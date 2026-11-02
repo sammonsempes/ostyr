@@ -39,6 +39,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "proc-macro2",
+ "quote",
  "ra-ap-rustc_lexer",
  "syn 2.0.119",
  "tempfile",
