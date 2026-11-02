@@ -1,29 +1,44 @@
-use std::error::Error;
-use std::fs;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use coverage_gate::check::{check, Violation};
 use coverage_gate::error::GateError;
 use coverage_gate::executable::has_executable_code;
 use coverage_gate::export::parse_export;
 use coverage_gate::run::run;
 use coverage_gate::scan::find_sources;
+use std::error::Error;
+use std::fs;
+use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
+
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+
 const COVERED: &str = include_str!("fixtures/covered.json");
+
+
 const BRANCH_MISSED: &str = include_str!("fixtures/branch_missed.json");
+
+
 const LINE_MISSED: &str = include_str!("fixtures/line_missed.json");
+
+
 const ZERO_BRANCHES: &str = include_str!("fixtures/zero_branches.json");
+
+
 const ABSENT: &str = include_str!("fixtures/absent.json");
+
+
 const LOCKED_MODE: u32 = 0o000;
+
+
 const OPEN_MODE: u32 = 0o755;
 
+
 struct FailingReader;
+
 
 impl io::Read for FailingReader {
     fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
@@ -31,7 +46,9 @@ impl io::Read for FailingReader {
     }
 }
 
+
 struct FailingWriter;
+
 
 impl io::Write for FailingWriter {
     fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
@@ -43,12 +60,14 @@ impl io::Write for FailingWriter {
     }
 }
 
+
 fn touch(root: &Path, relative: &str) -> TestResult {
     let path = root.join(relative);
     fs::create_dir_all(path.parent().ok_or("no parent")?)?;
     fs::write(path, "")?;
     Ok(())
 }
+
 
 fn workspace() -> Result<(TempDir, PathBuf), Box<dyn Error>> {
     let dir = tempfile::tempdir()?;
@@ -68,15 +87,18 @@ fn workspace() -> Result<(TempDir, PathBuf), Box<dyn Error>> {
     Ok((dir, root))
 }
 
+
 fn write_export(root: &Path, template: &str) -> Result<PathBuf, Box<dyn Error>> {
     let path = root.join("export.json");
     fs::write(&path, template.replace("{ROOT}", &root.display().to_string()))?;
     Ok(path)
 }
 
+
 fn args(export: &Path, root: &Path) -> Vec<String> {
     vec!["coverage_gate".to_string(), export.display().to_string(), root.display().to_string()]
 }
+
 
 fn run_report(template: &str) -> Result<(bool, String, PathBuf), Box<dyn Error>> {
     let (_dir, root) = workspace()?;
@@ -86,6 +108,7 @@ fn run_report(template: &str) -> Result<(bool, String, PathBuf), Box<dyn Error>>
     Ok((passed, String::from_utf8(out)?, root))
 }
 
+
 #[test]
 fn all_covered_passes() -> TestResult {
     let (passed, report, _root) = run_report(COVERED)?;
@@ -94,12 +117,14 @@ fn all_covered_passes() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn zero_branches_passes() -> TestResult {
     let (passed, _report, _root) = run_report(ZERO_BRANCHES)?;
     assert!(passed);
     Ok(())
 }
+
 
 #[test]
 fn missed_branch_fails_with_counts() -> TestResult {
@@ -109,6 +134,7 @@ fn missed_branch_fails_with_counts() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn missed_line_fails_with_counts() -> TestResult {
     let (passed, report, _root) = run_report(LINE_MISSED)?;
@@ -116,6 +142,7 @@ fn missed_line_fails_with_counts() -> TestResult {
     assert!(report.contains("crates/demo/src/lib.rs: lines 9/10"));
     Ok(())
 }
+
 
 #[test]
 fn absent_file_fails() -> TestResult {
@@ -127,6 +154,7 @@ fn absent_file_fails() -> TestResult {
     assert!(!report.contains("build.rs"));
     Ok(())
 }
+
 
 #[test]
 fn both_shortfalls_are_listed() -> TestResult {
@@ -141,21 +169,25 @@ fn both_shortfalls_are_listed() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn malformed_json_is_a_parse_error() {
     assert!(matches!(parse_export("{not json".as_bytes()), Err(GateError::Parse(_))));
 }
+
 
 #[test]
 fn unreadable_input_is_a_read_error() {
     assert!(matches!(parse_export(FailingReader), Err(GateError::Read(_))));
 }
 
+
 #[test]
 fn missing_arguments_is_a_usage_error() {
     let result = run(&["coverage_gate".to_string()], Vec::new());
     assert!(matches!(result, Err(GateError::Usage)));
 }
+
 
 #[test]
 fn missing_export_is_an_open_error() -> TestResult {
@@ -164,6 +196,7 @@ fn missing_export_is_an_open_error() -> TestResult {
     assert!(matches!(result, Err(GateError::Open { .. })));
     Ok(())
 }
+
 
 #[test]
 fn missing_root_is_a_resolve_error() -> TestResult {
@@ -174,6 +207,7 @@ fn missing_root_is_a_resolve_error() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn unwritable_report_is_a_write_error() -> TestResult {
     let (_dir, root) = workspace()?;
@@ -182,6 +216,7 @@ fn unwritable_report_is_a_write_error() -> TestResult {
     assert!(matches!(result, Err(GateError::Write(_))));
     Ok(())
 }
+
 
 #[test]
 fn unwalkable_directory_is_a_walk_error() -> TestResult {
@@ -195,6 +230,7 @@ fn unwalkable_directory_is_a_walk_error() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn errors_keep_their_cause() -> TestResult {
     let error = GateError::Read(io::Error::other("cause"));
@@ -202,6 +238,7 @@ fn errors_keep_their_cause() -> TestResult {
     assert!(error.source().is_some());
     Ok(())
 }
+
 
 #[test]
 fn default_root_is_the_current_directory() -> TestResult {
@@ -212,6 +249,7 @@ fn default_root_is_the_current_directory() -> TestResult {
     assert!(passed.is_ok());
     Ok(())
 }
+
 
 #[test]
 fn binary_exit_codes() -> TestResult {
@@ -230,6 +268,7 @@ fn binary_exit_codes() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn absent_file_without_code_passes() -> TestResult {
     let (_dir, root) = workspace()?;
@@ -239,6 +278,7 @@ fn absent_file_without_code_passes() -> TestResult {
     Ok(())
 }
 
+
 #[test]
 fn absent_unreadable_source_is_an_error() -> TestResult {
     let (_dir, root) = workspace()?;
@@ -247,6 +287,7 @@ fn absent_unreadable_source_is_an_error() -> TestResult {
     assert!(matches!(run(&args(&export, &root), Vec::new()), Err(GateError::ReadSource { .. })));
     Ok(())
 }
+
 
 #[test]
 fn absent_unparsable_source_is_an_error() -> TestResult {
@@ -258,6 +299,7 @@ fn absent_unparsable_source_is_an_error() -> TestResult {
     assert!(error.err().ok_or("no error")?.source().is_some());
     Ok(())
 }
+
 
 #[test]
 fn executable_code_detection() -> TestResult {

@@ -1,9 +1,9 @@
-use std::fmt;
-use std::path::{Path, PathBuf};
-
 use crate::error::GateError;
 use crate::executable::file_has_executable_code;
 use crate::export::{Counts, Export, FileEntry};
+use std::fmt;
+use std::path::{Path, PathBuf};
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Violation {
@@ -11,6 +11,7 @@ pub enum Violation {
     Branches { file: PathBuf, covered: u64, total: u64 },
     Lines { file: PathBuf, covered: u64, total: u64 },
 }
+
 
 impl fmt::Display for Violation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -22,9 +23,11 @@ impl fmt::Display for Violation {
     }
 }
 
+
 pub fn shortfall(counts: &Counts) -> Option<(u64, u64)> {
     (counts.covered < counts.count).then_some((counts.covered, counts.count))
 }
+
 
 pub fn check_entry(source: &Path, entry: &FileEntry) -> Vec<Violation> {
     let branches = shortfall(&entry.summary.branches).map(|(covered, total)| Violation::Branches {
@@ -40,6 +43,7 @@ pub fn check_entry(source: &Path, entry: &FileEntry) -> Vec<Violation> {
     branches.into_iter().chain(lines).collect()
 }
 
+
 pub fn check_source(export: &Export, source: &Path) -> Result<Vec<Violation>, GateError> {
     let listed = export.data.iter().flat_map(|data| &data.files).find(|entry| entry.filename == source);
     Ok(match listed {
@@ -50,6 +54,7 @@ pub fn check_source(export: &Export, source: &Path) -> Result<Vec<Violation>, Ga
             .collect(),
     })
 }
+
 
 pub fn check(export: &Export, sources: &[PathBuf]) -> Result<Vec<Violation>, GateError> {
     let per_file = sources.iter().map(|source| check_source(export, source)).collect::<Result<Vec<_>, _>>()?;
