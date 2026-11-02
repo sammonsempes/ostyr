@@ -211,7 +211,7 @@ pub fn yaml_comments_are_reported_but_quoted_hashes_pass() -> anyhow::Result<()>
 
 
 #[test]
-pub fn yaml_tree_is_scanned_without_target_git_and_cache() -> anyhow::Result<()> {
+pub fn yaml_tree_is_scanned_without_target_and_hidden_dirs() -> anyhow::Result<()> {
     let workspace = tempdir()?;
     [
         ("crates/a/src/lib.rs", "fn alpha() {}\n"),
@@ -222,6 +222,10 @@ pub fn yaml_tree_is_scanned_without_target_git_and_cache() -> anyhow::Result<()>
         ("crates/a/target/x.yaml", "# skipped\n"),
         (".git/x.yaml", "# skipped\n"),
         (".cache/x.yaml", "# skipped\n"),
+        ("conf/.cache/deep/x.yaml", "# skipped\n"),
+        ("target/x.yaml", "# skipped\n"),
+        ("visible/x.yaml", "# scanned\n"),
+        ("conf/.config.yaml", "# scanned\n"),
     ]
     .iter()
     .try_for_each(|(relative, content)| {
@@ -233,7 +237,27 @@ pub fn yaml_tree_is_scanned_without_target_git_and_cache() -> anyhow::Result<()>
     let found: Vec<String> = lint_root(workspace.path(), read_file)?.iter().map(ToString::to_string).collect();
     assert_eq!(
         found,
-        vec![line("conf/rules.yml", "1:1", "yaml-comment", "comments are not allowed in YAML files")]
+        vec![
+            line("conf/.config.yaml", "1:1", "yaml-comment", "comments are not allowed in YAML files"),
+            line("conf/rules.yml", "1:1", "yaml-comment", "comments are not allowed in YAML files"),
+            line("visible/x.yaml", "1:1", "yaml-comment", "comments are not allowed in YAML files"),
+        ]
+    );
+    Ok(())
+}
+
+
+#[test]
+pub fn hidden_scan_root_is_still_scanned() -> anyhow::Result<()> {
+    let parent = tempdir()?;
+    let root = parent.path().join(".something");
+    std::fs::create_dir_all(root.join("crates"))?;
+    std::fs::create_dir_all(root.join("tools"))?;
+    std::fs::write(root.join("a.yaml"), "# bad\n")?;
+    let found: Vec<String> = lint_root(&root, read_file)?.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        found,
+        vec![line("a.yaml", "1:1", "yaml-comment", "comments are not allowed in YAML files")]
     );
     Ok(())
 }
