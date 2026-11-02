@@ -1,13 +1,9 @@
-use std::{error::Error, ffi::OsString, io, path::Path};
-
-
 use custom_lint::{
     error::LintError,
     run::{read_file, run},
     scan::{lint_file, lint_root, lint_source},
 };
-
-
+use std::{error::Error, ffi::OsString, io, path::Path};
 use tempfile::tempdir;
 
 

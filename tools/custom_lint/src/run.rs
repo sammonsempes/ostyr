@@ -1,7 +1,5 @@
-use std::{ffi::OsString, io::Write, path::Path};
-
-
 use crate::{error::LintError, scan::lint_root, types::FileReader};
+use std::{ffi::OsString, io::Write, path::Path};
 
 
 pub fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {

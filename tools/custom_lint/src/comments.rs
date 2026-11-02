@@ -1,7 +1,5 @@
-use ra_ap_rustc_lexer::{tokenize, FrontmatterAllowed, TokenKind};
-
-
 use crate::model::{Comment, CommentKind};
+use ra_ap_rustc_lexer::{tokenize, FrontmatterAllowed, TokenKind};
 
 
 pub fn classify(kind: TokenKind) -> Option<CommentKind> {

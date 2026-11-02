@@ -1,10 +1,8 @@
-use std::path::Path;
-
-
 use crate::{
     model::{violation_at, Comment, CommentKind, Context, Violation},
     position::line_column,
 };
+use std::path::Path;
 
 
 pub const LINE_COMMENT: &str = "line-comment";
