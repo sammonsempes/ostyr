@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT"
+EXPORT="${COVERAGE_EXPORT:-target/coverage.json}"
+mkdir -p "$(dirname "$EXPORT")"
+
+step() {
+  local name=$1
+  shift
+  echo "pre-commit: $name" >&2
+  if ! "$@"; then
+    echo "pre-commit: FAILED at step: $name" >&2
+    exit 1
+  fi
+}
+
+lint() {
+  if [ -n "${CUSTOM_LINT:-}" ]; then "$CUSTOM_LINT" "$ROOT"; else cargo run --offline -q -p custom_lint -- "$ROOT"; fi
+}
+
+gate() {
+  if [ -n "${COVERAGE_GATE:-}" ]; then "$COVERAGE_GATE" "$EXPORT" "$ROOT"; else cargo run --offline -q -p coverage_gate -- "$EXPORT" "$ROOT"; fi
+}
+
+step "1/5 cargo +nightly fmt --check" cargo +nightly fmt --check
+step "2/5 cargo clippy" cargo clippy --offline --all-targets -- -D warnings
+step "3/5 custom_lint" lint
+step "4/5 cargo llvm-cov" cargo +nightly llvm-cov --offline --branch --fail-under-lines 100 --json --output-path "$EXPORT"
+step "5/5 coverage_gate" gate
+echo "pre-commit: all steps passed" >&2
