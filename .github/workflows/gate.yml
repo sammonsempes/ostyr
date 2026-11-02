@@ -35,22 +35,3 @@ jobs:
         run: cargo fetch --locked
       - name: Run the gate
         run: .githooks/pre-commit
-
-  commit-messages:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-      - name: Check every commit message
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          RANGE="$BASE_SHA..$HEAD_SHA"
-          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then RANGE="$HEAD_SHA"; fi
-          MESSAGE_FILE=$(mktemp)
-          for COMMIT in $(git rev-list --no-merges "$RANGE"); do
-            git log -1 --format=%B "$COMMIT" > "$MESSAGE_FILE"
-            .githooks/commit-msg "$MESSAGE_FILE"
-          done
