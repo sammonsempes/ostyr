@@ -1,7 +1,5 @@
-use std::path::Path;
-
-
 use custom_lint::scan::lint_source;
+use std::path::Path;
 
 
 const SRC_PATH: &str = "crates/x/src/lib.rs";

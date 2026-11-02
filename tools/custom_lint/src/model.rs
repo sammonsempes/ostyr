@@ -1,7 +1,5 @@
-use std::{fmt, path::PathBuf};
-
-
 use crate::types::Position;
+use std::{fmt, path::PathBuf};
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]

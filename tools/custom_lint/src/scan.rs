@@ -1,9 +1,3 @@
-use std::path::{Path, PathBuf};
-
-
-use walkdir::{DirEntry, WalkDir};
-
-
 use crate::{
     comments::extract_comments,
     error::LintError,
@@ -11,6 +5,8 @@ use crate::{
     rules::RULES,
     types::FileReader,
 };
+use std::path::{Path, PathBuf};
+use walkdir::{DirEntry, WalkDir};
 
 
 const SCAN_DIRS: [&str; 2] = ["crates", "tools"];

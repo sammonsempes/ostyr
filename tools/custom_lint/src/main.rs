@@ -1,7 +1,5 @@
-use std::process::ExitCode;
-
-
 use custom_lint::run::{read_file, run};
+use std::process::ExitCode;
 
 
 fn main() -> anyhow::Result<ExitCode> {
