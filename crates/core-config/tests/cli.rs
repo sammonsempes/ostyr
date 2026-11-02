@@ -2,9 +2,10 @@ mod common;
 
 
 use common::fixture;
-use core_config::cli::{run, CliError, USAGE};
+use core_config::cli::{run, run_reporting, CliError, USAGE};
 use std::error::Error;
 use std::io::{self, Write};
+use std::process::{Command, ExitCode};
 
 
 struct FailingWriter;
@@ -112,5 +113,60 @@ fn output_failure_is_reported() -> TestResult {
     assert!(commands
         .iter()
         .all(|args| matches!(run(args, &mut FailingWriter), Err(CliError::Output(_)))));
+    Ok(())
+}
+
+
+#[test]
+fn run_reporting_writes_display_to_err_and_fails() -> TestResult {
+    let bad = path_text("module_unknown_field.yaml");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run_reporting(&["check", "module", &bad], &mut out, &mut err)?;
+    let text = String::from_utf8(err)?;
+    assert_eq!(code, ExitCode::FAILURE);
+    assert!(out.is_empty());
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains(":3:1: at `listn`") && !text.contains("Parse {"), "{text}");
+    Ok(())
+}
+
+
+#[test]
+fn run_reporting_succeeds_on_valid_file() -> TestResult {
+    let module = path_text("module_ok.yaml");
+    let code = run_reporting(&["check", "module", &module], &mut Vec::new(), &mut Vec::new())?;
+    assert_eq!(code, ExitCode::SUCCESS);
+    Ok(())
+}
+
+
+#[test]
+fn run_reporting_propagates_stderr_failure() -> TestResult {
+    let result = run_reporting(&["bogus"], &mut Vec::new(), &mut FailingWriter);
+    assert!(result.is_err());
+    Ok(())
+}
+
+
+#[test]
+fn example_binary_prints_display_and_exits_non_zero() -> TestResult {
+    let bad = path_text("module_unknown_field.yaml");
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "run",
+            "--quiet",
+            "-p",
+            "core-config",
+            "--example",
+            "config_tool",
+            "--",
+            "check",
+            "module",
+            &bad,
+        ])
+        .output()?;
+    let text = String::from_utf8(output.stderr)?;
+    assert!(!output.status.success());
+    assert!(text.contains(":3:1: at `listn`") && !text.contains("Parse {"), "{text}");
     Ok(())
 }

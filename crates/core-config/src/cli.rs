@@ -3,6 +3,7 @@ use crate::load::{load_module, load_module_for_tenant, load_platform};
 use crate::schema::write_schemas;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::ExitCode;
 use thiserror::Error;
 
 
@@ -40,5 +41,14 @@ pub fn run<W: Write>(args: &[&str], out: &mut W) -> Result<(), CliError> {
             writeln!(out, "ok {tenant}").map_err(CliError::from)
         }
         _ => Err(CliError::Usage),
+    }
+}
+
+
+/// Runs the command, writes the `Display` form of any error to `err` and maps the outcome to an exit code.
+pub fn run_reporting<W: Write, E: Write>(args: &[&str], out: &mut W, err: &mut E) -> io::Result<ExitCode> {
+    match run(args, out) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(error) => writeln!(err, "{error}").map(|()| ExitCode::FAILURE),
     }
 }

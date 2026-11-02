@@ -55,10 +55,10 @@ fn plaintext_secret_in_tenant_is_rejected_in_the_merged_document() -> TestResult
             assert!(file.contains("module_bad.yaml (merged over "), "{file}");
             assert_eq!(field_path, "secrets.db");
             assert!(line > 1);
+            Ok(())
         }
-        other => return Err(format!("unexpected {other:?}").into()),
+        other => Err(format!("unexpected {other:?}").into()),
     }
-    Ok(())
 }
 
 

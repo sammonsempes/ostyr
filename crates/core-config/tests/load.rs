@@ -124,10 +124,12 @@ fn syntax_error_is_located() -> TestResult {
 #[test]
 fn error_outside_the_deserializer_uses_root_marker() -> TestResult {
     match parse_document::<ModuleConfig>("a: 1\n---\nb: 2\n", "inline") {
-        Err(ConfigError::Parse { field_path, .. }) => assert!(!field_path.is_empty() || field_path == ROOT_FIELD_PATH),
-        other => return Err(format!("expected a parse error, got {other:?}").into()),
+        Err(ConfigError::Parse { field_path, .. }) => {
+            assert!(!field_path.is_empty() || field_path == ROOT_FIELD_PATH);
+            Ok(())
+        }
+        other => Err(format!("expected a parse error, got {other:?}").into()),
     }
-    Ok(())
 }
 
 
