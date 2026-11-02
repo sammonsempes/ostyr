@@ -1,0 +1,56 @@
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install the pinned stable toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal --component rustfmt --component llvm-tools-preview
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941
+        with:
+          tool: cargo-llvm-cov
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Run the gate
+        run: .githooks/pre-commit
+
+  commit-messages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Check every commit message
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          RANGE="$BASE_SHA..$HEAD_SHA"
+          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then RANGE="$HEAD_SHA"; fi
+          MESSAGE_FILE=$(mktemp)
+          for COMMIT in $(git rev-list --no-merges "$RANGE"); do
+            git log -1 --format=%B "$COMMIT" > "$MESSAGE_FILE"
+            .githooks/commit-msg "$MESSAGE_FILE"
+          done
