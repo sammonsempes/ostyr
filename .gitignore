@@ -1,1 +1,3 @@
 target/
+lab/state/
+lab/tofu/.terraform/

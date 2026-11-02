@@ -1,0 +1,5 @@
+vms:
+  - name: ubuntu
+    base_image: ubuntu-24.04.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
