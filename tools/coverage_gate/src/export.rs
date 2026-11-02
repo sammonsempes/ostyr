@@ -37,7 +37,7 @@ pub struct Counts {
 }
 
 
-pub fn parse_export<R: Read>(mut reader: R) -> Result<Export, GateError> {
+pub fn parse_export<Input: Read>(mut reader: Input) -> Result<Export, GateError> {
     let mut text = String::new();
     reader.read_to_string(&mut text).map_err(GateError::Read)?;
     serde_json::from_str(&text).map_err(GateError::Parse)

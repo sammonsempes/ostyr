@@ -16,7 +16,7 @@ const EXPORT_ARG: usize = 1;
 const ROOT_ARG: usize = 2;
 
 
-pub fn run<W: Write>(args: &[String], mut out: W) -> Result<bool, GateError> {
+pub fn run<Output: Write>(args: &[String], mut out: Output) -> Result<bool, GateError> {
     let export_path = Path::new(args.get(EXPORT_ARG).ok_or(GateError::Usage)?);
     let root = Path::new(args.get(ROOT_ARG).map_or(DEFAULT_ROOT, String::as_str));
     let file = File::open(export_path).map_err(|source| GateError::Open {

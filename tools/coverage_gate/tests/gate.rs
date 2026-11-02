@@ -13,7 +13,22 @@ use std::process::Command;
 use tempfile::TempDir;
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const TWO_SHORTFALLS: usize = 2;
+
+
+const BRANCHES_COVERED: u64 = 3;
+
+
+const BRANCHES_TOTAL: u64 = 4;
+
+
+const LINES_COVERED: u64 = 8;
+
+
+const LINES_TOTAL: u64 = 10;
+
+
+const INVALID_UTF8: [u8; 2] = [0xff, 0xfe];
 
 
 const COVERED: &str = include_str!("fixtures/covered.json");
@@ -61,15 +76,15 @@ impl io::Write for FailingWriter {
 }
 
 
-fn touch(root: &Path, relative: &str) -> TestResult {
+fn touch(root: &Path, relative: &str) -> anyhow::Result<()> {
     let path = root.join(relative);
-    fs::create_dir_all(path.parent().ok_or("no parent")?)?;
+    fs::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("no parent"))?)?;
     fs::write(path, "")?;
     Ok(())
 }
 
 
-fn workspace() -> Result<(TempDir, PathBuf), Box<dyn Error>> {
+fn workspace() -> Result<(TempDir, PathBuf), anyhow::Error> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().canonicalize()?;
     touch(&root, "crates/demo/src/lib.rs")?;
@@ -88,7 +103,7 @@ fn workspace() -> Result<(TempDir, PathBuf), Box<dyn Error>> {
 }
 
 
-fn write_export(root: &Path, template: &str) -> Result<PathBuf, Box<dyn Error>> {
+fn write_export(root: &Path, template: &str) -> Result<PathBuf, anyhow::Error> {
     let path = root.join("export.json");
     fs::write(&path, template.replace("{ROOT}", &root.display().to_string()))?;
     Ok(path)
@@ -100,7 +115,7 @@ fn args(export: &Path, root: &Path) -> Vec<String> {
 }
 
 
-fn run_report(template: &str) -> Result<(bool, String, PathBuf), Box<dyn Error>> {
+fn run_report(template: &str) -> Result<(bool, String, PathBuf), anyhow::Error> {
     let (_dir, root) = workspace()?;
     let export = write_export(&root, template)?;
     let mut out = Vec::new();
@@ -110,7 +125,7 @@ fn run_report(template: &str) -> Result<(bool, String, PathBuf), Box<dyn Error>>
 
 
 #[test]
-fn all_covered_passes() -> TestResult {
+fn all_covered_passes() -> anyhow::Result<()> {
     let (passed, report, _root) = run_report(COVERED)?;
     assert!(passed);
     assert!(report.is_empty());
@@ -119,7 +134,7 @@ fn all_covered_passes() -> TestResult {
 
 
 #[test]
-fn zero_branches_passes() -> TestResult {
+fn zero_branches_passes() -> anyhow::Result<()> {
     let (passed, _report, _root) = run_report(ZERO_BRANCHES)?;
     assert!(passed);
     Ok(())
@@ -127,7 +142,7 @@ fn zero_branches_passes() -> TestResult {
 
 
 #[test]
-fn missed_branch_fails_with_counts() -> TestResult {
+fn missed_branch_fails_with_counts() -> anyhow::Result<()> {
     let (passed, report, _root) = run_report(BRANCH_MISSED)?;
     assert!(!passed);
     assert!(report.contains("crates/demo/src/lib.rs: branches 3/4"));
@@ -136,7 +151,7 @@ fn missed_branch_fails_with_counts() -> TestResult {
 
 
 #[test]
-fn missed_line_fails_with_counts() -> TestResult {
+fn missed_line_fails_with_counts() -> anyhow::Result<()> {
     let (passed, report, _root) = run_report(LINE_MISSED)?;
     assert!(!passed);
     assert!(report.contains("crates/demo/src/lib.rs: lines 9/10"));
@@ -145,7 +160,7 @@ fn missed_line_fails_with_counts() -> TestResult {
 
 
 #[test]
-fn absent_file_fails() -> TestResult {
+fn absent_file_fails() -> anyhow::Result<()> {
     let (passed, report, _root) = run_report(ABSENT)?;
     assert!(!passed);
     assert!(report.contains("crates/demo/src/lib.rs: absent from the coverage export"));
@@ -157,15 +172,29 @@ fn absent_file_fails() -> TestResult {
 
 
 #[test]
-fn both_shortfalls_are_listed() -> TestResult {
+fn both_shortfalls_are_listed() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let both = BRANCH_MISSED.replace("\"covered\":10", "\"covered\":8");
     let export = write_export(&root, &both)?;
     let parsed = parse_export(fs::File::open(&export)?)?;
     let violations = check(&parsed, &find_sources(&root)?)?;
-    assert_eq!(violations.len(), 2);
-    assert!(matches!(violations.first(), Some(Violation::Branches { covered: 3, total: 4, .. })));
-    assert!(matches!(violations.get(1), Some(Violation::Lines { covered: 8, total: 10, .. })));
+    assert_eq!(violations.len(), TWO_SHORTFALLS);
+    assert!(matches!(
+        violations.first(),
+        Some(Violation::Branches {
+            covered: BRANCHES_COVERED,
+            total: BRANCHES_TOTAL,
+            ..
+        })
+    ));
+    assert!(matches!(
+        violations.get(1),
+        Some(Violation::Lines {
+            covered: LINES_COVERED,
+            total: LINES_TOTAL,
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -190,7 +219,7 @@ fn missing_arguments_is_a_usage_error() {
 
 
 #[test]
-fn missing_export_is_an_open_error() -> TestResult {
+fn missing_export_is_an_open_error() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let result = run(&args(&root.join("nope.json"), &root), Vec::new());
     assert!(matches!(result, Err(GateError::Open { .. })));
@@ -199,7 +228,7 @@ fn missing_export_is_an_open_error() -> TestResult {
 
 
 #[test]
-fn missing_root_is_a_resolve_error() -> TestResult {
+fn missing_root_is_a_resolve_error() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let export = write_export(&root, COVERED)?;
     let result = run(&args(&export, &root.join("nope")), Vec::new());
@@ -209,7 +238,7 @@ fn missing_root_is_a_resolve_error() -> TestResult {
 
 
 #[test]
-fn unwritable_report_is_a_write_error() -> TestResult {
+fn unwritable_report_is_a_write_error() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let export = write_export(&root, LINE_MISSED)?;
     let result = run(&args(&export, &root), FailingWriter);
@@ -219,7 +248,7 @@ fn unwritable_report_is_a_write_error() -> TestResult {
 
 
 #[test]
-fn unwalkable_directory_is_a_walk_error() -> TestResult {
+fn unwalkable_directory_is_a_walk_error() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let locked = root.join("crates/locked");
     fs::create_dir_all(&locked)?;
@@ -232,7 +261,7 @@ fn unwalkable_directory_is_a_walk_error() -> TestResult {
 
 
 #[test]
-fn errors_keep_their_cause() -> TestResult {
+fn errors_keep_their_cause() -> anyhow::Result<()> {
     let error = GateError::Read(io::Error::other("cause"));
     assert_eq!(error.to_string(), "cannot read the coverage export");
     assert!(error.source().is_some());
@@ -241,7 +270,7 @@ fn errors_keep_their_cause() -> TestResult {
 
 
 #[test]
-fn default_root_is_the_current_directory() -> TestResult {
+fn default_root_is_the_current_directory() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let export = write_export(&root, COVERED)?;
     let arguments = vec!["coverage_gate".to_string(), export.display().to_string()];
@@ -252,7 +281,7 @@ fn default_root_is_the_current_directory() -> TestResult {
 
 
 #[test]
-fn binary_exit_codes() -> TestResult {
+fn binary_exit_codes() -> anyhow::Result<()> {
     let binary = env!("CARGO_BIN_EXE_coverage_gate");
     let (_dir, root) = workspace()?;
     let passing = write_export(&root, COVERED)?;
@@ -270,7 +299,7 @@ fn binary_exit_codes() -> TestResult {
 
 
 #[test]
-fn absent_file_without_code_passes() -> TestResult {
+fn absent_file_without_code_passes() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     fs::remove_file(root.join("crates/demo/src/lib.rs"))?;
     let export = write_export(&root, ABSENT)?;
@@ -280,9 +309,9 @@ fn absent_file_without_code_passes() -> TestResult {
 
 
 #[test]
-fn absent_unreadable_source_is_an_error() -> TestResult {
+fn absent_unreadable_source_is_an_error() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
-    fs::write(root.join("crates/demo/src/lib.rs"), [0xff, 0xfe])?;
+    fs::write(root.join("crates/demo/src/lib.rs"), INVALID_UTF8)?;
     let export = write_export(&root, ABSENT)?;
     assert!(matches!(run(&args(&export, &root), Vec::new()), Err(GateError::ReadSource { .. })));
     Ok(())
@@ -290,19 +319,19 @@ fn absent_unreadable_source_is_an_error() -> TestResult {
 
 
 #[test]
-fn absent_unparsable_source_is_an_error() -> TestResult {
+fn absent_unparsable_source_is_an_error() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     fs::write(root.join("crates/demo/src/lib.rs"), "fn (")?;
     let export = write_export(&root, ABSENT)?;
     let error = run(&args(&export, &root), Vec::new());
     assert!(matches!(&error, Err(GateError::ParseSource { .. })));
-    assert!(error.err().ok_or("no error")?.source().is_some());
+    assert!(error.err().ok_or_else(|| anyhow::anyhow!("no error"))?.source().is_some());
     Ok(())
 }
 
 
 #[test]
-fn executable_code_detection() -> TestResult {
+fn executable_code_detection() -> anyhow::Result<()> {
     let code = [
         "fn a() {}",
         "struct S; impl S { fn m(&self) {} }",

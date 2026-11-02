@@ -7,7 +7,7 @@ pub fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 
-pub fn run<W: Write>(arguments: impl Iterator<Item = OsString>, output: &mut W, read: FileReader) -> Result<usize, LintError> {
+pub fn run<Output: Write>(arguments: impl Iterator<Item = OsString>, output: &mut Output, read: FileReader) -> Result<usize, LintError> {
     let collected: Vec<OsString> = arguments.collect();
     match collected.as_slice() {
         [root] => {
