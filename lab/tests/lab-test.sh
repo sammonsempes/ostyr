@@ -62,14 +62,14 @@ check "host address unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_addr
 
 overlay_xml="$(virsh_lab vol-dumpxml --pool "$LAB_POOL" "$prefix-$vm_name.qcow2")"
 check "overlay has a backing file" grep -q '<backingStore>' <<<"$overlay_xml"
-check "overlay backs onto the base volume" grep -q 'ubuntu-24.04.qcow2' <<<"$overlay_xml"
+check "overlay backs onto the base volume" grep -q 'ubuntu-2404.qcow2' <<<"$overlay_xml"
 
 "$LAB_DIR/down.sh" "$TEST_TASK"
 check "no domain left" test "$(domain_count)" -eq 0
 check "no network left" test "$(network_count)" -eq 0
 check "no volume left" test "$(volume_count)" -eq 0
 check "state removed" test ! -e "$lab_state"
-check "base volume untouched" virsh_lab vol-info --pool "$LAB_POOL" ubuntu-24.04.qcow2
+check "base volume untouched" virsh_lab vol-info --pool "$LAB_POOL" ubuntu-2404.qcow2
 "$LAB_DIR/down.sh" "$TEST_TASK"
 
 exit "$((failures > 0))"
