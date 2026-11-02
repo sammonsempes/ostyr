@@ -10,6 +10,8 @@ readonly HOST_RESERVED_GB=8
 readonly KIB_PER_GB=1048576
 readonly SSH_ATTEMPTS=60
 readonly SSH_DELAY_SECONDS=5
+readonly SECONDS_PER_DAY=86400
+readonly STALE_DAYS=7
 readonly SUBNET_FIRST=100
 readonly SUBNET_LAST=199
 
@@ -55,12 +57,26 @@ ensure_base_images() {
     local image
     mapfile -t images < <(awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u)
     for image in "${images[@]}"; do
-        if [[ "$image" == "ubuntu-24.04.qcow2" ]]; then
-            "$LAB_DIR/base-ubuntu.sh" "$image"
-        else
-            virsh_lab vol-info --pool "$LAB_POOL" "$image" >/dev/null 2>&1 || die "base image $image missing from pool $LAB_POOL"
+        if ! virsh_lab vol-info --pool "$LAB_POOL" "$image" >/dev/null 2>&1; then
+            "$LAB_DIR/images/build.sh" "${image%.qcow2}"
         fi
+        warn_if_stale "$image"
     done
+}
+
+warn_if_stale() {
+    local stamp_file built_at age_days
+    stamp_file="$(mktemp)"
+    if virsh_lab vol-download --pool "$LAB_POOL" "$1.built" "$stamp_file" >/dev/null 2>&1 && built_at="$(cat "$stamp_file")" &&
+        [[ "$built_at" =~ ^[0-9]+$ ]]; then
+        age_days=$((($(date +%s) - built_at) / SECONDS_PER_DAY))
+        if ((age_days > STALE_DAYS)); then
+            log "warning: base image $1 is $age_days days old (built $(date -d "@$built_at" --iso-8601=date)), rebuild with lab/images/build.sh ${1%.qcow2}"
+        fi
+    else
+        log "warning: base image $1 has no recorded build date, rebuild with lab/images/build.sh ${1%.qcow2}"
+    fi
+    rm -f "$stamp_file"
 }
 
 free_subnet_octet() {
