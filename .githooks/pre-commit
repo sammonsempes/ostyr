@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if ! command -v cargo >/dev/null 2>&1; then export PATH="$HOME/.cargo/bin:$PATH"; fi
+ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 EXPORT="${COVERAGE_EXPORT:-target/coverage.json}"
 mkdir -p "$(dirname "$EXPORT")"
