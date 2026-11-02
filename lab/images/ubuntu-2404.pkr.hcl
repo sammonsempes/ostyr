@@ -27,9 +27,15 @@ variable "image_base_url" {
   default = "https://cloud-images.ubuntu.com/noble/current"
 }
 
+variable "image_checksum" {
+  type        = string
+  default     = "file:https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
+  description = "build.sh passes the sha256 taken from the GPG-verified SHA256SUMS"
+}
+
 source "qemu" "ubuntu" {
   iso_url          = "${var.image_base_url}/noble-server-cloudimg-amd64.img"
-  iso_checksum     = "file:${var.image_base_url}/SHA256SUMS"
+  iso_checksum     = var.image_checksum
   disk_image       = true
   use_backing_file = false
   disk_size        = "8G"

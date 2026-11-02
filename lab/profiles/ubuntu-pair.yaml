@@ -1,0 +1,9 @@
+vms:
+  - name: server
+    base_image: ubuntu-2404.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
+  - name: client
+    base_image: ubuntu-2404.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
