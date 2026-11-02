@@ -23,7 +23,7 @@ pub fn run<W: Write>(args: &[String], mut out: W) -> Result<bool, GateError> {
         path: root.to_path_buf(),
         source,
     })?;
-    let violations = check(&export, &find_sources(&resolved)?);
+    let violations = check(&export, &find_sources(&resolved)?)?;
     violations
         .iter()
         .try_for_each(|violation| writeln!(out, "{violation}"))

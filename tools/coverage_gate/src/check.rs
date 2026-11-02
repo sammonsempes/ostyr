@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::error::GateError;
+use crate::executable::file_has_executable_code;
 use crate::export::{Counts, Export, FileEntry};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -38,14 +40,18 @@ pub fn check_entry(source: &Path, entry: &FileEntry) -> Vec<Violation> {
     branches.into_iter().chain(lines).collect()
 }
 
-pub fn check(export: &Export, sources: &[PathBuf]) -> Vec<Violation> {
-    sources
-        .iter()
-        .flat_map(
-            |source| match export.data.iter().flat_map(|data| &data.files).find(|entry| &entry.filename == source) {
-                Some(entry) => check_entry(source, entry),
-                None => vec![Violation::Missing { file: source.clone() }],
-            },
-        )
-        .collect()
+pub fn check_source(export: &Export, source: &Path) -> Result<Vec<Violation>, GateError> {
+    let listed = export.data.iter().flat_map(|data| &data.files).find(|entry| entry.filename == source);
+    Ok(match listed {
+        Some(entry) => check_entry(source, entry),
+        None => file_has_executable_code(source)?
+            .then(|| Violation::Missing { file: source.to_path_buf() })
+            .into_iter()
+            .collect(),
+    })
+}
+
+pub fn check(export: &Export, sources: &[PathBuf]) -> Result<Vec<Violation>, GateError> {
+    let per_file = sources.iter().map(|source| check_source(export, source)).collect::<Result<Vec<_>, _>>()?;
+    Ok(per_file.into_iter().flatten().collect())
 }

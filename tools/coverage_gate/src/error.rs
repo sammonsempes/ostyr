@@ -23,6 +23,18 @@ pub enum GateError {
         #[source]
         source: io::Error,
     },
+    #[error("cannot read source {path}")]
+    ReadSource {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot parse source {path}")]
+    ParseSource {
+        path: PathBuf,
+        #[source]
+        source: syn::Error,
+    },
     #[error("cannot scan the workspace")]
     Walk(#[from] walkdir::Error),
     #[error("cannot write the report")]

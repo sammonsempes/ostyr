@@ -7,6 +7,7 @@ use std::process::Command;
 
 use coverage_gate::check::{check, Violation};
 use coverage_gate::error::GateError;
+use coverage_gate::executable::has_executable_code;
 use coverage_gate::export::parse_export;
 use coverage_gate::run::run;
 use coverage_gate::scan::find_sources;
@@ -53,6 +54,12 @@ fn workspace() -> Result<(TempDir, PathBuf), Box<dyn Error>> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().canonicalize()?;
     touch(&root, "crates/demo/src/lib.rs")?;
+    fs::write(root.join("crates/demo/src/lib.rs"), "pub fn demo() {}")?;
+    touch(&root, "crates/demo/src/types.rs")?;
+    fs::write(
+        root.join("crates/demo/src/types.rs"),
+        "//! doc\nuse std::fmt;\npub mod a;\n#[derive(Debug)]\npub struct T;\n",
+    )?;
     touch(&root, "crates/demo/src/notes.txt")?;
     touch(&root, "crates/demo/build.rs")?;
     touch(&root, "target/debug/src/generated.rs")?;
@@ -127,7 +134,7 @@ fn both_shortfalls_are_listed() -> TestResult {
     let both = BRANCH_MISSED.replace("\"covered\":10", "\"covered\":8");
     let export = write_export(&root, &both)?;
     let parsed = parse_export(fs::File::open(&export)?)?;
-    let violations = check(&parsed, &find_sources(&root)?);
+    let violations = check(&parsed, &find_sources(&root)?)?;
     assert_eq!(violations.len(), 2);
     assert!(matches!(violations.first(), Some(Violation::Branches { covered: 3, total: 4, .. })));
     assert!(matches!(violations.get(1), Some(Violation::Lines { covered: 8, total: 10, .. })));
@@ -220,5 +227,64 @@ fn binary_exit_codes() -> TestResult {
     let usage = Command::new(binary).output()?;
     assert!(!usage.status.success());
     assert!(String::from_utf8(usage.stderr)?.contains("usage"));
+    Ok(())
+}
+
+#[test]
+fn absent_file_without_code_passes() -> TestResult {
+    let (_dir, root) = workspace()?;
+    fs::remove_file(root.join("crates/demo/src/lib.rs"))?;
+    let export = write_export(&root, ABSENT)?;
+    assert!(run(&args(&export, &root), Vec::new())?);
+    Ok(())
+}
+
+#[test]
+fn absent_unreadable_source_is_an_error() -> TestResult {
+    let (_dir, root) = workspace()?;
+    fs::write(root.join("crates/demo/src/lib.rs"), [0xff, 0xfe])?;
+    let export = write_export(&root, ABSENT)?;
+    assert!(matches!(run(&args(&export, &root), Vec::new()), Err(GateError::ReadSource { .. })));
+    Ok(())
+}
+
+#[test]
+fn absent_unparsable_source_is_an_error() -> TestResult {
+    let (_dir, root) = workspace()?;
+    fs::write(root.join("crates/demo/src/lib.rs"), "fn (")?;
+    let export = write_export(&root, ABSENT)?;
+    let error = run(&args(&export, &root), Vec::new());
+    assert!(matches!(&error, Err(GateError::ParseSource { .. })));
+    assert!(error.err().ok_or("no error")?.source().is_some());
+    Ok(())
+}
+
+#[test]
+fn executable_code_detection() -> TestResult {
+    let code = [
+        "fn a() {}",
+        "struct S; impl S { fn m(&self) {} }",
+        "trait T { fn d() {} }",
+        "mod m { pub mod n { fn deep() {} } }",
+        "const C: fn() = || {};",
+        "static S: fn() = || {};",
+    ];
+    for text in code {
+        assert!(has_executable_code(text)?, "{text}");
+    }
+    let plain = [
+        "",
+        "use std::fmt;",
+        "struct S; impl S { const X: u8 = 1; }",
+        "trait T { fn d(); }",
+        "mod m;",
+        "mod m { struct S; }",
+        "const C: u8 = 1;",
+        "static S: u8 = 1;",
+        "type A = fn(u8);",
+    ];
+    for text in plain {
+        assert!(!has_executable_code(text)?, "{text}");
+    }
     Ok(())
 }
