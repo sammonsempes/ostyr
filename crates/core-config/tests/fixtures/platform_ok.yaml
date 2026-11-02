@@ -1,0 +1,16 @@
+modules:
+  - name: siem
+    version: 1.2.0
+    endpoint: https://siem.internal:8080
+  - name: edr
+    version: 0.9.0
+    endpoint: https://edr.internal:8443
+authentication:
+  provider: oidc
+  issuer: https://sso.internal
+  client_secret: openbao://kv/sso/client
+event_bus:
+  endpoint: nats://bus.internal:4222
+storage:
+  endpoint: https://s3.internal
+  credentials: vault://kv/s3

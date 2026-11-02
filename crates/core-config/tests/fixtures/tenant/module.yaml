@@ -1,0 +1,7 @@
+tenant: acme
+listen: null
+secrets:
+  db: vault://kv/acme/db
+settings:
+  retention: 90d
+  tier: gold

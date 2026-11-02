@@ -1,0 +1,9 @@
+name: siem
+version: 1.2.0
+listen: 0.0.0.0:8080
+secrets:
+  db: vault://kv/base/db
+  tls: sops:secrets/base.enc.yaml
+settings:
+  retention: 30d
+  region: eu

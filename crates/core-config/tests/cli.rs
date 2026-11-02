@@ -1,0 +1,116 @@
+mod common;
+
+
+use common::fixture;
+use core_config::cli::{run, CliError, USAGE};
+use std::error::Error;
+use std::io::{self, Write};
+
+
+struct FailingWriter;
+
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("injected failure"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+type TestResult = Result<(), Box<dyn Error>>;
+
+
+fn output_of(args: &[&str]) -> Result<String, Box<dyn Error>> {
+    let mut out = Vec::new();
+    run(args, &mut out)?;
+    Ok(String::from_utf8(out)?)
+}
+
+
+fn path_text(name: &str) -> String {
+    fixture(name).display().to_string()
+}
+
+
+#[test]
+fn check_commands_report_ok() -> TestResult {
+    let platform = path_text("platform_ok.yaml");
+    let module = path_text("module_ok.yaml");
+    let base = path_text("base/module.yaml");
+    let tenant = path_text("tenant/module.yaml");
+    assert_eq!(output_of(&["check", "platform", &platform])?, format!("ok {platform}\n"));
+    assert_eq!(output_of(&["check", "module", &module])?, format!("ok {module}\n"));
+    assert_eq!(output_of(&["check", "tenant", &base, &tenant])?, format!("ok {tenant}\n"));
+    Ok(())
+}
+
+
+#[test]
+fn schema_command_lists_files() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let target = dir.path().display().to_string();
+    let output = output_of(&["schema", &target])?;
+    assert_eq!(output.lines().count(), 2);
+    Ok(())
+}
+
+
+#[test]
+fn invalid_files_report_config_errors() -> TestResult {
+    let bad = path_text("module_unknown_field.yaml");
+    let error = output_of(&["check", "module", &bad]).err().ok_or("no error")?;
+    assert!(error.to_string().contains(":3:1: at `listn`"));
+    Ok(())
+}
+
+
+#[test]
+fn every_command_reports_config_failures() -> TestResult {
+    let absent = path_text("absent.yaml");
+    let base = path_text("base/module.yaml");
+    let dir = tempfile::tempdir()?;
+    let blocker = dir.path().join("file");
+    std::fs::write(&blocker, "x")?;
+    let blocked = blocker.join("sub").display().to_string();
+    let commands: [&[&str]; 4] = [
+        &["check", "platform", &absent],
+        &["check", "module", &absent],
+        &["check", "tenant", &base, &absent],
+        &["schema", &blocked],
+    ];
+    assert!(commands.iter().all(|args| matches!(run(args, &mut Vec::new()), Err(CliError::Config(_)))));
+    Ok(())
+}
+
+
+#[test]
+fn unknown_command_prints_usage() -> TestResult {
+    let error = output_of(&["bogus"]).err().ok_or("no error")?;
+    assert_eq!(error.to_string(), USAGE);
+    Ok(())
+}
+
+
+#[test]
+fn output_failure_is_reported() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let target = dir.path().display().to_string();
+    let platform = path_text("platform_ok.yaml");
+    let module = path_text("module_ok.yaml");
+    let base = path_text("base/module.yaml");
+    let tenant = path_text("tenant/module.yaml");
+    let commands: [&[&str]; 4] = [
+        &["check", "platform", &platform],
+        &["check", "module", &module],
+        &["check", "tenant", &base, &tenant],
+        &["schema", &target],
+    ];
+    assert!(commands
+        .iter()
+        .all(|args| matches!(run(args, &mut FailingWriter), Err(CliError::Output(_)))));
+    Ok(())
+}

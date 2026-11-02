@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "SecretRef": {
+      "description": "A reference to a secret held elsewhere, never the secret itself.",
+      "pattern": "^(vault://|openbao://|sops:).+",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Configuration of one module.",
+  "properties": {
+    "listen": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "type": "string"
+    },
+    "secrets": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SecretRef"
+      },
+      "type": "object"
+    },
+    "settings": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "tenant": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "version"
+  ],
+  "title": "ModuleConfig",
+  "type": "object"
+}
