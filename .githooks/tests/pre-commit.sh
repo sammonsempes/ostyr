@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+export PATH="$HOME/.cargo/bin:$PATH"
+cd "$HERE"
+cargo build -q -p custom_lint -p coverage_gate
+export CUSTOM_LINT="$HERE/target/debug/custom_lint"
+export COVERAGE_GATE="$HERE/target/debug/coverage_gate"
+SCRATCH=$(mktemp -d)
+trap 'rm -rf "$SCRATCH"' EXIT
+export CARGO_TARGET_DIR="$SCRATCH/target"
+export COVERAGE_EXPORT="$SCRATCH/coverage.json"
+FAILS=0
+
+R="$SCRATCH/repo"
+mkdir -p "$R/.githooks" "$R/crates/demo/src" "$R/crates/demo/tests" "$R/tools"
+cp "$HERE/.githooks/pre-commit" "$R/.githooks/pre-commit"
+cp "$HERE/rustfmt.toml" "$HERE/rust-toolchain.toml" "$R/"
+printf '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n' >"$R/Cargo.toml"
+printf '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n' >"$R/crates/demo/Cargo.toml"
+printf 'target/\n' >"$R/.gitignore"
+cat >"$R/crates/demo/tests/demo.rs" <<'T'
+#[test]
+fn adds() {
+    assert_eq!(demo::add(1, 2), 3);
+    assert_eq!(demo::pick(true), 1);
+    assert_eq!(demo::pick(false), 0);
+    assert_eq!(demo::extra(true), 1);
+    assert_eq!(demo::extra(false), 0);
+}
+T
+
+CLEAN_ADD='pub fn add(a: u32, b: u32) -> u32 {
+    a + b
+}
+'
+CLEAN_PICK='pub fn pick(flag: bool) -> u32 {
+    if flag {
+        1
+    } else {
+        0
+    }
+}
+'
+CLEAN_EXTRA='pub fn extra(flag: bool) -> u32 {
+    if flag {
+        1
+    } else {
+        0
+    }
+}
+'
+GAP='
+
+'
+cd "$R"
+git init -q
+(cd "$R" && cargo generate-lockfile --offline -q)
+
+try() {
+  local label=$1 expect=$2 failed_step=${3:-} got
+  git add -A
+  if git -c core.hooksPath=.githooks -c user.name=t -c user.email=t@example.com commit -q -m "$label" >"$SCRATCH/out.txt" 2>&1; then
+    got=accepted
+  else
+    got=refused
+  fi
+  if [ -n "$failed_step" ] && ! grep -qF "FAILED at step: $failed_step" "$SCRATCH/out.txt"; then
+    got="refused-elsewhere"
+  fi
+  if [ "$got" != "$expect" ]; then
+    echo "FAIL: $label expected $expect got $got"
+    tail -n 20 "$SCRATCH/out.txt"
+    FAILS=$((FAILS + 1))
+  fi
+}
+
+printf '%s' "pub fn add(a:u32,b:u32)->u32{a+b}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "bad format" refused "1/5 cargo +nightly fmt --check"
+
+printf '%s' "pub fn add(a: u32, b: u32) -> u32 {
+    let unused = 1;
+    a + b
+}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "clippy error" refused "2/5 cargo clippy"
+
+printf '%s' "// a comment
+$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "lint violation" refused "3/5 custom_lint"
+
+printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA$GAP${CLEAN_EXTRA/extra/untested}" >crates/demo/src/lib.rs
+try "uncovered branch" refused "4/5 cargo llvm-cov"
+
+printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "clean commit" accepted
+
+if [ "$(git log --format=%s)" != "clean commit" ]; then
+  echo "FAIL: history is not only the clean commit"
+  FAILS=$((FAILS + 1))
+fi
+if [ "$FAILS" -ne 0 ]; then exit 1; fi
+echo "pre-commit tests passed"
