@@ -46,7 +46,7 @@ fn unparsable(_path: &Path) -> io::Result<Vec<u8>> {
 
 
 fn clean(_path: &Path) -> io::Result<Vec<u8>> {
-    Ok(b"fn a() {}\n".to_vec())
+    Ok(b"fn go() {}\n".to_vec())
 }
 
 
