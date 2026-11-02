@@ -11,8 +11,8 @@ pub const PLATFORM_SCHEMA_FILE: &str = "platform.schema.json";
 pub const MODULE_SCHEMA_FILE: &str = "module.schema.json";
 
 
-pub fn schema_text<T: JsonSchema>() -> String {
-    format!("{:#}\n", schema_for!(T).as_value())
+pub fn schema_text<Schema: JsonSchema>() -> String {
+    format!("{:#}\n", schema_for!(Schema).as_value())
 }
 
 

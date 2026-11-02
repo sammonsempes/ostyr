@@ -33,11 +33,11 @@ pub fn position_of(location: Option<Location>) -> (u64, u64) {
 
 
 /// Parses `text` strictly; `file` only labels errors, which carry line, column and field path.
-pub fn parse_document<T: DeserializeOwned>(text: &str, file: &str) -> Result<T, ConfigError> {
+pub fn parse_document<Document: DeserializeOwned>(text: &str, file: &str) -> Result<Document, ConfigError> {
     let options = serde_saphyr::options! { with_snippet: false };
     let mut field_path = ROOT_FIELD_PATH.to_string();
     let result = serde_saphyr::with_deserializer_from_str_with_options(text, options, |deserializer| {
-        serde_path_to_error::deserialize::<_, T>(deserializer).map_err(|error| {
+        serde_path_to_error::deserialize::<_, Document>(deserializer).map_err(|error| {
             field_path = error.path().to_string();
             error.into_inner()
         })

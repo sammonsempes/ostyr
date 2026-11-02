@@ -2,6 +2,7 @@ mod common;
 
 
 use common::fixture;
+use common::types::TestResult;
 use core_config::cli::{run, run_reporting, CliError, USAGE};
 use std::error::Error;
 use std::io::{self, Write};
@@ -22,7 +23,10 @@ impl Write for FailingWriter {
 }
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const EXPECTED_SCHEMA_FILES: usize = 2;
+
+
+const COMMAND_COUNT: usize = 4;
 
 
 fn output_of(args: &[&str]) -> Result<String, Box<dyn Error>> {
@@ -55,7 +59,7 @@ fn schema_command_lists_files() -> TestResult {
     let dir = tempfile::tempdir()?;
     let target = dir.path().display().to_string();
     let output = output_of(&["schema", &target])?;
-    assert_eq!(output.lines().count(), 2);
+    assert_eq!(output.lines().count(), EXPECTED_SCHEMA_FILES);
     Ok(())
 }
 
@@ -77,7 +81,7 @@ fn every_command_reports_config_failures() -> TestResult {
     let blocker = dir.path().join("file");
     std::fs::write(&blocker, "x")?;
     let blocked = blocker.join("sub").display().to_string();
-    let commands: [&[&str]; 4] = [
+    let commands: [&[&str]; COMMAND_COUNT] = [
         &["check", "platform", &absent],
         &["check", "module", &absent],
         &["check", "tenant", &base, &absent],
@@ -104,7 +108,7 @@ fn output_failure_is_reported() -> TestResult {
     let module = path_text("module_ok.yaml");
     let base = path_text("base/module.yaml");
     let tenant = path_text("tenant/module.yaml");
-    let commands: [&[&str]; 4] = [
+    let commands: [&[&str]; COMMAND_COUNT] = [
         &["check", "platform", &platform],
         &["check", "module", &module],
         &["check", "tenant", &base, &tenant],

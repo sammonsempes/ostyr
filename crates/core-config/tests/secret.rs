@@ -1,8 +1,12 @@
+#[path = "common/types.rs"]
+mod types;
+
+
 use core_config::secret::{PlaintextSecret, SecretRef, SECRET_PREFIXES};
-use std::error::Error;
+use types::TestResult;
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const EXPECTED_PREFIXES: usize = 3;
 
 
 #[test]
@@ -18,7 +22,7 @@ fn references_are_accepted() -> TestResult {
 fn values_and_empty_references_are_rejected() -> TestResult {
     let samples = ["hunter2", "", "vault://", "sops:", "https://vault://x", " vault://kv"];
     assert!(samples.iter().all(|sample| SecretRef::try_from((*sample).to_string()).is_err()));
-    assert_eq!(SECRET_PREFIXES.len(), 3);
+    assert_eq!(SECRET_PREFIXES.len(), EXPECTED_PREFIXES);
     Ok(())
 }
 

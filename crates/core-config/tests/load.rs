@@ -2,6 +2,7 @@ mod common;
 
 
 use common::fixture;
+use common::types::TestResult;
 use core_config::error::ConfigError;
 use core_config::load::{load_module, load_platform};
 use core_config::model::ModuleConfig;
@@ -21,10 +22,31 @@ impl Read for FailingReader {
 }
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const EXPECTED_MODULES: usize = 2;
 
 
-type Failure = (String, u64, u64, String, String);
+const UNKNOWN_FIELD_LINE: u64 = 3;
+
+
+const WRONG_TYPE_LINE: u64 = 4;
+
+
+const WRONG_TYPE_COLUMN: u64 = 14;
+
+
+const PLAINTEXT_SECRET_LINE: u64 = 4;
+
+
+const PLAINTEXT_SECRET_COLUMN: u64 = 7;
+
+
+pub struct Failure {
+    pub file: String,
+    pub line: u64,
+    pub column: u64,
+    pub field_path: String,
+    pub message: String,
+}
 
 
 fn parse_failure(name: &str) -> Result<Failure, Box<dyn Error>> {
@@ -36,7 +58,13 @@ fn parse_failure(name: &str) -> Result<Failure, Box<dyn Error>> {
             field_path,
             message,
             ..
-        }) => Ok((file, line, column, field_path, message)),
+        }) => Ok(Failure {
+            file,
+            line,
+            column,
+            field_path,
+            message,
+        }),
         other => Err(format!("expected a parse error, got {other:?}").into()),
     }
 }
@@ -56,7 +84,7 @@ fn valid_module_loads() -> TestResult {
 #[test]
 fn valid_platform_loads() -> TestResult {
     let platform = load_platform(&fixture("platform_ok.yaml"))?;
-    assert_eq!(platform.modules.len(), 2);
+    assert_eq!(platform.modules.len(), EXPECTED_MODULES);
     assert_eq!(platform.authentication.map(|auth| auth.provider), Some("oidc".to_string()));
     assert_eq!(platform.event_bus.map(|bus| bus.endpoint), Some("nats://bus.internal:4222".to_string()));
     assert!(platform.storage.is_some_and(|storage| storage.credentials.is_some()));
@@ -75,9 +103,15 @@ fn module_without_platform_file_needs_nothing_else() -> TestResult {
 
 #[test]
 fn unknown_field_is_located() -> TestResult {
-    let (file, line, column, field_path, message) = parse_failure("module_unknown_field.yaml")?;
+    let Failure {
+        file,
+        line,
+        column,
+        field_path,
+        message,
+    } = parse_failure("module_unknown_field.yaml")?;
     assert!(file.ends_with("module_unknown_field.yaml"));
-    assert_eq!((line, column), (3, 1));
+    assert_eq!((line, column), (UNKNOWN_FIELD_LINE, 1));
     assert_eq!(field_path, "listn");
     assert!(message.contains("unknown field `listn`"), "{message}");
     Ok(())
@@ -86,8 +120,10 @@ fn unknown_field_is_located() -> TestResult {
 
 #[test]
 fn wrong_type_is_located() -> TestResult {
-    let (_, line, column, field_path, _) = parse_failure("module_wrong_type.yaml")?;
-    assert_eq!((line, column), (4, 14));
+    let Failure {
+        line, column, field_path, ..
+    } = parse_failure("module_wrong_type.yaml")?;
+    assert_eq!((line, column), (WRONG_TYPE_LINE, WRONG_TYPE_COLUMN));
     assert_eq!(field_path, "settings.retention");
     Ok(())
 }
@@ -95,7 +131,7 @@ fn wrong_type_is_located() -> TestResult {
 
 #[test]
 fn missing_field_is_located() -> TestResult {
-    let (_, line, _, _, message) = parse_failure("module_missing_field.yaml")?;
+    let Failure { line, message, .. } = parse_failure("module_missing_field.yaml")?;
     assert_eq!(line, 1);
     assert!(message.contains("missing field `version`"), "{message}");
     Ok(())
@@ -104,8 +140,14 @@ fn missing_field_is_located() -> TestResult {
 
 #[test]
 fn plaintext_secret_is_rejected_without_echo() -> TestResult {
-    let (_, line, column, field_path, message) = parse_failure("module_plaintext_secret.yaml")?;
-    assert_eq!((line, column), (4, 7));
+    let Failure {
+        line,
+        column,
+        field_path,
+        message,
+        ..
+    } = parse_failure("module_plaintext_secret.yaml")?;
+    assert_eq!((line, column), (PLAINTEXT_SECRET_LINE, PLAINTEXT_SECRET_COLUMN));
     assert_eq!(field_path, "secrets.db");
     assert!(message.contains("never a value"), "{message}");
     assert!(!message.contains("hunter2"), "{message}");
@@ -115,7 +157,7 @@ fn plaintext_secret_is_rejected_without_echo() -> TestResult {
 
 #[test]
 fn syntax_error_is_located() -> TestResult {
-    let (_, line, _, _, _) = parse_failure("module_syntax.yaml")?;
+    let Failure { line, .. } = parse_failure("module_syntax.yaml")?;
     assert!(line >= 1);
     Ok(())
 }

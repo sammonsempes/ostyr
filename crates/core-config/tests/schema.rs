@@ -1,12 +1,16 @@
+#[path = "common/types.rs"]
+mod types;
+
+
 use core_config::error::ConfigError;
 use core_config::model::{ModuleConfig, PlatformConfig};
 use core_config::schema::{schema_text, write_schemas, MODULE_SCHEMA_FILE, PLATFORM_SCHEMA_FILE};
-use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+use types::TestResult;
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const EXPECTED_SCHEMA_FILES: usize = 2;
 
 
 fn committed_dir() -> PathBuf {
@@ -19,7 +23,7 @@ fn schemas_are_written() -> TestResult {
     let dir = tempfile::tempdir()?;
     let target = dir.path().join("out");
     let written = write_schemas(&target)?;
-    assert_eq!(written.len(), 2);
+    assert_eq!(written.len(), EXPECTED_SCHEMA_FILES);
     assert_eq!(fs::read_to_string(target.join(PLATFORM_SCHEMA_FILE))?, schema_text::<PlatformConfig>());
     let module: serde_json::Value = serde_json::from_str(&fs::read_to_string(target.join(MODULE_SCHEMA_FILE))?)?;
     assert_eq!(module.get("additionalProperties"), Some(&serde_json::Value::Bool(false)));

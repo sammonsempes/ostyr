@@ -2,15 +2,15 @@ mod common;
 
 
 use common::fixture;
+use common::types::TestResult;
 use core_config::error::ConfigError;
 use core_config::load::{load_layered, load_module_for_tenant};
 use core_config::merge::merge_documents;
 use core_config::model::PlatformConfig;
 use core_config::parse::parse_document;
-use std::error::Error;
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const EXPECTED_SECRETS: usize = 2;
 
 
 #[test]
@@ -19,7 +19,7 @@ fn tenant_overrides_base() -> TestResult {
     assert_eq!(module.name, "siem");
     assert_eq!(module.tenant.as_deref(), Some("acme"));
     assert!(module.listen.is_none());
-    assert_eq!(module.secrets.len(), 2);
+    assert_eq!(module.secrets.len(), EXPECTED_SECRETS);
     assert_eq!(module.secrets.get("db").map(|secret| secret.0.as_str()), Some("vault://kv/acme/db"));
     assert_eq!(
         module.secrets.get("tls").map(|secret| secret.0.as_str()),
