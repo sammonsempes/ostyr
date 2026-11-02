@@ -1,7 +1,7 @@
 use crate::{
     model::{violation_at, Context, Violation},
     position::line_column,
-    tokens::{is_keyword, significant_tokens, Token},
+    tokens::{is_keyword, is_while_true, significant_tokens, Token},
 };
 use ra_ap_rustc_lexer::TokenKind;
 
@@ -56,11 +56,6 @@ pub fn is_capped(condition: &[Token]) -> bool {
 }
 
 
-pub fn is_while_true(condition: &[Token]) -> bool {
-    matches!(condition, [only] if is_keyword(only, "true"))
-}
-
-
 pub fn loop_keyword<'a>(token: &Token<'a>, next: Option<&Token>, in_impl_header: bool) -> Option<&'a str> {
     let generic_binder = next.is_some_and(|following| following.kind == TokenKind::Lt);
     let is_for = is_keyword(token, "for") && !in_impl_header && !generic_binder;
@@ -76,7 +71,7 @@ pub fn at_offset(context: &Context, rule: &'static str, offset: usize, message: 
 
 pub fn open_body<'a>(context: &Context, mut scan: LoopScan<'a>, opened: Pending<'a>) -> LoopScan<'a> {
     scan.bodies.push(opened.depth);
-    let uncapped = opened.keyword == "while" && !is_while_true(&opened.condition) && !is_capped(&opened.condition);
+    let uncapped = opened.keyword == "while" && !is_while_true(opened.keyword, &opened.condition) && !is_capped(&opened.condition);
     let too_deep = scan.bodies.len() > MAX_NESTING;
     scan.violations.extend(uncapped.then(|| {
         at_offset(

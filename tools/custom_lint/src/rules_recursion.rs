@@ -98,32 +98,59 @@ pub fn is_recursive(reach: &CallGraph, name: &str) -> bool {
 }
 
 
-pub fn recursion(context: &Context) -> Vec<Violation> {
+pub struct FileItems<'a> {
+    pub context: &'a Context,
+    pub items: Vec<&'a Item>,
+    pub aliases: BTreeMap<String, String>,
+}
+
+
+pub struct Located<'a, 'b> {
+    pub file: &'b FileItems<'a>,
+    pub function: &'a ItemFn,
+}
+
+
+pub fn file_items(context: &Context) -> FileItems<'_> {
     let items = flatten_items(&context.file.items);
     let aliases = alias_map(&items);
-    let functions: Vec<&ItemFn> = items
+    FileItems { context, items, aliases }
+}
+
+
+pub fn located_functions<'a, 'b>(files: &'b [FileItems<'a>]) -> Vec<Located<'a, 'b>> {
+    files
         .iter()
-        .filter_map(|item| match item {
-            Item::Fn(function) => Some(function),
-            _ => None,
+        .flat_map(|file| {
+            file.items.iter().filter_map(move |item| match item {
+                Item::Fn(function) => Some(Located { file, function }),
+                _ => None,
+            })
         })
-        .collect();
-    let names: BTreeSet<String> = functions.iter().map(|function| function.sig.ident.to_string()).collect();
-    let edges = functions.iter().fold(CallGraph::new(), |mut graph, function| {
+        .collect()
+}
+
+
+pub fn recursion_in_crate(contexts: &[&Context]) -> Vec<Violation> {
+    let files: Vec<FileItems> = contexts.iter().map(|context| file_items(context)).collect();
+    let functions = located_functions(&files);
+    let names: BTreeSet<String> = functions.iter().map(|located| located.function.sig.ident.to_string()).collect();
+    let edges = functions.iter().fold(CallGraph::new(), |mut graph, located| {
         graph
-            .entry(function.sig.ident.to_string())
+            .entry(located.function.sig.ident.to_string())
             .or_default()
-            .extend(callees(function, &aliases, &names));
+            .extend(callees(located.function, &located.file.aliases, &names));
         graph
     });
     let reach = (0..names.len()).fold(edges, |current, _| extend_reach(&current));
     functions
         .iter()
-        .filter(|function| is_recursive(&reach, &function.sig.ident.to_string()))
-        .map(|function| {
+        .filter(|located| is_recursive(&reach, &located.function.sig.ident.to_string()))
+        .map(|located| {
+            let function = located.function;
             let start = function.sig.ident.span().start();
             violation_at(
-                context,
+                located.file.context,
                 RECURSION,
                 (start.line, start.column + 1),
                 format!("function `{}` is recursive", function.sig.ident),

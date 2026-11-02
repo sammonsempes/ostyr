@@ -44,6 +44,46 @@ pub fn is_keyword(token: &Token, word: &str) -> bool {
 }
 
 
+pub fn is_while_true(keyword: &str, condition: &[Token]) -> bool {
+    keyword == "while" && matches!(condition, [only] if is_keyword(only, "true"))
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Attribute<'a> {
+    pub offset: usize,
+    pub tokens: Vec<Token<'a>>,
+}
+
+
+pub fn bracket_start(tokens: &[Token], pound: usize) -> Option<usize> {
+    let after_pound = pound + 1;
+    let inner = after_pound + usize::from(kind_at(tokens, after_pound) == Some(TokenKind::Bang));
+    (kind_at(tokens, inner) == Some(TokenKind::OpenBracket)).then_some(inner)
+}
+
+
+pub fn attribute_at<'a>(tokens: &[Token<'a>], pound: usize) -> Option<Attribute<'a>> {
+    let open = bracket_start(tokens, pound)?;
+    let close = closing_index(tokens, open, |kind, depth| kind == TokenKind::CloseBracket && depth == 0);
+    let offset = tokens.get(pound)?.offset;
+    tokens.get(open + 1..close).map(|inner| Attribute {
+        offset,
+        tokens: inner.to_vec(),
+    })
+}
+
+
+pub fn attributes<'a>(tokens: &[Token<'a>]) -> Vec<Attribute<'a>> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.kind == TokenKind::Pound)
+        .filter_map(|(index, _)| attribute_at(tokens, index))
+        .collect()
+}
+
+
 pub fn before<'a, 'b>(tokens: &'b [Token<'a>], index: usize, distance: usize) -> Option<&'b Token<'a>> {
     index.checked_sub(distance).and_then(|position| tokens.get(position))
 }

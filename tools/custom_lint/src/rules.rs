@@ -2,14 +2,17 @@ use crate::{
     model::Rule,
     rules_comments::{doc_comment_multiline, line_comment, DOC_COMMENT_MULTILINE, LINE_COMMENT},
     rules_flow::{bare_loop, break_continue, process_exit, return_expression, BARE_LOOP, BREAK_CONTINUE, PROCESS_EXIT, RETURN},
+    rules_hygiene::{
+        assert_outside_tests, let_underscore, shell_c, silencer, test_in_src, ASSERT_OUTSIDE_TESTS, LET_UNDERSCORE, SHELL_C, SILENCER, TEST_IN_SRC,
+    },
     rules_loops::{loop_nesting, uncapped_while, LOOP_NESTING, UNCAPPED_WHILE},
     rules_names::{forbidden_ident, global_mutable, magic_number, FORBIDDEN_IDENT, GLOBAL_MUTABLE, MAGIC_NUMBER},
-    rules_recursion::{recursion, RECURSION},
     rules_spacing::{item_spacing, ITEM_SPACING},
     rules_types::{
         any_type, custom_trait, impl_allowlist, inherent_impl, type_alias_location, ANY_TYPE, CUSTOM_TRAIT, IMPL_ALLOWLIST, INHERENT_IMPL,
         TYPE_ALIAS_LOCATION,
     },
+    rules_unsafe::{unsafe_outside_boundary, unsafe_without_safety, UNSAFE_OUTSIDE_BOUNDARY, UNSAFE_WITHOUT_SAFETY},
 };
 
 
@@ -47,10 +50,6 @@ pub const RULES: &[Rule] = &[
         check: loop_nesting,
     },
     Rule {
-        id: RECURSION,
-        check: recursion,
-    },
-    Rule {
         id: PROCESS_EXIT,
         check: process_exit,
     },
@@ -86,4 +85,29 @@ pub const RULES: &[Rule] = &[
         id: GLOBAL_MUTABLE,
         check: global_mutable,
     },
+    Rule {
+        id: UNSAFE_OUTSIDE_BOUNDARY,
+        check: unsafe_outside_boundary,
+    },
+    Rule {
+        id: UNSAFE_WITHOUT_SAFETY,
+        check: unsafe_without_safety,
+    },
+    Rule {
+        id: ASSERT_OUTSIDE_TESTS,
+        check: assert_outside_tests,
+    },
+    Rule {
+        id: TEST_IN_SRC,
+        check: test_in_src,
+    },
+    Rule {
+        id: SILENCER,
+        check: silencer,
+    },
+    Rule {
+        id: LET_UNDERSCORE,
+        check: let_underscore,
+    },
+    Rule { id: SHELL_C, check: shell_c },
 ];

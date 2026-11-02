@@ -1,7 +1,7 @@
 use crate::{
     model::{violation_at, Context, Violation},
     position::line_column,
-    tokens::{is_keyword, significant_tokens, Token},
+    tokens::{is_keyword, is_while_true, significant_tokens, Token},
 };
 use ra_ap_rustc_lexer::TokenKind;
 
@@ -48,16 +48,11 @@ pub fn break_continue(context: &Context) -> Vec<Violation> {
 }
 
 
-pub fn is_while_true(pair: &[Token]) -> bool {
-    matches!(pair, [first, second] if is_keyword(first, "while") && is_keyword(second, "true"))
-}
-
-
 pub fn bare_loop(context: &Context) -> Vec<Violation> {
     let tokens = significant_tokens(&context.source);
     let while_true = tokens
         .windows(WHILE_TRUE_WIDTH)
-        .filter(|pair| is_while_true(pair))
+        .filter(|pair| pair.split_first().is_some_and(|(first, rest)| is_while_true(first.text, rest)))
         .filter_map(|pair| pair.first())
         .map(|token| at_offset(context, BARE_LOOP, token.offset, "`while true` is not allowed".to_string()));
     let bare = tokens
