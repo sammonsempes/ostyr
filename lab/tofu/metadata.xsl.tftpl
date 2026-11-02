@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:output method="xml" indent="yes"/>
+  <xsl:template match="@*|node()">
+    <xsl:copy>
+      <xsl:apply-templates select="@*|node()"/>
+    </xsl:copy>
+  </xsl:template>
+  <xsl:template match="/domain/devices/disk[@device='disk']/driver/@type">
+    <xsl:attribute name="type">qcow2</xsl:attribute>
+  </xsl:template>
+  <xsl:template match="/domain">
+    <xsl:copy>
+      <xsl:apply-templates select="@*|node()"/>
+      <metadata>
+        <ostyr:lab xmlns:ostyr="urn:ostyr:lab">
+          <ostyr:task>${task_id}</ostyr:task>
+          <ostyr:created>${created_at}</ostyr:created>
+        </ostyr:lab>
+      </metadata>
+    </xsl:copy>
+  </xsl:template>
+</xsl:stylesheet>
