@@ -1,0 +1,22 @@
+use std::{ffi::OsString, io::Write, path::Path};
+
+
+use crate::{error::LintError, scan::lint_root, types::FileReader};
+
+
+pub fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+
+pub fn run<W: Write>(arguments: impl Iterator<Item = OsString>, output: &mut W, read: FileReader) -> Result<usize, LintError> {
+    let collected: Vec<OsString> = arguments.collect();
+    match collected.as_slice() {
+        [root] => {
+            let violations = lint_root(Path::new(root), read)?;
+            violations.iter().try_for_each(|violation| writeln!(output, "{violation}"))?;
+            Ok(violations.len())
+        }
+        _ => Err(LintError::Usage),
+    }
+}

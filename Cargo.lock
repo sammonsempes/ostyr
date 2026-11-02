@@ -34,6 +34,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "custom_lint"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "ra-ap-rustc_lexer",
+ "syn 2.0.119",
+ "tempfile",
+ "thiserror",
+ "walkdir",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -95,10 +108,6 @@ name = "placeholder"
 version = "0.0.0"
 
 [[package]]
-name = "placeholder-tool"
-version = "0.0.0"
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +130,17 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "ra-ap-rustc_lexer"
+version = "0.181.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9d7cb2aa8347ddad2896c26db870155144133eac1a27e0bb89904d430ef4b68"
+dependencies = [
+ "memchr",
+ "unicode-ident",
+ "unicode-properties",
+]
 
 [[package]]
 name = "rustix"
@@ -247,6 +267,12 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-properties"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993ad287eb20e8ba755312801cfe1413e0f25d604075863acaddca10b04c1833"
 
 [[package]]
 name = "walkdir"
