@@ -26,7 +26,7 @@ const RUST_EXTENSION: &str = "rs";
 const YAML_EXTENSIONS: [&str; 2] = ["yaml", "yml"];
 
 
-const YAML_SKIPPED_DIRS: [&str; 3] = ["target", ".git", ".cache"];
+const HIDDEN_PREFIX: &str = ".";
 
 
 const CRATE_KEY_DEPTH: usize = 2;
@@ -153,11 +153,17 @@ pub fn lint_yaml_entry(
 }
 
 
+pub fn is_skipped_yaml_dir(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    entry.depth() > 0 && entry.file_type().is_dir() && (name == SKIPPED_DIR || name.starts_with(HIDDEN_PREFIX))
+}
+
+
 pub fn lint_yaml_tree(root: &Path, read: FileReader) -> Result<Vec<Violation>, LintError> {
     WalkDir::new(root)
         .sort_by_file_name()
         .into_iter()
-        .filter_entry(|entry| !YAML_SKIPPED_DIRS.iter().any(|skipped| entry.file_name() == *skipped))
+        .filter_entry(|entry| !is_skipped_yaml_dir(entry))
         .try_fold(Vec::new(), |found, entry_result| lint_yaml_entry(root, found, entry_result, read))
 }
 
