@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "AuthenticationRef": {
+      "additionalProperties": false,
+      "properties": {
+        "client_secret": {
+          "$ref": "#/$defs/SecretRef"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "issuer",
+        "client_secret"
+      ],
+      "type": "object"
+    },
+    "ModuleEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "endpoint"
+      ],
+      "type": "object"
+    },
+    "SecretRef": {
+      "description": "A reference to a secret held elsewhere, never the secret itself.",
+      "pattern": "^(vault://|openbao://|sops:).+",
+      "type": "string"
+    },
+    "ServiceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "credentials": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Platform file: which modules coexist (spec section 4). Optional: a module runs alone without it.",
+  "properties": {
+    "authentication": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthenticationRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event_bus": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ServiceRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "modules": {
+      "items": {
+        "$ref": "#/$defs/ModuleEntry"
+      },
+      "type": "array"
+    },
+    "storage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ServiceRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "modules"
+  ],
+  "title": "PlatformConfig",
+  "type": "object"
+}

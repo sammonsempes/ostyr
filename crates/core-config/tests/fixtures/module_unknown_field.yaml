@@ -1,0 +1,3 @@
+name: siem
+version: 1.2.0
+listn: 0.0.0.0:8080
