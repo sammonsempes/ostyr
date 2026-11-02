@@ -60,7 +60,7 @@ git init -q
 try() {
   local label=$1 expect=$2 failed_step=${3:-} got
   git add -A
-  if git -c core.hooksPath=.githooks -c user.name=t -c user.email=t@example.com commit -q -m "$label" >"$SCRATCH/out.txt" 2>&1; then
+  if git -c core.hooksPath=${HOOKS:-.githooks} -c user.name=t -c user.email=t@example.com commit -q -m "$label" >"$SCRATCH/out.txt" 2>&1; then
     got=accepted
   else
     got=refused
@@ -93,6 +93,34 @@ try "uncovered branch" refused "4/5 cargo llvm-cov"
 
 printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
 try "clean commit" accepted
+
+W="$SCRATCH/wt"
+MAIN_HOOKS="$R/.githooks"
+git worktree add -q "$W" -b side
+printf '%s' "// a comment
+$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >"$W/crates/demo/src/lib.rs"
+mkdir -p "$W/tools"
+cd "$W"
+HOOKS="$MAIN_HOOKS" try "worktree violation" refused "3/5 custom_lint"
+if git log --format=%s | grep -qx "worktree violation"; then
+  echo "FAIL: worktree violation reached history"
+  FAILS=$((FAILS + 1))
+fi
+printf '%s' "// a comment
+$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >"$R/crates/demo/src/lib.rs"
+printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >"$W/crates/demo/src/lib.rs"
+printf 'x\n' >"$W/note.txt"
+HOOKS="$MAIN_HOOKS" try "worktree clean" accepted
+printf 'y\n' >"$W/note.txt"
+git add -A
+if ! env PATH="/usr/bin:/bin" "$MAIN_HOOKS/pre-commit" >"$SCRATCH/out.txt" 2>&1; then
+  echo "FAIL: hook without cargo on PATH"
+  tail -n 20 "$SCRATCH/out.txt"
+  FAILS=$((FAILS + 1))
+fi
+cd "$R"
+git checkout -q -- .
+git log -1 --format=%s >/dev/null
 
 if [ "$(git log --format=%s)" != "clean commit" ]; then
   echo "FAIL: history is not only the clean commit"
