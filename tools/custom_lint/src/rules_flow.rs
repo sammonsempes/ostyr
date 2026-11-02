@@ -24,7 +24,7 @@ const EXIT_PATH_WIDTH: usize = 4;
 const WHILE_TRUE_WIDTH: usize = 2;
 
 
-fn at_offset(context: &Context, rule: &'static str, offset: usize, message: String) -> Violation {
+pub fn at_offset(context: &Context, rule: &'static str, offset: usize, message: String) -> Violation {
     violation_at(context, rule, line_column(&context.source, offset), message)
 }
 

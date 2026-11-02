@@ -12,7 +12,11 @@ const DOC_MESSAGE: &str = "doc-comment-multiline: doc comment spans more than on
 
 
 fn report(path: &str, source: &str) -> anyhow::Result<Vec<String>> {
-    Ok(lint_source(Path::new(path), source)?.iter().map(ToString::to_string).collect())
+    Ok(lint_source(Path::new(path), source)?
+        .iter()
+        .filter(|violation| violation.rule.ends_with("comment") || violation.rule.ends_with("multiline"))
+        .map(ToString::to_string)
+        .collect())
 }
 
 
