@@ -698,7 +698,7 @@ The Rust code follows the project coding rules, written in English like all the 
 - **Code**: no `unsafe` outside two isolated system interface crates (Windows API, eBPF probes), reviewed by two people and documented block by block, no possible panic (`unwrap`, `expect`, direct indexing forbidden), a single exit point per function, neither recursion nor `break`, no magic numbers, no global mutable state, existing crates preferred to home-made code.
 - **Tests**: 100 % line and branch coverage, module by module, without any exclusion; error paths are covered by injecting failing dependencies.
 - **Single gate**: a pre-commit hook chains `rustfmt`, `clippy`, `custom_lint`, `cargo llvm-cov` and `coverage_gate`. The `custom_lint` (rules Clippy does not cover) and `coverage_gate` (branch coverage threshold) tools are part of the project to be developed.
-- **Git**: one-line commits, one coherent change per commit, never a direct push to `master`.
+- **Git**: one-line commits, one coherent change per commit, never a direct push to `main`.
 
 ## 13. Interface
 
