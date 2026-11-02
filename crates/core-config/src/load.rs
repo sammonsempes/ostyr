@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use std::path::Path;
 
 
-pub fn load_file<T: DeserializeOwned>(path: &Path) -> Result<T, ConfigError> {
+pub fn load_file<Document: DeserializeOwned>(path: &Path) -> Result<Document, ConfigError> {
     let text = read_file(path)?;
     parse_document(&text, &path.display().to_string())
 }
@@ -23,7 +23,7 @@ pub fn load_module(path: &Path) -> Result<ModuleConfig, ConfigError> {
 
 
 /// Loads a tenant file merged over a common base; errors of the merged result name the tenant file and position in the merged document.
-pub fn load_layered<T: DeserializeOwned>(base: &Path, tenant: &Path) -> Result<T, ConfigError> {
+pub fn load_layered<Document: DeserializeOwned>(base: &Path, tenant: &Path) -> Result<Document, ConfigError> {
     let base_file = base.display().to_string();
     let tenant_file = tenant.display().to_string();
     let merged = merge_documents(&read_file(base)?, &base_file, &read_file(tenant)?, &tenant_file)?;

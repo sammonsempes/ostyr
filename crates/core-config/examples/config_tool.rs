@@ -1,9 +1,10 @@
-use core_config::cli::{run, CliError};
-use std::io::stdout;
+use core_config::cli::run_reporting;
+use std::io::{stderr, stdout};
+use std::process::ExitCode;
 
 
-fn main() -> Result<(), CliError> {
+fn main() -> std::io::Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    run(&borrowed, &mut stdout())
+    run_reporting(&borrowed, &mut stdout(), &mut stderr())
 }

@@ -2,15 +2,15 @@ mod common;
 
 
 use common::fixture;
+use common::types::TestResult;
 use core_config::error::ConfigError;
 use core_config::load::{load_layered, load_module_for_tenant};
 use core_config::merge::merge_documents;
 use core_config::model::PlatformConfig;
 use core_config::parse::parse_document;
-use std::error::Error;
 
 
-type TestResult = Result<(), Box<dyn Error>>;
+const EXPECTED_SECRETS: usize = 2;
 
 
 #[test]
@@ -19,7 +19,7 @@ fn tenant_overrides_base() -> TestResult {
     assert_eq!(module.name, "siem");
     assert_eq!(module.tenant.as_deref(), Some("acme"));
     assert!(module.listen.is_none());
-    assert_eq!(module.secrets.len(), 2);
+    assert_eq!(module.secrets.len(), EXPECTED_SECRETS);
     assert_eq!(module.secrets.get("db").map(|secret| secret.0.as_str()), Some("vault://kv/acme/db"));
     assert_eq!(
         module.secrets.get("tls").map(|secret| secret.0.as_str()),
@@ -55,10 +55,10 @@ fn plaintext_secret_in_tenant_is_rejected_in_the_merged_document() -> TestResult
             assert!(file.contains("module_bad.yaml (merged over "), "{file}");
             assert_eq!(field_path, "secrets.db");
             assert!(line > 1);
+            Ok(())
         }
-        other => return Err(format!("unexpected {other:?}").into()),
+        other => Err(format!("unexpected {other:?}").into()),
     }
-    Ok(())
 }
 
 
