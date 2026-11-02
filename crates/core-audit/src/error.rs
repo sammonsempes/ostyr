@@ -31,7 +31,9 @@ pub enum AuditError {
     },
     #[error("chain head is {actual}, expected {expected} (log truncated or replaced)")]
     HeadMismatch { expected: String, actual: String },
-    #[error("usage: append <file> <count> | verify <file> [head] | export <file>")]
+    #[error("an earlier append failed: the log handle refuses further appends, reopen the log to verify it")]
+    LogPoisoned,
+    #[error("usage: append <file> <count> | verify <file> [head] | export <file> [head]")]
     Usage,
     #[error("invalid count `{value}`: {source}")]
     InvalidCount {

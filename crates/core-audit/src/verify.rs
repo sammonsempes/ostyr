@@ -51,11 +51,17 @@ pub fn verify<Input: BufRead>(input: Input, expected_head: Option<&str>) -> Resu
                 .map(|record| (line_number, record.hash))
                 .map_err(|reason| AuditError::Broken { line: line_number, reason })
         })?;
+    check_head(expected_head, head).map(|actual| VerifyReport { records, head: actual })
+}
+
+
+/// Passes the head through when no anchor is given or it matches the anchor.
+pub fn check_head(expected_head: Option<&str>, head: String) -> Result<String, AuditError> {
     match expected_head {
         Some(expected) if expected != head => Err(AuditError::HeadMismatch {
             expected: expected.to_owned(),
             actual: head,
         }),
-        _ => Ok(VerifyReport { records, head }),
+        _ => Ok(head),
     }
 }

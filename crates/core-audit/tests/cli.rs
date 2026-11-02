@@ -32,6 +32,8 @@ fn append_verify_and_export_round_trip() -> TestResult {
     assert!(output_of(&["verify", &path, &head])?.starts_with("ok 5 records"));
     assert!(matches!(output_of(&["verify", &path, "abc"]), Err(AuditError::HeadMismatch { .. })));
     assert_eq!(output_of(&["export", &path])?.lines().count(), SAMPLE_COUNT);
+    assert_eq!(output_of(&["export", &path, &head])?.lines().count(), SAMPLE_COUNT);
+    assert!(matches!(output_of(&["export", &path, "abc"]), Err(AuditError::HeadMismatch { .. })));
     assert!(!fs::read_to_string(&path)?.contains("hunter2"));
     Ok(())
 }

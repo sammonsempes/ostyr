@@ -44,7 +44,7 @@ pub fn append_samples<Output: Write>(log: &AuditLog<Output>, total: usize) -> Re
 }
 
 
-/// Runs one command of the example binary: `append <file> <count>`, `verify <file> [head]` or `export <file>`.
+/// Runs one command of the example binary: `append <file> <count>`, `verify <file> [head]` or `export <file> [head]`.
 pub fn run<Output: Write>(args: &[&str], out: &mut Output) -> Result<(), AuditError> {
     match args {
         ["append", file, count] => parse_count(count)
@@ -52,7 +52,8 @@ pub fn run<Output: Write>(args: &[&str], out: &mut Output) -> Result<(), AuditEr
             .and_then(|new_head| writeln!(out, "head {new_head}").map_err(AuditError::from)),
         ["verify", file] => verify_file(file, None, out),
         ["verify", file, expected] => verify_file(file, Some(expected), out),
-        ["export", file] => export(BufReader::new(File::open(file)?), out).map(|_| ()),
+        ["export", file] => export_file(file, None, out),
+        ["export", file, expected] => export_file(file, Some(expected), out),
         _ => Err(AuditError::Usage),
     }
 }
@@ -61,4 +62,9 @@ pub fn run<Output: Write>(args: &[&str], out: &mut Output) -> Result<(), AuditEr
 pub fn verify_file<Output: Write>(file: &str, expected: Option<&str>, out: &mut Output) -> Result<(), AuditError> {
     let report = verify(BufReader::new(File::open(file)?), expected)?;
     writeln!(out, "ok {} records head {}", report.records, report.head).map_err(AuditError::from)
+}
+
+
+pub fn export_file<Output: Write>(file: &str, expected: Option<&str>, out: &mut Output) -> Result<(), AuditError> {
+    export(BufReader::new(File::open(file)?), out, expected).map(|_| ())
 }

@@ -1,5 +1,7 @@
 #[path = "support/failing_writer.rs"]
 mod failing_writer;
+#[path = "support/partial_writer.rs"]
+mod partial_writer;
 #[path = "support/sample.rs"]
 mod sample;
 #[path = "support/types.rs"]
@@ -11,9 +13,11 @@ use core_audit::log::{append, genesis_log, head, new_log, no_sync, open_file_log
 use core_audit::model::GENESIS_HASH;
 use core_audit::verify::verify;
 use failing_writer::FailingWriter;
+use partial_writer::PartialWriter;
 use sample::entry;
 use std::fs;
 use std::io::{self, BufReader};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::thread;
 use types::TestResult;
@@ -26,6 +30,12 @@ const APPENDS_PER_THREAD: usize = 25;
 
 
 const FILE_RECORDS: usize = 3;
+
+
+const OWNER_ONLY_MODE: u32 = 0o600;
+
+
+const MODE_MASK: u32 = 0o777;
 
 
 fn failing_sync(_writer: &mut Vec<u8>) -> io::Result<()> {
@@ -125,5 +135,48 @@ fn file_log_refuses_a_tampered_file_and_a_directory() -> TestResult {
     fs::write(&path, "garbage\n")?;
     assert!(matches!(open_file_log(&path), Err(AuditError::Broken { line: 1, .. })));
     assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
+    Ok(())
+}
+
+
+#[test]
+fn failed_sync_poisons_the_handle() -> TestResult {
+    let log = new_log(Vec::new(), GENESIS_HASH, failing_sync);
+    assert!(matches!(append(&log, entry(0)?), Err(AuditError::Io(_))));
+    assert!(matches!(append(&log, entry(1)?), Err(AuditError::LogPoisoned)));
+    assert_eq!(head(&log), GENESIS_HASH);
+    Ok(())
+}
+
+
+#[test]
+fn partial_write_poisons_the_handle() -> TestResult {
+    let log = genesis_log(PartialWriter::default());
+    assert!(matches!(append(&log, entry(0)?), Err(AuditError::Io(_))));
+    assert!(matches!(append(&log, entry(1)?), Err(AuditError::LogPoisoned)));
+    let state = log.state.into_inner()?;
+    assert!(!state.writer.written.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn flush_failure_poisons_the_handle() -> TestResult {
+    let log = genesis_log(FailingWriter {
+        fail_write: false,
+        fail_flush: true,
+    });
+    assert!(append(&log, entry(0)?).is_err());
+    assert!(matches!(append(&log, entry(1)?), Err(AuditError::LogPoisoned)));
+    Ok(())
+}
+
+
+#[test]
+fn file_log_is_created_owner_only() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("audit.log");
+    open_file_log(&path)?;
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & MODE_MASK, OWNER_ONLY_MODE);
     Ok(())
 }

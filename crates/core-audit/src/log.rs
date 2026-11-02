@@ -4,6 +4,7 @@ use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::verify::verify;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -12,6 +13,7 @@ use std::sync::{Mutex, PoisonError};
 pub struct LogState<Output> {
     pub writer: Output,
     pub head: String,
+    pub poisoned: bool,
 }
 
 
@@ -39,6 +41,7 @@ pub fn new_log<Output: Write>(writer: Output, head: &str, sync: fn(&mut Output) 
         state: Mutex::new(LogState {
             writer,
             head: head.to_owned(),
+            poisoned: false,
         }),
         sync,
     }
@@ -50,23 +53,42 @@ pub fn genesis_log<Output: Write>(writer: Output) -> AuditLog<Output> {
 }
 
 
+pub const LOG_FILE_MODE: u32 = 0o600;
+
+
 /// Opens (creating if needed) an append-only file, verifies its existing chain and continues it.
 pub fn open_file_log(path: &Path) -> Result<AuditLog<File>, AuditError> {
-    let file = OpenOptions::new().read(true).append(true).create(true).open(path)?;
+    let file = OpenOptions::new().read(true).append(true).create(true).mode(LOG_FILE_MODE).open(path)?;
     let report = verify(BufReader::new(&file), None)?;
     Ok(new_log(file, &report.head, sync_file))
+}
+
+
+pub fn write_durably<Output: Write>(writer: &mut Output, sync: fn(&mut Output) -> io::Result<()>, line: &str) -> io::Result<()> {
+    writer.write_all(line.as_bytes())?;
+    writer.flush()?;
+    sync(writer)
 }
 
 
 /// Chains, writes, flushes and syncs one record; the head only advances once the whole line is durable.
 pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
     let mut state = log.state.lock().unwrap_or_else(PoisonError::into_inner);
-    let record = seal(entry, &state.head)?;
-    state.writer.write_all(render_line(&record).as_bytes())?;
-    state.writer.flush()?;
-    (log.sync)(&mut state.writer)?;
-    state.head.clone_from(&record.hash);
-    Ok(record)
+    if state.poisoned {
+        Err(AuditError::LogPoisoned)
+    } else {
+        let record = seal(entry, &state.head)?;
+        match write_durably(&mut state.writer, log.sync, &render_line(&record)) {
+            Ok(()) => {
+                state.head.clone_from(&record.hash);
+                Ok(record)
+            }
+            Err(error) => {
+                state.poisoned = true;
+                Err(AuditError::Io(error))
+            }
+        }
+    }
 }
 
 

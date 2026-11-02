@@ -1,7 +1,7 @@
 use crate::canonical::{actor_label, outcome_label};
 use crate::error::AuditError;
 use crate::model::{Outcome, Record, GENESIS_HASH};
-use crate::verify::{check_line, raw_lines};
+use crate::verify::{check_head, check_line, raw_lines};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
@@ -38,10 +38,10 @@ pub fn to_ecs(record: &Record) -> Value {
             "category": [category(&record.action)],
             "action": record.action,
             "outcome": ecs_outcome(record.outcome),
-            "id": record.request_id,
+            "id": record.hash,
             "reason": record.justification,
-            "hash": record.hash,
         },
+        "trace": { "id": record.request_id },
         "user": { "id": record.actor_id },
         "service": { "name": record.module },
         "organization": { "id": record.tenant },
@@ -56,8 +56,8 @@ pub fn to_ecs(record: &Record) -> Value {
 }
 
 
-/// Reads a log (refusing a broken chain) and writes one ECS event per line; returns the event count.
-pub fn export<Input: BufRead, Output: Write>(input: Input, out: &mut Output) -> Result<usize, AuditError> {
+/// Reads a log (refusing a broken chain or, given `expected_head`, a head that differs) and writes one ECS event per line; returns the event count.
+pub fn export<Input: BufRead, Output: Write>(input: Input, out: &mut Output, expected_head: Option<&str>) -> Result<usize, AuditError> {
     raw_lines(input)
         .enumerate()
         .try_fold((0, GENESIS_HASH.to_owned()), |(_, previous), (index, line)| {
@@ -65,5 +65,5 @@ pub fn export<Input: BufRead, Output: Write>(input: Input, out: &mut Output) -> 
             writeln!(out, "{}", to_ecs(&record))?;
             Ok((index + 1, record.hash))
         })
-        .map(|(count, _)| count)
+        .and_then(|(count, head)| check_head(expected_head, head).map(|_| count))
 }
