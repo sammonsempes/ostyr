@@ -1,15 +1,20 @@
-use std::fs::File;
-use std::io::Write;
-use std::path::Path;
-
 use crate::check::check;
 use crate::error::GateError;
 use crate::export::parse_export;
 use crate::scan::find_sources;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+
 
 const DEFAULT_ROOT: &str = ".";
+
+
 const EXPORT_ARG: usize = 1;
+
+
 const ROOT_ARG: usize = 2;
+
 
 pub fn run<W: Write>(args: &[String], mut out: W) -> Result<bool, GateError> {
     let export_path = Path::new(args.get(EXPORT_ARG).ok_or(GateError::Usage)?);

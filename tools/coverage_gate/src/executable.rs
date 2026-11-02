@@ -1,8 +1,7 @@
+use crate::error::GateError;
 use std::iter::successors;
-
 use syn::{Expr, ImplItem, Item, TraitItem};
 
-use crate::error::GateError;
 
 pub fn is_code(item: &Item) -> bool {
     match item {
@@ -18,12 +17,14 @@ pub fn is_code(item: &Item) -> bool {
     }
 }
 
+
 pub fn children(item: &Item) -> &[Item] {
     match item {
         Item::Mod(module) => module.content.as_ref().map_or(&[], |(_, items)| items.as_slice()),
         _ => &[],
     }
 }
+
 
 pub fn has_executable_code(text: &str) -> Result<bool, syn::Error> {
     let file = syn::parse_file(text)?;
@@ -35,6 +36,7 @@ pub fn has_executable_code(text: &str) -> Result<bool, syn::Error> {
     .flatten()
     .any(is_code))
 }
+
 
 pub fn file_has_executable_code(path: &std::path::Path) -> Result<bool, GateError> {
     let text = std::fs::read_to_string(path).map_err(|source| GateError::ReadSource {
