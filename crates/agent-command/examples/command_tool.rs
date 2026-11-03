@@ -1,4 +1,4 @@
-use agent_command::cli::{verify_session, write_keypair, write_signed};
+use agent_command::cli::{seconds_since_epoch, verify_session, write_keypair, write_signed};
 use agent_command::keys::open_keys_engine;
 use agent_command::sign::os_random;
 use agent_command::verify::open_verifier;
@@ -20,7 +20,7 @@ const USAGE: &str = "usage: command_tool keygen | sign <seed-hex> <key-id> <agen
 
 
 fn now_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
+    seconds_since_epoch(SystemTime::now().duration_since(UNIX_EPOCH))
 }
 
 
