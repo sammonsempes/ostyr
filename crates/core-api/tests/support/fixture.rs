@@ -34,6 +34,9 @@ pub const KEY_FILL: u8 = 7;
 pub const TEST_HEADER_TIMEOUT: Duration = Duration::from_millis(300);
 
 
+pub const TEST_BODY_TIMEOUT: Duration = Duration::from_millis(300);
+
+
 pub const TEST_MAX_CONNECTIONS: usize = 2;
 
 
@@ -137,6 +140,7 @@ pub fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
         key_file: key_file.display().to_string(),
         compromised_list,
         header_read_timeout: TEST_HEADER_TIMEOUT,
+        body_read_timeout: TEST_BODY_TIMEOUT,
         max_connections_per_source: TEST_MAX_CONNECTIONS,
     })
 }

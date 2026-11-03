@@ -27,6 +27,9 @@ pub const SETTING_COMPROMISED_LIST: &str = "compromised_list";
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 
+pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+
 pub const MAX_CONNECTIONS_PER_SOURCE: usize = 64;
 
 
@@ -70,6 +73,7 @@ pub fn api_config(module: &ModuleConfig) -> Result<ApiConfig, StartupError> {
         key_file: required_setting(module, SETTING_KEY_FILE)?.clone(),
         compromised_list: PathBuf::from(required_setting(module, SETTING_COMPROMISED_LIST)?),
         header_read_timeout: HEADER_READ_TIMEOUT,
+        body_read_timeout: BODY_READ_TIMEOUT,
         max_connections_per_source: MAX_CONNECTIONS_PER_SOURCE,
     })
 }

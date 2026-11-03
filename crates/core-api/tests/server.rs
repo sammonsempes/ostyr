@@ -381,3 +381,65 @@ async fn a_dual_stack_listener_keys_an_ipv4_client_by_its_ipv4_address() -> Test
     assert!(running.await?.is_ok());
     Ok(())
 }
+
+
+const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+
+
+const SLOW_BODY_REQUEST: &str =
+    "POST /auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"user";
+
+
+#[tokio::test]
+async fn an_http2_preface_is_not_served() -> TestResult {
+    let fx = fixture()?;
+    let (handle, running) = start(&fx.config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut prior = TcpStream::connect(address).await?;
+    prior.write_all(HTTP2_PREFACE).await?;
+    let mut first = [0; 1];
+    let read = tokio::time::timeout(SETTLE_PAUSE, prior.read(&mut first)).await;
+    assert!(read.map_or(true, |bytes| bytes.map_or(true, |count| count == 0 || first != [0])));
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_tls_client_offering_only_h2_fails_the_handshake() -> TestResult {
+    let fx = fixture()?;
+    let pki = pki()?;
+    let config = ApiConfig {
+        tls: Some(tls_files_in(fx.dir.path(), &pki)?),
+        ..fx.config.clone()
+    };
+    let (handle, running) = start(&config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut client = client_config(&pki, &TLS13)?;
+    client.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = TlsConnector::from(Arc::new(client));
+    let outcome = connector
+        .connect(ServerName::try_from(LOCALHOST_NAME)?, TcpStream::connect(address).await?)
+        .await;
+    assert!(outcome.is_err());
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_client_sending_its_body_slowly_gets_408() -> TestResult {
+    let fx = fixture()?;
+    let (handle, running) = start(&fx.config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut slow = TcpStream::connect(address).await?;
+    slow.write_all(SLOW_BODY_REQUEST.as_bytes()).await?;
+    let (reply, waited) = read_until_closed(&mut slow).await?;
+    assert!(reply.starts_with("HTTP/1.1 408"));
+    assert!(waited < READ_DEADLINE);
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
