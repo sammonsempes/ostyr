@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+percent-encoding = "2"
 regex = "1"
 tracing = "0.1"
 
