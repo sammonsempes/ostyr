@@ -41,7 +41,7 @@ if [[ "${1:-}" != "--static" ]]; then
     lab_state="$(state_dir "$TEST_TASK")"
     read -r _ vm_user vm_address <"$lab_state/vms.txt"
     ssh_vm() {
-        ssh -i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+        ssh -n -i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
             "$vm_user@$vm_address" "$@"
     }
     check "cloud-init status done" grep -q 'status: done' <(ssh_vm cloud-init status --wait)
@@ -50,6 +50,23 @@ if [[ "${1:-}" != "--static" ]]; then
     check "build date recorded" virsh_lab vol-info --pool "$LAB_POOL" ubuntu-2404.qcow2.built
     "$LAB_DIR/down.sh" "$TEST_TASK"
     check "base volume untouched" virsh_lab vol-info --pool "$LAB_POOL" ubuntu-2404.qcow2
+
+    export LAB_PROFILE="linux-matrix"
+    for image in rocky-9 rocky-8 debian-12; do
+        check "build $image" "$IMAGES_DIR/build.sh" "$image"
+    done
+    "$LAB_DIR/up.sh" "$TEST_TASK"
+    while read -r vm_name vm_user vm_address; do
+        kernel="$(ssh -n -i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "$vm_user@$vm_address" uname -r)"
+        log "$vm_name kernel $kernel"
+        check "$vm_name cloud-init done" ssh -n -i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR "$vm_user@$vm_address" 'cloud-init status --wait | grep -q "status: done"'
+        if [[ "$vm_name" == "rocky8" ]]; then
+            check "rocky8 runs kernel 4.18" grep -q '^4\.18\.' <<<"$kernel"
+        fi
+    done <"$lab_state/vms.txt"
+    "$LAB_DIR/down.sh" "$TEST_TASK"
 fi
 
 exit "$((failures > 0))"
