@@ -1059,6 +1059,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dns-rpz"
+version = "0.0.0"
+dependencies = [
+ "core-audit",
+ "core-config",
+ "idna",
+ "intel-feeds",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

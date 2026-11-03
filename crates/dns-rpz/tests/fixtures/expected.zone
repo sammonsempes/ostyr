@@ -1,0 +1,13 @@
+$ORIGIN rpz.example.org.
+$TTL 300
+@ IN SOA ns1.example.org. hostmaster.example.org. 2026110301 1800 600 86400 300
+@ IN NS ns1.example.org.
+@ IN NS ns2.example.org.
+128.1.zz.db8.2001.rpz-ip IN CNAME *.
+24.0.100.51.198.rpz-ip IN CNAME rpz-passthru.
+32.1.2.0.192.rpz-ip IN CNAME sinkhole.example.org.
+48.zz.abcd.db8.2001.rpz-ip IN CNAME rpz-passthru.
+bad-site.example.net IN CNAME .
+*.bad-site.example.net IN CNAME .
+evil.example.com IN CNAME .
+*.evil.example.com IN CNAME .

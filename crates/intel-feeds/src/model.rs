@@ -37,14 +37,14 @@ pub struct Canonical {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub feed: String,
     pub version: String,
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Tags {
     pub malware: Vec<String>,
     pub actor: Vec<String>,
@@ -52,7 +52,7 @@ pub struct Tags {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ioc {
     pub ioc_type: IocType,
     pub value: String,

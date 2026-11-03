@@ -1,0 +1,31 @@
+zone: rpz.example.org
+soa:
+  mname: ns1.example.org
+  rname: hostmaster.example.org
+  refresh: 1800
+ns:
+  - ns1.example.org
+  - ns2.example.org
+ttl: 300
+min_confidence: 50
+tlp_allowed: [clear, green, amber]
+wildcard: true
+max_records: 1000
+allowlist:
+  domains:
+    - example.org
+    - internal.example.net
+  cidrs:
+    - 10.0.0.0/8
+    - fd00::/8
+actions:
+  domain:
+    action: nxdomain
+  ipv4:
+    action:
+      cname: sinkhole.example.org
+    min_confidence: 60
+  ipv6:
+    action: nodata
+  cidr:
+    action: passthru
