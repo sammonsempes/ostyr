@@ -60,6 +60,12 @@ check "Internet unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $PUBLIC_ADDRES
 check "LAN gateway unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_gateway"
 check "host address unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_address"
 
+bridge_address="${vm_address%.*}.1"
+host_ports="$(ss -H -ltn | awk '{n = split($4, a, ":"); print a[n]}' | sort -un | tr '\n' ' ')"
+forced_route_probe="sudo ip route add default via $bridge_address && for port in $host_ports; do timeout 2 bash -c \"echo > /dev/tcp/$host_address/\$port\" && exit 1; done; exit 0"
+check "forced route: host listening ports unreachable" ssh_vm "$forced_route_probe"
+check "forced route: Internet still unreachable" fails ssh_vm "ping -c 1 -W 2 $PUBLIC_ADDRESS"
+
 overlay_xml="$(virsh_lab vol-dumpxml --pool "$LAB_POOL" "$prefix-$vm_name.qcow2")"
 check "overlay has a backing file" grep -q '<backingStore>' <<<"$overlay_xml"
 check "overlay backs onto the base volume" grep -q 'ubuntu-2404.qcow2' <<<"$overlay_xml"

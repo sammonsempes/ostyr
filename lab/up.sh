@@ -10,13 +10,12 @@ readonly HOST_RESERVED_GB=8
 readonly KIB_PER_GB=1048576
 readonly SSH_ATTEMPTS=60
 readonly SSH_DELAY_SECONDS=5
-readonly SECONDS_PER_DAY=86400
-readonly STALE_DAYS=7
 readonly SUBNET_FIRST=100
 readonly SUBNET_LAST=199
 
 task_id="${1:?usage: up.sh <task-id>}"
 validate_task_id "$task_id"
+run_reaper
 
 resolve_profile() {
     local profile="${LAB_PROFILE:-}"
@@ -27,6 +26,7 @@ resolve_profile() {
         profile="$(sed -n "s/^- \*\*Lab profile\*\*: \`\([^\`]*\)\`.*/\1/p" "$backlog_file" | head -n 1)"
         [[ -n "$profile" ]] || die "no 'Lab profile' field in $backlog_file"
     fi
+    validate_profile_name "$profile"
     [[ -f "$LAB_DIR/profiles/$profile.yaml" ]] || die "unknown profile '$profile'"
     printf '%s' "$profile"
 }
@@ -64,21 +64,6 @@ ensure_base_images() {
     done
 }
 
-warn_if_stale() {
-    local stamp_file built_at age_days
-    stamp_file="$(mktemp)"
-    if virsh_lab vol-download --pool "$LAB_POOL" "$1.built" "$stamp_file" >/dev/null 2>&1 && built_at="$(cat "$stamp_file")" &&
-        [[ "$built_at" =~ ^[0-9]+$ ]]; then
-        age_days=$((($(date +%s) - built_at) / SECONDS_PER_DAY))
-        if ((age_days > STALE_DAYS)); then
-            log "warning: base image $1 is $age_days days old (built $(date -d "@$built_at" --iso-8601=date)), rebuild with lab/images/build.sh ${1%.qcow2}"
-        fi
-    else
-        log "warning: base image $1 has no recorded build date, rebuild with lab/images/build.sh ${1%.qcow2}"
-    fi
-    rm -f "$stamp_file"
-}
-
 free_subnet_octet() {
     local used candidate
     used="$({
@@ -108,6 +93,10 @@ wait_for_ssh() {
 
 profile="$(resolve_profile)"
 profile_source="$LAB_DIR/profiles/$profile.yaml"
+validate_profile_fields "$profile_source"
+mkdir -p "$LAB_STATE_ROOT"
+exec 9>"$LAB_STATE_ROOT/up.lock"
+flock 9
 vm_count="$(grep -c '^  - name:' "$profile_source")"
 [[ -z "$(virsh_lab net-list --all --name | awk -v n="$(lab_prefix "$task_id")" '$0 == n')" ]] || die "lab for $task_id already exists, run lab/down.sh $task_id first"
 check_quota "$vm_count"
@@ -135,6 +124,8 @@ run_tofu "$task_id" init -input=false -no-color >"$lab_state/init.log" 2>&1 || {
 }
 run_tofu "$task_id" apply -input=false -auto-approve -no-color -state="$lab_state/lab.tfstate" -var-file="$lab_state/vars.json" ||
     die "apply failed; run lab/down.sh $task_id to clean up"
+
+flock -u 9
 
 vms="$(run_tofu "$task_id" output -raw -state="$lab_state/lab.tfstate" vms)"
 printf '%s\n' "$vms" >"$lab_state/vms.txt"
