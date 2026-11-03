@@ -10,10 +10,10 @@ use crate::service::{
 use crate::store::{load_accounts_file, save_accounts_file};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use crate::types::{Clock, RandomFn, RoleSet, StoreKey};
-use core_audit::log::{check_private, open_file_log};
+use core_audit::log::{check_private, open_file_log, owner_only};
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use time::OffsetDateTime;
@@ -23,6 +23,9 @@ pub const PATH_COUNT: usize = 4;
 
 
 pub const KEY_READ_LIMIT: u64 = 33;
+
+
+pub const LOCK_SUFFIX: &str = ".lock";
 
 
 pub const CLI_TENANT: &str = "default";
@@ -55,7 +58,7 @@ pub fn show_enrolment(enrolment: Enrolment) -> String {
 
 pub fn read_key_file(path: &str) -> Result<StoreKey, AuthError> {
     let file = File::open(path)?;
-    check_private(&file)?;
+    check_private(&file).map_err(AuthError::KeyFile)?;
     let mut bytes = Vec::new();
     file.take(KEY_READ_LIMIT).read_to_end(&mut bytes)?;
     if bytes.len() == KEY_BYTES {
@@ -63,6 +66,14 @@ pub fn read_key_file(path: &str) -> Result<StoreKey, AuthError> {
     } else {
         Err(AuthError::InvalidKey)
     }
+}
+
+
+/// Holds an exclusive advisory lock on `<store>.lock` until the returned file is dropped.
+pub fn lock_store(store: &str) -> Result<File, AuthError> {
+    let file = owner_only(OpenOptions::new().write(true).create(true).truncate(false)).open(format!("{store}{LOCK_SUFFIX}"))?;
+    file.lock()?;
+    Ok(file)
 }
 
 
@@ -117,6 +128,7 @@ pub fn serve<Input: BufRead, Output: Write>(
     random: RandomFn,
 ) -> Result<(), AuthError> {
     let [store, audit, key_file, compromised_file] = paths;
+    let _store_lock = lock_store(store)?;
     let store_path = PathBuf::from(store);
     let key = read_key_file(key_file)?;
     let audit_log = open_file_log(&PathBuf::from(audit))?;
@@ -140,10 +152,12 @@ pub fn serve<Input: BufRead, Output: Write>(
         let text = line?;
         let words: Vec<&str> = text.split_whitespace().collect();
         let reply = match execute(&mut state, &context, clock(), &words) {
-            Ok(done) => done,
+            Ok(done) => {
+                save_accounts_file(&store_path, &state.accounts, random)?;
+                done
+            }
             Err(error) => format!("error {error}"),
         };
-        save_accounts_file(&store_path, &state.accounts, random)?;
         writeln!(output, "{reply}")?;
         Ok::<(), AuthError>(())
     })

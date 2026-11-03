@@ -37,6 +37,8 @@ pub enum AuthError {
     Format(#[from] serde_json::Error),
     #[error("account store version {found} is not supported")]
     UnsupportedVersion { found: u32 },
+    #[error("key file rejected: {0}")]
+    KeyFile(#[source] AuditError),
     #[error("audit failed: {0}")]
     Audit(#[from] AuditError),
     #[error("system clock is before 1970")]

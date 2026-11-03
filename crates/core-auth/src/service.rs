@@ -27,6 +27,12 @@ pub const ANONYMOUS_ACTOR: &str = "anonymous";
 pub const BOOTSTRAP_ACTOR: &str = "bootstrap";
 
 
+pub const SYSTEM_ACTOR: &str = "system";
+
+
+pub const ENROLMENT_SOURCE: &str = "enrolment";
+
+
 pub const UNKNOWN_PREFIX: &str = "unknown:";
 
 
@@ -69,7 +75,7 @@ pub struct Context<'a, Output> {
 }
 
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct State {
     pub accounts: AccountMap,
     pub sessions: SessionMap,
@@ -262,8 +268,36 @@ pub fn finish<Output: Write, Value>(
 }
 
 
+pub fn is_reserved(username: &str) -> bool {
+    let lowered = username.to_lowercase();
+    [ANONYMOUS_ACTOR, BOOTSTRAP_ACTOR, SYSTEM_ACTOR].contains(&lowered.as_str()) || lowered.starts_with(UNKNOWN_PREFIX)
+}
+
+
+pub fn transact<Output: Write, Value>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    token: &str,
+    action: &str,
+    target: impl Fn(&State) -> String,
+    operation: impl FnOnce(&mut State, &Acting) -> Result<(Value, Parameters), AuthError>,
+) -> Result<Value, AuthError> {
+    let mut working = state.clone();
+    let acting = resolve_actor(&mut working, context.catalog, token, now);
+    let result = operation(&mut working, &acting);
+    let outcome = finish(context, now, &acting.actor, action, &target(&working), result);
+    state.attempts = working.attempts;
+    if outcome.is_ok() {
+        state.accounts = working.accounts;
+        state.sessions = working.sessions;
+    }
+    outcome
+}
+
+
 pub fn check_username(username: &str) -> Result<(), AuthError> {
-    if username.is_empty() || username.chars().any(|character| character.is_whitespace() || character.is_control()) {
+    if username.is_empty() || username.chars().any(|character| character.is_whitespace() || character.is_control()) || is_reserved(username) {
         Err(AuthError::InvalidUsername)
     } else {
         Ok(())
@@ -313,17 +347,18 @@ pub fn create_account<Output: Write>(
     password: &SecretString,
     roles: RoleSet,
 ) -> Result<(), AuthError> {
-    let acting = resolve_actor(state, context.catalog, token, now);
-    let result = require(&acting, acting.manager)
-        .and_then(|()| insert_account(state, context, username, password, roles))
-        .map(|parameters| ((), parameters));
-    finish(
+    transact(
+        state,
         context,
         now,
-        &acting.actor,
+        token,
         ACTION_ACCOUNT_CREATE,
-        &audit_name(&state.accounts, username),
-        result,
+        |after| audit_name(&after.accounts, username),
+        |working, acting| {
+            require(acting, acting.manager)
+                .and_then(|()| insert_account(working, context, username, password, roles))
+                .map(|parameters| ((), parameters))
+        },
     )
 }
 
@@ -358,12 +393,13 @@ pub fn bootstrap_administrator<Output: Write>(
     username: &str,
     password: &SecretString,
 ) -> Result<Enrolment, AuthError> {
-    let created = if state.accounts.is_empty() {
-        insert_account(state, context, username, password, RoleSet::from([ROLE_ADMINISTRATOR.to_owned()]))
+    let mut working = state.clone();
+    let created = if working.accounts.is_empty() {
+        insert_account(&mut working, context, username, password, RoleSet::from([ROLE_ADMINISTRATOR.to_owned()]))
     } else {
         Err(AuthError::AlreadyBootstrapped)
     };
-    let target = audit_name(&state.accounts, username);
+    let target = audit_name(&working.accounts, username);
     finish(
         context,
         now,
@@ -372,12 +408,37 @@ pub fn bootstrap_administrator<Output: Write>(
         &target,
         created.map(|parameters| ((), parameters)),
     )?;
-    let enrolled = state
+    let enrolled = working
         .accounts
         .get_mut(username)
         .ok_or(AuthError::NoSuchAccount)
         .and_then(|account| enrol_account(account, context, username));
-    finish(context, now, BOOTSTRAP_ACTOR, ACTION_MFA_ENROL, &target, enrolled)
+    let shown = finish(context, now, BOOTSTRAP_ACTOR, ACTION_MFA_ENROL, &target, enrolled)?;
+    state.accounts = working.accounts;
+    Ok(shown)
+}
+
+
+pub fn check_current_code<Output: Write>(
+    attempts: &mut AttemptMap,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    existing: &mut TotpEnrolment,
+    username: &str,
+    code: &SecretString,
+) -> Result<(), AuthError> {
+    let key = account_key(username);
+    match locked_until(attempts, &key, now) {
+        Some(until) => Err(AuthError::Locked { until }),
+        None => match verify_factor(existing, context.key, username, code.expose_secret(), now)? {
+            None => Ok(()),
+            Some(denial) => {
+                record_failure(attempts, &key, ACCOUNT_MAX_FAILURES, now)
+                    .map_or(Ok(()), |until| log_lockout(context, now, username, ENROLMENT_SOURCE, "account", until))?;
+                Err(denial_error(denial))
+            }
+        },
+    }
 }
 
 
@@ -392,9 +453,7 @@ pub fn replace_enrolment<Output: Write>(
     let account = state.accounts.get_mut(username).ok_or(AuthError::NoSuchAccount)?;
     let proof = match (account.totp.as_mut(), acting.manager, current_code) {
         (Some(_), false, None) => Err(AuthError::MfaRequired),
-        (Some(existing), false, Some(code)) => {
-            verify_factor(existing, context.key, username, code.expose_secret(), now)?.map_or(Ok(()), |denial| Err(denial_error(denial)))
-        }
+        (Some(existing), false, Some(code)) => check_current_code(&mut state.attempts, context, now, existing, username, code),
         _ => Ok(()),
     };
     proof.and_then(|()| enrol_account(account, context, username))
@@ -409,16 +468,17 @@ pub fn enrol_totp<Output: Write>(
     username: &str,
     current_code: Option<&SecretString>,
 ) -> Result<Enrolment, AuthError> {
-    let acting = resolve_actor(state, context.catalog, token, now);
-    let result = require(&acting, acting.manager || acting.actor == username)
-        .and_then(|()| replace_enrolment(state, context, now, &acting, username, current_code));
-    finish(
+    transact(
+        state,
         context,
         now,
-        &acting.actor,
+        token,
         ACTION_MFA_ENROL,
-        &audit_name(&state.accounts, username),
-        result,
+        |after| audit_name(&after.accounts, username),
+        |working, acting| {
+            require(acting, acting.manager || acting.actor == username)
+                .and_then(|()| replace_enrolment(working, context, now, acting, username, current_code))
+        },
     )
 }
 
@@ -442,17 +502,18 @@ pub fn change_roles<Output: Write>(
     username: &str,
     roles: RoleSet,
 ) -> Result<(), AuthError> {
-    let acting = resolve_actor(state, context.catalog, token, now);
-    let result = require(&acting, acting.manager)
-        .and_then(|()| apply_roles(state, context.catalog, username, roles))
-        .map(|parameters| ((), parameters));
-    finish(
+    transact(
+        state,
         context,
         now,
-        &acting.actor,
+        token,
         ACTION_ROLE_CHANGE,
-        &audit_name(&state.accounts, username),
-        result,
+        |after| audit_name(&after.accounts, username),
+        |working, acting| {
+            require(acting, acting.manager)
+                .and_then(|()| apply_roles(working, context.catalog, username, roles))
+                .map(|parameters| ((), parameters))
+        },
     )
 }
 
@@ -464,18 +525,19 @@ pub fn revoke_token<Output: Write>(
     token: &str,
     target_token: &str,
 ) -> Result<(), AuthError> {
-    let acting = resolve_actor(state, context.catalog, token, now);
     let owner = session_owner(&state.sessions, target_token);
-    let result = require(&acting, acting.manager || owner.as_deref() == Some(acting.actor.as_str()))
-        .and_then(|()| revoke_session(&mut state.sessions, target_token).ok_or(AuthError::SessionInvalid))
-        .map(|_| ((), Vec::new()));
-    finish(
+    transact(
+        state,
         context,
         now,
-        &acting.actor,
+        token,
         ACTION_SESSION_REVOKE,
-        owner.as_deref().unwrap_or(UNKNOWN_SESSION),
-        result,
+        |_| owner.clone().unwrap_or_else(|| UNKNOWN_SESSION.to_owned()),
+        |working, acting| {
+            require(acting, acting.manager || owner.as_deref() == Some(acting.actor.as_str()))
+                .and_then(|()| revoke_session(&mut working.sessions, target_token).ok_or(AuthError::SessionInvalid))
+                .map(|_| ((), Vec::new()))
+        },
     )
 }
 
@@ -487,18 +549,19 @@ pub fn revoke_all_sessions<Output: Write>(
     token: &str,
     username: &str,
 ) -> Result<usize, AuthError> {
-    let acting = resolve_actor(state, context.catalog, token, now);
-    let result = require(&acting, acting.manager || acting.actor == username).map(|()| {
-        let revoked = revoke_user_sessions(&mut state.sessions, username);
-        (revoked, vec![("count", revoked.to_string())])
-    });
-    finish(
+    transact(
+        state,
         context,
         now,
-        &acting.actor,
+        token,
         ACTION_SESSION_REVOKE_ALL,
-        &audit_name(&state.accounts, username),
-        result,
+        |after| audit_name(&after.accounts, username),
+        |working, acting| {
+            require(acting, acting.manager || acting.actor == username).map(|()| {
+                let revoked = revoke_user_sessions(&mut working.sessions, username);
+                (revoked, vec![("count", revoked.to_string())])
+            })
+        },
     )
 }
 
@@ -568,7 +631,7 @@ pub fn log_lockout<Output: Write>(
     context: &Context<Output>,
     now: OffsetDateTime,
     audit_user: &str,
-    request: &LoginRequest,
+    source: &str,
     scope: &str,
     until: OffsetDateTime,
 ) -> Result<(), AuthError> {
@@ -581,7 +644,7 @@ pub fn log_lockout<Output: Write>(
         Outcome::Denied,
         &[
             ("scope", scope.to_owned()),
-            ("source", request.source.clone()),
+            ("source", source.to_owned()),
             ("until", until.unix_timestamp().to_string()),
         ],
     )
@@ -599,7 +662,7 @@ pub fn register_failure<Output: Write>(
     let source_lock = record_failure(&mut state.attempts, &source_key(&request.source), SOURCE_MAX_FAILURES, now);
     [("account", account_lock), ("source", source_lock)]
         .into_iter()
-        .try_for_each(|(scope, lock)| lock.map_or(Ok(()), |until| log_lockout(context, now, audit_user, request, scope, until)))
+        .try_for_each(|(scope, lock)| lock.map_or(Ok(()), |until| log_lockout(context, now, audit_user, &request.source, scope, until)))
 }
 
 
@@ -626,8 +689,8 @@ pub fn grant_login<Output: Write>(
     now: OffsetDateTime,
     request: &LoginRequest,
 ) -> Result<SecretString, AuthError> {
-    clear_failures(&mut state.attempts, &account_key(&request.username));
-    let token = create_session(&mut state.sessions, &request.username, now, context.random)?;
+    let mut sessions = state.sessions.clone();
+    let token = create_session(&mut sessions, &request.username, now, context.random)?;
     record(
         context,
         now,
@@ -637,6 +700,8 @@ pub fn grant_login<Output: Write>(
         Outcome::Success,
         &[("source", request.source.clone())],
     )?;
+    state.sessions = sessions;
+    clear_failures(&mut state.attempts, &account_key(&request.username));
     Ok(token)
 }
 
@@ -656,9 +721,18 @@ pub fn login<Output: Write>(
             record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Denied, &parameters)?;
             Err(AuthError::Locked { until })
         }
-        None => match check_factors(&mut state.accounts, context, request, now)? {
-            None => grant_login(state, context, now, request),
-            Some(denial) => deny_login(state, context, now, &audit_user, request, denial),
-        },
+        None => {
+            let mut accounts = state.accounts.clone();
+            match check_factors(&mut accounts, context, request, now)? {
+                None => {
+                    let granted = grant_login(state, context, now, request);
+                    if granted.is_ok() {
+                        state.accounts = accounts;
+                    }
+                    granted
+                }
+                Some(denial) => deny_login(state, context, now, &audit_user, request, denial),
+            }
+        }
     }
 }

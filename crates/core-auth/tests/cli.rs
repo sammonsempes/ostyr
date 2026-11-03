@@ -14,10 +14,12 @@ use core_auth::random::os_random;
 use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
 use failing_writer::FailingWriter;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::BufReader;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::OffsetDateTime;
 use types::TestResult;
@@ -98,9 +100,14 @@ fn write_key(directory: &Path, bytes: Vec<u8>, mode: u32) -> Result<(), Box<dyn 
 
 
 fn paths(workspace: &Workspace) -> Vec<String> {
+    paths_in(workspace.directory.path())
+}
+
+
+fn paths_in(directory: &Path) -> Vec<String> {
     ["accounts.json", "audit.log", "key", "bad-words"]
         .iter()
-        .map(|name| workspace.directory.path().join(name).display().to_string())
+        .map(|name| directory.join(name).display().to_string())
         .collect()
 }
 
@@ -235,7 +242,7 @@ fn key_files_must_be_private_and_exactly_32_bytes() -> TestResult {
     })?;
     write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
     let loose = run(&paths(&space), "".as_bytes(), &mut output, fixed_clock, os_random);
-    assert!(matches!(loose, Err(AuthError::Audit(AuditError::InsecurePermissions { .. }))));
+    assert!(matches!(loose, Err(AuthError::KeyFile(AuditError::InsecurePermissions { .. }))));
     assert!(!space.directory.path().join("audit.log").exists());
     Ok(())
 }
@@ -309,5 +316,78 @@ fn a_malformed_store_stops_the_tool() -> TestResult {
     fs::write(&store, "garbage")?;
     fs::set_permissions(&store, fs::Permissions::from_mode(OWNER_ONLY))?;
     assert!(session(&space, "bogus\n").is_err());
+    Ok(())
+}
+
+
+const CHILD_ENV: &str = "CORE_AUTH_LOCK_CHILD";
+
+
+const BLOCKED_MILLISECONDS: u64 = 600;
+
+
+#[test]
+fn lock_child_process() -> TestResult {
+    match std::env::var(CHILD_ENV) {
+        Ok(directory) => {
+            let mut output = Vec::new();
+            run(
+                &paths_in(Path::new(&directory)),
+                format!("bootstrap root {PASSWORD}\n").as_bytes(),
+                &mut output,
+                fixed_clock,
+                os_random,
+            )?;
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+
+#[test]
+fn concurrent_runs_wait_for_the_store_lock() -> TestResult {
+    let space = workspace()?;
+    let lock_path = space.directory.path().join("accounts.json.lock");
+    let held = OpenOptions::new().write(true).create(true).truncate(false).open(&lock_path)?;
+    held.lock()?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", "lock_child_process", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, space.directory.path())
+        .spawn()?;
+    std::thread::sleep(Duration::from_millis(BLOCKED_MILLISECONDS));
+    assert!(child.try_wait()?.is_none());
+    assert!(!space.directory.path().join("accounts.json").exists());
+    assert!(!space.directory.path().join("audit.log").exists());
+    held.unlock()?;
+    assert!(child.wait()?.success());
+    assert!(space.directory.path().join("accounts.json").exists());
+    Ok(())
+}
+
+
+#[test]
+fn the_lock_file_is_private_and_a_failed_command_does_not_rewrite_the_store() -> TestResult {
+    let space = workspace()?;
+    session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
+    let store = space.directory.path().join("accounts.json");
+    let lock_mode = fs::metadata(space.directory.path().join("accounts.json.lock"))?.permissions().mode() & MODE_MASK;
+    assert_eq!(lock_mode, OWNER_ONLY);
+    let before = fs::metadata(&store)?.ino();
+    let output = session(&space, "bogus\nroles 00 root reader\n")?;
+    assert_eq!(output.matches("error ").count(), HEX_PER_BYTE);
+    assert_eq!(fs::metadata(&store)?.ino(), before);
+    session(&space, "totp GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\n")?;
+    assert_ne!(fs::metadata(&store)?.ino(), before);
+    Ok(())
+}
+
+
+#[test]
+fn a_loose_key_file_error_names_the_key_file() -> TestResult {
+    let space = workspace()?;
+    write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
+    let result = run(&paths(&space), "".as_bytes(), Vec::new(), fixed_clock, os_random);
+    assert!(result.err().ok_or("accepted")?.to_string().starts_with("key file rejected"));
     Ok(())
 }
