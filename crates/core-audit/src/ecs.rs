@@ -1,9 +1,9 @@
 use crate::canonical::{actor_label, outcome_label};
 use crate::error::AuditError;
 use crate::model::{Outcome, Record, GENESIS_HASH};
-use crate::verify::{check_head, check_line, raw_lines};
+use crate::verify::{check_line, raw_lines, same_as_first_pass, verify};
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
 
 pub const ECS_VERSION: &str = "8.11";
@@ -56,20 +56,19 @@ pub fn to_ecs(record: &Record) -> Value {
 }
 
 
-/// Verifies the whole chain (and the anchor, given `expected_head`) first, then writes one ECS event per line; returns the event count.
-pub fn export<Input: BufRead, Output: Write>(input: Input, out: &mut Output, expected_head: Option<&str>) -> Result<usize, AuditError> {
-    let records = raw_lines(input)
+/// Pass one verifies the whole chain (and the anchor, given `expected_head`) without keeping records; pass two reopens the input and writes one ECS event per line.
+pub fn export<Input: BufRead, Output: Write, Open: FnMut() -> io::Result<Input>>(
+    mut open: Open,
+    out: &mut Output,
+    expected_head: Option<&str>,
+) -> Result<usize, AuditError> {
+    let report = verify(open()?, expected_head)?;
+    raw_lines(open()?)
         .enumerate()
-        .try_fold(Vec::new(), |mut records: Vec<Record>, (index, line)| {
-            let previous = records.last().map_or(GENESIS_HASH, |record| record.hash.as_str());
-            let record = check_line(&line?, previous).map_err(|reason| AuditError::Broken { line: index + 1, reason })?;
-            records.push(record);
-            Ok::<_, AuditError>(records)
-        })?;
-    check_head(
-        expected_head,
-        records.last().map_or(GENESIS_HASH, |record| record.hash.as_str()).to_owned(),
-    )?;
-    records.iter().try_for_each(|record| writeln!(out, "{}", to_ecs(record)))?;
-    Ok(records.len())
+        .try_fold((GENESIS_HASH.to_owned(), 0), |state, (index, line)| {
+            let record = check_line(&line?, &state.0).map_err(|reason| AuditError::Broken { line: index + 1, reason })?;
+            writeln!(out, "{}", to_ecs(&record))?;
+            Ok::<_, AuditError>((record.hash, index + 1))
+        })
+        .and_then(|(head, records)| same_as_first_pass(&report, head, records))
 }
