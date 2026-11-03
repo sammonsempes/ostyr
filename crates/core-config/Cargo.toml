@@ -6,13 +6,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 json-patch = "4"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "2"
 serde_json = "1"
 serde_path_to_error = "0.1"
+similar = "2"
 thiserror = "2"
+time = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
