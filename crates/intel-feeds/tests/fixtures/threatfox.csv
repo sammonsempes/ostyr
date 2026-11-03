@@ -1,0 +1,8 @@
+# ThreatFox-style fixture written for this project
+# "first_seen_utc", "ioc_id", "ioc_value", "ioc_type", "threat_type", "fk_malware", "malware_alias", "malware_printable", "last_seen_utc", "confidence_level", "is_compromised", "reference", "tags", "anonymous", "reporter"
+"2026-11-01 01:00:00", "2001", "198.51.100.7:443", "ip:port", "botnet_cc", "win.x", "", "Example RAT", "2026-11-02 01:00:00", "75", "False", "None", "", "0", "rep"
+"2026-11-01 02:00:00", "2002", "Bad.Example.ORG.", "domain", "botnet_cc", "win.x", "", "Example RAT", "", "90", "False", "None", "", "0", "rep"
+"2026-11-01 03:00:00", "2003", "D41D8CD98F00B204E9800998ECF8427E", "md5_hash", "payload", "win.y", "", "Other", "", "50", "False", "None", "", "0", "rep"
+"2026-11-01 04:00:00", "2004", "abc", "sha256_hash", "payload", "win.y", "", "Other", "", "50", "False", "None", "", "0", "rep"
+"2026-11-01 05:00:00", "2005", "198.51.100.9", "ip:port", "botnet_cc", "win.x", "", "Example RAT", "", "150", "False", "None", "", "0", "rep"
+"bad time", "2006", "198.51.100.10", "ip:port", "botnet_cc", "win.x", "", "Example RAT", "", "50", "False", "None", "", "0", "rep"

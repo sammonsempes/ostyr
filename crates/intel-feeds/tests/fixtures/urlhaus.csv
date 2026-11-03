@@ -1,0 +1,7 @@
+############################################
+# URLhaus-style fixture written for this project
+############################################
+# id,dateadded,url,url_status,last_online,threat,tags,urlhaus_link,reporter
+"1001","2026-11-01 08:00:00","http://Evil.Example.com/payload.sh#frag","online","2026-11-02 09:00:00","malware_download","elf,Mozi","https://urlhaus.example/url/1001/","reporter_a"
+"1002","2026-11-02 10:30:00","http://203.0.113.9:8080/a.exe","offline","None","malware_download","exe","https://urlhaus.example/url/1002/","reporter_b"
+"1003","2026-11-02 11:00:00","not a url","online","None","malware_download","","https://urlhaus.example/url/1003/","reporter_c"

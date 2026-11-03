@@ -1,0 +1,6 @@
+[
+  {"ioc": "Evil2.example", "type": "domain", "score": 70, "tags": ["a", "b"]},
+  {"ioc": "192.0.2.201"},
+  "stray",
+  {"nothing": 1}
+]

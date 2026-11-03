@@ -1,0 +1,29 @@
+[package]
+name = "intel-feeds"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
+csv = "1"
+idna = "1"
+ipnet = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde-well-known", "macros"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
+proptest = "1"
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+signal-hook = "0.4.6"
