@@ -111,6 +111,25 @@ pub struct Catalogue {
 }
 
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Asset {
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+
+/// Platform data standing in for the CMDB: the tags of every known host and account.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inventory {
+    #[serde(default)]
+    pub hosts: BTreeMap<String, Asset>,
+    #[serde(default)]
+    pub accounts: BTreeMap<String, Asset>,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConditionOutcome {
     True,
@@ -145,6 +164,15 @@ pub enum TraceEvent {
     Approval {
         path: String,
         params: ParamMap,
+        granted: bool,
+    },
+    Pending {
+        path: String,
+        step: String,
+    },
+    UnknownAsset {
+        path: String,
+        id: String,
     },
     Halted {
         path: String,
@@ -178,4 +206,5 @@ pub struct SimulationInput {
     pub fleet_size: u64,
     pub isolated_now: u64,
     pub fail_action: Option<usize>,
+    pub approvals: Vec<String>,
 }

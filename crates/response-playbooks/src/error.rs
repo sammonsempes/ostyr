@@ -37,8 +37,8 @@ pub enum Problem {
     EmptyName,
     #[error("nesting deeper than {0} levels")]
     TooDeep(usize),
-    #[error("{path}: destructive action `{action}` on a protected class is not behind an approval")]
-    UnprotectedDestructive { path: String, action: String },
+    #[error("{path}: parameter `{param}` is a breaker target and must be a bare `{{{{ alert.<entity> }}}}` or a literal")]
+    BreakerTargetNotEntity { path: String, param: String },
     #[error("{path}: {message}")]
     BadExpression { path: String, message: String },
     #[error("{path}: {reason}")]

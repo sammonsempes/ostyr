@@ -14,8 +14,9 @@ use response_playbooks::params::{
 };
 use response_playbooks::trigger::{lookup, mismatches, parse_comparison, satisfied, Comparison};
 use response_playbooks::types::ParamMap;
+use response_playbooks::validate::is_bare_entity;
 use response_playbooks::validate::playbook_problems;
-use response_playbooks::walk::{approval_target, approvals_in, descendants, flatten, MAX_DEPTH};
+use response_playbooks::walk::{flatten, MAX_DEPTH};
 use serde_json::{json, Value};
 use types::TestResult;
 
@@ -364,32 +365,15 @@ fn triggers_compare_and_report() -> TestResult {
 
 
 #[test]
-fn the_walk_gates_steps_by_approvals() -> TestResult {
+fn the_walk_lists_steps_in_level_order() -> TestResult {
     let playbook = playbook_of(&steps_playbook(
-        "  - action: request_approval\n    params: { role: r, timeout: 5m, action: wipe }\n  - action: wipe\n  - if: \"{{ a }}\"\n    then:\n      - action: kill\n    else:\n      - action: request_approval\n        params: { role: r, timeout: 5m, action: kill }",
+        "  - action: wipe\n  - if: \"{{ a }}\"\n    then:\n      - action: kill\n    else:\n      - action: request_approval\n        params: { role: r, timeout: 5m, action: kill }",
     ))?;
     let flattened = flatten(&playbook.steps, "steps");
     assert!(!flattened.truncated);
-    assert_eq!(flattened.steps.len(), NESTED_COUNT + FIRST_LEVEL_COUNT);
-    let wipe = flattened.steps.iter().find(|flat| flat.path == "steps.1").ok_or("no wipe")?;
-    assert_eq!(wipe.approved, vec!["wipe".to_owned()]);
-    let kill = flattened.steps.iter().find(|flat| flat.path == "steps.2.then.0").ok_or("no kill")?;
-    assert!(kill.approved.contains(&"kill".to_owned()));
-    assert_eq!(approvals_in(&playbook.steps).len(), FIRST_LEVEL_COUNT);
-    assert_eq!(descendants(&playbook.steps).len(), NESTED_COUNT + FIRST_LEVEL_COUNT);
-    let plain = Step::default();
-    assert!(approval_target(&plain).is_none());
-    let approval = Step {
-        action: Some(APPROVAL_ACTION.to_owned()),
-        ..Step::default()
-    };
-    assert!(approval_target(&approval).is_none());
-    let foreign = Step {
-        connector: Some("c".to_owned()),
-        action: Some(APPROVAL_ACTION.to_owned()),
-        ..Step::default()
-    };
-    assert!(approval_target(&foreign).is_none());
+    let paths: Vec<&str> = flattened.steps.iter().map(|flat| flat.path.as_str()).collect();
+    assert_eq!(paths, vec!["steps.0", "steps.1", "steps.1.then.0", "steps.1.else.0"]);
+    assert_eq!(flattened.steps.len(), NESTED_COUNT + 1);
     Ok(())
 }
 
@@ -463,19 +447,32 @@ fn every_static_refusal_is_listed() -> TestResult {
 
 
 #[test]
-fn destructive_actions_on_protected_classes_need_an_approval() -> TestResult {
-    let bare = problems_of(
-        "  - action: lock_account\n    params: { user: u }\n  - action: run_script\n    params: { host: h, count: 3 }\n  - action: soft_isolate\n    params: { host: h }\n  - action: block_name\n    params: { domain: a.example }",
+fn a_breaker_target_must_be_a_bare_entity_or_a_literal() -> TestResult {
+    let accepted = problems_of(
+        "  - action: lock_account\n    params: { user: \"{{ alert.user }}\" }\n  - action: soft_isolate\n    params: { host: dc-01 }\n  - action: soft_isolate\n    params: { host: \"{{alert.host_name}}\" }\n  - action: notify\n    params: { text: \"h-{{ alert.host }}\" }",
     )?;
-    let unprotected: Vec<&Problem> = bare
-        .iter()
-        .filter(|found| matches!(found, Problem::UnprotectedDestructive { .. }))
-        .collect();
-    assert_eq!(unprotected.len(), TWO_PROBLEMS, "{bare:?}");
-    let gated = problems_of(
-        "  - action: request_approval\n    params: { role: r, timeout: 5m, action: lock_account }\n  - action: lock_account\n    params: { user: u }\n  - if: \"{{ a }}\"\n    then:\n      - action: run_script\n        params: { host: h, count: 3 }\n    else:\n      - action: request_approval\n        params: { role: r, timeout: 5m, action: run_script }",
-    )?;
-    assert!(gated.is_empty(), "{gated:?}");
+    assert!(accepted.is_empty(), "{accepted:?}");
+    for target in [
+        "{{ alert.host.value }}",
+        "h-{{ alert.host }}",
+        "{{ alert.host }}{{ alert.user }}",
+        "{{ playbook.variables.host }}",
+        "{{ alert.host | upper }}",
+        "{{ alert. }}",
+        "{{ host }}",
+    ] {
+        let refused = problems_of(&format!("  - action: soft_isolate\n    params: {{ host: \"{target}\" }}"))?;
+        assert!(
+            refused
+                .iter()
+                .any(|found| matches!(found, Problem::BreakerTargetNotEntity { path, param } if path == "steps.0" && param == "host")),
+            "{target}: {refused:?}"
+        );
+    }
+    assert!(is_bare_entity("{{ alert.user }}"));
+    assert!(!is_bare_entity("{{ alert.user.id }}"));
+    assert!(!is_bare_entity("{{ alert. }}"));
+    assert!(!is_bare_entity("alert.user"));
     Ok(())
 }
 
@@ -531,6 +528,10 @@ fn the_catalogue_is_checked() -> TestResult {
     assert!(reasons.iter().any(|reason| reason.contains("`gone`")), "{reasons:?}");
     assert!(reasons.iter().any(|reason| reason.contains("unknown parameter `d`")), "{reasons:?}");
     assert!(reasons.iter().any(|reason| reason.contains("unknown parameter `m`")), "{reasons:?}");
+    let unbound = catalogue_of("actions:\n  - action: wipe\n    destructive: true\n    compensate: undo\n  - action: undo\n")?;
+    assert!(catalogue_problems(&unbound)
+        .iter()
+        .any(|problem| problem.to_string().contains("`wipe`") && problem.to_string().contains("needs a `breaker` binding")));
     let with_connector = catalogue_of("actions:\n  - connector: x\n    action: a\n    compensate: gone\n")?;
     assert!(catalogue_problems(&with_connector)
         .iter()

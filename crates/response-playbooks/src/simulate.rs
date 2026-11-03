@@ -1,17 +1,26 @@
+use crate::catalogue::APPROVAL_TARGET_PARAM;
 use crate::catalogue::{find_entry, APPROVAL_ACTION};
 use crate::expr::{evaluate_condition, PlaybookScope, Scope};
-use crate::model::{BreakerBinding, BreakerKind, Catalogue, CatalogueEntry, ConditionOutcome, Playbook, SimulationInput, Step, Trace, TraceEvent};
+use crate::model::{
+    BreakerBinding, BreakerKind, Catalogue, CatalogueEntry, ConditionOutcome, Inventory, Playbook, SimulationInput, Step, Trace, TraceEvent,
+};
 use crate::params::{as_count, as_duration, as_ip, resolve_params};
+use crate::render::action_name;
 use crate::trigger::mismatches;
 use crate::types::{ParamMap, ResolvedMap};
+use core_config::reload::current_config;
 use response_breakers::breakers::Breakers;
 use response_breakers::check::check;
+use response_breakers::config::limits_for;
 use response_breakers::model::{ActionKind, ProposedAction, Target, Verdict};
 use std::ops::ControlFlow;
 use std::time::Duration;
 
 
 pub const MAX_WORK: usize = 100_000;
+
+
+pub const EMPTY_STEP: &str = "(empty step)";
 
 
 pub const STEPS_ROOT: &str = "steps";
@@ -24,6 +33,7 @@ pub const ON_ERROR_ROOT: &str = "on_error";
 pub struct Context<'a> {
     pub playbook: &'a Playbook,
     pub catalogue: &'a Catalogue,
+    pub inventory: &'a Inventory,
     pub breakers: &'a Breakers,
     pub input: &'a SimulationInput,
 }
@@ -51,6 +61,15 @@ pub struct Run<'a> {
     pub ran: usize,
     pub failed: bool,
     pub halted: bool,
+    pub awaiting: bool,
+}
+
+
+/// The action as the breakers see it; `unknown` names a host or account missing from the inventory.
+#[derive(Debug, Clone)]
+pub struct Proposed {
+    pub action: ProposedAction,
+    pub unknown: Option<String>,
 }
 
 
@@ -136,19 +155,40 @@ pub fn kind_of(context: &Context, binding: &BreakerBinding, resolved: &ResolvedM
 }
 
 
-/// The action as the breakers see it: the target parameter gives the identifier and, for an entity, its tags.
-pub fn proposal(context: &Context, binding: &BreakerBinding, resolved: &ResolvedMap) -> Result<ProposedAction, String> {
+/// Inventory tags plus the alert's: an alert can add protection, never remove it. An unknown host or account gets a protected tag (fail closed).
+pub fn target_tags(context: &Context, kind: BreakerKind, id: &str, alert_tags: &[String]) -> (Vec<String>, bool) {
+    let limits = limits_for(&current_config(&context.breakers.engine), &context.input.tenant);
+    let class = match kind {
+        BreakerKind::IsolateEndpoint | BreakerKind::RmmScript => Some((&context.inventory.hosts, limits.protected_host_tags)),
+        BreakerKind::DisableAccount => Some((&context.inventory.accounts, limits.protected_account_tags)),
+        BreakerKind::BlockIp | BreakerKind::BlockDomain => None,
+    };
+    match class {
+        None => (alert_tags.to_vec(), false),
+        Some((assets, protected)) => {
+            let known = assets.get(id);
+            let base: Vec<String> = known.map_or_else(|| protected.first().cloned().into_iter().collect(), |asset| asset.tags.clone());
+            ([base, alert_tags.to_vec()].concat(), known.is_none())
+        }
+    }
+}
+
+
+/// The action as the breakers see it: the target parameter gives the identifier, the platform inventory the tags.
+pub fn proposal(context: &Context, binding: &BreakerBinding, resolved: &ResolvedMap) -> Result<Proposed, String> {
     let target = resolved
         .get(&binding.target)
         .ok_or_else(|| format!("the breaker target `{}` is missing", binding.target))?;
-    Ok(ProposedAction {
-        tenant: context.input.tenant.clone(),
-        request_id: context.input.request_id.clone(),
-        kind: kind_of(context, binding, resolved, &target.value)?,
-        target: Target {
-            id: target_id(&target.value),
-            tags: target.tags.clone(),
+    let id = target_id(&target.value);
+    let (tags, unknown) = target_tags(context, binding.kind, &id, &target.tags);
+    Ok(Proposed {
+        action: ProposedAction {
+            tenant: context.input.tenant.clone(),
+            request_id: context.input.request_id.clone(),
+            kind: kind_of(context, binding, resolved, &target.value)?,
+            target: Target { id: id.clone(), tags },
         },
+        unknown: unknown.then_some(id),
     })
 }
 
@@ -172,11 +212,15 @@ pub fn record_action(context: &Context, fail_at: Option<usize>, work: &Work, ent
     let verdict = entry
         .breaker
         .as_ref()
-        .map(|binding| proposal(context, binding, resolved).map(|action| check(context.breakers, &action)))
+        .map(|binding| proposal(context, binding, resolved).map(|proposed| (check(context.breakers, &proposed.action), proposed.unknown)))
         .transpose();
     match verdict {
         Err(reason) => reject(state, work, reason),
-        Ok(decided) => {
+        Ok(checked) => {
+            let (decided, unknown) = checked.unzip();
+            if let Some(id) = unknown.flatten() {
+                state.events.push(TraceEvent::UnknownAsset { path: work.path.clone(), id });
+            }
             let stopped = matches!(decided, Some(Verdict::NeedsApproval { .. }));
             state.events.push(TraceEvent::Action {
                 path: work.path.clone(),
@@ -208,6 +252,21 @@ pub fn record_action(context: &Context, fail_at: Option<usize>, work: &Work, ent
 }
 
 
+/// An approval that the input does not grant stops the run: everything after it waits.
+pub fn record_approval(context: &Context, work: &Work, resolved: &ResolvedMap, state: &mut Run) {
+    let granted = resolved
+        .get(APPROVAL_TARGET_PARAM)
+        .and_then(|found| found.value.as_str())
+        .is_some_and(|action| context.input.approvals.iter().any(|approved| approved == action));
+    state.events.push(TraceEvent::Approval {
+        path: work.path.clone(),
+        params: values_of(resolved),
+        granted,
+    });
+    state.awaiting = !granted;
+}
+
+
 pub fn act(context: &Context, fail_at: Option<usize>, work: &Work, state: &mut Run) {
     let names = done_names(&state.done);
     let scope = scope_of(context, &names);
@@ -219,10 +278,7 @@ pub fn act(context: &Context, fail_at: Option<usize>, work: &Work, state: &mut R
     match entry.map(|found| resolve_params(found, &step.params, &scope).map(|resolved| (found, resolved))) {
         None => reject(state, work, "no such action in the catalogue".to_owned()),
         Some(Err(reason)) => reject(state, work, reason),
-        Some(Ok((_, resolved))) if is_approval(step) => state.events.push(TraceEvent::Approval {
-            path: work.path.clone(),
-            params: values_of(&resolved),
-        }),
+        Some(Ok((_, resolved))) if is_approval(step) => record_approval(context, work, &resolved, state),
         Some(Ok((found, resolved))) => record_action(context, fail_at, work, found, &resolved, state),
     }
 }
@@ -250,8 +306,8 @@ pub fn branch<'a>(context: &Context, work: &Work<'a>, condition: &str, state: &m
 
 
 pub fn advance<'a>(context: &Context, fail_at: Option<usize>, mut state: Run<'a>) -> ControlFlow<Run<'a>, Run<'a>> {
-    let stopped = state.failed || state.halted;
-    match state.pending.pop().filter(|_| !stopped) {
+    let stopped = state.failed || state.halted || state.awaiting;
+    match (!stopped).then(|| state.pending.pop()).flatten() {
         Some(work) => {
             match &work.step.condition {
                 Some(condition) => branch(context, &work, condition, &mut state),
@@ -271,8 +327,34 @@ pub fn run_sequence<'a>(context: &Context, steps: &'a [Step], root: &str, fail_a
         ..state
     };
     match (0..MAX_WORK).try_fold(seeded, |current, _| advance(context, fail_at, current)) {
-        ControlFlow::Break(finished) | ControlFlow::Continue(finished) => finished,
+        ControlFlow::Break(finished) | ControlFlow::Continue(finished) => with_pending(finished),
     }
+}
+
+
+pub fn pending_label(step: &Step) -> String {
+    step.condition
+        .clone()
+        .or_else(|| step.action.as_deref().map(|action| action_name(step.connector.as_deref(), action)))
+        .unwrap_or_else(|| EMPTY_STEP.to_owned())
+}
+
+
+/// Steps still to run when the sequence waits for an approval are traced and dropped, never run.
+pub fn with_pending(mut state: Run) -> Run {
+    if state.awaiting {
+        let waiting: Vec<TraceEvent> = state
+            .pending
+            .drain(..)
+            .rev()
+            .map(|work| TraceEvent::Pending {
+                path: work.path,
+                step: pending_label(work.step),
+            })
+            .collect();
+        state.events.extend(waiting);
+    }
+    state
 }
 
 
@@ -310,10 +392,11 @@ pub fn run_all(context: &Context) -> Vec<TraceEvent> {
 
 
 /// Simulates one alert. The breakers are asked for every action (and count it); nothing is executed.
-pub fn simulate(playbook: &Playbook, catalogue: &Catalogue, breakers: &Breakers, input: &SimulationInput) -> Trace {
+pub fn simulate(playbook: &Playbook, catalogue: &Catalogue, inventory: &Inventory, breakers: &Breakers, input: &SimulationInput) -> Trace {
     let context = Context {
         playbook,
         catalogue,
+        inventory,
         breakers,
         input,
     };

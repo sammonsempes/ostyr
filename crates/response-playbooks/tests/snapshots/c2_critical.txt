@@ -4,5 +4,5 @@ condition steps.0 false: {{ alert.remote_ip and alert.remote_ip.reputation >= 80
 condition steps.1 false: {{ alert.domain }}
 condition steps.2 false: {{ alert.host.criticality != 'critical' }}
 approval requested steps.2.else.0 action="isolate_endpoint" role="soc_lead" timeout="15m"
-condition steps.3 false: {{ alert.user and not alert.user.is_privileged }}
-action steps.4 slack/notify channel="#soc" message="C2 confirmed on dc-01: actions []" breakers=not applicable
+pending approval steps.3 {{ alert.user and not alert.user.is_privileged }}
+pending approval steps.4 slack/notify

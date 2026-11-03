@@ -10,14 +10,16 @@ use core_config::reload::{current_config, reload, ReloadOutcome};
 use response_breakers::breakers::{open_breakers, BreakerSettings, Breakers};
 use response_breakers::store::sync_path;
 use response_playbooks::bundle::{
-    bundle_state, find_playbook, open_playbooks, simulate_named, validate_bundle, Bundle, PlaybookSettings, CATALOGUE_DOCUMENT, MODULE,
+    bundle_state, document_value, find_playbook, leaves, open_playbooks, simulate_named, validate_bundle, Bundle, PlaybookSettings, MAX_STATE_DEPTH,
+    MODULE,
 };
 use response_playbooks::cli::{execute, run_command, run_session, Session};
 use response_playbooks::error::{CommandError, PlaybookError};
-use response_playbooks::model::{Catalogue, Mode, Playbook, SimulationInput};
+use response_playbooks::model::{Catalogue, Inventory, Mode, Playbook, SimulationInput};
 use response_playbooks::render::render_trace;
 use response_playbooks::simulate::simulate;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -29,6 +31,23 @@ use types::TestResult;
 
 
 const CATALOGUE: &str = include_str!("../fixtures/catalogue.yaml");
+
+
+const INVENTORY: &str = "
+hosts:
+  dc-01: { tags: [critical, domain-controller] }
+  ws-0042: { tags: [workstation] }
+  h: {}
+  '7': {}
+accounts:
+  admin-ops: { tags: [privileged] }
+  jdoe: {}
+  bob: {}
+  adm: {}
+";
+
+
+const FIXTURE_INVENTORY: &str = include_str!("../fixtures/inventory.yaml");
 
 
 const C2: &str = include_str!("../fixtures/c2.yaml");
@@ -154,7 +173,13 @@ fn input(alert: &str, fail_action: Option<usize>) -> Result<SimulationInput, Box
         fleet_size: BIG_FLEET,
         isolated_now: 0,
         fail_action,
+        approvals: Vec::new(),
     })
+}
+
+
+fn inventory() -> Result<Inventory, Box<dyn Error>> {
+    Ok(parse_document(INVENTORY, "inventory.yaml")?)
 }
 
 
@@ -175,6 +200,7 @@ fn trace_of(harness: &Harness, alert: &str, fail_action: Option<usize>) -> Resul
     Ok(render_trace(&simulate(
         &playbook,
         &catalogue,
+        &inventory()?,
         &harness.breakers,
         &input(alert, fail_action)?,
     )))
@@ -190,7 +216,13 @@ fn custom_trace(steps: &str, alert: &Value, fail_action: Option<usize>) -> Resul
     let current = harness()?;
     let mut simulated = input("{}", fail_action)?;
     simulated.alert = alert.clone();
-    Ok(render_trace(&simulate(&playbook, &catalogue, &current.breakers, &simulated)))
+    Ok(render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &current.breakers,
+        &simulated,
+    )))
 }
 
 
@@ -225,8 +257,14 @@ fn only_the_header_tells_enforce_from_simulate() -> TestResult {
         mode: Mode::Simulate,
         ..playbook.clone()
     };
-    let enforced = render_trace(&simulate(&playbook, &catalogue, &harness()?.breakers, &input(HOSTILE, None)?));
-    let simulated = render_trace(&simulate(&quiet, &catalogue, &harness()?.breakers, &input(HOSTILE, None)?));
+    let enforced = render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &input(HOSTILE, None)?,
+    ));
+    let simulated = render_trace(&simulate(&quiet, &catalogue, &inventory()?, &harness()?.breakers, &input(HOSTILE, None)?));
     assert_eq!(enforced.replace("mode=enforce", "mode=simulate"), simulated);
     Ok(())
 }
@@ -237,7 +275,13 @@ fn compensations_run_in_reverse_order_of_the_actions() -> TestResult {
     let (catalogue, _) = fixtures()?;
     let text = "name: c\nversion: 1\nmode: enforce\nsteps:\n  - connector: fortigate\n    action: block_ip\n    params: { ip: 198.51.100.7, duration: 1h }\n  - connector: entra_id\n    action: revoke_sessions\n    params: { user: bob }\n  - connector: dns\n    action: sinkhole\n    params: { domain: x.example, duration: 1h }\n  - action: isolate_endpoint\n    params: { host: h }\n  - connector: slack\n    action: notify\n    params: { channel: c, message: never }\non_error:\n  - connector: pagerduty\n    action: page\n    params: { severity: high, summary: failed }\n";
     let playbook: Playbook = parse_document(text, "c.yaml")?;
-    let failed = render_trace(&simulate(&playbook, &catalogue, &harness()?.breakers, &input("{}", Some(FOURTH))?));
+    let failed = render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &input("{}", Some(FOURTH))?,
+    ));
     let lines: Vec<&str> = failed.lines().collect();
     let position = |needle: &str| lines.iter().position(|line| line.contains(needle)).ok_or("missing line");
     assert!(position("compensation unsinkhole for sinkhole")? < position("compensation unblock_ip for block_ip")?);
@@ -245,7 +289,13 @@ fn compensations_run_in_reverse_order_of_the_actions() -> TestResult {
     assert!(position("compensation unblock_ip")? < position("on_error handler")?);
     assert!(!failed.contains("revoke_sessions for") && !failed.contains("isolate_endpoint for") && !failed.contains("never"));
     assert!(failed.contains("on_error.0 pagerduty/page"));
-    let first = render_trace(&simulate(&playbook, &catalogue, &harness()?.breakers, &input("{}", Some(NO_ENTRY))?));
+    let first = render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &input("{}", Some(NO_ENTRY))?,
+    ));
     assert!(!first.contains("compensation"));
     Ok(())
 }
@@ -271,7 +321,8 @@ fn guards_and_steps_that_cannot_run_are_traced() -> TestResult {
     assert!(guarded.contains("rejected steps.4 : no such action in the catalogue"));
     assert!(guarded.contains("rejected steps.5 notify: parameter `text` is missing or empty"));
     assert!(guarded.contains("approval requested steps.6 action=\"ban\" role=\"lead\" timeout=\"5m\""));
-    assert!(guarded.contains("action steps.7 notify text=\"after\""));
+    assert!(guarded.contains("pending approval steps.7 notify"));
+    assert!(!guarded.contains("action steps.7"));
     Ok(())
 }
 
@@ -391,8 +442,9 @@ fn the_current_bundle_is_found_by_name_or_file_stem() -> TestResult {
     assert!(simulate_named(&bundle, &rig.session.breakers, "c2", &input(HOSTILE, None)?).is_some());
     assert!(simulate_named(&bundle, &rig.session.breakers, "other", &input(HOSTILE, None)?).is_none());
     let state = bundle_state(&bundle);
-    assert!(state.contains_key(CATALOGUE_DOCUMENT));
-    assert_eq!(state.len(), FIRST_ISOLATED);
+    assert!(state.keys().any(|key| key.ends_with("catalogue.yaml::actions.0.action")));
+    assert!(state.keys().any(|key| key.ends_with("inventory.yaml::hosts.dc-01.tags.0")));
+    assert!(state.keys().any(|key| key.ends_with("c2.yaml::steps.2.else.0.params.role")));
     assert!(validate_bundle(&bundle).is_ok());
     Ok(())
 }
@@ -421,6 +473,7 @@ fn replace_file(path: &Path, text: &str) -> io::Result<()> {
 fn settings_in(dir: &Path, entries: &Arc<Mutex<Vec<NewEntry>>>) -> PlaybookSettings {
     PlaybookSettings {
         catalogue_path: path_in(dir, "catalogue.yaml"),
+        inventory_path: path_in(dir, "inventory.yaml"),
         playbook_paths: vec![path_in(dir, "c2.yaml")],
         audit: Arc::new(recording_audit(entries)),
     }
@@ -430,6 +483,7 @@ fn settings_in(dir: &Path, entries: &Arc<Mutex<Vec<NewEntry>>>) -> PlaybookSetti
 fn rig() -> Result<Rig, Box<dyn Error>> {
     let dir = tempdir()?;
     replace_file(&path_in(dir.path(), "catalogue.yaml"), CATALOGUE)?;
+    replace_file(&path_in(dir.path(), "inventory.yaml"), FIXTURE_INVENTORY)?;
     replace_file(&path_in(dir.path(), "c2.yaml"), C2)?;
     let entries = Arc::new(Mutex::new(Vec::new()));
     let engine = Arc::new(open_playbooks(settings_in(dir.path(), &entries))?);
@@ -531,6 +585,15 @@ fn a_bundle_that_does_not_load_or_validate_does_not_open() -> TestResult {
     let broken = open_playbooks(settings_in(dir.path(), &entries)).err().ok_or("expected a failure")?;
     assert!(broken.to_string().contains("catalogue.yaml:1:"), "{broken}");
     replace_file(&path_in(dir.path(), "catalogue.yaml"), CATALOGUE)?;
+    let no_inventory = open_playbooks(settings_in(dir.path(), &entries)).err().ok_or("expected a failure")?;
+    assert!(no_inventory.to_string().contains("inventory.yaml"), "{no_inventory}");
+    replace_file(&path_in(dir.path(), "inventory.yaml"), "hosts:\n  h:\n    tag: [x]\n")?;
+    let strict = open_playbooks(settings_in(dir.path(), &entries)).err().ok_or("expected a failure")?;
+    assert!(
+        strict.to_string().contains("inventory.yaml:3:") && strict.to_string().contains("tag"),
+        "{strict}"
+    );
+    replace_file(&path_in(dir.path(), "inventory.yaml"), FIXTURE_INVENTORY)?;
     replace_file(
         &path_in(dir.path(), "c2.yaml"),
         "name: x\nversion: 1\nmode: simulate\nsteps: [ { bogus: 1 } ]\n",
@@ -573,6 +636,9 @@ fn the_command_line_reports_and_never_stops_on_an_error() -> TestResult {
     assert!(text.matches("error: usage: list | validate").count() == FIRST_ISOLATED);
     let invalid = Bundle {
         playbooks: Vec::new(),
+        catalogue_file: "dup.yaml".to_owned(),
+        inventory: Inventory::default(),
+        inventory_file: "inventory.yaml".to_owned(),
         catalogue: parse_document("actions:\n  - action: a\n  - action: a\n", "dup.yaml")?,
     };
     rig.session.engine.current.store(Arc::new(invalid));
@@ -608,4 +674,228 @@ impl io::Write for FailingWriter {
     fn flush(&mut self) -> io::Result<()> {
         Err(io::Error::other("closed"))
     }
+}
+
+
+fn probe_trace(steps: &str, alert: &str, approvals: &[&str]) -> Result<String, Box<dyn Error>> {
+    let text = format!(
+        "name: probe\nversion: 1\nmode: enforce\nsteps:\n{steps}\non_error:\n  - connector: pagerduty\n    action: page\n    params: {{ severity: high, summary: failed }}\n"
+    );
+    let playbook: Playbook = parse_document(&text, "probe.yaml")?;
+    let catalogue: Catalogue = parse_document(CATALOGUE, "catalogue.yaml")?;
+    let mut simulated = input(alert, None)?;
+    simulated.approvals = approvals.iter().map(|approved| (*approved).to_owned()).collect();
+    Ok(render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &simulated,
+    )))
+}
+
+
+const APPROVE_ISOLATION: &str = "  - action: request_approval\n    params: { role: soc_lead, timeout: 15m, action: isolate_endpoint }\n";
+
+
+const ISOLATE_HOST: &str = "  - action: isolate_endpoint\n    params: { host: \"{{ alert.host }}\" }\n";
+
+
+const NESTED_APPROVAL: &str =
+    "  - if: \"{{ true }}\"\n    then:\n      - action: request_approval\n        params: { role: r, timeout: 5m, action: isolate_endpoint }\n";
+
+
+const OPPOSITE_BRANCH: &str = "  - if: \"{{ true }}\"\n    then:\n      - action: isolate_endpoint\n        params: { host: \"{{ alert.host }}\" }\n    else:\n      - action: request_approval\n        params: { role: r, timeout: 5m, action: isolate_endpoint }\n";
+
+
+#[test]
+fn probe_one_an_approval_that_nobody_gave_halts_the_sequence() -> TestResult {
+    let waiting = probe_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), CRITICAL, &[])?;
+    assert!(waiting.contains("approval requested steps.0"), "{waiting}");
+    assert!(waiting.contains("pending approval steps.1 isolate_endpoint"), "{waiting}");
+    assert!(!waiting.contains("action steps.1") && !waiting.contains("breakers=allowed"), "{waiting}");
+    let blank = probe_trace(&format!("{APPROVE_ISOLATION}  - {{}}\n"), CRITICAL, &[])?;
+    assert!(blank.contains("pending approval steps.1 (empty step)"), "{blank}");
+    let nested = probe_trace(&format!("{NESTED_APPROVAL}{ISOLATE_HOST}"), CRITICAL, &[])?;
+    assert!(
+        nested.contains("pending approval steps.1 isolate_endpoint") && !nested.contains("action steps.1"),
+        "{nested}"
+    );
+    let granted = probe_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), CRITICAL, &["isolate_endpoint"])?;
+    assert!(granted.contains("approval granted steps.0"), "{granted}");
+    assert!(
+        granted.contains("action steps.1 isolate_endpoint host=\"dc-01\" breakers=needs-approval") && granted.contains("halted steps.1"),
+        "{granted}"
+    );
+    let other = probe_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), CRITICAL, &["disable_account"])?;
+    assert!(
+        other.contains("approval requested steps.0") && other.contains("pending approval steps.1"),
+        "{other}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn probe_two_an_approval_in_the_opposite_branch_is_no_gate() -> TestResult {
+    let trace = probe_trace(OPPOSITE_BRANCH, CRITICAL, &[])?;
+    assert!(!trace.contains("breakers=allowed"), "{trace}");
+    assert!(
+        trace.contains("breakers=needs-approval alert=true reason=protected target tagged `critical`"),
+        "{trace}"
+    );
+    assert!(trace.contains("halted steps.0.then.0"), "{trace}");
+    Ok(())
+}
+
+
+#[test]
+fn probe_three_protection_comes_from_the_inventory_not_from_the_alert() -> TestResult {
+    let stripped = r#"{ "host": { "value": "dc-01", "criticality": "normal", "tags": [] } }"#;
+    for host in ["{{ alert.host }}", "{{ alert.host.value }}", "h-{{ alert.host }}", "dc-01"] {
+        let trace = probe_trace(
+            &format!("  - action: isolate_endpoint\n    params: {{ host: \"{host}\" }}\n"),
+            stripped,
+            &[],
+        )?;
+        assert!(!trace.contains("breakers=allowed"), "{host}: {trace}");
+    }
+    let known = probe_trace(ISOLATE_HOST, stripped, &[])?;
+    assert!(known.contains("reason=protected target tagged `critical`"), "{known}");
+    assert!(!known.contains("unknown asset"), "{known}");
+    let ghost = probe_trace(ISOLATE_HOST, r#"{ "host": { "value": "ghost" } }"#, &[])?;
+    assert!(
+        ghost.contains("unknown asset steps.0 ghost: not in the inventory, treated as protected"),
+        "{ghost}"
+    );
+    assert!(ghost.contains("breakers=needs-approval") && ghost.contains("halted steps.0"), "{ghost}");
+    let plain = probe_trace(ISOLATE_HOST, r#"{ "host": { "value": "ws-0042" } }"#, &[])?;
+    assert!(plain.contains("breakers=allowed"), "{plain}");
+    let added = probe_trace(ISOLATE_HOST, r#"{ "host": { "value": "ws-0042", "tags": ["hypervisor"] } }"#, &[])?;
+    assert!(added.contains("protected target tagged `hypervisor`"), "{added}");
+    Ok(())
+}
+
+
+#[test]
+fn accounts_are_looked_up_in_the_inventory_too() -> TestResult {
+    let disable = |alert: &str| -> Result<String, Box<dyn Error>> {
+        custom_trace(
+            "  - action: disable\n    params: { user: \"{{ alert.user }}\" }",
+            &serde_json::from_str(alert)?,
+            None,
+        )
+    };
+    assert!(disable(r#"{ "user": { "value": "admin-ops" } }"#)?.contains("protected target tagged `privileged`"));
+    assert!(disable(r#"{ "user": { "value": "bob" } }"#)?.contains("breakers=allowed"));
+    let ghost = disable(r#"{ "user": { "value": "ghost" } }"#)?;
+    assert!(
+        ghost.contains("unknown asset steps.0 ghost") && ghost.contains("protected target tagged `privileged`"),
+        "{ghost}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn probe_four_a_destructive_action_without_a_breaker_binding_does_not_open() -> TestResult {
+    let dir = tempdir()?;
+    let entries = Arc::new(Mutex::new(Vec::new()));
+    let unbound = CATALOGUE.replace("    breaker: { kind: isolate_endpoint, target: host }\n", "");
+    replace_file(&path_in(dir.path(), "catalogue.yaml"), &unbound)?;
+    replace_file(&path_in(dir.path(), "inventory.yaml"), FIXTURE_INVENTORY)?;
+    replace_file(&path_in(dir.path(), "c2.yaml"), C2)?;
+    let refused = open_playbooks(settings_in(dir.path(), &entries)).err().ok_or("expected a failure")?;
+    assert!(
+        refused
+            .to_string()
+            .contains("`isolate_endpoint`: a destructive action needs a `breaker` binding"),
+        "{refused}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_simulation_input_can_grant_approvals_from_the_command_line() -> TestResult {
+    let rig = rig()?;
+    let critical = alert_file(&rig, "critical.json", CRITICAL)?;
+    let waiting = execute(&rig.session, &["simulate", "c2", &critical])?;
+    assert!(waiting.contains("pending approval steps.4 slack/notify"), "{waiting}");
+    let granted = execute(&rig.session, &["simulate", "c2", &critical, "approve=isolate_endpoint"])?;
+    assert!(
+        granted.contains("approval granted steps.2.else.0") && granted.contains("action steps.4 slack/notify"),
+        "{granted}"
+    );
+    let both = execute(&rig.session, &["simulate", "c2", &critical, "1", "approve=isolate_endpoint", "approve=x"])?;
+    assert!(both.contains("approval granted"), "{both}");
+    assert!(matches!(
+        execute(&rig.session, &["simulate", "c2", &critical, "1", "2"]),
+        Err(CommandError::Usage(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_is_audited_with_the_changed_file_and_the_changed_keys() -> TestResult {
+    let rig = rig()?;
+    let changed = FIXTURE_INVENTORY.replace("tags: [workstation]", "tags: [workstation, lab]");
+    replace_file(&path_in(rig.dir.path(), "inventory.yaml"), &changed)?;
+    let outcome = reload(&rig.session.engine);
+    assert!(
+        matches!(&outcome, ReloadOutcome::Applied { keys } if keys.len() == 1 && keys.iter().all(|key| key.ends_with("inventory.yaml::hosts.ws-0042.tags.1"))),
+        "{outcome:?}"
+    );
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace("version: 3", "version: 4"))?;
+    replace_file(&path_in(rig.dir.path(), "catalogue.yaml"), &format!("{CATALOGUE}  - action: extra\n"))?;
+    assert!(matches!(reload(&rig.session.engine), ReloadOutcome::Applied { .. }));
+    let applied = recorded_for(&rig, Outcome::Success)?;
+    assert_eq!(applied.len(), FIRST_ISOLATED);
+    let first = applied.first().ok_or("no entry")?;
+    assert!(
+        first.target.ends_with("inventory.yaml") && !first.target.contains(','),
+        "{}",
+        first.target
+    );
+    let diff = first.parameters.get("diff").ok_or("no diff")?;
+    assert!(
+        diff.contains("--- a/") && diff.contains("hosts.ws-0042.tags.1") && !diff.contains("Inventory {"),
+        "{diff}"
+    );
+    let second = applied.get(1).ok_or("no entry")?;
+    assert!(
+        second.target.contains("c2.yaml") && second.target.contains("catalogue.yaml") && second.target.contains(','),
+        "{}",
+        second.target
+    );
+    replace_file(&path_in(rig.dir.path(), "inventory.yaml"), "hosts: 3\n")?;
+    assert!(matches!(reload(&rig.session.engine), ReloadOutcome::Refused { .. }));
+    let denied = recorded_for(&rig, Outcome::Denied)?;
+    assert!(denied.first().is_some_and(|entry| entry.target.ends_with("catalogue.yaml")));
+    Ok(())
+}
+
+
+#[test]
+fn a_document_that_cannot_be_serialised_is_kept_as_an_error_text() -> TestResult {
+    let unkeyed: BTreeMap<(u8, u8), u8> = BTreeMap::from([((1, 1), 1)]);
+    let value = document_value(&unkeyed);
+    assert!(value.as_str().is_some_and(|text| text.contains("key must be a string")), "{value}");
+    Ok(())
+}
+
+
+#[test]
+fn a_document_deeper_than_the_state_limit_keeps_its_tail_as_text() -> TestResult {
+    let deep = (0..=MAX_STATE_DEPTH).fold(json!("end"), |inner, _| json!({ "k": inner }));
+    let found = leaves("f", &deep);
+    assert_eq!(found.len(), 1);
+    let (key, text) = found.first().ok_or("no leaf")?;
+    assert!(key.starts_with("f::k.k") && text.contains("end"), "{key} {text}");
+    assert_eq!(
+        leaves("f", &json!({ "a": [], "b": { "c": 1 } })),
+        vec![("f::a".to_owned(), "[]".to_owned()), ("f::b.c".to_owned(), "1".to_owned())]
+    );
+    Ok(())
 }

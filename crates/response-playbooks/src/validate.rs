@@ -1,7 +1,7 @@
 use crate::catalogue::find_entry;
 use crate::error::Problem;
 use crate::expr::{check_template, is_template, single_expression};
-use crate::model::{BreakerKind, Catalogue, CatalogueEntry, Playbook, Step};
+use crate::model::{Catalogue, CatalogueEntry, Playbook, Step};
 use crate::params::check_type;
 use crate::trigger::ALERT_PREFIX;
 use crate::walk::{flatten, FlatStep, MAX_DEPTH};
@@ -117,22 +117,28 @@ pub fn compensation_problem(path: &str, step: &Step, entry: &CatalogueEntry, cat
 }
 
 
-pub fn protects_asset_or_account(entry: &CatalogueEntry) -> bool {
-    entry.breaker.as_ref().is_some_and(|binding| {
-        matches!(
-            binding.kind,
-            BreakerKind::IsolateEndpoint | BreakerKind::DisableAccount | BreakerKind::RmmScript
-        )
-    })
+pub const ENTITY_PREFIX: &str = "alert.";
+
+
+/// A bare `{{ alert.name }}`: one level of the alert, nothing computed.
+pub fn is_bare_entity(text: &str) -> bool {
+    single_expression(text)
+        .map(str::trim)
+        .and_then(|inner| inner.strip_prefix(ENTITY_PREFIX))
+        .is_some_and(|name| !name.is_empty() && name.chars().all(|letter| letter.is_alphanumeric() || letter == '_'))
 }
 
 
-/// A destructive action on a host or an account class that the breakers protect is reachable only behind an approval for that action.
-pub fn protection_problem(flat: &FlatStep, entry: &CatalogueEntry) -> Option<Problem> {
-    (entry.destructive && protects_asset_or_account(entry) && !flat.approved.contains(&entry.action)).then(|| Problem::UnprotectedDestructive {
-        path: flat.path.clone(),
-        action: entry.action.clone(),
-    })
+/// The breakers look the target up in the inventory by identifier: it must come straight from the alert or be a literal.
+pub fn target_problem(path: &str, step: &Step, entry: &CatalogueEntry) -> Option<Problem> {
+    let binding = entry.breaker.as_ref()?;
+    match step.params.get(&binding.target) {
+        Some(Value::String(text)) if is_template(text) && !is_bare_entity(text) => Some(Problem::BreakerTargetNotEntity {
+            path: path.to_owned(),
+            param: binding.target.clone(),
+        }),
+        _ => None,
+    }
 }
 
 
@@ -151,7 +157,7 @@ pub fn action_problems(flat: &FlatStep, catalogue: &Catalogue) -> Vec<Problem> {
                 param_problems(&flat.path, step, entry)
                     .into_iter()
                     .chain(compensation_problem(&flat.path, step, entry, catalogue))
-                    .chain(protection_problem(flat, entry))
+                    .chain(target_problem(&flat.path, step, entry))
                     .collect()
             },
         )

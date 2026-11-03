@@ -85,6 +85,11 @@ pub fn compensate_problem(catalogue: &Catalogue, entry: &CatalogueEntry) -> Opti
 }
 
 
+pub fn unbound_problem(entry: &CatalogueEntry) -> Option<Problem> {
+    (entry.destructive && entry.breaker.is_none()).then(|| bad_entry(entry, "a destructive action needs a `breaker` binding".to_owned()))
+}
+
+
 pub fn binding_problems(entry: &CatalogueEntry) -> Vec<Problem> {
     entry
         .breaker
@@ -109,6 +114,7 @@ pub fn catalogue_problems(catalogue: &Catalogue) -> Vec<Problem> {
             [
                 duplicate_problem(catalogue, entry),
                 reserved_problem(entry),
+                unbound_problem(entry),
                 compensate_problem(catalogue, entry),
             ]
             .into_iter()

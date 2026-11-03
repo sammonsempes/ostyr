@@ -22,7 +22,10 @@ pub const REQUEST_ID: &str = "simulation";
 pub const DEFAULT_FLEET_SIZE: u64 = 10_000;
 
 
-pub const USAGE: &str = "list | validate | reload | simulate <playbook> <alert-file> [fail-action-index] | quit";
+pub const APPROVE_PREFIX: &str = "approve=";
+
+
+pub const USAGE: &str = "list | validate | reload | simulate <playbook> <alert-file> [fail-action-index] [approve=<action>]... | quit";
 
 
 pub struct Session {
@@ -31,7 +34,7 @@ pub struct Session {
 }
 
 
-pub fn read_alert(path: &str, fail_action: Option<usize>) -> Result<SimulationInput, CommandError> {
+pub fn read_alert(path: &str, fail_action: Option<usize>, approvals: Vec<String>) -> Result<SimulationInput, CommandError> {
     Ok(SimulationInput {
         tenant: DEFAULT_TENANT.to_owned(),
         request_id: REQUEST_ID.to_owned(),
@@ -39,6 +42,7 @@ pub fn read_alert(path: &str, fail_action: Option<usize>) -> Result<SimulationIn
         fleet_size: DEFAULT_FLEET_SIZE,
         isolated_now: 0,
         fail_action,
+        approvals,
     })
 }
 
@@ -60,8 +64,25 @@ pub fn list(bundle: &Bundle) -> String {
 }
 
 
-pub fn run_simulation(session: &Session, name: &str, path: &str, fail_action: Option<usize>) -> Result<String, CommandError> {
-    let input = read_alert(path, fail_action)?;
+/// The options after the alert file: at most one failing action index and any number of `approve=<action>`.
+pub fn parse_options(options: &[&str]) -> Result<(Option<usize>, Vec<String>), CommandError> {
+    let (approved, others): (Vec<&str>, Vec<&str>) = options.iter().partition(|option| option.starts_with(APPROVE_PREFIX));
+    let approvals = approved
+        .iter()
+        .filter_map(|option| option.strip_prefix(APPROVE_PREFIX))
+        .map(str::to_owned)
+        .collect();
+    match others.as_slice() {
+        [] => Ok((None, approvals)),
+        [fail] => Ok((Some(fail.parse()?), approvals)),
+        _ => Err(CommandError::Usage(USAGE)),
+    }
+}
+
+
+pub fn run_simulation(session: &Session, name: &str, path: &str, options: &[&str]) -> Result<String, CommandError> {
+    let (fail_action, approvals) = parse_options(options)?;
+    let input = read_alert(path, fail_action, approvals)?;
     simulate_named(&current_config(&session.engine), &session.breakers, name, &input)
         .map(|trace| render_trace(&trace).trim_end().to_owned())
         .ok_or_else(|| CommandError::UnknownPlaybook(name.to_owned()))
@@ -77,8 +98,7 @@ pub fn execute(session: &Session, tokens: &[&str]) -> Result<String, CommandErro
             Ok(format!("valid: {} playbook(s)", bundle.playbooks.len()))
         }
         ["reload"] => Ok(describe(&reload(&session.engine))),
-        ["simulate", name, path] => run_simulation(session, name, path, None),
-        ["simulate", name, path, fail] => run_simulation(session, name, path, Some(fail.parse()?)),
+        ["simulate", name, path, options @ ..] => run_simulation(session, name, path, options),
         _ => Err(CommandError::Usage(USAGE)),
     }
 }

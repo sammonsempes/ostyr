@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
 
-const USAGE: &str = "usage: playbooks_demo <limits-file> <counter-file> <audit-file> <catalogue> <playbook>...";
+const USAGE: &str = "usage: playbooks_demo <limits-file> <counter-file> <audit-file> <catalogue> <inventory> <playbook>...";
 
 
 #[cfg(unix)]
@@ -44,15 +44,26 @@ fn open_limits(limits_file: &str, store_file: &str, audit_file: &str) -> Result<
 }
 
 
-fn start(limits_file: &str, store_file: &str, audit_file: &str, catalogue: &str, playbooks: &[String]) -> Result<(), Box<dyn Error>> {
+fn start(
+    limits_file: &str,
+    store_file: &str,
+    audit_file: &str,
+    catalogue: &str,
+    inventory: &str,
+    playbooks: &[String],
+) -> Result<(), Box<dyn Error>> {
     let (breakers, audit) = open_limits(limits_file, store_file, audit_file)?;
     let playbook_paths: Vec<PathBuf> = playbooks.iter().map(PathBuf::from).collect();
     let engine = Arc::new(open_playbooks(PlaybookSettings {
         catalogue_path: PathBuf::from(catalogue),
+        inventory_path: PathBuf::from(inventory),
         playbook_paths: playbook_paths.clone(),
         audit,
     })?);
-    let watched: Vec<PathBuf> = std::iter::once(PathBuf::from(catalogue)).chain(playbook_paths).collect();
+    let watched: Vec<PathBuf> = [PathBuf::from(catalogue), PathBuf::from(inventory)]
+        .into_iter()
+        .chain(playbook_paths)
+        .collect();
     let _watcher = watch_files(Arc::clone(&engine), &watched, DEBOUNCE)?;
     let session = Session { engine, breakers };
     let _signals = keep_signals(&session)?;
@@ -64,8 +75,8 @@ fn start(limits_file: &str, store_file: &str, audit_file: &str, catalogue: &str,
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
-        [limits_file, store_file, audit_file, catalogue, playbooks @ ..] if !playbooks.is_empty() => {
-            start(limits_file, store_file, audit_file, catalogue, playbooks)
+        [limits_file, store_file, audit_file, catalogue, inventory, playbooks @ ..] if !playbooks.is_empty() => {
+            start(limits_file, store_file, audit_file, catalogue, inventory, playbooks)
         }
         _ => Err(USAGE.into()),
     }

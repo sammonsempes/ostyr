@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 humantime = "2"
 minijinja = { version = "3", default-features = false, features = ["builtins", "fuel", "serde"] }
@@ -18,7 +19,6 @@ thiserror = "2"
 signal-hook = "0.4.6"
 
 [dev-dependencies]
-core-audit = { version = "0.0.0", path = "../core-audit" }
 tempfile = "3"
 time = "0.3"
 

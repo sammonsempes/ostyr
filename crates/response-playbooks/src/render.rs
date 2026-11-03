@@ -47,7 +47,13 @@ pub fn event_line(event: &TraceEvent) -> String {
             verdict.as_deref().unwrap_or("not applicable")
         ),
         TraceEvent::Rejected { path, action, reason } => format!("rejected {path} {action}: {reason}"),
-        TraceEvent::Approval { path, params } => format!("approval requested {path} {}", params_text(params)),
+        TraceEvent::Approval { path, params, granted } => format!(
+            "approval {} {path} {}",
+            if *granted { "granted" } else { "requested" },
+            params_text(params)
+        ),
+        TraceEvent::Pending { path, step } => format!("pending approval {path} {step}"),
+        TraceEvent::UnknownAsset { path, id } => format!("unknown asset {path} {id}: not in the inventory, treated as protected"),
         TraceEvent::Halted { path } => format!("halted {path}: waiting for approval, on-call alert raised"),
         TraceEvent::Failure { path, action } => format!("failure simulated {path} {action}"),
         TraceEvent::Compensation { action, compensates } => format!("compensation {action} for {compensates}"),
