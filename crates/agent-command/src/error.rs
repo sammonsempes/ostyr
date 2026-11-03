@@ -1,4 +1,5 @@
 use crate::types::BoxError;
+use core_audit::error::AuditError;
 use ed25519_dalek::SignatureError;
 use std::io;
 use std::num::ParseIntError;
@@ -28,6 +29,10 @@ pub enum CommandError {
     KeyOutsideValidity,
     #[error("bad signature")]
     BadSignature,
+    #[error("command is bound to another signing key")]
+    KeyIdMismatch,
+    #[error("command is bound to another key class")]
+    KeyClassMismatch,
     #[error("command addressed to another agent")]
     WrongAgent,
     #[error("command addressed to another tenant")]
@@ -76,6 +81,12 @@ pub enum StoreError {
     },
     #[error("{path}: the state file has an unknown layout")]
     Layout { path: PathBuf },
+    #[error("{path}: the state file is not private: {source}")]
+    Insecure {
+        path: PathBuf,
+        #[source]
+        source: AuditError,
+    },
 }
 
 
@@ -110,6 +121,8 @@ pub enum CliError {
     Usage(&'static str),
     #[error("unknown action `{0}`")]
     UnknownAction(String),
+    #[error("unknown key class `{0}`")]
+    Class(String),
     #[error("invalid number `{0}`")]
     Number(String),
     #[error("invalid hexadecimal: {0}")]

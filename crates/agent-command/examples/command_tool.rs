@@ -1,4 +1,4 @@
-use agent_command::cli::{seconds_since_epoch, verify_session, write_keypair, write_signed};
+use agent_command::cli::{log_dispatch, seconds_since_epoch, verify_session, write_keypair, write_signed};
 use agent_command::keys::open_keys_engine;
 use agent_command::sign::os_random;
 use agent_command::verify::open_verifier;
@@ -6,16 +6,17 @@ use core_audit::log::{append, open_file_log};
 use core_config::reload::ReloadContext;
 use core_config::watch::watch_files;
 use std::error::Error;
-use std::io::{stdin, stdout};
+use std::io::{stderr, stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
 
-const USAGE: &str = "usage: command_tool keygen | sign <seed-hex> <key-id> <agent> <tenant> <sequence> <action> [parameter] | \
+const USAGE: &str = "usage: command_tool keygen | sign <seed-hex> <key-id> <class> <agent> <tenant> <sequence> <action> [parameter] | \
                      verify <keys-file> <state-file> <audit-file> <agent> <tenant>";
 
 
@@ -46,6 +47,7 @@ fn verify(keys_file: &str, state_file: &str, audit_file: &str, agent_id: &str, t
 
 
 fn main() -> Result<(), Box<dyn Error>> {
+    tracing::dispatcher::set_global_default(log_dispatch(BoxMakeWriter::new(stderr)))?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {

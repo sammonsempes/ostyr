@@ -12,7 +12,7 @@ pub const CLOCK_SKEW_SECONDS: u64 = 30;
 pub const MAX_LIFETIME_SECONDS: u64 = 600;
 
 
-/// Largest step one accepted command may add to its class sequence.
+/// Largest step one accepted command may add to its class sequence; it only bounds how fast routine numbers can be burnt.
 pub const MAX_SEQUENCE_ADVANCE: u64 = 1_000;
 
 
@@ -45,6 +45,8 @@ pub enum Action {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
+    pub key_id: String,
+    pub key_class: KeyClass,
     pub agent_id: String,
     pub tenant: String,
     pub issued_at: u64,
@@ -55,7 +57,7 @@ pub struct Command {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyClass {
     Routine,

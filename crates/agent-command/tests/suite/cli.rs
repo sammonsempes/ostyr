@@ -1,12 +1,16 @@
 use crate::common::types::TestResult;
 use crate::common::{setup, NOW, SEED_LENGTH};
-use agent_command::cli::{parse_action, parse_sequence, seconds_since_epoch, signing_key_from, verify_session, write_keypair, write_signed};
+use agent_command::cli::{
+    log_dispatch, parse_action, parse_class, parse_sequence, seconds_since_epoch, signing_key_from, verify_session, write_keypair, write_signed,
+};
 use agent_command::error::CliError;
-use agent_command::model::Action;
+use agent_command::model::{Action, KeyClass};
 use agent_command::sign::os_random;
 use data_encoding::HEXLOWER;
 use std::io::{self, BufReader, Read, Write};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 const STORED: u64 = 3;
@@ -131,23 +135,23 @@ fn signing_reports_usage_and_failures() -> TestResult {
     let seed = seed_hex(1);
     assert!(matches!(write_signed(&["x"], NOW, os_random, &mut Vec::new()), Err(CliError::Usage(_))));
     assert!(matches!(
-        write_signed(&[&seed, "k", "a", "t", "x", "ping"], NOW, os_random, &mut Vec::new()),
+        write_signed(&[&seed, "k", "routine", "a", "t", "x", "ping"], NOW, os_random, &mut Vec::new()),
         Err(CliError::Number(_))
     ));
     assert!(matches!(
-        write_signed(&[&seed, "k", "a", "t", "1", "ping"], NOW, failing_fill, &mut Vec::new()),
+        write_signed(&[&seed, "k", "routine", "a", "t", "1", "ping"], NOW, failing_fill, &mut Vec::new()),
         Err(CliError::Random(_))
     ));
     assert!(matches!(
-        write_signed(&[&seed, "k", "a", "t", "1", "format"], NOW, os_random, &mut Vec::new()),
+        write_signed(&[&seed, "k", "routine", "a", "t", "1", "format"], NOW, os_random, &mut Vec::new()),
         Err(CliError::UnknownAction(_))
     ));
     assert!(matches!(
-        write_signed(&["zz", "k", "a", "t", "1", "ping"], NOW, os_random, &mut Vec::new()),
+        write_signed(&["zz", "k", "routine", "a", "t", "1", "ping"], NOW, os_random, &mut Vec::new()),
         Err(CliError::Hex(_))
     ));
     assert!(matches!(
-        write_signed(&[&seed, "k", "a", "t", "1", "ping"], NOW, os_random, &mut FailingWriter),
+        write_signed(&[&seed, "k", "routine", "a", "t", "1", "ping"], NOW, os_random, &mut FailingWriter),
         Err(CliError::Io(_))
     ));
     Ok(())
@@ -158,8 +162,8 @@ fn signing_reports_usage_and_failures() -> TestResult {
 fn a_session_accepts_refuses_and_reports() -> TestResult {
     let setup = setup()?;
     let seed = seed_hex(crate::common::SENSITIVE_SEED);
-    let good = signed_line(&[&seed, "sensitive-1", "agent-1", "acme", "1", "kill", "4"])?;
-    let other = signed_line(&[&seed, "sensitive-1", "agent-2", "acme", "2", "ping"])?;
+    let good = signed_line(&[&seed, "sensitive-1", "sensitive", "agent-1", "acme", "1", "kill", "4"])?;
+    let other = signed_line(&[&seed, "sensitive-1", "sensitive", "agent-2", "acme", "2", "ping"])?;
     let input = format!("{good}{good}{other}not hex\n");
     let mut out = Vec::new();
     verify_session(&setup.verifier, input.as_bytes(), &mut out, fixed_now)?;
@@ -203,5 +207,54 @@ fn a_clock_before_the_epoch_reads_as_zero() -> TestResult {
     assert!(before.is_err());
     assert_eq!(seconds_since_epoch(before), 0);
     assert_eq!(seconds_since_epoch(Ok(Duration::from_secs(NOW))), NOW);
+    Ok(())
+}
+
+
+#[derive(Clone)]
+struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+
+impl Write for SharedBuffer {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+#[test]
+fn classes_parse_by_name() -> TestResult {
+    assert_eq!(parse_class("routine").ok(), Some(KeyClass::Routine));
+    assert_eq!(parse_class("sensitive").ok(), Some(KeyClass::Sensitive));
+    assert!(matches!(parse_class("admin"), Err(CliError::Class(_))));
+    let seed = seed_hex(1);
+    assert!(matches!(
+        write_signed(&[&seed, "k", "admin", "a", "t", "1", "ping"], NOW, os_random, &mut Vec::new()),
+        Err(CliError::Class(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn refusals_and_clock_warnings_reach_the_injected_writer() -> TestResult {
+    let setup = setup()?;
+    let captured = SharedBuffer(Arc::new(Mutex::new(Vec::new())));
+    let sink = captured.clone();
+    let dispatch = log_dispatch(BoxMakeWriter::new(move || sink.clone()));
+    let before_epoch = UNIX_EPOCH.duration_since(SystemTime::now());
+    tracing::dispatcher::with_default(&dispatch, || -> TestResult {
+        seconds_since_epoch(before_epoch);
+        verify_session(&setup.verifier, "00\n".as_bytes(), &mut Vec::new(), fixed_now)?;
+        Ok(())
+    })?;
+    let text = String::from_utf8(captured.0.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
+    assert!(text.contains("system clock is before the Unix epoch"), "{text}");
+    assert!(text.contains("command refused"), "{text}");
     Ok(())
 }

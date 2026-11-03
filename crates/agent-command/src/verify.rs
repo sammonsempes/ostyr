@@ -3,7 +3,7 @@ use crate::error::{CommandError, StoreError};
 use crate::model::{
     Action, Command, Envelope, KeyClass, Sequences, TrustedKey, TrustedKeys, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_SEQUENCE_ADVANCE,
 };
-use crate::store::{file_saver, load_sequences};
+use crate::store::{check_state_private, file_saver, load_sequences};
 use crate::types::SaveFn;
 use core_config::reload::{current_config, ReloadEngine};
 use ed25519_dalek::{Signature, SIGNATURE_LENGTH};
@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tracing::warn;
 
 
-/// The stored sequences are loaded now: a corrupt store stops the agent instead of re-opening the replay window.
+/// The state file must be private; the stored sequences are loaded now: a corrupt store stops the agent instead of re-opening the replay window.
 pub fn open_verifier(agent_id: &str, tenant: &str, keys: Arc<ReloadEngine<TrustedKeys>>, state_file: &Path) -> Result<Verifier, StoreError> {
+    check_state_private(state_file)?;
     Ok(open_verifier_with(
         agent_id,
         tenant,
@@ -87,6 +88,17 @@ pub fn check_signature(key: &TrustedKey, envelope: &Envelope) -> Result<(), Comm
 }
 
 
+pub fn check_binding(key_id: &str, key: &TrustedKey, command: &Command) -> Result<(), CommandError> {
+    if command.key_id != key_id {
+        Err(CommandError::KeyIdMismatch)
+    } else if command.key_class != key.class {
+        Err(CommandError::KeyClassMismatch)
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn check_target(verifier: &Verifier, command: &Command) -> Result<(), CommandError> {
     if command.agent_id != verifier.agent_id {
         Err(CommandError::WrongAgent)
@@ -156,6 +168,7 @@ pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, Com
     check_key(key, now)?;
     check_signature(key, &envelope)?;
     let command: Command = decode_exact(&envelope.command)?;
+    check_binding(&envelope.key_id, key, &command)?;
     check_target(verifier, &command)?;
     check_times(&command, now)?;
     check_class(key.class, &command.action)?;
