@@ -1,8 +1,9 @@
-use crate::types::{AccessTable, ConnectionTable, KeyedLimiter, VerifyPasswordFn};
+use crate::types::{AccessTable, ConnectionTable, KeyedLimiter, SharedHttpFn, SharedResolveFn, VerifyPasswordFn};
 use axum::http::StatusCode;
 use core_audit::log::AuditLog;
+use core_auth::oidc::OidcConfig;
 use core_auth::service::State;
-use core_auth::types::{Clock, CompromisedSet, RandomFn, RoleCatalog, StoreKey};
+use core_auth::types::{Clock, CompromisedSet, PendingMap, RandomFn, RoleCatalog, StoreKey};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -36,6 +37,15 @@ pub struct ApiState {
     pub max_sources: usize,
     pub max_attempts: usize,
     pub body_timeout: Duration,
+    pub oidc: Option<OidcRuntime>,
+}
+
+
+pub struct OidcRuntime {
+    pub config: OidcConfig,
+    pub http: SharedHttpFn,
+    pub resolve: SharedResolveFn,
+    pub pending: std::sync::Mutex<PendingMap>,
 }
 
 
@@ -86,6 +96,15 @@ pub struct ApiConfig {
     pub header_read_timeout: Duration,
     pub body_read_timeout: Duration,
     pub max_connections_per_source: usize,
+    pub oidc: Option<OidcFiles>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcFiles {
+    pub config: PathBuf,
+    pub ca_file: Option<PathBuf>,
+    pub secret_file: PathBuf,
 }
 
 
@@ -127,6 +146,7 @@ pub enum ApiError {
     RequestTimeout,
     PayloadTooLarge,
     TooManyRequests,
+    BadGateway,
     Internal,
 }
 
@@ -193,4 +213,18 @@ pub struct ErrorDetail {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
     pub error: ErrorDetail,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct CallbackQuery {
+    pub state: Option<String>,
+    pub code: Option<SecretString>,
+    pub error: Option<String>,
+}
+
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StartReply {
+    pub authorization_url: String,
 }
