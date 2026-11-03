@@ -70,7 +70,7 @@ Each module is a standalone service: it installs alone (package, container or He
 | Module | Alone, it provides | Minimal storage | Combined, it gains |
 | --- | --- | --- | --- |
 | **EDR** (agents and management server) | Protection, telemetry and response on endpoints | Single-node ClickHouse, or export to a third-party SIEM | Multi-source correlation, AI, cases |
-| **Detection and SIEM** | Ingestion, normalisation, Sigma rules, hunting | ClickHouse | Agents, connectors, AI |
+| **Detection and SIEM** | Ingestion, normalisation, Sigma rules, hunting (analyst-driven and automatic) | ClickHouse | Agents, connectors, AI |
 | **Response and cases** | Cases, analysers, playbooks on alerts received through API or webhook | PostgreSQL | Every alert source |
 | **AI** | Investigation and verdict on alerts received through API | None (stateless) | Tuning of the other modules' configurations |
 | **Identity provider** | OIDC and SAML SSO, MFA | PostgreSQL | Access adapted to risk and device posture |
@@ -483,7 +483,7 @@ These three functions always produce a visible and verifiable result (query, par
 
 **Natural language hunting.**
 
-- The analyst asks a question in French or English; the AI translates it into a PPL, DQL or osquery SQL query, displayed and editable before execution.
+- The analyst asks a question in French or English; the AI translates it into a ClickHouse SQL or osquery SQL query, displayed and editable before execution.
 - Read-only queries, with bounded time range and cost, with an explanation of the logic.
 - A fruitful hunt can be saved or converted into a Sigma rule, which then goes through the validator and the detection tests.
 
@@ -497,6 +497,18 @@ These three functions always produce a visible and verifiable result (query, par
 - Import of Splunk (SPL), Microsoft Sentinel (KQL), Elastic (EQL, ES|QL), QRadar (AQL) and Wazuh rules.
 - Each rule is first matched against existing Sigma rules (SigmaHQ); failing that, it is translated into Sigma, with automatic correction on syntax errors (three attempts at most).
 - Status per rule: translated, partial (blockers explained: missing field or source) or not translatable. Installation only after human approval and passing the detection tests.
+
+### Automatic threat hunting
+
+Proactive hunting that runs on its own, on top of the analyst-driven natural language hunting above.
+
+- **Hunt packs as code.** Versioned files (query in ClickHouse SQL or osquery SQL, ATT&CK technique, hypothesis, schedule, time window, cost bound, expected baseline), kept in the Git repository like rules, with tests on the lab corpus.
+- **Scheduled runs.** Each pack runs on its schedule across the history in ClickHouse and live on endpoints through osquery, read-only, with bounded time range and cost.
+- **Intel-triggered runs.** A new IOC, a CVE marked KEV or a new threat report triggers retro-hunts over the history, reusing the threat intelligence retro-matching.
+- **Statistical hunts.** Baselines per entity and stack counting (rare process, rare parent-child pair, rare destination, first-seen binary, new persistence entry, beaconing regularity) surface the rare and the new, not only known indicators.
+- **AI hypotheses.** The AI module proposes new hypotheses from recent alerts, intelligence and coverage gaps (ATT&CK techniques without detection), always as a displayed, editable query bound by the same read-only and cost limits; never an action.
+- **Findings.** Grouped per entity, scored into the risk score, and opened as a low-priority case or attached to an existing one; a fruitful hunt is proposed as a Sigma rule that goes through the policy validator and the detection tests.
+- **Coverage report.** Which techniques were hunted, when and with which result, feeding the GRC evidence.
 
 ## 9. Incident response and forensics
 
@@ -652,17 +664,27 @@ Git is the source of truth for the whole platform. The interface, the CLI and th
 | Layer | What is provided |
 | --- | --- |
 | Deployment | Helm charts, Docker Compose, deb, rpm and msi packages, Ansible roles, OpenTofu and Terraform modules for AWS, Azure, GCP, OVHcloud, Scaleway and Proxmox |
-| Platform configuration | Official OpenTofu and Terraform provider, and declarative YAML files: modules, connectors, roles, tenants, retention, circuit breakers |
+| Platform configuration | Official OpenTofu and Terraform provider, and declarative YAML files: modules, connectors, roles, tenants, retention, circuit breakers, every other module setting (hot-reloaded, see below) |
 | Security content | Sigma and YARA rules, ASR, App Control, TracingPolicies, exclusions, SCA policies, honeytokens, playbooks, parsers, forensic artefacts, GRC frameworks |
 | Agents | Policies per endpoint group, selected by tags, with no manual configuration on the endpoint |
 
-- **Plan, then apply.** `xdrctl plan` shows the gap between the repository and the real state, `xdrctl apply` applies it; the OpenTofu provider offers the same cycle.
+- **Plan, then apply.** `xdrctl plan` shows the gap between the repository and the real state, `xdrctl apply` applies it; the OpenTofu provider offers the same cycle. The apply is a live reload, never a restart (see "Live reconfiguration").
 - **Validation in continuous integration.** Schemas, Sigma lint, policy validator (section 8), playbook simulation, detection tests on the test endpoints. A merge request that breaks a test cannot be merged.
 - **Drift detection.** Any gap between the real state, including on endpoints, and the repository is reported, then corrected automatically if the policy says so. A Defender exclusion added by hand on a workstation is thus detected and removed.
 - **Secrets.** Never in Git: only references to the vault (Vault, OpenBao), or files encrypted with SOPS.
 - **Environments.** The same repository serves pre-production and production, with promotion by branch or by tag.
 - **Multi-tenant.** One folder or repository per tenant, inheriting from a common base.
 - **Read-only mode.** The interface can be configured to accept no changes: everything then goes through Git.
+
+### Live reconfiguration
+
+Every setting of every module and agent lives in a file that can be versioned in Git, and is applied without restart.
+
+- **Files are the source of truth.** No setting exists only in a database, a form or a running process; the API, the interface, `xdrctl` and the AI write files (a commit or a merge request), never live state alone.
+- **Reload.** A module watches its configuration files and also reloads on `SIGHUP` and on `xdrctl apply`. It parses and validates the new version strictly, swaps it atomically, keeps serving the old version when the new one is invalid, and audits every reload (applied or refused, with the diff, through the `xdrctl plan` cycle).
+- **Covered without restart.** Modules, connectors, roles, tenants, retention, rules, policies, exclusions, playbooks, rate limits, OIDC settings, TLS certificates and keys (new handshakes use the new pair) and log levels.
+- **Single exception.** The listening address and port of a socket, documented per module, until a socket handover exists.
+- **Agents.** They receive their policy files over the agent channel, apply them without a service restart, then confirm the applied version (rollback above).
 
 ### Community library
 
@@ -705,7 +727,7 @@ The Rust code follows the project coding rules, written in English like all the 
 | Section | Content |
 | --- | --- |
 | **Dashboard** | Protection state, effective mode of each endpoint (full, reduced, degraded), AI mode, blind spots |
-| **Hunting** | ClickHouse SQL queries (optional experimental KQL dialect), live osquery, entity graph, per-entity timeline, natural language hunting |
+| **Hunting** | ClickHouse SQL queries (optional experimental KQL dialect), live osquery, entity graph, per-entity timeline, natural language hunting, automatic hunt packs |
 | **Alerts** | Alert queue sorted by risk score, AI investigation, verdict and confidence, cases and case templates, observables and analysers, response actions, ransomware recovery, forensic hunts, CyberChef, reported phishing, out-of-band crisis room, reports |
 | **Rules** | Sigma, YARA, Sysmon, ASR, App Control, TracingPolicies, FIM, exclusions (with expiry), MITRE coverage, continuous testing, migration from other SIEMs, history |
 | **AI review** | Pending suggestions, sample of verdicts to review, quality statistics, validator refusals |
