@@ -10,6 +10,7 @@ LAB_STATE_ROOT="$LAB_DIR/state"
 LAB_URI="qemu:///system"
 readonly SECONDS_PER_DAY=86400
 readonly STALE_DAYS=7
+readonly DESTROY_TIMEOUT_SECONDS=120
 readonly KIB_PER_UNIT=4194304
 PATH="$HOME/.local/bin:$PATH"
 export PATH
@@ -84,7 +85,25 @@ run_tofu() {
     shift
     mkdir -p "$LAB_STATE_ROOT/plugin-cache"
     TF_DATA_DIR="$(state_dir "$task_id")/data" TF_PLUGIN_CACHE_DIR="$LAB_STATE_ROOT/plugin-cache" TF_IN_AUTOMATION=1 \
-        tofu -chdir="$LAB_DIR/tofu" "$@"
+        "${LAB_TOFU_BIN:-tofu}" -chdir="$LAB_DIR/tofu" "$@"
+}
+
+run_tofu_bounded() {
+    local pid waited=0 limit="${LAB_DESTROY_TIMEOUT:-$DESTROY_TIMEOUT_SECONDS}"
+    run_tofu "$@" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null && ((waited < limit)); do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        pkill -KILL -P "$pid" || log "no child of $pid to kill"
+        kill -KILL "$pid" || log "process $pid already gone"
+        wait "$pid" || log "destroy killed after ${limit}s"
+        false
+    else
+        wait "$pid"
+    fi
 }
 
 ensure_pool() {
