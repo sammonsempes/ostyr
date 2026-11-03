@@ -4,6 +4,7 @@ mod failing_writer;
 mod types;
 
 
+#[cfg(unix)]
 use core_audit::error::AuditError;
 use core_auth::error::AuthError;
 use core_auth::model::{Account, TotpEnrolment};
@@ -11,13 +12,17 @@ use core_auth::random::os_random;
 use core_auth::store::{load_accounts, load_accounts_file, save_accounts, save_accounts_file, STORE_VERSION};
 use core_auth::types::AccountMap;
 use failing_writer::FailingWriter;
-use std::fs::{self, Permissions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::Permissions;
+#[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use tempfile::tempdir;
 use types::TestResult;
 
 
+#[cfg(unix)]
 const OWNER_ONLY: u32 = 0o600;
 
 
@@ -27,9 +32,11 @@ const PATTERN_BYTE: u8 = 7;
 const FILES_AFTER_TWO_SAVES: usize = 2;
 
 
+#[cfg(unix)]
 const LOOSE: u32 = 0o644;
 
 
+#[cfg(unix)]
 const MODE_MASK: u32 = 0o777;
 
 
@@ -99,6 +106,7 @@ fn newline_write_failure_is_reported() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn store_file_is_created_with_mode_0600() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
@@ -130,6 +138,7 @@ fn missing_file_is_an_empty_store() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn loose_modes_are_refused() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
@@ -171,6 +180,7 @@ fn an_existing_temporary_file_is_never_reused() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn a_symlinked_temporary_name_is_not_followed() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
@@ -234,6 +244,7 @@ fn malformed_file_is_reported() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
     fs::write(&path, "oops")?;
+    #[cfg(unix)]
     fs::set_permissions(&path, Permissions::from_mode(OWNER_ONLY))?;
     assert!(matches!(load_accounts_file(&path), Err(AuthError::Format(_))));
     Ok(())

@@ -9,12 +9,16 @@ mod types;
 use core_audit::error::AuditError;
 use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
-use core_auth::cli::{apply_command, parse_roles, run, totp_now};
+#[cfg(unix)]
+use core_auth::cli::apply_command;
+use core_auth::cli::{parse_roles, run, totp_now};
 use core_auth::error::AuthError;
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
-use core_auth::service::{Context, State};
+use core_auth::service::Context;
+#[cfg(unix)]
+use core_auth::service::State;
 use core_auth::types::{CompromisedSet, RoleCatalog, StoreKey};
 use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
@@ -22,9 +26,16 @@ use failing_writer::FailingWriter;
 use secrecy::SecretSlice;
 use std::fs::{self, OpenOptions};
 use std::io::BufReader;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::OffsetDateTime;
@@ -40,10 +51,26 @@ const SECRET_BYTES: usize = 20;
 const ENROLMENTS: usize = 2;
 
 
+#[cfg(unix)]
 const GROUP_READABLE: u32 = 0o640;
 
 
 const HEX_PER_BYTE: usize = 2;
+
+
+const FAILED_COMMANDS: usize = 2;
+
+
+#[cfg(unix)]
+const WRITE_BUDGET: usize = 100;
+
+
+#[cfg(unix)]
+const TOTP_STEP: u64 = 30;
+
+
+#[cfg(unix)]
+const READ_ONLY_DIRECTORY: u32 = 0o500;
 
 
 const CODE_DIGITS: usize = 6;
@@ -61,6 +88,7 @@ const BASE_TIME: i64 = 1_700_000_010;
 const KEY_LENGTH: usize = 32;
 
 
+#[cfg(unix)]
 const MODE_MASK: u32 = 0o777;
 
 
@@ -100,6 +128,7 @@ fn workspace() -> Result<Workspace, Box<dyn std::error::Error>> {
 fn write_key(directory: &Path, bytes: Vec<u8>, mode: u32) -> Result<(), Box<dyn std::error::Error>> {
     let key = directory.join("key");
     fs::write(&key, bytes)?;
+    #[cfg(unix)]
     fs::set_permissions(&key, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
@@ -160,6 +189,7 @@ fn full_administrator_flow() -> TestResult {
         assert!(!store.contains(value));
         assert!(!audit.contains(value));
     });
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(space.directory.path().join("accounts.json"))?.permissions().mode() & MODE_MASK,
         OWNER_ONLY
@@ -246,10 +276,13 @@ fn key_files_must_be_private_and_exactly_32_bytes() -> TestResult {
         assert!(matches!(result, Err(AuthError::InvalidKey)));
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
-    write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
-    let loose = run(&paths(&space), "".as_bytes(), &mut output, fixed_clock, os_random);
-    assert!(matches!(loose, Err(AuthError::KeyFile(AuditError::InsecurePermissions { .. }))));
-    assert!(!space.directory.path().join("audit.log").exists());
+    #[cfg(unix)]
+    {
+        write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
+        let loose = run(&paths(&space), "".as_bytes(), &mut output, fixed_clock, os_random);
+        assert!(matches!(loose, Err(AuthError::KeyFile(AuditError::InsecurePermissions { .. }))));
+        assert!(!space.directory.path().join("audit.log").exists());
+    }
     Ok(())
 }
 
@@ -320,6 +353,7 @@ fn a_malformed_store_stops_the_tool() -> TestResult {
     let space = workspace()?;
     let store = space.directory.path().join("accounts.json");
     fs::write(&store, "garbage")?;
+    #[cfg(unix)]
     fs::set_permissions(&store, fs::Permissions::from_mode(OWNER_ONLY))?;
     assert!(session(&space, "bogus\n").is_err());
     Ok(())
@@ -373,20 +407,73 @@ fn concurrent_runs_wait_for_the_store_lock() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn the_lock_file_is_private_and_a_failed_command_does_not_rewrite_the_store() -> TestResult {
     let space = workspace()?;
-    session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
+    constant_session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
     let store = space.directory.path().join("accounts.json");
     let lock_mode = fs::metadata(space.directory.path().join("accounts.json.lock"))?.permissions().mode() & MODE_MASK;
     assert_eq!(lock_mode, OWNER_ONLY);
     let before = fs::metadata(&store)?.ino();
     let output = session(&space, "bogus\nroles 00 root reader\n")?;
-    assert_eq!(output.matches("error ").count(), HEX_PER_BYTE);
+    assert_eq!(output.matches("error ").count(), FAILED_COMMANDS);
     assert_eq!(fs::metadata(&store)?.ino(), before);
     session(&space, "totp GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\ncheck 00\n")?;
     assert_eq!(fs::metadata(&store)?.ino(), before);
-    session(&space, &format!("login root {PASSWORD} 10.0.0.1\n"))?;
-    assert_eq!(fs::metadata(&store)?.ino(), before);
+    let secret = BASE32_NOPAD.encode(&[PATTERN_BYTE; SECRET_BYTES]);
+    let code = totp_now(&secret, fixed_clock())?;
+    let logged = constant_session(&space, &format!("login root {PASSWORD} 10.0.0.1 {code}\n"))?;
+    assert!(logged.starts_with("ok "));
+    assert_ne!(fs::metadata(&store)?.ino(), before);
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
+fn a_login_whose_store_save_fails_returns_no_session() -> TestResult {
+    let fixture = fixture();
+    let directory = tempdir()?;
+    let store_directory = directory.path().join("store");
+    fs::create_dir(&store_directory)?;
+    let store = store_directory.join("accounts.json");
+    let context = working(&fixture);
+    let mut state = State::default();
+    let enrolment = apply_command(&mut state, &context, fixed_clock(), &store, &["bootstrap", "root", PASSWORD])?;
+    let secret = word_after(&enrolment, "secret ").ok_or("no secret")?.to_owned();
+    let first_code = totp_now(&secret, fixed_clock())?;
+    let first = apply_command(
+        &mut state,
+        &context,
+        fixed_clock(),
+        &store,
+        &["login", "root", PASSWORD, "10.0.0.1", first_code.as_str()],
+    )?;
+    let token = word_after(&first, "ok ").ok_or("no token")?.to_owned();
+    let later = fixed_clock() + Duration::from_secs(TOTP_STEP);
+    let code = totp_now(&secret, later)?;
+    let login = ["login", "root", PASSWORD, "10.0.0.1", code.as_str()];
+    fs::set_permissions(&store_directory, fs::Permissions::from_mode(READ_ONLY_DIRECTORY))?;
+    let unsaved = apply_command(
+        &mut state,
+        &context,
+        later,
+        &store,
+        &["create", token.as_str(), "alice", PASSWORD, "reader"],
+    );
+    let refused = apply_command(&mut state, &context, later, &store, &login);
+    let sessions_after_refusal = state.sessions.len();
+    let replayed = apply_command(&mut state, &context, later, &store, &login);
+    let shown = apply_command(&mut state, &context, later, &store, &["totp", secret.as_str()])?;
+    fs::set_permissions(&store_directory, fs::Permissions::from_mode(MODE_MASK))?;
+    assert_eq!(shown.len(), CODE_DIGITS);
+    assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    assert!(matches!(replayed, Err(AuthError::MfaInvalid)));
+    assert!(matches!(unsaved, Err(AuthError::Io(_))));
+    assert_eq!(sessions_after_refusal, 0);
+    let guard = fixture.audit_ok.state.lock().map_err(|error| error.to_string())?;
+    let audit = String::from_utf8(guard.writer.clone())?;
+    assert!(audit.contains("internal_error"));
     Ok(())
 }
 
@@ -442,12 +529,86 @@ fn broken<'a>(fixture: &'a Fixture) -> Context<'a, FailingWriter> {
 }
 
 
+#[cfg(unix)]
 fn same_file(path: &Path, content: &[u8], inode: u64) -> Result<bool, Box<dyn std::error::Error>> {
     Ok(fs::read(path)? == content && fs::metadata(path)?.ino() == inode)
 }
 
 
+#[cfg(unix)]
+struct BudgetWriter {
+    writes_left: Arc<AtomicUsize>,
+}
+
+
+#[cfg(unix)]
+impl Write for BudgetWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let allowed = self
+            .writes_left
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1));
+        allowed.map(|_| buffer.len()).map_err(|_| std::io::Error::other("write budget spent"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
 #[test]
+#[cfg(unix)]
+fn a_failing_audit_after_an_unsaved_login_is_reported() -> TestResult {
+    let fixture = fixture();
+    let writes_left = Arc::new(AtomicUsize::new(WRITE_BUDGET));
+    let audit = genesis_log(BudgetWriter {
+        writes_left: Arc::clone(&writes_left),
+    });
+    let context = Context {
+        audit: &audit,
+        random: os_random,
+        verify: &verify_password,
+        key: &fixture.key,
+        compromised: &fixture.compromised,
+        catalog: &fixture.catalog,
+        tenant: "default",
+        request_id: "cli",
+    };
+    let directory = tempdir()?;
+    let store_directory = directory.path().join("store");
+    fs::create_dir(&store_directory)?;
+    let store = store_directory.join("accounts.json");
+    let mut state = State::default();
+    let enrolment = apply_command(&mut state, &context, fixed_clock(), &store, &["bootstrap", "root", PASSWORD])?;
+    let secret = word_after(&enrolment, "secret ").ok_or("no secret")?.to_owned();
+    let code = totp_now(&secret, fixed_clock())?;
+    fs::set_permissions(&store_directory, fs::Permissions::from_mode(READ_ONLY_DIRECTORY))?;
+    let later = fixed_clock() + Duration::from_secs(TOTP_STEP);
+    let later_code = totp_now(&secret, later)?;
+    let accepted = apply_command(
+        &mut state,
+        &context,
+        fixed_clock(),
+        &store,
+        &["login", "root", PASSWORD, "10.0.0.1", code.as_str()],
+    );
+    writes_left.store(1, Ordering::SeqCst);
+    let unaudited = apply_command(
+        &mut state,
+        &context,
+        later,
+        &store,
+        &["login", "root", PASSWORD, "10.0.0.1", later_code.as_str()],
+    );
+    fs::set_permissions(&store_directory, fs::Permissions::from_mode(MODE_MASK))?;
+    assert!(matches!(accepted, Err(AuthError::InvalidCredentials)));
+    assert!(matches!(unaudited, Err(AuthError::Audit(_))));
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
 fn a_failing_audit_append_leaves_the_store_untouched() -> TestResult {
     let fixture = fixture();
     let directory = tempdir()?;
@@ -485,6 +646,7 @@ fn a_failing_audit_append_leaves_the_store_untouched() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn a_loose_key_file_error_names_the_key_file() -> TestResult {
     let space = workspace()?;
     write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
