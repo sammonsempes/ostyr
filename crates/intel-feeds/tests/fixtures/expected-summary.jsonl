@@ -1,0 +1,7 @@
+{"feed":"urlhaus","parsed":2,"skipped":{"invalid_value":1},"unsupported":0,"expired":0,"duplicates":0,"samples":[{"line":7,"reason":"invalid domain name"}],"failed":null}
+{"feed":"threatfox","parsed":3,"skipped":{"invalid_confidence":1,"invalid_timestamp":1,"invalid_value":1},"unsupported":0,"expired":1,"duplicates":0,"samples":[{"line":6,"reason":"hash must be 64 hexadecimal characters"},{"line":7,"reason":"invalid confidence `150`"},{"line":8,"reason":"invalid timestamp `bad time`: the 'year' component could not be parsed"}],"failed":null}
+{"feed":"feodo","parsed":2,"skipped":{},"unsupported":0,"expired":0,"duplicates":0,"samples":[],"failed":null}
+{"feed":"crowdsec","parsed":6,"skipped":{"invalid_value":2},"unsupported":0,"expired":0,"duplicates":1,"samples":[{"line":8,"reason":"invalid domain name"},{"line":9,"reason":"invalid network: invalid IP address syntax"}],"failed":null}
+{"feed":"partner","parsed":2,"skipped":{"missing_field":1},"unsupported":0,"expired":0,"duplicates":0,"samples":[{"line":4,"reason":"missing field `value`"}],"failed":null}
+{"feed":"list","parsed":2,"skipped":{"missing_field":1,"not_an_object":1},"unsupported":0,"expired":0,"duplicates":0,"samples":[{"line":3,"reason":"entry is not a JSON object"},{"line":4,"reason":"missing field `value`"}],"failed":null}
+{"feed":"stix","parsed":4,"skipped":{"invalid_value":1,"missing_field":1},"unsupported":1,"expired":0,"duplicates":0,"samples":[{"line":5,"reason":"missing field `pattern`"},{"line":6,"reason":"hash must be 32 hexadecimal characters"}],"failed":null}

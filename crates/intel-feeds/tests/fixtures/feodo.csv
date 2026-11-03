@@ -1,0 +1,6 @@
+############################################
+# Feodo Tracker-style fixture written for this project
+############################################
+# first_seen_utc,dst_ip,dst_port,c2_status,last_online,malware
+2026-10-30 12:00:00,192.0.2.50,443,online,2026-11-02,Emotet
+2026-10-31 12:00:00,2001:db8::1,8080,offline,2026-11-01,QakBot
