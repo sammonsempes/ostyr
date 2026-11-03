@@ -8,7 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 readonly TASK="TDOWNHANG"
 readonly TIMEOUT_SECONDS=5
 readonly MAX_SECONDS=40
-readonly HANG_SECONDS=600
+readonly HANG_SECONDS=613
 
 failures=0
 check() {
@@ -67,6 +67,7 @@ elapsed=$(($(date +%s) - started))
 check "down.sh exits 0" test "$down_status" -eq 0
 check "down.sh took under ${MAX_SECONDS}s (took ${elapsed}s)" test "$elapsed" -lt "$MAX_SECONDS"
 check "no domain or network remains" test -z "$(remaining_names)"
+check "no descendant of the hung binary is left" test -z "$(pgrep -f "^sleep $HANG_SECONDS\$" || true)"
 check "state directory is gone" test ! -e "$lab_state"
 
 if ((failures > 0)); then
