@@ -391,14 +391,38 @@ const SLOW_BODY_REQUEST: &str =
 
 
 #[tokio::test]
-async fn an_http2_client_that_never_answers_pings_is_disconnected() -> TestResult {
+async fn an_http2_preface_is_not_served() -> TestResult {
     let fx = fixture()?;
     let (handle, running) = start(&fx.config, fx.router.clone());
     let address = listening(&handle).await?;
-    let mut silent = TcpStream::connect(address).await?;
-    silent.write_all(HTTP2_PREFACE).await?;
-    let (_, waited) = read_until_closed(&mut silent).await?;
-    assert!(waited < READ_DEADLINE);
+    let mut prior = TcpStream::connect(address).await?;
+    prior.write_all(HTTP2_PREFACE).await?;
+    let mut first = [0; 1];
+    let read = tokio::time::timeout(SETTLE_PAUSE, prior.read(&mut first)).await;
+    assert!(read.map_or(true, |bytes| bytes.map_or(true, |count| count == 0 || first != [0])));
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_tls_client_offering_only_h2_fails_the_handshake() -> TestResult {
+    let fx = fixture()?;
+    let pki = pki()?;
+    let config = ApiConfig {
+        tls: Some(tls_files_in(fx.dir.path(), &pki)?),
+        ..fx.config.clone()
+    };
+    let (handle, running) = start(&config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut client = client_config(&pki, &TLS13)?;
+    client.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = TlsConnector::from(Arc::new(client));
+    let outcome = connector
+        .connect(ServerName::try_from(LOCALHOST_NAME)?, TcpStream::connect(address).await?)
+        .await;
+    assert!(outcome.is_err());
     handle.shutdown();
     assert!(running.await?.is_ok());
     Ok(())

@@ -85,8 +85,6 @@ pub struct ApiConfig {
     pub compromised_list: PathBuf,
     pub header_read_timeout: Duration,
     pub body_read_timeout: Duration,
-    pub http2_keep_alive_interval: Duration,
-    pub http2_keep_alive_timeout: Duration,
     pub max_connections_per_source: usize,
 }
 

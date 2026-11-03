@@ -30,12 +30,6 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 
-pub const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
-
-
-pub const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-
-
 pub const MAX_CONNECTIONS_PER_SOURCE: usize = 64;
 
 
@@ -80,8 +74,6 @@ pub fn api_config(module: &ModuleConfig) -> Result<ApiConfig, StartupError> {
         compromised_list: PathBuf::from(required_setting(module, SETTING_COMPROMISED_LIST)?),
         header_read_timeout: HEADER_READ_TIMEOUT,
         body_read_timeout: BODY_READ_TIMEOUT,
-        http2_keep_alive_interval: HTTP2_KEEP_ALIVE_INTERVAL,
-        http2_keep_alive_timeout: HTTP2_KEEP_ALIVE_TIMEOUT,
         max_connections_per_source: MAX_CONNECTIONS_PER_SOURCE,
     })
 }

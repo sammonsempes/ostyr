@@ -26,7 +26,7 @@ use tower::service_fn;
 use utoipa::openapi::OpenApi as OpenApiDocument;
 
 
-pub const ALPN_PROTOCOLS: [&[u8]; 2] = [b"h2", b"http/1.1"];
+pub const ALPN_PROTOCOLS: [&[u8]; 1] = [b"http/1.1"];
 
 
 pub const USAGE: &str = "usage: <module-config.yaml>";
@@ -74,15 +74,14 @@ pub fn connection_service(router: Router, peer: SocketAddr, guard: ConnectionGua
 }
 
 
-pub fn with_timeouts<Acceptor>(mut server: Server<SocketAddr, Acceptor>, config: &ApiConfig) -> Server<SocketAddr, Acceptor> {
-    let builder = server.http_builder();
-    builder.http1().timer(TokioTimer::new()).header_read_timeout(config.header_read_timeout);
-    builder
-        .http2()
+pub fn with_timeouts<Acceptor>(server: Server<SocketAddr, Acceptor>, config: &ApiConfig) -> Server<SocketAddr, Acceptor> {
+    let mut http1_server = server.http1_only();
+    http1_server
+        .http_builder()
+        .http1()
         .timer(TokioTimer::new())
-        .keep_alive_interval(config.http2_keep_alive_interval)
-        .keep_alive_timeout(config.http2_keep_alive_timeout);
-    server
+        .header_read_timeout(config.header_read_timeout);
+    http1_server
 }
 
 
