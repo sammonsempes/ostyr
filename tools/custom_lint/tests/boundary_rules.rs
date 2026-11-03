@@ -191,6 +191,28 @@ pub fn shell_command_strings_are_reported() -> anyhow::Result<()> {
 
 
 #[test]
+pub fn tests_must_return_a_result() -> anyhow::Result<()> {
+    let rule = "test-returns-result";
+    let message = "test `x` must return a `Result`";
+    assert!(report_at(TESTS_PATH, rule, "#[test]\nfn x() -> anyhow::Result<()> {\n    Ok(())\n}\n")?.is_empty());
+    assert!(report_at(TESTS_PATH, rule, "#[test]\nfn x() -> TestResult {\n    Ok(())\n}\n")?.is_empty());
+    assert!(report_at(TESTS_PATH, rule, "fn x() {}\n")?.is_empty());
+    assert_eq!(
+        report_at(TESTS_PATH, rule, "#[test]\nfn x() {}\n")?,
+        vec![line(TESTS_PATH, "2:4", rule, message)]
+    );
+    assert_eq!(report_at(TESTS_PATH, rule, "#[tokio::test]\nasync fn x() {}\n")?.len(), 1);
+    assert_eq!(
+        report_at(TESTS_PATH, rule, "mod m {\n    #[test]\n    fn x() -> u8 {\n        1\n    }\n}\n")?.len(),
+        1
+    );
+    assert_eq!(report_at(TESTS_PATH, rule, "#[test]\nfn x() -> &'static str {\n    \"\"\n}\n")?.len(), 1);
+    assert!(report_at(SRC_PATH, rule, "#[test]\nfn x() {}\n")?.is_empty());
+    Ok(())
+}
+
+
+#[test]
 pub fn yaml_comments_are_reported_but_quoted_hashes_pass() -> anyhow::Result<()> {
     let path = Path::new("conf/a.yaml");
     let source = "# header\nkey: value # trailing\nquoted: \"#soc\"\nplain: a#b\nblock: |\n  # not a comment\nlist:\n  - '#x'\n";

@@ -1,10 +1,12 @@
 use crate::{
-    model::{Context, Violation},
+    model::{violation_at, Context, Violation},
     rules_flow::at_offset,
+    rules_recursion::flatten_items,
     tokens::{attributes, is_keyword, significant_tokens, Token},
 };
 use ra_ap_rustc_lexer::{LiteralKind, TokenKind};
 use std::path::Path;
+use syn::{Attribute, Item, ItemFn, ReturnType, Type};
 
 
 pub const ASSERT_OUTSIDE_TESTS: &str = "assert-outside-tests";
@@ -20,6 +22,9 @@ pub const LET_UNDERSCORE: &str = "let-underscore";
 
 
 pub const SHELL_C: &str = "shell-c";
+
+
+pub const TEST_RETURNS_RESULT: &str = "test-returns-result";
 
 
 const ASSERT_MACROS: [&str; 6] = ["assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne"];
@@ -185,6 +190,42 @@ pub fn shell_c(context: &Context) -> Vec<Violation> {
                 SHELL_C,
                 token.offset,
                 "running a shell with a command string is not allowed".to_string(),
+            )
+        })
+        .collect()
+}
+
+
+pub fn is_test_attribute(attribute: &Attribute) -> bool {
+    attribute.path().segments.last().is_some_and(|segment| segment.ident == "test")
+}
+
+
+pub fn returns_result(function: &ItemFn) -> bool {
+    matches!(
+        &function.sig.output,
+        ReturnType::Type(_, returned)
+            if matches!(returned.as_ref(), Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident.to_string().ends_with("Result")))
+    )
+}
+
+
+pub fn test_returns_result(context: &Context) -> Vec<Violation> {
+    let in_tests = has_component(&context.path, "tests");
+    flatten_items(&context.file.items)
+        .into_iter()
+        .filter_map(|item| match item {
+            Item::Fn(function) => Some(function),
+            _ => None,
+        })
+        .filter(|function| in_tests && function.attrs.iter().any(is_test_attribute) && !returns_result(function))
+        .map(|function| {
+            let start = function.sig.ident.span().start();
+            violation_at(
+                context,
+                TEST_RETURNS_RESULT,
+                (start.line, start.column + 1),
+                format!("test `{}` must return a `Result`", function.sig.ident),
             )
         })
         .collect()

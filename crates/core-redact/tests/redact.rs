@@ -18,7 +18,7 @@ const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln-_x";
 
 
 #[test]
-fn sensitive_keys_are_matched_by_segment() {
+fn sensitive_keys_are_matched_by_segment() -> TestResult {
     [
         "password",
         "PASSWORD",
@@ -49,11 +49,12 @@ fn sensitive_keys_are_matched_by_segment() {
     ]
     .iter()
     .for_each(|key| assert!(is_sensitive_key(key), "{key}"));
+    Ok(())
 }
 
 
 #[test]
-fn near_miss_keys_are_not_sensitive() {
+fn near_miss_keys_are_not_sensitive() -> TestResult {
     [
         "author",
         "monkey",
@@ -68,27 +69,30 @@ fn near_miss_keys_are_not_sensitive() {
     ]
     .iter()
     .for_each(|key| assert!(!is_sensitive_key(key), "{key}"));
+    Ok(())
 }
 
 
 #[test]
-fn keys_are_split_on_separators_and_camel_case() {
+fn keys_are_split_on_separators_and_camel_case() -> TestResult {
     assert_eq!(split_segments("apiKey"), ["api", "Key"]);
     assert_eq!(split_segments("APIKey"), ["API", "Key"]);
     assert_eq!(split_segments("x-auth_token.v2"), ["x", "auth", "token", "v", "2"]);
     assert_eq!(split_segments("a__b"), ["a", "", "b"]);
+    Ok(())
 }
 
 
 #[test]
-fn sensitive_keys_redact_the_whole_value() {
+fn sensitive_keys_redact_the_whole_value() -> TestResult {
     assert_eq!(redact_value("api_key", "anything at all"), REDACTED);
     assert_eq!(redact_value("name", "visible"), "visible");
+    Ok(())
 }
 
 
 #[test]
-fn every_reviewed_probe_is_redacted() {
+fn every_reviewed_probe_is_redacted() -> TestResult {
     let cases = [
         (
             "note",
@@ -146,11 +150,12 @@ fn every_reviewed_probe_is_redacted() {
     cases
         .iter()
         .for_each(|(key, value, expected)| assert_eq!(redact_value(key, value), *expected, "{value}"));
+    Ok(())
 }
 
 
 #[test]
-fn near_misses_stay_unchanged() {
+fn near_misses_stay_unchanged() -> TestResult {
     [
         "author",
         "https://host",
@@ -167,11 +172,12 @@ fn near_misses_stay_unchanged() {
     ]
     .iter()
     .for_each(|value| assert_eq!(redact_value("note", value), *value));
+    Ok(())
 }
 
 
 #[test]
-fn parameters_are_redacted_by_key_and_value() {
+fn parameters_are_redacted_by_key_and_value() -> TestResult {
     let parameters: ParameterMap = [
         ("password".to_owned(), "hunter2".to_owned()),
         ("note".to_owned(), "Bearer topsecret".to_owned()),
@@ -182,21 +188,24 @@ fn parameters_are_redacted_by_key_and_value() {
     assert_eq!(redacted.get("password").map(String::as_str), Some(REDACTED));
     assert_eq!(redacted.get("note").map(String::as_str), Some("Bearer [REDACTED]"));
     assert_eq!(redacted.get("name").map(String::as_str), Some("visible"));
+    Ok(())
 }
 
 
 #[test]
-fn a_pattern_that_did_not_compile_redacts_everything() {
+fn a_pattern_that_did_not_compile_redacts_everything() -> TestResult {
     let broken = Regex::new(&String::from("("));
     assert_eq!(apply_rule(&broken, "visible", REDACTED), REDACTED);
     assert_eq!(apply_rule(&Regex::new("a"), "banana", "o"), "bonono");
+    Ok(())
 }
 
 
 #[test]
-fn redaction_is_idempotent() {
+fn redaction_is_idempotent() -> TestResult {
     let once = redact_text("Bearer abc https://u:p@h and -----BEGIN X-----y-----END X-----");
     assert_eq!(redact_text(&once), once);
+    Ok(())
 }
 
 

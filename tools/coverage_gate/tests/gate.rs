@@ -200,21 +200,24 @@ fn both_shortfalls_are_listed() -> anyhow::Result<()> {
 
 
 #[test]
-fn malformed_json_is_a_parse_error() {
+fn malformed_json_is_a_parse_error() -> anyhow::Result<()> {
     assert!(matches!(parse_export("{not json".as_bytes()), Err(GateError::Parse(_))));
+    Ok(())
 }
 
 
 #[test]
-fn unreadable_input_is_a_read_error() {
+fn unreadable_input_is_a_read_error() -> anyhow::Result<()> {
     assert!(matches!(parse_export(FailingReader), Err(GateError::Read(_))));
+    Ok(())
 }
 
 
 #[test]
-fn missing_arguments_is_a_usage_error() {
+fn missing_arguments_is_a_usage_error() -> anyhow::Result<()> {
     let result = run(&["coverage_gate".to_string()], Vec::new());
     assert!(matches!(result, Err(GateError::Usage)));
+    Ok(())
 }
 
 

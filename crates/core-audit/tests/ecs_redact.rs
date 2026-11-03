@@ -233,7 +233,7 @@ fn export_refuses_an_input_that_changes_between_the_passes() -> TestResult {
 
 
 #[test]
-fn a_changed_head_or_count_is_refused() {
+fn a_changed_head_or_count_is_refused() -> TestResult {
     let report = VerifyReport {
         records: RECORD_COUNT,
         head: "abc".to_owned(),
@@ -241,4 +241,5 @@ fn a_changed_head_or_count_is_refused() {
     assert!(same_as_first_pass(&report, "abc".to_owned(), RECORD_COUNT).is_ok());
     assert!(same_as_first_pass(&report, "abc".to_owned(), RECORD_COUNT + 1).is_err());
     assert!(same_as_first_pass(&report, "abd".to_owned(), RECORD_COUNT).is_err());
+    Ok(())
 }
