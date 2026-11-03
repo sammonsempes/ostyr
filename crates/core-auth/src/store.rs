@@ -1,6 +1,8 @@
 use crate::error::AuthError;
 use crate::model::Account;
+use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
+use crate::service::OIDC_PREFIX;
 use crate::types::{AccountMap, RandomFn};
 use core_audit::log::{check_private, owner_only};
 use data_encoding::HEXLOWER;
@@ -24,9 +26,19 @@ pub struct StoreFile {
 }
 
 
+pub fn check_reserved(account: &Account) -> Result<(), AuthError> {
+    if account.username.starts_with(OIDC_PREFIX) && account.password_hash != EXTERNAL_PASSWORD_HASH {
+        Err(AuthError::ReservedAccount(account.username.clone()))
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn load_accounts<Input: Read>(input: Input) -> Result<AccountMap, AuthError> {
     let parsed: StoreFile = serde_json::from_reader(input)?;
     if parsed.version == STORE_VERSION {
+        parsed.accounts.iter().try_for_each(check_reserved)?;
         Ok(parsed.accounts.into_iter().map(|account| (account.username.clone(), account)).collect())
     } else {
         Err(AuthError::UnsupportedVersion { found: parsed.version })

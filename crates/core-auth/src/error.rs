@@ -1,4 +1,5 @@
 use core_audit::error::AuditError;
+use core_config::error::ConfigError;
 use std::io;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -15,8 +16,51 @@ pub enum PolicyViolation {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum OidcDenial {
+    #[error("the login state is unknown or expired")]
+    BadState,
+    #[error("the identity provider failed or answered invalidly")]
+    Provider,
+    #[error("the provider returned no ID token")]
+    MissingIdToken,
+    #[error("the ID token has expired")]
+    Expired,
+    #[error("the ID token audience is wrong")]
+    WrongAudience,
+    #[error("the ID token issuer is wrong")]
+    WrongIssuer,
+    #[error("the ID token nonce does not match")]
+    BadNonce,
+    #[error("the ID token signature is invalid")]
+    BadSignature,
+    #[error("the ID token is invalid")]
+    InvalidToken,
+    #[error("the ID token subject is unusable")]
+    InvalidSubject,
+    #[error("no group of the user maps to a role")]
+    Unmapped,
+    #[error("too many logins are pending")]
+    TooManyPending,
+    #[error("the ID token does not prove multi-factor authentication")]
+    MfaMissing,
+}
+
+
 #[derive(Debug, Error)]
 pub enum AuthError {
+    #[error("OIDC login refused: {0}")]
+    Oidc(#[from] OidcDenial),
+    #[error("OIDC configuration rejected: {0}")]
+    Config(#[from] ConfigError),
+    #[error("the client secret reference could not be resolved: {0}")]
+    Secret(#[source] io::Error),
+    #[error("OIDC URL `{0}` must use https")]
+    InsecureUrl(String),
+    #[error("OIDC URL is invalid: {0}")]
+    InvalidUrl(#[from] openidconnect::url::ParseError),
+    #[error("account `{0}` uses the reserved oidc: prefix without being external")]
+    ReservedAccount(String),
     #[error("random source failed: {0}")]
     Random(#[from] getrandom::Error),
     #[error("password hashing parameters rejected: {0}")]

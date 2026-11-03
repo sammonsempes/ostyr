@@ -36,6 +36,9 @@ pub const ENROLMENT_SOURCE: &str = "enrolment";
 pub const UNKNOWN_PREFIX: &str = "unknown:";
 
 
+pub const OIDC_PREFIX: &str = "oidc:";
+
+
 pub const UNKNOWN_HEX_CHARS: usize = 12;
 
 
@@ -272,7 +275,9 @@ pub fn finish<Output: Write, Value>(
 
 pub fn is_reserved(username: &str) -> bool {
     let lowered = username.to_lowercase();
-    [ANONYMOUS_ACTOR, BOOTSTRAP_ACTOR, SYSTEM_ACTOR].contains(&lowered.as_str()) || lowered.starts_with(UNKNOWN_PREFIX)
+    [ANONYMOUS_ACTOR, BOOTSTRAP_ACTOR, SYSTEM_ACTOR].contains(&lowered.as_str())
+        || lowered.starts_with(UNKNOWN_PREFIX)
+        || lowered.starts_with(OIDC_PREFIX)
 }
 
 

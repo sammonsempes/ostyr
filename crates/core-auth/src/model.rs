@@ -1,4 +1,5 @@
 use crate::types::RoleSet;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -34,4 +35,12 @@ pub struct Session {
 pub struct Attempts {
     pub failures: Vec<OffsetDateTime>,
     pub locked_until: Option<OffsetDateTime>,
+}
+
+
+#[derive(Debug, Clone)]
+pub struct PendingLogin {
+    pub nonce: String,
+    pub verifier: SecretString,
+    pub created_at: OffsetDateTime,
 }
