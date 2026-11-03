@@ -1,0 +1,1 @@
+{"process_kprobe":{"process":{"pid":4242,"uid":1000,"binary":"/usr/bin/curl"},"function_name":"fd_install","args":[{"int_arg":5},{"file_arg":{"path":"/tmp/dropper.bin"}}]},"node_name":"node-1","time":"2026-11-03T10:00:04Z"}

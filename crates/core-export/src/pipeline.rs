@@ -51,6 +51,7 @@ pub fn saturation_alert(host: &str, dropped: usize, max_bytes: u64, now: OffsetD
             module: Some(ALERT_MODULE.to_string()),
             severity: Some(ALERT_SEVERITY),
             sequence: None,
+            ..EventFields::default()
         },
         message: Some(format!("export buffer saturated, {dropped} event(s) dropped")),
         host: Some(HostFields {

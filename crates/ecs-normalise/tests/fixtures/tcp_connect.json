@@ -1,0 +1,1 @@
+{"process_kprobe":{"process":{"pid":4242,"uid":1000,"binary":"/usr/bin/curl"},"function_name":"tcp_connect","args":[{"sock_arg":{"family":"AF_INET","type":"SOCK_STREAM","protocol":"IPPROTO_TCP","saddr":"10.0.0.5","daddr":"203.0.113.9","sport":51514,"dport":443,"state":"TCP_SYN_SENT"}}]},"node_name":"node-1","time":"2026-11-03T10:00:05Z"}

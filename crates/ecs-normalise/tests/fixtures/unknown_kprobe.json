@@ -1,0 +1,1 @@
+{"process_kprobe":{"process":{"pid":4242,"binary":"/usr/bin/curl"},"function_name":"sys_ptrace"},"node_name":"node-1","time":"2026-11-03T10:00:06Z"}
