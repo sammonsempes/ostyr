@@ -9,6 +9,26 @@
   <xsl:template match="/domain/devices/disk[@device='disk']/driver/@type">
     <xsl:attribute name="type">qcow2</xsl:attribute>
   </xsl:template>
+%{ if secure_boot ~}
+  <xsl:template match="/domain/devices/disk[@device='cdrom']/target">
+    <target dev="sda" bus="sata"/>
+  </xsl:template>
+  <xsl:template match="/domain/devices/video/model/@type">
+    <xsl:attribute name="type">vga</xsl:attribute>
+  </xsl:template>
+  <xsl:template match="/domain/os/loader">
+    <xsl:copy>
+      <xsl:attribute name="secure">yes</xsl:attribute>
+      <xsl:apply-templates select="@*|node()"/>
+    </xsl:copy>
+  </xsl:template>
+  <xsl:template match="/domain/features">
+    <xsl:copy>
+      <xsl:apply-templates select="@*|node()"/>
+      <smm state="on"/>
+    </xsl:copy>
+  </xsl:template>
+%{ endif ~}
   <xsl:template match="/domain">
     <xsl:copy>
       <xsl:apply-templates select="@*|node()"/>

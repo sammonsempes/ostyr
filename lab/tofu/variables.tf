@@ -21,13 +21,3 @@ variable "ssh_public_key" {
 variable "created_at" {
   type = number
 }
-
-variable "memory_mb" {
-  type    = number
-  default = 4096
-}
-
-variable "overlay_size_bytes" {
-  type    = number
-  default = 21474836480
-}

@@ -10,6 +10,7 @@ LAB_STATE_ROOT="$LAB_DIR/state"
 LAB_URI="qemu:///system"
 readonly SECONDS_PER_DAY=86400
 readonly STALE_DAYS=7
+readonly KIB_PER_UNIT=4194304
 PATH="$HOME/.local/bin:$PATH"
 export PATH
 
@@ -41,6 +42,27 @@ validate_profile_fields() {
             [[ "$value" =~ ^[a-z0-9-]+$ ]] || die "invalid profile $field '$value' in $1 (lowercase letters, digits and hyphens only)"
         done < <(awk -v key="$field:" '{sub(/^ *- */, "")} $1 == key {print $2}' "$1")
     done
+}
+
+validate_profile_choices() {
+    local field_allowed field allowed value
+    for field_allowed in "guest:linux|windows" "firmware:bios|uefi" "tpm:true|false" "memory_gb:4|8" "disk_gb:[0-9]+"; do
+        field="${field_allowed%%:*}"
+        allowed="${field_allowed#*:}"
+        while read -r value; do
+            [[ "$value" =~ ^($allowed)$ ]] || die "invalid profile $field '$value' in $1 (allowed: $allowed)"
+        done < <(awk -v key="$field:" '{sub(/^ *- */, "")} $1 == key {print $2}' "$1")
+    done
+}
+
+profile_units() {
+    awk '/^  - name:/ {count += 1} $1 == "memory_gb:" {extra += $2 / 4 - 1} END {print count + extra}' "$1"
+}
+
+domain_units() {
+    local memory_kib
+    memory_kib="$(virsh_lab dominfo "$1" | awk '/^Max memory:/ {print $3}')"
+    printf '%s' "$(((memory_kib + KIB_PER_UNIT - 1) / KIB_PER_UNIT))"
 }
 
 run_reaper() {

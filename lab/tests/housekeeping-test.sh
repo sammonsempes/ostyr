@@ -51,6 +51,15 @@ check "bad VM name rejected" fails bash -c 'source "$1"; validate_profile_fields
 check "bad ssh_user rejected" fails bash -c 'source "$1"; validate_profile_fields "$2"' _ "$LAB_DIR/lib.sh" "$work_dir/bad-user.yaml"
 check "good profile accepted" bash -c 'source "$1"; validate_profile_fields "$2"' _ "$LAB_DIR/lib.sh" "$work_dir/good.yaml"
 check "shipped profiles accepted" bash -c 'source "$1"; for f in "$(dirname "$1")"/profiles/*.yaml; do validate_profile_fields "$f"; done' _ "$LAB_DIR/lib.sh"
+printf 'vms:\n  - name: a\n    guest: bsd\n' >"$work_dir/bad-guest.yaml"
+printf 'vms:\n  - name: a\n    memory_gb: 6\n' >"$work_dir/bad-memory.yaml"
+printf 'vms:\n  - name: a\n    firmware: uefi\n    tpm: true\n    memory_gb: 8\n    guest: windows\n    disk_gb: 50\n' >"$work_dir/good-windows.yaml"
+check "bad guest rejected" fails bash -c 'source "$1"; validate_profile_choices "$2"' _ "$LAB_DIR/lib.sh" "$work_dir/bad-guest.yaml"
+check "bad memory_gb rejected" fails bash -c 'source "$1"; validate_profile_choices "$2"' _ "$LAB_DIR/lib.sh" "$work_dir/bad-memory.yaml"
+check "windows fields accepted" bash -c 'source "$1"; validate_profile_choices "$2"' _ "$LAB_DIR/lib.sh" "$work_dir/good-windows.yaml"
+check "shipped profiles have valid choices" bash -c 'source "$1"; for f in "$(dirname "$1")"/profiles/*.yaml; do validate_profile_choices "$f"; done' _ "$LAB_DIR/lib.sh"
+check "linux profile counts one unit per VM" test "$(bash -c 'source "$1"; profile_units "$2"' _ "$LAB_DIR/lib.sh" "$LAB_DIR/profiles/ubuntu-pair.yaml")" -eq 2
+check "an 8 GB VM counts two units" test "$(bash -c 'source "$1"; profile_units "$2"' _ "$LAB_DIR/lib.sh" "$LAB_DIR/profiles/windows-domain.yaml")" -eq 3
 
 ensure_pool
 create_volume "$STALE_IMAGE" qcow2
