@@ -9,8 +9,8 @@ use core_audit::error::AuditError;
 use core_auth::error::AuthError;
 use core_auth::model::{Account, TotpEnrolment};
 use core_auth::random::os_random;
-use core_auth::store::{load_accounts, load_accounts_file, save_accounts, save_accounts_file, STORE_VERSION};
-use core_auth::types::AccountMap;
+use core_auth::store::{load_accounts, load_accounts_file, save_accounts, save_store_file, STORE_VERSION};
+use core_auth::types::{AccountMap, CredentialMap};
 use failing_writer::FailingWriter;
 use std::fs;
 #[cfg(unix)]
@@ -110,7 +110,7 @@ fn newline_write_failure_is_reported() -> TestResult {
 fn store_file_is_created_with_mode_0600() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
-    save_accounts_file(&path, &sample(), os_random)?;
+    save_store_file(&path, &sample(), &CredentialMap::new(), os_random)?;
     assert_eq!(fs::metadata(&path)?.permissions().mode() & MODE_MASK, OWNER_ONLY);
     assert_eq!(load_accounts_file(&path)?, sample());
     assert!(!directory.path().join("accounts.tmp").exists());
@@ -122,8 +122,8 @@ fn store_file_is_created_with_mode_0600() -> TestResult {
 fn saving_again_replaces_the_file() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
-    save_accounts_file(&path, &sample(), os_random)?;
-    save_accounts_file(&path, &AccountMap::new(), os_random)?;
+    save_store_file(&path, &sample(), &CredentialMap::new(), os_random)?;
+    save_store_file(&path, &AccountMap::new(), &CredentialMap::new(), os_random)?;
     assert!(load_accounts_file(&path)?.is_empty());
     Ok(())
 }
@@ -142,7 +142,7 @@ fn missing_file_is_an_empty_store() -> TestResult {
 fn loose_modes_are_refused() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
-    save_accounts_file(&path, &sample(), os_random)?;
+    save_store_file(&path, &sample(), &CredentialMap::new(), os_random)?;
     fs::set_permissions(&path, Permissions::from_mode(LOOSE))?;
     assert!(matches!(
         load_accounts_file(&path),
@@ -170,7 +170,7 @@ fn an_existing_temporary_file_is_never_reused() -> TestResult {
     let temporary = directory.path().join(".accounts.json.0707070707070707.tmp");
     fs::write(&temporary, "keep")?;
     assert!(matches!(
-        save_accounts_file(&path, &sample(), constant_random),
+        save_store_file(&path, &sample(), &CredentialMap::new(), constant_random),
         Err(AuthError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
     ));
     assert_eq!(fs::read_to_string(&temporary)?, "keep");
@@ -187,7 +187,10 @@ fn a_symlinked_temporary_name_is_not_followed() -> TestResult {
     let victim = directory.path().join("victim");
     fs::write(&victim, "precious")?;
     symlink(&victim, directory.path().join(".accounts.json.0707070707070707.tmp"))?;
-    assert!(matches!(save_accounts_file(&path, &sample(), constant_random), Err(AuthError::Io(_))));
+    assert!(matches!(
+        save_store_file(&path, &sample(), &CredentialMap::new(), constant_random),
+        Err(AuthError::Io(_))
+    ));
     assert_eq!(fs::read_to_string(&victim)?, "precious");
     Ok(())
 }
@@ -198,8 +201,8 @@ fn different_store_names_never_share_a_temporary_file() -> TestResult {
     let directory = tempdir()?;
     let first = directory.path().join("accounts.json");
     let second = directory.path().join("accounts.bak");
-    save_accounts_file(&first, &sample(), constant_random)?;
-    save_accounts_file(&second, &AccountMap::new(), constant_random)?;
+    save_store_file(&first, &sample(), &CredentialMap::new(), constant_random)?;
+    save_store_file(&second, &AccountMap::new(), &CredentialMap::new(), constant_random)?;
     assert_eq!(load_accounts_file(&first)?, sample());
     assert!(load_accounts_file(&second)?.is_empty());
     assert_eq!(fs::read_dir(directory.path())?.count(), FILES_AFTER_TWO_SAVES);
@@ -210,11 +213,11 @@ fn different_store_names_never_share_a_temporary_file() -> TestResult {
 #[test]
 fn random_failure_and_nameless_paths_are_reported() -> TestResult {
     assert!(matches!(
-        save_accounts_file(Path::new("accounts.json"), &sample(), failing_random),
+        save_store_file(Path::new("accounts.json"), &sample(), &CredentialMap::new(), failing_random),
         Err(AuthError::Random(_))
     ));
     assert!(matches!(
-        save_accounts_file(Path::new("/"), &sample(), os_random),
+        save_store_file(Path::new("/"), &sample(), &CredentialMap::new(), os_random),
         Err(AuthError::Usage(_))
     ));
     Ok(())
@@ -228,13 +231,21 @@ fn io_failures_are_reported() -> TestResult {
     fs::write(&blocker, "")?;
     assert!(matches!(load_accounts_file(&blocker.join("child")), Err(AuthError::Io(_))));
     assert!(matches!(
-        save_accounts_file(&directory.path().join("missing").join("a.json"), &sample(), os_random),
+        save_store_file(
+            &directory.path().join("missing").join("a.json"),
+            &sample(),
+            &CredentialMap::new(),
+            os_random
+        ),
         Err(AuthError::Io(_))
     ));
     let target = directory.path().join("target");
     fs::create_dir(&target)?;
     fs::write(target.join("child"), "")?;
-    assert!(matches!(save_accounts_file(&target, &sample(), os_random), Err(AuthError::Io(_))));
+    assert!(matches!(
+        save_store_file(&target, &sample(), &CredentialMap::new(), os_random),
+        Err(AuthError::Io(_))
+    ));
     Ok(())
 }
 
