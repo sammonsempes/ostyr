@@ -66,5 +66,5 @@ pub fn verify_file<Output: Write>(file: &str, expected: Option<&str>, out: &mut 
 
 
 pub fn export_file<Output: Write>(file: &str, expected: Option<&str>, out: &mut Output) -> Result<(), AuditError> {
-    export(BufReader::new(File::open(file)?), out, expected).map(|_| ())
+    export(|| File::open(file).map(BufReader::new), out, expected).map(|_| ())
 }

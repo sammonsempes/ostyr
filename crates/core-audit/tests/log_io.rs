@@ -17,6 +17,7 @@ use partial_writer::PartialWriter;
 use sample::entry;
 use std::fs;
 use std::io::{self, BufReader};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::thread;
@@ -32,9 +33,11 @@ const APPENDS_PER_THREAD: usize = 25;
 const FILE_RECORDS: usize = 3;
 
 
+#[cfg(unix)]
 const OWNER_ONLY_MODE: u32 = 0o600;
 
 
+#[cfg(unix)]
 const MODE_MASK: u32 = 0o777;
 
 
@@ -128,12 +131,24 @@ fn file_log_persists_and_continues_the_chain() -> TestResult {
 }
 
 
+#[cfg(unix)]
+fn owner_only(path: &std::path::Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn owner_only(_path: &std::path::Path) -> io::Result<()> {
+    Ok(())
+}
+
+
 #[test]
 fn file_log_refuses_a_tampered_file_and_a_directory() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("audit.log");
     fs::write(&path, "garbage\n")?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY_MODE))?;
+    owner_only(&path)?;
     assert!(matches!(open_file_log(&path), Err(AuditError::Broken { line: 1, .. })));
     assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
     Ok(())
@@ -174,6 +189,7 @@ fn flush_failure_poisons_the_handle() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn file_log_is_created_owner_only() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("audit.log");
@@ -209,10 +225,12 @@ fn panic_mid_write_poisons_the_mutex_and_refuses_appends() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const WIDE_MODE: u32 = 0o640;
 
 
 #[test]
+#[cfg(unix)]
 fn file_log_refuses_group_or_other_access() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("audit.log");
