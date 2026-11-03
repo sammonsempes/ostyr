@@ -2,7 +2,8 @@ use crate::error::StoreError;
 use crate::model::Sequences;
 use crate::types::SaveFn;
 use atomicwrites::{AllowOverwrite, AtomicFile, Error as AtomicError};
-use std::fs;
+use core_audit::log::{check_private, owner_only};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -51,10 +52,36 @@ pub fn load_sequences(path: &Path) -> Result<Sequences, StoreError> {
 }
 
 
-/// `atomicwrites`: temp file in the same directory, fsync, rename, then fsync of the directory on Unix and `MoveFileExW` with write-through on Windows.
+/// A missing file is fine; an existing one must grant nothing to group or other (Windows: no check, ACLs are the deployment's job).
+pub fn check_state_private(path: &Path) -> Result<(), StoreError> {
+    match File::open(path) {
+        Ok(file) => check_private(&file).map_err(|source| StoreError::Insecure {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+
+/// `atomicwrites` with the temporary file created 0600 on Unix: temp file in the same directory, fsync, rename, then fsync of the directory on Unix and `MoveFileExW` with write-through on Windows.
+pub fn private_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    owner_only(options.write(true).create(true).truncate(true));
+    options
+}
+
+
 pub fn save_sequences(path: &Path, sequences: &Sequences) -> io::Result<()> {
     AtomicFile::new(path, AllowOverwrite)
-        .write(|file| writeln!(file, "{ROUTINE_LABEL} {} {SENSITIVE_LABEL} {}", sequences.routine, sequences.sensitive))
+        .write_with_options(
+            |file| writeln!(file, "{ROUTINE_LABEL} {} {SENSITIVE_LABEL} {}", sequences.routine, sequences.sensitive),
+            private_options(),
+        )
         .map_err(|failure| match failure {
             AtomicError::Internal(error) | AtomicError::User(error) => error,
         })

@@ -1,7 +1,7 @@
 use crate::common::types::TestResult;
 use crate::common::{
-    command, replace_file, routine_envelope, sensitive_envelope, setup, sign_with, signing_key, Setup, LIFETIME, NOW, ROUTINE_ID, ROUTINE_SEED,
-    SENSITIVE_ID,
+    command, key_entry, replace_file, routine_envelope, sensitive_command, sensitive_envelope, setup, sign_with, signing_key, Setup, LIFETIME, NOW,
+    ROUTINE_ID, ROUTINE_SEED, SENSITIVE_ID, SENSITIVE_SEED,
 };
 use crate::common::{SECOND, THIRD};
 use agent_command::codec::signing_message;
@@ -56,7 +56,7 @@ fn routine_command_round_trips() -> TestResult {
 #[test]
 fn sensitive_action_with_sensitive_key_is_accepted() -> TestResult {
     let setup = setup()?;
-    let sent = command(1, Action::Isolate);
+    let sent = sensitive_command(1, Action::Isolate);
     assert_eq!(verify(&setup, &sensitive_envelope(&sent)?)?, sent);
     Ok(())
 }
@@ -322,5 +322,38 @@ fn expired_and_not_yet_valid_keys_are_refused_after_a_live_reload() -> TestResul
     assert!(matches!(expired, Err(CommandError::KeyOutsideValidity)));
     let early = agent_command::verify::verify_command(&setup.verifier, &routine_envelope(&command(SECOND, Action::Ping))?, NOW - LIFETIME - 1);
     assert!(matches!(early, Err(CommandError::KeyOutsideValidity)));
+    Ok(())
+}
+
+
+#[test]
+fn a_command_bound_to_another_key_id_is_refused() -> TestResult {
+    let setup = setup()?;
+    let foreign = with(command(1, Action::Ping), |value| value.key_id = SENSITIVE_ID.to_owned());
+    assert!(matches!(verify(&setup, &routine_envelope(&foreign)?), Err(CommandError::KeyIdMismatch)));
+    assert!(verify(&setup, &routine_envelope(&command(1, Action::Ping))?).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_command_signed_before_its_key_changed_class_is_refused() -> TestResult {
+    let setup = setup()?;
+    let before = routine_envelope(&command(1, Action::Ping))?;
+    let moved = format!(
+        "keys:\n{}{}",
+        key_entry(ROUTINE_ID, "sensitive", ROUTINE_SEED, NOW - LIFETIME, NOW + LIFETIME * LIFETIME, false),
+        key_entry(
+            SENSITIVE_ID,
+            "sensitive",
+            SENSITIVE_SEED,
+            NOW - LIFETIME,
+            NOW + LIFETIME * LIFETIME,
+            false
+        )
+    );
+    replace_file(&setup.keys_path, &moved)?;
+    core_config::reload::reload(&setup.engine);
+    assert!(matches!(verify(&setup, &before), Err(CommandError::KeyClassMismatch)));
     Ok(())
 }
