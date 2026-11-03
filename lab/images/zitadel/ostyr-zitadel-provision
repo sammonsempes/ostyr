@@ -11,6 +11,8 @@ readonly LAB_DIR="/etc/ostyr-lab"
 readonly ZITADEL_DIR="/etc/zitadel"
 readonly CERT_DAYS=3650
 readonly READY_ATTEMPTS=300
+readonly API_ATTEMPTS=30
+readonly API_DELAY=2
 readonly ORG_NAME="ostyr"
 readonly MAPPED_PASSWORD="Lab-Mapped-1!"
 readonly UNMAPPED_PASSWORD="Lab-Unmapped-1!"
@@ -63,15 +65,37 @@ ENV
 chmod 600 "$ZITADEL_DIR/zitadel.env"
 systemctl enable --now zitadel
 
+retry_curl() {
+    local attempt http_code response
+    response="$(mktemp)"
+    for ((attempt = 1; attempt <= API_ATTEMPTS; attempt++)); do
+        http_code="$(curl --silent --output "$response" --write-out '%{http_code}' --cacert "$LAB_DIR/ca.pem" --resolve "$domain:443:127.0.0.1" \
+            -H "Authorization: Bearer $(cat "$LAB_DIR/provisioner.pat")" "$@" || true)"
+        if [[ "$http_code" =~ ^2 ]]; then
+            cat "$response"
+            rm -f "$response"
+            return 0
+        fi
+        if [[ "$http_code" =~ ^[1-4] ]]; then
+            printf 'error: HTTP %s: %s\n' "$http_code" "$(cat "$response")" >&2
+            rm -f "$response"
+            return 1
+        fi
+        printf 'retry %s/%s: HTTP %s\n' "$attempt" "$API_ATTEMPTS" "$http_code" >&2
+        sleep "$API_DELAY"
+    done
+    rm -f "$response"
+    printf 'error: API still failing after %s attempts\n' "$API_ATTEMPTS" >&2
+    return 1
+}
+
 api() {
     local path="$1" body="$2"
-    curl --fail-with-body --silent --show-error --request "${3:-POST}" --cacert "$LAB_DIR/ca.pem" --resolve "$domain:443:127.0.0.1" \
-        -H "Authorization: Bearer $(cat "$LAB_DIR/provisioner.pat")" -H 'Content-Type: application/json' -d "$body" "$base$path"
+    retry_curl --request "${3:-POST}" -H 'Content-Type: application/json' -d "$body" "$base$path"
 }
 
 api_get() {
-    curl --fail-with-body --silent --show-error --cacert "$LAB_DIR/ca.pem" --resolve "$domain:443:127.0.0.1" \
-        -H "Authorization: Bearer $(cat "$LAB_DIR/provisioner.pat")" "$base$1"
+    retry_curl "$base$1"
 }
 
 fetch_login_policy() {
@@ -91,6 +115,7 @@ fetch_login_policy
 login_policy="$(jq -c '.policy | del(.details, .isDefault) | .mfaInitSkipLifetime = "0s"' "$LAB_DIR/login-policy.json")"
 rm -f "$LAB_DIR/login-policy.json"
 api /admin/v1/policies/login "$login_policy" PUT >/dev/null
+api_get /management/v1/orgs/me >/dev/null
 
 dev_mode=false
 [[ "$redirect_uri" == http://* ]] && dev_mode=true
