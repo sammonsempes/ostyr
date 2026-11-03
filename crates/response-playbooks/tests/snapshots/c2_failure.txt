@@ -1,0 +1,10 @@
+playbook Block confirmed C2 v3 mode=enforce
+trigger matched
+condition steps.0 true: {{ alert.remote_ip and alert.remote_ip.reputation >= 80 and not alert.remote_ip.is_internal }}
+action steps.0.then.0 fortigate/block_ip duration="24h" ip="203.0.113.9" breakers=allowed
+condition steps.1 true: {{ alert.domain }}
+action steps.1.then.0 dns/sinkhole domain="c2.evil.example" duration="24h" breakers=allowed
+failure simulated steps.1.then.0 sinkhole
+compensation unblock_ip for block_ip
+on_error handler
+action on_error.0 pagerduty/page severity="high" summary="C2 playbook failed on ws-0042" breakers=not applicable
