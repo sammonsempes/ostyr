@@ -2,15 +2,15 @@ pub mod types;
 
 
 use agent_command::keys::open_keys_engine;
-use agent_command::model::{Action, Command, Sequences, TrustedKeys, Verifier, NONCE_LENGTH};
+use agent_command::model::{Action, Command, KeyClass, Sequences, TrustedKeys, Verifier, NONCE_LENGTH};
 use agent_command::sign::{memory_signer, sign_command};
 use agent_command::verify::open_verifier_with;
-use core_audit::log::{append, genesis_log};
+use core_audit::log::{append, genesis_log, owner_only};
 use core_config::reload::{ReloadContext, ReloadEngine};
 use data_encoding::HEXLOWER;
 use ed25519_dalek::SigningKey;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -93,6 +93,13 @@ pub fn replace_file(path: &Path, text: &str) -> io::Result<()> {
 }
 
 
+pub fn private_file(path: &Path, text: &str) -> io::Result<()> {
+    owner_only(OpenOptions::new().write(true).create(true).truncate(true))
+        .open(path)?
+        .write_all(text.as_bytes())
+}
+
+
 pub fn context() -> ReloadContext {
     ReloadContext {
         actor_id: "agent-command".to_owned(),
@@ -130,6 +137,8 @@ pub fn verifier_with(engine: Arc<ReloadEngine<TrustedKeys>>, last_sequence: u64)
 
 pub fn command(sequence: u64, action: Action) -> Command {
     Command {
+        key_id: ROUTINE_ID.to_owned(),
+        key_class: KeyClass::Routine,
         agent_id: AGENT.to_owned(),
         tenant: TENANT.to_owned(),
         issued_at: NOW,
@@ -137,6 +146,15 @@ pub fn command(sequence: u64, action: Action) -> Command {
         sequence,
         nonce: [sequence as u8; NONCE_LENGTH],
         action,
+    }
+}
+
+
+pub fn sensitive_command(sequence: u64, action: Action) -> Command {
+    Command {
+        key_id: SENSITIVE_ID.to_owned(),
+        key_class: KeyClass::Sensitive,
+        ..command(sequence, action)
     }
 }
 
@@ -152,7 +170,15 @@ pub fn routine_envelope(command: &Command) -> Result<Vec<u8>, Box<dyn std::error
 
 
 pub fn sensitive_envelope(command: &Command) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    sign_with(command, SENSITIVE_ID, SENSITIVE_SEED)
+    sign_with(
+        &Command {
+            key_id: SENSITIVE_ID.to_owned(),
+            key_class: KeyClass::Sensitive,
+            ..command.clone()
+        },
+        SENSITIVE_ID,
+        SENSITIVE_SEED,
+    )
 }
 
 

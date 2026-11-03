@@ -12,8 +12,12 @@ run_reaper
 prefix="$(lab_prefix "$task_id")"
 lab_state="$(state_dir "$task_id")"
 
+virsh_lab list --name | names_with_prefix "$prefix-" | while read -r domain; do
+    virsh_lab destroy "$domain" >/dev/null 2>&1 || log "domain $domain could not be force-stopped"
+done
+
 if [[ -f "$lab_state/lab.tfstate" && -f "$lab_state/vars.json" ]]; then
-    run_tofu "$task_id" destroy -input=false -auto-approve -no-color -state="$lab_state/lab.tfstate" -var-file="$lab_state/vars.json" ||
+    run_tofu_bounded "$task_id" destroy -input=false -auto-approve -no-color -state="$lab_state/lab.tfstate" -var-file="$lab_state/vars.json" ||
         log "destroy through state failed, sweeping by name"
 fi
 
@@ -32,6 +36,15 @@ virsh_lab net-list --all --name | awk -v n="$prefix" '$0 == n' | while read -r n
     virsh_lab net-destroy "$network" >/dev/null 2>&1 || log "network $network was not active"
     virsh_lab net-undefine "$network" >/dev/null
 done
+
+remaining="$( (
+    virsh_lab list --all --name
+    virsh_lab net-list --all --name
+    virsh_lab vol-list --pool "$LAB_POOL" 2>/dev/null | awk 'NR > 2 && $1 != "" {print $1}'
+) | names_with_prefix "$prefix" | grep -E "^$prefix(-|$)" || true)"
+if [[ -n "$remaining" ]]; then
+    die "lab $task_id not fully destroyed, remaining: $remaining"
+fi
 
 rm -rf "$lab_state"
 log "lab $task_id destroyed"

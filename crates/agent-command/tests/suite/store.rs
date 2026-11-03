@@ -1,8 +1,8 @@
 use crate::common::types::TestResult;
-use crate::common::{command, engine_at, replace_file, routine_envelope, sensitive_envelope, setup, verifier_with, NOW, SECOND};
+use crate::common::{command, engine_at, private_file, routine_envelope, sensitive_envelope, setup, verifier_with, NOW, SECOND};
 use agent_command::error::{CommandError, StoreError};
 use agent_command::model::{Action, Sequences, MAX_SEQUENCE_ADVANCE};
-use agent_command::store::{file_saver, load_sequences, save_sequences};
+use agent_command::store::{check_state_private, file_saver, load_sequences, save_sequences};
 use agent_command::verify::{open_verifier, open_verifier_with, verify_command};
 use std::fs;
 use std::io;
@@ -102,7 +102,7 @@ fn the_sequence_survives_reopening_the_store() -> TestResult {
 fn opening_with_a_corrupt_store_fails() -> TestResult {
     let setup = setup()?;
     let state = setup.keys_path.with_file_name("sequence");
-    replace_file(&state, "garbage")?;
+    private_file(&state, "garbage")?;
     let opened = open_verifier(crate::common::AGENT, crate::common::TENANT, Arc::clone(&setup.engine), &state);
     assert!(matches!(opened, Err(StoreError::Corrupt { .. })));
     Ok(())
@@ -149,7 +149,7 @@ fn the_engine_helper_and_the_verifier_helper_agree() -> TestResult {
 fn an_old_single_sequence_file_is_read_as_both_classes() -> TestResult {
     let setup = setup()?;
     let state = setup.keys_path.with_file_name("sequence");
-    replace_file(&state, "7\n")?;
+    private_file(&state, "7\n")?;
     assert_eq!(load_sequences(&state)?, both(STORED));
     let verifier = open_verifier(crate::common::AGENT, crate::common::TENANT, Arc::clone(&setup.engine), &state)?;
     let replay = routine_envelope(&command(STORED, Action::Ping))?;
@@ -210,5 +210,74 @@ fn a_jump_over_the_cap_is_refused_without_advancing_anything() -> TestResult {
             sensitive: 1
         }
     );
+    Ok(())
+}
+
+
+#[cfg(unix)]
+const MODE_MASK: u32 = 0o777;
+
+
+#[cfg(unix)]
+const PRIVATE: u32 = 0o600;
+
+
+#[cfg(unix)]
+const GROUP_READ: u32 = 0o640;
+
+
+#[cfg(unix)]
+const OTHER_READ: u32 = 0o606;
+
+
+#[cfg(unix)]
+const GROUP_WRITE: u32 = 0o664;
+
+
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> io::Result<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(fs::metadata(path)?.permissions().mode() & MODE_MASK)
+}
+
+
+#[cfg(unix)]
+#[test]
+fn the_state_file_and_its_temporary_file_are_created_private() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("sequence");
+    save_sequences(&path, &both(1))?;
+    assert_eq!(mode_of(&path)?, PRIVATE);
+    let probe = dir.path().join("probe");
+    agent_command::store::private_options().open(&probe)?;
+    assert_eq!(mode_of(&probe)?, PRIVATE);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_state_file_open_to_group_or_other_is_refused() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup()?;
+    let state = setup.keys_path.with_file_name("sequence");
+    save_sequences(&state, &both(1))?;
+    [GROUP_READ, OTHER_READ, GROUP_WRITE].iter().try_for_each(|mode| -> TestResult {
+        fs::set_permissions(&state, fs::Permissions::from_mode(*mode))?;
+        let opened = open_verifier(crate::common::AGENT, crate::common::TENANT, Arc::clone(&setup.engine), &state);
+        assert!(matches!(opened, Err(StoreError::Insecure { .. })), "mode {mode:o}");
+        Ok(())
+    })?;
+    fs::set_permissions(&state, fs::Permissions::from_mode(PRIVATE))?;
+    assert!(open_verifier(crate::common::AGENT, crate::common::TENANT, Arc::clone(&setup.engine), &state).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn an_unreadable_state_path_is_an_io_error() -> TestResult {
+    let setup = setup()?;
+    let beneath_a_file = setup.keys_path.join("sequence");
+    assert!(matches!(check_state_private(&beneath_a_file), Err(StoreError::Io { .. })));
     Ok(())
 }

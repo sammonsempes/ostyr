@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::model::{Action, Command, Verifier};
+use crate::model::{Action, Command, KeyClass, Verifier};
 use crate::sign::{memory_signer, new_nonce, sign_command};
 use crate::types::FillFn;
 use crate::verify::{action_name, verify_command};
@@ -7,10 +7,17 @@ use data_encoding::HEXLOWER;
 use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH};
 use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTimeError};
-use tracing::warn;
+use tracing::{warn, Dispatch};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
-pub const SIGN_USAGE: &str = "sign <seed-hex> <key-id> <agent> <tenant> <sequence> <action> [parameter]";
+pub const SIGN_USAGE: &str = "sign <seed-hex> <key-id> <class> <agent> <tenant> <sequence> <action> [parameter]";
+
+
+/// Plain-text events to the given writer (stderr in the example), so refusals and clock warnings are visible.
+pub fn log_dispatch(writer: BoxMakeWriter) -> Dispatch {
+    Dispatch::new(tracing_subscriber::fmt().with_ansi(false).with_writer(writer).finish())
+}
 
 
 pub const COMMAND_LIFETIME_SECONDS: u64 = 60;
@@ -58,6 +65,15 @@ pub fn parse_action(name: &str, parameter: Option<&str>) -> Result<Action, CliEr
 }
 
 
+pub fn parse_class(text: &str) -> Result<KeyClass, CliError> {
+    match text {
+        "routine" => Ok(KeyClass::Routine),
+        "sensitive" => Ok(KeyClass::Sensitive),
+        other => Err(CliError::Class(other.to_owned())),
+    }
+}
+
+
 pub fn parse_sequence(text: &str) -> Result<u64, CliError> {
     text.parse().map_err(|_| CliError::Number(text.to_owned()))
 }
@@ -72,8 +88,10 @@ pub fn signing_key_from(seed_hex: &str) -> Result<SigningKey, CliError> {
 /// Writes the signed envelope as one hexadecimal line.
 pub fn write_signed<Output: Write>(args: &[&str], now: u64, fill: FillFn, out: &mut Output) -> Result<(), CliError> {
     match args {
-        [seed, key_id, agent_id, tenant, sequence, action] | [seed, key_id, agent_id, tenant, sequence, action, _] => {
+        [seed, key_id, class, agent_id, tenant, sequence, action] | [seed, key_id, class, agent_id, tenant, sequence, action, _] => {
             let command = Command {
+                key_id: (*key_id).to_owned(),
+                key_class: parse_class(class)?,
                 agent_id: (*agent_id).to_owned(),
                 tenant: (*tenant).to_owned(),
                 issued_at: now,
@@ -91,7 +109,7 @@ pub fn write_signed<Output: Write>(args: &[&str], now: u64, fill: FillFn, out: &
 }
 
 
-pub const SIGN_PARAMETER_INDEX: usize = 6;
+pub const SIGN_PARAMETER_INDEX: usize = 7;
 
 
 /// One hexadecimal envelope per line in; `accepted <action>` or `refused <reason>` per line out, flushed so a peer can read it live.

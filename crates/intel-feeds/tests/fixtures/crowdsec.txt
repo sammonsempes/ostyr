@@ -1,0 +1,10 @@
+# CrowdSec-style blocklist fixture written for this project
+192.0.2.1
+198.51.100.0/24
+
+10.1.2.3/8
+::ffff:192.0.2.77
+2001:DB8:0:0::5
+bad value!
+1.2.3.4/33
+192.0.2.50

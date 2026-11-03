@@ -1,0 +1,49 @@
+feeds:
+  - name: urlhaus
+    format: abuse_ch_urlhaus
+    path: urlhaus.csv
+    version: "2026-11-02"
+    default_confidence: 60
+    tlp: clear
+    ttl_seconds: 604800
+  - name: threatfox
+    format: abuse_ch_threatfox
+    path: threatfox.csv
+    version: "2026-11-02"
+    tlp: green
+    ttl_seconds: 86400
+  - name: feodo
+    format: abuse_ch_feodo
+    path: feodo.csv
+    default_confidence: 90
+  - name: crowdsec
+    format: crowdsec
+    path: crowdsec.txt
+    default_confidence: 40
+    tlp: amber
+    ttl_seconds: 43200
+  - name: partner
+    format: csv
+    path: generic.csv
+    mapping:
+      value: indicator
+      ioc_type: kind
+      first_seen: seen
+      confidence: score
+      malware: family
+      actor: who
+    tlp: red
+  - name: list
+    format: json
+    path: list.json
+    mapping:
+      value: ioc
+      ioc_type: type
+      confidence: score
+      malware: tags
+  - name: stix
+    format: stix
+    path: bundle.json
+    version: "bundle-1"
+    tlp: amber_strict
+    ttl_seconds: 31536000
