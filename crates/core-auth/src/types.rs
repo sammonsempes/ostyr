@@ -1,5 +1,5 @@
 use crate::error::AuthError;
-use crate::model::{Account, Attempts, PendingLogin, Session};
+use crate::model::{Account, Attempts, Challenge, PendingLogin, Session, StoredCredential};
 use core_config::secret::SecretRef;
 use openidconnect::core::CoreClient;
 use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, HttpResponse};
@@ -26,6 +26,12 @@ pub type SessionMap = BTreeMap<String, Session>;
 
 
 pub type AttemptMap = BTreeMap<String, Attempts>;
+
+
+pub type CredentialMap = BTreeMap<String, Vec<StoredCredential>>;
+
+
+pub type ChallengeMap = BTreeMap<String, Challenge>;
 
 
 pub type RoleSet = BTreeSet<String>;

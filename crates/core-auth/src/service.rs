@@ -4,11 +4,13 @@ use crate::model::{Account, TotpEnrolment};
 use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::password::hash_password;
 use crate::policy::check_password;
-use crate::rbac::{check_roles, is_allowed, requires_mfa, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR};
+use crate::rbac::{check_roles, is_allowed, requires_mfa, webauthn_required, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR};
 use crate::secretbox::{open_secret, seal_secret};
 use crate::session::{create_session, hash_token, revoke_session, revoke_user_sessions, session_owner, validate_session};
 use crate::totp::{consume_backup_code, hash_backup_code, new_backup_codes, new_secret, secret_text, verify_code};
-use crate::types::{AccountMap, AttemptMap, CompromisedSet, Parameters, RandomFn, RoleCatalog, RoleSet, SessionMap, StoreKey, VerifyFn};
+use crate::types::{
+    AccountMap, AttemptMap, ChallengeMap, CompromisedSet, CredentialMap, Parameters, RandomFn, RoleCatalog, RoleSet, SessionMap, StoreKey, VerifyFn,
+};
 use core_audit::log::{append, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use secrecy::{ExposeSecret, SecretString};
@@ -79,11 +81,13 @@ pub struct Context<'a, Output> {
 }
 
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct State {
     pub accounts: AccountMap,
     pub sessions: SessionMap,
     pub attempts: AttemptMap,
+    pub credentials: CredentialMap,
+    pub challenges: ChallengeMap,
 }
 
 
@@ -118,6 +122,7 @@ pub enum Denial {
     MfaNotEnrolled,
     MfaMissing,
     MfaInvalid,
+    WebauthnRequired,
     Internal,
 }
 
@@ -129,6 +134,7 @@ pub fn denial_reason(denial: Denial) -> &'static str {
         Denial::MfaNotEnrolled => "mfa_not_enrolled",
         Denial::MfaMissing => "mfa_missing",
         Denial::MfaInvalid => "mfa_invalid",
+        Denial::WebauthnRequired => "webauthn_required",
         Denial::Internal => "internal_error",
     }
 }
@@ -140,12 +146,13 @@ pub fn denial_error(denial: Denial) -> AuthError {
         Denial::MfaNotEnrolled => AuthError::MfaEnrolmentRequired,
         Denial::MfaMissing => AuthError::MfaRequired,
         Denial::MfaInvalid => AuthError::MfaInvalid,
+        Denial::WebauthnRequired => AuthError::WebauthnRequired,
     }
 }
 
 
 pub fn counts_as_failure(denial: Denial) -> bool {
-    !matches!(denial, Denial::MfaNotEnrolled | Denial::MfaMissing)
+    !matches!(denial, Denial::MfaNotEnrolled | Denial::MfaMissing | Denial::WebauthnRequired)
 }
 
 
@@ -296,9 +303,11 @@ pub fn transact<Output: Write, Value>(
     let result = operation(&mut working, &acting);
     let outcome = finish(context, now, &acting.actor, action, &target(&working), result);
     state.attempts = working.attempts;
+    state.challenges = working.challenges;
     if outcome.is_ok() {
         state.accounts = working.accounts;
         state.sessions = working.sessions;
+        state.credentials = working.credentials;
     }
     outcome
 }
@@ -609,10 +618,26 @@ pub fn second_factor(
 ) -> Result<Option<Denial>, AuthError> {
     let role_needs_mfa = requires_mfa(catalog, &account.roles);
     match (account.totp.as_mut(), request.totp_code.as_ref()) {
+        _ if webauthn_required(catalog, &account.roles) => Ok(Some(Denial::WebauthnRequired)),
         (None, _) => Ok(role_needs_mfa.then_some(Denial::MfaNotEnrolled)),
         (Some(_), None) => Ok(Some(Denial::MfaMissing)),
         (Some(enrolment), Some(code)) => verify_factor(enrolment, key, &request.username, code.expose_secret(), now),
     }
+}
+
+
+pub fn verify_account_password<Output: Write>(
+    accounts: &AccountMap,
+    context: &Context<Output>,
+    username: &str,
+    password: &SecretString,
+) -> Result<bool, AuthError> {
+    let stored = accounts.get(username);
+    let external = stored.is_some_and(|account| account.password_hash == EXTERNAL_PASSWORD_HASH);
+    let hash = stored
+        .filter(|_| !external)
+        .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone());
+    Ok((context.verify)(password.expose_secret(), &hash)? && !external)
 }
 
 
@@ -622,14 +647,8 @@ pub fn check_factors<Output: Write>(
     request: &LoginRequest,
     now: OffsetDateTime,
 ) -> Result<Option<Denial>, AuthError> {
-    let stored = accounts.get_mut(&request.username);
-    let external = stored.as_ref().is_some_and(|account| account.password_hash == EXTERNAL_PASSWORD_HASH);
-    let hash = stored
-        .as_ref()
-        .filter(|_| !external)
-        .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone());
-    let password_ok = (context.verify)(request.password.expose_secret(), &hash)? && !external;
-    match stored {
+    let password_ok = verify_account_password(accounts, context, &request.username, &request.password)?;
+    match accounts.get_mut(&request.username) {
         None => Ok(Some(Denial::UnknownUser)),
         Some(account) if password_ok => second_factor(account, context.catalog, context.key, request, now),
         Some(_) => Ok(Some(Denial::BadPassword)),
@@ -668,7 +687,7 @@ pub fn register_failure<Output: Write>(
     audit_user: &str,
     request: &LoginRequest,
 ) -> Result<(), AuthError> {
-    count_failure(state, context, now, audit_user, request, true)
+    count_failure(state, context, now, audit_user, &request.username, &request.source, true)
 }
 
 
@@ -677,16 +696,34 @@ pub fn count_failure<Output: Write>(
     context: &Context<Output>,
     now: OffsetDateTime,
     audit_user: &str,
-    request: &LoginRequest,
+    username: &str,
+    source: &str,
     count_account: bool,
 ) -> Result<(), AuthError> {
-    let account_lock = (count_account && state.accounts.contains_key(&request.username))
-        .then(|| record_failure(&mut state.attempts, &account_key(&request.username), ACCOUNT_MAX_FAILURES, now))
+    let account_lock = (count_account && state.accounts.contains_key(username))
+        .then(|| record_failure(&mut state.attempts, &account_key(username), ACCOUNT_MAX_FAILURES, now))
         .flatten();
-    let source_lock = record_failure(&mut state.attempts, &source_key(&request.source), SOURCE_MAX_FAILURES, now);
+    let source_lock = record_failure(&mut state.attempts, &source_key(source), SOURCE_MAX_FAILURES, now);
     [("account", account_lock), ("source", source_lock)]
         .into_iter()
-        .try_for_each(|(scope, lock)| lock.map_or(Ok(()), |until| log_lockout(context, now, audit_user, &request.source, scope, until)))
+        .try_for_each(|(scope, lock)| lock.map_or(Ok(()), |until| log_lockout(context, now, audit_user, source, scope, until)))
+}
+
+
+pub fn record_denial<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    audit_user: &str,
+    request: &LoginRequest,
+    denial: Denial,
+) -> Result<(), AuthError> {
+    let parameters = [("reason", denial_reason(denial).to_owned()), ("source", request.source.clone())];
+    record(context, now, audit_user, ACTION_LOGIN, audit_user, denial_outcome(denial), &parameters)?;
+    if counts_as_failure(denial) {
+        register_failure(state, context, now, audit_user, request)?;
+    }
+    Ok(())
 }
 
 
@@ -698,11 +735,7 @@ pub fn deny_login<Output: Write>(
     request: &LoginRequest,
     denial: Denial,
 ) -> Result<SecretString, AuthError> {
-    let parameters = [("reason", denial_reason(denial).to_owned()), ("source", request.source.clone())];
-    record(context, now, audit_user, ACTION_LOGIN, audit_user, denial_outcome(denial), &parameters)?;
-    if counts_as_failure(denial) {
-        register_failure(state, context, now, audit_user, request)?;
-    }
+    record_denial(state, context, now, audit_user, request, denial)?;
     Err(denial_error(denial))
 }
 
@@ -751,14 +784,24 @@ pub fn grant_login<Output: Write>(
 }
 
 
-pub fn refuse_locked<Output: Write>(
+pub fn refuse_locked<Output: Write>(context: &Context<Output>, now: OffsetDateTime, audit_user: &str, source: &str) -> Result<(), AuthError> {
+    let parameters = [("reason", "locked".to_owned()), ("source", source.to_owned())];
+    record(context, now, audit_user, ACTION_LOGIN, audit_user, Outcome::Denied, &parameters)
+}
+
+
+pub fn penalise_locked_account<Output: Write>(
+    state: &mut State,
     context: &Context<Output>,
     now: OffsetDateTime,
     audit_user: &str,
     request: &LoginRequest,
 ) -> Result<(), AuthError> {
-    let parameters = [("reason", "locked".to_owned()), ("source", request.source.clone())];
-    record(context, now, audit_user, ACTION_LOGIN, audit_user, Outcome::Denied, &parameters)
+    refuse_locked(context, now, audit_user, &request.source)?;
+    (context.verify)(request.password.expose_secret(), DUMMY_HASH)
+        .inspect_err(|error| tracing::warn!(%error, "dummy verification failed for a locked account"))
+        .ok();
+    count_failure(state, context, now, audit_user, &request.username, &request.source, false)
 }
 
 
@@ -769,12 +812,31 @@ pub fn refuse_locked_account<Output: Write>(
     audit_user: &str,
     request: &LoginRequest,
 ) -> Result<SecretString, AuthError> {
-    refuse_locked(context, now, audit_user, request)?;
-    (context.verify)(request.password.expose_secret(), DUMMY_HASH)
-        .inspect_err(|error| tracing::warn!(%error, "dummy verification failed for a locked account"))
-        .ok();
-    count_failure(state, context, now, audit_user, request, false)?;
+    penalise_locked_account(state, context, now, audit_user, request)?;
     Err(AuthError::InvalidCredentials)
+}
+
+
+pub fn login_gate<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    audit_user: &str,
+    request: &LoginRequest,
+) -> Result<(), AuthError> {
+    let source_lock = locked_until(&state.attempts, &source_key(&request.source), now);
+    let account_lock = locked_until(&state.attempts, &account_key(&request.username), now);
+    match (source_lock, account_lock) {
+        (Some(until), _) => {
+            refuse_locked(context, now, audit_user, &request.source)?;
+            Err(AuthError::Locked { until })
+        }
+        (None, Some(_)) => {
+            penalise_locked_account(state, context, now, audit_user, request)?;
+            Err(AuthError::InvalidCredentials)
+        }
+        (None, None) => Ok(()),
+    }
 }
 
 
@@ -789,7 +851,7 @@ pub fn login<Output: Write>(
     let account_lock = locked_until(&state.attempts, &account_key(&request.username), now);
     match (source_lock, account_lock) {
         (Some(until), _) => {
-            refuse_locked(context, now, &audit_user, request)?;
+            refuse_locked(context, now, &audit_user, &request.source)?;
             Err(AuthError::Locked { until })
         }
         (None, Some(_)) => refuse_locked_account(state, context, now, &audit_user, request),

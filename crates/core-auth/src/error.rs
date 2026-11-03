@@ -115,6 +115,30 @@ pub enum AuthError {
     PermissionDenied,
     #[error("session is invalid or expired")]
     SessionInvalid,
+    #[error("a WebAuthn credential is required for this account")]
+    WebauthnRequired,
+    #[error("the WebAuthn ceremony failed: {0}")]
+    Webauthn(#[from] webauthn_rs::prelude::WebauthnError),
+    #[error("WebAuthn is not configured")]
+    WebauthnNotConfigured,
+    #[error("the WebAuthn challenge is unknown, used or not bound to this request")]
+    ChallengeInvalid,
+    #[error("the WebAuthn challenge has expired")]
+    ChallengeExpired,
+    #[error("too many WebAuthn challenges are pending")]
+    TooManyChallenges,
+    #[error("the credential signature counter went backwards")]
+    CounterRegression,
+    #[error("the credential is not registered for this account")]
+    UnknownCredential,
+    #[error("the credential is already registered")]
+    CredentialExists,
+    #[error("the credential name is invalid")]
+    InvalidCredentialName,
+    #[error("the last second factor of an account that requires one cannot be removed")]
+    LastFactor,
+    #[error("credentials of `{0}` belong to no account")]
+    OrphanCredential(String),
     #[error("invalid command: {0}")]
     Usage(String),
 }

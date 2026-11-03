@@ -1,24 +1,31 @@
 use crate::error::AuthError;
+use crate::model::CredentialInfo;
 use crate::password::verify_password;
 use crate::policy::load_compromised;
-use crate::rbac::{builtin_catalog, PERMISSION_EVENTS_READ};
+use crate::rbac::{builtin_catalog, load_catalog, PERMISSION_EVENTS_READ};
 use crate::secretbox::KEY_BYTES;
 use crate::service::{
     audit_name, authorize, bootstrap_administrator, change_roles, create_account, denial_reason, enrol_totp, login, record, revoke_all_sessions,
-    revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN, ACTION_SESSION_REVOKE,
+    revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN, ACTION_SESSION_REVOKE, ANONYMOUS_ACTOR,
 };
 use crate::session::revoke_session;
-use crate::store::{load_accounts_file, save_accounts_file};
+use crate::store::{load_store_file, save_store_file};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
-use crate::types::{Clock, RandomFn, RoleSet, StoreKey};
+use crate::types::{Clock, RandomFn, RoleCatalog, RoleSet, StoreKey};
+use crate::webauthn::{
+    build_webauthn, list_credentials, parse_webauthn_config, passkey_login_start, register_finish, register_start, remove_credential,
+    rename_credential, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest,
+};
 use core_audit::log::{check_private, open_file_log, owner_only};
 use core_audit::model::Outcome;
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
+use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
+use webauthn_rs::prelude::Webauthn;
 
 
 pub const PATH_COUNT: usize = 4;
@@ -36,10 +43,10 @@ pub const CLI_TENANT: &str = "default";
 pub const CLI_REQUEST_ID: &str = "cli";
 
 
-pub const READ_ONLY_COMMANDS: [&str; 2] = ["totp", "check"];
+pub const READ_ONLY_COMMANDS: [&str; 6] = ["totp", "check", "wa-list", "wa-register-start", "wa-login-start", "passkey-start"];
 
 
-pub const USAGE: &str = "usage: auth_tool <store> <audit-log> <key-file> <compromised-list>; commands on stdin";
+pub const USAGE: &str = "usage: auth_tool <store> <audit-log> <key-file> <compromised-list> [<webauthn-config> [<roles-file>]]; commands on stdin";
 
 
 pub fn parse_roles(text: &str) -> RoleSet {
@@ -82,7 +89,86 @@ pub fn lock_store(store: &str) -> Result<File, AuthError> {
 }
 
 
-pub fn execute<Output: Write>(state: &mut State, context: &Context<Output>, now: OffsetDateTime, words: &[&str]) -> Result<String, AuthError> {
+pub fn require_webauthn(webauthn: Option<&Webauthn>) -> Result<&Webauthn, AuthError> {
+    webauthn.ok_or(AuthError::WebauthnNotConfigured)
+}
+
+
+pub fn json_text<Value: Serialize>(identifier: &str, value: &Value) -> Result<String, AuthError> {
+    Ok(format!("ok {identifier} {}", serde_json::to_string(value)?))
+}
+
+
+pub fn show_credential(info: &CredentialInfo) -> String {
+    let used = info.last_used.map_or_else(|| "-".to_owned(), |seconds| seconds.to_string());
+    format!("{} {} {} {used}", info.id, info.name, info.created_at)
+}
+
+
+/// WebAuthn commands carry their JSON document as the last word(s); the rest of the line is rejoined with spaces.
+pub fn execute_webauthn<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    webauthn: Option<&Webauthn>,
+    now: OffsetDateTime,
+    words: &[&str],
+) -> Result<String, AuthError> {
+    match words {
+        ["wa-register-start", token, user] => {
+            let (identifier, options) = register_start(state, context, require_webauthn(webauthn)?, now, token, user)?;
+            json_text(&identifier, &options)
+        }
+        ["wa-register-finish", token, user, challenge, name, json @ ..] => {
+            let request = RegistrationRequest {
+                username: (*user).to_owned(),
+                challenge_id: (*challenge).to_owned(),
+                name: (*name).to_owned(),
+                response: serde_json::from_str(&json.join(" "))?,
+            };
+            register_finish(state, context, require_webauthn(webauthn)?, now, token, &request).map(|identifier| format!("ok {identifier}"))
+        }
+        ["wa-login-start", user, password, source] => {
+            let request = LoginRequest {
+                username: (*user).to_owned(),
+                password: SecretString::from(*password),
+                totp_code: None,
+                source: (*source).to_owned(),
+            };
+            let (identifier, options) = webauthn_login_start(state, context, require_webauthn(webauthn)?, now, &request)?;
+            json_text(&identifier, &options)
+        }
+        ["passkey-start", source] => {
+            let (identifier, options) = passkey_login_start(state, context, require_webauthn(webauthn)?, now, source)?;
+            json_text(&identifier, &options)
+        }
+        ["wa-login-finish", challenge, source, json @ ..] => {
+            let assertion = Assertion {
+                challenge_id: (*challenge).to_owned(),
+                response: serde_json::from_str(&json.join(" "))?,
+                source: (*source).to_owned(),
+            };
+            webauthn_login_finish(state, context, require_webauthn(webauthn)?, now, &assertion).map(|token| format!("ok {}", token.expose_secret()))
+        }
+        ["wa-list", token, user] => {
+            let listed = list_credentials(state, context.catalog, now, token, user)?;
+            Ok(listed.iter().map(show_credential).collect::<Vec<_>>().join("\n"))
+        }
+        ["wa-rename", token, user, identifier, name] => {
+            rename_credential(state, context, now, token, (user, identifier, name)).map(|()| "ok".to_owned())
+        }
+        ["wa-remove", token, user, identifier] => remove_credential(state, context, now, token, (user, identifier)).map(|()| "ok".to_owned()),
+        _ => Err(AuthError::Usage("unknown command".to_owned())),
+    }
+}
+
+
+pub fn execute_with<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    webauthn: Option<&Webauthn>,
+    now: OffsetDateTime,
+    words: &[&str],
+) -> Result<String, AuthError> {
     match words {
         ["bootstrap", user, password] => bootstrap_administrator(state, context, now, user, &SecretString::from(*password)).map(show_enrolment),
         ["create", token, user, password, roles] => {
@@ -106,7 +192,7 @@ pub fn execute<Output: Write>(state: &mut State, context: &Context<Output>, now:
         ["revoke", token, target] => revoke_token(state, context, now, token, target).map(|()| "ok".to_owned()),
         ["revoke-all", token, user] => revoke_all_sessions(state, context, now, token, user).map(|count| format!("revoked {count}")),
         ["check", token] => authorize(state, context.catalog, token, now, PERMISSION_EVENTS_READ).map(|user| format!("allowed {user}")),
-        _ => Err(AuthError::Usage("unknown command".to_owned())),
+        _ => execute_webauthn(state, context, webauthn, now, words),
     }
 }
 
@@ -116,7 +202,6 @@ pub fn is_read_only(words: &[&str]) -> bool {
 }
 
 
-/// Runs one command and saves the store only when a mutating command succeeded; a login whose save fails yields no session.
 pub fn apply_command<Output: Write>(
     state: &mut State,
     context: &Context<Output>,
@@ -124,34 +209,61 @@ pub fn apply_command<Output: Write>(
     store_path: &Path,
     words: &[&str],
 ) -> Result<String, AuthError> {
-    let done = execute(state, context, now, words)?;
+    apply_command_with(state, context, None, now, (store_path, words))
+}
+
+
+pub fn undo_login<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    (user_hint, source): (Option<&str>, &str),
+    done: &str,
+) -> Result<String, AuthError> {
+    let revoked = done.strip_prefix("ok ").and_then(|token| revoke_session(&mut state.sessions, token));
+    let audit_user = audit_name(&state.accounts, user_hint.or(revoked.as_deref()).unwrap_or(ANONYMOUS_ACTOR));
+    let parameters = [("reason", denial_reason(Denial::Internal).to_owned()), ("source", source.to_owned())];
+    record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Failure, &parameters)?;
+    let revocation = [
+        ("reason", denial_reason(Denial::Internal).to_owned()),
+        ("count", usize::from(revoked.is_some()).to_string()),
+    ];
+    record(
+        context,
+        now,
+        &audit_user,
+        ACTION_SESSION_REVOKE,
+        &audit_user,
+        Outcome::Success,
+        &revocation,
+    )?;
+    Err(AuthError::InvalidCredentials)
+}
+
+
+/// Runs one command and saves the store only when a mutating command succeeded; a login whose save fails yields no session.
+pub fn apply_command_with<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    webauthn: Option<&Webauthn>,
+    now: OffsetDateTime,
+    (store_path, words): (&Path, &[&str]),
+) -> Result<String, AuthError> {
+    let done = execute_with(state, context, webauthn, now, words)?;
     let saved = if is_read_only(words) {
         Ok(())
     } else {
-        save_accounts_file(store_path, &state.accounts, context.random)
+        save_store_file(store_path, &state.accounts, &state.credentials, context.random)
     };
     match (saved, words) {
         (Ok(()), _) => Ok(done),
         (Err(error), ["login", user, _, source, ..]) => {
             tracing::warn!(%error, "store save failed after a successful login");
-            let revoked = done.strip_prefix("ok ").and_then(|token| revoke_session(&mut state.sessions, token));
-            let audit_user = audit_name(&state.accounts, user);
-            let parameters = [("reason", denial_reason(Denial::Internal).to_owned()), ("source", (*source).to_owned())];
-            record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Failure, &parameters)?;
-            let revocation = [
-                ("reason", denial_reason(Denial::Internal).to_owned()),
-                ("count", usize::from(revoked.is_some()).to_string()),
-            ];
-            record(
-                context,
-                now,
-                &audit_user,
-                ACTION_SESSION_REVOKE,
-                &audit_user,
-                Outcome::Success,
-                &revocation,
-            )?;
-            Err(AuthError::InvalidCredentials)
+            undo_login(state, context, now, (Some(user), source), &done)
+        }
+        (Err(error), ["wa-login-finish", _, source, ..]) => {
+            tracing::warn!(%error, "store save failed after a successful WebAuthn login");
+            undo_login(state, context, now, (None, source), &done)
         }
         (Err(error), _) => Err(error),
     }
@@ -166,16 +278,43 @@ pub fn run<Input: BufRead, Output: Write>(
     random: RandomFn,
 ) -> Result<(), AuthError> {
     match arguments {
-        [store, audit, key_file, compromised_file] => serve(&[store, audit, key_file, compromised_file], input, output, clock, random),
+        [store, audit, key_file, compromised_file] => {
+            serve(&[store, audit, key_file, compromised_file], (None, None), (input, output), clock, random)
+        }
+        [store, audit, key_file, compromised_file, webauthn_file] => serve(
+            &[store, audit, key_file, compromised_file],
+            (Some(webauthn_file), None),
+            (input, output),
+            clock,
+            random,
+        ),
+        [store, audit, key_file, compromised_file, webauthn_file, roles_file] => serve(
+            &[store, audit, key_file, compromised_file],
+            (Some(webauthn_file), Some(roles_file)),
+            (input, output),
+            clock,
+            random,
+        ),
         _ => Err(AuthError::Usage(USAGE.to_owned())),
     }
 }
 
 
+pub fn load_roles(file: &str) -> Result<RoleCatalog, AuthError> {
+    load_catalog(File::open(file)?)
+}
+
+
+pub fn load_webauthn(file: &str) -> Result<Webauthn, AuthError> {
+    let config = parse_webauthn_config(&std::fs::read_to_string(file)?, file)?;
+    build_webauthn(&config)
+}
+
+
 pub fn serve<Input: BufRead, Output: Write>(
     paths: &[&String; PATH_COUNT],
-    input: Input,
-    mut output: Output,
+    (webauthn_file, roles_file): (Option<&String>, Option<&String>),
+    (input, mut output): (Input, Output),
     clock: Clock,
     random: RandomFn,
 ) -> Result<(), AuthError> {
@@ -185,7 +324,7 @@ pub fn serve<Input: BufRead, Output: Write>(
     let key = read_key_file(key_file)?;
     let audit_log = open_file_log(&PathBuf::from(audit))?;
     let compromised = load_compromised(BufReader::new(File::open(compromised_file)?))?;
-    let catalog = builtin_catalog();
+    let catalog = roles_file.map(|file| load_roles(file)).transpose()?.unwrap_or_else(builtin_catalog);
     let context = Context {
         audit: &audit_log,
         random,
@@ -196,14 +335,17 @@ pub fn serve<Input: BufRead, Output: Write>(
         tenant: CLI_TENANT,
         request_id: CLI_REQUEST_ID,
     };
+    let webauthn = webauthn_file.map(|file| load_webauthn(file)).transpose()?;
+    let (accounts, credentials) = load_store_file(&store_path)?;
     let mut state = State {
-        accounts: load_accounts_file(&store_path)?,
+        accounts,
+        credentials,
         ..State::default()
     };
     input.lines().try_for_each(|line| {
         let text = line?;
         let words: Vec<&str> = text.split_whitespace().collect();
-        let reply = match apply_command(&mut state, &context, clock(), &store_path, &words) {
+        let reply = match apply_command_with(&mut state, &context, webauthn.as_ref(), clock(), (&store_path, &words)) {
             Ok(done) => done,
             Err(error) => format!("error {error}"),
         };
