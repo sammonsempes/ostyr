@@ -19,9 +19,10 @@ fn state(items: &[(&str, &str)]) -> ConfigState {
 
 
 #[test]
-fn equal_states_give_an_empty_plan() {
+fn equal_states_give_an_empty_plan() -> TestResult {
     let current = state(&[("a", "1\n")]);
     assert!(plan(&current, &current).is_empty());
+    Ok(())
 }
 
 
@@ -54,7 +55,7 @@ fn plan_orders_creates_updates_deletes_with_diffs() -> TestResult {
 
 
 #[test]
-fn drift_and_rollback_are_plans() {
+fn drift_and_rollback_are_plans() -> TestResult {
     let git = state(&[("a", "1\n")]);
     let real = state(&[("a", "edited\n")]);
     assert_eq!(drift(&git, &real), plan(&git, &real));
@@ -62,12 +63,14 @@ fn drift_and_rollback_are_plans() {
     assert!(drift(&git, &git).is_empty());
     let previous = state(&[("a", "0\n")]);
     assert_eq!(rollback(&previous, &git), plan(&previous, &git));
+    Ok(())
 }
 
 
 #[test]
-fn action_names() {
+fn action_names() -> TestResult {
     assert_eq!(action_name(ChangeKind::Create), "config.create");
     assert_eq!(action_name(ChangeKind::Update), "config.update");
     assert_eq!(action_name(ChangeKind::Delete), "config.delete");
+    Ok(())
 }

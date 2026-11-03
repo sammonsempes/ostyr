@@ -168,13 +168,14 @@ fn failure_midway_stops_and_reports_applied() -> TestResult {
 
 
 #[test]
-fn applier_error_message_names_key_and_count() {
+fn applier_error_message_names_key_and_count() -> TestResult {
     let error = ApplyError::Applier {
         key: "k".to_owned(),
         applied: vec!["x".to_owned()],
         source: Box::new(io::Error::other("boom")),
     };
     assert_eq!(error.to_string(), "applying `k` failed after 1 change(s): boom");
+    Ok(())
 }
 
 
