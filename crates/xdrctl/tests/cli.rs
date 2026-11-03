@@ -52,9 +52,11 @@ const MODULE_BAD: &str = include_str!("../../core-config/tests/fixtures/module_u
 const WORLD_READABLE: u32 = 0o644;
 
 
+#[cfg(unix)]
 const READ_ONLY: u32 = 0o500;
 
 
+#[cfg(unix)]
 const FULL_OWNER: u32 = 0o700;
 
 
