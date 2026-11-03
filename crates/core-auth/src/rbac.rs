@@ -44,6 +44,9 @@ pub const PERMISSION_ROLES_MANAGE: &str = "roles.manage";
 pub const PERMISSION_AUDIT_EXPORT: &str = "audit.export";
 
 
+pub const POLICY_WEBAUTHN_REQUIRED: &str = "policy.webauthn_required";
+
+
 pub const PRIVILEGED_PERMISSIONS: [&str; 4] = [
     PERMISSION_USERS_MANAGE,
     PERMISSION_CONFIG_MANAGE,
@@ -120,6 +123,11 @@ pub fn is_allowed(catalog: &RoleCatalog, roles: &RoleSet, permission: &str) -> b
 
 pub fn requires_mfa(catalog: &RoleCatalog, roles: &RoleSet) -> bool {
     PRIVILEGED_PERMISSIONS.iter().any(|privileged| is_allowed(catalog, roles, privileged))
+}
+
+
+pub fn webauthn_required(catalog: &RoleCatalog, roles: &RoleSet) -> bool {
+    is_allowed(catalog, roles, POLICY_WEBAUTHN_REQUIRED)
 }
 
 

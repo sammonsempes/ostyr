@@ -59,7 +59,7 @@ fn sample() -> AccountMap {
 fn accounts_round_trip() -> TestResult {
     let mut bytes = Vec::new();
     save_accounts(&mut bytes, &sample())?;
-    assert!(String::from_utf8(bytes.clone())?.contains("\"version\": 1"));
+    assert!(String::from_utf8(bytes.clone())?.contains("\"version\": 2"));
     assert_eq!(load_accounts(bytes.as_slice())?, sample());
     Ok(())
 }

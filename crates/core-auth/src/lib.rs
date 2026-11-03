@@ -15,3 +15,4 @@ pub mod session;
 pub mod store;
 pub mod totp;
 pub mod types;
+pub mod webauthn;
