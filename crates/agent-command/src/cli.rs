@@ -6,12 +6,26 @@ use crate::verify::{action_name, verify_command};
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH};
 use std::io::{BufRead, Write};
+use std::time::{Duration, SystemTimeError};
+use tracing::warn;
 
 
 pub const SIGN_USAGE: &str = "sign <seed-hex> <key-id> <agent> <tenant> <sequence> <action> [parameter]";
 
 
 pub const COMMAND_LIFETIME_SECONDS: u64 = 60;
+
+
+/// A clock before the epoch is logged and read as 0, which refuses every command (issued in the future).
+pub fn seconds_since_epoch(elapsed: Result<Duration, SystemTimeError>) -> u64 {
+    elapsed.map_or_else(
+        |error| {
+            warn!(error = %error, "system clock is before the Unix epoch, treating it as 0");
+            0
+        },
+        |duration| duration.as_secs(),
+    )
+}
 
 
 /// Writes `seed <hex>` and `public <hex>` for a fresh random key.

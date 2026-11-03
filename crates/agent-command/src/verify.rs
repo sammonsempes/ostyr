@@ -1,7 +1,9 @@
 use crate::codec::{decode_exact, signing_message};
 use crate::error::{CommandError, StoreError};
-use crate::model::{Action, Command, Envelope, KeyClass, TrustedKey, TrustedKeys, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS};
-use crate::store::{file_saver, load_sequence};
+use crate::model::{
+    Action, Command, Envelope, KeyClass, Sequences, TrustedKey, TrustedKeys, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_SEQUENCE_ADVANCE,
+};
+use crate::store::{file_saver, load_sequences};
 use crate::types::SaveFn;
 use core_config::reload::{current_config, ReloadEngine};
 use ed25519_dalek::{Signature, SIGNATURE_LENGTH};
@@ -10,24 +12,30 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tracing::warn;
 
 
-/// The stored sequence is loaded now: a corrupt store stops the agent instead of re-opening the replay window.
+/// The stored sequences are loaded now: a corrupt store stops the agent instead of re-opening the replay window.
 pub fn open_verifier(agent_id: &str, tenant: &str, keys: Arc<ReloadEngine<TrustedKeys>>, state_file: &Path) -> Result<Verifier, StoreError> {
     Ok(open_verifier_with(
         agent_id,
         tenant,
         keys,
-        load_sequence(state_file)?,
+        load_sequences(state_file)?,
         file_saver(state_file.to_path_buf()),
     ))
 }
 
 
-pub fn open_verifier_with(agent_id: &str, tenant: &str, keys: Arc<ReloadEngine<TrustedKeys>>, last_sequence: u64, save: Box<SaveFn>) -> Verifier {
+pub fn open_verifier_with(
+    agent_id: &str,
+    tenant: &str,
+    keys: Arc<ReloadEngine<TrustedKeys>>,
+    last_sequences: Sequences,
+    save: Box<SaveFn>,
+) -> Verifier {
     Verifier {
         agent_id: agent_id.to_owned(),
         tenant: tenant.to_owned(),
         keys,
-        last_sequence: Mutex::new(last_sequence),
+        last_sequences: Mutex::new(last_sequences),
         save,
     }
 }
@@ -114,14 +122,27 @@ pub fn check_class(class: KeyClass, action: &Action) -> Result<(), CommandError>
 }
 
 
-/// The lock is held from the comparison to the durable save; a failed save leaves the sequence unaccepted.
-pub fn accept_sequence(verifier: &Verifier, sequence: u64) -> Result<(), CommandError> {
-    let mut last = verifier.last_sequence.lock().unwrap_or_else(PoisonError::into_inner);
-    if sequence <= *last {
+/// The lock is held from the comparison to the durable save; a failed save leaves the sequences unaccepted.
+pub fn accept_sequence(verifier: &Verifier, class: KeyClass, sequence: u64) -> Result<(), CommandError> {
+    let mut last = verifier.last_sequences.lock().unwrap_or_else(PoisonError::into_inner);
+    let previous = match class {
+        KeyClass::Routine => last.routine,
+        KeyClass::Sensitive => last.sensitive,
+    };
+    if sequence <= previous {
         Err(CommandError::ReplayedSequence)
+    } else if sequence - previous > MAX_SEQUENCE_ADVANCE {
+        Err(CommandError::SequenceJump)
     } else {
-        (verifier.save)(sequence).map_err(CommandError::Store)?;
-        *last = sequence;
+        let advanced = match class {
+            KeyClass::Routine => Sequences { routine: sequence, ..*last },
+            KeyClass::Sensitive => Sequences {
+                sensitive: sequence,
+                ..*last
+            },
+        };
+        (verifier.save)(&advanced).map_err(CommandError::Store)?;
+        *last = advanced;
         Ok(())
     }
 }
@@ -138,7 +159,7 @@ pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, Com
     check_target(verifier, &command)?;
     check_times(&command, now)?;
     check_class(key.class, &command.action)?;
-    accept_sequence(verifier, command.sequence)?;
+    accept_sequence(verifier, key.class, command.sequence)?;
     Ok(command)
 }
 

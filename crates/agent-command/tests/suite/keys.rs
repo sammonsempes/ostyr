@@ -107,3 +107,22 @@ fn a_reload_with_an_invalid_file_keeps_the_old_keys() -> TestResult {
     assert_eq!(current_config(&engine).keys.len(), KEY_COUNT);
     Ok(())
 }
+
+
+#[test]
+fn the_same_public_key_under_two_ids_is_refused_at_load_and_at_reload() -> TestResult {
+    let twice = format!(
+        "keys:\n{}{}",
+        key_entry("a", "routine", ROUTINE_SEED, 0, 1, false),
+        key_entry("b", "sensitive", ROUTINE_SEED, 0, 1, false)
+    );
+    assert!(engine_error(&twice)?.contains("public key of `b` is already listed under `a`"));
+    let dir = tempdir()?;
+    let path = dir.path().join("keys.yaml");
+    replace_file(&path, &keys_text(false, NOW + LIFETIME))?;
+    let engine = engine_at(&path)?;
+    replace_file(&path, &twice)?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
+    assert_eq!(current_config(&engine).keys.len(), KEY_COUNT);
+    Ok(())
+}

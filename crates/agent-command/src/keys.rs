@@ -46,11 +46,15 @@ impl TryFrom<RawKeyFile> for TrustedKeys {
     type Error = KeyFileError;
 
     fn try_from(file: RawKeyFile) -> Result<Self, Self::Error> {
-        let keys = file.keys.iter().try_fold(BTreeMap::new(), |mut keys, raw| {
+        let keys = file.keys.iter().try_fold(BTreeMap::<String, TrustedKey>::new(), |mut keys, raw| {
             let key = trusted_key(raw)?;
-            match keys.insert(raw.id.clone(), key) {
-                Some(_) => Err(KeyFileError::Duplicate { id: raw.id.clone() }),
-                None => Ok(keys),
+            let same_key = keys
+                .iter()
+                .find_map(|(id, other)| (other.public_key == key.public_key).then(|| id.clone()));
+            match (same_key, keys.insert(raw.id.clone(), key)) {
+                (_, Some(_)) => Err(KeyFileError::Duplicate { id: raw.id.clone() }),
+                (Some(first), None) => Err(KeyFileError::DuplicatePublicKey { id: raw.id.clone(), first }),
+                (None, None) => Ok(keys),
             }
         })?;
         Ok(TrustedKeys { keys })

@@ -1,11 +1,12 @@
 use crate::common::types::TestResult;
 use crate::common::{setup, NOW, SEED_LENGTH};
-use agent_command::cli::{parse_action, parse_sequence, signing_key_from, verify_session, write_keypair, write_signed};
+use agent_command::cli::{parse_action, parse_sequence, seconds_since_epoch, signing_key_from, verify_session, write_keypair, write_signed};
 use agent_command::error::CliError;
 use agent_command::model::Action;
 use agent_command::sign::os_random;
 use data_encoding::HEXLOWER;
 use std::io::{self, BufReader, Read, Write};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 
 const STORED: u64 = 3;
@@ -192,5 +193,15 @@ fn a_session_reports_io_failures() -> TestResult {
         verify_session(&setup.verifier, "x\n".as_bytes(), &mut FlushFails, fixed_now),
         Err(CliError::Io(_))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn a_clock_before_the_epoch_reads_as_zero() -> TestResult {
+    let before = UNIX_EPOCH.duration_since(SystemTime::now());
+    assert!(before.is_err());
+    assert_eq!(seconds_since_epoch(before), 0);
+    assert_eq!(seconds_since_epoch(Ok(Duration::from_secs(NOW))), NOW);
     Ok(())
 }
