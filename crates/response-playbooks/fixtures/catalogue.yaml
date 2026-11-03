@@ -1,0 +1,48 @@
+actions:
+  - connector: fortigate
+    action: block_ip
+    destructive: true
+    compensate: unblock_ip
+    breaker: { kind: block_ip, target: ip, duration: duration }
+    params:
+      ip: { type: ip }
+      duration: { type: duration }
+  - connector: fortigate
+    action: unblock_ip
+    params:
+      ip: { type: ip }
+  - connector: dns
+    action: sinkhole
+    destructive: true
+    compensate: unsinkhole
+    breaker: { kind: block_domain, target: domain, duration: duration }
+    params:
+      domain: { type: domain }
+      duration: { type: duration }
+  - connector: dns
+    action: unsinkhole
+    params:
+      domain: { type: domain }
+  - action: isolate_endpoint
+    destructive: true
+    compensate: release_endpoint
+    breaker: { kind: isolate_endpoint, target: host }
+    params:
+      host: { type: string }
+  - action: release_endpoint
+    params:
+      host: { type: string }
+  - connector: entra_id
+    action: revoke_sessions
+    params:
+      user: { type: string }
+  - connector: slack
+    action: notify
+    params:
+      channel: { type: string }
+      message: { type: string }
+  - connector: pagerduty
+    action: page
+    params:
+      severity: { type: string }
+      summary: { type: string }

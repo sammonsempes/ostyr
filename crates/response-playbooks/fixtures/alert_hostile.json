@@ -1,0 +1,9 @@
+{
+  "verdict": "malicious",
+  "category": "command_and_control",
+  "confidence": 0.93,
+  "remote_ip": { "value": "203.0.113.9", "reputation": 95, "is_internal": false },
+  "domain": "c2.evil.example",
+  "host": { "value": "ws-0042", "criticality": "normal", "tags": ["workstation"] },
+  "user": { "value": "jdoe", "is_privileged": false, "tags": [] }
+}

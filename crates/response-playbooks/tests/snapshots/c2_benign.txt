@@ -1,0 +1,2 @@
+playbook Block confirmed C2 v3 mode=enforce
+trigger not matched: alert.confidence expected ">= 0.8", alert.verdict expected "malicious"
