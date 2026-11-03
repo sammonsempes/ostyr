@@ -1,0 +1,38 @@
+name: Block confirmed C2
+version: 3
+mode: enforce
+trigger:
+  alert.verdict: malicious
+  alert.category: command_and_control
+  alert.confidence: ">= 0.8"
+steps:
+  - if: "{{ alert.remote_ip and alert.remote_ip.reputation >= 80 and not alert.remote_ip.is_internal }}"
+    then:
+      - connector: fortigate
+        action: block_ip
+        params: { ip: "{{ alert.remote_ip }}", duration: 24h }
+        compensate: unblock_ip
+  - if: "{{ alert.domain }}"
+    then:
+      - connector: dns
+        action: sinkhole
+        params: { domain: "{{ alert.domain }}", duration: 24h }
+  - if: "{{ alert.host.criticality != 'critical' }}"
+    then:
+      - action: isolate_endpoint
+        params: { host: "{{ alert.host }}" }
+    else:
+      - action: request_approval
+        params: { role: soc_lead, timeout: 15m, action: isolate_endpoint }
+  - if: "{{ alert.user and not alert.user.is_privileged }}"
+    then:
+      - connector: entra_id
+        action: revoke_sessions
+        params: { user: "{{ alert.user }}" }
+  - connector: slack
+    action: notify
+    params: { channel: "#soc", message: "C2 confirmed on {{ alert.host }}: actions {{ playbook.actions_done }}" }
+on_error:
+  - connector: pagerduty
+    action: page
+    params: { severity: high, summary: "C2 playbook failed on {{ alert.host }}" }
