@@ -1,7 +1,7 @@
 use crate::canonical::{actor_label, outcome_label};
 use crate::error::AuditError;
 use crate::model::{Outcome, Record, GENESIS_HASH};
-use crate::verify::{check_line, raw_lines, verify};
+use crate::verify::{check_line, raw_lines, same_as_first_pass, verify};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -65,10 +65,10 @@ pub fn export<Input: BufRead, Output: Write, Open: FnMut() -> io::Result<Input>>
     let report = verify(open()?, expected_head)?;
     raw_lines(open()?)
         .enumerate()
-        .try_fold(GENESIS_HASH.to_owned(), |previous, (index, line)| {
-            let record = check_line(&line?, &previous).map_err(|reason| AuditError::Broken { line: index + 1, reason })?;
+        .try_fold((GENESIS_HASH.to_owned(), 0), |state, (index, line)| {
+            let record = check_line(&line?, &state.0).map_err(|reason| AuditError::Broken { line: index + 1, reason })?;
             writeln!(out, "{}", to_ecs(&record))?;
-            Ok::<_, AuditError>(record.hash)
+            Ok::<_, AuditError>((record.hash, index + 1))
         })
-        .map(|_| report.records)
+        .and_then(|(head, records)| same_as_first_pass(&report, head, records))
 }

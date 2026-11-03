@@ -104,6 +104,14 @@ fn every_reviewed_probe_is_redacted() {
         ("note", "bearer abc", "bearer [REDACTED]"),
         ("note", "BASIC dXNlcg==", "BASIC [REDACTED]"),
         ("note", "Bearer Bearer abc", "Bearer [REDACTED]"),
+        ("note", "x_bearer SECRET", "x_bearer [REDACTED]"),
+        ("note", "9basic SECRET", "9basic [REDACTED]"),
+        ("header", "Authorization: token SECRET", "Authorization: token [REDACTED]"),
+        (
+            "note",
+            "{\"Authorization\": \"Token SECRET\"}",
+            "{\"Authorization\": \"Token [REDACTED]\"}",
+        ),
         (
             "note",
             "x\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\ny",

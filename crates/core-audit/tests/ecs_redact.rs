@@ -14,6 +14,7 @@ use core_audit::ecs::{category, ecs_outcome, export, to_ecs};
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::Outcome;
+use core_audit::verify::{same_as_first_pass, VerifyReport};
 use core_redact::value::REDACTED;
 use failing_reader::flaky_reader;
 use failing_writer::FailingWriter;
@@ -195,4 +196,49 @@ fn export_checks_the_anchored_head() -> TestResult {
     ));
     assert!(out.is_empty());
     Ok(())
+}
+
+
+const OTHER_CHAIN_OFFSET: usize = 10;
+
+
+fn swapped_chain() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let log = genesis_log(Vec::new());
+    (0..RECORD_COUNT).try_for_each(|index| {
+        entry(index + OTHER_CHAIN_OFFSET)
+            .map_err(|error| error.to_string())
+            .and_then(|new| append(&log, new).map(|_| ()).map_err(|error| error.to_string()))
+    })?;
+    Ok(vec![String::from_utf8(log.state.into_inner()?.writer)?])
+}
+
+
+#[test]
+fn export_refuses_an_input_that_changes_between_the_passes() -> TestResult {
+    let (lines, _) = build_log(RECORD_COUNT)?;
+    let (longer, _) = build_log(RECORD_COUNT + 1)?;
+    let first = lines.concat().into_bytes();
+    let shorter = lines.iter().take(RECORD_COUNT - 1).cloned().collect::<String>().into_bytes();
+    let second_pass_inputs = [shorter, longer.concat().into_bytes(), swapped_chain()?.concat().into_bytes()];
+    second_pass_inputs.iter().try_for_each(|second| -> TestResult {
+        let calls = Cell::new(0);
+        let changing = || {
+            calls.set(calls.get() + 1);
+            Ok(Cursor::new(if calls.get() > 1 { second.clone() } else { first.clone() }))
+        };
+        assert!(matches!(export(changing, &mut Vec::new(), None), Err(AuditError::HeadMismatch { .. })));
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_changed_head_or_count_is_refused() {
+    let report = VerifyReport {
+        records: RECORD_COUNT,
+        head: "abc".to_owned(),
+    };
+    assert!(same_as_first_pass(&report, "abc".to_owned(), RECORD_COUNT).is_ok());
+    assert!(same_as_first_pass(&report, "abc".to_owned(), RECORD_COUNT + 1).is_err());
+    assert!(same_as_first_pass(&report, "abd".to_owned(), RECORD_COUNT).is_err());
 }

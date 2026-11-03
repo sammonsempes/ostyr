@@ -65,3 +65,14 @@ pub fn check_head(expected_head: Option<&str>, head: String) -> Result<String, A
         _ => Ok(head),
     }
 }
+
+
+/// Pass two must end on the head and count pass one verified, else the input changed between the passes.
+pub fn same_as_first_pass(report: &VerifyReport, head: String, records: usize) -> Result<usize, AuditError> {
+    (head == report.head && records == report.records)
+        .then_some(records)
+        .ok_or_else(|| AuditError::HeadMismatch {
+            expected: report.head.clone(),
+            actual: head.clone(),
+        })
+}
