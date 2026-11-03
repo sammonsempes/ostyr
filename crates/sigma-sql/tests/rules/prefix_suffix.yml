@@ -1,0 +1,9 @@
+title: startswith and endswith
+logsource:
+  category: file_event
+  product: windows
+detection:
+  selection:
+    TargetFilename|startswith: 'C:\Users\'
+    Image|endswith: '.exe'
+  condition: selection

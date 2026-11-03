@@ -1,0 +1,11 @@
+title: CIDR match
+logsource:
+  category: network_connection
+  product: linux
+detection:
+  selection:
+    DestinationIp|cidr:
+      - 10.0.0.0/8
+      - 2001:db8::/32
+    DestinationPort: 4444
+  condition: selection

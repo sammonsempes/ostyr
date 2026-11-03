@@ -1,0 +1,10 @@
+title: List of maps is an OR
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    - Image|endswith: /bash
+      CommandLine|contains: 'nc -e'
+    - Image|endswith: /sh
+  condition: selection

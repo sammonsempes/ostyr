@@ -1,0 +1,12 @@
+title: Condition forms
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  sel_one:
+    Image|endswith: '\a.exe'
+  sel_two:
+    Image|endswith: '\b.exe'
+  filter_user:
+    User: SYSTEM
+  condition: (sel_one or sel_two) and not filter_user

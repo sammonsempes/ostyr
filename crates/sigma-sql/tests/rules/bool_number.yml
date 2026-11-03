@@ -1,0 +1,8 @@
+title: Booleans and numbers with string modifiers
+logsource:
+  category: network_connection
+detection:
+  selection:
+    Initiated: true
+    DestinationPort|contains: 44
+  condition: selection

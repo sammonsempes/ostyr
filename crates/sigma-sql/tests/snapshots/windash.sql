@@ -1,0 +1,1 @@
+SELECT `event.id` FROM `events` WHERE `event.category` = 'process' AND `host.os.type` = 'windows' AND ((`process.command_line` ilike '% -enc%' OR `process.command_line` ilike '% /enc%' OR `process.command_line` ilike '% –enc%' OR `process.command_line` ilike '% —enc%' OR `process.command_line` ilike '% ―enc%'))

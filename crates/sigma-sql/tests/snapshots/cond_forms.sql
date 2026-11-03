@@ -1,0 +1,1 @@
+SELECT `event.id` FROM `events` WHERE `event.category` = 'process' AND `host.os.type` = 'windows' AND (((`process.executable` ilike '%\\\\a.exe') OR (`process.executable` ilike '%\\\\b.exe')) AND NOT (`user.name` ilike 'SYSTEM'))
