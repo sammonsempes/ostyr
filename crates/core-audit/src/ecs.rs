@@ -56,14 +56,20 @@ pub fn to_ecs(record: &Record) -> Value {
 }
 
 
-/// Reads a log (refusing a broken chain or, given `expected_head`, a head that differs) and writes one ECS event per line; returns the event count.
+/// Verifies the whole chain (and the anchor, given `expected_head`) first, then writes one ECS event per line; returns the event count.
 pub fn export<Input: BufRead, Output: Write>(input: Input, out: &mut Output, expected_head: Option<&str>) -> Result<usize, AuditError> {
-    raw_lines(input)
+    let records = raw_lines(input)
         .enumerate()
-        .try_fold((0, GENESIS_HASH.to_owned()), |(_, previous), (index, line)| {
-            let record = check_line(&line?, &previous).map_err(|reason| AuditError::Broken { line: index + 1, reason })?;
-            writeln!(out, "{}", to_ecs(&record))?;
-            Ok((index + 1, record.hash))
-        })
-        .and_then(|(count, head)| check_head(expected_head, head).map(|_| count))
+        .try_fold(Vec::new(), |mut records: Vec<Record>, (index, line)| {
+            let previous = records.last().map_or(GENESIS_HASH, |record| record.hash.as_str());
+            let record = check_line(&line?, previous).map_err(|reason| AuditError::Broken { line: index + 1, reason })?;
+            records.push(record);
+            Ok::<_, AuditError>(records)
+        })?;
+    check_head(
+        expected_head,
+        records.last().map_or(GENESIS_HASH, |record| record.hash.as_str()).to_owned(),
+    )?;
+    records.iter().try_for_each(|record| writeln!(out, "{}", to_ecs(record)))?;
+    Ok(records.len())
 }

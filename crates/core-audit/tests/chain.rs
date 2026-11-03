@@ -259,9 +259,10 @@ fn rewritten_chain_does_not_match_the_anchor() -> TestResult {
 
 
 #[test]
-fn read_failure_is_an_io_error() {
+fn read_failure_is_an_io_error() -> Result<(), Box<dyn std::error::Error>> {
     let result = verify(BufReader::new(flaky_reader(Vec::new(), true)), None);
     assert!(matches!(result, Err(AuditError::Io(_))));
+    Ok(())
 }
 
 

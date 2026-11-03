@@ -102,6 +102,7 @@ fn export_refuses_a_broken_chain() -> TestResult {
         export(lines.concat().as_bytes(), &mut out, None),
         Err(AuditError::Broken { line: REMOVED_LINE, .. })
     ));
+    assert!(out.is_empty());
     Ok(())
 }
 
@@ -170,10 +171,12 @@ fn export_checks_the_anchored_head() -> TestResult {
     let (lines, head) = build_log(RECORD_COUNT)?;
     let text = lines.concat();
     assert_eq!(export(text.as_bytes(), &mut Vec::new(), Some(&head))?, RECORD_COUNT);
+    let mut out = Vec::new();
     assert!(matches!(
-        export(text.as_bytes(), &mut Vec::new(), Some("abc")),
+        export(text.as_bytes(), &mut out, Some("abc")),
         Err(AuditError::HeadMismatch { .. })
     ));
+    assert!(out.is_empty());
     Ok(())
 }
 

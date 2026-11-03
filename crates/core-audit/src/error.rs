@@ -33,6 +33,8 @@ pub enum AuditError {
     HeadMismatch { expected: String, actual: String },
     #[error("an earlier append failed: the log handle refuses further appends, reopen the log to verify it")]
     LogPoisoned,
+    #[error("log file mode is {mode:o}, it must grant no access to group or other")]
+    InsecurePermissions { mode: u32 },
     #[error("usage: append <file> <count> | verify <file> [head] | export <file> [head]")]
     Usage,
     #[error("invalid count `{value}`: {source}")]

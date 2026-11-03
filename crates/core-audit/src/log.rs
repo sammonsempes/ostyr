@@ -4,7 +4,8 @@ use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::verify::verify;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
-use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -56,9 +57,48 @@ pub fn genesis_log<Output: Write>(writer: Output) -> AuditLog<Output> {
 pub const LOG_FILE_MODE: u32 = 0o600;
 
 
+pub const GROUP_OTHER_MASK: u32 = 0o077;
+
+
+#[cfg(unix)]
+pub fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
+    options.mode(LOG_FILE_MODE)
+}
+
+
+#[cfg(not(unix))]
+pub fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
+    options
+}
+
+
+#[cfg(unix)]
+pub fn check_private(file: &File) -> Result<(), AuditError> {
+    let mode = file.metadata()?.permissions().mode();
+    if mode & GROUP_OTHER_MASK == 0 {
+        Ok(())
+    } else {
+        Err(AuditError::InsecurePermissions {
+            mode: mode & !FILE_TYPE_MASK,
+        })
+    }
+}
+
+
+#[cfg(unix)]
+pub const FILE_TYPE_MASK: u32 = 0o170000;
+
+
+#[cfg(not(unix))]
+pub fn check_private(_file: &File) -> Result<(), AuditError> {
+    Ok(())
+}
+
+
 /// Opens (creating if needed) an append-only file, verifies its existing chain and continues it.
 pub fn open_file_log(path: &Path) -> Result<AuditLog<File>, AuditError> {
-    let file = OpenOptions::new().read(true).append(true).create(true).mode(LOG_FILE_MODE).open(path)?;
+    let file = owner_only(OpenOptions::new().read(true).append(true).create(true)).open(path)?;
+    check_private(&file)?;
     let report = verify(BufReader::new(&file), None)?;
     Ok(new_log(file, &report.head, sync_file))
 }
@@ -73,7 +113,7 @@ pub fn write_durably<Output: Write>(writer: &mut Output, sync: fn(&mut Output) -
 
 /// Chains, writes, flushes and syncs one record; the head only advances once the whole line is durable.
 pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
-    let mut state = log.state.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut state = log.state.lock().map_err(|_| AuditError::LogPoisoned)?;
     if state.poisoned {
         Err(AuditError::LogPoisoned)
     } else {

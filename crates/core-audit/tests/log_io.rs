@@ -133,6 +133,7 @@ fn file_log_refuses_a_tampered_file_and_a_directory() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("audit.log");
     fs::write(&path, "garbage\n")?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY_MODE))?;
     assert!(matches!(open_file_log(&path), Err(AuditError::Broken { line: 1, .. })));
     assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
     Ok(())
@@ -178,5 +179,47 @@ fn file_log_is_created_owner_only() -> TestResult {
     let path = dir.path().join("audit.log");
     open_file_log(&path)?;
     assert_eq!(fs::metadata(&path)?.permissions().mode() & MODE_MASK, OWNER_ONLY_MODE);
+    Ok(())
+}
+
+
+#[derive(Debug)]
+pub struct PanickingWriter;
+
+
+impl io::Write for PanickingWriter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        std::panic::resume_unwind(Box::new("injected writer panic"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+#[test]
+fn panic_mid_write_poisons_the_mutex_and_refuses_appends() -> TestResult {
+    let log = genesis_log(PanickingWriter);
+    let first_entry = entry(0)?;
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| append(&log, first_entry)));
+    assert!(first.is_err());
+    assert!(matches!(append(&log, entry(1)?), Err(AuditError::LogPoisoned)));
+    Ok(())
+}
+
+
+const WIDE_MODE: u32 = 0o640;
+
+
+#[test]
+fn file_log_refuses_group_or_other_access() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("audit.log");
+    fs::write(&path, "")?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(WIDE_MODE))?;
+    assert!(matches!(open_file_log(&path), Err(AuditError::InsecurePermissions { mode: WIDE_MODE })));
+    fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY_MODE))?;
+    assert!(open_file_log(&path).is_ok());
     Ok(())
 }
