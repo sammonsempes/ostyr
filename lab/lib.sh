@@ -90,15 +90,16 @@ run_tofu() {
 
 run_tofu_bounded() {
     local pid waited=0 limit="${LAB_DESTROY_TIMEOUT:-$DESTROY_TIMEOUT_SECONDS}"
+    set -m
     run_tofu "$@" &
     pid=$!
+    set +m
     while kill -0 "$pid" 2>/dev/null && ((waited < limit)); do
         sleep 1
         waited=$((waited + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
-        pkill -KILL -P "$pid" || log "no child of $pid to kill"
-        kill -KILL "$pid" || log "process $pid already gone"
+        kill -KILL -- "-$pid" || log "process group $pid already gone"
         wait "$pid" || log "destroy killed after ${limit}s"
         false
     else
