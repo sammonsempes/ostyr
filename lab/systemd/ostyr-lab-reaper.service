@@ -1,0 +1,6 @@
+[Unit]
+Description=Destroy expired Ostyr lab VMs
+
+[Service]
+Type=oneshot
+ExecStart=%h/ostyr/lab/reaper.sh

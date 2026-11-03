@@ -12,19 +12,7 @@ template="$LAB_DIR/images/$image.pkr.hcl"
 [[ -f "$template" ]] || die "no template $template"
 volume="$image.qcow2"
 stamp_volume="$volume.built"
-
-volume_path() {
-    virsh_lab vol-path --pool "$LAB_POOL" "$1"
-}
-
-overlays_of() {
-    local base_path="$1"
-    local name
-    virsh_lab vol-list --pool "$LAB_POOL" | awk 'NR > 2 && NF {print $1}' | while read -r name; do
-        virsh_lab vol-dumpxml --pool "$LAB_POOL" "$name" | awk -v base="$base_path" -v name="$name" \
-            '/<backingStore>/ {inside = 1} inside && index($0, "<path>" base "</path>") {print name} /<\/backingStore>/ {inside = 0}'
-    done
-}
+UBUNTU_CLOUDIMAGE_KEYRING="${UBUNTU_CLOUDIMAGE_KEYRING:-/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg}"
 
 upload_volume() {
     local name="$1" file="$2" format="$3"
@@ -38,8 +26,19 @@ work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-packer-$image" -f "$work_dir/id_ed25519"
+
+base_url="$(sed -n '/variable "image_base_url"/,/}/ s/^ *default *= *"\(.*\)"/\1/p' "$template")"
+image_file="$(sed -n 's/^ *iso_url *= *"\${var.image_base_url}\/\(.*\)"/\1/p' "$template")"
+[[ -n "$base_url" && -n "$image_file" ]] || die "cannot read image_base_url and iso_url from $template"
+curl --fail --silent --show-error --location --output "$work_dir/SHA256SUMS" "$base_url/SHA256SUMS"
+curl --fail --silent --show-error --location --output "$work_dir/SHA256SUMS.gpg" "$base_url/SHA256SUMS.gpg"
+gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
+image_sum="$(awk -v file="*$image_file" '$2 == file {print $1}' "$work_dir/SHA256SUMS")"
+[[ "$image_sum" =~ ^[0-9a-f]{64}$ ]] || die "no checksum for $image_file in the verified SHA256SUMS"
+
 packer init "$template"
 packer build -color=false \
+    -var "image_checksum=sha256:$image_sum" \
     -var "output_directory=$work_dir/output" \
     -var "ssh_private_key_file=$work_dir/id_ed25519" \
     -var "ssh_public_key=$(cat "$work_dir/id_ed25519.pub")" \

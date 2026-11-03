@@ -7,6 +7,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 task_id="${1:?usage: down.sh <task-id>}"
 validate_task_id "$task_id"
+run_reaper
 
 prefix="$(lab_prefix "$task_id")"
 lab_state="$(state_dir "$task_id")"

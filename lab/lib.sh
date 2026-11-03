@@ -8,6 +8,8 @@ LAB_POOL="${LAB_POOL:-ostyr-lab}"
 LAB_POOL_PATH="${LAB_POOL_PATH:-/var/lib/libvirt/images/$LAB_POOL}"
 LAB_STATE_ROOT="$LAB_DIR/state"
 LAB_URI="qemu:///system"
+readonly SECONDS_PER_DAY=86400
+readonly STALE_DAYS=7
 PATH="$HOME/.local/bin:$PATH"
 export PATH
 
@@ -26,6 +28,25 @@ virsh_lab() {
 
 validate_task_id() {
     [[ "$1" =~ ^[A-Za-z0-9]+$ ]] || die "invalid task id '$1' (letters and digits only)"
+}
+
+validate_profile_name() {
+    [[ "$1" =~ ^[a-z0-9-]+$ ]] || die "invalid profile name '$1' (lowercase letters, digits and hyphens only)"
+}
+
+validate_profile_fields() {
+    local field value
+    for field in name ssh_user; do
+        while read -r value; do
+            [[ "$value" =~ ^[a-z0-9-]+$ ]] || die "invalid profile $field '$value' in $1 (lowercase letters, digits and hyphens only)"
+        done < <(awk -v key="$field:" '{sub(/^ *- */, "")} $1 == key {print $2}' "$1")
+    done
+}
+
+run_reaper() {
+    if [[ -z "${LAB_REAPER_ACTIVE:-}" ]]; then
+        "$LAB_DIR/reaper.sh" || log "reaper failed, continuing"
+    fi
 }
 
 lab_prefix() {
@@ -57,4 +78,32 @@ ensure_pool() {
 
 names_with_prefix() {
     awk -v prefix="$1" 'index($0, prefix) == 1'
+}
+
+volume_path() {
+    virsh_lab vol-path --pool "$LAB_POOL" "$1"
+}
+
+overlays_of() {
+    local base_path="$1"
+    local name
+    virsh_lab vol-list --pool "$LAB_POOL" | awk 'NR > 2 && NF {print $1}' | while read -r name; do
+        virsh_lab vol-dumpxml --pool "$LAB_POOL" "$name" | awk -v base="$base_path" -v name="$name" \
+            '/<backingStore>/ {inside = 1} inside && index($0, "<path>" base "</path>") {print name} /<\/backingStore>/ {inside = 0}'
+    done
+}
+
+warn_if_stale() {
+    local stamp_file built_at age_days
+    stamp_file="$(mktemp)"
+    if virsh_lab vol-download --pool "$LAB_POOL" "$1.built" "$stamp_file" >/dev/null 2>&1 && built_at="$(cat "$stamp_file")" &&
+        [[ "$built_at" =~ ^[0-9]+$ ]]; then
+        age_days=$((($(date +%s) - built_at) / SECONDS_PER_DAY))
+        if ((age_days > STALE_DAYS)); then
+            log "warning: base image $1 is $age_days days old (built $(date -d "@$built_at" --iso-8601=date)), rebuild with lab/images/build.sh ${1%.qcow2}"
+        fi
+    else
+        log "warning: base image $1 has no recorded build date, rebuild with lab/images/build.sh ${1%.qcow2}"
+    fi
+    rm -f "$stamp_file"
 }
