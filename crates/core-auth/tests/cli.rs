@@ -6,23 +6,32 @@ mod failing_writer;
 mod types;
 
 
+#[cfg(unix)]
 use core_audit::error::AuditError;
+#[cfg(unix)]
 use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
 #[cfg(unix)]
 use core_auth::cli::apply_command;
 use core_auth::cli::{parse_roles, run, totp_now};
 use core_auth::error::AuthError;
+#[cfg(unix)]
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
+#[cfg(unix)]
 use core_auth::rbac::builtin_catalog;
+#[cfg(unix)]
 use core_auth::service::Context;
 #[cfg(unix)]
 use core_auth::service::State;
+#[cfg(unix)]
+use core_auth::session::hash_token;
+#[cfg(unix)]
 use core_auth::types::{CompromisedSet, RoleCatalog, StoreKey};
 use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
 use failing_writer::FailingWriter;
+#[cfg(unix)]
 use secrecy::SecretSlice;
 use std::fs::{self, OpenOptions};
 use std::io::BufReader;
@@ -58,6 +67,7 @@ const GROUP_READABLE: u32 = 0o640;
 const HEX_PER_BYTE: usize = 2;
 
 
+#[cfg(unix)]
 const FAILED_COMMANDS: usize = 2;
 
 
@@ -125,11 +135,18 @@ fn workspace() -> Result<Workspace, Box<dyn std::error::Error>> {
 }
 
 
+#[cfg(unix)]
 fn write_key(directory: &Path, bytes: Vec<u8>, mode: u32) -> Result<(), Box<dyn std::error::Error>> {
     let key = directory.join("key");
     fs::write(&key, bytes)?;
-    #[cfg(unix)]
     fs::set_permissions(&key, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+
+#[cfg(not(unix))]
+fn write_key(directory: &Path, bytes: Vec<u8>, _mode: u32) -> Result<(), Box<dyn std::error::Error>> {
+    fs::write(directory.join("key"), bytes)?;
     Ok(())
 }
 
@@ -470,14 +487,17 @@ fn a_login_whose_store_save_fails_returns_no_session() -> TestResult {
     assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
     assert!(matches!(replayed, Err(AuthError::MfaInvalid)));
     assert!(matches!(unsaved, Err(AuthError::Io(_))));
-    assert_eq!(sessions_after_refusal, 0);
+    assert_eq!(sessions_after_refusal, 1);
+    assert!(state.sessions.contains_key(&hash_token(&token)));
     let guard = fixture.audit_ok.state.lock().map_err(|error| error.to_string())?;
     let audit = String::from_utf8(guard.writer.clone())?;
     assert!(audit.contains("internal_error"));
+    assert!(audit.contains("auth.session.revoke"));
     Ok(())
 }
 
 
+#[cfg(unix)]
 struct Fixture {
     audit_ok: AuditLog<Vec<u8>>,
     audit_broken: AuditLog<FailingWriter>,
@@ -487,6 +507,7 @@ struct Fixture {
 }
 
 
+#[cfg(unix)]
 fn fixture() -> Fixture {
     Fixture {
         audit_ok: genesis_log(Vec::new()),
@@ -501,6 +522,7 @@ fn fixture() -> Fixture {
 }
 
 
+#[cfg(unix)]
 fn working<'a>(fixture: &'a Fixture) -> Context<'a, Vec<u8>> {
     Context {
         audit: &fixture.audit_ok,
@@ -515,6 +537,7 @@ fn working<'a>(fixture: &'a Fixture) -> Context<'a, Vec<u8>> {
 }
 
 
+#[cfg(unix)]
 fn broken<'a>(fixture: &'a Fixture) -> Context<'a, FailingWriter> {
     Context {
         audit: &fixture.audit_broken,

@@ -5,9 +5,9 @@ use crate::rbac::{builtin_catalog, PERMISSION_EVENTS_READ};
 use crate::secretbox::KEY_BYTES;
 use crate::service::{
     audit_name, authorize, bootstrap_administrator, change_roles, create_account, denial_reason, enrol_totp, login, record, revoke_all_sessions,
-    revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN,
+    revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN, ACTION_SESSION_REVOKE,
 };
-use crate::session::revoke_user_sessions;
+use crate::session::revoke_session;
 use crate::store::{load_accounts_file, save_accounts_file};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use crate::types::{Clock, RandomFn, RoleSet, StoreKey};
@@ -134,10 +134,23 @@ pub fn apply_command<Output: Write>(
         (Ok(()), _) => Ok(done),
         (Err(error), ["login", user, _, source, ..]) => {
             tracing::warn!(%error, "store save failed after a successful login");
-            revoke_user_sessions(&mut state.sessions, user);
+            let revoked = done.strip_prefix("ok ").and_then(|token| revoke_session(&mut state.sessions, token));
             let audit_user = audit_name(&state.accounts, user);
             let parameters = [("reason", denial_reason(Denial::Internal).to_owned()), ("source", (*source).to_owned())];
             record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Failure, &parameters)?;
+            let revocation = [
+                ("reason", denial_reason(Denial::Internal).to_owned()),
+                ("count", usize::from(revoked.is_some()).to_string()),
+            ];
+            record(
+                context,
+                now,
+                &audit_user,
+                ACTION_SESSION_REVOKE,
+                &audit_user,
+                Outcome::Success,
+                &revocation,
+            )?;
             Err(AuthError::InvalidCredentials)
         }
         (Err(error), _) => Err(error),
