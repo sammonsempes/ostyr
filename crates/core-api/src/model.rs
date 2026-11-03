@@ -1,4 +1,4 @@
-use crate::types::{AccessTable, KeyedLimiter};
+use crate::types::{AccessTable, KeyedLimiter, VerifyPasswordFn};
 use axum::http::StatusCode;
 use core_audit::log::AuditLog;
 use core_auth::service::State;
@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
+use tracing::Dispatch;
 use utoipa::ToSchema;
 
 
@@ -26,6 +28,11 @@ pub struct ApiState {
     pub limiter: KeyedLimiter,
     pub access: AccessTable,
     pub document: serde_json::Value,
+    pub verify: VerifyPasswordFn,
+    pub hashing: Arc<Semaphore>,
+    pub dispatch: Dispatch,
+    pub max_sources: usize,
+    pub max_attempts: usize,
 }
 
 

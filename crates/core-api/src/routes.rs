@@ -3,7 +3,7 @@ use crate::middleware::{edge, guard, limit};
 use crate::model::{
     ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule,
 };
-use crate::state::{auth_context, lock_auth};
+use crate::state::{auth_context, lock_auth, prune_attempts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
@@ -14,13 +14,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_audit::model::Outcome;
-use core_auth::service::{login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN};
+use core_auth::error::AuthError;
+use core_auth::service::{login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH};
 use core_auth::session::revoke_session;
 use core_auth::store::save_accounts_file;
 use secrecy::{ExposeSecret, SecretString};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
 use time::OffsetDateTime;
+use tokio::task::spawn_blocking;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::{Components, OpenApi as OpenApiDocument};
 use utoipa::OpenApi;
@@ -184,15 +186,70 @@ pub fn persist_login(
 }
 
 
-pub fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: Result<Bytes, BytesRejection>) -> Result<Response, ApiError> {
+pub fn stored_hash(app: &ApiState, username: &str) -> String {
+    lock_auth(app)
+        .accounts
+        .get(username)
+        .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone())
+}
+
+
+pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: &str) -> Result<Option<bool>, ApiError> {
+    let permit = app.hashing.clone().acquire_owned().await.map_err(|error| {
+        tracing::error!(%error, "password hashing gate closed");
+        ApiError::Internal
+    })?;
+    let (verify, secret, hash) = (app.verify, password.clone(), stored.to_owned());
+    let joined = spawn_blocking(move || {
+        let held = permit;
+        let verdict = verify(secret.expose_secret(), &hash);
+        drop(held);
+        verdict
+    })
+    .await;
+    match joined {
+        Ok(Ok(verdict)) => Ok(Some(verdict)),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "password verification failed internally");
+            Ok(None)
+        }
+        Err(error) => {
+            tracing::error!(%error, "password verification task failed");
+            Err(ApiError::Internal)
+        }
+    }
+}
+
+
+pub fn admit_login(app: &ApiState, auth: &mut AuthState, now: OffsetDateTime) -> Result<(), ApiError> {
+    prune_attempts(&mut auth.attempts, now);
+    if auth.attempts.len() >= app.max_attempts {
+        tracing::warn!("failure tracking table is full, login refused");
+        Err(ApiError::TooManyRequests)
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, stored: &str, verdict: Option<bool>) -> Result<Response, ApiError> {
+    let now = (app.clock)();
+    let verify = |_: &str, current: &str| verdict.filter(|_| current == stored).ok_or(AuthError::InvalidCredentials);
+    let mut auth = lock_auth(app);
+    admit_login(app, &mut auth, now)?;
+    let context = auth_context(app, request_id, &verify);
+    let token = core_login(&mut auth, &context, now, request).map_err(|failure| auth_failure(&failure))?;
+    persist_login(app, &mut auth, &context, now, request, &token).map(|granted| Json(granted).into_response())
+}
+
+
+pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: Result<Bytes, BytesRejection>) -> Result<Response, ApiError> {
     let bytes = body.map_err(|rejection| body_failure(&rejection))?;
     let parsed: LoginBody = serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest)?;
     let request = login_request(parsed, source);
-    let now = (app.clock)();
-    let mut auth = lock_auth(app);
-    let context = auth_context(app, request_id);
-    let token = core_login(&mut auth, &context, now, &request).map_err(|failure| auth_failure(&failure))?;
-    persist_login(app, &mut auth, &context, now, &request, &token).map(|granted| Json(granted).into_response())
+    let stored = stored_hash(app, &request.username);
+    let verdict = verify_off_worker(app, &request.password, &stored).await?;
+    commit_login(app, request_id, &request, &stored, verdict)
 }
 
 
@@ -215,14 +272,14 @@ pub async fn login_endpoint(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    reply(login_flow(&app, &request_id.0, peer.ip(), body))
+    reply(login_flow(&app, &request_id.0, peer.ip(), body).await)
 }
 
 
 pub fn logout_flow(app: &ApiState, request_id: &str, session: &Authenticated) -> Result<Response, ApiError> {
     let now = (app.clock)();
     let mut auth = lock_auth(app);
-    let context = auth_context(app, request_id);
+    let context = auth_context(app, request_id, &app.verify);
     let token = session.token.expose_secret();
     revoke_token(&mut auth, &context, now, token, token)
         .map(|()| StatusCode::NO_CONTENT.into_response())

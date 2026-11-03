@@ -21,7 +21,7 @@ use core_auth::session::validate_session;
 use core_auth::types::{RandomFn, RoleCatalog};
 use data_encoding::HEXLOWER;
 use secrecy::SecretString;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
@@ -33,6 +33,9 @@ pub const REQUEST_ID_MAX_LENGTH: usize = 64;
 
 
 pub const REQUEST_ID_BYTES: usize = 16;
+
+
+pub const IPV6_HOST_BITS: u32 = 64;
 
 
 pub const UNAVAILABLE_ID: &str = "unavailable";
@@ -112,7 +115,9 @@ pub fn log_request(app: &ApiState, id: &str, method: &str, path: &str, source: I
     let (module, tenant) = (app.module.as_str(), app.tenant.as_str());
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let (result, code) = (result_label(status), status.as_u16());
-    tracing::info!(target: LOG_TARGET, module, tenant, request_id = id, duration_ms, result, method, path, status = code, source = %source, "request");
+    tracing::dispatcher::with_default(&app.dispatch, || {
+        tracing::info!(target: LOG_TARGET, module, tenant, request_id = id, duration_ms, result, method, path, status = code, source = %source, "request");
+    });
 }
 
 
@@ -137,10 +142,27 @@ pub async fn edge(State(app): State<SharedState>, ConnectInfo(peer): ConnectInfo
 }
 
 
+pub fn rate_key(source: IpAddr) -> IpAddr {
+    match source {
+        IpAddr::V4(_) => source,
+        IpAddr::V6(address) => IpAddr::V6(Ipv6Addr::from((u128::from(address) >> IPV6_HOST_BITS) << IPV6_HOST_BITS)),
+    }
+}
+
+
+pub fn admit_source(app: &ApiState, source: IpAddr) -> bool {
+    if app.limiter.len() >= app.max_sources {
+        app.limiter.retain_recent();
+    }
+    app.limiter.len() < app.max_sources && app.limiter.check_key(&rate_key(source)).is_ok()
+}
+
+
 pub async fn limit(State(app): State<SharedState>, ConnectInfo(peer): ConnectInfo<SocketAddr>, request: Request, next: Next) -> Response {
-    match app.limiter.check_key(&peer.ip()) {
-        Ok(()) => next.run(request).await,
-        Err(_) => error_response(&ApiError::TooManyRequests),
+    if admit_source(&app, peer.ip()) {
+        next.run(request).await
+    } else {
+        error_response(&ApiError::TooManyRequests)
     }
 }
 

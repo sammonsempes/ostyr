@@ -8,8 +8,7 @@ use core_api::types::{AccessTable, SharedState};
 use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
-use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -93,10 +92,23 @@ pub fn extra_access() -> AccessTable {
 }
 
 
+#[cfg(unix)]
+pub fn set_mode(path: &std::path::Path, mode: u32) -> Result<(), TestError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+
+#[cfg(not(unix))]
+pub fn set_mode(_path: &std::path::Path, _mode: u32) -> Result<(), TestError> {
+    Ok(())
+}
+
+
 pub fn private_file(path: &PathBuf, content: &[u8]) -> Result<(), TestError> {
     fs::write(path, content)?;
-    fs::set_permissions(path, Permissions::from_mode(OWNER_ONLY))?;
-    Ok(())
+    set_mode(path, OWNER_ONLY)
 }
 
 
@@ -135,7 +147,7 @@ pub fn seed_reader(state: &ApiState) -> Result<(), TestError> {
 }
 
 
-pub fn fixture_with(adjust: fn(ApiState) -> Result<ApiState, TestError>) -> Result<Fixture, TestError> {
+pub fn fixture_with(adjust: impl FnOnce(ApiState) -> Result<ApiState, TestError>) -> Result<Fixture, TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
     let built = build_state(&config, extra_access())?;

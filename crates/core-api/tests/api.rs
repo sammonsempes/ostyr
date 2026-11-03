@@ -2,6 +2,8 @@
 mod fixture;
 #[path = "support/http.rs"]
 mod http;
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
@@ -9,25 +11,32 @@ mod types;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, StatusCode};
 use core_api::failure::{auth_failure, error_parts};
-use core_api::logging::json_dispatch;
-use core_api::middleware::SECURITY_HEADERS;
+use core_api::middleware::{admit_source, rate_key, SECURITY_HEADERS};
 use core_api::model::{ApiError, ApiState};
-use core_api::routes::{core_access, BODY_LIMIT_BYTES};
-use core_api::state::RATE_BURST;
+use core_api::routes::{commit_login, core_access, BODY_LIMIT_BYTES};
+use core_api::state::{prune_attempts, MAX_CONCURRENT_HASHES, RATE_BURST};
 use core_audit::log::{new_log, sync_file};
 use core_audit::model::GENESIS_HASH;
 use core_audit::verify::verify;
 use core_auth::error::AuthError;
+use core_auth::limiter::{FAILURE_WINDOW_SECONDS, LOCKOUT_SECONDS};
+use core_auth::model::Attempts;
 use core_auth::random::os_random;
+use core_auth::service::LoginRequest;
 use core_auth::session::create_session;
 use fixture::{fixture, fixture_with, PASSWORD, READER};
+use governor::{Quota, RateLimiter};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
+use logging::capture_dispatch;
+use secrecy::SecretString;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use time::OffsetDateTime;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use types::{TestError, TestResult};
@@ -104,6 +113,7 @@ fn unwritable_store(state: ApiState) -> Result<ApiState, TestError> {
 #[tokio::test]
 async fn health_is_public_and_hardened() -> TestResult {
     let fx = fixture()?;
+    assert!(fx.dir.path().exists());
     let response = call(&fx.router, "GET", "/health", None).await?;
     assert_eq!(response.status(), StatusCode::OK);
     SECURITY_HEADERS
@@ -457,17 +467,15 @@ async fn a_failed_store_save_and_a_failed_audit_still_refuse_the_login() -> Test
 
 #[tokio::test]
 async fn request_logs_carry_the_constant_fields() -> TestResult {
-    let fx = fixture()?;
-    let log_path = fx.dir.path().join("platform.log");
-    let dispatch = json_dispatch(BoxMakeWriter::new(Mutex::new(File::create(&log_path)?)));
-    let guard = tracing::dispatcher::set_default(&dispatch);
-    tracing::callsite::rebuild_interest_cache();
+    let log_dir = tempfile::tempdir()?;
+    let log_path = log_dir.path().join("platform.log");
+    let dispatch = capture_dispatch(BoxMakeWriter::new(Mutex::new(File::create(&log_path)?)));
+    let fx = fixture_with(|state| Ok(ApiState { dispatch, ..state }))?;
     let mut identified = request("GET", "/health", None, Body::empty())?;
     identified.headers_mut().insert("x-request-id", HeaderValue::from_static("log-1"));
     send(&fx.router, identified).await?;
     send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
     call(&fx.router, "GET", "/auth/me", None).await?;
-    drop(guard);
     let text = fs::read_to_string(&log_path)?;
     assert!(!text.contains(PASSWORD));
     let events: Vec<serde_json::Value> = text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
@@ -523,5 +531,269 @@ fn auth_errors_map_to_api_errors() -> TestResult {
         (AuthError::Io(io::Error::other("disk")), ApiError::Internal),
     ];
     cases.iter().for_each(|(error, expected)| assert_eq!(auth_failure(error), *expected));
+    Ok(())
+}
+
+
+const SOURCE_A: u8 = 1;
+
+
+const SOURCE_B: u8 = 2;
+
+
+const SOURCE_C: u8 = 3;
+
+
+const SOURCE_D: u8 = 4;
+
+
+const SOURCE_E: u8 = 5;
+
+
+const SMALL_TABLE: usize = 2;
+
+
+const STALE_ENTRIES: usize = 5;
+
+
+const RECOVERY_PAUSE: Duration = Duration::from_millis(500);
+
+
+const SHORT_PERIOD: Duration = Duration::from_millis(100);
+
+
+const RECENT_SECONDS: i64 = 10;
+
+
+fn failing_verify(_password: &str, _stored: &str) -> Result<bool, AuthError> {
+    Err(AuthError::Decrypt)
+}
+
+
+fn panicking_verify(_password: &str, _stored: &str) -> Result<bool, AuthError> {
+    let zero = std::hint::black_box(u32::MIN);
+    Ok(1 / zero == 0)
+}
+
+
+fn failing_hash(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState {
+        verify: failing_verify,
+        ..state
+    })
+}
+
+
+fn panicking_hash(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState {
+        verify: panicking_verify,
+        ..state
+    })
+}
+
+
+fn closed_gate(state: ApiState) -> Result<ApiState, TestError> {
+    state.hashing.close();
+    Ok(state)
+}
+
+
+fn small_attempt_table(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState { max_attempts: 1, ..state })
+}
+
+
+fn small_source_table(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState {
+        max_sources: SMALL_TABLE,
+        limiter: RateLimiter::keyed(Quota::with_period(SHORT_PERIOD).ok_or("zero period")?),
+        ..state
+    })
+}
+
+
+fn login_request(username: &str) -> LoginRequest {
+    LoginRequest {
+        username: username.to_owned(),
+        password: SecretString::from(PASSWORD),
+        totp_code: None,
+        source: "127.0.0.1".to_owned(),
+    }
+}
+
+
+async fn login_status(fixture: &fixture::Fixture, offset: u8, password: &str) -> Result<StatusCode, TestError> {
+    let response = send_from(
+        &fixture.router,
+        client(offset),
+        request("POST", "/auth/login", None, login_body(READER, password))?,
+    )
+    .await?;
+    Ok(response.status())
+}
+
+
+async fn login_status_of(router: &axum::Router, offset: u8) -> Result<StatusCode, TestError> {
+    let response = send_from(
+        router,
+        client(offset),
+        request("POST", "/auth/login", None, login_body(READER, PASSWORD))?,
+    )
+    .await?;
+    Ok(response.status())
+}
+
+
+#[tokio::test]
+async fn a_failing_verification_refuses_the_login_without_a_session() -> TestResult {
+    let fx = fixture_with(failing_hash)?;
+    let response = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(response).await?.pointer("/error/code"), Some(&json!("invalid_credentials")));
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_panicking_verification_is_an_internal_error() -> TestResult {
+    let fx = fixture_with(panicking_hash)?;
+    assert_eq!(login_status(&fx, 1, PASSWORD).await?, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(fx.state.hashing.available_permits(), MAX_CONCURRENT_HASHES);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_closed_hashing_gate_is_an_internal_error() -> TestResult {
+    let fx = fixture_with(closed_gate)?;
+    assert_eq!(login_status(&fx, 1, PASSWORD).await?, StatusCode::INTERNAL_SERVER_ERROR);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn concurrent_logins_all_succeed_and_release_the_gate() -> TestResult {
+    let fx = fixture()?;
+    assert!(fx.dir.path().exists());
+    let (first, second, third, fourth, fifth) = tokio::join!(
+        login_status_of(&fx.router, SOURCE_A),
+        login_status_of(&fx.router, SOURCE_B),
+        login_status_of(&fx.router, SOURCE_C),
+        login_status_of(&fx.router, SOURCE_D),
+        login_status_of(&fx.router, SOURCE_E),
+    );
+    for status in [first, second, third, fourth, fifth] {
+        assert_eq!(status?, StatusCode::OK);
+    }
+    assert_eq!(fx.state.hashing.available_permits(), MAX_CONCURRENT_HASHES);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_changed_hash_or_failed_verdict_fails_closed() -> TestResult {
+    let fx = fixture()?;
+    let stale = commit_login(&fx.state, "id-1", &login_request(READER), "not the stored hash", Some(true));
+    assert!(stale.is_err());
+    let unverified = commit_login(&fx.state, "id-2", &login_request(READER), "not the stored hash", None);
+    assert!(unverified.is_err());
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn pruning_keeps_only_locked_or_recent_entries() -> TestResult {
+    let now = OffsetDateTime::now_utc();
+    let old = now - time::Duration::seconds(FAILURE_WINDOW_SECONDS + 1);
+    let recent = now - time::Duration::seconds(RECENT_SECONDS);
+    let mut attempts: core_auth::types::AttemptMap = [
+        (
+            "stale".to_owned(),
+            Attempts {
+                failures: vec![old],
+                locked_until: None,
+            },
+        ),
+        ("empty".to_owned(), Attempts::default()),
+        (
+            "expired-lock".to_owned(),
+            Attempts {
+                failures: vec![],
+                locked_until: Some(old),
+            },
+        ),
+        (
+            "recent".to_owned(),
+            Attempts {
+                failures: vec![old, recent],
+                locked_until: None,
+            },
+        ),
+        (
+            "locked".to_owned(),
+            Attempts {
+                failures: vec![],
+                locked_until: Some(now + time::Duration::seconds(LOCKOUT_SECONDS)),
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    prune_attempts(&mut attempts, now);
+    assert_eq!(attempts.keys().map(String::as_str).collect::<Vec<_>>(), ["locked", "recent"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_failure_table_refuses_logins_until_entries_expire() -> TestResult {
+    let fx = fixture_with(small_attempt_table)?;
+    assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
+    assert_eq!(login_status(&fx, SOURCE_B, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    {
+        let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+        auth.attempts.clear();
+        (0..STALE_ENTRIES).for_each(|index| {
+            auth.attempts.insert(
+                format!("account:old-{index}"),
+                Attempts {
+                    failures: vec![OffsetDateTime::UNIX_EPOCH],
+                    locked_until: None,
+                },
+            );
+        });
+    }
+    assert_eq!(login_status(&fx, SOURCE_C, PASSWORD).await?, StatusCode::OK);
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_source_table_is_capped_and_idle_sources_expire() -> TestResult {
+    let fx = fixture_with(small_source_table)?;
+    let (first, second, third) = (client(SOURCE_A).ip(), client(SOURCE_B).ip(), client(SOURCE_C).ip());
+    assert!(admit_source(&fx.state, first));
+    assert!(admit_source(&fx.state, second));
+    assert!(!admit_source(&fx.state, third));
+    assert!(fx.state.limiter.len() <= SMALL_TABLE);
+    tokio::time::sleep(RECOVERY_PAUSE).await;
+    assert!(admit_source(&fx.state, third));
+    assert!(fx.state.limiter.len() <= SMALL_TABLE);
+    Ok(())
+}
+
+
+#[test]
+fn ipv6_sources_share_one_bucket_per_64_bit_prefix() -> TestResult {
+    let first: IpAddr = "2001:db8:1:2::1".parse()?;
+    let same_prefix: IpAddr = "2001:db8:1:2:ffff::9".parse()?;
+    let other_prefix: IpAddr = "2001:db8:1:3::1".parse()?;
+    let v4: IpAddr = "192.0.2.7".parse()?;
+    assert_eq!(rate_key(first), rate_key(same_prefix));
+    assert_ne!(rate_key(first), rate_key(other_prefix));
+    assert_eq!(rate_key(v4), v4);
     Ok(())
 }

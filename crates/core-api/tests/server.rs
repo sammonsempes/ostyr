@@ -8,15 +8,14 @@ use core_api::error::StartupError;
 use core_api::model::{ApiConfig, TlsFiles};
 use core_api::server::{check_transport, run_module, serve, tls_server_config};
 use core_api::types::ServerHandle;
-use fixture::{extra_access, extra_router, fixture, private_file};
+use fixture::{extra_access, extra_router, fixture, private_file, set_mode};
 use rcgen::generate_simple_self_signed;
 use rustls::crypto::ring::default_provider;
 use rustls::version::{TLS12, TLS13};
 use rustls::{ClientConfig, ProtocolVersion, RootCertStore};
 use rustls_pki_types::ServerName;
-use std::fs::{self, Permissions};
+use std::fs;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -175,9 +174,9 @@ fn tls_material_is_validated() -> TestResult {
     let files = tls_files_in(dir.path(), &pki)?;
     assert!(tls_server_config(&files).is_ok());
 
-    fs::set_permissions(&files.key, Permissions::from_mode(WORLD_READABLE))?;
-    assert!(matches!(tls_server_config(&files), Err(StartupError::Audit(_))));
-    fs::set_permissions(&files.key, Permissions::from_mode(fixture::OWNER_ONLY))?;
+    set_mode(&files.key, WORLD_READABLE)?;
+    assert_eq!(matches!(tls_server_config(&files), Err(StartupError::Audit(_))), cfg!(unix));
+    set_mode(&files.key, fixture::OWNER_ONLY)?;
 
     let missing_key = TlsFiles {
         key: dir.path().join("absent.key"),
