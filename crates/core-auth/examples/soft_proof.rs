@@ -6,7 +6,6 @@ use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fs;
 use std::io::{stdout, BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use webauthn_authenticator_rs::prelude::{Url, WebauthnAuthenticator};
@@ -28,6 +27,7 @@ const KEY_BYTES: usize = 32;
 const KEY_FILL: u8 = 9;
 
 
+#[cfg(unix)]
 const OWNER_ONLY: u32 = 0o600;
 
 
@@ -57,10 +57,17 @@ struct Rig {
 }
 
 
+#[cfg(unix)]
 fn private_file(path: &Path, content: &[u8]) -> Result<(), Box<dyn Error>> {
     fs::write(path, content)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY))?;
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(OWNER_ONLY))?;
     Ok(())
+}
+
+
+#[cfg(not(unix))]
+fn private_file(path: &Path, content: &[u8]) -> Result<(), Box<dyn Error>> {
+    Ok(fs::write(path, content)?)
 }
 
 

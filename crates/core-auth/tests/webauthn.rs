@@ -8,7 +8,9 @@ mod types;
 
 use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
-use core_auth::cli::{apply_command, apply_command_with, run, totp_now};
+use core_auth::cli::{apply_command, apply_command_with};
+#[cfg(unix)]
+use core_auth::cli::{run, totp_now};
 use core_auth::error::AuthError;
 use core_auth::limiter::{ACCOUNT_MAX_FAILURES, SOURCE_MAX_FAILURES};
 use core_auth::password::verify_password;
@@ -16,9 +18,9 @@ use core_auth::random::os_random;
 use core_auth::rbac::{builtin_catalog, load_catalog, webauthn_required, ROLE_ADMINISTRATOR, ROLE_READER};
 use core_auth::service::{bootstrap_administrator, create_account, enrol_totp, login, Context, LoginRequest, State};
 use core_auth::session::TOKEN_BYTES;
-use core_auth::store::{
-    load_accounts, load_accounts_file, load_store, load_store_file, save_accounts, save_accounts_file, save_store, save_store_file, STORE_VERSION,
-};
+#[cfg(unix)]
+use core_auth::store::{load_accounts, load_accounts_file, STORE_VERSION};
+use core_auth::store::{load_store, load_store_file, save_accounts, save_accounts_file, save_store, save_store_file};
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{CompromisedSet, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use core_auth::webauthn::{
@@ -31,6 +33,7 @@ use failing_writer::FailingWriter;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use serde_json::{json, Value};
 use soft::{assert_with, discoverable_assertion, edited, origin, register_with, set_at, soft_passkey, SoftResult};
+#[cfg(unix)]
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -1254,9 +1257,11 @@ fn the_last_factor_of_an_account_that_needs_one_cannot_be_removed() -> TestResul
 }
 
 
+#[cfg(unix)]
 const VERSION_ONE: &str = r#"{"version":1,"accounts":[{"username":"alice","password_hash":"x","roles":["reader"],"totp":null}]}"#;
 
 
+#[cfg(unix)]
 const OWNER_ONLY: u32 = 0o600;
 
 
@@ -1291,6 +1296,7 @@ fn credentials_round_trip_through_the_store() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn a_version_one_store_migrates_and_is_rewritten_as_version_two() -> TestResult {
     let (accounts, credentials) = load_store(VERSION_ONE.as_bytes())?;
     assert_eq!(accounts.len(), 1);
@@ -1351,9 +1357,11 @@ fn saving_accounts_keeps_the_credentials_of_the_remaining_accounts() -> TestResu
 const REPLY_PARTS: usize = 3;
 
 
+#[cfg(unix)]
 const READ_ONLY_DIRECTORY: u32 = 0o500;
 
 
+#[cfg(unix)]
 const WRITABLE_DIRECTORY: u32 = 0o700;
 
 
@@ -1462,6 +1470,7 @@ fn the_tool_refuses_webauthn_without_a_configuration() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn a_login_whose_store_save_fails_returns_no_session() -> TestResult {
     let fx = fixture()?;
     let mut world = world(&fx)?;
@@ -1513,6 +1522,7 @@ fn a_login_whose_store_save_fails_returns_no_session() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn the_tool_reads_the_webauthn_configuration_file() -> TestResult {
     let directory = tempdir()?;
     let write = |name: &str, content: &[u8]| -> SoftResult<String> {
@@ -1567,12 +1577,15 @@ fn the_tool_reads_the_webauthn_configuration_file() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const PATTERN_BYTE: u8 = 7;
 
 
+#[cfg(unix)]
 const SECRET_BYTES: usize = 20;
 
 
+#[cfg(unix)]
 fn constant_random(buffer: &mut [u8]) -> Result<(), getrandom::Error> {
     buffer.fill(PATTERN_BYTE);
     Ok(())
@@ -1580,6 +1593,7 @@ fn constant_random(buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 
 
 #[test]
+#[cfg(unix)]
 fn the_tool_loads_custom_roles_from_a_file() -> TestResult {
     let directory = tempdir()?;
     let write = |name: &str, content: &[u8]| -> SoftResult<String> {
