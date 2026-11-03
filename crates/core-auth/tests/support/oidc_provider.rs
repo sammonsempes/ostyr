@@ -27,6 +27,12 @@ pub const GOOD_KEY: &str = include_str!("../fixtures/good_key.pem");
 pub const OTHER_KEY: &str = include_str!("../fixtures/other_key.pem");
 
 
+pub const SCHEME_HTTPS: &str = "https";
+
+
+pub const SCHEME_HTTP: &str = "http";
+
+
 pub const STATUS_OK: u16 = 200;
 
 
@@ -41,6 +47,8 @@ pub struct Provider {
     pub token_status: u16,
     pub challenge: Option<String>,
     pub with_token_endpoint: bool,
+    pub token_scheme: &'static str,
+    pub jwks_scheme: &'static str,
     pub discoveries_left: Cell<usize>,
 }
 
@@ -51,6 +59,8 @@ pub fn provider(id_token: Option<String>, challenge: Option<String>) -> Provider
         token_status: STATUS_OK,
         challenge,
         with_token_endpoint: true,
+        token_scheme: SCHEME_HTTPS,
+        jwks_scheme: SCHEME_HTTPS,
         discoveries_left: Cell::new(usize::MAX),
     }
 }
@@ -86,17 +96,23 @@ pub fn jwks() -> Result<Value, Box<dyn std::error::Error>> {
 
 
 pub fn metadata(with_token_endpoint: bool) -> Value {
+    metadata_with(with_token_endpoint, SCHEME_HTTPS, SCHEME_HTTPS)
+}
+
+
+pub fn metadata_with(with_token_endpoint: bool, token_scheme: &str, jwks_scheme: &str) -> Value {
+    let host = ISSUER.trim_start_matches("https://");
     let mut document = json!({
         "issuer": ISSUER,
         "authorization_endpoint": format!("{ISSUER}/authorize"),
-        "jwks_uri": format!("{ISSUER}/jwks"),
+        "jwks_uri": format!("{jwks_scheme}://{host}/jwks"),
         "response_types_supported": ["code"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
     });
     if with_token_endpoint {
         if let Some(map) = document.as_object_mut() {
-            map.insert("token_endpoint".to_owned(), json!(format!("{ISSUER}/token")));
+            map.insert("token_endpoint".to_owned(), json!(format!("{token_scheme}://{host}/token")));
         }
     }
     document
@@ -131,7 +147,10 @@ pub fn respond(provider: &Provider, request: HttpRequest) -> Result<HttpResponse
         "/.well-known/openid-configuration" => match provider.discoveries_left.get().checked_sub(1) {
             Some(left) => {
                 provider.discoveries_left.set(left);
-                reply(STATUS_OK, &metadata(provider.with_token_endpoint))
+                reply(
+                    STATUS_OK,
+                    &metadata_with(provider.with_token_endpoint, provider.token_scheme, provider.jwks_scheme),
+                )
             }
             None => reply(STATUS_ERROR, &json!({})),
         },

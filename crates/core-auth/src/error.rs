@@ -44,6 +44,8 @@ pub enum OidcDenial {
     TooManyPending,
     #[error("the ID token does not prove multi-factor authentication")]
     MfaMissing,
+    #[error("the provider advertises an endpoint that is not https")]
+    InsecureEndpoint,
 }
 
 
