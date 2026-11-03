@@ -16,7 +16,9 @@ use axum::{Extension, Json, Router};
 use core_audit::model::Outcome;
 use core_auth::error::AuthError;
 use core_auth::limiter::{account_key, locked_until, source_key};
-use core_auth::service::{login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH};
+use core_auth::service::{
+    audit_name, login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH,
+};
 use core_auth::session::revoke_session;
 use core_auth::store::save_accounts_file;
 use secrecy::{ExposeSecret, SecretString};
@@ -222,9 +224,18 @@ pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: 
 }
 
 
+pub fn missing_keys(auth: &AuthState, request: &LoginRequest) -> usize {
+    let account = auth.accounts.contains_key(&request.username).then(|| account_key(&request.username));
+    std::iter::once(source_key(&request.source))
+        .chain(account)
+        .filter(|key| !auth.attempts.contains_key(key))
+        .count()
+}
+
+
 pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginRequest) -> Result<(), ApiError> {
     prune_attempts(&mut auth.attempts, (app.clock)());
-    if auth.attempts.len() >= app.max_attempts && !auth.attempts.contains_key(&source_key(&request.source)) {
+    if auth.attempts.len() + missing_keys(auth, request) > app.max_attempts {
         tracing::warn!("failure tracking table is full, login refused");
         Err(ApiError::TooManyRequests)
     } else {
@@ -233,7 +244,8 @@ pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginReq
 }
 
 
-pub fn check_not_locked(auth: &AuthState, request: &LoginRequest, now: OffsetDateTime) -> Result<(), ApiError> {
+pub fn check_not_locked(app: &ApiState, auth: &AuthState, request_id: &str, request: &LoginRequest) -> Result<(), ApiError> {
+    let now = (app.clock)();
     let account = auth
         .accounts
         .contains_key(&request.username)
@@ -241,20 +253,24 @@ pub fn check_not_locked(auth: &AuthState, request: &LoginRequest, now: OffsetDat
         .and_then(|key| locked_until(&auth.attempts, &key, now));
     if account
         .or_else(|| locked_until(&auth.attempts, &source_key(&request.source), now))
-        .is_some()
+        .is_none()
     {
-        tracing::warn!("login refused before hashing, source or account is locked");
-        Err(ApiError::TooManyRequests)
-    } else {
         Ok(())
+    } else {
+        tracing::warn!("login refused before hashing, source or account is locked");
+        let context = auth_context(app, request_id, &app.verify);
+        let audit_user = audit_name(&auth.accounts, &request.username);
+        let parameters = [("reason", "locked".to_owned()), ("source", request.source.clone())];
+        record(&context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Denied, &parameters).map_err(|failure| auth_failure(&failure))?;
+        Err(ApiError::TooManyRequests)
     }
 }
 
 
-pub fn admit_login(app: &ApiState, request: &LoginRequest) -> Result<(), ApiError> {
+pub fn admit_login(app: &ApiState, request_id: &str, request: &LoginRequest) -> Result<(), ApiError> {
     let mut auth = lock_auth(app);
     check_table_room(app, &mut auth, request)?;
-    check_not_locked(&auth, request, (app.clock)())
+    check_not_locked(app, &auth, request_id, request)
 }
 
 
@@ -273,7 +289,7 @@ pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: 
     let bytes = body.map_err(|rejection| body_failure(&rejection))?;
     let parsed: LoginBody = serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest)?;
     let request = login_request(parsed, source);
-    admit_login(app, &request)?;
+    admit_login(app, request_id, &request)?;
     let stored = stored_hash(app, &request.username);
     let verdict = verify_off_worker(app, &request.password, &stored).await?;
     commit_login(app, request_id, &request, &stored, verdict)

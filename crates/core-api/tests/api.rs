@@ -553,6 +553,9 @@ const SOURCE_E: u8 = 5;
 const SMALL_TABLE: usize = 2;
 
 
+const TWO_KEYS: usize = 2;
+
+
 const ROTATION_ATTEMPTS: usize = 25;
 
 
@@ -603,6 +606,14 @@ fn closed_gate(state: ApiState) -> Result<ApiState, TestError> {
 
 fn small_attempt_table(state: ApiState) -> Result<ApiState, TestError> {
     Ok(ApiState { max_attempts: 1, ..state })
+}
+
+
+fn two_key_attempt_table(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState {
+        max_attempts: TWO_KEYS,
+        ..state
+    })
 }
 
 
@@ -751,7 +762,7 @@ fn pruning_keeps_only_locked_or_recent_entries() -> TestResult {
 
 #[tokio::test]
 async fn a_full_failure_table_refuses_new_sources_until_entries_expire() -> TestResult {
-    let fx = fixture_with(small_attempt_table)?;
+    let fx = fixture_with(two_key_attempt_table)?;
     assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
     assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
     assert_eq!(login_status(&fx, SOURCE_B, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
@@ -934,14 +945,14 @@ async fn a_locked_source_or_account_is_refused_without_hashing() -> TestResult {
     let fx = fixture_with(panicking_hash)?;
     let mut request = login_request(READER);
     request.source = "203.0.113.50".to_owned();
-    assert!(admit_login(&fx.state, &request).is_ok());
+    assert!(admit_login(&fx.state, "id-admit", &request).is_ok());
     fx.state
         .auth
         .lock()
         .map_err(|_| "poisoned")?
         .attempts
         .insert("source:203.0.113.50".to_owned(), locked_for_a_while());
-    assert!(matches!(admit_login(&fx.state, &request), Err(ApiError::TooManyRequests)));
+    assert!(matches!(admit_login(&fx.state, "id-admit", &request), Err(ApiError::TooManyRequests)));
     assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::INTERNAL_SERVER_ERROR);
     {
         let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
@@ -962,7 +973,7 @@ async fn a_lock_on_an_unknown_account_name_is_ignored_before_hashing() -> TestRe
         .map_err(|_| "poisoned")?
         .attempts
         .insert("account:nobody".to_owned(), locked_for_a_while());
-    assert!(admit_login(&fx.state, &login_request("nobody")).is_ok());
+    assert!(admit_login(&fx.state, "id-admit", &login_request("nobody")).is_ok());
     Ok(())
 }
 
@@ -1008,4 +1019,87 @@ async fn wrong_login_status(router: &axum::Router, offset: u8) -> Result<StatusC
     Ok(send_from(router, client(offset), request("POST", "/auth/login", None, body)?)
         .await?
         .status())
+}
+
+
+#[tokio::test]
+async fn an_existing_account_needs_room_for_both_of_its_failure_keys() -> TestResult {
+    let fx = fixture_with(two_key_attempt_table)?;
+    fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.insert(
+        "source:203.0.113.9".to_owned(),
+        Attempts {
+            failures: vec![OffsetDateTime::now_utc()],
+            locked_until: None,
+        },
+    );
+    let mut known = login_request(READER);
+    known.source = "198.51.100.1".to_owned();
+    assert!(matches!(admit_login(&fx.state, "id-room", &known), Err(ApiError::TooManyRequests)));
+    let mut unknown = login_request("stranger");
+    unknown.source = "198.51.100.1".to_owned();
+    assert!(admit_login(&fx.state, "id-room", &unknown).is_ok());
+    Ok(())
+}
+
+
+async fn wrong_reader_status(router: &axum::Router, offset: u8) -> Result<StatusCode, TestError> {
+    let body = login_body(READER, "wrong password here");
+    Ok(send_from(router, client(offset), request("POST", "/auth/login", None, body)?)
+        .await?
+        .status())
+}
+
+
+#[tokio::test]
+async fn in_flight_logins_for_an_existing_account_cannot_grow_the_table_past_its_cap() -> TestResult {
+    let fx = fixture_with(two_key_attempt_table)?;
+    let (first, second, third, fourth, fifth) = tokio::join!(
+        wrong_reader_status(&fx.router, SOURCE_A),
+        wrong_reader_status(&fx.router, SOURCE_B),
+        wrong_reader_status(&fx.router, SOURCE_C),
+        wrong_reader_status(&fx.router, SOURCE_D),
+        wrong_reader_status(&fx.router, SOURCE_E),
+    );
+    let statuses = [first?, second?, third?, fourth?, fifth?];
+    assert!(statuses.contains(&StatusCode::UNAUTHORIZED));
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.len() <= TWO_KEYS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_login_refused_for_a_lock_is_audited_as_denied_locked() -> TestResult {
+    let fx = fixture_with(panicking_hash)?;
+    fx.state
+        .auth
+        .lock()
+        .map_err(|_| "poisoned")?
+        .attempts
+        .insert(format!("account:{READER}"), locked_for_a_while());
+    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    let denied: Vec<serde_json::Value> = audit_lines(&fx)?
+        .into_iter()
+        .filter(|line| line.get("action") == Some(&json!("auth.login")))
+        .collect();
+    assert_eq!(denied.len(), 1);
+    let line = denied.first().ok_or("no record")?;
+    assert_eq!(line.get("outcome"), Some(&json!("denied")));
+    assert_eq!(line.pointer("/parameters/reason"), Some(&json!("locked")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failing_audit_on_a_locked_refusal_fails_closed() -> TestResult {
+    let fx = fixture_with(read_only_audit)?;
+    fx.state
+        .auth
+        .lock()
+        .map_err(|_| "poisoned")?
+        .attempts
+        .insert("source:203.0.113.50".to_owned(), locked_for_a_while());
+    let mut request = login_request("stranger");
+    request.source = "203.0.113.50".to_owned();
+    assert!(matches!(admit_login(&fx.state, "id-audit", &request), Err(ApiError::Internal)));
+    Ok(())
 }
