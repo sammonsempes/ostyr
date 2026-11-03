@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_audit::model::Outcome;
 use core_auth::error::AuthError;
-use core_auth::limiter::{account_key, locked_until, source_key};
+use core_auth::limiter::{locked_until, source_key};
 use core_auth::service::{
     audit_name, login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH,
 };
@@ -220,18 +220,14 @@ pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: 
 }
 
 
-pub fn missing_keys(auth: &AuthState, request: &LoginRequest) -> usize {
-    let account = auth.accounts.contains_key(&request.username).then(|| account_key(&request.username));
-    std::iter::once(source_key(&request.source))
-        .chain(account)
-        .filter(|key| !auth.attempts.contains_key(key))
-        .count()
+pub fn needed_room(auth: &AuthState, request: &LoginRequest) -> usize {
+    1 + usize::from(!auth.attempts.contains_key(&source_key(&request.source)))
 }
 
 
 pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginRequest) -> Result<(), ApiError> {
     prune_attempts(&mut auth.attempts, (app.clock)());
-    if auth.attempts.len() + missing_keys(auth, request) > app.max_attempts {
+    if auth.attempts.len() + needed_room(auth, request) > app.max_attempts {
         tracing::warn!("failure tracking table is full, login refused");
         Err(ApiError::TooManyRequests)
     } else {
@@ -242,12 +238,7 @@ pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginReq
 
 pub fn is_locked(app: &ApiState, auth: &AuthState, request: &LoginRequest) -> bool {
     let now = (app.clock)();
-    auth.accounts
-        .contains_key(&request.username)
-        .then(|| account_key(&request.username))
-        .and_then(|key| locked_until(&auth.attempts, &key, now))
-        .or_else(|| locked_until(&auth.attempts, &source_key(&request.source), now))
-        .is_some()
+    locked_until(&auth.attempts, &source_key(&request.source), now).is_some()
 }
 
 
@@ -283,7 +274,13 @@ pub fn admit_login(app: &ApiState, request_id: &str, request: &LoginRequest) -> 
 
 pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, stored: &str, verdict: Option<bool>) -> Result<Response, ApiError> {
     let now = (app.clock)();
-    let verify = |_: &str, current: &str| verdict.filter(|_| current == stored).ok_or(AuthError::InvalidCredentials);
+    let verify = |_: &str, current: &str| {
+        if current == stored {
+            verdict.ok_or(AuthError::InvalidCredentials)
+        } else {
+            Ok(false)
+        }
+    };
     let mut auth = lock_auth(app);
     check_table_room(app, &mut auth, request).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
     let context = auth_context(app, request_id, &verify);
@@ -313,7 +310,7 @@ pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, bytes:
         (status = 403, description = "Second factor enrolment required", body = ErrorBody),
         (status = 408, description = "Request body not received in time", body = ErrorBody),
         (status = 413, description = "Request body too large", body = ErrorBody),
-        (status = 429, description = "Too many requests or account locked", body = ErrorBody)
+        (status = 429, description = "Too many requests or source locked", body = ErrorBody)
     )
 )]
 pub async fn login_endpoint(

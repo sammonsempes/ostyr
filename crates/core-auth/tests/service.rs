@@ -366,6 +366,61 @@ fn every_login_path_costs_one_password_verification() -> TestResult {
 }
 
 
+fn lock_alice(state: &mut State, fixture: &Fixture<Vec<u8>>) -> TestResult {
+    let ctx = context(fixture);
+    (0..ACCOUNT_MAX_FAILURES).try_for_each(|attempt| {
+        login(
+            state,
+            &ctx,
+            at(1)?,
+            &request("alice", SECOND_PASSWORD, None, &format!("10.0.2.{attempt}")),
+        )
+        .err();
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_locked_account_costs_one_dummy_verification_and_replies_like_a_wrong_password() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    lock_alice(&mut state, &fixture)?;
+    let calls = Cell::new(usize::MIN);
+    let seen = RefCell::new(Vec::new());
+    let counting = |password: &str, stored: &str| {
+        calls.set(calls.get() + 1);
+        seen.borrow_mut().push(stored.to_owned());
+        verify_password(password, stored)
+    };
+    let ctx = Context {
+        verify: &counting,
+        ..context(&fixture)
+    };
+    let locked = login(&mut state, &ctx, at(PLUS_TWO)?, &request("alice", GOOD_PASSWORD, None, SOURCE));
+    assert!(matches!(locked, Err(AuthError::InvalidCredentials)));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(seen.borrow().first().map(String::as_str), Some(DUMMY_HASH));
+    assert!(audit_text(&fixture)?.contains("\"reason\":\"locked\""));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_dummy_verification_on_a_locked_account_still_replies_invalid_credentials() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    lock_alice(&mut state, &fixture)?;
+    let ctx = Context {
+        verify: &failing_verify,
+        ..context(&fixture)
+    };
+    let locked = login(&mut state, &ctx, at(PLUS_TWO)?, &request("alice", GOOD_PASSWORD, None, SOURCE));
+    assert!(matches!(locked, Err(AuthError::InvalidCredentials)));
+    Ok(())
+}
+
+
 #[test]
 fn unknown_users_are_counted_under_their_source_only() -> TestResult {
     let fixture = fixture();
@@ -761,7 +816,7 @@ fn repeated_failures_lock_the_account_and_are_audited() -> TestResult {
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     let locked = login(&mut state, &ctx, at(PLUS_TWO)?, &request("alice", GOOD_PASSWORD, None, SOURCE));
-    assert!(matches!(locked, Err(AuthError::Locked { until }) if until == at(1 + LOCKOUT_SECONDS).unwrap_or(until)));
+    assert!(matches!(locked, Err(AuthError::InvalidCredentials)));
     let text = audit_text(&fixture)?;
     assert!(text.contains("auth.lockout") && text.contains("\"scope\":\"account\""));
     assert!(text.contains("\"reason\":\"locked\""));
@@ -1211,7 +1266,7 @@ fn wrong_current_codes_lock_the_enrolment_and_the_login() -> TestResult {
     ));
     assert!(matches!(
         login(&mut state, &ctx, at(PLUS_THREE)?, &request("alice", GOOD_PASSWORD, None, SOURCE)),
-        Err(AuthError::Locked { .. })
+        Err(AuthError::InvalidCredentials)
     ));
     let text = audit_text(&healthy)?;
     assert!(text.contains("auth.lockout"));
@@ -1275,7 +1330,7 @@ fn an_undecryptable_secret_is_audited_counted_and_locks_the_account() -> TestRes
         at(PLUS_TWO)?,
         &request("root", GOOD_PASSWORD, Some("123456"), SOURCE),
     );
-    assert!(matches!(locked, Err(AuthError::Locked { .. })));
+    assert!(matches!(locked, Err(AuthError::InvalidCredentials)));
     Ok(())
 }
 
