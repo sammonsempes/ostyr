@@ -36,6 +36,7 @@ pub const USER: &str = "reader";
 pub const OWNER_ONLY: u32 = 0o600;
 
 
+#[cfg(unix)]
 pub const MODE_MASK: u32 = 0o777;
 
 
