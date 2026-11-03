@@ -14,7 +14,8 @@ now="$(date +%s)"
 
 metadata_field() {
     local domain="$1" field="$2"
-    virsh_lab metadata "$domain" --uri urn:ostyr:lab 2>/dev/null | tr -d '\n' | sed -n "s/.*$field>\([^<][^<]*\)<.*/\1/p"
+    virsh_lab metadata "$domain" --uri urn:ostyr:lab 2>/dev/null | tr -d ' \n' |
+        sed -n "s|.*<\([A-Za-z]*:\)\{0,1\}$field>\([^<]*\)</.*|\2|p"
 }
 
 expired_tasks() {
