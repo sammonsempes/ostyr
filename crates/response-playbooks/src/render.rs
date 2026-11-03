@@ -19,7 +19,7 @@ pub fn outcome_text(outcome: &ConditionOutcome) -> String {
     match outcome {
         ConditionOutcome::True => "true".to_owned(),
         ConditionOutcome::False => "false".to_owned(),
-        ConditionOutcome::Failed(message) => format!("error ({message}), nothing runs"),
+        ConditionOutcome::Failed(message) => format!("error ({message}), run halted"),
     }
 }
 
@@ -52,7 +52,7 @@ pub fn event_line(event: &TraceEvent) -> String {
             if *granted { "granted" } else { "requested" },
             params_text(params)
         ),
-        TraceEvent::Pending { path, step } => format!("pending approval {path} {step}"),
+        TraceEvent::NotRun { path, step } => format!("halted {path} {step}: not run"),
         TraceEvent::UnknownAsset { path, id } => format!("unknown asset {path} {id}: not in the inventory, treated as protected"),
         TraceEvent::Halted { path } => format!("halted {path}: waiting for approval, on-call alert raised"),
         TraceEvent::Failure { path, action } => format!("failure simulated {path} {action}"),

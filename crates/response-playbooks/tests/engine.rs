@@ -7,6 +7,8 @@ use core_audit::log::{append, genesis_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_config::parse::parse_document;
 use core_config::reload::{current_config, reload, ReloadOutcome};
+use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 use response_breakers::breakers::{open_breakers, BreakerSettings, Breakers};
 use response_breakers::store::sync_path;
 use response_playbooks::bundle::{
@@ -311,15 +313,15 @@ fn an_unresolvable_approval_stops_the_run() -> TestResult {
         None,
     )?;
     assert!(halted.contains("rejected steps.0 request_approval"), "{halted}");
-    assert!(halted.contains("pending approval steps.1 notify"), "{halted}");
-    assert!(halted.contains("pending approval steps.2"), "{halted}");
+    assert!(halted.contains("halted steps.1 notify"), "{halted}");
+    assert!(halted.contains("halted steps.2"), "{halted}");
     assert!(!halted.contains("action steps.1"), "{halted}");
     let after_approval = custom_trace(
         "  - action: request_approval\n    params: { role: lead, timeout: 5m, action: ban }\n  - action: nothing\n  - action: notify\n    params: { text: after }",
         &alert,
         None,
     )?;
-    assert!(after_approval.contains("pending approval steps.1"), "{after_approval}");
+    assert!(after_approval.contains("halted steps.1"), "{after_approval}");
     assert!(!after_approval.contains("action steps.2"), "{after_approval}");
     let granted = custom_trace(
         "  - action: request_approval\n    params: { role: lead, timeout: 5m, action: granted }\n  - action: nothing\n  - action: notify\n    params: { text: after }",
@@ -327,34 +329,46 @@ fn an_unresolvable_approval_stops_the_run() -> TestResult {
         None,
     )?;
     assert!(granted.contains("rejected steps.1 nothing"), "{granted}");
-    assert!(granted.contains("pending approval steps.2 notify"), "{granted}");
+    assert!(granted.contains("halted steps.2 notify"), "{granted}");
+    assert!(!granted.contains("action steps.2"), "{granted}");
     Ok(())
 }
 
 
 #[test]
-fn guards_and_steps_that_cannot_run_are_traced() -> TestResult {
+fn guards_and_steps_that_cannot_run_halt_the_run() -> TestResult {
     let alert = json!({ "name": "n", "host": { "value": "h" } });
     let guarded = custom_trace(
-        "  - if: \"{{ alert.x | nosuchfilter }}\"\n    then:\n      - action: notify\n        params: { text: no }\n    else:\n      - action: notify\n        params: { text: no }\n  - action: notify\n    params: { text: \"{{ playbook.variables.channel }} {{ alert.name }}\" }\n  - action: nothing\n  - connector: x\n    action: y\n  - {}\n  - action: notify\n    params: { text: \"{{ alert.missing }}\" }\n  - action: request_approval\n    params: { role: lead, timeout: 5m, action: ban }\n  - action: notify\n    params: { text: after }",
+        "  - if: \"{{ alert.x | nosuchfilter }}\"\n    then:\n      - action: notify\n        params: { text: no }\n    else:\n      - action: notify\n        params: { text: no }\n  - action: notify\n    params: { text: after }",
         &alert,
         None,
     )?;
     assert!(guarded.contains("condition steps.0 error"), "{guarded}");
-    assert!(guarded.contains("nothing runs"));
+    assert!(guarded.contains("run halted"));
     assert!(!guarded.contains("steps.0.then") && !guarded.contains("steps.0.else"));
-    assert!(
-        guarded.contains("action steps.1 notify text=\"ops n\" breakers=not applicable"),
-        "{guarded}"
-    );
-    assert!(guarded.contains("rejected steps.2 nothing: no such action in the catalogue"));
-    assert!(guarded.contains("rejected steps.3 y: no such action in the catalogue"));
-    assert!(guarded.contains("rejected steps.4 : no such action in the catalogue"));
-    assert!(guarded.contains("rejected steps.5 notify: parameter `text` is missing or empty"));
-    assert!(guarded.contains("approval requested steps.6 action=\"ban\" role=\"lead\" timeout=\"5m\""));
-    assert!(guarded.contains("pending approval steps.7 notify"));
-    assert!(!guarded.contains("action steps.7"));
-    Ok(())
+    assert!(guarded.contains("halted steps.1 notify: not run"), "{guarded}");
+    assert!(!guarded.contains("action steps.1"), "{guarded}");
+    let ran = custom_trace(
+        "  - action: notify\n    params: { text: \"{{ playbook.variables.channel }} {{ alert.name }}\" }",
+        &alert,
+        None,
+    )?;
+    assert!(ran.contains("action steps.0 notify text=\"ops n\" breakers=not applicable"), "{ran}");
+    let failing = [
+        ("  - action: nothing\n", "rejected steps.0 nothing: no such action in the catalogue"),
+        ("  - connector: x\n    action: y\n", "rejected steps.0 y: no such action in the catalogue"),
+        ("  - {}\n", "rejected steps.0 : no such action in the catalogue"),
+        (
+            "  - action: notify\n    params: { text: \"{{ alert.missing }}\" }\n",
+            "rejected steps.0 notify: parameter `text` is missing or empty",
+        ),
+    ];
+    failing.iter().try_for_each(|(step, expected)| -> TestResult {
+        let trace = custom_trace(&format!("{step}  - action: notify\n    params: {{ text: after }}"), &alert, None)?;
+        assert!(trace.contains(expected), "{trace}");
+        assert!(trace.contains("halted steps.1 notify: not run"), "{trace}");
+        Ok(())
+    })
 }
 
 
@@ -376,31 +390,36 @@ fn a_failing_action_in_a_branch_runs_the_error_handler_with_alert_data() -> Test
 #[test]
 fn breaker_bindings_that_cannot_be_built_are_rejected() -> TestResult {
     let alert = json!({ "user": { "value": "adm", "tags": ["privileged"] }, "plain": { "value": "bob" }, "n": OVER_LIMIT });
-    let rejected = custom_trace(
-        "  - action: ban_ip\n  - action: ban_ip\n    params: { ip: notip }\n  - action: ban_ip\n    params: { ip: 198.51.100.1, ttl: xyz }\n  - action: ban_domain_timed\n    params: { domain: a.example, ttl: xyz }\n  - action: run\n    params: { host: h }\n  - action: run_blind\n    params: { host: h }",
-        &alert,
-        None,
-    )?;
-    assert!(
-        rejected.contains("rejected steps.0 ban_ip: the breaker target `ip` is missing"),
-        "{rejected}"
-    );
-    assert!(
-        rejected.contains("rejected steps.1 ban_ip: `\"notip\"` is not an IP address"),
-        "{rejected}"
-    );
-    assert!(rejected.contains("rejected steps.2 ban_ip: `\"xyz\"` is not a duration"), "{rejected}");
-    assert!(
-        rejected.contains("rejected steps.3 ban_domain_timed: `\"xyz\"` is not a duration"),
-        "{rejected}"
-    );
-    assert!(rejected.contains("rejected steps.4 run: the number of machines is missing"), "{rejected}");
-    assert!(
-        rejected.contains("rejected steps.5 run_blind: the number of machines is missing"),
-        "{rejected}"
-    );
-    assert!(!rejected.contains("halted"));
-    Ok(())
+    let cases = [
+        ("  - action: ban_ip\n", "rejected steps.0 ban_ip: the breaker target `ip` is missing"),
+        (
+            "  - action: ban_ip\n    params: { ip: notip }\n",
+            "rejected steps.0 ban_ip: `\"notip\"` is not an IP address",
+        ),
+        (
+            "  - action: ban_ip\n    params: { ip: 198.51.100.1, ttl: xyz }\n",
+            "rejected steps.0 ban_ip: `\"xyz\"` is not a duration",
+        ),
+        (
+            "  - action: ban_domain_timed\n    params: { domain: a.example, ttl: xyz }\n",
+            "rejected steps.0 ban_domain_timed: `\"xyz\"` is not a duration",
+        ),
+        (
+            "  - action: run\n    params: { host: h }\n",
+            "rejected steps.0 run: the number of machines is missing",
+        ),
+        (
+            "  - action: run_blind\n    params: { host: h }\n",
+            "rejected steps.0 run_blind: the number of machines is missing",
+        ),
+    ];
+    cases.iter().try_for_each(|(step, expected)| -> TestResult {
+        let rejected = custom_trace(&format!("{step}  - action: notify\n    params: {{ text: after }}"), &alert, None)?;
+        assert!(rejected.contains(expected), "{rejected}");
+        assert!(rejected.contains("halted steps.1 notify: not run"), "{rejected}");
+        assert!(!rejected.contains("action steps.1"), "{rejected}");
+        Ok(())
+    })
 }
 
 
@@ -743,13 +762,13 @@ const OPPOSITE_BRANCH: &str = "  - if: \"{{ true }}\"\n    then:\n      - action
 fn probe_one_an_approval_that_nobody_gave_halts_the_sequence() -> TestResult {
     let waiting = probe_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), CRITICAL, &[])?;
     assert!(waiting.contains("approval requested steps.0"), "{waiting}");
-    assert!(waiting.contains("pending approval steps.1 isolate_endpoint"), "{waiting}");
+    assert!(waiting.contains("halted steps.1 isolate_endpoint"), "{waiting}");
     assert!(!waiting.contains("action steps.1") && !waiting.contains("breakers=allowed"), "{waiting}");
     let blank = probe_trace(&format!("{APPROVE_ISOLATION}  - {{}}\n"), CRITICAL, &[])?;
-    assert!(blank.contains("pending approval steps.1 (empty step)"), "{blank}");
+    assert!(blank.contains("halted steps.1 (empty step)"), "{blank}");
     let nested = probe_trace(&format!("{NESTED_APPROVAL}{ISOLATE_HOST}"), CRITICAL, &[])?;
     assert!(
-        nested.contains("pending approval steps.1 isolate_endpoint") && !nested.contains("action steps.1"),
+        nested.contains("halted steps.1 isolate_endpoint") && !nested.contains("action steps.1"),
         "{nested}"
     );
     let granted = probe_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), CRITICAL, &["isolate_endpoint"])?;
@@ -760,7 +779,7 @@ fn probe_one_an_approval_that_nobody_gave_halts_the_sequence() -> TestResult {
     );
     let other = probe_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), CRITICAL, &["disable_account"])?;
     assert!(
-        other.contains("approval requested steps.0") && other.contains("pending approval steps.1"),
+        other.contains("approval requested steps.0") && other.contains("halted steps.1"),
         "{other}"
     );
     Ok(())
@@ -852,7 +871,7 @@ fn the_simulation_input_can_grant_approvals_from_the_command_line() -> TestResul
     let rig = rig()?;
     let critical = alert_file(&rig, "critical.json", CRITICAL)?;
     let waiting = execute(&rig.session, &["simulate", "c2", &critical])?;
-    assert!(waiting.contains("pending approval steps.4 slack/notify"), "{waiting}");
+    assert!(waiting.contains("halted steps.4 slack/notify"), "{waiting}");
     let granted = execute(&rig.session, &["simulate", "c2", &critical, "approve=isolate_endpoint"])?;
     assert!(
         granted.contains("approval granted steps.2.else.0") && granted.contains("action steps.4 slack/notify"),
@@ -938,4 +957,153 @@ fn a_serialisation_failure_becomes_text() -> TestResult {
     let value = response_playbooks::bundle::document_value(&unserialisable);
     assert!(value.as_str().is_some_and(|text| text.contains("key must be a string")), "{value}");
     Ok(())
+}
+
+
+const UNPROTECTED: &str = r#"{ "name": "n", "host": { "value": "ws-0042" } }"#;
+
+
+const ERROR_PAGE: &str = "  - connector: pagerduty\n    action: page\n    params: { severity: high, summary: failed }\n";
+
+
+fn halting_trace(steps: &str, on_error: &str, fail_action: Option<usize>, approvals: &[&str]) -> Result<String, Box<dyn Error>> {
+    let text = format!("name: probe\nversion: 1\nmode: enforce\nsteps:\n{steps}\non_error:\n{on_error}");
+    let playbook: Playbook = parse_document(&text, "probe.yaml")?;
+    let catalogue: Catalogue = parse_document(CATALOGUE, "catalogue.yaml")?;
+    let mut simulated = input(UNPROTECTED, fail_action)?;
+    simulated.approvals = approvals.iter().map(|approved| (*approved).to_owned()).collect();
+    Ok(render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &simulated,
+    )))
+}
+
+
+fn isolated(trace: &str) -> bool {
+    trace.lines().any(|line| line.starts_with("action ") && line.contains("isolate_endpoint"))
+}
+
+
+const UNRESOLVED_APPROVAL: &str = "  - action: request_approval\n    params: { role: lead, timeout: 5m, action: \"{{ alert.missing }}\" }\n";
+
+
+const BROKEN_CONDITION: &str = "  - if: \"{{ alert.host.value / 2 > 1 }}\"\n    then:\n      - action: request_approval\n        params: { role: r, timeout: 5m, action: isolate_endpoint }\n";
+
+
+const REJECTED_STEP: &str = "  - action: nothing\n";
+
+
+#[test]
+fn probe_five_an_unresolvable_approval_halts_before_a_destructive_action() -> TestResult {
+    let trace = halting_trace(&format!("{UNRESOLVED_APPROVAL}{ISOLATE_HOST}"), ERROR_PAGE, None, &[])?;
+    assert!(trace.contains("rejected steps.0 request_approval"), "{trace}");
+    assert!(trace.contains("halted steps.1 isolate_endpoint: not run"), "{trace}");
+    assert!(!isolated(&trace), "{trace}");
+    Ok(())
+}
+
+
+#[test]
+fn probe_six_a_condition_that_fails_to_evaluate_halts_the_run() -> TestResult {
+    let trace = halting_trace(&format!("{BROKEN_CONDITION}{ISOLATE_HOST}"), ERROR_PAGE, None, &[])?;
+    assert!(trace.contains("condition steps.0 error"), "{trace}");
+    assert!(trace.contains("halted steps.1 isolate_endpoint: not run"), "{trace}");
+    assert!(!isolated(&trace), "{trace}");
+    let granted = halting_trace(&format!("{BROKEN_CONDITION}{ISOLATE_HOST}"), ERROR_PAGE, None, &["isolate_endpoint"])?;
+    assert!(!isolated(&granted), "{granted}");
+    Ok(())
+}
+
+
+#[test]
+fn probe_seven_a_rejected_step_in_on_error_halts_the_handler() -> TestResult {
+    let handler = format!("{REJECTED_STEP}{ISOLATE_HOST}");
+    let trace = halting_trace(&format!("{APPROVE_ISOLATION}{ISOLATE_HOST}"), &handler, Some(0), &["isolate_endpoint"])?;
+    assert!(trace.contains("approval granted steps.0"), "{trace}");
+    assert!(trace.contains("on_error handler"), "{trace}");
+    assert!(trace.contains("rejected on_error.0 nothing"), "{trace}");
+    assert!(trace.contains("halted on_error.1 isolate_endpoint: not run"), "{trace}");
+    let plain = halting_trace(&format!("{ISOLATE_HOST}{ISOLATE_HOST}"), &handler, Some(0), &[])?;
+    assert!(plain.contains("halted on_error.1 isolate_endpoint: not run"), "{plain}");
+    Ok(())
+}
+
+
+#[test]
+fn probe_eight_a_destructive_step_in_on_error_goes_through_the_breakers() -> TestResult {
+    let critical = r#"{ "host": { "value": "dc-01" } }"#;
+    let text =
+        format!("name: probe\nversion: 1\nmode: enforce\nsteps:\n  - action: release_endpoint\n    params: {{ host: h }}\non_error:\n{ISOLATE_HOST}");
+    let playbook: Playbook = parse_document(&text, "probe.yaml")?;
+    let catalogue: Catalogue = parse_document(CATALOGUE, "catalogue.yaml")?;
+    let simulated = input(critical, Some(0))?;
+    let trace = render_trace(&simulate(&playbook, &catalogue, &inventory()?, &harness()?.breakers, &simulated));
+    assert!(
+        trace.contains("action on_error.0 isolate_endpoint host=\"dc-01\" breakers=needs-approval"),
+        "{trace}"
+    );
+    assert!(trace.contains("halted on_error.0:"), "{trace}");
+    Ok(())
+}
+
+
+const STEP_KINDS: usize = 9;
+
+
+const MAX_STEPS: usize = 6;
+
+
+const PROPTEST_CASES: u32 = 64;
+
+
+const STEP_TEXTS: [&str; STEP_KINDS] = [
+    "  - connector: slack\n    action: notify\n    params: { channel: c, message: m }\n",
+    ISOLATE_HOST,
+    "  - action: isolate_endpoint\n    params: { host: \"{{ alert.missing }}\" }\n",
+    "  - if: \"{{ alert.host.value / 2 > 1 }}\"\n    then:\n      - action: isolate_endpoint\n        params: { host: \"{{ alert.host }}\" }\n    else:\n      - action: isolate_endpoint\n        params: { host: \"{{ alert.host }}\" }\n",
+    "  - action: request_approval\n    params: { role: r, timeout: 5m, action: other }\n",
+    APPROVE_ISOLATION,
+    REJECTED_STEP,
+    "  - connector: fortigate\n    action: block_ip\n    params: { ip: notip, duration: 1h }\n",
+    "  - if: \"{{ true }}\"\n    then:\n      - action: isolate_endpoint\n        params: { host: \"{{ alert.host }}\" }\n",
+];
+
+
+fn sequence_text(kinds: &[usize]) -> String {
+    kinds.iter().map(|kind| STEP_TEXTS.get(*kind).copied().unwrap_or(REJECTED_STEP)).collect()
+}
+
+
+fn poisoned(line: &str) -> bool {
+    line.starts_with("rejected ") || line.starts_with("approval requested ") || line.starts_with("halted ") || line.contains("run halted")
+}
+
+
+fn ran_after_poison(trace: &str) -> bool {
+    trace.lines().skip_while(|line| !poisoned(line)).any(|line| line.starts_with("action "))
+}
+
+
+fn generated_trace(steps: &[usize], on_error: &[usize], fail_action: Option<usize>, granted: bool) -> Result<String, TestCaseError> {
+    let approvals: &[&str] = if granted { &["isolate_endpoint"] } else { &[] };
+    halting_trace(&sequence_text(steps), &sequence_text(on_error), fail_action, approvals).map_err(|failure| TestCaseError::fail(failure.to_string()))
+}
+
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
+
+    #[test]
+    fn no_action_is_traced_after_the_first_failure_or_ungranted_approval(
+        steps in proptest::collection::vec(0..STEP_KINDS, 1..MAX_STEPS),
+        on_error in proptest::collection::vec(0..STEP_KINDS, 1..MAX_STEPS),
+        fail_action in proptest::option::of(0..MAX_STEPS),
+        granted in any::<bool>(),
+    ) {
+        let trace = generated_trace(&steps, &on_error, fail_action, granted)?;
+        prop_assert!(!ran_after_poison(&trace), "{}", trace);
+    }
 }

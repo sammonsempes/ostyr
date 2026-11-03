@@ -7,3 +7,5 @@ action steps.1.then.0 dns/sinkhole domain="c2.evil.example" duration="24h" break
 condition steps.2 true: {{ alert.host.criticality != 'critical' }}
 action steps.2.then.0 isolate_endpoint host="ws-0042" breakers=needs-approval alert=true reason=limit isolations_per_hour reached: 5 of 5
 halted steps.2.then.0: waiting for approval, on-call alert raised
+halted steps.3 {{ alert.user and not alert.user.is_privileged }}: not run
+halted steps.4 slack/notify: not run

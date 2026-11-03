@@ -166,7 +166,7 @@ pub enum TraceEvent {
         params: ParamMap,
         granted: bool,
     },
-    Pending {
+    NotRun {
         path: String,
         step: String,
     },

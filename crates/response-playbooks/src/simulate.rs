@@ -61,8 +61,6 @@ pub struct Run<'a> {
     pub ran: usize,
     pub failed: bool,
     pub halted: bool,
-    pub awaiting: bool,
-    pub approval_seen: bool,
 }
 
 
@@ -205,9 +203,7 @@ pub fn reject(state: &mut Run, work: &Work, reason: String) {
         action: work.step.action.as_deref().map_or_else(String::new, str::to_owned),
         reason,
     });
-    if is_approval(work.step) || state.approval_seen {
-        state.awaiting = true;
-    }
+    state.halted = true;
 }
 
 
@@ -256,7 +252,7 @@ pub fn record_action(context: &Context, fail_at: Option<usize>, work: &Work, ent
 }
 
 
-/// An approval that the input does not grant stops the run: everything after it waits.
+/// An approval that the input does not grant halts the run.
 pub fn record_approval(context: &Context, work: &Work, resolved: &ResolvedMap, state: &mut Run) {
     let granted = resolved
         .get(APPROVAL_TARGET_PARAM)
@@ -267,8 +263,7 @@ pub fn record_approval(context: &Context, work: &Work, resolved: &ResolvedMap, s
         params: values_of(resolved),
         granted,
     });
-    state.awaiting = !granted;
-    state.approval_seen = true;
+    state.halted = !granted;
 }
 
 
@@ -301,6 +296,7 @@ pub fn branch<'a>(context: &Context, work: &Work<'a>, condition: &str, state: &m
         ConditionOutcome::False => (&work.step.otherwise, "else"),
         ConditionOutcome::Failed(_) => (&[], "none"),
     };
+    state.halted = matches!(outcome, ConditionOutcome::Failed(_));
     state.events.push(TraceEvent::Condition {
         path: work.path.clone(),
         expression: condition.to_owned(),
@@ -311,7 +307,7 @@ pub fn branch<'a>(context: &Context, work: &Work<'a>, condition: &str, state: &m
 
 
 pub fn advance<'a>(context: &Context, fail_at: Option<usize>, mut state: Run<'a>) -> ControlFlow<Run<'a>, Run<'a>> {
-    let stopped = state.failed || state.halted || state.awaiting;
+    let stopped = state.failed || state.halted;
     match (!stopped).then(|| state.pending.pop()).flatten() {
         Some(work) => {
             match &work.step.condition {
@@ -345,14 +341,14 @@ pub fn pending_label(step: &Step) -> String {
 }
 
 
-/// Steps still to run when the sequence waits for an approval are traced and dropped, never run.
+/// Steps still to run when the run halts are traced and dropped, never run.
 pub fn with_pending(mut state: Run) -> Run {
-    if state.awaiting {
+    if state.halted {
         let waiting: Vec<TraceEvent> = state
             .pending
             .drain(..)
             .rev()
-            .map(|work| TraceEvent::Pending {
+            .map(|work| TraceEvent::NotRun {
                 path: work.path,
                 step: pending_label(work.step),
             })
@@ -385,9 +381,8 @@ pub fn run_all(context: &Context) -> Vec<TraceEvent> {
         events.push(TraceEvent::ErrorHandler);
         let handler = Run {
             events,
-            done: first.done,
-            ran: first.ran,
-            ..Run::default()
+            failed: false,
+            ..first
         };
         run_sequence(context, &context.playbook.on_error, ON_ERROR_ROOT, None, handler).events
     } else {
