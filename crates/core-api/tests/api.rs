@@ -505,6 +505,7 @@ fn every_error_has_a_stable_status_and_code() -> TestResult {
         (ApiError::MfaInvalid, StatusCode::UNAUTHORIZED),
         (ApiError::MfaEnrolmentRequired, StatusCode::FORBIDDEN),
         (ApiError::Forbidden, StatusCode::FORBIDDEN),
+        (ApiError::RequestTimeout, StatusCode::REQUEST_TIMEOUT),
         (ApiError::PayloadTooLarge, StatusCode::PAYLOAD_TOO_LARGE),
         (ApiError::TooManyRequests, StatusCode::TOO_MANY_REQUESTS),
         (ApiError::Internal, StatusCode::INTERNAL_SERVER_ERROR),
@@ -991,6 +992,7 @@ async fn commit_login_repeats_the_full_table_check() -> TestResult {
     let stored = core_api::routes::stored_hash(&fx.state, READER);
     let refused = commit_login(&fx.state, "id-3", &login_request(READER), &stored, Some(true));
     assert!(matches!(refused, Err(ApiError::TooManyRequests)));
+    assert_eq!(login_refusal_reasons(&fx)?, ["table_full"]);
     Ok(())
 }
 
@@ -1101,5 +1103,98 @@ async fn a_failing_audit_on_a_locked_refusal_fails_closed() -> TestResult {
     let mut request = login_request("stranger");
     request.source = "203.0.113.50".to_owned();
     assert!(matches!(admit_login(&fx.state, "id-audit", &request), Err(ApiError::Internal)));
+    Ok(())
+}
+
+
+fn login_refusal_reasons(fixture: &fixture::Fixture) -> Result<Vec<String>, TestError> {
+    Ok(audit_lines(fixture)?
+        .iter()
+        .filter(|line| line.get("action") == Some(&json!("auth.login")))
+        .filter_map(|line| line.pointer("/parameters/reason").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+
+#[tokio::test]
+async fn a_login_refused_for_a_full_table_is_audited_as_denied_table_full() -> TestResult {
+    let fx = fixture_with(two_key_attempt_table)?;
+    assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
+    assert_eq!(login_status(&fx, SOURCE_B, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    let refused: Vec<serde_json::Value> = audit_lines(&fx)?
+        .into_iter()
+        .filter(|line| line.get("action") == Some(&json!("auth.login")) && line.get("outcome") == Some(&json!("denied")))
+        .collect();
+    assert_eq!(refused.len(), 1);
+    let line = refused.first().ok_or("no record")?;
+    assert_eq!(line.pointer("/parameters/reason"), Some(&json!("table_full")));
+    assert_eq!(line.pointer("/parameters/source"), Some(&json!("127.0.0.3")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_table_and_a_locked_key_is_audited_as_locked() -> TestResult {
+    let fx = fixture_with(small_attempt_table)?;
+    fx.state
+        .auth
+        .lock()
+        .map_err(|_| "poisoned")?
+        .attempts
+        .insert(format!("account:{READER}"), locked_for_a_while());
+    let mut request = login_request(READER);
+    request.source = "198.51.100.1".to_owned();
+    assert!(matches!(admit_login(&fx.state, "id-both", &request), Err(ApiError::TooManyRequests)));
+    assert_eq!(login_refusal_reasons(&fx)?, ["locked"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn audit_records_carry_the_folded_source_key() -> TestResult {
+    let fx = fixture()?;
+    let source = SocketAddr::new("::ffff:203.0.113.7".parse()?, CLIENT_PORT_FOR_AUDIT);
+    send_from(&fx.router, source, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
+    let wide = SocketAddr::new("2001:db8:1:2:ffff::9".parse()?, CLIENT_PORT_FOR_AUDIT);
+    send_from(
+        &fx.router,
+        wide,
+        request("POST", "/auth/login", None, login_body(READER, "wrong password here"))?,
+    )
+    .await?;
+    let sources: Vec<String> = audit_lines(&fx)?
+        .iter()
+        .filter(|line| line.get("action") == Some(&json!("api.request")))
+        .filter_map(|line| line.pointer("/parameters/source").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(sources, ["203.0.113.7", "2001:db8:1:2::"]);
+    Ok(())
+}
+
+
+const CLIENT_PORT_FOR_AUDIT: u16 = 40_001;
+
+
+#[tokio::test]
+async fn a_body_that_stalls_is_answered_with_408() -> TestResult {
+    let fx = fixture()?;
+    let stalled = Body::from_stream(tokio_stream::pending::<Result<Bytes, io::Error>>());
+    let response = send(&fx.router, request("POST", "/auth/login", None, stalled)?).await?;
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(body_json(response).await?.pointer("/error/code"), Some(&json!("request_timeout")));
+    let partial = Body::from_stream(tokio_stream::StreamExt::chain(
+        tokio_stream::iter(vec![Ok::<_, io::Error>(Bytes::from("{\"username\":"))]),
+        tokio_stream::pending(),
+    ));
+    let slow = send(&fx.router, request("POST", "/auth/login", None, partial)?).await?;
+    assert_eq!(slow.status(), StatusCode::REQUEST_TIMEOUT);
+    let timed_out: Vec<String> = audit_lines(&fx)?
+        .iter()
+        .filter_map(|line| line.pointer("/parameters/status").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(timed_out, ["408", "408"]);
     Ok(())
 }

@@ -14,6 +14,11 @@ pub fn error_parts(error: &ApiError) -> (StatusCode, &'static str, &'static str)
         ApiError::MfaInvalid => (StatusCode::UNAUTHORIZED, "mfa_invalid", "the second factor is invalid"),
         ApiError::MfaEnrolmentRequired => (StatusCode::FORBIDDEN, "mfa_enrolment_required", "a second factor must be enrolled first"),
         ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "the operation is not permitted"),
+        ApiError::RequestTimeout => (
+            StatusCode::REQUEST_TIMEOUT,
+            "request_timeout",
+            "the request body was not received in time",
+        ),
         ApiError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "the request body is too large"),
         ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", "too many requests, retry later"),
         ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "the request could not be processed"),
