@@ -2,7 +2,7 @@ use crate::model::{ApiError, ErrorBody, ErrorDetail};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use core_auth::error::AuthError;
+use core_auth::error::{AuthError, OidcDenial};
 
 
 pub fn error_parts(error: &ApiError) -> (StatusCode, &'static str, &'static str) {
@@ -21,6 +21,7 @@ pub fn error_parts(error: &ApiError) -> (StatusCode, &'static str, &'static str)
         ),
         ApiError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "the request body is too large"),
         ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", "too many requests, retry later"),
+        ApiError::BadGateway => (StatusCode::BAD_GATEWAY, "bad_gateway", "the identity provider is unavailable"),
         ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "the request could not be processed"),
     }
 }
@@ -51,7 +52,8 @@ pub fn auth_failure(error: &AuthError) -> ApiError {
         AuthError::MfaRequired => ApiError::MfaRequired,
         AuthError::MfaInvalid => ApiError::MfaInvalid,
         AuthError::MfaEnrolmentRequired => ApiError::MfaEnrolmentRequired,
-        AuthError::Locked { .. } => ApiError::TooManyRequests,
+        AuthError::Locked { .. } | AuthError::Oidc(OidcDenial::TooManyPending) => ApiError::TooManyRequests,
+        AuthError::Oidc(OidcDenial::Provider) => ApiError::BadGateway,
         other => {
             tracing::warn!(error = %other, "internal authentication failure");
             ApiError::Internal

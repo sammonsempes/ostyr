@@ -1,5 +1,6 @@
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiState};
+use crate::oidc::load_oidc;
 use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
 use core_audit::log::open_file_log;
@@ -49,6 +50,8 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
     let audit = open_file_log(&config.audit_log)?;
     let compromised = load_compromised(BufReader::new(File::open(&config.compromised_list)?))?;
     let accounts = load_accounts_file(&config.accounts_store)?;
+    let catalog = builtin_catalog();
+    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog)).transpose()?;
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
@@ -61,7 +64,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         audit,
         key,
         compromised,
-        catalog: builtin_catalog(),
+        catalog,
         random: os_random,
         clock: OffsetDateTime::now_utc,
         store_path: config.accounts_store.clone(),
@@ -74,6 +77,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         max_sources: MAX_TRACKED_SOURCES,
         max_attempts: MAX_TRACKED_ATTEMPTS,
         body_timeout: config.body_read_timeout,
+        oidc,
     })
 }
 

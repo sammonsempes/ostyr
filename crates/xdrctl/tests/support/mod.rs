@@ -196,6 +196,7 @@ pub fn start_live() -> Result<Live, TestError> {
         header_read_timeout: SERVER_TIMEOUT,
         body_read_timeout: SERVER_TIMEOUT,
         max_connections_per_source: MAX_CONNECTIONS,
+        oidc: None,
     };
     let handle = ServerHandle::new();
     let (sender, receiver) = channel();
