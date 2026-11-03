@@ -15,7 +15,7 @@ use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 
@@ -32,6 +32,9 @@ pub const CLI_TENANT: &str = "default";
 
 
 pub const CLI_REQUEST_ID: &str = "cli";
+
+
+pub const READ_ONLY_COMMANDS: [&str; 2] = ["totp", "check"];
 
 
 pub const USAGE: &str = "usage: auth_tool <store> <audit-log> <key-file> <compromised-list>; commands on stdin";
@@ -106,6 +109,27 @@ pub fn execute<Output: Write>(state: &mut State, context: &Context<Output>, now:
 }
 
 
+pub fn is_read_only(words: &[&str]) -> bool {
+    words.first().is_some_and(|command| READ_ONLY_COMMANDS.contains(command))
+}
+
+
+/// Runs one command and saves the store only when a mutating command succeeded.
+pub fn apply_command<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    store_path: &Path,
+    words: &[&str],
+) -> Result<String, AuthError> {
+    let done = execute(state, context, now, words)?;
+    if !is_read_only(words) {
+        save_accounts_file(store_path, &state.accounts, context.random)?;
+    }
+    Ok(done)
+}
+
+
 pub fn run<Input: BufRead, Output: Write>(
     arguments: &[String],
     input: Input,
@@ -151,11 +175,8 @@ pub fn serve<Input: BufRead, Output: Write>(
     input.lines().try_for_each(|line| {
         let text = line?;
         let words: Vec<&str> = text.split_whitespace().collect();
-        let reply = match execute(&mut state, &context, clock(), &words) {
-            Ok(done) => {
-                save_accounts_file(&store_path, &state.accounts, random)?;
-                done
-            }
+        let reply = match apply_command(&mut state, &context, clock(), &store_path, &words) {
+            Ok(done) => done,
             Err(error) => format!("error {error}"),
         };
         writeln!(output, "{reply}")?;

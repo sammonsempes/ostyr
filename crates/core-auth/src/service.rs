@@ -114,6 +114,7 @@ pub enum Denial {
     MfaNotEnrolled,
     MfaMissing,
     MfaInvalid,
+    Internal,
 }
 
 
@@ -124,13 +125,14 @@ pub fn denial_reason(denial: Denial) -> &'static str {
         Denial::MfaNotEnrolled => "mfa_not_enrolled",
         Denial::MfaMissing => "mfa_missing",
         Denial::MfaInvalid => "mfa_invalid",
+        Denial::Internal => "internal_error",
     }
 }
 
 
 pub fn denial_error(denial: Denial) -> AuthError {
     match denial {
-        Denial::UnknownUser | Denial::BadPassword => AuthError::InvalidCredentials,
+        Denial::UnknownUser | Denial::BadPassword | Denial::Internal => AuthError::InvalidCredentials,
         Denial::MfaNotEnrolled => AuthError::MfaEnrolmentRequired,
         Denial::MfaMissing => AuthError::MfaRequired,
         Denial::MfaInvalid => AuthError::MfaInvalid,
@@ -683,26 +685,47 @@ pub fn deny_login<Output: Write>(
 }
 
 
+pub fn factors_denial<Output: Write>(
+    accounts: &mut AccountMap,
+    context: &Context<Output>,
+    request: &LoginRequest,
+    now: OffsetDateTime,
+) -> Option<Denial> {
+    check_factors(accounts, context, request, now).unwrap_or_else(|error| {
+        tracing::warn!(%error, "login verification failed internally");
+        Some(Denial::Internal)
+    })
+}
+
+
 pub fn grant_login<Output: Write>(
     state: &mut State,
     context: &Context<Output>,
     now: OffsetDateTime,
+    audit_user: &str,
     request: &LoginRequest,
 ) -> Result<SecretString, AuthError> {
     let mut sessions = state.sessions.clone();
-    let token = create_session(&mut sessions, &request.username, now, context.random)?;
-    record(
-        context,
-        now,
-        &request.username,
-        ACTION_LOGIN,
-        &request.username,
-        Outcome::Success,
-        &[("source", request.source.clone())],
-    )?;
-    state.sessions = sessions;
-    clear_failures(&mut state.attempts, &account_key(&request.username));
-    Ok(token)
+    match create_session(&mut sessions, &request.username, now, context.random) {
+        Ok(token) => {
+            record(
+                context,
+                now,
+                &request.username,
+                ACTION_LOGIN,
+                &request.username,
+                Outcome::Success,
+                &[("source", request.source.clone())],
+            )?;
+            state.sessions = sessions;
+            clear_failures(&mut state.attempts, &account_key(&request.username));
+            Ok(token)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "session creation failed after the factors were accepted");
+            deny_login(state, context, now, audit_user, request, Denial::Internal)
+        }
+    }
 }
 
 
@@ -723,9 +746,9 @@ pub fn login<Output: Write>(
         }
         None => {
             let mut accounts = state.accounts.clone();
-            match check_factors(&mut accounts, context, request, now)? {
+            match factors_denial(&mut accounts, context, request, now) {
                 None => {
-                    let granted = grant_login(state, context, now, request);
+                    let granted = grant_login(state, context, now, &audit_user, request);
                     if granted.is_ok() {
                         state.accounts = accounts;
                     }

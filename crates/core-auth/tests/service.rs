@@ -390,7 +390,7 @@ fn verification_failure_is_reported_for_unknown_users() -> TestResult {
     };
     assert!(matches!(
         login(&mut state, &ctx, at(1)?, &request("nobody", GOOD_PASSWORD, None, SOURCE)),
-        Err(AuthError::Decrypt)
+        Err(AuthError::InvalidCredentials)
     ));
     Ok(())
 }
@@ -723,7 +723,7 @@ fn corrupted_totp_secret_is_reported() -> TestResult {
         .ok_or("no totp")?
         .encrypted_secret = "AAAA".to_owned();
     let result = login(&mut state, &ctx, at(1)?, &request("root", GOOD_PASSWORD, Some("123456"), SOURCE));
-    assert!(matches!(result, Err(AuthError::Decrypt)));
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
     Ok(())
 }
 
@@ -1043,7 +1043,7 @@ fn locked_login_audit_failure_and_token_failure_are_reported() -> TestResult {
         at(1)?,
         &request("alice", GOOD_PASSWORD, None, SOURCE),
     );
-    assert!(matches!(token_failure, Err(AuthError::Random(_))));
+    assert!(matches!(token_failure, Err(AuthError::InvalidCredentials)));
     (0..ACCOUNT_MAX_FAILURES).for_each(|_| {
         login(
             &mut state,
@@ -1071,10 +1071,10 @@ fn corrupted_password_hash_and_clock_before_epoch_are_reported() -> TestResult {
     enrol_totp(&mut state, &ctx, at(0)?, &admin, "root", None)?;
     let before_epoch = OffsetDateTime::from_unix_timestamp(-1)?;
     let early = login(&mut state, &ctx, before_epoch, &request("root", GOOD_PASSWORD, Some("123456"), SOURCE));
-    assert!(matches!(early, Err(AuthError::ClockBeforeEpoch)));
+    assert!(matches!(early, Err(AuthError::InvalidCredentials)));
     state.accounts.get_mut("root").ok_or("no account")?.password_hash = "garbage".to_owned();
     let corrupted = login(&mut state, &ctx, at(1)?, &request("root", GOOD_PASSWORD, None, SOURCE));
-    assert!(matches!(corrupted, Err(AuthError::Hash(_))));
+    assert!(matches!(corrupted, Err(AuthError::InvalidCredentials)));
     Ok(())
 }
 
@@ -1217,5 +1217,70 @@ fn enrolment_lockout_audit_failure_is_reported() -> TestResult {
         .map(|_| enrol_totp(&mut state, &selective_context, when, alice.expose_secret(), "alice", Some(&wrong)))
         .collect::<Vec<_>>();
     assert!(matches!(results.last(), Some(Err(AuthError::Audit(_)))));
+    Ok(())
+}
+
+
+fn login_lines(fixture: &Fixture<Vec<u8>>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Ok(audit_text(fixture)?
+        .lines()
+        .filter(|line| line.contains("\"action\":\"auth.login\""))
+        .map(str::to_owned)
+        .collect())
+}
+
+
+#[test]
+fn an_undecryptable_secret_is_audited_counted_and_locks_the_account() -> TestResult {
+    let fixture = fixture();
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    enrol_totp(&mut state, &context(&fixture), at(0)?, &admin, "root", None)?;
+    let other_key: StoreKey = SecretSlice::from(vec![KEY_FILL + 1; KEY_LENGTH]);
+    let wrong_key = Context {
+        key: &other_key,
+        ..context(&fixture)
+    };
+    let before = login_lines(&fixture)?.len();
+    (0..ACCOUNT_MAX_FAILURES).try_for_each(|_| {
+        let result = login(&mut state, &wrong_key, at(1)?, &request("root", GOOD_PASSWORD, Some("123456"), SOURCE));
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    let lines = login_lines(&fixture)?;
+    let new_lines: Vec<&String> = lines.iter().skip(before).collect();
+    assert_eq!(new_lines.len(), ACCOUNT_MAX_FAILURES);
+    assert!(new_lines
+        .iter()
+        .all(|line| line.contains("\"outcome\":\"failure\"") && line.contains("\"reason\":\"internal_error\"")));
+    let locked = login(
+        &mut state,
+        &wrong_key,
+        at(PLUS_TWO)?,
+        &request("root", GOOD_PASSWORD, Some("123456"), SOURCE),
+    );
+    assert!(matches!(locked, Err(AuthError::Locked { .. })));
+    Ok(())
+}
+
+
+#[test]
+fn a_session_failure_after_the_factors_is_a_generic_audited_denial() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let before = login_lines(&fixture)?.len();
+    let sessions_before = state.sessions.len();
+    let result = login(
+        &mut state,
+        &context_with(&fixture, fail_on_token),
+        at(1)?,
+        &request("alice", GOOD_PASSWORD, None, SOURCE),
+    );
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    let lines = login_lines(&fixture)?;
+    assert_eq!(lines.len(), before + 1);
+    assert!(lines
+        .last()
+        .is_some_and(|line| line.contains("\"outcome\":\"failure\"") && line.contains("\"reason\":\"internal_error\"")));
+    assert_eq!(state.sessions.len(), sessions_before);
     Ok(())
 }

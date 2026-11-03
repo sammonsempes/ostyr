@@ -7,13 +7,19 @@ mod types;
 
 
 use core_audit::error::AuditError;
+use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
-use core_auth::cli::{parse_roles, run, totp_now};
+use core_auth::cli::{apply_command, parse_roles, run, totp_now};
 use core_auth::error::AuthError;
+use core_auth::password::verify_password;
 use core_auth::random::os_random;
+use core_auth::rbac::builtin_catalog;
+use core_auth::service::{Context, State};
+use core_auth::types::{CompromisedSet, RoleCatalog, StoreKey};
 use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
 use failing_writer::FailingWriter;
+use secrecy::SecretSlice;
 use std::fs::{self, OpenOptions};
 use std::io::BufReader;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -377,8 +383,103 @@ fn the_lock_file_is_private_and_a_failed_command_does_not_rewrite_the_store() ->
     let output = session(&space, "bogus\nroles 00 root reader\n")?;
     assert_eq!(output.matches("error ").count(), HEX_PER_BYTE);
     assert_eq!(fs::metadata(&store)?.ino(), before);
-    session(&space, "totp GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\n")?;
-    assert_ne!(fs::metadata(&store)?.ino(), before);
+    session(&space, "totp GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\ncheck 00\n")?;
+    assert_eq!(fs::metadata(&store)?.ino(), before);
+    session(&space, &format!("login root {PASSWORD} 10.0.0.1\n"))?;
+    assert_eq!(fs::metadata(&store)?.ino(), before);
+    Ok(())
+}
+
+
+struct Fixture {
+    audit_ok: AuditLog<Vec<u8>>,
+    audit_broken: AuditLog<FailingWriter>,
+    key: StoreKey,
+    compromised: CompromisedSet,
+    catalog: RoleCatalog,
+}
+
+
+fn fixture() -> Fixture {
+    Fixture {
+        audit_ok: genesis_log(Vec::new()),
+        audit_broken: genesis_log(FailingWriter {
+            fail_write: true,
+            fail_flush: false,
+        }),
+        key: SecretSlice::from(vec![KEY_FILL; KEY_LENGTH]),
+        compromised: CompromisedSet::new(),
+        catalog: builtin_catalog(),
+    }
+}
+
+
+fn working<'a>(fixture: &'a Fixture) -> Context<'a, Vec<u8>> {
+    Context {
+        audit: &fixture.audit_ok,
+        random: os_random,
+        verify: &verify_password,
+        key: &fixture.key,
+        compromised: &fixture.compromised,
+        catalog: &fixture.catalog,
+        tenant: "default",
+        request_id: "cli",
+    }
+}
+
+
+fn broken<'a>(fixture: &'a Fixture) -> Context<'a, FailingWriter> {
+    Context {
+        audit: &fixture.audit_broken,
+        random: os_random,
+        verify: &verify_password,
+        key: &fixture.key,
+        compromised: &fixture.compromised,
+        catalog: &fixture.catalog,
+        tenant: "default",
+        request_id: "cli",
+    }
+}
+
+
+fn same_file(path: &Path, content: &[u8], inode: u64) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(fs::read(path)? == content && fs::metadata(path)?.ino() == inode)
+}
+
+
+#[test]
+fn a_failing_audit_append_leaves_the_store_untouched() -> TestResult {
+    let fixture = fixture();
+    let directory = tempdir()?;
+    let store = directory.path().join("accounts.json");
+    let mut state = State::default();
+    let denied = apply_command(&mut state, &broken(&fixture), fixed_clock(), &store, &["bootstrap", "root", PASSWORD]);
+    assert!(matches!(denied, Err(AuthError::Audit(_))));
+    assert!(!store.exists());
+    assert!(state.accounts.is_empty());
+    let ok_context = working(&fixture);
+    let enrolment = apply_command(&mut state, &ok_context, fixed_clock(), &store, &["bootstrap", "root", PASSWORD])?;
+    let secret = word_after(&enrolment, "secret ").ok_or("no secret")?.to_owned();
+    assert!(store.exists());
+    let code = totp_now(&secret, fixed_clock())?;
+    let logged = apply_command(
+        &mut state,
+        &ok_context,
+        fixed_clock(),
+        &store,
+        &["login", "root", PASSWORD, "10.0.0.1", &code],
+    )?;
+    let token = word_after(&logged, "ok ").ok_or("no token")?.to_owned();
+    let before_content = fs::read(&store)?;
+    let before_inode = fs::metadata(&store)?.ino();
+    let mutation = ["create", token.as_str(), "bob", "another-long-passphrase", "reader"];
+    let refused = apply_command(&mut state, &broken(&fixture), fixed_clock(), &store, &mutation);
+    assert!(matches!(refused, Err(AuthError::Audit(_))));
+    assert!(same_file(&store, &before_content, before_inode)?);
+    assert!(!state.accounts.contains_key("bob"));
+    let accepted = apply_command(&mut state, &ok_context, fixed_clock(), &store, &mutation)?;
+    assert_eq!(accepted, "ok");
+    assert!(!same_file(&store, &before_content, before_inode)?);
     Ok(())
 }
 

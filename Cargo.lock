@@ -243,6 +243,7 @@ dependencies = [
  "thiserror",
  "time",
  "totp-lite",
+ "tracing",
 ]
 
 [[package]]
