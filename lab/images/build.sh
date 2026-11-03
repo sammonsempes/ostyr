@@ -23,42 +23,89 @@ upload_volume() {
 }
 
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+trap 'chmod -R u+w "$work_dir" 2>/dev/null; rm -rf "$work_dir"' EXIT
 
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-packer-$image" -f "$work_dir/id_ed25519"
 
-base_url="$(sed -n '/variable "image_base_url"/,/}/ s/^ *default *= *"\(.*\)"/\1/p' "$template")"
-image_file="$(sed -n 's/^ *iso_url *= *"\${var.image_base_url}\/\(.*\)"/\1/p' "$template")"
-[[ -n "$base_url" && -n "$image_file" ]] || die "cannot read image_base_url and iso_url from $template"
-fetch() {
-    curl --fail --silent --show-error --location --output "$2" "$1"
+ISO_CACHE="$LAB_STATE_ROOT/iso-cache"
+PINS_FILE="$LAB_DIR/images/pins.tsv"
+
+pin_field() {
+    awk -F'\t' -v name="$1" -v column="$2" '$1 == name {print $column}' "$PINS_FILE"
 }
 
-verify_rocky() {
-    local key="$1" sums_name="$2" sig_name="$3"
-    fetch "$base_url/$sums_name" "$work_dir/sums"
-    fetch "$base_url/$sig_name" "$work_dir/sums.sig"
-    gpg --dearmor <"$LAB_DIR/images/keys/$key.asc" >"$work_dir/key.gpg"
-    gpgv --keyring "$work_dir/key.gpg" "$work_dir/sums.sig" "$work_dir/sums" || die "checksum signature check failed"
-    image_sum="sha256:$(sed -n "s/^SHA256 ($image_file) = \([0-9a-f]\{64\}\)\$/\1/p" "$work_dir/sums")"
+fetch_pinned() {
+    local name="$1"
+    local url expected file actual
+    url="$(pin_field "$name" 5)"
+    expected="$(pin_field "$name" 2)"
+    file="$ISO_CACHE/$(pin_field "$name" 3)"
+    [[ -n "$url" && "$expected" =~ ^[0-9a-f]{64}$ ]] || die "no valid pin for $name in $PINS_FILE"
+    mkdir -p "$ISO_CACHE"
+    if [[ ! -f "$file" ]]; then
+        curl --fail --silent --show-error --location --output "$file.part" "$url" && mv "$file.part" "$file"
+    fi
+    actual="$(sha256sum "$file" | cut -d' ' -f1)"
+    [[ "$actual" == "$expected" ]] || die "$name: sha256 $actual does not match the pin $expected; remove $file and review the pin before changing it"
+    printf '%s' "$file"
 }
 
+prepare_windows() {
+    local iso_name="$1"
+    local virtio_iso
+    iso_path="$(fetch_pinned "$iso_name")"
+    virtio_iso="$(fetch_pinned virtio-win)"
+    cloudbase_msi="$(fetch_pinned cloudbase-init)"
+    mkdir -p "$work_dir/drivers"
+    xorriso -osirrox on -indev "$virtio_iso" -extract /viostor "$work_dir/drivers/viostor" -extract /NetKVM "$work_dir/drivers/NetKVM" >"$work_dir/xorriso.log" 2>&1 ||
+        die "cannot extract the virtio drivers from $virtio_iso"
+    chmod -R u+rwX "$work_dir/drivers"
+    build_password="Aa1-$(openssl rand -hex 12)"
+    image_sum="sha256:$(pin_field "$iso_name" 2)"
+    extra_vars=(-var "iso_path=$iso_path" -var "drivers_dir=$work_dir/drivers" -var "cloudbase_msi=$cloudbase_msi" -var "build_password=$build_password")
+}
+
+prepare_linux() {
+    base_url="$(sed -n '/variable "image_base_url"/,/}/ s/^ *default *= *"\(.*\)"/\1/p' "$template")"
+    image_file="$(sed -n 's/^ *iso_url *= *"\${var.image_base_url}\/\(.*\)"/\1/p' "$template")"
+    [[ -n "$base_url" && -n "$image_file" ]] || die "cannot read image_base_url and iso_url from $template"
+    fetch() {
+        curl --fail --silent --show-error --location --output "$2" "$1"
+    }
+
+    verify_rocky() {
+        local key="$1" sums_name="$2" sig_name="$3"
+        fetch "$base_url/$sums_name" "$work_dir/sums"
+        fetch "$base_url/$sig_name" "$work_dir/sums.sig"
+        gpg --dearmor <"$LAB_DIR/images/keys/$key.asc" >"$work_dir/key.gpg"
+        gpgv --keyring "$work_dir/key.gpg" "$work_dir/sums.sig" "$work_dir/sums" || die "checksum signature check failed"
+        image_sum="sha256:$(sed -n "s/^SHA256 ($image_file) = \([0-9a-f]\{64\}\)\$/\1/p" "$work_dir/sums")"
+    }
+
+    case "$image" in
+        ubuntu-*)
+            fetch "$base_url/SHA256SUMS" "$work_dir/SHA256SUMS"
+            fetch "$base_url/SHA256SUMS.gpg" "$work_dir/SHA256SUMS.gpg"
+            gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
+            image_sum="sha256:$(awk -v file="*$image_file" '$2 == file {print $1}' "$work_dir/SHA256SUMS")"
+            ;;
+        rocky-9) verify_rocky rocky-9 "$image_file.CHECKSUM" "$image_file.CHECKSUM.asc" ;;
+        rocky-8) verify_rocky rocky-8 CHECKSUM CHECKSUM.sig ;;
+        debian-*)
+            fetch "$base_url/SHA512SUMS" "$work_dir/SHA512SUMS"
+            image_sum="sha512:$(awk -v file="$image_file" '$2 == file {print $1}' "$work_dir/SHA512SUMS")"
+            ;;
+        *) die "no checksum verification known for image '$image'" ;;
+    esac
+    [[ "$image_sum" =~ ^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$ ]] || die "no checksum for $image_file in the verified checksum file"
+}
+
+extra_vars=()
 case "$image" in
-    ubuntu-*)
-        fetch "$base_url/SHA256SUMS" "$work_dir/SHA256SUMS"
-        fetch "$base_url/SHA256SUMS.gpg" "$work_dir/SHA256SUMS.gpg"
-        gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
-        image_sum="sha256:$(awk -v file="*$image_file" '$2 == file {print $1}' "$work_dir/SHA256SUMS")"
-        ;;
-    rocky-9) verify_rocky rocky-9 "$image_file.CHECKSUM" "$image_file.CHECKSUM.asc" ;;
-    rocky-8) verify_rocky rocky-8 CHECKSUM CHECKSUM.sig ;;
-    debian-*)
-        fetch "$base_url/SHA512SUMS" "$work_dir/SHA512SUMS"
-        image_sum="sha512:$(awk -v file="$image_file" '$2 == file {print $1}' "$work_dir/SHA512SUMS")"
-        ;;
-    *) die "no checksum verification known for image '$image'" ;;
+    win11) prepare_windows win11 ;;
+    ws2022-dc) prepare_windows ws2022 ;;
+    *) prepare_linux ;;
 esac
-[[ "$image_sum" =~ ^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$ ]] || die "no checksum for $image_file in the verified checksum file"
 
 packer init "$template"
 packer build -color=false \
@@ -66,6 +113,7 @@ packer build -color=false \
     -var "output_directory=$work_dir/output" \
     -var "ssh_private_key_file=$work_dir/id_ed25519" \
     -var "ssh_public_key=$(cat "$work_dir/id_ed25519.pub")" \
+    "${extra_vars[@]}" \
     "$template"
 built="$work_dir/output/$volume"
 [[ -f "$built" ]] || die "packer produced no $built"

@@ -29,9 +29,19 @@ trap cleanup EXIT
 
 ssh-keygen -q -t ed25519 -N '' -f "$work_dir/key"
 check "packer fmt -check" packer fmt -check "$IMAGES_DIR"
+mkdir -p "$work_dir/drivers/viostor" "$work_dir/drivers/NetKVM"
 for template in "$IMAGES_DIR"/*.pkr.hcl; do
+    extra_vars=()
+    if [[ "$(basename "$template")" =~ ^(win|ws) ]]; then
+        touch "$work_dir/cloudbase.msi"
+        extra_vars=(-var "drivers_dir=$work_dir/drivers" -var "cloudbase_msi=$work_dir/cloudbase.msi")
+    fi
     check "packer validate $(basename "$template")" packer validate \
-        -var "ssh_private_key_file=$work_dir/key" -var "ssh_public_key=$(cat "$work_dir/key.pub")" "$template"
+        -var "ssh_private_key_file=$work_dir/key" -var "ssh_public_key=$(cat "$work_dir/key.pub")" "${extra_vars[@]}" "$template"
+done
+check "pins file is well formed" awk -F'\t' 'NF != 5 || $2 !~ /^[0-9a-f]{64}$/ {bad = 1} END {exit bad}' "$IMAGES_DIR/pins.tsv"
+for pin in win11 ws2022 virtio-win cloudbase-init; do
+    check "pin $pin present" grep -q "^$pin"$'\t' "$IMAGES_DIR/pins.tsv"
 done
 
 if [[ "${1:-}" != "--static" ]]; then
@@ -66,6 +76,25 @@ if [[ "${1:-}" != "--static" ]]; then
             check "rocky8 runs kernel 4.18" grep -q '^4\.18\.' <<<"$kernel"
         fi
     done <"$lab_state/vms.txt"
+    "$LAB_DIR/down.sh" "$TEST_TASK"
+
+    export LAB_PROFILE="windows-domain"
+    for image in ws2022-dc win11; do
+        check "build $image" "$IMAGES_DIR/build.sh" "$image"
+    done
+    "$LAB_DIR/up.sh" "$TEST_TASK"
+    read -r _ dc_user dc_address < <(awk '$1 == "dc"' "$lab_state/vms.txt")
+    read -r _ ws_user ws_address < <(awk '$1 == "ws"' "$lab_state/vms.txt")
+    ssh_windows() {
+        local user="$1" address="$2"
+        shift 2
+        ssh -n -i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "$user@$address" "$@"
+    }
+    check "workstation is in the lab domain" grep -q 'lab.ostyr.test' <(ssh_windows "$ws_user" "$ws_address" '(Get-CimInstance Win32_ComputerSystem).Domain')
+    check "workstation Defender real-time protection on" grep -q 'True' <(ssh_windows "$ws_user" "$ws_address" '(Get-MpComputerStatus).RealTimeProtectionEnabled')
+    check "dc Defender real-time protection on" grep -q 'True' <(ssh_windows "$dc_user" "$dc_address" '(Get-MpComputerStatus).RealTimeProtectionEnabled')
+    check "Sysmon not installed on the workstation" grep -q 'absent' <(ssh_windows "$ws_user" "$ws_address" 'if (Get-Service Sysmon64 -ErrorAction SilentlyContinue) {"present"} else {"absent"}')
     "$LAB_DIR/down.sh" "$TEST_TASK"
 fi
 

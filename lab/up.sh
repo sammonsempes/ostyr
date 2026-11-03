@@ -8,7 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 readonly GB_PER_VM=4
 readonly HOST_RESERVED_GB=8
 readonly KIB_PER_GB=1048576
-readonly SSH_ATTEMPTS=60
+readonly SSH_ATTEMPTS=120
 readonly SSH_DELAY_SECONDS=5
 readonly SUBNET_FIRST=100
 readonly SUBNET_LAST=199
@@ -43,8 +43,10 @@ max_vms() {
 
 check_quota() {
     local wanted="$1"
-    local running limit
-    running="$(virsh_lab list --state-running --name | names_with_prefix "ostyr-" | wc -l)"
+    local running=0 limit domain
+    while read -r domain; do
+        running=$((running + $(domain_units "$domain")))
+    done < <(virsh_lab list --state-running --name | names_with_prefix "ostyr-")
     limit="$(max_vms)"
     if ((running + wanted > limit)); then
         die "quota exceeded: $running lab VMs running + $wanted requested > LAB_MAX_VMS=$limit"
@@ -82,8 +84,8 @@ wait_for_ssh() {
     local key="$1" user="$2" address="$3"
     local attempt
     for ((attempt = 0; attempt < SSH_ATTEMPTS; attempt++)); do
-        if ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-            "$user@$address" true 2>/dev/null; then
+        if ssh -n -i "$key" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "$user@$address" "exit 0" 2>/dev/null; then
             return 0
         fi
         sleep "$SSH_DELAY_SECONDS"
@@ -94,10 +96,11 @@ wait_for_ssh() {
 profile="$(resolve_profile)"
 profile_source="$LAB_DIR/profiles/$profile.yaml"
 validate_profile_fields "$profile_source"
+validate_profile_choices "$profile_source"
 mkdir -p "$LAB_STATE_ROOT"
 exec 9>"$LAB_STATE_ROOT/up.lock"
 flock 9
-vm_count="$(grep -c '^  - name:' "$profile_source")"
+vm_count="$(profile_units "$profile_source")"
 [[ -z "$(virsh_lab net-list --all --name | awk -v n="$(lab_prefix "$task_id")" '$0 == n')" ]] || die "lab for $task_id already exists, run lab/down.sh $task_id first"
 check_quota "$vm_count"
 
@@ -134,3 +137,8 @@ while read -r name user address; do
     printf '%s  %s  ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s@%s\n' \
         "$(lab_prefix "$task_id")-$name" "$address" "$lab_state/id_ed25519" "$user" "$address"
 done <"$lab_state/vms.txt"
+
+setup_script="$LAB_DIR/profiles/$profile.setup.sh"
+if [[ -f "$setup_script" ]]; then
+    "$setup_script" "$lab_state" "$(lab_prefix "$task_id")"
+fi

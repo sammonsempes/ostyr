@@ -1,0 +1,11 @@
+$ErrorActionPreference = 'Stop'
+Start-Transcript -Path C:\Windows\Temp\bootstrap.log
+Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private
+Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'
+Set-Service -Name sshd -StartupType Automatic
+$keyFile = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+New-Item -ItemType Directory -Force -Path (Split-Path $keyFile) | Out-Null
+Set-Content -Path $keyFile -Value '${ssh_public_key}' -Encoding ascii
+icacls.exe $keyFile /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+Start-Service -Name sshd
+Stop-Transcript
