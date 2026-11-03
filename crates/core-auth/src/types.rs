@@ -1,7 +1,12 @@
 use crate::error::AuthError;
-use crate::model::{Account, Attempts, Session};
+use crate::model::{Account, Attempts, PendingLogin, Session};
+use core_config::secret::SecretRef;
+use openidconnect::core::CoreClient;
+use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, HttpResponse};
 use secrecy::SecretSlice;
+use secrecy::SecretString;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io;
 use time::OffsetDateTime;
 
 
@@ -36,3 +41,18 @@ pub type VerifyFn<'a> = &'a dyn Fn(&str, &str) -> Result<bool, AuthError>;
 
 
 pub type Parameters = Vec<(&'static str, String)>;
+
+
+pub type PendingMap = BTreeMap<String, PendingLogin>;
+
+
+pub type GroupRoleMap = BTreeMap<String, BTreeSet<String>>;
+
+
+pub type HttpFn<'a> = &'a dyn Fn(HttpRequest) -> Result<HttpResponse, io::Error>;
+
+
+pub type ResolveFn<'a> = &'a dyn Fn(&SecretRef) -> Result<SecretString, io::Error>;
+
+
+pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
