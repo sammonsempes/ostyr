@@ -2,7 +2,7 @@ pub mod types;
 
 
 use agent_command::keys::open_keys_engine;
-use agent_command::model::{Action, Command, TrustedKeys, Verifier, NONCE_LENGTH};
+use agent_command::model::{Action, Command, Sequences, TrustedKeys, Verifier, NONCE_LENGTH};
 use agent_command::sign::{memory_signer, sign_command};
 use agent_command::verify::open_verifier_with;
 use core_audit::log::{append, genesis_log};
@@ -115,7 +115,16 @@ pub fn engine_at(path: &Path) -> Result<Arc<ReloadEngine<TrustedKeys>>, Box<dyn 
 
 
 pub fn verifier_with(engine: Arc<ReloadEngine<TrustedKeys>>, last_sequence: u64) -> Verifier {
-    open_verifier_with(AGENT, TENANT, engine, last_sequence, Box::new(|_sequence| Ok(())))
+    open_verifier_with(
+        AGENT,
+        TENANT,
+        engine,
+        Sequences {
+            routine: last_sequence,
+            sensitive: last_sequence,
+        },
+        Box::new(|_sequences| Ok(())),
+    )
 }
 
 

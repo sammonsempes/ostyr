@@ -44,6 +44,8 @@ pub enum CommandError {
     SensitiveActionNeedsSensitiveKey,
     #[error("sequence number is not greater than the last accepted one")]
     ReplayedSequence,
+    #[error("sequence number jumps further than the allowed advance")]
+    SequenceJump,
     #[error("cannot store the sequence number, command refused: {0}")]
     Store(#[source] io::Error),
 }
@@ -72,6 +74,8 @@ pub enum StoreError {
         #[source]
         source: ParseIntError,
     },
+    #[error("{path}: the state file has an unknown layout")]
+    Layout { path: PathBuf },
 }
 
 
@@ -93,6 +97,8 @@ pub enum KeyFileError {
     },
     #[error("key `{id}` appears twice")]
     Duplicate { id: String },
+    #[error("public key of `{id}` is already listed under `{first}`")]
+    DuplicatePublicKey { id: String, first: String },
     #[error("key `{id}`: not_before is after not_after")]
     Validity { id: String },
 }

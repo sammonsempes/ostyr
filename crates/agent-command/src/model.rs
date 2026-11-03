@@ -12,6 +12,10 @@ pub const CLOCK_SKEW_SECONDS: u64 = 30;
 pub const MAX_LIFETIME_SECONDS: u64 = 600;
 
 
+/// Largest step one accepted command may add to its class sequence.
+pub const MAX_SEQUENCE_ADVANCE: u64 = 1_000;
+
+
 pub const NONCE_LENGTH: usize = 16;
 
 
@@ -96,11 +100,18 @@ pub struct RawKeyFile {
 }
 
 
-/// `last_sequence` is held during the check and the durable save, so two commands never race.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sequences {
+    pub routine: u64,
+    pub sensitive: u64,
+}
+
+
+/// `last_sequences` is held during the check and the durable save, so two commands never race.
 pub struct Verifier {
     pub agent_id: String,
     pub tenant: String,
     pub keys: Arc<ReloadEngine<TrustedKeys>>,
-    pub last_sequence: Mutex<u64>,
+    pub last_sequences: Mutex<Sequences>,
     pub save: Box<SaveFn>,
 }
