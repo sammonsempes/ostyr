@@ -19,7 +19,7 @@ use core_auth::service::{
     audit_name, login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH,
 };
 use core_auth::session::revoke_session;
-use core_auth::store::save_accounts_file;
+use core_auth::store::save_store_file;
 use secrecy::{ExposeSecret, SecretString};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
@@ -159,7 +159,7 @@ pub fn persist_login(
     request: &LoginRequest,
     token: &SecretString,
 ) -> Result<LoginReply, ApiError> {
-    match save_accounts_file(&app.store_path, &auth.accounts, app.random) {
+    match save_store_file(&app.store_path, &auth.accounts, &auth.credentials, app.random) {
         Ok(()) => Ok(LoginReply {
             token: token.expose_secret().to_owned(),
             token_type: TOKEN_TYPE.to_owned(),
