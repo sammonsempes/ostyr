@@ -1,3 +1,4 @@
+use crate::error::ConfigError;
 use crate::plan::Change;
 use crate::secret::SecretRef;
 use core_audit::error::AuditError;
@@ -28,3 +29,18 @@ pub type ReaderFn<'a> = dyn FnMut() -> Result<ConfigState, BoxError> + 'a;
 
 
 pub type AuditFn<'a> = dyn FnMut(NewEntry) -> Result<Record, AuditError> + 'a;
+
+
+pub type LoaderFn<Config> = dyn Fn() -> Result<Config, ConfigError> + Send + Sync;
+
+
+pub type StateFn<Config> = fn(&Config) -> ConfigState;
+
+
+pub type SharedAuditFn = dyn Fn(NewEntry) -> Result<Record, AuditError> + Send + Sync;
+
+
+pub type ValidateFn<Config> = dyn Fn(&Config) -> Result<(), BoxError> + Send + Sync;
+
+
+pub type ApplySectionFn<Config> = dyn Fn(&Config) + Send + Sync;

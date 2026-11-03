@@ -6,8 +6,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+arc-swap = "1.9.3"
 core-audit = { version = "0.0.0", path = "../core-audit" }
 json-patch = "4"
+notify = "8.2.1"
+notify-debouncer-full = "0.7.0"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "2"
@@ -16,6 +19,10 @@ serde_path_to_error = "0.1"
 similar = "2"
 thiserror = "2"
 time = "0.3"
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
 
 [dev-dependencies]
 tempfile = "3"

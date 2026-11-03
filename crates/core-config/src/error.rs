@@ -1,4 +1,5 @@
 use crate::types::BoxError;
+use core_audit::error::AuditError;
 use std::io;
 use thiserror::Error;
 
@@ -44,4 +45,27 @@ pub enum ApplyError {
     ReadBack(#[source] BoxError),
     #[error("real state differs from the desired state after apply: {}", keys.join(", "))]
     Mismatch { keys: Vec<String> },
+}
+
+
+/// Why a reload left the old configuration in force.
+#[derive(Debug, Error)]
+pub enum ReloadRefusal {
+    #[error(transparent)]
+    Load(#[from] ConfigError),
+    #[error("section `{section}` refused the new configuration: {source}")]
+    Subscriber {
+        section: String,
+        #[source]
+        source: BoxError,
+    },
+    #[error("cannot audit the reload, nothing swapped: {0}")]
+    Audit(#[from] AuditError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum WatchError {
+    #[error("cannot watch: {0}")]
+    Notify(#[from] notify::Error),
 }
