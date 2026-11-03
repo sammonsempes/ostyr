@@ -363,6 +363,7 @@ pub fn upsert_external(state: &mut State, username: &str, roles: RoleSet) {
     if changed {
         revoke_user_sessions(&mut state.sessions, username);
     }
+    state.credentials.remove(username);
     state.accounts.insert(
         username.to_owned(),
         Account {
@@ -411,6 +412,7 @@ pub fn mfa_satisfied(config: &OidcConfig, identity: &Identity) -> bool {
 
 pub fn strip_account(state: &mut State, username: &str) -> usize {
     state.accounts.get_mut(username).into_iter().for_each(|account| account.roles.clear());
+    state.credentials.remove(username);
     revoke_user_sessions(&mut state.sessions, username)
 }
 
@@ -431,6 +433,7 @@ pub fn deny_external<Output: Write>(
     let error = record_denial(context, now, username, denial, callback)?;
     state.accounts = working.accounts;
     state.sessions = working.sessions;
+    state.credentials = working.credentials;
     Ok(error)
 }
 
@@ -451,6 +454,7 @@ pub fn grant_external<Output: Write>(
             record(context, now, username, ACTION_LOGIN, OIDC_TARGET, Outcome::Success, &parameters)?;
             state.accounts = working.accounts;
             state.sessions = working.sessions;
+            state.credentials = working.credentials;
             Ok(token)
         }
         Err(error) => {

@@ -42,10 +42,16 @@ pub fn check_reserved(account: &Account) -> Result<(), AuthError> {
 
 pub fn check_credentials(accounts: &AccountMap, credentials: &[StoredCredential]) -> Result<(), AuthError> {
     credentials.iter().try_for_each(|credential| {
-        accounts
-            .contains_key(&credential.username)
-            .then_some(())
-            .ok_or_else(|| AuthError::OrphanCredential(credential.username.clone()))
+        accounts.get(&credential.username).map_or_else(
+            || Err(AuthError::OrphanCredential(credential.username.clone())),
+            |account| {
+                if account.password_hash == EXTERNAL_PASSWORD_HASH {
+                    Err(AuthError::ExternalCredentials(credential.username.clone()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
     })
 }
 

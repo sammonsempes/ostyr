@@ -137,6 +137,10 @@ pub enum AuthError {
     InvalidCredentialName,
     #[error("the last second factor of an account that requires one cannot be removed")]
     LastFactor,
+    #[error("passkeys are for local accounts only, not for accounts of an identity provider")]
+    ExternalAccount,
+    #[error("credentials of `{0}` belong to an external account")]
+    ExternalCredentials(String),
     #[error("credentials of `{0}` belong to no account")]
     OrphanCredential(String),
     #[error("invalid command: {0}")]

@@ -1,8 +1,9 @@
 //! WebAuthn credentials of local accounts: registration, second factor and passwordless passkey login (spec sections 12 and 15).
 
 use crate::error::AuthError;
-use crate::limiter::{account_key, clear_failures, locked_until, source_key};
+use crate::limiter::{account_key, clear_failures, locked_until, record_failure, source_key};
 use crate::model::{Challenge, ChallengeKind, CredentialInfo, Located, Prepared, StoredCredential};
+use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
 use crate::rbac::{requires_mfa, webauthn_required};
 use crate::service::{
@@ -30,6 +31,15 @@ pub const CHALLENGE_SECONDS: i64 = 300;
 
 
 pub const CHALLENGE_MAX: usize = 1024;
+
+
+pub const ANONYMOUS_CHALLENGE_MAX: usize = 256;
+
+
+pub const PASSKEY_START_MAX: usize = 20;
+
+
+pub const PASSKEY_START_KEY: &str = "passkey_start";
 
 
 pub const CHALLENGE_ID_BYTES: usize = 16;
@@ -144,7 +154,16 @@ pub fn issue_challenge(
     kind: ChallengeKind,
 ) -> Result<String, AuthError> {
     state.challenges.retain(|_, challenge| is_fresh(challenge, now));
-    if state.challenges.len() >= CHALLENGE_MAX {
+    let anonymous = state
+        .challenges
+        .values()
+        .filter(|pending| matches!(pending.kind, ChallengeKind::Passwordless(_)))
+        .count();
+    let crowded = match kind {
+        ChallengeKind::Passwordless(_) => anonymous >= ANONYMOUS_CHALLENGE_MAX,
+        _ => state.challenges.len() >= CHALLENGE_MAX,
+    };
+    if crowded {
         Err(AuthError::TooManyChallenges)
     } else {
         let identifier = HEXLOWER.encode(&random_array::<CHALLENGE_ID_BYTES>(random)?);
@@ -184,6 +203,17 @@ pub fn passkeys_of(state: &State, username: &str) -> Vec<Passkey> {
 }
 
 
+/// Passkeys belong to local accounts: an identity provider owns the roles of an external account and could not revoke a passkey.
+pub fn require_local(state: &State, username: &str) -> Result<(), AuthError> {
+    let account = state.accounts.get(username).ok_or(AuthError::NoSuchAccount)?;
+    if account.password_hash == EXTERNAL_PASSWORD_HASH {
+        Err(AuthError::ExternalAccount)
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn begin_registration(
     working: &mut State,
     context: &Context<impl Write>,
@@ -191,7 +221,7 @@ pub fn begin_registration(
     now: OffsetDateTime,
     (actor, username): (&str, &str),
 ) -> Result<(String, CreationChallengeResponse), AuthError> {
-    working.accounts.get(username).ok_or(AuthError::NoSuchAccount)?;
+    require_local(working, username)?;
     let excluded = passkeys_of(working, username).iter().map(|passkey| passkey.cred_id().clone()).collect();
     let (options, registration) = webauthn.start_passkey_registration(user_uuid(username), username, username, Some(excluded))?;
     let identifier = issue_challenge(working, now, context.random, (actor, username), ChallengeKind::Registration(registration))?;
@@ -240,6 +270,7 @@ pub fn complete_registration(
     request: &RegistrationRequest,
 ) -> Result<(String, Parameters), AuthError> {
     check_name(&request.name)?;
+    require_local(working, &request.username)?;
     let challenge = take_challenge(working, now, &request.challenge_id)?;
     let registration = registration_state(challenge, actor, &request.username)?;
     let passkey = webauthn.finish_passkey_registration(&request.response, &registration)?;
@@ -449,13 +480,16 @@ pub fn passkey_login_start<Output: Write>(
     now: OffsetDateTime,
     source: &str,
 ) -> Result<(String, RequestChallengeResponse), AuthError> {
-    match locked_until(&state.attempts, &source_key(source), now) {
+    let start_key = source_key(&format!("{PASSKEY_START_KEY}:{source}"));
+    let locked = locked_until(&state.attempts, &source_key(source), now).or_else(|| locked_until(&state.attempts, &start_key, now));
+    match locked {
         Some(until) => {
             refuse_locked(context, now, ANONYMOUS_ACTOR, source)?;
             Err(AuthError::Locked { until })
         }
         None => {
             let mut working = state.clone();
+            record_failure(&mut working.attempts, &start_key, PASSKEY_START_MAX, now);
             let started = webauthn
                 .start_discoverable_authentication()
                 .map_err(AuthError::from)
@@ -473,6 +507,7 @@ pub fn passkey_login_start<Output: Write>(
                 started.map(|value| (value, vec![("source", source.to_owned())])),
             )?;
             state.challenges = working.challenges;
+            state.attempts = working.attempts;
             Ok(reply)
         }
     }
@@ -481,7 +516,7 @@ pub fn passkey_login_start<Output: Write>(
 
 pub fn locate(working: &State, webauthn: &Webauthn, challenge: Challenge, response: &PublicKeyCredential) -> Result<Located, AuthError> {
     match challenge.kind {
-        ChallengeKind::SecondFactor(authentication) => Ok(Located {
+        ChallengeKind::SecondFactor(authentication) => require_local(working, &challenge.user).map(|()| Located {
             user: challenge.user,
             prepared: Prepared::SecondFactor(authentication),
         }),
@@ -494,6 +529,7 @@ pub fn locate(working: &State, webauthn: &Webauthn, challenge: Challenge, respon
                 .flatten()
                 .find(|credential| credential.id == identifier && user_uuid(&credential.username) == handle)
                 .ok_or(AuthError::UnknownCredential)?;
+            require_local(working, &stored.username)?;
             Ok(Located {
                 user: stored.username.clone(),
                 prepared: Prepared::Passwordless(discoverable, Box::new(stored.passkey.clone())),
@@ -528,6 +564,7 @@ pub fn refusal_reason(error: &AuthError) -> &'static str {
         AuthError::ChallengeExpired => "challenge_expired",
         AuthError::ChallengeInvalid => "bad_challenge",
         AuthError::UnknownCredential => "unknown_credential",
+        AuthError::ExternalAccount => "external_account",
         AuthError::CounterRegression => "counter_regression",
         _ => "assertion_invalid",
     }

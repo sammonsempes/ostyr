@@ -247,7 +247,10 @@ pub fn require(acting: &Acting, allowed: bool) -> Result<(), AuthError> {
 
 
 pub fn failure_outcome(error: &AuthError) -> Outcome {
-    if matches!(error, AuthError::PermissionDenied | AuthError::SessionInvalid) {
+    if matches!(
+        error,
+        AuthError::PermissionDenied | AuthError::SessionInvalid | AuthError::ExternalAccount
+    ) {
         Outcome::Denied
     } else {
         Outcome::Failure

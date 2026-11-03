@@ -13,10 +13,12 @@ use core_auth::cli::{apply_command, apply_command_with};
 use core_auth::cli::{run, totp_now};
 use core_auth::error::AuthError;
 use core_auth::limiter::{ACCOUNT_MAX_FAILURES, SOURCE_MAX_FAILURES};
+use core_auth::oidc::{strip_account, upsert_external, EXTERNAL_PASSWORD_HASH};
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
 use core_auth::rbac::{builtin_catalog, load_catalog, webauthn_required, ROLE_ADMINISTRATOR, ROLE_READER};
 use core_auth::service::{bootstrap_administrator, create_account, enrol_totp, login, Context, LoginRequest, State};
+use core_auth::session::create_session;
 use core_auth::session::TOKEN_BYTES;
 #[cfg(unix)]
 use core_auth::store::{load_accounts, load_accounts_file, STORE_VERSION};
@@ -25,8 +27,8 @@ use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{CompromisedSet, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use core_auth::webauthn::{
     build_webauthn, check_name, list_credentials, parse_webauthn_config, passkey_login_start, register_finish, register_start, remove_credential,
-    rename_credential, user_uuid, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest, WebauthnConfig, CHALLENGE_ID_BYTES,
-    CHALLENGE_MAX, CHALLENGE_SECONDS, NAME_MAX_CHARS,
+    rename_credential, user_uuid, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest, WebauthnConfig,
+    ANONYMOUS_CHALLENGE_MAX, CHALLENGE_ID_BYTES, CHALLENGE_MAX, CHALLENGE_SECONDS, NAME_MAX_CHARS, PASSKEY_START_MAX,
 };
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use failing_writer::FailingWriter;
@@ -80,6 +82,15 @@ const PLUS_THREE: i64 = 3;
 
 
 const LATE: i64 = CHALLENGE_SECONDS + 1;
+
+
+const STARTS_PER_SOURCE: usize = 10;
+
+
+const REFUSED_TWICE: usize = 2;
+
+
+const LATE_LOCK: i64 = 901;
 
 
 const HIGH_COUNTER: u64 = 1000;
@@ -989,18 +1000,37 @@ fn passkey_assertions_are_checked_against_the_stored_credential() -> TestResult 
 }
 
 
+fn fill_anonymous(world: &mut World, fixture: &Fixture<Vec<u8>>, count: usize) -> SoftResult<()> {
+    let ctx = context(fixture);
+    let start = at(0)?;
+    Ok((0..count).try_for_each(|i| {
+        let source = format!("10.1.0.{}", i / STARTS_PER_SOURCE);
+        passkey_login_start(&mut world.state, &ctx, &fixture.webauthn, start, &source).map(|_| ())
+    })?)
+}
+
+
 #[test]
-fn a_second_factor_challenge_cannot_be_used_after_it_was_replaced_and_challenges_are_capped() -> TestResult {
+fn challenges_are_capped_and_anonymous_ones_cannot_starve_the_others() -> TestResult {
     let fx = fixture()?;
     let mut world = world(&fx)?;
     let ctx = context(&fx);
-    let start = at(0)?;
-    (0..CHALLENGE_MAX).try_for_each(|_| passkey_login_start(&mut world.state, &ctx, &fx.webauthn, start, SOURCE).map(|_| ()))?;
+    let admin = world.admin.clone();
+    fill_anonymous(&mut world, &fx, ANONYMOUS_CHALLENGE_MAX)?;
     assert!(matches!(
-        passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, SOURCE),
+        passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, "10.2.0.1"),
         Err(AuthError::TooManyChallenges)
     ));
-    assert!(passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(LATE)?, SOURCE).is_ok());
+    assert!(register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &admin, "alice").is_ok());
+    let others = CHALLENGE_MAX - ANONYMOUS_CHALLENGE_MAX - 1;
+    let start = at(0)?;
+    (0..others).try_for_each(|_| register_start(&mut world.state, &ctx, &fx.webauthn, start, &admin, "alice").map(|_| ()))?;
+    assert!(matches!(
+        register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &admin, "alice"),
+        Err(AuthError::TooManyChallenges)
+    ));
+    assert_eq!(world.state.challenges.len(), CHALLENGE_MAX);
+    assert!(passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(LATE)?, "10.2.0.1").is_ok());
     assert_eq!(world.state.challenges.len(), 1);
     assert!(matches!(
         passkey_login_start(
@@ -1012,6 +1042,168 @@ fn a_second_factor_challenge_cannot_be_used_after_it_was_replaced_and_challenges
         ),
         Err(AuthError::Random(_))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn passkey_login_starts_are_counted_per_source() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let start = at(0)?;
+    (0..PASSKEY_START_MAX).try_for_each(|_| passkey_login_start(&mut world.state, &ctx, &fx.webauthn, start, SOURCE).map(|_| ()))?;
+    assert!(matches!(
+        passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_ONE)?, SOURCE),
+        Err(AuthError::Locked { .. })
+    ));
+    assert!(passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_ONE)?, OTHER_SOURCE).is_ok());
+    assert!(audit_text(&fx)?.contains("\"reason\":\"locked\""));
+    assert!(passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(LATE_LOCK)?, SOURCE).is_ok());
+    Ok(())
+}
+
+
+fn external_session(world: &mut World, name: &str) -> SoftResult<String> {
+    upsert_external(&mut world.state, name, roles(&[ROLE_ADMINISTRATOR]));
+    Ok(create_session(&mut world.state.sessions, name, at(PLUS_ONE)?, os_random)?
+        .expose_secret()
+        .to_owned())
+}
+
+
+#[test]
+fn an_identity_provider_account_cannot_register_a_passkey() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let subject = "oidc:subject-42";
+    let token = external_session(&mut world, subject)?;
+    assert!(matches!(
+        register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_TWO)?, &token, subject),
+        Err(AuthError::ExternalAccount)
+    ));
+    let admin = world.admin.clone();
+    assert!(matches!(
+        register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_TWO)?, &admin, subject),
+        Err(AuthError::ExternalAccount)
+    ));
+    assert!(world.state.credentials.is_empty());
+    assert!(audit_text(&fx)?.contains("\"outcome\":\"denied\""));
+    assert!(matches!(
+        webauthn_login_start(
+            &mut world.state,
+            &ctx,
+            &fx.webauthn,
+            at(PLUS_TWO)?,
+            &request(subject, GOOD_PASSWORD, SOURCE)
+        ),
+        Err(AuthError::InvalidCredentials)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_account_turned_external_between_start_and_finish_cannot_register() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let admin = world.admin.clone();
+    let (challenge, options) = register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_ONE)?, &admin, "alice")?;
+    let response = register_with(&mut soft_passkey(), &origin(ORIGIN)?, options)?;
+    upsert_external(&mut world.state, "alice", roles(&[ROLE_ADMINISTRATOR]));
+    let finished = RegistrationRequest {
+        username: "alice".to_owned(),
+        challenge_id: challenge,
+        name: "laptop".to_owned(),
+        response,
+    };
+    assert!(matches!(
+        register_finish(&mut world.state, &ctx, &fx.webauthn, at(PLUS_TWO)?, &admin, &finished),
+        Err(AuthError::ExternalAccount)
+    ));
+    assert!(world.state.credentials.is_empty());
+    Ok(())
+}
+
+
+fn make_external(state: &mut State, name: &str) -> SoftResult<()> {
+    state.accounts.get_mut(name).ok_or("no account")?.password_hash = EXTERNAL_PASSWORD_HASH.to_owned();
+    Ok(())
+}
+
+
+#[test]
+fn assertions_for_an_account_that_became_external_are_refused() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let alice = token_for(&fx, &mut world, "alice", PLUS_ONE)?;
+    let mut soft = soft_passkey();
+    let credential = register(&fx, &mut world.state, &mut soft, (&alice, "alice", "laptop"), PLUS_TWO)?;
+    let (challenge, options) = webauthn_login_start(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &request("alice", GOOD_PASSWORD, SOURCE),
+    )?;
+    let response = assert_with(&mut soft, &origin(ORIGIN)?, options)?;
+    make_external(&mut world.state, "alice")?;
+    let assertion = Assertion {
+        challenge_id: challenge,
+        response,
+        source: SOURCE.to_owned(),
+    };
+    assert!(invalid(webauthn_login_finish(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &assertion
+    )));
+    let (second_challenge, second_options) = passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_THREE)?, SOURCE)?;
+    let handle = BASE64URL_NOPAD.encode(user_uuid("alice").as_bytes());
+    let second_response = discoverable_assertion(&mut soft, &origin(ORIGIN)?, second_options, (&credential, Some(&handle)))?;
+    let second = Assertion {
+        challenge_id: second_challenge,
+        response: second_response,
+        source: SOURCE.to_owned(),
+    };
+    assert!(invalid(webauthn_login_finish(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_THREE)?,
+        &second
+    )));
+    assert!(audit_text(&fx)?.matches("\"reason\":\"external_account\"").count() == REFUSED_TWICE);
+    Ok(())
+}
+
+
+#[test]
+fn deprovisioning_an_external_account_removes_its_credentials() -> TestResult {
+    let fx = fixture()?;
+    let mut state = registered(&fx)?;
+    assert!(state.credentials.contains_key("alice"));
+    strip_account(&mut state, "alice");
+    assert!(!state.credentials.contains_key("alice"));
+    let mut again = registered(&fx)?;
+    upsert_external(&mut again, "alice", roles(&[ROLE_READER]));
+    assert!(again.credentials.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_store_holding_credentials_of_an_external_account_is_refused() -> TestResult {
+    let mut state = registered(&fixture()?)?;
+    make_external(&mut state, "alice")?;
+    let mut bytes = Vec::new();
+    save_store(&mut bytes, &state.accounts, &state.credentials)?;
+    assert!(matches!(load_store(bytes.as_slice()), Err(AuthError::ExternalCredentials(_))));
     Ok(())
 }
 
