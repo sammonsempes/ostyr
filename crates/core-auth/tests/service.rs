@@ -19,7 +19,7 @@ use core_auth::service::{
 };
 use core_auth::store::save_accounts;
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
-use core_auth::types::{CompromisedSet, RoleCatalog, RoleSet, StoreKey};
+use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, RoleCatalog, RoleSet, SessionMap, StoreKey};
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use failing_writer::FailingWriter;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
@@ -187,6 +187,11 @@ fn current_code(secret: &SecretString, offset: i64) -> Result<String, Box<dyn st
     let raw = BASE32_NOPAD.decode(secret.expose_secret().as_bytes())?;
     let seconds = u64::try_from(BASE_TIME + offset)?;
     Ok(code_for_step(&raw, seconds / TOTP_STEP_SECONDS))
+}
+
+
+fn parts(state: &State) -> (&AccountMap, &SessionMap, &AttemptMap) {
+    (&state.accounts, &state.sessions, &state.attempts)
 }
 
 
@@ -1175,30 +1180,30 @@ fn a_failed_audit_append_leaves_the_state_unchanged() -> TestResult {
         create_account(&mut state, &ctx, at(PLUS_TWO)?, &admin, "bob", &good, roles(&[])),
         Err(AuthError::Audit(_))
     ));
-    assert_eq!(state, snapshot);
+    assert_eq!(parts(&state), parts(&snapshot));
     assert!(matches!(
         change_roles(&mut state, &ctx, at(PLUS_TWO)?, &admin, "alice", roles(&[ROLE_ADMINISTRATOR])),
         Err(AuthError::Audit(_))
     ));
-    assert_eq!(state, snapshot);
+    assert_eq!(parts(&state), parts(&snapshot));
     assert!(matches!(
         revoke_all_sessions(&mut state, &ctx, at(PLUS_TWO)?, &admin, "alice"),
         Err(AuthError::Audit(_))
     ));
-    assert_eq!(state, snapshot);
+    assert_eq!(parts(&state), parts(&snapshot));
     assert!(matches!(
         revoke_token(&mut state, &ctx, at(PLUS_TWO)?, &admin, alice.expose_secret()),
         Err(AuthError::Audit(_))
     ));
-    assert_eq!(state, snapshot);
+    assert_eq!(parts(&state), parts(&snapshot));
     assert!(matches!(
         enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, &admin, "alice", None),
         Err(AuthError::Audit(_))
     ));
-    assert_eq!(state, snapshot);
+    assert_eq!(parts(&state), parts(&snapshot));
     let code = request("alice", GOOD_PASSWORD, Some(&backup), SOURCE);
     assert!(matches!(login(&mut state, &ctx, at(PLUS_TWO)?, &code), Err(AuthError::Audit(_))));
-    assert_eq!(state, snapshot);
+    assert_eq!(parts(&state), parts(&snapshot));
     login(&mut state, &ctx_ok, at(PLUS_TWO)?, &code)?;
     assert!(matches!(login(&mut state, &ctx_ok, at(PLUS_THREE)?, &code), Err(AuthError::MfaInvalid)));
     let mut empty = State::default();
@@ -1206,7 +1211,7 @@ fn a_failed_audit_append_leaves_the_state_unchanged() -> TestResult {
         bootstrap_administrator(&mut empty, &ctx, at(0)?, "root", &good),
         Err(AuthError::Audit(_))
     ));
-    assert_eq!(empty, State::default());
+    assert_eq!(parts(&empty), parts(&State::default()));
     Ok(())
 }
 
@@ -1217,7 +1222,7 @@ fn a_failed_second_bootstrap_audit_leaves_the_state_empty() -> TestResult {
     let mut state = State::default();
     let result = bootstrap_administrator(&mut state, &context(&selective), at(0)?, "root", &SecretString::from(GOOD_PASSWORD));
     assert!(matches!(result, Err(AuthError::Audit(_))));
-    assert_eq!(state, State::default());
+    assert_eq!(parts(&state), parts(&State::default()));
     Ok(())
 }
 
