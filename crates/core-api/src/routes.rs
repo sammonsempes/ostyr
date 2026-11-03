@@ -1,13 +1,12 @@
 use crate::failure::{auth_failure, reply};
-use crate::middleware::{edge, guard, limit, rate_key};
+use crate::middleware::{body_deadline, edge, guard, limit, rate_key};
 use crate::model::{
     ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule,
 };
 use crate::state::{auth_context, lock_auth, prune_attempts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
@@ -32,6 +31,12 @@ use utoipa::OpenApi;
 
 
 pub const BODY_LIMIT_BYTES: usize = 16_384;
+
+
+pub const REASON_LOCKED: &str = "locked";
+
+
+pub const REASON_TABLE_FULL: &str = "table_full";
 
 
 pub const HEALTH_STATUS: &str = "ok";
@@ -106,7 +111,7 @@ pub fn build_router(state: SharedState, extra: Router<SharedState>) -> Router {
         .route("/auth/logout", post(logout_endpoint))
         .route("/auth/me", get(me_endpoint))
         .merge(extra)
-        .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(state.clone(), body_deadline))
         .layer(from_fn_with_state(state.clone(), guard))
         .layer(from_fn_with_state(state.clone(), limit))
         .layer(from_fn_with_state(state.clone(), edge))
@@ -133,15 +138,6 @@ pub async fn health_endpoint() -> Json<HealthReply> {
 )]
 pub async fn openapi_endpoint(State(app): State<SharedState>) -> Json<serde_json::Value> {
     Json(app.document.clone())
-}
-
-
-pub fn body_failure(rejection: &BytesRejection) -> ApiError {
-    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        ApiError::PayloadTooLarge
-    } else {
-        ApiError::BadRequest
-    }
 }
 
 
@@ -244,33 +240,44 @@ pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginReq
 }
 
 
-pub fn check_not_locked(app: &ApiState, auth: &AuthState, request_id: &str, request: &LoginRequest) -> Result<(), ApiError> {
+pub fn is_locked(app: &ApiState, auth: &AuthState, request: &LoginRequest) -> bool {
     let now = (app.clock)();
-    let account = auth
-        .accounts
+    auth.accounts
         .contains_key(&request.username)
         .then(|| account_key(&request.username))
-        .and_then(|key| locked_until(&auth.attempts, &key, now));
-    if account
+        .and_then(|key| locked_until(&auth.attempts, &key, now))
         .or_else(|| locked_until(&auth.attempts, &source_key(&request.source), now))
-        .is_none()
-    {
-        Ok(())
-    } else {
-        tracing::warn!("login refused before hashing, source or account is locked");
-        let context = auth_context(app, request_id, &app.verify);
-        let audit_user = audit_name(&auth.accounts, &request.username);
-        let parameters = [("reason", "locked".to_owned()), ("source", request.source.clone())];
-        record(&context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Denied, &parameters).map_err(|failure| auth_failure(&failure))?;
-        Err(ApiError::TooManyRequests)
-    }
+        .is_some()
+}
+
+
+pub fn refuse_login(app: &ApiState, auth: &AuthState, request_id: &str, request: &LoginRequest, reason: &str) -> ApiError {
+    tracing::warn!(reason, "login refused before hashing");
+    let context = auth_context(app, request_id, &app.verify);
+    let audit_user = audit_name(&auth.accounts, &request.username);
+    let parameters = [("reason", reason.to_owned()), ("source", request.source.clone())];
+    record(
+        &context,
+        (app.clock)(),
+        &audit_user,
+        ACTION_LOGIN,
+        &audit_user,
+        Outcome::Denied,
+        &parameters,
+    )
+    .map_or_else(|failure| auth_failure(&failure), |()| ApiError::TooManyRequests)
 }
 
 
 pub fn admit_login(app: &ApiState, request_id: &str, request: &LoginRequest) -> Result<(), ApiError> {
     let mut auth = lock_auth(app);
-    check_table_room(app, &mut auth, request)?;
-    check_not_locked(app, &auth, request_id, request)
+    let full = check_table_room(app, &mut auth, request).is_err();
+    let reason = if is_locked(app, &auth, request) {
+        Some(REASON_LOCKED)
+    } else {
+        full.then_some(REASON_TABLE_FULL)
+    };
+    reason.map_or(Ok(()), |found| Err(refuse_login(app, &auth, request_id, request, found)))
 }
 
 
@@ -278,15 +285,14 @@ pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, st
     let now = (app.clock)();
     let verify = |_: &str, current: &str| verdict.filter(|_| current == stored).ok_or(AuthError::InvalidCredentials);
     let mut auth = lock_auth(app);
-    check_table_room(app, &mut auth, request)?;
+    check_table_room(app, &mut auth, request).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
     let context = auth_context(app, request_id, &verify);
     let token = core_login(&mut auth, &context, now, request).map_err(|failure| auth_failure(&failure))?;
     persist_login(app, &mut auth, &context, now, request, &token).map(|granted| Json(granted).into_response())
 }
 
 
-pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: Result<Bytes, BytesRejection>) -> Result<Response, ApiError> {
-    let bytes = body.map_err(|rejection| body_failure(&rejection))?;
+pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, bytes: Bytes) -> Result<Response, ApiError> {
     let parsed: LoginBody = serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest)?;
     let request = login_request(parsed, source);
     admit_login(app, request_id, &request)?;
@@ -305,6 +311,7 @@ pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: 
         (status = 400, description = "Malformed request", body = ErrorBody),
         (status = 401, description = "Invalid credentials or second factor", body = ErrorBody),
         (status = 403, description = "Second factor enrolment required", body = ErrorBody),
+        (status = 408, description = "Request body not received in time", body = ErrorBody),
         (status = 413, description = "Request body too large", body = ErrorBody),
         (status = 429, description = "Too many requests or account locked", body = ErrorBody)
     )
@@ -313,7 +320,7 @@ pub async fn login_endpoint(
     State(app): State<SharedState>,
     Extension(request_id): Extension<RequestId>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    body: Result<Bytes, BytesRejection>,
+    body: Bytes,
 ) -> Response {
     reply(login_flow(&app, &request_id.0, peer.ip(), body).await)
 }

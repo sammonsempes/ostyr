@@ -381,3 +381,41 @@ async fn a_dual_stack_listener_keys_an_ipv4_client_by_its_ipv4_address() -> Test
     assert!(running.await?.is_ok());
     Ok(())
 }
+
+
+const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+
+
+const SLOW_BODY_REQUEST: &str =
+    "POST /auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"user";
+
+
+#[tokio::test]
+async fn an_http2_client_that_never_answers_pings_is_disconnected() -> TestResult {
+    let fx = fixture()?;
+    let (handle, running) = start(&fx.config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut silent = TcpStream::connect(address).await?;
+    silent.write_all(HTTP2_PREFACE).await?;
+    let (_, waited) = read_until_closed(&mut silent).await?;
+    assert!(waited < READ_DEADLINE);
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_client_sending_its_body_slowly_gets_408() -> TestResult {
+    let fx = fixture()?;
+    let (handle, running) = start(&fx.config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut slow = TcpStream::connect(address).await?;
+    slow.write_all(SLOW_BODY_REQUEST.as_bytes()).await?;
+    let (reply, waited) = read_until_closed(&mut slow).await?;
+    assert!(reply.starts_with("HTTP/1.1 408"));
+    assert!(waited < READ_DEADLINE);
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}

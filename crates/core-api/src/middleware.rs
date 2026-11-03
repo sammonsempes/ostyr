@@ -1,7 +1,9 @@
 use crate::failure::{auth_failure, error_response};
 use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, RequestId, Requirement, Window};
+use crate::routes::{route_key, BODY_LIMIT_BYTES};
 use crate::state::{lock_auth, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use crate::types::SharedState;
+use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::header::{
     HeaderName, AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
@@ -20,7 +22,9 @@ use core_auth::service::{authorize, ANONYMOUS_ACTOR};
 use core_auth::session::validate_session;
 use core_auth::types::{RandomFn, RoleCatalog};
 use data_encoding::HEXLOWER;
+use http_body_util::LengthLimitError;
 use secrecy::SecretString;
+use std::error::Error;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::PoisonError;
 use std::time::Instant;
@@ -203,7 +207,7 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 pub fn route_of(request: &Request) -> String {
     let path = request.extensions().get::<MatchedPath>().map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    crate::routes::route_key(request.method().as_str(), path)
+    route_key(request.method().as_str(), path)
 }
 
 
@@ -344,7 +348,7 @@ pub async fn guard(
         route,
         state_changing,
         sensitive: rule.is_some_and(|found| found.sensitive),
-        source: peer.ip().to_string(),
+        source: rate_key(peer.ip()).to_string(),
         status: response.status(),
     };
     match audit_exchange(&app, &exchange) {
@@ -353,5 +357,24 @@ pub async fn guard(
             tracing::error!(%error, "audit append failed, request answered with an error");
             error_response(&ApiError::Internal)
         }
+    }
+}
+
+
+pub fn body_failure(error: &axum::Error) -> ApiError {
+    if error.source().is_some_and(|cause| cause.is::<LengthLimitError>()) {
+        ApiError::PayloadTooLarge
+    } else {
+        ApiError::BadRequest
+    }
+}
+
+
+pub async fn body_deadline(State(app): State<SharedState>, request: Request, next: Next) -> Response {
+    let (parts, body) = request.into_parts();
+    match tokio::time::timeout(app.body_timeout, to_bytes(body, BODY_LIMIT_BYTES)).await {
+        Err(_) => error_response(&ApiError::RequestTimeout),
+        Ok(Err(error)) => error_response(&body_failure(&error)),
+        Ok(Ok(bytes)) => next.run(Request::from_parts(parts, Body::from(bytes))).await,
     }
 }

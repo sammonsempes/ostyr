@@ -22,7 +22,6 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, PoisonError};
-use std::time::Duration;
 use tower::service_fn;
 use utoipa::openapi::OpenApi as OpenApiDocument;
 
@@ -75,8 +74,14 @@ pub fn connection_service(router: Router, peer: SocketAddr, guard: ConnectionGua
 }
 
 
-pub fn with_header_timeout<Acceptor>(mut server: Server<SocketAddr, Acceptor>, timeout: Duration) -> Server<SocketAddr, Acceptor> {
-    server.http_builder().http1().timer(TokioTimer::new()).header_read_timeout(timeout);
+pub fn with_timeouts<Acceptor>(mut server: Server<SocketAddr, Acceptor>, config: &ApiConfig) -> Server<SocketAddr, Acceptor> {
+    let builder = server.http_builder();
+    builder.http1().timer(TokioTimer::new()).header_read_timeout(config.header_read_timeout);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(config.http2_keep_alive_interval)
+        .keep_alive_timeout(config.http2_keep_alive_timeout);
     server
 }
 
@@ -97,15 +102,12 @@ pub async fn serve(config: &ApiConfig, router: Router, handle: ServerHandle) -> 
     let served = match &config.tls {
         Some(files) => {
             let rustls = RustlsConfig::from_config(Arc::new(tls_server_config(files)?));
-            with_header_timeout(
-                axum_server::bind_rustls(config.address, rustls).handle(handle),
-                config.header_read_timeout,
-            )
-            .serve(service)
-            .await
+            with_timeouts(axum_server::bind_rustls(config.address, rustls).handle(handle), config)
+                .serve(service)
+                .await
         }
         None => {
-            with_header_timeout(axum_server::bind(config.address).handle(handle), config.header_read_timeout)
+            with_timeouts(axum_server::bind(config.address).handle(handle), config)
                 .serve(service)
                 .await
         }

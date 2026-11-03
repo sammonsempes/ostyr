@@ -73,6 +73,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         dispatch: tracing::dispatcher::get_default(Dispatch::clone),
         max_sources: MAX_TRACKED_SOURCES,
         max_attempts: MAX_TRACKED_ATTEMPTS,
+        body_timeout: config.body_read_timeout,
     })
 }
 

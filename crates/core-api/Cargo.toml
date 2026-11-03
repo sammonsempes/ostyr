@@ -12,6 +12,7 @@ core-audit = { path = "../core-audit" }
 core-auth = { path = "../core-auth" }
 core-config = { path = "../core-config" }
 data-encoding = "2.11.1"
+http-body-util = "0.1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
