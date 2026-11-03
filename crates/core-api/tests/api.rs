@@ -15,7 +15,7 @@ use core_api::failure::{auth_failure, error_parts};
 use core_api::middleware::{admit_source, count_request, rate_key, SECURITY_HEADERS};
 use core_api::model::Window;
 use core_api::model::{ApiError, ApiState};
-use core_api::routes::{commit_login, core_access, BODY_LIMIT_BYTES};
+use core_api::routes::{admit_login, commit_login, core_access, BODY_LIMIT_BYTES};
 use core_api::state::{prune_attempts, MAX_CONCURRENT_HASHES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_audit::log::{new_log, sync_file};
 use core_audit::model::GENESIS_HASH;
@@ -903,4 +903,109 @@ async fn the_example_module_answers_a_permitted_session() -> TestResult {
     assert_eq!(bytes, PING_REPLY.as_bytes());
     assert!(serde_json::to_value(example_document())?.pointer("/paths/~1example~1ping/get").is_some());
     Ok(())
+}
+
+
+fn mapped_and_plain_keys() -> Result<(IpAddr, IpAddr, IpAddr), TestError> {
+    Ok(("::ffff:192.0.2.1".parse()?, "::ffff:198.51.100.7".parse()?, "192.0.2.1".parse()?))
+}
+
+
+#[test]
+fn an_ipv4_mapped_address_is_keyed_as_its_ipv4_address() -> TestResult {
+    let (first, second, plain) = mapped_and_plain_keys()?;
+    assert_eq!(rate_key(first), plain);
+    assert_eq!(rate_key(second), "198.51.100.7".parse::<IpAddr>()?);
+    assert_ne!(rate_key(first), rate_key(second));
+    Ok(())
+}
+
+
+fn locked_for_a_while() -> Attempts {
+    Attempts {
+        failures: Vec::new(),
+        locked_until: Some(OffsetDateTime::now_utc() + time::Duration::seconds(LOCKOUT_SECONDS)),
+    }
+}
+
+
+#[tokio::test]
+async fn a_locked_source_or_account_is_refused_without_hashing() -> TestResult {
+    let fx = fixture_with(panicking_hash)?;
+    let mut request = login_request(READER);
+    request.source = "203.0.113.50".to_owned();
+    assert!(admit_login(&fx.state, &request).is_ok());
+    fx.state
+        .auth
+        .lock()
+        .map_err(|_| "poisoned")?
+        .attempts
+        .insert("source:203.0.113.50".to_owned(), locked_for_a_while());
+    assert!(matches!(admit_login(&fx.state, &request), Err(ApiError::TooManyRequests)));
+    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::INTERNAL_SERVER_ERROR);
+    {
+        let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+        auth.attempts.clear();
+        auth.attempts.insert(format!("account:{READER}"), locked_for_a_while());
+    }
+    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_lock_on_an_unknown_account_name_is_ignored_before_hashing() -> TestResult {
+    let fx = fixture()?;
+    fx.state
+        .auth
+        .lock()
+        .map_err(|_| "poisoned")?
+        .attempts
+        .insert("account:nobody".to_owned(), locked_for_a_while());
+    assert!(admit_login(&fx.state, &login_request("nobody")).is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn commit_login_repeats_the_full_table_check() -> TestResult {
+    let fx = fixture_with(small_attempt_table)?;
+    fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.insert(
+        "source:203.0.113.9".to_owned(),
+        Attempts {
+            failures: vec![OffsetDateTime::now_utc()],
+            locked_until: None,
+        },
+    );
+    let stored = core_api::routes::stored_hash(&fx.state, READER);
+    let refused = commit_login(&fx.state, "id-3", &login_request(READER), &stored, Some(true));
+    assert!(matches!(refused, Err(ApiError::TooManyRequests)));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn in_flight_logins_cannot_grow_the_failure_table_past_its_cap() -> TestResult {
+    let fx = fixture_with(small_attempt_table)?;
+    let (first, second, third, fourth, fifth) = tokio::join!(
+        wrong_login_status(&fx.router, SOURCE_A),
+        wrong_login_status(&fx.router, SOURCE_B),
+        wrong_login_status(&fx.router, SOURCE_C),
+        wrong_login_status(&fx.router, SOURCE_D),
+        wrong_login_status(&fx.router, SOURCE_E),
+    );
+    let statuses = [first?, second?, third?, fourth?, fifth?];
+    assert!(statuses
+        .iter()
+        .all(|status| *status == StatusCode::UNAUTHORIZED || *status == StatusCode::TOO_MANY_REQUESTS));
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.len() <= 1);
+    Ok(())
+}
+
+
+async fn wrong_login_status(router: &axum::Router, offset: u8) -> Result<StatusCode, TestError> {
+    let body = login_body(&format!("stranger-{offset}"), "wrong password here");
+    Ok(send_from(router, client(offset), request("POST", "/auth/login", None, body)?)
+        .await?
+        .status())
 }

@@ -144,8 +144,9 @@ pub async fn edge(State(app): State<SharedState>, ConnectInfo(peer): ConnectInfo
 
 
 pub fn rate_key(source: IpAddr) -> IpAddr {
-    match source {
-        IpAddr::V4(_) => source,
+    let canonical = source.to_canonical();
+    match canonical {
+        IpAddr::V4(_) => canonical,
         IpAddr::V6(address) => IpAddr::V6(Ipv6Addr::from((u128::from(address) >> IPV6_HOST_BITS) << IPV6_HOST_BITS)),
     }
 }

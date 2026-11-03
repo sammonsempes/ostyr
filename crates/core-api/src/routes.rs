@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_audit::model::Outcome;
 use core_auth::error::AuthError;
-use core_auth::limiter::source_key;
+use core_auth::limiter::{account_key, locked_until, source_key};
 use core_auth::service::{login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH};
 use core_auth::session::revoke_session;
 use core_auth::store::save_accounts_file;
@@ -222,8 +222,7 @@ pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: 
 }
 
 
-pub fn admit_login(app: &ApiState, request: &LoginRequest) -> Result<(), ApiError> {
-    let mut auth = lock_auth(app);
+pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginRequest) -> Result<(), ApiError> {
     prune_attempts(&mut auth.attempts, (app.clock)());
     if auth.attempts.len() >= app.max_attempts && !auth.attempts.contains_key(&source_key(&request.source)) {
         tracing::warn!("failure tracking table is full, login refused");
@@ -234,10 +233,36 @@ pub fn admit_login(app: &ApiState, request: &LoginRequest) -> Result<(), ApiErro
 }
 
 
+pub fn check_not_locked(auth: &AuthState, request: &LoginRequest, now: OffsetDateTime) -> Result<(), ApiError> {
+    let account = auth
+        .accounts
+        .contains_key(&request.username)
+        .then(|| account_key(&request.username))
+        .and_then(|key| locked_until(&auth.attempts, &key, now));
+    if account
+        .or_else(|| locked_until(&auth.attempts, &source_key(&request.source), now))
+        .is_some()
+    {
+        tracing::warn!("login refused before hashing, source or account is locked");
+        Err(ApiError::TooManyRequests)
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn admit_login(app: &ApiState, request: &LoginRequest) -> Result<(), ApiError> {
+    let mut auth = lock_auth(app);
+    check_table_room(app, &mut auth, request)?;
+    check_not_locked(&auth, request, (app.clock)())
+}
+
+
 pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, stored: &str, verdict: Option<bool>) -> Result<Response, ApiError> {
     let now = (app.clock)();
     let verify = |_: &str, current: &str| verdict.filter(|_| current == stored).ok_or(AuthError::InvalidCredentials);
     let mut auth = lock_auth(app);
+    check_table_room(app, &mut auth, request)?;
     let context = auth_context(app, request_id, &verify);
     let token = core_login(&mut auth, &context, now, request).map_err(|failure| auth_failure(&failure))?;
     persist_login(app, &mut auth, &context, now, request, &token).map(|granted| Json(granted).into_response())

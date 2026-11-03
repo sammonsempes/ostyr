@@ -354,3 +354,30 @@ fn the_connection_table_counts_folds_and_forgets_sources() -> TestResult {
     assert!(table.lock().map_err(|_| "poisoned")?.is_empty());
     Ok(())
 }
+
+
+#[tokio::test]
+async fn a_dual_stack_listener_keys_an_ipv4_client_by_its_ipv4_address() -> TestResult {
+    let fx = fixture()?;
+    let pki = pki()?;
+    let config = ApiConfig {
+        address: "[::]:0".parse()?,
+        tls: Some(tls_files_in(fx.dir.path(), &pki)?),
+        ..fx.config.clone()
+    };
+    let (handle, running) = start(&config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let connector = TlsConnector::from(Arc::new(client_config(&pki, &TLS13)?));
+    let stream = connector
+        .connect(
+            ServerName::try_from(LOCALHOST_NAME)?,
+            TcpStream::connect(("127.0.0.1", address.port())).await?,
+        )
+        .await?;
+    assert!(read_response(stream).await?.starts_with("HTTP/1.1 200 OK"));
+    let keys: Vec<String> = fx.state.limiter.lock().map_err(|_| "poisoned")?.keys().map(ToString::to_string).collect();
+    assert_eq!(keys, ["127.0.0.1".to_owned()]);
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
