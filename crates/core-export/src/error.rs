@@ -1,0 +1,45 @@
+use crate::types::BoxError;
+use std::io;
+use thiserror::Error;
+
+
+pub const USAGE: &str = "usage: webhook <config> <count> <first-sequence> | syslog <config> <count> <first-sequence>";
+
+
+#[derive(Debug, Error)]
+pub enum ExportError {
+    #[error("cannot serialise the event: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("cannot format a timestamp: {0}")]
+    Timestamp(#[from] time::error::Format),
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("TLS: {0}")]
+    Tls(#[from] rustls::Error),
+    #[error("invalid certificate: {0}")]
+    Certificate(#[source] ureq::Error),
+    #[error("invalid server name `{name}`: {source}")]
+    ServerName {
+        name: String,
+        #[source]
+        source: rustls::pki_types::InvalidDnsNameError,
+    },
+    #[error("delivery failed after {attempts} attempt(s)")]
+    Exhausted {
+        attempts: u32,
+        #[source]
+        source: Option<BoxError>,
+    },
+    #[error("cannot resolve the secret reference: {0}")]
+    Secret(#[source] BoxError),
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error("{USAGE}")]
+    Usage,
+    #[error("the configuration has no `{0}` output")]
+    MissingSection(&'static str),
+}
