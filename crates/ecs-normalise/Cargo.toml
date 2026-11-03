@@ -1,0 +1,20 @@
+[package]
+name = "ecs-normalise"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-export = { version = "0.0.0", path = "../core-export" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde-well-known"] }
+tracing = "0.1"
+
+[dev-dependencies]
+sigma-sql = { version = "0.0.0", path = "../sigma-sql" }
+
+[lints]
+workspace = true

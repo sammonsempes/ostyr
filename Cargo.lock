@@ -1046,6 +1046,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecs-normalise"
+version = "0.0.0"
+dependencies = [
+ "core-export",
+ "serde",
+ "serde_json",
+ "sigma-sql",
+ "thiserror 2.0.21",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "ed25519"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

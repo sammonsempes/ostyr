@@ -1,0 +1,1 @@
+{"process_exit":{"process":{"pid":4242,"uid":1000,"cwd":"/home/alice","binary":"/usr/bin/curl","arguments":"-s"},"parent":{"pid":4000,"binary":"/bin/bash"},"status":0},"node_name":"node-1","time":"2026-11-03T10:00:02Z"}

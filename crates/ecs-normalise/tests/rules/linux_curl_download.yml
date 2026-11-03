@@ -1,0 +1,18 @@
+title: Download tool started from a shell
+id: 00000000-0000-4000-8000-000000000044
+status: test
+level: medium
+tags:
+  - attack.command_and_control
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|endswith: '/curl'
+    ParentImage|endswith: '/bash'
+    CommandLine|contains: 'http://'
+    CurrentDirectory|startswith: '/home/'
+    ProcessId: 4242
+    ParentProcessId: 4000
+  condition: selection

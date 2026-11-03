@@ -1,0 +1,1 @@
+{"process_kprobe":{"process":{"pid":4242,"uid":1000,"cwd":"/home/alice","binary":"/usr/bin/curl","arguments":"-s"},"parent":{"pid":4000,"binary":"/bin/bash"},"function_name":"security_file_open","args":[{"file_arg":{"path":"/etc/shadow","permission":"-rw-r-----"}}],"action":"KPROBE_ACTION_POST"},"node_name":"node-1","time":"2026-11-03T10:00:03Z"}

@@ -28,6 +28,8 @@ pub struct EventFields {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub category: Vec<String>,
+    #[serde(rename = "type", skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +53,15 @@ pub struct HostFields {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ip: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<OsFields>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct OsFields {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 
@@ -87,6 +98,32 @@ pub struct ProcessFields {
     pub executable: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_line: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentFields>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ParentFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct NetworkFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
 }
 
 
@@ -119,6 +156,8 @@ pub struct EcsEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination: Option<EndpointFields>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessFields>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileFields>,
@@ -138,6 +177,7 @@ pub fn blank_event(timestamp: OffsetDateTime) -> EcsEvent {
         user: None,
         source: None,
         destination: None,
+        network: None,
         process: None,
         file: None,
         labels: LabelMap::new(),
