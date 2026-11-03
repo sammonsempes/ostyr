@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Usage: ostyr-zitadel-provision <external-domain> <server-ip> <redirect-uri>   (run as root by lab/profiles/oidc-pair.setup.sh)
+# Generates the per-lab CA and server certificate, configures PostgreSQL and Zitadel, starts both, then creates through the management API
+# a project, a role, an OIDC web application and two users. Writes /etc/ostyr-lab/ca.pem and the root-only /etc/ostyr-lab/oidc.env.
+set -euo pipefail
+
+domain="${1:?usage: ostyr-zitadel-provision <external-domain> <server-ip> <redirect-uri>}"
+server_ip="${2:?server ip}"
+redirect_uri="${3:?redirect uri}"
+readonly LAB_DIR="/etc/ostyr-lab"
+readonly ZITADEL_DIR="/etc/zitadel"
+readonly CERT_DAYS=3650
+readonly READY_ATTEMPTS=300
+readonly API_ATTEMPTS=30
+readonly API_DELAY=2
+readonly ORG_NAME="ostyr"
+readonly MAPPED_PASSWORD="Lab-Mapped-1!"
+readonly UNMAPPED_PASSWORD="Lab-Unmapped-1!"
+readonly ROLE_KEY="ostyr-admins"
+base="https://$domain"
+install -d -m 755 "$LAB_DIR"
+install -d -m 700 "$ZITADEL_DIR"
+
+openssl req -x509 -newkey rsa:2048 -nodes -days "$CERT_DAYS" -subj "/CN=ostyr lab CA" -keyout "$ZITADEL_DIR/ca.key" -out "$LAB_DIR/ca.pem"
+openssl req -newkey rsa:2048 -nodes -subj "/CN=$domain" -keyout "$ZITADEL_DIR/tls.key" -out "$ZITADEL_DIR/tls.csr"
+printf 'subjectAltName=DNS:%s,IP:%s\nextendedKeyUsage=serverAuth\n' "$domain" "$server_ip" >"$ZITADEL_DIR/san.ext"
+openssl x509 -req -in "$ZITADEL_DIR/tls.csr" -CA "$LAB_DIR/ca.pem" -CAkey "$ZITADEL_DIR/ca.key" -CAcreateserial -days "$CERT_DAYS" \
+    -extfile "$ZITADEL_DIR/san.ext" -out "$ZITADEL_DIR/tls.crt"
+chmod 644 "$ZITADEL_DIR/tls.crt" "$LAB_DIR/ca.pem"
+chmod 600 "$ZITADEL_DIR/tls.key"
+
+postgres_password="$(openssl rand -hex 16)"
+zitadel_db_password="$(openssl rand -hex 16)"
+systemctl enable --now postgresql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER USER postgres PASSWORD '$postgres_password'"
+
+cat >"$ZITADEL_DIR/zitadel.env" <<ENV
+ZITADEL_MASTERKEY=$(openssl rand -hex 16)
+ZITADEL_EXTERNALDOMAIN=$domain
+ZITADEL_EXTERNALPORT=443
+ZITADEL_EXTERNALSECURE=true
+ZITADEL_PORT=443
+ZITADEL_TLS_ENABLED=true
+ZITADEL_TLS_KEYPATH=$ZITADEL_DIR/tls.key
+ZITADEL_TLS_CERTPATH=$ZITADEL_DIR/tls.crt
+ZITADEL_DATABASE_POSTGRES_HOST=localhost
+ZITADEL_DATABASE_POSTGRES_PORT=5432
+ZITADEL_DATABASE_POSTGRES_DATABASE=zitadel
+ZITADEL_DATABASE_POSTGRES_USER_USERNAME=zitadel
+ZITADEL_DATABASE_POSTGRES_USER_PASSWORD=$zitadel_db_password
+ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE=disable
+ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME=postgres
+ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD=$postgres_password
+ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE=disable
+ZITADEL_FIRSTINSTANCE_PATPATH=$LAB_DIR/provisioner.pat
+ZITADEL_FIRSTINSTANCE_ORG_NAME=$ORG_NAME
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME=admin
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD=Lab-Admin-1!
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED=false
+ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED=true
+ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME=provisioner
+ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME=provisioner
+ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE=2099-01-01T00:00:00Z
+ENV
+chmod 600 "$ZITADEL_DIR/zitadel.env"
+systemctl enable --now zitadel
+
+retry_curl() {
+    local attempt http_code response
+    response="$(mktemp)"
+    for ((attempt = 1; attempt <= API_ATTEMPTS; attempt++)); do
+        http_code="$(curl --silent --output "$response" --write-out '%{http_code}' --cacert "$LAB_DIR/ca.pem" --resolve "$domain:443:127.0.0.1" \
+            -H "Authorization: Bearer $(cat "$LAB_DIR/provisioner.pat")" "$@" || true)"
+        if [[ "$http_code" =~ ^2 ]]; then
+            cat "$response"
+            rm -f "$response"
+            return 0
+        fi
+        if [[ "$http_code" =~ ^[1-4] ]]; then
+            printf 'error: HTTP %s: %s\n' "$http_code" "$(cat "$response")" >&2
+            rm -f "$response"
+            return 1
+        fi
+        printf 'retry %s/%s: HTTP %s\n' "$attempt" "$API_ATTEMPTS" "$http_code" >&2
+        sleep "$API_DELAY"
+    done
+    rm -f "$response"
+    printf 'error: API still failing after %s attempts\n' "$API_ATTEMPTS" >&2
+    return 1
+}
+
+api() {
+    local path="$1" body="$2"
+    retry_curl --request "${3:-POST}" -H 'Content-Type: application/json' -d "$body" "$base$path"
+}
+
+api_get() {
+    retry_curl "$base$1"
+}
+
+fetch_login_policy() {
+    local attempt
+    for ((attempt = 0; attempt < READY_ATTEMPTS; attempt++)); do
+        if [[ -s "$LAB_DIR/provisioner.pat" ]] && api_get /admin/v1/policies/login >"$LAB_DIR/login-policy.json" 2>/dev/null; then
+            return 0
+        fi
+        sleep 2
+    done
+    journalctl -u zitadel --no-pager -n 40 >&2
+    printf 'error: zitadel admin API not ready\n' >&2
+    exit 1
+}
+fetch_login_policy
+
+login_policy="$(jq -c '.policy | del(.details, .isDefault) | .mfaInitSkipLifetime = "0s"' "$LAB_DIR/login-policy.json")"
+rm -f "$LAB_DIR/login-policy.json"
+api /admin/v1/policies/login "$login_policy" PUT >/dev/null
+api_get /management/v1/orgs/me >/dev/null
+
+dev_mode=false
+[[ "$redirect_uri" == http://* ]] && dev_mode=true
+project_id="$(api /management/v1/projects '{"name":"ostyr","projectRoleAssertion":true,"projectRoleCheck":false}' | jq -r .id)"
+api "/management/v1/projects/$project_id/roles" "{\"roleKey\":\"$ROLE_KEY\",\"displayName\":\"ostyr admins\"}" >/dev/null
+app="$(api "/management/v1/projects/$project_id/apps/oidc" "$(jq -n --arg uri "$redirect_uri" --argjson dev "$dev_mode" '{
+    name: "ostyr", redirectUris: [$uri], responseTypes: ["OIDC_RESPONSE_TYPE_CODE"], grantTypes: ["OIDC_GRANT_TYPE_AUTHORIZATION_CODE"],
+    appType: "OIDC_APP_TYPE_WEB", authMethodType: "OIDC_AUTH_METHOD_TYPE_BASIC", devMode: $dev,
+    accessTokenType: "OIDC_TOKEN_TYPE_BEARER", idTokenRoleAssertion: true, idTokenUserinfoAssertion: true, accessTokenRoleAssertion: true}')")"
+
+create_user() {
+    local name="$1" password="$2"
+    api /management/v1/users/human/_import "$(jq -n --arg name "$name" --arg password "$password" --arg domain "$domain" '{
+        userName: $name, profile: {firstName: $name, lastName: "Lab"}, email: {email: ($name + "@" + $domain), isEmailVerified: true},
+        password: $password, passwordChangeRequired: false}')" | jq -r .userId
+}
+
+mapped_id="$(create_user mapped "$MAPPED_PASSWORD")"
+create_user unmapped "$UNMAPPED_PASSWORD" >/dev/null
+api "/management/v1/users/$mapped_id/grants" "$(jq -n --arg project "$project_id" --arg role "$ROLE_KEY" '{projectId: $project, roleKeys: [$role]}')" >/dev/null
+
+issuer="$(curl --fail --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:443:127.0.0.1" "$base/.well-known/openid-configuration" | jq -r .issuer)"
+umask 077
+cat >"$LAB_DIR/oidc.env" <<ENV
+OIDC_ISSUER=$issuer
+OIDC_CLIENT_ID=$(jq -r .clientId <<<"$app")
+OIDC_CLIENT_SECRET=$(jq -r .clientSecret <<<"$app")
+OIDC_REDIRECT_URI=$redirect_uri
+OIDC_ROLE_CLAIM=urn:zitadel:iam:org:project:roles
+OIDC_ROLE=$ROLE_KEY
+OIDC_MAPPED_LOGIN=mapped
+OIDC_MAPPED_PASSWORD=$MAPPED_PASSWORD
+OIDC_UNMAPPED_LOGIN=unmapped
+OIDC_UNMAPPED_PASSWORD=$UNMAPPED_PASSWORD
+ENV

@@ -1,0 +1,14 @@
+[Unit]
+Description=Zitadel identity provider (ostyr lab)
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+EnvironmentFile=/etc/zitadel/zitadel.env
+ExecStart=/usr/local/bin/zitadel start-from-init --masterkeyFromEnv --tlsMode enabled
+Restart=on-failure
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

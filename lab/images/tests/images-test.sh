@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: lab/images/tests/images-test.sh [--static]
+# Usage: lab/images/tests/images-test.sh [--static|--oidc-only]
 # Runs packer fmt -check and validate on every template; unless --static, also builds ubuntu-2404, boots it through up.sh and checks cloud-init.
 set -euo pipefail
 
@@ -44,7 +44,7 @@ for pin in win11 ws2022 virtio-win cloudbase-init; do
     check "pin $pin present" grep -q "^$pin"$'\t' "$IMAGES_DIR/pins.tsv"
 done
 
-if [[ "${1:-}" != "--static" ]]; then
+if [[ "${1:-}" != "--static" && "${1:-}" != "--oidc-only" ]]; then
     export LAB_PROFILE="ubuntu-single"
     check "build" "$IMAGES_DIR/build.sh" ubuntu-2404
     "$LAB_DIR/up.sh" "$TEST_TASK"
@@ -95,6 +95,22 @@ if [[ "${1:-}" != "--static" ]]; then
     check "workstation Defender real-time protection on" grep -q 'True' <(ssh_windows "$ws_user" "$ws_address" '(Get-MpComputerStatus).RealTimeProtectionEnabled')
     check "dc Defender real-time protection on" grep -q 'True' <(ssh_windows "$dc_user" "$dc_address" '(Get-MpComputerStatus).RealTimeProtectionEnabled')
     check "Sysmon not installed on the workstation" grep -q 'absent' <(ssh_windows "$ws_user" "$ws_address" 'if (Get-Service Sysmon64 -ErrorAction SilentlyContinue) {"present"} else {"absent"}')
+    "$LAB_DIR/down.sh" "$TEST_TASK"
+fi
+
+if [[ "${1:-}" != "--static" ]]; then
+    export LAB_PROFILE="oidc-pair"
+    check "build zitadel" "$IMAGES_DIR/build.sh" zitadel
+    "$LAB_DIR/up.sh" "$TEST_TASK"
+    lab_state="$(state_dir "$TEST_TASK")"
+    read -r _ server_user server_address < <(awk '$1 == "server"' "$lab_state/vms.txt")
+    check "server reads the discovery document with the lab CA" grep -q 'https://zitadel.lab.test' < <(ssh -n -i "$lab_state/id_ed25519" -o BatchMode=yes \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$server_user@$server_address" \
+        'curl -s --cacert /etc/ostyr-lab/ca.pem https://zitadel.lab.test/.well-known/openid-configuration')
+    for user_kind in mapped unmapped; do
+        check "oidc-login.sh gets a code for the $user_kind user" grep -q '^code=' < <("$LAB_DIR/tests/oidc-login.sh" "$TEST_TASK" "$user_kind")
+        check "ID token roles claim is right for the $user_kind user" grep -q '^ok ' < <("$LAB_DIR/tests/oidc-roles.sh" "$TEST_TASK" "$user_kind")
+    done
     "$LAB_DIR/down.sh" "$TEST_TASK"
 fi
 

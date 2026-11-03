@@ -8,5 +8,6 @@ A profile is `lab/profiles/<name>.yaml`: a list of VMs (name, base_image, vcpu, 
 | `ubuntu-pair` | `server` and `client` (attacks the server), both `ubuntu-2404` | T024, T025, T026, T027 |
 | `linux-matrix` | `ubuntu` (`ubuntu-2404`), `rocky9` (`rocky-9`), `rocky8` (`rocky-8`, kernel 4.18), `debian` (`debian-12`) | T012 |
 | `windows-domain` | `dc` (`ws2022-dc`, 4 GB) promotes `lab.ostyr.test`; `ws` (`win11`, 8 GB) joins it; 3 quota units | T013 |
+| `oidc-pair` | `server` (`ubuntu-2404`) and `zitadel` (`zitadel`: Zitadel + PostgreSQL, TLS from a per-lab CA); `OIDC_REDIRECT_URI` sets the application redirect URI | T016, T026B |
 
 Planned, created by their own task: `attack-linux` (T014).
