@@ -733,6 +733,31 @@ pub fn grant_login<Output: Write>(
 }
 
 
+pub fn refuse_locked<Output: Write>(
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    audit_user: &str,
+    request: &LoginRequest,
+) -> Result<(), AuthError> {
+    let parameters = [("reason", "locked".to_owned()), ("source", request.source.clone())];
+    record(context, now, audit_user, ACTION_LOGIN, audit_user, Outcome::Denied, &parameters)
+}
+
+
+pub fn refuse_locked_account<Output: Write>(
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    audit_user: &str,
+    request: &LoginRequest,
+) -> Result<SecretString, AuthError> {
+    refuse_locked(context, now, audit_user, request)?;
+    (context.verify)(request.password.expose_secret(), DUMMY_HASH)
+        .inspect_err(|error| tracing::warn!(%error, "dummy verification failed for a locked account"))
+        .ok();
+    Err(AuthError::InvalidCredentials)
+}
+
+
 pub fn login<Output: Write>(
     state: &mut State,
     context: &Context<Output>,
@@ -740,15 +765,15 @@ pub fn login<Output: Write>(
     request: &LoginRequest,
 ) -> Result<SecretString, AuthError> {
     let audit_user = audit_name(&state.accounts, &request.username);
-    let lock = locked_until(&state.attempts, &account_key(&request.username), now)
-        .or_else(|| locked_until(&state.attempts, &source_key(&request.source), now));
-    match lock {
-        Some(until) => {
-            let parameters = [("reason", "locked".to_owned()), ("source", request.source.clone())];
-            record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Denied, &parameters)?;
+    let source_lock = locked_until(&state.attempts, &source_key(&request.source), now);
+    let account_lock = locked_until(&state.attempts, &account_key(&request.username), now);
+    match (source_lock, account_lock) {
+        (Some(until), _) => {
+            refuse_locked(context, now, &audit_user, request)?;
             Err(AuthError::Locked { until })
         }
-        None => {
+        (None, Some(_)) => refuse_locked_account(context, now, &audit_user, request),
+        (None, None) => {
             let mut accounts = state.accounts.clone();
             match factors_denial(&mut accounts, context, request, now) {
                 None => {

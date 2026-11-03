@@ -224,7 +224,9 @@ fn brute_force_is_locked_and_audited() -> TestResult {
     script.push_str(&"login root wrong-password-here 10.0.0.2\n".repeat(BRUTE_FORCE));
     script.push_str(&format!("login root {PASSWORD} 10.0.0.2\n"));
     let output = session(&space, &script)?;
-    assert!(output.contains("error too many failures"));
+    assert!(!output.contains("error too many failures"));
+    assert!(!output.contains("token"));
+    assert!(output.lines().last().is_some_and(|line| line.contains("invalid credentials")));
     assert!(fs::read_to_string(space.directory.path().join("audit.log"))?.contains("auth.lockout"));
     Ok(())
 }

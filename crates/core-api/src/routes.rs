@@ -246,18 +246,10 @@ pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginReq
 
 pub fn check_not_locked(app: &ApiState, auth: &AuthState, request_id: &str, request: &LoginRequest) -> Result<(), ApiError> {
     let now = (app.clock)();
-    let account = auth
-        .accounts
-        .contains_key(&request.username)
-        .then(|| account_key(&request.username))
-        .and_then(|key| locked_until(&auth.attempts, &key, now));
-    if account
-        .or_else(|| locked_until(&auth.attempts, &source_key(&request.source), now))
-        .is_none()
-    {
+    if locked_until(&auth.attempts, &source_key(&request.source), now).is_none() {
         Ok(())
     } else {
-        tracing::warn!("login refused before hashing, source or account is locked");
+        tracing::warn!("login refused before hashing, source is locked");
         let context = auth_context(app, request_id, &app.verify);
         let audit_user = audit_name(&auth.accounts, &request.username);
         let parameters = [("reason", "locked".to_owned()), ("source", request.source.clone())];

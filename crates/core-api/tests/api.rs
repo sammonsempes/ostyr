@@ -228,9 +228,24 @@ async fn bad_credentials_look_alike_and_lock_out() -> TestResult {
         )
         .await?;
     }
+    for _ in 0..FAILURES_BEFORE_LOCK {
+        send(
+            &fx.router,
+            request("POST", "/auth/login", None, login_body("nobody", "still wrong password"))?,
+        )
+        .await?;
+    }
     let locked = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
-    assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(body_json(locked).await?.pointer("/error/code"), Some(&json!("too_many_requests")));
+    let unknown_after = send(&fx.router, request("POST", "/auth/login", None, login_body("nobody", PASSWORD))?).await?;
+    assert_eq!(locked.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown_after.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(locked).await?, wrong_body);
+    assert_eq!(body_json(unknown_after).await?, wrong_body);
+    let locked_records = audit_lines(&fx)?
+        .into_iter()
+        .filter(|line| line.pointer("/parameters/reason") == Some(&json!("locked")))
+        .count();
+    assert_eq!(locked_records, 1);
     Ok(())
 }
 
@@ -941,7 +956,7 @@ fn locked_for_a_while() -> Attempts {
 
 
 #[tokio::test]
-async fn a_locked_source_or_account_is_refused_without_hashing() -> TestResult {
+async fn a_locked_source_is_refused_without_hashing_but_an_account_lock_is_not() -> TestResult {
     let fx = fixture_with(panicking_hash)?;
     let mut request = login_request(READER);
     request.source = "203.0.113.50".to_owned();
@@ -959,7 +974,7 @@ async fn a_locked_source_or_account_is_refused_without_hashing() -> TestResult {
         auth.attempts.clear();
         auth.attempts.insert(format!("account:{READER}"), locked_for_a_while());
     }
-    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    assert!(admit_login(&fx.state, "id-admit", &request).is_ok());
     Ok(())
 }
 
@@ -1069,14 +1084,14 @@ async fn in_flight_logins_for_an_existing_account_cannot_grow_the_table_past_its
 
 #[tokio::test]
 async fn a_login_refused_for_a_lock_is_audited_as_denied_locked() -> TestResult {
-    let fx = fixture_with(panicking_hash)?;
+    let fx = fixture()?;
     fx.state
         .auth
         .lock()
         .map_err(|_| "poisoned")?
         .attempts
         .insert(format!("account:{READER}"), locked_for_a_while());
-    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::UNAUTHORIZED);
     let denied: Vec<serde_json::Value> = audit_lines(&fx)?
         .into_iter()
         .filter(|line| line.get("action") == Some(&json!("auth.login")))
