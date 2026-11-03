@@ -1,6 +1,6 @@
 use crate::model::{ActorKind, NewEntry, Outcome, Record};
-use crate::redact::redact_parameters;
 use crate::types::ParameterMap;
+use core_redact::redact_parameters;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
