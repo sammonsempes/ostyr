@@ -171,6 +171,21 @@ pub fn provider_error<Cause: Display>(cause: Cause) -> OidcDenial {
 }
 
 
+pub fn require_secure_endpoints(metadata: &CoreProviderMetadata) -> Result<(), OidcDenial> {
+    let endpoints = [
+        Some(metadata.authorization_endpoint().url().as_str()),
+        metadata.token_endpoint().map(|endpoint| endpoint.url().as_str()),
+        Some(metadata.jwks_uri().url().as_str()),
+    ];
+    endpoints.into_iter().flatten().try_for_each(|endpoint| {
+        require_https(endpoint).map_err(|error| {
+            tracing::warn!(%error, "identity provider advertises an insecure endpoint");
+            OidcDenial::InsecureEndpoint
+        })
+    })
+}
+
+
 pub fn build_client(oidc: &OidcContext) -> Result<OidcClient, OidcDenial> {
     let secret = (oidc.resolve)(&oidc.config.client_secret).map_err(provider_error)?;
     require_https(&oidc.config.issuer).map_err(provider_error)?;
@@ -178,6 +193,7 @@ pub fn build_client(oidc: &OidcContext) -> Result<OidcClient, OidcDenial> {
     let issuer = IssuerUrl::new(oidc.config.issuer.clone()).map_err(provider_error)?;
     let redirect = RedirectUrl::new(oidc.config.redirect_url.clone()).map_err(provider_error)?;
     let metadata = CoreProviderMetadata::discover(&issuer, &oidc.http).map_err(provider_error)?;
+    require_secure_endpoints(&metadata)?;
     Ok(CoreClient::from_provider_metadata(
         metadata,
         ClientId::new(oidc.config.client_id.clone()),
@@ -246,11 +262,15 @@ pub fn begin_login<Output: Write>(
     source: &str,
 ) -> Result<String, AuthError> {
     match start_login(oidc, pending, now, context.random) {
-        Err(AuthError::Oidc(denial)) => {
+        Err(error) => {
+            let denial = match &error {
+                AuthError::Oidc(denial) => *denial,
+                _ => OidcDenial::Provider,
+            };
             audit_denial(context, now, ANONYMOUS_ACTOR, denial, source)?;
-            Err(AuthError::Oidc(denial))
+            Err(error)
         }
-        other => other,
+        granted => granted,
     }
 }
 
@@ -283,6 +303,7 @@ pub fn denial_reason(denial: OidcDenial) -> &'static str {
         OidcDenial::Unmapped => "unmapped",
         OidcDenial::TooManyPending => "too_many_pending",
         OidcDenial::MfaMissing => "mfa_missing",
+        OidcDenial::InsecureEndpoint => "insecure_endpoint",
     }
 }
 

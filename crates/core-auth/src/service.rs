@@ -1,6 +1,7 @@
 use crate::error::AuthError;
 use crate::limiter::{account_key, clear_failures, locked_until, record_failure, source_key, ACCOUNT_MAX_FAILURES, SOURCE_MAX_FAILURES};
 use crate::model::{Account, TotpEnrolment};
+use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::password::hash_password;
 use crate::policy::check_password;
 use crate::rbac::{check_roles, is_allowed, requires_mfa, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR};
@@ -622,10 +623,12 @@ pub fn check_factors<Output: Write>(
     now: OffsetDateTime,
 ) -> Result<Option<Denial>, AuthError> {
     let stored = accounts.get_mut(&request.username);
+    let external = stored.as_ref().is_some_and(|account| account.password_hash == EXTERNAL_PASSWORD_HASH);
     let hash = stored
         .as_ref()
+        .filter(|_| !external)
         .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone());
-    let password_ok = (context.verify)(request.password.expose_secret(), &hash)?;
+    let password_ok = (context.verify)(request.password.expose_secret(), &hash)? && !external;
     match stored {
         None => Ok(Some(Denial::UnknownUser)),
         Some(account) if password_ok => second_factor(account, context.catalog, context.key, request, now),

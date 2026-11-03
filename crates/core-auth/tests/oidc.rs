@@ -16,17 +16,20 @@ use core_auth::oidc::{
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
 use core_auth::rbac::{builtin_catalog, PERMISSION_ALERTS_TRIAGE, PERMISSION_USERS_MANAGE};
-use core_auth::service::{authorize, create_account, Context, State};
+use core_auth::service::{authorize, create_account, login, Context, LoginRequest, State, DUMMY_HASH};
 use core_auth::store::load_accounts;
 use core_auth::types::{CompromisedSet, PendingMap, RoleCatalog, StoreKey};
 use core_config::secret::SecretRef;
 use limited_writer::LimitedWriter;
-use oidc_provider::{challenge_of, jwks, make_jwt, metadata, provider, respond, Provider, CLIENT_ID, GOOD_KEY, ISSUER, OTHER_KEY, STATUS_ERROR};
+use oidc_provider::{
+    challenge_of, jwks, make_jwt, metadata, provider, respond, Provider, CLIENT_ID, GOOD_KEY, ISSUER, OTHER_KEY, SCHEME_HTTP, STATUS_ERROR,
+};
 use openidconnect::http::{HeaderValue, Request};
 use openidconnect::url::Url;
 use openidconnect::{ClaimsVerificationError, HttpRequest};
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -64,7 +67,10 @@ const PROVIDER_REFUSALS: usize = 6;
 const NON_UTF8_BYTE: u8 = 255;
 
 
-const REASON_COUNT: usize = 13;
+const INSECURE_CASES: usize = 2;
+
+
+const REASON_COUNT: usize = 14;
 
 
 const GROUP_COUNT: usize = 2;
@@ -876,6 +882,7 @@ fn claims_and_groups_helpers() -> TestResult {
         OidcDenial::Unmapped,
         OidcDenial::TooManyPending,
         OidcDenial::MfaMissing,
+        OidcDenial::InsecureEndpoint,
     ]
     .into_iter()
     .map(denial_reason)
@@ -1121,5 +1128,78 @@ fn store_refuses_local_accounts_in_the_oidc_namespace() -> TestResult {
     assert_eq!(load_accounts(external.as_bytes())?.len(), 1);
     let ordinary = local.replace("oidc:x", "alice");
     assert_eq!(load_accounts(ordinary.as_bytes())?.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn insecure_discovered_endpoints_are_refused_and_audited() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let mut insecure_token = provider(None, None);
+    insecure_token.token_scheme = SCHEME_HTTP;
+    let mut insecure_jwks = provider(None, None);
+    insecure_jwks.jwks_scheme = SCHEME_HTTP;
+    [insecure_token, insecure_jwks].iter().try_for_each(|mock| -> TestResult {
+        let http = |request: HttpRequest| respond(mock, request);
+        let oidc = OidcContext {
+            config: &fixture.config,
+            http: &http,
+            resolve: &resolve,
+        };
+        let result = begin_login(&context(&fixture), &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
+        assert!(matches!(result, Err(AuthError::Oidc(OidcDenial::InsecureEndpoint))));
+        Ok(())
+    })?;
+    let text = audit_text(&fixture)?;
+    assert_eq!(text.matches("\"reason\":\"insecure_endpoint\"").count(), INSECURE_CASES);
+    Ok(())
+}
+
+
+#[test]
+fn local_login_on_an_external_account_spends_a_dummy_verification() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let mut state = State::default();
+    login_with(&fixture, &mut state, &spec())??;
+    let calls = Cell::new(usize::MIN);
+    let hashes = RefCell::new(Vec::new());
+    let counting = |password: &str, hash: &str| {
+        calls.set(calls.get() + 1);
+        hashes.borrow_mut().push(hash.to_owned());
+        verify_password(password, hash)
+    };
+    let counted = Context {
+        verify: &counting,
+        ..context(&fixture)
+    };
+    let request = LoginRequest {
+        username: "oidc:user-1".to_owned(),
+        password: SecretString::from("anything at all"),
+        totp_code: None,
+        source: SOURCE.to_owned(),
+    };
+    let result = login(&mut state, &counted, at(1)?, &request);
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(hashes.borrow().as_slice(), [DUMMY_HASH.to_owned()]);
+    Ok(())
+}
+
+
+#[test]
+fn begin_login_audits_a_random_source_failure() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let healthy = provider(None, None);
+    let http = |request: HttpRequest| respond(&healthy, request);
+    let oidc = OidcContext {
+        config: &fixture.config,
+        http: &http,
+        resolve: &resolve,
+    };
+    let failing = context_with(&fixture, |_| Err(getrandom::Error::UNSUPPORTED));
+    let result = begin_login(&failing, &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
+    assert!(matches!(result, Err(AuthError::Random(_))));
+    let text = audit_text(&fixture)?;
+    assert!(text.contains("\"reason\":\"provider_error\"") && text.contains(SOURCE), "{text}");
     Ok(())
 }
