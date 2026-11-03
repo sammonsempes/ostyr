@@ -1,0 +1,17 @@
+vms:
+  - name: ubuntu
+    base_image: ubuntu-2404.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
+  - name: rocky9
+    base_image: rocky-9.qcow2
+    vcpu: 2
+    ssh_user: rocky
+  - name: rocky8
+    base_image: rocky-8.qcow2
+    vcpu: 2
+    ssh_user: rocky
+  - name: debian
+    base_image: debian-12.qcow2
+    vcpu: 2
+    ssh_user: debian

@@ -30,15 +30,39 @@ ssh-keygen -q -t ed25519 -N '' -C "ostyr-packer-$image" -f "$work_dir/id_ed25519
 base_url="$(sed -n '/variable "image_base_url"/,/}/ s/^ *default *= *"\(.*\)"/\1/p' "$template")"
 image_file="$(sed -n 's/^ *iso_url *= *"\${var.image_base_url}\/\(.*\)"/\1/p' "$template")"
 [[ -n "$base_url" && -n "$image_file" ]] || die "cannot read image_base_url and iso_url from $template"
-curl --fail --silent --show-error --location --output "$work_dir/SHA256SUMS" "$base_url/SHA256SUMS"
-curl --fail --silent --show-error --location --output "$work_dir/SHA256SUMS.gpg" "$base_url/SHA256SUMS.gpg"
-gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
-image_sum="$(awk -v file="*$image_file" '$2 == file {print $1}' "$work_dir/SHA256SUMS")"
-[[ "$image_sum" =~ ^[0-9a-f]{64}$ ]] || die "no checksum for $image_file in the verified SHA256SUMS"
+fetch() {
+    curl --fail --silent --show-error --location --output "$2" "$1"
+}
+
+verify_rocky() {
+    local key="$1" sums_name="$2" sig_name="$3"
+    fetch "$base_url/$sums_name" "$work_dir/sums"
+    fetch "$base_url/$sig_name" "$work_dir/sums.sig"
+    gpg --dearmor <"$LAB_DIR/images/keys/$key.asc" >"$work_dir/key.gpg"
+    gpgv --keyring "$work_dir/key.gpg" "$work_dir/sums.sig" "$work_dir/sums" || die "checksum signature check failed"
+    image_sum="sha256:$(sed -n "s/^SHA256 ($image_file) = \([0-9a-f]\{64\}\)\$/\1/p" "$work_dir/sums")"
+}
+
+case "$image" in
+    ubuntu-*)
+        fetch "$base_url/SHA256SUMS" "$work_dir/SHA256SUMS"
+        fetch "$base_url/SHA256SUMS.gpg" "$work_dir/SHA256SUMS.gpg"
+        gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
+        image_sum="sha256:$(awk -v file="*$image_file" '$2 == file {print $1}' "$work_dir/SHA256SUMS")"
+        ;;
+    rocky-9) verify_rocky rocky-9 "$image_file.CHECKSUM" "$image_file.CHECKSUM.asc" ;;
+    rocky-8) verify_rocky rocky-8 CHECKSUM CHECKSUM.sig ;;
+    debian-*)
+        fetch "$base_url/SHA512SUMS" "$work_dir/SHA512SUMS"
+        image_sum="sha512:$(awk -v file="$image_file" '$2 == file {print $1}' "$work_dir/SHA512SUMS")"
+        ;;
+    *) die "no checksum verification known for image '$image'" ;;
+esac
+[[ "$image_sum" =~ ^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$ ]] || die "no checksum for $image_file in the verified checksum file"
 
 packer init "$template"
 packer build -color=false \
-    -var "image_checksum=sha256:$image_sum" \
+    -var "image_checksum=$image_sum" \
     -var "output_directory=$work_dir/output" \
     -var "ssh_private_key_file=$work_dir/id_ed25519" \
     -var "ssh_public_key=$(cat "$work_dir/id_ed25519.pub")" \
