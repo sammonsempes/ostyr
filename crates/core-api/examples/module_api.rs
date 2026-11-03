@@ -1,9 +1,7 @@
-use axum::routing::get;
-use axum::Router;
+use core_api::example::{example_access, example_document, example_router};
 use core_api::logging::json_dispatch;
-use core_api::model::{Requirement, Rule};
 use core_api::server::run_module;
-use core_api::types::{AccessTable, ServerHandle};
+use core_api::types::ServerHandle;
 use std::io::{stderr, stdout, Write};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -11,24 +9,6 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 const SHUTDOWN_GRACE_SECONDS: u64 = 5;
-
-
-async fn ping() -> &'static str {
-    "pong"
-}
-
-
-fn ping_access() -> AccessTable {
-    [(
-        "GET /example/ping".to_owned(),
-        Rule {
-            requirement: Requirement::Permission("events.read".to_owned()),
-            sensitive: false,
-        },
-    )]
-    .into_iter()
-    .collect()
-}
 
 
 async fn stop_on_interrupt(handle: ServerHandle) {
@@ -46,7 +26,7 @@ async fn main() -> std::io::Result<ExitCode> {
         Ok(()) => {
             let handle = ServerHandle::new();
             tokio::spawn(stop_on_interrupt(handle.clone()));
-            match run_module(&arguments, Router::new().route("/example/ping", get(ping)), ping_access(), handle).await {
+            match run_module(&arguments, example_router(), example_access(), vec![example_document()], handle).await {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(error) => writeln!(stderr(), "{error}").map(|()| ExitCode::FAILURE),
             }

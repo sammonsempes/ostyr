@@ -367,6 +367,23 @@ fn every_login_path_costs_one_password_verification() -> TestResult {
 
 
 #[test]
+fn unknown_users_are_counted_under_their_source_only() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let ctx = context(&fixture);
+    login(&mut state, &ctx, at(1)?, &request("nobody", GOOD_PASSWORD, None, SOURCE))
+        .err()
+        .ok_or("accepted")?;
+    login(&mut state, &ctx, at(1)?, &request("alice", "wrong password here", None, SOURCE))
+        .err()
+        .ok_or("accepted")?;
+    let keys: Vec<&str> = state.attempts.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["account:alice", "source:10.0.0.7"]);
+    Ok(())
+}
+
+
+#[test]
 fn dummy_hash_uses_the_production_parameters() -> TestResult {
     assert!(DUMMY_HASH.contains(&format!("m={ARGON2_MEMORY_KIB},t={ARGON2_ITERATIONS},p={ARGON2_PARALLELISM}")));
     assert!(DUMMY_HASH.starts_with("$argon2id$"));
@@ -426,7 +443,7 @@ fn unknown_usernames_are_audited_as_a_pseudonym() -> TestResult {
     let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     let typed = "TypedPassword!9";
-    (0..ACCOUNT_MAX_FAILURES).for_each(|_| {
+    (0..SOURCE_MAX_FAILURES).for_each(|_| {
         assert!(login(
             &mut state,
             &ctx,

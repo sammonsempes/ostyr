@@ -1,5 +1,5 @@
 use crate::failure::{auth_failure, reply};
-use crate::middleware::{edge, guard, limit};
+use crate::middleware::{edge, guard, limit, rate_key};
 use crate::model::{
     ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule,
 };
@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_audit::model::Outcome;
 use core_auth::error::AuthError;
+use core_auth::limiter::source_key;
 use core_auth::service::{login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH};
 use core_auth::session::revoke_session;
 use core_auth::store::save_accounts_file;
@@ -147,7 +148,7 @@ pub fn login_request(body: LoginBody, source: IpAddr) -> LoginRequest {
         username: body.username,
         password: body.password,
         totp_code: body.totp_code,
-        source: source.to_string(),
+        source: rate_key(source).to_string(),
     }
 }
 
@@ -221,9 +222,10 @@ pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: 
 }
 
 
-pub fn admit_login(app: &ApiState, auth: &mut AuthState, now: OffsetDateTime) -> Result<(), ApiError> {
-    prune_attempts(&mut auth.attempts, now);
-    if auth.attempts.len() >= app.max_attempts {
+pub fn admit_login(app: &ApiState, request: &LoginRequest) -> Result<(), ApiError> {
+    let mut auth = lock_auth(app);
+    prune_attempts(&mut auth.attempts, (app.clock)());
+    if auth.attempts.len() >= app.max_attempts && !auth.attempts.contains_key(&source_key(&request.source)) {
         tracing::warn!("failure tracking table is full, login refused");
         Err(ApiError::TooManyRequests)
     } else {
@@ -236,7 +238,6 @@ pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, st
     let now = (app.clock)();
     let verify = |_: &str, current: &str| verdict.filter(|_| current == stored).ok_or(AuthError::InvalidCredentials);
     let mut auth = lock_auth(app);
-    admit_login(app, &mut auth, now)?;
     let context = auth_context(app, request_id, &verify);
     let token = core_login(&mut auth, &context, now, request).map_err(|failure| auth_failure(&failure))?;
     persist_login(app, &mut auth, &context, now, request, &token).map(|granted| Json(granted).into_response())
@@ -247,6 +248,7 @@ pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: 
     let bytes = body.map_err(|rejection| body_failure(&rejection))?;
     let parsed: LoginBody = serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest)?;
     let request = login_request(parsed, source);
+    admit_login(app, &request)?;
     let stored = stored_hash(app, &request.username);
     let verdict = verify_off_worker(app, &request.password, &stored).await?;
     commit_login(app, request_id, &request, &stored, verdict)

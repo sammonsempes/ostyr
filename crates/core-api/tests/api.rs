@@ -10,11 +10,13 @@ mod types;
 
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, StatusCode};
+use core_api::example::{example_document, PING_REPLY};
 use core_api::failure::{auth_failure, error_parts};
-use core_api::middleware::{admit_source, rate_key, SECURITY_HEADERS};
+use core_api::middleware::{admit_source, count_request, rate_key, SECURITY_HEADERS};
+use core_api::model::Window;
 use core_api::model::{ApiError, ApiState};
 use core_api::routes::{commit_login, core_access, BODY_LIMIT_BYTES};
-use core_api::state::{prune_attempts, MAX_CONCURRENT_HASHES, RATE_BURST};
+use core_api::state::{prune_attempts, MAX_CONCURRENT_HASHES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_audit::log::{new_log, sync_file};
 use core_audit::model::GENESIS_HASH;
 use core_audit::verify::verify;
@@ -25,7 +27,6 @@ use core_auth::random::os_random;
 use core_auth::service::LoginRequest;
 use core_auth::session::create_session;
 use fixture::{fixture, fixture_with, PASSWORD, READER};
-use governor::{Quota, RateLimiter};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
 use logging::capture_dispatch;
 use secrecy::SecretString;
@@ -33,10 +34,9 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
 use time::OffsetDateTime;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use types::{TestError, TestResult};
@@ -307,7 +307,7 @@ async fn deny_by_default_and_permission_checks() -> TestResult {
 #[tokio::test]
 async fn rate_limit_is_per_source() -> TestResult {
     let fx = fixture()?;
-    let total = usize::try_from(RATE_BURST.get())? + EXTRA_REQUESTS;
+    let total = usize::try_from(RATE_MAX_REQUESTS)? + EXTRA_REQUESTS;
     let mut statuses = Vec::new();
     for _ in 0..total {
         statuses.push(call(&fx.router, "GET", "/health", None).await?.status());
@@ -347,7 +347,7 @@ async fn openapi_documents_every_route() -> TestResult {
                 .collect::<Vec<_>>()
         })
         .collect();
-    let routed: BTreeSet<String> = core_access().into_keys().collect();
+    let routed: BTreeSet<String> = core_access().into_keys().chain(["GET /example/ping".to_owned()]).collect();
     assert_eq!(documented, routed);
     Ok(())
 }
@@ -553,13 +553,16 @@ const SOURCE_E: u8 = 5;
 const SMALL_TABLE: usize = 2;
 
 
+const ROTATION_ATTEMPTS: usize = 25;
+
+
+const SOURCE_LOCKOUT_FAILURES: usize = 20;
+
+
+const CLIENT_PORT: u16 = 40_000;
+
+
 const STALE_ENTRIES: usize = 5;
-
-
-const RECOVERY_PAUSE: Duration = Duration::from_millis(500);
-
-
-const SHORT_PERIOD: Duration = Duration::from_millis(100);
 
 
 const RECENT_SECONDS: i64 = 10;
@@ -606,7 +609,6 @@ fn small_attempt_table(state: ApiState) -> Result<ApiState, TestError> {
 fn small_source_table(state: ApiState) -> Result<ApiState, TestError> {
     Ok(ApiState {
         max_sources: SMALL_TABLE,
-        limiter: RateLimiter::keyed(Quota::with_period(SHORT_PERIOD).ok_or("zero period")?),
         ..state
     })
 }
@@ -748,8 +750,9 @@ fn pruning_keeps_only_locked_or_recent_entries() -> TestResult {
 
 
 #[tokio::test]
-async fn a_full_failure_table_refuses_logins_until_entries_expire() -> TestResult {
+async fn a_full_failure_table_refuses_new_sources_until_entries_expire() -> TestResult {
     let fx = fixture_with(small_attempt_table)?;
+    assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
     assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
     assert_eq!(login_status(&fx, SOURCE_B, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
     {
@@ -772,16 +775,88 @@ async fn a_full_failure_table_refuses_logins_until_entries_expire() -> TestResul
 
 
 #[tokio::test]
-async fn the_source_table_is_capped_and_idle_sources_expire() -> TestResult {
+async fn the_source_table_refuses_new_sources_only_and_idle_sources_expire() -> TestResult {
     let fx = fixture_with(small_source_table)?;
     let (first, second, third) = (client(SOURCE_A).ip(), client(SOURCE_B).ip(), client(SOURCE_C).ip());
     assert!(admit_source(&fx.state, first));
     assert!(admit_source(&fx.state, second));
     assert!(!admit_source(&fx.state, third));
-    assert!(fx.state.limiter.len() <= SMALL_TABLE);
-    tokio::time::sleep(RECOVERY_PAUSE).await;
+    assert!(admit_source(&fx.state, first));
+    assert!(admit_source(&fx.state, second));
+    assert_eq!(fx.state.limiter.lock().map_err(|_| "poisoned")?.len(), SMALL_TABLE);
+    {
+        let mut table = fx.state.limiter.lock().map_err(|_| "poisoned")?;
+        table.insert(
+            rate_key(first),
+            Window {
+                started: OffsetDateTime::UNIX_EPOCH,
+                count: RATE_MAX_REQUESTS,
+            },
+        );
+    }
     assert!(admit_source(&fx.state, third));
-    assert!(fx.state.limiter.len() <= SMALL_TABLE);
+    assert!(fx.state.limiter.lock().map_err(|_| "poisoned")?.len() <= SMALL_TABLE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_known_source_over_its_quota_stays_refused_in_a_full_table() -> TestResult {
+    let fx = fixture_with(small_source_table)?;
+    let first = client(SOURCE_A).ip();
+    let results: Vec<bool> = (0..=RATE_MAX_REQUESTS).map(|_| admit_source(&fx.state, first)).collect();
+    assert_eq!(results.iter().filter(|admitted| **admitted).count(), usize::try_from(RATE_MAX_REQUESTS)?);
+    assert_eq!(results.last(), Some(&false));
+    let window = *fx
+        .state
+        .limiter
+        .lock()
+        .map_err(|_| "poisoned")?
+        .get(&rate_key(first))
+        .ok_or("no window")?;
+    assert!(OffsetDateTime::now_utc() - window.started < time::Duration::seconds(RATE_WINDOW_SECONDS));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn rotating_inside_one_64_bit_prefix_still_trips_the_source_lockout() -> TestResult {
+    let fx = fixture()?;
+    let mut statuses = Vec::new();
+    for host in 1..=ROTATION_ATTEMPTS {
+        let source = SocketAddr::new(format!("2001:db8:1:2::{host:x}").parse()?, CLIENT_PORT);
+        let body = login_body(&format!("random-name-{host}"), "wrong password here");
+        statuses.push(send_from(&fx.router, source, request("POST", "/auth/login", None, body)?).await?.status());
+    }
+    let (before, after) = statuses.split_at(SOURCE_LOCKOUT_FAILURES);
+    assert!(before.iter().all(|status| *status == StatusCode::UNAUTHORIZED));
+    assert!(after.iter().all(|status| *status == StatusCode::TOO_MANY_REQUESTS));
+    let keys: Vec<String> = fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.keys().cloned().collect();
+    assert_eq!(keys, ["source:2001:db8:1:2::".to_owned()]);
+    Ok(())
+}
+
+
+fn full_table_with_failing_hash(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState {
+        max_attempts: 1,
+        verify: panicking_verify,
+        ..state
+    })
+}
+
+
+#[tokio::test]
+async fn a_refused_login_costs_no_password_hashing() -> TestResult {
+    let fx = fixture_with(full_table_with_failing_hash)?;
+    fx.state.auth.lock().map_err(|_| "poisoned")?.attempts.insert(
+        "source:203.0.113.9".to_owned(),
+        Attempts {
+            failures: vec![OffsetDateTime::now_utc()],
+            locked_until: None,
+        },
+    );
+    assert_eq!(login_status(&fx, SOURCE_B, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
     Ok(())
 }
 
@@ -795,5 +870,37 @@ fn ipv6_sources_share_one_bucket_per_64_bit_prefix() -> TestResult {
     assert_eq!(rate_key(first), rate_key(same_prefix));
     assert_ne!(rate_key(first), rate_key(other_prefix));
     assert_eq!(rate_key(v4), v4);
+    Ok(())
+}
+
+
+#[test]
+fn an_expired_window_restarts_its_count() -> TestResult {
+    let now = OffsetDateTime::now_utc();
+    let mut spent = Window {
+        started: OffsetDateTime::UNIX_EPOCH,
+        count: RATE_MAX_REQUESTS,
+    };
+    assert!(count_request(&mut spent, now));
+    assert_eq!((spent.started, spent.count), (now, 1));
+    let mut full = Window {
+        started: now,
+        count: RATE_MAX_REQUESTS,
+    };
+    assert!(!count_request(&mut full, now));
+    assert_eq!(full.count, RATE_MAX_REQUESTS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_example_module_answers_a_permitted_session() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let response = call(&fx.router, "GET", "/example/ping", Some(&token)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), BODY_LIMIT_BYTES).await?;
+    assert_eq!(bytes, PING_REPLY.as_bytes());
+    assert!(serde_json::to_value(example_document())?.pointer("/paths/~1example~1ping/get").is_some());
     Ok(())
 }

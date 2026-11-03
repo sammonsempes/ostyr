@@ -1,6 +1,6 @@
 use crate::failure::{auth_failure, error_response};
-use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, RequestId, Requirement};
-use crate::state::lock_auth;
+use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, RequestId, Requirement, Window};
+use crate::state::{lock_auth, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use crate::types::SharedState;
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::header::{
@@ -22,8 +22,9 @@ use core_auth::types::{RandomFn, RoleCatalog};
 use data_encoding::HEXLOWER;
 use secrecy::SecretString;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, Instant};
-use time::OffsetDateTime;
+use std::sync::PoisonError;
+use std::time::Instant;
+use time::{Duration, OffsetDateTime};
 
 
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -111,7 +112,7 @@ pub fn result_label(status: StatusCode) -> &'static str {
 }
 
 
-pub fn log_request(app: &ApiState, id: &str, method: &str, path: &str, source: IpAddr, status: StatusCode, elapsed: Duration) {
+pub fn log_request(app: &ApiState, id: &str, method: &str, path: &str, source: IpAddr, status: StatusCode, elapsed: std::time::Duration) {
     let (module, tenant) = (app.module.as_str(), app.tenant.as_str());
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let (result, code) = (result_label(status), status.as_u16());
@@ -150,11 +151,35 @@ pub fn rate_key(source: IpAddr) -> IpAddr {
 }
 
 
-pub fn admit_source(app: &ApiState, source: IpAddr) -> bool {
-    if app.limiter.len() >= app.max_sources {
-        app.limiter.retain_recent();
+pub fn window_open(window: &Window, now: OffsetDateTime) -> bool {
+    now - window.started < Duration::seconds(RATE_WINDOW_SECONDS)
+}
+
+
+pub fn count_request(window: &mut Window, now: OffsetDateTime) -> bool {
+    if !window_open(window, now) {
+        *window = Window { started: now, count: 0 };
     }
-    app.limiter.len() < app.max_sources && app.limiter.check_key(&rate_key(source)).is_ok()
+    window.count < RATE_MAX_REQUESTS && {
+        window.count += 1;
+        true
+    }
+}
+
+
+pub fn admit_source(app: &ApiState, source: IpAddr) -> bool {
+    let now = (app.clock)();
+    let mut table = app.limiter.lock().unwrap_or_else(PoisonError::into_inner);
+    if table.len() >= app.max_sources {
+        table.retain(|_, window| window_open(window, now));
+    }
+    let key = rate_key(source);
+    let known = table.contains_key(&key);
+    if known || table.len() < app.max_sources {
+        count_request(table.entry(key).or_insert(Window { started: now, count: 0 }), now)
+    } else {
+        false
+    }
 }
 
 

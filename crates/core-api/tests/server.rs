@@ -5,9 +5,10 @@ mod types;
 
 
 use core_api::error::StartupError;
+use core_api::middleware::rate_key;
 use core_api::model::{ApiConfig, TlsFiles};
-use core_api::server::{check_transport, run_module, serve, tls_server_config};
-use core_api::types::ServerHandle;
+use core_api::server::{admit_connection, check_transport, run_module, serve, tls_server_config};
+use core_api::types::{ConnectionTable, ServerHandle};
 use fixture::{extra_access, extra_router, fixture, private_file, set_mode};
 use rcgen::generate_simple_self_signed;
 use rustls::crypto::ring::default_provider;
@@ -18,6 +19,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -236,7 +238,7 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
     let path = module_yaml(dir.path(), "127.0.0.1:0")?;
     let handle = ServerHandle::new();
     let running = handle.clone();
-    let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), running).await });
+    let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), vec![], running).await });
     let address = listening(&handle).await?;
     assert!(read_response(TcpStream::connect(address).await?).await?.starts_with("HTTP/1.1 200 OK"));
     handle.shutdown();
@@ -248,22 +250,107 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
 #[tokio::test]
 async fn run_module_reports_startup_problems() -> TestResult {
     let dir = tempdir()?;
-    let usage = run_module(&[], extra_router(), extra_access(), ServerHandle::new()).await;
+    let usage = run_module(&[], extra_router(), extra_access(), vec![], ServerHandle::new()).await;
     assert!(matches!(usage, Err(StartupError::Usage(_))));
     let absent = run_module(
         &[dir.path().join("none.yaml").display().to_string()],
         extra_router(),
         extra_access(),
+        vec![],
         ServerHandle::new(),
     )
     .await;
     assert!(matches!(absent, Err(StartupError::Config(_))));
     let exposed = module_yaml(dir.path(), "0.0.0.0:8443")?;
-    let plain = run_module(&[exposed], extra_router(), extra_access(), ServerHandle::new()).await;
+    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], ServerHandle::new()).await;
     assert!(matches!(plain, Err(StartupError::PlainHttpRefused(_))));
     let local = module_yaml(dir.path(), "127.0.0.1:0")?;
     fs::remove_file(dir.path().join("compromised.txt"))?;
-    let broken = run_module(&[local], extra_router(), extra_access(), ServerHandle::new()).await;
+    let broken = run_module(&[local], extra_router(), extra_access(), vec![], ServerHandle::new()).await;
     assert!(matches!(broken, Err(StartupError::Io(_))));
+    Ok(())
+}
+
+
+const PARTIAL_HEADERS: &str = "GET /health HTTP/1.1\r\nHost: localhost\r\n";
+
+
+const READ_DEADLINE: Duration = Duration::from_secs(5);
+
+
+const TABLE_LIMIT: usize = 2;
+
+
+const SETTLE_PAUSE: Duration = Duration::from_millis(200);
+
+
+const LONG_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+
+
+async fn read_until_closed(stream: &mut TcpStream) -> Result<(String, Duration), TestError> {
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(READ_DEADLINE, stream.read_to_end(&mut bytes)).await??;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), started.elapsed()))
+}
+
+
+#[tokio::test]
+async fn a_client_sending_headers_slowly_is_disconnected() -> TestResult {
+    let fx = fixture()?;
+    let (handle, running) = start(&fx.config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut slow = TcpStream::connect(address).await?;
+    slow.write_all(PARTIAL_HEADERS.as_bytes()).await?;
+    let (reply, waited) = read_until_closed(&mut slow).await?;
+    assert!(!reply.starts_with("HTTP/1.1 200"));
+    assert!(waited < READ_DEADLINE);
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn connections_per_source_are_limited_and_released() -> TestResult {
+    let fx = fixture()?;
+    let config = ApiConfig {
+        header_read_timeout: LONG_HEADER_TIMEOUT,
+        ..fx.config.clone()
+    };
+    let (handle, running) = start(&config, fx.router.clone());
+    let address = listening(&handle).await?;
+    let mut held = Vec::new();
+    for _ in 0..config.max_connections_per_source {
+        let mut stream = TcpStream::connect(address).await?;
+        stream.write_all(PARTIAL_HEADERS.as_bytes()).await?;
+        held.push(stream);
+    }
+    tokio::time::sleep(SETTLE_PAUSE).await;
+    let mut excess = TcpStream::connect(address).await?;
+    let (reply, _) = read_until_closed(&mut excess).await?;
+    assert!(reply.is_empty());
+    held.clear();
+    tokio::time::sleep(SETTLE_PAUSE).await;
+    assert!(read_response(TcpStream::connect(address).await?).await?.starts_with("HTTP/1.1 200 OK"));
+    handle.shutdown();
+    assert!(running.await?.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn the_connection_table_counts_folds_and_forgets_sources() -> TestResult {
+    let table = ConnectionTable::default();
+    let first = "2001:db8:1:2::1".parse()?;
+    let same_prefix = "2001:db8:1:2:ffff::9".parse()?;
+    let one = admit_connection(&table, first, TABLE_LIMIT).ok_or("first refused")?;
+    let two = admit_connection(&table, same_prefix, TABLE_LIMIT).ok_or("second refused")?;
+    assert!(admit_connection(&table, first, TABLE_LIMIT).is_none());
+    assert_eq!(table.lock().map_err(|_| "poisoned")?.get(&rate_key(first)), Some(&TABLE_LIMIT));
+    drop(one);
+    assert_eq!(table.lock().map_err(|_| "poisoned")?.get(&rate_key(first)), Some(&1));
+    drop(two);
+    assert!(table.lock().map_err(|_| "poisoned")?.is_empty());
     Ok(())
 }

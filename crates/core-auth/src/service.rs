@@ -660,7 +660,11 @@ pub fn register_failure<Output: Write>(
     audit_user: &str,
     request: &LoginRequest,
 ) -> Result<(), AuthError> {
-    let account_lock = record_failure(&mut state.attempts, &account_key(&request.username), ACCOUNT_MAX_FAILURES, now);
+    let account_lock = state
+        .accounts
+        .contains_key(&request.username)
+        .then(|| record_failure(&mut state.attempts, &account_key(&request.username), ACCOUNT_MAX_FAILURES, now))
+        .flatten();
     let source_lock = record_failure(&mut state.attempts, &source_key(&request.source), SOURCE_MAX_FAILURES, now);
     [("account", account_lock), ("source", source_lock)]
         .into_iter()

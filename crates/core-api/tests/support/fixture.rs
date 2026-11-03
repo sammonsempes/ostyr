@@ -1,6 +1,7 @@
 use crate::types::TestError;
 use axum::routing::{get, post};
 use axum::Router;
+use core_api::example::{example_access, example_document, example_router};
 use core_api::model::{ApiConfig, ApiState, Requirement, Rule};
 use core_api::routes::build_router;
 use core_api::state::build_state;
@@ -11,6 +12,7 @@ use core_auth::random::os_random;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 
 
@@ -27,6 +29,12 @@ pub const KEY_BYTES: usize = 32;
 
 
 pub const KEY_FILL: u8 = 7;
+
+
+pub const TEST_HEADER_TIMEOUT: Duration = Duration::from_millis(300);
+
+
+pub const TEST_MAX_CONNECTIONS: usize = 2;
 
 
 pub const TEST_ADDRESS: &str = "127.0.0.1:0";
@@ -60,6 +68,7 @@ pub fn extra_router() -> Router<SharedState> {
         .route("/example/secret", get(guarded))
         .route("/example/events", get(plain))
         .route("/example/change", post(plain))
+        .merge(example_router())
 }
 
 
@@ -88,6 +97,7 @@ pub fn extra_access() -> AccessTable {
         ),
     ]
     .into_iter()
+    .chain(example_access())
     .collect()
 }
 
@@ -126,6 +136,8 @@ pub fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
         audit_log: dir.path().join("audit.log"),
         key_file: key_file.display().to_string(),
         compromised_list,
+        header_read_timeout: TEST_HEADER_TIMEOUT,
+        max_connections_per_source: TEST_MAX_CONNECTIONS,
     })
 }
 
@@ -150,7 +162,7 @@ pub fn seed_reader(state: &ApiState) -> Result<(), TestError> {
 pub fn fixture_with(adjust: impl FnOnce(ApiState) -> Result<ApiState, TestError>) -> Result<Fixture, TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
-    let built = build_state(&config, extra_access())?;
+    let built = build_state(&config, extra_access(), vec![example_document()])?;
     seed_reader(&built)?;
     let state: SharedState = Arc::new(adjust(built)?);
     let router = build_router(state.clone(), extra_router());

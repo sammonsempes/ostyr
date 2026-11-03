@@ -12,26 +12,20 @@ use core_auth::rbac::builtin_catalog;
 use core_auth::service::{Context, State};
 use core_auth::store::load_accounts_file;
 use core_auth::types::{AttemptMap, VerifyFn};
-use governor::{Quota, RateLimiter};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
 use tracing::Dispatch;
+use utoipa::openapi::OpenApi as OpenApiDocument;
 
 
-pub const RATE_PER_MINUTE: NonZeroU32 = match NonZeroU32::new(60) {
-    Some(value) => value,
-    None => NonZeroU32::MIN,
-};
+pub const RATE_WINDOW_SECONDS: i64 = 60;
 
 
-pub const RATE_BURST: NonZeroU32 = match NonZeroU32::new(30) {
-    Some(value) => value,
-    None => NonZeroU32::MIN,
-};
+pub const RATE_MAX_REQUESTS: u32 = 30;
 
 
 pub const MAX_CONCURRENT_HASHES: usize = 4;
@@ -43,7 +37,14 @@ pub const MAX_TRACKED_SOURCES: usize = 10_000;
 pub const MAX_TRACKED_ATTEMPTS: usize = 10_000;
 
 
-pub fn build_state(config: &ApiConfig, extra_access: AccessTable) -> Result<ApiState, StartupError> {
+pub fn merged_document(module: &str, extra_documents: Vec<OpenApiDocument>) -> OpenApiDocument {
+    let mut document = openapi_document(module);
+    extra_documents.into_iter().for_each(|extra| document.merge(extra));
+    document
+}
+
+
+pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_documents: Vec<OpenApiDocument>) -> Result<ApiState, StartupError> {
     let key = read_key_file(&config.key_file)?;
     let audit = open_file_log(&config.audit_log)?;
     let compromised = load_compromised(BufReader::new(File::open(&config.compromised_list)?))?;
@@ -64,9 +65,9 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable) -> Result<ApiS
         random: os_random,
         clock: OffsetDateTime::now_utc,
         store_path: config.accounts_store.clone(),
-        limiter: RateLimiter::keyed(Quota::per_minute(RATE_PER_MINUTE).allow_burst(RATE_BURST)),
+        limiter: Mutex::new(BTreeMap::new()),
         access,
-        document: serde_json::to_value(openapi_document(&config.module))?,
+        document: serde_json::to_value(merged_document(&config.module, extra_documents))?,
         verify: verify_password,
         hashing: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
         dispatch: tracing::dispatcher::get_default(Dispatch::clone),

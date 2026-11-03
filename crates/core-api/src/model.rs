@@ -1,4 +1,4 @@
-use crate::types::{AccessTable, KeyedLimiter, VerifyPasswordFn};
+use crate::types::{AccessTable, ConnectionTable, KeyedLimiter, VerifyPasswordFn};
 use axum::http::StatusCode;
 use core_audit::log::AuditLog;
 use core_auth::service::State;
@@ -6,9 +6,11 @@ use core_auth::types::{Clock, CompromisedSet, RandomFn, RoleCatalog, StoreKey};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, PoisonError};
+use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 use tracing::Dispatch;
 use utoipa::ToSchema;
@@ -17,7 +19,7 @@ use utoipa::ToSchema;
 pub struct ApiState {
     pub module: String,
     pub tenant: String,
-    pub auth: Mutex<State>,
+    pub auth: std::sync::Mutex<State>,
     pub audit: AuditLog<File>,
     pub key: StoreKey,
     pub compromised: CompromisedSet,
@@ -33,6 +35,33 @@ pub struct ApiState {
     pub dispatch: Dispatch,
     pub max_sources: usize,
     pub max_attempts: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub started: OffsetDateTime,
+    pub count: u32,
+}
+
+
+#[derive(Debug)]
+pub struct ConnectionGuard {
+    pub table: ConnectionTable,
+    pub source: IpAddr,
+}
+
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
+        let remaining = table.get(&self.source).copied().unwrap_or(0).saturating_sub(1);
+        if remaining == 0 {
+            table.remove(&self.source);
+        } else {
+            table.insert(self.source, remaining);
+        }
+    }
 }
 
 
@@ -53,6 +82,8 @@ pub struct ApiConfig {
     pub audit_log: PathBuf,
     pub key_file: String,
     pub compromised_list: PathBuf,
+    pub header_read_timeout: Duration,
+    pub max_connections_per_source: usize,
 }
 
 

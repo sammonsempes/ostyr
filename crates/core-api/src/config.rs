@@ -3,6 +3,7 @@ use crate::model::{ApiConfig, TlsFiles};
 use core_config::model::ModuleConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 
 pub const SETTING_TLS_CERTIFICATE: &str = "tls_certificate";
@@ -21,6 +22,12 @@ pub const SETTING_KEY_FILE: &str = "key_file";
 
 
 pub const SETTING_COMPROMISED_LIST: &str = "compromised_list";
+
+
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+
+pub const MAX_CONNECTIONS_PER_SOURCE: usize = 64;
 
 
 pub const DEFAULT_TENANT: &str = "default";
@@ -62,5 +69,7 @@ pub fn api_config(module: &ModuleConfig) -> Result<ApiConfig, StartupError> {
         audit_log: PathBuf::from(required_setting(module, SETTING_AUDIT_LOG)?),
         key_file: required_setting(module, SETTING_KEY_FILE)?.clone(),
         compromised_list: PathBuf::from(required_setting(module, SETTING_COMPROMISED_LIST)?),
+        header_read_timeout: HEADER_READ_TIMEOUT,
+        max_connections_per_source: MAX_CONNECTIONS_PER_SOURCE,
     })
 }
