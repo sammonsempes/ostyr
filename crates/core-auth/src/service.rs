@@ -660,9 +660,19 @@ pub fn register_failure<Output: Write>(
     audit_user: &str,
     request: &LoginRequest,
 ) -> Result<(), AuthError> {
-    let account_lock = state
-        .accounts
-        .contains_key(&request.username)
+    count_failure(state, context, now, audit_user, request, true)
+}
+
+
+pub fn count_failure<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    audit_user: &str,
+    request: &LoginRequest,
+    count_account: bool,
+) -> Result<(), AuthError> {
+    let account_lock = (count_account && state.accounts.contains_key(&request.username))
         .then(|| record_failure(&mut state.attempts, &account_key(&request.username), ACCOUNT_MAX_FAILURES, now))
         .flatten();
     let source_lock = record_failure(&mut state.attempts, &source_key(&request.source), SOURCE_MAX_FAILURES, now);
@@ -745,6 +755,7 @@ pub fn refuse_locked<Output: Write>(
 
 
 pub fn refuse_locked_account<Output: Write>(
+    state: &mut State,
     context: &Context<Output>,
     now: OffsetDateTime,
     audit_user: &str,
@@ -754,6 +765,7 @@ pub fn refuse_locked_account<Output: Write>(
     (context.verify)(request.password.expose_secret(), DUMMY_HASH)
         .inspect_err(|error| tracing::warn!(%error, "dummy verification failed for a locked account"))
         .ok();
+    count_failure(state, context, now, audit_user, request, false)?;
     Err(AuthError::InvalidCredentials)
 }
 
@@ -772,7 +784,7 @@ pub fn login<Output: Write>(
             refuse_locked(context, now, &audit_user, request)?;
             Err(AuthError::Locked { until })
         }
-        (None, Some(_)) => refuse_locked_account(context, now, &audit_user, request),
+        (None, Some(_)) => refuse_locked_account(state, context, now, &audit_user, request),
         (None, None) => {
             let mut accounts = state.accounts.clone();
             match factors_denial(&mut accounts, context, request, now) {

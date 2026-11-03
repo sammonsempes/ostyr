@@ -225,10 +225,9 @@ pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: 
 
 
 pub fn missing_keys(auth: &AuthState, request: &LoginRequest) -> usize {
-    let account = auth.accounts.contains_key(&request.username).then(|| account_key(&request.username));
-    std::iter::once(source_key(&request.source))
-        .chain(account)
-        .filter(|key| !auth.attempts.contains_key(key))
+    [source_key(&request.source), account_key(&request.username)]
+        .iter()
+        .filter(|key| !auth.attempts.contains_key(*key))
         .count()
 }
 
@@ -298,7 +297,7 @@ pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, body: 
         (status = 401, description = "Invalid credentials or second factor", body = ErrorBody),
         (status = 403, description = "Second factor enrolment required", body = ErrorBody),
         (status = 413, description = "Request body too large", body = ErrorBody),
-        (status = 429, description = "Too many requests or account locked", body = ErrorBody)
+        (status = 429, description = "Too many requests or source locked", body = ErrorBody)
     )
 )]
 pub async fn login_endpoint(

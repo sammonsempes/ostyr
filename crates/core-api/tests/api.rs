@@ -586,6 +586,9 @@ const STALE_ENTRIES: usize = 5;
 const RECENT_SECONDS: i64 = 10;
 
 
+const SEQUENCE_LENGTH: usize = 21;
+
+
 fn failing_verify(_password: &str, _stored: &str) -> Result<bool, AuthError> {
     Err(AuthError::Decrypt)
 }
@@ -1052,7 +1055,33 @@ async fn an_existing_account_needs_room_for_both_of_its_failure_keys() -> TestRe
     assert!(matches!(admit_login(&fx.state, "id-room", &known), Err(ApiError::TooManyRequests)));
     let mut unknown = login_request("stranger");
     unknown.source = "198.51.100.1".to_owned();
-    assert!(admit_login(&fx.state, "id-room", &unknown).is_ok());
+    assert!(matches!(admit_login(&fx.state, "id-room", &unknown), Err(ApiError::TooManyRequests)));
+    Ok(())
+}
+
+
+async fn status_sequence(router: &axum::Router, offset: u8, username: &str) -> Result<Vec<StatusCode>, TestError> {
+    let mut statuses = Vec::new();
+    for _ in 0..SEQUENCE_LENGTH {
+        let body = login_body(username, "wrong password here");
+        statuses.push(
+            send_from(router, client(offset), request("POST", "/auth/login", None, body)?)
+                .await?
+                .status(),
+        );
+    }
+    Ok(statuses)
+}
+
+
+#[tokio::test]
+async fn a_real_name_and_an_unknown_name_give_identical_status_sequences_from_one_source() -> TestResult {
+    let fx = fixture()?;
+    let real = status_sequence(&fx.router, 1, READER).await?;
+    let unknown = status_sequence(&fx.router, OTHER_SOURCE, "nobody").await?;
+    assert_eq!(real, unknown);
+    assert_eq!(real.last(), Some(&StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(real.first(), Some(&StatusCode::UNAUTHORIZED));
     Ok(())
 }
 
