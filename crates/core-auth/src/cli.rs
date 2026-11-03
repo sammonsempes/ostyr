@@ -4,13 +4,15 @@ use crate::policy::load_compromised;
 use crate::rbac::{builtin_catalog, PERMISSION_EVENTS_READ};
 use crate::secretbox::KEY_BYTES;
 use crate::service::{
-    authorize, bootstrap_administrator, change_roles, create_account, enrol_totp, login, revoke_all_sessions, revoke_token, Context, Enrolment,
-    LoginRequest, State,
+    audit_name, authorize, bootstrap_administrator, change_roles, create_account, denial_reason, enrol_totp, login, record, revoke_all_sessions,
+    revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN,
 };
+use crate::session::revoke_user_sessions;
 use crate::store::{load_accounts_file, save_accounts_file};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use crate::types::{Clock, RandomFn, RoleSet, StoreKey};
 use core_audit::log::{check_private, open_file_log, owner_only};
+use core_audit::model::Outcome;
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use std::fs::{File, OpenOptions};
@@ -114,7 +116,7 @@ pub fn is_read_only(words: &[&str]) -> bool {
 }
 
 
-/// Runs one command and saves the store only when a mutating command succeeded.
+/// Runs one command and saves the store only when a mutating command succeeded; a login whose save fails yields no session.
 pub fn apply_command<Output: Write>(
     state: &mut State,
     context: &Context<Output>,
@@ -123,10 +125,23 @@ pub fn apply_command<Output: Write>(
     words: &[&str],
 ) -> Result<String, AuthError> {
     let done = execute(state, context, now, words)?;
-    if !is_read_only(words) {
-        save_accounts_file(store_path, &state.accounts, context.random)?;
+    let saved = if is_read_only(words) {
+        Ok(())
+    } else {
+        save_accounts_file(store_path, &state.accounts, context.random)
+    };
+    match (saved, words) {
+        (Ok(()), _) => Ok(done),
+        (Err(error), ["login", user, _, source, ..]) => {
+            tracing::warn!(%error, "store save failed after a successful login");
+            revoke_user_sessions(&mut state.sessions, user);
+            let audit_user = audit_name(&state.accounts, user);
+            let parameters = [("reason", denial_reason(Denial::Internal).to_owned()), ("source", (*source).to_owned())];
+            record(context, now, &audit_user, ACTION_LOGIN, &audit_user, Outcome::Failure, &parameters)?;
+            Err(AuthError::InvalidCredentials)
+        }
+        (Err(error), _) => Err(error),
     }
-    Ok(done)
 }
 
 
