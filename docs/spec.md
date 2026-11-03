@@ -4,11 +4,11 @@ Nov 2, 2026 · @Samsam
 
 ## 1. Vision and positioning
 
-An open source cyber platform, usable straight after installation without expert configuration, that detects and blocks locally and deterministically, then investigates and tunes itself with built-in AI. It relies on **OpenSearch** for storage, search and correlation, and on **osquery** for endpoint inventory and querying.
+An open source cyber platform, usable straight after installation without expert configuration, that detects and blocks locally and deterministically, then investigates and tunes itself with built-in AI. It relies on **ClickHouse** for storage, search and correlation, and on **osquery** for endpoint inventory and querying.
 
-**Differentiation.** Wazuh already covers agents, FIM and active response; Security Onion covers NDR; Velociraptor covers forensics; Shuffle covers SOAR. This project's own value comes down to three points:
+**Differentiation.** Wazuh already covers agents, FIM and active response; Security Onion covers NDR; dedicated tools cover forensics; Shuffle covers SOAR. This project's own value comes down to three points:
 
-- **orchestration of recognised native sensors** (Sysmon, Defender, Tetragon, ClamAV, osquery) rather than a home-made sensor, with continuous checking of their state;
+- **orchestration of recognised native sensors** (Sysmon, Defender, Tetragon, YARA-X, osquery) rather than a home-made sensor, with continuous checking of their state;
 - **automatic, reversible tuning by AI**, framed by a deterministic validator, with a complete history.
 - **everything as code and modular**: each module (EDR, WAF, DNS, identity provider…) deploys alone or combined with the others, and all configuration lives in Git, with no no-code interface.
 
@@ -18,7 +18,7 @@ Anything that does not serve these three points is either delegated to a connect
 
 ## 2. Guiding principles
 
-- **Operational from installation, without bloat.** Detection rules, threat intel, protection policies, FIM and honeytokens are active by default. A single module installs with one command in under 10 minutes; the "all-in-one" profile in under 30 minutes. Heavy components (Kafka, OpenSearch cluster, local AI) are only required when volume or usage justifies them.
+- **Operational from installation, without bloat.** Detection rules, threat intel, protection policies, FIM and honeytokens are active by default. A single module installs with one command in under 10 minutes; the "all-in-one" profile in under 30 minutes. Heavy components (NATS JetStream, ClickHouse cluster, local AI) are only required when volume or usage justifies them.
 - **Blocking never depends on AI.** Local detection and blocking are deterministic. If the AI, the server or the network is unreachable, the agent keeps protecting with its cached policies.
 - **AI is strongly recommended, not blocking.** An AI provider (external API or local model) is offered during installation. Without AI, the platform starts in an explicit **degraded mode**: permanent banner in the interface, manual triage, no automatic tuning. A local model must pass a qualification test before it is enabled (section 8).
 - **The human stays in control by default.** The default tuning mode is "human approval". Switching to autonomous mode is an explicit, reversible and logged decision.
@@ -40,7 +40,7 @@ The values below are initial targets for v1, to be confirmed by benchmarks befor
 | Requirement | v1 target | Measurement |
 | --- | --- | --- |
 | CPU of the agent and its sensors (excluding antivirus scans) | < 3 % on average, < 10 % peak over 1 min | Agent internal telemetry |
-| Agent memory (excluding Defender and ClamAV) | < 300 MB | Agent internal telemetry |
+| Agent memory (excluding Defender) | < 300 MB | Agent internal telemetry |
 | Local blocking delay (ASR, Tetragon, App Control) | Before the action executes | Atomic Red Team tests |
 | Windows reactive kill delay | < 1 s after process creation | Test bench |
 | Central detection → alert delay | < 60 s at the 95th percentile | End-to-end timestamps |
@@ -51,7 +51,7 @@ The values below are initial targets for v1, to be confirmed by benchmarks befor
 | Ingestion throughput, all-in-one profile | 2,000 events/s, up to 250 endpoints | Load bench |
 | Ingestion throughput, distributed profile | 50,000 events/s, up to 10,000 endpoints | Load bench |
 | Average volume per endpoint after filtering | < 1 GB/day (server), < 300 MB/day (workstation) | Ingestion statistics |
-| Searchable retention | 12 months minimum | ISM policies |
+| Searchable retention | 12 months minimum | ClickHouse TTL and tiered storage policies |
 | Agent offline autonomy | Full protection + 72 h of local buffer | Disconnection test |
 | Backend availability (distributed profile) | 99.9 % | Monitoring |
 | Event loss | 0 outside buffer saturation, alert on saturation | Sequence counters |
@@ -69,8 +69,8 @@ Each module is a standalone service: it installs alone (package, container or He
 
 | Module | Alone, it provides | Minimal storage | Combined, it gains |
 | --- | --- | --- | --- |
-| **EDR** (agents and management server) | Protection, telemetry and response on endpoints | Single-node OpenSearch, or export to a third-party SIEM | Multi-source correlation, AI, cases |
-| **Detection and SIEM** | Ingestion, normalisation, Sigma rules, hunting | OpenSearch | Agents, connectors, AI |
+| **EDR** (agents and management server) | Protection, telemetry and response on endpoints | Single-node ClickHouse, or export to a third-party SIEM | Multi-source correlation, AI, cases |
+| **Detection and SIEM** | Ingestion, normalisation, Sigma rules, hunting | ClickHouse | Agents, connectors, AI |
 | **Response and cases** | Cases, analysers, playbooks on alerts received through API or webhook | PostgreSQL | Every alert source |
 | **AI** | Investigation and verdict on alerts received through API | None (stateless) | Tuning of the other modules' configurations |
 | **Identity provider** | OIDC and SAML SSO, MFA | PostgreSQL | Access adapted to risk and device posture |
@@ -85,7 +85,7 @@ Each module is a standalone service: it installs alone (package, container or He
 
 **Shared lightweight core.** Every module ships the same core: REST API, CLI, local or OIDC authentication, audit log, declarative configuration engine. No central service is mandatory. When several modules coexist, a platform file declares their list; they then share authentication, the event bus and storage.
 
-**Standard outputs.** Every module exports its events in ECS format (syslog, OTLP, Kafka or webhook) to integrate with an existing SIEM such as Splunk, Sentinel, Elastic or Wazuh. One can therefore adopt a single module without replacing anything.
+**Standard outputs.** Every module exports its events in ECS format (syslog, OTLP, NATS JetStream or webhook) to integrate with an existing SIEM such as Splunk, Sentinel, Elastic or Wazuh. One can therefore adopt a single module without replacing anything.
 
 ### Deployment profiles
 
@@ -93,8 +93,8 @@ Three profiles share the same code; only the number of modules, the ingestion mo
 
 | Profile | Target | Components | Ingestion |
 | --- | --- | --- | --- |
-| **All-in-one** | Evaluation, SMEs up to 250 endpoints | One server (or VM), single-node OpenSearch, containerised backend services | Direct, with a disk buffer on the agent side and on the server side |
-| **Distributed** | Mid-sized companies, SOCs, MSSPs | Multi-node OpenSearch cluster, redundant backend services, Kafka | Through Kafka |
+| **All-in-one** | Evaluation, SMEs up to 250 endpoints | One server (or VM), single-node ClickHouse, containerised backend services | Direct, with a disk buffer on the agent side and on the server side |
+| **Distributed** | Mid-sized companies, SOCs, MSSPs | Multi-node ClickHouse cluster, redundant backend services, NATS JetStream | Through NATS JetStream |
 | **Single module** | Targeted need: only the EDR, the WAF, the DNS, the identity provider… | One container or package, with the module's minimal storage | Direct, with optional export to a third-party SIEM |
 
 Migration from the all-in-one profile to the distributed profile is tooled and does not require reinstalling the agents.
@@ -103,12 +103,12 @@ Migration from the all-in-one profile to the distributed profile is tooled and d
 
 Events flow down from the sources to detection; every AI proposal goes through the validator and the history before travelling back up, signed, to the agents.
 
-- **Decoupled ingestion.** In the distributed profile, an **Apache Kafka** buffer (Apache 2 licence) separates the agents from OpenSearch, absorbs peaks and prevents losses. Redpanda is not chosen by default because its community edition is under the BSL licence.
-- **Normalisation.** All events are converted into a single schema: **ECS** is chosen because it is the closest to existing Sigma backends and OpenSearch mappings. An OCSF export is available as output for customers who require it. Tetragon events are mapped to the Sigma Linux categories (`process_creation`, `file_event`, `network_connection`) so that the same rules apply to both systems.
-- **Stream detection.** A stream correlation engine, plugged into Kafka (or into the internal buffer in the all-in-one profile), handles time sequences, UEBA and Sigma correlation rules. OpenSearch offers no native equivalent to EQL sequences, and the Security Analytics correlation engine remains limited for these cases.
-- **Storage and search.** OpenSearch, with the **Security Analytics** plugin to run single-event Sigma rules.
-- **Retention.** ISM policies manage hot, warm and cold storage. **Searchable snapshots** on S3 (or S3-compatible: MinIO, Ceph) allow hunting over 12 months without keeping everything on fast disk.
-- **High availability (distributed profile).** OpenSearch cluster of at least 3 nodes, stateless backend services behind a load balancer, replicated configuration database, backup and restore tested automatically every week.
+- **Decoupled ingestion.** In the distributed profile, a **NATS JetStream** buffer (Apache 2.0 licence) separates the agents from ClickHouse, absorbs peaks and prevents losses.
+- **Normalisation.** All events are converted into a single schema: **ECS** is chosen because it is the closest to existing Sigma backends and to the ClickHouse table schemas. An OCSF export is available as output for customers who require it. Tetragon events are mapped to the Sigma Linux categories (`process_creation`, `file_event`, `network_connection`) so that the same rules apply to both systems.
+- **Stream detection.** A stream correlation engine, plugged into NATS JetStream (or into the internal buffer in the all-in-one profile), handles time sequences, UEBA and Sigma correlation rules. It also runs single-event Sigma rules, compiled to ClickHouse SQL by an in-house converter.
+- **Storage and search.** ClickHouse. Hunting is done in SQL (a KQL dialect is optional and experimental).
+- **Retention.** ClickHouse TTL rules and storage policies manage hot, warm and cold storage. Cold data on S3 (or S3-compatible: MinIO, Ceph) allows hunting over 12 months without keeping everything on fast disk.
+- **High availability (distributed profile).** ClickHouse cluster of at least 3 nodes, stateless backend services behind a load balancer, replicated configuration database, backup and restore tested automatically every week.
 - **AI.** Support for external APIs and local models (Ollama, vLLM). A dedicated queue smooths the load and enforces a budget (number of calls and cost per day).
 - **Communication with agents.** gRPC over mTLS, automatic certificate rotation, support for corporate HTTP(S) proxies, and fallback to TLS WebSocket when gRPC is filtered.
 
@@ -166,9 +166,9 @@ VDI environments (Citrix, Azure Virtual Desktop, VMware Horizon) and machines cl
 | --- | --- |
 | Telemetry | **Tetragon** (eBPF): processes, files, network, kernel modules, privilege escalations |
 | Behavioural blocking | Tetragon: SIGKILL and system call override before the action executes; BPF-LSM when the kernel allows it |
-| Antivirus | **ClamAV** (clamd + clamonacc through fanotify) and **YARA-X** |
+| File scanning | **YARA-X**, with threat intel hashes |
 | Network blocking | **nftables** |
-| Logs | journald / syslog through **Fluent Bit** or **Vector** |
+| Logs | journald / syslog through **Vector** |
 | Older kernel fallback | **Reduced eBPF**: Tetragon limited to the available probes, reactive kill by the agent |
 
 **Containers.** Tetragon links each event to its container and enriches it with the runtime metadata (containerd, Docker, CRI-O): image, container name, pod, Kubernetes namespace. This makes it possible to detect container escapes, privileged containers and container **drift** (execution of a binary absent from the original image).
@@ -313,10 +313,10 @@ Preventive blocking only exists for local mechanisms. A central detection trigge
 | App Control (denied hashes) | Windows endpoint | Preventive blocking | Yes |
 | Sysmon 27/28 | Windows endpoint | Preventive blocking | Yes |
 | Tetragon TracingPolicies (SIGKILL, override, BPF-LSM) | Linux endpoint | Preventive blocking | Yes |
-| Defender, ClamAV, YARA-X | Endpoint | Blocking or quarantine | Yes |
+| Defender, YARA-X | Endpoint | Blocking or quarantine | Yes |
 | Windows Firewall, nftables (IP IOCs) | Endpoint | Network blocking | Yes, cached list |
 | Lightweight agent rules (honeytokens, reactive kill) | Endpoint | Reactive kill | Yes |
-| Single-event Sigma (Security Analytics) | Central | Alert, then playbook | No |
+| Single-event Sigma (compiled to ClickHouse SQL) | Central | Alert, then playbook | No |
 | Correlation, sequences, UEBA (stream engine) | Central | Alert, then playbook | No |
 | Connectors (identity, cloud, SaaS, NDR) | Central | Alert, then playbook | No |
 
@@ -326,7 +326,7 @@ Preventive blocking only exists for local mechanisms. A central detection trigge
 - **Multi-source correlation and sequences.** Example: a phishing email, then a child process of Outlook, then a connection to a malicious IP, within a 30-minute window for the same user.
 - **Entity graph.** Links between users, hosts, IPs, domains, files and containers, for investigation and correlation.
 - **UEBA.** Behavioural baseline per user and per machine: unusual hours, abnormal volumes, first login to a machine. Learning period of at least 30 days, without alerts, before activation.
-- **Threat intel.** MISP, OpenCTI, STIX/TAXII and abuse.ch feeds, with IOC scoring and expiry. Free Defender does not handle custom IOCs; they are therefore enforced through App Control (hashes), the firewall and nftables (IPs), and the filtering DNS if the optional module is active.
+- **Threat intel.** Native, stored in ClickHouse: bulk feed connectors (STIX/TAXII 2.1, abuse.ch, CSV and JSON lists, CrowdSec blocklist, MISP-format feeds read as files), an IOC table with TTL expiry and scoring, ClickHouse dictionaries for ingest-time enrichment (`ip_trie` for IPs and CIDRs), scheduled SQL for retro-matching, and STIX/TAXII export for sharing. MISP and OpenCTI are optional connectors only. Free Defender does not handle custom IOCs; they are therefore enforced through App Control (hashes), the firewall and nftables (IPs), and the filtering DNS if the optional module is active.
 - **IOCs in App Control.** To avoid bloating the policies, hashes are grouped in a single supplemental deny policy, regenerated at most once per hour, with a size cap. Only recent, high-score IOCs go into it; the others stay in detection.
 - **MITRE ATT&CK coverage.** Map of detected, blocked and uncovered techniques, per system and per source.
 - **Blind spot detection.** A silent agent or sensor, a log source that stops reporting or an abnormal drop in volume raises an alert.
@@ -343,7 +343,7 @@ Preventive blocking only exists for local mechanisms. A central detection trigge
 
 **Attack paths.**
 
-- The platform builds an exposure graph from its own data: Active Directory group memberships and ACLs, open sessions, local administration rights (osquery), KEV vulnerabilities, SCA results, Internet-exposed services (perimeter connectors) and cloud IAM rights. The analysis is inspired by BloodHound Community Edition, which can be integrated as a collector.
+- The platform builds an exposure graph from its own data: Active Directory group memberships and ACLs, open sessions, local administration rights (osquery), KEV vulnerabilities, SCA results, Internet-exposed services (perimeter connectors) and cloud IAM rights. Attack paths are computed from this entity graph.
 - **Critical assets** tagged automatically (domain controllers, AD CS, backup servers, hypervisors, secrets vaults) or manually.
 - Computation of paths from likely entry points (user workstations, exposed or vulnerable machines) to critical assets, and highlighting of **choke points** where several paths cross.
 - Recommendations ranked by number of paths closed. Paths feed the risk score, vulnerability prioritisation and the GRC section.
@@ -384,7 +384,7 @@ Posture says how the directory is configured; audit says who changed it, when an
 **Cloud and Kubernetes posture.**
 
 - **Cloud**: scheduled assessment of AWS, Azure and GCP account configuration with **Prowler**: public storage, overly broad IAM roles, old access keys, disabled logging, missing encryption, security groups open to the Internet.
-- **Kubernetes**: checking of clusters with **kube-bench** (CIS recommendations) and of deployed manifests: privileged containers, no resource limits, overly powerful service accounts, plaintext secrets, no network policies.
+- **Kubernetes**: checking of clusters with **Trivy** (CIS recommendations) and of deployed manifests: privileged containers, no resource limits, overly powerful service accounts, plaintext secrets, no network policies.
 - **Container images**: analysis of vulnerabilities and embedded secrets with **Trivy**, in registries and on running images, cross-checked with Tetragon to prioritise images that are actually running and exposed.
 - **Infrastructure code**: the same checks apply to Terraform, OpenTofu, Helm and Kubernetes files before deployment, in the customer's continuous integration.
 - The results feed attack paths, the risk score and GRC.
@@ -393,7 +393,7 @@ Posture says how the directory is configured; audit says who changed it, when an
 
 - **Retroactive IOC matching.** Every new IOC (hash, IP, domain, URL) is automatically searched for across the whole retained history, up to 12 months. A domain declared malicious today thus reveals every device that contacted it before.
 - **Emerging threat sheets.** For each tracked campaign (ransomware, exploited vulnerability, actor), a sheet shows: IOC matches in the history, detection rules present or missing, vulnerable or misconfigured assets involved, and recommended actions. Coverage is checked by the detection tests.
-- **Grouping by campaign or actor.** Alerts linked to the same campaign, malware or actor (according to the MISP or OpenCTI threat intel associations) are merged into a single incident, more reliable than the alerts taken in isolation.
+- **Grouping by campaign or actor.** Alerts linked to the same campaign, malware or actor (according to the threat intel associations) are merged into a single incident, more reliable than the alerts taken in isolation.
 
 ### Enrichment: at ingestion or at alert time
 
@@ -401,7 +401,7 @@ When enrichment happens is chosen per source and per field type, in the declarat
 
 |  | At ingestion (every log) | At alert time |
 | --- | --- | --- |
-| **Usable sources** | Only threat intel **stored in the platform**: MISP, OpenCTI, STIX/TAXII and abuse.ch feeds synchronised in bulk, internal lists, CMDB, geolocation and ASN in a local database | Local database, plus external analysers queried on demand (VirusTotal, AbuseIPDB, Shodan…) |
+| **Usable sources** | Only threat intel **stored in the platform**: STIX/TAXII, abuse.ch, CrowdSec blocklist and other feeds synchronised in bulk into ClickHouse, internal lists, CMDB, geolocation and ASN in a local database | Local database, plus external analysers queried on demand (VirusTotal, AbuseIPDB, Shodan…) |
 | **Network calls** | None: matching is done in memory, in the pipeline | API calls one at a time, with cache, quotas and TLP and PAP rules |
 | **What you gain** | Every event carries its matches (ECS `threat.*` fields): you can search, filter and hunt on threat intel across the whole history | Rich, up-to-date enrichment, at no cost on log volume |
 | **Limit** | Enrichment reflects the IOC state at ingestion time; IOCs that arrive later are covered by retroactive matching | Logs that do not trigger an alert are not enriched |
@@ -412,7 +412,7 @@ When enrichment happens is chosen per source and per field type, in the declarat
 
 ### Continuous testing
 
-Atomic Red Team and Caldera automatically check that detections work, in particular after every tuning. Tests run on **dedicated test endpoints**, representative of each role, and never on production machines. Only tests marked harmless may be allowed in production, by explicit decision. A tuning that makes a test fail is rolled back automatically.
+Atomic Red Team automatically checks that detections work, in particular after every tuning. Tests run on **dedicated test endpoints**, representative of each role, and never on production machines. Only tests marked harmless may be allowed in production, by explicit decision. A tuning that makes a test fail is rolled back automatically.
 
 ## 8. Role of AI and guardrails
 
@@ -423,7 +423,7 @@ The AI investigates, explains and proposes; it only acts through bounded tools, 
 - The AI analyses the endpoint through osquery: services, installed software, probable role (domain controller, SQL server, developer workstation, Kubernetes host…), presence of a third-party antivirus, backup and indexing tools.
 - It starts from **deterministic reference configurations** per role (for example sysmon-modular for Sysmon) and proposes adjustments:
   - **Windows:** Sysmon configuration, Defender exclusions, ASR rule mode (audit or block);
-  - **Linux:** Tetragon TracingPolicies, clamonacc scope (for example `/tmp`, `/home`, `/var/www`, downloads), exclusions;
+  - **Linux:** Tetragon TracingPolicies, YARA-X scan scope (for example `/tmp`, `/home`, `/var/www`, downloads), exclusions;
   - **Both:** FIM exclusions.
 - ASR rules start in **audit mode for 14 days**, then switch to block mode rule by rule if no recurring false positive is observed.
 
@@ -444,7 +444,7 @@ An exclusion is only proposed if all of the following conditions are met:
 3. the original alert is **neither critical nor linked to a honeytoken**;
 4. the binary involved is **signed by a trusted publisher**, or its hash is known and stable.
 
-The exclusion is then built with the **narrowest possible scope**: hash rather than path, path rather than name, one endpoint rather than a group, a precise command line rather than a whole process. It is applied in the right place (Sigma rule, Sysmon, Defender, Tetragon or ClamAV) and carries a **lifetime of 90 days**, renewable after review.
+The exclusion is then built with the **narrowest possible scope**: hash rather than path, path rather than name, one endpoint rather than a group, a precise command line rather than a whole process. It is applied in the right place (Sigma rule, Sysmon, Defender, Tetragon or YARA-X) and carries a **lifetime of 90 days**, renewable after review.
 
 ### Policy validator (non-AI)
 
@@ -489,7 +489,7 @@ These three functions always produce a visible and verifiable result (query, par
 
 **Assisted import of log sources.**
 
-- The user provides a log sample from an unsupported source; the AI proposes a parser (Vector or Fluent Bit) and the mapping to ECS.
+- The user provides a log sample from an unsupported source; the AI proposes a parser (Vector) and the mapping to ECS.
 - The parser is validated deterministically on the sample (parse rate, mandatory fields), reviewed by a human, then versioned like any configuration.
 
 **Rule migration from other SIEMs.**
@@ -501,7 +501,7 @@ These three functions always produce a visible and verifiable result (query, par
 ## 9. Incident response and forensics
 
 - **Incident management.** Alert grouping, timeline, comments, assignment, status, severity, response SLA per severity.
-- **Remote forensic collection.** Memory dump and artefacts: MFT, prefetch, Amcache, logs, shell histories. Integration of **Velociraptor** (AGPL licence) as an optional collector rather than a reimplementation. Every collection is hashed and timestamped to preserve the chain of custody.
+- **Remote forensic collection.** Memory dump and artefacts: MFT, prefetch, Amcache, logs, shell histories. Performed by the Ostyr agent and osquery. Every collection is hashed and timestamped to preserve the chain of custody.
 - **Manual and automated actions.** Isolation, kill, quarantine, account disabling, network blocking, all reversible from the incident.
 - **Remote shell.** Reserved for a dedicated role, subject to MFA at every opening, fully recorded (commands and outputs), and subject to dual approval on critical assets.
 - **Incident report.** Generated by the AI then reviewed by an analyst: summary, timeline, impact, actions taken, recommendations. PDF and Markdown export.
@@ -514,15 +514,15 @@ These three functions always produce a visible and verifiable result (query, par
 - **Observables** with TLP and PAP marking, IOC status, source, and automatic detection of observables **already seen** in other cases.
 - **Merging and linking of cases** related to the same threat, suggested by overlapping observables.
 - **Evidence register** linked to the chain of custody of the forensic collection.
-- **MISP exchange**: creating a case from a MISP event, exporting a case to one or more MISP servers.
+- **Threat intel exchange**: creating a case from a STIX bundle, exporting a case as STIX/TAXII. An optional MISP connector adds exchange with MISP servers.
 - **Sharing between tenants** (MSSP): a case, a task or an observable can be shared with another tenant according to explicit rules.
 
 ### Observable analysers
 
 - One-click analysis, or automatic analysis during the AI investigation, of hashes, IPs, domains, URLs, email addresses and files.
 - **Local analysers:** internal threat intel, platform history, YARA-X, entity graph.
-- **External analysers** (API key provided by the user): VirusTotal, AbuseIPDB, URLhaus, Shodan, among others. Compatibility with the Cortex catalogue of analysers and responders.
-- Self-hosted **sandbox** (CAPE) for detonating suspicious files.
+- **External analysers** (API key provided by the user): VirusTotal, AbuseIPDB, URLhaus, Shodan, among others. A small set of in-house analysers ships with the platform.
+- Optional connector to an external **sandbox** (for example CAPE) for detonating suspicious files.
 - **Sharing rules:** TLP and PAP marking decides what may leave. A TLP:RED observable or a file never leaves the platform without explicit authorisation. Results are cached.
 
 ### Automatic containment of compromised accounts
@@ -538,7 +538,7 @@ These three functions always produce a visible and verifiable result (query, par
 ### Fleet-wide forensics
 
 - **Forensic hunts**: the same artefact (prefetch, Amcache, scheduled tasks, shell history, recent files) is collected in one go across the whole fleet or a filtered group (system, tag, role), with results viewable as they arrive.
-- **Declarative artefacts**: each collection is a versioned, configurable and tested file; compatible with the Velociraptor artefact format to reuse the existing library.
+- **Declarative artefacts**: each collection is a versioned, configurable and tested file; written in an in-house artefact format, run by the Ostyr agent and osquery.
 - **Offline collector**: generation of a standalone, signed executable, to collect on a machine without an agent or cut off from the network. Results are encrypted, then imported into the case with their hash.
 
 ### Built-in analysis tools
@@ -637,7 +637,7 @@ The following are versioned the Git way, in an exportable internal repository:
 
 - Sigma and YARA rules;
 - Sysmon configurations, Defender settings (exclusions, ASR), App Control policies;
-- Tetragon TracingPolicies and ClamAV configurations;
+- Tetragon TracingPolicies and YARA-X configurations;
 - exclusions, the honeytoken table, playbooks and circuit breakers;
 - the thresholds and configuration of the policy validator.
 
@@ -683,7 +683,7 @@ A platform that can run commands on every endpoint is a prime target: compromisi
 | Theft of connector secrets | Secrets vault (Vault or OpenBao), encryption at rest, minimal rights per connector, rotation |
 | Leak between tenants (MSSP) | Indexes, encryption keys and roles separated per tenant, automated isolation tests |
 | Manipulation of the AI | Guardrails of section 8 |
-| Exposed data | TLS encryption everywhere, encryption at rest of OpenSearch and snapshots |
+| Exposed data | TLS encryption everywhere, encryption at rest of ClickHouse and backups |
 | Tampering with the audit trail | Append-only audit log, hash-chained, exportable to a third-party SIEM |
 | Misuse of the RMM | Only signed scripts from Git, dual approval of mass executions, recorded sessions, user consent for remote control |
 
@@ -705,7 +705,7 @@ The Rust code follows the project coding rules, written in English like all the 
 | Section | Content |
 | --- | --- |
 | **Dashboard** | Protection state, effective mode of each endpoint (full, reduced, degraded), AI mode, blind spots |
-| **Hunting** | OpenSearch queries (PPL/DQL), live osquery, entity graph, per-entity timeline, natural language hunting |
+| **Hunting** | ClickHouse SQL queries (optional experimental KQL dialect), live osquery, entity graph, per-entity timeline, natural language hunting |
 | **Alerts** | Alert queue sorted by risk score, AI investigation, verdict and confidence, cases and case templates, observables and analysers, response actions, ransomware recovery, forensic hunts, CyberChef, reported phishing, out-of-band crisis room, reports |
 | **Rules** | Sigma, YARA, Sysmon, ASR, App Control, TracingPolicies, FIM, exclusions (with expiry), MITRE coverage, continuous testing, migration from other SIEMs, history |
 | **AI review** | Pending suggestions, sample of verdicts to review, quality statistics, validator refusals |
@@ -770,11 +770,11 @@ The GRC section turns the data the platform already collects into compliance evi
 | --- | --- | --- |
 | Anti-malware protection | State of agents and sensors | Share of endpoints in full protection mode |
 | Vulnerability management | osquery inventory, CVE, CISA KEV | Average time to fix KEV vulnerabilities |
-| Logging and retention | Ingestion, ISM policies | Active sources, effective retention against required retention |
+| Logging and retention | Ingestion, ClickHouse TTL rules | Active sources, effective retention against required retention |
 | Incident management | Incidents | Detection, response and closure times; notifications sent on time |
 | Privileged access | Identity connectors | Privileged accounts without MFA, inactive accounts |
 | Backups | Restore tests | Date of the last successful restore, immutability enabled, critical servers without a recent backup |
-| Detection effectiveness | Atomic Red Team and Caldera tests | Test success rate, MITRE coverage |
+| Detection effectiveness | Atomic Red Team tests | Test success rate, MITRE coverage |
 | System hardening | Security configuration assessment (SCA) | Hardening score per endpoint, failed CIS and ANSSI controls |
 | Patch management | Patch management, osquery inventory | Share of patches applied on time, by severity |
 | Workstation encryption | Disk encryption | Share of encrypted workstations, escrowed keys |
@@ -808,7 +808,7 @@ These modules are **disabled by default** and install separately, alone or with 
 
 ### DNS module
 
-- Filtering resolver (Unbound or CoreDNS with RPZ) fed by threat intel.
+- Filtering resolver (**Unbound** with RPZ zones generated from the ClickHouse IOC table) fed by threat intel.
 - Sinkhole of malicious domains, with an information page for the user.
 - Detection of DGAs and DNS tunnelling.
 - **Transparent mode available**: the module can sit as a relay in front of existing resolvers (Active Directory in particular) rather than replacing them.
@@ -824,7 +824,10 @@ These modules are **disabled by default** and install separately, alone or with 
 
 ### WAF and reverse proxy module
 
-- **Coraza** with the **OWASP Core Rule Set**, built into the module's reverse proxy (based on **Caddy**), or as a module of an existing proxy (Envoy).
+- **CrowdSec AppSec** in front of **Caddy**, the only supported reverse proxy (Traefik and HAProxy are not supported). Coraza and the **OWASP Core Rule Set** run inside CrowdSec.
+- **CrowdSec collections**: `crowdsecurity/appsec-generic-rules`, `crowdsecurity/appsec-crs-inband`, `crowdsecurity/appsec-virtual-patching`, `crowdsecurity/base-http-scenarios`, `crowdsecurity/http-cve`, `crowdsecurity/http-dos`, `crowdsecurity/http-extended-context`, `crowdsecurity/caddy`, `crowdsecurity/whitelist-good-actors` and `ostyr/zitadel` (to be written: parser and brute-force scenario).
+- **AppSec configs**: `crowdsecurity/appsec-default` (custom version with `pre_eval` exceptions) and `crowdsecurity/crs-inband`.
+- **Community blocklist sharing** is optional and off in air-gapped mode.
 - Starts in **detection mode** for 14 days, then switches to blocking with a CRS paranoia level of 1.
 - Tuning by the AI subject to the same validator and the same exclusion rules as endpoints (section 8).
 
@@ -842,7 +845,7 @@ These modules are **disabled by default** and install separately, alone or with 
 
 - **Zeek** (protocol metadata) and **Suricata** (signatures) sensors, on a mirror port or a TAP, deployed as a container or an appliance.
 - **Full packet capture** by Suricata, in a ring buffer on local disk with a configurable retention period (for example 7 days). From an alert or an incident, extraction of the exact PCAP flow, downloadable or viewable online.
-- **Network file analysis**: files extracted from traffic by Zeek and Suricata are analysed by **Strelka** (YARA, metadata, nested archives) and then, if needed, by the sandbox.
+- **Network file analysis**: files extracted from traffic by Zeek and Suricata are scanned by **YARA-X** and then, if needed, by the sandbox.
 - The module sees agentless devices (printers, IoT, OT) and lateral movement; its events feed correlation, network discovery and the risk score.
 
 ### RMM module
@@ -855,7 +858,7 @@ The RMM module (remote monitoring and management) uses the same agent as the EDR
 - **Device configuration**: system settings, registry keys, services, scheduled tasks and local accounts described as desired state, with automatic drift correction.
 - **Remote control**:
   - **workstations**: screen sharing through the agent (WebRTC), with explicit user consent and a visible banner throughout the session, except for a declared exception for machines without a user;
-  - **servers**: RDP, SSH and VNC access from the browser through an **Apache Guacamole** gateway, without exposing these ports or distributing credentials.
+  - **servers**: RDP, SSH and VNC access from the browser through **RustDesk**, without exposing these ports or distributing credentials.
 - **Remote tools**: file explorer, process and service manager, event viewer, terminal, without full remote control.
 - **Power management**: Wake-on-LAN, scheduled restart and shutdown, respecting maintenance windows.
 - **MSP use**: per-customer views, activity and monitoring reports per tenant.
@@ -885,7 +888,7 @@ The CMDB is the reference for assets and their relationships. It fills itself au
 
 ## 15. Identity provider (OIDC and SAML)
 
-The platform ships an identity provider based on **Keycloak** (Apache 2.0 licence). It authenticates the platform's users and can optionally serve as the identity provider for all of the organisation's applications. Its specific value: access is decided taking into account what the XDR knows about the user's risk and the state of their device.
+The platform ships an identity provider based on **Zitadel** (AGPL licence, written in Go, multi-tenant, OIDC and SAML as identity provider, SCIM). It authenticates the platform's users and can optionally serve as the identity provider for all of the organisation's applications. Limit: Zitadel has no upstream SAML federation; Entra ID and Google federate through OIDC. Its specific value: access is decided taking into account what the XDR knows about the user's risk and the state of their device.
 
 | Use | Activation | For whom |
 | --- | --- | --- |
@@ -919,7 +922,7 @@ The platform ships an identity provider based on **Keycloak** (Apache 2.0 licenc
 - Local **break-glass accounts**, stored offline, to access the platform even if the identity provider is unavailable.
 - Token **signing keys** stored in the secrets vault (section 12), with automatic rotation.
 - **High availability mandatory** when it serves as the organisation's identity provider: at least 2 instances and a replicated database, because any outage blocks access to applications.
-- Keycloak **updates** deployed in rings, like the other components.
+- Zitadel **updates** deployed in rings, like the other components.
 
 ## 16. 24/7 operations and foundation
 
@@ -928,7 +931,7 @@ The platform ships an identity provider based on **Keycloak** (Apache 2.0 licenc
 - **Multi-tenant** for MSSPs, with the isolation described in section 12.
 - **Platform audit**: who viewed, changed or ran what, in a tamper-proof log.
 - **Centralised update** of agents, sensors, rules and signatures, in rings (pilot, then general), with automatic halt of the rollout if the error rate of the pilot ring exceeds a threshold.
-- **Monitoring of the platform itself**: Prometheus metrics, OpenSearch and Kafka health, ingestion lag, AI queue.
+- **Monitoring of the platform itself**: Prometheus metrics, ClickHouse and NATS JetStream health, ingestion lag, AI queue.
 - **Backup and restore** of the configuration and indexes, tested automatically.
 
 ## 17. Compliance, privacy and licences
@@ -951,18 +954,18 @@ Licences to be checked at every release; state known at the time of writing:
 
 | Component | Licence | Consequence |
 | --- | --- | --- |
-| OpenSearch, Kafka, Tetragon, Coraza, OWASP CRS, CoreDNS, Fluent Bit, Caldera, vLLM, BloodHound CE, Keycloak, CyberChef, Strelka, Caddy, Prowler, kube-bench, Trivy, Apache Guacamole | Apache 2.0 | No particular constraint |
+| ClickHouse, NATS JetStream, Tetragon, vLLM, CyberChef, Caddy, Prowler, Trivy | Apache 2.0 | No particular constraint |
 | osquery | Apache 2.0 / GPLv2 (dual licence) | No particular constraint |
 | YARA-X, Zeek, Unbound, OpenCanary | BSD | No particular constraint |
-| Atomic Red Team, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei) | MIT | No particular constraint |
+| Atomic Red Team, CrowdSec, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei) | MIT | No particular constraint |
 | Kea, Vector, OpenBao, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
-| ClamAV, Suricata, USBGuard | GPLv2 | Run as separate processes, not linked to the platform code |
-| Velociraptor, MinIO, Cortex | AGPLv3 | Optional integration, as a separate process |
+| Suricata, USBGuard | GPLv2 | Run as separate processes, not linked to the platform code |
+| Zitadel, RustDesk, MinIO | AGPL-3.0 | Optional integration, as a separate process |
 | Sysmon | Sysinternals licence (freeware) | Redistribution forbidden: downloaded from Microsoft |
 | Microsoft Defender | Proprietary, included in Windows | Advanced features (custom IOCs, ASR reports) reserved for Defender for Endpoint licences |
-| Redpanda, HashiCorp Vault | BSL | Not chosen by default |
+| HashiCorp Vault | BSL | Not chosen by default |
+| Packer | BSL | Development tool only, never distributed, so the licence is acceptable; builds the KVM lab images, Windows included |
 | CIS Benchmarks content | CIS licence (CC BY-NC-SA 4.0) | SCA policies written by the project, quoting only CIS recommendation numbers |
-| CAPE (sandbox) | To be checked | Deployed separately, as an option |
 
 **Platform licence.** Choice: **Apache 2.0** for the agent (easier adoption, integration into other tools) and **AGPLv3** for the server (protection against a proprietary SaaS takeover). Decision made, contributions under DCO (section 19).
 
@@ -974,14 +977,14 @@ Licences to be checked at every release; state known at the time of writing:
 - **Free Defender does not handle custom IOCs.** They are enforced by other means (section 7).
 - **Tamper Protection.** When it is active, some Defender settings are locked. It is necessary to test precisely what the agent can change through PowerShell (`Set-MpPreference`) depending on whether the device is managed by Intune, by GPO or unmanaged, and to document the behaviour in each case.
 - **Third-party antivirus.** It switches Defender to passive mode. Its presence is detected at onboarding and the endpoint is displayed with reduced protection.
-- **Sysmon volume.** It depends entirely on the configuration. An overly broad configuration overloads the endpoint and OpenSearch: it is the first thing to tune, starting from a proven baseline.
+- **Sysmon volume.** It depends entirely on the configuration. An overly broad configuration overloads the endpoint and ClickHouse: it is the first thing to tune, starting from a proven baseline.
 - **App Control.** A badly built policy can prevent legitimate applications from starting. Every deny policy is first deployed in audit mode on the pilot ring.
 
 ### Linux
 
 - **Blocking depends on the kernel.** Tetragon's SIGKILL works on most recent kernels. System call override requires `CONFIG_BPF_KPROBE_OVERRIDE`. BPF-LSM requires kernel 5.7 or later with `lsm=bpf` at boot, which is not the default on several distributions. The agent chooses the best available mode (section 5).
 - **Older kernels.** Below 5.4, the reduced mode (partial eBPF, reactive blocking) is clearly reported. No non-eBPF sensor is used on Linux.
-- **On-access ClamAV scanning is resource-hungry.** clamonacc is limited to the sensitive directories defined by the machine's role, and its consumption is monitored.
+- **On-access YARA-X scanning is resource-hungry.** It is limited to the sensitive directories defined by the machine's role, and its consumption is monitored.
 - **Immutable containers and Kubernetes nodes.** On distributions without a classic package manager (Talos, Bottlerocket, Flatcar), the agent is deployed as a DaemonSet and FIM relies on the reference image.
 
 ### General
@@ -1008,7 +1011,7 @@ Licences to be checked at every release; state known at the time of writing:
 | Question | Decision | Why, and when to revisit it |
 | --- | --- | --- |
 | Platform licence | **Apache 2.0 for the agent, AGPLv3 for the server.** Contributions under DCO, without a CLA. | The agent is installed at customers' sites and integrates with other tools: a permissive licence removes barriers. The AGPL prevents a vendor from reselling the server as closed SaaS without contributing its changes back. The DCO reassures contributors: no relicensing is possible. |
-| Stream correlation engine | **Lightweight in-house engine in Rust**, built into the backend services, reading Kafka or the internal buffer, with persistent on-disk state and checkpoints. It implements Sigma correlation rules (event count, value count, temporal sequences). | Flink requires a JVM and a dedicated cluster, incompatible with the all-in-one profile, and would mean maintaining two engines. To be revisited if the need exceeds 50,000 events/s or requires complex windows: Flink would then become an option of the distributed profile. |
+| Stream correlation engine | **Lightweight in-house engine in Rust**, built into the backend services, reading NATS JetStream or the internal buffer, with persistent on-disk state and checkpoints. It implements Sigma correlation rules (event count, value count, temporal sequences). | Flink requires a JVM and a dedicated cluster, incompatible with the all-in-one profile, and would mean maintaining two engines. To be revisited if the need exceeds 50,000 events/s or requires complex windows: Flink would then become an option of the distributed profile. |
 | Language of the agent and services | **Rust**, for the agent as well as the backend services (stream engine, relay, shared module core). Third-party sensors stay in their original language (Tetragon in Go, osquery in C++) and are driven through their APIs. | No garbage collector: predictable reaction time for the reactive kill and a small memory footprint, in line with the budget of section 3 and the lightweight modules. Memory safety, essential for an agent running with the highest privileges. Suitable ecosystem: **aya** to write agent-specific eBPF probes in Rust alongside Tetragon, tonic for gRPC, windows-rs for the Windows APIs, YARA-X embedded directly as a library, and a single static binary that is easy to distribute. Trade-off: more demanding development and a smaller contributor pool than Go. |
 | Tamper Protection | **Never disable it.** On unmanaged devices, the agent drives exclusions, ASR, Controlled Folder Access and Network Protection through `Set-MpPreference`. On devices managed by Intune or GPO, the agent switches to **read-only** on Defender and produces the configuration to apply in the management tool. | Tamper Protection mainly protects real-time protection, cloud protection and behaviour monitoring; exclusions are only locked when they are managed by Intune. Writing locally over a central policy would create conflicts. A test bench before going into production is still needed to confirm each setting. |
 | AI evaluation thresholds | **Recall ≥ 90 % on malicious alerts, and ≤ 1 % of malicious alerts classified as benign or false positive.** Corpus of at least 500 alerts. | The major risk is not one alert too many but an attack classified as benign, which can lead to an exclusion. Corpus built from public datasets (OTRF Security-Datasets, Splunk attack\_data, EVTX-ATTACK-SAMPLES), Atomic Red Team replays on the test endpoints and benign alerts labelled by the pilots. Thresholds revisited after the first deployments. |
