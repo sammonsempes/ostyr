@@ -228,9 +228,24 @@ async fn bad_credentials_look_alike_and_lock_out() -> TestResult {
         )
         .await?;
     }
+    for _ in 0..FAILURES_BEFORE_LOCK {
+        send(
+            &fx.router,
+            request("POST", "/auth/login", None, login_body("nobody", "still wrong password"))?,
+        )
+        .await?;
+    }
     let locked = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
-    assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(body_json(locked).await?.pointer("/error/code"), Some(&json!("too_many_requests")));
+    let unknown_after = send(&fx.router, request("POST", "/auth/login", None, login_body("nobody", PASSWORD))?).await?;
+    assert_eq!(locked.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown_after.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(locked).await?, wrong_body);
+    assert_eq!(body_json(unknown_after).await?, wrong_body);
+    let locked_records = audit_lines(&fx)?
+        .into_iter()
+        .filter(|line| line.pointer("/parameters/reason") == Some(&json!("locked")))
+        .count();
+    assert_eq!(locked_records, 1);
     Ok(())
 }
 
@@ -569,6 +584,9 @@ const STALE_ENTRIES: usize = 5;
 
 
 const RECENT_SECONDS: i64 = 10;
+
+
+const SEQUENCE_LENGTH: usize = 21;
 
 
 fn failing_verify(_password: &str, _stored: &str) -> Result<bool, AuthError> {
@@ -941,7 +959,7 @@ fn locked_for_a_while() -> Attempts {
 
 
 #[tokio::test]
-async fn a_locked_source_or_account_is_refused_without_hashing() -> TestResult {
+async fn a_locked_source_is_refused_without_hashing_but_an_account_lock_is_not() -> TestResult {
     let fx = fixture_with(panicking_hash)?;
     let mut request = login_request(READER);
     request.source = "203.0.113.50".to_owned();
@@ -959,7 +977,7 @@ async fn a_locked_source_or_account_is_refused_without_hashing() -> TestResult {
         auth.attempts.clear();
         auth.attempts.insert(format!("account:{READER}"), locked_for_a_while());
     }
-    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    assert!(admit_login(&fx.state, "id-admit", &request).is_ok());
     Ok(())
 }
 
@@ -1037,7 +1055,33 @@ async fn an_existing_account_needs_room_for_both_of_its_failure_keys() -> TestRe
     assert!(matches!(admit_login(&fx.state, "id-room", &known), Err(ApiError::TooManyRequests)));
     let mut unknown = login_request("stranger");
     unknown.source = "198.51.100.1".to_owned();
-    assert!(admit_login(&fx.state, "id-room", &unknown).is_ok());
+    assert!(matches!(admit_login(&fx.state, "id-room", &unknown), Err(ApiError::TooManyRequests)));
+    Ok(())
+}
+
+
+async fn status_sequence(router: &axum::Router, offset: u8, username: &str) -> Result<Vec<StatusCode>, TestError> {
+    let mut statuses = Vec::new();
+    for _ in 0..SEQUENCE_LENGTH {
+        let body = login_body(username, "wrong password here");
+        statuses.push(
+            send_from(router, client(offset), request("POST", "/auth/login", None, body)?)
+                .await?
+                .status(),
+        );
+    }
+    Ok(statuses)
+}
+
+
+#[tokio::test]
+async fn a_real_name_and_an_unknown_name_give_identical_status_sequences_from_one_source() -> TestResult {
+    let fx = fixture()?;
+    let real = status_sequence(&fx.router, 1, READER).await?;
+    let unknown = status_sequence(&fx.router, OTHER_SOURCE, "nobody").await?;
+    assert_eq!(real, unknown);
+    assert_eq!(real.last(), Some(&StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(real.first(), Some(&StatusCode::UNAUTHORIZED));
     Ok(())
 }
 
@@ -1069,14 +1113,14 @@ async fn in_flight_logins_for_an_existing_account_cannot_grow_the_table_past_its
 
 #[tokio::test]
 async fn a_login_refused_for_a_lock_is_audited_as_denied_locked() -> TestResult {
-    let fx = fixture_with(panicking_hash)?;
+    let fx = fixture()?;
     fx.state
         .auth
         .lock()
         .map_err(|_| "poisoned")?
         .attempts
         .insert(format!("account:{READER}"), locked_for_a_while());
-    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::UNAUTHORIZED);
     let denied: Vec<serde_json::Value> = audit_lines(&fx)?
         .into_iter()
         .filter(|line| line.get("action") == Some(&json!("auth.login")))
