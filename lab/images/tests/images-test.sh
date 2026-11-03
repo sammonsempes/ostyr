@@ -96,6 +96,18 @@ if [[ "${1:-}" != "--static" ]]; then
     check "dc Defender real-time protection on" grep -q 'True' <(ssh_windows "$dc_user" "$dc_address" '(Get-MpComputerStatus).RealTimeProtectionEnabled')
     check "Sysmon not installed on the workstation" grep -q 'absent' <(ssh_windows "$ws_user" "$ws_address" 'if (Get-Service Sysmon64 -ErrorAction SilentlyContinue) {"present"} else {"absent"}')
     "$LAB_DIR/down.sh" "$TEST_TASK"
+
+    export LAB_PROFILE="oidc-pair"
+    check "build zitadel" "$IMAGES_DIR/build.sh" zitadel
+    "$LAB_DIR/up.sh" "$TEST_TASK"
+    read -r _ server_user server_address < <(awk '$1 == "server"' "$lab_state/vms.txt")
+    check "server reads the discovery document with the lab CA" grep -q 'https://zitadel.lab.test' < <(ssh -n -i "$lab_state/id_ed25519" -o BatchMode=yes \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$server_user@$server_address" \
+        'curl -s --cacert /etc/ostyr-lab/ca.pem https://zitadel.lab.test/.well-known/openid-configuration')
+    for user_kind in mapped unmapped; do
+        check "oidc-login.sh gets a code for the $user_kind user" grep -q '^code=' < <("$LAB_DIR/tests/oidc-login.sh" "$TEST_TASK" "$user_kind")
+    done
+    "$LAB_DIR/down.sh" "$TEST_TASK"
 fi
 
 exit "$((failures > 0))"
