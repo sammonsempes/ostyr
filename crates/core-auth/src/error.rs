@@ -45,6 +45,8 @@ pub enum AuthError {
     InvalidUsername,
     #[error("account already exists")]
     AccountExists,
+    #[error("the store already holds accounts")]
+    AlreadyBootstrapped,
     #[error("no such account")]
     NoSuchAccount,
     #[error("unknown role `{0}`")]

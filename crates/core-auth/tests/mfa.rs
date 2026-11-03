@@ -82,12 +82,13 @@ fn enrolment_with(hashes: Vec<String>) -> TotpEnrolment {
 
 
 #[test]
-fn rfc_6238_vectors() {
+fn rfc_6238_vectors() -> TestResult {
     assert_eq!(code_for_step(RFC_SECRET, RFC_STEP_59), "287082");
     assert_eq!(
         code_for_step(RFC_SECRET, u64::try_from(RFC_TIME_LATER).map_or(0, |time| time / TOTP_STEP_SECONDS)),
         "081804"
     );
+    Ok(())
 }
 
 
@@ -175,7 +176,7 @@ fn secrets_and_backup_codes_are_generated() -> TestResult {
 
 
 #[test]
-fn backup_codes_work_once() {
+fn backup_codes_work_once() -> TestResult {
     let hashes = vec![hash_backup_code("AAAA"), hash_backup_code("BBBB"), hash_backup_code("CCCC")];
     let mut enrolment = enrolment_with(hashes);
     assert!(!consume_backup_code(&mut enrolment, "ZZZZ"));
@@ -183,14 +184,16 @@ fn backup_codes_work_once() {
     assert!(consume_backup_code(&mut enrolment, "BBBB"));
     assert_eq!(enrolment.backup_code_hashes, vec![hash_backup_code("AAAA"), hash_backup_code("CCCC")]);
     assert!(!consume_backup_code(&mut enrolment, "BBBB"));
+    Ok(())
 }
 
 
 #[test]
-fn backup_code_hash_hides_the_code() {
+fn backup_code_hash_hides_the_code() -> TestResult {
     let hash = hash_backup_code("AAAA");
     assert!(!hash.contains("AAAA"));
     assert_eq!(hash, hash_backup_code("AAAA"));
+    Ok(())
 }
 
 
@@ -217,15 +220,16 @@ fn sealed_secret_is_bound_to_key_and_account() -> TestResult {
 
 
 #[test]
-fn sealed_secret_rejects_garbage() {
+fn sealed_secret_rejects_garbage() -> TestResult {
     let key = key_of(KEY_BYTES);
     assert!(matches!(open_secret(&key, "alice", "!!!"), Err(AuthError::Decrypt)));
     assert!(matches!(open_secret(&key, "alice", "AAAA"), Err(AuthError::Decrypt)));
+    Ok(())
 }
 
 
 #[test]
-fn key_length_and_random_failures_are_reported() {
+fn key_length_and_random_failures_are_reported() -> TestResult {
     let short = key_of(KEY_BYTES - 1);
     assert!(matches!(seal_secret(&short, "alice", RFC_SECRET, os_random), Err(AuthError::InvalidKey)));
     assert!(matches!(open_secret(&short, "alice", "AAAA"), Err(AuthError::InvalidKey)));
@@ -233,4 +237,5 @@ fn key_length_and_random_failures_are_reported() {
         seal_secret(&key_of(KEY_BYTES), "alice", RFC_SECRET, failing_random),
         Err(AuthError::Random(_))
     ));
+    Ok(())
 }

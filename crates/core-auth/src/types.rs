@@ -1,3 +1,4 @@
+use crate::error::AuthError;
 use crate::model::{Account, Attempts, Session};
 use secrecy::SecretSlice;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -29,3 +30,9 @@ pub type RoleCatalog = BTreeMap<String, BTreeSet<String>>;
 
 
 pub type CompromisedSet = HashSet<String>;
+
+
+pub type VerifyFn<'a> = &'a dyn Fn(&str, &str) -> Result<bool, AuthError>;
+
+
+pub type Parameters = Vec<(&'static str, String)>;

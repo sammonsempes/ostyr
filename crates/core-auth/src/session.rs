@@ -68,3 +68,8 @@ pub fn revoke_user_sessions(sessions: &mut SessionMap, user: &str) -> usize {
     sessions.retain(|_, session| session.user != user);
     before - sessions.len()
 }
+
+
+pub fn session_owner(sessions: &SessionMap, token: &str) -> Option<String> {
+    sessions.get(&hash_token(token)).map(|session| session.user.clone())
+}

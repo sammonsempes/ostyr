@@ -38,7 +38,18 @@ pub const PERMISSION_USERS_MANAGE: &str = "users.manage";
 pub const PERMISSION_CONFIG_MANAGE: &str = "config.manage";
 
 
-pub const MFA_REQUIRED_ROLES: [&str; 1] = [ROLE_ADMINISTRATOR];
+pub const PERMISSION_ROLES_MANAGE: &str = "roles.manage";
+
+
+pub const PERMISSION_AUDIT_EXPORT: &str = "audit.export";
+
+
+pub const PRIVILEGED_PERMISSIONS: [&str; 4] = [
+    PERMISSION_USERS_MANAGE,
+    PERMISSION_CONFIG_MANAGE,
+    PERMISSION_ROLES_MANAGE,
+    PERMISSION_AUDIT_EXPORT,
+];
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -64,6 +75,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_RESPONSE_EXECUTE,
         PERMISSION_USERS_MANAGE,
         PERMISSION_CONFIG_MANAGE,
+        PERMISSION_ROLES_MANAGE,
     ];
     let auditor = [PERMISSION_EVENTS_READ, PERMISSION_AUDIT_READ];
     [
@@ -106,8 +118,8 @@ pub fn is_allowed(catalog: &RoleCatalog, roles: &RoleSet, permission: &str) -> b
 }
 
 
-pub fn requires_mfa(roles: &RoleSet) -> bool {
-    MFA_REQUIRED_ROLES.iter().any(|required| roles.contains(*required))
+pub fn requires_mfa(catalog: &RoleCatalog, roles: &RoleSet) -> bool {
+    PRIVILEGED_PERMISSIONS.iter().any(|privileged| is_allowed(catalog, roles, privileged))
 }
 
 

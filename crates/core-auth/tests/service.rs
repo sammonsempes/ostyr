@@ -8,19 +8,31 @@ use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
 use core_auth::error::AuthError;
 use core_auth::limiter::{ACCOUNT_MAX_FAILURES, LOCKOUT_SECONDS, SOURCE_MAX_FAILURES};
+use core_auth::password::{verify_password, ARGON2_ITERATIONS, ARGON2_MEMORY_KIB, ARGON2_PARALLELISM};
 use core_auth::random::os_random;
-use core_auth::rbac::{builtin_catalog, PERMISSION_EVENTS_READ, PERMISSION_RESPONSE_EXECUTE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_READER};
+use core_auth::rbac::{
+    builtin_catalog, load_catalog, PERMISSION_EVENTS_READ, PERMISSION_RESPONSE_EXECUTE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_READER,
+};
 use core_auth::service::{
-    authorize, change_roles, create_account, enrol_totp, login, revoke_all_sessions, revoke_token, Context, LoginRequest, State,
+    authorize, bootstrap_administrator, change_roles, create_account, enrol_totp, login, revoke_all_sessions, revoke_token, Context, LoginRequest,
+    State, DUMMY_HASH,
 };
 use core_auth::store::save_accounts;
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{CompromisedSet, RoleCatalog, RoleSet, StoreKey};
-use data_encoding::BASE32_NOPAD;
+use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use failing_writer::FailingWriter;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
+use sha2::{Digest, Sha256};
+use std::cell::{Cell, RefCell};
 use time::OffsetDateTime;
 use types::TestResult;
+
+
+const PSEUDONYM_CHARS: usize = 12;
+
+
+const PERMISSION_DENIALS: usize = 7;
 
 
 const PLUS_TWO: i64 = 2;
@@ -109,6 +121,7 @@ fn context_with<'a, Output>(fixture: &'a Fixture<Output>, random: core_auth::typ
     Context {
         audit: &fixture.audit,
         random,
+        verify: &verify_password,
         key: &fixture.key,
         compromised: &fixture.compromised,
         catalog: &fixture.catalog,
@@ -145,18 +158,28 @@ fn request(user: &str, password: &str, code: Option<&str>, source: &str) -> Logi
 }
 
 
-fn with_user(fixture: &Fixture<Vec<u8>>, user: &str, user_roles: &[&str]) -> Result<State, Box<dyn std::error::Error>> {
+fn with_user(fixture: &Fixture<Vec<u8>>, user: &str, user_roles: &[&str]) -> Result<(State, String), Box<dyn std::error::Error>> {
     let mut state = State::default();
+    let admin = bootstrap(fixture, &mut state)?;
     create_account(
         &mut state,
         &context(fixture),
         at(0)?,
-        "root",
+        &admin,
         user,
         &SecretString::from(GOOD_PASSWORD),
         roles(user_roles),
     )?;
-    Ok(state)
+    Ok((state, admin))
+}
+
+
+fn bootstrap(fixture: &Fixture<Vec<u8>>, state: &mut State) -> Result<String, Box<dyn std::error::Error>> {
+    let ctx = context(fixture);
+    let enrolment = bootstrap_administrator(state, &ctx, at(0)?, "admin", &SecretString::from(SECOND_PASSWORD))?;
+    let code = current_code(&enrolment.secret, 0)?;
+    let token = login(state, &ctx, at(0)?, &request("admin", SECOND_PASSWORD, Some(&code), "10.9.9.9"))?;
+    Ok(token.expose_secret().to_owned())
 }
 
 
@@ -206,7 +229,7 @@ fn fail_on_salt(buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 #[test]
 fn account_creation_is_audited() -> TestResult {
     let fixture = fixture();
-    let state = with_user(&fixture, "alice", &[ROLE_ANALYST])?;
+    let (state, _) = with_user(&fixture, "alice", &[ROLE_ANALYST])?;
     assert!(state.accounts.contains_key("alice"));
     let text = audit_text(&fixture)?;
     assert!(text.contains("auth.account.create"));
@@ -219,35 +242,35 @@ fn account_creation_is_audited() -> TestResult {
 #[test]
 fn account_creation_rejections_are_audited() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     let good = SecretString::from(GOOD_PASSWORD);
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "alice", &good, roles(&[])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "alice", &good, roles(&[])),
         Err(AuthError::AccountExists)
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "", &good, roles(&[])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "", &good, roles(&[])),
         Err(AuthError::InvalidUsername)
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "a b", &good, roles(&[])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "a b", &good, roles(&[])),
         Err(AuthError::InvalidUsername)
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "a\u{7}b", &good, roles(&[])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "a\u{7}b", &good, roles(&[])),
         Err(AuthError::InvalidUsername)
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "bob", &good, roles(&["ghost"])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "bob", &good, roles(&["ghost"])),
         Err(AuthError::UnknownRole(_))
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "bob", &SecretString::from("short"), roles(&[])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "bob", &SecretString::from("short"), roles(&[])),
         Err(AuthError::Policy(_))
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(1)?, "root", "bob", &SecretString::from("Password1234"), roles(&[])),
+        create_account(&mut state, &ctx, at(1)?, &admin, "bob", &SecretString::from("Password1234"), roles(&[])),
         Err(AuthError::Policy(_))
     ));
     assert!(!state.accounts.contains_key("bob"));
@@ -262,11 +285,11 @@ fn account_creation_rejections_are_audited() -> TestResult {
 #[test]
 fn salt_failure_aborts_account_creation() -> TestResult {
     let fixture = fixture();
-    let mut state = State::default();
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context_with(&fixture, fail_on_salt);
-    let result = create_account(&mut state, &ctx, at(0)?, "root", "alice", &SecretString::from(GOOD_PASSWORD), roles(&[]));
+    let result = create_account(&mut state, &ctx, at(0)?, &admin, "bob", &SecretString::from(GOOD_PASSWORD), roles(&[]));
     assert!(matches!(result, Err(AuthError::Random(_))));
-    assert!(state.accounts.is_empty());
+    assert!(!state.accounts.contains_key("bob"));
     Ok(())
 }
 
@@ -274,7 +297,7 @@ fn salt_failure_aborts_account_creation() -> TestResult {
 #[test]
 fn login_succeeds_and_session_authorises() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     let token = login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
     let user = authorize(&mut state, &fixture.catalog, token.expose_secret(), at(PLUS_TWO)?, PERMISSION_EVENTS_READ)?;
@@ -299,7 +322,7 @@ fn login_succeeds_and_session_authorises() -> TestResult {
 #[test]
 fn wrong_password_and_unknown_user_look_alike() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     let wrong = login(&mut state, &ctx, at(1)?, &request("alice", "wrong password here", None, SOURCE));
     let unknown = login(&mut state, &ctx, at(PLUS_TWO)?, &request("nobody", GOOD_PASSWORD, None, SOURCE));
@@ -313,14 +336,247 @@ fn wrong_password_and_unknown_user_look_alike() -> TestResult {
 
 
 #[test]
-fn dummy_hash_failure_is_reported_for_unknown_users() -> TestResult {
+fn every_login_path_costs_one_password_verification() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let calls = Cell::new(usize::MIN);
+    let seen = RefCell::new(Vec::new());
+    let counting = |password: &str, stored: &str| {
+        calls.set(calls.get() + 1);
+        seen.borrow_mut().push(stored.to_owned());
+        verify_password(password, stored)
+    };
+    let ctx = Context {
+        verify: &counting,
+        ..context(&fixture)
+    };
+    let alice_hash = state.accounts.get("alice").ok_or("no alice")?.password_hash.clone();
+    let paths = [("nobody", GOOD_PASSWORD), ("alice", "wrong password here"), ("alice", GOOD_PASSWORD)];
+    paths.iter().try_for_each(|(user, password)| {
+        calls.set(0);
+        let attempt = login(&mut state, &ctx, at(1)?, &request(user, password, None, SOURCE));
+        assert_eq!(attempt.is_ok(), *user == "alice" && *password == GOOD_PASSWORD);
+        assert_eq!(calls.get(), 1);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    let hashes = seen.borrow();
+    assert_eq!(hashes.first().map(String::as_str), Some(DUMMY_HASH));
+    assert_eq!(hashes.get(1), Some(&alice_hash));
+    Ok(())
+}
+
+
+#[test]
+fn dummy_hash_uses_the_production_parameters() -> TestResult {
+    assert!(DUMMY_HASH.contains(&format!("m={ARGON2_MEMORY_KIB},t={ARGON2_ITERATIONS},p={ARGON2_PARALLELISM}")));
+    assert!(DUMMY_HASH.starts_with("$argon2id$"));
+    assert!(verify_password("dummy password for constant work", DUMMY_HASH)?);
+    Ok(())
+}
+
+
+fn failing_verify(_password: &str, _stored: &str) -> Result<bool, AuthError> {
+    Err(AuthError::Decrypt)
+}
+
+
+#[test]
+fn verification_failure_is_reported_for_unknown_users() -> TestResult {
     let fixture = fixture();
     let mut state = State::default();
-    let ctx = context_with(&fixture, fail_on_salt);
+    let ctx = Context {
+        verify: &failing_verify,
+        ..context(&fixture)
+    };
     assert!(matches!(
         login(&mut state, &ctx, at(1)?, &request("nobody", GOOD_PASSWORD, None, SOURCE)),
-        Err(AuthError::Random(_))
+        Err(AuthError::Decrypt)
     ));
+    Ok(())
+}
+
+
+#[test]
+fn custom_privileged_role_requires_mfa_without_the_administrator_name() -> TestResult {
+    let mut fixture = fixture();
+    fixture.catalog = load_catalog(r#"[{"name":"ops","permissions":["config.manage"]},{"name":"viewer","permissions":["events.read"]}]"#.as_bytes())?;
+    let (mut state, admin) = with_user(&fixture, "olga", &["ops"])?;
+    let ctx = context(&fixture);
+    assert!(matches!(
+        login(&mut state, &ctx, at(1)?, &request("olga", GOOD_PASSWORD, None, SOURCE)),
+        Err(AuthError::MfaEnrolmentRequired)
+    ));
+    create_account(
+        &mut state,
+        &ctx,
+        at(1)?,
+        &admin,
+        "vera",
+        &SecretString::from(GOOD_PASSWORD),
+        roles(&["viewer"]),
+    )?;
+    login(&mut state, &ctx, at(PLUS_TWO)?, &request("vera", GOOD_PASSWORD, None, SOURCE))?;
+    Ok(())
+}
+
+
+#[test]
+fn unknown_usernames_are_audited_as_a_pseudonym() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let ctx = context(&fixture);
+    let typed = "TypedPassword!9";
+    (0..ACCOUNT_MAX_FAILURES).for_each(|_| {
+        assert!(login(
+            &mut state,
+            &ctx,
+            at(1).unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            &request(typed, GOOD_PASSWORD, None, SOURCE)
+        )
+        .is_err());
+    });
+    let text = audit_text(&fixture)?;
+    assert!(!text.contains(typed));
+    let digest = HEXLOWER.encode(&Sha256::digest(typed.as_bytes()));
+    let prefix: String = digest.chars().take(PSEUDONYM_CHARS).collect();
+    assert!(text.contains(&format!("unknown:{prefix}")));
+    assert!(text.contains("auth.lockout"));
+    Ok(())
+}
+
+
+#[test]
+fn every_failed_operation_is_audited() -> TestResult {
+    let fixture = fixture();
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let ctx = context(&fixture);
+    assert!(matches!(
+        change_roles(&mut state, &ctx, at(1)?, &admin, "alice", roles(&["ghost"])),
+        Err(AuthError::UnknownRole(_))
+    ));
+    assert!(matches!(
+        change_roles(&mut state, &ctx, at(1)?, &admin, "ghost", roles(&[])),
+        Err(AuthError::NoSuchAccount)
+    ));
+    assert!(matches!(
+        enrol_totp(&mut state, &ctx, at(1)?, &admin, "ghost", None),
+        Err(AuthError::NoSuchAccount)
+    ));
+    assert!(matches!(
+        revoke_token(&mut state, &ctx, at(1)?, &admin, "no such token"),
+        Err(AuthError::SessionInvalid)
+    ));
+    assert!(matches!(
+        create_account(&mut state, &ctx, at(1)?, &admin, "alice", &SecretString::from(GOOD_PASSWORD), roles(&[])),
+        Err(AuthError::AccountExists)
+    ));
+    let text = audit_text(&fixture)?;
+    ["authz.role.change", "auth.mfa.enrol", "auth.account.create"].iter().for_each(|action| {
+        let failures = text
+            .lines()
+            .filter(|line| line.contains(action) && line.contains("\"outcome\":\"failure\""))
+            .count();
+        assert!(failures >= 1, "no failure record for {action}");
+    });
+    assert!(text
+        .lines()
+        .any(|line| line.contains("auth.session.revoke\"") && line.contains("\"outcome\":\"denied\"")));
+    assert!(!text.contains("\"target\":\"ghost\""));
+    Ok(())
+}
+
+
+#[test]
+fn unauthorised_callers_are_denied_and_audited() -> TestResult {
+    let fixture = fixture();
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let ctx = context(&fixture);
+    let good = SecretString::from(GOOD_PASSWORD);
+    create_account(&mut state, &ctx, at(1)?, &admin, "bob", &good, roles(&[ROLE_READER]))?;
+    let alice = login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
+    let bob = login(&mut state, &ctx, at(1)?, &request("bob", GOOD_PASSWORD, None, SOURCE))?;
+    let token = alice.expose_secret();
+    assert!(matches!(
+        create_account(&mut state, &ctx, at(PLUS_TWO)?, token, "eve", &good, roles(&[ROLE_ADMINISTRATOR])),
+        Err(AuthError::PermissionDenied)
+    ));
+    assert!(matches!(
+        change_roles(&mut state, &ctx, at(PLUS_TWO)?, token, "alice", roles(&[ROLE_ADMINISTRATOR])),
+        Err(AuthError::PermissionDenied)
+    ));
+    assert!(matches!(
+        enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, token, "bob", None),
+        Err(AuthError::PermissionDenied)
+    ));
+    assert!(matches!(
+        revoke_token(&mut state, &ctx, at(PLUS_TWO)?, token, bob.expose_secret()),
+        Err(AuthError::PermissionDenied)
+    ));
+    assert!(matches!(
+        revoke_token(&mut state, &ctx, at(PLUS_TWO)?, token, "unknown token"),
+        Err(AuthError::PermissionDenied)
+    ));
+    assert!(matches!(
+        revoke_all_sessions(&mut state, &ctx, at(PLUS_TWO)?, token, "bob"),
+        Err(AuthError::PermissionDenied)
+    ));
+    assert!(matches!(
+        create_account(&mut state, &ctx, at(PLUS_TWO)?, "bogus", "eve", &good, roles(&[])),
+        Err(AuthError::SessionInvalid)
+    ));
+    assert!(!state.accounts.contains_key("eve"));
+    assert_eq!(
+        state.accounts.get("alice").map(|account| account.roles.clone()),
+        Some(roles(&[ROLE_READER]))
+    );
+    let text = audit_text(&fixture)?;
+    assert!(text.contains("anonymous"));
+    assert!(text.lines().filter(|line| line.contains("\"outcome\":\"denied\"")).count() >= PERMISSION_DENIALS);
+    revoke_token(&mut state, &ctx, at(PLUS_THREE)?, token, token)?;
+    assert!(matches!(
+        authorize(&mut state, &fixture.catalog, token, at(PLUS_FOUR)?, PERMISSION_EVENTS_READ),
+        Err(AuthError::SessionInvalid)
+    ));
+    let second = login(&mut state, &ctx, at(PLUS_FIVE)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
+    assert_eq!(revoke_all_sessions(&mut state, &ctx, at(PLUS_SIX)?, second.expose_secret(), "alice")?, 1);
+    Ok(())
+}
+
+
+#[test]
+fn re_enrolment_needs_the_current_code_or_the_manage_permission() -> TestResult {
+    let fixture = fixture();
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let ctx = context(&fixture);
+    let alice = login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
+    let token = alice.expose_secret();
+    let first = enrol_totp(&mut state, &ctx, at(1)?, token, "alice", None)?;
+    assert!(matches!(
+        enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, token, "alice", None),
+        Err(AuthError::MfaRequired)
+    ));
+    let wrong = SecretString::from("000000");
+    assert!(matches!(
+        enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, token, "alice", Some(&wrong)),
+        Err(AuthError::MfaInvalid)
+    ));
+    let code = SecretString::from(current_code(&first.secret, PLUS_TWO)?);
+    let second = enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, token, "alice", Some(&code))?;
+    assert_ne!(first.secret.expose_secret(), second.secret.expose_secret());
+    let third = enrol_totp(&mut state, &ctx, at(PLUS_THREE)?, &admin, "alice", None)?;
+    assert_ne!(second.secret.expose_secret(), third.secret.expose_secret());
+    Ok(())
+}
+
+
+#[test]
+fn bootstrap_is_possible_only_on_an_empty_store() -> TestResult {
+    let fixture = fixture();
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let result = bootstrap_administrator(&mut state, &context(&fixture), at(1)?, "mallory", &SecretString::from(GOOD_PASSWORD));
+    assert!(matches!(result, Err(AuthError::AlreadyBootstrapped)));
+    assert!(!state.accounts.contains_key("mallory"));
+    assert!(audit_text(&fixture)?.contains("\"outcome\":\"failure\""));
     Ok(())
 }
 
@@ -328,13 +584,13 @@ fn dummy_hash_failure_is_reported_for_unknown_users() -> TestResult {
 #[test]
 fn administrator_needs_enrolment_then_totp() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     let ctx = context(&fixture);
     assert!(matches!(
         login(&mut state, &ctx, at(1)?, &request("root", GOOD_PASSWORD, None, SOURCE)),
         Err(AuthError::MfaEnrolmentRequired)
     ));
-    let enrolment = enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, "root", "root")?;
+    let enrolment = enrol_totp(&mut state, &ctx, at(PLUS_TWO)?, &admin, "root", None)?;
     assert!(matches!(
         login(&mut state, &ctx, at(PLUS_THREE)?, &request("root", GOOD_PASSWORD, None, SOURCE)),
         Err(AuthError::MfaRequired)
@@ -366,9 +622,9 @@ fn administrator_needs_enrolment_then_totp() -> TestResult {
 #[test]
 fn clock_skew_beyond_the_window_is_refused() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     let ctx = context(&fixture);
-    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, "root", "root")?;
+    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, &admin, "root", None)?;
     let stale = current_code(&enrolment.secret, -STEP_SKEW_SECONDS)?;
     let result = login(&mut state, &ctx, at(1)?, &request("root", GOOD_PASSWORD, Some(&stale), SOURCE));
     assert!(matches!(result, Err(AuthError::MfaInvalid)));
@@ -379,9 +635,9 @@ fn clock_skew_beyond_the_window_is_refused() -> TestResult {
 #[test]
 fn backup_codes_log_in_once() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     let ctx = context(&fixture);
-    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, "root", "root")?;
+    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, &admin, "root", None)?;
     let backup = enrolment.backup_codes.first().ok_or("no backup code")?.expose_secret();
     login(&mut state, &ctx, at(1)?, &request("root", GOOD_PASSWORD, Some(backup), SOURCE))?;
     let again = login(&mut state, &ctx, at(PLUS_TWO)?, &request("root", GOOD_PASSWORD, Some(backup), SOURCE));
@@ -393,9 +649,9 @@ fn backup_codes_log_in_once() -> TestResult {
 #[test]
 fn enrolled_non_administrators_must_use_their_second_factor() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_ANALYST])?;
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_ANALYST])?;
     let ctx = context(&fixture);
-    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, "root", "alice")?;
+    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, &admin, "alice", None)?;
     assert!(matches!(
         login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE)),
         Err(AuthError::MfaRequired)
@@ -409,8 +665,8 @@ fn enrolled_non_administrators_must_use_their_second_factor() -> TestResult {
 #[test]
 fn stored_totp_secret_is_encrypted() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
-    let enrolment = enrol_totp(&mut state, &context(&fixture), at(0)?, "root", "root")?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let enrolment = enrol_totp(&mut state, &context(&fixture), at(0)?, &admin, "root", None)?;
     let mut stored = Vec::new();
     save_accounts(&mut stored, &state.accounts)?;
     let text = String::from_utf8(stored)?;
@@ -425,21 +681,21 @@ fn stored_totp_secret_is_encrypted() -> TestResult {
 #[test]
 fn enrolment_failures_are_reported() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     assert!(matches!(
-        enrol_totp(&mut state, &context(&fixture), at(0)?, "root", "ghost"),
+        enrol_totp(&mut state, &context(&fixture), at(0)?, &admin, "ghost", None),
         Err(AuthError::NoSuchAccount)
     ));
     assert!(matches!(
-        enrol_totp(&mut state, &context_with(&fixture, fail_on_secret), at(0)?, "root", "root"),
+        enrol_totp(&mut state, &context_with(&fixture, fail_on_secret), at(0)?, &admin, "root", None),
         Err(AuthError::Random(_))
     ));
     assert!(matches!(
-        enrol_totp(&mut state, &context_with(&fixture, fail_on_backup), at(0)?, "root", "root"),
+        enrol_totp(&mut state, &context_with(&fixture, fail_on_backup), at(0)?, &admin, "root", None),
         Err(AuthError::Random(_))
     ));
     assert!(matches!(
-        enrol_totp(&mut state, &context_with(&fixture, fail_on_nonce), at(0)?, "root", "root"),
+        enrol_totp(&mut state, &context_with(&fixture, fail_on_nonce), at(0)?, &admin, "root", None),
         Err(AuthError::Random(_))
     ));
     let bad_key = Fixture {
@@ -447,7 +703,7 @@ fn enrolment_failures_are_reported() -> TestResult {
         ..fixture_over(Vec::new())
     };
     assert!(matches!(
-        enrol_totp(&mut state, &context(&bad_key), at(0)?, "root", "root"),
+        enrol_totp(&mut state, &context(&bad_key), at(0)?, &admin, "root", None),
         Err(AuthError::InvalidKey)
     ));
     Ok(())
@@ -457,9 +713,9 @@ fn enrolment_failures_are_reported() -> TestResult {
 #[test]
 fn corrupted_totp_secret_is_reported() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     let ctx = context(&fixture);
-    enrol_totp(&mut state, &ctx, at(0)?, "root", "root")?;
+    enrol_totp(&mut state, &ctx, at(0)?, &admin, "root", None)?;
     state
         .accounts
         .get_mut("root")
@@ -475,7 +731,7 @@ fn corrupted_totp_secret_is_reported() -> TestResult {
 #[test]
 fn repeated_failures_lock_the_account_and_are_audited() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     (0..ACCOUNT_MAX_FAILURES).try_for_each(|attempt| {
         let result = login(
@@ -518,7 +774,7 @@ fn brute_force_from_one_source_is_locked_out_by_source() -> TestResult {
 #[test]
 fn success_resets_the_failure_counter() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     (0..ACCOUNT_MAX_FAILURES - 1).try_for_each(|_| {
         login(&mut state, &ctx, at(1)?, &request("alice", "wrong password here", None, SOURCE))
@@ -539,10 +795,10 @@ fn success_resets_the_failure_counter() -> TestResult {
 #[test]
 fn role_change_revokes_sessions_and_is_audited() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     let token = login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
-    change_roles(&mut state, &ctx, at(PLUS_TWO)?, "root", "alice", roles(&[ROLE_ANALYST]))?;
+    change_roles(&mut state, &ctx, at(PLUS_TWO)?, &admin, "alice", roles(&[ROLE_ANALYST]))?;
     assert!(matches!(
         authorize(
             &mut state,
@@ -556,11 +812,11 @@ fn role_change_revokes_sessions_and_is_audited() -> TestResult {
     let text = audit_text(&fixture)?;
     assert!(text.contains("authz.role.change") && text.contains("\"before\":\"reader\"") && text.contains("\"after\":\"analyst\""));
     assert!(matches!(
-        change_roles(&mut state, &ctx, at(PLUS_FOUR)?, "root", "alice", roles(&["ghost"])),
+        change_roles(&mut state, &ctx, at(PLUS_FOUR)?, &admin, "alice", roles(&["ghost"])),
         Err(AuthError::UnknownRole(_))
     ));
     assert!(matches!(
-        change_roles(&mut state, &ctx, at(PLUS_FOUR)?, "root", "ghost", roles(&[])),
+        change_roles(&mut state, &ctx, at(PLUS_FOUR)?, &admin, "ghost", roles(&[])),
         Err(AuthError::NoSuchAccount)
     ));
     Ok(())
@@ -570,16 +826,16 @@ fn role_change_revokes_sessions_and_is_audited() -> TestResult {
 #[test]
 fn revocation_is_audited() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let ctx = context(&fixture);
     let first = login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
     let second = login(&mut state, &ctx, at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
-    revoke_token(&mut state, &ctx, at(PLUS_TWO)?, "root", first.expose_secret())?;
+    revoke_token(&mut state, &ctx, at(PLUS_TWO)?, &admin, first.expose_secret())?;
     assert!(matches!(
-        revoke_token(&mut state, &ctx, at(PLUS_TWO)?, "root", first.expose_secret()),
+        revoke_token(&mut state, &ctx, at(PLUS_TWO)?, &admin, first.expose_secret()),
         Err(AuthError::SessionInvalid)
     ));
-    assert_eq!(revoke_all_sessions(&mut state, &ctx, at(PLUS_THREE)?, "root", "alice")?, 1);
+    assert_eq!(revoke_all_sessions(&mut state, &ctx, at(PLUS_THREE)?, &admin, "alice")?, 1);
     assert!(matches!(
         authorize(
             &mut state,
@@ -600,7 +856,7 @@ fn revocation_is_audited() -> TestResult {
 #[test]
 fn sessions_of_deleted_accounts_are_invalid() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&fixture, "alice", &[ROLE_READER])?;
     let token = login(&mut state, &context(&fixture), at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
     state.accounts.clear();
     assert!(matches!(
@@ -614,9 +870,9 @@ fn sessions_of_deleted_accounts_are_invalid() -> TestResult {
 #[test]
 fn secrets_never_reach_debug_or_display_output() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     let ctx = context(&fixture);
-    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, "root", "root")?;
+    let enrolment = enrol_totp(&mut state, &ctx, at(0)?, &admin, "root", None)?;
     let code = current_code(&enrolment.secret, 1)?;
     let login_request = request("root", GOOD_PASSWORD, Some(&code), SOURCE);
     let token = login(&mut state, &ctx, at(1)?, &login_request)?;
@@ -641,31 +897,32 @@ fn secrets_never_reach_debug_or_display_output() -> TestResult {
 
 #[test]
 fn audit_failures_stop_every_operation() -> TestResult {
-    let broken = FailingWriter {
+    let healthy = fixture();
+    let (mut state, admin) = with_user(&healthy, "alice", &[ROLE_READER])?;
+    let broken = fixture_over(FailingWriter {
         fail_write: true,
         fail_flush: false,
-    };
-    let fixture = fixture_over(broken);
-    let ctx = context(&fixture);
+    });
+    let ctx = context(&broken);
     let good = SecretString::from(GOOD_PASSWORD);
-    let mut state = State::default();
     assert!(matches!(
-        create_account(&mut state, &ctx, at(0)?, "root", "alice", &good, roles(&[])),
+        create_account(&mut state, &ctx, at(0)?, &admin, "bob", &good, roles(&[])),
         Err(AuthError::Audit(_))
     ));
     assert!(matches!(
-        create_account(&mut state, &ctx, at(0)?, "root", "", &good, roles(&[])),
-        Err(AuthError::Audit(_))
-    ));
-    let healthy = fixture_over(Vec::new());
-    state.accounts.clear();
-    create_account(&mut state, &context(&healthy), at(0)?, "root", "alice", &good, roles(&[ROLE_READER]))?;
-    assert!(matches!(
-        change_roles(&mut state, &ctx, at(0)?, "root", "alice", roles(&[])),
+        create_account(&mut state, &ctx, at(0)?, &admin, "", &good, roles(&[])),
         Err(AuthError::Audit(_))
     ));
     assert!(matches!(
-        revoke_all_sessions(&mut state, &ctx, at(0)?, "root", "alice"),
+        create_account(&mut state, &ctx, at(0)?, "bogus", "carol", &good, roles(&[])),
+        Err(AuthError::Audit(_))
+    ));
+    assert!(matches!(
+        change_roles(&mut state, &ctx, at(0)?, &admin, "alice", roles(&[])),
+        Err(AuthError::Audit(_))
+    ));
+    assert!(matches!(
+        revoke_all_sessions(&mut state, &ctx, at(0)?, &admin, "alice"),
         Err(AuthError::Audit(_))
     ));
     assert!(matches!(
@@ -678,10 +935,32 @@ fn audit_failures_stop_every_operation() -> TestResult {
     ));
     let token = login(&mut state, &context(&healthy), at(1)?, &request("alice", GOOD_PASSWORD, None, SOURCE))?;
     assert!(matches!(
-        revoke_token(&mut state, &ctx, at(1)?, "root", token.expose_secret()),
+        revoke_token(&mut state, &ctx, at(1)?, &admin, token.expose_secret()),
         Err(AuthError::Audit(_))
     ));
-    assert!(matches!(enrol_totp(&mut state, &ctx, at(0)?, "root", "alice"), Err(AuthError::Audit(_))));
+    assert!(matches!(
+        enrol_totp(&mut state, &ctx, at(0)?, &admin, "alice", None),
+        Err(AuthError::Audit(_))
+    ));
+    assert!(matches!(
+        enrol_totp(&mut state, &ctx, at(0)?, &admin, "ghost", None),
+        Err(AuthError::Audit(_))
+    ));
+    let mut empty = State::default();
+    assert!(matches!(
+        bootstrap_administrator(&mut empty, &ctx, at(0)?, "root", &good),
+        Err(AuthError::Audit(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn bootstrap_enrolment_audit_failure_is_reported() -> TestResult {
+    let selective = fixture_over(SelectiveWriter { needle: "auth.mfa.enrol" });
+    let mut state = State::default();
+    let result = bootstrap_administrator(&mut state, &context(&selective), at(0)?, "root", &SecretString::from(GOOD_PASSWORD));
+    assert!(matches!(result, Err(AuthError::Audit(_))));
     Ok(())
 }
 
@@ -689,7 +968,7 @@ fn audit_failures_stop_every_operation() -> TestResult {
 #[test]
 fn lockout_audit_failure_is_reported() -> TestResult {
     let healthy = fixture();
-    let mut state = with_user(&healthy, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&healthy, "alice", &[ROLE_READER])?;
     let broken = fixture_over(FailingWriter {
         fail_write: true,
         fail_flush: false,
@@ -742,7 +1021,7 @@ fn fail_on_token(buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 #[test]
 fn lockout_record_failure_is_reported() -> TestResult {
     let healthy = fixture();
-    let mut state = with_user(&healthy, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&healthy, "alice", &[ROLE_READER])?;
     let selective = fixture_over(SelectiveWriter { needle: "auth.lockout" });
     let ctx = context(&selective);
     let moment = at(1)?;
@@ -757,7 +1036,7 @@ fn lockout_record_failure_is_reported() -> TestResult {
 #[test]
 fn locked_login_audit_failure_and_token_failure_are_reported() -> TestResult {
     let healthy = fixture();
-    let mut state = with_user(&healthy, "alice", &[ROLE_READER])?;
+    let (mut state, _) = with_user(&healthy, "alice", &[ROLE_READER])?;
     let token_failure = login(
         &mut state,
         &context_with(&healthy, fail_on_token),
@@ -787,9 +1066,9 @@ fn locked_login_audit_failure_and_token_failure_are_reported() -> TestResult {
 #[test]
 fn corrupted_password_hash_and_clock_before_epoch_are_reported() -> TestResult {
     let fixture = fixture();
-    let mut state = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
+    let (mut state, admin) = with_user(&fixture, "root", &[ROLE_ADMINISTRATOR])?;
     let ctx = context(&fixture);
-    enrol_totp(&mut state, &ctx, at(0)?, "root", "root")?;
+    enrol_totp(&mut state, &ctx, at(0)?, &admin, "root", None)?;
     let before_epoch = OffsetDateTime::from_unix_timestamp(-1)?;
     let early = login(&mut state, &ctx, before_epoch, &request("root", GOOD_PASSWORD, Some("123456"), SOURCE));
     assert!(matches!(early, Err(AuthError::ClockBeforeEpoch)));

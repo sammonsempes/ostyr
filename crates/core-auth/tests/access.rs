@@ -50,7 +50,7 @@ fn failing_random(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 
 
 #[test]
-fn built_in_roles_have_the_expected_permissions() {
+fn built_in_roles_have_the_expected_permissions() -> TestResult {
     let catalog = builtin_catalog();
     let matrix = [
         (ROLE_READER, [true, false, false, false, false, false]),
@@ -73,25 +73,28 @@ fn built_in_roles_have_the_expected_permissions() {
             .zip(expected)
             .for_each(|(permission, allowed)| assert_eq!(is_allowed(&catalog, &roles(&[role]), permission), *allowed, "{role} {permission}"));
     });
+    Ok(())
 }
 
 
 #[test]
-fn access_is_denied_by_default() {
+fn access_is_denied_by_default() -> TestResult {
     let catalog = builtin_catalog();
     assert!(!is_allowed(&catalog, &RoleSet::new(), PERMISSION_EVENTS_READ));
     assert!(!is_allowed(&catalog, &roles(&["ghost"]), PERMISSION_EVENTS_READ));
     assert!(!is_allowed(&catalog, &roles(&[ROLE_ADMINISTRATOR]), "unknown.permission"));
     assert!(!is_allowed(&catalog, &roles(&[ROLE_ADMINISTRATOR]), ""));
+    Ok(())
 }
 
 
 #[test]
-fn several_roles_add_their_permissions() {
+fn several_roles_add_their_permissions() -> TestResult {
     let catalog = builtin_catalog();
     let both = roles(&[ROLE_READER, ROLE_AUDITOR]);
     assert!(is_allowed(&catalog, &both, PERMISSION_AUDIT_READ));
     assert!(!is_allowed(&catalog, &both, PERMISSION_USERS_MANAGE));
+    Ok(())
 }
 
 
@@ -108,29 +111,50 @@ fn custom_roles_are_data() -> TestResult {
 
 
 #[test]
-fn custom_roles_cannot_redefine_built_ins() {
+fn custom_roles_cannot_redefine_built_ins() -> TestResult {
     let text = r#"[{"name":"administrator","permissions":[]}]"#;
     assert!(matches!(load_catalog(text.as_bytes()), Err(AuthError::BuiltInRole(name)) if name == ROLE_ADMINISTRATOR));
+    Ok(())
 }
 
 
 #[test]
-fn malformed_role_data_is_refused() {
+fn malformed_role_data_is_refused() -> TestResult {
     assert!(matches!(load_catalog("[{".as_bytes()), Err(AuthError::Format(_))));
     assert!(matches!(
         load_catalog(r#"[{"name":"x","permissions":[],"extra":1}]"#.as_bytes()),
         Err(AuthError::Format(_))
     ));
+    Ok(())
 }
 
 
 #[test]
-fn unknown_roles_are_refused_and_mfa_is_for_administrators() {
+fn unknown_roles_are_refused() -> TestResult {
     let catalog = builtin_catalog();
     assert!(matches!(check_roles(&catalog, &roles(&["ghost"])), Err(AuthError::UnknownRole(name)) if name == "ghost"));
-    assert!(requires_mfa(&roles(&[ROLE_READER, ROLE_ADMINISTRATOR])));
-    assert!(!requires_mfa(&roles(&[ROLE_RESPONDER])));
-    assert!(!requires_mfa(&RoleSet::new()));
+    Ok(())
+}
+
+
+#[test]
+fn mfa_follows_privileged_permissions_not_role_names() -> TestResult {
+    let text = r#"[
+        {"name":"ops","permissions":["config.manage"]},
+        {"name":"keeper","permissions":["roles.manage"]},
+        {"name":"exporter","permissions":["audit.export"]},
+        {"name":"people","permissions":["users.manage"]},
+        {"name":"viewer","permissions":["events.read"]}
+    ]"#;
+    let catalog = load_catalog(text.as_bytes())?;
+    assert!(requires_mfa(&catalog, &roles(&[ROLE_READER, ROLE_ADMINISTRATOR])));
+    ["ops", "keeper", "exporter", "people"]
+        .iter()
+        .for_each(|name| assert!(requires_mfa(&catalog, &roles(&[ROLE_READER, name])), "{name}"));
+    assert!(!requires_mfa(&catalog, &roles(&[ROLE_RESPONDER, ROLE_AUDITOR, "viewer"])));
+    assert!(!requires_mfa(&catalog, &roles(&["ghost"])));
+    assert!(!requires_mfa(&catalog, &RoleSet::new()));
+    Ok(())
 }
 
 

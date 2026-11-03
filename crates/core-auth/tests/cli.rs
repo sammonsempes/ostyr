@@ -6,10 +6,12 @@ mod failing_writer;
 mod types;
 
 
+use core_audit::error::AuditError;
 use core_audit::verify::verify;
 use core_auth::cli::{parse_roles, run, totp_now};
 use core_auth::error::AuthError;
 use core_auth::random::os_random;
+use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
 use failing_writer::FailingWriter;
 use std::fs;
@@ -22,6 +24,15 @@ use types::TestResult;
 
 
 const KEY_FILL: u8 = 5;
+
+
+const SECRET_BYTES: usize = 20;
+
+
+const ENROLMENTS: usize = 2;
+
+
+const GROUP_READABLE: u32 = 0o640;
 
 
 const HEX_PER_BYTE: usize = 2;
@@ -72,9 +83,17 @@ fn fixed_clock() -> OffsetDateTime {
 
 fn workspace() -> Result<Workspace, Box<dyn std::error::Error>> {
     let directory = tempdir()?;
-    fs::write(directory.path().join("key"), vec![KEY_FILL; KEY_LENGTH])?;
+    write_key(directory.path(), vec![KEY_FILL; KEY_LENGTH], OWNER_ONLY)?;
     fs::write(directory.path().join("bad-words"), "password1234\n")?;
     Ok(Workspace { directory })
+}
+
+
+fn write_key(directory: &Path, bytes: Vec<u8>, mode: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let key = directory.join("key");
+    fs::write(&key, bytes)?;
+    fs::set_permissions(&key, fs::Permissions::from_mode(mode))?;
+    Ok(())
 }
 
 
@@ -115,10 +134,7 @@ fn word_after<'a>(text: &'a str, label: &str) -> Option<&'a str> {
 #[test]
 fn full_administrator_flow() -> TestResult {
     let space = workspace()?;
-    let setup = session(
-        &space,
-        &format!("create root {PASSWORD} administrator\nenrol root\nlogin root {PASSWORD} 10.0.0.1\n"),
-    )?;
+    let setup = session(&space, &format!("bootstrap root {PASSWORD}\nlogin root {PASSWORD} 10.0.0.1\n"))?;
     let secret = word_after(&setup, "secret ").ok_or("no secret")?.to_owned();
     assert!(setup.contains("error a second factor is required"));
     let code = session(&space, &format!("totp {secret}\n"))?.trim().to_owned();
@@ -143,9 +159,10 @@ fn full_administrator_flow() -> TestResult {
 #[test]
 fn brute_force_is_locked_and_audited() -> TestResult {
     let space = workspace()?;
-    let mut script = format!("create alice {PASSWORD} reader\n");
-    script.push_str(&"login alice wrong-password-here 10.0.0.2\n".repeat(BRUTE_FORCE));
-    script.push_str(&format!("login alice {PASSWORD} 10.0.0.2\n"));
+    session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
+    let mut script = String::new();
+    script.push_str(&"login root wrong-password-here 10.0.0.2\n".repeat(BRUTE_FORCE));
+    script.push_str(&format!("login root {PASSWORD} 10.0.0.2\n"));
     let output = session(&space, &script)?;
     assert!(output.contains("error too many failures"));
     assert!(fs::read_to_string(space.directory.path().join("audit.log"))?.contains("auth.lockout"));
@@ -153,35 +170,32 @@ fn brute_force_is_locked_and_audited() -> TestResult {
 }
 
 
-#[test]
-fn every_command_replies() -> TestResult {
-    let space = workspace()?;
-    let setup = session(&space, &format!("create alice {PASSWORD} reader\nlogin alice {PASSWORD} src\n"))?;
-    let token = word_after(&setup, "ok ").ok_or("no token")?.to_owned();
-    let script = format!("check {token}\nroles alice analyst\ncheck {token}\nrevoke-all alice\nbogus\ntotp !!!\n");
-    let output = session(&space, &script)?;
-    assert!(output.contains("error session is invalid or expired"));
-    assert!(output.contains("revoked 0"));
-    assert!(output.contains("error invalid command: unknown command"));
-    assert!(output.contains("error invalid command: secret is not base32"));
-    let same_process = session(&space, &format!("login alice {PASSWORD} src\n"))?;
-    let fresh = word_after(&same_process, "ok ").ok_or("no token")?;
-    let checked = session(&space, &format!("login alice {PASSWORD} src\nroles alice reader\nrevoke-all alice\n"))?;
-    assert!(checked.contains("revoked") && !fresh.is_empty());
-    Ok(())
+fn constant_session(workspace: &Workspace, script: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+    run(&paths(workspace), script.as_bytes(), &mut output, fixed_clock, constant_random)?;
+    Ok(String::from_utf8(output)?)
 }
 
 
 #[test]
-fn check_allows_a_live_session() -> TestResult {
+fn every_command_replies() -> TestResult {
     let space = workspace()?;
-    let mut output = Vec::new();
+    constant_session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
+    let secret = BASE32_NOPAD.encode(&[PATTERN_BYTE; SECRET_BYTES]);
+    let code = totp_now(&secret, fixed_clock())?;
+    let token = "07".repeat(KEY_LENGTH);
     let script = format!(
-        "create alice {PASSWORD} reader\nlogin alice {PASSWORD} src\ncheck {}\n",
-        "07".repeat(KEY_LENGTH)
+        "login root {PASSWORD} src {code}\ncreate {token} alice {PASSWORD} reader\nenrol {token} alice\nenrol {token} alice 000000\nroles {token} alice analyst\n\
+         revoke-all {token} alice\ncheck {token}\nrevoke {token} {token}\ncheck {token}\nbogus\ntotp !!!\n"
     );
-    run(&paths(&space), script.as_bytes(), &mut output, fixed_clock, constant_random)?;
-    assert!(String::from_utf8(output)?.contains("allowed alice"));
+    let output = constant_session(&space, &script)?;
+    assert!(output.contains(&format!("ok {token}")));
+    assert!(output.contains("allowed root"));
+    assert!(output.contains("revoked 0"));
+    assert!(output.contains("error session is invalid or expired"));
+    assert!(output.contains("error invalid command: unknown command"));
+    assert!(output.contains("error invalid command: secret is not base32"));
+    assert!(output.matches("secret ").count() >= ENROLMENTS);
     Ok(())
 }
 
@@ -199,6 +213,30 @@ fn roles_are_parsed_and_totp_is_computed() -> TestResult {
         totp_now(RFC_SECRET_BASE32, OffsetDateTime::from_unix_timestamp(-1)?),
         Err(AuthError::ClockBeforeEpoch)
     ));
+    Ok(())
+}
+
+
+#[test]
+fn key_files_must_be_private_and_exactly_32_bytes() -> TestResult {
+    let space = workspace()?;
+    let mut output = Vec::new();
+    [
+        (vec![KEY_FILL; KEY_LENGTH + 1], OWNER_ONLY),
+        (vec![KEY_FILL; KEY_LENGTH - 1], OWNER_ONLY),
+        (Vec::new(), OWNER_ONLY),
+    ]
+    .into_iter()
+    .try_for_each(|(bytes, mode)| {
+        write_key(space.directory.path(), bytes, mode)?;
+        let result = run(&paths(&space), "".as_bytes(), &mut output, fixed_clock, os_random);
+        assert!(matches!(result, Err(AuthError::InvalidKey)));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
+    let loose = run(&paths(&space), "".as_bytes(), &mut output, fixed_clock, os_random);
+    assert!(matches!(loose, Err(AuthError::Audit(AuditError::InsecurePermissions { .. }))));
+    assert!(!space.directory.path().join("audit.log").exists());
     Ok(())
 }
 
