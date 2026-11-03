@@ -42,6 +42,8 @@ pub enum OidcDenial {
     Unmapped,
     #[error("too many logins are pending")]
     TooManyPending,
+    #[error("the ID token does not prove multi-factor authentication")]
+    MfaMissing,
 }
 
 
@@ -53,6 +55,12 @@ pub enum AuthError {
     Config(#[from] ConfigError),
     #[error("the client secret reference could not be resolved: {0}")]
     Secret(#[source] io::Error),
+    #[error("OIDC URL `{0}` must use https")]
+    InsecureUrl(String),
+    #[error("OIDC URL is invalid: {0}")]
+    InvalidUrl(#[from] openidconnect::url::ParseError),
+    #[error("account `{0}` uses the reserved oidc: prefix without being external")]
+    ReservedAccount(String),
     #[error("random source failed: {0}")]
     Random(#[from] getrandom::Error),
     #[error("password hashing parameters rejected: {0}")]

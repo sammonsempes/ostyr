@@ -1,25 +1,28 @@
 use crate::error::{AuthError, OidcDenial};
 use crate::model::{Account, PendingLogin};
 use crate::random::random_array;
-use crate::rbac::check_roles;
+use crate::rbac::{check_roles, requires_mfa};
 use crate::service::{check_username, join_roles, record, Context, State, ACTION_LOGIN, ANONYMOUS_ACTOR, OIDC_PREFIX};
 use crate::session::{create_session, hash_token, revoke_user_sessions};
-use crate::types::{GroupRoleMap, HttpFn, OidcClient, PendingMap, RandomFn, ResolveFn, RoleCatalog, RoleSet};
+use crate::types::{GroupRoleMap, HttpFn, OidcClient, Parameters, PendingMap, RandomFn, ResolveFn, RoleCatalog, RoleSet};
 use core_audit::model::Outcome;
 use core_config::parse::parse_document;
 use core_config::secret::SecretRef;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreJwsSigningAlgorithm, CoreProviderMetadata};
+use openidconnect::http::{header, Response};
+use openidconnect::url::Url;
 use openidconnect::{
     AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, HttpRequest, HttpResponse, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, SyncHttpClient, TokenResponse,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fmt::Display;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::iter::once;
 use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
 
@@ -40,6 +43,18 @@ pub const PENDING_TTL_SECONDS: i64 = 600;
 
 
 pub const PENDING_MAX: usize = 1024;
+
+
+pub const RESPONSE_MAX_BYTES: u64 = 1_048_576;
+
+
+pub const HTTPS_SCHEME: &str = "https";
+
+
+pub const CLAIM_AMR: &str = "amr";
+
+
+pub const CLAIM_ACR: &str = "acr";
 
 
 pub const STATE_BYTES: usize = 32;
@@ -64,6 +79,10 @@ pub struct OidcConfig {
     #[serde(default)]
     pub scopes: Vec<String>,
     pub role_map: GroupRoleMap,
+    #[serde(default)]
+    pub mfa_amr: Vec<String>,
+    #[serde(default)]
+    pub mfa_acr: Vec<String>,
 }
 
 
@@ -86,6 +105,8 @@ pub struct Callback {
 pub struct Identity {
     pub subject: String,
     pub groups: BTreeSet<String>,
+    pub amr: BTreeSet<String>,
+    pub acr: Option<String>,
 }
 
 
@@ -94,8 +115,19 @@ pub fn default_groups_claim() -> String {
 }
 
 
+pub fn require_https(value: &str) -> Result<(), AuthError> {
+    if Url::parse(value)?.scheme() == HTTPS_SCHEME {
+        Ok(())
+    } else {
+        Err(AuthError::InsecureUrl(value.to_owned()))
+    }
+}
+
+
 pub fn parse_oidc_config(text: &str, file: &str, catalog: &RoleCatalog) -> Result<OidcConfig, AuthError> {
     let config: OidcConfig = parse_document(text, file)?;
+    require_https(&config.issuer)?;
+    require_https(&config.redirect_url)?;
     config.role_map.values().try_for_each(|roles| check_roles(catalog, roles))?;
     Ok(config)
 }
@@ -110,7 +142,26 @@ pub fn new_agent() -> ureq::Agent {
 
 
 pub fn http_call(agent: &ureq::Agent, request: HttpRequest) -> Result<HttpResponse, io::Error> {
-    agent.call(request).map_err(io::Error::other)
+    let target = agent.request(request.method().as_str(), &request.uri().to_string());
+    let prepared = request
+        .headers()
+        .iter()
+        .try_fold(target, |built, (name, value)| value.to_str().map(|text| built.set(name.as_str(), text)))
+        .map_err(io::Error::other)?;
+    let response = prepared.send_bytes(request.body()).map_err(io::Error::other)?;
+    let builder = response
+        .header(header::CONTENT_TYPE.as_str())
+        .iter()
+        .fold(Response::builder().status(response.status()), |built, value| {
+            built.header(header::CONTENT_TYPE, *value)
+        });
+    let mut body = Vec::new();
+    response.into_reader().take(RESPONSE_MAX_BYTES + 1).read_to_end(&mut body)?;
+    if body.len() as u64 > RESPONSE_MAX_BYTES {
+        Err(io::Error::other("identity provider response is too large"))
+    } else {
+        builder.body(body).map_err(io::Error::other)
+    }
 }
 
 
@@ -122,6 +173,8 @@ pub fn provider_error<Cause: Display>(cause: Cause) -> OidcDenial {
 
 pub fn build_client(oidc: &OidcContext) -> Result<OidcClient, OidcDenial> {
     let secret = (oidc.resolve)(&oidc.config.client_secret).map_err(provider_error)?;
+    require_https(&oidc.config.issuer).map_err(provider_error)?;
+    require_https(&oidc.config.redirect_url).map_err(provider_error)?;
     let issuer = IssuerUrl::new(oidc.config.issuer.clone()).map_err(provider_error)?;
     let redirect = RedirectUrl::new(oidc.config.redirect_url.clone()).map_err(provider_error)?;
     let metadata = CoreProviderMetadata::discover(&issuer, &oidc.http).map_err(provider_error)?;
@@ -144,7 +197,7 @@ pub fn prune_pending(pending: &mut PendingMap, now: OffsetDateTime) {
 }
 
 
-pub fn begin_login(oidc: &OidcContext, pending: &mut PendingMap, now: OffsetDateTime, random: RandomFn) -> Result<String, AuthError> {
+pub fn start_login(oidc: &OidcContext, pending: &mut PendingMap, now: OffsetDateTime, random: RandomFn) -> Result<String, AuthError> {
     prune_pending(pending, now);
     if pending.len() >= PENDING_MAX {
         Err(OidcDenial::TooManyPending)?;
@@ -185,6 +238,23 @@ pub fn begin_login(oidc: &OidcContext, pending: &mut PendingMap, now: OffsetDate
 }
 
 
+pub fn begin_login<Output: Write>(
+    context: &Context<Output>,
+    oidc: &OidcContext,
+    pending: &mut PendingMap,
+    now: OffsetDateTime,
+    source: &str,
+) -> Result<String, AuthError> {
+    match start_login(oidc, pending, now, context.random) {
+        Err(AuthError::Oidc(denial)) => {
+            audit_denial(context, now, ANONYMOUS_ACTOR, denial, source)?;
+            Err(AuthError::Oidc(denial))
+        }
+        other => other,
+    }
+}
+
+
 pub fn claims_denial(error: ClaimsVerificationError) -> OidcDenial {
     tracing::warn!(%error, "ID token rejected");
     match error {
@@ -212,6 +282,7 @@ pub fn denial_reason(denial: OidcDenial) -> &'static str {
         OidcDenial::InvalidSubject => "invalid_subject",
         OidcDenial::Unmapped => "unmapped",
         OidcDenial::TooManyPending => "too_many_pending",
+        OidcDenial::MfaMissing => "mfa_missing",
     }
 }
 
@@ -255,6 +326,8 @@ pub fn fetch_identity(oidc: &OidcContext, login: PendingLogin, code: &SecretStri
     payload_of(&token.to_string()).map(|payload| Identity {
         subject,
         groups: groups_of(&payload, &oidc.config.groups_claim),
+        amr: groups_of(&payload, CLAIM_AMR),
+        acr: payload.get(CLAIM_ACR).and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -281,6 +354,23 @@ pub fn upsert_external(state: &mut State, username: &str, roles: RoleSet) {
 }
 
 
+pub fn audit_denial<Output: Write>(
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    actor: &str,
+    denial: OidcDenial,
+    source: &str,
+) -> Result<(), AuthError> {
+    let outcome = if matches!(denial, OidcDenial::Unmapped | OidcDenial::MfaMissing) {
+        Outcome::Denied
+    } else {
+        Outcome::Failure
+    };
+    let parameters = [("reason", denial_reason(denial).to_owned()), ("source", source.to_owned())];
+    record(context, now, actor, ACTION_LOGIN, OIDC_TARGET, outcome, &parameters)
+}
+
+
 pub fn record_denial<Output: Write>(
     context: &Context<Output>,
     now: OffsetDateTime,
@@ -288,14 +378,39 @@ pub fn record_denial<Output: Write>(
     denial: OidcDenial,
     callback: &Callback,
 ) -> Result<AuthError, AuthError> {
-    let outcome = if denial == OidcDenial::Unmapped {
-        Outcome::Denied
-    } else {
-        Outcome::Failure
-    };
-    let parameters = [("reason", denial_reason(denial).to_owned()), ("source", callback.source.clone())];
-    record(context, now, actor, ACTION_LOGIN, OIDC_TARGET, outcome, &parameters)?;
+    audit_denial(context, now, actor, denial, &callback.source)?;
     Ok(AuthError::InvalidCredentials)
+}
+
+
+pub fn mfa_satisfied(config: &OidcConfig, identity: &Identity) -> bool {
+    identity.amr.iter().any(|method| config.mfa_amr.contains(method)) || identity.acr.as_ref().is_some_and(|class| config.mfa_acr.contains(class))
+}
+
+
+pub fn strip_account(state: &mut State, username: &str) -> usize {
+    state.accounts.get_mut(username).into_iter().for_each(|account| account.roles.clear());
+    revoke_user_sessions(&mut state.sessions, username)
+}
+
+
+pub fn deny_external<Output: Write>(
+    state: &mut State,
+    context: &Context<Output>,
+    now: OffsetDateTime,
+    username: &str,
+    denial: OidcDenial,
+    mapping: &[(&'static str, String)],
+    callback: &Callback,
+) -> Result<AuthError, AuthError> {
+    let mut working = state.clone();
+    let revoked = strip_account(&mut working, username);
+    let parameters: Parameters = mapping.iter().cloned().chain(once(("revoked", revoked.to_string()))).collect();
+    record(context, now, username, ACTION_OIDC_MAP, username, Outcome::Denied, &parameters)?;
+    let error = record_denial(context, now, username, denial, callback)?;
+    state.accounts = working.accounts;
+    state.sessions = working.sessions;
+    Ok(error)
 }
 
 
@@ -340,8 +455,9 @@ pub fn settle_identity<Output: Write>(
         let roles = map_roles(oidc.config, &identity.groups);
         let mapping = [("roles", join_roles(&roles)), ("groups", identity.groups.len().to_string())];
         if roles.is_empty() {
-            record(context, now, &username, ACTION_OIDC_MAP, &username, Outcome::Denied, &mapping)?;
-            Err(record_denial(context, now, &username, OidcDenial::Unmapped, callback)?)
+            Err(deny_external(state, context, now, &username, OidcDenial::Unmapped, &mapping, callback)?)
+        } else if requires_mfa(context.catalog, &roles) && !mfa_satisfied(oidc.config, identity) {
+            Err(deny_external(state, context, now, &username, OidcDenial::MfaMissing, &mapping, callback)?)
         } else {
             record(context, now, &username, ACTION_OIDC_MAP, &username, Outcome::Success, &mapping)?;
             grant_external(state, context, now, &username, roles, callback)

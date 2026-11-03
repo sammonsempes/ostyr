@@ -11,17 +11,18 @@ use core_audit::verify::verify;
 use core_auth::error::{AuthError, OidcDenial};
 use core_auth::oidc::{
     begin_login, claims_denial, complete_login, denial_reason, groups_of, http_call, map_roles, new_agent, parse_oidc_config, payload_of, Callback,
-    OidcConfig, OidcContext, PENDING_MAX,
+    OidcConfig, OidcContext, PENDING_MAX, RESPONSE_MAX_BYTES,
 };
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
 use core_auth::rbac::{builtin_catalog, PERMISSION_ALERTS_TRIAGE, PERMISSION_USERS_MANAGE};
 use core_auth::service::{authorize, create_account, Context, State};
+use core_auth::store::load_accounts;
 use core_auth::types::{CompromisedSet, PendingMap, RoleCatalog, StoreKey};
 use core_config::secret::SecretRef;
 use limited_writer::LimitedWriter;
 use oidc_provider::{challenge_of, jwks, make_jwt, metadata, provider, respond, Provider, CLIENT_ID, GOOD_KEY, ISSUER, OTHER_KEY, STATUS_ERROR};
-use openidconnect::http::Request;
+use openidconnect::http::{HeaderValue, Request};
 use openidconnect::url::Url;
 use openidconnect::{ClaimsVerificationError, HttpRequest};
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
@@ -57,7 +58,13 @@ const HTTP_OK: u16 = 200;
 const PLUS_TWO: i64 = 2;
 
 
-const REASON_COUNT: usize = 12;
+const PROVIDER_REFUSALS: usize = 6;
+
+
+const NON_UTF8_BYTE: u8 = 255;
+
+
+const REASON_COUNT: usize = 13;
 
 
 const GROUP_COUNT: usize = 2;
@@ -78,7 +85,10 @@ const ANALYST_GROUP: &str = "soc-analysts";
 const ADMIN_GROUP: &str = "soc-admins";
 
 
-const CONFIG_TEXT: &str = "issuer: https://idp.example\nclient_id: test-client\nclient_secret: vault://kv/oidc\nredirect_url: https://ostyr.example/callback\nrole_map:\n  soc-analysts: [analyst]\n  soc-admins: [administrator, responder]\n";
+const CONFIG_TEXT: &str = "issuer: https://idp.example\nclient_id: test-client\nclient_secret: vault://kv/oidc\nredirect_url: https://ostyr.example/callback\nrole_map:\n  soc-analysts: [analyst]\n  soc-admins: [administrator, responder]\nmfa_amr: [mfa, otp]\nmfa_acr: [\"urn:mfa\"]\n";
+
+
+const CONFIG_WITHOUT_MFA: &str = "issuer: https://idp.example\nclient_id: test-client\nclient_secret: vault://kv/oidc\nredirect_url: https://ostyr.example/callback\nrole_map:\n  soc-analysts: [analyst]\n  soc-admins: [administrator, responder]\n";
 
 
 struct Fixture<Output> {
@@ -97,6 +107,8 @@ struct Spec {
     nonce: Option<String>,
     exp_offset: i64,
     groups: Value,
+    amr: Value,
+    acr: Option<String>,
     pem: &'static str,
     state: Option<String>,
     include_token: bool,
@@ -119,12 +131,17 @@ fn config() -> Result<OidcConfig, Box<dyn std::error::Error>> {
 
 
 fn fixture_over<Output: Write>(output: Output) -> Result<Fixture<Output>, Box<dyn std::error::Error>> {
+    fixture_text(output, CONFIG_TEXT)
+}
+
+
+fn fixture_text<Output: Write>(output: Output, text: &str) -> Result<Fixture<Output>, Box<dyn std::error::Error>> {
     Ok(Fixture {
         audit: genesis_log(output),
         key: SecretSlice::from(vec![KEY_FILL; KEY_LENGTH]),
         catalog: builtin_catalog(),
         compromised: CompromisedSet::new(),
-        config: config()?,
+        config: parse_oidc_config(text, "oidc.yaml", &builtin_catalog())?,
     })
 }
 
@@ -170,6 +187,8 @@ fn spec() -> Spec {
         nonce: None,
         exp_offset: TOKEN_TTL,
         groups: json!([ANALYST_GROUP]),
+        amr: Value::Null,
+        acr: None,
         pem: GOOD_KEY,
         state: None,
         include_token: true,
@@ -195,7 +214,7 @@ fn prepare<Output: Write>(fixture: &Fixture<Output>, pending: &mut PendingMap) -
         http: &http,
         resolve: &resolve,
     };
-    let url = Url::parse(&begin_login(&oidc, pending, at(0)?, os_random)?)?;
+    let url = Url::parse(&begin_login(&context(fixture), &oidc, pending, at(0)?, SOURCE)?)?;
     let pairs: BTreeMap<String, String> = url.query_pairs().map(|(name, value)| (name.into_owned(), value.into_owned())).collect();
     let field = |name: &str| pairs.get(name).cloned().ok_or(format!("missing {name}"));
     assert_eq!(field("code_challenge_method")?, "S256");
@@ -220,6 +239,8 @@ fn token_for(prepared: &Prepared, spec: &Spec) -> Result<String, Box<dyn std::er
         "iat": now,
         "nonce": spec.nonce.clone().unwrap_or_else(|| prepared.nonce.clone()),
         "groups": spec.groups,
+        "amr": spec.amr,
+        "acr": spec.acr,
     });
     make_jwt(spec.pem, &claims)
 }
@@ -530,6 +551,7 @@ fn object_groups_and_role_changes_revoke_old_sessions() -> TestResult {
     let third = prepare(&fixture, &mut pending)?;
     let promoted = Spec {
         groups: json!({ ADMIN_GROUP: {"org": "domain"} }),
+        amr: json!(["mfa"]),
         ..spec()
     };
     let admin = complete(&fixture, &mut state, &mut pending, &third, &promoted)??;
@@ -676,7 +698,21 @@ fn begin_login_reports_failures() -> TestResult {
             http,
             resolve: &resolve,
         };
-        begin_login(&oidc, queue, at(0).map_err(|error| AuthError::Usage(error.to_string()))?, os_random)
+        begin_login(
+            &context(&fixture),
+            &oidc,
+            queue,
+            at(0).map_err(|error| AuthError::Usage(error.to_string()))?,
+            SOURCE,
+        )
+    };
+    let insecure_issuer = OidcConfig {
+        issuer: "http://idp.example".to_owned(),
+        ..fixture.config.clone()
+    };
+    let insecure_redirect = OidcConfig {
+        redirect_url: "http://ostyr.example/callback".to_owned(),
+        ..fixture.config.clone()
     };
     let bad_issuer = OidcConfig {
         issuer: "not a url".to_owned(),
@@ -710,7 +746,18 @@ fn begin_login_reports_failures() -> TestResult {
         with(&fixture.config, &broken_http, &mut pending),
         Err(AuthError::Oidc(OidcDenial::Provider))
     ));
+    assert!(matches!(
+        with(&insecure_issuer, &healthy_http, &mut pending),
+        Err(AuthError::Oidc(OidcDenial::Provider))
+    ));
+    assert!(matches!(
+        with(&insecure_redirect, &healthy_http, &mut pending),
+        Err(AuthError::Oidc(OidcDenial::Provider))
+    ));
     assert!(pending.is_empty());
+    let refusals = audit_text(&fixture)?;
+    assert_eq!(refusals.matches("\"reason\":\"provider_error\"").count(), PROVIDER_REFUSALS);
+    assert!(refusals.contains("\"source\":\"10.0.0.7\""));
     let scoped_url = with(&scoped, &healthy_http, &mut pending)?;
     assert!(scoped_url.contains("scope=openid+profile"), "{scoped_url}");
     let oidc = OidcContext {
@@ -718,8 +765,29 @@ fn begin_login_reports_failures() -> TestResult {
         http: &healthy_http,
         resolve: &resolve,
     };
-    let failing_random = begin_login(&oidc, &mut PendingMap::new(), at(0)?, |_| Err(getrandom::Error::UNSUPPORTED));
+    let failing = context_with(&fixture, |_| Err(getrandom::Error::UNSUPPORTED));
+    let failing_random = begin_login(&failing, &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
     assert!(matches!(failing_random, Err(AuthError::Random(_))));
+    Ok(())
+}
+
+
+#[test]
+fn begin_login_refusal_with_failing_audit_is_an_audit_error() -> TestResult {
+    let fixture = fixture_over(LimitedWriter {
+        operations_left: 0,
+        bytes: Vec::new(),
+    })?;
+    let broken = provider(None, None);
+    broken.discoveries_left.set(0);
+    let http = |request: HttpRequest| respond(&broken, request);
+    let oidc = OidcContext {
+        config: &fixture.config,
+        http: &http,
+        resolve: &resolve,
+    };
+    let result = begin_login(&context(&fixture), &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
+    assert!(matches!(result, Err(AuthError::Audit(_))));
     Ok(())
 }
 
@@ -741,11 +809,12 @@ fn pending_logins_are_capped_and_pruned() -> TestResult {
         resolve: &resolve,
     };
     assert!(matches!(
-        begin_login(&oidc, &mut pending, at(0)?, os_random),
+        begin_login(&context(&fixture), &oidc, &mut pending, at(0)?, SOURCE),
         Err(AuthError::Oidc(OidcDenial::TooManyPending))
     ));
+    assert!(audit_text(&fixture)?.contains("\"reason\":\"too_many_pending\""));
     let later = at(core_auth::oidc::PENDING_TTL_SECONDS + 1)?;
-    begin_login(&oidc, &mut pending, later, os_random)?;
+    begin_login(&context(&fixture), &oidc, &mut pending, later, SOURCE)?;
     assert_eq!(pending.len(), 1);
     assert!(!first.state.is_empty());
     Ok(())
@@ -766,6 +835,21 @@ fn config_loading_checks_secret_and_roles() -> TestResult {
     assert!(matches!(
         parse_oidc_config(&unknown_role, "oidc.yaml", &catalog),
         Err(AuthError::UnknownRole(_))
+    ));
+    let insecure_issuer = CONFIG_TEXT.replace("https://idp.example", "http://idp.example");
+    assert!(matches!(
+        parse_oidc_config(&insecure_issuer, "oidc.yaml", &catalog),
+        Err(AuthError::InsecureUrl(_))
+    ));
+    let insecure_redirect = CONFIG_TEXT.replace("https://ostyr.example", "http://ostyr.example");
+    assert!(matches!(
+        parse_oidc_config(&insecure_redirect, "oidc.yaml", &catalog),
+        Err(AuthError::InsecureUrl(_))
+    ));
+    let garbage = CONFIG_TEXT.replace("https://idp.example", "not a url");
+    assert!(matches!(
+        parse_oidc_config(&garbage, "oidc.yaml", &catalog),
+        Err(AuthError::InvalidUrl(_))
     ));
     Ok(())
 }
@@ -791,6 +875,7 @@ fn claims_and_groups_helpers() -> TestResult {
         OidcDenial::InvalidSubject,
         OidcDenial::Unmapped,
         OidcDenial::TooManyPending,
+        OidcDenial::MfaMissing,
     ]
     .into_iter()
     .map(denial_reason)
@@ -817,7 +902,7 @@ fn payload_decoding_rejects_malformed_tokens() -> TestResult {
 }
 
 
-fn serve_once(response: &'static str) -> Result<(u16, std::thread::JoinHandle<io::Result<()>>), io::Error> {
+fn serve_once(response: String) -> Result<(u16, std::thread::JoinHandle<io::Result<()>>), io::Error> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let handle = std::thread::spawn(move || {
@@ -834,7 +919,8 @@ fn serve_once(response: &'static str) -> Result<(u16, std::thread::JoinHandle<io
 
 #[test]
 fn http_adapter_talks_to_a_server_and_reports_failures() -> TestResult {
-    let (port, handle) = serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")?;
+    let (port, handle) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned())?;
     let request = Request::builder()
         .method("GET")
         .uri(format!("http://127.0.0.1:{port}/x"))
@@ -849,5 +935,191 @@ fn http_adapter_talks_to_a_server_and_reports_failures() -> TestResult {
         .uri(format!("http://127.0.0.1:{closed}/x"))
         .body(Vec::new())?;
     assert!(http_call(&new_agent(), refused).is_err());
+    Ok(())
+}
+
+
+fn reply_text(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+
+fn get_request(port: u16) -> Result<openidconnect::HttpRequest, Box<dyn std::error::Error>> {
+    Ok(Request::builder()
+        .method("GET")
+        .uri(format!("http://127.0.0.1:{port}/x"))
+        .header("x-test", "value")
+        .body(Vec::new())?)
+}
+
+
+#[test]
+fn http_adapter_refuses_oversized_bodies_and_error_statuses() -> TestResult {
+    let limit = usize::try_from(RESPONSE_MAX_BYTES)?;
+    let exact = "a".repeat(limit);
+    let (exact_port, exact_handle) = serve_once(reply_text("200 OK", &exact))?;
+    let accepted = http_call(&new_agent(), get_request(exact_port)?)?;
+    exact_handle.join().map_err(|_| "server thread panicked")??;
+    assert_eq!(accepted.body().len(), limit);
+    let (big_port, big_handle) = serve_once(reply_text("200 OK", &"a".repeat(limit + 1)))?;
+    let oversized = http_call(&new_agent(), get_request(big_port)?);
+    big_handle.join().map_err(|_| "server thread panicked")??;
+    assert!(oversized.is_err());
+    let (status_port, status_handle) = serve_once(reply_text("500 Internal Server Error", "{}"))?;
+    let failed = http_call(&new_agent(), get_request(status_port)?);
+    status_handle.join().map_err(|_| "server thread panicked")??;
+    assert!(failed.is_err());
+    let binary = Request::builder()
+        .method("GET")
+        .uri("http://127.0.0.1:1/x")
+        .header("x-test", HeaderValue::from_bytes(&[NON_UTF8_BYTE])?)
+        .body(Vec::new())?;
+    assert!(http_call(&new_agent(), binary).is_err());
+    Ok(())
+}
+
+
+fn login_with(fixture: &Fixture<Vec<u8>>, state: &mut State, spec: &Spec) -> Result<Result<SecretString, AuthError>, Box<dyn std::error::Error>> {
+    let mut pending = PendingMap::new();
+    let prepared = prepare(fixture, &mut pending)?;
+    complete(fixture, state, &mut pending, &prepared, spec)
+}
+
+
+fn admin(amr: Value, acr: Option<&str>) -> Spec {
+    Spec {
+        groups: json!([ADMIN_GROUP]),
+        amr,
+        acr: acr.map(str::to_owned),
+        ..spec()
+    }
+}
+
+
+#[test]
+fn privileged_roles_need_a_configured_mfa_claim() -> TestResult {
+    let cases = [
+        (json!(["pwd"]), None, false),
+        (Value::Null, None, false),
+        (json!(["pwd", "otp"]), None, true),
+        (json!(["mfa"]), None, true),
+        (Value::Null, Some("urn:mfa"), true),
+        (json!(["pwd"]), Some("urn:mfa"), true),
+        (Value::Null, Some("urn:other"), false),
+    ];
+    cases.into_iter().try_for_each(|(amr, acr, granted)| {
+        let fixture = fixture_over(Vec::new())?;
+        let mut state = State::default();
+        let result = login_with(&fixture, &mut state, &admin(amr, acr))?;
+        assert_eq!(result.is_ok(), granted);
+        assert_eq!(state.sessions.len(), usize::from(granted));
+        assert_eq!(state.accounts.len(), usize::from(granted));
+        let text = audit_text(&fixture)?;
+        assert_eq!(text.contains("\"reason\":\"mfa_missing\""), !granted);
+        assert_eq!(text.contains("\"outcome\":\"denied\""), !granted);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn privileged_roles_are_never_granted_without_configured_mfa() -> TestResult {
+    let fixture = fixture_text(Vec::new(), CONFIG_WITHOUT_MFA)?;
+    let mut state = State::default();
+    let strong = admin(json!(["mfa", "otp", "hwk"]), Some("urn:mfa"));
+    let result = login_with(&fixture, &mut state, &strong)?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert!(state.sessions.is_empty() && state.accounts.is_empty());
+    let analyst = login_with(&fixture, &mut state, &spec())?;
+    assert!(analyst.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn losing_mapping_or_mfa_clears_roles_and_sessions() -> TestResult {
+    let lost = [
+        Spec {
+            groups: json!(["nobody"]),
+            ..admin(json!(["mfa"]), None)
+        },
+        admin(json!(["pwd"]), None),
+    ];
+    lost.iter().try_for_each(|downgrade| {
+        let fixture = fixture_over(Vec::new())?;
+        let mut state = State::default();
+        let token = login_with(&fixture, &mut state, &admin(json!(["mfa"]), None))??;
+        assert_eq!(state.sessions.len(), 1);
+        let result = login_with(&fixture, &mut state, downgrade)?;
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        assert!(state.sessions.is_empty());
+        let account = state.accounts.get("oidc:user-1").ok_or("account missing")?;
+        assert!(account.roles.is_empty());
+        assert!(authorize(
+            &mut state,
+            &fixture.catalog,
+            token.expose_secret(),
+            at(PLUS_TWO)?,
+            PERMISSION_ALERTS_TRIAGE
+        )
+        .is_err());
+        let text = audit_text(&fixture)?;
+        assert!(text.contains("\"revoked\":\"1\""), "{text}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+fn downgrade_run(budget: usize) -> Result<&'static str, Box<dyn std::error::Error>> {
+    let fixture = fixture_over(LimitedWriter {
+        operations_left: usize::MAX,
+        bytes: Vec::new(),
+    })?;
+    let mut state = State::default();
+    let mut pending = PendingMap::new();
+    let first = prepare(&fixture, &mut pending)?;
+    complete(&fixture, &mut state, &mut pending, &first, &spec())??;
+    let second = prepare(&fixture, &mut pending)?;
+    fixture.audit.state.lock().map_err(|_| "poisoned")?.writer.operations_left = budget;
+    let unmapped = Spec {
+        groups: json!(["nobody"]),
+        ..spec()
+    };
+    let result = complete(&fixture, &mut state, &mut pending, &second, &unmapped)?;
+    let account = state.accounts.get("oidc:user-1").ok_or("account missing")?;
+    match &result {
+        Err(AuthError::Audit(_)) => {
+            assert!(!account.roles.is_empty() && state.sessions.len() == 1);
+            Ok("audit")
+        }
+        Err(AuthError::InvalidCredentials) => {
+            assert!(account.roles.is_empty() && state.sessions.is_empty());
+            Ok("denied")
+        }
+        other => Err(format!("unexpected {other:?}").into()),
+    }
+}
+
+
+#[test]
+fn downgrade_is_committed_only_after_the_audit_append() -> TestResult {
+    let labels = (0..=AUDIT_BUDGET).map(downgrade_run).collect::<Result<Vec<_>, _>>()?;
+    assert!(labels.contains(&"denied") && labels.contains(&"audit"));
+    Ok(())
+}
+
+
+#[test]
+fn store_refuses_local_accounts_in_the_oidc_namespace() -> TestResult {
+    let local =
+        r#"{"version":1,"accounts":[{"username":"oidc:x","password_hash":"$argon2id$v=19$m=1,t=1,p=1$c2FsdHNhbHQ$aGFzaA","roles":[],"totp":null}]}"#;
+    assert!(matches!(load_accounts(local.as_bytes()), Err(AuthError::ReservedAccount(name)) if name == "oidc:x"));
+    let external = local.replace("$argon2id$v=19$m=1,t=1,p=1$c2FsdHNhbHQ$aGFzaA", "!external");
+    assert_eq!(load_accounts(external.as_bytes())?.len(), 1);
+    let ordinary = local.replace("oidc:x", "alice");
+    assert_eq!(load_accounts(ordinary.as_bytes())?.len(), 1);
     Ok(())
 }
