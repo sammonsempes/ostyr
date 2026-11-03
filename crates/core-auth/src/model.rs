@@ -2,6 +2,7 @@ use crate::types::RoleSet;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use webauthn_rs::prelude::{DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration};
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,4 +44,56 @@ pub struct PendingLogin {
     pub nonce: String,
     pub verifier: SecretString,
     pub created_at: OffsetDateTime,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredCredential {
+    pub username: String,
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+    pub passkey: Passkey,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialInfo {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+}
+
+
+#[derive(Debug, Clone)]
+pub enum ChallengeKind {
+    Registration(PasskeyRegistration),
+    SecondFactor(PasskeyAuthentication),
+    Passwordless(DiscoverableAuthentication),
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Challenge {
+    pub actor: String,
+    pub user: String,
+    pub created_at: OffsetDateTime,
+    pub kind: ChallengeKind,
+}
+
+
+#[derive(Debug, Clone)]
+pub enum Prepared {
+    SecondFactor(PasskeyAuthentication),
+    Passwordless(DiscoverableAuthentication, Box<Passkey>),
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Located {
+    pub user: String,
+    pub prepared: Prepared,
 }

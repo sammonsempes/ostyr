@@ -22,10 +22,13 @@ thiserror = "2.0.21"
 ureq = "2.12"
 time = { version = "0.3", features = ["formatting"] }
 totp-lite = "2.0.1"
+uuid = "1"
+webauthn-rs = { version = "0.6.2", default-features = false, features = ["conditional-ui"] }
 tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+webauthn-authenticator-rs = { version = "0.6.2", features = ["softpasskey"] }
 
 [lints]
 workspace = true
