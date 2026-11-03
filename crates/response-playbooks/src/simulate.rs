@@ -62,6 +62,7 @@ pub struct Run<'a> {
     pub failed: bool,
     pub halted: bool,
     pub awaiting: bool,
+    pub approval_seen: bool,
 }
 
 
@@ -204,6 +205,9 @@ pub fn reject(state: &mut Run, work: &Work, reason: String) {
         action: work.step.action.as_deref().map_or_else(String::new, str::to_owned),
         reason,
     });
+    if is_approval(work.step) || state.approval_seen {
+        state.awaiting = true;
+    }
 }
 
 
@@ -264,6 +268,7 @@ pub fn record_approval(context: &Context, work: &Work, resolved: &ResolvedMap, s
         granted,
     });
     state.awaiting = !granted;
+    state.approval_seen = true;
 }
 
 

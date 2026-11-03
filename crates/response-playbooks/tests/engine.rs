@@ -216,6 +216,7 @@ fn custom_trace(steps: &str, alert: &Value, fail_action: Option<usize>) -> Resul
     let current = harness()?;
     let mut simulated = input("{}", fail_action)?;
     simulated.alert = alert.clone();
+    simulated.approvals = vec!["granted".to_owned()];
     Ok(render_trace(&simulate(
         &playbook,
         &catalogue,
@@ -297,6 +298,36 @@ fn compensations_run_in_reverse_order_of_the_actions() -> TestResult {
         &input("{}", Some(NO_ENTRY))?,
     ));
     assert!(!first.contains("compensation"));
+    Ok(())
+}
+
+
+#[test]
+fn an_unresolvable_approval_stops_the_run() -> TestResult {
+    let alert = json!({ "name": "n", "host": { "value": "h" } });
+    let halted = custom_trace(
+        "  - action: request_approval\n    params: { role: lead, timeout: 5m, action: \"{{ alert.missing }}\" }\n  - action: notify\n    params: { text: after }\n  - action: nothing",
+        &alert,
+        None,
+    )?;
+    assert!(halted.contains("rejected steps.0 request_approval"), "{halted}");
+    assert!(halted.contains("pending approval steps.1 notify"), "{halted}");
+    assert!(halted.contains("pending approval steps.2"), "{halted}");
+    assert!(!halted.contains("action steps.1"), "{halted}");
+    let after_approval = custom_trace(
+        "  - action: request_approval\n    params: { role: lead, timeout: 5m, action: ban }\n  - action: nothing\n  - action: notify\n    params: { text: after }",
+        &alert,
+        None,
+    )?;
+    assert!(after_approval.contains("pending approval steps.1"), "{after_approval}");
+    assert!(!after_approval.contains("action steps.2"), "{after_approval}");
+    let granted = custom_trace(
+        "  - action: request_approval\n    params: { role: lead, timeout: 5m, action: granted }\n  - action: nothing\n  - action: notify\n    params: { text: after }",
+        &alert,
+        None,
+    )?;
+    assert!(granted.contains("rejected steps.1 nothing"), "{granted}");
+    assert!(granted.contains("pending approval steps.2 notify"), "{granted}");
     Ok(())
 }
 
@@ -897,5 +928,14 @@ fn a_document_deeper_than_the_state_limit_keeps_its_tail_as_text() -> TestResult
         leaves("f", &json!({ "a": [], "b": { "c": 1 } })),
         vec![("f::a".to_owned(), "[]".to_owned()), ("f::b.c".to_owned(), "1".to_owned())]
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_serialisation_failure_becomes_text() -> TestResult {
+    let unserialisable: BTreeMap<(u8, u8), u8> = BTreeMap::from([((0, 1), 1)]);
+    let value = response_playbooks::bundle::document_value(&unserialisable);
+    assert!(value.as_str().is_some_and(|text| text.contains("key must be a string")), "{value}");
     Ok(())
 }

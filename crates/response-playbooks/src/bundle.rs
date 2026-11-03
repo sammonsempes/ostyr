@@ -127,7 +127,10 @@ pub fn leaves(file: &str, document: &Value) -> Vec<(String, String)> {
 
 pub fn document_value<Document: Serialize>(document: &Document) -> Value {
     serde_json::to_value(document)
-        .map_err(|failure| failure.to_string())
+        .map_err(|failure| {
+            tracing::error!(%failure, "document serialisation failed");
+            failure.to_string()
+        })
         .unwrap_or_else(Value::String)
 }
 
