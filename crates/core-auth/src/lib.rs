@@ -4,6 +4,7 @@ pub mod cli;
 pub mod error;
 pub mod limiter;
 pub mod model;
+pub mod oidc;
 pub mod password;
 pub mod policy;
 pub mod random;
