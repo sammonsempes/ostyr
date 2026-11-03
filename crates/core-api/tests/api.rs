@@ -782,7 +782,7 @@ fn pruning_keeps_only_locked_or_recent_entries() -> TestResult {
 async fn a_full_failure_table_refuses_new_sources_until_entries_expire() -> TestResult {
     let fx = fixture_with(two_key_attempt_table)?;
     assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
-    assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::UNAUTHORIZED);
+    assert_eq!(login_status(&fx, 1, "wrong password here").await?, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(login_status(&fx, SOURCE_B, PASSWORD).await?, StatusCode::TOO_MANY_REQUESTS);
     {
         let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
@@ -1145,5 +1145,82 @@ async fn a_failing_audit_on_a_locked_refusal_fails_closed() -> TestResult {
     let mut request = login_request("stranger");
     request.source = "203.0.113.50".to_owned();
     assert!(matches!(admit_login(&fx.state, "id-audit", &request), Err(ApiError::Internal)));
+    Ok(())
+}
+
+
+const FILLED_TABLE: usize = 5;
+
+
+fn filler_attempts(auth: &mut core_auth::service::State, count: usize) {
+    (0..count).for_each(|index| {
+        auth.attempts.insert(
+            format!("source:198.51.100.{index}"),
+            Attempts {
+                failures: vec![OffsetDateTime::now_utc()],
+                locked_until: None,
+            },
+        );
+    });
+}
+
+
+async fn three_step_statuses(username: &str) -> Result<Vec<StatusCode>, TestError> {
+    let fx = fixture_with(|state| {
+        Ok(ApiState {
+            max_attempts: FILLED_TABLE,
+            ..state
+        })
+    })?;
+    let mut statuses = Vec::new();
+    let first = send_from(
+        &fx.router,
+        client(SOURCE_A),
+        request("POST", "/auth/login", None, login_body(username, "wrong password here"))?,
+    )
+    .await?;
+    statuses.push(first.status());
+    {
+        let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+        let present = auth.attempts.len();
+        filler_attempts(&mut auth, FILLED_TABLE - present);
+    }
+    let retry = send_from(
+        &fx.router,
+        client(SOURCE_A),
+        request("POST", "/auth/login", None, login_body(username, "wrong password here"))?,
+    )
+    .await?;
+    statuses.push(retry.status());
+    Ok(statuses)
+}
+
+
+#[tokio::test]
+async fn a_full_table_answers_a_real_and_an_unknown_name_alike_after_one_failure() -> TestResult {
+    let real = three_step_statuses(READER).await?;
+    let unknown = three_step_statuses("nobody").await?;
+    assert_eq!(real, unknown);
+    assert_eq!(real.first(), Some(&StatusCode::UNAUTHORIZED));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_locked_account_login_logs_no_warning() -> TestResult {
+    let log_dir = tempfile::tempdir()?;
+    let log_path = log_dir.path().join("platform.log");
+    let dispatch = capture_dispatch(BoxMakeWriter::new(Mutex::new(File::create(&log_path)?)));
+    let fx = fixture_with(|state| Ok(ApiState { dispatch, ..state }))?;
+    fx.state
+        .auth
+        .lock()
+        .map_err(|_| "poisoned")?
+        .attempts
+        .insert(format!("account:{READER}"), locked_for_a_while());
+    assert_eq!(login_status(&fx, SOURCE_A, PASSWORD).await?, StatusCode::UNAUTHORIZED);
+    let text = fs::read_to_string(&log_path)?;
+    assert!(!text.contains("WARN"), "{text}");
+    assert!(!text.contains("dummy verification"), "{text}");
     Ok(())
 }
