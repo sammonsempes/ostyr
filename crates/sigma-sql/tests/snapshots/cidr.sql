@@ -1,0 +1,1 @@
+SELECT `event.id` FROM `events` WHERE `event.category` = 'network' AND `host.os.type` = 'linux' AND (((isIPAddressInRange(toString(`destination.ip`), '10.0.0.0/8') OR isIPAddressInRange(toString(`destination.ip`), '2001:db8::/32')) AND `destination.port` = 4444))

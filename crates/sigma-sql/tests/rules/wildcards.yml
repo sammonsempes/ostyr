@@ -1,0 +1,13 @@
+title: Wildcards and escapes
+logsource:
+  category: file_event
+  product: linux
+detection:
+  selection:
+    TargetFilename:
+      - '/tmp/*.sh'
+      - '/tmp/a?b'
+      - '/tmp/100%_done'
+      - '/tmp/literal\*star'
+      - 'C:\dir\\*'
+  condition: selection

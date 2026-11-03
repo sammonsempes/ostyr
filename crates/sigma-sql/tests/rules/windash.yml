@@ -1,0 +1,8 @@
+title: Windows dash variants
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    CommandLine|windash|contains: ' -enc'
+  condition: selection

@@ -1,0 +1,35 @@
+products:
+  windows: windows
+  linux: linux
+categories:
+  process_creation:
+    event_category: process
+    fields:
+      Image: process.executable
+      CommandLine: process.command_line
+      ParentImage: process.parent.executable
+      ParentCommandLine: process.parent.command_line
+      User: user.name
+      ProcessId: process.pid
+      ParentProcessId: process.parent.pid
+      OriginalFileName: process.pe.original_file_name
+      CurrentDirectory: process.working_directory
+  file_event:
+    event_category: file
+    fields:
+      Image: process.executable
+      TargetFilename: file.path
+      ProcessId: process.pid
+      User: user.name
+  network_connection:
+    event_category: network
+    fields:
+      Image: process.executable
+      DestinationIp: destination.ip
+      DestinationPort: destination.port
+      DestinationHostname: destination.domain
+      SourceIp: source.ip
+      SourcePort: source.port
+      Initiated: network.direction
+      User: user.name
+      ProcessId: process.pid

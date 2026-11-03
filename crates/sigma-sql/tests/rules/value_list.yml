@@ -1,0 +1,14 @@
+title: Value list is an OR and all makes an AND
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  any_of:
+    CommandLine|contains:
+      - ' -enc '
+      - ' -EncodedCommand '
+  every:
+    CommandLine|contains|all:
+      - powershell
+      - bypass
+  condition: any_of and every

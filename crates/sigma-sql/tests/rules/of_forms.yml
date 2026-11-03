@@ -1,0 +1,12 @@
+title: Quantified conditions
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  sel_a:
+    Image|endswith: '\a.exe'
+  sel_b:
+    Image|endswith: '\b.exe'
+  other:
+    User: root
+  condition: 1 of sel* and all of sel* and 1 of them and not all of them

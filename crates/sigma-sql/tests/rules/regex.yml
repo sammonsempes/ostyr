@@ -1,0 +1,8 @@
+title: Regular expression
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    CommandLine|re: '\d{3}-\d{4}\s+it''s'
+  condition: selection

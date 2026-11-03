@@ -1,0 +1,11 @@
+title: exists and null
+logsource:
+  category: process_creation
+detection:
+  has_parent:
+    ParentImage|exists: true
+  no_user:
+    User|exists: false
+  empty_command:
+    CommandLine: null
+  condition: has_parent and no_user and empty_command

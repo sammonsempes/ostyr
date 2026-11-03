@@ -1,0 +1,15 @@
+title: Selection map is an AND
+id: 00000000-0000-4000-8000-000000000001
+status: test
+level: medium
+tags:
+  - attack.execution
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image: 'C:\Windows\System32\cmd.exe'
+    ProcessId: 4688
+    User: null
+  condition: selection

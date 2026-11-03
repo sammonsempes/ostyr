@@ -1,0 +1,1 @@
+SELECT `event.id` FROM `events` WHERE `event.category` = 'file' AND `host.os.type` = 'linux' AND ((`file.path` ilike '/tmp/%.sh' OR `file.path` ilike '/tmp/a_b' OR `file.path` ilike '/tmp/100\\%\\_done' OR `file.path` ilike '/tmp/literal*star' OR `file.path` ilike 'C:\\\\dir\\\\%'))
