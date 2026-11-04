@@ -1,0 +1,36 @@
+{
+  "username": "bob",
+  "id": "jgUEVIVzNqfEPqeU9eUwhERykDk05jE43P57f36vpz0",
+  "name": "laptop",
+  "created_at": 1700000012,
+  "last_used": null,
+  "passkey": {
+    "cred": {
+      "attestation": { "data": "Self_", "metadata": "None" },
+      "attestation_format": "packed",
+      "backup_eligible": false,
+      "backup_state": false,
+      "counter": 0,
+      "cred": {
+        "key": {
+          "EC_EC2": {
+            "curve": "SECP256R1",
+            "x": "8Q9nFeXiVoP2--eeaKJQcwq5qgjWb0ikvofvEifIZsY",
+            "y": "ulguZw7WvpvveCmpdHW82c5s35UEkkMCzI4gZDnyV4g"
+          }
+        },
+        "type_": "ES256"
+      },
+      "cred_id": "jgUEVIVzNqfEPqeU9eUwhERykDk05jE43P57f36vpz0",
+      "extensions": {
+        "appid": "NotRequested",
+        "cred_props": "Ignored",
+        "cred_protect": "Ignored",
+        "hmac_create_secret": "NotRequested"
+      },
+      "registration_policy": "required",
+      "transports": null,
+      "user_verified": true
+    }
+  }
+}

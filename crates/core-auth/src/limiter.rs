@@ -11,6 +11,9 @@ pub const SOURCE_MAX_FAILURES: usize = 20;
 pub const FAILURE_WINDOW_SECONDS: i64 = 900;
 
 
+pub const PASSKEY_START_PREFIX: &str = "passkey_start";
+
+
 pub const LOCKOUT_SECONDS: i64 = 900;
 
 
@@ -21,6 +24,11 @@ pub fn account_key(username: &str) -> String {
 
 pub fn source_key(source: &str) -> String {
     format!("source:{source}")
+}
+
+
+pub fn passkey_start_key(source: &str) -> String {
+    format!("{PASSKEY_START_PREFIX}:{source}")
 }
 
 

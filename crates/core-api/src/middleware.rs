@@ -1,7 +1,7 @@
 use crate::failure::{auth_failure, error_response};
 use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, RequestId, Requirement, Window};
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
-use crate::state::{lock_auth, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
+use crate::state::{lock_auth, refresh_accounts, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use crate::types::SharedState;
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
@@ -251,6 +251,7 @@ pub fn authenticate(app: &ApiState, requirement: Option<&Requirement>, token: St
     match validate_session(&mut auth.sessions, &token, now) {
         Err(_) => deny(ANONYMOUS_ACTOR, ApiError::Unauthorized),
         Ok(user) => {
+            refresh_accounts(app, &mut auth);
             let allowed = check_requirement(&mut auth, &app.catalog, requirement, &token, now);
             Decision {
                 actor: user.clone(),

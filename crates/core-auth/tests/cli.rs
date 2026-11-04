@@ -27,6 +27,8 @@ use core_auth::service::State;
 #[cfg(unix)]
 use core_auth::session::hash_token;
 #[cfg(unix)]
+use core_auth::store::{load_accounts_file, update_store_file};
+#[cfg(unix)]
 use core_auth::types::{CompromisedSet, RoleCatalog, StoreKey};
 use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
@@ -487,7 +489,7 @@ fn a_login_whose_store_save_fails_returns_no_session() -> TestResult {
     fs::set_permissions(&store_directory, fs::Permissions::from_mode(MODE_MASK))?;
     assert_eq!(shown.len(), CODE_DIGITS);
     assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
-    assert!(matches!(replayed, Err(AuthError::MfaInvalid)));
+    assert!(matches!(replayed, Err(AuthError::InvalidCredentials)));
     assert!(matches!(unsaved, Err(AuthError::Io(_))));
     assert_eq!(sessions_after_refusal, 1);
     assert!(state.sessions.contains_key(&hash_token(&token)));
@@ -677,5 +679,49 @@ fn a_loose_key_file_error_names_the_key_file() -> TestResult {
     write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
     let result = run(&paths(&space), "".as_bytes(), Vec::new(), fixed_clock, os_random);
     assert!(result.err().ok_or("accepted")?.to_string().starts_with("key file rejected"));
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
+fn a_command_keeps_changes_another_writer_made_to_the_file() -> TestResult {
+    let fixture = fixture();
+    let directory = tempdir()?;
+    let store = directory.path().join("accounts.json");
+    let context = working(&fixture);
+    let mut state = State::default();
+    let enrolment = apply_command(&mut state, &context, fixed_clock(), &store, &["bootstrap", "root", PASSWORD])?;
+    let secret = word_after(&enrolment, "secret ").ok_or("no secret")?.to_owned();
+    let code = totp_now(&secret, fixed_clock())?;
+    let logged = apply_command(
+        &mut state,
+        &context,
+        fixed_clock(),
+        &store,
+        &["login", "root", PASSWORD, "10.0.0.1", code.as_str()],
+    )?;
+    let token = word_after(&logged, "ok ").ok_or("no token")?.to_owned();
+    update_store_file(&store, os_random, |accounts, _| {
+        let mut outsider = accounts.get("root").ok_or(AuthError::Usage("no root".to_owned()))?.clone();
+        outsider.username = "outsider".to_owned();
+        outsider.roles = ["reader".to_owned()].into();
+        accounts.insert("outsider".to_owned(), outsider);
+        Ok(())
+    })?
+    .saved?;
+    apply_command(
+        &mut state,
+        &context,
+        fixed_clock(),
+        &store,
+        &["create", token.as_str(), "bob", "another-long-passphrase", "reader"],
+    )?;
+    let stored = load_accounts_file(&store)?;
+    assert!(stored.contains_key("outsider"));
+    assert!(stored.contains_key("bob"));
+    let listed = apply_command(&mut state, &context, fixed_clock(), &store, &["check", token.as_str()])?;
+    assert!(listed.starts_with("allowed"));
+    assert!(state.accounts.contains_key("outsider"));
     Ok(())
 }
