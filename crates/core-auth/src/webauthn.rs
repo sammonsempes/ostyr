@@ -48,6 +48,9 @@ pub const REGISTRATION_ACTOR_MAX: usize = 8;
 pub const REGISTRATION_ACCOUNT_MAX: usize = 4;
 
 
+pub const SECOND_FACTOR_ACCOUNT_MAX: usize = 3;
+
+
 pub const CHALLENGE_ID_BYTES: usize = 16;
 
 
@@ -178,6 +181,22 @@ pub fn is_crowded(state: &State, (actor, user, reserved): (&str, &str, bool), ki
 }
 
 
+/// Drops the oldest second-factor challenges of an account so that one more fits under `SECOND_FACTOR_ACCOUNT_MAX`.
+pub fn evict_second_factor(state: &mut State, user: &str) {
+    let mut held: Vec<(OffsetDateTime, String)> = state
+        .challenges
+        .iter()
+        .filter(|(_, challenge)| challenge.user == user && matches!(challenge.kind, ChallengeKind::SecondFactor(_)))
+        .map(|(identifier, challenge)| (challenge.created_at, identifier.clone()))
+        .collect();
+    held.sort();
+    let surplus = (held.len() + 1).saturating_sub(SECOND_FACTOR_ACCOUNT_MAX);
+    held.into_iter().take(surplus).for_each(|(_, identifier)| {
+        state.challenges.remove(&identifier);
+    });
+}
+
+
 pub fn issue_challenge(
     state: &mut State,
     now: OffsetDateTime,
@@ -186,6 +205,9 @@ pub fn issue_challenge(
     kind: ChallengeKind,
 ) -> Result<String, AuthError> {
     state.challenges.retain(|_, challenge| is_fresh(challenge, now));
+    if matches!(kind, ChallengeKind::SecondFactor(_)) {
+        evict_second_factor(state, user);
+    }
     if is_crowded(state, (actor, user, reserved), &kind) {
         Err(AuthError::TooManyChallenges)
     } else {

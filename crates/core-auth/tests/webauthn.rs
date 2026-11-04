@@ -30,7 +30,7 @@ use core_auth::webauthn::{
     build_webauthn, check_name, list_credentials, parse_webauthn_config, passkey_login_start, register_finish, register_start, remove_credential,
     rename_credential, user_uuid, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest, WebauthnConfig,
     ANONYMOUS_CHALLENGE_MAX, CHALLENGE_ID_BYTES, CHALLENGE_MAX, CHALLENGE_SECONDS, NAME_MAX_CHARS, PASSKEY_START_MAX, REGISTRATION_ACCOUNT_MAX,
-    RESERVED_CHALLENGE_MAX,
+    RESERVED_CHALLENGE_MAX, SECOND_FACTOR_ACCOUNT_MAX,
 };
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use failing_writer::FailingWriter;
@@ -96,6 +96,9 @@ const REFUSED_TWICE: usize = 2;
 
 
 const LATE_LOCK: i64 = 901;
+
+
+const REPEATED_STARTS: usize = 12;
 
 
 const HIGH_COUNTER: u64 = 1000;
@@ -1112,6 +1115,49 @@ fn webauthn_required_accounts_keep_a_reserved_challenge_pool() -> TestResult {
         at(PLUS_TWO)?,
         &request("glass", GOOD_PASSWORD, SOURCE)
     )));
+    Ok(())
+}
+
+
+#[test]
+fn repeated_second_factor_starts_replace_older_challenges_per_account() -> TestResult {
+    let fx = fixture_over(Vec::new(), strict_catalog()?)?;
+    let ctx = context(&fx);
+    let mut world = world(&fx)?;
+    let admin = world.admin.clone();
+    create_account(
+        &mut world.state,
+        &ctx,
+        at(PLUS_ONE)?,
+        &admin,
+        "glass",
+        &SecretString::from(GOOD_PASSWORD),
+        roles(&["breakglass"]),
+    )?;
+    let mut keys = [soft_passkey(), soft_passkey()];
+    register(&fx, &mut world.state, &mut keys[0], (&admin, "alice", "key"), PLUS_ONE)?;
+    register(&fx, &mut world.state, &mut keys[1], (&admin, "glass", "key"), PLUS_ONE)?;
+    let held = |state: &State, user: &str| state.challenges.values().filter(|challenge| challenge.user == user).count();
+    let start = |state: &mut State, user: &str, offset: i64| -> SoftResult<String> {
+        Ok(webauthn_login_start(state, &ctx, &fx.webauthn, at(offset)?, &request(user, GOOD_PASSWORD, SOURCE)).map(|(identifier, _)| identifier)?)
+    };
+    let first = start(&mut world.state, "alice", PLUS_TWO)?;
+    (0..REPEATED_STARTS).try_for_each(|_| start(&mut world.state, "alice", PLUS_TWO).map(|_| ()))?;
+    assert_eq!(held(&world.state, "alice"), SECOND_FACTOR_ACCOUNT_MAX);
+    assert!(!world.state.challenges.contains_key(&first));
+    let glass_first = start(&mut world.state, "glass", PLUS_TWO)?;
+    (0..REPEATED_STARTS).try_for_each(|_| start(&mut world.state, "glass", PLUS_TWO).map(|_| ()))?;
+    assert_eq!(held(&world.state, "glass"), SECOND_FACTOR_ACCOUNT_MAX);
+    assert!(!world.state.challenges.contains_key(&glass_first));
+    assert!(world
+        .state
+        .challenges
+        .values()
+        .filter(|challenge| challenge.reserved)
+        .all(|challenge| challenge.user == "glass"));
+    assert!(register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_TWO)?, &admin, "bob").is_ok());
+    let newest = start(&mut world.state, "alice", PLUS_TWO)?;
+    assert!(world.state.challenges.contains_key(&newest));
     Ok(())
 }
 
