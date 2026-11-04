@@ -141,6 +141,7 @@ issuer="$(curl --fail --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:443
 umask 077
 cat >"$LAB_DIR/oidc.env" <<ENV
 OIDC_ISSUER=$issuer
+OIDC_PROJECT_ID=$project_id
 OIDC_CLIENT_ID=$(jq -r .clientId <<<"$app")
 OIDC_CLIENT_SECRET=$(jq -r .clientSecret <<<"$app")
 OIDC_REDIRECT_URI=$redirect_uri

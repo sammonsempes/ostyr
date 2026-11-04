@@ -10,8 +10,8 @@ use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
 use core_auth::error::{AuthError, OidcDenial};
 use core_auth::oidc::{
-    begin_login, claims_denial, complete_login, denial_reason, groups_of, http_call, map_roles, new_agent, parse_oidc_config, payload_of, Callback,
-    OidcConfig, OidcContext, PENDING_MAX, RESPONSE_MAX_BYTES,
+    audiences_of, begin_login, claims_denial, complete_login, denial_reason, groups_of, http_call, map_roles, new_agent, parse_oidc_config,
+    payload_of, Callback, OidcConfig, OidcContext, PENDING_MAX, RESPONSE_MAX_BYTES,
 };
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
@@ -70,7 +70,7 @@ const NON_UTF8_BYTE: u8 = 255;
 const INSECURE_CASES: usize = 2;
 
 
-const REASON_COUNT: usize = 14;
+const REASON_COUNT: usize = 16;
 
 
 const GROUP_COUNT: usize = 2;
@@ -109,6 +109,8 @@ struct Fixture<Output> {
 struct Spec {
     iss: String,
     aud: String,
+    extra_aud: Vec<String>,
+    azp: Option<String>,
     sub: String,
     nonce: Option<String>,
     exp_offset: i64,
@@ -121,6 +123,12 @@ struct Spec {
     token_status: u16,
     with_token_endpoint: bool,
     discoveries: usize,
+}
+
+
+struct Case {
+    fixture: Fixture<Vec<u8>>,
+    spec: Spec,
 }
 
 
@@ -189,6 +197,8 @@ fn spec() -> Spec {
     Spec {
         iss: ISSUER.to_owned(),
         aud: CLIENT_ID.to_owned(),
+        extra_aud: Vec::new(),
+        azp: None,
         sub: SUBJECT.to_owned(),
         nonce: None,
         exp_offset: TOKEN_TTL,
@@ -239,7 +249,8 @@ fn token_for(prepared: &Prepared, spec: &Spec) -> Result<String, Box<dyn std::er
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let claims = json!({
         "iss": spec.iss,
-        "aud": [spec.aud],
+        "aud": std::iter::once(spec.aud.clone()).chain(spec.extra_aud.clone()).collect::<Vec<String>>(),
+        "azp": spec.azp,
         "sub": spec.sub,
         "exp": now + spec.exp_offset,
         "iat": now,
@@ -422,6 +433,106 @@ fn wrong_audience_is_refused() -> TestResult {
         },
         "wrong_audience",
     )
+}
+
+
+fn with_audiences(extra: &[&str], azp: Option<&str>, trusted: &[&str]) -> Result<Case, Box<dyn std::error::Error>> {
+    let mut fixture = fixture_over(Vec::new())?;
+    fixture.config.additional_audiences = trusted.iter().map(|name| (*name).to_owned()).collect();
+    let spec = Spec {
+        extra_aud: extra.iter().map(|name| (*name).to_owned()).collect(),
+        azp: azp.map(str::to_owned),
+        ..spec()
+    };
+    Ok(Case { fixture, spec })
+}
+
+
+fn granted(fixture: &Fixture<Vec<u8>>, spec: &Spec) -> TestResult {
+    let mut state = State::default();
+    let mut pending = PendingMap::new();
+    let prepared = prepare(fixture, &mut pending)?;
+    let result = complete(fixture, &mut state, &mut pending, &prepared, spec)?;
+    assert!(result.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn trusted_additional_audience_with_matching_azp_is_accepted() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&["project-1"], Some(CLIENT_ID), &["project-1"])?;
+    granted(&fixture, &spec)
+}
+
+
+#[test]
+fn single_audience_with_matching_or_absent_azp_is_accepted() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&[], Some(CLIENT_ID), &[])?;
+    granted(&fixture, &spec)
+}
+
+
+#[test]
+fn unlisted_extra_audience_is_refused() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&["project-1"], Some(CLIENT_ID), &[])?;
+    refused(&fixture, &spec, "untrusted_audience")
+}
+
+
+#[test]
+fn partly_listed_extra_audiences_are_refused() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&["project-1", "other"], Some(CLIENT_ID), &["project-1"])?;
+    refused(&fixture, &spec, "untrusted_audience")
+}
+
+
+#[test]
+fn several_audiences_without_azp_are_refused() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&["project-1"], None, &["project-1"])?;
+    refused(&fixture, &spec, "bad_azp")
+}
+
+
+#[test]
+fn foreign_azp_is_refused() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&["project-1"], Some("someone-else"), &["project-1"])?;
+    refused(&fixture, &spec, "bad_azp")
+}
+
+
+#[test]
+fn foreign_azp_on_a_single_audience_is_refused() -> TestResult {
+    let Case { fixture, spec } = with_audiences(&[], Some("someone-else"), &[])?;
+    refused(&fixture, &spec, "bad_azp")
+}
+
+
+#[test]
+fn audience_lacking_the_client_is_wrong_even_if_listed() -> TestResult {
+    let Case { fixture, mut spec } = with_audiences(&["project-1"], Some(CLIENT_ID), &["project-1", "someone-else"])?;
+    spec.aud = "someone-else".to_owned();
+    refused(&fixture, &spec, "wrong_audience")
+}
+
+
+#[test]
+fn additional_audiences_follow_the_configuration_passed_to_each_login() -> TestResult {
+    let Case { mut fixture, spec } = with_audiences(&["project-1"], Some(CLIENT_ID), &["project-1"])?;
+    granted(&fixture, &spec)?;
+    fixture.config.additional_audiences.clear();
+    refused(&fixture, &spec, "untrusted_audience")
+}
+
+
+#[test]
+fn additional_audiences_are_parsed_from_yaml_and_audience_claims_read() -> TestResult {
+    let text = format!("{CONFIG_TEXT}additional_audiences: [project-1]\n");
+    let parsed = parse_oidc_config(&text, "oidc.yaml", &builtin_catalog())?;
+    assert_eq!(parsed.additional_audiences, vec!["project-1".to_owned()]);
+    assert!(config()?.additional_audiences.is_empty());
+    assert_eq!(audiences_of(&json!({"aud": "a"})), vec!["a".to_owned()]);
+    assert!(audiences_of(&json!({"aud": 1})).is_empty());
+    Ok(())
 }
 
 
@@ -883,6 +994,8 @@ fn claims_and_groups_helpers() -> TestResult {
         OidcDenial::TooManyPending,
         OidcDenial::MfaMissing,
         OidcDenial::InsecureEndpoint,
+        OidcDenial::UntrustedAudience,
+        OidcDenial::BadAzp,
     ]
     .into_iter()
     .map(denial_reason)
