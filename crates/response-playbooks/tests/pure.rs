@@ -6,7 +6,8 @@ use core_config::parse::parse_document;
 use response_playbooks::catalogue::{catalogue_problems, find_entry, APPROVAL_ACTION};
 use response_playbooks::error::{describe, DocumentProblems, ExprError, Problem};
 use response_playbooks::expr::{
-    check_template, evaluate, evaluate_condition, is_template, refuse_blocks, render, resolve, sandbox, single_expression, PlaybookScope, Scope,
+    check_template, evaluate, evaluate_condition, is_template, nesting_depth, refuse_blocks, render, resolve, sandbox, single_expression,
+    PlaybookScope, Scope, MAX_NESTING, MAX_SOURCE_LEN,
 };
 use response_playbooks::model::{Catalogue, ParamType, Playbook, Step};
 use response_playbooks::params::{
@@ -536,5 +537,76 @@ fn the_catalogue_is_checked() -> TestResult {
     assert!(catalogue_problems(&with_connector)
         .iter()
         .any(|problem| problem.to_string().contains("x/a")));
+    Ok(())
+}
+
+
+const PROBE_TERMS: usize = 12_000;
+
+
+const DELIMITER_DEPTH: usize = 2;
+
+
+const BALANCED_DEPTH: usize = 3;
+
+
+const UNMATCHED_DEPTH: usize = 2;
+
+
+fn long_sum(terms: usize) -> String {
+    format!("{{{{ {}1 }}}}", "1 + ".repeat(terms))
+}
+
+
+fn nested(depth: usize) -> String {
+    format!("{{{{ {}1{} }}}}", "(".repeat(depth), ")".repeat(depth))
+}
+
+
+#[test]
+fn an_expression_beyond_the_size_caps_is_refused_before_compilation() -> TestResult {
+    let alert = json!({});
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    let long = long_sum(PROBE_TERMS);
+    assert!(matches!(check_template(&long), Err(ExprError::TooLong { .. })));
+    assert!(matches!(render(&long, &scope), Err(ExprError::TooLong { .. })));
+    assert!(matches!(evaluate_condition(&long, &scope), Err(ExprError::TooLong { .. })));
+    assert!(matches!(resolve(&long, &scope), Err(ExprError::TooLong { .. })));
+    assert!(matches!(evaluate(&long, &scope), Err(ExprError::TooLong { .. })));
+    let refused = check_template(&nested(MAX_NESTING + 1)).err().ok_or("expected refusal")?;
+    assert!(matches!(refused, ExprError::TooNested { .. }));
+    assert!(refused.to_string().contains("limit is"), "{refused}");
+    assert!(check_template(&nested(MAX_NESTING - DELIMITER_DEPTH)).is_ok());
+    assert!(check_template(&"x".repeat(MAX_SOURCE_LEN)).is_ok());
+    assert_eq!(nesting_depth("([{}])"), BALANCED_DEPTH);
+    assert_eq!(nesting_depth("))(("), UNMATCHED_DEPTH);
+    let problems = problems_of(&format!(
+        "  - action: notify\n    params: {{ text: \"{}\" }}\n  - if: \"{}\"\n    then:\n      - action: notify\n        params: {{ text: x }}\n",
+        long_sum(PROBE_TERMS),
+        nested(MAX_NESTING + 1)
+    ))?;
+    assert_eq!(
+        problems.iter().filter(|problem| matches!(problem, Problem::BadExpression { .. })).count(),
+        TWO_PROBLEMS
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_optional_parameter_that_resolves_empty_is_an_error() -> TestResult {
+    let catalogue = catalogue_of(EXTRA_CATALOGUE)?;
+    let entry = find_entry(&catalogue, None, "notify").ok_or("no notify")?;
+    let alert = json!({});
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    let empty: ParamMap = serde_json::from_value(json!({ "text": "x", "level": "{{ alert.nothing }}" }))?;
+    assert!(resolve_params(entry, &empty, &scope)
+        .err()
+        .ok_or("expected refusal")?
+        .contains("`level` is missing or empty"));
+    let absent: ParamMap = serde_json::from_value(json!({ "text": "x" }))?;
+    assert!(resolve_params(entry, &absent, &scope).is_ok());
     Ok(())
 }

@@ -328,7 +328,11 @@ pub fn run_sequence<'a>(context: &Context, steps: &'a [Step], root: &str, fail_a
         ..state
     };
     match (0..MAX_WORK).try_fold(seeded, |current, _| advance(context, fail_at, current)) {
-        ControlFlow::Break(finished) | ControlFlow::Continue(finished) => with_pending(finished),
+        ControlFlow::Break(finished) => with_pending(finished),
+        ControlFlow::Continue(exhausted) => with_pending(Run {
+            halted: exhausted.halted || !exhausted.pending.is_empty(),
+            ..exhausted
+        }),
     }
 }
 

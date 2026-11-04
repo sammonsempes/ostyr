@@ -8,6 +8,10 @@ use thiserror::Error;
 pub enum ExprError {
     #[error("forbidden syntax `{0}`: only `{{{{ expression }}}}` is allowed")]
     Forbidden(String),
+    #[error("expression is {length} bytes long, the limit is {max}")]
+    TooLong { length: usize, max: usize },
+    #[error("expression nests brackets {depth} levels deep, the limit is {max}")]
+    TooNested { depth: usize, max: usize },
     #[error("expression refused: {0}")]
     Engine(#[from] minijinja::Error),
     #[error("value cannot be converted: {0}")]

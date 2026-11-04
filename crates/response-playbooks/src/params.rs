@@ -126,7 +126,7 @@ pub fn resolve_params(entry: &CatalogueEntry, params: &ParamMap, scope: &Scope) 
                     resolved
                 })
                 .map_err(|failure| format!("parameter `{name}`: {failure}")),
-            None if spec.optional => Ok(resolved),
+            None if spec.optional && !params.contains_key(name) => Ok(resolved),
             None => Err(format!("parameter `{name}` is missing or empty")),
         }
     })

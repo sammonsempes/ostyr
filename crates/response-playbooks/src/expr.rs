@@ -6,7 +6,19 @@ use minijinja::{escape_formatter, Environment, Output, State, UndefinedBehavior,
 use serde::Serialize;
 
 
-pub const FUEL: u64 = 20_000;
+pub const FUEL: u64 = 500;
+
+
+pub const MAX_SOURCE_LEN: usize = 2_000;
+
+
+pub const MAX_NESTING: usize = 16;
+
+
+pub const OPENERS: [char; 3] = ['(', '[', '{'];
+
+
+pub const CLOSERS: [char; 3] = [')', ']', '}'];
 
 
 pub const RECURSION_LIMIT: usize = 8;
@@ -75,7 +87,40 @@ pub fn single_expression(text: &str) -> Option<&str> {
 }
 
 
+/// Deepest bracket nesting of the text, by one bounded pass; brackets inside string literals count too, which only over-refuses.
+pub fn nesting_depth(text: &str) -> usize {
+    text.chars()
+        .fold((0, 0), |(current, deepest): (usize, usize), letter| {
+            let next = if OPENERS.contains(&letter) {
+                current + 1
+            } else if CLOSERS.contains(&letter) {
+                current.saturating_sub(1)
+            } else {
+                current
+            };
+            (next, deepest.max(next))
+        })
+        .1
+}
+
+
+/// The size caps are checked before minijinja compiles anything: its compiler recurses over the syntax tree.
+pub fn check_limits(text: &str) -> Result<(), ExprError> {
+    let length = text.len();
+    let depth = nesting_depth(text);
+    if length > MAX_SOURCE_LEN {
+        Err(ExprError::TooLong { length, max: MAX_SOURCE_LEN })
+    } else if depth > MAX_NESTING {
+        Err(ExprError::TooNested { depth, max: MAX_NESTING })
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Refused before any compilation: an oversized or too deeply nested source, then block tags.
 pub fn refuse_blocks(text: &str) -> Result<(), ExprError> {
+    check_limits(text)?;
     FORBIDDEN_TAGS
         .iter()
         .find(|tag| text.contains(**tag))

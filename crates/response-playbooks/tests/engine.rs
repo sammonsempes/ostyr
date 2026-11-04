@@ -19,7 +19,7 @@ use response_playbooks::cli::{execute, run_command, run_session, Session};
 use response_playbooks::error::{CommandError, PlaybookError};
 use response_playbooks::model::{Catalogue, Inventory, Mode, Playbook, SimulationInput};
 use response_playbooks::render::render_trace;
-use response_playbooks::simulate::simulate;
+use response_playbooks::simulate::{simulate, MAX_WORK};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -1106,4 +1106,127 @@ proptest! {
         let trace = generated_trace(&steps, &on_error, fail_action, granted)?;
         prop_assert!(!ran_after_poison(&trace), "{}", trace);
     }
+}
+
+
+const PROBE_TERMS: usize = 12_000;
+
+
+const NESTING_PROBE: usize = 500;
+
+
+const FUEL_TERMS: usize = 450;
+
+
+const C2_MESSAGE: &str = "\"C2 confirmed on {{ alert.host }}: actions {{ playbook.actions_done }}\"";
+
+
+fn oversized_reload(replacement: &str) -> TestResult {
+    let rig = rig()?;
+    let alert = alert_file(&rig, "hostile.json", HOSTILE)?;
+    let before = execute(&rig.session, &["simulate", "c2", &alert])?;
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, replacement))?;
+    let refused = reload(&rig.session.engine);
+    assert!(
+        matches!(&refused, ReloadOutcome::Refused { reason } if reason.contains("c2.yaml") && reason.contains("limit is")),
+        "{refused:?}"
+    );
+    assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
+    assert_eq!(recorded_for(&rig, Outcome::Denied)?.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_twelve_thousand_term_expression_is_refused_on_reload_and_the_old_bundle_stays() -> TestResult {
+    oversized_reload(&format!("\"{{{{ {}1 }}}}\"", "1 + ".repeat(PROBE_TERMS)))
+}
+
+
+#[test]
+fn a_deeply_nested_expression_is_refused_on_reload_and_the_old_bundle_stays() -> TestResult {
+    oversized_reload(&format!("\"{{{{ {}1{} }}}}\"", "(".repeat(NESTING_PROBE), ")".repeat(NESTING_PROBE)))
+}
+
+
+#[test]
+fn a_twelve_thousand_term_expression_does_not_validate() -> TestResult {
+    let text = format!(
+        "name: probe\nversion: 1\nmode: enforce\nsteps:\n  - connector: slack\n    action: notify\n    params: {{ channel: c, message: \"{{{{ {}1 }}}}\" }}\non_error:\n{ERROR_PAGE}",
+        "1 + ".repeat(PROBE_TERMS)
+    );
+    let playbook: Playbook = parse_document(&text, "probe.yaml")?;
+    let catalogue: Catalogue = parse_document(CATALOGUE, "catalogue.yaml")?;
+    let found = response_playbooks::validate::playbook_problems(&playbook, &catalogue);
+    assert!(found.iter().any(|problem| problem.to_string().contains("limit is")), "{found:?}");
+    Ok(())
+}
+
+
+#[test]
+fn an_expression_that_runs_out_of_fuel_halts_the_run() -> TestResult {
+    let condition = format!(
+        "  - if: \"{{{{ {}a }}}}\"\n    then:\n      - action: isolate_endpoint\n        params: {{ host: \"{{{{ alert.host }}}}\" }}\n",
+        "a ~ ".repeat(FUEL_TERMS)
+    );
+    let trace = halting_trace(&format!("{condition}{ISOLATE_HOST}"), ERROR_PAGE, None, &[])?;
+    assert!(trace.contains("condition steps.0 error"), "{trace}");
+    assert!(trace.to_lowercase().contains("fuel"), "{trace}");
+    assert!(trace.contains("halted steps.1 isolate_endpoint: not run"), "{trace}");
+    assert!(!isolated(&trace), "{trace}");
+    Ok(())
+}
+
+
+#[test]
+fn an_optional_parameter_that_resolves_empty_halts_the_run() -> TestResult {
+    let step = "  - action: ban_ip\n    params: { ip: \"{{ alert.missing }}\" }\n";
+    let trace = custom_trace(&format!("{step}{NOTIFY_STEP_SIM}"), &json!({}), None)?;
+    assert!(trace.contains("rejected steps.0 ban_ip"), "{trace}");
+    assert!(trace.contains("halted steps.1 notify: not run"), "{trace}");
+    Ok(())
+}
+
+
+const NOTIFY_STEP_SIM: &str = "  - action: notify\n    params: { text: hi }\n";
+
+
+#[test]
+fn work_beyond_the_cap_halts_the_run_and_traces_what_is_left() -> TestResult {
+    let skipped = "  - if: \"{{ false }}\"\n    then:\n      - action: isolate_endpoint\n        params: { host: h }\n";
+    let text = format!("name: probe\nversion: 1\nmode: enforce\nsteps:\n{skipped}on_error:\n{ERROR_PAGE}");
+    let mut playbook: Playbook = parse_document(&text, "probe.yaml")?;
+    let step = playbook.steps.first().cloned().ok_or("no step")?;
+    playbook.steps = vec![step; MAX_WORK + 1];
+    let catalogue: Catalogue = parse_document(CATALOGUE, "catalogue.yaml")?;
+    let trace = render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &input(UNPROTECTED, None)?,
+    ));
+    assert!(trace.contains(&format!("halted steps.{MAX_WORK} {{{{ false }}}}: not run")), "{trace}");
+    playbook.steps.truncate(MAX_WORK);
+    let exact = render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &input(UNPROTECTED, None)?,
+    ));
+    assert!(!exact.contains("halted"), "exact fit must not halt");
+    let rejecting: Playbook = parse_document(&text.replace(skipped, REJECTED_STEP), "probe.yaml")?;
+    let last = rejecting.steps.first().cloned().ok_or("no step")?;
+    playbook.steps.truncate(MAX_WORK - 1);
+    playbook.steps.push(last);
+    let rejected = render_trace(&simulate(
+        &playbook,
+        &catalogue,
+        &inventory()?,
+        &harness()?.breakers,
+        &input(UNPROTECTED, None)?,
+    ));
+    assert!(rejected.contains("rejected steps.99999 nothing"), "last iteration rejection");
+    Ok(())
 }
