@@ -4,6 +4,8 @@ mod fixture;
 mod http;
 #[path = "support/logging.rs"]
 mod logging;
+#[path = "support/passkey.rs"]
+mod passkey;
 #[path = "support/types.rs"]
 mod types;
 
@@ -29,6 +31,7 @@ use core_auth::session::create_session;
 use fixture::{fixture, fixture_with, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
 use logging::capture_dispatch;
+use passkey::fixture_with_passkey;
 use secrecy::SecretString;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -187,6 +190,34 @@ async fn login_me_logout_cycle() -> TestResult {
         call(&fx.router, "POST", "/auth/logout", Some(&token)).await?.status(),
         StatusCode::UNAUTHORIZED
     );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn logins_keep_every_stored_passkey() -> TestResult {
+    let fx = fixture_with_passkey()?;
+    let stored_ids = || -> Result<Vec<String>, TestError> {
+        let stored: serde_json::Value = serde_json::from_str(&fs::read_to_string(&fx.config.accounts_store)?)?;
+        Ok(stored
+            .get("credentials")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("no credentials")?
+            .iter()
+            .filter_map(|credential| credential.get("id").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .collect())
+    };
+    login_token(&fx.router).await?;
+    assert_eq!(stored_ids()?, ["jgUEVIVzNqfEPqeU9eUwhERykDk05jE43P57f36vpz0"]);
+    let refused = send(
+        &fx.router,
+        request("POST", "/auth/login", None, login_body(READER, "wrong password here"))?,
+    )
+    .await?;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    login_token(&fx.router).await?;
+    assert_eq!(stored_ids()?, ["jgUEVIVzNqfEPqeU9eUwhERykDk05jE43P57f36vpz0"]);
+    assert_eq!(fx.state.auth.lock().map_err(|_| "poisoned")?.credentials.len(), 1);
     Ok(())
 }
 

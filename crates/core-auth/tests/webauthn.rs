@@ -12,7 +12,8 @@ use core_auth::cli::{apply_command, apply_command_with};
 #[cfg(unix)]
 use core_auth::cli::{run, totp_now};
 use core_auth::error::AuthError;
-use core_auth::limiter::{ACCOUNT_MAX_FAILURES, SOURCE_MAX_FAILURES};
+use core_auth::limiter::{passkey_start_key, record_failure, source_key, ACCOUNT_MAX_FAILURES, SOURCE_MAX_FAILURES};
+use core_auth::model::Challenge;
 use core_auth::oidc::{strip_account, upsert_external, EXTERNAL_PASSWORD_HASH};
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
@@ -22,13 +23,14 @@ use core_auth::session::create_session;
 use core_auth::session::TOKEN_BYTES;
 #[cfg(unix)]
 use core_auth::store::{load_accounts, load_accounts_file, STORE_VERSION};
-use core_auth::store::{load_store, load_store_file, save_accounts, save_accounts_file, save_store, save_store_file};
+use core_auth::store::{load_store, load_store_file, save_accounts, save_store, save_store_file};
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{CompromisedSet, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use core_auth::webauthn::{
     build_webauthn, check_name, list_credentials, parse_webauthn_config, passkey_login_start, register_finish, register_start, remove_credential,
     rename_credential, user_uuid, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest, WebauthnConfig,
-    ANONYMOUS_CHALLENGE_MAX, CHALLENGE_ID_BYTES, CHALLENGE_MAX, CHALLENGE_SECONDS, NAME_MAX_CHARS, PASSKEY_START_MAX,
+    ANONYMOUS_CHALLENGE_MAX, CHALLENGE_ID_BYTES, CHALLENGE_MAX, CHALLENGE_SECONDS, NAME_MAX_CHARS, PASSKEY_START_MAX, REGISTRATION_ACCOUNT_MAX,
+    RESERVED_CHALLENGE_MAX, SECOND_FACTOR_ACCOUNT_MAX,
 };
 use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
 use failing_writer::FailingWriter;
@@ -87,10 +89,16 @@ const LATE: i64 = CHALLENGE_SECONDS + 1;
 const STARTS_PER_SOURCE: usize = 10;
 
 
+const LOGINS_FROM_ONE_SOURCE: usize = 25;
+
+
 const REFUSED_TWICE: usize = 2;
 
 
 const LATE_LOCK: i64 = 901;
+
+
+const REPEATED_STARTS: usize = 12;
 
 
 const HIGH_COUNTER: u64 = 1000;
@@ -1010,6 +1018,178 @@ fn fill_anonymous(world: &mut World, fixture: &Fixture<Vec<u8>>, count: usize) -
 }
 
 
+fn first_challenge(state: &State) -> SoftResult<Challenge> {
+    Ok(state.challenges.values().next().cloned().ok_or("no challenge")?)
+}
+
+
+fn stuff(state: &mut State, (prefix, count, reserved): (&str, usize, bool), template: &Challenge) {
+    (0..count).for_each(|i| {
+        let filler = format!("{prefix}-{i}");
+        state.challenges.insert(
+            filler.clone(),
+            Challenge {
+                actor: filler.clone(),
+                user: filler,
+                reserved,
+                ..template.clone()
+            },
+        );
+    });
+}
+
+
+#[test]
+fn registration_challenges_are_capped_per_account_and_per_actor() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let admin = world.admin.clone();
+    let start = |state: &mut State, user: &str, token: &str, offset: i64| -> SoftResult<bool> {
+        Ok(register_start(state, &ctx, &fx.webauthn, at(offset)?, token, user).is_ok())
+    };
+    assert!((0..REGISTRATION_ACCOUNT_MAX).all(|_| start(&mut world.state, "alice", &admin, 0).unwrap_or(false)));
+    assert!(!start(&mut world.state, "alice", &admin, 0)?);
+    assert!((0..REGISTRATION_ACCOUNT_MAX).all(|_| start(&mut world.state, "bob", &admin, 0).unwrap_or(false)));
+    assert!(!start(&mut world.state, "admin", &admin, 0)?);
+    let bob = token_for(&fx, &mut world, "bob", PLUS_ONE)?;
+    assert!(!start(&mut world.state, "bob", &bob, PLUS_ONE)?);
+    assert!(start(&mut world.state, "alice", &admin, LATE)?);
+    Ok(())
+}
+
+
+#[test]
+fn another_account_still_registers_while_one_actor_is_at_its_quota() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    let alice = token_for(&fx, &mut world, "alice", 0)?;
+    let bob = token_for(&fx, &mut world, "bob", 0)?;
+    let begin = at(0)?;
+    (0..REGISTRATION_ACCOUNT_MAX).try_for_each(|_| register_start(&mut world.state, &ctx, &fx.webauthn, begin, &alice, "alice").map(|_| ()))?;
+    assert!(matches!(
+        register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &alice, "alice"),
+        Err(AuthError::TooManyChallenges)
+    ));
+    assert!(register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &bob, "bob").is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn webauthn_required_accounts_keep_a_reserved_challenge_pool() -> TestResult {
+    let fx = fixture_over(Vec::new(), strict_catalog()?)?;
+    let ctx = context(&fx);
+    let mut world = world(&fx)?;
+    let admin = world.admin.clone();
+    create_account(
+        &mut world.state,
+        &ctx,
+        at(PLUS_ONE)?,
+        &admin,
+        "glass",
+        &SecretString::from(GOOD_PASSWORD),
+        roles(&["breakglass"]),
+    )?;
+    let mut glass_key = soft_passkey();
+    register(&fx, &mut world.state, &mut glass_key, (&admin, "glass", "key"), PLUS_ONE)?;
+    let mut alice_key = soft_passkey();
+    register(&fx, &mut world.state, &mut alice_key, (&admin, "alice", "key"), PLUS_ONE)?;
+    register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_ONE)?, &admin, "bob")?;
+    let template = first_challenge(&world.state)?;
+    stuff(&mut world.state, ("shared", CHALLENGE_MAX - 1, false), &template);
+    assert!(invalid(webauthn_login_start(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_TWO)?,
+        &request("alice", GOOD_PASSWORD, OTHER_SOURCE)
+    )));
+    assert!(!second_factor(&fx, &mut world.state, &mut glass_key, ("glass", SOURCE), PLUS_TWO)?.is_empty());
+    stuff(&mut world.state, ("reserved", RESERVED_CHALLENGE_MAX, true), &template);
+    assert!(invalid(webauthn_login_start(
+        &mut world.state,
+        &ctx,
+        &fx.webauthn,
+        at(PLUS_TWO)?,
+        &request("glass", GOOD_PASSWORD, SOURCE)
+    )));
+    Ok(())
+}
+
+
+#[test]
+fn repeated_second_factor_starts_replace_older_challenges_per_account() -> TestResult {
+    let fx = fixture_over(Vec::new(), strict_catalog()?)?;
+    let ctx = context(&fx);
+    let mut world = world(&fx)?;
+    let admin = world.admin.clone();
+    create_account(
+        &mut world.state,
+        &ctx,
+        at(PLUS_ONE)?,
+        &admin,
+        "glass",
+        &SecretString::from(GOOD_PASSWORD),
+        roles(&["breakglass"]),
+    )?;
+    let mut keys = [soft_passkey(), soft_passkey()];
+    register(&fx, &mut world.state, &mut keys[0], (&admin, "alice", "key"), PLUS_ONE)?;
+    register(&fx, &mut world.state, &mut keys[1], (&admin, "glass", "key"), PLUS_ONE)?;
+    let held = |state: &State, user: &str| state.challenges.values().filter(|challenge| challenge.user == user).count();
+    let start = |state: &mut State, user: &str, offset: i64| -> SoftResult<String> {
+        Ok(webauthn_login_start(state, &ctx, &fx.webauthn, at(offset)?, &request(user, GOOD_PASSWORD, SOURCE)).map(|(identifier, _)| identifier)?)
+    };
+    let first = start(&mut world.state, "alice", PLUS_TWO)?;
+    (0..REPEATED_STARTS).try_for_each(|_| start(&mut world.state, "alice", PLUS_TWO).map(|_| ()))?;
+    assert_eq!(held(&world.state, "alice"), SECOND_FACTOR_ACCOUNT_MAX);
+    assert!(!world.state.challenges.contains_key(&first));
+    let glass_first = start(&mut world.state, "glass", PLUS_TWO)?;
+    (0..REPEATED_STARTS).try_for_each(|_| start(&mut world.state, "glass", PLUS_TWO).map(|_| ()))?;
+    assert_eq!(held(&world.state, "glass"), SECOND_FACTOR_ACCOUNT_MAX);
+    assert!(!world.state.challenges.contains_key(&glass_first));
+    assert!(world
+        .state
+        .challenges
+        .values()
+        .filter(|challenge| challenge.reserved)
+        .all(|challenge| challenge.user == "glass"));
+    assert!(register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_TWO)?, &admin, "bob").is_ok());
+    let newest = start(&mut world.state, "alice", PLUS_TWO)?;
+    assert!(world.state.challenges.contains_key(&newest));
+    Ok(())
+}
+
+
+#[test]
+fn a_successful_passkey_login_clears_the_source_start_counter() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let admin = world.admin.clone();
+    let mut soft = soft_passkey();
+    let credential = register(&fx, &mut world.state, &mut soft, (&admin, "admin", "yubikey"), PLUS_ONE)?;
+    (0..LOGINS_FROM_ONE_SOURCE)
+        .try_for_each(|_| passkey_login(&fx, &mut world.state, &mut soft, (&credential, "admin", SOURCE), PLUS_TWO).map(|_| ()))?;
+    assert!(!world.state.attempts.contains_key(&passkey_start_key(SOURCE)));
+    Ok(())
+}
+
+
+#[test]
+fn the_start_counter_lives_outside_the_source_namespace() -> TestResult {
+    let fx = fixture()?;
+    let mut world = world(&fx)?;
+    let ctx = context(&fx);
+    passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, SOURCE)?;
+    assert!(world.state.attempts.contains_key(&passkey_start_key(SOURCE)));
+    assert!(!world.state.attempts.contains_key(&source_key(&format!("passkey_start:{SOURCE}"))));
+    record_failure(&mut world.state.attempts, &source_key(&passkey_start_key(OTHER_SOURCE)), 1, at(0)?);
+    assert!(passkey_login_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_ONE)?, OTHER_SOURCE).is_ok());
+    Ok(())
+}
+
+
 #[test]
 fn challenges_are_capped_and_anonymous_ones_cannot_starve_the_others() -> TestResult {
     let fx = fixture()?;
@@ -1022,11 +1202,14 @@ fn challenges_are_capped_and_anonymous_ones_cannot_starve_the_others() -> TestRe
         Err(AuthError::TooManyChallenges)
     ));
     assert!(register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &admin, "alice").is_ok());
-    let others = CHALLENGE_MAX - ANONYMOUS_CHALLENGE_MAX - 1;
-    let start = at(0)?;
-    (0..others).try_for_each(|_| register_start(&mut world.state, &ctx, &fx.webauthn, start, &admin, "alice").map(|_| ()))?;
+    let template = first_challenge(&world.state)?;
+    stuff(
+        &mut world.state,
+        ("shared", CHALLENGE_MAX - ANONYMOUS_CHALLENGE_MAX - 1, false),
+        &template,
+    );
     assert!(matches!(
-        register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &admin, "alice"),
+        register_start(&mut world.state, &ctx, &fx.webauthn, at(0)?, &admin, "bob"),
         Err(AuthError::TooManyChallenges)
     ));
     assert_eq!(world.state.challenges.len(), CHALLENGE_MAX);
@@ -1499,7 +1682,7 @@ fn a_version_one_store_migrates_and_is_rewritten_as_version_two() -> TestResult 
     fs::write(&path, VERSION_ONE)?;
     fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(OWNER_ONLY))?;
     let loaded = load_accounts_file(&path)?;
-    save_accounts_file(&path, &loaded, os_random)?;
+    save_store_file(&path, &loaded, &core_auth::types::CredentialMap::new(), os_random)?;
     assert!(fs::read_to_string(&path)?.contains(&format!("\"version\": {STORE_VERSION}")));
     Ok(())
 }
@@ -1531,16 +1714,14 @@ fn stored_credentials_are_validated() -> TestResult {
 
 
 #[test]
-fn saving_accounts_keeps_the_credentials_of_the_remaining_accounts() -> TestResult {
-    let state = registered(&fixture()?)?;
+fn saving_writes_the_in_memory_credentials() -> TestResult {
+    let mut state = registered(&fixture()?)?;
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
     save_store_file(&path, &state.accounts, &state.credentials, os_random)?;
-    save_accounts_file(&path, &state.accounts, os_random)?;
     assert_eq!(load_store_file(&path)?.1.get("alice").map(Vec::len), Some(1));
-    let mut remaining = state.accounts.clone();
-    remaining.remove("alice");
-    save_accounts_file(&path, &remaining, os_random)?;
+    state.credentials.clear();
+    save_store_file(&path, &state.accounts, &state.credentials, os_random)?;
     assert!(load_store_file(&path)?.1.is_empty());
     Ok(())
 }

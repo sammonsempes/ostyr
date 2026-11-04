@@ -82,6 +82,7 @@ pub struct Challenge {
     pub user: String,
     pub created_at: OffsetDateTime,
     pub kind: ChallengeKind,
+    pub reserved: bool,
 }
 
 

@@ -1,7 +1,7 @@
 //! WebAuthn credentials of local accounts: registration, second factor and passwordless passkey login (spec sections 12 and 15).
 
 use crate::error::AuthError;
-use crate::limiter::{account_key, clear_failures, locked_until, record_failure, source_key};
+use crate::limiter::{account_key, clear_failures, locked_until, passkey_start_key, record_failure, source_key};
 use crate::model::{Challenge, ChallengeKind, CredentialInfo, Located, Prepared, StoredCredential};
 use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
@@ -39,7 +39,16 @@ pub const ANONYMOUS_CHALLENGE_MAX: usize = 256;
 pub const PASSKEY_START_MAX: usize = 20;
 
 
-pub const PASSKEY_START_KEY: &str = "passkey_start";
+pub const RESERVED_CHALLENGE_MAX: usize = 64;
+
+
+pub const REGISTRATION_ACTOR_MAX: usize = 8;
+
+
+pub const REGISTRATION_ACCOUNT_MAX: usize = 4;
+
+
+pub const SECOND_FACTOR_ACCOUNT_MAX: usize = 3;
 
 
 pub const CHALLENGE_ID_BYTES: usize = 16;
@@ -146,24 +155,60 @@ pub fn is_fresh(challenge: &Challenge, now: OffsetDateTime) -> bool {
 }
 
 
+pub fn is_crowded(state: &State, (actor, user, reserved): (&str, &str, bool), kind: &ChallengeKind) -> bool {
+    let pending = || state.challenges.values();
+    let reserved_used = pending().filter(|challenge| challenge.reserved).count();
+    let shared_full = state.challenges.len() - reserved_used >= CHALLENGE_MAX;
+    let registrations = || pending().filter(|challenge| matches!(challenge.kind, ChallengeKind::Registration(_)));
+    if reserved {
+        reserved_used >= RESERVED_CHALLENGE_MAX
+    } else {
+        match kind {
+            ChallengeKind::Passwordless(_) => {
+                pending()
+                    .filter(|challenge| matches!(challenge.kind, ChallengeKind::Passwordless(_)))
+                    .count()
+                    >= ANONYMOUS_CHALLENGE_MAX
+            }
+            ChallengeKind::Registration(_) => {
+                shared_full
+                    || registrations().filter(|challenge| challenge.actor == actor).count() >= REGISTRATION_ACTOR_MAX
+                    || registrations().filter(|challenge| challenge.user == user).count() >= REGISTRATION_ACCOUNT_MAX
+            }
+            ChallengeKind::SecondFactor(_) => shared_full,
+        }
+    }
+}
+
+
+/// Drops the oldest second-factor challenges of an account so that one more fits under `SECOND_FACTOR_ACCOUNT_MAX`.
+pub fn evict_second_factor(state: &mut State, user: &str) {
+    let mut held: Vec<(OffsetDateTime, String)> = state
+        .challenges
+        .iter()
+        .filter(|(_, challenge)| challenge.user == user && matches!(challenge.kind, ChallengeKind::SecondFactor(_)))
+        .map(|(identifier, challenge)| (challenge.created_at, identifier.clone()))
+        .collect();
+    held.sort();
+    let surplus = (held.len() + 1).saturating_sub(SECOND_FACTOR_ACCOUNT_MAX);
+    held.into_iter().take(surplus).for_each(|(_, identifier)| {
+        state.challenges.remove(&identifier);
+    });
+}
+
+
 pub fn issue_challenge(
     state: &mut State,
     now: OffsetDateTime,
     random: RandomFn,
-    (actor, user): (&str, &str),
+    (actor, user, reserved): (&str, &str, bool),
     kind: ChallengeKind,
 ) -> Result<String, AuthError> {
     state.challenges.retain(|_, challenge| is_fresh(challenge, now));
-    let anonymous = state
-        .challenges
-        .values()
-        .filter(|pending| matches!(pending.kind, ChallengeKind::Passwordless(_)))
-        .count();
-    let crowded = match kind {
-        ChallengeKind::Passwordless(_) => anonymous >= ANONYMOUS_CHALLENGE_MAX,
-        _ => state.challenges.len() >= CHALLENGE_MAX,
-    };
-    if crowded {
+    if matches!(kind, ChallengeKind::SecondFactor(_)) {
+        evict_second_factor(state, user);
+    }
+    if is_crowded(state, (actor, user, reserved), &kind) {
         Err(AuthError::TooManyChallenges)
     } else {
         let identifier = HEXLOWER.encode(&random_array::<CHALLENGE_ID_BYTES>(random)?);
@@ -174,6 +219,7 @@ pub fn issue_challenge(
                 user: user.to_owned(),
                 created_at: now,
                 kind,
+                reserved,
             },
         );
         Ok(identifier)
@@ -224,7 +270,13 @@ pub fn begin_registration(
     require_local(working, username)?;
     let excluded = passkeys_of(working, username).iter().map(|passkey| passkey.cred_id().clone()).collect();
     let (options, registration) = webauthn.start_passkey_registration(user_uuid(username), username, username, Some(excluded))?;
-    let identifier = issue_challenge(working, now, context.random, (actor, username), ChallengeKind::Registration(registration))?;
+    let identifier = issue_challenge(
+        working,
+        now,
+        context.random,
+        (actor, username, false),
+        ChallengeKind::Registration(registration),
+    )?;
     Ok((identifier, options))
 }
 
@@ -435,7 +487,11 @@ pub fn second_factor_challenge<Output: Write>(
         (true, true) => {
             let (options, authentication) = webauthn.start_passkey_authentication(&passkeys)?;
             let kind = ChallengeKind::SecondFactor(authentication);
-            let identifier = issue_challenge(working, now, context.random, (&request.username, &request.username), kind)?;
+            let reserved = working
+                .accounts
+                .get(&request.username)
+                .is_some_and(|account| webauthn_required(context.catalog, &account.roles));
+            let identifier = issue_challenge(working, now, context.random, (&request.username, &request.username, reserved), kind)?;
             Ok(Ok((identifier, options)))
         }
     }
@@ -480,7 +536,7 @@ pub fn passkey_login_start<Output: Write>(
     now: OffsetDateTime,
     source: &str,
 ) -> Result<(String, RequestChallengeResponse), AuthError> {
-    let start_key = source_key(&format!("{PASSKEY_START_KEY}:{source}"));
+    let start_key = passkey_start_key(source);
     let locked = locked_until(&state.attempts, &source_key(source), now).or_else(|| locked_until(&state.attempts, &start_key, now));
     match locked {
         Some(until) => {
@@ -495,7 +551,7 @@ pub fn passkey_login_start<Output: Write>(
                 .map_err(AuthError::from)
                 .and_then(|(options, discoverable)| {
                     let kind = ChallengeKind::Passwordless(discoverable);
-                    issue_challenge(&mut working, now, context.random, (ANONYMOUS_ACTOR, ANONYMOUS_ACTOR), kind)
+                    issue_challenge(&mut working, now, context.random, (ANONYMOUS_ACTOR, ANONYMOUS_ACTOR, false), kind)
                         .map(|identifier| (identifier, options))
                 });
             let reply = finish(
@@ -626,6 +682,7 @@ pub fn grant_assertion<Output: Write>(
             state.sessions = working.sessions;
             state.credentials = working.credentials;
             clear_failures(&mut state.attempts, &account_key(&located.user));
+            clear_failures(&mut state.attempts, &passkey_start_key(source));
             Ok(token)
         }
         Err(error) => {

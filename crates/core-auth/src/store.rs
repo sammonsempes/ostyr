@@ -128,15 +128,3 @@ pub fn save_store_file(path: &Path, accounts: &AccountMap, credentials: &Credent
     fs::rename(&temporary, path)?;
     Ok(())
 }
-
-
-/// Saves accounts and keeps the credentials already in the file for the accounts that remain.
-pub fn save_accounts_file(path: &Path, accounts: &AccountMap, random: RandomFn) -> Result<(), AuthError> {
-    let (_, mut credentials) = if path.is_file() {
-        load_store_file(path)?
-    } else {
-        (AccountMap::new(), CredentialMap::new())
-    };
-    credentials.retain(|username, _| accounts.contains_key(username));
-    save_store_file(path, accounts, &credentials, random)
-}

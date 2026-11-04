@@ -10,7 +10,7 @@ use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
 use core_auth::service::{Context, State};
-use core_auth::store::load_accounts_file;
+use core_auth::store::load_store_file;
 use core_auth::types::{AttemptMap, VerifyFn};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -48,7 +48,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
     let key = read_key_file(&config.key_file)?;
     let audit = open_file_log(&config.audit_log)?;
     let compromised = load_compromised(BufReader::new(File::open(&config.compromised_list)?))?;
-    let accounts = load_accounts_file(&config.accounts_store)?;
+    let (accounts, credentials) = load_store_file(&config.accounts_store)?;
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
@@ -56,6 +56,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         tenant: config.tenant.clone(),
         auth: Mutex::new(State {
             accounts,
+            credentials,
             ..State::default()
         }),
         audit,
