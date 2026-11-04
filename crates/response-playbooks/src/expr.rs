@@ -4,15 +4,28 @@ use crate::types::ParamMap;
 use minijinja::value::Serde;
 use minijinja::{escape_formatter, Environment, Output, State, UndefinedBehavior, Value};
 use serde::Serialize;
+use std::thread;
 
 
-pub const FUEL: u64 = 500;
+pub const FUEL: u64 = 100;
 
 
-pub const MAX_SOURCE_LEN: usize = 2_000;
+pub const MAX_SOURCE_LEN: usize = 512;
 
 
-pub const MAX_NESTING: usize = 16;
+pub const MAX_NESTING: usize = 32;
+
+
+pub const MAX_OPERATORS: usize = 128;
+
+
+pub const WORKER_STACK_BYTES: usize = 8_388_608;
+
+
+pub const OPERATOR_CHARS: [char; 15] = ['(', '[', '{', '-', '+', '.', '|', '*', '~', '<', '>', '=', '!', '&', '/'];
+
+
+pub const OPERATOR_WORDS: [&str; 7] = ["not", "and", "or", "if", "is", "in", "else"];
 
 
 pub const OPENERS: [char; 3] = ['(', '[', '{'];
@@ -104,17 +117,43 @@ pub fn nesting_depth(text: &str) -> usize {
 }
 
 
+/// Every construct that can nest the syntax tree (brackets, unary and binary operators, `.`, `|`, `[`, `**`, `~`, keywords), over-counted on purpose.
+pub fn operator_count(text: &str) -> usize {
+    let symbols = text.chars().filter(|letter| OPERATOR_CHARS.contains(letter)).count();
+    let words = text
+        .split(|letter: char| !letter.is_alphanumeric() && letter != '_')
+        .filter(|word| OPERATOR_WORDS.contains(word))
+        .count();
+    symbols + words
+}
+
+
 /// The size caps are checked before minijinja compiles anything: its compiler recurses over the syntax tree.
 pub fn check_limits(text: &str) -> Result<(), ExprError> {
     let length = text.len();
     let depth = nesting_depth(text);
+    let operators = operator_count(text);
     if length > MAX_SOURCE_LEN {
         Err(ExprError::TooLong { length, max: MAX_SOURCE_LEN })
     } else if depth > MAX_NESTING {
         Err(ExprError::TooNested { depth, max: MAX_NESTING })
+    } else if operators > MAX_OPERATORS {
+        Err(ExprError::TooComplex {
+            operators,
+            max: MAX_OPERATORS,
+        })
     } else {
         Ok(())
     }
+}
+
+
+/// Runs the work on a scoped thread with an explicit stack size, so the guarantee does not depend on the caller's thread.
+pub fn on_worker<Output: Send>(stack_bytes: usize, work: impl FnOnce() -> Result<Output, ExprError> + Send) -> Result<Output, ExprError> {
+    thread::scope(|scope| {
+        let handle = thread::Builder::new().stack_size(stack_bytes).spawn_scoped(scope, work)?;
+        handle.join().map_err(|_panic| ExprError::WorkerPanicked)?
+    })
 }
 
 
@@ -131,12 +170,14 @@ pub fn refuse_blocks(text: &str) -> Result<(), ExprError> {
 /// Compiles without evaluating: a syntax error or a block tag is refused.
 pub fn check_template(text: &str) -> Result<(), ExprError> {
     refuse_blocks(text)?;
-    let environment = sandbox();
-    single_expression(text).map_or_else(
-        || environment.template_from_str(text).map(|_compiled| ()),
-        |inner| environment.compile_expression(inner).map(|_compiled| ()),
-    )?;
-    Ok(())
+    on_worker(WORKER_STACK_BYTES, || {
+        let environment = sandbox();
+        single_expression(text).map_or_else(
+            || environment.template_from_str(text).map(|_compiled| ()),
+            |inner| environment.compile_expression(inner).map(|_compiled| ()),
+        )?;
+        Ok(())
+    })
 }
 
 
@@ -147,8 +188,10 @@ pub fn scope_value(scope: &Scope) -> Value {
 
 pub fn evaluate(expression: &str, scope: &Scope) -> Result<Value, ExprError> {
     refuse_blocks(expression)?;
-    let environment = sandbox();
-    Ok(environment.compile_expression(expression)?.eval(scope_value(scope))?)
+    on_worker(WORKER_STACK_BYTES, || {
+        let environment = sandbox();
+        Ok(environment.compile_expression(expression)?.eval(scope_value(scope))?)
+    })
 }
 
 
@@ -161,7 +204,7 @@ pub fn evaluate_condition(text: &str, scope: &Scope) -> Result<bool, ExprError> 
 
 pub fn render(text: &str, scope: &Scope) -> Result<String, ExprError> {
     refuse_blocks(text)?;
-    Ok(sandbox().render_str(text, scope_value(scope))?)
+    on_worker(WORKER_STACK_BYTES, || Ok(sandbox().render_str(text, scope_value(scope))?))
 }
 
 

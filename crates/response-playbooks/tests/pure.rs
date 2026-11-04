@@ -6,8 +6,8 @@ use core_config::parse::parse_document;
 use response_playbooks::catalogue::{catalogue_problems, find_entry, APPROVAL_ACTION};
 use response_playbooks::error::{describe, DocumentProblems, ExprError, Problem};
 use response_playbooks::expr::{
-    check_template, evaluate, evaluate_condition, is_template, nesting_depth, refuse_blocks, render, resolve, sandbox, single_expression,
-    PlaybookScope, Scope, MAX_NESTING, MAX_SOURCE_LEN,
+    check_template, evaluate, evaluate_condition, is_template, nesting_depth, on_worker, operator_count, refuse_blocks, render, resolve, sandbox,
+    single_expression, PlaybookScope, Scope, MAX_NESTING, MAX_OPERATORS, MAX_SOURCE_LEN,
 };
 use response_playbooks::model::{Catalogue, ParamType, Playbook, Step};
 use response_playbooks::params::{
@@ -608,5 +608,117 @@ fn an_optional_parameter_that_resolves_empty_is_an_error() -> TestResult {
         .contains("`level` is missing or empty"));
     let absent: ParamMap = serde_json::from_value(json!({ "text": "x" }))?;
     assert!(resolve_params(entry, &absent, &scope).is_ok());
+    Ok(())
+}
+
+
+const SMALL_STACK_BYTES: usize = 1_048_576;
+
+
+const CHAIN_BUDGET: usize = 126;
+
+
+const REVIEWER_PROBE: usize = 1985;
+
+
+const OPERATOR_MIX: usize = 9;
+
+
+const HALF: usize = 2;
+
+
+const THIRD: usize = 3;
+
+
+fn braces(expression: &str) -> String {
+    format!("{{{{ {expression} }}}}")
+}
+
+
+fn chains(links: usize) -> Vec<(&'static str, String)> {
+    vec![
+        ("unary minus", braces(&format!("{}1", "-".repeat(links)))),
+        ("attribute", braces(&format!("alert{}", ".b".repeat(links)))),
+        ("filter", braces(&format!("1{}", "|abs".repeat(links / HALF)))),
+        ("subscript", braces(&format!("alert{}", "[0]".repeat(links)))),
+        ("power", braces(&format!("1{}", "**1".repeat(links / HALF)))),
+        ("not", braces(&format!("{}true", "not ".repeat(links / HALF)))),
+        ("concat", braces(&format!("1{}", "~1".repeat(links)))),
+        ("comparison", braces(&format!("1{}", "<1".repeat(links)))),
+        ("boolean", braces(&format!("true{}", " and true".repeat(links / THIRD)))),
+    ]
+}
+
+
+fn checked_on_small_stack(text: String) -> Result<(), String> {
+    std::thread::Builder::new()
+        .stack_size(SMALL_STACK_BYTES)
+        .spawn(move || {
+            let alert = json!({});
+            let variables = ParamMap::new();
+            let scope = scope_over(&alert, &variables, &[]);
+            check_template(&text).map_err(|failure| failure.to_string())?;
+            let evaluated = evaluate_condition(&text, &scope).map(|_truth| ());
+            let rendered = render(&text, &scope).map(|_text| ());
+            [evaluated, rendered]
+                .into_iter()
+                .filter(|outcome| !matches!(outcome, Ok(()) | Err(ExprError::Engine(_))))
+                .try_for_each(|outcome| outcome.map_err(|failure| failure.to_string()))
+        })
+        .map_err(|failure| failure.to_string())?
+        .join()
+        .map_err(|_panic| "the thread panicked".to_owned())?
+}
+
+
+#[test]
+fn every_chain_kind_at_the_largest_size_checks_and_evaluates_on_a_one_mebibyte_stack() -> TestResult {
+    chains(CHAIN_BUDGET)
+        .into_iter()
+        .try_for_each(|(kind, text)| checked_on_small_stack(text).map_err(|failure| format!("{kind}: {failure}")))?;
+    Ok(())
+}
+
+
+#[test]
+fn every_oversized_chain_is_refused_before_compilation() -> TestResult {
+    let alert = json!({});
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    chains(REVIEWER_PROBE).into_iter().try_for_each(|(kind, text)| {
+        let refused = check_template(&text).err().ok_or(format!("{kind} accepted"))?;
+        assert!(
+            matches!(
+                refused,
+                ExprError::TooLong { .. } | ExprError::TooNested { .. } | ExprError::TooComplex { .. }
+            ),
+            "{kind}: {refused}"
+        );
+        assert!(evaluate_condition(&text, &scope).is_err(), "{kind}");
+        Ok::<(), String>(())
+    })?;
+    let compact = braces(&format!("{}1", "-".repeat(MAX_OPERATORS)));
+    assert!(compact.len() < MAX_SOURCE_LEN);
+    let refused = check_template(&compact).err().ok_or("expected refusal")?;
+    assert!(matches!(refused, ExprError::TooComplex { .. }));
+    assert!(refused.to_string().contains("limit is"), "{refused}");
+    assert_eq!(operator_count("{{ not a and b or c if d else e is f in g }}"), OPERATOR_MIX);
+    Ok(())
+}
+
+
+#[test]
+fn the_worker_reports_a_thread_that_cannot_start_and_one_that_panics() -> TestResult {
+    assert!(on_worker(SMALL_STACK_BYTES, || Ok(true))?);
+    let refused = on_worker(usize::MAX, || Ok(true)).err().ok_or("expected refusal")?;
+    assert!(matches!(refused, ExprError::Worker(_)), "{refused}");
+    assert!(refused.to_string().contains("worker"));
+    let panicked = on_worker(SMALL_STACK_BYTES, || -> Result<bool, ExprError> {
+        std::panic::resume_unwind(Box::new(false))
+    })
+    .err()
+    .ok_or("expected refusal")?;
+    assert!(matches!(panicked, ExprError::WorkerPanicked), "{panicked}");
+    assert!(panicked.to_string().contains("panicked"));
     Ok(())
 }

@@ -7,6 +7,7 @@ use core_audit::log::{append, genesis_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_config::parse::parse_document;
 use core_config::reload::{current_config, reload, ReloadOutcome};
+use core_config::watch::watch_files;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use response_breakers::breakers::{open_breakers, BreakerSettings, Breakers};
@@ -27,6 +28,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::OffsetDateTime;
 use types::TestResult;
@@ -1115,7 +1117,7 @@ const PROBE_TERMS: usize = 12_000;
 const NESTING_PROBE: usize = 500;
 
 
-const FUEL_TERMS: usize = 450;
+const FUEL_TERMS: usize = 60;
 
 
 const C2_MESSAGE: &str = "\"C2 confirmed on {{ alert.host }}: actions {{ playbook.actions_done }}\"";
@@ -1166,8 +1168,8 @@ fn a_twelve_thousand_term_expression_does_not_validate() -> TestResult {
 #[test]
 fn an_expression_that_runs_out_of_fuel_halts_the_run() -> TestResult {
     let condition = format!(
-        "  - if: \"{{{{ {}a }}}}\"\n    then:\n      - action: isolate_endpoint\n        params: {{ host: \"{{{{ alert.host }}}}\" }}\n",
-        "a ~ ".repeat(FUEL_TERMS)
+        "  - if: \"{{{{ {}a.b }}}}\"\n    then:\n      - action: isolate_endpoint\n        params: {{ host: \"{{{{ alert.host }}}}\" }}\n",
+        "a.b ~ ".repeat(FUEL_TERMS)
     );
     let trace = halting_trace(&format!("{condition}{ISOLATE_HOST}"), ERROR_PAGE, None, &[])?;
     assert!(trace.contains("condition steps.0 error"), "{trace}");
@@ -1228,5 +1230,46 @@ fn work_beyond_the_cap_halts_the_run_and_traces_what_is_left() -> TestResult {
         &input(UNPROTECTED, None)?,
     ));
     assert!(rejected.contains("rejected steps.99999 nothing"), "last iteration rejection");
+    Ok(())
+}
+
+
+const REVIEWER_PROBE: usize = 1985;
+
+
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
+
+
+const WATCH_POLL: Duration = Duration::from_millis(100);
+
+
+const WATCH_ATTEMPTS: usize = 100;
+
+
+#[test]
+fn the_unary_minus_probe_is_refused_on_reload_and_the_old_bundle_stays() -> TestResult {
+    oversized_reload(&format!("\"{{{{ {}1 }}}}\"", "-".repeat(REVIEWER_PROBE)))
+}
+
+
+#[test]
+fn the_unary_minus_probe_is_refused_by_the_file_watcher_and_the_old_bundle_stays() -> TestResult {
+    let rig = rig()?;
+    let alert = alert_file(&rig, "hostile.json", HOSTILE)?;
+    let before = execute(&rig.session, &["simulate", "c2", &alert])?;
+    let watched = [path_in(rig.dir.path(), "c2.yaml")];
+    let watcher = watch_files(Arc::clone(&rig.session.engine), &watched, WATCH_DEBOUNCE)?;
+    replace_file(
+        &path_in(rig.dir.path(), "c2.yaml"),
+        &C2.replace(C2_MESSAGE, &format!("\"{{{{ {}1 }}}}\"", "-".repeat(REVIEWER_PROBE))),
+    )?;
+    let refused = (0..WATCH_ATTEMPTS).find_map(|_| {
+        std::thread::sleep(WATCH_POLL);
+        recorded_for(&rig, Outcome::Denied).ok().filter(|entries| !entries.is_empty())
+    });
+    drop(watcher);
+    let entries = refused.ok_or("the watcher never refused the reload")?;
+    assert!(entries.iter().any(|entry| format!("{entry:?}").contains("limit is")), "{entries:?}");
+    assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
     Ok(())
 }
