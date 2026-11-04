@@ -23,7 +23,7 @@ use core_auth::session::create_session;
 use core_auth::session::TOKEN_BYTES;
 #[cfg(unix)]
 use core_auth::store::{load_accounts, load_accounts_file, STORE_VERSION};
-use core_auth::store::{load_store, load_store_file, save_accounts, save_store, save_store_file};
+use core_auth::store::{load_store, load_store_file, save_accounts, save_store, save_store_file, update_store_file};
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{CompromisedSet, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use core_auth::webauthn::{
@@ -98,7 +98,7 @@ const REFUSED_TWICE: usize = 2;
 const LATE_LOCK: i64 = 901;
 
 
-const REPEATED_STARTS: usize = 12;
+const REPEATED_STARTS: i64 = 12;
 
 
 const HIGH_COUNTER: u64 = 1000;
@@ -1142,11 +1142,11 @@ fn repeated_second_factor_starts_replace_older_challenges_per_account() -> TestR
         Ok(webauthn_login_start(state, &ctx, &fx.webauthn, at(offset)?, &request(user, GOOD_PASSWORD, SOURCE)).map(|(identifier, _)| identifier)?)
     };
     let first = start(&mut world.state, "alice", PLUS_TWO)?;
-    (0..REPEATED_STARTS).try_for_each(|_| start(&mut world.state, "alice", PLUS_TWO).map(|_| ()))?;
+    (1..=REPEATED_STARTS).try_for_each(|round| start(&mut world.state, "alice", PLUS_TWO + round).map(|_| ()))?;
     assert_eq!(held(&world.state, "alice"), SECOND_FACTOR_ACCOUNT_MAX);
     assert!(!world.state.challenges.contains_key(&first));
     let glass_first = start(&mut world.state, "glass", PLUS_TWO)?;
-    (0..REPEATED_STARTS).try_for_each(|_| start(&mut world.state, "glass", PLUS_TWO).map(|_| ()))?;
+    (1..=REPEATED_STARTS).try_for_each(|round| start(&mut world.state, "glass", PLUS_TWO + round).map(|_| ()))?;
     assert_eq!(held(&world.state, "glass"), SECOND_FACTOR_ACCOUNT_MAX);
     assert!(!world.state.challenges.contains_key(&glass_first));
     assert!(world
@@ -1156,7 +1156,7 @@ fn repeated_second_factor_starts_replace_older_challenges_per_account() -> TestR
         .filter(|challenge| challenge.reserved)
         .all(|challenge| challenge.user == "glass"));
     assert!(register_start(&mut world.state, &ctx, &fx.webauthn, at(PLUS_TWO)?, &admin, "bob").is_ok());
-    let newest = start(&mut world.state, "alice", PLUS_TWO)?;
+    let newest = start(&mut world.state, "alice", PLUS_TWO + REPEATED_STARTS + 1)?;
     assert!(world.state.challenges.contains_key(&newest));
     Ok(())
 }
@@ -1745,6 +1745,17 @@ fn exec(state: &mut State, fixture: &Fixture<Vec<u8>>, store: &Path, text: &str)
 }
 
 
+fn seed_store(store: &Path, state: &State) -> TestResult {
+    update_store_file(store, os_random, |accounts, credentials| {
+        accounts.clone_from(&state.accounts);
+        credentials.clone_from(&state.credentials);
+        Ok(())
+    })?
+    .saved?;
+    Ok(())
+}
+
+
 fn json_after(reply: &str) -> SoftResult<(String, String)> {
     let mut parts = reply.splitn(REPLY_PARTS, ' ');
     parts.next();
@@ -1762,6 +1773,7 @@ fn the_tool_drives_registration_and_both_logins_from_json() -> TestResult {
     let mut soft = soft_passkey();
     let page = origin(ORIGIN)?;
     let admin = world.admin.clone();
+    seed_store(&store, &world.state)?;
     exec(
         &mut world.state,
         &fx,
@@ -1854,6 +1866,7 @@ fn a_login_whose_store_save_fails_returns_no_session() -> TestResult {
     let mut soft = soft_passkey();
     let page = origin(ORIGIN)?;
     let admin = world.admin.clone();
+    seed_store(&store, &world.state)?;
     exec(
         &mut world.state,
         &fx,

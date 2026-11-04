@@ -10,7 +10,7 @@ use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
 use core_auth::service::{Context, State};
-use core_auth::store::load_store_file;
+use core_auth::store::{load_store_file, read_store_locked};
 use core_auth::types::{AttemptMap, VerifyFn};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -81,6 +81,18 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
 
 pub fn lock_auth(app: &ApiState) -> MutexGuard<'_, State> {
     app.auth.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+
+/// Replaces the in-memory accounts and credentials with the file's, read under the store lock; a read failure keeps the old copy and is logged.
+pub fn refresh_accounts(app: &ApiState, auth: &mut State) {
+    match read_store_locked(&app.store_path) {
+        Ok((accounts, credentials)) => {
+            auth.accounts = accounts;
+            auth.credentials = credentials;
+        }
+        Err(error) => tracing::warn!(%error, "account store re-read failed, the in-memory copy is used"),
+    }
 }
 
 

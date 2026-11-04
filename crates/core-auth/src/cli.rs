@@ -9,19 +9,19 @@ use crate::service::{
     revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN, ACTION_SESSION_REVOKE, ANONYMOUS_ACTOR,
 };
 use crate::session::revoke_session;
-use crate::store::{load_store_file, save_store_file};
+use crate::store::{read_store_locked, update_store_file, Updated};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use crate::types::{Clock, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use crate::webauthn::{
     build_webauthn, list_credentials, parse_webauthn_config, passkey_login_start, register_finish, register_start, remove_credential,
     rename_credential, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest,
 };
-use core_audit::log::{check_private, open_file_log, owner_only};
+use core_audit::log::{check_private, open_file_log};
 use core_audit::model::Outcome;
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use serde::Serialize;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
@@ -32,9 +32,6 @@ pub const PATH_COUNT: usize = 4;
 
 
 pub const KEY_READ_LIMIT: u64 = 33;
-
-
-pub const LOCK_SUFFIX: &str = ".lock";
 
 
 pub const CLI_TENANT: &str = "default";
@@ -78,14 +75,6 @@ pub fn read_key_file(path: &str) -> Result<StoreKey, AuthError> {
     } else {
         Err(AuthError::InvalidKey)
     }
-}
-
-
-/// Holds an exclusive advisory lock on `<store>.lock` until the returned file is dropped.
-pub fn lock_store(store: &str) -> Result<File, AuthError> {
-    let file = owner_only(OpenOptions::new().write(true).create(true).truncate(false)).open(format!("{store}{LOCK_SUFFIX}"))?;
-    file.lock()?;
-    Ok(file)
 }
 
 
@@ -249,12 +238,25 @@ pub fn apply_command_with<Output: Write>(
     now: OffsetDateTime,
     (store_path, words): (&Path, &[&str]),
 ) -> Result<String, AuthError> {
-    let done = execute_with(state, context, webauthn, now, words)?;
-    let saved = if is_read_only(words) {
-        Ok(())
+    let updated = if is_read_only(words) {
+        let (accounts, credentials) = read_store_locked(store_path)?;
+        state.accounts = accounts;
+        state.credentials = credentials;
+        Updated {
+            value: execute_with(state, context, webauthn, now, words)?,
+            saved: Ok(()),
+        }
     } else {
-        save_store_file(store_path, &state.accounts, &state.credentials, context.random)
+        update_store_file(store_path, context.random, |accounts, credentials| {
+            state.accounts = std::mem::take(accounts);
+            state.credentials = std::mem::take(credentials);
+            let value = execute_with(state, context, webauthn, now, words)?;
+            accounts.clone_from(&state.accounts);
+            credentials.clone_from(&state.credentials);
+            Ok(value)
+        })?
     };
+    let Updated { value: done, saved } = updated;
     match (saved, words) {
         (Ok(()), _) => Ok(done),
         (Err(error), ["login", user, _, source, ..]) => {
@@ -319,8 +321,8 @@ pub fn serve<Input: BufRead, Output: Write>(
     random: RandomFn,
 ) -> Result<(), AuthError> {
     let [store, audit, key_file, compromised_file] = paths;
-    let _store_lock = lock_store(store)?;
     let store_path = PathBuf::from(store);
+    read_store_locked(&store_path)?;
     let key = read_key_file(key_file)?;
     let audit_log = open_file_log(&PathBuf::from(audit))?;
     let compromised = load_compromised(BufReader::new(File::open(compromised_file)?))?;
@@ -336,12 +338,7 @@ pub fn serve<Input: BufRead, Output: Write>(
         request_id: CLI_REQUEST_ID,
     };
     let webauthn = webauthn_file.map(|file| load_webauthn(file)).transpose()?;
-    let (accounts, credentials) = load_store_file(&store_path)?;
-    let mut state = State {
-        accounts,
-        credentials,
-        ..State::default()
-    };
+    let mut state = State::default();
     input.lines().try_for_each(|line| {
         let text = line?;
         let words: Vec<&str> = text.split_whitespace().collect();

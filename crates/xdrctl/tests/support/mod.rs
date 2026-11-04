@@ -7,6 +7,7 @@ use core_api::types::{ServerHandle, SharedState};
 use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
+use core_auth::store::update_store_file;
 use rcgen::generate_simple_self_signed;
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
@@ -142,19 +143,18 @@ pub fn mode_of(_path: &Path) -> Result<u32, TestError> {
 
 
 pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<SocketAddr>) -> TestResult {
-    let state: SharedState = Arc::new(build_state(&config, example_access(), vec![example_document()])?);
     let account = Account {
         username: USER.to_owned(),
         password_hash: hash_password(PASSWORD, os_random)?,
         roles: ["reader".to_owned()].into(),
         totp: None,
     };
-    state
-        .auth
-        .lock()
-        .map_err(|_| "auth state poisoned")?
-        .accounts
-        .insert(USER.to_owned(), account);
+    update_store_file(&config.accounts_store, os_random, |accounts, _| {
+        accounts.insert(USER.to_owned(), account);
+        Ok(())
+    })?
+    .saved?;
+    let state: SharedState = Arc::new(build_state(&config, example_access(), vec![example_document()])?);
     let router = build_router(state, example_router());
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {

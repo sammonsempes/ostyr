@@ -9,7 +9,7 @@ use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 
 pub const STORE_VERSION: u32 = 2;
@@ -19,6 +19,9 @@ pub const FIRST_STORE_VERSION: u32 = 1;
 
 
 pub const TEMP_SUFFIX_BYTES: usize = 8;
+
+
+pub const LOCK_SUFFIX: &str = ".lock";
 
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,4 +130,48 @@ pub fn save_store_file(path: &Path, accounts: &AccountMap, credentials: &Credent
     file.sync_all()?;
     fs::rename(&temporary, path)?;
     Ok(())
+}
+
+
+/// The value a store mutation produced and the outcome of writing the store afterwards.
+#[derive(Debug)]
+pub struct Updated<Value> {
+    pub value: Value,
+    pub saved: Result<(), AuthError>,
+}
+
+
+pub fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(LOCK_SUFFIX);
+    PathBuf::from(name)
+}
+
+
+/// Holds an exclusive advisory lock on `<store>.lock` until the returned file is dropped.
+pub fn lock_store(path: &Path) -> Result<File, AuthError> {
+    let file = owner_only(OpenOptions::new().write(true).create(true).truncate(false)).open(lock_path(path))?;
+    file.lock()?;
+    Ok(file)
+}
+
+
+/// Reads the store while holding the store lock, so a concurrent writer is never seen half done.
+pub fn read_store_locked(path: &Path) -> Result<(AccountMap, CredentialMap), AuthError> {
+    let _lock = lock_store(path)?;
+    load_store_file(path)
+}
+
+
+/// The only way to change the store: lock, re-read, apply `mutate`, write atomically, unlock; a failed write is reported in `saved`.
+pub fn update_store_file<Value>(
+    path: &Path,
+    random: RandomFn,
+    mutate: impl FnOnce(&mut AccountMap, &mut CredentialMap) -> Result<Value, AuthError>,
+) -> Result<Updated<Value>, AuthError> {
+    let _lock = lock_store(path)?;
+    let (mut accounts, mut credentials) = load_store_file(path)?;
+    let value = mutate(&mut accounts, &mut credentials)?;
+    let saved = save_store_file(path, &accounts, &credentials, random);
+    Ok(Updated { value, saved })
 }

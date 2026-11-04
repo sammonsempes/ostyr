@@ -28,7 +28,8 @@ use core_auth::model::Attempts;
 use core_auth::random::os_random;
 use core_auth::service::LoginRequest;
 use core_auth::session::create_session;
-use fixture::{fixture, fixture_with, PASSWORD, READER};
+use core_auth::store::{load_store_file, update_store_file};
+use fixture::{fixture, fixture_with, set_mode, Fixture, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
 use logging::capture_dispatch;
 use passkey::fixture_with_passkey;
@@ -38,11 +39,22 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Mutex;
 use time::OffsetDateTime;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use types::{TestError, TestResult};
+
+
+const READ_ONLY_DIRECTORY: u32 = 0o500;
+
+
+const WRITABLE_DIRECTORY: u32 = 0o700;
+
+
+const OWNER_ONLY_FILE: u32 = 0o600;
+
+
+const CREDENTIALS_AFTER_ADD: usize = 2;
 
 
 const GENERATED_ID_CHARS: usize = 32;
@@ -99,17 +111,20 @@ fn short_sync(file: &mut File) -> io::Result<()> {
 fn two_record_audit(state: ApiState) -> Result<ApiState, TestError> {
     Ok(ApiState {
         audit: new_log(tempfile::tempfile()?, GENESIS_HASH, short_sync),
-        store_path: PathBuf::from("/nonexistent-directory/accounts.json"),
-        ..state
+        ..read_only_store(state)?
     })
 }
 
 
-fn unwritable_store(state: ApiState) -> Result<ApiState, TestError> {
-    Ok(ApiState {
-        store_path: PathBuf::from("/nonexistent-directory/accounts.json"),
-        ..state
-    })
+fn read_only_store(state: ApiState) -> Result<ApiState, TestError> {
+    let directory = state.store_path.parent().ok_or("store has no directory")?;
+    set_mode(directory, READ_ONLY_DIRECTORY)?;
+    Ok(state)
+}
+
+
+fn restore_store_directory(fx: &Fixture) -> TestResult {
+    set_mode(fx.dir.path(), WRITABLE_DIRECTORY)
 }
 
 
@@ -226,7 +241,11 @@ async fn logins_keep_every_stored_passkey() -> TestResult {
 async fn me_for_a_vanished_account_is_unauthorised() -> TestResult {
     let fx = fixture()?;
     let token = login_token(&fx.router).await?;
-    fx.state.auth.lock().map_err(|_| "poisoned")?.accounts.remove(READER);
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        accounts.remove(READER);
+        Ok(())
+    })?
+    .saved?;
     assert_eq!(
         call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
         StatusCode::UNAUTHORIZED
@@ -486,11 +505,12 @@ async fn audit_failures_fail_closed() -> TestResult {
 
 #[tokio::test]
 async fn a_failed_store_save_discards_the_session() -> TestResult {
-    let fx = fixture_with(unwritable_store)?;
+    let fx = fixture_with(read_only_store)?;
     let response = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(body_json(response).await?.pointer("/error/code"), Some(&json!("invalid_credentials")));
     assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
+    restore_store_directory(&fx)?;
     let reasons: Vec<String> = audit_lines(&fx)?
         .iter()
         .filter(|line| line.get("action") == Some(&json!("auth.login")))
@@ -507,6 +527,7 @@ async fn a_failed_store_save_and_a_failed_audit_still_refuse_the_login() -> Test
     let response = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
+    restore_store_directory(&fx)?;
     Ok(())
 }
 
@@ -1352,5 +1373,78 @@ async fn a_locked_account_login_logs_no_warning() -> TestResult {
     let text = fs::read_to_string(&log_path)?;
     assert!(!text.contains("WARN"), "{text}");
     assert!(!text.contains("dummy verification"), "{text}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_passkey_removed_in_the_file_stays_removed_after_an_api_login() -> TestResult {
+    let fx = fixture_with_passkey()?;
+    login_token(&fx.router).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |_, credentials| {
+        credentials.clear();
+        Ok(())
+    })?
+    .saved?;
+    login_token(&fx.router).await?;
+    assert!(load_store_file(&fx.config.accounts_store)?.1.is_empty());
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.credentials.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_passkey_added_in_the_file_survives_an_api_login() -> TestResult {
+    let fx = fixture_with_passkey()?;
+    login_token(&fx.router).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |_, credentials| {
+        let mut added = credentials
+            .get(READER)
+            .and_then(|held| held.first())
+            .ok_or(AuthError::Usage("no credential".to_owned()))?
+            .clone();
+        added.id = "second".to_owned();
+        credentials.entry(READER.to_owned()).or_default().push(added);
+        Ok(())
+    })?
+    .saved?;
+    login_token(&fx.router).await?;
+    assert_eq!(
+        load_store_file(&fx.config.accounts_store)?.1.get(READER).map(Vec::len),
+        Some(CREDENTIALS_AFTER_ADD)
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_role_change_in_the_file_survives_an_api_login_and_applies_at_once() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        accounts.get_mut(READER).ok_or(AuthError::Usage("no account".to_owned()))?.roles = ["auditor".to_owned()].into();
+        Ok(())
+    })?
+    .saved?;
+    let me = body_json(call(&fx.router, "GET", "/auth/me", Some(&token)).await?).await?;
+    assert_eq!(me.pointer("/roles"), Some(&json!(["auditor"])));
+    login_token(&fx.router).await?;
+    let stored = load_store_file(&fx.config.accounts_store)?.0;
+    assert_eq!(
+        stored.get(READER).map(|account| account.roles.clone()),
+        Some(["auditor".to_owned()].into())
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unreadable_store_refuses_the_login_without_a_session() -> TestResult {
+    let fx = fixture()?;
+    fs::write(&fx.config.accounts_store, "not json")?;
+    set_mode(&fx.config.accounts_store, OWNER_ONLY_FILE)?;
+    let response = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
+    assert_ne!(response.status(), StatusCode::OK);
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
     Ok(())
 }

@@ -3,7 +3,7 @@ use crate::middleware::{body_deadline, edge, guard, limit, rate_key};
 use crate::model::{
     ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule,
 };
-use crate::state::{auth_context, lock_auth, prune_attempts};
+use crate::state::{auth_context, lock_auth, prune_attempts, refresh_accounts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
@@ -19,7 +19,7 @@ use core_auth::service::{
     audit_name, login as core_login, record, revoke_token, Context, LoginRequest, State as AuthState, ACTION_LOGIN, DUMMY_HASH,
 };
 use core_auth::session::revoke_session;
-use core_auth::store::save_store_file;
+use core_auth::store::update_store_file;
 use secrecy::{ExposeSecret, SecretString};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
@@ -157,9 +157,18 @@ pub fn persist_login(
     context: &Context<File>,
     now: OffsetDateTime,
     request: &LoginRequest,
-    token: &SecretString,
 ) -> Result<LoginReply, ApiError> {
-    match save_store_file(&app.store_path, &auth.accounts, &auth.credentials, app.random) {
+    let updated = update_store_file(&app.store_path, app.random, |accounts, credentials| {
+        auth.accounts = std::mem::take(accounts);
+        auth.credentials = std::mem::take(credentials);
+        let token = core_login(auth, context, now, request)?;
+        accounts.clone_from(&auth.accounts);
+        credentials.clone_from(&auth.credentials);
+        Ok(token)
+    })
+    .map_err(|failure| auth_failure(&failure))?;
+    let token = updated.value;
+    match updated.saved {
         Ok(()) => Ok(LoginReply {
             token: token.expose_secret().to_owned(),
             token_type: TOKEN_TYPE.to_owned(),
@@ -186,8 +195,9 @@ pub fn persist_login(
 
 
 pub fn stored_hash(app: &ApiState, username: &str) -> String {
-    lock_auth(app)
-        .accounts
+    let mut auth = lock_auth(app);
+    refresh_accounts(app, &mut auth);
+    auth.accounts
         .get(username)
         .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone())
 }
@@ -284,8 +294,7 @@ pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, st
     let mut auth = lock_auth(app);
     check_table_room(app, &mut auth, request).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
     let context = auth_context(app, request_id, &verify);
-    let token = core_login(&mut auth, &context, now, request).map_err(|failure| auth_failure(&failure))?;
-    persist_login(app, &mut auth, &context, now, request, &token).map(|granted| Json(granted).into_response())
+    persist_login(app, &mut auth, &context, now, request).map(|granted| Json(granted).into_response())
 }
 
 

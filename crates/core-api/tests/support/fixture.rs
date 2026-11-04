@@ -9,6 +9,7 @@ use core_api::types::{AccessTable, SharedState};
 use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
+use core_auth::store::update_store_file;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -146,19 +147,18 @@ pub fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
 }
 
 
-pub fn seed_reader(state: &ApiState) -> Result<(), TestError> {
+pub fn seed_reader(config: &ApiConfig) -> Result<(), TestError> {
     let account = Account {
         username: READER.to_owned(),
         password_hash: hash_password(PASSWORD, os_random)?,
         roles: ["reader".to_owned()].into(),
         totp: None,
     };
-    state
-        .auth
-        .lock()
-        .map_err(|_| "auth state poisoned")?
-        .accounts
-        .insert(READER.to_owned(), account);
+    update_store_file(&config.accounts_store, os_random, |accounts, _| {
+        accounts.insert(READER.to_owned(), account);
+        Ok(())
+    })?
+    .saved?;
     Ok(())
 }
 
@@ -166,8 +166,8 @@ pub fn seed_reader(state: &ApiState) -> Result<(), TestError> {
 pub fn fixture_with(adjust: impl FnOnce(ApiState) -> Result<ApiState, TestError>) -> Result<Fixture, TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
+    seed_reader(&config)?;
     let built = build_state(&config, extra_access(), vec![example_document()])?;
-    seed_reader(&built)?;
     let state: SharedState = Arc::new(adjust(built)?);
     let router = build_router(state.clone(), extra_router());
     Ok(Fixture { dir, state, router, config })
