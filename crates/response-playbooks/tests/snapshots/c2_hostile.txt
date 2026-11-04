@@ -1,0 +1,11 @@
+playbook Block confirmed C2 v3 mode=enforce
+trigger matched
+condition steps.0 true: {{ alert.remote_ip and alert.remote_ip.reputation >= 80 and not alert.remote_ip.is_internal }}
+action steps.0.then.0 fortigate/block_ip duration="24h" ip="203.0.113.9" breakers=allowed
+condition steps.1 true: {{ alert.domain }}
+action steps.1.then.0 dns/sinkhole domain="c2.evil.example" duration="24h" breakers=allowed
+condition steps.2 true: {{ alert.host.criticality != 'critical' }}
+action steps.2.then.0 isolate_endpoint host="ws-0042" breakers=allowed
+condition steps.3 true: {{ alert.user and not alert.user.is_privileged }}
+action steps.3.then.0 entra_id/revoke_sessions user="jdoe" breakers=not applicable
+action steps.4 slack/notify channel="#soc" message="C2 confirmed on ws-0042: actions ['block_ip', 'sinkhole', 'isolate_endpoint', 'revoke_sessions']" breakers=not applicable
