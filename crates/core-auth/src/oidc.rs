@@ -57,6 +57,12 @@ pub const CLAIM_AMR: &str = "amr";
 pub const CLAIM_ACR: &str = "acr";
 
 
+pub const CLAIM_AUD: &str = "aud";
+
+
+pub const CLAIM_AZP: &str = "azp";
+
+
 pub const STATE_BYTES: usize = 32;
 
 
@@ -83,6 +89,8 @@ pub struct OidcConfig {
     pub mfa_amr: Vec<String>,
     #[serde(default)]
     pub mfa_acr: Vec<String>,
+    #[serde(default)]
+    pub additional_audiences: Vec<String>,
 }
 
 
@@ -279,7 +287,6 @@ pub fn claims_denial(error: ClaimsVerificationError) -> OidcDenial {
     tracing::warn!(%error, "ID token rejected");
     match error {
         ClaimsVerificationError::Expired(_) => OidcDenial::Expired,
-        ClaimsVerificationError::InvalidAudience(_) => OidcDenial::WrongAudience,
         ClaimsVerificationError::InvalidIssuer(_) => OidcDenial::WrongIssuer,
         ClaimsVerificationError::InvalidNonce(_) => OidcDenial::BadNonce,
         ClaimsVerificationError::SignatureVerification(_) => OidcDenial::BadSignature,
@@ -304,6 +311,36 @@ pub fn denial_reason(denial: OidcDenial) -> &'static str {
         OidcDenial::TooManyPending => "too_many_pending",
         OidcDenial::MfaMissing => "mfa_missing",
         OidcDenial::InsecureEndpoint => "insecure_endpoint",
+        OidcDenial::UntrustedAudience => "untrusted_audience",
+        OidcDenial::BadAzp => "bad_azp",
+    }
+}
+
+
+pub fn audiences_of(payload: &Value) -> Vec<String> {
+    match payload.get(CLAIM_AUD) {
+        Some(Value::String(audience)) => vec![audience.clone()],
+        Some(Value::Array(items)) => items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+
+pub fn audience_denial(payload: &Value, config: &OidcConfig) -> OidcDenial {
+    if audiences_of(payload).contains(&config.client_id) {
+        OidcDenial::UntrustedAudience
+    } else {
+        OidcDenial::WrongAudience
+    }
+}
+
+
+pub fn check_azp(payload: &Value, config: &OidcConfig) -> Result<(), OidcDenial> {
+    let several = audiences_of(payload).len() > 1;
+    match payload.get(CLAIM_AZP).and_then(Value::as_str) {
+        Some(party) if party == config.client_id => Ok(()),
+        None if !several => Ok(()),
+        _ => Err(OidcDenial::BadAzp),
     }
 }
 
@@ -341,10 +378,21 @@ pub fn fetch_identity(oidc: &OidcContext, login: PendingLogin, code: &SecretStri
         .request(&oidc.http)
         .map_err(provider_error)?;
     let token = response.id_token().ok_or(OidcDenial::MissingIdToken)?;
-    let verifier = client.id_token_verifier().set_allowed_algs(ALLOWED_ALGORITHMS);
-    let claims = token.claims(&verifier, &Nonce::new(login.nonce)).map_err(claims_denial)?;
+    let payload = payload_of(&token.to_string())?;
+    let verifier = client
+        .id_token_verifier()
+        .set_allowed_algs(ALLOWED_ALGORITHMS)
+        .set_other_audience_verifier_fn(|audience| oidc.config.additional_audiences.iter().any(|trusted| trusted == &**audience));
+    let claims = token.claims(&verifier, &Nonce::new(login.nonce)).map_err(|error| match error {
+        ClaimsVerificationError::InvalidAudience(_) => {
+            tracing::warn!(%error, "ID token rejected");
+            audience_denial(&payload, oidc.config)
+        }
+        other => claims_denial(other),
+    })?;
+    check_azp(&payload, oidc.config)?;
     let subject = claims.subject().to_string();
-    payload_of(&token.to_string()).map(|payload| Identity {
+    Ok(Identity {
         subject,
         groups: groups_of(&payload, &oidc.config.groups_claim),
         amr: groups_of(&payload, CLAIM_AMR),

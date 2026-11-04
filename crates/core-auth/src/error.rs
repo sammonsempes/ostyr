@@ -46,6 +46,10 @@ pub enum OidcDenial {
     MfaMissing,
     #[error("the provider advertises an endpoint that is not https")]
     InsecureEndpoint,
+    #[error("the ID token lists an audience that is not trusted")]
+    UntrustedAudience,
+    #[error("the ID token authorized party is missing or foreign")]
+    BadAzp,
 }
 
 
