@@ -8,6 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 readonly GB_PER_VM=4
 readonly HOST_RESERVED_GB=8
 readonly KIB_PER_GB=1048576
+readonly INIT_TIMEOUT_SECONDS=300
 readonly SSH_ATTEMPTS=120
 readonly SSH_DELAY_SECONDS=5
 readonly SUBNET_FIRST=100
@@ -60,7 +61,12 @@ ensure_base_images() {
     mapfile -t images < <(awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u)
     for image in "${images[@]}"; do
         if ! virsh_lab vol-info --pool "$LAB_POOL" "$image" >/dev/null 2>&1; then
-            "$LAB_DIR/images/build.sh" "${image%.qcow2}"
+            exec 8>>"$LAB_STATE_ROOT/build-${image%.qcow2}.lock"
+            acquire_lock 8 "$LAB_STATE_ROOT/build-${image%.qcow2}.lock"
+            if ! virsh_lab vol-info --pool "$LAB_POOL" "$image" >/dev/null 2>&1; then
+                "$LAB_DIR/images/build.sh" "${image%.qcow2}"
+            fi
+            exec 8>&-
         fi
         warn_if_stale "$image"
     done
@@ -98,8 +104,13 @@ profile_source="$LAB_DIR/profiles/$profile.yaml"
 validate_profile_fields "$profile_source"
 validate_profile_choices "$profile_source"
 mkdir -p "$LAB_STATE_ROOT"
-exec 9>"$LAB_STATE_ROOT/up.lock"
-flock 9
+ensure_plugin_cache
+exec 9>>"$LAB_STATE_ROOT/up.lock"
+acquire_lock 9 "$LAB_STATE_ROOT/up.lock"
+ensure_pool
+flock -u 9
+ensure_base_images "$profile_source"
+acquire_lock 9 "$LAB_STATE_ROOT/up.lock"
 vm_count="$(profile_units "$profile_source")"
 [[ -z "$(virsh_lab net-list --all --name | awk -v n="$(lab_prefix "$task_id")" '$0 == n')" ]] || die "lab for $task_id already exists, run lab/down.sh $task_id first"
 check_quota "$vm_count"
@@ -109,8 +120,6 @@ mkdir -p "$lab_state"
 cp "$profile_source" "$lab_state/profile.yaml"
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-lab-$task_id" -f "$lab_state/id_ed25519"
 
-ensure_pool
-ensure_base_images "$profile_source"
 
 jq -n \
     --arg task_id "$task_id" \
@@ -121,9 +130,9 @@ jq -n \
     --argjson created_at "$(date +%s)" \
     '$ARGS.named' >"$lab_state/vars.json"
 
-run_tofu "$task_id" init -input=false -no-color >"$lab_state/init.log" 2>&1 || {
+BOUND_SECONDS="${LAB_INIT_TIMEOUT:-$INIT_TIMEOUT_SECONDS}" run_tofu_bounded "$task_id" init -input=false -no-color >"$lab_state/init.log" 2>&1 || {
     cat "$lab_state/init.log" >&2
-    die "init failed"
+    die "init failed or timed out after ${LAB_INIT_TIMEOUT:-$INIT_TIMEOUT_SECONDS}s: the provider is neither in $LAB_PLUGIN_CACHE nor downloadable"
 }
 run_tofu "$task_id" apply -input=false -auto-approve -no-color -state="$lab_state/lab.tfstate" -var-file="$lab_state/vars.json" ||
     die "apply failed; run lab/down.sh $task_id to clean up"

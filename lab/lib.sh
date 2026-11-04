@@ -7,6 +7,7 @@ export REPO_DIR
 LAB_POOL="${LAB_POOL:-ostyr-lab}"
 LAB_POOL_PATH="${LAB_POOL_PATH:-/var/lib/libvirt/images/$LAB_POOL}"
 LAB_STATE_ROOT="$LAB_DIR/state"
+LAB_PLUGIN_CACHE="${LAB_PLUGIN_CACHE:-$HOME/.cache/ostyr-lab/plugin-cache}"
 LAB_URI="qemu:///system"
 readonly SECONDS_PER_DAY=86400
 readonly STALE_DAYS=7
@@ -83,13 +84,35 @@ state_dir() {
 run_tofu() {
     local task_id="$1"
     shift
-    mkdir -p "$LAB_STATE_ROOT/plugin-cache"
-    TF_DATA_DIR="$(state_dir "$task_id")/data" TF_PLUGIN_CACHE_DIR="$LAB_STATE_ROOT/plugin-cache" TF_IN_AUTOMATION=1 \
+    TF_DATA_DIR="$(state_dir "$task_id")/data" TF_PLUGIN_CACHE_DIR="$LAB_PLUGIN_CACHE" TF_IN_AUTOMATION=1 \
         "${LAB_TOFU_BIN:-tofu}" -chdir="$LAB_DIR/tofu" "$@"
 }
 
+ensure_plugin_cache() {
+    local main_repo seed
+    mkdir -p "$LAB_PLUGIN_CACHE"
+    if [[ -z "$(ls -A "$LAB_PLUGIN_CACHE")" ]]; then
+        main_repo="$(dirname "$(git -C "$REPO_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_DIR")")"
+        seed="$main_repo/lab/state/plugin-cache"
+        if [[ -d "$seed" && -n "$(ls -A "$seed")" ]]; then
+            log "seeding the provider cache $LAB_PLUGIN_CACHE from $seed"
+            cp -a "$seed/." "$LAB_PLUGIN_CACHE/"
+        fi
+    fi
+}
+
+acquire_lock() {
+    local fd="$1" path="$2" holder
+    if ! flock -n "$fd"; then
+        holder="$(cat "$path" 2>/dev/null || true)"
+        log "waiting for lock ${path##*/} held by task ${holder:-unknown}"
+        flock "$fd"
+    fi
+    printf '%s\n' "$task_id" >"$path"
+}
+
 run_tofu_bounded() {
-    local pid waited=0 limit="${LAB_DESTROY_TIMEOUT:-$DESTROY_TIMEOUT_SECONDS}"
+    local pid waited=0 limit="${BOUND_SECONDS:-${LAB_DESTROY_TIMEOUT:-$DESTROY_TIMEOUT_SECONDS}}"
     set -m
     run_tofu "$@" &
     pid=$!
@@ -100,7 +123,7 @@ run_tofu_bounded() {
     done
     if kill -0 "$pid" 2>/dev/null; then
         kill -KILL -- "-$pid" || log "process group $pid already gone"
-        wait "$pid" || log "destroy killed after ${limit}s"
+        wait "$pid" || log "bounded call killed after ${limit}s"
         false
     else
         wait "$pid"
