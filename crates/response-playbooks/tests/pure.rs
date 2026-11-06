@@ -6,8 +6,8 @@ use core_config::parse::parse_document;
 use response_playbooks::catalogue::{catalogue_problems, find_entry, APPROVAL_ACTION};
 use response_playbooks::error::{describe, DocumentProblems, ExprError, Problem};
 use response_playbooks::expr::{
-    check_template, evaluate, evaluate_condition, is_template, nesting_depth, on_worker, operator_count, refuse_blocks, render, resolve, sandbox,
-    single_expression, PlaybookScope, Scope, MAX_NESTING, MAX_OPERATORS, MAX_SOURCE_LEN,
+    check_template, constant_value, evaluate, evaluate_condition, is_template, nesting_depth, on_worker, operator_count, refuse_blocks, render,
+    resolve, sandbox, single_expression, PlaybookScope, Scope, MAX_NESTING, MAX_OPERATORS, MAX_SOURCE_LEN,
 };
 use response_playbooks::model::{Catalogue, ParamType, Playbook, Step};
 use response_playbooks::params::{
@@ -720,5 +720,39 @@ fn the_worker_reports_a_thread_that_cannot_start_and_one_that_panics() -> TestRe
     .ok_or("expected refusal")?;
     assert!(matches!(panicked, ExprError::WorkerPanicked), "{panicked}");
     assert!(panicked.to_string().contains("panicked"));
+    Ok(())
+}
+
+
+const CHAIN_TERMS: usize = 250;
+
+
+#[test]
+fn percent_chains_and_long_lists_are_too_complex() -> TestResult {
+    let percent = braces(&format!("1{}", "%1".repeat(CHAIN_TERMS)));
+    let list = braces(&format!("[1{}]", ",1".repeat(CHAIN_TERMS)));
+    [percent, list].into_iter().try_for_each(|text| {
+        let refused = check_template(&text).err().ok_or("accepted")?;
+        assert!(matches!(refused, ExprError::TooComplex { .. }), "{refused}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_constant_of_the_wrong_type_is_a_load_problem() -> TestResult {
+    let bad = problems_of("  - action: notify\n    params: { text: \"{{ ---1 }}\" }")?;
+    assert!(bad
+        .iter()
+        .any(|found| matches!(found, Problem::BadExpression { path, .. } if path == "steps.0.params.text")));
+    let divide = problems_of("  - action: notify\n    params: { text: \"{{ 1 // 0 }}\" }")?;
+    assert_eq!(divide.len(), 1, "{divide:?}");
+    let fine = problems_of(
+        "  - action: notify\n    params: { text: \"{{ 'x' }}\", level: \"{{ 3 }}\" }\n  - action: notify\n    params: { text: \"{{ alert.a }}\", level: \"{{ '' }}\" }",
+    )?;
+    assert!(fine.is_empty(), "{fine:?}");
+    assert!(constant_value(&"x".repeat(MAX_SOURCE_LEN + 1)).is_err());
+    assert_eq!(constant_value("plain")?, None);
+    assert_eq!(constant_value("{{ alert.a }}")?, None);
     Ok(())
 }

@@ -1,8 +1,8 @@
 use crate::catalogue::find_entry;
 use crate::error::Problem;
-use crate::expr::{check_template, is_template, single_expression};
+use crate::expr::{check_template, constant_value, is_template, single_expression};
 use crate::model::{Catalogue, CatalogueEntry, Playbook, Step};
-use crate::params::check_type;
+use crate::params::{check_type, is_empty};
 use crate::trigger::ALERT_PREFIX;
 use crate::walk::{flatten, FlatStep, MAX_DEPTH};
 use serde_json::Value;
@@ -69,9 +69,16 @@ pub fn literal_problem(path: &str, name: &str, value: &Value, entry: &CatalogueE
             action: entry.action.clone(),
             param: name.to_owned(),
         }),
-        (Value::String(text), Some(_)) if is_template(text) => check_template(text)
+        (Value::String(text), Some(spec)) if is_template(text) => check_template(text)
+            .and_then(|()| constant_value(text))
+            .map_err(|failure| failure.to_string())
+            .and_then(|constant| {
+                constant
+                    .filter(|computed| !is_empty(computed))
+                    .map_or(Ok(()), |computed| check_type(spec.kind, &computed))
+            })
             .err()
-            .map(|failure| expression_problem(&format!("{path}.params.{name}"), failure.to_string())),
+            .map(|failure| expression_problem(&format!("{path}.params.{name}"), failure)),
         (literal, Some(spec)) => check_type(spec.kind, literal).err().map(|message| Problem::ParamType {
             path: path.to_owned(),
             param: name.to_owned(),

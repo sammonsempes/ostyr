@@ -22,7 +22,7 @@ pub const MAX_OPERATORS: usize = 128;
 pub const WORKER_STACK_BYTES: usize = 8_388_608;
 
 
-pub const OPERATOR_CHARS: [char; 15] = ['(', '[', '{', '-', '+', '.', '|', '*', '~', '<', '>', '=', '!', '&', '/'];
+pub const OPERATOR_CHARS: [char; 17] = ['(', '[', '{', '-', '+', '.', '|', '*', '~', '<', '>', '=', '!', '&', '/', '%', ','];
 
 
 pub const OPERATOR_WORDS: [&str; 7] = ["not", "and", "or", "if", "is", "in", "else"];
@@ -117,7 +117,7 @@ pub fn nesting_depth(text: &str) -> usize {
 }
 
 
-/// Every construct that can nest the syntax tree (brackets, unary and binary operators, `.`, `|`, `[`, `**`, `~`, keywords), over-counted on purpose.
+/// Every construct that can nest the syntax tree (brackets, unary and binary operators including `%` and `//`, `,`, `.`, `|`, `**`, `~`, keywords), over-counted on purpose.
 pub fn operator_count(text: &str) -> usize {
     let symbols = text.chars().filter(|letter| OPERATOR_CHARS.contains(letter)).count();
     let words = text
@@ -164,6 +164,26 @@ pub fn refuse_blocks(text: &str) -> Result<(), ExprError> {
         .iter()
         .find(|tag| text.contains(**tag))
         .map_or(Ok(()), |tag| Err(ExprError::Forbidden((*tag).to_owned())))
+}
+
+
+/// The value of a text that is one constant expression (no variable of the scope); `None` for any other text.
+pub fn constant_value(text: &str) -> Result<Option<serde_json::Value>, ExprError> {
+    refuse_blocks(text)?;
+    match single_expression(text) {
+        Some(inner) => on_worker(WORKER_STACK_BYTES, || {
+            let environment = sandbox();
+            let compiled = environment.compile_expression(inner)?;
+            let constant = compiled.undeclared_variables(false).is_empty();
+            constant
+                .then(|| compiled.eval(()))
+                .transpose()?
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(ExprError::from)
+        }),
+        None => Ok(None),
+    }
 }
 
 
