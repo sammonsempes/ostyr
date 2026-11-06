@@ -717,12 +717,14 @@ dependencies = [
  "getrandom 0.4.3",
  "http-body-util",
  "hyper-util",
+ "openidconnect",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -732,6 +734,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "ureq 2.12.1",
  "utoipa",
 ]
 

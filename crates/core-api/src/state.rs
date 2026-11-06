@@ -1,5 +1,6 @@
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiState};
+use crate::oidc::load_oidc;
 use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
 use core_audit::log::open_file_log;
@@ -9,9 +10,9 @@ use core_auth::password::verify_password;
 use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
-use core_auth::service::{Context, State};
+use core_auth::service::{Context, State, OIDC_PREFIX};
 use core_auth::store::{load_store_file, read_store_locked};
-use core_auth::types::{AttemptMap, VerifyFn};
+use core_auth::types::{AccountMap, AttemptMap, VerifyFn};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -49,6 +50,8 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
     let audit = open_file_log(&config.audit_log)?;
     let compromised = load_compromised(BufReader::new(File::open(&config.compromised_list)?))?;
     let (accounts, credentials) = load_store_file(&config.accounts_store)?;
+    let catalog = builtin_catalog();
+    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog)).transpose()?;
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
@@ -62,7 +65,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         audit,
         key,
         compromised,
-        catalog: builtin_catalog(),
+        catalog,
         random: os_random,
         clock: OffsetDateTime::now_utc,
         store_path: config.accounts_store.clone(),
@@ -75,6 +78,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         max_sources: MAX_TRACKED_SOURCES,
         max_attempts: MAX_TRACKED_ATTEMPTS,
         body_timeout: config.body_read_timeout,
+        oidc,
     })
 }
 
@@ -84,10 +88,21 @@ pub fn lock_auth(app: &ApiState) -> MutexGuard<'_, State> {
 }
 
 
-/// Replaces the in-memory accounts and credentials with the file's, read under the store lock; a read failure keeps the old copy and is logged.
+/// The `oidc:` accounts of `previous` that `stored` does not hold: they live in memory only, created by an OIDC callback.
+pub fn memory_only_accounts(previous: &AccountMap, stored: &AccountMap) -> AccountMap {
+    previous
+        .iter()
+        .filter(|(name, _)| name.starts_with(OIDC_PREFIX) && !stored.contains_key(*name))
+        .map(|(name, account)| (name.clone(), account.clone()))
+        .collect()
+}
+
+
+/// Replaces the in-memory accounts and credentials with the file's, read under the store lock, keeping the memory-only `oidc:` accounts.
 pub fn refresh_accounts(app: &ApiState, auth: &mut State) {
     match read_store_locked(&app.store_path) {
-        Ok((accounts, credentials)) => {
+        Ok((mut accounts, credentials)) => {
+            accounts.extend(memory_only_accounts(&auth.accounts, &accounts));
             auth.accounts = accounts;
             auth.credentials = credentials;
         }
