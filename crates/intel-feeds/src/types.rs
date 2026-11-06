@@ -1,5 +1,6 @@
 use crate::error::EntryError;
-use crate::model::{Ioc, IocType, RawEntry};
+use crate::export::ExportSummary;
+use crate::model::{FeedSummary, Ioc, IocType, RawEntry};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead};
@@ -23,3 +24,6 @@ pub type LineHandler<'a> = dyn FnMut(&str) -> Result<Option<RawEntry>, EntryErro
 
 
 pub type ItemHandler<'a> = dyn Fn(&Value) -> Result<Vec<Ioc>, EntryError> + 'a;
+
+
+pub type ExportRun = (Vec<FeedSummary>, ExportSummary);

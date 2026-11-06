@@ -2070,12 +2070,14 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

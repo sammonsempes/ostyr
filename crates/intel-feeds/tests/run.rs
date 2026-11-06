@@ -86,7 +86,10 @@ fn one_ioc_per_value_keeps_every_source_and_the_best_attributes() -> TestResult 
     let mut second = feed("second", FeedFormat::Crowdsec);
     second.default_confidence = HIGH;
     second.tlp = Tlp::Amber;
-    let config = FeedsFile { feeds: vec![first, second] };
+    let config = FeedsFile {
+        feeds: vec![first, second],
+        ..FeedsFile::default()
+    };
     let files = BTreeMap::from([("first", "192.0.2.1\n192.0.2.1\n"), ("second", "192.0.2.1\n")]);
     let (iocs, summaries) = run_text(&config, &files)?;
     assert_eq!(iocs.len(), 1);
@@ -109,7 +112,13 @@ fn expired_iocs_are_dropped_and_counted_with_an_injected_clock() -> TestResult {
     config.ttl_seconds = Some(SHORT_TTL);
     let text = "indicator,seen\n192.0.2.9,2026-01-01 00:00:00\n192.0.2.10,2026-11-03 11:59:00\n192.0.2.11,2026-11-03 11:59:01\n";
     let files = BTreeMap::from([("old", text)]);
-    let (iocs, summaries) = run_text(&FeedsFile { feeds: vec![config] }, &files)?;
+    let (iocs, summaries) = run_text(
+        &FeedsFile {
+            feeds: vec![config],
+            ..FeedsFile::default()
+        },
+        &files,
+    )?;
     assert_eq!(
         iocs.iter().map(|line| line["value"].clone()).collect::<Vec<_>>(),
         vec![Value::from("192.0.2.11")]
@@ -124,6 +133,7 @@ fn expired_iocs_are_dropped_and_counted_with_an_injected_clock() -> TestResult {
 fn an_unreadable_feed_is_reported_and_the_others_still_run() -> TestResult {
     let config = FeedsFile {
         feeds: vec![feed("missing", FeedFormat::Crowdsec), feed("present", FeedFormat::Crowdsec)],
+        ..FeedsFile::default()
     };
     let files = BTreeMap::from([("present", "192.0.2.1\n")]);
     let (iocs, summaries) = run_text(&config, &files)?;
@@ -138,6 +148,7 @@ fn an_unreadable_feed_is_reported_and_the_others_still_run() -> TestResult {
 fn a_failing_output_is_an_error() -> TestResult {
     let config = FeedsFile {
         feeds: vec![feed("present", FeedFormat::Crowdsec)],
+        ..FeedsFile::default()
     };
     let files = BTreeMap::from([("present", "192.0.2.1\n")]);
     assert!(run_feeds(&config, now(), &|path| open_from(&files, path), &mut FailingWriter).is_err());

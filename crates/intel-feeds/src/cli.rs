@@ -1,6 +1,6 @@
 use crate::config::FeedsFile;
 use crate::model::FeedSummary;
-use crate::run::run_feeds;
+use crate::run::{export_feeds, run_feeds};
 use crate::types::{ClockFn, OpenFn};
 use core_config::reload::{current_config, reload, ReloadEngine};
 use core_config::reload_cli::{write_outcome, QUIT_COMMAND};
@@ -25,13 +25,20 @@ pub fn write_summaries(summaries: &[FeedSummary], report: &mut dyn Write) -> io:
 }
 
 
-/// `run` parses every feed of the current configuration, `reload` reloads the file, `feeds` lists the feed names.
+/// `run` parses every feed of the current configuration, `export` writes a STIX bundle under the export policy, `reload` reloads the file, `feeds` lists the feed names.
 pub fn run_command(session: &mut Session, command: &str) -> io::Result<()> {
     match command.trim() {
         "run" => {
             let config = current_config(session.engine);
             let summaries = run_feeds(&config, (session.clock)(), session.open, &mut *session.out)?;
             write_summaries(&summaries, &mut *session.report)
+        }
+        "export" => {
+            let config = current_config(session.engine);
+            let (summaries, exported) = export_feeds(&config, (session.clock)(), session.open, &mut *session.out)?;
+            write_summaries(&summaries, &mut *session.report)?;
+            serde_json::to_writer(&mut *session.report, &exported)?;
+            writeln!(session.report)
         }
         "reload" => write_outcome(&reload(session.engine), &mut session.report),
         "feeds" => current_config(session.engine)
