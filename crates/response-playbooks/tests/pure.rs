@@ -6,7 +6,7 @@ use core_config::parse::parse_document;
 use response_playbooks::catalogue::{catalogue_problems, find_entry, APPROVAL_ACTION};
 use response_playbooks::error::{describe, DocumentProblems, ExprError, Problem};
 use response_playbooks::expr::{
-    check_template, constant_value, evaluate, evaluate_condition, is_template, nesting_depth, on_worker, operator_count, refuse_blocks,
+    check_template, constant_value, evaluate, evaluate_condition, is_constant, is_template, nesting_depth, on_worker, operator_count, refuse_blocks,
     refuse_repetition, render, resolve, sandbox, single_expression, PlaybookScope, Scope, MAX_NESTING, MAX_OPERATORS, MAX_SOURCE_LEN,
 };
 use response_playbooks::model::{Catalogue, ParamType, Playbook, Step};
@@ -755,6 +755,71 @@ fn a_constant_of_the_wrong_type_is_a_load_problem() -> TestResult {
     assert!(constant_value(&"x".repeat(MAX_SOURCE_LEN + 1)).is_err());
     assert_eq!(constant_value("plain")?, None);
     assert_eq!(constant_value("{{ alert.a }}")?, None);
+    Ok(())
+}
+
+
+#[test]
+fn slices_of_alert_fields_are_not_constants() -> TestResult {
+    let alert = json!({ "host": "abcdefghijklmnop", "list": ["a", "b", "c"], "name": "text" });
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    let cases = [
+        ("alert.host[0:8]", json!("abcdefgh")),
+        ("alert.host[:12] | upper", json!("ABCDEFGHIJKL")),
+        ("alert.list[1:] | first", json!("b")),
+        ("alert.list[:2] | length", json!(TWO_PROBLEMS)),
+        ("'x' ~ alert.name[0:2]", json!("xte")),
+    ];
+    cases.iter().try_for_each(|(expression, expected)| {
+        let text = braces(expression);
+        assert_eq!(constant_value(&text)?, None, "{expression}");
+        assert_eq!(&resolve(&text, &scope)?, expected, "{expression}");
+        let found = problems_of(&format!("  - action: notify\n    params: {{ text: \"{text}\" }}"))?;
+        assert!(found.is_empty(), "{expression}: {found:?}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn only_literals_filters_and_tests_make_a_constant() -> TestResult {
+    let constants = [
+        "1 + 2",
+        "true and not false",
+        "None is none",
+        "'a' | upper | length",
+        "3 is odd",
+        "3 is not even",
+        "1 if true else 2",
+        "[1, 2] | first",
+        "'a' | nosuch",
+        "3 is nosuch",
+        "3 is not nosuch",
+        "range(3)",
+    ];
+    constants.iter().try_for_each(|expression| {
+        assert!(is_constant(expression), "{expression}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    let variables = [
+        "alert",
+        "playbook.name",
+        "unknown",
+        "length",
+        "not length",
+        "'a'.not",
+        "'a'.if",
+        "'a'.upper",
+        "'a'.upper()",
+    ];
+    variables.iter().try_for_each(|expression| {
+        assert!(!is_constant(expression), "{expression}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    assert!(!is_constant("'unterminated"));
+    assert!(constant_value("{{ 'unterminated }}").is_err());
+    assert_eq!(constant_value("{{ 1 - 1 }}")?, Some(json!(0)));
     Ok(())
 }
 

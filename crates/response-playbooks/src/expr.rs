@@ -30,6 +30,9 @@ pub const OPERATOR_CHARS: [char; 17] = ['(', '[', '{', '-', '+', '.', '|', '*', 
 pub const OPERATOR_WORDS: [&str; 7] = ["not", "and", "or", "if", "is", "in", "else"];
 
 
+pub const LITERAL_WORDS: [&str; 6] = ["true", "false", "none", "True", "False", "None"];
+
+
 pub const OPENERS: [char; 3] = ['(', '[', '{'];
 
 
@@ -228,22 +231,42 @@ pub fn refuse_blocks(text: &str) -> Result<(), ExprError> {
 }
 
 
-/// The value of a text that is one constant expression (no variable of the scope); `None` for any other text.
+/// True when no identifier can name a scope variable: literals, keywords, names in filter or test position, and called functions.
+pub fn is_constant(expression: &str) -> bool {
+    let lexed = tokenize(expression, true, SyntaxConfig::default())
+        .map(|token| token.map(|(kind, _span)| kind))
+        .collect::<Result<Vec<_>, _>>();
+    lexed.is_ok_and(|tokens| {
+        tokens.iter().enumerate().all(|(i, token)| match token {
+            Token::Ident(name) => {
+                let before = i.checked_sub(1).and_then(|k| tokens.get(k));
+                let before_that = i.checked_sub(1).and_then(|k| k.checked_sub(1)).and_then(|k| tokens.get(k));
+                let after_is = matches!(before, Some(Token::Ident("is")));
+                let after_is_not = matches!(before, Some(Token::Ident("not"))) && matches!(before_that, Some(Token::Ident("is")));
+                let called = matches!(tokens.get(i + 1), Some(Token::ParenOpen)) && !matches!(before, Some(Token::Dot));
+                LITERAL_WORDS.contains(name)
+                    || OPERATOR_WORDS.contains(name) && !matches!(before, Some(Token::Dot))
+                    || matches!(before, Some(Token::Pipe))
+                    || after_is
+                    || after_is_not
+                    || called
+            }
+            _ => true,
+        })
+    })
+}
+
+
+/// The value of a text that is one constant expression (no identifier but literals, filters and tests); `None` for any other text.
 pub fn constant_value(text: &str) -> Result<Option<serde_json::Value>, ExprError> {
     refuse_blocks(text)?;
     match single_expression(text) {
-        Some(inner) => on_worker(WORKER_STACK_BYTES, || {
+        Some(inner) if is_constant(inner) => on_worker(WORKER_STACK_BYTES, || {
             let environment = sandbox();
-            let compiled = environment.compile_expression(inner)?;
-            let constant = compiled.undeclared_variables(false).is_empty();
-            constant
-                .then(|| compiled.eval(()))
-                .transpose()?
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(ExprError::from)
+            let value = environment.compile_expression(inner)?.eval(())?;
+            Ok(Some(serde_json::to_value(value)?))
         }),
-        None => Ok(None),
+        _ => Ok(None),
     }
 }
 
