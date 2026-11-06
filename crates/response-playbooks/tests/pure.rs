@@ -6,8 +6,8 @@ use core_config::parse::parse_document;
 use response_playbooks::catalogue::{catalogue_problems, find_entry, APPROVAL_ACTION};
 use response_playbooks::error::{describe, DocumentProblems, ExprError, Problem};
 use response_playbooks::expr::{
-    check_template, evaluate, evaluate_condition, is_template, nesting_depth, on_worker, operator_count, refuse_blocks, render, resolve, sandbox,
-    single_expression, PlaybookScope, Scope, MAX_NESTING, MAX_OPERATORS, MAX_SOURCE_LEN,
+    check_template, constant_value, evaluate, evaluate_condition, is_template, nesting_depth, on_worker, operator_count, refuse_blocks,
+    refuse_repetition, render, resolve, sandbox, single_expression, PlaybookScope, Scope, MAX_NESTING, MAX_OPERATORS, MAX_SOURCE_LEN,
 };
 use response_playbooks::model::{Catalogue, ParamType, Playbook, Step};
 use response_playbooks::params::{
@@ -211,8 +211,9 @@ fn the_sandbox_has_no_include_and_bounded_fuel() -> TestResult {
     let environment = sandbox();
     assert!(environment.render_str("{% include 'passwd' %}", ()).is_err());
     assert!(environment.render_str("{% extends 'base' %}", ()).is_err());
-    let loops = "{% for a in range(100) %}{% for b in range(100) %}{{ a }}{% endfor %}{% endfor %}";
-    let exhausted = environment.render_str(loops, ()).err().ok_or("expected exhaustion")?;
+    let ten = "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]";
+    let loops = format!("{{% for a in {ten} %}}{{% for b in {ten} %}}{{{{ a }}}}{{% endfor %}}{{% endfor %}}");
+    let exhausted = environment.render_str(&loops, ()).err().ok_or("expected exhaustion")?;
     assert!(exhausted.to_string().to_lowercase().contains("fuel"), "{exhausted}");
     Ok(())
 }
@@ -720,5 +721,148 @@ fn the_worker_reports_a_thread_that_cannot_start_and_one_that_panics() -> TestRe
     .ok_or("expected refusal")?;
     assert!(matches!(panicked, ExprError::WorkerPanicked), "{panicked}");
     assert!(panicked.to_string().contains("panicked"));
+    Ok(())
+}
+
+
+const CHAIN_TERMS: usize = 250;
+
+
+#[test]
+fn percent_chains_and_long_lists_are_too_complex() -> TestResult {
+    let percent = braces(&format!("1{}", "%1".repeat(CHAIN_TERMS)));
+    let list = braces(&format!("[1{}]", ",1".repeat(CHAIN_TERMS)));
+    [percent, list].into_iter().try_for_each(|text| {
+        let refused = check_template(&text).err().ok_or("accepted")?;
+        assert!(matches!(refused, ExprError::TooComplex { .. }), "{refused}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn a_constant_of_the_wrong_type_is_a_load_problem() -> TestResult {
+    let bad = problems_of("  - action: notify\n    params: { text: \"{{ ---1 }}\" }")?;
+    assert!(bad
+        .iter()
+        .any(|found| matches!(found, Problem::BadExpression { path, .. } if path == "steps.0.params.text")));
+    let divide = problems_of("  - action: notify\n    params: { text: \"{{ 1 // 0 }}\" }")?;
+    assert_eq!(divide.len(), 1, "{divide:?}");
+    let fine = problems_of(
+        "  - action: notify\n    params: { text: \"{{ 'x' }}\", level: \"{{ 3 }}\" }\n  - action: notify\n    params: { text: \"{{ alert.a }}\", level: \"{{ '' }}\" }",
+    )?;
+    assert!(fine.is_empty(), "{fine:?}");
+    assert!(constant_value(&"x".repeat(MAX_SOURCE_LEN + 1)).is_err());
+    assert_eq!(constant_value("plain")?, None);
+    assert_eq!(constant_value("{{ alert.a }}")?, None);
+    Ok(())
+}
+
+
+const MEMORY_LIMIT_ENV: &str = "PLAYBOOKS_MEMORY_CHILD";
+
+
+const MEMORY_LIMIT_BYTES: &str = "--as=4000000000";
+
+
+const HOSTILE_EXPRESSIONS: [&str; 16] = [
+    "(['x' * 1000000] * 100000) | join",
+    "'x' * 100000000",
+    "[1] * 100000000",
+    "[[1] * 10000] * 10000",
+    "('x' * 1000) ~ 'y'",
+    "'x' ~ ('y' * 1000)",
+    "'a' | replace('a', 'bbbbbbbbbb') | replace('b', 'cccccccccc')",
+    "'x' | center(1000000000)",
+    "'%1000000000d' | format(1)",
+    "range(1000000000) | list",
+    "list(range(1000000))",
+    "dict(a=1)",
+    "[1, 2] | join('xxxxxxxxxxxxxxxxxxxxxxxxxxx')",
+    "'x' | indent(1000000000)",
+    "2 * 3",
+    "alert.name * 3",
+];
+
+
+fn refuse_every_hostile_expression() -> TestResult {
+    let alert = json!({ "name": "text" });
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    HOSTILE_EXPRESSIONS.iter().try_for_each(|expression| {
+        let text = braces(expression);
+        assert!(evaluate(expression, &scope).is_err(), "evaluate {expression}");
+        assert!(render(&text, &scope).is_err(), "render {expression}");
+        assert!(resolve(&text, &scope).is_err(), "resolve {expression}");
+        assert!(!matches!(constant_value(&text), Ok(Some(_))), "constant {expression}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn hostile_expressions_are_refused_by_every_entry_point() -> TestResult {
+    refuse_every_hostile_expression()
+}
+
+
+#[test]
+fn memory_limited_child_refuses_every_hostile_expression() -> TestResult {
+    std::env::var(MEMORY_LIMIT_ENV).map_or(Ok(()), |_marker| refuse_every_hostile_expression())
+}
+
+
+#[test]
+fn hostile_expressions_do_not_allocate_under_a_memory_limit() -> TestResult {
+    let status = std::process::Command::new("prlimit")
+        .arg(MEMORY_LIMIT_BYTES)
+        .arg("--")
+        .arg(std::env::current_exe()?)
+        .args(["--exact", "memory_limited_child_refuses_every_hostile_expression", "--test-threads=1"])
+        .env(MEMORY_LIMIT_ENV, "1")
+        .output()?;
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stdout));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("1 passed"), "the child test did not run");
+    Ok(())
+}
+
+
+#[test]
+fn multiplication_is_refused_in_expressions_and_left_alone_in_plain_text() -> TestResult {
+    let alert = json!({});
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    assert!(matches!(refuse_repetition("1 * 2", true), Err(ExprError::Forbidden(_))));
+    assert!(matches!(refuse_blocks("{{ \"}}\" ~ 'x' * 9 }}"), Err(ExprError::Forbidden(_))));
+    assert!(matches!(refuse_blocks("{{ 'unterminated }}"), Err(ExprError::Engine(_))));
+    assert!(refuse_blocks("**bold** {{ 2 ** 3 }}").is_ok());
+    assert_eq!(render("**bold** {{ 2 ** 3 }}", &scope)?, "**bold** 8");
+    Ok(())
+}
+
+
+#[test]
+fn the_sandbox_keeps_its_bounded_filters_and_tests() -> TestResult {
+    let alert = json!({ "name": "text", "list": ["c", "a"] });
+    let variables = ParamMap::new();
+    let scope = scope_over(&alert, &variables, &[]);
+    assert_eq!(
+        render("{{ alert.name | upper }}{{ alert.list | length }}{{ alert.list | sort | first }}", &scope)?,
+        "TEXT2a"
+    );
+    assert!(evaluate_condition(
+        "{{ alert.name is defined and alert.nothing is undefined and alert.list is sequence }}",
+        &scope
+    )?);
+    Ok(())
+}
+
+
+#[test]
+fn an_entity_constant_is_reduced_like_at_run_time() -> TestResult {
+    let reduced = problems_of("  - action: notify\n    params: { text: \"{{ {'value': 'x'} }}\" }")?;
+    assert!(reduced.is_empty(), "{reduced:?}");
+    let wrong = problems_of("  - action: notify\n    params: { text: \"{{ {'value': 7} }}\" }")?;
+    assert_eq!(wrong.len(), 1, "{wrong:?}");
     Ok(())
 }
