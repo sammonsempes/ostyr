@@ -284,7 +284,7 @@ pub fn begin_login<Output: Write>(
 
 
 pub fn claims_denial(error: ClaimsVerificationError) -> OidcDenial {
-    tracing::warn!(%error, "ID token rejected");
+    tracing::warn!(%error, cause = ?std::error::Error::source(&error), "ID token rejected");
     match error {
         ClaimsVerificationError::Expired(_) => OidcDenial::Expired,
         ClaimsVerificationError::InvalidIssuer(_) => OidcDenial::WrongIssuer,

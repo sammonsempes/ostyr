@@ -1,9 +1,10 @@
 use crate::failure::{auth_failure, reply};
 use crate::middleware::{body_deadline, edge, guard, limit, rate_key};
 use crate::model::{
-    ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule,
+    ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule, StartReply,
 };
-use crate::state::{auth_context, lock_auth, prune_attempts, refresh_accounts};
+use crate::oidc::{callback_endpoint, start_endpoint};
+use crate::state::{auth_context, lock_auth, memory_only_accounts, prune_attempts, refresh_accounts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
@@ -39,6 +40,9 @@ pub const REASON_LOCKED: &str = "locked";
 pub const REASON_TABLE_FULL: &str = "table_full";
 
 
+pub const REASON_INTERNAL: &str = "internal_error";
+
+
 pub const HEALTH_STATUS: &str = "ok";
 
 
@@ -56,8 +60,16 @@ pub const PUBLIC_RULE: Rule = Rule {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health_endpoint, openapi_endpoint, login_endpoint, logout_endpoint, me_endpoint),
-    components(schemas(HealthReply, LoginBody, LoginReply, MeReply, ErrorBody, ErrorDetail))
+    paths(
+        health_endpoint,
+        openapi_endpoint,
+        login_endpoint,
+        logout_endpoint,
+        me_endpoint,
+        crate::oidc::start_endpoint,
+        crate::oidc::callback_endpoint
+    ),
+    components(schemas(HealthReply, LoginBody, LoginReply, MeReply, ErrorBody, ErrorDetail, StartReply))
 )]
 pub struct ApiDoc;
 
@@ -72,6 +84,14 @@ pub fn core_access() -> AccessTable {
         (route_key("GET", "/health"), PUBLIC_RULE),
         (route_key("GET", "/openapi.json"), PUBLIC_RULE),
         (route_key("POST", "/auth/login"), PUBLIC_RULE),
+        (
+            route_key("GET", "/auth/oidc/start"),
+            Rule {
+                requirement: Requirement::Public,
+                sensitive: true,
+            },
+        ),
+        (route_key("GET", "/auth/oidc/callback"), PUBLIC_RULE),
         (
             route_key("POST", "/auth/logout"),
             Rule {
@@ -110,12 +130,25 @@ pub fn build_router(state: SharedState, extra: Router<SharedState>) -> Router {
         .route("/auth/login", post(login_endpoint))
         .route("/auth/logout", post(logout_endpoint))
         .route("/auth/me", get(me_endpoint))
+        .merge(oidc_router(&state))
         .merge(extra)
         .layer(from_fn_with_state(state.clone(), body_deadline))
         .layer(from_fn_with_state(state.clone(), guard))
         .layer(from_fn_with_state(state.clone(), limit))
         .layer(from_fn_with_state(state.clone(), edge))
         .with_state(state)
+}
+
+
+pub fn oidc_router(state: &ApiState) -> Router<SharedState> {
+    let router = Router::new();
+    if state.oidc.is_some() {
+        router
+            .route("/auth/oidc/start", get(start_endpoint))
+            .route("/auth/oidc/callback", get(callback_endpoint))
+    } else {
+        router
+    }
 }
 
 
@@ -159,10 +192,15 @@ pub fn persist_login(
     request: &LoginRequest,
 ) -> Result<LoginReply, ApiError> {
     let updated = update_store_file(&app.store_path, app.random, |accounts, credentials| {
+        let external = memory_only_accounts(&auth.accounts, accounts);
         auth.accounts = std::mem::take(accounts);
+        auth.accounts.extend(external.clone());
         auth.credentials = std::mem::take(credentials);
         let token = core_login(auth, context, now, request)?;
         accounts.clone_from(&auth.accounts);
+        external.keys().for_each(|name| {
+            accounts.remove(name);
+        });
         credentials.clone_from(&auth.credentials);
         Ok(token)
     })
@@ -230,14 +268,14 @@ pub async fn verify_off_worker(app: &ApiState, password: &SecretString, stored: 
 }
 
 
-pub fn needed_room(auth: &AuthState, request: &LoginRequest) -> usize {
-    1 + usize::from(!auth.attempts.contains_key(&source_key(&request.source)))
+pub fn needed_room(auth: &AuthState, source: &str) -> usize {
+    1 + usize::from(!auth.attempts.contains_key(&source_key(source)))
 }
 
 
-pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginRequest) -> Result<(), ApiError> {
+pub fn check_table_room(app: &ApiState, auth: &mut AuthState, source: &str) -> Result<(), ApiError> {
     prune_attempts(&mut auth.attempts, (app.clock)());
-    if auth.attempts.len() + needed_room(auth, request) > app.max_attempts {
+    if auth.attempts.len() + needed_room(auth, source) > app.max_attempts {
         tracing::warn!("failure tracking table is full, login refused");
         Err(ApiError::TooManyRequests)
     } else {
@@ -246,34 +284,44 @@ pub fn check_table_room(app: &ApiState, auth: &mut AuthState, request: &LoginReq
 }
 
 
-pub fn is_locked(app: &ApiState, auth: &AuthState, request: &LoginRequest) -> bool {
+pub fn is_locked(app: &ApiState, auth: &AuthState, source: &str) -> bool {
     let now = (app.clock)();
-    locked_until(&auth.attempts, &source_key(&request.source), now).is_some()
+    locked_until(&auth.attempts, &source_key(source), now).is_some()
 }
 
 
 pub fn refuse_login(app: &ApiState, auth: &AuthState, request_id: &str, request: &LoginRequest, reason: &str) -> ApiError {
-    tracing::warn!(reason, "login refused before hashing");
+    refuse_with(app, auth, request_id, request, reason, (Outcome::Denied, ApiError::TooManyRequests))
+}
+
+
+pub fn refuse_internal(app: &ApiState, request_id: &str, request: &LoginRequest, error: ApiError) -> ApiError {
+    let auth = lock_auth(app);
+    refuse_with(app, &auth, request_id, request, REASON_INTERNAL, (Outcome::Failure, error))
+}
+
+
+pub fn refuse_with(
+    app: &ApiState,
+    auth: &AuthState,
+    request_id: &str,
+    request: &LoginRequest,
+    reason: &str,
+    (outcome, error): (Outcome, ApiError),
+) -> ApiError {
+    tracing::warn!(reason, "login refused");
     let context = auth_context(app, request_id, &app.verify);
     let audit_user = audit_name(&auth.accounts, &request.username);
     let parameters = [("reason", reason.to_owned()), ("source", request.source.clone())];
-    record(
-        &context,
-        (app.clock)(),
-        &audit_user,
-        ACTION_LOGIN,
-        &audit_user,
-        Outcome::Denied,
-        &parameters,
-    )
-    .map_or_else(|failure| auth_failure(&failure), |()| ApiError::TooManyRequests)
+    record(&context, (app.clock)(), &audit_user, ACTION_LOGIN, &audit_user, outcome, &parameters)
+        .map_or_else(|failure| auth_failure(&failure), |()| error)
 }
 
 
 pub fn admit_login(app: &ApiState, request_id: &str, request: &LoginRequest) -> Result<(), ApiError> {
     let mut auth = lock_auth(app);
-    let full = check_table_room(app, &mut auth, request).is_err();
-    let reason = if is_locked(app, &auth, request) {
+    let full = check_table_room(app, &mut auth, &request.source).is_err();
+    let reason = if is_locked(app, &auth, &request.source) {
         Some(REASON_LOCKED)
     } else {
         full.then_some(REASON_TABLE_FULL)
@@ -292,7 +340,7 @@ pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, st
         }
     };
     let mut auth = lock_auth(app);
-    check_table_room(app, &mut auth, request).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
+    check_table_room(app, &mut auth, &request.source).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
     let context = auth_context(app, request_id, &verify);
     persist_login(app, &mut auth, &context, now, request).map(|granted| Json(granted).into_response())
 }
@@ -303,7 +351,9 @@ pub async fn login_flow(app: &ApiState, request_id: &str, source: IpAddr, bytes:
     let request = login_request(parsed, source);
     admit_login(app, request_id, &request)?;
     let stored = stored_hash(app, &request.username);
-    let verdict = verify_off_worker(app, &request.password, &stored).await?;
+    let verdict = verify_off_worker(app, &request.password, &stored)
+        .await
+        .map_err(|error| refuse_internal(app, request_id, &request, error))?;
     commit_login(app, request_id, &request, &stored, verdict)
 }
 

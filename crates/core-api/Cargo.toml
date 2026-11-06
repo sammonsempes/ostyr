@@ -14,6 +14,7 @@ core-config = { path = "../core-config" }
 data-encoding = "2.11.1"
 http-body-util = "0.1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+openidconnect = { version = "4.1.0", default-features = false, features = ["ureq"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
@@ -25,14 +26,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
+ureq = "2.12"
 utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-tokio-stream = "0.1"
 getrandom = "0.4.3"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+sha2 = "0.10"
 tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = "0.1"
 
 [lints]
 workspace = true

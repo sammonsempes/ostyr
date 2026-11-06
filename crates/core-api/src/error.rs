@@ -21,6 +21,8 @@ pub enum StartupError {
     },
     #[error("tls_certificate and tls_key must be set together")]
     IncompleteTls,
+    #[error("oidc and oidc_secret_file must be set together")]
+    IncompleteOidc,
     #[error("plain HTTP is refused on {0}: configure tls_certificate and tls_key, or bind to a loopback address")]
     PlainHttpRefused(SocketAddr),
     #[error("configuration: {0}")]
