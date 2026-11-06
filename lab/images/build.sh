@@ -62,7 +62,7 @@ prepare_linux() {
     }
 
     case "$image" in
-        ubuntu-*|zitadel)
+        ubuntu-*|zitadel|k3s-node|backup-server|attacker)
             fetch "$base_url/SHA256SUMS" "$work_dir/SHA256SUMS"
             fetch "$base_url/SHA256SUMS.gpg" "$work_dir/SHA256SUMS.gpg"
             gpgv --keyring "$UBUNTU_CLOUDIMAGE_KEYRING" "$work_dir/SHA256SUMS.gpg" "$work_dir/SHA256SUMS" || die "SHA256SUMS signature check failed"
