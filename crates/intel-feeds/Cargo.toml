@@ -12,10 +12,12 @@ idna = "1"
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha1 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known", "macros"] }
 tracing = "0.1"
 url = "2"
+uuid = { version = "1", default-features = false }
 
 [dev-dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }

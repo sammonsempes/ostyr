@@ -1,9 +1,10 @@
 use crate::config::{FeedConfig, FeedsFile};
 use crate::dedup::{insert_ioc, is_expired};
 use crate::error::FeedError;
+use crate::export::export_bundle;
 use crate::formats::parse_feed;
 use crate::model::{Collector, FeedSummary};
-use crate::types::{IocIndex, OpenFn};
+use crate::types::{ExportRun, IocIndex, OpenFn};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
@@ -58,10 +59,25 @@ pub fn write_iocs(index: &IocIndex, out: &mut dyn Write) -> io::Result<()> {
 }
 
 
-/// Parses every feed, deduplicates across feeds, then streams the normalised IOCs to `out`.
-pub fn run_feeds(config: &FeedsFile, now: OffsetDateTime, open: &OpenFn, out: &mut dyn Write) -> io::Result<Vec<FeedSummary>> {
+/// Parses every feed and deduplicates across feeds.
+pub fn collect_feeds(config: &FeedsFile, now: OffsetDateTime, open: &OpenFn) -> (IocIndex, Vec<FeedSummary>) {
     let mut index = IocIndex::new();
     let summaries = config.feeds.iter().map(|feed| ingest(feed, now, open, &mut index)).collect();
+    (index, summaries)
+}
+
+
+/// Parses every feed, deduplicates across feeds, then streams the normalised IOCs to `out`.
+pub fn run_feeds(config: &FeedsFile, now: OffsetDateTime, open: &OpenFn, out: &mut dyn Write) -> io::Result<Vec<FeedSummary>> {
+    let (index, summaries) = collect_feeds(config, now, open);
     write_iocs(&index, out)?;
     Ok(summaries)
+}
+
+
+/// The normalised IOCs as a STIX 2.1 bundle under the configured export policy.
+pub fn export_feeds(config: &FeedsFile, now: OffsetDateTime, open: &OpenFn, out: &mut dyn Write) -> io::Result<ExportRun> {
+    let (index, summaries) = collect_feeds(config, now, open);
+    let exported = export_bundle(&index, &config.export, out)?;
+    Ok((summaries, exported))
 }

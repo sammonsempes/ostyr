@@ -1,5 +1,5 @@
 use crate::limits::{DEFAULT_CONFIDENCE, MAX_CONFIDENCE};
-use crate::model::Tlp;
+use crate::model::{IocType, Tlp};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -11,6 +11,9 @@ use thiserror::Error;
 
 
 pub const FEEDS_SECTION: &str = "feeds";
+
+
+pub const EXPORT_KEY: &str = "export.policy";
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -63,10 +66,25 @@ pub struct FeedConfig {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// STIX export policy: nothing above `max_tlp` or below `min_confidence`, and only the listed types (`None` means every type).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportPolicy {
+    #[serde(default)]
+    pub max_tlp: Tlp,
+    #[serde(default)]
+    pub min_confidence: u8,
+    #[serde(default)]
+    pub types: Option<Vec<IocType>>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedsFile {
     pub feeds: Vec<FeedConfig>,
+    #[serde(default)]
+    pub export: ExportPolicy,
 }
 
 
@@ -78,6 +96,8 @@ pub enum FeedsError {
     Confidence(String),
     #[error("feed `{0}`: the csv and json formats need `mapping.value`")]
     MappingValue(String),
+    #[error("export policy: minimum confidence above {MAX_CONFIDENCE}")]
+    ExportConfidence,
 }
 
 
@@ -95,10 +115,10 @@ pub fn needs_mapping(format: FeedFormat) -> bool {
 }
 
 
-/// Names are unique and non-empty, confidences within 0 to 100, generic formats carry a value mapping.
+/// Names are unique and non-empty, confidences (feeds and export minimum) within 0 to 100, generic formats carry a value mapping.
 pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
     let mut names = BTreeSet::new();
-    config.feeds.iter().try_for_each(|feed| {
+    let feeds = config.feeds.iter().try_for_each(|feed| {
         if feed.name.is_empty() || !names.insert(feed.name.as_str()) {
             Err(FeedsError::Name(feed.name.clone()))
         } else if feed.default_confidence > MAX_CONFIDENCE {
@@ -108,7 +128,13 @@ pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
         } else {
             Ok(())
         }
-    })
+    });
+    feeds?;
+    if config.export.min_confidence > MAX_CONFIDENCE {
+        Err(FeedsError::ExportConfidence)
+    } else {
+        Ok(())
+    }
 }
 
 
@@ -117,6 +143,7 @@ pub fn feeds_state(config: &FeedsFile) -> ConfigState {
         .feeds
         .iter()
         .map(|feed| (format!("{FEEDS_SECTION}.{}", feed.name), format!("{feed:?}")))
+        .chain(std::iter::once((EXPORT_KEY.to_owned(), format!("{:?}", config.export))))
         .collect()
 }
 

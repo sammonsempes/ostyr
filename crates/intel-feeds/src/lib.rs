@@ -6,6 +6,7 @@ pub mod config;
 pub mod dedup;
 pub mod entry;
 pub mod error;
+pub mod export;
 pub mod formats;
 pub mod limits;
 pub mod lines;

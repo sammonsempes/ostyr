@@ -43,7 +43,7 @@ fn the_fixture_file_loads_and_validates() -> TestResult {
         .find(|candidate| candidate.name == "threatfox")
         .ok_or("no threatfox")?;
     assert_eq!((threatfox.tlp, threatfox.ttl_seconds), (Tlp::Green, Some(ONE_DAY)));
-    assert_eq!(feeds_state(&config).len(), FIXTURE_FEEDS);
+    assert_eq!(feeds_state(&config).len(), FIXTURE_FEEDS + 1);
     Ok(())
 }
 
@@ -80,7 +80,10 @@ fn an_invalid_first_file_is_refused() -> TestResult {
 #[test]
 fn validation_names_the_offending_feed() -> TestResult {
     let named = |name: &str, format: FeedFormat| feed(name, format);
-    let with = |feeds| FeedsFile { feeds };
+    let with = |feeds| FeedsFile {
+        feeds,
+        ..FeedsFile::default()
+    };
     assert!(matches!(
         validate_feeds(&with(vec![named("a", FeedFormat::Crowdsec), named("a", FeedFormat::Crowdsec)])),
         Err(FeedsError::Name(name)) if name == "a"
