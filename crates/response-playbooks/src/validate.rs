@@ -2,7 +2,7 @@ use crate::catalogue::find_entry;
 use crate::error::Problem;
 use crate::expr::{check_template, constant_value, is_template, single_expression};
 use crate::model::{Catalogue, CatalogueEntry, Playbook, Step};
-use crate::params::{check_type, is_empty};
+use crate::params::{check_type, is_empty, reduce_entity};
 use crate::trigger::ALERT_PREFIX;
 use crate::walk::{flatten, FlatStep, MAX_DEPTH};
 use serde_json::Value;
@@ -74,8 +74,9 @@ pub fn literal_problem(path: &str, name: &str, value: &Value, entry: &CatalogueE
             .map_err(|failure| failure.to_string())
             .and_then(|constant| {
                 constant
-                    .filter(|computed| !is_empty(computed))
-                    .map_or(Ok(()), |computed| check_type(spec.kind, &computed))
+                    .map(reduce_entity)
+                    .filter(|computed| !is_empty(&computed.value))
+                    .map_or(Ok(()), |computed| check_type(spec.kind, &computed.value))
             })
             .err()
             .map(|failure| expression_problem(&format!("{path}.params.{name}"), failure)),
