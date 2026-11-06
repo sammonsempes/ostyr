@@ -27,28 +27,7 @@ trap 'chmod -R u+w "$work_dir" 2>/dev/null; rm -rf "$work_dir"' EXIT
 
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-packer-$image" -f "$work_dir/id_ed25519"
 
-ISO_CACHE="$LAB_STATE_ROOT/iso-cache"
-PINS_FILE="$LAB_DIR/images/pins.tsv"
-
-pin_field() {
-    awk -F'\t' -v name="$1" -v column="$2" '$1 == name {print $column}' "$PINS_FILE"
-}
-
-fetch_pinned() {
-    local name="$1"
-    local url expected file actual
-    url="$(pin_field "$name" 5)"
-    expected="$(pin_field "$name" 2)"
-    file="$ISO_CACHE/$(pin_field "$name" 3)"
-    [[ -n "$url" && "$expected" =~ ^[0-9a-f]{64}$ ]] || die "no valid pin for $name in $PINS_FILE"
-    mkdir -p "$ISO_CACHE"
-    if [[ ! -f "$file" ]]; then
-        curl --fail --silent --show-error --location --output "$file.part" "$url" && mv "$file.part" "$file"
-    fi
-    actual="$(sha256sum "$file" | cut -d' ' -f1)"
-    [[ "$actual" == "$expected" ]] || die "$name: sha256 $actual does not match the pin $expected; remove $file and review the pin before changing it"
-    printf '%s' "$file"
-}
+source "$LAB_DIR/images/iso-cache.sh"
 
 prepare_windows() {
     local iso_name="$1"
