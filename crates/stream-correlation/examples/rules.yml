@@ -1,0 +1,72 @@
+title: Failed login
+id: failed-login
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    CommandLine|contains: login failed
+  condition: selection
+---
+title: Outbound beacon
+id: outbound
+logsource:
+  category: network_connection
+detection:
+  selection:
+    Image|endswith: /beacon
+  condition: selection
+---
+title: Download tool
+id: download
+logsource:
+  category: process_creation
+detection:
+  selection:
+    Image|endswith: /curl
+  condition: selection
+---
+title: Run dropped payload
+id: execute
+logsource:
+  category: process_creation
+detection:
+  selection:
+    Image|startswith: /tmp/
+  condition: selection
+---
+title: SSH brute force
+id: ssh-brute-force
+correlation:
+  type: event_count
+  rules:
+    - failed-login
+  group-by:
+    - host.name
+  timespan: 5m
+  condition:
+    gte: 5
+---
+title: Destination scan
+id: destination-scan
+correlation:
+  type: value_count
+  rules:
+    - outbound
+  group-by:
+    - host.name
+  timespan: 10m
+  condition:
+    gte: 3
+    field: destination.ip
+---
+title: Download then execute
+id: download-then-execute
+correlation:
+  type: temporal_ordered
+  rules:
+    - download
+    - execute
+  group-by:
+    - host.name
+  timespan: 2m

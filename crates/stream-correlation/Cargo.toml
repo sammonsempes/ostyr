@@ -1,0 +1,31 @@
+[package]
+name = "stream-correlation"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
+core-config = { version = "0.0.0", path = "../core-config" }
+glob = "0.3"
+ipnet = "2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "2"
+serde_json = "1"
+sha2 = "0.10"
+sigma-sql = { version = "0.0.0", path = "../sigma-sql" }
+thiserror = "2"
+time = { version = "0.3", features = ["parsing"] }
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4.6"
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
