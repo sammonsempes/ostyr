@@ -48,9 +48,10 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{sleep, spawn, JoinHandle};
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Duration as StdDuration;
 use tempfile::tempdir;
 use time::{Duration, OffsetDateTime};
 use tokio::time::sleep as sleep_async;
@@ -460,13 +461,13 @@ async fn a_full_pending_table_refuses_starts_with_429() -> TestResult {
 }
 
 
-const SLOW_PROVIDER_MILLIS: u64 = 3000;
+const POLL_MILLIS: u64 = 5;
 
 
-const HEALTH_BOUND_MILLIS: u64 = 5000;
+const RELEASE_WAIT_POLLS: u32 = 12000;
 
 
-const HEAD_START_MILLIS: u64 = 350;
+const ARRIVAL_WAIT_POLLS: u32 = 12000;
 
 
 const STALL_CLIENTS: u8 = 8;
@@ -489,10 +490,23 @@ async fn status_of(router: axum::Router, offset: u8, target: String, cookie: Opt
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResult {
     let cell = TokenCell::default();
+    let released = Arc::new(AtomicBool::new(false));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    let provider_released = Arc::clone(&released);
+    let provider_timed_out = Arc::clone(&timed_out);
+    let provider_arrivals = Arc::clone(&arrivals);
     let runtime = runtime_over(
         CONFIG_TEXT,
         Box::new(move |request| {
-            sleep(StdDuration::from_millis(SLOW_PROVIDER_MILLIS));
+            provider_arrivals.fetch_add(1, Ordering::SeqCst);
+            let opened = (0..RELEASE_WAIT_POLLS).find(|_| {
+                sleep(StdDuration::from_millis(POLL_MILLIS));
+                provider_released.load(Ordering::SeqCst)
+            });
+            if opened.is_none() {
+                provider_timed_out.store(true, Ordering::SeqCst);
+            }
             respond(&cell, request)
         }),
     )?;
@@ -505,8 +519,12 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
     let starts = (1..=STALL_CLIENTS)
         .map(|offset| tokio::spawn(status_of(fx.router.clone(), offset, "/auth/oidc/start".to_owned(), None)))
         .collect::<Vec<_>>();
-    sleep_async(StdDuration::from_millis(HEAD_START_MILLIS)).await;
-    let began = Instant::now();
+    let mut waited = 0;
+    while arrivals.load(Ordering::SeqCst) == 0 && waited < ARRIVAL_WAIT_POLLS {
+        sleep_async(StdDuration::from_millis(POLL_MILLIS)).await;
+        waited += 1;
+    }
+    assert!(arrivals.load(Ordering::SeqCst) > 0);
     let forged = (1..=STALL_CLIENTS)
         .map(|offset| {
             let state = format!("forged-{offset}");
@@ -520,10 +538,12 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
     for handle in forged {
         assert_eq!(handle.await??, StatusCode::UNAUTHORIZED);
     }
-    assert!(began.elapsed() < StdDuration::from_millis(HEALTH_BOUND_MILLIS));
+    assert!(!released.load(Ordering::SeqCst));
+    released.store(true, Ordering::SeqCst);
     for handle in starts {
         assert_eq!(handle.await??, StatusCode::OK);
     }
+    assert!(!timed_out.load(Ordering::SeqCst));
     Ok(())
 }
 
