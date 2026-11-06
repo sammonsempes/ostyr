@@ -1273,3 +1273,36 @@ fn the_unary_minus_probe_is_refused_by_the_file_watcher_and_the_old_bundle_stays
     assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
     Ok(())
 }
+
+
+#[test]
+fn a_constant_of_the_wrong_type_is_refused_on_reload_and_by_the_file_watcher() -> TestResult {
+    let rig = rig()?;
+    let alert = alert_file(&rig, "hostile.json", HOSTILE)?;
+    let before = execute(&rig.session, &["simulate", "c2", &alert])?;
+    let percent = format!("\"{{{{ 1{} }}}}\"", "%1".repeat(PERCENT_TERMS));
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, &percent))?;
+    assert!(matches!(reload(&rig.session.engine), ReloadOutcome::Refused { .. }));
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, "\"{{ ---1 }}\""))?;
+    let refused = reload(&rig.session.engine);
+    assert!(
+        matches!(&refused, ReloadOutcome::Refused { reason } if reason.contains("steps.")),
+        "{refused:?}"
+    );
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), C2)?;
+    let watched = [path_in(rig.dir.path(), "c2.yaml")];
+    let watcher = watch_files(Arc::clone(&rig.session.engine), &watched, WATCH_DEBOUNCE)?;
+    let denied_before = recorded_for(&rig, Outcome::Denied)?.len();
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, "\"{{ ---1 }}\""))?;
+    let seen = (0..WATCH_ATTEMPTS).find_map(|_| {
+        std::thread::sleep(WATCH_POLL);
+        recorded_for(&rig, Outcome::Denied).ok().filter(|entries| entries.len() > denied_before)
+    });
+    drop(watcher);
+    seen.ok_or("the watcher never refused the reload")?;
+    assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
+    Ok(())
+}
+
+
+const PERCENT_TERMS: usize = 250;
