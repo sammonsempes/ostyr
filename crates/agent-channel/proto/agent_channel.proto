@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package ostyr.agent.v1;
+
+service Heartbeat {
+  rpc Beat(BeatRequest) returns (BeatReply);
+}
+
+service Events {
+  rpc Push(stream EventBatch) returns (stream EventAck);
+}
+
+service Commands {
+  rpc Subscribe(SubscribeRequest) returns (stream CommandEnvelope);
+  rpc Report(CommandReport) returns (ReportReply);
+}
+
+message BeatRequest {
+  string agent_version = 1;
+}
+
+message BeatReply {
+  string tenant = 1;
+  string agent_id = 2;
+}
+
+message EventBatch {
+  uint64 sequence = 1;
+  bytes ecs_json = 2;
+}
+
+message EventAck {
+  uint64 sequence = 1;
+}
+
+message SubscribeRequest {}
+
+message CommandEnvelope {
+  bytes envelope = 1;
+}
+
+message CommandReport {
+  bytes envelope_digest = 1;
+  bool accepted = 2;
+  string reason = 3;
+}
+
+message ReportReply {}
