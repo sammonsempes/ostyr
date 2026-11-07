@@ -5,6 +5,7 @@ use std::error::Error;
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
+use tokio::sync::watch::error::RecvError;
 use tonic::Status;
 use x509_parser::error::X509Error;
 
@@ -56,10 +57,23 @@ pub enum ChannelError {
     Handshake(#[source] io::Error),
     #[error("peer identity refused: {0}")]
     Identity(#[from] IdentityError),
+    #[error("agent certificate {serial} is revoked")]
+    Revoked { serial: String },
+    #[error("the revocation list is no longer maintained, connection closed: {0}")]
+    RevocationClosed(#[source] RecvError),
     #[error("connection failed: {0}")]
     Serve(#[source] Box<dyn Error + Send + Sync>),
     #[error("cannot connect: {0}")]
     Transport(#[from] tonic::transport::Error),
     #[error("call refused: {0}")]
     Status(#[source] Box<Status>),
+}
+
+
+#[derive(Debug, Error)]
+pub enum RevocationError {
+    #[error("serial `{0}` is not a hexadecimal number")]
+    NotHexadecimal(String),
+    #[error("serial `{0}` is zero")]
+    Zero(String),
 }

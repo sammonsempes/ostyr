@@ -1,6 +1,6 @@
 use crate::harness::{
-    attempt, attempt_with, bounded, client_paths, custom_client, finish, init_logging, make_platform, server_paths, start_server, start_single,
-    stop_server,
+    attempt, attempt_with, bounded, client_paths, custom_client, empty_revocation, finish, init_logging, make_platform, server_paths, start_server,
+    start_single, stop_server,
 };
 use crate::pki::{agent_spec, make_authority, LeafSpec, AGENT_URI};
 use crate::types::TestResult;
@@ -244,9 +244,18 @@ async fn accept_errors_are_logged_and_serving_goes_on() -> TestResult {
     init_logging()?;
     let dir = tempdir()?;
     let platform = make_platform()?;
-    let config = server_config(&server_paths(dir.path(), &platform)?)?;
+    let paths = server_paths(dir.path(), &platform)?;
+    let config = server_config(&paths)?;
     let incoming = stream::iter(vec![Err(io::Error::other("accept failed"))]);
-    bounded(serve(Box::pin(incoming), config, channel_router(), Box::pin(std::future::pending()))).await?;
+    let revocation = empty_revocation(&paths)?;
+    bounded(serve(
+        Box::pin(incoming),
+        config,
+        channel_router(),
+        revocation.watcher,
+        Box::pin(std::future::pending()),
+    ))
+    .await?;
     Ok(())
 }
 

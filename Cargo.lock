@@ -69,6 +69,8 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "core-audit",
+ "core-config",
+ "data-encoding",
  "futures-util",
  "http",
  "hyper-util",
@@ -79,6 +81,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "secrecy",
+ "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

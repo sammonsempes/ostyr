@@ -1,4 +1,5 @@
 use crate::pki::{issue, make_authority, server_spec, write_file, write_leaf, Authority, LeafSpec, SERVER_NAME, WORLD_READABLE_MODE};
+use crate::revocation_support::{open_revocation, Revocation, RevocationControl};
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::ChannelError;
 use agent_channel::model::{ClientTlsPaths, ServerTlsPaths, ALPN_H2};
@@ -47,6 +48,7 @@ pub struct RunningServer {
     pub address: SocketAddr,
     pub shutdown: oneshot::Sender<()>,
     pub handle: JoinHandle<()>,
+    pub control: RevocationControl,
 }
 
 
@@ -78,7 +80,18 @@ pub fn client_paths(dir: &Path, name: &str, platform: &Platform, agent: &Authori
 }
 
 
+pub fn empty_revocation(paths: &ServerTlsPaths) -> Result<Revocation, Box<dyn Error>> {
+    let dir = paths.certificate.parent().ok_or("certificate has no directory")?;
+    open_revocation(dir, &[])
+}
+
+
 pub async fn start_server(paths: &ServerTlsPaths) -> Result<RunningServer, Box<dyn Error>> {
+    start_server_with(paths, empty_revocation(paths)?).await
+}
+
+
+pub async fn start_server_with(paths: &ServerTlsPaths, revocation: Revocation) -> Result<RunningServer, Box<dyn Error>> {
     init_logging()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -88,32 +101,48 @@ pub async fn start_server(paths: &ServerTlsPaths) -> Result<RunningServer, Box<d
         Box::pin(TcpListenerStream::new(listener)),
         config,
         channel_router(),
+        revocation.watcher,
         Box::pin(async move {
             if let Err(error) = receiver.await {
                 tracing::warn!(%error, "shutdown sender dropped");
             }
         }),
     ));
-    Ok(RunningServer { address, shutdown, handle })
+    Ok(RunningServer {
+        address,
+        shutdown,
+        handle,
+        control: revocation.control,
+    })
 }
 
 
 pub struct SingleServer {
     pub address: SocketAddr,
     pub handle: JoinHandle<Result<(), ChannelError>>,
+    pub control: RevocationControl,
 }
 
 
 pub async fn start_single(paths: &ServerTlsPaths) -> Result<SingleServer, Box<dyn Error>> {
+    start_single_with(paths, empty_revocation(paths)?).await
+}
+
+
+pub async fn start_single_with(paths: &ServerTlsPaths, revocation: Revocation) -> Result<SingleServer, Box<dyn Error>> {
     init_logging()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let acceptor = TlsAcceptor::from(server_config(paths)?);
     let handle = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.map_err(ChannelError::Handshake)?;
-        run_connection(stream, acceptor, channel_router()).await
+        run_connection(stream, acceptor, channel_router(), revocation.watcher).await
     });
-    Ok(SingleServer { address, handle })
+    Ok(SingleServer {
+        address,
+        handle,
+        control: revocation.control,
+    })
 }
 
 

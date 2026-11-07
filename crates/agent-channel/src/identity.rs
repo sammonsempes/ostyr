@@ -1,5 +1,7 @@
 use crate::error::IdentityError;
 use crate::model::{Identity, IDENTITY_URI_PREFIX, MAX_IDENTITY_COMPONENT_LENGTH};
+use crate::revocation::canonical_serial;
+use data_encoding::HEXLOWER;
 use rustls_pki_types::CertificateDer;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::extensions::GeneralName;
@@ -10,6 +12,19 @@ use x509_parser::parse_x509_certificate;
 pub fn identity_from_chain(chain: Option<&[CertificateDer<'_>]>) -> Result<Identity, IdentityError> {
     let leaf = chain.and_then(<[CertificateDer<'_>]>::first).ok_or(IdentityError::NoCertificate)?;
     identity_from_certificate(leaf.as_ref())
+}
+
+
+/// Serial of the leaf certificate of a verified peer chain, in the form kept by the revocation list.
+pub fn serial_from_chain(chain: Option<&[CertificateDer<'_>]>) -> Result<String, IdentityError> {
+    let leaf = chain.and_then(<[CertificateDer<'_>]>::first).ok_or(IdentityError::NoCertificate)?;
+    serial_from_certificate(leaf.as_ref())
+}
+
+
+pub fn serial_from_certificate(der: &[u8]) -> Result<String, IdentityError> {
+    let (_, certificate) = parse_x509_certificate(der).map_err(IdentityError::Certificate)?;
+    Ok(canonical_serial(&HEXLOWER.encode(certificate.raw_serial())))
 }
 
 
