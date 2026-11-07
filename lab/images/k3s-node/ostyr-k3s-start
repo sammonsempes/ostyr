@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Usage: ostyr-k3s-start
+# Starts k3s on the lab NIC address: the isolated lab network has no default route, so k3s must be told its node IP and flannel interface.
+set -euo pipefail
+
+readonly ATTEMPTS=60
+readonly DELAY_SECONDS=2
+
+node_ip=""
+interface=""
+for ((attempt = 0; attempt < ATTEMPTS && ${#node_ip} == 0; attempt++)); do
+    read -r interface node_ip < <(ip -4 -o addr show scope global | awk '{split($4, address, "/"); print $2, address[1]; exit}') || true
+    if [[ -z "$node_ip" ]]; then
+        sleep "$DELAY_SECONDS"
+    fi
+done
+[[ -n "$node_ip" ]] || {
+    echo "ostyr-k3s-start: no global IPv4 address after $((ATTEMPTS * DELAY_SECONDS)) s" >&2
+    exit 1
+}
+
+exec /usr/local/bin/k3s server --write-kubeconfig-mode 644 --node-ip "$node_ip" --flannel-iface "$interface"
