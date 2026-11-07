@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# Usage: lab/images/build.sh <image>
+# Usage: lab/images/build.sh [--force] <image>   (LAB_FORCE_BUILD=1 is the same as --force)
 # Builds lab/images/<image>.pkr.hcl with Packer (QEMU, checksum-verified official media) and uploads it as base volume <image>.qcow2.
 # The previous volume is replaced only when no overlay depends on it. The build date is recorded in volume <image>.qcow2.built.
+# The fingerprint of the build inputs is recorded in volume <image>.qcow2.inputs; when it matches and the volume exists, nothing is rebuilt.
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-image="${1:?usage: build.sh <image>}"
+force="${LAB_FORCE_BUILD:-0}"
+if [[ "${1:-}" == "--force" ]]; then
+    force=1
+    shift
+fi
+image="${1:?usage: build.sh [--force] <image>}"
 [[ "$image" =~ ^[a-z0-9-]+$ ]] || die "invalid image name '$image'"
 template="$LAB_DIR/images/$image.pkr.hcl"
 [[ -f "$template" ]] || die "no template $template"
 volume="$image.qcow2"
 stamp_volume="$volume.built"
+inputs_volume="$volume.inputs"
+LAB_BUILD_LOCK_DIR="${LAB_BUILD_LOCK_DIR:-$HOME/.cache/ostyr-lab/build-locks}"
 UBUNTU_CLOUDIMAGE_KEYRING="${UBUNTU_CLOUDIMAGE_KEYRING:-/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg}"
 
 upload_volume() {
@@ -22,8 +30,34 @@ upload_volume() {
     virsh_lab vol-upload --pool "$LAB_POOL" "$name" "$file"
 }
 
+inputs_fingerprint() {
+    local files=("$image.pkr.hcl")
+    case "$image" in
+        win11|ws2022-dc) files+=(pins.tsv windows) ;;
+        rocky-*) files+=("keys/$image.asc") ;;
+    esac
+    [[ ! -d "$LAB_DIR/images/$image" ]] || files+=("$image")
+    (cd "$LAB_DIR/images" && find "${files[@]}" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+}
+
 work_dir="$(mktemp -d)"
 trap 'chmod -R u+w "$work_dir" 2>/dev/null; rm -rf "$work_dir"' EXIT
+
+mkdir -p "$LAB_BUILD_LOCK_DIR"
+exec 9>"$LAB_BUILD_LOCK_DIR/$image.lock"
+if ! flock -n 9; then
+    log "waiting for another build of $image"
+    flock 9
+fi
+
+ensure_pool
+inputs="$(inputs_fingerprint)"
+if [[ "$force" != "1" ]] && virsh_lab vol-info --pool "$LAB_POOL" "$volume" >/dev/null 2>&1 &&
+    virsh_lab vol-download --pool "$LAB_POOL" "$inputs_volume" "$work_dir/stored-inputs" >/dev/null 2>&1 &&
+    [[ "$(cat "$work_dir/stored-inputs")" == "$inputs" ]]; then
+    log "$image up to date (inputs $inputs), use --force to rebuild"
+    exit 0
+fi
 
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-packer-$image" -f "$work_dir/id_ed25519"
 
@@ -98,6 +132,7 @@ built="$work_dir/output/$volume"
 [[ -f "$built" ]] || die "packer produced no $built"
 qemu-img check "$built" >/dev/null
 date +%s >"$work_dir/built"
+printf '%s\n' "$inputs" >"$work_dir/inputs"
 
 ensure_pool
 if virsh_lab vol-info --pool "$LAB_POOL" "$volume" >/dev/null 2>&1; then
@@ -108,6 +143,10 @@ fi
 if virsh_lab vol-info --pool "$LAB_POOL" "$stamp_volume" >/dev/null 2>&1; then
     virsh_lab vol-delete --pool "$LAB_POOL" "$stamp_volume" >/dev/null
 fi
+if virsh_lab vol-info --pool "$LAB_POOL" "$inputs_volume" >/dev/null 2>&1; then
+    virsh_lab vol-delete --pool "$LAB_POOL" "$inputs_volume" >/dev/null
+fi
 upload_volume "$volume" "$built" qcow2
+upload_volume "$inputs_volume" "$work_dir/inputs" raw
 upload_volume "$stamp_volume" "$work_dir/built" raw
 log "base volume $volume uploaded, built $(date -d "@$(cat "$work_dir/built")" --iso-8601=seconds)"
