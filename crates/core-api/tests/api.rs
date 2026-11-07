@@ -2,6 +2,8 @@
 mod fixture;
 #[path = "support/http.rs"]
 mod http;
+#[path = "support/limits.rs"]
+mod limits;
 #[path = "support/logging.rs"]
 mod logging;
 #[path = "support/passkey.rs"]
@@ -31,6 +33,7 @@ use core_auth::session::{create_session, mark_sessions_revoked};
 use core_auth::store::{load_store_file, update_store_file};
 use fixture::{fixture, fixture_with, set_mode, Fixture, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
+use limits::with_limits;
 use logging::capture_dispatch;
 use passkey::fixture_with_passkey;
 use secrecy::SecretString;
@@ -676,23 +679,17 @@ fn closed_gate(state: ApiState) -> Result<ApiState, TestError> {
 
 
 fn small_attempt_table(state: ApiState) -> Result<ApiState, TestError> {
-    Ok(ApiState { max_attempts: 1, ..state })
+    Ok(with_limits(state, |limits| limits.max_attempts = 1))
 }
 
 
 fn two_key_attempt_table(state: ApiState) -> Result<ApiState, TestError> {
-    Ok(ApiState {
-        max_attempts: TWO_KEYS,
-        ..state
-    })
+    Ok(with_limits(state, |limits| limits.max_attempts = TWO_KEYS))
 }
 
 
 fn small_source_table(state: ApiState) -> Result<ApiState, TestError> {
-    Ok(ApiState {
-        max_sources: SMALL_TABLE,
-        ..state
-    })
+    Ok(with_limits(state, |limits| limits.max_sources = SMALL_TABLE))
 }
 
 
@@ -921,9 +918,8 @@ async fn rotating_inside_one_64_bit_prefix_still_trips_the_source_lockout() -> T
 
 fn full_table_with_failing_hash(state: ApiState) -> Result<ApiState, TestError> {
     Ok(ApiState {
-        max_attempts: 1,
         verify: panicking_verify,
-        ..state
+        ..with_limits(state, |limits| limits.max_attempts = 1)
     })
 }
 
@@ -963,13 +959,14 @@ fn an_expired_window_restarts_its_count() -> TestResult {
         started: OffsetDateTime::UNIX_EPOCH,
         count: RATE_MAX_REQUESTS,
     };
-    assert!(count_request(&mut spent, now));
+    let limits = fixture()?.config.limits;
+    assert!(count_request(&mut spent, now, &limits));
     assert_eq!((spent.started, spent.count), (now, 1));
     let mut full = Window {
         started: now,
         count: RATE_MAX_REQUESTS,
     };
-    assert!(!count_request(&mut full, now));
+    assert!(!count_request(&mut full, now, &limits));
     assert_eq!(full.count, RATE_MAX_REQUESTS);
     Ok(())
 }
@@ -1230,12 +1227,7 @@ fn filler_attempts(auth: &mut core_auth::service::State, count: usize) {
 
 
 async fn three_step_statuses(username: &str) -> Result<Vec<StatusCode>, TestError> {
-    let fx = fixture_with(|state| {
-        Ok(ApiState {
-            max_attempts: FILLED_TABLE,
-            ..state
-        })
-    })?;
+    let fx = fixture_with(|state| Ok(with_limits(state, |limits| limits.max_attempts = FILLED_TABLE)))?;
     let mut statuses = Vec::new();
     let first = send_from(
         &fx.router,

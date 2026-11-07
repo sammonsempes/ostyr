@@ -8,6 +8,7 @@ pub mod logging;
 pub mod middleware;
 pub mod model;
 pub mod oidc;
+pub mod reload;
 pub mod routes;
 pub mod server;
 pub mod state;

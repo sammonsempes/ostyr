@@ -128,6 +128,22 @@ async fn serve_refuses_plain_http_off_loopback() -> TestResult {
 
 
 #[tokio::test]
+async fn serve_refuses_unreadable_tls_files() -> TestResult {
+    let fx = fixture()?;
+    let config = ApiConfig {
+        tls: Some(TlsFiles {
+            certificate: fx.dir.path().join("none.pem"),
+            key: fx.dir.path().join("none.key"),
+        }),
+        ..fx.config.clone()
+    };
+    let result = serve(&config, fx.router.clone(), ServerHandle::new()).await;
+    assert!(matches!(result, Err(StartupError::Io(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn plain_http_serves_on_loopback() -> TestResult {
     let fx = fixture()?;
     let (handle, running) = start(&fx.config, fx.router.clone());
@@ -177,7 +193,7 @@ fn tls_material_is_validated() -> TestResult {
     assert!(tls_server_config(&files).is_ok());
 
     set_mode(&files.key, WORLD_READABLE)?;
-    assert_eq!(matches!(tls_server_config(&files), Err(StartupError::Audit(_))), cfg!(unix));
+    assert_eq!(matches!(tls_server_config(&files), Err(StartupError::InsecureFile { .. })), cfg!(unix));
     set_mode(&files.key, fixture::OWNER_ONLY)?;
 
     let missing_key = TlsFiles {
@@ -190,7 +206,7 @@ fn tls_material_is_validated() -> TestResult {
         certificate: dir.path().join("absent.pem"),
         ..files.clone()
     };
-    assert!(matches!(tls_server_config(&missing_certificate), Err(StartupError::Pem(_))));
+    assert!(matches!(tls_server_config(&missing_certificate), Err(StartupError::Io(_))));
 
     let other = pki_pair()?;
     let other_key = dir.path().join("other.key");
@@ -238,7 +254,7 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
     let path = module_yaml(dir.path(), "127.0.0.1:0")?;
     let handle = ServerHandle::new();
     let running = handle.clone();
-    let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), vec![], running).await });
+    let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), vec![], running, None).await });
     let address = listening(&handle).await?;
     assert!(read_response(TcpStream::connect(address).await?).await?.starts_with("HTTP/1.1 200 OK"));
     handle.shutdown();
@@ -250,7 +266,7 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
 #[tokio::test]
 async fn run_module_reports_startup_problems() -> TestResult {
     let dir = tempdir()?;
-    let usage = run_module(&[], extra_router(), extra_access(), vec![], ServerHandle::new()).await;
+    let usage = run_module(&[], extra_router(), extra_access(), vec![], ServerHandle::new(), None).await;
     assert!(matches!(usage, Err(StartupError::Usage(_))));
     let absent = run_module(
         &[dir.path().join("none.yaml").display().to_string()],
@@ -258,15 +274,16 @@ async fn run_module_reports_startup_problems() -> TestResult {
         extra_access(),
         vec![],
         ServerHandle::new(),
+        None,
     )
     .await;
     assert!(matches!(absent, Err(StartupError::Config(_))));
     let exposed = module_yaml(dir.path(), "0.0.0.0:8443")?;
-    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], ServerHandle::new()).await;
+    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], ServerHandle::new(), None).await;
     assert!(matches!(plain, Err(StartupError::PlainHttpRefused(_))));
     let local = module_yaml(dir.path(), "127.0.0.1:0")?;
     fs::remove_file(dir.path().join("compromised.txt"))?;
-    let broken = run_module(&[local], extra_router(), extra_access(), vec![], ServerHandle::new()).await;
+    let broken = run_module(&[local], extra_router(), extra_access(), vec![], ServerHandle::new(), None).await;
     assert!(matches!(broken, Err(StartupError::Io(_))));
     Ok(())
 }
@@ -321,7 +338,7 @@ async fn connections_per_source_are_limited_and_released() -> TestResult {
     let (handle, running) = start(&config, fx.router.clone());
     let address = listening(&handle).await?;
     let mut held = Vec::new();
-    for _ in 0..config.max_connections_per_source {
+    for _ in 0..config.limits.max_connections_per_source {
         let mut stream = TcpStream::connect(address).await?;
         stream.write_all(PARTIAL_HEADERS.as_bytes()).await?;
         held.push(stream);

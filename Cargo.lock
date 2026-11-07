@@ -749,6 +749,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 name = "core-api"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "axum-server",
  "core-audit",
@@ -766,6 +767,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",

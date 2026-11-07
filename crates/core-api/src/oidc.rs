@@ -2,8 +2,10 @@ use crate::error::StartupError;
 use crate::failure::{auth_failure, reply};
 use crate::middleware::rate_key;
 use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
+use crate::reload::content_digest;
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
-use crate::state::{auth_context, lock_auth, remember_callback_account};
+use crate::server::open_private;
+use crate::state::{auth_context, current_compromised, lock_auth, remember_callback_account};
 use crate::types::SharedState;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{ConnectInfo, Query, State};
@@ -11,7 +13,6 @@ use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use core_audit::log::check_private;
 use core_audit::model::Outcome;
 use core_auth::error::OidcDenial;
 use core_auth::limiter::{record_failure, source_key, SOURCE_MAX_FAILURES};
@@ -20,6 +21,7 @@ use core_auth::oidc::{
     audit_denial, begin_login, fetch_identity, http_call, new_agent, parse_oidc_config, prune_pending, settle_identity, take_pending, Callback,
     Identity, KeyRefreshGate, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
 };
+use core_auth::random::{os_random, random_array};
 use core_auth::service::{log_lockout, record, ACTION_LOGIN, ANONYMOUS_ACTOR};
 use core_auth::session::{hash_token, session_owner};
 use core_auth::types::{PendingMap, RoleCatalog};
@@ -30,11 +32,11 @@ use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use secrecy::{ExposeSecret, SecretString};
-use std::fs::{read_to_string, File};
+use std::fs::{read, read_to_string};
 use std::io::{self, Read};
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::task::spawn_blocking;
 use ureq::{Agent, AgentBuilder};
@@ -42,6 +44,9 @@ use ureq::{Agent, AgentBuilder};
 
 /// Pending logins one folded source may hold at once.
 pub const PENDING_PER_SOURCE_MAX: usize = 16;
+
+
+pub const SALT_BYTES: usize = 32;
 
 
 pub const BINDING_COOKIE: &str = "__Host-oidc_binding";
@@ -78,29 +83,40 @@ pub fn binding_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 
-pub fn read_secret(path: &Path) -> Result<SecretString, io::Error> {
-    let mut file = File::open(path)?;
-    check_private(&file).map_err(io::Error::other)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(SecretString::from(text.trim_end().to_owned()))
+/// The whole content of a file that must be private, read from the handle that was checked.
+pub fn read_private(path: &Path) -> Result<Vec<u8>, StartupError> {
+    let mut bytes = Vec::new();
+    open_private(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 
-pub fn trust_roots(path: &Path) -> Result<RootCertStore, StartupError> {
+pub fn secret_from(bytes: Vec<u8>) -> Result<SecretString, io::Error> {
+    String::from_utf8(bytes)
+        .map(|text| SecretString::from(text.trim_end().to_owned()))
+        .map_err(io::Error::other)
+}
+
+
+pub fn read_secret(path: &Path) -> Result<SecretString, io::Error> {
+    read_private(path).map_err(io::Error::other).and_then(secret_from)
+}
+
+
+pub fn trust_roots(pem: &[u8]) -> Result<RootCertStore, StartupError> {
     let mut roots = RootCertStore::empty();
-    CertificateDer::pem_file_iter(path)?.try_for_each(|certificate| -> Result<(), StartupError> { Ok(roots.add(certificate?)?) })?;
+    CertificateDer::pem_slice_iter(pem).try_for_each(|certificate| -> Result<(), StartupError> { Ok(roots.add(certificate?)?) })?;
     Ok(roots)
 }
 
 
-pub fn provider_agent(ca_file: Option<&Path>) -> Result<Agent, StartupError> {
-    match ca_file {
+pub fn provider_agent(ca_pem: Option<&[u8]>) -> Result<Agent, StartupError> {
+    match ca_pem {
         None => Ok(new_agent()),
-        Some(path) => {
+        Some(pem) => {
             let tls = ClientConfig::builder_with_provider(Arc::new(default_provider()))
                 .with_protocol_versions(&[&TLS13, &TLS12])?
-                .with_root_certificates(trust_roots(path)?)
+                .with_root_certificates(trust_roots(pem)?)
                 .with_no_client_auth();
             Ok(AgentBuilder::new()
                 .redirects(0)
@@ -112,11 +128,44 @@ pub fn provider_agent(ca_file: Option<&Path>) -> Result<Agent, StartupError> {
 }
 
 
+pub static FINGERPRINT_SALT: OnceLock<[u8; SALT_BYTES]> = OnceLock::new();
+
+
+/// The per-process salt of the OIDC fingerprint: random, kept in memory, never written to a file or the audit.
+pub fn fingerprint_salt() -> Result<&'static [u8; SALT_BYTES], StartupError> {
+    match FINGERPRINT_SALT.get() {
+        Some(salt) => Ok(salt),
+        None => {
+            let fresh = random_array::<SALT_BYTES>(os_random)?;
+            Ok(FINGERPRINT_SALT.get_or_init(|| fresh))
+        }
+    }
+}
+
+
+/// A salted digest of every path and byte the runtime was built from; the secret enters it only keyed by the salt, so a guess cannot recompute it.
+pub fn oidc_fingerprint(salt: &[u8], files: &OidcFiles, yaml: &[u8], ca_pem: Option<&[u8]>, secret: &[u8]) -> String {
+    let parts = [
+        files.config.display().to_string(),
+        content_digest(yaml),
+        files.ca_file.iter().map(|path| path.display().to_string()).collect::<String>(),
+        ca_pem.map_or_else(String::new, content_digest),
+        files.secret_file.display().to_string(),
+        content_digest(&[salt, secret].concat()),
+    ];
+    content_digest(&[salt, parts.join("\n").as_bytes()].concat())
+}
+
+
 pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime, StartupError> {
-    let config = parse_oidc_config(&read_to_string(&files.config)?, &files.config.display().to_string(), catalog)?;
-    let agent = provider_agent(files.ca_file.as_deref())?;
+    let text = read_to_string(&files.config)?;
+    let config = parse_oidc_config(&text, &files.config.display().to_string(), catalog)?;
+    let ca_pem = files.ca_file.as_deref().map(read).transpose()?;
+    let agent = provider_agent(ca_pem.as_deref())?;
+    let secret_bytes = read_private(&files.secret_file)?;
     let secret_file = files.secret_file.clone();
     Ok(OidcRuntime {
+        fingerprint: oidc_fingerprint(fingerprint_salt()?, files, text.as_bytes(), ca_pem.as_deref(), &secret_bytes),
         config,
         http: Box::new(move |request| http_call(&agent, request)),
         resolve: Box::new(move |_| read_secret(&secret_file)),
@@ -126,8 +175,8 @@ pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime
 }
 
 
-pub fn oidc_runtime(app: &ApiState) -> Result<&OidcRuntime, ApiError> {
-    app.oidc.as_ref().ok_or(ApiError::Internal)
+pub fn oidc_runtime(app: &ApiState) -> Result<Arc<OidcRuntime>, ApiError> {
+    app.oidc.load_full().ok_or(ApiError::Unauthorized)
 }
 
 
@@ -147,7 +196,8 @@ pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, so
     prune_pending(&mut pending, now);
     let from_source = pending.values().filter(|login| login.source == source).count();
     if pending.len() >= PENDING_MAX || from_source >= PENDING_PER_SOURCE_MAX {
-        let context = auth_context(app, request_id, &app.verify);
+        let compromised = current_compromised(app);
+        let context = auth_context(app, request_id, &app.verify, &compromised);
         Err(audit_denial(&context, now, ANONYMOUS_ACTOR, OidcDenial::TooManyPending, source)
             .map_or_else(|failure| auth_failure(&failure), |()| ApiError::TooManyRequests))
     } else {
@@ -159,11 +209,12 @@ pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, so
 
 pub fn begin(app: &ApiState, request_id: &str, source: &str) -> Result<String, ApiError> {
     let runtime = oidc_runtime(app)?;
-    let context = auth_context(app, request_id, &app.verify);
-    store_pending(app, runtime, request_id, source, PendingMap::new())?;
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
+    store_pending(app, &runtime, request_id, source, PendingMap::new())?;
     let mut fresh = PendingMap::new();
-    let location = begin_login(&context, &oidc_context(runtime), &mut fresh, (app.clock)(), source).map_err(|failure| auth_failure(&failure))?;
-    store_pending(app, runtime, request_id, source, fresh)?;
+    let location = begin_login(&context, &oidc_context(&runtime), &mut fresh, (app.clock)(), source).map_err(|failure| auth_failure(&failure))?;
+    store_pending(app, &runtime, request_id, source, fresh)?;
     Ok(location)
 }
 
@@ -223,7 +274,8 @@ pub async fn start_endpoint(
 
 pub fn refusal(app: &ApiState, request_id: &str, source: &str, reason: &str, outcome: Outcome, error: ApiError) -> ApiError {
     tracing::warn!(reason, "OIDC callback refused");
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     let parameters = [("reason", reason.to_owned()), ("source", source.to_owned())];
     record(&context, (app.clock)(), ANONYMOUS_ACTOR, ACTION_LOGIN, OIDC_TARGET, outcome, &parameters)
         .map_or_else(|failure| auth_failure(&failure), |()| error)
@@ -231,7 +283,8 @@ pub fn refusal(app: &ApiState, request_id: &str, source: &str, reason: &str, out
 
 
 pub fn deny(app: &ApiState, request_id: &str, source: &str, denial: OidcDenial) -> ApiError {
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     audit_denial(&context, (app.clock)(), ANONYMOUS_ACTOR, denial, source)
         .map_or_else(|failure| auth_failure(&failure), |()| ApiError::InvalidCredentials)
 }
@@ -294,21 +347,25 @@ pub fn parse_callback(
 }
 
 
-pub fn take_login(app: &ApiState, request_id: &str, callback: &Callback) -> Result<PendingLogin, ApiError> {
-    let runtime = oidc_runtime(app)?;
+pub fn take_login(app: &ApiState, runtime: &OidcRuntime, request_id: &str, callback: &Callback) -> Result<PendingLogin, ApiError> {
     let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
     take_pending(&mut pending, &callback.state, (app.clock)()).map_err(|denial| deny(app, request_id, &callback.source, denial))
 }
 
 
-pub fn fetch(app: &ApiState, login: PendingLogin, code: &SecretString) -> Result<Identity, OidcDenial> {
-    let runtime = app.oidc.as_ref().ok_or(OidcDenial::Provider)?;
+pub fn fetch(runtime: &OidcRuntime, login: PendingLogin, code: &SecretString) -> Result<Identity, OidcDenial> {
     fetch_identity(&oidc_context(runtime), login, code)
 }
 
 
-pub async fn fetch_off_worker(app: &SharedState, request_id: &str, login: PendingLogin, callback: &Callback) -> Result<Identity, ApiError> {
-    let (worker, code) = (app.clone(), callback.code.clone());
+pub async fn fetch_off_worker(
+    app: &SharedState,
+    runtime: &Arc<OidcRuntime>,
+    request_id: &str,
+    login: PendingLogin,
+    callback: &Callback,
+) -> Result<Identity, ApiError> {
+    let (worker, code) = (runtime.clone(), callback.code.clone());
     spawn_blocking(move || fetch(&worker, login, &code))
         .await
         .unwrap_or_else(|error| {
@@ -319,10 +376,10 @@ pub async fn fetch_off_worker(app: &SharedState, request_id: &str, login: Pendin
 }
 
 
-pub fn settle(app: &ApiState, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
-    let runtime = oidc_runtime(app)?;
+pub fn settle(app: &ApiState, runtime: &OidcRuntime, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
     let mut auth = lock_auth(app);
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     let token =
         settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
     session_owner(&auth.sessions, token.expose_secret())
@@ -336,7 +393,8 @@ pub fn count_callback_failure(app: &ApiState, request_id: &str, source: &str) {
     let now = (app.clock)();
     let mut auth = lock_auth(app);
     if crate::routes::check_table_room(app, &mut auth, source).is_ok() {
-        let context = auth_context(app, request_id, &app.verify);
+        let compromised = current_compromised(app);
+        let context = auth_context(app, request_id, &app.verify, &compromised);
         record_failure(&mut auth.attempts, &source_key(source), SOURCE_MAX_FAILURES, now)
             .into_iter()
             .for_each(|until| {
@@ -356,9 +414,10 @@ pub async fn run_callback(
     query: Option<CallbackQuery>,
 ) -> Result<SecretString, ApiError> {
     let callback = parse_callback(app, request_id, source, binding, query)?;
-    let login = take_login(app, request_id, &callback)?;
-    let identity = fetch_off_worker(app, request_id, login, &callback).await?;
-    settle(app, request_id, &identity, &callback)
+    let runtime = oidc_runtime(app)?;
+    let login = take_login(app, &runtime, request_id, &callback)?;
+    let identity = fetch_off_worker(app, &runtime, request_id, login, &callback).await?;
+    settle(app, &runtime, request_id, &identity, &callback)
 }
 
 

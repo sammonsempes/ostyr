@@ -1,4 +1,5 @@
-use crate::model::{ApiState, Rule, Window};
+use crate::model::{ApiState, Limits, Rule, Window};
+use arc_swap::ArcSwap;
 use core_auth::error::AuthError;
 use core_config::secret::SecretRef;
 use openidconnect::{HttpRequest, HttpResponse};
@@ -28,6 +29,12 @@ pub type VerifyPasswordFn = fn(&str, &str) -> Result<bool, AuthError>;
 
 
 pub type SharedHttpFn = Box<dyn Fn(HttpRequest) -> Result<HttpResponse, io::Error> + Send + Sync>;
+
+
+pub type SharedLimits = Arc<ArcSwap<Limits>>;
+
+
+pub type LogLevelHandle = tracing_subscriber::reload::Handle<tracing::level_filters::LevelFilter, tracing_subscriber::Registry>;
 
 
 pub type SharedResolveFn = Box<dyn Fn(&SecretRef) -> Result<SecretString, io::Error> + Send + Sync>;
