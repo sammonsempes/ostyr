@@ -11,7 +11,7 @@ use core_audit::verify::verify;
 use core_auth::error::{AuthError, OidcDenial};
 use core_auth::oidc::{
     audiences_of, begin_login, claims_denial, complete_login, denial_reason, groups_of, http_call, map_roles, new_agent, parse_oidc_config,
-    payload_of, Callback, OidcConfig, OidcContext, PENDING_MAX, RESPONSE_MAX_BYTES,
+    payload_of, Callback, KeyRefreshGate, OidcConfig, OidcContext, PENDING_MAX, RESPONSE_MAX_BYTES,
 };
 use core_auth::password::verify_password;
 use core_auth::random::os_random;
@@ -22,11 +22,12 @@ use core_auth::types::{CompromisedSet, PendingMap, RoleCatalog, StoreKey};
 use core_config::secret::SecretRef;
 use limited_writer::LimitedWriter;
 use oidc_provider::{
-    challenge_of, jwks, make_jwt, metadata, provider, respond, Provider, CLIENT_ID, GOOD_KEY, ISSUER, OTHER_KEY, SCHEME_HTTP, STATUS_ERROR,
+    challenge_of, jwks, make_jwt, metadata, provider, reply, respond, Provider, CLIENT_ID, GOOD_KEY, ISSUER, OTHER_KEY, SCHEME_HTTP, STATUS_ERROR,
 };
+use openidconnect::core::CoreRsaPrivateSigningKey;
 use openidconnect::http::{HeaderValue, Request};
 use openidconnect::url::Url;
-use openidconnect::{ClaimsVerificationError, HttpRequest};
+use openidconnect::{ClaimsVerificationError, HttpRequest, JsonWebKeyId, JsonWebKeySet, PrivateSigningKey};
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
@@ -229,6 +230,7 @@ fn prepare<Output: Write>(fixture: &Fixture<Output>, pending: &mut PendingMap) -
         config: &fixture.config,
         http: &http,
         resolve: &resolve,
+        refresh: &KeyRefreshGate::default(),
     };
     let url = Url::parse(&begin_login(&context(fixture), &oidc, pending, at(0)?, SOURCE)?)?;
     let pairs: BTreeMap<String, String> = url.query_pairs().map(|(name, value)| (name.into_owned(), value.into_owned())).collect();
@@ -294,6 +296,7 @@ fn complete_with<Output: Write>(
         config: &fixture.config,
         http: &http,
         resolve: &resolve,
+        refresh: &KeyRefreshGate::default(),
     };
     let callback = Callback {
         state: spec.state.clone().unwrap_or_else(|| prepared.state.clone()),
@@ -814,6 +817,7 @@ fn begin_login_reports_failures() -> TestResult {
             config,
             http,
             resolve: &resolve,
+            refresh: &KeyRefreshGate::default(),
         };
         begin_login(
             &context(&fixture),
@@ -881,6 +885,7 @@ fn begin_login_reports_failures() -> TestResult {
         config: &fixture.config,
         http: &healthy_http,
         resolve: &resolve,
+        refresh: &KeyRefreshGate::default(),
     };
     let failing = context_with(&fixture, |_| Err(getrandom::Error::UNSUPPORTED));
     let failing_random = begin_login(&failing, &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
@@ -902,6 +907,7 @@ fn begin_login_refusal_with_failing_audit_is_an_audit_error() -> TestResult {
         config: &fixture.config,
         http: &http,
         resolve: &resolve,
+        refresh: &KeyRefreshGate::default(),
     };
     let result = begin_login(&context(&fixture), &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
     assert!(matches!(result, Err(AuthError::Audit(_))));
@@ -924,6 +930,7 @@ fn pending_logins_are_capped_and_pruned() -> TestResult {
         config: &fixture.config,
         http: &http,
         resolve: &resolve,
+        refresh: &KeyRefreshGate::default(),
     };
     assert!(matches!(
         begin_login(&context(&fixture), &oidc, &mut pending, at(0)?, SOURCE),
@@ -1258,6 +1265,7 @@ fn insecure_discovered_endpoints_are_refused_and_audited() -> TestResult {
             config: &fixture.config,
             http: &http,
             resolve: &resolve,
+            refresh: &KeyRefreshGate::default(),
         };
         let result = begin_login(&context(&fixture), &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
         assert!(matches!(result, Err(AuthError::Oidc(OidcDenial::InsecureEndpoint))));
@@ -1308,11 +1316,139 @@ fn begin_login_audits_a_random_source_failure() -> TestResult {
         config: &fixture.config,
         http: &http,
         resolve: &resolve,
+        refresh: &KeyRefreshGate::default(),
     };
     let failing = context_with(&fixture, |_| Err(getrandom::Error::UNSUPPORTED));
     let result = begin_login(&failing, &oidc, &mut PendingMap::new(), at(0)?, SOURCE);
     assert!(matches!(result, Err(AuthError::Random(_))));
     let text = audit_text(&fixture)?;
     assert!(text.contains("\"reason\":\"provider_error\"") && text.contains(SOURCE), "{text}");
+    Ok(())
+}
+
+
+const REFRESHED_FETCHES: usize = 2;
+
+
+const STALE_KEY_ID: &str = "stale-key";
+
+
+struct Rotation {
+    stale_fetches: usize,
+    fail_discovery_after: usize,
+}
+
+
+fn stale_jwks() -> Result<Value, Box<dyn std::error::Error>> {
+    let key = CoreRsaPrivateSigningKey::from_pem(OTHER_KEY, Some(JsonWebKeyId::new(STALE_KEY_ID.to_owned())))?.as_verification_key();
+    Ok(serde_json::to_value(JsonWebKeySet::new(vec![key]))?)
+}
+
+
+fn complete_rotating<Output: Write>(
+    fixture: &Fixture<Output>,
+    gate: &KeyRefreshGate,
+    rotation: &Rotation,
+    pem: &'static str,
+) -> Result<(Result<SecretString, AuthError>, usize), Box<dyn std::error::Error>> {
+    let mut pending = PendingMap::new();
+    let prepared = prepare(fixture, &mut pending)?;
+    let mock = provider(Some(token_for(&prepared, &Spec { pem, ..spec() })?), Some(prepared.challenge.clone()));
+    let jwks_calls = Cell::<usize>::default();
+    let discovery_calls = Cell::<usize>::default();
+    let stale = stale_jwks()?;
+    let http = |request: HttpRequest| match request.uri().path() {
+        "/jwks" => {
+            jwks_calls.set(jwks_calls.get() + 1);
+            if jwks_calls.get() <= rotation.stale_fetches {
+                reply(HTTP_OK, &stale)
+            } else {
+                respond(&mock, request)
+            }
+        }
+        "/.well-known/openid-configuration" => {
+            discovery_calls.set(discovery_calls.get() + 1);
+            if discovery_calls.get() > rotation.fail_discovery_after {
+                reply(STATUS_ERROR, &json!({}))
+            } else {
+                respond(&mock, request)
+            }
+        }
+        _ => respond(&mock, request),
+    };
+    let oidc = OidcContext {
+        config: &fixture.config,
+        http: &http,
+        resolve: &resolve,
+        refresh: gate,
+    };
+    let callback = Callback {
+        state: prepared.state.clone(),
+        code: SecretString::from("code-1"),
+        source: SOURCE.to_owned(),
+    };
+    let mut state = State::default();
+    let result = complete_login(&mut state, &mut pending, &context(fixture), &oidc, at(1)?, &callback);
+    Ok((result, jwks_calls.get()))
+}
+
+
+#[test]
+fn a_key_missing_from_the_first_set_verifies_after_one_refresh() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let rotation = Rotation {
+        stale_fetches: 1,
+        fail_discovery_after: usize::MAX,
+    };
+    let (result, fetches) = complete_rotating(&fixture, &KeyRefreshGate::default(), &rotation, GOOD_KEY)?;
+    assert!(result.is_ok());
+    assert_eq!(fetches, REFRESHED_FETCHES);
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_key_id_that_stays_unknown_is_refused_with_one_refresh_per_interval() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let gate = KeyRefreshGate::default();
+    let rotation = Rotation {
+        stale_fetches: usize::MAX,
+        fail_discovery_after: usize::MAX,
+    };
+    let (first, first_fetches) = complete_rotating(&fixture, &gate, &rotation, GOOD_KEY)?;
+    let (second, second_fetches) = complete_rotating(&fixture, &gate, &rotation, GOOD_KEY)?;
+    assert!(matches!(first, Err(AuthError::InvalidCredentials)));
+    assert!(matches!(second, Err(AuthError::InvalidCredentials)));
+    assert_eq!(first_fetches, REFRESHED_FETCHES);
+    assert_eq!(second_fetches, 1);
+    assert!(audit_text(&fixture)?.contains("\"reason\":\"bad_signature\""));
+    Ok(())
+}
+
+
+#[test]
+fn a_forged_signature_with_a_known_key_id_is_refused_without_refresh() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let rotation = Rotation {
+        stale_fetches: 0,
+        fail_discovery_after: usize::MAX,
+    };
+    let (result, fetches) = complete_rotating(&fixture, &KeyRefreshGate::default(), &rotation, OTHER_KEY)?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert_eq!(fetches, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_refresh_keeps_the_signature_refusal() -> TestResult {
+    let fixture = fixture_over(Vec::new())?;
+    let rotation = Rotation {
+        stale_fetches: 1,
+        fail_discovery_after: 1,
+    };
+    let (result, _) = complete_rotating(&fixture, &KeyRefreshGate::default(), &rotation, GOOD_KEY)?;
+    assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    assert!(audit_text(&fixture)?.contains("\"reason\":\"bad_signature\""));
     Ok(())
 }
