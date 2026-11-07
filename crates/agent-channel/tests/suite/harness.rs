@@ -1,12 +1,14 @@
 use crate::pki::{issue, make_authority, server_spec, write_file, write_leaf, Authority, LeafSpec, SERVER_NAME, WORLD_READABLE_MODE};
 use crate::revocation_support::{open_revocation, Revocation, RevocationControl};
+use crate::state::default_state;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::ChannelError;
 use agent_channel::model::{ClientTlsPaths, ServerTlsPaths, ALPN_H2};
 use agent_channel::proto::BeatReply;
-use agent_channel::server::{channel_router, run_connection, serve};
+use agent_channel::server::{run_connection, serve};
+use agent_channel::services::channel_router;
 use agent_channel::tls::{client_config, parse_private_key, provider, read_certificates, read_private_key, root_store, server_config};
-use agent_channel::types::SharedClientConfig;
+use agent_channel::types::{SharedClientConfig, SharedState};
 use rustls::{ClientConfig, SupportedProtocolVersion};
 use std::error::Error;
 use std::net::SocketAddr;
@@ -28,6 +30,11 @@ static LOGGING: LazyLock<Option<String>> = LazyLock::new(|| {
         .err()
         .map(|error| error.to_string())
 });
+
+
+pub fn scoped_logging() -> tracing::subscriber::DefaultGuard {
+    tracing::subscriber::set_default(tracing_subscriber::fmt().with_writer(std::io::sink).finish())
+}
 
 
 pub fn init_logging() -> Result<(), Box<dyn Error>> {
@@ -92,6 +99,11 @@ pub async fn start_server(paths: &ServerTlsPaths) -> Result<RunningServer, Box<d
 
 
 pub async fn start_server_with(paths: &ServerTlsPaths, revocation: Revocation) -> Result<RunningServer, Box<dyn Error>> {
+    start_server_state(paths, revocation, default_state()).await
+}
+
+
+pub async fn start_server_state(paths: &ServerTlsPaths, revocation: Revocation, state: SharedState) -> Result<RunningServer, Box<dyn Error>> {
     init_logging()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -100,7 +112,8 @@ pub async fn start_server_with(paths: &ServerTlsPaths, revocation: Revocation) -
     let handle = tokio::spawn(serve(
         Box::pin(TcpListenerStream::new(listener)),
         config,
-        channel_router(),
+        channel_router(Arc::clone(&state)),
+        state,
         revocation.watcher,
         Box::pin(async move {
             if let Err(error) = receiver.await {
@@ -130,13 +143,18 @@ pub async fn start_single(paths: &ServerTlsPaths) -> Result<SingleServer, Box<dy
 
 
 pub async fn start_single_with(paths: &ServerTlsPaths, revocation: Revocation) -> Result<SingleServer, Box<dyn Error>> {
+    start_single_state(paths, revocation, default_state()).await
+}
+
+
+pub async fn start_single_state(paths: &ServerTlsPaths, revocation: Revocation, state: SharedState) -> Result<SingleServer, Box<dyn Error>> {
     init_logging()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let acceptor = TlsAcceptor::from(server_config(paths)?);
     let handle = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.map_err(ChannelError::Handshake)?;
-        run_connection(stream, acceptor, channel_router(), revocation.watcher).await
+        run_connection(stream, acceptor, channel_router(Arc::clone(&state)), state, revocation.watcher).await
     });
     Ok(SingleServer {
         address,

@@ -65,10 +65,29 @@ pub fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Ch
 }
 
 
-pub fn root_store(path: &Path) -> Result<RootCertStore, ChannelError> {
+pub fn store_of(certificates: Vec<CertificateDer<'static>>) -> Result<RootCertStore, ChannelError> {
     let mut roots = RootCertStore::empty();
-    read_certificates(path)?.into_iter().try_for_each(|certificate| roots.add(certificate))?;
+    certificates.into_iter().try_for_each(|certificate| roots.add(certificate))?;
     Ok(roots)
+}
+
+
+pub fn root_store(path: &Path) -> Result<RootCertStore, ChannelError> {
+    store_of(read_certificates(path)?)
+}
+
+
+/// The agent CA bundle must hold one certificate: revoked serials are matched without the issuer.
+pub fn single_authority(path: &Path) -> Result<Vec<CertificateDer<'static>>, ChannelError> {
+    let certificates = read_certificates(path)?;
+    if certificates.len() > 1 {
+        Err(ChannelError::MultipleAgentCa {
+            path: path.to_path_buf(),
+            count: certificates.len(),
+        })
+    } else {
+        Ok(certificates)
+    }
 }
 
 
@@ -76,7 +95,7 @@ pub fn root_store(path: &Path) -> Result<RootCertStore, ChannelError> {
 pub fn server_config(paths: &ServerTlsPaths) -> Result<SharedServerConfig, ChannelError> {
     let certificates = read_certificates(&paths.certificate)?;
     let key = parse_private_key(&read_private_key(&paths.key)?, &paths.key)?;
-    let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(root_store(&paths.agent_ca)?), provider()).build()?;
+    let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(store_of(single_authority(&paths.agent_ca)?)?), provider()).build()?;
     let mut config = ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&TLS13])?
         .with_client_cert_verifier(verifier)

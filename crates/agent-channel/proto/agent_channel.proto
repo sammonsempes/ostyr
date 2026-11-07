@@ -17,23 +17,31 @@ service Commands {
 
 message BeatRequest {
   string agent_version = 1;
+  string tenant = 2;
+  string agent_id = 3;
 }
 
 message BeatReply {
   string tenant = 1;
   string agent_id = 2;
+  uint64 interval_seconds = 3;
 }
 
 message EventBatch {
   uint64 sequence = 1;
   bytes ecs_json = 2;
+  string tenant = 3;
+  string agent_id = 4;
 }
 
 message EventAck {
   uint64 sequence = 1;
 }
 
-message SubscribeRequest {}
+message SubscribeRequest {
+  string tenant = 1;
+  string agent_id = 2;
+}
 
 message CommandEnvelope {
   bytes envelope = 1;
@@ -43,6 +51,8 @@ message CommandReport {
   bytes envelope_digest = 1;
   bool accepted = 2;
   string reason = 3;
+  string tenant = 4;
+  string agent_id = 5;
 }
 
 message ReportReply {}

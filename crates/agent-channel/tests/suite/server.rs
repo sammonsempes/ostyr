@@ -3,12 +3,14 @@ use crate::harness::{
     start_single, stop_server,
 };
 use crate::pki::{agent_spec, make_authority, LeafSpec, AGENT_URI};
+use crate::state::default_state;
 use crate::types::TestResult;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::{ChannelError, IdentityError};
 use agent_channel::model::Identity;
 use agent_channel::proto::BeatRequest;
-use agent_channel::server::{beat, channel_router, log_outcome, serve};
+use agent_channel::server::{log_outcome, serve};
+use agent_channel::services::{beat, channel_router};
 use agent_channel::tls::server_config;
 use futures_util::stream;
 use rustls::version::{TLS12, TLS13};
@@ -215,9 +217,13 @@ async fn heartbeat_on_a_dead_channel_reports_the_status() -> TestResult {
 
 #[tokio::test]
 async fn beat_without_verified_identity_is_unauthenticated() -> TestResult {
-    let outcome = beat(Request::new(BeatRequest {
-        agent_version: "test".to_string(),
-    }))
+    let outcome = beat(
+        default_state(),
+        Request::new(BeatRequest {
+            agent_version: "test".to_string(),
+            ..BeatRequest::default()
+        }),
+    )
     .await;
     assert_eq!(outcome.err().map(|status| status.code()), Some(Code::Unauthenticated));
     Ok(())
@@ -228,12 +234,13 @@ async fn beat_without_verified_identity_is_unauthenticated() -> TestResult {
 async fn beat_answers_with_the_identity_in_the_request_extensions() -> TestResult {
     let mut request = Request::new(BeatRequest {
         agent_version: "test".to_string(),
+        ..BeatRequest::default()
     });
     request.extensions_mut().insert(Identity {
         tenant: "acme".to_string(),
         agent_id: "agent-9".to_string(),
     });
-    let reply = beat(request).await?.into_inner();
+    let reply = beat(default_state(), request).await?.into_inner();
     assert_eq!((reply.tenant.as_str(), reply.agent_id.as_str()), ("acme", "agent-9"));
     Ok(())
 }
@@ -251,7 +258,8 @@ async fn accept_errors_are_logged_and_serving_goes_on() -> TestResult {
     bounded(serve(
         Box::pin(incoming),
         config,
-        channel_router(),
+        channel_router(default_state()),
+        default_state(),
         revocation.watcher,
         Box::pin(std::future::pending()),
     ))

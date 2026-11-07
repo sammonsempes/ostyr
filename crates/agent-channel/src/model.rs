@@ -1,7 +1,11 @@
+use crate::types::{CommandSource, EventSink};
 use secrecy::SecretString;
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 
 pub const IDENTITY_URI_PREFIX: &str = "urn:ostyr:agent:";
@@ -19,6 +23,53 @@ pub const ALPN_H2: &[u8] = b"h2";
 pub const HEARTBEAT_PATH: &str = "/ostyr.agent.v1.Heartbeat/Beat";
 
 
+pub const EVENTS_PATH: &str = "/ostyr.agent.v1.Events/Push";
+
+
+pub const SUBSCRIBE_PATH: &str = "/ostyr.agent.v1.Commands/Subscribe";
+
+
+pub const REPORT_PATH: &str = "/ostyr.agent.v1.Commands/Report";
+
+
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
+
+
+pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 1_048_576;
+
+
+pub const DEFAULT_MAX_STREAMS_PER_AGENT: usize = 4;
+
+
+pub const DEFAULT_MAX_REQUESTS_PER_WINDOW: u32 = 200;
+
+
+pub const DEFAULT_RATE_WINDOW_SECONDS: u64 = 1;
+
+
+pub const DEFAULT_MAX_CONNECTIONS_PER_AGENT: usize = 4;
+
+
+pub const DEFAULT_MAX_STREAMS_PER_CONNECTION: u32 = 8;
+
+
+pub const DEFAULT_MAX_INFLIGHT_PER_AGENT: usize = 8;
+
+
+pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+
+
+/// Agent-supplied text is cut to this many characters before it reaches a log line.
+pub const MAX_LOGGED_TEXT_CHARS: usize = 128;
+
+
+pub const TRUNCATION_MARKER: &str = "...[truncated]";
+
+
+/// Most significant bit of the first serial byte: set means a negative DER integer.
+pub const SERIAL_SIGN_BIT: u8 = 0x80;
+
+
 /// Upper bound between a serial entering the revocation list and the close of that agent connections.
 pub const REVOCATION_CLOSE_SECONDS: u64 = 5;
 
@@ -27,7 +78,7 @@ pub const PLACEHOLDER_ENDPOINT: &str = "http://agent-channel.invalid";
 
 
 /// The agent identity, read from the verified client certificate and from nowhere else.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identity {
     pub tenant: String,
     pub agent_id: String,
@@ -70,4 +121,108 @@ pub struct RawRevocationFile {
 #[serde(try_from = "RawRevocationFile")]
 pub struct Revocations {
     pub serials: BTreeSet<String>,
+}
+
+
+/// Bounds and intervals of the server side, loadable from a configuration file; every field defaults to its `DEFAULT_*` const.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChannelSettings {
+    pub heartbeat_interval_seconds: u64,
+    pub max_message_bytes: usize,
+    pub max_streams_per_agent: usize,
+    pub max_requests_per_window: u32,
+    pub rate_window_seconds: u64,
+    pub max_connections_per_agent: usize,
+    pub max_streams_per_connection: u32,
+    pub max_inflight_per_agent: usize,
+    pub request_timeout_seconds: u64,
+}
+
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_seconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            max_streams_per_agent: DEFAULT_MAX_STREAMS_PER_AGENT,
+            max_requests_per_window: DEFAULT_MAX_REQUESTS_PER_WINDOW,
+            rate_window_seconds: DEFAULT_RATE_WINDOW_SECONDS,
+            max_connections_per_agent: DEFAULT_MAX_CONNECTIONS_PER_AGENT,
+            max_streams_per_connection: DEFAULT_MAX_STREAMS_PER_CONNECTION,
+            max_inflight_per_agent: DEFAULT_MAX_INFLIGHT_PER_AGENT,
+            request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        }
+    }
+}
+
+
+/// Refusals and outcomes since the server started.
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub oversized: AtomicU64,
+    pub rate_limited: AtomicU64,
+    pub stream_limited: AtomicU64,
+    pub connection_limited: AtomicU64,
+    pub inflight_limited: AtomicU64,
+    pub timed_out: AtomicU64,
+    pub identity_mismatch: AtomicU64,
+    pub events_acknowledged: AtomicU64,
+    pub commands_accepted: AtomicU64,
+    pub commands_refused: AtomicU64,
+}
+
+
+/// What one agent currently holds: connections, streams, requests in flight and the requests of the current rate window.
+#[derive(Clone, Debug)]
+pub struct AgentLoad {
+    pub connections: usize,
+    pub streams: usize,
+    pub inflight: usize,
+    pub window_started: Instant,
+    pub window_count: u32,
+}
+
+
+/// Shared by every connection: bounds, counters, per-agent load and the two injected ends (event sink, command source).
+pub struct ServerState {
+    pub settings: ChannelSettings,
+    pub counters: Counters,
+    pub load: Mutex<HashMap<Identity, AgentLoad>>,
+    pub events: EventSink,
+    pub commands: CommandSource,
+}
+
+
+/// The kinds of per-agent slot: an open connection, an open stream, a request being handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    Connection,
+    Stream,
+    Inflight,
+}
+
+
+/// One slot of an agent; dropping it gives the slot back.
+pub struct SlotPermit {
+    pub state: Arc<ServerState>,
+    pub identity: Identity,
+    pub kind: SlotKind,
+}
+
+
+/// Everything a running `Events` stream needs; the permit goes with the stream.
+pub struct PushSession {
+    pub state: Arc<ServerState>,
+    pub identity: Identity,
+    pub permit: SlotPermit,
+}
+
+
+/// What the agent decided about one command envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandVerdict {
+    pub digest: Vec<u8>,
+    pub accepted: bool,
+    pub reason: String,
 }

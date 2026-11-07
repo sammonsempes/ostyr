@@ -1,47 +1,17 @@
 use crate::error::{ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serial_from_chain};
-use crate::model::{Identity, HEARTBEAT_PATH};
-use crate::proto::{BeatReply, BeatRequest};
+use crate::limits::open_slot;
+use crate::model::{Identity, SlotKind};
 use crate::revocation::{is_revoked, is_revoked_now};
-use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, ShutdownSignal};
-use axum::body::Body;
+use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, SharedState, ShutdownSignal};
 use axum::{Extension, Router};
 use futures_util::{FutureExt, StreamExt};
-use http::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
-use std::convert::Infallible;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
-use tonic::server::Grpc;
-use tonic_prost::ProstCodec;
-use tower::service_fn;
-
-
-pub fn channel_router() -> Router {
-    Router::new().route_service(HEARTBEAT_PATH, service_fn(heartbeat_route))
-}
-
-
-pub async fn heartbeat_route(request: Request<Body>) -> Result<Response<tonic::body::Body>, Infallible> {
-    Ok(Grpc::new(ProstCodec::<BeatReply, BeatRequest>::default())
-        .unary(service_fn(beat), request)
-        .await)
-}
-
-
-/// Answers with the identity taken from the certificate; the request names no agent and no tenant.
-pub async fn beat(request: tonic::Request<BeatRequest>) -> Result<tonic::Response<BeatReply>, tonic::Status> {
-    let identity = request
-        .extensions()
-        .get::<Identity>()
-        .ok_or_else(|| tonic::Status::unauthenticated("no verified agent identity"))?;
-    Ok(tonic::Response::new(BeatReply {
-        tenant: identity.tenant.clone(),
-        agent_id: identity.agent_id.clone(),
-    }))
-}
 
 
 /// Accepts connections until `shutdown` completes; every connection runs in its own task and a refused one is logged.
@@ -49,6 +19,7 @@ pub async fn serve(
     incoming: IncomingConnections,
     config: SharedServerConfig,
     router: Router,
+    state: SharedState,
     revocations: RevocationWatch,
     shutdown: ShutdownSignal,
 ) {
@@ -58,7 +29,7 @@ pub async fn serve(
         .for_each(|accepted| {
             match accepted {
                 Ok(stream) => {
-                    let connection = run_connection(stream, acceptor.clone(), router.clone(), revocations.clone());
+                    let connection = run_connection(stream, acceptor.clone(), router.clone(), Arc::clone(&state), revocations.clone());
                     tokio::spawn(connection.map(log_outcome));
                 }
                 Err(error) => tracing::warn!(%error, "accept failed"),
@@ -70,21 +41,37 @@ pub async fn serve(
 
 
 /// Handshake, identity and serial from the certificate, then HTTP/2; the connection ends as soon as the serial is revoked.
-pub async fn run_connection(stream: TcpStream, acceptor: TlsAcceptor, router: Router, revocations: RevocationWatch) -> Result<(), ChannelError> {
+pub async fn run_connection(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    router: Router,
+    state: SharedState,
+    revocations: RevocationWatch,
+) -> Result<(), ChannelError> {
     let tls = acceptor.accept(stream).await.map_err(ChannelError::Handshake)?;
     let identity = identity_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
     let serial = serial_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
     if is_revoked_now(&revocations, &serial) {
         Err(refused_revoked(serial))
     } else {
+        let _connection = open_slot(&state, &identity, SlotKind::Connection).map_err(|_refused| too_many_connections(&identity))?;
         let service = router.layer(Extension(identity));
-        let builder = Builder::new(TokioExecutor::new()).http2_only();
+        let mut builder = Builder::new(TokioExecutor::new()).http2_only();
+        builder.http2().max_concurrent_streams(state.settings.max_streams_per_connection);
         tokio::select! {
             served = builder.serve_connection(TokioIo::new(tls), TowerToHyperService::new(service)) => {
                 served.map_err(ChannelError::Serve)
             }
             closed = watch_revocation(revocations, &serial) => Err(closed),
         }
+    }
+}
+
+
+pub fn too_many_connections(identity: &Identity) -> ChannelError {
+    ChannelError::TooManyConnections {
+        tenant: identity.tenant.clone(),
+        agent_id: identity.agent_id.clone(),
     }
 }
 

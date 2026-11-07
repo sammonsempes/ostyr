@@ -2,8 +2,8 @@ use crate::harness::make_platform;
 use crate::pki::{agent_spec, issue, LeafSpec, AGENT_URI};
 use crate::types::TestResult;
 use agent_channel::error::IdentityError;
-use agent_channel::identity::{identity_from_certificate, identity_from_chain, parse_identity_uri, valid_component};
-use agent_channel::model::{Identity, MAX_IDENTITY_COMPONENT_LENGTH};
+use agent_channel::identity::{identity_from_certificate, identity_from_chain, parse_identity_uri, serial_from_certificate, valid_component};
+use agent_channel::model::{Identity, MAX_IDENTITY_COMPONENT_LENGTH, SERIAL_SIGN_BIT};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use std::error::Error;
@@ -132,5 +132,25 @@ fn uri_shapes_are_checked() -> TestResult {
 fn component_length_bound_is_inclusive() -> TestResult {
     assert!(valid_component(&"a".repeat(MAX_IDENTITY_COMPONENT_LENGTH)));
     assert!(!valid_component(&"a".repeat(MAX_IDENTITY_COMPONENT_LENGTH + 1)));
+    Ok(())
+}
+
+
+#[test]
+fn a_negative_serial_is_refused() -> TestResult {
+    let der = certificate_der(&agent_spec(&[AGENT_URI]))?;
+    let serial = {
+        let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref())?;
+        parsed.raw_serial().to_vec()
+    };
+    let mut patched = der.as_ref().to_vec();
+    let position = patched
+        .windows(serial.len())
+        .position(|window| window == serial.as_slice())
+        .ok_or("serial not found")?;
+    let first = patched.get_mut(position).ok_or("serial out of range")?;
+    *first |= SERIAL_SIGN_BIT;
+    assert!(matches!(serial_from_certificate(&patched), Err(IdentityError::NegativeSerial)));
+    assert!(serial_from_certificate(der.as_ref()).is_ok());
     Ok(())
 }
