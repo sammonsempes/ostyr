@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: lab/images/prune.sh
-# Deletes base volumes (and their .built stamp) that no profile references and no overlay depends on. Lab volumes (ostyr-*) are never touched.
+# Deletes base volumes (and their .built and .inputs stamps) that no profile references and no overlay depends on. Lab volumes (ostyr-*) are never touched.
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
@@ -14,9 +14,9 @@ virsh_lab vol-list --pool "$LAB_POOL" | awk 'NR > 2 && NF && $1 !~ /^ostyr-/ && 
         log "keep $volume (an overlay depends on it)"
     else
         virsh_lab vol-delete --pool "$LAB_POOL" "$volume" >/dev/null
-        if virsh_lab vol-info --pool "$LAB_POOL" "$volume.built" >/dev/null 2>&1; then
-            virsh_lab vol-delete --pool "$LAB_POOL" "$volume.built" >/dev/null
-        fi
+        for suffix in built inputs; do
+            virsh_lab vol-info --pool "$LAB_POOL" "$volume.$suffix" >/dev/null 2>&1 && virsh_lab vol-delete --pool "$LAB_POOL" "$volume.$suffix" >/dev/null
+        done
         log "deleted $volume"
     fi
 done

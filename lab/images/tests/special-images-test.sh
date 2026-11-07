@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: [SPECIAL_TASK=<lab id>] [SPECIAL_SKIP_BUILD=1] lab/images/tests/special-images-test.sh [--static]
+# Usage: [SPECIAL_TASK=<lab id>] lab/images/tests/special-images-test.sh [--static]
 # Builds k3s-node, backup-server, attacker and ubuntu-2404, boots base-special and attack-linux, checks each image, runs one harmless Atomic test.
 # --static only validates the three templates and the egress script.
 set -euo pipefail
@@ -87,7 +87,6 @@ check "ubuntu-2404 installs rsyslog-gnutls" grep -q 'rsyslog-gnutls' "$IMAGES_DI
 
 if [[ "${1:-}" != "--static" ]]; then
     for image in ubuntu-2404 k3s-node backup-server attacker; do
-        [[ "${SPECIAL_SKIP_BUILD:-0}" == "1" ]] && continue
         check "build $image" "$IMAGES_DIR/build.sh" "$image"
     done
 
