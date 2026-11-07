@@ -63,6 +63,8 @@ pub enum ChannelError {
     Identity(#[from] IdentityError),
     #[error("agent certificate {serial} is revoked")]
     Revoked { serial: String },
+    #[error("agent {tenant}/{agent_id} holds too many connections, connection refused")]
+    TooManyConnections { tenant: String, agent_id: String },
     #[error("the revocation list is no longer maintained, connection closed: {0}")]
     RevocationClosed(#[source] RecvError),
     #[error("connection failed: {0}")]

@@ -1,3 +1,4 @@
+mod bounds;
 mod harness;
 mod identity;
 mod pki;

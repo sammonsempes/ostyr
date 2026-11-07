@@ -47,6 +47,25 @@ pub const DEFAULT_MAX_REQUESTS_PER_WINDOW: u32 = 200;
 pub const DEFAULT_RATE_WINDOW_SECONDS: u64 = 1;
 
 
+pub const DEFAULT_MAX_CONNECTIONS_PER_AGENT: usize = 4;
+
+
+pub const DEFAULT_MAX_STREAMS_PER_CONNECTION: u32 = 8;
+
+
+pub const DEFAULT_MAX_INFLIGHT_PER_AGENT: usize = 8;
+
+
+pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+
+
+/// Agent-supplied text is cut to this many characters before it reaches a log line.
+pub const MAX_LOGGED_TEXT_CHARS: usize = 128;
+
+
+pub const TRUNCATION_MARKER: &str = "...[truncated]";
+
+
 /// Most significant bit of the first serial byte: set means a negative DER integer.
 pub const SERIAL_SIGN_BIT: u8 = 0x80;
 
@@ -114,6 +133,10 @@ pub struct ChannelSettings {
     pub max_streams_per_agent: usize,
     pub max_requests_per_window: u32,
     pub rate_window_seconds: u64,
+    pub max_connections_per_agent: usize,
+    pub max_streams_per_connection: u32,
+    pub max_inflight_per_agent: usize,
+    pub request_timeout_seconds: u64,
 }
 
 
@@ -125,6 +148,10 @@ impl Default for ChannelSettings {
             max_streams_per_agent: DEFAULT_MAX_STREAMS_PER_AGENT,
             max_requests_per_window: DEFAULT_MAX_REQUESTS_PER_WINDOW,
             rate_window_seconds: DEFAULT_RATE_WINDOW_SECONDS,
+            max_connections_per_agent: DEFAULT_MAX_CONNECTIONS_PER_AGENT,
+            max_streams_per_connection: DEFAULT_MAX_STREAMS_PER_CONNECTION,
+            max_inflight_per_agent: DEFAULT_MAX_INFLIGHT_PER_AGENT,
+            request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
         }
     }
 }
@@ -136,6 +163,9 @@ pub struct Counters {
     pub oversized: AtomicU64,
     pub rate_limited: AtomicU64,
     pub stream_limited: AtomicU64,
+    pub connection_limited: AtomicU64,
+    pub inflight_limited: AtomicU64,
+    pub timed_out: AtomicU64,
     pub identity_mismatch: AtomicU64,
     pub events_acknowledged: AtomicU64,
     pub commands_accepted: AtomicU64,
@@ -143,10 +173,12 @@ pub struct Counters {
 }
 
 
-/// What one agent currently holds: open streams and the requests of the current rate window.
+/// What one agent currently holds: connections, streams, requests in flight and the requests of the current rate window.
 #[derive(Clone, Debug)]
 pub struct AgentLoad {
+    pub connections: usize,
     pub streams: usize,
+    pub inflight: usize,
     pub window_started: Instant,
     pub window_count: u32,
 }
@@ -162,10 +194,20 @@ pub struct ServerState {
 }
 
 
-/// One open stream of an agent; dropping it gives the slot back.
-pub struct StreamPermit {
+/// The kinds of per-agent slot: an open connection, an open stream, a request being handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    Connection,
+    Stream,
+    Inflight,
+}
+
+
+/// One slot of an agent; dropping it gives the slot back.
+pub struct SlotPermit {
     pub state: Arc<ServerState>,
     pub identity: Identity,
+    pub kind: SlotKind,
 }
 
 
@@ -173,7 +215,7 @@ pub struct StreamPermit {
 pub struct PushSession {
     pub state: Arc<ServerState>,
     pub identity: Identity,
-    pub permit: StreamPermit,
+    pub permit: SlotPermit,
 }
 
 

@@ -112,7 +112,8 @@ pub async fn start_server_state(paths: &ServerTlsPaths, revocation: Revocation, 
     let handle = tokio::spawn(serve(
         Box::pin(TcpListenerStream::new(listener)),
         config,
-        channel_router(state),
+        channel_router(Arc::clone(&state)),
+        state,
         revocation.watcher,
         Box::pin(async move {
             if let Err(error) = receiver.await {
@@ -153,7 +154,7 @@ pub async fn start_single_state(paths: &ServerTlsPaths, revocation: Revocation, 
     let acceptor = TlsAcceptor::from(server_config(paths)?);
     let handle = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.map_err(ChannelError::Handshake)?;
-        run_connection(stream, acceptor, channel_router(state), revocation.watcher).await
+        run_connection(stream, acceptor, channel_router(Arc::clone(&state)), state, revocation.watcher).await
     });
     Ok(SingleServer {
         address,

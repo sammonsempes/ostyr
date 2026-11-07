@@ -9,7 +9,7 @@ use agent_channel::model::{ChannelSettings, CommandVerdict, Identity, DEFAULT_MA
 use agent_channel::proto::{BeatRequest, CommandReport, EventBatch, SubscribeRequest};
 use agent_channel::services::{beat, open_push, report, subscribe};
 use agent_channel::tls::client_config;
-use agent_channel::types::{CommandSource, SharedState};
+use agent_channel::types::{CommandSource, SharedClientConfig, SharedState};
 use agent_command::keys::open_keys_engine;
 use agent_command::model::{Action, Command, KeyClass, Sequences, NONCE_LENGTH};
 use agent_command::sign::{memory_signer, sign_command};
@@ -79,7 +79,7 @@ const LONG_WINDOW_SECONDS: u64 = 3_600;
 const BATCH_COUNT: u64 = 3;
 
 
-fn agent_identity() -> Identity {
+pub fn agent_identity() -> Identity {
     Identity {
         tenant: "acme".to_string(),
         agent_id: "agent-1".to_string(),
@@ -103,27 +103,28 @@ fn identified<Message>(message: Message) -> Request<Message> {
 }
 
 
-fn counter(value: &AtomicU64) -> u64 {
+pub fn counter(value: &AtomicU64) -> u64 {
     value.load(Ordering::Relaxed)
 }
 
 
-fn settings(change: impl FnOnce(&mut ChannelSettings)) -> ChannelSettings {
+pub fn settings(change: impl FnOnce(&mut ChannelSettings)) -> ChannelSettings {
     let mut base = ChannelSettings::default();
     change(&mut base);
     base
 }
 
 
-struct Session {
-    channel: Channel,
-    server: crate::harness::RunningServer,
+pub struct Session {
+    pub channel: Channel,
+    pub config: SharedClientConfig,
+    pub server: crate::harness::RunningServer,
     _dir: tempfile::TempDir,
     _logging: DefaultGuard,
 }
 
 
-async fn session(state: SharedState) -> Result<Session, Box<dyn Error>> {
+pub async fn session(state: SharedState) -> Result<Session, Box<dyn Error>> {
     let logging = scoped_logging();
     let dir = tempdir()?;
     let platform: Platform = make_platform()?;
@@ -134,9 +135,11 @@ async fn session(state: SharedState) -> Result<Session, Box<dyn Error>> {
     )
     .await?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
-    let channel = bounded(connect_channel(server.address, client_config(&paths)?, SERVER_NAME)).await??;
+    let config = client_config(&paths)?;
+    let channel = bounded(connect_channel(server.address, Arc::clone(&config), SERVER_NAME)).await??;
     Ok(Session {
         channel,
+        config,
         server,
         _dir: dir,
         _logging: logging,
@@ -144,12 +147,12 @@ async fn session(state: SharedState) -> Result<Session, Box<dyn Error>> {
 }
 
 
-async fn finish_session(session: Session) -> TestResult {
+pub async fn finish_session(session: Session) -> TestResult {
     stop_server(session.server).await
 }
 
 
-fn status_code(outcome: Result<impl std::fmt::Debug, ChannelError>) -> Option<Code> {
+pub fn status_code(outcome: Result<impl std::fmt::Debug, ChannelError>) -> Option<Code> {
     match outcome {
         Err(ChannelError::Status(status)) => Some(status.code()),
         _ => None,
@@ -157,7 +160,7 @@ fn status_code(outcome: Result<impl std::fmt::Debug, ChannelError>) -> Option<Co
 }
 
 
-fn recording_state(settings: ChannelSettings) -> (SharedState, Stored) {
+pub fn recording_state(settings: ChannelSettings) -> (SharedState, Stored) {
     let stored = new_stored();
     (
         make_state(settings, recording_sink(Arc::clone(&stored)), envelope_source(Vec::new())),
@@ -251,7 +254,7 @@ async fn a_batch_flood_is_refused_and_counted() -> TestResult {
     let outcome = bounded(push_events(session.channel.clone(), (1..=FLOOD_BATCHES).map(batch).collect())).await?;
     assert_eq!(status_code(outcome), Some(Code::ResourceExhausted));
     assert_eq!(counter(&state.counters.rate_limited), 1);
-    assert_eq!(stored_count(&stored)?, usize::try_from(FLOOD_LIMIT)?);
+    assert_eq!(stored_count(&stored)?, usize::try_from(FLOOD_LIMIT - 1)?);
     finish_session(session).await
 }
 

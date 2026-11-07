@@ -259,6 +259,7 @@ async fn accept_errors_are_logged_and_serving_goes_on() -> TestResult {
         Box::pin(incoming),
         config,
         channel_router(default_state()),
+        default_state(),
         revocation.watcher,
         Box::pin(std::future::pending()),
     ))

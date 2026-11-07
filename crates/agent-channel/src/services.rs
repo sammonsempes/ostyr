@@ -1,5 +1,5 @@
-use crate::limits::{admit_request, bump, check_claim, count_oversized, open_stream};
-use crate::model::{Identity, PushSession, EVENTS_PATH, HEARTBEAT_PATH, REPORT_PATH, SUBSCRIBE_PATH};
+use crate::limits::{admit_request, bounded_text, bump, check_claim, count_oversized, open_slot, open_stream};
+use crate::model::{Identity, PushSession, SlotKind, EVENTS_PATH, HEARTBEAT_PATH, REPORT_PATH, SUBSCRIBE_PATH};
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
 use crate::types::{AckStream, BoxError, EnvelopeStream, GrpcResponse, SharedState};
 use axum::body::Body;
@@ -8,7 +8,10 @@ use data_encoding::HEXLOWER;
 use futures_util::{Stream, StreamExt};
 use http::Request;
 use std::convert::Infallible;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
 use tonic::server::Grpc;
 use tonic::{Status, Streaming};
 use tonic_prost::ProstCodec;
@@ -40,47 +43,94 @@ pub fn count_oversized_response(state: &SharedState, response: GrpcResponse) -> 
 }
 
 
+/// Runs one RPC under the agent in-flight bound and the request timeout; both apply before any body is read.
+pub async fn guarded<Run, Handled>(state: &SharedState, request: Request<Body>, run: Run) -> Result<GrpcResponse, Infallible>
+where
+    Run: FnOnce(Request<Body>) -> Handled,
+    Handled: Future<Output = Result<GrpcResponse, Infallible>>,
+{
+    let admitted = request
+        .extensions()
+        .get::<Identity>()
+        .cloned()
+        .ok_or_else(|| Status::unauthenticated("no verified agent identity"))
+        .and_then(|identity| open_slot(state, &identity, SlotKind::Inflight));
+    match admitted {
+        Ok(permit) => {
+            let limit = Duration::from_secs(state.settings.request_timeout_seconds);
+            let outcome = timeout(limit, run(request)).await;
+            drop(permit);
+            outcome.unwrap_or_else(|_elapsed| Ok(timed_out(state)))
+        }
+        Err(status) => Ok(status.into_http()),
+    }
+}
+
+
+pub fn timed_out(state: &SharedState) -> GrpcResponse {
+    bump(&state.counters.timed_out);
+    tracing::warn!(seconds = state.settings.request_timeout_seconds, "agent request timed out, refused");
+    Status::deadline_exceeded("request timed out").into_http()
+}
+
+
 pub async fn heartbeat_route(state: SharedState, request: Request<Body>) -> Result<GrpcResponse, Infallible> {
-    let handler_state = Arc::clone(&state);
-    let response = Grpc::new(ProstCodec::<BeatReply, BeatRequest>::default())
-        .max_decoding_message_size(state.settings.max_message_bytes)
-        .unary(service_fn(move |beat_request| beat(Arc::clone(&handler_state), beat_request)), request)
-        .await;
-    Ok(count_oversized_response(&state, response))
+    let route_state = Arc::clone(&state);
+    guarded(&route_state, request, move |admitted| async move {
+        let handler_state = Arc::clone(&state);
+        let response = Grpc::new(ProstCodec::<BeatReply, BeatRequest>::default())
+            .max_decoding_message_size(state.settings.max_message_bytes)
+            .unary(service_fn(move |beat_request| beat(Arc::clone(&handler_state), beat_request)), admitted)
+            .await;
+        Ok(count_oversized_response(&state, response))
+    })
+    .await
 }
 
 
 pub async fn events_route(state: SharedState, request: Request<Body>) -> Result<GrpcResponse, Infallible> {
-    Ok(Grpc::new(ProstCodec::<EventAck, EventBatch>::default())
-        .max_decoding_message_size(state.settings.max_message_bytes)
-        .streaming(service_fn(move |push_request| push(Arc::clone(&state), push_request)), request)
-        .await)
+    let route_state = Arc::clone(&state);
+    guarded(&route_state, request, move |admitted| async move {
+        Ok(Grpc::new(ProstCodec::<EventAck, EventBatch>::default())
+            .max_decoding_message_size(state.settings.max_message_bytes)
+            .streaming(service_fn(move |push_request| push(Arc::clone(&state), push_request)), admitted)
+            .await)
+    })
+    .await
 }
 
 
 pub async fn subscribe_route(state: SharedState, request: Request<Body>) -> Result<GrpcResponse, Infallible> {
-    let handler_state = Arc::clone(&state);
-    let response = Grpc::new(ProstCodec::<CommandEnvelope, SubscribeRequest>::default())
-        .max_decoding_message_size(state.settings.max_message_bytes)
-        .server_streaming(
-            service_fn(move |subscribe_request| subscribe(Arc::clone(&handler_state), subscribe_request)),
-            request,
-        )
-        .await;
-    Ok(count_oversized_response(&state, response))
+    let route_state = Arc::clone(&state);
+    guarded(&route_state, request, move |admitted| async move {
+        let handler_state = Arc::clone(&state);
+        let response = Grpc::new(ProstCodec::<CommandEnvelope, SubscribeRequest>::default())
+            .max_decoding_message_size(state.settings.max_message_bytes)
+            .server_streaming(
+                service_fn(move |subscribe_request| subscribe(Arc::clone(&handler_state), subscribe_request)),
+                admitted,
+            )
+            .await;
+        Ok(count_oversized_response(&state, response))
+    })
+    .await
 }
 
 
 pub async fn report_route(state: SharedState, request: Request<Body>) -> Result<GrpcResponse, Infallible> {
-    let handler_state = Arc::clone(&state);
-    let response = Grpc::new(ProstCodec::<ReportReply, CommandReport>::default())
-        .max_decoding_message_size(state.settings.max_message_bytes)
-        .unary(
-            service_fn(move |report_request| report(Arc::clone(&handler_state), report_request)),
-            request,
-        )
-        .await;
-    Ok(count_oversized_response(&state, response))
+    let route_state = Arc::clone(&state);
+    guarded(&route_state, request, move |admitted| async move {
+        let handler_state = Arc::clone(&state);
+        let response = Grpc::new(ProstCodec::<ReportReply, CommandReport>::default())
+            .max_decoding_message_size(state.settings.max_message_bytes)
+            .unary(
+                service_fn(move |report_request| report(Arc::clone(&handler_state), report_request)),
+                admitted,
+            )
+            .await;
+        Ok(count_oversized_response(&state, response))
+    })
+    .await
 }
 
 
@@ -120,6 +170,7 @@ pub fn open_push(
     inbound: impl Stream<Item = Result<EventBatch, Status>> + Send + 'static,
 ) -> Result<tonic::Response<AckStream>, Status> {
     let verified = identity?;
+    admit_request(&state, &verified)?;
     let permit = open_stream(&state, &verified)?;
     let session = Arc::new(PushSession {
         state,
@@ -176,7 +227,8 @@ pub async fn report(state: SharedState, request: tonic::Request<CommandReport>) 
         &state.counters.commands_refused
     };
     bump(counter);
-    let digest = HEXLOWER.encode(&verdict.envelope_digest);
-    tracing::info!(agent = %identity.agent_id, %digest, accepted = verdict.accepted, reason = %verdict.reason, "command verdict reported");
+    let digest = bounded_text(&HEXLOWER.encode(&verdict.envelope_digest));
+    let reason = bounded_text(&verdict.reason);
+    tracing::info!(agent = %identity.agent_id, ?digest, accepted = verdict.accepted, ?reason, "command verdict reported");
     Ok(tonic::Response::new(ReportReply {}))
 }

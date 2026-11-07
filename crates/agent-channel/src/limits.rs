@@ -1,4 +1,4 @@
-use crate::model::{AgentLoad, Identity, ServerState, StreamPermit};
+use crate::model::{AgentLoad, ChannelSettings, Counters, Identity, ServerState, SlotKind, SlotPermit, MAX_LOGGED_TEXT_CHARS, TRUNCATION_MARKER};
 use crate::types::SharedState;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +20,9 @@ pub fn lock_load(state: &ServerState) -> MutexGuard<'_, HashMap<Identity, AgentL
 
 pub fn fresh_load(now: Instant) -> AgentLoad {
     AgentLoad {
+        connections: 0,
         streams: 0,
+        inflight: 0,
         window_started: now,
         window_count: 0,
     }
@@ -57,33 +59,81 @@ pub fn admit_request(state: &ServerState, identity: &Identity) -> Result<(), Sta
 }
 
 
-/// Takes one of the agent stream slots, or refuses with `ResourceExhausted`, counted and logged.
-pub fn open_stream(state: &SharedState, identity: &Identity) -> Result<StreamPermit, Status> {
-    let opened = {
-        let mut loads = lock_load(state);
-        let load = loads.entry(identity.clone()).or_insert_with(|| fresh_load(Instant::now()));
-        let free = load.streams < state.settings.max_streams_per_agent;
-        load.streams = load.streams.saturating_add(usize::from(free));
-        free
-    };
-    if opened {
-        Ok(StreamPermit {
-            state: Arc::clone(state),
-            identity: identity.clone(),
-        })
-    } else {
-        bump(&state.counters.stream_limited);
-        tracing::warn!(tenant = %identity.tenant, agent = %identity.agent_id, "agent concurrent streams exceeded, stream refused");
-        Err(Status::resource_exhausted("too many concurrent streams"))
+pub fn slot_count(load: &mut AgentLoad, kind: SlotKind) -> &mut usize {
+    match kind {
+        SlotKind::Connection => &mut load.connections,
+        SlotKind::Stream => &mut load.streams,
+        SlotKind::Inflight => &mut load.inflight,
     }
 }
 
 
-impl Drop for StreamPermit {
+pub fn slot_limit(settings: &ChannelSettings, kind: SlotKind) -> usize {
+    match kind {
+        SlotKind::Connection => settings.max_connections_per_agent,
+        SlotKind::Stream => settings.max_streams_per_agent,
+        SlotKind::Inflight => settings.max_inflight_per_agent,
+    }
+}
+
+
+pub fn slot_refusals(counters: &Counters, kind: SlotKind) -> &AtomicU64 {
+    match kind {
+        SlotKind::Connection => &counters.connection_limited,
+        SlotKind::Stream => &counters.stream_limited,
+        SlotKind::Inflight => &counters.inflight_limited,
+    }
+}
+
+
+/// Takes one slot of `kind` for the agent, or refuses with `ResourceExhausted`, counted and logged.
+pub fn open_slot(state: &SharedState, identity: &Identity, kind: SlotKind) -> Result<SlotPermit, Status> {
+    let opened = {
+        let mut loads = lock_load(state);
+        let load = loads.entry(identity.clone()).or_insert_with(|| fresh_load(Instant::now()));
+        let limit = slot_limit(&state.settings, kind);
+        let held = slot_count(load, kind);
+        let free = *held < limit;
+        *held = held.saturating_add(usize::from(free));
+        free
+    };
+    if opened {
+        Ok(SlotPermit {
+            state: Arc::clone(state),
+            identity: identity.clone(),
+            kind,
+        })
+    } else {
+        bump(slot_refusals(&state.counters, kind));
+        tracing::warn!(tenant = %identity.tenant, agent = %identity.agent_id, ?kind, "agent concurrent slots exceeded, refused");
+        Err(Status::resource_exhausted("too many concurrent connections, streams or requests"))
+    }
+}
+
+
+/// Takes one of the agent stream slots.
+pub fn open_stream(state: &SharedState, identity: &Identity) -> Result<SlotPermit, Status> {
+    open_slot(state, identity, SlotKind::Stream)
+}
+
+
+impl Drop for SlotPermit {
     fn drop(&mut self) {
+        let kind = self.kind;
         lock_load(&self.state)
             .entry(self.identity.clone())
-            .and_modify(|load| load.streams = load.streams.saturating_sub(1));
+            .and_modify(|load| *slot_count(load, kind) = slot_count(load, kind).saturating_sub(1));
+    }
+}
+
+
+/// Agent text cut to `MAX_LOGGED_TEXT_CHARS` characters with a marker; log it with `?` so control characters are escaped.
+pub fn bounded_text(text: &str) -> String {
+    let kept: String = text.chars().take(MAX_LOGGED_TEXT_CHARS).collect();
+    if kept.len() < text.len() {
+        kept + TRUNCATION_MARKER
+    } else {
+        kept
     }
 }
 
@@ -99,7 +149,9 @@ pub fn check_claim(state: &ServerState, identity: &Identity, tenant: &str, agent
         Ok(())
     } else {
         bump(&state.counters.identity_mismatch);
-        tracing::warn!(agent = %identity.agent_id, claimed_tenant = tenant, claimed_agent = agent_id, "payload names another agent or tenant");
+        let claimed_tenant = bounded_text(tenant);
+        let claimed_agent = bounded_text(agent_id);
+        tracing::warn!(agent = %identity.agent_id, ?claimed_tenant, ?claimed_agent, "payload names another agent or tenant");
         Err(Status::permission_denied("payload names another agent or tenant than the certificate"))
     }
 }
