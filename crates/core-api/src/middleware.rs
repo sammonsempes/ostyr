@@ -1,7 +1,7 @@
 use crate::failure::{auth_failure, error_response};
-use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, RequestId, Requirement, Window};
+use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, Limits, RequestId, Requirement, Window};
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
-use crate::state::{lock_auth, refresh_accounts, session_revoked, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
+use crate::state::{lock_auth, refresh_accounts, session_revoked};
 use crate::types::SharedState;
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
@@ -156,16 +156,16 @@ pub fn rate_key(source: IpAddr) -> IpAddr {
 }
 
 
-pub fn window_open(window: &Window, now: OffsetDateTime) -> bool {
-    now - window.started < Duration::seconds(RATE_WINDOW_SECONDS)
+pub fn window_open(window: &Window, now: OffsetDateTime, limits: &Limits) -> bool {
+    now - window.started < Duration::seconds(limits.rate_window_seconds)
 }
 
 
-pub fn count_request(window: &mut Window, now: OffsetDateTime) -> bool {
-    if !window_open(window, now) {
+pub fn count_request(window: &mut Window, now: OffsetDateTime, limits: &Limits) -> bool {
+    if !window_open(window, now, limits) {
         *window = Window { started: now, count: 0 };
     }
-    window.count < RATE_MAX_REQUESTS && {
+    window.count < limits.rate_max_requests && {
         window.count += 1;
         true
     }
@@ -174,14 +174,15 @@ pub fn count_request(window: &mut Window, now: OffsetDateTime) -> bool {
 
 pub fn admit_source(app: &ApiState, source: IpAddr) -> bool {
     let now = (app.clock)();
+    let limits = app.limits.load_full();
     let mut table = app.limiter.lock().unwrap_or_else(PoisonError::into_inner);
-    if table.len() >= app.max_sources {
-        table.retain(|_, window| window_open(window, now));
+    if table.len() >= limits.max_sources {
+        table.retain(|_, window| window_open(window, now, &limits));
     }
     let key = rate_key(source);
     let known = table.contains_key(&key);
-    if known || table.len() < app.max_sources {
-        count_request(table.entry(key).or_insert(Window { started: now, count: 0 }), now)
+    if known || table.len() < limits.max_sources {
+        count_request(table.entry(key).or_insert(Window { started: now, count: 0 }), now, &limits)
     } else {
         false
     }
@@ -379,7 +380,7 @@ pub fn body_failure(error: &axum::Error) -> ApiError {
 
 pub async fn body_deadline(State(app): State<SharedState>, request: Request, next: Next) -> Response {
     let (parts, body) = request.into_parts();
-    match tokio::time::timeout(app.body_timeout, to_bytes(body, BODY_LIMIT_BYTES)).await {
+    match tokio::time::timeout(app.limits.load().body_read_timeout, to_bytes(body, BODY_LIMIT_BYTES)).await {
         Err(_) => error_response(&ApiError::RequestTimeout),
         Ok(Err(error)) => error_response(&body_failure(&error)),
         Ok(Ok(bytes)) => next.run(Request::from_parts(parts, Body::from(bytes))).await,

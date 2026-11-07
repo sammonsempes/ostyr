@@ -1,8 +1,9 @@
+use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::example::{example_access, example_document, example_router};
-use core_api::model::{ApiConfig, TlsFiles};
+use core_api::model::{ApiConfig, Limits, TlsFiles};
 use core_api::routes::build_router;
 use core_api::server::serve;
-use core_api::state::build_state;
+use core_api::state::{build_state, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_api::types::{ServerHandle, SharedState};
 use core_auth::model::Account;
 use core_auth::password::hash_password;
@@ -195,8 +196,15 @@ pub fn start_live() -> Result<Live, TestError> {
         key_file: key_file.display().to_string(),
         compromised_list,
         header_read_timeout: SERVER_TIMEOUT,
-        body_read_timeout: SERVER_TIMEOUT,
-        max_connections_per_source: MAX_CONNECTIONS,
+        limits: Limits {
+            rate_max_requests: RATE_MAX_REQUESTS,
+            rate_window_seconds: RATE_WINDOW_SECONDS,
+            max_sources: MAX_TRACKED_SOURCES,
+            max_attempts: MAX_TRACKED_ATTEMPTS,
+            body_read_timeout: SERVER_TIMEOUT,
+            max_connections_per_source: MAX_CONNECTIONS,
+        },
+        log_level: DEFAULT_LOG_LEVEL,
         oidc: None,
     };
     let handle = ServerHandle::new();

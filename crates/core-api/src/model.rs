@@ -1,12 +1,15 @@
-use crate::types::{AccessTable, ConnectionTable, KeyedLimiter, SharedHttpFn, SharedResolveFn, VerifyPasswordFn};
+use crate::types::{AccessTable, ConnectionTable, KeyedLimiter, SharedHttpFn, SharedLimits, SharedResolveFn, VerifyPasswordFn};
+use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::http::StatusCode;
 use core_audit::log::AuditLog;
 use core_auth::oidc::OidcConfig;
 use core_auth::service::State;
 use core_auth::types::{Clock, CompromisedSet, PendingMap, RandomFn, RoleCatalog, StoreKey};
+use core_config::model::ModuleConfig;
+use rustls::ServerConfig;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -14,6 +17,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::Semaphore;
+use tracing::level_filters::LevelFilter;
 use tracing::Dispatch;
 use utoipa::ToSchema;
 
@@ -24,7 +28,7 @@ pub struct ApiState {
     pub auth: std::sync::Mutex<State>,
     pub audit: AuditLog<File>,
     pub key: StoreKey,
-    pub compromised: CompromisedSet,
+    pub compromised: ArcSwap<CompromisedSet>,
     pub catalog: RoleCatalog,
     pub random: RandomFn,
     pub clock: Clock,
@@ -35,15 +39,27 @@ pub struct ApiState {
     pub verify: VerifyPasswordFn,
     pub hashing: Arc<Semaphore>,
     pub dispatch: Dispatch,
-    pub max_sources: usize,
-    pub max_attempts: usize,
-    pub body_timeout: Duration,
-    pub oidc: Option<OidcRuntime>,
+    pub limits: SharedLimits,
+    pub oidc: ArcSwapOption<OidcRuntime>,
     pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
 }
 
 
+/// The settings that change at run time; readers load one whole value, lock-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub rate_max_requests: u32,
+    pub rate_window_seconds: i64,
+    pub max_sources: usize,
+    pub max_attempts: usize,
+    pub body_read_timeout: Duration,
+    pub max_connections_per_source: usize,
+}
+
+
+/// `fingerprint` digests the provider files, so a reload swaps the runtime (and drops its pending logins) only when they changed.
 pub struct OidcRuntime {
+    pub fingerprint: String,
     pub config: OidcConfig,
     pub http: SharedHttpFn,
     pub resolve: SharedResolveFn,
@@ -97,9 +113,20 @@ pub struct ApiConfig {
     pub key_file: String,
     pub compromised_list: PathBuf,
     pub header_read_timeout: Duration,
-    pub body_read_timeout: Duration,
-    pub max_connections_per_source: usize,
+    pub limits: Limits,
+    pub log_level: LevelFilter,
     pub oidc: Option<OidcFiles>,
+}
+
+
+/// One whole, validated configuration: what the reload engine swaps. Files are read and checked before it exists.
+pub struct ApiSettings {
+    pub module: ModuleConfig,
+    pub config: ApiConfig,
+    pub tls: Option<Arc<ServerConfig>>,
+    pub oidc: Option<Arc<OidcRuntime>>,
+    pub compromised: Arc<CompromisedSet>,
+    pub fingerprints: BTreeMap<String, String>,
 }
 
 
