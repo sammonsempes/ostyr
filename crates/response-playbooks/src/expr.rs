@@ -1,8 +1,10 @@
 use crate::error::ExprError;
 use crate::model::Mode;
 use crate::types::ParamMap;
+use minijinja::machinery::{tokenize, Token};
+use minijinja::syntax::SyntaxConfig;
 use minijinja::value::Serde;
-use minijinja::{escape_formatter, Environment, Output, State, UndefinedBehavior, Value};
+use minijinja::{escape_formatter, filters, tests, Environment, Output, State, UndefinedBehavior, Value};
 use serde::Serialize;
 use std::thread;
 
@@ -22,10 +24,13 @@ pub const MAX_OPERATORS: usize = 128;
 pub const WORKER_STACK_BYTES: usize = 8_388_608;
 
 
-pub const OPERATOR_CHARS: [char; 15] = ['(', '[', '{', '-', '+', '.', '|', '*', '~', '<', '>', '=', '!', '&', '/'];
+pub const OPERATOR_CHARS: [char; 17] = ['(', '[', '{', '-', '+', '.', '|', '*', '~', '<', '>', '=', '!', '&', '/', '%', ','];
 
 
 pub const OPERATOR_WORDS: [&str; 7] = ["not", "and", "or", "if", "is", "in", "else"];
+
+
+pub const LITERAL_WORDS: [&str; 6] = ["true", "false", "none", "True", "False", "None"];
 
 
 pub const OPENERS: [char; 3] = ['(', '[', '{'];
@@ -38,6 +43,9 @@ pub const RECURSION_LIMIT: usize = 8;
 
 
 pub const DISPLAY_KEY: &str = "value";
+
+
+pub const MULTIPLY: &str = "*";
 
 
 pub const OPEN: &str = "{{";
@@ -75,14 +83,60 @@ pub fn display_entity(out: &mut Output, state: &mut State, value: &Value) -> Res
 }
 
 
-/// No loader, no include, no filesystem, no network; missing fields are undefined (falsy, printed empty); bounded fuel and recursion.
+/// Empty environment plus allow-listed filters and tests; no loader, undefined fields are falsy, bounded fuel and recursion.
 pub fn sandbox<'a>() -> Environment<'a> {
-    let mut environment = Environment::new();
+    let mut environment = Environment::empty();
     environment.set_undefined_behavior(UndefinedBehavior::Chainable);
     environment.set_fuel(Some(FUEL));
     environment.set_recursion_limit(RECURSION_LIMIT);
     environment.set_formatter(display_entity);
+    add_filters(&mut environment);
+    add_tests(&mut environment);
     environment
+}
+
+
+pub fn add_filters(environment: &mut Environment) {
+    environment.add_filter("length", filters::length);
+    environment.add_filter("count", filters::length);
+    environment.add_filter("lower", filters::lower);
+    environment.add_filter("upper", filters::upper);
+    environment.add_filter("trim", filters::trim);
+    environment.add_filter("capitalize", filters::capitalize);
+    environment.add_filter("title", filters::title);
+    environment.add_filter("default", filters::default);
+    environment.add_filter("d", filters::default);
+    environment.add_filter("int", filters::int);
+    environment.add_filter("float", filters::float);
+    environment.add_filter("string", filters::string);
+    environment.add_filter("bool", filters::bool);
+    environment.add_filter("abs", filters::abs);
+    environment.add_filter("round", filters::round);
+    environment.add_filter("first", filters::first);
+    environment.add_filter("last", filters::last);
+    environment.add_filter("min", filters::min);
+    environment.add_filter("max", filters::max);
+    environment.add_filter("sum", filters::sum);
+    environment.add_filter("sort", filters::sort);
+    environment.add_filter("reverse", filters::reverse);
+    environment.add_filter("unique", filters::unique);
+}
+
+
+pub fn add_tests(environment: &mut Environment) {
+    environment.add_test("defined", tests::is_defined);
+    environment.add_test("undefined", tests::is_undefined);
+    environment.add_test("none", tests::is_none);
+    environment.add_test("boolean", tests::is_boolean);
+    environment.add_test("string", tests::is_string);
+    environment.add_test("number", tests::is_number);
+    environment.add_test("integer", tests::is_integer);
+    environment.add_test("mapping", tests::is_mapping);
+    environment.add_test("sequence", tests::is_sequence);
+    environment.add_test("odd", tests::is_odd);
+    environment.add_test("even", tests::is_even);
+    environment.add_test("startingwith", tests::is_startingwith);
+    environment.add_test("endingwith", tests::is_endingwith);
 }
 
 
@@ -117,7 +171,7 @@ pub fn nesting_depth(text: &str) -> usize {
 }
 
 
-/// Every construct that can nest the syntax tree (brackets, unary and binary operators, `.`, `|`, `[`, `**`, `~`, keywords), over-counted on purpose.
+/// Every construct that can nest the syntax tree (brackets, unary and binary operators including `%` and `//`, `,`, `.`, `|`, `**`, `~`, keywords), over-counted on purpose.
 pub fn operator_count(text: &str) -> usize {
     let symbols = text.chars().filter(|letter| OPERATOR_CHARS.contains(letter)).count();
     let words = text
@@ -157,13 +211,63 @@ pub fn on_worker<Output: Send>(stack_bytes: usize, work: impl FnOnce() -> Result
 }
 
 
-/// Refused before any compilation: an oversized or too deeply nested source, then block tags.
+/// Refuses every `*` token (unbounded repetition); with `in_expression` false the text is a template and plain text is left alone.
+pub fn refuse_repetition(text: &str, in_expression: bool) -> Result<(), ExprError> {
+    tokenize(text, in_expression, SyntaxConfig::default()).try_for_each(|token| match token? {
+        (Token::Mul, _) => Err(ExprError::Forbidden(MULTIPLY.to_owned())),
+        _ => Ok(()),
+    })
+}
+
+
+/// Refused before any compilation: an oversized or too deeply nested source, any `*`, then block tags.
 pub fn refuse_blocks(text: &str) -> Result<(), ExprError> {
     check_limits(text)?;
+    refuse_repetition(text, false)?;
     FORBIDDEN_TAGS
         .iter()
         .find(|tag| text.contains(**tag))
         .map_or(Ok(()), |tag| Err(ExprError::Forbidden((*tag).to_owned())))
+}
+
+
+/// True when no identifier can name a scope variable: literals, keywords, names in filter or test position, and called functions.
+pub fn is_constant(expression: &str) -> bool {
+    let lexed = tokenize(expression, true, SyntaxConfig::default())
+        .map(|token| token.map(|(kind, _span)| kind))
+        .collect::<Result<Vec<_>, _>>();
+    lexed.is_ok_and(|tokens| {
+        tokens.iter().enumerate().all(|(i, token)| match token {
+            Token::Ident(name) => {
+                let before = i.checked_sub(1).and_then(|k| tokens.get(k));
+                let before_that = i.checked_sub(1).and_then(|k| k.checked_sub(1)).and_then(|k| tokens.get(k));
+                let after_is = matches!(before, Some(Token::Ident("is")));
+                let after_is_not = matches!(before, Some(Token::Ident("not"))) && matches!(before_that, Some(Token::Ident("is")));
+                let called = matches!(tokens.get(i + 1), Some(Token::ParenOpen)) && !matches!(before, Some(Token::Dot));
+                LITERAL_WORDS.contains(name)
+                    || OPERATOR_WORDS.contains(name) && !matches!(before, Some(Token::Dot))
+                    || matches!(before, Some(Token::Pipe))
+                    || after_is
+                    || after_is_not
+                    || called
+            }
+            _ => true,
+        })
+    })
+}
+
+
+/// The value of a text that is one constant expression (no identifier but literals, filters and tests); `None` for any other text.
+pub fn constant_value(text: &str) -> Result<Option<serde_json::Value>, ExprError> {
+    refuse_blocks(text)?;
+    match single_expression(text) {
+        Some(inner) if is_constant(inner) => on_worker(WORKER_STACK_BYTES, || {
+            let environment = sandbox();
+            let value = environment.compile_expression(inner)?.eval(())?;
+            Ok(Some(serde_json::to_value(value)?))
+        }),
+        _ => Ok(None),
+    }
 }
 
 
@@ -188,6 +292,7 @@ pub fn scope_value(scope: &Scope) -> Value {
 
 pub fn evaluate(expression: &str, scope: &Scope) -> Result<Value, ExprError> {
     refuse_blocks(expression)?;
+    refuse_repetition(expression, true)?;
     on_worker(WORKER_STACK_BYTES, || {
         let environment = sandbox();
         Ok(environment.compile_expression(expression)?.eval(scope_value(scope))?)

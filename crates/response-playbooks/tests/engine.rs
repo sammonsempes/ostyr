@@ -1273,3 +1273,135 @@ fn the_unary_minus_probe_is_refused_by_the_file_watcher_and_the_old_bundle_stays
     assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
     Ok(())
 }
+
+
+#[test]
+fn a_constant_of_the_wrong_type_is_refused_on_reload_and_by_the_file_watcher() -> TestResult {
+    let rig = rig()?;
+    let alert = alert_file(&rig, "hostile.json", HOSTILE)?;
+    let before = execute(&rig.session, &["simulate", "c2", &alert])?;
+    let percent = format!("\"{{{{ 1{} }}}}\"", "%1".repeat(PERCENT_TERMS));
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, &percent))?;
+    assert!(matches!(reload(&rig.session.engine), ReloadOutcome::Refused { .. }));
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, "\"{{ ---1 }}\""))?;
+    let refused = reload(&rig.session.engine);
+    assert!(
+        matches!(&refused, ReloadOutcome::Refused { reason } if reason.contains("steps.")),
+        "{refused:?}"
+    );
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), C2)?;
+    let watched = [path_in(rig.dir.path(), "c2.yaml")];
+    let watcher = watch_files(Arc::clone(&rig.session.engine), &watched, WATCH_DEBOUNCE)?;
+    let denied_before = recorded_for(&rig, Outcome::Denied)?.len();
+    replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace(C2_MESSAGE, "\"{{ ---1 }}\""))?;
+    let seen = (0..WATCH_ATTEMPTS).find_map(|_| {
+        std::thread::sleep(WATCH_POLL);
+        recorded_for(&rig, Outcome::Denied).ok().filter(|entries| entries.len() > denied_before)
+    });
+    drop(watcher);
+    seen.ok_or("the watcher never refused the reload")?;
+    assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
+    Ok(())
+}
+
+
+const PERCENT_TERMS: usize = 250;
+
+
+const MEMORY_LIMIT_ENV: &str = "PLAYBOOKS_ENGINE_MEMORY_CHILD";
+
+
+const MEMORY_LIMIT_BYTES: &str = "--as=4000000000";
+
+
+const JOIN_PROBE: &str = "(['x' * 1000000] * 100000) | join";
+
+
+const HOSTILE_MESSAGES: [&str; 5] = [
+    JOIN_PROBE,
+    "'x' * 100000000",
+    "('x' * 1000) ~ 'y'",
+    "'a' | replace('a', 'bbbbbbbbbb') | replace('b', 'cccccccccc')",
+    "'x' | center(1000000000)",
+];
+
+
+fn every_hostile_reload_is_refused() -> TestResult {
+    let rig = rig()?;
+    let alert = alert_file(&rig, "hostile.json", HOSTILE)?;
+    let before = execute(&rig.session, &["simulate", "c2", &alert])?;
+    HOSTILE_MESSAGES.iter().try_for_each(|message| {
+        replace_file(
+            &path_in(rig.dir.path(), "c2.yaml"),
+            &C2.replace(C2_MESSAGE, &format!("\"{{{{ {message} }}}}\"")),
+        )?;
+        let refused = reload(&rig.session.engine);
+        assert!(
+            matches!(&refused, ReloadOutcome::Refused { reason } if reason.contains("c2.yaml")),
+            "{message}: {refused:?}"
+        );
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+    assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
+    assert_eq!(recorded_for(&rig, Outcome::Denied)?.len(), HOSTILE_MESSAGES.len());
+    Ok(())
+}
+
+
+#[test]
+fn hostile_expressions_are_refused_on_reload_and_the_old_bundle_stays() -> TestResult {
+    every_hostile_reload_is_refused()
+}
+
+
+#[test]
+fn memory_limited_child_refuses_every_hostile_reload() -> TestResult {
+    std::env::var(MEMORY_LIMIT_ENV).map_or(Ok(()), |_marker| every_hostile_reload_is_refused())
+}
+
+
+#[test]
+fn hostile_reloads_do_not_allocate_under_a_memory_limit() -> TestResult {
+    let output = std::process::Command::new("prlimit")
+        .arg(MEMORY_LIMIT_BYTES)
+        .arg("--")
+        .arg(std::env::current_exe()?)
+        .args(["--exact", "memory_limited_child_refuses_every_hostile_reload", "--test-threads=1"])
+        .env(MEMORY_LIMIT_ENV, "1")
+        .output()?;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "the child test did not run");
+    Ok(())
+}
+
+
+#[test]
+fn the_join_probe_is_refused_by_the_file_watcher_and_the_old_bundle_stays() -> TestResult {
+    let rig = rig()?;
+    let alert = alert_file(&rig, "hostile.json", HOSTILE)?;
+    let before = execute(&rig.session, &["simulate", "c2", &alert])?;
+    let watched = [path_in(rig.dir.path(), "c2.yaml")];
+    let watcher = watch_files(Arc::clone(&rig.session.engine), &watched, WATCH_DEBOUNCE)?;
+    replace_file(
+        &path_in(rig.dir.path(), "c2.yaml"),
+        &C2.replace(C2_MESSAGE, &format!("\"{{{{ {JOIN_PROBE} }}}}\"")),
+    )?;
+    let refused = (0..WATCH_ATTEMPTS).find_map(|_| {
+        std::thread::sleep(WATCH_POLL);
+        recorded_for(&rig, Outcome::Denied).ok().filter(|entries| !entries.is_empty())
+    });
+    drop(watcher);
+    refused.ok_or("the watcher never refused the reload")?;
+    assert_eq!(execute(&rig.session, &["simulate", "c2", &alert])?, before);
+    Ok(())
+}
+
+
+#[test]
+fn a_hostile_expression_that_reaches_run_time_halts_the_run() -> TestResult {
+    let step = "  - action: notify\n    params: { text: \"{{ alert.name ~ ('x' * 100000000) }}\" }\n";
+    let trace = custom_trace(&format!("{step}{NOTIFY_STEP_SIM}"), &json!({ "name": "n" }), None)?;
+    assert!(trace.contains("rejected steps.0 notify"), "{trace}");
+    assert!(trace.contains("halted steps.1 notify: not run"), "{trace}");
+    Ok(())
+}
