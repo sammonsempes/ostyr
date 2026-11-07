@@ -71,6 +71,12 @@ variable "powershell_yaml_version" {
   default = "0.4.9"
 }
 
+variable "powershell_yaml_sha256" {
+  type        = string
+  default     = "9148c268709ab46b21835c3ed8502ebdbff4a6dc19e65b7b3dd6b66e9131fd28"
+  description = "sha256 of the PSGallery nupkg of powershell_yaml_version, computed when pinned"
+}
+
 source "qemu" "attacker" {
   iso_url          = "${var.image_base_url}/noble-server-cloudimg-amd64.img"
   iso_checksum     = var.image_checksum
@@ -124,13 +130,16 @@ build {
       "sudo install -d -m 755 /opt/AtomicRedTeam/invoke-atomicredteam",
       "sudo tar -xzf /tmp/invoke-atomicredteam.tar.gz -C /opt/AtomicRedTeam/invoke-atomicredteam --strip-components=1",
       "sudo tar -xzf /tmp/atomics.tar.gz -C /opt/AtomicRedTeam --strip-components=1 --wildcards '*/atomics'",
-      "sudo pwsh -NoProfile -Command \"Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module powershell-yaml -RequiredVersion ${var.powershell_yaml_version} -Scope AllUsers -Force\"",
+      "curl --fail --silent --show-error --location --output /tmp/powershell-yaml.nupkg https://www.powershellgallery.com/api/v2/package/powershell-yaml/${var.powershell_yaml_version}",
+      "echo '${var.powershell_yaml_sha256}  /tmp/powershell-yaml.nupkg' | sha256sum --check -",
+      "sudo python3 -m zipfile -e /tmp/powershell-yaml.nupkg /usr/local/share/powershell/Modules/powershell-yaml/${var.powershell_yaml_version}",
+      "sudo pwsh -NoProfile -Command \"Import-Module powershell-yaml -RequiredVersion ${var.powershell_yaml_version}; Get-Command ConvertFrom-Yaml | Out-Null\"",
       "sudo pwsh -NoProfile -Command \"Import-Module /opt/AtomicRedTeam/invoke-atomicredteam/Invoke-AtomicRedTeam.psd1 -Force; Get-Command Invoke-AtomicTest | Out-Null\"",
       "sudo install -m 755 /tmp/ostyr-attacker-egress /usr/local/sbin/ostyr-attacker-egress",
       "sudo install -m 644 /tmp/ostyr-attacker-egress.service /etc/systemd/system/ostyr-attacker-egress.service",
       "sudo systemctl daemon-reload",
       "sudo systemctl enable ostyr-attacker-egress.service",
-      "rm -f /tmp/powershell.tar.gz /tmp/invoke-atomicredteam.tar.gz /tmp/atomics.tar.gz /tmp/ostyr-attacker-egress /tmp/ostyr-attacker-egress.service",
+      "rm -f /tmp/powershell.tar.gz /tmp/invoke-atomicredteam.tar.gz /tmp/atomics.tar.gz /tmp/powershell-yaml.nupkg /tmp/ostyr-attacker-egress /tmp/ostyr-attacker-egress.service",
       "sudo systemctl enable qemu-guest-agent",
       "sudo systemctl enable cloud-init",
       "sudo passwd -l ubuntu",

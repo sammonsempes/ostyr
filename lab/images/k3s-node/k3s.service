@@ -15,7 +15,7 @@ TasksMax=infinity
 TimeoutStartSec=0
 Restart=always
 RestartSec=5s
-ExecStart=/usr/local/bin/k3s server --write-kubeconfig-mode 644
+ExecStart=/usr/local/sbin/ostyr-k3s-start
 
 [Install]
 WantedBy=multi-user.target
