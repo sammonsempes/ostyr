@@ -1,16 +1,16 @@
-use crate::limits::{admit_request, bounded_text, bump, check_claim, count_oversized, open_slot, open_stream};
+use crate::limits::{admit_request, bounded_text, bump, check_claim, count_oversized, digest_text, open_slot, open_stream};
 use crate::model::{Identity, PushSession, SlotKind, EVENTS_PATH, HEARTBEAT_PATH, REPORT_PATH, SUBSCRIBE_PATH};
+use crate::presence::record_beat;
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
 use crate::types::{AckStream, BoxError, EnvelopeStream, GrpcResponse, SharedState};
 use axum::body::Body;
 use axum::Router;
-use data_encoding::HEXLOWER;
 use futures_util::{Stream, StreamExt};
 use http::Request;
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tonic::server::Grpc;
 use tonic::{Status, Streaming};
@@ -149,6 +149,7 @@ pub async fn beat(state: SharedState, request: tonic::Request<BeatRequest>) -> R
     let identity = identity_of(&request)?;
     admit_request(&state, &identity)?;
     check_claim(&state, &identity, &request.get_ref().tenant, &request.get_ref().agent_id)?;
+    record_beat(&state, &identity, Instant::now());
     Ok(tonic::Response::new(BeatReply {
         tenant: identity.tenant,
         agent_id: identity.agent_id,
@@ -227,7 +228,7 @@ pub async fn report(state: SharedState, request: tonic::Request<CommandReport>) 
         &state.counters.commands_refused
     };
     bump(counter);
-    let digest = bounded_text(&HEXLOWER.encode(&verdict.envelope_digest));
+    let digest = digest_text(&verdict.envelope_digest);
     let reason = bounded_text(&verdict.reason);
     tracing::info!(agent = %identity.agent_id, ?digest, accepted = verdict.accepted, ?reason, "command verdict reported");
     Ok(tonic::Response::new(ReportReply {}))

@@ -6,6 +6,7 @@ pub mod error;
 pub mod identity;
 pub mod limits;
 pub mod model;
+pub mod presence;
 pub mod proto;
 pub mod revocation;
 pub mod server;
