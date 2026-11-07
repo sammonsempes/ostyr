@@ -1,7 +1,7 @@
 use crate::error::AuthError;
 use crate::model::Session;
 use crate::random::random_array;
-use crate::types::{RandomFn, SessionMap};
+use crate::types::{AccountMap, RandomFn, SessionMap};
 use data_encoding::HEXLOWER;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
@@ -60,6 +60,30 @@ pub fn validate_session(sessions: &mut SessionMap, token: &str, now: OffsetDateT
 
 pub fn revoke_session(sessions: &mut SessionMap, token: &str) -> Option<String> {
     sessions.remove(&hash_token(token)).map(|session| session.user)
+}
+
+
+/// Nanoseconds since the epoch, the unit of `Account.sessions_valid_after`; out of range saturates, which revokes every session.
+pub fn revocation_marker(now: OffsetDateTime) -> i64 {
+    i64::try_from(now.unix_timestamp_nanos()).unwrap_or(i64::MAX)
+}
+
+
+/// Records that every session of `username` created at or before `now` is void, in the account itself so the store file carries it.
+pub fn mark_sessions_revoked(accounts: &mut AccountMap, username: &str, now: OffsetDateTime) {
+    accounts
+        .get_mut(username)
+        .into_iter()
+        .for_each(|account| account.sessions_valid_after = Some(revocation_marker(now)));
+}
+
+
+/// True when the session was created at or before the owner's revocation marker.
+pub fn is_revoked(accounts: &AccountMap, session: &Session) -> bool {
+    accounts
+        .get(&session.user)
+        .and_then(|account| account.sessions_valid_after)
+        .is_some_and(|marker| revocation_marker(session.created_at) <= marker)
 }
 
 

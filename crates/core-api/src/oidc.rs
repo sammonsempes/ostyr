@@ -3,7 +3,7 @@ use crate::failure::{auth_failure, reply};
 use crate::middleware::rate_key;
 use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
-use crate::state::{auth_context, lock_auth};
+use crate::state::{auth_context, lock_auth, remember_callback_account};
 use crate::types::SharedState;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{ConnectInfo, Query, State};
@@ -21,7 +21,7 @@ use core_auth::oidc::{
     Identity, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
 };
 use core_auth::service::{log_lockout, record, ACTION_LOGIN, ANONYMOUS_ACTOR};
-use core_auth::session::hash_token;
+use core_auth::session::{hash_token, session_owner};
 use core_auth::types::{PendingMap, RoleCatalog};
 use openidconnect::url::Url;
 use rustls::crypto::ring::default_provider;
@@ -38,6 +38,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::task::spawn_blocking;
 use ureq::{Agent, AgentBuilder};
+
+
+/// Pending logins one folded source may hold at once.
+pub const PENDING_PER_SOURCE_MAX: usize = 16;
 
 
 pub const BINDING_COOKIE: &str = "__Host-oidc_binding";
@@ -139,7 +143,8 @@ pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, so
     let now = (app.clock)();
     let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
     prune_pending(&mut pending, now);
-    if pending.len() >= PENDING_MAX {
+    let from_source = pending.values().filter(|login| login.source == source).count();
+    if pending.len() >= PENDING_MAX || from_source >= PENDING_PER_SOURCE_MAX {
         let context = auth_context(app, request_id, &app.verify);
         Err(audit_denial(&context, now, ANONYMOUS_ACTOR, OidcDenial::TooManyPending, source)
             .map_or_else(|failure| auth_failure(&failure), |()| ApiError::TooManyRequests))
@@ -316,7 +321,12 @@ pub fn settle(app: &ApiState, request_id: &str, identity: &Identity, callback: &
     let runtime = oidc_runtime(app)?;
     let mut auth = lock_auth(app);
     let context = auth_context(app, request_id, &app.verify);
-    settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))
+    let token =
+        settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
+    session_owner(&auth.sessions, token.expose_secret())
+        .iter()
+        .for_each(|username| remember_callback_account(app, username));
+    Ok(token)
 }
 
 

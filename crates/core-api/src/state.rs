@@ -5,15 +5,17 @@ use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
 use core_audit::log::open_file_log;
 use core_auth::cli::read_key_file;
+use core_auth::error::AuthError;
 use core_auth::limiter::FAILURE_WINDOW_SECONDS;
 use core_auth::password::verify_password;
 use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
-use core_auth::service::{Context, State, OIDC_PREFIX};
+use core_auth::service::{Context, State};
+use core_auth::session::{hash_token, is_revoked};
 use core_auth::store::{load_store_file, read_store_locked};
 use core_auth::types::{AccountMap, AttemptMap, VerifyFn};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -79,6 +81,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         max_attempts: MAX_TRACKED_ATTEMPTS,
         body_timeout: config.body_read_timeout,
         oidc,
+        callback_accounts: Mutex::new(BTreeSet::new()),
     })
 }
 
@@ -88,26 +91,43 @@ pub fn lock_auth(app: &ApiState) -> MutexGuard<'_, State> {
 }
 
 
-/// The `oidc:` accounts of `previous` that `stored` does not hold: they live in memory only, created by an OIDC callback.
-pub fn memory_only_accounts(previous: &AccountMap, stored: &AccountMap) -> AccountMap {
+/// The accounts of `previous` that `stored` does not hold and an OIDC callback created: they live in memory only.
+pub fn memory_only_accounts(app: &ApiState, previous: &AccountMap, stored: &AccountMap) -> AccountMap {
+    let created = app.callback_accounts.lock().unwrap_or_else(PoisonError::into_inner);
     previous
         .iter()
-        .filter(|(name, _)| name.starts_with(OIDC_PREFIX) && !stored.contains_key(*name))
+        .filter(|(name, _)| created.contains(*name) && !stored.contains_key(*name))
         .map(|(name, account)| (name.clone(), account.clone()))
         .collect()
 }
 
 
 /// Replaces the in-memory accounts and credentials with the file's, read under the store lock, keeping the memory-only `oidc:` accounts.
-pub fn refresh_accounts(app: &ApiState, auth: &mut State) {
-    match read_store_locked(&app.store_path) {
-        Ok((mut accounts, credentials)) => {
-            accounts.extend(memory_only_accounts(&auth.accounts, &accounts));
+pub fn refresh_accounts(app: &ApiState, auth: &mut State) -> Result<(), AuthError> {
+    read_store_locked(&app.store_path)
+        .inspect_err(|error| tracing::warn!(%error, "account store re-read failed, the request is refused"))
+        .map(|(mut accounts, credentials)| {
+            accounts.extend(memory_only_accounts(app, &auth.accounts, &accounts));
             auth.accounts = accounts;
             auth.credentials = credentials;
-        }
-        Err(error) => tracing::warn!(%error, "account store re-read failed, the in-memory copy is used"),
-    }
+        })
+}
+
+
+/// Records the account an OIDC callback created, so `memory_only_accounts` can tell it from a deleted file account.
+pub fn remember_callback_account(app: &ApiState, username: &str) {
+    app.callback_accounts
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(username.to_owned());
+}
+
+
+/// True when the session of `token` predates the revocation marker of its owner.
+pub fn session_revoked(auth: &State, token: &str) -> bool {
+    auth.sessions
+        .get(&hash_token(token))
+        .is_some_and(|session| is_revoked(&auth.accounts, session))
 }
 
 
