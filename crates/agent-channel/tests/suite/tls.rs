@@ -8,6 +8,9 @@ use std::fs;
 use tempfile::tempdir;
 
 
+const TWO: usize = 2;
+
+
 const INVALID_UTF8: [u8; 2] = [0xff, 0xfe];
 
 
@@ -130,5 +133,22 @@ fn valid_files_build_both_configurations() -> TestResult {
         &platform.agent_ca,
         &agent_spec(&[AGENT_URI]),
     )?)?;
+    Ok(())
+}
+
+
+#[test]
+fn an_agent_ca_bundle_with_two_authorities_is_refused() -> TestResult {
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let second = make_authority()?;
+    let mut paths = server_paths(dir.path(), &platform)?;
+    paths.agent_ca = write_file(
+        dir.path(),
+        "bundle.pem",
+        &format!("{}{}", platform.agent_ca.pem, second.pem),
+        WORLD_READABLE_MODE,
+    )?;
+    assert!(matches!(server_config(&paths), Err(ChannelError::MultipleAgentCa { count: TWO, .. })));
     Ok(())
 }

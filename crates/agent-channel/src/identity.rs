@@ -1,5 +1,5 @@
 use crate::error::IdentityError;
-use crate::model::{Identity, IDENTITY_URI_PREFIX, MAX_IDENTITY_COMPONENT_LENGTH};
+use crate::model::{Identity, IDENTITY_URI_PREFIX, MAX_IDENTITY_COMPONENT_LENGTH, SERIAL_SIGN_BIT};
 use crate::revocation::canonical_serial;
 use data_encoding::HEXLOWER;
 use rustls_pki_types::CertificateDer;
@@ -24,7 +24,11 @@ pub fn serial_from_chain(chain: Option<&[CertificateDer<'_>]>) -> Result<String,
 
 pub fn serial_from_certificate(der: &[u8]) -> Result<String, IdentityError> {
     let (_, certificate) = parse_x509_certificate(der).map_err(IdentityError::Certificate)?;
-    Ok(canonical_serial(&HEXLOWER.encode(certificate.raw_serial())))
+    if certificate.raw_serial().first().is_some_and(|byte| byte & SERIAL_SIGN_BIT != 0) {
+        Err(IdentityError::NegativeSerial)
+    } else {
+        Ok(canonical_serial(&HEXLOWER.encode(certificate.raw_serial())))
+    }
 }
 
 

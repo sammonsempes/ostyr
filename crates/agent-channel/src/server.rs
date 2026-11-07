@@ -1,47 +1,14 @@
 use crate::error::{ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serial_from_chain};
-use crate::model::{Identity, HEARTBEAT_PATH};
-use crate::proto::{BeatReply, BeatRequest};
 use crate::revocation::{is_revoked, is_revoked_now};
 use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, ShutdownSignal};
-use axum::body::Body;
 use axum::{Extension, Router};
 use futures_util::{FutureExt, StreamExt};
-use http::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
-use std::convert::Infallible;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
-use tonic::server::Grpc;
-use tonic_prost::ProstCodec;
-use tower::service_fn;
-
-
-pub fn channel_router() -> Router {
-    Router::new().route_service(HEARTBEAT_PATH, service_fn(heartbeat_route))
-}
-
-
-pub async fn heartbeat_route(request: Request<Body>) -> Result<Response<tonic::body::Body>, Infallible> {
-    Ok(Grpc::new(ProstCodec::<BeatReply, BeatRequest>::default())
-        .unary(service_fn(beat), request)
-        .await)
-}
-
-
-/// Answers with the identity taken from the certificate; the request names no agent and no tenant.
-pub async fn beat(request: tonic::Request<BeatRequest>) -> Result<tonic::Response<BeatReply>, tonic::Status> {
-    let identity = request
-        .extensions()
-        .get::<Identity>()
-        .ok_or_else(|| tonic::Status::unauthenticated("no verified agent identity"))?;
-    Ok(tonic::Response::new(BeatReply {
-        tenant: identity.tenant.clone(),
-        agent_id: identity.agent_id.clone(),
-    }))
-}
 
 
 /// Accepts connections until `shutdown` completes; every connection runs in its own task and a refused one is logged.

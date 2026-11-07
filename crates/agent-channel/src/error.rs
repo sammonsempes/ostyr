@@ -20,6 +20,8 @@ pub enum IdentityError {
     Names(#[source] X509Error),
     #[error("the peer certificate must carry exactly one URI name, found {0}")]
     UriCount(usize),
+    #[error("the peer certificate serial is negative, which RFC 5280 forbids")]
+    NegativeSerial,
     #[error("the URI name {0} is not urn:ostyr:agent:<tenant>:<agent-id>")]
     BadUri(String),
 }
@@ -47,6 +49,8 @@ pub enum ChannelError {
     },
     #[error("{path}: no certificate found")]
     NoCertificate { path: PathBuf },
+    #[error("{path}: the agent CA bundle holds {count} certificates, exactly one is accepted so a revoked serial names one issuer")]
+    MultipleAgentCa { path: PathBuf, count: usize },
     #[error("TLS configuration refused: {0}")]
     Tls(#[from] rustls::Error),
     #[error("client certificate verifier refused: {0}")]
