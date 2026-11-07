@@ -125,6 +125,7 @@ fn runtime_over(
         http,
         resolve: Box::new(|_| Ok(SecretString::from(CLIENT_SECRET))),
         pending: Mutex::new(Default::default()),
+        refresh: Default::default(),
     })
 }
 

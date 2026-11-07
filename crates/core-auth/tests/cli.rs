@@ -119,6 +119,9 @@ const PATTERN_BYTE: u8 = 7;
 const BRUTE_FORCE: usize = 6;
 
 
+const REVOCATIONS: usize = 2;
+
+
 struct Workspace {
     directory: TempDir,
 }
@@ -723,5 +726,29 @@ fn a_command_keeps_changes_another_writer_made_to_the_file() -> TestResult {
     let listed = apply_command(&mut state, &context, fixed_clock(), &store, &["check", token.as_str()])?;
     assert!(listed.starts_with("allowed"));
     assert!(state.accounts.contains_key("outsider"));
+    Ok(())
+}
+
+
+#[test]
+fn revoke_all_on_an_absent_oidc_name_writes_a_stub_and_audits_the_clear_target() -> TestResult {
+    let space = workspace()?;
+    constant_session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
+    let secret = BASE32_NOPAD.encode(&[PATTERN_BYTE; SECRET_BYTES]);
+    let code = totp_now(&secret, fixed_clock())?;
+    let token = "07".repeat(KEY_LENGTH);
+    let script = format!("login root {PASSWORD} src {code}\nrevoke-all {token} oidc:absent-sub\nrevoke-all {token} ghost\n");
+    let output = constant_session(&space, &script)?;
+    assert!(output.matches("revoked 0").count() >= REVOCATIONS, "{output}");
+    let stored = load_accounts_file(&space.directory.path().join("accounts.json"))?;
+    let stub = stored.get("oidc:absent-sub").ok_or("stub missing")?;
+    assert!(stub.sessions_valid_after.is_some());
+    assert!(stub.roles.is_empty());
+    assert_eq!(stub.password_hash, "!external");
+    assert!(!stored.contains_key("ghost"));
+    let audit = fs::read_to_string(space.directory.path().join("audit.log"))?;
+    assert!(audit.contains("oidc:absent-sub"));
+    assert!(!audit.contains("ghost"));
+    assert!(audit.contains("unknown:"));
     Ok(())
 }

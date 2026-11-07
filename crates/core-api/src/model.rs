@@ -48,6 +48,7 @@ pub struct OidcRuntime {
     pub http: SharedHttpFn,
     pub resolve: SharedResolveFn,
     pub pending: std::sync::Mutex<PendingMap>,
+    pub refresh: core_auth::oidc::KeyRefreshGate,
 }
 
 

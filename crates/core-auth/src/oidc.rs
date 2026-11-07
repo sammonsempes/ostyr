@@ -9,12 +9,12 @@ use core_audit::model::Outcome;
 use core_config::parse::parse_document;
 use core_config::secret::SecretRef;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
-use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreJwsSigningAlgorithm, CoreProviderMetadata};
+use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreJwsSigningAlgorithm, CoreProviderMetadata};
 use openidconnect::http::{header, Response};
 use openidconnect::url::Url;
 use openidconnect::{
     AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken, HttpRequest, HttpResponse, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    PkceCodeVerifier, RedirectUrl, Scope, SignatureVerificationError, TokenResponse,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::io::{self, Read, Write};
 use std::iter::once;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
 
@@ -63,6 +64,9 @@ pub const CLAIM_AUD: &str = "aud";
 pub const CLAIM_AZP: &str = "azp";
 
 
+pub const KEY_REFRESH_INTERVAL_SECONDS: i64 = 30;
+
+
 pub const STATE_BYTES: usize = 32;
 
 
@@ -98,6 +102,14 @@ pub struct OidcContext<'a> {
     pub config: &'a OidcConfig,
     pub http: HttpFn<'a>,
     pub resolve: ResolveFn<'a>,
+    pub refresh: &'a KeyRefreshGate,
+}
+
+
+/// Unix seconds of the last provider key refresh, shared by every login of one runtime.
+#[derive(Debug, Default)]
+pub struct KeyRefreshGate {
+    pub last: AtomicI64,
 }
 
 
@@ -375,6 +387,41 @@ pub fn take_pending(pending: &mut PendingMap, state: &str, now: OffsetDateTime) 
 }
 
 
+pub fn claim_refresh(gate: &KeyRefreshGate, now: i64) -> bool {
+    gate.last
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
+            (now - last >= KEY_REFRESH_INTERVAL_SECONDS).then_some(now)
+        })
+        .is_ok()
+}
+
+
+pub fn verify_token(client: &OidcClient, oidc: &OidcContext, token: &CoreIdToken, nonce: &str) -> Result<String, ClaimsVerificationError> {
+    let verifier = client
+        .id_token_verifier()
+        .set_allowed_algs(ALLOWED_ALGORITHMS)
+        .set_other_audience_verifier_fn(|audience| oidc.config.additional_audiences.iter().any(|trusted| trusted == &**audience));
+    token
+        .claims(&verifier, &Nonce::new(nonce.to_owned()))
+        .map(|claims| claims.subject().to_string())
+}
+
+
+pub fn verify_with_refresh(client: &OidcClient, oidc: &OidcContext, token: &CoreIdToken, nonce: &str) -> Result<String, ClaimsVerificationError> {
+    match verify_token(client, oidc, token, nonce) {
+        Err(ClaimsVerificationError::SignatureVerification(SignatureVerificationError::NoMatchingKey))
+            if claim_refresh(oidc.refresh, OffsetDateTime::now_utc().unix_timestamp()) =>
+        {
+            tracing::warn!("ID token signed with an unknown key id, refreshing the provider keys once");
+            let refreshed =
+                build_client(oidc).map_err(|_| ClaimsVerificationError::SignatureVerification(SignatureVerificationError::NoMatchingKey))?;
+            verify_token(&refreshed, oidc, token, nonce)
+        }
+        other => other,
+    }
+}
+
+
 pub fn fetch_identity(oidc: &OidcContext, login: PendingLogin, code: &SecretString) -> Result<Identity, OidcDenial> {
     let client = build_client(oidc)?;
     let response = client
@@ -385,11 +432,7 @@ pub fn fetch_identity(oidc: &OidcContext, login: PendingLogin, code: &SecretStri
         .map_err(provider_error)?;
     let token = response.id_token().ok_or(OidcDenial::MissingIdToken)?;
     let payload = payload_of(&token.to_string())?;
-    let verifier = client
-        .id_token_verifier()
-        .set_allowed_algs(ALLOWED_ALGORITHMS)
-        .set_other_audience_verifier_fn(|audience| oidc.config.additional_audiences.iter().any(|trusted| trusted == &**audience));
-    let claims = token.claims(&verifier, &Nonce::new(login.nonce)).map_err(|error| match error {
+    let subject = verify_with_refresh(&client, oidc, token, &login.nonce).map_err(|error| match error {
         ClaimsVerificationError::InvalidAudience(_) => {
             tracing::warn!(%error, "ID token rejected");
             audience_denial(&payload, oidc.config)
@@ -397,7 +440,6 @@ pub fn fetch_identity(oidc: &OidcContext, login: PendingLogin, code: &SecretStri
         other => claims_denial(other),
     })?;
     check_azp(&payload, oidc.config)?;
-    let subject = claims.subject().to_string();
     Ok(Identity {
         subject,
         groups: groups_of(&payload, &oidc.config.groups_claim),

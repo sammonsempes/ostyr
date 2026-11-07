@@ -18,7 +18,7 @@ use core_auth::limiter::{record_failure, source_key, SOURCE_MAX_FAILURES};
 use core_auth::model::PendingLogin;
 use core_auth::oidc::{
     audit_denial, begin_login, fetch_identity, http_call, new_agent, parse_oidc_config, prune_pending, settle_identity, take_pending, Callback,
-    Identity, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
+    Identity, KeyRefreshGate, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
 };
 use core_auth::service::{log_lockout, record, ACTION_LOGIN, ANONYMOUS_ACTOR};
 use core_auth::session::{hash_token, session_owner};
@@ -121,6 +121,7 @@ pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime
         http: Box::new(move |request| http_call(&agent, request)),
         resolve: Box::new(move |_| read_secret(&secret_file)),
         pending: Mutex::new(PendingMap::new()),
+        refresh: KeyRefreshGate::default(),
     })
 }
 
@@ -135,6 +136,7 @@ pub fn oidc_context(runtime: &OidcRuntime) -> OidcContext<'_> {
         config: &runtime.config,
         http: &*runtime.http,
         resolve: &*runtime.resolve,
+        refresh: &runtime.refresh,
     }
 }
 
