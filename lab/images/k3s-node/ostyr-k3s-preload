@@ -40,13 +40,13 @@ systemctl start k3s
 wait_until "airgap import finished" import_done
 wait_until "every kube-system pod Running or Completed" pods_settled
 
-"$K3S" crictl rmp --force --all
+"$K3S" crictl rmp --force --all || echo "ostyr-k3s-preload: pod removal timed out, the state is deleted below anyway" >&2
 systemctl stop k3s
 pkill -f containerd-shim || true
 sleep "$DELAY_SECONDS"
 mount | awk '$3 ~ "^(/run/k3s|/var/lib/kubelet|/var/lib/rancher/k3s)" {print $3}' | sort -r | xargs --no-run-if-empty umount
 
 find "$K3S_DIR/agent" -mindepth 1 -maxdepth 1 ! -name containerd -exec rm -rf {} +
-rm -rf "$K3S_DIR/server" /var/lib/kubelet /var/lib/cni /run/k3s /run/flannel /etc/rancher/k3s
+rm -rf "$K3S_DIR/server" /var/lib/kubelet /var/lib/cni /run/k3s /run/flannel /etc/rancher/k3s /etc/rancher/node
 "$K3S" crictl --version
 ls "$K3S_DIR/agent/containerd"

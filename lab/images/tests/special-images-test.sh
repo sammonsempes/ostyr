@@ -13,7 +13,7 @@ readonly OUTSIDE_ADDRESS="1.1.1.1"
 readonly CONNECT_TIMEOUT=5
 readonly K3S_ATTEMPTS=60
 readonly K3S_DELAY_SECONDS=5
-readonly K3S_MIN_PODS=6
+readonly K3S_MIN_PODS=8
 readonly LAN_PORTS="22 53 80 443"
 readonly ATOMIC_TEST_NAME="Linux Download File and Run"
 
@@ -97,6 +97,7 @@ if [[ "${1:-}" != "--static" ]]; then
     check "k3s binary runs" grep -q 'k3s version' <(ssh_vm k3s k3s --version)
     check_not "k3s airgap tarball removed (images preloaded)" k3s "test -e /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst"
     check_not "k3s has no cluster state baked" k3s "sudo test -e /var/lib/rancher/k3s/server/db"
+    check_not "k3s node join password not baked" k3s "sudo test -e /etc/rancher/node"
     check "k3s containerd store holds the pause image" ssh_vm k3s "sudo grep -q mirrored-pause /var/lib/rancher/k3s/agent/containerd/io.containerd.metadata.v1.bolt/meta.db"
     check_not "k3s service is not enabled" k3s "systemctl is-enabled --quiet k3s"
     check_not "k3s node has no default route" k3s "test -n \"\$(ip -4 route show default)\""
