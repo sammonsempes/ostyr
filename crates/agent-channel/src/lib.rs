@@ -6,6 +6,7 @@ pub mod error;
 pub mod identity;
 pub mod model;
 pub mod proto;
+pub mod revocation;
 pub mod server;
 pub mod tls;
 pub mod types;
