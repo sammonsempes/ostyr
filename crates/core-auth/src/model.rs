@@ -21,6 +21,8 @@ pub struct Account {
     pub password_hash: String,
     pub roles: RoleSet,
     pub totp: Option<TotpEnrolment>,
+    #[serde(default)]
+    pub sessions_valid_after: Option<i64>,
 }
 
 
@@ -44,6 +46,7 @@ pub struct PendingLogin {
     pub nonce: String,
     pub verifier: SecretString,
     pub created_at: OffsetDateTime,
+    pub source: String,
 }
 
 

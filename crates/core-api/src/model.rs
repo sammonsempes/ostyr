@@ -6,6 +6,7 @@ use core_auth::service::State;
 use core_auth::types::{Clock, CompromisedSet, PendingMap, RandomFn, RoleCatalog, StoreKey};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -38,6 +39,7 @@ pub struct ApiState {
     pub max_attempts: usize,
     pub body_timeout: Duration,
     pub oidc: Option<OidcRuntime>,
+    pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
 }
 
 

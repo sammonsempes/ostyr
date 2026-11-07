@@ -221,7 +221,12 @@ pub fn prune_pending(pending: &mut PendingMap, now: OffsetDateTime) {
 }
 
 
-pub fn start_login(oidc: &OidcContext, pending: &mut PendingMap, now: OffsetDateTime, random: RandomFn) -> Result<String, AuthError> {
+pub fn start_login(
+    oidc: &OidcContext,
+    pending: &mut PendingMap,
+    now: OffsetDateTime,
+    (random, source): (RandomFn, &str),
+) -> Result<String, AuthError> {
     prune_pending(pending, now);
     if pending.len() >= PENDING_MAX {
         Err(OidcDenial::TooManyPending)?;
@@ -256,6 +261,7 @@ pub fn start_login(oidc: &OidcContext, pending: &mut PendingMap, now: OffsetDate
             nonce,
             verifier: SecretString::from(verifier),
             created_at: now,
+            source: source.to_owned(),
         },
     );
     Ok(url.to_string())
@@ -269,7 +275,7 @@ pub fn begin_login<Output: Write>(
     now: OffsetDateTime,
     source: &str,
 ) -> Result<String, AuthError> {
-    match start_login(oidc, pending, now, context.random) {
+    match start_login(oidc, pending, now, (context.random, source)) {
         Err(error) => {
             let denial = match &error {
                 AuthError::Oidc(denial) => *denial,
@@ -419,6 +425,7 @@ pub fn upsert_external(state: &mut State, username: &str, roles: RoleSet) {
             password_hash: EXTERNAL_PASSWORD_HASH.to_owned(),
             roles,
             totp: None,
+            sessions_valid_after: None,
         },
     );
 }

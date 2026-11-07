@@ -51,6 +51,9 @@ const LOOSE: u32 = 0o644;
 const MODE_MASK: u32 = 0o777;
 
 
+const MARKER: i64 = 7;
+
+
 fn sample() -> AccountMap {
     let account = Account {
         username: "alice".to_owned(),
@@ -61,6 +64,7 @@ fn sample() -> AccountMap {
             last_step: 1,
             backup_code_hashes: vec!["h1".to_owned()],
         }),
+        sessions_valid_after: Some(MARKER),
     };
     [("alice".to_owned(), account)].into()
 }
@@ -279,6 +283,7 @@ fn named_account(name: &str) -> Account {
         password_hash: "$argon2id$hash".to_owned(),
         roles: ["reader".to_owned()].into(),
         totp: None,
+        sessions_valid_after: None,
     }
 }
 

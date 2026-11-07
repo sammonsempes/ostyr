@@ -192,7 +192,7 @@ pub fn persist_login(
     request: &LoginRequest,
 ) -> Result<LoginReply, ApiError> {
     let updated = update_store_file(&app.store_path, app.random, |accounts, credentials| {
-        let external = memory_only_accounts(&auth.accounts, accounts);
+        let external = memory_only_accounts(app, &auth.accounts, accounts);
         auth.accounts = std::mem::take(accounts);
         auth.accounts.extend(external.clone());
         auth.credentials = std::mem::take(credentials);
@@ -234,10 +234,13 @@ pub fn persist_login(
 
 pub fn stored_hash(app: &ApiState, username: &str) -> String {
     let mut auth = lock_auth(app);
-    refresh_accounts(app, &mut auth);
-    auth.accounts
-        .get(username)
-        .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone())
+    match refresh_accounts(app, &mut auth) {
+        Ok(()) => auth
+            .accounts
+            .get(username)
+            .map_or_else(|| DUMMY_HASH.to_owned(), |account| account.password_hash.clone()),
+        Err(_) => DUMMY_HASH.to_owned(),
+    }
 }
 
 
