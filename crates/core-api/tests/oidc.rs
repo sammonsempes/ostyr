@@ -856,11 +856,8 @@ fn serve_tls_once(certificate: &str, key: &str) -> Result<(u16, JoinHandle<Resul
 
 
 fn fetch_over_tls(ca_pem: &str, certificate: &str, key: &str) -> Result<(bool, Result<usize, io::Error>), TestError> {
-    let dir = tempdir()?;
-    let ca_file = dir.path().join("ca.pem");
-    fs::write(&ca_file, ca_pem)?;
     let (port, server) = serve_tls_once(certificate, key)?;
-    let agent = provider_agent(Some(&ca_file))?;
+    let agent = provider_agent(Some(ca_pem.as_bytes()))?;
     let target = Request::builder().uri(format!("https://{LOCALHOST_NAME}:{port}/")).body(Vec::new())?;
     let reached = http_call(&agent, target).is_ok();
     let served = server.join().map_err(|_| "server thread panicked")?;
@@ -885,10 +882,16 @@ fn the_provider_certificate_is_checked_against_the_configured_ca() -> TestResult
 #[test]
 fn a_missing_or_invalid_ca_file_is_a_startup_error() -> TestResult {
     let dir = tempdir()?;
-    assert!(provider_agent(Some(&dir.path().join("missing.pem"))).is_err());
-    let broken = dir.path().join("broken.pem");
-    fs::write(&broken, "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")?;
-    assert!(provider_agent(Some(&broken)).is_err());
+    let broken = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    assert!(provider_agent(Some(broken.as_bytes())).is_err());
+    let missing = OidcFiles {
+        config: dir.path().join("oidc.yaml"),
+        ca_file: Some(dir.path().join("missing.pem")),
+        secret_file: dir.path().join("oidc.secret"),
+    };
+    fs::write(&missing.config, CONFIG_TEXT)?;
+    private_file(&missing.secret_file, b"secret")?;
+    assert!(matches!(load_oidc(&missing, &builtin_catalog()), Err(StartupError::Io(_))));
     assert!(provider_agent(None).is_ok());
     Ok(())
 }

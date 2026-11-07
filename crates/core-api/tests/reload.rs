@@ -4,7 +4,10 @@ mod fixture;
 mod types;
 
 
-use core_api::config::{limits, log_level, DEFAULT_LOG_LEVEL, MAX_CONNECTIONS_PER_SOURCE};
+use core_api::config::{
+    api_config, limits, log_level, DEFAULT_LOG_LEVEL, MAX_CONNECTIONS_CAP, MAX_CONNECTIONS_PER_SOURCE, MAX_RATE_REQUESTS, MAX_TABLE_ENTRIES,
+    MAX_TIMEOUT_SECONDS, MAX_WINDOW_SECONDS,
+};
 use core_api::error::StartupError;
 use core_api::logging::reloadable_dispatch;
 use core_api::middleware::admit_source;
@@ -71,10 +74,10 @@ const ALT_CONNECTIONS: usize = 15;
 const PLAIN_FILES: usize = 2;
 
 
-const WITHOUT_CA_FILES: usize = 5;
+const WITHOUT_CA_FILES: usize = 6;
 
 
-const WITH_CA_FILES: usize = 6;
+const WITH_CA_FILES: usize = 7;
 
 
 const TWO_RECORDS: usize = 2;
@@ -253,9 +256,67 @@ fn bad_numbers_zero_and_unknown_levels_are_refused() -> TestResult {
     ));
     assert!(invalid.is_err_and(|error| error.to_string().contains("many")));
     let zero = limits(&module_in(dir.path(), "  max_sources: 0\n")?);
-    assert!(matches!(zero, Err(StartupError::ZeroSetting("max_sources"))));
+    assert!(matches!(zero, Err(StartupError::OutOfRange { name: "max_sources", .. })));
     let level = log_level(&module_in(dir.path(), "  log_level: loud\n")?);
     assert!(matches!(level, Err(StartupError::InvalidSetting { name: "log_level", .. })));
+    Ok(())
+}
+
+
+#[test]
+fn every_numeric_setting_has_a_valid_range() -> TestResult {
+    let dir = tempdir()?;
+    let over_requests = MAX_RATE_REQUESTS + 1;
+    let over_window = MAX_WINDOW_SECONDS + 1;
+    let over_entries = MAX_TABLE_ENTRIES + 1;
+    let over_connections = MAX_CONNECTIONS_CAP + 1;
+    let over_timeout = MAX_TIMEOUT_SECONDS + 1;
+    let bad = [
+        ("rate_max_requests", over_requests.to_string()),
+        ("rate_window_seconds", over_window.to_string()),
+        ("rate_window_seconds", "-5".to_owned()),
+        ("rate_window_seconds", "0".to_owned()),
+        ("max_sources", over_entries.to_string()),
+        ("max_sources", "-1".to_owned()),
+        ("max_attempts", over_entries.to_string()),
+        ("max_attempts", "0".to_owned()),
+        ("max_attempts", "-1".to_owned()),
+        ("max_connections_per_source", over_connections.to_string()),
+        ("max_connections_per_source", "0".to_owned()),
+        ("body_read_timeout_seconds", over_timeout.to_string()),
+        ("body_read_timeout_seconds", "0".to_owned()),
+        ("header_read_timeout_seconds", over_timeout.to_string()),
+        ("header_read_timeout_seconds", "0".to_owned()),
+        ("rate_max_requests", "0".to_owned()),
+        ("rate_max_requests", "-3".to_owned()),
+    ];
+    bad.iter().try_for_each(|(name, value)| -> TestResult {
+        let module = module_in(dir.path(), &format!("  {name}: {value}\n"))?;
+        assert!(api_config(&module).is_err(), "{name}: {value}");
+        Ok(())
+    })?;
+    let negative = module_in(dir.path(), "  rate_window_seconds: -5\n")?;
+    assert!(matches!(
+        api_config(&negative),
+        Err(StartupError::OutOfRange {
+            name: "rate_window_seconds",
+            ..
+        })
+    ));
+    let edge = format!(
+        "  rate_max_requests: {MAX_RATE_REQUESTS}\n  rate_window_seconds: {MAX_WINDOW_SECONDS}\n  max_sources: {MAX_TABLE_ENTRIES}\n  max_attempts: 1\n  max_connections_per_source: {MAX_CONNECTIONS_CAP}\n  body_read_timeout_seconds: {MAX_TIMEOUT_SECONDS}\n  header_read_timeout_seconds: 1\n"
+    );
+    assert!(api_config(&module_in(dir.path(), &edge)?).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_with_a_negative_window_is_refused_and_the_old_limit_kept() -> TestResult {
+    let running = live("")?;
+    rewrite(&running, "  rate_window_seconds: -5\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    assert_eq!(running.state.limits.load().rate_window_seconds, RATE_WINDOW_SECONDS);
     Ok(())
 }
 
@@ -321,7 +382,7 @@ fn the_loader_names_the_file_and_keeps_the_cause() -> TestResult {
     assert!(matches!(load_settings(&dir.path().join("none.yaml")), Err(ConfigError::Io { .. })));
     let path = write_module(dir.path(), "  rate_max_requests: 0\n")?;
     let refused = load_settings(&path);
-    assert!(refused.is_err_and(|error| error.to_string().contains("must not be zero")));
+    assert!(refused.is_err_and(|error| error.to_string().contains("must be between 1 and")));
     Ok(())
 }
 
@@ -560,6 +621,79 @@ fn the_oidc_runtime_is_swapped_only_when_its_files_change() -> TestResult {
     fs::write(&oidc_yaml, OIDC_TEXT)?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
     assert!(running.state.oidc.load().is_some());
+    Ok(())
+}
+
+
+fn oidc_settings(dir: &Path, secret: &str) -> Result<String, TestError> {
+    let oidc_yaml = dir.join("oidc.yaml");
+    if !oidc_yaml.exists() {
+        fs::write(&oidc_yaml, OIDC_TEXT)?;
+    }
+    let secret_file = dir.join(secret);
+    if !secret_file.exists() {
+        private_file(&secret_file, b"secret")?;
+    }
+    Ok(format!(
+        "  oidc: {}\n  oidc_secret_file: {}\n",
+        oidc_yaml.display(),
+        secret_file.display()
+    ))
+}
+
+
+#[test]
+fn a_changed_oidc_secret_path_or_content_swaps_the_runtime() -> TestResult {
+    let dir = tempdir()?;
+    let first_settings = oidc_settings(dir.path(), "first.secret")?;
+    let second_settings = oidc_settings(dir.path(), "second.secret")?;
+    let running = live_with(dir, &first_settings, None)?;
+    let first = running.state.oidc.load_full().ok_or("no oidc")?;
+    rewrite(&running, &second_settings)?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    let moved = running.state.oidc.load_full().ok_or("no oidc")?;
+    assert!(!Arc::ptr_eq(&first, &moved));
+    assert_ne!(first.fingerprint, moved.fingerprint);
+    private_file(&running.dir.path().join("second.secret"), b"rotated")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    let rotated = running.state.oidc.load_full().ok_or("no oidc")?;
+    assert!(!Arc::ptr_eq(&moved, &rotated));
+    assert_ne!(moved.fingerprint, rotated.fingerprint);
+    let secret = (rotated.resolve)(&rotated.config.client_secret)?;
+    assert_eq!(secrecy::ExposeSecret::expose_secret(&secret), "rotated");
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Unchanged));
+    Ok(())
+}
+
+
+#[test]
+fn a_group_readable_oidc_secret_refuses_the_reload_and_names_the_file() -> TestResult {
+    let dir = tempdir()?;
+    let first_settings = oidc_settings(dir.path(), "first.secret")?;
+    let loose_settings = oidc_settings(dir.path(), "loose.secret")?;
+    set_mode(&dir.path().join("loose.secret"), WORLD_READABLE)?;
+    let running = live_with(dir, &first_settings, None)?;
+    let first = running.state.oidc.load_full().ok_or("no oidc")?;
+    rewrite(&running, &loose_settings)?;
+    let outcome = reload(&running.engine);
+    if cfg!(unix) {
+        assert!(matches!(outcome, ReloadOutcome::Refused { ref reason } if reason.contains("loose.secret")));
+        assert!(Arc::ptr_eq(&first, &running.state.oidc.load_full().ok_or("no oidc")?));
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_group_readable_tls_key_is_refused_by_name() -> TestResult {
+    let dir = tempdir()?;
+    write_pki(dir.path(), &pki()?)?;
+    set_mode(&dir.path().join("server.key"), WORLD_READABLE)?;
+    let refused = build_settings(module_in(dir.path(), &tls_extra(dir.path()))?);
+    if cfg!(unix) {
+        let message = refused.err().ok_or("accepted")?.to_string();
+        assert!(message.contains("server.key") && !message.contains("audit log"), "{message}");
+    }
     Ok(())
 }
 

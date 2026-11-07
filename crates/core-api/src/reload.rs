@@ -127,7 +127,7 @@ pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
     let oidc = config
         .oidc
         .iter()
-        .flat_map(|files| [Some(files.config.clone()), files.ca_file.clone()])
+        .flat_map(|files| [Some(files.config.clone()), files.ca_file.clone(), Some(files.secret_file.clone())])
         .flatten();
     [module_file.to_path_buf(), config.compromised_list.clone()]
         .into_iter()

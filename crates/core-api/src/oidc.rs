@@ -2,8 +2,9 @@ use crate::error::StartupError;
 use crate::failure::{auth_failure, reply};
 use crate::middleware::rate_key;
 use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
-use crate::reload::{content_digest, file_digest};
+use crate::reload::content_digest;
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
+use crate::server::open_private;
 use crate::state::{auth_context, current_compromised, lock_auth, remember_callback_account};
 use crate::types::SharedState;
 use axum::extract::rejection::QueryRejection;
@@ -12,7 +13,6 @@ use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use core_audit::log::check_private;
 use core_audit::model::Outcome;
 use core_auth::error::OidcDenial;
 use core_auth::limiter::{record_failure, source_key, SOURCE_MAX_FAILURES};
@@ -31,7 +31,7 @@ use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use secrecy::{ExposeSecret, SecretString};
-use std::fs::{read_to_string, File};
+use std::fs::{read, read_to_string};
 use std::io::{self, Read};
 use std::net::IpAddr;
 use std::path::Path;
@@ -79,29 +79,40 @@ pub fn binding_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 
-pub fn read_secret(path: &Path) -> Result<SecretString, io::Error> {
-    let mut file = File::open(path)?;
-    check_private(&file).map_err(io::Error::other)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(SecretString::from(text.trim_end().to_owned()))
+/// The whole content of a file that must be private, read from the handle that was checked.
+pub fn read_private(path: &Path) -> Result<Vec<u8>, StartupError> {
+    let mut bytes = Vec::new();
+    open_private(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 
-pub fn trust_roots(path: &Path) -> Result<RootCertStore, StartupError> {
+pub fn secret_from(bytes: Vec<u8>) -> Result<SecretString, io::Error> {
+    String::from_utf8(bytes)
+        .map(|text| SecretString::from(text.trim_end().to_owned()))
+        .map_err(io::Error::other)
+}
+
+
+pub fn read_secret(path: &Path) -> Result<SecretString, io::Error> {
+    read_private(path).map_err(io::Error::other).and_then(secret_from)
+}
+
+
+pub fn trust_roots(pem: &[u8]) -> Result<RootCertStore, StartupError> {
     let mut roots = RootCertStore::empty();
-    CertificateDer::pem_file_iter(path)?.try_for_each(|certificate| -> Result<(), StartupError> { Ok(roots.add(certificate?)?) })?;
+    CertificateDer::pem_slice_iter(pem).try_for_each(|certificate| -> Result<(), StartupError> { Ok(roots.add(certificate?)?) })?;
     Ok(roots)
 }
 
 
-pub fn provider_agent(ca_file: Option<&Path>) -> Result<Agent, StartupError> {
-    match ca_file {
+pub fn provider_agent(ca_pem: Option<&[u8]>) -> Result<Agent, StartupError> {
+    match ca_pem {
         None => Ok(new_agent()),
-        Some(path) => {
+        Some(pem) => {
             let tls = ClientConfig::builder_with_provider(Arc::new(default_provider()))
                 .with_protocol_versions(&[&TLS13, &TLS12])?
-                .with_root_certificates(trust_roots(path)?)
+                .with_root_certificates(trust_roots(pem)?)
                 .with_no_client_auth();
             Ok(AgentBuilder::new()
                 .redirects(0)
@@ -113,14 +124,29 @@ pub fn provider_agent(ca_file: Option<&Path>) -> Result<Agent, StartupError> {
 }
 
 
+/// One digest over every path and every byte the runtime was built from, so a changed secret path or content swaps it.
+pub fn oidc_fingerprint(files: &OidcFiles, yaml: &[u8], ca_pem: Option<&[u8]>, secret: &[u8]) -> String {
+    let parts = [
+        files.config.display().to_string(),
+        content_digest(yaml),
+        files.ca_file.iter().map(|path| path.display().to_string()).collect::<String>(),
+        ca_pem.map_or_else(String::new, content_digest),
+        files.secret_file.display().to_string(),
+        content_digest(secret),
+    ];
+    content_digest(parts.join("\n").as_bytes())
+}
+
+
 pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime, StartupError> {
     let text = read_to_string(&files.config)?;
     let config = parse_oidc_config(&text, &files.config.display().to_string(), catalog)?;
-    let agent = provider_agent(files.ca_file.as_deref())?;
-    let ca_digest = files.ca_file.as_deref().map_or_else(|| Ok(String::new()), file_digest)?;
+    let ca_pem = files.ca_file.as_deref().map(read).transpose()?;
+    let agent = provider_agent(ca_pem.as_deref())?;
+    let secret_bytes = read_private(&files.secret_file)?;
     let secret_file = files.secret_file.clone();
     Ok(OidcRuntime {
-        fingerprint: format!("{}{ca_digest}", content_digest(text.as_bytes())),
+        fingerprint: oidc_fingerprint(files, text.as_bytes(), ca_pem.as_deref(), &secret_bytes),
         config,
         http: Box::new(move |request| http_call(&agent, request)),
         resolve: Box::new(move |_| read_secret(&secret_file)),
@@ -302,21 +328,25 @@ pub fn parse_callback(
 }
 
 
-pub fn take_login(app: &ApiState, request_id: &str, callback: &Callback) -> Result<PendingLogin, ApiError> {
-    let runtime = oidc_runtime(app)?;
+pub fn take_login(app: &ApiState, runtime: &OidcRuntime, request_id: &str, callback: &Callback) -> Result<PendingLogin, ApiError> {
     let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
     take_pending(&mut pending, &callback.state, (app.clock)()).map_err(|denial| deny(app, request_id, &callback.source, denial))
 }
 
 
-pub fn fetch(app: &ApiState, login: PendingLogin, code: &SecretString) -> Result<Identity, OidcDenial> {
-    let runtime = app.oidc.load_full().ok_or(OidcDenial::Provider)?;
-    fetch_identity(&oidc_context(&runtime), login, code)
+pub fn fetch(runtime: &OidcRuntime, login: PendingLogin, code: &SecretString) -> Result<Identity, OidcDenial> {
+    fetch_identity(&oidc_context(runtime), login, code)
 }
 
 
-pub async fn fetch_off_worker(app: &SharedState, request_id: &str, login: PendingLogin, callback: &Callback) -> Result<Identity, ApiError> {
-    let (worker, code) = (app.clone(), callback.code.clone());
+pub async fn fetch_off_worker(
+    app: &SharedState,
+    runtime: &Arc<OidcRuntime>,
+    request_id: &str,
+    login: PendingLogin,
+    callback: &Callback,
+) -> Result<Identity, ApiError> {
+    let (worker, code) = (runtime.clone(), callback.code.clone());
     spawn_blocking(move || fetch(&worker, login, &code))
         .await
         .unwrap_or_else(|error| {
@@ -327,13 +357,12 @@ pub async fn fetch_off_worker(app: &SharedState, request_id: &str, login: Pendin
 }
 
 
-pub fn settle(app: &ApiState, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
-    let runtime = oidc_runtime(app)?;
+pub fn settle(app: &ApiState, runtime: &OidcRuntime, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
     let mut auth = lock_auth(app);
     let compromised = current_compromised(app);
     let context = auth_context(app, request_id, &app.verify, &compromised);
     let token =
-        settle_identity(&mut auth, &context, &oidc_context(&runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
+        settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
     session_owner(&auth.sessions, token.expose_secret())
         .iter()
         .for_each(|username| remember_callback_account(app, username));
@@ -366,9 +395,10 @@ pub async fn run_callback(
     query: Option<CallbackQuery>,
 ) -> Result<SecretString, ApiError> {
     let callback = parse_callback(app, request_id, source, binding, query)?;
-    let login = take_login(app, request_id, &callback)?;
-    let identity = fetch_off_worker(app, request_id, login, &callback).await?;
-    settle(app, request_id, &identity, &callback)
+    let runtime = oidc_runtime(app)?;
+    let login = take_login(app, &runtime, request_id, &callback)?;
+    let identity = fetch_off_worker(app, &runtime, request_id, login, &callback).await?;
+    settle(app, &runtime, request_id, &identity, &callback)
 }
 
 

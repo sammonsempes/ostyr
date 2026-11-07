@@ -43,9 +43,20 @@ pub fn check_transport(address: SocketAddr, tls: Option<&TlsFiles>) -> Result<()
 }
 
 
+/// Opens a file that must grant nothing to group or other; the refusal names the file.
+pub fn open_private(path: &Path) -> Result<File, StartupError> {
+    let file = File::open(path)?;
+    check_private(&file).map_err(|source| StartupError::InsecureFile {
+        file: path.display().to_string(),
+        source,
+    })?;
+    Ok(file)
+}
+
+
 /// TLS 1.2 and 1.3 only; the private key file must grant nothing to group or other.
 pub fn tls_server_config(files: &TlsFiles) -> Result<ServerConfig, StartupError> {
-    check_private(&File::open(&files.key)?)?;
+    open_private(&files.key)?;
     let certificates = CertificateDer::pem_file_iter(&files.certificate)?.collect::<Result<Vec<_>, _>>()?;
     let key = PrivateKeyDer::from_pem_file(&files.key)?;
     let mut config = ServerConfig::builder_with_provider(Arc::new(default_provider()))

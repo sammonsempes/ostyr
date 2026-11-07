@@ -31,8 +31,14 @@ pub enum StartupError {
         #[source]
         source: BoxError,
     },
-    #[error("setting `{0}` must not be zero")]
-    ZeroSetting(&'static str),
+    #[error("setting `{name}` must be between {minimum} and {maximum}")]
+    OutOfRange { name: &'static str, minimum: String, maximum: String },
+    #[error("{file}: {source}")]
+    InsecureFile {
+        file: String,
+        #[source]
+        source: AuditError,
+    },
     #[error("{0} needs a restart")]
     RestartNeeded(&'static str),
     #[error("file watch: {0}")]

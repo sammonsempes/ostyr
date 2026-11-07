@@ -193,7 +193,7 @@ fn tls_material_is_validated() -> TestResult {
     assert!(tls_server_config(&files).is_ok());
 
     set_mode(&files.key, WORLD_READABLE)?;
-    assert_eq!(matches!(tls_server_config(&files), Err(StartupError::Audit(_))), cfg!(unix));
+    assert_eq!(matches!(tls_server_config(&files), Err(StartupError::InsecureFile { .. })), cfg!(unix));
     set_mode(&files.key, fixture::OWNER_ONLY)?;
 
     let missing_key = TlsFiles {

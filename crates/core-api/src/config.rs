@@ -4,7 +4,9 @@ use crate::state::{MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS,
 use core_config::model::ModuleConfig;
 use core_config::types::BoxError;
 use std::error::Error;
+use std::fmt::Display;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -71,6 +73,21 @@ pub const BODY_READ_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_CONNECTIONS_PER_SOURCE: usize = 64;
 
 
+pub const MAX_RATE_REQUESTS: u32 = 1_000_000;
+
+
+pub const MAX_WINDOW_SECONDS: i64 = 86_400;
+
+
+pub const MAX_TABLE_ENTRIES: usize = 1_000_000;
+
+
+pub const MAX_CONNECTIONS_CAP: usize = 65_536;
+
+
+pub const MAX_TIMEOUT_SECONDS: u64 = 3_600;
+
+
 pub const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 
 
@@ -82,10 +99,15 @@ pub fn required_setting<'a>(module: &'a ModuleConfig, name: &'static str) -> Res
 }
 
 
-/// The setting parsed as a number, `default` when absent; zero is refused.
-pub fn number_setting<Number>(module: &ModuleConfig, name: &'static str, default: Number) -> Result<Number, StartupError>
+/// The setting parsed as a number, `default` when absent; a value outside `range` is refused.
+pub fn number_setting<Number>(
+    module: &ModuleConfig,
+    name: &'static str,
+    default: Number,
+    range: RangeInclusive<Number>,
+) -> Result<Number, StartupError>
 where
-    Number: FromStr + Default + PartialEq,
+    Number: FromStr + PartialOrd + Display,
     Number::Err: Error + Send + Sync + 'static,
 {
     let value = module.settings.get(name).map_or(Ok(default), |text| {
@@ -95,10 +117,14 @@ where
             source: BoxError::from(source),
         })
     })?;
-    if value == Number::default() {
-        Err(StartupError::ZeroSetting(name))
-    } else {
+    if range.contains(&value) {
         Ok(value)
+    } else {
+        Err(StartupError::OutOfRange {
+            name,
+            minimum: range.start().to_string(),
+            maximum: range.end().to_string(),
+        })
     }
 }
 
@@ -116,12 +142,17 @@ pub fn log_level(module: &ModuleConfig) -> Result<LevelFilter, StartupError> {
 
 pub fn limits(module: &ModuleConfig) -> Result<Limits, StartupError> {
     Ok(Limits {
-        rate_max_requests: number_setting(module, SETTING_RATE_MAX_REQUESTS, RATE_MAX_REQUESTS)?,
-        rate_window_seconds: number_setting(module, SETTING_RATE_WINDOW_SECONDS, RATE_WINDOW_SECONDS)?,
-        max_sources: number_setting(module, SETTING_MAX_SOURCES, MAX_TRACKED_SOURCES)?,
-        max_attempts: number_setting(module, SETTING_MAX_ATTEMPTS, MAX_TRACKED_ATTEMPTS)?,
-        body_read_timeout: Duration::from_secs(number_setting(module, SETTING_BODY_TIMEOUT, BODY_READ_TIMEOUT_SECONDS)?),
-        max_connections_per_source: number_setting(module, SETTING_MAX_CONNECTIONS, MAX_CONNECTIONS_PER_SOURCE)?,
+        rate_max_requests: number_setting(module, SETTING_RATE_MAX_REQUESTS, RATE_MAX_REQUESTS, 1..=MAX_RATE_REQUESTS)?,
+        rate_window_seconds: number_setting(module, SETTING_RATE_WINDOW_SECONDS, RATE_WINDOW_SECONDS, 1..=MAX_WINDOW_SECONDS)?,
+        max_sources: number_setting(module, SETTING_MAX_SOURCES, MAX_TRACKED_SOURCES, 1..=MAX_TABLE_ENTRIES)?,
+        max_attempts: number_setting(module, SETTING_MAX_ATTEMPTS, MAX_TRACKED_ATTEMPTS, 1..=MAX_TABLE_ENTRIES)?,
+        body_read_timeout: Duration::from_secs(number_setting(
+            module,
+            SETTING_BODY_TIMEOUT,
+            BODY_READ_TIMEOUT_SECONDS,
+            1..=MAX_TIMEOUT_SECONDS,
+        )?),
+        max_connections_per_source: number_setting(module, SETTING_MAX_CONNECTIONS, MAX_CONNECTIONS_PER_SOURCE, 1..=MAX_CONNECTIONS_CAP)?,
     })
 }
 
@@ -170,7 +201,12 @@ pub fn api_config(module: &ModuleConfig) -> Result<ApiConfig, StartupError> {
         audit_log: PathBuf::from(required_setting(module, SETTING_AUDIT_LOG)?),
         key_file: required_setting(module, SETTING_KEY_FILE)?.clone(),
         compromised_list: PathBuf::from(required_setting(module, SETTING_COMPROMISED_LIST)?),
-        header_read_timeout: Duration::from_secs(number_setting(module, SETTING_HEADER_TIMEOUT, HEADER_READ_TIMEOUT_SECONDS)?),
+        header_read_timeout: Duration::from_secs(number_setting(
+            module,
+            SETTING_HEADER_TIMEOUT,
+            HEADER_READ_TIMEOUT_SECONDS,
+            1..=MAX_TIMEOUT_SECONDS,
+        )?),
         limits: limits(module)?,
         log_level: log_level(module)?,
         oidc: oidc_files(module)?,
