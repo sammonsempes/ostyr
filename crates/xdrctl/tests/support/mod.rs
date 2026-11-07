@@ -148,6 +148,7 @@ pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<Socket
         password_hash: hash_password(PASSWORD, os_random)?,
         roles: ["reader".to_owned()].into(),
         totp: None,
+        sessions_valid_after: None,
     };
     update_store_file(&config.accounts_store, os_random, |accounts, _| {
         accounts.insert(USER.to_owned(), account);

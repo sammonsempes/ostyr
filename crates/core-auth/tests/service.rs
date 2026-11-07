@@ -17,6 +17,7 @@ use core_auth::service::{
     authorize, bootstrap_administrator, change_roles, create_account, enrol_totp, login, revoke_all_sessions, revoke_token, Context, LoginRequest,
     State, DUMMY_HASH,
 };
+use core_auth::session::revocation_marker;
 use core_auth::store::save_accounts;
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, RoleCatalog, RoleSet, SessionMap, StoreKey};
@@ -1359,5 +1360,22 @@ fn a_session_failure_after_the_factors_is_a_generic_audited_denial() -> TestResu
         .last()
         .is_some_and(|line| line.contains("\"outcome\":\"failure\"") && line.contains("\"reason\":\"internal_error\"")));
     assert_eq!(state.sessions.len(), sessions_before);
+    Ok(())
+}
+
+
+#[test]
+fn role_change_and_revoke_all_write_the_revocation_marker() -> TestResult {
+    let fixture = fixture();
+    let (mut state, admin) = with_user(&fixture, "alice", &[ROLE_READER])?;
+    let ctx = context(&fixture);
+    let marker = |current: &State| current.accounts.get("alice").and_then(|account| account.sessions_valid_after);
+    assert_eq!(marker(&state), None);
+    change_roles(&mut state, &ctx, at(PLUS_TWO)?, &admin, "alice", roles(&[ROLE_ANALYST]))?;
+    assert_eq!(marker(&state), Some(revocation_marker(at(PLUS_TWO)?)));
+    revoke_all_sessions(&mut state, &ctx, at(PLUS_THREE)?, &admin, "alice")?;
+    assert_eq!(marker(&state), Some(revocation_marker(at(PLUS_THREE)?)));
+    assert!(matches!(revoke_all_sessions(&mut state, &ctx, at(PLUS_THREE)?, &admin, "ghost"), Ok(0)));
+    assert!(!state.accounts.contains_key("ghost"));
     Ok(())
 }

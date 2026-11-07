@@ -154,6 +154,7 @@ pub fn seed_reader(config: &ApiConfig) -> Result<(), TestError> {
         password_hash: hash_password(PASSWORD, os_random)?,
         roles: ["reader".to_owned()].into(),
         totp: None,
+        sessions_valid_after: None,
     };
     update_store_file(&config.accounts_store, os_random, |accounts, _| {
         accounts.insert(READER.to_owned(), account);
