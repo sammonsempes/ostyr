@@ -141,6 +141,11 @@ fn mock_runtime(cell: &TokenCell) -> Result<OidcRuntime, TestError> {
 }
 
 
+fn frozen_clock() -> OffsetDateTime {
+    OffsetDateTime::UNIX_EPOCH + Duration::seconds(HOUR_SECONDS)
+}
+
+
 fn oidc_fixture() -> Result<(Fixture, TokenCell), TestError> {
     let cell = TokenCell::default();
     let runtime = mock_runtime(&cell)?;
@@ -400,7 +405,15 @@ async fn a_callback_without_or_with_a_foreign_binding_is_refused_and_keeps_the_l
 
 #[tokio::test]
 async fn a_callback_flood_gets_429_without_audit_records() -> TestResult {
-    let (fx, _) = oidc_fixture()?;
+    let cell = TokenCell::default();
+    let runtime = mock_runtime(&cell)?;
+    let fx = fixture_with(move |state| {
+        Ok(ApiState {
+            oidc: ArcSwapOption::from_pointee(runtime),
+            clock: frozen_clock,
+            ..state
+        })
+    })?;
     let mut statuses = Vec::new();
     let mut sizes = Vec::new();
     for _ in 0..FLOOD_REQUESTS {
