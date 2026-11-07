@@ -321,6 +321,17 @@ fn a_session_at_or_before_the_marker_is_revoked() -> TestResult {
     assert!(!is_revoked(&accounts, session));
     mark_sessions_revoked(&mut accounts, "ghost", at(0)?);
     assert!(!is_revoked(&accounts, session));
+    assert!(!accounts.contains_key("ghost"));
+    mark_sessions_revoked(&mut accounts, "oidc:sub", at(0)?);
+    assert_eq!(
+        accounts.get("oidc:sub").and_then(|account| account.sessions_valid_after),
+        Some(revocation_marker(at(0)?))
+    );
+    mark_sessions_revoked(&mut accounts, "oidc:sub", at(1)?);
+    assert_eq!(
+        accounts.get("oidc:sub").and_then(|account| account.sessions_valid_after),
+        Some(revocation_marker(at(1)?))
+    );
     mark_sessions_revoked(&mut accounts, "alice", at(0)?);
     assert!(is_revoked(&accounts, session));
     mark_sessions_revoked(&mut accounts, "alice", at(-1)?);
