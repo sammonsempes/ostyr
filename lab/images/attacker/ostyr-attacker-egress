@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Usage: ostyr-attacker-egress
+# Drops every outgoing packet that does not stay on a directly connected subnet, so attack tooling cannot leave the lab network.
+# Fails closed: the drop-only chain is loaded first and stays when no subnet is found.
+set -euo pipefail
+
+readonly ATTEMPTS=60
+readonly DELAY_SECONDS=2
+
+nft -f - <<EOF
+table inet ostyr_attacker
+delete table inet ostyr_attacker
+table inet ostyr_attacker {
+    chain output {
+        type filter hook output priority 0; policy drop;
+        oif lo accept
+        ct state established,related accept
+        udp sport 68 udp dport 67 accept
+    }
+}
+EOF
+
+subnets=""
+for ((attempt = 0; attempt < ATTEMPTS && ${#subnets} == 0; attempt++)); do
+    subnets="$(ip -4 -o route show proto kernel scope link | awk '$1 ~ /\// && $1 !~ /^169\.254\./ {printf "%s%s", sep, $1; sep = ", "}')"
+    if [[ -z "$subnets" ]]; then
+        sleep "$DELAY_SECONDS"
+    fi
+done
+[[ -n "$subnets" ]] || {
+    echo "ostyr-attacker-egress: no connected IPv4 subnet, egress stays closed" >&2
+    exit 1
+}
+
+nft add rule inet ostyr_attacker output ip daddr "{ $subnets }" accept

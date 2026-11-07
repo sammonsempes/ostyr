@@ -27,7 +27,7 @@ use core_auth::limiter::{FAILURE_WINDOW_SECONDS, LOCKOUT_SECONDS};
 use core_auth::model::Attempts;
 use core_auth::random::os_random;
 use core_auth::service::LoginRequest;
-use core_auth::session::create_session;
+use core_auth::session::{create_session, mark_sessions_revoked};
 use core_auth::store::{load_store_file, update_store_file};
 use fixture::{fixture, fixture_with, set_mode, Fixture, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
@@ -1446,5 +1446,42 @@ async fn an_unreadable_store_refuses_the_login_without_a_session() -> TestResult
     let response = send(&fx.router, request("POST", "/auth/login", None, login_body(READER, PASSWORD))?).await?;
     assert_ne!(response.status(), StatusCode::OK);
     assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unreadable_store_refuses_an_authenticated_request_and_audits_it() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    fs::write(&fx.config.accounts_store, "not json")?;
+    set_mode(&fx.config.accounts_store, OWNER_ONLY_FILE)?;
+    let denied = call(&fx.router, "GET", "/auth/me", Some(&token)).await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert!(audit_lines(&fx)?.iter().any(|line| {
+        let text = line.to_string();
+        text.contains("api.request") && text.contains("denied")
+    }));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_revocation_marker_in_the_file_ends_the_api_session_at_the_next_request() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        mark_sessions_revoked(accounts, READER, OffsetDateTime::now_utc());
+        Ok(())
+    })?
+    .saved?;
+    assert_eq!(
+        call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
+    let fresh = login_token(&fx.router).await?;
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&fresh)).await?.status(), StatusCode::OK);
     Ok(())
 }

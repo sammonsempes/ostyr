@@ -17,18 +17,21 @@ use core_api::error::StartupError;
 use core_api::model::{ApiError, ApiState, CallbackQuery, OidcFiles, OidcRuntime};
 use core_api::oidc::{
     binding_cookie, binding_of, callback_flow, count_callback_failure, load_oidc, provider_agent, read_secret, start_flow, start_response,
-    BINDING_COOKIE,
+    BINDING_COOKIE, PENDING_PER_SOURCE_MAX,
 };
 use core_api::routes::core_access;
-use core_api::state::build_state;
+use core_api::state::{build_state, refresh_accounts};
 use core_audit::log::{new_log, sync_file};
 use core_audit::model::GENESIS_HASH;
 use core_auth::error::AuthError;
 use core_auth::limiter::{account_key, source_key, SOURCE_MAX_FAILURES};
 use core_auth::model::{Attempts, PendingLogin};
 use core_auth::oidc::{http_call, PENDING_MAX};
+use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
-use core_auth::store::load_store_file;
+use core_auth::session::mark_sessions_revoked;
+use core_auth::store::{load_store_file, update_store_file};
+use core_auth::types::RoleSet;
 use core_config::model::ModuleConfig;
 use fixture::{config_in, fixture, fixture_with, private_file, Fixture, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
@@ -65,6 +68,9 @@ const ANALYST_GROUP: &str = "soc-analysts";
 
 
 const TOKEN_TTL: i64 = 3600;
+
+
+const OTHER_HOST: u32 = 8;
 
 
 const FLOOD_REQUESTS: usize = 31;
@@ -308,6 +314,49 @@ async fn an_oidc_session_survives_store_refreshes_and_local_logins() -> TestResu
 
 
 #[tokio::test]
+async fn a_file_revocation_ends_an_oidc_session_and_a_new_login_works() -> TestResult {
+    let (fx, cell) = oidc_fixture()?;
+    let token = oidc_token(&fx, &cell).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        mark_sessions_revoked(accounts, "oidc:user-1", OffsetDateTime::now_utc());
+        Ok(())
+    })?
+    .saved?;
+    assert_eq!(
+        call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let fresh = oidc_token(&fx, &cell).await?;
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&fresh)).await?.status(), StatusCode::OK);
+    login_token(&fx.router).await?;
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&fresh)).await?.status(), StatusCode::OK);
+    assert!(load_store_file(&fx.config.accounts_store)?.0.contains_key("oidc:user-1"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_session_of_an_account_deleted_from_the_file_is_refused_everywhere() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        accounts.remove(READER);
+        Ok(())
+    })?
+    .saved?;
+    assert_eq!(
+        call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&fx.router, "POST", "/auth/logout", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn a_replayed_callback_is_refused_and_audited() -> TestResult {
     let (fx, cell) = oidc_fixture()?;
     let started = start(&fx).await?;
@@ -450,6 +499,7 @@ async fn a_full_pending_table_refuses_starts_with_429() -> TestResult {
                     nonce: "n".to_owned(),
                     verifier: SecretString::from("v"),
                     created_at: OffsetDateTime::now_utc(),
+                    source: "other".to_owned(),
                 },
             );
         });
@@ -950,6 +1000,7 @@ async fn an_audit_failure_on_a_refusal_fails_closed() -> TestResult {
                     nonce: "n".to_owned(),
                     verifier: SecretString::from("v"),
                     created_at: OffsetDateTime::now_utc(),
+                    source: "other".to_owned(),
                 },
             );
         });
@@ -961,5 +1012,60 @@ async fn an_audit_failure_on_a_refusal_fails_closed() -> TestResult {
     assert!(attempts
         .get(&source_key(FIXTURE_SOURCE))
         .is_some_and(|entry| entry.locked_until.is_some()));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn one_source_cannot_fill_the_pending_table() -> TestResult {
+    let (fx, _) = oidc_fixture()?;
+    {
+        let runtime = fx.state.oidc.as_ref().ok_or("no oidc")?;
+        let mut pending = runtime.pending.lock().map_err(|_| "poisoned")?;
+        (0..PENDING_PER_SOURCE_MAX).for_each(|index| {
+            pending.insert(
+                format!("key-{index}"),
+                PendingLogin {
+                    nonce: "n".to_owned(),
+                    verifier: SecretString::from("v"),
+                    created_at: OffsetDateTime::now_utc(),
+                    source: "127.0.0.1".to_owned(),
+                },
+            );
+        });
+    }
+    let full = start_flow(&fx.state, "id-1", IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
+    assert!(matches!(full, Err(ApiError::TooManyRequests)));
+    assert!(has_reason(&fx, "auth.login", "too_many_pending")?);
+    let other = start_flow(
+        &fx.state,
+        "id-2",
+        IpAddr::V4(Ipv4Addr::LOCALHOST.to_bits().wrapping_add(OTHER_HOST).into()),
+    )
+    .await;
+    assert!(other.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_oidc_account_deleted_from_the_file_is_dropped_unless_a_callback_made_it() -> TestResult {
+    let (fx, cell) = oidc_fixture()?;
+    let token = oidc_token(&fx, &cell).await?;
+    let ghost = core_auth::model::Account {
+        username: "oidc:ghost".to_owned(),
+        password_hash: core_auth::oidc::EXTERNAL_PASSWORD_HASH.to_owned(),
+        roles: RoleSet::new(),
+        totp: None,
+        sessions_valid_after: None,
+    };
+    {
+        let mut auth = fx.state.auth.lock().map_err(|_| "poisoned")?;
+        auth.accounts.insert("oidc:ghost".to_owned(), ghost);
+        refresh_accounts(&fx.state, &mut auth)?;
+        assert!(auth.accounts.contains_key("oidc:user-1"));
+        assert!(!auth.accounts.contains_key("oidc:ghost"));
+    }
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
     Ok(())
 }

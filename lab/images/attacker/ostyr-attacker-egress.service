@@ -1,0 +1,12 @@
+[Unit]
+Description=Confine attacker egress to the lab subnet
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ostyr-attacker-egress
+
+[Install]
+WantedBy=multi-user.target

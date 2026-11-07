@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Usage: sudo ostyr-k3s-preload
+# Build-time only: starts k3s once so it imports the airgap tarball into the containerd store, waits for every kube-system pod,
+# then stops k3s and removes all cluster state, keeping only the imported images, so a lab start needs no import.
+set -euo pipefail
+
+readonly ATTEMPTS=120
+readonly DELAY_SECONDS=5
+readonly K3S_DIR=/var/lib/rancher/k3s
+readonly K3S=/usr/local/bin/k3s
+
+wait_until() {
+    local description="$1"
+    shift
+    local attempt
+    for ((attempt = 0; attempt < ATTEMPTS; attempt++)); do
+        if "$@"; then
+            echo "ostyr-k3s-preload: $description after $((attempt * DELAY_SECONDS)) s"
+            return 0
+        fi
+        sleep "$DELAY_SECONDS"
+    done
+    echo "ostyr-k3s-preload: timeout waiting for $description" >&2
+    "$K3S" kubectl get pods -A >&2 || true
+    return 1
+}
+
+import_done() {
+    journalctl -u k3s --no-pager | grep -q 'Imported [0-9]* images'
+}
+
+pods_settled() {
+    local total pending
+    total="$("$K3S" kubectl get pods -n kube-system --no-headers 2>/dev/null | wc -l)"
+    pending="$("$K3S" kubectl get pods -n kube-system --no-headers 2>/dev/null | awk '$3 != "Running" && $3 != "Completed"' | wc -l)"
+    [[ "$total" -gt 0 && "$pending" == "0" ]]
+}
+
+systemctl start k3s
+wait_until "airgap import finished" import_done
+wait_until "every kube-system pod Running or Completed" pods_settled
+
+"$K3S" crictl rmp --force --all
+systemctl stop k3s
+pkill -f containerd-shim || true
+sleep "$DELAY_SECONDS"
+mount | awk '$3 ~ "^(/run/k3s|/var/lib/kubelet|/var/lib/rancher/k3s)" {print $3}' | sort -r | xargs --no-run-if-empty umount
+
+find "$K3S_DIR/agent" -mindepth 1 -maxdepth 1 ! -name containerd -exec rm -rf {} +
+rm -rf "$K3S_DIR/server" /var/lib/kubelet /var/lib/cni /run/k3s /run/flannel /etc/rancher/k3s
+"$K3S" crictl --version
+ls "$K3S_DIR/agent/containerd"

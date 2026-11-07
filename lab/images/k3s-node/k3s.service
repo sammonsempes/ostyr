@@ -1,0 +1,21 @@
+[Unit]
+Description=Lightweight Kubernetes (single-node server, started by the lab)
+Documentation=https://docs.k3s.io
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStart=/usr/local/sbin/ostyr-k3s-start
+
+[Install]
+WantedBy=multi-user.target

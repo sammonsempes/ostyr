@@ -67,7 +67,7 @@ build {
       "cloud-init status --wait",
       "sudo DEBIAN_FRONTEND=noninteractive apt-get update",
       "sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade",
-      "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent",
+      "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent rsyslog-gnutls",
       "sudo systemctl enable qemu-guest-agent",
       "sudo systemctl enable cloud-init",
       "sudo passwd -l ubuntu",

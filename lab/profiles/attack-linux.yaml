@@ -1,0 +1,9 @@
+vms:
+  - name: attacker
+    base_image: attacker.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
+  - name: target
+    base_image: ubuntu-2404.qcow2
+    vcpu: 2
+    ssh_user: ubuntu

@@ -1,0 +1,9 @@
+vms:
+  - name: k3s
+    base_image: k3s-node.qcow2
+    vcpu: 2
+    ssh_user: ubuntu
+  - name: backup
+    base_image: backup-server.qcow2
+    vcpu: 2
+    ssh_user: ubuntu

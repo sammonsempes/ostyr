@@ -1,7 +1,9 @@
 use crate::error::AuthError;
-use crate::model::Session;
+use crate::model::{Account, Session};
+use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
-use crate::types::{RandomFn, SessionMap};
+use crate::service::OIDC_PREFIX;
+use crate::types::{AccountMap, RandomFn, RoleSet, SessionMap};
 use data_encoding::HEXLOWER;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
@@ -60,6 +62,39 @@ pub fn validate_session(sessions: &mut SessionMap, token: &str, now: OffsetDateT
 
 pub fn revoke_session(sessions: &mut SessionMap, token: &str) -> Option<String> {
     sessions.remove(&hash_token(token)).map(|session| session.user)
+}
+
+
+/// Nanoseconds since the epoch, the unit of `Account.sessions_valid_after`; out of range saturates, which revokes every session.
+pub fn revocation_marker(now: OffsetDateTime) -> i64 {
+    i64::try_from(now.unix_timestamp_nanos()).unwrap_or(i64::MAX)
+}
+
+
+/// Voids every session of `username` created at or before `now` in the account (an `oidc:` name with none gets a rolesless stub).
+pub fn mark_sessions_revoked(accounts: &mut AccountMap, username: &str, now: OffsetDateTime) {
+    if username.starts_with(OIDC_PREFIX) {
+        accounts.entry(username.to_owned()).or_insert_with(|| Account {
+            username: username.to_owned(),
+            password_hash: EXTERNAL_PASSWORD_HASH.to_owned(),
+            roles: RoleSet::new(),
+            totp: None,
+            sessions_valid_after: None,
+        });
+    }
+    accounts
+        .get_mut(username)
+        .into_iter()
+        .for_each(|account| account.sessions_valid_after = Some(revocation_marker(now)));
+}
+
+
+/// True when the session was created at or before the owner's revocation marker.
+pub fn is_revoked(accounts: &AccountMap, session: &Session) -> bool {
+    accounts
+        .get(&session.user)
+        .and_then(|account| account.sessions_valid_after)
+        .is_some_and(|marker| revocation_marker(session.created_at) <= marker)
 }
 
 

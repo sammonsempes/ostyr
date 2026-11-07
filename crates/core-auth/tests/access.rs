@@ -7,6 +7,7 @@ use core_auth::limiter::{
     account_key, clear_failures, locked_until, record_failure, source_key, ACCOUNT_MAX_FAILURES, FAILURE_WINDOW_SECONDS, LOCKOUT_SECONDS,
     SOURCE_MAX_FAILURES,
 };
+use core_auth::model::Account;
 use core_auth::random::os_random;
 use core_auth::rbac::{
     builtin_catalog, check_roles, is_allowed, load_catalog, requires_mfa, PERMISSION_ALERTS_TRIAGE, PERMISSION_AUDIT_READ, PERMISSION_CONFIG_MANAGE,
@@ -14,9 +15,10 @@ use core_auth::rbac::{
     ROLE_RESPONDER,
 };
 use core_auth::session::{
-    create_session, hash_token, revoke_session, revoke_user_sessions, validate_session, SESSION_ABSOLUTE_SECONDS, SESSION_IDLE_SECONDS,
+    create_session, hash_token, is_revoked, mark_sessions_revoked, revocation_marker, revoke_session, revoke_user_sessions, validate_session,
+    SESSION_ABSOLUTE_SECONDS, SESSION_IDLE_SECONDS,
 };
-use core_auth::types::{AttemptMap, RoleSet, SessionMap};
+use core_auth::types::{AccountMap, AttemptMap, RoleSet, SessionMap};
 use secrecy::ExposeSecret;
 use time::{Duration, OffsetDateTime};
 use types::TestResult;
@@ -295,5 +297,55 @@ fn clearing_forgets_failures_and_keys_are_scoped() -> TestResult {
     clear_failures(&mut attempts, &account_key("alice"));
     assert!(attempts.is_empty());
     assert_eq!(Duration::seconds(LOCKOUT_SECONDS), Duration::seconds(FAILURE_WINDOW_SECONDS));
+    Ok(())
+}
+
+
+#[test]
+fn a_session_at_or_before_the_marker_is_revoked() -> TestResult {
+    let mut sessions = SessionMap::new();
+    let token = create_session(&mut sessions, "alice", at(0)?, os_random)?;
+    let session = sessions.get(&hash_token(token.expose_secret())).ok_or("no session")?;
+    let mut accounts = AccountMap::new();
+    assert!(!is_revoked(&accounts, session));
+    accounts.insert(
+        "alice".to_owned(),
+        Account {
+            username: "alice".to_owned(),
+            password_hash: "h".to_owned(),
+            roles: RoleSet::new(),
+            totp: None,
+            sessions_valid_after: None,
+        },
+    );
+    assert!(!is_revoked(&accounts, session));
+    mark_sessions_revoked(&mut accounts, "ghost", at(0)?);
+    assert!(!is_revoked(&accounts, session));
+    assert!(!accounts.contains_key("ghost"));
+    mark_sessions_revoked(&mut accounts, "oidc:sub", at(0)?);
+    assert_eq!(
+        accounts.get("oidc:sub").and_then(|account| account.sessions_valid_after),
+        Some(revocation_marker(at(0)?))
+    );
+    mark_sessions_revoked(&mut accounts, "oidc:sub", at(1)?);
+    assert_eq!(
+        accounts.get("oidc:sub").and_then(|account| account.sessions_valid_after),
+        Some(revocation_marker(at(1)?))
+    );
+    mark_sessions_revoked(&mut accounts, "alice", at(0)?);
+    assert!(is_revoked(&accounts, session));
+    mark_sessions_revoked(&mut accounts, "alice", at(-1)?);
+    assert!(!is_revoked(&accounts, session));
+    Ok(())
+}
+
+
+#[test]
+fn an_out_of_range_time_saturates_the_marker() -> TestResult {
+    assert_eq!(
+        revocation_marker(OffsetDateTime::new_utc(time::Date::MAX, time::Time::MIDNIGHT)),
+        i64::MAX
+    );
+    assert!(revocation_marker(at(0)?) < i64::MAX);
     Ok(())
 }

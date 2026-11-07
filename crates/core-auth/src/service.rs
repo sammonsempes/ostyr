@@ -6,7 +6,7 @@ use crate::password::hash_password;
 use crate::policy::check_password;
 use crate::rbac::{check_roles, is_allowed, requires_mfa, webauthn_required, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR};
 use crate::secretbox::{open_secret, seal_secret};
-use crate::session::{create_session, hash_token, revoke_session, revoke_user_sessions, session_owner, validate_session};
+use crate::session::{create_session, hash_token, mark_sessions_revoked, revoke_session, revoke_user_sessions, session_owner, validate_session};
 use crate::totp::{consume_backup_code, hash_backup_code, new_backup_codes, new_secret, secret_text, verify_code};
 use crate::types::{
     AccountMap, AttemptMap, ChallengeMap, CompromisedSet, CredentialMap, Parameters, RandomFn, RoleCatalog, RoleSet, SessionMap, StoreKey, VerifyFn,
@@ -351,6 +351,7 @@ pub fn insert_account<Output: Write>(
                 password_hash: hash_password(password.expose_secret(), context.random)?,
                 roles,
                 totp: None,
+                sessions_valid_after: None,
             },
         );
         Ok(vec![("roles", joined)])
@@ -532,7 +533,10 @@ pub fn change_roles<Output: Write>(
         |working, acting| {
             require(acting, acting.manager)
                 .and_then(|()| apply_roles(working, context.catalog, username, roles))
-                .map(|parameters| ((), parameters))
+                .map(|parameters| {
+                    mark_sessions_revoked(&mut working.accounts, username, now);
+                    ((), parameters)
+                })
         },
     )
 }
@@ -579,6 +583,7 @@ pub fn revoke_all_sessions<Output: Write>(
         |working, acting| {
             require(acting, acting.manager || acting.actor == username).map(|()| {
                 let revoked = revoke_user_sessions(&mut working.sessions, username);
+                mark_sessions_revoked(&mut working.accounts, username, now);
                 (revoked, vec![("count", revoked.to_string())])
             })
         },
