@@ -13,6 +13,7 @@ readonly OUTSIDE_ADDRESS="1.1.1.1"
 readonly CONNECT_TIMEOUT=5
 readonly K3S_ATTEMPTS=60
 readonly K3S_DELAY_SECONDS=5
+readonly K3S_MIN_PODS=6
 readonly LAN_PORTS="22 53 80 443"
 readonly ATOMIC_TEST_NAME="Linux Download File and Run"
 
@@ -28,14 +29,18 @@ check() {
     fi
 }
 
+remote_answer() {
+    local vm="$1" command="$2"
+    ssh_vm "$vm" "if $command >/dev/null 2>&1; then echo yes; else echo no; fi"
+}
+
 check_not() {
-    local description="$1"
-    shift
-    if "$@"; then
-        log "FAIL $description"
-        failures=$((failures + 1))
-    else
+    local description="$1" vm="$2" command="$3" answer
+    if answer="$(remote_answer "$vm" "$command")" && [[ "$answer" == "no" ]]; then
         log "ok   $description"
+    else
+        log "FAIL $description (answer: ${answer:-none, ssh failed})"
+        failures=$((failures + 1))
     fi
 }
 
@@ -56,11 +61,13 @@ ssh_vm() {
 }
 
 k3s_pods_ready() {
-    local attempt pending pods
+    local attempt pending pods started
+    started="$SECONDS"
     for ((attempt = 0; attempt < K3S_ATTEMPTS; attempt++)); do
         pods="$(ssh_vm k3s "k3s kubectl get pods -n kube-system --no-headers 2>/dev/null | wc -l")" || pods=0
         pending="$(ssh_vm k3s "k3s kubectl get pods -n kube-system --no-headers 2>/dev/null | awk '\$3 != \"Running\" && \$3 != \"Completed\"' | wc -l")" || pending=1
-        if [[ "$pending" == "0" && "$pods" -gt 0 ]]; then
+        if [[ "$pending" == "0" && "$pods" -ge "$K3S_MIN_PODS" ]]; then
+            log "kube-system: $pods pods Running or Completed after $((SECONDS - started)) s, load average $(cut -d' ' -f1-3 /proc/loadavg)"
             return 0
         fi
         sleep "$K3S_DELAY_SECONDS"
@@ -88,9 +95,12 @@ if [[ "${1:-}" != "--static" ]]; then
     "$LAB_DIR/up.sh" "$TEST_TASK"
     lab_state="$(state_dir "$TEST_TASK")"
     check "k3s binary runs" grep -q 'k3s version' <(ssh_vm k3s k3s --version)
-    check "k3s airgap images baked" ssh_vm k3s 'ls /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst'
-    check_not "k3s service is not enabled" ssh_vm k3s systemctl is-enabled --quiet k3s
-    check_not "k3s node has no default route" test -n "$(ssh_vm k3s ip -4 route show default)"
+    check_not "k3s airgap tarball removed (images preloaded)" k3s "test -e /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst"
+    check_not "k3s has no cluster state baked" k3s "sudo test -e /var/lib/rancher/k3s/server/db"
+    check "k3s containerd store holds the pause image" ssh_vm k3s "sudo grep -q mirrored-pause /var/lib/rancher/k3s/agent/containerd/io.containerd.metadata.v1.bolt/meta.db"
+    check_not "k3s service is not enabled" k3s "systemctl is-enabled --quiet k3s"
+    check_not "k3s node has no default route" k3s "test -n \"\$(ip -4 route show default)\""
+    log "load average before k3s start: $(cut -d' ' -f1-3 /proc/loadavg)"
     ssh_vm k3s sudo systemctl start k3s
     check "k3s kube-system pods all Running or Completed" k3s_pods_ready
     check "restic runs" ssh_vm backup restic version
@@ -109,10 +119,10 @@ if [[ "${1:-}" != "--static" ]]; then
     check "target has rsyslog-gnutls" ssh_vm target dpkg -s rsyslog-gnutls
     check "attacker has pwsh" grep -q 'PowerShell 7' <(ssh_vm attacker pwsh --version)
     check "attacker egress service active" ssh_vm attacker systemctl is-active --quiet ostyr-attacker-egress
-    check_not "attacker cannot reach $OUTSIDE_ADDRESS" ssh_vm attacker curl --silent --max-time "$CONNECT_TIMEOUT" "https://$OUTSIDE_ADDRESS"
+    check_not "attacker cannot reach $OUTSIDE_ADDRESS" attacker "curl --silent --max-time $CONNECT_TIMEOUT https://$OUTSIDE_ADDRESS"
     for lan_address in "$bridge_address" "$host_lan_address" "$host_gateway"; do
         for lan_port in $LAN_PORTS; do
-            check_not "attacker cannot reach $lan_address:$lan_port" ssh_vm attacker nc -z -w "$CONNECT_TIMEOUT" "$lan_address" "$lan_port"
+            check_not "attacker cannot reach $lan_address:$lan_port" attacker "nc -z -w $CONNECT_TIMEOUT $lan_address $lan_port"
         done
     done
     check "attacker reaches the target" ssh_vm attacker ping -c 1 -W "$CONNECT_TIMEOUT" "$target_address"

@@ -80,7 +80,7 @@ build {
   sources = ["source.qemu.k3s_node"]
 
   provisioner "file" {
-    sources     = ["${path.root}/k3s-node/k3s.service", "${path.root}/k3s-node/ostyr-k3s-start"]
+    sources     = ["${path.root}/k3s-node/k3s.service", "${path.root}/k3s-node/ostyr-k3s-start", "${path.root}/k3s-node/ostyr-k3s-preload"]
     destination = "/tmp/"
   }
 
@@ -102,7 +102,9 @@ build {
       "sudo install -m 644 /tmp/k3s.service /etc/systemd/system/k3s.service",
       "sudo install -m 755 /tmp/ostyr-k3s-start /usr/local/sbin/ostyr-k3s-start",
       "sudo systemctl daemon-reload",
-      "rm -f /tmp/k3s /tmp/airgap.tar.zst /tmp/k3s.service /tmp/ostyr-k3s-start",
+      "sudo bash /tmp/ostyr-k3s-preload",
+      "sudo rm -f /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst",
+      "rm -f /tmp/k3s /tmp/airgap.tar.zst /tmp/k3s.service /tmp/ostyr-k3s-start /tmp/ostyr-k3s-preload",
       "sudo systemctl enable qemu-guest-agent",
       "sudo systemctl enable cloud-init",
       "sudo passwd -l ubuntu",
