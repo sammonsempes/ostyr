@@ -12,12 +12,14 @@ use core_api::error::StartupError;
 use core_api::logging::reloadable_dispatch;
 use core_api::middleware::admit_source;
 use core_api::model::ApiSettings;
+use core_api::model::OidcFiles;
+use core_api::oidc::{fingerprint_salt, oidc_fingerprint};
 use core_api::reload::{
-    accept, build_settings, content_digest, file_digest, first_then_file, load_settings, open_reload, settings_state, validate_fixed, watched_files,
+    accept, build_settings, content_digest, first_then_file, load_settings, open_reload, settings_state, validate_fixed, watched_files,
     FINGERPRINT_COMPROMISED, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
 };
-use core_api::server::run_module;
-use core_api::state::{build_state, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
+use core_api::server::{load_tls, run_module};
+use core_api::state::{build_state, read_compromised_digested, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_api::types::{LogLevelHandle, ServerHandle, SharedState};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
@@ -322,16 +324,96 @@ fn a_reload_with_a_negative_window_is_refused_and_the_old_limit_kept() -> TestRe
 
 
 #[test]
-fn digests_follow_the_content() -> TestResult {
+fn digests_come_from_the_bytes_that_were_parsed() -> TestResult {
     let dir = tempdir()?;
-    let path = dir.path().join("file.txt");
-    fs::write(&path, "one")?;
-    let first = file_digest(&path)?;
-    assert_eq!(first, content_digest(b"one"));
-    fs::write(&path, "two")?;
-    assert_ne!(file_digest(&path)?, first);
-    assert!(file_digest(&dir.path().join("missing")).is_err());
+    let list = dir.path().join("list.txt");
+    fs::write(&list, "hunter2\n")?;
+    let (first_set, first_digest) = read_compromised_digested(&list)?;
+    assert!(first_set.contains("hunter2"));
+    assert_eq!(first_digest, content_digest(b"hunter2\n"));
+    fs::write(&list, "swordfish\n")?;
+    let (second_set, second_digest) = read_compromised_digested(&list)?;
+    assert!(second_set.contains("swordfish") && !second_set.contains("hunter2"));
+    assert_eq!(second_digest, content_digest(b"swordfish\n"));
+    assert!(read_compromised_digested(&dir.path().join("missing")).is_err());
     Ok(())
+}
+
+
+#[test]
+fn a_tls_pair_is_read_once_and_digested_as_read() -> TestResult {
+    let dir = tempdir()?;
+    let material = pki()?;
+    write_pki(dir.path(), &material)?;
+    let module = module_in(dir.path(), &tls_extra(dir.path()))?;
+    let files = api_config(&module)?.tls.ok_or("no tls")?;
+    let loaded = load_tls(&files)?;
+    assert_eq!(loaded.certificate_digest, content_digest(&fs::read(&files.certificate)?));
+    assert_eq!(loaded.key_digest, content_digest(&fs::read(&files.key)?));
+    Ok(())
+}
+
+
+#[test]
+fn the_oidc_fingerprint_is_keyed_and_follows_every_input() -> TestResult {
+    let files = OidcFiles {
+        config: PathBuf::from("oidc.yaml"),
+        ca_file: Some(PathBuf::from("ca.pem")),
+        secret_file: PathBuf::from("oidc.secret"),
+    };
+    let base = oidc_fingerprint(b"salt", &files, b"yaml", Some(b"ca"), b"secret");
+    assert_eq!(base, oidc_fingerprint(b"salt", &files, b"yaml", Some(b"ca"), b"secret"));
+    assert_ne!(base, oidc_fingerprint(b"other", &files, b"yaml", Some(b"ca"), b"secret"));
+    assert_ne!(base, oidc_fingerprint(b"salt", &files, b"yaml", Some(b"ca"), b"rotated"));
+    assert_ne!(base, oidc_fingerprint(b"salt", &files, b"yaml", None, b"secret"));
+    assert_eq!(fingerprint_salt()?, fingerprint_salt()?);
+    Ok(())
+}
+
+
+#[test]
+fn the_audit_log_holds_nothing_recomputable_from_the_oidc_secret() -> TestResult {
+    let guesses = ["hunter2", "password", "secret", "swordfish", "rotated"];
+    let dir = tempdir()?;
+    let yaml = dir.path().join("oidc.yaml");
+    fs::write(&yaml, OIDC_TEXT)?;
+    let secret_file = dir.path().join("guessed.secret");
+    private_file(&secret_file, b"hunter2")?;
+    let settings = format!("  oidc: {}\n  oidc_secret_file: {}\n", yaml.display(), secret_file.display());
+    let running = live_with(dir, &settings, None)?;
+    let first = running.state.oidc.load_full().ok_or("no oidc")?;
+    private_file(&secret_file, b"swordfish")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    let rotated = running.state.oidc.load_full().ok_or("no oidc")?;
+    assert!(!Arc::ptr_eq(&first, &rotated));
+    let files = OidcFiles {
+        config: yaml,
+        ca_file: None,
+        secret_file,
+    };
+    let log = fs::read_to_string(running.dir.path().join("audit.log"))?;
+    assert!(log.contains("config.reload"));
+    guesses.iter().try_for_each(|guess| -> TestResult {
+        let unsalted = oidc_fingerprint(&[], &files, OIDC_TEXT.as_bytes(), None, guess.as_bytes());
+        let candidates = [
+            content_digest(guess.as_bytes()),
+            unsalted,
+            content_digest(format!("{guess}\n").as_bytes()),
+        ];
+        candidates
+            .iter()
+            .for_each(|candidate| assert!(!log.contains(candidate.as_str()), "{guess}"));
+        assert!(!log.contains(guess));
+        Ok(())
+    })?;
+    assert!(!settings_state_text(&running)?.contains("hunter2"));
+    Ok(())
+}
+
+
+fn settings_state_text(running: &Live) -> Result<String, TestError> {
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    Ok(format!("{:?}", settings_state(&settings)))
 }
 
 

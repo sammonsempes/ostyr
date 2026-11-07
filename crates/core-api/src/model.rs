@@ -57,7 +57,7 @@ pub struct Limits {
 }
 
 
-/// `fingerprint` digests the provider files, so a reload swaps the runtime (and drops its pending logins) only when they changed.
+/// `fingerprint` is keyed by a per-process salt that is never written, so it decides swaps without being recomputable from the audit; it digests the provider files, so a reload swaps the runtime (and drops its pending logins) only when they changed.
 pub struct OidcRuntime {
     pub fingerprint: String,
     pub config: OidcConfig,
@@ -127,6 +127,14 @@ pub struct ApiSettings {
     pub oidc: Option<Arc<OidcRuntime>>,
     pub compromised: Arc<CompromisedSet>,
     pub fingerprints: BTreeMap<String, String>,
+}
+
+
+/// A TLS pair read once: the digests are of the bytes the configuration was parsed from.
+pub struct LoadedTls {
+    pub config: ServerConfig,
+    pub certificate_digest: String,
+    pub key_digest: String,
 }
 
 

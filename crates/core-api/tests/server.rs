@@ -206,7 +206,7 @@ fn tls_material_is_validated() -> TestResult {
         certificate: dir.path().join("absent.pem"),
         ..files.clone()
     };
-    assert!(matches!(tls_server_config(&missing_certificate), Err(StartupError::Pem(_))));
+    assert!(matches!(tls_server_config(&missing_certificate), Err(StartupError::Io(_))));
 
     let other = pki_pair()?;
     let other_key = dir.path().join("other.key");

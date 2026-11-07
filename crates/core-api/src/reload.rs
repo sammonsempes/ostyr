@@ -2,8 +2,8 @@ use crate::config::api_config;
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiSettings};
 use crate::oidc::load_oidc;
-use crate::server::{check_transport, tls_server_config};
-use crate::state::read_compromised;
+use crate::server::{check_transport, load_tls};
+use crate::state::read_compromised_digested;
 use crate::types::{LogLevelHandle, SharedState};
 use axum_server::tls_rustls::RustlsConfig;
 use core_audit::log::append;
@@ -15,8 +15,6 @@ use core_config::reload::{module_state, open_engine, ReloadContext, ReloadEngine
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use data_encoding::HEXLOWER;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -49,45 +47,34 @@ pub fn content_digest(bytes: &[u8]) -> String {
 }
 
 
-pub fn file_digest(path: &Path) -> Result<String, io::Error> {
-    fs::read(path).map(|bytes| content_digest(&bytes))
-}
-
-
-pub fn file_fingerprints(files: &[(&str, &Path)]) -> Result<BTreeMap<String, String>, io::Error> {
-    files
-        .iter()
-        .map(|(name, path)| file_digest(path).map(|text| ((*name).to_owned(), text)))
-        .collect()
-}
-
-
-/// Reads and checks every file the configuration points at, so a swap can no longer fail.
+/// Reads and checks every file the configuration points at, so a swap can no longer fail; each digest is of the bytes that were parsed.
 pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError> {
     let config = api_config(&module)?;
     check_transport(config.address, config.tls.as_ref())?;
-    let tls = config.tls.as_ref().map(|files| tls_server_config(files).map(Arc::new)).transpose()?;
+    let loaded_tls = config.tls.as_ref().map(load_tls).transpose()?;
     let oidc = config
         .oidc
         .as_ref()
         .map(|files| load_oidc(files, &builtin_catalog()).map(Arc::new))
         .transpose()?;
-    let compromised = Arc::new(read_compromised(&config.compromised_list)?);
-    let files = config.tls.iter().flat_map(|tls_files| {
+    let (list, list_digest) = read_compromised_digested(&config.compromised_list)?;
+    let tls_digests = loaded_tls.iter().flat_map(|loaded| {
         [
-            (FINGERPRINT_TLS_CERTIFICATE, tls_files.certificate.as_path()),
-            (FINGERPRINT_TLS_KEY, tls_files.key.as_path()),
+            (FINGERPRINT_TLS_CERTIFICATE.to_owned(), loaded.certificate_digest.clone()),
+            (FINGERPRINT_TLS_KEY.to_owned(), loaded.key_digest.clone()),
         ]
     });
-    let all_files: Vec<_> = files.chain([(FINGERPRINT_COMPROMISED, config.compromised_list.as_path())]).collect();
-    let mut fingerprints = file_fingerprints(&all_files)?;
-    fingerprints.extend(oidc.iter().map(|runtime| (FINGERPRINT_OIDC.to_owned(), runtime.fingerprint.clone())));
+    let oidc_digest = oidc.iter().map(|runtime| (FINGERPRINT_OIDC.to_owned(), runtime.fingerprint.clone()));
+    let fingerprints = tls_digests
+        .chain(oidc_digest)
+        .chain([(FINGERPRINT_COMPROMISED.to_owned(), list_digest)])
+        .collect();
     Ok(ApiSettings {
         module,
         config,
-        tls,
+        tls: loaded_tls.map(|loaded| Arc::new(loaded.config)),
         oidc,
-        compromised,
+        compromised: Arc::new(list),
         fingerprints,
     })
 }

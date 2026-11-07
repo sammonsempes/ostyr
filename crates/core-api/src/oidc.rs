@@ -21,6 +21,7 @@ use core_auth::oidc::{
     audit_denial, begin_login, fetch_identity, http_call, new_agent, parse_oidc_config, prune_pending, settle_identity, take_pending, Callback,
     Identity, KeyRefreshGate, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
 };
+use core_auth::random::{os_random, random_array};
 use core_auth::service::{log_lockout, record, ACTION_LOGIN, ANONYMOUS_ACTOR};
 use core_auth::session::{hash_token, session_owner};
 use core_auth::types::{PendingMap, RoleCatalog};
@@ -35,7 +36,7 @@ use std::fs::{read, read_to_string};
 use std::io::{self, Read};
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::task::spawn_blocking;
 use ureq::{Agent, AgentBuilder};
@@ -43,6 +44,9 @@ use ureq::{Agent, AgentBuilder};
 
 /// Pending logins one folded source may hold at once.
 pub const PENDING_PER_SOURCE_MAX: usize = 16;
+
+
+pub const SALT_BYTES: usize = 32;
 
 
 pub const BINDING_COOKIE: &str = "__Host-oidc_binding";
@@ -124,17 +128,32 @@ pub fn provider_agent(ca_pem: Option<&[u8]>) -> Result<Agent, StartupError> {
 }
 
 
-/// One digest over every path and every byte the runtime was built from, so a changed secret path or content swaps it.
-pub fn oidc_fingerprint(files: &OidcFiles, yaml: &[u8], ca_pem: Option<&[u8]>, secret: &[u8]) -> String {
+pub static FINGERPRINT_SALT: OnceLock<[u8; SALT_BYTES]> = OnceLock::new();
+
+
+/// The per-process salt of the OIDC fingerprint: random, kept in memory, never written to a file or the audit.
+pub fn fingerprint_salt() -> Result<&'static [u8; SALT_BYTES], StartupError> {
+    match FINGERPRINT_SALT.get() {
+        Some(salt) => Ok(salt),
+        None => {
+            let fresh = random_array::<SALT_BYTES>(os_random)?;
+            Ok(FINGERPRINT_SALT.get_or_init(|| fresh))
+        }
+    }
+}
+
+
+/// A salted digest of every path and byte the runtime was built from; the secret enters it only keyed by the salt, so a guess cannot recompute it.
+pub fn oidc_fingerprint(salt: &[u8], files: &OidcFiles, yaml: &[u8], ca_pem: Option<&[u8]>, secret: &[u8]) -> String {
     let parts = [
         files.config.display().to_string(),
         content_digest(yaml),
         files.ca_file.iter().map(|path| path.display().to_string()).collect::<String>(),
         ca_pem.map_or_else(String::new, content_digest),
         files.secret_file.display().to_string(),
-        content_digest(secret),
+        content_digest(&[salt, secret].concat()),
     ];
-    content_digest(parts.join("\n").as_bytes())
+    content_digest(&[salt, parts.join("\n").as_bytes()].concat())
 }
 
 
@@ -146,7 +165,7 @@ pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime
     let secret_bytes = read_private(&files.secret_file)?;
     let secret_file = files.secret_file.clone();
     Ok(OidcRuntime {
-        fingerprint: oidc_fingerprint(files, text.as_bytes(), ca_pem.as_deref(), &secret_bytes),
+        fingerprint: oidc_fingerprint(fingerprint_salt()?, files, text.as_bytes(), ca_pem.as_deref(), &secret_bytes),
         config,
         http: Box::new(move |request| http_call(&agent, request)),
         resolve: Box::new(move |_| read_secret(&secret_file)),

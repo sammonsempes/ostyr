@@ -1,6 +1,7 @@
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiState};
 use crate::oidc::load_oidc;
+use crate::reload::content_digest;
 use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -18,7 +19,7 @@ use core_auth::session::{hash_token, is_revoked};
 use core_auth::store::{load_store_file, read_store_locked};
 use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, VerifyFn};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -88,7 +89,14 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
 
 
 pub fn read_compromised(path: &Path) -> Result<CompromisedSet, StartupError> {
-    Ok(load_compromised(BufReader::new(File::open(path)?))?)
+    read_compromised_digested(path).map(|(set, _)| set)
+}
+
+
+/// The list and the digest of the very bytes it was parsed from.
+pub fn read_compromised_digested(path: &Path) -> Result<(CompromisedSet, String), StartupError> {
+    let bytes = fs::read(path)?;
+    Ok((load_compromised(BufReader::new(bytes.as_slice()))?, content_digest(&bytes)))
 }
 
 
