@@ -2,8 +2,9 @@ use crate::error::StartupError;
 use crate::failure::{auth_failure, reply};
 use crate::middleware::rate_key;
 use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
+use crate::reload::{content_digest, file_digest};
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
-use crate::state::{auth_context, lock_auth, remember_callback_account};
+use crate::state::{auth_context, current_compromised, lock_auth, remember_callback_account};
 use crate::types::SharedState;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{ConnectInfo, Query, State};
@@ -113,10 +114,13 @@ pub fn provider_agent(ca_file: Option<&Path>) -> Result<Agent, StartupError> {
 
 
 pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime, StartupError> {
-    let config = parse_oidc_config(&read_to_string(&files.config)?, &files.config.display().to_string(), catalog)?;
+    let text = read_to_string(&files.config)?;
+    let config = parse_oidc_config(&text, &files.config.display().to_string(), catalog)?;
     let agent = provider_agent(files.ca_file.as_deref())?;
+    let ca_digest = files.ca_file.as_deref().map_or_else(|| Ok(String::new()), file_digest)?;
     let secret_file = files.secret_file.clone();
     Ok(OidcRuntime {
+        fingerprint: format!("{}{ca_digest}", content_digest(text.as_bytes())),
         config,
         http: Box::new(move |request| http_call(&agent, request)),
         resolve: Box::new(move |_| read_secret(&secret_file)),
@@ -126,8 +130,8 @@ pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime
 }
 
 
-pub fn oidc_runtime(app: &ApiState) -> Result<&OidcRuntime, ApiError> {
-    app.oidc.as_ref().ok_or(ApiError::Internal)
+pub fn oidc_runtime(app: &ApiState) -> Result<Arc<OidcRuntime>, ApiError> {
+    app.oidc.load_full().ok_or(ApiError::Unauthorized)
 }
 
 
@@ -147,7 +151,8 @@ pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, so
     prune_pending(&mut pending, now);
     let from_source = pending.values().filter(|login| login.source == source).count();
     if pending.len() >= PENDING_MAX || from_source >= PENDING_PER_SOURCE_MAX {
-        let context = auth_context(app, request_id, &app.verify);
+        let compromised = current_compromised(app);
+        let context = auth_context(app, request_id, &app.verify, &compromised);
         Err(audit_denial(&context, now, ANONYMOUS_ACTOR, OidcDenial::TooManyPending, source)
             .map_or_else(|failure| auth_failure(&failure), |()| ApiError::TooManyRequests))
     } else {
@@ -159,11 +164,12 @@ pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, so
 
 pub fn begin(app: &ApiState, request_id: &str, source: &str) -> Result<String, ApiError> {
     let runtime = oidc_runtime(app)?;
-    let context = auth_context(app, request_id, &app.verify);
-    store_pending(app, runtime, request_id, source, PendingMap::new())?;
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
+    store_pending(app, &runtime, request_id, source, PendingMap::new())?;
     let mut fresh = PendingMap::new();
-    let location = begin_login(&context, &oidc_context(runtime), &mut fresh, (app.clock)(), source).map_err(|failure| auth_failure(&failure))?;
-    store_pending(app, runtime, request_id, source, fresh)?;
+    let location = begin_login(&context, &oidc_context(&runtime), &mut fresh, (app.clock)(), source).map_err(|failure| auth_failure(&failure))?;
+    store_pending(app, &runtime, request_id, source, fresh)?;
     Ok(location)
 }
 
@@ -223,7 +229,8 @@ pub async fn start_endpoint(
 
 pub fn refusal(app: &ApiState, request_id: &str, source: &str, reason: &str, outcome: Outcome, error: ApiError) -> ApiError {
     tracing::warn!(reason, "OIDC callback refused");
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     let parameters = [("reason", reason.to_owned()), ("source", source.to_owned())];
     record(&context, (app.clock)(), ANONYMOUS_ACTOR, ACTION_LOGIN, OIDC_TARGET, outcome, &parameters)
         .map_or_else(|failure| auth_failure(&failure), |()| error)
@@ -231,7 +238,8 @@ pub fn refusal(app: &ApiState, request_id: &str, source: &str, reason: &str, out
 
 
 pub fn deny(app: &ApiState, request_id: &str, source: &str, denial: OidcDenial) -> ApiError {
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     audit_denial(&context, (app.clock)(), ANONYMOUS_ACTOR, denial, source)
         .map_or_else(|failure| auth_failure(&failure), |()| ApiError::InvalidCredentials)
 }
@@ -302,8 +310,8 @@ pub fn take_login(app: &ApiState, request_id: &str, callback: &Callback) -> Resu
 
 
 pub fn fetch(app: &ApiState, login: PendingLogin, code: &SecretString) -> Result<Identity, OidcDenial> {
-    let runtime = app.oidc.as_ref().ok_or(OidcDenial::Provider)?;
-    fetch_identity(&oidc_context(runtime), login, code)
+    let runtime = app.oidc.load_full().ok_or(OidcDenial::Provider)?;
+    fetch_identity(&oidc_context(&runtime), login, code)
 }
 
 
@@ -322,9 +330,10 @@ pub async fn fetch_off_worker(app: &SharedState, request_id: &str, login: Pendin
 pub fn settle(app: &ApiState, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
     let runtime = oidc_runtime(app)?;
     let mut auth = lock_auth(app);
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     let token =
-        settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
+        settle_identity(&mut auth, &context, &oidc_context(&runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
     session_owner(&auth.sessions, token.expose_secret())
         .iter()
         .for_each(|username| remember_callback_account(app, username));
@@ -336,7 +345,8 @@ pub fn count_callback_failure(app: &ApiState, request_id: &str, source: &str) {
     let now = (app.clock)();
     let mut auth = lock_auth(app);
     if crate::routes::check_table_room(app, &mut auth, source).is_ok() {
-        let context = auth_context(app, request_id, &app.verify);
+        let compromised = current_compromised(app);
+        let context = auth_context(app, request_id, &app.verify, &compromised);
         record_failure(&mut auth.attempts, &source_key(source), SOURCE_MAX_FAILURES, now)
             .into_iter()
             .for_each(|until| {

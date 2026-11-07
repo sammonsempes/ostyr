@@ -2,6 +2,8 @@
 mod fixture;
 #[path = "support/http.rs"]
 mod http;
+#[path = "support/limits.rs"]
+mod limits;
 #[path = "support/oidc_provider.rs"]
 mod oidc_provider;
 #[path = "support/oidc/types.rs"]
@@ -10,6 +12,7 @@ mod oidc_types;
 mod types;
 
 
+use arc_swap::ArcSwapOption;
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode};
 use core_api::config::{api_config, oidc_files};
@@ -35,6 +38,7 @@ use core_auth::types::RoleSet;
 use core_config::model::ModuleConfig;
 use fixture::{config_in, fixture, fixture_with, private_file, Fixture, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
+use limits::with_limits;
 use oidc_provider::{make_jwt, respond, CLIENT_ID, CLIENT_SECRET, ISSUER};
 use oidc_types::TokenCell;
 use openidconnect::http::Request;
@@ -121,6 +125,7 @@ fn runtime_over(
     http: Box<dyn Fn(openidconnect::HttpRequest) -> Result<openidconnect::HttpResponse, io::Error> + Send + Sync>,
 ) -> Result<OidcRuntime, TestError> {
     Ok(OidcRuntime {
+        fingerprint: "test".to_owned(),
         config: core_auth::oidc::parse_oidc_config(config_text, "oidc.yaml", &builtin_catalog())?,
         http,
         resolve: Box::new(|_| Ok(SecretString::from(CLIENT_SECRET))),
@@ -141,7 +146,7 @@ fn oidc_fixture() -> Result<(Fixture, TokenCell), TestError> {
     let runtime = mock_runtime(&cell)?;
     let built = fixture_with(move |state| {
         Ok(ApiState {
-            oidc: Some(runtime),
+            oidc: ArcSwapOption::from_pointee(runtime),
             ..state
         })
     })?;
@@ -153,7 +158,7 @@ fn failing_http_fixture() -> Result<Fixture, TestError> {
     let runtime = runtime_over(CONFIG_TEXT, Box::new(|_| Err(io::Error::other("provider down"))))?;
     fixture_with(move |state| {
         Ok(ApiState {
-            oidc: Some(runtime),
+            oidc: ArcSwapOption::from_pointee(runtime),
             ..state
         })
     })
@@ -161,7 +166,7 @@ fn failing_http_fixture() -> Result<Fixture, TestError> {
 
 
 fn pending_nonce(fx: &Fixture) -> Result<String, TestError> {
-    let runtime = fx.state.oidc.as_ref().ok_or("no oidc")?;
+    let runtime = fx.state.oidc.load_full().ok_or("no oidc")?;
     let pending = runtime.pending.lock().map_err(|_| "poisoned")?;
     Ok(pending.values().next().ok_or("no pending login")?.nonce.clone())
 }
@@ -253,7 +258,10 @@ async fn start_returns_the_url_and_binds_the_browser() -> TestResult {
     let state = pairs.iter().find(|(name, _)| name == "state").ok_or("no state")?.1.clone();
     assert!(cookie.contains(&binding_of(&state)));
     assert!(pairs.iter().any(|(name, value)| name == "code_challenge_method" && value == "S256"));
-    assert_eq!(fx.state.oidc.as_ref().ok_or("no oidc")?.pending.lock().map_err(|_| "poisoned")?.len(), 1);
+    assert_eq!(
+        fx.state.oidc.load_full().ok_or("no oidc")?.pending.lock().map_err(|_| "poisoned")?.len(),
+        1
+    );
     assert_eq!(records(&fx, "api.request")?.len(), 1);
     Ok(())
 }
@@ -283,7 +291,7 @@ async fn a_full_login_creates_a_session_and_audits_once() -> TestResult {
     assert!(fx
         .state
         .oidc
-        .as_ref()
+        .load_full()
         .ok_or("no oidc")?
         .pending
         .lock()
@@ -491,7 +499,7 @@ async fn the_access_table_and_the_document_list_both_routes() -> TestResult {
 async fn a_full_pending_table_refuses_starts_with_429() -> TestResult {
     let (fx, _) = oidc_fixture()?;
     {
-        let runtime = fx.state.oidc.as_ref().ok_or("no oidc")?;
+        let runtime = fx.state.oidc.load_full().ok_or("no oidc")?;
         let mut pending = runtime.pending.lock().map_err(|_| "poisoned")?;
         (0..PENDING_MAX).for_each(|index| {
             pending.insert(
@@ -563,7 +571,7 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
     )?;
     let fx = fixture_with(move |state| {
         Ok(ApiState {
-            oidc: Some(runtime),
+            oidc: ArcSwapOption::from_pointee(runtime),
             ..state
         })
     })?;
@@ -621,7 +629,7 @@ async fn a_panicking_provider_call_is_contained() -> TestResult {
     let runtime = runtime_over(CONFIG_TEXT, Box::new(panicking_http))?;
     let fx = fixture_with(move |state| {
         Ok(ApiState {
-            oidc: Some(runtime),
+            oidc: ArcSwapOption::from_pointee(runtime),
             ..state
         })
     })?;
@@ -638,7 +646,7 @@ async fn a_panicking_provider_call_is_contained() -> TestResult {
     )?;
     let second = fixture_with(move |state| {
         Ok(ApiState {
-            oidc: Some(switching),
+            oidc: ArcSwapOption::from_pointee(switching),
             ..state
         })
     })?;
@@ -668,9 +676,8 @@ async fn a_locked_source_and_a_full_table_are_refused_before_any_exchange() -> T
     let runtime = mock_runtime(&TokenCell::default())?;
     let full = fixture_with(move |state| {
         Ok(ApiState {
-            max_attempts: 0,
-            oidc: Some(runtime),
-            ..state
+            oidc: ArcSwapOption::from_pointee(runtime),
+            ..with_limits(state, |limits| limits.max_attempts = 0)
         })
     })?;
     let refused = callback(&full, CLIENT_OFFSET, "code=a&state=b", None).await?;
@@ -685,7 +692,7 @@ async fn failures_are_counted_only_while_the_table_has_room() -> TestResult {
     let roomy = fixture()?;
     (0..SOURCE_MAX_FAILURES).for_each(|_| count_callback_failure(&roomy.state, "id-1", FIXTURE_SOURCE));
     assert_eq!(records(&roomy, "auth.lockout")?.len(), 1);
-    let full = fixture_with(|state| Ok(ApiState { max_attempts: 1, ..state }))?;
+    let full = fixture_with(|state| Ok(with_limits(state, |limits| limits.max_attempts = 1)))?;
     count_callback_failure(&full.state, "id-1", FIXTURE_SOURCE);
     assert!(full.state.auth.lock().map_err(|_| "poisoned")?.attempts.is_empty());
     Ok(())
@@ -794,10 +801,10 @@ fn oidc_files_in(dir: &Path, config_text: &str) -> Result<OidcFiles, TestError> 
 fn the_module_starts_with_or_without_oidc() -> TestResult {
     let dir = tempdir()?;
     let mut config = config_in(&dir)?;
-    assert!(build_state(&config, Default::default(), Vec::new())?.oidc.is_none());
+    assert!(build_state(&config, Default::default(), Vec::new())?.oidc.load().is_none());
     config.oidc = Some(oidc_files_in(dir.path(), CONFIG_TEXT)?);
     let state = build_state(&config, Default::default(), Vec::new())?;
-    let runtime = state.oidc.as_ref().ok_or("no oidc")?;
+    let runtime = state.oidc.load_full().ok_or("no oidc")?;
     assert_eq!(runtime.config.client_id, CLIENT_ID);
     let secret = (runtime.resolve)(&runtime.config.client_secret)?;
     assert_eq!(secrecy::ExposeSecret::expose_secret(&secret), CLIENT_SECRET);
@@ -971,7 +978,7 @@ fn silent_audit_fixture() -> Result<Fixture, TestError> {
     fixture_with(move |state| {
         Ok(ApiState {
             audit: new_log(fs::File::open("/dev/null")?, GENESIS_HASH, sync_file),
-            oidc: Some(runtime),
+            oidc: ArcSwapOption::from_pointee(runtime),
             ..state
         })
     })
@@ -992,7 +999,7 @@ async fn an_audit_failure_on_a_refusal_fails_closed() -> TestResult {
     let refused = callback_flow(&fx.state, "id-2", peer, None, Some(provider_error)).await;
     assert!(matches!(refused, Err(ApiError::Internal)));
     {
-        let runtime = fx.state.oidc.as_ref().ok_or("no oidc")?;
+        let runtime = fx.state.oidc.load_full().ok_or("no oidc")?;
         let mut pending = runtime.pending.lock().map_err(|_| "poisoned")?;
         (0..PENDING_MAX).for_each(|index| {
             pending.insert(
@@ -1021,7 +1028,7 @@ async fn an_audit_failure_on_a_refusal_fails_closed() -> TestResult {
 async fn one_source_cannot_fill_the_pending_table() -> TestResult {
     let (fx, _) = oidc_fixture()?;
     {
-        let runtime = fx.state.oidc.as_ref().ok_or("no oidc")?;
+        let runtime = fx.state.oidc.load_full().ok_or("no oidc")?;
         let mut pending = runtime.pending.lock().map_err(|_| "poisoned")?;
         (0..PENDING_PER_SOURCE_MAX).for_each(|index| {
             pending.insert(
