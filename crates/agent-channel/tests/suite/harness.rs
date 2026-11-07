@@ -3,7 +3,7 @@ use crate::revocation_support::{open_revocation, Revocation, RevocationControl};
 use crate::state::default_state;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::ChannelError;
-use agent_channel::model::{ClientTlsPaths, ServerTlsPaths, ALPN_H2};
+use agent_channel::model::{Admission, ClientTlsPaths, ServerTlsPaths, ALPN_H2};
 use agent_channel::proto::BeatReply;
 use agent_channel::server::{run_connection, serve};
 use agent_channel::services::channel_router;
@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -104,8 +104,18 @@ pub async fn start_server_with(paths: &ServerTlsPaths, revocation: Revocation) -
 
 
 pub async fn start_server_state(paths: &ServerTlsPaths, revocation: Revocation, state: SharedState) -> Result<RunningServer, Box<dyn Error>> {
+    start_server_at(paths, revocation, state, "127.0.0.1:0").await
+}
+
+
+pub async fn start_server_at(
+    paths: &ServerTlsPaths,
+    revocation: Revocation,
+    state: SharedState,
+    bind: &str,
+) -> Result<RunningServer, Box<dyn Error>> {
     init_logging()?;
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let listener = TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
     let (shutdown, receiver) = oneshot::channel::<()>();
     let config = server_config(paths)?;
@@ -147,6 +157,15 @@ pub async fn start_single_with(paths: &ServerTlsPaths, revocation: Revocation) -
 }
 
 
+pub fn single_admission(state: &SharedState) -> Admission {
+    let (_never_evicted, evicted) = oneshot::channel();
+    Admission {
+        connections: Arc::new(Semaphore::new(state.settings.max_total_connections)),
+        evicted,
+    }
+}
+
+
 pub async fn start_single_state(paths: &ServerTlsPaths, revocation: Revocation, state: SharedState) -> Result<SingleServer, Box<dyn Error>> {
     init_logging()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -154,7 +173,8 @@ pub async fn start_single_state(paths: &ServerTlsPaths, revocation: Revocation, 
     let acceptor = TlsAcceptor::from(server_config(paths)?);
     let handle = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.map_err(ChannelError::Handshake)?;
-        run_connection(stream, acceptor, channel_router(Arc::clone(&state)), state, revocation.watcher).await
+        let admission = single_admission(&state);
+        run_connection(stream, acceptor, channel_router(Arc::clone(&state)), state, revocation.watcher, admission).await
     });
     Ok(SingleServer {
         address,
