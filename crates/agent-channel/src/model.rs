@@ -5,6 +5,7 @@ use agent_command::model::Command;
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -70,6 +71,14 @@ pub const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 1_024;
 pub const DEFAULT_MAX_PENDING_HANDSHAKES: usize = 256;
 
 
+/// Pending handshakes one source may hold; further connections from it are refused, so one host cannot evict the agents of the others.
+pub const DEFAULT_MAX_PENDING_HANDSHAKES_PER_SOURCE: usize = 16;
+
+
+/// An IPv6 source is folded to its /64: the host bits are cleared.
+pub const IPV6_HOST_BITS: u32 = 64;
+
+
 /// Under the five minutes of the specification, so an operator sees a silent agent before the contractual delay.
 pub const DEFAULT_SILENCE_THRESHOLD_SECONDS: u64 = 150;
 
@@ -79,6 +88,25 @@ pub const DEFAULT_SILENCE_CHECK_INTERVAL_SECONDS: u64 = 10;
 
 /// A peer that has not finished its TLS handshake after this long is dropped, so a stalled peer cannot hold a task.
 pub const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+
+
+/// One delivery attempt (dial, stream, acknowledgements) is cut after this long, so a server holding the stream open cannot hang the agent.
+pub const ATTEMPT_TIMEOUT_SECONDS: u64 = 60;
+
+
+/// Acknowledgements for batches not pending that one attempt tolerates before it stops reading.
+pub const MAX_IGNORED_ACKS: usize = 8;
+
+
+/// Absolute bound of the acknowledgement read loop, whatever the number of pending batches.
+pub const MAX_ACK_READS: usize = 4_096;
+
+
+/// HTTP/2 keepalive ping interval: a server host that died without a FIN is detected after this plus the timeout.
+pub const KEEPALIVE_INTERVAL_SECONDS: u64 = 10;
+
+
+pub const KEEPALIVE_TIMEOUT_SECONDS: u64 = 10;
 
 
 pub const BACKOFF_INITIAL_MILLIS: u64 = 500;
@@ -196,6 +224,7 @@ pub struct ChannelSettings {
     pub request_timeout_seconds: u64,
     pub max_total_connections: usize,
     pub max_pending_handshakes: usize,
+    pub max_pending_handshakes_per_source: usize,
     pub silence_threshold_seconds: u64,
     pub silence_check_interval_seconds: u64,
 }
@@ -215,6 +244,7 @@ impl Default for ChannelSettings {
             request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
+            max_pending_handshakes_per_source: DEFAULT_MAX_PENDING_HANDSHAKES_PER_SOURCE,
             silence_threshold_seconds: DEFAULT_SILENCE_THRESHOLD_SECONDS,
             silence_check_interval_seconds: DEFAULT_SILENCE_CHECK_INTERVAL_SECONDS,
         }
@@ -238,6 +268,7 @@ pub struct Counters {
     pub connections_capped: AtomicU64,
     pub handshake_timeouts: AtomicU64,
     pub handshakes_evicted: AtomicU64,
+    pub handshakes_refused: AtomicU64,
 }
 
 
@@ -311,6 +342,14 @@ pub struct CommandVerdict {
 pub struct Admission {
     pub connections: Arc<Semaphore>,
     pub evicted: oneshot::Receiver<()>,
+}
+
+
+/// A connection still in its TLS handshake: the source it came from and the signal that drops it.
+#[derive(Debug)]
+pub struct PendingHandshake {
+    pub source: IpAddr,
+    pub stop: oneshot::Sender<()>,
 }
 
 

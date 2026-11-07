@@ -79,6 +79,8 @@ pub enum ChannelError {
     Transport(#[from] tonic::transport::Error),
     #[error("call refused: {0}")]
     Status(#[source] Box<Status>),
+    #[error("delivery attempt not finished after {seconds} seconds")]
+    AttemptTimedOut { seconds: u64 },
     #[error("the server closed the event stream with {unacknowledged} batches unacknowledged")]
     StreamEnded { unacknowledged: usize },
     #[error("event delivery abandoned after {attempts} consecutive failed attempts: {last}")]

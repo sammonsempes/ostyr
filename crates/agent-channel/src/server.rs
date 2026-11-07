@@ -1,7 +1,7 @@
 use crate::error::{ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serial_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
-use crate::model::{Admission, Identity, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS};
+use crate::model::{Admission, Identity, PendingHandshake, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS, IPV6_HOST_BITS};
 use crate::revocation::{is_revoked, is_revoked_now};
 use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, SharedState, ShutdownSignal};
 use axum::{Extension, Router};
@@ -9,7 +9,9 @@ use futures_util::{FutureExt, StreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
-use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::io;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -19,7 +21,7 @@ use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
 
-/// Accepts connections until `shutdown` completes; the oldest pending handshake is evicted at the cap, authenticated ones are capped apart.
+/// Accepts connections until `shutdown` completes; handshakes are capped per source and globally, authenticated connections are capped apart.
 pub async fn serve(
     incoming: IncomingConnections,
     config: SharedServerConfig,
@@ -30,25 +32,29 @@ pub async fn serve(
 ) {
     let acceptor = TlsAcceptor::from(config);
     let connections = Arc::new(Semaphore::new(state.settings.max_total_connections));
-    let mut handshakes = VecDeque::new();
+    let mut handshakes = Vec::new();
     incoming
         .take_until(shutdown)
         .for_each(|accepted| {
             match accepted {
                 Ok(stream) => {
-                    let admission = Admission {
-                        connections: Arc::clone(&connections),
-                        evicted: register_handshake(&mut handshakes, &state),
-                    };
-                    let connection = run_connection(
-                        stream,
-                        acceptor.clone(),
-                        router.clone(),
-                        Arc::clone(&state),
-                        revocations.clone(),
-                        admission,
-                    );
-                    tokio::spawn(connection.map(log_outcome));
+                    let source = peer_source(stream.peer_addr());
+                    let evicted = source.and_then(|known| register_handshake(&mut handshakes, known, &state));
+                    if let Some(signal) = evicted {
+                        let admission = Admission {
+                            connections: Arc::clone(&connections),
+                            evicted: signal,
+                        };
+                        let connection = run_connection(
+                            stream,
+                            acceptor.clone(),
+                            router.clone(),
+                            Arc::clone(&state),
+                            revocations.clone(),
+                            admission,
+                        );
+                        tokio::spawn(connection.map(log_outcome));
+                    }
                 }
                 Err(error) => tracing::warn!(%error, "accept failed"),
             }
@@ -58,15 +64,52 @@ pub async fn serve(
 }
 
 
-/// Notes a new handshake; when `max_pending_handshakes` are already waiting the oldest one is told to stop. Finished handshakes are forgotten first.
-pub fn register_handshake(handshakes: &mut VecDeque<oneshot::Sender<()>>, state: &ServerState) -> oneshot::Receiver<()> {
-    handshakes.retain(|waiting| !waiting.is_closed());
-    if handshakes.len() >= state.settings.max_pending_handshakes {
-        evict(handshakes.pop_front(), state);
+/// The address a handshake is counted against: IPv4 as is, IPv6 folded to its /64, IPv4-mapped IPv6 as IPv4.
+pub fn source_of(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (u128::MAX << IPV6_HOST_BITS))),
+        other => other,
     }
-    let (sender, receiver) = oneshot::channel();
-    handshakes.push_back(sender);
-    receiver
+}
+
+
+/// The folded source of an accepted connection; a connection whose peer address cannot be read is dropped.
+pub fn peer_source(peer: io::Result<SocketAddr>) -> Option<IpAddr> {
+    match peer {
+        Ok(address) => Some(source_of(address.ip())),
+        Err(error) => {
+            tracing::warn!(%error, "peer address unknown, connection dropped");
+            None
+        }
+    }
+}
+
+
+/// Notes a new handshake: `None` when its source is at its cap, else the oldest of the busiest source is evicted at the global cap.
+pub fn register_handshake(handshakes: &mut Vec<PendingHandshake>, source: IpAddr, state: &ServerState) -> Option<oneshot::Receiver<()>> {
+    handshakes.retain(|waiting| !waiting.stop.is_closed());
+    if handshakes.iter().filter(|waiting| waiting.source == source).count() >= state.settings.max_pending_handshakes_per_source {
+        bump(&state.counters.handshakes_refused);
+        tracing::debug!(%source, "pending handshake cap of the source reached, connection refused");
+        None
+    } else {
+        if handshakes.len() >= state.settings.max_pending_handshakes {
+            let victim = busiest_oldest(handshakes).map(|position| handshakes.remove(position).stop);
+            evict(victim, state);
+        }
+        let (sender, receiver) = oneshot::channel();
+        handshakes.push(PendingHandshake { source, stop: sender });
+        Some(receiver)
+    }
+}
+
+
+/// Position of the oldest handshake among those of the source holding the most.
+pub fn busiest_oldest(handshakes: &[PendingHandshake]) -> Option<usize> {
+    let mut per_source: HashMap<IpAddr, usize> = HashMap::new();
+    handshakes.iter().for_each(|waiting| *per_source.entry(waiting.source).or_insert(0) += 1);
+    let busiest = per_source.values().max();
+    handshakes.iter().position(|waiting| per_source.get(&waiting.source) == busiest)
 }
 
 

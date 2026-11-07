@@ -1,11 +1,11 @@
 use crate::error::ChannelError;
 use crate::model::{
-    CommandRun, CommandVerdict, Delivery, Judged, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS, CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, HEARTBEAT_PATH, MAX_BACKOFF_SHIFT, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT, REPORT_PATH,
-    SUBSCRIBE_PATH,
+    CommandRun, CommandVerdict, Delivery, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS,
+    CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS, KEEPALIVE_TIMEOUT_SECONDS,
+    MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT, REPORT_PATH, SUBSCRIBE_PATH,
 };
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
-use crate::types::{ClockFn, DialFn, PauseFn, SharedClientConfig};
+use crate::types::{AckStream, ClockFn, DialFn, PauseFn, SharedClientConfig};
 use agent_command::model::Verifier;
 use agent_command::verify::verify_command;
 use futures_util::{stream, Stream, StreamExt, TryStreamExt};
@@ -20,6 +20,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::time::{timeout_at, Instant};
 use tokio_rustls::TlsConnector;
 use tonic::client::Grpc;
 use tonic::transport::{Channel, Endpoint};
@@ -43,6 +44,9 @@ pub async fn connect_channel(address: SocketAddr, config: SharedClientConfig, se
     });
     let channel = Endpoint::from_static(PLACEHOLDER_ENDPOINT)
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECONDS))
+        .http2_keep_alive_interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECONDS))
+        .keep_alive_timeout(Duration::from_secs(KEEPALIVE_TIMEOUT_SECONDS))
+        .keep_alive_while_idle(true)
         .connect_with_connector(service)
         .await?;
     Ok(channel)
@@ -207,16 +211,44 @@ pub fn random_jitter() -> u64 {
 }
 
 
-/// Opens the stream with the pending batches; returns the sequences acknowledged before the stream ended, and how it ended.
-pub async fn send_pending(dial: &DialFn, pending: &[EventBatch]) -> (Vec<u64>, Result<(), ChannelError>) {
-    match open_pending(dial, pending).await {
-        Ok(acknowledgements) => {
-            let items: Vec<Result<EventAck, Status>> = acknowledgements.collect().await;
-            let acknowledged = items.iter().filter_map(|item| item.as_ref().ok()).map(|ack| ack.sequence).collect();
-            let ended = items.into_iter().find_map(Result::err).map_or(Ok(()), |status| Err(status_error(status)));
-            (acknowledged, ended)
+/// Reads acknowledgements until every pending batch is settled, the stream ends, `deadline` passes, or `pending.len() + MAX_IGNORED_ACKS` items were read.
+pub async fn read_acks(acks: AckStream, pending: &[EventBatch], deadline: Instant) -> (Vec<u64>, Result<(), ChannelError>) {
+    let mut limited = acks.take(pending.len() + MAX_IGNORED_ACKS);
+    let mut waiting: Vec<u64> = pending.iter().map(|batch| batch.sequence).collect();
+    let mut acknowledged = Vec::new();
+    let mut read = 0;
+    let mut ended = Ok(());
+    let mut open = true;
+    while open && !waiting.is_empty() && read < MAX_ACK_READS && ended.is_ok() {
+        match timeout_at(deadline, limited.next()).await {
+            Ok(Some(Ok(ack))) => {
+                waiting.retain(|sequence| *sequence != ack.sequence);
+                acknowledged.push(ack.sequence);
+            }
+            Ok(Some(Err(status))) => ended = Err(status_error(status)),
+            Ok(None) => open = false,
+            Err(_elapsed) => ended = Err(attempt_timed_out()),
         }
-        Err(error) => (Vec::new(), Err(error)),
+        read += 1;
+    }
+    (acknowledged, ended)
+}
+
+
+pub fn attempt_timed_out() -> ChannelError {
+    ChannelError::AttemptTimedOut {
+        seconds: ATTEMPT_TIMEOUT_SECONDS,
+    }
+}
+
+
+/// Dials, opens the stream with the pending batches and reads the acknowledgements, all within `ATTEMPT_TIMEOUT_SECONDS`.
+pub async fn send_pending(dial: &DialFn, pending: &[EventBatch]) -> (Vec<u64>, Result<(), ChannelError>) {
+    let deadline = Instant::now() + Duration::from_secs(ATTEMPT_TIMEOUT_SECONDS);
+    match timeout_at(deadline, open_pending(dial, pending)).await {
+        Ok(Ok(acknowledgements)) => read_acks(Box::pin(acknowledgements), pending, deadline).await,
+        Ok(Err(error)) => (Vec::new(), Err(error)),
+        Err(_elapsed) => (Vec::new(), Err(attempt_timed_out())),
     }
 }
 
