@@ -3,6 +3,7 @@ use crate::model::{ApiConfig, ApiState};
 use crate::oidc::load_oidc;
 use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use core_audit::log::open_file_log;
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
@@ -15,10 +16,11 @@ use core_auth::rbac::builtin_catalog;
 use core_auth::service::{Context, State};
 use core_auth::session::{hash_token, is_revoked};
 use core_auth::store::{load_store_file, read_store_locked};
-use core_auth::types::{AccountMap, AttemptMap, VerifyFn};
+use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, VerifyFn};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::BufReader;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
@@ -51,10 +53,10 @@ pub fn merged_document(module: &str, extra_documents: Vec<OpenApiDocument>) -> O
 pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_documents: Vec<OpenApiDocument>) -> Result<ApiState, StartupError> {
     let key = read_key_file(&config.key_file)?;
     let audit = open_file_log(&config.audit_log)?;
-    let compromised = load_compromised(BufReader::new(File::open(&config.compromised_list)?))?;
+    let compromised = read_compromised(&config.compromised_list)?;
     let (accounts, credentials) = load_store_file(&config.accounts_store)?;
     let catalog = builtin_catalog();
-    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog)).transpose()?;
+    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog).map(Arc::new)).transpose()?;
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
@@ -67,7 +69,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         }),
         audit,
         key,
-        compromised,
+        compromised: ArcSwap::from_pointee(compromised),
         catalog,
         random: os_random,
         clock: OffsetDateTime::now_utc,
@@ -78,12 +80,20 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         verify: verify_password,
         hashing: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
         dispatch: tracing::dispatcher::get_default(Dispatch::clone),
-        max_sources: MAX_TRACKED_SOURCES,
-        max_attempts: MAX_TRACKED_ATTEMPTS,
-        body_timeout: config.body_read_timeout,
-        oidc,
+        limits: Arc::new(ArcSwap::from_pointee(config.limits)),
+        oidc: ArcSwapOption::new(oidc),
         callback_accounts: Mutex::new(BTreeSet::new()),
     })
+}
+
+
+pub fn read_compromised(path: &Path) -> Result<CompromisedSet, StartupError> {
+    Ok(load_compromised(BufReader::new(File::open(path)?))?)
+}
+
+
+pub fn current_compromised(app: &ApiState) -> Arc<CompromisedSet> {
+    app.compromised.load_full()
 }
 
 
@@ -154,13 +164,13 @@ pub fn prune_attempts(attempts: &mut AttemptMap, now: OffsetDateTime) {
 }
 
 
-pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn<'a>) -> Context<'a, File> {
+pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn<'a>, compromised: &'a CompromisedSet) -> Context<'a, File> {
     Context {
         audit: &app.audit,
         random: app.random,
         verify,
         key: &app.key,
-        compromised: &app.compromised,
+        compromised,
         catalog: &app.catalog,
         tenant: &app.tenant,
         request_id,

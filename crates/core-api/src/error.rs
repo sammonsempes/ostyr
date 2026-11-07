@@ -1,6 +1,7 @@
 use core_audit::error::AuditError;
 use core_auth::error::AuthError;
-use core_config::error::ConfigError;
+use core_config::error::{ConfigError, WatchError};
+use core_config::types::BoxError;
 use rustls_pki_types::pem;
 use std::io;
 use std::net::{AddrParseError, SocketAddr};
@@ -23,6 +24,19 @@ pub enum StartupError {
     IncompleteTls,
     #[error("oidc and oidc_secret_file must be set together")]
     IncompleteOidc,
+    #[error("setting `{name}` has an invalid value `{value}`: {source}")]
+    InvalidSetting {
+        name: &'static str,
+        value: String,
+        #[source]
+        source: BoxError,
+    },
+    #[error("setting `{0}` must not be zero")]
+    ZeroSetting(&'static str),
+    #[error("{0} needs a restart")]
+    RestartNeeded(&'static str),
+    #[error("file watch: {0}")]
+    Watch(#[from] WatchError),
     #[error("plain HTTP is refused on {0}: configure tls_certificate and tls_key, or bind to a loopback address")]
     PlainHttpRefused(SocketAddr),
     #[error("configuration: {0}")]

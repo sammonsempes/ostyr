@@ -4,7 +4,7 @@ use crate::model::{
     ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule, StartReply,
 };
 use crate::oidc::{callback_endpoint, start_endpoint};
-use crate::state::{auth_context, lock_auth, memory_only_accounts, prune_attempts, refresh_accounts};
+use crate::state::{auth_context, current_compromised, lock_auth, memory_only_accounts, prune_attempts, refresh_accounts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
@@ -131,25 +131,14 @@ pub fn build_router(state: SharedState, extra: Router<SharedState>) -> Router {
         .route("/auth/login", post(login_endpoint))
         .route("/auth/logout", post(logout_endpoint))
         .route("/auth/me", get(me_endpoint))
-        .merge(oidc_router(&state))
+        .route("/auth/oidc/start", get(start_endpoint))
+        .route("/auth/oidc/callback", get(callback_endpoint))
         .merge(extra)
         .layer(from_fn_with_state(state.clone(), body_deadline))
         .layer(from_fn_with_state(state.clone(), guard))
         .layer(from_fn_with_state(state.clone(), limit))
         .layer(from_fn_with_state(state.clone(), edge))
         .with_state(state)
-}
-
-
-pub fn oidc_router(state: &ApiState) -> Router<SharedState> {
-    let router = Router::new();
-    if state.oidc.is_some() {
-        router
-            .route("/auth/oidc/start", get(start_endpoint))
-            .route("/auth/oidc/callback", get(callback_endpoint))
-    } else {
-        router
-    }
 }
 
 
@@ -284,7 +273,7 @@ pub fn needed_room(auth: &AuthState, source: &str) -> usize {
 
 pub fn check_table_room(app: &ApiState, auth: &mut AuthState, source: &str) -> Result<(), ApiError> {
     prune_attempts(&mut auth.attempts, (app.clock)());
-    if auth.attempts.len() + needed_room(auth, source) > app.max_attempts {
+    if auth.attempts.len() + needed_room(auth, source) > app.limits.load().max_attempts {
         tracing::warn!("failure tracking table is full, login refused");
         Err(ApiError::TooManyRequests)
     } else {
@@ -319,7 +308,8 @@ pub fn refuse_with(
     (outcome, error): (Outcome, ApiError),
 ) -> ApiError {
     tracing::warn!(reason, "login refused");
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     let audit_user = audit_name(&auth.accounts, &request.username);
     let parameters = [("reason", reason.to_owned()), ("source", request.source.clone())];
     record(&context, (app.clock)(), &audit_user, ACTION_LOGIN, &audit_user, outcome, &parameters)
@@ -350,7 +340,8 @@ pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, st
     };
     let mut auth = lock_auth(app);
     check_table_room(app, &mut auth, &request.source).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
-    let context = auth_context(app, request_id, &verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &verify, &compromised);
     persist_login(app, &mut auth, &context, now, request).map(|granted| Json(granted).into_response())
 }
 
@@ -394,7 +385,8 @@ pub async fn login_endpoint(
 pub fn logout_flow(app: &ApiState, request_id: &str, session: &Authenticated) -> Result<Response, ApiError> {
     let now = (app.clock)();
     let mut auth = lock_auth(app);
-    let context = auth_context(app, request_id, &app.verify);
+    let compromised = current_compromised(app);
+    let context = auth_context(app, request_id, &app.verify, &compromised);
     let token = session.token.expose_secret();
     revoke_token(&mut auth, &context, now, token, token)
         .map(|()| StatusCode::NO_CONTENT.into_response())
