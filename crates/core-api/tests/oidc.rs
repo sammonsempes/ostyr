@@ -27,8 +27,10 @@ use core_auth::error::AuthError;
 use core_auth::limiter::{account_key, source_key, SOURCE_MAX_FAILURES};
 use core_auth::model::{Attempts, PendingLogin};
 use core_auth::oidc::{http_call, PENDING_MAX};
+use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
-use core_auth::store::load_store_file;
+use core_auth::session::mark_sessions_revoked;
+use core_auth::store::{load_store_file, update_store_file};
 use core_auth::types::RoleSet;
 use core_config::model::ModuleConfig;
 use fixture::{config_in, fixture, fixture_with, private_file, Fixture, PASSWORD, READER};
@@ -307,6 +309,49 @@ async fn an_oidc_session_survives_store_refreshes_and_local_logins() -> TestResu
     login_token(&fx.router).await?;
     assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
     assert!(!load_store_file(&fx.config.accounts_store)?.0.contains_key("oidc:user-1"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_file_revocation_ends_an_oidc_session_and_a_new_login_works() -> TestResult {
+    let (fx, cell) = oidc_fixture()?;
+    let token = oidc_token(&fx, &cell).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        mark_sessions_revoked(accounts, "oidc:user-1", OffsetDateTime::now_utc());
+        Ok(())
+    })?
+    .saved?;
+    assert_eq!(
+        call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let fresh = oidc_token(&fx, &cell).await?;
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&fresh)).await?.status(), StatusCode::OK);
+    login_token(&fx.router).await?;
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&fresh)).await?.status(), StatusCode::OK);
+    assert!(load_store_file(&fx.config.accounts_store)?.0.contains_key("oidc:user-1"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_session_of_an_account_deleted_from_the_file_is_refused_everywhere() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    update_store_file(&fx.config.accounts_store, os_random, |accounts, _| {
+        accounts.remove(READER);
+        Ok(())
+    })?
+    .saved?;
+    assert_eq!(
+        call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&fx.router, "POST", "/auth/logout", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
     Ok(())
 }
 

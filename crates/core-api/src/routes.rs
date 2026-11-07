@@ -21,6 +21,7 @@ use core_auth::service::{
 };
 use core_auth::session::revoke_session;
 use core_auth::store::update_store_file;
+use core_auth::types::AccountMap;
 use secrecy::{ExposeSecret, SecretString};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
@@ -193,6 +194,10 @@ pub fn persist_login(
 ) -> Result<LoginReply, ApiError> {
     let updated = update_store_file(&app.store_path, app.random, |accounts, credentials| {
         let external = memory_only_accounts(app, &auth.accounts, accounts);
+        let markers: AccountMap = external
+            .keys()
+            .filter_map(|name| accounts.get(name).map(|stub| (name.clone(), stub.clone())))
+            .collect();
         auth.accounts = std::mem::take(accounts);
         auth.accounts.extend(external.clone());
         auth.credentials = std::mem::take(credentials);
@@ -201,6 +206,7 @@ pub fn persist_login(
         external.keys().for_each(|name| {
             accounts.remove(name);
         });
+        accounts.extend(markers);
         credentials.clone_from(&auth.credentials);
         Ok(token)
     })

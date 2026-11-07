@@ -1,7 +1,9 @@
 use crate::error::AuthError;
-use crate::model::Session;
+use crate::model::{Account, Session};
+use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
-use crate::types::{AccountMap, RandomFn, SessionMap};
+use crate::service::OIDC_PREFIX;
+use crate::types::{AccountMap, RandomFn, RoleSet, SessionMap};
 use data_encoding::HEXLOWER;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
@@ -69,8 +71,17 @@ pub fn revocation_marker(now: OffsetDateTime) -> i64 {
 }
 
 
-/// Records that every session of `username` created at or before `now` is void, in the account itself so the store file carries it.
+/// Voids every session of `username` created at or before `now` in the account (an `oidc:` name with none gets a rolesless stub).
 pub fn mark_sessions_revoked(accounts: &mut AccountMap, username: &str, now: OffsetDateTime) {
+    if username.starts_with(OIDC_PREFIX) {
+        accounts.entry(username.to_owned()).or_insert_with(|| Account {
+            username: username.to_owned(),
+            password_hash: EXTERNAL_PASSWORD_HASH.to_owned(),
+            roles: RoleSet::new(),
+            totp: None,
+            sessions_valid_after: None,
+        });
+    }
     accounts
         .get_mut(username)
         .into_iter()

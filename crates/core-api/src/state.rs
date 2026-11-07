@@ -7,6 +7,7 @@ use core_audit::log::open_file_log;
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
 use core_auth::limiter::FAILURE_WINDOW_SECONDS;
+use core_auth::model::Account;
 use core_auth::password::verify_password;
 use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
@@ -91,13 +92,24 @@ pub fn lock_auth(app: &ApiState) -> MutexGuard<'_, State> {
 }
 
 
-/// The accounts of `previous` that `stored` does not hold and an OIDC callback created: they live in memory only.
+/// The accounts of `previous` that an OIDC callback created: they live in memory only, but take the revocation marker the file holds for them.
 pub fn memory_only_accounts(app: &ApiState, previous: &AccountMap, stored: &AccountMap) -> AccountMap {
     let created = app.callback_accounts.lock().unwrap_or_else(PoisonError::into_inner);
     previous
         .iter()
-        .filter(|(name, _)| created.contains(*name) && !stored.contains_key(*name))
-        .map(|(name, account)| (name.clone(), account.clone()))
+        .filter(|(name, _)| created.contains(*name))
+        .map(|(name, account)| {
+            let marker = account
+                .sessions_valid_after
+                .max(stored.get(name).and_then(|kept| kept.sessions_valid_after));
+            (
+                name.clone(),
+                Account {
+                    sessions_valid_after: marker,
+                    ..account.clone()
+                },
+            )
+        })
         .collect()
 }
 
@@ -123,11 +135,11 @@ pub fn remember_callback_account(app: &ApiState, username: &str) {
 }
 
 
-/// True when the session of `token` predates the revocation marker of its owner.
+/// True when the session of `token` predates the revocation marker of its owner, or its owner is no longer an account at all.
 pub fn session_revoked(auth: &State, token: &str) -> bool {
     auth.sessions
         .get(&hash_token(token))
-        .is_some_and(|session| is_revoked(&auth.accounts, session))
+        .is_some_and(|session| !auth.accounts.contains_key(&session.user) || is_revoked(&auth.accounts, session))
 }
 
 
