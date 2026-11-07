@@ -143,6 +143,7 @@ pub fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
         header_read_timeout: TEST_HEADER_TIMEOUT,
         body_read_timeout: TEST_BODY_TIMEOUT,
         max_connections_per_source: TEST_MAX_CONNECTIONS,
+        oidc: None,
     })
 }
 

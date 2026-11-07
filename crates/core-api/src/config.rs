@@ -1,5 +1,5 @@
 use crate::error::StartupError;
-use crate::model::{ApiConfig, TlsFiles};
+use crate::model::{ApiConfig, OidcFiles, TlsFiles};
 use core_config::model::ModuleConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -22,6 +22,15 @@ pub const SETTING_KEY_FILE: &str = "key_file";
 
 
 pub const SETTING_COMPROMISED_LIST: &str = "compromised_list";
+
+
+pub const SETTING_OIDC: &str = "oidc";
+
+
+pub const SETTING_OIDC_CA_FILE: &str = "oidc_ca_file";
+
+
+pub const SETTING_OIDC_SECRET_FILE: &str = "oidc_secret_file";
 
 
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -62,6 +71,19 @@ pub fn tls_files(module: &ModuleConfig) -> Result<Option<TlsFiles>, StartupError
 }
 
 
+pub fn oidc_files(module: &ModuleConfig) -> Result<Option<OidcFiles>, StartupError> {
+    match (module.settings.get(SETTING_OIDC), module.settings.get(SETTING_OIDC_SECRET_FILE)) {
+        (Some(config), Some(secret)) => Ok(Some(OidcFiles {
+            config: PathBuf::from(config),
+            ca_file: module.settings.get(SETTING_OIDC_CA_FILE).map(PathBuf::from),
+            secret_file: PathBuf::from(secret),
+        })),
+        (None, None) => Ok(None),
+        _ => Err(StartupError::IncompleteOidc),
+    }
+}
+
+
 pub fn api_config(module: &ModuleConfig) -> Result<ApiConfig, StartupError> {
     Ok(ApiConfig {
         module: module.name.clone(),
@@ -75,5 +97,6 @@ pub fn api_config(module: &ModuleConfig) -> Result<ApiConfig, StartupError> {
         header_read_timeout: HEADER_READ_TIMEOUT,
         body_read_timeout: BODY_READ_TIMEOUT,
         max_connections_per_source: MAX_CONNECTIONS_PER_SOURCE,
+        oidc: oidc_files(module)?,
     })
 }
