@@ -4,7 +4,7 @@ use crate::model::{
     ApiError, ApiState, Authenticated, ErrorBody, ErrorDetail, HealthReply, LoginBody, LoginReply, MeReply, RequestId, Requirement, Rule, StartReply,
 };
 use crate::oidc::{callback_endpoint, start_endpoint};
-use crate::state::{auth_context, current_compromised, lock_auth, memory_only_accounts, prune_attempts, refresh_accounts};
+use crate::state::{auth_context, auth_inputs, lock_auth, memory_only_accounts, prune_attempts, refresh_accounts};
 use crate::types::{AccessTable, SharedState};
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
@@ -115,7 +115,7 @@ pub fn core_access() -> AccessTable {
 
 pub fn openapi_document(module: &str) -> OpenApiDocument {
     let mut document = ApiDoc::openapi();
-    document.info.title = format!("{module} API");
+    document.info.title = document_title(module);
     document.components.get_or_insert_with(Components::new).add_security_scheme(
         BEARER_SCHEME,
         SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
@@ -160,7 +160,26 @@ pub async fn health_endpoint() -> Json<HealthReply> {
     responses((status = 200, description = "This OpenAPI 3 document"))
 )]
 pub async fn openapi_endpoint(State(app): State<SharedState>) -> Json<serde_json::Value> {
-    Json(app.document.clone())
+    Json(current_document(app.as_ref()))
+}
+
+
+pub const DOCUMENT_TITLE_POINTER: &str = "/info/title";
+
+
+pub fn document_title(module: &str) -> String {
+    format!("{module} API")
+}
+
+
+/// The merged document with the title of the module name now in force.
+pub fn current_document(app: &ApiState) -> serde_json::Value {
+    let mut document = app.document.clone();
+    document
+        .pointer_mut(DOCUMENT_TITLE_POINTER)
+        .into_iter()
+        .for_each(|title| *title = serde_json::Value::String(document_title(&app.identity.load().module)));
+    document
 }
 
 
@@ -308,8 +327,8 @@ pub fn refuse_with(
     (outcome, error): (Outcome, ApiError),
 ) -> ApiError {
     tracing::warn!(reason, "login refused");
-    let compromised = current_compromised(app);
-    let context = auth_context(app, request_id, &app.verify, &compromised);
+    let inputs = auth_inputs(app);
+    let context = auth_context(app, request_id, &app.verify, &inputs);
     let audit_user = audit_name(&auth.accounts, &request.username);
     let parameters = [("reason", reason.to_owned()), ("source", request.source.clone())];
     record(&context, (app.clock)(), &audit_user, ACTION_LOGIN, &audit_user, outcome, &parameters)
@@ -340,8 +359,8 @@ pub fn commit_login(app: &ApiState, request_id: &str, request: &LoginRequest, st
     };
     let mut auth = lock_auth(app);
     check_table_room(app, &mut auth, &request.source).map_err(|_| refuse_login(app, &auth, request_id, request, REASON_TABLE_FULL))?;
-    let compromised = current_compromised(app);
-    let context = auth_context(app, request_id, &verify, &compromised);
+    let inputs = auth_inputs(app);
+    let context = auth_context(app, request_id, &verify, &inputs);
     persist_login(app, &mut auth, &context, now, request).map(|granted| Json(granted).into_response())
 }
 
@@ -385,8 +404,8 @@ pub async fn login_endpoint(
 pub fn logout_flow(app: &ApiState, request_id: &str, session: &Authenticated) -> Result<Response, ApiError> {
     let now = (app.clock)();
     let mut auth = lock_auth(app);
-    let compromised = current_compromised(app);
-    let context = auth_context(app, request_id, &app.verify, &compromised);
+    let inputs = auth_inputs(app);
+    let context = auth_context(app, request_id, &app.verify, &inputs);
     let token = session.token.expose_secret();
     revoke_token(&mut auth, &context, now, token, token)
         .map(|()| StatusCode::NO_CONTENT.into_response())

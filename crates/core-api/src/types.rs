@@ -1,4 +1,4 @@
-use crate::model::{ApiState, Limits, Listener, PreparedAudit, Rule, Sockets, Window};
+use crate::model::{ApiState, Limits, Listener, PreparedAudit, PreparedKey, Rule, Sockets, Window};
 use arc_swap::ArcSwap;
 use core_auth::error::AuthError;
 use core_config::secret::SecretRef;
@@ -50,3 +50,6 @@ pub type PendingAudit = Arc<Mutex<Option<PreparedAudit>>>;
 
 
 pub type WatchGuard = Box<dyn Send>;
+
+
+pub type PendingKey = Arc<Mutex<Option<PreparedKey>>>;
