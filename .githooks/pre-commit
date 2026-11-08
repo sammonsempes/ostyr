@@ -34,6 +34,26 @@ covered_tests() {
   return "$status"
 }
 
+docs_only() {
+  local staged path
+  staged=$(git diff --cached --name-only --diff-filter=ACMRD)
+  [ -n "$staged" ] || return 1
+  while IFS= read -r path; do
+    case "$path" in
+      backlog/* | .cache/*) ;;
+      crates/* | tools/* | lab/* | docs/*) return 1 ;;
+      *.md) ;;
+      *) return 1 ;;
+    esac
+  done <<<"$staged"
+}
+
+if docs_only; then
+  step "custom_lint" lint
+  echo "pre-commit: documentation-only commit, Rust steps skipped" >&2
+  exit 0
+fi
+
 step "1/5 cargo +nightly fmt --check" cargo +nightly fmt --check
 step "2/5 cargo clippy" cargo clippy --offline --all-targets -- -D warnings
 step "3/5 custom_lint" lint
