@@ -1,5 +1,9 @@
-use crate::model::{AgentLoad, ChannelSettings, Counters, Identity, ServerState, SlotKind, SlotPermit, MAX_LOGGED_TEXT_CHARS, TRUNCATION_MARKER};
+use crate::model::{
+    AgentLoad, ChannelSettings, Counters, Identity, Presence, ServerState, SlotKind, SlotPermit, MAX_LOGGED_DIGEST_BYTES, MAX_LOGGED_TEXT_CHARS,
+    TRUNCATION_MARKER,
+};
 use crate::types::SharedState;
+use data_encoding::HEXLOWER;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, MutexGuard, PoisonError};
@@ -15,6 +19,11 @@ pub fn bump(counter: &AtomicU64) {
 /// No code holding the lock can panic, so a poisoned lock still guards consistent data.
 pub fn lock_load(state: &ServerState) -> MutexGuard<'_, HashMap<Identity, AgentLoad>> {
     state.load.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+
+pub fn lock_presence(state: &ServerState) -> MutexGuard<'_, HashMap<Identity, Presence>> {
+    state.presence.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 
@@ -134,6 +143,18 @@ pub fn bounded_text(text: &str) -> String {
         kept + TRUNCATION_MARKER
     } else {
         kept
+    }
+}
+
+
+/// Hex of at most `MAX_LOGGED_DIGEST_BYTES` digest bytes, so a huge reported digest never becomes a huge temporary string.
+pub fn digest_text(digest: &[u8]) -> String {
+    let shown = digest.get(..MAX_LOGGED_DIGEST_BYTES).unwrap_or(digest);
+    let text = HEXLOWER.encode(shown);
+    if shown.len() < digest.len() {
+        text + TRUNCATION_MARKER
+    } else {
+        text
     }
 }
 
