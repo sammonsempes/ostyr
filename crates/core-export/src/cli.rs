@@ -1,17 +1,25 @@
-use crate::config::{load_export, ExportConfig, SyslogConfig, SyslogTransport, WebhookConfig};
+use crate::config::{load_export, ExportConfig, OtlpConfig, SyslogConfig, SyslogTransport, WebhookConfig};
 use crate::ecs::{blank_event, to_json, EcsEvent, EventFields, HostFields};
 use crate::error::ExportError;
-use crate::http::{build_agent, post_json};
-use crate::pipeline::{export_webhook, ExportReport};
+use crate::http::{build_agent, build_agent_with, post_json, post_otlp};
+use crate::otlp::prepare_otlp;
+use crate::pipeline::{export_otlp, export_webhook, ExportReport};
+use crate::reload::open_export_engine;
 use crate::syslog::{format_message, send_datagrams, write_frames, SyslogHeader};
 use crate::tls::{client_config, close, open_stream};
 use crate::types::{ResolveFn, SleepFn};
 use crate::webhook::RetryPolicy;
-use std::fs;
+use core_audit::log::{append, open_file_log, AuditLog};
+use core_config::reload::{current_config, ReloadContext, ReloadEngine};
+use core_config::types::SharedAuditFn;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::thread::sleep;
 use time::OffsetDateTime;
+
+
+pub const NO_REDIRECTS: u32 = 0;
 
 
 pub const SAMPLE_HOST: &str = "export-demo";
@@ -21,6 +29,15 @@ pub const SAMPLE_DATASET: &str = "ostyr.demo";
 
 
 pub const SAMPLE_SEVERITY: u32 = 1;
+
+
+pub const AUDIT_EXTENSION: &str = "audit";
+
+
+pub const AUDIT_MODULE: &str = "core-export";
+
+
+pub const AUDIT_REQUEST_ID: &str = "export-reload";
 
 
 pub fn sample_event(sequence: u64, now: OffsetDateTime) -> EcsEvent {
@@ -77,6 +94,21 @@ pub fn run_webhook(
 }
 
 
+pub fn run_otlp(
+    config: &OtlpConfig,
+    events: &[EcsEvent],
+    policy: &RetryPolicy,
+    pause: &mut SleepFn,
+    now: OffsetDateTime,
+) -> Result<ExportReport, ExportError> {
+    let token = prepare_otlp(config)?;
+    let ca = read_ca(config.ca_file.as_ref())?;
+    let agent = build_agent_with(ca.as_deref(), NO_REDIRECTS)?;
+    let mut post = |body: &str| post_otlp(&agent, &config.endpoint, token.as_deref(), body);
+    export_otlp(events, config, policy, &mut post, pause, SAMPLE_HOST, now)
+}
+
+
 pub fn run_syslog(config: &SyslogConfig, events: &[EcsEvent]) -> Result<(), ExportError> {
     let header = SyslogHeader {
         hostname: config.hostname.clone(),
@@ -92,6 +124,12 @@ pub fn run_syslog(config: &SyslogConfig, events: &[EcsEvent]) -> Result<(), Expo
             close(&mut stream)
         }
     }
+}
+
+
+/// Reloads of the export settings are appended to this log.
+pub fn audit_into(log: AuditLog<File>) -> Box<SharedAuditFn> {
+    Box::new(move |entry| append(&log, entry))
 }
 
 
@@ -120,6 +158,20 @@ pub fn run<Output: Write>(args: &[&str], out: &mut Output, resolve: &ResolveFn) 
             let events = sample_events(parse_number(count)?, parse_number(first)?, now);
             syslog_command(out, &load_export(Path::new(config_path))?, &events)
         }
+        ["otlp", config_path, count, first] => {
+            let events = sample_events(parse_number(count)?, parse_number(first)?, now);
+            let path = Path::new(config_path);
+            let log = open_file_log(&path.with_extension(AUDIT_EXTENSION))?;
+            let context = ReloadContext {
+                actor_id: SAMPLE_HOST.to_string(),
+                tenant: SAMPLE_HOST.to_string(),
+                module: AUDIT_MODULE.to_string(),
+                target: config_path.to_string(),
+                request_id: AUDIT_REQUEST_ID.to_string(),
+            };
+            let engine = open_export_engine(path, audit_into(log), context)?;
+            otlp_command(out, &engine, &events, &RetryPolicy::default(), &mut sleep, now)
+        }
         _ => Err(ExportError::Usage),
     }
 }
@@ -143,7 +195,26 @@ pub fn webhook_command<Output: Write>(
     now: OffsetDateTime,
 ) -> Result<(), ExportError> {
     let webhook = config.webhook.as_ref().ok_or(ExportError::MissingSection("webhook"))?;
-    let report = run_webhook(webhook, events, resolve, policy, pause, now)?;
+    report_to(out, &run_webhook(webhook, events, resolve, policy, pause, now)?)
+}
+
+
+/// Uses the settings the engine holds now, so a live swap applies from the next run.
+pub fn otlp_command<Output: Write>(
+    out: &mut Output,
+    engine: &ReloadEngine<ExportConfig>,
+    events: &[EcsEvent],
+    policy: &RetryPolicy,
+    pause: &mut SleepFn,
+    now: OffsetDateTime,
+) -> Result<(), ExportError> {
+    let settings = current_config(engine);
+    let otlp = settings.otlp.as_ref().ok_or(ExportError::MissingSection("otlp"))?;
+    report_to(out, &run_otlp(otlp, events, policy, pause, now)?)
+}
+
+
+pub fn report_to<Output: Write>(out: &mut Output, report: &ExportReport) -> Result<(), ExportError> {
     say(
         out,
         &format!(

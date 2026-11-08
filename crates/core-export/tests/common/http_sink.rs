@@ -7,7 +7,7 @@ use std::thread::{spawn, JoinHandle};
 
 
 /// Reads one request, answers with `status`, returns the `Authorization` header value (empty when absent) and the body.
-pub fn serve_one<Stream: Read + Write>(stream: Stream, status: u16) -> io::Result<(String, String)> {
+pub fn serve_one<Stream: Read + Write>(stream: Stream, status: u16, reply: &str) -> io::Result<(String, String)> {
     let mut reader = BufReader::new(stream);
     let headers = reader
         .by_ref()
@@ -28,7 +28,10 @@ pub fn serve_one<Stream: Read + Write>(stream: Stream, status: u16) -> io::Resul
         .unwrap_or(0);
     let mut body = vec![u8::MIN; length];
     reader.read_exact(&mut body)?;
-    let response = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    let response = format!(
+        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+        reply.len()
+    );
     reader.get_mut().write_all(response.as_bytes())?;
     reader.get_mut().flush()?;
     Ok((
@@ -46,19 +49,26 @@ pub struct HttpSink {
 
 /// Serves one request per entry of `statuses`, over TLS when `tls` is given. Returns the port.
 pub fn spawn_http_sink(tls: Option<Arc<ServerConfig>>, statuses: Vec<u16>) -> Result<HttpSink, Box<dyn Error>> {
+    spawn_replying_sink(tls, statuses.into_iter().map(|status| (status, String::new())).collect())
+}
+
+
+/// Like `spawn_http_sink`, each entry also carries the response body.
+pub fn spawn_replying_sink(tls: Option<Arc<ServerConfig>>, replies: Vec<(u16, String)>) -> Result<HttpSink, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let handle = spawn(move || {
-        statuses
+        replies
             .iter()
-            .map(|status| {
+            .map(|(status, reply)| {
                 let (tcp, _peer) = listener.accept()?;
                 match &tls {
                     Some(config) => serve_one(
                         StreamOwned::new(ServerConnection::new(config.clone()).map_err(io::Error::other)?, tcp),
                         *status,
+                        reply,
                     ),
-                    None => serve_one(tcp, *status),
+                    None => serve_one(tcp, *status, reply),
                 }
             })
             .collect()
