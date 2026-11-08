@@ -211,7 +211,7 @@ pub fn start_live() -> Result<Live, TestError> {
     let (sender, receiver) = channel();
     let running = handle.clone();
     thread::spawn(move || run_server(config, running, sender).map_err(|error| error.to_string()));
-    let address = receiver.recv_timeout(SERVER_TIMEOUT)?;
+    let address = receiver.recv()?;
     Ok(Live {
         dir,
         url: format!("https://localhost:{}", address.port()),
