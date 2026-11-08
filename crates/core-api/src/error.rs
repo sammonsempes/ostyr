@@ -41,6 +41,8 @@ pub enum StartupError {
     },
     #[error("{0} needs a restart")]
     RestartNeeded(&'static str),
+    #[error("the reload engine is gone, the file watch cannot follow the module file")]
+    EngineGone,
     #[error("file watch: {0}")]
     Watch(#[from] WatchError),
     #[error("plain HTTP is refused on {0}: configure tls_certificate and tls_key, or bind to a loopback address")]
