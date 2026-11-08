@@ -1002,8 +1002,8 @@ Licences to be checked at every release; state known at the time of writing:
 
 | Component | Licence | Consequence |
 | --- | --- | --- |
-| ClickHouse, NATS JetStream, Tetragon, vLLM, CyberChef, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries, guacd (Apache Guacamole proxy, agentless SSH opt-in only) | Apache 2.0 | No particular constraint |
-| OpenTelemetry eBPF profiler | Apache 2.0, kernel-side eBPF programs GPLv2 | Run as a separate process on the agent |
+| ClickHouse, NATS JetStream, vLLM, CyberChef, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries, guacd (Apache Guacamole proxy, agentless SSH opt-in only) | Apache 2.0 | No particular constraint |
+| OpenTelemetry eBPF profiler, Tetragon | Apache 2.0, kernel-side eBPF programs GPLv2 (Tetragon: BSD-2-Clause or GPLv2) | Run as a separate process on the agent |
 | osquery | Apache 2.0 / GPLv2 (dual licence) | No particular constraint |
 | YARA-X, Zeek, Unbound, OpenCanary, ipmitool | BSD | No particular constraint |
 | lldpd | ISC | No particular constraint |
@@ -1013,7 +1013,7 @@ Licences to be checked at every release; state known at the time of writing:
 | USBGuard, smartmontools, NUT | GPLv2 or later (NUT Python scripts GPLv3 or later) | Run as separate processes, not linked to the platform code |
 | Zitadel, RustDesk (`hbbs`, `hbbr` and the project build of the endpoint service), MinIO | AGPL-3.0 | Separate processes; the RustDesk project build publishes its sources |
 | Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap, WSUS | Not used | Excluded by the component rules (section 4): own interface, extra durable state or non-compatible licence |
-| Vulnerability and baseline data: OSV, NVD, CISA KEV, EPSS, ANSSI hygiene guide, DISA STIGs | OSV: one licence per source database (CC BY 4.0, CC0, Apache 2.0, CC BY-SA 4.0 and, for Chainguard, CC BY-NC-ND 4.0); public domain (NVD, STIGs); CC0 (KEV); free of charge with no licence text published (EPSS); Etalab Open Licence 2.0 (ANSSI) | Data, not code; attribution kept; feeds verified at download; OSV sources under a non-commercial or no-derivatives licence are not ingested |
+| Vulnerability and baseline data: OSV, NVD, CISA KEV, EPSS, ANSSI hygiene guide, DISA STIGs | OSV: one licence per source database (CC BY 4.0, CC0, Apache 2.0, CC BY-SA 4.0, MIT, BSD and, for Chainguard, CC BY-NC-ND 4.0); public domain (NVD, STIGs); CC0 (KEV); free of charge with no licence text published (EPSS); Etalab Open Licence 2.0 (ANSSI) | Data, not code; attribution kept; feeds verified at download; OSV sources under a non-commercial or no-derivatives licence are not ingested |
 | Apple APNs and MDM protocol, Android Management API | Vendor services under their terms | Services used through their public APIs, no component redistributed; prerequisites in section 19 |
 | Sysmon | Sysinternals licence (freeware) | Redistribution forbidden: downloaded from Microsoft |
 | Microsoft Defender | Proprietary, included in Windows | Advanced features (custom IOCs, ASR reports) reserved for Defender for Endpoint licences |
