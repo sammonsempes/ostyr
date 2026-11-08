@@ -1,0 +1,68 @@
+use crate::types::TestResult;
+use script_library::model::MAX_PATH_LENGTH;
+use script_library::path::{absolute_components, is_separator, is_under_prefixes};
+
+
+fn prefixes(list: &[&str]) -> Vec<String> {
+    list.iter().map(|prefix| prefix.to_string()).collect()
+}
+
+
+#[test]
+fn separators() -> TestResult {
+    assert!(is_separator('/'));
+    assert!(is_separator('\\'));
+    assert!(!is_separator('a'));
+    Ok(())
+}
+
+
+#[test]
+fn unix_and_drive_paths_are_split() -> TestResult {
+    assert_eq!(absolute_components("/var//log/").ok_or("unix")?, vec!["/", "var", "log"]);
+    assert_eq!(absolute_components("C:\\Data\\x").ok_or("drive")?, vec!["C:", "Data", "x"]);
+    assert_eq!(absolute_components("d:/").ok_or("drive root")?, vec!["d:"]);
+    assert_eq!(absolute_components("/").ok_or("root")?, vec!["/"]);
+    Ok(())
+}
+
+
+#[test]
+fn refused_forms() -> TestResult {
+    let long = format!("/{}", "a".repeat(MAX_PATH_LENGTH));
+    let refused = [
+        "",
+        "relative/path",
+        "./x",
+        "\\x",
+        "\\\\server\\share",
+        "C:",
+        "C:x",
+        "1:/x",
+        "CC:/x",
+        "/a/../b",
+        "/a\\..\\b",
+        "C:\\a\\..",
+        "/a\0b",
+        "/a\nb",
+        long.as_str(),
+    ];
+    refused.iter().for_each(|path| assert!(absolute_components(path).is_none(), "{path:?}"));
+    Ok(())
+}
+
+
+#[test]
+fn prefix_match_is_by_component() -> TestResult {
+    let allowed = prefixes(&["/var/log", "C:\\Data"]);
+    assert!(is_under_prefixes("/var/log", &allowed));
+    assert!(is_under_prefixes("/var/log/app/x.log", &allowed));
+    assert!(is_under_prefixes("C:\\Data\\sub", &allowed));
+    assert!(!is_under_prefixes("/var/logs/x", &allowed));
+    assert!(!is_under_prefixes("/var", &allowed));
+    assert!(!is_under_prefixes("/C:/Data/x", &allowed));
+    assert!(!is_under_prefixes("/var/log/../etc", &allowed));
+    assert!(!is_under_prefixes("/var/log/x", &prefixes(&["relative", "/etc"])));
+    assert!(!is_under_prefixes("/var/log/x", &[]));
+    Ok(())
+}

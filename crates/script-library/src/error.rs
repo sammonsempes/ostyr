@@ -1,0 +1,40 @@
+use core_config::error::ConfigError;
+use thiserror::Error;
+
+
+/// Values never appear in a message: a parameter may carry a secret.
+#[derive(Debug, Error)]
+pub enum ScriptError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("manifest exceeds {max} bytes")]
+    ManifestTooLarge { max: usize },
+    #[error("invalid manifest field `{field}`")]
+    InvalidManifest { field: String },
+    #[error("invalid parameter pattern: {0}")]
+    Pattern(#[source] regex::Error),
+    #[error("missing parameter `{0}`")]
+    MissingParameter(String),
+    #[error("unknown parameter")]
+    UnknownParameter,
+    #[error("parameter `{0}` has the wrong type")]
+    WrongType(String),
+    #[error("parameter `{0}` is too short")]
+    TooShort(String),
+    #[error("parameter `{0}` is too long")]
+    TooLong(String),
+    #[error("parameter `{0}` contains a NUL byte")]
+    NulByte(String),
+    #[error("parameter `{0}` does not match its pattern")]
+    PatternMismatch(String),
+    #[error("parameter `{0}` is out of range")]
+    OutOfRange(String),
+    #[error("parameter `{0}` is not one of the allowed values")]
+    NotAllowed(String),
+    #[error("parameter `{0}` is not a plain absolute path")]
+    MalformedPath(String),
+    #[error("parameter `{0}` is outside the allowed prefixes")]
+    PathOutsidePrefixes(String),
+    #[error("script digest does not match the manifest")]
+    DigestMismatch,
+}
