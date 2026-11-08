@@ -8,7 +8,9 @@ use core_audit::log::{check_private, owner_only};
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 
@@ -100,9 +102,32 @@ pub fn save_accounts<Output: Write>(output: Output, accounts: &AccountMap) -> Re
 }
 
 
+/// Opens `path` for reading without blocking on a FIFO or device, and refuses anything but a regular file, judged on the opened handle.
+pub fn open_regular(path: &Path) -> io::Result<File> {
+    let file = non_blocking(OpenOptions::new().read(true)).open(path)?;
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(ErrorKind::InvalidInput, "not a regular file"))
+    }
+}
+
+
+#[cfg(unix)]
+pub fn non_blocking(options: &mut OpenOptions) -> &mut OpenOptions {
+    options.custom_flags(libc::O_NONBLOCK)
+}
+
+
+#[cfg(not(unix))]
+pub fn non_blocking(options: &mut OpenOptions) -> &mut OpenOptions {
+    options
+}
+
+
 /// A missing file is an empty store; an existing file must grant nothing to group or other.
 pub fn load_store_file(path: &Path) -> Result<(AccountMap, CredentialMap), AuthError> {
-    match File::open(path) {
+    match open_regular(path) {
         Ok(file) => {
             check_private(&file)?;
             load_store(file)
@@ -120,6 +145,38 @@ pub fn load_accounts_file(path: &Path) -> Result<AccountMap, AuthError> {
 
 /// Writes a unique `.<name>.<random>.tmp` beside `path` (create_new, mode 0600), syncs it and renames it over `path`.
 pub fn save_store_file(path: &Path, accounts: &AccountMap, credentials: &CredentialMap, random: RandomFn) -> Result<(), AuthError> {
+    save_store_file_with(path, accounts, credentials, random, sync_directory)
+}
+
+
+/// The directory a relative `path` lives in: `.` when it has no parent component.
+pub fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+
+#[cfg(unix)]
+pub fn sync_directory(directory: &Path) -> io::Result<()> {
+    File::open(directory)?.sync_all()
+}
+
+
+#[cfg(not(unix))]
+pub fn sync_directory(_directory: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+
+/// Like `save_store_file`, with the parent directory sync injected so its failure can be tested.
+pub fn save_store_file_with(
+    path: &Path,
+    accounts: &AccountMap,
+    credentials: &CredentialMap,
+    random: RandomFn,
+    sync_parent: fn(&Path) -> io::Result<()>,
+) -> Result<(), AuthError> {
     let name = path
         .file_name()
         .ok_or_else(|| AuthError::Usage("store path has no file name".to_owned()))?;
@@ -129,6 +186,7 @@ pub fn save_store_file(path: &Path, accounts: &AccountMap, credentials: &Credent
     save_store(&file, accounts, credentials)?;
     file.sync_all()?;
     fs::rename(&temporary, path)?;
+    sync_parent(parent_directory(path))?;
     Ok(())
 }
 
