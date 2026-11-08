@@ -1,6 +1,7 @@
 pub mod types;
 
 
+use agent_command::cli::log_dispatch;
 use agent_command::keys::open_keys_engine;
 use agent_command::model::{Action, Command, KeyClass, Sequences, TrustedKeys, Verifier, NONCE_LENGTH};
 use agent_command::sign::{memory_signer, sign_command};
@@ -12,8 +13,19 @@ use ed25519_dalek::SigningKey;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tempfile::TempDir;
+use tracing::Dispatch;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
+
+
+pub static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+pub fn capture_dispatch(writer: BoxMakeWriter) -> Dispatch {
+    LazyLock::force(&ANCHOR);
+    log_dispatch(writer)
+}
 
 
 pub const NOW: u64 = 1_700_000_000;

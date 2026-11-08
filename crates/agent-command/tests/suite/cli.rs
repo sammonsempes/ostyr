@@ -1,7 +1,7 @@
 use crate::common::types::TestResult;
-use crate::common::{setup, NOW, SEED_LENGTH};
+use crate::common::{capture_dispatch, setup, NOW, SEED_LENGTH};
 use agent_command::cli::{
-    log_dispatch, parse_action, parse_class, parse_sequence, seconds_since_epoch, signing_key_from, verify_session, write_keypair, write_signed,
+    parse_action, parse_class, parse_sequence, seconds_since_epoch, signing_key_from, verify_session, write_keypair, write_signed,
 };
 use agent_command::error::CliError;
 use agent_command::model::{Action, KeyClass};
@@ -246,7 +246,7 @@ fn refusals_and_clock_warnings_reach_the_injected_writer() -> TestResult {
     let setup = setup()?;
     let captured = SharedBuffer(Arc::new(Mutex::new(Vec::new())));
     let sink = captured.clone();
-    let dispatch = log_dispatch(BoxMakeWriter::new(move || sink.clone()));
+    let dispatch = capture_dispatch(BoxMakeWriter::new(move || sink.clone()));
     let before_epoch = UNIX_EPOCH.duration_since(SystemTime::now());
     tracing::dispatcher::with_default(&dispatch, || -> TestResult {
         seconds_since_epoch(before_epoch);
