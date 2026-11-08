@@ -21,3 +21,13 @@ variable "ssh_public_key" {
 variable "created_at" {
   type = number
 }
+
+variable "domain_type" {
+  type    = string
+  default = "kvm"
+
+  validation {
+    condition     = contains(["kvm", "qemu"], var.domain_type)
+    error_message = "domain_type must be kvm or qemu"
+  }
+}

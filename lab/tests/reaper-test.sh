@@ -36,7 +36,7 @@ define_lab() {
     local prefix
     prefix="$(lab_prefix "$task")"
     cat >"$work_dir/$task.xml" <<EOF
-<domain type='kvm'>
+<domain type='$([[ "$(lab_accel)" == kvm ]] && echo kvm || echo qemu)'>
   <name>$prefix-vm</name>
   <memory unit='MiB'>16</memory>
   <os><type>hvm</type></os>

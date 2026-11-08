@@ -120,9 +120,13 @@ case "$image" in
     *) prepare_linux ;;
 esac
 
+accel="$(lab_accel)"
+factor="$(accel_timeout_factor)"
 packer init "$template"
 packer build -color=false \
     -var "image_checksum=$image_sum" \
+    -var "accelerator=$accel" \
+    -var "timeout_factor=$factor" \
     -var "output_directory=$work_dir/output" \
     -var "ssh_private_key_file=$work_dir/id_ed25519" \
     -var "ssh_public_key=$(cat "$work_dir/id_ed25519.pub")" \

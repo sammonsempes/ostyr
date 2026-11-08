@@ -10,6 +10,10 @@ readonly IMAGE="ubuntu-2404"
 readonly SLOW_SECONDS=3
 
 failures=0
+fails() {
+    ! "$@"
+}
+
 check() {
     local description="$1"
     shift
@@ -31,6 +35,7 @@ cat >"$work_dir/home/.local/bin/packer" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$1" == "build" ]]; then
     echo call >>"$STUB_COUNT"
+    printf '%s\n' "$*" >"$STUB_ARGS"
     for argument in "$@"; do
         [[ "$argument" == output_directory=* ]] && output="${argument#output_directory=}"
     done
@@ -71,7 +76,7 @@ printf '#!/usr/bin/env bash\n' >"$work_dir/home/.local/bin/gpgv"
 printf '#!/usr/bin/env bash\n' >"$work_dir/home/.local/bin/qemu-img"
 chmod +x "$work_dir/home/.local/bin/"*
 
-export STUB_COUNT="$work_dir/count" STUB_POOL="$work_dir/pool" STUB_IMAGE_FILE="$image_file"
+export STUB_ARGS="$work_dir/args" STUB_COUNT="$work_dir/count" STUB_POOL="$work_dir/pool" STUB_IMAGE_FILE="$image_file"
 export LAB_BUILD_LOCK_DIR="$work_dir/locks"
 export HOME="$work_dir/home"
 build="$work_dir/lab/images/build.sh"
@@ -124,6 +129,31 @@ second_pid=$!
 check "first concurrent build succeeds" wait "$first_pid"
 check "second concurrent build succeeds" wait "$second_pid"
 check "concurrent builds call packer once" test "$(calls)" = 1
+
+invalid_accel() {
+    (
+        export LAB_ACCEL=xen
+        lab_accel
+    ) 2>/dev/null
+}
+
+touch "$work_dir/fake-kvm"
+check "LAB_ACCEL=kvm is kvm" test "$(LAB_ACCEL=kvm lab_accel)" = kvm
+check "LAB_ACCEL=tcg is tcg" test "$(LAB_ACCEL=tcg lab_accel)" = tcg
+check "readable device selects kvm" test "$(LAB_KVM_DEVICE="$work_dir/fake-kvm" lab_accel)" = kvm
+check "missing device selects tcg" test "$(LAB_KVM_DEVICE="$work_dir/absent" lab_accel)" = tcg
+check "LAB_ACCEL overrides the device" test "$(LAB_ACCEL=tcg LAB_KVM_DEVICE="$work_dir/fake-kvm" lab_accel)" = tcg
+check "invalid LAB_ACCEL is refused" fails invalid_accel
+check "kvm factor is 1" test "$(LAB_ACCEL=kvm accel_timeout_factor)" = 1
+check "tcg factor is TCG_TIMEOUT_FACTOR" test "$(LAB_ACCEL=tcg accel_timeout_factor)" = "$TCG_TIMEOUT_FACTOR"
+
+fingerprint_before="$(cat "$work_dir/pool/$IMAGE.qcow2.inputs")"
+for accel in kvm tcg; do
+    check "forced $accel build succeeds" env LAB_ACCEL="$accel" "$build" --force "$IMAGE" >/dev/null 2>&1
+    check "packer receives accelerator=$accel" grep -q -- "-var accelerator=$accel " "$STUB_ARGS"
+    check "$accel build keeps the fingerprint" test "$(cat "$work_dir/pool/$IMAGE.qcow2.inputs")" = "$fingerprint_before"
+done
+check "tcg passes the timeout factor" grep -q -- "-var timeout_factor=$TCG_TIMEOUT_FACTOR " "$STUB_ARGS"
 
 [[ "$failures" -eq 0 ]] || die "$failures check(s) failed"
 log "all build-skip checks passed"

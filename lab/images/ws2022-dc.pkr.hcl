@@ -7,6 +7,18 @@ packer {
   }
 }
 
+variable "accelerator" {
+  type        = string
+  default     = "kvm"
+  description = "build.sh passes kvm or tcg"
+}
+
+variable "timeout_factor" {
+  type        = number
+  default     = 1
+  description = "build.sh multiplies the SSH timeout under tcg"
+}
+
 variable "output_directory" {
   type    = string
   default = "output/ws2022-dc"
@@ -64,7 +76,7 @@ source "qemu" "ws2022" {
   disk_compression  = true
   format            = "qcow2"
   net_device        = "virtio-net"
-  accelerator       = "kvm"
+  accelerator       = var.accelerator
   machine_type      = "q35"
   efi_boot          = true
   efi_firmware_code = "/usr/share/OVMF/OVMF_CODE_4M.fd"
@@ -90,7 +102,7 @@ source "qemu" "ws2022" {
   communicator         = "ssh"
   ssh_username         = "packer"
   ssh_private_key_file = var.ssh_private_key_file
-  ssh_timeout          = "90m"
+  ssh_timeout          = "${90 * var.timeout_factor}m"
   shutdown_command     = "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\finalize.ps1"
   shutdown_timeout     = "30m"
 }

@@ -13,6 +13,8 @@ readonly SECONDS_PER_DAY=86400
 readonly STALE_DAYS=7
 readonly DESTROY_TIMEOUT_SECONDS=120
 readonly KIB_PER_UNIT=4194304
+readonly TCG_TIMEOUT_FACTOR=6
+LAB_KVM_DEVICE="${LAB_KVM_DEVICE:-/dev/kvm}"
 PATH="$HOME/.local/bin:$PATH"
 export PATH
 
@@ -27,6 +29,19 @@ die() {
 
 virsh_lab() {
     virsh -c "$LAB_URI" "$@"
+}
+
+lab_accel() {
+    local accel="${LAB_ACCEL:-}"
+    if [[ -z "$accel" ]]; then
+        if [[ -r "$LAB_KVM_DEVICE" && -w "$LAB_KVM_DEVICE" ]]; then accel=kvm; else accel=tcg; fi
+    fi
+    [[ "$accel" == "kvm" || "$accel" == "tcg" ]] || die "invalid LAB_ACCEL '$accel' (kvm or tcg)"
+    printf '%s' "$accel"
+}
+
+accel_timeout_factor() {
+    if [[ "$(lab_accel)" == "tcg" ]]; then printf '%s' "$TCG_TIMEOUT_FACTOR"; else printf '1'; fi
 }
 
 validate_task_id() {

@@ -89,7 +89,7 @@ free_subnet_octet() {
 wait_for_ssh() {
     local key="$1" user="$2" address="$3"
     local attempt
-    for ((attempt = 0; attempt < SSH_ATTEMPTS; attempt++)); do
+    for ((attempt = 0; attempt < ssh_attempts; attempt++)); do
         if ssh -n -i "$key" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
             "$user@$address" "exit 0" 2>/dev/null; then
             return 0
@@ -121,6 +121,12 @@ cp "$profile_source" "$lab_state/profile.yaml"
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-lab-$task_id" -f "$lab_state/id_ed25519"
 
 
+accel="$(lab_accel)"
+factor="$(accel_timeout_factor)"
+domain_type=kvm
+[[ "$accel" == "kvm" ]] || domain_type=qemu
+ssh_attempts=$((SSH_ATTEMPTS * factor))
+
 jq -n \
     --arg task_id "$task_id" \
     --arg profile_file "$lab_state/profile.yaml" \
@@ -128,6 +134,7 @@ jq -n \
     --argjson subnet_octet "$(free_subnet_octet)" \
     --arg ssh_public_key "$(cat "$lab_state/id_ed25519.pub")" \
     --argjson created_at "$(date +%s)" \
+    --arg domain_type "$domain_type" \
     '$ARGS.named' >"$lab_state/vars.json"
 
 BOUND_SECONDS="${LAB_INIT_TIMEOUT:-$INIT_TIMEOUT_SECONDS}" run_tofu_bounded "$task_id" init -input=false -no-color >"$lab_state/init.log" 2>&1 || {
