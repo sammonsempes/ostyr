@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 pub type SharedState = Arc<ApiState>;
 
 
+pub type PendingGenerations = Mutex<BTreeMap<String, u64>>;
+
+
 pub type KeyedLimiter = Mutex<BTreeMap<IpAddr, Window>>;
 
 

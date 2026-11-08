@@ -22,7 +22,7 @@ use core_auth::oidc::{
     Identity, KeyRefreshGate, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
 };
 use core_auth::random::{os_random, random_array};
-use core_auth::service::{log_lockout, record, ACTION_LOGIN, ANONYMOUS_ACTOR};
+use core_auth::service::{log_lockout, record, State as AuthState, ACTION_LOGIN, ANONYMOUS_ACTOR};
 use core_auth::session::{hash_token, session_owner};
 use core_auth::types::{PendingMap, RoleCatalog};
 use openidconnect::url::Url;
@@ -62,6 +62,9 @@ pub const REASON_BAD_REQUEST: &str = "bad_request";
 
 
 pub const REASON_BAD_BINDING: &str = "bad_binding";
+
+
+pub const REASON_IDENTITY_CHANGED: &str = "identity_changed";
 
 
 pub const SCOPE_SOURCE: &str = "source";
@@ -170,6 +173,7 @@ pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime
         http: Box::new(move |request| http_call(&agent, request)),
         resolve: Box::new(move |_| read_secret(&secret_file)),
         pending: Mutex::new(PendingMap::new()),
+        generations: Mutex::default(),
         refresh: KeyRefreshGate::default(),
     })
 }
@@ -190,17 +194,30 @@ pub fn oidc_context(runtime: &OidcRuntime) -> OidcContext<'_> {
 }
 
 
-pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, source: &str, fresh: PendingMap) -> Result<(), ApiError> {
+/// Inserts `fresh` only while the identity generation is still `started`; `generations` is locked after `pending`, always.
+pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, source: &str, started: u64, fresh: PendingMap) -> Result<(), ApiError> {
     let now = (app.clock)();
     let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut generations = runtime.generations.lock().unwrap_or_else(PoisonError::into_inner);
     prune_pending(&mut pending, now);
+    generations.retain(|state, _| pending.contains_key(state));
     let from_source = pending.values().filter(|login| login.source == source).count();
-    if pending.len() >= PENDING_MAX || from_source >= PENDING_PER_SOURCE_MAX {
+    if app.identity.load().generation != started {
+        Err(refusal(
+            app,
+            request_id,
+            source,
+            REASON_IDENTITY_CHANGED,
+            Outcome::Denied,
+            ApiError::InvalidCredentials,
+        ))
+    } else if pending.len() >= PENDING_MAX || from_source >= PENDING_PER_SOURCE_MAX {
         let inputs = auth_inputs(app);
         let context = auth_context(app, request_id, &app.verify, &inputs);
         Err(audit_denial(&context, now, ANONYMOUS_ACTOR, OidcDenial::TooManyPending, source)
             .map_or_else(|failure| auth_failure(&failure), |()| ApiError::TooManyRequests))
     } else {
+        generations.extend(fresh.keys().map(|state| (state.clone(), started)));
         pending.extend(fresh);
         Ok(())
     }
@@ -209,12 +226,13 @@ pub fn store_pending(app: &ApiState, runtime: &OidcRuntime, request_id: &str, so
 
 pub fn begin(app: &ApiState, request_id: &str, source: &str) -> Result<String, ApiError> {
     let runtime = oidc_runtime(app)?;
+    let started = app.identity.load().generation;
     let inputs = auth_inputs(app);
     let context = auth_context(app, request_id, &app.verify, &inputs);
-    store_pending(app, &runtime, request_id, source, PendingMap::new())?;
+    store_pending(app, &runtime, request_id, source, started, PendingMap::new())?;
     let mut fresh = PendingMap::new();
     let location = begin_login(&context, &oidc_context(&runtime), &mut fresh, (app.clock)(), source).map_err(|failure| auth_failure(&failure))?;
-    store_pending(app, &runtime, request_id, source, fresh)?;
+    store_pending(app, &runtime, request_id, source, started, fresh)?;
     Ok(location)
 }
 
@@ -347,9 +365,15 @@ pub fn parse_callback(
 }
 
 
-pub fn take_login(app: &ApiState, runtime: &OidcRuntime, request_id: &str, callback: &Callback) -> Result<PendingLogin, ApiError> {
+/// Removes the login and returns it with the generation recorded when it started, which `settle` checks again before it mints a session.
+pub fn take_login(app: &ApiState, runtime: &OidcRuntime, request_id: &str, callback: &Callback) -> Result<(PendingLogin, u64), ApiError> {
     let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
-    take_pending(&mut pending, &callback.state, (app.clock)()).map_err(|denial| deny(app, request_id, &callback.source, denial))
+    let mut generations = runtime.generations.lock().unwrap_or_else(PoisonError::into_inner);
+    let taken = take_pending(&mut pending, &callback.state, (app.clock)());
+    let started = generations.remove(&hash_token(&callback.state));
+    taken
+        .map(|login| (login, started.unwrap_or(u64::MAX)))
+        .map_err(|denial| deny(app, request_id, &callback.source, denial))
 }
 
 
@@ -376,12 +400,42 @@ pub async fn fetch_off_worker(
 }
 
 
-pub fn settle(app: &ApiState, runtime: &OidcRuntime, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
+pub fn settle(
+    app: &ApiState,
+    runtime: &OidcRuntime,
+    request_id: &str,
+    identity: &Identity,
+    callback: &Callback,
+    started: u64,
+) -> Result<SecretString, ApiError> {
     let mut auth = lock_auth(app);
+    if app.identity.load().generation != started {
+        Err(refusal(
+            app,
+            request_id,
+            &callback.source,
+            REASON_IDENTITY_CHANGED,
+            Outcome::Denied,
+            ApiError::InvalidCredentials,
+        ))
+    } else {
+        mint_session(app, &mut auth, runtime, request_id, identity, callback)
+    }
+}
+
+
+pub fn mint_session(
+    app: &ApiState,
+    auth: &mut AuthState,
+    runtime: &OidcRuntime,
+    request_id: &str,
+    identity: &Identity,
+    callback: &Callback,
+) -> Result<SecretString, ApiError> {
     let inputs = auth_inputs(app);
     let context = auth_context(app, request_id, &app.verify, &inputs);
     let token =
-        settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
+        settle_identity(auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
     session_owner(&auth.sessions, token.expose_secret())
         .iter()
         .for_each(|username| remember_callback_account(app, username));
@@ -415,9 +469,9 @@ pub async fn run_callback(
 ) -> Result<SecretString, ApiError> {
     let callback = parse_callback(app, request_id, source, binding, query)?;
     let runtime = oidc_runtime(app)?;
-    let login = take_login(app, &runtime, request_id, &callback)?;
+    let (login, started) = take_login(app, &runtime, request_id, &callback)?;
     let identity = fetch_off_worker(app, &runtime, request_id, login, &callback).await?;
-    settle(app, &runtime, request_id, &identity, &callback)
+    settle(app, &runtime, request_id, &identity, &callback, started)
 }
 
 

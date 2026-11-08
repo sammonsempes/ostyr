@@ -1,5 +1,5 @@
 use crate::error::StartupError;
-use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs};
+use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, StateInputs};
 use crate::oidc::load_oidc;
 use crate::reload::content_digest;
 use crate::routes::{core_access, openapi_document};
@@ -51,19 +51,43 @@ pub fn merged_document(module: &str, extra_documents: Vec<OpenApiDocument>) -> O
 }
 
 
-pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_documents: Vec<OpenApiDocument>) -> Result<ApiState, StartupError> {
-    let key = read_key_file(&config.key_file)?;
+/// Reads the key, the list and the OIDC files once each, then builds the state from them.
+pub fn build_state_from_files(
+    config: &ApiConfig,
+    extra_access: AccessTable,
+    extra_documents: Vec<OpenApiDocument>,
+) -> Result<ApiState, StartupError> {
+    let oidc = config
+        .oidc
+        .as_ref()
+        .map(|files| load_oidc(files, &builtin_catalog()).map(Arc::new))
+        .transpose()?;
+    let inputs = StateInputs {
+        key: Arc::new(read_key_file(&config.key_file)?),
+        compromised: Arc::new(read_compromised(&config.compromised_list)?),
+        oidc,
+    };
+    build_state(config, &inputs, extra_access, extra_documents)
+}
+
+
+/// Builds the state from the key, the list and the OIDC runtime already read, so no file is read twice.
+pub fn build_state(
+    config: &ApiConfig,
+    inputs: &StateInputs,
+    extra_access: AccessTable,
+    extra_documents: Vec<OpenApiDocument>,
+) -> Result<ApiState, StartupError> {
     let audit = open_file_log(&config.audit_log)?;
-    let compromised = read_compromised(&config.compromised_list)?;
     let (accounts, credentials) = load_store_file(&config.accounts_store)?;
     let catalog = builtin_catalog();
-    let oidc = config.oidc.as_ref().map(|files| load_oidc(files, &catalog).map(Arc::new)).transpose()?;
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
         identity: ArcSwap::from_pointee(ApiIdentity {
             module: config.module.clone(),
             tenant: config.tenant.clone(),
+            generation: 0,
         }),
         auth: Mutex::new(State {
             accounts,
@@ -71,8 +95,8 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
             ..State::default()
         }),
         audit,
-        key: ArcSwap::from_pointee(key),
-        compromised: ArcSwap::from_pointee(compromised),
+        key: ArcSwap::new(inputs.key.clone()),
+        compromised: ArcSwap::new(inputs.compromised.clone()),
         catalog,
         random: os_random,
         clock: OffsetDateTime::now_utc,
@@ -84,7 +108,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         hashing: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
         dispatch: tracing::dispatcher::get_default(Dispatch::clone),
         limits: Arc::new(ArcSwap::from_pointee(config.limits)),
-        oidc: ArcSwapOption::new(oidc),
+        oidc: ArcSwapOption::new(inputs.oidc.clone()),
         callback_accounts: Mutex::new(BTreeSet::new()),
     })
 }

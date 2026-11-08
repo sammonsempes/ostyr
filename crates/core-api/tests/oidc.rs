@@ -17,15 +17,16 @@ use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode};
 use core_api::config::{api_config, oidc_files};
 use core_api::error::StartupError;
-use core_api::model::{ApiError, ApiState, CallbackQuery, OidcFiles, OidcRuntime};
+use core_api::model::{ApiError, ApiIdentity, ApiState, CallbackQuery, OidcFiles, OidcRuntime, StateInputs};
 use core_api::oidc::{
     binding_cookie, binding_of, callback_flow, count_callback_failure, load_oidc, provider_agent, read_secret, start_flow, start_response,
     BINDING_COOKIE, PENDING_PER_SOURCE_MAX,
 };
 use core_api::routes::core_access;
-use core_api::state::{build_state, refresh_accounts};
+use core_api::state::{build_state, build_state_from_files, lock_auth, refresh_accounts};
 use core_audit::log::{new_log, sync_file};
 use core_audit::model::GENESIS_HASH;
+use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
 use core_auth::limiter::{account_key, source_key, SOURCE_MAX_FAILURES};
 use core_auth::model::{Attempts, PendingLogin};
@@ -130,6 +131,7 @@ fn runtime_over(
         http,
         resolve: Box::new(|_| Ok(SecretString::from(CLIENT_SECRET))),
         pending: Mutex::new(Default::default()),
+        generations: Default::default(),
         refresh: Default::default(),
     })
 }
@@ -620,6 +622,64 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
 }
 
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_login_in_flight_during_an_identity_change_is_refused() -> TestResult {
+    let cell = TokenCell::default();
+    let held = Arc::new(AtomicBool::new(false));
+    let released = Arc::new(AtomicBool::new(false));
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    let (provider_held, provider_released, provider_arrivals, provider_cell) =
+        (Arc::clone(&held), Arc::clone(&released), Arc::clone(&arrivals), cell.clone());
+    let runtime = runtime_over(
+        CONFIG_TEXT,
+        Box::new(move |request| {
+            if provider_held.load(Ordering::SeqCst) {
+                provider_arrivals.fetch_add(1, Ordering::SeqCst);
+                (0..RELEASE_WAIT_POLLS).find(|_| {
+                    sleep(StdDuration::from_millis(POLL_MILLIS));
+                    provider_released.load(Ordering::SeqCst)
+                });
+            }
+            respond(&provider_cell, request)
+        }),
+    )?;
+    let fx = fixture_with(move |state| {
+        Ok(ApiState {
+            oidc: ArcSwapOption::from_pointee(runtime),
+            ..state
+        })
+    })?;
+    let started = start(&fx).await?;
+    set_identity(&cell, &started, &json!([ANALYST_GROUP]))?;
+    held.store(true, Ordering::SeqCst);
+    let target = format!("/auth/oidc/callback?{}", query_for(&started));
+    let inflight = tokio::spawn(status_of(fx.router.clone(), CLIENT_OFFSET, target, Some(started.cookie.clone())));
+    let mut waited = 0;
+    while arrivals.load(Ordering::SeqCst) == 0 && waited < ARRIVAL_WAIT_POLLS {
+        sleep_async(StdDuration::from_millis(POLL_MILLIS)).await;
+        waited += 1;
+    }
+    assert!(arrivals.load(Ordering::SeqCst) > 0);
+    let original = fx.state.identity.load_full();
+    let away = ApiIdentity {
+        tenant: "other-tenant".to_owned(),
+        generation: original.generation + 1,
+        ..(*original).clone()
+    };
+    let back = ApiIdentity {
+        generation: away.generation + 1,
+        ..(*original).clone()
+    };
+    fx.state.identity.store(Arc::new(away));
+    fx.state.identity.store(Arc::new(back));
+    released.store(true, Ordering::SeqCst);
+    assert_eq!(inflight.await??, StatusCode::UNAUTHORIZED);
+    assert!(has_reason(&fx, "auth.login", "identity_changed")?);
+    assert!(lock_auth(&fx.state).sessions.is_empty());
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn an_unreachable_provider_is_a_502_at_start() -> TestResult {
     let fx = failing_http_fixture()?;
@@ -814,9 +874,9 @@ fn oidc_files_in(dir: &Path, config_text: &str) -> Result<OidcFiles, TestError> 
 fn the_module_starts_with_or_without_oidc() -> TestResult {
     let dir = tempdir()?;
     let mut config = config_in(&dir)?;
-    assert!(build_state(&config, Default::default(), Vec::new())?.oidc.load().is_none());
+    assert!(build_state_from_files(&config, Default::default(), Vec::new())?.oidc.load().is_none());
     config.oidc = Some(oidc_files_in(dir.path(), CONFIG_TEXT)?);
-    let state = build_state(&config, Default::default(), Vec::new())?;
+    let state = build_state_from_files(&config, Default::default(), Vec::new())?;
     let runtime = state.oidc.load_full().ok_or("no oidc")?;
     assert_eq!(runtime.config.client_id, CLIENT_ID);
     let secret = (runtime.resolve)(&runtime.config.client_secret)?;
@@ -828,12 +888,34 @@ fn the_module_starts_with_or_without_oidc() -> TestResult {
 
 
 #[test]
+fn the_state_keeps_the_key_list_and_runtime_it_is_handed() -> TestResult {
+    let dir = tempdir()?;
+    let mut config = config_in(&dir)?;
+    config.oidc = Some(oidc_files_in(dir.path(), CONFIG_TEXT)?);
+    let runtime = Arc::new(runtime_over(CONFIG_TEXT, Box::new(panicking_http))?);
+    let inputs = StateInputs {
+        key: Arc::new(read_key_file(&config.key_file)?),
+        compromised: Arc::new(Default::default()),
+        oidc: Some(runtime.clone()),
+    };
+    let state = build_state(&config, &inputs, Default::default(), Vec::new())?;
+    assert!(Arc::ptr_eq(&state.key.load_full(), &inputs.key));
+    assert!(Arc::ptr_eq(&state.compromised.load_full(), &inputs.compromised));
+    assert!(state.oidc.load_full().is_some_and(|held| Arc::ptr_eq(&held, &runtime)));
+    Ok(())
+}
+
+
+#[test]
 fn a_bad_oidc_configuration_stops_the_module() -> TestResult {
     let dir = tempdir()?;
     let mut config = config_in(&dir)?;
     let insecure = CONFIG_TEXT.replace("https://idp.example", "http://idp.example");
     config.oidc = Some(oidc_files_in(dir.path(), &insecure)?);
-    assert!(matches!(build_state(&config, Default::default(), Vec::new()), Err(StartupError::Auth(_))));
+    assert!(matches!(
+        build_state_from_files(&config, Default::default(), Vec::new()),
+        Err(StartupError::Auth(_))
+    ));
     config.oidc = Some(OidcFiles {
         config: dir.path().join("missing.yaml"),
         ca_file: None,

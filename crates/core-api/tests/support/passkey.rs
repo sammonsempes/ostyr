@@ -2,7 +2,7 @@ use crate::fixture::{config_in, extra_access, extra_router, private_file, Fixtur
 use crate::types::TestError;
 use core_api::example::example_document;
 use core_api::routes::build_router;
-use core_api::state::build_state;
+use core_api::state::build_state_from_files;
 use core_api::types::SharedState;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
@@ -68,7 +68,7 @@ pub fn fixture_with_passkey() -> Result<Fixture, TestError> {
         "credentials": [stored_passkey()]
     });
     private_file(&config.accounts_store, store.to_string().as_bytes())?;
-    let built = build_state(&config, extra_access(), vec![example_document()])?;
+    let built = build_state_from_files(&config, extra_access(), vec![example_document()])?;
     let state: SharedState = Arc::new(built);
     let router = build_router(state.clone(), extra_router());
     Ok(Fixture { dir, state, router, config })
