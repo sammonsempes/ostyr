@@ -1,0 +1,21 @@
+rule:
+  id: flapping
+  metric: host.metric
+  condition: {kind: threshold, direction: above, threshold: 90}
+  for: 120
+  close_after: 600
+  severity: high
+  runbook: https://runbooks.example.org/flapping
+points: [[0, 50], [60, 95], [120, 95], [180, 95], [240, 85], [300, 92], [360, 85], [420, 92], [480, 70], [540, 85], [600, 92]]
+steps:
+  - {at: 0, expect: inactive}
+  - {at: 60, expect: pending}
+  - {at: 120, expect: pending}
+  - {at: 180, expect: firing}
+  - {at: 240, expect: resolved}
+  - {at: 300, expect: pending}
+  - {at: 360, expect: inactive}
+  - {at: 420, expect: pending}
+  - {at: 480, expect: inactive}
+  - {at: 540, expect: inactive}
+  - {at: 600, expect: pending}

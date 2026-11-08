@@ -1,0 +1,16 @@
+rule:
+  id: absence
+  metric: host.metric
+  condition: {kind: absence, interval: 60}
+  close_after: 300
+  severity: critical
+  runbook: https://runbooks.example.org/absence
+points: [[0, 1], [60, 1], [120, 1], [420, 1], [480, 1], [540, 1], [600, 1], [660, 1], [720, 1]]
+steps:
+  - {at: 120, expect: inactive}
+  - {at: 299, expect: inactive}
+  - {at: 300, expect: firing}
+  - {at: 360, expect: firing}
+  - {at: 420, expect: resolved}
+  - {at: 480, expect: resolved}
+  - {at: 720, expect: closed}
