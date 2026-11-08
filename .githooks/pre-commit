@@ -4,7 +4,7 @@ if ! command -v cargo >/dev/null 2>&1; then export PATH="$HOME/.cargo/bin:$PATH"
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 export CARGO_INCREMENTAL=0
-EXPORT="${COVERAGE_EXPORT:-target/coverage.json}"
+EXPORT="${COVERAGE_EXPORT:-${CARGO_TARGET_DIR:-target}/coverage.json}"
 mkdir -p "$(dirname "$EXPORT")"
 
 LOW=()
