@@ -8,13 +8,17 @@ mod tls_sink;
 mod types;
 
 
+use core_audit::log::{append, genesis_log};
+use core_config::reload::{ReloadContext, ReloadEngine};
 use core_config::secret::SecretRef;
-use core_export::cli::{run, run_syslog, sample_event, sample_events, syslog_command, webhook_command};
-use core_export::config::parse_export;
+use core_export::cli::{otlp_command, run, run_otlp, run_syslog, sample_event, sample_events, syslog_command, webhook_command};
+use core_export::config::{parse_export, ExportConfig};
 use core_export::error::ExportError;
+use core_export::reload::open_export_engine;
 use core_export::types::BoxError;
 use core_export::webhook::RetryPolicy;
 use std::fs;
+use std::io;
 use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
 use std::time::Duration;
@@ -132,6 +136,119 @@ fn run_sends_to_the_webhook_with_the_resolved_token() -> TestResult {
     assert_eq!(received.len(), 1);
     assert_eq!(received.first().map(|(auth, _body)| auth.as_str()), Some("bearer tok"));
     assert!(received.first().is_some_and(|(_auth, body)| body.contains("\"sequence\":102")));
+    Ok(())
+}
+
+
+fn otlp_yaml(endpoint: &str, buffer: &Path, extra: &str) -> String {
+    let insecure = if endpoint.starts_with("http://") {
+        "  allow_insecure_loopback: true\n"
+    } else {
+        ""
+    };
+    format!(
+        "otlp:\n  endpoint: {endpoint}\n  buffer_dir: {}\n  tenant: acme\n{insecure}{extra}",
+        buffer.display()
+    )
+}
+
+
+fn engine_for(path: &Path) -> Result<ReloadEngine<ExportConfig>, Box<dyn std::error::Error>> {
+    let log = genesis_log(io::sink());
+    let context = ReloadContext {
+        actor_id: "test".to_string(),
+        tenant: "acme".to_string(),
+        module: "core-export".to_string(),
+        target: path.display().to_string(),
+        request_id: "r".to_string(),
+    };
+    Ok(open_export_engine(path, Box::new(move |entry| append(&log, entry)), context)?)
+}
+
+
+#[test]
+fn run_sends_otlp_with_the_token_from_a_file_and_audits_to_a_file() -> TestResult {
+    let dir = tempdir()?;
+    let authority = pki::test_pki()?;
+    let http_sink::HttpSink { port, bodies } = http_sink::spawn_http_sink(Some(authority.server_config.clone()), vec![STATUS_OK])?;
+    let token = dir.path().join("token");
+    fs::write(&token, "tok\n")?;
+    let ca = dir.path().join("ca.pem");
+    fs::write(&ca, &authority.ca_pem)?;
+    let config = dir.path().join("export.yaml");
+    fs::write(
+        &config,
+        otlp_yaml(
+            &format!("https://localhost:{port}/v1/logs"),
+            &dir.path().join("buf"),
+            &format!("  token_file: {}\n  ca_file: {}\n", token.display(), ca.display()),
+        ),
+    )?;
+    let mut out = Vec::new();
+    run(&["otlp", &config.display().to_string(), "3", "10"], &mut out, &no_secret)?;
+    assert_eq!(String::from_utf8(out)?, "sent=1 buffered=0 drained=0 dropped=0\n");
+    let received = bodies.join().map_err(|_panic| "sink thread panicked")??;
+    assert_eq!(received.first().map(|(auth, _body)| auth.as_str()), Some("bearer tok"));
+    assert!(received
+        .first()
+        .is_some_and(|(_auth, body)| body.contains("resourceLogs") && body.contains("tenant.id")));
+    assert!(dir.path().join("export.audit").exists());
+    Ok(())
+}
+
+
+#[test]
+fn otlp_arguments_files_and_credentials_are_checked() -> TestResult {
+    let dir = tempdir()?;
+    assert!(matches!(
+        run(&["otlp", "cfg", "x", "0"], &mut Vec::new(), &no_secret),
+        Err(ExportError::Usage)
+    ));
+    assert!(matches!(
+        run(&["otlp", "cfg", "1", "x"], &mut Vec::new(), &no_secret),
+        Err(ExportError::Usage)
+    ));
+    let missing = dir.path().join("missing.yaml");
+    assert!(matches!(
+        run(&["otlp", &missing.display().to_string(), "1", "0"], &mut Vec::new(), &no_secret),
+        Err(ExportError::Config(_))
+    ));
+    let blocked = dir.path().join("blocked.yaml");
+    fs::write(&blocked, otlp_yaml("http://127.0.0.1:1/v1/logs", dir.path(), ""))?;
+    fs::create_dir(blocked.with_extension("audit"))?;
+    assert!(matches!(
+        run(&["otlp", &blocked.display().to_string(), "1", "0"], &mut Vec::new(), &no_secret),
+        Err(ExportError::Audit(_))
+    ));
+    let path = dir.path().join("export.yaml");
+    fs::write(
+        &path,
+        otlp_yaml("https://localhost:1/v1/logs", dir.path(), "  token_file: /nonexistent/token\n"),
+    )?;
+    assert!(engine_for(&path).is_err());
+    let pem = dir.path().join("bad.pem");
+    fs::write(&pem, "not a pem")?;
+    let config = parse_export(
+        &otlp_yaml("https://localhost:1/v1/logs", dir.path(), &format!("  ca_file: {}\n", pem.display())),
+        "test",
+    )?
+    .otlp
+    .ok_or("no otlp")?;
+    assert!(matches!(
+        run_otlp(&config, &[], &fast_policy(), &mut |_delay| {}, now()?),
+        Err(ExportError::Certificate(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_config_without_an_otlp_section_is_refused() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("export.yaml");
+    fs::write(&path, "webhook:\n  url: https://x.example/h\n  buffer_dir: /tmp/b\n")?;
+    let outcome = otlp_command(&mut Vec::new(), &engine_for(&path)?, &[], &fast_policy(), &mut |_delay| {}, now()?);
+    assert!(matches!(outcome, Err(ExportError::MissingSection("otlp"))));
     Ok(())
 }
 

@@ -52,11 +52,32 @@ pub struct WebhookConfig {
 }
 
 
+/// OTLP/HTTP logs: `endpoint` is the full URL (`https://host:4318/v1/logs`); the bearer token is read from `token_file`; `http://` needs `allow_insecure_loopback`, a loopback host and no token.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpConfig {
+    pub endpoint: String,
+    pub token_file: Option<String>,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    pub buffer_dir: String,
+    #[serde(default = "default_buffer_max_bytes")]
+    pub buffer_max_bytes: u64,
+    pub ca_file: Option<String>,
+    #[serde(default = "default_app_name")]
+    pub service_name: String,
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_loopback: bool,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExportConfig {
     pub syslog: Option<SyslogConfig>,
     pub webhook: Option<WebhookConfig>,
+    pub otlp: Option<OtlpConfig>,
 }
 
 
