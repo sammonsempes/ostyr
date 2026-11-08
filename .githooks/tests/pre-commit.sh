@@ -20,18 +20,22 @@ printf '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n' >"$R/Cargo.toml"
 printf '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n' >"$R/crates/demo/Cargo.toml"
 printf 'target/\n' >"$R/.gitignore"
 cat >"$R/crates/demo/tests/demo.rs" <<'T'
+const TWO: u32 = 2;
+
+
 #[test]
-fn adds() {
-    assert_eq!(demo::add(1, 2), 3);
+fn adds() -> Result<(), String> {
+    assert_eq!(demo::add(1, 1), TWO);
     assert_eq!(demo::pick(true), 1);
     assert_eq!(demo::pick(false), 0);
     assert_eq!(demo::extra(true), 1);
     assert_eq!(demo::extra(false), 0);
+    Ok(())
 }
 T
 
-CLEAN_ADD='pub fn add(a: u32, b: u32) -> u32 {
-    a + b
+CLEAN_ADD='pub fn add(left: u32, right: u32) -> u32 {
+    left + right
 }
 '
 CLEAN_PICK='pub fn pick(flag: bool) -> u32 {
@@ -60,7 +64,7 @@ git init -q
 try() {
   local label=$1 expect=$2 failed_step=${3:-} got
   git add -A
-  if git -c core.hooksPath=${HOOKS:-.githooks} -c user.name=t -c user.email=t@example.com commit -q -m "$label" >"$SCRATCH/out.txt" 2>&1; then
+  if git -c core.hooksPath="${HOOKS:-.githooks}" -c user.name=t -c user.email=t@example.com commit -q -m "$label" >"$SCRATCH/out.txt" 2>&1; then
     got=accepted
   else
     got=refused
@@ -72,15 +76,16 @@ try() {
     echo "FAIL: $label expected $expect got $got"
     tail -n 20 "$SCRATCH/out.txt"
     FAILS=$((FAILS + 1))
+    exit 1
   fi
 }
 
-printf '%s' "pub fn add(a:u32,b:u32)->u32{a+b}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+printf '%s' "pub fn add(left:u32,right:u32)->u32{left+right}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
 try "bad format" refused "1/5 cargo +nightly fmt --check"
 
-printf '%s' "pub fn add(a: u32, b: u32) -> u32 {
+printf '%s' "pub fn add(left: u32, right: u32) -> u32 {
     let unused = 1;
-    a + b
+    left + right
 }$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
 try "clippy error" refused "2/5 cargo clippy"
 
@@ -105,6 +110,7 @@ HOOKS="$MAIN_HOOKS" try "worktree violation" refused "3/5 custom_lint"
 if git log --format=%s | grep -qx "worktree violation"; then
   echo "FAIL: worktree violation reached history"
   FAILS=$((FAILS + 1))
+  exit 1
 fi
 printf '%s' "// a comment
 $CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >"$R/crates/demo/src/lib.rs"
@@ -117,6 +123,7 @@ if ! env PATH="/usr/bin:/bin" "$MAIN_HOOKS/pre-commit" >"$SCRATCH/out.txt" 2>&1;
   echo "FAIL: hook without cargo on PATH"
   tail -n 20 "$SCRATCH/out.txt"
   FAILS=$((FAILS + 1))
+  exit 1
 fi
 cd "$R"
 git checkout -q -- .
@@ -125,6 +132,7 @@ git log -1 --format=%s >/dev/null
 if [ "$(git log --format=%s)" != "clean commit" ]; then
   echo "FAIL: history is not only the clean commit"
   FAILS=$((FAILS + 1))
+  exit 1
 fi
 if [ "$FAILS" -ne 0 ]; then exit 1; fi
 echo "pre-commit tests passed"
