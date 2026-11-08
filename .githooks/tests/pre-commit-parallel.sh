@@ -13,6 +13,7 @@ cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 if [ "$1" = "+nightly" ] && [ "$2" = "fmt" ]; then
   touch "$SYNC/here.$(basename "$PWD")"
+  echo "$CARGO_TARGET_DIR" >"$SYNC/target.$(basename "$PWD")"
   POLLS=0
   MAX_POLLS=600
   while [ "$(find "$SYNC" -name 'here.*' | wc -l)" -lt 2 ] && [ "$POLLS" -lt "$MAX_POLLS" ]; do
@@ -47,5 +48,9 @@ wait "$SECOND" || FAILS=$((FAILS + 1))
 if [ "$FAILS" -ne 0 ]; then
   echo "FAIL: two hooks did not run their Rust steps at once"
   cat "$SCRATCH/out.one" "$SCRATCH/out.two"
+fi
+if [ "$(cat "$SYNC/target.one")" != "$SCRATCH/one/target" ] || [ "$(cat "$SYNC/target.two")" != "$SCRATCH/two/target" ]; then
+  echo "FAIL: the two hooks did not build in their own target directories"
+  FAILS=$((FAILS + 1))
 fi
 exit "$FAILS"

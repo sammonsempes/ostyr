@@ -41,28 +41,17 @@ fi
 
 : >"$STUB_LOG"
 env -u COVERAGE_EXPORT -u CARGO_TARGET_DIR OSTYR_PRIVATE_TARGET=1 PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
-if ! grep -qF -- "--output-path target/coverage.json" "$STUB_LOG"; then
-  echo "FAIL: default export moved"
+if ! grep -qF -- "tdir=$R/target/gates/" "$STUB_LOG"; then
+  echo "FAIL: OSTYR_PRIVATE_TARGET changes the target directory"
   cat "$STUB_LOG"
-  FAILS=$((FAILS + 1))
-fi
-if grep -q "tdir=[^ ]" "$STUB_LOG"; then
-  echo "FAIL: private target got per-gate directories"
   FAILS=$((FAILS + 1))
 fi
 
 : >"$STUB_LOG"
 env -u COVERAGE_EXPORT -u CARGO_TARGET_DIR -u OSTYR_PRIVATE_TARGET PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
 if ! grep -qF -- "tdir=$R/target/gates/" "$STUB_LOG" || ! grep -qF -- "bdir=$R/target/llvm-cov-target" "$STUB_LOG"; then
-  echo "FAIL: default is not the shared directory with a per-gate llvm-cov target"
+  echo "FAIL: default is not the checkout target with a per-gate llvm-cov target"
   cat "$STUB_LOG"
-  FAILS=$((FAILS + 1))
-fi
-
-: >"$STUB_LOG"
-env -u COVERAGE_EXPORT CARGO_TARGET_DIR="$R/target" OSTYR_PRIVATE_TARGET=1 PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
-if ! grep -qF -- "--output-path target/coverage.json" "$STUB_LOG"; then
-  echo "FAIL: opt-out does not beat CARGO_TARGET_DIR"
   FAILS=$((FAILS + 1))
 fi
 
@@ -79,7 +68,7 @@ if env -u COVERAGE_EXPORT CARGO_TARGET_DIR="$SCRATCH/elsewhere" PATH="$SCRATCH/b
   echo "FAIL: foreign CARGO_TARGET_DIR accepted"
   FAILS=$((FAILS + 1))
 fi
-if ! grep -qF "is neither" "$SCRATCH/out" || [ -s "$STUB_LOG" ]; then
+if ! grep -qF "is not" "$SCRATCH/out" || [ -s "$STUB_LOG" ]; then
   echo "FAIL: foreign CARGO_TARGET_DIR not refused before cargo"
   FAILS=$((FAILS + 1))
 fi
@@ -92,8 +81,8 @@ echo y >g.rs
 git add -A
 : >"$STUB_LOG"
 env -u COVERAGE_EXPORT -u CARGO_TARGET_DIR -u OSTYR_PRIVATE_TARGET PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
-if ! grep -qF -- "tdir=$R/target/gates/" "$STUB_LOG"; then
-  echo "FAIL: linked worktree does not use the main checkout target"
+if ! grep -qF -- "tdir=$W/target/gates/" "$STUB_LOG" || grep -qF -- "$R/target" "$STUB_LOG"; then
+  echo "FAIL: linked worktree does not use its own target"
   cat "$STUB_LOG"
   FAILS=$((FAILS + 1))
 fi
