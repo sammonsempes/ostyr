@@ -27,3 +27,6 @@ pub type ItemHandler<'a> = dyn Fn(&Value) -> Result<Vec<Ioc>, EntryError> + 'a;
 
 
 pub type ExportRun = (Vec<FeedSummary>, ExportSummary);
+
+
+pub type TtlDefaults = BTreeMap<String, u32>;
