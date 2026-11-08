@@ -3,6 +3,7 @@ set -euo pipefail
 if ! command -v cargo >/dev/null 2>&1; then export PATH="$HOME/.cargo/bin:$PATH"; fi
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
+export CARGO_INCREMENTAL=0
 EXPORT="${COVERAGE_EXPORT:-target/coverage.json}"
 mkdir -p "$(dirname "$EXPORT")"
 
@@ -24,9 +25,18 @@ gate() {
   if [ -n "${COVERAGE_GATE:-}" ]; then "$COVERAGE_GATE" "$EXPORT" "$ROOT"; else cargo run --offline -q -p coverage_gate -- "$EXPORT" "$ROOT"; fi
 }
 
+covered_tests() {
+  local scratch="/dev/shm/ostyr-gate-$$"
+  mkdir -p "$scratch"
+  local status=0
+  TMPDIR="$scratch" cargo +nightly llvm-cov --offline --branch --fail-under-lines 100 --json --output-path "$EXPORT" || status=$?
+  rm -rf "$scratch"
+  return "$status"
+}
+
 step "1/5 cargo +nightly fmt --check" cargo +nightly fmt --check
 step "2/5 cargo clippy" cargo clippy --offline --all-targets -- -D warnings
 step "3/5 custom_lint" lint
-step "4/5 cargo llvm-cov" cargo +nightly llvm-cov --offline --branch --fail-under-lines 100 --json --output-path "$EXPORT"
+step "4/5 cargo llvm-cov" covered_tests
 step "5/5 coverage_gate" gate
 echo "pre-commit: all steps passed" >&2
