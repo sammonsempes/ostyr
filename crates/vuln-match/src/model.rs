@@ -131,3 +131,49 @@ pub enum Verdict {
     Affected { fixed: Option<String> },
     NotAffected,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Criticality {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScoredFinding {
+    pub finding: Finding,
+    pub cvss: f64,
+    pub epss: f64,
+    pub kev: bool,
+    pub criticality: Criticality,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EolEntry {
+    pub product: String,
+    pub cycle: String,
+    pub end_date: time::Date,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EolTable {
+    #[serde(default)]
+    pub entries: Vec<EolEntry>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EolFinding {
+    pub package: String,
+    pub installed_version: String,
+    pub ecosystem: String,
+    pub cycle: String,
+    pub end_date: time::Date,
+}

@@ -22,3 +22,12 @@ pub enum OsvError {
     #[error("invalid OSV JSON")]
     Json(#[from] serde_json::Error),
 }
+
+
+#[derive(Debug, Error)]
+pub enum EolError {
+    #[error("end-of-life table: {count} entries exceed the limit of {max}")]
+    TooMany { count: usize, max: usize },
+    #[error("end-of-life table: {0}")]
+    Config(#[from] core_config::error::ConfigError),
+}
