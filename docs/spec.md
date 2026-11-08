@@ -12,6 +12,8 @@ An open source cyber platform, usable straight after installation without expert
 - **automatic, reversible tuning by AI**, framed by a deterministic validator, with a complete history.
 - **everything as code and modular**: each module (EDR, WAF, DNS, identity provider…) deploys alone or combined with the others, and all configuration lives in Git, with no no-code interface.
 
+**IT platform scope.** The platform is an IT platform, not only a cyber one: next to detection and response it monitors and manages the estate. It covers host and application metrics (CPU, memory, disk I/O and space, temperature, OOM kills, reboots, system calls through eBPF), network traffic (IDS), HTTP requests and edge attacks (WAF), authentications, logs, threat intel, application health, obsolete versions and vulnerabilities, and it manages devices (scripts, patches, software, remote shell and desktop) on Windows, Linux, macOS and mobile devices. Sections 20 to 23 specify these functions; they follow the same three differentiators and the same component rules (section 4).
+
 Anything that does not serve these three points is either delegated to a connector, shipped as an optional module, or placed out of scope (section 19).
 
 **Target audience.** SMEs and mid-sized companies without a dedicated SOC (main target of v1), in-house SOC teams, and MSSPs thanks to multi-tenancy.
@@ -28,9 +30,11 @@ Anything that does not serve these three points is either delegated to a connect
 - **Full traceability.** Every change, whether made by a human or by the AI, is recorded, comparable (diff) and reversible.
 - **Transparency.** All data, decisions and actions are visible in the interface, including the AI's reasoning.
 - **Secure by design.** The platform is treated as a critical asset, with its own threat model (section 12).
-- **Strict modularity.** Each module (EDR, SIEM and detection, response and cases, AI, identity provider, GRC, WAF, DNS, DHCP, NDR, RMM, CMDB) and each connector works alone. Combined, they enrich each other, but none depends on another to start (section 4).
+- **Strict modularity.** Each module (EDR, SIEM and detection, response and cases, AI, identity provider, GRC, WAF, DNS, DHCP, NDR, RMM, CMDB, monitoring, on-call, status page, site collector, vulnerability and compliance, MDM) and each connector works alone. Combined, they enrich each other, but none depends on another to start (section 4).
 - **Everything as code (IaC).** Deployment, configuration, rules, policies, exclusions, playbooks, connectors, roles and frameworks are described in declarative files versioned in Git. A whole platform can be recreated identically from its repository (section 11).
 - **API first, no no-code.** Every function is first an API, then a CLI command, then a screen. The interface is for viewing, investigating and approving; it offers no visual editor, and every change it makes becomes a commit.
+- **No listening port on a managed device.** Every flow from a managed device is initiated by the device: the agent channel is outbound gRPC over mTLS to the server or a relay (section 4), and remote shell, file transfer and remote desktop travel inside or through outbound connections. No agent opens a listening socket for remote access.
+- **Headless components only.** No third-party component with its own graphical interface reaches a user: the interface is Ostyr's alone (section 13). Durable state lives in PostgreSQL, ClickHouse, NATS JetStream, MinIO or Git; a new stateful component needs an owner decision.
 - **Easy investigation and readable logs.** An event can be understood without knowing its source: plain-language summary, decoded values, context displayed alongside, one-click pivot to everything related to it. The raw data always remains accessible (section 13).
 
 ## 3. Non-functional requirements
@@ -57,6 +61,12 @@ The values below are initial targets for v1, to be confirmed by benchmarks befor
 | Event loss | 0 outside buffer saturation, alert on saturation | Sequence counters |
 | Installing a single module | One command, under 10 min | Installation test in continuous integration |
 | Footprint of a single lightweight module (WAF, DNS, identity provider), excluding storage | 1 vCPU and 1 GB of RAM maximum | Test bench |
+| Metrics ingestion, all-in-one profile | 10,000 samples/s, up to 250 endpoints | Load bench |
+| Metrics ingestion, distributed profile | 250,000 samples/s, up to 10,000 endpoints | Load bench |
+| Metric query delay on rollups (30 days, one series) | < 2 s at the 95th percentile | Load bench |
+| Metric retention per tier | Raw 15 days, 1 minute 90 days, 1 hour 13 months, 1 day 5 years | ClickHouse TTL and tiered storage policies |
+| Metric threshold crossing → alert delay | < 60 s at the 95th percentile | End-to-end timestamps |
+| Alert → first on-call notification delay | < 30 s at the 95th percentile | End-to-end timestamps |
 | Full rebuild from Git | Identical, with no manual action apart from secrets | Weekly rebuild test |
 
 **Sizing.** The documentation provides a storage calculator (endpoints × daily volume × retention × replication factor) and reference hardware profiles.
@@ -79,7 +89,13 @@ Each module is a standalone service: it installs alone (package, container or He
 | **DNS** | Filtering resolver fed by threat intel | Local files | Sinkhole by playbook, correlation |
 | **DHCP** | Kea server in high availability, lease history | PostgreSQL | Automatic quarantine, discovery |
 | **NDR** | Zeek, Suricata, packet capture, file analysis | Local disk | Correlation with endpoints |
-| **RMM** | Monitoring, scripts, software deployment, remote control | PostgreSQL | Remediation by playbook, security context on every device |
+| **RMM** | Scripts, patch management, software deployment, remote shell and desktop | PostgreSQL | Remediation by playbook, security context on every device |
+| **Monitoring** | Metrics, alerting, forecasting, synthetic checks, tracing, application health | ClickHouse | Correlation with security events, CMDB services |
+| **On-call** | Alert routing, schedules, escalation, notifications, silences | PostgreSQL | Every IT and security alert source |
+| **Status page** | Public status page, SLA and SLO reports per business service | PostgreSQL | Monitoring, on-call and CMDB |
+| **Site collector** | Syslog, SNMP traps, flows and Redfish events from a remote site | Local disk buffer | Network devices, discovery, hardware health |
+| **Vulnerability and compliance** | Inventory against CVE, end-of-life, configuration baselines, certificates | PostgreSQL | Risk score, GRC evidence |
+| **MDM** | Apple and Android mobile device management | PostgreSQL | CMDB, access adapted to device posture |
 | **CMDB** | Inventory of assets and their relationships, business services, licences | PostgreSQL | Criticality for the risk score, attack paths and circuit breakers |
 | **Each connector** | Collection from, or action on, a third-party system | None | Feeds every other module |
 
@@ -96,6 +112,10 @@ Three profiles share the same code; only the number of modules, the ingestion mo
 | **All-in-one** | Evaluation, SMEs up to 250 endpoints | One server (or VM), single-node ClickHouse, containerised backend services | Direct, with a disk buffer on the agent side and on the server side |
 | **Distributed** | Mid-sized companies, SOCs, MSSPs | Multi-node ClickHouse cluster, redundant backend services, NATS JetStream | Through NATS JetStream |
 | **Single module** | Targeted need: only the EDR, the WAF, the DNS, the identity provider… | One container or package, with the module's minimal storage | Direct, with optional export to a third-party SIEM |
+
+**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, MinIO (S3, headless, web console disabled) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used, and Guacamole is not used for managed devices. Secrets are files encrypted with SOPS in Git by default; OpenBao is optional.
+
+**No listening port on managed devices.** Every flow from a managed device is initiated by the device. Agentless equipment (switches, printers, BMCs, appliances) pushes to a site collector (section 22); polling it is an explicit per-device opt-in.
 
 Migration from the all-in-one profile to the distributed profile is tooled and does not require reinstalling the agents.
 
@@ -131,6 +151,8 @@ A device used remotely or on the move, without VPN, stays protected and managed 
 | Windows workstation | Windows 10 22H2, Windows 11 | Defender required in active mode for full blocking |
 | Windows Server | 2016, 2019, 2022, 2025 | 2012 R2 not supported (end of support) |
 | Linux | Kernel 5.4 or later: RHEL/Rocky/Alma 8 and 9, Debian 11 and 12, Ubuntu 20.04 to 24.04, SUSE 15 | Full Tetragon mode (eBPF) |
+| macOS | Current and previous two major versions | Agent without a custom Endpoint Security client in v1 (section 21) |
+| Android, iOS and iPadOS | Current and previous two major versions | Managed through MDM only, no agent (section 21) |
 | Older Linux | Kernel 4.18 to 5.3 | Reduced mode: Tetragon with only the eBPF probes available on that kernel, reactive blocking only |
 
 The exact compatibility list is published and tested in continuous integration on every release.
@@ -178,6 +200,7 @@ VDI environments (Citrix, Azure Virtual Desktop, VMware Horizon) and machines cl
 - **Sensor orchestration.** The agent deploys and updates the components, applies their configurations, constantly checks that they are running and have not been disabled, and forwards their events.
 - **Capability detection.** At installation and then at every restart, the agent measures what the system allows (kernel version, `CONFIG_BPF_KPROBE_OVERRIDE`, BPF-LSM active, Defender active or passive, Tamper Protection) and chooses the best blocking mode. The effective mode is displayed for each endpoint.
 - **Local filtering and aggregation.** Repetitive events are deduplicated and aggregated before sending, within the volume budget of section 3.
+- **No listening port.** The agent never opens a listening socket for remote access: the agent channel, remote shell, file transfer and remote desktop are all initiated by the device, to the server or a relay.
 - **Offline operation.** Cached policies and rules, encrypted local buffer of at least 72 h, deferred sending on reconnection, alert if the buffer saturates.
 - **Embedded osquery.** Inventory, on-demand hunting and scheduled queries.
 - **FIM.** osquery computes a hash baseline at onboarding. Real-time monitoring is provided by Sysmon on Windows (files and registry) and by Tetragon on Linux. Monitored locations:
@@ -732,7 +755,11 @@ The Rust code follows the project coding rules, written in English like all the 
 | **Rules** | Sigma, YARA, Sysmon, ASR, App Control, TracingPolicies, FIM, exclusions (with expiry), MITRE coverage, continuous testing, migration from other SIEMs, history |
 | **AI review** | Pending suggestions, sample of verdicts to review, quality statistics, validator refusals |
 | **Endpoints** | Inventory, discovered unmanaged devices, state of agents and sensors, blocking capabilities, configuration (SCA), adaptive hardening, patches, encryption, browser extensions, devices, restore snapshots, containers, vulnerabilities, honeytokens and honeypots, hardened protection mode, policies, actions |
-| **RMM** | Monitoring and thresholds, script library and executions, software catalogue, desired state of devices, remote control and recorded sessions |
+| **RMM** | Scripts and executions, patches and rings, software catalogue, desired state of devices, remote shell, remote desktop and recorded sessions, mobile devices |
+| **Monitoring** | Metrics and dashboards, alert rules and forecasts, synthetic checks, traces and profiles, application health, service map |
+| **On-call** | Schedules, escalation policies, notifications, silences and maintenance windows |
+| **Status page** | Public status page configuration, SLA and SLO reports |
+| **Infrastructure** | Site collectors, network devices, hardware health, containers, Kubernetes and virtualisation, discovery |
 | **CMDB** | Assets and relationships, business services, life cycle, licences, change history, synchronisation state |
 | **Exposure** | Risk score per entity, critical assets, attack paths, choke points, recommendations ranked by number of paths closed, AD and Entra ID posture and audit (change history, GPOs, rollback), leaked credentials, external attack surface, cloud and Kubernetes posture, backups |
 | **Connectors** | Detection sources and action connectors, requested rights, health state, assisted import of new sources, connector generation from OpenAPI |
@@ -743,7 +770,7 @@ The Rust code follows the project coding rules, written in English like all the 
 | **Identity** | Users, groups, OIDC and SAML applications, MFA, access policies adapted to risk and device posture, active sessions, authentication logs |
 | **Administration** | AI configuration and budget, RBAC, SSO, multi-tenant, retention, platform audit, backups, Git repository, configuration drift, community library |
 
-The interface is a client of the documented REST API (OpenAPI), just like the `xdrctl` CLI and the OpenTofu provider: no function is reserved to it. It displays every module, including those not yet installed or configured: these appear in a distinct colour, with what they provide and the IaC configuration snippet that enables them. It offers no no-code editor, and every change it allows produces a commit or a merge request (section 11). It is available in French and English.
+The interface is a client of the documented REST API (OpenAPI), just like the `xdrctl` CLI and the OpenTofu provider: no function is reserved to it. It displays every module, including those not yet installed or configured: these appear in a distinct colour, with what they provide and the IaC configuration snippet that enables them. **UI rule.** No third-party component with its own graphical interface reaches a user: the consoles and admin pages of Zitadel, MinIO, the CrowdSec console, Stork, the RustDesk client and every metrics, tracing or on-call tool are disabled or never exposed. Metrics charts, traces, profiles, remote desktop and the status page are all rendered by Ostyr's interface. It offers no no-code editor, and every change it allows produces a commit or a merge request (section 11). It is available in French and English.
 
 ### Log readability and ease of investigation
 
@@ -872,24 +899,23 @@ These modules are **disabled by default** and install separately, alone or with 
 
 ### RMM module
 
-The RMM module (remote monitoring and management) uses the same agent as the EDR, with only the RMM functions enabled if it is deployed alone. It brings under a single policy what the IT team and the security team do on endpoints.
+The RMM module (remote monitoring and management) uses the same agent as the EDR, with only the RMM functions enabled if it is deployed alone. It brings under a single policy what the IT team and the security team do on endpoints. Metrics, alerting and application health are specified in section 20, device management in section 21 and equipment without an agent in section 22.
 
-- **Monitoring**: CPU, memory, disk, services, processes, temperature, state of local backups, availability, with thresholds and alerts declared in files. Agentless monitoring of network devices through SNMP and ICMP.
-- **Scripts**: library of PowerShell, Bash and Python scripts versioned in Git, with typed parameters, on-demand or scheduled execution, on a machine or a tag group. Results and outputs kept per execution.
-- **Software deployment**: installation, update and uninstallation through winget and MSI on Windows, the package manager on Linux. Catalogue of approved applications declared as code, which adds to patch management (section 5).
-- **Device configuration**: system settings, registry keys, services, scheduled tasks and local accounts described as desired state, with automatic drift correction.
-- **Remote control**:
-  - **workstations**: screen sharing through the agent (WebRTC), with explicit user consent and a visible banner throughout the session, except for a declared exception for machines without a user;
-  - **servers**: RDP, SSH and VNC access from the browser through **RustDesk**, without exposing these ports or distributing credentials.
-- **Remote tools**: file explorer, process and service manager, event viewer, terminal, without full remote control.
+- **Scripts**: signed library of PowerShell, Bash and Python scripts versioned in Git, with typed parameters, on-demand or scheduled execution, on a machine or a tag group. Results and outputs kept per execution (section 21).
+- **Patch management and software deployment**: OS and third-party updates by rings and maintenance windows, and an approved software catalogue declared as code (section 21).
+- **Device configuration**: system settings, registry keys, services, scheduled tasks and local accounts described as desired state, with optional automatic drift correction (section 23).
+- **Remote shell and file transfer**: carried inside the agent channel. The agent opens a pseudo-terminal or reads a file on a signed command; no SSH server and no listening port exist on the device.
+- **Remote desktop**: the RustDesk engine, relay-only, with an Ostyr viewer in the interface (section 21). Screen sharing through WebRTC, and RDP, SSH and VNC access through RustDesk, are not provided.
+- **Agentless equipment**: switches, printers, BMCs and appliances push syslog, SNMP traps, flows and Redfish events to a site collector. SNMP or Redfish polling is an explicit opt-in per device, never applied to a managed device (section 22).
+- **Remote tools**: file explorer, process and service manager, event viewer and terminal, all through the agent channel, without full remote control.
 - **Power management**: Wake-on-LAN, scheduled restart and shutdown, respecting maintenance windows.
 - **MSP use**: per-customer views, activity and monitoring reports per tenant.
 
-**RMM security.** RMM tools are among the most misused by attackers. The module therefore applies strict controls:
+**RMM security.** RMM tools are among the most misused by attackers. The module therefore applies strict controls, detailed in section 21:
 
 - only signed scripts present in Git can run; a free-form command requires the dedicated role and MFA, and is recorded;
 - an execution on more than 20 machines requires dual approval and goes through the circuit breakers (section 10);
-- every remote control session is recorded (video or command stream), timestamped and linked to a ticket or an incident;
+- every remote shell and remote desktop session is recorded (command stream or video), timestamped and linked to a ticket or an incident;
 - unapproved third-party remote control tools (AnyDesk, TeamViewer, ScreenConnect and equivalents) are detected, reported and can be blocked, because they often serve as a backdoor.
 
 ### CMDB module
@@ -904,7 +930,7 @@ The CMDB is the reference for assets and their relationships. It fills itself au
 - **Life cycle**: ordered, in service, in maintenance, retired, destroyed; alert when a retired asset reappears on the network.
 - **Software licences**: counting installations against acquired entitlements, detection of unauthorised software.
 - **History** of every item: who or what changed it, when, and with what previous value.
-- **Two-way synchronisation** with GLPI, NetBox, iTop and ServiceNow through connectors, for organisations that already have a CMDB.
+- **Two-way synchronisation** with GLPI, NetBox, iTop and ServiceNow through connectors, for organisations that already have a CMDB. The connector uses their APIs only: their own interfaces are never deployed or exposed by the platform.
 
 **What the CMDB brings to the other modules.** Criticality and owner feed the risk score, attack paths and circuit breakers (a critical asset is never isolated automatically). Business services give the impact of an incident. The complete inventory serves as evidence for GRC, since NIS 2 and ISO 27001 require an asset inventory.
 
@@ -976,18 +1002,23 @@ Licences to be checked at every release; state known at the time of writing:
 
 | Component | Licence | Consequence |
 | --- | --- | --- |
-| ClickHouse, NATS JetStream, Tetragon, vLLM, CyberChef, Caddy, Prowler, Trivy | Apache 2.0 | No particular constraint |
+| ClickHouse, NATS JetStream, Tetragon, vLLM, CyberChef, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries, guacd (Apache Guacamole proxy, agentless SSH opt-in only) | Apache 2.0 | No particular constraint |
+| OpenTelemetry eBPF profiler | Apache 2.0, kernel-side eBPF programs GPLv2 | Run as a separate process on the agent |
 | osquery | Apache 2.0 / GPLv2 (dual licence) | No particular constraint |
-| YARA-X, Zeek, Unbound, OpenCanary | BSD | No particular constraint |
-| Atomic Red Team, CrowdSec, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei) | MIT | No particular constraint |
+| YARA-X, Zeek, Unbound, OpenCanary, ipmitool | BSD | No particular constraint |
+| lldpd | ISC | No particular constraint |
+| Atomic Red Team, CrowdSec, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei), gitleaks, NanoMDM, winget | MIT | No particular constraint |
 | Kea, Vector, OpenBao, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
-| Suricata, USBGuard | GPLv2 | Run as separate processes, not linked to the platform code |
-| Zitadel, RustDesk, MinIO | AGPL-3.0 | Optional integration, as a separate process |
+| Suricata, USBGuard, smartmontools, NUT | GPLv2 | Run as separate processes, not linked to the platform code |
+| Zitadel, RustDesk (`hbbs`, `hbbr` and the project build of the endpoint service), MinIO | AGPL-3.0 | Separate processes; the RustDesk project build publishes its sources |
+| Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap, WSUS | Not used | Excluded by the component rules (section 4): own interface, extra durable state or non-compatible licence |
+| Vulnerability and baseline data: OSV, NVD, CISA KEV, EPSS, ANSSI hygiene guide, DISA STIGs | CC BY 4.0 or Apache 2.0 (OSV), public domain (NVD, KEV, STIGs), free with attribution (EPSS), Etalab Open Licence 2.0 (ANSSI) | Data, not code; attribution kept; feeds verified at download |
+| Apple APNs and MDM protocol, Android Management API | Vendor services under their terms | Services used through their public APIs, no component redistributed; prerequisites in section 19 |
 | Sysmon | Sysinternals licence (freeware) | Redistribution forbidden: downloaded from Microsoft |
 | Microsoft Defender | Proprietary, included in Windows | Advanced features (custom IOCs, ASR reports) reserved for Defender for Endpoint licences |
 | HashiCorp Vault | BSL | Not chosen by default |
 | Packer | BSL | Development tool only, never distributed, so the licence is acceptable; builds the KVM lab images, Windows included |
-| CIS Benchmarks content | CIS licence (CC BY-NC-SA 4.0) | SCA policies written by the project, quoting only CIS recommendation numbers |
+| CIS Benchmarks content | CIS licence (CC BY-NC-SA 4.0) | SCA policies written by the project, quoting only CIS recommendation numbers; full content used only if the customer brings it |
 
 **Platform licence.** Choice: **Apache 2.0** for the agent (easier adoption, integration into other tools) and **AGPLv3** for the server (protection against a proprietary SaaS takeover). Decision made, contributions under DCO (section 19).
 
@@ -1019,14 +1050,23 @@ Licences to be checked at every release; state known at the time of writing:
 
 ### Out of scope for v1
 
-- **macOS agent** (Endpoint Security Framework), planned later.
-- **Mobile devices** (MDM), which may be covered by a connector.
+- **Custom macOS Endpoint Security client**: the v1 macOS agent uses `eslogger` and the unified log (section 21).
+- **Browser RDP and VNC to servers** through a gateway: remote access goes through the agent channel and the relay-only remote desktop (section 21).
+- **Remote control of iOS and iPadOS devices**: Apple allows screen sharing only.
 - **DLP**, beyond detection of network exfiltration.
 - **PPL protection and ELAM driver** on Windows.
 - **Windows Server 2012 R2 and earlier.**
 - **Integration of Defender for Endpoint** and Defender for Business (API, IOCs, isolation).
 - **Visual or no-code editor** for playbooks, rules or connectors, by choice: everything remains versioned code (section 11).
 - **Mandatory central service**: no module may depend on another to start (section 4).
+
+### Open prerequisites for the owner
+
+These actions depend on accounts only the owner holds and must be done before release of the functions that need them.
+
+- **Apple Developer ID** for signing and notarising the macOS agent (section 21).
+- **APNs MDM certificate** for Apple mobile device management (section 21).
+- **Android Enterprise enrolment** with the Android Management API (section 21).
 
 ### Decisions on the open questions
 
@@ -1039,3 +1079,320 @@ Licences to be checked at every release; state known at the time of writing:
 | AI evaluation thresholds | **Recall ≥ 90 % on malicious alerts, and ≤ 1 % of malicious alerts classified as benign or false positive.** Corpus of at least 500 alerts. | The major risk is not one alert too many but an attack classified as benign, which can lead to an exclusion. Corpus built from public datasets (OTRF Security-Datasets, Splunk attack\_data, EVTX-ATTACK-SAMPLES), Atomic Red Team replays on the test endpoints and benign alerts labelled by the pilots. Thresholds revisited after the first deployments. |
 | Circuit breaker values | **Fixed values of section 10, plus a relative rule: never more than 2 % of the fleet isolated at the same time.** Adjustable per tenant. | Absolute values alone are too permissive for 50 workstations and too strict for 10,000. Recalibration is done by replaying the pilots' history in simulation mode, without risk. |
 | Defender for Endpoint connector | **No.** The platform only uses the Defender Antivirus included in Windows, even when a Defender for Endpoint or Defender for Business licence exists. | A single operating mode for every customer: less code and fewer tests, no dependency on a Microsoft API or licence. IOCs remain enforced as described in section 7. If Defender for Endpoint is already managed by Intune, the agent stays read-only on Defender (Tamper Protection row) to avoid conflicts. |
+
+
+## 20. IT monitoring and observability
+
+These functions belong to the monitoring, on-call and status page modules (section 4). They share the rules below with sections 21 to 23.
+
+**Common rules for sections 20 to 23.**
+
+- **Settings are files.** Every threshold, schedule, check, baseline, catalogue, ring, route and policy introduced here is a file in Git, reloaded without restart as described in section 11 "Live reconfiguration"; an invalid file is refused and the previous version kept, and the reload is audited.
+- **Headless components.** No component named here exposes its own interface; every screen is Ostyr's (section 13).
+- **State.** Each subsection names where its state lives: ClickHouse, PostgreSQL, NATS JetStream, MinIO or Git, never a new store.
+- **Bounded inputs.** Every input from an agent, a collector, a device or an external API is bounded in size and count before it is buffered, and every wait on a peer has a deadline.
+- **Tenants.** Every item carries its tenant and is invisible to the others.
+
+### Metrics pipeline
+
+- **What it does.** The agent samples host metrics (CPU per core and pressure, memory and swap, disk I/O and space and inodes, network counters, temperature and fan sensors, OOM kills, reboots with their cause, uptime, system call counts through eBPF) and sends them on the agent channel. Applications and services can push metrics in OTLP to the agent or the platform.
+- **Components.** The agent's own collectors, with osquery tables and the eBPF probes of section 5; the agent channel; Vector and NATS JetStream for transport; ClickHouse for storage. The OpenTelemetry protocol is the only external format; no Prometheus, VictoriaMetrics or Grafana.
+- **State.** ClickHouse. Raw samples roll up by materialised views into 1 minute, 1 hour and 1 day tables, each with its own TTL and storage policy (targets in section 3).
+- **Requirements.**
+  - The sampling interval and the list of metrics per role are declared in the agent policy; a change applies without a service restart.
+  - A metric has a name, a unit, a type (gauge, counter, histogram) and labels; the number of series per tenant and the cardinality of each label are capped, and the excess is dropped and counted, not silently ignored.
+  - The query layer picks the finest table that satisfies the requested range and step; a test shows that a 30 day query never reads the raw table.
+  - A silent device (no sample for three intervals) raises an "absence" alert; a clock drift is corrected before storage (section 18).
+  - Agent samples are buffered with the 72 hour offline buffer of section 5 and sent in order, with sequence counters.
+  - The data is exported in OTLP and ECS for third-party tools (section 4).
+
+### Metric alerting and forecasting
+
+- **What it does.** Alert rules on metrics: threshold, rate of change, absence, comparison to a baseline (seasonal, per entity), and forecasts such as time to disk full and capacity trend. The alerts join the same queue as security alerts.
+- **Components.** The stream correlation engine (section 19) for streaming rules, and scheduled ClickHouse queries for forecasts and baselines; the on-call module for delivery. No external alert manager.
+- **State.** Rules in Git; alert state and baselines in ClickHouse (small tables) and PostgreSQL (alert lifecycle).
+- **Requirements.**
+  - A rule file holds the query, the condition, the duration it must hold (for), the severity, the labels and the runbook link; the rule set is tested on recorded series in continuous integration.
+  - Disk-full forecasting uses a linear fit over a declared window and states the projected date and its confidence; a test checks a known ramp.
+  - Alert flapping is limited by hysteresis and by the duration condition; an alert that stays resolved for a declared time closes itself.
+  - Alerts are deduplicated by fingerprint (rule and labels) and linked to the CMDB asset and business service (section 14).
+  - Rules respect maintenance windows (below).
+
+### On-call
+
+- **What it does.** Routes every IT and security alert to the right person: schedules and rotations, escalation policies, notification channels, acknowledgement, silences, deduplication and grouping, and maintenance windows.
+- **Components.** In-house module. Channels are connectors: SMTP, webhook, Microsoft Teams, Slack, ntfy and an SMS provider (section 6). No Grafana OnCall or other third-party on-call tool.
+- **State.** PostgreSQL for the alert lifecycle (open, acknowledged, escalated, resolved) and the notification log; schedules, policies, routes and silences as files in Git.
+- **Requirements.**
+  - The first notification leaves within 30 seconds of the alert at the 95th percentile (section 3).
+  - An unacknowledged alert escalates at the declared delay to the next level; the escalation time is driven by a clock injected in tests.
+  - Schedules support time zones, rotations, overrides and holidays; a time-zone change over a daylight saving switch is tested.
+  - A failing channel falls back to the next channel of the policy and is reported; no alert is lost when every channel fails (it stays open and visible).
+  - A silence and a maintenance window have an author, a reason and an expiry; a silence with no expiry is refused.
+  - Acknowledgement and resolution from a channel use a signed, single-use, expiring link; the link carries no secret reusable elsewhere.
+  - Every notification, acknowledgement and silence is audited.
+
+### Synthetic checks and certificate expiry
+
+- **What it does.** Active checks of services as a user would see them: HTTP(S) with status, content and latency, TCP connect, ICMP, DNS resolution, and TLS handshake with the certificate chain and expiry, run from the platform and from site collectors.
+- **Components.** In-house checks in the backend services and in the site collector; certificate data feeds the lifecycle of section 23.
+- **State.** Check definitions in Git; results in ClickHouse.
+- **Requirements.**
+  - A check has an interval, a timeout, a number of consecutive failures before alerting, and the locations that run it; an alert needs failures from the declared number of locations.
+  - Checks reach only targets declared in files, or in the CMDB for internal services; a check cannot be pointed at an arbitrary address by an API caller outside the declared scope (server-side request forgery protection: private, link-local and metadata addresses are refused unless declared).
+  - Certificate expiry alerts at declared thresholds (30, 14 and 7 days by default).
+  - The results are bounded in size (response bodies are never stored beyond a capped excerpt).
+
+### Status page and SLA reports
+
+- **What it does.** A public or private status page per business service, with current state, incidents and history, and SLA and SLO reports (availability, error budget) computed from checks and incidents.
+- **Components.** In-house, served by Ostyr behind the reverse proxy (section 14); no Statuspage-like third-party software.
+- **State.** PostgreSQL for incidents and messages; availability measures in ClickHouse; the page layout and components in Git.
+- **Requirements.**
+  - The public page is unauthenticated: it serves pre-rendered content only, exposes no internal name, address or detail beyond what the owner declared, is rate limited per source before any other work, and keeps serving a static copy when the backend is down.
+  - Publishing an incident or a state change needs an authenticated role; automatic state changes follow declared rules and can be overridden.
+  - The SLA computation excludes declared maintenance windows and states its method; a test replays a known outage and checks the figure.
+  - Reports are generated on a schedule and can be exported (PDF and CSV).
+  - The status page is on its own failure domain: its outage does not depend on the platform it reports on when deployed with the relay profile.
+
+### Tracing/APM and profiling
+
+- **What it does.** Distributed traces from applications in OTLP, with service maps and latency and error breakdowns, and continuous CPU profiling of every process through eBPF, linked to traces and to metrics.
+- **Components.** OpenTelemetry protocol ingestion in the backend services; the OpenTelemetry eBPF profiler on the Linux agent, run as a separate process; ClickHouse storage. No Jaeger, Tempo or Parca.
+- **State.** ClickHouse (traces and profile samples with their own TTL and sampling rules); profiler settings in the agent policy.
+- **Requirements.**
+  - Trace and profile ingestion is bounded per tenant (spans per second, span size, attributes per span); excess is dropped and counted.
+  - Head and tail sampling rules are declared in files; error traces are kept at a higher rate.
+  - The profiler stays within the agent CPU budget of section 3 and is disabled automatically when the budget is exceeded, with an alert.
+  - Symbolisation of binaries uses local symbol files and never sends binaries to a third party.
+  - A trace links to the logs and metrics of the same service and time range.
+
+### Application health
+
+- **What it does.** The health of what runs on the device: services and daemons, scheduled tasks and cron jobs (last run, result, duration), databases (availability, replication lag, connections, slow queries), NTP drift, queue depth and application probes (a declared command or endpoint that returns a status).
+- **Components.** osquery tables and agent probes; database checks use read-only accounts through connectors; no additional component on the device.
+- **State.** ClickHouse for measures; probe and expectation definitions in Git.
+- **Requirements.**
+  - A service expectation (should run, should be enabled) is a file; a failed or flapping service alerts with its last log lines (bounded).
+  - A scheduled task that did not run within its expected window alerts.
+  - NTP drift above a declared threshold alerts and is shown with the correction of section 18.
+  - Probes execute only commands from signed files in Git, with a timeout and an output cap.
+  - Database credentials are read-only and held in the secrets files; they never appear in a result, a log or an error.
+
+## 21. Endpoint and device management
+
+These functions belong to the RMM and MDM modules. They are the highest-risk part of the platform: every command is signed, checked by the agent (section 12) and audited, and the rules of "RMM security" (section 14) apply to all of them. Every flow is initiated by the device: no command port is opened on it.
+
+### Scripts
+
+- **What it does.** A library of PowerShell, Bash and Python scripts that run on demand, on a schedule or from a playbook, on one device or a tag group.
+- **Components.** The agent command channel; signing by the platform; Git for the library.
+- **State.** Scripts and parameters in Git; execution results in ClickHouse; execution state in PostgreSQL.
+- **Requirements.**
+  - Only a script whose signature and digest match a version merged in Git runs; the agent verifies the signature before launching it.
+  - Parameters are typed and validated (string, integer, enumeration, path) against a schema, and passed as arguments, never concatenated into a shell string.
+  - A run has a timeout, an output size cap and a resource limit; the output is stored per execution and redacted for declared secret patterns.
+  - A run on more than 20 devices needs dual approval and passes the circuit breakers (section 10).
+  - A free-form command needs the dedicated role and MFA, and is recorded in full.
+  - A command replayed or expired is refused by the agent (anti-replay nonce and expiry).
+
+### Patch management
+
+- **What it does.** Inventories missing OS and third-party updates and applies them by rings (pilot, then groups) inside maintenance windows, with reboot handling, health checks and automatic stop when a ring fails.
+- **Components.** Native mechanisms on the device: apt and dnf and zypper on Linux, the Windows Update Agent API and winget on Windows, `softwareupdate` on macOS. No WSUS and no other patch server.
+- **State.** Rings, windows and policies in Git; patch state per device in PostgreSQL; history in ClickHouse.
+- **Requirements.**
+  - Updates come only from the vendor repositories the policy names, with the vendor signature checked by the package manager; an internal mirror is allowed for isolated networks.
+  - A ring starts only when the previous ring is healthy for the declared soak time; failures above a threshold stop the rollout through the circuit breakers (section 10).
+  - A device never reboots outside its maintenance window unless the policy says so; a user prompt precedes a workstation reboot.
+  - A failed update rolls back when the package manager allows, otherwise raises an alert with the log.
+  - Patch status feeds vulnerability management (section 23) and the risk score.
+  - Every command is signed and audited.
+
+### Software deployment
+
+- **What it does.** An approved catalogue of applications that can be installed, updated and uninstalled on devices or groups, with staged rollout.
+- **Components.** winget and MSI on Windows, the native package manager on Linux, pkg and App Store volume mechanisms on macOS; MinIO or the repository hosts the packages.
+- **State.** Catalogue in Git (name, source, version policy, digest, publisher); deployment state in PostgreSQL; packages in MinIO.
+- **Requirements.**
+  - Only signed packages from the catalogue install; the agent verifies the signature and the pinned digest before execution.
+  - A rollout is staged by rings like patches and stops on failure.
+  - An uninstall removes only what the catalogue names.
+  - Installed software that is not in the catalogue is reported to the CMDB licence counting (section 14).
+
+### Remote shell and file transfer
+
+- **What it does.** An interactive shell and file transfer to a device from the interface, without any remote-access service on the device.
+- **Components.** The agent channel only: on a signed command the agent opens a pseudo-terminal or a file handle and streams it back on the existing outbound connection. No SSH server.
+- **State.** Session metadata in PostgreSQL; recordings in MinIO; policy in Git.
+- **Requirements.**
+  - Opening a session needs the dedicated role and MFA at each opening; on critical assets (CMDB) it needs dual approval; both appear in the audit.
+  - The session is recorded in full (input and output, timestamps) and linked to a ticket or an incident; a recording that cannot be written ends the session.
+  - A session has an idle timeout and a maximum duration; a dead channel closes it.
+  - File transfer is bounded in size, checked for malware by YARA-X when uploaded, and limited to declared paths unless approved.
+  - The user of a workstation sees a banner for the whole session, except for a declared exception for machines without a user (section 17 privacy rules apply).
+
+### Remote desktop
+
+- **What it does.** Full screen, keyboard and mouse control of Windows, macOS, Linux and Android devices from the interface.
+- **Components.** The RustDesk engine as a separate process, run in a project build with direct IP access disabled, no listening port, no hole punching and relay-only through `hbbr`; `hbbs` and `hbbr` run headless. The viewer is Ostyr's own, in the interface, speaking the RustDesk protocol over the relay. iOS and iPadOS can only share their screen (Apple restriction) and are never controlled.
+- **State.** `hbbs` keeps a small peer database; it is the only extra state and is covered by backup. Session metadata in PostgreSQL, recordings in MinIO, policy in Git.
+- **Requirements.**
+  - The endpoint service makes only outbound connections to `hbbr`; a test scans the device for listening sockets during a session and finds none.
+  - The relay accepts only sessions authorised by a short-lived token signed by the platform; a peer identifier alone gives no access.
+  - The project build shows a session indicator and, on workstations, asks the user's consent; consent and indicator cannot be disabled by the viewer.
+  - Session opening follows the rules of remote shell: role, MFA, dual approval on critical assets, full recording, ticket link.
+  - Unapproved third-party remote tools are detected and can be blocked (section 14).
+
+### macOS agent
+
+- **What it does.** The common agent functions (section 5) on macOS: inventory, telemetry, state of protection.
+- **Components.** osquery; `eslogger` and the unified log as telemetry sources; the application firewall, FileVault, Gatekeeper, SIP and XProtect state read from the system; launchd for supervision.
+- **State.** As on the other agents: local encrypted buffer; server side as sections 4 and 20.
+- **Requirements.**
+  - v1 uses no custom Endpoint Security client (it needs an Apple entitlement); the agent states its reduced mode like the older Linux kernels (section 5).
+  - The agent package is signed with an Apple Developer ID and notarised (open prerequisite in section 19).
+  - The agent runs with the permissions macOS grants through a configuration profile deployed by MDM or by hand; a missing permission is detected and displayed as a blind spot.
+  - Scripts, patches, software, remote shell and remote desktop work as on the other systems, through the same signed commands.
+
+### Mobile devices (MDM)
+
+- **What it does.** Enrolment, inventory, configuration, compliance, lock and wipe of iOS, iPadOS and Android devices; their posture feeds access decisions (section 15).
+- **Components.** Apple MDM through APNs with NanoMDM (MIT, headless, PostgreSQL storage) as the engine; Android Enterprise through the Android Management API. Both are outbound-only from the device and the platform.
+- **State.** PostgreSQL; profiles and policies in Git.
+- **Requirements.**
+  - The platform keeps no listening port on the device; commands travel through the vendors' push channels.
+  - The APNs MDM certificate and the Android Enterprise enrolment are owner prerequisites (section 19); their keys are held in the secrets files and rotated without restart.
+  - Enrolment tokens are single-use and expire; an unenrolled or wiped device is removed from the CMDB.
+  - A wipe needs approval and is audited; a lost-mode lock is available.
+  - Compliance rules (encryption, passcode, OS version, jailbreak) are files; a non-compliant device is reported to the identity provider for risk-adapted access (section 15).
+  - The management interface is Ostyr's; no NanoMDM or vendor console is exposed.
+
+## 22. Infrastructure and network
+
+### Site collector
+
+- **What it does.** An Ostyr role installed at a remote site that receives, on the local network, what agentless equipment pushes: syslog, SNMP traps, NetFlow, sFlow and IPFIX, and Redfish events. It runs checks (section 20) and probes (section 23) from that site, buffers on disk and forwards to the platform.
+- **Components.** The Ostyr agent in collector role, with Vector for syslog and flows; the agent channel outbound only.
+- **State.** A bounded disk buffer on the collector; everything else on the platform.
+- **Requirements.**
+  - The collector opens listening ports only on the local network, for the declared protocols and sources, and none towards the Internet.
+  - Peers on the LAN are unauthenticated: every message is bounded in size and rate, per source and in total before parsing, and a single source cannot exhaust the capacity left for others; an unknown source is counted and optionally dropped.
+  - The disk buffer has a size cap, drops the oldest low-priority data first and alerts on saturation; a dead peer or a stalled reader never blocks reception.
+  - The channel to the platform is the agent channel (section 4) with the same revocation and relay rules.
+  - Its configuration (allowed sources, protocols, ports, credentials) is a file pushed over the channel and applied without restart, except the listening port, which is documented as the single exception of section 11.
+
+### Network devices
+
+- **What it does.** Visibility on switches, routers, firewalls, access points and printers: interface state and counters, errors, topology through LLDP and CDP, flows, configuration changes and events.
+- **Components.** The site collector for traps, flows and syslog; SNMP v3 decoding in the Rust code; polling by SNMP, and SSH from the interface through `guacd`, only when enabled per device.
+- **State.** Metrics and flows in ClickHouse; devices and links in the CMDB (PostgreSQL); device declarations in Git.
+- **Requirements.**
+  - Push is the default; SNMP polling is an explicit per-device opt-in in the device file, never applied to a device that runs an agent.
+  - SNMP v3 with authentication and privacy is required; v1 and v2c are refused unless the file accepts them for a named device, with a warning in the CMDB.
+  - Trap and flow volumes are bounded per device; sampling rates are respected when computing traffic.
+  - LLDP and CDP data builds the topology graph with a timestamp per link; a link not seen for a declared time is marked stale.
+  - Credentials live in the secrets files and never appear in a log or an error.
+
+### Hardware health
+
+- **What it does.** Disk SMART status and predictive failure, RAID state, IPMI and Redfish sensors (temperature, fans, power supplies, memory errors), and UPS state (battery, load, runtime) through NUT.
+- **Components.** `smartmontools` and the NUT client on the agent, IPMI through `ipmitool` locally; Redfish events received by the site collector, Redfish polling opt-in per device.
+- **State.** ClickHouse for measures; device declarations in Git.
+- **Requirements.**
+  - Hardware measures use the metrics pipeline and alert rules of section 20.
+  - A predictive-failure SMART attribute or a UPS on battery raises an alert with the affected asset and business service.
+  - Redfish polling uses a read-only account declared in the device file; it is opt-in and never run against a managed device.
+  - Tool output is parsed strictly and bounded; an unreadable output is reported as a blind spot, not as healthy.
+
+### Containers, Kubernetes and virtualisation
+
+- **What it does.** Inventory and metrics of containers (Docker, containerd, CRI-O), Kubernetes clusters (nodes, pods, deployments, events) and hypervisors (Proxmox, VMware vSphere, Hyper-V), linked to the CMDB.
+- **Components.** The agent and Tetragon for node and container telemetry (section 5); connectors that read the Kubernetes API and the hypervisor management APIs with read-only credentials.
+- **State.** Metrics in ClickHouse; items and relationships in the CMDB (PostgreSQL); connector settings in Git.
+- **Requirements.**
+  - Management credentials are read-only and checked at setup: a connector that is given write rights refuses to start.
+  - Containers and pods are created and retired in the CMDB from events, without leaving ghost items.
+  - Container metrics carry image, pod, namespace and node labels, with the cardinality caps of section 20.
+  - Immutable Kubernetes nodes use the DaemonSet deployment of section 18.
+
+### Network discovery and service map
+
+- **What it does.** Finds devices and services on the network and draws which service talks to which, feeding the CMDB.
+- **Components.** Passive sources first: DHCP leases, the NDR, flows, ARP and LLDP tables from agents. Active probing from a site collector is opt-in per network, using MIT-licensed tools (naabu, httpx) driven by the collector; nmap is not used.
+- **State.** Items and relationships in the CMDB (PostgreSQL); observed flows aggregated in ClickHouse; scope declarations in Git.
+- **Requirements.**
+  - Active probing runs only against ranges declared in a file, with a rate limit, and never against a range not owned by the tenant.
+  - A discovered device without an agent raises the alert of section 14; a discovered service is linked to its host and to the business service when known.
+  - The service map is built from observed connections with a retention bound and shows the last time each edge was seen.
+  - Results are reconciled with the CMDB keys (section 14) and conflicts are logged.
+
+## 23. Exposure, vulnerabilities and compliance
+
+### Configuration compliance and drift
+
+- **What it does.** Evaluates devices against baselines and reports drift; optionally corrects it.
+- **Components.** osquery for evaluation; baselines as code derived from the ANSSI hygiene guide and the DISA STIGs (redistributable); CIS content only when the customer brings it, because of its licence (section 17).
+- **State.** Baselines and desired state in Git; results in ClickHouse; compliance state per control in PostgreSQL for GRC.
+- **Requirements.**
+  - A baseline is a versioned file with controls, query, expected result, severity and framework mapping; an exception is a file with owner and expiry.
+  - Correction is off by default per control and applies only through signed commands; every correction is audited and reversible.
+  - Results feed the GRC controls (section 13) and the risk score.
+  - A baseline change goes through the detection-style tests on a lab corpus before merge.
+
+### Certificate lifecycle
+
+- **What it does.** Inventories certificates and warns before expiry; renews those Ostyr manages.
+- **Components.** Agents (certificate stores and service endpoints), site collectors (TLS probes), public Certificate Transparency logs for the organisation's domains; ACME for renewal where Ostyr manages the service (Caddy, section 14).
+- **State.** The CMDB (PostgreSQL) holds certificates and their relationships; probe results in ClickHouse; domains and policies in Git.
+- **Requirements.**
+  - A certificate is identified by its fingerprint and linked to the services that present it.
+  - Expiry alerts follow section 20; an unexpected certificate for an owned domain in CT logs raises a security alert.
+  - ACME accounts and private keys are held in the secrets files with mode checks; keys are never logged or shipped to the CMDB.
+  - A failed renewal alerts well before expiry and leaves the old certificate in place.
+
+### Vulnerability management and obsolete versions
+
+- **What it does.** Matches the software inventory of every device against known vulnerabilities, ranks them, and reports software past end of life.
+- **Components.** Local inventory from osquery and the package managers; CVE data from OSV and the NVD, EPSS scores and the CISA KEV list loaded into ClickHouse (section 7 threat intel); end-of-life dates from a versioned table; external attack-surface probing from a collector with naabu and nuclei (MIT). nmap is not used.
+- **State.** Findings in ClickHouse and PostgreSQL; the end-of-life table and scan scopes in Git.
+- **Requirements.**
+  - Authenticated scanning is local: the device's own inventory is matched against CVE data; the platform never logs into a device remotely to scan it.
+  - Network scanning only probes the declared external attack surface and agentless equipment, from a collector, with rate limits and scopes in files.
+  - A finding carries CVE, affected package and version, fix version, EPSS, KEV status and the asset criticality; priority is computed deterministically.
+  - A new KEV entry triggers matching over the whole inventory without waiting for the schedule.
+  - Software past its end-of-life date raises a finding even when no CVE is known.
+  - Feed downloads are verified (signature or digest) and bounded in size; an air-gapped mirror is supported.
+
+### Device control
+
+- **What it does.** Controls USB and removable storage devices and browser extensions on endpoints.
+- **Components.** Microsoft Defender device control on Windows, USBGuard on Linux, osquery extension tables, and browser enterprise policies.
+- **State.** Policies as allow and deny lists in Git; events in ClickHouse; the CMDB lists extensions per device.
+- **Requirements.**
+  - Rules match by class, vendor and product identifiers, and serial number for allowed items; a default mode of audit precedes any blocking.
+  - A blocked or unknown device raises an event with the user and device identity.
+  - Extensions are inventoried with identifier, version, permissions and source; those not on the allow list are reported and blocked where the browser policy permits.
+  - Exceptions have an owner and an expiry.
+
+### Secret scanning and SBOM
+
+- **What it does.** Finds secrets left in files and repositories and builds the software bill of materials of images, packages and directories.
+- **Components.** gitleaks (MIT) for secrets and syft (Apache 2.0) for SBOMs, run by the agent and by a scheduled job; SBOMs are matched with the vulnerability data above.
+- **State.** Findings in PostgreSQL; SBOMs in MinIO in CycloneDX or SPDX format; scan scopes and rules in Git.
+- **Requirements.**
+  - A secret finding stores the location, the rule and a masked excerpt; the secret itself and any hash of it never reach storage, a log or an error.
+  - Scans are bounded by file size and count and skip declared paths.
+  - An SBOM is signed, versioned per artefact and diffed between versions.
+  - A finding in a repository raises an alert with the owner from the CMDB.
+
+### Cloud and SaaS posture and cost
+
+- **What it does.** Checks the configuration of cloud accounts and SaaS tenants and follows cloud spending.
+- **Components.** Connectors (section 6) with read-only API credentials; Prowler and Trivy for posture checks (section 17); billing exports loaded into ClickHouse.
+- **State.** Findings in PostgreSQL; billing data in ClickHouse; account declarations in Git.
+- **Requirements.**
+  - Credentials are read-only and verified at setup; a connector given write rights refuses to start.
+  - Posture findings map to GRC controls (section 13) and appear in the Exposure screen.
+  - Cost data is aggregated per account, service, tag and business service; a budget file raises alerts on spending and on an abnormal daily change.
+  - Billing exports are bounded in size and loaded idempotently.

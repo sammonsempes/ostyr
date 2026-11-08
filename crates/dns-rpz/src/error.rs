@@ -23,6 +23,8 @@ pub enum PolicyError {
     Confidence(String),
     #[error("`max_records` must be between 1 and {0}")]
     MaxRecords(usize),
+    #[error("`{0}` is not an acceptable setting")]
+    Setting(String),
     #[error("allowlist network `{value}`: {source}")]
     Network {
         value: String,
@@ -57,4 +59,15 @@ pub enum RpzError {
     Serial(#[from] SerialError),
     #[error(transparent)]
     Policy(#[from] PolicyError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum ReloadError {
+    #[error("cannot run the Unbound control command: {0}")]
+    Io(#[from] io::Error),
+    #[error("the Unbound control command failed with status {0:?}")]
+    Failed(Option<i32>),
+    #[error("the Unbound control command did not finish within {0} seconds")]
+    TimedOut(u64),
 }
