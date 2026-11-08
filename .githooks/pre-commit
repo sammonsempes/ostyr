@@ -116,24 +116,6 @@ if docs_only; then
   exit 0
 fi
 
-prototype_branch() {
-  local branch
-  branch=$(git symbolic-ref --short HEAD 2>/dev/null) || return 1
-  case "$branch" in
-    prototype/?*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-if prototype_branch; then
-  step "1/4 cargo +nightly fmt --check" low cargo +nightly fmt --check
-  step "2/4 cargo clippy" low cargo clippy --offline --all-targets -- -D warnings
-  step "3/4 custom_lint" lint
-  step "4/4 cargo test" low cargo test --offline --workspace
-  echo "pre-commit: LIGHT GATE (prototype branch): coverage not checked" >&2
-  exit 0
-fi
-
 prepare_gate_dir
 step "1/5 cargo +nightly fmt --check" low cargo +nightly fmt --check
 step "2/5 cargo clippy" low cargo clippy --offline --all-targets -- -D warnings
