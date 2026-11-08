@@ -810,6 +810,7 @@ dependencies = [
  "core-config",
  "data-encoding",
  "getrandom 0.4.3",
+ "libc",
  "openidconnect",
  "secrecy",
  "serde",
@@ -825,6 +826,7 @@ dependencies = [
  "uuid",
  "webauthn-authenticator-rs",
  "webauthn-rs",
+ "zeroize",
 ]
 
 [[package]]

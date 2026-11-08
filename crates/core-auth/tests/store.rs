@@ -10,7 +10,8 @@ use core_auth::error::AuthError;
 use core_auth::model::{Account, TotpEnrolment};
 use core_auth::random::os_random;
 use core_auth::store::{
-    load_accounts, load_accounts_file, lock_path, read_store_locked, save_accounts, save_store_file, update_store_file, STORE_VERSION,
+    load_accounts, load_accounts_file, lock_path, parent_directory, read_store_locked, save_accounts, save_store_file, save_store_file_with,
+    sync_directory, update_store_file, STORE_VERSION,
 };
 use core_auth::types::{AccountMap, CredentialMap};
 use failing_writer::FailingWriter;
@@ -369,5 +370,58 @@ fn concurrent_writers_never_lose_an_update() -> TestResult {
         Ok(())
     })?;
     assert_eq!(load_accounts_file(&path)?.len(), WRITERS * UPDATES_PER_WRITER);
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
+fn a_fifo_at_the_store_path_is_refused_without_blocking() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("accounts.json");
+    assert!(std::process::Command::new("mkfifo").arg(&path).status()?.success());
+    assert!(matches!(load_accounts_file(&path), Err(AuthError::Io(_))));
+    Ok(())
+}
+
+
+fn failing_sync(_directory: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("sync failed"))
+}
+
+
+fn recording_sync(directory: &Path) -> std::io::Result<()> {
+    fs::write(directory.join("synced"), "")
+}
+
+
+#[test]
+fn the_parent_directory_is_synced_after_the_rename() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("accounts.json");
+    save_store_file_with(&path, &sample(), &CredentialMap::new(), os_random, recording_sync)?;
+    assert!(directory.path().join("synced").exists());
+    assert_eq!(load_accounts_file(&path)?, sample());
+    let failed = save_store_file_with(&path, &sample(), &CredentialMap::new(), os_random, failing_sync);
+    assert!(matches!(failed, Err(AuthError::Io(_))));
+    Ok(())
+}
+
+
+#[test]
+fn the_real_directory_sync_works_and_fails_on_a_missing_directory() -> TestResult {
+    let directory = tempdir()?;
+    sync_directory(directory.path())?;
+    #[cfg(unix)]
+    assert!(sync_directory(&directory.path().join("absent")).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_relative_path_lives_in_the_current_directory() -> TestResult {
+    assert_eq!(parent_directory(Path::new("store.json")), Path::new("."));
+    assert_eq!(parent_directory(Path::new("a/store.json")), Path::new("a"));
+    assert_eq!(parent_directory(Path::new("/")), Path::new("."));
     Ok(())
 }

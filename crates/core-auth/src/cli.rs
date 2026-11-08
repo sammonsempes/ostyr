@@ -9,7 +9,7 @@ use crate::service::{
     revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN, ACTION_SESSION_REVOKE, ANONYMOUS_ACTOR,
 };
 use crate::session::revoke_session;
-use crate::store::{read_store_locked, update_store_file, Updated};
+use crate::store::{open_regular, read_store_locked, update_store_file, Updated};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use crate::types::{Clock, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use crate::webauthn::{
@@ -26,12 +26,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use webauthn_rs::prelude::Webauthn;
+use zeroize::Zeroizing;
 
 
 pub const PATH_COUNT: usize = 4;
 
 
 pub const KEY_READ_LIMIT: u64 = 33;
+
+
+pub const KEY_READ_LIMIT_BYTES: usize = 33;
 
 
 pub const CLI_TENANT: &str = "default";
@@ -66,12 +70,12 @@ pub fn show_enrolment(enrolment: Enrolment) -> String {
 
 
 pub fn read_key_file(path: &str) -> Result<StoreKey, AuthError> {
-    let file = File::open(path)?;
+    let file = open_regular(Path::new(path))?;
     check_private(&file).map_err(AuthError::KeyFile)?;
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::with_capacity(KEY_READ_LIMIT_BYTES));
     file.take(KEY_READ_LIMIT).read_to_end(&mut bytes)?;
     if bytes.len() == KEY_BYTES {
-        Ok(SecretSlice::from(bytes))
+        Ok(SecretSlice::from(bytes.to_vec()))
     } else {
         Err(AuthError::InvalidKey)
     }

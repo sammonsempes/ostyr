@@ -13,6 +13,8 @@ use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
 #[cfg(unix)]
 use core_auth::cli::apply_command;
+#[cfg(unix)]
+use core_auth::cli::read_key_file;
 use core_auth::cli::{parse_roles, run, totp_now};
 use core_auth::error::AuthError;
 #[cfg(unix)]
@@ -119,6 +121,7 @@ const PATTERN_BYTE: u8 = 7;
 const BRUTE_FORCE: usize = 6;
 
 
+#[cfg(unix)]
 const REVOCATIONS: usize = 2;
 
 
@@ -307,6 +310,18 @@ fn key_files_must_be_private_and_exactly_32_bytes() -> TestResult {
         assert!(matches!(loose, Err(AuthError::KeyFile(AuditError::InsecurePermissions { .. }))));
         assert!(!space.directory.path().join("audit.log").exists());
     }
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
+fn a_fifo_at_the_key_path_is_refused_without_blocking() -> TestResult {
+    let space = workspace()?;
+    let fifo = space.directory.path().join("key.fifo");
+    assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
+    let result = read_key_file(&fifo.to_string_lossy());
+    assert!(matches!(result, Err(AuthError::Io(_))));
     Ok(())
 }
 
@@ -731,6 +746,7 @@ fn a_command_keeps_changes_another_writer_made_to_the_file() -> TestResult {
 
 
 #[test]
+#[cfg(unix)]
 fn revoke_all_on_an_absent_oidc_name_writes_a_stub_and_audits_the_clear_target() -> TestResult {
     let space = workspace()?;
     constant_session(&space, &format!("bootstrap root {PASSWORD}\n"))?;
