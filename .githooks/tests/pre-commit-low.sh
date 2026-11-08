@@ -22,7 +22,7 @@ exec "${@:3}"
 S
 chmod +x "$SCRATCH/bin/"*
 cp "$SCRATCH/bin/cargo" "$SCRATCH/bin/nice" "$SCRATCH/nobin/"
-for tool in bash env git dirname mkdir rm; do
+for tool in bash env git dirname mkdir rm cksum cut; do
   ln -s "$(command -v "$tool")" "$SCRATCH/nobin/$tool"
 done
 export STUB_LOG="$SCRATCH/log"

@@ -12,7 +12,7 @@ S
 printf '#!/usr/bin/env bash\nexit 0\n' >"$SCRATCH/bin/sccache"
 chmod +x "$SCRATCH/bin/"*
 cp "$SCRATCH/bin/cargo" "$SCRATCH/nobin/"
-for tool in bash env git dirname mkdir rm; do
+for tool in bash env git dirname mkdir rm cksum cut; do
   ln -s "$(command -v "$tool")" "$SCRATCH/nobin/$tool"
 done
 export STUB_LOG="$SCRATCH/log"
