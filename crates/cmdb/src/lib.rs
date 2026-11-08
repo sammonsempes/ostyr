@@ -3,6 +3,7 @@
 pub mod config;
 pub mod error;
 pub mod impact;
+pub mod import;
 pub mod model;
 pub mod reconcile;
 pub mod types;

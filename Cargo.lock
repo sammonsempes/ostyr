@@ -730,7 +730,9 @@ name = "cmdb"
 version = "0.0.0"
 dependencies = [
  "core-config",
+ "csv",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]
