@@ -74,7 +74,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
         catalog,
         random: os_random,
         clock: OffsetDateTime::now_utc,
-        store_path: config.accounts_store.clone(),
+        store_path: ArcSwap::from_pointee(config.accounts_store.clone()),
         limiter: Mutex::new(BTreeMap::new()),
         access,
         document: serde_json::to_value(merged_document(&config.module, extra_documents))?,
@@ -134,7 +134,7 @@ pub fn memory_only_accounts(app: &ApiState, previous: &AccountMap, stored: &Acco
 
 /// Replaces the in-memory accounts and credentials with the file's, read under the store lock, keeping the memory-only `oidc:` accounts.
 pub fn refresh_accounts(app: &ApiState, auth: &mut State) -> Result<(), AuthError> {
-    read_store_locked(&app.store_path)
+    read_store_locked(&app.store_path.load())
         .inspect_err(|error| tracing::warn!(%error, "account store re-read failed, the request is refused"))
         .map(|(mut accounts, credentials)| {
             accounts.extend(memory_only_accounts(app, &auth.accounts, &accounts));

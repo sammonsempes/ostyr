@@ -1,22 +1,30 @@
-use crate::types::{AccessTable, ConnectionTable, KeyedLimiter, SharedHttpFn, SharedLimits, SharedResolveFn, VerifyPasswordFn};
+use crate::error::StartupError;
+use crate::types::{
+    AccessTable, ConnectionTable, KeyedLimiter, ServerHandle, SharedHttpFn, SharedLimits, SharedListener, SharedResolveFn, VerifyPasswordFn,
+    WatchGuard,
+};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::http::StatusCode;
-use core_audit::log::AuditLog;
+use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
+use core_audit::log::{AuditLog, LogState};
 use core_auth::oidc::OidcConfig;
 use core_auth::service::State;
 use core_auth::types::{Clock, CompromisedSet, PendingMap, RandomFn, RoleCatalog, StoreKey};
 use core_config::model::ModuleConfig;
+use core_config::reload::ReloadEngine;
 use rustls::ServerConfig;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::sync::Semaphore;
+use tokio::runtime::Handle;
+use tokio::sync::{Notify, Semaphore};
 use tracing::level_filters::LevelFilter;
 use tracing::Dispatch;
 use utoipa::ToSchema;
@@ -32,7 +40,7 @@ pub struct ApiState {
     pub catalog: RoleCatalog,
     pub random: RandomFn,
     pub clock: Clock,
-    pub store_path: PathBuf,
+    pub store_path: ArcSwap<PathBuf>,
     pub limiter: KeyedLimiter,
     pub access: AccessTable,
     pub document: serde_json::Value,
@@ -265,4 +273,102 @@ pub struct CallbackQuery {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StartReply {
     pub authorization_url: String,
+}
+
+
+/// Two handles on one listening socket: `kept` stays in `Bound` (so a later server can clone it), `server` goes to the new server.
+#[derive(Debug)]
+pub struct Sockets {
+    pub kept: TcpListener,
+    pub server: TcpListener,
+}
+
+
+/// What the running server was started with, to tell whether a reload must start another one.
+#[derive(Debug)]
+pub struct Bound {
+    pub socket: TcpListener,
+    pub tls: Option<RustlsConfig>,
+    pub address: SocketAddr,
+    pub header_read_timeout: Duration,
+    pub generation: u64,
+}
+
+
+/// `handle` stops the newest server; `bound` is `None` until the first server starts.
+#[derive(Debug)]
+pub struct Current {
+    pub handle: ServerHandle,
+    pub bound: Option<Bound>,
+}
+
+
+/// The live listener: a reload starts a new server (a new generation) on the new socket and drains the old one.
+#[derive(Debug)]
+pub struct Listener {
+    pub current: Mutex<Current>,
+    pub connections: ConnectionTable,
+    pub finished: Notify,
+    pub outcome: Mutex<Option<Result<(), StartupError>>>,
+}
+
+
+/// A new audit log, opened and verified before the swap.
+#[derive(Debug)]
+pub struct PreparedAudit {
+    pub path: PathBuf,
+    pub state: LogState<File>,
+}
+
+
+/// The paths being watched and the guard that watches them.
+pub struct Watching {
+    pub files: Vec<PathBuf>,
+    pub guard: WatchGuard,
+}
+
+
+/// The file watch follows the module file, so it can be replaced by a reload; `engine` is weak so the engine can be dropped.
+#[derive(Default)]
+pub struct Rewatch {
+    pub engine: OnceLock<Weak<ReloadEngine<ApiSettings>>>,
+    pub watching: Mutex<Option<Watching>>,
+}
+
+
+/// Stops the watch when dropped: the watch holds the engine, which holds this watch.
+pub struct WatchStop(pub Arc<Rewatch>);
+
+
+impl Drop for WatchStop {
+    fn drop(&mut self) {
+        self.0.watching.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
+}
+
+
+/// Stops the newest server when dropped, so a start-up that fails after the server began leaves nothing listening.
+pub struct ServerStop(pub SharedListener);
+
+
+impl Drop for ServerStop {
+    fn drop(&mut self) {
+        self.0
+            .current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .handle
+            .graceful_shutdown(None);
+    }
+}
+
+
+/// Everything a reload needs to move the listener and the file watch.
+#[derive(Clone)]
+pub struct ListenerSetup {
+    pub listener: SharedListener,
+    pub router: Router,
+    pub limits: SharedLimits,
+    pub runtime: Handle,
+    pub rewatch: Arc<Rewatch>,
 }

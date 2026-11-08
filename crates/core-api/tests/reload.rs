@@ -12,19 +12,26 @@ use core_api::error::StartupError;
 use core_api::logging::reloadable_dispatch;
 use core_api::middleware::admit_source;
 use core_api::model::ApiSettings;
-use core_api::model::OidcFiles;
+use core_api::model::{ApiConfig, Bound, ListenerSetup, OidcFiles, PreparedAudit, Rewatch, Watching};
 use core_api::oidc::{fingerprint_salt, oidc_fingerprint};
 use core_api::reload::{
-    accept, build_settings, content_digest, first_then_file, load_settings, open_reload, settings_state, validate_fixed, watched_files,
-    FINGERPRINT_COMPROMISED, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
+    accept, build_settings, content_digest, first_then_file, follow_files, load_settings, open_reload, rewatch, settings_state, switch_audit,
+    validate_fixed, watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
 };
-use core_api::server::{load_tls, run_module};
+use core_api::routes::build_router;
+use core_api::server::{
+    bind_socket, current_handle, finish, listening_address, load_tls, new_listener, retire_socket, run_module, start_first, stop_listener,
+    wait_finished,
+};
 use core_api::state::{build_state, read_compromised_digested, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
-use core_api::types::{LogLevelHandle, ServerHandle, SharedState};
+use core_api::types::{LogLevelHandle, SharedListener, SharedState};
+use core_audit::log::LogState;
+use core_audit::model::GENESIS_HASH;
+use core_audit::verify::verify;
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
-use core_config::reload::{reload, ReloadEngine, ReloadOutcome};
+use core_config::reload::{reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use fixture::{extra_access, extra_router, fixture, private_file, set_mode};
 use rcgen::generate_simple_self_signed;
 use rustls::crypto::ring::default_provider;
@@ -33,9 +40,10 @@ use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, ServerName};
 use std::fs;
 use std::future::Future;
+use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -122,6 +130,9 @@ struct Live {
     state: SharedState,
     engine: Arc<ReloadEngine<ApiSettings>>,
     tls: Option<axum_server::tls_rustls::RustlsConfig>,
+    _runtime: tokio::runtime::Runtime,
+    listener: SharedListener,
+    setup: ListenerSetup,
 }
 
 
@@ -185,13 +196,31 @@ fn live_with(dir: TempDir, extra: &str, log: Option<LogLevelHandle>) -> Result<L
     let settings = build_settings(load_module(&module_file)?)?;
     let state: SharedState = Arc::new(build_state(&settings.config, extra_access(), Vec::new())?);
     let tls = settings.tls.clone().map(axum_server::tls_rustls::RustlsConfig::from_config);
-    let engine = open_reload(&state, settings, &module_file, tls.clone(), log)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let listener = new_listener();
+    let setup = ListenerSetup {
+        listener: listener.clone(),
+        router: build_router(state.clone(), extra_router()),
+        limits: state.limits.clone(),
+        runtime: runtime.handle().clone(),
+        rewatch: Arc::new(Rewatch::default()),
+    };
+    let config = settings.config.clone();
+    let engine = open_reload(&state, settings, &module_file, setup.clone(), log)?;
+    *setup.rewatch.watching.lock().map_err(|_| "poisoned")? = Some(Watching {
+        files: watched_files(&module_file, &config),
+        guard: Box::new(()),
+    });
+    start_first(&setup, &config, tls.clone())?;
     Ok(Live {
         dir,
         module_file,
         state,
         engine,
         tls,
+        _runtime: runtime,
+        listener,
+        setup,
     })
 }
 
@@ -512,35 +541,17 @@ fn every_file_the_module_points_at_is_watched() -> TestResult {
 
 
 #[test]
-fn things_fixed_at_start_are_named_in_the_refusal() -> TestResult {
+fn identity_fields_are_named_in_the_refusal() -> TestResult {
     let dir = tempdir()?;
-    write_pki(dir.path(), &pki()?)?;
     let start = build_settings(module_in(dir.path(), "")?)?;
     assert!(accept(&start).is_ok());
     assert!(validate_fixed(&start.config, &start).is_ok());
     let other = dir.path().join("other");
     let cases = [
-        ("listen", module_text(dir.path(), "example", "127.0.0.1:1", "")?),
-        (
-            "header_read_timeout_seconds",
-            module_text(dir.path(), "example", LOOPBACK, "  header_read_timeout_seconds: 11\n")?,
-        ),
-        (
-            "enabling or disabling TLS",
-            module_text(dir.path(), "example", LOOPBACK, &tls_extra(dir.path()))?,
-        ),
         ("name", module_text(dir.path(), "renamed", LOOPBACK, "")?),
         (
             "tenant",
             format!("tenant: elsewhere\n{}", module_text(dir.path(), "example", LOOPBACK, "")?),
-        ),
-        (
-            "accounts_store",
-            module_text(dir.path(), "example", LOOPBACK, "").map(|text| text.replace("accounts.json", "other.json"))?,
-        ),
-        (
-            "audit_log",
-            module_text(dir.path(), "example", LOOPBACK, "").map(|text| text.replace("audit.log", "other.log"))?,
         ),
         (
             "key_file",
@@ -559,18 +570,24 @@ fn things_fixed_at_start_are_named_in_the_refusal() -> TestResult {
 
 
 #[test]
-fn a_changed_listen_is_refused_audited_and_nothing_else_applies() -> TestResult {
+fn a_listen_address_that_cannot_be_bound_refuses_the_reload_and_nothing_else_applies() -> TestResult {
     let running = live("")?;
-    let both = module_text(running.dir.path(), "example", "127.0.0.1:1", "  rate_max_requests: 2\n")?;
+    let taken = std::net::TcpListener::bind(LOOPBACK)?;
+    let both = module_text(
+        running.dir.path(),
+        "example",
+        &taken.local_addr()?.to_string(),
+        "  rate_max_requests: 2\n",
+    )?;
     fs::write(&running.module_file, both)?;
     let outcome = reload(&running.engine);
-    assert!(matches!(outcome, ReloadOutcome::Refused { ref reason } if reason.contains("listen needs a restart")));
+    assert!(matches!(outcome, ReloadOutcome::Refused { ref reason } if reason.contains("`listener`")));
     assert_eq!(running.state.limits.load().rate_max_requests, RATE_MAX_REQUESTS);
     let records = reload_records(running.dir.path())?;
     assert_eq!(records.len(), 1);
-    assert!(records
-        .iter()
-        .all(|line| line.contains("refused") && line.contains("listen needs a restart")));
+    assert!(records.iter().all(|line| line.contains("refused")));
+    let current = running.listener.current.lock().map_err(|_| "poisoned")?;
+    assert_eq!(current.bound.as_ref().map(|bound| bound.generation), Some(0));
     Ok(())
 }
 
@@ -845,19 +862,19 @@ async fn status_of(address: SocketAddr) -> Result<String, TestError> {
 }
 
 
-fn start_module(path: &Path) -> (ServerHandle, tokio::task::JoinHandle<Result<(), StartupError>>) {
-    let handle = ServerHandle::new();
-    let running = handle.clone();
+fn start_module(path: &Path) -> (SharedListener, tokio::task::JoinHandle<Result<(), StartupError>>) {
+    let listener = new_listener();
+    let running = listener.clone();
     let arguments = vec![path.display().to_string()];
     (
-        handle,
+        listener,
         tokio::spawn(async move { run_module(&arguments, extra_router(), extra_access(), vec![], running, None).await }),
     )
 }
 
 
-async fn listening(handle: &ServerHandle) -> Result<SocketAddr, TestError> {
-    Ok(handle.listening().await.ok_or("server did not start")?)
+async fn listening(listener: &SharedListener) -> Result<SocketAddr, TestError> {
+    Ok(listening_address(listener).await.ok_or("server did not start")?)
 }
 
 
@@ -865,15 +882,21 @@ async fn listening(handle: &ServerHandle) -> Result<SocketAddr, TestError> {
 async fn editing_the_module_file_changes_the_running_server() -> TestResult {
     let dir = tempdir()?;
     let path = write_module(dir.path(), &format!("  rate_max_requests: {HIGH_LIMIT}\n"))?;
-    let (handle, task) = start_module(&path);
-    let address = listening(&handle).await?;
+    let (listener, task) = start_module(&path);
+    let address = listening(&listener).await?;
     assert!(status_of(address).await?.contains("200"));
+    let taken = std::net::TcpListener::bind(LOOPBACK)?;
     fs::write(
         &path,
-        module_text(dir.path(), "example", "127.0.0.1:1", &format!("  rate_max_requests: {LOW_LIMIT}\n"))?,
+        module_text(
+            dir.path(),
+            "example",
+            &taken.local_addr()?.to_string(),
+            &format!("  rate_max_requests: {LOW_LIMIT}\n"),
+        )?,
     )?;
     let directory = dir.path();
-    let refused = eventually(|| async move { Ok(reload_records(directory)?.iter().any(|line| line.contains("listen needs a restart"))) }).await?;
+    let refused = eventually(|| async move { Ok(reload_records(directory)?.iter().any(|line| line.contains("refused"))) }).await?;
     assert!(refused);
     assert!(status_of(address).await?.contains("200"));
     assert!(status_of(address).await?.contains("200"));
@@ -884,7 +907,7 @@ async fn editing_the_module_file_changes_the_running_server() -> TestResult {
     )?;
     let limited = eventually(|| async move { Ok(status_of(address).await?.contains("429")) }).await?;
     assert!(limited);
-    handle.shutdown();
+    stop_listener(&listener, None);
     assert!(task.await?.is_ok());
     Ok(())
 }
@@ -895,8 +918,8 @@ async fn editing_the_module_file_changes_the_running_server() -> TestResult {
 async fn sighup_reloads_the_module_file() -> TestResult {
     let dir = tempdir()?;
     let path = write_module(dir.path(), &format!("  rate_max_requests: {HIGH_LIMIT}\n"))?;
-    let (handle, task) = start_module(&path);
-    let address = listening(&handle).await?;
+    let (listener, task) = start_module(&path);
+    let address = listening(&listener).await?;
     assert!(status_of(address).await?.contains("200"));
     fs::write(
         &path,
@@ -905,7 +928,7 @@ async fn sighup_reloads_the_module_file() -> TestResult {
     signal_hook::low_level::raise(signal_hook::consts::SIGHUP)?;
     let limited = eventually(|| async move { Ok(status_of(address).await?.contains("429")) }).await?;
     assert!(limited);
-    handle.shutdown();
+    stop_listener(&listener, None);
     assert!(task.await?.is_ok());
     Ok(())
 }
@@ -939,8 +962,8 @@ async fn a_replaced_certificate_serves_new_handshakes_and_spares_open_connection
     let (first, second) = (pki()?, pki()?);
     write_pki(dir.path(), &first)?;
     let path = write_module(dir.path(), &tls_extra(dir.path()))?;
-    let (handle, task) = start_module(&path);
-    let address = listening(&handle).await?;
+    let (listener, task) = start_module(&path);
+    let address = listening(&listener).await?;
     let (mut open, seen) = presented_certificate(address, &[&first, &second]).await?;
     assert_eq!(seen, first.der);
     write_pki(dir.path(), &second)?;
@@ -958,7 +981,329 @@ async fn a_replaced_certificate_serves_new_handshakes_and_spares_open_connection
         eventually(|| async move { Ok(reload_records(directory)?.iter().filter(|line| line.contains("refused")).count() > before) }).await?;
     assert!(refused);
     assert_eq!(presented_certificate(address, &[&first, &second]).await?.1, second.der);
-    handle.shutdown();
+    stop_listener(&listener, None);
     assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+const PLAIN_AGAIN: u64 = 2;
+
+
+const RETIRED: u64 = 2;
+
+
+const NEWEST: u64 = 3;
+
+
+const SLOW_LOGIN: &str =
+    "POST /auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n";
+
+
+const PARTIAL_HEADERS: &str = "GET /health HTTP/1.1\r\nHost: localhost\r\n";
+
+
+const PATIENT: &str = "  header_read_timeout_seconds: 3600\n  body_read_timeout_seconds: 3600\n";
+
+
+const SHORT_HEADER_TIMEOUT: &str = "  header_read_timeout_seconds: 1\n";
+
+
+const PROBE_PAUSE: Duration = Duration::from_secs(5);
+
+
+fn free_address() -> Result<String, TestError> {
+    Ok(std::net::TcpListener::bind(LOOPBACK)?.local_addr()?.to_string())
+}
+
+
+fn generation_of(listener: &SharedListener) -> Result<Option<u64>, TestError> {
+    let current = listener.current.lock().map_err(|_| "poisoned")?;
+    Ok(current.bound.as_ref().map(|bound| bound.generation))
+}
+
+
+async fn moved_to(listener: &SharedListener, old: SocketAddr) -> Result<SocketAddr, TestError> {
+    let watched = listener;
+    let changed = eventually(|| async move { Ok(listening_address(watched).await != Some(old)) }).await?;
+    assert!(changed);
+    listening(listener).await
+}
+
+
+async fn at_generation(listener: &SharedListener, wanted: u64) -> Result<(), TestError> {
+    let watched = listener;
+    let reached = eventually(|| async move { Ok(generation_of(watched)? == Some(wanted)) }).await?;
+    assert!(reached);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_moved_listen_serves_on_the_new_port_and_frees_the_old_one() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    fs::write(&path, module_text(dir.path(), "example", &free_address()?, "")?)?;
+    let (listener, task) = start_module(&path);
+    let old = listening(&listener).await?;
+    assert!(status_of(old).await?.contains("200"));
+    let second = free_address()?;
+    fs::write(&path, module_text(dir.path(), "example", &second, "")?)?;
+    let new = moved_to(&listener, old).await?;
+    assert_eq!(new.to_string(), second);
+    assert!(status_of(new).await?.contains("200"));
+    let freed = eventually(|| async move { Ok(TcpStream::connect(old).await.is_err()) }).await?;
+    assert!(freed);
+    assert_eq!(generation_of(&listener)?, Some(1));
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_request_in_flight_finishes_on_the_old_listener() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    fs::write(&path, module_text(dir.path(), "example", &free_address()?, PATIENT)?)?;
+    let (listener, task) = start_module(&path);
+    let old = listening(&listener).await?;
+    let mut open = TcpStream::connect(old).await?;
+    open.write_all(SLOW_LOGIN.as_bytes()).await?;
+    let held = current_handle(&listener);
+    let held_ref = &held;
+    let accepted = eventually(|| async move { Ok(held_ref.connection_count() == 1) }).await?;
+    assert!(accepted);
+    fs::write(&path, module_text(dir.path(), "example", &free_address()?, PATIENT)?)?;
+    let new = moved_to(&listener, old).await?;
+    assert!(status_of(new).await?.contains("200"));
+    let refused = eventually(|| async move { Ok(TcpStream::connect(old).await.is_err()) }).await?;
+    assert!(refused);
+    open.write_all(b"{}").await?;
+    let mut bytes = Vec::new();
+    open.read_to_end(&mut bytes).await?;
+    assert!(String::from_utf8_lossy(&bytes).starts_with("HTTP/1.1 4"));
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+async fn closes_a_partial_request(address: SocketAddr) -> Result<bool, TestError> {
+    let mut stream = TcpStream::connect(address).await?;
+    stream.write_all(PARTIAL_HEADERS.as_bytes()).await?;
+    let mut bytes = Vec::new();
+    Ok(tokio::time::timeout(PROBE_PAUSE, stream.read_to_end(&mut bytes)).await.is_ok())
+}
+
+
+#[tokio::test]
+async fn a_changed_header_timeout_applies_to_new_connections_on_the_same_address() -> TestResult {
+    let dir = tempdir()?;
+    let path = write_module(dir.path(), PATIENT)?;
+    let (listener, task) = start_module(&path);
+    let address = listening(&listener).await?;
+    fs::write(&path, module_text(dir.path(), "example", LOOPBACK, SHORT_HEADER_TIMEOUT)?)?;
+    at_generation(&listener, 1).await?;
+    let closed = eventually(|| async move { closes_a_partial_request(address).await }).await?;
+    assert!(closed);
+    assert!(status_of(address).await?.contains("200"));
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn tls_turned_on_then_off_changes_what_new_connections_get() -> TestResult {
+    let dir = tempdir()?;
+    let pair = pki()?;
+    write_pki(dir.path(), &pair)?;
+    let path = write_module(dir.path(), "")?;
+    let (listener, task) = start_module(&path);
+    let address = listening(&listener).await?;
+    assert!(status_of(address).await?.contains("200"));
+    fs::write(&path, module_text(dir.path(), "example", LOOPBACK, &tls_extra(dir.path()))?)?;
+    let pair_ref = &pair;
+    let secured = eventually(|| async move {
+        Ok(presented_certificate(address, &[pair_ref])
+            .await
+            .is_ok_and(|(_, seen)| seen == pair_ref.der))
+    })
+    .await?;
+    assert!(secured);
+    fs::write(&path, module_text(dir.path(), "example", LOOPBACK, "")?)?;
+    let plain = eventually(|| async move { Ok(status_of(address).await.is_ok_and(|line| line.contains("200"))) }).await?;
+    assert!(plain);
+    assert_eq!(generation_of(&listener)?, Some(PLAIN_AGAIN));
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_moved_watched_file_is_watched_from_the_next_reload_on() -> TestResult {
+    let dir = tempdir()?;
+    let lists = dir.path().join("lists");
+    fs::create_dir(&lists)?;
+    fs::write(lists.join("moved.txt"), "passwordpassword\n")?;
+    let path = write_module(dir.path(), "")?;
+    let (listener, task) = start_module(&path);
+    listening(&listener).await?;
+    let text = module_text(dir.path(), "example", LOOPBACK, "")?.replace("compromised.txt", "lists/moved.txt");
+    fs::write(&path, text)?;
+    let directory = dir.path();
+    let moved = eventually(|| async move { Ok(reload_records(directory)?.iter().any(|line| line.contains("applied"))) }).await?;
+    assert!(moved);
+    let moved_list = lists.join("moved.txt");
+    let mut attempt = usize::MIN;
+    let followed = eventually(|| {
+        attempt += 1;
+        let (file, entry) = (moved_list.clone(), format!("another-password-entry-{attempt}\n"));
+        async move {
+            fs::write(&file, entry)?;
+            Ok(reload_records(directory)?.iter().filter(|line| line.contains("applied")).count() > 1)
+        }
+    })
+    .await?;
+    assert!(followed);
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn the_file_watch_needs_its_engine_and_reports_unwatchable_directories() -> TestResult {
+    let empty = Rewatch::default();
+    assert!(matches!(rewatch(&empty, vec![PathBuf::from("x")]), Err(StartupError::EngineGone)));
+    let running = live("")?;
+    let missing = vec![running.dir.path().join("absent").join("file.txt")];
+    assert!(matches!(rewatch(&running.setup.rewatch, missing), Err(StartupError::Watch(_))));
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    follow_files(&empty, &running.module_file, &settings);
+    assert!(rewatch(&running.setup.rewatch, watched_files(&running.module_file, &settings.config)).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_moved_accounts_store_is_checked_first_and_a_bad_one_is_refused() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let original = running.state.store_path.load_full();
+    private_file(&directory.join("bad.json"), b"not json")?;
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    fs::write(&running.module_file, plain.replace("accounts.json", "bad.json"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("`accounts_store`")));
+    assert_eq!(running.state.store_path.load_full(), original);
+    fs::write(&running.module_file, plain.replace("accounts.json", "moved.json"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(*running.state.store_path.load_full(), directory.join("moved.json"));
+    assert_eq!(reload_records(directory)?.len(), TWO_RECORDS);
+    Ok(())
+}
+
+
+#[test]
+fn a_moved_audit_log_is_recorded_in_both_files_and_a_bad_one_is_refused() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    private_file(&directory.join("bad.log"), b"not a record\n")?;
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    fs::write(&running.module_file, plain.replace("audit.log", "bad.log"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("`audit_log`")));
+    fs::write(&running.module_file, plain.replace("audit.log", "moved.log"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    let old_log = fs::read_to_string(directory.join("audit.log"))?;
+    assert!(old_log.contains("refused") && old_log.contains("applied") && !old_log.contains("audit_log moved"));
+    let new_log = fs::read_to_string(directory.join("moved.log"))?;
+    assert!(new_log.contains("audit_log moved from") && new_log.contains("moved.log"));
+    fs::write(&running.module_file, plain.replace("audit.log", "moved.log") + "  rate_max_requests: 2\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(fs::read_to_string(directory.join("audit.log"))?, old_log);
+    assert_eq!(fs::read_to_string(directory.join("moved.log"))?.lines().count(), TWO_RECORDS);
+    assert!(verify(BufReader::new(fs::File::open(directory.join("moved.log"))?), None).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_switch_without_a_matching_prepared_log_changes_nothing_and_a_failing_new_log_is_only_logged() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let context = ReloadContext {
+        actor_id: "test".to_owned(),
+        tenant: "default".to_owned(),
+        module: "example".to_owned(),
+        target: "module.yaml".to_owned(),
+        request_id: "test".to_owned(),
+    };
+    let current = Mutex::new(directory.join("audit.log"));
+    switch_audit(&running.state, &context, &current, &Mutex::new(None), &settings);
+    assert_eq!(*current.lock().map_err(|_| "poisoned")?, directory.join("audit.log"));
+    let read_only = PreparedAudit {
+        path: settings.config.audit_log.clone(),
+        state: LogState {
+            writer: fs::File::open(directory.join("compromised.txt"))?,
+            head: GENESIS_HASH.to_owned(),
+            poisoned: false,
+        },
+    };
+    switch_audit(&running.state, &context, &current, &Mutex::new(Some(read_only)), &settings);
+    assert_eq!(*current.lock().map_err(|_| "poisoned")?, settings.config.audit_log);
+    Ok(())
+}
+
+
+#[test]
+fn the_first_server_refuses_a_plain_public_address_and_an_address_in_use() -> TestResult {
+    let running = live("")?;
+    let fx = fixture()?;
+    let exposed = ApiConfig {
+        address: "0.0.0.0:0".parse()?,
+        ..fx.config.clone()
+    };
+    assert!(matches!(
+        start_first(&running.setup, &exposed, None),
+        Err(StartupError::PlainHttpRefused(_))
+    ));
+    let taken = std::net::TcpListener::bind(LOOPBACK)?;
+    let busy = ApiConfig {
+        address: taken.local_addr()?,
+        ..fx.config
+    };
+    assert!(matches!(start_first(&running.setup, &busy, None), Err(StartupError::Io(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn only_the_newest_generation_ends_the_run() -> TestResult {
+    let listener = new_listener();
+    finish(&listener, 0, Err(StartupError::Usage("before any server".to_owned())));
+    listener.current.lock().map_err(|_| "poisoned")?.bound = Some(Bound {
+        socket: bind_socket(LOOPBACK.parse()?)?,
+        tls: None,
+        address: LOOPBACK.parse()?,
+        header_read_timeout: Duration::from_secs(1),
+        generation: NEWEST,
+    });
+    finish(&listener, RETIRED, Err(StartupError::Usage("retired".to_owned())));
+    finish(&listener, NEWEST, Err(StartupError::Usage("newest".to_owned())));
+    assert!(matches!(wait_finished(&listener).await, Err(StartupError::Usage(ref text)) if text == "newest"));
+    finish(&listener, NEWEST, Ok(()));
+    assert!(wait_finished(&listener).await.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_listening_socket_that_cannot_be_shut_down_is_only_logged() -> TestResult {
+    let socket = bind_socket(LOOPBACK.parse()?)?;
+    retire_socket(&socket);
+    retire_socket(&socket);
     Ok(())
 }

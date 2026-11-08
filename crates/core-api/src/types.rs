@@ -1,4 +1,4 @@
-use crate::model::{ApiState, Limits, Rule, Window};
+use crate::model::{ApiState, Limits, Listener, PreparedAudit, Rule, Sockets, Window};
 use arc_swap::ArcSwap;
 use core_auth::error::AuthError;
 use core_config::secret::SecretRef;
@@ -38,3 +38,15 @@ pub type LogLevelHandle = tracing_subscriber::reload::Handle<tracing::level_filt
 
 
 pub type SharedResolveFn = Box<dyn Fn(&SecretRef) -> Result<SecretString, io::Error> + Send + Sync>;
+
+
+pub type SharedListener = Arc<Listener>;
+
+
+pub type PendingSockets = Arc<Mutex<Option<Sockets>>>;
+
+
+pub type PendingAudit = Arc<Mutex<Option<PreparedAudit>>>;
+
+
+pub type WatchGuard = Box<dyn Send>;
