@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -53,6 +54,10 @@ pub const FINGERPRINT_OIDC: &str = "file.oidc";
 
 
 pub const FINGERPRINT_KEY: &str = "file.key_file";
+
+
+/// The state a configuration reports once its key rotation failed, so the next reload sees a change and retries.
+pub const KEY_ROTATION_FAILED: &str = "rotation_failed";
 
 
 pub fn content_digest(bytes: &[u8]) -> String {
@@ -102,6 +107,7 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         compromised: Arc::new(list),
         key,
         fingerprints,
+        rotation_failed: AtomicBool::new(false),
     })
 }
 
@@ -127,9 +133,11 @@ pub fn first_then_file(first: ApiSettings, path: PathBuf) -> Box<LoaderFn<ApiSet
 
 /// The module state plus one digest per referenced file, so a replaced certificate or list is a change; digests only, never content.
 pub fn settings_state(settings: &ApiSettings) -> ConfigState {
+    let failed = settings.rotation_failed.load(Ordering::SeqCst);
     module_state(&settings.module)
         .into_iter()
         .chain(settings.fingerprints.iter().map(|(name, text)| (name.clone(), text.clone())))
+        .chain(failed.then(|| (FINGERPRINT_KEY.to_owned(), KEY_ROTATION_FAILED.to_owned())))
         .collect()
 }
 
@@ -387,6 +395,7 @@ pub fn switch_key(state: &ApiState, context: &ReloadContext, prepared: &PendingK
     taken.into_iter().for_each(|candidate| {
         let (outcome, parameters) = rotate_store(state, &candidate.key)
             .inspect_err(|error| tracing::error!(%error, "key rotation failed after validation, the old key is kept"))
+            .inspect_err(|_| settings.rotation_failed.store(true, Ordering::SeqCst))
             .map_or_else(
                 |error| {
                     (

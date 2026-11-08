@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -168,6 +169,7 @@ pub struct ApiSettings {
     pub compromised: Arc<CompromisedSet>,
     pub key: Arc<StoreKey>,
     pub fingerprints: BTreeMap<String, String>,
+    pub rotation_failed: AtomicBool,
 }
 
 
