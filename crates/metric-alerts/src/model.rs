@@ -37,6 +37,22 @@ pub enum Condition {
     Absence {
         interval: u64,
     },
+    Forecast {
+        window: u64,
+        capacity: Capacity,
+        horizon: u64,
+        min_confidence: f64,
+        min_points: usize,
+    },
+}
+
+
+/// Where the capacity a forecast projects towards comes from: a constant, or the latest value of another metric.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Capacity {
+    Fixed { value: f64 },
+    Metric { name: String },
 }
 
 
