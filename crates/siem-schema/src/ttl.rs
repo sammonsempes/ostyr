@@ -23,7 +23,8 @@ pub struct TtlSettings {
 }
 
 
-fn check_days(days: u32) -> Result<u32, SchemaError> {
+/// Checks a retention in days.
+pub fn check_days(days: u32) -> Result<u32, SchemaError> {
     if (1..=MAX_RETENTION_DAYS).contains(&days) {
         Ok(days)
     } else {

@@ -22,7 +22,8 @@ pub fn check_unique(columns: &[Column]) -> Result<(), SchemaError> {
 }
 
 
-fn render_column(column: &Column) -> Result<String, SchemaError> {
+/// Renders one indented column line.
+pub fn render_column(column: &Column) -> Result<String, SchemaError> {
     quote_identifier(&column.name).map(|name| format!("    {name} {}", column.column_type))
 }
 
