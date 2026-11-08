@@ -542,6 +542,24 @@ fn the_catalogue_is_checked() -> TestResult {
 }
 
 
+#[test]
+fn a_compensation_that_is_destructive_or_bound_to_a_breaker_is_refused() -> TestResult {
+    let found = problems_of("  - action: kill\n    compensate: wipe\n  - action: kill\n    compensate: soft_isolate")?;
+    let refused = found
+        .iter()
+        .filter(|problem| matches!(problem, Problem::UnsafeCompensation { .. }))
+        .count();
+    assert_eq!(refused, TWO_PROBLEMS, "{found:?}");
+    let catalogue = catalogue_of(
+        "actions:\n  - action: undo\n    destructive: true\n    breaker: { kind: disable_account, target: user }\n    params:\n      user: { type: string }\n  - action: act\n    compensate: undo\n",
+    )?;
+    assert!(catalogue_problems(&catalogue)
+        .iter()
+        .any(|problem| problem.to_string().contains("`undo` is destructive or bound to a breaker")));
+    Ok(())
+}
+
+
 const PROBE_TERMS: usize = 12_000;
 
 

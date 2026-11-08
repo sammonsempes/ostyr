@@ -1,5 +1,6 @@
 use crate::error::Problem;
 use crate::model::{Catalogue, CatalogueEntry, ParamSpec, ParamType};
+use crate::validate::is_unsafe_compensation;
 use std::sync::LazyLock;
 
 
@@ -80,8 +81,12 @@ pub fn compensate_problem(catalogue: &Catalogue, entry: &CatalogueEntry) -> Opti
     entry
         .compensate
         .as_ref()
-        .filter(|compensate| find_entry(catalogue, entry.connector.as_deref(), compensate).is_none())
-        .map(|compensate| bad_entry(entry, format!("compensation `{compensate}` is not in the catalogue")))
+        .and_then(|compensate| match find_entry(catalogue, entry.connector.as_deref(), compensate) {
+            None => Some(bad_entry(entry, format!("compensation `{compensate}` is not in the catalogue"))),
+            Some(undo) => {
+                is_unsafe_compensation(undo).then(|| bad_entry(entry, format!("compensation `{compensate}` is destructive or bound to a breaker")))
+            }
+        })
 }
 
 

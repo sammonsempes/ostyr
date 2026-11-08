@@ -1,6 +1,7 @@
-use crate::types::ParamMap;
+use crate::types::{ConnectorFn, MonotonicFn, ParamMap};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,6 +9,10 @@ use std::collections::BTreeMap;
 pub enum Mode {
     Simulate,
     Enforce,
+    #[serde(rename = "dry-run")]
+    DryRun,
+    #[serde(rename = "approval-required")]
+    ApprovalRequired,
 }
 
 
@@ -181,6 +186,11 @@ pub enum TraceEvent {
         path: String,
         action: String,
     },
+    ActionFailed {
+        path: String,
+        action: String,
+        reason: String,
+    },
     Compensation {
         action: String,
         compensates: String,
@@ -207,4 +217,39 @@ pub struct SimulationInput {
     pub isolated_now: u64,
     pub fail_action: Option<usize>,
     pub approvals: Vec<String>,
+}
+
+
+/// An action that failed; `took_effect` is true when the connector succeeded too late, so the action must still be undone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub event: TraceEvent,
+    pub took_effect: bool,
+}
+
+
+/// What a connector is asked to do; `deadline` is the time the run allows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectorCall {
+    pub tenant: String,
+    pub request_id: String,
+    pub connector: Option<String>,
+    pub action: String,
+    pub params: ParamMap,
+    pub deadline: Duration,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorResult {
+    pub summary: String,
+}
+
+
+/// The real run's injected world: the connector, a monotonic clock and the per-action deadline.
+#[derive(Clone, Copy)]
+pub struct Executor<'a> {
+    pub connector: &'a ConnectorFn,
+    pub clock: &'a MonotonicFn,
+    pub deadline: Duration,
 }

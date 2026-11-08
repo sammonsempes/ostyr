@@ -1,7 +1,23 @@
 use core_config::error::ConfigError;
 use std::io;
 use std::num::ParseIntError;
+use std::time::Duration;
 use thiserror::Error;
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConnectorError {
+    #[error("connector failed: {0}")]
+    Failed(String),
+    #[error("connector took {elapsed:?}, the deadline is {deadline:?}")]
+    Timeout { elapsed: Duration, deadline: Duration },
+    #[error("no such compensation in the catalogue")]
+    UnknownCompensation,
+    #[error("the compensation is destructive or bound to a breaker")]
+    UnsafeCompensation,
+    #[error("no approval record for the action this compensation undoes")]
+    UnapprovedCompensation,
+}
 
 
 #[derive(Debug, Error)]
@@ -39,6 +55,8 @@ pub enum Problem {
     MissingCompensation { path: String, action: String },
     #[error("{path}: action `{action}` compensates with unknown `{compensate}`")]
     UnknownCompensation { path: String, action: String, compensate: String },
+    #[error("{path}: action `{action}` compensates with `{compensate}`, which is destructive or bound to a breaker")]
+    UnsafeCompensation { path: String, action: String, compensate: String },
     #[error("on_error is missing: a failure must page someone")]
     MissingOnError,
     #[error("steps is empty")]
