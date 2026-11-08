@@ -84,7 +84,7 @@ source "qemu" "ws2022" {
   headless          = true
   memory            = 4096
   cpus              = 4
-  qemuargs          = [["-cpu", "host"]]
+  qemuargs          = [["-cpu", var.accelerator == "kvm" ? "host" : "max"]]
   output_directory  = var.output_directory
   vm_name           = "ws2022-dc.qcow2"
   cd_label          = "ANSWER"
