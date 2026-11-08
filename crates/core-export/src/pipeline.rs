@@ -1,7 +1,8 @@
 use crate::buffer::{create_file, drain, enqueue, sync_path, Enqueued};
-use crate::config::WebhookConfig;
+use crate::config::{OtlpConfig, WebhookConfig};
 use crate::ecs::{blank_event, to_json, EcsEvent, EventFields, HostFields};
 use crate::error::ExportError;
+use crate::otlp::otlp_batches;
 use crate::types::{DeliverFn, PostFn, SleepFn};
 use crate::webhook::{batches, deliver, RetryPolicy};
 use std::path::Path;
@@ -74,7 +75,7 @@ pub fn route_batch(
     state: (ExportReport, bool),
     batch: &(usize, String),
     send: &mut DeliverFn,
-    config: &WebhookConfig,
+    spool: &Spool,
 ) -> Result<(ExportReport, bool), ExportError> {
     let (mut report, was_down) = state;
     let (count, body) = batch;
@@ -82,13 +83,7 @@ pub fn route_batch(
     if delivered {
         report.sent_batches += 1;
     } else {
-        match enqueue(
-            Path::new(&config.buffer_dir),
-            body,
-            config.buffer_max_bytes,
-            &mut create_file,
-            &mut sync_path,
-        )? {
+        match enqueue(spool.dir, body, spool.max_bytes, &mut create_file, &mut sync_path)? {
             Enqueued::Stored(_path) => report.buffered_batches += 1,
             Enqueued::Saturated => report.dropped_events += count,
         }
@@ -97,7 +92,44 @@ pub fn route_batch(
 }
 
 
-/// Buffered batches go first, then the new ones; a batch the target refuses is buffered, or dropped with an alert when the buffer is full.
+/// Where batches wait while the target is down, and the limit past which they are dropped with an alert.
+pub struct Spool<'a> {
+    pub dir: &'a Path,
+    pub max_bytes: u64,
+}
+
+
+/// Shared by webhook and OTLP: buffered batches go first, then `prepared` (count, body); a refused batch is buffered or dropped with an alert.
+pub fn export_prepared(
+    prepared: &[(usize, String)],
+    spool: &Spool,
+    policy: &RetryPolicy,
+    post: &mut PostFn,
+    sleep: &mut SleepFn,
+    context: (&str, OffsetDateTime),
+) -> Result<ExportReport, ExportError> {
+    let (host, now) = context;
+    let dir = spool.dir;
+    let mut send = |body: &str| deliver(policy, post, sleep, body).map(|_attempts| ());
+    let mut drained_batches = NO_BATCHES;
+    let drained = drain(dir, &mut |body: &str| send(body).inspect(|_delivered| drained_batches += 1));
+    let still_down = match drained {
+        Ok(_count) => Ok(false),
+        Err(ExportError::Exhausted { .. }) => Ok(true),
+        Err(other) => Err(other),
+    }?;
+    let (mut report, _down) = prepared.iter().try_fold((ExportReport::default(), still_down), |state, batch| {
+        route_batch(state, batch, &mut send, spool)
+    })?;
+    report.drained_batches = drained_batches;
+    if report.dropped_events > 0 {
+        tracing::error!(dropped = report.dropped_events, "export buffer saturated");
+        report.alert = Some(saturation_alert(host, report.dropped_events, spool.max_bytes, now));
+    }
+    Ok(report)
+}
+
+
 pub fn export_webhook(
     events: &[EcsEvent],
     config: &WebhookConfig,
@@ -108,24 +140,27 @@ pub fn export_webhook(
     now: OffsetDateTime,
 ) -> Result<ExportReport, ExportError> {
     let serialised = events.iter().map(to_json).collect::<Result<Vec<_>, _>>()?;
-    let dir = Path::new(&config.buffer_dir);
-    let mut send = |body: &str| deliver(policy, post, sleep, body).map(|_attempts| ());
-    let mut drained_batches = NO_BATCHES;
-    let drained = drain(dir, &mut |body: &str| send(body).inspect(|_delivered| drained_batches += 1));
-    let still_down = match drained {
-        Ok(_count) => Ok(false),
-        Err(ExportError::Exhausted { .. }) => Ok(true),
-        Err(other) => Err(other),
-    }?;
-    let (mut report, _down) = batches(&serialised, config.batch_size)
-        .iter()
-        .try_fold((ExportReport::default(), still_down), |state, batch| {
-            route_batch(state, batch, &mut send, config)
-        })?;
-    report.drained_batches = drained_batches;
-    if report.dropped_events > 0 {
-        tracing::error!(dropped = report.dropped_events, "export buffer saturated");
-        report.alert = Some(saturation_alert(host, report.dropped_events, config.buffer_max_bytes, now));
-    }
-    Ok(report)
+    let spool = Spool {
+        dir: Path::new(&config.buffer_dir),
+        max_bytes: config.buffer_max_bytes,
+    };
+    export_prepared(&batches(&serialised, config.batch_size), &spool, policy, post, sleep, (host, now))
+}
+
+
+/// The webhook delivery with each batch encoded as an OTLP `ExportLogsServiceRequest`.
+pub fn export_otlp(
+    events: &[EcsEvent],
+    config: &OtlpConfig,
+    policy: &RetryPolicy,
+    post: &mut PostFn,
+    sleep: &mut SleepFn,
+    host: &str,
+    now: OffsetDateTime,
+) -> Result<ExportReport, ExportError> {
+    let spool = Spool {
+        dir: Path::new(&config.buffer_dir),
+        max_bytes: config.buffer_max_bytes,
+    };
+    export_prepared(&otlp_batches(events, config)?, &spool, policy, post, sleep, (host, now))
 }

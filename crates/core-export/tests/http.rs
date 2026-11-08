@@ -7,7 +7,7 @@ mod types;
 
 
 use core_export::error::ExportError;
-use core_export::http::{build_agent, post_json};
+use core_export::http::{build_agent, post_json, post_otlp};
 use types::TestResult;
 
 
@@ -59,6 +59,46 @@ fn https_works_with_the_private_ca_and_fails_without_it() -> TestResult {
     post_json(&build_agent(Some(authority.ca_pem.as_bytes()))?, &url, None, "[1]").map_err(|error| error.to_string())?;
     assert!(post_json(&build_agent(None)?, &url, None, "[2]").is_err());
     assert!(bodies.join().map_err(|_panic| "sink thread panicked")?.is_err());
+    Ok(())
+}
+
+
+const PARTIAL: &str = "{\"partialSuccess\":{\"rejectedLogRecords\":\"2\"}}";
+
+
+const OVER_LIMIT: usize = 70_000;
+
+
+const THREE_REQUESTS: usize = 3;
+
+
+#[test]
+fn otlp_accepts_a_partial_success_without_retrying() -> TestResult {
+    let replies = vec![
+        (STATUS_OK, PARTIAL.to_string()),
+        (STATUS_OK, "{}".to_string()),
+        (STATUS_OK, "x".repeat(OVER_LIMIT)),
+    ];
+    let http_sink::HttpSink { port, bodies } = http_sink::spawn_replying_sink(None, replies)?;
+    let agent = build_agent(None)?;
+    let url = format!("http://127.0.0.1:{port}/v1/logs");
+    post_otlp(&agent, &url, Some("tok"), "{}").map_err(|error| error.to_string())?;
+    post_otlp(&agent, &url, None, "{}").map_err(|error| error.to_string())?;
+    post_otlp(&agent, &url, None, "{}").map_err(|error| error.to_string())?;
+    let received = bodies.join().map_err(|_panic| "sink thread panicked")??;
+    assert_eq!(received.len(), THREE_REQUESTS);
+    assert_eq!(received.first().map(|(auth, _body)| auth.as_str()), Some("bearer tok"));
+    Ok(())
+}
+
+
+#[test]
+fn otlp_rejection_and_unreachable_receiver_are_errors() -> TestResult {
+    let http_sink::HttpSink { port, bodies } = http_sink::spawn_http_sink(None, vec![STATUS_ERROR])?;
+    let agent = build_agent(None)?;
+    assert!(post_otlp(&agent, &format!("http://127.0.0.1:{port}/v1/logs"), None, "{}").is_err());
+    bodies.join().map_err(|_panic| "sink thread panicked")??;
+    assert!(post_otlp(&agent, "http://127.0.0.1:1/v1/logs", None, "{}").is_err());
     Ok(())
 }
 
