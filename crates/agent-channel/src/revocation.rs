@@ -52,8 +52,14 @@ pub fn is_revoked(revocations: &Revocations, serial: &str) -> bool {
 }
 
 
-pub fn is_revoked_now(watcher: &RevocationWatch, serial: &str) -> bool {
-    is_revoked(&watcher.borrow(), serial)
+/// The serials of `chain` that are on the list.
+pub fn revoked_in(revocations: &Revocations, chain: &[String]) -> Vec<String> {
+    chain.iter().filter(|serial| is_revoked(revocations, serial)).cloned().collect()
+}
+
+
+pub fn revoked_now(watcher: &RevocationWatch, chain: &[String]) -> Vec<String> {
+    revoked_in(&watcher.borrow(), chain)
 }
 
 

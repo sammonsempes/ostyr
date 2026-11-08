@@ -1,11 +1,12 @@
 use crate::error::{ChannelError, IdentityError};
-use crate::identity::{identity_from_chain, serial_from_chain};
+use crate::identity::{identity_from_chain, serials_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
 use crate::model::{
     Admission, Identity, PendingHandshake, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS, IPV6_HOST_BITS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
     SERVER_KEEPALIVE_TIMEOUT_SECONDS,
 };
-use crate::revocation::{is_revoked, is_revoked_now};
+use crate::revocation::{revoked_in, revoked_now};
+use crate::settings::{resize_total, settings_of};
 use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, SharedState, ShutdownSignal};
 use axum::{Extension, Router};
 use futures_util::{FutureExt, StreamExt};
@@ -34,13 +35,15 @@ pub async fn serve(
     shutdown: ShutdownSignal,
 ) {
     let acceptor = TlsAcceptor::from(config);
-    let connections = Arc::new(Semaphore::new(state.settings.max_total_connections));
+    let connections = Arc::new(Semaphore::new(settings_of(&state).max_total_connections));
+    let mut capacity = settings_of(&state).max_total_connections;
     let mut handshakes = Vec::new();
     incoming
         .take_until(shutdown)
         .for_each(|accepted| {
             match accepted {
                 Ok(stream) => {
+                    capacity = resize_total(&connections, capacity, settings_of(&state).max_total_connections);
                     let source = peer_source(stream.peer_addr());
                     let evicted = source.and_then(|known| register_handshake(&mut handshakes, known, &state));
                     if let Some(signal) = evicted {
@@ -90,13 +93,14 @@ pub fn peer_source(peer: io::Result<SocketAddr>) -> Option<IpAddr> {
 
 /// Notes a new handshake: `None` when its source is at its cap, else the oldest of the busiest source is evicted at the global cap.
 pub fn register_handshake(handshakes: &mut Vec<PendingHandshake>, source: IpAddr, state: &ServerState) -> Option<oneshot::Receiver<()>> {
+    let settings = settings_of(state);
     handshakes.retain(|waiting| !waiting.stop.is_closed());
-    if handshakes.iter().filter(|waiting| waiting.source == source).count() >= state.settings.max_pending_handshakes_per_source {
+    if handshakes.iter().filter(|waiting| waiting.source == source).count() >= settings.max_pending_handshakes_per_source {
         bump(&state.counters.handshakes_refused);
         tracing::debug!(%source, "pending handshake cap of the source reached, connection refused");
         None
     } else {
-        if handshakes.len() >= state.settings.max_pending_handshakes {
+        if handshakes.len() >= settings.max_pending_handshakes {
             let victim = busiest_oldest(handshakes).map(|position| handshakes.remove(position).stop);
             evict(victim, state);
         }
@@ -153,10 +157,9 @@ pub async fn run_connection(
 ) -> Result<(), ChannelError> {
     let tls = handshake(stream, acceptor, &state, admission.evicted).await?;
     let identity = identity_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
-    let serial = serial_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
-    if is_revoked_now(&revocations, &serial) {
-        Err(refused_revoked(serial))
-    } else {
+    let serials = serials_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
+    let revoked = revoked_now(&revocations, &serials);
+    if revoked.is_empty() {
         let _total = admission.connections.try_acquire_owned().map_err(|_refused| connection_capped(&state))?;
         let _connection = open_slot(&state, &identity, SlotKind::Connection).map_err(|_refused| too_many_connections(&identity))?;
         let service = router.layer(Extension(identity));
@@ -164,22 +167,24 @@ pub async fn run_connection(
         builder
             .http2()
             .timer(TokioTimer::new())
-            .max_concurrent_streams(state.settings.max_streams_per_connection)
+            .max_concurrent_streams(settings_of(&state).max_streams_per_connection)
             .keep_alive_interval(Duration::from_secs(SERVER_KEEPALIVE_INTERVAL_SECONDS))
             .keep_alive_timeout(Duration::from_secs(SERVER_KEEPALIVE_TIMEOUT_SECONDS));
         tokio::select! {
             served = builder.serve_connection(TokioIo::new(tls), TowerToHyperService::new(service)) => {
                 served.map_err(ChannelError::Serve)
             }
-            closed = watch_revocation(revocations, &serial) => Err(closed),
+            closed = watch_revocation(revocations, &serials) => Err(closed),
         }
+    } else {
+        Err(refused_revoked(revoked.join(",")))
     }
 }
 
 
 pub fn connection_capped(state: &ServerState) -> ChannelError {
     bump(&state.counters.connections_capped);
-    let limit = state.settings.max_total_connections;
+    let limit = settings_of(state).max_total_connections;
     tracing::warn!(limit, "total connection cap reached, connection dropped");
     ChannelError::ConnectionCapped { limit }
 }
@@ -207,11 +212,14 @@ pub fn refused_revoked(serial: String) -> ChannelError {
 }
 
 
-/// Completes with the reason as soon as `serial` is on the list, or when the list is no longer maintained.
-pub async fn watch_revocation(mut revocations: RevocationWatch, serial: &str) -> ChannelError {
-    let outcome = revocations.wait_for(|list| is_revoked(list, serial)).await.map(|_list| ());
+/// Completes with the reason as soon as a serial of `chain` is on the list, or when the list is no longer maintained.
+pub async fn watch_revocation(mut revocations: RevocationWatch, chain: &[String]) -> ChannelError {
+    let outcome = revocations
+        .wait_for(|list| !revoked_in(list, chain).is_empty())
+        .await
+        .map(|list| revoked_in(&list, chain));
     match outcome {
-        Ok(()) => refused_revoked(serial.to_owned()),
+        Ok(revoked) => refused_revoked(revoked.join(",")),
         Err(source) => ChannelError::RevocationClosed(source),
     }
 }

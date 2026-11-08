@@ -126,3 +126,16 @@ pub fn set_mode(path: &Path, mode: u32) -> Result<(), Box<dyn Error>> {
 pub fn set_mode(_path: &Path, _mode: u32) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
+
+
+pub fn make_intermediate(root: &Authority) -> Result<Authority, Box<dyn Error>> {
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let certificate = params.signed_by(&key, &root.issuer)?;
+    Ok(Authority {
+        pem: certificate.pem(),
+        issuer: Issuer::new(params, key),
+    })
+}
