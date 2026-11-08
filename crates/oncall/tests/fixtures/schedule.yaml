@@ -1,0 +1,21 @@
+name: primary
+time_zone: Europe/Paris
+layers:
+  - name: weekly
+    participants: [alice, bob]
+    start: 2026-01-05T09:00:00
+    period_days: 7
+  - name: backup
+    participants: [erin]
+    start: 2026-01-01T00:00:00
+    period_days: 30
+overrides:
+  - person: carol
+    start: 2026-01-12T00:00:00Z
+    end: 2026-01-13T00:00:00Z
+holidays:
+  - date: 2026-01-19
+    rule: nobody
+  - date: 2026-01-20
+    rule:
+      cover: [dave]

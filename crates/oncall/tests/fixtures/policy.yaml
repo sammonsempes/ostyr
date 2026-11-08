@@ -1,0 +1,12 @@
+name: default
+levels:
+  - delay_seconds: 0
+    targets:
+      - schedule: primary
+  - delay_seconds: 300
+    targets:
+      - person: alice
+      - person: bob
+  - delay_seconds: 600
+    targets:
+      - person: manager
