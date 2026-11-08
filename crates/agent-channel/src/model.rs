@@ -109,6 +109,13 @@ pub const KEEPALIVE_INTERVAL_SECONDS: u64 = 10;
 pub const KEEPALIVE_TIMEOUT_SECONDS: u64 = 10;
 
 
+/// Server HTTP/2 keepalive ping interval, sent while idle too: an agent that vanished without a FIN is dropped after this plus the timeout.
+pub const SERVER_KEEPALIVE_INTERVAL_SECONDS: u64 = 20;
+
+
+pub const SERVER_KEEPALIVE_TIMEOUT_SECONDS: u64 = 10;
+
+
 pub const BACKOFF_INITIAL_MILLIS: u64 = 500;
 
 

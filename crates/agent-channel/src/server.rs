@@ -1,12 +1,15 @@
 use crate::error::{ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serial_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
-use crate::model::{Admission, Identity, PendingHandshake, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS, IPV6_HOST_BITS};
+use crate::model::{
+    Admission, Identity, PendingHandshake, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS, IPV6_HOST_BITS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
+    SERVER_KEEPALIVE_TIMEOUT_SECONDS,
+};
 use crate::revocation::{is_revoked, is_revoked_now};
 use crate::types::{IncomingConnections, RevocationWatch, SharedServerConfig, SharedState, ShutdownSignal};
 use axum::{Extension, Router};
 use futures_util::{FutureExt, StreamExt};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
 use std::collections::HashMap;
@@ -158,7 +161,12 @@ pub async fn run_connection(
         let _connection = open_slot(&state, &identity, SlotKind::Connection).map_err(|_refused| too_many_connections(&identity))?;
         let service = router.layer(Extension(identity));
         let mut builder = Builder::new(TokioExecutor::new()).http2_only();
-        builder.http2().max_concurrent_streams(state.settings.max_streams_per_connection);
+        builder
+            .http2()
+            .timer(TokioTimer::new())
+            .max_concurrent_streams(state.settings.max_streams_per_connection)
+            .keep_alive_interval(Duration::from_secs(SERVER_KEEPALIVE_INTERVAL_SECONDS))
+            .keep_alive_timeout(Duration::from_secs(SERVER_KEEPALIVE_TIMEOUT_SECONDS));
         tokio::select! {
             served = builder.serve_connection(TokioIo::new(tls), TowerToHyperService::new(service)) => {
                 served.map_err(ChannelError::Serve)

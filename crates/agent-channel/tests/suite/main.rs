@@ -2,6 +2,7 @@ mod bounds;
 mod harness;
 mod hostile;
 mod identity;
+mod keepalive;
 mod pki;
 mod resilience;
 mod revocation;
