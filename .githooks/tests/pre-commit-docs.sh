@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-SCRATCH=$(mktemp -d)
+mkdir -p "${CARGO_TARGET_DIR:-$PWD/target}"
+SCRATCH=$(mktemp -d -p "${CARGO_TARGET_DIR:-$PWD/target}")
+mkdir -p "$SCRATCH/tmp"
+export TMPDIR="$SCRATCH/tmp"
+unset CARGO_TARGET_DIR
 trap 'rm -rf "$SCRATCH"' EXIT
 export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin"

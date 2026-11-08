@@ -9,23 +9,23 @@ if command -v sccache >/dev/null 2>&1; then
   export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
   export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
 fi
-if [ -z "${OSTYR_PRIVATE_TARGET:-}" ] && [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  export CARGO_TARGET_DIR="$HOME/.cache/ostyr-target"
-fi
+GATE_LOCK_WAIT_SECONDS=3600
+DEFAULT_BUILD_JOBS=8
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}"
+MAIN_TARGET="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/target"
 if [ -n "${OSTYR_PRIVATE_TARGET:-}" ]; then unset CARGO_TARGET_DIR; fi
-TARGET="${CARGO_TARGET_DIR:-target}"
-if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-  GATE_DIR="$TARGET/gates/$(printf %s "$ROOT" | cksum | cut -d' ' -f1)"
-  export CARGO_LLVM_COV_TARGET_DIR="$GATE_DIR/llvm-cov-target"
-  export CARGO_LLVM_COV_BUILD_DIR="$TARGET/llvm-cov-target"
-  GATE_STALE_DAYS=1
-  if [ -d "$TARGET/gates" ]; then find "$TARGET/gates" -mindepth 1 -maxdepth 1 -mtime "+$GATE_STALE_DAYS" -exec rm -rf {} +; fi
-  trap 'rm -rf "$GATE_DIR"' EXIT
-else
-  GATE_DIR="$TARGET"
+if [ -z "${OSTYR_PRIVATE_TARGET:-}" ]; then
+  if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+    export CARGO_TARGET_DIR="$MAIN_TARGET"
+  else
+    WANTED=$(realpath -m "$CARGO_TARGET_DIR")
+    if [ "$WANTED" != "$(realpath -m "$MAIN_TARGET")" ] && [ "$WANTED" != "$(realpath -m "$ROOT/target")" ]; then
+      echo "pre-commit: CARGO_TARGET_DIR=$CARGO_TARGET_DIR is neither $MAIN_TARGET nor $ROOT/target" >&2
+      exit 1
+    fi
+  fi
 fi
-EXPORT="${COVERAGE_EXPORT:-$GATE_DIR/coverage.json}"
-mkdir -p "$(dirname "$EXPORT")"
+TARGET="${CARGO_TARGET_DIR:-target}"
 
 LOW=()
 if command -v nice >/dev/null 2>&1; then
@@ -41,7 +41,7 @@ step() {
   local name=$1
   shift
   echo "pre-commit: $name" >&2
-  if ! "$@"; then
+  if ! "$@" 9>&-; then
     echo "pre-commit: FAILED at step: $name" >&2
     exit 1
   fi
@@ -56,12 +56,40 @@ gate() {
 }
 
 covered_tests() {
-  local scratch="/dev/shm/ostyr-gate-$$"
+  local scratch="$GATE_DIR/tmp-$$"
   mkdir -p "$scratch"
   local status=0
   TMPDIR="$scratch" low cargo +nightly llvm-cov --offline --branch --fail-under-lines 100 --json --output-path "$EXPORT" || status=$?
   rm -rf "$scratch"
   return "$status"
+}
+
+prepare_gate_dir() {
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    GATE_DIR="$TARGET/gates/$(printf %s "$ROOT" | cksum | cut -d' ' -f1)"
+    export CARGO_LLVM_COV_TARGET_DIR="$GATE_DIR/llvm-cov-target"
+    export CARGO_LLVM_COV_BUILD_DIR="$TARGET/llvm-cov-target"
+    GATE_STALE_DAYS=1
+    if [ -d "$TARGET/gates" ]; then find "$TARGET/gates" -mindepth 1 -maxdepth 1 -mtime "+$GATE_STALE_DAYS" -exec rm -rf {} +; fi
+    trap 'rm -rf "$GATE_DIR"' EXIT
+  else
+    GATE_DIR="$TARGET"
+  fi
+  EXPORT="${COVERAGE_EXPORT:-$GATE_DIR/coverage.json}"
+  mkdir -p "$(dirname "$EXPORT")"
+}
+
+take_gate_lock() {
+  local wait_seconds="${OSTYR_GATE_LOCK_WAIT_SECONDS:-$GATE_LOCK_WAIT_SECONDS}"
+  mkdir -p "$MAIN_TARGET"
+  exec 9>"$MAIN_TARGET/.gate.lock"
+  if ! flock -n 9; then
+    echo "pre-commit: waiting for the gate lock $MAIN_TARGET/.gate.lock" >&2
+    if ! flock -w "$wait_seconds" 9; then
+      echo "pre-commit: timed out after ${wait_seconds}s on the gate lock $MAIN_TARGET/.gate.lock" >&2
+      exit 1
+    fi
+  fi
 }
 
 docs_only() {
@@ -84,6 +112,8 @@ if docs_only; then
   exit 0
 fi
 
+take_gate_lock
+prepare_gate_dir
 step "1/5 cargo +nightly fmt --check" low cargo +nightly fmt --check
 step "2/5 cargo clippy" low cargo clippy --offline --all-targets -- -D warnings
 step "3/5 custom_lint" lint

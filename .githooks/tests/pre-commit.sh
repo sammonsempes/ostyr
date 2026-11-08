@@ -4,11 +4,15 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 export PATH="$HOME/.cargo/bin:$PATH"
 cd "$HERE"
 cargo build -q -p custom_lint -p coverage_gate
-export CUSTOM_LINT="$HERE/target/debug/custom_lint"
-export COVERAGE_GATE="$HERE/target/debug/coverage_gate"
-SCRATCH=$(mktemp -d)
+export CUSTOM_LINT="${CARGO_TARGET_DIR:-$HERE/target}/debug/custom_lint"
+export COVERAGE_GATE="${CARGO_TARGET_DIR:-$HERE/target}/debug/coverage_gate"
+mkdir -p "${CARGO_TARGET_DIR:-$PWD/target}"
+SCRATCH=$(mktemp -d -p "${CARGO_TARGET_DIR:-$PWD/target}")
+mkdir -p "$SCRATCH/tmp"
+export TMPDIR="$SCRATCH/tmp"
+unset CARGO_TARGET_DIR
 trap 'rm -rf "$SCRATCH"' EXIT
-export CARGO_TARGET_DIR="$SCRATCH/target"
+export CARGO_TARGET_DIR="$SCRATCH/repo/target"
 export COVERAGE_EXPORT="$SCRATCH/coverage.json"
 FAILS=0
 
