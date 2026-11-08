@@ -117,7 +117,9 @@ fn add_process(event: &mut EcsEvent, process: &Process, parent: Option<&Process>
             pid: Some(parent_process.pid),
             executable: Some(parent_process.binary.clone()),
             command_line: Some(command_line(parent_process)),
+            ..ParentFields::default()
         }),
+        ..ProcessFields::default()
     });
     event.user = process.uid.map(|uid| UserFields {
         id: Some(uid.to_string()),
@@ -162,7 +164,7 @@ fn file_event(probe: &KprobeBody, base: EcsEvent) -> Result<Outcome, NormaliseEr
         file: Some(FileFields {
             path: Some(file.path.clone()),
             name: Some(base_name(&file.path).to_string()),
-            size: None,
+            ..FileFields::default()
         }),
         ..classify(base, "file", "access", &probe.function_name)
     };

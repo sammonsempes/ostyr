@@ -1,0 +1,1 @@
+{"Event":{"System":{"EventID":3,"Computer":"WIN-02","TimeCreated":{"SystemTime":"2026-11-03T10:00:00Z"}},"EventData":{"Image":"C:\\a\\b.exe","ProcessId":7,"Initiated":false,"Protocol":"UDP","SourceIp":"10.0.0.5","SourcePort":53,"DestinationIp":"10.0.0.1","DestinationPort":"1024"}}}
