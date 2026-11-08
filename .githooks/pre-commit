@@ -33,6 +33,10 @@ if command -v nice >/dev/null 2>&1; then
   if command -v ionice >/dev/null 2>&1; then LOW+=(ionice -c 3); fi
 fi
 
+if [ "$(id -u)" = 0 ] && command -v setpriv >/dev/null 2>&1; then
+  LOW=(setpriv --bounding-set -dac_override,-dac_read_search,-fowner "${LOW[@]+"${LOW[@]}"}")
+fi
+
 low() {
   "${LOW[@]+"${LOW[@]}"}" "$@"
 }
@@ -98,7 +102,7 @@ docs_only() {
   [ -n "$staged" ] || return 1
   while IFS= read -r path; do
     case "$path" in
-      backlog/* | .cache/*) ;;
+      backlog/* | .cache/* | NOTES.md | */NOTES.md) ;;
       crates/* | tools/* | lab/* | docs/*) return 1 ;;
       *.md) ;;
       *) return 1 ;;
