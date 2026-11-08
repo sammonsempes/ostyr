@@ -1,7 +1,9 @@
 mod bounds;
 mod harness;
+mod hostile;
 mod identity;
 mod pki;
+mod resilience;
 mod revocation;
 mod revocation_support;
 mod server;

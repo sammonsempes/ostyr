@@ -475,7 +475,10 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
-    let verdicts = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW)).await??;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW)).await??;
+    assert_eq!(run.accepted.len(), 1);
+    assert_eq!(run.accepted.first().map(|command| command.sequence), Some(FIRST));
+    let verdicts = run.verdicts;
     let accepted: Vec<bool> = verdicts.iter().map(|verdict| verdict.accepted).collect();
     assert_eq!(accepted, vec![true, false, false]);
     assert!(verdicts.iter().skip(1).all(|verdict| !verdict.reason.is_empty()));
