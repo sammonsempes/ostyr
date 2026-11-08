@@ -9,9 +9,6 @@ if command -v sccache >/dev/null 2>&1; then
   export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
   export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
 fi
-GATE_LOCK_WAIT_SECONDS=3600
-DEFAULT_BUILD_JOBS=8
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}"
 MAIN_TARGET="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/target"
 if [ -n "${OSTYR_PRIVATE_TARGET:-}" ]; then unset CARGO_TARGET_DIR; fi
 if [ -z "${OSTYR_PRIVATE_TARGET:-}" ]; then
@@ -27,25 +24,20 @@ if [ -z "${OSTYR_PRIVATE_TARGET:-}" ]; then
 fi
 TARGET="${CARGO_TARGET_DIR:-target}"
 
-LOW=()
-if command -v nice >/dev/null 2>&1; then
-  LOW=(nice -n 10)
-  if command -v ionice >/dev/null 2>&1; then LOW+=(ionice -c 3); fi
-fi
-
+WRAP=()
 if [ "$(id -u)" = 0 ] && command -v setpriv >/dev/null 2>&1; then
-  LOW=(setpriv --bounding-set -dac_override,-dac_read_search,-fowner "${LOW[@]+"${LOW[@]}"}")
+  WRAP=(setpriv --bounding-set "-dac_override,-dac_read_search,-fowner")
 fi
 
 low() {
-  "${LOW[@]+"${LOW[@]}"}" "$@"
+  "${WRAP[@]+"${WRAP[@]}"}" "$@"
 }
 
 step() {
   local name=$1
   shift
   echo "pre-commit: $name" >&2
-  if ! "$@" 9>&-; then
+  if ! "$@"; then
     echo "pre-commit: FAILED at step: $name" >&2
     exit 1
   fi
@@ -83,19 +75,6 @@ prepare_gate_dir() {
   mkdir -p "$(dirname "$EXPORT")"
 }
 
-take_gate_lock() {
-  local wait_seconds="${OSTYR_GATE_LOCK_WAIT_SECONDS:-$GATE_LOCK_WAIT_SECONDS}"
-  mkdir -p "$MAIN_TARGET"
-  exec 9>"$MAIN_TARGET/.gate.lock"
-  if ! flock -n 9; then
-    echo "pre-commit: waiting for the gate lock $MAIN_TARGET/.gate.lock" >&2
-    if ! flock -w "$wait_seconds" 9; then
-      echo "pre-commit: timed out after ${wait_seconds}s on the gate lock $MAIN_TARGET/.gate.lock" >&2
-      exit 1
-    fi
-  fi
-}
-
 docs_only() {
   local staged path
   staged=$(git diff --cached --name-only --diff-filter=ACMRD)
@@ -126,7 +105,6 @@ prototype_branch() {
 }
 
 if prototype_branch; then
-  take_gate_lock
   step "1/4 cargo +nightly fmt --check" low cargo +nightly fmt --check
   step "2/4 cargo clippy" low cargo clippy --offline --all-targets -- -D warnings
   step "3/4 custom_lint" lint
@@ -135,7 +113,6 @@ if prototype_branch; then
   exit 0
 fi
 
-take_gate_lock
 prepare_gate_dir
 step "1/5 cargo +nightly fmt --check" low cargo +nightly fmt --check
 step "2/5 cargo clippy" low cargo clippy --offline --all-targets -- -D warnings
