@@ -181,7 +181,7 @@ pub fn persist_login(
     now: OffsetDateTime,
     request: &LoginRequest,
 ) -> Result<LoginReply, ApiError> {
-    let updated = update_store_file(&app.store_path, app.random, |accounts, credentials| {
+    let updated = update_store_file(&app.store_path.load(), app.random, |accounts, credentials| {
         let external = memory_only_accounts(app, &auth.accounts, accounts);
         let markers: AccountMap = external
             .keys()

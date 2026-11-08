@@ -120,7 +120,8 @@ fn two_record_audit(state: ApiState) -> Result<ApiState, TestError> {
 
 
 fn read_only_store(state: ApiState) -> Result<ApiState, TestError> {
-    let directory = state.store_path.parent().ok_or("store has no directory")?;
+    let store = state.store_path.load_full();
+    let directory = store.parent().ok_or("store has no directory")?;
     set_mode(directory, READ_ONLY_DIRECTORY)?;
     Ok(state)
 }

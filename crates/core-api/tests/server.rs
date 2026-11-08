@@ -7,7 +7,7 @@ mod types;
 use core_api::error::StartupError;
 use core_api::middleware::rate_key;
 use core_api::model::{ApiConfig, TlsFiles};
-use core_api::server::{admit_connection, check_transport, run_module, serve, tls_server_config};
+use core_api::server::{admit_connection, check_transport, listening_address, new_listener, run_module, serve, stop_listener, tls_server_config};
 use core_api::types::{ConnectionTable, ServerHandle};
 use fixture::{extra_access, extra_router, fixture, private_file, set_mode};
 use rcgen::generate_simple_self_signed;
@@ -252,12 +252,12 @@ fn module_yaml(dir: &Path, listen: &str) -> Result<String, TestError> {
 async fn a_module_runs_from_its_configuration_file() -> TestResult {
     let dir = tempdir()?;
     let path = module_yaml(dir.path(), "127.0.0.1:0")?;
-    let handle = ServerHandle::new();
-    let running = handle.clone();
+    let listener = new_listener();
+    let running = listener.clone();
     let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), vec![], running, None).await });
-    let address = listening(&handle).await?;
+    let address = listening_address(&listener).await.ok_or("server did not start")?;
     assert!(read_response(TcpStream::connect(address).await?).await?.starts_with("HTTP/1.1 200 OK"));
-    handle.shutdown();
+    stop_listener(&listener, None);
     assert!(task.await?.is_ok());
     Ok(())
 }
@@ -266,24 +266,24 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
 #[tokio::test]
 async fn run_module_reports_startup_problems() -> TestResult {
     let dir = tempdir()?;
-    let usage = run_module(&[], extra_router(), extra_access(), vec![], ServerHandle::new(), None).await;
+    let usage = run_module(&[], extra_router(), extra_access(), vec![], new_listener(), None).await;
     assert!(matches!(usage, Err(StartupError::Usage(_))));
     let absent = run_module(
         &[dir.path().join("none.yaml").display().to_string()],
         extra_router(),
         extra_access(),
         vec![],
-        ServerHandle::new(),
+        new_listener(),
         None,
     )
     .await;
     assert!(matches!(absent, Err(StartupError::Config(_))));
     let exposed = module_yaml(dir.path(), "0.0.0.0:8443")?;
-    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], ServerHandle::new(), None).await;
+    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], new_listener(), None).await;
     assert!(matches!(plain, Err(StartupError::PlainHttpRefused(_))));
     let local = module_yaml(dir.path(), "127.0.0.1:0")?;
     fs::remove_file(dir.path().join("compromised.txt"))?;
-    let broken = run_module(&[local], extra_router(), extra_access(), vec![], ServerHandle::new(), None).await;
+    let broken = run_module(&[local], extra_router(), extra_access(), vec![], new_listener(), None).await;
     assert!(matches!(broken, Err(StartupError::Io(_))));
     Ok(())
 }
