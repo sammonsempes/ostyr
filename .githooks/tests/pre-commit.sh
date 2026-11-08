@@ -12,7 +12,6 @@ mkdir -p "$SCRATCH/tmp"
 export TMPDIR="$SCRATCH/tmp"
 unset CARGO_TARGET_DIR
 trap 'rm -rf "$SCRATCH"' EXIT
-export CARGO_TARGET_DIR="$SCRATCH/repo/target"
 export COVERAGE_EXPORT="$SCRATCH/coverage.json"
 FAILS=0
 
