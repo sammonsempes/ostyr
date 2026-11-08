@@ -133,6 +133,31 @@ cd "$R"
 git checkout -q -- .
 git log -1 --format=%s >/dev/null
 
+BASE_BRANCH=$(git symbolic-ref --short HEAD)
+git checkout -q -b prototype/x
+printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA$GAP${CLEAN_EXTRA/extra/untested}" >crates/demo/src/lib.rs
+try "prototype gap" accepted
+if ! grep -qF "LIGHT GATE (prototype branch): coverage not checked" "$SCRATCH/out.txt"; then
+  echo "FAIL: light gate line missing"
+  FAILS=$((FAILS + 1))
+  exit 1
+fi
+printf '%s' "pub fn add(left:u32,right:u32)->u32{left+right}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "prototype bad format" refused "1/4 cargo +nightly fmt --check"
+printf '%s' "pub fn add(left: u32, right: u32) -> u32 {
+    let unused = 1;
+    left + right
+}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "prototype clippy error" refused "2/4 cargo clippy"
+printf '%s' "// a comment
+$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
+try "prototype lint violation" refused "3/4 custom_lint"
+git checkout -q HEAD -- .
+git checkout -q "$BASE_BRANCH"
+printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA$GAP${CLEAN_EXTRA/extra/untested}" >crates/demo/src/lib.rs
+try "other branch gap" refused "4/5 cargo llvm-cov"
+git checkout -q HEAD -- .
+
 if [ "$(git log --format=%s)" != "clean commit" ]; then
   echo "FAIL: history is not only the clean commit"
   FAILS=$((FAILS + 1))
