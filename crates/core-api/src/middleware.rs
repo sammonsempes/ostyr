@@ -117,7 +117,8 @@ pub fn result_label(status: StatusCode) -> &'static str {
 
 
 pub fn log_request(app: &ApiState, id: &str, method: &str, path: &str, source: IpAddr, status: StatusCode, elapsed: std::time::Duration) {
-    let (module, tenant) = (app.module.as_str(), app.tenant.as_str());
+    let identity = app.identity.load();
+    let (module, tenant) = (identity.module.as_str(), identity.tenant.as_str());
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let (result, code) = (result_label(status), status.as_u16());
     tracing::dispatcher::with_default(&app.dispatch, || {
@@ -300,6 +301,7 @@ pub fn exchange_outcome(status: StatusCode) -> Outcome {
 
 pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditError> {
     if needs_audit(exchange) {
+        let identity = app.identity.load();
         append(
             &app.audit,
             NewEntry {
@@ -308,8 +310,8 @@ pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditEr
                     kind: ActorKind::User,
                     id: exchange.actor.clone(),
                 },
-                tenant: app.tenant.clone(),
-                module: app.module.clone(),
+                tenant: identity.tenant.clone(),
+                module: identity.module.clone(),
                 action: ACTION_REQUEST.to_owned(),
                 target: exchange.route.clone(),
                 outcome: exchange_outcome(exchange.status),

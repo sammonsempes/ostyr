@@ -1,5 +1,5 @@
 use crate::error::StartupError;
-use crate::model::{ApiConfig, ApiState};
+use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs};
 use crate::oidc::load_oidc;
 use crate::reload::content_digest;
 use crate::routes::{core_access, openapi_document};
@@ -61,15 +61,17 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
     let mut access = extra_access;
     access.extend(core_access());
     Ok(ApiState {
-        module: config.module.clone(),
-        tenant: config.tenant.clone(),
+        identity: ArcSwap::from_pointee(ApiIdentity {
+            module: config.module.clone(),
+            tenant: config.tenant.clone(),
+        }),
         auth: Mutex::new(State {
             accounts,
             credentials,
             ..State::default()
         }),
         audit,
-        key,
+        key: ArcSwap::from_pointee(key),
         compromised: ArcSwap::from_pointee(compromised),
         catalog,
         random: os_random,
@@ -102,6 +104,15 @@ pub fn read_compromised_digested(path: &Path) -> Result<(CompromisedSet, String)
 
 pub fn current_compromised(app: &ApiState) -> Arc<CompromisedSet> {
     app.compromised.load_full()
+}
+
+
+pub fn auth_inputs(app: &ApiState) -> AuthInputs {
+    AuthInputs {
+        compromised: current_compromised(app),
+        key: app.key.load_full(),
+        identity: app.identity.load_full(),
+    }
 }
 
 
@@ -172,15 +183,15 @@ pub fn prune_attempts(attempts: &mut AttemptMap, now: OffsetDateTime) {
 }
 
 
-pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn<'a>, compromised: &'a CompromisedSet) -> Context<'a, File> {
+pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn<'a>, inputs: &'a AuthInputs) -> Context<'a, File> {
     Context {
         audit: &app.audit,
         random: app.random,
         verify,
-        key: &app.key,
-        compromised,
+        key: &inputs.key,
+        compromised: &inputs.compromised,
         catalog: &app.catalog,
-        tenant: &app.tenant,
+        tenant: &inputs.identity.tenant,
         request_id,
     }
 }

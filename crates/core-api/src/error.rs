@@ -39,8 +39,6 @@ pub enum StartupError {
         #[source]
         source: AuditError,
     },
-    #[error("{0} needs a restart")]
-    RestartNeeded(&'static str),
     #[error("the reload engine is gone, the file watch cannot follow the module file")]
     EngineGone,
     #[error("file watch: {0}")]

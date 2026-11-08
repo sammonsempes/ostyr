@@ -32,11 +32,10 @@ use utoipa::ToSchema;
 
 
 pub struct ApiState {
-    pub module: String,
-    pub tenant: String,
+    pub identity: ArcSwap<ApiIdentity>,
     pub auth: std::sync::Mutex<State>,
     pub audit: AuditLog<File>,
-    pub key: StoreKey,
+    pub key: ArcSwap<StoreKey>,
     pub compromised: ArcSwap<CompromisedSet>,
     pub catalog: RoleCatalog,
     pub random: RandomFn,
@@ -51,6 +50,29 @@ pub struct ApiState {
     pub limits: SharedLimits,
     pub oidc: ArcSwapOption<OidcRuntime>,
     pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
+}
+
+
+/// The module name and tenant every audit record and log line carries; replaced whole at a reload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiIdentity {
+    pub module: String,
+    pub tenant: String,
+}
+
+
+/// What one authentication step reads: taken together so it never mixes the old key with the new tenant.
+pub struct AuthInputs {
+    pub compromised: Arc<CompromisedSet>,
+    pub key: Arc<StoreKey>,
+    pub identity: Arc<ApiIdentity>,
+}
+
+
+/// The new store key, read and checked at validation and kept for the swap.
+pub struct PreparedKey {
+    pub file: String,
+    pub key: Arc<StoreKey>,
 }
 
 

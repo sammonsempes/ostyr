@@ -1,15 +1,19 @@
 use crate::config::api_config;
 use crate::error::StartupError;
-use crate::model::{ApiConfig, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, Rewatch, Sockets, Watching};
+use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, PreparedKey, Rewatch, Sockets, Watching};
 use crate::oidc::load_oidc;
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
 use crate::state::{lock_auth, read_compromised_digested};
-use crate::types::{LogLevelHandle, PendingAudit, PendingSockets, ServerHandle, SharedState, WatchGuard};
+use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
-use core_audit::log::{append, open_file_log};
-use core_audit::model::Outcome;
+use core_audit::log::{append, check_private, open_file_log};
+use core_audit::model::{NewEntry, Outcome};
+use core_auth::cli::read_key_file;
+use core_auth::error::AuthError;
 use core_auth::rbac::builtin_catalog;
-use core_auth::store::load_store_file;
+use core_auth::secretbox::{open_secret, seal_secret};
+use core_auth::store::{load_store, load_store_file, update_store_file};
+use core_auth::types::{AccountMap, CredentialMap, RandomFn, StoreKey};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
@@ -18,8 +22,9 @@ use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use core_config::watch::watch_files;
 use data_encoding::HEXLOWER;
 use same_file::Handle;
+use secrecy::{ExposeSecret, SecretSlice};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -134,17 +139,40 @@ pub fn accept(_settings: &ApiSettings) -> Result<(), BoxError> {
 }
 
 
-/// Refuses a change to an identity field: `name`, `tenant` and `key_file` are fixed by the deployment (see the crate notes).
-pub fn validate_fixed(startup: &ApiConfig, settings: &ApiSettings) -> Result<(), BoxError> {
-    let next = &settings.config;
-    [
-        ("name", startup.module == next.module),
-        ("tenant", startup.tenant == next.tenant),
-        ("key_file", startup.key_file == next.key_file),
-    ]
-    .into_iter()
-    .find(|(_, same)| !same)
-    .map_or(Ok(()), |(name, _)| Err(BoxError::from(StartupError::RestartNeeded(name))))
+/// The record `entry` with the name and tenant in force now, not the ones the engine context was opened with.
+pub fn current_entry(state: &ApiState, entry: NewEntry) -> NewEntry {
+    let identity = state.identity.load();
+    NewEntry {
+        tenant: identity.tenant.clone(),
+        module: identity.module.clone(),
+        ..entry
+    }
+}
+
+
+/// Replaces the name and tenant; the sessions issued under the old ones end, and the change is audited once under the new ones.
+pub fn switch_identity(state: &ApiState, context: &ReloadContext, settings: &ApiSettings) {
+    let next = ApiIdentity {
+        module: settings.config.module.clone(),
+        tenant: settings.config.tenant.clone(),
+    };
+    let previous = state.identity.swap(Arc::new(next.clone()));
+    if *previous != next {
+        lock_auth(state).sessions.clear();
+        let changed = format!(
+            "identity changed from {}/{} to {}/{}, every session revoked",
+            previous.module, previous.tenant, next.module, next.tenant
+        );
+        append(
+            &state.audit,
+            current_entry(
+                state,
+                reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", changed)]),
+            ),
+        )
+        .map(|_| ())
+        .unwrap_or_else(|error| tracing::error!(%error, "cannot record the identity change"));
+    }
 }
 
 
@@ -172,14 +200,21 @@ pub fn apply_log_level(handle: &LogLevelHandle, settings: &ApiSettings) {
 }
 
 
+/// Opens the store once and checks (mode) and parses that very handle; a missing file is an error here, never an empty store.
+pub fn read_store_handle(path: &Path) -> Result<(AccountMap, CredentialMap), BoxError> {
+    let file = File::open(path)?;
+    check_private(&file)?;
+    load_store(file).map_err(BoxError::from)
+}
+
+
 /// A moved accounts store must exist and parse (mode included) before it replaces the old one; nothing is created, not even the lock file.
 pub fn check_store(state: &ApiState, settings: &ApiSettings) -> Result<(), BoxError> {
     let next = &settings.config.accounts_store;
     if **state.store_path.load() == *next {
         Ok(())
     } else {
-        fs::metadata(next)?;
-        load_store_file(next).map(|_| ()).map_err(BoxError::from)
+        read_store_handle(next).map(|_| ())
     }
 }
 
@@ -198,7 +233,10 @@ pub fn switch_store(state: &ApiState, context: &ReloadContext, settings: &ApiSet
         );
         append(
             &state.audit,
-            reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
+            current_entry(
+                state,
+                reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
+            ),
         )
         .map(|_| ())
         .unwrap_or_else(|error| tracing::error!(%error, "cannot record the accounts store switch"));
@@ -256,10 +294,95 @@ pub fn switch_audit(
         let moved = format!("audit_log moved from {} to {}", previous.display(), settings.config.audit_log.display());
         append(
             &state.audit,
-            reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
+            current_entry(
+                state,
+                reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
+            ),
         )
         .map(|_| ())
         .unwrap_or_else(|error| tracing::error!(%error, "cannot record the audit log switch in the new log"));
+    });
+}
+
+
+/// Opens each stored TOTP secret with `live` and seals it again with `next`; a secret that does not open refuses the whole change.
+pub fn reseal_accounts(accounts: &mut AccountMap, live: &StoreKey, next: &StoreKey, random: RandomFn) -> Result<usize, AuthError> {
+    accounts
+        .iter_mut()
+        .filter_map(|(name, account)| account.totp.as_mut().map(|totp| (name, totp)))
+        .try_fold(0, |count, (name, totp)| {
+            let plain = SecretSlice::from(open_secret(live, name, &totp.encrypted_secret)?);
+            totp.encrypted_secret = seal_secret(next, name, plain.expose_secret(), random)?;
+            Ok(count + 1)
+        })
+}
+
+
+/// Reads the new key through the handle its mode was checked on and rehearses the re-encryption on a copy of the store; nothing is written.
+pub fn prepare_key(state: &ApiState, current: &Mutex<String>, prepared: &PendingKey, settings: &ApiSettings) -> Result<(), BoxError> {
+    let next = &settings.config.key_file;
+    prepared.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let changed = *current.lock().unwrap_or_else(PoisonError::into_inner) != *next;
+    let loaded = changed
+        .then(|| -> Result<PreparedKey, BoxError> {
+            let key = read_key_file(next)?;
+            let (mut accounts, _) = load_store_file(&settings.config.accounts_store)?;
+            reseal_accounts(&mut accounts, &state.key.load(), &key, state.random)?;
+            Ok(PreparedKey {
+                file: next.clone(),
+                key: Arc::new(key),
+            })
+        })
+        .transpose()?;
+    *prepared.lock().unwrap_or_else(PoisonError::into_inner) = loaded;
+    Ok(())
+}
+
+
+/// Re-encrypts the stored secrets under the store lock, then swaps the key, all while no login can run; a failure leaves the old key and file.
+pub fn rotate_store(state: &ApiState, next: &Arc<StoreKey>) -> Result<usize, AuthError> {
+    let _held = lock_auth(state);
+    let live = state.key.load_full();
+    let updated = update_store_file(&state.store_path.load(), state.random, |accounts, _| {
+        reseal_accounts(accounts, &live, next, state.random)
+    })?;
+    updated.saved?;
+    state.key.store(Arc::clone(next));
+    Ok(updated.value)
+}
+
+
+/// Applies the prepared key; a failure after validation cannot refuse the reload, so it is logged and audited and the old key stays.
+pub fn switch_key(state: &ApiState, context: &ReloadContext, current: &Mutex<String>, prepared: &PendingKey, settings: &ApiSettings) {
+    let taken = prepared
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .filter(|candidate| candidate.file == settings.config.key_file);
+    taken.into_iter().for_each(|candidate| {
+        let (outcome, parameters) = rotate_store(state, &candidate.key)
+            .inspect_err(|error| tracing::error!(%error, "key rotation failed after validation, the old key is kept"))
+            .map_or_else(
+                |error| {
+                    (
+                        Outcome::Failure,
+                        [("result", "key_rotation_failed".to_owned()), ("reason", error.to_string())],
+                    )
+                },
+                |count| {
+                    *current.lock().unwrap_or_else(PoisonError::into_inner) = candidate.file.clone();
+                    (
+                        Outcome::Success,
+                        [
+                            ("result", "applied".to_owned()),
+                            ("diff", format!("key_file changed, {count} stored secrets re-encrypted")),
+                        ],
+                    )
+                },
+            );
+        append(&state.audit, current_entry(state, reload_entry(context, outcome, parameters)))
+            .map(|_| ())
+            .unwrap_or_else(|error| tracing::error!(%error, "cannot record the key rotation"));
     });
 }
 
@@ -347,7 +470,12 @@ pub fn subscribers(
 ) -> Vec<Subscriber<ApiSettings>> {
     let (for_limits, for_oidc, for_list) = (state.clone(), state.clone(), state.clone());
     let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
-    let store_context = context.clone();
+    let (store_context, identity_context, key_context) = (context.clone(), context.clone(), context.clone());
+    let (key_state, key_apply_state, identity_state) = (state.clone(), state.clone(), state.clone());
+    let key_path = Arc::new(Mutex::new(startup.key_file.clone()));
+    let key_applied_path = Arc::clone(&key_path);
+    let prepared_key = PendingKey::default();
+    let applied_key = Arc::clone(&prepared_key);
     let audit_path = Arc::new(Mutex::new(startup.audit_log.clone()));
     let audit_applied_path = Arc::clone(&audit_path);
     let prepared_audit = PendingAudit::default();
@@ -358,8 +486,8 @@ pub fn subscribers(
     vec![
         Subscriber {
             section: "identity".to_owned(),
-            validate: Box::new(move |settings| validate_fixed(&startup, settings)),
-            apply: Box::new(|_| ()),
+            validate: Box::new(accept),
+            apply: Box::new(move |settings| switch_identity(&identity_state, &identity_context, settings)),
         },
         section("limits", move |settings| for_limits.limits.store(Arc::new(settings.config.limits))),
         section("tls", move |settings| {
@@ -388,6 +516,11 @@ pub fn subscribers(
             validate: Box::new(move |settings| prepare_audit(&prepare_state, &audit_path, &prepared_audit, settings)),
             apply: Box::new(move |settings| switch_audit(&audit_state, &context, &audit_applied_path, &applied_audit, settings)),
         },
+        Subscriber {
+            section: "key_file".to_owned(),
+            validate: Box::new(move |settings| prepare_key(&key_state, &key_path, &prepared_key, settings)),
+            apply: Box::new(move |settings| switch_key(&key_apply_state, &key_context, &key_applied_path, &applied_key, settings)),
+        },
         section("watch", move |settings| follow_files(&watch_setup.rewatch, &module_file, settings)),
         Subscriber {
             section: "listener".to_owned(),
@@ -400,7 +533,7 @@ pub fn subscribers(
 
 pub fn audit_into(state: &SharedState) -> Box<SharedAuditFn> {
     let log = state.clone();
-    Box::new(move |entry| append(&log.audit, entry))
+    Box::new(move |entry| append(&log.audit, current_entry(&log, entry)))
 }
 
 
@@ -414,8 +547,8 @@ pub fn open_reload(
 ) -> Result<Arc<ReloadEngine<ApiSettings>>, ConfigError> {
     let context = ReloadContext {
         actor_id: RELOAD_ACTOR.to_owned(),
-        tenant: state.tenant.clone(),
-        module: state.module.clone(),
+        tenant: state.identity.load().tenant.clone(),
+        module: state.identity.load().module.clone(),
         target: module_file.display().to_string(),
         request_id: RELOAD_REQUEST_ID.to_owned(),
     };
