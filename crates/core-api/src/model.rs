@@ -71,7 +71,6 @@ pub struct AuthInputs {
 
 /// The new store key, read and checked at validation and kept for the swap.
 pub struct PreparedKey {
-    pub file: String,
     pub key: Arc<StoreKey>,
 }
 
@@ -157,6 +156,7 @@ pub struct ApiSettings {
     pub tls: Option<Arc<ServerConfig>>,
     pub oidc: Option<Arc<OidcRuntime>>,
     pub compromised: Arc<CompromisedSet>,
+    pub key: Arc<StoreKey>,
     pub fingerprints: BTreeMap<String, String>,
 }
 

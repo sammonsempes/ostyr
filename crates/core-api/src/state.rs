@@ -6,7 +6,6 @@ use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use core_audit::log::open_file_log;
-use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
 use core_auth::limiter::FAILURE_WINDOW_SECONDS;
 use core_auth::model::Account;
@@ -17,7 +16,7 @@ use core_auth::rbac::builtin_catalog;
 use core_auth::service::{Context, State};
 use core_auth::session::{hash_token, is_revoked};
 use core_auth::store::{load_store_file, read_store_locked};
-use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, VerifyFn};
+use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, StoreKey, VerifyFn};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::BufReader;
@@ -51,8 +50,12 @@ pub fn merged_document(module: &str, extra_documents: Vec<OpenApiDocument>) -> O
 }
 
 
-pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_documents: Vec<OpenApiDocument>) -> Result<ApiState, StartupError> {
-    let key = read_key_file(&config.key_file)?;
+pub fn build_state(
+    config: &ApiConfig,
+    key: Arc<StoreKey>,
+    extra_access: AccessTable,
+    extra_documents: Vec<OpenApiDocument>,
+) -> Result<ApiState, StartupError> {
     let audit = open_file_log(&config.audit_log)?;
     let compromised = read_compromised(&config.compromised_list)?;
     let (accounts, credentials) = load_store_file(&config.accounts_store)?;
@@ -71,7 +74,7 @@ pub fn build_state(config: &ApiConfig, extra_access: AccessTable, extra_document
             ..State::default()
         }),
         audit,
-        key: ArcSwap::from_pointee(key),
+        key: ArcSwap::new(key),
         compromised: ArcSwap::from_pointee(compromised),
         catalog,
         random: os_random,

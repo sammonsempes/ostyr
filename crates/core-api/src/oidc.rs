@@ -1,7 +1,7 @@
 use crate::error::StartupError;
 use crate::failure::{auth_failure, reply};
 use crate::middleware::rate_key;
-use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
+use crate::model::{ApiError, ApiIdentity, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
 use crate::reload::content_digest;
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
 use crate::server::open_private;
@@ -22,7 +22,7 @@ use core_auth::oidc::{
     Identity, KeyRefreshGate, OidcContext, HTTP_TIMEOUT_SECONDS, OIDC_TARGET, PENDING_MAX, PENDING_TTL_SECONDS,
 };
 use core_auth::random::{os_random, random_array};
-use core_auth::service::{log_lockout, record, ACTION_LOGIN, ANONYMOUS_ACTOR};
+use core_auth::service::{log_lockout, record, State as AuthState, ACTION_LOGIN, ANONYMOUS_ACTOR};
 use core_auth::session::{hash_token, session_owner};
 use core_auth::types::{PendingMap, RoleCatalog};
 use openidconnect::url::Url;
@@ -62,6 +62,9 @@ pub const REASON_BAD_REQUEST: &str = "bad_request";
 
 
 pub const REASON_BAD_BINDING: &str = "bad_binding";
+
+
+pub const REASON_IDENTITY_CHANGED: &str = "identity_changed";
 
 
 pub const SCOPE_SOURCE: &str = "source";
@@ -347,9 +350,18 @@ pub fn parse_callback(
 }
 
 
-pub fn take_login(app: &ApiState, runtime: &OidcRuntime, request_id: &str, callback: &Callback) -> Result<PendingLogin, ApiError> {
+/// Removes the login and returns it with the identity in force at that moment, which `settle` checks again before it mints a session.
+pub fn take_login(
+    app: &ApiState,
+    runtime: &OidcRuntime,
+    request_id: &str,
+    callback: &Callback,
+) -> Result<(PendingLogin, Arc<ApiIdentity>), ApiError> {
     let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
-    take_pending(&mut pending, &callback.state, (app.clock)()).map_err(|denial| deny(app, request_id, &callback.source, denial))
+    let identity = app.identity.load_full();
+    take_pending(&mut pending, &callback.state, (app.clock)())
+        .map(|login| (login, identity))
+        .map_err(|denial| deny(app, request_id, &callback.source, denial))
 }
 
 
@@ -376,12 +388,42 @@ pub async fn fetch_off_worker(
 }
 
 
-pub fn settle(app: &ApiState, runtime: &OidcRuntime, request_id: &str, identity: &Identity, callback: &Callback) -> Result<SecretString, ApiError> {
+pub fn settle(
+    app: &ApiState,
+    runtime: &OidcRuntime,
+    request_id: &str,
+    identity: &Identity,
+    callback: &Callback,
+    started_under: &ApiIdentity,
+) -> Result<SecretString, ApiError> {
     let mut auth = lock_auth(app);
+    if *app.identity.load_full() != *started_under {
+        Err(refusal(
+            app,
+            request_id,
+            &callback.source,
+            REASON_IDENTITY_CHANGED,
+            Outcome::Denied,
+            ApiError::InvalidCredentials,
+        ))
+    } else {
+        mint_session(app, &mut auth, runtime, request_id, identity, callback)
+    }
+}
+
+
+pub fn mint_session(
+    app: &ApiState,
+    auth: &mut AuthState,
+    runtime: &OidcRuntime,
+    request_id: &str,
+    identity: &Identity,
+    callback: &Callback,
+) -> Result<SecretString, ApiError> {
     let inputs = auth_inputs(app);
     let context = auth_context(app, request_id, &app.verify, &inputs);
     let token =
-        settle_identity(&mut auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
+        settle_identity(auth, &context, &oidc_context(runtime), (app.clock)(), identity, callback).map_err(|failure| auth_failure(&failure))?;
     session_owner(&auth.sessions, token.expose_secret())
         .iter()
         .for_each(|username| remember_callback_account(app, username));
@@ -415,9 +457,9 @@ pub async fn run_callback(
 ) -> Result<SecretString, ApiError> {
     let callback = parse_callback(app, request_id, source, binding, query)?;
     let runtime = oidc_runtime(app)?;
-    let login = take_login(app, &runtime, request_id, &callback)?;
+    let (login, started_under) = take_login(app, &runtime, request_id, &callback)?;
     let identity = fetch_off_worker(app, &runtime, request_id, login, &callback).await?;
-    settle(app, &runtime, request_id, &identity, &callback)
+    settle(app, &runtime, request_id, &identity, &callback, &started_under)
 }
 
 

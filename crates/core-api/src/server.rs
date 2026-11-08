@@ -310,7 +310,7 @@ pub async fn run_module(
             let module_file = Path::new(path);
             let settings = build_settings(load_module(module_file)?)?;
             let config = settings.config.clone();
-            let state: SharedState = Arc::new(build_state(&config, extra_access, extra_documents)?);
+            let state: SharedState = Arc::new(build_state(&config, settings.key.clone(), extra_access, extra_documents)?);
             let tls = settings.tls.clone().map(RustlsConfig::from_config);
             let setup = ListenerSetup {
                 listener: listener.clone(),

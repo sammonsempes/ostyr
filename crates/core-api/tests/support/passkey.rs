@@ -4,6 +4,7 @@ use core_api::example::example_document;
 use core_api::routes::build_router;
 use core_api::state::build_state;
 use core_api::types::SharedState;
+use core_auth::cli::read_key_file;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
 use std::sync::Arc;
@@ -68,7 +69,12 @@ pub fn fixture_with_passkey() -> Result<Fixture, TestError> {
         "credentials": [stored_passkey()]
     });
     private_file(&config.accounts_store, store.to_string().as_bytes())?;
-    let built = build_state(&config, extra_access(), vec![example_document()])?;
+    let built = build_state(
+        &config,
+        Arc::new(read_key_file(&config.key_file)?),
+        extra_access(),
+        vec![example_document()],
+    )?;
     let state: SharedState = Arc::new(built);
     let router = build_router(state.clone(), extra_router());
     Ok(Fixture { dir, state, router, config })

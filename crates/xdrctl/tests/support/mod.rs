@@ -5,6 +5,7 @@ use core_api::routes::build_router;
 use core_api::server::serve;
 use core_api::state::{build_state, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_api::types::{ServerHandle, SharedState};
+use core_auth::cli::read_key_file;
 use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
@@ -156,7 +157,12 @@ pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<Socket
         Ok(())
     })?
     .saved?;
-    let state: SharedState = Arc::new(build_state(&config, example_access(), vec![example_document()])?);
+    let state: SharedState = Arc::new(build_state(
+        &config,
+        Arc::new(read_key_file(&config.key_file)?),
+        example_access(),
+        vec![example_document()],
+    )?);
     let router = build_router(state, example_router());
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
