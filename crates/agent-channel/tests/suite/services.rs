@@ -23,7 +23,7 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::sync::Notify;
@@ -499,9 +499,7 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
 
 
 pub fn record_executed(executed: &Mutex<Vec<u64>>, sequence: u64) {
-    if let Ok(mut held) = executed.lock() {
-        held.push(sequence);
-    }
+    executed.lock().unwrap_or_else(PoisonError::into_inner).push(sequence);
 }
 
 

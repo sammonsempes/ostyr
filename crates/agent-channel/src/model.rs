@@ -94,6 +94,10 @@ pub const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
 pub const ATTEMPT_TIMEOUT_SECONDS: u64 = 60;
 
 
+/// A unary call (`heartbeat`, `report_command`) is cut after this long, so a live but silent server cannot hang the agent.
+pub const UNARY_TIMEOUT_SECONDS: u64 = 30;
+
+
 /// Acknowledgements for batches not pending that one attempt tolerates before it stops reading.
 pub const MAX_IGNORED_ACKS: usize = 8;
 

@@ -75,6 +75,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "http",
+ "hyper",
  "hyper-util",
  "prost",
  "prost-build",

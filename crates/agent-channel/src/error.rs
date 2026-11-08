@@ -81,6 +81,8 @@ pub enum ChannelError {
     Status(#[source] Box<Status>),
     #[error("delivery attempt not finished after {seconds} seconds")]
     AttemptTimedOut { seconds: u64 },
+    #[error("unary call not answered after {seconds} seconds")]
+    CallTimedOut { seconds: u64 },
     #[error("the server closed the event stream with {unacknowledged} batches unacknowledged")]
     StreamEnded { unacknowledged: usize },
     #[error("event delivery abandoned after {attempts} consecutive failed attempts: {last}")]

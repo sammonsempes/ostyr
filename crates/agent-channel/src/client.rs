@@ -4,6 +4,7 @@ use crate::model::{
     CommandRun, CommandVerdict, Delivery, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS,
     CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS, KEEPALIVE_TIMEOUT_SECONDS,
     MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_KEPT_REFUSALS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT, REPORT_PATH, SUBSCRIBE_PATH,
+    UNARY_TIMEOUT_SECONDS,
 };
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
 use crate::types::{AckStream, ClockFn, DialFn, ExecuteFn, PauseFn, SharedClientConfig};
@@ -16,12 +17,13 @@ use hyper_util::rt::TokioIo;
 use ring::digest::{digest, SHA256};
 use rustls_pki_types::ServerName;
 use std::collections::hash_map::RandomState;
+use std::future::Future;
 use std::hash::BuildHasher;
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{timeout, timeout_at, Instant};
 use tokio_rustls::TlsConnector;
 use tonic::client::Grpc;
 use tonic::transport::{Channel, Endpoint};
@@ -67,7 +69,26 @@ pub async fn ready_grpc(channel: Channel) -> Result<Grpc<Channel>, ChannelError>
 }
 
 
+/// Runs one unary call under `UNARY_TIMEOUT_SECONDS`; a hit is logged and returned as `CallTimedOut`.
+pub async fn within_deadline<Output>(call: impl Future<Output = Result<Output, ChannelError>>) -> Result<Output, ChannelError> {
+    match timeout(Duration::from_secs(UNARY_TIMEOUT_SECONDS), call).await {
+        Ok(outcome) => outcome,
+        Err(_elapsed) => {
+            tracing::warn!(seconds = UNARY_TIMEOUT_SECONDS, "unary call not answered before the deadline");
+            Err(ChannelError::CallTimedOut {
+                seconds: UNARY_TIMEOUT_SECONDS,
+            })
+        }
+    }
+}
+
+
 pub async fn heartbeat(channel: Channel, agent_version: &str) -> Result<BeatReply, ChannelError> {
+    within_deadline(send_heartbeat(channel, agent_version)).await
+}
+
+
+pub async fn send_heartbeat(channel: Channel, agent_version: &str) -> Result<BeatReply, ChannelError> {
     let mut grpc = ready_grpc(channel).await?;
     let reply = grpc
         .unary(
@@ -144,6 +165,11 @@ pub fn judge(verifier: &Verifier, envelope: &[u8], now: u64) -> Judged {
 
 
 pub async fn report_command(channel: Channel, verdict: &CommandVerdict) -> Result<(), ChannelError> {
+    within_deadline(send_report(channel, verdict)).await
+}
+
+
+pub async fn send_report(channel: Channel, verdict: &CommandVerdict) -> Result<(), ChannelError> {
     let mut grpc = ready_grpc(channel).await?;
     grpc.unary(
         tonic::Request::new(CommandReport {
