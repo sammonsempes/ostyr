@@ -5,7 +5,7 @@ use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::example::{example_access, example_document, example_router};
 use core_api::model::{ApiConfig, ApiState, Limits, Requirement, Rule};
 use core_api::routes::build_router;
-use core_api::state::{build_state, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
+use core_api::state::{build_state_from_files, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_api::types::{AccessTable, SharedState};
 use core_auth::model::Account;
 use core_auth::password::hash_password;
@@ -177,7 +177,7 @@ pub fn fixture_with(adjust: impl FnOnce(ApiState) -> Result<ApiState, TestError>
     let dir = tempdir()?;
     let config = config_in(&dir)?;
     seed_reader(&config)?;
-    let built = build_state(&config, extra_access(), vec![example_document()])?;
+    let built = build_state_from_files(&config, extra_access(), vec![example_document()])?;
     let state: SharedState = Arc::new(adjust(built)?);
     let router = build_router(state.clone(), extra_router());
     Ok(Fixture { dir, state, router, config })
