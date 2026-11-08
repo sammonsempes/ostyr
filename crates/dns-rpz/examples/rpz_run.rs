@@ -2,8 +2,10 @@ use core_audit::log::{append, open_file_log};
 use core_config::reload::{ReloadContext, ReloadEngine};
 use core_config::watch::watch_files;
 use dns_rpz::cli::{run_session, Session};
+use dns_rpz::model::Reloader;
 use dns_rpz::policy::{open_policy, Policy};
 use dns_rpz::run::open_file;
+use dns_rpz::unbound::run_with_deadline;
 use std::error::Error;
 use std::io::{self, stderr, stdin};
 use std::path::{Path, PathBuf};
@@ -42,7 +44,8 @@ struct Arguments<'a> {
 
 
 fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
-    let log = open_file_log(Path::new(arguments.audit_file))?;
+    let log = Arc::new(open_file_log(Path::new(arguments.audit_file))?);
+    let engine_log = Arc::clone(&log);
     let context = ReloadContext {
         actor_id: "rpz_run".to_owned(),
         tenant: "example".to_owned(),
@@ -52,7 +55,7 @@ fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     };
     let engine = Arc::new(open_policy(
         PathBuf::from(arguments.policy_file),
-        Box::new(move |entry| append(&log, entry)),
+        Box::new(move |entry| append(&engine_log, entry)),
         context,
     )?);
     let _watcher = watch_files(Arc::clone(&engine), &[PathBuf::from(arguments.policy_file)], DEBOUNCE)?;
@@ -62,7 +65,21 @@ fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     let ioc_path = PathBuf::from(arguments.ioc_file);
     let open = move || open_file(&ioc_path);
     let mut report = stderr();
+    let reload_context = ReloadContext {
+        actor_id: "rpz_run".to_owned(),
+        tenant: "example".to_owned(),
+        module: "dns-rpz".to_owned(),
+        target: arguments.zone_file.to_owned(),
+        request_id: "dns-rpz-zone-reload".to_owned(),
+    };
+    let audit = move |entry| append(&log, entry);
+    let reloader = Reloader {
+        runner: &run_with_deadline,
+        audit: &audit,
+        context: &reload_context,
+    };
     let mut session = Session {
+        reloader: &reloader,
         engine: &engine,
         clock: &clock,
         open: &open,

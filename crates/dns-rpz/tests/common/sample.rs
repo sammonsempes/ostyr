@@ -1,6 +1,6 @@
 use dns_rpz::policy::{
     default_expire, default_max_records, default_negative_ttl, default_refresh, default_retry, default_tlp_allowed, default_ttl, Actions, Allowlist,
-    Policy, Soa,
+    Policy, Soa, Unbound,
 };
 
 
@@ -26,5 +26,6 @@ pub fn sample_policy() -> Policy {
         max_records: default_max_records(),
         allowlist: Allowlist::default(),
         actions: Actions::default(),
+        unbound: Unbound::default(),
     }
 }

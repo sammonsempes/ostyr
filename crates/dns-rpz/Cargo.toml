@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 idna = "1"
 intel-feeds = { version = "0.0.0", path = "../intel-feeds" }
@@ -16,9 +17,9 @@ tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known", "macros"] }
 tracing = "0.1"
+wait-timeout = "0.2"
 
 [dev-dependencies]
-core-audit = { version = "0.0.0", path = "../core-audit" }
 tracing-subscriber = "0.3"
 
 [lints]

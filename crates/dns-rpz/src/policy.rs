@@ -1,7 +1,8 @@
 use crate::error::PolicyError;
 use crate::limits::{
     DEFAULT_EXPIRE_SECONDS, DEFAULT_MAX_RECORDS, DEFAULT_MIN_CONFIDENCE, DEFAULT_NEGATIVE_TTL_SECONDS, DEFAULT_REFRESH_SECONDS,
-    DEFAULT_RETRY_SECONDS, DEFAULT_TTL_SECONDS, MAX_RECORDS_LIMIT,
+    DEFAULT_RETRY_SECONDS, DEFAULT_TTL_SECONDS, DEFAULT_UNBOUND_COMMAND, DEFAULT_UNBOUND_TIMEOUT_SECONDS, DEFAULT_ZONEFILE, MAX_RECORDS_LIMIT,
+    MAX_SETTING_BYTES, MAX_UNBOUND_TIMEOUT_SECONDS,
 };
 use crate::name::normalise_name;
 use core_config::error::ConfigError;
@@ -81,6 +82,51 @@ pub struct Soa {
 }
 
 
+/// Unbound side of the zone: the `rpz:` block, the control command and its deadline.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unbound {
+    #[serde(default = "default_command")]
+    pub command: String,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_zonefile")]
+    pub zonefile: String,
+    #[serde(default)]
+    pub action_override: Option<Action>,
+    #[serde(default)]
+    pub log_name: Option<String>,
+}
+
+
+impl Default for Unbound {
+    fn default() -> Self {
+        Self {
+            command: default_command(),
+            timeout_seconds: default_timeout(),
+            zonefile: default_zonefile(),
+            action_override: None,
+            log_name: None,
+        }
+    }
+}
+
+
+pub fn default_command() -> String {
+    DEFAULT_UNBOUND_COMMAND.to_owned()
+}
+
+
+pub fn default_timeout() -> u64 {
+    DEFAULT_UNBOUND_TIMEOUT_SECONDS
+}
+
+
+pub fn default_zonefile() -> String {
+    DEFAULT_ZONEFILE.to_owned()
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -101,6 +147,8 @@ pub struct Policy {
     pub allowlist: Allowlist,
     #[serde(default)]
     pub actions: Actions,
+    #[serde(default)]
+    pub unbound: Unbound,
 }
 
 
@@ -209,6 +257,33 @@ pub fn check_rule(field: &str, rule: &Rule) -> Result<(), PolicyError> {
 }
 
 
+/// A setting written into the Unbound configuration or run as a command: bounded, printable, no quote or backslash.
+pub fn check_setting(field: &str, value: &str) -> Result<(), PolicyError> {
+    if value.is_empty() || value.len() > MAX_SETTING_BYTES || value.chars().any(|character| character.is_control() || "\"\\".contains(character)) {
+        Err(PolicyError::Setting(field.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn check_unbound(unbound: &Unbound) -> Result<(), PolicyError> {
+    check_setting("unbound.command", &unbound.command)?;
+    check_setting("unbound.zonefile", &unbound.zonefile)?;
+    unbound
+        .log_name
+        .as_deref()
+        .map_or(Ok(()), |name| check_setting("unbound.log_name", name))?;
+    if unbound.timeout_seconds == 0 || unbound.timeout_seconds > MAX_UNBOUND_TIMEOUT_SECONDS {
+        Err(PolicyError::Setting("unbound.timeout_seconds".to_owned()))?;
+    }
+    match &unbound.action_override {
+        Some(Action::Cname(host)) => check_name("unbound.action_override", host),
+        _ => Ok(()),
+    }
+}
+
+
 /// Names canonical, confidences within 0 to 100, at least one name server, a bounded zone size, parsable allowlist networks.
 pub fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
     check_name("zone", &policy.zone)?;
@@ -231,7 +306,8 @@ pub fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
     check_rule("domain", &policy.actions.domain)?;
     check_rule("ipv4", &policy.actions.ipv4)?;
     check_rule("ipv6", &policy.actions.ipv6)?;
-    check_rule("cidr", &policy.actions.cidr)
+    check_rule("cidr", &policy.actions.cidr)?;
+    check_unbound(&policy.unbound)
 }
 
 
