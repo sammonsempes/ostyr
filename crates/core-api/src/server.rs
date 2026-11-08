@@ -203,6 +203,7 @@ pub fn new_listener() -> SharedListener {
         current: Mutex::new(Current {
             handle: ServerHandle::new(),
             bound: None,
+            stopped: false,
         }),
         connections: ConnectionTable::default(),
         finished: Notify::new(),
@@ -222,9 +223,11 @@ pub async fn listening_address(listener: &Listener) -> Option<SocketAddr> {
 }
 
 
-/// Stops the newest server after at most `grace`; `run_module` then returns.
+/// Stops the newest server after at most `grace`, and no later reload starts another; `run_module` then returns.
 pub fn stop_listener(listener: &Listener, grace: Option<Duration>) {
-    current_handle(listener).graceful_shutdown(grace);
+    let mut current = listener.current.lock().unwrap_or_else(PoisonError::into_inner);
+    current.stopped = true;
+    current.handle.graceful_shutdown(grace);
 }
 
 

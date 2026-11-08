@@ -1,4 +1,5 @@
 use crate::error::StartupError;
+use crate::server::stop_listener;
 use crate::types::{
     AccessTable, ConnectionTable, KeyedLimiter, ServerHandle, SharedHttpFn, SharedLimits, SharedListener, SharedResolveFn, VerifyPasswordFn,
     WatchGuard,
@@ -295,11 +296,12 @@ pub struct Bound {
 }
 
 
-/// `handle` stops the newest server; `bound` is `None` until the first server starts.
+/// `handle` stops the newest server, `stopped` keeps a later reload from starting another; `bound` is `None` until the first server starts.
 #[derive(Debug)]
 pub struct Current {
     pub handle: ServerHandle,
     pub bound: Option<Bound>,
+    pub stopped: bool,
 }
 
 
@@ -353,12 +355,7 @@ pub struct ServerStop(pub SharedListener);
 
 impl Drop for ServerStop {
     fn drop(&mut self) {
-        self.0
-            .current
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .handle
-            .graceful_shutdown(None);
+        stop_listener(&self.0, None);
     }
 }
 

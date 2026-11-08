@@ -3,13 +3,13 @@ use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, Rewatch, Sockets, Watching};
 use crate::oidc::load_oidc;
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
-use crate::state::read_compromised_digested;
+use crate::state::{lock_auth, read_compromised_digested};
 use crate::types::{LogLevelHandle, PendingAudit, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
 use core_audit::log::{append, open_file_log};
 use core_audit::model::Outcome;
 use core_auth::rbac::builtin_catalog;
-use core_auth::store::read_store_locked;
+use core_auth::store::load_store_file;
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
@@ -17,7 +17,9 @@ use core_config::reload::{module_state, open_engine, reload_entry, ReloadContext
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use core_config::watch::watch_files;
 use data_encoding::HEXLOWER;
+use same_file::Handle;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -170,30 +172,66 @@ pub fn apply_log_level(handle: &LogLevelHandle, settings: &ApiSettings) {
 }
 
 
-/// A new accounts store must lock and parse before it replaces the old one; an unchanged path costs nothing.
+/// A moved accounts store must exist and parse (mode included) before it replaces the old one; nothing is created, not even the lock file.
 pub fn check_store(state: &ApiState, settings: &ApiSettings) -> Result<(), BoxError> {
     let next = &settings.config.accounts_store;
     if **state.store_path.load() == *next {
         Ok(())
     } else {
-        read_store_locked(next).map(|_| ()).map_err(BoxError::from)
+        fs::metadata(next)?;
+        load_store_file(next).map(|_| ()).map_err(BoxError::from)
     }
 }
 
 
-/// Opens and verifies the new audit log and keeps it for `switch_audit`; a refusal leaves nothing prepared.
-pub fn prepare_audit(current: &Mutex<PathBuf>, prepared: &Mutex<Option<PreparedAudit>>, settings: &ApiSettings) -> Result<(), BoxError> {
+/// Points the state at the new accounts store; the sessions issued under the old one end, and the switch is audited once.
+pub fn switch_store(state: &ApiState, context: &ReloadContext, settings: &ApiSettings) {
+    let next = &settings.config.accounts_store;
+    let previous = state.store_path.swap(Arc::new(next.clone()));
+    if *previous != *next {
+        lock_auth(state).sessions.clear();
+        state.callback_accounts.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        let moved = format!(
+            "accounts_store moved from {} to {}, every session revoked",
+            previous.display(),
+            next.display()
+        );
+        append(
+            &state.audit,
+            reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
+        )
+        .map(|_| ())
+        .unwrap_or_else(|error| tracing::error!(%error, "cannot record the accounts store switch"));
+    }
+}
+
+
+/// Opens and verifies the new audit log and keeps it for `switch_audit`; the same file under another name (`..`, a link) is not a move.
+pub fn prepare_audit(
+    state: &ApiState,
+    current: &Mutex<PathBuf>,
+    prepared: &Mutex<Option<PreparedAudit>>,
+    settings: &ApiSettings,
+) -> Result<(), BoxError> {
     let next = &settings.config.audit_log;
     prepared.lock().unwrap_or_else(PoisonError::into_inner).take();
-    let moved = *current.lock().unwrap_or_else(PoisonError::into_inner) != *next;
-    let opened = moved
+    let renamed = *current.lock().unwrap_or_else(PoisonError::into_inner) != *next;
+    let opened = renamed
         .then(|| {
-            open_file_log(next).map(|log| PreparedAudit {
-                path: next.clone(),
-                state: log.state.into_inner().unwrap_or_else(PoisonError::into_inner),
+            open_file_log(next).map_err(BoxError::from).and_then(|log| {
+                let candidate = log.state.into_inner().unwrap_or_else(PoisonError::into_inner);
+                let same = {
+                    let running = state.audit.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    Handle::from_file(running.writer.try_clone()?)? == Handle::from_file(candidate.writer.try_clone()?)?
+                };
+                Ok((!same).then(|| PreparedAudit {
+                    path: next.clone(),
+                    state: candidate,
+                }))
             })
         })
-        .transpose()?;
+        .transpose()?
+        .flatten();
     *prepared.lock().unwrap_or_else(PoisonError::into_inner) = opened;
     Ok(())
 }
@@ -251,14 +289,15 @@ pub fn prepare_sockets(setup: &ListenerSetup, pending: &Mutex<Option<Sockets>>, 
 }
 
 
-/// Starts the new server first, then stops the old one from accepting and gives its connections `DRAIN_TIMEOUT` to finish.
+/// Starts the new server first (never after a stop), then stops the old one from accepting and gives its connections `DRAIN_TIMEOUT` to finish.
 pub fn switch_listener(setup: &ListenerSetup, pending: &Mutex<Option<Sockets>>, settings: &ApiSettings) {
     let taken = pending.lock().unwrap_or_else(PoisonError::into_inner).take();
-    taken.into_iter().for_each(|sockets| {
+    let mut current = setup.listener.current.lock().unwrap_or_else(PoisonError::into_inner);
+    let wanted = taken.filter(|_| !current.stopped);
+    wanted.into_iter().for_each(|sockets| {
         let config = &settings.config;
         let tls = settings.tls.clone().map(RustlsConfig::from_config);
         let handle = ServerHandle::new();
-        let mut current = setup.listener.current.lock().unwrap_or_else(PoisonError::into_inner);
         let generation = current.bound.as_ref().map_or(0, |bound| bound.generation + 1);
         spawn_generation(setup, sockets.server, tls.clone(), config.header_read_timeout, handle.clone(), generation);
         let previous = current.bound.replace(Bound {
@@ -307,7 +346,8 @@ pub fn subscribers(
     log: Option<LogLevelHandle>,
 ) -> Vec<Subscriber<ApiSettings>> {
     let (for_limits, for_oidc, for_list) = (state.clone(), state.clone(), state.clone());
-    let (check_state, apply_state, audit_state) = (state.clone(), state.clone(), state.clone());
+    let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
+    let store_context = context.clone();
     let audit_path = Arc::new(Mutex::new(startup.audit_log.clone()));
     let audit_applied_path = Arc::clone(&audit_path);
     let prepared_audit = PendingAudit::default();
@@ -341,11 +381,11 @@ pub fn subscribers(
         Subscriber {
             section: "accounts_store".to_owned(),
             validate: Box::new(move |settings| check_store(&check_state, settings)),
-            apply: Box::new(move |settings| apply_state.store_path.store(Arc::new(settings.config.accounts_store.clone()))),
+            apply: Box::new(move |settings| switch_store(&apply_state, &store_context, settings)),
         },
         Subscriber {
             section: "audit_log".to_owned(),
-            validate: Box::new(move |settings| prepare_audit(&audit_path, &prepared_audit, settings)),
+            validate: Box::new(move |settings| prepare_audit(&prepare_state, &audit_path, &prepared_audit, settings)),
             apply: Box::new(move |settings| switch_audit(&audit_state, &context, &audit_applied_path, &applied_audit, settings)),
         },
         section("watch", move |settings| follow_files(&watch_setup.rewatch, &module_file, settings)),

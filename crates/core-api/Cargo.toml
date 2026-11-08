@@ -18,6 +18,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 openidconnect = { version = "4.1.0", default-features = false, features = ["ureq"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+same-file = "1.0.6"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

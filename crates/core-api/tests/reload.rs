@@ -16,7 +16,7 @@ use core_api::model::{ApiConfig, Bound, ListenerSetup, OidcFiles, PreparedAudit,
 use core_api::oidc::{fingerprint_salt, oidc_fingerprint};
 use core_api::reload::{
     accept, build_settings, content_digest, first_then_file, follow_files, load_settings, open_reload, rewatch, settings_state, switch_audit,
-    validate_fixed, watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
+    switch_store, validate_fixed, watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
 };
 use core_api::routes::build_router;
 use core_api::server::{
@@ -28,6 +28,9 @@ use core_api::types::{LogLevelHandle, SharedListener, SharedState};
 use core_audit::log::LogState;
 use core_audit::model::GENESIS_HASH;
 use core_audit::verify::verify;
+use core_auth::random::os_random;
+use core_auth::store::save_store_file;
+use core_auth::types::{AccountMap, CredentialMap};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
@@ -93,6 +96,9 @@ const WITH_CA_FILES: usize = 7;
 const TWO_RECORDS: usize = 2;
 
 
+const FOUR_RECORDS: usize = 4;
+
+
 const HIGH_LIMIT: u32 = 1000;
 
 
@@ -109,6 +115,9 @@ const BODY_SECONDS: u64 = 3;
 
 
 const WORLD_READABLE: u32 = 0o644;
+
+
+const OWNER_ONLY: u32 = 0o600;
 
 
 const OIDC_TEXT: &str = "issuer: https://idp.example\nclient_id: test-client\nclient_secret: vault://kv/oidc\nredirect_url: https://ostyr.example/auth/oidc/callback\nrole_map:\n  soc-analysts: [analyst]\n";
@@ -1198,10 +1207,16 @@ fn a_moved_accounts_store_is_checked_first_and_a_bad_one_is_refused() -> TestRes
     fs::write(&running.module_file, plain.replace("accounts.json", "bad.json"))?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("`accounts_store`")));
     assert_eq!(running.state.store_path.load_full(), original);
+    fs::write(&running.module_file, plain.replace("accounts.json", "absent.json"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("`accounts_store`")));
+    assert!(!directory.join("absent.json").exists() && !directory.join("absent.json.lock").exists());
+    assert_eq!(running.state.store_path.load_full(), original);
+    save_store_file(&directory.join("moved.json"), &AccountMap::new(), &CredentialMap::new(), os_random)?;
+    set_mode(&directory.join("moved.json"), OWNER_ONLY)?;
     fs::write(&running.module_file, plain.replace("accounts.json", "moved.json"))?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
     assert_eq!(*running.state.store_path.load_full(), directory.join("moved.json"));
-    assert_eq!(reload_records(directory)?.len(), TWO_RECORDS);
+    assert_eq!(reload_records(directory)?.len(), FOUR_RECORDS);
     Ok(())
 }
 
@@ -1305,5 +1320,109 @@ fn a_listening_socket_that_cannot_be_shut_down_is_only_logged() -> TestResult {
     let socket = bind_socket(LOOPBACK.parse()?)?;
     retire_socket(&socket);
     retire_socket(&socket);
+    Ok(())
+}
+
+
+fn audit_chain_is_intact(path: &Path) -> Result<bool, TestError> {
+    Ok(verify(BufReader::new(fs::File::open(path)?), None).is_ok())
+}
+
+
+fn reload_with_audit_path(running: &Live, audit_path: &Path) -> Result<(), TestError> {
+    let plain = module_text(running.dir.path(), "example", LOOPBACK, "")?;
+    let original = running.dir.path().join("audit.log").display().to_string();
+    fs::write(&running.module_file, plain.replace(&original, &audit_path.display().to_string()))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn the_same_audit_file_through_dot_dot_is_not_a_move_and_keeps_the_chain() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    fs::create_dir(directory.join("sub"))?;
+    reload_with_audit_path(&running, &directory.join("sub").join("..").join("audit.log"))?;
+    let log = fs::read_to_string(directory.join("audit.log"))?;
+    assert!(!log.contains("audit_log moved"));
+    assert!(audit_chain_is_intact(&directory.join("audit.log"))?);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn the_same_audit_file_through_a_symlink_is_not_a_move_and_keeps_the_chain() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    std::os::unix::fs::symlink(directory.join("audit.log"), directory.join("link.log"))?;
+    reload_with_audit_path(&running, &directory.join("link.log"))?;
+    let log = fs::read_to_string(directory.join("audit.log"))?;
+    assert!(!log.contains("audit_log moved"));
+    assert!(audit_chain_is_intact(&directory.join("audit.log"))?);
+    Ok(())
+}
+
+
+#[test]
+fn a_moved_accounts_store_revokes_the_sessions_and_audits_it_once() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let context = ReloadContext {
+        actor_id: "test".to_owned(),
+        tenant: "default".to_owned(),
+        module: "example".to_owned(),
+        target: "module.yaml".to_owned(),
+        request_id: "test".to_owned(),
+    };
+    running
+        .state
+        .callback_accounts
+        .lock()
+        .map_err(|_| "poisoned")?
+        .insert("oidc:someone".to_owned());
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    save_store_file(&directory.join("moved.json"), &AccountMap::new(), &CredentialMap::new(), os_random)?;
+    set_mode(&directory.join("moved.json"), OWNER_ONLY)?;
+    fs::write(&running.module_file, plain.replace("accounts.json", "moved.json"))?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    switch_store(&running.state, &context, &settings);
+    assert!(running.state.callback_accounts.lock().map_err(|_| "poisoned")?.is_empty());
+    switch_store(&running.state, &context, &settings);
+    let log = fs::read_to_string(directory.join("audit.log"))?;
+    assert_eq!(log.matches("every session revoked").count(), 1);
+    running.state.audit.state.lock().map_err(|_| "poisoned")?.poisoned = true;
+    fs::write(&running.module_file, plain)?;
+    let back = build_settings(load_module(&running.module_file)?)?;
+    switch_store(&running.state, &context, &back);
+    assert_eq!(*running.state.store_path.load_full(), back.config.accounts_store);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_stop_racing_a_reload_still_ends_the_run() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    fs::write(&path, module_text(dir.path(), "example", &free_address()?, "")?)?;
+    let (listener, task) = start_module(&path);
+    listening(&listener).await?;
+    fs::write(&path, module_text(dir.path(), "example", &free_address()?, "")?)?;
+    let stopper = listener.clone();
+    let stop = std::thread::spawn(move || stop_listener(&stopper, None));
+    stop.join().map_err(|_| "stop thread panicked")?;
+    assert!(task.await?.is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_after_a_stop_starts_no_new_generation() -> TestResult {
+    let running = live("")?;
+    stop_listener(&running.listener, None);
+    fs::write(&running.module_file, module_text(running.dir.path(), "example", &free_address()?, "")?)?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(generation_of(&running.listener)?, Some(0));
     Ok(())
 }
