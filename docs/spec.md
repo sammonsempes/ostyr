@@ -1009,10 +1009,11 @@ Licences to be checked at every release; state known at the time of writing:
 | lldpd | ISC | No particular constraint |
 | Atomic Red Team, CrowdSec, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei), gitleaks, NanoMDM, winget | MIT | No particular constraint |
 | Kea, Vector, OpenBao, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
-| Suricata, USBGuard, smartmontools, NUT | GPLv2 | Run as separate processes, not linked to the platform code |
+| Suricata | GPLv2 | Run as a separate process, not linked to the platform code |
+| USBGuard, smartmontools, NUT | GPLv2 or later (NUT Python scripts GPLv3 or later) | Run as separate processes, not linked to the platform code |
 | Zitadel, RustDesk (`hbbs`, `hbbr` and the project build of the endpoint service), MinIO | AGPL-3.0 | Separate processes; the RustDesk project build publishes its sources |
 | Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap, WSUS | Not used | Excluded by the component rules (section 4): own interface, extra durable state or non-compatible licence |
-| Vulnerability and baseline data: OSV, NVD, CISA KEV, EPSS, ANSSI hygiene guide, DISA STIGs | CC BY 4.0 or Apache 2.0 (OSV), public domain (NVD, KEV, STIGs), free with attribution (EPSS), Etalab Open Licence 2.0 (ANSSI) | Data, not code; attribution kept; feeds verified at download |
+| Vulnerability and baseline data: OSV, NVD, CISA KEV, EPSS, ANSSI hygiene guide, DISA STIGs | OSV: one licence per source database (CC BY 4.0, CC0, Apache 2.0, CC BY-SA 4.0 and, for Chainguard, CC BY-NC-ND 4.0); public domain (NVD, STIGs); CC0 (KEV); free of charge with no licence text published (EPSS); Etalab Open Licence 2.0 (ANSSI) | Data, not code; attribution kept; feeds verified at download; OSV sources under a non-commercial or no-derivatives licence are not ingested |
 | Apple APNs and MDM protocol, Android Management API | Vendor services under their terms | Services used through their public APIs, no component redistributed; prerequisites in section 19 |
 | Sysmon | Sysinternals licence (freeware) | Redistribution forbidden: downloaded from Microsoft |
 | Microsoft Defender | Proprietary, included in Windows | Advanced features (custom IOCs, ASR reports) reserved for Defender for Endpoint licences |
@@ -1020,7 +1021,7 @@ Licences to be checked at every release; state known at the time of writing:
 | Packer | BSL | Development tool only, never distributed, so the licence is acceptable; builds the KVM lab images, Windows included |
 | CIS Benchmarks content | CIS licence (CC BY-NC-SA 4.0) | SCA policies written by the project, quoting only CIS recommendation numbers; full content used only if the customer brings it |
 
-**Platform licence.** Choice: **Apache 2.0** for the agent (easier adoption, integration into other tools) and **AGPLv3** for the server (protection against a proprietary SaaS takeover). Decision made, contributions under DCO (section 19).
+**Platform licence.** Choice: **AGPL-3.0-only** for every Ostyr component, the endpoint agent included (owner decision of 2026-11-02, protection against a proprietary SaaS takeover). Contributions under DCO (section 19).
 
 ## 18. Technical points of attention
 
@@ -1072,7 +1073,7 @@ These actions depend on accounts only the owner holds and must be done before re
 
 | Question | Decision | Why, and when to revisit it |
 | --- | --- | --- |
-| Platform licence | **Apache 2.0 for the agent, AGPLv3 for the server.** Contributions under DCO, without a CLA. | The agent is installed at customers' sites and integrates with other tools: a permissive licence removes barriers. The AGPL prevents a vendor from reselling the server as closed SaaS without contributing its changes back. The DCO reassures contributors: no relicensing is possible. |
+| Platform licence | **AGPL-3.0-only for every component, the endpoint agent included.** Contributions under DCO, without a CLA. | One licence for the whole repository keeps the rules simple. The AGPL prevents a vendor from reselling the platform as closed SaaS without contributing its changes back. The DCO reassures contributors: no relicensing is possible. |
 | Stream correlation engine | **Lightweight in-house engine in Rust**, built into the backend services, reading NATS JetStream or the internal buffer, with persistent on-disk state and checkpoints. It implements Sigma correlation rules (event count, value count, temporal sequences). | Flink requires a JVM and a dedicated cluster, incompatible with the all-in-one profile, and would mean maintaining two engines. To be revisited if the need exceeds 50,000 events/s or requires complex windows: Flink would then become an option of the distributed profile. |
 | Language of the agent and services | **Rust**, for the agent as well as the backend services (stream engine, relay, shared module core). Third-party sensors stay in their original language (Tetragon in Go, osquery in C++) and are driven through their APIs. | No garbage collector: predictable reaction time for the reactive kill and a small memory footprint, in line with the budget of section 3 and the lightweight modules. Memory safety, essential for an agent running with the highest privileges. Suitable ecosystem: **aya** to write agent-specific eBPF probes in Rust alongside Tetragon, tonic for gRPC, windows-rs for the Windows APIs, YARA-X embedded directly as a library, and a single static binary that is easy to distribute. Trade-off: more demanding development and a smaller contributor pool than Go. |
 | Tamper Protection | **Never disable it.** On unmanaged devices, the agent drives exclusions, ASR, Controlled Folder Access and Network Protection through `Set-MpPreference`. On devices managed by Intune or GPO, the agent switches to **read-only** on Defender and produces the configuration to apply in the management tool. | Tamper Protection mainly protects real-time protection, cloud protection and behaviour monitoring; exclusions are only locked when they are managed by Intune. Writing locally over a central policy would create conflicts. A test bench before going into production is still needed to confirm each setting. |
