@@ -6,6 +6,8 @@ pub fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Simulate => "simulate",
         Mode::Enforce => "enforce",
+        Mode::DryRun => "dry-run",
+        Mode::ApprovalRequired => "approval-required",
     }
 }
 
@@ -56,6 +58,7 @@ pub fn event_line(event: &TraceEvent) -> String {
         TraceEvent::UnknownAsset { path, id } => format!("unknown asset {path} {id}: not in the inventory, treated as protected"),
         TraceEvent::Halted { path } => format!("halted {path}: waiting for approval, on-call alert raised"),
         TraceEvent::Failure { path, action } => format!("failure simulated {path} {action}"),
+        TraceEvent::ActionFailed { path, action, reason } => format!("failure {path} {action}: {reason}"),
         TraceEvent::Compensation { action, compensates } => format!("compensation {action} for {compensates}"),
         TraceEvent::ErrorHandler => "on_error handler".to_owned(),
     }

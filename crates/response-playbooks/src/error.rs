@@ -1,7 +1,19 @@
 use core_config::error::ConfigError;
 use std::io;
 use std::num::ParseIntError;
+use std::time::Duration;
 use thiserror::Error;
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConnectorError {
+    #[error("connector failed: {0}")]
+    Failed(String),
+    #[error("connector took {elapsed:?}, the deadline is {deadline:?}")]
+    Timeout { elapsed: Duration, deadline: Duration },
+    #[error("no such compensation in the catalogue")]
+    UnknownCompensation,
+}
 
 
 #[derive(Debug, Error)]

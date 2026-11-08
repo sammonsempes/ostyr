@@ -8,6 +8,7 @@ pub mod expr;
 pub mod model;
 pub mod params;
 pub mod render;
+pub mod run;
 pub mod simulate;
 pub mod trigger;
 pub mod types;
