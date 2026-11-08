@@ -2,9 +2,9 @@ use crate::error::ChannelError;
 use crate::limits::bounded_text;
 use crate::model::{
     CommandRun, CommandVerdict, Delivery, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS,
-    CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS, KEEPALIVE_TIMEOUT_SECONDS,
-    MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_KEPT_REFUSALS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT, REPORT_PATH, SUBSCRIBE_PATH,
-    UNARY_TIMEOUT_SECONDS,
+    CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, EXECUTOR_BUSY_REASON, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS,
+    KEEPALIVE_TIMEOUT_SECONDS, MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_KEPT_REFUSALS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT,
+    REPORT_PATH, SUBSCRIBE_PATH, UNARY_TIMEOUT_SECONDS,
 };
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
 use crate::types::{AckStream, ClockFn, DialFn, ExecuteFn, PauseFn, SharedClientConfig};
@@ -212,9 +212,20 @@ pub async fn judge_and_report(
     run: CommandRun,
 ) -> Result<CommandRun, ChannelError> {
     let judged = judge(verifier, &envelope, clock());
-    judged.command.into_iter().for_each(execute);
-    report_command(channel, &judged.verdict).await?;
-    Ok(record_verdict(run, judged.verdict))
+    let queued = judged.command.is_none_or(execute);
+    let verdict = if queued { judged.verdict } else { busy_verdict(judged.verdict.digest) };
+    report_command(channel, &verdict).await?;
+    Ok(record_verdict(run, verdict))
+}
+
+
+/// The verdict of an accepted command the executor could not take over: refused and reported, never silently lost.
+pub fn busy_verdict(digest: Vec<u8>) -> CommandVerdict {
+    CommandVerdict {
+        digest,
+        accepted: false,
+        reason: EXECUTOR_BUSY_REASON.to_owned(),
+    }
 }
 
 

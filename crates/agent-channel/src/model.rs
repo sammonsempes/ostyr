@@ -46,6 +46,10 @@ pub const REPORT_PATH: &str = "/ostyr.agent.v1.Commands/Report";
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
 
 
+/// Reason reported when the executor cannot take an accepted command; its sequence is consumed, so the signer issues a new one.
+pub const EXECUTOR_BUSY_REASON: &str = "executor busy, command not executed";
+
+
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 1_048_576;
 
 
