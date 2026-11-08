@@ -875,6 +875,7 @@ dependencies = [
 name = "core-export"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
  "core-config",
  "rcgen",
  "rustls",

@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 
 
-pub const USAGE: &str = "usage: webhook <config> <count> <first-sequence> | syslog <config> <count> <first-sequence>";
+pub const USAGE: &str = "usage: webhook|syslog|otlp <config> <count> <first-sequence>";
 
 
 #[derive(Debug, Error)]
@@ -38,6 +38,16 @@ pub enum ExportError {
     Secret(#[source] BoxError),
     #[error(transparent)]
     Config(#[from] core_config::error::ConfigError),
+    #[error("the token file {path} is larger than {max} bytes")]
+    TokenTooLarge { path: String, max: usize },
+    #[error("the token file {0} is empty")]
+    TokenEmpty(String),
+    #[error("the token file {0} holds a control character")]
+    TokenInvalid(String),
+    #[error("invalid OTLP setting: {0}")]
+    Invalid(&'static str),
+    #[error(transparent)]
+    Audit(#[from] core_audit::error::AuditError),
     #[error("{USAGE}")]
     Usage,
     #[error("the configuration has no `{0}` output")]
