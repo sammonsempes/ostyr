@@ -75,6 +75,38 @@ prepare_gate_dir() {
   mkdir -p "$(dirname "$EXPORT")"
 }
 
+MENTION_PATTERN='cl''aude|anthro''pic'
+
+unpublished_path() {
+  case "$1" in
+    .cl''aude/* | backlog/* | docs/ai-development.md | .githooks/commit-msg | tests/cl''aude-hooks.sh | CL''AUDE.md | */CL''AUDE.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+rewritten_path() {
+  local filter="$ROOT/.cl""aude/publish/index-filter.sh"
+  [ -f "$filter" ] && grep -q -F -- "rewrite $1 " "$filter"
+}
+
+check_published_mentions() {
+  local path added found=0
+  local -a paths
+  mapfile -t paths < <(git diff --cached --name-only --diff-filter=ACMR)
+  for path in "${paths[@]+"${paths[@]}"}"; do
+    if ! unpublished_path "$path" && ! rewritten_path "$path"; then
+      added=$(git diff --cached -U0 -- "$path" | grep '^+' | grep -v '^+++ ' || true)
+      if grep -q -i -E -- "$MENTION_PATTERN" <<<"$added"; then
+        echo "pre-commit: $path is published and an added line matches '$MENTION_PATTERN'; reword it or add a rewrite in its index-filter.sh" >&2
+        found=1
+      fi
+    fi
+  done
+  return "$found"
+}
+
+if ! check_published_mentions; then exit 1; fi
+
 docs_only() {
   local staged path
   staged=$(git diff --cached --name-only --diff-filter=ACMRD)
