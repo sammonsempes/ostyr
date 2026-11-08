@@ -1,0 +1,15 @@
+rule:
+  id: rate
+  metric: host.metric
+  condition: {kind: rate, direction: above, threshold: 1}
+  for: 60
+  close_after: 300
+  severity: medium
+  runbook: https://runbooks.example.org/rate
+points: [[0, 0], [60, 30], [120, 150], [120, 150], [180, 270], [240, 272]]
+steps:
+  - {at: 0, expect: inactive}
+  - {at: 60, expect: inactive}
+  - {at: 120, expect: pending}
+  - {at: 180, expect: firing}
+  - {at: 240, expect: resolved}

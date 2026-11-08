@@ -1,0 +1,19 @@
+rule:
+  id: sustained
+  metric: host.metric
+  condition: {kind: threshold, direction: above, threshold: 90}
+  for: 120
+  close_after: 300
+  severity: high
+  runbook: https://runbooks.example.org/sustained
+points: [[0, 50], [60, 95], [120, 95], [180, 95], [240, 50], [300, 50], [540, 50], [600, 50], [660, 95]]
+steps:
+  - {at: 0, expect: inactive}
+  - {at: 60, expect: pending}
+  - {at: 120, expect: pending}
+  - {at: 180, expect: firing}
+  - {at: 240, expect: resolved}
+  - {at: 300, expect: resolved}
+  - {at: 540, expect: closed}
+  - {at: 600, expect: closed}
+  - {at: 660, expect: pending}

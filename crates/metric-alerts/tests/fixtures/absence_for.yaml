@@ -1,0 +1,14 @@
+rule:
+  id: absence_for
+  metric: host.metric
+  condition: {kind: absence, interval: 60}
+  for: 120
+  close_after: 300
+  severity: critical
+  runbook: https://runbooks.example.org/absence-for
+points: [[0, 1]]
+steps:
+  - {at: 120, expect: inactive}
+  - {at: 180, expect: pending}
+  - {at: 240, expect: pending}
+  - {at: 300, expect: firing}

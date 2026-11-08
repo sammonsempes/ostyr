@@ -1,0 +1,17 @@
+rule:
+  id: spike
+  metric: host.metric
+  selector: {host: web-1}
+  condition: {kind: threshold, direction: above, threshold: 90}
+  for: 300
+  close_after: 600
+  severity: high
+  labels: {team: infra}
+  runbook: https://runbooks.example.org/spike
+points: [[0, 50], [60, 95], [120, 95], [180, 50], [240, 50]]
+steps:
+  - {at: 0, expect: inactive}
+  - {at: 60, expect: pending}
+  - {at: 120, expect: pending}
+  - {at: 180, expect: inactive}
+  - {at: 240, expect: inactive}

@@ -1,0 +1,12 @@
+rule:
+  id: rate_below
+  metric: host.metric
+  condition: {kind: rate, direction: below, threshold: -1, clear: -0.5}
+  close_after: 300
+  severity: medium
+  runbook: https://runbooks.example.org/rate-below
+points: [[0, 100], [60, 20], [120, 20]]
+steps:
+  - {at: 0, expect: inactive}
+  - {at: 60, expect: firing}
+  - {at: 120, expect: resolved}

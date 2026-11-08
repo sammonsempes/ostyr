@@ -1,0 +1,13 @@
+rule:
+  id: below
+  metric: host.metric
+  condition: {kind: threshold, direction: below, threshold: 10, clear: 20}
+  close_after: 300
+  severity: low
+  runbook: https://runbooks.example.org/below
+points: [[0, 50], [60, 5], [120, 15], [180, 25]]
+steps:
+  - {at: 0, expect: inactive}
+  - {at: 60, expect: firing}
+  - {at: 120, expect: firing}
+  - {at: 180, expect: resolved}
