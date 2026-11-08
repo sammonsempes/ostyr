@@ -3,7 +3,7 @@ use crate::state::{envelope_source, make_audited_state, make_live_state, new_sto
 use crate::types::TestResult;
 use agent_channel::error::SettingsError;
 use agent_channel::limits::open_slot;
-use agent_channel::model::{ChannelSettings, Identity, SlotKind, DEFAULT_MAX_STREAMS_PER_AGENT};
+use agent_channel::model::{ChannelSettings, Identity, SlotKind, DEFAULT_MAX_STREAMS_PER_AGENT, MAX_MESSAGE_BYTES_LIMIT};
 use agent_channel::presence::{record_beat, watch_silence};
 use agent_channel::settings::{open_settings_engine, resize_total, settings_of, settings_state, validate_settings};
 use core_audit::model::{NewEntry, Outcome};
@@ -238,5 +238,25 @@ async fn the_silence_interval_follows_a_reload() -> TestResult {
         .map(|entry| entry.action.clone())
         .collect();
     assert_eq!(actions, vec!["agent.silent", "agent.back", "agent.silent"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_message_bound_above_the_sink_line_limit_is_refused() -> TestResult {
+    let at_limit = ChannelSettings {
+        max_message_bytes: MAX_MESSAGE_BYTES_LIMIT,
+        ..ChannelSettings::default()
+    };
+    assert!(validate_settings(&at_limit).is_ok());
+    let above = ChannelSettings {
+        max_message_bytes: MAX_MESSAGE_BYTES_LIMIT + 1,
+        ..ChannelSettings::default()
+    };
+    assert!(validate_settings(&above)
+        .err()
+        .ok_or("accepted")?
+        .to_string()
+        .contains("max_message_bytes"));
     Ok(())
 }

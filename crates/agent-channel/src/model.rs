@@ -46,7 +46,15 @@ pub const REPORT_PATH: &str = "/ostyr.agent.v1.Commands/Report";
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
 
 
+/// Reason reported when the executor cannot take an accepted command; its sequence is consumed, so the signer issues a new one.
+pub const EXECUTOR_BUSY_REASON: &str = "executor busy, command not executed";
+
+
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 1_048_576;
+
+
+/// Highest `max_message_bytes` a setting may take: the events file of the example sink bounds its lines from it.
+pub const MAX_MESSAGE_BYTES_LIMIT: usize = 4 * DEFAULT_MAX_MESSAGE_BYTES;
 
 
 pub const DEFAULT_MAX_STREAMS_PER_AGENT: usize = 4;
