@@ -1,0 +1,12 @@
+[Unit]
+Description=Ostyr lab bridges cannot reach host services
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/ostyr-lab.nft
+
+[Install]
+WantedBy=multi-user.target

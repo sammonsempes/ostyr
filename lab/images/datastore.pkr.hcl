@@ -91,7 +91,7 @@ source "qemu" "datastore" {
   headless         = true
   memory           = 4096
   cpus             = 2
-  qemuargs         = [["-cpu", "host"]]
+  qemuargs         = [["-cpu", var.accelerator == "kvm" ? "host" : "max"]]
   output_directory = var.output_directory
   vm_name          = "datastore.qcow2"
   cd_label         = "cidata"

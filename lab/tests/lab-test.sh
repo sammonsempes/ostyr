@@ -5,7 +5,7 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-readonly TEST_TASK="TLABTEST"
+readonly TEST_TASK="${LAB_TEST_TASK:-TLABTEST}"
 readonly PUBLIC_ADDRESS="1.1.1.1"
 
 failures=0
@@ -64,9 +64,24 @@ check "LAN gateway unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_gatew
 check "host address unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_address"
 
 bridge_address="${vm_address%.*}.1"
-host_ports="$(ss -H -ltn | awk '{n = split($4, a, ":"); print a[n]}' | sort -un | tr '\n' ' ')"
-forced_route_probe="sudo ip route add default via $bridge_address && for port in $host_ports; do timeout 2 bash -c \"echo > /dev/tcp/$host_address/\$port\" && exit 1; done; exit 0"
-check "forced route: host listening ports unreachable" ssh_vm "$forced_route_probe"
+host_addresses="$(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')"
+probe_pairs() {
+    local proto="$1" flag="$2"
+    ss -H "$flag" -n | awk '{print $4}' | awk -v proto="$proto" -v addrs="$host_addresses" '
+        { n = split($0, p, ":"); port = p[n]; address = substr($0, 1, length($0) - length(port) - 1); sub(/%.*/, "", address) }
+        address ~ /^127\./ || address ~ /:/ { next }
+        address == "0.0.0.0" || address == "*" { m = split(addrs, a, " "); for (i = 1; i <= m; i++) print proto, a[i], port; next }
+        { print proto, address, port }' | sort -u
+}
+mapfile -t probe_pairs_list < <(probe_pairs tcp -ltn)
+probe_script="sudo ip route replace default via $bridge_address"
+for pair in "${probe_pairs_list[@]}"; do
+    read -r _ address port <<<"$pair"
+    probe_script+=" && ! nc -z -w 2 $address $port"
+done
+log "forced-route probe: $probe_script"
+check "forced route: no listening host pair reachable" ssh_vm "$probe_script"
+check "forced route: bridge tcp 22 unreachable" ssh_vm "sudo ip route replace default via $bridge_address; ! timeout 2 bash -c 'echo > /dev/tcp/$bridge_address/22'"
 check "forced route: Internet still unreachable" fails ssh_vm "ping -c 1 -W 2 $PUBLIC_ADDRESS"
 
 overlay_xml="$(virsh_lab vol-dumpxml --pool "$LAB_POOL" "$prefix-$vm_name.qcow2")"
