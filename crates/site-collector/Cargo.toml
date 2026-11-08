@@ -1,0 +1,18 @@
+[package]
+name = "site-collector"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false }
+syslog_loose = "0.23"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
