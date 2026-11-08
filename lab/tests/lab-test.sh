@@ -5,7 +5,7 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-readonly TEST_TASK="TLABTEST"
+readonly TEST_TASK="${LAB_TEST_TASK:-TLABTEST}"
 readonly PUBLIC_ADDRESS="1.1.1.1"
 
 failures=0
@@ -64,9 +64,45 @@ check "LAN gateway unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_gatew
 check "host address unreachable from VM" fails ssh_vm "ping -c 1 -W 2 $host_address"
 
 bridge_address="${vm_address%.*}.1"
-host_ports="$(ss -H -ltn | awk '{n = split($4, a, ":"); print a[n]}' | sort -un | tr '\n' ' ')"
-forced_route_probe="sudo ip route add default via $bridge_address && for port in $host_ports; do timeout 2 bash -c \"echo > /dev/tcp/$host_address/\$port\" && exit 1; done; exit 0"
-check "forced route: host listening ports unreachable" ssh_vm "$forced_route_probe"
+host_addresses="$(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')"
+probe_pairs() {
+    local proto="$1" flag="$2"
+    ss -H "$flag" -n | awk '{print $4}' | awk -v proto="$proto" -v addrs="$host_addresses" '
+        { n = split($0, p, ":"); port = p[n]; address = substr($0, 1, length($0) - length(port) - 1); sub(/%.*/, "", address) }
+        address ~ /^127\./ || address ~ /:/ { next }
+        address == "0.0.0.0" || address == "*" { m = split(addrs, a, " "); for (i = 1; i <= m; i++) print proto, a[i], port; next }
+        { print proto, address, port }' | sort -u
+}
+readonly UDP_UNREACHABLE_ERRNO=113
+udp_probe_python="import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(2)
+s.connect((sys.argv[1], int(sys.argv[2])))
+try:
+    s.send(bytes(1))
+    s.recv(1)
+except OSError as error:
+    sys.exit(0 if error.errno == $UDP_UNREACHABLE_ERRNO else 1)
+sys.exit(1)"
+mapfile -t tcp_pairs < <(probe_pairs tcp -ltn)
+mapfile -t udp_pairs < <(probe_pairs udp -lun)
+check "VM has nc and python3 for the probes" ssh_vm "command -v nc >/dev/null && command -v python3 >/dev/null"
+force_route="sudo ip route replace default via $bridge_address"
+tcp_script="command -v nc >/dev/null && $force_route"
+for pair in "${tcp_pairs[@]}"; do
+    read -r _ address port <<<"$pair"
+    tcp_script+=" && ! nc -z -w 2 $address $port"
+done
+udp_script="command -v python3 >/dev/null && $force_route"
+for pair in "${udp_pairs[@]}"; do
+    read -r _ address port <<<"$pair"
+    [[ "$address:$port" == "$bridge_address:67" ]] || udp_script+=" && python3 -c '$udp_probe_python' $address $port"
+done
+log "forced-route tcp probe: $tcp_script"
+log "forced-route udp probe: $udp_script"
+check "forced route: no listening tcp pair reachable" ssh_vm "$tcp_script"
+check "forced route: no listening udp pair reachable (except dhcp on the bridge)" ssh_vm "$udp_script"
+check "forced route: bridge tcp 22 unreachable" ssh_vm "$force_route; ! timeout 2 bash -c 'echo > /dev/tcp/$bridge_address/22'"
 check "forced route: Internet still unreachable" fails ssh_vm "ping -c 1 -W 2 $PUBLIC_ADDRESS"
 
 overlay_xml="$(virsh_lab vol-dumpxml --pool "$LAB_POOL" "$prefix-$vm_name.qcow2")"

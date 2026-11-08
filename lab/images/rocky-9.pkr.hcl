@@ -57,7 +57,7 @@ source "qemu" "rocky" {
   headless         = true
   memory           = 2048
   cpus             = 2
-  qemuargs         = [["-cpu", "host"]]
+  qemuargs         = [["-cpu", var.accelerator == "kvm" ? "host" : "max"]]
   output_directory = var.output_directory
   vm_name          = "rocky-9.qcow2"
   cd_label         = "cidata"
