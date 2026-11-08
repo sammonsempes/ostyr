@@ -1,0 +1,16 @@
+[Unit]
+Description=NATS server with JetStream (ostyr lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nats
+Group=nats
+ExecStart=/usr/local/bin/nats-server --config /etc/nats/nats.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
