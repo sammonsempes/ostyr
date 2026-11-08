@@ -24,6 +24,15 @@ cat >"$SCRATCH/bin/ionice" <<'S'
 echo "ionice $*" >>"$STUB_LOG"
 exec "${@:3}"
 S
+cat >"$SCRATCH/bin/id" <<'S'
+#!/usr/bin/env bash
+echo "${STUB_UID:-1000}"
+S
+cat >"$SCRATCH/bin/setpriv" <<'S'
+#!/usr/bin/env bash
+echo "setpriv $*" >>"$STUB_LOG"
+exec "${@:3}"
+S
 chmod +x "$SCRATCH/bin/"*
 cp "$SCRATCH/bin/cargo" "$SCRATCH/bin/nice" "$SCRATCH/nobin/"
 for tool in bash env git dirname mkdir rm cksum cut realpath flock find; do
@@ -54,6 +63,17 @@ expect "clippy low" '^nice -n 10 ionice -c 3 cargo clippy'
 expect "llvm-cov low" '^ionice -c 3 cargo \+nightly llvm-cov'
 expect "build low" '^ionice -c 3 cargo run --offline -q -p custom_lint'
 expect "gate low" '^ionice -c 3 cargo run --offline -q -p coverage_gate'
+if grep -q '^setpriv' "$STUB_LOG"; then
+  echo "FAIL: setpriv used for a non-root user"
+  FAILS=$((FAILS + 1))
+fi
+
+: >"$STUB_LOG"
+env STUB_UID=0 PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
+expect "root clippy" '^setpriv --bounding-set -dac_override,-dac_read_search,-fowner nice -n 10 ionice -c 3 cargo clippy'
+expect "root llvm-cov" '^setpriv --bounding-set -dac_override,-dac_read_search,-fowner nice -n 10 ionice -c 3 cargo \+nightly llvm-cov'
+expect "root lint" '^setpriv .* cargo run --offline -q -p custom_lint'
+expect "root gate" '^setpriv .* cargo run --offline -q -p coverage_gate'
 
 : >"$STUB_LOG"
 env PATH="$SCRATCH/nobin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1

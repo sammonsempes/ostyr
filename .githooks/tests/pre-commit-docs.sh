@@ -53,7 +53,8 @@ check() {
 check "backlog only" skip backlog/x.md
 check "backlog plus crate" full backlog/y.md crates/a/src/lib.rs
 check "docs spec" full docs/spec.md
-check "crate notes" full crates/a/NOTES.md
+check "crate notes" skip crates/a/NOTES.md
+check "crate notes plus rs" full crates/a/NOTES.md crates/a/src/lib.rs
 check "root markdown" skip NOTES.md
 check "cache dir" skip .cache/z.json
 git rm -q backlog/x.md
