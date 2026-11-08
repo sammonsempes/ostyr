@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Usage: ostyr-datastore-provision <domain> <server-ip>   (run as root by lab/profiles/datastore-pair.setup.sh)
+# Generates the per-lab CA and server certificate (SAN domain and IP), configures ClickHouse, NATS JetStream and PostgreSQL with TLS only on the
+# lab address, starts and enables them, and writes /etc/ostyr-lab/ca.pem and the root-only /etc/ostyr-lab/datastore.env.
+set -euo pipefail
+
+domain="${1:?usage: ostyr-datastore-provision <domain> <server-ip>}"
+server_ip="${2:?server ip}"
+readonly LAB_DIR="/etc/ostyr-lab"
+readonly PRIVATE_DIR="$LAB_DIR/private"
+readonly CERT_DAYS=3650
+readonly READY_ATTEMPTS=60
+readonly READY_DELAY=2
+readonly CLICKHOUSE_HTTPS_PORT=8443
+readonly CLICKHOUSE_NATIVE_PORT=9440
+readonly NATS_PORT=4222
+readonly POSTGRES_PORT=5432
+readonly SERVICE_USER="ostyr"
+readonly SERVICE_DATABASE="ostyr"
+postgres_conf_dir="$(echo /etc/postgresql/*/main/conf.d)"
+postgres_hba="$(echo /etc/postgresql/*/main/pg_hba.conf)"
+
+install -d -m 755 "$LAB_DIR"
+install -d -m 700 "$PRIVATE_DIR"
+
+openssl req -x509 -newkey rsa:2048 -nodes -days "$CERT_DAYS" -subj "/CN=ostyr lab CA" -keyout "$PRIVATE_DIR/ca.key" -out "$LAB_DIR/ca.pem"
+openssl req -newkey rsa:2048 -nodes -subj "/CN=$domain" -keyout "$PRIVATE_DIR/tls.key" -out "$PRIVATE_DIR/tls.csr"
+printf 'subjectAltName=DNS:%s,IP:%s\nextendedKeyUsage=serverAuth\n' "$domain" "$server_ip" >"$PRIVATE_DIR/san.ext"
+openssl x509 -req -in "$PRIVATE_DIR/tls.csr" -CA "$LAB_DIR/ca.pem" -CAkey "$PRIVATE_DIR/ca.key" -CAcreateserial -days "$CERT_DAYS" \
+    -extfile "$PRIVATE_DIR/san.ext" -out "$PRIVATE_DIR/tls.crt"
+chmod 644 "$LAB_DIR/ca.pem"
+
+install_tls() {
+    local owner="$1" directory="$2"
+    install -d -m 750 -o "$owner" -g "$owner" "$directory"
+    install -m 644 -o "$owner" -g "$owner" "$PRIVATE_DIR/tls.crt" "$directory/tls.crt"
+    install -m 600 -o "$owner" -g "$owner" "$PRIVATE_DIR/tls.key" "$directory/tls.key"
+}
+install_tls clickhouse /etc/clickhouse-server/tls
+install_tls nats /etc/nats/tls
+install_tls postgres /etc/postgresql/tls
+
+clickhouse_password="$(openssl rand -hex 16)"
+nats_password="$(openssl rand -hex 16)"
+postgres_password="$(openssl rand -hex 16)"
+
+cat >/etc/clickhouse-server/config.d/ostyr.xml <<XML
+<clickhouse>
+    <listen_host replace="replace">$server_ip</listen_host>
+    <http_port remove="remove"/>
+    <tcp_port remove="remove"/>
+    <interserver_http_port remove="remove"/>
+    <mysql_port remove="remove"/>
+    <postgresql_port remove="remove"/>
+    <https_port>$CLICKHOUSE_HTTPS_PORT</https_port>
+    <tcp_port_secure>$CLICKHOUSE_NATIVE_PORT</tcp_port_secure>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/clickhouse-server/tls/tls.crt</certificateFile>
+            <privateKeyFile>/etc/clickhouse-server/tls/tls.key</privateKeyFile>
+            <caConfig>$LAB_DIR/ca.pem</caConfig>
+            <verificationMode>none</verificationMode>
+            <loadDefaultCAFile>true</loadDefaultCAFile>
+            <cacheSessions>true</cacheSessions>
+            <disableProtocols>sslv2,sslv3,tlsv1,tlsv1_1</disableProtocols>
+            <preferServerCiphers>true</preferServerCiphers>
+        </server>
+    </openSSL>
+</clickhouse>
+XML
+cat >/etc/clickhouse-server/users.d/ostyr.xml <<XML
+<clickhouse>
+    <users>
+        <default remove="remove"/>
+        <$SERVICE_USER>
+            <password_sha256_hex>$(printf '%s' "$clickhouse_password" | sha256sum | cut -d' ' -f1)</password_sha256_hex>
+            <networks><ip>::/0</ip></networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </$SERVICE_USER>
+    </users>
+</clickhouse>
+XML
+chown clickhouse:clickhouse /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
+chmod 640 /etc/clickhouse-server/config.d/ostyr.xml /etc/clickhouse-server/users.d/ostyr.xml
+
+install -d -m 750 -o nats -g nats /var/lib/nats
+cat >/etc/nats/nats.conf <<CONF
+server_name: ostyr-datastore
+host: $server_ip
+port: $NATS_PORT
+jetstream {
+    store_dir: /var/lib/nats
+}
+tls {
+    cert_file: /etc/nats/tls/tls.crt
+    key_file: /etc/nats/tls/tls.key
+    ca_file: $LAB_DIR/ca.pem
+    handshake_first: true
+}
+authorization {
+    user: $SERVICE_USER
+    password: "$nats_password"
+}
+CONF
+chown nats:nats /etc/nats/nats.conf
+chmod 600 /etc/nats/nats.conf
+
+cat >"$postgres_conf_dir/ostyr.conf" <<CONF
+listen_addresses = '$server_ip'
+port = $POSTGRES_PORT
+ssl = on
+ssl_cert_file = '/etc/postgresql/tls/tls.crt'
+ssl_key_file = '/etc/postgresql/tls/tls.key'
+ssl_min_protocol_version = 'TLSv1.2'
+password_encryption = 'scram-sha-256'
+CONF
+cat >"$postgres_hba" <<CONF
+local all postgres peer
+hostssl all $SERVICE_USER 0.0.0.0/0 scram-sha-256
+CONF
+chown postgres:postgres "$postgres_conf_dir/ostyr.conf" "$postgres_hba"
+
+systemctl enable --now postgresql
+systemctl restart postgresql
+systemctl enable --now clickhouse-server
+systemctl enable --now nats-server
+
+cat >"$LAB_DIR/datastore.env" <<ENV
+DATASTORE_DOMAIN=$domain
+DATASTORE_IP=$server_ip
+DATASTORE_CA=$LAB_DIR/ca.pem
+CLICKHOUSE_HTTPS_PORT=$CLICKHOUSE_HTTPS_PORT
+CLICKHOUSE_NATIVE_PORT=$CLICKHOUSE_NATIVE_PORT
+CLICKHOUSE_USER=$SERVICE_USER
+CLICKHOUSE_PASSWORD=$clickhouse_password
+NATS_PORT=$NATS_PORT
+NATS_USER=$SERVICE_USER
+NATS_PASSWORD=$nats_password
+POSTGRES_PORT=$POSTGRES_PORT
+POSTGRES_USER=$SERVICE_USER
+POSTGRES_PASSWORD=$postgres_password
+POSTGRES_DATABASE=$SERVICE_DATABASE
+ENV
+chmod 600 "$LAB_DIR/datastore.env"
+
+wait_for() {
+    local description="$1" attempt
+    shift
+    for ((attempt = 0; attempt < READY_ATTEMPTS; attempt++)); do
+        if "$@" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$READY_DELAY"
+    done
+    printf 'error: %s not ready\n' "$description" >&2
+    return 1
+}
+wait_for "PostgreSQL" systemctl is-active --quiet postgresql@16-main
+sudo -u postgres psql -v ON_ERROR_STOP=1 --quiet <<SQL
+CREATE ROLE $SERVICE_USER LOGIN PASSWORD '$postgres_password';
+CREATE DATABASE $SERVICE_DATABASE OWNER $SERVICE_USER;
+SQL
+wait_for "ClickHouse" curl --fail --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:$CLICKHOUSE_HTTPS_PORT:$server_ip" \
+    --user "$SERVICE_USER:$clickhouse_password" --data-binary 'SELECT 1' "https://$domain:$CLICKHOUSE_HTTPS_PORT/"
+wait_for "NATS" systemctl is-active --quiet nats-server
+printf 'datastore provisioned\n'

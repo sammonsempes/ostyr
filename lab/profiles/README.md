@@ -10,5 +10,6 @@ A profile is `lab/profiles/<name>.yaml`: a list of VMs (name, base_image, vcpu, 
 | `windows-domain` | `dc` (`ws2022-dc`, 4 GB) promotes `lab.ostyr.test`; `ws` (`win11`, 8 GB) joins it; 3 quota units | T013 |
 | `oidc-pair` | `server` (`ubuntu-2404`) and `zitadel` (`zitadel`: Zitadel + PostgreSQL, TLS from a per-lab CA); `OIDC_REDIRECT_URI` sets the application redirect URI | T016, T026B |
 | `attack-linux` | `attacker` (`attacker`: Atomic Red Team, egress confined to the lab subnet) and `target` (`ubuntu-2404`) | T014, T030 |
+| `datastore-pair` | `datastore` (`datastore`: ClickHouse, NATS JetStream, PostgreSQL, TLS from a per-lab CA, credentials in `/etc/ostyr-lab/datastore.env`) and `client` (`ubuntu-2404` with the nats CLI and psql installed by the setup script) | T018 |
 
 The `k3s-node` and `backup-server` images have no profile yet; a task that needs them adds its own.
