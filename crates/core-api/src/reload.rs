@@ -1,7 +1,7 @@
 use crate::config::api_config;
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, PreparedKey, Rewatch, Sockets, Watching};
-use crate::oidc::load_oidc;
+use crate::oidc::{fingerprint_salt, load_oidc};
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
 use crate::state::{lock_auth, read_compromised_digested};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
@@ -52,8 +52,18 @@ pub const FINGERPRINT_COMPROMISED: &str = "file.compromised_list";
 pub const FINGERPRINT_OIDC: &str = "file.oidc";
 
 
+pub const FINGERPRINT_KEY: &str = "file.key_file";
+
+
 pub fn content_digest(bytes: &[u8]) -> String {
     HEXLOWER.encode(&Sha256::digest(bytes))
+}
+
+
+/// A digest of the key keyed by the per-process salt, so the audit diff shows that it changed without a way to recompute it.
+pub fn key_fingerprint(key: &StoreKey) -> Result<String, StartupError> {
+    let salt = fingerprint_salt()?;
+    Ok(content_digest(&[salt.as_slice(), b"key", key.expose_secret()].concat()))
 }
 
 
@@ -68,6 +78,8 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         .map(|files| load_oidc(files, &builtin_catalog()).map(Arc::new))
         .transpose()?;
     let (list, list_digest) = read_compromised_digested(&config.compromised_list)?;
+    let key = Arc::new(read_key_file(&config.key_file)?);
+    let key_digest = key_fingerprint(&key)?;
     let tls_digests = loaded_tls.iter().flat_map(|loaded| {
         [
             (FINGERPRINT_TLS_CERTIFICATE.to_owned(), loaded.certificate_digest.clone()),
@@ -77,7 +89,10 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
     let oidc_digest = oidc.iter().map(|runtime| (FINGERPRINT_OIDC.to_owned(), runtime.fingerprint.clone()));
     let fingerprints = tls_digests
         .chain(oidc_digest)
-        .chain([(FINGERPRINT_COMPROMISED.to_owned(), list_digest)])
+        .chain([
+            (FINGERPRINT_COMPROMISED.to_owned(), list_digest),
+            (FINGERPRINT_KEY.to_owned(), key_digest),
+        ])
         .collect();
     Ok(ApiSettings {
         module,
@@ -85,6 +100,7 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         tls: loaded_tls.map(|loaded| Arc::new(loaded.config)),
         oidc,
         compromised: Arc::new(list),
+        key,
         fingerprints,
     })
 }
@@ -126,11 +142,15 @@ pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
         .iter()
         .flat_map(|files| [Some(files.config.clone()), files.ca_file.clone(), Some(files.secret_file.clone())])
         .flatten();
-    [module_file.to_path_buf(), config.compromised_list.clone()]
-        .into_iter()
-        .chain(tls)
-        .chain(oidc)
-        .collect()
+    [
+        module_file.to_path_buf(),
+        config.compromised_list.clone(),
+        PathBuf::from(&config.key_file),
+    ]
+    .into_iter()
+    .chain(tls)
+    .chain(oidc)
+    .collect()
 }
 
 
@@ -152,15 +172,22 @@ pub fn current_entry(state: &ApiState, entry: NewEntry) -> NewEntry {
 
 /// Replaces the name and tenant; the sessions issued under the old ones end, and the change is audited once under the new ones.
 pub fn switch_identity(state: &ApiState, context: &ReloadContext, settings: &ApiSettings) {
+    let previous = state.identity.load_full();
     let next = ApiIdentity {
         module: settings.config.module.clone(),
         tenant: settings.config.tenant.clone(),
+        generation: previous.generation + 1,
     };
-    let previous = state.identity.swap(Arc::new(next.clone()));
-    if *previous != next {
+    if previous.module != next.module || previous.tenant != next.tenant {
+        state.identity.store(Arc::new(next.clone()));
         lock_auth(state).sessions.clear();
+        state.oidc.load().iter().for_each(|runtime| {
+            let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            runtime.generations.lock().unwrap_or_else(PoisonError::into_inner).clear();
+            pending.clear();
+        });
         let changed = format!(
-            "identity changed from {}/{} to {}/{}, every session revoked",
+            "identity changed from {}/{} to {}/{}, every session revoked, pending OIDC logins dropped",
             previous.module, previous.tenant, next.module, next.tenant
         );
         append(
@@ -318,19 +345,17 @@ pub fn reseal_accounts(accounts: &mut AccountMap, live: &StoreKey, next: &StoreK
 }
 
 
-/// Reads the new key through the handle its mode was checked on and rehearses the re-encryption on a copy of the store; nothing is written.
-pub fn prepare_key(state: &ApiState, current: &Mutex<String>, prepared: &PendingKey, settings: &ApiSettings) -> Result<(), BoxError> {
-    let next = &settings.config.key_file;
+/// Rehearses the re-encryption of a copy of the store under the key read at build time, when its content differs from the live key; nothing is written.
+pub fn prepare_key(state: &ApiState, prepared: &PendingKey, settings: &ApiSettings) -> Result<(), BoxError> {
     prepared.lock().unwrap_or_else(PoisonError::into_inner).take();
-    let changed = *current.lock().unwrap_or_else(PoisonError::into_inner) != *next;
+    let live = state.key.load_full();
+    let changed = live.expose_secret() != settings.key.expose_secret();
     let loaded = changed
         .then(|| -> Result<PreparedKey, BoxError> {
-            let key = read_key_file(next)?;
             let (mut accounts, _) = load_store_file(&settings.config.accounts_store)?;
-            reseal_accounts(&mut accounts, &state.key.load(), &key, state.random)?;
+            reseal_accounts(&mut accounts, &live, &settings.key, state.random)?;
             Ok(PreparedKey {
-                file: next.clone(),
-                key: Arc::new(key),
+                key: Arc::clone(&settings.key),
             })
         })
         .transpose()?;
@@ -353,12 +378,12 @@ pub fn rotate_store(state: &ApiState, next: &Arc<StoreKey>) -> Result<usize, Aut
 
 
 /// Applies the prepared key; a failure after validation cannot refuse the reload, so it is logged and audited and the old key stays.
-pub fn switch_key(state: &ApiState, context: &ReloadContext, current: &Mutex<String>, prepared: &PendingKey, settings: &ApiSettings) {
+pub fn switch_key(state: &ApiState, context: &ReloadContext, prepared: &PendingKey, settings: &ApiSettings) {
     let taken = prepared
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take()
-        .filter(|candidate| candidate.file == settings.config.key_file);
+        .filter(|candidate| Arc::ptr_eq(&candidate.key, &settings.key));
     taken.into_iter().for_each(|candidate| {
         let (outcome, parameters) = rotate_store(state, &candidate.key)
             .inspect_err(|error| tracing::error!(%error, "key rotation failed after validation, the old key is kept"))
@@ -370,7 +395,6 @@ pub fn switch_key(state: &ApiState, context: &ReloadContext, current: &Mutex<Str
                     )
                 },
                 |count| {
-                    *current.lock().unwrap_or_else(PoisonError::into_inner) = candidate.file.clone();
                     (
                         Outcome::Success,
                         [
@@ -472,8 +496,6 @@ pub fn subscribers(
     let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
     let (store_context, identity_context, key_context) = (context.clone(), context.clone(), context.clone());
     let (key_state, key_apply_state, identity_state) = (state.clone(), state.clone(), state.clone());
-    let key_path = Arc::new(Mutex::new(startup.key_file.clone()));
-    let key_applied_path = Arc::clone(&key_path);
     let prepared_key = PendingKey::default();
     let applied_key = Arc::clone(&prepared_key);
     let audit_path = Arc::new(Mutex::new(startup.audit_log.clone()));
@@ -518,8 +540,8 @@ pub fn subscribers(
         },
         Subscriber {
             section: "key_file".to_owned(),
-            validate: Box::new(move |settings| prepare_key(&key_state, &key_path, &prepared_key, settings)),
-            apply: Box::new(move |settings| switch_key(&key_apply_state, &key_context, &key_applied_path, &applied_key, settings)),
+            validate: Box::new(move |settings| prepare_key(&key_state, &prepared_key, settings)),
+            apply: Box::new(move |settings| switch_key(&key_apply_state, &key_context, &applied_key, settings)),
         },
         section("watch", move |settings| follow_files(&watch_setup.rewatch, &module_file, settings)),
         Subscriber {

@@ -53,11 +53,20 @@ pub struct ApiState {
 }
 
 
-/// The module name and tenant every audit record and log line carries; replaced whole at a reload.
+/// The module name and tenant every audit record and log line carries; replaced whole at a reload. `generation` grows only when the name or tenant really changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiIdentity {
     pub module: String,
     pub tenant: String,
+    pub generation: u64,
+}
+
+
+/// The key, the list and the OIDC runtime a state starts from, each read once.
+pub struct StateInputs {
+    pub key: Arc<StoreKey>,
+    pub compromised: Arc<CompromisedSet>,
+    pub oidc: Option<Arc<OidcRuntime>>,
 }
 
 
@@ -71,7 +80,6 @@ pub struct AuthInputs {
 
 /// The new store key, read and checked at validation and kept for the swap.
 pub struct PreparedKey {
-    pub file: String,
     pub key: Arc<StoreKey>,
 }
 
@@ -95,6 +103,7 @@ pub struct OidcRuntime {
     pub http: SharedHttpFn,
     pub resolve: SharedResolveFn,
     pub pending: std::sync::Mutex<PendingMap>,
+    pub generations: crate::types::PendingGenerations,
     pub refresh: core_auth::oidc::KeyRefreshGate,
 }
 
@@ -157,6 +166,7 @@ pub struct ApiSettings {
     pub tls: Option<Arc<ServerConfig>>,
     pub oidc: Option<Arc<OidcRuntime>>,
     pub compromised: Arc<CompromisedSet>,
+    pub key: Arc<StoreKey>,
     pub fingerprints: BTreeMap<String, String>,
 }
 
