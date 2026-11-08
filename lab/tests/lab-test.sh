@@ -67,6 +67,7 @@ bridge_address="${vm_address%.*}.1"
 host_ports="$(ss -H -ltn | awk '{n = split($4, a, ":"); print a[n]}' | sort -un | tr '\n' ' ')"
 forced_route_probe="sudo ip route add default via $bridge_address && for port in $host_ports; do timeout 2 bash -c \"echo > /dev/tcp/$host_address/\$port\" && exit 1; done; exit 0"
 check "forced route: host listening ports unreachable" ssh_vm "$forced_route_probe"
+check "forced route: bridge tcp 22 unreachable" ssh_vm "sudo ip route replace default via $bridge_address; ! timeout 2 bash -c 'echo > /dev/tcp/$bridge_address/22'"
 check "forced route: Internet still unreachable" fails ssh_vm "ping -c 1 -W 2 $PUBLIC_ADDRESS"
 
 overlay_xml="$(virsh_lab vol-dumpxml --pool "$LAB_POOL" "$prefix-$vm_name.qcow2")"
