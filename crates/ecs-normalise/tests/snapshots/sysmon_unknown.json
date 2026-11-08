@@ -1,0 +1,1 @@
+{"@timestamp":"2026-11-03T10:00:00.123Z","ecs":{"version":"8.11"},"event":{"kind":"event","code":"99","dataset":"sysmon.unknown","module":"sysmon"},"host":{"name":"WIN-01.corp.test","os":{"type":"windows"}},"sysmon":{"Baz":"1 < 2","Foo":"bar","UtcTime":"2026-11-03 10:00:00.123"}}

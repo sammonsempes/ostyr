@@ -3,8 +3,8 @@ mod types;
 
 
 use core_export::ecs::{
-    blank_event, to_json, EndpointFields, EventFields, FileFields, HostFields, NetworkFields, OsFields, ParentFields, ProcessFields, UserFields,
-    ECS_VERSION,
+    blank_event, to_json, DnsFields, DnsQuestion, EndpointFields, EventFields, FileFields, HashFields, HostFields, NetworkFields, OsFields,
+    ParentFields, PeFields, ProcessFields, RegistryFields, UserFields, ECS_VERSION,
 };
 use core_export::error::ExportError;
 use time::OffsetDateTime;
@@ -58,6 +58,7 @@ fn full_event_matches_the_ecs_snapshot() -> TestResult {
     let mut event = blank_event(OffsetDateTime::from_unix_timestamp(FIXED_UNIX)?);
     event.event = EventFields {
         kind: text("event"),
+        code: None,
         category: vec!["process".to_string(), "network".to_string()],
         types: vec!["start".to_string()],
         action: text("start"),
@@ -104,12 +105,15 @@ fn full_event_matches_the_ecs_snapshot() -> TestResult {
             pid: Some(1),
             executable: text("/sbin/init"),
             command_line: text("init"),
+            ..ParentFields::default()
         }),
+        ..ProcessFields::default()
     });
     event.file = Some(FileFields {
         path: text("/tmp/a"),
         name: text("a"),
         size: Some(FILE_SIZE),
+        ..FileFields::default()
     });
     event.labels.insert("tenant".to_string(), "acme".to_string());
     assert_eq!(to_json(&event)?, FULL_SNAPSHOT);
@@ -132,5 +136,49 @@ fn blank_event_keeps_only_the_mandatory_fields() -> TestResult {
 fn a_timestamp_outside_rfc3339_is_an_error() -> TestResult {
     let event = blank_event(OffsetDateTime::from_unix_timestamp(YEAR_BEFORE_COMMON_ERA)?);
     assert!(matches!(to_json(&event), Err(ExportError::Serialize(_))));
+    Ok(())
+}
+
+
+#[test]
+fn windows_endpoint_groups_are_serialised_nested() -> TestResult {
+    let mut event = blank_event(OffsetDateTime::from_unix_timestamp(FIXED_UNIX)?);
+    event.event.code = text("1");
+    event.process = Some(ProcessFields {
+        entity_id: text("{g}"),
+        hash: Some(HashFields {
+            md5: text("a"),
+            sha1: text("b"),
+            sha256: text("c"),
+        }),
+        pe: Some(PeFields {
+            original_file_name: text("x.exe"),
+        }),
+        parent: Some(ParentFields {
+            entity_id: text("{p}"),
+            ..ParentFields::default()
+        }),
+        ..ProcessFields::default()
+    });
+    event.file = Some(FileFields {
+        hash: Some(HashFields::default()),
+        ..FileFields::default()
+    });
+    event.registry = Some(RegistryFields { path: text("HKLM\\k") });
+    event.dns = Some(DnsFields {
+        question: DnsQuestion { name: text("a.test") },
+        resolved_ip: vec!["10.0.0.1".to_string()],
+    });
+    event.sysmon.insert("Key".to_string(), "v".to_string());
+    assert_eq!(
+        to_json(&event)?,
+        concat!(
+            r#"{"@timestamp":"2023-11-14T22:13:20Z","ecs":{"version":"8.11"},"event":{"code":"1"},"#,
+            r#""process":{"entity_id":"{g}","hash":{"md5":"a","sha1":"b","sha256":"c"},"#,
+            r#""pe":{"original_file_name":"x.exe"},"parent":{"entity_id":"{p}"}},"#,
+            r#""file":{"hash":{}},"registry":{"path":"HKLM\\k"},"#,
+            r#""dns":{"question":{"name":"a.test"},"resolved_ip":["10.0.0.1"]},"sysmon":{"Key":"v"}}"#
+        )
+    );
     Ok(())
 }

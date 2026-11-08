@@ -26,6 +26,8 @@ impl Default for EcsMeta {
 pub struct EventFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub category: Vec<String>,
     #[serde(rename = "type", skip_serializing_if = "Vec::is_empty")]
@@ -103,7 +105,31 @@ pub struct ProcessFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<HashFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pe: Option<PeFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentFields>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HashFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PeFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_file_name: Option<String>,
 }
 
 
@@ -111,6 +137,8 @@ pub struct ProcessFields {
 pub struct ParentFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +163,30 @@ pub struct FileFields {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<HashFields>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RegistryFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DnsQuestion {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DnsFields {
+    pub question: DnsQuestion,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_ip: Vec<String>,
 }
 
 
@@ -161,8 +213,14 @@ pub struct EcsEvent {
     pub process: Option<ProcessFields>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<RegistryFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsFields>,
     #[serde(skip_serializing_if = "LabelMap::is_empty")]
     pub labels: LabelMap,
+    #[serde(skip_serializing_if = "LabelMap::is_empty")]
+    pub sysmon: LabelMap,
 }
 
 
@@ -180,7 +238,10 @@ pub fn blank_event(timestamp: OffsetDateTime) -> EcsEvent {
         network: None,
         process: None,
         file: None,
+        registry: None,
+        dns: None,
         labels: LabelMap::new(),
+        sysmon: LabelMap::new(),
     }
 }
 
