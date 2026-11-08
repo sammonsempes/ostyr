@@ -114,14 +114,25 @@ pub fn compensation_problem(path: &str, step: &Step, entry: &CatalogueEntry, cat
             path: path.to_owned(),
             action: entry.action.clone(),
         }),
-        Some(compensate) => find_entry(catalogue, entry.connector.as_deref(), compensate)
-            .is_none()
-            .then(|| Problem::UnknownCompensation {
+        Some(compensate) => match find_entry(catalogue, entry.connector.as_deref(), compensate) {
+            None => Some(Problem::UnknownCompensation {
                 path: path.to_owned(),
                 action: entry.action.clone(),
                 compensate: compensate.clone(),
             }),
+            Some(undo) => is_unsafe_compensation(undo).then(|| Problem::UnsafeCompensation {
+                path: path.to_owned(),
+                action: entry.action.clone(),
+                compensate: compensate.clone(),
+            }),
+        },
     }
+}
+
+
+/// An undo is never destructive and never bound to a breaker: undoing must not need a limit and must not do harm.
+pub fn is_unsafe_compensation(undo: &CatalogueEntry) -> bool {
+    undo.destructive || undo.breaker.is_some()
 }
 
 

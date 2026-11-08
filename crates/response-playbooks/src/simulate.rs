@@ -2,10 +2,12 @@ use crate::catalogue::APPROVAL_TARGET_PARAM;
 use crate::catalogue::{find_entry, APPROVAL_ACTION};
 use crate::expr::{evaluate_condition, PlaybookScope, Scope};
 use crate::model::{
-    BreakerBinding, BreakerKind, Catalogue, CatalogueEntry, ConditionOutcome, Inventory, Playbook, SimulationInput, Step, Trace, TraceEvent,
+    BreakerBinding, BreakerKind, Catalogue, CatalogueEntry, ConditionOutcome, Executor, Failure, Inventory, Playbook, SimulationInput, Step, Trace,
+    TraceEvent,
 };
 use crate::params::{as_count, as_duration, as_ip, resolve_params};
 use crate::render::action_name;
+use crate::run::{audit_denied, compensation_failure, run_action, unapproved};
 use crate::trigger::mismatches;
 use crate::types::{ParamMap, ResolvedMap};
 use core_config::reload::current_config;
@@ -36,6 +38,7 @@ pub struct Context<'a> {
     pub inventory: &'a Inventory,
     pub breakers: &'a Breakers,
     pub input: &'a SimulationInput,
+    pub exec: Option<&'a Executor<'a>>,
 }
 
 
@@ -50,6 +53,8 @@ pub struct Work<'a> {
 pub struct Done {
     pub action: String,
     pub compensate: Option<String>,
+    pub connector: Option<String>,
+    pub compensation_params: ParamMap,
 }
 
 
@@ -207,8 +212,58 @@ pub fn reject(state: &mut Run, work: &Work, reason: String) {
 }
 
 
-/// The breakers decide before anything would run; a verdict that needs approval stops the playbook.
+/// An action the mode does not allow is rejected before the breakers are asked, so that it consumes no counter.
 pub fn record_action(context: &Context, fail_at: Option<usize>, work: &Work, entry: &CatalogueEntry, resolved: &ResolvedMap, state: &mut Run) {
+    match unapproved(context, entry) {
+        Some(reason) => {
+            audit_denied(context, work, entry, resolved, &reason);
+            reject(state, work, reason);
+        }
+        None => record_checked(context, fail_at, work, entry, resolved, state),
+    }
+}
+
+
+/// What undoing an action needs: the compensation's own parameters, taken from the action's.
+pub fn compensation_params(context: &Context, work: &Work, entry: &CatalogueEntry, resolved: &ResolvedMap) -> ParamMap {
+    work.step
+        .compensate
+        .as_ref()
+        .or(entry.compensate.as_ref())
+        .and_then(|name| find_entry(context.catalogue, work.step.connector.as_deref(), name))
+        .map_or_else(ParamMap::new, |undo| {
+            values_of(resolved)
+                .into_iter()
+                .filter(|(name, _)| undo.params.contains_key(name))
+                .collect()
+        })
+}
+
+
+/// The action's failure, simulated at index `fail_at` or reported by the connector of a real run.
+pub fn failure_of(
+    context: &Context,
+    fail_at: Option<usize>,
+    work: &Work,
+    entry: &CatalogueEntry,
+    resolved: &ResolvedMap,
+    ran: usize,
+) -> Option<Failure> {
+    match context.exec {
+        None => (fail_at == Some(ran)).then(|| Failure {
+            took_effect: false,
+            event: TraceEvent::Failure {
+                path: work.path.clone(),
+                action: entry.action.clone(),
+            },
+        }),
+        Some(exec) => run_action(context, exec, work, entry, resolved),
+    }
+}
+
+
+/// The breakers decide before anything would run; a verdict that needs approval stops the playbook.
+pub fn record_checked(context: &Context, fail_at: Option<usize>, work: &Work, entry: &CatalogueEntry, resolved: &ResolvedMap, state: &mut Run) {
     let verdict = entry
         .breaker
         .as_ref()
@@ -230,21 +285,21 @@ pub fn record_action(context: &Context, fail_at: Option<usize>, work: &Work, ent
                 verdict: decided.map(|found| found.to_string()),
             });
             if stopped {
+                audit_denied(context, work, entry, resolved, "a circuit breaker needs approval");
                 state.halted = true;
                 state.events.push(TraceEvent::Halted { path: work.path.clone() });
             } else {
-                if fail_at == Some(state.ran) {
-                    state.failed = true;
-                    state.events.push(TraceEvent::Failure {
-                        path: work.path.clone(),
-                        action: entry.action.clone(),
-                    });
-                } else {
+                let failure = failure_of(context, fail_at, work, entry, resolved, state.ran);
+                state.failed = failure.is_some();
+                if failure.as_ref().is_none_or(|late| late.took_effect) {
                     state.done.push(Done {
                         action: entry.action.clone(),
                         compensate: work.step.compensate.clone().or_else(|| entry.compensate.clone()),
+                        connector: work.step.connector.clone(),
+                        compensation_params: compensation_params(context, work, entry, resolved),
                     });
                 }
+                state.events.extend(failure.map(|found| found.event));
                 state.ran += 1;
             }
         }
@@ -363,15 +418,17 @@ pub fn with_pending(mut state: Run) -> Run {
 }
 
 
-/// Compensations run in reverse order of the actions that would have run.
-pub fn compensations(done: &[Done]) -> Vec<TraceEvent> {
+/// Compensations run in reverse order of the actions that ran; a real run calls the connector and never stops at a failed undo.
+pub fn compensations(context: &Context, done: &[Done]) -> Vec<TraceEvent> {
     done.iter()
         .rev()
-        .filter_map(|finished| {
-            finished.compensate.as_ref().map(|compensate| TraceEvent::Compensation {
+        .filter_map(|finished| finished.compensate.as_ref().map(|compensate| (finished, compensate)))
+        .flat_map(|(finished, compensate)| {
+            std::iter::once(TraceEvent::Compensation {
                 action: compensate.clone(),
                 compensates: finished.action.clone(),
             })
+            .chain(compensation_failure(context, finished, compensate))
         })
         .collect()
 }
@@ -381,7 +438,7 @@ pub fn run_all(context: &Context) -> Vec<TraceEvent> {
     let first = run_sequence(context, &context.playbook.steps, STEPS_ROOT, context.input.fail_action, Run::default());
     if first.failed {
         let mut events = first.events;
-        events.extend(compensations(&first.done));
+        events.extend(compensations(context, &first.done));
         events.push(TraceEvent::ErrorHandler);
         let handler = Run {
             events,
@@ -395,14 +452,22 @@ pub fn run_all(context: &Context) -> Vec<TraceEvent> {
 }
 
 
-/// Simulates one alert. The breakers are asked for every action (and count it); nothing is executed.
-pub fn simulate(playbook: &Playbook, catalogue: &Catalogue, inventory: &Inventory, breakers: &Breakers, input: &SimulationInput) -> Trace {
+/// Walks one alert: simulated without an executor, real with one. The breakers are asked for every action (and count it).
+pub fn trace_for(
+    playbook: &Playbook,
+    catalogue: &Catalogue,
+    inventory: &Inventory,
+    breakers: &Breakers,
+    input: &SimulationInput,
+    exec: Option<&Executor>,
+) -> Trace {
     let context = Context {
         playbook,
         catalogue,
         inventory,
         breakers,
         input,
+        exec,
     };
     let unmet = mismatches(&playbook.trigger, &input.alert);
     let matched = unmet.is_empty();
@@ -414,4 +479,10 @@ pub fn simulate(playbook: &Playbook, catalogue: &Catalogue, inventory: &Inventor
         mode: playbook.mode,
         events: std::iter::once(trigger).chain(events).collect(),
     }
+}
+
+
+/// Simulates one alert. The breakers are asked for every action (and count it); nothing is executed.
+pub fn simulate(playbook: &Playbook, catalogue: &Catalogue, inventory: &Inventory, breakers: &Breakers, input: &SimulationInput) -> Trace {
+    trace_for(playbook, catalogue, inventory, breakers, input, None)
 }
