@@ -40,7 +40,7 @@ use core_auth::password::hash_password;
 use core_auth::random::os_random;
 use core_auth::secretbox::{open_secret, seal_secret};
 use core_auth::session::hash_token;
-use core_auth::store::{load_store_file, save_store_file, update_store_file};
+use core_auth::store::{load_store_file, lock_path, save_store_file, update_store_file};
 use core_auth::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use core_auth::types::{AccountMap, CredentialMap, StoreKey};
 use core_config::error::ConfigError;
@@ -1421,6 +1421,9 @@ const NEW_NAME: &str = "renamed";
 const TOTP_USER: &str = "totp-user";
 
 
+const SECOND_TOTP_USER: &str = "second-totp-user";
+
+
 const OLD_KEY_FILL: u8 = fixture::KEY_FILL;
 
 
@@ -1437,12 +1440,6 @@ const TOTP_SECRET_FILL: u8 = 5;
 
 
 const TOTP_SECRET_BYTES: usize = 20;
-
-
-const READ_ONLY_DIRECTORY: u32 = 0o500;
-
-
-const WRITABLE_DIRECTORY: u32 = 0o700;
 
 
 fn store_key(fill: u8) -> StoreKey {
@@ -1462,8 +1459,13 @@ fn password_account(name: &str, totp: Option<TotpEnrolment>) -> Result<Account, 
 
 
 fn totp_enrolment(fill: u8) -> Result<TotpEnrolment, TestError> {
+    totp_enrolment_for(TOTP_USER, fill)
+}
+
+
+fn totp_enrolment_for(name: &str, fill: u8) -> Result<TotpEnrolment, TestError> {
     Ok(TotpEnrolment {
-        encrypted_secret: seal_secret(&store_key(fill), TOTP_USER, &[TOTP_SECRET_FILL; TOTP_SECRET_BYTES], os_random)?,
+        encrypted_secret: seal_secret(&store_key(fill), name, &[TOTP_SECRET_FILL; TOTP_SECRET_BYTES], os_random)?,
         last_step: 0,
         backup_code_hashes: Vec::new(),
     })
@@ -1837,6 +1839,20 @@ fn a_secret_that_does_not_decrypt_refuses_the_rotation_and_changes_nothing() -> 
 }
 
 
+fn block_store_lock(live: &Live) -> Result<PathBuf, TestError> {
+    let lock = lock_path(&live.state.store_path.load());
+    fs::remove_file(&lock)?;
+    fs::create_dir(&lock)?;
+    Ok(lock)
+}
+
+
+fn unblock_store_lock(lock: &Path) -> TestResult {
+    fs::remove_dir(lock)?;
+    Ok(())
+}
+
+
 #[test]
 fn a_rotation_that_fails_after_validation_keeps_the_old_key_and_is_audited() -> TestResult {
     let running = live("")?;
@@ -1852,12 +1868,104 @@ fn a_rotation_that_fails_after_validation_keeps_the_old_key_and_is_audited() -> 
     prepare_key(&running.state, &prepared, &settings).map_err(|error| error.to_string())?;
     assert!(prepared.lock().map_err(|_| "poisoned")?.is_some());
     let stored = fs::read(directory.join("accounts.json"))?;
-    set_mode(directory, READ_ONLY_DIRECTORY)?;
+    block_store_lock(&running)?;
     switch_key(&running.state, &test_context(), &prepared, &settings);
-    set_mode(directory, WRITABLE_DIRECTORY)?;
     assert_eq!(fs::read(directory.join("accounts.json"))?, stored);
     assert_eq!(running.state.key.load().expose_secret(), store_key(OLD_KEY_FILL).expose_secret());
     assert!(reload_records(directory)?.iter().any(|line| line.contains("key_rotation_failed")));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_rotation_is_retried_by_the_next_reload_with_the_same_bytes() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    let new_key_file = directory.join("new.key");
+    private_file(&new_key_file, &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    fs::write(&running.module_file, module_with_key(directory, &new_key_file)?)?;
+    let lock = block_store_lock(&running)?;
+    let failed = reload(&running.engine);
+    unblock_store_lock(&lock)?;
+    assert!(matches!(failed, ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(OLD_KEY_FILL).expose_secret());
+    let failures = |records: Vec<String>| records.iter().filter(|line| line.contains("key_rotation_failed")).count();
+    assert_eq!(failures(reload_records(directory)?), 1);
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(NEW_KEY_FILL).expose_secret());
+    assert_eq!(failures(reload_records(directory)?), 1);
+    assert_eq!(reload(&running.engine), ReloadOutcome::Unchanged);
+    Ok(())
+}
+
+
+#[test]
+fn a_rotation_that_keeps_failing_is_retried_and_audited_each_time() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    let new_key_file = directory.join("new.key");
+    private_file(&new_key_file, &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    fs::write(&running.module_file, module_with_key(directory, &new_key_file)?)?;
+    block_store_lock(&running)?;
+    let outcomes = [reload(&running.engine), reload(&running.engine)];
+    assert!(outcomes.iter().all(|outcome| matches!(outcome, ReloadOutcome::Applied { .. })));
+    let failures = reload_records(directory)?
+        .iter()
+        .filter(|line| line.contains("key_rotation_failed"))
+        .count();
+    assert_eq!(failures, outcomes.len());
+    Ok(())
+}
+
+
+#[test]
+fn a_store_with_one_unreadable_secret_among_readable_ones_is_refused_at_startup_with_the_count() -> TestResult {
+    let running = live("")?;
+    seed(
+        &running,
+        vec![
+            password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?,
+            password_account(SECOND_TOTP_USER, Some(totp_enrolment_for(SECOND_TOTP_USER, THIRD_KEY_FILL)?))?,
+        ],
+    )?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let inputs = StateInputs {
+        key: settings.key.clone(),
+        compromised: settings.compromised.clone(),
+        oidc: settings.oidc.clone(),
+    };
+    let refused = build_state(&settings.config, &inputs, extra_access(), Vec::new())
+        .err()
+        .ok_or("started")?;
+    let message = refused.to_string();
+    assert!(
+        message.contains("1 of 2 stored TOTP secrets") && !message.contains(SECOND_TOTP_USER),
+        "{message}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_key_that_does_not_decrypt_the_store_is_refused_at_startup_naming_the_previous_key_path() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(THIRD_KEY_FILL)?))?])?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let inputs = StateInputs {
+        key: settings.key.clone(),
+        compromised: settings.compromised.clone(),
+        oidc: settings.oidc.clone(),
+    };
+    let refused = build_state(&settings.config, &inputs, extra_access(), Vec::new())
+        .err()
+        .ok_or("started")?;
+    let message = refused.to_string();
+    assert!(
+        message.contains("store.key.previous") && message.contains("does not decrypt"),
+        "{message}"
+    );
     Ok(())
 }
 
