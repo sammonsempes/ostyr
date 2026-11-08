@@ -1,7 +1,10 @@
 mod bounds;
 mod harness;
+mod hostile;
 mod identity;
+mod keepalive;
 mod pki;
+mod resilience;
 mod revocation;
 mod revocation_support;
 mod server;
@@ -9,3 +12,4 @@ mod services;
 mod state;
 mod tls;
 mod types;
+mod unary;

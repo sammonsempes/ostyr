@@ -43,7 +43,7 @@ const LOG_LINES: usize = 3;
 
 
 #[derive(Clone)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub struct Capture(pub Arc<Mutex<Vec<u8>>>);
 
 
 impl io::Write for Capture {

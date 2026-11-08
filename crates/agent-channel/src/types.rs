@@ -1,13 +1,18 @@
+use crate::error::ChannelError;
 use crate::model::{Identity, Revocations, ServerState};
 use crate::proto::{CommandEnvelope, EventAck, EventBatch};
+use agent_command::model::Command;
+use core_config::types::SharedAuditFn;
 use std::error::Error;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_stream::Stream;
+use tonic::transport::Channel;
 use tonic::Status;
 
 
@@ -55,7 +60,29 @@ pub type EnvelopeStream = Pin<Box<dyn Stream<Item = Result<CommandEnvelope, Stat
 pub type SharedState = Arc<ServerState>;
 
 
+/// Receives each accepted command as it arrives; it must hand the work off and return quickly.
+pub type ExecuteFn = dyn Fn(Command) + Send + Sync;
+
+
 pub type ClockFn = dyn Fn() -> u64 + Send + Sync;
 
 
 pub type GrpcResponse = http::Response<tonic::body::Body>;
+
+
+/// Writes one audit record; the server example injects the append of the platform audit log.
+pub type AuditSink = Box<SharedAuditFn>;
+
+
+pub type DialFuture = Pin<Box<dyn Future<Output = Result<Channel, ChannelError>> + Send>>;
+
+
+/// Opens a fresh channel to the server; called again after every failure.
+pub type DialFn = dyn Fn() -> DialFuture + Send + Sync;
+
+
+pub type PauseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+
+/// Waits for the given delay; injected so tests do not sleep.
+pub type PauseFn = dyn Fn(Duration) -> PauseFuture + Send + Sync;
