@@ -36,7 +36,7 @@ chmod +x "$work_dir/hung-binary"
 
 for vm in a b; do
     cat >"$work_dir/$vm.xml" <<EOF
-<domain type='kvm'>
+<domain type='$([[ "$(lab_accel)" == kvm ]] && echo kvm || echo qemu)'>
   <name>$prefix-$vm</name>
   <memory unit='MiB'>16</memory>
   <os><type>hvm</type></os>

@@ -53,6 +53,9 @@ ssh_vm() {
 }
 
 check "one running domain" test "$(running_domain_count)" -eq 1
+expected_type=kvm
+[[ "$(lab_accel)" == "kvm" ]] || expected_type=qemu
+check "domain type matches the accelerator" grep -q "<domain type='$expected_type'" <(virsh_lab dumpxml "$prefix-$vm_name")
 check "domain carries creation metadata" virsh_lab metadata "$prefix-$vm_name" --uri urn:ostyr:lab
 check "network has no forward element" fails grep -q '<forward' <(virsh_lab net-dumpxml "$prefix")
 check "VM has no default route" test -z "$(ssh_vm "ip route | awk '/^default/ {print \$3}'")"

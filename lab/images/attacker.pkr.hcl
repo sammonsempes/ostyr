@@ -7,6 +7,18 @@ packer {
   }
 }
 
+variable "accelerator" {
+  type        = string
+  default     = "kvm"
+  description = "build.sh passes kvm or tcg"
+}
+
+variable "timeout_factor" {
+  type        = number
+  default     = 1
+  description = "build.sh multiplies the SSH timeout under tcg"
+}
+
 variable "output_directory" {
   type    = string
   default = "output/attacker"
@@ -85,7 +97,7 @@ source "qemu" "attacker" {
   disk_size        = "12G"
   disk_compression = true
   format           = "qcow2"
-  accelerator      = "kvm"
+  accelerator      = var.accelerator
   headless         = true
   memory           = 2048
   cpus             = 2
@@ -99,7 +111,7 @@ source "qemu" "attacker" {
   communicator         = "ssh"
   ssh_username         = "ubuntu"
   ssh_private_key_file = var.ssh_private_key_file
-  ssh_timeout          = "10m"
+  ssh_timeout          = "${10 * var.timeout_factor}m"
   shutdown_command     = "sudo shutdown -P now"
 }
 

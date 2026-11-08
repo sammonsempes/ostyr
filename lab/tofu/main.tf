@@ -46,6 +46,7 @@ resource "libvirt_domain" "vm" {
   name      = "${local.prefix}-${each.key}"
   memory    = try(each.value.memory_gb, 4) * 1024
   vcpu      = each.value.vcpu
+  type      = var.domain_type
   cloudinit = libvirt_cloudinit_disk.init[each.key].id
   machine   = local.uefi[each.key] ? "q35" : null
   firmware  = local.uefi[each.key] ? "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd" : null
@@ -67,7 +68,7 @@ resource "libvirt_domain" "vm" {
   }
 
   cpu {
-    mode = "host-passthrough"
+    mode = var.domain_type == "kvm" ? "host-passthrough" : "custom"
   }
 
   disk {
@@ -77,6 +78,11 @@ resource "libvirt_domain" "vm" {
   network_interface {
     network_id     = libvirt_network.lab.id
     wait_for_lease = true
+  }
+
+  graphics {
+    type        = "vnc"
+    listen_type = "none"
   }
 
   console {
