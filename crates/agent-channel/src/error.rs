@@ -59,6 +59,12 @@ pub enum ChannelError {
     ServerName(#[from] rustls_pki_types::InvalidDnsNameError),
     #[error("TLS handshake failed: {0}")]
     Handshake(#[source] io::Error),
+    #[error("TLS handshake not finished after {seconds} seconds, connection dropped")]
+    HandshakeTimeout { seconds: u64 },
+    #[error("TLS handshake dropped to make room for a newer connection")]
+    HandshakeEvicted,
+    #[error("{limit} authenticated connections already open, connection dropped")]
+    ConnectionCapped { limit: usize },
     #[error("peer identity refused: {0}")]
     Identity(#[from] IdentityError),
     #[error("agent certificate {serial} is revoked")]
@@ -73,6 +79,16 @@ pub enum ChannelError {
     Transport(#[from] tonic::transport::Error),
     #[error("call refused: {0}")]
     Status(#[source] Box<Status>),
+    #[error("delivery attempt not finished after {seconds} seconds")]
+    AttemptTimedOut { seconds: u64 },
+    #[error("the server closed the event stream with {unacknowledged} batches unacknowledged")]
+    StreamEnded { unacknowledged: usize },
+    #[error("event delivery abandoned after {attempts} consecutive failed attempts: {last}")]
+    RetriesExhausted {
+        attempts: u32,
+        #[source]
+        last: Box<ChannelError>,
+    },
 }
 
 

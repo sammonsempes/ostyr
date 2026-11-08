@@ -1,9 +1,13 @@
 use crate::types::Stored;
 use agent_channel::model::{ChannelSettings, Counters, Identity, ServerState};
 use agent_channel::proto::EventBatch;
-use agent_channel::types::{CommandSource, EventSink, SharedState};
+use agent_channel::types::{AuditSink, CommandSource, EventSink, SharedState};
+use core_audit::error::AuditError;
+use core_audit::log::{append, genesis_log};
+use core_audit::model::NewEntry;
 use futures_util::stream;
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex};
 
 
@@ -33,13 +37,35 @@ pub fn envelope_source(envelopes: Vec<Vec<u8>>) -> CommandSource {
 }
 
 
+pub fn discarding_audit() -> AuditSink {
+    let log = genesis_log(io::sink());
+    Box::new(move |entry| append(&log, entry))
+}
+
+
+pub fn recording_audit(recorded: Arc<Mutex<Vec<NewEntry>>>) -> AuditSink {
+    let log = genesis_log(io::sink());
+    Box::new(move |entry| {
+        recorded.lock().map_err(|_| AuditError::LogPoisoned)?.push(entry.clone());
+        append(&log, entry)
+    })
+}
+
+
 pub fn make_state(settings: ChannelSettings, events: EventSink, commands: CommandSource) -> SharedState {
+    make_audited_state(settings, events, commands, discarding_audit())
+}
+
+
+pub fn make_audited_state(settings: ChannelSettings, events: EventSink, commands: CommandSource, audit: AuditSink) -> SharedState {
     Arc::new(ServerState {
         settings,
         counters: Counters::default(),
         load: Mutex::new(HashMap::new()),
         events,
         commands,
+        presence: Mutex::new(HashMap::new()),
+        audit,
     })
 }
 
