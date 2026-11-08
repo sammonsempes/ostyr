@@ -1,0 +1,11 @@
+table inet ostyr_lab
+delete table inet ostyr_lab
+table inet ostyr_lab {
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		iifname != "virbr*" accept
+		ct state established,related accept
+		udp dport 67 fib daddr . iif type { local, broadcast } accept
+		counter reject with icmpx admin-prohibited
+	}
+}
