@@ -15,6 +15,7 @@ thiserror = "2"
 
 [dev-dependencies]
 proptest = "1"
+siem-schema = { path = "../siem-schema" }
 
 [lints]
 workspace = true
