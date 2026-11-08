@@ -29,3 +29,7 @@ let_underscore_must_use = "deny"
 needless_return = "deny"
 bool_comparison = "deny"
 partialeq_to_none = "deny"
+
+
+[profile.dev]
+debug = "line-tables-only"
