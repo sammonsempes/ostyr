@@ -77,7 +77,7 @@ pub fn compile_rule(text: &str, mapping: &FieldMapping, options: &SqlOptions) ->
         .map(|(name, value)| compile_selection(&context, value).map(|sql| (name.clone(), sql)))
         .collect::<Result<_, _>>()?;
     let condition = compile_condition(&rule.title, &rule.condition, &selections)?;
-    let mut filters = vec![format!("{CATEGORY_COLUMN} = {}", sql_literal(&category_mapping.event_category))];
+    let mut filters = vec![format!("has({CATEGORY_COLUMN}, {})", sql_literal(&category_mapping.event_category))];
     filters.extend(os_filter(&rule, mapping)?);
     filters.push(condition);
     Ok(format!(

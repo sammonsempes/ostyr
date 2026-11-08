@@ -1,8 +1,8 @@
 use crate::error::SigmaError;
 use crate::mapping::CategoryMapping;
 use crate::modifier::{parse_field_key, Matcher, Modifiers};
-use crate::sql::{quote_identifier, sql_literal};
-use crate::value::{like_pattern, parse_pieces, Piece};
+use crate::sql::{is_array_field, quote_identifier, sql_literal};
+use crate::value::{like_pattern, parse_pieces, plain_text, Piece};
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -17,6 +17,9 @@ pub struct Context<'a> {
 
 
 const DASH_VARIANTS: &[char] = &['-', '/', '\u{2013}', '\u{2014}', '\u{2015}'];
+
+
+const ARRAY_ELEMENT: &str = "x";
 
 
 const IPV4_BITS: u8 = 32;
@@ -123,6 +126,39 @@ fn item_sql(context: &Context, field: &str, column: &str, modifiers: Modifiers, 
 }
 
 
+fn array_item_sql(context: &Context, field: &str, column: &str, modifiers: Modifiers, item: &Value) -> Result<String, SigmaError> {
+    let plain = match item {
+        Value::String(text) if modifiers.matcher == Matcher::Equals && !modifiers.windash => plain_text(&parse_pieces(text)),
+        _ => None,
+    };
+    match (modifiers.matcher, item, plain) {
+        (Matcher::Exists, Value::Bool(present), _) => Ok(format!("{}({column})", if *present { "notEmpty" } else { "empty" })),
+        (Matcher::Equals, Value::Null, _) => Ok(format!("empty({column})")),
+        (Matcher::Equals, Value::Bool(flag), _) => Ok(format!("has({column}, {flag})")),
+        (Matcher::Equals, Value::Number(number), _) => Ok(format!("has({column}, {number})")),
+        (_, _, Some(text)) => Ok(format!("has({column}, {})", sql_literal(&text))),
+        (_, Value::String(_) | Value::Number(_), None) => {
+            item_sql(context, field, ARRAY_ELEMENT, modifiers, item).map(|predicate| format!("arrayExists({ARRAY_ELEMENT} -> {predicate}, {column})"))
+        }
+        _ => Err(bad_value(context, field, "unsupported value type".to_string())),
+    }
+}
+
+
+fn has_any_sql(column: &str, modifiers: Modifiers, items: &[&Value]) -> Option<String> {
+    let texts: Option<Vec<String>> = items
+        .iter()
+        .map(|item| match item {
+            Value::String(text) => plain_text(&parse_pieces(text)).map(|plain| sql_literal(&plain)),
+            _ => None,
+        })
+        .collect();
+    texts
+        .filter(|list| list.len() > 1 && modifiers.matcher == Matcher::Equals && !modifiers.all && !modifiers.windash)
+        .map(|list| format!("hasAny({column}, [{}])", list.join(", ")))
+}
+
+
 fn compile_field(context: &Context, key: &str, value: &Value) -> Result<String, SigmaError> {
     let (field, modifiers) = parse_field_key(context.rule, key)?;
     let column = context.mapping.fields.get(&field).ok_or_else(|| SigmaError::UnmappedField {
@@ -135,10 +171,21 @@ fn compile_field(context: &Context, key: &str, value: &Value) -> Result<String, 
         Value::Array(list) => list.iter().collect(),
         single => vec![single],
     };
-    let parts = items
-        .iter()
-        .map(|item| item_sql(context, &field, &quoted, modifiers, item))
-        .collect::<Result<Vec<_>, _>>()?;
+    let array = is_array_field(column);
+    let any = if array { has_any_sql(&quoted, modifiers, &items) } else { None };
+    let parts = match any {
+        Some(sql) => vec![sql],
+        None => items
+            .iter()
+            .map(|item| {
+                if array {
+                    array_item_sql(context, &field, &quoted, modifiers, item)
+                } else {
+                    item_sql(context, &field, &quoted, modifiers, item)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     joined(context, &parts, if modifiers.all { " AND " } else { " OR " })
 }
 

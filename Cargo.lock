@@ -3992,6 +3992,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "siem-schema",
  "thiserror 2.0.21",
 ]
 

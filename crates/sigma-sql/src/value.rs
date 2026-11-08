@@ -67,3 +67,15 @@ pub fn like_pattern(pieces: &[Piece], open_start: bool, open_end: bool) -> Strin
     let end = if open_end { "%" } else { "" };
     format!("{start}{body}{end}")
 }
+
+
+/// Returns the text when the pieces hold no wildcard.
+pub fn plain_text(pieces: &[Piece]) -> Option<String> {
+    pieces
+        .iter()
+        .map(|piece| match piece {
+            Piece::Literal(character) => Some(*character),
+            _ => None,
+        })
+        .collect()
+}
