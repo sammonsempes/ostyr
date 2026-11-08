@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 agent-command = { path = "../agent-command" }
+arc-swap = "1.9.3"
 axum = { version = "0.8", default-features = false }
 core-audit = { path = "../core-audit" }
 core-config = { path = "../core-config" }

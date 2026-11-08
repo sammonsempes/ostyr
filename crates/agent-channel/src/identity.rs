@@ -15,10 +15,13 @@ pub fn identity_from_chain(chain: Option<&[CertificateDer<'_>]>) -> Result<Ident
 }
 
 
-/// Serial of the leaf certificate of a verified peer chain, in the form kept by the revocation list.
-pub fn serial_from_chain(chain: Option<&[CertificateDer<'_>]>) -> Result<String, IdentityError> {
-    let leaf = chain.and_then(<[CertificateDer<'_>]>::first).ok_or(IdentityError::NoCertificate)?;
-    serial_from_certificate(leaf.as_ref())
+/// Serials of every certificate the peer sent (leaf first, then intermediates), in the form kept by the revocation list.
+pub fn serials_from_chain(chain: Option<&[CertificateDer<'_>]>) -> Result<Vec<String>, IdentityError> {
+    let certificates = chain.filter(|sent| !sent.is_empty()).ok_or(IdentityError::NoCertificate)?;
+    certificates
+        .iter()
+        .map(|certificate| serial_from_certificate(certificate.as_ref()))
+        .collect()
 }
 
 

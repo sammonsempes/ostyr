@@ -9,6 +9,7 @@ mod revocation;
 mod revocation_support;
 mod server;
 mod services;
+mod settings;
 mod state;
 mod tls;
 mod types;

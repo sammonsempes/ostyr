@@ -101,3 +101,12 @@ pub enum RevocationError {
     #[error("serial `{0}` is zero")]
     Zero(String),
 }
+
+
+#[derive(Debug, Error)]
+pub enum SettingsError {
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error("settings out of range: {0}")]
+    Invalid(String),
+}

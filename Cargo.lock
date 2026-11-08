@@ -68,6 +68,7 @@ name = "agent-channel"
 version = "0.0.0"
 dependencies = [
  "agent-command",
+ "arc-swap",
  "axum",
  "core-audit",
  "core-config",
