@@ -1863,6 +1863,72 @@ fn a_rotation_that_fails_after_validation_keeps_the_old_key_and_is_audited() -> 
 
 
 #[test]
+fn a_failed_rotation_is_retried_by_the_next_reload_with_the_same_bytes() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    let new_key_file = directory.join("new.key");
+    private_file(&new_key_file, &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    fs::write(&running.module_file, module_with_key(directory, &new_key_file)?)?;
+    set_mode(directory, READ_ONLY_DIRECTORY)?;
+    let failed = reload(&running.engine);
+    set_mode(directory, WRITABLE_DIRECTORY)?;
+    assert!(matches!(failed, ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(OLD_KEY_FILL).expose_secret());
+    let failures = |records: Vec<String>| records.iter().filter(|line| line.contains("key_rotation_failed")).count();
+    assert_eq!(failures(reload_records(directory)?), 1);
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(NEW_KEY_FILL).expose_secret());
+    assert_eq!(failures(reload_records(directory)?), 1);
+    assert_eq!(reload(&running.engine), ReloadOutcome::Unchanged);
+    Ok(())
+}
+
+
+#[test]
+fn a_rotation_that_keeps_failing_is_retried_and_audited_each_time() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    let new_key_file = directory.join("new.key");
+    private_file(&new_key_file, &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    fs::write(&running.module_file, module_with_key(directory, &new_key_file)?)?;
+    set_mode(directory, READ_ONLY_DIRECTORY)?;
+    let outcomes = [reload(&running.engine), reload(&running.engine)];
+    set_mode(directory, WRITABLE_DIRECTORY)?;
+    assert!(outcomes.iter().all(|outcome| matches!(outcome, ReloadOutcome::Applied { .. })));
+    let failures = reload_records(directory)?
+        .iter()
+        .filter(|line| line.contains("key_rotation_failed"))
+        .count();
+    assert_eq!(failures, outcomes.len());
+    Ok(())
+}
+
+
+#[test]
+fn a_key_that_does_not_decrypt_the_store_is_refused_at_startup_naming_the_previous_key_path() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(THIRD_KEY_FILL)?))?])?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let inputs = StateInputs {
+        key: settings.key.clone(),
+        compromised: settings.compromised.clone(),
+        oidc: settings.oidc.clone(),
+    };
+    let refused = build_state(&settings.config, &inputs, extra_access(), Vec::new())
+        .err()
+        .ok_or("started")?;
+    let message = refused.to_string();
+    assert!(
+        message.contains("store.key.previous") && message.contains("does not decrypt"),
+        "{message}"
+    );
+    Ok(())
+}
+
+
+#[test]
 fn a_key_rotation_with_a_failing_audit_still_swaps_and_is_only_logged() -> TestResult {
     let running = live("")?;
     let directory = running.dir.path();

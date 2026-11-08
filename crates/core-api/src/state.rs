@@ -14,14 +14,16 @@ use core_auth::password::verify_password;
 use core_auth::policy::load_compromised;
 use core_auth::random::os_random;
 use core_auth::rbac::builtin_catalog;
+use core_auth::secretbox::open_secret;
 use core_auth::service::{Context, State};
 use core_auth::session::{hash_token, is_revoked};
 use core_auth::store::{load_store_file, read_store_locked};
-use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, VerifyFn};
+use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, StoreKey, VerifyFn};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
@@ -36,6 +38,9 @@ pub const RATE_MAX_REQUESTS: u32 = 30;
 
 
 pub const MAX_CONCURRENT_HASHES: usize = 4;
+
+
+pub const PREVIOUS_KEY_SUFFIX: &str = ".previous";
 
 
 pub const MAX_TRACKED_SOURCES: usize = 10_000;
@@ -80,6 +85,7 @@ pub fn build_state(
 ) -> Result<ApiState, StartupError> {
     let audit = open_file_log(&config.audit_log)?;
     let (accounts, credentials) = load_store_file(&config.accounts_store)?;
+    check_store_key(&accounts, &inputs.key, Path::new(&config.key_file))?;
     let catalog = builtin_catalog();
     let mut access = extra_access;
     access.extend(core_access());
@@ -111,6 +117,28 @@ pub fn build_state(
         oidc: ArcSwapOption::new(inputs.oidc.clone()),
         callback_accounts: Mutex::new(BTreeSet::new()),
     })
+}
+
+
+/// The path where the previous key of an interrupted rotation is kept (T033E).
+pub fn previous_key_path(key_file: &Path) -> PathBuf {
+    let mut name = OsString::from(key_file.as_os_str());
+    name.push(PREVIOUS_KEY_SUFFIX);
+    PathBuf::from(name)
+}
+
+
+/// Refuses a key that opens none of the stored TOTP secrets, naming the previous-key path, instead of starting with broken TOTP.
+pub fn check_store_key(accounts: &AccountMap, key: &StoreKey, key_file: &Path) -> Result<(), StartupError> {
+    accounts
+        .iter()
+        .filter_map(|(name, account)| account.totp.as_ref().map(|totp| (name, totp)))
+        .try_for_each(|(name, totp)| open_secret(key, name, &totp.encrypted_secret).map(|_| ()))
+        .map_err(|source| StartupError::StoreKeyMismatch {
+            key_file: key_file.display().to_string(),
+            previous: previous_key_path(key_file).display().to_string(),
+            source: Box::new(source),
+        })
 }
 
 

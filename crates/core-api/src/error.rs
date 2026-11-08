@@ -39,6 +39,13 @@ pub enum StartupError {
         #[source]
         source: AuditError,
     },
+    #[error("the key file {key_file} does not decrypt the account store: restore the previous key at {previous}: {source}")]
+    StoreKeyMismatch {
+        key_file: String,
+        previous: String,
+        #[source]
+        source: Box<AuthError>,
+    },
     #[error("the reload engine is gone, the file watch cannot follow the module file")]
     EngineGone,
     #[error("file watch: {0}")]
