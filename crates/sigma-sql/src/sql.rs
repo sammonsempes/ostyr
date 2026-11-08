@@ -42,3 +42,13 @@ pub fn quote_identifier(name: &str) -> Result<String, SigmaError> {
         Err(SigmaError::BadIdentifier(name.to_string()))
     }
 }
+
+
+/// ECS fields stored as `Array(...)` columns; mirrors the array column list of `siem-schema`.
+pub const ARRAY_FIELDS: &[&str] = &["event.category", "event.type", "related.ip", "related.user", "related.hash", "tags"];
+
+
+/// Tells whether an ECS column is an array column.
+pub fn is_array_field(column: &str) -> bool {
+    ARRAY_FIELDS.contains(&column)
+}

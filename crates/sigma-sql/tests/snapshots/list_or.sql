@@ -1,1 +1,1 @@
-SELECT `event.id` FROM `events` WHERE `event.category` = 'process' AND `host.os.type` = 'linux' AND (((`process.command_line` ilike '%nc -e%' AND `process.executable` ilike '%/bash') OR `process.executable` ilike '%/sh'))
+SELECT `event.id` FROM `events` WHERE has(`event.category`, 'process') AND `host.os.type` = 'linux' AND (((`process.command_line` ilike '%nc -e%' AND `process.executable` ilike '%/bash') OR `process.executable` ilike '%/sh'))

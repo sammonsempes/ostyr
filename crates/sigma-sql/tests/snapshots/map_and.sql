@@ -1,1 +1,1 @@
-SELECT `event.id` FROM `events` WHERE `event.category` = 'process' AND `host.os.type` = 'windows' AND ((`process.executable` ilike 'C:\\\\Windows\\\\System32\\\\cmd.exe' AND `process.pid` = 4688 AND isNull(`user.name`)))
+SELECT `event.id` FROM `events` WHERE has(`event.category`, 'process') AND `host.os.type` = 'windows' AND ((`process.executable` ilike 'C:\\\\Windows\\\\System32\\\\cmd.exe' AND `process.pid` = 4688 AND isNull(`user.name`)))
