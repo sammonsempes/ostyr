@@ -110,3 +110,49 @@ pub enum SettingsError {
     #[error("settings out of range: {0}")]
     Invalid(String),
 }
+
+
+#[derive(Debug, Error)]
+pub enum SinkError {
+    #[error("{path}: {source}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("event file line {line} is not `<tenant> <agent-id> <sequence> <hex>`")]
+    Corrupt { line: usize },
+    #[error("event file: {0}")]
+    Io(#[from] io::Error),
+}
+
+
+#[derive(Debug, Error)]
+pub enum AppError {
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error(transparent)]
+    Audit(#[from] AuditError),
+    #[error(transparent)]
+    Channel(#[from] ChannelError),
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
+    #[error(transparent)]
+    Watch(#[from] core_config::error::WatchError),
+    #[error(transparent)]
+    Sink(#[from] SinkError),
+    #[error(transparent)]
+    Store(#[from] agent_command::error::StoreError),
+    #[error("invalid server address: {0}")]
+    Address(#[from] std::net::AddrParseError),
+    #[error("input or output failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("a task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("agent session abandoned after {attempts} consecutive failed attempts")]
+    AttemptsExhausted {
+        attempts: u32,
+        #[source]
+        last: Option<Box<ChannelError>>,
+    },
+}

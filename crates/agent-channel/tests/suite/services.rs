@@ -438,7 +438,7 @@ fn signed_envelope(sequence: u64) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 
-fn agent_verifier(dir: &std::path::Path) -> Result<agent_command::model::Verifier, Box<dyn Error>> {
+pub fn agent_verifier(dir: &std::path::Path) -> Result<agent_command::model::Verifier, Box<dyn Error>> {
     let file = dir.join("keys.yaml");
     let public = HEXLOWER.encode(&SigningKey::from_bytes(&[KEY_SEED; SEED_LENGTH]).verifying_key().to_bytes());
     fs::write(
