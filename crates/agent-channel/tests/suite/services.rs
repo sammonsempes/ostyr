@@ -5,7 +5,7 @@ use crate::types::{Stored, TestResult};
 use agent_channel::client::{connect_channel, heartbeat, open_event_stream, push_events, run_commands, status_error};
 use agent_channel::error::ChannelError;
 use agent_channel::limits::{admit_request, check_claim, claim_matches, count_request, fresh_load, open_stream};
-use agent_channel::model::{ChannelSettings, CommandVerdict, Identity, DEFAULT_MAX_MESSAGE_BYTES};
+use agent_channel::model::{ChannelSettings, CommandVerdict, Identity, DEFAULT_MAX_MESSAGE_BYTES, MAX_KEPT_REFUSALS};
 use agent_channel::proto::{BeatRequest, CommandReport, EventBatch, SubscribeRequest};
 use agent_channel::services::{beat, open_push, report, subscribe};
 use agent_channel::tls::client_config;
@@ -23,9 +23,10 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+use tokio::sync::Notify;
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
 use tracing::subscriber::DefaultGuard;
@@ -56,6 +57,9 @@ const SEED_LENGTH: usize = 32;
 
 
 const DIGEST_LENGTH: usize = 32;
+
+
+const JUNK_ENVELOPES: usize = MAX_KEPT_REFUSALS + 6;
 
 
 const KEY_ID: &str = "routine-1";
@@ -475,18 +479,75 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
-    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW)).await??;
-    assert_eq!(run.accepted.len(), 1);
-    assert_eq!(run.accepted.first().map(|command| command.sequence), Some(FIRST));
-    let verdicts = run.verdicts;
-    let accepted: Vec<bool> = verdicts.iter().map(|verdict| verdict.accepted).collect();
-    assert_eq!(accepted, vec![true, false, false]);
-    assert!(verdicts.iter().skip(1).all(|verdict| !verdict.reason.is_empty()));
-    assert_eq!(verdicts.first().map(|verdict| verdict.digest.len()), Some(DIGEST_LENGTH));
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &{
+        let sink = Arc::clone(&executed);
+        move |command| record_executed(&sink, command.sequence)
+    }))
+    .await??;
+    assert_eq!(*executed.lock().map_err(|_| "poisoned")?, vec![FIRST]);
+    assert_eq!((run.accepted, run.refused), (FIRST, SECOND));
+    assert_eq!(run.refusals.len(), usize::try_from(SECOND)?);
+    assert!(run.refusals.iter().all(|verdict| !verdict.accepted && !verdict.reason.is_empty()));
+    assert_eq!(run.refusals.first().map(|verdict| verdict.digest.len()), Some(DIGEST_LENGTH));
     assert_eq!(
         (counter(&state.counters.commands_accepted), counter(&state.counters.commands_refused)),
         (FIRST, SECOND)
     );
+    finish_session(session).await
+}
+
+
+pub fn record_executed(executed: &Mutex<Vec<u64>>, sequence: u64) {
+    if let Ok(mut held) = executed.lock() {
+        held.push(sequence);
+    }
+}
+
+
+#[tokio::test]
+async fn a_flood_of_junk_envelopes_keeps_only_the_capped_refusals() -> TestResult {
+    let junk = JUNK_ENVELOPES;
+    let commands: CommandSource = envelope_source(vec![b"junk".to_vec(); junk]);
+    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let session = session(Arc::clone(&state)).await?;
+    let dir = tempdir()?;
+    let verifier = agent_verifier(dir.path())?;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| ())).await??;
+    assert_eq!(run.refused, u64::try_from(junk)?);
+    assert_eq!(run.accepted, 0);
+    assert_eq!(run.refusals.len(), MAX_KEPT_REFUSALS);
+    assert_eq!(counter(&state.counters.commands_refused), u64::try_from(junk)?);
+    finish_session(session).await
+}
+
+
+#[tokio::test]
+async fn an_accepted_command_reaches_the_executor_while_the_subscription_stays_open() -> TestResult {
+    let envelopes = vec![signed_envelope(1)?];
+    let commands: CommandSource = Box::new(move |_identity| Box::pin(stream::iter(envelopes.clone()).chain(stream::pending())));
+    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let session = session(Arc::clone(&state)).await?;
+    let dir = tempdir()?;
+    let verifier = agent_verifier(dir.path())?;
+    let arrived = Arc::new(Notify::new());
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let (sink, wake) = (Arc::clone(&executed), Arc::clone(&arrived));
+    let execute = move |command: Command| {
+        record_executed(&sink, command.sequence);
+        wake.notify_one();
+    };
+    let mut run = Box::pin(run_commands(session.channel.clone(), &verifier, &|| NOW, &execute));
+    let ended = bounded(async {
+        tokio::select! {
+            () = arrived.notified() => false,
+            _outcome = &mut run => true,
+        }
+    })
+    .await?;
+    assert!(!ended);
+    assert_eq!(*executed.lock().map_err(|_| "poisoned")?, vec![FIRST]);
+    drop(run);
     finish_session(session).await
 }
 
@@ -496,7 +557,7 @@ async fn the_command_stream_of_a_dead_channel_reports_the_status() -> TestResult
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-    let outcome = bounded(run_commands(channel, &verifier, &|| NOW)).await?;
+    let outcome = bounded(run_commands(channel, &verifier, &|| NOW, &|_command| ())).await?;
     assert_eq!(status_code(outcome), Some(Code::Unavailable));
     Ok(())
 }

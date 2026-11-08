@@ -1,6 +1,7 @@
 use crate::error::ChannelError;
 use crate::model::{Identity, Revocations, ServerState};
 use crate::proto::{CommandEnvelope, EventAck, EventBatch};
+use agent_command::model::Command;
 use core_config::types::SharedAuditFn;
 use std::error::Error;
 use std::future::Future;
@@ -57,6 +58,10 @@ pub type EnvelopeStream = Pin<Box<dyn Stream<Item = Result<CommandEnvelope, Stat
 
 
 pub type SharedState = Arc<ServerState>;
+
+
+/// Receives each accepted command as it arrives; it must hand the work off and return quickly.
+pub type ExecuteFn = dyn Fn(Command) + Send + Sync;
 
 
 pub type ClockFn = dyn Fn() -> u64 + Send + Sync;

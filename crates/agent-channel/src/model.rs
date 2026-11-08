@@ -98,6 +98,10 @@ pub const ATTEMPT_TIMEOUT_SECONDS: u64 = 60;
 pub const MAX_IGNORED_ACKS: usize = 8;
 
 
+/// Refusal verdicts a command run keeps for its caller; later ones are counted and logged only.
+pub const MAX_KEPT_REFUSALS: usize = 64;
+
+
 /// Absolute bound of the acknowledgement read loop, whatever the number of pending batches.
 pub const MAX_ACK_READS: usize = 4_096;
 
@@ -378,9 +382,10 @@ pub struct Judged {
 }
 
 
-/// Every verdict reported and every accepted command, in arrival order; the caller executes the commands.
+/// What a command run keeps: the counts of accepted and refused commands and at most `MAX_KEPT_REFUSALS` refusal verdicts.
 #[derive(Debug, Default)]
 pub struct CommandRun {
-    pub verdicts: Vec<CommandVerdict>,
-    pub accepted: Vec<Command>,
+    pub refusals: Vec<CommandVerdict>,
+    pub accepted: u64,
+    pub refused: u64,
 }

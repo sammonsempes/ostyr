@@ -1,11 +1,12 @@
 use crate::error::ChannelError;
+use crate::limits::bounded_text;
 use crate::model::{
     CommandRun, CommandVerdict, Delivery, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS,
     CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS, KEEPALIVE_TIMEOUT_SECONDS,
-    MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT, REPORT_PATH, SUBSCRIBE_PATH,
+    MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_KEPT_REFUSALS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT, REPORT_PATH, SUBSCRIBE_PATH,
 };
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
-use crate::types::{AckStream, ClockFn, DialFn, PauseFn, SharedClientConfig};
+use crate::types::{AckStream, ClockFn, DialFn, ExecuteFn, PauseFn, SharedClientConfig};
 use agent_command::model::Verifier;
 use agent_command::verify::verify_command;
 use futures_util::{stream, Stream, StreamExt, TryStreamExt};
@@ -160,23 +161,39 @@ pub async fn report_command(channel: Channel, verdict: &CommandVerdict) -> Resul
 }
 
 
+/// Counts the verdict; a refusal is kept only while fewer than `MAX_KEPT_REFUSALS` are held, later ones are logged and dropped.
+pub fn record_verdict(mut run: CommandRun, verdict: CommandVerdict) -> CommandRun {
+    if verdict.accepted {
+        run.accepted += 1;
+    } else {
+        run.refused += 1;
+        if run.refusals.len() < MAX_KEPT_REFUSALS {
+            run.refusals.push(verdict);
+        } else {
+            tracing::warn!(reason = ?bounded_text(&verdict.reason), "refusal verdict dropped past the kept cap");
+        }
+    }
+    run
+}
+
+
 pub async fn judge_and_report(
     channel: Channel,
     verifier: &Verifier,
     clock: &ClockFn,
+    execute: &ExecuteFn,
     envelope: Vec<u8>,
-    mut run: CommandRun,
+    run: CommandRun,
 ) -> Result<CommandRun, ChannelError> {
     let judged = judge(verifier, &envelope, clock());
+    judged.command.into_iter().for_each(execute);
     report_command(channel, &judged.verdict).await?;
-    run.verdicts.push(judged.verdict);
-    run.accepted.extend(judged.command);
-    Ok(run)
+    Ok(record_verdict(run, judged.verdict))
 }
 
 
-/// Subscribes, verifies every envelope streamed by the server and reports `accepted` or `refused`; returns the verdicts and the accepted commands when the stream ends.
-pub async fn run_commands(channel: Channel, verifier: &Verifier, clock: &ClockFn) -> Result<CommandRun, ChannelError> {
+/// Executes each accepted command at once, reports every verdict, keeps counts and at most `MAX_KEPT_REFUSALS` refusals.
+pub async fn run_commands(channel: Channel, verifier: &Verifier, clock: &ClockFn, execute: &ExecuteFn) -> Result<CommandRun, ChannelError> {
     let mut grpc = ready_grpc(channel.clone()).await?;
     let envelopes = grpc
         .server_streaming(
@@ -190,7 +207,7 @@ pub async fn run_commands(channel: Channel, verifier: &Verifier, clock: &ClockFn
     envelopes
         .map_err(status_error)
         .try_fold(CommandRun::default(), move |run, received| {
-            judge_and_report(channel.clone(), verifier, clock, received.envelope, run)
+            judge_and_report(channel.clone(), verifier, clock, execute, received.envelope, run)
         })
         .await
 }
