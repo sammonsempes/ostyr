@@ -2,6 +2,7 @@ use crate::limits::{admit_request, bounded_text, bump, check_claim, count_oversi
 use crate::model::{Identity, PushSession, SlotKind, EVENTS_PATH, HEARTBEAT_PATH, REPORT_PATH, SUBSCRIBE_PATH};
 use crate::presence::record_beat;
 use crate::proto::{BeatReply, BeatRequest, CommandEnvelope, CommandReport, EventAck, EventBatch, ReportReply, SubscribeRequest};
+use crate::settings::settings_of;
 use crate::types::{AckStream, BoxError, EnvelopeStream, GrpcResponse, SharedState};
 use axum::body::Body;
 use axum::Router;
@@ -57,7 +58,7 @@ where
         .and_then(|identity| open_slot(state, &identity, SlotKind::Inflight));
     match admitted {
         Ok(permit) => {
-            let limit = Duration::from_secs(state.settings.request_timeout_seconds);
+            let limit = Duration::from_secs(settings_of(state).request_timeout_seconds);
             let outcome = timeout(limit, run(request)).await;
             drop(permit);
             outcome.unwrap_or_else(|_elapsed| Ok(timed_out(state)))
@@ -69,7 +70,7 @@ where
 
 pub fn timed_out(state: &SharedState) -> GrpcResponse {
     bump(&state.counters.timed_out);
-    tracing::warn!(seconds = state.settings.request_timeout_seconds, "agent request timed out, refused");
+    tracing::warn!(seconds = settings_of(state).request_timeout_seconds, "agent request timed out, refused");
     Status::deadline_exceeded("request timed out").into_http()
 }
 
@@ -79,7 +80,7 @@ pub async fn heartbeat_route(state: SharedState, request: Request<Body>) -> Resu
     guarded(&route_state, request, move |admitted| async move {
         let handler_state = Arc::clone(&state);
         let response = Grpc::new(ProstCodec::<BeatReply, BeatRequest>::default())
-            .max_decoding_message_size(state.settings.max_message_bytes)
+            .max_decoding_message_size(settings_of(&state).max_message_bytes)
             .unary(service_fn(move |beat_request| beat(Arc::clone(&handler_state), beat_request)), admitted)
             .await;
         Ok(count_oversized_response(&state, response))
@@ -92,7 +93,7 @@ pub async fn events_route(state: SharedState, request: Request<Body>) -> Result<
     let route_state = Arc::clone(&state);
     guarded(&route_state, request, move |admitted| async move {
         Ok(Grpc::new(ProstCodec::<EventAck, EventBatch>::default())
-            .max_decoding_message_size(state.settings.max_message_bytes)
+            .max_decoding_message_size(settings_of(&state).max_message_bytes)
             .streaming(service_fn(move |push_request| push(Arc::clone(&state), push_request)), admitted)
             .await)
     })
@@ -105,7 +106,7 @@ pub async fn subscribe_route(state: SharedState, request: Request<Body>) -> Resu
     guarded(&route_state, request, move |admitted| async move {
         let handler_state = Arc::clone(&state);
         let response = Grpc::new(ProstCodec::<CommandEnvelope, SubscribeRequest>::default())
-            .max_decoding_message_size(state.settings.max_message_bytes)
+            .max_decoding_message_size(settings_of(&state).max_message_bytes)
             .server_streaming(
                 service_fn(move |subscribe_request| subscribe(Arc::clone(&handler_state), subscribe_request)),
                 admitted,
@@ -122,7 +123,7 @@ pub async fn report_route(state: SharedState, request: Request<Body>) -> Result<
     guarded(&route_state, request, move |admitted| async move {
         let handler_state = Arc::clone(&state);
         let response = Grpc::new(ProstCodec::<ReportReply, CommandReport>::default())
-            .max_decoding_message_size(state.settings.max_message_bytes)
+            .max_decoding_message_size(settings_of(&state).max_message_bytes)
             .unary(
                 service_fn(move |report_request| report(Arc::clone(&handler_state), report_request)),
                 admitted,
@@ -153,7 +154,7 @@ pub async fn beat(state: SharedState, request: tonic::Request<BeatRequest>) -> R
     Ok(tonic::Response::new(BeatReply {
         tenant: identity.tenant,
         agent_id: identity.agent_id,
-        interval_seconds: state.settings.heartbeat_interval_seconds,
+        interval_seconds: settings_of(&state).heartbeat_interval_seconds,
     }))
 }
 

@@ -2,6 +2,7 @@ use crate::model::{
     AgentLoad, ChannelSettings, Counters, Identity, Presence, ServerState, SlotKind, SlotPermit, MAX_LOGGED_DIGEST_BYTES, MAX_LOGGED_TEXT_CHARS,
     TRUNCATION_MARKER,
 };
+use crate::settings::settings_of;
 use crate::types::SharedState;
 use data_encoding::HEXLOWER;
 use std::collections::HashMap;
@@ -52,11 +53,12 @@ pub fn count_request(load: &mut AgentLoad, now: Instant, window: Duration, maxim
 /// Refuses with `ResourceExhausted`, counted and logged, an agent above its request rate.
 pub fn admit_request(state: &ServerState, identity: &Identity) -> Result<(), Status> {
     let now = Instant::now();
-    let window = Duration::from_secs(state.settings.rate_window_seconds);
+    let settings = settings_of(state);
+    let window = Duration::from_secs(settings.rate_window_seconds);
     let admitted = {
         let mut loads = lock_load(state);
         let load = loads.entry(identity.clone()).or_insert_with(|| fresh_load(now));
-        count_request(load, now, window, state.settings.max_requests_per_window)
+        count_request(load, now, window, settings.max_requests_per_window)
     };
     if admitted {
         Ok(())
@@ -100,7 +102,7 @@ pub fn open_slot(state: &SharedState, identity: &Identity, kind: SlotKind) -> Re
     let opened = {
         let mut loads = lock_load(state);
         let load = loads.entry(identity.clone()).or_insert_with(|| fresh_load(Instant::now()));
-        let limit = slot_limit(&state.settings, kind);
+        let limit = slot_limit(&settings_of(state), kind);
         let held = slot_count(load, kind);
         let free = *held < limit;
         *held = held.saturating_add(usize::from(free));
@@ -182,6 +184,6 @@ pub fn check_claim(state: &ServerState, identity: &Identity, tenant: &str, agent
 pub fn count_oversized(state: &ServerState, status: &Status) {
     if status.code() == Code::OutOfRange {
         bump(&state.counters.oversized);
-        tracing::warn!(limit = state.settings.max_message_bytes, "message above the size bound refused");
+        tracing::warn!(limit = settings_of(state).max_message_bytes, "message above the size bound refused");
     }
 }

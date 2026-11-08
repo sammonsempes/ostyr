@@ -1,13 +1,14 @@
 use crate::limits::lock_presence;
 use crate::model::{Identity, Presence, ServerState, AUDIT_ACTOR, AUDIT_MODULE, BACK_ACTION, SILENT_ACTION};
+use crate::settings::settings_of;
 use crate::types::SharedState;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
-use tokio::time::interval;
-use tokio_stream::wrappers::IntervalStream;
+use tokio::time::sleep;
 
 
 /// A system audit record about one agent; `silent_seconds` is how long the agent had been quiet.
@@ -56,7 +57,7 @@ pub fn record_beat(state: &ServerState, identity: &Identity, now: Instant) {
 
 /// Writes one `agent.silent` record, under the presence lock, per agent quiet for longer than the threshold and not yet recorded; returns how many.
 pub fn check_silence(state: &ServerState, now: Instant) -> usize {
-    let threshold = Duration::from_secs(state.settings.silence_threshold_seconds);
+    let threshold = Duration::from_secs(settings_of(state).silence_threshold_seconds);
     let mut presence = lock_presence(state);
     let newly_silent: Vec<(Identity, u64)> = presence
         .iter_mut()
@@ -73,14 +74,16 @@ pub fn check_silence(state: &ServerState, now: Instant) -> usize {
 }
 
 
-/// Checks for silent agents every `silence_check_interval_seconds` (at least one) until `shutdown` completes.
+/// Checks for silent agents every `silence_check_interval_seconds` (at least one, read again at each tick) until `shutdown` completes.
 pub async fn watch_silence(state: SharedState, shutdown: impl Future<Output = ()>) {
-    let period = Duration::from_secs(state.settings.silence_check_interval_seconds.max(1));
-    IntervalStream::new(interval(period))
-        .take_until(shutdown)
-        .for_each(|_tick| {
-            check_silence(&state, Instant::now());
-            std::future::ready(())
-        })
-        .await;
+    stream::unfold(Arc::clone(&state), |current| async move {
+        sleep(Duration::from_secs(settings_of(&current).silence_check_interval_seconds.max(1))).await;
+        Some(((), current))
+    })
+    .take_until(shutdown)
+    .for_each(|()| {
+        check_silence(&state, Instant::now());
+        std::future::ready(())
+    })
+    .await;
 }

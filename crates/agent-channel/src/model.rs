@@ -1,6 +1,6 @@
 use crate::error::ChannelError;
 use crate::proto::EventBatch;
-use crate::types::{AuditSink, CommandSource, EventSink};
+use crate::types::{AuditSink, CommandSource, EventSink, SharedSettings};
 use agent_command::model::Command;
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -11,6 +11,12 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{oneshot, Semaphore};
+
+
+pub const SETTINGS_SECTION: &str = "channel_settings";
+
+
+pub const MAX_TOTAL_CONNECTIONS_LIMIT: usize = 1_000_000;
 
 
 pub const IDENTITY_URI_PREFIX: &str = "urn:ostyr:agent:";
@@ -308,7 +314,7 @@ pub struct Presence {
 
 /// Shared by every connection: bounds, counters, per-agent load, heartbeats and the injected ends (event sink, command source, audit).
 pub struct ServerState {
-    pub settings: ChannelSettings,
+    pub settings: SharedSettings,
     pub counters: Counters,
     pub load: Mutex<HashMap<Identity, AgentLoad>>,
     pub events: EventSink,

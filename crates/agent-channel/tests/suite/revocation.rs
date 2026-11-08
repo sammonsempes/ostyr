@@ -1,12 +1,13 @@
 use crate::harness::{
-    attempt, bounded, client_paths, finish, make_platform, server_paths, start_server_with, start_single, start_single_with, stop_server,
+    attempt, bounded, chained_agent, client_paths, finish, make_platform, server_paths, start_server_with, start_single, start_single_with,
+    stop_server,
 };
-use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
+use crate::pki::{agent_spec, make_intermediate, AGENT_URI, SERVER_NAME};
 use crate::revocation_support::{agent_serial, open_revocation, recorded_entries, write_revocations};
 use crate::types::TestResult;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::{ChannelError, IdentityError, RevocationError};
-use agent_channel::identity::serial_from_chain;
+use agent_channel::identity::serials_from_chain;
 use agent_channel::model::{Revocations, REVOCATION_CLOSE_SECONDS};
 use agent_channel::revocation::{canonical_serial, is_revoked, parse_serial, revocations_state};
 use agent_channel::tls::client_config;
@@ -57,7 +58,7 @@ fn state_lists_one_line_per_serial() -> TestResult {
 
 #[test]
 fn chain_without_certificate_has_no_serial() -> TestResult {
-    assert!(matches!(serial_from_chain(None), Err(IdentityError::NoCertificate)));
+    assert!(matches!(serials_from_chain(None), Err(IdentityError::NoCertificate)));
     Ok(())
 }
 
@@ -159,6 +160,55 @@ async fn dropping_the_revocation_engine_closes_connections() -> TestResult {
     drop(server.control);
     let closed = timeout(Duration::from_secs(REVOCATION_CLOSE_SECONDS), handle).await??;
     assert!(matches!(closed, Err(ChannelError::RevocationClosed(_))));
+    drop(channel);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_chain_with_an_intermediate_is_accepted_when_nothing_is_revoked() -> TestResult {
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let intermediate = make_intermediate(&platform.agent_ca)?;
+    let agent = chained_agent(dir.path(), &platform, &intermediate, &agent_spec(&[AGENT_URI]))?;
+    let server = start_single(&server_paths(dir.path(), &platform)?).await?;
+    let channel = connect_channel(server.address, client_config(&agent.paths)?, SERVER_NAME).await?;
+    let reply = bounded(heartbeat(channel.clone(), "test")).await??;
+    assert_eq!(reply.agent_id, "agent-1");
+    drop(channel);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_revoked_intermediate_is_refused_at_the_handshake() -> TestResult {
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let intermediate = make_intermediate(&platform.agent_ca)?;
+    let agent = chained_agent(dir.path(), &platform, &intermediate, &agent_spec(&[AGENT_URI]))?;
+    let server_files = server_paths(dir.path(), &platform)?;
+    let revocation = open_revocation(dir.path(), &[agent.intermediate_serial.as_str()])?;
+    let server = start_single_with(&server_files, revocation).await?;
+    assert!(bounded(attempt(server.address, &agent.paths)).await?.is_err());
+    let served = finish(server).await?;
+    assert!(matches!(served, Err(ChannelError::Revoked { serial }) if serial == agent.intermediate_serial));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn revoking_the_intermediate_of_a_connected_agent_closes_its_connection() -> TestResult {
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let intermediate = make_intermediate(&platform.agent_ca)?;
+    let agent = chained_agent(dir.path(), &platform, &intermediate, &agent_spec(&[AGENT_URI]))?;
+    let server = start_single(&server_paths(dir.path(), &platform)?).await?;
+    let channel = connect_channel(server.address, client_config(&agent.paths)?, SERVER_NAME).await?;
+    bounded(heartbeat(channel.clone(), "test")).await??;
+    write_revocations(&server.control.file, &[agent.intermediate_serial.as_str()])?;
+    assert!(matches!(reload(&server.control.engine), ReloadOutcome::Applied { .. }));
+    let closed = timeout(Duration::from_secs(REVOCATION_CLOSE_SECONDS), server.handle).await??;
+    assert!(matches!(closed, Err(ChannelError::Revoked { serial }) if serial == agent.intermediate_serial));
     drop(channel);
     Ok(())
 }

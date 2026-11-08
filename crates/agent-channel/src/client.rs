@@ -88,7 +88,7 @@ pub async fn heartbeat(channel: Channel, agent_version: &str) -> Result<BeatRepl
 }
 
 
-pub async fn send_heartbeat(channel: Channel, agent_version: &str) -> Result<BeatReply, ChannelError> {
+async fn send_heartbeat(channel: Channel, agent_version: &str) -> Result<BeatReply, ChannelError> {
     let mut grpc = ready_grpc(channel).await?;
     let reply = grpc
         .unary(
@@ -169,7 +169,7 @@ pub async fn report_command(channel: Channel, verdict: &CommandVerdict) -> Resul
 }
 
 
-pub async fn send_report(channel: Channel, verdict: &CommandVerdict) -> Result<(), ChannelError> {
+async fn send_report(channel: Channel, verdict: &CommandVerdict) -> Result<(), ChannelError> {
     let mut grpc = ready_grpc(channel).await?;
     grpc.unary(
         tonic::Request::new(CommandReport {

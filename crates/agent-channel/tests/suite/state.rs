@@ -1,7 +1,8 @@
 use crate::types::Stored;
 use agent_channel::model::{ChannelSettings, Counters, Identity, ServerState};
 use agent_channel::proto::EventBatch;
-use agent_channel::types::{AuditSink, CommandSource, EventSink, SharedState};
+use agent_channel::settings::shared_settings;
+use agent_channel::types::{AuditSink, CommandSource, EventSink, SharedSettings, SharedState};
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
@@ -59,7 +60,7 @@ pub fn make_state(settings: ChannelSettings, events: EventSink, commands: Comman
 
 pub fn make_audited_state(settings: ChannelSettings, events: EventSink, commands: CommandSource, audit: AuditSink) -> SharedState {
     Arc::new(ServerState {
-        settings,
+        settings: shared_settings(settings),
         counters: Counters::default(),
         load: Mutex::new(HashMap::new()),
         events,
@@ -72,4 +73,17 @@ pub fn make_audited_state(settings: ChannelSettings, events: EventSink, commands
 
 pub fn default_state() -> SharedState {
     make_state(ChannelSettings::default(), recording_sink(new_stored()), envelope_source(Vec::new()))
+}
+
+
+pub fn make_live_state(settings: SharedSettings) -> SharedState {
+    Arc::new(ServerState {
+        settings,
+        counters: Counters::default(),
+        load: Mutex::new(HashMap::new()),
+        events: recording_sink(new_stored()),
+        commands: envelope_source(Vec::new()),
+        presence: Mutex::new(HashMap::new()),
+        audit: discarding_audit(),
+    })
 }

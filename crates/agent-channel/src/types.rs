@@ -1,7 +1,8 @@
 use crate::error::ChannelError;
-use crate::model::{Identity, Revocations, ServerState};
+use crate::model::{ChannelSettings, Identity, Revocations, ServerState};
 use crate::proto::{CommandEnvelope, EventAck, EventBatch};
 use agent_command::model::Command;
+use arc_swap::ArcSwap;
 use core_config::types::SharedAuditFn;
 use std::error::Error;
 use std::future::Future;
@@ -29,6 +30,9 @@ pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 
 pub type RevocationWatch = watch::Receiver<Revocations>;
+
+
+pub type SharedSettings = Arc<ArcSwap<ChannelSettings>>;
 
 
 pub type RevocationSender = Arc<watch::Sender<Revocations>>;

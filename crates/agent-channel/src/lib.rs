@@ -11,5 +11,6 @@ pub mod proto;
 pub mod revocation;
 pub mod server;
 pub mod services;
+pub mod settings;
 pub mod tls;
 pub mod types;

@@ -1,12 +1,14 @@
-use crate::pki::{issue, make_authority, server_spec, write_file, write_leaf, Authority, LeafSpec, SERVER_NAME, WORLD_READABLE_MODE};
+use crate::pki::{issue, make_authority, server_spec, write_file, write_leaf, Authority, LeafSpec, PRIVATE_MODE, SERVER_NAME, WORLD_READABLE_MODE};
 use crate::revocation_support::{open_revocation, Revocation, RevocationControl};
 use crate::state::default_state;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::ChannelError;
+use agent_channel::identity::serial_from_certificate;
 use agent_channel::model::{Admission, ClientTlsPaths, ServerTlsPaths, ALPN_H2};
 use agent_channel::proto::BeatReply;
 use agent_channel::server::{run_connection, serve};
 use agent_channel::services::channel_router;
+use agent_channel::settings::settings_of;
 use agent_channel::tls::{client_config, parse_private_key, provider, read_certificates, read_private_key, root_store, server_config};
 use agent_channel::types::{SharedClientConfig, SharedState};
 use rustls::{ClientConfig, SupportedProtocolVersion};
@@ -160,7 +162,7 @@ pub async fn start_single_with(paths: &ServerTlsPaths, revocation: Revocation) -
 pub fn single_admission(state: &SharedState) -> Admission {
     let (_never_evicted, evicted) = oneshot::channel();
     Admission {
-        connections: Arc::new(Semaphore::new(state.settings.max_total_connections)),
+        connections: Arc::new(Semaphore::new(settings_of(state).max_total_connections)),
         evicted,
     }
 }
@@ -232,4 +234,27 @@ pub fn custom_client(
 pub async fn attempt_with(address: SocketAddr, config: SharedClientConfig) -> Result<BeatReply, ChannelError> {
     let channel = connect_channel(address, config, SERVER_NAME).await?;
     heartbeat(channel, "test").await
+}
+
+
+pub struct ChainedAgent {
+    pub paths: ClientTlsPaths,
+    pub intermediate_serial: String,
+}
+
+
+pub fn chained_agent(dir: &Path, platform: &Platform, intermediate: &Authority, spec: &LeafSpec) -> Result<ChainedAgent, Box<dyn Error>> {
+    let leaf = issue(intermediate, spec)?;
+    let bundle = format!("{}{}", leaf.certificate_pem, intermediate.pem);
+    let intermediate_file = write_file(dir, "intermediate.pem", &intermediate.pem, WORLD_READABLE_MODE)?;
+    let intermediate_certificates = read_certificates(&intermediate_file)?;
+    let intermediate_der = intermediate_certificates.first().ok_or("no intermediate certificate")?;
+    Ok(ChainedAgent {
+        paths: ClientTlsPaths {
+            certificate: write_file(dir, "chained.crt", &bundle, WORLD_READABLE_MODE)?,
+            key: write_file(dir, "chained.key", &leaf.key_pem, PRIVATE_MODE)?,
+            platform_ca: write_file(dir, "platform-ca.pem", &platform.platform_ca.pem, WORLD_READABLE_MODE)?,
+        },
+        intermediate_serial: serial_from_certificate(intermediate_der.as_ref())?,
+    })
 }
