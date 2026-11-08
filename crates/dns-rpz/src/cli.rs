@@ -1,7 +1,9 @@
 use crate::error::RpzError;
+use crate::model::Reloader;
 use crate::policy::Policy;
 use crate::run::generate;
 use crate::types::{ClockFn, OpenFn};
+use crate::unbound::reload_zone;
 use core_config::reload::{current_config, reload, ReloadEngine};
 use core_config::reload_cli::{write_outcome, QUIT_COMMAND};
 use std::io::{self, BufRead, Write};
@@ -16,6 +18,7 @@ pub struct Session<'a> {
     pub open: &'a OpenFn<'a>,
     pub counter: &'a Path,
     pub output: &'a Path,
+    pub reloader: &'a Reloader<'a>,
     pub report: &'a mut dyn Write,
 }
 
@@ -29,7 +32,11 @@ pub fn run_generation(session: &mut Session) -> io::Result<()> {
     match result {
         Ok(summary) => {
             serde_json::to_writer(&mut *session.report, &summary)?;
-            writeln!(session.report)
+            writeln!(session.report)?;
+            match reload_zone(&policy, session.reloader) {
+                Ok(()) => Ok(()),
+                Err(failure) => writeln!(session.report, "failed reload {failure}"),
+            }
         }
         Err(failure) => {
             error!(%failure, "zone generation failed");

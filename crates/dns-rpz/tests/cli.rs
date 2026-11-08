@@ -4,14 +4,18 @@ mod clock;
 mod engine;
 #[path = "common/memory.rs"]
 mod memory;
+#[path = "common/runner.rs"]
+mod runner;
 #[path = "common/types.rs"]
 mod types;
 
 
 use clock::now;
 use dns_rpz::cli::{run_command, run_session, Session};
-use engine::{engine_for, policy_text, replace_file};
+use dns_rpz::model::Reloader;
+use engine::{audit, context, engine_for, policy_text, replace_file};
 use memory::LimitedWriter;
+use runner::{failing_runner, succeeding_runner};
 use std::fs;
 use std::io::{self, BufRead, Cursor};
 use tempfile::tempdir;
@@ -43,6 +47,13 @@ fn a_session_generates_reloads_and_stops_at_quit() -> TestResult {
     let policy = engine_for(&path)?;
     let counter = dir.path().join("counter");
     let zone = dir.path().join("zone.db");
+    let sink = audit();
+    let zone_context = context();
+    let reloader = Reloader {
+        runner: &succeeding_runner,
+        audit: &*sink,
+        context: &zone_context,
+    };
     let mut report = Vec::new();
     let mut session = Session {
         engine: &policy,
@@ -51,6 +62,7 @@ fn a_session_generates_reloads_and_stops_at_quit() -> TestResult {
         counter: &counter,
         output: &zone,
         report: &mut report,
+        reloader: &reloader,
     };
     replace_file(&path, &policy_text("allowlist:\n  domains: [example.com]\n"))?;
     run_session(&mut session, &mut Cursor::new("run\nreload\nreload\nbogus\nrun\nquit\nrun\n"))?;
@@ -76,6 +88,13 @@ fn a_failed_run_is_reported_and_the_session_goes_on() -> TestResult {
     let policy = engine_for(&path)?;
     let counter = dir.path().join("counter");
     let zone = dir.path().join("zone.db");
+    let sink = audit();
+    let zone_context = context();
+    let reloader = Reloader {
+        runner: &succeeding_runner,
+        audit: &*sink,
+        context: &zone_context,
+    };
     let mut report = Vec::new();
     let mut session = Session {
         engine: &policy,
@@ -84,6 +103,7 @@ fn a_failed_run_is_reported_and_the_session_goes_on() -> TestResult {
         counter: &counter,
         output: &zone,
         report: &mut report,
+        reloader: &reloader,
     };
     run_session(&mut session, &mut Cursor::new("run\nrun\n"))?;
     let text = String::from_utf8(report)?;
@@ -101,6 +121,13 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
     let policy = engine_for(&path)?;
     let counter = dir.path().join("counter");
     let zone = dir.path().join("zone.db");
+    let sink = audit();
+    let zone_context = context();
+    let reloader = Reloader {
+        runner: &succeeding_runner,
+        audit: &*sink,
+        context: &zone_context,
+    };
     let attempt = |command: &str, room: usize, open: &dyn Fn() -> io::Result<Box<dyn BufRead>>| {
         let mut report = LimitedWriter { remaining: room };
         let mut session = Session {
@@ -110,6 +137,7 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
             counter: &counter,
             output: &zone,
             report: &mut report,
+            reloader: &reloader,
         };
         run_command(&mut session, command)
     };
@@ -125,8 +153,42 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
         counter: &counter,
         output: &zone,
         report: &mut report,
+        reloader: &reloader,
     };
     let mut unreadable = Cursor::new(b"\xff\xfe\n".to_vec());
     assert!(run_session(&mut session, &mut unreadable).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_zone_reload_is_reported_after_the_summary() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("policy.yaml");
+    replace_file(&path, &policy_text(""))?;
+    let policy = engine_for(&path)?;
+    let counter = dir.path().join("counter");
+    let zone = dir.path().join("zone.db");
+    let sink = audit();
+    let zone_context = context();
+    let reloader = Reloader {
+        runner: &failing_runner,
+        audit: &*sink,
+        context: &zone_context,
+    };
+    let mut report = Vec::new();
+    let mut session = Session {
+        engine: &policy,
+        clock: &now,
+        open: &open_iocs,
+        counter: &counter,
+        output: &zone,
+        report: &mut report,
+        reloader: &reloader,
+    };
+    run_session(&mut session, &mut Cursor::new("run\n"))?;
+    let text = String::from_utf8(report)?;
+    assert!(text.contains("\"serial\":2026110301") && text.contains("failed reload"), "{text}");
+    assert!(zone.exists());
     Ok(())
 }

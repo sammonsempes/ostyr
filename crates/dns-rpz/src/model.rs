@@ -43,3 +43,20 @@ pub struct RunSummary {
     pub records: u64,
     pub serial: u32,
 }
+
+
+/// How the Unbound control command ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Success,
+    Failed(Option<i32>),
+    TimedOut,
+}
+
+
+/// What a zone reload needs: the command runner, the audit sink and who is acting.
+pub struct Reloader<'a> {
+    pub runner: &'a crate::types::RunnerFn<'a>,
+    pub audit: &'a core_config::types::SharedAuditFn,
+    pub context: &'a core_config::reload::ReloadContext,
+}
