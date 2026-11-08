@@ -13,5 +13,6 @@ pub mod lines;
 pub mod model;
 pub mod run;
 pub mod stix;
+pub mod store;
 pub mod timestamp;
 pub mod types;

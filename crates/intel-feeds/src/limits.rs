@@ -41,3 +41,15 @@ pub const SHA256_HEX_LENGTH: usize = 64;
 
 
 pub const DEFAULT_FEED_VERSION: &str = "unversioned";
+
+
+pub const MAX_ROWS_PER_BATCH: usize = 10_000;
+
+
+pub const MAX_BATCH_BYTES: usize = 1_048_576;
+
+
+pub const MAX_IDENTIFIER_BYTES: usize = 64;
+
+
+pub const DEFAULT_TTL_SECONDS: u32 = 2_592_000;
