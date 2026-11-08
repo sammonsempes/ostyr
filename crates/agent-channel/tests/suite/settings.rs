@@ -1,16 +1,20 @@
-use crate::state::{make_live_state, recording_audit};
+use crate::services::agent_identity;
+use crate::state::{envelope_source, make_audited_state, make_live_state, new_stored, recording_audit, recording_sink};
 use crate::types::TestResult;
 use agent_channel::error::SettingsError;
 use agent_channel::limits::open_slot;
 use agent_channel::model::{ChannelSettings, Identity, SlotKind, DEFAULT_MAX_STREAMS_PER_AGENT};
+use agent_channel::presence::{record_beat, watch_silence};
 use agent_channel::settings::{open_settings_engine, resize_total, settings_of, settings_state, validate_settings};
 use core_audit::model::{NewEntry, Outcome};
 use core_config::reload::{reload, ReloadContext, ReloadOutcome};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use tokio::sync::Semaphore;
+use tokio::sync::{oneshot, Semaphore};
+use tokio::time::sleep;
 
 
 const SETTINGS_FILE: &str = "settings.yaml";
@@ -154,5 +158,85 @@ fn the_total_cap_grows_and_shrinks() -> TestResult {
     assert_eq!(resize_total(&semaphore, CAPACITY + SECOND_BOUND, SHRUNK), CAPACITY);
     drop(held);
     assert_eq!(semaphore.available_permits(), CAPACITY);
+    Ok(())
+}
+
+
+const SLOW_INTERVAL_SECONDS: u64 = 1000;
+
+
+const FAST_INTERVAL_SECONDS: u64 = 1;
+
+
+const SLOW_TICK_MILLIS: u64 = 1_000_500;
+
+
+const FAST_TICK_MILLIS: u64 = 1_000;
+
+
+#[test]
+fn zero_bounds_are_refused() -> TestResult {
+    let bad = ChannelSettings {
+        max_streams_per_agent: 0,
+        max_connections_per_agent: 0,
+        max_inflight_per_agent: 0,
+        max_requests_per_window: 0,
+        silence_threshold_seconds: 0,
+        silence_check_interval_seconds: 0,
+        ..ChannelSettings::default()
+    };
+    let message = validate_settings(&bad).err().ok_or("accepted")?.to_string();
+    [
+        "max_streams_per_agent",
+        "max_connections_per_agent",
+        "max_inflight_per_agent",
+        "max_requests_per_window",
+        "silence_threshold_seconds",
+        "silence_check_interval_seconds",
+    ]
+    .iter()
+    .for_each(|name| assert!(message.contains(name)));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_silence_interval_follows_a_reload() -> TestResult {
+    let recorded: Arc<Mutex<Vec<NewEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let state = make_audited_state(
+        ChannelSettings {
+            silence_threshold_seconds: 0,
+            silence_check_interval_seconds: SLOW_INTERVAL_SECONDS,
+            ..ChannelSettings::default()
+        },
+        recording_sink(new_stored()),
+        envelope_source(Vec::new()),
+        recording_audit(Arc::clone(&recorded)),
+    );
+    record_beat(&state, &agent_identity(), Instant::now());
+    let (stop, stopped) = oneshot::channel::<()>();
+    let watching = tokio::spawn(watch_silence(Arc::clone(&state), async move {
+        if let Err(error) = stopped.await {
+            tracing::warn!(%error, "stop sender dropped");
+        }
+    }));
+    tokio::task::yield_now().await;
+    state.settings.store(Arc::new(ChannelSettings {
+        silence_threshold_seconds: 0,
+        silence_check_interval_seconds: FAST_INTERVAL_SECONDS,
+        ..ChannelSettings::default()
+    }));
+    sleep(Duration::from_millis(SLOW_TICK_MILLIS)).await;
+    record_beat(&state, &agent_identity(), Instant::now());
+    sleep(Duration::from_millis(FAST_TICK_MILLIS)).await;
+    stop.send(()).map_err(|()| "watch already stopped")?;
+    watching.await?;
+    let actions: Vec<String> = recorded
+        .lock()
+        .map_err(|_| "poisoned")?
+        .iter()
+        .map(|entry| entry.action.clone())
+        .collect();
+    assert_eq!(actions, vec!["agent.silent", "agent.back", "agent.silent"]);
     Ok(())
 }

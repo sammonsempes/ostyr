@@ -35,8 +35,9 @@ pub async fn serve(
     shutdown: ShutdownSignal,
 ) {
     let acceptor = TlsAcceptor::from(config);
-    let connections = Arc::new(Semaphore::new(settings_of(&state).max_total_connections));
-    let mut capacity = settings_of(&state).max_total_connections;
+    let initial = settings_of(&state).max_total_connections;
+    let connections = Arc::new(Semaphore::new(initial));
+    let mut capacity = initial;
     let mut handshakes = Vec::new();
     incoming
         .take_until(shutdown)

@@ -27,6 +27,12 @@ pub fn invalid_settings(settings: &ChannelSettings) -> Vec<&'static str> {
         ("heartbeat_interval_seconds", settings.heartbeat_interval_seconds == 0),
         ("max_message_bytes", settings.max_message_bytes == 0),
         ("rate_window_seconds", settings.rate_window_seconds == 0),
+        ("max_streams_per_agent", settings.max_streams_per_agent == 0),
+        ("max_connections_per_agent", settings.max_connections_per_agent == 0),
+        ("max_inflight_per_agent", settings.max_inflight_per_agent == 0),
+        ("max_requests_per_window", settings.max_requests_per_window == 0),
+        ("silence_threshold_seconds", settings.silence_threshold_seconds == 0),
+        ("silence_check_interval_seconds", settings.silence_check_interval_seconds == 0),
         ("max_streams_per_connection", settings.max_streams_per_connection == 0),
         ("request_timeout_seconds", settings.request_timeout_seconds == 0),
         (

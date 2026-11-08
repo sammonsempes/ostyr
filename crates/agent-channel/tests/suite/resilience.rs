@@ -327,11 +327,14 @@ async fn a_heartbeat_through_the_channel_is_recorded() -> TestResult {
 }
 
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_watch_records_a_silent_agent_and_stops_on_shutdown() -> TestResult {
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let state = make_audited_state(
-        settings(|base| base.silence_threshold_seconds = 0),
+        settings(|base| {
+            base.silence_threshold_seconds = 0;
+            base.silence_check_interval_seconds = 1;
+        }),
         recording_sink(new_stored()),
         envelope_source(Vec::new()),
         recording_audit(Arc::clone(&recorded)),
