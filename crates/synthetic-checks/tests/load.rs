@@ -168,3 +168,13 @@ fn load_checks_reads_a_file_and_reports_missing() -> TestResult {
     assert!(load_checks(&dir.path().join("absent.yaml")).is_err());
     Ok(())
 }
+
+
+#[test]
+fn a_ca_file_is_kept_and_bounded() -> TestResult {
+    assert_eq!(parse(MINIMAL)?.ca_file, None);
+    let kept = parse(&format!("ca_file: /etc/ostyr/ca.pem\n{MINIMAL}"))?;
+    assert_eq!(kept.ca_file.as_deref(), Some("/etc/ostyr/ca.pem"));
+    assert!(message_of(&format!("ca_file: \"\"\n{MINIMAL}"))?.contains("ca_file"));
+    Ok(())
+}
