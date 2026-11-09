@@ -5,6 +5,7 @@ pub mod evaluate;
 pub mod fingerprint;
 pub mod forecast;
 pub mod model;
+pub mod query;
 pub mod rules;
 pub mod state;
 pub mod types;
