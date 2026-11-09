@@ -9,6 +9,7 @@ publish = false
 core-config = { path = "../core-config" }
 data-encoding = "2.11.1"
 regex = "1"
+regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"

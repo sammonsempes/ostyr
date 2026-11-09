@@ -15,4 +15,5 @@ pub mod model;
 pub mod params;
 pub mod path;
 pub mod pattern;
+pub mod redact;
 pub mod types;

@@ -38,6 +38,36 @@ pub const MAX_OUTPUT_BYTES: u64 = 16_777_216;
 pub const MAX_MANIFEST_BYTES: usize = 65_536;
 
 
+pub const MAX_SECRET_PATTERNS: usize = 16;
+
+
+pub const MIN_MEMORY_BYTES: u64 = 1_048_576;
+
+
+pub const MAX_MEMORY_BYTES: u64 = 17_179_869_184;
+
+
+pub const DEFAULT_MEMORY_BYTES: u64 = 536_870_912;
+
+
+pub const MAX_PIDS: u64 = 4096;
+
+
+pub const DEFAULT_PIDS: u64 = 256;
+
+
+pub const MAX_CPU_PERCENT: u64 = 6400;
+
+
+pub const REDACTION_SLACK_BYTES: u64 = 65_536;
+
+
+pub const READ_SLACK_COUNT: u64 = 2;
+
+
+pub const REDACTION_MARK: &[u8] = b"[REDACTED]";
+
+
 pub const SHA256_HEX_LENGTH: usize = 64;
 
 
@@ -69,6 +99,43 @@ pub enum ParamKind {
 }
 
 
+/// Per-run cgroup limits; a manifest that declares none gets the defaults, never an unlimited run. `cpu_percent` is of one CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Limits {
+    pub memory_bytes: u64,
+    pub pids: u64,
+    pub cpu_percent: Option<u64>,
+}
+
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            memory_bytes: DEFAULT_MEMORY_BYTES,
+            pids: DEFAULT_PIDS,
+            cpu_percent: None,
+        }
+    }
+}
+
+
+/// The limit a run ran into, read back from the cgroup: a memory kill, or a refused fork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitHit {
+    Memory,
+    Pids,
+}
+
+
+/// The unprivileged user the script runs as, so it cannot write the delegated cgroup root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunAs {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+
 /// `script` is relative to the library root; `sha256` is lowercase hex.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +148,10 @@ pub struct Manifest {
     pub max_output_bytes: u64,
     #[serde(default)]
     pub parameters: BTreeMap<String, ParamKind>,
+    #[serde(default)]
+    pub secret_patterns: Vec<String>,
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 
@@ -108,13 +179,7 @@ pub struct LaunchRequest {
     pub cgroup_root: PathBuf,
     pub kill_grace: Duration,
     pub environment: Vec<(String, String)>,
-}
-
-
-/// A leaf cgroup created for one run, removed on drop.
-#[derive(Debug)]
-pub struct CgroupGuard {
-    pub path: PathBuf,
+    pub run_as: Option<RunAs>,
 }
 
 
@@ -125,6 +190,7 @@ pub struct Outcome {
     pub timed_out: bool,
     pub output: Vec<u8>,
     pub dropped_bytes: u64,
+    pub limit_hit: Option<LimitHit>,
 }
 
 

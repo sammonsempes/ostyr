@@ -50,6 +50,8 @@ pub enum ScriptError {
     UnsafeWorkRoot,
     #[error("the cgroup root is not on a cgroup v2 filesystem")]
     NotCgroupV2,
+    #[error("the run-as uid must be neither root nor the agent's own uid")]
+    InvalidRunAs,
     #[error("none of the declared interpreter paths exists")]
     NoInterpreter,
     #[error("{context}")]
