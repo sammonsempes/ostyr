@@ -9,6 +9,9 @@ use policy_validator::reload::{load_policy, open_validator, policy_loader, polic
 use std::fs;
 
 
+const MIN_AUDITED_RELOADS: usize = 2;
+
+
 const MIN_TEN: &str = "min_benign_verdicts: 10\n";
 
 
@@ -138,5 +141,23 @@ fn a_policy_error_travels_as_a_parse_error_with_its_message() -> TestResult {
     let error = refusal("policy.yaml", &PolicyError::EmptyInterpreter);
     assert!(matches!(&error, ConfigError::Parse { file, message, .. } if file == "policy.yaml" && message.contains("interpreter")));
     assert!(Reason::InvalidHash.to_string().contains("invalid_hash"));
+    Ok(())
+}
+
+
+#[test]
+fn the_list_digest_survives_redaction_in_the_audit_record() -> TestResult {
+    let bench = bench("{}")?;
+    replace_file(&bench.policy_file, "security_sensors: [edr]\n")?;
+    assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
+    replace_file(&bench.policy_file, "security_sensors: [other]\n")?;
+    assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
+    let text = fs::read_to_string(&bench.audit_file)?;
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains("sha256-salted=")).collect();
+    assert!(lines.len() >= MIN_AUDITED_RELOADS, "{text}");
+    assert!(!text.contains("[REDACTED]"), "{text}");
+    let first = lines.first().ok_or("none")?;
+    let last = lines.last().ok_or("none")?;
+    assert_ne!(first, last);
     Ok(())
 }
