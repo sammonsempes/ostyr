@@ -79,3 +79,8 @@ pub struct Rule {
 pub struct RuleFile {
     pub rules: Vec<Rule>,
 }
+
+
+/// A tenant identifier that passed `parse_tenant_id`; it is only ever sent as a query parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantId(pub String);
