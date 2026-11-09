@@ -2,6 +2,7 @@ use crate::types::{Handler, Shape};
 use rustls::ServerConfig;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -36,6 +37,7 @@ pub enum Reply {
     IntRows(Vec<i32>),
     Error(&'static str),
     Hang,
+    Sleep(Duration),
     Drop,
 }
 
@@ -226,6 +228,9 @@ pub async fn serve_messages<Channel: AsyncRead + AsyncWrite + Unpin>(
                 if matches!(reply, Reply::Hang) {
                     std::future::pending::<()>().await;
                 }
+                if let Reply::Sleep(pause) = reply {
+                    tokio::time::sleep(pause).await;
+                }
                 if matches!(reply, Reply::Drop) {
                     done = true;
                 } else {
@@ -239,6 +244,9 @@ pub async fn serve_messages<Channel: AsyncRead + AsyncWrite + Unpin>(
                     session.reply = handler(&sql);
                     if matches!(session.reply, Reply::Hang) {
                         std::future::pending::<()>().await;
+                    }
+                    if let Reply::Sleep(pause) = session.reply {
+                        tokio::time::sleep(pause).await;
                     }
                 }
                 if !session.skipping || tag == b'S' {

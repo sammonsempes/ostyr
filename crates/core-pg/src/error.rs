@@ -12,6 +12,8 @@ pub enum PgError {
         #[source]
         source: io::Error,
     },
+    #[error("{file}: not a regular file")]
+    NotRegular { file: String },
     #[error("{file}: larger than {limit} bytes")]
     TooLarge { file: String, limit: u64 },
     #[error("{file}: the password is empty")]
@@ -52,6 +54,22 @@ pub enum PgError {
 pub const CLASS_CHARACTERS: usize = 2;
 
 
+pub const SQLSTATE_CHARACTERS: usize = 5;
+
+
+pub const INVALID_SQLSTATE: &str = "invalid";
+
+
+/// A server-supplied code is kept only when it is five characters of `[0-9A-Z]`.
+pub fn checked_sqlstate(code: &str) -> String {
+    if code.len() == SQLSTATE_CHARACTERS && code.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase()) {
+        code.to_owned()
+    } else {
+        INVALID_SQLSTATE.to_owned()
+    }
+}
+
+
 /// A fixed class for the first two characters of a SQLSTATE code.
 pub fn sqlstate_class(code: &str) -> &'static str {
     match code.get(..CLASS_CHARACTERS) {
@@ -72,7 +90,7 @@ pub fn sqlstate_class(code: &str) -> &'static str {
 pub fn reduce(error: tokio_postgres::Error) -> PgError {
     match error.as_db_error() {
         Some(database) => {
-            let code = database.code().code().to_owned();
+            let code = checked_sqlstate(database.code().code());
             PgError::Server {
                 class: sqlstate_class(&code),
                 code,
