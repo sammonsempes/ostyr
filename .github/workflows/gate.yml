@@ -18,8 +18,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install the pinned stable toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Install nightly
-        run: rustup toolchain install nightly --profile minimal --component rustfmt --component llvm-tools-preview
+      - name: Install the nightly pinned to the date of the development host
+        run: .github/gate-nightly.sh 2026-11-08
       - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941
         with:
           tool: cargo-llvm-cov
@@ -33,5 +33,5 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
       - name: Fetch dependencies
         run: cargo fetch --locked
-      - name: Run the gate
-        run: .githooks/pre-commit
+      - name: Run the gate as root, like the development host
+        run: sudo env "HOME=$HOME" "PATH=$PATH" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$HOME/.rustup" .githooks/pre-commit
