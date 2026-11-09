@@ -1,7 +1,26 @@
-Last metadata expiration check: 0:03:12 ago on Mon 09 Nov 2026 10:00:00 AM UTC.
-RLSA-2026:1001 Important/Sec. openssl-1:3.2.2-6.el9_5.1.x86_64
-RLSA-2026:1001 Important/Sec. openssl-libs-1:3.2.2-6.el9_5.1.x86_64
-RLSA-2026:1002 Moderate/Sec. kernel-5.14.0-503.15.1.el9_5.x86_64
-RLSA-2026:1003 unknown/Sec. unknown-pkg-2.0-1.el9.noarch
-RLBA-2026:2001 bugfix        tzdata-2025b-1.el9.noarch
-RLEA-2026:3001 enhancement   vim-minimal-2:8.2.2637-21.el9.x86_64
+Last metadata expiration check: 0:01:55 ago on Mon Nov  9 19:11:05 2026.
+RLSA-2026:1350  Moderate/Sec.  curl-7.76.1-35.el9_7.3.x86_64
+RLSA-2026:55439 Important/Sec. curl-7.76.1-40.el9_8.5.x86_64
+RLSA-2026:69126 Important/Sec. curl-7.76.1-40.el9_8.7.x86_64
+RLSA-2026:80511 Moderate/Sec.  curl-7.76.1-40.el9_8.8.x86_64
+RLSA-2026:92907 Moderate/Sec.  curl-7.76.1-40.el9_8.9.x86_64
+RLSA-2026:1350  Moderate/Sec.  libcurl-7.76.1-35.el9_7.3.x86_64
+RLSA-2026:55439 Important/Sec. libcurl-7.76.1-40.el9_8.5.x86_64
+RLSA-2026:69126 Important/Sec. libcurl-7.76.1-40.el9_8.7.x86_64
+RLSA-2026:80511 Moderate/Sec.  libcurl-7.76.1-40.el9_8.8.x86_64
+RLSA-2026:92907 Moderate/Sec.  libcurl-7.76.1-40.el9_8.9.x86_64
+RLSA-2026:69123 Important/Sec. sudo-1.9.17p2-3.el9_8.1.x86_64
+RLSA-2026:75571 Important/Sec. sudo-1.9.17p2-3.el9_8.3.x86_64
+RLSA-2026:19220 Important/Sec. sudo-1.9.17p2-3.el9_8.x86_64
+RLSA-2026:12310 Important/Sec. sudo-1.9.5p2-15.el9_7.x86_64
+RLSA-2026:5602  Moderate/Sec.  vim-minimal-2:8.2.2637-23.el9_7.1.x86_64
+RLSA-2026:8259  Important/Sec. vim-minimal-2:8.2.2637-23.el9_7.2.x86_64
+RLSA-2026:11510 Important/Sec. vim-minimal-2:8.2.2637-23.el9_7.3.x86_64
+RLSA-2025:20945 Moderate/Sec.  vim-minimal-2:8.2.2637-23.el9_7.x86_64
+RLSA-2026:38511 Important/Sec. vim-minimal-2:8.2.2637-26.el9_8.10.x86_64
+RLSA-2026:47982 Important/Sec. vim-minimal-2:8.2.2637-26.el9_8.13.x86_64
+RLSA-2026:66366 Important/Sec. vim-minimal-2:8.2.2637-26.el9_8.21.x86_64
+RLSA-2026:75768 Important/Sec. vim-minimal-2:8.2.2637-26.el9_8.23.x86_64
+RLSA-2026:19224 Important/Sec. vim-minimal-2:8.2.2637-26.el9_8.4.x86_64
+RLSA-2026:22717 Moderate/Sec.  vim-minimal-2:8.2.2637-26.el9_8.5.x86_64
+RLSA-2026:28209 Moderate/Sec.  vim-minimal-2:8.2.2637-26.el9_8.6.x86_64
