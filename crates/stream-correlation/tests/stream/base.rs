@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sigma_sql::error::SigmaError;
 use stream_correlation::base::{base_matches, compile_base};
 use stream_correlation::check::{dash_variants, string_pattern};
-use stream_correlation::error::CorrelationError;
+use stream_correlation::error::{redacted, CorrelationError};
 use stream_correlation::field::{event_time_ms, field_texts, group_key, lookup};
 
 
@@ -346,7 +346,7 @@ fn unsupported_and_invalid_rules_are_typed_errors() -> TestResult {
         sigma_error(&process_rule("  selection:\n    Image: /x\n  condition: other\n"))?,
         SigmaError::MissingSelection { .. }
     ));
-    assert!(matches!(refused("not: a rule")?, CorrelationError::Sigma(SigmaError::Yaml(_))));
+    assert!(matches!(refused("not: a rule")?, CorrelationError::Config(_)));
     Ok(())
 }
 
@@ -355,5 +355,16 @@ fn unsupported_and_invalid_rules_are_typed_errors() -> TestResult {
 fn string_patterns_escape_regex_syntax() -> TestResult {
     assert_eq!(string_pattern(sigma_sql::modifier::Matcher::Equals, "a.b*"), "^a\\.b.*$");
     assert_eq!(string_pattern(sigma_sql::modifier::Matcher::Contains, "a?"), "a.");
+    Ok(())
+}
+
+
+#[test]
+fn other_sigma_errors_pass_through_redaction_unchanged() -> TestResult {
+    let error = redacted(SigmaError::Unsupported {
+        rule: "r".to_string(),
+        construct: "c".to_string(),
+    });
+    assert!(matches!(error, CorrelationError::Sigma(SigmaError::Unsupported { .. })));
     Ok(())
 }

@@ -1,5 +1,5 @@
 use crate::condition::{evaluate, to_steps, Step};
-use crate::error::CorrelationError;
+use crate::error::{redacted, CorrelationError};
 use crate::field::field_texts;
 use crate::selection::{compile_selection, selection_matches};
 use crate::types::{Selection, SelectionResults};
@@ -52,7 +52,7 @@ fn os_filter(rule: &Rule, mapping: &FieldMapping) -> Result<Option<String>, Sigm
                 .products
                 .get(product)
                 .cloned()
-                .ok_or_else(|| unsupported(rule, format!("logsource product {product}")))
+                .ok_or_else(|| unsupported(rule, "logsource product".to_string()))
         })
         .transpose()
 }
@@ -60,7 +60,7 @@ fn os_filter(rule: &Rule, mapping: &FieldMapping) -> Result<Option<String>, Sigm
 
 /// Compiles the text of one Sigma rule; `name` is the rule's `name` key, which the SQL parser drops.
 pub fn compile_base(text: &str, name: Option<String>, mapping: &FieldMapping) -> Result<BaseRule, CorrelationError> {
-    let rule = parse_rule(text)?;
+    let rule = parse_rule(text).map_err(redacted)?;
     let category = rule
         .logsource
         .category
@@ -69,7 +69,7 @@ pub fn compile_base(text: &str, name: Option<String>, mapping: &FieldMapping) ->
     let category_mapping = mapping
         .categories
         .get(category)
-        .ok_or_else(|| unsupported(&rule, format!("logsource category {category}")))?;
+        .ok_or_else(|| unsupported(&rule, "logsource category".to_string()))?;
     match rule.logsource.service {
         Some(_) => Err(unsupported(&rule, "logsource service".to_string())),
         None => Ok(()),

@@ -1,7 +1,9 @@
 use crate::base::{compile_base, BaseRule};
 use crate::correlation::{check_keys, invalid, parse_kind, parse_timespan, CorrelationRule, RawDocument};
-use crate::error::CorrelationError;
+use crate::error::{schema_error, CorrelationError};
 use crate::types::RuleTexts;
+use core_config::error::ConfigError;
+use core_config::parse::parse_document;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sigma_sql::mapping::FieldMapping;
@@ -29,10 +31,28 @@ pub struct Document {
 }
 
 
+/// Names the file in an error; a redacted YAML error carries the file in its own fields.
 pub fn in_file(file: &str, source: CorrelationError) -> CorrelationError {
-    CorrelationError::InFile {
-        file: file.to_string(),
-        source: Box::new(source),
+    match source {
+        CorrelationError::Config(ConfigError::Parse {
+            line,
+            column,
+            field_path,
+            message,
+            source: cause,
+            ..
+        }) => CorrelationError::Config(ConfigError::Parse {
+            file: file.to_string(),
+            line,
+            column,
+            field_path,
+            message,
+            source: cause,
+        }),
+        other => CorrelationError::InFile {
+            file: file.to_string(),
+            source: Box::new(other),
+        },
     }
 }
 
@@ -51,7 +71,7 @@ pub fn split_documents(text: &str) -> Vec<String> {
 fn read_documents(texts: &RuleTexts) -> Result<Vec<Document>, CorrelationError> {
     texts.iter().try_fold(Vec::new(), |mut documents, (file, text)| {
         split_documents(text).into_iter().try_for_each(|document| {
-            serde_saphyr::from_str::<Value>(&document)
+            parse_document::<Value>(&document, file)
                 .map(|value| {
                     documents.push(Document {
                         file: file.clone(),
@@ -59,7 +79,7 @@ fn read_documents(texts: &RuleTexts) -> Result<Vec<Document>, CorrelationError> 
                         value,
                     })
                 })
-                .map_err(|error| in_file(file, CorrelationError::from(error)))
+                .map_err(CorrelationError::from)
         })?;
         Ok(documents)
     })
@@ -100,10 +120,7 @@ pub fn fingerprint(text: &str, bases: &[&BaseRule]) -> String {
 
 fn compile_correlation(document: &Document, references: &BTreeMap<String, usize>, bases: &[BaseRule]) -> Result<CorrelationRule, CorrelationError> {
     let title = document.value.get("title").and_then(Value::as_str).unwrap_or("untitled");
-    let raw: RawDocument = serde_json::from_value(document.value.clone()).map_err(|source| CorrelationError::Schema {
-        rule: title.to_string(),
-        source,
-    })?;
+    let raw: RawDocument = serde_path_to_error::deserialize(document.value.clone()).map_err(|error| schema_error(title, &error))?;
     check_keys(&raw)?;
     let kind = parse_kind(&raw.title, &raw.correlation)?;
     let timespan_ms = parse_timespan(&raw.title, &raw.correlation.timespan)?;
@@ -112,10 +129,10 @@ fn compile_correlation(document: &Document, references: &BTreeMap<String, usize>
         .rules
         .iter()
         .map(|reference| {
-            references.get(reference).copied().ok_or_else(|| CorrelationError::UnknownReference {
-                rule: raw.title.clone(),
-                reference: reference.clone(),
-            })
+            references
+                .get(reference)
+                .copied()
+                .ok_or_else(|| CorrelationError::UnknownReference { rule: raw.title.clone() })
         })
         .collect::<Result<Vec<usize>, _>>()?;
     match rules.as_slice() {

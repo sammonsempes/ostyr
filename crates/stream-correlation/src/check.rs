@@ -25,6 +25,12 @@ pub const DASH_VARIANTS: &[char] = &['-', '/', '\u{2013}', '\u{2014}', '\u{2015}
 pub const CASE_INSENSITIVE: &str = "(?is)";
 
 
+pub const INVALID_REGEX: &str = "invalid regular expression";
+
+
+pub const INVALID_CIDR: &str = "invalid CIDR network";
+
+
 fn bad_value(rule: &str, field: &str, reason: String) -> SigmaError {
     SigmaError::BadValue {
         rule: rule.to_string(),
@@ -61,7 +67,7 @@ pub fn dash_variants(text: &str) -> Vec<String> {
 
 
 fn string_regex(rule: &str, field: &str, matcher: Matcher, text: &str) -> Result<Regex, SigmaError> {
-    Regex::new(&format!("{CASE_INSENSITIVE}{}", string_pattern(matcher, text))).map_err(|error| bad_value(rule, field, error.to_string()))
+    Regex::new(&format!("{CASE_INSENSITIVE}{}", string_pattern(matcher, text))).map_err(|_| bad_value(rule, field, INVALID_REGEX.to_string()))
 }
 
 
@@ -69,11 +75,11 @@ fn text_check(rule: &str, field: &str, modifiers: Modifiers, text: &str) -> Resu
     match modifiers.matcher {
         Matcher::Regex => Regex::new(text)
             .map(|pattern| Check::Text(vec![pattern]))
-            .map_err(|error| bad_value(rule, field, error.to_string())),
+            .map_err(|_| bad_value(rule, field, INVALID_REGEX.to_string())),
         Matcher::Cidr => text
             .parse::<IpNet>()
             .map(Check::Cidr)
-            .map_err(|error| bad_value(rule, field, error.to_string())),
+            .map_err(|_| bad_value(rule, field, INVALID_CIDR.to_string())),
         Matcher::Exists => Err(bad_value(rule, field, "exists takes true or false".to_string())),
         matcher => {
             let variants = if modifiers.windash {
