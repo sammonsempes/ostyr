@@ -1,5 +1,5 @@
 use crate::error::SettingsError;
-use crate::model::{ChannelSettings, ServerState, MAX_TOTAL_CONNECTIONS_LIMIT, SETTINGS_SECTION};
+use crate::model::{ChannelSettings, ServerState, MAX_MESSAGE_BYTES_LIMIT, MAX_TOTAL_CONNECTIONS_LIMIT, SETTINGS_SECTION};
 use crate::types::{BoxError, SharedSettings};
 use arc_swap::ArcSwap;
 use core_config::load::load_file;
@@ -25,7 +25,10 @@ pub fn settings_of(state: &ServerState) -> Arc<ChannelSettings> {
 pub fn invalid_settings(settings: &ChannelSettings) -> Vec<&'static str> {
     [
         ("heartbeat_interval_seconds", settings.heartbeat_interval_seconds == 0),
-        ("max_message_bytes", settings.max_message_bytes == 0),
+        (
+            "max_message_bytes",
+            settings.max_message_bytes == 0 || settings.max_message_bytes > MAX_MESSAGE_BYTES_LIMIT,
+        ),
         ("rate_window_seconds", settings.rate_window_seconds == 0),
         ("max_streams_per_agent", settings.max_streams_per_agent == 0),
         ("max_connections_per_agent", settings.max_connections_per_agent == 0),
