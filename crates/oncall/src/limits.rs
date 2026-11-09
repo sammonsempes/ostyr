@@ -62,3 +62,54 @@ pub const MAX_ALERTS: u64 = 10_000;
 
 
 pub const MAX_GROUP_LABELS: u64 = 8;
+
+
+pub const MAX_CHANNELS: u64 = 64;
+
+
+pub const MAX_TARGET_LEN: u64 = 2048;
+
+
+pub const MAX_PATH_LEN: u64 = 4096;
+
+
+pub const MAX_RENDER_ENTRIES: usize = 32;
+
+
+pub const MAX_REASON_LEN: usize = 256;
+
+
+pub const SMTP_SUBJECT_LEN: usize = 200;
+
+
+pub const SMTP_BODY_LEN: usize = 8_000;
+
+
+pub const WEBHOOK_SUBJECT_LEN: usize = 200;
+
+
+pub const WEBHOOK_BODY_LEN: usize = 4_000;
+
+
+pub const NTFY_SUBJECT_LEN: usize = 100;
+
+
+pub const NTFY_BODY_LEN: usize = 1_000;
+
+
+pub const TEAMS_SUBJECT_LEN: usize = 150;
+
+
+pub const TEAMS_BODY_LEN: usize = 4_000;
+
+
+pub const SLACK_SUBJECT_LEN: usize = 150;
+
+
+pub const SLACK_BODY_LEN: usize = 3_000;
+
+
+pub const SMS_SUBJECT_LEN: usize = 40;
+
+
+pub const SMS_BODY_LEN: usize = 160;
