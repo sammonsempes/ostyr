@@ -939,14 +939,34 @@ fn files_are_handed_to_the_script_user_before_the_bytes_are_written() -> TestRes
 
 #[test]
 fn run_as_root_or_the_agent_uid_is_refused() -> TestResult {
-    let user = |uid| Some(RunAs { uid, gid: NOBODY });
-    assert!(matches!(refusal(check_run_as(user(0).as_ref(), NOBODY))?, ScriptError::InvalidRunAs));
-    assert!(matches!(refusal(check_run_as(user(NOBODY).as_ref(), NOBODY))?, ScriptError::InvalidRunAs));
-    check_run_as(user(NOBODY).as_ref(), 0)?;
-    check_run_as(None, 0)?;
+    let user = |uid, gid| Some(RunAs { uid, gid });
+    let other = NOBODY - 1;
+    assert!(matches!(
+        refusal(check_run_as(user(0, NOBODY).as_ref(), NOBODY, other))?,
+        ScriptError::InvalidRunAs
+    ));
+    assert!(matches!(
+        refusal(check_run_as(user(NOBODY, NOBODY).as_ref(), NOBODY, other))?,
+        ScriptError::InvalidRunAs
+    ));
+    assert!(matches!(
+        refusal(check_run_as(user(NOBODY, 0).as_ref(), other, other))?,
+        ScriptError::InvalidRunAs
+    ));
+    assert!(matches!(
+        refusal(check_run_as(user(NOBODY, NOBODY).as_ref(), other, NOBODY))?,
+        ScriptError::InvalidRunAs
+    ));
+    check_run_as(user(NOBODY, NOBODY).as_ref(), 0, 1)?;
+    check_run_as(None, 0, 0)?;
     let root = tempfile::tempdir()?;
     let mut launch = request(root.path(), Interpreter::Bash, "echo hi\n");
-    launch.run_as = user(0);
+    launch.run_as = user(0, NOBODY);
+    assert!(matches!(refusal(run(&launch))?, ScriptError::InvalidRunAs));
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    launch.run_as = user(NOBODY, 0);
+    assert!(matches!(refusal(run(&launch))?, ScriptError::InvalidRunAs));
+    launch.run_as = user(NOBODY, rustix::process::getegid().as_raw());
     assert!(matches!(refusal(run(&launch))?, ScriptError::InvalidRunAs));
     assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
     Ok(())
