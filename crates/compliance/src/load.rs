@@ -1,6 +1,6 @@
 use crate::error::ComplianceError;
 use crate::evaluate::build_pattern;
-use crate::model::{Baseline, Control, Exception, ExceptionFile, Expectation, Scope};
+use crate::model::{Baseline, Control, Exception, ExceptionFile, Expectation, Policy, Scope};
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text};
 use serde::de::DeserializeOwned;
@@ -20,6 +20,12 @@ pub const MAX_CONTROLS: usize = 1_000;
 
 
 pub const MAX_EXCEPTIONS: usize = 10_000;
+
+
+pub const MAX_ACTIONS: usize = 1_000;
+
+
+pub const MAX_CAP: usize = 100_000;
 
 
 pub const MAX_FRAMEWORKS: usize = 16;
@@ -84,6 +90,22 @@ fn check_control(control: &Control) -> Result<(), String> {
 }
 
 
+fn check_actions(baseline: &Baseline) -> Result<(), String> {
+    if baseline.actions.len() > MAX_ACTIONS {
+        Err(format!("more than {MAX_ACTIONS} actions"))
+    } else {
+        baseline.actions.iter().try_for_each(|action| check_text("action", action, MAX_ID_LEN))?;
+        baseline.controls.iter().try_for_each(|control| match &control.correction {
+            Some(correction) if !baseline.actions.contains(&correction.action) => Err(format!(
+                "control `{}`: correction action `{}` is not declared in `actions`",
+                control.id, correction.action
+            )),
+            _ => Ok(()),
+        })
+    }
+}
+
+
 pub fn check_baseline(baseline: &Baseline) -> Result<(), String> {
     if baseline.version != SUPPORTED_VERSION {
         Err(format!("unsupported baseline version {}", baseline.version))
@@ -91,10 +113,12 @@ pub fn check_baseline(baseline: &Baseline) -> Result<(), String> {
         Err(format!("more than {MAX_CONTROLS} controls"))
     } else {
         check_text("name", &baseline.name, MAX_ID_LEN)?;
+        check_text("tenant", &baseline.tenant, MAX_ID_LEN)?;
         baseline
             .controls
             .iter()
             .try_for_each(|control| check_control(control).map_err(|message| format!("control `{}`: {message}", control.id)))?;
+        check_actions(baseline)?;
         let identifiers: BTreeSet<&String> = baseline.controls.iter().map(|control| &control.id).collect();
         if identifiers.len() == baseline.controls.len() {
             Ok(())
@@ -164,6 +188,24 @@ pub fn parse_exceptions(reader: &mut dyn Read, file: &str) -> Result<Vec<Excepti
 }
 
 
+pub fn check_policy(policy: &Policy) -> Result<(), String> {
+    if policy.version != SUPPORTED_VERSION {
+        Err(format!("unsupported policy version {}", policy.version))
+    } else if policy.max_devices == 0 || policy.max_devices > MAX_CAP {
+        Err(format!("`max_devices` must be between 1 and {MAX_CAP}"))
+    } else if policy.max_corrections_per_device == 0 || policy.max_corrections_per_device > MAX_CAP {
+        Err(format!("`max_corrections_per_device` must be between 1 and {MAX_CAP}"))
+    } else {
+        check_text("tenant", &policy.tenant, MAX_ID_LEN)
+    }
+}
+
+
+pub fn parse_policy(reader: &mut dyn Read, file: &str) -> Result<Policy, ComplianceError> {
+    parse_checked(reader, file, check_policy)
+}
+
+
 fn open_file(path: &Path) -> Result<File, ComplianceError> {
     File::open(path).map_err(|source| {
         ComplianceError::Config(ConfigError::Io {
@@ -181,4 +223,9 @@ pub fn load_baseline(path: &Path) -> Result<Baseline, ComplianceError> {
 
 pub fn load_exceptions(path: &Path) -> Result<Vec<Exception>, ComplianceError> {
     parse_exceptions(&mut open_file(path)?, &path.display().to_string())
+}
+
+
+pub fn load_policy(path: &Path) -> Result<Policy, ComplianceError> {
+    parse_policy(&mut open_file(path)?, &path.display().to_string())
 }

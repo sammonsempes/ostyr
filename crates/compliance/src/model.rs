@@ -65,7 +65,10 @@ pub struct Control {
 #[serde(deny_unknown_fields)]
 pub struct Baseline {
     pub version: u32,
+    pub tenant: String,
     pub name: String,
+    #[serde(default)]
+    pub actions: Vec<String>,
     pub controls: Vec<Control>,
 }
 
@@ -110,4 +113,61 @@ pub enum Verdict {
     Fail { offending: Vec<Row>, total: usize },
     Error { reason: String },
     Excepted { owner: String, reason: String },
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    pub version: u32,
+    pub tenant: String,
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    pub max_devices: usize,
+    pub max_corrections_per_device: usize,
+}
+
+
+fn default_dry_run() -> bool {
+    true
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceVerdicts {
+    pub tenant: String,
+    pub target: Target,
+    pub verdicts: Vec<(String, Verdict)>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionRequest {
+    pub control: String,
+    pub device: String,
+    pub action: String,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferReason {
+    DeviceCapReached,
+    DeviceCorrectionCapReached,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredCorrection {
+    pub request: CorrectionRequest,
+    pub reason: DeferReason,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    pub tenant: String,
+    pub dry_run: bool,
+    pub requests: Vec<CorrectionRequest>,
+    pub would_run: Vec<CorrectionRequest>,
+    pub deferred: Vec<DeferredCorrection>,
 }
