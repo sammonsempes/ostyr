@@ -70,6 +70,14 @@ pub fn refusal<Value>(result: Result<Value, ScriptError>) -> Result<ScriptError,
 }
 
 
+pub fn refusal_io<Value>(result: io::Result<Value>) -> Result<io::Error, Box<dyn Error>> {
+    match result {
+        Ok(_) => Err("expected an I/O failure".into()),
+        Err(error) => Ok(error),
+    }
+}
+
+
 pub struct FailingReader;
 
 

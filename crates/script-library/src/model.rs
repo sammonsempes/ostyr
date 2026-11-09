@@ -2,6 +2,7 @@ use crate::types::Params;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 
 pub const MAX_NAME_LENGTH: usize = 64;
@@ -104,7 +105,16 @@ pub struct LaunchRequest {
     pub params: Params,
     pub script_bytes: Vec<u8>,
     pub work_root: PathBuf,
+    pub cgroup_root: PathBuf,
+    pub kill_grace: Duration,
     pub environment: Vec<(String, String)>,
+}
+
+
+/// A leaf cgroup created for one run, removed on drop.
+#[derive(Debug)]
+pub struct CgroupGuard {
+    pub path: PathBuf,
 }
 
 
