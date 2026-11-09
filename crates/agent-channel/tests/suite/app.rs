@@ -4,13 +4,14 @@ use crate::pki::{agent_spec, write_file, AGENT_URI, PRIVATE_MODE, SERVER_NAME, W
 use crate::services::agent_verifier;
 use crate::types::TestResult;
 use agent_channel::agent_app::{
-    dialer, execute_fn, load_agent_file, record_commands, run_agent, run_attempts, session_attempt, AgentFile, MAX_AGENT_ATTEMPTS,
+    dialer, execute_fn, load_agent_file, record_commands, run_agent, run_attempts, run_streams, session_attempt, settle_and_join, settle_events,
+    start_worker, AgentFile, MAX_AGENT_ATTEMPTS,
 };
 use agent_channel::app::{alerting_audit, read_bounded_line, reload_context, shared_log_audit, BoundedLine};
 use agent_channel::client::deliver_events;
 use agent_channel::commands::{agent_directory, command_source, paths_of, read_envelope, read_envelopes, MAX_COMMAND_FILES, MAX_ENVELOPE_FILE_BYTES};
 use agent_channel::error::{AppError, ChannelError, SinkError};
-use agent_channel::model::{ClientTlsPaths, Identity, DEFAULT_MAX_MESSAGE_BYTES};
+use agent_channel::model::{ClientTlsPaths, Delivered, Identity, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_channel::proto::EventBatch;
 use agent_channel::server_app::{bind_server, load_server_file, run_server, run_server_with_clock, ServerFile};
 use agent_channel::sink::{file_sink, load_seen, open_event_store, parse_line, store_batch, EventStore};
@@ -19,9 +20,11 @@ use agent_channel::spool::{
     suffixed, write_sequence, SequenceState, ASIDE_SUFFIX, MAX_REJECTED_BYTES, MAX_SPOOL_BATCHES, REJECTED_SUFFIX, SENDING_SUFFIX,
 };
 use agent_channel::tls::client_config;
-use agent_channel::types::PauseFuture;
+use agent_channel::types::{DialFuture, PauseFuture};
+use agent_command::keys::open_keys_engine;
 use agent_command::model::{Action, Command, KeyClass, NONCE_LENGTH};
 use agent_command::sign::{memory_signer, sign_command};
+use agent_command::verify::open_verifier;
 use core_audit::error::AuditError;
 use core_audit::log::{genesis_log, open_file_log};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
@@ -43,6 +46,15 @@ use tokio::sync::{mpsc, oneshot};
 pub fn no_sync() -> io::Result<()> {
     Ok(())
 }
+
+
+const WORKER_QUEUE_FOR_TEST: usize = 8;
+
+
+const SECOND_SEQUENCE: u64 = 2;
+
+
+const COMMANDS_QUEUED: usize = 2;
 
 
 const KEY_SEED: u8 = 9;
@@ -1056,5 +1068,144 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
     assert_eq!(pauses.load(Ordering::SeqCst), 1);
     stop.send(()).map_err(|()| "server already stopped")?;
     handle.await??;
+    Ok(())
+}
+
+
+fn refusing_dial() -> DialFuture {
+    Box::pin(async { Err(ChannelError::CallTimedOut { seconds: 1 }) })
+}
+
+
+#[tokio::test]
+async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> TestResult {
+    let _logging = scoped_logging();
+    let dir = tempdir()?;
+    let Fixture { server, agent } = fixture(dir.path())?;
+    let listener = bind_server(&server).await?;
+    let config = client_config(&ClientTlsPaths {
+        certificate: agent.certificate.clone(),
+        key: agent.key.clone(),
+        platform_ca: agent.platform_ca.clone(),
+    })?;
+    let dial = dialer(listener.local_addr()?, config, agent.server_name.clone());
+    let (stop, stopped) = oneshot::channel::<()>();
+    let handle = tokio::spawn(run_server(
+        server.clone(),
+        listener,
+        Box::pin(async move {
+            if let Err(error) = stopped.await {
+                tracing::warn!(%error, "stop sender dropped");
+            }
+        }),
+    ));
+    let spool = claim_spool(&agent)?;
+    let log = Arc::new(open_file_log(&agent.audit_file)?);
+    let keys = Arc::new(open_keys_engine(
+        agent.keys_file.clone(),
+        shared_log_audit(&log),
+        reload_context(&agent.keys_file, "test", "acme", "keys"),
+    )?);
+    let verifier = open_verifier(&agent.agent_id, &agent.tenant, keys, &agent.state_file)?;
+    let (sender, receiver) = mpsc::channel(WORKER_QUEUE_FOR_TEST);
+    let execute = execute_fn(sender);
+    let pauses = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&pauses);
+    let pause = move |_delay: Duration| -> PauseFuture {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    };
+    let (delivery, run) = bounded(run_streams(
+        &refusing_dial,
+        dial.as_ref(),
+        &pause,
+        spool.batches.clone(),
+        &verifier,
+        execute.as_ref(),
+    ))
+    .await?;
+    assert!(matches!(delivery, Err(ChannelError::RetriesExhausted { .. })));
+    assert!(pauses.load(Ordering::SeqCst) > 0);
+    assert_eq!(run?.accepted, 1);
+    drop(execute);
+    assert_eq!(record_commands(receiver, Vec::new()).await, 1);
+    let events = settle_events(&agent, &spool, delivery)?;
+    assert_eq!((events.failures, events.acknowledged.len()), (1, 0));
+    assert!(suffixed(&agent.spool_file, SENDING_SUFFIX).exists());
+    stop.send(()).map_err(|()| "server already stopped")?;
+    bounded(handle).await???;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> TestResult {
+    let _logging = scoped_logging();
+    let dir = tempdir()?;
+    let Fixture { agent, .. } = fixture(dir.path())?;
+    let spool = claim_spool(&agent)?;
+    let mut broken = agent.clone();
+    broken.spool_file = dir.path().join("missing").join("spool");
+    let worker = start_worker(&agent.executed_file)?;
+    let execute = execute_fn(worker.sender);
+    assert!(execute(command(1)));
+    assert!(execute(command(SECOND_SEQUENCE)));
+    drop(execute);
+    let delivered = Delivered {
+        acknowledged: vec![1],
+        rejected: vec![batch(1)],
+    };
+    let settled = settle_and_join(&broken, &spool, Ok(delivered), worker.handle).await;
+    assert!(settled.is_err());
+    assert_eq!(fs::read_to_string(&agent.executed_file)?.lines().count(), COMMANDS_QUEUED);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
+    let _logging = scoped_logging();
+    let dir = tempdir()?;
+    let Fixture { server, agent } = fixture(dir.path())?;
+    let listener = bind_server(&server).await?;
+    let config = client_config(&ClientTlsPaths {
+        certificate: agent.certificate.clone(),
+        key: agent.key.clone(),
+        platform_ca: agent.platform_ca.clone(),
+    })?;
+    let dial = dialer(listener.local_addr()?, config, agent.server_name.clone());
+    let (stop, stopped) = oneshot::channel::<()>();
+    let handle = tokio::spawn(run_server(
+        server.clone(),
+        listener,
+        Box::pin(async move {
+            if let Err(error) = stopped.await {
+                tracing::warn!(%error, "stop sender dropped");
+            }
+        }),
+    ));
+    stop.send(()).map_err(|()| "server already stopped")?;
+    bounded(handle).await???;
+    let spool = claim_spool(&agent)?;
+    let log = Arc::new(open_file_log(&agent.audit_file)?);
+    let keys = Arc::new(open_keys_engine(
+        agent.keys_file.clone(),
+        shared_log_audit(&log),
+        reload_context(&agent.keys_file, "test", "acme", "keys"),
+    )?);
+    let verifier = open_verifier(&agent.agent_id, &agent.tenant, keys, &agent.state_file)?;
+    let (sender, _receiver) = mpsc::channel(WORKER_QUEUE_FOR_TEST);
+    let execute = execute_fn(sender);
+    let (delivery, run) = bounded(run_streams(
+        dial.as_ref(),
+        dial.as_ref(),
+        &|_delay: Duration| -> PauseFuture { Box::pin(std::future::ready(())) },
+        spool.batches.clone(),
+        &verifier,
+        execute.as_ref(),
+    ))
+    .await?;
+    assert!(delivery.is_err());
+    assert!(matches!(run, Err(AppError::AttemptsExhausted { .. })));
     Ok(())
 }

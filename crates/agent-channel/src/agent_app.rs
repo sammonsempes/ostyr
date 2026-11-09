@@ -1,8 +1,9 @@
 use crate::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use crate::client::{backoff_delay, connect_channel, deliver_events, heartbeat, random_jitter, run_commands};
-use crate::error::AppError;
-use crate::model::{ClientTlsPaths, CommandRun};
-use crate::spool::{claim_spool, finish_spool, quarantine, suffixed, MAX_REJECTED_BYTES, REJECTED_SUFFIX};
+use crate::error::{AppError, ChannelError};
+use crate::model::{ClientTlsPaths, CommandRun, Delivered};
+use crate::proto::EventBatch;
+use crate::spool::{claim_spool, finish_spool, quarantine, suffixed, Spool, MAX_REJECTED_BYTES, REJECTED_SUFFIX};
 use crate::tls::client_config;
 use crate::types::{DialFn, ExecuteFn, PauseFn, SharedClientConfig};
 use agent_command::cli::seconds_since_epoch;
@@ -63,8 +64,17 @@ pub struct AgentFile {
 #[derive(Debug)]
 pub struct AgentOutcome {
     pub acknowledged: Vec<u64>,
+    pub event_failures: u32,
     pub run: CommandRun,
     pub executed: u64,
+}
+
+
+/// What event delivery settled in one run: the acknowledged sequences and how many deliveries failed.
+#[derive(Debug)]
+pub struct EventsOutcome {
+    pub acknowledged: Vec<u64>,
+    pub failures: u32,
 }
 
 
@@ -167,7 +177,66 @@ pub async fn session_attempt(dial: &DialFn, verifier: &Verifier, execute: &Execu
 }
 
 
-/// Sends the spooled events, then heartbeats and runs the command stream until the server ends it; accepted commands go to a worker.
+/// Runs event delivery and the command stream side by side: neither waits for the other, each keeps its own deadlines and backoff.
+pub async fn run_streams(
+    events_dial: &DialFn,
+    commands_dial: &DialFn,
+    pause: &PauseFn,
+    batches: Vec<EventBatch>,
+    verifier: &Verifier,
+    execute: &ExecuteFn,
+) -> (Result<Delivered, ChannelError>, Result<CommandRun, AppError>) {
+    tokio::join!(
+        deliver_events(events_dial, pause, batches),
+        run_attempts(|| session_attempt(commands_dial, verifier, execute), pause)
+    )
+}
+
+
+/// A failed delivery is logged and counted, its batches stay in the claimed spool for the next run; a delivery that settled is written out.
+pub fn settle_events(file: &AgentFile, spool: &Spool, delivery: Result<Delivered, ChannelError>) -> Result<EventsOutcome, AppError> {
+    match delivery {
+        Ok(delivered) => {
+            quarantine(&suffixed(&file.spool_file, REJECTED_SUFFIX), &delivered.rejected, MAX_REJECTED_BYTES)?;
+            let settled: Vec<u64> = delivered
+                .acknowledged
+                .iter()
+                .copied()
+                .chain(delivered.rejected.iter().map(|batch| batch.sequence))
+                .collect();
+            finish_spool(spool, &settled)?;
+            Ok(EventsOutcome {
+                acknowledged: delivered.acknowledged,
+                failures: 0,
+            })
+        }
+        Err(error) => {
+            tracing::error!(%error, "event delivery failed, the spool is kept for the next run");
+            Ok(EventsOutcome {
+                acknowledged: Vec::new(),
+                failures: 1,
+            })
+        }
+    }
+}
+
+
+/// Settles the events, then always waits for the worker so no accepted command is lost to a failed settle; the settle error wins.
+pub async fn settle_and_join(
+    file: &AgentFile,
+    spool: &Spool,
+    delivery: Result<Delivered, ChannelError>,
+    handle: JoinHandle<u64>,
+) -> Result<(EventsOutcome, u64), AppError> {
+    let settled = settle_events(file, spool, delivery);
+    let joined = handle.await;
+    let events = settled?;
+    let executed = joined?;
+    Ok((events, executed))
+}
+
+
+/// Heartbeats and runs the command stream while the spooled events are delivered; a failed event delivery never stops commands.
 pub async fn run_agent(file: &AgentFile, pause: &PauseFn) -> Result<AgentOutcome, AppError> {
     let address: SocketAddr = file.server.parse()?;
     let config = client_config(&ClientTlsPaths {
@@ -177,16 +246,6 @@ pub async fn run_agent(file: &AgentFile, pause: &PauseFn) -> Result<AgentOutcome
     })?;
     let dial = dialer(address, config, file.server_name.clone());
     let spool = claim_spool(file)?;
-    let delivered = deliver_events(dial.as_ref(), pause, spool.batches.clone()).await?;
-    quarantine(&suffixed(&file.spool_file, REJECTED_SUFFIX), &delivered.rejected, MAX_REJECTED_BYTES)?;
-    let settled: Vec<u64> = delivered
-        .acknowledged
-        .iter()
-        .copied()
-        .chain(delivered.rejected.iter().map(|batch| batch.sequence))
-        .collect();
-    finish_spool(&spool, &settled)?;
-    let acknowledged = delivered.acknowledged;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let keys = Arc::new(open_keys_engine(
         file.keys_file.clone(),
@@ -198,11 +257,13 @@ pub async fn run_agent(file: &AgentFile, pause: &PauseFn) -> Result<AgentOutcome
     let verifier = open_verifier(&file.agent_id, &file.tenant, keys, &file.state_file)?;
     let worker = start_worker(&file.executed_file)?;
     let execute = execute_fn(worker.sender);
-    let dial_ref = dial.as_ref();
-    let verifier_ref = &verifier;
-    let execute_ref = execute.as_ref();
-    let run = run_attempts(move || session_attempt(dial_ref, verifier_ref, execute_ref), pause).await?;
+    let (delivery, run) = run_streams(dial.as_ref(), dial.as_ref(), pause, spool.batches.clone(), &verifier, execute.as_ref()).await;
     drop(execute);
-    let executed = worker.handle.await?;
-    Ok(AgentOutcome { acknowledged, run, executed })
+    let (events, executed) = settle_and_join(file, &spool, delivery, worker.handle).await?;
+    Ok(AgentOutcome {
+        acknowledged: events.acknowledged,
+        event_failures: events.failures,
+        run: run?,
+        executed,
+    })
 }
