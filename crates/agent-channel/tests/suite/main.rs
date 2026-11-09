@@ -5,6 +5,7 @@ mod hostile;
 mod identity;
 mod keepalive;
 mod pki;
+mod preface;
 mod resilience;
 mod revocation;
 mod revocation_support;

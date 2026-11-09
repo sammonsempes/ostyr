@@ -38,6 +38,7 @@ pub fn invalid_settings(settings: &ChannelSettings) -> Vec<&'static str> {
         ("silence_check_interval_seconds", settings.silence_check_interval_seconds == 0),
         ("max_streams_per_connection", settings.max_streams_per_connection == 0),
         ("request_timeout_seconds", settings.request_timeout_seconds == 0),
+        ("first_request_timeout_seconds", settings.first_request_timeout_seconds == 0),
         (
             "max_total_connections",
             settings.max_total_connections == 0 || settings.max_total_connections > MAX_TOTAL_CONNECTIONS_LIMIT,

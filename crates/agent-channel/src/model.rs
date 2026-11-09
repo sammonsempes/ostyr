@@ -78,6 +78,10 @@ pub const DEFAULT_MAX_INFLIGHT_PER_AGENT: usize = 8;
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 
 
+/// From TLS completion to the first HTTP/2 request: a peer that sends nothing, or only the preface, is dropped after this long.
+pub const DEFAULT_FIRST_REQUEST_TIMEOUT_SECONDS: u64 = 10;
+
+
 pub const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 1_024;
 
 
@@ -136,6 +140,16 @@ pub const SERVER_KEEPALIVE_INTERVAL_SECONDS: u64 = 20;
 
 
 pub const SERVER_KEEPALIVE_TIMEOUT_SECONDS: u64 = 10;
+
+
+/// TCP keepalive on accepted sockets: idle time before the first probe, probe interval and probes, so a silent peer is dropped after 20 + 5 * 3 = 35 s.
+pub const TCP_KEEPALIVE_IDLE_SECONDS: u64 = 20;
+
+
+pub const TCP_KEEPALIVE_INTERVAL_SECONDS: u64 = 5;
+
+
+pub const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
 
 pub const BACKOFF_INITIAL_MILLIS: u64 = 500;
@@ -251,6 +265,7 @@ pub struct ChannelSettings {
     pub max_streams_per_connection: u32,
     pub max_inflight_per_agent: usize,
     pub request_timeout_seconds: u64,
+    pub first_request_timeout_seconds: u64,
     pub max_total_connections: usize,
     pub max_pending_handshakes: usize,
     pub max_pending_handshakes_per_source: usize,
@@ -271,6 +286,7 @@ impl Default for ChannelSettings {
             max_streams_per_connection: DEFAULT_MAX_STREAMS_PER_CONNECTION,
             max_inflight_per_agent: DEFAULT_MAX_INFLIGHT_PER_AGENT,
             request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            first_request_timeout_seconds: DEFAULT_FIRST_REQUEST_TIMEOUT_SECONDS,
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_pending_handshakes_per_source: DEFAULT_MAX_PENDING_HANDSHAKES_PER_SOURCE,
@@ -296,6 +312,7 @@ pub struct Counters {
     pub commands_refused: AtomicU64,
     pub connections_capped: AtomicU64,
     pub handshake_timeouts: AtomicU64,
+    pub first_request_timeouts: AtomicU64,
     pub handshakes_evicted: AtomicU64,
     pub handshakes_refused: AtomicU64,
 }

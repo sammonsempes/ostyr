@@ -61,6 +61,8 @@ pub enum ChannelError {
     Handshake(#[source] io::Error),
     #[error("TLS handshake not finished after {seconds} seconds, connection dropped")]
     HandshakeTimeout { seconds: u64 },
+    #[error("no HTTP/2 request {seconds} seconds after the TLS handshake, connection dropped")]
+    FirstRequestTimeout { seconds: u64 },
     #[error("TLS handshake dropped to make room for a newer connection")]
     HandshakeEvicted,
     #[error("{limit} authenticated connections already open, connection dropped")]
