@@ -12,4 +12,12 @@ pub enum OncallError {
     OutOfBounds { what: &'static str, value: u64, min: u64, max: u64 },
     #[error("override of `{person}` ends before it starts")]
     OverrideRange { person: String },
+    #[error("`{name}` ends before it starts")]
+    ExpiryRange { name: String },
+    #[error("invalid regex `{pattern}`")]
+    InvalidRegex {
+        pattern: String,
+        #[source]
+        source: regex::Error,
+    },
 }

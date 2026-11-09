@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 
 /// A rotation: `participants` take turns every `period_days`, the first hand-off is `start` in the schedule's local time.
@@ -82,4 +83,75 @@ pub enum EscalationState {
     Acknowledged,
     Waiting,
     Level(usize),
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    Equal,
+    Regex,
+}
+
+
+/// A regex matcher is anchored: it must match the whole label value.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Matcher {
+    pub label: String,
+    pub kind: MatchKind,
+    pub value: String,
+}
+
+
+/// `expires_at` is required: a silence without an expiry is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Silence {
+    pub name: String,
+    pub matchers: Vec<Matcher>,
+    pub author: String,
+    pub reason: String,
+    pub starts_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SilenceFile {
+    pub silences: Vec<Silence>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Window {
+    pub name: String,
+    pub assets: Vec<String>,
+    pub author: String,
+    pub reason: String,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowFile {
+    pub windows: Vec<Window>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alert {
+    pub fingerprint: String,
+    pub labels: BTreeMap<String, String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertGroup {
+    pub labels: BTreeMap<String, String>,
+    pub alerts: Vec<Alert>,
 }

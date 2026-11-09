@@ -32,3 +32,33 @@ pub const MAX_DELAY_DAYS: u64 = 7;
 
 
 pub const MAX_DELAY_SECONDS: u64 = MAX_DELAY_DAYS * SECONDS_PER_DAY;
+
+
+pub const MAX_SILENCES: u64 = 1024;
+
+
+pub const MAX_WINDOWS: u64 = 256;
+
+
+pub const MAX_MATCHERS: u64 = 16;
+
+
+pub const MAX_ASSETS: u64 = 256;
+
+
+pub const MAX_VALUE_LEN: u64 = 256;
+
+
+pub const MAX_REGEX_LEN: u64 = 256;
+
+
+pub const MAX_REGEX_BYTES: usize = 65_536;
+
+
+pub const MAX_TEXT_LEN: u64 = 512;
+
+
+pub const MAX_ALERTS: u64 = 10_000;
+
+
+pub const MAX_GROUP_LABELS: u64 = 8;
