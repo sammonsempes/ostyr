@@ -13,6 +13,8 @@ pub mod schedule;
 pub mod secret;
 pub mod settings;
 pub mod silence;
+pub mod smtp;
 pub mod transport;
 pub mod types;
 pub mod validate;
+pub mod wire;

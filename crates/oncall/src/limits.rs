@@ -122,3 +122,36 @@ pub const MAX_TIMEOUT_MILLIS: u64 = 60_000;
 
 
 pub const MAX_SECRET_DIRS: u64 = 1024;
+
+
+pub const MAX_HOST_LEN: u64 = 253;
+
+
+pub const MAX_USERNAME_LEN: u64 = MAX_VALUE_LEN;
+
+
+pub const UTF8_MAX_BYTES: usize = 4;
+
+
+pub const MAX_MAIL_SUBJECT_BYTES: usize = SMTP_SUBJECT_LEN * UTF8_MAX_BYTES;
+
+
+pub const MAX_MAIL_BODY_BYTES: usize = SMTP_BODY_LEN * UTF8_MAX_BYTES;
+
+
+pub const MAX_REPLY_LINE_BYTES: usize = 512;
+
+
+pub const MAX_REPLY_BYTES: usize = 4096;
+
+
+pub const READ_CHUNK_BYTES: usize = 512;
+
+
+pub const WRITE_CHUNK_BYTES: usize = 1024;
+
+
+pub const MAX_IO_STEPS: usize = 4096;
+
+
+pub const MAX_CONNECT_ADDRESSES: usize = 8;

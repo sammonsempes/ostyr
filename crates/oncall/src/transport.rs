@@ -3,6 +3,7 @@ use crate::load::read_file_limited;
 use crate::model::{Channel, ChannelKind, Message};
 use crate::secret::read_secret;
 use crate::settings::TransportSettings;
+use crate::smtp::send_mail;
 use crate::types::Headers;
 use core_config::reload::{current_config, ReloadEngine};
 use serde_json::json;
@@ -119,6 +120,15 @@ pub fn post(agent: &Agent, url: &Url, payload: &Payload) -> Result<(), Transport
 
 /// One send with one settings snapshot; the secret, when the channel has one, becomes the bearer token and is zeroised on drop.
 pub fn send_one(settings: &TransportSettings, channel: &Channel, message: &Message) -> Result<(), TransportError> {
+    match channel.kind {
+        ChannelKind::Smtp => send_mail(settings, channel, message),
+        _ => send_https(settings, channel, message),
+    }
+}
+
+
+/// Every kind but smtp: a POST to the channel's https URL.
+pub fn send_https(settings: &TransportSettings, channel: &Channel, message: &Message) -> Result<(), TransportError> {
     check_text(message)?;
     let url = https_url(channel)?;
     let mut prepared = payload(channel.kind, message)?;
@@ -132,7 +142,7 @@ pub fn send_one(settings: &TransportSettings, channel: &Channel, message: &Messa
 }
 
 
-/// The T109 sender: the error text is fixed (it never holds the target, a header or a secret) and `notify` reports `sender failed`.
+/// The T109 sender for every kind, mail included: the error text is fixed (it never holds the target, a header or a secret) and `notify` reports `sender failed`.
 pub fn https_sender(engine: &ReloadEngine<TransportSettings>) -> impl FnMut(&Channel, &Message) -> Result<(), String> + '_ {
     move |channel, message| send_one(&current_config(engine), channel, message).map_err(|error| error.to_string())
 }
