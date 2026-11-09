@@ -3,6 +3,7 @@
 use crate::types::UnmatchedCounts;
 use rpm_version::Evr;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -176,4 +177,50 @@ pub struct EolFinding {
     pub ecosystem: String,
     pub cycle: String,
     pub end_date: time::Date,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedSettings {
+    pub sha256: String,
+    #[serde(default)]
+    pub prefix_licences: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allowed_licences: Vec<String>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedLimits {
+    pub max_archive_bytes: u64,
+    pub max_entries: usize,
+    pub max_entry_bytes: u64,
+    pub max_total_bytes: u64,
+    pub max_ratio: u64,
+    pub ratio_floor_bytes: u64,
+    pub max_retained_items: u64,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Directory {
+    pub entries: u64,
+    pub bytes: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedRecord {
+    pub record: OsvRecord,
+    pub licence: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FeedReport {
+    pub records: Vec<LoadedRecord>,
+    pub bad_entries: usize,
+    pub dropped_by_licence: usize,
+    pub retained_items: u64,
 }
