@@ -7,7 +7,7 @@ use core_audit::log::{append, genesis_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_config::parse::parse_document;
 use core_config::plan::{change_of, Change, ChangeKind};
-use core_config::reload::{bounded_parameter, changed_settings_text, current_config, diff_text, reload, ReloadOutcome};
+use core_config::reload::{bounded_parameter, changed_files_text, changed_settings_text, current_config, diff_text, reload, ReloadOutcome};
 use core_config::watch::watch_files;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
@@ -33,6 +33,9 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::OffsetDateTime;
 use types::TestResult;
+
+
+const CHANGED_KEYS: usize = 300;
 
 
 const CATALOGUE: &str = include_str!("../fixtures/catalogue.yaml");
@@ -1428,6 +1431,10 @@ fn reload_entry(changes: &[Change]) -> NewEntry {
                 "changed_settings".to_owned(),
                 bounded_parameter("changed_settings", &changed_settings_text(changes)),
             ),
+            (
+                "changed_files".to_owned(),
+                bounded_parameter("changed_files", &changed_files_text(changes)),
+            ),
         ]
         .into(),
     }
@@ -1462,10 +1469,25 @@ fn a_key_holding_a_comma_and_another_file_prefix_retargets_only_the_changed_file
     let key = change_of(ChangeKind::Update, "a.yaml::x,other.yaml::y", "1", "2");
     assert_eq!(retarget(reload_entry(&[key]), &two_files()).target, "a.yaml");
     let raw = NewEntry {
-        parameters: [("changed_settings".to_owned(), "a.yaml::x,other.yaml::y".to_owned())].into(),
+        parameters: [("changed_files".to_owned(), "a.yaml::x,other.yaml::y".to_owned())].into(),
         ..reload_entry(&[])
     };
     assert_eq!(retarget(raw, &two_files()).target, "catalogue");
+    Ok(())
+}
+
+
+#[test]
+fn a_cut_changed_settings_still_names_every_changed_file() -> Result<(), Box<dyn Error>> {
+    let mut changes: Vec<Change> = (0..CHANGED_KEYS)
+        .map(|index| change_of(ChangeKind::Update, &format!("a.yaml::k{index:04}"), "1", "2"))
+        .collect();
+    changes.push(change_of(ChangeKind::Update, "b.yaml::z", "1", "2"));
+    let entry = reload_entry(&changes);
+    let settings = entry.parameters.get("changed_settings").ok_or("no changed_settings")?;
+    assert!(settings.contains("more keys omitted"), "{settings}");
+    let files = vec!["a.yaml".to_owned(), "b.yaml".to_owned(), "c.yaml".to_owned()];
+    assert_eq!(retarget(entry, &files).target, "a.yaml,b.yaml");
     Ok(())
 }
 
