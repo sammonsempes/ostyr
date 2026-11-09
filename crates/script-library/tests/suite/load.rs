@@ -224,3 +224,18 @@ fn files_are_loaded_from_disk() -> TestResult {
     assert!(matches!(missing, ScriptError::Config(_)));
     Ok(())
 }
+
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_without_blocking() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("pipe.yaml");
+    let status = std::process::Command::new("mkfifo").arg(&path).status()?;
+    assert!(status.success());
+    let error = refusal(load_manifest(&path))?;
+    assert!(matches!(error, ScriptError::NotRegularFile(_)));
+    let folder = refusal(load_manifest(directory.path()))?;
+    assert!(matches!(folder, ScriptError::Config(_) | ScriptError::NotRegularFile(_)));
+    Ok(())
+}

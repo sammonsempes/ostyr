@@ -13,8 +13,22 @@ pub const UNC_LENGTH: usize = 2;
 pub const PARENT: &str = "..";
 
 
+pub const RESERVED_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+    "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+
 pub fn is_separator(character: char) -> bool {
     matches!(character, '/' | '\\')
+}
+
+
+/// A Windows device name, with or without an extension, in any case.
+pub fn is_reserved_name(part: &str) -> bool {
+    part.split('.')
+        .next()
+        .is_some_and(|stem| RESERVED_NAMES.iter().any(|name| name.eq_ignore_ascii_case(stem)))
 }
 
 
@@ -24,14 +38,15 @@ fn is_drive(part: &str) -> bool {
 }
 
 
-/// Components of a plain absolute path (`/x` or `C:\x`), or `None` when relative, too long, holding a control character, a `..`, a UNC start or a component ending in a dot or space.
+/// Components of a plain absolute path (`/x` or `C:\x`); `None` when relative, too long, control character, `..`, UNC, device name or dot/space end.
 pub fn absolute_components(path: &str) -> Option<Vec<&str>> {
     let parts: Vec<&str> = path.split(is_separator).filter(|part| !part.is_empty()).collect();
     let rooted = path.starts_with('/');
     let drive_rooted = !rooted && path.len() > DRIVE_ONLY_LENGTH && parts.first().is_some_and(|first| is_drive(first));
     let unc = path.chars().take(UNC_LENGTH).filter(|character| is_separator(*character)).count() == UNC_LENGTH;
     let normalised = parts.iter().all(|part| !part.ends_with(['.', ' ']));
-    let plain = path.len() <= MAX_PATH_LENGTH && !path.chars().any(char::is_control) && !parts.contains(&PARENT) && !unc && normalised;
+    let device_free = parts.iter().all(|part| !is_reserved_name(part));
+    let plain = path.len() <= MAX_PATH_LENGTH && !path.chars().any(char::is_control) && !parts.contains(&PARENT) && !unc && normalised && device_free;
     let root: Vec<&str> = if rooted { vec![UNIX_ROOT] } else { Vec::new() };
     (plain && (rooted || drive_rooted)).then(|| root.into_iter().chain(parts).collect())
 }
