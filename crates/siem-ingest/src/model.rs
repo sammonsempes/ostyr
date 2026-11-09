@@ -2,7 +2,9 @@ use crate::settings::IngestSettings;
 use crate::types::{AckFn, AckToken, ClockFn, DeadLetterFn, FetchFn, PendingMap, SinkFn, SleepFn};
 use core_config::reload::ReloadEngine;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 
 
@@ -123,4 +125,24 @@ pub struct Batcher {
     pub sink: Box<SinkFn>,
     pub clock: Box<ClockFn>,
     pub sleep: Box<SleepFn>,
+}
+
+
+/// One NATS connection with its durable consumer; `held` keeps each delivered message until its acknowledgement.
+pub struct Session {
+    pub client: async_nats::Client,
+    pub jetstream: async_nats::jetstream::Context,
+    pub consumer: async_nats::jetstream::consumer::PullConsumer,
+    pub held: HashMap<AckToken, async_nats::jetstream::Message>,
+    pub dropped: Arc<AtomicBool>,
+    pub settings: Arc<IngestSettings>,
+}
+
+
+/// The runtime and the settings engine the three `Wiring` closures share; the session is replaced after any failure.
+pub struct Link {
+    pub runtime: tokio::runtime::Runtime,
+    pub settings: Arc<ReloadEngine<IngestSettings>>,
+    pub session: Mutex<Option<Session>>,
+    pub next_token: AtomicU64,
 }

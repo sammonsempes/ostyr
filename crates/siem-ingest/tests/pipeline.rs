@@ -1,10 +1,10 @@
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
-use siem_ingest::batcher::new_batcher;
+use siem_ingest::batcher::{new_batcher, push};
 use siem_ingest::error::{InsertClass, InsertError, PipelineError};
-use siem_ingest::model::{AckAction, CycleReport, Delivery, LoopReport, Pipeline, Wiring};
-use siem_ingest::pipeline::{new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, MAX_LOOP_CYCLES, POISON_REASON};
+use siem_ingest::model::{AckAction, CycleReport, Delivery, FlushReport, LoopReport, Message, Pipeline, Wiring};
+use siem_ingest::pipeline::{new_pipeline, pending_bytes, poison_text, run_cycle, run_loop, settle, MAX_LOOP_CYCLES, POISON_REASON};
 use siem_ingest::settings::open_settings;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -18,6 +18,9 @@ use time::OffsetDateTime;
 
 
 const EVENT: &str = r#"{"@timestamp":"2026-01-01T00:00:00Z","ecs":{"version":"8.11"},"event":{"kind":"event"}}"#;
+
+
+const BAD_MARK: &str = "BAD";
 
 
 const START: i64 = 1_800_000_000;
@@ -81,6 +84,7 @@ pub struct Rig {
     pub queue: Arc<Queue>,
     pub sink_error: Arc<Mutex<Option<String>>>,
     pub poison: Arc<AtomicBool>,
+    pub split_poison: Arc<AtomicBool>,
     pub ack_fails: Arc<AtomicBool>,
     pub dead_fails: Arc<AtomicBool>,
     pub clock: Arc<AtomicI64>,
@@ -104,6 +108,7 @@ fn rig(yaml: &str) -> Result<Rig, Box<dyn Error>> {
     let queue: Arc<Queue> = Arc::default();
     let sink_error: Arc<Mutex<Option<String>>> = Arc::default();
     let poison = Arc::new(AtomicBool::new(false));
+    let split_poison = Arc::new(AtomicBool::new(false));
     let ack_fails = Arc::new(AtomicBool::new(false));
     let dead_fails = Arc::new(AtomicBool::new(false));
     let clock = Arc::new(AtomicI64::new(START));
@@ -111,6 +116,7 @@ fn rig(yaml: &str) -> Result<Rig, Box<dyn Error>> {
     let sink_lines = Arc::clone(&lines);
     let sink_failure = Arc::clone(&sink_error);
     let sink_poison = Arc::clone(&poison);
+    let sink_split = Arc::clone(&split_poison);
     let ticking = Arc::clone(&clock);
     let slept = Arc::clone(&delays);
     let batcher = new_batcher(
@@ -118,7 +124,11 @@ fn rig(yaml: &str) -> Result<Rig, Box<dyn Error>> {
         Box::new(move |tenant, documents| {
             record(&sink_lines, format!("sink:{tenant}:{}", documents.len()))?;
             let failure = sink_failure.lock().map_err(|_| "poisoned")?.clone();
-            if sink_poison.load(Ordering::SeqCst) {
+            let malformed = documents.len() > 1
+                || documents
+                    .iter()
+                    .any(|document| String::from_utf8_lossy(&document.payload).contains(BAD_MARK));
+            if sink_poison.load(Ordering::SeqCst) || (sink_split.load(Ordering::SeqCst) && malformed) {
                 Err(Box::new(InsertError::Class(InsertClass::ParseError)))
             } else {
                 failure.map_or(Ok(()), |text| Err(text.into()))
@@ -166,6 +176,7 @@ fn rig(yaml: &str) -> Result<Rig, Box<dyn Error>> {
         queue,
         sink_error,
         poison,
+        split_poison,
         ack_fails,
         dead_fails,
         clock,
@@ -457,5 +468,69 @@ fn the_loop_stops_when_asked() -> Result<(), Box<dyn Error>> {
     let mut rig = rig("")?;
     assert_eq!(run_loop(&mut rig.pipeline, &|| true), LoopReport::default());
     assert_eq!(CycleReport::default().fetched, 0);
+    Ok(())
+}
+
+
+#[test]
+fn an_unparsable_batch_is_split_so_the_valid_rows_land() -> Result<(), Box<dyn Error>> {
+    let mut rig = rig("max_batch_messages: 3\nretry_attempts: 1\n")?;
+    rig.split_poison.store(true, Ordering::SeqCst);
+    let bad = EVENT.replace("\"event\"}", "\"BAD\"}");
+    enqueue(
+        &rig,
+        vec![
+            delivery("events.tenant-a", EVENT, TOKEN_ONE),
+            delivery("events.tenant-a", &bad, TOKEN_TWO),
+            delivery("events.tenant-a", EVENT, TOKEN_THREE),
+        ],
+    )?;
+    let report = run_cycle(&mut rig.pipeline)?;
+    assert_eq!(
+        lines(&rig)?,
+        [
+            "sink:tenant-a:3".to_owned(),
+            "sink:tenant-a:1".to_owned(),
+            "ack:1".to_owned(),
+            "sink:tenant-a:1".to_owned(),
+            format!("dead:tenant-a:{}:{POISON_REASON}", bad.len()),
+            "ack:2".to_owned(),
+            "sink:tenant-a:1".to_owned(),
+            "ack:3".to_owned(),
+        ]
+    );
+    assert_eq!(report.acknowledged, TWO + 1);
+    assert_eq!(report.dead_lettered, 1);
+    assert!(rig.pipeline.pending.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_isolated_message_the_batcher_refuses_is_naked_not_left_pending() -> Result<(), Box<dyn Error>> {
+    let yaml = format!("max_message_bytes: {EVENT_BYTES}\nmax_batch_bytes: {HOLD_BYTES}\nmax_buffered_bytes: {HOLD_BYTES}\n");
+    let mut rig = rig(&yaml)?;
+    let message = |token: u64| Message {
+        tenant: "tenant-a".to_owned(),
+        payload: EVENT.as_bytes().to_vec(),
+        token,
+    };
+    push(&mut rig.pipeline.batcher, &message(TOKEN_THREE))?;
+    [TOKEN_ONE, TOKEN_TWO].into_iter().for_each(|token| {
+        rig.pipeline.pending.insert(token, message(token));
+    });
+    let flushed = FlushReport {
+        tenant: "tenant-a".to_owned(),
+        acknowledge: Vec::new(),
+        unacknowledged: vec![TOKEN_ONE, TOKEN_TWO],
+        dead_letters: Vec::new(),
+        delivered: 0,
+        sink_error: Some(poison_text()),
+    };
+    let mut report = CycleReport::default();
+    settle(&mut rig.pipeline, flushed, &mut report);
+    assert_eq!(lines(&rig)?, ["nak:1", "sink:tenant-a:1", "ack:3", "sink:tenant-a:1", "ack:2"]);
+    assert_eq!(report.redelivered, 1);
+    assert!(rig.pipeline.pending.is_empty());
     Ok(())
 }
