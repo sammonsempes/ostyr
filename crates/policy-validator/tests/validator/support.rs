@@ -18,6 +18,21 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 
+pub const BPF_AGENT_INDEX: usize = 18;
+
+
+pub const TETRAGON_SENSOR_INDEX: usize = 8;
+
+
+pub const OSQUERYD_SENSOR_INDEX: usize = 6;
+
+
+pub const OSTYR_SENSOR_INDEX: usize = 11;
+
+
+pub const OSTYR_AGENT_INDEX: usize = 2;
+
+
 pub const VERDICTS: u32 = 8;
 
 
