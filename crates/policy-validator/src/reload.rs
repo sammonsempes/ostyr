@@ -56,9 +56,16 @@ pub fn list_summary(values: &[String]) -> String {
 }
 
 
+/// Count and whether the list differs from the built-in default: no entry and no digest, a digest of a short list can be confirmed by guessing.
+pub fn sensitive_summary(values: &[String], default: &[String]) -> String {
+    format!("count={} changed={}", values.len(), values != default)
+}
+
+
 /// One key per setting, so a reload diff names what changed.
 pub fn policy_state(loaded: &LoadedPolicy) -> ConfigState {
     let policy = &loaded.policy;
+    let default = Policy::default();
     let rules: Vec<String> = policy.critical_asr_rules.iter().map(ToString::to_string).collect();
     [
         ("config_hash", loaded.hash.clone()),
@@ -68,11 +75,11 @@ pub fn policy_state(loaded: &LoadedPolicy) -> ConfigState {
         ("interpreters", joined(&policy.interpreters)),
         ("user_writable_prefixes", joined(&policy.user_writable_prefixes)),
         ("user_writable_segments", joined(&policy.user_writable_segments)),
-        ("honeytoken_paths", joined(&policy.honeytoken_paths)),
-        ("agent_paths", joined(&policy.agent_paths)),
+        ("honeytoken_paths", sensitive_summary(&policy.honeytoken_paths, &default.honeytoken_paths)),
+        ("agent_paths", sensitive_summary(&policy.agent_paths, &default.agent_paths)),
         ("critical_asr_rules", joined(&rules)),
         ("os_directories", list_summary(&policy.os_directories)),
-        ("security_sensors", list_summary(&policy.security_sensors)),
+        ("security_sensors", sensitive_summary(&policy.security_sensors, &default.security_sensors)),
         ("service_tools", list_summary(&policy.service_tools)),
         ("os_vendor_signers", list_summary(&policy.os_vendor_signers)),
     ]

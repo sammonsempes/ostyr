@@ -80,7 +80,7 @@ fn run_shm_is_a_writable_prefix() -> TestResult {
 #[test]
 fn the_reload_diff_covers_the_lists_without_their_entries() -> TestResult {
     let state = policy_state(&loaded()?);
-    for key in ["os_directories", "security_sensors", "service_tools", "os_vendor_signers"] {
+    for key in ["os_directories", "service_tools", "os_vendor_signers"] {
         let value = state.get(key).ok_or(key)?;
         assert!(value.starts_with("count="), "{key}: {value}");
         assert!(value.contains(" sha256-salted="), "{key}: {value}");

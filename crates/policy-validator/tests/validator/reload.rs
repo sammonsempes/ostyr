@@ -113,7 +113,7 @@ fn the_state_has_one_key_per_setting() -> TestResult {
     assert!(state
         .get("critical_asr_rules")
         .is_some_and(|text| text.contains("9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2")));
-    assert_eq!(state.get("honeytoken_paths").map(String::as_str), Some(""));
+    assert_eq!(state.get("honeytoken_paths").map(String::as_str), Some("count=0 changed=false"));
     Ok(())
 }
 
@@ -148,9 +148,9 @@ fn a_policy_error_travels_as_a_parse_error_with_its_message() -> TestResult {
 #[test]
 fn the_list_digest_survives_redaction_in_the_audit_record() -> TestResult {
     let bench = bench("{}")?;
-    replace_file(&bench.policy_file, "security_sensors: [edr]\n")?;
+    replace_file(&bench.policy_file, "os_directories: [/edr]\n")?;
     assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
-    replace_file(&bench.policy_file, "security_sensors: [other]\n")?;
+    replace_file(&bench.policy_file, "os_directories: [/other]\n")?;
     assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
     let text = fs::read_to_string(&bench.audit_file)?;
     let lines: Vec<&str> = text.lines().filter(|line| line.contains("sha256-salted=")).collect();
@@ -159,5 +159,32 @@ fn the_list_digest_survives_redaction_in_the_audit_record() -> TestResult {
     let first = lines.first().ok_or("none")?;
     let last = lines.last().ok_or("none")?;
     assert_ne!(first, last);
+    Ok(())
+}
+
+
+#[test]
+fn sensitive_lists_reach_the_audit_as_count_and_changed_only() -> TestResult {
+    let bench = bench("{}")?;
+    replace_file(
+        &bench.policy_file,
+        "honeytoken_paths: [/srv/canary-9]\nsecurity_sensors: [edr]\nagent_paths: [/opt/agent-7]\n",
+    )?;
+    assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
+    let text = fs::read_to_string(&bench.audit_file)?;
+    for entry in ["canary-9", "edr", "agent-7"] {
+        assert!(!text.contains(entry), "{entry}: {text}");
+    }
+    assert!(text.contains("count=1 changed=true"), "{text}");
+    assert!(!text.contains("sha256-salted"), "{text}");
+    let state = policy_state(&loaded()?);
+    for key in ["honeytoken_paths", "security_sensors", "agent_paths"] {
+        assert!(
+            state
+                .get(key)
+                .is_some_and(|value| value.contains("changed=") && !value.contains("sha256")),
+            "{key}"
+        );
+    }
     Ok(())
 }
