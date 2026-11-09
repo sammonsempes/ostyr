@@ -1,9 +1,9 @@
-use crate::apply::{apply, ApplyContext};
+use crate::apply::{apply, ApplyContext, APPLY_DECLARED_KEYS};
 use crate::error::ApplyError;
 use crate::plan::{drift, plan, Change, ChangeKind};
 use crate::types::{BoxError, ConfigState, Plan};
 use core_audit::error::AuditError;
-use core_audit::log::{append, open_file_log};
+use core_audit::log::{append_declared, open_file_log};
 use core_audit::model::{Actor, ActorKind};
 use std::fs;
 use std::io::{self, Write};
@@ -97,7 +97,7 @@ pub fn run<Output: Write>(args: &[&str], out: &mut Output) -> Result<(), ApplyCl
                 &changes,
                 &wanted,
                 &context,
-                &mut |entry| append(&log, entry),
+                &mut |entry| append_declared(&log, entry, &APPLY_DECLARED_KEYS),
                 &mut |change| apply_to_dir(state_dir, change).map_err(BoxError::from),
                 &mut || read_state(state_dir).map_err(BoxError::from),
             )?;

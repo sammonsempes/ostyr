@@ -479,6 +479,9 @@ async fn audit_records_changes_sensitive_reads_and_denials() -> TestResult {
     assert_eq!(change_record.get("request_id"), Some(&json!("req-change-1")));
     assert_eq!(change_record.get("tenant"), Some(&json!("acme")));
     assert_eq!(change_record.get("module"), Some(&json!("example")));
+    let declared = change_record.get("parameters").ok_or("no parameters")?;
+    assert_eq!(declared.get("status"), Some(&json!("200")));
+    assert_ne!(declared.get("source"), Some(&json!("[REDACTED]")));
     let text = fs::read_to_string(&fx.config.audit_log)?;
     assert!(!text.contains(PASSWORD));
     assert!(!text.contains(&token));

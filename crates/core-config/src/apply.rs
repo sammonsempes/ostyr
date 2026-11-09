@@ -5,6 +5,9 @@ use core_audit::model::{Actor, NewEntry, Outcome};
 use time::OffsetDateTime;
 
 
+pub const APPLY_DECLARED_KEYS: [&str; 1] = ["diff"];
+
+
 #[derive(Debug, Clone)]
 pub struct ApplyContext {
     pub actor: Actor,

@@ -3,12 +3,13 @@ mod types;
 
 
 use core_audit::error::AuditError;
-use core_audit::log::{append, genesis_log};
-use core_audit::model::{Actor, ActorKind};
+use core_audit::log::{append, append_declared, genesis_log};
+use core_audit::model::{Actor, ActorKind, Outcome};
 use core_audit::verify::verify;
-use core_config::apply::{apply, ApplyContext};
+use core_config::apply::{apply, audit_entry, ApplyContext, APPLY_DECLARED_KEYS};
 use core_config::error::ApplyError;
-use core_config::plan::{plan, Change, ChangeKind};
+use core_config::plan::{change_of, plan, Change, ChangeKind};
+use core_config::reload::{reload_entry, ReloadContext, RELOAD_DECLARED_KEYS};
 use core_config::types::{BoxError, ConfigState};
 use std::cell::RefCell;
 use std::io::{self, Write};
@@ -238,5 +239,34 @@ fn audit_failure_is_an_error() -> TestResult {
         ) => assert!(error.to_string().contains("audit failed")),
         other => Err(format!("unexpected {other:?}"))?,
     }
+    Ok(())
+}
+
+
+#[test]
+fn undeclared_apply_and_reload_parameters_are_redacted_and_declared_ones_kept() -> TestResult {
+    let change = change_of(ChangeKind::Create, "k", "", "v");
+    let mut apply_entry = audit_entry(&context(), &change);
+    apply_entry.parameters.insert("password".to_owned(), "hunter2".to_owned());
+    let reload_context = ReloadContext {
+        actor_id: "system".to_owned(),
+        tenant: "t".to_owned(),
+        module: "m".to_owned(),
+        target: "x".to_owned(),
+        request_id: "r".to_owned(),
+    };
+    let mut reload = reload_entry(
+        &reload_context,
+        Outcome::Success,
+        [("result", "applied".to_owned()), ("diff", "d".to_owned())],
+    );
+    reload.parameters.insert("token".to_owned(), "hunter3".to_owned());
+    let log = genesis_log(Vec::new());
+    let applied = append_declared(&log, apply_entry, &APPLY_DECLARED_KEYS)?;
+    let reloaded = append_declared(&log, reload, &RELOAD_DECLARED_KEYS)?;
+    assert_eq!(applied.parameters.get("password").map(String::as_str), Some("[REDACTED]"));
+    assert_eq!(applied.parameters.get("diff"), Some(&change.diff));
+    assert_eq!(reloaded.parameters.get("token").map(String::as_str), Some("[REDACTED]"));
+    assert_eq!(reloaded.parameters.get("result").map(String::as_str), Some("applied"));
     Ok(())
 }

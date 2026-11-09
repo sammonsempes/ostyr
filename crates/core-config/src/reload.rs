@@ -17,6 +17,9 @@ pub const RELOAD_ACTION: &str = "config.reload";
 pub const PARAMETER_COUNT: usize = 2;
 
 
+pub const RELOAD_DECLARED_KEYS: [&str; 3] = ["result", "diff", "reason"];
+
+
 /// A module's hook per configuration section: `validate` may refuse, `apply` runs after the swap.
 pub struct Subscriber<Config> {
     pub section: String,

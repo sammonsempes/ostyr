@@ -7,7 +7,7 @@ use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn
 use crate::state::{check_store_key, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
-use core_audit::log::{append, check_private, open_file_log};
+use core_audit::log::{append_declared, check_private, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
@@ -18,7 +18,7 @@ use core_auth::types::{AccountMap, CredentialMap, RandomFn, StoreKey};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
-use core_config::reload::{module_state, open_engine, reload_entry, ReloadContext, ReloadEngine, Subscriber};
+use core_config::reload::{module_state, open_engine, reload_entry, ReloadContext, ReloadEngine, Subscriber, RELOAD_DECLARED_KEYS};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use core_config::watch::watch_files;
 use data_encoding::HEXLOWER;
@@ -199,12 +199,13 @@ pub fn switch_identity(state: &ApiState, context: &ReloadContext, settings: &Api
             "identity changed from {}/{} to {}/{}, every session revoked, pending OIDC logins dropped",
             previous.module, previous.tenant, next.module, next.tenant
         );
-        append(
+        append_declared(
             &state.audit,
             current_entry(
                 state,
                 reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", changed)]),
             ),
+            &RELOAD_DECLARED_KEYS,
         )
         .map(|_| ())
         .unwrap_or_else(|error| tracing::error!(%error, "cannot record the identity change"));
@@ -273,12 +274,13 @@ pub fn switch_store(state: &ApiState, context: &ReloadContext, settings: &ApiSet
             previous.display(),
             next.display()
         );
-        append(
+        append_declared(
             &state.audit,
             current_entry(
                 state,
                 reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
             ),
+            &RELOAD_DECLARED_KEYS,
         )
         .map(|_| ())
         .unwrap_or_else(|error| tracing::error!(%error, "cannot record the accounts store switch"));
@@ -334,12 +336,13 @@ pub fn switch_audit(
         let previous = std::mem::replace(&mut *current.lock().unwrap_or_else(PoisonError::into_inner), candidate.path);
         *state.audit.state.lock().unwrap_or_else(PoisonError::into_inner) = candidate.state;
         let moved = format!("audit_log moved from {} to {}", previous.display(), settings.config.audit_log.display());
-        append(
+        append_declared(
             &state.audit,
             current_entry(
                 state,
                 reload_entry(context, Outcome::Success, [("result", "applied".to_owned()), ("diff", moved)]),
             ),
+            &RELOAD_DECLARED_KEYS,
         )
         .map(|_| ())
         .unwrap_or_else(|error| tracing::error!(%error, "cannot record the audit log switch in the new log"));
@@ -627,7 +630,7 @@ pub fn subscribers(
 
 pub fn audit_into(state: &SharedState) -> Box<SharedAuditFn> {
     let log = state.clone();
-    Box::new(move |entry| append(&log.audit, current_entry(&log, entry)))
+    Box::new(move |entry| append_declared(&log.audit, current_entry(&log, entry), &RELOAD_DECLARED_KEYS))
 }
 
 
