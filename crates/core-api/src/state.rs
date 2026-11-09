@@ -1,7 +1,7 @@
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, StateInputs};
 use crate::oidc::load_oidc;
-use crate::previous::{read_previous_key, record_previous, retire_previous, ROTATION_RESUMED};
+use crate::previous::{read_previous_key, record_previous, remove_stale_previous, retire_previous, ROTATION_RESUMED};
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
 use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
@@ -162,8 +162,23 @@ pub fn check_store_key(accounts: &AccountMap, key: &StoreKey, key_file: &Path) -
 pub fn load_sealed_store(config: &ApiConfig, key: &StoreKey, audit: &AuditLog<File>) -> Result<(AccountMap, CredentialMap), StartupError> {
     let (accounts, credentials) = load_store_file(&config.accounts_store)?;
     match check_store_key(&accounts, key, Path::new(&config.key_file)) {
-        Ok(()) => Ok((accounts, credentials)),
+        Ok(()) => {
+            remove_stale_previous(audit, &startup_context(config), Path::new(&config.key_file));
+            Ok((accounts, credentials))
+        }
         Err(mismatch) => resume_rotation(config, key, audit, &accounts, mismatch),
+    }
+}
+
+
+/// The audit context of the key work done while the service starts.
+pub fn startup_context(config: &ApiConfig) -> ReloadContext {
+    ReloadContext {
+        actor_id: RELOAD_ACTOR.to_owned(),
+        tenant: config.tenant.clone(),
+        module: config.module.clone(),
+        target: config.key_file.clone(),
+        request_id: STARTUP_REQUEST_ID.to_owned(),
     }
 }
 
@@ -183,13 +198,7 @@ pub fn resume_rotation(
         source,
     })?;
     let previous = found.filter(|candidate| unopened_secrets(accounts, candidate).0 == 0).ok_or(mismatch)?;
-    let context = ReloadContext {
-        actor_id: RELOAD_ACTOR.to_owned(),
-        tenant: config.tenant.clone(),
-        module: config.module.clone(),
-        target: config.key_file.clone(),
-        request_id: STARTUP_REQUEST_ID.to_owned(),
-    };
+    let context = startup_context(config);
     let reseal = |stored: &mut AccountMap, _: &mut CredentialMap| reseal_accounts(stored, &previous, key, os_random);
     let updated = update_store_file(&config.accounts_store, os_random, reseal)?;
     updated.saved?;

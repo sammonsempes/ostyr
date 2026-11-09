@@ -167,3 +167,17 @@ pub fn retire_previous_with<Output: Write>(audit: &AuditLog<Output>, context: &R
 pub fn retire_previous<Output: Write>(audit: &AuditLog<Output>, context: &ReloadContext, key_file: &Path) {
     retire_previous_with(audit, context, key_file, remove_synced);
 }
+
+
+/// At startup, with the key file opening every secret: a `.previous` left by an interrupted rotation is checked through one handle, then removed and audited.
+pub fn remove_stale_previous<Output: Write>(audit: &AuditLog<Output>, context: &ReloadContext, key_file: &Path) {
+    let target = previous_key_path(key_file);
+    match open_no_follow(&target)
+        .and_then(|file| file.metadata())
+        .and_then(|metadata| check_previous_metadata(&metadata))
+    {
+        Ok(()) => retire_previous(audit, context, key_file),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => tracing::error!(%error, file = %target.display(), "a stale previous key is left in place"),
+    }
+}
