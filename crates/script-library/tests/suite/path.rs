@@ -85,3 +85,55 @@ fn prefix_match_is_by_component() -> TestResult {
     assert!(!is_under_prefixes("/var/log/x", &[]));
     Ok(())
 }
+
+
+#[test]
+fn windows_device_names_are_refused_in_any_component() -> TestResult {
+    let refused = [
+        "/var/CON",
+        "/var/con",
+        "/var/nul.txt",
+        "C:\\Data\\Aux.log",
+        "/a/COM1/b",
+        "/a/lpt9.tar.gz",
+        "/prn",
+    ];
+    refused.iter().try_for_each(|path| -> TestResult {
+        assert!(absolute_components(path).is_none(), "{path}");
+        Ok(())
+    })?;
+    let allowed = ["/var/console", "/var/COM10", "/var/com", "/var/.con", "/var/lpt", "/var/nulls.txt"];
+    allowed.iter().try_for_each(|path| -> TestResult {
+        assert!(absolute_components(path).is_some(), "{path}");
+        Ok(())
+    })?;
+    assert!(!is_under_prefixes("/var/log/CON", &prefixes(&["/var/log"])));
+    Ok(())
+}
+
+
+#[test]
+fn device_names_with_spaces_streams_and_superscripts_are_refused() -> TestResult {
+    let refused = [
+        "C:\\x\\nul .txt",
+        "C:\\x\\CON .log",
+        "C:\\x\\NUL:",
+        "/var/nul .txt",
+        "/var/nul:stream",
+        "/var/COM\u{b9}",
+        "/var/com\u{b2}.txt",
+        "/var/COM\u{b3}",
+        "/var/LPT\u{b9}",
+        "/var/LPT\u{b2}",
+        "/var/lpt\u{b3}.x",
+        "/var/CONIN$",
+        "/var/conout$",
+        "/var/CLOCK$.txt",
+    ];
+    refused.iter().try_for_each(|path| -> TestResult {
+        assert!(absolute_components(path).is_none(), "{path}");
+        Ok(())
+    })?;
+    assert!(absolute_components("/var/CLOCK").is_some());
+    Ok(())
+}

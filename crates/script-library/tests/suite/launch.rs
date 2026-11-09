@@ -1,0 +1,430 @@
+use crate::common::{manifest_with, params_of, path_kind, refusal, text, text_kind, FailingReader};
+use crate::types::TestResult;
+use data_encoding::HEXLOWER;
+use script_library::error::ScriptError;
+use script_library::launch::{allowed_environment, capture, launch_script, resolve_paths, run_script, tolerate_empty_group, write_private_script};
+use script_library::model::{Interpreter, LaunchRequest, Manifest, Outcome};
+use script_library::types::Params;
+use sha2::{Digest, Sha256};
+use std::ffi::OsString;
+use std::io;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
+use std::path::Path;
+use std::process::{Child, ExitStatus};
+use std::time::Duration;
+
+
+pub const MODE_BITS: u32 = 0o777;
+
+
+pub const FILE_MODE: u32 = 0o600;
+
+
+pub const DIRECTORY_MODE: u32 = 0o700;
+
+
+pub const SMALL_CAP: u64 = 16;
+
+
+pub const OVERFLOW: usize = 5000;
+
+
+pub const PARTIAL_PREFIX: usize = 4;
+
+
+pub const EXIT_CODE: i32 = 3;
+
+
+pub const INVALID_UTF8_BYTE: u8 = 0xff;
+
+
+pub const MODE_LINE: usize = 1;
+
+
+pub const DIRECTORY_LINE: usize = 2;
+
+
+pub const LABEL_LINE: usize = 3;
+
+
+pub const ALLOWED_VARIABLES: usize = 2;
+
+
+pub const PARTIAL_DROPPED: u64 = 2;
+
+
+const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+
+fn digest_of(bytes: &[u8]) -> String {
+    HEXLOWER.encode(&Sha256::digest(bytes))
+}
+
+
+fn instant_timeout(_child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
+    Ok(None)
+}
+
+
+fn failing_wait(_child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
+    Err(io::Error::other("injected wait failure"))
+}
+
+
+fn request(root: &Path, interpreter: Interpreter, script: &str) -> LaunchRequest {
+    let manifest = Manifest {
+        sha256: digest_of(script.as_bytes()),
+        ..manifest_with(interpreter, vec![])
+    };
+    LaunchRequest {
+        manifest,
+        params: Params::new(),
+        script_bytes: script.as_bytes().to_vec(),
+        work_root: root.to_path_buf(),
+        environment: vec![("PATH".to_string(), SYSTEM_PATH.to_string())],
+    }
+}
+
+
+fn output_text(outcome: &Outcome) -> String {
+    String::from_utf8_lossy(&outcome.output).to_string()
+}
+
+
+fn utf8(path: &Path) -> Result<&str, &'static str> {
+    path.to_str().ok_or("path is not UTF-8")
+}
+
+
+#[test]
+fn bash_runs_the_digested_bytes_from_a_private_file() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let script = "echo \"$0\"\nstat -c '%a' \"$0\"\nstat -c '%a' \"$(dirname \"$0\")\"\necho \"$1\"\n";
+    let mut launch = request(root.path(), Interpreter::Bash, script);
+    launch
+        .manifest
+        .parameters
+        .insert("label".to_string(), text_kind(0, SMALL_CAP as usize, None));
+    launch.params = params_of(vec![("label", text("x y"))]);
+    let outcome = launch_script(&launch)?;
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(!outcome.timed_out);
+    let lines: Vec<String> = output_text(&outcome).lines().map(str::to_string).collect();
+    let path = lines.first().ok_or("path")?;
+    assert!(Path::new(path).is_absolute());
+    assert!(path.starts_with(utf8(root.path())?));
+    assert_eq!(lines.get(MODE_LINE).map(String::as_str), Some("600"));
+    assert_eq!(lines.get(DIRECTORY_LINE).map(String::as_str), Some("700"));
+    assert_eq!(lines.get(LABEL_LINE).map(String::as_str), Some("--label=x y"));
+    assert!(!Path::new(path).exists());
+    Ok(())
+}
+
+
+#[test]
+fn swapping_the_library_file_after_the_digest_has_no_effect() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let library = root.path().join("library.sh");
+    std::fs::write(&library, "echo genuine\n")?;
+    let original = request(root.path(), Interpreter::Bash, "echo genuine\n");
+    let digested = std::fs::read(&library)?;
+    std::fs::write(&library, "echo swapped\n")?;
+    let launch = LaunchRequest {
+        script_bytes: digested,
+        ..original
+    };
+    assert_eq!(output_text(&launch_script(&launch)?), "genuine\n");
+    Ok(())
+}
+
+
+#[test]
+fn bytes_that_do_not_match_the_digest_are_never_run() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let launch = LaunchRequest {
+        script_bytes: b"echo evil\n".to_vec(),
+        ..request(root.path(), Interpreter::Bash, "echo genuine\n")
+    };
+    assert!(matches!(refusal(launch_script(&launch))?, ScriptError::DigestMismatch));
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn python_runs_isolated() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let script = "import sys\nprint(sys.flags.isolated, sys.argv[0].endswith('script.py'))\n";
+    let outcome = launch_script(&request(root.path(), Interpreter::Python, script))?;
+    assert_eq!(output_text(&outcome), "1 True\n");
+    Ok(())
+}
+
+
+#[test]
+fn only_allowlisted_variables_reach_the_script() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut launch = request(root.path(), Interpreter::Bash, "env | sort\n");
+    launch.environment = vec![
+        ("PATH".to_string(), SYSTEM_PATH.to_string()),
+        ("LANG".to_string(), "C".to_string()),
+        ("SECRET_TOKEN".to_string(), "hunter2".to_string()),
+        ("LD_PRELOAD".to_string(), "/evil.so".to_string()),
+    ];
+    let shown = output_text(&launch_script(&launch)?);
+    assert!(shown.contains("LANG=C"));
+    assert!(shown.contains(&format!("PATH={SYSTEM_PATH}")));
+    assert!(!shown.contains("SECRET_TOKEN"));
+    assert!(!shown.contains("LD_PRELOAD"));
+    assert_eq!(allowed_environment(&launch.environment).len(), ALLOWED_VARIABLES);
+    Ok(())
+}
+
+
+#[test]
+fn output_beyond_the_cap_is_dropped_and_counted() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let script = format!("head -c {OVERFLOW} /dev/zero | tr '\\0' a\n");
+    let mut launch = request(root.path(), Interpreter::Bash, &script);
+    launch.manifest.max_output_bytes = SMALL_CAP;
+    let outcome = launch_script(&launch)?;
+    assert_eq!(outcome.output, b"a".repeat(SMALL_CAP as usize));
+    assert_eq!(outcome.dropped_bytes, OVERFLOW as u64 - SMALL_CAP);
+    Ok(())
+}
+
+
+#[test]
+fn stderr_shares_the_pipe_and_exit_code_is_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let script = format!("echo oops >&2\nexit {EXIT_CODE}\n");
+    let outcome = launch_script(&request(root.path(), Interpreter::Bash, &script))?;
+    assert_eq!(outcome.exit_code, Some(EXIT_CODE));
+    assert_eq!(output_text(&outcome), "oops\n");
+    assert_eq!(outcome.dropped_bytes, 0);
+    Ok(())
+}
+
+
+#[test]
+fn deadline_kills_the_whole_process_group() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let outcome = run_script(&request(root.path(), Interpreter::Bash, "sleep 300 &\nwait\n"), instant_timeout)?;
+    assert!(outcome.timed_out);
+    assert_eq!(outcome.exit_code, None);
+    Ok(())
+}
+
+
+#[test]
+fn wait_failure_kills_and_is_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let error = refusal(run_script(&request(root.path(), Interpreter::Bash, "sleep 300\n"), failing_wait))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("wait")));
+    Ok(())
+}
+
+
+#[test]
+fn missing_interpreter_is_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut launch = request(root.path(), Interpreter::Bash, "echo hi\n");
+    launch.environment = vec![("PATH".to_string(), "/nonexistent".to_string())];
+    let error = refusal(launch_script(&launch))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("start")));
+    Ok(())
+}
+
+
+#[test]
+fn unusable_work_root_is_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let launch = request(&root.path().join("absent"), Interpreter::Bash, "echo hi\n");
+    let error = refusal(launch_script(&launch))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("directory")));
+    Ok(())
+}
+
+
+#[test]
+fn invalid_request_is_refused_before_anything_is_written() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut launch = request(root.path(), Interpreter::Bash, "echo hi\n");
+    launch.manifest.script = "-c".to_string();
+    assert!(matches!(refusal(launch_script(&launch))?, ScriptError::InvalidManifest { .. }));
+    let mut missing = request(root.path(), Interpreter::Bash, "echo hi\n");
+    missing
+        .manifest
+        .parameters
+        .insert("label".to_string(), text_kind(0, SMALL_CAP as usize, None));
+    assert!(matches!(refusal(launch_script(&missing))?, ScriptError::MissingParameter(_)));
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn private_files_have_owner_only_modes_and_never_overwrite() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let (directory, path) = write_private_script(root.path(), "script.sh", b"echo hi\n")?;
+    assert_eq!(std::fs::metadata(&path)?.permissions().mode() & MODE_BITS, FILE_MODE);
+    assert_eq!(std::fs::metadata(directory.path())?.permissions().mode() & MODE_BITS, DIRECTORY_MODE);
+    assert_eq!(std::fs::read(&path)?, b"echo hi\n");
+    let again = std::fs::OpenOptions::new().write(true).create_new(true).open(&path);
+    assert!(again.is_err());
+    let nested = refusal(write_private_script(directory.path(), "../escape/x", b"x").map(drop))?;
+    assert!(matches!(nested, ScriptError::Io { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn capture_counts_without_buffering() -> TestResult {
+    let kept = capture(&b"abcdef"[..], PARTIAL_PREFIX as u64)?;
+    assert_eq!(kept.bytes, b"abcd");
+    assert_eq!(kept.dropped, PARTIAL_DROPPED);
+    assert!(capture(FailingReader, SMALL_CAP).is_err());
+    Ok(())
+}
+
+
+fn path_manifest(prefix: &str) -> Manifest {
+    manifest_with(
+        Interpreter::Bash,
+        vec![("target", path_kind(&[prefix])), ("label", text_kind(0, SMALL_CAP as usize, None))],
+    )
+}
+
+
+#[test]
+fn symlinks_are_resolved_before_the_prefix_check() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let allowed = base.join("allowed");
+    let outside = base.join("outside");
+    std::fs::create_dir(&allowed)?;
+    std::fs::create_dir(&outside)?;
+    std::fs::write(allowed.join("ok.txt"), "x")?;
+    std::fs::write(outside.join("secret.txt"), "x")?;
+    symlink(outside.join("secret.txt"), allowed.join("escape.txt"))?;
+    symlink(&allowed, base.join("alias"))?;
+    let manifest = path_manifest(utf8(&allowed)?);
+    let good = params_of(vec![("target", text(utf8(&allowed.join("ok.txt"))?)), ("label", text("a"))]);
+    let resolved = resolve_paths(&manifest, &good)?;
+    assert_eq!(resolved.get("target"), good.get("target"));
+    assert_eq!(resolved.get("label"), good.get("label"));
+    let aliased = params_of(vec![("target", text(utf8(&base.join("alias/ok.txt"))?))]);
+    assert_eq!(resolve_paths(&manifest, &aliased)?.get("target"), good.get("target"));
+    let escape = params_of(vec![("target", text(utf8(&allowed.join("escape.txt"))?))]);
+    assert!(matches!(refusal(resolve_paths(&manifest, &escape))?, ScriptError::PathOutsidePrefixes(_)));
+    let absent = params_of(vec![("target", text(utf8(&allowed.join("absent"))?))]);
+    assert!(matches!(refusal(resolve_paths(&manifest, &absent))?, ScriptError::PathUnresolved { .. }));
+    let unresolvable = path_manifest("/nonexistent-prefix");
+    assert!(matches!(
+        refusal(resolve_paths(&unresolvable, &good))?,
+        ScriptError::PathOutsidePrefixes(_)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_symlinked_parameter_reaches_the_script_resolved() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let allowed = base.join("allowed");
+    std::fs::create_dir(&allowed)?;
+    std::fs::write(allowed.join("ok.txt"), "x")?;
+    symlink(allowed.join("ok.txt"), allowed.join("link.txt"))?;
+    let mut launch = request(&base, Interpreter::Bash, "echo \"$1\"\necho \"$2\"\n");
+    launch.manifest.parameters = path_manifest(utf8(&allowed)?).parameters;
+    launch.params = params_of(vec![("target", text(utf8(&allowed.join("link.txt"))?)), ("label", text("a"))]);
+    let shown = output_text(&launch_script(&launch)?);
+    assert!(shown.contains("--label=a"));
+    assert!(shown.contains(&format!("--target={}", allowed.join("ok.txt").display())));
+    Ok(())
+}
+
+
+#[test]
+fn powershell_names_its_file_with_the_script_extension() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut launch = request(root.path(), Interpreter::Powershell, "Write-Output hi\n");
+    launch.environment = vec![("PATH".to_string(), "/nonexistent".to_string())];
+    let error = refusal(launch_script(&launch))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("start")));
+    Ok(())
+}
+
+
+#[test]
+fn kill_and_reader_failures_keep_their_cause() -> TestResult {
+    let killed = ScriptError::from(rustix::io::Errno::PERM);
+    assert!(matches!(&killed, ScriptError::Io { context, .. } if context.contains("kill")));
+    assert!(std::error::Error::source(&killed).is_some());
+    let stopped = ScriptError::from(std::sync::mpsc::RecvTimeoutError::Disconnected);
+    assert!(matches!(&stopped, ScriptError::Io { context, .. } if context.contains("reader")));
+    assert!(std::error::Error::source(&stopped).is_some());
+    let held = ScriptError::from(std::sync::mpsc::RecvTimeoutError::Timeout);
+    assert!(matches!(&held, ScriptError::Io { context, .. } if context.contains("held open")));
+    assert!(matches!(tolerate_empty_group(Err(rustix::io::Errno::SRCH)), Ok(())));
+    assert!(matches!(tolerate_empty_group(Ok(())), Ok(())));
+    assert!(matches!(
+        tolerate_empty_group(Err(rustix::io::Errno::PERM)),
+        Err(ScriptError::Io { context, .. }) if context.contains("kill")
+    ));
+    Ok(())
+}
+
+
+fn non_utf8_name() -> OsString {
+    OsString::from_vec(vec![b'o', INVALID_UTF8_BYTE, b'x'])
+}
+
+
+#[test]
+fn non_utf8_paths_are_refused() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let allowed = base.join("allowed");
+    std::fs::create_dir(&allowed)?;
+    std::fs::write(allowed.join(non_utf8_name()), "x")?;
+    symlink(allowed.join(non_utf8_name()), allowed.join("link.txt"))?;
+    let manifest = path_manifest(utf8(&allowed)?);
+    let params = params_of(vec![("target", text(utf8(&allowed.join("link.txt"))?))]);
+    assert!(matches!(refusal(resolve_paths(&manifest, &params))?, ScriptError::MalformedPath(_)));
+    let odd_root = base.join(non_utf8_name());
+    std::fs::create_dir(&odd_root)?;
+    let launch = request(&odd_root, Interpreter::Bash, "echo hi\n");
+    assert!(matches!(refusal(launch_script(&launch))?, ScriptError::MalformedPath(_)));
+    Ok(())
+}
+
+
+#[test]
+fn a_background_job_does_not_outlive_a_normal_exit() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let script = "(sleep 20; echo late) &\necho early\nexit 0\n";
+    let outcome = launch_script(&request(root.path(), Interpreter::Bash, script))?;
+    assert!(!outcome.timed_out);
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(output_text(&outcome), "early\n");
+    Ok(())
+}
+
+
+#[test]
+fn an_output_held_open_past_the_deadline_is_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let marker = root.path().join("escaped");
+    let script = format!(
+        "setsid bash -c 'touch {0}; sleep 3' &\nfor i in $(seq 1 1000); do [ -e {0} ] || sleep 0.01; done\necho hi\n",
+        marker.display()
+    );
+    let mut launch = request(root.path(), Interpreter::Bash, &script);
+    launch.manifest.timeout_seconds = 1;
+    let error = refusal(launch_script(&launch))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("held open")));
+    Ok(())
+}
