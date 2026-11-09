@@ -36,6 +36,7 @@ pub struct ExportReport {
     pub buffered_batches: usize,
     pub drained_batches: usize,
     pub dropped_events: usize,
+    pub rejected_batches: usize,
     pub alert: Option<EcsEvent>,
 }
 
@@ -79,16 +80,25 @@ pub fn route_batch(
 ) -> Result<(ExportReport, bool), ExportError> {
     let (mut report, was_down) = state;
     let (count, body) = batch;
-    let delivered = !was_down && send(body).is_ok();
-    if delivered {
-        report.sent_batches += 1;
-    } else {
-        match enqueue(spool.dir, body, spool.max_bytes, &mut create_file, &mut sync_path)? {
-            Enqueued::Stored(_path) => report.buffered_batches += 1,
-            Enqueued::Saturated => report.dropped_events += count,
+    let sent = if was_down { None } else { Some(send(body)) };
+    let still_down = match sent {
+        Some(Ok(())) => {
+            report.sent_batches += 1;
+            false
         }
-    }
-    Ok((report, !delivered))
+        Some(Err(ExportError::Rejected { .. })) => {
+            report.rejected_batches += 1;
+            false
+        }
+        _ => {
+            match enqueue(spool.dir, body, spool.max_bytes, &mut create_file, &mut sync_path)? {
+                Enqueued::Stored(_path) => report.buffered_batches += 1,
+                Enqueued::Saturated => report.dropped_events += count,
+            }
+            true
+        }
+    };
+    Ok((report, still_down))
 }
 
 
@@ -112,7 +122,14 @@ pub fn export_prepared(
     let dir = spool.dir;
     let mut send = |body: &str| deliver(policy, post, sleep, body).map(|_attempts| ());
     let mut drained_batches = NO_BATCHES;
-    let drained = drain(dir, &mut |body: &str| send(body).inspect(|_delivered| drained_batches += 1));
+    let mut rejected_buffered = NO_BATCHES;
+    let drained = drain(dir, &mut |body: &str| match send(body) {
+        Err(ExportError::Rejected { .. }) => {
+            rejected_buffered += 1;
+            Ok(())
+        }
+        other => other.inspect(|_delivered| drained_batches += 1),
+    });
     let still_down = match drained {
         Ok(_count) => Ok(false),
         Err(ExportError::Exhausted { .. }) => Ok(true),
@@ -122,6 +139,7 @@ pub fn export_prepared(
         route_batch(state, batch, &mut send, spool)
     })?;
     report.drained_batches = drained_batches;
+    report.rejected_batches += rejected_buffered;
     if report.dropped_events > 0 {
         tracing::error!(dropped = report.dropped_events, "export buffer saturated");
         report.alert = Some(saturation_alert(host, report.dropped_events, spool.max_bytes, now));

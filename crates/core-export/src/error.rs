@@ -34,6 +34,8 @@ pub enum ExportError {
         #[source]
         source: Option<BoxError>,
     },
+    #[error("the receiver rejected the batch permanently with status {status}")]
+    Rejected { status: u16 },
     #[error("cannot resolve the secret reference: {0}")]
     Secret(#[source] BoxError),
     #[error(transparent)]
@@ -52,4 +54,12 @@ pub enum ExportError {
     Usage,
     #[error("the configuration has no `{0}` output")]
     MissingSection(&'static str),
+}
+
+
+/// A post error that must not be retried (OTLP/HTTP permanent failure); `deliver` turns it into `ExportError::Rejected`.
+#[derive(Debug, Error)]
+#[error("permanent rejection with status {status}")]
+pub struct PermanentRejection {
+    pub status: u16,
 }

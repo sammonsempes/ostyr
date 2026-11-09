@@ -218,8 +218,8 @@ pub fn report_to<Output: Write>(out: &mut Output, report: &ExportReport) -> Resu
     say(
         out,
         &format!(
-            "sent={} buffered={} drained={} dropped={}",
-            report.sent_batches, report.buffered_batches, report.drained_batches, report.dropped_events
+            "sent={} buffered={} drained={} dropped={} rejected={}",
+            report.sent_batches, report.buffered_batches, report.drained_batches, report.dropped_events, report.rejected_batches
         ),
     )?;
     report

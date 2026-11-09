@@ -1,4 +1,4 @@
-use crate::error::ExportError;
+use crate::error::{ExportError, PermanentRejection};
 use crate::otlp::{rejected_records, MAX_RESPONSE_BYTES};
 use crate::types::BoxError;
 use std::time::Duration;
@@ -59,7 +59,7 @@ pub fn post_json(agent: &Agent, url: &str, token: Option<&str>, body: &str) -> R
 
 /// Only a 2xx answer counts as delivered (a redirect or a 1xx is an error). An accepted request is never retried because of its response: an unreadable or oversized body is logged, `rejectedLogRecords` is logged.
 pub fn post_otlp(agent: &Agent, url: &str, token: Option<&str>, body: &str) -> Result<(), BoxError> {
-    let mut response = send_json(agent, url, token, body)?;
+    let mut response = send_json(agent, url, token, body).map_err(classify_status)?;
     if !response.status().is_success() {
         Err(BoxError::from(format!("OTLP receiver answered status {}", response.status())))?;
     }
@@ -77,4 +77,31 @@ pub fn post_otlp(agent: &Agent, url: &str, token: Option<&str>, body: &str) -> R
         tracing::warn!(rejected, "OTLP receiver rejected log records");
     }
     Ok(())
+}
+
+
+pub const STATUS_CLIENT_ERROR_FIRST: u16 = 400;
+
+
+pub const STATUS_REQUEST_TIMEOUT: u16 = 408;
+
+
+pub const STATUS_TOO_MANY_REQUESTS: u16 = 429;
+
+
+pub const STATUS_CLIENT_ERROR_LAST: u16 = 499;
+
+
+/// A 4xx answer other than 408 and 429 is a permanent failure (OTLP/HTTP "Failures"); everything else keeps its error.
+pub fn classify_status(error: BoxError) -> BoxError {
+    let permanent = match error.downcast_ref::<ureq::Error>() {
+        Some(ureq::Error::StatusCode(status)) if is_permanent(*status) => Some(*status),
+        _ => None,
+    };
+    permanent.map_or(error, |status| BoxError::from(PermanentRejection { status }))
+}
+
+
+pub fn is_permanent(status: u16) -> bool {
+    (STATUS_CLIENT_ERROR_FIRST..=STATUS_CLIENT_ERROR_LAST).contains(&status) && status != STATUS_REQUEST_TIMEOUT && status != STATUS_TOO_MANY_REQUESTS
 }
