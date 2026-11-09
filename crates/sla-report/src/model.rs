@@ -76,3 +76,50 @@ pub struct SlaFigure {
     pub ignored: usize,
     pub method: String,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceInput {
+    pub tenant: String,
+    pub name: String,
+    pub objective_ppm: u32,
+    pub figure: SlaFigure,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportLimits {
+    pub max_services: usize,
+    pub max_name_bytes: usize,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReportLine {
+    pub name: String,
+    pub objective_percent: String,
+    pub availability_percent: Option<String>,
+    pub budget_used_seconds: i64,
+    pub budget_allowed_seconds: i64,
+    pub down_seconds: i64,
+    pub unknown_seconds: i64,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct ReportTotals {
+    pub services: usize,
+    pub budget_used_seconds: i64,
+    pub down_seconds: i64,
+    pub unknown_seconds: i64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Report {
+    pub tenant: String,
+    pub start: i64,
+    pub end: i64,
+    pub lines: Vec<ReportLine>,
+    pub totals: ReportTotals,
+}
