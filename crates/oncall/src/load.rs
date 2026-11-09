@@ -1,7 +1,7 @@
 use crate::error::OncallError;
 use crate::limits::MAX_FILE_BYTES;
-use crate::model::{Policy, Schedule};
-use crate::validate::{validate_policy, validate_schedule};
+use crate::model::{Policy, Schedule, Silence, SilenceFile, Window, WindowFile};
+use crate::validate::{validate_policy, validate_schedule, validate_silences, validate_windows};
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text};
 use std::fs::File;
@@ -51,4 +51,28 @@ pub fn load_schedule(path: &Path) -> Result<Schedule, OncallError> {
 
 pub fn load_policy(path: &Path) -> Result<Policy, OncallError> {
     parse_policy(&read_file_limited(path)?, &path.display().to_string())
+}
+
+
+pub fn parse_silences(text: &str, file: &str) -> Result<Vec<Silence>, OncallError> {
+    let parsed: SilenceFile = parse_document(text, file)?;
+    validate_silences(&parsed)?;
+    Ok(parsed.silences)
+}
+
+
+pub fn parse_windows(text: &str, file: &str) -> Result<Vec<Window>, OncallError> {
+    let parsed: WindowFile = parse_document(text, file)?;
+    validate_windows(&parsed)?;
+    Ok(parsed.windows)
+}
+
+
+pub fn load_silences(path: &Path) -> Result<Vec<Silence>, OncallError> {
+    parse_silences(&read_file_limited(path)?, &path.display().to_string())
+}
+
+
+pub fn load_windows(path: &Path) -> Result<Vec<Window>, OncallError> {
+    parse_windows(&read_file_limited(path)?, &path.display().to_string())
 }
