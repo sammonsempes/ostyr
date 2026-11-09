@@ -1,9 +1,9 @@
 use crate::harness::{
-    attempt, bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server_state, start_single_state,
+    attempt, awaited, bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server_state, start_single_state,
     stop_server,
 };
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
-use crate::services::{agent_identity, counter, recording_state, settings};
+use crate::services::{agent_identity, counter, patient_settings, recording_state, settings};
 use crate::types::TestResult;
 use agent_channel::error::ChannelError;
 use agent_channel::limits::lock_load;
@@ -15,11 +15,18 @@ use agent_channel::types::SharedState;
 use rustls_pki_types::ServerName;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+
+
+const SNAPSHOT_SECONDS: u64 = 7;
+
+
+const SWAPPED_SECONDS: u64 = 11;
 
 
 const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -51,9 +58,40 @@ async fn a_client_sending_nothing_after_tls_is_dropped_at_the_deadline() -> Test
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let _silent = silent_client(server.address, &agent).await?;
     tokio::time::pause();
-    let served = server.handle.await?;
+    let served = awaited(server.handle).await?;
     assert!(matches!(served, Err(ChannelError::FirstRequestTimeout { .. })));
     assert_eq!(counter(&state.counters.first_request_timeouts), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_patient_settings_are_accepted_by_validation() -> TestResult {
+    assert!(validate_settings(&patient_settings()).is_ok());
+    assert_eq!(patient_settings().handshake_timeout_seconds, MAX_HANDSHAKE_TIMEOUT_SECONDS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_swap_during_the_handshake_does_not_change_the_connection_bounds() -> TestResult {
+    let _logging = scoped_logging();
+    let (state, _stored) = recording_state(settings(|base| base.first_request_timeout_seconds = SNAPSHOT_SECONDS));
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let paths = server_paths(dir.path(), &platform)?;
+    let server = start_single_state(&paths, empty_revocation(&paths)?, state.clone()).await?;
+    let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
+    let tcp = TcpStream::connect(server.address).await?;
+    tokio::task::yield_now().await;
+    state
+        .settings
+        .store(Arc::new(settings(|base| base.first_request_timeout_seconds = SWAPPED_SECONDS)));
+    let connector = TlsConnector::from(client_config(&agent)?);
+    let _silent = connector.connect(ServerName::try_from(SERVER_NAME)?, tcp).await?;
+    tokio::time::pause();
+    let served = awaited(server.handle).await?;
+    assert!(matches!(served, Err(ChannelError::FirstRequestTimeout { seconds: SNAPSHOT_SECONDS })));
     Ok(())
 }
 

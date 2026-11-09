@@ -205,6 +205,14 @@ pub async fn attempt(address: SocketAddr, paths: &ClientTlsPaths) -> Result<Beat
 }
 
 
+pub const HANG_GUARD_SECONDS: u64 = 600;
+
+
+pub async fn awaited<Output>(handle: JoinHandle<Output>) -> Result<Output, Box<dyn Error>> {
+    Ok(timeout(Duration::from_secs(HANG_GUARD_SECONDS), handle).await??)
+}
+
+
 pub async fn bounded<Output>(future: impl std::future::Future<Output = Output>) -> Result<Output, Box<dyn Error>> {
     Ok(timeout(Duration::from_secs(CALL_TIMEOUT_SECONDS), future).await?)
 }

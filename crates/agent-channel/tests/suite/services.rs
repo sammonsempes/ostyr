@@ -5,7 +5,7 @@ use crate::types::{Stored, TestResult};
 use agent_channel::client::{connect_channel, heartbeat, open_event_stream, push_events, run_commands, status_error};
 use agent_channel::error::ChannelError;
 use agent_channel::limits::{admit_request, check_claim, claim_matches, count_request, fresh_load, open_stream};
-use agent_channel::model::{ChannelSettings, CommandVerdict, Identity, DEFAULT_MAX_MESSAGE_BYTES, MAX_KEPT_REFUSALS};
+use agent_channel::model::{ChannelSettings, CommandVerdict, Identity, DEFAULT_MAX_MESSAGE_BYTES, MAX_HANDSHAKE_TIMEOUT_SECONDS, MAX_KEPT_REFUSALS};
 use agent_channel::proto::{BeatRequest, CommandReport, EventBatch, SubscribeRequest};
 use agent_channel::services::{beat, open_push, report, subscribe};
 use agent_channel::tls::client_config;
@@ -112,7 +112,7 @@ pub fn counter(value: &AtomicU64) -> u64 {
 }
 
 
-pub const PATIENT_HANDSHAKE_SECONDS: u64 = 3600;
+pub const PATIENT_HANDSHAKE_SECONDS: u64 = MAX_HANDSHAKE_TIMEOUT_SECONDS;
 
 
 pub fn patient_settings() -> ChannelSettings {

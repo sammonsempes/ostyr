@@ -133,14 +133,14 @@ pub fn evict(oldest: Option<oneshot::Sender<()>>, state: &ServerState) {
 }
 
 
-/// The TLS handshake, cut at `handshake_timeout_seconds` (one settings snapshot) and when `evicted` fires; a dropped sender never evicts.
+/// The TLS handshake, cut after `seconds` and when `evicted` fires; a dropped sender never evicts.
 pub async fn handshake(
     stream: TcpStream,
     acceptor: TlsAcceptor,
     state: &ServerState,
+    seconds: u64,
     evicted: oneshot::Receiver<()>,
 ) -> Result<TlsStream<TcpStream>, ChannelError> {
-    let seconds = settings_of(state).handshake_timeout_seconds;
     let limit = Duration::from_secs(seconds);
     let finished = tokio::select! {
         accepted = timeout(limit, acceptor.accept(stream)) => accepted.map_err(|_elapsed| handshake_timed_out(state, seconds)),
@@ -160,12 +160,16 @@ pub async fn run_connection(
     admission: Admission,
 ) -> Result<(), ChannelError> {
     log_keepalive(set_keepalive(&stream));
-    let tls = handshake(stream, acceptor, &state, admission.evicted).await?;
+    let settings = settings_of(&state);
+    let tls = handshake(stream, acceptor, &state, settings.handshake_timeout_seconds, admission.evicted).await?;
     let identity = identity_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
     let serials = serials_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
     let revoked = revoked_now(&revocations, &serials);
     if revoked.is_empty() {
-        let _total = admission.connections.try_acquire_owned().map_err(|_refused| connection_capped(&state))?;
+        let _total = admission
+            .connections
+            .try_acquire_owned()
+            .map_err(|_refused| connection_capped(&state, settings.max_total_connections))?;
         let _connection = open_slot(&state, &identity, SlotKind::Connection).map_err(|_refused| too_many_connections(&identity))?;
         let first_request = Arc::new(Notify::new());
         let noted = Arc::clone(&first_request);
@@ -173,12 +177,12 @@ pub async fn run_connection(
             noted.notify_one();
             request
         });
-        let limit = Duration::from_secs(settings_of(&state).first_request_timeout_seconds);
+        let limit = Duration::from_secs(settings.first_request_timeout_seconds);
         let mut builder = Builder::new(TokioExecutor::new()).http2_only();
         builder
             .http2()
             .timer(TokioTimer::new())
-            .max_concurrent_streams(settings_of(&state).max_streams_per_connection)
+            .max_concurrent_streams(settings.max_streams_per_connection)
             .keep_alive_interval(Duration::from_secs(SERVER_KEEPALIVE_INTERVAL_SECONDS))
             .keep_alive_timeout(Duration::from_secs(SERVER_KEEPALIVE_TIMEOUT_SECONDS));
         tokio::select! {
@@ -237,9 +241,8 @@ pub fn log_keepalive(outcome: io::Result<()>) {
 }
 
 
-pub fn connection_capped(state: &ServerState) -> ChannelError {
+pub fn connection_capped(state: &ServerState, limit: usize) -> ChannelError {
     bump(&state.counters.connections_capped);
-    let limit = settings_of(state).max_total_connections;
     tracing::warn!(limit, "total connection cap reached, connection dropped");
     ChannelError::ConnectionCapped { limit }
 }

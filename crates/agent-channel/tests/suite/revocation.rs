@@ -1,5 +1,5 @@
 use crate::harness::{
-    attempt, bounded, chained_agent, client_paths, empty_revocation, finish, make_platform, server_paths, start_server_with, start_single,
+    attempt, awaited, bounded, chained_agent, client_paths, empty_revocation, finish, make_platform, server_paths, start_server_with, start_single,
     start_single_state, start_single_with, stop_server,
 };
 use crate::pki::{agent_spec, make_intermediate, AGENT_URI, SERVER_NAME};
@@ -102,7 +102,7 @@ async fn revoking_a_connected_agent_closes_its_connection_within_the_bound() -> 
     assert_eq!(reply.agent_id, "agent-1");
     write_revocations(&server.control.file, &[serial.as_str()])?;
     assert!(matches!(reload(&server.control.engine), ReloadOutcome::Applied { .. }));
-    let closed = server.handle.await?;
+    let closed = awaited(server.handle).await?;
     assert!(matches!(closed, Err(ChannelError::Revoked { serial: refused }) if refused == serial));
     assert!(bounded(heartbeat(channel, "test")).await?.is_err());
     Ok(())
@@ -164,7 +164,7 @@ async fn dropping_the_revocation_engine_closes_connections() -> TestResult {
     bounded(heartbeat(channel.clone(), "test")).await??;
     let handle = server.handle;
     drop(server.control);
-    let closed = handle.await?;
+    let closed = awaited(handle).await?;
     assert!(matches!(closed, Err(ChannelError::RevocationClosed(_))));
     drop(channel);
     Ok(())
@@ -213,7 +213,7 @@ async fn revoking_the_intermediate_of_a_connected_agent_closes_its_connection() 
     bounded(heartbeat(channel.clone(), "test")).await??;
     write_revocations(&server.control.file, &[agent.intermediate_serial.as_str()])?;
     assert!(matches!(reload(&server.control.engine), ReloadOutcome::Applied { .. }));
-    let closed = server.handle.await?;
+    let closed = awaited(server.handle).await?;
     assert!(matches!(closed, Err(ChannelError::Revoked { serial }) if serial == agent.intermediate_serial));
     drop(channel);
     Ok(())
