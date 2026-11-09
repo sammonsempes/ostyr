@@ -102,15 +102,15 @@ fn packages_are_sorted_and_deduplicated() -> TestResult {
 fn converted_packages_match_an_osv_record() -> TestResult {
     let record = parse_record(
         r#"{"id":"DSA-1","aliases":["CVE-2024-0001"],"affected":[{"package":{"ecosystem":"Debian:12","name":"glibc"},
-        "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"2.36-9+deb12u7"}]}]}]}"#,
+        "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"2.36-9+deb12u15"}]}]}]}"#,
     )?;
     let report = match_inventory(&to_packages(&parse_for(FIXTURE, "t", "x")?), &[record]);
     assert_eq!(report.findings.len(), 1);
     let finding = report.findings.first().ok_or("no finding")?;
     assert_eq!(
         (finding.package.as_str(), finding.installed_version.as_str()),
-        ("glibc", "2.36-9+deb12u4")
+        ("glibc", "2.36-9+deb12u14")
     );
-    assert_eq!(finding.fixed_version.as_deref(), Some("2.36-9+deb12u7"));
+    assert_eq!(finding.fixed_version.as_deref(), Some("2.36-9+deb12u15"));
     Ok(())
 }

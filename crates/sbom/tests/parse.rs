@@ -88,7 +88,7 @@ fn syft_sample_is_read() -> TestResult {
         .iter()
         .find(|component| component.name == "libc6")
         .ok_or("libc6 missing")?;
-    assert_eq!(libc.version.as_deref(), Some("2.36-9+deb12u4"));
+    assert_eq!(libc.version.as_deref(), Some("2.36-9+deb12u14"));
     assert_eq!(libc.kind, "library");
     assert_eq!(libc.key, "deb/debian/libc6");
     assert_eq!(libc.package.as_ref().map(|package| package.name.as_str()), Some("glibc"));

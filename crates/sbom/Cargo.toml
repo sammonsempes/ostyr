@@ -6,11 +6,20 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
 packageurl = "0.7"
+serde = { version = "1", features = ["derive"] }
 struson = "0.7"
+tempfile = "3"
 thiserror = "2"
 tracing = "0.1"
 vuln-match = { version = "0.0.0", path = "../vuln-match" }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 
 [lints]
 workspace = true
