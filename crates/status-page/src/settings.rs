@@ -1,7 +1,8 @@
 use crate::error::StatusPageError;
 use crate::model::{
     PageSettings, MAX_CONNECTIONS_LIMIT, MAX_CONNECTIONS_PER_SOURCE_LIMIT, MAX_CONNECTION_TIMEOUT_SECONDS, MAX_HEADERS_LIMIT, MAX_HEADER_BYTES_LIMIT,
-    MAX_HEADER_READ_TIMEOUT_SECONDS, MAX_SOURCES_LIMIT, MIN_HEADER_BYTES, SETTINGS_SECTION,
+    MAX_HEADER_READ_TIMEOUT_SECONDS, MAX_PROXY_HEADER_BYTES_LIMIT, MAX_SOURCES_LIMIT, MAX_TRUSTED_PROXIES, MAX_WIDE_MULTIPLIER, MAX_WIDE_PREFIX_BITS,
+    MIN_HEADER_BYTES, MIN_PROXY_HEADER_BYTES, SETTINGS_SECTION,
 };
 use crate::types::{BoxError, SharedSettings};
 use arc_swap::ArcSwap;
@@ -45,6 +46,19 @@ pub fn invalid_settings(settings: &PageSettings) -> Vec<&'static str> {
             settings.max_header_bytes < MIN_HEADER_BYTES || settings.max_header_bytes > MAX_HEADER_BYTES_LIMIT,
         ),
         ("cache_max_age_seconds", settings.cache_max_age_seconds == 0),
+        ("trusted_proxies", settings.trusted_proxies.len() > MAX_TRUSTED_PROXIES),
+        (
+            "max_proxy_header_bytes",
+            settings.max_proxy_header_bytes < MIN_PROXY_HEADER_BYTES || settings.max_proxy_header_bytes > MAX_PROXY_HEADER_BYTES_LIMIT,
+        ),
+        (
+            "wide_prefix_bits",
+            settings.wide_prefix_bits == 0 || settings.wide_prefix_bits > MAX_WIDE_PREFIX_BITS,
+        ),
+        (
+            "wide_multiplier",
+            settings.wide_multiplier == 0 || settings.wide_multiplier > MAX_WIDE_MULTIPLIER,
+        ),
     ]
     .into_iter()
     .filter_map(|(name, invalid)| invalid.then_some(name))
@@ -64,11 +78,14 @@ pub fn validate_settings(settings: &PageSettings) -> Result<(), StatusPageError>
 
 /// One line per field, so a reload's diff and audit entry show which bound changed.
 pub fn settings_state(settings: &PageSettings) -> ConfigState {
-    format!("{settings:#?}")
+    let proxies = settings.trusted_proxies.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+    let mut state: ConfigState = format!("{settings:#?}")
         .lines()
         .filter_map(|line| line.trim().trim_end_matches(',').split_once(": "))
         .map(|(name, value)| (format!("{SETTINGS_SECTION}.{name}"), value.to_owned()))
-        .collect()
+        .collect();
+    state.insert(format!("{SETTINGS_SECTION}.trusted_proxies"), proxies);
+    state
 }
 
 

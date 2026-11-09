@@ -34,4 +34,4 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch --locked
       - name: Run the gate as root, like the development host
-        run: sudo env "HOME=$HOME" "PATH=$PATH" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$HOME/.rustup" .githooks/pre-commit
+        run: sudo env "HOME=$HOME" "PATH=$PATH" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$HOME/.rustup" .github/gate-run.sh "$(id -un)" "$PWD" "$HOME"

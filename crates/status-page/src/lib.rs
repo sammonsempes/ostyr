@@ -6,6 +6,7 @@ pub mod error;
 pub mod html;
 pub mod limiter;
 pub mod model;
+pub mod proxy;
 pub mod render;
 pub mod serve;
 pub mod server;

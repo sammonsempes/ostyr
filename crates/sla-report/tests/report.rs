@@ -3,7 +3,7 @@ use sla_report::error::{ExportError, SlaError};
 use sla_report::export::{neutralise_cell, to_csv, to_json, CSV_HEADER};
 use sla_report::model::{CheckResult, Limits, MaintenanceWindow, Period, Report, ReportLimits, ServiceInput, SlaFigure};
 use sla_report::report::{
-    build_report, cut_name, default_report_limits, percent_from_ppm, DEFAULT_MAX_NAME_BYTES, DEFAULT_MAX_SERVICES, NAME_CUT_MARKER,
+    build_report, cut_name, default_report_limits, percent_from_ppm, report_line, DEFAULT_MAX_NAME_BYTES, DEFAULT_MAX_SERVICES, NAME_CUT_MARKER,
 };
 use std::io::{self, Write};
 
@@ -51,6 +51,9 @@ const SMALL_NAME: usize = 3;
 
 
 const BIG: usize = 1_000;
+
+
+const OBJECTIVE_LIMIT: u32 = 1_000_000;
 
 
 const CUT_AT_TWO: usize = 2;
@@ -356,5 +359,43 @@ fn leading_whitespace_and_full_width_prefixes_are_neutralised() -> Result<(), Sl
         .iter()
         .for_each(|cell| assert_eq!(neutralise_cell(cell), format!("'{cell}")));
     ["a=b", "  plain", ""].iter().for_each(|cell| assert_eq!(neutralise_cell(cell), *cell));
+    Ok(())
+}
+
+
+#[test]
+fn invisible_format_characters_before_a_prefix_are_neutralised() -> Result<(), SlaError> {
+    [
+        "\u{FEFF}=1",
+        "\u{200B}=1",
+        "\u{200C}=1",
+        "\u{200D}=1",
+        "\u{2060}=1",
+        " \u{200B}@x",
+        "\u{FEFF}\u{200B}+1",
+    ]
+    .iter()
+    .for_each(|cell| assert_eq!(neutralise_cell(cell), format!("'{cell}")));
+    ["\u{200B}plain", "\u{FEFF}"]
+        .iter()
+        .for_each(|cell| assert_eq!(neutralise_cell(cell), *cell));
+    Ok(())
+}
+
+
+#[test]
+fn report_line_refuses_an_objective_above_one_hundred_percent() -> Result<(), SlaError> {
+    let valid = service(TENANT, "api", figure(&[], &[], PERIOD_END, OBJECTIVE)?, OBJECTIVE);
+    assert!(report_line(&valid, BIG).is_ok());
+    let invalid = service(TENANT, "api", figure(&[], &[], PERIOD_END, OBJECTIVE)?, OBJECTIVE_LIMIT + 1);
+    let expected = Some(SlaError::InvalidObjective {
+        objective_ppm: OBJECTIVE_LIMIT + 1,
+    });
+    assert_eq!(report_line(&invalid, BIG).err(), expected);
+    let limits = ReportLimits {
+        max_services: BIG,
+        max_name_bytes: BIG,
+    };
+    assert_eq!(build_report(TENANT, &period(TENANT), &[invalid], &limits).err(), expected);
     Ok(())
 }

@@ -12,10 +12,12 @@ core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 futures-util = "0.3"
 html-escape = "0.2"
+ipnet = { version = "2", features = ["serde"] }
 http = "1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
 lru = "0.16"
+ppp = "2.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

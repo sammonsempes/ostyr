@@ -11,6 +11,9 @@ pub const DEFAULT_MAX_NAME_BYTES: usize = 128;
 pub const NAME_CUT_MARKER: &str = "...[cut]";
 
 
+const MAX_OBJECTIVE_PPM: u32 = 1_000_000;
+
+
 const PPM_PER_PERCENT: u32 = 10_000;
 
 
@@ -38,8 +41,12 @@ pub fn cut_name(name: &str, max_bytes: usize) -> String {
 }
 
 
-pub fn report_line(service: &ServiceInput, max_name_bytes: usize) -> ReportLine {
-    ReportLine {
+pub fn report_line(service: &ServiceInput, max_name_bytes: usize) -> Result<ReportLine, SlaError> {
+    let objective_ppm = service.objective_ppm;
+    (objective_ppm <= MAX_OBJECTIVE_PPM)
+        .then_some(())
+        .ok_or(SlaError::InvalidObjective { objective_ppm })?;
+    Ok(ReportLine {
         name: cut_name(&service.name, max_name_bytes),
         objective_percent: percent_from_ppm(service.objective_ppm),
         availability_percent: service.figure.availability_ppm.map(percent_from_ppm),
@@ -47,7 +54,7 @@ pub fn report_line(service: &ServiceInput, max_name_bytes: usize) -> ReportLine 
         budget_allowed_seconds: service.figure.budget.allowed_seconds,
         down_seconds: service.figure.down_seconds,
         unknown_seconds: service.figure.unknown_seconds,
-    }
+    })
 }
 
 
@@ -87,7 +94,10 @@ pub fn build_report(tenant: &str, period: &Period, services: &[ServiceInput], li
     };
     (period.tenant == tenant).then_some(()).ok_or(period_mismatch)?;
     services.iter().try_for_each(|service| check_service_tenant(tenant, service))?;
-    let mut lines: Vec<ReportLine> = services.iter().map(|service| report_line(service, limits.max_name_bytes)).collect();
+    let mut lines = services
+        .iter()
+        .map(|service| report_line(service, limits.max_name_bytes))
+        .collect::<Result<Vec<ReportLine>, SlaError>>()?;
     lines.sort_by(|left, right| left.name.cmp(&right.name));
     let totals = lines.iter().try_fold(ReportTotals::default(), add_line_to_totals)?;
     Ok(Report {
