@@ -1,5 +1,6 @@
 use crate::types::{NowFn, SharedSettings, SourceConnections};
 use arc_swap::ArcSwapOption;
+use ipnet::IpNet;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -197,6 +198,30 @@ pub const DEFAULT_MAX_HEADER_BYTES: usize = 16_384;
 pub const DEFAULT_CACHE_MAX_AGE_SECONDS: u64 = 15;
 
 
+pub const DEFAULT_MAX_PROXY_HEADER_BYTES: usize = 512;
+
+
+pub const DEFAULT_WIDE_PREFIX_BITS: u8 = 48;
+
+
+pub const DEFAULT_WIDE_MULTIPLIER: u32 = 8;
+
+
+pub const MIN_PROXY_HEADER_BYTES: usize = 52;
+
+
+pub const MAX_PROXY_HEADER_BYTES_LIMIT: usize = 4096;
+
+
+pub const MAX_TRUSTED_PROXIES: usize = 256;
+
+
+pub const MAX_WIDE_MULTIPLIER: u32 = 1024;
+
+
+pub const MAX_WIDE_PREFIX_BITS: u8 = 64;
+
+
 pub const MAX_SOURCES_LIMIT: usize = 1_000_000;
 
 
@@ -232,6 +257,10 @@ pub struct PageSettings {
     pub max_headers: usize,
     pub max_header_bytes: usize,
     pub cache_max_age_seconds: u64,
+    pub trusted_proxies: Vec<IpNet>,
+    pub max_proxy_header_bytes: usize,
+    pub wide_prefix_bits: u8,
+    pub wide_multiplier: u32,
 }
 
 
@@ -248,6 +277,10 @@ impl Default for PageSettings {
             max_headers: DEFAULT_MAX_HEADERS,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             cache_max_age_seconds: DEFAULT_CACHE_MAX_AGE_SECONDS,
+            trusted_proxies: Vec::new(),
+            max_proxy_header_bytes: DEFAULT_MAX_PROXY_HEADER_BYTES,
+            wide_prefix_bits: DEFAULT_WIDE_PREFIX_BITS,
+            wide_multiplier: DEFAULT_WIDE_MULTIPLIER,
         }
     }
 }
@@ -288,9 +321,31 @@ pub struct PageState {
     pub snapshot: ArcSwapOption<Snapshot>,
     pub settings: SharedSettings,
     pub buckets: Mutex<LruCache<IpAddr, Bucket>>,
+    pub wide_buckets: Mutex<LruCache<IpAddr, Bucket>>,
     pub now: Box<NowFn>,
     pub active: Arc<AtomicUsize>,
     pub sources: SourceConnections,
+    pub wide_sources: SourceConnections,
+    pub proxy_malformed: AtomicUsize,
+}
+
+
+/// The bounds a new connection is admitted against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionCaps {
+    pub per_source: usize,
+    pub per_wide: usize,
+    pub maximum: usize,
+    pub wide_bits: u8,
+}
+
+
+/// What a PROXY protocol v2 header from a trusted proxy said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyOutcome {
+    Client(IpAddr),
+    Local,
+    Malformed,
 }
 
 
@@ -299,4 +354,6 @@ pub struct ConnectionGuard {
     pub active: Arc<AtomicUsize>,
     pub sources: SourceConnections,
     pub key: IpAddr,
+    pub wide_sources: SourceConnections,
+    pub wide_key: Option<IpAddr>,
 }
