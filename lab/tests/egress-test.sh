@@ -7,6 +7,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 readonly TEST_TASK="${LAB_TEST_TASK:-TEGRESS}"
+readonly OTHER_TASK="${TEST_TASK}B"
 readonly PUBLIC_ADDRESS="1.1.1.1"
 readonly PROBE_TIMEOUT_SECONDS=5
 readonly REMOTE_TIMEOUT_SECONDS=900
@@ -33,6 +34,7 @@ lab_state="$(state_dir "$TEST_TASK")"
 
 cleanup() {
     "$LAB_DIR/down.sh" "$TEST_TASK" >/dev/null 2>&1 || log "cleanup failed"
+    "$LAB_DIR/down.sh" "$OTHER_TASK" >/dev/null 2>&1 || log "cleanup of the second lab failed"
 }
 trap cleanup EXIT
 
@@ -100,10 +102,12 @@ tcp_reaches() {
 }
 
 "$LAB_DIR/up.sh" "$TEST_TASK"
+"$LAB_DIR/up.sh" "$OTHER_TASK"
 read -r _ _ vm_address <"$lab_state/vms.txt"
 bridge_address="${vm_address%.*}.1"
 host_lan_address="$(ip -4 route get "$PUBLIC_ADDRESS" | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')"
-other_bridge_address="$(ip -4 -o addr show | awk -v own="$bridge_address" '$2 ~ /^virbr/ {split($4, a, "/"); if (a[1] != own) {print a[1]; exit}}')"
+read -r _ _ other_vm_address <"$(state_dir "$OTHER_TASK")/vms.txt"
+other_bridge_address="${other_vm_address%.*}.1"
 
 check "proxy process runs" proxy_running
 check "proxy listens only on the bridge address" bash -c "ss -ltnH 'sport = :$PROXY_PORT' | awk '{print \$4}' | grep -qx '$bridge_address:$PROXY_PORT' &&
@@ -120,9 +124,8 @@ check "direct connection to a public address fails" fails direct_fails
 check "host LAN address tcp 22 unreachable" fails tcp_reaches "$host_lan_address" 22
 check "host LAN address tcp 3128 unreachable" fails tcp_reaches "$host_lan_address" "$PROXY_PORT"
 check "bridge address tcp 22 unreachable" fails tcp_reaches "$bridge_address" 22
-if [[ -n "$other_bridge_address" ]]; then
-    check "another bridge tcp 3128 unreachable" fails tcp_reaches "$other_bridge_address" "$PROXY_PORT"
-fi
+check "the second lab proxy listens on its own bridge" bash -c "ss -ltnH 'sport = :$PROXY_PORT' | awk '{print \$4}' | grep -qx '$other_bridge_address:$PROXY_PORT'"
+check "another bridge tcp 3128 unreachable" fails tcp_reaches "$other_bridge_address" "$PROXY_PORT"
 
 "$LAB_DIR/down.sh" "$TEST_TASK"
 check "no proxy process after down.sh" fails proxy_running
