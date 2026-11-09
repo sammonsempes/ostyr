@@ -5,6 +5,7 @@ mod types;
 
 
 use core_audit::log::{genesis_log, AuditLog};
+use core_audit::model::Outcome;
 use core_audit::verify::verify;
 use core_auth::error::AuthError;
 use core_auth::limiter::{ACCOUNT_MAX_FAILURES, LOCKOUT_SECONDS, SOURCE_MAX_FAILURES};
@@ -14,13 +15,14 @@ use core_auth::rbac::{
     builtin_catalog, load_catalog, PERMISSION_EVENTS_READ, PERMISSION_RESPONSE_EXECUTE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_READER,
 };
 use core_auth::service::{
-    authorize, bootstrap_administrator, change_roles, create_account, enrol_totp, login, revoke_all_sessions, revoke_token, Context, LoginRequest,
-    State, DUMMY_HASH,
+    authorize, bootstrap_administrator, change_roles, create_account, enrol_totp, login, record, revoke_all_sessions, revoke_token, Context,
+    LoginRequest, State, DUMMY_HASH,
 };
 use core_auth::session::revocation_marker;
 use core_auth::store::save_accounts;
 use core_auth::totp::{code_for_step, TOTP_STEP_SECONDS};
 use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, RoleCatalog, RoleSet, SessionMap, StoreKey};
+use core_config::reload::MAX_VALUE_CHARS;
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use failing_writer::FailingWriter;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
@@ -1377,5 +1379,34 @@ fn role_change_and_revoke_all_write_the_revocation_marker() -> TestResult {
     assert_eq!(marker(&state), Some(revocation_marker(at(PLUS_THREE)?)));
     assert!(matches!(revoke_all_sessions(&mut state, &ctx, at(PLUS_THREE)?, &admin, "ghost"), Ok(0)));
     assert!(!state.accounts.contains_key("ghost"));
+    Ok(())
+}
+
+
+#[test]
+fn undeclared_audit_parameters_are_redacted_and_declared_ones_kept_and_bounded() -> TestResult {
+    let fixture = fixture();
+    let long_value = "x".repeat(MAX_VALUE_CHARS + 1);
+    record(
+        &context(&fixture),
+        at(0)?,
+        "alice",
+        "auth.test",
+        "alice",
+        Outcome::Success,
+        &[
+            ("source", SOURCE.to_owned()),
+            ("password", GOOD_PASSWORD.to_owned()),
+            ("name", long_value),
+        ],
+    )?;
+    let text = audit_text(&fixture)?;
+    assert!(text.contains(&format!("\"source\":\"{SOURCE}\"")));
+    assert!(text.contains("\"password\":\"[REDACTED]\""));
+    assert!(!text.contains(GOOD_PASSWORD));
+    assert!(text.contains(&format!(
+        "\"name\":\"{}[value truncated, 1 characters omitted]\"",
+        "x".repeat(MAX_VALUE_CHARS)
+    )));
     Ok(())
 }

@@ -13,8 +13,8 @@ use proptest::test_runner::TestCaseError;
 use response_breakers::breakers::{open_breakers, BreakerSettings, Breakers};
 use response_breakers::store::sync_path;
 use response_playbooks::bundle::{
-    bundle_state, document_value, find_playbook, leaves, open_playbooks, simulate_named, validate_bundle, Bundle, PlaybookSettings, MAX_STATE_DEPTH,
-    MODULE,
+    bundle_state, document_value, find_playbook, leaves, open_playbooks, retarget, simulate_named, validate_bundle, Bundle, PlaybookSettings,
+    MAX_STATE_DEPTH, MODULE,
 };
 use response_playbooks::cli::{execute, run_command, run_session, Session};
 use response_playbooks::error::{CommandError, PlaybookError};
@@ -890,7 +890,7 @@ fn the_simulation_input_can_grant_approvals_from_the_command_line() -> TestResul
 
 
 #[test]
-fn a_reload_is_audited_with_the_changed_file_and_the_changed_keys() -> TestResult {
+fn a_reload_is_audited_with_the_changed_file_and_the_changed_settings() -> TestResult {
     let rig = rig()?;
     let changed = FIXTURE_INVENTORY.replace("tags: [workstation]", "tags: [workstation, lab]");
     replace_file(&path_in(rig.dir.path(), "inventory.yaml"), &changed)?;
@@ -1403,5 +1403,37 @@ fn a_hostile_expression_that_reaches_run_time_halts_the_run() -> TestResult {
     let trace = custom_trace(&format!("{step}{NOTIFY_STEP_SIM}"), &json!({ "name": "n" }), None)?;
     assert!(trace.contains("rejected steps.0 notify"), "{trace}");
     assert!(trace.contains("halted steps.1 notify: not run"), "{trace}");
+    Ok(())
+}
+
+
+#[test]
+fn retarget_reads_the_changed_settings_when_the_diff_is_cut() -> Result<(), Box<dyn Error>> {
+    let files = vec!["a.yaml".to_owned(), "b.yaml".to_owned(), "c.yaml".to_owned()];
+    let entry = NewEntry {
+        timestamp: OffsetDateTime::UNIX_EPOCH,
+        actor: core_audit::model::Actor {
+            kind: core_audit::model::ActorKind::System,
+            id: "system".to_owned(),
+        },
+        tenant: "t".to_owned(),
+        module: "m".to_owned(),
+        action: "config.reload".to_owned(),
+        target: "catalogue".to_owned(),
+        outcome: Outcome::Success,
+        request_id: "r".to_owned(),
+        justification: None,
+        parameters: [
+            ("diff".to_owned(), "--- a/c.yaml::x\n[diff truncated, 5 characters omitted]".to_owned()),
+            ("changed_settings".to_owned(), "a.yaml::steps.0,other::y".to_owned()),
+        ]
+        .into(),
+    };
+    assert_eq!(retarget(entry.clone(), &files).target, "a.yaml,c.yaml");
+    let bare = NewEntry {
+        parameters: BTreeMap::new(),
+        ..entry
+    };
+    assert_eq!(retarget(bare, &files).target, "catalogue");
     Ok(())
 }

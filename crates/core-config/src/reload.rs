@@ -5,6 +5,7 @@ use crate::plan::{plan, Change};
 use crate::types::{ApplySectionFn, ConfigState, LoaderFn, Plan, SharedAuditFn, StateFn, ValidateFn};
 use arc_swap::ArcSwap;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use time::OffsetDateTime;
@@ -15,6 +16,58 @@ pub const RELOAD_ACTION: &str = "config.reload";
 
 
 pub const PARAMETER_COUNT: usize = 2;
+
+
+pub const MAX_VALUE_CHARS: usize = 512;
+
+
+pub const MAX_DIFF_ENTRIES: usize = 64;
+
+
+pub const MAX_DIFF_CHARS: usize = 8192;
+
+
+pub const MAX_KEY_ENTRIES: usize = 256;
+
+
+/// The text cut to `max` characters, with a visible marker naming the number of characters omitted.
+pub fn bounded_text(value: &str, max: usize, label: &str) -> String {
+    let omitted = value.chars().count().saturating_sub(max);
+    if omitted == 0 {
+        value.to_owned()
+    } else {
+        let kept: String = value.chars().take(max).collect();
+        format!("{kept}[{label} truncated, {omitted} characters omitted]")
+    }
+}
+
+
+pub fn bounded_value(value: &str) -> String {
+    bounded_text(value, MAX_VALUE_CHARS, "value")
+}
+
+
+pub fn bounded_diff(value: &str) -> String {
+    bounded_text(value, MAX_DIFF_CHARS, "diff")
+}
+
+
+pub fn bounded_parameter(key: &str, value: &str) -> String {
+    match key {
+        "diff" => bounded_diff(value),
+        "changed_settings" => bounded_text(value, MAX_DIFF_CHARS, "changed_settings"),
+        _ => bounded_value(value),
+    }
+}
+
+
+/// The SHA-256 of a full diff text, lower-case hex, so a record can be matched against Git.
+pub fn diff_digest(diff: &str) -> String {
+    format!("{:x}", Sha256::digest(diff.as_bytes()))
+}
+
+
+pub const RELOAD_DECLARED_KEYS: [&str; 5] = ["result", "diff", "reason", "changed_settings", "diff_sha256"];
 
 
 /// A module's hook per configuration section: `validate` may refuse, `apply` runs after the swap.
@@ -128,13 +181,50 @@ pub fn reload_entry(context: &ReloadContext, outcome: Outcome, parameters: [(&st
         outcome,
         request_id: context.request_id.clone(),
         justification: None,
-        parameters: parameters.into_iter().map(|(key, value)| (key.to_owned(), value)).collect(),
+        parameters: parameters
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), bounded_parameter(key, &value)))
+            .collect(),
     }
 }
 
 
-pub fn diff_text(changes: &[Change]) -> String {
+pub fn full_diff(changes: &[Change]) -> String {
     changes.iter().map(|change| change.diff.as_str()).collect()
+}
+
+
+pub fn diff_text(changes: &[Change]) -> String {
+    let shown: String = changes.iter().take(MAX_DIFF_ENTRIES).map(|change| change.diff.as_str()).collect();
+    let omitted = changes.len().saturating_sub(MAX_DIFF_ENTRIES);
+    if omitted == 0 {
+        shown
+    } else {
+        format!("{shown}[{omitted} more changes omitted]\n")
+    }
+}
+
+
+pub fn changed_settings_text(changes: &[Change]) -> String {
+    let shown: Vec<&str> = changes.iter().take(MAX_KEY_ENTRIES).map(|change| change.key.as_str()).collect();
+    let omitted = changes.len().saturating_sub(MAX_KEY_ENTRIES);
+    if omitted == 0 {
+        shown.join(",")
+    } else {
+        format!("{},[{omitted} more keys omitted]", shown.join(","))
+    }
+}
+
+
+/// Adds the full list of changed keys (bounded, with an omitted count) and the digest of the whole diff.
+pub fn with_changes(entry: NewEntry, changes: &[Change]) -> NewEntry {
+    let mut parameters = entry.parameters;
+    parameters.insert(
+        "changed_settings".to_owned(),
+        bounded_parameter("changed_settings", &changed_settings_text(changes)),
+    );
+    parameters.insert("diff_sha256".to_owned(), diff_digest(&full_diff(changes)));
+    NewEntry { parameters, ..entry }
 }
 
 
@@ -159,10 +249,13 @@ pub fn prepare<Config>(engine: &ReloadEngine<Config>) -> Result<Option<Candidate
 /// Audits first, then swaps: an audit failure leaves the old configuration in force.
 pub fn commit<Config>(engine: &ReloadEngine<Config>, candidate: Candidate<Config>) -> Result<ReloadOutcome, ReloadRefusal> {
     let keys: Vec<String> = candidate.changes.iter().map(|change| change.key.clone()).collect();
-    (engine.audit)(reload_entry(
-        &engine.context,
-        Outcome::Success,
-        [("result", "applied".to_owned()), ("diff", diff_text(&candidate.changes))],
+    (engine.audit)(with_changes(
+        reload_entry(
+            &engine.context,
+            Outcome::Success,
+            [("result", "applied".to_owned()), ("diff", diff_text(&candidate.changes))],
+        ),
+        &candidate.changes,
     ))?;
     engine.current.store(Arc::clone(&candidate.config));
     engine.subscribers.iter().for_each(|subscriber| (subscriber.apply)(&candidate.config));
