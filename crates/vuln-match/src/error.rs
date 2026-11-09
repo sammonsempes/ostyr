@@ -25,6 +25,29 @@ pub enum OsvError {
 
 
 #[derive(Debug, Error)]
+pub enum FeedError {
+    #[error("cannot read the feed archive")]
+    Io(#[from] std::io::Error),
+    #[error("archive exceeds the limit of {max} bytes")]
+    ArchiveTooLarge { max: u64 },
+    #[error("archive checksum {actual} does not match the configured {expected}")]
+    ChecksumMismatch { expected: String, actual: String },
+    #[error("invalid zip archive")]
+    Zip(#[from] zip::result::ZipError),
+    #[error("archive holds {count} entries, the limit is {max}")]
+    TooManyEntries { count: usize, max: usize },
+    #[error("unsafe entry name {name:?}")]
+    UnsafeName { name: String },
+    #[error("entry {name:?} exceeds {max} uncompressed bytes")]
+    EntryTooLarge { name: String, max: u64 },
+    #[error("archive exceeds {max} uncompressed bytes in total")]
+    TotalTooLarge { max: u64 },
+    #[error("entry {name:?} exceeds the compression ratio of {max}")]
+    RatioExceeded { name: String, max: u64 },
+}
+
+
+#[derive(Debug, Error)]
 pub enum EolError {
     #[error("end-of-life table: {count} entries exceed the limit of {max}")]
     TooMany { count: usize, max: usize },

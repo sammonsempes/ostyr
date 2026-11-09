@@ -22,3 +22,24 @@ pub const MAX_VERSION_BYTES: usize = 256;
 
 
 pub const MAX_EOL_ENTRIES: usize = 10_000;
+
+
+pub const MAX_ARCHIVE_BYTES: u64 = 268_435_456;
+
+
+pub const MAX_ARCHIVE_ENTRIES: usize = MAX_RECORDS;
+
+
+pub const MAX_ENTRY_BYTES: u64 = MAX_RECORD_BYTES as u64;
+
+
+pub const MAX_TOTAL_BYTES: u64 = 4_294_967_296;
+
+
+pub const MAX_COMPRESSION_RATIO: u64 = 200;
+
+
+pub const RATIO_FLOOR_BYTES: u64 = 65_536;
+
+
+pub const MAX_LOGGED_NAME_CHARS: usize = 128;
