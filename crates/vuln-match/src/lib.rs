@@ -2,6 +2,7 @@
 
 pub mod eol;
 pub mod error;
+pub mod feed;
 pub mod limits;
 pub mod matcher;
 pub mod model;
