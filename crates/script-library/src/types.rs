@@ -1,7 +1,6 @@
 use crate::model::ParamValue;
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
@@ -9,7 +8,8 @@ use std::time::Duration;
 pub type Params = BTreeMap<String, ParamValue>;
 
 
-pub type PlaceFn = fn(&Path, u32) -> io::Result<()>;
+#[cfg(unix)]
+pub type PlaceFn = fn(std::os::fd::BorrowedFd<'_>, u32) -> io::Result<()>;
 
 
 #[cfg(unix)]
@@ -20,9 +20,19 @@ pub type CheckFn = fn(std::os::fd::BorrowedFd<'_>) -> io::Result<bool>;
 pub type StatFn = fn(std::os::fd::BorrowedFd<'_>) -> Result<rustix::fs::Stat, rustix::io::Errno>;
 
 
-pub type KillFn = fn(&Path) -> io::Result<()>;
+#[cfg(unix)]
+pub type KillFn = fn(std::os::fd::BorrowedFd<'_>) -> io::Result<()>;
 
 
+#[cfg(unix)]
+pub type LimitFn = fn(std::os::fd::BorrowedFd<'_>, &crate::model::Limits) -> io::Result<()>;
+
+
+#[cfg(unix)]
+pub type EventsFn = fn(std::os::fd::BorrowedFd<'_>) -> io::Result<Option<crate::model::LimitHit>>;
+
+
+#[cfg(unix)]
 pub type NameFn<'a> = &'a mut dyn FnMut() -> io::Result<String>;
 
 
