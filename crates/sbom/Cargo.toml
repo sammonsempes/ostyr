@@ -1,0 +1,16 @@
+[package]
+name = "sbom"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+packageurl = "0.7"
+struson = "0.7"
+thiserror = "2"
+tracing = "0.1"
+vuln-match = { version = "0.0.0", path = "../vuln-match" }
+
+[lints]
+workspace = true
