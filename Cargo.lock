@@ -2862,6 +2862,8 @@ version = "0.0.0"
 dependencies = [
  "opentelemetry-proto",
  "prost",
+ "serde_json",
+ "siem-schema",
 ]
 
 [[package]]

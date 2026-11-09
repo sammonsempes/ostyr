@@ -8,6 +8,10 @@ publish = false
 [dependencies]
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "metrics"] }
 prost = "0.14"
+serde_json = "1"
+
+[dev-dependencies]
+siem-schema = { path = "../siem-schema" }
 
 [lints]
 workspace = true
