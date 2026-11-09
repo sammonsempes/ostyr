@@ -20,8 +20,8 @@ use core_api::oidc::{fingerprint_salt, oidc_fingerprint, settle, store_pending, 
 #[cfg(unix)]
 use core_api::previous::{check_previous_slot, read_previous_key};
 use core_api::previous::{
-    remove_synced, retire_previous, retire_previous_with, write_previous_key, PREVIOUS_KEY_REMOVAL_FAILED, PREVIOUS_KEY_REMOVED, PREVIOUS_KEY_SAVED,
-    ROTATION_RESUMED,
+    record_entry, remove_synced, retire_previous, retire_previous_with, write_previous_key, PREVIOUS_KEY_REMOVAL_FAILED, PREVIOUS_KEY_REMOVED,
+    PREVIOUS_KEY_SAVED, ROTATION_RESUMED,
 };
 use core_api::reload::{
     accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
@@ -38,8 +38,8 @@ use core_api::state::{
     RATE_WINDOW_SECONDS,
 };
 use core_api::types::{LogLevelHandle, SharedListener, SharedState};
-use core_audit::log::LogState;
-use core_audit::model::GENESIS_HASH;
+use core_audit::log::{genesis_log, LogState};
+use core_audit::model::{Outcome, GENESIS_HASH};
 use core_audit::verify::verify;
 use core_auth::model::{Account, Session, TotpEnrolment};
 use core_auth::oidc::{Callback, Identity};
@@ -53,7 +53,7 @@ use core_auth::types::{AccountMap, CredentialMap, StoreKey};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
-use core_config::reload::{reload, ReloadContext, ReloadEngine, ReloadOutcome};
+use core_config::reload::{reload, reload_entry, ReloadContext, ReloadEngine, ReloadOutcome};
 use fixture::{extra_access, extra_router, fixture, private_file, set_mode};
 use rcgen::generate_simple_self_signed;
 use rustls::crypto::ring::default_provider;
@@ -2528,5 +2528,27 @@ fn an_unreadable_live_store_is_not_taken_for_one_sealed_under_the_new_key() -> T
     let running = live("")?;
     running.state.store_path.store(Arc::new(running.dir.path().to_path_buf()));
     assert!(!store_sealed_under(&running.state, &store_key(NEW_KEY_FILL)));
+    Ok(())
+}
+
+
+#[test]
+fn undeclared_reload_parameters_are_redacted_and_declared_ones_kept() -> TestResult {
+    let context = ReloadContext {
+        actor_id: "system".to_owned(),
+        tenant: "t".to_owned(),
+        module: "m".to_owned(),
+        target: "x".to_owned(),
+        request_id: "r".to_owned(),
+    };
+    let mut entry = reload_entry(&context, Outcome::Success, [("result", "applied".to_owned()), ("diff", "d".to_owned())]);
+    entry.parameters.insert("token".to_owned(), "hunter2".to_owned());
+    let log = genesis_log(Vec::new());
+    record_entry(&log, entry);
+    let state = log.state.lock().map_err(|_| "poisoned")?;
+    let text = String::from_utf8(state.writer.clone())?;
+    assert!(text.contains("\"token\":\"[REDACTED]\""));
+    assert!(text.contains("\"result\":\"applied\""));
+    assert!(!text.contains("hunter2"));
     Ok(())
 }

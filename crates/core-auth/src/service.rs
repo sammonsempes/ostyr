@@ -11,14 +11,34 @@ use crate::totp::{consume_backup_code, hash_backup_code, new_backup_codes, new_s
 use crate::types::{
     AccountMap, AttemptMap, ChallengeMap, CompromisedSet, CredentialMap, Parameters, RandomFn, RoleCatalog, RoleSet, SessionMap, StoreKey, VerifyFn,
 };
-use core_audit::log::{append, AuditLog};
+use core_audit::log::{append_declared, AuditLog};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use core_config::reload::bounded_value;
 use secrecy::{ExposeSecret, SecretString};
 use std::io::Write;
 use time::OffsetDateTime;
 
 
 pub const MODULE_NAME: &str = "core-auth";
+
+
+pub const DECLARED_KEYS: [&str; 15] = [
+    "reason",
+    "source",
+    "method",
+    "roles",
+    "groups",
+    "revoked",
+    "before",
+    "after",
+    "revoked_sessions",
+    "count",
+    "scope",
+    "until",
+    "credential",
+    "name",
+    "remaining",
+];
 
 
 pub const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$eLn8npymZcp+LqjaHar7Ww$YLEZoBh9Xv6kwPHZD3zecktBgdrvag7/CXQCA6uy/Ws";
@@ -174,7 +194,7 @@ pub fn record<Output: Write>(
     outcome: Outcome,
     parameters: &[(&str, String)],
 ) -> Result<(), AuthError> {
-    append(
+    append_declared(
         context.audit,
         NewEntry {
             timestamp: now,
@@ -189,8 +209,12 @@ pub fn record<Output: Write>(
             outcome,
             request_id: context.request_id.to_owned(),
             justification: None,
-            parameters: parameters.iter().map(|(name, value)| ((*name).to_owned(), value.clone())).collect(),
+            parameters: parameters
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), bounded_value(value)))
+                .collect(),
         },
+        &DECLARED_KEYS,
     )?;
     Ok(())
 }

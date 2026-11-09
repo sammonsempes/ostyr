@@ -33,6 +33,9 @@ pub const KEY_SEPARATOR: &str = "::";
 pub const DIFF_PARAMETER: &str = "diff";
 
 
+pub const CHANGED_KEYS_PARAMETER: &str = "changed_settings";
+
+
 pub const MAX_STATE_DEPTH: usize = 32;
 
 
@@ -157,10 +160,16 @@ pub fn retarget(entry: NewEntry, files: &[String]) -> NewEntry {
     let changed: Vec<&str> = files
         .iter()
         .filter(|file| {
-            entry
+            let prefix = format!("{file}{KEY_SEPARATOR}");
+            let in_diff = entry
                 .parameters
                 .get(DIFF_PARAMETER)
-                .is_some_and(|diff| diff.contains(&format!("--- a/{file}{KEY_SEPARATOR}")))
+                .is_some_and(|diff| diff.contains(&format!("--- a/{prefix}")));
+            let in_keys = entry
+                .parameters
+                .get(CHANGED_KEYS_PARAMETER)
+                .is_some_and(|keys| keys.split(',').any(|key| key.starts_with(&prefix)));
+            in_diff || in_keys
         })
         .map(String::as_str)
         .collect();
