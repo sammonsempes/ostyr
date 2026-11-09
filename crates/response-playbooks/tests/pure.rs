@@ -160,7 +160,7 @@ fn unknown_keys_are_refused_with_file_line_and_path() -> TestResult {
     let message = failure.to_string();
     assert!(message.starts_with("pb.yaml:6:"), "{message}");
     assert!(message.contains("steps[0]"), "{message}");
-    assert!(message.contains("bogus"), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
     let top = parse_document::<Playbook>("name: x\nversion: 1\nmode: bogus\nsteps: []\n", "pb.yaml")
         .err()
         .ok_or("expected a refusal")?;

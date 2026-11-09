@@ -597,7 +597,7 @@ fn an_invalid_playbook_is_refused_audited_and_the_old_one_stays() -> TestResult 
     replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace("version: 3", "version: 3\nbogus: 1"))?;
     let refused = reload(&rig.session.engine);
     assert!(
-        matches!(&refused, ReloadOutcome::Refused { reason } if reason.contains("c2.yaml:") && reason.contains("bogus")),
+        matches!(&refused, ReloadOutcome::Refused { reason } if reason.contains("c2.yaml:") && reason.contains("unknown field")),
         "{refused:?}"
     );
     replace_file(&path_in(rig.dir.path(), "c2.yaml"), &C2.replace("action: sinkhole", "action: vanish"))?;

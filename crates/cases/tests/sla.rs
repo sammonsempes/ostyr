@@ -161,7 +161,7 @@ fn unknown_field_names_file_and_line() -> TestResult {
     )?;
     let message = load_sla(&path).err().ok_or("expected an error")?.to_string();
     assert!(message.contains("sla.yaml:6"), "{message}");
-    assert!(message.contains("extra"), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
     Ok(())
 }
 
