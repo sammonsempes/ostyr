@@ -14,7 +14,10 @@ use types::TestResult;
 
 
 const VALID: &str = "version: 1
+tenant: acme
 name: linux-hardening
+actions:
+  - lock-account
 controls:
   - id: ssh-root
     query: SELECT value FROM augeas WHERE path = '/files/etc/ssh/sshd_config/PermitRootLogin'
@@ -87,7 +90,7 @@ impl Read for FailingReader {
 
 
 fn baseline_with(control_fields: &str) -> String {
-    format!("version: 1\nname: base\ncontrols:\n  - id: c1\n    query: SELECT 1\n    severity: low\n{control_fields}")
+    format!("version: 1\ntenant: acme\nname: base\nactions: [fix]\ncontrols:\n  - id: c1\n    query: SELECT 1\n    severity: low\n{control_fields}")
 }
 
 
@@ -171,7 +174,7 @@ fn unknown_field_is_refused() -> TestResult {
 
 #[test]
 fn unsupported_version_is_refused() -> TestResult {
-    let message = baseline_error("version: 2\nname: base\ncontrols: []\n")?;
+    let message = baseline_error("version: 2\ntenant: acme\nname: base\ncontrols: []\n")?;
     assert!(message.contains("unsupported baseline version 2"), "{message}");
     Ok(())
 }
@@ -179,7 +182,7 @@ fn unsupported_version_is_refused() -> TestResult {
 
 #[test]
 fn empty_name_is_refused() -> TestResult {
-    let message = baseline_error("version: 1\nname: ' '\ncontrols: []\n")?;
+    let message = baseline_error("version: 1\ntenant: acme\nname: ' '\ncontrols: []\n")?;
     assert!(message.contains("`name` is empty"), "{message}");
     Ok(())
 }
@@ -188,7 +191,9 @@ fn empty_name_is_refused() -> TestResult {
 #[test]
 fn duplicate_control_id_is_refused() -> TestResult {
     let control = "  - id: c1\n    query: SELECT 1\n    severity: low\n    expect:\n      row_count: 0\n";
-    let message = baseline_error(&format!("version: 1\nname: base\ncontrols:\n{control}{control}"))?;
+    let message = baseline_error(&format!(
+        "version: 1\ntenant: acme\nname: base\nactions: [fix]\ncontrols:\n{control}{control}"
+    ))?;
     assert!(message.contains("duplicate control id"), "{message}");
     Ok(())
 }
@@ -198,7 +203,7 @@ fn duplicate_control_id_is_refused() -> TestResult {
 fn too_many_controls_is_refused() -> TestResult {
     let control = "  - id: cN\n    query: SELECT 1\n    severity: low\n    expect:\n      row_count: 0\n";
     let controls = control.repeat(MAX_CONTROLS + EXTRA);
-    let message = baseline_error(&format!("version: 1\nname: base\ncontrols:\n{controls}"))?;
+    let message = baseline_error(&format!("version: 1\ntenant: acme\nname: base\nactions: [fix]\ncontrols:\n{controls}"))?;
     assert!(message.contains("more than"), "{message}");
     Ok(())
 }
@@ -210,21 +215,21 @@ fn control_limits_are_enforced() -> TestResult {
     let long_query = "x".repeat(MAX_QUERY_LEN + EXTRA);
     let long_text = "x".repeat(MAX_TEXT_LEN + EXTRA);
     let cases = [
-        format!("version: 1\nname: b\ncontrols:\n  - id: {long_id}\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n"),
-        format!("version: 1\nname: b\ncontrols:\n  - id: c\n    query: {long_query}\n    severity: low\n    expect:\n      row_count: 0\n"),
-        "version: 1\nname: b\ncontrols:\n  - id: ''\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n".to_string(),
-        format!("version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_equals:\n        column: a\n        value: {long_text}\n"),
-        "version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_equals:\n        column: ''\n        value: v\n"
+        format!("version: 1\ntenant: t\nname: b\ncontrols:\n  - id: {long_id}\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n"),
+        format!("version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: {long_query}\n    severity: low\n    expect:\n      row_count: 0\n"),
+        "version: 1\ntenant: t\nname: b\ncontrols:\n  - id: ''\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n".to_string(),
+        format!("version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_equals:\n        column: a\n        value: {long_text}\n"),
+        "version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_equals:\n        column: ''\n        value: v\n"
             .to_string(),
-        format!("version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_matches:\n        column: a\n        pattern: {long_text}\n"),
-        "version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_matches:\n        column: ''\n        pattern: p\n"
+        format!("version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_matches:\n        column: a\n        pattern: {long_text}\n"),
+        "version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_matches:\n        column: ''\n        pattern: p\n"
             .to_string(),
-        "version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_matches:\n        column: a\n        pattern: ''\n"
+        "version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      column_matches:\n        column: a\n        pattern: ''\n"
             .to_string(),
-        format!("version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n    correction:\n      action: {long_text}\n"),
-        "version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n    correction:\n      action: ''\n"
+        format!("version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n    correction:\n      action: {long_text}\n"),
+        "version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n    correction:\n      action: ''\n"
             .to_string(),
-        "version: 1\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n    frameworks:\n      - framework: anssi\n        reference: ''\n"
+        "version: 1\ntenant: t\nname: b\ncontrols:\n  - id: c\n    query: q\n    severity: low\n    expect:\n      row_count: 0\n    frameworks:\n      - framework: anssi\n        reference: ''\n"
             .to_string(),
     ];
     cases

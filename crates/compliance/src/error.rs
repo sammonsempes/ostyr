@@ -8,6 +8,14 @@ pub enum ComplianceError {
     Config(#[from] ConfigError),
     #[error("{file}: {message}")]
     Invalid { file: String, message: String },
+    #[error("tenant `{found}` does not match tenant `{expected}`")]
+    TenantMismatch { expected: String, found: String },
+    #[error("verdict for control `{control}` which is not in the baseline")]
+    UnknownControl { control: String },
+    #[error("device `{device}` appears more than once in the verdicts")]
+    DuplicateDevice { device: String },
+    #[error("device `{device}` has more than one verdict for control `{control}`")]
+    DuplicateControl { device: String, control: String },
     #[error("query result is {bytes} bytes, over the limit")]
     ResultTooLarge { bytes: usize },
     #[error("query result has {rows} rows, over the limit")]
