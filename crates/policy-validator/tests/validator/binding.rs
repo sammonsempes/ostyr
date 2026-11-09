@@ -1,4 +1,4 @@
-use crate::support::{exclusion, hash, image, probe, reasons_for, HASH_PAIRS};
+use crate::support::{exclusion, hash, image, probe, reasons_for, BPF_AGENT_INDEX, HASH_PAIRS};
 use crate::types::TestResult;
 use policy_validator::model::{ObservedImage, PathForm, Reason, Scope, SelectorKind};
 use std::error::Error;
@@ -249,7 +249,8 @@ fn c3_finding_6_second_net_aliases_and_sensor_tampering() -> TestResult {
     assert_eq!(
         removal,
         vec![Reason::ProtectedPath {
-            directory: "/sys/fs/bpf".to_owned()
+            list: "agent_paths".to_owned(),
+            index: BPF_AGENT_INDEX
         }]
     );
     let by_path = probe(Scope::SingleEndpoint, SelectorKind::Path, "/usr/sbin/bpftool")?;

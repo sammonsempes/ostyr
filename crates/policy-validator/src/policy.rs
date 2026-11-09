@@ -233,6 +233,8 @@ pub enum PolicyError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedPath {
     pub name: String,
+    pub list: &'static str,
+    pub index: usize,
     pub path: CanonicalPath,
 }
 
@@ -259,7 +261,12 @@ pub fn named_paths(list: &'static str, entries: &[String]) -> Result<Vec<NamedPa
         .enumerate()
         .map(|(index, entry)| {
             canonical_path(entry)
-                .map(|path| NamedPath { name: entry.clone(), path })
+                .map(|path| NamedPath {
+                    name: entry.clone(),
+                    list,
+                    index,
+                    path,
+                })
                 .map_err(|form| PolicyError::InvalidPath { list, index, form })
         })
         .collect()
