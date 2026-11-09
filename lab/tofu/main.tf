@@ -37,7 +37,7 @@ resource "libvirt_cloudinit_disk" "init" {
   pool      = var.pool
   user_data = (local.windows[each.key] ?
     templatefile("${path.module}/user-data-windows.tftpl", { ssh_public_key = var.ssh_public_key }) :
-  templatefile("${path.module}/user-data.tftpl", { hostname = each.key, ssh_user = each.value.ssh_user, ssh_public_key = var.ssh_public_key }))
+  templatefile("${path.module}/user-data.tftpl", { hostname = each.key, ssh_user = each.value.ssh_user, ssh_public_key = var.ssh_public_key, proxy_url = var.proxy_url }))
   meta_data = local.windows[each.key] ? "instance-id: ${local.prefix}-${each.key}\nlocal-hostname: ${each.key}\n" : null
 }
 

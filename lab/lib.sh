@@ -14,6 +14,9 @@ readonly STALE_DAYS=7
 readonly DESTROY_TIMEOUT_SECONDS=120
 readonly KIB_PER_UNIT=4194304
 readonly TCG_TIMEOUT_FACTOR=6
+readonly PROXY_PORT=3128
+readonly PROXY_MAX_CLIENTS=20
+readonly PROXY_START_ATTEMPTS=20
 LAB_KVM_DEVICE="${LAB_KVM_DEVICE:-/dev/kvm}"
 PATH="$HOME/.local/bin:$PATH"
 export PATH
@@ -154,6 +157,69 @@ ensure_pool() {
         virsh_lab pool-start "$LAB_POOL" >/dev/null
     fi
     virsh_lab pool-autostart "$LAB_POOL" >/dev/null
+}
+
+proxy_dir() {
+    printf '%s/proxy' "$(state_dir "$1")"
+}
+
+profile_egress() {
+    local egress
+    egress="$(awk '$1 == "egress:" {print $2}' "$1")"
+    [[ -z "$egress" ]] && egress=none
+    [[ "$egress" == "proxy" || "$egress" == "none" ]] || die "invalid profile egress '$egress' in $1 (proxy or none)"
+    if [[ "$egress" == "proxy" ]] && grep -Eq 'base_image: *attacker' "$1"; then
+        die "egress: proxy is refused for attack profiles ($1)"
+    fi
+    printf '%s' "$egress"
+}
+
+proxy_filter_regexes() {
+    awk 'NF {
+        host = $1
+        suffix = (substr(host, 1, 1) == ".")
+        gsub(/\./, "\\.", host)
+        if (suffix) { sub(/^\\\./, "", host); print "(^|\\.)" host "$" } else { print "^" host "$" }
+    }' "$1"
+}
+
+proxy_start() {
+    local task_id="$1" address="$2" dir attempt
+    dir="$(proxy_dir "$task_id")"
+    mkdir -p "$dir"
+    proxy_filter_regexes "$LAB_DIR/egress-allow.txt" >"$dir/filter"
+    cat >"$dir/tinyproxy.conf" <<CONF
+Port $PROXY_PORT
+Listen $address
+Allow ${address%.1}.0/24
+PidFile "$dir/tinyproxy.pid"
+LogFile "$dir/proxy.log"
+LogLevel Info
+MaxClients $PROXY_MAX_CLIENTS
+ConnectPort 443
+Filter "$dir/filter"
+FilterType ere
+FilterDefaultDeny Yes
+DisableViaHeader Yes
+CONF
+    command -v ostyr-tinyproxy >/dev/null || die "ostyr-tinyproxy is missing, run sudo lab/host/install.sh"
+    ostyr-tinyproxy -c "$dir/tinyproxy.conf"
+    for ((attempt = 0; attempt < PROXY_START_ATTEMPTS; attempt++)); do
+        if ss -ltn "src $address:$PROXY_PORT" | grep -q LISTEN; then return 0; fi
+        sleep 1
+    done
+    die "proxy did not listen on $address:$PROXY_PORT"
+}
+
+proxy_stop() {
+    local dir pid
+    dir="$(proxy_dir "$1")"
+    if [[ -f "$dir/tinyproxy.pid" ]]; then
+        pid="$(cat "$dir/tinyproxy.pid")"
+        if [[ "$pid" =~ ^[0-9]+$ ]] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF "$dir/tinyproxy.conf"; then
+            kill "$pid" || log "proxy $pid already gone"
+        fi
+    fi
 }
 
 names_with_prefix() {

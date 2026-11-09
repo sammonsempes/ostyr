@@ -22,6 +22,11 @@ variable "created_at" {
   type = number
 }
 
+variable "proxy_url" {
+  type    = string
+  default = ""
+}
+
 variable "domain_type" {
   type    = string
   default = "kvm"
