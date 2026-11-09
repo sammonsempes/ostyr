@@ -2,11 +2,12 @@ use crate::error::CertError;
 use crate::model::{CertRecord, KeyType, ParseOutcome};
 use data_encoding::HEXLOWER;
 use sha2::{Digest, Sha256};
-use x509_parser::certificate::X509Certificate;
+use x509_parser::certificate::TbsCertificate;
 use x509_parser::extensions::GeneralName;
 use x509_parser::parse_x509_certificate;
 use x509_parser::pem::Pem;
 use x509_parser::public_key::PublicKey;
+use x509_parser::x509::SubjectPublicKeyInfo;
 
 
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
@@ -75,25 +76,31 @@ pub fn parse_pem(input: &[u8]) -> Result<ParseOutcome, CertError> {
 
 pub fn record_from_der(der: &[u8]) -> Result<CertRecord, CertError> {
     let (_, certificate) = parse_x509_certificate(der).map_err(CertError::Certificate)?;
-    let (key_type, key_bits) = key_of(&certificate);
-    let subject = certificate.subject().to_string();
-    let issuer = certificate.issuer().to_string();
+    record_from_tbs(&certificate.tbs_certificate, certificate.as_ref())
+}
+
+
+/// Builds a record from a TBSCertificate; the fingerprint is the SHA-256 of `identity_bytes` (the DER certificate, or the TBS of a precertificate).
+pub fn record_from_tbs(tbs: &TbsCertificate<'_>, identity_bytes: &[u8]) -> Result<CertRecord, CertError> {
+    let (key_type, key_bits) = key_of(&tbs.subject_pki);
+    let subject = tbs.subject().to_string();
+    let issuer = tbs.issuer().to_string();
     Ok(CertRecord {
-        fingerprint_sha256: HEXLOWER.encode(&Sha256::digest(certificate.as_ref())),
+        fingerprint_sha256: HEXLOWER.encode(&Sha256::digest(identity_bytes)),
         self_signed: subject == issuer,
         subject,
         issuer,
-        dns_names: dns_names(&certificate)?,
-        not_before: certificate.validity().not_before.timestamp(),
-        not_after: certificate.validity().not_after.timestamp(),
+        dns_names: dns_names(tbs)?,
+        not_before: tbs.validity().not_before.timestamp(),
+        not_after: tbs.validity().not_after.timestamp(),
         key_type,
         key_bits,
     })
 }
 
 
-fn key_of(certificate: &X509Certificate<'_>) -> (KeyType, Option<usize>) {
-    match certificate.public_key().parsed() {
+fn key_of(key_info: &SubjectPublicKeyInfo<'_>) -> (KeyType, Option<usize>) {
+    match key_info.parsed() {
         Ok(key @ PublicKey::RSA(_)) => (KeyType::Rsa, Some(key.key_size())),
         Ok(key @ PublicKey::EC(_)) => (KeyType::Ec, Some(key.key_size())),
         _ => (KeyType::Other, None),
@@ -101,8 +108,8 @@ fn key_of(certificate: &X509Certificate<'_>) -> (KeyType, Option<usize>) {
 }
 
 
-fn dns_names(certificate: &X509Certificate<'_>) -> Result<Vec<String>, CertError> {
-    let extension = certificate.subject_alternative_name().map_err(CertError::Extension)?;
+fn dns_names(tbs: &TbsCertificate<'_>) -> Result<Vec<String>, CertError> {
+    let extension = tbs.subject_alternative_name().map_err(CertError::Extension)?;
     Ok(extension.map_or_else(Vec::new, |san| {
         san.value
             .general_names
