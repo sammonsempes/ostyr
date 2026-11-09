@@ -14,6 +14,8 @@ pub enum StatusPageError {
     TextTooLong { field: &'static str, limit: usize },
     #[error("two components map to one service")]
     DuplicateService,
+    #[error("invalid rule for service `{service}`: {reason}")]
+    InvalidRule { service: String, reason: &'static str },
     #[error("{format} output larger than {limit} bytes")]
     OutputTooLarge { format: &'static str, limit: usize },
     #[error("page settings out of range: {0}")]

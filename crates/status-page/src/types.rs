@@ -1,6 +1,6 @@
 use crate::model::{PageSettings, PageState};
 use arc_swap::ArcSwap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::future::Future;
 use std::io;
@@ -32,3 +32,7 @@ pub type IncomingConnections = Pin<Box<dyn Stream<Item = io::Result<TcpStream>> 
 
 
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+
+/// Samples (newest first) per (check, location).
+pub type Series<'a> = BTreeMap<(&'a str, &'a str), Vec<(i64, bool)>>;

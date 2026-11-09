@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod config;
+pub mod derive;
 pub mod error;
 pub mod html;
 pub mod limiter;
