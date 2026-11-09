@@ -1,5 +1,7 @@
+use crate::types::Params;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 
 pub const MAX_NAME_LENGTH: usize = 64;
@@ -92,4 +94,32 @@ pub enum ParamValue {
 pub struct Argv {
     pub program: String,
     pub args: Vec<String>,
+}
+
+
+/// Everything one launch needs; `environment` is a snapshot of the caller's variables, of which only the allowlist is passed on.
+#[derive(Debug, Clone)]
+pub struct LaunchRequest {
+    pub manifest: Manifest,
+    pub params: Params,
+    pub script_bytes: Vec<u8>,
+    pub work_root: PathBuf,
+    pub environment: Vec<(String, String)>,
+}
+
+
+/// `exit_code` is `None` when the process was killed; `dropped_bytes` counts the output beyond the cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub output: Vec<u8>,
+    pub dropped_bytes: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Captured {
+    pub bytes: Vec<u8>,
+    pub dropped: u64,
 }

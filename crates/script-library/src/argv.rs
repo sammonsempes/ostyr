@@ -1,3 +1,4 @@
+use crate::check::check_manifest;
 use crate::error::ScriptError;
 use crate::model::{Argv, Interpreter, Manifest, ParamValue};
 use crate::params::validate_params;
@@ -11,6 +12,9 @@ pub const BASH_PROGRAM: &str = "bash";
 
 
 pub const PYTHON_PROGRAM: &str = "python3";
+
+
+pub const PYTHON_OPTION: &str = "-I";
 
 
 pub const POWERSHELL_OPTIONS: [&str; 3] = ["-NoProfile", "-NonInteractive", "-File"];
@@ -32,7 +36,8 @@ fn launch_args(interpreter: Interpreter, script: &str) -> Vec<String> {
             .map(|option| option.to_string())
             .chain([script.to_string()])
             .collect(),
-        Interpreter::Bash | Interpreter::Python => vec![script.to_string()],
+        Interpreter::Bash => vec![script.to_string()],
+        Interpreter::Python => vec![PYTHON_OPTION.to_string(), script.to_string()],
     }
 }
 
@@ -45,7 +50,7 @@ fn value_text(value: &ParamValue) -> String {
 }
 
 
-/// One element per parameter, name and value joined in the same element (`-name:value`, `--name=value`) so a value starting with `-` is never an option.
+/// One element per parameter, name and value in the same element (`-name:value`, `--name=value`): never read as an option.
 fn parameter_arg(interpreter: Interpreter, name: &str, value: &ParamValue) -> String {
     match interpreter {
         Interpreter::Powershell => format!("-{name}:{}", value_text(value)),
@@ -54,13 +59,20 @@ fn parameter_arg(interpreter: Interpreter, name: &str, value: &ParamValue) -> St
 }
 
 
-/// Validates the parameters, then returns the interpreter and separate arguments; nothing is ever joined into a shell string.
-pub fn build_argv(manifest: &Manifest, params: &Params) -> Result<Argv, ScriptError> {
-    validate_params(manifest, params)?;
-    let mut args = launch_args(manifest.interpreter, &manifest.script);
+/// Interpreter and separate arguments for `script`, without validating anything; the caller has checked manifest and parameters.
+pub fn argv_with_script(manifest: &Manifest, params: &Params, script: &str) -> Argv {
+    let mut args = launch_args(manifest.interpreter, script);
     args.extend(params.iter().map(|(name, value)| parameter_arg(manifest.interpreter, name, value)));
-    Ok(Argv {
+    Argv {
         program: program_of(manifest.interpreter).to_string(),
         args,
-    })
+    }
+}
+
+
+/// Checks the manifest and the parameters, then returns the interpreter and separate arguments; nothing is joined into a shell string.
+pub fn build_argv(manifest: &Manifest, params: &Params) -> Result<Argv, ScriptError> {
+    check_manifest(manifest)?;
+    validate_params(manifest, params)?;
+    Ok(argv_with_script(manifest, params, &manifest.script))
 }

@@ -1,4 +1,5 @@
 use core_config::error::ConfigError;
+use std::io;
 use thiserror::Error;
 
 
@@ -37,4 +38,44 @@ pub enum ScriptError {
     PathOutsidePrefixes(String),
     #[error("script digest does not match the manifest")]
     DigestMismatch,
+    #[error("manifest `{0}` is not a regular file")]
+    NotRegularFile(String),
+    #[error("parameter `{name}` does not resolve to an existing path")]
+    PathUnresolved {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{context}")]
+    Io {
+        context: &'static str,
+        #[source]
+        source: io::Error,
+    },
+}
+
+
+#[cfg(unix)]
+impl From<rustix::io::Errno> for ScriptError {
+    fn from(errno: rustix::io::Errno) -> Self {
+        Self::Io {
+            context: "cannot kill the script process group",
+            source: errno.into(),
+        }
+    }
+}
+
+
+#[cfg(unix)]
+impl From<std::sync::mpsc::RecvTimeoutError> for ScriptError {
+    fn from(error: std::sync::mpsc::RecvTimeoutError) -> Self {
+        let context = match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => "the output is still held open after the process group was killed",
+            std::sync::mpsc::RecvTimeoutError::Disconnected => "the output reader stopped without a result",
+        };
+        Self::Io {
+            context,
+            source: io::Error::other(error),
+        }
+    }
 }

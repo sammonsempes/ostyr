@@ -4,6 +4,8 @@ pub mod argv;
 pub mod check;
 pub mod digest;
 pub mod error;
+#[cfg(unix)]
+pub mod launch;
 pub mod load;
 pub mod model;
 pub mod params;
