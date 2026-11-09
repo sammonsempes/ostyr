@@ -16,6 +16,16 @@ pub enum StatusPageError {
     DuplicateService,
     #[error("{format} output larger than {limit} bytes")]
     OutputTooLarge { format: &'static str, limit: usize },
+    #[error("page settings out of range: {0}")]
+    InvalidSettings(String),
+    #[error("snapshot of tenant `{snapshot}` refused by the page of tenant `{page}`")]
+    SnapshotTenant { page: String, snapshot: String },
+    #[error(transparent)]
+    Audit(#[from] core_audit::error::AuditError),
+    #[error(transparent)]
+    Watch(#[from] core_config::error::WatchError),
+    #[error("input or output failed: {0}")]
+    Io(#[from] std::io::Error),
     #[error("cannot serialise the page: {0}")]
     Json(#[from] serde_json::Error),
 }
