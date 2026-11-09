@@ -19,3 +19,6 @@ pub const MAX_VERSIONS_PER_AFFECTED: usize = 65_536;
 
 
 pub const MAX_VERSION_BYTES: usize = 256;
+
+
+pub const MAX_EOL_ENTRIES: usize = 10_000;
