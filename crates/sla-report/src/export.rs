@@ -26,8 +26,11 @@ pub const INJECTION_PREFIXES: [char; 6] = ['=', '+', '-', '@', '\t', '\r'];
 pub const FULL_WIDTH_PREFIXES: [char; 4] = ['\u{FF1D}', '\u{FF0B}', '\u{FF0D}', '\u{FF20}'];
 
 
+pub const INVISIBLE_CHARS: [char; 5] = ['\u{FEFF}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}'];
+
+
 pub fn neutralise_cell(cell: &str) -> String {
-    let lead = cell.trim_start();
+    let lead = cell.trim_start_matches(|character: char| character.is_whitespace() || INVISIBLE_CHARS.contains(&character));
     let dangerous = cell.starts_with(INJECTION_PREFIXES) || lead.starts_with(INJECTION_PREFIXES) || lead.starts_with(FULL_WIDTH_PREFIXES);
     if dangerous {
         format!("'{cell}")
