@@ -14,6 +14,10 @@ readonly STALE_DAYS=7
 readonly DESTROY_TIMEOUT_SECONDS=120
 readonly KIB_PER_UNIT=4194304
 readonly TCG_TIMEOUT_FACTOR=6
+readonly PROXY_PORT=3128
+readonly PROXY_MAX_CLIENTS=20
+readonly PROXY_START_ATTEMPTS=20
+readonly PROXY_LOG_MAX_BYTES=8388608
 LAB_KVM_DEVICE="${LAB_KVM_DEVICE:-/dev/kvm}"
 PATH="$HOME/.local/bin:$PATH"
 export PATH
@@ -154,6 +158,82 @@ ensure_pool() {
         virsh_lab pool-start "$LAB_POOL" >/dev/null
     fi
     virsh_lab pool-autostart "$LAB_POOL" >/dev/null
+}
+
+proxy_dir() {
+    printf '%s/proxy' "$(state_dir "$1")"
+}
+
+profile_egress() {
+    local egress
+    egress="$(awk '$1 == "egress:" {print $2}' "$1")"
+    [[ -z "$egress" ]] && egress=none
+    [[ "$egress" == "proxy" || "$egress" == "none" ]] || die "invalid profile egress '$egress' in $1 (proxy or none)"
+    if [[ "$egress" == "proxy" ]] && grep -Eq 'base_image: *attacker' "$1"; then
+        die "egress: proxy is refused for attack profiles ($1)"
+    fi
+    printf '%s' "$egress"
+}
+
+proxy_filter_regexes() {
+    awk 'NF {
+        host = $1
+        suffix = (substr(host, 1, 1) == ".")
+        gsub(/\./, "\\.", host)
+        if (suffix) { sub(/^\\\./, "", host); prefix = "([a-z0-9-]+\\.)*" } else { prefix = "" }
+        print "^(http://)?" prefix host "(:(80|443))?(/|$)"
+    }' "$1"
+}
+
+proxy_unit() {
+    printf 'ostyr-proxy-%s.service' "$1"
+}
+
+proxy_start() {
+    local task_id="$1" address="$2" dir unit attempt
+    dir="$(proxy_dir "$task_id")"
+    unit="$(proxy_unit "$task_id")"
+    command -v ostyr-tinyproxy >/dev/null || die "ostyr-tinyproxy is missing, run sudo lab/host/install.sh"
+    mkdir -p "$dir"
+    proxy_filter_regexes "$LAB_DIR/egress-allow.txt" >"$dir/filter"
+    install -m 0600 -o nobody -g nogroup /dev/null "$dir/proxy.log"
+    cat >"$dir/tinyproxy.conf" <<CONF
+User nobody
+Group nogroup
+Port $PROXY_PORT
+Listen $address
+Allow ${address%.1}.0/24
+LogFile "$dir/proxy.log"
+LogLevel Notice
+MaxClients $PROXY_MAX_CLIENTS
+ConnectPort 443
+Filter "$dir/filter"
+FilterType ere
+FilterURLs Yes
+FilterDefaultDeny Yes
+DisableViaHeader Yes
+CONF
+    systemd-run --quiet --unit="${unit%.service}" \
+        -p ProtectSystem=strict -p ProtectHome=read-only -p "ReadWritePaths=$dir" -p PrivateTmp=yes -p NoNewPrivileges=yes \
+        -p ProtectKernelTunables=yes -p ProtectControlGroups=yes -p RestrictAddressFamilies="AF_INET AF_UNIX" \
+        -p CapabilityBoundingSet="CAP_SETUID CAP_SETGID" -p "LimitFSIZE=$PROXY_LOG_MAX_BYTES" \
+        ostyr-tinyproxy -d -c "$dir/tinyproxy.conf"
+    for ((attempt = 0; attempt < PROXY_START_ATTEMPTS; attempt++)); do
+        if ss -ltn "src $address:$PROXY_PORT" | grep -q LISTEN; then return 0; fi
+        sleep 1
+    done
+    die "proxy did not listen on $address:$PROXY_PORT"
+}
+
+proxy_stop() {
+    local unit state
+    unit="$(proxy_unit "$1")"
+    state="$(systemctl is-failed "$unit" || true)"
+    if [[ "$state" == "failed" ]]; then
+        log "proxy of $1 was stopped by the host (log cap of $PROXY_LOG_MAX_BYTES bytes or a crash), see journalctl -u $unit"
+    fi
+    if systemctl is-active --quiet "$unit"; then systemctl stop "$unit"; fi
+    if [[ "$state" == "failed" ]]; then systemctl reset-failed "$unit"; fi
 }
 
 names_with_prefix() {

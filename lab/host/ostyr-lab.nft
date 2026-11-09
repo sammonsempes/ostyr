@@ -6,6 +6,7 @@ table inet ostyr_lab {
 		iifname != "virbr*" accept
 		ct state established,related accept
 		udp dport 67 fib daddr . iif type { local, broadcast } accept
+		tcp dport 3128 fib daddr . iif type local accept
 		counter reject with icmpx admin-prohibited
 	}
 }

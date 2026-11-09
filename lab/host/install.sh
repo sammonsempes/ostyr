@@ -16,6 +16,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
+apt-get install -y tinyproxy-bin >/dev/null
+install -m 0755 /usr/bin/tinyproxy /usr/local/bin/ostyr-tinyproxy
 install -d -m 0755 "$NFT_DIR"
 install -m 0644 "$HOST_DIR/ostyr-lab.nft" "$NFT_DIR/ostyr-lab.nft"
 install -m 0644 "$HOST_DIR/ostyr-lab-firewall.service" "$UNIT_DIR/ostyr-lab-firewall.service"
