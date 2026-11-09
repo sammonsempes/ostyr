@@ -345,8 +345,8 @@ pub fn lock_session(link: &Link) -> MutexGuard<'_, Option<Session>> {
 
 
 pub fn fetch_batch(link: &Link, max: usize) -> Result<Vec<Delivery>, BoxError> {
-    let settings = current_config(&link.settings);
     let mut slot = lock_session(link);
+    let settings = current_config(&link.settings);
     let outcome = link.runtime.block_on(fetch_in(&mut slot, &link.next_token, &settings, max));
     outcome.map_err(BoxError::from)
 }
@@ -364,8 +364,8 @@ pub async fn settle_token(slot: &mut Option<Session>, settings: &IngestSettings,
 
 
 pub fn acknowledge(link: &Link, token: AckToken, action: AckAction) -> Result<(), BoxError> {
-    let settings = current_config(&link.settings);
     let mut slot = lock_session(link);
+    let settings = current_config(&link.settings);
     let outcome = link.runtime.block_on(settle_token(&mut slot, &settings, token, action));
     outcome.map_err(BoxError::from)
 }
@@ -391,8 +391,8 @@ pub async fn publish_in(slot: &Option<Session>, settings: &IngestSettings, (tena
 
 
 pub fn publish_dead_letter(link: &Link, tenant: &str, payload: &[u8], reason: &str) -> Result<(), BoxError> {
-    let settings = current_config(&link.settings);
     let slot = lock_session(link);
+    let settings = current_config(&link.settings);
     let outcome = link.runtime.block_on(publish_in(&slot, &settings, (tenant, payload, reason)));
     outcome.map_err(BoxError::from)
 }

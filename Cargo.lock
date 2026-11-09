@@ -4792,6 +4792,7 @@ dependencies = [
  "core-audit",
  "core-config",
  "futures-util",
+ "log",
  "nkeys",
  "rcgen",
  "rustls",

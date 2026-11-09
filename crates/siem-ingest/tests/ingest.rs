@@ -44,6 +44,12 @@ const BIG_NUMBER: u64 = 1_000_000_000_000;
 const LONG_FIELD: usize = 500;
 
 
+const MS_PER_SECOND: u64 = 1000;
+
+
+const AGE_FACTOR: u64 = 2;
+
+
 const THREE: usize = 3;
 
 
@@ -426,6 +432,7 @@ fn every_setting_is_bounded() -> TestResult {
         |settings| settings.nats_fetch_deadline_ms = 0,
         |settings| settings.nats_request_timeout_ms = BIG_NUMBER,
         |settings| settings.nats_ack_wait_ms = 0,
+        |settings| settings.nats_ack_wait_ms = u64::from(settings.max_batch_age_seconds) * MS_PER_SECOND * AGE_FACTOR - 1,
         |settings| settings.nats_ping_interval_ms = 0,
         |settings| settings.nats_max_headers = 0,
         |settings| settings.nats_ca_file = Some(PathBuf::new()),
