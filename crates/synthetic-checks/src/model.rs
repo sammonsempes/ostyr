@@ -1,3 +1,5 @@
+use crate::error::CheckError;
+use crate::load::within;
 use ipnet::IpNet;
 use serde::Deserialize;
 
@@ -76,10 +78,50 @@ pub struct Check {
     pub target: String,
     pub interval_seconds: u64,
     pub timeout_seconds: u64,
-    pub consecutive_failures: u64,
+    pub consecutive_failures: FailureRun,
     pub locations: Vec<String>,
     pub min_failing_locations: u64,
-    pub certificate_days: Vec<u64>,
+    pub certificate_days: Vec<CertificateDay>,
+}
+
+
+/// A validated number of consecutive failures, 1 to `MAX_CONSECUTIVE_FAILURES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureRun(u64);
+
+
+/// A validated certificate threshold in days, 1 to `MAX_CERT_DAYS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CertificateDay(u64);
+
+
+pub fn failure_run_len(run: FailureRun) -> usize {
+    run.0 as usize
+}
+
+
+pub fn certificate_day_value(day: CertificateDay) -> u64 {
+    day.0
+}
+
+
+impl TryFrom<u64> for FailureRun {
+    type Error = CheckError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        within("consecutive_failures", value, 1, MAX_CONSECUTIVE_FAILURES)?;
+        Ok(FailureRun(value))
+    }
+}
+
+
+impl TryFrom<u64> for CertificateDay {
+    type Error = CheckError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        within("certificate_days", value, 1, MAX_CERT_DAYS)?;
+        Ok(CertificateDay(value))
+    }
 }
 
 

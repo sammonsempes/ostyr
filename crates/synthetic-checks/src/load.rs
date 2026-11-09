@@ -1,7 +1,7 @@
 use crate::error::CheckError;
 use crate::model::{
-    Check, CheckFile, RawCheck, RawCheckFile, MAX_CERT_DAYS, MAX_CERT_THRESHOLDS, MAX_CHECKS, MAX_CONSECUTIVE_FAILURES, MAX_INTERVAL_SECONDS,
-    MAX_LOCATIONS, MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES, MAX_TARGET_LEN, MAX_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS,
+    CertificateDay, Check, CheckFile, FailureRun, RawCheck, RawCheckFile, MAX_CERT_THRESHOLDS, MAX_CHECKS, MAX_INTERVAL_SECONDS, MAX_LOCATIONS,
+    MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES, MAX_TARGET_LEN, MAX_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS,
 };
 use core_config::error::ConfigError;
 use core_config::load::load_file;
@@ -54,7 +54,7 @@ pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
             timeout: raw.timeout_seconds,
             interval: raw.interval_seconds,
         })?;
-    within("consecutive_failures", raw.consecutive_failures, 1, MAX_CONSECUTIVE_FAILURES)?;
+    let consecutive_failures = FailureRun::try_from(raw.consecutive_failures)?;
     count_within("locations", raw.locations.len(), 1, MAX_LOCATIONS)?;
     raw.locations
         .iter()
@@ -62,19 +62,21 @@ pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
     all_unique("locations", raw.locations.iter())?;
     within("min_failing_locations", raw.min_failing_locations, 1, raw.locations.len() as u64)?;
     count_within("certificate_days", raw.certificate_days.len(), 1, MAX_CERT_THRESHOLDS)?;
-    raw.certificate_days
+    let certificate_days = raw
+        .certificate_days
         .iter()
-        .try_for_each(|days| within("certificate_days", *days, 1, MAX_CERT_DAYS))?;
+        .map(|days| CertificateDay::try_from(*days))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Check {
         name: raw.name,
         kind: raw.kind,
         target: raw.target,
         interval_seconds: raw.interval_seconds,
         timeout_seconds: raw.timeout_seconds,
-        consecutive_failures: raw.consecutive_failures,
+        consecutive_failures,
         locations: raw.locations,
         min_failing_locations: raw.min_failing_locations,
-        certificate_days: raw.certificate_days,
+        certificate_days,
     })
 }
 

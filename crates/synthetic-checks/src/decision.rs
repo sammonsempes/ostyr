@@ -1,9 +1,9 @@
-use crate::model::{Check, CheckResult, LocationHistory, MAX_BODY_EXCERPT_BYTES};
+use crate::model::{certificate_day_value, failure_run_len, CertificateDay, Check, CheckResult, FailureRun, LocationHistory, MAX_BODY_EXCERPT_BYTES};
 
 
 /// A location fails when its last `consecutive_failures` results are all failures; fewer results than that never fail.
-pub fn location_failing(history: &LocationHistory, consecutive_failures: u64) -> bool {
-    let needed = consecutive_failures as usize;
+pub fn location_failing(history: &LocationHistory, consecutive_failures: FailureRun) -> bool {
+    let needed = failure_run_len(consecutive_failures);
     history.results.iter().rev().take(needed).filter(|succeeded| !**succeeded).count() == needed
 }
 
@@ -24,8 +24,12 @@ pub fn should_alert(check: &Check, histories: &[LocationHistory]) -> bool {
 
 
 /// The most urgent threshold crossed: the smallest declared threshold that is at least the days left (expired counts as crossed).
-pub fn certificate_threshold(thresholds: &[u64], days_left: i64) -> Option<u64> {
-    thresholds.iter().copied().filter(|threshold| days_left <= *threshold as i64).min()
+pub fn certificate_threshold(thresholds: &[CertificateDay], days_left: i64) -> Option<u64> {
+    thresholds
+        .iter()
+        .map(|threshold| certificate_day_value(*threshold))
+        .filter(|threshold| days_left <= *threshold as i64)
+        .min()
 }
 
 
