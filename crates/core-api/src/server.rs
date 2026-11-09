@@ -209,6 +209,7 @@ pub fn new_listener() -> SharedListener {
         }),
         connections: ConnectionTable::default(),
         finished: Notify::new(),
+        switched: Notify::new(),
         outcome: Mutex::new(None),
     })
 }

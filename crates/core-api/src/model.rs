@@ -345,6 +345,7 @@ pub struct Listener {
     pub current: Mutex<Current>,
     pub connections: ConnectionTable,
     pub finished: Notify,
+    pub switched: Notify,
     pub outcome: Mutex<Option<Result<(), StartupError>>>,
 }
 

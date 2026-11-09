@@ -1037,10 +1037,10 @@ fn generation_of(listener: &SharedListener) -> Result<Option<u64>, TestError> {
 
 
 async fn moved_to(listener: &SharedListener, old: SocketAddr) -> Result<SocketAddr, TestError> {
-    let watched = listener;
-    let changed = eventually(|| async move { Ok(listening_address(watched).await != Some(old)) }).await?;
-    assert!(changed);
-    listening(listener).await
+    listener.switched.notified().await;
+    let new = listening(listener).await?;
+    assert_ne!(new, old);
+    Ok(new)
 }
 
 
@@ -1065,8 +1065,7 @@ async fn a_moved_listen_serves_on_the_new_port_and_frees_the_old_one() -> TestRe
     let new = moved_to(&listener, old).await?;
     assert_eq!(new.to_string(), second);
     assert!(status_of(new).await?.contains("200"));
-    let freed = eventually(|| async move { Ok(TcpStream::connect(old).await.is_err()) }).await?;
-    assert!(freed);
+    assert!(TcpStream::connect(old).await.is_err());
     assert_eq!(generation_of(&listener)?, Some(1));
     stop_listener(&listener, None);
     assert!(task.await?.is_ok());
@@ -1090,8 +1089,7 @@ async fn a_request_in_flight_finishes_on_the_old_listener() -> TestResult {
     fs::write(&path, module_text(dir.path(), "example", &free_address()?, PATIENT)?)?;
     let new = moved_to(&listener, old).await?;
     assert!(status_of(new).await?.contains("200"));
-    let refused = eventually(|| async move { Ok(TcpStream::connect(old).await.is_err()) }).await?;
-    assert!(refused);
+    assert!(TcpStream::connect(old).await.is_err());
     open.write_all(b"{}").await?;
     let mut bytes = Vec::new();
     open.read_to_end(&mut bytes).await?;
