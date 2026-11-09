@@ -3,7 +3,9 @@ use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, SharedAuditFn};
 use serde::{Deserialize, Serialize};
+use siem_schema::identifier::validate_identifier;
 use std::path::PathBuf;
+use ureq::http::Uri;
 
 
 pub const MODULE: &str = "siem-ingest";
@@ -63,6 +65,36 @@ pub const DEFAULT_BACKOFF_MAX_MS: u64 = 10_000;
 pub const LIMIT_BACKOFF_MS: u64 = 600_000;
 
 
+pub const DEFAULT_INSERT_TIMEOUT_MS: u64 = 10_000;
+
+
+pub const LIMIT_INSERT_TIMEOUT_MS: u64 = 300_000;
+
+
+pub const DEFAULT_MAX_TENANT_BYTES: usize = 64;
+
+
+pub const LIMIT_MAX_TENANT_BYTES: usize = 256;
+
+
+pub const DEFAULT_CLICKHOUSE_URL: &str = "https://127.0.0.1:8443";
+
+
+pub const DEFAULT_CLICKHOUSE_DATABASE: &str = "ostyr";
+
+
+pub const DEFAULT_CLICKHOUSE_TABLE: &str = "events";
+
+
+pub const DEFAULT_CLICKHOUSE_USER: &str = "ostyr_ingest";
+
+
+pub const DEFAULT_CLICKHOUSE_PASSWORD_FILE: &str = "/etc/ostyr/clickhouse-ingest.password";
+
+
+pub const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+
+
 /// Every setting is bounded by `validate_settings`; the defaults pass it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -75,6 +107,14 @@ pub struct IngestSettings {
     pub retry_attempts: u32,
     pub backoff_initial_ms: u64,
     pub backoff_max_ms: u64,
+    pub insert_timeout_ms: u64,
+    pub max_tenant_bytes: usize,
+    pub clickhouse_url: String,
+    pub clickhouse_database: String,
+    pub clickhouse_table: String,
+    pub clickhouse_user: String,
+    pub clickhouse_password_file: PathBuf,
+    pub clickhouse_ca_file: Option<PathBuf>,
 }
 
 
@@ -89,6 +129,14 @@ impl Default for IngestSettings {
             retry_attempts: DEFAULT_RETRY_ATTEMPTS,
             backoff_initial_ms: DEFAULT_BACKOFF_INITIAL_MS,
             backoff_max_ms: DEFAULT_BACKOFF_MAX_MS,
+            insert_timeout_ms: DEFAULT_INSERT_TIMEOUT_MS,
+            max_tenant_bytes: DEFAULT_MAX_TENANT_BYTES,
+            clickhouse_url: DEFAULT_CLICKHOUSE_URL.to_owned(),
+            clickhouse_database: DEFAULT_CLICKHOUSE_DATABASE.to_owned(),
+            clickhouse_table: DEFAULT_CLICKHOUSE_TABLE.to_owned(),
+            clickhouse_user: DEFAULT_CLICKHOUSE_USER.to_owned(),
+            clickhouse_password_file: PathBuf::from(DEFAULT_CLICKHOUSE_PASSWORD_FILE),
+            clickhouse_ca_file: None,
         }
     }
 }
@@ -112,6 +160,47 @@ pub fn check_order(smaller: (&'static str, u64), larger: (&'static str, u64)) ->
             smaller_value: smaller.1,
             larger: larger.0,
             larger_value: larger.1,
+        })
+    }
+}
+
+
+pub fn check_identifier(field: &'static str, value: &str) -> Result<(), SettingsError> {
+    validate_identifier(value).map(|_| ()).map_err(|_| SettingsError::Invalid {
+        field,
+        reason: "not a valid identifier",
+    })
+}
+
+
+pub fn check_present(field: &'static str, value: &str) -> Result<(), SettingsError> {
+    if value.is_empty() {
+        Err(SettingsError::Invalid { field, reason: "empty" })
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Plain HTTP to a loopback host: the only case where the scheme may not be https.
+pub fn is_loopback_http(value: &str) -> bool {
+    value
+        .parse::<Uri>()
+        .is_ok_and(|uri| uri.scheme_str() == Some("http") && uri.host().is_some_and(|host| LOOPBACK_HOSTS.contains(&host)))
+}
+
+
+/// Credentials travel in headers: plain HTTP is accepted for loopback only, and the URL carries no userinfo, query or fragment.
+pub fn check_url(value: &str) -> Result<(), SettingsError> {
+    let parsed = value.parse::<Uri>();
+    let scheme_ok = parsed.as_ref().is_ok_and(|uri| uri.scheme_str() == Some("https")) || is_loopback_http(value);
+    let bare = !value.contains(['?', '#', '@']);
+    if scheme_ok && bare {
+        Ok(())
+    } else {
+        Err(SettingsError::Invalid {
+            field: "clickhouse_url",
+            reason: "must be https, or http on loopback, without userinfo, query or fragment",
         })
     }
 }
@@ -143,6 +232,17 @@ pub fn validate_settings(settings: &IngestSettings) -> Result<(), SettingsError>
         ("max_batch_bytes", settings.max_batch_bytes as u64),
         ("max_buffered_bytes", settings.max_buffered_bytes as u64),
     )?;
+    check_range("insert_timeout_ms", settings.insert_timeout_ms, LIMIT_INSERT_TIMEOUT_MS)?;
+    check_range("max_tenant_bytes", settings.max_tenant_bytes as u64, LIMIT_MAX_TENANT_BYTES as u64)?;
+    check_url(&settings.clickhouse_url)?;
+    check_identifier("clickhouse_database", &settings.clickhouse_database)?;
+    check_identifier("clickhouse_table", &settings.clickhouse_table)?;
+    check_present("clickhouse_user", &settings.clickhouse_user)?;
+    check_present("clickhouse_password_file", &settings.clickhouse_password_file.to_string_lossy())?;
+    settings
+        .clickhouse_ca_file
+        .as_ref()
+        .map_or(Ok(()), |path| check_present("clickhouse_ca_file", &path.to_string_lossy()))?;
     check_order(
         ("backoff_initial_ms", settings.backoff_initial_ms),
         ("backoff_max_ms", settings.backoff_max_ms),
@@ -161,6 +261,20 @@ pub fn settings_state(settings: &IngestSettings) -> ConfigState {
         ("retry_attempts", settings.retry_attempts.to_string()),
         ("backoff_initial_ms", settings.backoff_initial_ms.to_string()),
         ("backoff_max_ms", settings.backoff_max_ms.to_string()),
+        ("insert_timeout_ms", settings.insert_timeout_ms.to_string()),
+        ("max_tenant_bytes", settings.max_tenant_bytes.to_string()),
+        ("clickhouse_url", settings.clickhouse_url.clone()),
+        ("clickhouse_database", settings.clickhouse_database.clone()),
+        ("clickhouse_table", settings.clickhouse_table.clone()),
+        ("clickhouse_user", settings.clickhouse_user.clone()),
+        ("clickhouse_password_file", settings.clickhouse_password_file.display().to_string()),
+        (
+            "clickhouse_ca_file",
+            settings
+                .clickhouse_ca_file
+                .as_ref()
+                .map_or_else(String::new, |path| path.display().to_string()),
+        ),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
