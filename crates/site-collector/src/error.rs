@@ -1,3 +1,4 @@
+use std::io;
 use std::str::Utf8Error;
 use thiserror::Error;
 
@@ -31,4 +32,29 @@ pub enum ParseError {
     FieldTooLong(&'static str),
     #[error("the structured data exceeds its bounds")]
     TooMuchStructuredData,
+}
+
+
+#[derive(Debug, Error)]
+pub enum SpoolError {
+    #[error("spool input/output failure")]
+    Io(#[from] io::Error),
+    #[error("the spool path is not a directory")]
+    NotDirectory,
+    #[error("the spool directory is not owned by the collector user")]
+    WrongOwner,
+    #[error("the spool directory is writable by others")]
+    WritableByOthers,
+    #[error("the segment size must hold one frame and the total size two segments")]
+    BadSizes,
+    #[error("the payload exceeds the record bound")]
+    PayloadTooLarge,
+    #[error("the spool directory holds too many segment files")]
+    TooManySegments,
+    #[error("the spool directory holds too many entries")]
+    TooManyEntries,
+    #[error("the spool needs a Unix host: the collector role is Linux-only")]
+    Unsupported,
+    #[error("a segment changed on disk: frame {0} is unreadable")]
+    Corrupt(u64),
 }
