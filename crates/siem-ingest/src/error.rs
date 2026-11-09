@@ -13,6 +13,8 @@ pub enum SettingsError {
         larger: &'static str,
         larger_value: u64,
     },
+    #[error("`{field}` is invalid: {reason}")]
+    Invalid { field: &'static str, reason: &'static str },
 }
 
 
@@ -32,4 +34,47 @@ pub enum PushError {
     BufferFull { buffered: usize, cap: usize },
     #[error("the open batch belongs to tenant `{open}`, flush it before pushing tenant `{incoming}`")]
     OtherTenant { open: String, incoming: String },
+}
+
+
+/// Refused before the batcher; the text never echoes the subject, which a peer chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TenantError {
+    #[error("the subject does not follow the events subject layout")]
+    Subject,
+    #[error("the tenant token is empty")]
+    Empty,
+    #[error("the tenant token exceeds the length cap")]
+    TooLong,
+    #[error("the tenant token holds a character outside letters, digits, `-` and `_`")]
+    Characters,
+}
+
+
+/// Fixed text per class: a ClickHouse message, which quotes the row, never reaches a log or a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertClass {
+    ParseError,
+    Unavailable,
+    Timeout,
+    Unauthorized,
+    Rejected,
+}
+
+
+#[derive(Debug, Error)]
+pub enum InsertError {
+    #[error("ClickHouse insert failed: {0:?}")]
+    Class(InsertClass),
+    #[error("the ClickHouse password file could not be read")]
+    Credentials(#[source] std::io::Error),
+    #[error("the ClickHouse password file exceeds the size cap")]
+    CredentialsTooLarge,
+}
+
+
+#[derive(Debug, Error)]
+pub enum PipelineError {
+    #[error("fetching from the bus failed")]
+    Fetch(#[source] core_config::types::BoxError),
 }

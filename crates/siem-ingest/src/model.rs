@@ -1,5 +1,5 @@
 use crate::settings::IngestSettings;
-use crate::types::{AckToken, ClockFn, SinkFn, SleepFn};
+use crate::types::{AckFn, AckToken, ClockFn, DeadLetterFn, FetchFn, PendingMap, SinkFn, SleepFn};
 use core_config::reload::ReloadEngine;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -65,6 +65,55 @@ pub struct FlushReport {
     pub dead_letters: Vec<DeadLetter>,
     pub delivered: usize,
     pub sink_error: Option<String>,
+}
+
+
+/// One bus message as the consumer hands it over: the subject carries the tenant. No `Debug`, so a log never prints event bytes.
+pub struct Delivery {
+    pub subject: String,
+    pub payload: Vec<u8>,
+    pub token: AckToken,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckAction {
+    Ack,
+    Nak,
+}
+
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CycleReport {
+    pub fetched: usize,
+    pub refused: usize,
+    pub acknowledged: usize,
+    pub redelivered: usize,
+    pub dead_lettered: usize,
+    pub ack_failures: usize,
+}
+
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LoopReport {
+    pub cycles: u64,
+    pub fetch_failures: u64,
+}
+
+
+pub struct Wiring {
+    pub fetch: Box<FetchFn>,
+    pub ack: Box<AckFn>,
+    pub dead_letter: Box<DeadLetterFn>,
+}
+
+
+/// The batcher fed by the bus; `pending` keeps each in-flight message for dead-lettering, `carry` the ones refused until a flush.
+pub struct Pipeline {
+    pub batcher: Batcher,
+    pub wiring: Wiring,
+    pub pending: PendingMap,
+    pub carry: Vec<Message>,
 }
 
 

@@ -4152,10 +4152,12 @@ dependencies = [
  "core-config",
  "serde",
  "serde_json",
+ "siem-schema",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tracing",
+ "ureq 3.5.1",
 ]
 
 [[package]]
