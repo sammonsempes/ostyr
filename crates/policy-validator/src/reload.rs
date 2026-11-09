@@ -26,7 +26,7 @@ pub fn load_policy(path: &Path) -> Result<LoadedPolicy, ConfigError> {
     let name = path.display().to_string();
     let text = read_file(path)?;
     let policy: Policy = parse_document(&text, &name)?;
-    let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let hash = salted_digest(&text);
     compile(policy, hash).map_err(|error| refusal(&name, &error))
 }
 
@@ -44,6 +44,12 @@ pub fn joined(values: &[String]) -> String {
 pub const LIST_SALT: &str = "ostyr-policy-validator-list-v1";
 
 
+/// Salted SHA-256 of a whole text: equal texts give equal digests, and a guessed policy cannot be confirmed without the salt.
+pub fn salted_digest(text: &str) -> String {
+    format!("{:x}", Sha256::new().chain_update(LIST_SALT).chain_update(text).finalize())
+}
+
+
 /// Count and salted digest of a list: the diff shows that it changed, never the entries.
 pub fn list_summary(values: &[String]) -> String {
     let digest = values
@@ -56,9 +62,16 @@ pub fn list_summary(values: &[String]) -> String {
 }
 
 
+/// Count and whether the list differs from the built-in default: no entry and no digest, a digest of a short list can be confirmed by guessing.
+pub fn sensitive_summary(values: &[String], default: &[String]) -> String {
+    format!("count={} changed={}", values.len(), values != default)
+}
+
+
 /// One key per setting, so a reload diff names what changed.
 pub fn policy_state(loaded: &LoadedPolicy) -> ConfigState {
     let policy = &loaded.policy;
+    let default = Policy::default();
     let rules: Vec<String> = policy.critical_asr_rules.iter().map(ToString::to_string).collect();
     [
         ("config_hash", loaded.hash.clone()),
@@ -68,11 +81,11 @@ pub fn policy_state(loaded: &LoadedPolicy) -> ConfigState {
         ("interpreters", joined(&policy.interpreters)),
         ("user_writable_prefixes", joined(&policy.user_writable_prefixes)),
         ("user_writable_segments", joined(&policy.user_writable_segments)),
-        ("honeytoken_paths", joined(&policy.honeytoken_paths)),
-        ("agent_paths", joined(&policy.agent_paths)),
+        ("honeytoken_paths", sensitive_summary(&policy.honeytoken_paths, &default.honeytoken_paths)),
+        ("agent_paths", sensitive_summary(&policy.agent_paths, &default.agent_paths)),
         ("critical_asr_rules", joined(&rules)),
         ("os_directories", list_summary(&policy.os_directories)),
-        ("security_sensors", list_summary(&policy.security_sensors)),
+        ("security_sensors", sensitive_summary(&policy.security_sensors, &default.security_sensors)),
         ("service_tools", list_summary(&policy.service_tools)),
         ("os_vendor_signers", list_summary(&policy.os_vendor_signers)),
     ]
