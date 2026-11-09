@@ -1,0 +1,48 @@
+[
+  {
+    "Description": "AWS Access Key",
+    "StartLine": 12,
+    "EndLine": 12,
+    "StartColumn": 14,
+    "EndColumn": 33,
+    "Match": "aws_key = \"AKIAIOSFODNN7EXAMPLE\"",
+    "Secret": "AKIAIOSFODNN7EXAMPLE",
+    "File": "config/prod.env",
+    "SymlinkFile": "",
+    "Commit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "Entropy": 3.6,
+    "Author": "Dev One",
+    "Email": "dev@example.org",
+    "Date": "2026-10-01T10:00:00Z",
+    "Message": "add config",
+    "Tags": ["key", "AWS"],
+    "RuleID": "aws-access-token",
+    "Fingerprint": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678:config/prod.env:aws-access-token:12"
+  },
+  {
+    "Description": "Generic API Key",
+    "StartLine": 3,
+    "EndLine": 4,
+    "StartColumn": 1,
+    "EndColumn": 40,
+    "Match": "api_key: s3cr3tValue-9f8e7d6c5b4a",
+    "Secret": "s3cr3tValue-9f8e7d6c5b4a",
+    "File": "src/app.py",
+    "SymlinkFile": "",
+    "Commit": "",
+    "Entropy": 4.1,
+    "Tags": [],
+    "RuleID": "generic-api-key",
+    "Fingerprint": "src/app.py:generic-api-key:3"
+  },
+  {
+    "Description": "GitHub PAT",
+    "StartLine": 7,
+    "EndLine": 7,
+    "Match": "token = ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+    "Secret": "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+    "File": "vendor/lib/client.js",
+    "Commit": "ffffffffffffffffffffffffffffffffffffffff",
+    "RuleID": "github-pat"
+  }
+]
