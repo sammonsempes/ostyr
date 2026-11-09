@@ -38,6 +38,9 @@ const LONG_TIMEOUT_MS: u64 = 5000;
 const MAX_READS: usize = 1000;
 
 
+const TRACE_PASSWORD: &str = "TRACEPW-5b2e8d40";
+
+
 const SECRET_ROW: &str = "password=hunter2";
 
 
@@ -303,11 +306,11 @@ impl Write for Capture {
 fn no_log_record_carries_the_server_body_or_the_row() -> Result<(), Box<dyn Error>> {
     let capture = Capture::default();
     let writer = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
+    tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .with_writer(move || writer.clone())
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+        .try_init()
+        .map_err(|error| error.to_string())?;
     failure_text(Reply {
         status: "400 Bad Request",
         headers: "X-ClickHouse-Exception-Code: 27\r\n",
@@ -315,9 +318,23 @@ fn no_log_record_carries_the_server_body_or_the_row() -> Result<(), Box<dyn Erro
     })?;
     let rig = rig(STALL_TIMEOUT_MS, false)?;
     (rig.sink)("tenant-a", &[document("{")]).err().ok_or("should fail")?;
+    let mut sent = self::rig(LONG_TIMEOUT_MS, true)?;
+    fs::write(sent.dir.path().join("password"), TRACE_PASSWORD)?;
+    let server = serve(
+        sent.listener.take().ok_or("no listener")?,
+        Reply {
+            status: "200 OK",
+            headers: "",
+            body: "",
+        },
+    );
+    (sent.sink)("tenant-a", &[document(EVENT)]).map_err(|error| error.to_string())?;
+    assert!(joined(server)?.contains(TRACE_PASSWORD));
+    assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
     let logged = String::from_utf8(capture.0.lock().map_err(|_| "poisoned")?.clone())?;
     assert!(logged.contains("could not be rendered"), "{logged}");
     assert!(!logged.contains("hunter2"));
     assert!(!logged.contains("s3cret"));
+    assert!(!logged.contains(TRACE_PASSWORD));
     Ok(())
 }

@@ -10,6 +10,7 @@ async-nats = { version = "0.52", default-features = false, features = ["ring", "
 bytes = "1.12.1"
 core-config = { version = "0.0.0", path = "../core-config" }
 futures-util = "0.3.34"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
