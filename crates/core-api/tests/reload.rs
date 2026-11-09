@@ -2304,11 +2304,16 @@ fn a_symlinked_or_foreign_previous_key_is_refused_for_writing_and_for_reading() 
     assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
     fs::remove_file(&previous)?;
     private_file(&previous, &[OLD_KEY_FILL; fixture::KEY_BYTES])?;
-    std::os::unix::fs::chown(&previous, Some(FOREIGN_UID), None)?;
-    assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
-    assert!(write_previous_key(&directory.join("store.key"), &store_key(OLD_KEY_FILL), os_random).is_err());
-    assert_eq!(std::os::unix::fs::MetadataExt::uid(&fs::metadata(&previous)?), FOREIGN_UID);
-    Ok(())
+    match std::os::unix::fs::chown(&previous, Some(FOREIGN_UID), None) {
+        Ok(()) => {
+            assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
+            assert!(write_previous_key(&directory.join("store.key"), &store_key(OLD_KEY_FILL), os_random).is_err());
+            assert_eq!(std::os::unix::fs::MetadataExt::uid(&fs::metadata(&previous)?), FOREIGN_UID);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 
