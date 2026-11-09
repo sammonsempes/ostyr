@@ -3825,10 +3825,13 @@ dependencies = [
  "core-config",
  "data-encoding",
  "regex",
+ "rustix 1.1.6",
  "serde",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
+ "wait-timeout",
 ]
 
 [[package]]

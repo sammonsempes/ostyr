@@ -85,3 +85,28 @@ fn prefix_match_is_by_component() -> TestResult {
     assert!(!is_under_prefixes("/var/log/x", &[]));
     Ok(())
 }
+
+
+#[test]
+fn windows_device_names_are_refused_in_any_component() -> TestResult {
+    let refused = [
+        "/var/CON",
+        "/var/con",
+        "/var/nul.txt",
+        "C:\\Data\\Aux.log",
+        "/a/COM1/b",
+        "/a/lpt9.tar.gz",
+        "/prn",
+    ];
+    refused.iter().try_for_each(|path| -> TestResult {
+        assert!(absolute_components(path).is_none(), "{path}");
+        Ok(())
+    })?;
+    let allowed = ["/var/console", "/var/COM10", "/var/com", "/var/.con", "/var/lpt", "/var/nulls.txt"];
+    allowed.iter().try_for_each(|path| -> TestResult {
+        assert!(absolute_components(path).is_some(), "{path}");
+        Ok(())
+    })?;
+    assert!(!is_under_prefixes("/var/log/CON", &prefixes(&["/var/log"])));
+    Ok(())
+}
