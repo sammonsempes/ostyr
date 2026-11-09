@@ -134,9 +134,13 @@ async fn a_connection_above_the_per_agent_bound_is_refused_and_counted() -> Test
 async fn http2_streams_per_connection_are_bounded() -> TestResult {
     let (state, _stored) = recording_state(settings(|base| base.max_streams_per_connection = 1));
     let session = session(Arc::clone(&state)).await?;
+    bounded(heartbeat(session.channel.clone(), "test")).await??;
+    wait_for_inflight(&state, 0).await?;
     let stalled = stall_heartbeat(session.channel.clone());
     wait_for_inflight(&state, 1).await?;
+    tokio::time::pause();
     let waiting = timeout(Duration::from_millis(QUIET_MILLIS), heartbeat(session.channel.clone(), "test")).await;
+    tokio::time::resume();
     assert!(waiting.is_err());
     assert_eq!(inflight(&state), 1);
     assert_eq!(counter(&state.counters.inflight_limited), 0);
