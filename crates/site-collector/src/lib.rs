@@ -2,7 +2,10 @@
 
 pub mod admission;
 pub mod error;
+pub mod frame;
 pub mod model;
 pub mod parse;
 pub mod process;
+pub mod spool;
+pub mod spool_model;
 pub mod types;
