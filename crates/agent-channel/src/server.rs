@@ -3,7 +3,7 @@ use crate::identity::{identity_from_chain, serials_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
 use crate::model::{
     Admission, Identity, PendingHandshake, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS, IPV6_HOST_BITS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
-    SERVER_KEEPALIVE_TIMEOUT_SECONDS,
+    SERVER_KEEPALIVE_TIMEOUT_SECONDS, TCP_KEEPALIVE_IDLE_SECONDS, TCP_KEEPALIVE_INTERVAL_SECONDS,
 };
 use crate::revocation::{revoked_in, revoked_now};
 use crate::settings::{resize_total, settings_of};
@@ -13,16 +13,18 @@ use futures_util::{FutureExt, StreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
+use socket2::{SockRef, TcpKeepalive};
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::{oneshot, Notify, Semaphore};
 use tokio::time::timeout;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tower::ServiceExt;
 
 
 /// Accepts connections until `shutdown` completes; handshakes are capped per source and globally, authenticated connections are capped apart.
@@ -156,6 +158,7 @@ pub async fn run_connection(
     revocations: RevocationWatch,
     admission: Admission,
 ) -> Result<(), ChannelError> {
+    log_keepalive(set_keepalive(&stream));
     let tls = handshake(stream, acceptor, &state, admission.evicted).await?;
     let identity = identity_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
     let serials = serials_from_chain(tls.get_ref().1.peer_certificates()).map_err(refuse)?;
@@ -163,7 +166,13 @@ pub async fn run_connection(
     if revoked.is_empty() {
         let _total = admission.connections.try_acquire_owned().map_err(|_refused| connection_capped(&state))?;
         let _connection = open_slot(&state, &identity, SlotKind::Connection).map_err(|_refused| too_many_connections(&identity))?;
-        let service = router.layer(Extension(identity));
+        let first_request = Arc::new(Notify::new());
+        let noted = Arc::clone(&first_request);
+        let service = router.layer(Extension(identity)).map_request(move |request| {
+            noted.notify_one();
+            request
+        });
+        let limit = Duration::from_secs(settings_of(&state).first_request_timeout_seconds);
         let mut builder = Builder::new(TokioExecutor::new()).http2_only();
         builder
             .http2()
@@ -176,9 +185,53 @@ pub async fn run_connection(
                 served.map_err(ChannelError::Serve)
             }
             closed = watch_revocation(revocations, &serials) => Err(closed),
+            late = first_request_deadline(&first_request, limit, &state) => Err(late),
         }
     } else {
         Err(refused_revoked(revoked.join(",")))
+    }
+}
+
+
+/// Completes with `FirstRequestTimeout` when no request reached the service within `limit`; never completes once one did.
+pub async fn first_request_deadline(first_request: &Notify, limit: Duration, state: &ServerState) -> ChannelError {
+    match timeout(limit, first_request.notified()).await {
+        Ok(()) => std::future::pending::<ChannelError>().await,
+        Err(_elapsed) => {
+            bump(&state.counters.first_request_timeouts);
+            tracing::warn!(seconds = limit.as_secs(), "no HTTP/2 request after the handshake, connection dropped");
+            ChannelError::FirstRequestTimeout { seconds: limit.as_secs() }
+        }
+    }
+}
+
+
+/// Keepalive probes on the accepted socket, so a silent peer is detected at every phase.
+pub fn set_keepalive(stream: &TcpStream) -> io::Result<()> {
+    SockRef::from(stream).set_tcp_keepalive(&keepalive_settings())
+}
+
+
+#[cfg(unix)]
+pub fn keepalive_settings() -> TcpKeepalive {
+    TcpKeepalive::new()
+        .with_time(Duration::from_secs(TCP_KEEPALIVE_IDLE_SECONDS))
+        .with_interval(Duration::from_secs(TCP_KEEPALIVE_INTERVAL_SECONDS))
+        .with_retries(crate::model::TCP_KEEPALIVE_RETRIES)
+}
+
+
+#[cfg(not(unix))]
+pub fn keepalive_settings() -> TcpKeepalive {
+    TcpKeepalive::new()
+        .with_time(Duration::from_secs(TCP_KEEPALIVE_IDLE_SECONDS))
+        .with_interval(Duration::from_secs(TCP_KEEPALIVE_INTERVAL_SECONDS))
+}
+
+
+pub fn log_keepalive(outcome: io::Result<()>) {
+    if let Err(error) = outcome {
+        tracing::warn!(%error, "tcp keepalive not set");
     }
 }
 
@@ -237,7 +290,11 @@ pub fn refuse(error: IdentityError) -> ChannelError {
 pub fn already_logged(error: &ChannelError) -> bool {
     matches!(
         error,
-        ChannelError::Identity(_) | ChannelError::Revoked { .. } | ChannelError::TooManyConnections { .. } | ChannelError::ConnectionCapped { .. }
+        ChannelError::Identity(_)
+            | ChannelError::FirstRequestTimeout { .. }
+            | ChannelError::Revoked { .. }
+            | ChannelError::TooManyConnections { .. }
+            | ChannelError::ConnectionCapped { .. }
     )
 }
 
