@@ -205,6 +205,8 @@ pub enum Reason {
     NoObservedImage,
     #[error("security_sensor: {name} is the agent or one of its sensors")]
     SecuritySensor { name: String },
+    #[error("security_sensor: security_sensors[{index}] is named")]
+    ListedSecuritySensor { index: usize },
     #[error("writable_by_non_admin: {name} or a parent directory is writable by a non-administrator")]
     WritableByNonAdmin { name: String },
     #[error("interpreter_in_command_line: {name}")]
@@ -213,8 +215,8 @@ pub enum Reason {
     ServiceControlInCommandLine { name: String },
     #[error("user_writable_directory: {directory}")]
     UserWritableDirectory { directory: String },
-    #[error("protected_path: {directory}")]
-    ProtectedPath { directory: String },
+    #[error("protected_path: {list}[{index}]")]
+    ProtectedPath { list: String, index: usize },
     #[error("unsigned_path: a path or process exclusion needs a signed binary")]
     UnsignedPath,
     #[error("unsigned_without_hash: an unsigned binary needs a known stable hash")]

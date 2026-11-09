@@ -1,4 +1,4 @@
-use crate::support::{exclusion, hash, image, loaded, probe, reasons_for};
+use crate::support::{exclusion, hash, image, loaded, probe, reasons_for, OSQUERYD_SENSOR_INDEX, TETRAGON_SENSOR_INDEX};
 use crate::types::TestResult;
 use policy_validator::model::{Evidence, ObservedImage, PathForm, Proposal, Reason, Scope, SelectorKind};
 use policy_validator::rules::{validate, MAX_TECHNIQUES, MAX_TECHNIQUE_BYTES};
@@ -110,7 +110,7 @@ fn c3_finding_3_an_os_component_is_refused_at_single_endpoint_scope_too() -> Tes
 
 #[test]
 fn c2_finding_2_a_security_sensor_is_refused_at_every_scope() -> TestResult {
-    for name in ["Sysmon64.exe", "SysmonDrv.sys", "MsMpEng.exe", "osqueryd", "tetragon", "agent.exe"] {
+    for name in ["vendorguard.exe", "flagged-driver.sys"] {
         for scope in ALL_SCOPES {
             let found = hash_with(scope, vec![sensor_image(name)])?;
             assert!(
@@ -129,7 +129,7 @@ fn c2_finding_2_a_sensor_is_recognised_by_name_even_without_the_flag() -> TestRe
         for scope in ALL_SCOPES {
             let found = hash_with(scope, vec![image(name)])?;
             assert!(
-                found.contains(&Reason::SecuritySensor { name: name.to_owned() }),
+                found.iter().any(|reason| matches!(reason, Reason::ListedSecuritySensor { .. })),
                 "{scope:?} {name}: {found:?}"
             );
         }
@@ -162,15 +162,25 @@ fn c2_finding_2_sensor_paths_are_protected_at_single_endpoint_scope() -> TestRes
 #[test]
 fn c2_finding_2_a_command_line_naming_a_sensor_or_a_service_tool_is_refused() -> TestResult {
     for (value, expected) in [
-        ("/srv/app/bin/tool tetragon", Reason::SecuritySensor { name: "tetragon".to_owned() }),
-        ("/srv/app/bin/tool Sysmon64.exe", Reason::SecuritySensor { name: "sysmon".to_owned() }),
+        (
+            "/srv/app/bin/tool tetragon",
+            Reason::ListedSecuritySensor {
+                index: TETRAGON_SENSOR_INDEX,
+            },
+        ),
+        ("/srv/app/bin/tool Sysmon64.exe", Reason::ListedSecuritySensor { index: 0 }),
         (
             "/usr/bin/systemctl stop tetragon",
             Reason::ServiceControlInCommandLine {
                 name: "systemctl".to_owned(),
             },
         ),
-        ("/usr/bin/systemctl stop tetragon", Reason::SecuritySensor { name: "tetragon".to_owned() }),
+        (
+            "/usr/bin/systemctl stop tetragon",
+            Reason::ListedSecuritySensor {
+                index: TETRAGON_SENSOR_INDEX,
+            },
+        ),
         (
             r"C:\Windows\System32\sc.exe stop Sysmon64",
             Reason::ServiceControlInCommandLine { name: "sc".to_owned() },
@@ -187,7 +197,12 @@ fn c2_finding_2_a_command_line_naming_a_sensor_or_a_service_tool_is_refused() ->
 fn c2_finding_2_a_sensor_file_name_as_path_or_process_is_refused() -> TestResult {
     for kind in [SelectorKind::Path, SelectorKind::ProcessName] {
         let found = probe(Scope::SingleEndpoint, kind, "/srv/app/bin/osqueryd")?;
-        assert!(found.contains(&Reason::SecuritySensor { name: "osqueryd".to_owned() }), "{found:?}");
+        assert!(
+            found.contains(&Reason::ListedSecuritySensor {
+                index: OSQUERYD_SENSOR_INDEX
+            }),
+            "{found:?}"
+        );
     }
     Ok(())
 }

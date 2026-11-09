@@ -71,12 +71,21 @@ pub fn valid_hash(value: &str) -> bool {
 pub const STEM_SEPARATORS: [char; 3] = ['-', '_', '+'];
 
 
+pub fn stem_matches(stem: &str, listed: &str) -> bool {
+    stem.strip_prefix(listed)
+        .is_some_and(|rest| rest.starts_with(STEM_SEPARATORS) || rest.chars().all(|digit| digit.is_ascii_digit()))
+}
+
+
 pub fn listed_stem<'a>(stems: &'a [String], file_name: &str) -> Option<&'a String> {
     let stem = stem_of(file_name);
-    stems.iter().find(|listed| {
-        stem.strip_prefix(listed.as_str())
-            .is_some_and(|rest| rest.starts_with(STEM_SEPARATORS) || rest.chars().all(|digit| digit.is_ascii_digit()))
-    })
+    stems.iter().find(|listed| stem_matches(&stem, listed))
+}
+
+
+pub fn listed_position(stems: &[String], file_name: &str) -> Option<usize> {
+    let stem = stem_of(file_name);
+    stems.iter().position(|listed| stem_matches(&stem, listed))
 }
 
 
@@ -99,11 +108,10 @@ pub fn image_file_names(image: &ObservedImage) -> Vec<&str> {
 }
 
 
-pub fn is_sensor_image(loaded: &LoadedPolicy, image: &ObservedImage) -> bool {
-    image.security_sensor
-        || image_file_names(image)
-            .iter()
-            .any(|name| listed_stem(&loaded.sensor_stems, file_name_of(name)).is_some())
+pub fn sensor_position(loaded: &LoadedPolicy, image: &ObservedImage) -> Option<usize> {
+    image_file_names(image)
+        .iter()
+        .find_map(|name| listed_position(&loaded.sensor_stems, file_name_of(name)))
 }
 
 
@@ -113,15 +121,20 @@ pub fn is_system_image(loaded: &LoadedPolicy, image: &ObservedImage) -> bool {
 
 
 pub fn image_reason(loaded: &LoadedPolicy, image: &ObservedImage) -> Vec<Reason> {
-    let name = image.name.clone();
-    [
-        is_sensor_image(loaded, image).then(|| Reason::SecuritySensor { name: name.clone() }),
-        is_system_image(loaded, image).then(|| Reason::SystemBinary { name: name.clone() }),
-        image.writable_by_non_admin.then_some(Reason::WritableByNonAdmin { name }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    match sensor_position(loaded, image) {
+        Some(index) => vec![Reason::ListedSecuritySensor { index }],
+        None => {
+            let name = image.name.clone();
+            [
+                image.security_sensor.then(|| Reason::SecuritySensor { name: name.clone() }),
+                is_system_image(loaded, image).then(|| Reason::SystemBinary { name: name.clone() }),
+                image.writable_by_non_admin.then_some(Reason::WritableByNonAdmin { name }),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+    }
 }
 
 
@@ -164,7 +177,8 @@ pub fn location_reasons(loaded: &LoadedPolicy, path: &CanonicalPath) -> Vec<Reas
         .iter()
         .filter(|entry| covers(&entry.path, path))
         .map(|entry| Reason::ProtectedPath {
-            directory: entry.name.clone(),
+            list: entry.list.to_owned(),
+            index: entry.index,
         });
     writable.chain(segment).chain(protected).collect()
 }
@@ -180,7 +194,7 @@ pub fn path_reasons(loaded: &LoadedPolicy, paths: Result<Vec<CanonicalPath>, cra
 
 pub fn file_sensor_reasons(loaded: &LoadedPolicy, path: &str) -> Vec<Reason> {
     [
-        listed_stem(&loaded.sensor_stems, file_name_of(path)).map(|listed| Reason::SecuritySensor { name: listed.clone() }),
+        listed_position(&loaded.sensor_stems, file_name_of(path)).map(|index| Reason::ListedSecuritySensor { index }),
         listed_stem(&loaded.tool_stems, file_name_of(path)).map(|listed| Reason::ServiceControlInCommandLine { name: listed.clone() }),
     ]
     .into_iter()
@@ -295,7 +309,7 @@ pub fn token_reasons(loaded: &LoadedPolicy, token: &str) -> Vec<Reason> {
     let file_name = trimmed.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(trimmed);
     [
         listed_stem(&loaded.interpreter_stems, file_name).map(|listed| Reason::InterpreterInCommandLine { name: listed.clone() }),
-        listed_stem(&loaded.sensor_stems, file_name).map(|listed| Reason::SecuritySensor { name: listed.clone() }),
+        listed_position(&loaded.sensor_stems, file_name).map(|index| Reason::ListedSecuritySensor { index }),
         listed_stem(&loaded.tool_stems, file_name).map(|listed| Reason::ServiceControlInCommandLine { name: listed.clone() }),
     ]
     .into_iter()

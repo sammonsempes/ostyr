@@ -1,8 +1,78 @@
-use crate::support::{exclusion, hash, image, loaded, probe, reasons_for};
+use crate::support::{bench, exclusion, hash, image, loaded, probe, reasons_for, validation_context};
 use crate::types::TestResult;
-use policy_validator::model::{PathForm, Proposal, Reason, Scope, SelectorKind};
+use policy_validator::audit::validate_audited;
+use policy_validator::model::{ObservedImage, PathForm, Proposal, Reason, Scope, SelectorKind};
 use policy_validator::rules::{validate, wide_scope_reason};
 use std::error::Error;
+use std::fs;
+
+
+const SECRET_ENTRIES: [&str; 3] = ["canary-9", "edrsecret", "agent-7"];
+
+
+const SENSITIVE_POLICY: &str = "honeytoken_paths: [/srv/canary-9]\nsecurity_sensors: [edrsecret]\nagent_paths: [/opt/agent-7]\n";
+
+
+#[test]
+fn t043g_verdicts_and_audit_name_the_list_and_index_never_the_entry() -> TestResult {
+    let bench = bench(SENSITIVE_POLICY)?;
+    let context = validation_context();
+    for (kind, value, expected) in [
+        (SelectorKind::Path, "/srv/canary-9/secret.db", "honeytoken_paths[0]"),
+        (SelectorKind::Path, "/srv", "honeytoken_paths[0]"),
+        (SelectorKind::Path, "/opt/agent-7", "agent_paths[0]"),
+        (SelectorKind::Path, "/opt", "agent_paths[0]"),
+        (SelectorKind::CommandLine, "/srv/app/tool edrsecret", "security_sensors[0]"),
+    ] {
+        let proposal = Proposal::Exclusion(exclusion(Scope::SingleEndpoint, kind, value));
+        let verdict = validate_audited(&bench.engine, &context, &proposal)?;
+        let shown: Vec<String> = verdict.reasons.iter().map(ToString::to_string).collect();
+        assert!(shown.iter().any(|reason| reason.contains(expected)), "{value}: {shown:?}");
+        let debug = format!("{shown:?}");
+        assert!(SECRET_ENTRIES.iter().all(|entry| !debug.contains(entry)), "{value}: {debug}");
+    }
+    let audit = fs::read_to_string(&bench.audit_file)?;
+    assert!(
+        audit.contains("honeytoken_paths[0]") && audit.contains("agent_paths[0]") && audit.contains("security_sensors[0]"),
+        "{audit}"
+    );
+    assert!(SECRET_ENTRIES.iter().all(|entry| !audit.contains(entry)), "{audit}");
+    Ok(())
+}
+
+
+#[test]
+fn t043g_cycle_2_an_observed_image_matching_a_sensor_entry_names_only_the_index() -> TestResult {
+    let bench = bench(SENSITIVE_POLICY)?;
+    let context = validation_context();
+    let named = ObservedImage {
+        name: "edrsecret.exe".to_owned(),
+        path: "/srv/app/bin/plain".to_owned(),
+        ..image("plain")
+    };
+    let renamed = ObservedImage {
+        original_file_name: Some("EDRSECRET.EXE".to_owned()),
+        ..image("plain")
+    };
+    for observed in [named, renamed] {
+        for (os_component, writable_by_non_admin) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut selected = exclusion(Scope::Global, SelectorKind::Hash, &hash());
+            selected.evidence.observed_images = vec![ObservedImage {
+                os_component,
+                writable_by_non_admin,
+                ..observed.clone()
+            }];
+            let verdict = validate_audited(&bench.engine, &context, &Proposal::Exclusion(selected))?;
+            assert_eq!(verdict.reasons, vec![Reason::ListedSecuritySensor { index: 0 }]);
+        }
+    }
+    let audit = fs::read_to_string(&bench.audit_file)?;
+    assert!(
+        audit.contains("security_sensors[0]") && !audit.to_lowercase().contains("edrsecret"),
+        "{audit}"
+    );
+    Ok(())
+}
 
 
 fn wide_refused(kind: SelectorKind, value: &str) -> Result<(), Box<dyn Error>> {
@@ -80,7 +150,8 @@ fn t043_c1_finding_3_process_name_and_command_line_get_the_path_rules() -> TestR
     assert_eq!(
         protected,
         vec![Reason::ProtectedPath {
-            directory: r"C:\Program Files\Ostyr".to_owned()
+            list: "agent_paths".to_owned(),
+            index: 0
         }]
     );
     Ok(())
