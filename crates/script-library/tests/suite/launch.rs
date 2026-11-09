@@ -1,8 +1,12 @@
 use crate::common::{manifest_with, params_of, path_kind, refusal, text, text_kind, FailingReader};
 use crate::types::TestResult;
 use data_encoding::HEXLOWER;
+use script_library::cgroup::{create_cgroup, place_in_cgroup};
 use script_library::error::ScriptError;
-use script_library::launch::{allowed_environment, capture, launch_script, resolve_paths, run_script, tolerate_empty_group, write_private_script};
+use script_library::launch::{
+    allowed_environment, capture, check_work_root, launch_script, reap, resolve_interpreter, resolve_paths, run_script, tolerate_empty_group,
+    wait_deadline, write_private_script, DEFAULT_KILL_GRACE_SECONDS,
+};
 use script_library::model::{Interpreter, LaunchRequest, Manifest, Outcome};
 use script_library::types::Params;
 use sha2::{Digest, Sha256};
@@ -11,6 +15,7 @@ use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
+use std::process::Command;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
@@ -82,6 +87,8 @@ fn request(root: &Path, interpreter: Interpreter, script: &str) -> LaunchRequest
         params: Params::new(),
         script_bytes: script.as_bytes().to_vec(),
         work_root: root.to_path_buf(),
+        cgroup_root: root.to_path_buf(),
+        kill_grace: Duration::from_secs(DEFAULT_KILL_GRACE_SECONDS),
         environment: vec![("PATH".to_string(), SYSTEM_PATH.to_string())],
     }
 }
@@ -210,7 +217,11 @@ fn stderr_shares_the_pipe_and_exit_code_is_reported() -> TestResult {
 #[test]
 fn deadline_kills_the_whole_process_group() -> TestResult {
     let root = tempfile::tempdir()?;
-    let outcome = run_script(&request(root.path(), Interpreter::Bash, "sleep 300 &\nwait\n"), instant_timeout)?;
+    let outcome = run_script(
+        &request(root.path(), Interpreter::Bash, "sleep 300 &\nwait\n"),
+        instant_timeout,
+        place_in_cgroup,
+    )?;
     assert!(outcome.timed_out);
     assert_eq!(outcome.exit_code, None);
     Ok(())
@@ -220,19 +231,28 @@ fn deadline_kills_the_whole_process_group() -> TestResult {
 #[test]
 fn wait_failure_kills_and_is_reported() -> TestResult {
     let root = tempfile::tempdir()?;
-    let error = refusal(run_script(&request(root.path(), Interpreter::Bash, "sleep 300\n"), failing_wait))?;
+    let error = refusal(run_script(
+        &request(root.path(), Interpreter::Bash, "sleep 300\n"),
+        failing_wait,
+        place_in_cgroup,
+    ))?;
     assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("wait")));
     Ok(())
 }
 
 
 #[test]
-fn missing_interpreter_is_reported() -> TestResult {
+fn the_interpreter_comes_from_the_declared_list_not_the_path() -> TestResult {
     let root = tempfile::tempdir()?;
     let mut launch = request(root.path(), Interpreter::Bash, "echo hi\n");
     launch.environment = vec![("PATH".to_string(), "/nonexistent".to_string())];
-    let error = refusal(launch_script(&launch))?;
-    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("start")));
+    assert_eq!(output_text(&launch_script(&launch)?), "hi\n");
+    assert_eq!(resolve_interpreter(&["/nonexistent/bash", "/bin/sh"])?, "/bin/sh");
+    assert!(matches!(
+        refusal(resolve_interpreter(&["/nonexistent/bash"]))?,
+        ScriptError::NoInterpreter
+    ));
+    assert!(matches!(refusal(resolve_interpreter(&[]))?, ScriptError::NoInterpreter));
     Ok(())
 }
 
@@ -242,7 +262,7 @@ fn unusable_work_root_is_reported() -> TestResult {
     let root = tempfile::tempdir()?;
     let launch = request(&root.path().join("absent"), Interpreter::Bash, "echo hi\n");
     let error = refusal(launch_script(&launch))?;
-    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("directory")));
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("work root")));
     Ok(())
 }
 
@@ -350,11 +370,11 @@ fn a_symlinked_parameter_reaches_the_script_resolved() -> TestResult {
 #[test]
 fn powershell_names_its_file_with_the_script_extension() -> TestResult {
     let root = tempfile::tempdir()?;
-    let mut launch = request(root.path(), Interpreter::Powershell, "Write-Output hi\n");
-    launch.environment = vec![("PATH".to_string(), "/nonexistent".to_string())];
-    let error = refusal(launch_script(&launch))?;
-    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("start")));
-    Ok(())
+    let launch = request(root.path(), Interpreter::Powershell, "Write-Output hi\n");
+    match launch_script(&launch) {
+        Ok(_) | Err(ScriptError::NoInterpreter) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 
@@ -424,7 +444,194 @@ fn an_output_held_open_past_the_deadline_is_reported() -> TestResult {
     );
     let mut launch = request(root.path(), Interpreter::Bash, &script);
     launch.manifest.timeout_seconds = 1;
+    launch.kill_grace = Duration::from_secs(1);
     let error = refusal(launch_script(&launch))?;
     assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("held open")));
     Ok(())
+}
+
+
+fn failing_place(_cgroup: &Path, _pid: u32) -> io::Result<()> {
+    Err(io::Error::other("injected placement failure"))
+}
+
+
+fn removing_place(cgroup: &Path, _pid: u32) -> io::Result<()> {
+    std::fs::remove_dir(cgroup)
+}
+
+
+#[test]
+fn a_script_that_cannot_be_placed_in_its_cgroup_is_killed_and_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let launch = request(root.path(), Interpreter::Bash, "sleep 300\n");
+    let error = refusal(run_script(&launch, failing_wait, failing_place))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("place")));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_cgroup_kill_is_reported() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let launch = request(root.path(), Interpreter::Bash, "echo hi\n");
+    let error = refusal(run_script(&launch, wait_deadline, removing_place))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("kill the script cgroup")));
+    Ok(())
+}
+
+
+#[test]
+fn an_unusable_cgroup_root_is_reported_and_nothing_is_left() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let mut launch = request(root.path(), Interpreter::Bash, "echo hi\n");
+    launch.cgroup_root = root.path().join("absent");
+    let error = refusal(launch_script(&launch))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("create the script cgroup")));
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_work_root_must_be_private_to_the_agent_user() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let owner = rustix::process::geteuid().as_raw();
+    check_work_root(root.path(), owner)?;
+    assert!(matches!(refusal(check_work_root(root.path(), owner + 1))?, ScriptError::UnsafeWorkRoot));
+    let file = root.path().join("file");
+    std::fs::write(&file, "x")?;
+    assert!(matches!(refusal(check_work_root(&file, owner))?, ScriptError::UnsafeWorkRoot));
+    assert!(matches!(
+        refusal(check_work_root(&root.path().join("absent"), owner))?,
+        ScriptError::Io { .. }
+    ));
+    UNSAFE_MODES.iter().try_for_each(|mode| -> TestResult {
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(*mode))?;
+        assert!(
+            matches!(refusal(check_work_root(root.path(), owner))?, ScriptError::UnsafeWorkRoot),
+            "{mode:o}"
+        );
+        let launch = request(root.path(), Interpreter::Bash, "echo hi\n");
+        assert!(matches!(refusal(launch_script(&launch))?, ScriptError::UnsafeWorkRoot));
+        Ok(())
+    })?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(DIRECTORY_MODE))?;
+    check_work_root(root.path(), owner)?;
+    Ok(())
+}
+
+
+#[test]
+fn the_wait_after_the_kill_has_a_deadline() -> TestResult {
+    let mut stuck = Command::new("sleep").arg("300").spawn()?;
+    let error = refusal(reap(&mut stuck, Duration::from_millis(SHORT_GRACE_MILLISECONDS), wait_deadline))?;
+    assert!(matches!(error, ScriptError::Io { context, .. } if context.contains("still running")));
+    let failed = refusal(reap(&mut stuck, Duration::from_secs(1), failing_wait))?;
+    assert!(matches!(failed, ScriptError::Io { context, .. } if context.contains("reap")));
+    stuck.kill()?;
+    let status = reap(&mut stuck, Duration::from_secs(DEFAULT_KILL_GRACE_SECONDS), wait_deadline)?;
+    assert_eq!(status.code(), None);
+    Ok(())
+}
+
+
+pub const UNSAFE_MODES: [u32; 4] = [0o770, 0o707, 0o1777, 0o772];
+
+
+pub const SHORT_GRACE_MILLISECONDS: u64 = 10;
+
+
+pub const POLL_ATTEMPTS: u32 = 1000;
+
+
+pub const POLL_MILLISECONDS: u64 = 10;
+
+
+pub const SET_M_MARKER: &str = "31337";
+
+
+pub const SETSID_MARKER: &str = "31338";
+
+
+fn job_alive(marker: &str) -> bool {
+    let needle = format!("sleep\0{marker}\0");
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|entry| std::fs::read(entry.path().join("cmdline")))
+        .any(|cmdline| String::from_utf8_lossy(&cmdline).contains(&needle))
+}
+
+
+fn poll_until(condition: impl Fn() -> bool) -> bool {
+    (0..POLL_ATTEMPTS).any(|_attempt| {
+        let done = condition();
+        if !done {
+            std::thread::sleep(Duration::from_millis(POLL_MILLISECONDS));
+        }
+        done
+    })
+}
+
+
+fn wait_for_set_m_job(_child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
+    poll_until(|| job_alive(SET_M_MARKER));
+    Ok(None)
+}
+
+
+fn wait_for_setsid_job(_child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
+    poll_until(|| job_alive(SETSID_MARKER));
+    Ok(None)
+}
+
+
+fn own_cgroup_root() -> io::Result<Option<std::path::PathBuf>> {
+    let text = std::fs::read_to_string("/proc/self/cgroup")?;
+    let probe = format!("probe-{}", std::process::id());
+    Ok(text
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(|relative| Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/')))
+        .filter(|root| create_cgroup(root, &probe).is_ok()))
+}
+
+
+fn escaping_job_is_killed(script: &str, marker: &str, wait: script_library::types::WaitFn) -> TestResult {
+    let root = tempfile::tempdir()?;
+    own_cgroup_root()?.iter().try_for_each(|cgroups| -> TestResult {
+        let mut launch = request(root.path(), Interpreter::Bash, script);
+        launch.cgroup_root = cgroups.clone();
+        let outcome = run_script(&launch, wait, place_in_cgroup)?;
+        assert!(outcome.timed_out);
+        assert!(poll_until(|| !job_alive(marker)), "the job survived the deadline");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_set_m_job_is_killed_at_the_deadline() -> TestResult {
+    escaping_job_is_killed("set -m\nsleep 31337 &\nwait\n", SET_M_MARKER, wait_for_set_m_job)
+}
+
+
+#[test]
+fn the_script_runs_in_its_cgroup_from_its_first_instruction() -> TestResult {
+    let root = tempfile::tempdir()?;
+    own_cgroup_root()?.iter().try_for_each(|cgroups| -> TestResult {
+        let mut launch = request(root.path(), Interpreter::Bash, "cat /proc/self/cgroup\n");
+        launch.cgroup_root = cgroups.clone();
+        let shown = output_text(&launch_script(&launch)?);
+        assert!(shown.contains("/cg-script-"), "{shown}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_setsid_job_is_killed_at_the_deadline() -> TestResult {
+    escaping_job_is_killed("setsid sleep 31338 &\nwait\n", SETSID_MARKER, wait_for_setsid_job)
 }

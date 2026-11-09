@@ -127,6 +127,8 @@ fn device_names_with_spaces_streams_and_superscripts_are_refused() -> TestResult
         "/var/LPT\u{b2}",
         "/var/lpt\u{b3}.x",
         "/var/CONIN$",
+        "/var/COM0",
+        "/var/lpt0.txt",
         "/var/conout$",
         "/var/CLOCK$.txt",
     ];

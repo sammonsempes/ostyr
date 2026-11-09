@@ -1,4 +1,6 @@
 mod argv;
+#[cfg(unix)]
+mod cgroup;
 mod common;
 mod digest;
 #[cfg(unix)]
