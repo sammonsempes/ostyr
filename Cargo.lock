@@ -2986,6 +2986,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "patch-rollout"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "response-breakers",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
