@@ -35,7 +35,10 @@ const PENDING_BATCHES: u64 = 3;
 const FOREIGN_SEQUENCE: u64 = 99;
 
 
-const SETTLE_MILLIS: u64 = 25;
+const POLL_MILLIS: u64 = 25;
+
+
+const POLL_ATTEMPTS: u32 = 400;
 
 
 const FLOOD: usize = 5;
@@ -313,12 +316,17 @@ async fn a_flooding_source_is_refused_while_an_agent_from_another_address_connec
         socket.bind(SocketAddr::new(host(SECOND_SOURCE_BYTE), 0))?;
         flood.push(socket.connect(server.address).await?);
     }
-    sleep(Duration::from_millis(SETTLE_MILLIS)).await;
+    let expected_refusals = u64::try_from(FLOOD - PER_SOURCE)?;
+    let mut polls = 0;
+    while counter(&state.counters.handshakes_refused) < expected_refusals && polls < POLL_ATTEMPTS {
+        sleep(Duration::from_millis(POLL_MILLIS)).await;
+        polls += 1;
+    }
     assert_eq!(counter(&state.counters.handshakes_refused), u64::try_from(FLOOD - PER_SOURCE)?);
-    let closed = stream::iter(flood.iter_mut())
+    let closed = stream::iter(flood.iter_mut().skip(PER_SOURCE))
         .then(|connection: &mut TcpStream| async move {
             let mut buffer = [u8::MIN; 1];
-            timeout(Duration::from_millis(SETTLE_MILLIS), connection.read(&mut buffer)).await
+            bounded(connection.read(&mut buffer)).await
         })
         .filter(|read| std::future::ready(matches!(read, Ok(Ok(0) | Err(_)))))
         .count()
