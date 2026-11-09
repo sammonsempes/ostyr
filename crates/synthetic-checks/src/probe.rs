@@ -3,6 +3,7 @@ use crate::model::{MAX_BODY_EXCERPT_BYTES, MAX_TIMEOUT_SECONDS};
 use crate::target::{guard_address, probe_socket, CheckedAddr};
 use crate::types::{Clock, Connect, Fetch, Handshake, Resolve};
 use ipnet::IpNet;
+use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
 use url::{Host, Url};
@@ -191,7 +192,7 @@ pub fn escaped_excerpt(body: &[u8]) -> String {
     String::from_utf8_lossy(body)
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
                 character.escape_default().collect::<String>()
             } else {
                 character.to_string()
@@ -310,7 +311,10 @@ pub fn tcp_probe(
 ) -> Result<ProbeOutcome, ProbeError> {
     let deadline = start_deadline(clock, limits.timeout);
     let left = remaining(clock, &deadline)?;
-    connect(probe_socket(address, port), left).map_err(ProbeError::Transport)?;
+    connect(probe_socket(address, port), left).map_err(|error| match error.kind() {
+        io::ErrorKind::TimedOut => ProbeError::Timeout { limit: deadline.limit },
+        _ => ProbeError::Transport(error),
+    })?;
     remaining(clock, &deadline)?;
     Ok(ProbeOutcome {
         status: None,

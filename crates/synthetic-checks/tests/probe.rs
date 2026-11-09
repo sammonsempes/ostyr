@@ -401,6 +401,17 @@ fn tcp_probe_failure_and_deadline() -> TestResult {
 
 
 #[test]
+fn tcp_probe_maps_a_timed_out_connect_to_a_timeout() -> TestResult {
+    let timed_out = |_: SocketAddr, _: Duration| Err(io::Error::from(io::ErrorKind::TimedOut));
+    let error = tcp_probe(public("93.184.216.34")?, PORT, &limits(1)?, &timed_out, &fixed_clock)
+        .err()
+        .ok_or("expected a timeout")?;
+    assert!(matches!(error, ProbeError::Timeout { .. }));
+    Ok(())
+}
+
+
+#[test]
 fn tls_probe_returns_the_chain() -> TestResult {
     let names = RefCell::new(String::new());
     let handshake = |_: SocketAddr, name: &str, _: Duration, _: usize, _: usize| {
@@ -484,6 +495,14 @@ fn escaped_excerpt_escapes_and_caps_after_escaping() -> TestResult {
     assert_eq!(escaped_excerpt(b"a\nb\x00"), "a\\nb\\u{0}");
     assert_eq!(escaped_excerpt(&vec![b'\n'; MAX_BODY_EXCERPT_BYTES]).len(), MAX_BODY_EXCERPT_BYTES);
     assert_eq!(escaped_excerpt(&[INVALID_UTF8_BYTE]), "\u{fffd}");
+    assert_eq!(
+        escaped_excerpt("a\u{202e}b\u{2066}c\u{2069}d\u{202a}".as_bytes()),
+        "a\\u{202e}b\\u{2066}c\\u{2069}d\\u{202a}"
+    );
+    assert_eq!(
+        escaped_excerpt("\u{2029}\u{202f}\u{2065}\u{206a}".as_bytes()),
+        "\u{2029}\u{202f}\u{2065}\u{206a}"
+    );
     Ok(())
 }
 

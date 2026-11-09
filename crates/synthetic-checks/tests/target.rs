@@ -3,9 +3,9 @@ mod types;
 
 
 use ipnet::IpNet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use synthetic_checks::error::AddressClass;
-use synthetic_checks::target::{checked_ip, guard_address, probe_socket};
+use synthetic_checks::target::{checked_ip, embedded_v4, guard_address, probe_socket};
 use types::TestResult;
 
 
@@ -50,6 +50,7 @@ fn each_class_is_refused() -> TestResult {
         ("100.100.100.200", AddressClass::Metadata),
         ("192.0.0.192", AddressClass::Metadata),
         ("168.63.129.16", AddressClass::Metadata),
+        ("169.254.170.2", AddressClass::Metadata),
         ("100.64.0.1", AddressClass::Reserved),
         ("0.1.2.3", AddressClass::Reserved),
         ("240.0.0.1", AddressClass::Reserved),
@@ -207,5 +208,53 @@ fn metadata_at_the_nat64_local_embedded_position_is_never_scoped() -> TestResult
     assert_eq!(refused_class("64:ff9b:1::a9fe:a9fe", &scope)?, AddressClass::Metadata);
     assert_eq!(refused_class("64:ff9b:1:0:0:0:a9fe:a9fe", &[])?, AddressClass::Reserved);
     assert!(guard_address(ip("64:ff9b:1::808:808")?, &scope).is_ok());
+    Ok(())
+}
+
+
+const NAT64_LOCAL_PREFIX: [u8; 6] = [0, 0x64, 0xff, 0x9b, 0, 1];
+
+
+const METADATA_OCTETS: [u8; EMBEDDED_OCTETS] = [169, 254, 169, 254];
+
+
+const EMBEDDED_OCTETS: usize = 4;
+
+
+const POSITION_COUNT: usize = 4;
+
+
+const ADDRESS_OCTETS: usize = 16;
+
+
+const PREFIX_POSITIONS: usize = 6;
+
+
+const POSITIONS: [[usize; EMBEDDED_OCTETS]; POSITION_COUNT] = [[6, 7, 9, 10], [7, 9, 10, 11], [9, 10, 11, 12], [12, 13, 14, 15]];
+
+
+fn address_with_metadata_at(positions: &[usize; EMBEDDED_OCTETS]) -> Ipv6Addr {
+    let mut octets = [0u8; ADDRESS_OCTETS];
+    NAT64_LOCAL_PREFIX.iter().enumerate().for_each(|(index, value)| {
+        octets.get_mut(index).into_iter().for_each(|slot| *slot = *value);
+    });
+    positions.iter().zip(METADATA_OCTETS).for_each(|(position, value)| {
+        octets.get_mut(*position).into_iter().for_each(|slot| *slot = value);
+    });
+    Ipv6Addr::from(octets)
+}
+
+
+#[test]
+fn metadata_at_every_rfc_6052_position_is_never_scoped() -> TestResult {
+    let scope = [net("64:ff9b:1::/48")?];
+    POSITIONS.iter().try_for_each(|positions| -> TestResult {
+        let address = IpAddr::V6(address_with_metadata_at(positions));
+        assert!(embedded_v4(address).contains(&Ipv4Addr::from(METADATA_OCTETS)), "{address}");
+        assert_eq!(refused_class(&address.to_string(), &scope)?, AddressClass::Metadata, "{address}");
+        Ok(())
+    })?;
+    assert_eq!(embedded_v4(ip("64:ff9b:1::")?).len(), PREFIX_POSITIONS);
+    assert!(embedded_v4(ip("192.0.2.1")?).is_empty());
     Ok(())
 }
