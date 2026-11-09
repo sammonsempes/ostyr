@@ -3,7 +3,7 @@ mod types;
 
 
 use synthetic_checks::decision::{certificate_threshold, check_result, excerpt, location_failing, should_alert};
-use synthetic_checks::model::{Check, CheckKind, LocationHistory, DEFAULT_CERT_DAYS, MAX_BODY_EXCERPT_BYTES};
+use synthetic_checks::model::{CertificateDay, Check, CheckKind, FailureRun, LocationHistory, DEFAULT_CERT_DAYS, MAX_BODY_EXCERPT_BYTES};
 use types::TestResult;
 
 
@@ -43,18 +43,31 @@ const BETWEEN_MIDDLE_AND_LOW: i64 = 8;
 const NEAR_EXPIRY: i64 = 3;
 
 
-fn check(min_failing_locations: u64) -> Check {
-    Check {
+fn run(count: u64) -> Result<FailureRun, Box<dyn std::error::Error>> {
+    Ok(FailureRun::try_from(count)?)
+}
+
+
+fn days(values: &[u64]) -> Result<Vec<CertificateDay>, Box<dyn std::error::Error>> {
+    Ok(values
+        .iter()
+        .map(|value| CertificateDay::try_from(*value))
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+
+fn check(min_failing_locations: u64) -> Result<Check, Box<dyn std::error::Error>> {
+    Ok(Check {
         name: "web".to_string(),
         kind: CheckKind::Http,
         target: "https://example.org/".to_string(),
         interval_seconds: INTERVAL,
         timeout_seconds: TIMEOUT,
-        consecutive_failures: THREE,
+        consecutive_failures: run(THREE)?,
         locations: vec!["paris".to_string(), "berlin".to_string()],
         min_failing_locations,
-        certificate_days: DEFAULT_CERT_DAYS.to_vec(),
-    }
+        certificate_days: days(&DEFAULT_CERT_DAYS)?,
+    })
 }
 
 
@@ -68,16 +81,16 @@ fn history(location: &str, results: &[bool]) -> LocationHistory {
 
 #[test]
 fn consecutive_failures_are_required() -> TestResult {
-    assert!(location_failing(&history("p", &[true, false, false, false]), THREE));
-    assert!(!location_failing(&history("p", &[false, false]), THREE));
+    assert!(location_failing(&history("p", &[true, false, false, false]), run(THREE)?));
+    assert!(!location_failing(&history("p", &[false, false]), run(THREE)?));
     Ok(())
 }
 
 
 #[test]
 fn a_success_resets_the_run() -> TestResult {
-    assert!(!location_failing(&history("p", &[false, false, true]), THREE));
-    assert!(!location_failing(&history("p", &[false, false, true, false, false]), THREE));
+    assert!(!location_failing(&history("p", &[false, false, true]), run(THREE)?));
+    assert!(!location_failing(&history("p", &[false, false, true, false, false]), run(THREE)?));
     Ok(())
 }
 
@@ -87,10 +100,10 @@ fn quorum_of_locations() -> TestResult {
     let down = [false, false, false];
     let both = [history("paris", &down), history("berlin", &down)];
     let one = [history("paris", &down), history("berlin", &[true])];
-    assert!(should_alert(&check(TWO), &both));
-    assert!(!should_alert(&check(TWO), &one));
-    assert!(should_alert(&check(1), &one));
-    assert!(!should_alert(&check(1), &[]));
+    assert!(should_alert(&check(TWO)?, &both));
+    assert!(!should_alert(&check(TWO)?, &one));
+    assert!(should_alert(&check(1)?, &one));
+    assert!(!should_alert(&check(1)?, &[]));
     Ok(())
 }
 
@@ -98,7 +111,7 @@ fn quorum_of_locations() -> TestResult {
 #[test]
 fn undeclared_locations_do_not_count() -> TestResult {
     let down = [false, false, false];
-    assert!(!should_alert(&check(1), &[history("tokyo", &down)]));
+    assert!(!should_alert(&check(1)?, &[history("tokyo", &down)]));
     Ok(())
 }
 
@@ -115,8 +128,9 @@ fn each_certificate_threshold() -> TestResult {
         (1, Some(LOW)),
         (-NEAR_EXPIRY, Some(LOW)),
     ];
+    let thresholds = days(&DEFAULT_CERT_DAYS)?;
     cases.iter().for_each(|(days_left, expected)| {
-        assert_eq!(certificate_threshold(&DEFAULT_CERT_DAYS, *days_left), *expected, "{days_left}");
+        assert_eq!(certificate_threshold(&thresholds, *days_left), *expected, "{days_left}");
     });
     assert_eq!(certificate_threshold(&[], 1), None);
     Ok(())

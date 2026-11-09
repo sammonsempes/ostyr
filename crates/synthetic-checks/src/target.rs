@@ -81,7 +81,7 @@ pub fn classify(address: IpAddr) -> Option<AddressClass> {
 }
 
 
-/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96), SIIT, 6to4 or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`.
+/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96), SIIT, 6to4 or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and its last 32 bits are checked too so metadata there is never scoped.
 pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
     match address {
         IpAddr::V4(_) => Vec::new(),
@@ -91,7 +91,7 @@ pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
             let six_to_four = Ipv4Addr::new(o2, o3, o4, o5);
             [
                 (
-                    NAT64_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6),
+                    NAT64_V6.contains(&v6) || NAT64_LOCAL_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6),
                     vec![last_32],
                 ),
                 (SIX_TO_FOUR_V6.contains(&v6), vec![six_to_four]),

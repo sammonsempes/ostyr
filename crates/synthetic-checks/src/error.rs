@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::time::Duration;
 use thiserror::Error;
 
 
@@ -32,4 +33,31 @@ pub enum AddressClass {
 pub enum GuardError {
     #[error("address {address} is refused: {class:?} and not in the declared scope")]
     Refused { address: IpAddr, class: AddressClass },
+}
+
+
+#[derive(Debug, Error)]
+pub enum ProbeError {
+    #[error(transparent)]
+    Refused(#[from] GuardError),
+    #[error("name resolution failed")]
+    Resolve(#[source] std::io::Error),
+    #[error("transport failed")]
+    Transport(#[source] std::io::Error),
+    #[error("the {limit:?} check deadline passed")]
+    Timeout { limit: Duration },
+    #[error("more than {max} redirects")]
+    TooManyRedirects { max: usize },
+    #[error("target `{target}` is not a usable http or https URL")]
+    BadTarget { target: String },
+    #[error("redirect location is not a valid URL")]
+    BadRedirect(#[source] url::ParseError),
+    #[error("redirect location exceeds {max} bytes")]
+    RedirectTooLong { max: usize },
+    #[error(transparent)]
+    BadLimits(#[from] CheckError),
+    #[error("no address to connect to")]
+    NoAddress,
+    #[error("certificate chain exceeds {max_certs} certificates of {max_bytes} bytes")]
+    ChainTooLarge { max_certs: usize, max_bytes: usize },
 }
