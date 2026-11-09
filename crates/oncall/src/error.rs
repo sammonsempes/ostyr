@@ -22,6 +22,8 @@ pub enum OncallError {
     },
     #[error("channel `{channel}`: {reason}")]
     InvalidChannel { channel: String, reason: &'static str },
+    #[error("the setting `{field}` is not valid")]
+    InvalidSetting { field: &'static str },
     #[error("`{field}` holds a CR or LF")]
     HeaderInjection { field: &'static str },
 }
@@ -52,4 +54,42 @@ pub enum TransportError {
     Request(#[source] ureq::Error),
     #[error("the receiver did not answer with a success status")]
     Status,
+    #[error("the settings have no smtp section")]
+    SmtpNotConfigured,
+    #[error("the address is refused")]
+    Address(#[source] lettre::address::AddressError),
+    #[error("the text is too large or holds a line break in the subject")]
+    MailText,
+    #[error("the channel has a secret file but the settings no smtp username")]
+    NoUsername,
+    #[error("the mail cannot be built")]
+    Build(#[source] lettre::error::Error),
+    #[error("the address form is refused")]
+    AddressForm,
+    #[error("the TLS setup is refused")]
+    Tls(#[source] rustls::Error),
+    #[error("the CA certificate is refused")]
+    SmtpCertificate(#[source] rustls_pki_types::pem::Error),
+    #[error("the CA file holds no certificate")]
+    NoCertificate,
+    #[error("the relay host is not a valid server name")]
+    InvalidHost(#[source] rustls_pki_types::InvalidDnsNameError),
+    #[error("the connection failed")]
+    Io(#[source] std::io::Error),
+    #[error("no relay address was tried")]
+    NoAddress,
+    #[error("the send did not finish before the deadline")]
+    Deadline,
+    #[error("the server closed the connection")]
+    Closed,
+    #[error("the server reply is larger than the bound")]
+    ReplyTooLong,
+    #[error("the server reply is malformed")]
+    ReplyFormat,
+    #[error("the server refused a command with code {code}")]
+    Rejected { code: u16 },
+    #[error("the server does not offer STARTTLS")]
+    NoStarttls,
+    #[error("the server does not offer AUTH PLAIN")]
+    NoAuth,
 }
