@@ -5,6 +5,7 @@ use crate::plan::{plan, Change};
 use crate::types::{ApplySectionFn, ConfigState, LoaderFn, Plan, SharedAuditFn, StateFn, ValidateFn};
 use arc_swap::ArcSwap;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use core_redact::value::redact_text;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -61,9 +62,9 @@ pub fn bounded_parameter(key: &str, value: &str) -> String {
 }
 
 
-/// The SHA-256 of a full diff text, lower-case hex, so a record can be matched against Git.
+/// The SHA-256 of the redacted full diff text, lower-case hex: a secret pasted into a value never reaches an unsalted hash.
 pub fn diff_digest(diff: &str) -> String {
-    format!("{:x}", Sha256::digest(diff.as_bytes()))
+    format!("{:x}", Sha256::digest(redact_text(diff).as_bytes()))
 }
 
 
@@ -194,14 +195,27 @@ pub fn full_diff(changes: &[Change]) -> String {
 }
 
 
+pub const TRUNCATION_MARKER_RESERVE: usize = 64;
+
+
+/// At most `MAX_DIFF_ENTRIES` entries and `MAX_DIFF_CHARS` characters in all, both markers included, so `bounded_diff` never cuts it again.
 pub fn diff_text(changes: &[Change]) -> String {
     let shown: String = changes.iter().take(MAX_DIFF_ENTRIES).map(|change| change.diff.as_str()).collect();
     let omitted = changes.len().saturating_sub(MAX_DIFF_ENTRIES);
-    if omitted == 0 {
+    let entry_marker = if omitted == 0 {
+        String::new()
+    } else {
+        format!("[{omitted} more changes omitted]\n")
+    };
+    let budget = MAX_DIFF_CHARS.saturating_sub(entry_marker.chars().count() + TRUNCATION_MARKER_RESERVE);
+    let kept: String = shown.chars().take(budget).collect();
+    let body = if kept.len() == shown.len() {
         shown
     } else {
-        format!("{shown}[{omitted} more changes omitted]\n")
-    }
+        let cut = full_diff(changes).chars().count() - kept.chars().count();
+        format!("{kept}[diff truncated, {cut} characters omitted]")
+    };
+    format!("{body}{entry_marker}")
 }
 
 

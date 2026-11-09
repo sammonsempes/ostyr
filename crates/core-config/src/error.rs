@@ -13,6 +13,8 @@ pub enum ConfigError {
         #[source]
         source: io::Error,
     },
+    #[error("{file}: larger than {max} bytes")]
+    TooLarge { file: String, max: u64 },
     #[error("{file}:{line}:{column}: at `{field_path}`: {message}")]
     Parse {
         file: String,

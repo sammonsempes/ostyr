@@ -6,7 +6,7 @@ use common::types::TestResult;
 use core_config::error::ConfigError;
 use core_config::load::{load_module, load_platform};
 use core_config::model::ModuleConfig;
-use core_config::parse::{parse_document, position_of, read_text, ROOT_FIELD_PATH};
+use core_config::parse::{parse_document, position_of, read_text, read_text_capped, ROOT_FIELD_PATH};
 use core_config::secret::SecretRef;
 use std::error::Error;
 use std::io::{self, Read};
@@ -230,5 +230,20 @@ fn parse_error_without_position_displays() -> TestResult {
         source: Box::new(source),
     };
     assert_eq!(error.to_string(), "f.yaml:0:0: at `.`: m");
+    Ok(())
+}
+
+
+const SMALL_CAP: u64 = 8;
+
+
+#[test]
+fn a_file_one_byte_over_the_cap_is_refused_with_a_typed_error() -> TestResult {
+    let at_cap = "a".repeat(usize::try_from(SMALL_CAP)?);
+    assert_eq!(read_text_capped(&mut at_cap.as_bytes(), "at.yaml", SMALL_CAP)?, at_cap);
+    let over = "a".repeat(usize::try_from(SMALL_CAP)? + 1);
+    let error = read_text_capped(&mut over.as_bytes(), "big.yaml", SMALL_CAP).err().ok_or("no error")?;
+    assert!(matches!(error, ConfigError::TooLarge { ref file, max } if file == "big.yaml" && max == SMALL_CAP));
+    assert!(error.to_string().contains("big.yaml"));
     Ok(())
 }

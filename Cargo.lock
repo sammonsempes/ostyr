@@ -943,6 +943,7 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "core-audit",
+ "core-redact",
  "json-patch",
  "notify",
  "notify-debouncer-full",
