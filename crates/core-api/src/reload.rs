@@ -534,6 +534,7 @@ pub fn switch_listener(setup: &ListenerSetup, pending: &Mutex<Option<Sockets>>, 
             .filter(|old| old.address != config.address)
             .for_each(|old| retire_socket(&old.socket));
         std::mem::replace(&mut current.handle, handle).graceful_shutdown(Some(DRAIN_TIMEOUT));
+        setup.listener.switched.notify_one();
     });
 }
 
