@@ -422,6 +422,24 @@ pub fn current_context(state: &ApiState, context: &ReloadContext) -> ReloadConte
 
 /// Keeps the live key at `<key_file>.previous`, rotates, then removes it; a failed rotation leaves it for the next start.
 pub fn rotate_keeping_previous(state: &ApiState, context: &ReloadContext, key_file: &Path, next: &Arc<StoreKey>) -> Result<usize, AuthError> {
+    if store_sealed_under(state, next) {
+        rotate_store(state, next)
+    } else {
+        save_rotate_retire(state, context, key_file, next)
+    }
+}
+
+
+/// True when the live store already opens under `next` (a moved store sealed under the new key): no previous key is needed, the key follows the file.
+pub fn store_sealed_under(state: &ApiState, next: &StoreKey) -> bool {
+    read_store_locked(&state.store_path.load())
+        .inspect_err(|error| tracing::error!(%error, "cannot read the store to check whether it is sealed under the new key"))
+        .is_ok_and(|(accounts, _)| unopened_secrets(&accounts, next).0 == 0)
+}
+
+
+/// Writes the previous key, re-encrypts, then removes the previous key.
+pub fn save_rotate_retire(state: &ApiState, context: &ReloadContext, key_file: &Path, next: &Arc<StoreKey>) -> Result<usize, AuthError> {
     write_previous_key(key_file, &state.key.load(), state.random)?;
     let current = current_context(state, context);
     let detail = format!("{} written before the re-encryption", previous_key_path(key_file).display());

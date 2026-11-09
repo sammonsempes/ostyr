@@ -25,8 +25,8 @@ use core_api::previous::{
 };
 use core_api::reload::{
     accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
-    reseal_accounts, rewatch, settings_state, switch_audit, switch_identity, switch_key, switch_store, watched_files, FINGERPRINT_COMPROMISED,
-    FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
+    reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_identity, switch_key, switch_store, watched_files,
+    FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
 };
 use core_api::routes::build_router;
 use core_api::server::{
@@ -2466,5 +2466,67 @@ fn a_failed_temporary_write_is_cleaned_up_or_logged_and_a_failing_random_is_refu
     assert!(temporary.is_dir());
     assert!(write_previous_key(&key_file, &store_key(OLD_KEY_FILL), failing_random).is_err());
     assert!(!previous_of(&running).exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_stale_previous_key_is_removed_at_startup_and_audited() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    let previous = previous_of(&running);
+    private_file(&previous, &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    restarted(&running)?;
+    assert!(!previous.exists());
+    let audit = audit_text(&running)?;
+    assert!(String::from_utf8(audit.clone())?.contains(PREVIOUS_KEY_REMOVED));
+    assert!(!holds_key(&audit, OLD_KEY_FILL) && !holds_key(&audit, NEW_KEY_FILL));
+    restarted(&running)?;
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_stale_previous_that_is_not_a_regular_file_is_left_and_the_start_goes_on() -> TestResult {
+    let running = live("")?;
+    let previous = previous_of(&running);
+    fs::create_dir(&previous)?;
+    restarted(&running)?;
+    assert!(previous.is_dir());
+    fs::remove_dir(&previous)?;
+    let decoy = running.dir.path().join("decoy.key");
+    private_file(&decoy, &[OLD_KEY_FILL; fixture::KEY_BYTES])?;
+    std::os::unix::fs::symlink(&decoy, &previous)?;
+    restarted(&running)?;
+    assert!(previous.symlink_metadata().is_ok() && decoy.exists());
+    assert!(!String::from_utf8(audit_text(&running)?)?.contains(PREVIOUS_KEY_REMOVED));
+    Ok(())
+}
+
+
+#[test]
+fn a_moved_store_sealed_under_the_new_key_is_adopted_even_when_the_previous_cannot_be_written() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    write_moved_store(directory, NEW_KEY_FILL)?;
+    fs::create_dir(previous_of(&running))?;
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    private_file(&directory.join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    fs::write(&running.module_file, plain.replace("accounts.json", "moved.json"))?;
+    let outcome = reload(&running.engine);
+    assert!(matches!(outcome, ReloadOutcome::Applied { .. }), "{outcome:?}");
+    assert_eq!(*running.state.store_path.load_full(), directory.join("moved.json"));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(NEW_KEY_FILL).expose_secret());
+    assert!(!reload_records(directory)?.iter().any(|line| line.contains("key_rotation_failed")));
+    Ok(())
+}
+
+
+#[test]
+fn an_unreadable_live_store_is_not_taken_for_one_sealed_under_the_new_key() -> TestResult {
+    let running = live("")?;
+    running.state.store_path.store(Arc::new(running.dir.path().to_path_buf()));
+    assert!(!store_sealed_under(&running.state, &store_key(NEW_KEY_FILL)));
     Ok(())
 }
