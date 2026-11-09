@@ -155,6 +155,15 @@ pub fn bundle_state(bundle: &Bundle) -> ConfigState {
 }
 
 
+/// The JSON array of changed keys; a value that does not parse names no key and is logged.
+pub fn changed_keys(text: &str) -> Vec<String> {
+    serde_json::from_str(text).unwrap_or_else(|failure| {
+        tracing::warn!(%failure, "changed_settings is not a JSON array of strings");
+        Vec::new()
+    })
+}
+
+
 /// The files named by the diff of a reload entry, so that the audit target is the file that changed.
 pub fn retarget(entry: NewEntry, files: &[String]) -> NewEntry {
     let changed: Vec<&str> = files
@@ -168,7 +177,8 @@ pub fn retarget(entry: NewEntry, files: &[String]) -> NewEntry {
             let in_keys = entry
                 .parameters
                 .get(CHANGED_KEYS_PARAMETER)
-                .is_some_and(|keys| keys.split(',').any(|key| key.starts_with(&prefix)));
+                .map(|text| changed_keys(text))
+                .is_some_and(|keys| keys.iter().any(|key| key.starts_with(&prefix)));
             in_diff || in_keys
         })
         .map(String::as_str)

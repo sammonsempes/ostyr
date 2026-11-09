@@ -43,6 +43,22 @@ pub fn bounded_text(value: &str, max: usize, label: &str) -> String {
 }
 
 
+/// A key list kept as a JSON array: a list over the bound becomes one array holding a visible marker.
+pub fn bounded_key_list(value: &str) -> String {
+    let omitted = value.chars().count().saturating_sub(MAX_DIFF_CHARS);
+    if omitted == 0 {
+        value.to_owned()
+    } else {
+        encode_keys(&[format!("[changed_settings truncated, {omitted} characters omitted]")])
+    }
+}
+
+
+pub fn encode_keys(keys: &[String]) -> String {
+    serde_json::Value::Array(keys.iter().cloned().map(serde_json::Value::String).collect()).to_string()
+}
+
+
 pub fn bounded_value(value: &str) -> String {
     bounded_text(value, MAX_VALUE_CHARS, "value")
 }
@@ -56,7 +72,7 @@ pub fn bounded_diff(value: &str) -> String {
 pub fn bounded_parameter(key: &str, value: &str) -> String {
     match key {
         "diff" => bounded_diff(value),
-        "changed_settings" => bounded_text(value, MAX_DIFF_CHARS, "changed_settings"),
+        "changed_settings" => bounded_key_list(value),
         _ => bounded_value(value),
     }
 }
@@ -219,13 +235,29 @@ pub fn diff_text(changes: &[Change]) -> String {
 }
 
 
+/// A JSON array of strings: the keys that fit the bound, then one marker element naming how many keys were omitted.
 pub fn changed_settings_text(changes: &[Change]) -> String {
-    let shown: Vec<&str> = changes.iter().take(MAX_KEY_ENTRIES).map(|change| change.key.as_str()).collect();
-    let omitted = changes.len().saturating_sub(MAX_KEY_ENTRIES);
+    let budget = MAX_DIFF_CHARS.saturating_sub(TRUNCATION_MARKER_RESERVE);
+    let shown: Vec<String> = changes
+        .iter()
+        .take(MAX_KEY_ENTRIES)
+        .map(|change| change.key.clone())
+        .scan(usize::MIN, |used, key| {
+            *used = used.saturating_add(encode_keys(std::slice::from_ref(&key)).chars().count());
+            Some((*used, key))
+        })
+        .take_while(|(used, _)| *used <= budget)
+        .map(|(_, key)| key)
+        .collect();
+    let omitted = changes.len().saturating_sub(shown.len());
     if omitted == 0 {
-        shown.join(",")
+        encode_keys(&shown)
     } else {
-        format!("{},[{omitted} more keys omitted]", shown.join(","))
+        let marked: Vec<String> = shown
+            .into_iter()
+            .chain(std::iter::once(format!("[{omitted} more keys omitted]")))
+            .collect();
+        encode_keys(&marked)
     }
 }
 

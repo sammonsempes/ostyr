@@ -1425,7 +1425,7 @@ fn retarget_reads_the_changed_settings_when_the_diff_is_cut() -> Result<(), Box<
         justification: None,
         parameters: [
             ("diff".to_owned(), "--- a/c.yaml::x\n[diff truncated, 5 characters omitted]".to_owned()),
-            ("changed_settings".to_owned(), "a.yaml::steps.0,other::y".to_owned()),
+            ("changed_settings".to_owned(), r#"["a.yaml::steps.0","other::y"]"#.to_owned()),
         ]
         .into(),
     };
@@ -1435,5 +1435,30 @@ fn retarget_reads_the_changed_settings_when_the_diff_is_cut() -> Result<(), Box<
         ..entry
     };
     assert_eq!(retarget(bare, &files).target, "catalogue");
+    Ok(())
+}
+
+
+#[test]
+fn a_key_holding_a_comma_and_another_file_prefix_retargets_only_the_changed_file() -> Result<(), Box<dyn Error>> {
+    let files = vec!["a.yaml".to_owned(), "other.yaml".to_owned()];
+    let entry = |keys: &str| NewEntry {
+        timestamp: OffsetDateTime::UNIX_EPOCH,
+        actor: core_audit::model::Actor {
+            kind: core_audit::model::ActorKind::System,
+            id: "system".to_owned(),
+        },
+        tenant: "t".to_owned(),
+        module: "m".to_owned(),
+        action: "config.reload".to_owned(),
+        target: "catalogue".to_owned(),
+        outcome: Outcome::Success,
+        request_id: "r".to_owned(),
+        justification: None,
+        parameters: [("changed_settings".to_owned(), keys.to_owned())].into(),
+    };
+    let hostile = serde_json::to_string(&["a.yaml::x,other.yaml::y"])?;
+    assert_eq!(retarget(entry(&hostile), &files).target, "a.yaml");
+    assert_eq!(retarget(entry("a.yaml::x,other.yaml::y"), &files).target, "catalogue");
     Ok(())
 }
