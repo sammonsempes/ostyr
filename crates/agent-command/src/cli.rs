@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::model::{Action, Command, KeyClass, Verifier};
+use crate::model::{Action, Command, KeyClass, PackageSelection, RebootPolicy, Verifier};
 use crate::sign::{memory_signer, new_nonce, sign_command};
 use crate::types::FillFn;
 use crate::verify::{action_name, verify_command};
@@ -56,12 +56,40 @@ pub fn parse_action(name: &str, parameter: Option<&str>) -> Result<Action, CliEr
         "run_script" => Ok(Action::RunScript { script: text }),
         "update" => Ok(Action::Update { version: text }),
         "change_policy" => Ok(Action::ChangePolicy { policy: text }),
+        "install_updates" => parse_install_updates(&text),
+        "reboot" => parse_reboot(&text),
         "kill" => text
             .parse()
             .map(|process_id| Action::Kill { process_id })
             .map_err(|_| CliError::Number(text.clone())),
         other => Err(CliError::UnknownAction(other.to_owned())),
     }
+}
+
+
+/// `<never|in_window|required>` or `<policy>=<package>,<package>`; no package list means every allowed update.
+pub fn parse_install_updates(text: &str) -> Result<Action, CliError> {
+    let (policy, list) = text.split_once('=').map_or((text, None), |(policy, list)| (policy, Some(list)));
+    let reboot = match policy {
+        "never" => Ok(RebootPolicy::Never),
+        "in_window" => Ok(RebootPolicy::InWindow),
+        "required" => Ok(RebootPolicy::Required),
+        _ => Err(CliError::Parameter("reboot policy must be never, in_window or required")),
+    }?;
+    let packages = list.map_or(PackageSelection::AllAllowed, |names| {
+        PackageSelection::Named(names.split(',').map(str::to_owned).collect())
+    });
+    Ok(Action::InstallUpdates { packages, reboot })
+}
+
+
+/// `<true|false>,<deadline-seconds>`.
+pub fn parse_reboot(text: &str) -> Result<Action, CliError> {
+    let (prompt, deadline) = text.split_once(',').ok_or(CliError::Parameter("reboot takes <true|false>,<deadline>"))?;
+    Ok(Action::Reboot {
+        prompt_user: prompt.parse().map_err(|_| CliError::Parameter("reboot prompt must be true or false"))?,
+        deadline: parse_sequence(deadline)?,
+    })
 }
 
 
