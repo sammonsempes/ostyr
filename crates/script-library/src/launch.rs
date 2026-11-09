@@ -12,7 +12,7 @@ use crate::redact::redact_capped;
 use crate::types::{Params, WaitFn};
 use regex::bytes::Regex;
 use rustix::io::Errno;
-use rustix::process::{getegid, geteuid, kill_process_group, Pid, Signal};
+use rustix::process::{getegid, geteuid, getgroups, kill_process_group, Pid, Signal};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -282,9 +282,10 @@ fn run_child(
 
 
 /// A dedicated uid and gid only: root and the agent's own uid and gid are refused (fail closed).
-pub fn check_run_as(run_as: Option<&RunAs>, agent_uid: u32, agent_gid: u32) -> Result<(), ScriptError> {
+pub fn check_run_as(run_as: Option<&RunAs>, agent_uid: u32, agent_gid: u32, agent_groups: &[u32]) -> Result<(), ScriptError> {
     ensure(
-        run_as.is_none_or(|user| user.uid != 0 && user.uid != agent_uid && user.gid != 0 && user.gid != agent_gid),
+        run_as
+            .is_none_or(|user| user.uid != 0 && user.uid != agent_uid && user.gid != 0 && user.gid != agent_gid && !agent_groups.contains(&user.gid)),
         ScriptError::InvalidRunAs,
     )
 }
@@ -293,7 +294,8 @@ pub fn check_run_as(run_as: Option<&RunAs>, agent_uid: u32, agent_gid: u32) -> R
 /// Checks the manifest, the parameters, the digest and the work root, writes the digested bytes to a private file and runs it in its own cgroup.
 pub fn run_script(request: &LaunchRequest, wait: WaitFn, ops: &CgroupOps) -> Result<Outcome, ScriptError> {
     check_manifest(&request.manifest)?;
-    check_run_as(request.run_as.as_ref(), geteuid().as_raw(), getegid().as_raw())?;
+    let groups: Vec<u32> = getgroups()?.iter().map(|group| group.as_raw()).collect();
+    check_run_as(request.run_as.as_ref(), geteuid().as_raw(), getegid().as_raw(), &groups)?;
     validate_params(&request.manifest, &request.params)?;
     let bytes = check_digest(&request.manifest, request.script_bytes.clone())?;
     let root = open_work_root(&request.work_root, geteuid().as_raw())?;

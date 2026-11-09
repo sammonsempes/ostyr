@@ -26,7 +26,7 @@ use std::time::Duration;
 pub const SMALL_CAP: u64 = 16;
 
 
-pub const OVERFLOW: usize = 5000;
+pub const OVERFLOW: usize = 200_000;
 
 
 pub const PARTIAL_PREFIX: usize = 4;
@@ -942,23 +942,30 @@ fn run_as_root_or_the_agent_uid_is_refused() -> TestResult {
     let user = |uid, gid| Some(RunAs { uid, gid });
     let other = NOBODY - 1;
     assert!(matches!(
-        refusal(check_run_as(user(0, NOBODY).as_ref(), NOBODY, other))?,
+        refusal(check_run_as(user(0, NOBODY).as_ref(), NOBODY, other, &[]))?,
         ScriptError::InvalidRunAs
     ));
     assert!(matches!(
-        refusal(check_run_as(user(NOBODY, NOBODY).as_ref(), NOBODY, other))?,
+        refusal(check_run_as(user(NOBODY, NOBODY).as_ref(), NOBODY, other, &[]))?,
         ScriptError::InvalidRunAs
     ));
     assert!(matches!(
-        refusal(check_run_as(user(NOBODY, 0).as_ref(), other, other))?,
+        refusal(check_run_as(user(NOBODY, 0).as_ref(), other, other, &[]))?,
         ScriptError::InvalidRunAs
     ));
     assert!(matches!(
-        refusal(check_run_as(user(NOBODY, NOBODY).as_ref(), other, NOBODY))?,
+        refusal(check_run_as(user(NOBODY, NOBODY).as_ref(), other, NOBODY, &[]))?,
         ScriptError::InvalidRunAs
     ));
-    check_run_as(user(NOBODY, NOBODY).as_ref(), 0, 1)?;
-    check_run_as(None, 0, 0)?;
+    check_run_as(user(NOBODY, NOBODY).as_ref(), 0, 1, &[])?;
+    check_run_as(None, 0, 0, &[])?;
+    let supplementary = other - 1;
+    let unrelated = supplementary - 1;
+    assert!(matches!(
+        refusal(check_run_as(user(NOBODY, supplementary).as_ref(), 0, 1, &[unrelated, supplementary]))?,
+        ScriptError::InvalidRunAs
+    ));
+    check_run_as(user(NOBODY, supplementary).as_ref(), 0, 1, &[unrelated])?;
     let root = tempfile::tempdir()?;
     let mut launch = request(root.path(), Interpreter::Bash, "echo hi\n");
     launch.run_as = user(0, NOBODY);
