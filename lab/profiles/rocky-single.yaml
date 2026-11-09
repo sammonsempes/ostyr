@@ -1,0 +1,6 @@
+egress: proxy
+vms:
+  - name: rocky
+    base_image: rocky-9.qcow2
+    vcpu: 2
+    ssh_user: rocky

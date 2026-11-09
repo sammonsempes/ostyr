@@ -1,10 +1,7 @@
-Last metadata expiration check: 0:03:12 ago on Mon 09 Nov 2026 10:00:00 AM UTC.
+Last metadata expiration check: 0:02:04 ago on Mon Nov  9 19:11:05 2026.
 
-kernel.x86_64                      5.14.0-503.15.1.el9_5      baseos
-openssl.x86_64                     1:3.2.2-6.el9_5.1          baseos
-openssl-libs.x86_64                1:3.2.2-6.el9_5.1          baseos
-tzdata.noarch                      2025b-1.el9                baseos
-vim-minimal.x86_64                 2:8.2.2637-21.el9          appstream
-Obsoleting Packages
-newpkg.x86_64                      1.0-1.el9                  appstream
-    oldpkg.x86_64                  0.9-1.el9                  @baseos
+curl.x86_64                        7.76.1-40.el9_8.9                      zzbase
+libcurl.x86_64                     7.76.1-40.el9_8.9                      zzbase
+sudo.x86_64                        1.9.17p2-3.el9_8.3                     zzbase
+tzdata.noarch                      2026f-1.el9_8                          zzbase
+vim-minimal.x86_64                 2:8.2.2637-26.el9_8.23                 zzbase

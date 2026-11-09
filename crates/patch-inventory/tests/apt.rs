@@ -64,7 +64,7 @@ fn security_suites_are_flagged() -> TestResult {
         .iter()
         .map(|update| (update.package.as_str(), update.security))
         .collect();
-    assert_eq!(flags, [("curl", true), ("libcurl4t64", true), ("openssl", true), ("tzdata", false)]);
+    assert_eq!(flags, [("curl", true), ("libcurl4t64", true), ("openssl", true), ("tzdata", true)]);
     let curl = inventory.updates.first().ok_or("no update")?;
     assert_eq!(curl.origin.as_deref(), Some("noble-updates,noble-security"));
     assert_eq!(curl.advisory_id, None);

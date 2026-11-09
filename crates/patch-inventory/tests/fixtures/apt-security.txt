@@ -1,5 +1,5 @@
 Listing...
-curl/noble-updates,noble-security 8.5.0-2ubuntu10.6 amd64 [upgradable from: 8.5.0-2ubuntu10.5]
-libcurl4t64/noble-updates,noble-security 8.5.0-2ubuntu10.6 amd64 [upgradable from: 8.5.0-2ubuntu10.5]
-tzdata/noble-updates 2025b-0ubuntu0.24.04.1 all [upgradable from: 2024a-3ubuntu1.1]
-openssl/noble-updates,noble-security 3.0.13-0ubuntu3.5 amd64 [upgradable from: 3.0.13-0ubuntu3.4]
+curl/noble-updates,noble-security 8.5.0-2ubuntu10.16 amd64 [upgradable from: 8.5.0-2ubuntu10]
+libcurl4t64/noble-updates,noble-security 8.5.0-2ubuntu10.16 amd64 [upgradable from: 8.5.0-2ubuntu10]
+openssl/noble-updates,noble-security 3.0.13-0ubuntu3.16 amd64 [upgradable from: 3.0.13-0ubuntu3]
+tzdata/noble-updates,noble-security 2026e-0ubuntu0.24.04.1 all [upgradable from: 2024a-2ubuntu1]

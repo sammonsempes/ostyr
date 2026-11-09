@@ -19,9 +19,6 @@ const EMPTY: &[u8] = b"";
 const TINY_BYTES: usize = 4;
 
 
-const UNKNOWN_INDEX: usize = 4;
-
-
 const TZDATA_INDEX: usize = 3;
 
 
@@ -50,28 +47,41 @@ fn fixtures_are_merged() -> TestResult {
     assert_eq!(
         rows,
         [
-            ("kernel", "x86_64", "5.14.0-503.15.1.el9_5", true),
-            ("openssl", "x86_64", "1:3.2.2-6.el9_5.1", true),
-            ("openssl-libs", "x86_64", "1:3.2.2-6.el9_5.1", true),
-            ("tzdata", "noarch", "2025b-1.el9", false),
-            ("unknown-pkg", "noarch", "2.0-1.el9", true),
-            ("vim-minimal", "x86_64", "2:8.2.2637-21.el9", false),
+            ("curl", "x86_64", "7.76.1-40.el9_8.9", true),
+            ("libcurl", "x86_64", "7.76.1-40.el9_8.9", true),
+            ("sudo", "x86_64", "1.9.17p2-3.el9_8.3", true),
+            ("tzdata", "noarch", "2026f-1.el9_8", false),
+            ("vim-minimal", "x86_64", "2:8.2.2637-26.el9_8.23", true),
         ]
     );
-    let kernel = inventory.updates.first().ok_or("none")?;
-    assert_eq!(kernel.advisory_id.as_deref(), Some("RLSA-2026:1002"));
-    assert_eq!(kernel.severity.as_deref(), Some("moderate"));
-    assert_eq!(kernel.origin.as_deref(), Some("baseos"));
-    assert_eq!(kernel.installed_version, None);
+    let curl = inventory.updates.first().ok_or("none")?;
+    assert_eq!(curl.advisory_id.as_deref(), Some("RLSA-2026:1350"));
+    assert_eq!(curl.severity.as_deref(), Some("moderate"));
+    assert_eq!(curl.origin.as_deref(), Some("zzbase"));
+    assert_eq!(curl.installed_version, None);
     assert!(inventory
         .updates
         .iter()
         .all(|update| update.tenant == "tenant-a" && update.device_id == "device-1"));
-    let unknown = inventory.updates.get(UNKNOWN_INDEX).ok_or("none")?;
-    assert_eq!(unknown.severity, None);
-    assert_eq!(unknown.origin, None);
     let tzdata = inventory.updates.get(TZDATA_INDEX).ok_or("none")?;
-    assert_eq!(tzdata.advisory_id.as_deref(), Some("RLBA-2026:2001"));
+    assert_eq!(tzdata.advisory_id, None);
+    assert_eq!(tzdata.severity, None);
+    Ok(())
+}
+
+
+#[test]
+fn obsoleting_section_and_advisory_kinds_are_handled() -> TestResult {
+    let updateinfo = "RLSA-1 unknown/Sec. a-1.0-1.el9.noarch\nRLBA-2 bugfix b-1.0-1.el9.noarch\nRLEA-3 enhancement c-1.0-1.el9.noarch\n";
+    let check = "a.noarch 1.0-1.el9 baseos\nObsoleting Packages\nnewpkg.x86_64 1.0-1.el9 appstream\n    oldpkg.x86_64 0.9-1.el9 @baseos\n";
+    let inventory = parse_dnf(&device(), updateinfo.as_bytes(), check.as_bytes(), &limits())?;
+    let rows: Vec<(&str, bool, Option<&str>)> = inventory
+        .updates
+        .iter()
+        .map(|update| (update.package.as_str(), update.security, update.severity.as_deref()))
+        .collect();
+    assert_eq!(rows, [("a", true, None), ("b", false, None), ("c", false, None)]);
+    assert!(inventory.skipped.is_empty());
     Ok(())
 }
 
@@ -81,10 +91,6 @@ fn check_update_alone_has_no_advisory() -> TestResult {
     let inventory = parse_dnf(&device(), EMPTY, CHECK_UPDATE, &limits())?;
     assert_eq!(inventory.updates.len(), CHECK_UPDATE_COUNT);
     assert!(inventory.updates.iter().all(|update| !update.security && update.advisory_id.is_none()));
-    assert!(inventory
-        .updates
-        .iter()
-        .all(|update| update.package != "newpkg" && update.package != "oldpkg"));
     Ok(())
 }
 
