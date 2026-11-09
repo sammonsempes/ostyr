@@ -120,8 +120,24 @@ pub fn is_system_image(loaded: &LoadedPolicy, image: &ObservedImage) -> bool {
 }
 
 
+pub fn protected_image_reasons(loaded: &LoadedPolicy, image: &ObservedImage) -> Vec<Reason> {
+    image_path(image).map_or_else(Vec::new, |path| {
+        loaded
+            .protected
+            .iter()
+            .filter(|entry| covers(&entry.path, &path))
+            .map(|entry| Reason::ProtectedPath {
+                list: entry.list.to_owned(),
+                index: entry.index,
+            })
+            .collect()
+    })
+}
+
+
 pub fn image_reason(loaded: &LoadedPolicy, image: &ObservedImage) -> Vec<Reason> {
-    match sensor_position(loaded, image) {
+    let protected = protected_image_reasons(loaded, image);
+    let others = match sensor_position(loaded, image) {
         Some(index) => vec![Reason::ListedSecuritySensor { index }],
         None => {
             let name = image.name.clone();
@@ -134,7 +150,8 @@ pub fn image_reason(loaded: &LoadedPolicy, image: &ObservedImage) -> Vec<Reason>
             .flatten()
             .collect()
         }
-    }
+    };
+    [protected, others].concat()
 }
 
 
@@ -431,16 +448,31 @@ pub fn impact_reasons(impact: &Impact) -> Vec<Reason> {
 }
 
 
+pub fn without_repeated_protected(found: Vec<Reason>) -> Vec<Reason> {
+    let mut seen: Vec<Reason> = Vec::new();
+    found
+        .into_iter()
+        .filter(|reason| {
+            let fresh = !matches!(reason, Reason::ProtectedPath { .. }) || !seen.contains(reason);
+            seen.push(reason.clone());
+            fresh
+        })
+        .collect()
+}
+
+
 pub fn exclusion_reasons(loaded: &LoadedPolicy, exclusion: &Exclusion) -> Vec<Reason> {
-    [
-        selector_reasons(loaded, exclusion),
-        image_reasons(loaded, exclusion),
-        binding_reasons(exclusion),
-        evidence_reasons(loaded, exclusion),
-        narrowest_reasons(exclusion),
-        impact_reasons(&exclusion.impact),
-    ]
-    .concat()
+    without_repeated_protected(
+        [
+            selector_reasons(loaded, exclusion),
+            image_reasons(loaded, exclusion),
+            binding_reasons(exclusion),
+            evidence_reasons(loaded, exclusion),
+            narrowest_reasons(exclusion),
+            impact_reasons(&exclusion.impact),
+        ]
+        .concat(),
+    )
 }
 
 
