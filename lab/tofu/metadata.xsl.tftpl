@@ -9,6 +9,13 @@
   <xsl:template match="/domain/devices/disk[@device='disk']/driver/@type">
     <xsl:attribute name="type">qcow2</xsl:attribute>
   </xsl:template>
+%{ if tcg ~}
+  <xsl:template match="/domain/cpu">
+    <cpu mode="custom" match="exact" check="none">
+      <model fallback="forbid">Haswell-noTSX</model>
+    </cpu>
+  </xsl:template>
+%{ endif ~}
 %{ if secure_boot ~}
   <xsl:template match="/domain/devices/disk[@device='cdrom']/target">
     <target dev="sda" bus="sata"/>

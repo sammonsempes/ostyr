@@ -92,6 +92,6 @@ resource "libvirt_domain" "vm" {
   }
 
   xml {
-    xslt = templatefile("${path.module}/metadata.xsl.tftpl", { task_id = var.task_id, created_at = var.created_at, secure_boot = local.uefi[each.key] })
+    xslt = templatefile("${path.module}/metadata.xsl.tftpl", { task_id = var.task_id, created_at = var.created_at, secure_boot = local.uefi[each.key], tcg = var.domain_type == "qemu" })
   }
 }
