@@ -5,7 +5,9 @@ mod types;
 
 
 use core_audit::ecs::export;
-use core_audit::log::{append_declared, genesis_log};
+use core_audit::error::AuditError;
+use core_audit::log::{append_declared, genesis_log, MAX_KEY_BYTES, MAX_PARAMETERS};
+use core_audit::model::NewEntry;
 use core_audit::verify::verify;
 use core_redact::value::REDACTED;
 use sample::entry;
@@ -39,5 +41,36 @@ fn undeclared_keys_are_redacted_in_log_and_export() -> TestResult {
     assert_eq!(record.parameters.get("name").map(String::as_str), Some("visible"));
     assert!(text.contains("visible"));
     assert_eq!(verify(Cursor::new(bytes), None)?.head, record.hash);
+    Ok(())
+}
+
+
+const SHORT_KEY: usize = 4;
+
+
+fn with_parameters(count: usize, key_length: usize) -> Result<NewEntry, Box<dyn std::error::Error>> {
+    let mut new_entry = entry(0)?;
+    new_entry.parameters = (0..count).map(|index| (format!("{index:0>key_length$}"), "v".to_owned())).collect();
+    Ok(new_entry)
+}
+
+
+#[test]
+fn parameter_count_cap_holds_at_equality_and_refuses_one_over() -> TestResult {
+    let log = genesis_log(Vec::new());
+    append_declared(&log, with_parameters(MAX_PARAMETERS, SHORT_KEY)?, &[])?;
+    let refused = append_declared(&log, with_parameters(MAX_PARAMETERS + 1, SHORT_KEY)?, &[]);
+    assert!(matches!(refused, Err(AuditError::TooManyParameters { count, max }) if count == MAX_PARAMETERS + 1 && max == MAX_PARAMETERS));
+    Ok(())
+}
+
+
+#[test]
+fn key_length_cap_holds_at_equality_and_refuses_one_over() -> TestResult {
+    let log = genesis_log(Vec::new());
+    append_declared(&log, with_parameters(1, MAX_KEY_BYTES)?, &[])?;
+    let refused = append_declared(&log, with_parameters(1, MAX_KEY_BYTES + 1)?, &[]);
+    assert!(matches!(refused, Err(AuditError::KeyTooLong { length, max }) if length == MAX_KEY_BYTES + 1 && max == MAX_KEY_BYTES));
+    assert!(refused.is_err_and(|error| error.to_string().contains("128")));
     Ok(())
 }

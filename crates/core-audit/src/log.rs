@@ -132,8 +132,31 @@ pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<
 }
 
 
-/// Like `append`, but only the parameter keys in `declared` keep their value; every other value is stored as `[REDACTED]`.
+pub const MAX_PARAMETERS: usize = 64;
+
+
+pub const MAX_KEY_BYTES: usize = 128;
+
+
+/// Undeclared values become `[REDACTED]`; over `MAX_PARAMETERS` parameters or a key over `MAX_KEY_BYTES` is refused.
 pub fn append_declared<Output: Write>(log: &AuditLog<Output>, entry: NewEntry, declared: &[&str]) -> Result<Record, AuditError> {
+    if entry.parameters.len() > MAX_PARAMETERS {
+        Err(AuditError::TooManyParameters {
+            count: entry.parameters.len(),
+            max: MAX_PARAMETERS,
+        })
+    } else if let Some(key) = entry.parameters.keys().find(|key| key.len() > MAX_KEY_BYTES) {
+        Err(AuditError::KeyTooLong {
+            length: key.len(),
+            max: MAX_KEY_BYTES,
+        })
+    } else {
+        append_restricted(log, entry, declared)
+    }
+}
+
+
+fn append_restricted<Output: Write>(log: &AuditLog<Output>, entry: NewEntry, declared: &[&str]) -> Result<Record, AuditError> {
     let parameters = restrict_parameters(entry.parameters, declared);
     append(log, NewEntry { parameters, ..entry })
 }
