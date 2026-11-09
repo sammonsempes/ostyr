@@ -1,6 +1,6 @@
 use crate::support::{
     exclusion, hash, image, impact, loaded, probe, reasons_for, verdict_for, GOOD_PATH, GOOD_WINDOWS_PATH, HASH_PAIRS, MAX_LIFETIME, NEED_DAYS,
-    NEED_VERDICTS, TECHNIQUE, YEAR,
+    NEED_VERDICTS, OSTYR_AGENT_INDEX, OSTYR_SENSOR_INDEX, TECHNIQUE, YEAR,
 };
 use crate::types::TestResult;
 use policy_validator::model::{AsrChange, AsrState, Decision, Impact, PathForm, Proposal, Reason, Scope, SelectorKind, Severity};
@@ -184,16 +184,18 @@ fn the_agent_and_honeytoken_paths_are_protected() -> TestResult {
     assert_eq!(
         found,
         vec![Reason::ProtectedPath {
-            directory: r"C:\Program Files\Ostyr".to_owned()
+            list: "agent_paths".to_owned(),
+            index: 0
         }]
     );
     assert_eq!(
         probe(Scope::SingleEndpoint, SelectorKind::Path, "/opt/ostyr")?,
         vec![
             Reason::ProtectedPath {
-                directory: "/opt/ostyr".to_owned()
+                list: "agent_paths".to_owned(),
+                index: OSTYR_AGENT_INDEX
             },
-            Reason::SecuritySensor { name: "ostyr".to_owned() },
+            Reason::ListedSecuritySensor { index: OSTYR_SENSOR_INDEX },
             Reason::SecuritySensor { name: "ostyr".to_owned() }
         ]
     );
@@ -206,7 +208,8 @@ fn the_agent_and_honeytoken_paths_are_protected() -> TestResult {
     assert_eq!(
         validate(&custom, &proposal).reasons,
         vec![Reason::ProtectedPath {
-            directory: "/srv/secrets/passwords.xlsx".to_owned()
+            list: "honeytoken_paths".to_owned(),
+            index: 0
         }]
     );
     Ok(())

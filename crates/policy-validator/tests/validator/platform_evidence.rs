@@ -1,4 +1,4 @@
-use crate::support::{exclusion, hash, image, loaded, probe, reasons_for};
+use crate::support::{exclusion, hash, image, loaded, probe, reasons_for, OSQUERYD_SENSOR_INDEX, TETRAGON_SENSOR_INDEX};
 use crate::types::TestResult;
 use policy_validator::model::{Evidence, ObservedImage, PathForm, Proposal, Reason, Scope, SelectorKind};
 use policy_validator::rules::{validate, MAX_TECHNIQUES, MAX_TECHNIQUE_BYTES};
@@ -162,15 +162,25 @@ fn c2_finding_2_sensor_paths_are_protected_at_single_endpoint_scope() -> TestRes
 #[test]
 fn c2_finding_2_a_command_line_naming_a_sensor_or_a_service_tool_is_refused() -> TestResult {
     for (value, expected) in [
-        ("/srv/app/bin/tool tetragon", Reason::SecuritySensor { name: "tetragon".to_owned() }),
-        ("/srv/app/bin/tool Sysmon64.exe", Reason::SecuritySensor { name: "sysmon".to_owned() }),
+        (
+            "/srv/app/bin/tool tetragon",
+            Reason::ListedSecuritySensor {
+                index: TETRAGON_SENSOR_INDEX,
+            },
+        ),
+        ("/srv/app/bin/tool Sysmon64.exe", Reason::ListedSecuritySensor { index: 0 }),
         (
             "/usr/bin/systemctl stop tetragon",
             Reason::ServiceControlInCommandLine {
                 name: "systemctl".to_owned(),
             },
         ),
-        ("/usr/bin/systemctl stop tetragon", Reason::SecuritySensor { name: "tetragon".to_owned() }),
+        (
+            "/usr/bin/systemctl stop tetragon",
+            Reason::ListedSecuritySensor {
+                index: TETRAGON_SENSOR_INDEX,
+            },
+        ),
         (
             r"C:\Windows\System32\sc.exe stop Sysmon64",
             Reason::ServiceControlInCommandLine { name: "sc".to_owned() },
@@ -187,7 +197,12 @@ fn c2_finding_2_a_command_line_naming_a_sensor_or_a_service_tool_is_refused() ->
 fn c2_finding_2_a_sensor_file_name_as_path_or_process_is_refused() -> TestResult {
     for kind in [SelectorKind::Path, SelectorKind::ProcessName] {
         let found = probe(Scope::SingleEndpoint, kind, "/srv/app/bin/osqueryd")?;
-        assert!(found.contains(&Reason::SecuritySensor { name: "osqueryd".to_owned() }), "{found:?}");
+        assert!(
+            found.contains(&Reason::ListedSecuritySensor {
+                index: OSQUERYD_SENSOR_INDEX
+            }),
+            "{found:?}"
+        );
     }
     Ok(())
 }
