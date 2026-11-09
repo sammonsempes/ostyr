@@ -1,4 +1,10 @@
+use crate::types::{NowFn, SharedSettings};
+use arc_swap::ArcSwapOption;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -152,4 +158,122 @@ pub struct RenderedPage {
     pub json: String,
     pub html: String,
     pub dropped: Dropped,
+}
+
+
+pub const SETTINGS_SECTION: &str = "status_page";
+
+
+pub const DEFAULT_RATE_PER_SECOND: u32 = 5;
+
+
+pub const DEFAULT_BURST: u32 = 20;
+
+
+pub const DEFAULT_MAX_SOURCES: usize = 10_000;
+
+
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+
+
+pub const DEFAULT_HEADER_READ_TIMEOUT_SECONDS: u64 = 10;
+
+
+pub const DEFAULT_CONNECTION_TIMEOUT_SECONDS: u64 = 30;
+
+
+pub const DEFAULT_MAX_HEADERS: usize = 32;
+
+
+pub const MIN_HEADER_BYTES: usize = 8192;
+
+
+pub const DEFAULT_MAX_HEADER_BYTES: usize = 16_384;
+
+
+pub const DEFAULT_CACHE_MAX_AGE_SECONDS: u64 = 15;
+
+
+pub const MAX_SOURCES_LIMIT: usize = 1_000_000;
+
+
+pub const MAX_CONNECTIONS_LIMIT: usize = 65_536;
+
+
+/// The serving settings file; every bound is nonzero, applied from the next request (the connection bounds from the next connection).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PageSettings {
+    pub rate_per_second: u32,
+    pub burst: u32,
+    pub max_sources: usize,
+    pub max_connections: usize,
+    pub header_read_timeout_seconds: u64,
+    pub connection_timeout_seconds: u64,
+    pub max_headers: usize,
+    pub max_header_bytes: usize,
+    pub cache_max_age_seconds: u64,
+}
+
+
+impl Default for PageSettings {
+    fn default() -> Self {
+        Self {
+            rate_per_second: DEFAULT_RATE_PER_SECOND,
+            burst: DEFAULT_BURST,
+            max_sources: DEFAULT_MAX_SOURCES,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            header_read_timeout_seconds: DEFAULT_HEADER_READ_TIMEOUT_SECONDS,
+            connection_timeout_seconds: DEFAULT_CONNECTION_TIMEOUT_SECONDS,
+            max_headers: DEFAULT_MAX_HEADERS,
+            max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
+            cache_max_age_seconds: DEFAULT_CACHE_MAX_AGE_SECONDS,
+        }
+    }
+}
+
+
+/// What the readers are served: one rendered page, swapped whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub tenant: String,
+    pub html: String,
+    pub json: String,
+    pub etag: String,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bucket {
+    pub tokens_milli: u64,
+    pub last_millis: u64,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Allowed,
+    Limited { retry_after_seconds: u64 },
+}
+
+
+/// The peer of a connection, attached to each of its requests by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerIp(pub IpAddr);
+
+
+/// Everything the handlers share; the tenant is the one of the page config.
+pub struct PageState {
+    pub tenant: String,
+    pub snapshot: ArcSwapOption<Snapshot>,
+    pub settings: SharedSettings,
+    pub buckets: Mutex<LruCache<IpAddr, Bucket>>,
+    pub now: Box<NowFn>,
+    pub active: Arc<AtomicUsize>,
+}
+
+
+/// Counts one open connection; the count goes back down when it is dropped.
+pub struct ConnectionGuard {
+    pub active: Arc<AtomicUsize>,
 }
