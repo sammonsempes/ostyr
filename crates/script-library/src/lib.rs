@@ -1,0 +1,12 @@
+//! Script manifests with typed parameters and the argument vector of a launch (spec section 21).
+
+pub mod argv;
+pub mod check;
+pub mod digest;
+pub mod error;
+pub mod load;
+pub mod model;
+pub mod params;
+pub mod path;
+pub mod pattern;
+pub mod types;
