@@ -5,6 +5,7 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+mkdir -p "$REPO_DIR/target"
 work="$(mktemp -d "$REPO_DIR/target/egress-profile.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 failures=0

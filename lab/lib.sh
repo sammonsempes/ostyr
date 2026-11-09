@@ -214,7 +214,8 @@ FilterDefaultDeny Yes
 DisableViaHeader Yes
 CONF
     systemd-run --quiet --unit="${unit%.service}" \
-        -p ProtectSystem=strict -p ProtectHome=read-only -p "ReadWritePaths=$dir" -p PrivateTmp=yes -p NoNewPrivileges=yes \
+        -p ProtectSystem=strict -p ProtectHome=tmpfs -p "BindPaths=$dir" -p "ReadWritePaths=$dir" -p PrivateDevices=yes \
+        -p SystemCallFilter=@system-service -p PrivateTmp=yes -p NoNewPrivileges=yes \
         -p ProtectKernelTunables=yes -p ProtectControlGroups=yes -p RestrictAddressFamilies="AF_INET AF_UNIX" \
         -p CapabilityBoundingSet="CAP_SETUID CAP_SETGID" -p "LimitFSIZE=$PROXY_LOG_MAX_BYTES" \
         ostyr-tinyproxy -d -c "$dir/tinyproxy.conf"
