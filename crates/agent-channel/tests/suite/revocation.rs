@@ -1,9 +1,11 @@
 use crate::harness::{
-    attempt, bounded, chained_agent, client_paths, finish, make_platform, server_paths, start_server_with, start_single, start_single_with,
-    stop_server,
+    attempt, bounded, chained_agent, client_paths, empty_revocation, finish, make_platform, server_paths, start_server_with, start_single,
+    start_single_state, start_single_with, stop_server,
 };
 use crate::pki::{agent_spec, make_intermediate, AGENT_URI, SERVER_NAME};
 use crate::revocation_support::{agent_serial, open_revocation, recorded_entries, write_revocations};
+use crate::services::settings;
+use crate::state::{envelope_source, make_state, new_stored, recording_sink};
 use crate::types::TestResult;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::{ChannelError, IdentityError, RevocationError};
@@ -22,6 +24,9 @@ const SERIAL_COUNT: usize = 2;
 
 
 const REFUSED_RELOADS: usize = 2;
+
+
+const PATIENT_SECONDS: u64 = 3600;
 
 
 #[test]
@@ -153,7 +158,10 @@ async fn dropping_the_revocation_engine_closes_connections() -> TestResult {
     let dir = tempdir()?;
     let platform = make_platform()?;
     let paths = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
-    let server = start_single(&server_paths(dir.path(), &platform)?).await?;
+    let patient = settings(|base| base.first_request_timeout_seconds = PATIENT_SECONDS);
+    let state = make_state(patient, recording_sink(new_stored()), envelope_source(Vec::new()));
+    let server_files = server_paths(dir.path(), &platform)?;
+    let server = start_single_state(&server_files, empty_revocation(&server_files)?, state).await?;
     let channel = connect_channel(server.address, client_config(&paths)?, SERVER_NAME).await?;
     bounded(heartbeat(channel.clone(), "test")).await??;
     let handle = server.handle;
