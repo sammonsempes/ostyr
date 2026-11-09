@@ -14,13 +14,14 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Extension;
 use core_audit::error::AuditError;
-use core_audit::log::append;
+use core_audit::log::append_declared;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_auth::error::AuthError;
 use core_auth::random::random_array;
 use core_auth::service::{authorize, ANONYMOUS_ACTOR};
 use core_auth::session::{revoke_session, validate_session};
 use core_auth::types::{RandomFn, RoleCatalog};
+use core_config::reload::bounded_value;
 use data_encoding::HEXLOWER;
 use http_body_util::LengthLimitError;
 use secrecy::SecretString;
@@ -53,6 +54,9 @@ pub const BEARER_PREFIX: &[u8] = b"Bearer ";
 
 
 pub const ACTION_REQUEST: &str = "api.request";
+
+
+pub const REQUEST_DECLARED_KEYS: [&str; 2] = ["source", "status"];
 
 
 pub const LOG_TARGET: &str = "core_api::request";
@@ -302,7 +306,7 @@ pub fn exchange_outcome(status: StatusCode) -> Outcome {
 pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditError> {
     if needs_audit(exchange) {
         let identity = app.identity.load();
-        append(
+        append_declared(
             &app.audit,
             NewEntry {
                 timestamp: (app.clock)(),
@@ -318,12 +322,13 @@ pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditEr
                 request_id: exchange.request_id.clone(),
                 justification: None,
                 parameters: [
-                    ("source".to_owned(), exchange.source.clone()),
+                    ("source".to_owned(), bounded_value(&exchange.source)),
                     ("status".to_owned(), exchange.status.as_u16().to_string()),
                 ]
                 .into_iter()
                 .collect(),
             },
+            &REQUEST_DECLARED_KEYS,
         )
         .map(|_| ())
     } else {

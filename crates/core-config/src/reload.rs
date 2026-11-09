@@ -17,6 +17,37 @@ pub const RELOAD_ACTION: &str = "config.reload";
 pub const PARAMETER_COUNT: usize = 2;
 
 
+pub const MAX_VALUE_CHARS: usize = 512;
+
+
+pub const MAX_DIFF_ENTRIES: usize = 64;
+
+
+pub const MAX_DIFF_CHARS: usize = 8192;
+
+
+pub fn bounded_value(value: &str) -> String {
+    value.chars().take(MAX_VALUE_CHARS).collect()
+}
+
+
+pub fn bounded_diff(value: &str) -> String {
+    value.chars().take(MAX_DIFF_CHARS).collect()
+}
+
+
+pub fn bounded_parameter(key: &str, value: &str) -> String {
+    if key == "diff" {
+        bounded_diff(value)
+    } else {
+        bounded_value(value)
+    }
+}
+
+
+pub const RELOAD_DECLARED_KEYS: [&str; 3] = ["result", "diff", "reason"];
+
+
 /// A module's hook per configuration section: `validate` may refuse, `apply` runs after the swap.
 pub struct Subscriber<Config> {
     pub section: String,
@@ -128,13 +159,16 @@ pub fn reload_entry(context: &ReloadContext, outcome: Outcome, parameters: [(&st
         outcome,
         request_id: context.request_id.clone(),
         justification: None,
-        parameters: parameters.into_iter().map(|(key, value)| (key.to_owned(), value)).collect(),
+        parameters: parameters
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), bounded_parameter(key, &value)))
+            .collect(),
     }
 }
 
 
 pub fn diff_text(changes: &[Change]) -> String {
-    changes.iter().map(|change| change.diff.as_str()).collect()
+    changes.iter().take(MAX_DIFF_ENTRIES).map(|change| change.diff.as_str()).collect()
 }
 
 

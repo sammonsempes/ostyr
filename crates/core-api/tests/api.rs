@@ -16,9 +16,9 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, StatusCode};
 use core_api::example::{example_document, PING_REPLY};
 use core_api::failure::{auth_failure, error_parts};
-use core_api::middleware::{admit_source, count_request, rate_key, SECURITY_HEADERS};
+use core_api::middleware::{admit_source, audit_exchange, count_request, rate_key, SECURITY_HEADERS};
 use core_api::model::Window;
-use core_api::model::{ApiError, ApiState};
+use core_api::model::{ApiError, ApiState, Exchange};
 use core_api::routes::{admit_login, commit_login, core_access, BODY_LIMIT_BYTES};
 use core_api::state::{prune_attempts, MAX_CONCURRENT_HASHES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_audit::log::{new_log, sync_file};
@@ -31,6 +31,7 @@ use core_auth::random::os_random;
 use core_auth::service::LoginRequest;
 use core_auth::session::{create_session, mark_sessions_revoked};
 use core_auth::store::{load_store_file, update_store_file};
+use core_config::reload::MAX_VALUE_CHARS;
 use fixture::{fixture, fixture_with, set_mode, Fixture, PASSWORD, READER};
 use http::{audit_lines, body_json, call, client, login_body, login_token, request, send, send_from};
 use limits::with_limits;
@@ -479,6 +480,9 @@ async fn audit_records_changes_sensitive_reads_and_denials() -> TestResult {
     assert_eq!(change_record.get("request_id"), Some(&json!("req-change-1")));
     assert_eq!(change_record.get("tenant"), Some(&json!("acme")));
     assert_eq!(change_record.get("module"), Some(&json!("example")));
+    let declared = change_record.get("parameters").ok_or("no parameters")?;
+    assert_eq!(declared.get("status"), Some(&json!("200")));
+    assert_ne!(declared.get("source"), Some(&json!("[REDACTED]")));
     let text = fs::read_to_string(&fx.config.audit_log)?;
     assert!(!text.contains(PASSWORD));
     assert!(!text.contains(&token));
@@ -1492,5 +1496,35 @@ async fn a_revocation_marker_in_the_file_ends_the_api_session_at_the_next_reques
     assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
     let fresh = login_token(&fx.router).await?;
     assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&fresh)).await?.status(), StatusCode::OK);
+    Ok(())
+}
+
+
+const OVERSIZE: usize = 100;
+
+
+#[tokio::test]
+async fn an_oversized_request_source_is_cut_before_it_is_audited() -> TestResult {
+    let fx = fixture()?;
+    let exchange = Exchange {
+        request_id: "req-long".to_owned(),
+        actor: READER.to_owned(),
+        route: "POST /example/change".to_owned(),
+        state_changing: true,
+        sensitive: false,
+        source: "s".repeat(MAX_VALUE_CHARS + OVERSIZE),
+        status: StatusCode::OK,
+    };
+    audit_exchange(&fx.state, &exchange)?;
+    let lines = audit_lines(&fx)?;
+    let record = lines
+        .iter()
+        .find(|line| line.get("request_id") == Some(&json!("req-long")))
+        .ok_or("no record")?;
+    let source = record
+        .get("parameters")
+        .and_then(|parameters| parameters.get("source"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(source.map(str::len), Some(MAX_VALUE_CHARS));
     Ok(())
 }

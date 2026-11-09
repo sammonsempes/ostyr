@@ -1,5 +1,5 @@
 use crate::state::previous_key_path;
-use core_audit::log::{append, check_private, owner_only, AuditLog};
+use core_audit::log::{append_declared, check_private, owner_only, AuditLog};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::{KEY_READ_LIMIT, KEY_READ_LIMIT_BYTES};
 use core_auth::error::AuthError;
@@ -7,7 +7,7 @@ use core_auth::random::random_array;
 use core_auth::secretbox::KEY_BYTES;
 use core_auth::store::{parent_directory, sync_directory, TEMP_SUFFIX_BYTES};
 use core_auth::types::{RandomFn, StoreKey};
-use core_config::reload::{reload_entry, ReloadContext};
+use core_config::reload::{reload_entry, ReloadContext, RELOAD_DECLARED_KEYS};
 use data_encoding::HEXLOWER;
 use secrecy::{ExposeSecret, SecretSlice};
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -130,7 +130,7 @@ pub fn remove_synced(path: &Path) -> io::Result<()> {
 
 /// Appends one entry; a failing audit is only logged, the operation it records already happened.
 pub fn record_entry<Output: Write>(audit: &AuditLog<Output>, entry: NewEntry) {
-    append(audit, entry)
+    append_declared(audit, entry, &RELOAD_DECLARED_KEYS)
         .map(|_| ())
         .unwrap_or_else(|error| tracing::error!(%error, "cannot record the key rotation"));
 }

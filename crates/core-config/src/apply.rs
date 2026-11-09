@@ -1,8 +1,12 @@
 use crate::error::ApplyError;
 use crate::plan::{action_name, plan, Change};
+use crate::reload::bounded_diff;
 use crate::types::{ApplierFn, AuditFn, ConfigState, Plan, ReaderFn};
 use core_audit::model::{Actor, NewEntry, Outcome};
 use time::OffsetDateTime;
+
+
+pub const APPLY_DECLARED_KEYS: [&str; 1] = ["diff"];
 
 
 #[derive(Debug, Clone)]
@@ -32,7 +36,7 @@ pub fn audit_entry(context: &ApplyContext, change: &Change) -> NewEntry {
         outcome: Outcome::Success,
         request_id: context.request_id.clone(),
         justification: Some(context.justification.clone()),
-        parameters: [("diff".to_owned(), change.diff.clone())].into(),
+        parameters: [("diff".to_owned(), bounded_diff(&change.diff))].into(),
     }
 }
 
