@@ -34,6 +34,7 @@ ureq = "2.12"
 utoipa = { version = "5", features = ["axum_extras"] }
 
 [target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
 signal-hook = "0.4.6"
 
 [dev-dependencies]

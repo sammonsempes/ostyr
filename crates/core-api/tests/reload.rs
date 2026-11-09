@@ -14,11 +14,17 @@ use core_api::config::{
 use core_api::error::StartupError;
 use core_api::logging::reloadable_dispatch;
 use core_api::middleware::admit_source;
-use core_api::model::{ApiConfig, Bound, ListenerSetup, OidcFiles, PreparedAudit, Rewatch, StateInputs, Watching};
+use core_api::model::{ApiConfig, ApiState, Bound, ListenerSetup, OidcFiles, PreparedAudit, Rewatch, StateInputs, Watching};
 use core_api::model::{ApiError, ApiSettings};
 use core_api::oidc::{fingerprint_salt, oidc_fingerprint, settle, store_pending, take_login};
+#[cfg(unix)]
+use core_api::previous::{check_previous_slot, read_previous_key};
+use core_api::previous::{
+    remove_synced, retire_previous, retire_previous_with, write_previous_key, PREVIOUS_KEY_REMOVAL_FAILED, PREVIOUS_KEY_REMOVED, PREVIOUS_KEY_SAVED,
+    ROTATION_RESUMED,
+};
 use core_api::reload::{
-    accept, build_settings, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
+    accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
     reseal_accounts, rewatch, settings_state, switch_audit, switch_identity, switch_key, switch_store, watched_files, FINGERPRINT_COMPROMISED,
     FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
 };
@@ -28,7 +34,8 @@ use core_api::server::{
     wait_finished,
 };
 use core_api::state::{
-    build_state, lock_auth, read_compromised_digested, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS,
+    build_state, lock_auth, previous_key_path, read_compromised_digested, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS,
+    RATE_WINDOW_SECONDS,
 };
 use core_api::types::{LogLevelHandle, SharedListener, SharedState};
 use core_audit::log::LogState;
@@ -58,6 +65,8 @@ use std::fs;
 use std::future::Future;
 use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -133,6 +142,10 @@ const WORLD_READABLE: u32 = 0o644;
 
 
 const OWNER_ONLY: u32 = 0o600;
+
+
+#[cfg(unix)]
+const PERMISSION_BITS: u32 = 0o777;
 
 
 const OIDC_TEXT: &str = "issuer: https://idp.example\nclient_id: test-client\nclient_secret: vault://kv/oidc\nredirect_url: https://ostyr.example/auth/oidc/callback\nrole_map:\n  soc-analysts: [analyst]\n";
@@ -1433,6 +1446,13 @@ const NEW_KEY_FILL: u8 = 9;
 const THIRD_KEY_FILL: u8 = 11;
 
 
+#[cfg(unix)]
+const FOREIGN_UID: u32 = 12345;
+
+
+const FIXED_RANDOM_BYTE: u8 = 0xab;
+
+
 const SHORT_KEY_BYTES: usize = 16;
 
 
@@ -1530,12 +1550,13 @@ async fn body_json(response: axum::http::Response<Body>) -> Result<serde_json::V
 
 
 async fn login(running: &Live, user: &str, totp: Option<String>) -> Result<(StatusCode, serde_json::Value), TestError> {
+    login_router(&running.setup.router, user, totp).await
+}
+
+
+async fn login_router(router: &axum::Router, user: &str, totp: Option<String>) -> Result<(StatusCode, serde_json::Value), TestError> {
     let body = serde_json::json!({ "username": user, "password": fixture::PASSWORD, "totp_code": totp }).to_string();
-    let response = send(
-        &running.setup.router,
-        Request::builder().method("POST").uri("/auth/login").body(Body::from(body))?,
-    )
-    .await?;
+    let response = send(router, Request::builder().method("POST").uri("/auth/login").body(Body::from(body))?).await?;
     let status = response.status();
     Ok((status, body_json(response).await?))
 }
@@ -2167,5 +2188,283 @@ fn a_login_without_a_recorded_generation_is_refused_at_settle() -> TestResult {
     let (_, started) = take_login(&running.state, &runtime, "test", &callback_for("bare")).map_err(|_| "login not taken")?;
     let refused = settle(&running.state, &runtime, "test", &bare_identity(), &callback_for("bare"), started);
     assert!(matches!(refused, Err(ApiError::InvalidCredentials)));
+    Ok(())
+}
+
+
+fn previous_of(running: &Live) -> PathBuf {
+    previous_key_path(&running.dir.path().join("store.key"))
+}
+
+
+fn restarted(running: &Live) -> Result<ApiState, StartupError> {
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let inputs = StateInputs {
+        key: settings.key.clone(),
+        compromised: settings.compromised.clone(),
+        oidc: settings.oidc.clone(),
+    };
+    build_state(&settings.config, &inputs, extra_access(), Vec::new())
+}
+
+
+fn audit_text(running: &Live) -> Result<Vec<u8>, TestError> {
+    Ok(fs::read(running.dir.path().join("audit.log"))?)
+}
+
+
+#[cfg(unix)]
+fn assert_private(path: &Path) -> TestResult {
+    assert_eq!(fs::metadata(path)?.permissions().mode() & PERMISSION_BITS, OWNER_ONLY);
+    Ok(())
+}
+
+
+#[cfg(not(unix))]
+fn assert_private(_path: &Path) -> TestResult {
+    Ok(())
+}
+
+
+fn holds_key(bytes: &[u8], fill: u8) -> bool {
+    bytes.windows(fixture::KEY_BYTES).any(|window| window.iter().all(|byte| *byte == fill))
+}
+
+
+fn fail_rotation_in_place(running: &Live) -> TestResult {
+    seed(running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    private_file(&running.dir.path().join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    let lock = block_store_lock(running)?;
+    let failed = reload(&running.engine);
+    unblock_store_lock(&lock)?;
+    assert!(matches!(failed, ReloadOutcome::Applied { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_rotation_keeps_the_previous_key_and_a_restart_finishes_it() -> TestResult {
+    let running = live("")?;
+    fail_rotation_in_place(&running)?;
+    let previous = previous_of(&running);
+    assert_eq!(fs::read(&previous)?, vec![OLD_KEY_FILL; fixture::KEY_BYTES]);
+    assert_private(&previous)?;
+    assert_eq!(running.state.key.load().expose_secret(), store_key(OLD_KEY_FILL).expose_secret());
+    let state = Arc::new(restarted(&running)?);
+    assert!(!previous.exists());
+    let (accounts, _) = load_store_file(&running.state.store_path.load())?;
+    let stored = &accounts
+        .get(TOTP_USER)
+        .and_then(|account| account.totp.as_ref())
+        .ok_or("no totp")?
+        .encrypted_secret;
+    assert_eq!(
+        open_secret(&store_key(NEW_KEY_FILL), TOTP_USER, stored)?,
+        vec![TOTP_SECRET_FILL; TOTP_SECRET_BYTES]
+    );
+    let router = build_router(state, extra_router());
+    let (status, _) = running._runtime.block_on(login_router(&router, TOTP_USER, Some(current_totp_code()?)))?;
+    assert_eq!(status, StatusCode::OK);
+    let audit = audit_text(&running)?;
+    let text = String::from_utf8(audit.clone())?;
+    assert!(text.contains(PREVIOUS_KEY_SAVED) && text.contains(ROTATION_RESUMED) && text.contains(PREVIOUS_KEY_REMOVED));
+    assert!(!holds_key(&audit, OLD_KEY_FILL) && !holds_key(&audit, NEW_KEY_FILL));
+    Ok(())
+}
+
+
+#[test]
+fn a_successful_rotation_saves_then_removes_the_previous_key_and_audits_both() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    private_file(&running.dir.path().join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert!(!previous_of(&running).exists());
+    let text = String::from_utf8(audit_text(&running)?)?;
+    assert!(text.contains(PREVIOUS_KEY_SAVED) && text.contains(PREVIOUS_KEY_REMOVED));
+    assert!(!holds_key(text.as_bytes(), OLD_KEY_FILL) && !holds_key(text.as_bytes(), NEW_KEY_FILL));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_or_foreign_previous_key_is_refused_for_writing_and_for_reading() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    let directory = running.dir.path();
+    let decoy = directory.join("decoy.key");
+    private_file(&decoy, &[OLD_KEY_FILL; fixture::KEY_BYTES])?;
+    let previous = previous_of(&running);
+    std::os::unix::fs::symlink(&decoy, &previous)?;
+    private_file(&directory.join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(OLD_KEY_FILL).expose_secret());
+    assert!(fs::symlink_metadata(&previous)?.file_type().is_symlink());
+    assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
+    fs::remove_file(&previous)?;
+    private_file(&previous, &[OLD_KEY_FILL; fixture::KEY_BYTES])?;
+    std::os::unix::fs::chown(&previous, Some(FOREIGN_UID), None)?;
+    assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
+    assert!(write_previous_key(&directory.join("store.key"), &store_key(OLD_KEY_FILL), os_random).is_err());
+    assert_eq!(std::os::unix::fs::MetadataExt::uid(&fs::metadata(&previous)?), FOREIGN_UID);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_previous_key_that_is_loose_short_or_a_directory_is_refused() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    private_file(&running.dir.path().join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    let previous = previous_of(&running);
+    private_file(&previous, &[OLD_KEY_FILL; fixture::KEY_BYTES])?;
+    set_mode(&previous, WORLD_READABLE)?;
+    assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
+    private_file(&previous, &[OLD_KEY_FILL; SHORT_KEY_BYTES])?;
+    assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
+    fs::remove_file(&previous)?;
+    fs::create_dir(&previous)?;
+    assert!(matches!(restarted(&running), Err(StartupError::PreviousKey { .. })));
+    assert!(write_previous_key(&running.dir.path().join("store.key"), &store_key(OLD_KEY_FILL), os_random).is_err());
+    let blocked = running.dir.path().join("store.key");
+    assert!(check_previous_slot(&blocked.join("below")).is_err());
+    assert!(read_previous_key(&blocked.join("below")).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_store_that_neither_key_opens_stays_refused_and_untouched() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(THIRD_KEY_FILL)?))?])?;
+    private_file(&running.dir.path().join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    private_file(&previous_of(&running), &[OLD_KEY_FILL; fixture::KEY_BYTES])?;
+    let stored = fs::read(running.dir.path().join("accounts.json"))?;
+    assert!(matches!(restarted(&running), Err(StartupError::StoreKeyMismatch { .. })));
+    assert_eq!(fs::read(running.dir.path().join("accounts.json"))?, stored);
+    assert!(previous_of(&running).exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_store_sealed_under_the_new_key_while_the_live_key_is_old_is_adopted() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    private_file(&running.dir.path().join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    let prepared = Arc::new(Mutex::new(None));
+    prepare_key(&running.state, &prepared, &settings).map_err(|error| error.to_string())?;
+    update_store_file(&running.state.store_path.load(), os_random, |accounts, _| {
+        reseal_accounts(accounts, &store_key(OLD_KEY_FILL), &store_key(NEW_KEY_FILL), os_random)
+    })?
+    .saved?;
+    switch_key(&running.state, &test_context(), &prepared, &settings);
+    assert_eq!(running.state.key.load().expose_secret(), store_key(NEW_KEY_FILL).expose_secret());
+    assert!(!previous_of(&running).exists());
+    let again = Arc::new(Mutex::new(None));
+    prepare_key(&running.state, &again, &settings).map_err(|error| error.to_string())?;
+    assert!(again.lock().map_err(|_| "poisoned")?.is_none());
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_that_already_finds_the_store_sealed_under_the_new_key_is_accepted() -> TestResult {
+    let running = live("")?;
+    seed(&running, vec![password_account(TOTP_USER, Some(totp_enrolment(OLD_KEY_FILL)?))?])?;
+    update_store_file(&running.state.store_path.load(), os_random, |accounts, _| {
+        reseal_accounts(accounts, &store_key(OLD_KEY_FILL), &store_key(NEW_KEY_FILL), os_random)
+    })?
+    .saved?;
+    private_file(&running.dir.path().join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.key.load().expose_secret(), store_key(NEW_KEY_FILL).expose_secret());
+    let (status, _) = running._runtime.block_on(login(&running, TOTP_USER, Some(current_totp_code()?)))?;
+    assert_eq!(status, StatusCode::OK);
+    Ok(())
+}
+
+
+fn write_moved_store(directory: &Path, fill: u8) -> TestResult {
+    let mut accounts = AccountMap::new();
+    accounts.insert(TOTP_USER.to_owned(), password_account(TOTP_USER, Some(totp_enrolment(fill)?))?);
+    let path = directory.join("moved.json");
+    save_store_file(&path, &accounts, &CredentialMap::new(), os_random)?;
+    set_mode(&path, OWNER_ONLY)
+}
+
+
+#[test]
+fn a_moved_store_must_open_under_the_live_or_the_new_key() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    write_moved_store(directory, THIRD_KEY_FILL)?;
+    fs::write(&running.module_file, plain.replace("accounts.json", "moved.json"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("does not decrypt")));
+    write_moved_store(directory, OLD_KEY_FILL)?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn a_moved_store_sealed_under_the_new_key_is_accepted_with_the_new_key() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    write_moved_store(directory, NEW_KEY_FILL)?;
+    fs::write(&running.module_file, plain.replace("accounts.json", "moved.json"))?;
+    private_file(&directory.join("store.key"), &[NEW_KEY_FILL; fixture::KEY_BYTES])?;
+    let settings = build_settings(load_module(&running.module_file)?)?;
+    assert!(check_store(&running.state, &settings).is_ok());
+    Ok(())
+}
+
+
+fn failing_remove(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("injected"))
+}
+
+
+fn fixed_random(buffer: &mut [u8]) -> Result<(), getrandom::Error> {
+    buffer.fill(FIXED_RANDOM_BYTE);
+    Ok(())
+}
+
+
+#[test]
+fn a_previous_key_that_cannot_be_removed_is_logged_and_audited() -> TestResult {
+    let running = live("")?;
+    let key_file = running.dir.path().join("store.key");
+    retire_previous_with(&running.state.audit, &test_context(), &key_file, failing_remove);
+    let text = String::from_utf8(audit_text(&running)?)?;
+    assert!(text.contains(PREVIOUS_KEY_REMOVAL_FAILED) && text.contains("injected"));
+    assert!(remove_synced(&previous_of(&running)).is_err());
+    retire_previous(&running.state.audit, &test_context(), &key_file);
+    assert_eq!(
+        String::from_utf8(audit_text(&running)?)?.matches(PREVIOUS_KEY_REMOVAL_FAILED).count(),
+        TWO_RECORDS
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_temporary_write_is_cleaned_up_or_logged_and_a_failing_random_is_refused() -> TestResult {
+    let running = live("")?;
+    let key_file = running.dir.path().join("store.key");
+    let temporary = running.dir.path().join("store.key.previous.abababababababab.tmp");
+    fs::write(&temporary, b"stale")?;
+    assert!(write_previous_key(&key_file, &store_key(OLD_KEY_FILL), fixed_random).is_err());
+    assert!(!temporary.exists());
+    fs::create_dir(&temporary)?;
+    assert!(write_previous_key(&key_file, &store_key(OLD_KEY_FILL), fixed_random).is_err());
+    assert!(temporary.is_dir());
+    assert!(write_previous_key(&key_file, &store_key(OLD_KEY_FILL), failing_random).is_err());
+    assert!(!previous_of(&running).exists());
     Ok(())
 }
