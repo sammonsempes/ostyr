@@ -23,7 +23,7 @@ use siem_ingest::nats::{
 use siem_ingest::settings::{open_settings, IngestSettings};
 use std::error::Error;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -634,5 +634,61 @@ fn releasing_a_session_logs_a_failing_nak_and_skips_a_dropped_one() -> Result<()
     rig.link.runtime.block_on(release_held(session));
     assert!(lock(&rig.stub.hub).acks.is_empty());
     drop(real);
+    Ok(())
+}
+
+
+#[derive(Clone)]
+pub struct Capture(pub Arc<Mutex<Vec<u8>>>);
+
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+fn trace_capture() -> Result<Arc<Mutex<Vec<u8>>>, Box<dyn Error + Send + Sync>> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .try_init()
+        .map_err(|error| error.to_string())?;
+    Ok(captured)
+}
+
+
+const TRACE_PASSWORD: &str = "TRACEPW-9f3a7c1d";
+
+
+#[test]
+fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let captured = trace_capture()?;
+    let stub = start_stub(None, |state| {
+        state.nonce = true;
+        state.queue.push_back(queued("events.tenant-a", "one"));
+    })?;
+    let dir = tempdir()?;
+    let password_path = dir.path().join("nats.password");
+    fs::write(&password_path, format!("{TRACE_PASSWORD}\n"))?;
+    let extra = format!("nats_user: ops\nnats_password_file: \"{}\"\n", password_path.display());
+    let engine = engine_for(&dir, &yaml(stub.port, NORMAL_MS, &extra))?;
+    let link = link_for(&engine)?;
+    assert_eq!(fetch_batch(&link, FETCH_MAX)?.len(), 1);
+    let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    assert!(!logs.is_empty());
+    assert!(!logs.contains(TRACE_PASSWORD));
+    assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
     Ok(())
 }
