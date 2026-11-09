@@ -1,4 +1,4 @@
-use crate::error::CorrelationError;
+use crate::error::{redacted, CorrelationError};
 use crate::ruleset::{fingerprint, parse_ruleset, RuleSet};
 use crate::types::RuleTexts;
 use core_config::error::ConfigError;
@@ -33,7 +33,7 @@ pub fn read_texts(files: &[PathBuf]) -> Result<RuleTexts, ConfigError> {
 
 pub fn load_rules(mapping_file: &Path, rule_files: &[PathBuf]) -> Result<RuleSet, ConfigError> {
     let mapping_name = mapping_file.display().to_string();
-    let mapping = parse_mapping(&read_file(mapping_file)?).map_err(|error| refusal(&mapping_name, &CorrelationError::from(error)))?;
+    let mapping = parse_mapping(&read_file(mapping_file)?).map_err(|error| refusal(&mapping_name, &redacted(error)))?;
     let texts = read_texts(rule_files)?;
     parse_ruleset(&texts, &mapping).map_err(|error| refusal(&mapping_name, &error))
 }

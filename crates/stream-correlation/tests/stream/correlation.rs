@@ -1,5 +1,6 @@
 use crate::support::{ruleset, ANY_ORDER, BEACON, BRUTE_FORCE, DISTINCT_DESTINATIONS, DOWNLOAD, DROPPER, EXECUTE, LOGIN};
 use crate::types::TestResult;
+use core_config::error::ConfigError;
 use stream_correlation::correlation::{parse_timespan, CorrelationRule, Kind};
 use stream_correlation::error::CorrelationError;
 use stream_correlation::ruleset::split_documents;
@@ -121,11 +122,20 @@ fn documents_split_on_separator_lines() -> TestResult {
 #[test]
 fn unsupported_constructs_name_the_rule() -> TestResult {
     let unknown_type = variant_failure("correlation:\n  type: sequence\n  rules: [failed-login]\n  timespan: 1m\n")?;
-    assert!(unknown_type.contains("Variant") && unknown_type.contains("sequence"), "{unknown_type}");
+    assert!(
+        unknown_type.contains("Variant") && unknown_type.contains("correlation type") && !unknown_type.contains("sequence"),
+        "{unknown_type}"
+    );
     let extra_key = variant_failure("action: global\ncorrelation:\n  type: temporal\n  rules: [failed-login]\n  timespan: 1m\n")?;
-    assert!(extra_key.contains("top-level key action") && extra_key.contains("Variant"), "{extra_key}");
+    assert!(
+        extra_key.contains("top-level key") && !extra_key.contains("action") && extra_key.contains("Variant"),
+        "{extra_key}"
+    );
     let aliases = variant_failure("correlation:\n  type: temporal\n  rules: [failed-login]\n  timespan: 1m\n  aliases: {}\n")?;
-    assert!(aliases.contains("Variant") && aliases.contains("aliases"), "{aliases}");
+    assert!(
+        aliases.contains("Variant") && aliases.contains("unknown field") && !aliases.contains("aliases"),
+        "{aliases}"
+    );
     let temporal_condition = variant_failure("correlation:\n  type: temporal\n  rules: [failed-login]\n  timespan: 1m\n  condition:\n    gte: 2\n")?;
     assert!(temporal_condition.contains("condition on a temporal rule"), "{temporal_condition}");
     let ordered_condition =
@@ -142,7 +152,7 @@ fn invalid_conditions_are_refused() -> TestResult {
     let missing = variant_failure(head)?;
     assert!(missing.contains("needs a condition"), "{missing}");
     let unknown_key = variant_failure(&format!("{head}  condition:\n    over: 3\n"))?;
-    assert!(unknown_key.contains("condition key over"), "{unknown_key}");
+    assert!(unknown_key.contains("condition key") && !unknown_key.contains("over"), "{unknown_key}");
     let two = variant_failure(&format!("{head}  condition:\n    gt: 3\n    lt: 9\n"))?;
     assert!(two.contains("exactly one"), "{two}");
     let none = variant_failure(&format!("{head}  condition: {{}}\n"))?;
@@ -162,7 +172,7 @@ fn invalid_conditions_are_refused() -> TestResult {
 #[test]
 fn invalid_references_and_structure_are_refused() -> TestResult {
     let unknown = variant_failure("correlation:\n  type: temporal\n  rules: [nothing]\n  timespan: 1m\n")?;
-    assert!(unknown.contains("unknown rule reference nothing"), "{unknown}");
+    assert!(unknown.contains("unknown rule reference") && !unknown.contains("nothing"), "{unknown}");
     let empty = variant_failure("correlation:\n  type: temporal\n  rules: []\n  timespan: 1m\n")?;
     assert!(empty.contains("at least one rule"), "{empty}");
     let bad_span = variant_failure("correlation:\n  type: temporal\n  rules: [failed-login]\n  timespan: soon\n")?;
@@ -189,7 +199,10 @@ fn duplicate_identifiers_are_refused() -> TestResult {
 #[test]
 fn broken_documents_name_their_file() -> TestResult {
     let error = failure(&[LOGIN, "title: [unclosed"])?;
-    assert!(matches!(&error, CorrelationError::InFile { file, .. } if file == "rules.yml"), "{error}");
+    assert!(
+        matches!(&error, CorrelationError::Config(ConfigError::Parse { file, .. }) if file == "rules.yml"),
+        "{error}"
+    );
     let bad_base = failure(&["title: X\nlogsource:\n  category: process_creation\ndetection:\n  condition: nothing\n"])?;
     assert!(bad_base.to_string().starts_with("rules.yml:"), "{bad_base}");
     Ok(())

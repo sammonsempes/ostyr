@@ -134,14 +134,14 @@ pub fn parse_timespan(rule: &str, text: &str) -> Result<i64, CorrelationError> {
     let (digits, unit) = UNITS
         .iter()
         .find_map(|(suffix, millis)| text.strip_suffix(suffix).map(|digits| (digits, *millis)))
-        .ok_or_else(|| invalid(rule, "timespan", format!("{text:?} does not end in s, m, h, d or w")))?;
+        .ok_or_else(|| invalid(rule, "timespan", "does not end in s, m, h, d or w".to_string()))?;
     let count: i64 = digits
         .parse()
-        .map_err(|error: std::num::ParseIntError| invalid(rule, "timespan", error.to_string()))?;
+        .map_err(|_| invalid(rule, "timespan", "the count is not an integer".to_string()))?;
     count
         .checked_mul(unit)
         .filter(|millis| *millis > 0)
-        .ok_or_else(|| invalid(rule, "timespan", format!("{text:?} is not a positive duration")))
+        .ok_or_else(|| invalid(rule, "timespan", "is not a positive duration".to_string()))
 }
 
 
@@ -150,10 +150,10 @@ fn comparison_for(rule: &str, key: &str, value: &Value) -> Result<Threshold, Cor
         .iter()
         .find(|(name, _)| *name == key)
         .map(|(_, comparison)| *comparison)
-        .ok_or_else(|| unsupported(rule, format!("condition key {key}")))?;
+        .ok_or_else(|| unsupported(rule, "condition key".to_string()))?;
     let count = value
         .as_u64()
-        .ok_or_else(|| invalid(rule, "condition", format!("{key} needs a non-negative integer")))?;
+        .ok_or_else(|| invalid(rule, "condition", "a threshold needs a non-negative integer".to_string()))?;
     Ok(Threshold { comparison, value: count })
 }
 
@@ -207,7 +207,7 @@ pub fn parse_kind(rule: &str, correlation: &RawCorrelation) -> Result<Kind, Corr
         "value_count" => count_kind(rule, correlation, true),
         "temporal" => temporal_kind(rule, correlation, Kind::Temporal),
         "temporal_ordered" => temporal_kind(rule, correlation, Kind::TemporalOrdered),
-        other => Err(unsupported(rule, format!("correlation type {other}"))),
+        _ => Err(unsupported(rule, "correlation type".to_string())),
     }
 }
 
@@ -218,5 +218,5 @@ pub fn check_keys(document: &RawDocument) -> Result<(), CorrelationError> {
         .rest
         .keys()
         .filter(|key| !METADATA_KEYS.contains(&key.as_str()) && !EXTRA_KEYS.contains(&key.as_str()))
-        .try_for_each(|key| Err(unsupported(&document.title, format!("top-level key {key}"))))
+        .try_for_each(|_| Err(unsupported(&document.title, "top-level key".to_string())))
 }
