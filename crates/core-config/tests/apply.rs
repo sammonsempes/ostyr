@@ -275,6 +275,9 @@ fn undeclared_apply_and_reload_parameters_are_redacted_and_declared_ones_kept() 
 }
 
 
+const LONG_KEY: usize = 100;
+
+
 const OVERSIZE: usize = 100;
 
 
@@ -324,9 +327,10 @@ fn a_reload_with_many_changes_lists_every_key_marks_the_cut_and_carries_the_dige
     assert!(!shown.contains(&changes.get(MAX_DIFF_ENTRIES).ok_or("no change")?.diff));
     assert!(shown.ends_with(&format!("[{} more changes omitted]\n", total - MAX_DIFF_ENTRIES)));
     let keys = changed_settings_text(&changes);
-    assert!(keys.starts_with("key0000,key0001"));
-    assert!(keys.contains(&format!("key{:04}", MAX_KEY_ENTRIES - 1)));
-    assert!(keys.ends_with(&format!("[{OVERSIZE} more keys omitted]")));
+    let listed: Vec<String> = serde_json::from_str(&keys)?;
+    assert_eq!(listed.first().map(String::as_str), Some("key0000"));
+    assert!(listed.contains(&format!("key{:04}", MAX_KEY_ENTRIES - 1)));
+    assert_eq!(listed.last(), Some(&format!("[{OVERSIZE} more keys omitted]")));
     assert_eq!(diff_text(&[]), "");
     let entry = with_changes(
         reload_entry(
@@ -357,7 +361,30 @@ fn a_long_key_list_is_cut_with_a_marker() -> TestResult {
     assert!(entry
         .parameters
         .get("changed_settings")
-        .is_some_and(|text| text.contains("[changed_settings truncated, ")));
+        .is_some_and(|text| text.contains("more keys omitted")));
+    Ok(())
+}
+
+
+#[test]
+fn a_key_list_over_the_bound_keeps_its_marker_and_parses() -> TestResult {
+    let changes: Vec<Change> = (0..MAX_KEY_ENTRIES)
+        .map(|index| change_of(ChangeKind::Create, &format!("{index:04}{}", "k".repeat(LONG_KEY)), "", "v"))
+        .collect();
+    let listed: Vec<String> = serde_json::from_str(&changed_settings_text(&changes))?;
+    let marker = listed.last().ok_or("empty")?;
+    assert!(marker.ends_with(" more keys omitted]"));
+    assert!(listed.len() < MAX_KEY_ENTRIES);
+    Ok(())
+}
+
+
+#[test]
+fn a_directly_bounded_key_list_is_still_valid_json() -> TestResult {
+    let long = bounded_parameter("changed_settings", &"x".repeat(MAX_DIFF_CHARS + 1));
+    let listed: Vec<String> = serde_json::from_str(&long)?;
+    assert_eq!(listed, vec!["[changed_settings truncated, 1 characters omitted]".to_owned()]);
+    assert_eq!(bounded_parameter("changed_settings", "[]"), "[]");
     Ok(())
 }
 
