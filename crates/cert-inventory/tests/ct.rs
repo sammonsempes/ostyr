@@ -8,12 +8,33 @@ use cert_inventory::ct::{parse_entries, unexpected_for_domains, DEFAULT_LIMITS};
 use cert_inventory::error::CtError;
 use cert_inventory::model::{CtEntry, CtLimits, KnownSerial};
 use data_encoding::{BASE64, HEXLOWER};
-use rcgen::string::BmpString;
+use rcgen::string::{BmpString, Ia5String, PrintableString, UniversalString};
 use rcgen::{CertificateParams, CustomExtension, DnType, DnValue, IsCa, Issuer, KeyPair};
 use record::record_with;
 use sha2::{Digest, Sha256};
 use types::TestResult;
 use x509_parser::parse_x509_certificate;
+
+
+const TAG_PRINTABLE: u8 = 0x13;
+
+
+const TAG_BMP: u8 = 0x1e;
+
+
+const TAG_UNIVERSAL: u8 = 0x1c;
+
+
+const TAG_TELETEX: u8 = 0x14;
+
+
+const HIGH_SURROGATE_BYTE: u8 = 0xd8;
+
+
+const OUT_OF_RANGE_BYTE: u8 = 0x11;
+
+
+const FOUR: u8 = 4;
 
 
 const TIMESTAMP_MS: u64 = 1_700_000_000_123;
@@ -469,16 +490,80 @@ fn subject_cn_is_ignored_when_a_dns_san_exists() -> TestResult {
 }
 
 
-#[test]
-fn undecodable_subject_cn_is_reported_with_a_marker_whatever_the_domains() -> TestResult {
-    let outcome = parse_entries(&response(&[cn_only(DnValue::BmpString(BmpString::try_from("a")?))?]), &DEFAULT_LIMITS)?;
+fn names_of(leaf: Vec<u8>) -> Result<CtEntry, Box<dyn std::error::Error>> {
+    let outcome = parse_entries(&response(&[leaf]), &DEFAULT_LIMITS)?;
     assert_eq!(outcome.skipped_malformed, 0);
-    let entry = outcome.entries.first().ok_or("no entry")?;
+    Ok(outcome.entries.into_iter().next().ok_or("no entry")?)
+}
+
+
+fn patch(leaf: &[u8], from: &[u8], to: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let start = leaf.windows(from.len()).rposition(|window| window == from).ok_or("pattern not found")?;
+    let mut patched = leaf.to_vec();
+    patched.splice(start..start + from.len(), to.iter().copied());
+    Ok(patched)
+}
+
+
+fn assert_marker(entry: &CtEntry) {
     assert!(entry.undecodable_cn);
     assert!(entry.subject_cns.is_empty());
-    assert_eq!(unexpected_for_domains(&outcome.entries, &strings(&["other.test"]), &[], &[]).len(), 1);
-    let known_fingerprint = strings(&[entry.record.fingerprint_sha256.as_str()]);
-    assert!(unexpected_for_domains(&outcome.entries, &[], &known_fingerprint, &[]).is_empty());
+    assert_eq!(
+        unexpected_for_domains(std::slice::from_ref(entry), &strings(&["other.test"]), &[], &[]).len(),
+        1
+    );
+}
+
+
+#[test]
+fn bmp_and_universal_string_cns_are_decoded_and_watched() -> TestResult {
+    let bmp = names_of(cn_only(DnValue::BmpString(BmpString::try_from("Login.Example.Test.")?))?)?;
+    assert!(!bmp.undecodable_cn);
+    assert_eq!(bmp.subject_cns, ["Login.Example.Test."]);
+    assert_eq!(unexpected_for_domains(&[bmp], &strings(&["example.test"]), &[], &[]).len(), 1);
+    let universal = names_of(cn_only(DnValue::UniversalString(UniversalString::try_from("login.example.test")?))?)?;
+    assert_eq!(universal.subject_cns, ["login.example.test"]);
+    assert_eq!(unexpected_for_domains(&[universal], &strings(&["example.test"]), &[], &[]).len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn printable_and_ia5_cns_are_decoded() -> TestResult {
+    let printable = names_of(cn_only(DnValue::PrintableString(PrintableString::try_from("host.example.test")?))?)?;
+    assert_eq!(printable.subject_cns, ["host.example.test"]);
+    let ia5 = names_of(cn_only(DnValue::Ia5String(Ia5String::try_from("host.example.test")?))?)?;
+    assert_eq!(ia5.subject_cns, ["host.example.test"]);
+    Ok(())
+}
+
+
+fn retagged(from_tag: u8, to_tag: u8, content: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut from = vec![from_tag, u8::try_from(content.len())?];
+    from.extend_from_slice(content);
+    let mut to = vec![to_tag, u8::try_from(content.len())?];
+    to.extend_from_slice(content);
+    patch(&cn_only(DnValue::PrintableString(PrintableString::try_from("abc")?))?, &from, &to)
+}
+
+
+#[test]
+fn invalid_bmp_and_universal_cns_carry_the_marker() -> TestResult {
+    assert_marker(&names_of(retagged(TAG_PRINTABLE, TAG_BMP, b"abc")?)?);
+    assert_marker(&names_of(retagged(TAG_PRINTABLE, TAG_UNIVERSAL, b"abc")?)?);
+    assert_marker(&names_of(retagged(TAG_PRINTABLE, TAG_TELETEX, b"abc")?)?);
+    let surrogate = patch(
+        &cn_only(DnValue::BmpString(BmpString::try_from("ab")?))?,
+        &[TAG_BMP, FOUR, 0, b'a', 0, b'b'],
+        &[TAG_BMP, FOUR, HIGH_SURROGATE_BYTE, 0, 0, b'b'],
+    )?;
+    assert_marker(&names_of(surrogate)?);
+    let out_of_range = patch(
+        &cn_only(DnValue::UniversalString(UniversalString::try_from("a")?))?,
+        &[TAG_UNIVERSAL, FOUR, 0, 0, 0, b'a'],
+        &[TAG_UNIVERSAL, FOUR, 0, OUT_OF_RANGE_BYTE, 0, 0],
+    )?;
+    assert_marker(&names_of(out_of_range)?);
     Ok(())
 }
 

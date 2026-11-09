@@ -5,8 +5,10 @@ use crate::parse::{all_dns_names, record_with_names, serial_hex, MAX_DNS_NAMES};
 use data_encoding::{BASE64, HEXLOWER};
 use serde::Deserialize;
 use x509_parser::certificate::TbsCertificate;
+use x509_parser::der_parser::asn1_rs::Tag;
 use x509_parser::parse_x509_certificate;
 use x509_parser::prelude::FromDer;
+use x509_parser::x509::AttributeTypeAndValue;
 
 
 pub const DEFAULT_LIMITS: CtLimits = CtLimits {
@@ -32,6 +34,12 @@ const TIMESTAMP_BYTES: usize = 8;
 
 
 const ENTRY_TYPE_BYTES: usize = 2;
+
+
+const BMP_UNIT_BYTES: usize = 2;
+
+
+const UNIVERSAL_UNIT_BYTES: usize = 4;
 
 
 const BYTE_BITS: u32 = 8;
@@ -200,10 +208,34 @@ fn entry_from_tbs(tbs: &TbsCertificate<'_>, identity_bytes: &[u8], key_hash: Opt
 
 
 fn common_names(tbs: &TbsCertificate<'_>) -> (Vec<String>, bool) {
-    let decoded = tbs
-        .subject()
-        .iter_common_name()
-        .map(|attribute| attribute.as_str().map(str::to_string).ok())
-        .collect::<Vec<_>>();
+    let decoded = tbs.subject().iter_common_name().map(common_name_text).collect::<Vec<_>>();
     (decoded.iter().flatten().cloned().collect(), decoded.iter().any(Option::is_none))
+}
+
+
+fn common_name_text(attribute: &AttributeTypeAndValue<'_>) -> Option<String> {
+    let tag = attribute.attr_value().tag();
+    if tag == Tag::BmpString {
+        char::decode_utf16(
+            attribute
+                .as_slice()
+                .chunks(BMP_UNIT_BYTES)
+                .map(|unit| <[u8; BMP_UNIT_BYTES]>::try_from(unit).ok().map(u16::from_be_bytes))
+                .collect::<Option<Vec<u16>>>()?,
+        )
+        .collect::<Result<String, _>>()
+        .ok()
+    } else if tag == Tag::UniversalString {
+        attribute
+            .as_slice()
+            .chunks(UNIVERSAL_UNIT_BYTES)
+            .map(|unit| {
+                <[u8; UNIVERSAL_UNIT_BYTES]>::try_from(unit)
+                    .ok()
+                    .and_then(|bytes| char::from_u32(u32::from_be_bytes(bytes)))
+            })
+            .collect::<Option<String>>()
+    } else {
+        attribute.as_str().map(str::to_string).ok()
+    }
 }
