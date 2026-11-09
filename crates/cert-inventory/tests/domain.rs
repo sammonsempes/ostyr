@@ -4,7 +4,7 @@ mod record;
 mod types;
 
 
-use cert_inventory::domain::{matches_domain, name_matches};
+use cert_inventory::domain::{covers_zone, matches_domain, name_matches};
 use record::record_with;
 use types::TestResult;
 
@@ -51,5 +51,22 @@ fn record_matches_when_any_name_covers_any_owned_domain() -> TestResult {
     assert!(!matches_domain(&record, &owned(&["example.com"])));
     assert!(!matches_domain(&record, &[]));
     assert!(!matches_domain(&record_with(&[], 0), &owned(&["example.com"])));
+    Ok(())
+}
+
+
+#[test]
+fn zones_cover_themselves_and_subdomains() -> TestResult {
+    assert!(covers_zone("example.test", "example.test"));
+    assert!(covers_zone("A.Example.Test.", "example.test."));
+    assert!(covers_zone("login.example.test", "example.test"));
+    assert!(covers_zone("*.example.test", "example.test"));
+    assert!(covers_zone("*.example.test", "www.example.test"));
+    assert!(covers_zone("*.sub.example.test", "example.test"));
+    assert!(!covers_zone("*.test", "example.test"));
+    assert!(!covers_zone("*.*.example.test", "example.test"));
+    assert!(!covers_zone("*.other.test", "example.test"));
+    assert!(!covers_zone("notexample.test", "example.test"));
+    assert!(!covers_zone("example.test", ""));
     Ok(())
 }
