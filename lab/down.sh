@@ -11,6 +11,7 @@ run_reaper
 
 prefix="$(lab_prefix "$task_id")"
 lab_state="$(state_dir "$task_id")"
+proxy_stop "$task_id"
 
 virsh_lab list --name | names_with_prefix "$prefix-" | while read -r domain; do
     virsh_lab destroy "$domain" >/dev/null 2>&1 || log "domain $domain could not be force-stopped"

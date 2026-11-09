@@ -8,3 +8,32 @@ users:
     ssh_authorized_keys:
       - ${ssh_public_key}
 ssh_pwauth: false
+%{ if proxy_url != "" ~}
+write_files:
+  - path: /etc/environment
+    append: true
+    content: |
+      http_proxy=${proxy_url}
+      https_proxy=${proxy_url}
+      no_proxy=localhost,127.0.0.1,.lab.ostyr.test
+  - path: /etc/profile.d/ostyr-proxy.sh
+    content: |
+      export http_proxy=${proxy_url} https_proxy=${proxy_url} HTTP_PROXY=${proxy_url} HTTPS_PROXY=${proxy_url}
+      export no_proxy=localhost,127.0.0.1,.lab.ostyr.test NO_PROXY=localhost,127.0.0.1,.lab.ostyr.test
+  - path: /etc/apt/apt.conf.d/90ostyr-proxy
+    content: |
+      Acquire::http::Proxy "${proxy_url}";
+      Acquire::https::Proxy "${proxy_url}";
+  - path: /etc/systemd/system/docker.service.d/http-proxy.conf
+    content: |
+      [Service]
+      Environment="HTTP_PROXY=${proxy_url}" "HTTPS_PROXY=${proxy_url}" "NO_PROXY=localhost,127.0.0.1"
+  - path: /etc/dnf/dnf.conf.d/ostyr-proxy.conf
+    content: |
+      [main]
+      proxy=${proxy_url}
+  - path: /root/.cargo/config.toml
+    content: |
+      [http]
+      proxy = "${proxy_url}"
+%{ endif ~}

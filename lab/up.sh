@@ -126,12 +126,17 @@ factor="$(accel_timeout_factor)"
 domain_type=kvm
 [[ "$accel" == "kvm" ]] || domain_type=qemu
 ssh_attempts=$((SSH_ATTEMPTS * factor))
+egress="$(profile_egress "$profile_source")"
+subnet_octet="$(free_subnet_octet)"
+proxy_url=""
+if [[ "$egress" == "proxy" ]]; then proxy_url="http://192.168.$subnet_octet.1:$PROXY_PORT"; fi
 
 jq -n \
     --arg task_id "$task_id" \
     --arg profile_file "$lab_state/profile.yaml" \
     --arg pool "$LAB_POOL" \
-    --argjson subnet_octet "$(free_subnet_octet)" \
+    --argjson subnet_octet "$subnet_octet" \
+    --arg proxy_url "$proxy_url" \
     --arg ssh_public_key "$(cat "$lab_state/id_ed25519.pub")" \
     --argjson created_at "$(date +%s)" \
     --arg domain_type "$domain_type" \
@@ -145,6 +150,8 @@ run_tofu "$task_id" apply -input=false -auto-approve -no-color -state="$lab_stat
     die "apply failed; run lab/down.sh $task_id to clean up"
 
 flock -u 9
+
+if [[ "$egress" == "proxy" ]]; then proxy_start "$task_id" "192.168.$subnet_octet.1"; fi
 
 vms="$(run_tofu "$task_id" output -raw -state="$lab_state/lab.tfstate" vms)"
 printf '%s\n' "$vms" >"$lab_state/vms.txt"
