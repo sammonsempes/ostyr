@@ -112,8 +112,19 @@ pub fn counter(value: &AtomicU64) -> u64 {
 }
 
 
+pub const PATIENT_HANDSHAKE_SECONDS: u64 = 3600;
+
+
+pub fn patient_settings() -> ChannelSettings {
+    ChannelSettings {
+        handshake_timeout_seconds: PATIENT_HANDSHAKE_SECONDS,
+        ..ChannelSettings::default()
+    }
+}
+
+
 pub fn settings(change: impl FnOnce(&mut ChannelSettings)) -> ChannelSettings {
-    let mut base = ChannelSettings::default();
+    let mut base = patient_settings();
     change(&mut base);
     base
 }
@@ -180,7 +191,7 @@ fn stored_count(stored: &Stored) -> Result<usize, Box<dyn Error>> {
 
 #[tokio::test]
 async fn events_are_acknowledged_after_the_sink_accepted_them() -> TestResult {
-    let (state, stored) = recording_state(ChannelSettings::default());
+    let (state, stored) = recording_state(patient_settings());
     let session = session(Arc::clone(&state)).await?;
     let acknowledged = bounded(push_events(session.channel.clone(), (1..=BATCH_COUNT).map(batch).collect())).await??;
     assert_eq!(acknowledged, vec![FIRST, SECOND, THIRD]);
@@ -196,7 +207,7 @@ async fn events_are_acknowledged_after_the_sink_accepted_them() -> TestResult {
 
 #[tokio::test]
 async fn a_failing_sink_acknowledges_nothing() -> TestResult {
-    let state = make_state(ChannelSettings::default(), failing_sink(), envelope_source(Vec::new()));
+    let state = make_state(patient_settings(), failing_sink(), envelope_source(Vec::new()));
     let session = session(Arc::clone(&state)).await?;
     let outcome = bounded(push_events(session.channel.clone(), vec![batch(FIRST), batch(SECOND)])).await?;
     assert_eq!(status_code(outcome), Some(Code::Unavailable));
@@ -207,7 +218,7 @@ async fn a_failing_sink_acknowledges_nothing() -> TestResult {
 
 #[tokio::test]
 async fn a_payload_naming_another_agent_is_refused() -> TestResult {
-    let (state, stored) = recording_state(ChannelSettings::default());
+    let (state, stored) = recording_state(patient_settings());
     let session = session(Arc::clone(&state)).await?;
     let foreign = EventBatch {
         agent_id: "agent-2".to_string(),
@@ -336,7 +347,7 @@ fn admission_refuses_above_the_rate() -> TestResult {
 #[test]
 fn claims_are_checked_against_the_certificate_only() -> TestResult {
     let _logging = scoped_logging();
-    let (state, _stored) = recording_state(ChannelSettings::default());
+    let (state, _stored) = recording_state(patient_settings());
     let identity = agent_identity();
     assert!(claim_matches("", "acme"));
     assert!(claim_matches("acme", "acme"));
@@ -353,7 +364,7 @@ fn claims_are_checked_against_the_certificate_only() -> TestResult {
 #[tokio::test]
 async fn handlers_refuse_a_request_without_identity_or_with_another_name() -> TestResult {
     let _logging = scoped_logging();
-    let (state, _stored) = recording_state(ChannelSettings::default());
+    let (state, _stored) = recording_state(patient_settings());
     let unauthenticated = subscribe(Arc::clone(&state), Request::new(SubscribeRequest::default())).await;
     assert_eq!(unauthenticated.err().map(|status| status.code()), Some(Code::Unauthenticated));
     let unauthenticated_report = report(Arc::clone(&state), Request::new(CommandReport::default())).await;
@@ -393,7 +404,7 @@ async fn handlers_refuse_a_request_without_identity_or_with_another_name() -> Te
 #[tokio::test]
 async fn reports_are_counted_by_verdict() -> TestResult {
     let _logging = scoped_logging();
-    let (state, _stored) = recording_state(ChannelSettings::default());
+    let (state, _stored) = recording_state(patient_settings());
     report(
         Arc::clone(&state),
         identified(CommandReport {
@@ -475,7 +486,7 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
     let last = forged.last_mut().ok_or("empty envelope")?;
     *last ^= 1;
     let commands: CommandSource = envelope_source(vec![valid.clone(), valid, forged]);
-    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
@@ -510,7 +521,7 @@ pub fn record_executed(executed: &Mutex<Vec<u64>>, sequence: u64) {
 async fn a_flood_of_junk_envelopes_keeps_only_the_capped_refusals() -> TestResult {
     let junk = JUNK_ENVELOPES;
     let commands: CommandSource = envelope_source(vec![b"junk".to_vec(); junk]);
-    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
@@ -527,7 +538,7 @@ async fn a_flood_of_junk_envelopes_keeps_only_the_capped_refusals() -> TestResul
 async fn an_accepted_command_reaches_the_executor_while_the_subscription_stays_open() -> TestResult {
     let envelopes = vec![signed_envelope(1)?];
     let commands: CommandSource = Box::new(move |_identity| Box::pin(stream::iter(envelopes.clone()).chain(stream::pending())));
-    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
@@ -616,7 +627,7 @@ async fn subscribe_and_report_are_refused_above_the_request_rate() -> TestResult
 #[tokio::test]
 async fn an_event_stream_without_identity_is_refused_and_one_with_identity_is_acknowledged() -> TestResult {
     let _logging = scoped_logging();
-    let (state, stored) = recording_state(ChannelSettings::default());
+    let (state, stored) = recording_state(patient_settings());
     let refused = open_push(
         Arc::clone(&state),
         Err(Status::unauthenticated("no verified agent identity")),
@@ -638,7 +649,7 @@ async fn an_event_stream_without_identity_is_refused_and_one_with_identity_is_ac
 #[tokio::test]
 async fn an_accepted_command_the_executor_cannot_take_is_reported_refused() -> TestResult {
     let commands: CommandSource = envelope_source(vec![signed_envelope(1)?]);
-    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;

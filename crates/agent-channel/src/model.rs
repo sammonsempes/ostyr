@@ -104,8 +104,12 @@ pub const DEFAULT_SILENCE_THRESHOLD_SECONDS: u64 = 150;
 pub const DEFAULT_SILENCE_CHECK_INTERVAL_SECONDS: u64 = 10;
 
 
-/// A peer that has not finished its TLS handshake after this long is dropped, so a stalled peer cannot hold a task.
-pub const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+/// Default of `handshake_timeout_seconds`: a peer that has not finished its TLS handshake after this long is dropped.
+pub const DEFAULT_HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+
+
+/// Largest accepted `handshake_timeout_seconds`, so a setting cannot let a stalled peer hold a task for long.
+pub const MAX_HANDSHAKE_TIMEOUT_SECONDS: u64 = 60;
 
 
 /// One delivery attempt (dial, stream, acknowledgements) is cut after this long, so a server holding the stream open cannot hang the agent.
@@ -265,6 +269,7 @@ pub struct ChannelSettings {
     pub max_streams_per_connection: u32,
     pub max_inflight_per_agent: usize,
     pub request_timeout_seconds: u64,
+    pub handshake_timeout_seconds: u64,
     pub first_request_timeout_seconds: u64,
     pub max_total_connections: usize,
     pub max_pending_handshakes: usize,
@@ -286,6 +291,7 @@ impl Default for ChannelSettings {
             max_streams_per_connection: DEFAULT_MAX_STREAMS_PER_CONNECTION,
             max_inflight_per_agent: DEFAULT_MAX_INFLIGHT_PER_AGENT,
             request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            handshake_timeout_seconds: DEFAULT_HANDSHAKE_TIMEOUT_SECONDS,
             first_request_timeout_seconds: DEFAULT_FIRST_REQUEST_TIMEOUT_SECONDS,
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,

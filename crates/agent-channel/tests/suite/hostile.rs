@@ -2,13 +2,13 @@ use crate::harness::{
     attempt, bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server_state, stop_server, Platform,
 };
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
-use crate::services::{counter, settings};
+use crate::services::{counter, patient_settings, settings};
 use crate::state::{discarding_audit, envelope_source, make_audited_state, make_state, new_stored, recording_sink};
 use crate::types::TestResult;
 use agent_channel::client::{connect_channel, deliver_events, heartbeat, read_acks, send_pending};
 use agent_channel::error::ChannelError;
 use agent_channel::model::{
-    ChannelSettings, Identity, PendingHandshake, ATTEMPT_TIMEOUT_SECONDS, IPV6_HOST_BITS, MAX_ACK_READS, MAX_IGNORED_ACKS, MAX_RECONNECT_ATTEMPTS,
+    Identity, PendingHandshake, ATTEMPT_TIMEOUT_SECONDS, IPV6_HOST_BITS, MAX_ACK_READS, MAX_IGNORED_ACKS, MAX_RECONNECT_ATTEMPTS,
 };
 use agent_channel::proto::{EventAck, EventBatch};
 use agent_channel::server::{busiest_oldest, peer_source, register_handshake, source_of};
@@ -181,11 +181,7 @@ async fn a_server_holding_the_stream_open_without_acknowledging_ends_in_give_up(
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
     let config = client_config(&agent)?;
     let entered = Arc::new(Notify::new());
-    let state = make_state(
-        ChannelSettings::default(),
-        stalling_sink(Arc::clone(&entered)),
-        envelope_source(Vec::new()),
-    );
+    let state = make_state(patient_settings(), stalling_sink(Arc::clone(&entered)), envelope_source(Vec::new()));
     let server = start_server_state(&paths, empty_revocation(&paths)?, state).await?;
     let address = server.address;
     let dial = move || -> DialFuture {

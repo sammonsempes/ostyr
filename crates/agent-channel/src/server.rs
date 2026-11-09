@@ -2,7 +2,7 @@ use crate::error::{ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serials_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
 use crate::model::{
-    Admission, Identity, PendingHandshake, ServerState, SlotKind, HANDSHAKE_TIMEOUT_SECONDS, IPV6_HOST_BITS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
+    Admission, Identity, PendingHandshake, ServerState, SlotKind, IPV6_HOST_BITS, SERVER_KEEPALIVE_INTERVAL_SECONDS,
     SERVER_KEEPALIVE_TIMEOUT_SECONDS, TCP_KEEPALIVE_IDLE_SECONDS, TCP_KEEPALIVE_INTERVAL_SECONDS,
 };
 use crate::revocation::{revoked_in, revoked_now};
@@ -133,16 +133,17 @@ pub fn evict(oldest: Option<oneshot::Sender<()>>, state: &ServerState) {
 }
 
 
-/// The TLS handshake, cut at `HANDSHAKE_TIMEOUT_SECONDS` and when `evicted` fires; a dropped sender never evicts.
+/// The TLS handshake, cut at `handshake_timeout_seconds` (one settings snapshot) and when `evicted` fires; a dropped sender never evicts.
 pub async fn handshake(
     stream: TcpStream,
     acceptor: TlsAcceptor,
     state: &ServerState,
     evicted: oneshot::Receiver<()>,
 ) -> Result<TlsStream<TcpStream>, ChannelError> {
-    let limit = Duration::from_secs(HANDSHAKE_TIMEOUT_SECONDS);
+    let seconds = settings_of(state).handshake_timeout_seconds;
+    let limit = Duration::from_secs(seconds);
     let finished = tokio::select! {
-        accepted = timeout(limit, acceptor.accept(stream)) => accepted.map_err(|_elapsed| handshake_timed_out(state)),
+        accepted = timeout(limit, acceptor.accept(stream)) => accepted.map_err(|_elapsed| handshake_timed_out(state, seconds)),
         Ok(()) = evicted => Err(ChannelError::HandshakeEvicted),
     };
     finished?.map_err(ChannelError::Handshake)
@@ -244,11 +245,9 @@ pub fn connection_capped(state: &ServerState) -> ChannelError {
 }
 
 
-pub fn handshake_timed_out(state: &ServerState) -> ChannelError {
+pub fn handshake_timed_out(state: &ServerState, seconds: u64) -> ChannelError {
     bump(&state.counters.handshake_timeouts);
-    ChannelError::HandshakeTimeout {
-        seconds: HANDSHAKE_TIMEOUT_SECONDS,
-    }
+    ChannelError::HandshakeTimeout { seconds }
 }
 
 

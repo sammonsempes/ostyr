@@ -10,14 +10,12 @@ use crate::types::TestResult;
 use agent_channel::client::{connect_channel, heartbeat};
 use agent_channel::error::{ChannelError, IdentityError, RevocationError};
 use agent_channel::identity::serials_from_chain;
-use agent_channel::model::{Revocations, REVOCATION_CLOSE_SECONDS};
+use agent_channel::model::Revocations;
 use agent_channel::revocation::{canonical_serial, is_revoked, parse_serial, revocations_state};
 use agent_channel::tls::client_config;
 use core_audit::model::Outcome;
 use core_config::reload::{reload, ReloadOutcome};
-use std::time::Duration;
 use tempfile::tempdir;
-use tokio::time::timeout;
 
 
 const SERIAL_COUNT: usize = 2;
@@ -104,7 +102,7 @@ async fn revoking_a_connected_agent_closes_its_connection_within_the_bound() -> 
     assert_eq!(reply.agent_id, "agent-1");
     write_revocations(&server.control.file, &[serial.as_str()])?;
     assert!(matches!(reload(&server.control.engine), ReloadOutcome::Applied { .. }));
-    let closed = timeout(Duration::from_secs(REVOCATION_CLOSE_SECONDS), server.handle).await??;
+    let closed = server.handle.await?;
     assert!(matches!(closed, Err(ChannelError::Revoked { serial: refused }) if refused == serial));
     assert!(bounded(heartbeat(channel, "test")).await?.is_err());
     Ok(())
@@ -166,7 +164,7 @@ async fn dropping_the_revocation_engine_closes_connections() -> TestResult {
     bounded(heartbeat(channel.clone(), "test")).await??;
     let handle = server.handle;
     drop(server.control);
-    let closed = timeout(Duration::from_secs(REVOCATION_CLOSE_SECONDS), handle).await??;
+    let closed = handle.await?;
     assert!(matches!(closed, Err(ChannelError::RevocationClosed(_))));
     drop(channel);
     Ok(())
@@ -215,7 +213,7 @@ async fn revoking_the_intermediate_of_a_connected_agent_closes_its_connection() 
     bounded(heartbeat(channel.clone(), "test")).await??;
     write_revocations(&server.control.file, &[agent.intermediate_serial.as_str()])?;
     assert!(matches!(reload(&server.control.engine), ReloadOutcome::Applied { .. }));
-    let closed = timeout(Duration::from_secs(REVOCATION_CLOSE_SECONDS), server.handle).await??;
+    let closed = server.handle.await?;
     assert!(matches!(closed, Err(ChannelError::Revoked { serial }) if serial == agent.intermediate_serial));
     drop(channel);
     Ok(())

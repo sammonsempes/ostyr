@@ -7,7 +7,7 @@ use crate::services::{agent_identity, counter, recording_state, settings};
 use crate::types::TestResult;
 use agent_channel::error::ChannelError;
 use agent_channel::limits::lock_load;
-use agent_channel::model::ClientTlsPaths;
+use agent_channel::model::{ChannelSettings, ClientTlsPaths, DEFAULT_HANDSHAKE_TIMEOUT_SECONDS, MAX_HANDSHAKE_TIMEOUT_SECONDS};
 use agent_channel::server::{keepalive_settings, log_keepalive, set_keepalive};
 use agent_channel::settings::validate_settings;
 use agent_channel::tls::client_config;
@@ -100,5 +100,26 @@ fn a_zero_first_request_deadline_is_refused() -> TestResult {
     let bad = settings(|base| base.first_request_timeout_seconds = 0);
     let message = validate_settings(&bad).err().ok_or("accepted")?.to_string();
     assert!(message.contains("first_request_timeout_seconds"));
+    Ok(())
+}
+
+
+#[test]
+fn a_zero_or_oversized_handshake_deadline_is_refused() -> TestResult {
+    let zero = settings(|base| base.handshake_timeout_seconds = 0);
+    let above = settings(|base| base.handshake_timeout_seconds = MAX_HANDSHAKE_TIMEOUT_SECONDS + 1);
+    let at_limit = settings(|base| base.handshake_timeout_seconds = MAX_HANDSHAKE_TIMEOUT_SECONDS);
+    assert!(validate_settings(&zero)
+        .err()
+        .ok_or("accepted")?
+        .to_string()
+        .contains("handshake_timeout_seconds"));
+    assert!(validate_settings(&above)
+        .err()
+        .ok_or("accepted")?
+        .to_string()
+        .contains("handshake_timeout_seconds"));
+    assert!(validate_settings(&at_limit).is_ok());
+    assert_eq!(ChannelSettings::default().handshake_timeout_seconds, DEFAULT_HANDSHAKE_TIMEOUT_SECONDS);
     Ok(())
 }
