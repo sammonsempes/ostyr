@@ -85,8 +85,10 @@ pub fn validate_file(raw: RawCheckFile) -> Result<CheckFile, CheckError> {
     count_within("scope", raw.scope.len(), 0, MAX_SCOPE_ENTRIES)?;
     count_within("checks", raw.checks.len(), 0, MAX_CHECKS)?;
     all_unique("checks", raw.checks.iter().map(|check| &check.name))?;
+    raw.ca_file.iter().try_for_each(|path| text_ok("ca_file", path, MAX_TARGET_LEN))?;
     Ok(CheckFile {
         scope: raw.scope,
+        ca_file: raw.ca_file,
         checks: raw.checks,
     })
 }
