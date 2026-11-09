@@ -167,7 +167,7 @@ fn syntax_error_names_file_and_line() -> TestResult {
 #[test]
 fn unknown_field_is_refused() -> TestResult {
     let message = baseline_error(&baseline_with("    expect:\n      row_count: 0\n    surprise: 1\n"))?;
-    assert!(message.contains("surprise"), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
     Ok(())
 }
 

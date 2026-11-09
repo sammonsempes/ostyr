@@ -50,10 +50,10 @@ fn a_valid_file_loads_with_both_classes() -> TestResult {
 #[test]
 fn unknown_fields_and_classes_are_refused() -> TestResult {
     let extra = format!("{}    comment: x\n", keys_text(false, NOW + LIFETIME));
-    assert!(engine_error(&extra)?.contains("comment"));
+    assert!(engine_error(&extra)?.contains("unknown field"));
     let class = keys_text(false, NOW + LIFETIME).replace("class: routine", "class: admin");
-    assert!(engine_error(&class)?.contains("admin"));
-    assert!(engine_error("keys: []\nextra: 1\n")?.contains("extra"));
+    assert!(engine_error(&class)?.contains("unknown variant"));
+    assert!(engine_error("keys: []\nextra: 1\n")?.contains("unknown field"));
     Ok(())
 }
 

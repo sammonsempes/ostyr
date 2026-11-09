@@ -68,7 +68,7 @@ fn schema_command_lists_files() -> TestResult {
 fn invalid_files_report_config_errors() -> TestResult {
     let bad = path_text("module_unknown_field.yaml");
     let error = output_of(&["check", "module", &bad]).err().ok_or("no error")?;
-    assert!(error.to_string().contains(":3:1: at `listn`"));
+    assert!(error.to_string().contains(":3:1: at `.`: unknown field"));
     Ok(())
 }
 
@@ -130,7 +130,7 @@ fn run_reporting_writes_display_to_err_and_fails() -> TestResult {
     assert_eq!(code, ExitCode::FAILURE);
     assert!(out.is_empty());
     assert_eq!(text.lines().count(), 1);
-    assert!(text.contains(":3:1: at `listn`") && !text.contains("Parse {"), "{text}");
+    assert!(text.contains(":3:1: at `.`: unknown field") && !text.contains("Parse {"), "{text}");
     Ok(())
 }
 
@@ -171,6 +171,6 @@ fn example_binary_prints_display_and_exits_non_zero() -> TestResult {
         .output()?;
     let text = String::from_utf8(output.stderr)?;
     assert!(!output.status.success());
-    assert!(text.contains(":3:1: at `listn`") && !text.contains("Parse {"), "{text}");
+    assert!(text.contains(":3:1: at `.`: unknown field") && !text.contains("Parse {"), "{text}");
     Ok(())
 }
