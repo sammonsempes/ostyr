@@ -5,7 +5,8 @@ use core_config::error::ConfigError;
 use core_config::reload::{current_config, open_engine, reload, ReloadOutcome};
 use policy_validator::model::{Reason, Scope, SelectorKind};
 use policy_validator::policy::{Policy, PolicyError};
-use policy_validator::reload::{load_policy, open_validator, policy_loader, policy_state, refusal};
+use policy_validator::reload::{load_policy, open_validator, policy_loader, policy_state, refusal, salted_digest};
+use sha2::{Digest, Sha256};
 use std::fs;
 
 
@@ -86,11 +87,47 @@ fn an_invalid_file_is_refused_and_the_old_one_kept() -> TestResult {
 
 
 #[test]
-fn a_refusal_names_the_entry_and_the_form() -> TestResult {
+fn a_refusal_names_the_list_the_index_and_the_form() -> TestResult {
     let bench = bench("{}")?;
-    replace_file(&bench.policy_file, "user_writable_prefixes: ['/a/*']\n")?;
+    replace_file(&bench.policy_file, "user_writable_prefixes: ['/ok', '/a/*']\n")?;
     let outcome = reload(&bench.engine);
-    assert!(matches!(&outcome, ReloadOutcome::Refused { reason } if reason.contains("/a/*") && reason.contains("wildcard")));
+    assert!(
+        matches!(&outcome, ReloadOutcome::Refused { reason } if reason.contains("user_writable_prefixes[1]") && reason.contains("wildcard") && !reason.contains("/a/*"))
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_reload_leaks_no_list_entry_to_the_audit_or_the_reason() -> TestResult {
+    for (list, entry) in [
+        ("honeytoken_paths", "/srv/canary-9/"),
+        ("agent_paths", "/opt/agent-7/"),
+        ("os_directories", "/os-secret/"),
+        ("user_writable_prefixes", "/writable-secret/"),
+    ] {
+        let bench = bench("{}")?;
+        replace_file(&bench.policy_file, &format!("{list}: ['{entry}']\n"))?;
+        let outcome = reload(&bench.engine);
+        let marker = entry.trim_matches('/');
+        let text = fs::read_to_string(&bench.audit_file)?;
+        assert!(
+            matches!(&outcome, ReloadOutcome::Refused { reason } if reason.contains(&format!("{list}[0]")) && !reason.contains(marker)),
+            "{list}"
+        );
+        assert!(text.contains(&format!("{list}[0]")), "{list}: {text}");
+        assert!(!text.contains(marker), "{list}: {text}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_config_hash_is_salted_and_not_a_plain_sha256_of_the_file() -> TestResult {
+    let bench = bench("{}")?;
+    let hash = current_config(&bench.engine).hash.clone();
+    assert_eq!(hash, salted_digest("{}"));
+    assert_ne!(hash, format!("{:x}", Sha256::digest(b"{}")));
     Ok(())
 }
 
@@ -113,7 +150,7 @@ fn the_state_has_one_key_per_setting() -> TestResult {
     assert!(state
         .get("critical_asr_rules")
         .is_some_and(|text| text.contains("9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2")));
-    assert_eq!(state.get("honeytoken_paths").map(String::as_str), Some(""));
+    assert_eq!(state.get("honeytoken_paths").map(String::as_str), Some("count=0 changed=false"));
     Ok(())
 }
 
@@ -148,9 +185,9 @@ fn a_policy_error_travels_as_a_parse_error_with_its_message() -> TestResult {
 #[test]
 fn the_list_digest_survives_redaction_in_the_audit_record() -> TestResult {
     let bench = bench("{}")?;
-    replace_file(&bench.policy_file, "security_sensors: [edr]\n")?;
+    replace_file(&bench.policy_file, "os_directories: [/edr]\n")?;
     assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
-    replace_file(&bench.policy_file, "security_sensors: [other]\n")?;
+    replace_file(&bench.policy_file, "os_directories: [/other]\n")?;
     assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
     let text = fs::read_to_string(&bench.audit_file)?;
     let lines: Vec<&str> = text.lines().filter(|line| line.contains("sha256-salted=")).collect();
@@ -159,5 +196,32 @@ fn the_list_digest_survives_redaction_in_the_audit_record() -> TestResult {
     let first = lines.first().ok_or("none")?;
     let last = lines.last().ok_or("none")?;
     assert_ne!(first, last);
+    Ok(())
+}
+
+
+#[test]
+fn sensitive_lists_reach_the_audit_as_count_and_changed_only() -> TestResult {
+    let bench = bench("{}")?;
+    replace_file(
+        &bench.policy_file,
+        "honeytoken_paths: [/srv/canary-9]\nsecurity_sensors: [edr]\nagent_paths: [/opt/agent-7]\n",
+    )?;
+    assert!(matches!(reload(&bench.engine), ReloadOutcome::Applied { .. }));
+    let text = fs::read_to_string(&bench.audit_file)?;
+    for entry in ["canary-9", "edr", "agent-7"] {
+        assert!(!text.contains(entry), "{entry}: {text}");
+    }
+    assert!(text.contains("count=1 changed=true"), "{text}");
+    assert!(!text.contains("sha256-salted"), "{text}");
+    let state = policy_state(&loaded()?);
+    for key in ["honeytoken_paths", "security_sensors", "agent_paths"] {
+        assert!(
+            state
+                .get(key)
+                .is_some_and(|value| value.contains("changed=") && !value.contains("sha256")),
+            "{key}"
+        );
+    }
     Ok(())
 }

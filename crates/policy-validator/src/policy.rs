@@ -223,8 +223,8 @@ impl Default for Policy {
 
 #[derive(Debug, Error)]
 pub enum PolicyError {
-    #[error("`{entry}` is not a canonical path: {form}")]
-    InvalidPath { entry: String, form: PathForm },
+    #[error("`{list}[{index}]` is not a canonical path: {form}")]
+    InvalidPath { list: &'static str, index: usize, form: PathForm },
     #[error("an interpreter name is empty")]
     EmptyInterpreter,
 }
@@ -252,13 +252,15 @@ pub struct LoadedPolicy {
 }
 
 
-pub fn named_paths(entries: &[String]) -> Result<Vec<NamedPath>, PolicyError> {
+/// A refusal names the list and the index, never the entry: the message reaches the log and the audit.
+pub fn named_paths(list: &'static str, entries: &[String]) -> Result<Vec<NamedPath>, PolicyError> {
     entries
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
             canonical_path(entry)
                 .map(|path| NamedPath { name: entry.clone(), path })
-                .map_err(|form| PolicyError::InvalidPath { entry: entry.clone(), form })
+                .map_err(|form| PolicyError::InvalidPath { list, index, form })
         })
         .collect()
 }
@@ -278,12 +280,12 @@ pub fn interpreter_stems(names: &[String]) -> Result<Vec<String>, PolicyError> {
 }
 
 
-/// `hash` is the SHA-256 of the exact bytes that were parsed.
+/// `hash` is the salted digest of the exact bytes that were parsed.
 pub fn compile(policy: Policy, hash: String) -> Result<LoadedPolicy, PolicyError> {
-    let writable = named_paths(&policy.user_writable_prefixes)?;
-    let protected_entries: Vec<String> = policy.honeytoken_paths.iter().chain(&policy.agent_paths).cloned().collect();
-    let protected = named_paths(&protected_entries)?;
-    let os_dirs = named_paths(&policy.os_directories)?;
+    let writable = named_paths("user_writable_prefixes", &policy.user_writable_prefixes)?;
+    let mut protected = named_paths("honeytoken_paths", &policy.honeytoken_paths)?;
+    protected.extend(named_paths("agent_paths", &policy.agent_paths)?);
+    let os_dirs = named_paths("os_directories", &policy.os_directories)?;
     let segments = policy.user_writable_segments.iter().map(|segment| segment.to_lowercase()).collect();
     let stems = interpreter_stems(&policy.interpreters)?;
     let sensor_stems = interpreter_stems(&policy.security_sensors)?;
