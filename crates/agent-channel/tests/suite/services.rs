@@ -438,7 +438,7 @@ fn signed_envelope(sequence: u64) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 
-fn agent_verifier(dir: &std::path::Path) -> Result<agent_command::model::Verifier, Box<dyn Error>> {
+pub fn agent_verifier(dir: &std::path::Path) -> Result<agent_command::model::Verifier, Box<dyn Error>> {
     let file = dir.join("keys.yaml");
     let public = HEXLOWER.encode(&SigningKey::from_bytes(&[KEY_SEED; SEED_LENGTH]).verifying_key().to_bytes());
     fs::write(
@@ -482,7 +482,10 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
     let executed = Arc::new(Mutex::new(Vec::new()));
     let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &{
         let sink = Arc::clone(&executed);
-        move |command| record_executed(&sink, command.sequence)
+        move |command| {
+            record_executed(&sink, command.sequence);
+            true
+        }
     }))
     .await??;
     assert_eq!(*executed.lock().map_err(|_| "poisoned")?, vec![FIRST]);
@@ -511,7 +514,7 @@ async fn a_flood_of_junk_envelopes_keeps_only_the_capped_refusals() -> TestResul
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
-    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| ())).await??;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| true)).await??;
     assert_eq!(run.refused, u64::try_from(junk)?);
     assert_eq!(run.accepted, 0);
     assert_eq!(run.refusals.len(), MAX_KEPT_REFUSALS);
@@ -534,6 +537,7 @@ async fn an_accepted_command_reaches_the_executor_while_the_subscription_stays_o
     let execute = move |command: Command| {
         record_executed(&sink, command.sequence);
         wake.notify_one();
+        true
     };
     let mut run = Box::pin(run_commands(session.channel.clone(), &verifier, &|| NOW, &execute));
     let ended = bounded(async {
@@ -555,7 +559,7 @@ async fn the_command_stream_of_a_dead_channel_reports_the_status() -> TestResult
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-    let outcome = bounded(run_commands(channel, &verifier, &|| NOW, &|_command| ())).await?;
+    let outcome = bounded(run_commands(channel, &verifier, &|| NOW, &|_command| true)).await?;
     assert_eq!(status_code(outcome), Some(Code::Unavailable));
     Ok(())
 }
@@ -628,4 +632,21 @@ async fn an_event_stream_without_identity_is_refused_and_one_with_identity_is_ac
     assert_eq!(acknowledgements, vec![Ok(FIRST)]);
     assert_eq!(stored_count(&stored)?, 1);
     Ok(())
+}
+
+
+#[tokio::test]
+async fn an_accepted_command_the_executor_cannot_take_is_reported_refused() -> TestResult {
+    let commands: CommandSource = envelope_source(vec![signed_envelope(1)?]);
+    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), commands);
+    let session = session(Arc::clone(&state)).await?;
+    let dir = tempdir()?;
+    let verifier = agent_verifier(dir.path())?;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| false)).await??;
+    assert_eq!((run.accepted, run.refused), (0, FIRST));
+    assert_eq!(
+        run.refusals.first().map(|verdict| verdict.reason.as_str()),
+        Some(agent_channel::model::EXECUTOR_BUSY_REASON)
+    );
+    finish_session(session).await
 }
