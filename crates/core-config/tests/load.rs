@@ -247,3 +247,24 @@ fn a_file_one_byte_over_the_cap_is_refused_with_a_typed_error() -> TestResult {
     assert!(error.to_string().contains("big.yaml"));
     Ok(())
 }
+
+
+const MULTIBYTE_CAP: u64 = 3;
+
+
+const INVALID_UTF8: [u8; 2] = [0xff, 0xfe];
+
+
+#[test]
+fn an_over_cap_file_cut_inside_a_character_is_too_large_and_a_huge_cap_does_not_overflow() -> TestResult {
+    let text = "ééé";
+    let error = read_text_capped(&mut text.as_bytes(), "multi.yaml", MULTIBYTE_CAP)
+        .err()
+        .ok_or("no error")?;
+    assert!(matches!(error, ConfigError::TooLarge { .. }));
+    assert_eq!(read_text_capped(&mut text.as_bytes(), "ok.yaml", u64::MAX)?, text);
+    let invalid: &[u8] = &INVALID_UTF8;
+    let bad = read_text_capped(&mut &*invalid, "bad.yaml", SMALL_CAP).err().ok_or("no error")?;
+    assert!(matches!(bad, ConfigError::Io { .. }));
+    Ok(())
+}

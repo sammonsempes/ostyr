@@ -30,9 +30,6 @@ pub const VALIDATION_SECTION: &str = "validation";
 pub const KEY_SEPARATOR: &str = "::";
 
 
-pub const DIFF_PARAMETER: &str = "diff";
-
-
 pub const CHANGED_KEYS_PARAMETER: &str = "changed_settings";
 
 
@@ -155,21 +152,27 @@ pub fn bundle_state(bundle: &Bundle) -> ConfigState {
 }
 
 
+/// The JSON array of changed keys; a value that does not parse names no key and is logged.
+pub fn changed_keys(text: &str) -> Vec<String> {
+    serde_json::from_str(text).unwrap_or_else(|failure| {
+        tracing::warn!(%failure, "changed_settings is not a JSON array of strings");
+        Vec::new()
+    })
+}
+
+
 /// The files named by the diff of a reload entry, so that the audit target is the file that changed.
 pub fn retarget(entry: NewEntry, files: &[String]) -> NewEntry {
+    let keys = entry
+        .parameters
+        .get(CHANGED_KEYS_PARAMETER)
+        .map(|text| changed_keys(text))
+        .unwrap_or_default();
     let changed: Vec<&str> = files
         .iter()
         .filter(|file| {
             let prefix = format!("{file}{KEY_SEPARATOR}");
-            let in_diff = entry
-                .parameters
-                .get(DIFF_PARAMETER)
-                .is_some_and(|diff| diff.contains(&format!("--- a/{prefix}")));
-            let in_keys = entry
-                .parameters
-                .get(CHANGED_KEYS_PARAMETER)
-                .is_some_and(|keys| keys.split(',').any(|key| key.starts_with(&prefix)));
-            in_diff || in_keys
+            keys.iter().any(|key| key.starts_with(&prefix))
         })
         .map(String::as_str)
         .collect();

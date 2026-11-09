@@ -6,7 +6,8 @@ use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_config::parse::parse_document;
-use core_config::reload::{current_config, reload, ReloadOutcome};
+use core_config::plan::{change_of, Change, ChangeKind};
+use core_config::reload::{bounded_parameter, changed_settings_text, current_config, diff_text, reload, ReloadOutcome};
 use core_config::watch::watch_files;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
@@ -1407,10 +1408,8 @@ fn a_hostile_expression_that_reaches_run_time_halts_the_run() -> TestResult {
 }
 
 
-#[test]
-fn retarget_reads_the_changed_settings_when_the_diff_is_cut() -> Result<(), Box<dyn Error>> {
-    let files = vec!["a.yaml".to_owned(), "b.yaml".to_owned(), "c.yaml".to_owned()];
-    let entry = NewEntry {
+fn reload_entry(changes: &[Change]) -> NewEntry {
+    NewEntry {
         timestamp: OffsetDateTime::UNIX_EPOCH,
         actor: core_audit::model::Actor {
             kind: core_audit::model::ActorKind::System,
@@ -1424,16 +1423,58 @@ fn retarget_reads_the_changed_settings_when_the_diff_is_cut() -> Result<(), Box<
         request_id: "r".to_owned(),
         justification: None,
         parameters: [
-            ("diff".to_owned(), "--- a/c.yaml::x\n[diff truncated, 5 characters omitted]".to_owned()),
-            ("changed_settings".to_owned(), "a.yaml::steps.0,other::y".to_owned()),
+            ("diff".to_owned(), bounded_parameter("diff", &diff_text(changes))),
+            (
+                "changed_settings".to_owned(),
+                bounded_parameter("changed_settings", &changed_settings_text(changes)),
+            ),
         ]
         .into(),
-    };
+    }
+}
+
+
+fn two_files() -> Vec<String> {
+    vec!["a.yaml".to_owned(), "other.yaml".to_owned()]
+}
+
+
+#[test]
+fn retarget_reads_only_the_changed_settings() -> Result<(), Box<dyn Error>> {
+    let files = vec!["a.yaml".to_owned(), "b.yaml".to_owned(), "c.yaml".to_owned()];
+    let entry = reload_entry(&[
+        change_of(ChangeKind::Update, "a.yaml::steps.0", "1", "2"),
+        change_of(ChangeKind::Update, "c.yaml::x", "1", "2"),
+        change_of(ChangeKind::Update, "other::y", "1", "2"),
+    ]);
     assert_eq!(retarget(entry.clone(), &files).target, "a.yaml,c.yaml");
     let bare = NewEntry {
         parameters: BTreeMap::new(),
         ..entry
     };
     assert_eq!(retarget(bare, &files).target, "catalogue");
+    Ok(())
+}
+
+
+#[test]
+fn a_key_holding_a_comma_and_another_file_prefix_retargets_only_the_changed_file() -> Result<(), Box<dyn Error>> {
+    let key = change_of(ChangeKind::Update, "a.yaml::x,other.yaml::y", "1", "2");
+    assert_eq!(retarget(reload_entry(&[key]), &two_files()).target, "a.yaml");
+    let raw = NewEntry {
+        parameters: [("changed_settings".to_owned(), "a.yaml::x,other.yaml::y".to_owned())].into(),
+        ..reload_entry(&[])
+    };
+    assert_eq!(retarget(raw, &two_files()).target, "catalogue");
+    Ok(())
+}
+
+
+#[test]
+fn a_key_or_value_imitating_a_diff_header_does_not_retarget_another_file() -> Result<(), Box<dyn Error>> {
+    let key = change_of(ChangeKind::Update, "a.yaml::hosts.x,--- a/other.yaml::y", "1", "2");
+    assert_eq!(retarget(reload_entry(&[key]), &two_files()).target, "a.yaml");
+    let value = change_of(ChangeKind::Update, "a.yaml::note", "old", "see --- a/other.yaml::z");
+    assert_eq!(retarget(reload_entry(&[value]), &two_files()).target, "a.yaml");
     Ok(())
 }

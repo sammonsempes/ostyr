@@ -15,15 +15,20 @@ pub const MAX_FILE_BYTES: u64 = 8_388_608;
 
 /// Reads at most `max` bytes; one byte more is refused with `ConfigError::TooLarge` naming the file.
 pub fn read_text_capped(reader: &mut dyn Read, file: &str, max: u64) -> Result<String, ConfigError> {
-    let mut text = String::new();
-    Read::take(reader, max + 1).read_to_string(&mut text).map_err(|source| ConfigError::Io {
-        file: file.to_string(),
-        source,
-    })?;
-    if text.len() as u64 > max {
+    let mut bytes = Vec::new();
+    Read::take(reader, max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| ConfigError::Io {
+            file: file.to_string(),
+            source,
+        })?;
+    if bytes.len() as u64 > max {
         Err(ConfigError::TooLarge { file: file.to_string(), max })
     } else {
-        Ok(text)
+        String::from_utf8(bytes).map_err(|source| ConfigError::Io {
+            file: file.to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })
     }
 }
 
