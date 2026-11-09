@@ -46,6 +46,12 @@ pub enum ScriptError {
         #[source]
         source: io::Error,
     },
+    #[error("the work root is not a directory owned by the agent user, closed to others, below directories closed to others")]
+    UnsafeWorkRoot,
+    #[error("the cgroup root is not on a cgroup v2 filesystem")]
+    NotCgroupV2,
+    #[error("none of the declared interpreter paths exists")]
+    NoInterpreter,
     #[error("{context}")]
     Io {
         context: &'static str,
