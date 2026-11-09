@@ -87,7 +87,10 @@ fn c3_finding_2_a_path_must_cover_every_observed_image() -> TestResult {
         "/srv/app/bin/tool",
         vec![at("relative/tool", "tool")],
     )?;
-    assert_eq!(bad_image_path, unbound());
+    assert_eq!(
+        bad_image_path,
+        vec![Reason::NonCanonical { form: PathForm::NotAbsolute }, Reason::SelectorNotInEvidence]
+    );
     Ok(())
 }
 

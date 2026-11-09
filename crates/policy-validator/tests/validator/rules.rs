@@ -77,6 +77,16 @@ fn a_hash_must_be_sixty_four_hexadecimal_characters() -> TestResult {
 }
 
 
+fn non_canonical_forms(name: &str) -> Vec<PathForm> {
+    match name {
+        "bash.exe." => vec![PathForm::TrailingDotOrSpace],
+        "POWERS~1.EXE" => vec![PathForm::ShortName],
+        "" => vec![PathForm::TrailingSeparator],
+        _ => Vec::new(),
+    }
+}
+
+
 #[test]
 fn a_global_hash_of_a_system_binary_or_interpreter_is_refused() -> TestResult {
     for name in [
@@ -100,8 +110,9 @@ fn a_global_hash_of_a_system_binary_or_interpreter_is_refused() -> TestResult {
     ] {
         let mut proposal = exclusion(Scope::Global, SelectorKind::Hash, &hash());
         proposal.evidence.observed_images = vec![image("tool.exe"), image(name)];
-        let found = reasons_for(proposal)?;
-        assert_eq!(found, vec![Reason::SystemBinary { name: name.to_owned() }], "{name}");
+        let mut expected: Vec<Reason> = non_canonical_forms(name).into_iter().map(|form| Reason::NonCanonical { form }).collect();
+        expected.push(Reason::SystemBinary { name: name.to_owned() });
+        assert_eq!(reasons_for(proposal)?, expected, "{name}");
     }
     Ok(())
 }
