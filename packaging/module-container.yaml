@@ -1,0 +1,11 @@
+name: example
+version: 0.0.0
+tenant: default
+listen: 0.0.0.0:8443
+settings:
+  tls_certificate: /etc/ostyr/tls.crt
+  tls_key: /etc/ostyr/tls.key
+  accounts_store: /var/lib/ostyr/accounts.json
+  audit_log: /var/lib/ostyr/audit.log
+  key_file: /etc/ostyr/store.key
+  compromised_list: /etc/ostyr/compromised.txt

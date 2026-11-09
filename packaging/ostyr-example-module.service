@@ -1,0 +1,48 @@
+[Unit]
+Description=Ostyr example core module
+Documentation=file:///usr/share/doc/ostyr-example-module/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ostyr-module
+Group=ostyr-module
+ExecStart=/usr/bin/ostyr-example-module /etc/ostyr/example-module/module.yaml
+ExecReload=/usr/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+StateDirectory=ostyr-example-module
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+LimitNOFILE=65536
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

@@ -4,6 +4,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 publish = false
+description = "Ostyr example core module: REST API skeleton with TLS, local accounts, audit and OpenAPI"
 
 [dependencies]
 arc-swap = "1.9.3"
@@ -46,3 +47,25 @@ tokio-stream = "0.1"
 
 [lints]
 workspace = true
+
+[package.metadata.deb]
+name = "ostyr-example-module"
+maintainer = "Ostyr <contact@ostyr.invalid>"
+section = "admin"
+priority = "optional"
+depends = "$auto, openssl, adduser"
+extended-description = "The example core module every Ostyr module packaging copies: a hardened systemd service running as a dedicated user."
+maintainer-scripts = "../../packaging/debian"
+systemd-units = { unit-name = "ostyr-example-module", unit-scripts = "../../packaging", enable = true, start = true }
+conf-files = ["/etc/ostyr/example-module/module.yaml", "/etc/ostyr/example-module/compromised.txt"]
+assets = [
+    ["target/release/examples/module_api", "usr/bin/ostyr-example-module", "755"],
+    ["target/release/examples/auth_tool", "usr/bin/ostyr-auth-tool", "755"],
+    ["target/release/examples/xdrctl", "usr/bin/xdrctl", "755"],
+    ["../../packaging/module.yaml", "etc/ostyr/example-module/module.yaml", "644"],
+    ["../../packaging/compromised.txt", "etc/ostyr/example-module/compromised.txt", "644"],
+    ["../../packaging/README.md", "usr/share/doc/ostyr-example-module/README.md", "644"],
+    ["target/release/sbom/core-api.cdx.json", "usr/share/doc/ostyr-example-module/sbom/core-api.cdx.json", "644"],
+    ["target/release/sbom/core-auth.cdx.json", "usr/share/doc/ostyr-example-module/sbom/core-auth.cdx.json", "644"],
+    ["target/release/sbom/xdrctl.cdx.json", "usr/share/doc/ostyr-example-module/sbom/xdrctl.cdx.json", "644"],
+]
