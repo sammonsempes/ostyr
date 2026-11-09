@@ -15,7 +15,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
 use tonic_prost::ProstCodec;
@@ -27,7 +27,7 @@ const POLL_ATTEMPTS: u32 = 200;
 const POLL_MILLIS: u64 = 25;
 
 
-const QUIET_MILLIS: u64 = 500;
+const QUIET_POLLS: u32 = 20;
 
 
 const EXTRA_ATTEMPTS: u64 = 5;
@@ -132,15 +132,26 @@ async fn a_connection_above_the_per_agent_bound_is_refused_and_counted() -> Test
 
 #[tokio::test]
 async fn http2_streams_per_connection_are_bounded() -> TestResult {
-    let (state, _stored) = recording_state(settings(|base| base.max_streams_per_connection = 1));
+    let (state, _stored) = recording_state(settings(|base| {
+        base.max_streams_per_connection = 1;
+    }));
     let session = session(Arc::clone(&state)).await?;
+    bounded(heartbeat(session.channel.clone(), "test")).await??;
+    wait_for_inflight(&state, 0).await?;
     let stalled = stall_heartbeat(session.channel.clone());
     wait_for_inflight(&state, 1).await?;
-    let waiting = timeout(Duration::from_millis(QUIET_MILLIS), heartbeat(session.channel.clone(), "test")).await;
-    assert!(waiting.is_err());
+    let channel = session.channel.clone();
+    let queued = tokio::spawn(async move { heartbeat(channel, "test").await });
+    let mut polls = 0;
+    while !queued.is_finished() && polls < QUIET_POLLS {
+        sleep(Duration::from_millis(POLL_MILLIS)).await;
+        polls += 1;
+    }
+    assert!(!queued.is_finished());
     assert_eq!(inflight(&state), 1);
-    assert_eq!(counter(&state.counters.inflight_limited), 0);
     stalled.abort();
+    bounded(queued).await???;
+    assert_eq!(counter(&state.counters.inflight_limited), 0);
     finish_session(session).await
 }
 
