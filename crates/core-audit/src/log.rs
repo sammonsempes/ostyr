@@ -1,4 +1,4 @@
-use crate::canonical::{render_line, seal};
+use crate::canonical::{render_line, restrict_parameters, seal};
 use crate::error::AuditError;
 use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::verify::verify;
@@ -129,6 +129,13 @@ pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<
             }
         }
     }
+}
+
+
+/// Like `append`, but only the parameter keys in `declared` keep their value; every other value is stored as `[REDACTED]`.
+pub fn append_declared<Output: Write>(log: &AuditLog<Output>, entry: NewEntry, declared: &[&str]) -> Result<Record, AuditError> {
+    let parameters = restrict_parameters(entry.parameters, declared);
+    append(log, NewEntry { parameters, ..entry })
 }
 
 

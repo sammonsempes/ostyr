@@ -1,12 +1,18 @@
 use crate::ecs::export;
 use crate::error::AuditError;
-use crate::log::{append, head, open_file_log, AuditLog};
+use crate::log::{append_declared, head, open_file_log, AuditLog};
 use crate::model::{Actor, ActorKind, NewEntry, Outcome};
 use crate::verify::verify;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::Path;
 use time::OffsetDateTime;
+
+
+pub const SAMPLE_NOTE: &str = "k9Zq7Xw2Lm4Pv8Rt";
+
+
+pub const DECLARED_KEYS: [&str; 1] = ["name"];
 
 
 pub fn sample_entry(index: usize) -> NewEntry {
@@ -23,7 +29,12 @@ pub fn sample_entry(index: usize) -> NewEntry {
         outcome: Outcome::Success,
         request_id: format!("request-{index}"),
         justification: None,
-        parameters: [("password".to_owned(), "hunter2".to_owned())].into(),
+        parameters: [
+            ("password".to_owned(), "hunter2".to_owned()),
+            ("note".to_owned(), SAMPLE_NOTE.to_owned()),
+            ("name".to_owned(), "visible".to_owned()),
+        ]
+        .into(),
     }
 }
 
@@ -39,7 +50,7 @@ pub fn parse_count(text: &str) -> Result<usize, AuditError> {
 /// Appends `total` sample records and returns the new chain head.
 pub fn append_samples<Output: Write>(log: &AuditLog<Output>, total: usize) -> Result<String, AuditError> {
     (0..total)
-        .try_for_each(|index| append(log, sample_entry(index)).map(|_| ()))
+        .try_for_each(|index| append_declared(log, sample_entry(index), &DECLARED_KEYS).map(|_| ()))
         .map(|()| head(log))
 }
 

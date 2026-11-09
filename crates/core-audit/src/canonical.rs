@@ -1,6 +1,7 @@
 use crate::model::{ActorKind, NewEntry, Outcome, Record};
 use crate::types::ParameterMap;
 use core_redact::redact_parameters;
+use core_redact::value::REDACTED;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
@@ -89,4 +90,16 @@ pub fn seal(entry: NewEntry, previous_hash: &str) -> Result<Record, time::error:
     };
     let hash = compute_hash(&unsealed);
     Ok(Record { hash, ..unsealed })
+}
+
+
+/// Replaces the value of every parameter whose key is not in `declared` with `[REDACTED]`.
+pub fn restrict_parameters(parameters: ParameterMap, declared: &[&str]) -> ParameterMap {
+    parameters
+        .into_iter()
+        .map(|(key, value)| {
+            let kept = if declared.contains(&key.as_str()) { value } else { REDACTED.to_owned() };
+            (key, kept)
+        })
+        .collect()
 }

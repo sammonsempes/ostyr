@@ -34,7 +34,12 @@ fn append_verify_and_export_round_trip() -> TestResult {
     assert_eq!(output_of(&["export", &path])?.lines().count(), SAMPLE_COUNT);
     assert_eq!(output_of(&["export", &path, &head])?.lines().count(), SAMPLE_COUNT);
     assert!(matches!(output_of(&["export", &path, "abc"]), Err(AuditError::HeadMismatch { .. })));
-    assert!(!fs::read_to_string(&path)?.contains("hunter2"));
+    let exported = output_of(&["export", &path])?;
+    let stored = fs::read_to_string(&path)?;
+    [stored, exported].iter().for_each(|text| {
+        assert!(!text.contains("hunter2") && !text.contains(core_audit::cli::SAMPLE_NOTE));
+        assert!(text.contains("visible"));
+    });
     Ok(())
 }
 
