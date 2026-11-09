@@ -4234,12 +4234,18 @@ version = "0.0.0"
 dependencies = [
  "core-audit",
  "core-config",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "siem-schema",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tracing",
+ "tracing-subscriber",
+ "ureq 3.5.1",
 ]
 
 [[package]]

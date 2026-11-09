@@ -64,6 +64,9 @@ const SIZE_FIVE: usize = 5;
 const SIZE_EIGHT: usize = 8;
 
 
+const STATE_FIELDS: usize = 16;
+
+
 const BAD_BYTE: u8 = 0xff;
 
 
@@ -420,7 +423,7 @@ fn every_setting_is_bounded() -> TestResult {
         assert!(!error.to_string().is_empty());
         Ok(())
     })?;
-    assert_eq!(settings_state(&defaults).len(), SIZE_EIGHT);
+    assert_eq!(settings_state(&defaults).len(), STATE_FIELDS);
     Ok(())
 }
 
