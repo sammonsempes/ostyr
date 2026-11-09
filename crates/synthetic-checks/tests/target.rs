@@ -199,3 +199,13 @@ fn benchmarking_range_is_reserved() -> TestResult {
     assert_eq!(checked_ip(&guard_address(ip("198.20.0.1")?, &[])?), ip("198.20.0.1")?);
     Ok(())
 }
+
+
+#[test]
+fn metadata_at_the_nat64_local_embedded_position_is_never_scoped() -> TestResult {
+    let scope = [net("64:ff9b:1::/48")?];
+    assert_eq!(refused_class("64:ff9b:1::a9fe:a9fe", &scope)?, AddressClass::Metadata);
+    assert_eq!(refused_class("64:ff9b:1:0:0:0:a9fe:a9fe", &[])?, AddressClass::Reserved);
+    assert!(guard_address(ip("64:ff9b:1::808:808")?, &scope).is_ok());
+    Ok(())
+}

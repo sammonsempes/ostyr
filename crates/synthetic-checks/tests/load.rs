@@ -6,8 +6,8 @@ use core_config::parse::parse_document;
 use std::fs;
 use synthetic_checks::load::load_checks;
 use synthetic_checks::model::{
-    CheckFile, CheckKind, DEFAULT_CERT_DAYS, DEFAULT_CONSECUTIVE_FAILURES, DEFAULT_INTERVAL_SECONDS, DEFAULT_MIN_FAILING_LOCATIONS,
-    DEFAULT_TIMEOUT_SECONDS, MAX_CHECKS, MAX_NAME_LEN, MAX_SCOPE_ENTRIES,
+    certificate_day_value, failure_run_len, CertificateDay, CheckFile, CheckKind, DEFAULT_CERT_DAYS, DEFAULT_CONSECUTIVE_FAILURES,
+    DEFAULT_INTERVAL_SECONDS, DEFAULT_MIN_FAILING_LOCATIONS, DEFAULT_TIMEOUT_SECONDS, MAX_CHECKS, MAX_NAME_LEN, MAX_SCOPE_ENTRIES,
 };
 use tempfile::tempdir;
 use types::TestResult;
@@ -41,6 +41,11 @@ fn check_with(line: &str) -> String {
 }
 
 
+fn day_values(days: &[CertificateDay]) -> Vec<u64> {
+    days.iter().map(|day| certificate_day_value(*day)).collect()
+}
+
+
 fn message_of(text: &str) -> Result<String, Box<dyn std::error::Error>> {
     Ok(parse(text).err().ok_or("expected an error")?.to_string())
 }
@@ -53,9 +58,9 @@ fn defaults_apply() -> TestResult {
     assert_eq!(check.kind, CheckKind::Http);
     assert_eq!(check.interval_seconds, DEFAULT_INTERVAL_SECONDS);
     assert_eq!(check.timeout_seconds, DEFAULT_TIMEOUT_SECONDS);
-    assert_eq!(check.consecutive_failures, DEFAULT_CONSECUTIVE_FAILURES);
+    assert_eq!(failure_run_len(check.consecutive_failures), DEFAULT_CONSECUTIVE_FAILURES as usize);
     assert_eq!(check.min_failing_locations, DEFAULT_MIN_FAILING_LOCATIONS);
-    assert_eq!(check.certificate_days, DEFAULT_CERT_DAYS.to_vec());
+    assert_eq!(day_values(&check.certificate_days), DEFAULT_CERT_DAYS.to_vec());
     assert!(file.scope.is_empty());
     Ok(())
 }
@@ -67,7 +72,7 @@ fn full_entry_and_scope_parse() -> TestResult {
     let check = file.checks.first().ok_or("no check")?;
     assert_eq!(check.kind, CheckKind::Tcp);
     assert_eq!(check.locations, vec!["paris", "berlin"]);
-    assert_eq!(check.certificate_days, vec![CERT_LONG, CERT_SHORT]);
+    assert_eq!(day_values(&check.certificate_days), vec![CERT_LONG, CERT_SHORT]);
     assert_eq!(file.scope.len(), 1);
     Ok(())
 }
