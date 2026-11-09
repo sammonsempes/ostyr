@@ -37,3 +37,38 @@ pub enum ExpiryState {
     Crossed { threshold_days: u32 },
     Expired,
 }
+
+
+/// One parsed CT log entry; a precertificate's fingerprint is the SHA-256 of its TBS, not of a final certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CtEntry {
+    pub record: CertRecord,
+    pub all_dns_names: Vec<String>,
+    pub serial: String,
+    pub precert: bool,
+    pub timestamp_ms: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CtOutcome {
+    pub entries: Vec<CtEntry>,
+    pub skipped_malformed: usize,
+    pub skipped_unsupported: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtLimits {
+    pub max_json_bytes: usize,
+    pub max_entries: usize,
+    pub max_leaf_bytes: usize,
+}
+
+
+/// An (issuer, serial) pair of an inventoried certificate; `issuer` is the `CertRecord::issuer` string, `serial` the `serial_hex` form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownSerial {
+    pub issuer: String,
+    pub serial: String,
+}

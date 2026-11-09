@@ -17,3 +17,19 @@ pub enum CertError {
     #[error("invalid certificate extension: {0}")]
     Extension(#[source] X509Error),
 }
+
+
+/// No variant carries input bytes: the serde_json message is replaced by its position and category.
+#[derive(Debug, Error)]
+pub enum CtError {
+    #[error("get-entries response is {size} bytes, above the {max} byte limit")]
+    JsonTooLarge { size: usize, max: usize },
+    #[error("get-entries response holds more than {max} entries")]
+    TooManyEntries { max: usize },
+    #[error("invalid get-entries JSON ({category:?}) at line {line} column {column}")]
+    Json {
+        category: serde_json::error::Category,
+        line: usize,
+        column: usize,
+    },
+}
