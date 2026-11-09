@@ -2,6 +2,7 @@ use crate::error::OncallError;
 use crate::limits::{MAX_PATH_LEN, MAX_TARGET_LEN};
 use crate::load::read_file_limited;
 use crate::model::{Channel, ChannelKind};
+use crate::smtp::parse_address;
 use crate::validate::{check_between, check_name};
 use core_config::parse::parse_document;
 use std::path::Path;
@@ -17,10 +18,7 @@ pub fn invalid(channel: &Channel, reason: &'static str) -> OncallError {
 
 
 pub fn is_address(target: &str) -> bool {
-    let mut parts = target.split('@');
-    let has_shape =
-        matches!((parts.next(), parts.next(), parts.next()), (Some(local), Some(domain), None) if !local.is_empty() && !domain.is_empty());
-    has_shape && !target.chars().any(|character| character.is_control() || character.is_whitespace())
+    parse_address(target).is_ok()
 }
 
 

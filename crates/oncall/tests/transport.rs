@@ -1,3 +1,5 @@
+#[path = "common/pki.rs"]
+mod pki;
 #[path = "common/sink.rs"]
 mod sink;
 #[path = "common/types.rs"]
@@ -13,7 +15,8 @@ use oncall::notify::notify;
 use oncall::secret::{read_secret, secret_text};
 use oncall::settings::{open_settings_engine, parse_settings, settings_state, TransportSettings};
 use oncall::transport::{build_agent, check_text, https_sender, https_url, payload, post, send_one};
-use sink::{spawn_silent, spawn_sink, test_pki, Seen};
+use pki::{spawn_silent, test_pki};
+use sink::{spawn_sink, Seen};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -29,7 +32,7 @@ use types::TestResult;
 const INVALID_UTF8: &[u8] = &[u8::MAX, u8::MAX - 1];
 
 
-const STATE_KEYS: usize = 3;
+const STATE_KEYS: usize = 4;
 
 
 const TENANT: &str = "acme";
@@ -94,6 +97,7 @@ fn fixture(ca_pem: Option<&str>, timeout_millis: u64) -> Result<Fixture, Box<dyn
         timeout_millis,
         ca_file,
         secret_dirs: BTreeMap::from([(TENANT.to_string(), secrets.display().to_string())]),
+        smtp: None,
     };
     Ok(Fixture { directory, settings })
 }
@@ -254,7 +258,7 @@ fn the_request_goes_to_the_parsed_url() -> TestResult {
 #[test]
 fn a_server_that_never_answers_fails_on_the_injected_deadline() -> TestResult {
     let (release, wait) = signal();
-    let sink::Silent { port, held } = spawn_silent(wait)?;
+    let pki::Silent { port, held } = spawn_silent(wait)?;
     let fixture = fixture(None, SHORT_TIMEOUT_MILLIS)?;
     let outcome = send_one(&fixture.settings, &channel_for(ChannelKind::Webhook, &url_of(port), None), &message());
     assert!(matches!(outcome, Err(TransportError::Request(_))));
@@ -513,7 +517,10 @@ fn settings_bounds_are_enforced() -> TestResult {
 }
 
 
-const TRACE_SECRET: &str = "TOPSECRETBEARERTOKEN";
+const TRACE_SECRET: &str = "BEARERTOKEN16BYT";
+
+
+const HALF_LEN: usize = 8;
 
 
 const TRACE_URL_PATH: &str = "/services/T000/B000/SLACKURLSECRET";
@@ -537,7 +544,12 @@ fn the_log_bridge_at_trace_never_sees_the_bearer_token_or_the_url_path() -> Test
     send_one(&fixture.settings, &channel_for(ChannelKind::Webhook, &target, Some("token")), &message())?;
     sink.seen.join().map_err(|_panic| "sink panicked")??;
     let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    let (first_half, second_half) = TRACE_SECRET.split_at(HALF_LEN);
+    let spaced_hex = |text: &str| text.bytes().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
+    let lowered = logs.to_lowercase();
     assert!(!logs.contains(TRACE_SECRET));
+    assert!(!logs.contains(first_half) && !logs.contains(second_half));
+    assert!(!lowered.contains(&spaced_hex(first_half)) && !lowered.contains(&spaced_hex(second_half)));
     assert!(!logs.contains("SLACKURLSECRET"));
     assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
     Ok(())
