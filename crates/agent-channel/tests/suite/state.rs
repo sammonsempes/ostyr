@@ -1,4 +1,5 @@
 use crate::types::Stored;
+use agent_channel::limits::system_now;
 use agent_channel::model::{ChannelSettings, Counters, Identity, ServerState};
 use agent_channel::proto::EventBatch;
 use agent_channel::settings::shared_settings;
@@ -67,6 +68,7 @@ pub fn make_audited_state(settings: ChannelSettings, events: EventSink, commands
         commands,
         presence: Mutex::new(HashMap::new()),
         audit,
+        now: Box::new(system_now),
     })
 }
 
@@ -85,5 +87,6 @@ pub fn make_live_state(settings: SharedSettings) -> SharedState {
         commands: envelope_source(Vec::new()),
         presence: Mutex::new(HashMap::new()),
         audit: discarding_audit(),
+        now: Box::new(system_now),
     })
 }

@@ -28,6 +28,11 @@ pub fn lock_presence(state: &ServerState) -> MutexGuard<'_, HashMap<Identity, Pr
 }
 
 
+pub fn system_now() -> Instant {
+    Instant::now()
+}
+
+
 pub fn fresh_load(now: Instant) -> AgentLoad {
     AgentLoad {
         connections: 0,
@@ -52,7 +57,7 @@ pub fn count_request(load: &mut AgentLoad, now: Instant, window: Duration, maxim
 
 /// Refuses with `ResourceExhausted`, counted and logged, an agent above its request rate.
 pub fn admit_request(state: &ServerState, identity: &Identity) -> Result<(), Status> {
-    let now = Instant::now();
+    let now = (state.now)();
     let settings = settings_of(state);
     let window = Duration::from_secs(settings.rate_window_seconds);
     let admitted = {
@@ -101,7 +106,7 @@ pub fn slot_refusals(counters: &Counters, kind: SlotKind) -> &AtomicU64 {
 pub fn open_slot(state: &SharedState, identity: &Identity, kind: SlotKind) -> Result<SlotPermit, Status> {
     let opened = {
         let mut loads = lock_load(state);
-        let load = loads.entry(identity.clone()).or_insert_with(|| fresh_load(Instant::now()));
+        let load = loads.entry(identity.clone()).or_insert_with(|| fresh_load((state.now)()));
         let limit = slot_limit(&settings_of(state), kind);
         let held = slot_count(load, kind);
         let free = *held < limit;

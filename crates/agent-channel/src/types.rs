@@ -6,15 +6,21 @@ use arc_swap::ArcSwap;
 use core_config::types::SharedAuditFn;
 use std::error::Error;
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_stream::Stream;
 use tonic::transport::Channel;
 use tonic::Status;
+
+
+pub type EventWriter = Box<dyn Write + Send>;
+
+
+pub type SyncFn = Box<dyn Fn() -> io::Result<()> + Send>;
 
 
 pub type SharedServerConfig = Arc<rustls::ServerConfig>;
@@ -64,8 +70,12 @@ pub type EnvelopeStream = Pin<Box<dyn Stream<Item = Result<CommandEnvelope, Stat
 pub type SharedState = Arc<ServerState>;
 
 
-/// Receives each accepted command as it arrives; it must hand the work off and return quickly.
-pub type ExecuteFn = dyn Fn(Command) + Send + Sync;
+/// Receives each accepted command as it arrives; it must hand the work off and return quickly, true when the work was taken over.
+pub type ExecuteFn = dyn Fn(Command) -> bool + Send + Sync;
+
+
+/// Reads the monotonic time for the server limiter; production passes `system_now`.
+pub type NowFn = dyn Fn() -> Instant + Send + Sync;
 
 
 pub type ClockFn = dyn Fn() -> u64 + Send + Sync;
