@@ -1,0 +1,278 @@
+use crate::error::StoreError;
+use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Limits, Observation, Outcome, Resolution, Snapshot};
+use crate::reconcile::reconcile;
+use crate::types::{Executor, Row, TruthMap, VersionMap};
+use core_pg::error::PgError;
+use core_pg::migrate::Migration;
+use core_pg::scope::TenantScope;
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+
+
+pub const ASSETS_TABLE: &str = "cmdb_assets";
+
+
+pub const KEYS_TABLE: &str = "cmdb_identity_keys";
+
+
+pub const ATTRIBUTES_TABLE: &str = "cmdb_attributes";
+
+
+pub const ASSETS_SQL: &str = "SELECT id, kind, lifecycle, version::text FROM cmdb_assets WHERE tenant = $1 \
+                              ORDER BY id LIMIT $2::text::bigint OFFSET $3::text::bigint";
+
+
+pub const KEYS_SQL: &str = "SELECT asset, key, value FROM cmdb_identity_keys WHERE tenant = $1 \
+                            ORDER BY key, value LIMIT $2::text::bigint OFFSET $3::text::bigint";
+
+
+pub const ATTRIBUTES_SQL: &str = "SELECT asset, name, value, source FROM cmdb_attributes WHERE tenant = $1 \
+                                  ORDER BY asset, name LIMIT $2::text::bigint OFFSET $3::text::bigint";
+
+
+/// One statement, so one implicit transaction: `$1` tenant, `$2` the JSON document of the changes.
+pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
+
+
+pub const UNIQUE_VIOLATION: &str = "23505";
+
+
+pub const MAX_PAGES: usize = 10_000;
+
+
+pub const ATTEMPT_CEILING: usize = 10;
+
+
+pub const KIND_COLUMN: usize = 1;
+
+
+pub const KEY_COLUMN: usize = 1;
+
+
+pub const LIFECYCLE_COLUMN: usize = 2;
+
+
+pub const VALUE_COLUMN: usize = 2;
+
+
+pub const VERSION_COLUMN: usize = 3;
+
+
+pub const SOURCE_COLUMN: usize = 3;
+
+
+pub const MIGRATIONS: [Migration; 1] = [Migration {
+    version: "001_cmdb",
+    sql: include_str!("../migrations/001_cmdb.sql"),
+}];
+
+
+pub fn conflict_of(error: PgError) -> StoreError {
+    match error {
+        PgError::Server { ref code, .. } if code == UNIQUE_VIOLATION => StoreError::VersionConflict,
+        other => StoreError::Pg(other),
+    }
+}
+
+
+/// Reads one table page by page; the pages read are bounded by the row cap, so a huge tenant cannot grow the buffer without end.
+pub async fn read_table(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    table: &'static str,
+    sql: &'static str,
+    page_size: usize,
+    max_rows: usize,
+) -> Result<Vec<Row>, StoreError> {
+    let max_pages = max_rows / page_size.max(1) + 1;
+    let mut rows: Vec<Row> = Vec::new();
+    let mut done = false;
+    let mut pages = 0;
+    while !done && pages < MAX_PAGES && pages < max_pages {
+        let page = exec(scope.clone(), sql, vec![page_size.to_string(), rows.len().to_string()]).await?;
+        done = page.len() < page_size;
+        rows.extend(page);
+        pages += 1;
+    }
+    if rows.len() > max_rows {
+        Err(StoreError::TooManyRows { table, limit: max_rows })
+    } else {
+        Ok(rows)
+    }
+}
+
+
+pub fn cell<'a>(row: &'a Row, index: usize, table: &'static str) -> Result<&'a String, StoreError> {
+    row.get(index).ok_or(StoreError::BadRow { table })
+}
+
+
+pub fn parse_enum<Wanted: DeserializeOwned>(text: &str, table: &'static str) -> Result<Wanted, StoreError> {
+    serde_json::from_value(Value::String(text.to_owned())).map_err(|source| StoreError::BadValue { table, source })
+}
+
+
+pub fn asset_from_row(row: &Row) -> Result<(Asset, i64), StoreError> {
+    let version = cell(row, VERSION_COLUMN, ASSETS_TABLE)?.parse::<i64>().map_err(StoreError::BadVersion)?;
+    let asset = Asset {
+        id: cell(row, 0, ASSETS_TABLE)?.clone(),
+        kind: parse_enum(cell(row, KIND_COLUMN, ASSETS_TABLE)?, ASSETS_TABLE)?,
+        lifecycle: parse_enum(cell(row, LIFECYCLE_COLUMN, ASSETS_TABLE)?, ASSETS_TABLE)?,
+        keys: Default::default(),
+        attributes: Default::default(),
+    };
+    Ok((asset, version))
+}
+
+
+pub fn asset_of<'a>(assets: &'a mut BTreeMap<String, Asset>, id: &str, table: &'static str) -> Result<&'a mut Asset, StoreError> {
+    assets.get_mut(id).ok_or(StoreError::BadRow { table })
+}
+
+
+/// The tenant scope reaches every statement through the executor, which binds it as `$1`.
+pub async fn load_assets(exec: Executor<'_, '_>, scope: &TenantScope, limits: &Limits) -> Result<Snapshot, StoreError> {
+    let asset_rows = read_table(exec, scope, ASSETS_TABLE, ASSETS_SQL, limits.page_size, limits.max_assets).await?;
+    let key_rows = read_table(exec, scope, KEYS_TABLE, KEYS_SQL, limits.page_size, limits.max_child_rows).await?;
+    let attribute_rows = read_table(exec, scope, ATTRIBUTES_TABLE, ATTRIBUTES_SQL, limits.page_size, limits.max_child_rows).await?;
+    let mut by_id: BTreeMap<String, Asset> = BTreeMap::new();
+    let mut versions = VersionMap::new();
+    for row in &asset_rows {
+        let (asset, version) = asset_from_row(row)?;
+        versions.insert(asset.id.clone(), version);
+        by_id.insert(asset.id.clone(), asset);
+    }
+    for row in &key_rows {
+        let key: IdentityKey = parse_enum(cell(row, KEY_COLUMN, KEYS_TABLE)?, KEYS_TABLE)?;
+        let value = cell(row, VALUE_COLUMN, KEYS_TABLE)?.clone();
+        asset_of(&mut by_id, cell(row, 0, KEYS_TABLE)?, KEYS_TABLE)?.keys.insert(key, value);
+    }
+    for row in &attribute_rows {
+        let attribute = Attribute {
+            value: cell(row, VALUE_COLUMN, ATTRIBUTES_TABLE)?.clone(),
+            source: cell(row, SOURCE_COLUMN, ATTRIBUTES_TABLE)?.clone(),
+        };
+        let name = cell(row, KEY_COLUMN, ATTRIBUTES_TABLE)?.clone();
+        asset_of(&mut by_id, cell(row, 0, ATTRIBUTES_TABLE)?, ATTRIBUTES_TABLE)?
+            .attributes
+            .insert(name, attribute);
+    }
+    Ok(Snapshot {
+        assets: by_id.into_values().collect(),
+        versions,
+    })
+}
+
+
+/// Assets new or different from what was read.
+pub fn changed_assets<'a>(snapshot: &Snapshot, outcome: &'a Outcome) -> Vec<&'a Asset> {
+    let known: BTreeMap<&str, &Asset> = snapshot.assets.iter().map(|asset| (asset.id.as_str(), asset)).collect();
+    outcome
+        .inventory
+        .iter()
+        .filter(|asset| known.get(asset.id.as_str()).copied() != Some(*asset))
+        .collect()
+}
+
+
+pub fn asset_doc(asset: &Asset, version: i64) -> Value {
+    json!({
+        "id": asset.id,
+        "kind": asset.kind,
+        "lifecycle": asset.lifecycle,
+        "version": version,
+        "keys": asset.keys.iter().map(|(key, value)| json!({"key": key, "value": value})).collect::<Vec<Value>>(),
+        "attributes": asset
+            .attributes
+            .iter()
+            .map(|(name, attribute)| json!({"name": name, "value": attribute.value, "source": attribute.source}))
+            .collect::<Vec<Value>>(),
+    })
+}
+
+
+pub fn resolution_text(resolution: Resolution) -> &'static str {
+    match resolution {
+        Resolution::TookObserved => "took_observed",
+        Resolution::KeptCurrent => "kept_current",
+        Resolution::Undecided => "undecided",
+    }
+}
+
+
+pub fn conflict_doc(conflict: &Conflict) -> Value {
+    json!({
+        "asset": conflict.asset,
+        "attribute": conflict.attribute,
+        "current_value": conflict.current.value,
+        "current_source": conflict.current.source,
+        "observed_value": conflict.observed.value,
+        "observed_source": conflict.observed.source,
+        "resolution": resolution_text(conflict.resolution),
+    })
+}
+
+
+pub fn event_doc(event: &Event) -> Value {
+    match event {
+        Event::Created { asset } => json!({"asset": asset, "kind": "created", "lifecycle": null}),
+        Event::Reappeared { asset, lifecycle } => json!({"asset": asset, "kind": "reappeared", "lifecycle": lifecycle}),
+    }
+}
+
+
+/// Writes the changed assets, their keys and attributes, the conflicts and the events in one statement; a stale version fails it whole.
+pub async fn apply_outcome(exec: Executor<'_, '_>, scope: &TenantScope, snapshot: &Snapshot, outcome: &Outcome) -> Result<(), StoreError> {
+    let assets: Vec<Value> = changed_assets(snapshot, outcome)
+        .into_iter()
+        .map(|asset| asset_doc(asset, snapshot.versions.get(&asset.id).copied().unwrap_or(0)))
+        .collect();
+    let document = json!({
+        "assets": assets,
+        "conflicts": outcome.conflicts.iter().map(conflict_doc).collect::<Vec<Value>>(),
+        "events": outcome.events.iter().map(event_doc).collect::<Vec<Value>>(),
+    });
+    let rows = exec(scope.clone(), APPLY_SQL, vec![document.to_string()]).await.map_err(conflict_of)?;
+    let applied = rows.first().and_then(|row| row.first()).is_some_and(|answer| answer == "true");
+    if applied {
+        Ok(())
+    } else {
+        Err(StoreError::VersionConflict)
+    }
+}
+
+
+pub async fn attempt(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    observation: &Observation,
+    truth: &TruthMap,
+    limits: &Limits,
+) -> Result<Outcome, StoreError> {
+    let snapshot = load_assets(exec, scope, limits).await?;
+    let outcome = reconcile(&snapshot.assets, observation, truth)?;
+    apply_outcome(exec, scope, &snapshot, &outcome).await?;
+    Ok(outcome)
+}
+
+
+/// Load, reconcile, apply; a version conflict reloads and retries up to `limits.max_attempts` times.
+pub async fn reconcile_stored(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    observation: &Observation,
+    truth: &TruthMap,
+    limits: &Limits,
+) -> Result<Outcome, StoreError> {
+    let mut attempts = 0;
+    let mut result = Err(StoreError::VersionConflict);
+    while matches!(result, Err(StoreError::VersionConflict)) && attempts < ATTEMPT_CEILING && attempts < limits.max_attempts {
+        attempts += 1;
+        result = attempt(exec, scope, observation, truth, limits).await;
+    }
+    match result {
+        Err(StoreError::VersionConflict) => Err(StoreError::RetriesExhausted { attempts }),
+        other => other,
+    }
+}

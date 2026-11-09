@@ -1,4 +1,4 @@
-use crate::types::{AttributeMap, KeyMap, ObservedMap};
+use crate::types::{AttributeMap, KeyMap, ObservedMap, VersionMap};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -152,4 +152,46 @@ pub struct Outcome {
     pub inventory: Vec<Asset>,
     pub conflicts: Vec<Conflict>,
     pub events: Vec<Event>,
+}
+
+
+/// Assets as stored, with the version each had when read (the optimistic concurrency token).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub assets: Vec<Asset>,
+    pub versions: VersionMap,
+}
+
+
+/// Read and retry bounds of the store; `Default` gives the production values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub page_size: usize,
+    pub max_assets: usize,
+    pub max_child_rows: usize,
+    pub max_attempts: usize,
+}
+
+
+pub const DEFAULT_PAGE_SIZE: usize = 500;
+
+
+pub const DEFAULT_MAX_ASSETS: usize = 10_000;
+
+
+pub const DEFAULT_MAX_CHILD_ROWS: usize = 200_000;
+
+
+pub const DEFAULT_MAX_ATTEMPTS: usize = 3;
+
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            page_size: DEFAULT_PAGE_SIZE,
+            max_assets: DEFAULT_MAX_ASSETS,
+            max_child_rows: DEFAULT_MAX_CHILD_ROWS,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+        }
+    }
 }
