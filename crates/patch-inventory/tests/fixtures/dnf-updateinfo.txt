@@ -1,0 +1,7 @@
+Last metadata expiration check: 0:03:12 ago on Mon 09 Nov 2026 10:00:00 AM UTC.
+RLSA-2026:1001 Important/Sec. openssl-1:3.2.2-6.el9_5.1.x86_64
+RLSA-2026:1001 Important/Sec. openssl-libs-1:3.2.2-6.el9_5.1.x86_64
+RLSA-2026:1002 Moderate/Sec. kernel-5.14.0-503.15.1.el9_5.x86_64
+RLSA-2026:1003 unknown/Sec. unknown-pkg-2.0-1.el9.noarch
+RLBA-2026:2001 bugfix        tzdata-2025b-1.el9.noarch
+RLEA-2026:3001 enhancement   vim-minimal-2:8.2.2637-21.el9.x86_64
