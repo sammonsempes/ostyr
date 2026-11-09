@@ -1,7 +1,7 @@
 use crate::support::{bench, exclusion, hash, image, loaded, probe, reasons_for, validation_context};
 use crate::types::TestResult;
 use policy_validator::audit::validate_audited;
-use policy_validator::model::{ObservedImage, PathForm, Proposal, Reason, Scope, SelectorKind};
+use policy_validator::model::{Decision, ObservedImage, PathForm, Proposal, Reason, Scope, SelectorKind};
 use policy_validator::rules::{validate, wide_scope_reason};
 use std::error::Error;
 use std::fs;
@@ -103,9 +103,17 @@ fn endpoint_writable(kind: SelectorKind, value: &str, directory: &str) -> Result
 
 
 fn global_image_refused(name: &str) -> Result<(), Box<dyn Error>> {
+    let forms = if name.contains('~') { vec![PathForm::ShortName] } else { Vec::new() };
+    global_image_refused_with(name, forms)
+}
+
+
+fn global_image_refused_with(name: &str, forms: Vec<PathForm>) -> Result<(), Box<dyn Error>> {
     let mut proposal = exclusion(Scope::Global, SelectorKind::Hash, &hash());
     proposal.evidence.observed_images = vec![image(name)];
-    assert_eq!(reasons_for(proposal)?, vec![Reason::SystemBinary { name: name.to_owned() }], "{name}");
+    let mut expected: Vec<Reason> = forms.into_iter().map(|form| Reason::NonCanonical { form }).collect();
+    expected.push(Reason::SystemBinary { name: name.to_owned() });
+    assert_eq!(reasons_for(proposal)?, expected, "{name}");
     Ok(())
 }
 
@@ -385,5 +393,69 @@ fn t043a_c3_non_blocking_name_only_group_and_directory_arguments() -> TestResult
     let policy = loaded()?;
     let proposal = Proposal::Exclusion(exclusion(Scope::EndpointGroup, SelectorKind::Hash, &hash()));
     assert!(validate(&policy, &proposal).reasons.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn t043h_an_image_inside_a_protected_path_is_refused_whatever_the_flags() -> TestResult {
+    let bench =
+        bench("honeytoken_paths: [/srv/canary-9, 'C:\\Canary-9']\nsecurity_sensors: [edrsecret]\nagent_paths: [/opt/agent-7, 'C:\\Agent-7']\n")?;
+    let context = validation_context();
+    for (path, expected) in [
+        ("/opt/agent-7/bin/tool", "agent_paths[0]"),
+        ("/srv/canary-9/tool", "honeytoken_paths[0]"),
+        (r"C:\canary-9\tool.exe", "honeytoken_paths[1]"),
+        (r"D:\AGENT-7\bin\tool.exe", "agent_paths[1]"),
+    ] {
+        let mut selected = exclusion(Scope::Global, SelectorKind::Hash, &hash());
+        selected.evidence.observed_images = vec![ObservedImage {
+            path: path.to_owned(),
+            ..image("tool")
+        }];
+        let verdict = validate_audited(&bench.engine, &context, &Proposal::Exclusion(selected))?;
+        let shown: Vec<String> = verdict.reasons.iter().map(ToString::to_string).collect();
+        assert!(
+            shown.len() == 1 && shown.iter().any(|reason| reason.contains(expected)),
+            "{path}: {shown:?}"
+        );
+    }
+    let audit = fs::read_to_string(&bench.audit_file)?;
+    assert!(audit.contains("agent_paths[0]") && audit.contains("honeytoken_paths[0]"), "{audit}");
+    assert!(SECRET_ENTRIES.iter().all(|entry| !audit.contains(entry)), "{audit}");
+    let outside = exclusion(Scope::Global, SelectorKind::Hash, &hash());
+    assert!(validate_audited(&bench.engine, &context, &Proposal::Exclusion(outside))?
+        .reasons
+        .is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn t043h_c2_a_non_canonical_image_path_is_refused_not_ignored() -> TestResult {
+    let bench = bench(SENSITIVE_POLICY)?;
+    let context = validation_context();
+    for (path, form) in [
+        ("/opt/agent-7//bin/tool", PathForm::DoubledSeparator),
+        ("/opt/agent-7/bin/../tool", PathForm::DotSegment),
+        ("/opt/./agent-7/tool", PathForm::DotSegment),
+        (r"C:\Agent-7\tool.exe:ads", PathForm::AlternateStream),
+        (r"\Device\HarddiskVolume3\Agent-7\tool.exe", PathForm::NtDevice),
+        (r"C:\AGENT-~1\tool.exe", PathForm::ShortName),
+        ("C:/Agent-7\\tool.exe", PathForm::MixedSeparators),
+        (r"C:\Agent-7\tool.exe.", PathForm::TrailingDotOrSpace),
+        ("opt/agent-7/tool", PathForm::NotAbsolute),
+    ] {
+        let mut proposal = exclusion(Scope::Global, SelectorKind::Hash, &hash());
+        proposal.evidence.observed_images = vec![ObservedImage {
+            path: path.to_owned(),
+            ..image("tool")
+        }];
+        let verdict = validate_audited(&bench.engine, &context, &Proposal::Exclusion(proposal))?;
+        assert_eq!(verdict.reasons, vec![Reason::NonCanonical { form }], "{path}");
+        assert_eq!(verdict.decision, Decision::Refused, "{path}");
+    }
+    let audit = fs::read_to_string(&bench.audit_file)?;
+    assert!(SECRET_ENTRIES.iter().all(|entry| !audit.contains(entry)), "{audit}");
     Ok(())
 }
