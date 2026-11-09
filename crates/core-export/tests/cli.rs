@@ -131,7 +131,7 @@ fn run_sends_to_the_webhook_with_the_resolved_token() -> TestResult {
     )?;
     let mut out = Vec::new();
     run(&["webhook", &config.display().to_string(), "3", "100"], &mut out, &token_secret)?;
-    assert_eq!(String::from_utf8(out)?, "sent=1 buffered=0 drained=0 dropped=0\n");
+    assert_eq!(String::from_utf8(out)?, "sent=1 buffered=0 drained=0 dropped=0 rejected=0\n");
     let received = bodies.join().map_err(|_panic| "sink thread panicked")??;
     assert_eq!(received.len(), 1);
     assert_eq!(received.first().map(|(auth, _body)| auth.as_str()), Some("bearer tok"));
@@ -186,7 +186,7 @@ fn run_sends_otlp_with_the_token_from_a_file_and_audits_to_a_file() -> TestResul
     )?;
     let mut out = Vec::new();
     run(&["otlp", &config.display().to_string(), "3", "10"], &mut out, &no_secret)?;
-    assert_eq!(String::from_utf8(out)?, "sent=1 buffered=0 drained=0 dropped=0\n");
+    assert_eq!(String::from_utf8(out)?, "sent=1 buffered=0 drained=0 dropped=0 rejected=0\n");
     let received = bodies.join().map_err(|_panic| "sink thread panicked")??;
     assert_eq!(received.first().map(|(auth, _body)| auth.as_str()), Some("bearer tok"));
     assert!(received
@@ -289,7 +289,7 @@ fn a_saturated_buffer_prints_the_alert() -> TestResult {
         now()?,
     )?;
     let text = String::from_utf8(out)?;
-    assert!(text.starts_with("sent=0 buffered=0 drained=0 dropped=2\nalert {"));
+    assert!(text.starts_with("sent=0 buffered=0 drained=0 dropped=2 rejected=0\nalert {"));
     assert!(text.contains("export-buffer-saturated"));
     Ok(())
 }

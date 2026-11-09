@@ -9,6 +9,7 @@ const NO_SECRET_BACKEND: &str = "no secret backend is wired to this example";
 
 
 fn main() -> std::io::Result<ExitCode> {
+    tracing_subscriber::fmt().with_writer(stderr).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     let resolve = |_reference: &SecretRef| -> Result<String, BoxError> { Err(NO_SECRET_BACKEND.into()) };

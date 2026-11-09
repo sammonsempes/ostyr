@@ -1,5 +1,6 @@
-use crate::error::ExportError;
+use crate::error::{ExportError, PermanentRejection};
 use crate::types::{BoxError, PostFn, SleepFn};
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 
@@ -52,24 +53,29 @@ pub fn batches(events: &[String], batch_size: usize) -> Vec<(usize, String)> {
 }
 
 
-/// Posts `body` up to `policy.max_attempts` times, sleeping `backoff_delay` between attempts; returns the attempts used.
+/// Posts `body` up to `policy.max_attempts` times, sleeping `backoff_delay` between attempts; returns the attempts used. A `PermanentRejection` stops at once.
 pub fn deliver(policy: &RetryPolicy, post: &mut PostFn, sleep: &mut SleepFn, body: &str) -> Result<u32, ExportError> {
-    let mut last_error: Option<BoxError> = None;
-    let delivered = (0..policy.max_attempts).find_map(|attempt| {
-        post(body).map_or_else(
-            |error| {
+    let outcome = (0..policy.max_attempts).try_fold(None::<BoxError>, |_previous, attempt| match post(body) {
+        Ok(()) => ControlFlow::Break(Ok(attempt + 1)),
+        Err(error) => match error.downcast_ref::<PermanentRejection>() {
+            Some(rejection) => {
+                tracing::warn!(status = rejection.status, "export target rejected the batch permanently");
+                ControlFlow::Break(Err(ExportError::Rejected { status: rejection.status }))
+            }
+            None => {
                 tracing::warn!(attempt, %error, "webhook post failed");
-                last_error = Some(error);
                 if attempt + 1 < policy.max_attempts {
                     sleep(backoff_delay(policy, attempt));
                 }
-                None
-            },
-            |()| Some(attempt + 1),
-        )
+                ControlFlow::Continue(Some(error))
+            }
+        },
     });
-    delivered.ok_or(ExportError::Exhausted {
-        attempts: policy.max_attempts,
-        source: last_error,
-    })
+    match outcome {
+        ControlFlow::Break(result) => result,
+        ControlFlow::Continue(last_error) => Err(ExportError::Exhausted {
+            attempts: policy.max_attempts,
+            source: last_error,
+        }),
+    }
 }
