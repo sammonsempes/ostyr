@@ -1,4 +1,5 @@
 use crate::error::{IngestError, SettingsError};
+use crate::nats_settings::*;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, SharedAuditFn};
@@ -115,6 +116,20 @@ pub struct IngestSettings {
     pub clickhouse_user: String,
     pub clickhouse_password_file: PathBuf,
     pub clickhouse_ca_file: Option<PathBuf>,
+    pub nats_url: String,
+    pub nats_tls_first: bool,
+    pub nats_ca_file: Option<PathBuf>,
+    pub nats_credentials_file: Option<PathBuf>,
+    pub nats_user: Option<String>,
+    pub nats_password_file: Option<PathBuf>,
+    pub nats_stream: String,
+    pub nats_consumer: String,
+    pub nats_dead_letter_subject: String,
+    pub nats_fetch_deadline_ms: u64,
+    pub nats_request_timeout_ms: u64,
+    pub nats_ack_wait_ms: u64,
+    pub nats_ping_interval_ms: u64,
+    pub nats_max_headers: usize,
 }
 
 
@@ -137,6 +152,20 @@ impl Default for IngestSettings {
             clickhouse_user: DEFAULT_CLICKHOUSE_USER.to_owned(),
             clickhouse_password_file: PathBuf::from(DEFAULT_CLICKHOUSE_PASSWORD_FILE),
             clickhouse_ca_file: None,
+            nats_url: DEFAULT_NATS_URL.to_owned(),
+            nats_tls_first: false,
+            nats_ca_file: None,
+            nats_credentials_file: None,
+            nats_user: None,
+            nats_password_file: None,
+            nats_stream: DEFAULT_NATS_STREAM.to_owned(),
+            nats_consumer: DEFAULT_NATS_CONSUMER.to_owned(),
+            nats_dead_letter_subject: DEFAULT_DEAD_LETTER_SUBJECT.to_owned(),
+            nats_fetch_deadline_ms: DEFAULT_NATS_FETCH_DEADLINE_MS,
+            nats_request_timeout_ms: DEFAULT_NATS_REQUEST_TIMEOUT_MS,
+            nats_ack_wait_ms: DEFAULT_NATS_ACK_WAIT_MS,
+            nats_ping_interval_ms: DEFAULT_NATS_PING_INTERVAL_MS,
+            nats_max_headers: DEFAULT_NATS_MAX_HEADERS,
         }
     }
 }
@@ -246,7 +275,8 @@ pub fn validate_settings(settings: &IngestSettings) -> Result<(), SettingsError>
     check_order(
         ("backoff_initial_ms", settings.backoff_initial_ms),
         ("backoff_max_ms", settings.backoff_max_ms),
-    )
+    )?;
+    validate_nats_settings(settings)
 }
 
 
@@ -275,6 +305,35 @@ pub fn settings_state(settings: &IngestSettings) -> ConfigState {
                 .as_ref()
                 .map_or_else(String::new, |path| path.display().to_string()),
         ),
+        ("nats_url", settings.nats_url.clone()),
+        ("nats_tls_first", settings.nats_tls_first.to_string()),
+        (
+            "nats_ca_file",
+            settings.nats_ca_file.as_ref().map_or_else(String::new, |path| path.display().to_string()),
+        ),
+        (
+            "nats_credentials_file",
+            settings
+                .nats_credentials_file
+                .as_ref()
+                .map_or_else(String::new, |path| path.display().to_string()),
+        ),
+        ("nats_user", settings.nats_user.clone().unwrap_or_default()),
+        (
+            "nats_password_file",
+            settings
+                .nats_password_file
+                .as_ref()
+                .map_or_else(String::new, |path| path.display().to_string()),
+        ),
+        ("nats_stream", settings.nats_stream.clone()),
+        ("nats_consumer", settings.nats_consumer.clone()),
+        ("nats_dead_letter_subject", settings.nats_dead_letter_subject.clone()),
+        ("nats_fetch_deadline_ms", settings.nats_fetch_deadline_ms.to_string()),
+        ("nats_request_timeout_ms", settings.nats_request_timeout_ms.to_string()),
+        ("nats_ack_wait_ms", settings.nats_ack_wait_ms.to_string()),
+        ("nats_ping_interval_ms", settings.nats_ping_interval_ms.to_string()),
+        ("nats_max_headers", settings.nats_max_headers.to_string()),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))

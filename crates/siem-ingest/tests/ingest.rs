@@ -10,11 +10,12 @@ use core_config::reload::{current_config, reload, ReloadOutcome};
 use siem_ingest::batcher::{backoff_delay, flush, new_batcher, push, real_sleep, system_clock, tick};
 use siem_ingest::error::{IngestError, PushError, SettingsError};
 use siem_ingest::model::{Batcher, Message};
+use siem_ingest::nats_settings::{check_dead_letter_subject, check_name, check_nats_url};
 use siem_ingest::parse::{truncate_reason, MAX_REASON_CHARS};
 use siem_ingest::settings::{open_settings, settings_state, validate_settings, IngestSettings};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,6 +33,9 @@ const EVENT: &str = r#"{"@timestamp":"2026-01-01T00:00:00Z","ecs":{"version":"8.
 
 
 const MESSAGE_CAP: usize = 87;
+
+
+const LONG_NAME: usize = 200;
 
 
 const BIG_NUMBER: u64 = 1_000_000_000_000;
@@ -64,7 +68,7 @@ const SIZE_FIVE: usize = 5;
 const SIZE_EIGHT: usize = 8;
 
 
-const STATE_FIELDS: usize = 16;
+const STATE_FIELDS: usize = 30;
 
 
 const BAD_BYTE: u8 = 0xff;
@@ -415,6 +419,29 @@ fn every_setting_is_bounded() -> TestResult {
         |settings| settings.max_batch_bytes = settings.max_message_bytes - 1,
         |settings| settings.max_buffered_bytes = settings.max_message_bytes - 1,
         |settings| settings.backoff_max_ms = settings.backoff_initial_ms - 1,
+        |settings| settings.nats_url = "nats://nats.example.test:4222".to_owned(),
+        |settings| settings.nats_stream = "bad.name".to_owned(),
+        |settings| settings.nats_consumer = String::new(),
+        |settings| settings.nats_dead_letter_subject = "events.dead".to_owned(),
+        |settings| settings.nats_fetch_deadline_ms = 0,
+        |settings| settings.nats_request_timeout_ms = BIG_NUMBER,
+        |settings| settings.nats_ack_wait_ms = 0,
+        |settings| settings.nats_ping_interval_ms = 0,
+        |settings| settings.nats_max_headers = 0,
+        |settings| settings.nats_ca_file = Some(PathBuf::new()),
+        |settings| settings.nats_credentials_file = Some(PathBuf::new()),
+        |settings| settings.nats_password_file = Some(PathBuf::new()),
+        |settings| settings.nats_user = Some("ops".to_owned()),
+        |settings| settings.nats_password_file = Some(PathBuf::from("/etc/nats.password")),
+        |settings| {
+            settings.nats_user = Some("ops".to_owned());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+            settings.nats_credentials_file = Some(PathBuf::from("/etc/nats.creds"));
+        },
+        |settings| {
+            settings.nats_user = Some(String::new());
+            settings.nats_password_file = Some(PathBuf::from("/etc/nats.password"));
+        },
     ];
     mutations.iter().try_for_each(|mutate| -> TestResult {
         let mut settings = defaults.clone();
@@ -424,6 +451,18 @@ fn every_setting_is_bounded() -> TestResult {
         Ok(())
     })?;
     assert_eq!(settings_state(&defaults).len(), STATE_FIELDS);
+    let with_files = IngestSettings {
+        nats_ca_file: Some(PathBuf::from("/etc/ca.pem")),
+        nats_credentials_file: Some(PathBuf::from("/etc/nats.creds")),
+        nats_user: Some("ops".to_owned()),
+        nats_password_file: Some(PathBuf::from("/etc/nats.password")),
+        ..defaults
+    };
+    let state = settings_state(&with_files);
+    assert_eq!(state.get("nats_ca_file").map(String::as_str), Some("/etc/ca.pem"));
+    assert_eq!(state.get("nats_credentials_file").map(String::as_str), Some("/etc/nats.creds"));
+    assert_eq!(state.get("nats_password_file").map(String::as_str), Some("/etc/nats.password"));
+    assert_eq!(state.get("nats_user").map(String::as_str), Some("ops"));
     Ok(())
 }
 
@@ -508,5 +547,24 @@ fn a_batch_larger_than_the_buffer_is_refused_by_validation() -> TestResult {
         ..IngestSettings::default()
     };
     assert!(matches!(validate_settings(&settings), Err(SettingsError::Inconsistent { .. })));
+    Ok(())
+}
+
+
+#[test]
+fn nats_urls_and_subjects_follow_the_transport_rules() -> TestResult {
+    assert!(check_nats_url("tls://nats.example.test:4222", false).is_ok());
+    assert!(check_nats_url("nats://localhost:4222", false).is_ok());
+    assert!(check_nats_url("nats://nats.example.test:4222", true).is_ok());
+    assert!(check_nats_url("nats://nats.example.test:4222", false).is_err());
+    assert!(check_nats_url("tls://user:pass@nats.example.test:4222", false).is_err());
+    assert!(check_nats_url("http://localhost:4222", true).is_err());
+    assert!(check_nats_url("not a url", true).is_err());
+    assert!(check_dead_letter_subject("dead.events").is_ok());
+    assert!(check_dead_letter_subject("events.dead").is_err());
+    assert!(check_dead_letter_subject("dead..events").is_err());
+    assert!(check_dead_letter_subject("dead.*").is_err());
+    assert!(check_dead_letter_subject(&"a".repeat(LONG_NAME)).is_err());
+    assert!(check_name("nats_stream", &"a".repeat(LONG_NAME)).is_err());
     Ok(())
 }
