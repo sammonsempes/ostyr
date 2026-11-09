@@ -154,6 +154,7 @@ fn a_clean_end_with_batches_left_counts_as_a_failure() -> TestResult {
     let delivery = Delivery {
         pending: batches(BATCHES),
         acknowledged: Vec::new(),
+        rejected: Vec::new(),
         failures: 0,
         last: Ok(()),
     };
@@ -212,7 +213,7 @@ async fn delivery_gives_up_after_the_attempt_cap_with_bounded_pauses() -> TestRe
 async fn nothing_to_send_means_no_connection() -> TestResult {
     let dial = || -> DialFuture { Box::pin(async { Err(ChannelError::NoCertificate { path: "never".into() }) }) };
     let pause = |_delay: Duration| -> PauseFuture { Box::pin(async {}) };
-    assert!(deliver_events(&dial, &pause, Vec::new()).await?.is_empty());
+    assert!(deliver_events(&dial, &pause, Vec::new()).await?.acknowledged.is_empty());
     Ok(())
 }
 
@@ -261,7 +262,7 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     );
     let second = start_server_at(&paths, empty_revocation(&paths)?, second_state, &address.to_string()).await?;
     gate.notify_one();
-    let acknowledged = bounded(delivery).await???;
+    let acknowledged = bounded(delivery).await???.acknowledged;
     assert_eq!(acknowledged, (1..=BATCHES).collect::<Vec<u64>>());
     assert_eq!(sequences(&before_restart)?, (1..=FIRST_RUN_BATCHES).collect::<Vec<u64>>());
     assert_eq!(sequences(&after_restart)?, (FIRST_RUN_BATCHES + 1..=BATCHES).collect::<Vec<u64>>());
@@ -439,6 +440,7 @@ fn a_foreign_or_repeated_acknowledgement_is_no_progress_and_the_delivery_gives_u
     let delivery = Delivery {
         pending: batches(BATCHES),
         acknowledged: Vec::new(),
+        rejected: Vec::new(),
         failures: 0,
         last: Ok(()),
     };
@@ -506,5 +508,36 @@ fn evicting_a_handshake_that_already_finished_is_counted_and_harmless() -> TestR
     evict(Some(sender), &state);
     evict(None, &state);
     assert_eq!(counter(&state.counters.handshakes_evicted), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_size_refusal_quarantines_the_first_unacknowledged_batch_and_other_errors_do_not() -> TestResult {
+    let _logging = scoped_logging();
+    let fresh = |count: u64| Delivery {
+        pending: batches(count),
+        acknowledged: Vec::new(),
+        rejected: Vec::new(),
+        failures: 0,
+        last: Ok(()),
+    };
+    let refused = |code: tonic::Code| Err(ChannelError::Status(Box::new(tonic::Status::new(code, "refused"))));
+    let out_of_range = settle(fresh(BATCHES), vec![1], refused(tonic::Code::OutOfRange));
+    assert_eq!(
+        out_of_range.rejected.iter().map(|batch| batch.sequence).collect::<Vec<_>>(),
+        vec![FIRST_RUN_BATCHES]
+    );
+    assert_eq!(out_of_range.pending.len(), usize::try_from(BATCHES - FIRST_RUN_BATCHES)?);
+    assert_eq!(out_of_range.failures, 0);
+    let exhausted = settle(fresh(1), Vec::new(), refused(tonic::Code::ResourceExhausted));
+    assert_eq!(exhausted.rejected.len(), 1);
+    assert!(exhausted.pending.is_empty());
+    assert!(exhausted.last.is_ok());
+    let internal = settle(fresh(1), Vec::new(), refused(tonic::Code::Internal));
+    assert!(internal.rejected.is_empty());
+    assert_eq!(internal.failures, 1);
+    let nothing_pending = settle(fresh(0), Vec::new(), refused(tonic::Code::OutOfRange));
+    assert!(nothing_pending.rejected.is_empty());
     Ok(())
 }
