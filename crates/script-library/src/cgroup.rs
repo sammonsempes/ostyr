@@ -1,15 +1,16 @@
 use crate::error::ScriptError;
-use crate::fsdir::open_directory;
-use crate::model::CgroupGuard;
-use crate::types::{CheckFn, KillFn, PlaceFn};
-use rustix::fs::{mkdirat, Mode, RawMode};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::fd::{AsFd, BorrowedFd};
+use crate::fsdir::{io_failure, open_child_directory, open_directory};
+use crate::model::{LimitHit, Limits};
+use crate::types::{CheckFn, EventsFn, KillFn, LimitFn, PlaceFn};
+use rustix::fs::{accessat, mkdirat, openat, unlinkat, Access, AtFlags, Mode, OFlags, RawMode};
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{debug, warn};
 
 
 pub const PROCS_FILE: &str = "cgroup.procs";
@@ -19,6 +20,42 @@ pub const KILL_FILE: &str = "cgroup.kill";
 
 
 pub const KILL_VALUE: &str = "1";
+
+
+pub const MEMORY_MAX_FILE: &str = "memory.max";
+
+
+pub const PIDS_MAX_FILE: &str = "pids.max";
+
+
+pub const SWAP_MAX_FILE: &str = "memory.swap.max";
+
+
+pub const NO_SWAP: &str = "0";
+
+
+pub const CPU_MAX_FILE: &str = "cpu.max";
+
+
+pub const MEMORY_EVENTS_FILE: &str = "memory.events";
+
+
+pub const PIDS_EVENTS_FILE: &str = "pids.events";
+
+
+pub const OOM_KILL_KEY: &str = "oom_kill";
+
+
+pub const PIDS_REFUSED_KEY: &str = "max";
+
+
+pub const CPU_PERIOD_MICROSECONDS: u64 = 100_000;
+
+
+pub const CPU_MICROSECONDS_PER_PERCENT: u64 = 1000;
+
+
+pub const MAX_CONTROL_BYTES: u64 = 4096;
 
 
 pub const REMOVE_ATTEMPTS: u32 = 50;
@@ -36,12 +73,24 @@ pub const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
 pub const CGROUP_DIRECTORY_MODE: RawMode = 0o755;
 
 
-/// The three operations on a cgroup, injected so tests can stand in for a cgroup v2 mount.
+/// The operations on a cgroup, injected so tests can stand in for a cgroup v2 mount.
 #[derive(Debug, Clone, Copy)]
 pub struct CgroupOps {
     pub check: CheckFn,
     pub place: PlaceFn,
     pub kill: KillFn,
+    pub limit: LimitFn,
+    pub events: EventsFn,
+}
+
+
+/// A leaf cgroup created for one run, removed on drop; every control file is reached through `leaf`, the handle opened once below `root`.
+#[derive(Debug)]
+pub struct CgroupGuard {
+    pub path: PathBuf,
+    pub name: String,
+    pub root: OwnedFd,
+    pub leaf: OwnedFd,
 }
 
 
@@ -61,12 +110,22 @@ pub fn is_cgroup2(_directory: BorrowedFd<'_>) -> io::Result<bool> {
 
 
 /// The control files exist on a real cgroup; they are never created, so a plain directory cannot pass for one.
-pub fn write_control(directory: &Path, file: &str, text: &str) -> io::Result<()> {
-    OpenOptions::new().write(true).open(directory.join(file))?.write_all(text.as_bytes())
+pub fn write_control(directory: BorrowedFd<'_>, file: &str, text: &str) -> io::Result<()> {
+    let descriptor = openat(directory, file, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+    File::from(descriptor).write_all(text.as_bytes())
 }
 
 
-/// Creates the leaf cgroup `<root>/cg-<name>` relative to the root's handle, after `check` accepted that handle; the guard removes it when dropped.
+/// At most `MAX_CONTROL_BYTES` of a control file.
+pub fn read_control(directory: BorrowedFd<'_>, file: &str) -> io::Result<String> {
+    let descriptor = openat(directory, file, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+    let mut text = String::new();
+    File::from(descriptor).take(MAX_CONTROL_BYTES).read_to_string(&mut text)?;
+    Ok(text)
+}
+
+
+/// Creates the leaf cgroup `<root>/cg-<name>` relative to the root's handle, after `check` accepted that handle, and opens it once; the guard removes it when dropped.
 pub fn create_cgroup(root: &Path, name: &str, check: CheckFn) -> Result<CgroupGuard, ScriptError> {
     let context = "cannot create the script cgroup";
     let handle = open_directory(root).map_err(|source| ScriptError::Io { context, source })?;
@@ -77,8 +136,14 @@ pub fn create_cgroup(root: &Path, name: &str, check: CheckFn) -> Result<CgroupGu
         context,
         source: errno.into(),
     })?;
-    let path: PathBuf = root.join(leaf);
-    Ok(CgroupGuard { path })
+    let opened = open_child_directory(handle.as_fd(), OsStr::new(&leaf)).map_err(io_failure(context))?;
+    let path = root.join(&leaf);
+    Ok(CgroupGuard {
+        path,
+        leaf: opened,
+        name: leaf,
+        root: handle,
+    })
 }
 
 
@@ -87,25 +152,81 @@ pub const SYSTEM_CGROUP: CgroupOps = CgroupOps {
     check: is_cgroup2,
     place: place_in_cgroup,
     kill: kill_cgroup,
+    limit: apply_limits,
+    events: read_events,
 };
 
 
-pub fn place_in_cgroup(cgroup: &Path, pid: u32) -> io::Result<()> {
-    write_control(cgroup, PROCS_FILE, &pid.to_string())
+/// `cgroup.kill` must exist (kernel 5.14+) before the process enters: without it the cgroup could not be emptied, so the run fails closed.
+pub fn place_in_cgroup(leaf: BorrowedFd<'_>, pid: u32) -> io::Result<()> {
+    accessat(leaf, KILL_FILE, Access::WRITE_OK, AtFlags::empty())?;
+    write_control(leaf, PROCS_FILE, &pid.to_string())
 }
 
 
 /// `cgroup.kill` sends SIGKILL to every process of the cgroup, wherever its group or session went.
-pub fn kill_cgroup(cgroup: &Path) -> io::Result<()> {
-    write_control(cgroup, KILL_FILE, KILL_VALUE)
+pub fn kill_cgroup(leaf: BorrowedFd<'_>) -> io::Result<()> {
+    write_control(leaf, KILL_FILE, KILL_VALUE)
+}
+
+
+/// Writes `memory.max`, `pids.max` and, when declared, `cpu.max`; a controller that is not enabled makes this fail, so the run does not start unlimited.
+pub fn apply_limits(leaf: BorrowedFd<'_>, limits: &Limits) -> io::Result<()> {
+    write_control(leaf, MEMORY_MAX_FILE, &limits.memory_bytes.to_string())?;
+    write_control(leaf, SWAP_MAX_FILE, NO_SWAP).or_else(|error| match error.kind() {
+        io::ErrorKind::NotFound => {
+            debug!("swap accounting is off, the memory limit is the only one");
+            Ok(())
+        }
+        _ => Err(error),
+    })?;
+    write_control(leaf, PIDS_MAX_FILE, &limits.pids.to_string())?;
+    limits.cpu_percent.map_or(Ok(()), |percent| {
+        write_control(
+            leaf,
+            CPU_MAX_FILE,
+            &format!("{} {CPU_PERIOD_MICROSECONDS}", percent.saturating_mul(CPU_MICROSECONDS_PER_PERCENT)),
+        )
+    })
+}
+
+
+/// The value of `key` in a flat keyed file (`memory.events`); a missing key or a bad number is an error.
+pub fn event_count(text: &str, key: &str) -> io::Result<u64> {
+    text.lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(name, _)| *name == key)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?
+        .1
+        .trim()
+        .parse()
+        .map_err(io::Error::other)
+}
+
+
+pub fn count_in(leaf: BorrowedFd<'_>, file: &str, key: &str) -> io::Result<u64> {
+    let text = read_control(leaf, file)?;
+    event_count(&text, key)
+}
+
+
+/// A memory kill wins over a refused fork.
+pub fn read_events(leaf: BorrowedFd<'_>) -> io::Result<Option<LimitHit>> {
+    let oom_kills = count_in(leaf, MEMORY_EVENTS_FILE, OOM_KILL_KEY)?;
+    let refused = count_in(leaf, PIDS_EVENTS_FILE, PIDS_REFUSED_KEY)?;
+    Ok(match (oom_kills, refused) {
+        (0, 0) => None,
+        (0, _) => Some(LimitHit::Pids),
+        _ => Some(LimitHit::Memory),
+    })
 }
 
 
 /// A cgroup is removable only once its processes are gone, a moment after the kill: only EBUSY is retried, and the attempts are capped.
-pub fn remove_cgroup(path: &Path, remove: &mut dyn FnMut(&Path) -> io::Result<()>, pause: &mut dyn FnMut()) -> io::Result<()> {
+pub fn remove_cgroup(remove: &mut dyn FnMut() -> io::Result<()>, pause: &mut dyn FnMut()) -> io::Result<()> {
     (0..REMOVE_ATTEMPTS)
         .find_map(|_attempt| {
-            let result = remove(path);
+            let result = remove();
             match &result {
                 Err(error) if error.kind() == io::ErrorKind::ResourceBusy => {
                     pause();
@@ -125,7 +246,11 @@ pub fn pause_briefly() {
 
 impl Drop for CgroupGuard {
     fn drop(&mut self) {
-        if let Err(error) = remove_cgroup(&self.path, &mut |path| fs::remove_dir(path), &mut pause_briefly) {
+        let result = remove_cgroup(
+            &mut || unlinkat(self.root.as_fd(), self.name.as_str(), AtFlags::REMOVEDIR).map_err(io::Error::from),
+            &mut pause_briefly,
+        );
+        if let Err(error) = result {
             warn!(%error, "cannot remove the script cgroup");
         }
     }

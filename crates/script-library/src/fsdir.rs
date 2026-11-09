@@ -1,7 +1,8 @@
 use crate::check::ensure;
 use crate::error::ScriptError;
+use crate::model::RunAs;
 use crate::types::{NameFn, StatFn};
-use rustix::fs::{fstat, mkdirat, openat, Mode, OFlags, RawMode, CWD};
+use rustix::fs::{fchmod, fstat, mkdirat, openat, Mode, OFlags, RawMode, CWD};
 use rustix::io::Errno;
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -21,6 +22,9 @@ pub const PRIVATE_FILE_MODE: RawMode = 0o600;
 
 
 pub const PRIVATE_DIRECTORY_MODE: RawMode = 0o700;
+
+
+pub const SEARCHABLE_DIRECTORY_MODE: RawMode = 0o711;
 
 
 pub const PRIVATE_DIRECTORY_PREFIX: &str = "script-";
@@ -185,6 +189,32 @@ pub fn write_all_into<Sink: Write>(mut sink: Sink, bytes: &[u8]) -> Result<(), S
 
 /// One `O_EXCL | O_NOFOLLOW` file of mode 0600, created relative to the private directory's handle.
 pub fn write_private_file(directory: &PrivateDirectory, file_name: &str, bytes: &[u8]) -> Result<PathBuf, ScriptError> {
+    write_private_file_as(directory, file_name, bytes, None)
+}
+
+
+pub fn io_failure(context: &'static str) -> impl Fn(io::Error) -> ScriptError {
+    move |source| ScriptError::Io { context, source }
+}
+
+
+/// Lets the script's user search the directory (`0711`, it still cannot list or create in it): called once its files are handed over.
+pub fn open_to_script_user(directory: &PrivateDirectory) -> Result<(), ScriptError> {
+    let context = "cannot open the private script directory to the script user";
+    let mode = Mode::from_bits_truncate(SEARCHABLE_DIRECTORY_MODE);
+    fchmod(directory.handle.as_fd(), mode)
+        .map_err(io::Error::from)
+        .map_err(io_failure(context))
+}
+
+
+pub fn hand_over(file: &File, owner: &RunAs) -> io::Result<()> {
+    std::os::unix::fs::fchown(file, Some(owner.uid), Some(owner.gid))
+}
+
+
+/// `write_private_file`, the file handed to `owner` through its own handle before the bytes are written.
+pub fn write_private_file_as(directory: &PrivateDirectory, file_name: &str, bytes: &[u8], owner: Option<&RunAs>) -> Result<PathBuf, ScriptError> {
     let descriptor = openat(
         directory.handle.as_fd(),
         file_name,
@@ -195,7 +225,10 @@ pub fn write_private_file(directory: &PrivateDirectory, file_name: &str, bytes: 
         context: "cannot create the private script file",
         source: errno.into(),
     })?;
-    write_all_into(File::from(descriptor), bytes).map(|()| directory.path.join(file_name))
+    let file = File::from(descriptor);
+    let context = "cannot hand the private script file to the script user";
+    owner.map_or(Ok(()), |run_as| hand_over(&file, run_as).map_err(io_failure(context)))?;
+    write_all_into(file, bytes).map(|()| directory.path.join(file_name))
 }
 
 
