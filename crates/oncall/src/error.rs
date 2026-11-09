@@ -20,4 +20,8 @@ pub enum OncallError {
         #[source]
         source: regex::Error,
     },
+    #[error("channel `{channel}`: {reason}")]
+    InvalidChannel { channel: String, reason: &'static str },
+    #[error("`{field}` holds a CR or LF")]
+    HeaderInjection { field: &'static str },
 }
