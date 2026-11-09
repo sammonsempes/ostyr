@@ -2,8 +2,9 @@ use crate::config::api_config;
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, PreparedKey, Rewatch, Sockets, Watching};
 use crate::oidc::{fingerprint_salt, load_oidc};
+use crate::previous::{record_entry, record_previous, retire_previous, write_previous_key, PREVIOUS_KEY_SAVED};
 use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn_generation, DRAIN_TIMEOUT};
-use crate::state::{lock_auth, read_compromised_digested};
+use crate::state::{check_store_key, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
 use core_audit::log::{append, check_private, open_file_log};
@@ -12,7 +13,7 @@ use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
 use core_auth::rbac::builtin_catalog;
 use core_auth::secretbox::{open_secret, seal_secret};
-use core_auth::store::{load_store, load_store_file, update_store_file};
+use core_auth::store::{load_store, load_store_file, read_store_locked, update_store_file};
 use core_auth::types::{AccountMap, CredentialMap, RandomFn, StoreKey};
 use core_config::error::ConfigError;
 use core_config::load::load_module;
@@ -243,13 +244,19 @@ pub fn read_store_handle(path: &Path) -> Result<(AccountMap, CredentialMap), Box
 }
 
 
-/// A moved accounts store must exist and parse (mode included) before it replaces the old one; nothing is created, not even the lock file.
+/// A moved accounts store must exist, parse (mode included) and open under the live key or the new one before it replaces the old one.
 pub fn check_store(state: &ApiState, settings: &ApiSettings) -> Result<(), BoxError> {
     let next = &settings.config.accounts_store;
     if **state.store_path.load() == *next {
         Ok(())
     } else {
-        read_store_handle(next).map(|_| ())
+        let (accounts, _) = read_store_handle(next)?;
+        let opens_live = unopened_secrets(&accounts, &state.key.load()).0 == 0;
+        if opens_live {
+            Ok(())
+        } else {
+            check_store_key(&accounts, &settings.key, Path::new(&settings.config.key_file)).map_err(BoxError::from)
+        }
     }
 }
 
@@ -361,7 +368,10 @@ pub fn prepare_key(state: &ApiState, prepared: &PendingKey, settings: &ApiSettin
     let loaded = changed
         .then(|| -> Result<PreparedKey, BoxError> {
             let (mut accounts, _) = load_store_file(&settings.config.accounts_store)?;
-            reseal_accounts(&mut accounts, &live, &settings.key, state.random)?;
+            let sealed_already = unopened_secrets(&accounts, &settings.key).0 == 0;
+            sealed_already
+                .then_some(0)
+                .map_or_else(|| reseal_accounts(&mut accounts, &live, &settings.key, state.random), Ok)?;
             Ok(PreparedKey {
                 key: Arc::clone(&settings.key),
             })
@@ -372,16 +382,53 @@ pub fn prepare_key(state: &ApiState, prepared: &PendingKey, settings: &ApiSettin
 }
 
 
-/// Re-encrypts the stored secrets under the store lock, then swaps the key, all while no login can run; a failure leaves the old key and file.
+/// Re-encrypts the stored secrets under the store lock, then swaps the key, all while no login can run; a store already sealed under `next` is adopted.
 pub fn rotate_store(state: &ApiState, next: &Arc<StoreKey>) -> Result<usize, AuthError> {
     let _held = lock_auth(state);
     let live = state.key.load_full();
-    let updated = update_store_file(&state.store_path.load(), state.random, |accounts, _| {
+    let count = update_store_file(&state.store_path.load(), state.random, |accounts, _| {
         reseal_accounts(accounts, &live, next, state.random)
-    })?;
-    updated.saved?;
+    })
+    .and_then(|updated| updated.saved.map(|()| updated.value))
+    .or_else(|error| adopt_sealed(state, next, error))?;
     state.key.store(Arc::clone(next));
-    Ok(updated.value)
+    Ok(count)
+}
+
+
+/// After a failed write the store may already be sealed under `next` (renamed, then a later step failed); then the key follows the file.
+pub fn adopt_sealed(state: &ApiState, next: &StoreKey, error: AuthError) -> Result<usize, AuthError> {
+    match read_store_locked(&state.store_path.load()) {
+        Ok((accounts, _)) if unopened_secrets(&accounts, next).0 == 0 => Ok(0),
+        Ok(_) => Err(error),
+        Err(read) => {
+            tracing::error!(%read, "cannot read the store to check whether the rotation reached it");
+            Err(error)
+        }
+    }
+}
+
+
+/// The context with the name and tenant in force now.
+pub fn current_context(state: &ApiState, context: &ReloadContext) -> ReloadContext {
+    let identity = state.identity.load();
+    ReloadContext {
+        tenant: identity.tenant.clone(),
+        module: identity.module.clone(),
+        ..context.clone()
+    }
+}
+
+
+/// Keeps the live key at `<key_file>.previous`, rotates, then removes it; a failed rotation leaves it for the next start.
+pub fn rotate_keeping_previous(state: &ApiState, context: &ReloadContext, key_file: &Path, next: &Arc<StoreKey>) -> Result<usize, AuthError> {
+    write_previous_key(key_file, &state.key.load(), state.random)?;
+    let current = current_context(state, context);
+    let detail = format!("{} written before the re-encryption", previous_key_path(key_file).display());
+    record_previous(&state.audit, &current, Outcome::Success, PREVIOUS_KEY_SAVED, detail);
+    let count = rotate_store(state, next)?;
+    retire_previous(&state.audit, &current_context(state, context), key_file);
+    Ok(count)
 }
 
 
@@ -393,7 +440,7 @@ pub fn switch_key(state: &ApiState, context: &ReloadContext, prepared: &PendingK
         .take()
         .filter(|candidate| Arc::ptr_eq(&candidate.key, &settings.key));
     taken.into_iter().for_each(|candidate| {
-        let (outcome, parameters) = rotate_store(state, &candidate.key)
+        let (outcome, parameters) = rotate_keeping_previous(state, context, Path::new(&settings.config.key_file), &candidate.key)
             .inspect_err(|error| tracing::error!(%error, "key rotation failed after validation, the old key is kept"))
             .inspect_err(|_| settings.rotation_failed.store(true, Ordering::SeqCst))
             .map_or_else(
@@ -413,9 +460,7 @@ pub fn switch_key(state: &ApiState, context: &ReloadContext, prepared: &PendingK
                     )
                 },
             );
-        append(&state.audit, current_entry(state, reload_entry(context, outcome, parameters)))
-            .map(|_| ())
-            .unwrap_or_else(|error| tracing::error!(%error, "cannot record the key rotation"));
+        record_entry(&state.audit, current_entry(state, reload_entry(context, outcome, parameters)));
     });
 }
 

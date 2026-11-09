@@ -1,11 +1,13 @@
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, StateInputs};
 use crate::oidc::load_oidc;
-use crate::reload::content_digest;
+use crate::previous::{read_previous_key, record_previous, retire_previous, ROTATION_RESUMED};
+use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
 use crate::routes::{core_access, openapi_document};
 use crate::types::AccessTable;
 use arc_swap::{ArcSwap, ArcSwapOption};
-use core_audit::log::open_file_log;
+use core_audit::log::{open_file_log, AuditLog};
+use core_audit::model::Outcome;
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
 use core_auth::limiter::FAILURE_WINDOW_SECONDS;
@@ -17,8 +19,9 @@ use core_auth::rbac::builtin_catalog;
 use core_auth::secretbox::open_secret;
 use core_auth::service::{Context, State};
 use core_auth::session::{hash_token, is_revoked};
-use core_auth::store::{load_store_file, read_store_locked};
-use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, StoreKey, VerifyFn};
+use core_auth::store::{load_store_file, read_store_locked, update_store_file};
+use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, CredentialMap, StoreKey, VerifyFn};
+use core_config::reload::ReloadContext;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -38,6 +41,9 @@ pub const RATE_MAX_REQUESTS: u32 = 30;
 
 
 pub const MAX_CONCURRENT_HASHES: usize = 4;
+
+
+pub const STARTUP_REQUEST_ID: &str = "startup";
 
 
 pub const PREVIOUS_KEY_SUFFIX: &str = ".previous";
@@ -84,8 +90,7 @@ pub fn build_state(
     extra_documents: Vec<OpenApiDocument>,
 ) -> Result<ApiState, StartupError> {
     let audit = open_file_log(&config.audit_log)?;
-    let (accounts, credentials) = load_store_file(&config.accounts_store)?;
-    check_store_key(&accounts, &inputs.key, Path::new(&config.key_file))?;
+    let (accounts, credentials) = load_sealed_store(config, &inputs.key, &audit)?;
     let catalog = builtin_catalog();
     let mut access = extra_access;
     access.extend(core_access());
@@ -128,8 +133,8 @@ pub fn previous_key_path(key_file: &Path) -> PathBuf {
 }
 
 
-/// Refuses a key when any stored TOTP secret does not open, counting the failures and naming the previous-key path, instead of starting with broken TOTP.
-pub fn check_store_key(accounts: &AccountMap, key: &StoreKey, key_file: &Path) -> Result<(), StartupError> {
+/// How many stored TOTP secrets `key` fails to open, and how many there are.
+pub fn unopened_secrets(accounts: &AccountMap, key: &StoreKey) -> (usize, usize) {
     let secrets = accounts
         .iter()
         .filter_map(|(name, account)| account.totp.as_ref().map(|totp| (name, totp)));
@@ -137,12 +142,61 @@ pub fn check_store_key(accounts: &AccountMap, key: &StoreKey, key_file: &Path) -
     let failed = secrets
         .filter(|(name, totp)| open_secret(key, name, &totp.encrypted_secret).is_err())
         .count();
+    (failed, total)
+}
+
+
+/// Refuses a key when any stored TOTP secret does not open, counting the failures and naming the previous-key path, instead of starting with broken TOTP.
+pub fn check_store_key(accounts: &AccountMap, key: &StoreKey, key_file: &Path) -> Result<(), StartupError> {
+    let (failed, total) = unopened_secrets(accounts, key);
     (failed == 0).then_some(()).ok_or_else(|| StartupError::StoreKeyMismatch {
         key_file: key_file.display().to_string(),
         previous: previous_key_path(key_file).display().to_string(),
         failed,
         total,
     })
+}
+
+
+/// Loads the store; when `key` does not open it but `<key_file>.previous` does, finishes the interrupted rotation first.
+pub fn load_sealed_store(config: &ApiConfig, key: &StoreKey, audit: &AuditLog<File>) -> Result<(AccountMap, CredentialMap), StartupError> {
+    let (accounts, credentials) = load_store_file(&config.accounts_store)?;
+    match check_store_key(&accounts, key, Path::new(&config.key_file)) {
+        Ok(()) => Ok((accounts, credentials)),
+        Err(mismatch) => resume_rotation(config, key, audit, &accounts, mismatch),
+    }
+}
+
+
+/// Re-seals the store from the previous key to `key`, audits it and removes the previous key; a store neither key opens stays refused.
+pub fn resume_rotation(
+    config: &ApiConfig,
+    key: &StoreKey,
+    audit: &AuditLog<File>,
+    accounts: &AccountMap,
+    mismatch: StartupError,
+) -> Result<(AccountMap, CredentialMap), StartupError> {
+    let key_file = Path::new(&config.key_file);
+    let previous_file = previous_key_path(key_file);
+    let found = read_previous_key(&previous_file).map_err(|source| StartupError::PreviousKey {
+        file: previous_file.display().to_string(),
+        source,
+    })?;
+    let previous = found.filter(|candidate| unopened_secrets(accounts, candidate).0 == 0).ok_or(mismatch)?;
+    let context = ReloadContext {
+        actor_id: RELOAD_ACTOR.to_owned(),
+        tenant: config.tenant.clone(),
+        module: config.module.clone(),
+        target: config.key_file.clone(),
+        request_id: STARTUP_REQUEST_ID.to_owned(),
+    };
+    let reseal = |stored: &mut AccountMap, _: &mut CredentialMap| reseal_accounts(stored, &previous, key, os_random);
+    let updated = update_store_file(&config.accounts_store, os_random, reseal)?;
+    updated.saved?;
+    let detail = format!("store re-sealed from {} under the key file", previous_file.display());
+    record_previous(audit, &context, Outcome::Success, ROTATION_RESUMED, detail);
+    retire_previous(audit, &context, key_file);
+    load_store_file(&config.accounts_store).map_err(StartupError::from)
 }
 
 

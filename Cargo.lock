@@ -822,6 +822,7 @@ dependencies = [
  "hyper-util",
  "openidconnect",
  "rcgen",
+ "rustix 1.1.6",
  "rustls",
  "rustls-pki-types",
  "same-file",

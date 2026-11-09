@@ -40,14 +40,20 @@ pub enum StartupError {
         source: AuditError,
     },
     #[error(
-        "the key file {key_file} does not decrypt {failed} of {total} stored TOTP secrets: restore the previous key at {previous} if none opens, \
-         a store sealed under two keys needs the two-key recovery (T033E)"
+        "the key file {key_file} does not decrypt {failed} of {total} stored TOTP secrets, and no key kept at {previous} opens them either: \
+         restore the key that sealed them"
     )]
     StoreKeyMismatch {
         key_file: String,
         previous: String,
         failed: usize,
         total: usize,
+    },
+    #[error("previous key file {file}: {source}")]
+    PreviousKey {
+        file: String,
+        #[source]
+        source: AuthError,
     },
     #[error("the reload engine is gone, the file watch cannot follow the module file")]
     EngineGone,
