@@ -4,15 +4,14 @@ use crate::harness::{
     start_single_state, stop_server,
 };
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
-use crate::services::{agent_identity, counter, session, settings};
+use crate::services::{agent_identity, counter, patient_settings, session, settings};
 use crate::state::{discarding_audit, envelope_source, make_audited_state, make_state, new_stored, recording_audit, recording_sink};
 use crate::types::{Stored, TestResult};
 use agent_channel::client::{backoff_delay, connect_channel, deliver_events, heartbeat, random_jitter, settle};
 use agent_channel::error::{ChannelError, IdentityError};
 use agent_channel::limits::{digest_text, lock_presence};
 use agent_channel::model::{
-    ChannelSettings, Delivery, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS, MAX_LOGGED_DIGEST_BYTES, MAX_LOGGED_TEXT_CHARS, MAX_RECONNECT_ATTEMPTS,
-    TRUNCATION_MARKER,
+    Delivery, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS, MAX_LOGGED_DIGEST_BYTES, MAX_LOGGED_TEXT_CHARS, MAX_RECONNECT_ATTEMPTS, TRUNCATION_MARKER,
 };
 use agent_channel::presence::{check_silence, record_beat, watch_silence};
 use agent_channel::proto::EventBatch;
@@ -28,6 +27,9 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::sleep;
+
+
+const SMALL_HANDSHAKE_SECONDS: u64 = 2;
 
 
 const BATCHES: u64 = 5;
@@ -229,7 +231,7 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     let before_restart = new_stored();
     let after_restart = new_stored();
     let first_state = make_state(
-        ChannelSettings::default(),
+        patient_settings(),
         failing_after(Arc::clone(&before_restart), ACCEPTED_BEFORE_RESTART),
         envelope_source(Vec::new()),
     );
@@ -256,7 +258,7 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     assert!(delay <= Duration::from_millis(BACKOFF_MAX_MILLIS));
     stop_server(first).await?;
     let second_state = make_state(
-        ChannelSettings::default(),
+        patient_settings(),
         recording_sink(Arc::clone(&after_restart)),
         envelope_source(Vec::new()),
     );
@@ -319,7 +321,7 @@ fn a_failing_audit_log_does_not_stop_the_silence_check() -> TestResult {
 
 #[tokio::test]
 async fn a_heartbeat_through_the_channel_is_recorded() -> TestResult {
-    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), envelope_source(Vec::new()));
+    let state = make_state(patient_settings(), recording_sink(new_stored()), envelope_source(Vec::new()));
     let running = session(Arc::clone(&state)).await?;
     assert!(lock_presence(&state).is_empty());
     bounded(heartbeat(running.channel.clone(), "test")).await??;
@@ -366,12 +368,18 @@ async fn a_peer_stalling_in_the_handshake_is_dropped_at_the_timeout() -> TestRes
     let dir = tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
-    let state = make_state(ChannelSettings::default(), recording_sink(new_stored()), envelope_source(Vec::new()));
+    let impatient = settings(|base| base.handshake_timeout_seconds = SMALL_HANDSHAKE_SECONDS);
+    let state = make_state(impatient, recording_sink(new_stored()), envelope_source(Vec::new()));
     let server = start_single_state(&paths, empty_revocation(&paths)?, Arc::clone(&state)).await?;
     let _stalled = TcpStream::connect(server.address).await?;
     tokio::time::pause();
     let served = server.handle.await?;
-    assert!(matches!(served, Err(ChannelError::HandshakeTimeout { .. })));
+    assert!(matches!(
+        served,
+        Err(ChannelError::HandshakeTimeout {
+            seconds: SMALL_HANDSHAKE_SECONDS
+        })
+    ));
     assert_eq!(counter(&state.counters.handshake_timeouts), 1);
     Ok(())
 }
@@ -502,7 +510,7 @@ fn refusals_are_logged_once_and_a_bad_uri_is_bounded() -> TestResult {
 #[test]
 fn evicting_a_handshake_that_already_finished_is_counted_and_harmless() -> TestResult {
     let _logging = scoped_logging();
-    let (state, _stored) = crate::services::recording_state(ChannelSettings::default());
+    let (state, _stored) = crate::services::recording_state(patient_settings());
     let (sender, receiver) = oneshot::channel();
     drop(receiver);
     evict(Some(sender), &state);

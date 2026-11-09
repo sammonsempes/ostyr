@@ -1,3 +1,4 @@
+use crate::services::patient_settings;
 use crate::types::Stored;
 use agent_channel::limits::system_now;
 use agent_channel::model::{ChannelSettings, Counters, Identity, ServerState};
@@ -74,7 +75,7 @@ pub fn make_audited_state(settings: ChannelSettings, events: EventSink, commands
 
 
 pub fn default_state() -> SharedState {
-    make_state(ChannelSettings::default(), recording_sink(new_stored()), envelope_source(Vec::new()))
+    make_state(patient_settings(), recording_sink(new_stored()), envelope_source(Vec::new()))
 }
 
 

@@ -32,7 +32,7 @@ const CAPACITY: usize = 4;
 const SHRUNK: usize = 1;
 
 
-const FIELD_COUNT: usize = 15;
+const FIELD_COUNT: usize = 16;
 
 
 fn context() -> ReloadContext {

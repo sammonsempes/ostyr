@@ -1,5 +1,7 @@
 use crate::error::SettingsError;
-use crate::model::{ChannelSettings, ServerState, MAX_MESSAGE_BYTES_LIMIT, MAX_TOTAL_CONNECTIONS_LIMIT, SETTINGS_SECTION};
+use crate::model::{
+    ChannelSettings, ServerState, MAX_HANDSHAKE_TIMEOUT_SECONDS, MAX_MESSAGE_BYTES_LIMIT, MAX_TOTAL_CONNECTIONS_LIMIT, SETTINGS_SECTION,
+};
 use crate::types::{BoxError, SharedSettings};
 use arc_swap::ArcSwap;
 use core_config::load::load_file;
@@ -38,6 +40,10 @@ pub fn invalid_settings(settings: &ChannelSettings) -> Vec<&'static str> {
         ("silence_check_interval_seconds", settings.silence_check_interval_seconds == 0),
         ("max_streams_per_connection", settings.max_streams_per_connection == 0),
         ("request_timeout_seconds", settings.request_timeout_seconds == 0),
+        (
+            "handshake_timeout_seconds",
+            settings.handshake_timeout_seconds == 0 || settings.handshake_timeout_seconds > MAX_HANDSHAKE_TIMEOUT_SECONDS,
+        ),
         ("first_request_timeout_seconds", settings.first_request_timeout_seconds == 0),
         (
             "max_total_connections",
