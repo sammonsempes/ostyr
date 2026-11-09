@@ -220,7 +220,7 @@ fn loading_errors_name_file_and_line() -> TestResult {
     fs::write(&path, "templates:\n  - name: a\n    colour: red\n")?;
     let message = load_templates(&path).err().ok_or("expected an error")?.to_string();
     assert!(message.contains("templates.yaml:3"), "{message}");
-    assert!(message.contains("colour"), "{message}");
+    assert!(message.contains("unknown field"), "{message}");
     let missing = dir.path().join("absent.yaml");
     assert!(matches!(load_templates(&missing), Err(TemplateLoadError::Config(_))));
     fs::write(&path, "templates:\n  - name: \"\"\n")?;

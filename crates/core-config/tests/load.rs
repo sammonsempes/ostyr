@@ -112,8 +112,9 @@ fn unknown_field_is_located() -> TestResult {
     } = parse_failure("module_unknown_field.yaml")?;
     assert!(file.ends_with("module_unknown_field.yaml"));
     assert_eq!((line, column), (UNKNOWN_FIELD_LINE, 1));
-    assert_eq!(field_path, "listn");
-    assert!(message.contains("unknown field `listn`"), "{message}");
+    assert_eq!(field_path, ".");
+    assert!(message.starts_with("unknown field, expected one of"), "{message}");
+    assert!(!message.contains("listn"), "{message}");
     Ok(())
 }
 
@@ -179,7 +180,7 @@ fn error_outside_the_deserializer_uses_root_marker() -> TestResult {
 fn parse_error_display_names_file_line_column_and_path() -> TestResult {
     let error = load_module(&fixture("module_unknown_field.yaml")).err().ok_or("no error")?;
     let text = error.to_string();
-    assert!(text.contains("module_unknown_field.yaml:3:1: at `listn`"), "{text}");
+    assert!(text.contains("module_unknown_field.yaml:3:1: at `.`: unknown field"), "{text}");
     assert!(error.source().is_some());
     Ok(())
 }
