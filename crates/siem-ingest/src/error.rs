@@ -84,3 +84,37 @@ pub enum PipelineError {
     #[error("fetching from the bus failed")]
     Fetch(#[source] core_config::types::BoxError),
 }
+
+
+/// The text is fixed per variant: the cause stays in the source chain, so no credential or payload reaches a log line.
+#[derive(Debug, Error)]
+pub enum NatsError {
+    #[error("the NATS runtime could not start")]
+    Runtime(#[source] std::io::Error),
+    #[error("the NATS {what} file could not be read")]
+    File {
+        what: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the NATS {what} file exceeds the size cap")]
+    FileTooLarge { what: &'static str },
+    #[error("the NATS CA file holds no readable PEM certificate")]
+    CaInvalid(#[source] rustls_pki_types::pem::Error),
+    #[error("the NATS CA file holds no usable certificate")]
+    CaEmpty,
+    #[error("the NATS TLS configuration is invalid")]
+    Tls(#[source] rustls::Error),
+    #[error("the NATS credentials file is not valid")]
+    Credentials(#[source] std::io::Error),
+    #[error("the NATS server request failed")]
+    Request(#[source] core_config::types::BoxError),
+    #[error("the NATS server did not answer before the deadline")]
+    Timeout(#[source] tokio::time::error::Elapsed),
+    #[error("the NATS server accepts payloads of {server} bytes, above the {cap} byte batch cap")]
+    PayloadLimit { server: usize, cap: usize },
+    #[error("no NATS session is open")]
+    NotConnected,
+    #[error("the acknowledgement token is unknown to the NATS session")]
+    UnknownToken,
+}
