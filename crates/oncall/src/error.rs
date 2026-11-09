@@ -22,6 +22,8 @@ pub enum OncallError {
     },
     #[error("channel `{channel}`: {reason}")]
     InvalidChannel { channel: String, reason: &'static str },
+    #[error("the setting `{field}` is not valid")]
+    InvalidSetting { field: &'static str },
     #[error("`{field}` holds a CR or LF")]
     HeaderInjection { field: &'static str },
 }
@@ -52,4 +54,22 @@ pub enum TransportError {
     Request(#[source] ureq::Error),
     #[error("the receiver did not answer with a success status")]
     Status,
+    #[error("the settings have no smtp section")]
+    SmtpNotConfigured,
+    #[error("the address is refused")]
+    Address(#[source] lettre::address::AddressError),
+    #[error("the text is too large or holds a line break in the subject")]
+    MailText,
+    #[error("the channel has a secret file but the settings no smtp username")]
+    NoUsername,
+    #[error("the mail cannot be built")]
+    Build(#[source] lettre::error::Error),
+    #[error("the TLS setup is refused")]
+    Tls(#[source] lettre::transport::smtp::Error),
+    #[error("the CA certificate is refused")]
+    SmtpCertificate(#[source] lettre::transport::smtp::Error),
+    #[error("the mail was not delivered")]
+    Smtp(#[source] lettre::transport::smtp::Error),
+    #[error("the send did not finish before the deadline")]
+    Deadline(#[source] std::sync::mpsc::RecvTimeoutError),
 }

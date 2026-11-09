@@ -5,3 +5,6 @@ pub type Sender<'sender> = &'sender mut dyn FnMut(&Channel, &Message) -> Result<
 
 
 pub type Headers = Vec<(&'static str, zeroize::Zeroizing<String>)>;
+
+
+pub type MailOutcome = Result<(), lettre::transport::smtp::Error>;
