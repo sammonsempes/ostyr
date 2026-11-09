@@ -1,0 +1,5 @@
+name: pager-webhook
+tenant: acme
+kind: webhook
+target: https://hooks.example.com/alerts?token=hunter2
+secret_file: /etc/ostyr/secrets/pager-token

@@ -11,10 +11,14 @@ chrono-tz = { version = "0.10", features = ["serde"] }
 core-config = { version = "0.0.0", path = "../core-config" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
+tracing = "0.1"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tracing-subscriber = "0.3"
 
 [lints]
 workspace = true
