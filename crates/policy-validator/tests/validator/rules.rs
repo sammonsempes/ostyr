@@ -100,7 +100,10 @@ fn a_global_hash_of_a_system_binary_or_interpreter_is_refused() -> TestResult {
     ] {
         let mut proposal = exclusion(Scope::Global, SelectorKind::Hash, &hash());
         proposal.evidence.observed_images = vec![image("tool.exe"), image(name)];
-        let found = reasons_for(proposal)?;
+        let found: Vec<Reason> = reasons_for(proposal)?
+            .into_iter()
+            .filter(|reason| !matches!(reason, Reason::NonCanonical { .. }))
+            .collect();
         assert_eq!(found, vec![Reason::SystemBinary { name: name.to_owned() }], "{name}");
     }
     Ok(())

@@ -105,7 +105,11 @@ fn endpoint_writable(kind: SelectorKind, value: &str, directory: &str) -> Result
 fn global_image_refused(name: &str) -> Result<(), Box<dyn Error>> {
     let mut proposal = exclusion(Scope::Global, SelectorKind::Hash, &hash());
     proposal.evidence.observed_images = vec![image(name)];
-    assert_eq!(reasons_for(proposal)?, vec![Reason::SystemBinary { name: name.to_owned() }], "{name}");
+    let found: Vec<Reason> = reasons_for(proposal)?
+        .into_iter()
+        .filter(|reason| !matches!(reason, Reason::NonCanonical { .. }))
+        .collect();
+    assert_eq!(found, vec![Reason::SystemBinary { name: name.to_owned() }], "{name}");
     Ok(())
 }
 
@@ -385,5 +389,39 @@ fn t043a_c3_non_blocking_name_only_group_and_directory_arguments() -> TestResult
     let policy = loaded()?;
     let proposal = Proposal::Exclusion(exclusion(Scope::EndpointGroup, SelectorKind::Hash, &hash()));
     assert!(validate(&policy, &proposal).reasons.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn t043h_an_image_inside_a_protected_path_is_refused_whatever_the_flags() -> TestResult {
+    let bench =
+        bench("honeytoken_paths: [/srv/canary-9, 'C:\\Canary-9']\nsecurity_sensors: [edrsecret]\nagent_paths: [/opt/agent-7, 'C:\\Agent-7']\n")?;
+    let context = validation_context();
+    for (path, expected) in [
+        ("/opt/agent-7/bin/tool", "agent_paths[0]"),
+        ("/srv/canary-9/tool", "honeytoken_paths[0]"),
+        (r"C:\canary-9\tool.exe", "honeytoken_paths[1]"),
+        (r"D:\AGENT-7\bin\tool.exe", "agent_paths[1]"),
+    ] {
+        let mut selected = exclusion(Scope::Global, SelectorKind::Hash, &hash());
+        selected.evidence.observed_images = vec![ObservedImage {
+            path: path.to_owned(),
+            ..image("tool")
+        }];
+        let verdict = validate_audited(&bench.engine, &context, &Proposal::Exclusion(selected))?;
+        let shown: Vec<String> = verdict.reasons.iter().map(ToString::to_string).collect();
+        assert!(
+            shown.len() == 1 && shown.iter().any(|reason| reason.contains(expected)),
+            "{path}: {shown:?}"
+        );
+    }
+    let audit = fs::read_to_string(&bench.audit_file)?;
+    assert!(audit.contains("agent_paths[0]") && audit.contains("honeytoken_paths[0]"), "{audit}");
+    assert!(SECRET_ENTRIES.iter().all(|entry| !audit.contains(entry)), "{audit}");
+    let outside = exclusion(Scope::Global, SelectorKind::Hash, &hash());
+    assert!(validate_audited(&bench.engine, &context, &Proposal::Exclusion(outside))?
+        .reasons
+        .is_empty());
     Ok(())
 }

@@ -85,7 +85,7 @@ pub fn hash() -> String {
 
 pub fn image(name: &str) -> ObservedImage {
     ObservedImage {
-        path: format!("/srv/app/bin/{name}"),
+        path: format!("/srv/app/bin/{}", name.rsplit(['/', '\\']).next().unwrap_or(name)),
         sha256: hash(),
         name: name.to_owned(),
         original_file_name: None,
