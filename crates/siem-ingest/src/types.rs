@@ -1,6 +1,7 @@
 use crate::model::{AckAction, Delivery, Document, Message};
 use core_config::types::BoxError;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -34,3 +35,9 @@ pub type PendingMap = HashMap<AckToken, Message>;
 
 
 pub type Counts = Arc<Mutex<BTreeMap<String, usize>>>;
+
+
+pub type ConnectionFields<'a> = (
+    (&'a str, bool, Option<&'a Path>, Option<&'a Path>, Option<&'a str>, Option<&'a Path>),
+    (&'a str, &'a str, u64, u64, u64, usize),
+);

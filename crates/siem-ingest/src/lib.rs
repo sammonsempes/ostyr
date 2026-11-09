@@ -4,6 +4,8 @@ pub mod batcher;
 pub mod clickhouse;
 pub mod error;
 pub mod model;
+pub mod nats;
+pub mod nats_settings;
 pub mod parse;
 pub mod pipeline;
 pub mod settings;

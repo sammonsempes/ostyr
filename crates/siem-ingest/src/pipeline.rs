@@ -64,7 +64,7 @@ pub fn dead_letter(pipeline: &mut Pipeline, token: AckToken, reason: &str, repor
 
 
 /// Acts on a flush: dead letters are published then acknowledged, a refused batch is redelivered, or dead-lettered if unparsable.
-pub fn settle(pipeline: &mut Pipeline, flushed: FlushReport, report: &mut CycleReport) {
+pub fn settle_flat(pipeline: &mut Pipeline, flushed: FlushReport, report: &mut CycleReport) {
     let dead_tokens: HashSet<AckToken> = flushed.dead_letters.iter().map(|dead| dead.token).collect();
     let poison = flushed.sink_error.as_deref() == Some(poison_text().as_str());
     for dead in &flushed.dead_letters {
@@ -82,6 +82,45 @@ pub fn settle(pipeline: &mut Pipeline, flushed: FlushReport, report: &mut CycleR
             answer(pipeline, *token, AckAction::Nak, report);
         }
     }
+}
+
+
+/// Retries each message of a batch ClickHouse found unparsable on its own: the valid rows land, only the malformed ones are dead-lettered.
+pub fn isolate(pipeline: &mut Pipeline, tokens: &[AckToken], report: &mut CycleReport) {
+    for token in tokens {
+        let held = pipeline.pending.get(token).cloned();
+        held.into_iter().for_each(|message| {
+            let early = match push(&mut pipeline.batcher, &message) {
+                Ok(flushed) => flushed,
+                Err(refusal) => {
+                    warn!(%refusal, token = *token, "an isolated message was refused by the batcher, left for redelivery");
+                    pipeline.pending.remove(token);
+                    answer(pipeline, *token, AckAction::Nak, report);
+                    None
+                }
+            };
+            let last = flush(&mut pipeline.batcher);
+            early.into_iter().chain(Some(last)).for_each(|done| settle_flat(pipeline, done, report));
+        });
+    }
+}
+
+
+/// A batch refused as unparsable is split into one-message batches; any other flush is acted on as it is.
+pub fn settle(pipeline: &mut Pipeline, flushed: FlushReport, report: &mut CycleReport) {
+    let split = flushed.sink_error.as_deref() == Some(poison_text().as_str()) && flushed.unacknowledged.len() > 1;
+    let isolated: Vec<AckToken> = if split { flushed.unacknowledged.clone() } else { Vec::new() };
+    let rest = if split {
+        FlushReport {
+            unacknowledged: Vec::new(),
+            sink_error: None,
+            ..flushed
+        }
+    } else {
+        flushed
+    };
+    settle_flat(pipeline, rest, report);
+    isolate(pipeline, &isolated, report);
 }
 
 
