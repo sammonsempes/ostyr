@@ -84,6 +84,7 @@ pub const DEFAULT_USER_WRITABLE_PREFIXES: &[&str] = &[
     "/var/tmp",
     "/usr/tmp",
     "/dev/shm",
+    "/run/shm",
     "/home",
     "/root",
     "/Users",
@@ -166,6 +167,7 @@ pub const DEFAULT_SERVICE_TOOLS: &[&str] = &[
 ];
 
 
+/// Kept for the day signers come back: signer selectors are refused at every scope and nothing reads this list yet.
 pub const DEFAULT_OS_VENDOR_SIGNERS: &[&str] = &["microsoft windows", "microsoft corporation", "apple inc", "canonical", "red hat"];
 
 
@@ -247,7 +249,6 @@ pub struct LoadedPolicy {
     pub interpreter_stems: Vec<String>,
     pub sensor_stems: Vec<String>,
     pub tool_stems: Vec<String>,
-    pub vendor_signers: Vec<String>,
 }
 
 
@@ -287,7 +288,6 @@ pub fn compile(policy: Policy, hash: String) -> Result<LoadedPolicy, PolicyError
     let stems = interpreter_stems(&policy.interpreters)?;
     let sensor_stems = interpreter_stems(&policy.security_sensors)?;
     let tool_stems = interpreter_stems(&policy.service_tools)?;
-    let vendor_signers = policy.os_vendor_signers.iter().map(|signer| signer.trim().to_lowercase()).collect();
     Ok(LoadedPolicy {
         policy,
         hash,
@@ -298,7 +298,6 @@ pub fn compile(policy: Policy, hash: String) -> Result<LoadedPolicy, PolicyError
         interpreter_stems: stems,
         sensor_stems,
         tool_stems,
-        vendor_signers,
     })
 }
 

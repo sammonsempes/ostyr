@@ -16,6 +16,8 @@ mod properties;
 mod reload;
 #[path = "validator/rules.rs"]
 mod rules;
+#[path = "validator/signers_lists.rs"]
+mod signers_lists;
 #[path = "validator/support.rs"]
 mod support;
 #[path = "validator/types.rs"]

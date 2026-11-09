@@ -41,6 +41,21 @@ pub fn joined(values: &[String]) -> String {
 }
 
 
+pub const LIST_SALT: &str = "ostyr-policy-validator-list-v1";
+
+
+/// Count and salted digest of a list: the diff shows that it changed, never the entries.
+pub fn list_summary(values: &[String]) -> String {
+    let digest = values
+        .iter()
+        .fold(Sha256::new().chain_update(LIST_SALT), |state, value| {
+            state.chain_update(value.len().to_string()).chain_update(":").chain_update(value)
+        })
+        .finalize();
+    format!("count={} digest={digest:x}", values.len())
+}
+
+
 /// One key per setting, so a reload diff names what changed.
 pub fn policy_state(loaded: &LoadedPolicy) -> ConfigState {
     let policy = &loaded.policy;
@@ -56,6 +71,10 @@ pub fn policy_state(loaded: &LoadedPolicy) -> ConfigState {
         ("honeytoken_paths", joined(&policy.honeytoken_paths)),
         ("agent_paths", joined(&policy.agent_paths)),
         ("critical_asr_rules", joined(&rules)),
+        ("os_directories", list_summary(&policy.os_directories)),
+        ("security_sensors", list_summary(&policy.security_sensors)),
+        ("service_tools", list_summary(&policy.service_tools)),
+        ("os_vendor_signers", list_summary(&policy.os_vendor_signers)),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))

@@ -43,7 +43,6 @@ fn a_narrow_signed_exclusion_is_accepted() -> TestResult {
         probe(Scope::SingleEndpoint, SelectorKind::CommandLine, "/srv/app/bin/tool --flag /srv/data")?,
         vec![]
     );
-    assert_eq!(probe(Scope::SingleEndpoint, SelectorKind::Signer, "Vendor Inc")?, vec![]);
     assert_eq!(probe(Scope::EndpointGroup, SelectorKind::Hash, &hash())?, vec![]);
     assert_eq!(probe(Scope::Global, SelectorKind::Hash, &hash())?, vec![]);
     let accepted = verdict_for(exclusion(Scope::Global, SelectorKind::Hash, &hash()))?;
@@ -58,7 +57,7 @@ fn only_a_hash_is_allowed_at_global_and_group_scope() -> TestResult {
         assert_eq!(probe(scope, SelectorKind::Path, GOOD_PATH)?, vec![Reason::PathAtWideScope]);
         assert_eq!(probe(scope, SelectorKind::ProcessName, GOOD_PATH)?, vec![Reason::ProcessNameAtWideScope]);
         assert_eq!(probe(scope, SelectorKind::CommandLine, GOOD_PATH)?, vec![Reason::CommandLineAtWideScope]);
-        assert_eq!(probe(scope, SelectorKind::Signer, "Vendor Inc")?, vec![Reason::SignerAtWideScope]);
+        assert_eq!(probe(scope, SelectorKind::Signer, "Vendor Inc")?, vec![Reason::SignerSelector]);
     }
     Ok(())
 }
@@ -241,7 +240,7 @@ fn a_signer_selector_is_data_not_a_pattern() -> TestResult {
     for value in ["", "*", "Ven?dor", "%SIGNER%", "Vendor\nInc"] {
         assert_eq!(
             probe(Scope::SingleEndpoint, SelectorKind::Signer, value)?,
-            vec![Reason::InvalidSigner],
+            vec![Reason::SignerSelector],
             "{value:?}"
         );
     }
@@ -302,7 +301,7 @@ fn an_unsigned_binary_needs_a_stable_hash_and_never_a_path() -> TestResult {
     assert_eq!(reasons_for(unsigned_hash)?, vec![]);
     let mut unsigned_signer = exclusion(Scope::SingleEndpoint, SelectorKind::Signer, "Vendor");
     unsigned_signer.evidence.signed_by_trusted = false;
-    assert_eq!(reasons_for(unsigned_signer)?, vec![Reason::UnsignedWithoutHash]);
+    assert_eq!(reasons_for(unsigned_signer)?, vec![Reason::SignerSelector, Reason::UnsignedWithoutHash]);
     Ok(())
 }
 
@@ -311,7 +310,10 @@ fn an_unsigned_binary_needs_a_stable_hash_and_never_a_path() -> TestResult {
 fn the_narrowest_selector_and_scope_win() -> TestResult {
     let mut known = exclusion(Scope::SingleEndpoint, SelectorKind::Signer, "Vendor");
     known.evidence.known_hash = Some(hash());
-    assert_eq!(reasons_for(known)?, vec![Reason::NarrowerSelector { hash: hash() }]);
+    assert_eq!(
+        reasons_for(known)?,
+        vec![Reason::SignerSelector, Reason::NarrowerSelector { hash: hash() }]
+    );
     let mut same = exclusion(Scope::EndpointGroup, SelectorKind::Hash, &hash());
     same.evidence.known_hash = Some(hash());
     assert_eq!(reasons_for(same)?, vec![]);

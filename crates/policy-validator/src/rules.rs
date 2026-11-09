@@ -27,9 +27,6 @@ pub const MAX_IMAGE_NAME_BYTES: usize = 255;
 pub const MAX_RULE_ID_BYTES: usize = 64;
 
 
-pub const WILDCARD_SIGNER_CHARACTERS: [char; 3] = ['*', '?', '%'];
-
-
 pub fn bounded_impact(impact: &Impact) -> bool {
     impact.techniques.len() <= MAX_TECHNIQUES
         && impact.techniques.iter().all(|technique| technique.len() <= MAX_TECHNIQUE_BYTES)
@@ -75,7 +72,7 @@ pub fn listed_stem<'a>(stems: &'a [String], file_name: &str) -> Option<&'a Strin
     let stem = stem_of(file_name);
     stems.iter().find(|listed| {
         stem.strip_prefix(listed.as_str())
-            .is_some_and(|rest| rest.chars().all(|digit| digit.is_ascii_digit()))
+            .is_some_and(|rest| rest.starts_with('-') || rest.chars().all(|digit| digit.is_ascii_digit()))
     })
 }
 
@@ -174,18 +171,6 @@ pub fn path_reasons(loaded: &LoadedPolicy, paths: Result<Vec<CanonicalPath>, cra
     match paths {
         Err(form) => vec![Reason::NonCanonical { form }],
         Ok(found) => found.iter().flat_map(|path| location_reasons(loaded, path)).collect(),
-    }
-}
-
-
-pub fn signer_reasons(loaded: &LoadedPolicy, value: &str) -> Vec<Reason> {
-    let lower = value.to_lowercase();
-    if value.is_empty() || value.contains(WILDCARD_SIGNER_CHARACTERS) || value.chars().any(char::is_control) {
-        vec![Reason::InvalidSigner]
-    } else if loaded.vendor_signers.iter().any(|vendor| lower.contains(vendor.as_str())) {
-        vec![Reason::OsVendorSigner]
-    } else {
-        Vec::new()
     }
 }
 
@@ -325,12 +310,21 @@ pub fn command_words_reasons(loaded: &LoadedPolicy, value: &str) -> Vec<Reason> 
 }
 
 
+/// Every path-like argument after the executable is checked against the OS directories, whatever the images say.
+pub fn argument_directory_reasons(loaded: &LoadedPolicy, value: &str) -> Vec<Reason> {
+    command_line_paths(value).map_or_else(
+        |_| Vec::new(),
+        |paths| paths.iter().skip(1).flat_map(|path| directory_reasons(loaded, &[], path)).collect(),
+    )
+}
+
+
 pub fn wide_scope_reason(kind: SelectorKind) -> Reason {
     match kind {
         SelectorKind::Path => Reason::PathAtWideScope,
         SelectorKind::ProcessName => Reason::ProcessNameAtWideScope,
         SelectorKind::CommandLine => Reason::CommandLineAtWideScope,
-        SelectorKind::Signer | SelectorKind::Hash => Reason::SignerAtWideScope,
+        SelectorKind::Signer | SelectorKind::Hash => Reason::SignerSelector,
     }
 }
 
@@ -341,10 +335,15 @@ pub fn selector_reasons(loaded: &LoadedPolicy, exclusion: &Exclusion) -> Vec<Rea
     let wide = exclusion.scope != Scope::SingleEndpoint;
     match (kind, wide) {
         (SelectorKind::Hash, _) => hash_reasons(exclusion),
+        (SelectorKind::Signer, _) => vec![Reason::SignerSelector],
         (_, true) => vec![wide_scope_reason(*kind)],
-        (SelectorKind::Signer, false) => signer_reasons(loaded, value),
         (SelectorKind::Path | SelectorKind::ProcessName, false) => path_selector_reasons(loaded, &exclusion.evidence.observed_images, value),
-        (SelectorKind::CommandLine, false) => [path_reasons(loaded, command_line_paths(value)), command_words_reasons(loaded, value)].concat(),
+        (SelectorKind::CommandLine, false) => [
+            path_reasons(loaded, command_line_paths(value)),
+            argument_directory_reasons(loaded, value),
+            command_words_reasons(loaded, value),
+        ]
+        .concat(),
     }
 }
 

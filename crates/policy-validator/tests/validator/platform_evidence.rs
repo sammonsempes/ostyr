@@ -319,11 +319,14 @@ fn c2_finding_6_an_os_vendor_signer_is_refused() -> TestResult {
     ] {
         assert_eq!(
             probe(Scope::SingleEndpoint, SelectorKind::Signer, signer)?,
-            vec![Reason::OsVendorSigner],
+            vec![Reason::SignerSelector],
             "{signer}"
         );
     }
-    assert_eq!(probe(Scope::SingleEndpoint, SelectorKind::Signer, "Vendor Ltd")?, vec![]);
+    assert_eq!(
+        probe(Scope::SingleEndpoint, SelectorKind::Signer, "Vendor Ltd")?,
+        vec![Reason::SignerSelector]
+    );
     Ok(())
 }
 
