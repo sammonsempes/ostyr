@@ -25,13 +25,13 @@
   },
   "components": [
     {
-      "bom-ref": "pkg:deb/debian/bash@5.2.15-2%2Bb2?arch=amd64&distro=debian-12&package-id=2c4d7e1b9a0f3c58",
+      "bom-ref": "pkg:deb/debian/bash@5.2.15-2%2Bb2?arch=amd64&distro=debian-12.15&package-id=2c4d7e1b9a0f3c58",
       "type": "library",
       "publisher": "Matthias Klose <doko@debian.org>",
       "name": "bash",
       "version": "5.2.15-2+b2",
       "cpe": "cpe:2.3:a:bash:bash:5.2.15-2+b2:*:*:*:*:*:*:*",
-      "purl": "pkg:deb/debian/bash@5.2.15-2%2Bb2?arch=amd64&distro=debian-12",
+      "purl": "pkg:deb/debian/bash@5.2.15-2%2Bb2?arch=amd64&distro=debian-12.15",
       "properties": [
         {
           "name": "syft:package:foundBy",
@@ -44,12 +44,12 @@
       ]
     },
     {
-      "bom-ref": "pkg:deb/debian/libc6@2.36-9%2Bdeb12u4?arch=amd64&distro=debian-12&upstream=glibc&package-id=8e1f3a5c7b9d2f40",
+      "bom-ref": "pkg:deb/debian/libc6@2.36-9%2Bdeb12u4?arch=amd64&distro=debian-12.15&upstream=glibc&package-id=8e1f3a5c7b9d2f40",
       "type": "library",
       "name": "libc6",
       "version": "2.36-9+deb12u4",
       "cpe": "cpe:2.3:a:libc6:libc6:2.36-9+deb12u4:*:*:*:*:*:*:*",
-      "purl": "pkg:deb/debian/libc6@2.36-9%2Bdeb12u4?arch=amd64&distro=debian-12&upstream=glibc",
+      "purl": "pkg:deb/debian/libc6@2.36-9%2Bdeb12u4?arch=amd64&distro=debian-12.15&upstream=glibc",
       "properties": [
         {
           "name": "syft:package:foundBy",
@@ -58,11 +58,11 @@
       ]
     },
     {
-      "bom-ref": "pkg:deb/debian/openssl@3.0.11-1~deb12u2?arch=amd64&distro=debian-12&package-id=1a3b5c7d9e0f2a46",
+      "bom-ref": "pkg:deb/debian/openssl@3.0.11-1~deb12u2?arch=amd64&distro=debian-12.15&package-id=1a3b5c7d9e0f2a46",
       "type": "library",
       "name": "openssl",
       "version": "3.0.11-1~deb12u2",
-      "purl": "pkg:deb/debian/openssl@3.0.11-1~deb12u2?arch=amd64&distro=debian-12"
+      "purl": "pkg:deb/debian/openssl@3.0.11-1~deb12u2?arch=amd64&distro=debian-12.15"
     },
     {
       "bom-ref": "pkg:cargo/serde@1.0.190?package-id=5b7d9f1a3c5e7092",

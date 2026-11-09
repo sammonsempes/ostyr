@@ -118,3 +118,10 @@ pub struct Classified {
     pub package: Option<Package>,
     pub outcome: Outcome,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stderr {
+    pub kept: Vec<u8>,
+    pub total: u64,
+}

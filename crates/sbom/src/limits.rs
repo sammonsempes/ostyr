@@ -34,3 +34,30 @@ pub const UPSTREAM_QUALIFIER: &str = "upstream";
 
 
 pub const NAME_QUOTES: usize = 2;
+
+
+pub const SYFT_SECTION: &str = "syft";
+
+
+pub const SYFT_STATE_KEY: &str = "syft.settings";
+
+
+pub const HOME_PREFIX: &str = "syft-";
+
+
+pub const STDERR_EXCERPT_BYTES: usize = 256;
+
+
+pub const HELPERS_PER_RUN: usize = 2;
+
+
+pub const DIRECTORY_SCHEME: &str = "dir:";
+
+
+pub const OCI_SCHEME: &str = "oci-archive:";
+
+
+pub const DOCKER_SCHEME: &str = "docker-archive:";
+
+
+pub const SYFT_ARGUMENTS: [&str; 3] = ["scan", "-o", "cyclonedx-json"];

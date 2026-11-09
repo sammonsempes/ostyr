@@ -34,6 +34,20 @@ fn debian_and_ubuntu_carry_their_release() -> TestResult {
 
 
 #[test]
+fn debian_point_release_is_cut_to_the_major_as_syft_reports_it() -> TestResult {
+    assert_eq!(
+        package_of("pkg:deb/debian/bash@5.2?arch=amd64&distro=debian-12.15", None),
+        tuple("Debian:12", "bash", "5.2")
+    );
+    assert_eq!(
+        package_of("pkg:deb/ubuntu/bash@5.2?distro=ubuntu-22.04", None),
+        tuple("Ubuntu:22.04", "bash", "5.2")
+    );
+    Ok(())
+}
+
+
+#[test]
 fn debian_without_release_uses_the_namespace() -> TestResult {
     assert_eq!(package_of("pkg:deb/debian/bash@5.2", None), tuple("Debian", "bash", "5.2"));
     assert_eq!(package_of("pkg:deb/ubuntu/bash@5.2?distro=ubuntu", None), tuple("Ubuntu", "bash", "5.2"));
