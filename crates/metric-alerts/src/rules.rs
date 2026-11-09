@@ -1,5 +1,5 @@
 use crate::error::RuleError;
-use crate::model::{Condition, Direction, Rule, RuleFile};
+use crate::model::{Capacity, Condition, Direction, Rule, RuleFile};
 use crate::types::Labels;
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text};
@@ -28,6 +28,18 @@ pub const MAX_LABEL_LEN: usize = 128;
 
 
 pub const MAX_RUNBOOK_LEN: usize = 512;
+
+
+pub const MIN_CONFIDENCE: f64 = 0.0;
+
+
+pub const MAX_CONFIDENCE: f64 = 1.0;
+
+
+pub const MIN_FIT_POINTS: usize = 2;
+
+
+pub const MAX_FIT_POINTS: usize = 100_000;
 
 
 pub const MAX_DURATION_SECONDS: u64 = 2_592_000;
@@ -113,6 +125,27 @@ pub fn condition_ok(condition: &Condition) -> bool {
             threshold.is_finite() && clear.is_none_or(|level| level.is_finite() && clear_side_ok(*direction, level, *threshold))
         }
         Condition::Absence { interval } => (1..=MAX_DURATION_SECONDS).contains(interval),
+        Condition::Forecast {
+            window,
+            capacity,
+            horizon,
+            min_confidence,
+            min_points,
+        } => {
+            (1..=MAX_DURATION_SECONDS).contains(window)
+                && (1..=MAX_DURATION_SECONDS).contains(horizon)
+                && (MIN_CONFIDENCE..=MAX_CONFIDENCE).contains(min_confidence)
+                && (MIN_FIT_POINTS..=MAX_FIT_POINTS).contains(min_points)
+                && capacity_ok(capacity)
+        }
+    }
+}
+
+
+pub fn capacity_ok(capacity: &Capacity) -> bool {
+    match capacity {
+        Capacity::Fixed { value } => value.is_finite(),
+        Capacity::Metric { name } => bounded(name, MAX_METRIC_LEN),
     }
 }
 

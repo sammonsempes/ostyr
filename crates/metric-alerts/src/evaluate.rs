@@ -1,4 +1,5 @@
-use crate::model::{Condition, Direction, Rule};
+use crate::forecast::{forecast_holds, window_points};
+use crate::model::{Capacity, Condition, Direction, Rule};
 use crate::state::{active_since, next_state, AlertState};
 use crate::types::{Point, Timestamp};
 
@@ -13,12 +14,31 @@ pub struct Level {
 }
 
 
-/// New alert state for `rule` over `series` at time `now`; the series may be unsorted, and no data leaves a threshold breach as it was.
+/// New alert state for `rule` over `series` at time `now`; a forecast against a metric capacity never holds here, see `evaluate_with_capacity`.
 pub fn evaluate(rule: &Rule, series: &[Point], previous: &AlertState, now: Timestamp) -> AlertState {
+    evaluate_with_capacity(rule, series, None, previous, now)
+}
+
+
+/// Like `evaluate`, with the latest value of the capacity metric for a forecast rule whose capacity is a metric; the series may be unsorted.
+pub fn evaluate_with_capacity(rule: &Rule, series: &[Point], capacity_value: Option<f64>, previous: &AlertState, now: Timestamp) -> AlertState {
     let held = match &rule.condition {
         Condition::Absence { interval } => absence_start(series, *interval, previous, now),
         Condition::Threshold { direction, threshold, clear } => level_start(&sorted(series), &level_of(*direction, *threshold, *clear), previous),
         Condition::Rate { direction, threshold, clear } => level_start(&rates(&sorted(series)), &level_of(*direction, *threshold, *clear), previous),
+        Condition::Forecast {
+            window,
+            capacity,
+            horizon,
+            min_confidence,
+            min_points,
+        } => forecast_start(
+            &window_points(series, *window, now),
+            capacity_of(capacity, capacity_value),
+            (*horizon, *min_confidence, *min_points),
+            previous,
+            now,
+        ),
     };
     next_state(previous, held, rule, now)
 }
@@ -89,4 +109,26 @@ pub fn absence_start(series: &[Point], interval: u64, previous: &AlertState, now
         Some(last) => Some(last.saturating_add(ABSENCE_INTERVALS.saturating_mul(interval))).filter(|start| *start <= now),
         None => Some(active_since(previous).unwrap_or(now)),
     }
+}
+
+
+pub fn capacity_of(capacity: &Capacity, latest: Option<f64>) -> Option<f64> {
+    match capacity {
+        Capacity::Fixed { value } => Some(*value),
+        Capacity::Metric { .. } => latest,
+    }
+}
+
+
+/// A forecast has no breach in the series: it holds from the previous breach start, or from `now`, while the projection is inside the horizon.
+pub fn forecast_start(
+    points: &[Point],
+    capacity: Option<f64>,
+    limits: (u64, f64, usize),
+    previous: &AlertState,
+    now: Timestamp,
+) -> Option<Timestamp> {
+    capacity
+        .filter(|value| forecast_holds(points, *value, limits, now))
+        .map(|_| active_since(previous).unwrap_or(now))
 }
