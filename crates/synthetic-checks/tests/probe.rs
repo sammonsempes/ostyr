@@ -76,6 +76,7 @@ fn response(status: u16, location: Option<&str>, body: &[u8]) -> HttpResponse {
         location: location.map(str::to_string),
         body: body.to_vec(),
         certificate_chain: vec![vec![1]],
+        certificate_verified: None,
     }
 }
 
@@ -153,6 +154,20 @@ fn http_error_status_and_plain_http() -> TestResult {
     )?;
     assert!(!outcome.succeeded);
     assert_eq!(outcome.status, Some(BAD));
+    Ok(())
+}
+
+
+#[test]
+fn an_unverified_certificate_fails_an_otherwise_good_response() -> TestResult {
+    let fetch = |_: &HttpRequest, _: Duration, _: FetchCaps| {
+        let mut reply = response(OK, None, b"");
+        reply.certificate_verified = Some(false);
+        Ok(reply)
+    };
+    let outcome = http_probe("https://93.184.216.34/", &[], &limits(1)?, &bundle(&resolver(&[]), &fetch, &fixed_clock))?;
+    assert!(!outcome.succeeded);
+    assert_eq!(outcome.certificate_verified, Some(false));
     Ok(())
 }
 
@@ -498,6 +513,10 @@ fn escaped_excerpt_escapes_and_caps_after_escaping() -> TestResult {
     assert_eq!(
         escaped_excerpt("a\u{202e}b\u{2066}c\u{2069}d\u{202a}".as_bytes()),
         "a\\u{202e}b\\u{2066}c\\u{2069}d\\u{202a}"
+    );
+    assert_eq!(
+        escaped_excerpt("a\u{200e}b\u{200f}c\u{061c}d".as_bytes()),
+        "a\\u{200e}b\\u{200f}c\\u{61c}d"
     );
     assert_eq!(
         escaped_excerpt("\u{2029}\u{202f}\u{2065}\u{206a}".as_bytes()),
