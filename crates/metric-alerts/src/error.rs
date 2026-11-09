@@ -1,5 +1,6 @@
-use crate::rules::{MAX_FILE_BYTES, MAX_RULES};
+use crate::rules::{MAX_FILE_BYTES, MAX_LABELS, MAX_RULES};
 use core_config::error::ConfigError;
+use siem_schema::error::SchemaError;
 use thiserror::Error;
 
 
@@ -15,4 +16,8 @@ pub enum RuleError {
     Invalid { file: String, rule: String, field: &'static str },
     #[error("{file}: duplicate rule id `{rule}`")]
     DuplicateId { file: String, rule: String },
+    #[error("rule `{rule}`: {count} selector labels, at most {} allowed", MAX_LABELS)]
+    TooManySelectors { rule: String, count: usize },
+    #[error(transparent)]
+    Schema(#[from] SchemaError),
 }
