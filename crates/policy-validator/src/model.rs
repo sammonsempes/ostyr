@@ -185,8 +185,8 @@ pub enum Reason {
     ProcessNameAtWideScope,
     #[error("command_line_at_wide_scope: only a hash is allowed at global or group scope")]
     CommandLineAtWideScope,
-    #[error("signer_at_wide_scope: only a hash is allowed at global or group scope")]
-    SignerAtWideScope,
+    #[error("signer_selector: a signer is wider than a hash or a path and is refused at every scope")]
+    SignerSelector,
     #[error("non_canonical: {form}")]
     NonCanonical { form: PathForm },
     #[error("input_too_large: a field exceeds its size bound")]
@@ -199,8 +199,6 @@ pub enum Reason {
     OsDirectory { directory: String },
     #[error("invalid_hash: expected 64 hexadecimal characters")]
     InvalidHash,
-    #[error("invalid_signer: empty or wildcard")]
-    InvalidSigner,
     #[error("system_binary: {name} is a configured interpreter or system binary")]
     SystemBinary { name: String },
     #[error("no_observed_image: an exclusion needs the observed images")]
@@ -209,8 +207,6 @@ pub enum Reason {
     SecuritySensor { name: String },
     #[error("writable_by_non_admin: {name} or a parent directory is writable by a non-administrator")]
     WritableByNonAdmin { name: String },
-    #[error("os_vendor_signer: an operating system vendor publisher cannot be excluded")]
-    OsVendorSigner,
     #[error("interpreter_in_command_line: {name}")]
     InterpreterInCommandLine { name: String },
     #[error("service_control_in_command_line: {name}")]

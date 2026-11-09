@@ -26,6 +26,9 @@ fn non_hash_kind() -> impl Strategy<Value = SelectorKind> {
 }
 
 
+const DRIVE_PREFIX_LENGTH: usize = 2;
+
+
 fn any_scope() -> impl Strategy<Value = Scope> {
     prop_oneof![Just(Scope::Global), Just(Scope::EndpointGroup), Just(Scope::SingleEndpoint)]
 }
@@ -73,7 +76,8 @@ proptest! {
         let clean = found.iter().all(|reason| !matches!(reason, Reason::NonCanonical { .. }));
         prop_assert_eq!(clean, canonical_path(&value).is_ok());
         if clean {
-            prop_assert!(!value.contains(['*', '?', '%', '$', ':']));
+            prop_assert!(!value.contains(['*', '?', '%', '$']));
+            prop_assert!(!value.chars().skip(DRIVE_PREFIX_LENGTH).any(|character| character == ':'));
             prop_assert!(!value.split(['/', '\\']).any(|part| part == "." || part == ".."));
         }
     }
