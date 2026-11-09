@@ -155,3 +155,50 @@ pub struct AlertGroup {
     pub labels: BTreeMap<String, String>,
     pub alerts: Vec<Alert>,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
+    Smtp,
+    Webhook,
+    Ntfy,
+    Teams,
+    Slack,
+    Sms,
+}
+
+
+/// `secret_file` is the path of a file holding the secret; the secret itself is never a field.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    pub name: String,
+    pub tenant: String,
+    pub kind: ChannelKind,
+    pub target: String,
+    pub secret_file: Option<String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertNotice {
+    pub tenant: String,
+    pub name: String,
+    pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub subject: String,
+    pub body: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyFailure {
+    pub channel: String,
+    pub reason: String,
+}
