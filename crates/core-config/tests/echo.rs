@@ -439,3 +439,28 @@ fn describe_path_handles_root_and_sequences() -> TestResult {
     assert_eq!(describe_path(root.path(), true), ".");
     Ok(())
 }
+
+
+#[test]
+fn scanner_errors_read_yaml_syntax_error() -> TestResult {
+    let unterminated = failure::<ModuleConfig>(&format!("name: \"{MARKER}\n"))?;
+    assert!(
+        matches!(&unterminated, ConfigError::Parse { message, .. } if message == "YAML syntax error"),
+        "{unterminated}"
+    );
+    let tabbed = failure::<ModuleConfig>(&format!("name: x\nsettings:\n\t{MARKER}: 1\n"))?;
+    assert!(
+        matches!(&tabbed, ConfigError::Parse { message, .. } if message == "YAML syntax error"),
+        "{tabbed}"
+    );
+    assert!(!full_text(&tabbed).contains("canary"));
+    let validator = serde_saphyr::Error::ExternalMessage {
+        source: Box::new(serde_saphyr::ExternalMessageSource::Validator),
+        msg: MARKER.to_string(),
+        code: None,
+        params: Vec::new(),
+        location: serde_saphyr::Location::UNKNOWN,
+    };
+    assert_eq!(describe_error(&validator), "validation hook error");
+    Ok(())
+}

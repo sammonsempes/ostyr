@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 arc-swap = "1.9.3"
 core-audit = { version = "0.0.0", path = "../core-audit" }
+core-redact = { version = "0.0.0", path = "../core-redact" }
 json-patch = "4"
 notify = "8.2.1"
 notify-debouncer-full = "0.7.0"

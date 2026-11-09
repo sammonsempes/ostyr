@@ -1,7 +1,7 @@
 use crate::error::ConfigError;
 use serde::de::{DeserializeOwned, Error as _};
 use serde_path_to_error::{Path as FieldPath, Segment};
-use serde_saphyr::{Error as YamlError, Location};
+use serde_saphyr::{Error as YamlError, ExternalMessageSource, Location};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -10,13 +10,26 @@ use std::path::Path;
 pub const ROOT_FIELD_PATH: &str = ".";
 
 
-pub fn read_text(reader: &mut dyn Read, file: &str) -> Result<String, ConfigError> {
+pub const MAX_FILE_BYTES: u64 = 8_388_608;
+
+
+/// Reads at most `max` bytes; one byte more is refused with `ConfigError::TooLarge` naming the file.
+pub fn read_text_capped(reader: &mut dyn Read, file: &str, max: u64) -> Result<String, ConfigError> {
     let mut text = String::new();
-    reader.read_to_string(&mut text).map_err(|source| ConfigError::Io {
+    Read::take(reader, max + 1).read_to_string(&mut text).map_err(|source| ConfigError::Io {
         file: file.to_string(),
         source,
     })?;
-    Ok(text)
+    if text.len() as u64 > max {
+        Err(ConfigError::TooLarge { file: file.to_string(), max })
+    } else {
+        Ok(text)
+    }
+}
+
+
+pub fn read_text(reader: &mut dyn Read, file: &str) -> Result<String, ConfigError> {
+    read_text_capped(reader, file, MAX_FILE_BYTES)
 }
 
 
@@ -64,6 +77,7 @@ pub fn describe_error(error: &YamlError) -> String {
         YamlError::QuotingRequired { .. } => "value requires quotes".to_string(),
         YamlError::Message { msg, .. } => bounded_message(&strip_serde_names(msg)),
         YamlError::InvalidScalar { ty, .. } => format!("invalid {ty}"),
+        YamlError::ExternalMessage { source, .. } if matches!(source.as_ref(), ExternalMessageSource::Parser(_)) => "YAML syntax error".to_string(),
         YamlError::ExternalMessage { .. } | YamlError::HookError { .. } => "validation hook error".to_string(),
         YamlError::CyclicInclude { .. } | YamlError::ResolverError { .. } | YamlError::UnsupportedIncludeForm { .. } => "include error".to_string(),
         YamlError::UnresolvedProperty { .. }

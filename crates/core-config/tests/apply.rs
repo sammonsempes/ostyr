@@ -360,3 +360,33 @@ fn a_long_key_list_is_cut_with_a_marker() -> TestResult {
         .is_some_and(|text| text.contains("[changed_settings truncated, ")));
     Ok(())
 }
+
+
+#[test]
+fn the_digest_ignores_a_secret_pasted_into_a_value() -> TestResult {
+    let first = change_of(ChangeKind::Create, "settings.note", "", "Authorization: Bearer first-secret-value\n");
+    let second = change_of(ChangeKind::Create, "settings.note", "", "Authorization: Bearer second-secret-value\n");
+    assert_ne!(first.diff, second.diff);
+    assert_eq!(diff_digest(&first.diff), diff_digest(&second.diff));
+    let other = change_of(ChangeKind::Create, "settings.note", "", "plain\n");
+    assert_ne!(diff_digest(&first.diff), diff_digest(&other.diff));
+    Ok(())
+}
+
+
+#[test]
+fn the_entry_marker_survives_the_character_bound_and_the_omitted_count_covers_the_full_diff() -> TestResult {
+    let value = "y".repeat(MAX_DIFF_CHARS);
+    let total = MAX_DIFF_ENTRIES + OVERSIZE;
+    let changes: Vec<Change> = (0..total)
+        .map(|index| change_of(ChangeKind::Create, &format!("key{index:04}"), "", &value))
+        .collect();
+    let shown = diff_text(&changes);
+    assert!(shown.ends_with(&format!("[{} more changes omitted]\n", total - MAX_DIFF_ENTRIES)));
+    assert!(shown.chars().count() <= MAX_DIFF_CHARS);
+    assert_eq!(bounded_parameter("diff", &shown), shown);
+    let kept = shown.split("[diff truncated, ").next().ok_or("no body")?.chars().count();
+    let full = full_diff(&changes).chars().count();
+    assert!(shown.contains(&format!("[diff truncated, {} characters omitted]", full - kept)));
+    Ok(())
+}
