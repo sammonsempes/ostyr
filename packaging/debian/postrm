@@ -1,0 +1,13 @@
+#!/bin/sh
+# Purge removes the state, the generated secrets and the service account; a plain removal keeps them.
+set -eu
+
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/ostyr-example-module /etc/ostyr/example-module
+    rmdir --ignore-fail-on-non-empty /etc/ostyr
+    if getent passwd ostyr-module >/dev/null; then
+        deluser --system ostyr-module
+    fi
+fi
+
+#DEBHELPER#

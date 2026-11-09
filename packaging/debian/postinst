@@ -1,0 +1,52 @@
+#!/bin/sh
+# Prepares the service account, the state directory, the store key and a TLS certificate from a throwaway local CA; every step is idempotent.
+# OSTYR_ROOT (default empty) prefixes every path so that packaging/tests/postinst-test.sh can run it in a scratch tree.
+set -eu
+
+readonly SERVICE_USER=ostyr-module
+readonly STATE_DIR="${OSTYR_ROOT:-}/var/lib/ostyr-example-module"
+readonly CONFIG_DIR="${OSTYR_ROOT:-}/etc/ostyr/example-module"
+readonly KEY_BYTES=32
+readonly CERT_DAYS=825
+
+generate_key() {
+    if [ ! -e "$CONFIG_DIR/store.key" ]; then
+        (umask 077 && head -c "$KEY_BYTES" /dev/urandom >"$CONFIG_DIR/store.key")
+    fi
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/store.key"
+    chmod 0600 "$CONFIG_DIR/store.key"
+}
+
+generate_certificate() {
+    if [ ! -e "$CONFIG_DIR/tls.key" ]; then
+        host_name="$(hostname -f 2>/dev/null || hostname)"
+        scratch="$(mktemp -d "$CONFIG_DIR/.tls.XXXXXX")"
+        printf 'subjectAltName=DNS:%s,DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n' "$host_name" >"$scratch/leaf.ext"
+        (
+            umask 077
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days "$CERT_DAYS" -subj "/CN=Ostyr example module CA" \
+                -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -keyout "$scratch/ca.key" -out "$CONFIG_DIR/ca.crt"
+            openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=$host_name" -keyout "$CONFIG_DIR/tls.key" -out "$scratch/leaf.csr"
+            openssl x509 -req -in "$scratch/leaf.csr" -CA "$CONFIG_DIR/ca.crt" -CAkey "$scratch/ca.key" -CAserial "$scratch/ca.srl" -CAcreateserial -days "$CERT_DAYS" \
+                -extfile "$scratch/leaf.ext" -out "$CONFIG_DIR/tls.crt"
+        ) 2>/dev/null
+        rm -rf "$scratch"
+    fi
+    chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/tls.key"
+    chmod 0600 "$CONFIG_DIR/tls.key"
+    chmod 0644 "$CONFIG_DIR/tls.crt" "$CONFIG_DIR/ca.crt"
+}
+
+if [ "$1" = "configure" ]; then
+    if ! getent passwd "$SERVICE_USER" >/dev/null; then
+        adduser --system --group --no-create-home --home /nonexistent --shell /usr/sbin/nologin "$SERVICE_USER"
+    fi
+    mkdir -p "$STATE_DIR" "$CONFIG_DIR"
+    chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR"
+    chmod 0700 "$STATE_DIR"
+    chmod 0755 "$CONFIG_DIR"
+    generate_key
+    generate_certificate
+fi
+
+#DEBHELPER#
