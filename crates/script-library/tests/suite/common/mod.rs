@@ -1,5 +1,5 @@
 use script_library::error::ScriptError;
-use script_library::model::{Interpreter, Manifest, ParamKind, ParamValue};
+use script_library::model::{Interpreter, Limits, Manifest, ParamKind, ParamValue};
 use script_library::types::Params;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -27,6 +27,8 @@ pub fn manifest_with(interpreter: Interpreter, parameters: Vec<(&str, ParamKind)
             .into_iter()
             .map(|(name, kind)| (name.to_string(), kind))
             .collect::<BTreeMap<_, _>>(),
+        secret_patterns: vec![],
+        limits: Limits::default(),
     }
 }
 
@@ -70,6 +72,7 @@ pub fn refusal<Value>(result: Result<Value, ScriptError>) -> Result<ScriptError,
 }
 
 
+#[cfg(unix)]
 pub fn refusal_io<Value>(result: io::Result<Value>) -> Result<io::Error, Box<dyn Error>> {
     match result {
         Ok(_) => Err("expected an I/O failure".into()),

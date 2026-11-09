@@ -2,7 +2,7 @@ use crate::common::refusal;
 use crate::types::TestResult;
 use script_library::error::ScriptError;
 use script_library::fsdir::{
-    create_private_directory, open_work_root, open_work_root_with, random_name, write_all_into, write_private_file, NAME_ATTEMPTS,
+    create_private_directory, io_failure, open_work_root, open_work_root_with, random_name, write_all_into, write_private_file, NAME_ATTEMPTS,
 };
 use std::io::{self, Write};
 use std::os::fd::BorrowedFd;
@@ -246,5 +246,14 @@ fn an_ancestor_owned_by_a_stranger_is_refused() -> TestResult {
         refusal(open_work_root_with(base.path(), owner(), owned_by_a_stranger).map(drop))?,
         ScriptError::UnsafeWorkRoot
     ));
+    Ok(())
+}
+
+
+#[test]
+fn a_failure_while_handing_files_over_keeps_its_context_and_cause() -> TestResult {
+    let error = io_failure("cannot hand over")(io::Error::other("injected"));
+    assert!(matches!(&error, ScriptError::Io { context, .. } if context.contains("hand over")));
+    assert!(std::error::Error::source(&error).is_some());
     Ok(())
 }

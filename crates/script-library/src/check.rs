@@ -1,10 +1,10 @@
 use crate::error::ScriptError;
 use crate::model::{
-    Manifest, ParamKind, MAX_ENUM_VALUES, MAX_NAME_LENGTH, MAX_OUTPUT_BYTES, MAX_PARAMETERS, MAX_PATH_LENGTH, MAX_PREFIXES, MAX_STRING_LENGTH,
-    MAX_TIMEOUT_SECONDS, SHA256_HEX_LENGTH,
+    Limits, Manifest, ParamKind, MAX_CPU_PERCENT, MAX_ENUM_VALUES, MAX_MEMORY_BYTES, MAX_NAME_LENGTH, MAX_OUTPUT_BYTES, MAX_PARAMETERS,
+    MAX_PATH_LENGTH, MAX_PIDS, MAX_PREFIXES, MAX_SECRET_PATTERNS, MAX_STRING_LENGTH, MAX_TIMEOUT_SECONDS, MIN_MEMORY_BYTES, SHA256_HEX_LENGTH,
 };
 use crate::path::{absolute_components, is_separator};
-use crate::pattern::compile_pattern;
+use crate::pattern::{compile_pattern, compile_secret_patterns};
 
 
 pub fn ensure(condition: bool, error: ScriptError) -> Result<(), ScriptError> {
@@ -88,8 +88,29 @@ pub fn check_manifest(manifest: &Manifest) -> Result<(), ScriptError> {
     ensure((1..=MAX_TIMEOUT_SECONDS).contains(&manifest.timeout_seconds), invalid("timeout_seconds"))?;
     ensure((1..=MAX_OUTPUT_BYTES).contains(&manifest.max_output_bytes), invalid("max_output_bytes"))?;
     ensure(manifest.parameters.len() <= MAX_PARAMETERS, invalid("parameters"))?;
+    check_secret_patterns(&manifest.secret_patterns)?;
+    check_limits(&manifest.limits)?;
     manifest.parameters.iter().try_for_each(|(name, kind)| {
         ensure(is_identifier(name), invalid("parameters"))?;
         check_kind(name, kind)
     })
+}
+
+
+fn check_secret_patterns(patterns: &[String]) -> Result<(), ScriptError> {
+    ensure(patterns.len() <= MAX_SECRET_PATTERNS, invalid("secret_patterns"))?;
+    compile_secret_patterns(patterns).map(drop)
+}
+
+
+fn check_limits(limits: &Limits) -> Result<(), ScriptError> {
+    ensure(
+        (MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&limits.memory_bytes),
+        invalid("limits.memory_bytes"),
+    )?;
+    ensure((1..=MAX_PIDS).contains(&limits.pids), invalid("limits.pids"))?;
+    ensure(
+        limits.cpu_percent.is_none_or(|percent| (1..=MAX_CPU_PERCENT).contains(&percent)),
+        invalid("limits.cpu_percent"),
+    )
 }

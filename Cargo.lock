@@ -3945,6 +3945,7 @@ dependencies = [
  "core-config",
  "data-encoding",
  "regex",
+ "regex-syntax",
  "rustix 1.1.6",
  "serde",
  "sha2 0.10.9",
