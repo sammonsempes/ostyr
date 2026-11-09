@@ -113,3 +113,12 @@ pub const SMS_SUBJECT_LEN: usize = 40;
 
 
 pub const SMS_BODY_LEN: usize = 160;
+
+
+pub const MAX_SECRET_BYTES: u64 = 4096;
+
+
+pub const MAX_TIMEOUT_MILLIS: u64 = 60_000;
+
+
+pub const MAX_SECRET_DIRS: u64 = 1024;
