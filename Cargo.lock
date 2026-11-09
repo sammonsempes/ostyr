@@ -4248,8 +4248,11 @@ name = "site-collector"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "crc32fast",
  "proptest",
+ "rustix 1.1.6",
  "syslog_loose",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
 ]
