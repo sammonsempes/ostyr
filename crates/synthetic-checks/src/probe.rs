@@ -87,7 +87,7 @@ pub fn redacted_target(target: &str) -> String {
 }
 
 
-/// What a probe records; the body is never kept in full and `certificate_chain` (DER, leaf first) is empty unless TLS was used.
+/// What a probe records; the body is never kept in full and `certificate_chain` (DER, leaf first) is empty unless TLS was used; `certificate_verified` is `None` without TLS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeOutcome {
     pub status: Option<u16>,
@@ -95,6 +95,7 @@ pub struct ProbeOutcome {
     pub succeeded: bool,
     pub body_excerpt: String,
     pub certificate_chain: Vec<Vec<u8>>,
+    pub certificate_verified: Option<bool>,
 }
 
 
@@ -148,6 +149,7 @@ pub struct HttpResponse {
     pub location: Option<String>,
     pub body: Vec<u8>,
     pub certificate_chain: Vec<Vec<u8>>,
+    pub certificate_verified: Option<bool>,
 }
 
 
@@ -192,7 +194,8 @@ pub fn escaped_excerpt(body: &[u8]) -> String {
     String::from_utf8_lossy(body)
         .chars()
         .map(|character| {
-            if character.is_control() || matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+            if character.is_control() || matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
+            {
                 character.escape_default().collect::<String>()
             } else {
                 character.to_string()
@@ -257,8 +260,7 @@ pub fn hop(url: &Url, scope: &[IpNet], deadline: &Deadline, limits: &ProbeLimits
     let response = fetch(&request, left, caps).map_err(ProbeError::Transport)?;
     remaining(clock, deadline)?;
     check_chain(&response.certificate_chain)?;
-    let redirect = (FIRST_REDIRECT_STATUS..FIRST_ERROR_STATUS)
-        .contains(&response.status)
+    let redirect = ((FIRST_REDIRECT_STATUS..FIRST_ERROR_STATUS).contains(&response.status) && response.certificate_verified != Some(false))
         .then(|| response.location.clone())
         .flatten();
     match redirect {
@@ -291,11 +293,12 @@ pub fn http_probe(target: &str, scope: &[IpNet], limits: &ProbeLimits, transport
     match last {
         HopState::Follow(_) => Err(ProbeError::TooManyRedirects { max: limits.max_redirects }),
         HopState::Done(response) => Ok(ProbeOutcome {
-            status: Some(response.status),
+            status: (response.certificate_verified != Some(false)).then_some(response.status),
             latency_ms: latency_ms(clock, &deadline),
-            succeeded: (FIRST_SUCCESS_STATUS..FIRST_REDIRECT_STATUS).contains(&response.status),
+            succeeded: (FIRST_SUCCESS_STATUS..FIRST_REDIRECT_STATUS).contains(&response.status) && response.certificate_verified != Some(false),
             body_excerpt: escaped_excerpt(&response.body.into_iter().take(limits.max_response_bytes).collect::<Vec<u8>>()),
             certificate_chain: response.certificate_chain,
+            certificate_verified: response.certificate_verified,
         }),
     }
 }
@@ -322,6 +325,7 @@ pub fn tcp_probe(
         succeeded: true,
         body_excerpt: String::new(),
         certificate_chain: Vec::new(),
+        certificate_verified: None,
     })
 }
 
@@ -346,6 +350,7 @@ pub fn tls_probe(
         succeeded: !chain.is_empty(),
         body_excerpt: String::new(),
         certificate_chain: chain,
+        certificate_verified: None,
     })
 }
 
@@ -366,5 +371,6 @@ pub fn dns_probe(name: &str, limits: &ProbeLimits, resolve: &Resolve<'_>, clock:
         succeeded: !answers.is_empty(),
         body_excerpt: escaped_excerpt(listing.as_bytes()),
         certificate_chain: Vec::new(),
+        certificate_verified: None,
     })
 }
