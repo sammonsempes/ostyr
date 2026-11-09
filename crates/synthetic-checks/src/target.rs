@@ -9,10 +9,11 @@ pub const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 pub const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
 
-pub const METADATA_V4_EXTRA: [Ipv4Addr; 3] = [
+pub const METADATA_V4_EXTRA: [Ipv4Addr; 4] = [
     Ipv4Addr::new(100, 100, 100, 200),
     Ipv4Addr::new(192, 0, 0, 192),
     Ipv4Addr::new(168, 63, 129, 16),
+    Ipv4Addr::new(169, 254, 170, 2),
 ];
 
 
@@ -81,18 +82,29 @@ pub fn classify(address: IpAddr) -> Option<AddressClass> {
 }
 
 
-/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96), SIIT, 6to4 or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and its last 32 bits are checked too so metadata there is never scoped.
+/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96), SIIT, 6to4 or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and every RFC 6052 position is checked too so metadata there is never scoped.
 pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
     match address {
         IpAddr::V4(_) => Vec::new(),
         IpAddr::V6(v6) => {
-            let [_, _, o2, o3, o4, o5, _, _, _, _, _, _, o12, o13, o14, o15] = v6.octets();
+            let [_, _, o2, o3, o4, o5, o6, o7, _, o9, o10, o11, o12, o13, o14, o15] = v6.octets();
             let last_32 = Ipv4Addr::new(o12, o13, o14, o15);
             let six_to_four = Ipv4Addr::new(o2, o3, o4, o5);
             [
                 (
-                    NAT64_V6.contains(&v6) || NAT64_LOCAL_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6),
+                    NAT64_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6),
                     vec![last_32],
+                ),
+                (
+                    NAT64_LOCAL_V6.contains(&v6),
+                    vec![
+                        Ipv4Addr::new(o4, o5, o6, o7),
+                        Ipv4Addr::new(o5, o6, o7, o9),
+                        Ipv4Addr::new(o6, o7, o9, o10),
+                        Ipv4Addr::new(o7, o9, o10, o11),
+                        Ipv4Addr::new(o9, o10, o11, o12),
+                        last_32,
+                    ],
                 ),
                 (SIX_TO_FOUR_V6.contains(&v6), vec![six_to_four]),
             ]
