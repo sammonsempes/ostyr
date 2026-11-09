@@ -4367,8 +4367,13 @@ dependencies = [
 name = "sbom"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
+ "core-config",
  "packageurl",
+ "rustix 1.1.6",
+ "serde",
  "struson",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "vuln-match",

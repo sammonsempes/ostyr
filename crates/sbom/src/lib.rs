@@ -7,4 +7,7 @@ pub mod limits;
 pub mod model;
 pub mod parse;
 pub mod purl;
+#[cfg(unix)]
+pub mod run;
+pub mod settings;
 pub mod types;

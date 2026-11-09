@@ -73,11 +73,22 @@ pub fn key_of(parsed: &PackageUrl) -> String {
 pub fn ecosystem_of(parsed: &PackageUrl) -> Option<String> {
     let (distro, release) = distro_of(parsed);
     match parsed.ty() {
-        "deb" => lookup(&DEB_DISTROS, &distro).map(|base| release.map_or_else(|| base.to_string(), |text| format!("{base}:{text}"))),
+        "deb" => {
+            lookup(&DEB_DISTROS, &distro).map(|base| release.map_or_else(|| base.to_string(), |text| format!("{base}:{}", release_of(base, &text))))
+        }
         "rpm" => lookup(&RPM_DISTROS, &distro).map(str::to_string),
         "cargo" => Some("crates.io".to_string()),
         "npm" => Some("npm".to_string()),
         _ => None,
+    }
+}
+
+
+/// OSV files Debian per major release while syft reports `12.15`; Ubuntu keeps `22.04`.
+pub fn release_of<'a>(base: &str, release: &'a str) -> &'a str {
+    match base {
+        "Debian" => release.split_once('.').map_or(release, |(major, _)| major),
+        _ => release,
     }
 }
 
