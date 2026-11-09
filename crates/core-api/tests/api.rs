@@ -899,9 +899,25 @@ async fn a_known_source_over_its_quota_stays_refused_in_a_full_table() -> TestRe
 }
 
 
+const FROZEN_SECONDS: i64 = 1_800_000_000;
+
+
+fn frozen_clock() -> OffsetDateTime {
+    OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(FROZEN_SECONDS)
+}
+
+
+fn with_frozen_clock(state: ApiState) -> Result<ApiState, TestError> {
+    Ok(ApiState {
+        clock: frozen_clock,
+        ..state
+    })
+}
+
+
 #[tokio::test]
 async fn rotating_inside_one_64_bit_prefix_still_trips_the_source_lockout() -> TestResult {
-    let fx = fixture()?;
+    let fx = fixture_with(with_frozen_clock)?;
     let mut statuses = Vec::new();
     for host in 1..=ROTATION_ATTEMPTS {
         let source = SocketAddr::new(format!("2001:db8:1:2::{host:x}").parse()?, CLIENT_PORT);
@@ -1128,7 +1144,7 @@ async fn status_sequence(router: &axum::Router, offset: u8, username: &str) -> R
 
 #[tokio::test]
 async fn a_real_name_and_an_unknown_name_give_identical_status_sequences_from_one_source() -> TestResult {
-    let fx = fixture()?;
+    let fx = fixture_with(with_frozen_clock)?;
     let real = status_sequence(&fx.router, 1, READER).await?;
     let unknown = status_sequence(&fx.router, OTHER_SOURCE, "nobody").await?;
     assert_eq!(real, unknown);
