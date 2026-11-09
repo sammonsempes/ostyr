@@ -3,13 +3,18 @@ use crate::support::{
     LOGIN, MAPPING, SEC_2, SEC_3, SEC_4, SEC_5,
 };
 use crate::types::TestResult;
+use core_audit::error::AuditError;
+use core_audit::log::{append, genesis_log};
 use core_config::error::ConfigError;
 use core_config::reload::{open_engine, reload, ReloadOutcome};
+use core_config::types::SharedAuditFn;
 use std::fs;
+use std::io;
+use std::sync::{Arc, Mutex};
 use stream_correlation::cli::start_engine;
 use stream_correlation::engine::snapshot;
 use stream_correlation::error::CorrelationError;
-use stream_correlation::reload::{read_texts, refusal, rules_loader, rules_state};
+use stream_correlation::reload::{load_rules, open_rules, read_texts, refusal, rules_loader, rules_state};
 
 
 const STATE_KEYS: usize = 2;
@@ -138,5 +143,66 @@ fn the_reload_state_names_bases_and_correlations() -> TestResult {
     assert!(state.keys().any(|key| key.starts_with("base.Failed login.")));
     assert!(state.contains_key("correlation.brute-force"));
     mapping()?;
+    Ok(())
+}
+
+
+const CANARY: &str = "canary-9";
+
+
+fn capturing_audit(entries: Arc<Mutex<Vec<String>>>) -> Box<SharedAuditFn> {
+    let log = genesis_log(io::sink());
+    Box::new(move |entry| {
+        entries.lock().map_err(|_| AuditError::LogPoisoned)?.push(format!("{entry:?}"));
+        append(&log, entry)
+    })
+}
+
+
+fn refusal_reason(outcome: ReloadOutcome) -> Result<String, String> {
+    match outcome {
+        ReloadOutcome::Refused { reason } => Ok(reason),
+        other => Err(format!("expected a refusal, got {other:?}")),
+    }
+}
+
+
+fn refused_without_marker(rule_text: &str) -> TestResult {
+    let entries = Arc::new(Mutex::new(Vec::new()));
+    let bench = bench(&[LOGIN, BRUTE_FORCE])?;
+    let engine = open_rules(
+        bench.mapping_file.clone(),
+        vec![bench.rule_file.clone()],
+        capturing_audit(Arc::clone(&entries)),
+        context(),
+    )?;
+    replace_file(&bench.rule_file, rule_text)?;
+    let reason = refusal_reason(reload(&engine))?;
+    let audited = entries.lock().map_err(|_| "poisoned")?.join("\n");
+    assert!(!reason.contains(CANARY), "{reason}");
+    assert!(audited.contains("refused") && !audited.contains(CANARY), "{audited}");
+    let message = rules_error(&bench.mapping_file, &bench.rule_file)?;
+    assert!(!message.contains(CANARY), "{message}");
+    Ok(())
+}
+
+
+#[test]
+fn a_duplicate_key_marker_stays_out_of_the_refusal_and_the_audit() -> TestResult {
+    refused_without_marker("title: ok\ntitle: /srv/canary-9\n")
+}
+
+
+#[test]
+fn a_bad_tag_marker_stays_out_of_the_refusal_and_the_audit() -> TestResult {
+    refused_without_marker("title: !/srv/canary-9 x\n")
+}
+
+
+#[test]
+fn a_valid_rule_file_still_loads() -> TestResult {
+    let bench = bench(&[LOGIN, BRUTE_FORCE])?;
+    let rules = load_rules(&bench.mapping_file, std::slice::from_ref(&bench.rule_file))?;
+    assert_eq!(rules.correlations.len(), 1);
     Ok(())
 }

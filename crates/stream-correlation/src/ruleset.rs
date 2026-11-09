@@ -2,6 +2,7 @@ use crate::base::{compile_base, BaseRule};
 use crate::correlation::{check_keys, invalid, parse_kind, parse_timespan, CorrelationRule, RawDocument};
 use crate::error::CorrelationError;
 use crate::types::RuleTexts;
+use core_config::parse::parse_document;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sigma_sql::mapping::FieldMapping;
@@ -51,7 +52,7 @@ pub fn split_documents(text: &str) -> Vec<String> {
 fn read_documents(texts: &RuleTexts) -> Result<Vec<Document>, CorrelationError> {
     texts.iter().try_fold(Vec::new(), |mut documents, (file, text)| {
         split_documents(text).into_iter().try_for_each(|document| {
-            serde_saphyr::from_str::<Value>(&document)
+            parse_document::<Value>(&document, file)
                 .map(|value| {
                     documents.push(Document {
                         file: file.clone(),
@@ -59,7 +60,7 @@ fn read_documents(texts: &RuleTexts) -> Result<Vec<Document>, CorrelationError> 
                         value,
                     })
                 })
-                .map_err(|error| in_file(file, CorrelationError::from(error)))
+                .map_err(CorrelationError::from)
         })?;
         Ok(documents)
     })

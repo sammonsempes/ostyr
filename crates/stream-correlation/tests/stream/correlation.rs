@@ -1,5 +1,6 @@
 use crate::support::{ruleset, ANY_ORDER, BEACON, BRUTE_FORCE, DISTINCT_DESTINATIONS, DOWNLOAD, DROPPER, EXECUTE, LOGIN};
 use crate::types::TestResult;
+use core_config::error::ConfigError;
 use stream_correlation::correlation::{parse_timespan, CorrelationRule, Kind};
 use stream_correlation::error::CorrelationError;
 use stream_correlation::ruleset::split_documents;
@@ -189,7 +190,10 @@ fn duplicate_identifiers_are_refused() -> TestResult {
 #[test]
 fn broken_documents_name_their_file() -> TestResult {
     let error = failure(&[LOGIN, "title: [unclosed"])?;
-    assert!(matches!(&error, CorrelationError::InFile { file, .. } if file == "rules.yml"), "{error}");
+    assert!(
+        matches!(&error, CorrelationError::Config(ConfigError::Parse { file, .. }) if file == "rules.yml"),
+        "{error}"
+    );
     let bad_base = failure(&["title: X\nlogsource:\n  category: process_creation\ndetection:\n  condition: nothing\n"])?;
     assert!(bad_base.to_string().starts_with("rules.yml:"), "{bad_base}");
     Ok(())

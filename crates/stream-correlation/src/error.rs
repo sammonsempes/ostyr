@@ -1,3 +1,7 @@
+use core_config::error::ConfigError;
+use core_config::parse::{describe_error, position_of, ROOT_FIELD_PATH};
+use serde::de::Error as _;
+use sigma_sql::error::SigmaError;
 use std::io;
 use thiserror::Error;
 
@@ -6,8 +10,6 @@ use thiserror::Error;
 pub enum CorrelationError {
     #[error(transparent)]
     Sigma(#[from] sigma_sql::error::SigmaError),
-    #[error("cannot parse the YAML: {0}")]
-    Yaml(#[from] serde_saphyr::Error),
     #[error("{file}: {source}")]
     InFile {
         file: String,
@@ -56,4 +58,24 @@ pub enum CorrelationError {
     Serialize(#[source] serde_json::Error),
     #[error("cannot write: {0}")]
     Output(#[from] io::Error),
+}
+
+
+/// A YAML parse error of the Sigma parser becomes a fixed error class, since its text can quote the rule document.
+pub fn redacted(error: SigmaError) -> CorrelationError {
+    match error {
+        SigmaError::Yaml(yaml) => {
+            let (line, column) = position_of(yaml.location());
+            let message = describe_error(&yaml);
+            CorrelationError::Config(ConfigError::Parse {
+                file: String::new(),
+                line,
+                column,
+                field_path: ROOT_FIELD_PATH.to_string(),
+                message: message.clone(),
+                source: Box::new(serde_saphyr::Error::custom(message)),
+            })
+        }
+        other => CorrelationError::Sigma(other),
+    }
 }
