@@ -1,5 +1,6 @@
 //! Package version comparison and OSV matching.
 
+pub mod alerting;
 pub mod eol;
 pub mod error;
 pub mod feed;

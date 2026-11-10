@@ -6,6 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 core-config = { version = "0.0.0", path = "../core-config" }
 debversion = { version = "0.5", default-features = false }
 rpm-version = "0.5"
@@ -19,6 +21,7 @@ time = { version = "0.3", features = ["serde-human-readable"] }
 tracing = "0.1"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 time = { version = "0.3", features = ["macros"] }
