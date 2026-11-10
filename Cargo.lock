@@ -3528,7 +3528,12 @@ dependencies = [
 name = "patch-rollout"
 version = "0.0.0"
 dependencies = [
+ "agent-command",
+ "core-audit",
  "core-config",
+ "data-encoding",
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
  "response-breakers",
  "serde",
  "tempfile",
