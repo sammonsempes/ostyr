@@ -12,7 +12,11 @@ use core_audit::model::NewEntry;
 use core_config::reload::{reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use event_gateway::error::GatewayError;
 use event_gateway::model::{Gateway, GatewaySettings};
-use event_gateway::publish::{admit, check_identity, events_of, forced_payload, gateway_sink, message_id, outgoing_events, publish_batch};
+use event_gateway::model::{RefusalCounts, Refusals};
+use event_gateway::publish::{
+    admit, check_identity, count_refusal, events_of, forced_payload, gateway_sink, log_summary, message_id, outgoing_events, publish_batch,
+    refusal_counts, spawn_summary,
+};
 use event_gateway::session::{backoff_delay, new_gateway, settings_of};
 use event_gateway::settings::{open_settings, path_text, settings_state, validate_settings};
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Stub};
@@ -33,6 +37,9 @@ use tracing::level_filters::{LevelFilter, STATIC_MAX_LEVEL};
 
 
 const TWO: usize = 2;
+
+
+const SUMMARY_PERIOD_MS: u64 = 1000;
 
 
 const FOUR: usize = 4;
@@ -772,5 +779,126 @@ fn a_first_settings_file_that_does_not_parse_is_refused() -> TestResult {
         context,
     );
     assert!(matches!(outcome.err(), Some(GatewayError::Config(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn every_refusal_kind_increments_its_own_counter() -> TestResult {
+    let stub = start_stub(None, |state| state.max_payload = SMALL_PAYLOAD_LIMIT)?;
+    let rig = rig(&yaml(stub.port, "max_events_per_batch: 1\n"))?;
+    let agent = identity("tenant-a", "agent-1");
+    let big = format!("{{\"data\":\"{}\"}}", "x".repeat(BIG_EVENT_BYTES));
+    publish_batch(&rig.gateway, &agent, &batch(1, &["not json"]))
+        .await
+        .err()
+        .ok_or("expected a refusal")?;
+    publish_batch(&rig.gateway, &agent, &batch(1, &[&big]))
+        .await
+        .err()
+        .ok_or("expected a refusal")?;
+    publish_batch(&rig.gateway, &agent, &batch(1, &["{}", "{}"]))
+        .await
+        .err()
+        .ok_or("expected a refusal")?;
+    publish_batch(&rig.gateway, &identity("a.b", "agent-1"), &batch(1, &["{}"]))
+        .await
+        .err()
+        .ok_or("expected a refusal")?;
+    publish_batch(&rig.gateway, &agent, &batch(1, &["{}"])).await?;
+    assert_eq!(
+        refusal_counts(&rig.gateway.refusals),
+        RefusalCounts {
+            not_an_object: 1,
+            payload_too_large: 1,
+            too_many_events: 1,
+            invalid_identity: 1,
+            busy: 0,
+            backing_off: 0,
+        }
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_backing_off_gateway_counts_the_refusal_and_a_nats_failure_does_not() -> TestResult {
+    let rig = rig(&yaml(
+        dead_port()?,
+        &format!("backoff_initial_ms: {LONG_BACKOFF_MS}\nbackoff_max_ms: {LONG_BACKOFF_MS}\n"),
+    ))?;
+    let agent = identity("tenant-a", "agent-1");
+    publish_batch(&rig.gateway, &agent, &batch(1, &["{}"]))
+        .await
+        .err()
+        .ok_or("expected a failure")?;
+    assert_eq!(refusal_counts(&rig.gateway.refusals), RefusalCounts::default());
+    publish_batch(&rig.gateway, &agent, &batch(1, &["{}"]))
+        .await
+        .err()
+        .ok_or("expected a refusal")?;
+    assert_eq!(refusal_counts(&rig.gateway.refusals).backing_off, 1);
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_refused_as_busy_is_counted() -> TestResult {
+    let rig = rig(&yaml_with(dead_port()?, (GENEROUS_MS, GENEROUS_MS), "max_in_flight_batches: 1\n"))?;
+    let held = rig.gateway.link.lock().await;
+    let waiting_gateway = Arc::clone(&rig.gateway);
+    let waiting = tokio::spawn(async move { publish_batch(&waiting_gateway, &identity("tenant-a", "agent-1"), &batch(1, &["{}"])).await });
+    eventually_in_flight(&rig, 1).await?;
+    publish_batch(&rig.gateway, &identity("tenant-a", "agent-2"), &batch(1, &["{}"]))
+        .await
+        .err()
+        .ok_or("expected a refusal")?;
+    assert_eq!(refusal_counts(&rig.gateway.refusals).busy, 1);
+    waiting.await?.err().ok_or("expected a timeout")?;
+    drop(held);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_counters_are_logged_by_the_summary() -> TestResult {
+    let refusals = Refusals::default();
+    count_refusal(&refusals, &GatewayError::Identity);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let counts = log_summary(&refusals);
+    drop(guard);
+    assert_eq!(counts.invalid_identity, 1);
+    let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    assert!(logs.contains("invalid_identity: 1"));
+    assert!(logs.contains("refused batches since the start"));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn the_summary_task_logs_every_period_until_dropped() -> TestResult {
+    let refusals = Arc::new(Refusals::default());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let task = spawn_summary(Arc::clone(&refusals), Duration::from_millis(SUMMARY_PERIOD_MS));
+    sleep(Duration::from_millis(SUMMARY_PERIOD_MS * TWO as u64 + 1)).await;
+    drop(task);
+    sleep(Duration::from_millis(SUMMARY_PERIOD_MS * TWO as u64)).await;
+    drop(guard);
+    let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    assert_eq!(logs.matches("refused batches since the start").count(), TWO);
     Ok(())
 }

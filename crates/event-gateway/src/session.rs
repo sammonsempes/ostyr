@@ -1,5 +1,5 @@
 use crate::error::GatewayError;
-use crate::model::{Gateway, GatewaySettings, Link, Session, MODULE};
+use crate::model::{Gateway, GatewaySettings, Link, Refusals, Session, MODULE};
 use crate::types::ConnectionFields;
 use async_nats::jetstream::context::ContextBuilder;
 use async_nats::jetstream::Context;
@@ -155,6 +155,7 @@ pub fn new_gateway(settings: Arc<ReloadEngine<GatewaySettings>>) -> Gateway {
         settings,
         link: Mutex::new(Link::default()),
         in_flight: Arc::new(AtomicUsize::new(0)),
+        refusals: Arc::new(Refusals::default()),
     }
 }
 

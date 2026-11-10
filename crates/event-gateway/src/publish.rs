@@ -1,5 +1,5 @@
 use crate::error::GatewayError;
-use crate::model::{Gateway, GatewaySettings, Slot};
+use crate::model::{Gateway, GatewaySettings, RefusalCounts, Refusals, Slot, SummaryTask};
 use crate::session::{session_for, settings_of};
 use agent_channel::model::Identity;
 use agent_channel::proto::EventBatch;
@@ -10,11 +10,13 @@ use async_nats::jetstream::Context;
 use async_nats::HeaderMap;
 use bytes::Bytes;
 use futures_util::future::try_join_all;
+use futures_util::stream::{self, StreamExt};
 use serde_json::{Map, Value};
 use siem_ingest::nats::millis;
 use siem_ingest::tenant::{is_tenant_char, EVENTS_SUBJECT_PREFIX};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 
 
@@ -146,6 +148,72 @@ pub async fn deliver(gateway: &Gateway, settings: &Arc<GatewaySettings>, identit
 
 /// Publishes a whole batch under one deadline and one in-flight place; the batch is acknowledged only when this returns `Ok`.
 pub async fn publish_batch(gateway: &Gateway, identity: &Identity, batch: &EventBatch) -> Result<(), GatewayError> {
+    let outcome = try_publish(gateway, identity, batch).await;
+    if let Err(error) = &outcome {
+        count_refusal(&gateway.refusals, error);
+    }
+    outcome
+}
+
+
+/// The counter of a refusal kind; failures of NATS itself are not refusals.
+pub fn counter_for<'a>(refusals: &'a Refusals, error: &GatewayError) -> Option<&'a AtomicU64> {
+    match error {
+        GatewayError::NotAnObject(_) => Some(&refusals.not_an_object),
+        GatewayError::PayloadTooLarge { .. } => Some(&refusals.payload_too_large),
+        GatewayError::TooManyEvents { .. } => Some(&refusals.too_many_events),
+        GatewayError::Identity => Some(&refusals.invalid_identity),
+        GatewayError::Busy { .. } => Some(&refusals.busy),
+        GatewayError::BackingOff => Some(&refusals.backing_off),
+        _ => None,
+    }
+}
+
+
+pub fn count_refusal(refusals: &Refusals, error: &GatewayError) {
+    counter_for(refusals, error).iter().for_each(|counter| {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+}
+
+
+pub fn refusal_counts(refusals: &Refusals) -> RefusalCounts {
+    RefusalCounts {
+        not_an_object: refusals.not_an_object.load(Ordering::SeqCst),
+        payload_too_large: refusals.payload_too_large.load(Ordering::SeqCst),
+        too_many_events: refusals.too_many_events.load(Ordering::SeqCst),
+        invalid_identity: refusals.invalid_identity.load(Ordering::SeqCst),
+        busy: refusals.busy.load(Ordering::SeqCst),
+        backing_off: refusals.backing_off.load(Ordering::SeqCst),
+    }
+}
+
+
+/// Logs the counters and returns what was logged.
+pub fn log_summary(refusals: &Refusals) -> RefusalCounts {
+    let counts = refusal_counts(refusals);
+    info!(?counts, "refused batches since the start");
+    counts
+}
+
+
+/// Logs the refusal counters every `period` until the returned task is dropped.
+pub fn spawn_summary(refusals: Arc<Refusals>, period: Duration) -> SummaryTask {
+    let ticks = stream::unfold((), move |()| async move {
+        tokio::time::sleep(period).await;
+        Some(((), ()))
+    });
+    let handle = tokio::spawn(ticks.for_each(move |()| {
+        let shared = Arc::clone(&refusals);
+        async move {
+            log_summary(&shared);
+        }
+    }));
+    SummaryTask { handle }
+}
+
+
+pub async fn try_publish(gateway: &Gateway, identity: &Identity, batch: &EventBatch) -> Result<(), GatewayError> {
     let settings = settings_of(gateway);
     let _slot = admit(&gateway.in_flight, settings.max_in_flight_batches)?;
     let deadline = millis(settings.connect_timeout_ms + settings.publish_timeout_ms);
