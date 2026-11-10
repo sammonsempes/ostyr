@@ -3,9 +3,10 @@ use async_nats::Client;
 use core_config::reload::ReloadEngine;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 
@@ -43,6 +44,10 @@ pub const DEFAULT_BACKOFF_INITIAL_MS: u64 = 500;
 
 
 pub const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
+
+
+/// Period of the log line summarising the refused batches.
+pub const SUMMARY_INTERVAL_MS: u64 = 60_000;
 
 
 pub const LIMIT_MS: u64 = 600_000;
@@ -114,6 +119,44 @@ pub struct Gateway {
     pub settings: Arc<ReloadEngine<GatewaySettings>>,
     pub link: Mutex<Link>,
     pub in_flight: Arc<AtomicUsize>,
+    pub refusals: Arc<Refusals>,
+}
+
+
+/// Batches refused since the start, one counter per refusal kind.
+#[derive(Default)]
+pub struct Refusals {
+    pub not_an_object: AtomicU64,
+    pub payload_too_large: AtomicU64,
+    pub too_many_events: AtomicU64,
+    pub invalid_identity: AtomicU64,
+    pub busy: AtomicU64,
+    pub backing_off: AtomicU64,
+}
+
+
+/// A read of `Refusals` at one moment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefusalCounts {
+    pub not_an_object: u64,
+    pub payload_too_large: u64,
+    pub too_many_events: u64,
+    pub invalid_identity: u64,
+    pub busy: u64,
+    pub backing_off: u64,
+}
+
+
+/// The periodic summary task; `Drop` stops it.
+pub struct SummaryTask {
+    pub handle: JoinHandle<()>,
+}
+
+
+impl Drop for SummaryTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 
