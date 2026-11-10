@@ -12,16 +12,17 @@ use core_pg::migrate::check_embedded;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use oncall::alert::{Cell, Param, Statement};
 use oncall::alert_source::{
-    alert_notice, clean_text, map_severity, parse_source_settings, poll_all, poll_tenant, record_alert, run_rounds, source_details,
-    validate_source_settings, SourceSettings, DETAILS_SQL, FINGERPRINT_PREFIX, RECORD_SQL, UNRECORDED_SQL,
+    alert_notice, clean_text, count_answer, map_severity, parse_source_settings, poll_all, poll_tenant, purge_unpolled, record_alert, run_rounds,
+    skip_backlog, source_details, validate_source_settings, Round, SourceSettings, TenantCounts, DETAILS_SQL, FINGERPRINT_PREFIX, PURGE_SQL,
+    RECORD_SQL, SKIP_SQL, UNRECORDED_SQL,
 };
 use oncall::error::{OncallError, SourceError, StoreError};
-use oncall::limits::MAX_SOURCE_TEXT_CHARS;
+use oncall::limits::{MAX_PURGE_PER_ROUND, MAX_SKIP_PER_POLL, MAX_SOURCE_TEXT_CHARS};
 use oncall::model::{Channel, ChannelKind};
 use oncall::render::render;
 use oncall::store::MIGRATIONS;
-use oncall::types::{Row, TenantOutcome};
-use std::collections::BTreeMap;
+use oncall::types::Row;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{ready, Ready};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
@@ -76,6 +77,9 @@ struct SourceDb {
     alerts: Mutex<Vec<(String, SourceAlert)>>,
     fail: Mutex<bool>,
     reads: Mutex<Vec<String>>,
+    gone: Mutex<Vec<(String, String)>>,
+    bad_count: Mutex<Option<Vec<Vec<String>>>>,
+    purge_scopes: Mutex<Vec<String>>,
 }
 
 
@@ -101,7 +105,7 @@ fn poll_time() -> DateTime<Utc> {
 }
 
 
-fn quiet(_outcomes: &[TenantOutcome]) {}
+fn quiet(_round: &Round) {}
 
 
 fn instant(_interval: Duration) -> Pin<Box<dyn std::future::Future<Output = ()>>> {
@@ -162,6 +166,58 @@ fn malformed() -> PgError {
 }
 
 
+fn visible(db: &SourceDb, recorded: &Arc<Mutex<Db>>, tenant: &str) -> Vec<SourceAlert> {
+    let consumed: Vec<String> = lock(recorded)
+        .consumed
+        .iter()
+        .filter(|(owner, _id)| owner == tenant)
+        .map(|(_owner, id)| id.clone())
+        .collect();
+    let gone = lock(&db.gone).clone();
+    lock(&db.alerts)
+        .iter()
+        .filter(|(owner, _alert)| owner == tenant)
+        .map(|(_owner, alert)| alert.clone())
+        .filter(|alert| !consumed.contains(&alert.id) && !gone.contains(&(tenant.to_owned(), alert.id.clone())))
+        .collect()
+}
+
+
+fn limit_of(params: &[String]) -> Result<usize, PgError> {
+    params.last().ok_or_else(malformed)?.parse::<usize>().map_err(|_bad| malformed())
+}
+
+
+fn purge_handle(db: &SourceDb, recorded: &Arc<Mutex<Db>>, scope: &TenantScope, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
+    lock(&db.purge_scopes).push(tenant_of(scope).to_owned());
+    let polled: Vec<String> = serde_json::from_str(params.first().ok_or_else(malformed)?).map_err(|_bad| malformed())?;
+    let owners: BTreeSet<String> = lock(&db.alerts).iter().map(|(owner, _alert)| owner.clone()).collect();
+    let victims: Vec<(String, String)> = owners
+        .iter()
+        .filter(|owner| !polled.contains(owner) && polled.iter().any(|name| name == tenant_of(scope)))
+        .flat_map(|owner| visible(db, recorded, owner).into_iter().map(|alert| (owner.clone(), alert.id)))
+        .take(limit_of(params)?)
+        .collect();
+    lock(&db.gone).extend(victims.iter().cloned());
+    Ok(vec![vec![victims.len().to_string()]])
+}
+
+
+fn skip_handle(db: &SourceDb, recorded: &Arc<Mutex<Db>>, scope: &TenantScope, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
+    let added = DateTime::parse_from_rfc3339(params.first().ok_or_else(malformed)?)
+        .map_err(|_bad| malformed())?
+        .timestamp_micros();
+    let victims: Vec<(String, String)> = visible(db, recorded, tenant_of(scope))
+        .into_iter()
+        .filter(|alert| i64::try_from(alert.created_micros).is_ok_and(|created| created < added))
+        .take(limit_of(params)?)
+        .map(|alert| (tenant_of(scope).to_owned(), alert.id))
+        .collect();
+    lock(&db.gone).extend(victims.iter().cloned());
+    Ok(vec![vec![victims.len().to_string()]])
+}
+
+
 fn source_handle(
     db: &SourceDb,
     recorded: &Arc<Mutex<Db>>,
@@ -169,25 +225,19 @@ fn source_handle(
     sql: &'static str,
     params: &[String],
 ) -> Result<Vec<Vec<String>>, PgError> {
-    lock(&db.reads).push(tenant_of(scope).to_owned());
-    assert_eq!(sql, UNRECORDED_SQL);
     if *lock(&db.fail) {
         Err(PgError::InvalidTenant)
+    } else if let Some(rows) = lock(&db.bad_count).clone().filter(|_rows| sql != UNRECORDED_SQL) {
+        Ok(rows)
+    } else if sql == PURGE_SQL {
+        purge_handle(db, recorded, scope, params)
+    } else if sql == SKIP_SQL {
+        skip_handle(db, recorded, scope, params)
     } else {
-        let limit = params.last().ok_or_else(malformed)?.parse::<usize>().map_err(|_bad| malformed())?;
-        let consumed: Vec<String> = lock(recorded)
-            .consumed
-            .iter()
-            .filter(|(owner, _id)| owner == tenant_of(scope))
-            .map(|(_owner, id)| id.clone())
-            .collect();
-        let mine: Vec<SourceAlert> = lock(&db.alerts)
-            .iter()
-            .filter(|(owner, _alert)| owner == tenant_of(scope))
-            .map(|(_owner, alert)| alert.clone())
-            .filter(|alert| !consumed.contains(&alert.id))
-            .collect();
-        Ok(mine.iter().take(limit).map(source_row).collect())
+        assert_eq!(sql, UNRECORDED_SQL);
+        lock(&db.reads).push(tenant_of(scope).to_owned());
+        let limit = limit_of(params)?;
+        Ok(visible(db, recorded, tenant_of(scope)).iter().take(limit).map(source_row).collect())
     }
 }
 
@@ -284,10 +334,10 @@ fn add(source: &SourceDb, tenant: &str, name: &str, created: u64, title: &str) {
 }
 
 
-fn opened(outcomes: &[TenantOutcome], tenant: &str) -> Result<usize, Box<dyn std::error::Error>> {
-    let found = outcomes.iter().find(|(name, _result)| name == tenant).ok_or("tenant missing")?;
+fn opened(round: &Round, tenant: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let found = round.outcomes.iter().find(|(name, _result)| name == tenant).ok_or("tenant missing")?;
     match &found.1 {
-        Ok(count) => Ok(*count),
+        Ok(counts) => Ok(counts.opened),
         Err(error) => Err(error.to_string().into()),
     }
 }
@@ -305,14 +355,14 @@ async fn new_alerts_are_recorded_once_and_a_restart_continues_from_the_cursor() 
         max_per_poll: THREE + 1,
         ..settings.clone()
     };
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &wide, "acme", poll_time()).await?, THREE);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &wide, "acme", poll_time()).await?.opened, THREE);
     assert_eq!(count_for(&db, "acme"), THREE);
     let records_before = lock(&db).calls.iter().filter(|sql| **sql == RECORD_SQL).count();
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &wide, "acme", poll_time()).await?, 0);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &wide, "acme", poll_time()).await?.opened, 0);
     assert_eq!(lock(&db).calls.iter().filter(|sql| **sql == RECORD_SQL).count(), records_before);
     add(&source, "acme", "late", BASE_CREATED + FLOOD, "late one");
     let mut restarted = exec_for(&db);
-    assert_eq!(poll_tenant(&alerts_exec, &mut restarted, &wide, "acme", poll_time()).await?, 1);
+    assert_eq!(poll_tenant(&alerts_exec, &mut restarted, &wide, "acme", poll_time()).await?.opened, 1);
     assert_eq!(count_for(&db, "acme"), THREE + 1);
     Ok(())
 }
@@ -326,11 +376,15 @@ async fn a_redelivered_alert_is_a_no_op() -> TestResult {
     add(&source, "acme", "e1", BASE_CREATED, "t");
     let alerts_exec = source_exec(&source, &db);
     let mut exec = exec_for(&db);
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?, 1);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened, 1);
     let scope = tenant_scope("acme")?;
     let again = source_alert("acme", "e1", BASE_CREATED, "t");
-    assert_eq!(record_alert(&mut exec, &scope, &settings, &again, poll_time()).await?, 0);
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?, 0);
+    let redelivered = TenantCounts {
+        already: 1,
+        ..TenantCounts::default()
+    };
+    assert_eq!(record_alert(&mut exec, &scope, &settings, &again, poll_time()).await?, redelivered);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened, 0);
     assert_eq!(count_for(&db, "acme"), 1);
     assert_eq!(lock(&db).details.len(), 1);
     Ok(())
@@ -345,10 +399,10 @@ async fn one_poll_records_at_most_the_cap() -> TestResult {
     (0..CAP + THREE).for_each(|index| add(&source, "acme", &format!("e{index}"), BASE_CREATED + index as u64, "t"));
     let alerts_exec = source_exec(&source, &db);
     let mut exec = exec_for(&db);
-    let first = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?;
-    let second = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?;
-    let third = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?;
-    let fourth = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?;
+    let first = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened;
+    let second = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened;
+    let third = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened;
+    let fourth = poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened;
     assert_eq!((first, second, third, fourth), (CAP, CAP, 1, 0));
     Ok(())
 }
@@ -382,7 +436,7 @@ async fn failures_leave_the_cursor_and_the_next_poll_resumes() -> TestResult {
     assert!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await.is_err());
     assert_eq!(count_for(&db, "acme"), 1);
     lock(&db).fail_on_call = None;
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?, 1);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened, 1);
     assert_eq!(count_for(&db, "acme"), CAP);
     Ok(())
 }
@@ -431,7 +485,10 @@ async fn a_failing_tenant_does_not_stop_the_others() -> TestResult {
     let alerts_exec = source_exec(&source, &db);
     let mut exec = exec_for(&db);
     let outcomes = poll_all(&alerts_exec, &mut exec, &settings, poll_time).await;
-    assert!(matches!(outcomes.first().map(|(_n, result)| result), Some(Err(SourceError::Tenant(_)))));
+    assert!(matches!(
+        outcomes.outcomes.first().map(|(_n, result)| result),
+        Some(Err(SourceError::Tenant(_)))
+    ));
     assert_eq!(opened(&outcomes, "acme")?, 1);
     Ok(())
 }
@@ -559,6 +616,11 @@ fn the_settings_table_is_validated() -> TestResult {
     bad(&|edited| edited.max_per_poll = 0)?;
     bad(&|edited| edited.max_per_poll = alerts::store::MAX_PAGE_SIZE + 1)?;
     bad(&|edited| edited.interval_seconds = 0)?;
+    bad(&|edited| {
+        edited.added_at.insert("stranger".to_owned(), DateTime::<Utc>::UNIX_EPOCH);
+    })?;
+    let dated = parse_source_settings(&format!("{VALID_SETTINGS}added_at:\n  other: 2026-11-10T00:00:00Z\n"), "s.yaml")?;
+    assert_eq!(dated.added_at.len(), 1);
     assert!(parse_source_settings(&format!("{VALID_SETTINGS}extra: 1\n"), "s.yaml").is_err());
     assert_eq!(clean_text("a\u{85}b\u{2029}c"), "a b c");
     let long = "z".repeat(MAX_SOURCE_TEXT_CHARS + THREE);
@@ -569,6 +631,14 @@ fn the_settings_table_is_validated() -> TestResult {
     assert_eq!(clean_text(&"z".repeat(MAX_SOURCE_TEXT_CHARS)).chars().count(), MAX_SOURCE_TEXT_CHARS);
     assert_eq!(clean_text("x\u{202E}y\u{202A}\u{2066}z\u{2069}"), "x y  z ");
     assert_eq!(clean_text("\u{2029}\u{202F}\u{2065}\u{206A}"), " \u{202F}\u{2065}\u{206A}");
+    assert_eq!(
+        clean_text("a\u{200E}b\u{200F}c\u{061C}d\u{200B}e\u{200C}f\u{200D}g\u{FEFF}h"),
+        "a b c d e f g h"
+    );
+    assert_eq!(
+        clean_text("\u{200A}\u{2010}\u{0600}\u{FEFE}\u{FF00}"),
+        "\u{200A}\u{2010}\u{0600}\u{FEFE}\u{FF00}"
+    );
     Ok(())
 }
 
@@ -582,6 +652,10 @@ fn the_statements_are_tenant_scoped_and_the_migrations_valid() -> TestResult {
     assert!(!UNRECORDED_SQL.contains("NOT EXISTS") && !UNRECORDED_SQL.contains("(created, id)"));
     let columns = GET_SQL.split(" FROM ").next().ok_or("no select list")?;
     assert!(UNRECORDED_SQL.replace("a.", "").starts_with(columns));
+    assert!(SKIP_SQL.contains("DELETE FROM alert_outbox WHERE tenant = $1") && SKIP_SQL.contains("queued_at < $2::text::timestamptz"));
+    assert!(SKIP_SQL.contains("LIMIT $3::text::bigint") && PURGE_SQL.contains("LIMIT $3::text::bigint"));
+    assert!(PURGE_SQL.contains("tenant <> ALL(") && PURGE_SQL.contains("$1::text = ANY(") && PURGE_SQL.contains("DELETE FROM alert_outbox"));
+    assert!(!PURGE_SQL.contains("JOIN alerts") && !PURGE_SQL.contains("FROM alerts"));
     assert!(RECORD_SQL.contains("consumed AS (DELETE FROM alert_outbox WHERE tenant = $1 AND id = $8::text)"));
     assert!(RECORD_SQL.contains("ON CONFLICT (tenant, fingerprint) WHERE state <> 'resolved' DO NOTHING"));
     assert!(RECORD_SQL.contains("ON CONFLICT (tenant, source_alert) DO NOTHING"));
@@ -600,12 +674,12 @@ async fn an_alert_inserted_below_everything_recorded_is_recorded_on_the_next_pol
     let alerts_exec = source_exec(&source, &db);
     let mut exec = exec_for(&db);
     add(&source, "acme", "recent", BASE_CREATED * TWICE as u64, "recent");
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?, 1);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened, 1);
     add(&source, "acme", "late", BASE_CREATED / TWICE as u64, "late commit with an old stamp");
     add(&source, "acme", "newer", BASE_CREATED * THREE as u64, "newer");
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?, TWICE);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened, TWICE);
     assert_eq!(count_for(&db, "acme"), THREE);
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?, 0);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await?.opened, 0);
     Ok(())
 }
 
@@ -663,10 +737,11 @@ async fn a_held_key_is_consumed_not_stuck_and_the_queue_moves_on() -> TestResult
     let held = alert_id("acme", "rule", &["held".to_owned()]);
     lock(&db).alerts.push(("acme".to_owned(), 1, format!("{FINGERPRINT_PREFIX}{held}")));
     let capped = SourceSettings { max_per_poll: 1, ..settings };
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &capped, "acme", poll_time()).await?, 0);
+    let held_counts = poll_tenant(&alerts_exec, &mut exec, &capped, "acme", poll_time()).await?;
+    assert_eq!((held_counts.opened, held_counts.already, held_counts.conflict), (0, 0, 1));
     assert_eq!(lock(&db).consumed.len(), 1);
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &capped, "acme", poll_time()).await?, 1);
-    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &capped, "acme", poll_time()).await?, 0);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &capped, "acme", poll_time()).await?.opened, 1);
+    assert_eq!(poll_tenant(&alerts_exec, &mut exec, &capped, "acme", poll_time()).await?.opened, 0);
     Ok(())
 }
 
@@ -680,5 +755,160 @@ async fn the_generic_open_refuses_the_source_fingerprint_prefix() -> TestResult 
     assert!(matches!(refused, Err(StoreError::InvalidFingerprint { .. })));
     assert!(lock(&db).calls.is_empty());
     assert!(oncall::store::valid_fingerprint("manual:1") && !oncall::store::valid_fingerprint("") && !oncall::store::valid_fingerprint("alert:1"));
+    Ok(())
+}
+
+
+const GHOST_EXTRA: usize = 5;
+
+
+const GHOST_ROWS: usize = 2 * MAX_PURGE_PER_ROUND + GHOST_EXTRA;
+
+
+const OLD_ALERTS: usize = 5;
+
+
+const ANSWER: usize = 7;
+
+
+#[tokio::test]
+async fn the_outbox_of_an_unpolled_tenant_is_purged_in_bounded_rounds_while_polled_tenants_are_served() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = settings()?;
+    (0..GHOST_ROWS).for_each(|index| add(&source, "ghost", &format!("g{index}"), BASE_CREATED + index as u64, "ghost"));
+    (0..FLOOD).for_each(|index| add(&source, "acme", &format!("a{index}"), BASE_CREATED + index, "mine"));
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let purged: Vec<usize> = {
+        let mut rounds = Vec::new();
+        for _round in 0..THREE {
+            let round = poll_all(&alerts_exec, &mut exec, &settings, poll_time).await;
+            assert_eq!(opened(&round, "acme")?, CAP);
+            rounds.push(round.purged?);
+        }
+        rounds
+    };
+    assert_eq!(purged, vec![MAX_PURGE_PER_ROUND, MAX_PURGE_PER_ROUND, GHOST_EXTRA]);
+    assert_eq!(count_for(&db, "ghost"), 0);
+    assert_eq!(count_for(&db, "acme"), CAP * THREE);
+    assert!(lock(&source.purge_scopes).iter().all(|tenant| tenant == "acme"));
+    assert!(lock(&source.reads).iter().all(|tenant| tenant != "ghost"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_tenant_added_later_does_not_page_its_backlog() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let base = settings()?;
+    let added = DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::microseconds(BASE_CREATED as i64 + OLD_ALERTS as i64);
+    let with_added = SourceSettings {
+        added_at: BTreeMap::from([("other".to_owned(), added)]),
+        ..base
+    };
+    (0..FLOOD).for_each(|index| add(&source, "other", &format!("o{index}"), BASE_CREATED + index, "old or new"));
+    add(&source, "acme", "mine", 1, "older than any added_at but acme has none");
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let first = poll_all(&alerts_exec, &mut exec, &with_added, poll_time).await;
+    let counts = first
+        .outcomes
+        .iter()
+        .find(|(name, _result)| name == "other")
+        .ok_or("missing")?
+        .1
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    assert_eq!((counts.skipped_backlog, counts.opened), (OLD_ALERTS, CAP));
+    assert_eq!(opened(&first, "acme")?, 1);
+    let second = poll_all(&alerts_exec, &mut exec, &with_added, poll_time).await;
+    let again = second
+        .outcomes
+        .iter()
+        .find(|(name, _result)| name == "other")
+        .ok_or("missing")?
+        .1
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    assert_eq!((again.skipped_backlog, again.opened), (0, CAP));
+    assert_eq!(count_for(&db, "other"), CAP * TWICE);
+    let ids: Vec<String> = lock(&db).details.iter().map(|(_owner, _id, params)| text(params, P_SOURCE_ID)).collect();
+    assert!(!ids.contains(&alert_id("other", "rule", &["o0".to_owned()])));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_bad_count_answer_or_failing_store_is_reported_not_swallowed() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = SourceSettings {
+        added_at: BTreeMap::from([("acme".to_owned(), DateTime::<Utc>::UNIX_EPOCH)]),
+        ..settings()?
+    };
+    let alerts_exec = source_exec(&source, &db);
+    let scope = tenant_scope("acme")?;
+    assert!(matches!(count_answer(&[]), Err(alerts::error::StoreError::BadRow { .. })));
+    assert!(matches!(count_answer(&[Vec::new()]), Err(alerts::error::StoreError::BadRow { .. })));
+    assert!(count_answer(&[vec!["many".to_owned()]]).is_err());
+    assert_eq!(count_answer(&[vec![ANSWER.to_string()]])?, ANSWER);
+    *lock(&source.bad_count) = Some(vec![vec!["many".to_owned()]]);
+    assert!(matches!(purge_unpolled(&alerts_exec, &settings).await, Err(SourceError::Alerts(_))));
+    assert!(matches!(
+        skip_backlog(&alerts_exec, &settings, &scope, "acme").await,
+        Err(SourceError::Alerts(_))
+    ));
+    let mut exec = exec_for(&db);
+    assert!(poll_tenant(&alerts_exec, &mut exec, &settings, "acme", poll_time()).await.is_err());
+    *lock(&source.bad_count) = None;
+    *lock(&source.fail) = true;
+    assert!(matches!(purge_unpolled(&alerts_exec, &settings).await, Err(SourceError::Alerts(_))));
+    assert!(matches!(
+        skip_backlog(&alerts_exec, &settings, &scope, "acme").await,
+        Err(SourceError::Alerts(_))
+    ));
+    let round = poll_all(&alerts_exec, &mut exec, &settings, poll_time).await;
+    assert!(round.purged.is_err() && round.outcomes.iter().all(|(_tenant, outcome)| outcome.is_err()));
+    let empty = SourceSettings {
+        tenants: Vec::new(),
+        ..settings.clone()
+    };
+    assert!(matches!(purge_unpolled(&alerts_exec, &empty).await, Err(SourceError::NoTenants)));
+    let unnamed = SourceSettings {
+        tenants: vec!["bad name".to_owned()],
+        ..settings
+    };
+    assert!(matches!(purge_unpolled(&alerts_exec, &unnamed).await, Err(SourceError::Tenant(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn nothing_is_paged_while_the_backlog_is_still_being_skipped() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let added = DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::microseconds((BASE_CREATED + MAX_SKIP_PER_POLL as u64 + GHOST_EXTRA as u64) as i64);
+    let with_added = SourceSettings {
+        added_at: BTreeMap::from([("acme".to_owned(), added)]),
+        ..settings()?
+    };
+    (0..MAX_SKIP_PER_POLL + GHOST_EXTRA).for_each(|index| add(&source, "acme", &format!("old{index}"), BASE_CREATED + index as u64, "old"));
+    add(
+        &source,
+        "acme",
+        "fresh",
+        BASE_CREATED + MAX_SKIP_PER_POLL as u64 + GHOST_EXTRA as u64,
+        "fresh",
+    );
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let first = poll_tenant(&alerts_exec, &mut exec, &with_added, "acme", poll_time()).await?;
+    assert_eq!((first.skipped_backlog, first.opened), (MAX_SKIP_PER_POLL, 0));
+    assert!(lock(&source.reads).is_empty());
+    let second = poll_tenant(&alerts_exec, &mut exec, &with_added, "acme", poll_time()).await?;
+    assert_eq!((second.skipped_backlog, second.opened), (GHOST_EXTRA, 1));
+    assert_eq!(count_for(&db, "acme"), 1);
     Ok(())
 }

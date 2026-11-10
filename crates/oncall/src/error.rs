@@ -176,6 +176,8 @@ pub enum SourceError {
     Alerts(#[from] alerts::error::StoreError),
     #[error("the on-call store failed")]
     Store(#[from] StoreError),
+    #[error("no source tenant is configured")]
+    NoTenants,
     #[error("the tenant name is not valid")]
     Tenant(#[from] core_pg::error::PgError),
     #[error("no on-call severity is mapped for `{severity}`")]
