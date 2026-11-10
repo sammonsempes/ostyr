@@ -13,6 +13,9 @@ const SRC_PATH: &str = "crates/x/src/lib.rs";
 const BOUNDARY_PATH: &str = "crates/sys-windows/src/lib.rs";
 
 
+const SILENT_DEFAULT_HITS: usize = 2;
+
+
 const TESTS_PATH: &str = "crates/x/tests/it.rs";
 
 
@@ -150,6 +153,21 @@ pub fn let_underscore_is_reported() -> anyhow::Result<()> {
         report_at(SRC_PATH, rule, source)?,
         vec![line(SRC_PATH, "2:5", rule, "`let _ =` discards a value silently")]
     );
+    Ok(())
+}
+
+
+#[test]
+pub fn silent_defaults_are_reported() -> anyhow::Result<()> {
+    let rule = "silent-default";
+    let source = "fn a() {\n    x.unwrap_or_default();\n    f().ok();\n    let y = f().ok();\n    z = f().ok();\n    f().inspect_err(|error| tracing::warn!(%error)).ok();\n    let w = g().unwrap_or_else(|error| {\n        tracing::warn!(%error);\n        Default::default()\n    });\n}\n";
+    let default_message = "`unwrap_or_default()` swallows an error without a log";
+    let ok_message = "a discarded `.ok()` swallows an error without a log";
+    assert_eq!(
+        report_at(SRC_PATH, rule, source)?,
+        vec![line(SRC_PATH, "2:7", rule, default_message), line(SRC_PATH, "3:8", rule, ok_message)]
+    );
+    assert_eq!(report_at(TESTS_PATH, rule, source)?.len(), SILENT_DEFAULT_HITS);
     Ok(())
 }
 

@@ -67,7 +67,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<String> {
     while received.len() < expected && reads < MAX_READS {
         reads += 1;
         let count = stream.read(&mut chunk)?;
-        received.extend_from_slice(chunk.get(..count).unwrap_or_default());
+        received.extend_from_slice(chunk.get(..count).unwrap_or(&[]));
         let text = String::from_utf8_lossy(&received).into_owned();
         expected = text.find(HEADER_END).map_or(usize::MAX, |end| {
             let length = text

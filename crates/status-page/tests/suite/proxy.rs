@@ -96,7 +96,7 @@ async fn start(settings: PageSettings) -> Result<Server, Box<dyn std::error::Err
     let address = listener.local_addr()?;
     let (stop, stopped) = oneshot::channel::<()>();
     let shutdown = Box::pin(async {
-        stopped.await.unwrap_or_default();
+        stopped.await.inspect_err(|error| tracing::warn!(%error, "stop signal dropped")).ok();
     });
     tokio::spawn(serve(
         Box::pin(TcpListenerStream::new(listener)),
@@ -114,7 +114,11 @@ async fn exchange(address: SocketAddr, prefix: &[u8], text: &str) -> Result<Stri
     stream.write_all(text.as_bytes()).await?;
     stream.shutdown().await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap_or_default();
+    stream
+        .read_to_end(&mut bytes)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "read ended early"))
+        .ok();
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -301,7 +305,11 @@ async fn a_trusted_proxy_that_never_sends_the_header_is_cut_at_the_deadline() ->
     let started = Instant::now();
     let mut stream = TcpStream::connect(address).await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap_or_default();
+    stream
+        .read_to_end(&mut bytes)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "read ended early"))
+        .ok();
     assert!(started.elapsed() >= Duration::from_secs(SHORT_SECONDS));
     assert!(started.elapsed() < Duration::from_secs(LONG_SECONDS));
     settle(&state, 0).await;

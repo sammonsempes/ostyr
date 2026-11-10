@@ -36,7 +36,7 @@ pub fn serve_one<Stream: Read + Write>(stream: Stream, status: u16, location: &s
                     .filter(|(key, _value)| key.eq_ignore_ascii_case(name))
                     .map(|(_key, value)| value.trim().to_string())
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|| "".to_owned())
     };
     let length = header("content-length").parse::<usize>().map_err(io::Error::other)?;
     let mut body = vec![u8::MIN; length];

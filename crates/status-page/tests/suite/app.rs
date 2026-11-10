@@ -46,7 +46,7 @@ async fn the_example_serves_the_sample_page_until_shutdown() -> TestResult {
         file,
         listener,
         Box::pin(async {
-            stopped.await.unwrap_or_default();
+            stopped.await.inspect_err(|error| tracing::warn!(%error, "stop signal dropped")).ok();
         }),
     ));
     let mut stream = TcpStream::connect(address).await?;
