@@ -381,6 +381,15 @@ fn a_broken_pem_block_is_an_error() -> TestResult {
 
 
 #[test]
+fn a_pem_parse_error_never_echoes_the_file() -> TestResult {
+    let (_directory, path) = write_ca("ca.pem", b"MARKERLINE\n-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n")?;
+    let error = load_roots(Some(&path)).err().ok_or("expected an error")?;
+    assert!(!format!("{error:?} {error}").contains("MARKERLINE"));
+    Ok(())
+}
+
+
+#[test]
 fn too_many_ca_certificates_are_an_error() -> TestResult {
     let pki = ca_signed()?;
     let (_directory, path) = write_ca("ca.pem", pki.ca_pem.repeat(OVER_CA_COUNT).as_bytes())?;

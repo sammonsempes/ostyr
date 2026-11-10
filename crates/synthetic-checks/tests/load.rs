@@ -139,10 +139,29 @@ fn text_limits_are_enforced() -> TestResult {
 #[test]
 fn duplicates_are_refused() -> TestResult {
     let locations = "checks:\n  - name: a\n    kind: dns\n    target: x\n    locations: [p, p]\n";
-    assert!(message_of(locations)?.contains("duplicate entry `p`"));
+    assert!(message_of(locations)?.contains("duplicate entry"));
     let names = format!("{MINIMAL}{}", MINIMAL.trim_start_matches("checks:\n"));
-    assert!(message_of(&names)?.contains("duplicate entry `web`"));
+    assert!(message_of(&names)?.contains("duplicate entry"));
     Ok(())
+}
+
+
+#[test]
+fn error_text_never_echoes_the_input_value() -> TestResult {
+    let duplicate = "checks:\n  - name: a\n    kind: dns\n    target: x\n    locations: [MARKERDUP, MARKERDUP]\n";
+    let range = check_with("    interval_seconds: 987654321");
+    let timeout = check_with("    interval_seconds: 20\n    timeout_seconds: 29");
+    let cases = [
+        (duplicate.to_string(), "MARKERDUP", "locations"),
+        (range, "987654321", "interval_seconds"),
+        (timeout, "29", "timeout_seconds"),
+    ];
+    cases.iter().try_for_each(|(text, marker, field)| -> TestResult {
+        let message = message_of(text)?;
+        assert!(message.contains(field), "{message}");
+        assert!(!message.contains(marker), "{message}");
+        Ok(())
+    })
 }
 
 
