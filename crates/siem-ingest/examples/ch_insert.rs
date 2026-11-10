@@ -68,6 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         fetch: Box::new(move |_| Ok(pending.take().into_iter().flatten().collect())),
         ack: Box::new(move |_, action| count(&ack_counts, format!("{action:?}"))),
         dead_letter: Box::new(move |_, _, reason| count(&dead_counts, format!("dead letter: {reason}"))),
+        progress: Arc::new(|| Ok(())),
     };
     let batcher = new_batcher(engine, sink, Box::new(OffsetDateTime::now_utc), Box::new(sleep));
     let mut pipeline = new_pipeline(batcher, wiring);

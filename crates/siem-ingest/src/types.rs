@@ -31,6 +31,10 @@ pub type DeadLetterFn = dyn Fn(&str, &[u8], &str) -> Result<(), BoxError> + Send
 pub type StopFn = dyn Fn() -> bool;
 
 
+/// Tells the bus that every message still held is being worked on, so it does not redeliver them yet.
+pub type ProgressFn = dyn Fn() -> Result<(), BoxError> + Send + Sync;
+
+
 pub type PendingMap = HashMap<AckToken, Message>;
 
 

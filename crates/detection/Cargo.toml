@@ -1,0 +1,28 @@
+[package]
+name = "detection"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+agent-channel = { version = "0.0.0", path = "../agent-channel" }
+core-audit = { version = "0.0.0", path = "../core-audit" }
+core-config = { version = "0.0.0", path = "../core-config" }
+data-encoding = "2.11.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
+stream-correlation = { version = "0.0.0", path = "../stream-correlation" }
+thiserror = "2"
+time = "0.3"
+tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tempfile = "3"
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true

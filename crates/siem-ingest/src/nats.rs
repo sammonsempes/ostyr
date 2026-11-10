@@ -11,6 +11,7 @@ use async_nats::{ConnectOptions, HeaderMap};
 use bytes::Bytes;
 use core_config::reload::{current_config, ReloadEngine};
 use core_config::types::BoxError;
+use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt};
 use rustls::crypto::ring::default_provider;
 use rustls::{ClientConfig, RootCertStore};
@@ -363,6 +364,24 @@ pub async fn settle_token(slot: &mut Option<Session>, settings: &IngestSettings,
 }
 
 
+/// Sends an in-progress acknowledgement (`+WPI`) for every message still held, which restarts the server's `ack_wait` timer for it.
+pub async fn progress_in(slot: &Option<Session>, settings: &IngestSettings) -> Result<usize, NatsError> {
+    let session = slot.as_ref().ok_or(NatsError::NotConnected)?;
+    let limit = millis(settings.nats_request_timeout_ms);
+    try_join_all(session.held.values().map(|message| bounded(limit, message.ack_with(AckKind::Progress))))
+        .await
+        .map(|sent| sent.len())
+}
+
+
+pub fn report_progress(link: &Link) -> Result<(), BoxError> {
+    let slot = lock_session(link);
+    let settings = current_config(&link.settings);
+    let outcome = link.runtime.block_on(progress_in(&slot, &settings));
+    outcome.map(drop).map_err(BoxError::from)
+}
+
+
 pub fn acknowledge(link: &Link, token: AckToken, action: AckAction) -> Result<(), BoxError> {
     let mut slot = lock_session(link);
     let settings = current_config(&link.settings);
@@ -413,10 +432,12 @@ pub fn nats_wiring(settings: Arc<ReloadEngine<IngestSettings>>) -> Result<Wiring
     });
     let fetch_link = Arc::clone(&link);
     let ack_link = Arc::clone(&link);
+    let progress_link = Arc::clone(&link);
     let dead_link = link;
     Ok(Wiring {
         fetch: Box::new(move |max| fetch_batch(&fetch_link, max)),
         ack: Box::new(move |token, action| acknowledge(&ack_link, token, action)),
         dead_letter: Box::new(move |tenant, payload, reason| publish_dead_letter(&dead_link, tenant, payload, reason)),
+        progress: Arc::new(move || report_progress(&progress_link)),
     })
 }
