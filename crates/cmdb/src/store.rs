@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Limits, Observation, Outcome, Resolution, Snapshot};
+use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Limits, Observation, Outcome, Resolution, Snapshot, Stored};
 use crate::reconcile::reconcile;
 use crate::types::{Executor, Row, TruthMap, VersionMap};
 use core_pg::error::PgError;
@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 
 pub const ASSETS_TABLE: &str = "cmdb_assets";
+
+
+pub const CONFLICTS_TABLE: &str = "cmdb_conflicts";
 
 
 pub const KEYS_TABLE: &str = "cmdb_identity_keys";
@@ -40,7 +43,7 @@ pub const KEY_CURSOR: [usize; 2] = [1, 2];
 pub const ATTRIBUTE_CURSOR: [usize; 2] = [0, 1];
 
 
-/// One statement, so one implicit transaction: `$1` tenant, `$2` the JSON document of the changes.
+/// One statement (one implicit transaction): `$1` tenant, `$2` JSON changes, `$3` open-conflict cap; answers the applied flag and the refused count.
 pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
 
 
@@ -74,10 +77,16 @@ pub const VERSION_COLUMN: usize = 3;
 pub const SOURCE_COLUMN: usize = 3;
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "001_cmdb",
-    sql: include_str!("../migrations/001_cmdb.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "001_cmdb",
+        sql: include_str!("../migrations/001_cmdb.sql"),
+    },
+    Migration {
+        version: "002_cmdb_conflict_status",
+        sql: include_str!("../migrations/002_cmdb_conflict_status.sql"),
+    },
+];
 
 
 pub fn conflict_of(error: PgError) -> StoreError {
@@ -288,7 +297,13 @@ pub fn event_doc(event: &Event) -> Value {
 
 
 /// Writes the changed assets, their keys and attributes, the conflicts and the events in one statement; a stale version fails it whole.
-pub async fn apply_outcome(exec: Executor<'_, '_>, scope: &TenantScope, snapshot: &Snapshot, outcome: &Outcome) -> Result<(), StoreError> {
+pub async fn apply_outcome(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    snapshot: &Snapshot,
+    outcome: &Outcome,
+    max_open_conflicts: usize,
+) -> Result<usize, StoreError> {
     let assets: Vec<Value> = changed_assets(snapshot, outcome)
         .into_iter()
         .map(|asset| {
@@ -304,10 +319,14 @@ pub async fn apply_outcome(exec: Executor<'_, '_>, scope: &TenantScope, snapshot
         "conflicts": outcome.conflicts.iter().map(conflict_doc).collect::<Vec<Value>>(),
         "events": outcome.events.iter().map(event_doc).collect::<Vec<Value>>(),
     });
-    let rows = exec(scope.clone(), APPLY_SQL, vec![document.to_string()]).await.map_err(conflict_of)?;
-    let applied = rows.first().and_then(|row| row.first()).is_some_and(|answer| answer == "true");
+    let rows = exec(scope.clone(), APPLY_SQL, vec![document.to_string(), max_open_conflicts.to_string()])
+        .await
+        .map_err(conflict_of)?;
+    let answer = rows.first().ok_or(StoreError::BadRow { table: CONFLICTS_TABLE })?;
+    let applied = cell(answer, 0, CONFLICTS_TABLE)? == "true";
+    let refused = cell(answer, 1, CONFLICTS_TABLE)?.parse::<usize>().map_err(StoreError::BadCount)?;
     if applied {
-        Ok(())
+        Ok(refused)
     } else {
         Err(StoreError::VersionConflict)
     }
@@ -320,11 +339,11 @@ pub async fn attempt(
     observation: &Observation,
     truth: &TruthMap,
     limits: &Limits,
-) -> Result<Outcome, StoreError> {
+) -> Result<Stored, StoreError> {
     let snapshot = load_assets(exec, scope, limits).await?;
     let outcome = reconcile(&snapshot.assets, observation, truth)?;
-    apply_outcome(exec, scope, &snapshot, &outcome).await?;
-    Ok(outcome)
+    let refused_conflicts = apply_outcome(exec, scope, &snapshot, &outcome, limits.max_open_conflicts).await?;
+    Ok(Stored { outcome, refused_conflicts })
 }
 
 
@@ -335,7 +354,7 @@ pub async fn reconcile_stored(
     observation: &Observation,
     truth: &TruthMap,
     limits: &Limits,
-) -> Result<Outcome, StoreError> {
+) -> Result<Stored, StoreError> {
     let mut attempts = 0;
     let mut result = Err(StoreError::VersionConflict);
     while matches!(result, Err(StoreError::VersionConflict)) && attempts < ATTEMPT_CEILING && attempts < limits.max_attempts {

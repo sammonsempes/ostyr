@@ -254,3 +254,22 @@ fn a_key_owned_by_another_asset_is_a_conflict_and_other_data_applies() -> TestRe
     assert!(merged.attributes.contains_key("rack"));
     Ok(())
 }
+
+
+#[test]
+fn reserved_names_are_refused_by_reconcile_itself() -> TestResult {
+    let inventory = Vec::new();
+    let forged_source = observation("CMDB ", &[(IdentityKey::SerialNumber, "S1")], &[("rack", "r1")]);
+    assert!(matches!(
+        reconcile(&inventory, &forged_source, &TruthMap::new()),
+        Err(CmdbError::ReservedName { field: "source" })
+    ));
+    let forged_attribute = observation("agent", &[(IdentityKey::SerialNumber, "S1")], &[(" Key:mac", "b")]);
+    assert!(matches!(
+        reconcile(&inventory, &forged_attribute, &TruthMap::new()),
+        Err(CmdbError::ReservedName { field: "attributes" })
+    ));
+    let honest = observation("agent", &[(IdentityKey::SerialNumber, "S1")], &[("keyboard", "us")]);
+    assert!(reconcile(&inventory, &honest, &TruthMap::new()).is_ok());
+    Ok(())
+}

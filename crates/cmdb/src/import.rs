@@ -1,6 +1,6 @@
 use crate::error::ImportError;
 use crate::model::{Asset, AssetKind, Conflict, Event, Observation, Outcome};
-use crate::reconcile::{find_asset, reconcile};
+use crate::reconcile::{find_asset, is_reserved_attribute, is_reserved_source, reconcile};
 use crate::types::{ColumnMap, IdSet, KeyColumnMap, ObservedMap, RawRow, RowMap, TruthMap};
 use core_config::load::load_file;
 use serde::Deserialize;
@@ -67,20 +67,10 @@ pub struct ImportState {
 }
 
 
-pub const RESERVED_SOURCE: &str = "cmdb";
-
-
-pub const RESERVED_ATTRIBUTE_PREFIX: &str = "key:";
-
-
-/// Refuses the source `cmdb` and attribute names starting with `key:`, which would imitate a key conflict; the error names the field, never the value.
+/// Refuses the reserved source and attribute names of `reconcile`; the error names the field, never the value.
 pub fn check_mapping(mapping: &ImportMapping) -> Result<(), ImportError> {
-    let source_reserved = mapping.source.trim().eq_ignore_ascii_case(RESERVED_SOURCE);
-    let attribute_reserved = mapping
-        .attributes
-        .keys()
-        .any(|name| name.trim_start().to_ascii_lowercase().starts_with(RESERVED_ATTRIBUTE_PREFIX));
-    match (source_reserved, attribute_reserved) {
+    let attribute_reserved = mapping.attributes.keys().any(|name| is_reserved_attribute(name));
+    match (is_reserved_source(&mapping.source), attribute_reserved) {
         (true, _) => Err(ImportError::ReservedName { field: "source" }),
         (false, true) => Err(ImportError::ReservedName { field: "attributes" }),
         (false, false) => Ok(()),

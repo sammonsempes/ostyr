@@ -3,7 +3,31 @@ use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Lifecycle, Ob
 use crate::types::TruthMap;
 
 
-const KEY_OWNER_SOURCE: &str = "cmdb";
+pub const RESERVED_SOURCE: &str = "cmdb";
+
+
+pub const RESERVED_ATTRIBUTE_PREFIX: &str = "key:";
+
+
+pub fn is_reserved_source(source: &str) -> bool {
+    source.trim().eq_ignore_ascii_case(RESERVED_SOURCE)
+}
+
+
+pub fn is_reserved_attribute(name: &str) -> bool {
+    name.trim_start().to_ascii_lowercase().starts_with(RESERVED_ATTRIBUTE_PREFIX)
+}
+
+
+/// Refuses the source `cmdb` and attribute names starting with `key:`, which would imitate a key conflict; the error names the field, never the value.
+pub fn check_observation(observation: &Observation) -> Result<(), CmdbError> {
+    let attribute_reserved = observation.attributes.keys().any(|name| is_reserved_attribute(name));
+    match (is_reserved_source(&observation.source), attribute_reserved) {
+        (true, _) => Err(CmdbError::ReservedName { field: "source" }),
+        (false, true) => Err(CmdbError::ReservedName { field: "attributes" }),
+        (false, false) => Ok(()),
+    }
+}
 
 
 /// First asset sharing a key value with the observation, trying the keys from the strongest to the weakest.
@@ -88,7 +112,7 @@ pub fn merge_key(asset: &mut Asset, conflicts: &mut Vec<Conflict>, inventory: &[
             attribute: format!("key:{key}"),
             current: Attribute {
                 value: other.id.clone(),
-                source: KEY_OWNER_SOURCE.to_string(),
+                source: RESERVED_SOURCE.to_string(),
             },
             observed: Attribute {
                 value: value.to_string(),
@@ -102,6 +126,7 @@ pub fn merge_key(asset: &mut Asset, conflicts: &mut Vec<Conflict>, inventory: &[
 
 /// Pure: returns the next inventory, the conflict log entries and the events; the input is never modified.
 pub fn reconcile(inventory: &[Asset], observation: &Observation, truth: &TruthMap) -> Result<Outcome, CmdbError> {
+    check_observation(observation)?;
     let matched = find_asset(inventory, observation).cloned();
     let created = matched.is_none();
     let mut asset = matched.map_or_else(|| new_asset(observation), Ok)?;

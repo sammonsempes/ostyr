@@ -25,7 +25,20 @@ fresh AS (
         WHERE o.tenant = $1 AND o.asset = f->>'asset' AND o.attribute = f->>'attribute'
           AND o.current_value = f->>'current_value' AND o.current_source = f->>'current_source'
           AND o.observed_value = f->>'observed_value' AND o.observed_source = f->>'observed_source'
+          AND o.status = 'open'
     )
+),
+ranked AS (
+    SELECT fresh.*, row_number() OVER (
+        PARTITION BY asset ORDER BY attribute, current_value, current_source, observed_value, observed_source
+    ) AS position
+    FROM fresh
+),
+admitted AS (
+    SELECT r.asset, r.attribute, r.current_value, r.current_source, r.observed_value, r.observed_source, r.resolution
+    FROM ranked r
+    WHERE (SELECT count(*) FROM cmdb_conflicts o WHERE o.tenant = $1 AND o.asset = r.asset AND o.status = 'open') + r.position
+        <= $3::text::bigint
 ),
 inserted AS (
     INSERT INTO cmdb_assets (tenant, id, kind, lifecycle, version)
@@ -37,7 +50,7 @@ updated AS (
     SET kind = c.kind, lifecycle = c.lifecycle, version = t.version + 1
     FROM changed c
     WHERE t.tenant = $1 AND t.id = c.id AND t.version = c.version AND c.version > 0 AND (SELECT ok FROM guard)
-      AND (c.touch OR EXISTS (SELECT 1 FROM fresh WHERE fresh.asset = c.id))
+      AND (c.touch OR EXISTS (SELECT 1 FROM admitted WHERE admitted.asset = c.id))
     RETURNING t.id
 ),
 written_keys AS (
@@ -62,7 +75,7 @@ written_attributes AS (
 written_conflicts AS (
     INSERT INTO cmdb_conflicts (tenant, asset, attribute, current_value, current_source, observed_value, observed_source, resolution)
     SELECT $1, asset, attribute, current_value, current_source, observed_value, observed_source, resolution
-    FROM fresh
+    FROM admitted
     WHERE (SELECT ok FROM guard)
     RETURNING asset
 ),
@@ -73,4 +86,4 @@ written_events AS (
     WHERE (SELECT ok FROM guard)
     RETURNING asset
 )
-SELECT (SELECT ok FROM guard)::text
+SELECT (SELECT ok FROM guard)::text, ((SELECT count(*) FROM fresh) - (SELECT count(*) FROM admitted))::text

@@ -157,8 +157,29 @@ const CONFLICT_FIELDS: [&str; 6] = [
 ];
 
 
+pub fn set_status(conflict: &mut Value, status: &str) {
+    conflict.as_object_mut().into_iter().for_each(|object| {
+        object.insert("status".to_owned(), Value::from(status));
+    });
+}
+
+
+pub fn is_open(conflict: &Value) -> bool {
+    text(conflict, "status") != "resolved"
+}
+
+
 pub fn same_conflict(left: &Value, right: &Value) -> bool {
-    CONFLICT_FIELDS.iter().all(|field| text(left, field) == text(right, field))
+    is_open(left) && CONFLICT_FIELDS.iter().all(|field| text(left, field) == text(right, field))
+}
+
+
+pub fn open_count(tenant: &Tenant, asset: &str) -> usize {
+    tenant
+        .conflicts
+        .iter()
+        .filter(|conflict| is_open(conflict) && text(conflict, "asset") == asset)
+        .count()
 }
 
 
@@ -174,14 +195,31 @@ pub fn fresh_conflicts(tenant: &Tenant, document: &Value) -> Vec<Value> {
 }
 
 
-pub fn apply(tenant: &mut Tenant, document: &Value) -> Result<bool, PgError> {
+pub fn admitted_conflicts(tenant: &Tenant, fresh: Vec<Value>, cap: usize) -> Vec<Value> {
+    let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+    fresh
+        .into_iter()
+        .filter(|conflict| {
+            let asset = text(conflict, "asset");
+            let position = taken.entry(asset.clone()).or_default();
+            *position += 1;
+            open_count(tenant, &asset) + *position <= cap
+        })
+        .collect()
+}
+
+
+pub fn apply(tenant: &mut Tenant, document: &Value, cap: usize) -> Result<(bool, usize), PgError> {
     let assets = items(document, "assets");
     let fresh = !is_stale(tenant, &assets);
     if fresh && owns_foreign_key(tenant, &assets) {
         Err(unique_violation())
     } else {
+        let mut refused = 0;
         if fresh {
-            let new_conflicts = fresh_conflicts(tenant, document);
+            let candidates = fresh_conflicts(tenant, document);
+            let new_conflicts = admitted_conflicts(tenant, candidates.clone(), cap);
+            refused = candidates.len() - new_conflicts.len();
             assets
                 .iter()
                 .filter(|asset| {
@@ -189,11 +227,14 @@ pub fn apply(tenant: &mut Tenant, document: &Value) -> Result<bool, PgError> {
                         || new_conflicts.iter().any(|conflict| text(conflict, "asset") == text(asset, "id"))
                 })
                 .for_each(|asset| write_asset(tenant, asset));
-            tenant.conflicts.extend(new_conflicts);
+            tenant.conflicts.extend(new_conflicts.into_iter().map(|mut conflict| {
+                set_status(&mut conflict, "open");
+                conflict
+            }));
             tenant.events.extend(items(document, "events"));
             tenant.applies += 1;
         }
-        Ok(fresh)
+        Ok((fresh, refused))
     }
 }
 
@@ -222,12 +263,13 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &str, params: &[String]) -> Res
     if sql == APPLY_SQL {
         *lock(&db.apply_calls) += 1;
         match lock(&db.forced).pop_front() {
-            Some(Forced::Stale) => Ok(vec![vec!["false".to_owned()]]),
+            Some(Forced::Stale) => Ok(vec![vec!["false".to_owned(), "0".to_owned()]]),
             Some(Forced::UniqueViolation) => Err(unique_violation()),
             Some(Forced::OtherError) => Err(other_error()),
             None => {
                 let document: Value = serde_json::from_str(params.first().map_or("null", String::as_str)).unwrap_or(Value::Null);
-                apply(tenant, &document).map(|applied| vec![vec![applied.to_string()]])
+                let cap = params.get(1).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
+                apply(tenant, &document, cap).map(|(applied, refused)| vec![vec![applied.to_string(), refused.to_string()]])
             }
         }
     } else {
