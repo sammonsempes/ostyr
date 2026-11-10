@@ -23,7 +23,7 @@ pub const MIGRATIONS: [Migration; 1] = [Migration {
 pub const INSERT_SQL: &str = include_str!("../migrations/insert.sql");
 
 
-/// `$2` case id, `$3` JSON `{status, resolution, updated_at, event, version}`; answers the new version, or nothing when the version moved.
+/// `$2` case id, `$3` JSON `{status, resolution, updated_at, event, version}`, `$4` history cap; answers the new version, or nothing.
 pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
 
 
@@ -393,6 +393,12 @@ pub async fn list_cases(exec: Executor<'_, '_>, scope: &TenantScope, page: &Case
 }
 
 
+pub fn check_actor_and_time(actor: &str, now: i64) -> Result<(), CaseStoreError> {
+    check_text("actor", actor, MAX_NAME_CHARS)?;
+    check_time("now", now)
+}
+
+
 /// Applies the action to the snapshot and writes the case and its event in one statement guarded by the snapshot's version.
 pub async fn apply_to_stored(
     exec: Executor<'_, '_>,
@@ -402,9 +408,11 @@ pub async fn apply_to_stored(
     actor: &str,
     now: i64,
 ) -> Result<Stored, CaseStoreError> {
-    check_text("actor", actor, MAX_NAME_CHARS)?;
-    check_time("now", now)?;
-    if stored.case.history.len() >= MAX_HISTORY {
+    check_actor_and_time(actor, now)?;
+    check_text("id", &stored.case.id, MAX_ID_CHARS)?;
+    if stored.case.tenant != tenant_of(scope) {
+        Err(CaseStoreError::TenantMismatch)
+    } else if stored.case.history.len() >= MAX_HISTORY {
         Err(CaseStoreError::Full {
             what: "history",
             limit: MAX_HISTORY,
@@ -419,7 +427,12 @@ pub async fn apply_to_stored(
             "event": event,
             "version": stored.version,
         });
-        let rows = exec(scope.clone(), APPLY_SQL, vec![stored.case.id.clone(), change.to_string()]).await?;
+        let rows = exec(
+            scope.clone(),
+            APPLY_SQL,
+            vec![stored.case.id.clone(), change.to_string(), MAX_HISTORY.to_string()],
+        )
+        .await?;
         let answer = rows.first().ok_or(CaseStoreError::Conflict)?;
         Ok(Stored {
             case,
@@ -438,6 +451,7 @@ pub async fn apply_case_action(
     actor: &str,
     now: i64,
 ) -> Result<Stored, CaseStoreError> {
+    check_actor_and_time(actor, now)?;
     let stored = get_case(exec, scope, id).await?.ok_or(CaseStoreError::NotFound)?;
     apply_to_stored(exec, scope, &stored, action, actor, now).await
 }

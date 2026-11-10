@@ -1,9 +1,9 @@
-use crate::memory::{Db, Forced};
+use crate::memory::{lock, Db, Forced};
 use crate::types::TestResult;
 use crate::{case, executor, force, sent, stored_case, FOUR, NOW, THREE, TWO};
 use cases::error::{CaseStoreError, TransitionError};
 use cases::model::{CaseEvent, CaseEventKind, CaseStatus, Resolution};
-use cases::store::{apply_case_action, apply_to_stored, create_case, get_case, MAX_HISTORY, MAX_NAME_CHARS};
+use cases::store::{apply_case_action, apply_to_stored, create_case, get_case, MAX_HISTORY, MAX_ID_CHARS, MAX_NAME_CHARS};
 use cases::stored::Stored;
 use cases::transition::CaseAction;
 use core_pg::scope::tenant_scope;
@@ -118,5 +118,77 @@ async fn history_actor_and_time_are_bounded_before_sql() -> TestResult {
     force(&db, Forced::Fail);
     let broken = apply_to_stored(&exec, &scope, &calm, CaseAction::Start, "alice", NOW).await;
     assert!(matches!(broken, Err(CaseStoreError::Pg(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_foreign_snapshot_is_refused_before_any_sql() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let foreign = Stored {
+        case: case("other", "c1", NOW),
+        version: 1,
+    };
+    let refused = apply_to_stored(&exec, &scope, &foreign, CaseAction::Start, "alice", NOW).await;
+    assert!(matches!(refused, Err(CaseStoreError::TenantMismatch)));
+    let mut long = Stored {
+        case: case("acme", "c1", NOW),
+        version: 1,
+    };
+    long.case.id = "a".repeat(MAX_ID_CHARS + 1);
+    let too_long = apply_to_stored(&exec, &scope, &long, CaseAction::Start, "alice", NOW).await;
+    assert!(matches!(too_long, Err(CaseStoreError::FieldTooLong { .. })));
+    assert_eq!(sent(&db), 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_stale_snapshot_cannot_push_the_stored_history_past_the_cap() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let event = CaseEvent {
+        kind: CaseEventKind::Started,
+        at: NOW,
+        actor: "a".to_owned(),
+        from: CaseStatus::New,
+        to: CaseStatus::InProgress,
+    };
+    let mut crowded = case("acme", "c1", NOW);
+    crowded.history = vec![event; MAX_HISTORY];
+    lock(&db.tenants).entry("acme".to_owned()).or_default().insert(
+        "c1".to_owned(),
+        crate::memory::Entry {
+            case: crowded,
+            version: 1,
+            alerts: Default::default(),
+        },
+    );
+    let stale = Stored {
+        case: case("acme", "c1", NOW),
+        version: 1,
+    };
+    let refused = apply_to_stored(&exec, &scope, &stale, CaseAction::Start, "alice", NOW).await;
+    assert!(matches!(refused, Err(CaseStoreError::Conflict)));
+    assert_eq!(stored_case(&db, "acme", "c1").map(|case| case.history.len()), Some(MAX_HISTORY));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn apply_case_action_refuses_a_bad_actor_or_time_before_reading() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
+    let before = sent(&db);
+    let nul = apply_case_action(&exec, &scope, "c1", CaseAction::Start, "a\0", NOW).await;
+    assert!(matches!(nul, Err(CaseStoreError::NulByte { .. })));
+    let early = apply_case_action(&exec, &scope, "c1", CaseAction::Start, "alice", -1).await;
+    assert!(matches!(early, Err(CaseStoreError::BadTime { .. })));
+    assert_eq!(sent(&db), before);
     Ok(())
 }
