@@ -18,7 +18,7 @@ pub fn within(field: &'static str, value: u64, min: u64, max: u64) -> Result<(),
     (min..=max)
         .contains(&value)
         .then_some(())
-        .ok_or(CheckError::OutOfRange { field, value, min, max })
+        .ok_or(CheckError::OutOfRange { field, min, max })
 }
 
 
@@ -35,11 +35,9 @@ pub fn text_ok(field: &'static str, value: &str, max: usize) -> Result<(), Check
 
 pub fn all_unique<'a>(field: &'static str, values: impl Iterator<Item = &'a String>) -> Result<(), CheckError> {
     let mut seen = BTreeSet::new();
-    values.into_iter().try_for_each(|value| {
-        seen.insert(value.as_str())
-            .then_some(())
-            .ok_or_else(|| CheckError::Duplicate { field, value: value.clone() })
-    })
+    values
+        .into_iter()
+        .try_for_each(|value| seen.insert(value.as_str()).then_some(()).ok_or(CheckError::Duplicate { field }))
 }
 
 
@@ -50,10 +48,7 @@ pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
     within("timeout_seconds", raw.timeout_seconds, 1, MAX_TIMEOUT_SECONDS)?;
     (raw.timeout_seconds <= raw.interval_seconds)
         .then_some(())
-        .ok_or(CheckError::TimeoutAboveInterval {
-            timeout: raw.timeout_seconds,
-            interval: raw.interval_seconds,
-        })?;
+        .ok_or(CheckError::TimeoutAboveInterval)?;
     let consecutive_failures = FailureRun::try_from(raw.consecutive_failures)?;
     count_within("locations", raw.locations.len(), 1, MAX_LOCATIONS)?;
     raw.locations
