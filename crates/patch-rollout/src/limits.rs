@@ -9,6 +9,10 @@ pub const DEFAULT_MAX_GROUPS: usize = 1024;
 pub const DEFAULT_MAX_DEVICES: usize = 100_000;
 
 
+/// The longest window a caller may pass to signing: one week.
+pub const MAX_WINDOW_SECONDS: u64 = 604_800;
+
+
 pub const PERCENT: usize = 100;
 
 
