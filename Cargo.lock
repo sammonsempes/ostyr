@@ -3256,11 +3256,23 @@ dependencies = [
 name = "metrics-ingest"
 version = "0.0.0"
 dependencies = [
+ "core-config",
+ "core-pg",
+ "log",
  "opentelemetry-proto",
  "prost",
+ "rcgen",
+ "serde",
  "serde_json",
+ "siem-ingest",
  "siem-schema",
+ "tempfile",
+ "thiserror 2.0.21",
  "time",
+ "tracing",
+ "tracing-subscriber",
+ "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]
