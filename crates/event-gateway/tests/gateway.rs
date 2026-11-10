@@ -32,6 +32,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
+use tokio::net::TcpSocket;
 use tokio::time::sleep;
 use tracing::level_filters::{LevelFilter, STATIC_MAX_LEVEL};
 
@@ -198,8 +199,11 @@ fn rig(text: &str) -> Result<Rig, Box<dyn Error + Send + Sync>> {
 }
 
 
-fn dead_port() -> Result<u16, Box<dyn Error + Send + Sync>> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+fn dead_port() -> Result<(TcpSocket, u16), Box<dyn Error + Send + Sync>> {
+    let socket = TcpSocket::new_v4()?;
+    socket.bind("127.0.0.1:0".parse()?)?;
+    let port = socket.local_addr()?.port();
+    Ok((socket, port))
 }
 
 
@@ -397,8 +401,9 @@ async fn an_event_that_is_not_exactly_one_object_refuses_the_whole_batch() -> Te
 
 #[tokio::test]
 async fn a_dead_server_fails_the_batch_then_backs_off() -> TestResult {
+    let (_held, port) = dead_port()?;
     let rig = rig(&yaml(
-        dead_port()?,
+        port,
         &format!("backoff_initial_ms: {LONG_BACKOFF_MS}\nbackoff_max_ms: {LONG_BACKOFF_MS}\n"),
     ))?;
     let agent = identity("tenant-a", "agent-1");
@@ -414,7 +419,8 @@ async fn a_dead_server_fails_the_batch_then_backs_off() -> TestResult {
 #[tokio::test]
 async fn the_gateway_reconnects_when_the_server_comes_back_through_a_reload() -> TestResult {
     let stub = start_stub(None, |_| ())?;
-    let rig = rig(&yaml(dead_port()?, "backoff_initial_ms: 1\nbackoff_max_ms: 1\n"))?;
+    let (_held, port) = dead_port()?;
+    let rig = rig(&yaml(port, "backoff_initial_ms: 1\nbackoff_max_ms: 1\n"))?;
     let agent = identity("tenant-a", "agent-1");
     assert!(publish_batch(&rig.gateway, &agent, &batch(1, &["{}"])).await.is_err());
     fs::write(&rig.path, yaml(stub.port, "backoff_initial_ms: 1\nbackoff_max_ms: 1\n"))?;
@@ -476,7 +482,8 @@ async fn a_server_that_accepts_and_never_speaks_hits_the_deadline_and_frees_the_
 
 #[tokio::test(start_paused = true)]
 async fn the_in_flight_cap_refuses_at_once_and_a_waiting_batch_ends_at_the_deadline() -> TestResult {
-    let rig = rig(&yaml_with(dead_port()?, (GENEROUS_MS, GENEROUS_MS), "max_in_flight_batches: 1\n"))?;
+    let (_held, port) = dead_port()?;
+    let rig = rig(&yaml_with(port, (GENEROUS_MS, GENEROUS_MS), "max_in_flight_batches: 1\n"))?;
     let held = rig.gateway.link.lock().await;
     let waiting_gateway = Arc::clone(&rig.gateway);
     let waiting = tokio::spawn(async move { publish_batch(&waiting_gateway, &identity("tenant-a", "agent-1"), &batch(1, &["{}"])).await });
@@ -823,8 +830,9 @@ async fn every_refusal_kind_increments_its_own_counter() -> TestResult {
 
 #[tokio::test]
 async fn a_backing_off_gateway_counts_the_refusal_and_a_nats_failure_does_not() -> TestResult {
+    let (_held, port) = dead_port()?;
     let rig = rig(&yaml(
-        dead_port()?,
+        port,
         &format!("backoff_initial_ms: {LONG_BACKOFF_MS}\nbackoff_max_ms: {LONG_BACKOFF_MS}\n"),
     ))?;
     let agent = identity("tenant-a", "agent-1");
@@ -844,7 +852,8 @@ async fn a_backing_off_gateway_counts_the_refusal_and_a_nats_failure_does_not() 
 
 #[tokio::test(start_paused = true)]
 async fn a_batch_refused_as_busy_is_counted() -> TestResult {
-    let rig = rig(&yaml_with(dead_port()?, (GENEROUS_MS, GENEROUS_MS), "max_in_flight_batches: 1\n"))?;
+    let (_held, port) = dead_port()?;
+    let rig = rig(&yaml_with(port, (GENEROUS_MS, GENEROUS_MS), "max_in_flight_batches: 1\n"))?;
     let held = rig.gateway.link.lock().await;
     let waiting_gateway = Arc::clone(&rig.gateway);
     let waiting = tokio::spawn(async move { publish_batch(&waiting_gateway, &identity("tenant-a", "agent-1"), &batch(1, &["{}"])).await });
