@@ -19,7 +19,7 @@ use core_export::types::BoxError;
 use core_export::webhook::RetryPolicy;
 use std::fs;
 use std::io;
-use std::net::{TcpListener, UdpSocket};
+use std::net::UdpSocket;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -269,10 +269,9 @@ fn a_secret_that_cannot_be_resolved_is_an_error() -> TestResult {
 #[test]
 fn a_saturated_buffer_prints_the_alert() -> TestResult {
     let dir = tempdir()?;
-    let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let config = parse_export(
         &webhook_yaml(
-            &format!("http://127.0.0.1:{closed}/h"),
+            "http://127.0.0.1:1/h",
             &dir.path().join("buf"),
             &format!("  buffer_max_bytes: {BUFFER_TOO_SMALL}\n"),
         ),
