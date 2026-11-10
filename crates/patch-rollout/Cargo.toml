@@ -6,6 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+agent-command = { version = "0.0.0", path = "../agent-command" }
+getrandom = "0.4.3"
 core-config = { version = "0.0.0", path = "../core-config" }
 response-breakers = { version = "0.0.0", path = "../response-breakers" }
 serde = { version = "1", features = ["derive"] }
@@ -13,6 +15,7 @@ thiserror = "2"
 time = "0.3"
 
 [dev-dependencies]
+ed25519-dalek = "3"
 tempfile = "3"
 time = { version = "0.3", features = ["macros"] }
 

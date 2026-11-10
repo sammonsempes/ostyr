@@ -1,3 +1,4 @@
+use agent_command::error::SignError;
 use core_config::error::ConfigError;
 use thiserror::Error;
 
@@ -40,4 +41,32 @@ pub enum RolloutError {
     DuplicateRingState { ring: String },
     #[error("two states were given for the device `{device}`")]
     DuplicateDeviceState { device: String },
+}
+
+
+#[derive(Debug, Error)]
+pub enum StepError {
+    #[error("the reboot deadline is outside the command lifetime plus the window")]
+    DeadlineOutOfBounds,
+    #[error("cannot draw a nonce: {0}")]
+    Nonce(#[source] getrandom::Error),
+    #[error("cannot sign: {0}")]
+    Sign(#[source] SignError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum CommandError {
+    #[error(transparent)]
+    Rollout(#[from] RolloutError),
+    #[error("the clock is before the Unix epoch")]
+    ClockBeforeEpoch,
+    #[error("the command lifetime must be between 1 and {max} seconds")]
+    LifetimeOutOfBounds { max: u64 },
+    #[error("stopped after signing {signed} commands: {source}")]
+    Batch {
+        signed: usize,
+        #[source]
+        source: StepError,
+    },
 }
