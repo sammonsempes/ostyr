@@ -163,6 +163,7 @@ pub fn single_admission(state: &SharedState) -> Admission {
     let (_never_evicted, evicted) = oneshot::channel();
     Admission {
         connections: Arc::new(Semaphore::new(settings_of(state).max_total_connections)),
+        capacity: settings_of(state).max_total_connections,
         evicted,
     }
 }

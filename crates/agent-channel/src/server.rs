@@ -52,6 +52,7 @@ pub async fn serve(
                     if let Some(signal) = evicted {
                         let admission = Admission {
                             connections: Arc::clone(&connections),
+                            capacity,
                             evicted: signal,
                         };
                         let connection = run_connection(
@@ -169,7 +170,7 @@ pub async fn run_connection(
         let _total = admission
             .connections
             .try_acquire_owned()
-            .map_err(|_refused| connection_capped(&state, settings.max_total_connections))?;
+            .map_err(|_refused| connection_capped(&state, settings.max_total_connections, admission.capacity))?;
         let _connection = open_slot(&state, &identity, SlotKind::Connection).map_err(|_refused| too_many_connections(&identity))?;
         let first_request = Arc::new(Notify::new());
         let noted = Arc::clone(&first_request);
@@ -241,9 +242,9 @@ pub fn log_keepalive(outcome: io::Result<()>) {
 }
 
 
-pub fn connection_capped(state: &ServerState, limit: usize) -> ChannelError {
+pub fn connection_capped(state: &ServerState, snapshot_limit: usize, limit: usize) -> ChannelError {
     bump(&state.counters.connections_capped);
-    tracing::warn!(limit, "total connection cap reached, connection dropped");
+    tracing::warn!(limit, snapshot_limit, "total connection cap reached, connection dropped");
     ChannelError::ConnectionCapped { limit }
 }
 

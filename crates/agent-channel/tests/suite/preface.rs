@@ -82,13 +82,13 @@ async fn a_swap_during_the_handshake_does_not_change_the_connection_bounds() -> 
     let paths = server_paths(dir.path(), &platform)?;
     let server = start_single_state(&paths, empty_revocation(&paths)?, state.clone()).await?;
     let agent = client_paths(dir.path(), "agent", &platform, &platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
-    let tcp = TcpStream::connect(server.address).await?;
-    tokio::task::yield_now().await;
+    let mut silent = silent_client(server.address, &agent).await?;
     state
         .settings
         .store(Arc::new(settings(|base| base.first_request_timeout_seconds = SWAPPED_SECONDS)));
-    let connector = TlsConnector::from(client_config(&agent)?);
-    let _silent = connector.connect(ServerName::try_from(SERVER_NAME)?, tcp).await?;
+    silent.write_all(HTTP2_PREFACE).await?;
+    silent.write_all(&EMPTY_SETTINGS_FRAME).await?;
+    silent.flush().await?;
     tokio::time::pause();
     let served = awaited(server.handle).await?;
     assert!(matches!(served, Err(ChannelError::FirstRequestTimeout { seconds: SNAPSHOT_SECONDS })));
