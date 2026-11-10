@@ -23,7 +23,12 @@ for target in "$datastore_user@$datastore_address" "$client_user@$client_address
     ssh -n "${ssh_options[@]}" "$target" "printf '%s\n' '$hosts_entries' | sudo tee -a /etc/hosts >/dev/null"
 done
 
-ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo /usr/local/sbin/ostyr-datastore-provision '$DATASTORE_DOMAIN' '$datastore_address'"
+ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo /usr/local/sbin/ostyr-datastore-provision '$DATASTORE_DOMAIN' '$datastore_address'" ||
+    die "ostyr-datastore-provision failed on the datastore VM (see: journalctl on $datastore_address)"
+for provisioned in /etc/ostyr-lab/s3-access-key /etc/ostyr-lab/s3-secret-key; do
+    ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo test -s $provisioned" ||
+        die "$provisioned is missing after provisioning: the datastore base image predates Garage (run lab/images/build.sh datastore) or the Garage step failed"
+done
 
 transfer_dir="$lab_state/client-files"
 mkdir -p "$transfer_dir"
