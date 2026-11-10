@@ -153,6 +153,14 @@ pub struct ScoredFinding {
 }
 
 
+/// A scored finding on a named inventory asset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetFinding {
+    pub asset: String,
+    pub scored: ScoredFinding,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EolEntry {
