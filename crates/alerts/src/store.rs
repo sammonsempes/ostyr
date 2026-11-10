@@ -31,6 +31,18 @@ pub const NEXT_SQL: &str = "SELECT id, rule_id, rule_title, severity, event_time
                             AND (created, id) < ($2::text::bigint, $3::text) ORDER BY alerts.created DESC, alerts.id DESC LIMIT $4::text::bigint";
 
 
+pub const FIRST_ASC_SQL: &str =
+    "SELECT id, rule_id, rule_title, severity, event_time, created::text, COALESCE(host_name, ''), COALESCE(user_name, ''), \
+                                 event_ids::text, summary, summary_truncated::text, summary_original_bytes::text FROM alerts WHERE tenant = $1 \
+                                 ORDER BY alerts.created ASC, alerts.id ASC LIMIT $2::text::bigint";
+
+
+pub const NEXT_ASC_SQL: &str =
+    "SELECT id, rule_id, rule_title, severity, event_time, created::text, COALESCE(host_name, ''), COALESCE(user_name, ''), \
+                                event_ids::text, summary, summary_truncated::text, summary_original_bytes::text FROM alerts WHERE tenant = $1 \
+                                AND (created, id) > ($2::text::bigint, $3::text) ORDER BY alerts.created ASC, alerts.id ASC LIMIT $4::text::bigint";
+
+
 pub const GET_SQL: &str = "SELECT id, rule_id, rule_title, severity, event_time, created::text, COALESCE(host_name, ''), COALESCE(user_name, ''), \
                            event_ids::text, summary, summary_truncated::text, summary_original_bytes::text FROM alerts WHERE tenant = $1 \
                            AND id = $2::text";
@@ -343,11 +355,28 @@ pub async fn insert_alerts(exec: Executor<'_, '_>, scope: &TenantScope, alerts: 
 
 /// Newest first; the keyset is (created, id) and the page holds at most `MAX_PAGE_SIZE` alerts.
 pub async fn list_alerts(exec: Executor<'_, '_>, scope: &TenantScope, page: &Page) -> Result<AlertPage, StoreError> {
+    read_page(exec, scope, page, FIRST_SQL, NEXT_SQL).await
+}
+
+
+/// Oldest first, strictly after the cursor: the read side of a poller that persists its position.
+pub async fn list_alerts_oldest(exec: Executor<'_, '_>, scope: &TenantScope, page: &Page) -> Result<AlertPage, StoreError> {
+    read_page(exec, scope, page, FIRST_ASC_SQL, NEXT_ASC_SQL).await
+}
+
+
+pub async fn read_page(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    page: &Page,
+    first_sql: &'static str,
+    next_sql: &'static str,
+) -> Result<AlertPage, StoreError> {
     check_page(page)?;
     let fetch = (page.size + 1).to_string();
     let rows = match &page.after {
-        None => exec(scope.clone(), FIRST_SQL, vec![fetch]).await?,
-        Some(cursor) => exec(scope.clone(), NEXT_SQL, vec![cursor.created_micros.to_string(), cursor.id.clone(), fetch]).await?,
+        None => exec(scope.clone(), first_sql, vec![fetch]).await?,
+        Some(cursor) => exec(scope.clone(), next_sql, vec![cursor.created_micros.to_string(), cursor.id.clone(), fetch]).await?,
     };
     let mut alerts = rows
         .iter()

@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
 base64 = "0.22"
 cap-std = "3"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }

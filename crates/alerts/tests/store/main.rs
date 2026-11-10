@@ -6,10 +6,10 @@ use alerts::error::StoreError;
 use alerts::id::{alert_id, is_alert_id, ID_HEX_LENGTH};
 use alerts::model::{Alert, Cursor, Page, Severity, Summary, SEVERITY_COLUMN};
 use alerts::store::{
-    check_alert, check_page, format_cursor, get_alert, insert_alerts, list_alerts, parse_cursor, summarise, CREATED_COLUMN, EVENT_IDS_COLUMN,
-    FIRST_SQL, GET_SQL, INSERT_SQL, MAX_ALERTS_PER_INSERT, MAX_CREATED_MICROS, MAX_ENTITY_CHARS, MAX_EVENT_IDS, MAX_EVENT_ID_CHARS,
-    MAX_EVENT_TIME_CHARS, MAX_PAGE_SIZE, MAX_RULE_ID_CHARS, MAX_SUMMARY_BYTES, MAX_TITLE_CHARS, MIGRATIONS, MIGRATION_NAMESPACE, NEXT_SQL,
-    ORIGINAL_BYTES_COLUMN, TRUNCATED_COLUMN,
+    check_alert, check_page, format_cursor, get_alert, insert_alerts, list_alerts, list_alerts_oldest, parse_cursor, summarise, CREATED_COLUMN,
+    EVENT_IDS_COLUMN, FIRST_ASC_SQL, FIRST_SQL, GET_SQL, INSERT_SQL, MAX_ALERTS_PER_INSERT, MAX_CREATED_MICROS, MAX_ENTITY_CHARS, MAX_EVENT_IDS,
+    MAX_EVENT_ID_CHARS, MAX_EVENT_TIME_CHARS, MAX_PAGE_SIZE, MAX_RULE_ID_CHARS, MAX_SUMMARY_BYTES, MAX_TITLE_CHARS, MIGRATIONS, MIGRATION_NAMESPACE,
+    NEXT_ASC_SQL, NEXT_SQL, ORIGINAL_BYTES_COLUMN, TRUNCATED_COLUMN,
 };
 use alerts::types::{Row, RowFuture};
 use core_pg::error::PgError;
@@ -760,13 +760,19 @@ fn the_length_is_checked_before_the_nul_scan() -> TestResult {
 
 #[test]
 fn both_list_statements_order_by_the_table_columns() -> TestResult {
-    [FIRST_SQL, NEXT_SQL].iter().try_for_each(|sql| -> TestResult {
-        assert!(sql.contains("ORDER BY alerts.created DESC, alerts.id DESC LIMIT"), "{sql}");
-        let output = sql.split(" FROM ").next().ok_or("no select list")?;
-        assert!(!output.contains(" AS created") && !output.contains(" AS id"), "{sql}");
-        assert!(output.contains("created::text,"));
-        Ok(())
-    })
+    [FIRST_SQL, NEXT_SQL, FIRST_ASC_SQL, NEXT_ASC_SQL]
+        .iter()
+        .try_for_each(|sql| -> TestResult {
+            assert!(
+                sql.contains("ORDER BY alerts.created DESC, alerts.id DESC LIMIT")
+                    || sql.contains("ORDER BY alerts.created ASC, alerts.id ASC LIMIT"),
+                "{sql}"
+            );
+            let output = sql.split(" FROM ").next().ok_or("no select list")?;
+            assert!(!output.contains(" AS created") && !output.contains(" AS id"), "{sql}");
+            assert!(output.contains("created::text,"));
+            Ok(())
+        })
 }
 
 
@@ -778,5 +784,74 @@ fn the_memory_store_refuses_a_document_with_missing_fields() -> TestResult {
         .err()
         .ok_or("accepted")?;
     assert!(matches!(error, PgError::Server { .. }));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_oldest_first_read_pages_every_alert_once_in_order() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    let batch: Vec<Alert> = (0..SEVEN)
+        .map(|index| alert("acme", "r", &[&format!("e{index}")], BASE_TIME + (index as u64 / TWO as u64)))
+        .collect();
+    insert_alerts(&exec, &scope, &batch).await?;
+    insert_alerts(&exec, &other, &[alert("other", "r", &["x"], BASE_TIME)]).await?;
+    let first = list_alerts_oldest(
+        &exec,
+        &scope,
+        &Page {
+            after: None,
+            size: SMALL_PAGE,
+        },
+    )
+    .await?;
+    assert_eq!(first.alerts.len(), SMALL_PAGE);
+    assert!(first.alerts.windows(TWO).all(|pair| {
+        pair.first()
+            .zip(pair.last())
+            .is_some_and(|(left, right)| (left.created_micros, &left.id) < (right.created_micros, &right.id))
+    }));
+    let second = list_alerts_oldest(
+        &exec,
+        &scope,
+        &Page {
+            after: first.next.clone(),
+            size: SMALL_PAGE,
+        },
+    )
+    .await?;
+    let third = list_alerts_oldest(
+        &exec,
+        &scope,
+        &Page {
+            after: second.next.clone(),
+            size: SMALL_PAGE,
+        },
+    )
+    .await?;
+    assert!(third.next.is_none());
+    let mut seen: Vec<String> = [first, second, third]
+        .iter()
+        .flat_map(|page| page.alerts.iter().map(|found| found.id.clone()))
+        .collect();
+    assert_eq!(seen.len(), SEVEN);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), SEVEN);
+    let foreign = list_alerts_oldest(
+        &exec,
+        &other,
+        &Page {
+            after: None,
+            size: SMALL_PAGE,
+        },
+    )
+    .await?;
+    assert_eq!(foreign.alerts.len(), 1);
+    let sqls: Vec<&str> = lock(&db.statements).iter().map(|(_tenant, sql)| *sql).collect();
+    assert!(sqls.contains(&FIRST_ASC_SQL) && sqls.contains(&NEXT_ASC_SQL));
     Ok(())
 }

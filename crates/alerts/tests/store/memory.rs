@@ -1,5 +1,5 @@
 use crate::types::Table;
-use alerts::store::{GET_SQL, INSERT_SQL, NEXT_SQL};
+use alerts::store::{FIRST_ASC_SQL, GET_SQL, INSERT_SQL, NEXT_ASC_SQL, NEXT_SQL};
 use alerts::types::Row;
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -83,7 +83,8 @@ pub fn insert(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgError>
 
 pub fn select(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, PgError> {
     let limit = params.last().ok_or_else(malformed)?.parse::<usize>().map_err(|_source| malformed())?;
-    let cursor = if sql == NEXT_SQL {
+    let ascending = sql == FIRST_ASC_SQL || sql == NEXT_ASC_SQL;
+    let cursor = if sql == NEXT_SQL || sql == NEXT_ASC_SQL {
         let created = params.first().ok_or_else(malformed)?.parse::<u64>().map_err(|_source| malformed())?;
         Some((created, params.get(1).ok_or_else(malformed)?.clone()))
     } else {
@@ -91,9 +92,21 @@ pub fn select(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, P
     };
     let mut entries: Vec<(u64, String, Row)> = table.iter().map(|(id, (created, row))| (*created, id.clone(), row.clone())).collect();
     entries.sort_by(|left, right| (right.0, &right.1).cmp(&(left.0, &left.1)));
+    if ascending {
+        entries.reverse();
+    }
     Ok(entries
         .into_iter()
-        .filter(|(created, id, _row)| cursor.as_ref().is_none_or(|position| (*created, id.clone()) < *position))
+        .filter(|(created, id, _row)| {
+            cursor.as_ref().is_none_or(|position| {
+                let here = (*created, id.clone());
+                if ascending {
+                    here > *position
+                } else {
+                    here < *position
+                }
+            })
+        })
         .take(limit)
         .map(|(_created, _id, row)| row)
         .collect())
