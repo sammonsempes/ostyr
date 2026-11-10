@@ -1,7 +1,10 @@
+#[path = "common/refuse.rs"]
+mod refuse;
 #[path = "common/types.rs"]
 mod types;
 
 
+use refuse::refusing;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -28,7 +31,8 @@ fn connects_to_an_open_port() -> TestResult {
 
 #[test]
 fn a_closed_port_is_refused() -> TestResult {
-    let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let refused = refusing()?;
+    let closed = refused.address;
     let error = tcp_connect(closed, LEFT).err().ok_or("expected a refusal")?;
     assert_eq!(error.kind(), ErrorKind::ConnectionRefused);
     Ok(())
