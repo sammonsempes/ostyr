@@ -148,27 +148,39 @@ pub fn forwarded_address(headers: &HeaderMap) -> Option<IpAddr> {
 
 
 pub fn forwarded_for(text: &str) -> Option<IpAddr> {
-    match text
-        .split(';')
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(name, _)| name.trim().eq_ignore_ascii_case(FORWARDED_ELEMENT))
+    let pairs = text.split(';').map(|pair| pair.split_once('=')).collect::<Option<Vec<_>>>()?;
+    match pairs
+        .into_iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(FORWARDED_ELEMENT))
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [(_, node)] => forwarded_node(node.trim()),
+        [(_, node)] => forwarded_node(node),
         _ => None,
     }
 }
 
 
-/// An IPv4 literal or a bracketed IPv6 literal, optionally in quotes; a port, a name, `unknown` and `_obfuscated` all fail the parse.
+/// An IPv4 literal (quotes optional) or a quoted bracketed IPv6 literal; a port, a name, `unknown`, `_obfuscated` and whitespace all fail the parse.
 pub fn forwarded_node(node: &str) -> Option<IpAddr> {
-    let unquoted = node.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')).unwrap_or(node);
-    let parsed = match unquoted.strip_prefix('[').and_then(|inner| inner.strip_suffix(']')) {
+    let quoted = node.strip_prefix('"').and_then(|inner| inner.strip_suffix('"'));
+    let parsed = match quoted.and_then(|inner| inner.strip_prefix('[')).and_then(|inner| inner.strip_suffix(']')) {
         Some(inner) => inner.parse::<Ipv6Addr>().map(IpAddr::V6),
-        None => unquoted.parse::<Ipv4Addr>().map(IpAddr::V4),
+        None => quoted.unwrap_or(node).parse::<Ipv4Addr>().map(IpAddr::V4),
     };
     parsed.inspect_err(|error| tracing::debug!(%error, "malformed Forwarded address")).ok()
+}
+
+
+/// Counts an ignored forwarding header and warns when the count is a power of two (1, 2, 4, 8, ...), so the log stays bounded.
+pub fn note_ignored_forwarding(app: &ApiState) -> u64 {
+    let count = app.ignored_forwarding.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if count.is_power_of_two() {
+        tracing::dispatcher::with_default(&app.dispatch, || {
+            tracing::warn!(count, "forwarding headers from an untrusted peer ignored");
+        });
+    }
+    count
 }
 
 
@@ -184,7 +196,7 @@ pub fn client_source(app: &ApiState, peer: SocketAddr, headers: &HeaderMap) -> R
             .ok_or(ApiError::BadRequest)
     } else {
         if headers.contains_key(FORWARDED) || headers.contains_key(X_FORWARDED_FOR) {
-            app.ignored_forwarding.fetch_add(1, Ordering::Relaxed);
+            note_ignored_forwarding(app);
         }
         Ok(ClientSource {
             address: peer,
