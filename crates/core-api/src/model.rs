@@ -14,6 +14,7 @@ use core_auth::service::State;
 use core_auth::types::{Clock, CompromisedSet, PendingMap, RandomFn, RoleCatalog, StoreKey};
 use core_config::model::ModuleConfig;
 use core_config::reload::ReloadEngine;
+use ipnet::IpNet;
 use rustls::ServerConfig;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -51,7 +52,22 @@ pub struct ApiState {
     pub limits: SharedLimits,
     pub oidc: ArcSwapOption<OidcRuntime>,
     pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
+    pub forwarders: ArcSwap<Vec<IpNet>>,
+    pub ignored_forwarding: AtomicU64,
 }
+
+
+/// The address a request is attributed to: the TCP peer, or the `Forwarded` address when the peer is a trusted forwarder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientSource {
+    pub address: SocketAddr,
+    pub forwarded_by: Option<IpAddr>,
+}
+
+
+/// Request extension set by `edge` when a trusted forwarder supplied the source: the forwarder's own address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardedBy(pub IpAddr);
 
 
 /// The module name and tenant every audit record and log line carries; replaced whole at a reload. `generation` grows only when the name or tenant really changes.
@@ -169,6 +185,7 @@ pub struct ApiSettings {
     pub compromised: Arc<CompromisedSet>,
     pub key: Arc<StoreKey>,
     pub fingerprints: BTreeMap<String, String>,
+    pub forwarders: Arc<Vec<IpNet>>,
     pub rotation_failed: AtomicBool,
 }
 
@@ -248,6 +265,7 @@ pub struct Exchange {
     pub state_changing: bool,
     pub sensitive: bool,
     pub source: String,
+    pub forwarded_by: Option<String>,
     pub status: StatusCode,
 }
 

@@ -1,12 +1,12 @@
 use crate::failure::{auth_failure, error_response};
-use crate::model::{ApiError, ApiState, Authenticated, Decision, Exchange, Limits, RequestId, Requirement, Window};
+use crate::model::{ApiError, ApiState, Authenticated, ClientSource, Decision, Exchange, ForwardedBy, Limits, RequestId, Requirement, Window};
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
 use crate::state::{lock_auth, refresh_accounts, session_revoked};
 use crate::types::SharedState;
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::header::{
-    HeaderName, AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
+    HeaderName, AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, FORWARDED, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
     X_FRAME_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -26,7 +26,8 @@ use data_encoding::HEXLOWER;
 use http_body_util::LengthLimitError;
 use secrecy::SecretString;
 use std::error::Error;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::Ordering;
 use std::sync::PoisonError;
 use std::time::Instant;
 use time::{Duration, OffsetDateTime};
@@ -56,7 +57,13 @@ pub const BEARER_PREFIX: &[u8] = b"Bearer ";
 pub const ACTION_REQUEST: &str = "api.request";
 
 
-pub const REQUEST_DECLARED_KEYS: [&str; 2] = ["source", "status"];
+pub const REQUEST_DECLARED_KEYS: [&str; 3] = ["source", "status", "forwarded_by"];
+
+
+pub const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+
+
+pub const FORWARDED_ELEMENT: &str = "for";
 
 
 pub const LOG_TARGET: &str = "core_api::request";
@@ -131,23 +138,84 @@ pub fn log_request(app: &ApiState, id: &str, method: &str, path: &str, source: I
 }
 
 
+/// The address in one `Forwarded: for=<ip>` header: exactly one header, no list, exactly one `for` pair, an IPv4 or bracketed IPv6 literal without port.
+pub fn forwarded_address(headers: &HeaderMap) -> Option<IpAddr> {
+    match headers.get_all(FORWARDED).iter().collect::<Vec<_>>().as_slice() {
+        [value] => value.to_str().ok().filter(|text| !text.contains(',')).and_then(forwarded_for),
+        _ => None,
+    }
+}
+
+
+pub fn forwarded_for(text: &str) -> Option<IpAddr> {
+    match text
+        .split(';')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case(FORWARDED_ELEMENT))
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [(_, node)] => forwarded_node(node.trim()),
+        _ => None,
+    }
+}
+
+
+/// An IPv4 literal or a bracketed IPv6 literal, optionally in quotes; a port, a name, `unknown` and `_obfuscated` all fail the parse.
+pub fn forwarded_node(node: &str) -> Option<IpAddr> {
+    let unquoted = node.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')).unwrap_or(node);
+    let parsed = match unquoted.strip_prefix('[').and_then(|inner| inner.strip_suffix(']')) {
+        Some(inner) => inner.parse::<Ipv6Addr>().map(IpAddr::V6),
+        None => unquoted.parse::<Ipv4Addr>().map(IpAddr::V4),
+    };
+    parsed.inspect_err(|error| tracing::debug!(%error, "malformed Forwarded address")).ok()
+}
+
+
+/// The source of a request: the TCP peer, unless the peer is a trusted forwarder, which must then name the client (else 400, never its own address).
+pub fn client_source(app: &ApiState, peer: SocketAddr, headers: &HeaderMap) -> Result<ClientSource, ApiError> {
+    let canonical = peer.ip().to_canonical();
+    if app.forwarders.load().iter().any(|network| network.contains(&canonical)) {
+        forwarded_address(headers)
+            .map(|address| ClientSource {
+                address: SocketAddr::new(address, peer.port()),
+                forwarded_by: Some(peer.ip()),
+            })
+            .ok_or(ApiError::BadRequest)
+    } else {
+        if headers.contains_key(FORWARDED) || headers.contains_key(X_FORWARDED_FOR) {
+            app.ignored_forwarding.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(ClientSource {
+            address: peer,
+            forwarded_by: None,
+        })
+    }
+}
+
+
 pub async fn edge(State(app): State<SharedState>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut request: Request, next: Next) -> Response {
     let started = Instant::now();
     let method = request.method().to_string();
     let path = request.uri().path().to_owned();
-    let (id, mut response) = match request_id(request.headers(), app.random) {
-        Ok(id) => {
+    let (id, source, mut response) = match (request_id(request.headers(), app.random), client_source(&app, peer, request.headers())) {
+        (Ok(id), Ok(client)) => {
             request.extensions_mut().insert(RequestId(id.clone()));
+            request.extensions_mut().insert(ConnectInfo(client.address));
+            client.forwarded_by.into_iter().for_each(|forwarder| {
+                request.extensions_mut().insert(ForwardedBy(forwarder));
+            });
             let response = next.run(request).await;
-            (id, response)
+            (id, client.address, response)
         }
-        Err(error) => {
+        (Ok(id), Err(error)) => (id, peer, error_response(&error)),
+        (Err(error), _) => {
             tracing::warn!(%error, "request id generation failed");
-            (UNAVAILABLE_ID.to_owned(), error_response(&ApiError::Internal))
+            (UNAVAILABLE_ID.to_owned(), peer, error_response(&ApiError::Internal))
         }
     };
     decorate(response.headers_mut(), &id);
-    log_request(&app, &id, &method, &path, peer.ip(), response.status(), started.elapsed());
+    log_request(&app, &id, &method, &path, source.ip(), response.status(), started.elapsed());
     response
 }
 
@@ -326,6 +394,7 @@ pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditEr
                     ("status".to_owned(), exchange.status.as_u16().to_string()),
                 ]
                 .into_iter()
+                .chain(exchange.forwarded_by.iter().map(|by| ("forwarded_by".to_owned(), bounded_value(by))))
                 .collect(),
             },
             &REQUEST_DECLARED_KEYS,
@@ -348,6 +417,7 @@ pub async fn guard(
     let rule = app.access.get(&route);
     let decision = decide(&app, rule.map(|found| &found.requirement), bearer_token(request.headers()), (app.clock)());
     let state_changing = !request.method().is_safe();
+    let forwarded_by = request.extensions().get::<ForwardedBy>().map(|found| found.0);
     let response = match decision.error {
         Some(error) => error_response(&error),
         None => {
@@ -364,6 +434,7 @@ pub async fn guard(
         state_changing,
         sensitive: rule.is_some_and(|found| found.sensitive),
         source: rate_key(peer.ip()).to_string(),
+        forwarded_by: forwarded_by.map(|by| by.to_string()),
         status: response.status(),
     };
     match audit_exchange(&app, &exchange) {

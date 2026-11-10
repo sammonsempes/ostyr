@@ -1,4 +1,4 @@
-use crate::config::api_config;
+use crate::config::{api_config, forwarders};
 use crate::error::StartupError;
 use crate::model::{ApiConfig, ApiIdentity, ApiSettings, ApiState, Bound, ListenerSetup, PreparedAudit, PreparedKey, Rewatch, Sockets, Watching};
 use crate::oidc::{fingerprint_salt, load_oidc};
@@ -76,6 +76,7 @@ pub fn key_fingerprint(key: &StoreKey) -> Result<String, StartupError> {
 /// Reads and checks every file the configuration points at, so a swap can no longer fail; each digest is of the bytes that were parsed.
 pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError> {
     let config = api_config(&module)?;
+    let trusted = forwarders(&module)?;
     check_transport(config.address, config.tls.as_ref())?;
     let loaded_tls = config.tls.as_ref().map(load_tls).transpose()?;
     let oidc = config
@@ -108,6 +109,7 @@ pub fn build_settings(module: ModuleConfig) -> Result<ApiSettings, StartupError>
         compromised: Arc::new(list),
         key,
         fingerprints,
+        forwarders: Arc::new(trusted),
         rotation_failed: AtomicBool::new(false),
     })
 }
@@ -568,7 +570,7 @@ pub fn subscribers(
     context: ReloadContext,
     log: Option<LogLevelHandle>,
 ) -> Vec<Subscriber<ApiSettings>> {
-    let (for_limits, for_oidc, for_list) = (state.clone(), state.clone(), state.clone());
+    let (for_limits, for_oidc, for_list, for_forwarders) = (state.clone(), state.clone(), state.clone(), state.clone());
     let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
     let (store_context, identity_context, key_context) = (context.clone(), context.clone(), context.clone());
     let (key_state, key_apply_state, identity_state) = (state.clone(), state.clone(), state.clone());
@@ -598,6 +600,9 @@ pub fn subscribers(
                 .iter()
                 .flat_map(|bound| bound.tls.iter().zip(settings.tls.iter()))
                 .for_each(|(live, next)| live.reload_from_config(Arc::clone(next)));
+        }),
+        section("forwarders", move |settings| {
+            for_forwarders.forwarders.store(Arc::clone(&settings.forwarders))
         }),
         section("oidc", move |settings| apply_oidc(&for_oidc, settings)),
         section("compromised", move |settings| {

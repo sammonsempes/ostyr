@@ -319,6 +319,7 @@ pub async fn run_module(
                 oidc: settings.oidc.clone(),
             };
             let state: SharedState = Arc::new(build_state(&config, &inputs, extra_access, extra_documents)?);
+            state.forwarders.store(Arc::clone(&settings.forwarders));
             let tls = settings.tls.clone().map(RustlsConfig::from_config);
             let setup = ListenerSetup {
                 listener: listener.clone(),

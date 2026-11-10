@@ -15,6 +15,7 @@ core-auth = { path = "../core-auth" }
 core-config = { path = "../core-config" }
 data-encoding = "2.11.1"
 http-body-util = "0.1"
+ipnet = "2"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 openidconnect = { version = "4.1.0", default-features = false, features = ["ureq"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
