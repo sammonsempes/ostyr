@@ -134,6 +134,12 @@ fn migrations_are_valid_and_namespaced() -> TestResult {
     check_namespace(MIGRATION_NAMESPACE)?;
     assert!(MIGRATIONS.iter().all(|migration| migration.sql.contains("PRIMARY KEY (tenant, id)")));
     assert!(INSERT_SQL.contains("ON CONFLICT (tenant, id) DO NOTHING"));
+    assert!(INSERT_SQL.contains("queued AS (") && INSERT_SQL.contains("INSERT INTO alert_outbox (tenant, id) SELECT $1::text, id FROM written"));
+    let outbox = MIGRATIONS.last().ok_or("no migration")?;
+    assert!(
+        outbox.sql.contains("CREATE INDEX alert_outbox_by_seq ON alert_outbox (tenant, seq)") && outbox.sql.contains("GENERATED ALWAYS AS IDENTITY")
+    );
+    assert!(outbox.sql.contains("INSERT INTO alert_outbox (tenant, id) SELECT tenant, id FROM alerts"));
     [FIRST_SQL, NEXT_SQL, GET_SQL]
         .iter()
         .for_each(|sql| assert!(sql.contains("WHERE tenant = $1")));

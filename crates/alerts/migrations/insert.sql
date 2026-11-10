@@ -13,5 +13,7 @@ WITH incoming AS (
     FROM incoming
     ON CONFLICT (tenant, id) DO NOTHING
     RETURNING id
+), queued AS (
+    INSERT INTO alert_outbox (tenant, id) SELECT $1::text, id FROM written
 )
 SELECT count(*)::text FROM written

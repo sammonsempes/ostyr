@@ -11,10 +11,16 @@ use std::cmp::Ordering;
 pub const MIGRATION_NAMESPACE: &str = "alerts";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "001_alerts",
-    sql: include_str!("../migrations/001_alerts.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "001_alerts",
+        sql: include_str!("../migrations/001_alerts.sql"),
+    },
+    Migration {
+        version: "002_alert_outbox",
+        sql: include_str!("../migrations/002_alert_outbox.sql"),
+    },
+];
 
 
 /// One statement (one implicit transaction): `$1` tenant, `$2` JSON array of alerts; answers the number of rows that were new.
