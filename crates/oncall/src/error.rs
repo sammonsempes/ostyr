@@ -95,6 +95,49 @@ pub enum TransportError {
 }
 
 
+/// Fixed texts: nothing derived from the key or the MAC reaches an error.
+#[derive(Debug, Error)]
+pub enum LinkError<UsedError: std::error::Error + 'static> {
+    #[error("the link is malformed")]
+    Malformed,
+    #[error("the link is not valid")]
+    Tampered,
+    #[error("the link has expired")]
+    Expired,
+    #[error("the link was already used")]
+    Reused,
+    #[error("the link belongs to another tenant")]
+    OtherTenant,
+    #[error("the tenant name is not valid")]
+    InvalidTenant,
+    #[error("no random bytes are available")]
+    Random(#[source] getrandom::Error),
+    #[error("the link key cannot be used")]
+    Key(#[source] hmac::digest::InvalidLength),
+    #[error("the used-link store failed")]
+    Used(#[source] UsedError),
+    #[error("the alert store refused the event")]
+    Alert(#[source] StoreError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum KeyError {
+    #[error(transparent)]
+    File(#[from] core_pg::error::PgError),
+    #[error("the key file cannot be inspected")]
+    Inspect(#[source] std::io::Error),
+    #[error("the key file grants access to group or other")]
+    Mode,
+    #[error("the key file is not owned by the service user")]
+    Owner,
+    #[error("key file ownership cannot be checked on this platform")]
+    Unsupported,
+    #[error("the key is shorter than {min} bytes")]
+    TooShort { min: usize },
+}
+
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LifecycleError {
     #[error("the alert is resolved and accepts no event")]

@@ -200,5 +200,5 @@ pub struct Message {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyFailure {
     pub channel: String,
-    pub reason: String,
+    pub reason: crate::alert::FailureReason,
 }
