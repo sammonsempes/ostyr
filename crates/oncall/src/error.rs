@@ -93,3 +93,37 @@ pub enum TransportError {
     #[error("the server does not offer AUTH PLAIN")]
     NoAuth,
 }
+
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LifecycleError {
+    #[error("the alert is resolved and accepts no event")]
+    Resolved,
+    #[error("the alert is already acknowledged")]
+    AlreadyAcknowledged,
+    #[error("escalation must go to level {expected}, not {requested}")]
+    WrongLevel { expected: u32, requested: u32 },
+    #[error("level {requested} is above the limit {max}")]
+    LevelLimit { requested: u32, max: u32 },
+}
+
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error(transparent)]
+    Pg(#[from] core_pg::error::PgError),
+    #[error(transparent)]
+    Lifecycle(#[from] LifecycleError),
+    #[error("the fingerprint is empty, longer than {max} bytes or holds a control character")]
+    InvalidFingerprint { max: usize },
+    #[error("the channel name is empty, longer than {max} bytes or holds a control character")]
+    InvalidChannel { max: usize },
+    #[error("the limit {limit} is not between 1 and {max}")]
+    LimitOutOfRange { limit: u32, max: u32 },
+    #[error("no such alert for this tenant")]
+    NotFound,
+    #[error("the alert was changed by someone else")]
+    Conflict,
+    #[error("the database returned an unexpected value for `{column}`")]
+    BadRow { column: &'static str },
+}

@@ -11,6 +11,7 @@ cap-std = "3"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 lettre = { version = "0.11", default-features = false, features = ["builder"] }
 libc = "0.2"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
@@ -31,6 +32,8 @@ core-audit = { version = "0.0.0", path = "../core-audit" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 tracing-subscriber = "0.3"
 
 [lints]
