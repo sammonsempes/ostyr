@@ -16,6 +16,24 @@ pub enum CodecError {
 }
 
 
+/// Fixed texts: a refused package name is never echoed.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ActionError {
+    #[error("a named package selection must not be empty")]
+    NoPackages,
+    #[error("too many packages")]
+    TooManyPackages,
+    #[error("a package name is empty")]
+    EmptyPackageName,
+    #[error("a package name is too long")]
+    PackageNameTooLong,
+    #[error("a package name starts with a dash")]
+    PackageNameLeadingDash,
+    #[error("a package name holds a forbidden character")]
+    PackageNameCharacter,
+}
+
+
 /// Every variant is a distinct refusal reason; none carries command parameters.
 #[derive(Debug, Error)]
 pub enum CommandError {
@@ -45,6 +63,8 @@ pub enum CommandError {
     Expired,
     #[error("command is issued in the future beyond the clock skew")]
     IssuedInFuture,
+    #[error("invalid action: {0}")]
+    InvalidAction(#[from] ActionError),
     #[error("sensitive action signed by a routine key")]
     SensitiveActionNeedsSensitiveKey,
     #[error("sequence number is not greater than the last accepted one")]
@@ -62,6 +82,8 @@ pub enum SignError {
     Encode(#[from] postcard::Error),
     #[error("the signer failed: {0}")]
     Signer(#[source] BoxError),
+    #[error("invalid action: {0}")]
+    Action(#[from] ActionError),
 }
 
 
@@ -127,6 +149,10 @@ pub enum CliError {
     Number(String),
     #[error("invalid hexadecimal: {0}")]
     Hex(#[from] data_encoding::DecodeError),
+    #[error("invalid parameter: {0}")]
+    Parameter(&'static str),
+    #[error("invalid action: {0}")]
+    Action(#[from] ActionError),
     #[error("seed must be 32 bytes")]
     Seed,
     #[error(transparent)]

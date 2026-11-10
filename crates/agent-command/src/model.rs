@@ -16,6 +16,15 @@ pub const MAX_LIFETIME_SECONDS: u64 = 600;
 pub const MAX_SEQUENCE_ADVANCE: u64 = 1_000;
 
 
+pub const MAX_PACKAGES: usize = 256;
+
+
+pub const MAX_PACKAGE_NAME_LENGTH: usize = 128;
+
+
+pub const PACKAGE_NAME_PUNCTUATION: &str = ".+-_:~";
+
+
 pub const NONCE_LENGTH: usize = 16;
 
 
@@ -40,6 +49,24 @@ pub enum Action {
     Update { version: String },
     Uninstall,
     ChangePolicy { policy: String },
+    InstallUpdates { packages: PackageSelection, reboot: RebootPolicy },
+    Reboot { prompt_user: bool, deadline: u64 },
+}
+
+
+/// `AllAllowed` is every update the patch policy allows; `Named` holds at least one validated package name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PackageSelection {
+    AllAllowed,
+    Named(Vec<String>),
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RebootPolicy {
+    Never,
+    InWindow,
+    Required,
 }
 
 

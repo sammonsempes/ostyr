@@ -1,3 +1,4 @@
+use crate::action::validate_action;
 use crate::codec::{decode_exact, signing_message};
 use crate::error::{CommandError, StoreError};
 use crate::model::{
@@ -50,7 +51,9 @@ pub fn action_is_sensitive(action: &Action) -> bool {
         | Action::RunScript { .. }
         | Action::Update { .. }
         | Action::Uninstall
-        | Action::ChangePolicy { .. } => true,
+        | Action::ChangePolicy { .. }
+        | Action::InstallUpdates { .. }
+        | Action::Reboot { .. } => true,
     }
 }
 
@@ -65,6 +68,8 @@ pub fn action_name(action: &Action) -> &'static str {
         Action::Update { .. } => "update",
         Action::Uninstall => "uninstall",
         Action::ChangePolicy { .. } => "change_policy",
+        Action::InstallUpdates { .. } => "install_updates",
+        Action::Reboot { .. } => "reboot",
     }
 }
 
@@ -171,6 +176,7 @@ pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, Com
     check_binding(&envelope.key_id, key, &command)?;
     check_target(verifier, &command)?;
     check_times(&command, now)?;
+    validate_action(&command.action)?;
     check_class(key.class, &command.action)?;
     accept_sequence(verifier, key.class, command.sequence)?;
     Ok(command)

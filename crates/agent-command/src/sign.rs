@@ -1,3 +1,4 @@
+use crate::action::validate_action;
 use crate::codec::signing_message;
 use crate::error::SignError;
 use crate::model::{Command, Envelope, NONCE_LENGTH};
@@ -7,6 +8,7 @@ use ed25519_dalek::{Signer, SigningKey};
 
 /// The signer is injected: the private key never has to live in this crate (vault, HSM).
 pub fn sign_command(command: &Command, key_id: &str, signer: &SignerFn) -> Result<Vec<u8>, SignError> {
+    validate_action(&command.action)?;
     let command_bytes = postcard::to_stdvec(command)?;
     let signature = signer(&signing_message(&command_bytes)).map_err(SignError::Signer)?;
     Ok(postcard::to_stdvec(&Envelope {
