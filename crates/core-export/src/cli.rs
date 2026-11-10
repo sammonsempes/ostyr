@@ -9,8 +9,8 @@ use crate::syslog::{format_message, send_datagrams, write_frames, SyslogHeader};
 use crate::tls::{client_config, close, open_stream};
 use crate::types::{ResolveFn, SleepFn};
 use crate::webhook::RetryPolicy;
-use core_audit::log::{append, open_file_log, AuditLog};
-use core_config::reload::{current_config, ReloadContext, ReloadEngine};
+use core_audit::log::{append_declared, open_file_log, AuditLog};
+use core_config::reload::{current_config, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
 use std::fs::{self, File};
 use std::io::Write;
@@ -127,9 +127,13 @@ pub fn run_syslog(config: &SyslogConfig, events: &[EcsEvent]) -> Result<(), Expo
 }
 
 
+/// The audit keys that keep their value; `reload_entry` already cut each value with a visible marker.
+pub const EXPORT_DECLARED_KEYS: [&str; 5] = RELOAD_DECLARED_KEYS;
+
+
 /// Reloads of the export settings are appended to this log.
 pub fn audit_into(log: AuditLog<File>) -> Box<SharedAuditFn> {
-    Box::new(move |entry| append(&log, entry))
+    Box::new(move |entry| append_declared(&log, entry, &EXPORT_DECLARED_KEYS))
 }
 
 
