@@ -233,9 +233,17 @@ pub fn event_asset(event: &Event) -> &str {
 }
 
 
-pub fn asset_doc(asset: &Asset, version: i64) -> Value {
+/// An asset needs a new version unless it is only named by conflicts, which the statement bumps when one of them is new.
+pub fn is_touched(snapshot: &Snapshot, outcome: &Outcome, asset: &Asset) -> bool {
+    let known = snapshot.assets.iter().find(|stored| stored.id == asset.id);
+    known != Some(asset) || outcome.events.iter().any(|event| event_asset(event) == asset.id)
+}
+
+
+pub fn asset_doc(asset: &Asset, version: i64, touch: bool) -> Value {
     json!({
         "id": asset.id,
+        "touch": touch,
         "kind": asset.kind,
         "lifecycle": asset.lifecycle,
         "version": version,
@@ -283,7 +291,13 @@ pub fn event_doc(event: &Event) -> Value {
 pub async fn apply_outcome(exec: Executor<'_, '_>, scope: &TenantScope, snapshot: &Snapshot, outcome: &Outcome) -> Result<(), StoreError> {
     let assets: Vec<Value> = changed_assets(snapshot, outcome)
         .into_iter()
-        .map(|asset| asset_doc(asset, snapshot.versions.get(&asset.id).copied().unwrap_or(0)))
+        .map(|asset| {
+            asset_doc(
+                asset,
+                snapshot.versions.get(&asset.id).copied().unwrap_or(0),
+                is_touched(snapshot, outcome, asset),
+            )
+        })
         .collect();
     let document = json!({
         "assets": assets,

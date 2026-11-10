@@ -105,6 +105,10 @@ pub fn reconcile(inventory: &[Asset], observation: &Observation, truth: &TruthMa
     let matched = find_asset(inventory, observation).cloned();
     let created = matched.is_none();
     let mut asset = matched.map_or_else(|| new_asset(observation), Ok)?;
+    let collides = created && inventory.iter().any(|existing| existing.id == asset.id);
+    collides
+        .then_some(())
+        .map_or(Ok(()), |()| Err(CmdbError::IdCollision { id: asset.id.clone() }))?;
     let reappeared = !created && matches!(asset.lifecycle, Lifecycle::Retired | Lifecycle::Destroyed);
     let mut conflicts = Vec::new();
     observation

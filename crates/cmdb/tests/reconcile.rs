@@ -99,6 +99,22 @@ fn unknown_observation_creates_asset_without_touching_input() -> TestResult {
 
 
 #[test]
+fn a_derived_id_owned_by_another_asset_is_refused_and_never_overwrites_it() -> TestResult {
+    let inventory = vec![asset("serial_number:SN9", &[(IdentityKey::Name, "other")], Lifecycle::InService)];
+    let seen = observation("osquery", &[(IdentityKey::SerialNumber, "SN9")], &[("os", "linux")]);
+    let refused = reconcile(&inventory, &seen, &TruthMap::new()).err().ok_or("accepted")?;
+    assert_eq!(
+        refused,
+        CmdbError::IdCollision {
+            id: "serial_number:SN9".to_string()
+        }
+    );
+    assert!(refused.to_string().contains("serial_number:SN9"));
+    Ok(())
+}
+
+
+#[test]
 fn observation_without_key_is_refused() -> TestResult {
     let seen = observation("dhcp", &[], &[]);
     assert_eq!(

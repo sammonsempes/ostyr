@@ -267,6 +267,41 @@ fn reader_and_encoding_failures_are_reported() -> TestResult {
 
 
 #[test]
+fn reserved_source_and_attribute_prefix_are_refused_naming_the_field_only() -> TestResult {
+    let mut reserved_source = mapping(ImportFormat::Csv);
+    reserved_source.source = " CMDB ".to_string();
+    let refused_source = import_reader(CSV_TEXT.as_bytes(), &reserved_source, &[], &TruthMap::new())
+        .err()
+        .ok_or("accepted")?;
+    assert!(matches!(refused_source, ImportError::ReservedName { field: "source" }));
+    assert!(!refused_source.to_string().contains("CMDB"));
+    let mut reserved_attribute = mapping(ImportFormat::Csv);
+    reserved_attribute.attributes.insert("Key:mac".to_string(), "site".to_string());
+    let refused_attribute = import_reader(CSV_TEXT.as_bytes(), &reserved_attribute, &[], &TruthMap::new())
+        .err()
+        .ok_or("accepted")?;
+    assert!(matches!(refused_attribute, ImportError::ReservedName { field: "attributes" }));
+    assert!(!refused_attribute.to_string().contains("mac"));
+    Ok(())
+}
+
+
+#[test]
+fn reserved_names_are_refused_when_the_mapping_loads() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("mapping.yaml");
+    std::fs::write(&path, "format: csv\nsource: cmdb\nkind: server\nkeys:\n  serial_number: serial\n")?;
+    assert!(matches!(load_mapping(&path), Err(ImportError::ReservedName { field: "source" })));
+    std::fs::write(
+        &path,
+        "format: csv\nsource: legacy\nkind: server\nkeys:\n  serial_number: serial\nattributes:\n  \"key:serial_number\": owner\n",
+    )?;
+    assert!(matches!(load_mapping(&path), Err(ImportError::ReservedName { field: "attributes" })));
+    Ok(())
+}
+
+
+#[test]
 fn files_and_mapping_load_from_disk() -> TestResult {
     let dir = tempfile::tempdir()?;
     let mapping_path = dir.path().join("mapping.yaml");

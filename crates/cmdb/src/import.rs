@@ -2,7 +2,6 @@ use crate::error::ImportError;
 use crate::model::{Asset, AssetKind, Conflict, Event, Observation, Outcome};
 use crate::reconcile::{find_asset, reconcile};
 use crate::types::{ColumnMap, IdSet, KeyColumnMap, ObservedMap, RawRow, RowMap, TruthMap};
-use core_config::error::ConfigError;
 use core_config::load::load_file;
 use serde::Deserialize;
 use serde_json::Value;
@@ -68,8 +67,31 @@ pub struct ImportState {
 }
 
 
-pub fn load_mapping(path: &Path) -> Result<ImportMapping, ConfigError> {
-    load_file(path)
+pub const RESERVED_SOURCE: &str = "cmdb";
+
+
+pub const RESERVED_ATTRIBUTE_PREFIX: &str = "key:";
+
+
+/// Refuses the source `cmdb` and attribute names starting with `key:`, which would imitate a key conflict; the error names the field, never the value.
+pub fn check_mapping(mapping: &ImportMapping) -> Result<(), ImportError> {
+    let source_reserved = mapping.source.trim().eq_ignore_ascii_case(RESERVED_SOURCE);
+    let attribute_reserved = mapping
+        .attributes
+        .keys()
+        .any(|name| name.trim_start().to_ascii_lowercase().starts_with(RESERVED_ATTRIBUTE_PREFIX));
+    match (source_reserved, attribute_reserved) {
+        (true, _) => Err(ImportError::ReservedName { field: "source" }),
+        (false, true) => Err(ImportError::ReservedName { field: "attributes" }),
+        (false, false) => Ok(()),
+    }
+}
+
+
+pub fn load_mapping(path: &Path) -> Result<ImportMapping, ImportError> {
+    let mapping: ImportMapping = load_file(path)?;
+    check_mapping(&mapping)?;
+    Ok(mapping)
 }
 
 
@@ -235,6 +257,7 @@ pub fn import_reader<Input: Read>(
     inventory: &[Asset],
     truth: &TruthMap,
 ) -> Result<ImportReport, ImportError> {
+    check_mapping(mapping)?;
     let max_rows = mapping.max_rows.unwrap_or(MAX_IMPORT_ROWS).min(MAX_IMPORT_ROWS);
     let text = read_bounded(reader, mapping.max_bytes.unwrap_or(MAX_IMPORT_BYTES).min(MAX_IMPORT_BYTES))?;
     let body = text.strip_prefix('\u{feff}').unwrap_or(&text);

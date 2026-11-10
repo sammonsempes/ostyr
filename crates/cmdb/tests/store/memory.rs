@@ -147,6 +147,33 @@ pub fn write_asset(tenant: &mut Tenant, asset: &Value) {
 }
 
 
+const CONFLICT_FIELDS: [&str; 6] = [
+    "asset",
+    "attribute",
+    "current_value",
+    "current_source",
+    "observed_value",
+    "observed_source",
+];
+
+
+pub fn same_conflict(left: &Value, right: &Value) -> bool {
+    CONFLICT_FIELDS.iter().all(|field| text(left, field) == text(right, field))
+}
+
+
+pub fn fresh_conflicts(tenant: &Tenant, document: &Value) -> Vec<Value> {
+    let mut fresh: Vec<Value> = Vec::new();
+    items(document, "conflicts").into_iter().for_each(|conflict| {
+        let known = tenant.conflicts.iter().chain(fresh.iter()).any(|other| same_conflict(other, &conflict));
+        if !known {
+            fresh.push(conflict);
+        }
+    });
+    fresh
+}
+
+
 pub fn apply(tenant: &mut Tenant, document: &Value) -> Result<bool, PgError> {
     let assets = items(document, "assets");
     let fresh = !is_stale(tenant, &assets);
@@ -154,8 +181,15 @@ pub fn apply(tenant: &mut Tenant, document: &Value) -> Result<bool, PgError> {
         Err(unique_violation())
     } else {
         if fresh {
-            assets.iter().for_each(|asset| write_asset(tenant, asset));
-            tenant.conflicts.extend(items(document, "conflicts"));
+            let new_conflicts = fresh_conflicts(tenant, document);
+            assets
+                .iter()
+                .filter(|asset| {
+                    asset.get("touch").and_then(Value::as_bool).unwrap_or(false)
+                        || new_conflicts.iter().any(|conflict| text(conflict, "asset") == text(asset, "id"))
+                })
+                .for_each(|asset| write_asset(tenant, asset));
+            tenant.conflicts.extend(new_conflicts);
             tenant.events.extend(items(document, "events"));
             tenant.applies += 1;
         }

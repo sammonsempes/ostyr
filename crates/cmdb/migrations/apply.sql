@@ -2,7 +2,7 @@ WITH doc AS (
     SELECT $2::text::jsonb AS body
 ),
 changed AS (
-    SELECT a->>'id' AS id, a->>'kind' AS kind, a->>'lifecycle' AS lifecycle, (a->>'version')::bigint AS version, a
+    SELECT a->>'id' AS id, a->>'kind' AS kind, a->>'lifecycle' AS lifecycle, (a->>'version')::bigint AS version, (a->>'touch')::boolean AS touch, a
     FROM doc, jsonb_array_elements(body->'assets') AS a
 ),
 locked AS (
@@ -15,6 +15,18 @@ locked AS (
 guard AS (
     SELECT (SELECT count(*) FROM locked) = (SELECT count(*) FROM changed WHERE version > 0) AS ok
 ),
+fresh AS (
+    SELECT DISTINCT f->>'asset' AS asset, f->>'attribute' AS attribute, f->>'current_value' AS current_value,
+        f->>'current_source' AS current_source, f->>'observed_value' AS observed_value, f->>'observed_source' AS observed_source,
+        f->>'resolution' AS resolution
+    FROM doc, jsonb_array_elements(body->'conflicts') AS f
+    WHERE NOT EXISTS (
+        SELECT 1 FROM cmdb_conflicts o
+        WHERE o.tenant = $1 AND o.asset = f->>'asset' AND o.attribute = f->>'attribute'
+          AND o.current_value = f->>'current_value' AND o.current_source = f->>'current_source'
+          AND o.observed_value = f->>'observed_value' AND o.observed_source = f->>'observed_source'
+    )
+),
 inserted AS (
     INSERT INTO cmdb_assets (tenant, id, kind, lifecycle, version)
     SELECT $1, id, kind, lifecycle, 1 FROM changed WHERE version = 0 AND (SELECT ok FROM guard)
@@ -25,6 +37,7 @@ updated AS (
     SET kind = c.kind, lifecycle = c.lifecycle, version = t.version + 1
     FROM changed c
     WHERE t.tenant = $1 AND t.id = c.id AND t.version = c.version AND c.version > 0 AND (SELECT ok FROM guard)
+      AND (c.touch OR EXISTS (SELECT 1 FROM fresh WHERE fresh.asset = c.id))
     RETURNING t.id
 ),
 written_keys AS (
@@ -48,9 +61,8 @@ written_attributes AS (
 ),
 written_conflicts AS (
     INSERT INTO cmdb_conflicts (tenant, asset, attribute, current_value, current_source, observed_value, observed_source, resolution)
-    SELECT $1, f->>'asset', f->>'attribute', f->>'current_value', f->>'current_source', f->>'observed_value', f->>'observed_source',
-        f->>'resolution'
-    FROM doc, jsonb_array_elements(body->'conflicts') AS f
+    SELECT $1, asset, attribute, current_value, current_source, observed_value, observed_source, resolution
+    FROM fresh
     WHERE (SELECT ok FROM guard)
     RETURNING asset
 ),
