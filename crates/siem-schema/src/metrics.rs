@@ -238,7 +238,7 @@ fn render_table(table: MetricsTable, columns: &[Column], time_column: &str, sett
     let retention = table_retention(settings, table);
     let policy = validate_identifier(&retention.storage_policy)?;
     Ok(format!(
-        "CREATE TABLE {name}\n(\n{}\n)\nENGINE = {}\nPARTITION BY toYYYYMM({time})\nORDER BY ({tenant}, `metric`, `labels`, {time})\nTTL toDateTime({time}) + toIntervalDay({})\nSETTINGS storage_policy = '{policy}'\n",
+        "CREATE TABLE {name}\n(\n{}\n)\nENGINE = {}\nPARTITION BY toYYYYMM({time})\nORDER BY ({tenant}, `metric`, `unit`, `kind`, `labels`, {time})\nTTL toDateTime({time}) + toIntervalDay({})\nSETTINGS storage_policy = '{policy}'\n",
         lines.join(",\n"),
         engine(table),
         retention.days
