@@ -41,6 +41,18 @@ pub const DEFAULT_MAX_LABEL_KEYS_PER_TENANT: usize = 1_000;
 pub const DEFAULT_MAX_STATE_BYTES_PER_TENANT: usize = 67_108_864;
 
 
+pub const DEFAULT_MAX_BATCH_ROWS: usize = 10_000;
+
+
+pub const DEFAULT_MAX_BATCH_BYTES: usize = 4_194_304;
+
+
+pub const DEFAULT_MAX_FUTURE_SKEW_SECONDS: u64 = 300;
+
+
+pub const DEFAULT_RAW_RETENTION_SECONDS: u64 = 604_800;
+
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_request_bytes: usize,
@@ -56,6 +68,10 @@ pub struct Limits {
     pub max_values_per_label: usize,
     pub max_label_keys_per_tenant: usize,
     pub max_state_bytes_per_tenant: usize,
+    pub max_batch_rows: usize,
+    pub max_batch_bytes: usize,
+    pub max_future_skew_seconds: u64,
+    pub raw_retention_seconds: u64,
 }
 
 
@@ -75,6 +91,10 @@ impl Default for Limits {
             max_values_per_label: DEFAULT_MAX_VALUES_PER_LABEL,
             max_label_keys_per_tenant: DEFAULT_MAX_LABEL_KEYS_PER_TENANT,
             max_state_bytes_per_tenant: DEFAULT_MAX_STATE_BYTES_PER_TENANT,
+            max_batch_rows: DEFAULT_MAX_BATCH_ROWS,
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            max_future_skew_seconds: DEFAULT_MAX_FUTURE_SKEW_SECONDS,
+            raw_retention_seconds: DEFAULT_RAW_RETENTION_SECONDS,
         }
     }
 }
