@@ -30,16 +30,20 @@ mkdir -p "$transfer_dir"
 ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "cat /etc/ostyr-lab/ca.pem" >"$transfer_dir/ca.pem"
 ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo tar -C $CLIENT_DIR -cf - ." >"$transfer_dir/client.tar"
 ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo cat /etc/ostyr-lab/datastore.env" >"$transfer_dir/datastore.env"
-chmod 600 "$transfer_dir/datastore.env"
-scp "${ssh_options[@]}" "$transfer_dir/ca.pem" "$transfer_dir/client.tar" "$transfer_dir/datastore.env" "$client_user@$client_address:/tmp/"
+ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo cat /etc/ostyr-lab/s3-access-key" >"$transfer_dir/s3-access-key"
+ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo cat /etc/ostyr-lab/s3-secret-key" >"$transfer_dir/s3-secret-key"
+chmod 600 "$transfer_dir/datastore.env" "$transfer_dir/s3-access-key" "$transfer_dir/s3-secret-key"
+scp "${ssh_options[@]}" "$transfer_dir/ca.pem" "$transfer_dir/client.tar" "$transfer_dir/datastore.env" "$transfer_dir/s3-access-key" "$transfer_dir/s3-secret-key" "$client_user@$client_address:/tmp/"
 ssh -n "${ssh_options[@]}" "$client_user@$client_address" "set -e
 sudo install -d -m 755 /etc/ostyr-lab /tmp/client-pkgs
 sudo install -m 644 /tmp/ca.pem /etc/ostyr-lab/ca.pem
 sudo install -m 600 /tmp/datastore.env /etc/ostyr-lab/datastore.env
+sudo install -m 600 /tmp/s3-access-key /etc/ostyr-lab/s3-access-key
+sudo install -m 600 /tmp/s3-secret-key /etc/ostyr-lab/s3-secret-key
 sudo install -m 644 /tmp/ca.pem /usr/local/share/ca-certificates/ostyr-lab.crt
 sudo update-ca-certificates >/dev/null
 sudo tar -C /tmp/client-pkgs -xf /tmp/client.tar
 sudo install -m 755 /tmp/client-pkgs/nats /usr/local/bin/nats
 sudo dpkg -i /tmp/client-pkgs/libpq5_*.deb /tmp/client-pkgs/postgresql-client-common_*.deb /tmp/client-pkgs/postgresql-client-16_*.deb >/dev/null
-sudo rm -rf /tmp/client-pkgs /tmp/client.tar /tmp/ca.pem /tmp/datastore.env"
+sudo rm -rf /tmp/client-pkgs /tmp/client.tar /tmp/ca.pem /tmp/datastore.env /tmp/s3-access-key /tmp/s3-secret-key"
 rm -rf "$transfer_dir"

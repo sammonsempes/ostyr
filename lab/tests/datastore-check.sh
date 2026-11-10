@@ -10,7 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 readonly CONNECT_TIMEOUT=3
 readonly MARKER_BYTES=8
-readonly LAB_PORTS=(8443 9440 4222 5432)
+readonly LAB_PORTS=(8443 9440 4222 5432 3910)
 readonly PLAINTEXT_PORTS=(8123 9000 9004 9005 9009)
 
 task_id="${1:?usage: datastore-check.sh <task-id>}"
@@ -67,12 +67,26 @@ received="$(jetstream consumer next OSTYR_CHECK "check-$marker" --ack --raw 2>/d
 [[ "$(jetstream consumer info OSTYR_CHECK "check-$marker" --json | jq -r '.num_ack_pending + .num_pending')" == "0" ]] || fail "JetStream ack not recorded"
 step "JetStream publish, consume and ack over TLS"
 
+s3_access="$(cat "$S3_ACCESS_FILE")"
+s3_secret="$(cat "$S3_SECRET_FILE")"
+s3() {
+    curl --fail --silent --show-error --cacert "$DATASTORE_CA" --user "$s3_access:$s3_secret" --aws-sigv4 "aws:amz:$S3_REGION:s3" "$@"
+}
+s3_url="$S3_ENDPOINT/$S3_BUCKET/check-$marker"
+s3 --request PUT --data-binary "$marker" --output /dev/null "$s3_url"
+[[ "$(s3 "$s3_url")" == "$marker" ]] || fail "S3 object not read back"
+if curl --silent --max-time 3 --cacert "$DATASTORE_CA" --user "$s3_access:wrong" --aws-sigv4 "aws:amz:$S3_REGION:s3" --fail "$s3_url" >/dev/null; then
+    fail "S3 accepts a wrong secret"
+fi
+step "S3 signed PUT and GET over TLS with the lab CA"
+
 if [[ -n "$previous_marker" ]]; then
     [[ "$(clickhouse "SELECT marker FROM default.ostyr_check WHERE marker = '$previous_marker'")" == "$previous_marker" ]] || fail "previous ClickHouse row lost"
     [[ "$(postgres "SELECT marker FROM ostyr_check WHERE marker = '$previous_marker'")" == "$previous_marker" ]] || fail "previous PostgreSQL row lost"
     [[ "$(jetstream stream get OSTYR_CHECK --last-for "ostyr.check.$previous_marker" --json | jq -r '.data' | base64 -d)" == "$previous_marker" ]] ||
         fail "previous JetStream message lost"
-    step "data of the previous run persisted in all three stores"
+    [[ "$(s3 "$S3_ENDPOINT/$S3_BUCKET/check-$previous_marker")" == "$previous_marker" ]] || fail "previous S3 object lost"
+    step "data of the previous run persisted in all four stores"
 fi
 
 if curl --silent --max-time 3 "http://$DATASTORE_DOMAIN:8123/ping" >/dev/null; then fail "ClickHouse answers in plaintext on 8123"; fi

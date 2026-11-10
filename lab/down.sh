@@ -31,6 +31,7 @@ if virsh_lab pool-info "$LAB_POOL" >/dev/null 2>&1; then
     virsh_lab vol-list --pool "$LAB_POOL" | awk 'NR > 2 && $1 != "" {print $1}' | names_with_prefix "$prefix-" | while read -r volume; do
         virsh_lab vol-delete --pool "$LAB_POOL" "$volume" >/dev/null
     done
+    gc_all_bases
 fi
 
 virsh_lab net-list --all --name | awk -v n="$prefix" '$0 == n' | while read -r network; do

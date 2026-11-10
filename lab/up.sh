@@ -57,18 +57,28 @@ check_quota() {
 ensure_base_images() {
     local profile_file="$1"
     local -a images
-    local image
+    local image resolved
     mapfile -t images < <(awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u)
     for image in "${images[@]}"; do
-        if ! virsh_lab vol-info --pool "$LAB_POOL" "$image" >/dev/null 2>&1; then
+        if [[ -z "$(newest_base "${image%.qcow2}")" ]]; then
             exec 8>>"$LAB_STATE_ROOT/build-${image%.qcow2}.lock"
             acquire_lock 8 "$LAB_STATE_ROOT/build-${image%.qcow2}.lock"
-            if ! virsh_lab vol-info --pool "$LAB_POOL" "$image" >/dev/null 2>&1; then
+            if [[ -z "$(newest_base "${image%.qcow2}")" ]]; then
                 "$LAB_DIR/images/build.sh" "${image%.qcow2}"
             fi
             exec 8>&-
         fi
-        warn_if_stale "$image"
+        resolved="$(newest_base "${image%.qcow2}")"
+        [[ -n "$resolved" ]] || die "no base volume for $image"
+        warn_if_stale "$resolved"
+    done
+}
+
+resolve_profile_bases() {
+    local profile_file="$1" image resolved
+    awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u | while read -r image; do
+        resolved="$(newest_base "${image%.qcow2}")"
+        sed -i "s|base_image: *$image\$|base_image: $resolved|" "$profile_file"
     done
 }
 
@@ -118,6 +128,7 @@ check_quota "$vm_count"
 lab_state="$(state_dir "$task_id")"
 mkdir -p "$lab_state"
 cp "$profile_source" "$lab_state/profile.yaml"
+resolve_profile_bases "$lab_state/profile.yaml"
 ssh-keygen -q -t ed25519 -N '' -C "ostyr-lab-$task_id" -f "$lab_state/id_ed25519"
 
 

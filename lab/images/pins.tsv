@@ -2,3 +2,5 @@ ws2022	3e4fa6d8507b554856fc9ca6079cc402df11a8b79344871669f0251535255325	SERVER_E
 win11	755a90d43e826a74b9e1932a34788b898e028272439b777e5593dee8d53622ae	win11-24H2-26100.1742-enterprise-eval-x64.iso	2026-11-03	https://go.microsoft.com/fwlink/?linkid=2289031&clcid=0x409&culture=en-us&country=us
 virtio-win	303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d	virtio-win-0.1.302.iso	2026-11-03	https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso
 cloudbase-init	ffbf80515a7311ed00800276a6af7aab23b41d7acf13e79ce3d2d56844f638f7	CloudbaseInitSetup_1_1_9_x64.msi	2026-11-03	https://github.com/cloudbase/cloudbase-init/releases/download/1.1.9/CloudbaseInitSetup_1_1_9_x64.msi
+garage	2ff667286217cd73ebcb1c03af993822365000441dfe31a80cb64c5189a9dea8	garage-v2.5.0	2026-11-10	https://garagehq.deuxfleurs.fr/_releases/v2.5.0/x86_64-unknown-linux-musl/garage
+garage-image	23b16d34e0348d9aca9b960a7429a7e6d494974b5288bfb8f6c3ab856895f71e	dxflrs-garage-v2.5.0-amd64-manifest	2026-11-10	https://registry-1.docker.io/v2/dxflrs/garage/manifests/v2.5.0
