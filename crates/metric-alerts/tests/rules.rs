@@ -6,9 +6,10 @@ use core_config::error::ConfigError;
 use metric_alerts::error::RuleError;
 use metric_alerts::model::{Condition, Direction, Severity};
 use metric_alerts::rules::{
-    load_rules, parse_rules, validate_rule, MAX_DURATION_SECONDS, MAX_FILE_BYTES, MAX_ID_LEN, MAX_LABELS, MAX_LABEL_LEN, MAX_METRIC_LEN, MAX_RULES,
+    load_rules, parse_rules, validate_rule, MAX_DURATION_SECONDS, MAX_FILE_BYTES, MAX_LABELS, MAX_LABEL_LEN, MAX_METRIC_LEN, MAX_RULES,
     MAX_RUNBOOK_LEN,
 };
+use metric_alerts::token::MAX_TOKEN_CHARS;
 use std::io::{self, Read};
 
 
@@ -38,6 +39,9 @@ const FILE: &str = "rules.yaml";
 
 
 const THRESHOLD_LINE: u64 = 3;
+
+
+const LOADED_RULES: usize = 2;
 
 
 pub fn rule(id: &str, condition: &str, extra: &str) -> String {
@@ -166,7 +170,10 @@ fn bounds_are_checked_per_field() -> TestResult {
     let long_label = "x".repeat(MAX_LABEL_LEN + 1);
     let many_labels = (0..=MAX_LABELS).map(|index| format!("l{index}: v")).collect::<Vec<_>>().join(", ");
     let cases = [
-        (rule(&"x".repeat(MAX_ID_LEN + 1), ABOVE, ""), "id"),
+        (rule(&"x".repeat(MAX_TOKEN_CHARS + 1), ABOVE, ""), "id"),
+        (rule("\"Disk usage > 90%\"", ABOVE, ""), "id"),
+        (rule("\"-x\"", ABOVE, ""), "id"),
+        (rule("\"cpu high\"", ABOVE, ""), "id"),
         (rule("\"\"", ABOVE, ""), "id"),
         (rule("a", ABOVE, &format!("    selector: {{k: {long_label}}}\n")), "selector"),
         (rule("a", ABOVE, &format!("    selector: {{{long_label}: v}}\n")), "selector"),
@@ -248,5 +255,22 @@ fn non_finite_levels_are_invalid() -> TestResult {
 fn unknown_condition_field_is_refused() -> TestResult {
     let text = file(&[rule("a", "{kind: threshold, direction: above, threshold: 90, extra: 1}", "")]);
     assert!(matches!(parse(&text), Err(RuleError::Config(_))));
+    Ok(())
+}
+
+
+#[test]
+fn token_ids_load() -> TestResult {
+    let text = file(&[rule("cpu.high", ABOVE, ""), rule(&"x".repeat(MAX_TOKEN_CHARS), ABOVE, "")]);
+    assert_eq!(parse(&text)?, LOADED_RULES);
+    Ok(())
+}
+
+
+#[test]
+fn bad_id_error_names_file_and_rule() -> TestResult {
+    let text = file(&[rule("\"cpu high\"", ABOVE, "")]);
+    let error = parse_rules(&mut text.as_bytes(), "rules.yaml").err().ok_or("accepted")?;
+    assert_eq!(error.to_string(), "rules.yaml: rule `cpu high`: invalid `id`");
     Ok(())
 }

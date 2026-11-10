@@ -1,5 +1,6 @@
 use crate::rules::{MAX_FILE_BYTES, MAX_LABELS, MAX_RULES};
 use core_config::error::ConfigError;
+use core_pg::error::PgError;
 use siem_schema::error::SchemaError;
 use thiserror::Error;
 
@@ -23,7 +24,7 @@ pub enum RuleError {
     #[error("evaluation time out of range")]
     TimeOutOfRange,
     #[error("invalid tenant id")]
-    InvalidTenant,
+    InvalidTenant(#[source] PgError),
     #[error(transparent)]
     Schema(#[from] SchemaError),
 }

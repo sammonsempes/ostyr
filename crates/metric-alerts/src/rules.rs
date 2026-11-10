@@ -1,5 +1,6 @@
 use crate::error::RuleError;
 use crate::model::{Capacity, Condition, Direction, Rule, RuleFile};
+use crate::token::is_token;
 use crate::types::Labels;
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text};
@@ -13,9 +14,6 @@ pub const MAX_FILE_BYTES: u64 = 1_048_576;
 
 
 pub const MAX_RULES: usize = 1000;
-
-
-pub const MAX_ID_LEN: usize = 128;
 
 
 pub const MAX_METRIC_LEN: usize = 256;
@@ -87,7 +85,7 @@ pub fn validate_rule_file(rule_file: &RuleFile, file: &str) -> Result<(), RuleEr
 
 pub fn validate_rule(file: &str, rule: &Rule) -> Result<(), RuleError> {
     let checks = [
-        ("id", bounded(&rule.id, MAX_ID_LEN)),
+        ("id", is_token(&rule.id)),
         ("metric", bounded(&rule.metric, MAX_METRIC_LEN)),
         ("selector", labels_ok(&rule.selector)),
         ("labels", labels_ok(&rule.labels)),

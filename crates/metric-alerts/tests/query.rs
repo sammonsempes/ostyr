@@ -2,9 +2,11 @@ mod common;
 
 
 use common::types::TestResult;
+use core_pg::error::PgError;
+use core_pg::scope::{tenant_scope, MAX_TENANT_BYTES};
 use metric_alerts::error::RuleError;
-use metric_alerts::model::{Capacity, Condition, Direction, Rule, Severity, TenantId};
-use metric_alerts::query::{parse_tenant_id, rule_sql, window_and_step, MetricQuery, MAX_TENANT_LEN};
+use metric_alerts::model::{Capacity, Condition, Direction, Rule, Severity};
+use metric_alerts::query::{parse_tenant_id, rule_sql, window_and_step, MetricQuery};
 use siem_schema::metrics::{MetricsRetention, MetricsTable};
 use std::collections::BTreeMap;
 
@@ -123,7 +125,7 @@ pub fn forecast(window: u64, min_points: usize) -> Condition {
 
 
 pub fn compile(rule: &Rule, settings: &MetricsRetention) -> Result<MetricQuery, RuleError> {
-    rule_sql(rule, &TenantId("acme".to_string()), NOW, settings)
+    rule_sql(rule, &parse_tenant_id("acme")?, NOW, settings)
 }
 
 
@@ -276,8 +278,8 @@ fn too_many_selectors_are_refused() -> TestResult {
 fn tenants_never_mix() -> TestResult {
     let settings = MetricsRetention::default();
     let rule_value = rule(threshold(Direction::Above), 0, &[]);
-    let first = rule_sql(&rule_value, &TenantId("acme".to_string()), NOW, &settings)?;
-    let second = rule_sql(&rule_value, &TenantId("globex".to_string()), NOW, &settings)?;
+    let first = rule_sql(&rule_value, &parse_tenant_id("acme")?, NOW, &settings)?;
+    let second = rule_sql(&rule_value, &parse_tenant_id("globex")?, NOW, &settings)?;
     assert_eq!(first.sql, second.sql);
     assert!(first.sql.contains("WHERE `tenant` = {tenant:String}"));
     assert!(first.params.contains(&("tenant".to_string(), "acme".to_string())));
@@ -288,23 +290,21 @@ fn tenants_never_mix() -> TestResult {
 
 
 #[test]
-fn hostile_tenant_id_stays_a_parameter() -> TestResult {
-    let hostile = "x' OR 1=1; --";
-    let tenant = parse_tenant_id(hostile)?;
-    let query = rule_sql(&rule(threshold(Direction::Above), 0, &[]), &tenant, NOW, &MetricsRetention::default())?;
-    assert!(!query.sql.contains("1=1"));
-    assert!(query.params.contains(&("tenant".to_string(), hostile.to_string())));
+fn hostile_tenant_id_is_refused() -> TestResult {
+    assert!(matches!(parse_tenant_id("x' OR 1=1; --"), Err(RuleError::InvalidTenant(_))));
     Ok(())
 }
 
 
 #[test]
-fn tenant_id_is_bounded() -> TestResult {
-    assert_eq!(parse_tenant_id("acme")?, TenantId("acme".to_string()));
-    assert!(matches!(parse_tenant_id(""), Err(RuleError::InvalidTenant)));
-    assert!(matches!(parse_tenant_id("a\nb"), Err(RuleError::InvalidTenant)));
-    assert!(matches!(parse_tenant_id(&"a".repeat(MAX_TENANT_LEN + 1)), Err(RuleError::InvalidTenant)));
-    assert!(parse_tenant_id(&"a".repeat(MAX_TENANT_LEN)).is_ok());
-    assert_eq!(RuleError::InvalidTenant.to_string(), "invalid tenant id");
+fn tenant_id_follows_core_pg() -> TestResult {
+    assert_eq!(parse_tenant_id("acme")?, tenant_scope("acme")?);
+    assert!(parse_tenant_id("a.b").is_ok());
+    assert!(parse_tenant_id(&"a".repeat(MAX_TENANT_BYTES)).is_ok());
+    let refused = ["", "a\nb", "-x", ".x", &"a".repeat(MAX_TENANT_BYTES + 1)];
+    assert!(refused
+        .iter()
+        .all(|text| matches!(parse_tenant_id(text), Err(RuleError::InvalidTenant(_)))));
+    assert_eq!(RuleError::InvalidTenant(PgError::InvalidTenant).to_string(), "invalid tenant id");
     Ok(())
 }
