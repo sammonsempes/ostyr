@@ -179,8 +179,8 @@ fn invalid_references_and_structure_are_refused() -> TestResult {
     assert!(bad_span.contains("timespan"), "{bad_span}");
     let no_span = variant_failure("correlation:\n  type: temporal\n  rules: [failed-login]\n")?;
     assert!(no_span.contains("Variant"), "{no_span}");
-    let untitled = failure(&[LOGIN, "id: x\ncorrelation:\n  type: temporal\n  rules: [failed-login]\n  timespan: 1m\n"])?;
-    assert!(untitled.to_string().contains("untitled"), "{untitled}");
+    let untitled = ruleset(&[LOGIN, "id: x\ncorrelation:\n  type: temporal\n  rules: [failed-login]\n  timespan: 1m\n"])?;
+    assert_eq!(untitled.correlations.first().map(|rule| rule.title.as_str()), Some("x"));
     Ok(())
 }
 

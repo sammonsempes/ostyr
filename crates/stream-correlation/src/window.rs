@@ -1,5 +1,6 @@
 use crate::correlation::{Comparison, CorrelationRule, Kind, Threshold};
 use crate::field::GROUP_SEPARATOR;
+use crate::level::Level;
 use crate::types::GroupMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,6 +55,7 @@ pub struct State {
 pub struct Alert {
     pub rule_id: String,
     pub rule_title: String,
+    pub level: Level,
     pub group: BTreeMap<String, String>,
     pub first_ms: i64,
     pub last_ms: i64,
@@ -129,6 +131,7 @@ pub fn build_alert(rule: &CorrelationRule, key: &str, hits: &[Hit]) -> Alert {
     Alert {
         rule_id: rule.id.clone(),
         rule_title: rule.title.clone(),
+        level: rule.level,
         group: rule
             .group_by
             .iter()

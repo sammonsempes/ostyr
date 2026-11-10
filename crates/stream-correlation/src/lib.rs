@@ -9,6 +9,7 @@ pub mod correlation;
 pub mod engine;
 pub mod error;
 pub mod field;
+pub mod level;
 pub mod reload;
 pub mod ruleset;
 pub mod selection;

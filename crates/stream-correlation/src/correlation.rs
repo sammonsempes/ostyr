@@ -1,5 +1,6 @@
 use crate::error::CorrelationError;
 use crate::field::MILLIS_PER_SECOND;
+use crate::level::Level;
 use serde::Deserialize;
 use serde_json::Value;
 use sigma_sql::rule::METADATA_KEYS;
@@ -21,7 +22,7 @@ pub const DAYS_PER_WEEK: i64 = 7;
 pub const FIELD_KEY: &str = "field";
 
 
-pub const EXTRA_KEYS: &[&str] = &["status", "level", "tags"];
+pub const EXTRA_KEYS: &[&str] = &["status", "tags"];
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,7 @@ pub enum Kind {
 pub struct CorrelationRule {
     pub id: String,
     pub title: String,
+    pub level: Level,
     pub kind: Kind,
     pub rules: Vec<usize>,
     pub group_by: Vec<String>,
@@ -91,7 +93,8 @@ pub struct RawCorrelation {
 
 #[derive(Debug, Deserialize)]
 pub struct RawDocument {
-    pub title: String,
+    pub title: Option<String>,
+    pub level: Option<String>,
     pub id: Option<String>,
     pub name: Option<String>,
     pub correlation: RawCorrelation,
@@ -213,10 +216,10 @@ pub fn parse_kind(rule: &str, correlation: &RawCorrelation) -> Result<Kind, Corr
 
 
 /// Refuses any top-level key that is neither a rule field nor a metadata key.
-pub fn check_keys(document: &RawDocument) -> Result<(), CorrelationError> {
+pub fn check_keys(rule: &str, document: &RawDocument) -> Result<(), CorrelationError> {
     document
         .rest
         .keys()
         .filter(|key| !METADATA_KEYS.contains(&key.as_str()) && !EXTRA_KEYS.contains(&key.as_str()))
-        .try_for_each(|_| Err(unsupported(&document.title, "top-level key".to_string())))
+        .try_for_each(|_| Err(unsupported(rule, "top-level key".to_string())))
 }
