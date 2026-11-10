@@ -88,7 +88,7 @@ Each module is a standalone service: it installs alone (package, container or He
 | **WAF** | Reverse proxy with automatic TLS, routing, load balancing and WAF | Local files, syslog export | Correlation, tuning by AI |
 | **DNS** | Filtering resolver fed by threat intel | Local files | Sinkhole by playbook, correlation |
 | **DHCP** | Kea server in high availability, lease history | PostgreSQL | Automatic quarantine, discovery |
-| **NDR** | Zeek, Suricata, packet capture, file analysis | Local disk | Correlation with endpoints |
+| **NDR** | Suricata, packet capture, file analysis | Local disk | Correlation with endpoints |
 | **RMM** | Scripts, patch management, software deployment, remote shell and desktop | PostgreSQL | Remediation by playbook, security context on every device |
 | **Monitoring** | Metrics, alerting, forecasting, synthetic checks, tracing, application health | ClickHouse | Correlation with security events, CMDB services |
 | **On-call** | Alert routing, schedules, escalation, notifications, silences | PostgreSQL | Every IT and security alert source |
@@ -113,7 +113,7 @@ Three profiles share the same code; only the number of modules, the ingestion mo
 | **Distributed** | Mid-sized companies, SOCs, MSSPs | Multi-node ClickHouse cluster, redundant backend services, NATS JetStream | Through NATS JetStream |
 | **Single module** | Targeted need: only the EDR, the WAF, the DNS, the identity provider… | One container or package, with the module's minimal storage | Direct, with optional export to a third-party SIEM |
 
-**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, MinIO (S3, headless, web console disabled) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used, and Guacamole is not used for managed devices. Secrets are files encrypted with SOPS in Git by default.
+**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, MinIO (S3, headless, web console disabled) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used. Secrets are files encrypted with SOPS in Git by default.
 
 **No listening port on managed devices.** Every flow from a managed device is initiated by the device. Agentless equipment (switches, printers, BMCs, appliances) pushes to a site collector (section 22); polling it is an explicit per-device opt-in.
 
@@ -151,7 +151,7 @@ A device used remotely or on the move, without VPN, stays protected and managed 
 | Windows workstation | Windows 10 22H2, Windows 11 | Defender required in active mode for full blocking |
 | Windows Server | 2016, 2019, 2022, 2025 | 2012 R2 not supported (end of support) |
 | Linux | Kernel 5.4 or later: RHEL/Rocky/Alma 8 and 9, Debian 11 and 12, Ubuntu 20.04 to 24.04, SUSE 15 | Full Tetragon mode (eBPF) |
-| macOS | Current and previous two major versions | Agent without a custom Endpoint Security client in v1 (section 21) |
+| macOS | Current and previous two major versions | Agent without a custom Endpoint Security client (section 21) |
 | Android, iOS and iPadOS | Current and previous two major versions | Managed through MDM only, no agent (section 21) |
 | Older Linux | Kernel 4.18 to 5.3 | Reduced mode: Tetragon with only the eBPF probes available on that kernel, reactive blocking only |
 
@@ -214,7 +214,7 @@ VDI environments (Citrix, Azure Virtual Desktop, VMware Horizon) and machines cl
   - fake in-memory credentials (honeyhash) on Windows.
 
   Any use of a honeytoken raises a critical alert. On Windows, reads are detected through object access auditing (SACL on the decoys, event 4663), because Sysmon does not log reads. Use of a honeyhash is detected on domain controllers (events 4625, 4768, 4771 on the decoy account), which requires collecting their logs. On Linux, Tetragon monitors the opening of decoys.
-- **Tamper resistance.** Stopping, uninstalling or modifying the agent or its sensors requires an authorisation token signed by the platform. A determined local administrator can always bypass these protections (root on Linux; on Windows, PPL protection would require an ELAM driver certified by Microsoft, out of v1). The goal is therefore to **make tampering hard and always visible**: a silent, stopped or modified agent or sensor raises an alert in under 5 minutes thanks to the heartbeat monitored on the server side.
+- **Tamper resistance.** Stopping, uninstalling or modifying the agent or its sensors requires an authorisation token signed by the platform. A determined local administrator can always bypass these protections (root on Linux; on Windows, PPL protection would require an ELAM driver certified by Microsoft, not built). The goal is therefore to **make tampering hard and always visible**: a silent, stopped or modified agent or sensor raises an alert in under 5 minutes thanks to the heartbeat monitored on the server side.
 - **Response actions.** Network isolation (keeping the connection to the platform), process kill, file quarantine, remote shell, forensic collection. Every command received is signed by the platform and checked by the agent before execution (section 12).
 - **Agent update.** Signed packages, verification before installation, automatic rollback to the previous version if the agent does not restart healthily.
 
@@ -299,7 +299,7 @@ Connectors are used to **ingest** detection sources and to **act** on third-part
 | **Existing DNS and DHCP logs** | Windows DNS/DHCP, Kea, ISC, Infoblox, routers: IP ↔ MAC ↔ hostname history, device discovery, suspicious queries. Works without the optional module of section 14. |
 | **Perimeter** | Firewall, proxy and VPN logs. |
 | **Email** | Mail gateway: phishing, attachments, header analysis. |
-| **Network (NDR)** | Zeek and Suricata: agentless devices (printers, IoT, OT) and lateral movement. |
+| **Network (NDR)** | Suricata: agentless devices (printers, IoT, OT) and lateral movement. |
 
 Decoy accounts and SPNs in Active Directory are never created without explicit approval from a domain administrator: they modify a production directory.
 
@@ -892,9 +892,9 @@ These modules are **disabled by default** and install separately, alone or with 
 
 ### NDR module
 
-- **Zeek** (protocol metadata) and **Suricata** (signatures) sensors, on a mirror port or a TAP, deployed as a container or an appliance.
+- **Suricata** sensors (signatures and EVE protocol logs for flow, DNS, HTTP, TLS, SMB, Kerberos and DCE-RPC), on a mirror port or a TAP, deployed as a container or an appliance.
 - **Full packet capture** by Suricata, in a ring buffer on local disk with a configurable retention period (for example 7 days). From an alert or an incident, extraction of the exact PCAP flow, downloadable or viewable online.
-- **Network file analysis**: files extracted from traffic by Zeek and Suricata are scanned by **YARA-X** and then, if needed, by the sandbox.
+- **Network file analysis**: files extracted from traffic by Suricata are scanned by **YARA-X** and then, if needed, by the sandbox.
 - The module sees agentless devices (printers, IoT, OT) and lateral movement; its events feed correlation, network discovery and the risk score.
 
 ### RMM module
@@ -1002,10 +1002,10 @@ Licences to be checked at every release; state known at the time of writing:
 
 | Component | Licence | Consequence |
 | --- | --- | --- |
-| ClickHouse, NATS JetStream, vLLM, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries, guacd (Apache Guacamole proxy, agentless SSH opt-in only) | Apache 2.0 | No particular constraint |
+| ClickHouse, NATS JetStream, vLLM, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries | Apache 2.0 | No particular constraint |
 | OpenTelemetry eBPF profiler, Tetragon | Apache 2.0, kernel-side eBPF programs GPLv2 (Tetragon: BSD-2-Clause or GPLv2) | Run as a separate process on the agent |
 | osquery | Apache 2.0 / GPLv2 (dual licence) | No particular constraint |
-| YARA-X, Zeek, Unbound, OpenCanary, ipmitool | BSD | No particular constraint |
+| YARA-X, Unbound, OpenCanary, ipmitool | BSD | No particular constraint |
 | lldpd | ISC | No particular constraint |
 | Atomic Red Team, CrowdSec, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei), gitleaks, NanoMDM, winget | MIT | No particular constraint |
 | Kea, Vector, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
@@ -1049,9 +1049,9 @@ Licences to be checked at every release; state known at the time of writing:
 
 ## 19. Out of scope and open questions
 
-### Out of scope for v1
+### Out of scope
 
-- **Custom macOS Endpoint Security client**: the v1 macOS agent uses `eslogger` and the unified log (section 21).
+- **Custom macOS Endpoint Security client**: the macOS agent uses `eslogger` and the unified log (section 21).
 - **Browser RDP and VNC to servers** through a gateway: remote access goes through the agent channel and the relay-only remote desktop (section 21).
 - **Remote control of iOS and iPadOS devices**: Apple allows screen sharing only.
 - **DLP**, beyond detection of network exfiltration.
@@ -1251,7 +1251,7 @@ These functions belong to the RMM and MDM modules. They are the highest-risk par
 - **Components.** osquery; `eslogger` and the unified log as telemetry sources; the application firewall, FileVault, Gatekeeper, SIP and XProtect state read from the system; launchd for supervision.
 - **State.** As on the other agents: local encrypted buffer; server side as sections 4 and 20.
 - **Requirements.**
-  - v1 uses no custom Endpoint Security client (it needs an Apple entitlement); the agent states its reduced mode like the older Linux kernels (section 5).
+  - The agent uses no custom Endpoint Security client (it needs an Apple entitlement); the agent states its reduced mode like the older Linux kernels (section 5).
   - The agent package is signed with an Apple Developer ID and notarised (open prerequisite in section 19).
   - The agent runs with the permissions macOS grants through a configuration profile deployed by MDM or by hand; a missing permission is detected and displayed as a blind spot.
   - Scripts, patches, software, remote shell and remote desktop work as on the other systems, through the same signed commands.
@@ -1286,7 +1286,7 @@ These functions belong to the RMM and MDM modules. They are the highest-risk par
 ### Network devices
 
 - **What it does.** Visibility on switches, routers, firewalls, access points and printers: interface state and counters, errors, topology through LLDP and CDP, flows, configuration changes and events.
-- **Components.** The site collector for traps, flows and syslog; SNMP v3 decoding in the Rust code; polling by SNMP, and SSH from the interface through `guacd`, only when enabled per device.
+- **Components.** The site collector for traps, flows and syslog; SNMP v3 decoding in the Rust code; polling by SNMP, and an opt-in SSH console to agentless equipment, only when enabled per device: an in-house SSH client (`russh`) in the site collector, streamed to the Ostyr interface over the collector's outbound channel, under the remote shell rules (dedicated role, MFA at each opening, full recording).
 - **State.** Metrics and flows in ClickHouse; devices and links in the CMDB (PostgreSQL); device declarations in Git.
 - **Requirements.**
   - Push is the default; SNMP polling is an explicit per-device opt-in in the device file, never applied to a device that runs an agent.
