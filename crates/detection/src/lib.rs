@@ -4,7 +4,6 @@ pub mod detect;
 pub mod error;
 pub mod id;
 pub mod model;
-pub mod pg;
 pub mod run;
 pub mod settings;
 pub mod store;

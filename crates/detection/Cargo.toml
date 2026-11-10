@@ -7,10 +7,8 @@ publish = false
 
 [dependencies]
 agent-channel = { version = "0.0.0", path = "../agent-channel" }
-alerts = { version = "0.0.0", path = "../alerts" }
 core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
-core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2.11.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -18,17 +16,12 @@ sha2 = "0.10"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 stream-correlation = { version = "0.0.0", path = "../stream-correlation" }
 thiserror = "2"
-time = { version = "0.3", features = ["formatting"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
-tokio-postgres = "0.7"
+time = "0.3"
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 
 [dev-dependencies]
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber = "0.3"
 
 [lints]
