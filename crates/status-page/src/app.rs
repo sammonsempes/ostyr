@@ -8,8 +8,8 @@ use crate::server::status_router;
 use crate::settings::open_settings_engine;
 use crate::snapshot::{publish, snapshot_of};
 use crate::types::ShutdownSignal;
-use core_audit::log::{append, open_file_log, AuditLog};
-use core_config::reload::ReloadContext;
+use core_audit::log::{append_declared, open_file_log, AuditLog};
+use core_config::reload::{ReloadContext, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
 use core_config::watch::watch_files;
 use serde::Deserialize;
@@ -40,10 +40,13 @@ pub struct AppFile {
 }
 
 
-/// An audit function appending to the audit log file.
+pub const AUDIT_DECLARED_KEYS: &[&str] = &RELOAD_DECLARED_KEYS;
+
+
+/// An audit function appending declared keys only (values are already cut by `reload_entry`) to the audit log file.
 pub fn file_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
     let shared = Arc::clone(log);
-    Box::new(move |entry| append(&shared, entry))
+    Box::new(move |entry| append_declared(&shared, entry, AUDIT_DECLARED_KEYS))
 }
 
 
