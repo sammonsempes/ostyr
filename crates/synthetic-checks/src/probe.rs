@@ -1,4 +1,4 @@
-use crate::error::{CheckError, ProbeError};
+use crate::error::{CheckError, GuardError, ProbeError};
 use crate::load::validate_nat64_prefix;
 use crate::model::{MAX_BODY_EXCERPT_BYTES, MAX_TIMEOUT_SECONDS};
 use crate::target::{guard_address_nat64, probe_socket, CheckedAddr};
@@ -227,6 +227,7 @@ pub fn guarded_addresses(
     resolve: &Resolve<'_>,
     left: Duration,
 ) -> Result<Vec<CheckedAddr>, ProbeError> {
+    validate_nat64_prefix(nat64).map_err(|error| ProbeError::Refused(GuardError::BadPrefix(error)))?;
     let addresses = match host {
         Host::Ipv4(address) => vec![IpAddr::V4(address)],
         Host::Ipv6(address) => vec![IpAddr::V6(address)],

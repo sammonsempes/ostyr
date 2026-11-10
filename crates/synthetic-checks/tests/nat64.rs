@@ -40,10 +40,11 @@ fn prefix(text: &str) -> Result<Ipv6Net, Box<dyn std::error::Error>> {
 
 
 fn class_of(text: &str, scope: &[IpNet], nat64: Option<Ipv6Net>) -> Result<Option<AddressClass>, Box<dyn std::error::Error>> {
-    Ok(guard_address_nat64(ip(text)?, scope, nat64).err().map(|error| match error {
-        GuardError::Refused { class, .. } => class,
-        GuardError::BadPrefix(_) => AddressClass::Reserved,
-    }))
+    match guard_address_nat64(ip(text)?, scope, nat64) {
+        Ok(_) => Ok(None),
+        Err(GuardError::Refused { class, .. }) => Ok(Some(class)),
+        Err(GuardError::BadPrefix(error)) => Err(error.into()),
+    }
 }
 
 
@@ -210,4 +211,21 @@ fn an_unsupported_prefix_length_is_a_typed_refusal_in_both_guards() -> TestResul
             assert!(matches!(outcome, Err(ProbeError::Refused(GuardError::BadPrefix(_)))), "{declared}");
             Ok(())
         })
+}
+
+
+#[test]
+fn an_invalid_prefix_refuses_a_name_that_resolves_to_nothing() -> TestResult {
+    let resolve = |_: &str, _: Duration, _: usize| -> std::io::Result<Vec<IpAddr>> { Ok(vec![]) };
+    let outcome = guarded_addresses(
+        Host::Domain("empty.example"),
+        &[],
+        Some(prefix("2001:db8::/33")?),
+        &resolve,
+        Duration::ZERO,
+    );
+    assert!(matches!(outcome, Err(ProbeError::Refused(GuardError::BadPrefix(_)))));
+    let valid = guarded_addresses(Host::Domain("empty.example"), &[], None, &resolve, Duration::ZERO)?;
+    assert!(valid.is_empty());
+    Ok(())
 }
