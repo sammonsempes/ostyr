@@ -128,7 +128,7 @@ pub fn run_syslog(config: &SyslogConfig, events: &[EcsEvent]) -> Result<(), Expo
 
 
 /// The audit keys that keep their value; `reload_entry` already cut each value with a visible marker.
-pub const EXPORT_DECLARED_KEYS: [&str; 5] = RELOAD_DECLARED_KEYS;
+pub const EXPORT_DECLARED_KEYS: [&str; 6] = RELOAD_DECLARED_KEYS;
 
 
 /// Reloads of the export settings are appended to this log.

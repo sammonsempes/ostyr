@@ -10,8 +10,8 @@ use core_config::apply::{apply, audit_entry, ApplyContext, APPLY_DECLARED_KEYS};
 use core_config::error::ApplyError;
 use core_config::plan::{change_of, plan, Change, ChangeKind};
 use core_config::reload::{
-    bounded_parameter, bounded_value, changed_settings_text, diff_digest, diff_text, full_diff, reload_entry, with_changes, ReloadContext,
-    MAX_DIFF_CHARS, MAX_DIFF_ENTRIES, MAX_KEY_ENTRIES, MAX_VALUE_CHARS, RELOAD_DECLARED_KEYS,
+    bounded_parameter, bounded_value, changed_files_text, changed_settings_text, diff_digest, diff_text, full_diff, reload_entry, with_changes,
+    ReloadContext, MAX_DIFF_CHARS, MAX_DIFF_ENTRIES, MAX_KEY_ENTRIES, MAX_VALUE_CHARS, RELOAD_DECLARED_KEYS,
 };
 use core_config::types::{BoxError, ConfigState};
 use std::cell::RefCell;
@@ -53,6 +53,9 @@ impl Write for FailingWriter {
 
 
 const THREE_CHANGES: usize = 3;
+
+
+const CHANGED_KEYS: usize = 300;
 
 
 fn state(items: &[(&str, &str)]) -> ConfigState {
@@ -343,6 +346,30 @@ fn a_reload_with_many_changes_lists_every_key_marks_the_cut_and_carries_the_dige
     assert_eq!(entry.parameters.get("diff_sha256"), Some(&diff_digest(&full_diff(&changes))));
     assert_ne!(diff_digest(&full_diff(&changes)), diff_digest(&shown));
     assert!(entry.parameters.get("changed_settings").is_some_and(|text| text.contains("key0000")));
+    Ok(())
+}
+
+
+#[test]
+fn changed_files_lists_each_file_once_from_the_full_change_list() -> TestResult {
+    let mut changes: Vec<Change> = (0..CHANGED_KEYS)
+        .map(|index| change_of(ChangeKind::Update, &format!("a.yaml::k{index}"), "1", "2"))
+        .collect();
+    changes.push(change_of(ChangeKind::Update, "b.yaml::z", "1", "2"));
+    changes.push(change_of(ChangeKind::Update, "plain", "1", "2"));
+    let files: Vec<String> = serde_json::from_str(&changed_files_text(&changes))?;
+    assert_eq!(files, vec!["a.yaml".to_owned(), "b.yaml".to_owned()]);
+    let entry = with_changes(
+        reload_entry(
+            &reload_context(),
+            Outcome::Success,
+            [("result", "applied".to_owned()), ("diff", String::new())],
+        ),
+        &changes,
+    );
+    assert_eq!(entry.parameters.get("changed_files").map(String::as_str), Some(r#"["a.yaml","b.yaml"]"#));
+    let long = bounded_parameter("changed_files", &"x".repeat(MAX_DIFF_CHARS + 1));
+    assert!(long.contains("[changed_files truncated, 1 characters omitted]"));
     Ok(())
 }
 
