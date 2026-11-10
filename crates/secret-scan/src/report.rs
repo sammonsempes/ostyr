@@ -1,6 +1,7 @@
 use crate::error::ReportError;
 use crate::mask::{escape_bounded, masked_excerpt, MAX_FIELD_CHARS};
 use crate::model::{Finding, Limits, Report, ScanScope};
+use core_pg::scope::tenant_scope;
 use glob::Pattern;
 use serde::de::IgnoredAny;
 use serde::Deserialize;
@@ -87,6 +88,7 @@ fn classify(entry: &RawValue, patterns: &[Pattern], limits: &Limits) -> Outcome 
 
 /// Parses one gitleaks JSON report for one tenant and scan scope into masked findings.
 pub fn parse_report<Source: Read>(reader: Source, limits: &Limits, tenant: &str, scope_id: &str, scope: &ScanScope) -> Result<Report, ReportError> {
+    tenant_scope(tenant).map_err(ReportError::InvalidTenant)?;
     let patterns = scope
         .skipped_paths
         .iter()

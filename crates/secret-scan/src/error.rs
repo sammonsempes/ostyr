@@ -1,3 +1,4 @@
+use core_pg::error::PgError;
 use thiserror::Error;
 
 
@@ -15,4 +16,6 @@ pub enum ReportError {
     InvalidLimits { max_bytes: usize },
     #[error("invalid skipped path pattern: {0}")]
     InvalidPattern(#[source] glob::PatternError),
+    #[error("invalid tenant name")]
+    InvalidTenant(#[source] PgError),
 }
