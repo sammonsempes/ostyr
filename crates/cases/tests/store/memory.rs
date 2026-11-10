@@ -141,9 +141,10 @@ pub fn select(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, P
 
 pub fn apply(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgError> {
     let change: Value = serde_json::from_str(param(params, 1)?).map_err(|_source| malformed())?;
+    let cap = param(params, CAP_INDEX)?.parse::<usize>().map_err(|_source| malformed())?;
     let version = change.get("version").and_then(Value::as_i64).ok_or_else(malformed)?;
     match table.get_mut(param(params, 0)?) {
-        Some(entry) if entry.version == version => {
+        Some(entry) if entry.version == version && entry.case.history.len() < cap => {
             let event: CaseEvent = serde_json::from_value(change.get("event").cloned().ok_or_else(malformed)?).map_err(|_source| malformed())?;
             entry.case.status = serde_json::from_value(change.get("status").cloned().ok_or_else(malformed)?).map_err(|_source| malformed())?;
             entry.case.resolution =
