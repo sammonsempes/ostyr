@@ -622,3 +622,64 @@ async fn a_key_owned_by_another_asset_is_one_conflict_and_no_retry() -> TestResu
     assert_eq!(first.attributes.get("rack").map(|attribute| attribute.value.as_str()), Some("r1"));
     Ok(())
 }
+
+
+fn version_of(db: &Db, id: &str) -> Option<i64> {
+    with_tenant(db, "acme", |tenant| tenant.assets.get(id).map(|stored| stored.2))
+}
+
+
+#[tokio::test]
+async fn an_identical_open_conflict_is_stored_once_and_leaves_the_version_alone() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[]), &truth, &limits).await?;
+    let mut owner_b = observation("agent", "S2", &[]);
+    owner_b.keys.insert(IdentityKey::Mac, "M".to_owned());
+    reconcile_stored(&exec, &scope, &owner_b, &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
+    let after_first = version_of(&db, "serial_number:S1");
+    let second = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
+    let third = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
+    assert_eq!((second.conflicts.len(), third.conflicts.len()), (1, 1));
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
+    assert_eq!(version_of(&db, "serial_number:S1"), after_first);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_conflict_differing_in_value_is_stored_and_bumps_the_version() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    let before = version_of(&db, "serial_number:S1");
+    reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "cat")]), &truth, &limits).await?;
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE);
+    assert!(version_of(&db, "serial_number:S1") > before);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn duplicates_inside_one_document_are_stored_once() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &TruthMap::new(), &limits).await?;
+    let snapshot = load_assets(&exec, &scope, &limits).await?;
+    let mut outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("hr", "S1", &[("owner", "bob")]), &TruthMap::new())?;
+    let duplicate = outcome.conflicts.clone();
+    outcome.conflicts.extend(duplicate);
+    apply_outcome(&exec, &scope, &snapshot, &outcome).await?;
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
+    Ok(())
+}

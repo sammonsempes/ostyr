@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum CmdbError {
     #[error("observation from `{source_name}` carries no identity key")]
     NoIdentity { source_name: String },
+    #[error("derived asset id `{id}` belongs to an existing asset that does not own that key")]
+    IdCollision { id: String },
 }
 
 
@@ -22,6 +24,10 @@ pub enum ImportError {
     Header(#[source] csv::Error),
     #[error("mapped column `{column}` is missing from the import file")]
     MissingColumn { column: String },
+    #[error("import mapping field `{field}` uses a reserved name")]
+    ReservedName { field: &'static str },
+    #[error("import mapping: {0}")]
+    Mapping(#[from] core_config::error::ConfigError),
 }
 
 
