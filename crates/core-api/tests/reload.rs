@@ -120,6 +120,9 @@ const WITH_CA_FILES: usize = 8;
 const TWO_RECORDS: usize = 2;
 
 
+const LISTED_FORWARDERS: usize = 2;
+
+
 const FOUR_RECORDS: usize = 4;
 
 
@@ -649,6 +652,28 @@ fn a_valid_change_applies_and_an_invalid_one_keeps_the_old_value() -> TestResult
 
 
 #[test]
+fn a_changed_forwarder_list_applies_and_is_audited_and_a_bad_one_keeps_the_old_list() -> TestResult {
+    let running = live("")?;
+    assert!(running.state.forwarders.load().is_empty());
+    rewrite(&running, "  trusted_forwarders: \"10.0.0.0/8, 192.0.2.1\"\n")?;
+    assert_eq!(
+        reload(&running.engine),
+        ReloadOutcome::Applied {
+            keys: vec!["settings.trusted_forwarders".to_owned()]
+        }
+    );
+    let applied: Vec<String> = running.state.forwarders.load().iter().map(ToString::to_string).collect();
+    assert_eq!(applied, ["10.0.0.0/8".to_owned(), "192.0.2.1/32".to_owned()]);
+    assert!(reload_records(running.dir.path())?.iter().any(|line| line.contains("trusted_forwarders")));
+    rewrite(&running, "  trusted_forwarders: \"10.0.0.0/8, bogus\"\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("bogus")));
+    assert_eq!(running.state.forwarders.load().len(), LISTED_FORWARDERS);
+    assert!(reload_records(running.dir.path())?.iter().any(|line| line.contains("refused")));
+    Ok(())
+}
+
+
+#[test]
 fn a_lowered_rate_limit_applies_to_the_next_request() -> TestResult {
     let running = live("")?;
     let source = peer()?;
@@ -936,6 +961,19 @@ async fn editing_the_module_file_changes_the_running_server() -> TestResult {
     )?;
     let limited = eventually(|| async move { Ok(status_of(address).await?.contains("429")) }).await?;
     assert!(limited);
+    stop_listener(&listener, None);
+    assert!(guarded("server task", task).await??.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_forwarder_listed_at_startup_must_name_the_client() -> TestResult {
+    let dir = tempdir()?;
+    let path = write_module(dir.path(), "  trusted_forwarders: \"127.0.0.1\"\n")?;
+    let (listener, task) = start_module(&path);
+    let address = listening(&listener).await?;
+    assert!(status_of(address).await?.contains("400"));
     stop_listener(&listener, None);
     assert!(guarded("server task", task).await??.is_ok());
     Ok(())

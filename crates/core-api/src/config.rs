@@ -3,9 +3,10 @@ use crate::model::{ApiConfig, Limits, OidcFiles, TlsFiles};
 use crate::state::{MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_config::model::ModuleConfig;
 use core_config::types::BoxError;
+use ipnet::IpNet;
 use std::error::Error;
 use std::fmt::Display;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -88,6 +89,12 @@ pub const MAX_CONNECTIONS_CAP: usize = 65_536;
 pub const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 
 
+pub const SETTING_TRUSTED_FORWARDERS: &str = "trusted_forwarders";
+
+
+pub const MAX_TRUSTED_FORWARDERS: usize = 64;
+
+
 pub const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 
 
@@ -154,6 +161,34 @@ pub fn limits(module: &ModuleConfig) -> Result<Limits, StartupError> {
         )?),
         max_connections_per_source: number_setting(module, SETTING_MAX_CONNECTIONS, MAX_CONNECTIONS_PER_SOURCE, 1..=MAX_CONNECTIONS_CAP)?,
     })
+}
+
+
+/// One forwarder entry: a CIDR, or a single address (a host network).
+pub fn parse_forwarder(text: &str) -> Result<IpNet, StartupError> {
+    text.parse::<IpNet>()
+        .or_else(|_| text.parse::<IpAddr>().map(IpNet::from))
+        .map_err(|source| StartupError::InvalidSetting {
+            name: SETTING_TRUSTED_FORWARDERS,
+            value: text.to_owned(),
+            source: BoxError::from(source),
+        })
+}
+
+
+/// The comma separated `trusted_forwarders` setting (default empty); more than `MAX_TRUSTED_FORWARDERS` entries or an empty entry is refused.
+pub fn forwarders(module: &ModuleConfig) -> Result<Vec<IpNet>, StartupError> {
+    let text = module.settings.get(SETTING_TRUSTED_FORWARDERS).map_or("", |value| value.trim());
+    let entries: Vec<&str> = text.split(',').map(str::trim).filter(|_| !text.is_empty()).collect();
+    if entries.len() > MAX_TRUSTED_FORWARDERS {
+        Err(StartupError::OutOfRange {
+            name: SETTING_TRUSTED_FORWARDERS,
+            minimum: "0".to_owned(),
+            maximum: MAX_TRUSTED_FORWARDERS.to_string(),
+        })
+    } else {
+        entries.into_iter().map(parse_forwarder).collect()
+    }
 }
 
 

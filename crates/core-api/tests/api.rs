@@ -1513,6 +1513,7 @@ async fn an_oversized_request_source_is_cut_before_it_is_audited() -> TestResult
         state_changing: true,
         sensitive: false,
         source: "s".repeat(MAX_VALUE_CHARS + OVERSIZE),
+        forwarded_by: None,
         status: StatusCode::OK,
     };
     audit_exchange(&fx.state, &exchange)?;

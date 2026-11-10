@@ -27,6 +27,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
@@ -121,6 +122,8 @@ pub fn build_state(
         limits: Arc::new(ArcSwap::from_pointee(config.limits)),
         oidc: ArcSwapOption::new(inputs.oidc.clone()),
         callback_accounts: Mutex::new(BTreeSet::new()),
+        forwarders: ArcSwap::from_pointee(Vec::new()),
+        ignored_forwarding: AtomicU64::new(0),
     })
 }
 
