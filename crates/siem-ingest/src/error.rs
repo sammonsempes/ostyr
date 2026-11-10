@@ -46,7 +46,7 @@ pub enum TenantError {
     Empty,
     #[error("the tenant token exceeds the length cap")]
     TooLong,
-    #[error("the tenant token holds a character outside letters, digits, `-` and `_`")]
+    #[error("the tenant token is not a valid tenant name")]
     Characters,
 }
 
