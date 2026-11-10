@@ -4,7 +4,7 @@ use crate::error::ExportError;
 use crate::http::{build_agent, post_json, post_otlp};
 use crate::otlp::prepare_otlp;
 use crate::pipeline::{export_otlp, export_webhook, ExportReport};
-use crate::reload::check_webhook;
+use crate::reload::check_webhook_url;
 use crate::reload::open_export_engine;
 use crate::syslog::{format_message, send_datagrams, write_frames, SyslogHeader};
 use crate::tls::{client_config, close, open_stream};
@@ -84,6 +84,7 @@ pub fn run_webhook(
     pause: &mut SleepFn,
     now: OffsetDateTime,
 ) -> Result<ExportReport, ExportError> {
+    check_webhook_url(config)?;
     let ca = read_ca(config.ca_file.as_ref())?;
     let agent = build_agent(ca.as_deref())?;
     let token = config.token.as_ref().map(resolve).transpose().map_err(ExportError::Secret)?;
@@ -197,7 +198,6 @@ pub fn webhook_command<Output: Write>(
     now: OffsetDateTime,
 ) -> Result<(), ExportError> {
     let webhook = config.webhook.as_ref().ok_or(ExportError::MissingSection("webhook"))?;
-    check_webhook(config)?;
     report_to(out, &run_webhook(webhook, events, resolve, policy, pause, now)?)
 }
 
