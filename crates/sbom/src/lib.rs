@@ -10,4 +10,5 @@ pub mod purl;
 #[cfg(unix)]
 pub mod run;
 pub mod settings;
+pub mod signing;
 pub mod types;

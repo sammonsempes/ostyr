@@ -18,3 +18,12 @@ pub type Helpers = Arc<AtomicUsize>;
 
 #[cfg(unix)]
 pub type Job = Box<dyn FnOnce() -> Result<(), crate::error::RunError> + Send + 'static>;
+
+
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+
+pub type SignerFn = dyn Fn(&[u8]) -> Result<Vec<u8>, BoxError> + Send + Sync;
+
+
+pub type TrustedKeys = BTreeMap<String, crate::model::TrustedKey>;
