@@ -357,9 +357,9 @@ pub struct Current {
 }
 
 
-/// The live listener: a reload starts a new server (a new generation) on the new socket and drains the old one.
-#[derive(Debug)]
+/// The live listener: a reload starts a new server (a new generation) on the new socket and drains the old one. `state` is set once by `run_module`, so module code can reach the module audit log.
 pub struct Listener {
+    pub state: OnceLock<Arc<ApiState>>,
     pub current: Mutex<Current>,
     pub connections: ConnectionTable,
     pub finished: Notify,

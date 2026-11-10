@@ -413,6 +413,7 @@ pub async fn guard(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let admitted_identity = app.identity.load_full();
     let route = route_of(&request);
     let rule = app.access.get(&route);
     let decision = decide(&app, rule.map(|found| &found.requirement), bearer_token(request.headers()), (app.clock)());
@@ -421,6 +422,7 @@ pub async fn guard(
     let response = match decision.error {
         Some(error) => error_response(&error),
         None => {
+            request.extensions_mut().insert(admitted_identity);
             decision.session.into_iter().for_each(|session| {
                 request.extensions_mut().insert(session);
             });
