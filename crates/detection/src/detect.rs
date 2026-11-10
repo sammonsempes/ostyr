@@ -1,7 +1,9 @@
 use crate::error::{DetectionError, SinkError};
-use crate::id::{alert_id, event_identity};
+use crate::id::event_identity;
 use crate::model::{AlertRecord, AlertStore, CommitPolicy, Detector, ACK_WAIT_DIVISOR};
-use crate::types::{AlertSinkFn, EngineMap};
+use crate::types::{AlertSinkFn, EngineMap, KindCounts};
+use alerts::error::StoreError;
+use alerts::id::alert_id;
 use core_config::reload::{current_config, ReloadEngine};
 use core_config::types::BoxError;
 use serde_json::Value;
@@ -9,6 +11,7 @@ use siem_ingest::batcher::backoff_delay;
 use siem_ingest::model::Document;
 use siem_ingest::tenant::is_tenant_char;
 use siem_ingest::types::SinkFn;
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -42,6 +45,7 @@ pub fn new_detector(
         checkpoint_dir,
         refused: AtomicU64::new(0),
         invalid: AtomicU64::new(0),
+        permanent: Mutex::new(KindCounts::new()),
         dirty: AtomicBool::new(false),
     }
 }
@@ -133,7 +137,37 @@ pub fn report_progress(detector: &Detector) {
 }
 
 
-/// Retries the commit in place (nothing later is fetched, so the order survives a store failure) until it works, the service stops or `max_attempts`.
+/// A refusal the store would repeat for the same records, however often it is retried (a bound, an identity, a time or a tenant); only a connection, a timeout or an answer after SQL was sent can heal.
+pub fn is_permanent(error: &SinkError) -> bool {
+    match error {
+        SinkError::EventIdTooLong { .. }
+        | SinkError::EventTimeRange(_)
+        | SinkError::EventTimeFormat(_)
+        | SinkError::TenantMismatch
+        | SinkError::Serialize(_) => true,
+        SinkError::Store(inner) => !matches!(
+            inner,
+            StoreError::Pg(_) | StoreError::BadRow { .. } | StoreError::BadNumber { .. } | StoreError::BadEvents(_)
+        ),
+        _ => false,
+    }
+}
+
+
+/// Counts the refused records under the kind of the refusal (the cause's fixed text, never alert or event content) and warns with the totals.
+pub fn refuse_permanent(detector: &Detector, refused: usize, error: &SinkError) {
+    let kind = error.source().map_or_else(|| error.to_string(), ToString::to_string);
+    let total = {
+        let mut counts = detector.permanent.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = counts.entry(kind.clone()).or_insert(0);
+        *count += refused as u64;
+        *count
+    };
+    warn!(kind, refused, total, "alerts refused for good");
+}
+
+
+/// Retries a transient failure in place (nothing later is fetched, so the order survives a store failure) until it works, the service stops or `max_attempts`.
 pub fn commit_in_place(detector: &Detector, tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
     let policy = &detector.retry;
     let settings = current_config(&policy.ingest);
@@ -142,6 +176,10 @@ pub fn commit_in_place(detector: &Detector, tenant: &str, records: &[AlertRecord
         let started = Instant::now();
         match (detector.commit)(&detector.store, tenant, records) {
             Ok(stored) => Err(Ok(stored)),
+            Err(error) if is_permanent(&error) => {
+                refuse_permanent(detector, records.len(), &error);
+                Err(Ok(0))
+            }
             Err(error) if (policy.stop)() || attempt + 1 == policy.max_attempts => Err(Err(error)),
             Err(error) => {
                 let delay = backoff_delay(&settings, attempt);
