@@ -22,15 +22,17 @@ if [ "$CI_USER" = root ]; then
   mkdir -p "$RUNNER_HOME/.cargo"
   cp -a "$RUSTUP_HOME_REAL" "$RUNNER_HOME/.rustup"
   cp -a "$CARGO_HOME_REAL/registry" "$RUNNER_HOME/.cargo/registry"
-  git clone --quiet --branch "$BRANCH" "$ROOT" "$RUNNER_HOME/src"
+  RUNNER_CHECKOUT="$RUNNER_HOME/work/ostyr/ostyr"
+  mkdir -p "$(dirname "$RUNNER_CHECKOUT")"
+  git clone --quiet --branch "$BRANCH" "$ROOT" "$RUNNER_CHECKOUT"
   chown -R "$OWNER:$OWNER" "$RUNNER_HOME"
   chmod 750 "$RUNNER_HOME"
   RUNNER_ENV=(HOME="$RUNNER_HOME" LANG=C.UTF-8 CARGO_TERM_COLOR=never RUSTUP_HOME="$RUNNER_HOME/.rustup" CARGO_HOME="$RUNNER_HOME/.cargo"
     PATH="$WORK/bin:/usr/local/bin:/usr/bin:/bin")
-  cd "$RUNNER_HOME/src"
+  cd "$RUNNER_CHECKOUT"
   setpriv --reuid="$OWNER" --regid="$OWNER" --init-groups env -i "${RUNNER_ENV[@]}" cargo fetch --locked
   if [ "$FIX" = 1 ]; then
-    taskset -c "$CPUS" env -i "${RUNNER_ENV[@]}" "$ROOT/.github/gate-run.sh" "$OWNER" "$RUNNER_HOME/src" "$RUNNER_HOME"
+    taskset -c "$CPUS" env -i "${RUNNER_ENV[@]}" "$ROOT/.github/gate-run.sh" "$OWNER" "$RUNNER_CHECKOUT" "$RUNNER_HOME"
   else
     taskset -c "$CPUS" env -i "${RUNNER_ENV[@]}" SUDO_UID="$(id -u "$OWNER")" .githooks/pre-commit
   fi
