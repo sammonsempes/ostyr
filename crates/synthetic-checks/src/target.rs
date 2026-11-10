@@ -38,6 +38,9 @@ pub const NAT64_V6: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 0,
 pub const NAT64_LOCAL_V6: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48);
 
 
+pub const TEREDO_V6: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32);
+
+
 pub const SIIT_V6: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, 0, 0), 96);
 
 
@@ -75,26 +78,32 @@ pub fn classify(address: IpAddr) -> Option<AddressClass> {
             (v6.is_unicast_link_local(), AddressClass::LinkLocal),
             (v6.is_multicast(), AddressClass::Multicast),
             (v6.is_unspecified(), AddressClass::Unspecified),
-            (SITE_LOCAL_V6.contains(&v6) || NAT64_LOCAL_V6.contains(&v6), AddressClass::Reserved),
+            (
+                SITE_LOCAL_V6.contains(&v6) || NAT64_LOCAL_V6.contains(&v6) || TEREDO_V6.contains(&v6),
+                AddressClass::Reserved,
+            ),
         ],
     };
     table.into_iter().find_map(|(matches, class)| matches.then_some(class))
 }
 
 
-/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96), SIIT, 6to4 or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and every RFC 6052 position is checked too so metadata there is never scoped.
+/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96 or any address whose bits 64 to 95 are zero, a network-specific /96 prefix), SIIT, 6to4, Teredo (server and obfuscated client) or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and every RFC 6052 position is checked too so metadata there is never scoped.
 pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
     match address {
         IpAddr::V4(_) => Vec::new(),
         IpAddr::V6(v6) => {
-            let [_, _, o2, o3, o4, o5, o6, o7, _, o9, o10, o11, o12, o13, o14, o15] = v6.octets();
+            let [_, _, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15] = v6.octets();
+            let teredo_client = Ipv4Addr::new(!o12, !o13, !o14, !o15);
+            let rfc6052_96 = (o8 | o9 | o10 | o11) == 0 && o12 != 0;
             let last_32 = Ipv4Addr::new(o12, o13, o14, o15);
             let six_to_four = Ipv4Addr::new(o2, o3, o4, o5);
             [
                 (
-                    NAT64_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6),
+                    NAT64_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6) || rfc6052_96,
                     vec![last_32],
                 ),
+                (TEREDO_V6.contains(&v6), vec![Ipv4Addr::new(o4, o5, o6, o7), teredo_client]),
                 (
                     NAT64_LOCAL_V6.contains(&v6),
                     vec![
