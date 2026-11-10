@@ -107,7 +107,7 @@ pub fn check_transport(uri: &Uri) -> Result<(), ExportError> {
         Some("https") => Ok(()),
         Some("http") if !uri.host().is_some_and(is_loopback_host) => Err(ExportError::Invalid("http is allowed for a loopback host only")),
         Some("http") => Ok(()),
-        _ => Err(ExportError::Invalid("endpoint must start with https://")),
+        _ => Err(ExportError::Invalid("url must start with https://")),
     }
 }
 
