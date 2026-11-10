@@ -3304,6 +3304,7 @@ dependencies = [
  "chrono-tz",
  "core-audit",
  "core-config",
+ "core-pg",
  "lettre",
  "libc",
  "log",
@@ -3315,6 +3316,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-subscriber",
  "ureq 3.5.1",
@@ -3805,6 +3808,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
 ]
