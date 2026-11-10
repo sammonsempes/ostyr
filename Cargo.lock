@@ -3583,6 +3583,7 @@ dependencies = [
 name = "oncall"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "base64 0.22.1",
  "cap-std",
  "chrono",

@@ -194,3 +194,15 @@ pub const LINK_ACTION_ACKNOWLEDGE: u8 = 1;
 
 
 pub const LINK_ACTION_RESOLVE: u8 = 2;
+
+
+pub const MAX_SOURCE_TENANTS: u64 = 256;
+
+
+pub const MAX_SOURCE_INTERVAL_SECONDS: u64 = 3600;
+
+
+pub const SEVERITY_COUNT: usize = 5;
+
+
+pub const MAX_SOURCE_TEXT_CHARS: usize = 256;

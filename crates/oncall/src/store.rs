@@ -1,4 +1,5 @@
 use crate::alert::{Alert, Event, FailureReason, LifecycleState, Opened, Outcome, Param, Phase, Statement};
+use crate::alert_source::FINGERPRINT_PREFIX;
 use crate::error::StoreError;
 use crate::lifecycle::transition;
 use crate::limits::{MAX_CHANNEL_NAME_BYTES, MAX_FINGERPRINT_BYTES, MAX_OPEN_ALERTS};
@@ -13,10 +14,20 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "oncall";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "oncall_0001",
-    sql: include_str!("../migrations/oncall_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 3] = [
+    Migration {
+        version: "oncall_0001",
+        sql: include_str!("../migrations/oncall_0001.sql"),
+    },
+    Migration {
+        version: "oncall_0002",
+        sql: include_str!("../migrations/oncall_0002.sql"),
+    },
+    Migration {
+        version: "oncall_0003",
+        sql: include_str!("../migrations/oncall_0003.sql"),
+    },
+];
 
 
 /// Params: `$2` fingerprint, `$3` now. A live alert with the same fingerprint is reused and its counter incremented.
@@ -51,6 +62,12 @@ pub fn valid_text(text: &str, max: usize) -> bool {
 }
 
 
+/// A caller fingerprint is bounded text and never starts with the alert source prefix.
+pub fn valid_fingerprint(fingerprint: &str) -> bool {
+    valid_text(fingerprint, MAX_FINGERPRINT_BYTES) && !fingerprint.starts_with(FINGERPRINT_PREFIX)
+}
+
+
 pub async fn run<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, sql: &'static str, params: Vec<Param>) -> Result<Vec<Row>, StoreError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
@@ -71,7 +88,7 @@ where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    if !valid_text(fingerprint, MAX_FINGERPRINT_BYTES) {
+    if !valid_fingerprint(fingerprint) {
         Err(StoreError::InvalidFingerprint { max: MAX_FINGERPRINT_BYTES })
     } else {
         let rows = run(exec, scope, OPEN_SQL, vec![Param::Text(fingerprint.to_owned()), Param::Time(Some(now))]).await?;
