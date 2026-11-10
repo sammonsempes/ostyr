@@ -33,6 +33,27 @@ pub const DEFAULT_MAX_SPOOL_BYTES: u64 = 67_108_864;
 pub const DEFAULT_MAX_LINES_PER_POLL: u64 = 10_000;
 
 
+pub const DEFAULT_SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
+
+
+pub const DEFAULT_SENSOR_WINDOW_SECONDS: u64 = 120;
+
+
+pub const DEFAULT_SENSOR_INTERVAL_SECONDS: u64 = 10;
+
+
+pub const DEFAULT_MAX_RESTARTS_PER_HOUR: u64 = 6;
+
+
+pub const MAX_SENSOR_WINDOW_SECONDS: u64 = 240;
+
+
+pub const MAX_SENSOR_INTERVAL_SECONDS: u64 = 30;
+
+
+pub const MAX_RESTARTS_PER_HOUR_CEILING: u64 = 60;
+
+
 /// Upper bound of the polls and agent runs of one process; the cap exists because the rules forbid an unbounded loop.
 pub const MAX_POLLS: u64 = u64::MAX;
 
@@ -60,7 +81,33 @@ impl Default for SourceSettings {
 }
 
 
-/// The settings file; only `settings` is live-reloaded, the paths are read at start.
+/// The bounds of the sensor supervisor: window of no export progress, seconds between checks, restart cap per hour (zero never restarts).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct SensorSettings {
+    pub window_seconds: u64,
+    pub interval_seconds: u64,
+    pub max_restarts_per_hour: u64,
+}
+
+
+impl Default for SensorSettings {
+    fn default() -> Self {
+        Self {
+            window_seconds: DEFAULT_SENSOR_WINDOW_SECONDS,
+            interval_seconds: DEFAULT_SENSOR_INTERVAL_SECONDS,
+            max_restarts_per_hour: DEFAULT_MAX_RESTARTS_PER_HOUR,
+        }
+    }
+}
+
+
+pub fn default_systemctl_path() -> PathBuf {
+    PathBuf::from(DEFAULT_SYSTEMCTL_PATH)
+}
+
+
+/// The settings file; `settings` and `sensor` are live-reloaded, the paths (`systemctl_path` included) are read at start.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinuxFile {
@@ -70,6 +117,10 @@ pub struct LinuxFile {
     pub audit_file: PathBuf,
     #[serde(default)]
     pub settings: SourceSettings,
+    #[serde(default)]
+    pub sensor: SensorSettings,
+    #[serde(default = "default_systemctl_path")]
+    pub systemctl_path: PathBuf,
 }
 
 

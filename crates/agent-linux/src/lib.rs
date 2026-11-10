@@ -15,6 +15,8 @@ pub mod model;
 #[cfg(unix)]
 pub mod run;
 #[cfg(unix)]
+pub mod sensor;
+#[cfg(unix)]
 pub mod settings;
 #[cfg(unix)]
 pub mod types;
