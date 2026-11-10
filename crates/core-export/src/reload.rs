@@ -1,4 +1,4 @@
-use crate::config::ExportConfig;
+use crate::config::{ExportConfig, WebhookConfig};
 use crate::error::ExportError;
 use crate::otlp::{check_transport, prepare_otlp};
 use core_config::parse::{parse_document, read_file};
@@ -35,19 +35,23 @@ pub fn check_otlp(config: &ExportConfig) -> Result<(), ExportError> {
 
 /// Refuses a webhook URL with userinfo, a query string or cleartext http to a remote host (a token in a path segment cannot be detected): the token goes through `SecretRef`, and the URL reaches the audit and the logs.
 pub fn check_webhook(config: &ExportConfig) -> Result<(), ExportError> {
-    config.webhook.iter().try_for_each(|webhook| {
-        let uri = webhook
-            .url
-            .parse::<Uri>()
-            .map_err(|_invalid| ExportError::Invalid("webhook url is not a valid URL"))?;
-        if uri.query().is_some() || uri.authority().is_some_and(|authority| authority.as_str().contains('@')) || webhook.url.contains('#') {
-            Err(ExportError::Invalid(
-                "webhook url must not contain credentials, a query string or a fragment",
-            ))
-        } else {
-            check_transport(&uri)
-        }
-    })
+    config.webhook.iter().try_for_each(check_webhook_url)
+}
+
+
+/// The check of one webhook section, run by every entry point that posts.
+pub fn check_webhook_url(webhook: &WebhookConfig) -> Result<(), ExportError> {
+    let uri = webhook
+        .url
+        .parse::<Uri>()
+        .map_err(|_invalid| ExportError::Invalid("webhook url is not a valid URL"))?;
+    if uri.query().is_some() || uri.authority().is_some_and(|authority| authority.as_str().contains('@')) || webhook.url.contains('#') {
+        Err(ExportError::Invalid(
+            "webhook url must not contain credentials, a query string or a fragment",
+        ))
+    } else {
+        check_transport(&uri)
+    }
 }
 
 

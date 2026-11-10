@@ -11,7 +11,7 @@ mod types;
 use core_audit::log::{append, genesis_log};
 use core_config::reload::{ReloadContext, ReloadEngine};
 use core_config::secret::SecretRef;
-use core_export::cli::{otlp_command, run, run_otlp, run_syslog, sample_event, sample_events, syslog_command, webhook_command};
+use core_export::cli::{otlp_command, run, run_otlp, run_syslog, run_webhook, sample_event, sample_events, syslog_command, webhook_command};
 use core_export::config::{parse_export, ExportConfig};
 use core_export::error::ExportError;
 use core_export::reload::open_export_engine;
@@ -19,7 +19,7 @@ use core_export::types::BoxError;
 use core_export::webhook::RetryPolicy;
 use std::fs;
 use std::io;
-use std::net::UdpSocket;
+use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -262,6 +262,26 @@ fn a_webhook_url_with_a_query_is_refused_before_any_send() -> TestResult {
     )?;
     let result = webhook_command(&mut Vec::new(), &config, &[], &no_secret, &fast_policy(), &mut |_delay| {}, now()?);
     assert!(matches!(result, Err(ExportError::Invalid(_))));
+    Ok(())
+}
+
+
+#[test]
+fn run_webhook_called_directly_refuses_before_any_connection() -> TestResult {
+    let dir = tempdir()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let urls = ["http://siem.example/h".to_string(), format!("http://127.0.0.1:{port}/h?token=XYZ")];
+    let events = sample_events(1, 0, now()?);
+    urls.iter().try_for_each(|url| -> TestResult {
+        let config = parse_export(&webhook_yaml(url, &dir.path().join("buf"), ""), "export.yaml")?;
+        let webhook = config.webhook.as_ref().ok_or("no webhook section")?;
+        let result = run_webhook(webhook, &events, &no_secret, &fast_policy(), &mut |_delay| {}, now()?);
+        assert!(matches!(result, Err(ExportError::Invalid(_))));
+        Ok(())
+    })?;
+    assert!(matches!(listener.accept(), Err(ref error) if error.kind() == io::ErrorKind::WouldBlock));
     Ok(())
 }
 
