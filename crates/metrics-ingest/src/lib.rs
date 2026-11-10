@@ -2,5 +2,6 @@
 
 pub mod cardinality;
 pub mod decode;
+pub mod insert;
 pub mod model;
 pub mod types;
