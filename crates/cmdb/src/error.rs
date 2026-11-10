@@ -7,6 +7,8 @@ pub enum CmdbError {
     NoIdentity { source_name: String },
     #[error("derived asset id `{id}` belongs to an existing asset that does not own that key")]
     IdCollision { id: String },
+    #[error("observation field `{field}` uses a reserved name")]
+    ReservedName { field: &'static str },
 }
 
 
@@ -51,6 +53,8 @@ pub enum StoreError {
     BadLimits,
     #[error("an asset version is not a number")]
     BadVersion(#[source] std::num::ParseIntError),
+    #[error("the refused conflict list is malformed")]
+    BadRefused(#[source] serde_json::Error),
     #[error("an asset changed since it was read")]
     VersionConflict,
     #[error("still conflicting after {attempts} attempts")]

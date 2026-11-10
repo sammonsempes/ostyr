@@ -3,10 +3,13 @@ mod types;
 
 
 use cmdb::error::StoreError;
-use cmdb::model::{Asset, AssetKind, IdentityKey, Limits, Observation};
+use cmdb::model::{
+    Asset, AssetKind, Attribute, Conflict, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution, DEFAULT_MAX_OPEN_CONFLICTS,
+};
 use cmdb::store::{
-    apply_outcome, attempt, changed_assets, check_limits, conflict_of, event_doc, load_assets, read_table, reconcile_stored, resolution_text,
-    APPLY_SQL, ASSETS_SQL, ASSETS_TABLE, ASSET_CURSOR, ATTEMPT_CEILING, ATTRIBUTES_SQL, KEYS_SQL, MAX_PAGES, MAX_PAGE_SIZE, MIGRATIONS,
+    apply_outcome, attempt, changed_assets, check_limits, conflict_of, event_doc, is_exempt, load_assets, read_table, reconcile_stored,
+    resolution_text, without_refused, APPLY_SQL, ASSETS_SQL, ASSETS_TABLE, ASSET_CURSOR, ATTEMPT_CEILING, ATTRIBUTES_SQL, KEYS_SQL,
+    MAX_OPEN_CONFLICTS_CEILING, MAX_PAGES, MAX_PAGE_SIZE, MIGRATIONS,
 };
 use cmdb::types::{Row, RowFuture, TruthMap};
 use core_pg::error::PgError;
@@ -100,12 +103,12 @@ async fn a_new_observation_is_created_then_updated_with_a_new_version() -> TestR
     let limits = Limits::default();
     let truth = TruthMap::new();
     let first = reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("owner", "ann")]), &truth, &limits).await?;
-    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.outcome.events.len(), 1);
     let loaded = load_assets(&exec, &scope, &limits).await?;
     assert_eq!(loaded.assets.len(), 1);
     assert_eq!(loaded.versions.get("serial_number:SN1"), Some(&1));
     let second = reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("owner", "bob")]), &truth, &limits).await?;
-    assert!(second.events.is_empty());
+    assert!(second.outcome.events.is_empty());
     let reloaded = load_assets(&exec, &scope, &limits).await?;
     assert_eq!(reloaded.versions.get("serial_number:SN1"), Some(&SECOND_VERSION));
     let owner = reloaded
@@ -145,7 +148,7 @@ async fn a_tenant_never_sees_or_changes_another_tenants_asset() -> TestResult {
     reconcile_stored(&exec, &acme, &observation("agent", "SN1", &[("owner", "ann")]), &truth, &limits).await?;
     assert!(load_assets(&exec, &other, &limits).await?.assets.is_empty());
     let created = reconcile_stored(&exec, &other, &observation("agent", "SN1", &[("owner", "zed")]), &truth, &limits).await?;
-    assert_eq!(created.events.len(), 1);
+    assert_eq!(created.outcome.events.len(), 1);
     let acme_assets = load_assets(&exec, &acme, &limits).await?.assets;
     let other_assets = load_assets(&exec, &other, &limits).await?.assets;
     assert_eq!(acme_assets.len(), 1);
@@ -193,7 +196,7 @@ async fn a_real_concurrent_change_is_detected_by_the_version() -> TestResult {
     let snapshot = load_assets(&exec, &scope, &limits).await?;
     let outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("agent", "SN1", &[("owner", "bob")]), &truth)?;
     reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("owner", "cy")]), &truth, &limits).await?;
-    let result = apply_outcome(&exec, &scope, &snapshot, &outcome).await;
+    let result = apply_outcome(&exec, &scope, &snapshot, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await;
     assert!(matches!(result, Err(StoreError::VersionConflict)), "{result:?}");
     let owner = load_assets(&exec, &scope, &limits)
         .await?
@@ -430,6 +433,19 @@ fn limits_are_validated() -> TestResult {
     }));
     assert!(refused(Limits { page_size: 1, ..good }));
     assert!(refused(Limits {
+        max_open_conflicts: 0,
+        ..good
+    }));
+    assert!(refused(Limits {
+        max_open_conflicts: MAX_OPEN_CONFLICTS_CEILING + 1,
+        ..good
+    }));
+    assert!(check_limits(&Limits {
+        max_open_conflicts: MAX_OPEN_CONFLICTS_CEILING,
+        ..good
+    })
+    .is_ok());
+    assert!(refused(Limits {
         page_size: usize::MAX,
         ..good
     }));
@@ -521,7 +537,7 @@ async fn an_identity_key_taken_by_a_concurrent_create_is_a_version_conflict_then
         &limits,
     )
     .await?;
-    let refused = apply_outcome(&exec, &scope, &stale, &outcome).await;
+    let refused = apply_outcome(&exec, &scope, &stale, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await;
     assert!(matches!(refused, Err(StoreError::VersionConflict)), "{refused:?}");
     assert_eq!(load_assets(&exec, &scope, &limits).await?.assets.len(), 1);
     reconcile_stored(&exec, &scope, &seen, &truth, &limits).await?;
@@ -554,8 +570,8 @@ async fn two_stale_applies_of_a_conflict_on_an_unchanged_asset_write_one_conflic
         events: Vec::new(),
     };
     assert!(changed_assets(&snapshot, &only_event).is_empty());
-    apply_outcome(&exec, &scope, &snapshot, &outcome).await?;
-    let second = apply_outcome(&exec, &scope, &snapshot, &outcome_again).await;
+    apply_outcome(&exec, &scope, &snapshot, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await?;
+    let second = apply_outcome(&exec, &scope, &snapshot, &outcome_again, DEFAULT_MAX_OPEN_CONFLICTS).await;
     assert!(matches!(second, Err(StoreError::VersionConflict)), "{second:?}");
     assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
     Ok(())
@@ -608,7 +624,9 @@ async fn a_key_owned_by_another_asset_is_one_conflict_and_no_retry() -> TestResu
     owner_b.keys.insert(IdentityKey::Mac, "M".to_owned());
     reconcile_stored(&exec, &scope, &owner_b, &truth, &limits).await?;
     let before = *lock(&db.apply_calls);
-    let outcome = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
+    let outcome = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits)
+        .await?
+        .outcome;
     assert_eq!(*lock(&db.apply_calls), before + 1);
     assert_eq!(outcome.conflicts.len(), 1);
     let conflict = outcome.conflicts.first().ok_or("no conflict")?;
@@ -644,7 +662,7 @@ async fn an_identical_open_conflict_is_stored_once_and_leaves_the_version_alone(
     let after_first = version_of(&db, "serial_number:S1");
     let second = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
     let third = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
-    assert_eq!((second.conflicts.len(), third.conflicts.len()), (1, 1));
+    assert_eq!((second.outcome.conflicts.len(), third.outcome.conflicts.len()), (1, 1));
     assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
     assert_eq!(version_of(&db, "serial_number:S1"), after_first);
     Ok(())
@@ -679,7 +697,266 @@ async fn duplicates_inside_one_document_are_stored_once() -> TestResult {
     let mut outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("hr", "S1", &[("owner", "bob")]), &TruthMap::new())?;
     let duplicate = outcome.conflicts.clone();
     outcome.conflicts.extend(duplicate);
-    apply_outcome(&exec, &scope, &snapshot, &outcome).await?;
+    apply_outcome(&exec, &scope, &snapshot, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await?;
     assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
+    Ok(())
+}
+
+
+fn resolve_all(db: &Db) {
+    with_tenant(db, "acme", |tenant| {
+        tenant.conflicts.iter_mut().for_each(|conflict| memory::set_status(conflict, "resolved"));
+    });
+}
+
+
+#[tokio::test]
+async fn a_resolved_conflict_can_come_back_as_a_new_open_one() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
+    resolve_all(&db);
+    let again = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert_eq!(again.refused_conflicts.len(), 0);
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE);
+    let repeated = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert_eq!(repeated.refused_conflicts.len(), 0);
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn open_conflicts_are_capped_per_asset_and_the_refusal_is_counted() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let truth = TruthMap::new();
+    let limits = Limits {
+        max_open_conflicts: TWICE,
+        ..Limits::default()
+    };
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    let at_bound_one = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    let at_bound_two = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "cat")]), &truth, &limits).await?;
+    assert!(at_bound_one.refused_conflicts.is_empty() && at_bound_two.refused_conflicts.is_empty());
+    let before = version_of(&db, "serial_number:S1");
+    let over = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "dan")]), &truth, &limits).await?;
+    assert_eq!((over.outcome.conflicts.len(), over.refused_conflicts.len()), (0, 1));
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE);
+    assert_eq!(version_of(&db, "serial_number:S1"), before);
+    resolve_all(&db);
+    let after_resolution = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "dan")]), &truth, &limits).await?;
+    assert_eq!(after_resolution.refused_conflicts.len(), 0);
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE + 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_cap_of_one_tenant_never_counts_another_tenants_conflicts() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let truth = TruthMap::new();
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let acme = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    reconcile_stored(&exec, &acme, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &acme, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &other, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    let result = reconcile_stored(&exec, &other, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert_eq!(result.refused_conflicts.len(), 0);
+    Ok(())
+}
+
+
+pub async fn apply_answer(rows: Vec<Row>) -> Result<Vec<RefusedConflict>, StoreError> {
+    let exec = move |_: TenantScope, _: &'static str, _: Vec<String>| -> RowFuture<'static> { Box::pin(ready(Ok(rows.clone()))) };
+    let scope = tenant_scope("acme")?;
+    let snapshot = cmdb::model::Snapshot {
+        assets: Vec::new(),
+        versions: cmdb::types::VersionMap::new(),
+    };
+    let outcome = cmdb::model::Outcome {
+        inventory: Vec::new(),
+        conflicts: Vec::new(),
+        events: Vec::new(),
+    };
+    apply_outcome(&exec, &scope, &snapshot, &outcome, 1).await
+}
+
+
+#[tokio::test]
+async fn a_malformed_apply_answer_is_refused() -> TestResult {
+    assert!(matches!(apply_answer(Vec::new()).await, Err(StoreError::BadRow { .. })));
+    assert!(matches!(apply_answer(vec![Vec::new()]).await, Err(StoreError::BadRow { .. })));
+    assert!(matches!(
+        apply_answer(vec![vec!["true".to_owned()]]).await,
+        Err(StoreError::BadRow { .. })
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec!["true".to_owned(), "many".to_owned()]]).await,
+        Err(StoreError::BadRefused(_))
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec!["false".to_owned(), "[]".to_owned()]]).await,
+        Err(StoreError::VersionConflict)
+    ));
+    let listed = apply_answer(vec![vec![
+        "true".to_owned(),
+        r#"[{"asset":"a","attribute":"owner","observed_source":"hr"}]"#.to_owned(),
+    ]])
+    .await?;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.first().map(|refused| refused.attribute.as_str()), Some("owner"));
+    Ok(())
+}
+
+
+#[test]
+fn the_conflict_status_migration_adds_the_status_and_the_duplicate_index() -> TestResult {
+    let sql = MIGRATIONS.get(1).ok_or("no second migration")?.sql;
+    assert!(sql.contains("status IN ('open', 'resolved')"));
+    assert!(sql.contains("ON cmdb_conflicts (tenant, asset, attribute)"));
+    assert!(APPLY_SQL.contains("o.status = 'open'"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_overwrite_by_the_source_of_truth_at_the_cap_still_records_its_conflict() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let truth = TruthMap::from([("owner".to_owned(), "hr".to_owned())]);
+    reconcile_stored(
+        &exec,
+        &scope,
+        &observation("agent", "S1", &[("owner", "ann"), ("rack", "r1")]),
+        &truth,
+        &limits,
+    )
+    .await?;
+    let filled = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("rack", "r2")]), &truth, &limits).await?;
+    assert_eq!(filled.outcome.conflicts.len(), 1);
+    let third = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "eve")]), &truth, &limits).await?;
+    assert!(third.refused_conflicts.is_empty(), "{third:?}");
+    assert_eq!(third.outcome.conflicts.len(), 1);
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_key_conflict_is_never_refused_by_the_cap() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &observation("agent", "S2", &[]), &truth, &limits).await?;
+    let swapped = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "m1"), &truth, &limits).await?;
+    assert!(swapped.refused_conflicts.is_empty());
+    let taken = reconcile_stored(&exec, &scope, &nic_swap("agent", "S2", "m1"), &truth, &limits).await?;
+    assert!(taken.refused_conflicts.is_empty());
+    assert!(with_tenant(&db, "acme", |tenant| tenant.conflicts.iter().any(|conflict| memory::text(
+        conflict,
+        "attribute"
+    )
+    .starts_with("key:"))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn one_source_at_its_cap_does_not_block_another_and_refusals_are_listed() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    let blocked = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "cat")]), &truth, &limits).await?;
+    assert_eq!(
+        blocked.refused_conflicts,
+        vec![RefusedConflict {
+            asset: "serial_number:S1".to_owned(),
+            attribute: "owner".to_owned(),
+            observed_source: "hr".to_owned(),
+        }]
+    );
+    assert!(blocked.outcome.conflicts.is_empty());
+    let other = reconcile_stored(&exec, &scope, &observation("cmms", "S1", &[("owner", "dan")]), &truth, &limits).await?;
+    assert!(other.refused_conflicts.is_empty());
+    assert_eq!(other.outcome.conflicts.len(), 1);
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), TWICE);
+    Ok(())
+}
+
+
+fn conflict_of_source(asset: &str, attribute: &str, source: &str, resolution: Resolution) -> Conflict {
+    let side = |value: &str, from: &str| Attribute {
+        value: value.to_owned(),
+        source: from.to_owned(),
+    };
+    Conflict {
+        asset: asset.to_owned(),
+        attribute: attribute.to_owned(),
+        current: side("x", "agent"),
+        observed: side("y", source),
+        resolution,
+    }
+}
+
+
+#[test]
+fn a_refused_conflict_is_matched_on_asset_attribute_and_source_together() -> TestResult {
+    let kept = [
+        conflict_of_source("a2", "owner", "hr", Resolution::Undecided),
+        conflict_of_source("a1", "rack", "hr", Resolution::Undecided),
+        conflict_of_source("a1", "owner", "cmms", Resolution::Undecided),
+    ];
+    let gone = conflict_of_source("a1", "owner", "hr", Resolution::Undecided);
+    let outcome = Outcome {
+        inventory: Vec::new(),
+        conflicts: kept.iter().cloned().chain([gone]).collect(),
+        events: Vec::new(),
+    };
+    let refused = [RefusedConflict {
+        asset: "a1".to_owned(),
+        attribute: "owner".to_owned(),
+        observed_source: "hr".to_owned(),
+    }];
+    assert_eq!(without_refused(outcome, &refused).conflicts, kept);
+    Ok(())
+}
+
+
+#[test]
+fn only_a_took_observed_or_key_conflict_is_exempt() -> TestResult {
+    assert!(is_exempt(&conflict_of_source("a", "owner", "hr", Resolution::TookObserved)));
+    assert!(is_exempt(&conflict_of_source("a", "key:mac", "hr", Resolution::Undecided)));
+    assert!(!is_exempt(&conflict_of_source("a", "owner", "hr", Resolution::KeptCurrent)));
     Ok(())
 }

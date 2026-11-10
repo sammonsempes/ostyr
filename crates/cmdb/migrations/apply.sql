@@ -18,14 +18,33 @@ guard AS (
 fresh AS (
     SELECT DISTINCT f->>'asset' AS asset, f->>'attribute' AS attribute, f->>'current_value' AS current_value,
         f->>'current_source' AS current_source, f->>'observed_value' AS observed_value, f->>'observed_source' AS observed_source,
-        f->>'resolution' AS resolution
+        f->>'resolution' AS resolution, (f->>'exempt')::boolean AS exempt
     FROM doc, jsonb_array_elements(body->'conflicts') AS f
     WHERE NOT EXISTS (
         SELECT 1 FROM cmdb_conflicts o
         WHERE o.tenant = $1 AND o.asset = f->>'asset' AND o.attribute = f->>'attribute'
           AND o.current_value = f->>'current_value' AND o.current_source = f->>'current_source'
           AND o.observed_value = f->>'observed_value' AND o.observed_source = f->>'observed_source'
+          AND o.status = 'open'
     )
+),
+ranked AS (
+    SELECT f.*, (
+        SELECT count(*) FROM cmdb_conflicts o
+        WHERE o.tenant = $1 AND o.asset = f.asset AND o.observed_source = f.observed_source AND o.status = 'open'
+    ) + f.position <= $3::text::bigint AS admit
+    FROM (
+        SELECT fresh.*, row_number() OVER (
+            PARTITION BY asset, observed_source ORDER BY attribute, current_value, current_source, observed_value
+        ) AS position
+        FROM fresh
+        WHERE NOT exempt
+    ) f
+),
+admitted AS (
+    SELECT asset, attribute, current_value, current_source, observed_value, observed_source, resolution FROM fresh WHERE exempt
+    UNION ALL
+    SELECT asset, attribute, current_value, current_source, observed_value, observed_source, resolution FROM ranked WHERE admit
 ),
 inserted AS (
     INSERT INTO cmdb_assets (tenant, id, kind, lifecycle, version)
@@ -37,7 +56,7 @@ updated AS (
     SET kind = c.kind, lifecycle = c.lifecycle, version = t.version + 1
     FROM changed c
     WHERE t.tenant = $1 AND t.id = c.id AND t.version = c.version AND c.version > 0 AND (SELECT ok FROM guard)
-      AND (c.touch OR EXISTS (SELECT 1 FROM fresh WHERE fresh.asset = c.id))
+      AND (c.touch OR EXISTS (SELECT 1 FROM admitted WHERE admitted.asset = c.id))
     RETURNING t.id
 ),
 written_keys AS (
@@ -62,7 +81,7 @@ written_attributes AS (
 written_conflicts AS (
     INSERT INTO cmdb_conflicts (tenant, asset, attribute, current_value, current_source, observed_value, observed_source, resolution)
     SELECT $1, asset, attribute, current_value, current_source, observed_value, observed_source, resolution
-    FROM fresh
+    FROM admitted
     WHERE (SELECT ok FROM guard)
     RETURNING asset
 ),
@@ -73,4 +92,7 @@ written_events AS (
     WHERE (SELECT ok FROM guard)
     RETURNING asset
 )
-SELECT (SELECT ok FROM guard)::text
+SELECT (SELECT ok FROM guard)::text, (
+    SELECT coalesce(json_agg(json_build_object('asset', asset, 'attribute', attribute, 'observed_source', observed_source)), '[]'::json)
+    FROM ranked WHERE NOT admit
+)::text
