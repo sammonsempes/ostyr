@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2.11.1"
 ed25519-dalek = "3"
 packageurl = "0.7"
@@ -17,8 +18,11 @@ struson = "0.7"
 tempfile = "3"
 thiserror = "2"
 tracing = "0.1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+url = "2"
 zeroize = "1"
 vuln-match = { version = "0.0.0", path = "../vuln-match" }
+rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -26,6 +30,8 @@ rustix = { version = "1", features = ["process", "fs"] }
 walkdir = "2"
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [lints]
 workspace = true
