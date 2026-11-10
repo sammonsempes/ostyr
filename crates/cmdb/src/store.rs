@@ -1,5 +1,8 @@
 use crate::error::StoreError;
-use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution, Snapshot, Stored};
+use crate::model::{
+    Applied, Asset, Attribute, Conflict, DuplicateConflict, Event, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution, Snapshot,
+    Stored,
+};
 use crate::reconcile::{reconcile, RESERVED_ATTRIBUTE_PREFIX};
 use crate::types::{Executor, Row, TruthMap, VersionMap};
 use core_pg::error::PgError;
@@ -43,7 +46,7 @@ pub const KEY_CURSOR: [usize; 2] = [1, 2];
 pub const ATTRIBUTE_CURSOR: [usize; 2] = [0, 1];
 
 
-/// One statement (one implicit transaction): `$1` tenant, `$2` JSON changes, `$3` open-conflict cap; answers the applied flag and the refused conflicts as a JSON array.
+/// One statement (one implicit transaction): `$1` tenant, `$2` JSON changes, `$3` open-conflict cap, `$4` open key-conflict cap; answers the applied flag, the refused conflicts and the duplicates of open ones, each as a JSON array.
 pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
 
 
@@ -60,6 +63,12 @@ pub const ATTEMPT_CEILING: usize = 10;
 
 
 pub const MAX_OPEN_CONFLICTS_CEILING: usize = 100_000;
+
+
+pub const MAX_OPEN_KEY_CONFLICTS_CEILING: usize = 10_000;
+
+
+pub const DUPLICATES_COLUMN: usize = 2;
 
 
 pub const KIND_COLUMN: usize = 1;
@@ -100,7 +109,7 @@ pub fn conflict_of(error: PgError) -> StoreError {
 }
 
 
-/// A page size that is zero, above `MAX_PAGE_SIZE`, or too small to reach the row caps within `MAX_PAGES` pages is refused, as is a conflict cap of 0 or above its ceiling.
+/// A page size that is zero, above `MAX_PAGE_SIZE`, or too small to reach the row caps within `MAX_PAGES` pages is refused, as is a conflict cap (either) of 0 or above its ceiling.
 pub fn check_limits(limits: &Limits) -> Result<(), StoreError> {
     let reach = limits.page_size.saturating_mul(MAX_PAGES);
     if limits.page_size == 0
@@ -108,6 +117,8 @@ pub fn check_limits(limits: &Limits) -> Result<(), StoreError> {
         || reach <= limits.max_assets.max(limits.max_child_rows)
         || limits.max_open_conflicts == 0
         || limits.max_open_conflicts > MAX_OPEN_CONFLICTS_CEILING
+        || limits.max_open_key_conflicts == 0
+        || limits.max_open_key_conflicts > MAX_OPEN_KEY_CONFLICTS_CEILING
     {
         Err(StoreError::BadLimits)
     } else {
@@ -283,15 +294,22 @@ pub fn resolution_text(resolution: Resolution) -> &'static str {
 }
 
 
-/// A conflict recording a write by the source of truth or an identity signal is never refused by the cap.
+/// A conflict recording a write by the source of truth is never refused: refusing it would hide the write.
 pub fn is_exempt(conflict: &Conflict) -> bool {
-    conflict.resolution == Resolution::TookObserved || conflict.attribute.starts_with(RESERVED_ATTRIBUTE_PREFIX)
+    conflict.resolution == Resolution::TookObserved
+}
+
+
+/// An identity signal (`key:` attribute) is capped apart from the other conflicts.
+pub fn is_key_signal(conflict: &Conflict) -> bool {
+    conflict.attribute.starts_with(RESERVED_ATTRIBUTE_PREFIX)
 }
 
 
 pub fn conflict_doc(conflict: &Conflict) -> Value {
     json!({
         "exempt": is_exempt(conflict),
+        "is_key": is_key_signal(conflict),
         "asset": conflict.asset,
         "attribute": conflict.attribute,
         "current_value": conflict.current.value,
@@ -317,8 +335,8 @@ pub async fn apply_outcome(
     scope: &TenantScope,
     snapshot: &Snapshot,
     outcome: &Outcome,
-    max_open_conflicts: usize,
-) -> Result<Vec<RefusedConflict>, StoreError> {
+    limits: &Limits,
+) -> Result<Applied, StoreError> {
     let assets: Vec<Value> = changed_assets(snapshot, outcome)
         .into_iter()
         .map(|asset| {
@@ -334,32 +352,56 @@ pub async fn apply_outcome(
         "conflicts": outcome.conflicts.iter().map(conflict_doc).collect::<Vec<Value>>(),
         "events": outcome.events.iter().map(event_doc).collect::<Vec<Value>>(),
     });
-    let rows = exec(scope.clone(), APPLY_SQL, vec![document.to_string(), max_open_conflicts.to_string()])
-        .await
-        .map_err(conflict_of)?;
+    let rows = exec(
+        scope.clone(),
+        APPLY_SQL,
+        vec![
+            document.to_string(),
+            limits.max_open_conflicts.to_string(),
+            limits.max_open_key_conflicts.to_string(),
+        ],
+    )
+    .await
+    .map_err(conflict_of)?;
     let answer = rows.first().ok_or(StoreError::BadRow { table: CONFLICTS_TABLE })?;
     let applied = cell(answer, 0, CONFLICTS_TABLE)? == "true";
     let refused: Vec<RefusedConflict> = serde_json::from_str(cell(answer, 1, CONFLICTS_TABLE)?).map_err(StoreError::BadRefused)?;
+    let duplicates: Vec<DuplicateConflict> =
+        serde_json::from_str(cell(answer, DUPLICATES_COLUMN, CONFLICTS_TABLE)?).map_err(StoreError::BadDuplicates)?;
     if applied {
-        Ok(refused)
+        Ok(Applied { refused, duplicates })
     } else {
         Err(StoreError::VersionConflict)
     }
 }
 
 
-/// One observation has one conflict per asset, attribute and observed source, so that triple identifies a refused conflict.
-pub fn without_refused(outcome: Outcome, refused: &[RefusedConflict]) -> Outcome {
+/// One observation has one conflict per asset, attribute and observed source, so that triple identifies a refused or duplicate conflict.
+pub fn without_listed(outcome: Outcome, listed: &[(&str, &str, &str)]) -> Outcome {
     let conflicts = outcome
         .conflicts
         .into_iter()
-        .filter(|conflict| {
-            !refused
-                .iter()
-                .any(|gone| gone.asset == conflict.asset && gone.attribute == conflict.attribute && gone.observed_source == conflict.observed.source)
-        })
+        .filter(|conflict| !listed.contains(&(conflict.asset.as_str(), conflict.attribute.as_str(), conflict.observed.source.as_str())))
         .collect();
     Outcome { conflicts, ..outcome }
+}
+
+
+pub fn without_refused(outcome: Outcome, refused: &[RefusedConflict]) -> Outcome {
+    let listed: Vec<(&str, &str, &str)> = refused
+        .iter()
+        .map(|gone| (gone.asset.as_str(), gone.attribute.as_str(), gone.observed_source.as_str()))
+        .collect();
+    without_listed(outcome, &listed)
+}
+
+
+pub fn without_duplicates(outcome: Outcome, duplicates: &[DuplicateConflict]) -> Outcome {
+    let listed: Vec<(&str, &str, &str)> = duplicates
+        .iter()
+        .map(|gone| (gone.asset.as_str(), gone.attribute.as_str(), gone.observed_source.as_str()))
+        .collect();
+    without_listed(outcome, &listed)
 }
 
 
@@ -372,10 +414,11 @@ pub async fn attempt(
 ) -> Result<Stored, StoreError> {
     let snapshot = load_assets(exec, scope, limits).await?;
     let outcome = reconcile(&snapshot.assets, observation, truth)?;
-    let refused_conflicts = apply_outcome(exec, scope, &snapshot, &outcome, limits.max_open_conflicts).await?;
+    let applied = apply_outcome(exec, scope, &snapshot, &outcome, limits).await?;
     Ok(Stored {
-        outcome: without_refused(outcome, &refused_conflicts),
-        refused_conflicts,
+        outcome: without_duplicates(without_refused(outcome, &applied.refused), &applied.duplicates),
+        refused_conflicts: applied.refused,
+        duplicate_conflicts: applied.duplicates,
     })
 }
 

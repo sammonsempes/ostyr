@@ -4,12 +4,12 @@ mod types;
 
 use cmdb::error::StoreError;
 use cmdb::model::{
-    Asset, AssetKind, Attribute, Conflict, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution, DEFAULT_MAX_OPEN_CONFLICTS,
+    Applied, Asset, AssetKind, Attribute, Conflict, DuplicateConflict, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution,
 };
 use cmdb::store::{
-    apply_outcome, attempt, changed_assets, check_limits, conflict_of, event_doc, is_exempt, load_assets, read_table, reconcile_stored,
-    resolution_text, without_refused, APPLY_SQL, ASSETS_SQL, ASSETS_TABLE, ASSET_CURSOR, ATTEMPT_CEILING, ATTRIBUTES_SQL, KEYS_SQL,
-    MAX_OPEN_CONFLICTS_CEILING, MAX_PAGES, MAX_PAGE_SIZE, MIGRATIONS,
+    apply_outcome, attempt, changed_assets, check_limits, conflict_of, event_doc, is_exempt, is_key_signal, load_assets, read_table,
+    reconcile_stored, resolution_text, without_duplicates, without_refused, APPLY_SQL, ASSETS_SQL, ASSETS_TABLE, ASSET_CURSOR, ATTEMPT_CEILING,
+    ATTRIBUTES_SQL, KEYS_SQL, MAX_OPEN_CONFLICTS_CEILING, MAX_OPEN_KEY_CONFLICTS_CEILING, MAX_PAGES, MAX_PAGE_SIZE, MIGRATIONS,
 };
 use cmdb::types::{Row, RowFuture, TruthMap};
 use core_pg::error::PgError;
@@ -196,7 +196,7 @@ async fn a_real_concurrent_change_is_detected_by_the_version() -> TestResult {
     let snapshot = load_assets(&exec, &scope, &limits).await?;
     let outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("agent", "SN1", &[("owner", "bob")]), &truth)?;
     reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("owner", "cy")]), &truth, &limits).await?;
-    let result = apply_outcome(&exec, &scope, &snapshot, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await;
+    let result = apply_outcome(&exec, &scope, &snapshot, &outcome, &limits).await;
     assert!(matches!(result, Err(StoreError::VersionConflict)), "{result:?}");
     let owner = load_assets(&exec, &scope, &limits)
         .await?
@@ -433,6 +433,19 @@ fn limits_are_validated() -> TestResult {
     }));
     assert!(refused(Limits { page_size: 1, ..good }));
     assert!(refused(Limits {
+        max_open_key_conflicts: 0,
+        ..good
+    }));
+    assert!(refused(Limits {
+        max_open_key_conflicts: MAX_OPEN_KEY_CONFLICTS_CEILING + 1,
+        ..good
+    }));
+    assert!(check_limits(&Limits {
+        max_open_key_conflicts: MAX_OPEN_KEY_CONFLICTS_CEILING,
+        ..good
+    })
+    .is_ok());
+    assert!(refused(Limits {
         max_open_conflicts: 0,
         ..good
     }));
@@ -537,7 +550,7 @@ async fn an_identity_key_taken_by_a_concurrent_create_is_a_version_conflict_then
         &limits,
     )
     .await?;
-    let refused = apply_outcome(&exec, &scope, &stale, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await;
+    let refused = apply_outcome(&exec, &scope, &stale, &outcome, &limits).await;
     assert!(matches!(refused, Err(StoreError::VersionConflict)), "{refused:?}");
     assert_eq!(load_assets(&exec, &scope, &limits).await?.assets.len(), 1);
     reconcile_stored(&exec, &scope, &seen, &truth, &limits).await?;
@@ -570,8 +583,8 @@ async fn two_stale_applies_of_a_conflict_on_an_unchanged_asset_write_one_conflic
         events: Vec::new(),
     };
     assert!(changed_assets(&snapshot, &only_event).is_empty());
-    apply_outcome(&exec, &scope, &snapshot, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await?;
-    let second = apply_outcome(&exec, &scope, &snapshot, &outcome_again, DEFAULT_MAX_OPEN_CONFLICTS).await;
+    apply_outcome(&exec, &scope, &snapshot, &outcome, &limits).await?;
+    let second = apply_outcome(&exec, &scope, &snapshot, &outcome_again, &Limits::default()).await;
     assert!(matches!(second, Err(StoreError::VersionConflict)), "{second:?}");
     assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
     Ok(())
@@ -662,7 +675,8 @@ async fn an_identical_open_conflict_is_stored_once_and_leaves_the_version_alone(
     let after_first = version_of(&db, "serial_number:S1");
     let second = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
     let third = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
-    assert_eq!((second.outcome.conflicts.len(), third.outcome.conflicts.len()), (1, 1));
+    assert_eq!((second.outcome.conflicts.len(), third.outcome.conflicts.len()), (0, 0));
+    assert_eq!((second.duplicate_conflicts.len(), third.duplicate_conflicts.len()), (1, 1));
     assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
     assert_eq!(version_of(&db, "serial_number:S1"), after_first);
     Ok(())
@@ -697,7 +711,7 @@ async fn duplicates_inside_one_document_are_stored_once() -> TestResult {
     let mut outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("hr", "S1", &[("owner", "bob")]), &TruthMap::new())?;
     let duplicate = outcome.conflicts.clone();
     outcome.conflicts.extend(duplicate);
-    apply_outcome(&exec, &scope, &snapshot, &outcome, DEFAULT_MAX_OPEN_CONFLICTS).await?;
+    apply_outcome(&exec, &scope, &snapshot, &outcome, &limits).await?;
     assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
     Ok(())
 }
@@ -778,7 +792,7 @@ async fn the_cap_of_one_tenant_never_counts_another_tenants_conflicts() -> TestR
 }
 
 
-pub async fn apply_answer(rows: Vec<Row>) -> Result<Vec<RefusedConflict>, StoreError> {
+pub async fn apply_answer(rows: Vec<Row>) -> Result<Applied, StoreError> {
     let exec = move |_: TenantScope, _: &'static str, _: Vec<String>| -> RowFuture<'static> { Box::pin(ready(Ok(rows.clone()))) };
     let scope = tenant_scope("acme")?;
     let snapshot = cmdb::model::Snapshot {
@@ -790,7 +804,7 @@ pub async fn apply_answer(rows: Vec<Row>) -> Result<Vec<RefusedConflict>, StoreE
         conflicts: Vec::new(),
         events: Vec::new(),
     };
-    apply_outcome(&exec, &scope, &snapshot, &outcome, 1).await
+    apply_outcome(&exec, &scope, &snapshot, &outcome, &Limits::default()).await
 }
 
 
@@ -803,20 +817,26 @@ async fn a_malformed_apply_answer_is_refused() -> TestResult {
         Err(StoreError::BadRow { .. })
     ));
     assert!(matches!(
-        apply_answer(vec![vec!["true".to_owned(), "many".to_owned()]]).await,
+        apply_answer(vec![vec!["true".to_owned(), "many".to_owned(), "[]".to_owned()]]).await,
         Err(StoreError::BadRefused(_))
     ));
     assert!(matches!(
-        apply_answer(vec![vec!["false".to_owned(), "[]".to_owned()]]).await,
+        apply_answer(vec![vec!["true".to_owned(), "[]".to_owned()]]).await,
+        Err(StoreError::BadRow { .. })
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec!["true".to_owned(), "[]".to_owned(), "many".to_owned()]]).await,
+        Err(StoreError::BadDuplicates(_))
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned()]]).await,
         Err(StoreError::VersionConflict)
     ));
-    let listed = apply_answer(vec![vec![
-        "true".to_owned(),
-        r#"[{"asset":"a","attribute":"owner","observed_source":"hr"}]"#.to_owned(),
-    ]])
-    .await?;
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed.first().map(|refused| refused.attribute.as_str()), Some("owner"));
+    let entry = r#"[{"asset":"a","attribute":"owner","observed_source":"hr"}]"#.to_owned();
+    let listed = apply_answer(vec![vec!["true".to_owned(), entry.clone(), entry]]).await?;
+    assert_eq!(listed.refused.len(), 1);
+    assert_eq!(listed.refused.first().map(|refused| refused.attribute.as_str()), Some("owner"));
+    assert_eq!(listed.duplicates.first().map(|known| known.observed_source.as_str()), Some("hr"));
     Ok(())
 }
 
@@ -954,9 +974,168 @@ fn a_refused_conflict_is_matched_on_asset_attribute_and_source_together() -> Tes
 
 
 #[test]
-fn only_a_took_observed_or_key_conflict_is_exempt() -> TestResult {
+fn only_a_took_observed_conflict_is_exempt_and_only_a_key_attribute_is_a_key_signal() -> TestResult {
     assert!(is_exempt(&conflict_of_source("a", "owner", "hr", Resolution::TookObserved)));
-    assert!(is_exempt(&conflict_of_source("a", "key:mac", "hr", Resolution::Undecided)));
+    assert!(!is_exempt(&conflict_of_source("a", "key:mac", "hr", Resolution::Undecided)));
     assert!(!is_exempt(&conflict_of_source("a", "owner", "hr", Resolution::KeptCurrent)));
+    assert!(is_key_signal(&conflict_of_source("a", "key:mac", "hr", Resolution::Undecided)));
+    assert!(!is_key_signal(&conflict_of_source("a", "owner", "hr", Resolution::Undecided)));
+    Ok(())
+}
+
+
+fn owner_of_mac(serial: &str, mac: &str) -> Observation {
+    let mut owner = observation("agent", serial, &[]);
+    owner.keys.insert(IdentityKey::Mac, mac.to_owned());
+    owner
+}
+
+
+async fn key_conflicts_from(db: &Db, source: &str, serial: &str, macs: &[&str], limits: &Limits) -> Result<Vec<cmdb::model::Stored>, StoreError> {
+    let exec = executor(db);
+    let scope = tenant_scope("acme")?;
+    let mut stored = Vec::new();
+    for mac in macs {
+        stored.push(reconcile_stored(&exec, &scope, &nic_swap(source, serial, mac), &TruthMap::new(), limits).await?);
+    }
+    Ok(stored)
+}
+
+
+async fn seed_mac_owners(db: &Db, owners: &[(&str, &str)], limits: &Limits) -> TestResult {
+    let exec = executor(db);
+    let scope = tenant_scope("acme")?;
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[]), &TruthMap::new(), limits).await?;
+    for (serial, mac) in owners {
+        reconcile_stored(&exec, &scope, &owner_of_mac(serial, mac), &TruthMap::new(), limits).await?;
+    }
+    Ok(())
+}
+
+
+fn stored_key_conflicts(db: &Db) -> usize {
+    with_tenant(db, "acme", |tenant| {
+        tenant
+            .conflicts
+            .iter()
+            .filter(|conflict| memory::text(conflict, "attribute").starts_with("key:"))
+            .count()
+    })
+}
+
+
+#[tokio::test]
+async fn key_conflicts_have_their_own_cap_at_the_bound_and_one_over() -> TestResult {
+    let db = Db::default();
+    let limits = Limits {
+        max_open_key_conflicts: TWICE,
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    seed_mac_owners(&db, &[("S2", "m2"), ("S3", "m3"), ("S4", "m4")], &limits).await?;
+    let runs = key_conflicts_from(&db, "agent", "S1", &["m2", "m3", "m4"], &limits).await?;
+    let flags: Vec<(usize, usize)> = runs
+        .iter()
+        .map(|run| (run.outcome.conflicts.len(), run.refused_conflicts.len()))
+        .collect();
+    assert_eq!(flags, vec![(1, 0), (1, 0), (0, 1)]);
+    assert_eq!(stored_key_conflicts(&db), TWICE);
+    let refused = runs.last().and_then(|run| run.refused_conflicts.first()).ok_or("no refusal")?;
+    assert_eq!((refused.attribute.as_str(), refused.observed_source.as_str()), ("key:mac", "agent"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_source_at_its_key_cap_does_not_block_another_and_the_other_cap_is_separate() -> TestResult {
+    let db = Db::default();
+    let limits = Limits {
+        max_open_key_conflicts: 1,
+        ..Limits::default()
+    };
+    seed_mac_owners(&db, &[("S2", "m2"), ("S3", "m3")], &limits).await?;
+    key_conflicts_from(&db, "agent", "S1", &["m2"], &limits).await?;
+    let blocked = key_conflicts_from(&db, "agent", "S1", &["m3"], &limits).await?;
+    assert_eq!(blocked.iter().map(|run| run.refused_conflicts.len()).sum::<usize>(), 1);
+    let other = key_conflicts_from(&db, "cmms", "S1", &["m3"], &limits).await?;
+    assert_eq!(other.iter().map(|run| run.refused_conflicts.len()).sum::<usize>(), 0);
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    let plain = reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert!(plain.refused_conflicts.is_empty());
+    assert_eq!(stored_key_conflicts(&db), TWICE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_repeated_open_conflict_is_listed_as_a_duplicate_and_not_as_new() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[("owner", "ann")]), &truth, &limits).await?;
+    let first = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert_eq!((first.outcome.conflicts.len(), first.duplicate_conflicts.len()), (1, 0));
+    let again = reconcile_stored(&exec, &scope, &observation("hr", "S1", &[("owner", "bob")]), &truth, &limits).await?;
+    assert!(again.outcome.conflicts.is_empty());
+    assert_eq!(
+        again.duplicate_conflicts,
+        vec![DuplicateConflict {
+            asset: "serial_number:S1".to_owned(),
+            attribute: "owner".to_owned(),
+            observed_source: "hr".to_owned(),
+        }]
+    );
+    assert_eq!(with_tenant(&db, "acme", |tenant| tenant.conflicts.len()), 1);
+    let kept = [conflict_of_source("a1", "owner", "hr", Resolution::Undecided)];
+    let outcome = Outcome {
+        inventory: Vec::new(),
+        conflicts: kept.to_vec(),
+        events: Vec::new(),
+    };
+    let unrelated = [DuplicateConflict {
+        asset: "a1".to_owned(),
+        attribute: "rack".to_owned(),
+        observed_source: "hr".to_owned(),
+    }];
+    assert_eq!(without_duplicates(outcome, &unrelated).conflicts, kept);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_specific_conflict_is_refused_inside_one_document_in_apply_sql_order() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let truth = TruthMap::new();
+    reconcile_stored(
+        &exec,
+        &scope,
+        &observation("agent", "S1", &[("owner", "ann"), ("rack", "r1")]),
+        &truth,
+        &limits,
+    )
+    .await?;
+    let snapshot = load_assets(&exec, &scope, &limits).await?;
+    let mut outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("hr", "S1", &[("owner", "bob"), ("rack", "r2")]), &truth)?;
+    outcome.conflicts.reverse();
+    let applied = apply_outcome(&exec, &scope, &snapshot, &outcome, &limits).await?;
+    let refused: Vec<&str> = applied.refused.iter().map(|gone| gone.attribute.as_str()).collect();
+    assert_eq!(refused, vec!["rack"]);
+    let stored: Vec<String> = with_tenant(&db, "acme", |tenant| {
+        tenant.conflicts.iter().map(|conflict| memory::text(conflict, "attribute")).collect()
+    });
+    assert_eq!(stored, vec!["owner".to_owned()]);
+    assert!(APPLY_SQL.contains("ORDER BY attribute, current_value, current_source, observed_value"));
+    assert!(APPLY_SQL.contains("left(o.attribute, 4) = 'key:'"));
     Ok(())
 }
