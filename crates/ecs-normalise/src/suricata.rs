@@ -182,6 +182,7 @@ fn endpoint(ip: Option<IpAddr>, port: Option<u16>, bytes: Option<u64>, packets: 
         domain: None,
         bytes,
         packets,
+        mac: None,
     })
 }
 

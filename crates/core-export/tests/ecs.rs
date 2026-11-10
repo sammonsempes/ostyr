@@ -85,6 +85,7 @@ fn full_event_matches_the_ecs_snapshot() -> TestResult {
     event.message = text("hello");
     event.host = Some(HostFields {
         name: text("srv1"),
+        hostname: None,
         id: text("h-1"),
         ip: vec!["10.0.0.1".to_string()],
         os: Some(OsFields { kind: text("linux") }),
@@ -268,5 +269,25 @@ fn network_telemetry_groups_are_serialised_when_set() -> TestResult {
     );
     let json = to_json(&event)?;
     assert_eq!(json, expected);
+    Ok(())
+}
+
+
+#[test]
+fn mac_and_hostname_are_serialised_only_when_set() -> TestResult {
+    let mut event = blank_event(OffsetDateTime::from_unix_timestamp(FIXED_UNIX)?);
+    let without = to_json(&event)?;
+    event.source = Some(EndpointFields {
+        mac: text("AA-BB-CC-DD-EE-FF"),
+        ..EndpointFields::default()
+    });
+    event.host = Some(HostFields {
+        hostname: text("pc1.example"),
+        ..HostFields::default()
+    });
+    let with: serde_json::Value = serde_json::from_str(&to_json(&event)?)?;
+    assert!(!without.contains("mac") && !without.contains("hostname"));
+    assert_eq!(with.pointer("/source/mac"), Some(&serde_json::Value::from("AA-BB-CC-DD-EE-FF")));
+    assert_eq!(with.pointer("/host/hostname"), Some(&serde_json::Value::from("pc1.example")));
     Ok(())
 }
