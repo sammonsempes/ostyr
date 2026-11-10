@@ -155,6 +155,23 @@ pub struct Outcome {
 }
 
 
+/// A conflict refused because its asset already held `max_open_conflicts` open ones from the same observed source; no value is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedConflict {
+    pub asset: String,
+    pub attribute: String,
+    pub observed_source: String,
+}
+
+
+/// A stored reconciliation: the outcome with only the conflicts that are stored, and the refused ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stored {
+    pub outcome: Outcome,
+    pub refused_conflicts: Vec<RefusedConflict>,
+}
+
+
 /// Assets as stored, with the version each had when read (the optimistic concurrency token).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -170,6 +187,7 @@ pub struct Limits {
     pub max_assets: usize,
     pub max_child_rows: usize,
     pub max_attempts: usize,
+    pub max_open_conflicts: usize,
 }
 
 
@@ -185,6 +203,9 @@ pub const DEFAULT_MAX_CHILD_ROWS: usize = 200_000;
 pub const DEFAULT_MAX_ATTEMPTS: usize = 3;
 
 
+pub const DEFAULT_MAX_OPEN_CONFLICTS: usize = 1_000;
+
+
 impl Default for Limits {
     fn default() -> Self {
         Limits {
@@ -192,6 +213,7 @@ impl Default for Limits {
             max_assets: DEFAULT_MAX_ASSETS,
             max_child_rows: DEFAULT_MAX_CHILD_ROWS,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            max_open_conflicts: DEFAULT_MAX_OPEN_CONFLICTS,
         }
     }
 }
