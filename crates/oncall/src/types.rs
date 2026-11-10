@@ -19,4 +19,5 @@ pub type FillFn = fn(&mut [u8]) -> Result<(), getrandom::Error>;
 pub type IssueError = crate::error::LinkError<std::convert::Infallible>;
 
 
-pub type LinkKey = zeroize::Zeroizing<Vec<u8>>;
+/// A signing key of at least `MIN_LINK_KEY_BYTES`; only `linkkey` builds one. No `Debug`: it is a secret.
+pub struct LinkKey(pub(crate) zeroize::Zeroizing<Vec<u8>>);
