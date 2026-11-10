@@ -54,6 +54,9 @@ pub const ACK_PREFIX: &str = "$JS.ACK.";
 pub const DEAD_SUBJECT: &str = "dead.events";
 
 
+pub const EVENTS_PREFIX: &str = "events.";
+
+
 pub const API_PREFIX: &str = "$JS.API.CONSUMER.";
 
 
@@ -66,6 +69,7 @@ pub struct Queued {
 
 
 pub struct Published {
+    pub subject: String,
     pub headers: String,
     pub payload: Vec<u8>,
 }
@@ -384,8 +388,9 @@ pub fn route(state: &mut StubState, subject: &str, reply: Option<&str>, headers:
             String::from_utf8_lossy(payload).into_owned()
         });
         Ok(Vec::new())
-    } else if subject == DEAD_SUBJECT {
+    } else if subject == DEAD_SUBJECT || subject.starts_with(EVENTS_PREFIX) {
         state.published.push(Published {
+            subject: subject.to_owned(),
             headers: headers.to_owned(),
             payload: payload.to_vec(),
         });

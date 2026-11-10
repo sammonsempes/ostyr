@@ -13,7 +13,7 @@ use agent_channel::commands::{agent_directory, command_source, paths_of, read_en
 use agent_channel::error::{AppError, ChannelError, SinkError};
 use agent_channel::model::{ClientTlsPaths, Delivered, Identity, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_channel::proto::EventBatch;
-use agent_channel::server_app::{bind_server, load_server_file, run_server, run_server_with_clock, ServerFile};
+use agent_channel::server_app::{bind_server, file_events, load_server_file, run_server, run_server_with_clock, ServerFile};
 use agent_channel::sink::{file_sink, load_seen, open_event_store, parse_line, store_batch, EventStore};
 use agent_channel::spool::{
     append_back, claim_spool, count_lines, finish_spool, line_limit, load_claimed, quarantine, read_sequence, rewrite_lines, rewrite_lines_between,
@@ -351,6 +351,7 @@ async fn a_batch_lands_once_a_resent_batch_is_deduplicated_and_a_command_reaches
                 tracing::warn!(%error, "stop sender dropped");
             }
         }),
+        file_events(&server)?,
     ));
     let first = run_once(&agent).await?;
     assert_eq!(first.acknowledged, vec![FIRST, SECOND]);
@@ -388,6 +389,7 @@ async fn a_restarted_server_still_deduplicates() -> TestResult {
                     tracing::warn!(%error, "stop sender dropped");
                 }
             }),
+            file_events(&server)?,
         ));
         run_once(&agent).await?;
         stop.send(()).map_err(|()| "server already stopped")?;
@@ -410,13 +412,11 @@ async fn the_server_refuses_bad_files() -> TestResult {
         ..server.clone()
     };
     assert!(bind_server(&unknown).await.is_err());
-    let listener = bind_server(&server).await?;
     let corrupt = ServerFile {
         events_file: write_file(dir.path(), "corrupt.log", "garbage\n", PRIVATE_MODE)?,
         ..server.clone()
     };
-    let outcome = run_server(corrupt, listener, Box::pin(async {})).await;
-    assert!(matches!(outcome, Err(AppError::Sink(SinkError::Corrupt { line: 1 }))));
+    assert!(matches!(file_events(&corrupt), Err(AppError::Sink(SinkError::Corrupt { line: 1 }))));
     let text = format!(
         "listen: 127.0.0.1:0\ncertificate: {0}\nkey: {0}\nagent_ca: {0}\nrevocation_file: {0}\nsettings_file: {0}\naudit_file: {0}\nevents_file: {0}\ncommands_dir: {0}\n",
         dir.path().display()
@@ -1044,6 +1044,7 @@ async fn a_batch_the_server_refuses_as_too_large_is_quarantined_and_delivery_goe
                 tracing::warn!(%error, "stop sender dropped");
             }
         }),
+        file_events(&server)?,
     ));
     let big = "b".repeat(BIG_LINE);
     fs::write(&agent.spool_file, format!("small-1\n{big}\nsmall-2\n"))?;
@@ -1085,6 +1086,7 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
                 tracing::warn!(%error, "stop sender dropped");
             }
         }),
+        file_events(&server)?,
         Box::new(move || start + Duration::from_secs(read_clock.load(Ordering::SeqCst))),
     ));
     let config = client_config(&ClientTlsPaths {
@@ -1138,6 +1140,7 @@ async fn a_failing_event_delivery_never_keeps_a_command_from_the_agent() -> Test
                 tracing::warn!(%error, "stop sender dropped");
             }
         }),
+        file_events(&server)?,
     ));
     let spool = claim_spool(&agent)?;
     let log = Arc::new(open_file_log(&agent.audit_file)?);
@@ -1223,6 +1226,7 @@ async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
                 tracing::warn!(%error, "stop sender dropped");
             }
         }),
+        file_events(&server)?,
     ));
     stop.send(()).map_err(|()| "server already stopped")?;
     bounded(handle).await???;
