@@ -1,5 +1,5 @@
 use crate::error::SettingsError;
-use crate::settings::{check_present, check_range, IngestSettings, LOOPBACK_HOSTS};
+use crate::settings::{check_order, check_present, check_range, IngestSettings, LOOPBACK_HOSTS};
 use std::path::PathBuf;
 use ureq::http::Uri;
 
@@ -41,6 +41,12 @@ pub const LIMIT_NATS_NAME_BYTES: usize = 64;
 
 
 pub const LIMIT_NATS_SUBJECT_BYTES: usize = 128;
+
+
+pub const MS_PER_SECOND: u64 = 1000;
+
+
+pub const BATCH_AGE_FACTOR: u64 = 2;
 
 
 pub const EVENTS_STREAM_TOKEN: &str = "events";
@@ -127,6 +133,13 @@ pub fn validate_nats_settings(settings: &IngestSettings) -> Result<(), SettingsE
     check_range("nats_fetch_deadline_ms", settings.nats_fetch_deadline_ms, LIMIT_NATS_MS)?;
     check_range("nats_request_timeout_ms", settings.nats_request_timeout_ms, LIMIT_NATS_MS)?;
     check_range("nats_ack_wait_ms", settings.nats_ack_wait_ms, LIMIT_NATS_MS)?;
+    check_order(
+        (
+            "max_batch_age_seconds x 2000 (ms)",
+            u64::from(settings.max_batch_age_seconds) * MS_PER_SECOND * BATCH_AGE_FACTOR,
+        ),
+        ("nats_ack_wait_ms", settings.nats_ack_wait_ms),
+    )?;
     check_range("nats_ping_interval_ms", settings.nats_ping_interval_ms, LIMIT_NATS_MS)?;
     check_range("nats_max_headers", settings.nats_max_headers as u64, LIMIT_NATS_MAX_HEADERS as u64)?;
     check_optional_path("nats_ca_file", settings.nats_ca_file.as_ref())?;
