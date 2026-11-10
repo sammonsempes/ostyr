@@ -64,3 +64,12 @@ pub const SYFT_ARGUMENTS: [&str; 3] = ["scan", "-o", "cyclonedx-json"];
 
 
 pub const REAP_POLL_MILLIS: u64 = 10;
+
+
+pub const SBOM_SIGNING_CONTEXT: &[u8] = b"ostyr-sbom-v1\0";
+
+
+pub const KEY_FILE_HEX_LENGTH: usize = 64;
+
+
+pub const KEY_FILE_READ_LIMIT: u64 = 128;

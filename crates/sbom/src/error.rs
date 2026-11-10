@@ -82,3 +82,38 @@ pub enum RunError {
     #[error("a syft helper thread ended without a result")]
     Helper(#[from] std::sync::mpsc::RecvError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum SigningError {
+    #[error("the document is larger than the limit of {max} bytes")]
+    TooLarge { max: usize },
+    #[error("the signer failed")]
+    Signer(#[source] crate::types::BoxError),
+    #[error("unknown signing key")]
+    UnknownKey,
+    #[error("signing key is revoked")]
+    KeyRevoked,
+    #[error("signing key is outside its validity period")]
+    KeyOutsideValidity,
+    #[error("bad signature")]
+    BadSignature,
+    #[error("version {next} is not greater than {previous}")]
+    VersionNotIncreasing { previous: u64, next: u64 },
+    #[error("cannot read the key file")]
+    KeyIo(#[from] std::io::Error),
+    #[error("the key file is not private")]
+    KeyNotPrivate(#[from] core_audit::error::AuditError),
+    #[error("the key file belongs to another user")]
+    KeyWrongOwner,
+    #[error("the key file is not hexadecimal")]
+    KeyHex(#[from] data_encoding::DecodeError),
+    #[error("key files are supported on unix only")]
+    KeyUnsupported,
+    #[error("the key file must hold exactly 32 bytes in hexadecimal")]
+    KeyLength,
+    #[error(transparent)]
+    Sbom(#[from] SbomError),
+    #[error(transparent)]
+    Diff(#[from] DiffError),
+}
