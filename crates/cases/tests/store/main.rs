@@ -2,6 +2,7 @@ mod actions;
 mod appends;
 mod memory;
 mod rows;
+mod summary;
 mod types;
 
 
@@ -24,16 +25,16 @@ use std::future::ready;
 use types::{Setter, TestResult};
 
 
-const NOW: i64 = 1_700_000_000;
+pub const NOW: i64 = 1_700_000_000;
 
 
-const ALERT: &str = "2d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f0b894fee";
+pub const ALERT: &str = "2d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f0b894fee";
 
 
-const OTHER_ALERT: &str = "3d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f0b894fee";
+pub const OTHER_ALERT: &str = "3d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f0b894fee";
 
 
-const FIVE: usize = 5;
+pub const FIVE: usize = 5;
 
 
 pub const TWO: usize = 2;

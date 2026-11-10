@@ -26,6 +26,9 @@ pub const PERMISSION_EVENTS_READ: &str = "events.read";
 pub const PERMISSION_ALERTS_READ: &str = "alerts.read";
 
 
+pub const PERMISSION_CASES_READ: &str = "cases.read";
+
+
 pub const PERMISSION_ALERTS_TRIAGE: &str = "alerts.triage";
 
 
@@ -73,23 +76,35 @@ pub fn permission_set(permissions: &[&str]) -> BTreeSet<String> {
 
 pub fn builtin_catalog() -> RoleCatalog {
     let reader = [PERMISSION_EVENTS_READ];
-    let analyst = [PERMISSION_EVENTS_READ, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE];
+    let analyst = [
+        PERMISSION_EVENTS_READ,
+        PERMISSION_ALERTS_READ,
+        PERMISSION_ALERTS_TRIAGE,
+        PERMISSION_CASES_READ,
+    ];
     let responder = [
         PERMISSION_EVENTS_READ,
         PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
+        PERMISSION_CASES_READ,
         PERMISSION_RESPONSE_EXECUTE,
     ];
     let administrator = [
         PERMISSION_EVENTS_READ,
         PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
+        PERMISSION_CASES_READ,
         PERMISSION_RESPONSE_EXECUTE,
         PERMISSION_USERS_MANAGE,
         PERMISSION_CONFIG_MANAGE,
         PERMISSION_ROLES_MANAGE,
     ];
-    let auditor = [PERMISSION_EVENTS_READ, PERMISSION_ALERTS_READ, PERMISSION_AUDIT_READ];
+    let auditor = [
+        PERMISSION_EVENTS_READ,
+        PERMISSION_ALERTS_READ,
+        PERMISSION_CASES_READ,
+        PERMISSION_AUDIT_READ,
+    ];
     [
         (ROLE_READER, permission_set(&reader)),
         (ROLE_ANALYST, permission_set(&analyst)),

@@ -1,0 +1,11 @@
+use crate::memory::Entry;
+use std::collections::BTreeMap;
+
+
+pub type TestError = Box<dyn std::error::Error>;
+
+
+pub type TestResult = Result<(), TestError>;
+
+
+pub type Table = BTreeMap<String, Entry>;

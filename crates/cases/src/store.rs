@@ -57,6 +57,31 @@ pub const GET_SQL: &str = "SELECT id, title, COALESCE(description, ''), severity
                            observables::text, comments::text, history::text FROM cases WHERE tenant = $1 AND id = $2::text";
 
 
+/// Summary columns only (no description, comments, observables or history text): counts are `jsonb_array_length`, alert links a correlated count.
+pub const FIRST_SUMMARY_SQL: &str = "SELECT id, title, severity, status, COALESCE(assignee, ''), COALESCE(case_type, ''), created_at::text, \
+                                     updated_at::text, version::text, jsonb_array_length(tasks)::text, jsonb_array_length(observables)::text, \
+                                     jsonb_array_length(comments)::text, jsonb_array_length(history)::text, \
+                                     (SELECT count(*) FROM case_alerts WHERE case_alerts.tenant = cases.tenant AND case_alerts.case_id = cases.id)::text \
+                                     FROM cases WHERE tenant = $1 ORDER BY cases.created_at DESC, cases.id DESC LIMIT $2::text::bigint";
+
+
+pub const NEXT_SUMMARY_SQL: &str = "SELECT id, title, severity, status, COALESCE(assignee, ''), COALESCE(case_type, ''), created_at::text, \
+                                    updated_at::text, version::text, jsonb_array_length(tasks)::text, jsonb_array_length(observables)::text, \
+                                    jsonb_array_length(comments)::text, jsonb_array_length(history)::text, \
+                                    (SELECT count(*) FROM case_alerts WHERE case_alerts.tenant = cases.tenant AND case_alerts.case_id = cases.id)::text \
+                                    FROM cases WHERE tenant = $1 AND (created_at, id) < ($2::text::bigint, $3::text) \
+                                    ORDER BY cases.created_at DESC, cases.id DESC LIMIT $4::text::bigint";
+
+
+/// The summary columns, then description, resolution, template and the tasks text; comments, observables and history stay counts.
+pub const DETAIL_SQL: &str = "SELECT id, title, severity, status, COALESCE(assignee, ''), COALESCE(case_type, ''), created_at::text, \
+                              updated_at::text, version::text, jsonb_array_length(tasks)::text, jsonb_array_length(observables)::text, \
+                              jsonb_array_length(comments)::text, jsonb_array_length(history)::text, \
+                              (SELECT count(*) FROM case_alerts WHERE case_alerts.tenant = cases.tenant AND case_alerts.case_id = cases.id)::text, \
+                              COALESCE(description, ''), COALESCE(resolution, ''), COALESCE(template, ''), tasks::text \
+                              FROM cases WHERE tenant = $1 AND id = $2::text";
+
+
 pub const NUL: char = '\0';
 
 
@@ -145,6 +170,60 @@ pub const COMMENTS_COLUMN: usize = 14;
 
 
 pub const HISTORY_COLUMN: usize = 15;
+
+
+pub const SUMMARY_ID_COLUMN: usize = 0;
+
+
+pub const SUMMARY_TITLE_COLUMN: usize = 1;
+
+
+pub const SUMMARY_SEVERITY_COLUMN: usize = 2;
+
+
+pub const SUMMARY_STATUS_COLUMN: usize = 3;
+
+
+pub const SUMMARY_ASSIGNEE_COLUMN: usize = 4;
+
+
+pub const SUMMARY_TYPE_COLUMN: usize = 5;
+
+
+pub const SUMMARY_CREATED_COLUMN: usize = 6;
+
+
+pub const SUMMARY_UPDATED_COLUMN: usize = 7;
+
+
+pub const SUMMARY_VERSION_COLUMN: usize = 8;
+
+
+pub const SUMMARY_TASKS_COLUMN: usize = 9;
+
+
+pub const SUMMARY_OBSERVABLES_COLUMN: usize = 10;
+
+
+pub const SUMMARY_COMMENTS_COLUMN: usize = 11;
+
+
+pub const SUMMARY_HISTORY_COLUMN: usize = 12;
+
+
+pub const SUMMARY_ALERTS_COLUMN: usize = 13;
+
+
+pub const DETAIL_DESCRIPTION_COLUMN: usize = 14;
+
+
+pub const DETAIL_RESOLUTION_COLUMN: usize = 15;
+
+
+pub const DETAIL_TEMPLATE_COLUMN: usize = 16;
+
+
+pub const DETAIL_TASKS_COLUMN: usize = 17;
 
 
 pub const ADDED_COLUMN: usize = 1;
@@ -257,15 +336,44 @@ pub fn checked_observable(observable: &Observable) -> Result<Value, CaseStoreErr
 }
 
 
+pub fn check_cursor(cursor: &CaseCursor) -> Result<(), CaseStoreError> {
+    check_time("cursor_created_at", cursor.created_at)?;
+    check_text("cursor_id", &cursor.id, MAX_ID_CHARS)
+}
+
+
 pub fn check_page(page: &CasePage) -> Result<(), CaseStoreError> {
     if page.size == 0 || page.size > MAX_PAGE_SIZE {
         Err(CaseStoreError::BadPageSize { limit: MAX_PAGE_SIZE })
     } else if let Some(cursor) = &page.after {
-        check_time("cursor_created_at", cursor.created_at)?;
-        check_text("cursor_id", &cursor.id, MAX_ID_CHARS)
+        check_cursor(cursor)
     } else {
         Ok(())
     }
+}
+
+
+/// `<created_at>.<id>`; the id may hold dots, the first one ends the numerals.
+pub fn format_cursor(cursor: &CaseCursor) -> String {
+    format!("{}.{}", cursor.created_at, cursor.id)
+}
+
+
+/// ASCII numerals that fit `i64`, then a bounded id without NUL: anything else is `BadCursor`, so no cursor text reaches SQL unchecked.
+pub fn parse_cursor(text: &str) -> Result<CaseCursor, CaseStoreError> {
+    let (numerals, id) = text.split_once('.').ok_or(CaseStoreError::BadCursor)?;
+    let created_at = numerals
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| numerals.parse::<i64>().ok())
+        .flatten()
+        .ok_or(CaseStoreError::BadCursor)?;
+    let cursor = CaseCursor {
+        created_at,
+        id: id.to_owned(),
+    };
+    check_cursor(&cursor).map_err(|_invalid| CaseStoreError::BadCursor)?;
+    Ok(cursor)
 }
 
 
