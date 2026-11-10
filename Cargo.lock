@@ -4701,6 +4701,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-s3"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1af5b74b316ee483ae486bd3cb206c8caa5dbb3cf0eab7269a868ae43aeece03"
+dependencies = [
+ "hmac 0.13.0",
+ "jiff",
+ "percent-encoding",
+ "sha2 0.11.1",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4735,13 +4749,18 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "libc",
  "packageurl",
+ "rcgen",
  "rustix 1.1.6",
+ "rustls",
+ "rusty-s3",
  "serde",
  "sha2 0.10.9",
  "struson",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "ureq 3.5.1",
+ "url",
  "vuln-match",
  "walkdir",
  "zeroize",
