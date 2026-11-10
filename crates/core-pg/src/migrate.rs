@@ -14,7 +14,29 @@ pub const PAIR: usize = 2;
 pub const MAX_VERSION_BYTES: usize = 64;
 
 
-pub const APPLIED_SQL: &str = "SELECT version, digest FROM schema_migrations ORDER BY version";
+pub const APPLIED_SQL: &str = "SELECT namespace, version, digest FROM schema_migrations ORDER BY version";
+
+
+pub const COLUMNS_SQL: &str =
+    "SELECT column_name::text FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'schema_migrations'";
+
+
+pub const DIGEST_COLUMN: usize = 2;
+
+
+pub const MAX_NAMESPACE_BYTES: usize = 32;
+
+
+pub const NAMESPACE_COLUMN: &str = "namespace";
+
+
+/// The record table as found in the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableShape {
+    Absent,
+    Legacy,
+    Namespaced,
+}
 
 
 /// An ordered SQL file embedded with `include_str!`.
@@ -34,6 +56,42 @@ pub struct AppliedMigration {
 
 pub fn digest_of(sql: &str) -> String {
     format!("{:x}", Sha256::digest(sql.as_bytes()))
+}
+
+
+/// A namespace is `[a-z][a-z0-9_]{0,31}`: it is interpolated into the migration scripts, so nothing else may pass.
+pub fn check_namespace(namespace: &str) -> Result<(), PgError> {
+    let valid = namespace.chars().next().is_some_and(|first| first.is_ascii_lowercase())
+        && namespace.len() <= MAX_NAMESPACE_BYTES
+        && namespace
+            .chars()
+            .all(|character| character.is_ascii_digit() || character.is_ascii_lowercase() || character == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(PgError::InvalidNamespace {
+            namespace: namespace.chars().take(MAX_NAMESPACE_BYTES).collect(),
+        })
+    }
+}
+
+
+pub fn table_shape(columns: &[String]) -> TableShape {
+    if columns.is_empty() {
+        TableShape::Absent
+    } else if columns.iter().any(|column| column == NAMESPACE_COLUMN) {
+        TableShape::Namespaced
+    } else {
+        TableShape::Legacy
+    }
+}
+
+
+pub fn check_not_legacy(shape: TableShape) -> Result<(), PgError> {
+    match shape {
+        TableShape::Legacy => Err(PgError::LegacyRecords),
+        TableShape::Absent | TableShape::Namespaced => Ok(()),
+    }
 }
 
 
@@ -101,16 +159,17 @@ pub fn bootstrap_script() -> String {
     format!(
         "SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
          CREATE TABLE IF NOT EXISTS schema_migrations \
-         (version text PRIMARY KEY, digest text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())"
+         (namespace text NOT NULL, version text NOT NULL, digest text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now(), \
+         PRIMARY KEY (namespace, version))"
     )
 }
 
 
 /// One simple-query message is one implicit transaction: lock, record (a duplicate version fails), then the SQL; any failure rolls all back.
-pub fn migration_script(migration: &Migration) -> String {
+pub fn migration_script(namespace: &str, migration: &Migration) -> String {
     format!(
         "SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
-         INSERT INTO schema_migrations (version, digest) VALUES ('{}', '{}'); {}",
+         INSERT INTO schema_migrations (namespace, version, digest) VALUES ('{namespace}', '{}', '{}'); {}",
         migration.version,
         digest_of(migration.sql),
         migration.sql
@@ -118,27 +177,66 @@ pub fn migration_script(migration: &Migration) -> String {
 }
 
 
-pub async fn read_applied(client: &Client, deadline: Duration) -> Result<Vec<AppliedMigration>, PgError> {
-    let rows = global_query(client, APPLIED_SQL, deadline).await?;
-    rows.iter()
-        .map(|row| {
-            Ok(AppliedMigration {
-                version: column_text(row, 0)?,
-                digest: column_text(row, 1)?,
-            })
-        })
-        .collect()
+/// Rewrites a record table without a namespace in one transaction under the migration lock; the recheck inside keeps a second caller a no-op.
+pub fn adopt_script(namespace: &str) -> String {
+    format!(
+        "SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
+         DO $adopt$ BEGIN \
+         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() \
+         AND table_name = 'schema_migrations' AND column_name = 'namespace') THEN \
+         ALTER TABLE schema_migrations ADD COLUMN namespace text NOT NULL DEFAULT '{namespace}'; \
+         ALTER TABLE schema_migrations ALTER COLUMN namespace DROP DEFAULT; \
+         ALTER TABLE schema_migrations DROP CONSTRAINT schema_migrations_pkey; \
+         ALTER TABLE schema_migrations ADD PRIMARY KEY (namespace, version); \
+         END IF; END $adopt$"
+    )
 }
 
 
-/// Applies the pending migrations in order and returns their versions; a second run applies nothing.
-pub async fn migrate(client: &Client, embedded: &[Migration], deadline: Duration) -> Result<Vec<String>, PgError> {
+pub async fn read_shape(client: &Client, deadline: Duration) -> Result<TableShape, PgError> {
+    let rows = global_query(client, COLUMNS_SQL, deadline).await?;
+    let columns = rows.iter().map(|row| column_text(row, 0)).collect::<Result<Vec<String>, PgError>>()?;
+    Ok(table_shape(&columns))
+}
+
+
+/// The records of one namespace only: another store's versions are never this build's concern.
+pub async fn read_applied(client: &Client, namespace: &str, deadline: Duration) -> Result<Vec<AppliedMigration>, PgError> {
+    let rows = global_query(client, APPLIED_SQL, deadline).await?;
+    let records = rows
+        .iter()
+        .map(|row| Ok((column_text(row, 0)?, column_text(row, 1)?, column_text(row, DIGEST_COLUMN)?)))
+        .collect::<Result<Vec<(String, String, String)>, PgError>>()?;
+    Ok(records
+        .into_iter()
+        .filter(|(owner, _, _)| owner == namespace)
+        .map(|(_, version, digest)| AppliedMigration { version, digest })
+        .collect())
+}
+
+
+/// The explicit, audited upgrade path: records written before namespaces existed all become `namespace`. Returns whether anything was rewritten.
+pub async fn adopt_legacy(client: &Client, namespace: &str, deadline: Duration) -> Result<bool, PgError> {
+    check_namespace(namespace)?;
+    let legacy = read_shape(client, deadline).await? == TableShape::Legacy;
+    if legacy {
+        execute_script(client, &adopt_script(namespace), deadline).await?;
+        tracing::warn!(namespace, "schema_migrations records adopted into a namespace");
+    }
+    Ok(legacy)
+}
+
+
+/// Applies the pending migrations of one namespace in order and returns their versions; a second run applies nothing.
+pub async fn migrate(client: &Client, namespace: &str, embedded: &[Migration], deadline: Duration) -> Result<Vec<String>, PgError> {
+    check_namespace(namespace)?;
     check_embedded(embedded)?;
     execute_script(client, &bootstrap_script(), deadline).await?;
-    let applied = read_applied(client, deadline).await?;
+    check_not_legacy(read_shape(client, deadline).await?)?;
+    let applied = read_applied(client, namespace, deadline).await?;
     let pending = plan_migrations(&applied, embedded)?;
     for migration in &pending {
-        execute_script(client, &migration_script(migration), deadline).await?;
+        execute_script(client, &migration_script(namespace, migration), deadline).await?;
     }
     Ok(pending.iter().map(|migration| migration.version.to_owned()).collect())
 }

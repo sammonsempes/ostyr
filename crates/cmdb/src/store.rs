@@ -74,6 +74,9 @@ pub const VERSION_COLUMN: usize = 3;
 pub const SOURCE_COLUMN: usize = 3;
 
 
+pub const MIGRATION_NAMESPACE: &str = "cmdb";
+
+
 pub const MIGRATIONS: [Migration; 1] = [Migration {
     version: "001_cmdb",
     sql: include_str!("../migrations/001_cmdb.sql"),
