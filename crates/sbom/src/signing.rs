@@ -207,7 +207,7 @@ pub fn open_regular(path: &Path) -> Result<File, SigningError> {
 #[cfg(unix)]
 pub fn non_blocking(options: &mut OpenOptions) -> &mut OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_NONBLOCK)
+    options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
 }
 
 

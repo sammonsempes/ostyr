@@ -9,13 +9,12 @@ use sbom::error::{ResourceKind, RunError, SbomError, SettingsError, TargetError}
 use sbom::model::{Stderr, Verdict, WatchPlan};
 use sbom::run::{
     check_archive, child_environment, classify, disk_exceeded, disk_verdict, drain_stderr, entry_bytes, exceeded_limit, generate, generate_with,
-    kill_then, outcome, reserve_helpers, run_job, spawn_thread, stderr_excerpt, stderr_summary, watch_plan, watchdog,
+    kill_then, never_expired, outcome, reserve_helpers, run_job, spawn_thread, stderr_excerpt, stderr_summary, watch_plan, watchdog,
 };
 use sbom::settings::{SyftSettings, Target};
-use sbom::types::{Helpers, Job};
+use sbom::types::{DeadlineFn, Helpers, Job};
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -34,7 +33,7 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/syft-
 const FIXTURE_COMPONENTS: usize = 7;
 
 
-const SCRIPT_MODE: u32 = 0o755;
+const SCRIPT_MODE: &str = "755";
 
 
 const DEADLINE_MILLIS: u64 = 200;
@@ -75,9 +74,19 @@ const DOUBLE_EXCERPT: usize = 512;
 
 fn fake_syft(dir: &TempDir, body: &str) -> io::Result<PathBuf> {
     let path = dir.path().join("syft");
-    fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(SCRIPT_MODE))?;
-    Ok(path)
+    let source = tempfile::Builder::new().prefix("body-").tempfile_in(dir.path())?;
+    fs::write(source.path(), format!("#!/bin/sh\n{body}\n"))?;
+    let status = Command::new("install")
+        .arg("-m")
+        .arg(SCRIPT_MODE)
+        .arg(source.path())
+        .arg(&path)
+        .status()?;
+    if status.success() {
+        Ok(path)
+    } else {
+        Err(io::Error::other("install failed"))
+    }
 }
 
 
@@ -107,14 +116,23 @@ fn target() -> Target {
 }
 
 
-const TEXT_FILE_BUSY: i32 = 26;
-
-
-const BUSY_RETRIES: usize = 20;
-
-
-fn run_once(settings: &SyftSettings) -> Result<sbom::model::Sbom, RunError> {
+fn run(settings: &SyftSettings) -> Result<sbom::model::Sbom, RunError> {
     generate(settings, &fresh_helpers(), &target(), "tenant-a", "web:1.0")
+}
+
+
+fn at_once(_home: &Path) -> bool {
+    true
+}
+
+
+fn once_ready(home: &Path) -> bool {
+    home.join("ready").exists()
+}
+
+
+fn run_expiring(settings: &SyftSettings, expired: DeadlineFn) -> Result<sbom::model::Sbom, RunError> {
+    generate_with(spawn_thread, expired, settings, &fresh_helpers(), &target(), ("tenant-a", "web:1.0"))
 }
 
 
@@ -151,14 +169,6 @@ const SMALL_ARCHIVE_LIMIT: u64 = 1000;
 
 
 const LIVE_HELPERS: usize = 8;
-
-
-fn run(settings: &SyftSettings) -> Result<sbom::model::Sbom, RunError> {
-    (0..BUSY_RETRIES).fold(run_once(settings), |result, _| match result {
-        Err(RunError::Io(error)) if error.raw_os_error() == Some(TEXT_FILE_BUSY) => run_once(settings),
-        other => other,
-    })
-}
 
 
 #[test]
@@ -238,7 +248,7 @@ fn endless_output_stops_at_the_component_cap() -> TestResult {
 fn silent_hang_is_killed_at_the_deadline() -> TestResult {
     let dir = TempDir::new()?;
     let binary = fake_syft(&dir, "exec sleep 3600")?;
-    let result = run(&settings(&dir, binary, DEADLINE_MILLIS));
+    let result = run_expiring(&settings(&dir, binary, LONG_DEADLINE_MILLIS), at_once);
     assert!(matches!(result, Err(RunError::TimedOut)));
     Ok(())
 }
@@ -248,7 +258,7 @@ fn silent_hang_is_killed_at_the_deadline() -> TestResult {
 fn background_holder_of_the_pipe_dies_with_the_group() -> TestResult {
     let dir = TempDir::new()?;
     let binary = fake_syft(&dir, "sleep 3600 &\nwait")?;
-    let result = run(&settings(&dir, binary, DEADLINE_MILLIS));
+    let result = run_expiring(&settings(&dir, binary, LONG_DEADLINE_MILLIS), at_once);
     assert!(matches!(result, Err(RunError::TimedOut)));
     Ok(())
 }
@@ -542,11 +552,11 @@ fn child_that_left_the_group_is_killed_by_pid_at_the_deadline() -> TestResult {
     let dir = TempDir::new()?;
     let pid_file = dir.path().join("child.pid");
     let body = format!(
-        "exec perl -e 'setpgrp(0, getpgrp(getppid())); open(F, \">{}\"); print F \"$$\\n\"; close F; sleep 3600'",
+        "exec perl -e 'setpgrp(0, getpgrp(getppid())); open(F, \">{}\"); print F \"$$\\n\"; close F; open(R, \">$ENV{{HOME}}/ready\"); close R; sleep 3600'",
         pid_file.display()
     );
     let binary = fake_syft(&dir, &body)?;
-    let result = run(&settings(&dir, binary, DEADLINE_MILLIS));
+    let result = run_expiring(&settings(&dir, binary, LONG_DEADLINE_MILLIS), once_ready);
     assert!(matches!(result, Err(RunError::TimedOut)));
     assert!(!process_exists(&wait_for_pid_file(&pid_file)?));
     Ok(())
@@ -598,7 +608,7 @@ fn failed_helper_spawn_kills_the_child_and_returns_the_error() -> TestResult {
         let dir = TempDir::new()?;
         let binary = fake_syft(&dir, "exec sleep 3600")?;
         let configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
-        let result = generate_with(failing_after(allowed), &configured, &fresh_helpers(), &target(), scope);
+        let result = generate_with(failing_after(allowed), never_expired, &configured, &fresh_helpers(), &target(), scope);
         assert!(matches!(result, Err(RunError::Io(_))));
         Ok(())
     });
@@ -833,6 +843,7 @@ fn plan(home: &Path, ticks: u64, max_bytes: u64, max_entries: usize) -> WatchPla
         ticks,
         max_bytes,
         max_entries,
+        expired: never_expired,
     }
 }
 

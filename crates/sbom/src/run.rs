@@ -8,14 +8,15 @@ use crate::limits::{
 use crate::model::{Limits, Sbom, Stderr, Verdict, WatchPlan};
 use crate::parse::{parse_cyclonedx, to_u64};
 use crate::settings::{ensure, source_argument, target_path, validate_settings, SyftSettings, Target};
-use crate::types::{Helpers, Job};
+use crate::signing::non_blocking;
+use crate::types::{DeadlineFn, Helpers, Job};
 use rustix::io::Errno;
 use rustix::process::{kill_process, kill_process_group, Pid, Signal};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, PipeReader, PipeWriter, Read};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -136,17 +137,23 @@ pub fn entry_bytes(entry: walkdir::Result<DirEntry>) -> Result<u64, RunError> {
 }
 
 
-/// Ticks until `done` closes: at each tick the home size is checked, and the group is killed on a disk overrun or when the ticks run out.
+/// Ticks until `done` closes; kills the group on a disk overrun, when `plan.expired` says so, or when the ticks run out.
 pub fn watchdog(pid: Pid, done: &Receiver<()>, plan: &WatchPlan) -> Result<Verdict, RunError> {
     let decided = (0..plan.ticks).find_map(|_| match done.recv_timeout(plan.tick) {
         Err(RecvTimeoutError::Timeout) => match disk_exceeded(&plan.home, plan.max_bytes, plan.max_entries) {
-            Ok(false) => None,
+            Ok(false) => (plan.expired)(&plan.home).then(|| kill_then(pid, Ok(Verdict::TimedOut))),
             Ok(true) => Some(kill_then(pid, Ok(Verdict::DiskFull))),
             Err(error) => Some(kill_then(pid, Err(error))),
         },
         _ => Some(Ok(Verdict::Finished)),
     });
     decided.unwrap_or_else(|| kill_then(pid, Ok(Verdict::TimedOut)))
+}
+
+
+/// The production deadline test: never early, the tick count alone ends the run.
+pub fn never_expired(_home: &Path) -> bool {
+    false
 }
 
 
@@ -159,6 +166,7 @@ pub fn watch_plan(settings: &SyftSettings, home: &Path) -> WatchPlan {
         ticks: settings.deadline_millis.div_ceil(tick_millis),
         max_bytes: settings.max_run_disk_bytes,
         max_entries: settings.max_run_entries,
+        expired: never_expired,
     }
 }
 
@@ -196,9 +204,7 @@ pub fn check_archive(target: &Target, max: u64) -> Result<(), RunError> {
     match target {
         Target::Directory(_) => Ok(()),
         Target::OciArchive(_) | Target::DockerArchive(_) => {
-            let metadata = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
+            let metadata = non_blocking(fs::OpenOptions::new().read(true))
                 .open(target_path(target))
                 .and_then(|file| file.metadata())?;
             ensure(metadata.is_file(), RunError::NotRegular)?;
@@ -296,13 +302,14 @@ pub fn reap(child: &mut Child, polls: u64) -> io::Result<Option<ExitStatus>> {
 
 /// Runs syft with the given settings snapshot on `target` and returns its parsed SBOM for `tenant` and `artefact`.
 pub fn generate(settings: &SyftSettings, helpers: &Helpers, target: &Target, tenant: &str, artefact: &str) -> Result<Sbom, RunError> {
-    generate_with(spawn_thread, settings, helpers, target, (tenant, artefact))
+    generate_with(spawn_thread, never_expired, settings, helpers, target, (tenant, artefact))
 }
 
 
-/// `generate` with an injected thread spawner.
+/// `generate` with an injected thread spawner and an injected deadline test (called with the private home at every watchdog tick).
 pub fn generate_with<Spawn: FnMut(Job) -> io::Result<()>>(
     spawner: Spawn,
+    expired: DeadlineFn,
     settings: &SyftSettings,
     helpers: &Helpers,
     target: &Target,
@@ -318,7 +325,15 @@ pub fn generate_with<Spawn: FnMut(Job) -> io::Result<()>>(
     let (stdout_reader, stdout_writer) = io::pipe()?;
     let (stderr_reader, stderr_writer) = io::pipe()?;
     let child = spawn_syft(settings, &source, home.path(), stdout_writer, stderr_writer)?;
-    supervise(spawner, settings, (child, home.path()), (stdout_reader, stderr_reader), scope, slots)
+    supervise(
+        spawner,
+        expired,
+        settings,
+        (child, home.path()),
+        (stdout_reader, stderr_reader),
+        scope,
+        slots,
+    )
 }
 
 
@@ -355,6 +370,7 @@ pub fn outcome(timed_out: bool, parsed: Result<Result<Sbom, SbomError>, RecvTime
 
 pub fn supervise<Spawn: FnMut(Job) -> io::Result<()>>(
     spawner: Spawn,
+    expired: DeadlineFn,
     settings: &SyftSettings,
     running: (Child, &Path),
     pipes: (PipeReader, PipeReader),
@@ -368,7 +384,10 @@ pub fn supervise<Spawn: FnMut(Job) -> io::Result<()>>(
     let deadline = Duration::from_millis(settings.deadline_millis);
     let grace = Duration::from_millis(settings.helper_grace_millis);
     let polls = settings.helper_grace_millis / REAP_POLL_MILLIS + 1;
-    let plan = watch_plan(settings, home);
+    let plan = WatchPlan {
+        expired,
+        ..watch_plan(settings, home)
+    };
     let (done_sender, done_receiver) = mpsc::channel::<()>();
     let (watch_sender, watch_receiver) = mpsc::channel();
     let (stderr_sender, stderr_receiver) = mpsc::channel();
