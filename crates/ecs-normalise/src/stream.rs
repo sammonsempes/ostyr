@@ -1,12 +1,13 @@
 use crate::convert::{convert, Outcome};
 use crate::error::{LineError, NormaliseError};
+use crate::sysmon::{normalise_sysmon, UNKNOWN_DATASET};
 use crate::tetragon::Envelope;
-use crate::types::LineNumber;
+use crate::types::{LineNumber, SeenIds};
 use core_export::ecs::EcsEvent;
 use serde_json::{from_str, from_value, to_writer, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::iter::from_fn;
-use std::str::from_utf8;
+use std::str::FromStr;
 use tracing::warn;
 
 
@@ -22,6 +23,38 @@ pub struct Counts {
     pub processed: u64,
     pub malformed: u64,
     pub unknown: u64,
+    pub duplicate: u64,
+}
+
+
+/// The kind of line a stream carries.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    #[default]
+    Tetragon,
+    Sysmon,
+}
+
+
+impl FromStr for Format {
+    type Err = NormaliseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "tetragon" => Ok(Format::Tetragon),
+            "sysmon" => Ok(Format::Sysmon),
+            other => Err(NormaliseError::UnknownFormat(other.to_string())),
+        }
+    }
+}
+
+
+/// How a Sysmon line was mapped: a known id, an unmapped id seen for the first time, or an unmapped id seen before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SysmonClass {
+    Known,
+    Unmapped,
+    Repeated,
 }
 
 
@@ -66,20 +99,41 @@ pub fn normalise_line(line: LineNumber, text: &str) -> Result<Outcome, LineError
 }
 
 
-/// Turns one raw line into an outcome, attaching the line number to every error.
-pub fn decode(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
+/// Turns one raw line into UTF-8 text, attaching the line number to every error.
+pub fn line_text(line: LineNumber, raw: RawLine, max_line: u64) -> Result<String, LineError> {
     match raw {
         RawLine::TooLong => Err(LineError {
             line,
             error: NormaliseError::TooLong { max: max_line },
         }),
-        RawLine::Text(bytes) => from_utf8(&bytes)
-            .map_err(|error| LineError {
-                line,
-                error: NormaliseError::from(error),
-            })
-            .and_then(|text| normalise_line(line, text)),
+        RawLine::Text(bytes) => String::from_utf8(bytes).map_err(|error| LineError {
+            line,
+            error: NormaliseError::from(error.utf8_error()),
+        }),
     }
+}
+
+
+/// Turns one raw line into an outcome, attaching the line number to every error.
+pub fn decode(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
+    line_text(line, raw, max_line).and_then(|text| normalise_line(line, &text))
+}
+
+
+/// Turns one raw Sysmon line into an ECS event and its class; `seen` keeps the unmapped ids across the stream.
+pub fn decode_sysmon(line: LineNumber, raw: RawLine, max_line: u64, seen: &mut SeenIds) -> Result<(EcsEvent, SysmonClass), LineError> {
+    let text = line_text(line, raw, max_line)?;
+    let seen_before = seen.len();
+    let event = normalise_sysmon(&text, seen).map_err(|error| LineError {
+        line,
+        error: NormaliseError::Sysmon(error),
+    })?;
+    let class = match (event.event.dataset.as_deref() == Some(UNKNOWN_DATASET), seen.len() > seen_before) {
+        (false, _) => SysmonClass::Known,
+        (true, true) => SysmonClass::Unmapped,
+        (true, false) => SysmonClass::Repeated,
+    };
+    Ok((event, class))
 }
 
 
@@ -122,22 +176,78 @@ fn tally<Output: Write>(
 }
 
 
-/// Reads Tetragon JSON lines and writes ECS JSON lines; a bad line is counted and logged, only an I/O error stops the stream.
+fn tally_sysmon<Output: Write>(
+    counts: Counts,
+    line: LineNumber,
+    outcome: Result<(EcsEvent, SysmonClass), LineError>,
+    output: &mut Output,
+) -> Result<Counts, NormaliseError> {
+    match outcome {
+        Ok((event, class)) => {
+            write_event(output, &event)?;
+            Ok(match class {
+                SysmonClass::Known => Counts {
+                    processed: counts.processed + 1,
+                    ..counts
+                },
+                SysmonClass::Unmapped => Counts {
+                    unknown: counts.unknown + 1,
+                    ..counts
+                },
+                SysmonClass::Repeated => Counts {
+                    duplicate: counts.duplicate + 1,
+                    ..counts
+                },
+            })
+        }
+        Err(error) => {
+            warn!(line, %error, "malformed line");
+            Ok(Counts {
+                malformed: counts.malformed + 1,
+                ..counts
+            })
+        }
+    }
+}
+
+
+/// Reads Tetragon or Sysmon lines and writes ECS JSON lines; a bad line is counted and logged, only an I/O error stops the stream.
 pub fn normalise_stream_capped<Input: BufRead, Output: Write>(
     input: &mut Input,
     output: &mut Output,
     max_line: u64,
+    format: Format,
 ) -> Result<Counts, NormaliseError> {
+    normalise_dyn(input, output, max_line, format)
+}
+
+
+/// The stream loop on trait objects, so that one instantiation serves every caller.
+pub fn normalise_dyn(mut input: &mut dyn BufRead, mut output: &mut dyn Write, max_line: u64, format: Format) -> Result<Counts, NormaliseError> {
+    let mut seen = SeenIds::new();
     (1..)
-        .zip(from_fn(|| read_raw_line(input, max_line).transpose()))
-        .try_fold(Counts::default(), |counts, (line, raw)| {
-            let outcome = decode(line, raw?, max_line);
-            tally(counts, line, outcome, output)
+        .zip(from_fn(|| read_raw_line(&mut input, max_line).transpose()))
+        .try_fold(Counts::default(), |counts, (line, raw_line)| {
+            let raw = raw_line?;
+            match format {
+                Format::Tetragon => tally(counts, line, decode(line, raw, max_line), &mut output),
+                Format::Sysmon => tally_sysmon(counts, line, decode_sysmon(line, raw, max_line, &mut seen), &mut output),
+            }
         })
 }
 
 
 /// `normalise_stream_capped` with the production line cap.
+pub fn normalise_stream_format<Input: BufRead, Output: Write>(
+    input: &mut Input,
+    output: &mut Output,
+    format: Format,
+) -> Result<Counts, NormaliseError> {
+    normalise_stream_capped(input, output, MAX_LINE_BYTES, format)
+}
+
+
+/// `normalise_stream_format` for Tetragon lines.
 pub fn normalise_stream<Input: BufRead, Output: Write>(input: &mut Input, output: &mut Output) -> Result<Counts, NormaliseError> {
-    normalise_stream_capped(input, output, MAX_LINE_BYTES)
+    normalise_stream_format(input, output, Format::Tetragon)
 }

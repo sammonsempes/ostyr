@@ -7,7 +7,8 @@ use ecs_normalise::cli::run_reporting;
 use ecs_normalise::convert::Outcome;
 use ecs_normalise::error::NormaliseError;
 use ecs_normalise::stream::{
-    decode, normalise_line, normalise_stream, normalise_stream_capped, parse_line, read_raw_line, write_event, Counts, RawLine, MAX_LINE_BYTES,
+    decode, normalise_line, normalise_stream, normalise_stream_capped, parse_line, read_raw_line, write_event, Counts, Format, RawLine,
+    MAX_LINE_BYTES,
 };
 use serde_json::Value;
 use sigma_sql::compile::{compile_rule, SqlOptions};
@@ -163,6 +164,7 @@ fn unknown_kinds_are_counted_and_never_written() -> TestResult {
         counts,
         Counts {
             unknown: THREE,
+            duplicate: 0,
             ..Counts::default()
         }
     );
@@ -198,7 +200,8 @@ fn malformed_lines_are_typed_errors_and_the_stream_continues() -> TestResult {
         Counts {
             processed: TWO,
             malformed: THREE,
-            unknown: 0
+            unknown: 0,
+            duplicate: 0
         }
     );
     Ok(())
@@ -242,14 +245,15 @@ fn an_oversized_line_is_counted_and_the_next_one_is_read() -> TestResult {
     let input = format!("{EXEC}{EXEC_MINIMAL}");
     let mut out = Vec::new();
     let mut reader = input.as_bytes();
-    let counts = normalise_stream_capped(&mut reader, &mut out, STREAM_CAP)?;
+    let counts = normalise_stream_capped(&mut reader, &mut out, STREAM_CAP, Format::Tetragon)?;
     assert_eq!(String::from_utf8(out)?, SNAPSHOT_EXEC_MINIMAL);
     assert_eq!(
         counts,
         Counts {
             processed: 1,
             malformed: 1,
-            unknown: 0
+            unknown: 0,
+            duplicate: 0
         }
     );
     Ok(())
@@ -303,7 +307,7 @@ fn read_errors_stop_the_stream() -> TestResult {
         },
     );
     assert!(matches!(
-        normalise_stream_capped(&mut skipping, &mut out, TINY_CAP),
+        normalise_stream_capped(&mut skipping, &mut out, TINY_CAP, Format::Tetragon),
         Err(NormaliseError::Io(_))
     ));
     Ok(())
@@ -348,7 +352,7 @@ fn reporting(data: &'static [u8], fails: bool, room: usize) -> io::Result<(Strin
     let mut out = Vec::new();
     let mut error_bytes = vec![0; room];
     let mut sink = error_bytes.as_mut_slice();
-    let code = run_reporting(&mut input, &mut out, &mut sink)?;
+    let code = run_reporting(&[], &mut input, &mut out, &mut sink)?;
     Ok((String::from_utf8_lossy(&error_bytes).trim_end_matches('\0').to_string(), code))
 }
 

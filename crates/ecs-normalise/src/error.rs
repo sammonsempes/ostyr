@@ -21,6 +21,12 @@ pub enum NormaliseError {
     Serialize(#[source] serde_json::Error),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("invalid Sysmon event: {0}")]
+    Sysmon(#[source] SysmonError),
+    #[error("usage: normalise [--format tetragon|sysmon]")]
+    Usage,
+    #[error("unknown format `{0}` (expected tetragon or sysmon)")]
+    UnknownFormat(String),
 }
 
 
