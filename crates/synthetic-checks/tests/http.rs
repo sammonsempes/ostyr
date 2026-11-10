@@ -381,6 +381,18 @@ fn a_broken_pem_block_is_an_error() -> TestResult {
 
 
 #[test]
+fn a_pem_parse_error_never_echoes_the_file() -> TestResult {
+    let (_directory, path) = write_ca(
+        "ca.pem",
+        b"-----BEGIN CERTIFICATE-----\nAAAA\n-----BEGIN MARKERSTRONG-----\n-----END CERTIFICATE-----\n",
+    )?;
+    let error = load_roots(Some(&path)).err().ok_or("expected an error")?;
+    assert_eq!(error.to_string(), "CA file is not a valid PEM certificate bundle");
+    Ok(())
+}
+
+
+#[test]
 fn too_many_ca_certificates_are_an_error() -> TestResult {
     let pki = ca_signed()?;
     let (_directory, path) = write_ca("ca.pem", pki.ca_pem.repeat(OVER_CA_COUNT).as_bytes())?;

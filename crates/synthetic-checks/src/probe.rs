@@ -52,7 +52,7 @@ pub struct ProbeLimits {
 
 
 fn within_limit(field: &'static str, value: u64, max: u64) -> Result<(), CheckError> {
-    (value <= max).then_some(()).ok_or(CheckError::OutOfRange { field, value, min: 0, max })
+    (value <= max).then_some(()).ok_or(CheckError::OutOfRange { field, min: 0, max })
 }
 
 

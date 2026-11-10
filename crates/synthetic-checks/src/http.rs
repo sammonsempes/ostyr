@@ -252,7 +252,7 @@ pub fn load_roots(ca_file: Option<&str>) -> io::Result<Vec<Vec<u8>>> {
         .take(MAX_CA_CERTIFICATES + 1)
         .map(|parsed| parsed.map(|der| der.as_ref().to_vec()))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CA file is not a valid PEM certificate bundle"))?;
     (roots.len() <= MAX_CA_CERTIFICATES)
         .then_some(roots)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "too many CA certificates"))
