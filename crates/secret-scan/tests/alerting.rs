@@ -86,6 +86,7 @@ pub fn executor<'a>(store: &'a Store) -> impl Fn(TenantScope, &'static str, Vec<
 fn finding(file: &str, line: u64, commit: Option<&str>, rule: &str) -> Finding {
     Finding {
         file: file.to_owned(),
+        file_digest: path_digest(file),
         start_line: line,
         end_line: line.saturating_add(1),
         commit: commit.map(str::to_owned),
@@ -240,13 +241,13 @@ fn hostile_paths_are_shown_as_a_digest() -> TestResult {
         let item = finding(path, LINE, None, "rule");
         let alerts = secret_alerts(&scope, &report("acme", vec![item.clone()]), NOW_MICROS);
         let alert = alerts.first().ok_or("no alert")?;
-        let digest = short_digest(path);
+        let digest = short_digest(&path_digest(path));
         assert_eq!(digest.chars().count(), DIGEST_CHARS + 1);
         assert_eq!(alert.rule_title, format!("Secret rule in {digest}:{LINE}"));
         assert!(alert.summary.text.contains(&digest));
         assert!(!alert.summary.text.contains('\u{202e}'));
         assert!(!alert.rule_title.contains('\n'));
-        assert_eq!(shown_path(path), digest);
+        assert_eq!(shown_path(path, &path_digest(path)), digest);
         Ok(())
     })?;
     assert!(is_path("dir/with space/file.txt"));
@@ -263,7 +264,7 @@ fn a_long_title_falls_back_to_the_digest() -> TestResult {
     assert!(format!("Secret {} in {}:{}", item.rule_id, item.file, item.start_line).chars().count() > MAX_TITLE_CHARS);
     let title = title_of(&item);
     assert!(title.chars().count() <= MAX_TITLE_CHARS);
-    assert!(title.contains(&short_digest(&item.file)));
+    assert!(title.contains(&short_digest(&item.file_digest)));
     let alerts = secret_alerts(&scope, &report("acme", vec![item]), NOW_MICROS);
     assert_eq!(alerts.len(), 1);
     Ok(())
