@@ -17,7 +17,8 @@ use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::future::ready;
-use std::sync::Mutex;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
 use types::TestResult;
 
 
@@ -106,7 +107,7 @@ fn alert_maps_the_failure() -> TestResult {
     let alerts = drift_alerts(&scope, std::slice::from_ref(&item), NOW);
     let alert = alerts.first().ok_or("no alert")?;
     assert_eq!(alerts.len(), 1);
-    assert_eq!(alert.rule_id, format!("{RULE_PREFIX}anssi.ssh-01"));
+    assert_eq!(alert.rule_id, format!("{RULE_PREFIX}anssi:ssh-01"));
     assert_eq!(alert.tenant, "acme");
     assert_eq!(alert.rule_title, "Control ssh-01 failed: SSH root login disabled");
     assert_eq!(alert.host_name.as_deref(), Some("web-1"));
@@ -365,5 +366,46 @@ fn an_empty_or_invalid_tenant_is_dropped() -> TestResult {
         item.tenant = (*tenant).to_owned();
         assert!(drift_alerts(&acme, &[item], NOW).is_empty());
     });
+    Ok(())
+}
+
+
+#[test]
+fn colliding_baseline_control_pairs_give_different_rule_ids() -> TestResult {
+    let acme = tenant_scope("acme")?;
+    let first = alert_of(&acme, &finding("a.b", "c", "web-1"), NOW).ok_or("first")?;
+    let second = alert_of(&acme, &finding("a", "b.c", "web-1"), NOW).ok_or("second")?;
+    assert_ne!(first.rule_id, second.rule_id);
+    assert_eq!(first.rule_id, format!("{RULE_PREFIX}a.b:c"));
+    Ok(())
+}
+
+
+#[test]
+fn the_warning_holds_both_counts_and_no_tenant_name() -> TestResult {
+    let anchor = tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish());
+    let capture = Arc::new(tempfile::tempfile()?);
+    let writer = Arc::clone(&capture);
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Arc::clone(&writer))
+            .finish(),
+    );
+    let acme = tenant_scope("acme")?;
+    let mut foreign = finding("anssi", "ssh-01", "web-1");
+    foreign.tenant = "secretco".to_owned();
+    let bad_text = finding("-x", "ssh-02", "web-2");
+    let findings = [foreign, bad_text];
+    let alerts = tracing::dispatcher::with_default(&dispatch, || drift_alerts(&acme, &findings, NOW));
+    drop(anchor);
+    assert!(alerts.is_empty());
+    let mut text = String::new();
+    let mut file: &std::fs::File = &capture;
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_string(&mut text)?;
+    assert!(text.contains("rejected=1"), "{text}");
+    assert!(text.contains("foreign_tenant=1"), "{text}");
+    assert!(!text.contains("secretco") && !text.contains("acme"), "{text}");
     Ok(())
 }
