@@ -1,6 +1,6 @@
 use crate::error::CheckError;
 use crate::load::within;
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv6Net};
 use serde::Deserialize;
 
 
@@ -58,6 +58,9 @@ pub const DEFAULT_CERT_DAYS: [u64; 3] = [30, 14, 7];
 pub const MAX_BODY_EXCERPT_BYTES: usize = 512;
 
 
+pub const NAT64_PREFIX_LENGTHS: [u8; 6] = [32, 40, 48, 56, 64, 96];
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckKind {
@@ -82,6 +85,7 @@ pub struct Check {
     pub locations: Vec<String>,
     pub min_failing_locations: u64,
     pub certificate_days: Vec<CertificateDay>,
+    pub nat64_prefix: Option<Ipv6Net>,
 }
 
 
@@ -142,6 +146,8 @@ pub struct RawCheck {
     pub min_failing_locations: u64,
     #[serde(default = "default_certificate_days")]
     pub certificate_days: Vec<u64>,
+    #[serde(default)]
+    pub nat64_prefix: Option<Ipv6Net>,
 }
 
 

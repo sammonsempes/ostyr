@@ -88,19 +88,62 @@ pub fn classify(address: IpAddr) -> Option<AddressClass> {
 }
 
 
-/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96 or any address whose bits 64 to 95 are zero, a network-specific /96 prefix), SIIT, 6to4, Teredo (server and obfuscated client) or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and every RFC 6052 position is checked too so metadata there is never scoped.
+pub const BITS_PER_OCTET: u8 = 8;
+
+
+pub const RFC6052_U_OCTET: usize = 8;
+
+
+pub const V4_OCTETS: usize = 4;
+
+
+pub const ADDRESS_OCTETS: usize = 16;
+
+
+pub const ISATAP_PREFIXES: [[u8; 2]; 2] = [[0, 0], [2, 0]];
+
+
+pub const ISATAP_MARKER: [u8; 2] = [0x5e, 0xfe];
+
+
+/// The IPv4 address of an RFC 6052 embedding for a prefix length (32, 40, 48, 56, 64 or 96): the four octets after the prefix, octet 8 skipped.
+pub fn rfc6052_v4(octets: [u8; ADDRESS_OCTETS], prefix_len: u8) -> Option<Ipv4Addr> {
+    let found: Vec<u8> = (usize::from(prefix_len / BITS_PER_OCTET)..)
+        .filter(|index| *index != RFC6052_U_OCTET)
+        .take(V4_OCTETS)
+        .filter_map(|index| octets.get(index).copied())
+        .collect();
+    <[u8; V4_OCTETS]>::try_from(found).ok().map(Ipv4Addr::from)
+}
+
+
+/// `embedded_v4_nat64` without a declared NAT64 prefix.
 pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
+    embedded_v4_nat64(address, None)
+}
+
+
+/// IPv4 addresses embedded in a NAT64 (64:ff9b::/96, a declared site prefix at its RFC 6052 positions, or any address whose bits 64 to 95 are zero and whose last 32 bits are not a bare low 16-bit host number), SIIT, 6to4, Teredo (server and obfuscated client), ISATAP or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and every RFC 6052 position is checked too so metadata there is never scoped.
+pub fn embedded_v4_nat64(address: IpAddr, nat64: Option<Ipv6Net>) -> Vec<Ipv4Addr> {
     match address {
         IpAddr::V4(_) => Vec::new(),
         IpAddr::V6(v6) => {
-            let [_, _, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15] = v6.octets();
+            let octets = v6.octets();
+            let [_, _, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15] = octets;
             let teredo_client = Ipv4Addr::new(!o12, !o13, !o14, !o15);
-            let rfc6052_96 = (o8 | o9 | o10 | o11) == 0 && o12 != 0;
+            let low_host_number = o12 == 0 && o13 == 0 && (o14 | o15) != 0;
+            let rfc6052_96 = (o8 | o9 | o10 | o11) == 0 && !low_host_number && !NAT64_LOCAL_V6.contains(&v6) && !SIX_TO_FOUR_V6.contains(&v6);
             let last_32 = Ipv4Addr::new(o12, o13, o14, o15);
             let six_to_four = Ipv4Addr::new(o2, o3, o4, o5);
+            let isatap = ISATAP_PREFIXES.contains(&[o8, o9]) && [o10, o11] == ISATAP_MARKER;
+            let declared: Vec<Ipv4Addr> = nat64
+                .into_iter()
+                .filter(|prefix| prefix.contains(&v6))
+                .filter_map(|prefix| rfc6052_v4(octets, prefix.prefix_len()))
+                .collect();
             [
                 (
-                    NAT64_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6) || rfc6052_96,
+                    NAT64_V6.contains(&v6) || COMPATIBLE_V6.contains(&v6) || SIIT_V6.contains(&v6) || isatap,
                     vec![last_32],
                 ),
                 (TEREDO_V6.contains(&v6), vec![Ipv4Addr::new(o4, o5, o6, o7), teredo_client]),
@@ -116,6 +159,8 @@ pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
                     ],
                 ),
                 (SIX_TO_FOUR_V6.contains(&v6), vec![six_to_four]),
+                (rfc6052_96, vec![last_32]),
+                (true, declared),
             ]
             .into_iter()
             .filter_map(|(applies, found)| applies.then_some(found))
@@ -141,8 +186,14 @@ fn check_candidate(candidate: IpAddr, canonical: IpAddr, scope: &[IpNet]) -> Res
 
 /// Checks a resolved address (IPv4-mapped unwrapped, embedded IPv4 checked too); a metadata address is refused even when a scope entry covers it.
 pub fn guard_address(address: IpAddr, scope: &[IpNet]) -> Result<CheckedAddr, GuardError> {
+    guard_address_nat64(address, scope, None)
+}
+
+
+/// `guard_address` with the site's declared NAT64 prefix.
+pub fn guard_address_nat64(address: IpAddr, scope: &[IpNet], nat64: Option<Ipv6Net>) -> Result<CheckedAddr, GuardError> {
     let canonical = address.to_canonical();
-    let embedded = embedded_v4(canonical);
+    let embedded = embedded_v4_nat64(canonical, nat64);
     let verdict = std::iter::once(canonical)
         .chain(embedded.into_iter().map(IpAddr::V4))
         .try_for_each(|candidate| check_candidate(candidate, canonical, scope));
