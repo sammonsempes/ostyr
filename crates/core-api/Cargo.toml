@@ -44,6 +44,8 @@ getrandom = "0.4.3"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+notify = "8.2.1"
+notify-debouncer-full = "0.7.0"
 tokio-stream = "0.1"
 
 [lints]
