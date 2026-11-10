@@ -90,7 +90,7 @@ fn serve_tls_once(pki: &Pki) -> Result<Server, Box<dyn Error>> {
         while !received.ends_with("}\n") && reads < MAX_READS {
             reads += 1;
             let count = tls.read(&mut chunk)?;
-            received.push_str(&String::from_utf8_lossy(chunk.get(..count).unwrap_or_default()));
+            received.push_str(&String::from_utf8_lossy(chunk.get(..count).unwrap_or(&[])));
         }
         tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         tls.flush().map(|()| received)

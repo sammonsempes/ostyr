@@ -97,7 +97,7 @@ fn read_data<Stream: Read + Write>(reader: &mut BufReader<Stream>) -> io::Result
     let mut finished = false;
     let mut steps = 0;
     while !finished && steps < MAX_STEPS {
-        let line = read_text(reader)?.unwrap_or_default();
+        let line = read_text(reader)?.unwrap_or_else(|| "".to_owned());
         finished = line == ".";
         data.push_str(&line);
         data.push('\n');

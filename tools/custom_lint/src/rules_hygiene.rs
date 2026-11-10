@@ -21,6 +21,9 @@ pub const SILENCER: &str = "silencer";
 pub const LET_UNDERSCORE: &str = "let-underscore";
 
 
+pub const SILENT_DEFAULT: &str = "silent-default";
+
+
 pub const SHELL_C: &str = "shell-c";
 
 
@@ -37,6 +40,9 @@ const SHELL_FLAGS: [&str; 3] = ["-c", "/c", "-command"];
 
 
 const SHELL_SPAWN_WIDTH: usize = 6;
+
+
+const DISCARDED_OK: [&str; 5] = [".", "ok", "(", ")", ";"];
 
 
 const PAIR_WIDTH: usize = 2;
@@ -127,6 +133,43 @@ pub fn let_underscore(context: &Context) -> Vec<Violation> {
         .filter(|window| matches!(window, [first, second] if is_keyword(first, "let") && is_keyword(second, "_")))
         .filter_map(|window| window.first())
         .map(|token| at_offset(context, LET_UNDERSCORE, token.offset, "`let _ =` discards a value silently".to_string()))
+        .collect()
+}
+
+
+pub fn is_discarded_ok(window: &[Token]) -> bool {
+    window.iter().map(|token| token.text).eq(DISCARDED_OK)
+}
+
+
+pub fn is_statement_boundary(token: &Token) -> bool {
+    matches!(token.kind, TokenKind::Semi | TokenKind::OpenBrace | TokenKind::CloseBrace)
+}
+
+
+pub fn silent_default(context: &Context) -> Vec<Violation> {
+    let tokens = significant_tokens(&context.source);
+    let defaults = tokens
+        .iter()
+        .filter(|token| is_keyword(token, "unwrap_or_default"))
+        .map(|token| (token.offset, "`unwrap_or_default()` swallows an error without a log"));
+    let discarded = tokens
+        .windows(DISCARDED_OK.len())
+        .enumerate()
+        .filter(|(_, window)| is_discarded_ok(window))
+        .filter(|(index, _)| {
+            !tokens
+                .iter()
+                .take(*index)
+                .rev()
+                .take_while(|token| !is_statement_boundary(token))
+                .any(|token| token.kind == TokenKind::Eq || is_keyword(token, "inspect_err"))
+        })
+        .filter_map(|(_, window)| window.first())
+        .map(|token| (token.offset, "a discarded `.ok()` swallows an error without a log"));
+    defaults
+        .chain(discarded)
+        .map(|(offset, message)| at_offset(context, SILENT_DEFAULT, offset, message.to_string()))
         .collect()
 }
 

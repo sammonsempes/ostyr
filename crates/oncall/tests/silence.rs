@@ -245,7 +245,7 @@ fn alerts_are_deduplicated_and_grouped() -> TestResult {
     let groups = group_alerts(&alerts, &["service".to_string()])?;
     let sizes: Vec<(String, usize)> = groups
         .iter()
-        .map(|group| (group.labels.get("service").cloned().unwrap_or_default(), group.alerts.len()))
+        .map(|group| (group.labels.get("service").map_or_else(String::new, Clone::clone), group.alerts.len()))
         .collect();
     assert_eq!(sizes, vec![(String::new(), 1), ("api".to_string(), 1), ("db".to_string(), DB_ALERTS)]);
     let first = groups

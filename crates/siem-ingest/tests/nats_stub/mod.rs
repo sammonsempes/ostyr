@@ -272,7 +272,7 @@ pub fn matches(pattern: &str, subject: &str) -> bool {
 
 pub fn frame(out: &Outgoing, sid: &str) -> Vec<u8> {
     let subject = out.subject.as_deref().unwrap_or(&out.target);
-    let reply = out.ack_reply.as_deref().map(|text| format!("{text} ")).unwrap_or_default();
+    let reply = out.ack_reply.as_deref().map_or(String::new(), |text| format!("{text} "));
     let mut bytes = match &out.headers {
         Some(headers) => format!(
             "HMSG {subject} {sid} {reply}{} {}\r\n{headers}",
@@ -348,7 +348,7 @@ pub fn pull_reply(state: &mut StubState, reply: Option<&str>, payload: &[u8]) ->
     let request: Value = serde_json::from_slice(payload).map_err(io::Error::other)?;
     let wanted = request.get("batch").and_then(Value::as_u64).unwrap_or(0) as usize;
     state.pulls.push(request);
-    let inbox = reply.unwrap_or_default();
+    let inbox = reply.unwrap_or("");
     if state.silent_pull {
         Ok(Vec::new())
     } else if let Some(code) = state.pull_status.clone() {

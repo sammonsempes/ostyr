@@ -202,7 +202,7 @@ pub fn parse_line(segment: &[u8]) -> Result<ReplyLine, TransportError> {
             Ok(ReplyLine {
                 code,
                 last,
-                text: body.get(TEXT_OFFSET..).unwrap_or_default().to_owned(),
+                text: body.get(TEXT_OFFSET..).unwrap_or("").to_owned(),
             })
         }
     }

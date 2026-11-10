@@ -3,6 +3,7 @@ use crate::engine::{new_engine, process_event, snapshot, Engine};
 use crate::error::CorrelationError;
 use crate::field::{lookup, scalar_text};
 use crate::reload::open_rules;
+use crate::window::State;
 use core_config::reload::ReloadContext;
 use core_config::types::SharedAuditFn;
 use serde_json::Value;
@@ -37,7 +38,10 @@ pub fn start_engine(
 ) -> Result<Engine, CorrelationError> {
     let restored = load_checkpoint(checkpoint)?;
     info!(restored = restored.is_some(), "checkpoint loaded, a missing file is a first start");
-    let state = restored.unwrap_or_default();
+    let state = restored.unwrap_or_else(|| {
+        info!("no checkpoint, starting from an empty state");
+        State::default()
+    });
     let rules = Arc::new(open_rules(mapping_file, rule_files, audit, context)?);
     Ok(new_engine(rules, state))
 }

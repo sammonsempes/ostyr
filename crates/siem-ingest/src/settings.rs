@@ -318,7 +318,7 @@ pub fn settings_state(settings: &IngestSettings) -> ConfigState {
                 .as_ref()
                 .map_or_else(String::new, |path| path.display().to_string()),
         ),
-        ("nats_user", settings.nats_user.clone().unwrap_or_default()),
+        ("nats_user", settings.nats_user.as_deref().unwrap_or("").to_owned()),
         (
             "nats_password_file",
             settings

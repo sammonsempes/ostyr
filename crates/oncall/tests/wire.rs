@@ -34,7 +34,7 @@ const FLOOD_CHUNK: usize = 512;
 
 fn feed<'data>(data: &'data [u8], consumed: &'data mut usize) -> impl FnMut(&mut [u8]) -> Result<usize, TransportError> + 'data {
     move |buffer: &mut [u8]| {
-        let available = data.get(*consumed..).unwrap_or_default();
+        let available = data.get(*consumed..).unwrap_or(&[]);
         let count = available.len().min(buffer.len());
         buffer
             .iter_mut()

@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ack_counts = Arc::clone(&counts);
     let dead_counts = Arc::clone(&counts);
     let wiring = Wiring {
-        fetch: Box::new(move |_| Ok(pending.take().unwrap_or_default())),
+        fetch: Box::new(move |_| Ok(pending.take().into_iter().flatten().collect())),
         ack: Box::new(move |_, action| count(&ack_counts, format!("{action:?}"))),
         dead_letter: Box::new(move |_, _, reason| count(&dead_counts, format!("dead letter: {reason}"))),
     };

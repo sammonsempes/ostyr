@@ -57,7 +57,7 @@ async fn start(
     let address = listener.local_addr()?;
     let (stop, stopped) = oneshot::channel::<()>();
     let shutdown = Box::pin(async {
-        stopped.await.unwrap_or_default();
+        stopped.await.inspect_err(|error| tracing::warn!(%error, "stop signal dropped")).ok();
     });
     tokio::spawn(serve(
         Box::pin(TcpListenerStream::new(listener)),
@@ -73,7 +73,11 @@ async fn exchange(address: SocketAddr, text: &str) -> Result<String, Box<dyn std
     let mut stream = TcpStream::connect(address).await?;
     stream.write_all(text.as_bytes()).await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap_or_default();
+    stream
+        .read_to_end(&mut bytes)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "read ended early"))
+        .ok();
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -147,7 +151,11 @@ async fn a_slow_loris_is_dropped_by_the_header_deadline() -> TestResult {
     let mut stream = TcpStream::connect(address).await?;
     stream.write_all(b"GET / HT").await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap_or_default();
+    stream
+        .read_to_end(&mut bytes)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "read ended early"))
+        .ok();
     assert!(!String::from_utf8_lossy(&bytes).contains("200 OK"));
     assert!(started.elapsed() < Duration::from_secs(LONG_SECONDS));
     Ok(())
@@ -165,7 +173,11 @@ async fn an_idle_connection_is_dropped() -> TestResult {
     let started = Instant::now();
     let mut stream = TcpStream::connect(address).await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap_or_default();
+    stream
+        .read_to_end(&mut bytes)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "read ended early"))
+        .ok();
     assert!(started.elapsed() < Duration::from_secs(LONG_SECONDS));
     Ok(())
 }
@@ -183,7 +195,11 @@ async fn the_total_deadline_cuts_a_connection_kept_alive() -> TestResult {
     let mut stream = TcpStream::connect(address).await?;
     stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap_or_default();
+    stream
+        .read_to_end(&mut bytes)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "read ended early"))
+        .ok();
     assert!(String::from_utf8_lossy(&bytes).starts_with("HTTP/1.1 200"));
     assert!(started.elapsed() >= Duration::from_secs(SHORT_SECONDS));
     assert!(started.elapsed() < Duration::from_secs(LONG_SECONDS));
