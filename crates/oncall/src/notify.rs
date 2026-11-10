@@ -1,30 +1,36 @@
+use crate::alert::FailureReason;
 use crate::channel::{redacted_target, validate_channel};
 use crate::error::OncallError;
 use crate::limits::{MAX_CHANNELS, MAX_REASON_LEN};
 use crate::model::{AlertNotice, Channel, NotifyFailure};
 use crate::render::{render, truncate};
+use crate::store::reason_text;
 use crate::types::Sender;
 use crate::validate::check_between;
 
 
-pub fn failure(channel: &Channel, reason: &str) -> NotifyFailure {
-    let safe = truncate(reason, MAX_REASON_LEN);
+/// The caller gets the closed reason; the detail only reaches the log, cut to `MAX_REASON_LEN`.
+pub fn failure(channel: &Channel, reason: FailureReason, detail: &str) -> NotifyFailure {
+    let safe = truncate(detail, MAX_REASON_LEN);
     let target = redacted_target(channel);
-    tracing::warn!(channel = ?channel.name, target = %target, reason = ?safe, "notification failed");
+    let text = reason_text(reason);
+    tracing::warn!(channel = ?channel.name, target = %target, reason = text, detail = ?safe, "notification failed");
     NotifyFailure {
         channel: channel.name.clone(),
-        reason: safe,
+        reason,
     }
 }
 
 
 pub fn notify_one(alert: &AlertNotice, channel: &Channel, send: &mut Sender) -> Option<NotifyFailure> {
     if channel.tenant != alert.tenant {
-        Some(failure(channel, "channel belongs to another tenant"))
+        Some(failure(channel, FailureReason::OtherTenant, reason_text(FailureReason::OtherTenant)))
     } else {
         match validate_channel(channel).and_then(|()| render(alert, channel)) {
-            Err(error) => Some(failure(channel, &error.to_string())),
-            Ok(message) => send(channel, &message).err().map(|_| failure(channel, "sender failed")),
+            Err(error) => Some(failure(channel, FailureReason::InvalidMessage, &error.to_string())),
+            Ok(message) => send(channel, &message)
+                .err()
+                .map(|_| failure(channel, FailureReason::SenderFailed, reason_text(FailureReason::SenderFailed))),
         }
     }
 }

@@ -12,14 +12,18 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = { version = "0.10", features = ["serde"] }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+getrandom = "0.4.3"
+hmac = "0.12"
 lettre = { version = "0.11", default-features = false, features = ["builder"] }
 libc = "0.2"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+rustix = { version = "1.1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }

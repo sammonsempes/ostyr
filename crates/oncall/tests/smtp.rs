@@ -14,6 +14,7 @@ use oncall::model::{AlertNotice, Channel, ChannelKind, Message};
 use oncall::notify::notify;
 use oncall::settings::{parse_settings, validate_smtp, SmtpSettings, SmtpTls, TransportSettings};
 use oncall::smtp::{data_block, offers_plain, offers_starttls, parse_address, resolve, send_mail, send_mail_with};
+use oncall::store::reason_text;
 use oncall::transport::{send_one, FORBIDDEN_CHARS};
 use oncall::wire::Reply;
 use pki::{spawn_silent, test_pki};
@@ -550,7 +551,7 @@ fn the_server_reply_text_never_reaches_an_error_or_a_failure_reason() -> TestRes
     let failures = notify(&alert(), &[mail_channel(RECIPIENT, Some("smtp-pass"))], &mut engine_free_sender)?;
     assert_eq!(failures.len(), 1);
     assert_eq!(
-        failures.iter().map(|failure| failure.reason.as_str()).collect::<Vec<_>>(),
+        failures.iter().map(|failure| reason_text(failure.reason)).collect::<Vec<_>>(),
         vec!["sender failed"]
     );
     again.done.join().map_err(|_panic| "relay panicked")??;

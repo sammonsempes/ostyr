@@ -11,3 +11,12 @@ pub type ClockFn<'clock> = &'clock dyn Fn() -> std::time::Instant;
 
 
 pub type Row = Vec<crate::alert::Cell>;
+
+
+pub type FillFn = fn(&mut [u8]) -> Result<(), getrandom::Error>;
+
+
+pub type IssueError = crate::error::LinkError<std::convert::Infallible>;
+
+
+pub type LinkKey = zeroize::Zeroizing<Vec<u8>>;
