@@ -34,5 +34,8 @@ pub type IncomingConnections = Pin<Box<dyn Stream<Item = io::Result<TcpStream>> 
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 
+pub type Row = Vec<crate::store_model::Cell>;
+
+
 /// Samples (newest first) per (check, location).
 pub type Series<'a> = BTreeMap<(&'a str, &'a str), Vec<(i64, bool)>>;

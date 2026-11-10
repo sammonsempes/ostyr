@@ -10,6 +10,7 @@ arc-swap = "1.9.3"
 axum = { version = "0.8", default-features = false }
 core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 futures-util = "0.3"
 html-escape = "0.2"
 ipnet = { version = "2", features = ["serde"] }
@@ -28,6 +29,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing = "0.1"
 
 [dev-dependencies]
+tokio-postgres = "0.7"
 tempfile = "3"
 time = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util", "io-util"] }

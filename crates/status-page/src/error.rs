@@ -31,3 +31,20 @@ pub enum StatusPageError {
     #[error("cannot serialise the page: {0}")]
     Json(#[from] serde_json::Error),
 }
+
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("text `{field}` longer than {limit} characters")]
+    TextTooLong { field: &'static str, limit: usize },
+    #[error("text `{field}` is empty or holds a control character")]
+    TextInvalid { field: &'static str },
+    #[error("limit {limit} is outside 1..={max}")]
+    LimitOutOfRange { limit: u32, max: u32 },
+    #[error("no such incident for this tenant, a stale version, or the update limit is reached")]
+    Conflict,
+    #[error("unexpected value in column `{column}`")]
+    BadRow { column: &'static str },
+    #[error(transparent)]
+    Pg(#[from] core_pg::error::PgError),
+}
