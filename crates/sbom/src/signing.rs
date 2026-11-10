@@ -2,7 +2,7 @@
 
 use crate::diff::diff;
 use crate::error::SigningError;
-use crate::limits::{KEY_FILE_HEX_LENGTH, KEY_FILE_READ_LIMIT, SBOM_SIGNING_CONTEXT};
+use crate::limits::{KEY_FILE_BUFFER_CAPACITY, KEY_FILE_HEX_LENGTH, KEY_FILE_READ_LIMIT, SBOM_SIGNING_CONTEXT};
 use crate::model::{DocumentMeta, DocumentSignature, Limits, Sbom, SbomDiff, SignedDocument, TrustedKey};
 use crate::parse::parse_cyclonedx;
 use crate::types::{SignerFn, TrustedKeys};
@@ -170,8 +170,8 @@ pub fn check_key_owner(_file: &File) -> Result<(), SigningError> {
 pub fn parse_seed(text: &str) -> Result<SigningKey, SigningError> {
     let trimmed = text.trim();
     if trimmed.len() == KEY_FILE_HEX_LENGTH {
-        let bytes = HEXLOWER.decode(trimmed.as_bytes())?;
-        let seed = <[u8; SECRET_KEY_LENGTH]>::try_from(bytes.as_slice()).map_err(|_| SigningError::KeyLength)?;
+        let bytes = Zeroizing::new(HEXLOWER.decode(trimmed.as_bytes())?);
+        let seed = Zeroizing::new(<[u8; SECRET_KEY_LENGTH]>::try_from(bytes.as_slice())?);
         Ok(SigningKey::from_bytes(&seed))
     } else {
         Err(SigningError::KeyLength)
@@ -181,15 +181,27 @@ pub fn parse_seed(text: &str) -> Result<SigningKey, SigningError> {
 
 /// Mode and owner are checked on the open handle, and the seed is read from that same handle; one byte over the limit is refused.
 pub fn read_signing_key(file: File) -> Result<SigningKey, SigningError> {
+    parse_seed(&read_private_text(file, KEY_FILE_READ_LIMIT, KEY_FILE_BUFFER_CAPACITY)?)
+}
+
+
+/// The text sits in a zeroised buffer pre-sized to `capacity`; one byte over `limit` is refused.
+pub fn read_private_text(file: File, limit: u64, capacity: usize) -> Result<Zeroizing<String>, SigningError> {
     check_private(&file)?;
     check_key_owner(&file)?;
-    let mut text = Zeroizing::new(String::new());
-    file.take(KEY_FILE_READ_LIMIT + 1).read_to_string(&mut text)?;
-    if text.len() > usize::try_from(KEY_FILE_READ_LIMIT).unwrap_or(usize::MAX) {
+    let mut text = Zeroizing::new(String::with_capacity(capacity));
+    let mut capped = file.take(limit.saturating_add(1));
+    capped.read_to_string(&mut text)?;
+    if capped.limit() == 0 {
         Err(SigningError::KeyTooLarge)
     } else {
-        parse_seed(&text)
+        Ok(text)
     }
+}
+
+
+pub fn load_private_text(path: &Path, limit: u64, capacity: usize) -> Result<Zeroizing<String>, SigningError> {
+    read_private_text(open_regular(path)?, limit, capacity)
 }
 
 

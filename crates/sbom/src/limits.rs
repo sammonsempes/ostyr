@@ -122,3 +122,45 @@ pub const BLOCK_BYTES: u64 = 512;
 
 
 pub const DRAIN_CHUNK_BYTES: u64 = 8192;
+
+
+pub const KEY_FILE_BUFFER_CAPACITY: usize = 129;
+
+
+pub const MAX_NAME_BYTES: usize = 128;
+
+
+pub const STORE_DOCUMENT_SUFFIX: &str = ".cdx.json";
+
+
+pub const STORE_SIGNATURE_SUFFIX: &str = ".cdx.json.sig";
+
+
+pub const MAX_SIGNATURE_OBJECT_BYTES: usize = 512;
+
+
+pub const MAX_CREDENTIAL_BYTES: u64 = 256;
+
+
+pub const CREDENTIAL_BUFFER_CAPACITY: usize = 257;
+
+
+pub const MAX_CA_BYTES: u64 = 1_048_576;
+
+
+pub const PRESIGN_SECONDS: u64 = 60;
+
+
+pub const MIN_BUCKET_BYTES: usize = 3;
+
+
+pub const MAX_BUCKET_BYTES: usize = 63;
+
+
+pub const HTTP_OK_FIRST: u16 = 200;
+
+
+pub const HTTP_OK_LAST: u16 = 299;
+
+
+pub const NO_REDIRECTS: u32 = 0;
