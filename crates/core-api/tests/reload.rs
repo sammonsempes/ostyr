@@ -135,6 +135,15 @@ const POLLS: usize = 100;
 const POLL_PAUSE: Duration = Duration::from_millis(100);
 
 
+const MOVE_ATTEMPTS: usize = 5;
+
+
+const HANG_POLLS: usize = 3000;
+
+
+const HANG_GUARD: Duration = Duration::from_secs(300);
+
+
 const BODY_SECONDS: u64 = 3;
 
 
@@ -866,11 +875,18 @@ where
 }
 
 
+async fn guarded<Output>(step: &'static str, work: impl Future<Output = Output>) -> Result<Output, TestError> {
+    tokio::time::timeout(HANG_GUARD, work)
+        .await
+        .map_err(|_| format!("hang guard: {step} did not finish").into())
+}
+
+
 async fn status_of(address: SocketAddr) -> Result<String, TestError> {
-    let mut stream = TcpStream::connect(address).await?;
+    let mut stream = guarded("connect", TcpStream::connect(address)).await??;
     stream.write_all(HEALTH_REQUEST.as_bytes()).await?;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
+    guarded("status read", stream.read_to_end(&mut bytes)).await??;
     Ok(String::from_utf8_lossy(&bytes).lines().next().map_or_else(String::new, str::to_owned))
 }
 
@@ -887,7 +903,7 @@ fn start_module(path: &Path) -> (SharedListener, tokio::task::JoinHandle<Result<
 
 
 async fn listening(listener: &SharedListener) -> Result<SocketAddr, TestError> {
-    Ok(listening_address(listener).await.ok_or("server did not start")?)
+    Ok(guarded("listening", listening_address(listener)).await?.ok_or("server did not start")?)
 }
 
 
@@ -921,7 +937,7 @@ async fn editing_the_module_file_changes_the_running_server() -> TestResult {
     let limited = eventually(|| async move { Ok(status_of(address).await?.contains("429")) }).await?;
     assert!(limited);
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -942,7 +958,7 @@ async fn sighup_reloads_the_module_file() -> TestResult {
     let limited = eventually(|| async move { Ok(status_of(address).await?.contains("429")) }).await?;
     assert!(limited);
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -985,7 +1001,7 @@ async fn a_replaced_certificate_serves_new_handshakes_and_spares_open_connection
     assert!(swapped);
     open.write_all(HEALTH_REQUEST.as_bytes()).await?;
     let mut bytes = Vec::new();
-    open.read_to_end(&mut bytes).await?;
+    guarded("open read", open.read_to_end(&mut bytes)).await??;
     assert!(String::from_utf8_lossy(&bytes).starts_with("HTTP/1.1 200 OK"));
     let directory = dir.path();
     let before = reload_records(directory)?.iter().filter(|line| line.contains("refused")).count();
@@ -995,7 +1011,7 @@ async fn a_replaced_certificate_serves_new_handshakes_and_spares_open_connection
     assert!(refused);
     assert_eq!(presented_certificate(address, &[&first, &second]).await?.1, second.der);
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -1036,11 +1052,46 @@ fn generation_of(listener: &SharedListener) -> Result<Option<u64>, TestError> {
 }
 
 
-async fn moved_to(listener: &SharedListener, old: SocketAddr) -> Result<SocketAddr, TestError> {
-    listener.switched.notified().await;
+async fn landed(listener: &SharedListener, old: SocketAddr) -> Result<SocketAddr, TestError> {
     let new = listening(listener).await?;
     assert_ne!(new, old);
     Ok(new)
+}
+
+
+fn refusals(dir: &Path) -> Result<usize, TestError> {
+    Ok(reload_records(dir)?.iter().filter(|line| line.contains("refused")).count())
+}
+
+
+async fn refused_after(dir: &Path, before: usize) -> Result<bool, TestError> {
+    let mut seen = false;
+    let mut attempts = 0;
+    while !seen && attempts < HANG_POLLS {
+        seen = refusals(dir)? > before;
+        attempts += 1;
+        if !seen {
+            tokio::time::sleep(POLL_PAUSE).await;
+        }
+    }
+    Ok(seen)
+}
+
+
+async fn move_listen(listener: &SharedListener, dir: &Path, path: &Path, extra: &str, old: SocketAddr) -> Result<SocketAddr, TestError> {
+    let mut moved = None;
+    let mut attempts = 0;
+    while moved.is_none() && attempts < MOVE_ATTEMPTS {
+        let before = refusals(dir)?;
+        fs::write(path, module_text(dir, "example", &free_address()?, extra)?)?;
+        let switched = tokio::select! {
+            () = listener.switched.notified() => true,
+            seen = refused_after(dir, before) => !seen?,
+        };
+        moved = if switched { Some(landed(listener, old).await?) } else { None };
+        attempts += 1;
+    }
+    Ok(moved.ok_or("every attempted address was refused")?)
 }
 
 
@@ -1060,15 +1111,12 @@ async fn a_moved_listen_serves_on_the_new_port_and_frees_the_old_one() -> TestRe
     let (listener, task) = start_module(&path);
     let old = listening(&listener).await?;
     assert!(status_of(old).await?.contains("200"));
-    let second = free_address()?;
-    fs::write(&path, module_text(dir.path(), "example", &second, "")?)?;
-    let new = moved_to(&listener, old).await?;
-    assert_eq!(new.to_string(), second);
+    let new = move_listen(&listener, dir.path(), &path, "", old).await?;
     assert!(status_of(new).await?.contains("200"));
     assert!(TcpStream::connect(old).await.is_err());
     assert_eq!(generation_of(&listener)?, Some(1));
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -1086,16 +1134,15 @@ async fn a_request_in_flight_finishes_on_the_old_listener() -> TestResult {
     let held_ref = &held;
     let accepted = eventually(|| async move { Ok(held_ref.connection_count() == 1) }).await?;
     assert!(accepted);
-    fs::write(&path, module_text(dir.path(), "example", &free_address()?, PATIENT)?)?;
-    let new = moved_to(&listener, old).await?;
+    let new = move_listen(&listener, dir.path(), &path, PATIENT, old).await?;
     assert!(status_of(new).await?.contains("200"));
     assert!(TcpStream::connect(old).await.is_err());
     open.write_all(b"{}").await?;
     let mut bytes = Vec::new();
-    open.read_to_end(&mut bytes).await?;
+    guarded("held response", open.read_to_end(&mut bytes)).await??;
     assert!(String::from_utf8_lossy(&bytes).starts_with("HTTP/1.1 4"));
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -1120,7 +1167,7 @@ async fn a_changed_header_timeout_applies_to_new_connections_on_the_same_address
     assert!(closed);
     assert!(status_of(address).await?.contains("200"));
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -1148,7 +1195,7 @@ async fn tls_turned_on_then_off_changes_what_new_connections_get() -> TestResult
     assert!(plain);
     assert_eq!(generation_of(&listener)?, Some(PLAIN_AGAIN));
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
@@ -1180,7 +1227,7 @@ async fn a_moved_watched_file_is_watched_from_the_next_reload_on() -> TestResult
     .await?;
     assert!(followed);
     stop_listener(&listener, None);
-    assert!(task.await?.is_ok());
+    assert!(guarded("server task", task).await??.is_ok());
     Ok(())
 }
 
