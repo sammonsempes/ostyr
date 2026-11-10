@@ -167,11 +167,12 @@ pub enum Verdict {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct WatchPlan {
     pub home: std::path::PathBuf,
     pub tick: std::time::Duration,
     pub ticks: u64,
     pub max_bytes: u64,
     pub max_entries: usize,
+    pub expired: crate::types::DeadlineFn,
 }

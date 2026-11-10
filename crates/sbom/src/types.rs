@@ -27,3 +27,6 @@ pub type SignerFn = dyn Fn(&[u8]) -> Result<Vec<u8>, BoxError> + Send + Sync;
 
 
 pub type TrustedKeys = BTreeMap<String, crate::model::TrustedKey>;
+
+
+pub type DeadlineFn = fn(&std::path::Path) -> bool;
