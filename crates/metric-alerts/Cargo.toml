@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
+serde_json = "1"
+tracing = "0.1"
 core-config = { version = "0.0.0", path = "../core-config" }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 oncall = { version = "0.0.0", path = "../oncall" }
@@ -16,6 +20,7 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [lints]
 workspace = true

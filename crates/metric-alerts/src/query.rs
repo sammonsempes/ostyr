@@ -1,15 +1,12 @@
 use crate::error::RuleError;
 use crate::evaluate::ABSENCE_INTERVALS;
-use crate::model::{Condition, Direction, Rule, TenantId};
+use crate::model::{Condition, Direction, Rule};
 use crate::rules::MAX_LABELS;
 use crate::types::QueryParams;
+use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use siem_schema::identifier::{quote_identifier, validate_identifier};
 use siem_schema::metrics::{pick_table, table_name, MetricsRetention, MetricsTable, BUCKET_COLUMN};
 use siem_schema::schema::{TENANT_COLUMN, TIMESTAMP_COLUMN};
-
-
-/// Longest accepted tenant id, in bytes.
-pub const MAX_TENANT_LEN: usize = 128;
 
 
 /// Evaluation step of threshold and rate rules, in seconds.
@@ -37,13 +34,9 @@ pub enum Aggregate {
 }
 
 
-/// A tenant id is not empty, at most `MAX_TENANT_LEN` bytes, and has no control character.
-pub fn parse_tenant_id(text: &str) -> Result<TenantId, RuleError> {
-    if text.is_empty() || text.len() > MAX_TENANT_LEN || text.chars().any(char::is_control) {
-        Err(RuleError::InvalidTenant)
-    } else {
-        Ok(TenantId(text.to_string()))
-    }
+/// A tenant id in core-pg's grammar, never a local copy of it.
+pub fn parse_tenant_id(text: &str) -> Result<TenantScope, RuleError> {
+    tenant_scope(text).map_err(RuleError::InvalidTenant)
 }
 
 
@@ -127,7 +120,7 @@ pub fn selector_clauses(rule: &Rule) -> Result<(Vec<String>, QueryParams), RuleE
 
 
 /// Compiles the rule to one parameterised query over `[now - window, now]` returning rows `(ts, value)` in ascending order.
-pub fn rule_sql(rule: &Rule, tenant: &TenantId, now: u64, settings: &MetricsRetention) -> Result<MetricQuery, RuleError> {
+pub fn rule_sql(rule: &Rule, tenant: &TenantScope, now: u64, settings: &MetricsRetention) -> Result<MetricQuery, RuleError> {
     let (window, step) = window_and_step(rule);
     let table = pick_table(settings, window, step)?;
     let (clauses, label_params) = selector_clauses(rule)?;
@@ -141,7 +134,7 @@ pub fn rule_sql(rule: &Rule, tenant: &TenantId, now: u64, settings: &MetricsRete
         clauses.concat()
     );
     let base = vec![
-        ("tenant".to_string(), tenant.0.clone()),
+        ("tenant".to_string(), tenant_of(tenant).to_owned()),
         ("metric".to_string(), rule.metric.clone()),
         ("from".to_string(), from.to_string()),
         ("to".to_string(), now.to_string()),
