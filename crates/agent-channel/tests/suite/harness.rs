@@ -44,9 +44,6 @@ pub fn init_logging() -> Result<(), Box<dyn Error>> {
 }
 
 
-pub const CALL_TIMEOUT_SECONDS: u64 = 10;
-
-
 pub struct Platform {
     pub agent_ca: Authority,
     pub platform_ca: Authority,
@@ -214,7 +211,7 @@ pub async fn awaited<Output>(handle: JoinHandle<Output>) -> Result<Output, Box<d
 
 
 pub async fn bounded<Output>(future: impl std::future::Future<Output = Output>) -> Result<Output, Box<dyn Error>> {
-    Ok(timeout(Duration::from_secs(CALL_TIMEOUT_SECONDS), future).await?)
+    Ok(timeout(Duration::from_secs(HANG_GUARD_SECONDS), future).await?)
 }
 
 
