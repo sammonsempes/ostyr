@@ -79,6 +79,17 @@ variable "natscli_sha256" {
   description = "sha256 of nats-<version>-linux-amd64.zip, equal to the published SHA256SUMS of the release"
 }
 
+variable "garage_binary" {
+  type        = string
+  description = "build.sh passes the cached Garage binary, already checked against the garage row of pins.tsv"
+}
+
+variable "garage_sha256" {
+  type        = string
+  default     = "2ff667286217cd73ebcb1c03af993822365000441dfe31a80cb64c5189a9dea8"
+  description = "sha256 of the Garage v2.5.0 static musl binary, equal on the release host and in the dxflrs/garage image layer; checked again in the VM"
+}
+
 source "qemu" "datastore" {
   iso_url          = "${var.image_base_url}/noble-server-cloudimg-amd64.img"
   iso_checksum     = var.image_checksum
@@ -114,13 +125,19 @@ build {
     destination = "/tmp/"
   }
 
+  provisioner "file" {
+    sources     = [var.garage_binary, "${path.root}/datastore/garage.service", "${path.root}/datastore/ostyr-garage-tls.service"]
+    destination = "/tmp/"
+  }
+
   provisioner "shell" {
     inline = [
       "cloud-init status --wait",
       "sudo DEBIAN_FRONTEND=noninteractive apt-get update",
       "sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade",
       "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent",
-      "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install postgresql postgresql-client openssl jq curl ca-certificates gnupg unzip",
+      "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install postgresql postgresql-client openssl jq curl ca-certificates gnupg unzip stunnel4",
+      "sudo systemctl disable --now stunnel4",
       "sudo systemctl disable --now postgresql",
       "curl --fail --silent --show-error --location --output /tmp/clickhouse.key https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key",
       "test \"$(gpg --show-keys --with-colons /tmp/clickhouse.key | awk -F: '$1 == \"fpr\" {print $10; exit}')\" = '${var.clickhouse_key_fingerprint}'",
@@ -146,8 +163,14 @@ build {
       "unzip -o -j /tmp/natscli.zip '*/nats' -d /tmp/natscli",
       "sudo install -m 755 /tmp/natscli/nats /usr/local/share/ostyr-lab/client/nats",
       "cd /tmp && apt-get download postgresql-client-16 postgresql-client-common libpq5 && sudo install -m 644 /tmp/postgresql-client-16_*.deb /tmp/postgresql-client-common_*.deb /tmp/libpq5_*.deb /usr/local/share/ostyr-lab/client/",
+      "echo '${var.garage_sha256}  /tmp/garage-binary' | sha256sum --check -",
+      "sudo install -m 755 /tmp/garage-binary /usr/local/bin/garage",
+      "sudo useradd --system --home-dir /var/lib/garage --shell /usr/sbin/nologin garage",
+      "sudo install -m 644 /tmp/garage.service /etc/systemd/system/garage.service",
+      "sudo install -m 644 /tmp/ostyr-garage-tls.service /etc/systemd/system/ostyr-garage-tls.service",
+      "sudo systemctl daemon-reload",
       "sudo install -m 755 /tmp/ostyr-datastore-provision /usr/local/sbin/ostyr-datastore-provision",
-      "rm -rf /tmp/*.deb /tmp/clickhouse.key /tmp/nats.tar.gz /tmp/nats-server-* /tmp/natscli* /tmp/ostyr-datastore-provision /tmp/nats-server.service /tmp/restart-on-failure.conf",
+      "rm -rf /tmp/*.deb /tmp/clickhouse.key /tmp/nats.tar.gz /tmp/nats-server-* /tmp/natscli* /tmp/ostyr-datastore-provision /tmp/nats-server.service /tmp/restart-on-failure.conf /tmp/garage-binary /tmp/garage.service /tmp/ostyr-garage-tls.service",
       "sudo systemctl enable qemu-guest-agent",
       "sudo systemctl enable cloud-init",
       "sudo passwd -l ubuntu",

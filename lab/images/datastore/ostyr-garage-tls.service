@@ -1,0 +1,12 @@
+[Unit]
+Description=TLS front of the Garage S3 API (ostyr lab)
+After=network-online.target garage.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/stunnel /etc/stunnel/ostyr-garage.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

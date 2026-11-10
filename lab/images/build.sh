@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Usage: lab/images/build.sh [--force] <image>   (LAB_FORCE_BUILD=1 is the same as --force)
 # Builds lab/images/<image>.pkr.hcl with Packer (QEMU, checksum-verified official media) and uploads it as base volume <image>.qcow2.
-# The previous volume is replaced only when no overlay depends on it. The build date is recorded in volume <image>.qcow2.built.
-# The fingerprint of the build inputs is recorded in volume <image>.qcow2.inputs; when it matches and the volume exists, nothing is rebuilt.
+# When labs still use the current volume, the new one is installed as <image>-<fingerprint prefix>.qcow2 instead; lab/up.sh resolves the newest
+# version and older unused versions are deleted (here and by lab/down.sh). The build date is recorded in volume <volume>.built.
+# The fingerprint of the build inputs is recorded in volume <volume>.inputs; when it matches the newest version, nothing is rebuilt.
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
@@ -16,9 +17,6 @@ image="${1:?usage: build.sh [--force] <image>}"
 [[ "$image" =~ ^[a-z0-9-]+$ ]] || die "invalid image name '$image'"
 template="$LAB_DIR/images/$image.pkr.hcl"
 [[ -f "$template" ]] || die "no template $template"
-volume="$image.qcow2"
-stamp_volume="$volume.built"
-inputs_volume="$volume.inputs"
 LAB_BUILD_LOCK_DIR="${LAB_BUILD_LOCK_DIR:-$HOME/.cache/ostyr-lab/build-locks}"
 UBUNTU_CLOUDIMAGE_KEYRING="${UBUNTU_CLOUDIMAGE_KEYRING:-/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg}"
 
@@ -37,7 +35,12 @@ inputs_fingerprint() {
         rocky-*) files+=("keys/$image.asc") ;;
     esac
     [[ ! -d "$LAB_DIR/images/$image" ]] || files+=("$image")
-    (cd "$LAB_DIR/images" && find "${files[@]}" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+    {
+        (cd "$LAB_DIR/images" && find "${files[@]}" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
+        if [[ "$image" == "datastore" ]]; then
+            grep -P '^garage(-image)?\t' "$LAB_DIR/images/pins.tsv"
+        fi
+    } | sha256sum | cut -d' ' -f1
 }
 
 work_dir="$(mktemp -d)"
@@ -52,8 +55,9 @@ fi
 
 ensure_pool
 inputs="$(inputs_fingerprint)"
-if [[ "$force" != "1" ]] && virsh_lab vol-info --pool "$LAB_POOL" "$volume" >/dev/null 2>&1 &&
-    virsh_lab vol-download --pool "$LAB_POOL" "$inputs_volume" "$work_dir/stored-inputs" >/dev/null 2>&1 &&
+current="$(newest_base "$image")"
+if [[ "$force" != "1" && -n "$current" ]] &&
+    virsh_lab vol-download --pool "$LAB_POOL" "$current.inputs" "$work_dir/stored-inputs" >/dev/null 2>&1 &&
     [[ "$(cat "$work_dir/stored-inputs")" == "$inputs" ]]; then
     log "$image up to date (inputs $inputs), use --force to rebuild"
     exit 0
@@ -113,10 +117,36 @@ prepare_linux() {
     [[ "$image_sum" =~ ^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$ ]] || die "no checksum for $image_file in the verified checksum file"
 }
 
+LAB_GARAGE_CACHE="${LAB_GARAGE_CACHE:-$HOME/.cache/ostyr-lab/garage}"
+
+prepare_garage() {
+    local expected url cached actual
+    expected="$(pin_field garage 2)"
+    url="$(pin_field garage 5)"
+    cached="$LAB_GARAGE_CACHE/$(pin_field garage 3)"
+    [[ -n "$url" && "$expected" =~ ^[0-9a-f]{64}$ ]] || die "no valid garage pin in $PINS_FILE"
+    mkdir -p "$LAB_GARAGE_CACHE"
+    if [[ ! -f "$cached" ]]; then
+        curl --fail --silent --show-error --location --output "$cached.part" "$url" || die "garage: download from $url failed"
+        mv "$cached.part" "$cached"
+    fi
+    actual="$(sha256_of "$cached")"
+    if [[ "$actual" != "$expected" ]]; then
+        rm -f "$cached"
+        die "garage: sha256 $actual does not match the pin $expected; review the pin before changing it"
+    fi
+    cp "$cached" "$work_dir/garage-binary"
+    extra_vars=(-var "garage_binary=$work_dir/garage-binary")
+}
+
 extra_vars=()
 case "$image" in
     win11) prepare_windows win11 ;;
     ws2022-dc) prepare_windows ws2022 ;;
+    datastore)
+        prepare_linux
+        prepare_garage
+        ;;
     *) prepare_linux ;;
 esac
 
@@ -132,25 +162,32 @@ packer build -color=false \
     -var "ssh_public_key=$(cat "$work_dir/id_ed25519.pub")" \
     "${extra_vars[@]}" \
     "$template"
-built="$work_dir/output/$volume"
+built="$work_dir/output/$image.qcow2"
 [[ -f "$built" ]] || die "packer produced no $built"
 qemu-img check "$built" >/dev/null
 date +%s >"$work_dir/built"
 printf '%s\n' "$inputs" >"$work_dir/inputs"
 
 ensure_pool
+volume="$image.qcow2"
+if virsh_lab vol-info --pool "$LAB_POOL" "$volume" >/dev/null 2>&1 && [[ -n "$(overlays_of "$(volume_path "$volume")")" ]]; then
+    volume="$image-${inputs:0:12}.qcow2"
+    log "base volume $image.qcow2 is in use by running labs: installing the new image as $volume"
+fi
+stamp_volume="$volume.built"
+inputs_volume="$volume.inputs"
 if virsh_lab vol-info --pool "$LAB_POOL" "$volume" >/dev/null 2>&1; then
     dependants="$(overlays_of "$(volume_path "$volume")")"
     [[ -z "$dependants" ]] || die "base volume $volume is in use by: $(tr '\n' ' ' <<<"$dependants"); the previous image is kept, run lab/down.sh for those labs and rebuild"
     virsh_lab vol-delete --pool "$LAB_POOL" "$volume" >/dev/null
 fi
-if virsh_lab vol-info --pool "$LAB_POOL" "$stamp_volume" >/dev/null 2>&1; then
-    virsh_lab vol-delete --pool "$LAB_POOL" "$stamp_volume" >/dev/null
-fi
-if virsh_lab vol-info --pool "$LAB_POOL" "$inputs_volume" >/dev/null 2>&1; then
-    virsh_lab vol-delete --pool "$LAB_POOL" "$inputs_volume" >/dev/null
-fi
+for sibling in "$stamp_volume" "$inputs_volume"; do
+    if virsh_lab vol-info --pool "$LAB_POOL" "$sibling" >/dev/null 2>&1; then
+        virsh_lab vol-delete --pool "$LAB_POOL" "$sibling" >/dev/null
+    fi
+done
 upload_volume "$volume" "$built" qcow2
 upload_volume "$inputs_volume" "$work_dir/inputs" raw
 upload_volume "$stamp_volume" "$work_dir/built" raw
 log "base volume $volume uploaded, built $(date -d "@$(cat "$work_dir/built")" --iso-8601=seconds)"
+gc_bases "$image"

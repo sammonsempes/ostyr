@@ -69,7 +69,14 @@ case "$command" in
     vol-download) cat "$STUB_POOL/$1" >"$2" ;;
     vol-delete) rm -f "$STUB_POOL/$1" ;;
     vol-path) echo "$STUB_POOL/$1" ;;
-    vol-list) printf 'Name Path\n----\n' ;;
+    vol-list)
+        printf 'Name Path\n----\n'
+        for file in "$STUB_POOL"/*; do [[ ! -e "$file" ]] || printf ' %s %s\n' "$(basename "$file")" "$file"; done
+        ;;
+    vol-dumpxml)
+        base="$(sed -n 's/^overlay-of //p' "$STUB_POOL/$1")"
+        [[ -z "$base" ]] || printf '<volume>\n<backingStore>\n<path>%s</path>\n</backingStore>\n</volume>\n' "$base"
+        ;;
 esac
 STUB
 printf '#!/usr/bin/env bash\n' >"$work_dir/home/.local/bin/gpgv"
@@ -154,6 +161,29 @@ for accel in kvm tcg; do
     check "$accel build keeps the fingerprint" test "$(cat "$work_dir/pool/$IMAGE.qcow2.inputs")" = "$fingerprint_before"
 done
 check "tcg passes the timeout factor" grep -q -- "-var timeout_factor=$TCG_TIMEOUT_FACTOR " "$STUB_ARGS"
+
+rm -f "$work_dir/pool/"*
+reset_count
+check "build for the in-use test succeeds" run_build "$IMAGE"
+echo "overlay-of $work_dir/pool/$IMAGE.qcow2" >"$work_dir/pool/ostyr-lab-vm.qcow2"
+printf '\n' >>"$template"
+reset_count
+check "build while a lab uses the base succeeds" run_build "$IMAGE"
+check "in-use build calls packer once" test "$(calls)" = 1
+check "old base is kept" test -e "$work_dir/pool/$IMAGE.qcow2"
+versions="$(find "$work_dir/pool" -name "$IMAGE-????????????.qcow2" | wc -l | tr -d ' ')"
+check "new base installed under a fingerprinted name" test "$versions" = 1
+check "in-use build says so" grep -q 'in use by running labs' "$work_dir/output"
+reset_count
+check "rebuild with unchanged inputs succeeds" run_build "$IMAGE"
+check "newest version makes the build up to date" test "$(calls)" = 0
+PATH="$work_dir/home/.local/bin:$PATH"
+check "newest base resolves to the fingerprinted volume" test "$(newest_base "$IMAGE")" != "$IMAGE.qcow2"
+rm -f "$work_dir/pool/ostyr-lab-vm.qcow2"
+gc_all_bases >/dev/null 2>&1
+check "old base deleted once no lab uses it" test ! -e "$work_dir/pool/$IMAGE.qcow2"
+check "old base stamps deleted" test ! -e "$work_dir/pool/$IMAGE.qcow2.inputs"
+check "newest base kept by the cleanup" test -e "$(find "$work_dir/pool" -name "$IMAGE-????????????.qcow2")"
 
 [[ "$failures" -eq 0 ]] || die "$failures check(s) failed"
 log "all build-skip checks passed"

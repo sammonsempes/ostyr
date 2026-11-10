@@ -1,0 +1,15 @@
+[Unit]
+Description=Garage S3 object store (ostyr lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=garage
+Group=garage
+ExecStart=/usr/local/bin/garage --config /etc/garage.toml server
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

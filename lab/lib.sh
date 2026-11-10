@@ -254,6 +254,60 @@ overlays_of() {
     done
 }
 
+base_versions() {
+    virsh_lab vol-list --pool "$LAB_POOL" | awk 'NR > 2 && NF {print $1}' | { grep -E "^$1(-[0-9a-f]{12})?\.qcow2\$" || true; }
+}
+
+base_built_epoch() {
+    local stamp_file epoch=0
+    stamp_file="$(mktemp)"
+    if virsh_lab vol-download --pool "$LAB_POOL" "$1.built" "$stamp_file" >/dev/null 2>&1 && [[ "$(cat "$stamp_file")" =~ ^[0-9]+$ ]]; then
+        epoch="$(cat "$stamp_file")"
+    fi
+    rm -f "$stamp_file"
+    printf '%s' "$epoch"
+}
+
+newest_base() {
+    local volume
+    base_versions "$1" | while read -r volume; do
+        printf '%s %s\n' "$(base_built_epoch "$volume")" "$volume"
+    done | sort -k1,1nr -k2,2 | awk 'NR == 1 {print $2}'
+}
+
+delete_base() {
+    local suffix
+    virsh_lab vol-delete --pool "$LAB_POOL" "$1" >/dev/null
+    for suffix in built inputs; do
+        if virsh_lab vol-info --pool "$LAB_POOL" "$1.$suffix" >/dev/null 2>&1; then
+            virsh_lab vol-delete --pool "$LAB_POOL" "$1.$suffix" >/dev/null
+        fi
+    done
+}
+
+gc_bases() {
+    local newest volume
+    newest="$(newest_base "$1")"
+    base_versions "$1" | while read -r volume; do
+        if [[ "$volume" == "$newest" ]]; then
+            :
+        elif [[ -n "$(overlays_of "$(volume_path "$volume")")" ]]; then
+            log "old base volume $volume kept: labs still use it"
+        else
+            delete_base "$volume"
+            log "old base volume $volume deleted (newer $newest installed)"
+        fi
+    done
+}
+
+gc_all_bases() {
+    local image
+    virsh_lab vol-list --pool "$LAB_POOL" | awk 'NR > 2 && NF && $1 !~ /^ostyr-/ {print $1}' |
+        sed -n -E 's/^(.+)-[0-9a-f]{12}\.qcow2$/\1/p' | sort -u | while read -r image; do
+        gc_bases "$image"
+    done
+}
+
 warn_if_stale() {
     local stamp_file built_at age_days
     stamp_file="$(mktemp)"

@@ -15,6 +15,15 @@ readonly CLICKHOUSE_HTTPS_PORT=8443
 readonly CLICKHOUSE_NATIVE_PORT=9440
 readonly NATS_PORT=4222
 readonly POSTGRES_PORT=5432
+readonly GARAGE_S3_LOOPBACK_PORT=3900
+readonly GARAGE_RPC_PORT=3901
+readonly GARAGE_ADMIN_PORT=3903
+readonly S3_TLS_PORT=3910
+readonly S3_BUCKET_NAME="ostyr"
+readonly S3_REGION="garage"
+readonly S3_ACCESS_FILE="$LAB_DIR/s3-access-key"
+readonly S3_SECRET_FILE="$LAB_DIR/s3-secret-key"
+readonly GARAGE_CAPACITY="1G"
 readonly SERVICE_USER="ostyr"
 readonly SERVICE_DATABASE="ostyr"
 postgres_conf_dir="$(echo /etc/postgresql/*/main/conf.d)"
@@ -39,6 +48,7 @@ install_tls() {
 install_tls clickhouse /etc/clickhouse-server/tls
 install_tls nats /etc/nats/tls
 install_tls postgres /etc/postgresql/tls
+install_tls stunnel4 /etc/stunnel/tls
 
 clickhouse_password="$(openssl rand -hex 16)"
 nats_password="$(openssl rand -hex 16)"
@@ -122,10 +132,47 @@ hostssl all $SERVICE_USER 0.0.0.0/0 scram-sha-256
 CONF
 chown postgres:postgres "$postgres_conf_dir/ostyr.conf" "$postgres_hba"
 
+s3_access_key="GK$(openssl rand -hex 12)"
+s3_secret_key="$(openssl rand -hex 32)"
+install -d -m 750 -o garage -g garage /var/lib/garage /var/lib/garage/meta /var/lib/garage/data
+cat >/etc/garage.toml <<CONF
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+replication_factor = 1
+rpc_bind_addr = "127.0.0.1:$GARAGE_RPC_PORT"
+rpc_secret = "$(openssl rand -hex 32)"
+
+[s3_api]
+s3_region = "$S3_REGION"
+api_bind_addr = "127.0.0.1:$GARAGE_S3_LOOPBACK_PORT"
+
+[admin]
+api_bind_addr = "127.0.0.1:$GARAGE_ADMIN_PORT"
+admin_token = "$(openssl rand -hex 32)"
+CONF
+chown root:garage /etc/garage.toml
+chmod 640 /etc/garage.toml
+cat >/etc/stunnel/ostyr-garage.conf <<CONF
+foreground = yes
+setuid = stunnel4
+setgid = stunnel4
+sslVersionMin = TLSv1.2
+
+[garage-s3]
+accept = $server_ip:$S3_TLS_PORT
+connect = 127.0.0.1:$GARAGE_S3_LOOPBACK_PORT
+cert = /etc/stunnel/tls/tls.crt
+key = /etc/stunnel/tls/tls.key
+CONF
+chmod 644 /etc/stunnel/ostyr-garage.conf
+
 systemctl enable --now postgresql
 systemctl restart postgresql
 systemctl enable --now clickhouse-server
 systemctl enable --now nats-server
+systemctl enable --now garage
+systemctl enable --now ostyr-garage-tls
 
 cat >"$LAB_DIR/datastore.env" <<ENV
 DATASTORE_DOMAIN=$domain
@@ -142,7 +189,15 @@ POSTGRES_PORT=$POSTGRES_PORT
 POSTGRES_USER=$SERVICE_USER
 POSTGRES_PASSWORD=$postgres_password
 POSTGRES_DATABASE=$SERVICE_DATABASE
+S3_ENDPOINT=https://$domain:$S3_TLS_PORT
+S3_REGION=$S3_REGION
+S3_BUCKET=$S3_BUCKET_NAME
+S3_ACCESS_FILE=$S3_ACCESS_FILE
+S3_SECRET_FILE=$S3_SECRET_FILE
 ENV
+printf '%s' "$s3_access_key" >"$S3_ACCESS_FILE"
+printf '%s' "$s3_secret_key" >"$S3_SECRET_FILE"
+chmod 600 "$S3_ACCESS_FILE" "$S3_SECRET_FILE"
 chmod 600 "$LAB_DIR/datastore.env"
 
 wait_for() {
@@ -165,4 +220,12 @@ SQL
 wait_for "ClickHouse" curl --fail --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:$CLICKHOUSE_HTTPS_PORT:$server_ip" \
     --user "$SERVICE_USER:$clickhouse_password" --data-binary 'SELECT 1' "https://$domain:$CLICKHOUSE_HTTPS_PORT/"
 wait_for "NATS" systemctl is-active --quiet nats-server
+wait_for "Garage" garage status
+garage_node="$(garage node id -q | cut -d@ -f1)"
+garage layout assign -z lab -c "$GARAGE_CAPACITY" "$garage_node"
+garage layout apply --version 1
+garage bucket create "$S3_BUCKET_NAME"
+garage key import --yes -n ostyr-lab "$s3_access_key" "$s3_secret_key"
+garage bucket allow --read --write --owner "$S3_BUCKET_NAME" --key "$s3_access_key"
+wait_for "S3 TLS front" curl --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:$S3_TLS_PORT:$server_ip" "https://$domain:$S3_TLS_PORT/"
 printf 'datastore provisioned\n'
