@@ -357,12 +357,12 @@ fn a_message_with_too_many_headers_is_terminated_not_delivered() -> Result<(), B
 fn a_down_server_fails_the_fetch() -> Result<(), Box<dyn Error + Send + Sync>> {
     let closed = TcpListener::bind("127.0.0.1:0")?;
     let port = closed.local_addr()?.port();
-    drop(closed);
     let dir = tempdir()?;
     let engine = engine_for(&dir, &yaml(port, SHORT_MS, ""))?;
     let link = link_for(&engine)?;
     assert!(fetch_batch(&link, FETCH_MAX).is_err());
     assert!(acknowledge(&link, TOKEN_ONE, AckAction::Ack).is_err());
+    drop(closed);
     Ok(())
 }
 
@@ -621,7 +621,13 @@ fn a_reload_that_leaves_the_connection_settings_keeps_the_session() -> Result<()
 #[test]
 fn releasing_a_session_logs_a_failing_nak_and_skips_a_dropped_one() -> Result<(), Box<dyn Error + Send + Sync>> {
     let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
-    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
+    let patient = yaml(rig.stub.port, NORMAL_MS, "").replace(
+        &format!("nats_fetch_deadline_ms: {SHORT_MS}"),
+        &format!("nats_fetch_deadline_ms: {NORMAL_MS}"),
+    );
+    fs::write(&rig.path, patient)?;
+    assert!(matches!(reload(&rig.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(fetch_batch(&rig.link, 1)?.len(), 1);
     let mut session = rig.link.session.lock().map_err(|_| "poisoned")?.take().ok_or("no session")?;
     let real = session.held.remove(&TOKEN_ONE).ok_or("no held message")?;
     session.held.insert(
