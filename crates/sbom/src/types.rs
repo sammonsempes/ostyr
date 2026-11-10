@@ -30,3 +30,6 @@ pub type TrustedKeys = BTreeMap<String, crate::model::TrustedKey>;
 
 
 pub type DeadlineFn = fn(&std::path::Path) -> bool;
+
+
+pub type HttpFn = dyn Fn(&crate::model::HttpRequest) -> Result<crate::model::HttpResponse, BoxError> + Send + Sync;

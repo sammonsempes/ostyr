@@ -176,3 +176,41 @@ pub struct WatchPlan {
     pub max_entries: usize,
     pub expired: crate::types::DeadlineFn,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreMethod {
+    Get,
+    Put,
+}
+
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: StoreMethod,
+    pub url: String,
+    pub body: Vec<u8>,
+    pub max_response: usize,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectKeys {
+    pub document: String,
+    pub signature: String,
+}
+
+
+pub struct Store {
+    pub bucket: rusty_s3::Bucket,
+    pub credentials: rusty_s3::Credentials,
+    pub expiry: std::time::Duration,
+    pub http: Box<crate::types::HttpFn>,
+}

@@ -102,6 +102,41 @@ pub enum RunError {
 
 
 #[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("the {0} name is not usable in an object key")]
+    InvalidName(&'static str),
+    #[error("the tenant is outside the caller's scope")]
+    OutsideScope,
+    #[error("the store answered status {0}")]
+    Status(u16),
+    #[error("the store request failed")]
+    Transport(#[source] crate::types::BoxError),
+    #[error("the stored document is larger than the limit of {max} bytes")]
+    TooLarge { max: usize },
+    #[error("the stored signature object is malformed")]
+    BadSignatureObject,
+    #[error("the stored signature object is not text")]
+    SignatureText(#[source] std::str::Utf8Error),
+    #[error("the stored signature is not hexadecimal")]
+    SignatureHex(#[source] data_encoding::DecodeError),
+    #[error("store setting `{0}` is invalid")]
+    Settings(&'static str),
+    #[error("the bucket cannot be built")]
+    Bucket(#[from] rusty_s3::BucketError),
+    #[error("a credential file is empty or holds a control character")]
+    BadCredential,
+    #[error("the CA file is larger than the limit")]
+    CaTooLarge,
+    #[error("the CA certificate is invalid")]
+    Certificate(#[source] ureq::Error),
+    #[error("cannot read a store file")]
+    File(#[from] std::io::Error),
+    #[error(transparent)]
+    Signing(#[from] SigningError),
+}
+
+
+#[derive(Debug, Error)]
 pub enum SigningError {
     #[error("the document is larger than the limit of {max} bytes")]
     TooLarge { max: usize },
@@ -133,6 +168,8 @@ pub enum SigningError {
     KeyUnsupported,
     #[error("the key file must hold exactly 32 bytes in hexadecimal")]
     KeyLength,
+    #[error("the key seed is not 32 bytes")]
+    KeySeed(#[from] std::array::TryFromSliceError),
     #[error(transparent)]
     Sbom(#[from] SbomError),
     #[error(transparent)]
