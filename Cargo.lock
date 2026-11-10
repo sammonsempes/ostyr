@@ -945,13 +945,17 @@ dependencies = [
 name = "compliance"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "core-config",
+ "core-pg",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
