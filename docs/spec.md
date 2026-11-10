@@ -34,7 +34,7 @@ Anything that does not serve these three points is either delegated to a connect
 - **Everything as code (IaC).** Deployment, configuration, rules, policies, exclusions, playbooks, connectors, roles and frameworks are described in declarative files versioned in Git. A whole platform can be recreated identically from its repository (section 11).
 - **API first, no no-code.** Every function is first an API, then a CLI command, then a screen. The interface is for viewing, investigating and approving; it offers no visual editor, and every change it makes becomes a commit.
 - **No listening port on a managed device.** Every flow from a managed device is initiated by the device: the agent channel is outbound gRPC over mTLS to the server or a relay (section 4), and remote shell, file transfer and remote desktop travel inside or through outbound connections. No agent opens a listening socket for remote access.
-- **Headless components only.** No third-party component with its own graphical interface reaches a user: the interface is Ostyr's alone (section 13). Durable state lives in PostgreSQL, ClickHouse, NATS JetStream, MinIO or Git; a new stateful component needs an owner decision.
+- **Headless components only.** No third-party component with its own graphical interface reaches a user: the interface is Ostyr's alone (section 13). Durable state lives in PostgreSQL, ClickHouse, NATS JetStream, Garage or Git; a new stateful component needs an owner decision.
 - **Easy investigation and readable logs.** An event can be understood without knowing its source: plain-language summary, decoded values, context displayed alongside, one-click pivot to everything related to it. The raw data always remains accessible (section 13).
 
 ## 3. Non-functional requirements
@@ -113,7 +113,7 @@ Three profiles share the same code; only the number of modules, the ingestion mo
 | **Distributed** | Mid-sized companies, SOCs, MSSPs | Multi-node ClickHouse cluster, redundant backend services, NATS JetStream | Through NATS JetStream |
 | **Single module** | Targeted need: only the EDR, the WAF, the DNS, the identity provider… | One container or package, with the module's minimal storage | Direct, with optional export to a third-party SIEM |
 
-**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, MinIO (S3, headless, web console disabled) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used. Secrets are files encrypted with SOPS in Git by default.
+**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, Garage (S3-compatible, headless: admin API never exposed to users, no web UI; replicated in the distributed profile) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used. Secrets are files encrypted with SOPS in Git by default.
 
 **No listening port on managed devices.** Every flow from a managed device is initiated by the device. Agentless equipment (switches, printers, BMCs, appliances) pushes to a site collector (section 22); polling it is an explicit per-device opt-in.
 
@@ -127,7 +127,7 @@ Events flow down from the sources to detection; every AI proposal goes through t
 - **Normalisation.** All events are converted into a single schema: **ECS** is chosen because it is the closest to existing Sigma backends and to the ClickHouse table schemas. An OCSF export is available as output for customers who require it. Tetragon events are mapped to the Sigma Linux categories (`process_creation`, `file_event`, `network_connection`) so that the same rules apply to both systems.
 - **Stream detection.** A stream correlation engine, plugged into NATS JetStream (or into the internal buffer in the all-in-one profile), handles time sequences, UEBA and Sigma correlation rules. It also runs single-event Sigma rules, compiled to ClickHouse SQL by an in-house converter.
 - **Storage and search.** ClickHouse. Hunting is done in SQL (a KQL dialect is optional and experimental).
-- **Retention.** ClickHouse TTL rules and storage policies manage hot, warm and cold storage. Cold data on S3 (or S3-compatible: MinIO, Ceph) allows hunting over 12 months without keeping everything on fast disk.
+- **Retention.** ClickHouse TTL rules and storage policies manage hot, warm and cold storage. Cold data on S3 (or S3-compatible: Garage, Ceph) allows hunting over 12 months without keeping everything on fast disk.
 - **High availability (distributed profile).** ClickHouse cluster of at least 3 nodes, stateless backend services behind a load balancer, replicated configuration database, backup and restore tested automatically every week.
 - **AI.** Support for external APIs and local models (Ollama, vLLM). A dedicated queue smooths the load and enforces a budget (number of calls and cost per day).
 - **Communication with agents.** gRPC over mTLS, automatic certificate rotation, support for corporate HTTP(S) proxies, and fallback to TLS WebSocket when gRPC is filtered.
@@ -770,7 +770,7 @@ The Rust code follows the project coding rules, written in English like all the 
 | **Identity** | Users, groups, OIDC and SAML applications, MFA, access policies adapted to risk and device posture, active sessions, authentication logs |
 | **Administration** | AI configuration and budget, RBAC, SSO, multi-tenant, retention, platform audit, backups, Git repository, configuration drift, community library |
 
-The interface is a client of the documented REST API (OpenAPI), just like the `xdrctl` CLI and the OpenTofu provider: no function is reserved to it. It displays every module, including those not yet installed or configured: these appear in a distinct colour, with what they provide and the IaC configuration snippet that enables them. **UI rule.** No third-party component with its own graphical interface reaches a user: the consoles and admin pages of Zitadel, MinIO, the CrowdSec console, Stork, the RustDesk client and every metrics, tracing or on-call tool are disabled or never exposed. Metrics charts, traces, profiles, remote desktop and the status page are all rendered by Ostyr's interface. It offers no no-code editor, and every change it allows produces a commit or a merge request (section 11). It is available in French and English.
+The interface is a client of the documented REST API (OpenAPI), just like the `xdrctl` CLI and the OpenTofu provider: no function is reserved to it. It displays every module, including those not yet installed or configured: these appear in a distinct colour, with what they provide and the IaC configuration snippet that enables them. **UI rule.** No third-party component with its own graphical interface reaches a user: the consoles and admin pages of Zitadel, Garage, the CrowdSec console, Stork, the RustDesk client and every metrics, tracing or on-call tool are disabled or never exposed. Metrics charts, traces, profiles, remote desktop and the status page are all rendered by Ostyr's interface. It offers no no-code editor, and every change it allows produces a commit or a merge request (section 11). It is available in French and English.
 
 ### Log readability and ease of investigation
 
@@ -1011,7 +1011,7 @@ Licences to be checked at every release; state known at the time of writing:
 | Kea, Vector, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
 | Suricata | GPLv2 | Run as a separate process, not linked to the platform code |
 | USBGuard, smartmontools, NUT | GPLv2 or later (NUT Python scripts GPLv3 or later) | Run as separate processes, not linked to the platform code |
-| Zitadel, RustDesk (`hbbs`, `hbbr` and the project build of the endpoint service), MinIO | AGPL-3.0 | Separate processes; the RustDesk project build publishes its sources |
+| Zitadel, RustDesk (`hbbs`, `hbbr` and the project build of the endpoint service), Garage | AGPL-3.0 | Separate processes; the RustDesk project build publishes its sources |
 | Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap, WSUS | Not used | Excluded by the component rules (section 4): own interface, extra durable state or non-compatible licence |
 | Vulnerability and baseline data: OSV, NVD, CISA KEV, EPSS, ANSSI hygiene guide, DISA STIGs | OSV: one licence per source database (CC BY 4.0, CC0, Apache 2.0, CC BY-SA 4.0, MIT, BSD and, for Chainguard, CC BY-NC-ND 4.0); public domain (NVD, STIGs); CC0 (KEV); free of charge with no licence text published (EPSS); Etalab Open Licence 2.0 (ANSSI) | Data, not code; attribution kept; feeds verified at download; OSV sources under a non-commercial or no-derivatives licence are not ingested |
 | Apple APNs and MDM protocol, Android Management API | Vendor services under their terms | Services used through their public APIs, no component redistributed; prerequisites in section 19 |
@@ -1090,7 +1090,7 @@ These functions belong to the monitoring, on-call and status page modules (secti
 
 - **Settings are files.** Every threshold, schedule, check, baseline, catalogue, ring, route and policy introduced here is a file in Git, reloaded without restart as described in section 11 "Live reconfiguration"; an invalid file is refused and the previous version kept, and the reload is audited.
 - **Headless components.** No component named here exposes its own interface; every screen is Ostyr's (section 13).
-- **State.** Each subsection names where its state lives: ClickHouse, PostgreSQL, NATS JetStream, MinIO or Git, never a new store.
+- **State.** Each subsection names where its state lives: ClickHouse, PostgreSQL, NATS JetStream, Garage or Git, never a new store.
 - **Bounded inputs.** Every input from an agent, a collector, a device or an external API is bounded in size and count before it is buffered, and every wait on a peer has a deadline.
 - **Tenants.** Every item carries its tenant and is invisible to the others.
 
@@ -1213,8 +1213,8 @@ These functions belong to the RMM and MDM modules. They are the highest-risk par
 ### Software deployment
 
 - **What it does.** An approved catalogue of applications that can be installed, updated and uninstalled on devices or groups, with staged rollout.
-- **Components.** winget and MSI on Windows, the native package manager on Linux, pkg and App Store volume mechanisms on macOS; MinIO or the repository hosts the packages.
-- **State.** Catalogue in Git (name, source, version policy, digest, publisher); deployment state in PostgreSQL; packages in MinIO.
+- **Components.** winget and MSI on Windows, the native package manager on Linux, pkg and App Store volume mechanisms on macOS; Garage or the repository hosts the packages.
+- **State.** Catalogue in Git (name, source, version policy, digest, publisher); deployment state in PostgreSQL; packages in Garage.
 - **Requirements.**
   - Only signed packages from the catalogue install; the agent verifies the signature and the pinned digest before execution.
   - A rollout is staged by rings like patches and stops on failure.
@@ -1225,7 +1225,7 @@ These functions belong to the RMM and MDM modules. They are the highest-risk par
 
 - **What it does.** An interactive shell and file transfer to a device from the interface, without any remote-access service on the device.
 - **Components.** The agent channel only: on a signed command the agent opens a pseudo-terminal or a file handle and streams it back on the existing outbound connection. No SSH server.
-- **State.** Session metadata in PostgreSQL; recordings in MinIO; policy in Git.
+- **State.** Session metadata in PostgreSQL; recordings in Garage; policy in Git.
 - **Requirements.**
   - Opening a session needs the dedicated role and MFA at each opening; on critical assets (CMDB) it needs dual approval; both appear in the audit.
   - The session is recorded in full (input and output, timestamps) and linked to a ticket or an incident; a recording that cannot be written ends the session.
@@ -1237,7 +1237,7 @@ These functions belong to the RMM and MDM modules. They are the highest-risk par
 
 - **What it does.** Full screen, keyboard and mouse control of Windows, macOS, Linux and Android devices from the interface.
 - **Components.** The RustDesk engine as a separate process, run in a project build with direct IP access disabled, no listening port, no hole punching and relay-only through `hbbr`; `hbbs` and `hbbr` run headless. The viewer is Ostyr's own, in the interface, speaking the RustDesk protocol over the relay. iOS and iPadOS can only share their screen (Apple restriction) and are never controlled.
-- **State.** `hbbs` keeps a small peer database; it is the only extra state and is covered by backup. Session metadata in PostgreSQL, recordings in MinIO, policy in Git.
+- **State.** `hbbs` keeps a small peer database; it is the only extra state and is covered by backup. Session metadata in PostgreSQL, recordings in Garage, policy in Git.
 - **Requirements.**
   - The endpoint service makes only outbound connections to `hbbr`; a test scans the device for listening sockets during a session and finds none.
   - The relay accepts only sessions authorised by a short-lived token signed by the platform; a peer identifier alone gives no access.
@@ -1380,7 +1380,7 @@ These functions belong to the RMM and MDM modules. They are the highest-risk par
 
 - **What it does.** Finds secrets left in files and repositories and builds the software bill of materials of images, packages and directories.
 - **Components.** gitleaks (MIT) for secrets and syft (Apache 2.0) for SBOMs, run by the agent and by a scheduled job; SBOMs are matched with the vulnerability data above.
-- **State.** Findings in PostgreSQL; SBOMs in MinIO in CycloneDX or SPDX format; scan scopes and rules in Git.
+- **State.** Findings in PostgreSQL; SBOMs in Garage in CycloneDX or SPDX format; scan scopes and rules in Git.
 - **Requirements.**
   - A secret finding stores the location, the rule and a masked excerpt; the secret itself and any hash of it never reach storage, a log or an error.
   - Scans are bounded by file size and count and skip declared paths.
