@@ -12,7 +12,7 @@ use core_export::cli::{audit_into, run_otlp, sample_events};
 use core_export::config::{parse_export, ExportConfig};
 use core_export::error::ExportError;
 use core_export::pipeline::export_otlp;
-use core_export::reload::{export_state, open_export_engine, validate_otlp};
+use core_export::reload::{export_state, open_export_engine, validate_otlp, validate_webhook};
 use core_export::types::BoxError;
 use core_export::webhook::RetryPolicy;
 use std::fs;
@@ -185,6 +185,29 @@ fn settings_swap_live_and_an_invalid_candidate_keeps_the_old_ones() -> TestResul
     fs::write(&path, "otlp: [")?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     Ok(())
+}
+
+
+#[test]
+fn the_webhook_url_carries_no_credential() -> TestResult {
+    let parse = |url: &str| parse_export(&format!("webhook:\n  url: {url}\n  buffer_dir: /b\n"), "test");
+    assert!(validate_webhook(&parse("https://siem.example/hook/path")?).is_ok());
+    assert!(validate_webhook(&otlp_only()?).is_ok());
+    for url in [
+        "https://user:pw@siem.example/h",
+        "https://siem.example/h?token=XYZ",
+        "https://siem.example/h#frag",
+        "https://siem example/h",
+    ] {
+        let text = validate_webhook(&parse(url)?).err().ok_or("the URL was accepted")?.to_string();
+        assert!(!text.contains("XYZ") && !text.contains("pw") && !text.contains("siem"));
+    }
+    Ok(())
+}
+
+
+fn otlp_only() -> Result<ExportConfig, ExportError> {
+    parse_export("otlp:\n  endpoint: https://c.example\n  buffer_dir: /b\n", "test")
 }
 
 

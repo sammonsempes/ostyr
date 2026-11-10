@@ -11,7 +11,6 @@ mod types;
 use core_export::error::ExportError;
 use core_export::syslog::write_frames;
 use core_export::tls::{client_config, close, close_within, open_stream, root_store};
-use std::net::TcpListener;
 use std::time::Duration;
 use types::TestResult;
 
@@ -59,9 +58,8 @@ fn an_invalid_server_name_is_rejected_before_connecting() -> TestResult {
 
 #[test]
 fn a_closed_port_is_an_io_error() -> TestResult {
-    let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let config = client_config(None)?;
-    assert!(matches!(open_stream(&format!("localhost:{port}"), config), Err(ExportError::Io { .. })));
+    assert!(matches!(open_stream("127.0.0.1:1", config), Err(ExportError::Io { .. })));
     Ok(())
 }
 
