@@ -129,16 +129,17 @@ pub fn boundaries(
 }
 
 
-pub fn error_budget(up_seconds: i64, down_seconds: i64, objective_ppm: u32) -> ErrorBudget {
+pub fn error_budget(up_seconds: i64, down_seconds: i64, objective_ppm: u32) -> Result<ErrorBudget, SlaError> {
+    let allowed_ppm = PPM.checked_sub(objective_ppm).ok_or(SlaError::InvalidObjective { objective_ppm })?;
     let measured = i128::from(up_seconds) + i128::from(down_seconds);
-    let allowed = measured * i128::from(PPM - objective_ppm) / i128::from(PPM);
+    let allowed = measured * i128::from(allowed_ppm) / i128::from(PPM);
     let allowed_seconds = allowed as i64;
-    ErrorBudget {
+    Ok(ErrorBudget {
         allowed_seconds,
         consumed_seconds: down_seconds,
         remaining_seconds: (allowed_seconds - down_seconds).max(0),
         exhausted: down_seconds > allowed_seconds,
-    }
+    })
 }
 
 
@@ -195,7 +196,7 @@ pub fn availability(
         unknown_seconds: totals.unknown_seconds,
         excluded_seconds: totals.excluded_seconds,
         availability_ppm: availability_ppm(totals.up_seconds, totals.down_seconds),
-        budget: error_budget(totals.up_seconds, totals.down_seconds, objective_ppm),
+        budget: error_budget(totals.up_seconds, totals.down_seconds, objective_ppm)?,
         ignored,
         method: METHOD.to_string(),
     })

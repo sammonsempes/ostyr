@@ -371,6 +371,11 @@ fn invisible_format_characters_before_a_prefix_are_neutralised() -> Result<(), S
         "\u{200C}=1",
         "\u{200D}=1",
         "\u{2060}=1",
+        "\u{200E}=1",
+        "\u{200F}=1",
+        "\u{00AD}=1",
+        "\u{2061}=1",
+        "\u{180E}=1",
         " \u{200B}@x",
         "\u{FEFF}\u{200B}+1",
     ]
