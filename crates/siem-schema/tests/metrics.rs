@@ -89,7 +89,7 @@ fn golden_ddl() -> Result<(), SchemaError> {
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(`@timestamp`)
-ORDER BY (`tenant`, `metric`, `labels`, `@timestamp`)
+ORDER BY (`tenant`, `metric`, `unit`, `kind`, `labels`, `@timestamp`)
 TTL toDateTime(`@timestamp`) + toIntervalDay(7)
 SETTINGS storage_policy = 'default'
 ";
@@ -109,7 +109,7 @@ SETTINGS storage_policy = 'default'
 )
 ENGINE = AggregatingMergeTree
 PARTITION BY toYYYYMM(`bucket`)
-ORDER BY (`tenant`, `metric`, `labels`, `bucket`)
+ORDER BY (`tenant`, `metric`, `unit`, `kind`, `labels`, `bucket`)
 TTL toDateTime(`bucket`) + toIntervalDay(30)
 SETTINGS storage_policy = 'default'
 ";
