@@ -1,7 +1,7 @@
 use crate::config::{load_export, ExportConfig, OtlpConfig, SyslogConfig, SyslogTransport, WebhookConfig};
 use crate::ecs::{blank_event, to_json, EcsEvent, EventFields, HostFields};
 use crate::error::ExportError;
-use crate::http::{build_agent, build_agent_with, post_json, post_otlp};
+use crate::http::{build_agent, post_json, post_otlp};
 use crate::otlp::prepare_otlp;
 use crate::pipeline::{export_otlp, export_webhook, ExportReport};
 use crate::reload::check_webhook;
@@ -18,9 +18,6 @@ use std::io::Write;
 use std::path::Path;
 use std::thread::sleep;
 use time::OffsetDateTime;
-
-
-pub const NO_REDIRECTS: u32 = 0;
 
 
 pub const SAMPLE_HOST: &str = "export-demo";
@@ -104,7 +101,7 @@ pub fn run_otlp(
 ) -> Result<ExportReport, ExportError> {
     let token = prepare_otlp(config)?;
     let ca = read_ca(config.ca_file.as_ref())?;
-    let agent = build_agent_with(ca.as_deref(), NO_REDIRECTS)?;
+    let agent = build_agent(ca.as_deref())?;
     let mut post = |body: &str| post_otlp(&agent, &config.endpoint, token.as_deref(), body);
     export_otlp(events, config, policy, &mut post, pause, SAMPLE_HOST, now)
 }

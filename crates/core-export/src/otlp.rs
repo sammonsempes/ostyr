@@ -94,9 +94,17 @@ pub fn check_endpoint(config: &OtlpConfig) -> Result<(), ExportError> {
         _ if uri.authority().is_some_and(|authority| authority.as_str().contains('@')) => {
             Err(ExportError::Invalid("endpoint must not contain credentials"))
         }
-        Some("https") => Ok(()),
         Some("http") if !config.allow_insecure_loopback => Err(ExportError::Invalid("endpoint must use https")),
         Some("http") if config.token_file.is_some() => Err(ExportError::Invalid("a token is never sent over http")),
+        _ => check_transport(&uri),
+    }
+}
+
+
+/// `https://` always; `http://` only for a loopback host. Shared by the OTLP and webhook checks, with fixed texts that never echo the URL.
+pub fn check_transport(uri: &Uri) -> Result<(), ExportError> {
+    match uri.scheme_str() {
+        Some("https") => Ok(()),
         Some("http") if !uri.host().is_some_and(is_loopback_host) => Err(ExportError::Invalid("http is allowed for a loopback host only")),
         Some("http") => Ok(()),
         _ => Err(ExportError::Invalid("endpoint must start with https://")),

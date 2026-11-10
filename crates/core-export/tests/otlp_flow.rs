@@ -193,11 +193,16 @@ fn the_webhook_url_carries_no_credential() -> TestResult {
     let parse = |url: &str| parse_export(&format!("webhook:\n  url: {url}\n  buffer_dir: /b\n"), "test");
     assert!(validate_webhook(&parse("https://siem.example/hook/path")?).is_ok());
     assert!(validate_webhook(&otlp_only()?).is_ok());
+    assert!(validate_webhook(&parse("http://127.0.0.1:8080/h")?).is_ok());
+    assert!(validate_webhook(&parse("http://localhost/h")?).is_ok());
     for url in [
         "https://user:pw@siem.example/h",
         "https://siem.example/h?token=XYZ",
         "https://siem.example/h#frag",
         "https://siem example/h",
+        "http://siem.example/h",
+        "http://10.0.0.1/h",
+        "ftp://localhost/h",
     ] {
         let text = validate_webhook(&parse(url)?).err().ok_or("the URL was accepted")?.to_string();
         assert!(!text.contains("XYZ") && !text.contains("pw") && !text.contains("siem"));
