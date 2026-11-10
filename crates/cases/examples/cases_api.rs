@@ -1,10 +1,11 @@
 //! Usage: cases_api <module.yaml>. Serves `GET /cases` and `GET /cases/{id}` through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::settings::{open_pg_engine, SETTING_PG};
+use alerts::settings::{open_pg_engine_as, SETTING_PG};
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use cases::api::{cases_access, cases_document, cases_router};
 use cases::backend::pg_backend;
+use cases::backend::ACTOR;
 use cases::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
@@ -47,7 +48,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     tracing::dispatcher::set_global_default(dispatch)?;
     tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
     let listener = new_listener();
-    let (opened, pg_file) = open_pg_engine(Path::new(module_file), listener.clone())?;
+    let (opened, pg_file) = open_pg_engine_as(Path::new(module_file), listener.clone(), ACTOR)?;
     let engine = Arc::new(opened);
     let _watch = watch_files(Arc::clone(&engine), &[PathBuf::from(module_file), pg_file], RELOAD_DEBOUNCE)?;
     #[cfg(unix)]

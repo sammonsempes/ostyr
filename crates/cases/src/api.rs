@@ -3,7 +3,7 @@ use crate::error::CaseStoreError;
 use crate::store::{check_text, format_cursor, parse_cursor, MAX_ID_CHARS, MAX_PAGE_SIZE};
 use crate::stored::{CaseCounts, CaseCursor, CaseDetail, CasePage, CaseSummary, SummaryList};
 use alerts::error::StoreError;
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -131,12 +131,15 @@ pub async fn list_flow(identity: &ApiIdentity, backend: &CasesBackend, query: Re
 }
 
 
-/// A malformed id cannot name a stored case, so it is answered like a missing one, without a store call.
-pub async fn get_flow(identity: &ApiIdentity, backend: &CasesBackend, id: String) -> Result<Response, ApiError> {
+/// A malformed id, or one the extractor refuses (not UTF-8), is answered like a missing one, without a store call.
+pub async fn get_flow(identity: &ApiIdentity, backend: &CasesBackend, id: Result<String, PathRejection>) -> Result<Response, ApiError> {
     let scope = scope_of(identity).map_err(|error| store_failure(&error))?;
-    match check_text("id", &id, MAX_ID_CHARS) {
-        Err(_malformed) => Ok(not_found()),
-        Ok(()) => (backend.get)(scope, id)
+    let checked = id
+        .map_err(|_rejection| ())
+        .and_then(|text| check_text("id", &text, MAX_ID_CHARS).map(|()| text).map_err(|_malformed| ()));
+    match checked {
+        Err(()) => Ok(not_found()),
+        Ok(text) => (backend.get)(scope, text)
             .await
             .map_err(|error| store_failure(&error))
             .map(|found| found.map_or_else(not_found, |detail| Json(detail).into_response())),
@@ -182,9 +185,9 @@ pub async fn list_endpoint(
 pub async fn get_endpoint(
     Extension(identity): Extension<Arc<ApiIdentity>>,
     Extension(backend): Extension<CasesBackend>,
-    Path(id): Path<String>,
+    id: Result<Path<String>, PathRejection>,
 ) -> Response {
-    reply(get_flow(&identity, &backend, id).await)
+    reply(get_flow(&identity, &backend, id.map(|found| found.0)).await)
 }
 
 

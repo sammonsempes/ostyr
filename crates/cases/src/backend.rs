@@ -11,6 +11,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 
+pub const ACTOR: &str = "cases";
+
+
 pub async fn pg_list(
     engine: Arc<ReloadEngine<PgSettings>>,
     permits: Arc<Semaphore>,
