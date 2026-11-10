@@ -58,3 +58,18 @@ pub enum SpoolError {
     #[error("a segment changed on disk: frame {0} is unreadable")]
     Corrupt(u64),
 }
+
+
+#[derive(Debug, Error)]
+pub enum ListenError {
+    #[error("the listen address is not a socket address")]
+    BadAddress(#[source] std::net::AddrParseError),
+    #[error("cannot bind the listening socket")]
+    Bind(#[source] io::Error),
+    #[error("the tenant must hold between 1 and 128 bytes")]
+    BadTenant,
+    #[error("the admission limits are invalid")]
+    Limits(#[from] ConfigError),
+    #[error("the settings file cannot be loaded")]
+    Settings(#[from] core_config::error::ConfigError),
+}
