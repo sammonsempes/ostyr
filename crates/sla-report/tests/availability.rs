@@ -207,7 +207,7 @@ fn objective_one_hundred_percent() -> Result<(), SlaError> {
 
 #[test]
 fn exhausted_budget_never_negative_remaining() -> Result<(), SlaError> {
-    let budget = error_budget(MONTH, OUTAGE_SECONDS * TWO, OBJECTIVE_999);
+    let budget = error_budget(MONTH, OUTAGE_SECONDS * TWO, OBJECTIVE_999)?;
     assert!(budget.exhausted);
     assert_eq!(budget.remaining_seconds, 0);
     Ok(())
@@ -354,5 +354,15 @@ fn errors_display_their_cause() -> Result<(), SlaError> {
         SlaError::InvalidPeriod { start: 1, end: 0 },
     ];
     assert!(errors.iter().all(|error| !error.to_string().is_empty()));
+    Ok(())
+}
+
+
+#[test]
+fn error_budget_refuses_an_objective_above_ppm() -> Result<(), SlaError> {
+    let at_limit = error_budget(MONTH, 0, PPM)?;
+    assert_eq!(at_limit.allowed_seconds, 0);
+    let over = PPM + 1;
+    assert_eq!(error_budget(MONTH, 0, over), Err(SlaError::InvalidObjective { objective_ppm: over }));
     Ok(())
 }
