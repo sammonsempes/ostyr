@@ -1810,6 +1810,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-gateway"
+version = "0.0.0"
+dependencies = [
+ "agent-channel",
+ "async-nats",
+ "bytes",
+ "core-audit",
+ "core-config",
+ "futures-util",
+ "log",
+ "nkeys",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "siem-ingest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
