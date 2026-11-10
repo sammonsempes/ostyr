@@ -8,7 +8,7 @@ modules:
 authentication:
   provider: oidc
   issuer: https://sso.internal
-  client_secret: openbao://kv/sso/client
+  client_secret: vault://kv/sso/client
 event_bus:
   endpoint: nats://bus.internal:4222
 storage:
