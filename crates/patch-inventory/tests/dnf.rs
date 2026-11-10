@@ -2,9 +2,12 @@ mod common;
 
 
 use common::{device, limits, skipped_count, FailingReader, TestResult};
-use patch_inventory::dnf::{parse_dnf, split_nevra};
+use patch_inventory::dnf::{bare_update, parse_dnf, split_nevra};
 use patch_inventory::error::InventoryError;
-use patch_inventory::model::{Limits, SkipReason};
+use patch_inventory::finish::finish;
+use patch_inventory::model::{Limits, SkipReason, Update};
+use patch_inventory::types::SkipCounts;
+use vuln_match::model::Family;
 
 
 const UPDATEINFO: &[u8] = include_bytes!("fixtures/dnf-updateinfo.txt");
@@ -13,10 +16,31 @@ const UPDATEINFO: &[u8] = include_bytes!("fixtures/dnf-updateinfo.txt");
 const CHECK_UPDATE: &[u8] = include_bytes!("fixtures/dnf-check-update.txt");
 
 
+const REAL_PROGRESS: &[u8] = include_bytes!("fixtures/dnf-updateinfo-progress.txt");
+
+
+const REAL_PROGRESS_UPDATES: usize = 2;
+
+
+const OVERLONG_NAME_TOKENS: usize = 17;
+
+
+const PROGRESS_MALFORMED: usize = 2;
+
+
 const EMPTY: &[u8] = b"";
 
 
 const TINY_BYTES: usize = 4;
+
+
+const SUDO_INDEX: usize = 2;
+
+
+const VIM_INDEX: usize = 4;
+
+
+const LOOKALIKE_COUNT: usize = 6;
 
 
 const TZDATA_INDEX: usize = 3;
@@ -55,8 +79,13 @@ fn fixtures_are_merged() -> TestResult {
         ]
     );
     let curl = inventory.updates.first().ok_or("none")?;
-    assert_eq!(curl.advisory_id.as_deref(), Some("RLSA-2026:1350"));
+    assert_eq!(curl.advisory_id.as_deref(), Some("RLSA-2026:92907"));
     assert_eq!(curl.severity.as_deref(), Some("moderate"));
+    let sudo = inventory.updates.get(SUDO_INDEX).ok_or("none")?;
+    assert_eq!(sudo.advisory_id.as_deref(), Some("RLSA-2026:75571"));
+    assert_eq!(sudo.severity.as_deref(), Some("important"));
+    let vim = inventory.updates.get(VIM_INDEX).ok_or("none")?;
+    assert_eq!(vim.advisory_id.as_deref(), Some("RLSA-2026:75768"));
     assert_eq!(curl.origin.as_deref(), Some("zzbase"));
     assert_eq!(curl.installed_version, None);
     assert!(inventory
@@ -102,8 +131,45 @@ fn security_advisory_beats_bugfix_for_one_package() -> TestResult {
     assert_eq!(inventory.updates.len(), 1);
     let update = inventory.updates.first().ok_or("none")?;
     assert!(update.security);
+    assert_eq!(update.advisory_id.as_deref(), Some("RLSA-3"));
+    assert_eq!(update.severity.as_deref(), Some("low"));
+    Ok(())
+}
+
+
+#[test]
+fn no_matching_advisory_takes_the_highest_severity() -> TestResult {
+    let updateinfo = "RLSA-1 Moderate/Sec. p-1.0-1.el9.x86_64\nRLSA-2 Critical/Sec. p-1.0-2.el9.x86_64\nRLSA-3 Low/Sec. p-1.0-3.el9.x86_64\n";
+    let check = "p.x86_64 1.0-9.el9 baseos\n";
+    let inventory = parse_dnf(&device(), updateinfo.as_bytes(), check.as_bytes(), &limits())?;
+    let update = inventory.updates.first().ok_or("none")?;
     assert_eq!(update.advisory_id.as_deref(), Some("RLSA-2"));
-    assert_eq!(update.severity, None);
+    assert_eq!(update.candidate_version, "1.0-9.el9");
+    assert_eq!(update.origin.as_deref(), Some("baseos"));
+    Ok(())
+}
+
+
+#[test]
+fn candidate_match_wins_over_higher_severity() -> TestResult {
+    let updateinfo = "RLSA-1 Critical/Sec. p-1.0-1.el9.x86_64\nRLSA-2 Low/Sec. p-1.0-2.el9.x86_64\n";
+    let check = "p.x86_64 1.0-2.el9 baseos\n";
+    let inventory = parse_dnf(&device(), updateinfo.as_bytes(), check.as_bytes(), &limits())?;
+    let update = inventory.updates.first().ok_or("none")?;
+    assert_eq!(update.advisory_id.as_deref(), Some("RLSA-2"));
+    assert_eq!(update.origin.as_deref(), Some("baseos"));
+    Ok(())
+}
+
+
+#[test]
+fn progress_lines_are_ignored_and_lookalikes_are_malformed() -> TestResult {
+    let progress = "zzbase  11 MB/s | 47 MB  00:04\nzzbase 980 kB/s | 1.2 MB 00:00\n";
+    let lookalikes = "zzbase 11 MB | 47 MB 00:04\nzzbase x MB/s | 47 MB 00:04\nzzbase 11 MB/s | y MB 00:04\nzzbase 11 MB/s | 47 MBYTES 00:04\nzzbase 11 MB/s | 47 MB 0:a\nzzbase 11 MB/s | 47 MB 00::04\n";
+    let spaced = "Rocky Linux 9 - BaseOS 8.0 MB/s | 47 MB 00:05\n";
+    let both = format!("{progress}{spaced}{lookalikes}");
+    let inventory = parse_dnf(&device(), both.as_bytes(), progress.as_bytes(), &limits())?;
+    assert_eq!(skipped_count(&inventory.skipped, SkipReason::Malformed), LOOKALIKE_COUNT);
     Ok(())
 }
 
@@ -179,5 +245,42 @@ fn read_failures_are_errors() -> TestResult {
         parse_dnf(&device(), EMPTY, FailingReader, &limits()),
         Err(InventoryError::Read(_))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn finish_prefers_a_security_duplicate_over_a_plain_one() -> TestResult {
+    let plain = bare_update(&device(), "p", "x86_64", "1.0-1", None);
+    let security = Update {
+        security: true,
+        ..plain.clone()
+    };
+    let replaced = finish(Family::Rpm, vec![plain.clone(), security.clone()], SkipCounts::new());
+    assert_eq!(replaced.updates, std::slice::from_ref(&security));
+    let kept = finish(Family::Rpm, vec![security.clone(), plain], SkipCounts::new());
+    assert_eq!(kept.updates, std::slice::from_ref(&security));
+    let twice = finish(Family::Rpm, vec![security.clone(), security.clone()], SkipCounts::new());
+    assert_eq!(twice.updates, std::slice::from_ref(&security));
+    Ok(())
+}
+
+
+#[test]
+fn real_progress_lines_with_spaced_names_are_not_counted() -> TestResult {
+    let inventory = parse_dnf(&device(), REAL_PROGRESS, EMPTY, &limits())?;
+    assert!(inventory.skipped.is_empty());
+    assert_eq!(inventory.updates.len(), REAL_PROGRESS_UPDATES);
+    Ok(())
+}
+
+
+#[test]
+fn bare_progress_tail_and_overlong_names_are_malformed() -> TestResult {
+    let bare = "8.0 MB/s | 47 MB 00:05\n";
+    let long_name = format!("{} 8.0 MB/s | 47 MB 00:05\n", "x ".repeat(OVERLONG_NAME_TOKENS));
+    let input = format!("{bare}{long_name}");
+    let inventory = parse_dnf(&device(), input.as_bytes(), EMPTY, &limits())?;
+    assert_eq!(skipped_count(&inventory.skipped, SkipReason::Malformed), PROGRESS_MALFORMED);
     Ok(())
 }

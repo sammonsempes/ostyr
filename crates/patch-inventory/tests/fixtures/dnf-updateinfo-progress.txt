@@ -1,0 +1,13 @@
+lab BaseOS                                      8.0 MB/s |  47 MB     00:05    
+lab AppStream                                   7.8 MB/s |  31 MB     00:03    
+Last metadata expiration check: 0:00:53 ago on Mon Nov  9 22:37:55 2026.
+RLSA-2026:1350  Moderate/Sec.  curl-7.76.1-35.el9_7.3.x86_64
+RLSA-2026:55439 Important/Sec. curl-7.76.1-40.el9_8.5.x86_64
+RLSA-2026:69126 Important/Sec. curl-7.76.1-40.el9_8.7.x86_64
+RLSA-2026:80511 Moderate/Sec.  curl-7.76.1-40.el9_8.8.x86_64
+RLSA-2026:92907 Moderate/Sec.  curl-7.76.1-40.el9_8.9.x86_64
+RLSA-2026:1350  Moderate/Sec.  libcurl-7.76.1-35.el9_7.3.x86_64
+RLSA-2026:55439 Important/Sec. libcurl-7.76.1-40.el9_8.5.x86_64
+RLSA-2026:69126 Important/Sec. libcurl-7.76.1-40.el9_8.7.x86_64
+RLSA-2026:80511 Moderate/Sec.  libcurl-7.76.1-40.el9_8.8.x86_64
+RLSA-2026:92907 Moderate/Sec.  libcurl-7.76.1-40.el9_8.9.x86_64
