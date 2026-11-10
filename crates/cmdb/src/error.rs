@@ -55,6 +55,8 @@ pub enum StoreError {
     BadVersion(#[source] std::num::ParseIntError),
     #[error("the refused conflict list is malformed")]
     BadRefused(#[source] serde_json::Error),
+    #[error("the duplicate conflict list is malformed")]
+    BadDuplicates(#[source] serde_json::Error),
     #[error("an asset changed since it was read")]
     VersionConflict,
     #[error("still conflicting after {attempts} attempts")]

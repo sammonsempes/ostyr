@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 
+const KEY_CAP_PARAM: usize = 2;
+
+
 #[derive(Default)]
 pub struct Tenant {
     pub assets: BTreeMap<String, StoredAsset>,
@@ -174,11 +177,21 @@ pub fn same_conflict(left: &Value, right: &Value) -> bool {
 }
 
 
-pub fn open_count(tenant: &Tenant, asset: &str, source: &str) -> usize {
+pub fn is_key(conflict: &Value) -> bool {
+    conflict.get("is_key").and_then(Value::as_bool).unwrap_or(false)
+}
+
+
+pub fn open_count(tenant: &Tenant, asset: &str, source: &str, key: bool) -> usize {
     tenant
         .conflicts
         .iter()
-        .filter(|conflict| is_open(conflict) && text(conflict, "asset") == asset && text(conflict, "observed_source") == source)
+        .filter(|conflict| {
+            is_open(conflict)
+                && text(conflict, "asset") == asset
+                && text(conflict, "observed_source") == source
+                && text(conflict, "attribute").starts_with("key:") == key
+        })
         .count()
 }
 
@@ -188,11 +201,15 @@ pub fn is_exempt(conflict: &Value) -> bool {
 }
 
 
+pub fn is_known(tenant: &Tenant, conflict: &Value) -> bool {
+    tenant.conflicts.iter().any(|other| same_conflict(other, conflict))
+}
+
+
 pub fn fresh_conflicts(tenant: &Tenant, document: &Value) -> Vec<Value> {
     let mut fresh: Vec<Value> = Vec::new();
     items(document, "conflicts").into_iter().for_each(|conflict| {
-        let known = tenant.conflicts.iter().chain(fresh.iter()).any(|other| same_conflict(other, &conflict));
-        if !known {
+        if !is_known(tenant, &conflict) && !fresh.iter().any(|other| same_conflict(other, &conflict)) {
             fresh.push(conflict);
         }
     });
@@ -200,16 +217,51 @@ pub fn fresh_conflicts(tenant: &Tenant, document: &Value) -> Vec<Value> {
 }
 
 
-pub fn admitted_conflicts(tenant: &Tenant, fresh: Vec<Value>, cap: usize) -> Vec<Value> {
-    let mut taken: BTreeMap<(String, String), usize> = BTreeMap::new();
-    fresh
+pub fn duplicate_list(tenant: &Tenant, document: &Value) -> String {
+    let mut listed: Vec<(String, String, String)> = items(document, "conflicts")
+        .iter()
+        .filter(|conflict| is_known(tenant, conflict))
+        .map(|conflict| (text(conflict, "asset"), text(conflict, "attribute"), text(conflict, "observed_source")))
+        .collect();
+    listed.sort();
+    listed.dedup();
+    Value::Array(
+        listed
+            .into_iter()
+            .map(|(asset, attribute, source)| serde_json::json!({"asset": asset, "attribute": attribute, "observed_source": source}))
+            .collect(),
+    )
+    .to_string()
+}
+
+
+pub fn rank_key(conflict: &Value) -> (String, String, String, String, String, String) {
+    (
+        text(conflict, "asset"),
+        text(conflict, "observed_source"),
+        text(conflict, "attribute"),
+        text(conflict, "current_value"),
+        text(conflict, "current_source"),
+        text(conflict, "observed_value"),
+    )
+}
+
+
+/// Ranks like `apply.sql`: per (asset, source, key class), by attribute and values, exempt conflicts take no position.
+pub fn admitted_conflicts(tenant: &Tenant, fresh: Vec<Value>, cap: usize, key_cap: usize) -> Vec<Value> {
+    let mut ranked = fresh;
+    ranked.sort_by_key(rank_key);
+    let mut taken: BTreeMap<(String, String, bool), usize> = BTreeMap::new();
+    ranked
         .into_iter()
         .filter(|conflict| {
             let asset = text(conflict, "asset");
             let source = text(conflict, "observed_source");
-            let position = taken.entry((asset.clone(), source.clone())).or_default();
-            *position += 1;
-            is_exempt(conflict) || open_count(tenant, &asset, &source) + *position <= cap
+            let key = is_key(conflict);
+            let exempt = is_exempt(conflict);
+            let position = taken.entry((asset.clone(), source.clone(), key)).or_default();
+            *position += usize::from(!exempt);
+            exempt || open_count(tenant, &asset, &source, key) + *position <= if key { key_cap } else { cap }
         })
         .collect()
 }
@@ -231,17 +283,19 @@ pub fn refused_list(candidates: &[Value], admitted: &[Value]) -> String {
 }
 
 
-pub fn apply(tenant: &mut Tenant, document: &Value, cap: usize) -> Result<(bool, String), PgError> {
+pub fn apply(tenant: &mut Tenant, document: &Value, caps: (usize, usize)) -> Result<(bool, String, String), PgError> {
     let assets = items(document, "assets");
     let fresh = !is_stale(tenant, &assets);
     if fresh && owns_foreign_key(tenant, &assets) {
         Err(unique_violation())
     } else {
         let mut refused = "[]".to_owned();
+        let mut duplicates = "[]".to_owned();
         if fresh {
             let candidates = fresh_conflicts(tenant, document);
-            let new_conflicts = admitted_conflicts(tenant, candidates.clone(), cap);
+            let new_conflicts = admitted_conflicts(tenant, candidates.clone(), caps.0, caps.1);
             refused = refused_list(&candidates, &new_conflicts);
+            duplicates = duplicate_list(tenant, document);
             assets
                 .iter()
                 .filter(|asset| {
@@ -256,7 +310,7 @@ pub fn apply(tenant: &mut Tenant, document: &Value, cap: usize) -> Result<(bool,
             tenant.events.extend(items(document, "events"));
             tenant.applies += 1;
         }
-        Ok((fresh, refused))
+        Ok((fresh, refused, duplicates))
     }
 }
 
@@ -285,13 +339,14 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &str, params: &[String]) -> Res
     if sql == APPLY_SQL {
         *lock(&db.apply_calls) += 1;
         match lock(&db.forced).pop_front() {
-            Some(Forced::Stale) => Ok(vec![vec!["false".to_owned(), "[]".to_owned()]]),
+            Some(Forced::Stale) => Ok(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned()]]),
             Some(Forced::UniqueViolation) => Err(unique_violation()),
             Some(Forced::OtherError) => Err(other_error()),
             None => {
                 let document: Value = serde_json::from_str(params.first().map_or("null", String::as_str)).unwrap_or(Value::Null);
                 let cap = params.get(1).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
-                apply(tenant, &document, cap).map(|(applied, refused)| vec![vec![applied.to_string(), refused]])
+                let key_cap = params.get(KEY_CAP_PARAM).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
+                apply(tenant, &document, (cap, key_cap)).map(|(applied, refused, duplicates)| vec![vec![applied.to_string(), refused, duplicates]])
             }
         }
     } else {

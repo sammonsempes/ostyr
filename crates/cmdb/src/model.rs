@@ -164,11 +164,29 @@ pub struct RefusedConflict {
 }
 
 
-/// A stored reconciliation: the outcome with only the conflicts that are stored, and the refused ones.
+/// A conflict the store already held open with the same values, so nothing was written for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateConflict {
+    pub asset: String,
+    pub attribute: String,
+    pub observed_source: String,
+}
+
+
+/// What one apply answered: the refused conflicts and the duplicates of open ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applied {
+    pub refused: Vec<RefusedConflict>,
+    pub duplicates: Vec<DuplicateConflict>,
+}
+
+
+/// A stored reconciliation: `outcome.conflicts` holds only the conflicts newly written; the refused and the duplicates of open ones are listed apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stored {
     pub outcome: Outcome,
     pub refused_conflicts: Vec<RefusedConflict>,
+    pub duplicate_conflicts: Vec<DuplicateConflict>,
 }
 
 
@@ -188,6 +206,7 @@ pub struct Limits {
     pub max_child_rows: usize,
     pub max_attempts: usize,
     pub max_open_conflicts: usize,
+    pub max_open_key_conflicts: usize,
 }
 
 
@@ -206,6 +225,9 @@ pub const DEFAULT_MAX_ATTEMPTS: usize = 3;
 pub const DEFAULT_MAX_OPEN_CONFLICTS: usize = 1_000;
 
 
+pub const DEFAULT_MAX_OPEN_KEY_CONFLICTS: usize = 64;
+
+
 impl Default for Limits {
     fn default() -> Self {
         Limits {
@@ -214,6 +236,7 @@ impl Default for Limits {
             max_child_rows: DEFAULT_MAX_CHILD_ROWS,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             max_open_conflicts: DEFAULT_MAX_OPEN_CONFLICTS,
+            max_open_key_conflicts: DEFAULT_MAX_OPEN_KEY_CONFLICTS,
         }
     }
 }

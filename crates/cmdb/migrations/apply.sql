@@ -15,27 +15,35 @@ locked AS (
 guard AS (
     SELECT (SELECT count(*) FROM locked) = (SELECT count(*) FROM changed WHERE version > 0) AS ok
 ),
-fresh AS (
+incoming AS (
     SELECT DISTINCT f->>'asset' AS asset, f->>'attribute' AS attribute, f->>'current_value' AS current_value,
         f->>'current_source' AS current_source, f->>'observed_value' AS observed_value, f->>'observed_source' AS observed_source,
-        f->>'resolution' AS resolution, (f->>'exempt')::boolean AS exempt
+        f->>'resolution' AS resolution, (f->>'exempt')::boolean AS exempt, (f->>'is_key')::boolean AS is_key,
+        EXISTS (
+            SELECT 1 FROM cmdb_conflicts o
+            WHERE o.tenant = $1 AND o.asset = f->>'asset' AND o.attribute = f->>'attribute'
+              AND o.current_value = f->>'current_value' AND o.current_source = f->>'current_source'
+              AND o.observed_value = f->>'observed_value' AND o.observed_source = f->>'observed_source'
+              AND o.status = 'open'
+        ) AS known
     FROM doc, jsonb_array_elements(body->'conflicts') AS f
-    WHERE NOT EXISTS (
-        SELECT 1 FROM cmdb_conflicts o
-        WHERE o.tenant = $1 AND o.asset = f->>'asset' AND o.attribute = f->>'attribute'
-          AND o.current_value = f->>'current_value' AND o.current_source = f->>'current_source'
-          AND o.observed_value = f->>'observed_value' AND o.observed_source = f->>'observed_source'
-          AND o.status = 'open'
-    )
+),
+fresh AS (
+    SELECT asset, attribute, current_value, current_source, observed_value, observed_source, resolution, exempt, is_key
+    FROM incoming WHERE NOT known
+),
+duplicates AS (
+    SELECT DISTINCT asset, attribute, observed_source FROM incoming WHERE known
 ),
 ranked AS (
     SELECT f.*, (
         SELECT count(*) FROM cmdb_conflicts o
         WHERE o.tenant = $1 AND o.asset = f.asset AND o.observed_source = f.observed_source AND o.status = 'open'
-    ) + f.position <= $3::text::bigint AS admit
+          AND (left(o.attribute, 4) = 'key:') = f.is_key
+    ) + f.position <= CASE WHEN f.is_key THEN $4::text::bigint ELSE $3::text::bigint END AS admit
     FROM (
         SELECT fresh.*, row_number() OVER (
-            PARTITION BY asset, observed_source ORDER BY attribute, current_value, current_source, observed_value
+            PARTITION BY asset, observed_source, is_key ORDER BY attribute, current_value, current_source, observed_value
         ) AS position
         FROM fresh
         WHERE NOT exempt
@@ -95,4 +103,7 @@ written_events AS (
 SELECT (SELECT ok FROM guard)::text, (
     SELECT coalesce(json_agg(json_build_object('asset', asset, 'attribute', attribute, 'observed_source', observed_source)), '[]'::json)
     FROM ranked WHERE NOT admit
+)::text, (
+    SELECT coalesce(json_agg(json_build_object('asset', asset, 'attribute', attribute, 'observed_source', observed_source)), '[]'::json)
+    FROM duplicates
 )::text
