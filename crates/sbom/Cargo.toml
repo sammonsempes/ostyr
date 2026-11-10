@@ -6,20 +6,25 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
+data-encoding = "2.11.1"
+ed25519-dalek = "3"
 packageurl = "0.7"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 struson = "0.7"
 tempfile = "3"
 thiserror = "2"
 tracing = "0.1"
+zeroize = "1"
 vuln-match = { version = "0.0.0", path = "../vuln-match" }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+libc = "0.2"
+rustix = { version = "1", features = ["process", "fs"] }
 
 [dev-dependencies]
-core-audit = { version = "0.0.0", path = "../core-audit" }
 
 [lints]
 workspace = true
