@@ -4,6 +4,8 @@ pub mod error;
 pub mod model;
 pub mod observable;
 pub mod sla;
+pub mod store;
+pub mod stored;
 pub mod template;
 pub mod transition;
 pub mod types;
