@@ -88,6 +88,10 @@ pub enum CaseStoreError {
     BadAlertId,
     #[error("page size must be between 1 and {limit}")]
     BadPageSize { limit: usize },
+    #[error("cursor is malformed")]
+    BadCursor,
+    #[error("connection: {0}")]
+    Lease(#[from] alerts::error::StoreError),
     #[error("case not found")]
     NotFound,
     #[error("alert not found in this tenant")]

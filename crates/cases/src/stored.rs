@@ -1,5 +1,6 @@
 use crate::model::{Case, CaseEvent, CaseStatus, Comment, Observable, Resolution, Severity, Task};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 
 /// A case as read, with the version an update must present.
@@ -46,4 +47,50 @@ pub struct Parts {
     pub observables: Vec<Observable>,
     pub comments: Vec<Comment>,
     pub history: Vec<CaseEvent>,
+}
+
+
+/// How many entries each growing list of a case holds, so a response never carries the lists themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct CaseCounts {
+    pub tasks: usize,
+    pub observables: usize,
+    pub comments: usize,
+    pub history: usize,
+    pub alerts: usize,
+}
+
+
+/// A case without its comments, observables and history; times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct CaseSummary {
+    pub id: String,
+    pub title: String,
+    pub severity: Severity,
+    pub status: CaseStatus,
+    pub assignee: Option<String>,
+    pub case_type: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub version: i64,
+    pub counts: CaseCounts,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct CaseDetail {
+    #[serde(flatten)]
+    pub summary: CaseSummary,
+    pub description: Option<String>,
+    pub resolution: Option<Resolution>,
+    pub template: Option<String>,
+    #[schema(value_type = Vec<Object>)]
+    pub tasks: Vec<Task>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryList {
+    pub summaries: Vec<CaseSummary>,
+    pub next: Option<CaseCursor>,
 }

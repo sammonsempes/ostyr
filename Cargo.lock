@@ -711,13 +711,28 @@ name = "cases"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
+ "data-encoding",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

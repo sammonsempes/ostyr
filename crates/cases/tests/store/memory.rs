@@ -1,7 +1,9 @@
 use crate::types::Table;
 use alerts::types::Row;
 use cases::model::{Case, CaseEvent, CaseStatus, Comment, Observable};
-use cases::store::{APPLY_SQL, ATTACH_SQL, COMMENT_SQL, GET_SQL, INSERT_SQL, NEXT_SQL, OBSERVABLE_SQL};
+use cases::store::{
+    APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, FIRST_SUMMARY_SQL, GET_SQL, INSERT_SQL, NEXT_SQL, NEXT_SUMMARY_SQL, OBSERVABLE_SQL,
+};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::Value;
@@ -89,6 +91,41 @@ pub fn row_of(entry: &Entry) -> Result<Row, PgError> {
 }
 
 
+pub fn summary_row_of(entry: &Entry) -> Result<Row, PgError> {
+    let case = &entry.case;
+    Ok(vec![
+        case.id.clone(),
+        case.title.clone(),
+        label(&serde_json::to_value(case.severity).map_err(|_source| malformed())?),
+        label(&serde_json::to_value(case.status).map_err(|_source| malformed())?),
+        text(case.assignee.as_deref()),
+        text(case.case_type.as_deref()),
+        case.created_at.to_string(),
+        case.updated_at.to_string(),
+        entry.version.to_string(),
+        case.tasks.len().to_string(),
+        case.observables.len().to_string(),
+        case.comments.len().to_string(),
+        case.history.len().to_string(),
+        entry.alerts.len().to_string(),
+    ])
+}
+
+
+pub fn detail_row_of(entry: &Entry) -> Result<Row, PgError> {
+    let case = &entry.case;
+    let resolution = case.resolution.map_or(Ok(String::new()), |found| {
+        serde_json::to_value(found).map(|doc| label(&doc)).map_err(|_source| malformed())
+    })?;
+    let mut row = summary_row_of(entry)?;
+    row.push(text(case.description.as_deref()));
+    row.push(resolution);
+    row.push(text(case.template.as_deref()));
+    row.push(serde_json::to_value(&case.tasks).map_err(|_source| malformed())?.to_string());
+    Ok(row)
+}
+
+
 pub fn insert(table: &mut Table, tenant: &str, params: &[String]) -> Result<Vec<Row>, PgError> {
     let mut doc: Value = serde_json::from_str(param(params, 0)?).map_err(|_source| malformed())?;
     doc.as_object_mut()
@@ -116,7 +153,7 @@ pub fn select(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, P
     let limit = param(params, params.len().saturating_sub(1))?
         .parse::<usize>()
         .map_err(|_source| malformed())?;
-    let cursor = if sql == NEXT_SQL {
+    let cursor = if sql == NEXT_SQL || sql == NEXT_SUMMARY_SQL {
         Some((
             param(params, 0)?.parse::<i64>().map_err(|_source| malformed())?,
             param(params, 1)?.clone(),
@@ -134,7 +171,13 @@ pub fn select(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, P
                 .is_none_or(|position| (entry.case.created_at, entry.case.id.clone()) < *position)
         })
         .take(limit)
-        .map(row_of)
+        .map(|entry| {
+            if sql == FIRST_SUMMARY_SQL || sql == NEXT_SUMMARY_SQL {
+                summary_row_of(entry)
+            } else {
+                row_of(entry)
+            }
+        })
         .collect()
 }
 
@@ -234,6 +277,12 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]
                 insert(table, tenant_of(scope), params)
             } else if sql == GET_SQL {
                 table.get(param(params, 0)?).map(row_of).transpose().map(|row| row.into_iter().collect())
+            } else if sql == DETAIL_SQL {
+                table
+                    .get(param(params, 0)?)
+                    .map(detail_row_of)
+                    .transpose()
+                    .map(|row| row.into_iter().collect())
             } else if sql == APPLY_SQL {
                 apply(table, params)
             } else if sql == COMMENT_SQL {
