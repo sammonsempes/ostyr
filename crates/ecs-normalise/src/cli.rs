@@ -20,7 +20,7 @@ pub fn parse_format(args: &[&str]) -> Result<Format, NormaliseError> {
 /// Writes the counts line (or the error) on `err`; the duplicate count is shown for Sysmon only.
 pub fn report(result: Result<(Format, Counts), NormaliseError>, err: &mut dyn Write) -> io::Result<ExitCode> {
     match result {
-        Ok((Format::Tetragon, counts)) => {
+        Ok((Format::Tetragon | Format::Suricata, counts)) => {
             writeln!(
                 err,
                 "processed={} malformed={} unknown={}",

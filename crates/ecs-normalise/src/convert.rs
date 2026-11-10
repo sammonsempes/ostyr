@@ -183,16 +183,17 @@ fn network_event(probe: &KprobeBody, base: EcsEvent) -> Result<Outcome, Normalis
         source: Some(EndpointFields {
             ip: Some(socket.saddr.clone()),
             port: Some(socket.sport),
-            domain: None,
+            ..EndpointFields::default()
         }),
         destination: Some(EndpointFields {
             ip: Some(socket.daddr.clone()),
             port: Some(socket.dport),
-            domain: None,
+            ..EndpointFields::default()
         }),
         network: Some(NetworkFields {
             transport: Some("tcp".to_string()),
             direction: Some("egress".to_string()),
+            ..NetworkFields::default()
         }),
         ..classify(base, "network", "connection", "connect")
     };

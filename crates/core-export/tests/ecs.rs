@@ -3,8 +3,9 @@ mod types;
 
 
 use core_export::ecs::{
-    blank_event, to_json, DnsFields, DnsQuestion, EndpointFields, EventFields, FileFields, HashFields, HostFields, NetworkFields, OsFields,
-    ParentFields, PeFields, ProcessFields, RegistryFields, UserFields, ECS_VERSION,
+    blank_event, to_json, DnsFields, DnsQuestion, EndpointFields, EventFields, FileFields, HashFields, HostFields, HttpBodyFields, HttpFields,
+    HttpRequestFields, HttpResponseFields, JaHash, NetworkFields, OsFields, ParentFields, PeFields, ProcessFields, RegistryFields, RuleFields,
+    TlsClientFields, TlsFields, TlsServerFields, UrlFields, UserAgentFields, UserFields, ECS_VERSION,
 };
 use core_export::error::ExportError;
 use time::OffsetDateTime;
@@ -24,6 +25,18 @@ const DESTINATION_PORT: u16 = 443;
 
 
 const PROCESS_ID: u32 = 4242;
+
+
+const BYTES: u64 = 10;
+
+
+const PACKETS: u64 = 2;
+
+
+const STATUS: u64 = 200;
+
+
+const BODY_BYTES: u64 = 5;
 
 
 const FILE_SIZE: u64 = 2048;
@@ -67,6 +80,7 @@ fn full_event_matches_the_ecs_snapshot() -> TestResult {
         module: text("edr"),
         severity: Some(SEVERITY),
         sequence: Some(SEQUENCE),
+        ..EventFields::default()
     };
     event.message = text("hello");
     event.host = Some(HostFields {
@@ -84,15 +98,18 @@ fn full_event_matches_the_ecs_snapshot() -> TestResult {
         ip: text("10.0.0.1"),
         port: Some(SOURCE_PORT),
         domain: text("a.example"),
+        ..EndpointFields::default()
     });
     event.destination = Some(EndpointFields {
         ip: text("10.0.0.2"),
         port: Some(DESTINATION_PORT),
         domain: text("b.example"),
+        ..EndpointFields::default()
     });
     event.network = Some(NetworkFields {
         transport: text("tcp"),
         direction: text("egress"),
+        ..NetworkFields::default()
     });
     event.process = Some(ProcessFields {
         pid: Some(PROCESS_ID),
@@ -166,7 +183,12 @@ fn windows_endpoint_groups_are_serialised_nested() -> TestResult {
     });
     event.registry = Some(RegistryFields { path: text("HKLM\\k") });
     event.dns = Some(DnsFields {
-        question: DnsQuestion { name: text("a.test") },
+        question: DnsQuestion {
+            name: text("a.test"),
+            kind: None,
+        },
+        kind: None,
+        response_code: None,
         resolved_ip: vec!["10.0.0.1".to_string()],
     });
     event.sysmon.insert("Key".to_string(), "v".to_string());
@@ -180,5 +202,71 @@ fn windows_endpoint_groups_are_serialised_nested() -> TestResult {
             r#""dns":{"question":{"name":"a.test"},"resolved_ip":["10.0.0.1"]},"sysmon":{"Key":"v"}}"#
         )
     );
+    Ok(())
+}
+
+
+#[test]
+fn network_telemetry_groups_are_serialised_when_set() -> TestResult {
+    let mut event = blank_event(OffsetDateTime::from_unix_timestamp(FIXED_UNIX)?);
+    event.event = EventFields {
+        start: Some(OffsetDateTime::from_unix_timestamp(FIXED_UNIX)?),
+        end: Some(OffsetDateTime::from_unix_timestamp(FIXED_UNIX + 1)?),
+        ..EventFields::default()
+    };
+    event.source = Some(EndpointFields {
+        bytes: Some(BYTES),
+        packets: Some(PACKETS),
+        ..EndpointFields::default()
+    });
+    event.network = Some(NetworkFields {
+        protocol: text("http"),
+        community_id: text("1:abc"),
+        ..NetworkFields::default()
+    });
+    event.url = Some(UrlFields {
+        domain: text("a.test"),
+        path: text("/p"),
+        original: text("/p?q"),
+    });
+    event.http = Some(HttpFields {
+        version: text("HTTP/1.1"),
+        request: Some(HttpRequestFields { method: text("GET") }),
+        response: Some(HttpResponseFields {
+            status_code: Some(STATUS),
+            body: Some(HttpBodyFields { bytes: Some(BODY_BYTES) }),
+        }),
+    });
+    event.tls = Some(TlsFields {
+        version: text("TLS 1.3"),
+        client: Some(TlsClientFields {
+            server_name: text("a.test"),
+            ja3: Some(JaHash { hash: text("j3") }),
+        }),
+        server: Some(TlsServerFields {
+            subject: text("CN=a"),
+            issuer: text("CN=b"),
+            not_after: text("2027"),
+            ja3s: Some(JaHash { hash: text("js") }),
+        }),
+    });
+    event.rule = Some(RuleFields {
+        id: text("1"),
+        name: text("n"),
+        category: text("c"),
+    });
+    event.user_agent = Some(UserAgentFields { original: text("curl") });
+    let expected = concat!(
+        r#"{"@timestamp":"2023-11-14T22:13:20Z","ecs":{"version":"8.11"},"#,
+        r#""event":{"start":"2023-11-14T22:13:20Z","end":"2023-11-14T22:13:21Z"},"#,
+        r#""source":{"bytes":10,"packets":2},"network":{"protocol":"http","community_id":"1:abc"},"#,
+        r#""url":{"domain":"a.test","path":"/p","original":"/p?q"},"#,
+        r#""http":{"version":"HTTP/1.1","request":{"method":"GET"},"response":{"status_code":200,"body":{"bytes":5}}},"#,
+        r#""tls":{"version":"TLS 1.3","client":{"server_name":"a.test","ja3":{"hash":"j3"}},"#,
+        r#""server":{"subject":"CN=a","issuer":"CN=b","not_after":"2027","ja3s":{"hash":"js"}}},"#,
+        r#""rule":{"id":"1","name":"n","category":"c"},"user_agent":{"original":"curl"}}"#
+    );
+    let json = to_json(&event)?;
+    assert_eq!(json, expected);
     Ok(())
 }

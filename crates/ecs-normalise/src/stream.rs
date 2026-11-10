@@ -1,5 +1,6 @@
 use crate::convert::{convert, Outcome};
 use crate::error::{LineError, NormaliseError};
+use crate::suricata::{clean, cut_text, parse_eve};
 use crate::sysmon::{normalise_sysmon, UNKNOWN_DATASET};
 use crate::tetragon::Envelope;
 use crate::types::{LineNumber, SeenIds};
@@ -12,6 +13,9 @@ use tracing::warn;
 
 
 pub const MAX_LINE_BYTES: u64 = 1_048_576;
+
+
+pub const MAX_LOG_ERROR_CHARS: usize = 200;
 
 
 const LINE_END: u8 = b'\n';
@@ -33,6 +37,7 @@ pub enum Format {
     #[default]
     Tetragon,
     Sysmon,
+    Suricata,
 }
 
 
@@ -43,6 +48,7 @@ impl FromStr for Format {
         match text {
             "tetragon" => Ok(Format::Tetragon),
             "sysmon" => Ok(Format::Sysmon),
+            "suricata" => Ok(Format::Suricata),
             other => Err(NormaliseError::UnknownFormat(other.to_string())),
         }
     }
@@ -120,6 +126,12 @@ pub fn decode(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, 
 }
 
 
+/// Turns one raw Suricata EVE line into an outcome, attaching the line number to every error.
+pub fn decode_suricata(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
+    line_text(line, raw, max_line).and_then(|text| parse_eve(&text).map_err(|error| LineError { line, error }))
+}
+
+
 /// Turns one raw Sysmon line into an ECS event and its class; `seen` keeps the unmapped ids across the stream.
 pub fn decode_sysmon(line: LineNumber, raw: RawLine, max_line: u64, seen: &mut SeenIds) -> Result<(EcsEvent, SysmonClass), LineError> {
     let text = line_text(line, raw, max_line)?;
@@ -141,6 +153,12 @@ pub fn decode_sysmon(line: LineNumber, raw: RawLine, max_line: u64, seen: &mut S
 pub fn write_event<Output: Write>(output: &mut Output, event: &EcsEvent) -> Result<(), NormaliseError> {
     to_writer(&mut *output, event).map_err(NormaliseError::Serialize)?;
     writeln!(output).map_err(NormaliseError::from)
+}
+
+
+/// The error text for the log, cut at `MAX_LOG_ERROR_CHARS` with a visible marker: serde messages repeat the offending text.
+pub fn error_summary(error: &NormaliseError) -> String {
+    cut_text(&clean(&error.to_string()), MAX_LOG_ERROR_CHARS)
 }
 
 
@@ -166,7 +184,8 @@ fn tally<Output: Write>(
             })
         }
         Err(error) => {
-            warn!(line, %error, "malformed line");
+            let summary = error_summary(&error.error);
+            warn!(line, summary, "malformed line");
             Ok(Counts {
                 malformed: counts.malformed + 1,
                 ..counts
@@ -201,7 +220,8 @@ fn tally_sysmon<Output: Write>(
             })
         }
         Err(error) => {
-            warn!(line, %error, "malformed line");
+            let summary = error_summary(&error.error);
+            warn!(line, summary, "malformed line");
             Ok(Counts {
                 malformed: counts.malformed + 1,
                 ..counts
@@ -211,7 +231,7 @@ fn tally_sysmon<Output: Write>(
 }
 
 
-/// Reads Tetragon or Sysmon lines and writes ECS JSON lines; a bad line is counted and logged, only an I/O error stops the stream.
+/// Reads Tetragon, Sysmon or Suricata EVE lines and writes ECS JSON lines; a bad line is counted and logged, only an I/O error stops the stream.
 pub fn normalise_stream_capped<Input: BufRead, Output: Write>(
     input: &mut Input,
     output: &mut Output,
@@ -231,6 +251,7 @@ pub fn normalise_dyn(mut input: &mut dyn BufRead, mut output: &mut dyn Write, ma
             let raw = raw_line?;
             match format {
                 Format::Tetragon => tally(counts, line, decode(line, raw, max_line), &mut output),
+                Format::Suricata => tally(counts, line, decode_suricata(line, raw, max_line), &mut output),
                 Format::Sysmon => tally_sysmon(counts, line, decode_sysmon(line, raw, max_line, &mut seen), &mut output),
             }
         })

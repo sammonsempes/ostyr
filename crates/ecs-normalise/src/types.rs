@@ -15,3 +15,6 @@ pub type Fields = BTreeMap<String, String>;
 
 
 pub type SeenIds = BTreeSet<u32>;
+
+
+pub type Label = (String, String);
