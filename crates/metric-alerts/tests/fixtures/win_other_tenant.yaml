@@ -1,0 +1,17 @@
+rule:
+  id: sustained
+  metric: host.metric
+  condition: {kind: threshold, direction: above, threshold: 90}
+  for: 120
+  close_after: 300
+  severity: high
+  runbook: https://runbooks.example.org/sustained
+labels: {asset: host1}
+points: [[0, 50], [60, 95], [120, 95], [180, 95], [240, 95], [300, 95], [360, 95], [420, 95], [480, 95]]
+windows:
+  - tenant: globex
+    windows:
+      - {name: m, assets: [host1], author: a, reason: r, starts_at: "1970-01-01T00:01:40Z", ends_at: "1970-01-01T00:05:00Z"}
+steps:
+  - {at: 120, expect: pending, suppressed: false}
+  - {at: 180, expect: firing, suppressed: false}
