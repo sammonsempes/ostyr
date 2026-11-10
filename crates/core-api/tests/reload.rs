@@ -655,7 +655,7 @@ fn a_valid_change_applies_and_an_invalid_one_keeps_the_old_value() -> TestResult
 fn a_changed_forwarder_list_applies_and_is_audited_and_a_bad_one_keeps_the_old_list() -> TestResult {
     let running = live("")?;
     assert!(running.state.forwarders.load().is_empty());
-    rewrite(&running, "  trusted_forwarders: \"10.0.0.0/8, 192.0.2.1\"\n")?;
+    rewrite(&running, "  trusted_forwarders: \"10.0.0.0/16, 192.0.2.1\"\n")?;
     assert_eq!(
         reload(&running.engine),
         ReloadOutcome::Applied {
@@ -663,9 +663,9 @@ fn a_changed_forwarder_list_applies_and_is_audited_and_a_bad_one_keeps_the_old_l
         }
     );
     let applied: Vec<String> = running.state.forwarders.load().iter().map(ToString::to_string).collect();
-    assert_eq!(applied, ["10.0.0.0/8".to_owned(), "192.0.2.1/32".to_owned()]);
+    assert_eq!(applied, ["10.0.0.0/16".to_owned(), "192.0.2.1/32".to_owned()]);
     assert!(reload_records(running.dir.path())?.iter().any(|line| line.contains("trusted_forwarders")));
-    rewrite(&running, "  trusted_forwarders: \"10.0.0.0/8, bogus\"\n")?;
+    rewrite(&running, "  trusted_forwarders: \"10.0.0.0/16, bogus\"\n")?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("bogus")));
     assert_eq!(running.state.forwarders.load().len(), LISTED_FORWARDERS);
     assert!(reload_records(running.dir.path())?.iter().any(|line| line.contains("refused")));

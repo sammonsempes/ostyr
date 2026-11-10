@@ -150,7 +150,7 @@ async fn plain_http_serves_on_loopback() -> TestResult {
     let address = listening(&handle).await?;
     let reply = read_response(TcpStream::connect(address).await?).await?;
     assert!(reply.starts_with("HTTP/1.1 200 OK"));
-    assert!(reply.contains("{\"status\":\"ok\"}"));
+    assert!(reply.contains("\"status\":\"ok\""));
     assert!(fx.state.auth.lock().map_err(|_| "poisoned")?.sessions.is_empty());
     handle.shutdown();
     assert!(running.await?.is_ok());

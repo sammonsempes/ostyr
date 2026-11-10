@@ -31,6 +31,8 @@ pub enum StartupError {
         #[source]
         source: BoxError,
     },
+    #[error("setting `trusted_forwarders` entry `{entry}` is wider than the minimum prefix length {minimum}")]
+    ForwarderTooWide { entry: String, minimum: u8 },
     #[error("setting `{name}` must be between {minimum} and {maximum}")]
     OutOfRange { name: &'static str, minimum: String, maximum: String },
     #[error("{file}: {source}")]
