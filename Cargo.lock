@@ -152,6 +152,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "alerts"
+version = "0.0.0"
+dependencies = [
+ "core-pg",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
