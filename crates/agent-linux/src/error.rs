@@ -12,6 +12,21 @@ pub enum CapabilityError {
 }
 
 
+#[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
+pub enum StateDirReason {
+    #[error("the cursor path has no directory")]
+    NoDirectory,
+    #[error("the directory is missing")]
+    Missing,
+    #[error("the path is not a directory, or is a symlink")]
+    NotDirectory,
+    #[error("the directory is owned by neither the agent user nor root")]
+    WrongOwner,
+    #[error("the directory is writable by group or others")]
+    Writable,
+}
+
+
 #[derive(Debug, Error)]
 pub enum SourceError {
     #[error("input or output failed: {0}")]
@@ -28,8 +43,8 @@ pub enum SourceError {
     Export(#[from] core_export::error::ExportError),
     #[error("the export file could not be read: {0}")]
     Undrained(#[source] Box<SourceError>),
-    #[error("state directory of {} is missing or writable by group or others", .0.display())]
-    StateDir(PathBuf),
+    #[error("state directory of {} is refused: {}", .0.display(), .1)]
+    StateDir(PathBuf, StateDirReason),
     #[error("the background poll failed: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("settings out of range: {0}")]

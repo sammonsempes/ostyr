@@ -25,7 +25,10 @@ fn lines_appended_are_spooled_once_as_ecs() -> TestResult {
     let spooled = lines(&setup.paths.spool)?;
     assert_eq!(spooled.len(), LEN_THREE);
     assert!(spooled.iter().all(|line| line.contains("tetragon") && line.contains("/usr/bin/curl")));
-    assert_eq!(read_cursor(&setup.paths.cursor_file)?.offset, fs::metadata(&setup.paths.export)?.len());
+    assert_eq!(
+        read_cursor(&setup.state, &setup.paths.cursor_file)?.offset,
+        fs::metadata(&setup.paths.export)?.len()
+    );
     Ok(())
 }
 
@@ -48,14 +51,14 @@ fn a_restart_neither_replays_nor_skips() -> TestResult {
     append(&setup.paths.export, &format!("{EXEC}\n{EXEC}\n"))?;
     assert_eq!(poll_default(&mut setup)?.spooled, TWO);
     setup.follower = Follower {
-        cursor: read_cursor(&setup.paths.cursor_file)?,
+        cursor: read_cursor(&setup.state, &setup.paths.cursor_file)?,
         current: None,
         ..Follower::default()
     };
     assert_eq!(poll_default(&mut setup)?.spooled, 0);
     append(&setup.paths.export, &format!("{EXEC}\n"))?;
     setup.follower = Follower {
-        cursor: read_cursor(&setup.paths.cursor_file)?,
+        cursor: read_cursor(&setup.state, &setup.paths.cursor_file)?,
         current: None,
         ..Follower::default()
     };
@@ -71,6 +74,7 @@ fn a_cursor_naming_another_file_starts_at_the_beginning() -> TestResult {
     let mut setup = setup()?;
     append(&setup.paths.export, &format!("{EXEC}\n{EXEC}\n"))?;
     write_cursor(
+        &setup.state,
         &setup.paths.cursor_file,
         Cursor {
             dev: 1,
@@ -80,7 +84,7 @@ fn a_cursor_naming_another_file_starts_at_the_beginning() -> TestResult {
         },
     )?;
     setup.follower = Follower {
-        cursor: read_cursor(&setup.paths.cursor_file)?,
+        cursor: read_cursor(&setup.state, &setup.paths.cursor_file)?,
         current: None,
         ..Follower::default()
     };
@@ -103,7 +107,10 @@ fn a_rotation_drains_the_old_file_then_follows_the_new_one() -> TestResult {
     let after = poll_default(&mut setup)?;
     assert_eq!((after.spooled, after.rotated), (TWO, false));
     assert_eq!(lines(&setup.paths.spool)?.len(), LEN_FIVE);
-    assert_eq!(read_cursor(&setup.paths.cursor_file)?.ino, fs::metadata(&setup.paths.export)?.ino());
+    assert_eq!(
+        read_cursor(&setup.state, &setup.paths.cursor_file)?.ino,
+        fs::metadata(&setup.paths.export)?.ino()
+    );
     Ok(())
 }
 
@@ -242,10 +249,10 @@ fn a_full_spool_stops_the_reader_and_it_resumes_when_space_frees() -> TestResult
     append(&setup.paths.export, &format!("{EXEC}\n{EXEC}\n{EXEC}\n"))?;
     let first = poll_with(&mut setup, &settings, LINE_LIMIT)?;
     assert_eq!((first.spooled, first.stop), (1, Stop::Full));
-    let offset = read_cursor(&setup.paths.cursor_file)?.offset;
+    let offset = read_cursor(&setup.state, &setup.paths.cursor_file)?.offset;
     let blocked = poll_with(&mut setup, &settings, LINE_LIMIT)?;
     assert_eq!((blocked.spooled, blocked.stop), (0, Stop::Full));
-    assert_eq!(read_cursor(&setup.paths.cursor_file)?.offset, offset);
+    assert_eq!(read_cursor(&setup.state, &setup.paths.cursor_file)?.offset, offset);
     fs::rename(&setup.paths.spool, &setup.paths.sending)?;
     assert_eq!(poll_with(&mut setup, &settings, LINE_LIMIT)?.spooled, 0);
     fs::remove_file(&setup.paths.sending)?;
@@ -303,7 +310,7 @@ fn a_failed_spool_write_does_not_advance_the_offset() -> TestResult {
 fn a_failed_cursor_write_is_an_error_and_the_lines_stay_spooled() -> TestResult {
     let _log = scoped_logging();
     let mut setup = setup()?;
-    setup.paths.cursor_file = setup.dir.path().join("absent").join("cursor");
+    fs::create_dir(setup.dir.path().join("cursor.tmp"))?;
     append(&setup.paths.export, &format!("{EXEC}\n"))?;
     assert!(poll_default(&mut setup).is_err());
     assert_eq!(lines(&setup.paths.spool)?.len(), 1);
@@ -332,7 +339,7 @@ fn a_huge_line_without_a_newline_is_skipped_not_buffered() -> TestResult {
     fs::File::create(&setup.paths.export)?.set_len(HUGE_LINE_BYTES)?;
     let report = poll_default(&mut setup)?;
     assert_eq!((report.oversized, report.spooled), (1, 0));
-    assert_eq!(read_cursor(&setup.paths.cursor_file)?.offset, HUGE_LINE_BYTES);
+    assert_eq!(read_cursor(&setup.state, &setup.paths.cursor_file)?.offset, HUGE_LINE_BYTES);
     Ok(())
 }
 
@@ -361,10 +368,10 @@ fn an_unterminated_overlong_line_is_skipped_once_and_never_replays_the_file() ->
     assert_eq!(reports.iter().map(|report| report.oversized).sum::<u64>(), 1);
     assert!(reports.iter().all(|report| !report.truncated));
     assert_eq!(lines(&setup.paths.spool)?.len(), LEN_TWO);
-    assert!(read_cursor(&setup.paths.cursor_file)?.skipping);
+    assert!(read_cursor(&setup.state, &setup.paths.cursor_file)?.skipping);
     append(&setup.paths.export, &"y".repeat(OVERLONG_BYTES))?;
     setup.follower = Follower {
-        cursor: read_cursor(&setup.paths.cursor_file)?,
+        cursor: read_cursor(&setup.state, &setup.paths.cursor_file)?,
         current: None,
         ..Follower::default()
     };
@@ -376,7 +383,7 @@ fn an_unterminated_overlong_line_is_skipped_once_and_never_replays_the_file() ->
         (resumed.spooled, resumed.oversized, resumed.malformed, resumed.truncated),
         (1, 0, 0, false)
     );
-    assert!(!read_cursor(&setup.paths.cursor_file)?.skipping);
+    assert!(!read_cursor(&setup.state, &setup.paths.cursor_file)?.skipping);
     assert_eq!(lines(&setup.paths.spool)?.len(), LEN_THREE);
     Ok(())
 }
@@ -412,7 +419,14 @@ fn lines_written_to_the_old_file_after_the_rotation_is_seen_are_drained_before_t
     assert_eq!(poll_default(&mut setup)?.spooled, 1);
     fs::rename(&setup.paths.export, setup.dir.path().join("export.json.1"))?;
     append(&setup.paths.export, &format!("{EXEC}\n"))?;
-    let rotated = poll_stepped(&mut setup.follower, &setup.paths, &SourceSettings::default(), LINE_LIMIT, append_to_old)?;
+    let rotated = poll_stepped(
+        &mut setup.follower,
+        &setup.state,
+        &setup.paths,
+        &SourceSettings::default(),
+        LINE_LIMIT,
+        append_to_old,
+    )?;
     assert_eq!((rotated.spooled, rotated.rotated), (1, true));
     assert_eq!(poll_default(&mut setup)?.spooled, 1);
     assert_eq!(lines(&setup.paths.spool)?.len(), LEN_THREE);

@@ -1,5 +1,6 @@
+use agent_linux::cursor::open_state_dir;
 use agent_linux::follow::poll;
-use agent_linux::model::{Follower, Paths, Report, SourceSettings};
+use agent_linux::model::{Follower, Paths, Report, SourceSettings, StateDir};
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -23,6 +24,7 @@ pub const LINE_LIMIT: usize = 1_000_000;
 pub struct Setup {
     pub dir: TempDir,
     pub paths: Paths,
+    pub state: StateDir,
     pub follower: Follower,
 }
 
@@ -35,9 +37,11 @@ pub fn setup() -> Result<Setup, Box<dyn Error>> {
         spool: dir.path().join("spool"),
         sending: dir.path().join("spool.sending"),
     };
+    let state = open_state_dir(&paths.cursor_file)?;
     Ok(Setup {
         dir,
         paths,
+        state,
         follower: Follower::default(),
     })
 }
@@ -54,12 +58,18 @@ pub fn lines(path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
 
 
 pub fn poll_default(setup: &mut Setup) -> Result<Report, Box<dyn Error>> {
-    Ok(poll(&mut setup.follower, &setup.paths, &SourceSettings::default(), LINE_LIMIT)?)
+    Ok(poll(
+        &mut setup.follower,
+        &setup.state,
+        &setup.paths,
+        &SourceSettings::default(),
+        LINE_LIMIT,
+    )?)
 }
 
 
 pub fn poll_with(setup: &mut Setup, settings: &SourceSettings, limit: usize) -> Result<Report, Box<dyn Error>> {
-    Ok(poll(&mut setup.follower, &setup.paths, settings, limit)?)
+    Ok(poll(&mut setup.follower, &setup.state, &setup.paths, settings, limit)?)
 }
 
 
