@@ -23,6 +23,7 @@ vuln-match = { version = "0.0.0", path = "../vuln-match" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 rustix = { version = "1", features = ["process", "fs"] }
+walkdir = "2"
 
 [dev-dependencies]
 

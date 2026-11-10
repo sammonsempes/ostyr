@@ -4,10 +4,12 @@
 mod types;
 
 
-use sbom::error::{RunError, SbomError, SettingsError, TargetError};
-use sbom::model::Stderr;
+use rustix::process::Pid;
+use sbom::error::{ResourceKind, RunError, SbomError, SettingsError, TargetError};
+use sbom::model::{Stderr, Verdict, WatchPlan};
 use sbom::run::{
-    child_environment, drain_stderr, generate, generate_with, outcome, reserve_helpers, run_job, spawn_thread, stderr_excerpt, stderr_summary,
+    check_archive, child_environment, classify, disk_exceeded, disk_verdict, drain_stderr, entry_bytes, exceeded_limit, generate, generate_with,
+    kill_then, outcome, reserve_helpers, run_job, spawn_thread, stderr_excerpt, stderr_summary, watch_plan, watchdog,
 };
 use sbom::settings::{SyftSettings, Target};
 use sbom::types::{Helpers, Job};
@@ -16,10 +18,12 @@ use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::mpsc::{RecvTimeoutError, SendError};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use types::TestResult;
 
@@ -60,6 +64,9 @@ const EXIT_CODE: i32 = 3;
 const LONG_STDERR: usize = 1000;
 
 
+const DRAIN_MANY: usize = 100_000;
+
+
 const DOUBLE_STDERR: usize = 2000;
 
 
@@ -84,6 +91,13 @@ fn settings(dir: &TempDir, binary: PathBuf, deadline_millis: u64) -> SyftSetting
         max_stderr_bytes: STDERR_CAP,
         helper_grace_millis: GRACE_MILLIS,
         max_live_helpers: LIVE_HELPERS,
+        max_memory_bytes: MEMORY_LIMIT,
+        max_file_bytes: FILE_LIMIT,
+        max_archive_bytes: ARCHIVE_LIMIT,
+        max_run_disk_bytes: DISK_LIMIT,
+        max_run_entries: ENTRY_LIMIT,
+        disk_poll_millis: POLL_MILLIS,
+        prlimit_binary: PathBuf::from(PRLIMIT),
     }
 }
 
@@ -110,6 +124,30 @@ fn fresh_helpers() -> Helpers {
 
 
 const GRACE_MILLIS: u64 = 200;
+
+
+const MEMORY_LIMIT: u64 = 1_073_741_824;
+
+
+const DISK_LIMIT: u64 = 1_048_576;
+
+
+const ENTRY_LIMIT: usize = 1000;
+
+
+const POLL_MILLIS: u64 = 10;
+
+
+const PRLIMIT: &str = "/usr/bin/prlimit";
+
+
+const FILE_LIMIT: u64 = 1_048_576;
+
+
+const ARCHIVE_LIMIT: u64 = 1_048_576;
+
+
+const SMALL_ARCHIVE_LIMIT: u64 = 1000;
 
 
 const LIVE_HELPERS: usize = 8;
@@ -249,19 +287,26 @@ fn stderr_flood_is_drained_and_capped() -> TestResult {
 #[test]
 fn drain_keeps_the_cap_and_counts_the_rest() -> TestResult {
     let data = vec![b'x'; DOUBLE_STDERR];
-    let drained = drain_stderr(data.as_slice(), STDERR_CAP)?;
+    let drained = drain_stderr(&mut data.as_slice(), STDERR_CAP)?;
     assert_eq!(drained.kept.len(), STDERR_CAP);
     assert_eq!(drained.total, u64::try_from(DOUBLE_STDERR)?);
+    let mut ordered = vec![b'a'; STDERR_CAP];
+    ordered.extend(vec![b'z'; STDERR_CAP]);
+    let tail = drain_stderr(&mut ordered.as_slice(), STDERR_CAP)?;
+    assert_eq!(tail.kept, vec![b'z'; STDERR_CAP]);
+    assert_eq!(tail.total, u64::try_from(DOUBLE_STDERR)?);
+    let many_chunks = vec![b'q'; DRAIN_MANY];
+    assert_eq!(drain_stderr(&mut many_chunks.as_slice(), STDERR_CAP)?.total, u64::try_from(DRAIN_MANY)?);
     Ok(())
 }
 
 
 #[test]
 fn excerpt_is_bounded_and_escaped() -> TestResult {
-    let mut kept = b"line\nnext\x1b[31m".to_vec();
-    kept.extend(vec![b'y'; LONG_STDERR]);
+    let mut kept = vec![b'y'; LONG_STDERR];
+    kept.extend(b"line\nnext\x1b[31m");
     let excerpt = stderr_excerpt(&Stderr { kept, total: 0 });
-    assert!(excerpt.starts_with("line\\nnext\\u{1b}[31m"));
+    assert!(excerpt.ends_with("line\\nnext\\u{1b}[31m"));
     assert!(excerpt.len() <= DOUBLE_EXCERPT);
     Ok(())
 }
@@ -279,7 +324,7 @@ impl Read for Failing {
 
 #[test]
 fn drain_reports_a_read_failure() -> TestResult {
-    assert!(drain_stderr(Failing, STDERR_CAP).is_err());
+    assert!(drain_stderr(&mut Failing, STDERR_CAP).is_err());
     Ok(())
 }
 
@@ -322,12 +367,16 @@ fn binary_must_exist_and_be_a_regular_file() -> TestResult {
 
 
 #[test]
-fn non_executable_binary_fails_to_spawn() -> TestResult {
+fn non_executable_binary_fails_to_run_and_non_executable_prlimit_fails_to_spawn() -> TestResult {
     let dir = TempDir::new()?;
     let path = dir.path().join("plain");
     fs::write(&path, "x")?;
-    let result = run(&settings(&dir, path, LONG_DEADLINE_MILLIS));
-    assert!(matches!(result, Err(RunError::Io(_))));
+    let unusable = run(&settings(&dir, path.clone(), LONG_DEADLINE_MILLIS));
+    assert!(matches!(unusable, Err(RunError::Failed { code: Some(_), .. })), "{unusable:?}");
+    let binary = fake_syft(&dir, "exit 0")?;
+    let mut configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
+    configured.prlimit_binary = path;
+    assert!(matches!(run(&configured), Err(RunError::Io(_))));
     Ok(())
 }
 
@@ -568,5 +617,447 @@ fn abandoned_helper_results_are_logged_not_lost() -> TestResult {
     run_job(Box::new(|| Err(RunError::Abandoned)));
     run_job(Box::new(|| Ok(())));
     spawn_thread(Box::new(|| Ok(())))?;
+    Ok(())
+}
+
+
+const KIBIBYTES: u64 = 1024;
+
+
+const BIG_ALLOCATION: &str = "3000000000";
+
+
+const ARCHIVE_BYTES: usize = 2000;
+
+
+const XFSZ_SIGNAL: i32 = 25;
+
+
+const EXIT_ONE_STATUS: i32 = 256;
+
+
+fn work_dir_leftovers(dir: &TempDir) -> io::Result<usize> {
+    Ok(fs::read_dir(dir.path())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("syft-"))
+        .count())
+}
+
+
+#[test]
+fn the_child_runs_under_the_configured_address_space_limit() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(ulimit -v)\"";
+    let binary = fake_syft(&dir, body)?;
+    let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
+    let name = sbom.components.first().map(|component| component.name.clone());
+    assert_eq!(name, Some((MEMORY_LIMIT / KIBIBYTES).to_string()));
+    Ok(())
+}
+
+
+#[test]
+fn allocating_past_the_limit_is_a_typed_memory_error_and_the_home_is_removed() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = format!("head -c {BIG_ALLOCATION} /dev/zero | tr '\\0' x | tail -n 1");
+    let binary = fake_syft(&dir, &body)?;
+    let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
+    assert!(
+        matches!(
+            result,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::Memory,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn writing_past_the_limit_is_a_typed_file_error_and_the_home_is_removed() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = "exec dd if=/dev/zero of=\"$HOME/big\" bs=1M count=8";
+    let binary = fake_syft(&dir, body)?;
+    let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
+    limited.max_run_disk_bytes = HUGE_DISK;
+    let result = run(&limited);
+    assert!(
+        matches!(
+            result,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::FileSize,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn archives_are_checked_on_the_opened_handle() -> TestResult {
+    let dir = TempDir::new()?;
+    let archive = dir.path().join("image.tar");
+    fs::write(&archive, vec![b'a'; ARCHIVE_BYTES])?;
+    let oversize = check_archive(&Target::OciArchive(archive.clone()), SMALL_ARCHIVE_LIMIT);
+    assert!(matches!(
+        oversize,
+        Err(RunError::ResourceLimit {
+            kind: ResourceKind::Archive,
+            ..
+        })
+    ));
+    assert!(check_archive(&Target::DockerArchive(archive.clone()), u64::try_from(ARCHIVE_BYTES)?).is_ok());
+    assert!(check_archive(&Target::Directory(archive), 0).is_ok());
+    assert!(matches!(
+        check_archive(&Target::OciArchive(dir.path().to_path_buf()), 1),
+        Err(RunError::NotRegular)
+    ));
+    assert!(matches!(
+        check_archive(&Target::OciArchive(dir.path().join("absent")), 1),
+        Err(RunError::Io(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_oversize_archive_never_spawns() -> TestResult {
+    let dir = TempDir::new()?;
+    let archive = dir.path().join("image.tar");
+    fs::File::create(&archive)?.set_len(ARCHIVE_LIMIT + 1)?;
+    let binary = fake_syft(&dir, "exit 0")?;
+    let result = generate(
+        &settings(&dir, binary, LONG_DEADLINE_MILLIS),
+        &fresh_helpers(),
+        &Target::OciArchive(archive),
+        "t",
+        "a",
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::ResourceLimit {
+            kind: ResourceKind::Archive,
+            ..
+        })
+    ));
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn limit_classification() -> TestResult {
+    let ok = ExitStatus::from_raw(0);
+    let failed = ExitStatus::from_raw(EXIT_ONE_STATUS);
+    let xfsz = ExitStatus::from_raw(XFSZ_SIGNAL);
+    assert_eq!(exceeded_limit(ok, b"out of memory"), None);
+    assert_eq!(exceeded_limit(xfsz, b""), Some(ResourceKind::FileSize));
+    assert_eq!(exceeded_limit(failed, b"write: File too large"), Some(ResourceKind::FileSize));
+    assert_eq!(exceeded_limit(failed, b"fatal error: runtime: Out Of Memory"), Some(ResourceKind::Memory));
+    assert_eq!(exceeded_limit(failed, b"mmap: cannot allocate memory"), Some(ResourceKind::Memory));
+    assert_eq!(
+        exceeded_limit(failed, b"fatal error: failed to reserve page summary memory"),
+        Some(ResourceKind::Memory)
+    );
+    assert_eq!(
+        exceeded_limit(failed, b"runtime: allocating heap arena failed"),
+        Some(ResourceKind::Memory)
+    );
+    assert_eq!(exceeded_limit(failed, b"something else"), None);
+    assert!(matches!(
+        classify(Err(RunError::TimedOut), Some(ResourceKind::Memory)),
+        Err(RunError::TimedOut)
+    ));
+    assert!(matches!(
+        classify(Err(RunError::Abandoned), Some(ResourceKind::Memory)),
+        Err(RunError::ResourceLimit {
+            kind: ResourceKind::Memory,
+            ..
+        })
+    ));
+    assert!(matches!(classify(Err(RunError::Abandoned), None), Err(RunError::Abandoned)));
+    Ok(())
+}
+
+
+const WRITE_STEPS: &str = "for i in 1 2 3 4; do dd if=/dev/zero of=\"$TMPDIR/f$i\" bs=1k count=512 2>/dev/null; done\nexec sleep 3600";
+
+
+const MANY_FILES: &str = "for i in 1 2 3 4 5 6; do : > \"$TMPDIR/f$i\"; done\nexec sleep 3600";
+
+
+const SMALL_ENTRY_LIMIT: usize = 3;
+
+
+const BIG_FILE_BYTES: usize = 600_000;
+
+
+const KILL_SIGNAL: i32 = 9;
+
+
+const TICKS: u64 = 3;
+
+
+const TINY_DISK: u64 = 1000;
+
+
+const HUGE_DISK: u64 = 1_099_511_627_776;
+
+
+const TWO_ENTRIES: usize = 2;
+
+
+const THREE_TICKS_MILLIS: u64 = 25;
+
+
+const SHORT_MILLIS: u64 = 5;
+
+
+const TICK: Duration = Duration::from_millis(POLL_MILLIS);
+
+
+fn plan(home: &Path, ticks: u64, max_bytes: u64, max_entries: usize) -> WatchPlan {
+    WatchPlan {
+        home: home.to_path_buf(),
+        tick: TICK,
+        ticks,
+        max_bytes,
+        max_entries,
+    }
+}
+
+
+fn sleeper() -> io::Result<Child> {
+    Command::new("sleep").arg("3600").spawn()
+}
+
+
+fn killed(mut child: Child) -> TestResult {
+    assert_eq!(child.wait()?.signal(), Some(KILL_SIGNAL));
+    Ok(())
+}
+
+
+fn killed_by_hand(mut child: Child) -> TestResult {
+    child.kill()?;
+    child.wait()?;
+    Ok(())
+}
+
+
+#[test]
+fn writing_past_the_disk_bound_is_a_typed_disk_error_and_the_home_is_removed() -> TestResult {
+    let dir = TempDir::new()?;
+    let binary = fake_syft(&dir, WRITE_STEPS)?;
+    let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
+    assert!(
+        matches!(
+            result,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::Disk,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn too_many_entries_in_the_home_is_a_typed_disk_error() -> TestResult {
+    let dir = TempDir::new()?;
+    let binary = fake_syft(&dir, MANY_FILES)?;
+    let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
+    limited.max_run_entries = SMALL_ENTRY_LIMIT;
+    let result = run(&limited);
+    assert!(
+        matches!(
+            result,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::Disk,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_child_temporary_directory_is_its_private_home() -> TestResult {
+    let dir = TempDir::new()?;
+    let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$TMPDIR\"")?;
+    let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
+    let name = sbom.components.first().map(|component| component.name.clone()).ok_or("no component")?;
+    assert!(name.starts_with(&format!("{}/syft-", dir.path().display())), "{name}");
+    Ok(())
+}
+
+
+#[test]
+fn the_limits_are_in_force_from_the_first_instruction() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(ulimit -v)\"";
+    let binary = fake_syft(&dir, body)?;
+    let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
+    let name = sbom.components.first().map(|component| component.name.clone());
+    assert_eq!(name, Some((MEMORY_LIMIT / KIBIBYTES).to_string()));
+    Ok(())
+}
+
+
+#[test]
+fn only_the_kept_tail_of_stderr_classifies_a_failure() -> TestResult {
+    let dir = TempDir::new()?;
+    let early = fake_syft(&dir, "echo 'out of memory' >&2\nyes noise | head -c 5000 >&2\nexit 1")?;
+    let ignored = run(&settings(&dir, early, LONG_DEADLINE_MILLIS));
+    assert!(matches!(ignored, Err(RunError::Failed { code: Some(1), .. })), "{ignored:?}");
+    let late = fake_syft(&dir, "yes noise | head -c 5000 >&2\necho 'failed to reserve' >&2\nexit 1")?;
+    let found = run(&settings(&dir, late, LONG_DEADLINE_MILLIS));
+    assert!(
+        matches!(
+            found,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::Memory,
+                ..
+            })
+        ),
+        "{found:?}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_missing_or_irregular_prlimit_refuses_the_run() -> TestResult {
+    let dir = TempDir::new()?;
+    let binary = fake_syft(&dir, "exit 0")?;
+    let mut configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
+    configured.prlimit_binary = dir.path().join("absent");
+    assert!(matches!(run(&configured), Err(RunError::Io(_))));
+    configured.prlimit_binary = dir.path().to_path_buf();
+    assert!(matches!(run(&configured), Err(RunError::NotRegular)));
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_walk_measures_blocks_and_entries_and_stops_at_the_cap() -> TestResult {
+    let dir = TempDir::new()?;
+    fs::write(dir.path().join("big"), vec![b'a'; BIG_FILE_BYTES])?;
+    assert!(disk_exceeded(dir.path(), TINY_DISK, ENTRY_LIMIT)?);
+    assert!(!disk_exceeded(dir.path(), HUGE_DISK, ENTRY_LIMIT)?);
+    assert!(!disk_exceeded(dir.path(), HUGE_DISK, TWO_ENTRIES)?);
+    assert!(disk_exceeded(dir.path(), HUGE_DISK, 1)?);
+    assert!(matches!(
+        disk_exceeded(&dir.path().join("big").join("under"), 1, 1),
+        Err(RunError::Walk(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_vanished_entry_counts_as_nothing_and_other_walk_errors_are_typed() -> TestResult {
+    let dir = TempDir::new()?;
+    let file = dir.path().join("file");
+    fs::write(&file, "x")?;
+    let vanished = walkdir::WalkDir::new(dir.path().join("absent")).into_iter().next().ok_or("no entry")?;
+    assert_eq!(entry_bytes(vanished)?, 0);
+    let broken = walkdir::WalkDir::new(file.join("under")).into_iter().next().ok_or("no entry")?;
+    assert!(matches!(entry_bytes(broken), Err(RunError::Walk(_))));
+    let present = walkdir::WalkDir::new(&file).into_iter().next().ok_or("no entry")?;
+    assert!(entry_bytes(present)? > 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_watchdog_decides_on_close_disk_overrun_and_ticks_out() -> TestResult {
+    let dir = TempDir::new()?;
+    let (closed_sender, closed_receiver) = mpsc::channel::<()>();
+    drop(closed_sender);
+    let finished = sleeper()?;
+    let finished_verdict = watchdog(
+        Pid::from_child(&finished),
+        &closed_receiver,
+        &plan(dir.path(), TICKS, DISK_LIMIT, ENTRY_LIMIT),
+    )?;
+    assert_eq!(finished_verdict, Verdict::Finished);
+    killed_by_hand(finished)?;
+    let (_held_sender, held_receiver) = mpsc::channel::<()>();
+    let timed_out = sleeper()?;
+    let timed_out_verdict = watchdog(
+        Pid::from_child(&timed_out),
+        &held_receiver,
+        &plan(dir.path(), TICKS, DISK_LIMIT, ENTRY_LIMIT),
+    )?;
+    assert_eq!(timed_out_verdict, Verdict::TimedOut);
+    killed(timed_out)?;
+    fs::write(dir.path().join("big"), vec![b'a'; BIG_FILE_BYTES])?;
+    let full = sleeper()?;
+    let full_verdict = watchdog(Pid::from_child(&full), &held_receiver, &plan(dir.path(), TICKS, TINY_DISK, ENTRY_LIMIT))?;
+    assert_eq!(full_verdict, Verdict::DiskFull);
+    killed(full)?;
+    let broken = sleeper()?;
+    let under = dir.path().join("big").join("under");
+    let failed = watchdog(Pid::from_child(&broken), &held_receiver, &plan(&under, TICKS, DISK_LIMIT, ENTRY_LIMIT));
+    assert!(matches!(failed, Err(RunError::Walk(_))));
+    killed(broken)
+}
+
+
+#[test]
+fn killing_a_reaped_pid_is_an_error() -> TestResult {
+    let mut child = Command::new("true").spawn()?;
+    let pid = Pid::from_child(&child);
+    child.wait()?;
+    assert!(matches!(kill_then(pid, Ok(Verdict::Finished)), Err(RunError::Signal(_))));
+    Ok(())
+}
+
+
+#[test]
+fn the_watch_schedule_covers_the_deadline_with_ticks_no_longer_than_it() -> TestResult {
+    let dir = TempDir::new()?;
+    let mut configured = settings(&dir, PathBuf::from("/bin/true"), LONG_DEADLINE_MILLIS);
+    configured.disk_poll_millis = POLL_MILLIS;
+    configured.deadline_millis = THREE_TICKS_MILLIS;
+    let spread = watch_plan(&configured, dir.path());
+    assert_eq!((spread.tick, spread.ticks), (TICK, TICKS));
+    assert_eq!((spread.max_bytes, spread.max_entries), (DISK_LIMIT, ENTRY_LIMIT));
+    configured.deadline_millis = SHORT_MILLIS;
+    let short = watch_plan(&configured, dir.path());
+    assert_eq!((short.tick, short.ticks), (Duration::from_millis(SHORT_MILLIS), 1));
+    configured.deadline_millis = 0;
+    assert_eq!(watch_plan(&configured, dir.path()).ticks, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_disk_overrun_replaces_the_result_and_keeps_it_as_the_cause() -> TestResult {
+    let replaced = disk_verdict(Verdict::DiskFull, Err(RunError::Abandoned));
+    assert!(matches!(
+        &replaced,
+        Err(RunError::ResourceLimit { kind: ResourceKind::Disk, cause: Some(inner) }) if matches!(inner.as_ref(), RunError::Abandoned)
+    ));
+    assert!(matches!(disk_verdict(Verdict::Finished, Err(RunError::Busy)), Err(RunError::Busy)));
+    assert!(matches!(
+        disk_verdict(Verdict::TimedOut, Err(RunError::TimedOut)),
+        Err(RunError::TimedOut)
+    ));
     Ok(())
 }
