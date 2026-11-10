@@ -254,6 +254,19 @@ fn a_config_without_an_otlp_section_is_refused() -> TestResult {
 
 
 #[test]
+fn a_webhook_url_with_a_query_is_refused_before_any_send() -> TestResult {
+    let dir = tempdir()?;
+    let config = parse_export(
+        &webhook_yaml("https://siem.example/h?token=XYZ", &dir.path().join("buf"), ""),
+        "export.yaml",
+    )?;
+    let result = webhook_command(&mut Vec::new(), &config, &[], &no_secret, &fast_policy(), &mut |_delay| {}, now()?);
+    assert!(matches!(result, Err(ExportError::Invalid(_))));
+    Ok(())
+}
+
+
+#[test]
 fn a_secret_that_cannot_be_resolved_is_an_error() -> TestResult {
     let dir = tempdir()?;
     let config = parse_export(
