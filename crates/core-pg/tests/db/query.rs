@@ -27,6 +27,12 @@ const TWO_TENANTS: usize = 2;
 const SHORT: Duration = Duration::from_secs(2);
 
 
+const STEP_PAUSE: Duration = Duration::from_millis(300);
+
+
+const SHARED_DEADLINE: Duration = Duration::from_millis(500);
+
+
 pub async fn client_with(handler: Handler) -> Result<(Client, Fake, TempDir), Box<dyn Error>> {
     let pki = make_pki(SanType::IpAddress(loopback()))?;
     let fake = crate::fake::start(Mode::Tls(pki.server), "p", handler).await?;
@@ -109,5 +115,41 @@ async fn a_hung_query_hits_the_statement_deadline() -> Result<(), Box<dyn Error>
     tokio::time::pause();
     let error = global_query(&client, "SELECT HANG", SHORT).await.err().ok_or("accepted")?;
     assert!(matches!(error, PgError::StatementTimeout { .. }), "{error}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_malformed_sqlstate_from_the_server_is_reduced() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with(Arc::new(|_sql| Reply::Error("bad code\u{1b}[31m"))).await?;
+    let error = execute_script(&client, "X", DEADLINE).await.err().ok_or("accepted")?;
+    assert!(
+        matches!(&error, PgError::Server { code, class } if code == "invalid" && *class == "other"),
+        "{error}"
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_set_and_the_query_share_one_deadline() -> Result<(), Box<dyn Error>> {
+    let pause = STEP_PAUSE;
+    let handler: Handler = Arc::new(move |sql| if sql.starts_with("SET") { Reply::Sleep(pause) } else { Reply::Hang });
+    let (client, _fake, _dir) = client_with(handler).await?;
+    tokio::time::pause();
+    let start = tokio::time::Instant::now();
+    let error = global_query(&client, "SELECT 1", SHARED_DEADLINE).await.err().ok_or("accepted")?;
+    assert!(matches!(error, PgError::StatementTimeout { .. }), "{error}");
+    assert!(start.elapsed() < SHARED_DEADLINE + STEP_PAUSE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_refused_set_is_a_server_error() -> Result<(), Box<dyn Error>> {
+    let handler: Handler = Arc::new(|_sql| Reply::Error("42601"));
+    let (client, _fake, _dir) = client_with(handler).await?;
+    let error = global_query(&client, "SELECT 1", DEADLINE).await.err().ok_or("accepted")?;
+    assert!(matches!(error, PgError::Server { .. }), "{error}");
     Ok(())
 }

@@ -20,13 +20,15 @@ pub async fn execute_script(client: &Client, sql: &str, deadline: Duration) -> R
 }
 
 
-/// Sets the server-side deadline, then runs the statement under the same client-side deadline.
+/// Sets the server-side deadline, then runs the statement: both share one client-side deadline.
 pub async fn run_query(client: &Client, sql: &str, params: &[SqlParameter<'_>], deadline: Duration) -> Result<Vec<Row>, PgError> {
-    execute_script(client, "", deadline).await?;
-    timeout(deadline, client.query(sql, params))
+    let work = async {
+        client.batch_execute(&timed_script("", deadline)).await.map_err(reduce)?;
+        client.query(sql, params).await.map_err(reduce)
+    };
+    timeout(deadline, work)
         .await
         .map_err(|_elapsed| PgError::StatementTimeout { seconds: deadline.as_secs() })?
-        .map_err(reduce)
 }
 
 

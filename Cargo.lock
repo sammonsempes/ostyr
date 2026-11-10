@@ -1046,6 +1046,7 @@ version = "0.0.0"
 dependencies = [
  "core-audit",
  "core-config",
+ "libc",
  "rcgen",
  "rustls",
  "rustls-pki-types",
@@ -1060,6 +1061,8 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
+ "zeroize",
 ]
 
 [[package]]
