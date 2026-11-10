@@ -7,7 +7,9 @@ mod types;
 
 
 use core_export::error::ExportError;
-use core_export::http::{build_agent, build_agent_with, post_json, post_otlp};
+use core_export::http::{build_agent, post_json, post_otlp};
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use types::TestResult;
 
 
@@ -121,7 +123,7 @@ fn otlp_counts_only_a_2xx_answer_as_delivered() -> TestResult {
     let replies = vec![(STATUS_REDIRECT, String::new()), (STATUS_CREATED, String::new())];
     let http_sink::HttpSink { port, bodies } = http_sink::spawn_replying_sink(None, replies)?;
     let url = format!("http://127.0.0.1:{port}/v1/logs");
-    assert!(post_otlp(&build_agent_with(None, 0)?, &url, None, "{}").is_err());
+    assert!(post_otlp(&build_agent(None)?, &url, None, "{}").is_err());
     assert!(post_otlp(&build_agent(None)?, &url, None, "{}").is_ok());
     bodies.join().map_err(|_panic| "sink thread panicked")??;
     Ok(())
@@ -137,5 +139,27 @@ fn an_environment_proxy_is_ignored_and_the_receiver_is_reached_directly() -> Tes
     post_otlp(&agent, &format!("http://127.0.0.1:{port}/v1/logs"), None, "{}").map_err(|error| error.to_string())?;
     let received = bodies.join().map_err(|_panic| "sink thread panicked")??;
     assert_eq!(received.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_webhook_redirect_is_a_failure_and_the_location_is_never_requested() -> TestResult {
+    let target = TcpListener::bind("127.0.0.1:0")?;
+    target.set_nonblocking(true)?;
+    let location = format!("http://127.0.0.1:{}/elsewhere", target.local_addr()?.port());
+    let source = TcpListener::bind("127.0.0.1:0")?;
+    let port = source.local_addr()?.port();
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut stream, _peer) = source.accept()?;
+        let mut request_line = String::new();
+        BufReader::new(&stream).read_line(&mut request_line)?;
+        stream.write_all(format!("HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").as_bytes())
+    });
+    let outcome = post_json(&build_agent(None)?, &format!("http://127.0.0.1:{port}/hook"), Some("tok"), "[1]");
+    server.join().map_err(|_panic| "server thread panicked")??;
+    let text = outcome.err().ok_or("a redirect was accepted")?.to_string();
+    assert!(!text.contains("elsewhere"));
+    assert_eq!(target.accept().err().map(|error| error.kind()), Some(std::io::ErrorKind::WouldBlock));
     Ok(())
 }

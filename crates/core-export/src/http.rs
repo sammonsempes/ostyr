@@ -12,20 +12,14 @@ use ureq::Body;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 
-pub const DEFAULT_REDIRECTS: u32 = 10;
+pub const NO_REDIRECTS: u32 = 0;
 
 
 pub const CONTENT_TYPE: &str = "application/json";
 
 
-/// With a CA bundle only that CA is trusted (private CA); without one the Mozilla roots are.
+/// With a CA bundle only that CA is trusted (private CA); without one the Mozilla roots are. No redirect is ever followed, so a bearer token cannot be sent to another host.
 pub fn build_agent(ca_pem: Option<&[u8]>) -> Result<Agent, ExportError> {
-    build_agent_with(ca_pem, DEFAULT_REDIRECTS)
-}
-
-
-/// `max_redirects` 0 never follows a redirect, so a bearer token cannot be sent to another host.
-pub fn build_agent_with(ca_pem: Option<&[u8]>, max_redirects: u32) -> Result<Agent, ExportError> {
     let roots = match ca_pem {
         Some(pem) => RootCerts::new_with_certs(&[Certificate::from_pem(pem).map_err(ExportError::Certificate)?]),
         None => RootCerts::WebPki,
@@ -34,7 +28,7 @@ pub fn build_agent_with(ca_pem: Option<&[u8]>, max_redirects: u32) -> Result<Age
     let config = Config::builder()
         .tls_config(tls)
         .timeout_global(Some(REQUEST_TIMEOUT))
-        .max_redirects(max_redirects)
+        .max_redirects(NO_REDIRECTS)
         .proxy(None)
         .build();
     Ok(Agent::new_with_config(config))
@@ -52,9 +46,18 @@ pub fn send_json(agent: &Agent, url: &str, token: Option<&str>, body: &str) -> R
 }
 
 
+/// Only a 2xx answer counts as delivered; a redirect is a failure whose `Location` is never read or logged.
 pub fn post_json(agent: &Agent, url: &str, token: Option<&str>, body: &str) -> Result<(), BoxError> {
-    send_json(agent, url, token, body).map(|_response| ())
+    let response = send_json(agent, url, token, body)?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(BoxError::from(REDIRECT_REFUSED))
+    }
 }
+
+
+pub const REDIRECT_REFUSED: &str = "the webhook receiver did not answer 2xx (redirects are never followed)";
 
 
 /// Only a 2xx answer counts as delivered (a redirect or a 1xx is an error). An accepted request is never retried because of its response: an unreadable or oversized body is logged, `rejectedLogRecords` is logged.

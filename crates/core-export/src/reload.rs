@@ -1,6 +1,6 @@
 use crate::config::ExportConfig;
 use crate::error::ExportError;
-use crate::otlp::prepare_otlp;
+use crate::otlp::{check_transport, prepare_otlp};
 use core_config::parse::{parse_document, read_file};
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
@@ -33,7 +33,7 @@ pub fn check_otlp(config: &ExportConfig) -> Result<(), ExportError> {
 }
 
 
-/// Refuses a webhook URL with userinfo or a query string: the token goes through `SecretRef`, and the URL reaches the audit and the logs.
+/// Refuses a webhook URL with userinfo, a query string or cleartext http to a remote host (a token in a path segment cannot be detected): the token goes through `SecretRef`, and the URL reaches the audit and the logs.
 pub fn check_webhook(config: &ExportConfig) -> Result<(), ExportError> {
     config.webhook.iter().try_for_each(|webhook| {
         let uri = webhook
@@ -45,7 +45,7 @@ pub fn check_webhook(config: &ExportConfig) -> Result<(), ExportError> {
                 "webhook url must not contain credentials, a query string or a fragment",
             ))
         } else {
-            Ok(())
+            check_transport(&uri)
         }
     })
 }
