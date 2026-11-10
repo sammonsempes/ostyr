@@ -2,7 +2,8 @@ use crate::error::SinkError;
 use crate::model::{
     AlertRecord, AlertStore, FileStore, MAX_ALERTS_PER_BATCH, MAX_ALERT_LINE_BYTES, MAX_FIELD_CHARS, MAX_GROUP_FIELDS, MAX_STORED_EVENT_IDS,
 };
-use crate::types::{AlertSyncFn, AlertWriter, RenameFn, RotateFn};
+use crate::pg::pg_commit;
+use crate::types::{AlertSyncFn, AlertWriter, RenameFn, RotateFn, SyncDirFn};
 use agent_channel::app::{bounded_lines, BoundedLine};
 use core_audit::log::owner_only;
 use std::collections::{BTreeMap, HashSet};
@@ -60,16 +61,14 @@ pub fn load_seen(reader: &mut dyn BufRead, max_line: usize, max_ids: usize) -> R
 /// `damaged` makes the next write start with a newline, so a torn last line can never swallow a record.
 pub fn new_store(output: (AlertWriter, AlertSyncFn), rotate: RotateFn, seen: HashSet<String>, damaged: bool, max_stored: usize) -> AlertStore {
     let (writer, sync) = output;
-    AlertStore {
-        inner: Mutex::new(FileStore {
-            writer,
-            sync,
-            rotate,
-            seen,
-            damaged,
-            max_stored,
-        }),
-    }
+    AlertStore::File(Mutex::new(FileStore {
+        writer,
+        sync,
+        rotate,
+        seen,
+        damaged,
+        max_stored,
+    }))
 }
 
 
@@ -95,6 +94,12 @@ pub fn rotated_name(path: &Path, number: usize) -> PathBuf {
 
 pub fn move_file(from: &Path, to: &Path) -> io::Result<()> {
     rename(from, to)
+}
+
+
+/// Flushes the directory that holds `path`, so a rename in it survives a power loss.
+pub fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path.with_file_name("."))?.sync_all()
 }
 
 
@@ -130,14 +135,15 @@ pub fn rotate_files(path: &Path, keep: usize, rename: RenameFn) -> io::Result<()
 }
 
 
-/// Opens the new file under a temporary name, rotates while `<file>` exists, then moves the new file in: any failure changes nothing and a retry is safe.
-pub fn rotate_to_new(path: &Path, keep: usize, rename: RenameFn) -> io::Result<(AlertWriter, AlertSyncFn)> {
+/// Opens the new file under a temporary name, rotates while `<file>` exists, moves the new file in, then flushes the directory: any failure changes nothing and a retry is safe.
+pub fn rotate_to_new(path: &Path, keep: usize, rename: RenameFn, sync_dir: SyncDirFn) -> io::Result<(AlertWriter, AlertSyncFn)> {
     let temp = temp_name(path);
     let output = open_new(&temp).and_then(output_of)?;
     if path.exists() {
         rotate_files(path, keep, rename)?;
     }
     rename(&temp, path)?;
+    sync_dir(path)?;
     Ok(output)
 }
 
@@ -153,7 +159,7 @@ pub fn open_alert_store(path: &Path, max_stored: usize, keep: usize) -> Result<A
     let damaged = file.metadata().map_err(SinkError::Read)?.len() > 0;
     let output = output_of(file).map_err(SinkError::Write)?;
     let owned = path.to_path_buf();
-    let rotate: RotateFn = Box::new(move || rotate_to_new(&owned, keep, move_file));
+    let rotate: RotateFn = Box::new(move || rotate_to_new(&owned, keep, move_file, sync_directory));
     Ok(new_store(output, rotate, seen, damaged, max_stored))
 }
 
@@ -196,6 +202,7 @@ pub fn bound_record(record: &AlertRecord) -> AlertRecord {
         tenant: record.tenant.clone(),
         rule_id: cut_text(&record.rule_id, MAX_FIELD_CHARS),
         rule_title: cut_text(&record.rule_title, MAX_FIELD_CHARS),
+        level: record.level,
         group,
         first_ms: record.first_ms,
         last_ms: record.last_ms,
@@ -231,7 +238,15 @@ pub fn rotate_if_full(store: &mut FileStore) -> Result<(), SinkError> {
 
 /// Appends the records not stored yet, syncs, then remembers their ids (after a failed fsync the retry rewrites them); returns the new count.
 pub fn file_commit(store: &AlertStore, tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
-    let mut guard = store.inner.lock().unwrap_or_else(PoisonError::into_inner);
+    match store {
+        AlertStore::File(inner) => commit_file(inner, tenant, records),
+        AlertStore::Postgres(_) => Err(SinkError::WrongStore),
+    }
+}
+
+
+pub fn commit_file(store: &Mutex<FileStore>, tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
+    let mut guard = store.lock().unwrap_or_else(PoisonError::into_inner);
     let inner = &mut *guard;
     if records.iter().any(|record| record.tenant != tenant) {
         Err(SinkError::TenantMismatch)
@@ -253,5 +268,14 @@ pub fn file_commit(store: &AlertStore, tenant: &str, records: &[AlertRecord]) ->
         let count = fresh.len();
         inner.seen.extend(fresh);
         Ok(count)
+    }
+}
+
+
+/// The sink of the service: the commit that matches the store it was opened with.
+pub fn commit_alerts(store: &AlertStore, tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
+    match store {
+        AlertStore::File(_) => file_commit(store, tenant, records),
+        AlertStore::Postgres(_) => pg_commit(store, tenant, records),
     }
 }

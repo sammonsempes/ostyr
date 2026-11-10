@@ -1,10 +1,11 @@
 use crate::detect::{checkpoint_if_dirty, detection_sink, new_detector, save_all};
 use crate::error::DetectionError;
 use crate::model::{
-    CommitPolicy, Detector, AUDIT_TENANT, INGEST_REQUEST_ID, MAX_ALERTS_PER_BATCH, MAX_COMMIT_ATTEMPTS, MAX_ROTATED_FILES, MAX_STORED_ALERTS,
-    MAX_TENANTS, MODULE, RULES_REQUEST_ID,
+    AlertStore, CommitPolicy, Detector, SinkKind, AUDIT_TENANT, INGEST_REQUEST_ID, MAX_ALERTS_PER_BATCH, MAX_COMMIT_ATTEMPTS, MAX_ROTATED_FILES,
+    MAX_STORED_ALERTS, MAX_TENANTS, MODULE, PG_REQUEST_ID, RULES_REQUEST_ID,
 };
-use crate::settings::{fixed_paths, load_detection_file, open_ingest, open_rules_engine};
+use crate::pg::{open_pg_store, system_micros};
+use crate::settings::{fixed_paths, load_detection_file, open_ingest, open_pg_engine, open_rules_engine};
 use crate::store::open_alert_store;
 use crate::types::{AlertSinkFn, ClockFn, SharedStopFn, SleepFn};
 use agent_channel::app::{alerting_audit, debounce, keep_signals, reload_context, shared_log_audit};
@@ -63,7 +64,19 @@ pub fn run_service(path: &Path, stop: Box<SharedStopFn>, commit: AlertSinkFn) ->
         reload_context(path, MODULE, AUDIT_TENANT, RULES_REQUEST_ID),
     )?);
     create_dir_all(&file.checkpoint_dir)?;
-    let store = Arc::new(open_alert_store(&file.alerts_file, MAX_STORED_ALERTS, MAX_ROTATED_FILES)?);
+    let pg_engine = match file.sink {
+        SinkKind::File => None,
+        SinkKind::Postgres => Some(Arc::new(open_pg_engine(
+            path.to_path_buf(),
+            fixed_paths(&file),
+            alerting_audit(shared_log_audit(&log)),
+            reload_context(path, MODULE, AUDIT_TENANT, PG_REQUEST_ID),
+        )?)),
+    };
+    let store = Arc::new(match &pg_engine {
+        None => open_alert_store(&file.alerts_file, MAX_STORED_ALERTS, MAX_ROTATED_FILES)?,
+        Some(engine) => AlertStore::Postgres(open_pg_store(Arc::clone(engine), system_micros)?),
+    });
     let wiring = nats_wiring(Arc::clone(&ingest))?;
     let shared_stop: Arc<SharedStopFn> = Arc::from(stop);
     let policy = CommitPolicy {
@@ -89,6 +102,12 @@ pub fn run_service(path: &Path, stop: Box<SharedStopFn>, commit: AlertSinkFn) ->
         .collect();
     let _ingest_watch = watch_files(Arc::clone(&ingest), &[path.to_path_buf()], debounce())?;
     let _rules_watch = watch_files(Arc::clone(&rules), &rule_watch, debounce())?;
+    let pg_watch = pg_engine
+        .as_ref()
+        .map(|engine| watch_files(Arc::clone(engine), &[path.to_path_buf()], debounce()))
+        .transpose();
+    let _pg_watch = pg_watch?;
+    let _pg_signals = pg_engine.map(keep_signals).transpose()?;
     let _ingest_signals = keep_signals(Arc::clone(&ingest))?;
     let _rules_signals = keep_signals(rules)?;
     let mut pipeline = detection_pipeline(ingest, Arc::clone(&detector), wiring, (system_clock, real_sleep));
