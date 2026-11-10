@@ -58,6 +58,7 @@ fn component(name: &str, service: &str, objective_ppm: Option<u32>) -> Component
         name: name.to_string(),
         service: service.to_string(),
         objective_ppm,
+        rule: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn config() -> PageConfig {
         id: "main".to_string(),
         tenant: TENANT.to_string(),
         title: "Acme status".to_string(),
+        checks: Vec::new(),
         components: vec![
             component("Website", "svc-web-internal", Some(MID_PPM)),
             component("API", "svc-api-internal", None),

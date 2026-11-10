@@ -14,6 +14,22 @@ pub struct ComponentConfig {
     pub name: String,
     pub service: String,
     pub objective_ppm: Option<u32>,
+    #[serde(default)]
+    pub rule: Option<RuleConfig>,
+}
+
+
+/// State rule of one component: counts of failing locations, `recover_after` consecutive passes, results older than the window ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleConfig {
+    pub checks: Vec<String>,
+    pub degraded_after: u32,
+    pub down_after: u32,
+    pub recover_after: u32,
+    pub window_seconds: u32,
+    #[serde(default)]
+    pub unknown_state: Option<ComponentState>,
 }
 
 
@@ -23,6 +39,8 @@ pub struct PageConfig {
     pub id: String,
     pub tenant: String,
     pub title: String,
+    #[serde(default)]
+    pub checks: Vec<String>,
     pub components: Vec<ComponentConfig>,
 }
 
@@ -66,6 +84,26 @@ pub struct ServiceState {
     pub tenant: String,
     pub service: String,
     pub state: ComponentState,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckResult {
+    pub tenant: String,
+    pub check: String,
+    pub location: String,
+    pub at: i64,
+    pub passed: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualOverride {
+    pub tenant: String,
+    pub service: String,
+    pub state: ComponentState,
+    pub author: String,
+    pub expires_at: i64,
 }
 
 

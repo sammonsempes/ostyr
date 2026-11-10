@@ -82,16 +82,19 @@ fn sample_inputs_degrade_the_first_component_only() -> TestResult {
         id: "main".to_owned(),
         tenant: "acme".to_owned(),
         title: "t".to_owned(),
+        checks: Vec::new(),
         components: vec![
             ComponentConfig {
                 name: "A".to_owned(),
                 service: "a".to_owned(),
                 objective_ppm: None,
+                rule: None,
             },
             ComponentConfig {
                 name: "B".to_owned(),
                 service: "b".to_owned(),
                 objective_ppm: None,
+                rule: None,
             },
         ],
     };
