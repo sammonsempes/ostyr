@@ -5,5 +5,7 @@ pub mod error;
 pub mod impact;
 pub mod import;
 pub mod model;
+pub mod pg;
 pub mod reconcile;
+pub mod store;
 pub mod types;
