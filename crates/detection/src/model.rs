@@ -1,5 +1,6 @@
-use crate::types::{AlertSinkFn, AlertSyncFn, AlertWriter, EngineMap, RotateFn, SharedStopFn, SleepFn};
+use crate::types::{AlertSinkFn, AlertSyncFn, AlertWriter, EngineMap, MicrosFn, RotateFn, SharedStopFn, SleepFn};
 use core_config::reload::ReloadEngine;
+use core_pg::settings::PgSettings;
 use serde::{Deserialize, Serialize};
 use siem_ingest::settings::IngestSettings;
 use siem_ingest::types::ProgressFn;
@@ -8,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use stream_correlation::ruleset::RuleSet;
+use tokio::runtime::Runtime;
+use tokio_postgres::Client;
 
 
 pub const MODULE: &str = "detection";
@@ -17,6 +20,9 @@ pub const AUDIT_TENANT: &str = "all";
 
 
 pub const INGEST_REQUEST_ID: &str = "detection-ingest-reload";
+
+
+pub const PG_REQUEST_ID: &str = "detection-postgres-reload";
 
 
 pub const RULES_REQUEST_ID: &str = "detection-rules-reload";
@@ -52,6 +58,21 @@ pub const MAX_GROUP_FIELDS: usize = 16;
 pub const MAX_STORED_EVENT_IDS: usize = 100;
 
 
+pub const MICROS_PER_SECOND: u64 = 1_000_000;
+
+
+pub const NANOS_PER_MILLI: i128 = 1_000_000;
+
+
+pub const HOST_FIELD: &str = "host.name";
+
+
+pub const USER_FIELD: &str = "user.name";
+
+
+pub const REPLACEMENT: char = '\u{fffd}';
+
+
 /// One alert as stored: the id is the idempotence key, the tenant is the subject's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlertRecord {
@@ -66,8 +87,18 @@ pub struct AlertRecord {
 }
 
 
-/// The service file: the output paths are read at start, the `ingest` section and the rule files on every reload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Where the alerts go: a local file or the PostgreSQL store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SinkKind {
+    #[default]
+    File,
+    Postgres,
+}
+
+
+/// The service file: the output paths and the sink are read at start, the `ingest` and `postgres` sections and the rule files on every reload.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DetectionFile {
     pub audit_file: PathBuf,
@@ -75,6 +106,10 @@ pub struct DetectionFile {
     pub alerts_file: PathBuf,
     pub mapping_file: PathBuf,
     pub rule_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub sink: SinkKind,
+    #[serde(default)]
+    pub postgres: Option<PgSettings>,
     #[serde(default)]
     pub ingest: IngestSettings,
 }
@@ -107,11 +142,22 @@ pub struct FixedPaths {
     pub audit_file: PathBuf,
     pub checkpoint_dir: PathBuf,
     pub alerts_file: PathBuf,
+    pub sink: SinkKind,
 }
 
 
-pub struct AlertStore {
-    pub inner: Mutex<FileStore>,
+/// The PostgreSQL sink: its own runtime, the settings read afresh at every connect, the connection kept between batches, the clock of `created`.
+pub struct PgStore {
+    pub runtime: Runtime,
+    pub settings: Arc<ReloadEngine<PgSettings>>,
+    pub link: Mutex<Option<Client>>,
+    pub clock: MicrosFn,
+}
+
+
+pub enum AlertStore {
+    File(Mutex<FileStore>),
+    Postgres(PgStore),
 }
 
 

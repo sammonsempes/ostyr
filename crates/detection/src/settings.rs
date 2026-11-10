@@ -5,6 +5,7 @@ use core_config::load::load_file;
 use core_config::reload::Subscriber;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine};
 use core_config::types::{BoxError, LoaderFn, SharedAuditFn};
+use core_pg::settings::{settings_state as pg_state, PgSettings};
 use siem_ingest::error::{IngestError, SettingsError};
 use siem_ingest::nats_settings::DEFAULT_NATS_CONSUMER;
 use siem_ingest::settings::{settings_state, validate_settings, IngestSettings, SECTION};
@@ -26,6 +27,7 @@ pub fn fixed_paths(file: &DetectionFile) -> FixedPaths {
         audit_file: file.audit_file.clone(),
         checkpoint_dir: file.checkpoint_dir.clone(),
         alerts_file: file.alerts_file.clone(),
+        sink: file.sink,
     }
 }
 
@@ -36,7 +38,7 @@ pub fn check_fixed(baseline: &FixedPaths, file: DetectionFile) -> Result<Detecti
         Ok(file)
     } else {
         Err(ConfigError::WatchedFile {
-            file: "audit_file, checkpoint_dir, alerts_file".to_owned(),
+            file: "audit_file, checkpoint_dir, alerts_file, sink".to_owned(),
             reason: "read at start only, restart the service to change it".to_owned(),
         })
     }
@@ -125,4 +127,30 @@ pub fn open_rules_engine(
     context: ReloadContext,
 ) -> Result<ReloadEngine<RuleSet>, DetectionError> {
     Ok(open_engine(rules_loader(path, baseline), rules_state, Vec::new(), audit, context)?)
+}
+
+
+/// The `postgres` section of the service file; the postgres sink refuses a file without it.
+pub fn postgres_of(file: DetectionFile) -> Result<PgSettings, ConfigError> {
+    file.postgres.ok_or_else(|| ConfigError::WatchedFile {
+        file: "postgres".to_owned(),
+        reason: "the postgres sink needs a `postgres` section".to_owned(),
+    })
+}
+
+
+/// Read again on every reload: the next connection uses the new settings, an invalid file is refused and the old ones stay.
+pub fn open_pg_engine(
+    path: PathBuf,
+    baseline: FixedPaths,
+    audit: Box<SharedAuditFn>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<PgSettings>, DetectionError> {
+    Ok(open_engine(
+        Box::new(move || load_checked(&path, &baseline).and_then(postgres_of)),
+        pg_state,
+        Vec::new(),
+        audit,
+        context,
+    )?)
 }
