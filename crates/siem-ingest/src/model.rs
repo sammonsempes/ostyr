@@ -1,5 +1,5 @@
 use crate::settings::IngestSettings;
-use crate::types::{AckFn, AckToken, ClockFn, DeadLetterFn, FetchFn, PendingMap, SinkFn, SleepFn};
+use crate::types::{AckFn, AckToken, ClockFn, DeadLetterFn, FetchFn, PendingMap, ProgressFn, SinkFn, SleepFn};
 use core_config::reload::ReloadEngine;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -107,6 +107,7 @@ pub struct Wiring {
     pub fetch: Box<FetchFn>,
     pub ack: Box<AckFn>,
     pub dead_letter: Box<DeadLetterFn>,
+    pub progress: Arc<ProgressFn>,
 }
 
 

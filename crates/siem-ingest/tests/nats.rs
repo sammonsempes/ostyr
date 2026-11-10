@@ -5,7 +5,7 @@ use async_nats::jetstream;
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
-use core_config::reload::{reload, ReloadEngine, ReloadOutcome};
+use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Queued, Stub, StubState};
 use nkeys::KeyPair;
 use rcgen::generate_simple_self_signed;
@@ -17,8 +17,8 @@ use siem_ingest::error::NatsError;
 use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
 use siem_ingest::nats::{
-    acknowledge, check_payload_limit, connect_options, fetch_batch, nats_wiring, publish_dead_letter, read_bounded, settle_token, terminate,
-    tls_config, MAX_NATS_FILE_BYTES,
+    acknowledge, check_payload_limit, connect_options, fetch_batch, nats_wiring, progress_in, publish_dead_letter, read_bounded, report_progress,
+    settle_token, terminate, tls_config, MAX_NATS_FILE_BYTES,
 };
 use siem_ingest::settings::{open_settings, IngestSettings};
 use std::error::Error;
@@ -186,7 +186,9 @@ fn a_batch_is_fetched_acknowledged_and_dead_lettered() -> Result<(), Box<dyn Err
         state.queue.push_back(queued("events.tenant-a", "one"));
         state.queue.push_back(queued("events.tenant-b", "two"));
     })?;
-    let Wiring { mut fetch, ack, dead_letter } = nats_wiring(Arc::clone(&rig.engine))?;
+    let Wiring {
+        mut fetch, ack, dead_letter, ..
+    } = nats_wiring(Arc::clone(&rig.engine))?;
     let deliveries = fetch(FETCH_MAX)?;
     assert_eq!(deliveries.len(), PAIR);
     let first = deliveries.first().ok_or("no first delivery")?;
@@ -229,7 +231,9 @@ fn a_batch_is_fetched_acknowledged_and_dead_lettered() -> Result<(), Box<dyn Err
 #[test]
 fn acknowledgements_need_a_session_and_a_known_token() -> Result<(), Box<dyn Error + Send + Sync>> {
     let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
-    let Wiring { mut fetch, ack, dead_letter } = nats_wiring(Arc::clone(&rig.engine))?;
+    let Wiring {
+        mut fetch, ack, dead_letter, ..
+    } = nats_wiring(Arc::clone(&rig.engine))?;
     assert!(ack(TOKEN_ONE, AckAction::Ack).is_err());
     assert!(dead_letter("tenant-a", b"bad", "reason").is_err());
     assert_eq!(fetch(FETCH_MAX)?.len(), 1);
@@ -726,5 +730,25 @@ fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error
     assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
     assert!(!all_logs.contains(TRACE_PAYLOAD));
     assert!(tracing::level_filters::STATIC_MAX_LEVEL <= tracing::level_filters::LevelFilter::DEBUG);
+    Ok(())
+}
+
+
+#[test]
+fn an_in_progress_acknowledgement_covers_every_held_message_and_keeps_them_held() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let rig = rig(NORMAL_MS, "", |state| {
+        state.queue.push_back(queued("events.tenant-a", "one"));
+        state.queue.push_back(queued("events.tenant-a", "two"));
+    })?;
+    assert!(report_progress(&rig.link).is_err());
+    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), PAIR);
+    report_progress(&rig.link)?;
+    wait_until(&rig.stub, |state| state.acks.len() == PAIR)?;
+    assert_eq!(lock(&rig.stub.hub).acks, ["+WPI", "+WPI"]);
+    acknowledge(&rig.link, TOKEN_ONE, AckAction::Ack)?;
+    wait_until(&rig.stub, |state| state.acks.len() == PAIR + 1)?;
+    let settings = current_config(&rig.engine);
+    let slot = rig.link.session.lock().map_err(|_| "poisoned")?;
+    assert_eq!(rig.link.runtime.block_on(progress_in(&slot, &settings))?, 1);
     Ok(())
 }

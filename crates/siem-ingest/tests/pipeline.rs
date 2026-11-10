@@ -160,6 +160,7 @@ fn rig(yaml: &str) -> Result<Rig, Box<dyn Error>> {
                 Ok(())
             }
         }),
+        progress: Arc::new(|| Ok(())),
         dead_letter: Box::new(move |tenant, payload, reason| {
             record(&dead_lines, format!("dead:{tenant}:{}:{reason}", payload.len()))?;
             if dead_failing.load(Ordering::SeqCst) {
