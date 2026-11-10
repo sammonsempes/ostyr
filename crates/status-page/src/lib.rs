@@ -13,4 +13,6 @@ pub mod serve;
 pub mod server;
 pub mod settings;
 pub mod snapshot;
+pub mod store;
+pub mod store_model;
 pub mod types;
