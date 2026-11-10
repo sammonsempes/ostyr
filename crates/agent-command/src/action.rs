@@ -34,6 +34,14 @@ pub fn validate_selection(selection: &PackageSelection) -> Result<(), ActionErro
 pub fn validate_action(action: &Action) -> Result<(), ActionError> {
     match action {
         Action::InstallUpdates { packages, .. } => validate_selection(packages),
-        _ => Ok(()),
+        Action::Ping
+        | Action::CollectStatus
+        | Action::Isolate
+        | Action::Kill { .. }
+        | Action::RunScript { .. }
+        | Action::Update { .. }
+        | Action::Uninstall
+        | Action::ChangePolicy { .. }
+        | Action::Reboot { .. } => Ok(()),
     }
 }

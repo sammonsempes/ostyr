@@ -145,8 +145,8 @@ pub enum CliError {
     UnknownAction(String),
     #[error("unknown key class `{0}`")]
     Class(String),
-    #[error("invalid number `{0}`")]
-    Number(String),
+    #[error("invalid number")]
+    Number,
     #[error("invalid hexadecimal: {0}")]
     Hex(#[from] data_encoding::DecodeError),
     #[error("invalid parameter: {0}")]

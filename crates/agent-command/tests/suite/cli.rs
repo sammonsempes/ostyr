@@ -113,10 +113,12 @@ fn actions_parse_by_name() -> TestResult {
         Some(Action::ChangePolicy { policy: "p".to_owned() })
     );
     assert_eq!(parse_action("kill", Some("1")).ok(), Some(Action::Kill { process_id: 1 }));
-    assert!(matches!(parse_action("kill", Some("x")), Err(CliError::Number(_))));
-    assert!(matches!(parse_action("kill", None), Err(CliError::Number(_))));
+    assert!(matches!(parse_action("kill", Some("x")), Err(CliError::Number)));
+    assert!(matches!(parse_action("kill", None), Err(CliError::Number)));
     assert!(matches!(parse_action("format", None), Err(CliError::UnknownAction(_))));
-    assert!(matches!(parse_sequence("x"), Err(CliError::Number(_))));
+    assert!(matches!(parse_sequence("x"), Err(CliError::Number)));
+    let refusal = parse_sequence("secret-input").err().ok_or("a bad number was accepted")?;
+    assert!(!refusal.to_string().contains("secret-input"));
     assert_eq!(parse_sequence(&STORED.to_string()).ok(), Some(STORED));
     Ok(())
 }
@@ -136,7 +138,7 @@ fn signing_reports_usage_and_failures() -> TestResult {
     assert!(matches!(write_signed(&["x"], NOW, os_random, &mut Vec::new()), Err(CliError::Usage(_))));
     assert!(matches!(
         write_signed(&[&seed, "k", "routine", "a", "t", "x", "ping"], NOW, os_random, &mut Vec::new()),
-        Err(CliError::Number(_))
+        Err(CliError::Number)
     ));
     assert!(matches!(
         write_signed(&[&seed, "k", "routine", "a", "t", "1", "ping"], NOW, failing_fill, &mut Vec::new()),
