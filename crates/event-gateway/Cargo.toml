@@ -1,0 +1,32 @@
+[package]
+name = "event-gateway"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+agent-channel = { version = "0.0.0", path = "../agent-channel" }
+async-nats = { version = "0.52", default-features = false, features = ["ring", "jetstream", "nkeys", "crypto", "server_2_10"] }
+bytes = "1.12.1"
+core-audit = { version = "0.0.0", path = "../core-audit" }
+core-config = { version = "0.0.0", path = "../core-config" }
+futures-util = "0.3.34"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
+thiserror = "2"
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time", "net", "io-util", "sync", "macros"] }
+tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
+
+[dev-dependencies]
+nkeys = "0.4.5"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tempfile = "3"
+tokio = { version = "1.54.1", features = ["rt", "time", "net", "io-util", "sync", "macros", "test-util", "signal"] }
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true

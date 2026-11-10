@@ -11,7 +11,7 @@ use crate::services::channel_router;
 use crate::settings::open_settings_engine;
 use crate::sink::{file_sink, open_event_store};
 use crate::tls::server_config;
-use crate::types::{NowFn, ShutdownSignal};
+use crate::types::{EventSink, NowFn, ShutdownSignal};
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
@@ -56,13 +56,25 @@ pub async fn bind_server(file: &ServerFile) -> Result<TcpListener, AppError> {
 
 
 /// Serves until `shutdown` completes; settings and revocations reload on file change and on `SIGHUP`, every reload is audited.
-pub async fn run_server(file: ServerFile, listener: TcpListener, shutdown: ShutdownSignal) -> Result<(), AppError> {
-    run_server_with_clock(file, listener, shutdown, Box::new(system_now)).await
+pub async fn run_server(file: ServerFile, listener: TcpListener, shutdown: ShutdownSignal, events: EventSink) -> Result<(), AppError> {
+    run_server_with_clock(file, listener, shutdown, events, Box::new(system_now)).await
+}
+
+
+/// The example sink: the events file of `file`, deduplicated on `(identity, sequence)`.
+pub fn file_events(file: &ServerFile) -> Result<EventSink, AppError> {
+    Ok(file_sink(Arc::new(Mutex::new(open_event_store(&file.events_file)?))))
 }
 
 
 /// `run_server` with the limiter clock injected.
-pub async fn run_server_with_clock(file: ServerFile, listener: TcpListener, shutdown: ShutdownSignal, now: Box<NowFn>) -> Result<(), AppError> {
+pub async fn run_server_with_clock(
+    file: ServerFile,
+    listener: TcpListener,
+    shutdown: ShutdownSignal,
+    events: EventSink,
+    now: Box<NowFn>,
+) -> Result<(), AppError> {
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let (opened_settings, settings) = open_settings_engine(
         file.settings_file.clone(),
@@ -80,12 +92,11 @@ pub async fn run_server_with_clock(file: ServerFile, listener: TcpListener, shut
     let _revocation_watch = watch_files(Arc::clone(&revocation_engine), std::slice::from_ref(&file.revocation_file), debounce())?;
     let _settings_signals = keep_signals(settings_engine)?;
     let _revocation_signals = keep_signals(revocation_engine)?;
-    let store = Arc::new(Mutex::new(open_event_store(&file.events_file)?));
     let state = Arc::new(ServerState {
         settings,
         counters: Counters::default(),
         load: Mutex::default(),
-        events: file_sink(store),
+        events,
         commands: command_source(file.commands_dir.clone()),
         presence: Mutex::default(),
         audit: shared_log_audit(&log),
