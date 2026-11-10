@@ -1,6 +1,9 @@
 use crate::error::CmdbError;
-use crate::model::{Asset, Attribute, Conflict, Event, Lifecycle, Observation, Outcome, Resolution};
+use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Lifecycle, Observation, Outcome, Resolution};
 use crate::types::TruthMap;
+
+
+const KEY_OWNER_SOURCE: &str = "cmdb";
 
 
 /// First asset sharing a key value with the observation, trying the keys from the strongest to the weakest.
@@ -70,16 +73,44 @@ pub fn apply_attribute(asset: &mut Asset, conflicts: &mut Vec<Conflict>, observa
 }
 
 
+/// Adds a key the asset lacks, unless another asset of the inventory owns it: then a `key:<name>` conflict names both assets and the key stays put.
+pub fn merge_key(asset: &mut Asset, conflicts: &mut Vec<Conflict>, inventory: &[Asset], observation: &Observation, key: IdentityKey, value: &str) {
+    let owner = inventory
+        .iter()
+        .find(|other| other.id != asset.id && other.keys.get(&key).is_some_and(|owned| owned == value));
+    match (asset.keys.contains_key(&key), owner) {
+        (true, _) => (),
+        (false, None) => {
+            asset.keys.insert(key, value.to_string());
+        }
+        (false, Some(other)) => conflicts.push(Conflict {
+            asset: asset.id.clone(),
+            attribute: format!("key:{key}"),
+            current: Attribute {
+                value: other.id.clone(),
+                source: KEY_OWNER_SOURCE.to_string(),
+            },
+            observed: Attribute {
+                value: value.to_string(),
+                source: observation.source.clone(),
+            },
+            resolution: Resolution::KeptCurrent,
+        }),
+    }
+}
+
+
 /// Pure: returns the next inventory, the conflict log entries and the events; the input is never modified.
 pub fn reconcile(inventory: &[Asset], observation: &Observation, truth: &TruthMap) -> Result<Outcome, CmdbError> {
     let matched = find_asset(inventory, observation).cloned();
     let created = matched.is_none();
     let mut asset = matched.map_or_else(|| new_asset(observation), Ok)?;
     let reappeared = !created && matches!(asset.lifecycle, Lifecycle::Retired | Lifecycle::Destroyed);
-    observation.keys.iter().for_each(|(key, value)| {
-        asset.keys.entry(*key).or_insert_with(|| value.clone());
-    });
     let mut conflicts = Vec::new();
+    observation
+        .keys
+        .iter()
+        .for_each(|(key, value)| merge_key(&mut asset, &mut conflicts, inventory, observation, *key, value));
     observation
         .attributes
         .iter()

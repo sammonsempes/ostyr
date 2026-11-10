@@ -212,3 +212,29 @@ fn lifecycle_is_ordered() -> TestResult {
     assert!(Lifecycle::Retired < Lifecycle::Destroyed);
     Ok(())
 }
+
+
+#[test]
+fn a_key_owned_by_another_asset_is_a_conflict_and_other_data_applies() -> TestResult {
+    let inventory = vec![
+        asset("a", &[(IdentityKey::SerialNumber, "S1")], Lifecycle::InService),
+        asset("b", &[(IdentityKey::Mac, "M")], Lifecycle::InService),
+    ];
+    let seen = observation(
+        "agent",
+        &[(IdentityKey::SerialNumber, "S1"), (IdentityKey::Mac, "M"), (IdentityKey::Name, "web1")],
+        &[("rack", "r1")],
+    );
+    let outcome = reconcile(&inventory, &seen, &TruthMap::new())?;
+    let conflict = outcome.conflicts.first().ok_or("no conflict")?;
+    assert_eq!(
+        (conflict.asset.as_str(), conflict.attribute.as_str(), conflict.current.value.as_str()),
+        ("a", "key:mac", "b")
+    );
+    assert_eq!(outcome.conflicts.len(), 1);
+    let merged = outcome.inventory.iter().find(|item| item.id == "a").ok_or("no a")?;
+    assert!(!merged.keys.contains_key(&IdentityKey::Mac));
+    assert!(merged.keys.contains_key(&IdentityKey::Name));
+    assert!(merged.attributes.contains_key("rack"));
+    Ok(())
+}
