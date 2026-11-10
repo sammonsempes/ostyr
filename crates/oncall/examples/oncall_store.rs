@@ -7,7 +7,7 @@ use core_pg::settings::parse_settings;
 use oncall::alert::{Cell, Event, Param, Statement};
 use oncall::error::StoreError;
 use oncall::limits::MAX_OPEN_ALERTS;
-use oncall::store::{apply_event, open_alert, open_alerts, run, MIGRATIONS, UPDATE_SQL};
+use oncall::store::{apply_event, open_alert, open_alerts, run, MIGRATIONS, MIGRATION_NAMESPACE, UPDATE_SQL};
 use oncall::types::Row;
 use std::io::{stderr, stdout, Write};
 use std::path::Path;
@@ -103,7 +103,7 @@ async fn dump(client: &Client, scope: &TenantScope, out: &mut impl Write) -> Res
 async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Result<(), Box<dyn std::error::Error>> {
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, &settings_file.display().to_string())?;
     let client = connect(&settings).await?;
-    let applied = migrate(&client, &MIGRATIONS, DEADLINE).await?;
+    let applied = migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE).await?;
     let mut out = stdout();
     writeln!(out, "migrations applied: {applied:?}")?;
     let scope_a = tenant_scope(tenant_a)?;
