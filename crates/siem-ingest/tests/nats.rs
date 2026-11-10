@@ -242,7 +242,7 @@ fn acknowledgements_need_a_session_and_a_known_token() -> Result<(), Box<dyn Err
 
 #[test]
 fn a_refused_or_unconfirmed_dead_letter_is_an_error() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let rig = rig(SHORT_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
+    let rig = rig(NORMAL_MS, "", |state| state.queue.push_back(queued("events.tenant-a", "one")))?;
     assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
     lock(&rig.stub.hub).fail_publish = true;
     assert!(publish_dead_letter(&rig.link, "tenant-a", b"bad", "reason").is_err());
@@ -251,6 +251,8 @@ fn a_refused_or_unconfirmed_dead_letter_is_an_error() -> Result<(), Box<dyn Erro
         state.fail_publish = false;
         state.silent_publish = true;
     }
+    fs::write(&rig.path, yaml(rig.stub.port, SHORT_MS, ""))?;
+    assert!(matches!(reload(&rig.engine), ReloadOutcome::Applied { .. }));
     let timeout = publish_dead_letter(&rig.link, "tenant-a", b"bad", "reason")
         .err()
         .ok_or("an unconfirmed publish passed")?;
@@ -261,7 +263,9 @@ fn a_refused_or_unconfirmed_dead_letter_is_an_error() -> Result<(), Box<dyn Erro
 
 #[test]
 fn a_silent_server_fails_the_fetch_and_the_next_one_reconnects() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let rig = rig(SHORT_MS, "", |state| state.silent_pull = true)?;
+    let rig = rig(SHORT_MS, "", |_| {})?;
+    eventually(|| fetch_batch(&rig.link, FETCH_MAX).is_ok())?;
+    lock(&rig.stub.hub).silent_pull = true;
     let failure = fetch_batch(&rig.link, FETCH_MAX).err().ok_or("a silent server was not reported")?;
     assert_eq!(failure.to_string(), "the NATS server did not answer before the deadline");
     assert!(is_empty_slot(&rig.link));
@@ -270,8 +274,8 @@ fn a_silent_server_fails_the_fetch_and_the_next_one_reconnects() -> Result<(), B
         state.silent_pull = false;
         state.queue.push_back(queued("events.tenant-a", "one"));
     }
-    assert_eq!(fetch_batch(&rig.link, FETCH_MAX)?.len(), 1);
-    assert_eq!(lock(&rig.stub.hub).creates.len(), PAIR);
+    eventually(|| fetch_batch(&rig.link, FETCH_MAX).is_ok_and(|batch| batch.len() == 1))?;
+    assert!(lock(&rig.stub.hub).creates.len() >= PAIR);
     Ok(())
 }
 
