@@ -23,6 +23,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 use stub::{id_of, Mode, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, TOKEN};
 use tokio::sync::Semaphore;
+use tokio::time::{sleep, Instant};
 use tokio_stream::pending;
 use types::TestError;
 use types::TestResult;
@@ -822,11 +823,8 @@ async fn a_failed_remote_logout_of_the_previous_session_is_only_logged() -> Test
 
 #[tokio::test]
 async fn the_oldest_session_of_an_account_is_dropped_and_logged_out() -> TestResult {
-    let limits = WebLimits {
-        max_sessions: SESSIONS,
-        ..LIMITS
-    };
-    let rig = harness_custom(Mode::Normal, core_auth::random::os_random, limits).await?;
+    let rig = harness(Mode::Normal).await?;
+    rig.state.sessions_max.store(SESSIONS, Ordering::SeqCst);
     rig.state.user_sessions_max.store(CAP, Ordering::SeqCst);
     let mut sessions = Vec::new();
     for tick in 0..LOGINS {
@@ -941,15 +939,8 @@ async fn logins_hold_at_most_half_of_the_pool() -> TestResult {
 
 #[tokio::test]
 async fn accounts_that_differ_only_by_case_never_evict_each_other() -> TestResult {
-    let rig = harness_custom(
-        Mode::Normal,
-        core_auth::random::os_random,
-        WebLimits {
-            max_sessions: SESSIONS,
-            ..LIMITS
-        },
-    )
-    .await?;
+    let rig = harness(Mode::Normal).await?;
+    rig.state.sessions_max.store(SESSIONS, Ordering::SeqCst);
     rig.state.user_sessions_max.store(CAP, Ordering::SeqCst);
     let lower = session_value(&login_from(&rig, FIRST, Vec::new(), "alice", "secret").await?)?;
     let mut upper = Vec::new();
@@ -976,5 +967,66 @@ async fn a_full_session_table_logs_the_new_token_out_at_the_api() -> TestResult 
     let full = login_from(&rig, FIRST, Vec::new(), "multi", "secret").await?;
     assert_eq!(full.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(logged_out(&rig), vec!["Bearer tok-multi-2".to_owned()]);
+    Ok(())
+}
+
+
+const DEADLINE_SECONDS: u64 = 4;
+
+
+const RELEASE_SECONDS: u64 = 2;
+
+
+const WHOLE_POOL: u32 = 3;
+
+
+#[tokio::test(start_paused = true)]
+async fn a_login_waits_one_deadline_for_its_slot_and_its_request() -> TestResult {
+    let client = build_client(&ApiSection {
+        base_url: "http://127.0.0.1:1/".to_owned(),
+        ca: None,
+        timeout_seconds: DEADLINE_SECONDS,
+        max_connections: POOL,
+    })?;
+    let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let all_calls = client.permits.clone().acquire_many_owned(WHOLE_POOL).await?;
+    let slot = client.login_permits.clone().acquire_owned().await?;
+    let releaser = tokio::spawn(async move {
+        sleep(Duration::from_secs(RELEASE_SECONDS)).await;
+        drop(slot);
+    });
+    let started = Instant::now();
+    let outcome = login(&client, source, "alice", "secret", None).await;
+    releaser.await?;
+    assert!(matches!(outcome, Err(ApiFailure::Throttled)));
+    assert_eq!(started.elapsed(), client.deadline);
+    drop(all_calls);
+    Ok(())
+}
+
+
+const HOLD_SECONDS: u64 = 1;
+
+
+#[tokio::test(start_paused = true)]
+async fn the_request_gets_only_the_time_left_after_the_slots() -> TestResult {
+    let silent = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let client = build_client(&ApiSection {
+        base_url: format!("http://{}/", silent.local_addr()?),
+        ca: None,
+        timeout_seconds: DEADLINE_SECONDS,
+        max_connections: POOL,
+    })?;
+    let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let slot = client.login_permits.clone().acquire_owned().await?;
+    let releaser = tokio::spawn(async move {
+        sleep(Duration::from_secs(HOLD_SECONDS)).await;
+        drop(slot);
+    });
+    let started = Instant::now();
+    let outcome = login(&client, source, "alice", "secret", None).await;
+    releaser.await?;
+    assert!(matches!(outcome, Err(ApiFailure::Unavailable(_))));
+    assert_eq!(started.elapsed(), client.deadline);
     Ok(())
 }

@@ -1,5 +1,5 @@
 use crate::config::tls_files;
-use crate::error::{WebError, MAX_USER_SESSIONS};
+use crate::error::{WebError, MAX_SESSIONS, MAX_USER_SESSIONS};
 use crate::model::{ApiClient, ApiSection, Prepared, WebConfig};
 use core_api::server::load_tls;
 use core_config::parse::read_text_capped;
@@ -97,9 +97,19 @@ pub fn check_user_sessions(count: usize) -> Result<(), WebError> {
 }
 
 
+pub fn check_sessions(count: usize) -> Result<(), WebError> {
+    if (1..=MAX_SESSIONS).contains(&count) {
+        Ok(())
+    } else {
+        Err(WebError::Sessions)
+    }
+}
+
+
 /// Everything a reload needs, built and checked before anything is swapped.
 pub fn prepare(config: &WebConfig) -> Result<Prepared, WebError> {
     check_user_sessions(config.max_sessions_per_user)?;
+    check_sessions(config.max_sessions)?;
     let tls = tls_files(config)
         .map(|files| load_tls(&files).map(|loaded| Arc::new(loaded.config)))
         .transpose()?;
@@ -107,5 +117,6 @@ pub fn prepare(config: &WebConfig) -> Result<Prepared, WebError> {
         client: build_client(&config.api)?,
         tls,
         user_sessions: config.max_sessions_per_user,
+        sessions: config.max_sessions,
     })
 }

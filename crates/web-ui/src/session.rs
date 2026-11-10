@@ -97,7 +97,7 @@ pub fn create_session(state: &WebState, username: &str, token: SecretString) -> 
     let csrf = new_secret(state.random)?;
     let mut sessions = state.sessions.lock().unwrap_or_else(PoisonError::into_inner);
     sessions.retain(|_, session| session.expires > now);
-    if sessions.len() >= state.limits.max_sessions {
+    if sessions.len() >= state.sessions_max.load(Ordering::SeqCst) {
         Err(SessionError::Full)
     } else {
         let evicted = evict_oldest(&mut sessions, username, state.user_sessions_max.load(Ordering::SeqCst));
