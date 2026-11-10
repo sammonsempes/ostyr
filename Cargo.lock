@@ -157,18 +157,30 @@ dependencies = [
 name = "alerts"
 version = "0.0.0"
 dependencies = [
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
+ "core-config",
  "core-pg",
+ "data-encoding",
  "rcgen",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-postgres",
  "tokio-rustls",
+ "tower",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

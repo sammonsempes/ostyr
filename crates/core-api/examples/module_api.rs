@@ -33,6 +33,7 @@ async fn main() -> std::io::Result<ExitCode> {
                 example_router(),
                 example_access(),
                 vec![example_document()],
+                &[],
                 listener,
                 Some(log),
             )

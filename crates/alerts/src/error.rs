@@ -43,4 +43,6 @@ pub enum StoreError {
     Document(#[source] serde_json::Error),
     #[error("the stored event list is malformed")]
     BadEvents(#[source] serde_json::Error),
+    #[error("too many concurrent database requests")]
+    Busy,
 }

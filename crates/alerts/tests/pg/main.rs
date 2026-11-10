@@ -3,22 +3,35 @@ mod fake;
 mod types;
 
 
+use alerts::backend::{lease, pg_backend, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
+use alerts::error::StoreError;
+use alerts::id::alert_id;
 use alerts::model::Page;
 use alerts::pg::{pg_executor, pg_rows};
 use alerts::store::list_alerts;
 use certs::{loopback, make_pki};
+use core_api::logging::reloadable_dispatch;
+use core_audit::log::{append, genesis_log};
+use core_config::reload::{reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use core_pg::connect::connect;
 use core_pg::error::PgError;
 use core_pg::scope::tenant_scope;
-use core_pg::settings::parse_settings;
+use core_pg::settings::{open_settings, parse_settings, PgSettings};
 use fake::{Fake, Mode, Reply};
 use rcgen::SanType;
 use std::error::Error;
+use std::io::{sink, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::Semaphore;
 use tokio_postgres::Client;
+use tracing::level_filters::LevelFilter;
+use tracing::Dispatch;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use types::Handler;
 
 
@@ -119,5 +132,205 @@ async fn list_alerts_runs_against_a_real_client_scoped_to_the_tenant() -> Result
     let bound: Vec<&String> = statements.iter().filter(|entry| entry.starts_with("PARAMS")).collect();
     assert_eq!(bound.len(), 1, "{statements:?}");
     assert!(bound.iter().all(|entry| entry.as_str() == "PARAMS acme|11"), "{bound:?}");
+    Ok(())
+}
+
+
+pub const MARKER: &str = "marker-7f3a91";
+
+
+pub const ALERT_COLUMNS: usize = 12;
+
+
+pub struct Served {
+    pub engine: Arc<ReloadEngine<PgSettings>>,
+    pub fake: Fake,
+    pub dir: TempDir,
+    pub settings_file: PathBuf,
+    pub settings_text: String,
+}
+
+
+pub struct SharedBuffer(pub Arc<Mutex<Vec<u8>>>);
+
+
+impl Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+pub static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(sink).finish()));
+
+
+pub fn alert_row(id: &str) -> Vec<String> {
+    let columns = [
+        id,
+        "r1",
+        "Whoami executed",
+        "high",
+        "2026-11-10T10:00:00Z",
+        "1700000000000000",
+        "",
+        "",
+        "[\"e1\"]",
+        "{}",
+        "false",
+        "2",
+    ];
+    assert_eq!(columns.len(), ALERT_COLUMNS);
+    columns.iter().map(|column| (*column).to_owned()).collect()
+}
+
+
+pub fn alert_handler() -> Handler {
+    let id = alert_id("acme", "r1", &["e1".to_owned()]);
+    Arc::new(move |sql| {
+        if sql.contains("FROM alerts") {
+            Reply::Rows(vec![alert_row(&id)])
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+pub fn settings_for(port: u16, dir: &TempDir, ca_pem: &str) -> Result<String, Box<dyn Error>> {
+    let password_file = dir.path().join("pg.pass");
+    let ca_file = dir.path().join("ca.pem");
+    std::fs::write(&password_file, "p")?;
+    std::fs::write(&ca_file, ca_pem)?;
+    Ok(format!(
+        "host: 127.0.0.1\nport: {port}\ndatabase: ostyr\nuser: ostyr\npassword_file: {}\nca_file: {}\n",
+        password_file.display(),
+        ca_file.display()
+    ))
+}
+
+
+pub async fn served(handler: Handler) -> Result<Served, Box<dyn Error>> {
+    let pki = make_pki(SanType::IpAddress(loopback()))?;
+    let fake = fake::start(Mode::Tls(pki.server), "p", handler).await?;
+    let dir = tempdir()?;
+    let settings_text = settings_for(fake.port, &dir, &pki.ca_pem)?;
+    let settings_file = dir.path().join("pg.yaml");
+    std::fs::write(&settings_file, &settings_text)?;
+    let log = genesis_log(sink());
+    let context = ReloadContext {
+        actor_id: "test".to_owned(),
+        tenant: "acme".to_owned(),
+        module: "alerts".to_owned(),
+        target: settings_file.display().to_string(),
+        request_id: "test".to_owned(),
+    };
+    let engine = Arc::new(open_settings(settings_file.clone(), Box::new(move |entry| append(&log, entry)), context)?);
+    Ok(Served {
+        engine,
+        fake,
+        dir,
+        settings_file,
+        settings_text,
+    })
+}
+
+
+#[tokio::test]
+async fn the_pg_backend_lists_and_gets_through_a_leased_connection() -> Result<(), Box<dyn Error>> {
+    let mut served = served(alert_handler()).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let scope = tenant_scope("acme")?;
+    let page = (backend.list)(
+        scope.clone(),
+        Page {
+            after: None,
+            size: PAGE_SIZE,
+        },
+    )
+    .await?;
+    assert_eq!(page.alerts.len(), 1);
+    let id = alert_id("acme", "r1", &["e1".to_owned()]);
+    let found = (backend.get)(scope, id.clone()).await?;
+    assert_eq!(found.map(|alert| alert.id), Some(id));
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    let bound: Vec<String> = drain(&mut served.fake.statements)
+        .into_iter()
+        .filter(|entry| entry.starts_with("PARAMS"))
+        .collect();
+    assert!(bound.iter().all(|entry| entry.starts_with("PARAMS acme|")), "{bound:?}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_pool_is_busy_before_any_connection() -> Result<(), Box<dyn Error>> {
+    let served = served(alert_handler()).await?;
+    let permits = Arc::new(Semaphore::new(0));
+    let refused = lease(&served.engine, &permits).await.err().ok_or("leased")?;
+    assert!(matches!(refused, StoreError::Busy));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_pg_backend_is_busy_when_no_connection_is_free() -> Result<(), Box<dyn Error>> {
+    let served = served(alert_handler()).await?;
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::new(Semaphore::new(0)));
+    let scope = tenant_scope("acme")?;
+    let listed = (backend.list)(
+        scope.clone(),
+        Page {
+            after: None,
+            size: PAGE_SIZE,
+        },
+    )
+    .await;
+    assert!(matches!(listed, Err(StoreError::Busy)));
+    let found = (backend.get)(scope, alert_id("acme", "r1", &["e1".to_owned()])).await;
+    assert!(matches!(found, Err(StoreError::Busy)));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn settings_follow_the_file_and_an_invalid_file_keeps_the_old_ones() -> Result<(), Box<dyn Error>> {
+    let served = served(alert_handler()).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    std::fs::write(&served.settings_file, "host: [")?;
+    assert!(matches!(reload(&served.engine), ReloadOutcome::Refused { .. }));
+    assert!(lease(&served.engine, &permits).await.is_ok());
+    std::fs::write(&served.settings_file, served.settings_text.replace("port: ", "port: 1\n#"))?;
+    assert!(matches!(reload(&served.engine), ReloadOutcome::Applied { .. }));
+    let refused = lease(&served.engine, &permits).await.err().ok_or("connected")?;
+    assert!(matches!(refused, StoreError::Pg(_)), "{refused}");
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    assert!(served.dir.path().exists());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_bridged_log_at_trace_never_carries_a_bound_parameter() -> Result<(), Box<dyn Error>> {
+    LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&captured);
+    let (dispatch, _level) = reloadable_dispatch(BoxMakeWriter::new(move || SharedBuffer(Arc::clone(&writer))), LevelFilter::TRACE);
+    tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
+    tracing_log::log::set_max_level(tracing_log::log::LevelFilter::Trace);
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    let (client, _fake, _dir) = client_with(by_sql()).await?;
+    pg_rows(&client, DEADLINE, tenant_scope("acme")?, "SELECT TWOROWS $1 $2", vec![MARKER.to_owned()]).await?;
+    tracing_log::log::info!("bridge canary");
+    drop(guard);
+    let text = String::from_utf8(captured.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
+    assert!(text.contains("bridge canary"), "{text}");
+    assert!(!text.contains(MARKER), "{text}");
+    assert!(!text.contains("tokio_postgres"), "{text}");
     Ok(())
 }

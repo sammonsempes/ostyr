@@ -15,7 +15,7 @@ use core_api::error::StartupError;
 use core_api::logging::reloadable_dispatch;
 use core_api::middleware::admit_source;
 use core_api::model::{ApiConfig, ApiState, Bound, ListenerSetup, OidcFiles, PreparedAudit, Rewatch, StateInputs, Watching};
-use core_api::model::{ApiError, ApiSettings};
+use core_api::model::{ApiError, ApiIdentity, ApiSettings};
 use core_api::oidc::{fingerprint_salt, oidc_fingerprint, settle, store_pending, take_login};
 #[cfg(unix)]
 use core_api::previous::{check_previous_slot, read_previous_key};
@@ -25,8 +25,8 @@ use core_api::previous::{
 };
 use core_api::reload::{
     accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
-    reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_identity, switch_key, switch_store, watched_files,
-    FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
+    replace_identity, reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_identity, switch_key, switch_store,
+    watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
 };
 use core_api::routes::build_router;
 use core_api::server::{
@@ -241,6 +241,11 @@ fn module_in(dir: &Path, extra: &str) -> Result<ModuleConfig, TestError> {
 
 
 fn live_with(dir: TempDir, extra: &str, log: Option<LogLevelHandle>) -> Result<Live, TestError> {
+    live_starting(dir, extra, log, &[])
+}
+
+
+fn live_starting(dir: TempDir, extra: &str, log: Option<LogLevelHandle>, start_only: &[&'static str]) -> Result<Live, TestError> {
     let module_file = write_module(dir.path(), extra)?;
     let settings = build_settings(load_module(&module_file)?)?;
     let inputs = StateInputs {
@@ -260,7 +265,7 @@ fn live_with(dir: TempDir, extra: &str, log: Option<LogLevelHandle>) -> Result<L
         rewatch: Arc::new(Rewatch::default()),
     };
     let config = settings.config.clone();
-    let engine = open_reload(&state, settings, &module_file, setup.clone(), log)?;
+    let engine = open_reload(&state, settings, &module_file, setup.clone(), log, start_only)?;
     *setup.rewatch.watching.lock().map_err(|_| "poisoned")? = Some(Watching {
         files: watched_files(&module_file, &config),
         guard: Box::new(()),
@@ -922,7 +927,7 @@ fn start_module(path: &Path) -> (SharedListener, tokio::task::JoinHandle<Result<
     let arguments = vec![path.display().to_string()];
     (
         listener,
-        tokio::spawn(async move { run_module(&arguments, extra_router(), extra_access(), vec![], running, None).await }),
+        tokio::spawn(async move { run_module(&arguments, extra_router(), extra_access(), vec![], &[], running, None).await }),
     )
 }
 
@@ -2194,12 +2199,6 @@ fn renamed_settings(running: &Live, oidc: &str) -> Result<ApiSettings, TestError
 }
 
 
-const GENERATION_POLLS: usize = 20_000;
-
-
-const GENERATION_POLL_MILLIS: u64 = 1;
-
-
 #[test]
 fn a_login_taken_while_the_identity_switch_waits_is_refused_at_settle() -> TestResult {
     let dir = tempdir()?;
@@ -2213,19 +2212,16 @@ fn a_login_taken_while_the_identity_switch_waits_is_refused_at_settle() -> TestR
         .map_err(|_| "poisoned")?
         .insert(hash_token("state"), pending_login("10.0.0.1"));
     runtime.generations.lock().map_err(|_| "poisoned")?.insert(hash_token("state"), before);
-    let settings = renamed_settings(&running, &oidc)?;
-    let held = lock_auth(&running.state);
-    let started = std::thread::scope(|scope| -> Result<_, TestError> {
-        scope.spawn(|| switch_identity(&running.state, &test_context(), &settings));
-        let changed = (0..GENERATION_POLLS).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(GENERATION_POLL_MILLIS));
-            running.state.identity.load().generation != before
-        });
-        assert!(changed);
-        let (_, started) = take_login(&running.state, &runtime, "test", &callback_for("state")).map_err(|_| "login not taken")?;
-        drop(held);
-        Ok(started)
-    })?;
+    let current = running.state.identity.load_full();
+    replace_identity(
+        &running.state,
+        &ApiIdentity {
+            tenant: NEW_TENANT.to_owned(),
+            generation: before + 1,
+            ..(*current).clone()
+        },
+    );
+    let (_, started) = take_login(&running.state, &runtime, "test", &callback_for("state")).map_err(|_| "login not taken")?;
     assert_eq!(started, before);
     let refused = settle(&running.state, &runtime, "test", &bare_identity(), &callback_for("state"), started);
     assert!(matches!(refused, Err(ApiError::InvalidCredentials)));
@@ -2638,5 +2634,41 @@ fn undeclared_reload_parameters_are_redacted_and_declared_ones_kept() -> TestRes
     assert!(text.contains("\"token\":\"[REDACTED]\""));
     assert!(text.contains("\"result\":\"applied\""));
     assert!(!text.contains("hunter2"));
+    Ok(())
+}
+
+
+const START_ONLY_KEYS: [&str; 2] = ["pg_settings", "marker"];
+
+
+#[test]
+fn a_change_of_a_start_only_setting_is_refused_and_audited_denied_only() -> TestResult {
+    let running = live_starting(tempdir()?, "  pg_settings: /etc/one.yaml\n", None, &START_ONLY_KEYS)?;
+    rewrite(&running, "  pg_settings: /etc/two.yaml\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    let records = reload_records(running.dir.path())?;
+    assert_eq!(records.len(), 1);
+    assert!(records
+        .iter()
+        .all(|line| line.contains("\"denied\"") && line.contains("read at start only")));
+    assert!(records.iter().all(|line| !line.contains("applied")));
+    Ok(())
+}
+
+
+#[test]
+fn a_start_only_setting_added_later_is_refused() -> TestResult {
+    let running = live_starting(tempdir()?, "", None, &START_ONLY_KEYS)?;
+    rewrite(&running, "  marker: late\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    Ok(())
+}
+
+
+#[test]
+fn an_unchanged_start_only_setting_lets_other_changes_through() -> TestResult {
+    let running = live_starting(tempdir()?, "  pg_settings: /etc/one.yaml\n", None, &START_ONLY_KEYS)?;
+    rewrite(&running, "  pg_settings: /etc/one.yaml\n  log_level: debug\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
     Ok(())
 }

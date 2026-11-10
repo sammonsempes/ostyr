@@ -10,9 +10,9 @@ use core_auth::limiter::{
 use core_auth::model::Account;
 use core_auth::random::os_random;
 use core_auth::rbac::{
-    builtin_catalog, check_roles, is_allowed, load_catalog, requires_mfa, PERMISSION_ALERTS_TRIAGE, PERMISSION_AUDIT_READ, PERMISSION_CONFIG_MANAGE,
-    PERMISSION_EVENTS_READ, PERMISSION_RESPONSE_EXECUTE, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER,
-    ROLE_RESPONDER,
+    builtin_catalog, check_roles, is_allowed, load_catalog, requires_mfa, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE, PERMISSION_AUDIT_READ,
+    PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ, PERMISSION_RESPONSE_EXECUTE, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR, ROLE_ANALYST,
+    ROLE_AUDITOR, ROLE_READER, ROLE_RESPONDER,
 };
 use core_auth::session::{
     create_session, hash_token, is_revoked, mark_sessions_revoked, revocation_marker, revoke_session, revoke_user_sessions, validate_session,
@@ -55,14 +55,15 @@ fn failing_random(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 fn built_in_roles_have_the_expected_permissions() -> TestResult {
     let catalog = builtin_catalog();
     let matrix = [
-        (ROLE_READER, [true, false, false, false, false, false]),
-        (ROLE_ANALYST, [true, true, false, false, false, false]),
-        (ROLE_RESPONDER, [true, true, true, false, false, false]),
-        (ROLE_ADMINISTRATOR, [true, true, true, false, true, true]),
-        (ROLE_AUDITOR, [true, false, false, true, false, false]),
+        (ROLE_READER, [true, false, false, false, false, false, false]),
+        (ROLE_ANALYST, [true, true, true, false, false, false, false]),
+        (ROLE_RESPONDER, [true, true, true, true, false, false, false]),
+        (ROLE_ADMINISTRATOR, [true, true, true, true, false, true, true]),
+        (ROLE_AUDITOR, [true, true, false, false, true, false, false]),
     ];
     let permissions = [
         PERMISSION_EVENTS_READ,
+        PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
         PERMISSION_RESPONSE_EXECUTE,
         PERMISSION_AUDIT_READ,
