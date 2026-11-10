@@ -1,6 +1,6 @@
 use crate::bounds::Capture;
 use crate::harness::{
-    attempt, bounded, client_paths, empty_revocation, init_logging, make_platform, scoped_logging, server_paths, start_server_at, start_server_state,
+    attempt, bounded, client_paths, empty_revocation, init_logging, make_platform, scoped_logging, server_paths, start_server_on, start_server_state,
     start_single_state, stop_server,
 };
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::sleep;
 
@@ -235,8 +235,10 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
         failing_after(Arc::clone(&before_restart), ACCEPTED_BEFORE_RESTART),
         envelope_source(Vec::new()),
     );
-    let first = start_server_state(&paths, empty_revocation(&paths)?, first_state).await?;
-    let address = first.address;
+    let held = std::net::TcpListener::bind("127.0.0.1:0")?;
+    held.set_nonblocking(true)?;
+    let address = held.local_addr()?;
+    let first = start_server_on(&paths, empty_revocation(&paths)?, first_state, TcpListener::from_std(held.try_clone()?)?).await?;
     let dial = move || -> DialFuture {
         let dial_config = Arc::clone(&config);
         Box::pin(async move { connect_channel(address, dial_config, SERVER_NAME).await })
@@ -262,7 +264,7 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
         recording_sink(Arc::clone(&after_restart)),
         envelope_source(Vec::new()),
     );
-    let second = start_server_at(&paths, empty_revocation(&paths)?, second_state, &address.to_string()).await?;
+    let second = start_server_on(&paths, empty_revocation(&paths)?, second_state, TcpListener::from_std(held)?).await?;
     gate.notify_one();
     let acknowledged = bounded(delivery).await???.acknowledged;
     assert_eq!(acknowledged, (1..=BATCHES).collect::<Vec<u64>>());

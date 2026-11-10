@@ -106,18 +106,17 @@ pub async fn start_server_with(paths: &ServerTlsPaths, revocation: Revocation) -
 
 
 pub async fn start_server_state(paths: &ServerTlsPaths, revocation: Revocation, state: SharedState) -> Result<RunningServer, Box<dyn Error>> {
-    start_server_at(paths, revocation, state, "127.0.0.1:0").await
+    start_server_on(paths, revocation, state, TcpListener::bind("127.0.0.1:0").await?).await
 }
 
 
-pub async fn start_server_at(
+pub async fn start_server_on(
     paths: &ServerTlsPaths,
     revocation: Revocation,
     state: SharedState,
-    bind: &str,
+    listener: TcpListener,
 ) -> Result<RunningServer, Box<dyn Error>> {
     init_logging()?;
-    let listener = TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
     let (shutdown, receiver) = oneshot::channel::<()>();
     let config = server_config(paths)?;
