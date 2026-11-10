@@ -12,8 +12,8 @@ use core_config::load::load_file;
 use core_config::reload::{current_config, reload, ReloadOutcome};
 use engine::{engine_for, feeds_text, replace_file};
 use fixtures::fixture;
-use intel_feeds::config::{feeds_state, validate_feeds, FeedFormat, FeedsError, FeedsFile, OpenError};
-use intel_feeds::limits::{DEFAULT_CONFIDENCE, MAX_CONFIDENCE};
+use intel_feeds::config::{feeds_state, validate_feeds, ClickhouseError, FeedFormat, FeedsError, FeedsFile, OpenError, CLICKHOUSE_KEY};
+use intel_feeds::limits::{DEFAULT_CONFIDENCE, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE};
 use intel_feeds::model::Tlp;
 use support::feed;
 use tempfile::tempdir;
@@ -43,7 +43,7 @@ fn the_fixture_file_loads_and_validates() -> TestResult {
         .find(|candidate| candidate.name == "threatfox")
         .ok_or("no threatfox")?;
     assert_eq!((threatfox.tlp, threatfox.ttl_seconds), (Tlp::Green, Some(ONE_DAY)));
-    assert_eq!(feeds_state(&config).len(), FIXTURE_FEEDS + 1);
+    assert_eq!(feeds_state(&config).len(), FIXTURE_FEEDS + TWO_FEEDS);
     Ok(())
 }
 
@@ -129,5 +129,36 @@ fn a_new_feed_is_applied_without_restart_and_a_bad_file_keeps_the_old_one() -> T
     replace_file(&path, "feeds: [\n")?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).feeds.len(), TWO_FEEDS);
+    Ok(())
+}
+
+
+const CLICKHOUSE_SECTION: &str = "clickhouse:\n  url: https://ch.example:8443\n  user: ostyr\n  password_file: /etc/ostyr/ch.pw\n  ca_file: /etc/ostyr/ca.pem\n  database: ostyr\n  table: iocs\n  dictionary: trie\n  tenant: tenant-a\n";
+
+
+#[test]
+fn the_clickhouse_section_loads_validates_reloads_and_is_audited_state() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("feeds.yaml");
+    replace_file(&path, &feeds_text(CLICKHOUSE_SECTION))?;
+    let feeding = engine_for(&path)?;
+    let config = current_config(&feeding);
+    let clickhouse = config.clickhouse.as_ref().ok_or("no clickhouse")?;
+    assert_eq!(clickhouse.timeout_ms, DEFAULT_TIMEOUT_MS);
+    assert_eq!(clickhouse.tenant, "tenant-a");
+    assert!(feeds_state(&config).get(CLICKHOUSE_KEY).is_some_and(|text| text.contains("tenant-a")));
+    replace_file(&path, &feeds_text(&CLICKHOUSE_SECTION.replace("tenant-a", "-x")))?;
+    assert!(matches!(reload(&feeding), ReloadOutcome::Refused { .. }));
+    assert_eq!(
+        current_config(&feeding).clickhouse.as_ref().map(|section| section.tenant.as_str()),
+        Some("tenant-a")
+    );
+    replace_file(&path, &feeds_text(&CLICKHOUSE_SECTION.replace("https", "http")))?;
+    assert!(matches!(
+        engine_for(&path),
+        Err(OpenError::Invalid(FeedsError::Clickhouse(ClickhouseError::Url(_))))
+    ));
+    replace_file(&path, &feeds_text(&format!("{CLICKHOUSE_SECTION}  password: inline\n")))?;
+    assert!(engine_for(&path).is_err());
     Ok(())
 }

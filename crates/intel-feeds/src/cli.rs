@@ -1,7 +1,8 @@
 use crate::config::FeedsFile;
+use crate::load::summarise;
 use crate::model::FeedSummary;
-use crate::run::{export_feeds, run_feeds};
-use crate::types::{ClockFn, OpenFn};
+use crate::run::{collect_feeds, export_feeds, write_iocs};
+use crate::types::{ClockFn, LoadFn, OpenFn};
 use core_config::reload::{current_config, reload, ReloadEngine};
 use core_config::reload_cli::{write_outcome, QUIT_COMMAND};
 use std::io::{self, BufRead, Write};
@@ -12,6 +13,7 @@ pub struct Session<'a> {
     pub engine: &'a ReloadEngine<FeedsFile>,
     pub clock: &'a ClockFn<'a>,
     pub open: &'a OpenFn<'a>,
+    pub load: &'a LoadFn<'a>,
     pub out: &'a mut dyn Write,
     pub report: &'a mut dyn Write,
 }
@@ -25,13 +27,21 @@ pub fn write_summaries(summaries: &[FeedSummary], report: &mut dyn Write) -> io:
 }
 
 
-/// `run` parses every feed of the current configuration, `export` writes a STIX bundle under the export policy, `reload` reloads the file, `feeds` lists the feed names.
+/// `run` parses every feed of the current configuration, loads the IOCs into ClickHouse when `clickhouse` is set, `export` writes a STIX bundle under the export policy, `reload` reloads the file, `feeds` lists the feed names.
 pub fn run_command(session: &mut Session, command: &str) -> io::Result<()> {
     match command.trim() {
         "run" => {
             let config = current_config(session.engine);
-            let summaries = run_feeds(&config, (session.clock)(), session.open, &mut *session.out)?;
-            write_summaries(&summaries, &mut *session.report)
+            let now = (session.clock)();
+            let (index, summaries) = collect_feeds(&config, now, session.open);
+            write_iocs(&index, &mut *session.out)?;
+            write_summaries(&summaries, &mut *session.report)?;
+            config.clickhouse.as_ref().map_or(Ok(()), |clickhouse| {
+                let iocs: Vec<_> = index.into_values().collect();
+                let loaded = (session.load)(clickhouse, &iocs, &config.feeds, now);
+                serde_json::to_writer(&mut *session.report, &summarise(&loaded))?;
+                writeln!(session.report)
+            })
         }
         "export" => {
             let config = current_config(session.engine);

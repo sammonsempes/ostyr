@@ -1,5 +1,7 @@
+use crate::config::{ClickhouseConfig, FeedConfig};
 use crate::error::EntryError;
 use crate::export::ExportSummary;
+use crate::load::{LoadError, LoadOutcome};
 use crate::model::{FeedSummary, Ioc, IocType, RawEntry};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -30,3 +32,6 @@ pub type ExportRun = (Vec<FeedSummary>, ExportSummary);
 
 
 pub type TtlDefaults = BTreeMap<String, u32>;
+
+
+pub type LoadFn<'a> = dyn Fn(&ClickhouseConfig, &[Ioc], &[FeedConfig], OffsetDateTime) -> Result<LoadOutcome, LoadError> + 'a;

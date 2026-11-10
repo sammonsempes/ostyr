@@ -6,6 +6,8 @@ mod engine;
 mod fixtures;
 #[path = "common/memory.rs"]
 mod memory;
+#[path = "common/noload.rs"]
+mod noload;
 #[path = "common/support.rs"]
 mod support;
 #[path = "common/types.rs"]
@@ -30,6 +32,7 @@ use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use intel_feeds::run::{collect_feeds, open_file};
 use intel_feeds::types::IocIndex;
 use memory::{open_from, FailingWriter};
+use noload::no_load;
 use proptest::prelude::*;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -449,6 +452,7 @@ fn the_export_command_follows_the_live_policy() -> TestResult {
             engine: &running,
             clock: &now,
             open: &open,
+            load: &no_load,
             out,
             report,
         };
@@ -480,6 +484,7 @@ fn the_export_command_follows_the_live_policy() -> TestResult {
         engine: &running,
         clock: &now,
         open: &open,
+        load: &no_load,
         out: &mut FailingWriter,
         report: &mut Vec::new(),
     };
@@ -489,6 +494,7 @@ fn the_export_command_follows_the_live_policy() -> TestResult {
         engine: &running,
         clock: &now,
         open: &open,
+        load: &no_load,
         out: &mut sink,
         report: &mut FailingWriter,
     };
