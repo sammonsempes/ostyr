@@ -1,5 +1,6 @@
 use crate::convert::{convert, Outcome};
 use crate::error::{LineError, NormaliseError};
+use crate::suricata::parse_eve;
 use crate::sysmon::{normalise_sysmon, UNKNOWN_DATASET};
 use crate::tetragon::Envelope;
 use crate::types::{LineNumber, SeenIds};
@@ -33,6 +34,7 @@ pub enum Format {
     #[default]
     Tetragon,
     Sysmon,
+    Suricata,
 }
 
 
@@ -43,6 +45,7 @@ impl FromStr for Format {
         match text {
             "tetragon" => Ok(Format::Tetragon),
             "sysmon" => Ok(Format::Sysmon),
+            "suricata" => Ok(Format::Suricata),
             other => Err(NormaliseError::UnknownFormat(other.to_string())),
         }
     }
@@ -117,6 +120,12 @@ pub fn line_text(line: LineNumber, raw: RawLine, max_line: u64) -> Result<String
 /// Turns one raw line into an outcome, attaching the line number to every error.
 pub fn decode(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
     line_text(line, raw, max_line).and_then(|text| normalise_line(line, &text))
+}
+
+
+/// Turns one raw Suricata EVE line into an outcome, attaching the line number to every error.
+pub fn decode_suricata(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
+    line_text(line, raw, max_line).and_then(|text| parse_eve(&text).map_err(|error| LineError { line, error }))
 }
 
 
@@ -231,6 +240,7 @@ pub fn normalise_dyn(mut input: &mut dyn BufRead, mut output: &mut dyn Write, ma
             let raw = raw_line?;
             match format {
                 Format::Tetragon => tally(counts, line, decode(line, raw, max_line), &mut output),
+                Format::Suricata => tally(counts, line, decode_suricata(line, raw, max_line), &mut output),
                 Format::Sysmon => tally_sysmon(counts, line, decode_sysmon(line, raw, max_line, &mut seen), &mut output),
             }
         })

@@ -1,0 +1,1 @@
+{"timestamp":"2026-11-10T19:00:05.000001+0100","flow_id":42,"event_type":"flow","src_ip":"10.0.0.5","src_port":51000,"dest_ip":"10.0.0.9","dest_port":80,"proto":"TCP","app_proto":"http","flow":{"pkts_toserver":5,"pkts_toclient":4,"bytes_toserver":600,"bytes_toclient":1200,"start":"2026-11-10T19:00:00.000000+0000","end":"2026-11-10T19:00:04.500000+0000","age":4,"state":"closed"}}
