@@ -42,6 +42,12 @@ pub enum PgError {
     InvalidVersion { version: String },
     #[error("migration `{version}` is not after `{previous}`: versions must be strictly ascending")]
     MigrationOrder { version: String, previous: String },
+    #[error("invalid migration namespace `{namespace}`: expected 1 to 32 characters of [a-z0-9_] starting with a letter")]
+    InvalidNamespace { namespace: String },
+    #[error("schema_migrations has no namespace column: recreate the database, legacy records are not adopted")]
+    LegacyRecords,
+    #[error("schema_migrations holds more than {limit} records")]
+    TooManyRecords { limit: usize },
     #[error("migration `{version}` was applied with a different digest")]
     DigestMismatch { version: String },
     #[error("migration `{version}` is recorded as applied but unknown to this build")]

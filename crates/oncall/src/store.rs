@@ -10,6 +10,9 @@ use core_pg::scope::TenantScope;
 use std::future::Future;
 
 
+pub const MIGRATION_NAMESPACE: &str = "oncall";
+
+
 pub const MIGRATIONS: [Migration; 1] = [Migration {
     version: "oncall_0001",
     sql: include_str!("../migrations/oncall_0001.sql"),
