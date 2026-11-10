@@ -1,7 +1,10 @@
 use crate::error::CapabilityError;
-use crate::model::{Paths, SourceSettings};
+use crate::error::SensorError;
+use crate::model::{Paths, SensorSettings, SourceSettings};
 use arc_swap::ArcSwap;
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 
@@ -14,3 +17,13 @@ pub type StepFn = fn(&Paths);
 
 /// Reads a file under a byte cap: `None` when absent, an error when larger than the cap; a test double injects a failure.
 pub type ReadFn = fn(&Path, u64) -> Result<Option<Vec<u8>>, CapabilityError>;
+
+
+pub type SharedSensor = Arc<ArcSwap<SensorSettings>>;
+
+
+pub type RunFuture = Pin<Box<dyn Future<Output = Result<String, SensorError>> + Send>>;
+
+
+/// Runs a program with arguments and returns its bounded standard output; a test double injects a canned answer.
+pub type RunFn = fn(PathBuf, Vec<String>) -> RunFuture;

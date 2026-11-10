@@ -12,6 +12,23 @@ pub enum CapabilityError {
 }
 
 
+#[derive(Debug, Error)]
+pub enum SensorError {
+    #[error("the command could not run: {0}")]
+    Io(#[from] io::Error),
+    #[error("the command did not finish in time")]
+    Timeout,
+    #[error("the command wrote more than {0} bytes")]
+    TooLarge(u64),
+    #[error("the command failed with status {0:?}")]
+    Exit(Option<i32>),
+    #[error("the command output is not UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("the command output is not what systemctl show prints")]
+    Parse,
+}
+
+
 #[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
 pub enum StateDirReason {
     #[error("the cursor path has no directory")]
@@ -45,6 +62,8 @@ pub enum SourceError {
     Undrained(#[source] Box<SourceError>),
     #[error("state directory of {} is refused: {}", .0.display(), .1)]
     StateDir(PathBuf, StateDirReason),
+    #[error("{} is not an absolute path", .0.display())]
+    NotAbsolute(PathBuf),
     #[error("the background poll failed: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("settings out of range: {0}")]

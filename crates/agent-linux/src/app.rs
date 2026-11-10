@@ -2,6 +2,7 @@ use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::error::SourceError;
 use crate::model::{LinuxFile, Paths, Totals, LINUX_MODULE};
 use crate::run::run_source;
+use crate::sensor::{monotonic_seconds, run_command, run_sensor, SensorEnv};
 use crate::settings::open_settings_engine;
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
@@ -49,7 +50,11 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
     let agent = load_agent_file(&file.agent_file)?;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let context = reload_context(path, LINUX_MODULE, &agent.tenant, "agent-linux-reload");
-    let (engine, shared) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
+    file.systemctl_path
+        .is_absolute()
+        .then_some(())
+        .ok_or_else(|| SourceError::NotAbsolute(file.systemctl_path.clone()))?;
+    let (engine, shared, sensor_settings) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
     let reloadable = Arc::new(engine);
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
     let _signals = keep_signals(Arc::clone(&reloadable))?;
@@ -61,6 +66,27 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
             .inspect_err(|error| tracing::error!(%error, "source failed, the agent stops"))
     };
     let cycles = async { Ok::<u64, SourceError>(run_agent_cycles(&agent, max_polls, pause).await) };
-    let (totals, runs) = tokio::try_join!(source, cycles)?;
+    let env = SensorEnv {
+        systemctl: file.systemctl_path.clone(),
+        export: file.export_path.clone(),
+        spool: agent.spool_file.clone(),
+        tenant: agent.tenant.clone(),
+        run: run_command,
+    };
+    let sensor_audit = shared_log_audit(&log);
+    let sensor = async {
+        run_sensor(
+            &sensor_settings,
+            &env,
+            sensor_audit.as_ref(),
+            max_polls,
+            pause,
+            &monotonic_seconds,
+            &now_seconds,
+        )
+        .await
+        .map(|_| ())
+    };
+    let (totals, runs, ()) = tokio::try_join!(source, cycles, sensor)?;
     Ok(Totals { agent_runs: runs, ..totals })
 }
