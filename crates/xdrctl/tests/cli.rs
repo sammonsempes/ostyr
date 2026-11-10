@@ -3,6 +3,7 @@ mod support;
 
 use clap::Parser;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use support::{
@@ -10,6 +11,7 @@ use support::{
     OWNER_ONLY, PASSWORD, USER,
 };
 use tempfile::tempdir;
+use xdrctl::alerts::{list_path, map_status, valid_cursor, valid_id};
 use xdrctl::cli::{execute, render, render_error, run_reporting};
 use xdrctl::commands::{is_yaml, server_address, yaml_files};
 use xdrctl::error::{CliError, ClientError};
@@ -775,5 +777,309 @@ fn audit_diff_cut_once_and_target_and_justification_bounded() -> TestResult {
     assert!(expected.is_some_and(|value| value.ends_with(&format!("[diff truncated, {} characters omitted]", MAX_DIFF_CHARS_EXTRA))));
     assert!(record.target.contains("10 characters omitted"));
     assert!(record.justification.is_some_and(|value| value.contains("10 characters omitted")));
+    Ok(())
+}
+
+
+const STATUS_UNAUTHORIZED: u16 = 401;
+
+
+const STATUS_FORBIDDEN: u16 = 403;
+
+
+const STATUS_NOT_FOUND: u16 = 404;
+
+
+const STATUS_TOO_MANY: u16 = 429;
+
+
+const STATUS_BAD_REQUEST: u16 = 400;
+
+
+const CASE_COUNT: usize = 5;
+
+
+const SHOW_LINES: usize = 10;
+
+
+const LIST_LINES: usize = 3;
+
+
+const CURSOR_TOO_LONG: usize = 1025;
+
+
+const THIRD_CALL: usize = 2;
+
+
+const ALERTS_SERVER: &str = "https://example.test";
+
+
+const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+
+const FIRST_PAGE: &str = "{\"items\":[{\"id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"rule_id\":\"r1\",\
+\"rule_title\":\"Brute force\",\"severity\":\"high\",\"event_time\":\"2026-11-10T10:00:00Z\",\"created\":\"2026-11-10T10:00:01Z\",\
+\"host_name\":\"srv1\",\"user_name\":null,\"event_ids\":[\"e1\",\"e2\"],\"summary\":{\"count\":3},\"summary_truncated\":false}],\
+\"next_cursor\":\"abc_-=\"}";
+
+
+const LAST_PAGE: &str = "{\"items\":[],\"next_cursor\":null}";
+
+
+const HOSTILE: &str = "{\"id\":\"ab\\u001b[2Jcd\",\"rule_id\":\"r\\u0007\",\"rule_title\":\"t\\u001b]0;x\\u0007\\n\\u202eevil\",\
+\"severity\":\"low\",\"event_time\":\"2026\",\"created\":\"2026\",\"host_name\":\"h\\r\",\"user_name\":\"u\\u0000\",\
+\"event_ids\":[\"e\\u001b\"],\"summary\":{\"k\":\"v\\u001b\"},\"summary_truncated\":true}";
+
+
+fn store_alerts_session(dir: &Path) -> TestResult {
+    save_session(
+        &session_path(dir),
+        &Session {
+            server: ALERTS_SERVER.to_owned(),
+            token: "tok".to_owned(),
+        },
+    )?;
+    Ok(())
+}
+
+
+fn alerts_stub<'a>(
+    seen: &'a RefCell<Vec<String>>,
+    status: u16,
+    body: &'static str,
+) -> impl Fn(Option<&Path>, &HttpRequest) -> Result<HttpReply, ClientError> + 'a {
+    move |_, request| {
+        seen.borrow_mut().push(format!("{} {:?}", request.url, request.token));
+        Ok(HttpReply {
+            status,
+            body: body.to_owned(),
+        })
+    }
+}
+
+
+#[test]
+fn list_prints_a_table_and_the_cursor() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let first = invoke(
+        &offline_args(dir.path(), &["alerts", "list", "--limit", "5", "--cursor", "c1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, FIRST_PAGE),
+    )?;
+    assert_eq!(first.code, SUCCESS);
+    assert!(first.out.contains("0123456789ab\thigh\tBrute force\tsrv1\t-\t2026-11-10T10:00:00Z"));
+    assert!(first.out.ends_with("next cursor: abc_-=\n"));
+    assert_eq!(
+        seen.borrow().first().map(String::as_str),
+        Some("https://example.test/alerts?limit=5&cursor=c1 Some(\"tok\")")
+    );
+
+    let last = invoke(
+        &offline_args(dir.path(), &["alerts", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert!(last.out.ends_with("no more alerts\n"));
+    assert_eq!(
+        seen.borrow().get(1).map(String::as_str),
+        Some("https://example.test/alerts Some(\"tok\")")
+    );
+
+    let only_cursor = invoke(
+        &offline_args(dir.path(), &["alerts", "list", "--cursor", "c2"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert_eq!(only_cursor.code, SUCCESS);
+    assert_eq!(
+        seen.borrow().get(THIRD_CALL).map(String::as_str),
+        Some("https://example.test/alerts?cursor=c2 Some(\"tok\")")
+    );
+    Ok(())
+}
+
+
+#[test]
+fn json_output_is_the_api_body() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let listed = invoke(
+        &offline_args(dir.path(), &["--output", "json", "alerts", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, FIRST_PAGE),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(&listed.out)?, serde_json::from_str::<Value>(FIRST_PAGE)?);
+    Ok(())
+}
+
+
+#[test]
+fn show_prints_every_field() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let first = serde_json::from_str::<Value>(FIRST_PAGE)?;
+    let alert: &'static str = Box::leak(serde_json::to_string(first.get("items").and_then(|items| items.get(0)).ok_or("no item")?)?.into_boxed_str());
+    let shown = invoke(
+        &offline_args(dir.path(), &["alerts", "show", ID]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, alert),
+    )?;
+    assert_eq!(shown.code, SUCCESS);
+    assert!(shown.out.contains("rule: Brute force (r1)"));
+    assert!(shown
+        .out
+        .contains("host: srv1\nuser: -\nevents: e1,e2\nsummary: {\"count\":3}\nsummary truncated: false"));
+    assert_eq!(
+        seen.borrow().first().map(String::as_str),
+        Some(format!("https://example.test/alerts/{ID} Some(\"tok\")").as_str())
+    );
+    Ok(())
+}
+
+
+#[test]
+fn hostile_values_are_escaped() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let shown = invoke(
+        &offline_args(dir.path(), &["alerts", "show", ID]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, HOSTILE),
+    )?;
+    assert_eq!(shown.code, SUCCESS);
+    assert!(!shown.out.contains('\u{1b}'));
+    assert!(!shown.out.contains('\u{7}'));
+    assert!(!shown.out.contains('\u{202e}'));
+    assert!(!shown.out.contains('\r'));
+    assert!(shown.out.contains("\\u{1b}"));
+    assert_eq!(shown.out.lines().count(), SHOW_LINES);
+
+    let page = format!("{{\"items\":[{HOSTILE}],\"next_cursor\":\"x\\u001b\"}}");
+    let leaked: &'static str = Box::leak(page.into_boxed_str());
+    let listed = invoke(&offline_args(dir.path(), &["alerts", "list"]), "", &alerts_stub(&seen, STATUS_OK, leaked))?;
+    assert!(!listed.out.contains('\u{1b}'));
+    assert_eq!(listed.out.lines().count(), LIST_LINES);
+    Ok(())
+}
+
+
+#[test]
+fn errors_map_without_the_raw_body() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let cases: [(u16, &'static str, &str); CASE_COUNT] = [
+        (
+            STATUS_UNAUTHORIZED,
+            "{\"error\":{\"code\":\"unauthorized\",\"message\":\"SECRET-A\"}}",
+            "run `xdrctl login`",
+        ),
+        (
+            STATUS_FORBIDDEN,
+            "{\"error\":{\"code\":\"forbidden\",\"message\":\"SECRET-B\"}}",
+            "permission denied",
+        ),
+        (
+            STATUS_NOT_FOUND,
+            "{\"error\":{\"code\":\"not_found\",\"message\":\"SECRET-C\"}}",
+            "not found",
+        ),
+        (STATUS_TOO_MANY, "{\"error\":{\"code\":\"rate\",\"message\":\"SECRET-D\"}}", "retry later"),
+        (
+            STATUS_BAD_REQUEST,
+            "{\"error\":{\"code\":\"bad\",\"message\":\"cursor\\u001b\"}}",
+            "(400): bad: cursor\\u{1b}",
+        ),
+    ];
+    for (status, body, expected) in cases {
+        let list = invoke(&offline_args(dir.path(), &["alerts", "list"]), "", &alerts_stub(&seen, status, body))?;
+        assert_eq!(list.code, FAILURE);
+        assert!(list.err.contains(expected), "{}", list.err);
+        assert!(!list.err.contains("SECRET"));
+        let show = invoke(&offline_args(dir.path(), &["alerts", "show", ID]), "", &alerts_stub(&seen, status, body))?;
+        assert!(show.err.contains(expected), "{}", show.err);
+    }
+    let garbled = invoke(
+        &offline_args(dir.path(), &["alerts", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_ERROR, "<html>raw</html>"),
+    )?;
+    assert!(garbled.err.contains("unexpected reply"));
+    assert!(!garbled.err.contains("raw"));
+    let bad_list = invoke(&offline_args(dir.path(), &["alerts", "list"]), "", &alerts_stub(&seen, STATUS_OK, "[]"))?;
+    assert!(bad_list.err.contains("unexpected reply"));
+    let bad_show = invoke(
+        &offline_args(dir.path(), &["alerts", "show", ID]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, "[]"),
+    )?;
+    assert!(bad_show.err.contains("unexpected reply"));
+    let json_error = invoke(
+        &offline_args(dir.path(), &["--output", "json", "alerts", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_FORBIDDEN, "{\"error\":{\"code\":\"f\",\"message\":\"m\"}}"),
+    )?;
+    assert!(json_error.err.contains("permission denied"));
+    Ok(())
+}
+
+
+#[test]
+fn bad_arguments_and_missing_session_never_reach_the_server() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    for args in [
+        ["alerts", "show", "../x"],
+        ["alerts", "show", "zz"],
+        ["alerts", "list", "--cursor=a&tenant=b"],
+    ] {
+        let outcome = invoke(&offline_args(dir.path(), &args), "", &alerts_stub(&seen, STATUS_OK, LAST_PAGE))?;
+        assert_eq!(outcome.code, FAILURE);
+        assert!(outcome.err.contains("invalid"));
+    }
+    let empty = invoke(
+        &offline_args(dir.path(), &["alerts", "show", ""]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert_eq!(empty.code, FAILURE);
+    for limit in ["0", "101", "x"] {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["alerts", "list", "--limit", limit]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, USAGE_FAILURE);
+    }
+    assert!(seen.borrow().is_empty());
+    let fresh = tempdir()?;
+    let unauthenticated = invoke(
+        &offline_args(fresh.path(), &["alerts", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert!(unauthenticated.err.contains("not logged in"));
+    assert!(seen.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn helpers_validate_and_map() -> TestResult {
+    assert!(valid_id(ID));
+    assert!(!valid_id(&format!("{ID}0")));
+    assert!(valid_cursor("-a_B=9"));
+    assert!(!valid_cursor(&"a".repeat(CURSOR_TOO_LONG)));
+    assert!(!valid_cursor("a b"));
+    assert!(!valid_cursor(""));
+    assert!(list_path(None, Some("a b")).is_err());
+    assert_eq!(list_path(Some(1), None)?, "/alerts?limit=1");
+    assert!(matches!(map_status(CliError::NotLoggedIn), CliError::NotLoggedIn));
     Ok(())
 }

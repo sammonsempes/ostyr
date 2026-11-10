@@ -70,6 +70,16 @@ pub enum CliError {
     Audit(#[from] AuditError),
     #[error(transparent)]
     Apply(#[from] ApplyError),
+    #[error("invalid {0}")]
+    InvalidArgument(&'static str),
+    #[error("the session is not valid: run `xdrctl login`")]
+    Unauthorized,
+    #[error("permission denied: the account lacks the permission for this request")]
+    Forbidden,
+    #[error("not found")]
+    NotFound,
+    #[error("too many requests: retry later")]
+    RateLimited,
     #[error("apply cancelled")]
     Cancelled,
 }
