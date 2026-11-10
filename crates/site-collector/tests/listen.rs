@@ -391,8 +391,16 @@ fn a_failed_bind_keeps_the_old_socket_and_is_audited() -> TestResult {
 }
 
 
-#[test]
-fn a_refused_audit_releases_the_bound_address() -> TestResult {
+const PORT_ATTEMPTS: usize = 8;
+
+
+const RELOAD_WAIT_SECONDS: u64 = 30;
+
+
+const WATCH_DEBOUNCE_MS: u64 = 50;
+
+
+fn refused_audit_scenario() -> Result<bool, Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let file = dir.path().join("listener.yaml");
     write_settings(&file, "127.0.0.1:0", DEFAULT_RATE_PER_SECOND)?;
@@ -416,15 +424,63 @@ fn a_refused_audit_releases_the_bound_address() -> TestResult {
     failing.store(true, Ordering::SeqCst);
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(shared.bound.load().listen, "127.0.0.1:0");
-    assert!(UdpSocket::bind(&listen).is_ok());
+    let released = UdpSocket::bind(&listen).is_ok();
     write_settings(&file, "127.0.0.1:0", DEFAULT_RATE_PER_SECOND)?;
     assert!(matches!(reload(&engine), ReloadOutcome::Unchanged));
-    assert!(UdpSocket::bind(&listen).is_ok());
+    let still_released = UdpSocket::bind(&listen).is_ok();
     write_settings(&file, &listen, DEFAULT_RATE_PER_SECOND)?;
     failing.store(false, Ordering::SeqCst);
-    assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
-    assert_eq!(shared.bound.load().listen, listen);
-    assert_eq!(shared.bound.load().socket.local_addr()?.port(), port);
+    let applied = matches!(reload(&engine), ReloadOutcome::Applied { .. });
+    let proven = released && still_released && applied;
+    if proven {
+        assert_eq!(shared.bound.load().listen, listen);
+        assert_eq!(shared.bound.load().socket.local_addr()?.port(), port);
+    }
+    Ok(proven)
+}
+
+
+#[test]
+fn a_refused_audit_releases_the_bound_address() -> TestResult {
+    let proven = (0..PORT_ATTEMPTS).find_map(|_| refused_audit_scenario().map_or_else(|error| Some(Err(error)), |done| done.then_some(Ok(()))));
+    proven.unwrap_or_else(|| Err(Box::from("every picked port was taken by another process")))
+}
+
+
+#[test]
+fn a_settings_file_replaced_by_rename_is_reloaded_and_rebound() -> TestResult {
+    let dir = TempDir::new()?;
+    let file = dir.path().join("listener.yaml");
+    write_settings(&file, "127.0.0.1:0", DEFAULT_RATE_PER_SECOND)?;
+    let log = open_file_log(&dir.path().join("audit.log"))?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (opened_engine, shared) = open_listener_engine(
+        file.clone(),
+        Box::new(move |entry| {
+            let appended = append(&log, entry);
+            sender
+                .send(())
+                .map_err(|_closed| core_audit::error::AuditError::Io(io::Error::from(ErrorKind::BrokenPipe)))?;
+            appended
+        }),
+        context(),
+    )?;
+    let engine = Arc::new(opened_engine);
+    let _watcher = core_config::watch::watch_files(
+        Arc::clone(&engine),
+        std::slice::from_ref(&file),
+        std::time::Duration::from_millis(WATCH_DEBOUNCE_MS),
+    )?;
+    let before = shared.bound.load().socket.local_addr()?;
+    let replacement = dir.path().join("listener.yaml.new");
+    write_settings(&replacement, "127.0.0.2:0", DEFAULT_RATE_PER_SECOND)?;
+    fs::rename(&replacement, &file)?;
+    receiver.recv_timeout(std::time::Duration::from_secs(RELOAD_WAIT_SECONDS))?;
+    let _finished = engine.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let after = shared.bound.load().socket.local_addr()?;
+    assert_eq!(after.ip(), "127.0.0.2".parse::<IpAddr>()?);
+    assert_ne!(before.ip(), after.ip());
+    assert_eq!(shared.bound.load().listen, "127.0.0.2:0");
     Ok(())
 }
 
