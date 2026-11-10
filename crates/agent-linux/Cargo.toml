@@ -1,0 +1,26 @@
+[package]
+name = "agent-linux"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+agent-channel = { path = "../agent-channel" }
+arc-swap = "1.9.3"
+core-audit = { path = "../core-audit" }
+core-config = { path = "../core-config" }
+core-export = { path = "../core-export" }
+ecs-normalise = { path = "../ecs-normalise" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
