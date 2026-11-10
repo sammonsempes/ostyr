@@ -35,6 +35,10 @@ pub enum AuditError {
     LogPoisoned,
     #[error("file mode is {mode:o}, it must grant no access to group or other")]
     InsecurePermissions { mode: u32 },
+    #[error("{count} audit parameters, the limit is {max}")]
+    TooManyParameters { count: usize, max: usize },
+    #[error("an audit parameter key is {length} bytes, the limit is {max}")]
+    KeyTooLong { length: usize, max: usize },
     #[error("usage: append <file> <count> | verify <file> [head] | export <file> [head]")]
     Usage,
     #[error("invalid count `{value}`: {source}")]
