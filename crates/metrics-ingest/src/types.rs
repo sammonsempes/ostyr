@@ -1,5 +1,6 @@
 use crate::model::DropReason;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 
 pub type LabelMap = BTreeMap<String, String>;
@@ -21,3 +22,6 @@ pub type TenantMonth = (String, i32, u8);
 
 
 pub type Groups = BTreeMap<TenantMonth, Vec<Vec<u8>>>;
+
+
+pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;
