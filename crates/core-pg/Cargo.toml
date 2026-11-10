@@ -17,11 +17,16 @@ tokio = { version = "1", features = ["rt", "net", "time"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.13"
 tracing = "0.1"
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
+walkdir = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber = "0.3"

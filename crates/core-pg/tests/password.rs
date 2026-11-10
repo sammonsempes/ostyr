@@ -24,7 +24,7 @@ fn trailing_line_breaks_are_trimmed() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let path = dir.path().join("pass");
     fs::write(&path, "s3cret pass\r\n\n")?;
-    assert_eq!(read_password(&path)?, b"s3cret pass");
+    assert_eq!(read_password(&path)?.as_slice(), b"s3cret pass");
     Ok(())
 }
 

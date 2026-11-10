@@ -15,7 +15,7 @@ use tracing::warn;
 
 
 /// `SslMode::Require` makes the client refuse a server without TLS; the rustls verifier checks the chain and the host name.
-pub fn pg_config(settings: &PgSettings, password: Vec<u8>) -> Config {
+pub fn pg_config(settings: &PgSettings, password: &[u8]) -> Config {
     let mut config = Config::new();
     config
         .host(&settings.host)
@@ -42,7 +42,7 @@ pub async fn drive(connection: TlsConnection) {
 pub async fn connect_with_driver(settings: &PgSettings) -> Result<(Client, JoinHandle<()>), PgError> {
     let password = read_password(Path::new(&settings.password_file))?;
     let tls: MakeRustlsConnect = MakeRustlsConnect::new(client_config(Path::new(&settings.ca_file))?);
-    let config = pg_config(settings, password);
+    let config = pg_config(settings, &password);
     let attempt = config.connect(tls);
     let (client, connection) = timeout(Duration::from_secs(settings.connect_timeout_secs), attempt)
         .await
