@@ -1,13 +1,15 @@
 use crate::error::CliError;
 use crate::model::{ApplyArgs, Context, ErrorBody, HttpMethod, HttpRequest, LoginBody, LoginReply, MeReply, Report, Session};
 use crate::session::{load_session, remove_session, save_session};
-use core_audit::log::{append, open_file_log};
-use core_audit::model::{Actor, ActorKind};
+use core_audit::error::AuditError;
+use core_audit::log::{append_declared, open_file_log, AuditLog};
+use core_audit::model::{Actor, ActorKind, NewEntry, Record};
 use core_audit::verify::verify;
-use core_config::apply::{apply, ApplyContext};
+use core_config::apply::{apply, ApplyContext, APPLY_DECLARED_KEYS};
 use core_config::apply_cli::{apply_to_dir, read_state, write_plan};
 use core_config::load::{load_module, load_platform};
 use core_config::plan::{action_name, plan};
+use core_config::reload::bounded_value;
 use core_config::types::{BoxError, ConfigState, Plan};
 use serde_json::json;
 use std::fs::{self, File};
@@ -228,6 +230,43 @@ pub fn confirmed(changes: &Plan, input: &mut dyn BufRead, prompt: &mut dyn Write
 }
 
 
+pub const XDRCTL_DECLARED_KEYS: [&str; 2] = APPLY_DECLARED_KEYS;
+
+
+pub const ALREADY_BOUNDED_KEY: &str = "diff";
+
+
+/// Appends with the declared keys only; `audit_entry` already cut the diff, so it is not cut again, and every other value, target and justification get a visible cut.
+pub fn append_apply_entry<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
+    let parameters = entry
+        .parameters
+        .iter()
+        .map(|(key, value)| (key.clone(), keep_or_bound(key, value)))
+        .collect();
+    let target = bounded_value(&entry.target);
+    let justification = entry.justification.as_deref().map(bounded_value);
+    append_declared(
+        log,
+        NewEntry {
+            parameters,
+            target,
+            justification,
+            ..entry
+        },
+        &XDRCTL_DECLARED_KEYS,
+    )
+}
+
+
+pub fn keep_or_bound(key: &str, value: &str) -> String {
+    if key == ALREADY_BOUNDED_KEY {
+        value.to_owned()
+    } else {
+        bounded_value(value)
+    }
+}
+
+
 /// Applies the directory as the real state under the logged-in account; asks first unless `yes`.
 pub fn apply_command(ctx: &Context, args: &ApplyArgs, input: &mut dyn BufRead, prompt: &mut dyn Write) -> Result<Report, CliError> {
     let me = current_user(ctx)?;
@@ -251,7 +290,7 @@ pub fn apply_command(ctx: &Context, args: &ApplyArgs, input: &mut dyn BufRead, p
             &changes,
             &wanted,
             &context,
-            &mut |entry| append(&log, entry),
+            &mut |entry| append_apply_entry(&log, entry),
             &mut |change| apply_to_dir(&args.state, change).map_err(BoxError::from),
             &mut || read_state(&args.state).map_err(BoxError::from),
         )?;
