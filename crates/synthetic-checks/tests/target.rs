@@ -26,6 +26,7 @@ fn refused_class(text: &str, scope: &[IpNet]) -> Result<AddressClass, Box<dyn st
     let error = guard_address(ip(text)?, scope).err().ok_or("expected a refusal")?;
     match error {
         synthetic_checks::error::GuardError::Refused { class, .. } => Ok(class),
+        synthetic_checks::error::GuardError::BadPrefix(_) => Err("unexpected prefix error".into()),
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::error::{AddressClass, GuardError};
+use crate::load::validate_nat64_prefix;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -124,7 +125,7 @@ pub fn embedded_v4(address: IpAddr) -> Vec<Ipv4Addr> {
 
 
 /// IPv4 addresses embedded in a NAT64 (64:ff9b::/96, a declared site prefix at its RFC 6052 positions, or any address whose bits 64 to 95 are zero and whose last 32 bits are not a bare low 16-bit host number), SIIT, 6to4, Teredo (server and obfuscated client), ISATAP or IPv4-compatible IPv6 address; 64:ff9b:1::/48 is refused whole by `classify`, and every RFC 6052 position is checked too so metadata there is never scoped.
-pub fn embedded_v4_nat64(address: IpAddr, nat64: Option<Ipv6Net>) -> Vec<Ipv4Addr> {
+fn embedded_v4_nat64(address: IpAddr, nat64: Option<Ipv6Net>) -> Vec<Ipv4Addr> {
     match address {
         IpAddr::V4(_) => Vec::new(),
         IpAddr::V6(v6) => {
@@ -190,8 +191,9 @@ pub fn guard_address(address: IpAddr, scope: &[IpNet]) -> Result<CheckedAddr, Gu
 }
 
 
-/// `guard_address` with the site's declared NAT64 prefix.
+/// `guard_address` with the site's declared NAT64 prefix, validated here so an unsupported length is a typed refusal.
 pub fn guard_address_nat64(address: IpAddr, scope: &[IpNet], nat64: Option<Ipv6Net>) -> Result<CheckedAddr, GuardError> {
+    validate_nat64_prefix(nat64).map_err(GuardError::BadPrefix)?;
     let canonical = address.to_canonical();
     let embedded = embedded_v4_nat64(canonical, nat64);
     let verdict = std::iter::once(canonical)
