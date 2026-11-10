@@ -31,6 +31,18 @@ pub enum SinkError {
     TenantMismatch,
     #[error("an alert cannot be serialised")]
     Serialize(#[source] serde_json::Error),
+    #[error("the store given is not the one this sink writes to")]
+    WrongStore,
+    #[error("the database refused the alerts")]
+    Database(#[source] core_pg::error::PgError),
+    #[error("the alert store refused the alerts")]
+    Store(#[source] alerts::error::StoreError),
+    #[error("the database runtime cannot start")]
+    Runtime(#[source] std::io::Error),
+    #[error("the event time is outside the supported range")]
+    EventTimeRange(#[source] time::error::ComponentRange),
+    #[error("the event time cannot be written")]
+    EventTimeFormat(#[source] time::error::Format),
 }
 
 

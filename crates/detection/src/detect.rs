@@ -1,7 +1,8 @@
 use crate::error::{DetectionError, SinkError};
-use crate::id::{alert_id, event_identity};
+use crate::id::event_identity;
 use crate::model::{AlertRecord, AlertStore, CommitPolicy, Detector, ACK_WAIT_DIVISOR};
 use crate::types::{AlertSinkFn, EngineMap};
+use alerts::id::alert_id;
 use core_config::reload::{current_config, ReloadEngine};
 use core_config::types::BoxError;
 use serde_json::Value;
