@@ -6,16 +6,19 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 glob = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1", features = ["derive", "serde"] }
 
 [dev-dependencies]
 data-encoding = "2"
-sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros"] }
 tracing-subscriber = "0.3"
 
 [lints]

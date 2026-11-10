@@ -5011,12 +5011,15 @@ dependencies = [
 name = "secret-scan"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "core-pg",
  "data-encoding",
  "glob",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "zeroize",
