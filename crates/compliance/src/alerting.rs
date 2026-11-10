@@ -75,7 +75,7 @@ pub fn alert_of(scope: &TenantScope, item: &DriftFinding, now_micros: u64) -> Op
         && is_grammar(&item.title, MAX_TITLE_CHARS, TITLE_PUNCTUATION)
         && is_grammar(&item.asset, MAX_ASSET_CHARS, ASSET_PUNCTUATION);
     let tenant = tenant_of(scope).to_owned();
-    let rule_id = format!("{RULE_PREFIX}{}.{}", item.baseline, item.control);
+    let rule_id = format!("{RULE_PREFIX}{}:{}", item.baseline, item.control);
     let event_ids = vec![
         format!("baseline:{}", item.baseline),
         format!("control:{}", item.control),
