@@ -1,5 +1,7 @@
 use crate::failure::{auth_failure, error_response};
-use crate::model::{ApiError, ApiState, Authenticated, ClientSource, Decision, Exchange, ForwardedBy, Limits, RequestId, Requirement, Window};
+use crate::model::{
+    ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, Exchange, ForwardedBy, Limits, RequestId, Requirement, Window,
+};
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
 use crate::state::{lock_auth, refresh_accounts, session_revoked};
 use crate::types::SharedState;
@@ -28,7 +30,7 @@ use secrecy::SecretString;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 use time::{Duration, OffsetDateTime};
 
@@ -127,8 +129,14 @@ pub fn result_label(status: StatusCode) -> &'static str {
 }
 
 
-pub fn log_request(app: &ApiState, id: &str, method: &str, path: &str, source: IpAddr, status: StatusCode, elapsed: std::time::Duration) {
-    let identity = app.identity.load();
+pub fn log_request(
+    app: &ApiState,
+    identity: &ApiIdentity,
+    (id, method, path): (&str, &str, &str),
+    source: IpAddr,
+    status: StatusCode,
+    elapsed: std::time::Duration,
+) {
     let (module, tenant) = (identity.module.as_str(), identity.tenant.as_str());
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let (result, code) = (result_label(status), status.as_u16());
@@ -227,7 +235,12 @@ pub async fn edge(State(app): State<SharedState>, ConnectInfo(peer): ConnectInfo
         }
     };
     decorate(response.headers_mut(), &id);
-    log_request(&app, &id, &method, &path, source.ip(), response.status(), started.elapsed());
+    let admitted = response
+        .extensions()
+        .get::<Arc<ApiIdentity>>()
+        .cloned()
+        .unwrap_or_else(|| app.identity.load_full());
+    log_request(&app, &admitted, (&id, &method, &path), source.ip(), response.status(), started.elapsed());
     response
 }
 
@@ -302,6 +315,7 @@ pub fn admit(actor: &str, session: Option<Authenticated>) -> Decision {
         actor: actor.to_owned(),
         session,
         error: None,
+        identity: None,
     }
 }
 
@@ -311,6 +325,7 @@ pub fn deny(actor: &str, error: ApiError) -> Decision {
         actor: actor.to_owned(),
         session: None,
         error: Some(error),
+        identity: None,
     }
 }
 
@@ -351,6 +366,7 @@ pub fn authenticate(app: &ApiState, requirement: Option<&Requirement>, token: St
                         token: SecretString::from(token),
                     }),
                     error: allowed.err(),
+                    identity: Some(app.identity.load_full()),
                 }
             }
         },
@@ -385,7 +401,7 @@ pub fn exchange_outcome(status: StatusCode) -> Outcome {
 
 pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditError> {
     if needs_audit(exchange) {
-        let identity = app.identity.load();
+        let identity = &exchange.identity;
         append_declared(
             &app.audit,
             NewEntry {
@@ -428,11 +444,13 @@ pub async fn guard(
     let route = route_of(&request);
     let rule = app.access.get(&route);
     let decision = decide(&app, rule.map(|found| &found.requirement), bearer_token(request.headers()), (app.clock)());
+    let identity = decision.identity.clone().unwrap_or_else(|| app.identity.load_full());
     let state_changing = !request.method().is_safe();
     let forwarded_by = request.extensions().get::<ForwardedBy>().map(|found| found.0);
     let response = match decision.error {
         Some(error) => error_response(&error),
         None => {
+            request.extensions_mut().insert(identity.clone());
             decision.session.into_iter().for_each(|session| {
                 request.extensions_mut().insert(session);
             });
@@ -448,14 +466,17 @@ pub async fn guard(
         source: rate_key(peer.ip()).to_string(),
         forwarded_by: forwarded_by.map(|by| by.to_string()),
         status: response.status(),
+        identity: identity.clone(),
     };
-    match audit_exchange(&app, &exchange) {
+    let mut answered = match audit_exchange(&app, &exchange) {
         Ok(()) => response,
         Err(error) => {
             tracing::error!(%error, "audit append failed, request answered with an error");
             error_response(&ApiError::Internal)
         }
-    }
+    };
+    answered.extensions_mut().insert(identity);
+    answered
 }
 
 

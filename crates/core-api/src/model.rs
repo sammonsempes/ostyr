@@ -254,6 +254,8 @@ pub struct Decision {
     pub actor: String,
     pub session: Option<Authenticated>,
     pub error: Option<ApiError>,
+    /// The identity in force in the critical section that validated the session; `None` when no session was validated.
+    pub identity: Option<Arc<ApiIdentity>>,
 }
 
 
@@ -267,6 +269,7 @@ pub struct Exchange {
     pub source: String,
     pub forwarded_by: Option<String>,
     pub status: StatusCode,
+    pub identity: Arc<ApiIdentity>,
 }
 
 
@@ -357,9 +360,9 @@ pub struct Current {
 }
 
 
-/// The live listener: a reload starts a new server (a new generation) on the new socket and drains the old one.
-#[derive(Debug)]
+/// The live listener: a reload starts a new server (a new generation) on the new socket and drains the old one. `state` is set once by `run_module`, so module code can reach the module audit log.
 pub struct Listener {
+    pub state: OnceLock<Arc<ApiState>>,
     pub current: Mutex<Current>,
     pub connections: ConnectionTable,
     pub finished: Notify,

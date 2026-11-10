@@ -26,7 +26,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
@@ -202,6 +202,7 @@ pub async fn serve(config: &ApiConfig, router: Router, handle: ServerHandle) -> 
 /// A listener with no server yet: `run_module` starts the first one, `stop_listener` and `listening_address` act on the newest.
 pub fn new_listener() -> SharedListener {
     Arc::new(Listener {
+        state: OnceLock::new(),
         current: Mutex::new(Current {
             handle: ServerHandle::new(),
             bound: None,
@@ -305,6 +306,7 @@ pub async fn run_module(
     extra: Router<SharedState>,
     extra_access: AccessTable,
     extra_documents: Vec<OpenApiDocument>,
+    start_only: &[&'static str],
     listener: SharedListener,
     log: Option<LogLevelHandle>,
 ) -> Result<(), StartupError> {
@@ -320,6 +322,7 @@ pub async fn run_module(
             };
             let state: SharedState = Arc::new(build_state(&config, &inputs, extra_access, extra_documents)?);
             state.forwarders.store(Arc::clone(&settings.forwarders));
+            listener.state.get_or_init(|| state.clone());
             let tls = settings.tls.clone().map(RustlsConfig::from_config);
             let setup = ListenerSetup {
                 listener: listener.clone(),
@@ -329,7 +332,7 @@ pub async fn run_module(
                 rewatch: Arc::new(Rewatch::default()),
             };
             let _stop_watch = WatchStop(setup.rewatch.clone());
-            let engine = open_reload(&state, settings, module_file, setup.clone(), log)?;
+            let engine = open_reload(&state, settings, module_file, setup.clone(), log, start_only)?;
             start_first(&setup, &config, tls)?;
             let _stop_server = ServerStop(listener.clone());
             rewatch(&setup.rewatch, watched_files(module_file, &config))?;

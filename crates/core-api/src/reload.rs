@@ -25,6 +25,7 @@ use data_encoding::HEXLOWER;
 use same_file::Handle;
 use secrecy::{ExposeSecret, SecretSlice};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -165,6 +166,25 @@ pub fn watched_files(module_file: &Path, config: &ApiConfig) -> Vec<PathBuf> {
 }
 
 
+/// Refuses (the engine audits it `denied`) a change of any key the module reads at start only; the baseline is what the start file held.
+pub fn check_start_only(baseline: &BTreeMap<&'static str, Option<String>>, settings: &ApiSettings) -> Result<(), BoxError> {
+    let changed: Vec<&str> = baseline
+        .iter()
+        .filter(|(key, value)| settings.module.settings.get(**key) != value.as_ref())
+        .map(|(key, _)| *key)
+        .collect();
+    if changed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "settings.{} is read at start only, restart the service to change it",
+            changed.join(", settings.")
+        )
+        .into())
+    }
+}
+
+
 pub fn accept(_settings: &ApiSettings) -> Result<(), BoxError> {
     Ok(())
 }
@@ -181,6 +201,14 @@ pub fn current_entry(state: &ApiState, entry: NewEntry) -> NewEntry {
 }
 
 
+/// Stores the identity and ends every session in one critical section of the auth lock, which `authenticate` also takes to validate a session and read the identity.
+pub fn replace_identity(state: &ApiState, next: &ApiIdentity) {
+    let mut auth = lock_auth(state);
+    state.identity.store(Arc::new(next.clone()));
+    auth.sessions.clear();
+}
+
+
 /// Replaces the name and tenant; the sessions issued under the old ones end, and the change is audited once under the new ones.
 pub fn switch_identity(state: &ApiState, context: &ReloadContext, settings: &ApiSettings) {
     let previous = state.identity.load_full();
@@ -190,8 +218,7 @@ pub fn switch_identity(state: &ApiState, context: &ReloadContext, settings: &Api
         generation: previous.generation + 1,
     };
     if previous.module != next.module || previous.tenant != next.tenant {
-        state.identity.store(Arc::new(next.clone()));
-        lock_auth(state).sessions.clear();
+        replace_identity(state, &next);
         state.oidc.load().iter().for_each(|runtime| {
             let mut pending = runtime.pending.lock().unwrap_or_else(PoisonError::into_inner);
             runtime.generations.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -569,6 +596,7 @@ pub fn subscribers(
     module_file: PathBuf,
     context: ReloadContext,
     log: Option<LogLevelHandle>,
+    start_only: BTreeMap<&'static str, Option<String>>,
 ) -> Vec<Subscriber<ApiSettings>> {
     let (for_limits, for_oidc, for_list, for_forwarders) = (state.clone(), state.clone(), state.clone(), state.clone());
     let (check_state, apply_state, audit_state, prepare_state) = (state.clone(), state.clone(), state.clone(), state.clone());
@@ -584,6 +612,11 @@ pub fn subscribers(
     let applied_sockets = Arc::clone(&prepared_sockets);
     let (listener_setup, tls_setup, watch_setup) = (setup.clone(), setup.clone(), setup.clone());
     vec![
+        Subscriber {
+            section: "start_only".to_owned(),
+            validate: Box::new(move |settings| check_start_only(&start_only, settings)),
+            apply: Box::new(|_| ()),
+        },
         Subscriber {
             section: "identity".to_owned(),
             validate: Box::new(accept),
@@ -647,6 +680,7 @@ pub fn open_reload(
     module_file: &Path,
     setup: ListenerSetup,
     log: Option<LogLevelHandle>,
+    start_only: &[&'static str],
 ) -> Result<Arc<ReloadEngine<ApiSettings>>, ConfigError> {
     let context = ReloadContext {
         actor_id: RELOAD_ACTOR.to_owned(),
@@ -657,7 +691,8 @@ pub fn open_reload(
     };
     let startup = settings.config.clone();
     let rewatch_slot = Arc::clone(&setup.rewatch);
-    let hooks = subscribers(state, startup, setup, module_file.to_path_buf(), context.clone(), log);
+    let baseline = start_only.iter().map(|key| (*key, settings.module.settings.get(*key).cloned())).collect();
+    let hooks = subscribers(state, startup, setup, module_file.to_path_buf(), context.clone(), log, baseline);
     open_engine(
         first_then_file(settings, module_file.to_path_buf()),
         settings_state,

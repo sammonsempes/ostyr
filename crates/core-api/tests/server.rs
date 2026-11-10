@@ -254,7 +254,7 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
     let path = module_yaml(dir.path(), "127.0.0.1:0")?;
     let listener = new_listener();
     let running = listener.clone();
-    let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), vec![], running, None).await });
+    let task = tokio::spawn(async move { run_module(&[path], extra_router(), extra_access(), vec![], &[], running, None).await });
     let address = listening_address(&listener).await.ok_or("server did not start")?;
     assert!(read_response(TcpStream::connect(address).await?).await?.starts_with("HTTP/1.1 200 OK"));
     stop_listener(&listener, None);
@@ -266,24 +266,25 @@ async fn a_module_runs_from_its_configuration_file() -> TestResult {
 #[tokio::test]
 async fn run_module_reports_startup_problems() -> TestResult {
     let dir = tempdir()?;
-    let usage = run_module(&[], extra_router(), extra_access(), vec![], new_listener(), None).await;
+    let usage = run_module(&[], extra_router(), extra_access(), vec![], &[], new_listener(), None).await;
     assert!(matches!(usage, Err(StartupError::Usage(_))));
     let absent = run_module(
         &[dir.path().join("none.yaml").display().to_string()],
         extra_router(),
         extra_access(),
         vec![],
+        &[],
         new_listener(),
         None,
     )
     .await;
     assert!(matches!(absent, Err(StartupError::Config(_))));
     let exposed = module_yaml(dir.path(), "0.0.0.0:8443")?;
-    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], new_listener(), None).await;
+    let plain = run_module(&[exposed], extra_router(), extra_access(), vec![], &[], new_listener(), None).await;
     assert!(matches!(plain, Err(StartupError::PlainHttpRefused(_))));
     let local = module_yaml(dir.path(), "127.0.0.1:0")?;
     fs::remove_file(dir.path().join("compromised.txt"))?;
-    let broken = run_module(&[local], extra_router(), extra_access(), vec![], new_listener(), None).await;
+    let broken = run_module(&[local], extra_router(), extra_access(), vec![], &[], new_listener(), None).await;
     assert!(matches!(broken, Err(StartupError::Io(_))));
     Ok(())
 }

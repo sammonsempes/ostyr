@@ -16,11 +16,12 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, StatusCode};
 use core_api::example::{example_document, PING_REPLY};
 use core_api::failure::{auth_failure, error_parts};
-use core_api::middleware::{admit_source, audit_exchange, count_request, rate_key, SECURITY_HEADERS};
+use core_api::middleware::{admit_source, audit_exchange, authenticate, count_request, rate_key, SECURITY_HEADERS};
 use core_api::model::Window;
-use core_api::model::{ApiError, ApiState, Exchange};
+use core_api::model::{ApiError, ApiIdentity, ApiState, Exchange, Requirement};
+use core_api::reload::replace_identity;
 use core_api::routes::{admit_login, commit_login, core_access, BODY_LIMIT_BYTES};
-use core_api::state::{prune_attempts, MAX_CONCURRENT_HASHES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
+use core_api::state::{lock_auth, prune_attempts, MAX_CONCURRENT_HASHES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_audit::log::{new_log, sync_file};
 use core_audit::model::GENESIS_HASH;
 use core_audit::verify::verify;
@@ -43,7 +44,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use types::{TestError, TestResult};
@@ -1515,6 +1516,7 @@ async fn an_oversized_request_source_is_cut_before_it_is_audited() -> TestResult
         source: "s".repeat(MAX_VALUE_CHARS + OVERSIZE),
         forwarded_by: None,
         status: StatusCode::OK,
+        identity: fx.state.identity.load_full(),
     };
     audit_exchange(&fx.state, &exchange)?;
     let lines = audit_lines(&fx)?;
@@ -1529,5 +1531,89 @@ async fn an_oversized_request_source_is_cut_before_it_is_audited() -> TestResult
     let marker = format!("[value truncated, {OVERSIZE} characters omitted]");
     assert_eq!(source.map(str::len), Some(MAX_VALUE_CHARS + marker.len()));
     assert!(source.is_some_and(|text| text.ends_with(&marker)));
+    Ok(())
+}
+
+
+fn other_tenant(state: &ApiState) -> ApiIdentity {
+    let current = state.identity.load_full();
+    ApiIdentity {
+        tenant: "other-tenant".to_owned(),
+        generation: current.generation + 1,
+        ..(*current).clone()
+    }
+}
+
+
+#[tokio::test]
+async fn an_admitted_session_carries_the_identity_it_was_validated_under() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let decision = authenticate(&fx.state, Some(&Requirement::Session), token, OffsetDateTime::now_utc());
+    assert!(decision.error.is_none());
+    let admitted = decision.identity.ok_or("no identity")?;
+    assert!(Arc::ptr_eq(&admitted, &fx.state.identity.load_full()));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_session_checked_between_the_identity_store_and_the_session_clear_is_refused() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let next = other_tenant(&fx.state);
+    let decision = std::thread::scope(|scope| {
+        let mut held = lock_auth(&fx.state);
+        let request = scope.spawn(|| authenticate(&fx.state, Some(&Requirement::Session), token.clone(), OffsetDateTime::now_utc()));
+        fx.state.identity.store(Arc::new(next.clone()));
+        held.sessions.clear();
+        drop(held);
+        request.join()
+    });
+    let refused = decision.map_err(|_| "authenticate panicked")?;
+    assert!(matches!(refused.error, Some(ApiError::Unauthorized)));
+    assert!(refused.identity.is_none());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn replacing_the_identity_ends_the_sessions_in_the_same_step() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let next = other_tenant(&fx.state);
+    replace_identity(&fx.state, &next);
+    assert_eq!(fx.state.identity.load().tenant, "other-tenant");
+    assert!(lock_auth(&fx.state).sessions.is_empty());
+    assert_eq!(
+        call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_audit_and_the_log_of_a_request_use_the_identity_that_admitted_it() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let admitted = fx.state.identity.load_full();
+    let exchange = Exchange {
+        request_id: "req-identity".to_owned(),
+        actor: READER.to_owned(),
+        route: "POST /example/change".to_owned(),
+        state_changing: true,
+        sensitive: false,
+        source: "s".to_owned(),
+        forwarded_by: None,
+        status: StatusCode::OK,
+        identity: Arc::new(other_tenant(&fx.state)),
+    };
+    audit_exchange(&fx.state, &exchange)?;
+    let lines = audit_lines(&fx)?;
+    let last = lines.last().ok_or("no record")?;
+    assert_eq!(last.get("tenant").and_then(serde_json::Value::as_str), Some("other-tenant"));
+    assert_ne!(admitted.tenant, "other-tenant");
+    assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
     Ok(())
 }
