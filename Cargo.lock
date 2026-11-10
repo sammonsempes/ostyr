@@ -995,6 +995,8 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "ipnet",
+ "notify",
+ "notify-debouncer-full",
  "openidconnect",
  "rcgen",
  "rustix 1.1.6",
