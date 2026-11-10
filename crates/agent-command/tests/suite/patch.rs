@@ -198,7 +198,7 @@ fn the_cli_parses_patch_actions() -> TestResult {
     );
     assert!(matches!(parse_action("reboot", Some("true")), Err(CliError::Parameter(_))));
     assert!(matches!(parse_action("reboot", Some("maybe,5")), Err(CliError::Parameter(_))));
-    assert!(matches!(parse_action("reboot", Some("true,x")), Err(CliError::Number(_))));
+    assert!(matches!(parse_action("reboot", Some("true,x")), Err(CliError::Number)));
     Ok(())
 }
 

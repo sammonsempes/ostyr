@@ -58,10 +58,7 @@ pub fn parse_action(name: &str, parameter: Option<&str>) -> Result<Action, CliEr
         "change_policy" => Ok(Action::ChangePolicy { policy: text }),
         "install_updates" => parse_install_updates(&text),
         "reboot" => parse_reboot(&text),
-        "kill" => text
-            .parse()
-            .map(|process_id| Action::Kill { process_id })
-            .map_err(|_| CliError::Number(text.clone())),
+        "kill" => text.parse().map(|process_id| Action::Kill { process_id }).map_err(|_| CliError::Number),
         other => Err(CliError::UnknownAction(other.to_owned())),
     }
 }
@@ -103,7 +100,7 @@ pub fn parse_class(text: &str) -> Result<KeyClass, CliError> {
 
 
 pub fn parse_sequence(text: &str) -> Result<u64, CliError> {
-    text.parse().map_err(|_| CliError::Number(text.to_owned()))
+    text.parse().map_err(|_| CliError::Number)
 }
 
 
