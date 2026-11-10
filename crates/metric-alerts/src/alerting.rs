@@ -25,7 +25,10 @@ pub const ASSET_LABEL: &str = "asset";
 pub const MAX_LABELS: usize = 16;
 
 
-pub const MORE_RESERVE: usize = 16;
+pub const MORE_FIXED_CHARS: usize = 9;
+
+
+pub const MAX_FIRING_LABELS: usize = 1000;
 
 
 pub const MICROS_PER_SECOND: u64 = 1_000_000;
@@ -52,23 +55,25 @@ pub fn severity_of(severity: RuleSeverity) -> Severity {
 }
 
 
-/// The rule id is a token and `since` fits in alert microseconds; labels never invalidate a firing.
+/// The rule id is a token, `since` fits in alert microseconds and there are at most `MAX_FIRING_LABELS` labels; label texts never invalidate a firing.
 pub fn is_valid(firing: &Firing) -> bool {
     firing
         .since
         .checked_mul(MICROS_PER_SECOND)
         .is_some_and(|micros| micros <= MAX_CREATED_MICROS)
         && is_token(&firing.rule_id)
+        && firing.labels.len() <= MAX_FIRING_LABELS
 }
 
 
 /// The prefix, the rule id, then the first `MAX_LABELS` `name=value` pieces that fit within `MAX_TITLE_CHARS`, each part shown as itself or as `#digest`; the rest is `(+N more)`.
 pub fn title_of(rule_id: &str, labels: &Labels) -> String {
+    let reserve = MORE_FIXED_CHARS + labels.len().to_string().len();
     let (listed, omitted) = labels.iter().enumerate().fold(
         (format!("{TITLE_PREFIX}{rule_id}"), usize::default()),
         |(text, count), (index, (name, value))| {
             let piece = format!(" {}={}", shown(name), shown(value));
-            if index < MAX_LABELS && text.chars().count() + piece.chars().count() + MORE_RESERVE <= MAX_TITLE_CHARS {
+            if index < MAX_LABELS && text.chars().count() + piece.chars().count() + reserve <= MAX_TITLE_CHARS {
                 (text + &piece, count)
             } else {
                 (text, count + 1)
@@ -83,7 +88,7 @@ pub fn title_of(rule_id: &str, labels: &Labels) -> String {
 }
 
 
-/// One alert, or `None` when the rule id or `since` is outside its bounds.
+/// One alert, or `None` when the firing is of another tenant or its rule id, `since` or label count is outside its bounds.
 pub fn alert_of(scope: &TenantScope, firing: &Firing, now: Timestamp) -> Option<Alert> {
     let tenant = tenant_of(scope).to_owned();
     let rule_id = format!("{RULE_ID_PREFIX}{}", firing.rule_id);
@@ -94,7 +99,7 @@ pub fn alert_of(scope: &TenantScope, firing: &Firing, now: Timestamp) -> Option<
         format!("since:{}", firing.since),
     ];
     let created_micros = now.saturating_mul(MICROS_PER_SECOND).min(MAX_CREATED_MICROS);
-    is_valid(firing).then(|| Alert {
+    (tenant_of(&firing.tenant) == tenant_of(scope) && is_valid(firing)).then(|| Alert {
         id: alert_id(&tenant, &rule_id, &event_ids),
         tenant,
         rule_id,
