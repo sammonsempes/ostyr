@@ -171,3 +171,16 @@ pub struct Plan {
     pub would_run: Vec<CorrectionRequest>,
     pub deferred: Vec<DeferredCorrection>,
 }
+
+
+/// A control that failed on an asset, with the time of its first failure in the current run of failures (kept by the caller).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftFinding {
+    pub baseline: String,
+    pub control: String,
+    pub title: String,
+    pub severity: Severity,
+    pub asset: String,
+    pub first_failed_micros: u64,
+    pub verdict: Verdict,
+}
