@@ -57,6 +57,8 @@ pub enum StoreError {
     BadRefused(#[source] serde_json::Error),
     #[error("the duplicate conflict list is malformed")]
     BadDuplicates(#[source] serde_json::Error),
+    #[error("the outcome carries two conflicts for asset `{asset}`, attribute `{attribute}`, source `{source_name}`")]
+    DuplicateConflict { asset: String, attribute: String, source_name: String },
     #[error("an asset changed since it was read")]
     VersionConflict,
     #[error("still conflicting after {attempts} attempts")]

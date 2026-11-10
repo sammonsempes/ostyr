@@ -43,7 +43,7 @@ ranked AS (
     ) + f.position <= CASE WHEN f.is_key THEN $4::text::bigint ELSE $3::text::bigint END AS admit
     FROM (
         SELECT fresh.*, row_number() OVER (
-            PARTITION BY asset, observed_source, is_key ORDER BY attribute, current_value, current_source, observed_value
+            PARTITION BY asset, observed_source, is_key ORDER BY attribute COLLATE "C", current_value COLLATE "C", current_source COLLATE "C", observed_value COLLATE "C"
         ) AS position
         FROM fresh
         WHERE NOT exempt
