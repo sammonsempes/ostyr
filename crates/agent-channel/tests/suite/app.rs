@@ -7,7 +7,7 @@ use agent_channel::agent_app::{
     dialer, execute_fn, load_agent_file, record_commands, run_agent, run_attempts, run_streams, session_attempt, settle_and_join, settle_events,
     start_worker, AgentFile, MAX_AGENT_ATTEMPTS,
 };
-use agent_channel::app::{alerting_audit, read_bounded_line, reload_context, shared_log_audit, BoundedLine};
+use agent_channel::app::{alerting_audit, append_bounded, read_bounded_line, reload_context, shared_log_audit, BoundedLine};
 use agent_channel::client::deliver_events;
 use agent_channel::commands::{agent_directory, command_source, paths_of, read_envelope, read_envelopes, MAX_COMMAND_FILES, MAX_ENVELOPE_FILE_BYTES};
 use agent_channel::error::{AppError, ChannelError, SinkError};
@@ -28,6 +28,7 @@ use agent_command::verify::open_verifier;
 use core_audit::error::AuditError;
 use core_audit::log::{genesis_log, open_file_log};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
+use core_config::reload::MAX_VALUE_CHARS;
 use data_encoding::HEXLOWER;
 use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
@@ -674,6 +675,45 @@ fn a_failed_audit_append_is_passed_on_as_an_alert() -> TestResult {
     assert!(shared_log_audit(&file_log)(entry()).is_ok());
     let context = reload_context(Path::new("x.yaml"), "module", "tenant", "request");
     assert_eq!((context.target.as_str(), context.module.as_str()), ("x.yaml", "module"));
+    Ok(())
+}
+
+
+const OMITTED_FOR_TEST: usize = 88;
+
+
+const SILENT_FOR_TEST: u64 = 42;
+
+
+#[test]
+fn undeclared_parameters_are_redacted_and_long_values_cut() -> TestResult {
+    let log = genesis_log(io::sink());
+    let mut with_parameters = entry();
+    with_parameters.parameters = [
+        ("result".to_owned(), "applied".to_owned()),
+        ("reason".to_owned(), "r".repeat(MAX_VALUE_CHARS + OMITTED_FOR_TEST)),
+        ("password".to_owned(), "hunter2".to_owned()),
+    ]
+    .into();
+    let record = append_bounded(&log, with_parameters)?;
+    let get = |key: &str| record.parameters.get(key).map(String::as_str);
+    assert_eq!(get("result"), Some("applied"));
+    assert_eq!(get("password"), Some("[REDACTED]"));
+    let marker = format!("[value truncated, {OMITTED_FOR_TEST} characters omitted]");
+    assert!(get("reason").is_some_and(|reason| reason.ends_with(&marker)));
+    Ok(())
+}
+
+
+#[test]
+fn a_presence_entry_keeps_silent_seconds() -> TestResult {
+    let log = genesis_log(io::sink());
+    let identity = identity();
+    let record = append_bounded(
+        &log,
+        agent_channel::presence::presence_entry(&identity, "agent.silent", Outcome::Failure, SILENT_FOR_TEST),
+    )?;
+    assert_eq!(record.parameters.get("silent_seconds").map(String::as_str), Some("42"));
     Ok(())
 }
 

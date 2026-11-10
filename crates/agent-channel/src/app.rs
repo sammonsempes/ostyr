@@ -1,10 +1,12 @@
-use core_audit::log::{append, AuditLog};
-use core_config::reload::{ReloadContext, ReloadEngine};
+use core_audit::error::AuditError;
+use core_audit::log::{append_declared, AuditLog};
+use core_audit::model::{NewEntry, Record};
+use core_config::reload::{bounded_parameter, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
 use std::fs::File;
 use std::io::{self, BufRead, Read};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 
@@ -16,10 +18,30 @@ pub fn debounce() -> Duration {
 }
 
 
+/// The presence record key kept beside the reload keys.
+pub const PRESENCE_DECLARED_KEY: &str = "silent_seconds";
+
+
+/// The parameter keys this crate's records may keep: the reload keys and the presence key; any other value is stored as `[REDACTED]`.
+pub static AGENT_CHANNEL_DECLARED_KEYS: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| RELOAD_DECLARED_KEYS.iter().copied().chain([PRESENCE_DECLARED_KEY]).collect());
+
+
+/// Appends with declared keys, every value first cut with a visible marker naming the characters omitted.
+pub fn append_bounded<Output: std::io::Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
+    let parameters = entry
+        .parameters
+        .iter()
+        .map(|(key, value)| (key.clone(), bounded_parameter(key, value)))
+        .collect();
+    append_declared(log, NewEntry { parameters, ..entry }, AGENT_CHANNEL_DECLARED_KEYS.as_slice())
+}
+
+
 /// An audit function appending to the shared platform audit log.
 pub fn shared_log_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
     let shared = Arc::clone(log);
-    Box::new(move |entry| append(&shared, entry))
+    Box::new(move |entry| append_bounded(&shared, entry))
 }
 
 
