@@ -11,7 +11,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin" "$SCRATCH/nobin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
-echo "cargo wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} size=${SCCACHE_CACHE_SIZE:-none} inc=${CARGO_INCREMENTAL}" >>"$STUB_LOG"
+echo "cargo wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} size=${SCCACHE_CACHE_SIZE:-none} inc=${CARGO_INCREMENTAL} uds=${SCCACHE_SERVER_UDS:-none}" >>"$STUB_LOG"
 S
 printf '#!/usr/bin/env bash\nexit 0\n' >"$SCRATCH/bin/sccache"
 chmod +x "$SCRATCH/bin/"*
@@ -31,7 +31,7 @@ FAILS=0
 
 : >"$STUB_LOG"
 env PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
-if grep -qv "wrapper=sccache dir=$HOME/.cache/sccache size=20G inc=0" "$STUB_LOG"; then
+if grep -qv "wrapper=sccache dir=$HOME/.cache/sccache size=20G inc=0 uds=/tmp/sccache-$(id -u).sock" "$STUB_LOG"; then
   echo "FAIL: wrapper missing with sccache present"
   cat "$STUB_LOG"
   FAILS=$((FAILS + 1))
@@ -39,8 +39,15 @@ fi
 
 : >"$STUB_LOG"
 env PATH="$SCRATCH/nobin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
-if grep -qv "wrapper=none dir=none size=none inc=0" "$STUB_LOG"; then
+if grep -qv "wrapper=none dir=none size=none inc=0 uds=none" "$STUB_LOG"; then
   echo "FAIL: wrapper set without sccache"
+  cat "$STUB_LOG"
+  FAILS=$((FAILS + 1))
+fi
+: >"$STUB_LOG"
+env PATH="$SCRATCH/bin:/usr/bin:/bin" SCCACHE_SERVER_UDS=/run/custom.sock "$HERE/.githooks/pre-commit" >/dev/null 2>&1
+if grep -qv "uds=/run/custom.sock" "$STUB_LOG"; then
+  echo "FAIL: existing SCCACHE_SERVER_UDS not kept"
   cat "$STUB_LOG"
   FAILS=$((FAILS + 1))
 fi
