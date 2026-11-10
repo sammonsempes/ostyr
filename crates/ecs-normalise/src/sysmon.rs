@@ -18,6 +18,9 @@ use tracing::{debug, warn};
 pub const SYSMON_MODULE: &str = "sysmon";
 
 
+pub const UNKNOWN_DATASET: &str = "sysmon.unknown";
+
+
 pub const WINDOWS_OS_TYPE: &str = "windows";
 
 
@@ -410,7 +413,7 @@ fn unknown_event(base: EcsEvent, raw: RawEvent, seen: &mut SeenIds) -> EcsEvent 
     }
     EcsEvent {
         event: EventFields {
-            dataset: Some(format!("{SYSMON_MODULE}.unknown")),
+            dataset: Some(UNKNOWN_DATASET.to_string()),
             ..base.event.clone()
         },
         sysmon: raw.fields,
