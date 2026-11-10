@@ -113,7 +113,7 @@ Three profiles share the same code; only the number of modules, the ingestion mo
 | **Distributed** | Mid-sized companies, SOCs, MSSPs | Multi-node ClickHouse cluster, redundant backend services, NATS JetStream | Through NATS JetStream |
 | **Single module** | Targeted need: only the EDR, the WAF, the DNS, the identity provider… | One container or package, with the module's minimal storage | Direct, with optional export to a third-party SIEM |
 
-**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, MinIO (S3, headless, web console disabled) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used, and Guacamole is not used for managed devices. Secrets are files encrypted with SOPS in Git by default; OpenBao is optional.
+**Component rules.** Durable state lives only in PostgreSQL, ClickHouse, NATS JetStream, MinIO (S3, headless, web console disabled) or Git. Every third-party component is headless: its own console or admin page is disabled or never exposed. Prometheus, VictoriaMetrics, Grafana, Grafana OnCall, Jaeger, Tempo, Parca, nmap and WSUS are not used, and Guacamole is not used for managed devices. Secrets are files encrypted with SOPS in Git by default.
 
 **No listening port on managed devices.** Every flow from a managed device is initiated by the device. Agentless equipment (switches, printers, BMCs, appliances) pushes to a site collector (section 22); polling it is an explicit per-device opt-in.
 
@@ -578,7 +578,7 @@ Proactive hunting that runs on its own, on top of the analyst-driven natural lan
 
 ### Built-in analysis tools
 
-- Embedded **CyberChef**, to decode, decompress and analyse an artefact (encoded PowerShell, base64, XOR) without taking it out of the platform. The recipes used are recorded in the case log.
+- In-house **decoders** in the case view, to decode and decompress an artefact without taking it out of the platform: base64, hex, gzip and deflate, XOR with a given key, PowerShell `-EncodedCommand`, URL decoding. Input and output sizes are bounded and every decoding is recorded in the case log. No third-party tool.
 
 ### Phishing reporting
 
@@ -694,7 +694,7 @@ Git is the source of truth for the whole platform. The interface, the CLI and th
 - **Plan, then apply.** `xdrctl plan` shows the gap between the repository and the real state, `xdrctl apply` applies it; the OpenTofu provider offers the same cycle. The apply is a live reload, never a restart (see "Live reconfiguration").
 - **Validation in continuous integration.** Schemas, Sigma lint, policy validator (section 8), playbook simulation, detection tests on the test endpoints. A merge request that breaks a test cannot be merged.
 - **Drift detection.** Any gap between the real state, including on endpoints, and the repository is reported, then corrected automatically if the policy says so. A Defender exclusion added by hand on a workstation is thus detected and removed.
-- **Secrets.** Never in Git: only references to the vault (Vault, OpenBao), or files encrypted with SOPS.
+- **Secrets.** Never in clear in Git: files encrypted with SOPS by default, or a `vault://` reference to a customer's own Vault-API secret store (HashiCorp Vault or an OpenBao the customer runs; Ostyr deploys neither).
 - **Environments.** The same repository serves pre-production and production, with promotion by branch or by tag.
 - **Multi-tenant.** One folder or repository per tenant, inheriting from a common base.
 - **Read-only mode.** The interface can be configured to accept no changes: everything then goes through Git.
@@ -725,7 +725,7 @@ A platform that can run commands on every endpoint is a prime target: compromisi
 | Abuse of the remote shell or of actions | Dedicated role, dual approval on critical assets, full recording, quotas |
 | Compromised server driving the agents | Commands signed by an offline key or an HSM for sensitive actions; the agent refuses any unsigned or replayed command |
 | Booby-trapped update (supply chain) | Reproducible builds, Sigstore signing, published SBOM, verification by the agent before installation, deployment rings |
-| Theft of connector secrets | Secrets vault (Vault or OpenBao), encryption at rest, minimal rights per connector, rotation |
+| Theft of connector secrets | Secrets in SOPS files or the customer vault, encryption at rest, minimal rights per connector, rotation |
 | Leak between tenants (MSSP) | Indexes, encryption keys and roles separated per tenant, automated isolation tests |
 | Manipulation of the AI | Guardrails of section 8 |
 | Exposed data | TLS encryption everywhere, encryption at rest of ClickHouse and backups |
@@ -751,7 +751,7 @@ The Rust code follows the project coding rules, written in English like all the 
 | --- | --- |
 | **Dashboard** | Protection state, effective mode of each endpoint (full, reduced, degraded), AI mode, blind spots |
 | **Hunting** | ClickHouse SQL queries (optional experimental KQL dialect), live osquery, entity graph, per-entity timeline, natural language hunting, automatic hunt packs |
-| **Alerts** | Alert queue sorted by risk score, AI investigation, verdict and confidence, cases and case templates, observables and analysers, response actions, ransomware recovery, forensic hunts, CyberChef, reported phishing, out-of-band crisis room, reports |
+| **Alerts** | Alert queue sorted by risk score, AI investigation, verdict and confidence, cases and case templates, observables and analysers, response actions, ransomware recovery, forensic hunts, reported phishing, out-of-band crisis room, reports |
 | **Rules** | Sigma, YARA, Sysmon, ASR, App Control, TracingPolicies, FIM, exclusions (with expiry), MITRE coverage, continuous testing, migration from other SIEMs, history |
 | **AI review** | Pending suggestions, sample of verdicts to review, quality statistics, validator refusals |
 | **Endpoints** | Inventory, discovered unmanaged devices, state of agents and sensors, blocking capabilities, configuration (SCA), adaptive hardening, patches, encryption, browser extensions, devices, restore snapshots, containers, vulnerabilities, honeytokens and honeypots, hardened protection mode, policies, actions |
@@ -1002,13 +1002,13 @@ Licences to be checked at every release; state known at the time of writing:
 
 | Component | Licence | Consequence |
 | --- | --- | --- |
-| ClickHouse, NATS JetStream, vLLM, CyberChef, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries, guacd (Apache Guacamole proxy, agentless SSH opt-in only) | Apache 2.0 | No particular constraint |
+| ClickHouse, NATS JetStream, vLLM, Caddy, Prowler, Trivy, syft, OpenTelemetry protocol and Collector libraries, guacd (Apache Guacamole proxy, agentless SSH opt-in only) | Apache 2.0 | No particular constraint |
 | OpenTelemetry eBPF profiler, Tetragon | Apache 2.0, kernel-side eBPF programs GPLv2 (Tetragon: BSD-2-Clause or GPLv2) | Run as a separate process on the agent |
 | osquery | Apache 2.0 / GPLv2 (dual licence) | No particular constraint |
 | YARA-X, Zeek, Unbound, OpenCanary, ipmitool | BSD | No particular constraint |
 | lldpd | ISC | No particular constraint |
 | Atomic Red Team, CrowdSec, Ollama, ProjectDiscovery tools (subfinder, naabu, httpx, nuclei), gitleaks, NanoMDM, winget | MIT | No particular constraint |
-| Kea, Vector, OpenBao, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
+| Kea, Vector, OpenTofu | MPL 2.0 | Changes to the files concerned must be published |
 | Suricata | GPLv2 | Run as a separate process, not linked to the platform code |
 | USBGuard, smartmontools, NUT | GPLv2 or later (NUT Python scripts GPLv3 or later) | Run as separate processes, not linked to the platform code |
 | Zitadel, RustDesk (`hbbs`, `hbbr` and the project build of the endpoint service), MinIO | AGPL-3.0 | Separate processes; the RustDesk project build publishes its sources |

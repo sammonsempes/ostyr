@@ -34,7 +34,7 @@ fn schemas_are_written() -> TestResult {
 #[test]
 fn secret_fields_carry_the_reference_pattern() -> TestResult {
     let text = schema_text::<ModuleConfig>();
-    assert!(text.contains("vault://|openbao://|sops:"), "{text}");
+    assert!(text.contains("vault://|sops:"), "{text}");
     Ok(())
 }
 

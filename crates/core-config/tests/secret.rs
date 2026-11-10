@@ -6,13 +6,13 @@ use core_config::secret::{PlaintextSecret, SecretRef, SECRET_PREFIXES};
 use types::TestResult;
 
 
-const EXPECTED_PREFIXES: usize = 3;
+const EXPECTED_PREFIXES: usize = 2;
 
 
 #[test]
 fn references_are_accepted() -> TestResult {
     assert!(SecretRef::try_from("vault://kv/a".to_string()).is_ok());
-    assert!(SecretRef::try_from("openbao://kv/a".to_string()).is_ok());
+    assert!(SecretRef::try_from("openbao://kv/a".to_string()).is_err());
     assert!(SecretRef::try_from("sops:secrets/a.enc.yaml".to_string()).is_ok());
     Ok(())
 }

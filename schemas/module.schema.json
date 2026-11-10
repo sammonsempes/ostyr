@@ -2,7 +2,7 @@
   "$defs": {
     "SecretRef": {
       "description": "A reference to a secret held elsewhere, never the secret itself.",
-      "pattern": "^(vault://|openbao://|sops:).+",
+      "pattern": "^(vault://|sops:).+",
       "type": "string"
     }
   },
