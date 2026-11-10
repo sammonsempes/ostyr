@@ -2,6 +2,7 @@
 
 pub mod decision;
 pub mod error;
+pub mod http;
 pub mod load;
 pub mod model;
 pub mod probe;

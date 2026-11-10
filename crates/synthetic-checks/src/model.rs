@@ -175,6 +175,7 @@ pub fn default_certificate_days() -> Vec<u64> {
 #[serde(try_from = "RawCheckFile")]
 pub struct CheckFile {
     pub scope: Vec<IpNet>,
+    pub ca_file: Option<String>,
     pub checks: Vec<Check>,
 }
 
@@ -184,6 +185,8 @@ pub struct CheckFile {
 pub struct RawCheckFile {
     #[serde(default)]
     pub scope: Vec<IpNet>,
+    #[serde(default)]
+    pub ca_file: Option<String>,
     pub checks: Vec<Check>,
 }
 
