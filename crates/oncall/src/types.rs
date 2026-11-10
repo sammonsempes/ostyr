@@ -21,3 +21,15 @@ pub type IssueError = crate::error::LinkError<std::convert::Infallible>;
 
 /// A signing key of at least `MIN_LINK_KEY_BYTES`; only `linkkey` builds one. No `Debug`: it is a secret.
 pub struct LinkKey(pub(crate) zeroize::Zeroizing<Vec<u8>>);
+
+
+pub type NowFn = fn() -> chrono::DateTime<chrono::Utc>;
+
+
+pub type TenantOutcome = (String, Result<usize, crate::error::SourceError>);
+
+
+pub type WaitFn = fn(std::time::Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
+
+
+pub type ReportFn = fn(&[TenantOutcome]);

@@ -13,10 +13,20 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "oncall";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "oncall_0001",
-    sql: include_str!("../migrations/oncall_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 3] = [
+    Migration {
+        version: "oncall_0001",
+        sql: include_str!("../migrations/oncall_0001.sql"),
+    },
+    Migration {
+        version: "oncall_0002",
+        sql: include_str!("../migrations/oncall_0002.sql"),
+    },
+    Migration {
+        version: "oncall_0003",
+        sql: include_str!("../migrations/oncall_0003.sql"),
+    },
+];
 
 
 /// Params: `$2` fingerprint, `$3` now. A live alert with the same fingerprint is reused and its counter incremented.

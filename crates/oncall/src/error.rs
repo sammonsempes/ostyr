@@ -168,3 +168,16 @@ pub enum StoreError {
     #[error("the database returned an unexpected value for `{column}`")]
     BadRow { column: &'static str },
 }
+
+
+#[derive(Debug, Error)]
+pub enum SourceError {
+    #[error("the alert store failed")]
+    Alerts(#[from] alerts::error::StoreError),
+    #[error("the on-call store failed")]
+    Store(#[from] StoreError),
+    #[error("the tenant name is not valid")]
+    Tenant(#[from] core_pg::error::PgError),
+    #[error("no on-call severity is mapped for `{severity}`")]
+    Unmapped { severity: String },
+}
