@@ -102,6 +102,13 @@ fn record(answer: &IpAddr) -> Result<Vec<u8>, std::num::TryFromIntError> {
 }
 
 
+fn answer_section(answers: &[&IpAddr]) -> Result<(u16, Vec<u8>), std::num::TryFromIntError> {
+    let count = u16::try_from(answers.len())?;
+    let records = answers.iter().copied().map(record).collect::<Result<Vec<_>, _>>()?.concat();
+    Ok((count, records))
+}
+
+
 fn reply(query: &[u8], mode: &Mode) -> Option<Vec<u8>> {
     let identifier = query.get(..ID_BYTES)?;
     let body = query.get(HEADER_BYTES..)?;
@@ -116,7 +123,9 @@ fn reply(query: &[u8], mode: &Mode) -> Option<Vec<u8>> {
         Mode::NxDomain | Mode::Silent => Vec::new(),
     };
     let rcode = if matches!(mode, Mode::NxDomain) { NXDOMAIN } else { 0 };
-    let count = u16::try_from(answers.len()).ok()?;
+    let (count, records) = answer_section(&answers)
+        .map_err(|error| tracing::warn!(%error, "stub answer section failed"))
+        .ok()?;
     let header = [
         identifier,
         &[REPLY_FLAGS, RECURSION_AVAILABLE | rcode, 0, 1],
@@ -124,7 +133,6 @@ fn reply(query: &[u8], mode: &Mode) -> Option<Vec<u8>> {
         &[0, 0, 0, 0],
     ]
     .concat();
-    let records: Vec<u8> = answers.into_iter().map(record).collect::<Result<Vec<_>, _>>().ok()?.concat();
     Some([header, question.to_vec(), records].concat())
 }
 

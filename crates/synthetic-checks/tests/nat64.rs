@@ -8,9 +8,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use synthetic_checks::error::{AddressClass, GuardError, ProbeError};
 use synthetic_checks::model::CheckFile;
-use synthetic_checks::probe::{http_probe, probe_limits, with_nat64_prefix, HttpTransports};
+use synthetic_checks::probe::{guarded_addresses, http_probe, probe_limits, with_nat64_prefix, HttpTransports};
 use synthetic_checks::target::{embedded_v4, guard_address, guard_address_nat64, rfc6052_v4, V4_OCTETS};
 use types::TestResult;
+use url::Host;
 
 
 const FILE_NAME: &str = "checks.yaml";
@@ -41,6 +42,7 @@ fn prefix(text: &str) -> Result<Ipv6Net, Box<dyn std::error::Error>> {
 fn class_of(text: &str, scope: &[IpNet], nat64: Option<Ipv6Net>) -> Result<Option<AddressClass>, Box<dyn std::error::Error>> {
     Ok(guard_address_nat64(ip(text)?, scope, nat64).err().map(|error| match error {
         GuardError::Refused { class, .. } => class,
+        GuardError::BadPrefix(_) => AddressClass::Reserved,
     }))
 }
 
@@ -48,7 +50,7 @@ fn class_of(text: &str, scope: &[IpNet], nat64: Option<Ipv6Net>) -> Result<Optio
 #[test]
 fn declared_prefixes_of_every_length_refuse_the_embedded_metadata_address() -> TestResult {
     let cases = [
-        ("2001:db8:a9fe:a9fe::", "2001:db8::/32", AddressClass::Unspecified),
+        ("2001:db8:a9fe:a9fe:0:1::", "2001:db8::/32", AddressClass::Metadata),
         ("2001:db8:1a9:fea9:fe::", "2001:db8:100::/40", AddressClass::Metadata),
         ("2001:db8:1:a9fe:a9:fe00::", "2001:db8:1::/48", AddressClass::Metadata),
         ("2001:db8:1:a9:fe:a9fe::", "2001:db8:1::/56", AddressClass::Metadata),
@@ -189,4 +191,23 @@ fn the_http_probe_guards_with_the_declared_prefix() -> TestResult {
         .ok_or("expected a refusal")?;
     assert!(matches!(error, ProbeError::Refused(_)), "{error}");
     Ok(())
+}
+
+
+#[test]
+fn an_unsupported_prefix_length_is_a_typed_refusal_in_both_guards() -> TestResult {
+    let public = ip("2606:4700:4700::1111")?;
+    ["2001:db8::1/128", "2001:db8::/33", "2001:db8::/0"]
+        .iter()
+        .try_for_each(|declared| -> TestResult {
+            let net = Some(prefix(declared)?);
+            assert!(
+                matches!(guard_address_nat64(public, &[], net), Err(GuardError::BadPrefix(_))),
+                "{declared}"
+            );
+            let resolve = |_: &str, _: Duration, _: usize| -> std::io::Result<Vec<IpAddr>> { Ok(vec![public]) };
+            let outcome = guarded_addresses(Host::Ipv6("2606:4700:4700::1111".parse()?), &[], net, &resolve, Duration::ZERO);
+            assert!(matches!(outcome, Err(ProbeError::Refused(GuardError::BadPrefix(_)))), "{declared}");
+            Ok(())
+        })
 }

@@ -35,6 +35,8 @@ pub enum AddressClass {
 pub enum GuardError {
     #[error("address {address} is refused: {class:?} and not in the declared scope")]
     Refused { address: IpAddr, class: AddressClass },
+    #[error("the declared NAT64 prefix is invalid")]
+    BadPrefix(#[source] CheckError),
 }
 
 
