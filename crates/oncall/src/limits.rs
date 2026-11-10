@@ -155,3 +155,15 @@ pub const MAX_IO_STEPS: usize = 4096;
 
 
 pub const MAX_CONNECT_ADDRESSES: usize = 8;
+
+
+pub const MAX_ALERT_LEVEL: u32 = 10;
+
+
+pub const MAX_FINGERPRINT_BYTES: usize = 256;
+
+
+pub const MAX_OPEN_ALERTS: u32 = 1000;
+
+
+pub const MAX_CHANNEL_NAME_BYTES: usize = 64;

@@ -8,3 +8,6 @@ pub type Headers = Vec<(&'static str, zeroize::Zeroizing<String>)>;
 
 
 pub type ClockFn<'clock> = &'clock dyn Fn() -> std::time::Instant;
+
+
+pub type Row = Vec<crate::alert::Cell>;
