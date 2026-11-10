@@ -1631,9 +1631,12 @@ name = "detection"
 version = "0.0.0"
 dependencies = [
  "agent-channel",
+ "alerts",
  "core-audit",
  "core-config",
+ "core-pg",
  "data-encoding",
+ "rcgen",
  "rustls",
  "serde",
  "serde_json",
@@ -1643,6 +1646,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]

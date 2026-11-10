@@ -2,27 +2,8 @@ use data_encoding::HEXLOWER;
 use sha2::{Digest, Sha256};
 
 
-/// Characters of an `event.id` kept in the identity of an event.
-pub const MAX_EVENT_ID_CHARS: usize = 128;
-
-
-pub fn update_prefixed(hasher: &mut Sha256, part: &[u8]) {
-    hasher.update((part.len() as u64).to_be_bytes());
-    hasher.update(part);
-}
-
-
-/// SHA-256 over the length-prefixed tenant, rule id, the count of event ids and the sorted length-prefixed event ids, in lower-case hex.
-pub fn alert_id(tenant: &str, rule_id: &str, event_ids: &[String]) -> String {
-    let mut sorted: Vec<&str> = event_ids.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    let mut hasher = Sha256::new();
-    update_prefixed(&mut hasher, tenant.as_bytes());
-    update_prefixed(&mut hasher, rule_id.as_bytes());
-    hasher.update((sorted.len() as u64).to_be_bytes());
-    sorted.iter().for_each(|event_id| update_prefixed(&mut hasher, event_id.as_bytes()));
-    HEXLOWER.encode(&hasher.finalize())
-}
+/// Characters of an `event.id` kept in the identity of an event: with `:` and the 64 hex of the hash the identity stays within the 128 the alert store takes.
+pub const MAX_EVENT_ID_CHARS: usize = 63;
 
 
 /// The hash of the bytes the bus delivered, so two different events never share an identity even when an agent repeats an `event.id`.

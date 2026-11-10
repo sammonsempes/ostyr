@@ -1,30 +1,47 @@
+#[path = "postgres/certs.rs"]
+mod certs;
 mod common;
+#[path = "postgres/fake.rs"]
+mod fake;
 #[path = "../../siem-ingest/tests/nats_stub/mod.rs"]
 mod nats_stub;
+#[path = "postgres/types.rs"]
+mod types;
 
 
-use common::types::TestResult;
+use alerts::error::StoreError;
+use alerts::id::alert_id;
+use alerts::model::Severity;
+use alerts::types::RowFuture;
+use certs::{loopback, make_pki};
+use common::types::{Tables, TestResult};
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
 use core_config::reload::{current_config, reload, ReloadContext, ReloadEngine, ReloadOutcome};
+use core_pg::error::PgError;
+use core_pg::scope::{tenant_of, TenantScope};
 use detection::detect::{
-    checkpoint_if_dirty, checkpoint_path, collect_alerts, detect_batch, detection_sink, engine_for, identity_of, new_detector, record_of,
-    restore_state, save_all, valid_tenant,
+    checkpoint_if_dirty, checkpoint_path, collect_alerts, commit_in_place, detect_batch, detection_sink, engine_for, identity_of, is_permanent,
+    new_detector, record_of, restore_state, save_all, valid_tenant,
 };
 use detection::error::{DetectionError, SinkError};
-use detection::id::{alert_id, event_identity, payload_hash, MAX_EVENT_ID_CHARS};
+use detection::id::{event_identity, payload_hash, MAX_EVENT_ID_CHARS};
 use detection::model::{
-    AlertRecord, AlertStore, CommitPolicy, Detector, FixedPaths, MAX_ALERTS_PER_BATCH, MAX_ALERT_LINE_BYTES, MAX_GROUP_FIELDS, MAX_STORED_EVENT_IDS,
+    AlertRecord, AlertStore, CommitPolicy, Detector, FixedPaths, PgStore, SinkKind, MAX_ALERTS_PER_BATCH, MAX_ALERT_LINE_BYTES, MAX_GROUP_FIELDS,
+    MAX_STORED_EVENT_IDS,
 };
+use detection::pg::{alert_of, commit_pg, commit_with, open_pg_store, pg_commit, screen_records, severity_of, system_micros};
 use detection::run::{detection_pipeline, run_detection, run_service};
-use detection::settings::{check_backoff, fixed_paths, load_detection_file, open_ingest, open_rules_engine};
+use detection::settings::{check_backoff, check_fixed, fixed_paths, load_detection_file, open_ingest, open_pg_engine, open_rules_engine};
 use detection::store::{
-    bound_record, cut_text, file_commit, line_id, load_seen, move_file, new_store, open_alert_store, rotate_to_new, rotated_name, temp_name,
-    OMITTED_KEY,
+    bound_record, commit_alerts, cut_text, file_commit, line_id, load_seen, move_file, new_store, open_alert_store, rotate_to_new, rotated_name,
+    sync_directory, temp_name, OMITTED_KEY,
 };
 use detection::types::{AlertSyncFn, AlertWriter, RotateFn};
+use fake::{Fake, Mode, Reply};
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Queued, Stub};
+use rcgen::SanType;
 use serde_json::Value;
 use siem_ingest::model::{Document, Pipeline, Wiring};
 use siem_ingest::pipeline::run_cycle;
@@ -37,8 +54,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use stream_correlation::engine::{process_event, snapshot};
+use stream_correlation::level::Level;
 use tempfile::{tempdir, TempDir};
 use time::OffsetDateTime;
+use tokio::runtime::{Builder, Runtime};
+use types::Handler;
 
 
 const TWO: usize = 2;
@@ -327,6 +347,14 @@ fn memory_store(writer: Flaky, fail_sync: Arc<AtomicBool>) -> Arc<AlertStore> {
 }
 
 
+fn seen_of(store: &AlertStore) -> Result<HashSet<String>, Box<dyn Error + Send + Sync>> {
+    match store {
+        AlertStore::File(inner) => Ok(inner.lock().map_err(|_| "poisoned")?.seen.clone()),
+        AlertStore::Postgres(_) => Err("not a file store".into()),
+    }
+}
+
+
 struct Gear {
     detector: Detector,
     output: Shared,
@@ -569,6 +597,10 @@ fn only_a_plain_tenant_gets_an_engine_and_their_number_is_capped() -> TestResult
     assert!(valid_tenant("tenant-1_a"));
     assert!(!valid_tenant(""));
     assert!(!valid_tenant("../x"));
+    assert!(!valid_tenant("-x"));
+    assert!(!valid_tenant("_x"));
+    assert!(!valid_tenant(&"a".repeat(core_pg::scope::MAX_TENANT_BYTES + 1)));
+    assert!(valid_tenant("a.b-c_d"));
     assert!(matches!(engine_for(&gear.detector, "../x"), Err(DetectionError::InvalidTenant)));
     assert!(matches!(engine_for(&gear.detector, ""), Err(DetectionError::InvalidTenant)));
     engine_for(&gear.detector, "a")?;
@@ -610,6 +642,7 @@ fn a_corrupt_checkpoint_refuses_the_tenant_and_a_failed_save_stays_dirty() -> Te
     checkpoint_if_dirty(&gear.detector);
     fs::write(checkpoint_path(&bench.dir.path().join("checkpoints"), "z"), "not a checkpoint")?;
     assert!(matches!(engine_for(&gear.detector, "z"), Err(DetectionError::Correlation(_))));
+    assert!(detect_batch(&gear.detector, "z", &documents(&[whoami("z1", 0)])).is_err());
     Ok(())
 }
 
@@ -724,6 +757,7 @@ fn record(id: &str, tenant: &str) -> AlertRecord {
         tenant: tenant.to_owned(),
         rule_id: "rule".to_owned(),
         rule_title: "Rule".to_owned(),
+        level: Level::Medium,
         group: Default::default(),
         first_ms: 0,
         last_ms: 1,
@@ -782,7 +816,7 @@ fn after_a_failed_sync_the_ids_are_not_remembered_and_the_retry_writes_them_agai
     gear.fail_sync.store(true, Ordering::SeqCst);
     let batch = vec![record("x1", "a")];
     assert!(matches!(file_commit(&gear.detector.store, "a", &batch), Err(SinkError::Sync(_))));
-    assert!(gear.detector.store.inner.lock().map_err(|_| "poisoned")?.seen.is_empty());
+    assert!(seen_of(&gear.detector.store)?.is_empty());
     assert!(matches!(file_commit(&gear.detector.store, "a", &batch), Err(SinkError::Sync(_))));
     gear.fail_sync.store(false, Ordering::SeqCst);
     assert_eq!(file_commit(&gear.detector.store, "a", &batch)?, 1);
@@ -841,10 +875,7 @@ fn the_alerts_file_keeps_its_ids_across_a_restart_and_a_torn_tail() -> TestResul
     let text = fs::read_to_string(&path)?;
     let ids: Vec<String> = parse_records(&text)?.into_iter().map(|stored| stored.id).collect();
     assert_eq!(ids, ["x1", "x2", "x3"]);
-    assert_eq!(
-        open_alert_store(&path, LARGE_LINE, TWO)?.inner.lock().map_err(|_| "poisoned")?.seen.len(),
-        THREE
-    );
+    assert_eq!(seen_of(&open_alert_store(&path, LARGE_LINE, TWO)?)?.len(), THREE);
     Ok(())
 }
 
@@ -1288,6 +1319,7 @@ fn a_change_of_a_start_only_setting_is_refused_and_audited() -> TestResult {
 fn long_record() -> AlertRecord {
     AlertRecord {
         rule_title: "t".repeat(HUGE_TEXT),
+        level: Level::Medium,
         group: (0..MANY_FIELDS).map(|index| (format!("k{index:02}"), "v".repeat(HUGE_TEXT))).collect(),
         event_ids: (0..MANY_IDS).map(|index| format!("e{index}")).collect(),
         ..record("x1", "a")
@@ -1312,15 +1344,7 @@ fn a_record_is_bounded_when_written_so_the_file_always_reopens() -> TestResult {
     assert_eq!(stored.event_ids.len(), MAX_STORED_EVENT_IDS + 1);
     assert!(stored.event_ids.last().ok_or("no ids")?.contains("more event ids omitted"));
     assert_eq!(ids_of(&path)?, ["x1"]);
-    assert_eq!(
-        open_alert_store(&path, STORE_LIMIT, TWO)?
-            .inner
-            .lock()
-            .map_err(|_| "poisoned")?
-            .seen
-            .len(),
-        1
-    );
+    assert_eq!(seen_of(&open_alert_store(&path, STORE_LIMIT, TWO)?)?.len(), 1);
     assert_eq!(bound_record(&record("x2", "a")), record("x2", "a"));
     assert_eq!(cut_text("abc", THREE), "abc");
     Ok(())
@@ -1334,7 +1358,7 @@ fn an_oversized_or_torn_line_never_stops_the_service_from_restarting() -> TestRe
     let giant = "x".repeat(MAX_ALERT_LINE_BYTES + 1);
     fs::write(&path, format!("{giant}\n{}\n{{\"id\":\"torn", line_of("x1")?))?;
     let store = open_alert_store(&path, STORE_LIMIT, TWO)?;
-    assert_eq!(store.inner.lock().map_err(|_| "poisoned")?.seen, HashSet::from(["x1".to_owned()]));
+    assert_eq!(seen_of(&store)?, HashSet::from(["x1".to_owned()]));
     assert_eq!(file_commit(&store, "a", &[record("x2", "a")])?, 1);
     Ok(())
 }
@@ -1431,12 +1455,12 @@ fn a_rotation_failing_at_each_step_and_retried_loses_no_rotated_file() -> TestRe
             let marker = dir.path().join(format!("{fault}.fault"));
             fs::write(&marker, "")?;
             (0..ROTATION_RETRIES).try_for_each(|_| -> TestResult {
-                assert!(rotate_to_new(&path, THREE, flaky_move).is_err());
+                assert!(rotate_to_new(&path, THREE, flaky_move, sync_directory).is_err());
                 assert_eq!(fs::read_to_string(&path)?, "current");
                 Ok(())
             })?;
             fs::remove_file(&marker)?;
-            let _output = rotate_to_new(&path, THREE, flaky_move)?;
+            let _output = rotate_to_new(&path, THREE, flaky_move, sync_directory)?;
             assert_eq!(
                 snapshot_of(&path, &ALL_SLOTS)?,
                 [
@@ -1459,7 +1483,7 @@ fn a_rotation_failing_on_the_last_step_keeps_the_rotated_files_and_recovers() ->
     fs::write(rotated_name(&path, 1), "one")?;
     fs::write(format!("{}.fault", path.display()), "")?;
     (0..ROTATION_RETRIES).try_for_each(|_| -> TestResult {
-        assert!(rotate_to_new(&path, TWO, flaky_move).is_err());
+        assert!(rotate_to_new(&path, TWO, flaky_move, sync_directory).is_err());
         assert_eq!(
             snapshot_of(&path, &THREE_SLOTS)?,
             [None, Some("current".to_owned()), Some("one".to_owned())]
@@ -1467,7 +1491,7 @@ fn a_rotation_failing_on_the_last_step_keeps_the_rotated_files_and_recovers() ->
         Ok(())
     })?;
     fs::remove_file(format!("{}.fault", path.display()))?;
-    let _output = rotate_to_new(&path, TWO, flaky_move)?;
+    let _output = rotate_to_new(&path, TWO, flaky_move, sync_directory)?;
     assert_eq!(
         snapshot_of(&path, &THREE_SLOTS)?,
         [Some(String::new()), Some("current".to_owned()), Some("one".to_owned())]
@@ -1484,7 +1508,7 @@ fn a_rotation_that_cannot_open_the_new_file_or_remove_the_oldest_changes_nothing
     fs::write(rotated_name(&path, 1), "one")?;
     fs::create_dir(temp_name(&path))?;
     (0..ROTATION_RETRIES).try_for_each(|_| -> TestResult {
-        assert!(rotate_to_new(&path, 1, flaky_move).is_err());
+        assert!(rotate_to_new(&path, 1, flaky_move, sync_directory).is_err());
         assert_eq!(snapshot_of(&path, &[0, 1])?, [Some("current".to_owned()), Some("one".to_owned())]);
         Ok(())
     })?;
@@ -1492,7 +1516,7 @@ fn a_rotation_that_cannot_open_the_new_file_or_remove_the_oldest_changes_nothing
     fs::remove_file(rotated_name(&path, 1))?;
     fs::create_dir(rotated_name(&path, 1))?;
     (0..ROTATION_RETRIES).try_for_each(|_| -> TestResult {
-        assert!(rotate_to_new(&path, 1, flaky_move).is_err());
+        assert!(rotate_to_new(&path, 1, flaky_move, sync_directory).is_err());
         assert_eq!(fs::read_to_string(&path)?, "current");
         Ok(())
     })
@@ -1503,7 +1527,7 @@ fn a_rotation_that_cannot_open_the_new_file_or_remove_the_oldest_changes_nothing
 fn a_rotation_with_the_current_file_missing_just_moves_the_new_one_in() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("alerts.jsonl");
-    let _output = rotate_to_new(&path, 0, flaky_move)?;
+    let _output = rotate_to_new(&path, 0, flaky_move, sync_directory)?;
     assert!(path.exists());
     assert!(!temp_name(&path).exists());
     Ok(())
@@ -1531,5 +1555,896 @@ fn a_service_file_that_differs_from_the_start_baseline_is_refused() -> TestResul
     let audit = Shared::default();
     assert!(open_ingest(path.clone(), baseline.clone(), audit_fn(&audit), context(&path)).is_err());
     assert!(open_rules_engine(path.clone(), baseline, audit_fn(&audit), context(&path)).is_err());
+    Ok(())
+}
+
+
+fn checking_sync(path: &Path) -> io::Result<()> {
+    if temp_name(path).exists() || !rotated_name(path, 1).exists() {
+        Err(io::Error::other("directory flushed before the renames"))
+    } else if PathBuf::from(format!("{}.syncfault", path.display())).exists() {
+        Err(io::Error::other("injected directory sync failure"))
+    } else {
+        Ok(())
+    }
+}
+
+
+#[test]
+fn the_rotation_flushes_the_directory_after_both_renames() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("alerts.jsonl");
+    fs::write(&path, "current")?;
+    let _output = rotate_to_new(&path, TWO, move_file, checking_sync)?;
+    assert_eq!(fs::read_to_string(rotated_name(&path, 1))?, "current");
+    assert!(!temp_name(&path).exists());
+    fs::write(format!("{}.syncfault", path.display()), "")?;
+    assert!(rotate_to_new(&path, TWO, move_file, checking_sync).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_directory_sync_works_on_a_directory_and_fails_on_a_missing_one() -> TestResult {
+    let dir = tempdir()?;
+    sync_directory(&dir.path().join("alerts.jsonl"))?;
+    assert!(sync_directory(&dir.path().join("missing").join("alerts.jsonl")).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_record_id_is_the_alert_store_id_and_matches_the_t163_vector() -> TestResult {
+    let events = vec!["e1".to_owned(), "e2".to_owned()];
+    let vector = alert_id("a", "r", &events);
+    assert!(vector.starts_with("2d6c7e2f"), "{vector}");
+    let record = record_of(
+        "a",
+        stream_correlation::window::Alert {
+            rule_id: "r".to_owned(),
+            rule_title: "R".to_owned(),
+            level: stream_correlation::level::Level::Medium,
+            group: Default::default(),
+            first_ms: 0,
+            last_ms: 1,
+            event_ids: vec!["e2".to_owned(), "e1".to_owned()],
+        },
+    );
+    assert_eq!(record.id, vector);
+    Ok(())
+}
+
+
+const PG_SECTION: &str =
+    "postgres:\n  host: 127.0.0.1\n  database: ostyr\n  user: ostyr\n  password_file: /nonexistent/pass\n  ca_file: /nonexistent/ca\n";
+
+
+#[test]
+fn the_sink_setting_is_validated() -> TestResult {
+    let (_dir, file_path) = write_bench(&[WHOAMI, SEEN_ONCE], 1, "")?;
+    assert_eq!(load_detection_file(&file_path)?.sink, SinkKind::File);
+    let (_bad_dir, bad_path) = write_bench(&[WHOAMI, SEEN_ONCE], 1, "sink: elsewhere\n")?;
+    assert!(load_detection_file(&bad_path).is_err());
+    let (_missing_dir, missing_path) = write_bench(&[WHOAMI, SEEN_ONCE], 1, "sink: postgres\n")?;
+    let audit = Shared::default();
+    assert!(open_pg_engine(missing_path.clone(), fixed_of(&missing_path)?, audit_fn(&audit), context(&missing_path)).is_err());
+    let (_pg_dir, pg_path) = write_bench(&[WHOAMI, SEEN_ONCE], 1, &format!("sink: postgres\n{PG_SECTION}"))?;
+    let engine = open_pg_engine(pg_path.clone(), fixed_of(&pg_path)?, audit_fn(&audit), context(&pg_path))?;
+    assert_eq!(current_config(&engine).host, "127.0.0.1");
+    assert_eq!(load_detection_file(&pg_path)?.sink, SinkKind::Postgres);
+    Ok(())
+}
+
+
+#[test]
+fn a_live_change_of_the_sink_is_refused() -> TestResult {
+    let (_dir, path) = write_bench(&[WHOAMI, SEEN_ONCE], 1, "")?;
+    let baseline = fixed_of(&path)?;
+    let (_other, changed) = write_bench(&[WHOAMI, SEEN_ONCE], 1, &format!("sink: postgres\n{PG_SECTION}"))?;
+    let file = load_detection_file(&changed)?;
+    let file_sink = FixedPaths {
+        sink: SinkKind::File,
+        ..fixed_paths(&file)
+    };
+    assert!(check_fixed(&file_sink, file.clone()).is_err());
+    assert!(check_fixed(&fixed_paths(&file), file).is_ok());
+    assert_eq!(baseline.sink, SinkKind::File);
+    Ok(())
+}
+
+
+const PG_CLOCK_MICROS: u64 = 1_700_000_000_000_000;
+
+
+const MIN_NOW_MICROS: u64 = 1_700_000_000_000_000;
+
+
+const HUNDRED: usize = 100;
+
+
+const TITLE_LIMIT: usize = 256;
+
+
+const BEYOND_RANGE_MS: i64 = 253_402_304_399_000;
+
+
+const BEFORE_YEAR_ZERO_MS: i64 = -62_167_222_800_000;
+
+
+const POLL_ATTEMPTS: usize = 2000;
+
+
+const POLL_STEP: Duration = Duration::from_millis(5);
+
+
+fn fixed_micros() -> u64 {
+    PG_CLOCK_MICROS
+}
+
+
+fn pg_handler(failing: Arc<AtomicBool>, hangup: Arc<AtomicBool>) -> Handler {
+    Arc::new(move |sql| {
+        if sql.contains("ON CONFLICT") {
+            if hangup.load(Ordering::SeqCst) {
+                Reply::Hangup
+            } else if failing.load(Ordering::SeqCst) {
+                Reply::Error("XX000")
+            } else {
+                Reply::Rows(vec![vec!["1".to_owned()]])
+            }
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+struct Database {
+    runtime: Runtime,
+    fake: Fake,
+    failing: Arc<AtomicBool>,
+    hangup: Arc<AtomicBool>,
+    files: TempDir,
+    section: String,
+}
+
+
+fn database() -> Result<Database, Box<dyn Error + Send + Sync>> {
+    let pki = make_pki(SanType::IpAddress(loopback())).map_err(|error| error.to_string())?;
+    let runtime = Builder::new_multi_thread().worker_threads(TWO).enable_all().build()?;
+    let failing = Arc::new(AtomicBool::new(false));
+    let hangup = Arc::new(AtomicBool::new(false));
+    let handler = pg_handler(Arc::clone(&failing), Arc::clone(&hangup));
+    let fake = runtime.block_on(fake::start(Mode::Tls(pki.server), "p", handler))?;
+    let files = tempdir()?;
+    fs::write(files.path().join("pg.pass"), "p")?;
+    fs::write(files.path().join("ca.pem"), &pki.ca_pem)?;
+    let section = format!(
+        "postgres:\n  host: 127.0.0.1\n  port: {}\n  database: ostyr\n  user: ostyr\n  password_file: {}\n  ca_file: {}\n  connect_timeout_secs: 2\n",
+        fake.port,
+        files.path().join("pg.pass").display(),
+        files.path().join("ca.pem").display()
+    );
+    Ok(Database {
+        runtime,
+        fake,
+        failing,
+        hangup,
+        files,
+        section,
+    })
+}
+
+
+fn statements_of(database: &mut Database) -> Vec<String> {
+    std::iter::repeat_with(|| database.fake.statements.try_recv())
+        .take(POLL_ATTEMPTS)
+        .take_while(Result::is_ok)
+        .flatten()
+        .collect()
+}
+
+
+fn stored_docs(statements: &[String], tenant: &str) -> Result<Vec<Value>, Box<dyn Error + Send + Sync>> {
+    let prefix = format!("PARAMS {tenant}|");
+    statements
+        .iter()
+        .filter_map(|entry| entry.strip_prefix(&prefix))
+        .map(|text| Ok(serde_json::from_str::<Value>(text)?))
+        .collect()
+}
+
+
+fn pg_store_over(bench: &Bench) -> Result<PgStore, Box<dyn Error + Send + Sync>> {
+    let engine = open_pg_engine(bench.path.clone(), fixed_of(&bench.path)?, audit_fn(&bench.audit), context(&bench.path))?;
+    Ok(open_pg_store(Arc::new(engine), fixed_micros)?)
+}
+
+
+fn pg_bench() -> Result<(Database, Bench), Box<dyn Error + Send + Sync>> {
+    let database = database()?;
+    assert!(database.files.path().exists());
+    let bench = bench_with(&[WHOAMI, SEEN_ONCE], &format!("sink: postgres\n{}", database.section))?;
+    Ok((database, bench))
+}
+
+
+fn alert_record(tenant: &str, events: &[&str]) -> AlertRecord {
+    AlertRecord {
+        id: "unused".to_owned(),
+        tenant: tenant.to_owned(),
+        rule_id: "rule".to_owned(),
+        rule_title: "Rule".to_owned(),
+        level: Level::Medium,
+        group: [("host.name".to_owned(), "h1".to_owned())].into_iter().collect(),
+        first_ms: 0,
+        last_ms: 1,
+        event_ids: events.iter().map(|event| (*event).to_owned()).collect(),
+    }
+}
+
+
+fn memory_rows(origin: &Tables) -> impl Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'static> {
+    let shared = Arc::clone(origin);
+    move |scope, _sql, params| -> RowFuture<'static> {
+        let tables = Arc::clone(&shared);
+        Box::pin(async move {
+            let docs: Vec<Value> = serde_json::from_str(params.first().map_or("[]", String::as_str)).map_err(|_| PgError::InvalidTenant)?;
+            let ids: Vec<String> = docs
+                .iter()
+                .filter_map(|doc| doc.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect();
+            let mut guard = tables.lock().map_err(|_| PgError::InvalidTenant)?;
+            let table = guard.entry(tenant_of(&scope).to_owned()).or_default();
+            let fresh = ids.iter().filter(|id| !table.contains(id)).count();
+            table.extend(ids.into_iter().filter(|id| !table.contains(id)).collect::<Vec<_>>());
+            Ok(vec![vec![fresh.to_string()]])
+        })
+    }
+}
+
+
+fn plain_runtime() -> Result<Runtime, Box<dyn Error + Send + Sync>> {
+    Ok(Builder::new_current_thread().enable_all().build()?)
+}
+
+
+#[test]
+fn an_alert_is_stored_once_under_the_batch_tenant_and_a_replay_adds_nothing() -> TestResult {
+    let tables: Tables = Arc::default();
+    let exec = memory_rows(&tables);
+    let runtime = plain_runtime()?;
+    let batch = [alert_record("a", &["e1", "e2"])];
+    assert_eq!(commit_with(&runtime, &exec, "a", &batch, PG_CLOCK_MICROS)?, 1);
+    assert_eq!(commit_with(&runtime, &exec, "a", &batch, PG_CLOCK_MICROS + 1)?, 0);
+    let stored = tables.lock().map_err(|_| "poisoned")?;
+    assert_eq!(stored.get("a").map(Vec::len), Some(1));
+    assert!(stored.get("b").is_none());
+    assert_eq!(
+        stored.get("a").and_then(|ids| ids.first()),
+        Some(&alert_id("a", "rule", &["e1".to_owned(), "e2".to_owned()]))
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_scope_is_the_batch_tenant_only() -> TestResult {
+    let tables: Tables = Arc::default();
+    let exec = memory_rows(&tables);
+    let runtime = plain_runtime()?;
+    let foreign = [alert_record("b", &["e1"])];
+    assert!(matches!(
+        commit_with(&runtime, &exec, "a", &foreign, PG_CLOCK_MICROS),
+        Err(SinkError::Store(StoreError::TenantMismatch))
+    ));
+    assert!(matches!(
+        commit_with(&runtime, &exec, "-x", &[], PG_CLOCK_MICROS),
+        Err(SinkError::Database(_))
+    ));
+    assert!(tables.lock().map_err(|_| "poisoned")?.is_empty());
+    assert_eq!(commit_with(&runtime, &exec, "b", &foreign, PG_CLOCK_MICROS)?, 1);
+    let stored = tables.lock().map_err(|_| "poisoned")?;
+    assert_eq!((stored.get("a"), stored.get("b").map(Vec::len)), (None, Some(1)));
+    Ok(())
+}
+
+
+#[test]
+fn a_store_failure_is_returned() -> TestResult {
+    let runtime = plain_runtime()?;
+    let failing =
+        |_scope: TenantScope, _sql: &'static str, _params: Vec<String>| -> RowFuture<'static> { Box::pin(async { Err(PgError::InvalidTenant) }) };
+    assert!(matches!(
+        commit_with(&runtime, &failing, "a", &[alert_record("a", &["e1"])], PG_CLOCK_MICROS),
+        Err(SinkError::Store(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn two_long_event_ids_with_different_payloads_keep_their_hash_and_get_different_alert_ids() -> TestResult {
+    let long = "A".repeat(HUGE_TEXT);
+    let first = event_identity(Some(&long), b"one");
+    let second = event_identity(Some(&long), b"two");
+    let alert_first = alert_of(&alert_record("a", &[first.as_str()]), 0)?;
+    let alert_second = alert_of(&alert_record("a", &[second.as_str()]), 0)?;
+    assert_eq!(alert_first.event_ids, [first]);
+    assert_ne!(alert_first.id, alert_second.id);
+    Ok(())
+}
+
+
+#[test]
+fn the_mapping_bounds_every_field_and_derives_the_id_from_what_is_stored() -> TestResult {
+    let alert = alert_of(&alert_record("a", &["e2", "e1"]), PG_CLOCK_MICROS)?;
+    assert_eq!(alert.event_ids, ["e1", "e2"]);
+    assert_eq!(alert.id, alert_id("a", "rule", &alert.event_ids));
+    assert_eq!((alert.host_name.as_deref(), alert.user_name.as_deref()), (Some("h1"), None));
+    assert_eq!(
+        (alert.event_time.as_str(), alert.created_micros),
+        ("1970-01-01T00:00:00.001Z", PG_CLOCK_MICROS)
+    );
+    let many: Vec<String> = (0..HUNDRED + THREE).map(|number| format!("e{number:04}")).collect();
+    let crowded = AlertRecord {
+        event_ids: many.clone(),
+        ..alert_record("a", &[])
+    };
+    let stored = alert_of(&crowded, 0)?;
+    assert_eq!(stored.event_ids.len(), HUNDRED);
+    assert_eq!(stored.id, alert_id("a", "rule", &stored.event_ids));
+    assert_eq!(alert_of(&crowded, 1)?.id, stored.id);
+    let hostile = AlertRecord {
+        rule_id: "r\0".repeat(HUGE_TEXT),
+        rule_title: "t".repeat(HUGE_TEXT),
+        group: (0..MAX_GROUP_FIELDS * TWO)
+            .map(|number| (format!("k{number}"), "v".repeat(HUGE_TEXT)))
+            .collect(),
+        ..alert_record("a", &["x\0y"])
+    };
+    let bounded = alert_of(&hostile, 0)?;
+    assert!(!bounded.rule_id.contains('\0') && !bounded.event_ids.iter().any(|id| id.contains('\0')));
+    assert!(bounded.rule_title.chars().count() <= TITLE_LIMIT);
+    assert!(bounded.summary.truncated);
+    let nameless = AlertRecord {
+        group: [("host.name".to_owned(), String::new()), ("user.name".to_owned(), "u".to_owned())]
+            .into_iter()
+            .collect(),
+        ..alert_record("a", &["e1"])
+    };
+    let anonymous = alert_of(&nameless, 0)?;
+    assert_eq!((anonymous.host_name, anonymous.user_name.as_deref()), (None, Some("u")));
+    assert!(system_micros() > MIN_NOW_MICROS);
+    Ok(())
+}
+
+
+#[test]
+fn a_sink_given_the_other_kind_of_store_refuses() -> TestResult {
+    let (_database, bench) = pg_bench()?;
+    let pg = AlertStore::Postgres(pg_store_over(&bench)?);
+    assert!(matches!(file_commit(&pg, "a", &[]), Err(SinkError::WrongStore)));
+    let dir = tempdir()?;
+    let file = open_alert_store(&dir.path().join("alerts.jsonl"), LARGE_LINE, TWO)?;
+    assert!(matches!(pg_commit(&file, "a", &[]), Err(SinkError::WrongStore)));
+    assert_eq!(commit_alerts(&file, "a", &[record("x1", "a")])?, 1);
+    assert_eq!(commit_alerts(&pg, "a", &[])?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_connection_is_kept_migrated_once_and_survives_a_refusal_from_the_database() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let store = pg_store_over(&bench)?;
+    let batch = [alert_record("a", &["e1", "e2"])];
+    assert_eq!(commit_pg(&store, "a", &batch)?, 1);
+    assert_eq!(commit_pg(&store, "a", &batch)?, 1);
+    database.failing.store(true, Ordering::SeqCst);
+    assert!(matches!(commit_pg(&store, "a", &batch), Err(SinkError::Store(_))));
+    assert!(store.link.lock().map_err(|_| "poisoned")?.is_some());
+    database.failing.store(false, Ordering::SeqCst);
+    assert_eq!(commit_pg(&store, "a", &batch)?, 1);
+    let statements = statements_of(&mut database);
+    let docs = stored_docs(&statements, "a")?;
+    assert_eq!(docs.len(), THREE);
+    let ids: Vec<Option<&str>> = docs
+        .iter()
+        .map(|doc| doc.get(0).and_then(|alert| alert.get("id")).and_then(Value::as_str))
+        .collect();
+    assert!(ids.first().is_some_and(Option::is_some));
+    assert!(ids.iter().all(|id| *id == ids.first().copied().flatten()));
+    assert_eq!(
+        statements.iter().filter(|entry| entry.contains("INSERT INTO schema_migrations")).count(),
+        1
+    );
+    let passwords: Vec<Vec<u8>> = std::iter::repeat_with(|| database.fake.passwords.try_recv())
+        .take(POLL_ATTEMPTS)
+        .take_while(Result::is_ok)
+        .flatten()
+        .collect();
+    assert_eq!(passwords, [b"p".to_vec()]);
+    assert_eq!(stored_docs(&statements, "b")?.len(), 0);
+    let created = docs
+        .iter()
+        .all(|doc| doc.get(0).and_then(|alert| alert.get("created")).and_then(Value::as_u64) == Some(PG_CLOCK_MICROS));
+    assert!(created);
+    Ok(())
+}
+
+
+#[test]
+fn a_closed_connection_is_replaced_and_an_unreachable_database_is_an_error() -> TestResult {
+    let (database, bench) = pg_bench()?;
+    let store = pg_store_over(&bench)?;
+    let batch = [alert_record("a", &["e1"])];
+    assert_eq!(commit_pg(&store, "a", &batch)?, 1);
+    drop(database.runtime);
+    let closed = (0..POLL_ATTEMPTS).any(|_| {
+        std::thread::sleep(POLL_STEP);
+        store
+            .link
+            .lock()
+            .map(|slot| slot.as_ref().is_some_and(tokio_postgres::Client::is_closed))
+            .unwrap_or(false)
+    });
+    assert!(closed);
+    assert!(matches!(commit_pg(&store, "a", &batch), Err(SinkError::Database(_))));
+    assert!(store.link.lock().map_err(|_| "poisoned")?.is_none());
+    Ok(())
+}
+
+
+#[test]
+fn an_event_identity_over_the_store_limit_is_refused_not_cut() -> TestResult {
+    let long = "x".repeat(alerts::store::MAX_EVENT_ID_CHARS + 1);
+    assert!(matches!(
+        alert_of(&alert_record("a", &[long.as_str()]), 0),
+        Err(SinkError::EventIdTooLong { .. })
+    ));
+    let tables: Tables = Arc::default();
+    let exec = memory_rows(&tables);
+    let refused = commit_with(&plain_runtime()?, &exec, "a", &[alert_record("a", &[long.as_str()])], 0);
+    assert!(matches!(refused, Err(SinkError::EventIdTooLong { .. })));
+    assert!(tables.lock().map_err(|_| "poisoned")?.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_commit_never_connects_and_a_non_empty_one_fails_typed_on_a_dropped_database() -> TestResult {
+    let (database, bench) = pg_bench()?;
+    let store = pg_store_over(&bench)?;
+    drop(database.runtime);
+    assert_eq!(commit_pg(&store, "a", &[])?, 0);
+    assert!(store.link.lock().map_err(|_| "poisoned")?.is_none());
+    let batch = [alert_record("a", &["e1"])];
+    assert!(matches!(commit_pg(&store, "a", &batch), Err(SinkError::Database(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_store_leaves_the_batch_unacknowledged_and_the_redelivery_stores_the_same_alert() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let stopping = Arc::new(AtomicBool::new(true));
+    let stop_flag = Arc::clone(&stopping);
+    let policy = CommitPolicy {
+        ingest: Arc::clone(&bench.ingest),
+        progress: Arc::new(|| Ok(())),
+        stop: Arc::new(move || stop_flag.load(Ordering::SeqCst)),
+        sleep: no_sleep,
+        max_attempts: RETRIES as u32,
+    };
+    let detector = new_detector(
+        Arc::clone(&bench.rules),
+        Arc::new(AlertStore::Postgres(pg_store_over(&bench)?)),
+        commit_alerts,
+        (MAX_ALERTS_PER_BATCH, THREE),
+        bench.dir.path().join("checkpoints"),
+        policy,
+    );
+    let batch = documents(&[whoami("e1", 0)]);
+    database.failing.store(true, Ordering::SeqCst);
+    assert!(detect_batch(&detector, "a", &batch).is_err());
+    database.failing.store(false, Ordering::SeqCst);
+    detect_batch(&detector, "a", &batch)?;
+    let statements = statements_of(&mut database);
+    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT")).count(), TWO);
+    let docs = stored_docs(&statements, "a")?;
+    assert_eq!(docs.len(), 1);
+    let stored = docs.first().and_then(|doc| doc.get(0)).ok_or("no alert")?;
+    let events: Vec<String> = serde_json::from_value(stored.get("event_ids").cloned().ok_or("no events")?)?;
+    assert_eq!(
+        stored.get("id").and_then(Value::as_str),
+        Some(alert_id("a", "whoami-seen", &events).as_str())
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_service_runs_with_the_postgres_sink() -> TestResult {
+    let mut database = database()?;
+    let (dir, stub, path) = service_files(&format!("sink: postgres\n{}", database.section))?;
+    let payloads = [whoami("e1", 0), whoami("e2", 1)];
+    payloads
+        .iter()
+        .for_each(|payload| lock(&stub.hub).queue.push_back(queued("events.a", payload)));
+    let hub = Arc::clone(&stub.hub);
+    let stop = Box::new(move || lock(&hub).acks.len() >= TWO);
+    let summary = run_service(&path, stop, commit_alerts)?;
+    assert!(summary.cycles > 0);
+    let statements = statements_of(&mut database);
+    let docs = stored_docs(&statements, "a")?;
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        docs.first()
+            .and_then(|doc| doc.get(0))
+            .and_then(|alert| alert.get("rule_id"))
+            .and_then(Value::as_str),
+        Some("whoami-twice")
+    );
+    assert!(!dir.path().join("alerts.jsonl").exists() || fs::read_to_string(dir.path().join("alerts.jsonl"))?.is_empty());
+    Ok(())
+}
+
+
+const OVER_INSERT: usize = 501;
+
+
+const MANY_ALERTS: usize = 600;
+
+
+const LAST_INSTANT: &str = "9999-12-31T23:59:59.999Z";
+
+
+const FIRST_INSTANT: &str = "0000-01-01T00:00:00Z";
+
+
+fn permanent_for_a(store: &AlertStore, tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
+    if tenant == "a" {
+        Err(SinkError::EventIdTooLong { max: 1 })
+    } else {
+        file_commit(store, tenant, records)
+    }
+}
+
+
+#[test]
+fn an_event_time_outside_years_0_to_9999_is_clamped_and_the_original_is_kept_in_the_summary() -> TestResult {
+    let late = AlertRecord {
+        last_ms: BEYOND_RANGE_MS,
+        ..alert_record("a", &["e"])
+    };
+    let early = AlertRecord {
+        last_ms: BEFORE_YEAR_ZERO_MS,
+        ..alert_record("a", &["e"])
+    };
+    let (after, before, inside) = (alert_of(&late, 0)?, alert_of(&early, 0)?, alert_of(&alert_record("a", &["e"]), 0)?);
+    assert_eq!((after.event_time.as_str(), before.event_time.as_str()), (LAST_INSTANT, FIRST_INSTANT));
+    assert!(after.summary.text.contains(&format!("\"last_ms\":{BEYOND_RANGE_MS}")) && after.summary.text.contains("\"event_time_clamped\":true"));
+    assert!(before.summary.text.contains(&format!("\"last_ms\":{BEFORE_YEAR_ZERO_MS}")));
+    assert!(inside.summary.text.contains("\"event_time_clamped\":false"));
+    let extreme = AlertRecord {
+        last_ms: i64::MIN,
+        ..alert_record("a", &["e"])
+    };
+    assert_eq!(alert_of(&extreme, 0)?.event_time, FIRST_INSTANT);
+    Ok(())
+}
+
+
+#[test]
+fn more_alerts_than_one_insert_holds_are_stored_in_chunks() -> TestResult {
+    let tables: Tables = Arc::default();
+    let inserts = AtomicUsize::new(0);
+    let inner = memory_rows(&tables);
+    let exec = |scope: TenantScope, sql: &'static str, params: Vec<String>| -> RowFuture<'static> {
+        inserts.fetch_add(1, Ordering::SeqCst);
+        inner(scope, sql, params)
+    };
+    let runtime = plain_runtime()?;
+    let names: Vec<String> = (0..OVER_INSERT).map(|number| format!("e{number}")).collect();
+    let batch: Vec<AlertRecord> = names.iter().map(|name| alert_record("a", &[name.as_str()])).collect();
+    assert_eq!(commit_with(&runtime, &exec, "a", &batch, PG_CLOCK_MICROS)?, OVER_INSERT);
+    assert_eq!(inserts.load(Ordering::SeqCst), TWO);
+    assert_eq!(tables.lock().map_err(|_| "poisoned")?.get("a").map(Vec::len), Some(OVER_INSERT));
+    Ok(())
+}
+
+
+#[test]
+fn a_permanent_refusal_is_counted_and_acknowledged_and_never_blocks_another_tenant() -> TestResult {
+    let bench = bench(&[WHOAMI, SEEN_ONCE])?;
+    let mut gear = default_gear(&bench);
+    gear.detector.commit = permanent_for_a;
+    gear.stopping.store(false, Ordering::SeqCst);
+    detect_batch(&gear.detector, "a", &documents(&[whoami("e1", 0)]))?;
+    assert!(records_of(&gear.output)?.is_empty());
+    detect_batch(&gear.detector, "b", &documents(&[whoami("e1", 0)]))?;
+    assert_eq!(records_of(&gear.output)?.len(), 1);
+    let counts = gear.detector.permanent.lock().map_err(|_| "poisoned")?;
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts.get("an event identity is longer than 1 characters"), Some(&1));
+    Ok(())
+}
+
+
+fn permanent_for_bad(store: &AlertStore, tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
+    if records.iter().any(|record| record.event_ids.iter().any(|id| id.starts_with("bad"))) {
+        Err(SinkError::EventIdTooLong { max: 1 })
+    } else {
+        file_commit(store, tenant, records)
+    }
+}
+
+
+#[test]
+fn a_refused_record_never_drops_the_valid_records_of_its_batch() -> TestResult {
+    let bench = bench(&[WHOAMI, SEEN_ONCE])?;
+    let mut gear = default_gear(&bench);
+    gear.detector.commit = permanent_for_bad;
+    detect_batch(&gear.detector, "a", &documents(&[whoami("bad", 0), whoami("good", 1)]))?;
+    assert_eq!(records_of(&gear.output)?.len(), 1);
+    let counts = gear.detector.permanent.lock().map_err(|_| "poisoned")?;
+    assert_eq!(counts.get("an event identity is longer than 1 characters"), Some(&1));
+    Ok(())
+}
+
+
+fn permanent_then_transient(_store: &AlertStore, _tenant: &str, records: &[AlertRecord]) -> Result<usize, SinkError> {
+    if records.len() > 1 {
+        Err(SinkError::TenantMismatch)
+    } else {
+        Err(SinkError::Write(io::Error::other("down")))
+    }
+}
+
+
+#[test]
+fn a_transient_failure_while_isolating_the_records_is_returned() -> TestResult {
+    let bench = bench(&[WHOAMI, SEEN_ONCE])?;
+    let mut gear = default_gear(&bench);
+    gear.detector.commit = permanent_then_transient;
+    gear.stopping.store(true, Ordering::SeqCst);
+    let records = [alert_record("a", &["e1"]), alert_record("a", &["e2"])];
+    assert!(matches!(commit_in_place(&gear.detector, "a", &records), Err(SinkError::Write(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_tenant_core_pg_refuses_gets_no_engine_and_never_blocks_another_tenant() -> TestResult {
+    let bench = bench(&[WHOAMI, SEEN_ONCE])?;
+    let gear = default_gear(&bench);
+    detect_batch(&gear.detector, "-x", &documents(&[whoami("e1", 0), whoami("e2", 1)]))?;
+    detect_batch(&gear.detector, "b", &documents(&[whoami("e1", 0)]))?;
+    assert_eq!(records_of(&gear.output)?.len(), 1);
+    let counts = gear.detector.permanent.lock().map_err(|_| "poisoned")?;
+    assert_eq!(counts.values().copied().sum::<u64>(), TWO as u64);
+    assert!(counts.keys().all(|kind| !kind.contains("-x")));
+    Ok(())
+}
+
+
+#[test]
+fn only_a_refusal_the_store_would_repeat_is_permanent() -> TestResult {
+    let range = OffsetDateTime::from_unix_timestamp(i64::MAX).err().ok_or("in range")?;
+    let json = serde_json::from_str::<Value>("{").err().ok_or("parsed")?;
+    let permanent = [
+        SinkError::EventIdTooLong { max: 1 },
+        SinkError::EventTimeRange(range),
+        SinkError::EventTimeFormat(time::error::Format::InvalidComponent("year")),
+        SinkError::TenantMismatch,
+        SinkError::Database(PgError::InvalidTenant),
+        SinkError::Serialize(json),
+        SinkError::Store(StoreError::IdMismatch),
+        SinkError::Store(StoreError::TooManyAlerts { limit: 1 }),
+        SinkError::Store(StoreError::FieldEmpty { field: "rule_title" }),
+    ];
+    assert!(permanent.iter().all(is_permanent));
+    let transient = [
+        SinkError::Exhausted,
+        SinkError::WrongStore,
+        SinkError::Write(io::Error::other("down")),
+        SinkError::Database(PgError::ConnectTimeout { seconds: 1 }),
+        SinkError::Store(StoreError::Pg(PgError::InvalidTenant)),
+        SinkError::Store(StoreError::BadRow { column: 0 }),
+        SinkError::Store(StoreError::Busy),
+        SinkError::Store(StoreError::BadCursor),
+        SinkError::Store(StoreError::BadEvents(serde_json::from_str::<Value>("{").err().ok_or("parsed")?)),
+    ];
+    assert!(!transient.iter().any(is_permanent));
+    Ok(())
+}
+
+
+#[test]
+fn an_event_in_year_10000_or_before_year_0_never_stalls_detection_and_is_stored_clamped() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let stopping = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stopping);
+    let policy = CommitPolicy {
+        ingest: Arc::clone(&bench.ingest),
+        progress: Arc::new(|| Ok(())),
+        stop: Arc::new(move || stop_flag.load(Ordering::SeqCst)),
+        sleep: no_sleep,
+        max_attempts: RETRIES as u32,
+    };
+    let detector = new_detector(
+        Arc::clone(&bench.rules),
+        Arc::new(AlertStore::Postgres(pg_store_over(&bench)?)),
+        commit_alerts,
+        (MAX_ALERTS_PER_BATCH, THREE),
+        bench.dir.path().join("checkpoints"),
+        policy,
+    );
+    let late = whoami("e1", 0).replace("2026-11-10T10:00:00Z", "9999-12-31T23:59:59-01:00");
+    let early = whoami("e2", 0).replace("2026-11-10T10:00:00Z", "0000-01-01T00:00:00+01:00");
+    detect_batch(&detector, "a", &documents(&[late]))?;
+    detect_batch(&detector, "c", &documents(&[early]))?;
+    detect_batch(&detector, "b", &documents(&[whoami("e3", 0)]))?;
+    let statements = statements_of(&mut database);
+    assert_eq!(stored_docs(&statements, "b")?.len(), 1);
+    assert_eq!(stored_docs(&statements, "a")?.len(), 1);
+    assert_eq!(stored_docs(&statements, "c")?.len(), 1);
+    assert!(detector.permanent.lock().map_err(|_| "poisoned")?.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn six_hundred_matching_events_in_one_batch_are_all_stored() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let stopping = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stopping);
+    let policy = CommitPolicy {
+        ingest: Arc::clone(&bench.ingest),
+        progress: Arc::new(|| Ok(())),
+        stop: Arc::new(move || stop_flag.load(Ordering::SeqCst)),
+        sleep: no_sleep,
+        max_attempts: RETRIES as u32,
+    };
+    let detector = new_detector(
+        Arc::clone(&bench.rules),
+        Arc::new(AlertStore::Postgres(pg_store_over(&bench)?)),
+        commit_alerts,
+        (MAX_ALERTS_PER_BATCH, THREE),
+        bench.dir.path().join("checkpoints"),
+        policy,
+    );
+    let payloads: Vec<String> = (0..MANY_ALERTS)
+        .map(|number| whoami(&format!("e{number}"), number % SECONDS_PER_MINUTE))
+        .collect();
+    detect_batch(&detector, "a", &documents(&payloads))?;
+    let statements = statements_of(&mut database);
+    let stored: usize = stored_docs(&statements, "a")?.iter().map(|doc| doc.as_array().map_or(0, Vec::len)).sum();
+    assert_eq!(stored, MANY_ALERTS);
+    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT")).count(), TWO);
+    Ok(())
+}
+
+
+#[test]
+fn every_level_is_stored_with_its_own_severity() -> TestResult {
+    let expected = [
+        (Level::Informational, Severity::Informational),
+        (Level::Low, Severity::Low),
+        (Level::Medium, Severity::Medium),
+        (Level::High, Severity::High),
+        (Level::Critical, Severity::Critical),
+    ];
+    for (level, severity) in expected {
+        let record = AlertRecord {
+            level,
+            ..alert_record("a", &["e1"])
+        };
+        assert_eq!(severity_of(level), severity);
+        assert_eq!(alert_of(&record, 0)?.severity, severity);
+    }
+    Ok(())
+}
+
+
+const SECONDS_PER_MINUTE: usize = 60;
+
+
+const REFUSED_BEFORE_SQL: usize = 599;
+
+
+fn pg_detector(bench: &Bench) -> Result<Detector, Box<dyn Error + Send + Sync>> {
+    let stopping = Arc::new(AtomicBool::new(true));
+    let policy = CommitPolicy {
+        ingest: Arc::clone(&bench.ingest),
+        progress: Arc::new(|| Ok(())),
+        stop: Arc::new(move || stopping.load(Ordering::SeqCst)),
+        sleep: no_sleep,
+        max_attempts: RETRIES as u32,
+    };
+    Ok(new_detector(
+        Arc::clone(&bench.rules),
+        Arc::new(AlertStore::Postgres(pg_store_over(bench)?)),
+        commit_alerts,
+        (MAX_ALERTS_PER_BATCH, THREE),
+        bench.dir.path().join("checkpoints"),
+        policy,
+    ))
+}
+
+
+fn connections_of(database: &mut Database) -> usize {
+    std::iter::repeat_with(|| database.fake.passwords.try_recv())
+        .take(POLL_ATTEMPTS)
+        .take_while(Result::is_ok)
+        .count()
+}
+
+
+#[test]
+fn records_the_store_refuses_are_screened_in_memory_and_cost_no_connection() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let detector = pg_detector(&bench)?;
+    let names: Vec<String> = (0..=REFUSED_BEFORE_SQL).map(|number| format!("e{number}")).collect();
+    let batch: Vec<AlertRecord> = names
+        .iter()
+        .enumerate()
+        .map(|(number, name)| AlertRecord {
+            rule_title: if number == 0 { "ok".to_owned() } else { String::new() },
+            ..alert_record("a", &[name.as_str()])
+        })
+        .collect();
+    assert_eq!(commit_in_place(&detector, "a", &batch)?, 1);
+    assert_eq!(connections_of(&mut database), 1);
+    let statements = statements_of(&mut database);
+    assert_eq!(statements.iter().filter(|entry| entry.contains("ON CONFLICT")).count(), 1);
+    let counts = detector.permanent.lock().map_err(|_| "poisoned")?;
+    assert_eq!(counts.get("field `rule_title` is empty"), Some(&(REFUSED_BEFORE_SQL as u64)));
+    assert_eq!(counts.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_batch_the_store_refuses_entirely_never_connects() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let detector = pg_detector(&bench)?;
+    let batch = [AlertRecord {
+        rule_title: String::new(),
+        ..alert_record("a", &["e1"])
+    }];
+    assert_eq!(commit_in_place(&detector, "a", &batch)?, 0);
+    assert_eq!(connections_of(&mut database), 0);
+    assert!(matches!(screen_records("-x", &batch), Err(SinkError::Database(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_transport_failure_drops_the_connection_and_the_next_commit_reconnects() -> TestResult {
+    let (mut database, bench) = pg_bench()?;
+    let store = pg_store_over(&bench)?;
+    let batch = [alert_record("a", &["e1"])];
+    assert_eq!(commit_pg(&store, "a", &batch)?, 1);
+    database.hangup.store(true, Ordering::SeqCst);
+    assert!(matches!(commit_pg(&store, "a", &batch), Err(SinkError::Store(_))));
+    assert!(store.link.lock().map_err(|_| "poisoned")?.is_none());
+    database.hangup.store(false, Ordering::SeqCst);
+    assert_eq!(commit_pg(&store, "a", &batch)?, 1);
+    assert_eq!(connections_of(&mut database), TWO);
+    Ok(())
+}
+
+
+#[test]
+fn a_tenant_over_the_cap_is_counted_and_acknowledged_not_redelivered() -> TestResult {
+    let bench = bench(&[WHOAMI, SEEN_ONCE])?;
+    let gear = gear(&bench, (MAX_ALERTS_PER_BATCH, 1));
+    detect_batch(&gear.detector, "a", &documents(&[whoami("e1", 0)]))?;
+    detect_batch(&gear.detector, "b", &documents(&[whoami("e1", 0), whoami("e2", 1)]))?;
+    assert_eq!(records_of(&gear.output)?.len(), 1);
+    let counts = gear.detector.permanent.lock().map_err(|_| "poisoned")?;
+    assert_eq!(counts.get("more than 1 tenants"), Some(&(TWO as u64)));
     Ok(())
 }

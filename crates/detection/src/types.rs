@@ -37,3 +37,15 @@ pub type ClockFn = fn() -> OffsetDateTime;
 
 
 pub type SleepFn = fn(Duration);
+
+
+/// Microseconds since the Unix epoch, injected so a test fixes the `created` time of an alert.
+pub type MicrosFn = fn() -> u64;
+
+
+/// Flushes the directory holding a file; injected so a test can see the order of a rotation.
+pub type SyncDirFn = fn(&Path) -> io::Result<()>;
+
+
+/// Records refused as permanent errors, per kind of refusal.
+pub type KindCounts = BTreeMap<String, u64>;
