@@ -1,6 +1,6 @@
 //! Certificate expiry findings as alerts of the alert store (spec section 23).
 
-use crate::expiry::expiry_state;
+use crate::expiry::{expiry_state, SECONDS_PER_DAY};
 use crate::model::{CertRecord, ExpiryState};
 use alerts::error::StoreError;
 use alerts::id::alert_id;
@@ -34,6 +34,9 @@ pub const MICROS_PER_SECOND: u64 = 1_000_000;
 
 
 pub const MAX_CREATED_MICROS: u64 = i64::MAX as u64;
+
+
+pub const MAX_NOW_SECONDS: i64 = (MAX_CREATED_MICROS / MICROS_PER_SECOND) as i64;
 
 
 pub const COMMON_NAME_PREFIX: &str = "CN=";
@@ -109,7 +112,7 @@ pub fn micros_of(seconds: i64) -> u64 {
 
 /// One alert, or `None` when the certificate is not expiring or its fingerprint or `not_after` is outside the grammar.
 pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Alert> {
-    let (severity, state) = level_of(record, now)?;
+    let (severity, state) = level_of(record, now).filter(|_level| now >= 0)?;
     let date = date_of(record.not_after)?;
     let tenant = tenant_of(scope).to_owned();
     let name = cn_of(&record.subject);
@@ -120,13 +123,18 @@ pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Al
     let verb = if state == STATE_EXPIRED { "expired on" } else { "expires on" };
     let event_ids = vec![format!("sha256:{}", record.fingerprint_sha256), format!("state:{state}")];
     let created_micros = micros_of(now);
+    let state_start = if state == STATE_EXPIRED {
+        record.not_after
+    } else {
+        record.not_after.saturating_sub(i64::from(NEAR_DAYS).saturating_mul(SECONDS_PER_DAY))
+    };
     is_fingerprint(&record.fingerprint_sha256).then(|| Alert {
         id: alert_id(&tenant, EXPIRY_RULE_ID, &event_ids),
         tenant,
         rule_id: EXPIRY_RULE_ID.to_owned(),
         rule_title: format!("Certificate {label} {verb} {date}"),
         severity,
-        event_time: created_micros.to_string(),
+        event_time: micros_of(state_start).to_string(),
         created_micros,
         host_name: name.map(str::to_owned),
         user_name: None,
@@ -141,15 +149,17 @@ pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Al
 }
 
 
-/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings are counted in a warning.
+/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings and a bad `now` are counted in a warning.
 pub fn expiry_alerts(scope: &TenantScope, records: &[CertRecord], now: i64) -> Vec<Alert> {
     let mut alerts: Vec<Alert> = records.iter().filter_map(|record| alert_of(scope, record, now)).collect();
     let expiring = records.iter().filter(|record| level_of(record, now).is_some()).count();
-    let rejected = expiring.saturating_sub(alerts.len());
+    let now_dropped = if now < 0 { expiring } else { 0 };
+    let bad_now = if !(0..=MAX_NOW_SECONDS).contains(&now) { expiring } else { 0 };
+    let rejected = expiring.saturating_sub(alerts.len()).saturating_sub(now_dropped);
     alerts.sort_by(|left, right| left.id.cmp(&right.id));
     alerts.dedup_by(|right, left| right.id == left.id);
-    if rejected > 0 {
-        tracing::warn!(rejected, "expiring certificates outside the alert grammar were not turned into alerts");
+    if rejected > 0 || bad_now > 0 {
+        tracing::warn!(rejected, bad_now, "expiring certificates were not turned into alerts");
     }
     alerts
 }
