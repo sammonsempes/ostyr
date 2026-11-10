@@ -10,6 +10,7 @@ pub mod export;
 pub mod formats;
 pub mod limits;
 pub mod lines;
+pub mod load;
 pub mod model;
 pub mod run;
 pub mod stix;

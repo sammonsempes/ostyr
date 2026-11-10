@@ -53,3 +53,12 @@ pub const MAX_IDENTIFIER_BYTES: usize = 64;
 
 
 pub const DEFAULT_TTL_SECONDS: u32 = 2_592_000;
+
+
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+
+pub const MAX_TIMEOUT_MS: u64 = 600_000;
+
+
+pub const MAX_USER_BYTES: usize = 64;

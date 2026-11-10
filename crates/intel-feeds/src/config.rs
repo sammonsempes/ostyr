@@ -1,10 +1,15 @@
-use crate::limits::{DEFAULT_CONFIDENCE, MAX_CONFIDENCE};
+use crate::limits::{DEFAULT_CONFIDENCE, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE, MAX_TIMEOUT_MS, MAX_USER_BYTES};
 use crate::model::{IocType, Tlp};
+use crate::store::{quote_identifier, StoreError};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{ConfigState, SharedAuditFn};
+use core_pg::error::PgError;
+use core_pg::scope::tenant_scope;
 use serde::Deserialize;
+use siem_ingest::error::SettingsError;
+use siem_ingest::settings::check_url;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -14,6 +19,9 @@ pub const FEEDS_SECTION: &str = "feeds";
 
 
 pub const EXPORT_KEY: &str = "export.policy";
+
+
+pub const CLICKHOUSE_KEY: &str = "clickhouse";
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -79,12 +87,51 @@ pub struct ExportPolicy {
 }
 
 
+pub fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS
+}
+
+
+/// Where the IOCs are loaded: every row carries `tenant`; the password is read from `password_file` at each load and never held here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClickhouseConfig {
+    pub url: String,
+    pub user: String,
+    pub password_file: PathBuf,
+    pub ca_file: Option<PathBuf>,
+    pub database: String,
+    pub table: String,
+    pub dictionary: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    pub tenant: String,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedsFile {
     pub feeds: Vec<FeedConfig>,
     #[serde(default)]
     pub export: ExportPolicy,
+    #[serde(default)]
+    pub clickhouse: Option<ClickhouseConfig>,
+}
+
+
+#[derive(Debug, Error)]
+pub enum ClickhouseError {
+    #[error("clickhouse.tenant is not a valid tenant name")]
+    Tenant(#[source] PgError),
+    #[error("clickhouse identifier refused")]
+    Identifier(#[from] StoreError),
+    #[error("clickhouse.url refused")]
+    Url(#[from] SettingsError),
+    #[error("clickhouse.user must be 1 to {MAX_USER_BYTES} printable ASCII characters")]
+    User,
+    #[error("clickhouse.timeout_ms must be within 1..={MAX_TIMEOUT_MS}")]
+    Timeout,
 }
 
 
@@ -98,6 +145,8 @@ pub enum FeedsError {
     MappingValue(String),
     #[error("export policy: minimum confidence above {MAX_CONFIDENCE}")]
     ExportConfidence,
+    #[error("clickhouse settings invalid")]
+    Clickhouse(#[from] ClickhouseError),
 }
 
 
@@ -112,6 +161,24 @@ pub enum OpenError {
 
 pub fn needs_mapping(format: FeedFormat) -> bool {
     matches!(format, FeedFormat::Csv | FeedFormat::Json)
+}
+
+
+/// Tenant by core-pg's grammar, URL by siem-ingest's rule, identifiers quoted by the store, user and timeout bounded; nothing is sent here.
+pub fn validate_clickhouse(config: &ClickhouseConfig) -> Result<(), ClickhouseError> {
+    tenant_scope(&config.tenant).map_err(ClickhouseError::Tenant)?;
+    check_url(&config.url)?;
+    [&config.database, &config.table, &config.dictionary]
+        .into_iter()
+        .try_for_each(|name| quote_identifier(name).map(drop))?;
+    let user_ok = !config.user.is_empty() && config.user.len() <= MAX_USER_BYTES && config.user.chars().all(|character| character.is_ascii_graphic());
+    if !user_ok {
+        Err(ClickhouseError::User)
+    } else if config.timeout_ms == 0 || config.timeout_ms > MAX_TIMEOUT_MS {
+        Err(ClickhouseError::Timeout)
+    } else {
+        Ok(())
+    }
 }
 
 
@@ -133,7 +200,10 @@ pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
     if config.export.min_confidence > MAX_CONFIDENCE {
         Err(FeedsError::ExportConfidence)
     } else {
-        Ok(())
+        config
+            .clickhouse
+            .as_ref()
+            .map_or(Ok(()), |clickhouse| validate_clickhouse(clickhouse).map_err(FeedsError::from))
     }
 }
 
@@ -143,7 +213,10 @@ pub fn feeds_state(config: &FeedsFile) -> ConfigState {
         .feeds
         .iter()
         .map(|feed| (format!("{FEEDS_SECTION}.{}", feed.name), format!("{feed:?}")))
-        .chain(std::iter::once((EXPORT_KEY.to_owned(), format!("{:?}", config.export))))
+        .chain([
+            (EXPORT_KEY.to_owned(), format!("{:?}", config.export)),
+            (CLICKHOUSE_KEY.to_owned(), format!("{:?}", config.clickhouse)),
+        ])
         .collect()
 }
 
