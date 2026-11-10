@@ -4,6 +4,7 @@ pub mod cli;
 pub mod convert;
 pub mod error;
 pub mod stream;
+pub mod suricata;
 pub mod sysmon;
 pub mod sysmon_input;
 pub mod tetragon;

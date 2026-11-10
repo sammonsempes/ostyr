@@ -315,13 +315,19 @@ fn network_fields(fields: &Fields) -> Option<NetworkFields> {
     non_empty(NetworkFields {
         transport: text(fields, "Protocol").map(|protocol| protocol.to_lowercase()),
         direction: text(fields, "Initiated").map(|initiated| if initiated == "true" { "egress" } else { "ingress" }.to_string()),
+        ..NetworkFields::default()
     })
 }
 
 
 fn dns_fields(fields: &Fields) -> Option<DnsFields> {
     text(fields, "QueryName").map(|name| DnsFields {
-        question: DnsQuestion { name: Some(name) },
+        question: DnsQuestion {
+            name: Some(name),
+            kind: None,
+        },
+        kind: None,
+        response_code: None,
         resolved_ip: text(fields, "QueryResults")
             .iter()
             .flat_map(|results| results.split(';'))
@@ -385,12 +391,13 @@ fn known_event(base: EcsEvent, kind: &Kind, fields: &Fields) -> Result<EcsEvent,
         source: non_empty(EndpointFields {
             ip: text(fields, "SourceIp"),
             port: number(fields, "SourcePort")?,
-            domain: None,
+            ..EndpointFields::default()
         }),
         destination: non_empty(EndpointFields {
             ip: text(fields, "DestinationIp"),
             port: number(fields, "DestinationPort")?,
             domain: text(fields, "DestinationHostname"),
+            ..EndpointFields::default()
         }),
         network: network_fields(fields),
         process: process_fields(kind, fields)?,

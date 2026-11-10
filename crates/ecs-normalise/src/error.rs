@@ -23,9 +23,9 @@ pub enum NormaliseError {
     Io(#[from] io::Error),
     #[error("invalid Sysmon event: {0}")]
     Sysmon(#[source] SysmonError),
-    #[error("usage: normalise [--format tetragon|sysmon]")]
+    #[error("usage: normalise [--format tetragon|sysmon|suricata]")]
     Usage,
-    #[error("unknown format `{0}` (expected tetragon or sysmon)")]
+    #[error("unknown format `{0}` (expected tetragon, sysmon or suricata)")]
     UnknownFormat(String),
 }
 
