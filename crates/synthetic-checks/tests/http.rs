@@ -1,9 +1,12 @@
+#[path = "common/refuse.rs"]
+mod refuse;
 #[path = "common/server.rs"]
 mod server;
 #[path = "common/types.rs"]
 mod types;
 
 
+use refuse::refusing;
 use server::{ca_signed, finish, self_signed, serve, Behaviour, HOST};
 use std::io::ErrorKind;
 use std::io::Write;
@@ -223,16 +226,16 @@ fn a_zero_certificate_cap_captures_nothing() -> TestResult {
 
 #[test]
 fn an_unparseable_root_is_an_error() -> TestResult {
-    let served = serve(None, reply("200 OK", "", ""), 0)?;
-    assert!(http_fetch(&request(served.address, true)?, LEFT, caps(), &[BAD_ROOT.to_vec()]).is_err());
-    finish(served)?;
+    let refused = refusing()?;
+    assert!(http_fetch(&request(refused.address, true)?, LEFT, caps(), &[BAD_ROOT.to_vec()]).is_err());
     Ok(())
 }
 
 
 #[test]
 fn a_refused_connection_keeps_its_error() -> TestResult {
-    let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let refused = refusing()?;
+    let closed = refused.address;
     assert!(http_fetch(&request(closed, false)?, LEFT, caps(), &[]).is_err());
     assert!(http_fetch(&request(closed, true)?, LEFT, caps(), &[]).is_err());
     Ok(())
@@ -321,7 +324,8 @@ fn the_handshake_returns_the_self_signed_leaf() -> TestResult {
 
 #[test]
 fn the_handshake_to_a_closed_port_fails() -> TestResult {
-    let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let refused = refusing()?;
+    let closed = refused.address;
     assert!(tls_handshake(closed, HOST, LEFT, TEN, CERT_CAP).is_err());
     assert_eq!(closed.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     Ok(())
@@ -458,7 +462,8 @@ fn secret_request(address: SocketAddr, tls: bool) -> Result<HttpRequest, Box<dyn
 
 #[test]
 fn a_refused_connection_error_and_log_never_carry_the_path_or_query() -> TestResult {
-    let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let refused = refusing()?;
+    let closed = refused.address;
     let sink = Captured(Arc::new(Mutex::new(Vec::new())));
     let writer = sink.clone();
     let subscriber = tracing_subscriber::fmt()
