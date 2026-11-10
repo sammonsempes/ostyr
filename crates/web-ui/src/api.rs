@@ -7,9 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 use url::form_urlencoded::Serializer;
 
 
@@ -109,16 +108,16 @@ pub fn header_from_text(text: &str) -> Result<HeaderValue, ApiFailure> {
 }
 
 
-/// A slot of `permits` within `deadline`; a closed or exhausted semaphore is `Throttled`.
-pub async fn acquire(permits: &Arc<Semaphore>, deadline: Duration) -> Result<OwnedSemaphorePermit, ApiFailure> {
-    timeout(deadline, permits.clone().acquire_owned())
+/// A slot of `permits` before the instant `until`; a closed or exhausted semaphore is `Throttled`.
+pub async fn acquire(permits: &Arc<Semaphore>, until: Instant) -> Result<OwnedSemaphorePermit, ApiFailure> {
+    timeout_at(until, permits.clone().acquire_owned())
         .await
         .map_err(|_elapsed| ApiFailure::Throttled)?
         .map_err(|_closed| ApiFailure::Throttled)
 }
 
 
-/// One bounded pool of calls: waiting for a slot counts against the deadline, and the slot is held until the body is read.
+/// One bounded pool of calls: the wait for a slot and the request share the deadline, and the slot is held until the body is read.
 pub async fn call(
     client: &ApiClient,
     source: IpAddr,
@@ -127,10 +126,25 @@ pub async fn call(
     token: Option<&SecretString>,
     body: Option<String>,
 ) -> Result<Vec<u8>, ApiFailure> {
-    let _permit = acquire(&client.permits, client.deadline).await?;
+    call_until(client, Instant::now() + client.deadline, source, method, path, token, body).await
+}
+
+
+/// `call` against an instant computed once by the caller, so several waits of one operation share one deadline.
+pub async fn call_until(
+    client: &ApiClient,
+    until: Instant,
+    source: IpAddr,
+    method: Method,
+    path: &str,
+    token: Option<&SecretString>,
+    body: Option<String>,
+) -> Result<Vec<u8>, ApiFailure> {
+    let _permit = acquire(&client.permits, until).await?;
     let mut request = client
         .http
         .request(method, format!("{}{path}", client.base))
+        .timeout(until.saturating_duration_since(Instant::now()))
         .header(FORWARDED, header_from_text(&forwarded_value(source))?);
     request = token.iter().fold(request, |pending, secret| pending.bearer_auth(secret.expose_secret()));
     request = body
@@ -144,9 +158,10 @@ pub async fn call(
 
 /// `POST /auth/login`: the token goes straight into a secret and nothing of the answer is kept otherwise; logins hold at most half of the pool.
 pub async fn login(client: &ApiClient, source: IpAddr, username: &str, password: &str, totp_code: Option<&str>) -> Result<SecretString, ApiFailure> {
-    let _slot = acquire(&client.login_permits, client.deadline).await?;
+    let until = Instant::now() + client.deadline;
+    let _slot = acquire(&client.login_permits, until).await?;
     let body = json!({ "username": username, "password": password, "totp_code": totp_code }).to_string();
-    let bytes = call(client, source, Method::POST, "auth/login", None, Some(body)).await?;
+    let bytes = call_until(client, until, source, Method::POST, "auth/login", None, Some(body)).await?;
     let reply: TokenReply = serde_json::from_slice(&bytes)?;
     if valid_token(&reply.token) {
         Ok(SecretString::from(reply.token))

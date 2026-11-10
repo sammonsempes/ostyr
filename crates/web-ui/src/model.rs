@@ -79,7 +79,6 @@ pub struct Window {
 
 #[derive(Debug, Clone, Copy)]
 pub struct WebLimits {
-    pub max_sessions: usize,
     pub session_seconds: u64,
     pub form_timeout: Duration,
     pub form_bytes: usize,
@@ -110,6 +109,7 @@ pub struct Prepared {
     pub client: ApiClient,
     pub tls: Option<Arc<ServerConfig>>,
     pub user_sessions: usize,
+    pub sessions: usize,
 }
 
 
@@ -118,6 +118,7 @@ pub struct WebState {
     pub sessions: SessionTable,
     pub attempts: AttemptTable,
     pub user_sessions_max: AtomicUsize,
+    pub sessions_max: AtomicUsize,
     pub limits: WebLimits,
     pub clock: ClockFn,
     pub random: Random,
@@ -149,6 +150,9 @@ pub const DEFAULT_API_CONNECTIONS: usize = 16;
 pub const DEFAULT_USER_SESSIONS: usize = 5;
 
 
+pub const DEFAULT_SESSIONS: usize = 10_000;
+
+
 pub fn default_api_connections() -> usize {
     DEFAULT_API_CONNECTIONS
 }
@@ -156,6 +160,11 @@ pub fn default_api_connections() -> usize {
 
 pub fn default_user_sessions() -> usize {
     DEFAULT_USER_SESSIONS
+}
+
+
+pub fn default_sessions() -> usize {
+    DEFAULT_SESSIONS
 }
 
 
@@ -179,4 +188,6 @@ pub struct WebConfig {
     pub audit_file: PathBuf,
     #[serde(default = "default_user_sessions")]
     pub max_sessions_per_user: usize,
+    #[serde(default = "default_sessions")]
+    pub max_sessions: usize,
 }

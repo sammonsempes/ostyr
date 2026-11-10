@@ -19,7 +19,7 @@ use tempfile::{tempdir, TempDir};
 use web_ui::client::{client_tls, prepare};
 use web_ui::config::{load_web_config, DEFAULT_LIMITS};
 use web_ui::error::WebError;
-use web_ui::model::{TlsSection, WebConfig};
+use web_ui::model::{TlsSection, WebConfig, WebState};
 use web_ui::routes::build_router;
 use web_ui::server::{audit_into, build_engine, monotonic_seconds, new_state, reload_subscriber, serve_web};
 use web_ui::types::PendingRuntime;
@@ -79,6 +79,20 @@ struct Engine {
     engine: Arc<ReloadEngine<WebConfig>>,
     router: Router,
     tls: Option<RustlsConfig>,
+    state: Arc<WebState>,
+}
+
+
+fn settings_with(dir: &TempDir, base_url: &str, extra: &str) -> Result<PathBuf, TestError> {
+    let file = dir.path().join("web-ui.yaml");
+    fs::write(
+        &file,
+        format!(
+            "listen: 127.0.0.1:0\napi:\n  base_url: {base_url}\n  timeout_seconds: 5\naudit_file: {}\n{extra}",
+            dir.path().join("audit.log").display()
+        ),
+    )?;
+    Ok(file)
 }
 
 
@@ -91,8 +105,9 @@ fn open_running(file: &Path) -> Result<Engine, TestError> {
     let engine = Arc::new(build_engine(config.clone(), file, subscriber, audit_into(&config.audit_file)?));
     Ok(Engine {
         engine,
-        router: build_router(state),
+        router: build_router(state.clone()),
         tls,
+        state,
     })
 }
 
@@ -223,5 +238,69 @@ async fn startup_refusals() -> TestResult {
     assert!(prepare(&insecure).is_err());
     let first = monotonic_seconds();
     assert!(monotonic_seconds() >= first);
+    Ok(())
+}
+
+
+const RELOADED_SESSIONS: usize = 7;
+
+
+const RELOADED_USER_SESSIONS: usize = 3;
+
+
+#[tokio::test]
+async fn a_reload_swaps_the_session_caps() -> TestResult {
+    let api = start_stub(Mode::Normal).await?;
+    let dir = tempdir()?;
+    let base = format!("http://{}/", api.address);
+    let file = settings_with(&dir, &base, "")?;
+    let running = open_running(&file)?;
+    assert_ne!(running.state.sessions_max.load(Ordering::SeqCst), RELOADED_SESSIONS);
+    assert_ne!(running.state.user_sessions_max.load(Ordering::SeqCst), RELOADED_USER_SESSIONS);
+    settings_with(&dir, &base, "max_sessions: 7\nmax_sessions_per_user: 3\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(running.state.sessions_max.load(Ordering::SeqCst), RELOADED_SESSIONS);
+    assert_eq!(running.state.user_sessions_max.load(Ordering::SeqCst), RELOADED_USER_SESSIONS);
+    Ok(())
+}
+
+
+async fn served_login(client: &reqwest::Client, port: u16, username: &str) -> Result<StatusCode, TestError> {
+    let reply = client
+        .post(format!("http://127.0.0.1:{port}/login"))
+        .header("cookie", "__Host-ostyr_login=abc")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("csrf=abc&username={username}&password=secret"))
+        .send()
+        .await?;
+    Ok(reply.status())
+}
+
+
+#[tokio::test]
+async fn a_served_config_applies_its_session_caps_from_the_start() -> TestResult {
+    let api = start_stub(Mode::Normal).await?;
+    let dir = tempdir()?;
+    let file = settings_with(&dir, &format!("http://{}/", api.address), "max_sessions: 2\nmax_sessions_per_user: 1\n")?;
+    let handle = ServerHandle::new();
+    let serving = tokio::spawn({
+        let stopping = handle.clone();
+        async move { serve_web(&file, stopping).await }
+    });
+    let address = handle.listening().await.ok_or("not listening")?;
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(client_tls(None)?)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let first_three = [
+        served_login(&client, address.port(), "alice").await?,
+        served_login(&client, address.port(), "alice").await?,
+        served_login(&client, address.port(), "alice").await?,
+    ];
+    assert!(first_three.iter().all(|status| *status == StatusCode::SEE_OTHER));
+    assert_eq!(served_login(&client, address.port(), "multi").await?, StatusCode::SEE_OTHER);
+    assert_eq!(served_login(&client, address.port(), "Alice").await?, StatusCode::SERVICE_UNAVAILABLE);
+    handle.graceful_shutdown(None);
+    serving.await??;
     Ok(())
 }

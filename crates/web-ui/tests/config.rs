@@ -29,7 +29,7 @@ const TIMEOUT: u64 = 5;
 const WATCHED_WITH_TLS: usize = 4;
 
 
-const PLAIN_KEYS: usize = 6;
+const PLAIN_KEYS: usize = 7;
 
 
 const GOOD_COUNT: usize = 2;
@@ -188,6 +188,18 @@ fn connection_and_session_caps_are_settings_with_ranges() -> TestResult {
     assert_eq!((set.api.max_connections, set.max_sessions_per_user), (SET_CONNECTIONS, SET_SESSIONS));
     assert!(load(&yaml("  max_connections: 0\n", "")).is_err());
     assert!(load(&yaml("  max_connections: 61\n", "")).is_err());
+    assert_eq!(defaults.max_sessions, web_ui::model::DEFAULT_SESSIONS);
+    let capped = load(&yaml("", "").replace("audit_file", &format!("max_sessions: {SET_SESSIONS}\naudit_file")))?;
+    assert_eq!(capped.max_sessions, SET_SESSIONS);
+    assert!(web_ui::client::check_sessions(1).is_ok());
+    assert!(web_ui::client::check_sessions(web_ui::error::MAX_SESSIONS).is_ok());
+    assert!(web_ui::client::check_sessions(0).is_err());
+    assert!(web_ui::client::check_sessions(web_ui::error::MAX_SESSIONS + 1).is_err());
+    let no_sessions = WebConfig {
+        max_sessions: 0,
+        ..defaults.clone()
+    };
+    assert!(web_ui::client::prepare(&no_sessions).is_err());
     assert!(web_ui::client::check_user_sessions(1).is_ok());
     assert!(web_ui::client::check_user_sessions(0).is_err());
     assert!(web_ui::client::check_user_sessions(web_ui::error::MAX_USER_SESSIONS + 1).is_err());

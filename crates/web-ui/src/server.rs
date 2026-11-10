@@ -1,7 +1,7 @@
 use crate::client::prepare;
 use crate::config::{config_state, load_web_config, tls_files, watched_files, DEFAULT_LIMITS};
 use crate::error::WebError;
-use crate::model::{ApiClient, WebConfig, WebLimits, WebState, DEFAULT_USER_SESSIONS};
+use crate::model::{ApiClient, WebConfig, WebLimits, WebState, DEFAULT_SESSIONS, DEFAULT_USER_SESSIONS};
 use crate::routes::build_router;
 use crate::types::{ClockFn, PendingRuntime, Random};
 use arc_swap::ArcSwap;
@@ -60,6 +60,7 @@ pub fn new_state(client: ApiClient, limits: WebLimits, clock: ClockFn, random: R
         sessions: Default::default(),
         attempts: Default::default(),
         user_sessions_max: AtomicUsize::new(DEFAULT_USER_SESSIONS),
+        sessions_max: AtomicUsize::new(DEFAULT_SESSIONS),
         limits,
         clock,
         random,
@@ -87,6 +88,7 @@ pub fn apply_pending(state: &WebState, tls: &Option<RustlsConfig>, pending: &Pen
     prepared.into_iter().for_each(|ready| {
         state.api.store(Arc::new(ready.client));
         state.user_sessions_max.store(ready.user_sessions, Ordering::SeqCst);
+        state.sessions_max.store(ready.sessions, Ordering::SeqCst);
         tls.iter().zip(ready.tls).for_each(|(handle, config)| handle.reload_from_config(config));
     });
 }
@@ -147,6 +149,7 @@ pub async fn serve_web(settings_file: &Path, handle: ServerHandle) -> Result<(),
     let audit = audit_into(&config.audit_file)?;
     let state = Arc::new(new_state(prepared.client, DEFAULT_LIMITS, Box::new(monotonic_seconds), os_random));
     state.user_sessions_max.store(prepared.user_sessions, Ordering::SeqCst);
+    state.sessions_max.store(prepared.sessions, Ordering::SeqCst);
     let tls = prepared.tls.map(RustlsConfig::from_config);
     let subscriber = reload_subscriber(config.clone(), state.clone(), tls.clone(), PendingRuntime::default());
     let engine = Arc::new(build_engine(config.clone(), settings_file, subscriber, audit));
