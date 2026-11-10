@@ -1,7 +1,8 @@
 use crate::types::TestResult;
 use core_audit::log::open_file_log;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
-use status_page::app::{file_audit, run_app, sample_inputs, AppFile};
+use core_config::reload::{reload_entry, MAX_VALUE_CHARS};
+use status_page::app::{file_audit, reload_context, run_app, sample_inputs, AppFile, AUDIT_DECLARED_KEYS};
 use status_page::model::{ComponentConfig, ComponentState, PageConfig};
 use std::fs;
 use std::path::Path;
@@ -133,5 +134,58 @@ fn the_audit_function_appends_to_the_log() -> TestResult {
         parameters: Default::default(),
     };
     assert!(file_audit(&log)(entry).is_ok());
+    Ok(())
+}
+
+
+const OMITTED_CHARS: usize = 10;
+
+
+fn logged_text(first_value: &str, extra: Option<(&str, &str)>) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let log = Arc::new(open_file_log(&path)?);
+    let file = AppFile {
+        page_file: "page.yaml".into(),
+        settings_file: "settings.yaml".into(),
+        audit_file: path.clone(),
+    };
+    let [first, second, third, fourth, fifth] = AUDIT_DECLARED_KEYS;
+    let parameters = [(first, first_value.to_owned()), (second, "d".to_owned())];
+    let mut entry = reload_entry(&reload_context(&file, "acme"), Outcome::Success, parameters);
+    [third, fourth, fifth].iter().for_each(|key| {
+        entry.parameters.insert((*key).to_owned(), "other".to_owned());
+    });
+    if let Some((key, value)) = extra {
+        entry.parameters.insert(key.to_owned(), value.to_owned());
+    }
+    file_audit(&log)(entry)?;
+    Ok(fs::read_to_string(path)?)
+}
+
+
+#[test]
+fn an_undeclared_parameter_is_redacted() -> TestResult {
+    let text = logged_text("ok", Some(("password", "hunter2-secret")))?;
+    assert!(text.contains("[REDACTED]"));
+    assert!(!text.contains("hunter2-secret"));
+    Ok(())
+}
+
+
+#[test]
+fn each_declared_key_keeps_its_value() -> TestResult {
+    let text = logged_text("kept-value", None)?;
+    assert!(text.contains("kept-value"));
+    assert!(!text.contains("[REDACTED]"));
+    Ok(())
+}
+
+
+#[test]
+fn an_over_long_value_carries_the_cut_marker() -> TestResult {
+    let long = "x".repeat(MAX_VALUE_CHARS + OMITTED_CHARS);
+    let text = logged_text(&long, None)?;
+    assert!(text.contains(&format!("truncated, {OMITTED_CHARS} characters omitted")));
     Ok(())
 }
