@@ -4,6 +4,15 @@ use thiserror::Error;
 
 
 #[derive(Debug, Error)]
+pub enum CapabilityError {
+    #[error("input or output failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("{} is larger than {} bytes", .0.display(), .1)]
+    TooLarge(PathBuf, u64),
+}
+
+
+#[derive(Debug, Error)]
 pub enum SourceError {
     #[error("input or output failed: {0}")]
     Io(#[from] io::Error),

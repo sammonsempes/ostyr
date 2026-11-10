@@ -1,8 +1,9 @@
+use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::error::SourceError;
 use crate::model::{LinuxFile, Paths, Totals, LINUX_MODULE};
 use crate::run::run_source;
 use crate::settings::open_settings_engine;
-use agent_channel::agent_app::{load_agent_file, run_agent, AgentFile};
+use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
 use agent_channel::types::PauseFn;
@@ -53,6 +54,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
     let _signals = keep_signals(Arc::clone(&reloadable))?;
     let paths = source_paths(&file, &agent);
+    announce(Path::new(SYSTEM_ROOT), &paths.spool, read_bounded, now_seconds())?;
     let source = async {
         run_source(&shared, &paths, line_limit(&agent), max_polls, pause)
             .await

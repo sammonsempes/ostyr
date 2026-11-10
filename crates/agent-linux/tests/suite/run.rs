@@ -140,7 +140,9 @@ async fn the_linux_agent_runs_the_source_and_the_agent_side_by_side() -> TestRes
     append(&dir.path().join("export.json"), &format!("{EXEC}\n{EXEC}\n"))?;
     let totals = run_linux(&config, TWO, &|_| Box::pin(async {})).await?;
     assert_eq!((totals.polls, totals.spooled, totals.agent_runs), (TWO, TWO, 0));
-    assert_eq!(lines(&dir.path().join("spool"))?.len(), LEN_TWO);
+    let spooled = lines(&dir.path().join("spool"))?;
+    assert_eq!(spooled.len(), LEN_TWO + 1);
+    assert!(spooled.iter().any(|line| line.contains("agent.capabilities")));
     Ok(())
 }
 
