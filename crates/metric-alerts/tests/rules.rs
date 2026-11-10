@@ -9,7 +9,7 @@ use metric_alerts::rules::{
     load_rules, parse_rules, validate_rule, MAX_DURATION_SECONDS, MAX_FILE_BYTES, MAX_LABELS, MAX_LABEL_LEN, MAX_METRIC_LEN, MAX_RULES,
     MAX_RUNBOOK_LEN,
 };
-use metric_alerts::token::MAX_TOKEN_CHARS;
+use metric_alerts::token::{shown, MAX_TOKEN_CHARS};
 use std::io::{self, Read};
 
 
@@ -271,6 +271,20 @@ fn token_ids_load() -> TestResult {
 fn bad_id_error_names_file_and_rule() -> TestResult {
     let text = file(&[rule("\"cpu high\"", ABOVE, "")]);
     let error = parse_rules(&mut text.as_bytes(), "rules.yaml").err().ok_or("accepted")?;
-    assert_eq!(error.to_string(), "rules.yaml: rule `cpu high`: invalid `id`");
+    assert_eq!(error.to_string(), format!("rules.yaml: rule `{}`: invalid `id`", shown("cpu high")));
+    assert!(error.to_string().contains("`#"));
+    Ok(())
+}
+
+
+#[test]
+fn a_hostile_rule_id_is_shown_as_a_digest() -> TestResult {
+    let text = file(&[rule("\"a\\u202Eb\\nc\"", ABOVE, "")]);
+    let message = parse(&text).err().ok_or("accepted")?.to_string();
+    assert!(!message.contains('\u{202E}'));
+    assert!(!message.contains('\n'));
+    assert!(message.contains("`#"));
+    let duplicate = file(&[rule("a", ABOVE, ""), rule("a", ABOVE, "")]);
+    assert!(parse(&duplicate).err().ok_or("accepted")?.to_string().contains("rule id `a`"));
     Ok(())
 }
