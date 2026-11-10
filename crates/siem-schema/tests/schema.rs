@@ -355,3 +355,32 @@ fn ttl_migration() -> Result<(), SchemaError> {
     ));
     Ok(())
 }
+
+
+const COLD_FIXTURE: &str = include_str!("../../../lab/tests/fixtures/events-cold.sql");
+
+
+const LAB_MOVE_DAYS: u32 = 1;
+
+
+const LAB_PREMIUM_MOVE_DAYS: u32 = 2;
+
+
+#[test]
+fn lab_cold_fixture_matches_the_renderer() -> Result<(), SchemaError> {
+    let settings = TtlSettings {
+        default_days: DEFAULT_DAYS,
+        default_move_after_days: Some(LAB_MOVE_DAYS),
+        tiers: vec![TierRetention {
+            tier: "premium".to_string(),
+            hot_days: PREMIUM_DAYS,
+            move_after_days: Some(LAB_PREMIUM_MOVE_DAYS),
+        }],
+        storage_policy: Some("hot_cold".to_string()),
+        cold_volume: Some("cold".to_string()),
+    };
+    let sql = render_create_table("events_cold", &default_columns(), &settings)?;
+    assert_eq!(COLD_FIXTURE, sql);
+    assert!(sql.contains("TO VOLUME 'cold'") && sql.contains("`tenant_tier`"));
+    Ok(())
+}
