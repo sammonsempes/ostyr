@@ -6,8 +6,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+arc-swap = "1.9.3"
+core-config = { path = "../core-config" }
 chrono = { version = "0.4", default-features = false }
 crc32fast = "1"
+serde = { version = "1", features = ["derive"] }
 syslog_loose = "0.23"
 thiserror = "2"
 tracing = "0.1"
@@ -16,6 +19,7 @@ tracing = "0.1"
 rustix = { version = "1.1", features = ["fs", "process"] }
 
 [dev-dependencies]
+core-audit = { path = "../core-audit" }
 proptest = "1"
 tempfile = "3"
 
