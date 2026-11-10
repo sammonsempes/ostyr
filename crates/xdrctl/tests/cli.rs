@@ -698,3 +698,82 @@ fn rendering_reports_write_failures() -> TestResult {
     assert!(help_broken.is_err());
     Ok(())
 }
+
+
+const EXTRA_CHARS: usize = 10;
+
+
+const MAX_DIFF_CHARS_EXTRA: usize = 50_000;
+
+
+#[test]
+fn audit_declared_keys_kept_undeclared_redacted_and_long_values_cut() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let log = core_audit::log::open_file_log(&path)?;
+    let context = core_config::apply::ApplyContext {
+        actor: core_audit::model::Actor {
+            kind: core_audit::model::ActorKind::User,
+            id: "reader".to_owned(),
+        },
+        tenant: "default".to_owned(),
+        module: "xdrctl".to_owned(),
+        request_id: "r".to_owned(),
+        justification: "j".to_owned(),
+    };
+    let change = core_config::plan::Change {
+        kind: core_config::plan::ChangeKind::Update,
+        key: "k".to_owned(),
+        before: String::new(),
+        after: String::new(),
+        diff: "d".to_owned(),
+    };
+    let mut entry = core_config::apply::audit_entry(&context, &change);
+    entry.parameters.insert("password".to_owned(), "hunter2-secret".to_owned());
+    entry
+        .parameters
+        .insert("diff_sha256".to_owned(), "x".repeat(core_config::reload::MAX_VALUE_CHARS + EXTRA_CHARS));
+    let record = xdrctl::commands::append_apply_entry(&log, entry)?;
+    assert_eq!(xdrctl::commands::XDRCTL_DECLARED_KEYS, core_config::apply::APPLY_DECLARED_KEYS);
+    assert_eq!(record.parameters.get("password").map(String::as_str), Some("[REDACTED]"));
+    assert_eq!(record.parameters.get("diff").map(String::as_str), Some("d"));
+    assert!(record
+        .parameters
+        .get("diff_sha256")
+        .is_some_and(|value| value.contains("10 characters omitted")));
+    assert!(!fs::read_to_string(&path)?.contains("hunter2-secret"));
+    Ok(())
+}
+
+
+#[test]
+fn audit_diff_cut_once_and_target_and_justification_bounded() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let log = core_audit::log::open_file_log(&path)?;
+    let context = core_config::apply::ApplyContext {
+        actor: core_audit::model::Actor {
+            kind: core_audit::model::ActorKind::User,
+            id: "reader".to_owned(),
+        },
+        tenant: "default".to_owned(),
+        module: "xdrctl".to_owned(),
+        request_id: "r".to_owned(),
+        justification: "j".repeat(core_config::reload::MAX_VALUE_CHARS + EXTRA_CHARS),
+    };
+    let change = core_config::plan::Change {
+        kind: core_config::plan::ChangeKind::Update,
+        key: "k".repeat(core_config::reload::MAX_VALUE_CHARS + EXTRA_CHARS),
+        before: String::new(),
+        after: String::new(),
+        diff: "d".repeat(core_config::reload::MAX_DIFF_CHARS + MAX_DIFF_CHARS_EXTRA),
+    };
+    let entry = core_config::apply::audit_entry(&context, &change);
+    let expected = entry.parameters.get("diff").cloned();
+    let record = xdrctl::commands::append_apply_entry(&log, entry)?;
+    assert_eq!(record.parameters.get("diff"), expected.as_ref());
+    assert!(expected.is_some_and(|value| value.ends_with(&format!("[diff truncated, {} characters omitted]", MAX_DIFF_CHARS_EXTRA))));
+    assert!(record.target.contains("10 characters omitted"));
+    assert!(record.justification.is_some_and(|value| value.contains("10 characters omitted")));
+    Ok(())
+}
