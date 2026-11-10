@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_redact::value::redact_text;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use time::OffsetDateTime;
@@ -31,6 +32,12 @@ pub const MAX_DIFF_CHARS: usize = 8192;
 pub const MAX_KEY_ENTRIES: usize = 256;
 
 
+pub const FILE_KEY_SEPARATOR: &str = "::";
+
+
+pub const WATCHED_PATH_FORBIDDEN: char = ':';
+
+
 /// The text cut to `max` characters, with a visible marker naming the number of characters omitted.
 pub fn bounded_text(value: &str, max: usize, label: &str) -> String {
     let omitted = value.chars().count().saturating_sub(max);
@@ -44,12 +51,12 @@ pub fn bounded_text(value: &str, max: usize, label: &str) -> String {
 
 
 /// A key list kept as a JSON array: a list over the bound becomes one array holding a visible marker.
-pub fn bounded_key_list(value: &str) -> String {
+pub fn bounded_key_list(label: &str, value: &str) -> String {
     let omitted = value.chars().count().saturating_sub(MAX_DIFF_CHARS);
     if omitted == 0 {
         value.to_owned()
     } else {
-        encode_keys(&[format!("[changed_settings truncated, {omitted} characters omitted]")])
+        encode_keys(&[format!("[{label} truncated, {omitted} characters omitted]")])
     }
 }
 
@@ -72,7 +79,7 @@ pub fn bounded_diff(value: &str) -> String {
 pub fn bounded_parameter(key: &str, value: &str) -> String {
     match key {
         "diff" => bounded_diff(value),
-        "changed_settings" => bounded_key_list(value),
+        "changed_settings" | "changed_files" => bounded_key_list(key, value),
         _ => bounded_value(value),
     }
 }
@@ -84,7 +91,7 @@ pub fn diff_digest(diff: &str) -> String {
 }
 
 
-pub const RELOAD_DECLARED_KEYS: [&str; 5] = ["result", "diff", "reason", "changed_settings", "diff_sha256"];
+pub const RELOAD_DECLARED_KEYS: [&str; 6] = ["result", "diff", "reason", "changed_settings", "changed_files", "diff_sha256"];
 
 
 /// A module's hook per configuration section: `validate` may refuse, `apply` runs after the swap.
@@ -262,12 +269,46 @@ pub fn changed_settings_text(changes: &[Change]) -> String {
 }
 
 
+/// A JSON array of the distinct files named by the keys (`file::path`, text before the first separator), computed from the full change list.
+pub fn changed_files_text(changes: &[Change]) -> String {
+    let files: BTreeSet<String> = changes
+        .iter()
+        .filter_map(|change| change.key.split_once(FILE_KEY_SEPARATOR))
+        .map(|(file, _)| file.to_owned())
+        .collect();
+    encode_keys(&files.into_iter().collect::<Vec<String>>())
+}
+
+
+/// Refuses watched paths that contain a `:` or whose JSON list could exceed the audit bound, so `changed_files` is unambiguous and never cut.
+pub fn check_watched_files(files: &[String]) -> Result<(), ConfigError> {
+    let budget = MAX_DIFF_CHARS.saturating_sub(TRUNCATION_MARKER_RESERVE);
+    let ambiguous = files.iter().find(|file| file.contains(WATCHED_PATH_FORBIDDEN));
+    let too_long = encode_keys(files).chars().count() > budget;
+    match (ambiguous, too_long) {
+        (Some(file), _) => Err(ConfigError::WatchedFile {
+            file: file.clone(),
+            reason: format!("the path contains `{WATCHED_PATH_FORBIDDEN}`"),
+        }),
+        (None, true) => Err(ConfigError::WatchedFile {
+            file: format!("{} files", files.len()),
+            reason: format!("the paths exceed {budget} characters in all"),
+        }),
+        (None, false) => Ok(()),
+    }
+}
+
+
 /// Adds the full list of changed keys (bounded, with an omitted count) and the digest of the whole diff.
 pub fn with_changes(entry: NewEntry, changes: &[Change]) -> NewEntry {
     let mut parameters = entry.parameters;
     parameters.insert(
         "changed_settings".to_owned(),
         bounded_parameter("changed_settings", &changed_settings_text(changes)),
+    );
+    parameters.insert(
+        "changed_files".to_owned(),
+        bounded_parameter("changed_files", &changed_files_text(changes)),
     );
     parameters.insert("diff_sha256".to_owned(), diff_digest(&full_diff(changes)));
     NewEntry { parameters, ..entry }

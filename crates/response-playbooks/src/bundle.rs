@@ -6,7 +6,7 @@ use crate::validate::playbook_problems;
 use core_audit::model::NewEntry;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
-use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
+use core_config::reload::{check_watched_files, current_config, open_engine, ReloadContext, ReloadEngine, Subscriber, FILE_KEY_SEPARATOR};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use response_breakers::breakers::Breakers;
 use serde::Serialize;
@@ -27,10 +27,10 @@ pub const CATALOGUE_DOCUMENT: &str = "catalogue";
 pub const VALIDATION_SECTION: &str = "validation";
 
 
-pub const KEY_SEPARATOR: &str = "::";
+pub const KEY_SEPARATOR: &str = FILE_KEY_SEPARATOR;
 
 
-pub const CHANGED_KEYS_PARAMETER: &str = "changed_settings";
+pub const CHANGED_FILES_PARAMETER: &str = "changed_files";
 
 
 pub const MAX_STATE_DEPTH: usize = 32;
@@ -152,30 +152,26 @@ pub fn bundle_state(bundle: &Bundle) -> ConfigState {
 }
 
 
-/// The JSON array of changed keys; a value that does not parse names no key and is logged.
+/// A JSON array of strings; a value that does not parse names nothing and is logged.
 pub fn changed_keys(text: &str) -> Vec<String> {
     serde_json::from_str(text).unwrap_or_else(|failure| {
-        tracing::warn!(%failure, "changed_settings is not a JSON array of strings");
+        tracing::warn!(%failure, "changed_files is not a JSON array of strings");
         Vec::new()
     })
 }
 
 
-/// The files named by the diff of a reload entry, so that the audit target is the file that changed.
+/// The watched files listed in the `changed_files` parameter of a reload entry, which is computed before any cut, so the audit target is complete.
 pub fn retarget(entry: NewEntry, files: &[String]) -> NewEntry {
-    let keys = entry
+    let changed_files = entry
         .parameters
-        .get(CHANGED_KEYS_PARAMETER)
+        .get(CHANGED_FILES_PARAMETER)
         .map(|text| changed_keys(text))
-        .unwrap_or_default();
-    let changed: Vec<&str> = files
-        .iter()
-        .filter(|file| {
-            let prefix = format!("{file}{KEY_SEPARATOR}");
-            keys.iter().any(|key| key.starts_with(&prefix))
-        })
-        .map(String::as_str)
-        .collect();
+        .unwrap_or_else(|| {
+            tracing::warn!("reload entry has no changed_files parameter");
+            Vec::new()
+        });
+    let changed: Vec<&str> = files.iter().filter(|file| changed_files.contains(file)).map(String::as_str).collect();
     if changed.is_empty() {
         entry
     } else {
@@ -219,6 +215,7 @@ pub fn open_playbooks(settings: PlaybookSettings) -> Result<ReloadEngine<Bundle>
         .chain(&settings.playbook_paths)
         .map(|path| path.display().to_string())
         .collect();
+    check_watched_files(&known_files)?;
     let context = ReloadContext {
         actor_id: MODULE.to_owned(),
         tenant: "all".to_owned(),
