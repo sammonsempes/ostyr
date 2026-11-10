@@ -125,3 +125,35 @@ pub struct Stderr {
     pub kept: Vec<u8>,
     pub total: u64,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentMeta {
+    pub tenant: String,
+    pub artefact: String,
+    pub version: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSignature {
+    pub key_id: String,
+    pub bytes: Vec<u8>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedKey {
+    pub public_key: ed25519_dalek::VerifyingKey,
+    pub not_before: u64,
+    pub not_after: u64,
+    pub revoked: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedDocument {
+    pub bytes: Vec<u8>,
+    pub meta: DocumentMeta,
+    pub signature: DocumentSignature,
+}
