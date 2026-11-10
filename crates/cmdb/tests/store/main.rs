@@ -6,10 +6,12 @@ use cmdb::error::StoreError;
 use cmdb::model::{
     Applied, Asset, AssetKind, Attribute, Conflict, DuplicateConflict, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution,
 };
+use cmdb::reconcile::RESERVED_ATTRIBUTE_PREFIX;
 use cmdb::store::{
-    apply_outcome, attempt, changed_assets, check_limits, conflict_of, event_doc, is_exempt, is_key_signal, load_assets, read_table,
-    reconcile_stored, resolution_text, without_duplicates, without_refused, APPLY_SQL, ASSETS_SQL, ASSETS_TABLE, ASSET_CURSOR, ATTEMPT_CEILING,
-    ATTRIBUTES_SQL, KEYS_SQL, MAX_OPEN_CONFLICTS_CEILING, MAX_OPEN_KEY_CONFLICTS_CEILING, MAX_PAGES, MAX_PAGE_SIZE, MIGRATIONS,
+    apply_outcome, attempt, changed_assets, check_limits, check_one_conflict_per_triple, conflict_of, event_doc, is_exempt, is_key_signal,
+    load_assets, read_table, reconcile_stored, resolution_text, without_duplicates, without_refused, APPLY_SQL, ASSETS_SQL, ASSETS_TABLE,
+    ASSET_CURSOR, ATTEMPT_CEILING, ATTRIBUTES_SQL, KEYS_SQL, MAX_OPEN_CONFLICTS_CEILING, MAX_OPEN_KEY_CONFLICTS_CEILING, MAX_PAGES, MAX_PAGE_SIZE,
+    MIGRATIONS,
 };
 use cmdb::types::{Row, RowFuture, TruthMap};
 use core_pg::error::PgError;
@@ -1135,7 +1137,44 @@ async fn a_specific_conflict_is_refused_inside_one_document_in_apply_sql_order()
         tenant.conflicts.iter().map(|conflict| memory::text(conflict, "attribute")).collect()
     });
     assert_eq!(stored, vec!["owner".to_owned()]);
-    assert!(APPLY_SQL.contains("ORDER BY attribute, current_value, current_source, observed_value"));
-    assert!(APPLY_SQL.contains("left(o.attribute, 4) = 'key:'"));
+    assert!(APPLY_SQL
+        .contains("ORDER BY attribute COLLATE \"C\", current_value COLLATE \"C\", current_source COLLATE \"C\", observed_value COLLATE \"C\""));
+    Ok(())
+}
+
+
+#[test]
+fn the_sql_key_prefix_is_the_reserved_attribute_prefix() -> TestResult {
+    let fragment = format!("left(o.attribute, {}) = '{}'", RESERVED_ATTRIBUTE_PREFIX.len(), RESERVED_ATTRIBUTE_PREFIX);
+    assert!(
+        APPLY_SQL.contains(&fragment),
+        "apply.sql must test the prefix and length of RESERVED_ATTRIBUTE_PREFIX ({RESERVED_ATTRIBUTE_PREFIX:?}, length {}): {fragment}",
+        RESERVED_ATTRIBUTE_PREFIX.len()
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_outcome_with_two_conflicts_for_one_triple_is_refused() -> TestResult {
+    let first = conflict_of_source("a1", "owner", "hr", Resolution::Undecided);
+    let mut second = conflict_of_source("a1", "owner", "hr", Resolution::Undecided);
+    second.observed.value = "other".to_owned();
+    let other_source = conflict_of_source("a1", "owner", "crm", Resolution::Undecided);
+    let single = Outcome {
+        inventory: vec![],
+        conflicts: vec![first.clone(), other_source],
+        events: vec![],
+    };
+    assert!(check_one_conflict_per_triple(&single).is_ok());
+    let doubled = Outcome {
+        inventory: vec![],
+        conflicts: vec![first, second],
+        events: vec![],
+    };
+    assert!(matches!(
+        check_one_conflict_per_triple(&doubled),
+        Err(StoreError::DuplicateConflict { ref asset, ref attribute, ref source_name }) if asset == "a1" && attribute == "owner" && source_name == "hr"
+    ));
     Ok(())
 }

@@ -376,6 +376,24 @@ pub async fn apply_outcome(
 }
 
 
+/// Enforces the one conflict per asset, attribute and observed source that `without_listed` relies on.
+pub fn check_one_conflict_per_triple(outcome: &Outcome) -> Result<(), StoreError> {
+    let mut seen: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+    outcome.conflicts.iter().try_for_each(|conflict| {
+        let triple = (conflict.asset.as_str(), conflict.attribute.as_str(), conflict.observed.source.as_str());
+        if seen.insert(triple) {
+            Ok(())
+        } else {
+            Err(StoreError::DuplicateConflict {
+                asset: conflict.asset.clone(),
+                attribute: conflict.attribute.clone(),
+                source_name: conflict.observed.source.clone(),
+            })
+        }
+    })
+}
+
+
 /// One observation has one conflict per asset, attribute and observed source, so that triple identifies a refused or duplicate conflict.
 pub fn without_listed(outcome: Outcome, listed: &[(&str, &str, &str)]) -> Outcome {
     let conflicts = outcome
@@ -414,6 +432,7 @@ pub async fn attempt(
 ) -> Result<Stored, StoreError> {
     let snapshot = load_assets(exec, scope, limits).await?;
     let outcome = reconcile(&snapshot.assets, observation, truth)?;
+    check_one_conflict_per_triple(&outcome)?;
     let applied = apply_outcome(exec, scope, &snapshot, &outcome, limits).await?;
     Ok(Stored {
         outcome: without_duplicates(without_refused(outcome, &applied.refused), &applied.duplicates),
