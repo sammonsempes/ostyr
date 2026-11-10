@@ -1,6 +1,6 @@
 use crate::column::Column;
 use crate::error::SchemaError;
-use crate::identifier::quote_identifier;
+use crate::identifier::{quote_identifier, validate_identifier};
 use crate::schema::{TENANT_COLUMN, TENANT_TIER_COLUMN, TIMESTAMP_COLUMN};
 use crate::ttl::{render_ttl, TtlSettings};
 
@@ -37,6 +37,14 @@ fn check_required(columns: &[Column], required: &str) -> Result<(), SchemaError>
 }
 
 
+fn render_settings(ttl: &TtlSettings) -> Result<String, SchemaError> {
+    match &ttl.storage_policy {
+        Some(policy) => validate_identifier(policy).map(|name| format!("SETTINGS storage_policy = '{name}'\n")),
+        None => Ok(String::new()),
+    }
+}
+
+
 /// Renders the `CREATE TABLE` statement of the events table.
 pub fn render_create_table(table: &str, columns: &[Column], ttl: &TtlSettings) -> Result<String, SchemaError> {
     let table_name = quote_identifier(table)?;
@@ -48,8 +56,9 @@ pub fn render_create_table(table: &str, columns: &[Column], ttl: &TtlSettings) -
     let timestamp = quote_identifier(TIMESTAMP_COLUMN)?;
     let tenant = quote_identifier(TENANT_COLUMN)?;
     let expression = render_ttl(ttl)?;
+    let settings = render_settings(ttl)?;
     Ok(format!(
-        "CREATE TABLE {table_name}\n(\n{}\n)\nENGINE = MergeTree\nPARTITION BY toDate({timestamp})\nORDER BY ({tenant}, {timestamp})\nTTL {expression}\n",
+        "CREATE TABLE {table_name}\n(\n{}\n)\nENGINE = MergeTree\nPARTITION BY toDate({timestamp})\nORDER BY ({tenant}, {timestamp})\nTTL {expression}\n{settings}",
         lines.join(",\n")
     ))
 }
