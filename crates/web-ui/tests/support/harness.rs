@@ -32,8 +32,10 @@ pub const API_TIMEOUT: u64 = 5;
 pub const LOOPBACK_FIRST: u8 = 127;
 
 
+pub const HARNESS_SESSIONS: usize = 2;
+
+
 pub const LIMITS: WebLimits = WebLimits {
-    max_sessions: 2,
     session_seconds: 100,
     form_timeout: Duration::from_secs(5),
     form_bytes: 512,
@@ -80,6 +82,7 @@ pub async fn harness_custom(mode: Mode, random: Random, limits: WebLimits) -> Re
     let clock = Arc::new(AtomicU64::new(0));
     let ticking = clock.clone();
     let state = Arc::new(new_state(client, limits, Box::new(move || ticking.load(Ordering::SeqCst)), random));
+    state.sessions_max.store(HARNESS_SESSIONS, Ordering::SeqCst);
     Ok(Harness {
         router: build_router(state.clone()),
         state,

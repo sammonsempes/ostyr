@@ -13,6 +13,9 @@ pub const MAX_API_CONNECTIONS: usize = 60;
 pub const MAX_USER_SESSIONS: usize = 100;
 
 
+pub const MAX_SESSIONS: usize = 1_000_000;
+
+
 /// Why a call to the REST API gave no usable answer; no variant carries text of the API.
 #[derive(Debug, Error)]
 pub enum ApiFailure {
@@ -90,6 +93,8 @@ pub enum WebError {
     Fixed(&'static str),
     #[error("max_sessions_per_user must be between 1 and {MAX_USER_SESSIONS}")]
     UserSessions,
+    #[error("max_sessions must be between 1 and {MAX_SESSIONS}")]
+    Sessions,
     #[error("usage: <web-ui.yaml>")]
     Usage,
 }

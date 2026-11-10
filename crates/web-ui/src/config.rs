@@ -10,7 +10,6 @@ use url::{Host, Url};
 
 
 pub const DEFAULT_LIMITS: WebLimits = WebLimits {
-    max_sessions: 10_000,
     session_seconds: 28_800,
     form_timeout: Duration::from_secs(10),
     form_bytes: 8_192,
@@ -122,6 +121,7 @@ pub fn config_state(config: &WebConfig) -> ConfigState {
         ("api.timeout_seconds", config.api.timeout_seconds.to_string()),
         ("api.max_connections", config.api.max_connections.to_string()),
         ("max_sessions_per_user", config.max_sessions_per_user.to_string()),
+        ("max_sessions", config.max_sessions.to_string()),
         ("audit_file", config.audit_file.display().to_string()),
     ]
     .into_iter()
