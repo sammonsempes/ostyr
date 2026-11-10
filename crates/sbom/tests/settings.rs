@@ -54,6 +54,13 @@ fn valid() -> SyftSettings {
         max_stderr_bytes: 1,
         helper_grace_millis: 1,
         max_live_helpers: MIN_HELPERS,
+        max_memory_bytes: sbom::limits::MIN_MEMORY_BYTES,
+        max_file_bytes: sbom::limits::MIN_FILE_BYTES,
+        max_archive_bytes: sbom::limits::MIN_FILE_BYTES,
+        max_run_disk_bytes: sbom::limits::MIN_FILE_BYTES,
+        max_run_entries: 1,
+        disk_poll_millis: 1,
+        prlimit_binary: PathBuf::from("/usr/bin/prlimit"),
     }
 }
 
@@ -94,6 +101,34 @@ fn each_setting_is_validated() -> TestResult {
             max_live_helpers: 1,
             ..valid()
         },
+        SyftSettings {
+            max_memory_bytes: sbom::limits::MIN_MEMORY_BYTES - 1,
+            ..valid()
+        },
+        SyftSettings {
+            max_file_bytes: sbom::limits::MAX_RESOURCE_BYTES + 1,
+            ..valid()
+        },
+        SyftSettings {
+            max_archive_bytes: 0,
+            ..valid()
+        },
+        SyftSettings {
+            max_run_disk_bytes: 0,
+            ..valid()
+        },
+        SyftSettings {
+            max_run_entries: 0,
+            ..valid()
+        },
+        SyftSettings {
+            disk_poll_millis: 0,
+            ..valid()
+        },
+        SyftSettings {
+            prlimit_binary: PathBuf::from("prlimit"),
+            ..valid()
+        },
     ];
     let names = [
         "binary",
@@ -104,6 +139,13 @@ fn each_setting_is_validated() -> TestResult {
         "max_stderr_bytes",
         "helper_grace_millis",
         "max_live_helpers",
+        "max_memory_bytes",
+        "max_file_bytes",
+        "max_archive_bytes",
+        "max_run_disk_bytes",
+        "max_run_entries",
+        "disk_poll_millis",
+        "prlimit_binary",
     ];
     cases.iter().zip(names).try_for_each(|(case, name)| match validate_settings(case) {
         Err(SettingsError::Invalid(found)) if found == name => Ok(()),
@@ -165,6 +207,38 @@ fn settings_load_and_reload_live() -> TestResult {
     fs::write(&path, GOOD.replace("1000", "0"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).deadline_millis, SECOND_DEADLINE);
+    Ok(())
+}
+
+
+const EXPLICIT_ENTRIES: usize = 7;
+
+
+const EXPLICIT_MEMORY: u64 = 2_147_483_648;
+
+
+#[test]
+fn resource_limits_default_and_can_be_set() -> TestResult {
+    let dir = TempDir::new()?;
+    let path = dir.path().join("syft.yaml");
+    fs::write(&path, GOOD)?;
+    let engine = open_settings(path.clone(), audit(), context())?;
+    let defaults = current_config(&engine);
+    assert_eq!(defaults.max_memory_bytes, sbom::limits::DEFAULT_MAX_MEMORY_BYTES);
+    assert_eq!(defaults.max_file_bytes, sbom::limits::DEFAULT_MAX_FILE_BYTES);
+    assert_eq!(defaults.max_archive_bytes, sbom::limits::DEFAULT_MAX_ARCHIVE_BYTES);
+    assert_eq!(defaults.max_run_disk_bytes, sbom::limits::DEFAULT_MAX_RUN_DISK_BYTES);
+    assert_eq!(defaults.max_run_entries, sbom::limits::DEFAULT_MAX_RUN_ENTRIES);
+    assert_eq!(defaults.disk_poll_millis, sbom::limits::DEFAULT_DISK_POLL_MILLIS);
+    assert_eq!(defaults.prlimit_binary, PathBuf::from(sbom::limits::DEFAULT_PRLIMIT_BINARY));
+    let overrides = "max_memory_bytes: 2147483648\nmax_file_bytes: 2097152\nmax_archive_bytes: 3145728\nmax_run_disk_bytes: 4194304\n";
+    let extras = "max_run_entries: 7\ndisk_poll_millis: 9\nprlimit_binary: /opt/prlimit\n";
+    fs::write(&path, format!("{GOOD}{overrides}{extras}"))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
+    let applied = current_config(&engine);
+    assert_eq!(applied.max_memory_bytes, EXPLICIT_MEMORY);
+    assert_eq!(applied.max_run_entries, EXPLICIT_ENTRIES);
+    assert_eq!(applied.prlimit_binary, PathBuf::from("/opt/prlimit"));
     Ok(())
 }
 

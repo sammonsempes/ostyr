@@ -1,17 +1,22 @@
 //! Runs syft on an operator-given target and parses its CycloneDX output while it streams (Unix only: process groups).
 
-use crate::error::{RunError, SbomError};
-use crate::limits::{HELPERS_PER_RUN, HOME_PREFIX, REAP_POLL_MILLIS, STDERR_EXCERPT_BYTES, SYFT_ARGUMENTS};
-use crate::model::{Limits, Sbom, Stderr};
+use crate::error::{ResourceKind, RunError, SbomError};
+use crate::limits::{
+    BLOCK_BYTES, DRAIN_CHUNK_BYTES, FILE_MARKERS, HELPERS_PER_RUN, HOME_PREFIX, MEMORY_MARKERS, REAP_POLL_MILLIS, STDERR_EXCERPT_BYTES,
+    SYFT_ARGUMENTS,
+};
+use crate::model::{Limits, Sbom, Stderr, Verdict, WatchPlan};
 use crate::parse::{parse_cyclonedx, to_u64};
-use crate::settings::{ensure, source_argument, validate_settings, SyftSettings, Target};
+use crate::settings::{ensure, source_argument, target_path, validate_settings, SyftSettings, Target};
 use crate::types::{Helpers, Job};
 use rustix::io::Errno;
 use rustix::process::{kill_process, kill_process_group, Pid, Signal};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, PipeReader, PipeWriter, Read};
-use std::os::unix::process::CommandExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::Ordering;
@@ -19,6 +24,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError};
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
+use walkdir::{DirEntry, WalkDir};
 
 
 /// One live helper thread; the count drops when it ends, so a run refuses to start while earlier helpers are still stuck.
@@ -57,20 +63,36 @@ pub fn child_environment(home: &Path) -> Vec<(String, String)> {
 }
 
 
-/// Keeps at most `cap` bytes and counts, without buffering, what comes after.
-pub fn drain_stderr<Source: Read>(mut source: Source, cap: usize) -> io::Result<Stderr> {
-    let mut kept = Vec::new();
-    io::copy(&mut source.by_ref().take(to_u64(cap)), &mut kept)?;
-    let dropped = io::copy(&mut source, &mut io::sink())?;
-    let total = to_u64(kept.len()).saturating_add(dropped);
-    Ok(Stderr { kept, total })
+/// Keeps the last `cap` bytes (the cause of a failure comes last) and counts, without buffering, everything that came before.
+pub fn drain_stderr(source: &mut dyn Read, cap: usize) -> io::Result<Stderr> {
+    let mut chunks = std::iter::from_fn(|| {
+        let mut chunk = Vec::new();
+        match Read::take(&mut *source, DRAIN_CHUNK_BYTES).read_to_end(&mut chunk) {
+            Ok(0) => None,
+            Ok(_) => Some(Ok(chunk)),
+            Err(error) => Some(Err(error)),
+        }
+    });
+    let (tail, total) = chunks.try_fold((VecDeque::<u8>::new(), 0), |(mut tail, total): (VecDeque<u8>, u64), item| {
+        let chunk = item?;
+        let seen = total.saturating_add(to_u64(chunk.len()));
+        tail.extend(chunk);
+        let excess = tail.len().saturating_sub(cap);
+        tail.drain(..excess);
+        Ok::<_, io::Error>((tail, seen))
+    })?;
+    Ok(Stderr {
+        kept: tail.into_iter().collect(),
+        total,
+    })
 }
 
 
-/// A bounded, escaped excerpt: control characters never reach a log line raw.
+/// A bounded, escaped excerpt of the end of stderr: control characters never reach a log line raw.
 pub fn stderr_excerpt(stderr: &Stderr) -> String {
-    let head: Vec<u8> = stderr.kept.iter().copied().take(STDERR_EXCERPT_BYTES).collect();
-    String::from_utf8_lossy(&head).escape_debug().to_string()
+    let skipped = stderr.kept.len().saturating_sub(STDERR_EXCERPT_BYTES);
+    let tail: Vec<u8> = stderr.kept.iter().copied().skip(skipped).collect();
+    String::from_utf8_lossy(&tail).escape_debug().to_string()
 }
 
 
@@ -81,11 +103,62 @@ pub fn kill_all(pid: Pid) -> Result<(), Errno> {
 }
 
 
-/// Kills the process group when `done` does not close before the deadline; `true` means it did.
-pub fn watchdog(pid: Pid, done: &Receiver<()>, deadline: Duration) -> Result<bool, Errno> {
-    match done.recv_timeout(deadline) {
-        Err(RecvTimeoutError::Timeout) => kill_all(pid).map(|()| true),
-        _ => Ok(false),
+/// Kills the child and returns `verdict` (or its error) once it is dead.
+pub fn kill_then(pid: Pid, verdict: Result<Verdict, RunError>) -> Result<Verdict, RunError> {
+    kill_all(pid)?;
+    verdict
+}
+
+
+/// One walk of the syft home: more entries than `max_entries` or more disk than `max_bytes` is `true`; the walk stops one entry past the cap.
+pub fn disk_exceeded(home: &Path, max_bytes: u64, max_entries: usize) -> Result<bool, RunError> {
+    let (count, bytes) = WalkDir::new(home)
+        .into_iter()
+        .take(max_entries.saturating_add(1))
+        .try_fold((0, 0), |(count, bytes): (usize, u64), entry| {
+            entry_bytes(entry).map(|size| (count + 1, bytes.saturating_add(size)))
+        })?;
+    Ok(count > max_entries || bytes > max_bytes)
+}
+
+
+/// Disk blocks used by one entry; an entry that vanished during the walk (syft deleting its temporary files) counts as nothing and is logged.
+pub fn entry_bytes(entry: walkdir::Result<DirEntry>) -> Result<u64, RunError> {
+    match entry.and_then(|found| found.metadata()) {
+        Ok(metadata) => Ok(metadata.blocks().saturating_mul(BLOCK_BYTES)),
+        Err(error) if error.io_error().is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound) => {
+            let reason = format!("{error:?}");
+            debug!(%reason, "entry vanished during the disk walk");
+            Ok(0)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+
+/// Ticks until `done` closes: at each tick the home size is checked, and the group is killed on a disk overrun or when the ticks run out.
+pub fn watchdog(pid: Pid, done: &Receiver<()>, plan: &WatchPlan) -> Result<Verdict, RunError> {
+    let decided = (0..plan.ticks).find_map(|_| match done.recv_timeout(plan.tick) {
+        Err(RecvTimeoutError::Timeout) => match disk_exceeded(&plan.home, plan.max_bytes, plan.max_entries) {
+            Ok(false) => None,
+            Ok(true) => Some(kill_then(pid, Ok(Verdict::DiskFull))),
+            Err(error) => Some(kill_then(pid, Err(error))),
+        },
+        _ => Some(Ok(Verdict::Finished)),
+    });
+    decided.unwrap_or_else(|| kill_then(pid, Ok(Verdict::TimedOut)))
+}
+
+
+/// The watchdog schedule: a tick of `disk_poll_millis` (shorter than the deadline) and enough ticks to cover the deadline.
+pub fn watch_plan(settings: &SyftSettings, home: &Path) -> WatchPlan {
+    let tick_millis = settings.disk_poll_millis.min(settings.deadline_millis).max(1);
+    WatchPlan {
+        home: home.to_path_buf(),
+        tick: Duration::from_millis(tick_millis),
+        ticks: settings.deadline_millis.div_ceil(tick_millis),
+        max_bytes: settings.max_run_disk_bytes,
+        max_entries: settings.max_run_entries,
     }
 }
 
@@ -96,8 +169,12 @@ fn check_binary(binary: &Path) -> Result<(), RunError> {
 
 
 fn spawn_syft(settings: &SyftSettings, source: &str, home: &Path, stdout: PipeWriter, stderr: PipeWriter) -> io::Result<Child> {
-    let mut command = Command::new(&settings.binary);
+    let mut command = Command::new(&settings.prlimit_binary);
     command
+        .arg(format!("--as={}", settings.max_memory_bytes))
+        .arg(format!("--fsize={}", settings.max_file_bytes))
+        .arg("--")
+        .arg(&settings.binary)
         .args(SYFT_ARGUMENTS)
         .arg(source)
         .env_clear()
@@ -111,6 +188,68 @@ fn spawn_syft(settings: &SyftSettings, source: &str, home: &Path, stdout: PipeWr
         .stderr(stderr)
         .process_group(NEW_PROCESS_GROUP);
     command.spawn()
+}
+
+
+/// Refuses an archive target larger than `max`, measured on the opened handle (opened `O_NONBLOCK`, so a FIFO is refused, never waited on).
+pub fn check_archive(target: &Target, max: u64) -> Result<(), RunError> {
+    match target {
+        Target::Directory(_) => Ok(()),
+        Target::OciArchive(_) | Target::DockerArchive(_) => {
+            let metadata = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(target_path(target))
+                .and_then(|file| file.metadata())?;
+            ensure(metadata.is_file(), RunError::NotRegular)?;
+            ensure(
+                metadata.len() <= max,
+                RunError::ResourceLimit {
+                    kind: ResourceKind::Archive,
+                    cause: None,
+                },
+            )
+        }
+    }
+}
+
+
+/// Which resource limit a failed syft hit: SIGXFSZ, or a known out-of-memory or file-size message in the kept tail of its stderr (Go reports both as text).
+pub fn exceeded_limit(exit: ExitStatus, stderr: &[u8]) -> Option<ResourceKind> {
+    let text = String::from_utf8_lossy(stderr).to_lowercase();
+    let mentions = |markers: &[&str]| markers.iter().any(|marker| text.contains(marker));
+    match (exit.success(), exit.signal()) {
+        (true, _) => None,
+        (false, Some(libc::SIGXFSZ)) => Some(ResourceKind::FileSize),
+        _ if mentions(&FILE_MARKERS) => Some(ResourceKind::FileSize),
+        _ if mentions(&MEMORY_MARKERS) => Some(ResourceKind::Memory),
+        _ => None,
+    }
+}
+
+
+/// A resource limit hit replaces any other failure except a timeout; the replaced error stays as its cause.
+pub fn classify(result: Result<Sbom, RunError>, limit: Option<ResourceKind>) -> Result<Sbom, RunError> {
+    match (result, limit) {
+        (Err(RunError::TimedOut), _) => Err(RunError::TimedOut),
+        (Err(error), Some(kind)) => Err(RunError::ResourceLimit {
+            kind,
+            cause: Some(Box::new(error)),
+        }),
+        (other, _) => other,
+    }
+}
+
+
+/// A disk overrun replaces whatever the killed run returned; that result stays as the cause.
+pub fn disk_verdict(verdict: Verdict, result: Result<Sbom, RunError>) -> Result<Sbom, RunError> {
+    match verdict {
+        Verdict::DiskFull => Err(RunError::ResourceLimit {
+            kind: ResourceKind::Disk,
+            cause: result.err().map(Box::new),
+        }),
+        Verdict::Finished | Verdict::TimedOut => result,
+    }
 }
 
 
@@ -171,13 +310,15 @@ pub fn generate_with<Spawn: FnMut(Job) -> io::Result<()>>(
 ) -> Result<Sbom, RunError> {
     validate_settings(settings)?;
     let source = source_argument(target)?;
+    check_binary(&settings.prlimit_binary)?;
     check_binary(&settings.binary)?;
+    check_archive(target, settings.max_archive_bytes)?;
     let slots = reserve_helpers(helpers, settings.max_live_helpers).ok_or(RunError::Busy)?;
     let home = tempfile::Builder::new().prefix(HOME_PREFIX).tempdir_in(&settings.work_dir)?;
     let (stdout_reader, stdout_writer) = io::pipe()?;
     let (stderr_reader, stderr_writer) = io::pipe()?;
     let child = spawn_syft(settings, &source, home.path(), stdout_writer, stderr_writer)?;
-    supervise(spawner, settings, child, (stdout_reader, stderr_reader), scope, slots)
+    supervise(spawner, settings, (child, home.path()), (stdout_reader, stderr_reader), scope, slots)
 }
 
 
@@ -215,17 +356,19 @@ pub fn outcome(timed_out: bool, parsed: Result<Result<Sbom, SbomError>, RecvTime
 pub fn supervise<Spawn: FnMut(Job) -> io::Result<()>>(
     spawner: Spawn,
     settings: &SyftSettings,
-    mut child: Child,
+    running: (Child, &Path),
     pipes: (PipeReader, PipeReader),
     scope: (&str, &str),
     slots: [HelperSlot; HELPERS_PER_RUN],
 ) -> Result<Sbom, RunError> {
-    let (stdout_reader, stderr_reader) = pipes;
+    let (mut child, home) = running;
+    let (stdout_reader, mut stderr_reader) = pipes;
     let [stdout_slot, stderr_slot] = slots;
     let pid = Pid::from_child(&child);
     let deadline = Duration::from_millis(settings.deadline_millis);
     let grace = Duration::from_millis(settings.helper_grace_millis);
     let polls = settings.helper_grace_millis / REAP_POLL_MILLIS + 1;
+    let plan = watch_plan(settings, home);
     let (done_sender, done_receiver) = mpsc::channel::<()>();
     let (watch_sender, watch_receiver) = mpsc::channel();
     let (stderr_sender, stderr_receiver) = mpsc::channel();
@@ -238,9 +381,9 @@ pub fn supervise<Spawn: FnMut(Job) -> io::Result<()>>(
     };
     let (tenant, artefact) = (scope.0.to_owned(), scope.1.to_owned());
     let jobs: Vec<Job> = vec![
-        Box::new(move || watch_sender.send(watchdog(pid, &done_receiver, deadline)).map_err(RunError::from)),
+        Box::new(move || watch_sender.send(watchdog(pid, &done_receiver, &plan)).map_err(RunError::from)),
         Box::new(move || {
-            let drained = drain_stderr(stderr_reader, stderr_cap);
+            let drained = drain_stderr(&mut stderr_reader, stderr_cap);
             drop(stderr_slot);
             stderr_sender.send(drained).map_err(RunError::from)
         }),
@@ -266,10 +409,18 @@ pub fn supervise<Spawn: FnMut(Job) -> io::Result<()>>(
         _ => first.map_err(RunError::from),
     };
     started?;
-    let timed_out = watched??;
+    let verdict = watched??;
     stopped?;
     let status = exit?.ok_or(RunError::Unreaped)?;
-    let summary = stderr_summary(&stderr_receiver.recv_timeout(grace));
+    let stderr = stderr_receiver.recv_timeout(grace);
+    let summary = stderr_summary(&stderr);
     debug!(%summary, "syft finished");
-    outcome(timed_out, parsed, status)
+    let kept = stderr
+        .as_ref()
+        .ok()
+        .and_then(|drained| drained.as_ref().ok())
+        .map(|drained| drained.kept.as_slice());
+    let limit = exceeded_limit(status, kept.unwrap_or(&[]));
+    let result = classify(outcome(verdict == Verdict::TimedOut, parsed, status), limit);
+    disk_verdict(verdict, result)
 }
