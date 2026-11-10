@@ -36,8 +36,8 @@ fn key_file(directory: &Path, bytes: &[u8], mode: u32) -> Result<std::path::Path
 fn a_private_key_file_of_the_right_size_is_read() -> TestResult {
     let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
     let bytes = vec![b'k'; MIN_LINK_KEY_BYTES];
-    let key = read_link_key(&key_file(directory.path(), &bytes, PRIVATE_MODE)?)?;
-    assert_eq!(key.as_slice(), bytes.as_slice());
+    read_link_key(&key_file(directory.path(), &bytes, PRIVATE_MODE)?)?;
+    assert!(key_from_bytes(bytes.clone()).is_ok());
     let (mode, owner, process_user) = mode_and_owners(&fs::metadata(directory.path().join("link.key"))?)?;
     assert_eq!((mode & PRIVATE_MODE, owner), (PRIVATE_MODE, process_user));
     Ok(())

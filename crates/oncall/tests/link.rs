@@ -14,9 +14,10 @@ use oncall::link::{
     action_byte, action_from_byte, apply_link, issue_link, issue_link_with, mac_over, parse_claims, payload_bytes, redeem_link, seal, verify_link,
     Claims, LinkAction, Nonce, ALERT_BYTES, EXPIRY_BYTES,
 };
+use oncall::linkkey::key_from_bytes;
 use oncall::rows::phase_name;
 use oncall::store::{GET_SQL, UPDATE_SQL};
-use oncall::types::Row;
+use oncall::types::{LinkKey, Row};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::error::Error;
@@ -29,10 +30,10 @@ use types::TestResult;
 const STAMP: i64 = 1_700_000_000;
 
 
-const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+const KEY_BYTES: &[u8] = b"0123456789abcdef0123456789abcdef";
 
 
-const OTHER_KEY: &[u8] = b"fedcba9876543210fedcba9876543210";
+const OTHER_KEY_BYTES: &[u8] = b"fedcba9876543210fedcba9876543210";
 
 
 const ALERT: i64 = 7;
@@ -42,6 +43,16 @@ const TWO_LINKS: usize = 2;
 
 
 const LATER: i64 = 2;
+
+
+fn key() -> Result<LinkKey, Box<dyn Error>> {
+    Ok(key_from_bytes(KEY_BYTES.to_vec())?)
+}
+
+
+fn other_key() -> Result<LinkKey, Box<dyn Error>> {
+    Ok(key_from_bytes(OTHER_KEY_BYTES.to_vec())?)
+}
 
 
 fn at(offset: i64) -> Result<DateTime<Utc>, Box<dyn Error>> {
@@ -71,7 +82,7 @@ fn failing_fill(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 
 
 fn token(action: LinkAction, tenant: &str) -> Result<String, Box<dyn Error>> {
-    Ok(issue_link(ALERT, action, tenant, at(0)?, KEY)?)
+    Ok(issue_link(ALERT, action, tenant, at(0)?, &key()?)?)
 }
 
 
@@ -81,7 +92,7 @@ fn rebuilt(bytes: &[u8]) -> String {
 
 
 fn with_mac(payload: &[u8]) -> Result<String, Box<dyn Error>> {
-    let tag = mac_over(KEY, payload)?.finalize().into_bytes();
+    let tag = mac_over(&key()?, payload).finalize().into_bytes();
     let mut bytes = payload.to_vec();
     bytes.extend_from_slice(&tag);
     Ok(rebuilt(&bytes))
@@ -89,21 +100,21 @@ fn with_mac(payload: &[u8]) -> Result<String, Box<dyn Error>> {
 
 
 fn verified(token: &str, offset: i64) -> Result<Result<Claims, LinkError<io::Error>>, Box<dyn Error>> {
-    Ok(verify_link(token, at(offset)?, KEY))
+    Ok(verify_link(token, at(offset)?, &key()?))
 }
 
 
 #[test]
 fn a_link_round_trips() -> TestResult {
     let set = used_store();
-    let claims = redeem_link(&token(LinkAction::Resolve, "acme")?, at(1)?, KEY, &mut used_fn(&set))?;
+    let claims = redeem_link(&token(LinkAction::Resolve, "acme")?, at(1)?, &key()?, &mut used_fn(&set))?;
     assert_eq!(
         (claims.tenant.as_str(), claims.alert, claims.action),
         ("acme", ALERT, LinkAction::Resolve)
     );
     assert_eq!(claims.expires_at, STAMP + LINK_LIFETIME_SECONDS);
     assert_eq!(set.borrow().len(), 1);
-    let again = redeem_link(&token(LinkAction::Acknowledge, "acme")?, at(1)?, KEY, &mut used_fn(&set))?;
+    let again = redeem_link(&token(LinkAction::Acknowledge, "acme")?, at(1)?, &key()?, &mut used_fn(&set))?;
     assert_eq!(again.action, LinkAction::Acknowledge);
     assert_eq!(set.borrow().len(), TWO_LINKS);
     Ok(())
@@ -129,7 +140,10 @@ fn every_byte_field_of_the_token_is_covered_by_the_mac() -> TestResult {
             "position {position}"
         );
     }
-    assert!(matches!(verify_link::<io::Error>(&genuine, at(1)?, OTHER_KEY), Err(LinkError::Tampered)));
+    assert!(matches!(
+        verify_link::<io::Error>(&genuine, at(1)?, &other_key()?),
+        Err(LinkError::Tampered)
+    ));
     Ok(())
 }
 
@@ -140,7 +154,7 @@ fn the_expiry_is_inclusive_and_one_second_later_refuses() -> TestResult {
     assert!(verified(&genuine, LINK_LIFETIME_SECONDS)?.is_ok());
     assert!(matches!(verified(&genuine, LINK_LIFETIME_SECONDS + 1)?, Err(LinkError::Expired)));
     let set = used_store();
-    let late = redeem_link(&genuine, at(LINK_LIFETIME_SECONDS + 1)?, KEY, &mut used_fn(&set));
+    let late = redeem_link(&genuine, at(LINK_LIFETIME_SECONDS + 1)?, &key()?, &mut used_fn(&set));
     assert!(matches!(late, Err(LinkError::Expired)) && set.borrow().is_empty());
     Ok(())
 }
@@ -155,9 +169,9 @@ fn a_lifetime_beyond_the_bound_is_refused() -> TestResult {
         expires_at: STAMP + LINK_LIFETIME_SECONDS + offset,
         nonce: Nonce([0; NONCE_BYTES]),
     };
-    assert!(verified(&seal(&claims(LINK_SKEW_SECONDS), KEY)?, 0)?.is_ok());
+    assert!(verified(&seal(&claims(LINK_SKEW_SECONDS), &key()?), 0)?.is_ok());
     assert!(matches!(
-        verified(&seal(&claims(LINK_SKEW_SECONDS + 1), KEY)?, 0)?,
+        verified(&seal(&claims(LINK_SKEW_SECONDS + 1), &key()?), 0)?,
         Err(LinkError::Malformed)
     ));
     Ok(())
@@ -168,9 +182,9 @@ fn a_lifetime_beyond_the_bound_is_refused() -> TestResult {
 fn a_reused_link_is_refused() -> TestResult {
     let genuine = token(LinkAction::Resolve, "acme")?;
     let set = used_store();
-    redeem_link(&genuine, at(1)?, KEY, &mut used_fn(&set))?;
+    redeem_link(&genuine, at(1)?, &key()?, &mut used_fn(&set))?;
     assert!(matches!(
-        redeem_link(&genuine, at(LATER)?, KEY, &mut used_fn(&set)),
+        redeem_link(&genuine, at(LATER)?, &key()?, &mut used_fn(&set)),
         Err(LinkError::Reused)
     ));
     assert_eq!(LinkError::<io::Error>::Reused.to_string(), "the link was already used");
@@ -181,7 +195,7 @@ fn a_reused_link_is_refused() -> TestResult {
 #[test]
 fn a_failing_used_store_is_a_typed_error() -> TestResult {
     let genuine = token(LinkAction::Resolve, "acme")?;
-    let refused = redeem_link(&genuine, at(1)?, KEY, &mut failing_used);
+    let refused = redeem_link(&genuine, at(1)?, &key()?, &mut failing_used);
     assert!(matches!(refused, Err(LinkError::Used(_))));
     assert!(refused.err().and_then(|error| error.source().map(ToString::to_string)) == Some("store down".to_owned()));
     Ok(())
@@ -201,10 +215,13 @@ fn malformed_and_oversized_tokens_are_refused_before_any_mac_or_store_work() -> 
     let padded = format!("{genuine}=");
     let short = rebuilt(&[0; MAC_BYTES - 1]);
     for bad in ["", "!!!!", "not base64 at all", oversized.as_str(), padded.as_str(), short.as_str()] {
-        assert!(matches!(redeem_link(bad, at(1)?, KEY, &mut counting), Err(LinkError::Malformed)), "{bad}");
+        assert!(
+            matches!(redeem_link(bad, at(1)?, &key()?, &mut counting), Err(LinkError::Malformed)),
+            "{bad}"
+        );
     }
     assert!(calls.borrow().is_empty());
-    let longest = issue_link(ALERT, LinkAction::Resolve, &"a".repeat(MAX_TENANT_BYTES), at(0)?, KEY)?;
+    let longest = issue_link(ALERT, LinkAction::Resolve, &"a".repeat(MAX_TENANT_BYTES), at(0)?, &key()?)?;
     assert!(longest.len() <= MAX_TOKEN_CHARS);
     Ok(())
 }
@@ -259,11 +276,14 @@ fn the_tenant_is_validated_and_the_random_source_may_fail() -> TestResult {
     let too_long = "a".repeat(MAX_TENANT_BYTES + 1);
     for bad in ["", "has space", too_long.as_str(), "-x"] {
         assert!(
-            matches!(issue_link(ALERT, LinkAction::Resolve, bad, at(0)?, KEY), Err(LinkError::InvalidTenant)),
+            matches!(
+                issue_link(ALERT, LinkAction::Resolve, bad, at(0)?, &key()?),
+                Err(LinkError::InvalidTenant)
+            ),
             "{bad}"
         );
     }
-    let failed = issue_link_with(ALERT, LinkAction::Resolve, "acme", at(0)?, KEY, failing_fill);
+    let failed = issue_link_with(ALERT, LinkAction::Resolve, "acme", at(0)?, &key()?, failing_fill);
     assert!(matches!(failed, Err(LinkError::Random(_))));
     let first = token(LinkAction::Resolve, "acme")?;
     assert_ne!(first, token(LinkAction::Resolve, "acme")?);
@@ -282,11 +302,11 @@ fn errors_carry_fixed_texts_and_no_key_material() -> TestResult {
         LinkError::InvalidTenant,
     ]
     .map(|error| format!("{error} {error:?}"));
-    let key_text = String::from_utf8(KEY.to_vec())?;
+    let key_text = String::from_utf8(KEY_BYTES.to_vec())?;
     assert!(texts.iter().all(|text| !text.contains(&key_text)));
     let genuine = token(LinkAction::Resolve, "acme")?;
     let flipped = genuine.replacen(genuine.get(..1).ok_or("first")?, if genuine.starts_with('A') { "B" } else { "A" }, 1);
-    let message = format!("{:?}", verify_link::<io::Error>(&flipped, at(0)?, KEY).err());
+    let message = format!("{:?}", verify_link::<io::Error>(&flipped, at(0)?, &key()?).err());
     assert!(!message.contains(&genuine) && !message.contains(&flipped));
     Ok(())
 }
@@ -373,7 +393,7 @@ async fn a_redeemed_link_acts_in_its_own_tenant_only() -> TestResult {
         "acme",
         &token(LinkAction::Acknowledge, "acme")?,
         at(1)?,
-        KEY,
+        &key()?,
         &mut used_fn(&set),
     )
     .await?;
@@ -390,7 +410,7 @@ async fn a_token_of_another_tenant_is_refused_and_not_consumed() -> TestResult {
     let mut exec = exec_for(&state);
     let set = used_store();
     let foreign = token(LinkAction::Resolve, "other")?;
-    let refused = apply_link(&mut exec, "acme", &foreign, at(1)?, KEY, &mut used_fn(&set)).await;
+    let refused = apply_link(&mut exec, "acme", &foreign, at(1)?, &key()?, &mut used_fn(&set)).await;
     assert!(matches!(refused, Err(LinkError::OtherTenant)));
     assert!(set.borrow().is_empty());
     assert_eq!(phase_of(&state, "other").as_deref(), Some("open"));
@@ -403,14 +423,14 @@ async fn a_link_for_an_alert_of_nobody_is_not_found_and_a_replay_is_refused() ->
     let state = world();
     let mut exec = exec_for(&state);
     let set = used_store();
-    let missing = issue_link(ALERT + 1, LinkAction::Resolve, "acme", at(0)?, KEY)?;
-    let refused = apply_link(&mut exec, "acme", &missing, at(1)?, KEY, &mut used_fn(&set)).await;
+    let missing = issue_link(ALERT + 1, LinkAction::Resolve, "acme", at(0)?, &key()?)?;
+    let refused = apply_link(&mut exec, "acme", &missing, at(1)?, &key()?, &mut used_fn(&set)).await;
     assert!(matches!(refused, Err(LinkError::Alert(StoreError::NotFound))));
     let resolve = token(LinkAction::Resolve, "acme")?;
-    apply_link(&mut exec, "acme", &resolve, at(1)?, KEY, &mut used_fn(&set)).await?;
-    let replay = apply_link(&mut exec, "acme", &resolve, at(LATER)?, KEY, &mut used_fn(&set)).await;
+    apply_link(&mut exec, "acme", &resolve, at(1)?, &key()?, &mut used_fn(&set)).await?;
+    let replay = apply_link(&mut exec, "acme", &resolve, at(LATER)?, &key()?, &mut used_fn(&set)).await;
     assert!(matches!(replay, Err(LinkError::Reused)));
-    let forged = apply_link(&mut exec, "acme", "!!", at(LATER)?, KEY, &mut used_fn(&set)).await;
+    let forged = apply_link(&mut exec, "acme", "!!", at(LATER)?, &key()?, &mut used_fn(&set)).await;
     assert!(matches!(forged, Err(LinkError::Malformed)));
     Ok(())
 }
@@ -428,7 +448,7 @@ async fn a_token_with_an_invalid_tenant_name_is_refused_even_when_authentic() ->
         expires_at: STAMP + 1,
         nonce: Nonce([1; NONCE_BYTES]),
     };
-    let refused = apply_link(&mut exec, "bad tenant", &seal(&claims, KEY)?, at(0)?, KEY, &mut used_fn(&set)).await;
+    let refused = apply_link(&mut exec, "bad tenant", &seal(&claims, &key()?), at(0)?, &key()?, &mut used_fn(&set)).await;
     assert!(matches!(refused, Err(LinkError::InvalidTenant)));
     Ok(())
 }

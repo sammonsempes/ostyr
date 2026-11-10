@@ -4,13 +4,13 @@ use crate::limits::{
     LINK_ACTION_ACKNOWLEDGE, LINK_ACTION_RESOLVE, LINK_LIFETIME_SECONDS, LINK_SKEW_SECONDS, MAC_BYTES, MAX_TOKEN_CHARS, NONCE_BYTES,
 };
 use crate::store::apply_event;
-use crate::types::{FillFn, IssueError, Row};
+use crate::types::{FillFn, IssueError, LinkKey, Row};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use core_pg::scope::{tenant_scope, TenantScope};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::future::Future;
 
 
@@ -89,24 +89,28 @@ pub fn payload_bytes(claims: &Claims) -> Vec<u8> {
 }
 
 
-pub fn mac_over(key: &[u8], payload: &[u8]) -> Result<Hmac<Sha256>, hmac::digest::InvalidLength> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key)?;
+/// The key is hashed to a fixed-size block first, so building the MAC cannot fail on a key length.
+pub fn mac_over(key: &LinkKey, payload: &[u8]) -> Hmac<Sha256> {
+    let digest = Sha256::digest(key.0.as_slice());
+    let mut block = hmac::digest::Key::<Hmac<Sha256>>::default();
+    block.iter_mut().zip(digest.iter()).for_each(|(target, source)| *target = *source);
+    let mut mac = <Hmac<Sha256> as Mac>::new(&block);
     mac.update(DOMAIN_SEPARATOR);
     mac.update(payload);
-    Ok(mac)
+    mac
 }
 
 
 /// The opaque token: URL-safe base64 of the payload followed by its HMAC-SHA256.
-pub fn seal(claims: &Claims, key: &[u8]) -> Result<String, hmac::digest::InvalidLength> {
+pub fn seal(claims: &Claims, key: &LinkKey) -> String {
     let mut bytes = payload_bytes(claims);
-    let tag = mac_over(key, &bytes)?.finalize().into_bytes();
+    let tag = mac_over(key, &bytes).finalize().into_bytes();
     bytes.extend_from_slice(&tag);
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 
-pub fn issue_link_with(alert: i64, action: LinkAction, tenant: &str, now: DateTime<Utc>, key: &[u8], fill: FillFn) -> Result<String, IssueError> {
+pub fn issue_link_with(alert: i64, action: LinkAction, tenant: &str, now: DateTime<Utc>, key: &LinkKey, fill: FillFn) -> Result<String, IssueError> {
     tenant_scope(tenant).map_err(|_refused| LinkError::InvalidTenant)?;
     let mut nonce = [0; NONCE_BYTES];
     fill(&mut nonce).map_err(LinkError::Random)?;
@@ -117,12 +121,12 @@ pub fn issue_link_with(alert: i64, action: LinkAction, tenant: &str, now: DateTi
         expires_at: now.timestamp().saturating_add(LINK_LIFETIME_SECONDS),
         nonce: Nonce(nonce),
     };
-    seal(&claims, key).map_err(LinkError::Key)
+    Ok(seal(&claims, key))
 }
 
 
 /// A signed, single-use link for `action` on `alert`, valid for `LINK_LIFETIME_SECONDS`.
-pub fn issue_link(alert: i64, action: LinkAction, tenant: &str, now: DateTime<Utc>, key: &[u8]) -> Result<String, IssueError> {
+pub fn issue_link(alert: i64, action: LinkAction, tenant: &str, now: DateTime<Utc>, key: &LinkKey) -> Result<String, IssueError> {
     issue_link_with(alert, action, tenant, now, key, os_random)
 }
 
@@ -145,17 +149,14 @@ pub fn parse_claims(payload: &[u8]) -> Option<Claims> {
 
 
 /// Length and encoding first, then the MAC in constant time, then the structure and the expiry. Records nothing.
-pub fn verify_link<UsedError: std::error::Error + 'static>(token: &str, now: DateTime<Utc>, key: &[u8]) -> Result<Claims, LinkError<UsedError>> {
+pub fn verify_link<UsedError: std::error::Error + 'static>(token: &str, now: DateTime<Utc>, key: &LinkKey) -> Result<Claims, LinkError<UsedError>> {
     if token.is_empty() || token.len() > MAX_TOKEN_CHARS {
         Err(LinkError::Malformed)
     } else {
         let bytes = URL_SAFE_NO_PAD.decode(token).map_err(|_refused| LinkError::Malformed)?;
         let split = bytes.len().checked_sub(MAC_BYTES).ok_or(LinkError::Malformed)?;
         let (payload, tag) = bytes.split_at_checked(split).ok_or(LinkError::Malformed)?;
-        mac_over(key, payload)
-            .map_err(LinkError::Key)?
-            .verify_slice(tag)
-            .map_err(|_refused| LinkError::Tampered)?;
+        mac_over(key, payload).verify_slice(tag).map_err(|_refused| LinkError::Tampered)?;
         let claims = parse_claims(payload).ok_or(LinkError::Malformed)?;
         let seconds = now.timestamp();
         if claims.expires_at < seconds {
@@ -183,7 +184,7 @@ where
 }
 
 
-pub fn redeem_link<UsedError, Used>(token: &str, now: DateTime<Utc>, key: &[u8], used: &mut Used) -> Result<Claims, LinkError<UsedError>>
+pub fn redeem_link<UsedError, Used>(token: &str, now: DateTime<Utc>, key: &LinkKey, used: &mut Used) -> Result<Claims, LinkError<UsedError>>
 where
     UsedError: std::error::Error + 'static,
     Used: FnMut(&Nonce) -> Result<bool, UsedError>,
@@ -200,7 +201,7 @@ pub async fn apply_link<Executor, Pending, UsedError, Used>(
     tenant: &str,
     token: &str,
     now: DateTime<Utc>,
-    key: &[u8],
+    key: &LinkKey,
     used: &mut Used,
 ) -> Result<Alert, LinkError<UsedError>>
 where

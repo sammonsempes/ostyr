@@ -42,7 +42,7 @@ pub fn key_from_bytes(bytes: Vec<u8>) -> Result<LinkKey, KeyError> {
     if key.len() < MIN_LINK_KEY_BYTES {
         Err(KeyError::TooShort { min: MIN_LINK_KEY_BYTES })
     } else {
-        Ok(key)
+        Ok(LinkKey(key))
     }
 }
 

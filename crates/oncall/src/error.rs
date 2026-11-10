@@ -112,8 +112,6 @@ pub enum LinkError<UsedError: std::error::Error + 'static> {
     InvalidTenant,
     #[error("no random bytes are available")]
     Random(#[source] getrandom::Error),
-    #[error("the link key cannot be used")]
-    Key(#[source] hmac::digest::InvalidLength),
     #[error("the used-link store failed")]
     Used(#[source] UsedError),
     #[error("the alert store refused the event")]
