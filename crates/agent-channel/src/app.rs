@@ -1,5 +1,7 @@
-use core_audit::log::{append, AuditLog};
-use core_config::reload::{ReloadContext, ReloadEngine};
+use core_audit::error::AuditError;
+use core_audit::log::{append_declared, AuditLog};
+use core_audit::model::{NewEntry, Record};
+use core_config::reload::{bounded_parameter, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::SharedAuditFn;
 use std::fs::File;
 use std::io::{self, BufRead, Read};
@@ -16,10 +18,25 @@ pub fn debounce() -> Duration {
 }
 
 
+/// The parameter keys this crate's records may keep: the reload keys; any other value is stored as `[REDACTED]`.
+pub const AGENT_CHANNEL_DECLARED_KEYS: [&str; 5] = RELOAD_DECLARED_KEYS;
+
+
+/// Appends with declared keys, every value first cut with a visible marker naming the characters omitted.
+pub fn append_bounded<Output: std::io::Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<Record, AuditError> {
+    let parameters = entry
+        .parameters
+        .iter()
+        .map(|(key, value)| (key.clone(), bounded_parameter(key, value)))
+        .collect();
+    append_declared(log, NewEntry { parameters, ..entry }, &AGENT_CHANNEL_DECLARED_KEYS)
+}
+
+
 /// An audit function appending to the shared platform audit log.
 pub fn shared_log_audit(log: &Arc<AuditLog<File>>) -> Box<SharedAuditFn> {
     let shared = Arc::clone(log);
-    Box::new(move |entry| append(&shared, entry))
+    Box::new(move |entry| append_bounded(&shared, entry))
 }
 
 
