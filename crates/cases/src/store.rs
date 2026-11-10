@@ -426,6 +426,7 @@ pub async fn apply_to_stored(
             "updated_at": now,
             "event": event,
             "version": stored.version,
+            "prior_status": stored.case.status,
         });
         let rows = exec(
             scope.clone(),

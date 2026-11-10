@@ -192,3 +192,23 @@ async fn apply_case_action_refuses_a_bad_actor_or_time_before_reading() -> TestR
     assert_eq!(sent(&db), before);
     Ok(())
 }
+
+
+#[tokio::test]
+async fn a_status_changed_without_a_version_bump_is_a_conflict() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
+    let snapshot = get_case(&exec, &scope, "c1").await?.ok_or("missing")?;
+    lock(&db.tenants)
+        .get_mut("acme")
+        .and_then(|table| table.get_mut("c1"))
+        .ok_or("missing")?
+        .case
+        .status = CaseStatus::Closed;
+    let stale = apply_to_stored(&exec, &scope, &snapshot, CaseAction::Start, "alice", NOW + 1).await;
+    assert!(matches!(stale, Err(CaseStoreError::Conflict)));
+    assert_eq!(stored_case(&db, "acme", "c1").map(|stored| stored.history.len()), Some(0));
+    Ok(())
+}
