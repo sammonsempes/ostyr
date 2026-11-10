@@ -11,7 +11,7 @@ use alerts::store::{MAX_ALERTS_PER_INSERT, MAX_EVENT_ID_CHARS, MAX_TITLE_CHARS};
 use alerts::types::RowFuture;
 use cert_inventory::alerting::{
     alert_of, cn_of, date_of, expiry_alerts, is_dns_name, is_fingerprint, is_label, micros_of, store_expiry_alerts, EXPIRY_RULE_ID,
-    MAX_CREATED_MICROS, MAX_DNS_NAME_BYTES, MAX_LABEL_BYTES, NEAR_DAYS,
+    MAX_CREATED_MICROS, MAX_DNS_NAME_BYTES, MAX_LABEL_BYTES, MAX_NOW_SECONDS, MICROS_PER_SECOND, NEAR_DAYS,
 };
 use cert_inventory::expiry::SECONDS_PER_DAY;
 use cert_inventory::model::CertRecord;
@@ -114,7 +114,7 @@ fn mapping_expired_near_and_ok() -> TestResult {
     assert_eq!(high.rule_title, "Certificate old.example.com expired on 2023-11-14");
     assert_eq!(high.host_name.as_deref(), Some("old.example.com"));
     assert_eq!(high.created_micros, NOW_MICROS);
-    assert_eq!(high.event_time, NOW_MICROS.to_string());
+    assert_eq!(high.event_time, ((NOW - 1) as u64 * MICROS_PER_SECOND).to_string());
     assert_eq!(high.id, alert_id("acme", EXPIRY_RULE_ID, &high.event_ids));
     assert!(high.summary.text.contains("\"state\":\"expired\""));
     let medium = alert_of(&scope, &near, NOW).ok_or("no alert")?;
@@ -326,5 +326,50 @@ async fn executor_failure_is_propagated() -> TestResult {
     let exec = executor(&store);
     let alerts = expiry_alerts(&scope, &[cert('a', "CN=a.example.com", NOW - 1)], NOW);
     assert!(matches!(store_expiry_alerts(&exec, &scope, &alerts).await, Err(StoreError::Pg(_))));
+    Ok(())
+}
+
+
+#[test]
+fn negative_now_gives_no_alert() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let record = cert('a', "CN=a.example.com", 1);
+    assert!(alert_of(&scope, &record, -1).is_none());
+    assert!(expiry_alerts(&scope, &[record], -1).is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn now_above_the_store_range_is_clamped() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let record = cert('a', "CN=a.example.com", 1);
+    let alerts = expiry_alerts(&scope, &[record], MAX_NOW_SECONDS + 1);
+    assert_eq!(alerts.first().map(|alert| alert.created_micros), Some(MAX_CREATED_MICROS));
+    Ok(())
+}
+
+
+#[test]
+fn event_time_is_deterministic_per_record() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let near = cert('a', "CN=a.example.com", NOW + SECONDS_PER_DAY);
+    let first = alert_of(&scope, &near, NOW).ok_or("no alert")?;
+    let second = alert_of(&scope, &near, NOW + 1).ok_or("no alert")?;
+    assert_eq!(first.event_time, second.event_time);
+    assert_eq!(first.id, second.id);
+    assert_ne!(first.created_micros, second.created_micros);
+    let start = (NOW + SECONDS_PER_DAY - i64::from(NEAR_DAYS) * SECONDS_PER_DAY) as u64 * MICROS_PER_SECOND;
+    assert_eq!(first.event_time, start.to_string());
+    Ok(())
+}
+
+
+#[test]
+fn near_state_start_never_wraps() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let record = cert('a', "CN=a.example.com", SECONDS_PER_DAY);
+    let alert = alert_of(&scope, &record, 0).ok_or("no alert")?;
+    assert_eq!(alert.event_time, "0");
     Ok(())
 }
