@@ -743,12 +743,16 @@ dependencies = [
 name = "cert-inventory"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "core-pg",
  "data-encoding",
  "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "time",
+ "tokio",
  "tracing",
  "x509-parser",
 ]
