@@ -18,6 +18,10 @@ pub enum RuleError {
     DuplicateId { file: String, rule: String },
     #[error("rule `{rule}`: {count} selector labels, at most {} allowed", MAX_LABELS)]
     TooManySelectors { rule: String, count: usize },
+    #[error("evaluation time does not fit a timestamp")]
+    Time(#[from] std::num::TryFromIntError),
+    #[error("evaluation time out of range")]
+    TimeOutOfRange,
     #[error("invalid tenant id")]
     InvalidTenant,
     #[error(transparent)]
