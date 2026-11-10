@@ -1,9 +1,15 @@
 use core_pg::error::{sqlstate_class, PgError};
-use core_pg::migrate::{bootstrap_script, check_version, digest_of, migration_script, plan_migrations, AppliedMigration, Migration};
+use core_pg::migrate::{
+    adopt_script, applied_sql, bootstrap_script, check_namespace, check_not_legacy, check_row_count, check_version, digest_of, lock_script,
+    migration_script, plan_migrations, table_shape, AppliedMigration, Migration, TableShape, MAX_APPLIED_ROWS,
+};
 use core_pg::query::timed_script;
 use core_pg::scope::{tenant_of, tenant_scope};
 use std::error::Error;
 use std::time::Duration;
+
+
+const MAX_NAMESPACE: usize = 32;
 
 
 const TOO_LONG: usize = 65;
@@ -102,12 +108,12 @@ fn embedded_list_must_be_valid_and_ascending() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn scripts_take_the_lock_and_record_before_the_sql() -> Result<(), Box<dyn Error>> {
-    let script = migration_script(&FIRST);
+    let script = migration_script("store", &FIRST);
     let lock = script.find("pg_advisory_xact_lock").unwrap_or(usize::MAX);
     let record = script.find("INSERT INTO schema_migrations").unwrap_or(usize::MAX);
     let sql = script.find("CREATE TABLE a").unwrap_or(usize::MAX);
     assert!(lock < record && record < sql, "{script}");
-    assert!(script.contains(&digest_of(FIRST.sql)));
+    assert!(script.contains(&digest_of(FIRST.sql)) && script.contains("('store', '0001_init'"));
     assert!(!script.contains("BEGIN") && !script.contains("COMMIT"));
     let bootstrap = bootstrap_script();
     assert!(bootstrap.find("pg_advisory_xact_lock") < bootstrap.find("CREATE TABLE IF NOT EXISTS schema_migrations"));
@@ -165,5 +171,42 @@ fn plan_error_messages_name_versions_only() -> Result<(), Box<dyn Error>> {
     .ok_or("accepted")?
     .to_string();
     assert!(message.contains("0001_init") && !message.contains("CREATE"), "{message}");
+    Ok(())
+}
+
+
+#[test]
+fn namespaces_are_lowercase_identifiers() -> Result<(), Box<dyn Error>> {
+    ["oncall", "a", "cmdb_2", &"a".repeat(MAX_NAMESPACE)]
+        .iter()
+        .try_for_each(|good| check_namespace(good))?;
+    ["", "1a", "_a", "A", "a-b", "a'b", "é", &"a".repeat(MAX_NAMESPACE + 1)]
+        .iter()
+        .for_each(|bad| assert!(matches!(check_namespace(bad), Err(PgError::InvalidNamespace { .. })), "{bad}"));
+    Ok(())
+}
+
+
+#[test]
+fn table_shapes_are_told_apart() -> Result<(), Box<dyn Error>> {
+    let legacy = ["version".to_owned(), "digest".to_owned()];
+    let current = ["namespace".to_owned(), "version".to_owned()];
+    assert_eq!(table_shape(&[]), TableShape::Absent);
+    assert_eq!(table_shape(&legacy), TableShape::Legacy);
+    assert_eq!(table_shape(&current), TableShape::Namespaced);
+    assert!(matches!(check_not_legacy(TableShape::Legacy), Err(PgError::LegacyRecords)));
+    check_not_legacy(TableShape::Absent)?;
+    check_not_legacy(TableShape::Namespaced)?;
+    Ok(())
+}
+
+
+#[test]
+fn the_adoption_script_names_the_namespace_and_the_lock_is_its_own_statement() -> Result<(), Box<dyn Error>> {
+    let script = adopt_script("oncall");
+    assert!(script.contains("DEFAULT 'oncall'") && script.contains("PRIMARY KEY (namespace, version)"));
+    assert!(!script.contains("pg_advisory_xact_lock") && lock_script().contains("pg_advisory_xact_lock"));
+    assert!(applied_sql("oncall").contains("WHERE namespace = 'oncall'"));
+    assert!(check_row_count(MAX_APPLIED_ROWS).is_ok() && check_row_count(MAX_APPLIED_ROWS + 1).is_err());
     Ok(())
 }

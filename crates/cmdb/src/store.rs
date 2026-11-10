@@ -80,6 +80,9 @@ pub const VERSION_COLUMN: usize = 3;
 pub const SOURCE_COLUMN: usize = 3;
 
 
+pub const MIGRATION_NAMESPACE: &str = "cmdb";
+
+
 pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "001_cmdb",

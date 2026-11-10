@@ -7,7 +7,7 @@ use core_pg::settings::parse_settings;
 use status_page::error::StoreError;
 use status_page::model::{ComponentConfig, PageConfig, DEFAULT_LIMITS};
 use status_page::render::render;
-use status_page::store::{add_update, create_incident, published_incidents, resolve_incident, MAX_PUBLISHED, MIGRATIONS};
+use status_page::store::{add_update, create_incident, published_incidents, resolve_incident, MAX_PUBLISHED, MIGRATIONS, MIGRATION_NAMESPACE};
 use status_page::store_model::{Cell, IncidentRef, NewIncident, Param, Statement};
 use status_page::types::Row;
 use std::io::{stderr, stdout, Write};
@@ -99,7 +99,11 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, &settings_file.display().to_string())?;
     let client = connect(&settings).await?;
     let mut out = stdout();
-    writeln!(out, "migrations applied: {:?}", migrate(&client, &MIGRATIONS, DEADLINE).await?)?;
+    writeln!(
+        out,
+        "migrations applied: {:?}",
+        migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE).await?
+    )?;
     let scope_a = tenant_scope(tenant_a)?;
     let scope_b = tenant_scope(tenant_b)?;
     let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement);

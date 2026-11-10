@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -16,6 +17,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "net", "time"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.13"
+time = "0.3"
 tracing = "0.1"
 zeroize = "1"
 
@@ -23,7 +25,6 @@ zeroize = "1"
 libc = "0.2"
 
 [dev-dependencies]
-core-audit = { version = "0.0.0", path = "../core-audit" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
 walkdir = "2"
