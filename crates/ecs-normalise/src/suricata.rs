@@ -1,14 +1,17 @@
-//! Suricata EVE JSON lines (alert, flow, dns, http, tls) mapped to ECS (spec section 14, NDR).
+//! Suricata EVE JSON lines (alert, flow, dns, http, tls; the second slice is in `suricata_extra`) mapped to ECS (spec section 14, NDR).
 
 use crate::convert::Outcome;
 use crate::error::NormaliseError;
+use crate::suricata_extra::{alert_context, dcerpc_event, fileinfo_event, krb5_event, smb_event, Dcerpc, Fileinfo, Krb5, Smb};
 use crate::types::Label;
+use crate::types::{Objects, RawFields};
 use core_export::ecs::{
     blank_event, DnsFields, DnsQuestion, EcsEvent, EndpointFields, EventFields, HostFields, HttpBodyFields, HttpFields, HttpRequestFields,
     HttpResponseFields, JaHash, NetworkFields, RuleFields, TlsClientFields, TlsFields, TlsServerFields, UrlFields, UserAgentFields,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{from_str, Value};
 use std::net::IpAddr;
 use time::OffsetDateTime;
@@ -27,6 +30,9 @@ pub const MAX_ANSWERS: usize = 16;
 pub const BAD_LABEL_PREFIX: &str = "suricata_bad_";
 
 
+pub const NULL_TEXT: &str = "null";
+
+
 pub const REPLACEMENT: char = '\u{FFFD}';
 
 
@@ -43,19 +49,13 @@ time::serde::format_description!(
 #[derive(Debug, Default, Deserialize)]
 pub struct Alert {
     pub action: Option<String>,
-    pub signature_id: Option<Value>,
     pub signature: Option<String>,
     pub category: Option<String>,
-    pub severity: Option<Value>,
 }
 
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Flow {
-    pub pkts_toserver: Option<Value>,
-    pub pkts_toclient: Option<Value>,
-    pub bytes_toserver: Option<Value>,
-    pub bytes_toclient: Option<Value>,
     #[serde(default, with = "eve_time::option")]
     pub start: Option<OffsetDateTime>,
     #[serde(default, with = "eve_time::option")]
@@ -98,8 +98,6 @@ pub struct Http {
     pub http_user_agent: Option<String>,
     pub http_method: Option<String>,
     pub protocol: Option<String>,
-    pub status: Option<Value>,
-    pub length: Option<Value>,
 }
 
 
@@ -165,12 +163,12 @@ pub fn clean(text: &str) -> String {
 }
 
 
-fn clean_opt(text: Option<&String>) -> Option<String> {
+pub fn clean_opt(text: Option<&String>) -> Option<String> {
     text.filter(|found| !found.is_empty()).map(|found| clean(found))
 }
 
 
-fn non_empty<Group: Default + PartialEq>(group: Group) -> Option<Group> {
+pub fn non_empty<Group: Default + PartialEq>(group: Group) -> Option<Group> {
     Some(group).filter(|found| *found != Group::default())
 }
 
@@ -218,12 +216,20 @@ fn base_event(eve: &Eve, types: &[&str]) -> EcsEvent {
 }
 
 
-fn checked<Number: TryFrom<u64>>(field: &str, raw: Option<&Value>) -> (Option<Number>, Option<Label>) {
-    match raw.map(|found| found.as_u64().and_then(|number| Number::try_from(number).ok()).ok_or(found)) {
+/// A peer number read from its raw JSON text, so a value beyond `u64` is kept exactly in the `suricata_bad_` label.
+pub fn checked<Number: TryFrom<u64>>(field: &str, raw: Option<&RawValue>) -> (Option<Number>, Option<Label>) {
+    match raw.filter(|found| found.get() != NULL_TEXT).map(|found| {
+        found
+            .get()
+            .parse::<u64>()
+            .ok()
+            .and_then(|number| Number::try_from(number).ok())
+            .ok_or(found)
+    }) {
         None => (None, None),
         Some(Ok(number)) => (Some(number), None),
         Some(Err(found)) => {
-            let label = (format!("{BAD_LABEL_PREFIX}{field}"), clean(&found.to_string()));
+            let label = (format!("{BAD_LABEL_PREFIX}{field}"), clean(found.get()));
             warn!(field, "a number out of range is kept as a label");
             (None, Some(label))
         }
@@ -231,7 +237,13 @@ fn checked<Number: TryFrom<u64>>(field: &str, raw: Option<&Value>) -> (Option<Nu
 }
 
 
-fn with_labels(event: EcsEvent, bad: impl IntoIterator<Item = Option<Label>>) -> EcsEvent {
+/// One raw field of the line's own object.
+pub fn raw_field<'a>(fields: &'a RawFields, key: &str) -> Option<&'a RawValue> {
+    fields.get(key).map(Box::as_ref)
+}
+
+
+pub fn with_labels(event: EcsEvent, bad: impl IntoIterator<Item = Option<Label>>) -> EcsEvent {
     EcsEvent {
         labels: event.labels.clone().into_iter().chain(bad.into_iter().flatten()).collect(),
         ..event
@@ -239,10 +251,10 @@ fn with_labels(event: EcsEvent, bad: impl IntoIterator<Item = Option<Label>>) ->
 }
 
 
-fn alert_event(alert: &Alert, base: EcsEvent) -> EcsEvent {
-    let (id, bad_id): (Option<u64>, _) = checked("alert_signature_id", alert.signature_id.as_ref());
-    let (severity, bad_severity) = checked("alert_severity", alert.severity.as_ref());
-    with_labels(
+pub fn alert_event(alert: &Alert, fields: &RawFields, value: &Value, base: EcsEvent) -> EcsEvent {
+    let (id, bad_id): (Option<u64>, _) = checked("alert_signature_id", raw_field(fields, "signature_id"));
+    let (severity, bad_severity) = checked("alert_severity", raw_field(fields, "severity"));
+    let event = with_labels(
         EcsEvent {
             event: EventFields {
                 kind: Some("alert".to_string()),
@@ -258,15 +270,16 @@ fn alert_event(alert: &Alert, base: EcsEvent) -> EcsEvent {
             ..base
         },
         [bad_id, bad_severity],
-    )
+    );
+    alert_context(value, event)
 }
 
 
-fn flow_event(eve: &Eve, flow: &Flow, base: EcsEvent) -> EcsEvent {
-    let (packets_out, bad_packets_out) = checked("flow_pkts_toserver", flow.pkts_toserver.as_ref());
-    let (packets_in, bad_packets_in) = checked("flow_pkts_toclient", flow.pkts_toclient.as_ref());
-    let (bytes_out, bad_bytes_out) = checked("flow_bytes_toserver", flow.bytes_toserver.as_ref());
-    let (bytes_in, bad_bytes_in) = checked("flow_bytes_toclient", flow.bytes_toclient.as_ref());
+fn flow_event(eve: &Eve, flow: &Flow, fields: &RawFields, base: EcsEvent) -> EcsEvent {
+    let (packets_out, bad_packets_out) = checked("flow_pkts_toserver", raw_field(fields, "pkts_toserver"));
+    let (packets_in, bad_packets_in) = checked("flow_pkts_toclient", raw_field(fields, "pkts_toclient"));
+    let (bytes_out, bad_bytes_out) = checked("flow_bytes_toserver", raw_field(fields, "bytes_toserver"));
+    let (bytes_in, bad_bytes_in) = checked("flow_bytes_toclient", raw_field(fields, "bytes_toclient"));
     with_labels(
         EcsEvent {
             event: EventFields {
@@ -312,10 +325,10 @@ fn dns_event(dns: &Dns, base: EcsEvent) -> EcsEvent {
 }
 
 
-fn http_event(http: &Http, base: EcsEvent) -> EcsEvent {
+fn http_event(http: &Http, fields: &RawFields, base: EcsEvent) -> EcsEvent {
     let url = clean_opt(http.url.as_ref());
-    let (status, bad_status) = checked("http_status", http.status.as_ref());
-    let (length, bad_length) = checked("http_length", http.length.as_ref());
+    let (status, bad_status) = checked("http_status", raw_field(fields, "status"));
+    let (length, bad_length) = checked("http_length", raw_field(fields, "length"));
     with_labels(
         EcsEvent {
             url: non_empty(UrlFields {
@@ -374,10 +387,12 @@ fn tls_event(tls: &Tls, base: EcsEvent) -> EcsEvent {
 }
 
 
-/// The object of the line's own event type, parsed strictly: `MissingField` when absent, `Schema` when of the wrong shape.
-fn own_object<Object: DeserializeOwned>(value: &Value, kind: &'static str) -> Result<Object, NormaliseError> {
-    let object = value.get(kind).ok_or(NormaliseError::MissingField(kind))?;
-    Object::deserialize(object).map_err(NormaliseError::Schema)
+/// The object of the line's own event type, parsed strictly from its raw text: `MissingField` when absent, `Schema` when of the wrong shape.
+fn own_object<Object: DeserializeOwned>(objects: &Objects, kind: &'static str) -> Result<(Object, RawFields), NormaliseError> {
+    let text = objects.get(kind).ok_or(NormaliseError::MissingField(kind))?.get();
+    let object = from_str(text).map_err(NormaliseError::Schema)?;
+    let fields = from_str(text).map_err(NormaliseError::Schema)?;
+    Ok((object, fields))
 }
 
 
@@ -386,14 +401,18 @@ fn wrap(mapped: EcsEvent) -> Outcome {
 }
 
 
-/// Maps one EVE line to an ECS event; an event type outside the five mapped ones is `Unknown("suricata:<type>")`.
-pub fn convert_eve(eve: &Eve, value: &Value) -> Result<Outcome, NormaliseError> {
+/// Maps one EVE line to an ECS event; an event type outside the nine mapped ones is `Unknown("suricata:<type>")`.
+pub fn convert_eve(eve: &Eve, value: &Value, objects: &Objects) -> Result<Outcome, NormaliseError> {
     match eve.event_type.as_str() {
-        "alert" => own_object(value, "alert").map(|alert| wrap(alert_event(&alert, base_event(eve, &[])))),
-        "flow" => own_object(value, "flow").map(|flow| wrap(flow_event(eve, &flow, base_event(eve, &["connection", "end"])))),
-        "dns" => own_object(value, "dns").map(|dns| wrap(dns_event(&dns, base_event(eve, &["protocol"])))),
-        "http" => own_object(value, "http").map(|http| wrap(http_event(&http, base_event(eve, &["protocol"])))),
-        "tls" => own_object(value, "tls").map(|tls| wrap(tls_event(&tls, base_event(eve, &["protocol"])))),
+        "alert" => own_object(objects, "alert").map(|(alert, fields)| wrap(alert_event(&alert, &fields, value, base_event(eve, &[])))),
+        "flow" => own_object(objects, "flow").map(|(flow, fields)| wrap(flow_event(eve, &flow, &fields, base_event(eve, &["connection", "end"])))),
+        "dns" => own_object(objects, "dns").map(|(dns, _)| wrap(dns_event(&dns, base_event(eve, &["protocol"])))),
+        "http" => own_object(objects, "http").map(|(http, fields)| wrap(http_event(&http, &fields, base_event(eve, &["protocol"])))),
+        "tls" => own_object(objects, "tls").map(|(tls, _)| wrap(tls_event(&tls, base_event(eve, &["protocol"])))),
+        "fileinfo" => own_object::<Fileinfo>(objects, "fileinfo").map(|(file, fields)| wrap(fileinfo_event(&file, &fields, base_event(eve, &[])))),
+        "smb" => own_object::<Smb>(objects, "smb").map(|(smb, _)| wrap(smb_event(&smb, base_event(eve, &["protocol"])))),
+        "krb5" => own_object::<Krb5>(objects, "krb5").map(|(krb5, _)| wrap(krb5_event(&krb5, base_event(eve, &[])))),
+        "dcerpc" => own_object::<Dcerpc>(objects, "dcerpc").map(|(rpc, _)| wrap(dcerpc_event(&rpc, base_event(eve, &["protocol"])))),
         other => Ok(Outcome::Unknown(format!("{MODULE}:{}", clean(other)))),
     }
 }
@@ -403,5 +422,6 @@ pub fn convert_eve(eve: &Eve, value: &Value) -> Result<Outcome, NormaliseError> 
 pub fn parse_eve(text: &str) -> Result<Outcome, NormaliseError> {
     let value: Value = from_str(text).map_err(NormaliseError::Syntax)?;
     let eve = Eve::deserialize(&value).map_err(NormaliseError::Schema)?;
-    convert_eve(&eve, &value)
+    let objects: Objects = from_str(text).map_err(NormaliseError::Syntax)?;
+    convert_eve(&eve, &value, &objects)
 }
