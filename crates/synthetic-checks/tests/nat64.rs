@@ -5,6 +5,7 @@ mod types;
 use core_config::parse::parse_document;
 use ipnet::{IpNet, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use synthetic_checks::error::{AddressClass, GuardError, ProbeError};
 use synthetic_checks::model::CheckFile;
@@ -216,7 +217,11 @@ fn an_unsupported_prefix_length_is_a_typed_refusal_in_both_guards() -> TestResul
 
 #[test]
 fn an_invalid_prefix_refuses_a_name_that_resolves_to_nothing() -> TestResult {
-    let resolve = |_: &str, _: Duration, _: usize| -> std::io::Result<Vec<IpAddr>> { Ok(vec![]) };
+    let called = AtomicBool::new(false);
+    let resolve = |_: &str, _: Duration, _: usize| -> std::io::Result<Vec<IpAddr>> {
+        called.store(true, Ordering::SeqCst);
+        Ok(vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))])
+    };
     let outcome = guarded_addresses(
         Host::Domain("empty.example"),
         &[],
@@ -225,7 +230,9 @@ fn an_invalid_prefix_refuses_a_name_that_resolves_to_nothing() -> TestResult {
         Duration::ZERO,
     );
     assert!(matches!(outcome, Err(ProbeError::Refused(GuardError::BadPrefix(_)))));
+    assert!(!called.load(Ordering::SeqCst));
     let valid = guarded_addresses(Host::Domain("empty.example"), &[], None, &resolve, Duration::ZERO)?;
-    assert!(valid.is_empty());
+    assert!(called.load(Ordering::SeqCst));
+    assert_eq!(valid.len(), 1);
     Ok(())
 }
