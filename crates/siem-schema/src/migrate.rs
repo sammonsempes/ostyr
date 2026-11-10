@@ -2,6 +2,7 @@ use crate::column::Column;
 use crate::create::check_unique;
 use crate::error::SchemaError;
 use crate::identifier::quote_identifier;
+use crate::ttl::{has_move, render_ttl, TtlSettings};
 
 
 fn check_kept(old_column: &Column, newer: &[Column]) -> Result<(), SchemaError> {
@@ -28,5 +29,22 @@ pub fn render_migration(table: &str, old: &[Column], newer: &[Column]) -> Result
         Ok(String::new())
     } else {
         Ok(format!("ALTER TABLE {table_name} {}\n", additions.join(", ")))
+    }
+}
+
+
+/// Renders `ALTER TABLE … MODIFY TTL` when the TTL changed; empty otherwise; removing a cold move or changing the storage policy is refused.
+pub fn render_ttl_migration(table: &str, old: &TtlSettings, newer: &TtlSettings) -> Result<String, SchemaError> {
+    let table_name = quote_identifier(table)?;
+    let old_expression = render_ttl(old)?;
+    let new_expression = render_ttl(newer)?;
+    if old.storage_policy != newer.storage_policy {
+        Err(SchemaError::ChangedStoragePolicy)
+    } else if has_move(old) && !has_move(newer) {
+        Err(SchemaError::RemovedMove)
+    } else if old_expression == new_expression {
+        Ok(String::new())
+    } else {
+        Ok(format!("ALTER TABLE {table_name} MODIFY TTL {new_expression}\n"))
     }
 }

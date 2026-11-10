@@ -18,6 +18,14 @@ pub enum SchemaError {
     RawRetentionTooLong(u32, u32),
     #[error("no metrics table covers a range of {0} s at a step of {1} s")]
     NoMetricsTable(u64, u64),
+    #[error("move after {0} days is not before the retention of {1} days")]
+    MoveNotBeforeRetention(u32, u32),
+    #[error("a move to the cold tier needs a cold volume name")]
+    MissingColdVolume,
+    #[error("the cold tier move cannot be removed")]
+    RemovedMove,
+    #[error("the storage policy cannot change on an existing table")]
+    ChangedStoragePolicy,
     #[error("{0} tiers exceed the limit of {1}")]
     TooManyTiers(usize, usize),
     #[error("required column {0} is missing")]
