@@ -157,3 +157,21 @@ pub struct SignedDocument {
     pub meta: DocumentMeta,
     pub signature: DocumentSignature,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Finished,
+    TimedOut,
+    DiskFull,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchPlan {
+    pub home: std::path::PathBuf,
+    pub tick: std::time::Duration,
+    pub ticks: u64,
+    pub max_bytes: u64,
+    pub max_entries: usize,
+}

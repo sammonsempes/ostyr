@@ -73,3 +73,52 @@ pub const KEY_FILE_HEX_LENGTH: usize = 64;
 
 
 pub const KEY_FILE_READ_LIMIT: u64 = 128;
+
+
+pub const DEFAULT_MAX_MEMORY_BYTES: u64 = 4_294_967_296;
+
+
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 2_147_483_648;
+
+
+pub const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 4_294_967_296;
+
+
+pub const MIN_MEMORY_BYTES: u64 = 1_073_741_824;
+
+
+pub const MIN_FILE_BYTES: u64 = 1_048_576;
+
+
+pub const MAX_RESOURCE_BYTES: u64 = 1_099_511_627_776;
+
+
+pub const MEMORY_MARKERS: [&str; 6] = [
+    "out of memory",
+    "cannot allocate memory",
+    "memory exhausted",
+    "memory allocation of",
+    "failed to reserve",
+    "allocating heap arena",
+];
+
+
+pub const FILE_MARKERS: [&str; 2] = ["file too large", "file size limit exceeded"];
+
+
+pub const DEFAULT_MAX_RUN_DISK_BYTES: u64 = 8_589_934_592;
+
+
+pub const DEFAULT_MAX_RUN_ENTRIES: usize = 1_000_000;
+
+
+pub const DEFAULT_DISK_POLL_MILLIS: u64 = 200;
+
+
+pub const DEFAULT_PRLIMIT_BINARY: &str = "/usr/bin/prlimit";
+
+
+pub const BLOCK_BYTES: u64 = 512;
+
+
+pub const DRAIN_CHUNK_BYTES: u64 = 8192;

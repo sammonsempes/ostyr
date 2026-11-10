@@ -50,9 +50,24 @@ pub enum TargetError {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Memory,
+    FileSize,
+    Archive,
+    Disk,
+}
+
+
 #[cfg(unix)]
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("syft hit its {kind:?} resource limit")]
+    ResourceLimit {
+        kind: ResourceKind,
+        #[source]
+        cause: Option<Box<RunError>>,
+    },
     #[error(transparent)]
     Settings(#[from] SettingsError),
     #[error(transparent)]
@@ -75,6 +90,8 @@ pub enum RunError {
     Io(#[from] std::io::Error),
     #[error("cannot signal the syft process group")]
     Signal(#[from] rustix::io::Errno),
+    #[error("cannot measure the syft home")]
+    Walk(#[from] walkdir::Error),
     #[error("syft survived SIGKILL and could not be reaped")]
     Unreaped,
     #[error("a syft helper result was abandoned")]
