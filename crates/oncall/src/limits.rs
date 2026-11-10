@@ -167,3 +167,30 @@ pub const MAX_OPEN_ALERTS: u32 = 1000;
 
 
 pub const MAX_CHANNEL_NAME_BYTES: usize = 64;
+
+
+pub const LINK_LIFETIME_SECONDS: i64 = 86_400;
+
+
+pub const LINK_SKEW_SECONDS: i64 = 300;
+
+
+pub const NONCE_BYTES: usize = 16;
+
+
+pub const MAC_BYTES: usize = 32;
+
+
+pub const MIN_LINK_KEY_BYTES: usize = 32;
+
+
+pub const MAX_LINK_KEY_BYTES: u64 = 1024;
+
+
+pub const MAX_TOKEN_CHARS: usize = 192;
+
+
+pub const LINK_ACTION_ACKNOWLEDGE: u8 = 1;
+
+
+pub const LINK_ACTION_RESOLVE: u8 = 2;

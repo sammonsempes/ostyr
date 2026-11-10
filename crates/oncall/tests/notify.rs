@@ -2,6 +2,7 @@
 mod types;
 
 
+use oncall::alert::FailureReason;
 use oncall::channel::{load_channel, parse_channel, redacted_target, validate_channel};
 use oncall::error::OncallError;
 use oncall::limits::{
@@ -290,7 +291,7 @@ fn one_failing_sender_does_not_stop_the_others() -> TestResult {
     assert_eq!(failures.first().map(|failure| failure.channel.as_str()), Some("two"));
     let logs = String::from_utf8(capture.0.lock().map_err(|error| error.to_string())?.clone())?;
     assert!(logs.contains("two"));
-    let reasons: String = failures.iter().map(|failure| failure.reason.clone()).collect();
+    let reasons: String = failures.iter().map(|failure| format!("{:?}", failure.reason)).collect();
     assert!(!reasons.contains(SECRET_QUERY));
     assert!(!logs.contains(SECRET_QUERY));
     assert!(!logs.contains("/hook"));
@@ -318,7 +319,7 @@ fn sender_text_never_reaches_reasons_or_logs() -> TestResult {
         })
     })?;
     let logs = String::from_utf8(capture.0.lock().map_err(|error| error.to_string())?.clone())?;
-    let reasons: String = failures.iter().map(|failure| failure.reason.clone()).collect();
+    let reasons: String = failures.iter().map(|failure| format!("{:?}", failure.reason)).collect();
     assert!(!reasons.contains("hunter2") && !logs.contains("hunter2"));
     assert!(!logs.contains("FORGED"));
     assert!(failures.iter().all(|failure| failure.channel == "hook"));
@@ -338,7 +339,7 @@ fn an_unvalidated_channel_is_refused_by_notify() -> TestResult {
         },
     )?;
     assert!(calls.is_empty());
-    assert!(failures.iter().all(|failure| failure.reason.contains("https")));
+    assert!(failures.iter().all(|failure| failure.reason == FailureReason::InvalidMessage));
     Ok(())
 }
 
@@ -369,7 +370,7 @@ fn a_render_error_is_a_failure_of_that_channel() -> TestResult {
         &mut |_: &Channel, _: &Message| Ok(()),
     )?;
     assert_eq!(failures.len(), 1);
-    assert!(failures.iter().all(|failure| failure.reason.contains("CR or LF")));
+    assert!(failures.iter().all(|failure| failure.reason == FailureReason::InvalidMessage));
     Ok(())
 }
 
@@ -385,7 +386,7 @@ fn a_channel_of_another_tenant_is_refused() -> TestResult {
     })?;
     assert!(calls.is_empty());
     assert_eq!(failures.len(), 1);
-    assert!(failures.iter().all(|failure| failure.reason.contains("tenant")));
+    assert!(failures.iter().all(|failure| failure.reason == FailureReason::OtherTenant));
     Ok(())
 }
 
