@@ -12,6 +12,7 @@ mod revocation_support;
 mod server;
 mod services;
 mod settings;
+mod spool_append;
 mod state;
 mod tls;
 mod types;
