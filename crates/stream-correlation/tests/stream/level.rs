@@ -87,6 +87,20 @@ fn titles_are_bounded_and_clean() -> TestResult {
 
 
 #[test]
+fn an_empty_title_is_refused_for_both_rule_kinds() -> TestResult {
+    ["\"\"", "\"   \""].iter().try_for_each(|title| -> TestResult {
+        let base = refusal(&[&base_with(&format!("title: {title}\nid: named"))])?;
+        assert!(base.contains("named") && base.contains("empty"));
+        let corr = refusal(&[BASE_WITH_LEVEL, &correlation(&format!("title: {title}\n"))])?;
+        assert!(corr.contains("corr") && corr.contains("empty"));
+        Ok(())
+    })?;
+    assert!(check_title("r", " ").is_err());
+    Ok(())
+}
+
+
+#[test]
 fn highest_picks_the_most_severe_or_the_default() -> TestResult {
     assert_eq!(highest([Level::Low, Level::Critical, Level::High].into_iter()), Level::Critical);
     assert_eq!(highest(std::iter::empty()), DEFAULT_LEVEL);
