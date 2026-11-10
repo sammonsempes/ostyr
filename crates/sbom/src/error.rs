@@ -50,9 +50,23 @@ pub enum TargetError {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Memory,
+    FileSize,
+    Archive,
+}
+
+
 #[cfg(unix)]
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("syft hit its {kind:?} resource limit")]
+    ResourceLimit {
+        kind: ResourceKind,
+        #[source]
+        cause: Option<Box<RunError>>,
+    },
     #[error(transparent)]
     Settings(#[from] SettingsError),
     #[error(transparent)]

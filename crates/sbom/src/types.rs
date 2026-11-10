@@ -27,3 +27,7 @@ pub type SignerFn = dyn Fn(&[u8]) -> Result<Vec<u8>, BoxError> + Send + Sync;
 
 
 pub type TrustedKeys = BTreeMap<String, crate::model::TrustedKey>;
+
+
+#[cfg(unix)]
+pub type Limiter = fn(rustix::process::Pid, &crate::settings::SyftSettings) -> Result<(), crate::error::RunError>;

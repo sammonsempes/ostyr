@@ -1,17 +1,17 @@
 //! Runs syft on an operator-given target and parses its CycloneDX output while it streams (Unix only: process groups).
 
-use crate::error::{RunError, SbomError};
-use crate::limits::{HELPERS_PER_RUN, HOME_PREFIX, REAP_POLL_MILLIS, STDERR_EXCERPT_BYTES, SYFT_ARGUMENTS};
+use crate::error::{ResourceKind, RunError, SbomError};
+use crate::limits::{FILE_MARKERS, HELPERS_PER_RUN, HOME_PREFIX, MEMORY_MARKERS, REAP_POLL_MILLIS, STDERR_EXCERPT_BYTES, SYFT_ARGUMENTS};
 use crate::model::{Limits, Sbom, Stderr};
 use crate::parse::{parse_cyclonedx, to_u64};
-use crate::settings::{ensure, source_argument, validate_settings, SyftSettings, Target};
-use crate::types::{Helpers, Job};
+use crate::settings::{ensure, source_argument, target_path, validate_settings, SyftSettings, Target};
+use crate::types::{Helpers, Job, Limiter};
 use rustix::io::Errno;
-use rustix::process::{kill_process, kill_process_group, Pid, Signal};
+use rustix::process::{kill_process, kill_process_group, prlimit, Pid, Resource, Rlimit, Signal};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, PipeReader, PipeWriter, Read};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::Ordering;
@@ -114,6 +114,84 @@ fn spawn_syft(settings: &SyftSettings, source: &str, home: &Path, stdout: PipeWr
 }
 
 
+/// Refuses an archive target larger than `max`, measured on the opened handle; a directory has no size to check.
+pub fn check_archive(target: &Target, max: u64) -> Result<(), RunError> {
+    match target {
+        Target::Directory(_) => Ok(()),
+        Target::OciArchive(_) | Target::DockerArchive(_) => {
+            let metadata = fs::File::open(target_path(target)).and_then(|file| file.metadata())?;
+            ensure(metadata.is_file(), RunError::NotRegular)?;
+            ensure(
+                metadata.len() <= max,
+                RunError::ResourceLimit {
+                    kind: ResourceKind::Archive,
+                    cause: None,
+                },
+            )
+        }
+    }
+}
+
+
+/// Sets `RLIMIT_AS` and `RLIMIT_FSIZE` on the running child by pid (no `unsafe` needed, but the child runs unlimited until this returns).
+pub fn apply_limits(pid: Pid, settings: &SyftSettings) -> Result<(), RunError> {
+    [(Resource::As, settings.max_memory_bytes), (Resource::Fsize, settings.max_file_bytes)]
+        .into_iter()
+        .try_for_each(|(resource, bytes)| {
+            let limit = Rlimit {
+                current: Some(bytes),
+                maximum: Some(bytes),
+            };
+            prlimit(Some(pid), resource, limit).map_err(io::Error::from)?;
+            Ok(())
+        })
+}
+
+
+/// Applies the limits to the fresh child; when that fails the child is killed and reaped, never left unlimited.
+pub fn limit_child(limiter: Limiter, mut child: Child, settings: &SyftSettings) -> Result<Child, RunError> {
+    let pid = Pid::from_child(&child);
+    match limiter(pid, settings) {
+        Ok(()) => Ok(child),
+        Err(error) => {
+            let polls = settings.helper_grace_millis / REAP_POLL_MILLIS + 1;
+            kill_all(pid)
+                .map_err(RunError::from)
+                .and_then(|()| reap(&mut child, polls).map_err(RunError::from))
+                .and_then(|status| status.ok_or(RunError::Unreaped))
+                .and_then(|_status| Err(error))
+        }
+    }
+}
+
+
+/// Which resource limit a failed syft hit: SIGXFSZ, or a known out-of-memory or file-size message in its stderr (Go reports both as text).
+pub fn exceeded_limit(exit: ExitStatus, stderr: &[u8]) -> Option<ResourceKind> {
+    let text = String::from_utf8_lossy(stderr).to_lowercase();
+    let mentions = |markers: &[&str]| markers.iter().any(|marker| text.contains(marker));
+    match (exit.success(), exit.signal()) {
+        (true, _) => None,
+        (false, Some(libc::SIGXFSZ)) => Some(ResourceKind::FileSize),
+        _ if mentions(&FILE_MARKERS) => Some(ResourceKind::FileSize),
+        _ if mentions(&MEMORY_MARKERS) => Some(ResourceKind::Memory),
+        _ => None,
+    }
+}
+
+
+/// A resource limit hit replaces any other failure except a timeout; the replaced error stays as its cause.
+pub fn classify(result: Result<Sbom, RunError>, limit: Option<ResourceKind>) -> Result<Sbom, RunError> {
+    match (result, limit) {
+        (Err(RunError::TimedOut), _) => Err(RunError::TimedOut),
+        (Err(error), Some(kind)) => Err(RunError::ResourceLimit {
+            kind,
+            cause: Some(Box::new(error)),
+        }),
+        (other, _) => other,
+    }
+}
+
+
 /// Runs one helper job and logs a result that nobody waited for.
 pub fn run_job(job: Job) {
     if let Err(error) = job() {
@@ -157,13 +235,14 @@ pub fn reap(child: &mut Child, polls: u64) -> io::Result<Option<ExitStatus>> {
 
 /// Runs syft with the given settings snapshot on `target` and returns its parsed SBOM for `tenant` and `artefact`.
 pub fn generate(settings: &SyftSettings, helpers: &Helpers, target: &Target, tenant: &str, artefact: &str) -> Result<Sbom, RunError> {
-    generate_with(spawn_thread, settings, helpers, target, (tenant, artefact))
+    generate_with(spawn_thread, apply_limits, settings, helpers, target, (tenant, artefact))
 }
 
 
 /// `generate` with an injected thread spawner.
 pub fn generate_with<Spawn: FnMut(Job) -> io::Result<()>>(
     spawner: Spawn,
+    limiter: Limiter,
     settings: &SyftSettings,
     helpers: &Helpers,
     target: &Target,
@@ -172,11 +251,13 @@ pub fn generate_with<Spawn: FnMut(Job) -> io::Result<()>>(
     validate_settings(settings)?;
     let source = source_argument(target)?;
     check_binary(&settings.binary)?;
+    check_archive(target, settings.max_archive_bytes)?;
     let slots = reserve_helpers(helpers, settings.max_live_helpers).ok_or(RunError::Busy)?;
     let home = tempfile::Builder::new().prefix(HOME_PREFIX).tempdir_in(&settings.work_dir)?;
     let (stdout_reader, stdout_writer) = io::pipe()?;
     let (stderr_reader, stderr_writer) = io::pipe()?;
-    let child = spawn_syft(settings, &source, home.path(), stdout_writer, stderr_writer)?;
+    let spawned = spawn_syft(settings, &source, home.path(), stdout_writer, stderr_writer)?;
+    let child = limit_child(limiter, spawned, settings)?;
     supervise(spawner, settings, child, (stdout_reader, stderr_reader), scope, slots)
 }
 
@@ -269,7 +350,14 @@ pub fn supervise<Spawn: FnMut(Job) -> io::Result<()>>(
     let timed_out = watched??;
     stopped?;
     let status = exit?.ok_or(RunError::Unreaped)?;
-    let summary = stderr_summary(&stderr_receiver.recv_timeout(grace));
+    let stderr = stderr_receiver.recv_timeout(grace);
+    let summary = stderr_summary(&stderr);
     debug!(%summary, "syft finished");
-    outcome(timed_out, parsed, status)
+    let kept = stderr
+        .as_ref()
+        .ok()
+        .and_then(|drained| drained.as_ref().ok())
+        .map(|drained| drained.kept.as_slice());
+    let limit = exceeded_limit(status, kept.unwrap_or(&[]));
+    classify(outcome(timed_out, parsed, status), limit)
 }

@@ -1,7 +1,10 @@
 //! Syft settings (a file applied live through core-config) and the typed scan target.
 
 use crate::error::{SettingsError, TargetError};
-use crate::limits::{DIRECTORY_SCHEME, DOCKER_SCHEME, HELPERS_PER_RUN, OCI_SCHEME, SYFT_SECTION, SYFT_STATE_KEY};
+use crate::limits::{
+    DEFAULT_MAX_ARCHIVE_BYTES, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_MEMORY_BYTES, DIRECTORY_SCHEME, DOCKER_SCHEME, HELPERS_PER_RUN,
+    MAX_RESOURCE_BYTES, MIN_FILE_BYTES, MIN_MEMORY_BYTES, OCI_SCHEME, SYFT_SECTION, SYFT_STATE_KEY,
+};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -22,6 +25,27 @@ pub struct SyftSettings {
     pub max_stderr_bytes: usize,
     pub helper_grace_millis: u64,
     pub max_live_helpers: usize,
+    #[serde(default = "default_max_memory_bytes")]
+    pub max_memory_bytes: u64,
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_max_archive_bytes")]
+    pub max_archive_bytes: u64,
+}
+
+
+pub fn default_max_memory_bytes() -> u64 {
+    DEFAULT_MAX_MEMORY_BYTES
+}
+
+
+pub fn default_max_file_bytes() -> u64 {
+    DEFAULT_MAX_FILE_BYTES
+}
+
+
+pub fn default_max_archive_bytes() -> u64 {
+    DEFAULT_MAX_ARCHIVE_BYTES
 }
 
 
@@ -56,7 +80,24 @@ pub fn validate_settings(settings: &SyftSettings) -> Result<(), SettingsError> {
     ensure(settings.max_components > 0, SettingsError::Invalid("max_components"))?;
     ensure(settings.max_stderr_bytes > 0, SettingsError::Invalid("max_stderr_bytes"))?;
     ensure(settings.helper_grace_millis > 0, SettingsError::Invalid("helper_grace_millis"))?;
-    ensure(settings.max_live_helpers >= HELPERS_PER_RUN, SettingsError::Invalid("max_live_helpers"))
+    ensure(settings.max_live_helpers >= HELPERS_PER_RUN, SettingsError::Invalid("max_live_helpers"))?;
+    ensure(
+        in_range(settings.max_memory_bytes, MIN_MEMORY_BYTES),
+        SettingsError::Invalid("max_memory_bytes"),
+    )?;
+    ensure(
+        in_range(settings.max_file_bytes, MIN_FILE_BYTES),
+        SettingsError::Invalid("max_file_bytes"),
+    )?;
+    ensure(
+        in_range(settings.max_archive_bytes, MIN_FILE_BYTES),
+        SettingsError::Invalid("max_archive_bytes"),
+    )
+}
+
+
+fn in_range(value: u64, minimum: u64) -> bool {
+    (minimum..=MAX_RESOURCE_BYTES).contains(&value)
 }
 
 
@@ -88,7 +129,7 @@ pub fn open_settings(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadCo
 }
 
 
-fn target_path(target: &Target) -> &Path {
+pub fn target_path(target: &Target) -> &Path {
     match target {
         Target::Directory(path) | Target::OciArchive(path) | Target::DockerArchive(path) => path,
     }

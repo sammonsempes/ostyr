@@ -54,6 +54,9 @@ fn valid() -> SyftSettings {
         max_stderr_bytes: 1,
         helper_grace_millis: 1,
         max_live_helpers: MIN_HELPERS,
+        max_memory_bytes: sbom::limits::MIN_MEMORY_BYTES,
+        max_file_bytes: sbom::limits::MIN_FILE_BYTES,
+        max_archive_bytes: sbom::limits::MIN_FILE_BYTES,
     }
 }
 
@@ -94,6 +97,18 @@ fn each_setting_is_validated() -> TestResult {
             max_live_helpers: 1,
             ..valid()
         },
+        SyftSettings {
+            max_memory_bytes: sbom::limits::MIN_MEMORY_BYTES - 1,
+            ..valid()
+        },
+        SyftSettings {
+            max_file_bytes: sbom::limits::MAX_RESOURCE_BYTES + 1,
+            ..valid()
+        },
+        SyftSettings {
+            max_archive_bytes: 0,
+            ..valid()
+        },
     ];
     let names = [
         "binary",
@@ -104,6 +119,9 @@ fn each_setting_is_validated() -> TestResult {
         "max_stderr_bytes",
         "helper_grace_millis",
         "max_live_helpers",
+        "max_memory_bytes",
+        "max_file_bytes",
+        "max_archive_bytes",
     ];
     cases.iter().zip(names).try_for_each(|(case, name)| match validate_settings(case) {
         Err(SettingsError::Invalid(found)) if found == name => Ok(()),
@@ -165,6 +183,27 @@ fn settings_load_and_reload_live() -> TestResult {
     fs::write(&path, GOOD.replace("1000", "0"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
     assert_eq!(current_config(&engine).deadline_millis, SECOND_DEADLINE);
+    Ok(())
+}
+
+
+const EXPLICIT_MEMORY: u64 = 134_217_728;
+
+
+#[test]
+fn resource_limits_default_and_can_be_set() -> TestResult {
+    let dir = TempDir::new()?;
+    let path = dir.path().join("syft.yaml");
+    fs::write(&path, GOOD)?;
+    let engine = open_settings(path.clone(), audit(), context())?;
+    let defaults = current_config(&engine);
+    assert_eq!(defaults.max_memory_bytes, sbom::limits::DEFAULT_MAX_MEMORY_BYTES);
+    assert_eq!(defaults.max_file_bytes, sbom::limits::DEFAULT_MAX_FILE_BYTES);
+    assert_eq!(defaults.max_archive_bytes, sbom::limits::DEFAULT_MAX_ARCHIVE_BYTES);
+    let explicit = format!("{GOOD}max_memory_bytes: 134217728\nmax_file_bytes: 2097152\nmax_archive_bytes: 3145728\n");
+    fs::write(&path, explicit)?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(current_config(&engine).max_memory_bytes, EXPLICIT_MEMORY);
     Ok(())
 }
 

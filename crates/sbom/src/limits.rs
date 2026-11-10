@@ -73,3 +73,27 @@ pub const KEY_FILE_HEX_LENGTH: usize = 64;
 
 
 pub const KEY_FILE_READ_LIMIT: u64 = 128;
+
+
+pub const DEFAULT_MAX_MEMORY_BYTES: u64 = 4_294_967_296;
+
+
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 2_147_483_648;
+
+
+pub const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 4_294_967_296;
+
+
+pub const MIN_MEMORY_BYTES: u64 = 67_108_864;
+
+
+pub const MIN_FILE_BYTES: u64 = 1_048_576;
+
+
+pub const MAX_RESOURCE_BYTES: u64 = 1_099_511_627_776;
+
+
+pub const MEMORY_MARKERS: [&str; 4] = ["out of memory", "cannot allocate memory", "memory exhausted", "memory allocation of"];
+
+
+pub const FILE_MARKERS: [&str; 2] = ["file too large", "file size limit exceeded"];

@@ -4,10 +4,11 @@
 mod types;
 
 
-use sbom::error::{RunError, SbomError, SettingsError, TargetError};
+use sbom::error::{ResourceKind, RunError, SbomError, SettingsError, TargetError};
 use sbom::model::Stderr;
 use sbom::run::{
-    child_environment, drain_stderr, generate, generate_with, outcome, reserve_helpers, run_job, spawn_thread, stderr_excerpt, stderr_summary,
+    apply_limits, check_archive, child_environment, classify, drain_stderr, exceeded_limit, generate, generate_with, limit_child, outcome,
+    reserve_helpers, run_job, spawn_thread, stderr_excerpt, stderr_summary,
 };
 use sbom::settings::{SyftSettings, Target};
 use sbom::types::{Helpers, Job};
@@ -84,6 +85,9 @@ fn settings(dir: &TempDir, binary: PathBuf, deadline_millis: u64) -> SyftSetting
         max_stderr_bytes: STDERR_CAP,
         helper_grace_millis: GRACE_MILLIS,
         max_live_helpers: LIVE_HELPERS,
+        max_memory_bytes: MEMORY_LIMIT,
+        max_file_bytes: FILE_LIMIT,
+        max_archive_bytes: ARCHIVE_LIMIT,
     }
 }
 
@@ -110,6 +114,18 @@ fn fresh_helpers() -> Helpers {
 
 
 const GRACE_MILLIS: u64 = 200;
+
+
+const MEMORY_LIMIT: u64 = 104_857_600;
+
+
+const FILE_LIMIT: u64 = 1_048_576;
+
+
+const ARCHIVE_LIMIT: u64 = 1_048_576;
+
+
+const SMALL_ARCHIVE_LIMIT: u64 = 1000;
 
 
 const LIVE_HELPERS: usize = 8;
@@ -549,7 +565,7 @@ fn failed_helper_spawn_kills_the_child_and_returns_the_error() -> TestResult {
         let dir = TempDir::new()?;
         let binary = fake_syft(&dir, "exec sleep 3600")?;
         let configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
-        let result = generate_with(failing_after(allowed), &configured, &fresh_helpers(), &target(), scope);
+        let result = generate_with(failing_after(allowed), apply_limits, &configured, &fresh_helpers(), &target(), scope);
         assert!(matches!(result, Err(RunError::Io(_))));
         Ok(())
     });
@@ -568,5 +584,192 @@ fn abandoned_helper_results_are_logged_not_lost() -> TestResult {
     run_job(Box::new(|| Err(RunError::Abandoned)));
     run_job(Box::new(|| Ok(())));
     spawn_thread(Box::new(|| Ok(())))?;
+    Ok(())
+}
+
+
+const WAIT_FOR_LIMITS: &str = "for i in $(seq 1 1000); do [ \"$(ulimit -v)\" != unlimited ] && break; sleep 0.01; done";
+
+
+const KIBIBYTES: u64 = 1024;
+
+
+const BIG_ALLOCATION: &str = "3000000000";
+
+
+const ARCHIVE_BYTES: usize = 2000;
+
+
+const XFSZ_SIGNAL: i32 = 25;
+
+
+const EXIT_ONE_STATUS: i32 = 256;
+
+
+fn work_dir_leftovers(dir: &TempDir) -> io::Result<usize> {
+    Ok(fs::read_dir(dir.path())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("syft-"))
+        .count())
+}
+
+
+#[test]
+fn the_child_runs_under_the_configured_address_space_limit() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = format!("{WAIT_FOR_LIMITS}\nprintf '{{\"components\":[{{\"name\":\"%s\"}}]}}' \"$(ulimit -v)\"");
+    let binary = fake_syft(&dir, &body)?;
+    let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
+    let name = sbom.components.first().map(|component| component.name.clone());
+    assert_eq!(name, Some((MEMORY_LIMIT / KIBIBYTES).to_string()));
+    Ok(())
+}
+
+
+#[test]
+fn allocating_past_the_limit_is_a_typed_memory_error_and_the_home_is_removed() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = format!("{WAIT_FOR_LIMITS}\nhead -c {BIG_ALLOCATION} /dev/zero | tr '\\0' x | tail -n 1");
+    let binary = fake_syft(&dir, &body)?;
+    let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
+    assert!(
+        matches!(
+            result,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::Memory,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn writing_past_the_limit_is_a_typed_file_error_and_the_home_is_removed() -> TestResult {
+    let dir = TempDir::new()?;
+    let body = format!("{WAIT_FOR_LIMITS}\nexec dd if=/dev/zero of=\"$HOME/big\" bs=1M count=8");
+    let binary = fake_syft(&dir, &body)?;
+    let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
+    assert!(
+        matches!(
+            result,
+            Err(RunError::ResourceLimit {
+                kind: ResourceKind::FileSize,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn archives_are_checked_on_the_opened_handle() -> TestResult {
+    let dir = TempDir::new()?;
+    let archive = dir.path().join("image.tar");
+    fs::write(&archive, vec![b'a'; ARCHIVE_BYTES])?;
+    let oversize = check_archive(&Target::OciArchive(archive.clone()), SMALL_ARCHIVE_LIMIT);
+    assert!(matches!(
+        oversize,
+        Err(RunError::ResourceLimit {
+            kind: ResourceKind::Archive,
+            ..
+        })
+    ));
+    assert!(check_archive(&Target::DockerArchive(archive.clone()), u64::try_from(ARCHIVE_BYTES)?).is_ok());
+    assert!(check_archive(&Target::Directory(archive), 0).is_ok());
+    assert!(matches!(
+        check_archive(&Target::OciArchive(dir.path().to_path_buf()), 1),
+        Err(RunError::NotRegular)
+    ));
+    assert!(matches!(
+        check_archive(&Target::OciArchive(dir.path().join("absent")), 1),
+        Err(RunError::Io(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_oversize_archive_never_spawns() -> TestResult {
+    let dir = TempDir::new()?;
+    let archive = dir.path().join("image.tar");
+    fs::File::create(&archive)?.set_len(ARCHIVE_LIMIT + 1)?;
+    let binary = fake_syft(&dir, "exit 0")?;
+    let result = generate(
+        &settings(&dir, binary, LONG_DEADLINE_MILLIS),
+        &fresh_helpers(),
+        &Target::OciArchive(archive),
+        "t",
+        "a",
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::ResourceLimit {
+            kind: ResourceKind::Archive,
+            ..
+        })
+    ));
+    assert_eq!(work_dir_leftovers(&dir)?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_limit_call_kills_and_reaps_the_child() -> TestResult {
+    let dir = TempDir::new()?;
+    let binary = fake_syft(&dir, "exec sleep 3600")?;
+    let configured = settings(&dir, binary.clone(), LONG_DEADLINE_MILLIS);
+    let child = Command::new(&binary).spawn()?;
+    let failed = limit_child(|_, _| Err(RunError::Abandoned), child, &configured);
+    assert!(matches!(failed, Err(RunError::Abandoned)));
+    let second = Command::new(&binary).spawn()?;
+    let mut kept = limit_child(apply_limits, second, &configured)?;
+    kept.kill()?;
+    kept.wait()?;
+    Ok(())
+}
+
+
+#[test]
+fn limits_on_a_reaped_pid_are_an_io_error() -> TestResult {
+    let mut child = Command::new("true").spawn()?;
+    let pid = rustix::process::Pid::from_child(&child);
+    child.wait()?;
+    let dir = TempDir::new()?;
+    let configured = settings(&dir, PathBuf::from("/bin/true"), LONG_DEADLINE_MILLIS);
+    assert!(matches!(apply_limits(pid, &configured), Err(RunError::Io(_))));
+    Ok(())
+}
+
+
+#[test]
+fn limit_classification() -> TestResult {
+    let ok = ExitStatus::from_raw(0);
+    let failed = ExitStatus::from_raw(EXIT_ONE_STATUS);
+    let xfsz = ExitStatus::from_raw(XFSZ_SIGNAL);
+    assert_eq!(exceeded_limit(ok, b"out of memory"), None);
+    assert_eq!(exceeded_limit(xfsz, b""), Some(ResourceKind::FileSize));
+    assert_eq!(exceeded_limit(failed, b"write: File too large"), Some(ResourceKind::FileSize));
+    assert_eq!(exceeded_limit(failed, b"fatal error: runtime: Out Of Memory"), Some(ResourceKind::Memory));
+    assert_eq!(exceeded_limit(failed, b"mmap: cannot allocate memory"), Some(ResourceKind::Memory));
+    assert_eq!(exceeded_limit(failed, b"something else"), None);
+    assert!(matches!(
+        classify(Err(RunError::TimedOut), Some(ResourceKind::Memory)),
+        Err(RunError::TimedOut)
+    ));
+    assert!(matches!(
+        classify(Err(RunError::Abandoned), Some(ResourceKind::Memory)),
+        Err(RunError::ResourceLimit {
+            kind: ResourceKind::Memory,
+            ..
+        })
+    ));
+    assert!(matches!(classify(Err(RunError::Abandoned), None), Err(RunError::Abandoned)));
     Ok(())
 }
