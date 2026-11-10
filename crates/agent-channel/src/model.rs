@@ -394,6 +394,7 @@ pub struct CommandVerdict {
 #[derive(Debug)]
 pub struct Admission {
     pub connections: Arc<Semaphore>,
+    pub capacity: usize,
     pub evicted: oneshot::Receiver<()>,
 }
 
