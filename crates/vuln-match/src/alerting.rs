@@ -9,6 +9,7 @@ use alerts::store::{insert_alerts, summarise, MAX_ALERTS_PER_INSERT};
 use alerts::types::Executor;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::json;
+use std::collections::BTreeSet;
 
 
 pub const KEV_RULE_ID: &str = "vuln.kev";
@@ -18,6 +19,9 @@ pub const MAX_TOKEN_CHARS: usize = 100;
 
 
 pub const CVE_PREFIX: &str = "CVE-";
+
+
+pub const CVE_ZERO_YEAR: &str = "0000";
 
 
 pub const CVE_YEAR_DIGITS: usize = 4;
@@ -52,6 +56,7 @@ pub fn is_cve_id(text: &str) -> bool {
     let sequence = text.strip_prefix(CVE_PREFIX).and_then(|rest| rest.split_once('-'));
     sequence.is_some_and(|(year, number)| {
         year.len() == CVE_YEAR_DIGITS
+            && year != CVE_ZERO_YEAR
             && year.bytes().all(|byte| byte.is_ascii_digit())
             && (CVE_SEQUENCE_MIN_DIGITS..=CVE_SEQUENCE_MAX_DIGITS).contains(&number.len())
             && number.bytes().all(|byte| byte.is_ascii_digit())
@@ -59,15 +64,17 @@ pub fn is_cve_id(text: &str) -> bool {
 }
 
 
-/// The smallest valid CVE id among the CVE aliases and the record id, so the choice does not depend on alias order.
-pub fn cve_of(item: &AssetFinding) -> Option<&String> {
+/// The valid CVE ids of the record id and aliases that are in `kev_ids`, sorted and distinct, so the result does not depend on alias order.
+pub fn kev_cves_of<'a>(item: &'a AssetFinding, kev_ids: &BTreeSet<String>) -> Vec<&'a String> {
     let finding = &item.scored.finding;
     finding
         .cve_aliases
         .iter()
         .chain(std::iter::once(&finding.record_id))
-        .filter(|id| is_cve_id(id))
-        .min()
+        .filter(|id| is_cve_id(id) && kev_ids.contains(*id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 
@@ -83,10 +90,9 @@ pub fn severity_of(priority: u32) -> Severity {
 }
 
 
-/// One alert, or `None` when the finding is not KEV or a field that reaches the alert is outside its grammar.
-pub fn alert_of(scope: &TenantScope, item: &AssetFinding, now_micros: u64) -> Option<Alert> {
+/// One alert for a KEV CVE of the finding, or `None` when the finding is not KEV or a field that reaches the alert is outside its grammar.
+pub fn alert_of(scope: &TenantScope, item: &AssetFinding, cve: &str, now_micros: u64) -> Option<Alert> {
     let finding = &item.scored.finding;
-    let cve = cve_of(item)?;
     let fixed = finding.fixed_version.as_deref().filter(|version| is_token(version));
     let valid = item.scored.kev && is_token(&item.asset) && is_token(&finding.package) && is_token(&finding.installed_version);
     let tenant = tenant_of(scope).to_owned();
@@ -117,10 +123,23 @@ pub fn alert_of(scope: &TenantScope, item: &AssetFinding, now_micros: u64) -> Op
 }
 
 
-/// One alert per distinct KEV finding of the tenant (sorted by id, duplicates merged); rejected KEV findings are counted in a warning.
-pub fn kev_alerts(scope: &TenantScope, findings: &[AssetFinding], now_micros: u64) -> Vec<Alert> {
-    let mut alerts: Vec<Alert> = findings.iter().filter_map(|item| alert_of(scope, item, now_micros)).collect();
-    let rejected = findings.iter().filter(|item| item.scored.kev).count().saturating_sub(alerts.len());
+/// One alert per KEV CVE of each KEV finding of the tenant (sorted by id, duplicates merged); KEV findings without an alert are counted in a warning.
+pub fn kev_alerts(scope: &TenantScope, findings: &[AssetFinding], kev_ids: &BTreeSet<String>, now_micros: u64) -> Vec<Alert> {
+    let per_finding: Vec<Vec<Alert>> = findings
+        .iter()
+        .map(|item| {
+            kev_cves_of(item, kev_ids)
+                .into_iter()
+                .filter_map(|cve| alert_of(scope, item, cve, now_micros))
+                .collect()
+        })
+        .collect();
+    let rejected = findings
+        .iter()
+        .zip(&per_finding)
+        .filter(|(item, built)| item.scored.kev && built.is_empty())
+        .count();
+    let mut alerts: Vec<Alert> = per_finding.into_iter().flatten().collect();
     alerts.sort_by(|left, right| left.id.cmp(&right.id));
     alerts.dedup_by(|right, left| right.id == left.id);
     if rejected > 0 {
