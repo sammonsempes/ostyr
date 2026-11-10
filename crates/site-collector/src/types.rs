@@ -3,7 +3,7 @@ use crate::spool_model::Segment;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 
 pub type Millis = u64;
@@ -27,3 +27,12 @@ pub type DirHandle = std::os::fd::OwnedFd;
 
 #[cfg(not(unix))]
 pub type DirHandle = std::path::PathBuf;
+
+
+pub type RecvFn<'a> = dyn FnMut(&mut [u8]) -> io::Result<(usize, SocketAddr)> + 'a;
+
+
+pub type NowFn<'a> = dyn Fn() -> Millis + 'a;
+
+
+pub type YearFn<'a> = dyn Fn() -> i32 + 'a;
