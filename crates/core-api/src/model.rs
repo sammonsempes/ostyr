@@ -284,6 +284,7 @@ pub struct LoginBody {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HealthReply {
     pub status: String,
+    pub ignored_forwarding: u64,
 }
 
 

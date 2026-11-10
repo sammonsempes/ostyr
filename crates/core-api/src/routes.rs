@@ -25,6 +25,7 @@ use core_auth::types::AccountMap;
 use secrecy::{ExposeSecret, SecretString};
 use std::fs::File;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::Ordering;
 use time::OffsetDateTime;
 use tokio::task::spawn_blocking;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -147,9 +148,10 @@ pub fn build_router(state: SharedState, extra: Router<SharedState>) -> Router {
     path = "/health",
     responses((status = 200, description = "The service is up", body = HealthReply))
 )]
-pub async fn health_endpoint() -> Json<HealthReply> {
+pub async fn health_endpoint(State(app): State<SharedState>) -> Json<HealthReply> {
     Json(HealthReply {
         status: HEALTH_STATUS.to_owned(),
+        ignored_forwarding: app.ignored_forwarding.load(Ordering::Relaxed),
     })
 }
 

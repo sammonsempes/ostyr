@@ -95,6 +95,12 @@ pub const SETTING_TRUSTED_FORWARDERS: &str = "trusted_forwarders";
 pub const MAX_TRUSTED_FORWARDERS: usize = 64;
 
 
+pub const MIN_FORWARDER_PREFIX_V4: u8 = 16;
+
+
+pub const MIN_FORWARDER_PREFIX_V6: u8 = 48;
+
+
 pub const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 
 
@@ -164,15 +170,28 @@ pub fn limits(module: &ModuleConfig) -> Result<Limits, StartupError> {
 }
 
 
-/// One forwarder entry: a CIDR, or a single address (a host network).
+/// One forwarder entry: a CIDR, or a single address (a host network); a prefix shorter than the minimum (IPv4 /16, IPv6 /48) is refused.
 pub fn parse_forwarder(text: &str) -> Result<IpNet, StartupError> {
-    text.parse::<IpNet>()
+    let network = text
+        .parse::<IpNet>()
         .or_else(|_| text.parse::<IpAddr>().map(IpNet::from))
         .map_err(|source| StartupError::InvalidSetting {
             name: SETTING_TRUSTED_FORWARDERS,
             value: text.to_owned(),
             source: BoxError::from(source),
+        })?;
+    let minimum = match network {
+        IpNet::V4(_) => MIN_FORWARDER_PREFIX_V4,
+        IpNet::V6(_) => MIN_FORWARDER_PREFIX_V6,
+    };
+    if network.prefix_len() < minimum {
+        Err(StartupError::ForwarderTooWide {
+            entry: text.to_owned(),
+            minimum,
         })
+    } else {
+        Ok(network)
+    }
 }
 
 

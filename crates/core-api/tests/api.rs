@@ -144,7 +144,7 @@ async fn health_is_public_and_hardened() -> TestResult {
         .for_each(|(name, value)| assert_eq!(response.headers().get(name), Some(value)));
     let id = response.headers().get("x-request-id").ok_or("no request id")?.to_str()?.to_owned();
     assert_eq!(id.len(), GENERATED_ID_CHARS);
-    assert_eq!(body_json(response).await?, json!({ "status": "ok" }));
+    assert_eq!(body_json(response).await?, json!({ "status": "ok", "ignored_forwarding": 0 }));
     Ok(())
 }
 

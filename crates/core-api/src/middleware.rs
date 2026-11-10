@@ -148,25 +148,25 @@ pub fn forwarded_address(headers: &HeaderMap) -> Option<IpAddr> {
 
 
 pub fn forwarded_for(text: &str) -> Option<IpAddr> {
-    match text
-        .split(';')
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(name, _)| name.trim().eq_ignore_ascii_case(FORWARDED_ELEMENT))
+    let pairs = text.split(';').map(|pair| pair.split_once('=')).collect::<Option<Vec<_>>>()?;
+    match pairs
+        .into_iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(FORWARDED_ELEMENT))
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [(_, node)] => forwarded_node(node.trim()),
+        [(_, node)] => forwarded_node(node),
         _ => None,
     }
 }
 
 
-/// An IPv4 literal or a bracketed IPv6 literal, optionally in quotes; a port, a name, `unknown` and `_obfuscated` all fail the parse.
+/// An IPv4 literal (quotes optional) or a quoted bracketed IPv6 literal; a port, a name, `unknown`, `_obfuscated` and whitespace all fail the parse.
 pub fn forwarded_node(node: &str) -> Option<IpAddr> {
-    let unquoted = node.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')).unwrap_or(node);
-    let parsed = match unquoted.strip_prefix('[').and_then(|inner| inner.strip_suffix(']')) {
+    let quoted = node.strip_prefix('"').and_then(|inner| inner.strip_suffix('"'));
+    let parsed = match quoted.and_then(|inner| inner.strip_prefix('[')).and_then(|inner| inner.strip_suffix(']')) {
         Some(inner) => inner.parse::<Ipv6Addr>().map(IpAddr::V6),
-        None => unquoted.parse::<Ipv4Addr>().map(IpAddr::V4),
+        None => quoted.unwrap_or(node).parse::<Ipv4Addr>().map(IpAddr::V4),
     };
     parsed.inspect_err(|error| tracing::debug!(%error, "malformed Forwarded address")).ok()
 }
