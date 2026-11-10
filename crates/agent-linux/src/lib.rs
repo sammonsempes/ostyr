@@ -3,6 +3,8 @@
 #[cfg(unix)]
 pub mod app;
 #[cfg(unix)]
+pub mod capabilities;
+#[cfg(unix)]
 pub mod cursor;
 #[cfg(unix)]
 pub mod error;

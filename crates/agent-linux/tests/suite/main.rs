@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod capabilities;
 mod cursor;
 mod follow;
 mod run;
