@@ -124,7 +124,7 @@ fn write_files(dir: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std:
     fs::write(
         &config,
         format!(
-            "agent_file: {root}/agent.yaml\nexport_path: {root}/export.json\ncursor_file: {root}/cursor\naudit_file: {root}/linux-audit\n",
+            "agent_file: {root}/agent.yaml\nexport_path: {root}/export.json\ncursor_file: {root}/cursor\naudit_file: {root}/linux-audit\nsystemctl_path: {root}/no-systemctl\n",
             root = dir.display()
         ),
     )?;
@@ -193,3 +193,18 @@ const WORLD_WRITABLE: u32 = 0o777;
 
 
 const PRIVATE: u32 = 0o700;
+
+
+#[tokio::test]
+async fn a_relative_systemctl_path_is_refused_at_start() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let config = write_files(dir.path())?;
+    let text = fs::read_to_string(&config)?.replace(&format!("systemctl_path: {}/", dir.path().display()), "systemctl_path: ");
+    fs::write(&config, text)?;
+    assert!(matches!(
+        run_linux(&config, 1, &|_| Box::pin(async {})).await,
+        Err(SourceError::NotAbsolute(_))
+    ));
+    Ok(())
+}

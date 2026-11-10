@@ -13,12 +13,13 @@ core-config = { path = "../core-config" }
 core-export = { path = "../core-export" }
 ecs-normalise = { path = "../ecs-normalise" }
 libc = "0.2"
-rustix = { version = "1", features = ["fs", "process"] }
+rustix = { version = "1", features = ["fs", "process", "time"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+time = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
 tracing = "0.1"
 
 [dev-dependencies]
