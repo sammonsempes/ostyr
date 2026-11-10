@@ -1,6 +1,6 @@
 use crate::cursor::write_cursor;
 use crate::error::SourceError;
-use crate::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, Stop};
+use crate::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, StateDir, Stop};
 use crate::types::StepFn;
 use agent_channel::spool::append_back;
 use core_export::ecs::to_json;
@@ -291,11 +291,11 @@ pub fn drain(file: &File, cursor: &mut Cursor, paths: &Paths, settings: &SourceS
 
 
 /// Writes the cursor when it differs from the last written one; returns the cursor now on disk.
-pub fn save_if_changed(path: &Path, cursor: Cursor, saved: Cursor) -> Result<Cursor, SourceError> {
+pub fn save_if_changed(state: &StateDir, path: &Path, cursor: Cursor, saved: Cursor) -> Result<Cursor, SourceError> {
     if cursor == saved {
         Ok(saved)
     } else {
-        write_cursor(path, cursor)?;
+        write_cursor(state, path, cursor)?;
         Ok(cursor)
     }
 }
@@ -374,14 +374,15 @@ pub fn no_step(_paths: &Paths) {}
 
 
 /// One poll with the production steps.
-pub fn poll(follower: &mut Follower, paths: &Paths, settings: &SourceSettings, line_limit: usize) -> Result<Report, SourceError> {
-    poll_stepped(follower, paths, settings, line_limit, no_step)
+pub fn poll(follower: &mut Follower, state: &StateDir, paths: &Paths, settings: &SourceSettings, line_limit: usize) -> Result<Report, SourceError> {
+    poll_stepped(follower, state, paths, settings, line_limit, no_step)
 }
 
 
 /// One poll: the new identity at the export path is detected first, `step` runs, the old file is drained to its end, then the follower switches.
 pub fn poll_stepped(
     follower: &mut Follower,
+    state: &StateDir,
     paths: &Paths,
     settings: &SourceSettings,
     line_limit: usize,
@@ -406,13 +407,13 @@ pub fn poll_stepped(
             unusable = blocked;
             step(paths);
             let (drained, undrained) = drain_old(file, cursor, paths, settings, line_limit, next.is_some())?;
-            let saved = save_if_changed(&paths.cursor_file, *cursor, before)?;
+            let saved = save_if_changed(state, &paths.cursor_file, *cursor, before)?;
             let follow = undrained || matches!(drained.stop, Stop::Eof | Stop::Partial);
             let switch = next.filter(|_| follow);
             if let Some((_, fresh)) = &switch {
                 *cursor = *fresh;
             }
-            save_if_changed(&paths.cursor_file, *cursor, saved)?;
+            save_if_changed(state, &paths.cursor_file, *cursor, saved)?;
             let lost = u64::from(switch.is_some() && drained.stop == Stop::Partial) + u64::from(undrained);
             (
                 Report {

@@ -92,6 +92,13 @@ pub struct Follower {
 }
 
 
+/// The state directory held open: the cursor and its temporary file are opened and renamed relative to this handle, never through the path.
+#[derive(Debug)]
+pub struct StateDir {
+    pub handle: File,
+}
+
+
 /// Consecutive polls spent in each logged state (zero when not in it), so a state is logged on entry and exit only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Notes {

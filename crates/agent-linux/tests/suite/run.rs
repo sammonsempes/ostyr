@@ -69,7 +69,7 @@ async fn a_corrupt_cursor_stops_the_source_at_start() -> TestResult {
     let shared = Arc::new(ArcSwap::from_pointee(SourceSettings::default()));
     let outcome = run_source(&shared, &setup.paths, LINE_LIMIT, 1, &|_| Box::pin(async {})).await;
     assert!(matches!(outcome, Err(SourceError::Cursor(_))));
-    write_cursor(&setup.paths.cursor_file, Cursor::default())?;
+    write_cursor(&setup.state, &setup.paths.cursor_file, Cursor::default())?;
     Ok(())
 }
 
@@ -178,7 +178,7 @@ async fn a_source_that_fails_at_start_ends_the_agent_at_once() -> TestResult {
     let config = write_files(dir.path())?;
     let yielding: &PauseFn = &|_| Box::pin(tokio::task::yield_now());
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(WORLD_WRITABLE))?;
-    assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::StateDir(_))));
+    assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::StateDir(..))));
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(PRIVATE))?;
     fs::write(dir.path().join("cursor"), "garbage")?;
     assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::Cursor(_))));
