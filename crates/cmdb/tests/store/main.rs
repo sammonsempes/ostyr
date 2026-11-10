@@ -1137,8 +1137,41 @@ async fn a_specific_conflict_is_refused_inside_one_document_in_apply_sql_order()
         tenant.conflicts.iter().map(|conflict| memory::text(conflict, "attribute")).collect()
     });
     assert_eq!(stored, vec!["owner".to_owned()]);
-    assert!(APPLY_SQL
-        .contains("ORDER BY attribute COLLATE \"C\", current_value COLLATE \"C\", current_source COLLATE \"C\", observed_value COLLATE \"C\""));
+    assert!(APPLY_SQL.contains(
+        "ORDER BY attribute COLLATE \"C\", current_value COLLATE \"C\",\n                current_source COLLATE \"C\", observed_value COLLATE \"C\""
+    ));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_mixed_case_conflict_is_ordered_by_bytes_so_the_lowercase_name_is_refused() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let truth = TruthMap::new();
+    reconcile_stored(
+        &exec,
+        &scope,
+        &observation("agent", "S1", &[("owner", "ann"), ("Rack", "r1")]),
+        &truth,
+        &limits,
+    )
+    .await?;
+    let snapshot = load_assets(&exec, &scope, &limits).await?;
+    let mut outcome = cmdb::reconcile::reconcile(&snapshot.assets, &observation("hr", "S1", &[("owner", "bob"), ("Rack", "r2")]), &truth)?;
+    outcome.conflicts.reverse();
+    let applied = apply_outcome(&exec, &scope, &snapshot, &outcome, &limits).await?;
+    let refused: Vec<&str> = applied.refused.iter().map(|gone| gone.attribute.as_str()).collect();
+    assert_eq!(refused, vec!["owner"]);
+    let stored: Vec<String> = with_tenant(&db, "acme", |tenant| {
+        tenant.conflicts.iter().map(|conflict| memory::text(conflict, "attribute")).collect()
+    });
+    assert_eq!(stored, vec!["Rack".to_owned()]);
     Ok(())
 }
 
