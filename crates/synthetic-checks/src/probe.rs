@@ -1,8 +1,9 @@
 use crate::error::{CheckError, ProbeError};
+use crate::load::validate_nat64_prefix;
 use crate::model::{MAX_BODY_EXCERPT_BYTES, MAX_TIMEOUT_SECONDS};
-use crate::target::{guard_address, probe_socket, CheckedAddr};
+use crate::target::{guard_address_nat64, probe_socket, CheckedAddr};
 use crate::types::{Clock, Connect, Fetch, Handshake, Resolve};
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv6Net};
 use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -48,6 +49,7 @@ pub struct ProbeLimits {
     timeout: Duration,
     max_response_bytes: usize,
     max_redirects: usize,
+    nat64: Option<Ipv6Net>,
 }
 
 
@@ -69,7 +71,15 @@ pub fn probe_limits(timeout: Duration, max_response_bytes: usize, max_redirects:
         timeout,
         max_response_bytes,
         max_redirects,
+        nat64: None,
     })
+}
+
+
+/// The same limits with the site's declared NAT64 prefix, validated like the `nat64_prefix` check field; `None` clears it.
+pub fn with_nat64_prefix(limits: ProbeLimits, nat64: Option<Ipv6Net>) -> Result<ProbeLimits, CheckError> {
+    validate_nat64_prefix(nat64)?;
+    Ok(ProbeLimits { nat64, ..limits })
 }
 
 
@@ -210,7 +220,13 @@ pub fn escaped_excerpt(body: &[u8]) -> String {
 
 
 /// Resolves the host of a URL (an IP literal needs no lookup) and guards every address: one refused address refuses the host.
-pub fn guarded_addresses(host: Host<&str>, scope: &[IpNet], resolve: &Resolve<'_>, left: Duration) -> Result<Vec<CheckedAddr>, ProbeError> {
+pub fn guarded_addresses(
+    host: Host<&str>,
+    scope: &[IpNet],
+    nat64: Option<Ipv6Net>,
+    resolve: &Resolve<'_>,
+    left: Duration,
+) -> Result<Vec<CheckedAddr>, ProbeError> {
     let addresses = match host {
         Host::Ipv4(address) => vec![IpAddr::V4(address)],
         Host::Ipv6(address) => vec![IpAddr::V6(address)],
@@ -222,7 +238,7 @@ pub fn guarded_addresses(host: Host<&str>, scope: &[IpNet], resolve: &Resolve<'_
     };
     let guarded = addresses
         .into_iter()
-        .map(|address| guard_address(address, scope))
+        .map(|address| guard_address_nat64(address, scope, nat64))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(guarded)
 }
@@ -239,7 +255,7 @@ pub fn hop(url: &Url, scope: &[IpNet], deadline: &Deadline, limits: &ProbeLimits
         .then(|| url.host().zip(url.port_or_known_default()))
         .flatten()
         .ok_or_else(bad_target)?;
-    let address = guarded_addresses(host, scope, resolve, remaining(clock, deadline)?)?
+    let address = guarded_addresses(host, scope, limits.nat64, resolve, remaining(clock, deadline)?)?
         .first()
         .copied()
         .ok_or(ProbeError::NoAddress)?;

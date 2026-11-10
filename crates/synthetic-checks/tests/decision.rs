@@ -67,6 +67,7 @@ fn check(min_failing_locations: u64) -> Result<Check, Box<dyn std::error::Error>
         locations: vec!["paris".to_string(), "berlin".to_string()],
         min_failing_locations,
         certificate_days: days(&DEFAULT_CERT_DAYS)?,
+        nat64_prefix: None,
     })
 }
 

@@ -1,10 +1,11 @@
 use crate::error::CheckError;
 use crate::model::{
     CertificateDay, Check, CheckFile, FailureRun, RawCheck, RawCheckFile, MAX_CERT_THRESHOLDS, MAX_CHECKS, MAX_INTERVAL_SECONDS, MAX_LOCATIONS,
-    MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES, MAX_TARGET_LEN, MAX_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS,
+    MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES, MAX_TARGET_LEN, MAX_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS, NAT64_PREFIX_LENGTHS,
 };
 use core_config::error::ConfigError;
 use core_config::load::load_file;
+use ipnet::Ipv6Net;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -41,6 +42,15 @@ pub fn all_unique<'a>(field: &'static str, values: impl Iterator<Item = &'a Stri
 }
 
 
+pub fn validate_nat64_prefix(prefix: Option<Ipv6Net>) -> Result<(), CheckError> {
+    prefix.iter().try_for_each(|net| {
+        (NAT64_PREFIX_LENGTHS.contains(&net.prefix_len()) && net.trunc() == *net)
+            .then_some(())
+            .ok_or(CheckError::BadNat64Prefix)
+    })
+}
+
+
 pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
     text_ok("name", &raw.name, MAX_NAME_LEN)?;
     text_ok("target", &raw.target, MAX_TARGET_LEN)?;
@@ -49,6 +59,7 @@ pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
     (raw.timeout_seconds <= raw.interval_seconds)
         .then_some(())
         .ok_or(CheckError::TimeoutAboveInterval)?;
+    validate_nat64_prefix(raw.nat64_prefix)?;
     let consecutive_failures = FailureRun::try_from(raw.consecutive_failures)?;
     count_within("locations", raw.locations.len(), 1, MAX_LOCATIONS)?;
     raw.locations
@@ -72,6 +83,7 @@ pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
         locations: raw.locations,
         min_failing_locations: raw.min_failing_locations,
         certificate_days,
+        nat64_prefix: raw.nat64_prefix,
     })
 }
 

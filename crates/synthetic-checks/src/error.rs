@@ -11,6 +11,8 @@ pub enum CheckError {
     BadText { field: &'static str, max: usize },
     #[error("`{field}` has a duplicate entry")]
     Duplicate { field: &'static str },
+    #[error("`nat64_prefix` must be a network of length 32, 40, 48, 56, 64 or 96 without host bits")]
+    BadNat64Prefix,
     #[error("`timeout_seconds` must not exceed `interval_seconds`")]
     TimeoutAboveInterval,
 }

@@ -84,13 +84,13 @@ struct Stub {
 }
 
 
-fn record(answer: &IpAddr) -> Vec<u8> {
+fn record(answer: &IpAddr) -> Result<Vec<u8>, std::num::TryFromIntError> {
     let (kind, data) = match answer {
         IpAddr::V4(v4) => (TYPE_A, v4.octets().to_vec()),
         IpAddr::V6(v6) => (TYPE_AAAA, v6.octets().to_vec()),
     };
-    let length = u16::try_from(data.len()).unwrap_or(0);
-    [
+    let length = u16::try_from(data.len())?;
+    Ok([
         NAME_POINTER.as_slice(),
         &kind.to_be_bytes(),
         &CLASS_IN,
@@ -98,7 +98,7 @@ fn record(answer: &IpAddr) -> Vec<u8> {
         &length.to_be_bytes(),
         &data,
     ]
-    .concat()
+    .concat())
 }
 
 
@@ -124,7 +124,7 @@ fn reply(query: &[u8], mode: &Mode) -> Option<Vec<u8>> {
         &[0, 0, 0, 0],
     ]
     .concat();
-    let records: Vec<u8> = answers.into_iter().flat_map(record).collect();
+    let records: Vec<u8> = answers.into_iter().map(record).collect::<Result<Vec<_>, _>>().ok()?.concat();
     Some([header, question.to_vec(), records].concat())
 }
 
@@ -226,7 +226,7 @@ fn refused_through_the_guard(answer: &str, scope: &[ipnet::IpNet]) -> Result<boo
     let synthesised = IpAddr::V6(answer.parse::<Ipv6Addr>()?);
     let stub = serve(Mode::Answers(vec![synthesised]))?;
     let resolve = |name: &str, left: Duration, cap: usize| dns_resolve(Some(stub.address), name, left, cap);
-    let outcome = guarded_addresses(Host::Domain("synthesised.example"), scope, &resolve, LEFT);
+    let outcome = guarded_addresses(Host::Domain("synthesised.example"), scope, None, &resolve, LEFT);
     finish(stub)?;
     Ok(matches!(outcome, Err(ProbeError::Refused(_))))
 }
