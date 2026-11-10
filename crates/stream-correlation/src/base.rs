@@ -1,6 +1,7 @@
 use crate::condition::{evaluate, to_steps, Step};
 use crate::error::{redacted, CorrelationError};
 use crate::field::field_texts;
+use crate::level::{check_title, parse_level, Level, DEFAULT_LEVEL};
 use crate::selection::{compile_selection, selection_matches};
 use crate::types::{Selection, SelectionResults};
 use serde_json::Value;
@@ -18,6 +19,9 @@ pub const CATEGORY_FIELD: &str = "event.category";
 pub const OS_FIELD: &str = "host.os.type";
 
 
+pub const UNTITLED: &str = "untitled";
+
+
 pub const VALIDATION_STUB: &str = "x";
 
 
@@ -27,6 +31,7 @@ pub struct BaseRule {
     pub title: String,
     pub id: Option<String>,
     pub name: Option<String>,
+    pub level: Level,
     pub source: String,
     pub event_category: String,
     pub os: Option<String>,
@@ -61,6 +66,8 @@ fn os_filter(rule: &Rule, mapping: &FieldMapping) -> Result<Option<String>, Sigm
 /// Compiles the text of one Sigma rule; `name` is the rule's `name` key, which the SQL parser drops.
 pub fn compile_base(text: &str, name: Option<String>, mapping: &FieldMapping) -> Result<BaseRule, CorrelationError> {
     let rule = parse_rule(text).map_err(redacted)?;
+    check_title(rule.id.as_deref().unwrap_or(UNTITLED), &rule.title)?;
+    let level = parse_level(&rule.title, rule.level.as_deref())?.unwrap_or(DEFAULT_LEVEL);
     let category = rule
         .logsource
         .category
@@ -93,6 +100,7 @@ pub fn compile_base(text: &str, name: Option<String>, mapping: &FieldMapping) ->
         title: rule.title,
         id: rule.id,
         name,
+        level,
         source: text.to_string(),
         event_category: category_mapping.event_category.clone(),
         selections,

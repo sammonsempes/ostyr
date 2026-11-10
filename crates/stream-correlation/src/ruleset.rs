@@ -1,6 +1,7 @@
-use crate::base::{compile_base, BaseRule};
+use crate::base::{compile_base, BaseRule, UNTITLED};
 use crate::correlation::{check_keys, invalid, parse_kind, parse_timespan, CorrelationRule, RawDocument};
 use crate::error::{schema_error, CorrelationError};
+use crate::level::{check_title, highest, parse_level};
 use crate::types::RuleTexts;
 use core_config::error::ConfigError;
 use core_config::parse::parse_document;
@@ -119,11 +120,16 @@ pub fn fingerprint(text: &str, bases: &[&BaseRule]) -> String {
 
 
 fn compile_correlation(document: &Document, references: &BTreeMap<String, usize>, bases: &[BaseRule]) -> Result<CorrelationRule, CorrelationError> {
-    let title = document.value.get("title").and_then(Value::as_str).unwrap_or("untitled");
-    let raw: RawDocument = serde_path_to_error::deserialize(document.value.clone()).map_err(|error| schema_error(title, &error))?;
-    check_keys(&raw)?;
-    let kind = parse_kind(&raw.title, &raw.correlation)?;
-    let timespan_ms = parse_timespan(&raw.title, &raw.correlation.timespan)?;
+    let shown = document.value.get("title").and_then(Value::as_str).unwrap_or(UNTITLED);
+    let raw: RawDocument = serde_path_to_error::deserialize(document.value.clone()).map_err(|error| schema_error(shown, &error))?;
+    let id = raw.id.clone().or(raw.name.clone());
+    let rule_name = id.clone().unwrap_or_else(|| UNTITLED.to_string());
+    raw.title.iter().try_for_each(|text| check_title(&rule_name, text))?;
+    let title = raw.title.clone().or(id.clone()).unwrap_or(rule_name);
+    let explicit_level = parse_level(&title, raw.level.as_deref())?;
+    check_keys(&title, &raw)?;
+    let kind = parse_kind(&title, &raw.correlation)?;
+    let timespan_ms = parse_timespan(&title, &raw.correlation.timespan)?;
     let rules = raw
         .correlation
         .rules
@@ -132,18 +138,19 @@ fn compile_correlation(document: &Document, references: &BTreeMap<String, usize>
             references
                 .get(reference)
                 .copied()
-                .ok_or_else(|| CorrelationError::UnknownReference { rule: raw.title.clone() })
+                .ok_or_else(|| CorrelationError::UnknownReference { rule: title.clone() })
         })
         .collect::<Result<Vec<usize>, _>>()?;
     match rules.as_slice() {
-        [] => Err(invalid(&raw.title, "rules", "at least one rule is required".to_string())),
+        [] => Err(invalid(&title, "rules", "at least one rule is required".to_string())),
         _ => Ok(()),
     }?;
     let referenced: Vec<&BaseRule> = rules.iter().filter_map(|position| bases.get(*position)).collect();
     Ok(CorrelationRule {
-        id: raw.id.or(raw.name).unwrap_or_else(|| raw.title.clone()),
+        id: id.unwrap_or_else(|| title.clone()),
         fingerprint: fingerprint(&document.text, &referenced),
-        title: raw.title,
+        level: explicit_level.unwrap_or_else(|| highest(referenced.iter().map(|base| base.level))),
+        title,
         kind,
         rules,
         group_by: raw.correlation.group_by,
