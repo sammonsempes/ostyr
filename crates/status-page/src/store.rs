@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 
+pub const MIGRATION_NAMESPACE: &str = "status_page";
+
+
 pub const MIGRATIONS: [Migration; 1] = [Migration {
     version: "status_0001",
     sql: include_str!("../migrations/status_0001.sql"),
