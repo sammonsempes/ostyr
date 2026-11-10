@@ -19,7 +19,7 @@ siem-schema = { version = "0.0.0", path = "../siem-schema" }
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known"] }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time", "net", "io-util", "sync"] }
-tracing = "0.1"
+tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]

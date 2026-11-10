@@ -675,12 +675,15 @@ const TRACE_PASSWORD: &str = "TRACEPW-9f3a7c1d";
 const TRACE_JWT: &str = "TRACEJWT.9f3a7c1d.payload";
 
 
+const TRACE_PAYLOAD: &str = "TRACEPAYLOAD-5e2b8d40";
+
+
 #[test]
 fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error + Send + Sync>> {
     let captured = trace_capture()?;
     let stub = start_stub(None, |state| {
         state.nonce = true;
-        state.queue.push_back(queued("events.tenant-a", "one"));
+        state.queue.push_back(queued("events.tenant-a", TRACE_PAYLOAD));
     })?;
     let dir = tempdir()?;
     let password_path = dir.path().join("nats.password");
@@ -694,7 +697,7 @@ fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error
     assert!(!logs.contains(TRACE_PASSWORD));
     let credentials_stub = start_stub(None, |state| {
         state.nonce = true;
-        state.queue.push_back(queued("events.tenant-a", "two"));
+        state.queue.push_back(queued("events.tenant-a", TRACE_PAYLOAD));
     })?;
     let pair = KeyPair::new_user();
     let seed = pair.seed()?;
@@ -717,5 +720,7 @@ fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error
     assert!(!all_logs.contains(&seed));
     assert!(!all_logs.contains(TRACE_PASSWORD));
     assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
+    assert!(!all_logs.contains(TRACE_PAYLOAD));
+    assert!(tracing::level_filters::STATIC_MAX_LEVEL <= tracing::level_filters::LevelFilter::DEBUG);
     Ok(())
 }
