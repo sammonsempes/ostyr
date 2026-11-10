@@ -1,6 +1,7 @@
+use crate::alerts::{alerts_list, alerts_show, printable};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
-use crate::model::{AuditCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report};
+use crate::model::{AlertsCommand, AuditCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report};
 use crate::session::session_path;
 use crate::types::SendFn;
 use clap::Parser;
@@ -40,6 +41,12 @@ pub fn execute(
         Command::Audit {
             action: AuditCommand::Verify { file },
         } => audit_verify(file),
+        Command::Alerts {
+            action: AlertsCommand::List { limit, cursor },
+        } => alerts_list(&ctx, *limit, cursor.as_deref()),
+        Command::Alerts {
+            action: AlertsCommand::Show { id },
+        } => alerts_show(&ctx, id),
     }
 }
 
@@ -57,7 +64,7 @@ pub fn render(format: OutputFormat, report: &Report, out: &mut dyn Write) -> Res
 
 pub fn render_error(format: OutputFormat, error: &CliError, err: &mut dyn Write) -> io::Result<()> {
     match format {
-        OutputFormat::Text => writeln!(err, "error: {error}"),
+        OutputFormat::Text => writeln!(err, "error: {}", printable(&error.to_string())),
         OutputFormat::Json => writeln!(err, "{}", json!({ "error": error.to_string() })),
     }
 }

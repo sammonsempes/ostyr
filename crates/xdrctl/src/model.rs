@@ -57,6 +57,10 @@ pub enum Command {
         #[command(subcommand)]
         action: AuditCommand,
     },
+    Alerts {
+        #[command(subcommand)]
+        action: AlertsCommand,
+    },
 }
 
 
@@ -84,6 +88,43 @@ pub enum ConfigCommand {
 #[derive(Subcommand)]
 pub enum AuditCommand {
     Verify { file: PathBuf },
+}
+
+
+#[derive(Subcommand)]
+pub enum AlertsCommand {
+    /// Lists alerts, newest first; the next cursor is printed when there are more.
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Shows one alert by id.
+    Show { id: String },
+}
+
+
+#[derive(Deserialize)]
+pub struct AlertView {
+    pub id: String,
+    pub rule_id: String,
+    pub rule_title: String,
+    pub severity: String,
+    pub event_time: String,
+    pub created: String,
+    pub host_name: Option<String>,
+    pub user_name: Option<String>,
+    pub event_ids: Vec<String>,
+    pub summary: serde_json::Value,
+    pub summary_truncated: bool,
+}
+
+
+#[derive(Deserialize)]
+pub struct AlertPage {
+    pub items: Vec<AlertView>,
+    pub next_cursor: Option<String>,
 }
 
 
