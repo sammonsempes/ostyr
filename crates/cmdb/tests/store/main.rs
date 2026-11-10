@@ -587,3 +587,38 @@ fn default_limits_are_the_production_values() -> TestResult {
     assert!(limits.page_size < limits.max_assets && limits.max_assets < limits.max_child_rows && limits.max_attempts > 0);
     Ok(())
 }
+
+
+fn nic_swap(source: &str, serial: &str, mac: &str) -> Observation {
+    let mut swapped = observation(source, serial, &[("rack", "r1")]);
+    swapped.keys.insert(IdentityKey::Mac, mac.to_owned());
+    swapped
+}
+
+
+#[tokio::test]
+async fn a_key_owned_by_another_asset_is_one_conflict_and_no_retry() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "S1", &[]), &truth, &limits).await?;
+    let mut owner_b = observation("agent", "S2", &[]);
+    owner_b.keys.insert(IdentityKey::Mac, "M".to_owned());
+    reconcile_stored(&exec, &scope, &owner_b, &truth, &limits).await?;
+    let before = *lock(&db.apply_calls);
+    let outcome = reconcile_stored(&exec, &scope, &nic_swap("agent", "S1", "M"), &truth, &limits).await?;
+    assert_eq!(*lock(&db.apply_calls), before + 1);
+    assert_eq!(outcome.conflicts.len(), 1);
+    let conflict = outcome.conflicts.first().ok_or("no conflict")?;
+    assert_eq!(
+        (conflict.asset.as_str(), conflict.current.value.as_str()),
+        ("serial_number:S1", "serial_number:S2")
+    );
+    let loaded = load_assets(&exec, &scope, &limits).await?;
+    let first = loaded.assets.iter().find(|asset| asset.id == "serial_number:S1").ok_or("no S1")?;
+    assert!(!first.keys.contains_key(&IdentityKey::Mac));
+    assert_eq!(first.attributes.get("rack").map(|attribute| attribute.value.as_str()), Some("r1"));
+    Ok(())
+}
