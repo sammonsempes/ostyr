@@ -1567,6 +1567,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "detection"
+version = "0.0.0"
+dependencies = [
+ "agent-channel",
+ "core-audit",
+ "core-config",
+ "data-encoding",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "siem-ingest",
+ "stream-correlation",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
