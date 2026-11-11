@@ -1,11 +1,12 @@
 use crate::fixture::{fixture, Fixture};
 use crate::types::{TestError, TestResult};
-use alerts::settings::{check_unchanged, open_pg_engine, pg_file_of};
+use alerts::settings::{api_startup_reloads, check_unchanged, open_pg_engine, open_pg_engine_from, pg_file_of};
 use core_api::server::new_listener;
 use core_config::load::load_module;
 use core_config::reload::{current_config, reload, ReloadOutcome};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 
 const PG_TEXT: &str = "host: 127.0.0.1\nport: 5432\ndatabase: ostyr\nuser: ostyr\npassword_file: /run/pg.pass\nca_file: /run/ca.pem\n";
@@ -124,5 +125,29 @@ fn a_module_without_a_tenant_opens_under_the_default_one() -> TestResult {
     fs::write(&files.module, text)?;
     let (engine, _pg_file) = open_pg_engine(&files.module, new_listener())?;
     assert_eq!(current_config(&engine).host, "127.0.0.1");
+    Ok(())
+}
+
+
+#[test]
+fn the_api_startup_reloads_replay_a_pg_edit_made_before_they_run() -> TestResult {
+    let fx = fixture()?;
+    let files = files_of(&fx)?;
+    let listener = new_listener();
+    listener.state.get_or_init(|| fx.state.clone());
+    let loaded = load_module(&files.module)?;
+    let (opened, _pg_file) = open_pg_engine_from(&files.module, &loaded, listener, "alerts")?;
+    let engine = Arc::new(opened);
+    let reloads = api_startup_reloads(Arc::clone(&engine));
+    assert_eq!(reloads.len(), 1);
+    let before = fs::read_to_string(&files.audit)?;
+    let unchanged: Vec<ReloadOutcome> = reloads.iter().map(|run| run()).collect();
+    assert!(matches!(unchanged.as_slice(), [ReloadOutcome::Unchanged]));
+    assert_eq!(fs::read_to_string(&files.audit)?, before);
+    fs::write(&files.pg, OTHER_HOST)?;
+    let applied: Vec<ReloadOutcome> = reloads.iter().map(|run| run()).collect();
+    assert!(matches!(applied.as_slice(), [ReloadOutcome::Applied { .. }]));
+    assert_eq!(current_config(&engine).host, "127.0.0.2");
+    assert!(fs::read_to_string(&files.audit)?.contains("config.reload"));
     Ok(())
 }

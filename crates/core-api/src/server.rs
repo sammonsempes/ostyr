@@ -366,13 +366,13 @@ pub async fn run_loaded(
     };
     let _stop_watch = WatchStop(setup.rewatch.clone());
     let engine = open_reload(&state, settings, module_file, setup.clone(), log, start_only)?;
+    let extra_outcomes: Vec<ReloadOutcome> = startup_reloads.iter().map(|extra_reload| extra_reload()).collect();
+    tracing::debug!(?extra_outcomes, "startup reload of the extra engines");
     start_first(&setup, &config, tls)?;
     let _stop_server = ServerStop(listener.clone());
     rewatch(&setup.rewatch, watched_files(module_file, &config))?;
     let startup_outcome = reload(&engine);
     tracing::debug!(?startup_outcome, "startup reload");
-    let extra_outcomes: Vec<ReloadOutcome> = startup_reloads.iter().map(|extra_reload| extra_reload()).collect();
-    tracing::debug!(?extra_outcomes, "startup reload of the extra engines");
     #[cfg(unix)]
     let _signals = core_config::signal::reload_on_signals(engine, &[signal_hook::consts::SIGHUP])?;
     #[cfg(not(unix))]

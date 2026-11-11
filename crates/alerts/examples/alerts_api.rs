@@ -2,7 +2,7 @@
 
 use alerts::api::{alerts_access, alerts_document, alerts_router};
 use alerts::backend::{lease, pg_backend, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::settings::{open_pg_engine_from, startup_reload, ACTOR, SETTING_PG};
+use alerts::settings::{api_startup_reloads, open_pg_engine_from, ACTOR, SETTING_PG};
 use alerts::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
@@ -66,7 +66,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         &[SETTING_PG],
         listener,
         Some(log),
-        vec![startup_reload(startup_engine)],
+        api_startup_reloads(startup_engine),
     )
     .await?;
     Ok(())
