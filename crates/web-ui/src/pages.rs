@@ -1,7 +1,12 @@
-use crate::model::{Alert, AlertPage, Language};
-use crate::strings::{language_tag, severity_class, severity_key, text};
+use crate::api::valid_case_id;
+use crate::model::{Alert, AlertPage, CaseDetailView, CasePageView, CaseSummaryView, Language};
+use crate::strings::{
+    case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key, task_status_key, text,
+};
 use maud::{html, Markup, DOCTYPE};
 use serde_json::{Map, Value};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 
 pub const MAX_FIELD_CHARS: usize = 256;
@@ -14,6 +19,12 @@ pub const MAX_SUMMARY_ENTRIES: usize = 64;
 
 
 pub const MAX_EVENT_IDS: usize = 50;
+
+
+pub const MAX_TEXT_CHARS: usize = 4096;
+
+
+pub const MAX_TASKS: usize = 64;
 
 
 pub const STYLESHEET: &str = "body{font-family:sans-serif;margin:0;color:#1b1f23}header{display:flex;gap:1rem;align-items:center;padding:.5rem 1rem;\
@@ -93,6 +104,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                     strong { (text(language, "app_name")) }
                     @if let Some(token) = csrf {
                         (go("/alerts", text(language, "nav_alerts")))
+                        (go("/cases", text(language, "nav_cases")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -253,6 +265,167 @@ pub fn alert_page(language: Language, csrf: &str, alert: &Alert) -> Markup {
             }
             (summary_list(language, &alert.summary))
             (go("/alerts", text(language, "alert_back")))
+        },
+    )
+}
+
+
+/// Unix seconds as UTC RFC 3339; a value outside the calendar is the fixed "unknown" text.
+pub fn format_time(language: Language, seconds: i64) -> String {
+    OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()
+        .and_then(|moment| moment.format(&Rfc3339).ok())
+        .unwrap_or_else(|| text(language, "unknown").to_owned())
+}
+
+
+/// A case id is a link only inside the id grammar; any other id is text with a fixed marker.
+pub fn case_title_cell(language: Language, case: &CaseSummaryView) -> Markup {
+    let title = clip(language, &case.title, MAX_FIELD_CHARS);
+    html! {
+        @if valid_case_id(&case.id) {
+            (go(&format!("/cases/{}", case.id), &title))
+        } @else {
+            (title) " [" (text(language, "not_linkable")) "]"
+        }
+    }
+}
+
+
+pub fn case_row(language: Language, case: &CaseSummaryView) -> Markup {
+    html! {
+        tr {
+            td class=(case_severity_class(&case.severity)) { (text(language, case_severity_key(&case.severity))) }
+            td { (case_title_cell(language, case)) }
+            td { (text(language, status_key(&case.status))) }
+            td { (optional(language, case.assignee.as_ref())) }
+            td { (format_time(language, case.updated_at)) }
+        }
+    }
+}
+
+
+pub fn cases_page(language: Language, csrf: &str, page: &CasePageView, limit: Option<u32>) -> Markup {
+    layout(
+        language,
+        "title_cases",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_cases")) }
+            @if page.items.is_empty() {
+                div { (text(language, "cases_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_severity")) }
+                            th { (text(language, "col_case_title")) }
+                            th { (text(language, "col_status")) }
+                            th { (text(language, "col_assignee")) }
+                            th { (text(language, "col_updated")) }
+                        }
+                    }
+                    tbody {
+                        @for case in &page.items { (case_row(language, case)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &page.next_cursor {
+                form method="get" action="/cases" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    @if let Some(kept) = limit {
+                        input type="hidden" name="limit" value=(kept);
+                    }
+                    button type="submit" { (text(language, "cases_next")) }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn case_tasks(language: Language, case: &CaseDetailView) -> Markup {
+    let omitted = case.tasks.len().saturating_sub(MAX_TASKS);
+    html! {
+        ul {
+            @for task in case.tasks.iter().take(MAX_TASKS) {
+                li {
+                    (clip(language, &task.title, MAX_FIELD_CHARS)) " (" (text(language, task_status_key(&task.status))) ")"
+                    @if let Some(due) = task.due {
+                        " " (text(language, "case_due")) " " (format_time(language, due))
+                    }
+                }
+            }
+        }
+        @if omitted > 0 {
+            div { (omitted) " " (text(language, "omitted")) }
+        }
+    }
+}
+
+
+pub fn case_counts(language: Language, case: &CaseDetailView) -> Markup {
+    let counts = case.summary.counts;
+    html! {
+        dl {
+            dt { (text(language, "count_tasks")) }
+            dd { (counts.tasks) }
+            dt { (text(language, "count_observables")) }
+            dd { (counts.observables) }
+            dt { (text(language, "count_comments")) }
+            dd { (counts.comments) }
+            dt { (text(language, "count_history")) }
+            dd { (counts.history) }
+            dt { (text(language, "count_alerts")) }
+            dd { (counts.alerts) }
+        }
+    }
+}
+
+
+pub fn resolution_text(language: Language, resolution: Option<&String>) -> &'static str {
+    resolution.map_or_else(|| text(language, "none"), |value| text(language, resolution_key(value)))
+}
+
+
+pub fn description_text(language: Language, description: Option<&String>) -> String {
+    description.map_or_else(|| text(language, "none").to_owned(), |value| clip(language, value, MAX_TEXT_CHARS))
+}
+
+
+pub fn case_page(language: Language, csrf: &str, case: &CaseDetailView) -> Markup {
+    let summary = &case.summary;
+    layout(
+        language,
+        "title_case",
+        Some(csrf),
+        html! {
+            h1 { (clip(language, &summary.title, MAX_FIELD_CHARS)) }
+            dl {
+                dt { (text(language, "col_severity")) }
+                dd class=(case_severity_class(&summary.severity)) { (text(language, case_severity_key(&summary.severity))) }
+                dt { (text(language, "col_status")) }
+                dd { (text(language, status_key(&summary.status))) }
+                dt { (text(language, "col_assignee")) }
+                dd { (optional(language, summary.assignee.as_ref())) }
+                dt { (text(language, "col_type")) }
+                dd { (optional(language, summary.case_type.as_ref())) }
+                dt { (text(language, "case_template")) }
+                dd { (optional(language, case.template.as_ref())) }
+                dt { (text(language, "col_created")) }
+                dd { (format_time(language, summary.created_at)) }
+                dt { (text(language, "col_updated")) }
+                dd { (format_time(language, summary.updated_at)) }
+                dt { (text(language, "case_resolution")) }
+                dd { (resolution_text(language, case.resolution.as_ref())) }
+            }
+            h2 { (text(language, "case_description")) }
+            div { (description_text(language, case.description.as_ref())) }
+            h2 { (text(language, "case_tasks")) }
+            (case_tasks(language, case))
+            h2 { (text(language, "case_counts")) }
+            (case_counts(language, case))
+            (go("/cases", text(language, "case_back")))
         },
     )
 }

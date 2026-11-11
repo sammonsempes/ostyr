@@ -74,6 +74,7 @@ pub struct StubState {
     pub logouts: AtomicUsize,
     pub logins: AtomicUsize,
     pub details: AtomicUsize,
+    pub case_paths: Mutex<Vec<String>>,
     pub last_query: Mutex<String>,
 }
 
@@ -270,6 +271,142 @@ pub async fn detail_handler(State(state): State<Arc<StubState>>, headers: Header
 }
 
 
+pub const LONG_CASE_ID_CHARS: usize = 129;
+
+
+pub const ALERT_COUNT: u32 = SUMMARY_COUNT + SUMMARY_COUNT;
+
+
+pub const HUGE_TITLE_CHARS: usize = 10_000;
+
+
+pub const MANY_TASKS: usize = 70;
+
+
+pub const CASE_CREATED: i64 = 1_700_000_000;
+
+
+pub const FAR_FUTURE: i64 = i64::MAX;
+
+
+pub const BEFORE_YEAR_ZERO: i64 = -100_000_000_000;
+
+
+pub fn case(id: &str, title: &str, status: &str) -> Value {
+    json!({
+        "id": id, "title": title, "severity": "high", "status": status, "assignee": "bob", "case_type": null,
+        "created_at": CASE_CREATED, "updated_at": CASE_CREATED, "version": 1,
+        "counts": {"tasks": 0, "observables": SUMMARY_COUNT, "comments": 0, "history": 0, "alerts": ALERT_COUNT}
+    })
+}
+
+
+pub fn merged(base: Value, extra: Value) -> Value {
+    Value::Object(
+        base.as_object()
+            .into_iter()
+            .chain(extra.as_object())
+            .flat_map(|fields| fields.iter().map(|(name, value)| (name.clone(), value.clone())))
+            .collect(),
+    )
+}
+
+
+pub fn case_detail(id: &str, title: &str, status: &str) -> Value {
+    merged(
+        case(id, title, status),
+        json!({
+            "description": "Initial description", "resolution": "benign", "template": "phishing",
+            "tasks": [{"title": "Isolate host", "status": "in_progress", "due": CASE_CREATED, "log": []}]
+        }),
+    )
+}
+
+
+pub fn hostile_cases() -> Vec<Value> {
+    let huge = "h".repeat(HUGE_TITLE_CHARS);
+    let hostile_title = format!("{HOSTILE}\u{202e}\"><img src=x></style>{huge}");
+    vec![
+        case("case-1", &format!("{HOSTILE}\u{202e}\"><img src=x></style>{huge}"), "weird"),
+        merged(case("../x", &hostile_title, "new"), json!({"assignee": HOSTILE})),
+        case("-x", "dash", "closed"),
+        case(&"i".repeat(LONG_CASE_ID_CHARS), &hostile_title, "new"),
+        case("a/b", "slash", "new"),
+        case("%2e%2e", "encoded", "new"),
+        case("line\nfeed", "newline", "new"),
+    ]
+}
+
+
+pub fn hostile_detail(id: &str) -> Value {
+    let tasks: Vec<Value> = (0..MANY_TASKS)
+        .map(|index| json!({"title": format!("task{index}{HOSTILE}"), "status": "odd", "due": FAR_FUTURE, "log": []}))
+        .collect();
+    merged(
+        case_detail(id, HOSTILE, "weird"),
+        json!({
+            "description": format!("{HOSTILE}\u{202e}"), "resolution": "mystery", "template": format!("{HOSTILE}\u{202e}"), "tasks": tasks, "severity": "urgent",
+            "assignee": format!("{HOSTILE}\u{202e}"), "case_type": format!("{HOSTILE}\u{202e}"),
+            "created_at": BEFORE_YEAR_ZERO, "updated_at": FAR_FUTURE
+        }),
+    )
+}
+
+
+pub async fn cases_handler(
+    State(state): State<Arc<StubState>>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+    uri: axum::http::Uri,
+) -> Response {
+    note_forwarded(&state, &headers);
+    state.case_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Hostile => Json(page(hostile_cases(), None)).into_response(),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(page((0..MANY_ITEMS).map(|_| case("c", "t", "new")).collect(), None)).into_response(),
+            Mode::BadCursor => Json(page(vec![case("c", "t", "new")], Some("a b"))).into_response(),
+            Mode::Normal => match query.get("cursor").map(String::as_str) {
+                None => Json(page(
+                    vec![case("case-1", "Phishing wave", "new"), case("case-2", "Ransomware", "in_progress")],
+                    Some(FIRST_CURSOR),
+                ))
+                .into_response(),
+                Some(FIRST_CURSOR) => Json(page(vec![case("case-3", "Old case", "closed")], None)).into_response(),
+                Some(_) => error_reply(StatusCode::BAD_REQUEST),
+            },
+            _ => Json(page(vec![], None)).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn case_detail_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    note_forwarded(&state, &headers);
+    state
+        .case_paths
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(format!("/cases/{id}"));
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Hostile => Json(hostile_detail(&id)).into_response(),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::BadId => Json(case_detail("other", "t", "new")).into_response(),
+            _ if id == "missing" => error_reply(StatusCode::NOT_FOUND),
+            _ => Json(case_detail(&id, "Phishing wave", "in_progress")).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
     let state = Arc::new(StubState {
         mode: Mutex::new(mode),
@@ -279,6 +416,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         logouts: AtomicUsize::new(0),
         logins: AtomicUsize::new(0),
         details: AtomicUsize::new(0),
+        case_paths: Mutex::new(Vec::new()),
         last_query: Mutex::new(String::new()),
     });
     let router = Router::new()
@@ -286,6 +424,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/auth/logout", post(logout_handler))
         .route("/alerts", get(alerts_handler))
         .route("/alerts/{id}", get(detail_handler))
+        .route("/cases", get(cases_handler))
+        .route("/cases/{id}", get(case_detail_handler))
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

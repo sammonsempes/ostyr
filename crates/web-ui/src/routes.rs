@@ -1,7 +1,7 @@
-use crate::api::{get_alert, list_alerts, login, logout, valid_cursor, valid_id};
+use crate::api::{get_alert, get_case, list_alerts, list_cases, login, logout, valid_case_id, valid_cursor, valid_id};
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, Language, Opened, Principal, WebLimits, WebState};
-use crate::pages::{alert_page, alerts_page, error_page, login_page, STYLESHEET};
+use crate::pages::{alert_page, alerts_page, case_page, cases_page, error_page, login_page, STYLESHEET};
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
     LANGUAGE_COOKIE_SECONDS, LOGIN_COOKIE, LOGIN_COOKIE_SECONDS, SESSION_COOKIE,
@@ -466,6 +466,51 @@ pub async fn show_alert(
 }
 
 
+pub async fn show_cases_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let cursor = parse_cursor(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let limit = parse_limit(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let client = state.api.load_full();
+    let page = list_cases(&client, source, &principal.token, cursor, limit)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &cases_page(language, &principal.csrf, &page, limit), &[]))
+}
+
+
+pub async fn show_cases(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_cases_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_case_page(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    require(valid_case_id(id), language, StatusCode::NOT_FOUND, "error_not_found")?;
+    let client = state.api.load_full();
+    let case = get_case(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &case_page(language, &principal.csrf, &case), &[]))
+}
+
+
+pub async fn show_case(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    merge(show_case_page(&state, peer.ip(), &headers, &id).await)
+}
+
+
 pub fn build_router(state: SharedWeb) -> Router {
     Router::new()
         .route("/", get(index))
@@ -474,6 +519,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/logout", post(logout_submit))
         .route("/alerts", get(show_alerts))
         .route("/alerts/{id}", get(show_alert))
+        .route("/cases", get(show_cases))
+        .route("/cases/{id}", get(show_case))
         .route("/language/{code}", post(switch_language))
         .fallback(not_found)
         .layer(from_fn(harden))
