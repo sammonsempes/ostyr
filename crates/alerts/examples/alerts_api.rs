@@ -2,12 +2,13 @@
 
 use alerts::api::{alerts_access, alerts_document, alerts_router};
 use alerts::backend::{lease, pg_backend, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::settings::{open_pg_engine, SETTING_PG};
+use alerts::settings::{open_pg_engine_from, ACTOR, SETTING_PG};
 use alerts::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
-use core_api::server::{new_listener, run_module, stop_listener};
+use core_api::server::{new_listener, run_loaded, stop_listener};
 use core_api::types::SharedListener;
+use core_config::load::load_module;
 #[cfg(unix)]
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
@@ -44,8 +45,9 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let (dispatch, log) = reloadable_dispatch(BoxMakeWriter::new(stdout), DEFAULT_LOG_LEVEL);
     tracing::dispatcher::set_global_default(dispatch)?;
     tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
+    let loaded = load_module(Path::new(module_file))?;
     let listener = new_listener();
-    let (opened, pg_file) = open_pg_engine(Path::new(module_file), listener.clone())?;
+    let (opened, pg_file) = open_pg_engine_from(Path::new(module_file), &loaded, listener.clone(), ACTOR)?;
     let engine = Arc::new(opened);
     let _watch = watch_files(Arc::clone(&engine), &[PathBuf::from(module_file), pg_file], RELOAD_DEBOUNCE)?;
     #[cfg(unix)]
@@ -56,11 +58,10 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     drop(held);
     tracing::info!(applied = applied.len(), "alerts migrations checked");
     tokio::spawn(stop_on_interrupt(listener.clone()));
-    run_module(
-        arguments,
-        alerts_router(pg_backend(engine, permits)),
-        alerts_access(),
-        vec![alerts_document()],
+    run_loaded(
+        Path::new(module_file),
+        loaded,
+        (alerts_router(pg_backend(engine, permits)), alerts_access(), vec![alerts_document()]),
         &[SETTING_PG],
         listener,
         Some(log),

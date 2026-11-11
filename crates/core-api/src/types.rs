@@ -1,5 +1,6 @@
 use crate::model::{ApiState, Limits, Listener, PreparedAudit, PreparedKey, Rule, Sockets, Window};
 use arc_swap::ArcSwap;
+use axum::Router;
 use core_auth::error::AuthError;
 use core_config::secret::SecretRef;
 use openidconnect::{HttpRequest, HttpResponse};
@@ -11,6 +12,10 @@ use std::sync::{Arc, Mutex};
 
 
 pub type SharedState = Arc<ApiState>;
+
+
+/// A module's extra router, access table and OpenAPI documents, as handed to `run_loaded`.
+pub type ModuleParts = (Router<SharedState>, AccessTable, Vec<utoipa::openapi::OpenApi>);
 
 
 pub type PendingGenerations = Mutex<BTreeMap<String, u64>>;
