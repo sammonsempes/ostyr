@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS ostyr.`events`
     `process.parent.executable` String,
     `process.parent.command_line` String,
     `file.path` String,
-    `file.size` UInt64
+    `file.size` UInt64,
+    `event.code` LowCardinality(String),
+    `event.provider` LowCardinality(String)
 )
 ENGINE = MergeTree
 PARTITION BY toDate(`@timestamp`)

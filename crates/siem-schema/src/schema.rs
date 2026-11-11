@@ -10,7 +10,7 @@ pub const TENANT_COLUMN: &str = "tenant";
 pub const TENANT_TIER_COLUMN: &str = "tenant_tier";
 
 
-const DEFAULT_COLUMNS: [(&str, ColumnType); 41] = [
+const DEFAULT_COLUMNS: [(&str, ColumnType); 43] = [
     (TIMESTAMP_COLUMN, ColumnType::Timestamp),
     (TENANT_COLUMN, ColumnType::LowCardinalityText),
     (TENANT_TIER_COLUMN, ColumnType::LowCardinalityText),
@@ -52,6 +52,8 @@ const DEFAULT_COLUMNS: [(&str, ColumnType); 41] = [
     ("process.parent.command_line", ColumnType::Text),
     ("file.path", ColumnType::Text),
     ("file.size", ColumnType::UInt64),
+    ("event.code", ColumnType::LowCardinalityText),
+    ("event.provider", ColumnType::LowCardinalityText),
 ];
 
 

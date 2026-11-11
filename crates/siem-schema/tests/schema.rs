@@ -10,6 +10,9 @@ use siem_schema::ttl::{render_ttl, TierRetention, TtlSettings, MAX_RETENTION_DAY
 const DEFAULT_DAYS: u32 = 30;
 
 
+const OLD_COLUMN_COUNT: usize = 41;
+
+
 const PREMIUM_DAYS: u32 = 90;
 
 
@@ -201,6 +204,19 @@ fn migration_adds_columns() -> Result<(), SchemaError> {
         "ALTER TABLE `events` ADD COLUMN `host.name` String, ADD COLUMN `process.pid` UInt32\n"
     );
     assert_eq!(render_migration("events", &old, &old)?, "");
+    Ok(())
+}
+
+
+#[test]
+fn migration_from_the_41_column_list_adds_event_code_and_provider() -> Result<(), SchemaError> {
+    let newer = default_columns();
+    let old: Vec<Column> = newer.iter().take(OLD_COLUMN_COUNT).cloned().collect();
+    assert_eq!(old.len(), OLD_COLUMN_COUNT);
+    assert_eq!(
+        render_migration("events", &old, &newer)?,
+        "ALTER TABLE `events` ADD COLUMN `event.code` LowCardinality(String), ADD COLUMN `event.provider` LowCardinality(String)\n"
+    );
     Ok(())
 }
 
