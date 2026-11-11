@@ -58,6 +58,9 @@ pub const DEFAULT_CERT_DAYS: [u64; 3] = [30, 14, 7];
 pub const MAX_BODY_EXCERPT_BYTES: usize = 512;
 
 
+pub const ICMP_HOST_EXTRA_CHARS: [char; 3] = ['-', '.', '_'];
+
+
 pub const NAT64_PREFIX_LENGTHS: [u8; 6] = [32, 40, 48, 56, 64, 96];
 
 

@@ -13,6 +13,8 @@ pub enum CheckError {
     Duplicate { field: &'static str },
     #[error("`nat64_prefix` must be a network of length 32, 40, 48, 56, 64 or 96 without host bits")]
     BadNat64Prefix,
+    #[error("an `icmp` target must be an IP address or a host name without port, path or leading `-`")]
+    BadIcmpTarget,
     #[error("`timeout_seconds` must not exceed `interval_seconds`")]
     TimeoutAboveInterval,
 }
@@ -65,3 +67,8 @@ pub enum ProbeError {
     #[error("certificate chain exceeds {max_certs} certificates of {max_bytes} bytes")]
     ChainTooLarge { max_certs: usize, max_bytes: usize },
 }
+
+
+#[derive(Debug, Error)]
+#[error("an unprivileged ICMP socket cannot be created: check net.ipv4.ping_group_range")]
+pub struct PingSocketError(#[source] pub std::io::Error);

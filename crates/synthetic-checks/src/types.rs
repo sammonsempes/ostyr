@@ -20,3 +20,7 @@ pub type Connect<'a> = dyn Fn(SocketAddr, Duration) -> io::Result<()> + 'a;
 
 /// Takes the socket, the server name, the time left, the certificate count cap and the per-certificate byte cap.
 pub type Handshake<'a> = dyn Fn(SocketAddr, &str, Duration, usize, usize) -> io::Result<Vec<Vec<u8>>> + 'a;
+
+
+/// One echo request to the address, `Ok` when the matching reply arrives within the time left.
+pub type Ping<'a> = dyn Fn(IpAddr, Duration) -> io::Result<()> + 'a;

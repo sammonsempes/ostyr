@@ -1,12 +1,14 @@
 use crate::error::CheckError;
 use crate::model::{
-    CertificateDay, Check, CheckFile, FailureRun, RawCheck, RawCheckFile, MAX_CERT_THRESHOLDS, MAX_CHECKS, MAX_INTERVAL_SECONDS, MAX_LOCATIONS,
-    MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES, MAX_TARGET_LEN, MAX_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS, NAT64_PREFIX_LENGTHS,
+    CertificateDay, Check, CheckFile, CheckKind, FailureRun, RawCheck, RawCheckFile, ICMP_HOST_EXTRA_CHARS, MAX_CERT_THRESHOLDS, MAX_CHECKS,
+    MAX_INTERVAL_SECONDS, MAX_LOCATIONS, MAX_LOCATION_LEN, MAX_NAME_LEN, MAX_SCOPE_ENTRIES, MAX_TARGET_LEN, MAX_TIMEOUT_SECONDS,
+    MIN_INTERVAL_SECONDS, NAT64_PREFIX_LENGTHS,
 };
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use ipnet::Ipv6Net;
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::Path;
 
 
@@ -51,9 +53,22 @@ pub fn validate_nat64_prefix(prefix: Option<Ipv6Net>) -> Result<(), CheckError> 
 }
 
 
+/// An ICMP target is an IP literal or a plain host name: no port, path, userinfo or leading `-`.
+pub fn icmp_target_ok(target: &str) -> bool {
+    let name = !target.starts_with('-')
+        && target
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ICMP_HOST_EXTRA_CHARS.contains(&character));
+    name || target.parse::<IpAddr>().is_ok()
+}
+
+
 pub fn validate_check(raw: RawCheck) -> Result<Check, CheckError> {
     text_ok("name", &raw.name, MAX_NAME_LEN)?;
     text_ok("target", &raw.target, MAX_TARGET_LEN)?;
+    (raw.kind != CheckKind::Icmp || icmp_target_ok(&raw.target))
+        .then_some(())
+        .ok_or(CheckError::BadIcmpTarget)?;
     within("interval_seconds", raw.interval_seconds, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)?;
     within("timeout_seconds", raw.timeout_seconds, 1, MAX_TIMEOUT_SECONDS)?;
     (raw.timeout_seconds <= raw.interval_seconds)
