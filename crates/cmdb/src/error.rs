@@ -15,6 +15,8 @@ pub enum CmdbError {
     ControlCharacter { field: &'static str },
     #[error("observation carries more than {limit} attributes")]
     TooManyAttributes { limit: usize },
+    #[error("observation field `{field}` is empty")]
+    EmptyField { field: &'static str },
 }
 
 
@@ -24,6 +26,20 @@ pub enum CmdbConfigError {
     Load(#[from] core_config::error::ConfigError),
     #[error("{file}: declared asset {index}: {source}")]
     Declared {
+        file: String,
+        index: usize,
+        #[source]
+        source: CmdbError,
+    },
+    #[error("{file}: relationship {index}: {source}")]
+    Relationship {
+        file: String,
+        index: usize,
+        #[source]
+        source: CmdbError,
+    },
+    #[error("{file}: source of truth entry {index}: {source}")]
+    SourceOfTruth {
         file: String,
         index: usize,
         #[source]

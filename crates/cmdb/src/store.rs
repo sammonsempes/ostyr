@@ -3,7 +3,7 @@ use crate::model::{
     Applied, Asset, Attribute, Conflict, DuplicateConflict, Event, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution, Snapshot,
     Stored,
 };
-use crate::reconcile::{reconcile, RESERVED_ATTRIBUTE_PREFIX};
+use crate::reconcile::{check_observation, reconcile, RESERVED_ATTRIBUTE_PREFIX};
 use crate::types::{Executor, Row, TruthMap, VersionMap};
 use core_pg::error::PgError;
 use core_pg::migrate::Migration;
@@ -437,6 +437,7 @@ pub async fn attempt(
     truth: &TruthMap,
     limits: &Limits,
 ) -> Result<Stored, StoreError> {
+    check_observation(observation)?;
     let snapshot = load_assets(exec, scope, limits).await?;
     let outcome = reconcile(&snapshot.assets, observation, truth)?;
     check_one_conflict_per_triple(&outcome)?;

@@ -1,7 +1,7 @@
 use crate::error::{CmdbConfigError, CmdbError};
 use crate::impact::BUSINESS_SERVICE_ATTRIBUTE;
 use crate::model::{Asset, AssetKind, Attribute, Criticality, Lifecycle, Relationship};
-use crate::reconcile::{check_text, MAX_VALUE_BYTES};
+use crate::reconcile::{check_text, MAX_ATTRIBUTE_NAME_BYTES, MAX_VALUE_BYTES};
 use crate::summary::MAX_ID_BYTES;
 use crate::types::{KeyMap, TruthMap};
 use core_config::load::load_file;
@@ -53,6 +53,9 @@ pub struct CmdbConfig {
 
 
 pub fn check_declared(declared: &DeclaredAsset) -> Result<(), CmdbError> {
+    (!declared.id.is_empty())
+        .then_some(())
+        .ok_or(CmdbError::EmptyField { field: "asset id" })?;
     check_text("asset id", &declared.id, MAX_ID_BYTES)?;
     declared.keys.values().try_for_each(|value| check_text("keys", value, MAX_VALUE_BYTES))?;
     [&declared.owner, &declared.business_service, &declared.environment, &declared.location]
@@ -62,9 +65,35 @@ pub fn check_declared(declared: &DeclaredAsset) -> Result<(), CmdbError> {
 }
 
 
-/// Loads the file and refuses a declared asset whose id, key or attribute breaks the observation caps; the error names file, index and field.
+pub fn check_relationship(relationship: &Relationship) -> Result<(), CmdbError> {
+    check_text("relationship from", &relationship.from, MAX_ID_BYTES)?;
+    check_text("relationship to", &relationship.to, MAX_ID_BYTES)
+}
+
+
+pub fn check_truth(attribute: &str, source: &str) -> Result<(), CmdbError> {
+    check_text("source of truth attribute", attribute, MAX_ATTRIBUTE_NAME_BYTES)?;
+    check_text("source of truth source", source, MAX_VALUE_BYTES)
+}
+
+
+/// Loads the file and refuses a declared asset, relationship or source of truth that breaks the observation caps; the error names file, index and field.
 pub fn load_cmdb(path: &Path) -> Result<CmdbConfig, CmdbConfigError> {
     let config: CmdbConfig = load_file(path)?;
+    config.relationships.iter().enumerate().try_for_each(|(index, relationship)| {
+        check_relationship(relationship).map_err(|source| CmdbConfigError::Relationship {
+            file: path.display().to_string(),
+            index,
+            source,
+        })
+    })?;
+    config.sources_of_truth.iter().enumerate().try_for_each(|(index, (attribute, origin))| {
+        check_truth(attribute, origin).map_err(|source| CmdbConfigError::SourceOfTruth {
+            file: path.display().to_string(),
+            index,
+            source,
+        })
+    })?;
     config.assets.iter().enumerate().try_for_each(|(index, declared)| {
         check_declared(declared).map_err(|source| CmdbConfigError::Declared {
             file: path.display().to_string(),
