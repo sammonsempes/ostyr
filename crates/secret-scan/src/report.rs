@@ -1,5 +1,6 @@
+use crate::alerting::path_digest;
 use crate::error::ReportError;
-use crate::mask::{escape_bounded, masked_excerpt, MAX_FIELD_CHARS};
+use crate::mask::{escape_bounded, escape_marked, masked_excerpt, MAX_FIELD_CHARS};
 use crate::model::{Finding, Limits, Report, ScanScope};
 use core_pg::scope::tenant_scope;
 use glob::Pattern;
@@ -67,7 +68,8 @@ fn classify(entry: &RawValue, patterns: &[Pattern], limits: &Limits) -> Outcome 
     match serde_json::from_str::<RawFinding>(entry.get()) {
         Ok(raw) if patterns.iter().any(|pattern| pattern.matches(&raw.file)) => Outcome::Skipped,
         Ok(raw) => Outcome::Kept(Finding {
-            file: escape_bounded(&raw.file, MAX_FIELD_CHARS),
+            file: escape_marked(&raw.file, MAX_FIELD_CHARS),
+            file_digest: path_digest(&raw.file),
             start_line: raw.start_line,
             end_line: raw.end_line,
             commit: raw

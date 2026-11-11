@@ -56,9 +56,9 @@ pub fn path_digest(path: &str) -> String {
 }
 
 
-/// `#` and the first `DIGEST_CHARS` hex characters of the path digest.
-pub fn short_digest(path: &str) -> String {
-    format!("#{}", path_digest(path).chars().take(DIGEST_CHARS).collect::<String>())
+/// `#` and the first `DIGEST_CHARS` hex characters of a path digest.
+pub fn short_digest(digest: &str) -> String {
+    format!("#{}", digest.chars().take(DIGEST_CHARS).collect::<String>())
 }
 
 
@@ -78,20 +78,30 @@ pub fn commit_label(finding: &Finding) -> Option<&str> {
 
 
 /// The path when it passes the grammar, its short digest otherwise.
-pub fn shown_path(path: &str) -> String {
+pub fn shown_path(path: &str, digest: &str) -> String {
     if is_path(path) {
         path.to_owned()
     } else {
-        short_digest(path)
+        short_digest(digest)
     }
 }
 
 
 /// The title with the path; with its short digest instead when the path would push the title over the store's limit.
 pub fn title_of(finding: &Finding) -> String {
-    let long = format!("Secret {} in {}:{}", finding.rule_id, shown_path(&finding.file), finding.start_line);
+    let long = format!(
+        "Secret {} in {}:{}",
+        finding.rule_id,
+        shown_path(&finding.file, &finding.file_digest),
+        finding.start_line
+    );
     if long.chars().count() > MAX_TITLE_CHARS {
-        format!("Secret {} in {}:{}", finding.rule_id, short_digest(&finding.file), finding.start_line)
+        format!(
+            "Secret {} in {}:{}",
+            finding.rule_id,
+            short_digest(&finding.file_digest),
+            finding.start_line
+        )
     } else {
         long
     }
@@ -106,7 +116,7 @@ pub fn alert_of(scope: &TenantScope, report: &Report, finding: &Finding, now_mic
     let rule_id = format!("{RULE_PREFIX}{}", finding.rule_id);
     let event_ids = vec![
         format!("scope:{}", report.scope_id),
-        format!("file:{}", path_digest(&finding.file)),
+        format!("file:{}", finding.file_digest),
         format!("line:{}", finding.start_line),
         format!("commit:{commit}"),
     ];
@@ -122,10 +132,10 @@ pub fn alert_of(scope: &TenantScope, report: &Report, finding: &Finding, now_mic
         user_name: None,
         summary: summarise(&json!({
             "scope_id": report.scope_id,
-            "file": shown_path(&finding.file),
+            "file": shown_path(&finding.file, &finding.file_digest),
             "start_line": finding.start_line,
             "end_line": finding.end_line,
-            "commit": finding.commit,
+            "commit": commit,
             "rule_id": finding.rule_id,
         })),
         rule_id,

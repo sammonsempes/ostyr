@@ -46,6 +46,7 @@ pub struct ScanScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub file: String,
+    pub file_digest: String,
     pub start_line: u64,
     pub end_line: u64,
     pub commit: Option<String>,

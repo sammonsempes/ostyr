@@ -2,10 +2,16 @@
 mod types;
 
 
+use core_pg::scope::tenant_scope;
+use secret_scan::alerting::secret_alerts;
 use secret_scan::error::ReportError;
 use secret_scan::model::{Limits, ScanScope, DEFAULT_EXCERPT_CHARS, DEFAULT_KEPT_CHARS, DEFAULT_MAX_BYTES, DEFAULT_MAX_FINDINGS};
 use secret_scan::report::{parse_report, read_bounded};
+use std::collections::BTreeSet;
 use types::TestResult;
+
+
+const NOW_MICROS: u64 = 1_700_000_000_000_000;
 
 
 struct FailingReader;
@@ -269,5 +275,54 @@ fn bad_field_after_the_secret_is_malformed() -> TestResult {
         &ScanScope::default(),
     )?;
     assert_eq!((report.malformed, report.findings.len()), (1, 0));
+    Ok(())
+}
+
+
+const PATH_CHARS: usize = 600;
+
+
+const KEPT_PATH_CHARS: usize = 512;
+
+
+#[test]
+fn two_long_paths_cut_with_a_marker_keep_distinct_digests() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let first = format!("{}x", "a".repeat(PATH_CHARS));
+    let second = format!("{}y", "a".repeat(PATH_CHARS));
+    let entries = [&first, &second]
+        .iter()
+        .map(|path| format!(r#"{{"File":"{path}","StartLine":1,"EndLine":1,"RuleID":"rule","Match":"m","Secret":"s"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!("[{entries}]");
+    let report = parse_report(json.as_bytes(), &Limits::default(), "acme", "scan", &ScanScope::default())?;
+    assert_eq!(report.findings.len(), TWO);
+    assert!(report.findings.iter().all(|finding| finding.file.ends_with("[cut, 601 chars]")));
+    assert!(report
+        .findings
+        .iter()
+        .all(|finding| finding.file.starts_with(&"a".repeat(KEPT_PATH_CHARS))));
+    let digests = report.findings.iter().map(|finding| finding.file_digest.clone()).collect::<BTreeSet<_>>();
+    assert_eq!(digests.len(), TWO);
+    let alerts = secret_alerts(&scope, &report, NOW_MICROS);
+    assert_eq!(alerts.len(), TWO);
+    assert_ne!(
+        alerts.first().map(|alert| &alert.rule_title),
+        alerts.get(1).map(|alert| &alert.rule_title)
+    );
+    Ok(())
+}
+
+
+#[test]
+fn summary_and_event_id_agree_without_a_commit() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let json = r#"[{"File":"a.txt","StartLine":1,"EndLine":1,"RuleID":"rule","Match":"m","Secret":"s"}]"#;
+    let report = parse_report(json.as_bytes(), &Limits::default(), "acme", "scan", &ScanScope::default())?;
+    let alerts = secret_alerts(&scope, &report, NOW_MICROS);
+    let alert = alerts.first().ok_or("no alert")?;
+    assert!(alert.event_ids.contains(&"commit:none".to_owned()));
+    assert!(alert.summary.text.contains(r#""commit":"none""#));
     Ok(())
 }
