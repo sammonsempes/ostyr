@@ -6,7 +6,7 @@ use crate::model::{
 use crate::reload::{apply_log_level, build_settings, content_digest, open_reload, rewatch, watched_files};
 use crate::routes::build_router;
 use crate::state::build_state;
-use crate::types::{AccessTable, ConnectionTable, LogLevelHandle, ServerHandle, SharedLimits, SharedListener, SharedState};
+use crate::types::{AccessTable, ConnectionTable, LogLevelHandle, ModuleParts, ServerHandle, SharedLimits, SharedListener, SharedState};
 use arc_swap::ArcSwap;
 use axum::extract::ConnectInfo;
 use axum::{Extension, Router};
@@ -15,6 +15,7 @@ use axum_server::tls_rustls::{from_tcp_rustls, RustlsConfig};
 use axum_server::Server;
 use core_audit::log::check_private;
 use core_config::load::load_module;
+use core_config::model::ModuleConfig;
 use hyper_util::rt::TokioTimer;
 use rustls::crypto::ring::default_provider;
 use rustls::version::{TLS12, TLS13};
@@ -313,36 +314,51 @@ pub async fn run_module(
     match arguments {
         [path] => {
             let module_file = Path::new(path);
-            let settings = build_settings(load_module(module_file)?)?;
-            log.iter().for_each(|handle| apply_log_level(handle, &settings));
-            let config = settings.config.clone();
-            let inputs = StateInputs {
-                key: settings.key.clone(),
-                compromised: settings.compromised.clone(),
-                oidc: settings.oidc.clone(),
-            };
-            let state: SharedState = Arc::new(build_state(&config, &inputs, extra_access, extra_documents)?);
-            state.forwarders.store(Arc::clone(&settings.forwarders));
-            listener.state.get_or_init(|| state.clone());
-            let tls = settings.tls.clone().map(RustlsConfig::from_config);
-            let setup = ListenerSetup {
-                listener: listener.clone(),
-                router: build_router(state.clone(), extra),
-                limits: state.limits.clone(),
-                runtime: Handle::current(),
-                rewatch: Arc::new(Rewatch::default()),
-            };
-            let _stop_watch = WatchStop(setup.rewatch.clone());
-            let engine = open_reload(&state, settings, module_file, setup.clone(), log, start_only)?;
-            start_first(&setup, &config, tls)?;
-            let _stop_server = ServerStop(listener.clone());
-            rewatch(&setup.rewatch, watched_files(module_file, &config))?;
-            #[cfg(unix)]
-            let _signals = core_config::signal::reload_on_signals(engine, &[signal_hook::consts::SIGHUP])?;
-            #[cfg(not(unix))]
-            drop(engine);
-            wait_finished(&listener).await
+            let loaded = load_module(module_file)?;
+            run_loaded(module_file, loaded, (extra, extra_access, extra_documents), start_only, listener, log).await
         }
         _ => Err(StartupError::Usage(USAGE.to_owned())),
     }
+}
+
+
+/// As `run_module` for a module file the caller already read: state, start-only baseline and reload engine all come from `loaded`, never from a second read.
+pub async fn run_loaded(
+    module_file: &Path,
+    loaded: ModuleConfig,
+    parts: ModuleParts,
+    start_only: &[&'static str],
+    listener: SharedListener,
+    log: Option<LogLevelHandle>,
+) -> Result<(), StartupError> {
+    let (extra, extra_access, extra_documents) = parts;
+    let settings = build_settings(loaded)?;
+    log.iter().for_each(|handle| apply_log_level(handle, &settings));
+    let config = settings.config.clone();
+    let inputs = StateInputs {
+        key: settings.key.clone(),
+        compromised: settings.compromised.clone(),
+        oidc: settings.oidc.clone(),
+    };
+    let state: SharedState = Arc::new(build_state(&config, &inputs, extra_access, extra_documents)?);
+    state.forwarders.store(Arc::clone(&settings.forwarders));
+    listener.state.get_or_init(|| state.clone());
+    let tls = settings.tls.clone().map(RustlsConfig::from_config);
+    let setup = ListenerSetup {
+        listener: listener.clone(),
+        router: build_router(state.clone(), extra),
+        limits: state.limits.clone(),
+        runtime: Handle::current(),
+        rewatch: Arc::new(Rewatch::default()),
+    };
+    let _stop_watch = WatchStop(setup.rewatch.clone());
+    let engine = open_reload(&state, settings, module_file, setup.clone(), log, start_only)?;
+    start_first(&setup, &config, tls)?;
+    let _stop_server = ServerStop(listener.clone());
+    rewatch(&setup.rewatch, watched_files(module_file, &config))?;
+    #[cfg(unix)]
+    let _signals = core_config::signal::reload_on_signals(engine, &[signal_hook::consts::SIGHUP])?;
+    #[cfg(not(unix))]
+    drop(engine);
+    wait_finished(&listener).await
 }

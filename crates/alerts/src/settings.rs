@@ -80,7 +80,18 @@ pub fn open_pg_engine(module_file: &Path, listener: SharedListener) -> Result<(R
 /// As `open_pg_engine`, with the audit actor of the module that embeds the settings (`cases`, not `alerts`).
 pub fn open_pg_engine_as(module_file: &Path, listener: SharedListener, actor: &str) -> Result<(ReloadEngine<PgSettings>, PathBuf), ConfigError> {
     let module = load_module(module_file)?;
-    let pg_file = pg_file_of(module_file, &module)?;
+    open_pg_engine_from(module_file, &module, listener, actor)
+}
+
+
+/// As `open_pg_engine_as` for a module file the caller already read, so the core-pg file named comes from the same read as the rest of the start-up.
+pub fn open_pg_engine_from(
+    module_file: &Path,
+    module: &ModuleConfig,
+    listener: SharedListener,
+    actor: &str,
+) -> Result<(ReloadEngine<PgSettings>, PathBuf), ConfigError> {
+    let pg_file = pg_file_of(module_file, module)?;
     let context = ReloadContext {
         actor_id: actor.to_owned(),
         tenant: module.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.to_owned()),
