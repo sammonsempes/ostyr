@@ -92,7 +92,7 @@ pub const SOURCE_COLUMN: usize = 3;
 pub const MIGRATION_NAMESPACE: &str = "cmdb";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "001_cmdb",
         sql: include_str!("../migrations/001_cmdb.sql"),
@@ -100,6 +100,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "002_cmdb_conflict_status",
         sql: include_str!("../migrations/002_cmdb_conflict_status.sql"),
+    },
+    Migration {
+        version: "003_cmdb_read_indexes",
+        sql: include_str!("../migrations/003_cmdb_read_indexes.sql"),
     },
 ];
 

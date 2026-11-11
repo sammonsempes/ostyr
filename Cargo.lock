@@ -912,19 +912,30 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 name = "cmdb"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "csv",
+ "data-encoding",
  "rcgen",
  "rustls",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-postgres",
  "tokio-rustls",
+ "tower",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

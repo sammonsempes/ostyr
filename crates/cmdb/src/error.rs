@@ -51,6 +51,20 @@ pub enum StoreError {
     },
     #[error("page size must be between 1 and the page cap and reach the row caps within the page ceiling")]
     BadLimits,
+    #[error("lease: {0}")]
+    Lease(#[from] alerts::error::StoreError),
+    #[error("page size must be between 1 and {limit}")]
+    BadPageSize { limit: usize },
+    #[error("cursor is malformed")]
+    BadCursor,
+    #[error("asset id is empty, too long or holds a NUL character")]
+    BadId,
+    #[error("column {column} is not a number")]
+    BadNumber {
+        column: usize,
+        #[source]
+        source: std::num::ParseIntError,
+    },
     #[error("an asset version is not a number")]
     BadVersion(#[source] std::num::ParseIntError),
     #[error("the refused conflict list is malformed")]
