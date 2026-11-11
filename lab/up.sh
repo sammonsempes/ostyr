@@ -60,10 +60,12 @@ ensure_base_images() {
     local image resolved
     mapfile -t images < <(awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u)
     for image in "${images[@]}"; do
-        exec 8>>"$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
-        acquire_lock 8 "$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
-        "$LAB_DIR/images/build.sh" "${image%.qcow2}"
-        exec 8>&-
+        if ! "$LAB_DIR/images/build.sh" --check "${image%.qcow2}"; then
+            exec 8>>"$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
+            acquire_lock 8 "$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
+            "$LAB_DIR/images/build.sh" "${image%.qcow2}"
+            exec 8>&-
+        fi
         resolved="$(newest_base "${image%.qcow2}")"
         [[ -n "$resolved" ]] || die "no base volume for $image"
         warn_if_stale "$resolved"
