@@ -150,6 +150,10 @@ pub fn serve(tls: Option<Arc<ServerConfig>>, behaviour: Behaviour, connections: 
 }
 
 
+/// Connects once so a server thread still in `accept` (the client gave up before connecting) returns, then joins it.
 pub fn finish(served: Served) -> Result<Vec<String>, Box<dyn Error>> {
+    if let Err(error) = TcpStream::connect(served.address) {
+        tracing::debug!(%error, "wake connect refused, the server thread already ended");
+    }
     served.handle.join().map_err(|_| "the server thread panicked".into())
 }
