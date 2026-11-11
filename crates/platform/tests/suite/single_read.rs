@@ -5,7 +5,6 @@ use core_api::types::AccessTable;
 use core_config::load::load_module;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 use tempfile::tempdir;
 
 
@@ -13,12 +12,6 @@ const KEY_BYTES: usize = 32;
 
 
 const KEY_FILL: u8 = 9;
-
-
-const MAX_ATTEMPTS: usize = 400;
-
-
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 
 const START_ONLY: [&str; 1] = ["modules"];
@@ -76,16 +69,57 @@ async fn the_start_only_baseline_is_the_loaded_value_not_a_second_read() -> Test
     let parts = (Router::new(), AccessTable::new(), vec![]);
     let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None).await });
     listening_address(&listener).await.ok_or("server did not start")?;
-    let mut attempts = 0;
-    while !audit_text(dir.path())?.contains(REFUSAL_MARKER) && attempts < MAX_ATTEMPTS {
-        fs::write(&module_file, &text)?;
-        tokio::time::sleep(POLL_INTERVAL).await;
-        attempts += 1;
-    }
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
     let audit = audit_text(dir.path())?;
     assert!(audit.contains(REFUSAL_MARKER));
     assert!(!audit.contains("\"applied\""));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_file_unchanged_since_the_load_leaves_no_reload_record() -> TestResult {
+    let dir = tempdir()?;
+    private_file(&dir.path().join("store.key"), &[KEY_FILL; KEY_BYTES])?;
+    fs::write(dir.path().join("compromised.txt"), "passwordpassword\n")?;
+    let module_file = dir.path().join("platform.yaml");
+    fs::write(&module_file, module_text(dir.path()))?;
+    let loaded = load_module(&module_file)?;
+    let listener = new_listener();
+    let running = listener.clone();
+    let file = module_file.clone();
+    let parts = (Router::new(), AccessTable::new(), vec![]);
+    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None).await });
+    listening_address(&listener).await.ok_or("server did not start")?;
     stop_listener(&listener, None);
     assert!(task.await?.is_ok());
+    let audit = audit_text(dir.path())?;
+    assert!(!audit.contains(REFUSAL_MARKER));
+    assert!(!audit.contains("\"applied\""));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_allowed_change_made_during_startup_is_applied_by_the_startup_reload() -> TestResult {
+    let dir = tempdir()?;
+    private_file(&dir.path().join("store.key"), &[KEY_FILL; KEY_BYTES])?;
+    fs::write(dir.path().join("compromised.txt"), "passwordpassword\n")?;
+    let module_file = dir.path().join("platform.yaml");
+    fs::write(&module_file, module_text(dir.path()))?;
+    let mut loaded = load_module(&module_file)?;
+    loaded.settings.insert("log_level".to_owned(), "debug".to_owned());
+    let listener = new_listener();
+    let running = listener.clone();
+    let file = module_file.clone();
+    let parts = (Router::new(), AccessTable::new(), vec![]);
+    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None).await });
+    listening_address(&listener).await.ok_or("server did not start")?;
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    let audit = audit_text(dir.path())?;
+    assert!(audit.contains("\"applied\""));
+    assert!(!audit.contains(REFUSAL_MARKER));
     Ok(())
 }
