@@ -145,7 +145,7 @@ pub fn slot<'a>(sources: &'a mut SourceMap, limits: &ScaledLimits, source: Sourc
 
 fn count_drop(counters: &mut SourceCounters, verdict: &Result<(), DropReason>) {
     match verdict {
-        Ok(()) => {}
+        Ok(()) | Err(DropReason::TrapTooLarge | DropReason::TrapMalformed | DropReason::TrapUnsupported) => {}
         Err(DropReason::UnknownSource) => counters.dropped_unknown = counters.dropped_unknown.saturating_add(1),
         Err(DropReason::TooLarge) => counters.dropped_size = counters.dropped_size.saturating_add(1),
         Err(DropReason::SourceRate | DropReason::UnknownRate | DropReason::GlobalRate | DropReason::SourceTableFull) => {

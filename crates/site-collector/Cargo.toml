@@ -18,6 +18,7 @@ syslog_loose = "0.23"
 thiserror = "2"
 time = "0.3"
 tracing = "0.1"
+snmp-parser = "0.11.0"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process", "rand"] }
@@ -25,6 +26,7 @@ rustix = { version = "1.1", features = ["fs", "process", "rand"] }
 [dev-dependencies]
 core-audit = { path = "../core-audit" }
 proptest = "1"
+sha2 = "0.10"
 serde_json = "1"
 tempfile = "3"
 
