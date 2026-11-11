@@ -218,3 +218,11 @@ pub const MAX_SKIP_PER_POLL: usize = 1000;
 
 /// The poller lease lasts this many intervals.
 pub const LEASE_FACTOR: u64 = 3;
+
+
+/// Longest poller id, characters.
+pub const MAX_HOLDER_CHARS: usize = 64;
+
+
+/// Random bytes (hex-encoded in the id) that make each process's poller id its own.
+pub const HOLDER_RANDOM_BYTES: usize = 8;

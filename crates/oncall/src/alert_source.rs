@@ -2,6 +2,7 @@
 
 use crate::alert::{Param, Statement};
 use crate::error::{OncallError, SourceError, StoreError};
+use crate::holder::validate_holder;
 use crate::limits::{
     LEASE_FACTOR, MAX_FINGERPRINT_BYTES, MAX_PURGE_PER_ROUND, MAX_SKIP_PER_POLL, MAX_SOURCE_INTERVAL_SECONDS, MAX_SOURCE_TENANTS,
     MAX_SOURCE_TEXT_CHARS, SEVERITY_COUNT,
@@ -9,7 +10,7 @@ use crate::limits::{
 use crate::model::AlertNotice;
 use crate::rows::{cell_int, cell_text};
 use crate::store::{run, valid_text};
-use crate::types::{NowFn, ReportFn, Row, TenantOutcome, WaitFn};
+use crate::types::{AuditPurgeFn, NowFn, PurgedCounts, ReportFn, Row, TenantOutcome, WaitFn};
 use crate::validate::{check_between, check_name};
 use alerts::error::StoreError as AlertsError;
 use alerts::model::{Alert as SourceAlert, Severity};
@@ -53,13 +54,13 @@ pub const RECORD_SQL: &str = "WITH already AS (SELECT 1 FROM oncall_alert_detail
     SELECT (SELECT count(*) FROM detail), (SELECT count(*) FROM already)";
 
 
-/// Params: `$2` JSON array of the polled tenants, `$3` limit; `$1` must be one of them. Drops at most `$3` rows of unpolled tenants, answers the count.
+/// Params: `$2` JSON array of the polled tenants, `$3` limit; `$1` must be one of them. Drops at most `$3` rows of unpolled tenants, answers (tenant, count) rows.
 pub const PURGE_SQL: &str = "WITH RECURSIVE seen(tenant) AS (SELECT min(tenant) FROM alert_outbox UNION ALL \
     SELECT (SELECT min(o.tenant) FROM alert_outbox o WHERE o.tenant > seen.tenant) FROM seen WHERE seen.tenant IS NOT NULL), \
     unpolled AS (SELECT tenant FROM seen WHERE tenant IS NOT NULL AND $1::text = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb))) \
     AND tenant <> ALL(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb)))), \
     gone AS (DELETE FROM alert_outbox WHERE ctid IN (SELECT o.ctid FROM unpolled u \
-    CROSS JOIN LATERAL (SELECT ctid FROM alert_outbox WHERE tenant = u.tenant ORDER BY seq LIMIT $3::text::bigint) o LIMIT $3::text::bigint) RETURNING 1) SELECT count(*)::text FROM gone";
+    CROSS JOIN LATERAL (SELECT ctid FROM alert_outbox WHERE tenant = u.tenant ORDER BY seq LIMIT $3::text::bigint) o LIMIT $3::text::bigint) RETURNING tenant) SELECT tenant, count(*)::text FROM gone GROUP BY tenant ORDER BY tenant";
 
 
 /// Params: `$2` the tenant's `added_at`, `$3` limit. Consumes the tenant's outbox rows queued before `added_at` (never later than now); answers the number consumed.
@@ -103,21 +104,22 @@ pub struct TenantCounts {
 }
 
 
-/// One round: whether this poller held the lease (when not, nothing else ran), the rows purged for unpolled tenants, then each tenant's outcome.
+/// One round: lease state at the last renewal, each tenant outcome, rows purged per unpolled tenant (a tenant with none is absent).
 #[derive(Debug)]
 pub struct Round {
     pub leased: Result<bool, SourceError>,
-    pub purged: Result<usize, SourceError>,
+    pub purged: Result<PurgedCounts, SourceError>,
     pub outcomes: Vec<TenantOutcome>,
 }
 
 
-/// The injected clock, sleep and report of `run_rounds`.
+/// The injected clock, sleep, report and purge audit (called once per round that purged something) of `run_rounds`.
 #[derive(Clone, Copy)]
-pub struct RoundHooks {
+pub struct RoundHooks<'audit> {
     pub now: NowFn,
     pub wait: WaitFn,
     pub report: ReportFn,
+    pub audit_purge: AuditPurgeFn<'audit>,
 }
 
 
@@ -273,13 +275,31 @@ pub fn count_answer(rows: &[AlertsRow]) -> Result<usize, AlertsError> {
 
 
 /// Drops, at most `MAX_PURGE_PER_ROUND` rows, the outbox rows of tenants this poller does not serve; runs under the first polled tenant's scope.
-pub async fn purge_unpolled(alerts_exec: AlertsExecutor<'_, '_>, settings: &SourceSettings) -> Result<usize, SourceError> {
+pub async fn purge_unpolled(alerts_exec: AlertsExecutor<'_, '_>, settings: &SourceSettings) -> Result<PurgedCounts, SourceError> {
     let first = settings.tenants.first().ok_or(SourceError::NoTenants)?;
     let polled = serde_json::Value::from(settings.tenants.clone()).to_string();
     let rows = alerts_exec(tenant_scope(first)?, PURGE_SQL, vec![polled, MAX_PURGE_PER_ROUND.to_string()])
         .await
         .map_err(AlertsError::from)?;
-    Ok(count_answer(&rows)?)
+    Ok(purged_counts(&rows)?)
+}
+
+
+/// Decodes (tenant, count) rows; a tenant name the grammar refuses is a bad row, so no foreign text reaches a report or the audit.
+pub fn purged_counts(rows: &[AlertsRow]) -> Result<PurgedCounts, AlertsError> {
+    rows.iter()
+        .map(|row| {
+            let tenant = row
+                .first()
+                .filter(|name| tenant_scope(name).is_ok())
+                .ok_or(AlertsError::BadRow { column: 0 })?;
+            let count = row
+                .get(1)
+                .and_then(|cell| cell.parse::<usize>().ok())
+                .ok_or(AlertsError::BadRow { column: 1 })?;
+            Ok((tenant.clone(), count))
+        })
+        .collect()
 }
 
 
@@ -341,6 +361,7 @@ where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
+    validate_holder(holder)?;
     let first = settings.tenants.first().ok_or(SourceError::NoTenants)?;
     let seconds =
         i64::try_from(settings.interval_seconds.saturating_mul(LEASE_FACTOR)).map_err(|_big| StoreError::BadRow { column: "lease seconds" })?;
@@ -350,7 +371,7 @@ where
 }
 
 
-/// Lease first (without it nothing runs), then the bounded purge, then each tenant once: a failing tenant is reported and the others still run.
+/// Lease first, renewed before every further tenant and the purge; a poller that loses it stops there, purge included.
 pub async fn poll_all<Executor, Pending>(
     alerts_exec: AlertsExecutor<'_, '_>,
     exec: &mut Executor,
@@ -362,22 +383,25 @@ where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    let leased = take_lease(exec, settings, holder).await;
+    let mut leased = take_lease(exec, settings, holder).await;
     let mut outcomes = Vec::with_capacity(settings.tenants.len());
-    if matches!(leased, Ok(true)) {
-        let purged = purge_unpolled(alerts_exec, settings).await;
-        for tenant in &settings.tenants {
-            let outcome = poll_tenant(alerts_exec, exec, settings, tenant, now()).await;
-            outcomes.push((tenant.clone(), outcome));
+    for (index, tenant) in settings.tenants.iter().enumerate() {
+        if index > 0 && matches!(leased, Ok(true)) {
+            leased = take_lease(exec, settings, holder).await;
         }
-        Round { leased, purged, outcomes }
-    } else {
-        Round {
-            leased,
-            purged: Ok(0),
-            outcomes,
+        if matches!(leased, Ok(true)) {
+            outcomes.push((tenant.clone(), poll_tenant(alerts_exec, exec, settings, tenant, now()).await));
         }
     }
+    if matches!(leased, Ok(true)) {
+        leased = take_lease(exec, settings, holder).await;
+    }
+    let purged = if matches!(leased, Ok(true)) {
+        purge_unpolled(alerts_exec, settings).await
+    } else {
+        Ok(PurgedCounts::new())
+    };
+    Round { leased, purged, outcomes }
 }
 
 
@@ -388,7 +412,7 @@ pub async fn run_rounds<Executor, Pending>(
     exec: &mut Executor,
     settings: &SourceSettings,
     holder: &str,
-    hooks: &RoundHooks,
+    hooks: &RoundHooks<'_>,
 ) where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
@@ -400,6 +424,10 @@ pub async fn run_rounds<Executor, Pending>(
             warn!("another on-call poller holds the lease: this poller does nothing until it expires");
         }
         warned = matches!(round.leased, Ok(false));
+        if let Some(counts) = round.purged.as_ref().ok().filter(|counts| !counts.is_empty()) {
+            warn!("outbox rows of tenants outside this poller's `tenants` were dropped");
+            (hooks.audit_purge)(counts);
+        }
         (hooks.report)(&round);
         (hooks.wait)(Duration::from_secs(settings.interval_seconds)).await;
     }

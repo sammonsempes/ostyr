@@ -12,8 +12,8 @@ use core_pg::migrate::check_embedded;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use oncall::alert::{Cell, Param, Statement};
 use oncall::alert_source::{
-    alert_notice, clean_text, count_answer, map_severity, parse_source_settings, poll_all, poll_tenant, purge_unpolled, record_alert, run_rounds,
-    skip_backlog, source_details, take_lease, validate_source_settings, Round, RoundHooks, SourceSettings, TenantCounts, DETAILS_SQL,
+    alert_notice, clean_text, count_answer, map_severity, parse_source_settings, poll_all, poll_tenant, purge_unpolled, purged_counts, record_alert,
+    run_rounds, skip_backlog, source_details, take_lease, validate_source_settings, Round, RoundHooks, SourceSettings, TenantCounts, DETAILS_SQL,
     FINGERPRINT_PREFIX, LEASE_SQL, PURGE_SQL, RECORD_SQL, SKIP_SQL, UNRECORDED_SQL,
 };
 use oncall::error::{OncallError, SourceError, StoreError};
@@ -93,6 +93,8 @@ struct Db {
     fail_on_call: Option<usize>,
     lease: Option<String>,
     lease_expired: bool,
+    lease_calls: usize,
+    steal_on_lease: Option<usize>,
     record_rows: Option<Vec<Row>>,
     details_rows: Option<Vec<Row>>,
 }
@@ -226,7 +228,14 @@ fn purge_handle(db: &SourceDb, recorded: &Arc<Mutex<Db>>, scope: &TenantScope, p
         .take(limit_of(params)?)
         .collect();
     lock(&db.gone).extend(victims.iter().cloned());
-    Ok(vec![vec![victims.len().to_string()]])
+    let per_tenant: BTreeMap<&String, usize> = victims.iter().fold(BTreeMap::new(), |mut counts, (owner, _id)| {
+        *counts.entry(owner).or_insert(0) += 1;
+        counts
+    });
+    Ok(per_tenant
+        .into_iter()
+        .map(|(owner, count)| vec![owner.clone(), count.to_string()])
+        .collect())
 }
 
 
@@ -296,6 +305,10 @@ fn handle(db: &mut Db, tenant: &str, statement: &Statement) -> Result<Vec<Row>, 
         Err(StoreError::Conflict)
     } else if statement.sql == LEASE_SQL {
         let holder = text(&statement.params, 0);
+        db.lease_calls += 1;
+        if db.steal_on_lease == Some(db.lease_calls) {
+            db.lease = Some("poller-thief".to_owned());
+        }
         let free = db.lease.as_ref().is_none_or(|current| *current == holder) || db.lease_expired;
         db.lease_expired = false;
         Ok(if free {
@@ -551,6 +564,7 @@ async fn rounds_poll_report_and_wait_the_given_number_of_times() -> TestResult {
         now: poll_time,
         wait: instant,
         report: quiet,
+        audit_purge: &|_counts| (),
     };
     run_rounds(ROUNDS, &alerts_exec, &mut exec, &settings, "poller-a", &hooks).await;
     assert_eq!(lock(&source.reads).len(), ROUNDS * settings.tenants.len());
@@ -849,7 +863,7 @@ async fn the_outbox_of_an_unpolled_tenant_is_purged_in_bounded_rounds_while_poll
         for _round in 0..THREE {
             let round = poll_all(&alerts_exec, &mut exec, &settings, "poller-a", poll_time).await;
             assert_eq!(opened(&round, "acme")?, CAP);
-            rounds.push(round.purged?);
+            rounds.push(round.purged?.get("ghost").copied().unwrap_or(0));
         }
         rounds
     };
@@ -1015,7 +1029,7 @@ async fn one_poller_holds_the_lease_and_the_other_does_nothing_until_it_expires(
     ));
     add(&source, "acme", "a1", BASE_CREATED, "a");
     let refused = poll_all(&alerts_exec, &mut exec, &for_a, "poller-a", poll_time).await;
-    assert!(matches!(refused.leased, Ok(false)) && matches!(refused.purged, Ok(0)) && refused.outcomes.is_empty());
+    assert!(matches!(refused.leased, Ok(false)) && matches!(&refused.purged, Ok(counts) if counts.is_empty()) && refused.outcomes.is_empty());
     assert_eq!((count_for(&db, "acme"), count_for(&db, "beta")), (0, 1));
     assert!(lock(&source.purge_scopes).iter().all(|tenant| tenant == "beta"));
     lock(&db).lease_expired = true;
@@ -1039,6 +1053,7 @@ async fn rounds_without_the_lease_report_it_and_page_nothing() -> TestResult {
         now: poll_time,
         wait: instant,
         report: quiet,
+        audit_purge: &|_counts| (),
     };
     run_rounds(ROUNDS, &alerts_exec, &mut exec, &settings, "poller-a", &hooks).await;
     assert!(lock(&source.reads).is_empty() && count_for(&db, "acme") == 0);
@@ -1075,5 +1090,90 @@ async fn a_failing_lease_statement_is_reported_and_nothing_runs() -> TestResult 
         ..settings
     };
     assert!(matches!(take_lease(&mut exec, &endless, "poller-a").await, Err(SourceError::Store(_))));
+    Ok(())
+}
+
+
+fn lease_calls(db: &Arc<Mutex<Db>>) -> usize {
+    lock(db).calls.iter().filter(|sql| **sql == LEASE_SQL).count()
+}
+
+
+#[tokio::test]
+async fn the_lease_is_renewed_before_every_further_tenant_and_before_the_purge() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = settings()?;
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let round = poll_all(&alerts_exec, &mut exec, &settings, "poller-a", poll_time).await;
+    assert!(matches!(round.leased, Ok(true)) && round.outcomes.len() == settings.tenants.len());
+    assert_eq!(lease_calls(&db), settings.tenants.len() + 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_round_that_loses_the_lease_midway_stops_before_the_next_tenant_and_the_purge() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = settings()?;
+    add(&source, "ghost", "g", BASE_CREATED, "ghost");
+    add(&source, "other", "o", BASE_CREATED, "other");
+    lock(&db).steal_on_lease = Some(TWICE);
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let round = poll_all(&alerts_exec, &mut exec, &settings, "poller-a", poll_time).await;
+    assert!(matches!(round.leased, Ok(false)) && round.outcomes.len() == 1);
+    assert!(matches!(&round.purged, Ok(counts) if counts.is_empty()));
+    assert!(lock(&source.purge_scopes).is_empty() && count_for(&db, "other") == 0);
+    assert_eq!(lease_calls(&db), TWICE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn purged_rows_are_reported_per_tenant_and_audited_once_per_round() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = settings()?;
+    (0..THREE).for_each(|index| add(&source, "ghost", &format!("g{index}"), BASE_CREATED + index as u64, "ghost"));
+    add(&source, "phantom", "p", BASE_CREATED, "phantom");
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let audited = Mutex::new(Vec::new());
+    let record = |counts: &oncall::types::PurgedCounts| lock(&audited).push(counts.clone());
+    let hooks = RoundHooks {
+        now: poll_time,
+        wait: instant,
+        report: quiet,
+        audit_purge: &record,
+    };
+    run_rounds(TWICE, &alerts_exec, &mut exec, &settings, "poller-a", &hooks).await;
+    let expected = BTreeMap::from([("ghost".to_owned(), THREE), ("phantom".to_owned(), 1)]);
+    assert_eq!(*lock(&audited), vec![expected]);
+    Ok(())
+}
+
+
+#[test]
+fn purge_rows_with_a_foreign_tenant_name_or_a_bad_count_are_refused() -> TestResult {
+    assert!(purged_counts(&[vec!["bad name".to_owned(), "1".to_owned()]]).is_err());
+    assert!(purged_counts(&[vec!["acme".to_owned()]]).is_err());
+    assert!(purged_counts(&[vec!["acme".to_owned(), "many".to_owned()]]).is_err());
+    assert!(purged_counts(&[Vec::new()]).is_err());
+    assert_eq!(purged_counts(&[vec!["acme".to_owned(), "2".to_owned()]])?.get("acme"), Some(&TWICE));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unusable_holder_id_never_reaches_the_lease_statement() -> TestResult {
+    let db = new_db();
+    let settings = settings()?;
+    let mut exec = exec_for(&db);
+    assert!(matches!(take_lease(&mut exec, &settings, "").await, Err(SourceError::Holder(_))));
+    assert!(matches!(take_lease(&mut exec, &settings, "a b").await, Err(SourceError::Holder(_))));
+    assert!(lock(&db).calls.is_empty());
     Ok(())
 }
