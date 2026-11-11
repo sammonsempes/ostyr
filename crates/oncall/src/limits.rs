@@ -206,3 +206,15 @@ pub const SEVERITY_COUNT: usize = 5;
 
 
 pub const MAX_SOURCE_TEXT_CHARS: usize = 256;
+
+
+/// Outbox rows of unpolled tenants dropped per round.
+pub const MAX_PURGE_PER_ROUND: usize = 1000;
+
+
+/// Outbox rows older than a tenant's `added_at` consumed per poll.
+pub const MAX_SKIP_PER_POLL: usize = 1000;
+
+
+/// The poller lease lasts this many intervals.
+pub const LEASE_FACTOR: u64 = 3;

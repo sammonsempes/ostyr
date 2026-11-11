@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 pub const MIGRATION_NAMESPACE: &str = "alerts";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "001_alerts",
         sql: include_str!("../migrations/001_alerts.sql"),
@@ -19,6 +19,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "002_alert_outbox",
         sql: include_str!("../migrations/002_alert_outbox.sql"),
+    },
+    Migration {
+        version: "003_outbox_queued_at",
+        sql: include_str!("../migrations/003_outbox_queued_at.sql"),
     },
 ];
 

@@ -132,10 +132,15 @@ fn severity_round_trips_and_refuses_unknown_names() -> TestResult {
 fn migrations_are_valid_and_namespaced() -> TestResult {
     check_embedded(&MIGRATIONS)?;
     check_namespace(MIGRATION_NAMESPACE)?;
-    assert!(MIGRATIONS.iter().all(|migration| migration.sql.contains("PRIMARY KEY (tenant, id)")));
+    assert!(MIGRATIONS
+        .iter()
+        .take(TWO)
+        .all(|migration| migration.sql.contains("PRIMARY KEY (tenant, id)")));
     assert!(INSERT_SQL.contains("ON CONFLICT (tenant, id) DO NOTHING"));
     assert!(INSERT_SQL.contains("queued AS (") && INSERT_SQL.contains("INSERT INTO alert_outbox (tenant, id) SELECT $1::text, id FROM written"));
-    let outbox = MIGRATIONS.last().ok_or("no migration")?;
+    let outbox = MIGRATIONS.get(1).ok_or("no migration")?;
+    let queued = MIGRATIONS.last().ok_or("no migration")?;
+    assert!(queued.sql.contains("ADD COLUMN queued_at timestamptz NOT NULL DEFAULT now()") && queued.sql.contains("(tenant, queued_at)"));
     assert!(
         outbox.sql.contains("CREATE INDEX alert_outbox_by_seq ON alert_outbox (tenant, seq)") && outbox.sql.contains("GENERATED ALWAYS AS IDENTITY")
     );

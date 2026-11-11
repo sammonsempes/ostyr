@@ -2,7 +2,10 @@
 
 use crate::alert::{Param, Statement};
 use crate::error::{OncallError, SourceError, StoreError};
-use crate::limits::{MAX_FINGERPRINT_BYTES, MAX_SOURCE_INTERVAL_SECONDS, MAX_SOURCE_TENANTS, MAX_SOURCE_TEXT_CHARS, SEVERITY_COUNT};
+use crate::limits::{
+    LEASE_FACTOR, MAX_FINGERPRINT_BYTES, MAX_PURGE_PER_ROUND, MAX_SKIP_PER_POLL, MAX_SOURCE_INTERVAL_SECONDS, MAX_SOURCE_TENANTS,
+    MAX_SOURCE_TEXT_CHARS, SEVERITY_COUNT,
+};
 use crate::model::AlertNotice;
 use crate::rows::{cell_int, cell_text};
 use crate::store::{run, valid_text};
@@ -11,7 +14,7 @@ use crate::validate::{check_between, check_name};
 use alerts::error::StoreError as AlertsError;
 use alerts::model::{Alert as SourceAlert, Severity};
 use alerts::store::{alert_from_row, MAX_PAGE_SIZE};
-use alerts::types::Executor as AlertsExecutor;
+use alerts::types::{Executor as AlertsExecutor, Row as AlertsRow};
 use chrono::{DateTime, Utc};
 use core_config::parse::parse_document;
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -31,10 +34,11 @@ pub const COLUMN_USER: usize = 3;
 pub const FINGERPRINT_PREFIX: &str = "alert:";
 
 
-/// Params: `$2` limit. The tenant's outbox in arrival order joined to its alerts; the column list is that of `alerts::store::GET_SQL`.
+/// Params: `$2` limit, `$3` the tenant's `added_at` (epoch if none): rows queued since, in arrival order, joined to alerts (`GET_SQL` columns).
 pub const UNRECORDED_SQL: &str = "SELECT a.id, a.rule_id, a.rule_title, a.severity, a.event_time, a.created::text, COALESCE(a.host_name, ''), \
     COALESCE(a.user_name, ''), a.event_ids::text, a.summary, a.summary_truncated::text, a.summary_original_bytes::text \
-    FROM alert_outbox o JOIN alerts a ON a.tenant = o.tenant AND a.id = o.id WHERE o.tenant = $1 ORDER BY o.seq LIMIT $2::text::bigint";
+    FROM alert_outbox o JOIN alerts a ON a.tenant = o.tenant AND a.id = o.id \
+    WHERE o.tenant = $1 AND o.queued_at >= LEAST($3::text::timestamptz, now()) ORDER BY o.seq LIMIT $2::text::bigint";
 
 
 /// One transaction: opens the alert unless its source alert is recorded or a live one has the key, stores details, consumes the outbox row; answers (opened, already).
@@ -49,12 +53,34 @@ pub const RECORD_SQL: &str = "WITH already AS (SELECT 1 FROM oncall_alert_detail
     SELECT (SELECT count(*) FROM detail), (SELECT count(*) FROM already)";
 
 
+/// Params: `$2` JSON array of the polled tenants, `$3` limit; `$1` must be one of them. Drops at most `$3` rows of unpolled tenants, answers the count.
+pub const PURGE_SQL: &str = "WITH RECURSIVE seen(tenant) AS (SELECT min(tenant) FROM alert_outbox UNION ALL \
+    SELECT (SELECT min(o.tenant) FROM alert_outbox o WHERE o.tenant > seen.tenant) FROM seen WHERE seen.tenant IS NOT NULL), \
+    unpolled AS (SELECT tenant FROM seen WHERE tenant IS NOT NULL AND $1::text = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb))) \
+    AND tenant <> ALL(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb)))), \
+    gone AS (DELETE FROM alert_outbox WHERE ctid IN (SELECT o.ctid FROM unpolled u \
+    CROSS JOIN LATERAL (SELECT ctid FROM alert_outbox WHERE tenant = u.tenant ORDER BY seq LIMIT $3::text::bigint) o LIMIT $3::text::bigint) RETURNING 1) SELECT count(*)::text FROM gone";
+
+
+/// Params: `$2` the tenant's `added_at`, `$3` limit. Consumes the tenant's outbox rows queued before `added_at` (never later than now); answers the number consumed.
+pub const SKIP_SQL: &str = "WITH gone AS (DELETE FROM alert_outbox WHERE tenant = $1 AND id IN (SELECT id FROM alert_outbox \
+    WHERE tenant = $1 AND queued_at < LEAST($2::text::timestamptz, now()) ORDER BY queued_at LIMIT $3::text::bigint) RETURNING 1) \
+    SELECT count(*)::text FROM gone";
+
+
+/// Params: `$2` poller id, `$3` lease seconds; `$1` is only the scope. Takes or renews the lease unless another poller holds it; one row means held.
+pub const LEASE_SQL: &str = "INSERT INTO oncall_poller_lease AS lease (singleton, holder, expires_at) \
+    SELECT true, $2::text, now() + ($3::bigint * interval '1 second') WHERE $1::text IS NOT NULL \
+    ON CONFLICT (singleton) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at \
+    WHERE lease.holder = EXCLUDED.holder OR lease.expires_at < now() RETURNING true";
+
+
 /// Params: `$2` on-call alert id.
 pub const DETAILS_SQL: &str =
     "SELECT severity, title, COALESCE(host, ''), COALESCE(username, '') FROM oncall_alert_details WHERE tenant = $1 AND alert = $2";
 
 
-/// `severity_map` sends each alert severity (`informational` to `critical`, all five required) to an on-call severity name.
+/// `severity_map` sends each severity (all five required) to an on-call name; `added_at` is when a tenant was added, never later than the load time (its older outbox rows are skipped).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSettings {
@@ -62,6 +88,36 @@ pub struct SourceSettings {
     pub max_per_poll: usize,
     pub interval_seconds: u64,
     pub severity_map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub added_at: BTreeMap<String, DateTime<Utc>>,
+}
+
+
+/// What one poll or one record did: new on-call alerts, alerts already recorded, alerts whose key a live on-call alert held, backlog rows skipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TenantCounts {
+    pub opened: usize,
+    pub already: usize,
+    pub conflict: usize,
+    pub skipped_backlog: usize,
+}
+
+
+/// One round: whether this poller held the lease (when not, nothing else ran), the rows purged for unpolled tenants, then each tenant's outcome.
+#[derive(Debug)]
+pub struct Round {
+    pub leased: Result<bool, SourceError>,
+    pub purged: Result<usize, SourceError>,
+    pub outcomes: Vec<TenantOutcome>,
+}
+
+
+/// The injected clock, sleep and report of `run_rounds`.
+#[derive(Clone, Copy)]
+pub struct RoundHooks {
+    pub now: NowFn,
+    pub wait: WaitFn,
+    pub report: ReportFn,
 }
 
 
@@ -95,7 +151,7 @@ pub fn validate_severity_map(map: &BTreeMap<String, String>) -> Result<(), Oncal
 }
 
 
-pub fn validate_source_settings(settings: &SourceSettings) -> Result<(), OncallError> {
+pub fn validate_source_settings(settings: &SourceSettings, now: DateTime<Utc>) -> Result<(), OncallError> {
     check_between("source tenants", settings.tenants.len() as u64, 1, MAX_SOURCE_TENANTS)?;
     check_between("max_per_poll", settings.max_per_poll as u64, 1, MAX_PAGE_SIZE as u64)?;
     check_between("interval_seconds", settings.interval_seconds, 1, MAX_SOURCE_INTERVAL_SECONDS)?;
@@ -105,17 +161,19 @@ pub fn validate_source_settings(settings: &SourceSettings) -> Result<(), OncallE
         .iter()
         .try_for_each(|tenant| tenant_scope(tenant).map(|_scope| ()).map_err(|_bad| invalid("source tenant")))?;
     let distinct: BTreeSet<&String> = settings.tenants.iter().collect();
-    if distinct.len() == settings.tenants.len() {
-        Ok(())
-    } else {
+    if distinct.len() != settings.tenants.len() || !settings.added_at.keys().all(|tenant| distinct.contains(tenant)) {
         Err(invalid("source tenant"))
+    } else if settings.added_at.values().any(|added| *added > now) {
+        Err(invalid("added_at"))
+    } else {
+        Ok(())
     }
 }
 
 
-pub fn parse_source_settings(text: &str, file: &str) -> Result<SourceSettings, OncallError> {
+pub fn parse_source_settings(text: &str, file: &str, now: DateTime<Utc>) -> Result<SourceSettings, OncallError> {
     let settings: SourceSettings = parse_document(text, file)?;
-    validate_source_settings(&settings)?;
+    validate_source_settings(&settings, now)?;
     Ok(settings)
 }
 
@@ -130,11 +188,11 @@ pub fn map_severity(settings: &SourceSettings, severity: Severity) -> Result<&st
 }
 
 
-/// Control characters, the Unicode line separators and the bidi format characters become spaces; a text over the bound is cut with a visible marker.
+/// Control characters, the Unicode line separators and the bidi and zero-width format characters become spaces; a text over the bound is cut with a visible marker.
 pub fn clean_text(text: &str) -> String {
     let total = text.chars().count();
     let cleaned = text.chars().map(|character| {
-        if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+        if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{061C}' | '\u{FEFF}') {
             ' '
         } else {
             character
@@ -154,14 +212,14 @@ pub fn optional_text(text: &Option<String>) -> Param {
 }
 
 
-/// Records one alert, its details and the outbox consumption in one statement; answers 1 when a new on-call alert was opened, 0 otherwise (a held key is logged).
+/// Records one alert, its details and the outbox consumption in one statement; answers which of opened, already or conflict (a held key, logged) it was.
 pub async fn record_alert<Executor, Pending>(
     exec: &mut Executor,
     scope: &TenantScope,
     settings: &SourceSettings,
     alert: &SourceAlert,
     now: DateTime<Utc>,
-) -> Result<usize, SourceError>
+) -> Result<TenantCounts, SourceError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
@@ -184,79 +242,166 @@ where
         let row = rows.first().ok_or(StoreError::NotFound)?;
         let opened = cell_int(row, 0, "recorded")?;
         let already = cell_int(row, 1, "already")?;
-        if opened == 0 && already == 0 {
+        let conflict = opened == 0 && already == 0;
+        if conflict {
             warn!("an alert key is held by a live on-call alert without details; the outbox row was consumed");
         }
-        Ok(usize::from(opened > 0))
+        Ok(TenantCounts {
+            opened: usize::from(opened > 0),
+            already: usize::from(already > 0),
+            conflict: usize::from(conflict),
+            skipped_backlog: 0,
+        })
     }
 }
 
 
-/// One poll of one tenant: at most `max_per_poll` alerts of the outbox, read and written under that tenant's scope only.
+pub fn add_counts(total: TenantCounts, more: TenantCounts) -> TenantCounts {
+    TenantCounts {
+        opened: total.opened + more.opened,
+        already: total.already + more.already,
+        conflict: total.conflict + more.conflict,
+        skipped_backlog: total.skipped_backlog + more.skipped_backlog,
+    }
+}
+
+
+pub fn count_answer(rows: &[AlertsRow]) -> Result<usize, AlertsError> {
+    let cell = rows.first().and_then(|row| row.first()).ok_or(AlertsError::BadRow { column: 0 })?;
+    cell.parse::<usize>().map_err(|_bad| AlertsError::BadRow { column: 0 })
+}
+
+
+/// Drops, at most `MAX_PURGE_PER_ROUND` rows, the outbox rows of tenants this poller does not serve; runs under the first polled tenant's scope.
+pub async fn purge_unpolled(alerts_exec: AlertsExecutor<'_, '_>, settings: &SourceSettings) -> Result<usize, SourceError> {
+    let first = settings.tenants.first().ok_or(SourceError::NoTenants)?;
+    let polled = serde_json::Value::from(settings.tenants.clone()).to_string();
+    let rows = alerts_exec(tenant_scope(first)?, PURGE_SQL, vec![polled, MAX_PURGE_PER_ROUND.to_string()])
+        .await
+        .map_err(AlertsError::from)?;
+    Ok(count_answer(&rows)?)
+}
+
+
+/// Consumes, at most `MAX_SKIP_PER_POLL` rows, the tenant's outbox rows queued before its `added_at`, if it has one.
+pub async fn skip_backlog(
+    alerts_exec: AlertsExecutor<'_, '_>,
+    settings: &SourceSettings,
+    scope: &TenantScope,
+    tenant: &str,
+) -> Result<usize, SourceError> {
+    match settings.added_at.get(tenant) {
+        Some(added) => {
+            let rows = alerts_exec(scope.clone(), SKIP_SQL, vec![added.to_rfc3339(), MAX_SKIP_PER_POLL.to_string()])
+                .await
+                .map_err(AlertsError::from)?;
+            Ok(count_answer(&rows)?)
+        }
+        None => Ok(0),
+    }
+}
+
+
+/// One poll of one tenant: at most `max_per_poll` alerts queued since its `added_at`, whatever backlog is left to skip, under that tenant's scope only.
 pub async fn poll_tenant<Executor, Pending>(
     alerts_exec: AlertsExecutor<'_, '_>,
     exec: &mut Executor,
     settings: &SourceSettings,
     tenant: &str,
     now: DateTime<Utc>,
-) -> Result<usize, SourceError>
+) -> Result<TenantCounts, SourceError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
     let scope = tenant_scope(tenant)?;
-    let rows = alerts_exec(scope.clone(), UNRECORDED_SQL, vec![settings.max_per_poll.to_string()])
+    let skipped_backlog = skip_backlog(alerts_exec, settings, &scope, tenant).await?;
+    let since = settings.added_at.get(tenant).copied().unwrap_or(DateTime::<Utc>::UNIX_EPOCH).to_rfc3339();
+    let rows = alerts_exec(scope.clone(), UNRECORDED_SQL, vec![settings.max_per_poll.to_string(), since])
         .await
         .map_err(AlertsError::from)?;
     let unrecorded = rows
         .iter()
         .map(|row| alert_from_row(&scope, row))
         .collect::<Result<Vec<SourceAlert>, AlertsError>>()?;
-    let mut opened = 0;
+    let mut counts = TenantCounts {
+        skipped_backlog,
+        ..TenantCounts::default()
+    };
     for alert in unrecorded.iter().take(settings.max_per_poll) {
-        opened += record_alert(exec, &scope, settings, alert, now).await?;
+        counts = add_counts(counts, record_alert(exec, &scope, settings, alert, now).await?);
     }
-    Ok(opened)
+    Ok(counts)
 }
 
 
-/// Every configured tenant once, in order: a failing tenant is reported and the others still run, each capped at `max_per_poll`.
-pub async fn poll_all<Executor, Pending>(
-    alerts_exec: AlertsExecutor<'_, '_>,
-    exec: &mut Executor,
-    settings: &SourceSettings,
-    now: NowFn,
-) -> Vec<TenantOutcome>
+/// Takes or renews the single poller lease (`LEASE_FACTOR` times the interval); false when another poller holds it. Runs under the first polled tenant's scope.
+pub async fn take_lease<Executor, Pending>(exec: &mut Executor, settings: &SourceSettings, holder: &str) -> Result<bool, SourceError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    let mut outcomes = Vec::with_capacity(settings.tenants.len());
-    for tenant in &settings.tenants {
-        let outcome = poll_tenant(alerts_exec, exec, settings, tenant, now()).await;
-        outcomes.push((tenant.clone(), outcome));
-    }
-    outcomes
+    let first = settings.tenants.first().ok_or(SourceError::NoTenants)?;
+    let seconds =
+        i64::try_from(settings.interval_seconds.saturating_mul(LEASE_FACTOR)).map_err(|_big| StoreError::BadRow { column: "lease seconds" })?;
+    let params = vec![Param::Text(holder.to_owned()), Param::Int(seconds)];
+    let rows = run(exec, &tenant_scope(first)?, LEASE_SQL, params).await?;
+    Ok(!rows.is_empty())
 }
 
 
-/// `rounds` polls, `report` after each and `wait` for the interval between them; the clock and the sleep are injected function pointers.
+/// Lease first (without it nothing runs), then the bounded purge, then each tenant once: a failing tenant is reported and the others still run.
+pub async fn poll_all<Executor, Pending>(
+    alerts_exec: AlertsExecutor<'_, '_>,
+    exec: &mut Executor,
+    settings: &SourceSettings,
+    holder: &str,
+    now: NowFn,
+) -> Round
+where
+    Executor: FnMut(&TenantScope, Statement) -> Pending,
+    Pending: Future<Output = Result<Vec<Row>, StoreError>>,
+{
+    let leased = take_lease(exec, settings, holder).await;
+    let mut outcomes = Vec::with_capacity(settings.tenants.len());
+    if matches!(leased, Ok(true)) {
+        let purged = purge_unpolled(alerts_exec, settings).await;
+        for tenant in &settings.tenants {
+            let outcome = poll_tenant(alerts_exec, exec, settings, tenant, now()).await;
+            outcomes.push((tenant.clone(), outcome));
+        }
+        Round { leased, purged, outcomes }
+    } else {
+        Round {
+            leased,
+            purged: Ok(0),
+            outcomes,
+        }
+    }
+}
+
+
+/// `rounds` polls, `report` after each and `wait` for the interval between them; a poller that lost the lease logs it once, until it holds it again.
 pub async fn run_rounds<Executor, Pending>(
     rounds: usize,
     alerts_exec: AlertsExecutor<'_, '_>,
     exec: &mut Executor,
     settings: &SourceSettings,
-    now: NowFn,
-    wait: WaitFn,
-    report: ReportFn,
+    holder: &str,
+    hooks: &RoundHooks,
 ) where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
+    let mut warned = false;
     for _round in 0..rounds {
-        let outcomes = poll_all(alerts_exec, exec, settings, now).await;
-        report(&outcomes);
-        wait(Duration::from_secs(settings.interval_seconds)).await;
+        let round = poll_all(alerts_exec, exec, settings, holder, hooks.now).await;
+        if matches!(round.leased, Ok(false)) && !warned {
+            warn!("another on-call poller holds the lease: this poller does nothing until it expires");
+        }
+        warned = matches!(round.leased, Ok(false));
+        (hooks.report)(&round);
+        (hooks.wait)(Duration::from_secs(settings.interval_seconds)).await;
     }
 }
 
