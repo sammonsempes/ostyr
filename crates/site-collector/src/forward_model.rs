@@ -1,0 +1,54 @@
+pub const CURSOR_FILE: &str = "forward.cursor";
+
+
+pub const CURSOR_TEMPORARY: &str = "forward.cursor.tmp";
+
+
+pub const CURSOR_MAX_BYTES: u64 = 32;
+
+
+pub const MAX_FORWARD_BATCH_RECORDS: usize = 1000;
+
+
+pub const MAX_AGENT_SPOOL_BYTES: u64 = 64 * 1024 * 1024;
+
+
+pub const MAX_FORWARD_MESSAGE_BYTES: usize = 1024;
+
+
+pub const MAX_FORWARD_HOST_BYTES: usize = 253;
+
+
+pub const MAX_RAW_HOST_BYTES: usize = 64;
+
+
+pub const UNKNOWN_FACILITY: &str = "unknown";
+
+
+pub const MODULE: &str = "syslog";
+
+
+pub const FACILITY_NAMES: &[&str] = &[
+    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp", "ntp", "audit", "alert", "clock", "local0",
+    "local1", "local2", "local3", "local4", "local5", "local6", "local7",
+];
+
+
+pub const BIDI_CONTROLS: &[char] = &[
+    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardLimits {
+    pub max_records: usize,
+    pub agent_spool_max_bytes: u64,
+}
+
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForwardReport {
+    pub forwarded: u64,
+    pub skipped_unparsable: u64,
+    pub refused_full: u64,
+}

@@ -6,12 +6,13 @@ use core_audit::log::{append, open_file_log};
 use core_config::reload::{open_engine, reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use site_collector::admission::{collector_config, source_counters, tracked_sources, untracked_dropped};
 use site_collector::error::ListenError;
+use site_collector::forward_model::MAX_FORWARD_BATCH_RECORDS;
 use site_collector::listen::{
     bump, count_reason, handle_datagram, listener_tenant, open_runtime, priority_of, prune_if_due, receive_cycle, run, sync_settings,
 };
 use site_collector::listen_model::{
-    ListenerSettings, Runtime, SharedSocket, DEFAULT_BURST, DEFAULT_MAX_SOURCES, DEFAULT_RATE_PER_SECOND, DEFAULT_SOURCE_SHARE_PERCENT,
-    MAX_TENANT_BYTES, PRUNE_INTERVAL_MS,
+    ListenerSettings, Runtime, SharedSocket, DEFAULT_BURST, DEFAULT_FORWARD_BATCH_RECORDS, DEFAULT_MAX_SOURCES, DEFAULT_RATE_PER_SECOND,
+    DEFAULT_SOURCE_SHARE_PERCENT, MAX_TENANT_BYTES, PRUNE_INTERVAL_MS,
 };
 use site_collector::listen_settings::{
     bind_socket, collector_config_of, open_listener_engine, parse_listen, rebind, settings_loader, settings_state, source_key, validate_settings,
@@ -88,6 +89,7 @@ fn settings() -> ListenerSettings {
         source_share_percent: DEFAULT_SOURCE_SHARE_PERCENT,
         unknown_share_percent: DEFAULT_UNKNOWN_SHARE_PERCENT,
         max_sources: DEFAULT_MAX_SOURCES,
+        forward_batch_records: DEFAULT_FORWARD_BATCH_RECORDS,
         drop_unknown: false,
         sources: Vec::new(),
         bind_failed: Arc::default(),
@@ -190,6 +192,13 @@ fn validation_refuses_bad_settings() -> TestResult {
         ..settings()
     };
     assert!(matches!(validate_settings(&bad_address), Err(ListenError::BadAddress(_))));
+    for batch in [0, MAX_FORWARD_BATCH_RECORDS + 1] {
+        let bad_batch = ListenerSettings {
+            forward_batch_records: batch,
+            ..settings()
+        };
+        assert!(matches!(validate_settings(&bad_batch), Err(ListenError::BadForwardBatch)));
+    }
     assert!(parse_listen("127.0.0.1:514").is_ok());
     assert!(matches!(bind_socket("192.0.2.1:0".parse()?), Err(ListenError::Bind(_))));
     Ok(())

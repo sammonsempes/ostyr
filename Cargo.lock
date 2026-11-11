@@ -5460,17 +5460,21 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 name = "site-collector"
 version = "0.0.0"
 dependencies = [
+ "agent-channel",
  "arc-swap",
  "chrono",
  "core-audit",
  "core-config",
+ "core-export",
  "crc32fast",
  "proptest",
  "rustix 1.1.6",
  "serde",
+ "serde_json",
  "syslog_loose",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tracing",
 ]
 

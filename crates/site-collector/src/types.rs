@@ -36,3 +36,6 @@ pub type NowFn<'a> = dyn Fn() -> Millis + 'a;
 
 
 pub type YearFn<'a> = dyn Fn() -> i32 + 'a;
+
+
+pub type CursorWriter = fn(&DirHandle, u64) -> io::Result<()>;
