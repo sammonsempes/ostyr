@@ -73,10 +73,16 @@ pub fn module_audit(listener: SharedListener) -> Box<SharedAuditFn> {
 
 /// Reads the module file and the core-pg settings it names; later reloads (file watch, `SIGHUP`) are audited in the module audit log.
 pub fn open_pg_engine(module_file: &Path, listener: SharedListener) -> Result<(ReloadEngine<PgSettings>, PathBuf), ConfigError> {
+    open_pg_engine_as(module_file, listener, ACTOR)
+}
+
+
+/// As `open_pg_engine`, with the audit actor of the module that embeds the settings (`cases`, not `alerts`).
+pub fn open_pg_engine_as(module_file: &Path, listener: SharedListener, actor: &str) -> Result<(ReloadEngine<PgSettings>, PathBuf), ConfigError> {
     let module = load_module(module_file)?;
     let pg_file = pg_file_of(module_file, &module)?;
     let context = ReloadContext {
-        actor_id: ACTOR.to_owned(),
+        actor_id: actor.to_owned(),
         tenant: module.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.to_owned()),
         module: module.name.clone(),
         target: pg_file.display().to_string(),

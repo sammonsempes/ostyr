@@ -3,6 +3,7 @@ mod fixture;
 mod http;
 #[path = "../store/memory.rs"]
 mod memory;
+mod settings;
 mod swap;
 mod types;
 
@@ -31,6 +32,9 @@ const TOTAL: usize = 120;
 
 
 const SIZES: [usize; 3] = [1, 7, 50];
+
+
+const LONG_ID: usize = 1_000;
 
 
 const FLOOD: usize = 10;
@@ -163,12 +167,33 @@ async fn a_malformed_id_is_the_same_404_without_a_store_call() -> TestResult {
     let (fx, token) = seeded().await?;
     let missing = body_json(get(&fx.router, "/cases/nothing", Some(&token)).await?).await?;
     let before = lock(&fx.db.statements).len();
-    for path in ["/cases/%00".to_owned(), format!("/cases/{}", "x".repeat(MAX_ID_CHARS + 1))] {
+    let paths = [
+        "/cases/%00".to_owned(),
+        "/cases/%ff".to_owned(),
+        "/cases/%c0%af".to_owned(),
+        "/cases/%ed%a0%80".to_owned(),
+        format!("/cases/{}", "x".repeat(MAX_ID_CHARS + 1)),
+        format!("/cases/{}", "x".repeat(LONG_ID)),
+    ];
+    for path in paths {
         let response = get(&fx.router, &path, Some(&token)).await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         assert_eq!(body_json(response).await?, missing);
     }
     assert_eq!(lock(&fx.db.statements).len(), before);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_encoded_slash_or_a_double_encoding_is_the_same_404() -> TestResult {
+    let (fx, token) = seeded().await?;
+    let missing = body_json(get(&fx.router, "/cases/nothing", Some(&token)).await?).await?;
+    for path in ["/cases/c1%2fx", "/cases/%252f", "/cases/%2e%2e%2fc1"] {
+        let response = get(&fx.router, path, Some(&token)).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(body_json(response).await?, missing, "{path}");
+    }
     Ok(())
 }
 
