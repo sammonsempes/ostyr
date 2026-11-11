@@ -54,5 +54,5 @@ pub fn read_link_key(path: &Path) -> Result<LinkKey, KeyError> {
     let (mode, owner, process_user) = mode_and_owners(&metadata)?;
     check_owner_and_mode(mode, owner, process_user)?;
     let bytes = read_capped(&mut handle, MAX_LINK_KEY_BYTES, &path.display().to_string())?;
-    key_from_bytes(bytes)
+    key_from_bytes(bytes.to_vec())
 }

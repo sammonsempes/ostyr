@@ -8,10 +8,12 @@ use zeroize::Zeroizing;
 pub const MAX_PASSWORD_BYTES: u64 = 1024;
 
 
+const PASSWORD_CAPACITY: usize = 1025;
+
+
 /// At most `limit` bytes: a larger source is refused rather than cut.
-pub fn read_capped(reader: &mut dyn Read, limit: u64, file: &str) -> Result<Vec<u8>, PgError> {
-    let capacity = usize::try_from(limit.min(MAX_PASSWORD_BYTES) + 1).unwrap_or(0);
-    let mut bytes = Vec::with_capacity(capacity);
+pub fn read_capped(reader: &mut dyn Read, limit: u64, file: &str) -> Result<Zeroizing<Vec<u8>>, PgError> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(PASSWORD_CAPACITY));
     let mut limited = reader.take(limit + 1);
     limited.read_to_end(&mut bytes).map_err(|source| PgError::Io {
         file: file.to_owned(),
@@ -51,7 +53,7 @@ pub fn open_checked(path: &Path, is_regular: fn(&File) -> std::io::Result<bool>)
 }
 
 
-pub fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, PgError> {
+pub fn read_limited(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, PgError> {
     let file = path.display().to_string();
     let mut handle = open_regular(path)?;
     read_capped(&mut handle, limit, &file)
@@ -60,7 +62,7 @@ pub fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, PgError> {
 
 /// The password bytes without the trailing line break, read afresh at each connect.
 pub fn read_password(path: &Path) -> Result<Zeroizing<Vec<u8>>, PgError> {
-    let mut bytes = Zeroizing::new(read_limited(path, MAX_PASSWORD_BYTES)?);
+    let mut bytes = read_limited(path, MAX_PASSWORD_BYTES)?;
     let kept = bytes.iter().rposition(|byte| *byte != b'\n' && *byte != b'\r').map_or(0, |last| last + 1);
     bytes.truncate(kept);
     if bytes.is_empty() {
