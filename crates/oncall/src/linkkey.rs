@@ -1,7 +1,7 @@
 use crate::error::KeyError;
 use crate::limits::{MAX_LINK_KEY_BYTES, MIN_LINK_KEY_BYTES};
 use crate::types::LinkKey;
-use core_pg::password::{open_regular, read_capped};
+use core_pg::password::{open_regular, read_secret};
 use std::fs::Metadata;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -52,6 +52,6 @@ pub fn read_link_key(path: &Path) -> Result<LinkKey, KeyError> {
     let metadata = handle.metadata().map_err(KeyError::Inspect)?;
     let (mode, owner, process_user) = mode_and_owners(&metadata)?;
     check_owner_and_mode(mode, owner, process_user)?;
-    let bytes = read_capped(&mut handle, MAX_LINK_KEY_BYTES, &path.display().to_string())?;
+    let bytes = read_secret(&mut handle, MAX_LINK_KEY_BYTES, &path.display().to_string())?;
     key_from_bytes(bytes)
 }
