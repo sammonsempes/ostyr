@@ -5804,6 +5804,7 @@ dependencies = [
  "alerts",
  "core-config",
  "core-pg",
+ "getrandom 0.4.3",
  "hickory-resolver",
  "ipnet",
  "metric-alerts",

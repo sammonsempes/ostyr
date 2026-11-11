@@ -1,8 +1,8 @@
 use crate::error::{CheckError, GuardError, ProbeError};
 use crate::load::validate_nat64_prefix;
 use crate::model::{MAX_BODY_EXCERPT_BYTES, MAX_TIMEOUT_SECONDS};
-use crate::target::{guard_address_nat64, probe_socket, CheckedAddr};
-use crate::types::{Clock, Connect, Fetch, Handshake, Resolve};
+use crate::target::{checked_ip, guard_address_nat64, probe_socket, CheckedAddr};
+use crate::types::{Clock, Connect, Fetch, Handshake, Ping, Resolve};
 use ipnet::{IpNet, Ipv6Net};
 use std::io;
 use std::net::IpAddr;
@@ -332,6 +332,26 @@ pub fn tcp_probe(
     let deadline = start_deadline(clock, limits.timeout);
     let left = remaining(clock, &deadline)?;
     connect(probe_socket(address, port), left).map_err(|error| match error.kind() {
+        io::ErrorKind::TimedOut => ProbeError::Timeout { limit: deadline.limit },
+        _ => ProbeError::Transport(error),
+    })?;
+    remaining(clock, &deadline)?;
+    Ok(ProbeOutcome {
+        status: None,
+        latency_ms: latency_ms(clock, &deadline),
+        succeeded: true,
+        body_excerpt: String::new(),
+        certificate_chain: Vec::new(),
+        certificate_verified: None,
+    })
+}
+
+
+/// An ICMP probe: one echo request to the checked address, answered within the remaining time.
+pub fn icmp_probe(address: CheckedAddr, limits: &ProbeLimits, ping: &Ping<'_>, clock: &Clock<'_>) -> Result<ProbeOutcome, ProbeError> {
+    let deadline = start_deadline(clock, limits.timeout);
+    let left = remaining(clock, &deadline)?;
+    ping(checked_ip(&address), left).map_err(|error| match error.kind() {
         io::ErrorKind::TimedOut => ProbeError::Timeout { limit: deadline.limit },
         _ => ProbeError::Transport(error),
     })?;
