@@ -61,6 +61,8 @@ pub enum SysmonError {
     UnexpectedChild,
     #[error("the event has more than one root element")]
     MultipleRoots,
+    #[error("the event has text outside its root element")]
+    OutsideRoot,
     #[error("a JSON key is repeated: {0}")]
     DuplicateKey(#[source] serde_json::Error),
     #[error("invalid XML: {0}")]
