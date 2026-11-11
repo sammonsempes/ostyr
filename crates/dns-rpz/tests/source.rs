@@ -21,16 +21,18 @@ use intel_feeds::limits::MAX_READ_BYTES;
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use logging::init_logging;
 use sample::sample_policy;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use time::macros::datetime;
 use time::OffsetDateTime;
+use tracing::subscriber::with_default;
 use types::TestResult;
 
 
@@ -184,8 +186,8 @@ fn sample_ioc(value: &str, tlp: Tlp) -> Ioc {
 }
 
 
-fn run_from(open: &dyn Fn() -> io::Result<Box<dyn BufRead>>, dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut input = open()?;
+fn run_from(open: &dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>>, dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let mut input = open(now())?;
     generate(&sample_policy(), &mut input, now(), &dir.join("counter"), &dir.join("zone.db"))?;
     Ok(fs::read_to_string(dir.join("zone.db"))?)
 }
@@ -203,7 +205,7 @@ fn state(dir: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
 
 fn refused<Body>(
     rig: &Rig,
-    open: &dyn Fn() -> io::Result<Box<dyn BufRead>>,
+    open: &dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>>,
     before: &(String, String),
     status: &'static str,
     body: Body,
@@ -226,7 +228,7 @@ fn the_table_rows_give_the_zone_of_the_json_lines_path() -> TestResult {
     let rig = rig("tenant-a")?;
     let server = answer(&rig.listener, "200 OK", text_body(good_rows()))?;
     let rejected = AtomicU64::new(0);
-    let from_table = run_from(&clickhouse_open(&rig.feeds, &now, &rejected), rig.dir.path())?;
+    let from_table = run_from(&clickhouse_open(&rig.feeds, &rejected), rig.dir.path())?;
     let head = joined(server)?;
     assert!(head.contains("param_tenant=tenant-a"), "{head}");
     let other = tempdir()?;
@@ -241,7 +243,7 @@ fn the_table_rows_give_the_zone_of_the_json_lines_path() -> TestResult {
     let file = other.path().join("iocs.jsonl");
     fs::write(&file, lines)?;
     let spec = file.display().to_string();
-    let from_file = run_from(&*open_source(&spec, &now, &rejected), other.path())?;
+    let from_file = run_from(&*open_source(&spec, &rejected), other.path())?;
     assert_eq!(from_table, from_file);
     assert!(from_table.contains("\nevil.example.com IN CNAME .") && from_table.contains("\nworse.example.net IN CNAME ."));
     assert!(!from_table.contains("secret.example.org"), "{from_table}");
@@ -258,7 +260,7 @@ fn the_rows_left_out_are_counted_in_the_summary() -> TestResult {
     let server = answer(&rig.listener, "200 OK", text_body(body))?;
     let rejected = AtomicU64::new(0);
     let spec = format!("clickhouse:{}", rig.feeds.display());
-    let source = open_source(&spec, &now, &rejected);
+    let source = open_source(&spec, &rejected);
     let policy_file = rig.dir.path().join("policy.yaml");
     replace_file(&policy_file, &policy_text(""))?;
     let policy = engine_for(&policy_file)?;
@@ -299,7 +301,7 @@ fn a_failed_read_leaves_the_counter_and_the_zone_untouched() -> TestResult {
     init_logging();
     let rig = rig("tenant-a")?;
     let rejected = AtomicU64::new(0);
-    let open = clickhouse_open(&rig.feeds, &now, &rejected);
+    let open = clickhouse_open(&rig.feeds, &rejected);
     let first = answer(&rig.listener, "200 OK", text_body(good_rows()))?;
     run_from(&open, rig.dir.path())?;
     joined(first)?;
@@ -327,7 +329,7 @@ fn a_bad_tenant_is_refused_before_any_request() -> TestResult {
     init_logging();
     let rig = rig("-x")?;
     let rejected = AtomicU64::new(0);
-    let failure = run_from(&clickhouse_open(&rig.feeds, &now, &rejected), rig.dir.path())
+    let failure = run_from(&clickhouse_open(&rig.feeds, &rejected), rig.dir.path())
         .err()
         .ok_or("accepted")?;
     assert_eq!(failure.to_string(), SOURCE_FAILED);
@@ -343,10 +345,10 @@ fn a_missing_file_or_section_is_refused() -> TestResult {
     let dir = tempdir()?;
     let rejected = AtomicU64::new(0);
     let absent = dir.path().join("absent.yaml");
-    assert!(run_from(&clickhouse_open(&absent, &now, &rejected), dir.path()).is_err());
+    assert!(run_from(&clickhouse_open(&absent, &rejected), dir.path()).is_err());
     let bare = dir.path().join("bare.yaml");
     fs::write(&bare, "feeds: []\n")?;
-    assert!(run_from(&clickhouse_open(&bare, &now, &rejected), dir.path()).is_err());
+    assert!(run_from(&clickhouse_open(&bare, &rejected), dir.path()).is_err());
     assert!(!dir.path().join("zone.db").exists());
     Ok(())
 }
@@ -357,6 +359,30 @@ fn a_plain_argument_is_a_json_lines_file() -> TestResult {
     let dir = tempdir()?;
     let rejected = AtomicU64::new(0);
     let missing = dir.path().join("none.jsonl").display().to_string();
-    assert!(open_source(&missing, &now, &rejected)().is_err());
+    assert!(open_source(&missing, &rejected)(now()).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_source_leaves_one_warn_line_without_secrets() -> TestResult {
+    init_logging();
+    let rig = rig("tenant-a")?;
+    let server = answer(&rig.listener, "401 Unauthorized", text_body("SECRET-SERVER-TEXT".to_owned()))?;
+    let rejected = AtomicU64::new(0);
+    let open = clickhouse_open(&rig.feeds, &rejected);
+    let capture = rig.dir.path().join("captured.log");
+    let writer = Arc::new(File::create(&capture)?);
+    let subscriber = tracing_subscriber::fmt().with_writer(writer).with_ansi(false).finish();
+    let failure = with_default(subscriber, || run_from(&open, rig.dir.path()));
+    assert_eq!(failure.err().ok_or("the run succeeded")?.to_string(), SOURCE_FAILED);
+    joined(server)?;
+    let text = fs::read_to_string(&capture)?;
+    assert_eq!(text.lines().filter(|line| line.contains("dns_rpz::source")).count(), 1, "{text}");
+    assert!(
+        text.contains("WARN") && text.contains("ClickHouse IOC source failed") && text.contains("the ClickHouse read failed"),
+        "{text}"
+    );
+    assert!(!text.contains(PASSWORD) && !text.contains("SECRET"), "{text}");
     Ok(())
 }
