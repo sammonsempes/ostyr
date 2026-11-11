@@ -3,8 +3,8 @@ use crate::api::{
     MAX_COMMENT_CHARS,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
-use crate::model::{ApiClient, Language, Opened, Principal, WebLimits, WebState};
-use crate::pages::{alert_page, alerts_page, case_page, case_page_with, cases_page, error_page, login_page, STYLESHEET};
+use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
+use crate::pages::{alert_page, alerts_page, case_page, case_page_with, cases_page, comment_unloaded_page, error_page, login_page, STYLESHEET};
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
     LANGUAGE_COOKIE_SECONDS, LOGIN_COOKIE, LOGIN_COOKIE_SECONDS, SESSION_COOKIE,
@@ -183,9 +183,28 @@ pub fn session_refusal(language: Language, failure: &SessionError) -> Response {
 }
 
 
+/// A fixed class name per failure, safe to log: never the URL, the status text or an API value.
+pub fn failure_class(failure: &ApiFailure) -> &'static str {
+    match failure {
+        ApiFailure::Unauthorized => "unauthorized",
+        ApiFailure::Forbidden => "forbidden",
+        ApiFailure::NotFound => "not_found",
+        ApiFailure::Throttled => "throttled",
+        ApiFailure::BadRequest => "bad_request",
+        ApiFailure::Unavailable(_) => "unavailable",
+        ApiFailure::Conflict(_) => "conflict",
+        ApiFailure::Status(_) => "status",
+        ApiFailure::TooLarge => "too_large",
+        ApiFailure::Malformed(_) => "malformed",
+        ApiFailure::Json(_) => "json",
+    }
+}
+
+
 /// A page for a failed API call: our own text per class, never the API's.
 pub fn api_refusal(language: Language, csrf: Option<&str>, failure: &ApiFailure) -> Response {
-    tracing::warn!(%failure, "API call failed");
+    let class = failure_class(failure);
+    tracing::warn!(class, "API call failed");
     match failure {
         ApiFailure::Unauthorized | ApiFailure::Forbidden => refusal(language, csrf, StatusCode::FORBIDDEN, "error_forbidden"),
         ApiFailure::NotFound => refusal(language, csrf, StatusCode::NOT_FOUND, "error_not_found"),
@@ -603,14 +622,42 @@ pub async fn submit_case_comment(state: &WebState, source: IpAddr, headers: &Hea
     let stored = post_case_comment(&client, source, &principal.token, id, text)
         .await
         .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
-    let case = get_case(&client, source, &principal.token, id)
-        .await
-        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
-    Ok(html_response(
-        StatusCode::OK,
-        &case_page_with(language, &principal.csrf, &case, Some(&stored)),
-        &[],
-    ))
+    let reread = get_case(&client, source, &principal.token, id).await;
+    Ok(comment_answer(state, &principal, language, id, &stored, &reread))
+}
+
+
+/// The page after a stored comment: the case when it was read again, else the stored comment and our own fixed text; a `401` ends the session.
+pub fn comment_answer(
+    state: &WebState,
+    principal: &Principal,
+    language: Language,
+    id: &str,
+    stored: &CommentView,
+    reread: &Result<CaseDetailView, ApiFailure>,
+) -> Response {
+    match reread {
+        Ok(case) => html_response(StatusCode::OK, &case_page_with(language, &principal.csrf, case, Some(stored)), &[]),
+        Err(ApiFailure::Unauthorized) => {
+            tracing::warn!("the case re-read after a comment was refused with 401");
+            drop_session(state, &principal.key);
+            let page = comment_unloaded_page(language, None, stored, "/login", "comment_signin", "login_submit");
+            html_response(StatusCode::OK, &page, &[clear_cookie(SESSION_COOKIE)])
+        }
+        Err(failure) => {
+            let class = failure_class(failure);
+            tracing::warn!(class, "the case re-read after a comment failed");
+            let page = comment_unloaded_page(
+                language,
+                Some(&principal.csrf),
+                stored,
+                &format!("/cases/{id}"),
+                "comment_unloaded",
+                "case_reload",
+            );
+            html_response(StatusCode::OK, &page, &[])
+        }
+    }
 }
 
 
