@@ -9,7 +9,7 @@ use core_pg::query::scoped_query;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::parse_settings;
 use oncall::alert::{Cell, Param, Statement};
-use oncall::alert_source::{parse_source_settings, poll_all};
+use oncall::alert_source::{parse_source_settings, poll_all, Round};
 use oncall::error::StoreError;
 use oncall::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use oncall::types::Row;
@@ -39,6 +39,21 @@ const COLUMN_HOST: usize = 3;
 const ALERTS_PER_TENANT: u64 = 3;
 
 
+const BACKLOG_ALERTS: u64 = 2;
+
+
+const CLOCK_MARGIN: Duration = Duration::from_secs(2);
+
+
+const POLLER: &str = "poller-a";
+
+
+const OTHER_POLLER: &str = "poller-b";
+
+
+const FRESH_ALERTS: u64 = 1;
+
+
 const BASE_CREATED: u64 = 1_000;
 
 
@@ -49,6 +64,29 @@ const DUMP_SQL: &str = "SELECT a.fingerprint, d.severity, d.title, COALESCE(d.ho
 const SETTINGS_TEXT: &str =
     "tenants: [TENANT_A, TENANT_B]\nmax_per_poll: 2\ninterval_seconds: 30\nseverity_map:\n  informational: info\n  low: info\n  \
 medium: ticket\n  high: page\n  critical: page-now\n";
+
+
+fn summary(round: &Round) -> String {
+    let purged = round.purged.as_ref().map_or_else(|error| error.to_string(), ToString::to_string);
+    let tenants: Vec<String> = round
+        .outcomes
+        .iter()
+        .map(|(tenant, outcome)| {
+            format!(
+                "{tenant}={}",
+                outcome.as_ref().map_or_else(
+                    |error| error.to_string(),
+                    |counts| format!(
+                        "opened:{} already:{} conflict:{} skipped_backlog:{}",
+                        counts.opened, counts.already, counts.conflict, counts.skipped_backlog
+                    )
+                )
+            )
+        })
+        .collect();
+    let leased = round.leased.as_ref().map_or_else(|error| error.to_string(), ToString::to_string);
+    format!("leased={leased} purged={purged} {}", tenants.join(" "))
+}
 
 
 fn wall_clock() -> DateTime<Utc> {
@@ -142,20 +180,15 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
         let batch: Vec<SourceAlert> = (0..ALERTS_PER_TENANT).map(|index| source_alert(tenant, index)).collect();
         insert_alerts(&alerts_exec, &scope, &batch).await?;
     }
-    let source_settings = parse_source_settings(&SETTINGS_TEXT.replace("TENANT_A", tenant_a).replace("TENANT_B", tenant_b), "inline")?;
+    let source_settings = parse_source_settings(
+        &SETTINGS_TEXT.replace("TENANT_A", tenant_a).replace("TENANT_B", tenant_b),
+        "inline",
+        wall_clock(),
+    )?;
     let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement);
-    for round in 0..=ALERTS_PER_TENANT {
-        let outcomes = poll_all(&alerts_exec, &mut exec, &source_settings, wall_clock).await;
-        let summary: Vec<String> = outcomes
-            .iter()
-            .map(|(tenant, outcome)| {
-                format!(
-                    "{tenant}={}",
-                    outcome.as_ref().map_or_else(|error| error.to_string(), ToString::to_string)
-                )
-            })
-            .collect();
-        writeln!(out, "poll {round}: {}", summary.join(" "))?;
+    for round_number in 0..=ALERTS_PER_TENANT {
+        let round = poll_all(&alerts_exec, &mut exec, &source_settings, POLLER, wall_clock).await;
+        writeln!(out, "poll {round_number}: {}", summary(&round))?;
     }
     for tenant in tenants {
         let scope = tenant_scope(tenant)?;
@@ -163,17 +196,43 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
         late.created_micros = 1;
         insert_alerts(&alerts_exec, &scope, &[late]).await?;
     }
-    let outcomes = poll_all(&alerts_exec, &mut exec, &source_settings, wall_clock).await;
-    let late_summary: Vec<String> = outcomes
-        .iter()
-        .map(|(tenant, outcome)| {
-            format!(
-                "{tenant}={}",
-                outcome.as_ref().map_or_else(|error| error.to_string(), ToString::to_string)
-            )
-        })
+    let late = poll_all(&alerts_exec, &mut exec, &source_settings, POLLER, wall_clock).await;
+    writeln!(out, "late poll: {}", summary(&late))?;
+    let ghost = format!("{tenant_a}-ghost");
+    let ghost_scope = tenant_scope(&ghost)?;
+    let ghost_batch: Vec<SourceAlert> = (0..ALERTS_PER_TENANT).map(|index| source_alert(&ghost, index)).collect();
+    insert_alerts(&alerts_exec, &ghost_scope, &ghost_batch).await?;
+    let backlog: Vec<SourceAlert> = (ALERTS_PER_TENANT + 1..ALERTS_PER_TENANT + 1 + BACKLOG_ALERTS)
+        .map(|index| source_alert(tenant_b, index))
         .collect();
-    writeln!(out, "late poll: {}", late_summary.join(" "))?;
+    insert_alerts(&alerts_exec, &tenant_scope(tenant_b)?, &backlog).await?;
+    tokio::time::sleep(CLOCK_MARGIN).await;
+    let added = wall_clock().to_rfc3339();
+    tokio::time::sleep(CLOCK_MARGIN).await;
+    let fresh: Vec<SourceAlert> = (ALERTS_PER_TENANT + 1 + BACKLOG_ALERTS..ALERTS_PER_TENANT + 1 + BACKLOG_ALERTS + FRESH_ALERTS)
+        .map(|index| source_alert(tenant_b, index))
+        .collect();
+    insert_alerts(&alerts_exec, &tenant_scope(tenant_b)?, &fresh).await?;
+    let dated = format!(
+        "{}added_at:\n  {tenant_b}: {added}\n",
+        SETTINGS_TEXT.replace("TENANT_A", tenant_a).replace("TENANT_B", tenant_b)
+    );
+    let dated_settings = parse_source_settings(&dated, "inline", wall_clock())?;
+    writeln!(
+        out,
+        "added tenant {tenant_b} later: {}",
+        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, POLLER, wall_clock).await)
+    )?;
+    writeln!(
+        out,
+        "other poller: {}",
+        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, OTHER_POLLER, wall_clock).await)
+    )?;
+    writeln!(
+        out,
+        "second round: {}",
+        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, POLLER, wall_clock).await)
+    )?;
     for tenant in tenants {
         writeln!(out, "-- {tenant} on-call alerts")?;
         dump(&client, &tenant_scope(tenant)?, &mut out).await?;

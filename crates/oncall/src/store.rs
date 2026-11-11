@@ -14,7 +14,7 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "oncall";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "oncall_0001",
         sql: include_str!("../migrations/oncall_0001.sql"),
@@ -26,6 +26,10 @@ pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "oncall_0003",
         sql: include_str!("../migrations/oncall_0003.sql"),
+    },
+    Migration {
+        version: "oncall_0004",
+        sql: include_str!("../migrations/oncall_0004.sql"),
     },
 ];
 
