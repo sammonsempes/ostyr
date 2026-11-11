@@ -2,7 +2,7 @@
 mod types;
 
 
-use dhcp_kea::cli::{counts_line, follow_file, no_pause, one_shot, parse_args, report, run, COUNTS_EVERY_POLLS, POLL_INTERVAL};
+use dhcp_kea::cli::{counts_line, follow_file, follow_file_since, no_pause, one_shot, parse_args, report, run, COUNTS_EVERY_POLLS, POLL_INTERVAL};
 use dhcp_kea::error::KeaError;
 use dhcp_kea::follow::Counts;
 use std::fs::{create_dir, write};
@@ -52,7 +52,7 @@ fn a_run_writes_ecs_lines_and_reports_the_counts() -> TestResult {
     assert!(text.contains("\"mac\":\"AA-BB-CC-DD-EE-01\""));
     assert_eq!(
         String::from_utf8(err)?,
-        "processed=1 duplicate=1 evicted=0 restarts=0 absent=0 refused=0 malformed=address=1\n"
+        "processed=1 duplicate=1 evicted=0 restarts=0 absent=0 refused=0 recovered=0 unrecovered=0 beyond_seen=0 malformed=address=1\n"
     );
     Ok(())
 }
@@ -135,5 +135,26 @@ fn a_follow_counts_a_refused_path_and_keeps_going_while_a_one_shot_fails() -> Te
     assert_eq!(code(one_shot_status), code(ExitCode::FAILURE));
     let follow_status = run(&[path.to_str().ok_or("path")?, "--follow"], &mut out, &mut err, TWO_POLLS, no_pause)?;
     assert_eq!(code(follow_status), code(ExitCode::SUCCESS));
+    Ok(())
+}
+
+
+const COMPACTED: &str = "address,hwaddr,valid_lifetime,expire,hostname,subnet_id,state\n\
+10.0.0.9,aa:bb:cc:dd:ee:09,3600,1700003600,h9.example.,1,0\n";
+
+
+const STARTED_AT_EPOCH: i64 = 0;
+
+
+#[test]
+fn a_follow_started_at_a_given_time_recovers_leases_created_after_it() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, CSV)?;
+    write(directory.path().join("leases.csv.2"), COMPACTED)?;
+    let mut out = Vec::new();
+    let mut counts_out = Vec::new();
+    let counts = follow_file_since(&path, 1, (&mut out, &mut counts_out), no_pause, STARTED_AT_EPOCH)?;
+    assert_eq!((counts.processed, counts.recovered), (1, 1));
     Ok(())
 }

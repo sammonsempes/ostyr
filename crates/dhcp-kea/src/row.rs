@@ -43,6 +43,8 @@ pub const HOSTNAME_RAW_LABEL: &str = "kea_hostname_raw";
 pub struct Converted {
     pub event: EcsEvent,
     pub key: LeaseKey,
+    /// Unix seconds when the lease was created or renewed: `expire - valid_lifetime`.
+    pub cltt: i64,
 }
 
 
@@ -169,6 +171,6 @@ pub fn convert_row(columns: &Columns, text: &str) -> Result<Converted, RowError>
             labels: labels.into_iter().flatten().collect(),
             ..blank_event(timestamp)
         };
-        Ok(Converted { event, key })
+        Ok(Converted { event, key, cltt: start })
     }
 }
