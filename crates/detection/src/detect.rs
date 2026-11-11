@@ -27,6 +27,9 @@ use stream_correlation::window::{Alert, State};
 use tracing::{debug, warn};
 
 
+pub const PERMANENT_SQLSTATE_CLASSES: [&str; 2] = ["22", "23"];
+
+
 pub fn new_detector(
     rules: Arc<ReloadEngine<RuleSet>>,
     store: Arc<AlertStore>,
@@ -140,6 +143,12 @@ pub fn report_progress(detector: &Detector) {
 }
 
 
+/// SQLSTATE classes 22 (data exception) and 23 (integrity constraint violation) are deterministic for the same record; every other server error is transient.
+pub fn is_permanent_sqlstate(code: &str) -> bool {
+    PERMANENT_SQLSTATE_CLASSES.iter().any(|class| code.starts_with(class))
+}
+
+
 /// A refusal the store would repeat for the same records, however often it is retried (a bound, an identity, a time or a tenant); anything not listed, a new variant included, is transient and retried.
 pub fn is_permanent(error: &SinkError) -> bool {
     match error {
@@ -149,21 +158,23 @@ pub fn is_permanent(error: &SinkError) -> bool {
         | SinkError::TenantMismatch
         | SinkError::Database(PgError::InvalidTenant)
         | SinkError::Serialize(_) => true,
-        SinkError::Store(inner) => matches!(
-            inner,
+        SinkError::Store(inner) => match inner {
             StoreError::TooManyAlerts { .. }
-                | StoreError::TenantMismatch
-                | StoreError::IdMismatch
-                | StoreError::FieldEmpty { .. }
-                | StoreError::FieldTooLong { .. }
-                | StoreError::NulByte { .. }
-                | StoreError::BadEventCount { .. }
-                | StoreError::BadCreated
-                | StoreError::BadOriginalBytes
-                | StoreError::BadSummary
-                | StoreError::BadId
-                | StoreError::Document(_)
-        ),
+            | StoreError::TenantMismatch
+            | StoreError::IdMismatch
+            | StoreError::FieldEmpty { .. }
+            | StoreError::FieldTooLong { .. }
+            | StoreError::NulByte { .. }
+            | StoreError::BadEventCount { .. }
+            | StoreError::BadCreated
+            | StoreError::BadOriginalBytes
+            | StoreError::BadSummary
+            | StoreError::BadId
+            | StoreError::Document(_) => true,
+            StoreError::Pg(PgError::Server { code, .. }) => is_permanent_sqlstate(code),
+            StoreError::Busy => false,
+            _ => false,
+        },
         _ => false,
     }
 }

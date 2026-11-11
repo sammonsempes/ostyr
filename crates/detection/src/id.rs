@@ -20,3 +20,18 @@ pub fn event_identity(event_id: Option<&str>, payload: &[u8]) -> String {
         |text| format!("{}:{hash}", text.chars().take(MAX_EVENT_ID_CHARS).collect::<String>()),
     )
 }
+
+
+pub const DIGEST_PREFIX: &str = "digest:";
+
+
+/// `digest:<SHA-256 hex>` over the whole sorted set, each id length-prefixed (`u64be`), so a tail cut from the stored list still changes the alert id.
+pub fn set_digest(sorted_ids: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((sorted_ids.len() as u64).to_be_bytes());
+    sorted_ids.iter().for_each(|id| {
+        hasher.update((id.len() as u64).to_be_bytes());
+        hasher.update(id.as_bytes());
+    });
+    format!("{DIGEST_PREFIX}{}", HEXLOWER.encode(&hasher.finalize()))
+}
