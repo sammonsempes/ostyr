@@ -3,6 +3,7 @@ mod http;
 mod memory;
 mod settings;
 mod swap;
+mod triage;
 mod types;
 
 
@@ -11,13 +12,13 @@ use alerts::api::{
     MAX_CURSOR_CHARS,
 };
 use alerts::error::StoreError;
-use alerts::model::{AlertPage, Backend, Cursor, Summary};
+use alerts::model::{AlertDetail, AlertPage, Backend, Cursor, Summary};
 use alerts::store::{MAX_PAGE_SIZE, NEXT_SQL};
 use axum::http::StatusCode;
 use core_api::model::{ApiError, ApiIdentity};
 use core_api::state::RATE_MAX_REQUESTS;
 use data_encoding::BASE64URL_NOPAD;
-use fixture::{alert, fixture, fixture_with, memory_backend, store, ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT};
+use fixture::{alert, busy_triage, fixed_clock, fixture, fixture_with, memory_backend, store, ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT};
 use http::{body_json, get, login};
 use memory::{lock, Forced};
 use serde_json::{json, Value};
@@ -283,6 +284,8 @@ async fn a_path_the_extractor_refuses_never_reaches_the_backend() -> TestResult 
             counted.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(None) })
         }),
+        triage: busy_triage(),
+        clock: fixed_clock,
     })?;
     let token = login(&fx.router, ANALYST).await?;
     assert_eq!(get(&fx.router, "/alerts/%ff", Some(&token)).await?.status(), StatusCode::NOT_FOUND);
@@ -298,6 +301,8 @@ async fn a_busy_store_is_a_429() -> TestResult {
     let fx = fixture_with(|_db| Backend {
         list: Arc::new(|_scope, _page| Box::pin(async { Err(StoreError::Busy) })),
         get: Arc::new(|_scope, _id| Box::pin(async { Err(StoreError::Busy) })),
+        triage: busy_triage(),
+        clock: fixed_clock,
     })?;
     let token = login(&fx.router, ANALYST).await?;
     assert_eq!(get(&fx.router, "/alerts", Some(&token)).await?.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -327,9 +332,11 @@ async fn an_alert_that_cannot_be_rendered_is_a_generic_500() -> TestResult {
             Box::pin(async {
                 let mut huge = alert(TENANT, "r", &["e"], BASE_TIME);
                 huge.created_micros = u64::MAX;
-                Ok(Some(huge))
+                Ok(Some(AlertDetail { alert: huge, triage: None }))
             })
         }),
+        triage: busy_triage(),
+        clock: fixed_clock,
     })?;
     let token = login(&fx.router, ANALYST).await?;
     assert_eq!(

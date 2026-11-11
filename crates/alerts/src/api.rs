@@ -1,17 +1,21 @@
 use crate::error::StoreError;
-use crate::model::{Alert, AlertListView, AlertView, Backend, Cursor, ListQuery, Page, Summary};
-use crate::store::{format_cursor, parse_cursor, MAX_PAGE_SIZE};
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query};
+use crate::id::is_alert_id;
+use crate::model::{
+    Alert, AlertDetail, AlertDetailView, AlertListView, AlertView, Backend, Cursor, ListQuery, Page, Summary, Triage, TriageChange, TriageRequest,
+    TriageStatus, TriageView,
+};
+use crate::store::{check_optional, format_cursor, parse_cursor, MAX_NOTE_CHARS, MAX_PAGE_SIZE};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_api::failure::reply;
-use core_api::model::{ApiError, ApiIdentity, ErrorBody, ErrorDetail, Requirement, Rule};
+use core_api::model::{ApiError, ApiIdentity, Authenticated, ErrorBody, ErrorDetail, Requirement, Rule};
 use core_api::routes::route_key;
 use core_api::types::{AccessTable, SharedState};
-use core_auth::rbac::PERMISSION_ALERTS_READ;
+use core_auth::rbac::{PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE};
 use core_pg::scope::{tenant_scope, TenantScope};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::{json, Value};
@@ -38,6 +42,25 @@ pub const LIST_PATH: &str = "/alerts";
 pub const GET_PATH: &str = "/alerts/{id}";
 
 
+pub const TRIAGE_PATH: &str = "/alerts/{id}/triage";
+
+
+pub const UTF8_BYTES_PER_CHAR: usize = 4;
+
+
+pub const BODY_OVERHEAD_BYTES: usize = 256;
+
+
+/// The note cap in raw UTF-8 plus the other fields; core-api's own cap (16 384) applies first to anything larger.
+pub const TRIAGE_BODY_LIMIT: usize = MAX_NOTE_CHARS * UTF8_BYTES_PER_CHAR + BODY_OVERHEAD_BYTES;
+
+
+pub const BAD_REQUEST_CODE: &str = "bad_request";
+
+
+pub const CHANGED_CODE: &str = "triage_changed";
+
+
 pub const NOT_FOUND_CODE: &str = "not_found";
 
 
@@ -45,7 +68,10 @@ pub const NOT_FOUND_MESSAGE: &str = "no such alert";
 
 
 #[derive(OpenApi)]
-#[openapi(paths(list_endpoint, get_endpoint), components(schemas(AlertView, AlertListView)))]
+#[openapi(
+    paths(list_endpoint, get_endpoint, triage_endpoint),
+    components(schemas(AlertView, AlertListView, AlertDetailView, TriageView, TriageRequest, TriageStatus))
+)]
 pub struct AlertsDoc;
 
 
@@ -179,9 +205,128 @@ pub async fn get_flow(identity: &ApiIdentity, backend: &Backend, id: Result<Stri
     match found {
         Err(StoreError::BadId) | Ok(None) => Ok(not_found()),
         Err(error) => Err(store_failure(&error)),
-        Ok(Some(alert)) => {
-            let view = view_of(&alert).map_err(|error| store_failure(&error))?;
+        Ok(Some(detail)) => {
+            let view = detail_view(&detail).map_err(|error| store_failure(&error))?;
             Ok(Json(view).into_response())
+        }
+    }
+}
+
+
+pub fn triage_view(triage: &Triage) -> Result<TriageView, StoreError> {
+    Ok(TriageView {
+        status: triage.status.to_string(),
+        actor: triage.actor.clone(),
+        note: triage.note.clone(),
+        updated_at: created_time(triage.updated_at)?,
+        version: triage.version,
+    })
+}
+
+
+pub fn detail_view(detail: &AlertDetail) -> Result<AlertDetailView, StoreError> {
+    Ok(AlertDetailView {
+        alert: view_of(&detail.alert)?,
+        triage: detail.triage.as_ref().map(triage_view).transpose()?,
+    })
+}
+
+
+/// Names the field, never its value.
+pub fn bad_field(field: &str, reason: &str) -> Response {
+    let body = ErrorBody {
+        error: ErrorDetail {
+            code: BAD_REQUEST_CODE.to_owned(),
+            message: format!("field `{field}` {reason}"),
+        },
+    };
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
+
+/// A body over the route's limit is the 413, any other refusal (syntax, unknown field, wrong type or status, content type) the 400.
+pub fn body_failure(rejection: &JsonRejection) -> ApiError {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::PayloadTooLarge
+    } else {
+        ApiError::BadRequest
+    }
+}
+
+
+/// The user of the session `guard` validated; a request that reached a handler without one is never written anonymously.
+pub fn actor_of(session: Option<&Authenticated>) -> Result<String, ApiError> {
+    session.map(|found| found.user.clone()).ok_or_else(|| {
+        tracing::warn!("alerts triage reached without a session");
+        ApiError::Internal
+    })
+}
+
+
+/// A moved version or a second first triage is the 409; another tenant's alert is the 404 of the read route.
+pub fn triage_failure(error: &StoreError) -> Result<Response, ApiError> {
+    match error {
+        StoreError::NotFound | StoreError::BadId => Ok(not_found()),
+        StoreError::Conflict => {
+            let body = ErrorBody {
+                error: ErrorDetail {
+                    code: CHANGED_CODE.to_owned(),
+                    message: "the triage changed, read the alert again".to_owned(),
+                },
+            };
+            Ok((StatusCode::CONFLICT, Json(body)).into_response())
+        }
+        other => Err(store_failure(other)),
+    }
+}
+
+
+/// The refusal for a body field, before any store call: a version below 1 or a note that is empty, too long or holds NUL.
+pub fn request_fault(request: &TriageRequest) -> Option<Response> {
+    if request.version.is_some_and(|read| read < 1) {
+        Some(bad_field("version", "must be at least 1"))
+    } else {
+        check_optional("note", request.note.as_deref(), MAX_NOTE_CHARS)
+            .err()
+            .map(|_refused| bad_field("note", "is empty, too long or holds a NUL character"))
+    }
+}
+
+
+pub async fn triage_flow(
+    identity: &ApiIdentity,
+    session: Option<&Authenticated>,
+    backend: &Backend,
+    id: Result<String, PathRejection>,
+    body: Result<TriageRequest, ApiError>,
+) -> Result<Response, ApiError> {
+    match body {
+        Err(ApiError::BadRequest) => Ok(bad_field(
+            "body",
+            "must be a JSON object with `status` (acknowledged or closed), optional `note` and `version`, and no other field",
+        )),
+        Err(other) => Err(other),
+        Ok(request) => {
+            let scope = scope_of(identity).map_err(|error| store_failure(&error))?;
+            let actor = actor_of(session)?;
+            let checked = id.ok().filter(|text| is_alert_id(text));
+            match (checked, request_fault(&request)) {
+                (None, _) => Ok(not_found()),
+                (Some(_), Some(refusal)) => Ok(refusal),
+                (Some(text), None) => {
+                    let change = TriageChange {
+                        status: request.status,
+                        actor,
+                        note: request.note,
+                        now: (backend.clock)(),
+                    };
+                    let done = (backend.triage)(scope, text, change, request.version).await;
+                    match done {
+                        Ok(triage) => Ok(Json(triage_view(&triage).map_err(|error| store_failure(&error))?).into_response()),
+                        Err(error) => triage_failure(&error),
+                    }
+                }
+            }
         }
     }
 }
@@ -215,7 +360,7 @@ pub async fn list_endpoint(
     params(("id" = String, Path, description = "Alert id, 64 lowercase hexadecimal characters")),
     security(("bearer" = [])),
     responses(
-        (status = 200, description = "The alert", body = AlertView),
+        (status = 200, description = "The alert with its triage", body = AlertDetailView),
         (status = 401, description = "No valid session", body = ErrorBody),
         (status = 403, description = "Permission denied", body = ErrorBody),
         (status = 404, description = "No such alert for this tenant", body = ErrorBody),
@@ -231,22 +376,64 @@ pub async fn get_endpoint(
 }
 
 
+#[utoipa::path(
+    post,
+    path = "/alerts/{id}/triage",
+    params(("id" = String, Path, description = "Alert id, 64 lowercase hexadecimal characters")),
+    request_body = TriageRequest,
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "The triage as stored", body = TriageView),
+        (status = 400, description = "Malformed body, unknown field or status, bad version, or a note that is empty, too long or holds NUL", body = ErrorBody),
+        (status = 401, description = "No valid session", body = ErrorBody),
+        (status = 403, description = "Permission denied", body = ErrorBody),
+        (status = 404, description = "No such alert for this tenant", body = ErrorBody),
+        (status = 409, description = "The triage changed or already exists", body = ErrorBody),
+        (status = 413, description = "Body too large", body = ErrorBody),
+        (status = 429, description = "Too many requests", body = ErrorBody)
+    )
+)]
+pub async fn triage_endpoint(
+    Extension(identity): Extension<Arc<ApiIdentity>>,
+    Extension(backend): Extension<Backend>,
+    session: Option<Extension<Authenticated>>,
+    id: Result<Path<String>, PathRejection>,
+    body: Result<Json<TriageRequest>, JsonRejection>,
+) -> Response {
+    let parsed = body.map(|found| found.0).map_err(|rejection| body_failure(&rejection));
+    reply(
+        triage_flow(
+            &identity,
+            session.as_ref().map(|found| &found.0),
+            &backend,
+            id.map(|found| found.0),
+            parsed,
+        )
+        .await,
+    )
+}
+
+
 pub fn alerts_router(backend: Backend) -> Router<SharedState> {
     Router::new()
         .route(LIST_PATH, get(list_endpoint))
         .route(GET_PATH, get(get_endpoint))
+        .route(TRIAGE_PATH, post(triage_endpoint).layer(DefaultBodyLimit::max(TRIAGE_BODY_LIMIT)))
         .layer(Extension(backend))
 }
 
 
 pub fn alerts_access() -> AccessTable {
-    [LIST_PATH, GET_PATH]
+    let reads = [LIST_PATH, GET_PATH].map(|path| (route_key("GET", path), PERMISSION_ALERTS_READ));
+    let writes = [(route_key("POST", TRIAGE_PATH), PERMISSION_ALERTS_TRIAGE)];
+    reads
         .into_iter()
-        .map(|path| {
+        .chain(writes)
+        .map(|(key, permission)| {
             (
-                route_key("GET", path),
+                key,
                 Rule {
-                    requirement: Requirement::Permission(PERMISSION_ALERTS_READ.to_owned()),
+                    requirement: Requirement::Permission(permission.to_owned()),
                     sensitive: false,
                 },
             )

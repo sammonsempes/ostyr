@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use crate::model::{Alert, AlertPage, Page};
+use crate::model::{AlertDetail, AlertPage, Page, Triage, TriageChange};
 use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
 use std::future::Future;
@@ -23,4 +23,11 @@ pub type StoreFuture<Output> = Pin<Box<dyn Future<Output = Result<Output, StoreE
 pub type ListFn = Arc<dyn Fn(TenantScope, Page) -> StoreFuture<AlertPage> + Send + Sync>;
 
 
-pub type GetFn = Arc<dyn Fn(TenantScope, String) -> StoreFuture<Option<Alert>> + Send + Sync>;
+pub type GetFn = Arc<dyn Fn(TenantScope, String) -> StoreFuture<Option<AlertDetail>> + Send + Sync>;
+
+
+pub type TriageFn = Arc<dyn Fn(TenantScope, String, TriageChange, Option<i64>) -> StoreFuture<Triage> + Send + Sync>;
+
+
+/// Microseconds since the Unix epoch.
+pub type ClockFn = fn() -> u64;
