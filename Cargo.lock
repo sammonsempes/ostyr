@@ -5544,6 +5544,8 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "snmp-parser",
  "syslog_loose",
  "tempfile",
  "thiserror 2.0.21",
@@ -5573,6 +5575,18 @@ name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+
+[[package]]
+name = "snmp-parser"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0edee72a0990df1c39eb951d9495e3aa5f78569eea497767960d2450dafd7999"
+dependencies = [
+ "asn1-rs",
+ "nom 7.1.3",
+ "rusticata-macros",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "socket2"
