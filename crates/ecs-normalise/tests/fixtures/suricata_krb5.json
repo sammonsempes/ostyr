@@ -1,0 +1,1 @@
+{"timestamp":"2026-11-10T19:00:00.123456+0000","flow_id":1234567890,"in_iface":"lo","src_ip":"10.0.0.5","src_port":51000,"dest_ip":"10.0.0.9","dest_port":88,"proto":"UDP","app_proto":"krb5","event_type":"krb5","krb5":{"msg_type":"KRB_AS_REQ","cname":"alice","realm":"EXAMPLE.TEST","sname":"krbtgt/EXAMPLE.TEST","encryption":"aes256-cts-hmac-sha1-96","weak_encryption":false}}
