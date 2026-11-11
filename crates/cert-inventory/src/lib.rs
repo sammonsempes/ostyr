@@ -7,3 +7,4 @@ pub mod error;
 pub mod expiry;
 pub mod model;
 pub mod parse;
+pub mod scan;

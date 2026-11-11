@@ -15,9 +15,14 @@ sha2 = "0.10"
 thiserror = "2"
 time = "0.3"
 tracing = "0.1"
+walkdir = "2"
 x509-parser = "0.18"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
