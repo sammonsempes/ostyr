@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use time::OffsetDateTime;
 use tracing::warn;
 
 
@@ -38,21 +39,24 @@ pub fn no_pause(_interval: Duration) {}
 /// The counts as one line, never any row content.
 pub fn counts_line(counts: &Counts) -> String {
     format!(
-        "processed={} duplicate={} evicted={} restarts={} absent={} refused={} malformed={}",
+        "processed={} duplicate={} evicted={} restarts={} absent={} refused={} recovered={} unrecovered={} beyond_seen={} malformed={}",
         counts.processed,
         counts.duplicate,
         counts.evicted,
         counts.restarts,
         counts.absent,
         counts.refused,
+        counts.recovered,
+        counts.unrecovered,
+        counts.beyond_seen,
         malformed_summary(counts)
     )
 }
 
 
-fn poll_once(path: &Path, state: &mut FollowState, counts: &mut Counts, out: &mut dyn Write) -> Result<(), KeaError> {
+fn poll_once(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut dyn Write) -> Result<(), KeaError> {
     let mut events = Vec::new();
-    match poll(path, state, &Limits::default(), counts, &mut events) {
+    match poll(path, state, limits, counts, &mut events) {
         Err(KeaError::NotRegular) => {
             counts.refused += 1;
             warn!("the lease path is not a regular file, refused");
@@ -65,12 +69,23 @@ fn poll_once(path: &Path, state: &mut FollowState, counts: &mut Counts, out: &mu
 }
 
 
-/// Polls the file `polls` times, writing every new lease as one ECS JSON line and the counts on `err` every `COUNTS_EVERY_POLLS` polls.
+/// Polls the file `polls` times, writing every new lease as one ECS JSON line and the counts on `err` every `COUNTS_EVERY_POLLS` polls; the follower starts now.
 pub fn follow_file(path: &Path, polls: u64, out: &mut dyn Write, err: &mut dyn Write, pause: PauseFn) -> Result<Counts, KeaError> {
+    follow_file_since(path, polls, (out, err), pause, OffsetDateTime::now_utc().unix_timestamp())
+}
+
+
+/// `follow_file` with the start time given (Unix seconds): a lease created at or after it that `.2` holds and the main file never showed is recovered.
+pub fn follow_file_since(path: &Path, polls: u64, sinks: (&mut dyn Write, &mut dyn Write), pause: PauseFn, started: i64) -> Result<Counts, KeaError> {
+    let (out, err) = sinks;
+    let limits = Limits {
+        started,
+        ..Limits::default()
+    };
     let mut state = FollowState::default();
     let mut counts = Counts::default();
     (1..=polls).try_for_each(|number| {
-        poll_once(path, &mut state, &mut counts, out)?;
+        poll_once(path, &mut state, &limits, &mut counts, out)?;
         if number % COUNTS_EVERY_POLLS == 0 {
             writeln!(err, "{}", counts_line(&counts))?;
         }

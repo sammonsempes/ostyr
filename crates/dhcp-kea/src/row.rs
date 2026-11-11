@@ -43,6 +43,8 @@ pub const HOSTNAME_RAW_LABEL: &str = "kea_hostname_raw";
 pub struct Converted {
     pub event: EcsEvent,
     pub key: LeaseKey,
+    /// Unix seconds when the lease was created or renewed: `expire - valid_lifetime`.
+    pub cltt: i64,
 }
 
 
@@ -144,7 +146,7 @@ pub fn convert_row(columns: &Columns, text: &str) -> Result<Converted, RowError>
         ];
         let timestamp = OffsetDateTime::from_unix_timestamp(start).map_err(|_| RowError::Range)?;
         let event_end = OffsetDateTime::from_unix_timestamp(end).map_err(|_| RowError::Range)?;
-        let key = (end, address.clone(), mac.clone().unwrap_or_else(String::new));
+        let key = (start, end, address.clone(), mac.clone().unwrap_or_else(String::new));
         let event = EcsEvent {
             event: EventFields {
                 kind: Some("event".to_string()),
@@ -169,6 +171,6 @@ pub fn convert_row(columns: &Columns, text: &str) -> Result<Converted, RowError>
             labels: labels.into_iter().flatten().collect(),
             ..blank_event(timestamp)
         };
-        Ok(Converted { event, key })
+        Ok(Converted { event, key, cltt: start })
     }
 }
