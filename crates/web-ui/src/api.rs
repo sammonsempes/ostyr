@@ -1,5 +1,5 @@
 use crate::error::ApiFailure;
-use crate::model::{Alert, AlertPage, ApiClient};
+use crate::model::{Alert, AlertPage, ApiClient, CaseDetailView, CasePageView};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Method, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
@@ -30,6 +30,9 @@ pub const MAX_CURSOR_CHARS: usize = 512;
 pub const ID_LENGTH: usize = 64;
 
 
+pub const MAX_CASE_ID_CHARS: usize = 128;
+
+
 pub const FORWARDED: HeaderName = HeaderName::from_static("forwarded");
 
 
@@ -44,6 +47,16 @@ pub struct TokenReply {
 
 pub fn valid_id(id: &str) -> bool {
     id.len() == ID_LENGTH && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+
+/// A case id that may become a link or an API path: ASCII alphanumeric first, then alphanumerics and `._-`, at most 128 characters.
+pub fn valid_case_id(id: &str) -> bool {
+    id.len() <= MAX_CASE_ID_CHARS
+        && id.bytes().next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_' || byte == b'-')
 }
 
 
@@ -232,6 +245,58 @@ pub async fn get_alert(client: &ApiClient, source: IpAddr, token: &SecretString,
             Ok(alert)
         } else {
             Err(ApiFailure::Malformed("alert id differs"))
+        }
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+pub fn check_case_page(page: &CasePageView) -> Result<(), ApiFailure> {
+    if page.items.len() > MAX_ITEMS {
+        Err(ApiFailure::Malformed("too many items"))
+    } else if page.next_cursor.as_deref().is_some_and(|cursor| !valid_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn cases_path(cursor: Option<&str>, limit: Option<u32>) -> String {
+    let mut query = Serializer::new(String::new());
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    limit.iter().for_each(|value| {
+        query.append_pair("limit", &value.to_string());
+    });
+    format!("cases?{}", query.finish())
+}
+
+
+pub async fn list_cases(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<CasePageView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &cases_path(cursor, limit), Some(token), None).await?;
+    let page: CasePageView = serde_json::from_slice(&bytes)?;
+    check_case_page(&page).map(|()| page)
+}
+
+
+/// An identifier outside the case grammar is a missing case without any call.
+pub async fn get_case(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<CaseDetailView, ApiFailure> {
+    if valid_case_id(id) {
+        let bytes = call(client, source, Method::GET, &format!("cases/{id}"), Some(token), None).await?;
+        let case: CaseDetailView = serde_json::from_slice(&bytes)?;
+        if case.summary.id == id {
+            Ok(case)
+        } else {
+            Err(ApiFailure::Malformed("case id differs"))
         }
     } else {
         Err(ApiFailure::NotFound)

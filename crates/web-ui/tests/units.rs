@@ -4,7 +4,7 @@ mod types;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use types::TestResult;
-use web_ui::api::{alerts_path, classify, get_alert, valid_cursor, valid_id, valid_token, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES};
+use web_ui::api::{alerts_path, cases_path, classify, get_alert, get_case, valid_cursor, valid_id, valid_token, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES};
 use web_ui::client::build_client;
 use web_ui::error::{ApiFailure, SessionError};
 use web_ui::model::ApiSection;
@@ -129,5 +129,28 @@ async fn an_invalid_id_is_not_found_without_a_call() -> TestResult {
         get_alert(&client, SOURCE, &token, &"a".repeat(ID_LENGTH)).await,
         Err(ApiFailure::Unavailable(_))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn the_cases_query_is_encoded() -> TestResult {
+    assert_eq!(cases_path(None, None), "cases?");
+    assert_eq!(cases_path(Some("a=b&c"), Some(LIMIT)), "cases?cursor=a%3Db%26c&limit=7");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_invalid_case_id_is_not_found_without_a_call() -> TestResult {
+    let client = build_client(&ApiSection {
+        base_url: "http://127.0.0.1:1/".to_owned(),
+        ca: None,
+        timeout_seconds: 1,
+        max_connections: CONNECTIONS,
+    })?;
+    let token = secrecy::SecretString::from("t".to_owned());
+    assert!(matches!(get_case(&client, SOURCE, &token, "-x").await, Err(ApiFailure::NotFound)));
+    assert!(matches!(get_case(&client, SOURCE, &token, "ok-1").await, Err(ApiFailure::Unavailable(_))));
     Ok(())
 }
