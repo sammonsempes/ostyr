@@ -7,8 +7,9 @@ use alerts::model::{Alert, Severity};
 use alerts::store::{insert_alerts, summarise, MAX_ALERTS_PER_INSERT, MAX_CREATED_MICROS, MAX_TITLE_CHARS};
 use alerts::types::Executor;
 use core_pg::scope::{tenant_of, TenantScope};
-use metric_alerts::token::shown;
+use metric_alerts::token::{is_token, shown, DIGEST_MARK};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 
 pub const RULE_ID_PREFIX: &str = "synthetic.";
@@ -51,6 +52,16 @@ pub fn since_micros(since: u64) -> Option<u64> {
 }
 
 
+/// The check name when it is a token, else `#` and the full SHA-256 in hex: the identity of a check, never shortened.
+pub fn identity_of(check: &str) -> String {
+    if is_token(check) {
+        check.to_owned()
+    } else {
+        format!("{DIGEST_MARK}{:x}", Sha256::digest(check.as_bytes()))
+    }
+}
+
+
 /// The head, then up to `MAX_LOCATIONS` locations that fit within `MAX_TITLE_CHARS`, each shown as itself or as `#digest`; the rest is `(+N more)`.
 pub fn title_of(check: &str, locations: &[String]) -> String {
     let reserve = MORE_FIXED_CHARS + locations.len().to_string().len();
@@ -78,7 +89,7 @@ pub fn title_of(check: &str, locations: &[String]) -> String {
 pub fn alert_of(scope: &TenantScope, outage: &Outage, now: u64) -> Option<Alert> {
     let tenant = tenant_of(scope).to_owned();
     let rule_id = format!("{RULE_ID_PREFIX}{}", kind_name(outage.kind));
-    let event_ids = vec![format!("check:{}", shown(&outage.check)), format!("since:{}", outage.since)];
+    let event_ids = vec![format!("check:{}", identity_of(&outage.check)), format!("since:{}", outage.since)];
     let created_micros = now.saturating_mul(MICROS_PER_SECOND).min(MAX_CREATED_MICROS);
     let listed: Vec<&String> = outage.failing_locations.iter().take(MAX_LOCATIONS).collect();
     let omitted = outage.failing_locations.len().saturating_sub(listed.len());
