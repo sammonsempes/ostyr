@@ -46,12 +46,12 @@ const LATER: i64 = 2;
 
 
 fn key() -> Result<LinkKey, Box<dyn Error>> {
-    Ok(key_from_bytes(KEY_BYTES.to_vec())?)
+    Ok(key_from_bytes(zeroize::Zeroizing::new(KEY_BYTES.to_vec()))?)
 }
 
 
 fn other_key() -> Result<LinkKey, Box<dyn Error>> {
-    Ok(key_from_bytes(OTHER_KEY_BYTES.to_vec())?)
+    Ok(key_from_bytes(zeroize::Zeroizing::new(OTHER_KEY_BYTES.to_vec()))?)
 }
 
 
