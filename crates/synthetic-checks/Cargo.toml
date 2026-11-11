@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
+metric-alerts = { version = "0.0.0", path = "../metric-alerts" }
+serde_json = "1"
 core-config = { version = "0.0.0", path = "../core-config" }
 hickory-resolver = "0.26"
 ipnet = { version = "2", features = ["serde"] }
@@ -22,6 +26,7 @@ url = "2"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 socket2 = "0.6"
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 tracing-subscriber = "0.3"
 
 [lints]
