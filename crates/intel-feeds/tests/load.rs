@@ -61,6 +61,9 @@ const THREE: usize = 3;
 const TWO: usize = 2;
 
 
+const DICTIONARY_PORT: u16 = 9440;
+
+
 const TABLE_AND_DICTIONARY: usize = 2;
 
 
@@ -96,6 +99,8 @@ fn rig(timeout_ms: u64) -> Result<Rig, Box<dyn std::error::Error>> {
         database: "ostyr".to_owned(),
         table: "iocs".to_owned(),
         dictionary: "ioc_trie".to_owned(),
+        dictionary_user: "ostyr_dict".to_owned(),
+        dictionary_port: DICTIONARY_PORT,
         timeout_ms,
         tenant: "tenant-a".to_owned(),
     };
@@ -298,12 +303,13 @@ fn a_tenant_core_pg_refuses_is_refused_before_any_io() -> TestResult {
 fn identifiers_with_a_quote_or_a_semicolon_are_refused() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
     ["io`cs", "iocs;drop", "", "1iocs", "a b"].iter().try_for_each(|name| -> TestResult {
-        [0, 1, TWO].iter().try_for_each(|which| -> TestResult {
+        [0, 1, TWO, TWO + 1].iter().try_for_each(|which| -> TestResult {
             let mut config = rig.config.clone();
-            match which {
+            match *which {
                 0 => config.database = (*name).to_owned(),
                 1 => config.table = (*name).to_owned(),
-                _ => config.dictionary = (*name).to_owned(),
+                TWO => config.dictionary = (*name).to_owned(),
+                _ => config.dictionary_user = (*name).to_owned(),
             }
             assert!(matches!(validate_clickhouse(&config), Err(ClickhouseError::Identifier(_))));
             assert!(load_iocs(&config, &iocs(1), &[], NOW, &idle).is_err());
@@ -326,6 +332,12 @@ fn user_and_timeout_are_bounded() -> TestResult {
     ["", "a\nb", "a b", &"u".repeat(MAX_USER_BYTES + 1)]
         .iter()
         .for_each(|user| assert!(matches!(validate_clickhouse(&with_user(user)), Err(ClickhouseError::User))));
+    let no_port = ClickhouseConfig {
+        dictionary_port: 0,
+        ..rig.config.clone()
+    };
+    assert!(matches!(validate_clickhouse(&no_port), Err(ClickhouseError::Port)));
+    assert_eq!(ClickhouseError::Port.to_string(), "clickhouse.dictionary_port must not be 0");
     [0, MAX_TIMEOUT_MS + 1].iter().for_each(|timeout_ms| {
         let config = ClickhouseConfig {
             timeout_ms: *timeout_ms,
@@ -420,6 +432,7 @@ impl Write for Capture {
 
 #[test]
 fn a_trace_subscriber_never_sees_the_key() -> TestResult {
+    tracing_log::LogTracer::init()?;
     let capture = Capture::default();
     let writer = capture.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -439,6 +452,7 @@ fn a_trace_subscriber_never_sees_the_key() -> TestResult {
     assert!(tracing::level_filters::STATIC_MAX_LEVEL <= tracing::level_filters::LevelFilter::DEBUG);
     let logged = String::from_utf8(capture.0.lock().map_err(|_| "poisoned")?.clone())?;
     assert!(logged.contains("left out"), "{logged}");
+    assert!(logged.contains("ureq"), "{logged}");
     assert!(!logged.contains(PASSWORD));
     Ok(())
 }

@@ -27,6 +27,7 @@ uuid = { version = "1", default-features = false }
 core-audit = { version = "0.0.0", path = "../core-audit" }
 proptest = "1"
 tempfile = "3"
+tracing-log = "0.2"
 tracing-subscriber = "0.3"
 
 [lints]

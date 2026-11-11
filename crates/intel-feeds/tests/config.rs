@@ -13,7 +13,7 @@ use core_config::reload::{current_config, reload, ReloadOutcome};
 use engine::{engine_for, feeds_text, replace_file};
 use fixtures::fixture;
 use intel_feeds::config::{feeds_state, validate_feeds, ClickhouseError, FeedFormat, FeedsError, FeedsFile, OpenError, CLICKHOUSE_KEY};
-use intel_feeds::limits::{DEFAULT_CONFIDENCE, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE};
+use intel_feeds::limits::{DEFAULT_CONFIDENCE, DEFAULT_DICTIONARY_PORT, DEFAULT_DICTIONARY_USER, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE};
 use intel_feeds::model::Tlp;
 use support::feed;
 use tempfile::tempdir;
@@ -145,6 +145,8 @@ fn the_clickhouse_section_loads_validates_reloads_and_is_audited_state() -> Test
     let config = current_config(&feeding);
     let clickhouse = config.clickhouse.as_ref().ok_or("no clickhouse")?;
     assert_eq!(clickhouse.timeout_ms, DEFAULT_TIMEOUT_MS);
+    assert_eq!(clickhouse.dictionary_user, DEFAULT_DICTIONARY_USER);
+    assert_eq!(clickhouse.dictionary_port, DEFAULT_DICTIONARY_PORT);
     assert_eq!(clickhouse.tenant, "tenant-a");
     assert!(feeds_state(&config).get(CLICKHOUSE_KEY).is_some_and(|text| text.contains("tenant-a")));
     replace_file(&path, &feeds_text(&CLICKHOUSE_SECTION.replace("tenant-a", "-x")))?;

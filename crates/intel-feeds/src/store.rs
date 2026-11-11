@@ -103,9 +103,10 @@ pub fn table_ddl(database: &str, table: &str) -> Result<String, StoreError> {
 }
 
 
-/// The dictionary reads the whole table: several tenants in one deployment use one table each.
-pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str) -> Result<String, StoreError> {
+/// The dictionary reads the whole table as `user`, a loopback no-password identity over the secure native `port`: no credential is in the DDL text.
+pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str, user: &str, port: u16) -> Result<String, StoreError> {
     let source = qualified(database, table)?;
+    quote_identifier(user)?;
     let target = qualified(database, dictionary)?;
     Ok(format!(
         "CREATE DICTIONARY IF NOT EXISTS {target} (\n    \
@@ -118,7 +119,7 @@ pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str) -> Result<S
          `expires_at` DateTime('UTC')\n\
          )\n\
          PRIMARY KEY `prefix`\n\
-         SOURCE(CLICKHOUSE(QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
+         SOURCE(CLICKHOUSE(USER '{user}' HOST '127.0.0.1' PORT {port} SECURE 1 QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
          FROM {source} FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `expires_at` > now()'))\n\
          LAYOUT(IP_TRIE)\n\
          LIFETIME(MIN 30 MAX 300)"
