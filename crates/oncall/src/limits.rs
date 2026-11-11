@@ -228,7 +228,7 @@ pub const MAX_HOLDER_CHARS: usize = 64;
 pub const HOLDER_RANDOM_BYTES: usize = 8;
 
 
-/// The server cancels a purge after this many milliseconds (`core_pg::query::timed_script`), before the client deadline gives up and before the shortest lease (`LEASE_FACTOR` seconds).
+/// The server cancels a purge after this many milliseconds (`SET LOCAL statement_timeout`), before the client deadline gives up and before the shortest lease (`LEASE_FACTOR` seconds).
 pub const PURGE_SERVER_TIMEOUT_MILLIS: u64 = 2_000;
 
 
