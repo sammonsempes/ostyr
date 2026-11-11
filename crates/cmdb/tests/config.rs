@@ -159,3 +159,72 @@ fn declared_assets_over_a_cap_or_with_invisible_text_are_refused_at_load() -> Te
     assert_eq!(load_cmdb(&path)?.assets.len(), 1);
     Ok(())
 }
+
+
+fn config_error(text: &str) -> Result<CmdbConfigError, Box<dyn std::error::Error>> {
+    let (_dir, path) = write_config(text)?;
+    Ok(load_cmdb(&path).err().ok_or("accepted")?)
+}
+
+
+fn asset_with(field: &str, value: &str) -> String {
+    format!("assets:\n  - id: a1\n    kind: server\n    lifecycle: in_service\n    {field}: \"{value}\"\n")
+}
+
+
+#[test]
+fn business_service_environment_and_location_are_capped_at_load() -> TestResult {
+    let long = "x".repeat(VALUE_CAP + 1);
+    ["business_service", "environment", "location"]
+        .iter()
+        .try_for_each(|field| -> TestResult {
+            let error = config_error(&asset_with(field, &long))?;
+            assert!(matches!(&error, CmdbConfigError::Declared { index: 0, .. }), "{error}");
+            assert!(!error.to_string().contains(&long));
+            let (_dir, path) = write_config(&asset_with(field, &"x".repeat(VALUE_CAP)))?;
+            assert_eq!(load_cmdb(&path)?.assets.len(), 1);
+            Ok(())
+        })
+}
+
+
+#[test]
+fn an_empty_declared_id_is_refused() -> TestResult {
+    let error = config_error("assets:\n  - id: \"\"\n    kind: server\n    lifecycle: in_service\n")?;
+    assert!(
+        matches!(&error, CmdbConfigError::Declared { index: 0, source, .. } if source.to_string().contains("asset id")),
+        "{error}"
+    );
+    Ok(())
+}
+
+
+fn edge(from: &str, to: &str) -> String {
+    format!("relationships:\n  - from: web1\n    kind: runs_on\n    to: web2\n  - from: \"{from}\"\n    kind: runs_on\n    to: \"{to}\"\n")
+}
+
+
+#[test]
+fn relationships_and_sources_of_truth_are_checked_at_load() -> TestResult {
+    let long = "i".repeat(MAX_ID_BYTES + 1);
+    [edge("a", "b\\u202e"), edge(&long, "b"), edge("a\\u200b", "b")]
+        .iter()
+        .try_for_each(|text| -> TestResult {
+            let error = config_error(text)?;
+            let message = error.to_string();
+            assert!(matches!(&error, CmdbConfigError::Relationship { index: 1, .. }), "{message}");
+            assert!(message.contains("cmdb.yaml") && message.contains("relationship"), "{message}");
+            assert!(!message.contains(&long));
+            Ok(())
+        })?;
+    let to = config_error(&edge("a", "b\\u202e"))?.to_string();
+    assert!(to.contains("relationship to"), "{to}");
+    let from = config_error(&edge(&long, "b"))?.to_string();
+    assert!(from.contains("relationship from"), "{from}");
+    let attribute = config_error("sources_of_truth:\n  \"ow\\u202en\": declared\n")?;
+    assert!(matches!(&attribute, CmdbConfigError::SourceOfTruth { index: 0, .. }), "{attribute}");
+    assert!(attribute.to_string().contains("source of truth attribute"));
+    let origin = config_error("sources_of_truth:\n  owner: \"dec\\u202elared\"\n")?;
+    assert!(origin.to_string().contains("source of truth source"), "{origin}");
+    Ok(())
+}

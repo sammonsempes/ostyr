@@ -1253,3 +1253,23 @@ async fn attribute_count_and_invisible_text_are_refused_before_any_store_call() 
     assert_eq!(*lock(&db.apply_calls), 1);
     Ok(())
 }
+
+
+#[tokio::test]
+async fn a_refused_observation_costs_no_statement() -> TestResult {
+    let db = Db::default();
+    let inner = executor(&db);
+    let statements = std::sync::atomic::AtomicUsize::new(0);
+    let counting = |scope: TenantScope, sql: &'static str, params: Vec<String>| -> RowFuture<'_> {
+        statements.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        inner(scope, sql, params)
+    };
+    let scope = tenant_scope("acme")?;
+    let oversized = observation("agent", "SN1", &[("rack", &"v".repeat(ATTRIBUTE_VALUE_BYTES + 1))]);
+    let refused = reconcile_stored(&counting, &scope, &oversized, &TruthMap::new(), &Limits::default()).await;
+    assert!(matches!(refused, Err(StoreError::Cmdb(CmdbError::FieldTooLong { .. }))), "{refused:?}");
+    assert_eq!(statements.load(std::sync::atomic::Ordering::SeqCst), 0);
+    reconcile_stored(&counting, &scope, &observation("agent", "SN1", &[]), &TruthMap::new(), &Limits::default()).await?;
+    assert!(statements.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    Ok(())
+}
