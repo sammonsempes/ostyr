@@ -128,6 +128,12 @@ pub enum DropReason {
     TrapMalformed,
     #[error("the SNMP message is not a v1 or v2c trap or inform")]
     TrapUnsupported,
+    #[error("the flow datagram exceeds the size cap")]
+    FlowTooLarge,
+    #[error("the flow datagram is malformed")]
+    FlowMalformed,
+    #[error("the flow datagram is not NetFlow version 5")]
+    FlowUnsupported,
 }
 
 

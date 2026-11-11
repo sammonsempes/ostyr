@@ -26,6 +26,7 @@ rustix = { version = "1.1", features = ["fs", "process", "rand"] }
 [dev-dependencies]
 core-audit = { path = "../core-audit" }
 proptest = "1"
+rand = "0.8"
 sha2 = "0.10"
 serde_json = "1"
 tempfile = "3"
