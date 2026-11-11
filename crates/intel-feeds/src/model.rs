@@ -97,6 +97,7 @@ pub struct FeedSummary {
     pub unsupported: u64,
     pub expired: u64,
     pub duplicates: u64,
+    pub unknown_tlp: u64,
     pub samples: Vec<SkipSample>,
     pub failed: Option<String>,
 }

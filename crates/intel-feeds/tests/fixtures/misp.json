@@ -1,0 +1,38 @@
+{
+  "Event": {
+    "info": "Project-written MISP event",
+    "Tag": [{"name": "type:OSINT"}, {"name": "tlp:green"}],
+    "Attribute": [
+      {"type": "ip-dst", "value": "198.51.100.7", "to_ids": true},
+      {"type": "ip-src|port", "value": "203.0.113.5|443", "to_ids": true},
+      {"type": "ip-src", "value": "192.0.2.0/24", "to_ids": "1"},
+      {"type": "ip-dst", "value": "2001:db8::1", "to_ids": true},
+      {"type": "domain", "value": "Evil.Example", "to_ids": true, "first_seen": "2026-11-01T08:00:00+00:00", "last_seen": "2026-11-02T08:00:00+00:00"},
+      {"type": "hostname", "value": "host.example.net", "to_ids": true, "timestamp": "1762000000"},
+      {"type": "domain|ip", "value": "dual.example|192.0.2.99", "to_ids": true},
+      {"type": "url", "value": "http://bad.example/x", "to_ids": true},
+      {"type": "md5", "value": "D41D8CD98F00B204E9800998ECF8427E", "to_ids": true},
+      {"type": "filename|sha1", "value": "a|b.exe|da39a3ee5e6b4b0d3255bfef95601890afd80709", "to_ids": true},
+      {"type": "filename|sha256", "value": "x.dll|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "to_ids": true},
+      {"type": "domain", "value": "not-for-detection.example", "to_ids": false},
+      {"type": "domain", "value": "absent-flag.example"},
+      {"type": "domain", "value": "deleted.example", "to_ids": true, "deleted": true},
+      {"type": "email-src", "value": "a@b.example", "to_ids": true},
+      {"type": "domain", "value": "tag-red.example", "to_ids": true, "Tag": [{"name": "tlp:red"}, {"name": "other"}, {"id": 1}]},
+      {"type": "domain", "value": "tag-white.example", "to_ids": true, "Tag": [{"name": "tlp:white"}]},
+      {"type": "domain", "value": "odd-tlp.example", "to_ids": true, "Tag": [{"name": "tlp:weird"}]},
+      {"type": "ip-dst", "value": "evil.example", "to_ids": true},
+      {"type": "url", "value": "http://a.example/x\nhttp://b.example", "to_ids": true},
+      {"type": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85", "to_ids": true},
+      {"type": "domain|ip", "value": "halfbad.example|nope", "to_ids": true},
+      {"type": "domain", "value": "badtime.example", "to_ids": true, "first_seen": "yesterday"},
+      {"type": "domain", "to_ids": true},
+      "text"
+    ],
+    "Object": [
+      {"name": "domain-ip", "Attribute": [{"type": "ip-dst", "value": "192.0.2.77", "to_ids": true}]},
+      {"name": "empty"},
+      "not an object"
+    ]
+  }
+}

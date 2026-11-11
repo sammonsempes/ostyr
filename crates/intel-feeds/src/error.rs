@@ -1,4 +1,4 @@
-use crate::limits::{MAX_DOCUMENT_BYTES, MAX_URL_BYTES};
+use crate::limits::{MAX_DOCUMENT_BYTES, MAX_MISP_ATTRIBUTES, MAX_URL_BYTES};
 use std::io;
 use std::str::Utf8Error;
 use thiserror::Error;
@@ -50,8 +50,14 @@ pub enum EntryError {
     },
     #[error(transparent)]
     Canon(#[from] CanonError),
-    #[error("unsupported STIX pattern")]
+    #[error("unsupported pattern or attribute type")]
     UnsupportedPattern,
+    #[error("attribute is not marked for detection")]
+    NotForDetection,
+    #[error("attribute is deleted")]
+    Deleted,
+    #[error("value holds a control character")]
+    ControlCharacter,
 }
 
 
@@ -68,6 +74,10 @@ pub enum FeedError {
     NotAnArray,
     #[error("the document is not a STIX bundle with an `objects` array")]
     NotABundle,
+    #[error("the document is not a MISP event with array `Attribute` and `Object` fields")]
+    NotAnEvent,
+    #[error("more than {MAX_MISP_ATTRIBUTES} attributes in the event")]
+    TooManyAttributes,
 }
 
 
@@ -83,5 +93,8 @@ pub fn reason_key(error: &EntryError) -> &'static str {
         EntryError::Confidence { .. } => "invalid_confidence",
         EntryError::Canon(_) => "invalid_value",
         EntryError::UnsupportedPattern => "unsupported_pattern",
+        EntryError::NotForDetection => "not_for_detection",
+        EntryError::Deleted => "deleted",
+        EntryError::ControlCharacter => "control_character",
     }
 }
