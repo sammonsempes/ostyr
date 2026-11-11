@@ -52,7 +52,7 @@ fn a_run_writes_ecs_lines_and_reports_the_counts() -> TestResult {
     assert!(text.contains("\"mac\":\"AA-BB-CC-DD-EE-01\""));
     assert_eq!(
         String::from_utf8(err)?,
-        "processed=1 duplicate=1 evicted=0 restarts=0 absent=0 refused=0 malformed=address=1\n"
+        "processed=1 duplicate=1 evicted=0 restarts=0 absent=0 refused=0 recovered=0 unrecovered=0 malformed=address=1\n"
     );
     Ok(())
 }
