@@ -4,12 +4,11 @@ use core_config::watch::watch_files;
 use dns_rpz::cli::{run_session, Session};
 use dns_rpz::model::Reloader;
 use dns_rpz::policy::{open_policy, Policy};
-use dns_rpz::source::open_source;
+use dns_rpz::run::open_file;
 use dns_rpz::unbound::run_with_deadline;
 use std::error::Error;
 use std::io::{self, stderr, stdin};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
@@ -19,8 +18,7 @@ use time::OffsetDateTime;
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
 
-const USAGE: &str =
-    "usage: rpz_run <policy> <audit> <iocs.jsonl|clickhouse:feeds.yaml> <counter> <zone> [fixed-now-rfc3339]; stdin commands: run, reload, quit";
+const USAGE: &str = "usage: rpz_run <policy> <audit> <iocs> <counter> <zone> [fixed-now-rfc3339]; stdin commands: run, reload, quit";
 
 
 #[cfg(unix)]
@@ -64,8 +62,8 @@ fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     let _signals = keep_signals(Arc::clone(&engine))?;
     let fixed = arguments.fixed_now.map(|text| OffsetDateTime::parse(text, &Rfc3339)).transpose()?;
     let clock = move || fixed.unwrap_or_else(OffsetDateTime::now_utc);
-    let rejected = AtomicU64::new(0);
-    let open = open_source(arguments.ioc_file, &clock, &rejected);
+    let ioc_path = PathBuf::from(arguments.ioc_file);
+    let open = move || open_file(&ioc_path);
     let mut report = stderr();
     let reload_context = ReloadContext {
         actor_id: "rpz_run".to_owned(),
@@ -84,8 +82,7 @@ fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
         reloader: &reloader,
         engine: &engine,
         clock: &clock,
-        open: &*open,
-        rejected: &rejected,
+        open: &open,
         counter: Path::new(arguments.counter_file),
         output: Path::new(arguments.zone_file),
         report: &mut report,

@@ -40,7 +40,6 @@ pub struct RunSummary {
     pub published: BTreeMap<&'static str, u64>,
     pub skipped: BTreeMap<&'static str, u64>,
     pub dropped_by_cap: u64,
-    pub source_bad_rows: u64,
     pub records: u64,
     pub serial: u32,
 }

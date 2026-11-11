@@ -115,7 +115,6 @@ fn the_fixture_iocs_give_the_snapshot_zone() -> TestResult {
                 ("unsupported_type", TWO),
             ]),
             dropped_by_cap: 0,
-            source_bad_rows: 0,
             records: FIXTURE_RECORDS,
             serial: FIRST_SERIAL,
         }
