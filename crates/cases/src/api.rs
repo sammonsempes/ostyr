@@ -1,19 +1,25 @@
-use crate::api_model::{CaseListView, CasesBackend, ListQuery};
+use crate::api_model::{ActionName, ActionRequest, CaseListView, CasesBackend, CommentRequest, ListQuery};
 use crate::error::CaseStoreError;
+use crate::model::Comment;
 use crate::store::{check_text, format_cursor, parse_cursor, MAX_ID_CHARS, MAX_PAGE_SIZE};
 use crate::stored::{CaseCounts, CaseCursor, CaseDetail, CasePage, CaseSummary, SummaryList};
+use crate::write_api::{
+    __path_action_endpoint, __path_comment_endpoint, action_endpoint, comment_endpoint, ACTIONS_PATH, ACTION_BODY_LIMIT, COMMENTS_PATH,
+    COMMENT_BODY_LIMIT,
+};
 use alerts::error::StoreError;
 use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_api::failure::reply;
 use core_api::model::{ApiError, ApiIdentity, ErrorBody, ErrorDetail, Requirement, Rule};
 use core_api::routes::route_key;
 use core_api::types::{AccessTable, SharedState};
-use core_auth::rbac::PERMISSION_CASES_READ;
+use core_auth::rbac::{PERMISSION_CASES_READ, PERMISSION_CASES_WRITE};
 use core_pg::scope::{tenant_scope, TenantScope};
 use data_encoding::BASE64URL_NOPAD;
 use std::sync::Arc;
@@ -42,8 +48,8 @@ pub const NOT_FOUND_MESSAGE: &str = "no such case";
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(list_endpoint, get_endpoint),
-    components(schemas(CaseSummary, CaseDetail, CaseCounts, CaseListView))
+    paths(list_endpoint, get_endpoint, action_endpoint, comment_endpoint),
+    components(schemas(CaseSummary, CaseDetail, CaseCounts, CaseListView, ActionRequest, ActionName, CommentRequest, Comment))
 )]
 pub struct CasesDoc;
 
@@ -131,15 +137,18 @@ pub async fn list_flow(identity: &ApiIdentity, backend: &CasesBackend, query: Re
 }
 
 
+/// `None` for an id the extractor refused (not UTF-8) or that is empty, over `MAX_ID_CHARS` or holds NUL.
+pub fn checked_id(id: Result<String, PathRejection>) -> Option<String> {
+    id.ok().filter(|text| check_text("id", text, MAX_ID_CHARS).is_ok())
+}
+
+
 /// A malformed id, or one the extractor refuses (not UTF-8), is answered like a missing one, without a store call.
 pub async fn get_flow(identity: &ApiIdentity, backend: &CasesBackend, id: Result<String, PathRejection>) -> Result<Response, ApiError> {
     let scope = scope_of(identity).map_err(|error| store_failure(&error))?;
-    let checked = id
-        .map_err(|_rejection| ())
-        .and_then(|text| check_text("id", &text, MAX_ID_CHARS).map(|()| text).map_err(|_malformed| ()));
-    match checked {
-        Err(()) => Ok(not_found()),
-        Ok(text) => (backend.get)(scope, text)
+    match checked_id(id) {
+        None => Ok(not_found()),
+        Some(text) => (backend.get)(scope, text)
             .await
             .map_err(|error| store_failure(&error))
             .map(|found| found.map_or_else(not_found, |detail| Json(detail).into_response())),
@@ -195,18 +204,23 @@ pub fn cases_router(backend: CasesBackend) -> Router<SharedState> {
     Router::new()
         .route(LIST_PATH, get(list_endpoint))
         .route(GET_PATH, get(get_endpoint))
+        .route(ACTIONS_PATH, post(action_endpoint).layer(DefaultBodyLimit::max(ACTION_BODY_LIMIT)))
+        .route(COMMENTS_PATH, post(comment_endpoint).layer(DefaultBodyLimit::max(COMMENT_BODY_LIMIT)))
         .layer(Extension(backend))
 }
 
 
 pub fn cases_access() -> AccessTable {
-    [LIST_PATH, GET_PATH]
+    let reads = [LIST_PATH, GET_PATH].map(|path| (route_key("GET", path), PERMISSION_CASES_READ));
+    let writes = [ACTIONS_PATH, COMMENTS_PATH].map(|path| (route_key("POST", path), PERMISSION_CASES_WRITE));
+    reads
         .into_iter()
-        .map(|path| {
+        .chain(writes)
+        .map(|(key, permission)| {
             (
-                route_key("GET", path),
+                key,
                 Rule {
-                    requirement: Requirement::Permission(PERMISSION_CASES_READ.to_owned()),
+                    requirement: Requirement::Permission(permission.to_owned()),
                     sensitive: false,
                 },
             )

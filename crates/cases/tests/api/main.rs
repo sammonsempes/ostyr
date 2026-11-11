@@ -6,6 +6,7 @@ mod memory;
 mod settings;
 mod swap;
 mod types;
+mod writes;
 
 
 use alerts::error::StoreError;
@@ -20,7 +21,7 @@ use cases::stored::{CaseCursor, SummaryList};
 use core_api::model::{ApiError, ApiIdentity};
 use core_api::state::RATE_MAX_REQUESTS;
 use data_encoding::BASE64URL_NOPAD;
-use fixture::{case, executor, fixture, fixture_with, memory_backend, store, ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT};
+use fixture::{case, executor, fixed_clock, fixture, fixture_with, memory_backend, store, ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT};
 use http::{body_json, get, login, BODY_READ_LIMIT};
 use memory::{lock, Forced};
 use serde_json::{json, Value};
@@ -374,6 +375,9 @@ async fn a_busy_store_is_a_429() -> TestResult {
     let fx = fixture_with(|_db| CasesBackend {
         list: Arc::new(|_scope, _page| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
         get: Arc::new(|_scope, _id| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
+        act: Arc::new(|_scope, _id, _action, _actor, _now| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
+        comment: Arc::new(|_scope, _id, _comment| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
+        clock: fixed_clock,
     })?;
     let token = login(&fx.router, ANALYST).await?;
     assert_eq!(get(&fx.router, "/cases", Some(&token)).await?.status(), StatusCode::TOO_MANY_REQUESTS);

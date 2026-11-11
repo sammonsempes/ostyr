@@ -29,6 +29,9 @@ pub const PERMISSION_ALERTS_READ: &str = "alerts.read";
 pub const PERMISSION_CASES_READ: &str = "cases.read";
 
 
+pub const PERMISSION_CASES_WRITE: &str = "cases.write";
+
+
 pub const PERMISSION_CMDB_READ: &str = "cmdb.read";
 
 
@@ -84,6 +87,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
         PERMISSION_CASES_READ,
+        PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
     ];
     let responder = [
@@ -91,6 +95,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
         PERMISSION_CASES_READ,
+        PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_RESPONSE_EXECUTE,
     ];
@@ -99,6 +104,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
         PERMISSION_CASES_READ,
+        PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_RESPONSE_EXECUTE,
         PERMISSION_USERS_MANAGE,
