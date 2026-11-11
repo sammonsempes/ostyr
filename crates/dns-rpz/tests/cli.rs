@@ -18,6 +18,7 @@ use memory::LimitedWriter;
 use runner::{failing_runner, succeeding_runner};
 use std::fs;
 use std::io::{self, BufRead, Cursor};
+use std::sync::atomic::AtomicU64;
 use tempfile::tempdir;
 use types::TestResult;
 
@@ -54,11 +55,13 @@ fn a_session_generates_reloads_and_stops_at_quit() -> TestResult {
         audit: &*sink,
         context: &zone_context,
     };
+    let rejected = AtomicU64::new(0);
     let mut report = Vec::new();
     let mut session = Session {
         engine: &policy,
         clock: &now,
         open: &open_iocs,
+        rejected: &rejected,
         counter: &counter,
         output: &zone,
         report: &mut report,
@@ -95,11 +98,13 @@ fn a_failed_run_is_reported_and_the_session_goes_on() -> TestResult {
         audit: &*sink,
         context: &zone_context,
     };
+    let rejected = AtomicU64::new(0);
     let mut report = Vec::new();
     let mut session = Session {
         engine: &policy,
         clock: &now,
         open: &open_missing,
+        rejected: &rejected,
         counter: &counter,
         output: &zone,
         report: &mut report,
@@ -128,12 +133,14 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
         audit: &*sink,
         context: &zone_context,
     };
+    let rejected = AtomicU64::new(0);
     let attempt = |command: &str, room: usize, open: &dyn Fn() -> io::Result<Box<dyn BufRead>>| {
         let mut report = LimitedWriter { remaining: room };
         let mut session = Session {
             engine: &policy,
             clock: &now,
             open,
+            rejected: &rejected,
             counter: &counter,
             output: &zone,
             report: &mut report,
@@ -150,6 +157,7 @@ fn failures_of_the_report_and_the_input_propagate() -> TestResult {
         engine: &policy,
         clock: &now,
         open: &open_iocs,
+        rejected: &rejected,
         counter: &counter,
         output: &zone,
         report: &mut report,
@@ -176,11 +184,13 @@ fn a_failed_zone_reload_is_reported_after_the_summary() -> TestResult {
         audit: &*sink,
         context: &zone_context,
     };
+    let rejected = AtomicU64::new(0);
     let mut report = Vec::new();
     let mut session = Session {
         engine: &policy,
         clock: &now,
         open: &open_iocs,
+        rejected: &rejected,
         counter: &counter,
         output: &zone,
         report: &mut report,
