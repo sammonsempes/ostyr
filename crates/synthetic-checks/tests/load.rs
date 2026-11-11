@@ -51,6 +51,41 @@ fn message_of(text: &str) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 
+fn icmp_with(target: &str) -> String {
+    format!("checks:\n  - name: ping\n    kind: icmp\n    target: \"{target}\"\n    locations: [paris]\n")
+}
+
+
+#[test]
+fn an_icmp_target_is_an_address_or_a_plain_name() -> TestResult {
+    ["192.0.2.1", "2001:db8::1", "host.example.org", "db_1.lan"]
+        .iter()
+        .try_for_each(|target| -> TestResult {
+            assert_eq!(parse(&icmp_with(target))?.checks.len(), 1, "{target}");
+            Ok(())
+        })
+}
+
+
+#[test]
+fn an_icmp_target_with_a_port_a_path_or_a_leading_dash_is_refused() -> TestResult {
+    [
+        "192.0.2.1:80",
+        "[2001:db8::1]:80",
+        "host/path",
+        "user@host",
+        "-host",
+        "fe80::1%eth0",
+        "a b",
+    ]
+    .iter()
+    .try_for_each(|target| -> TestResult {
+        assert!(message_of(&icmp_with(target))?.contains("`icmp` target"), "{target}");
+        Ok(())
+    })
+}
+
+
 #[test]
 fn defaults_apply() -> TestResult {
     let file = parse(MINIMAL)?;
