@@ -6,7 +6,7 @@ use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, MAX_TENANT_BYTES};
 use metric_alerts::error::RuleError;
 use metric_alerts::model::{Capacity, Condition, Direction, Rule, Severity};
-use metric_alerts::query::{parse_tenant_id, rule_sql, window_and_step, MetricQuery};
+use metric_alerts::query::{capacity_sql, latest_value, parse_tenant_id, rule_sql, window_and_step, MetricQuery};
 use siem_schema::metrics::{MetricsRetention, MetricsTable};
 use std::collections::BTreeMap;
 
@@ -306,5 +306,95 @@ fn tenant_id_follows_core_pg() -> TestResult {
         .iter()
         .all(|text| matches!(parse_tenant_id(text), Err(RuleError::InvalidTenant(_)))));
     assert_eq!(RuleError::InvalidTenant(PgError::InvalidTenant).to_string(), "invalid tenant id");
+    Ok(())
+}
+
+
+const LATEST_TIME: u64 = 30;
+
+
+const LATEST_VALUE: f64 = 3.0;
+
+
+const EARLY_VALUE: f64 = 1.0;
+
+
+pub fn capacity_rule(name: &str, window: u64) -> Rule {
+    let condition = Condition::Forecast {
+        window,
+        capacity: Capacity::Metric { name: name.to_string() },
+        horizon: HORIZON,
+        min_confidence: CONFIDENCE,
+        min_points: FORECAST_POINTS,
+    };
+    rule(condition, 0, &[("asset", "web"), ("mount", "/")])
+}
+
+
+pub fn capacity(rule: &Rule, settings: &MetricsRetention) -> Result<Option<MetricQuery>, RuleError> {
+    capacity_sql(rule, &parse_tenant_id("acme")?, NOW, settings)
+}
+
+
+#[test]
+fn capacity_query_golden_raw_and_rollup() -> TestResult {
+    let raw = capacity(&capacity_rule("disk.total", FIVE_MINUTES), &MetricsRetention::default())?.ok_or("no query")?;
+    let expected = "SELECT toUnixTimestamp(`@timestamp`) AS `ts`, anyLast(`value`) AS `value`\nFROM `metric_samples`\nWHERE `tenant` = {tenant:String}\n    AND `metric` = {metric:String}\n    AND `@timestamp` >= toDateTime64({from:UInt64}, 3, 'UTC')\n    AND `@timestamp` <= toDateTime64({to:UInt64}, 3, 'UTC')\n    AND `labels`[{label_name_0:String}] = {label_value_0:String}\n    AND `labels`[{label_name_1:String}] = {label_value_1:String}\nGROUP BY `ts`\nORDER BY `ts` ASC\n";
+    assert_eq!(raw.sql, expected);
+    let from = (NOW - FIVE_MINUTES).to_string();
+    let params: Vec<(&str, &str)> = raw.params.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    let wanted = vec![
+        ("tenant", "acme"),
+        ("metric", "disk.total"),
+        ("from", from.as_str()),
+        ("to", "1000000000"),
+        ("label_name_0", "asset"),
+        ("label_value_0", "web"),
+        ("label_name_1", "mount"),
+        ("label_value_1", "/"),
+    ];
+    assert_eq!(params, wanted);
+    let rollup = capacity(&capacity_rule("disk.total", THIRTY_DAYS), &short_rollups())?.ok_or("no query")?;
+    assert_ne!(rollup.table, MetricsTable::Raw);
+    assert!(rollup.sql.contains("anyLast(`value_last`)"));
+    assert!(rollup.sql.contains("WHERE `tenant` = {tenant:String}"));
+    Ok(())
+}
+
+
+#[test]
+fn capacity_query_is_none_for_other_rules() -> TestResult {
+    let settings = MetricsRetention::default();
+    let others = [
+        rule(threshold(Direction::Above), 0, &[]),
+        rule(rate(Direction::Above), 0, &[]),
+        rule(Condition::Absence { interval: INTERVAL }, 0, &[]),
+        rule(forecast(TWO_DAYS, FORECAST_POINTS), 0, &[]),
+    ];
+    others
+        .iter()
+        .try_for_each(|other| capacity(other, &settings).map(|query| assert!(query.is_none())))?;
+    Ok(())
+}
+
+
+#[test]
+fn hostile_capacity_name_stays_a_parameter() -> TestResult {
+    let hostile = "x' OR 1=1 --`}\n";
+    let plain = capacity(&capacity_rule("plain", FIVE_MINUTES), &MetricsRetention::default())?.ok_or("no query")?;
+    let query = capacity(&capacity_rule(hostile, FIVE_MINUTES), &MetricsRetention::default())?.ok_or("no query")?;
+    assert_eq!(query.sql, plain.sql);
+    assert!(query.params.contains(&("metric".to_string(), hostile.to_string())));
+    Ok(())
+}
+
+
+#[test]
+fn latest_value_takes_the_greatest_timestamp() -> TestResult {
+    assert_eq!(
+        latest_value(&[(LATEST_TIME, LATEST_VALUE), (1, EARLY_VALUE), (QUARTER, EARLY_VALUE)]),
+        Some(LATEST_VALUE)
+    );
+    assert_eq!(latest_value(&[]), None);
     Ok(())
 }

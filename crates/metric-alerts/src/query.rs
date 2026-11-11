@@ -1,8 +1,8 @@
 use crate::error::RuleError;
 use crate::evaluate::ABSENCE_INTERVALS;
-use crate::model::{Condition, Direction, Rule};
+use crate::model::{Capacity, Condition, Direction, Rule};
 use crate::rules::MAX_LABELS;
-use crate::types::QueryParams;
+use crate::types::{Point, QueryParams};
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use siem_schema::identifier::{quote_identifier, validate_identifier};
 use siem_schema::metrics::{pick_table, table_name, MetricsRetention, MetricsTable, BUCKET_COLUMN};
@@ -121,6 +121,19 @@ pub fn selector_clauses(rule: &Rule) -> Result<(Vec<String>, QueryParams), RuleE
 
 /// Compiles the rule to one parameterised query over `[now - window, now]` returning rows `(ts, value)` in ascending order.
 pub fn rule_sql(rule: &Rule, tenant: &TenantScope, now: u64, settings: &MetricsRetention) -> Result<MetricQuery, RuleError> {
+    metric_sql(rule, tenant, now, settings, &rule.metric, aggregate_of(&rule.condition))
+}
+
+
+/// The shared query builder: the rule's window, table and selector over `metric` with `aggregate`, always filtered on the tenant.
+pub fn metric_sql(
+    rule: &Rule,
+    tenant: &TenantScope,
+    now: u64,
+    settings: &MetricsRetention,
+    metric: &str,
+    aggregate: Aggregate,
+) -> Result<MetricQuery, RuleError> {
     let (window, step) = window_and_step(rule);
     let table = pick_table(settings, window, step)?;
     let (clauses, label_params) = selector_clauses(rule)?;
@@ -128,14 +141,14 @@ pub fn rule_sql(rule: &Rule, tenant: &TenantScope, now: u64, settings: &MetricsR
     let name = quote_identifier(table_name(table))?;
     let time = quote_identifier(time_column(table))?;
     let tenant_column = quote_identifier(TENANT_COLUMN)?;
-    let value = value_expression(table, aggregate_of(&rule.condition));
+    let value = value_expression(table, aggregate);
     let sql = format!(
         "SELECT toUnixTimestamp({time}) AS `ts`, {value} AS `value`\nFROM {name}\nWHERE {tenant_column} = {{tenant:String}}\n    AND `metric` = {{metric:String}}\n    AND {time} >= toDateTime64({{from:UInt64}}, 3, 'UTC')\n    AND {time} <= toDateTime64({{to:UInt64}}, 3, 'UTC')\n{}GROUP BY `ts`\nORDER BY `ts` ASC\n",
         clauses.concat()
     );
     let base = vec![
         ("tenant".to_string(), tenant_of(tenant).to_owned()),
-        ("metric".to_string(), rule.metric.clone()),
+        ("metric".to_string(), metric.to_owned()),
         ("from".to_string(), from.to_string()),
         ("to".to_string(), now.to_string()),
     ];
@@ -144,4 +157,22 @@ pub fn rule_sql(rule: &Rule, tenant: &TenantScope, now: u64, settings: &MetricsR
         params: [base, label_params].concat(),
         table,
     })
+}
+
+
+/// Query of the latest capacity of a forecast whose capacity is a metric; `None` for every other rule.
+pub fn capacity_sql(rule: &Rule, tenant: &TenantScope, now: u64, settings: &MetricsRetention) -> Result<Option<MetricQuery>, RuleError> {
+    match &rule.condition {
+        Condition::Forecast {
+            capacity: Capacity::Metric { name },
+            ..
+        } => metric_sql(rule, tenant, now, settings, name, Aggregate::Last).map(Some),
+        _ => Ok(None),
+    }
+}
+
+
+/// The value of the greatest timestamp.
+pub fn latest_value(rows: &[Point]) -> Option<f64> {
+    rows.iter().max_by_key(|(timestamp, _)| *timestamp).map(|(_, value)| *value)
 }
