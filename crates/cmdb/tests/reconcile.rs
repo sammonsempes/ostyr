@@ -273,3 +273,98 @@ fn reserved_names_are_refused_by_reconcile_itself() -> TestResult {
     assert!(reconcile(&inventory, &honest, &TruthMap::new()).is_ok());
     Ok(())
 }
+
+
+const ID_CAP: usize = 512;
+
+
+const VALUE_CAP: usize = 4_096;
+
+
+const NAME_CAP: usize = 256;
+
+
+const ONE_MEGABYTE: usize = 1_048_576;
+
+
+fn refusal(observation: &Observation) -> Option<CmdbError> {
+    reconcile(&[], observation, &TruthMap::new()).err()
+}
+
+
+#[test]
+fn derived_id_and_key_value_are_bounded() -> TestResult {
+    let prefix = format!("{}:", IdentityKey::SerialNumber);
+    let at_cap = "s".repeat(ID_CAP - prefix.len());
+    assert!(refusal(&observation("agent", &[(IdentityKey::SerialNumber, &at_cap)], &[])).is_none());
+    let over = "s".repeat(ID_CAP - prefix.len() + 1);
+    assert_eq!(
+        refusal(&observation("agent", &[(IdentityKey::SerialNumber, &over)], &[])),
+        Some(CmdbError::FieldTooLong {
+            field: "asset id",
+            limit: ID_CAP
+        })
+    );
+    let huge = "s".repeat(VALUE_CAP + 1);
+    assert_eq!(
+        refusal(&observation("agent", &[(IdentityKey::SerialNumber, &huge)], &[])),
+        Some(CmdbError::FieldTooLong {
+            field: "keys",
+            limit: VALUE_CAP
+        })
+    );
+    Ok(())
+}
+
+
+#[test]
+fn attribute_name_value_and_source_are_bounded() -> TestResult {
+    let keys = [(IdentityKey::SerialNumber, "S1")];
+    let name_ok = "n".repeat(NAME_CAP);
+    let value_ok = "v".repeat(VALUE_CAP);
+    assert!(refusal(&observation("agent", &keys, &[(&name_ok, &value_ok)])).is_none());
+    let name_over = "n".repeat(NAME_CAP + 1);
+    assert_eq!(
+        refusal(&observation("agent", &keys, &[(&name_over, "x")])),
+        Some(CmdbError::FieldTooLong {
+            field: "attribute name",
+            limit: NAME_CAP
+        })
+    );
+    let value_over = "v".repeat(ONE_MEGABYTE);
+    assert_eq!(
+        refusal(&observation("agent", &keys, &[("serial", &value_over)])),
+        Some(CmdbError::FieldTooLong {
+            field: "attribute value",
+            limit: VALUE_CAP
+        })
+    );
+    let source_over = "a".repeat(VALUE_CAP + 1);
+    assert_eq!(
+        refusal(&observation(&source_over, &keys, &[])),
+        Some(CmdbError::FieldTooLong {
+            field: "source",
+            limit: VALUE_CAP
+        })
+    );
+    Ok(())
+}
+
+
+#[test]
+fn control_characters_are_refused_naming_the_field_only() -> TestResult {
+    let keys = [(IdentityKey::SerialNumber, "S1")];
+    let ansi = "\u{1b}[31mred";
+    let cases = [
+        (observation("agent", &[(IdentityKey::SerialNumber, ansi)], &[]), "keys"),
+        (observation("agent", &keys, &[("ra\0ck", "x")]), "attribute name"),
+        (observation("agent", &keys, &[("rack", "a\0b")]), "attribute value"),
+        (observation("ag\u{7}ent", &keys, &[]), "source"),
+    ];
+    cases
+        .iter()
+        .for_each(|(case, field)| assert_eq!(refusal(case), Some(CmdbError::ControlCharacter { field })));
+    let message = CmdbError::ControlCharacter { field: "keys" }.to_string();
+    assert!(!message.contains('\u{1b}'));
+    Ok(())
+}

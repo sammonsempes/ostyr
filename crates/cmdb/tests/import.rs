@@ -11,6 +11,9 @@ use std::io::Read;
 use types::TestResult;
 
 
+const OVERSIZED_VALUE: usize = 5_000;
+
+
 const SMALL_BYTES: u64 = 10;
 
 
@@ -282,6 +285,21 @@ fn reserved_source_and_attribute_prefix_are_refused_naming_the_field_only() -> T
         .ok_or("accepted")?;
     assert!(matches!(refused_attribute, ImportError::ReservedName { field: "attributes" }));
     assert!(!refused_attribute.to_string().contains("mac"));
+    Ok(())
+}
+
+
+#[test]
+fn oversized_value_rejects_that_row_only() -> TestResult {
+    let long = "v".repeat(OVERSIZED_VALUE);
+    let text = format!("serial,owner,site\nSN1,{long},paris\nSN2,bob,lyon\n");
+    let report = run(&text, ImportFormat::Csv, &[], &TruthMap::new())?;
+    assert_eq!(report.created.len(), 1);
+    assert_eq!(report.rejected.len(), 1);
+    assert!(report
+        .rejected
+        .iter()
+        .all(|row| row.reason.contains("attribute value") && !row.reason.contains(&long)));
     Ok(())
 }
 
