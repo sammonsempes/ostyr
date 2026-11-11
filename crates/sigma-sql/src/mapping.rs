@@ -15,9 +15,19 @@ pub struct CategoryMapping {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ServiceMapping {
+    pub provider: String,
+    pub fields: FieldTable,
+}
+
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldMapping {
     pub products: FieldTable,
     pub categories: BTreeMap<String, CategoryMapping>,
+    #[serde(default)]
+    pub services: BTreeMap<String, ServiceMapping>,
 }
 
 
@@ -28,6 +38,7 @@ pub fn parse_mapping(text: &str) -> Result<FieldMapping, SigmaError> {
         .categories
         .values()
         .flat_map(|category| category.fields.values())
+        .chain(mapping.services.values().flat_map(|service| service.fields.values()))
         .try_for_each(|column| quote_identifier(column).map(|_| ()))?;
     Ok(mapping)
 }

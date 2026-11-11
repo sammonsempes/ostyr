@@ -1,7 +1,7 @@
 use crate::error::SigmaError;
-use crate::mapping::CategoryMapping;
 use crate::modifier::{parse_field_key, Matcher, Modifiers};
 use crate::sql::{is_array_field, quote_identifier, sql_literal};
+use crate::types::FieldTable;
 use crate::value::{like_pattern, parse_pieces, plain_text, Piece};
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -12,11 +12,14 @@ use std::net::IpAddr;
 pub struct Context<'a> {
     pub rule: &'a str,
     pub category: &'a str,
-    pub mapping: &'a CategoryMapping,
+    pub fields: &'a FieldTable,
 }
 
 
 const DASH_VARIANTS: &[char] = &['-', '/', '\u{2013}', '\u{2014}', '\u{2015}'];
+
+
+pub const EVENT_CODE_COLUMN: &str = "event.code";
 
 
 const ARRAY_ELEMENT: &str = "x";
@@ -159,18 +162,36 @@ fn has_any_sql(column: &str, modifiers: Modifiers, items: &[&Value]) -> Option<S
 }
 
 
+fn event_code_value(context: &Context, field: &str, item: &Value) -> Result<Value, SigmaError> {
+    match item {
+        Value::Number(number) if !number.is_f64() => Ok(Value::String(number.to_string())),
+        Value::String(_) => Ok(item.clone()),
+        _ => Err(bad_value(context, field, "an event code is an integer or a string".to_string())),
+    }
+}
+
+
 fn compile_field(context: &Context, key: &str, value: &Value) -> Result<String, SigmaError> {
     let (field, modifiers) = parse_field_key(context.rule, key)?;
-    let column = context.mapping.fields.get(&field).ok_or_else(|| SigmaError::UnmappedField {
+    let column = context.fields.get(&field).ok_or_else(|| SigmaError::UnmappedField {
         rule: context.rule.to_string(),
         field: field.clone(),
         category: context.category.to_string(),
     })?;
     let quoted = quote_identifier(column)?;
-    let items: Vec<&Value> = match value {
+    let raw_items: Vec<&Value> = match value {
         Value::Array(list) => list.iter().collect(),
         single => vec![single],
     };
+    let converted: Vec<Value> = if column == EVENT_CODE_COLUMN {
+        raw_items
+            .iter()
+            .map(|item| event_code_value(context, &field, item))
+            .collect::<Result<_, _>>()?
+    } else {
+        raw_items.into_iter().cloned().collect()
+    };
+    let items: Vec<&Value> = converted.iter().collect();
     let array = is_array_field(column);
     let any = if array { has_any_sql(&quoted, modifiers, &items) } else { None };
     let parts = match any {
