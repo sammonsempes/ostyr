@@ -1,7 +1,7 @@
 //! Unix directory walk by file descriptor: every directory and file is opened relative to its parent's handle, never by path text.
 
 use crate::scan::{cut_path, examine, has_wanted_extension, load_handle, record_error, Loaded, ScanSettings, ScanState};
-use rustix::fs::{openat, Dir, FileType, Mode, OFlags};
+use rustix::fs::{openat, statat, AtFlags, Dir, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -56,6 +56,15 @@ pub fn plan(settings: &ScanSettings, name: &OsStr, file_type: FileType) -> Step 
         Step::Examine
     } else {
         Step::Ignore
+    }
+}
+
+
+/// Resolves an `Unknown` reported type with one `fstatat` that does not follow symlinks; any other type, or a failed stat, is kept as reported.
+pub fn resolve_type(parent: &OwnedFd, name: &OsStr, reported: FileType) -> FileType {
+    match reported {
+        FileType::Unknown => statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_or(reported, |stat| FileType::from_raw_mode(stat.st_mode)),
+        _ => reported,
     }
 }
 
@@ -187,8 +196,9 @@ pub fn handle_next(
 
 fn visit(settings: &ScanSettings, level: &Level, can_descend: bool, before_open: fn(&Path), state: &mut ScanState, listed: &Listed) -> Option<Level> {
     let path = level.path.join(&listed.name);
+    let file_type = resolve_type(&level.handle, &listed.name, listed.file_type);
     before_open(&path);
-    match plan(settings, &listed.name, listed.file_type) {
+    match plan(settings, &listed.name, file_type) {
         Step::Descend if can_descend => open_child(level, &listed.name, path, state),
         Step::Examine => {
             examine(settings, state, &path, || load_at(&level.handle, &listed.name, settings.max_file_bytes));
