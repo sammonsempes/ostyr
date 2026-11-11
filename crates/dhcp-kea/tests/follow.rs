@@ -848,3 +848,74 @@ fn compacted_passes_over_a_full_seen_set_emit_each_row_at_most_once() -> TestRes
     assert_eq!((run.counts.recovered, run.counts.beyond_seen), (MANY_ROWS, FOUR_BEYOND));
     Ok(())
 }
+
+
+const SECOND_LEASE: u8 = 2;
+
+
+const THIRD_LEASE: u8 = 3;
+
+
+const FIRST_CLTT: i64 = 1_000;
+
+
+const SECOND_CLTT: i64 = 2_000;
+
+
+const THIRD_CLTT: i64 = 3_000;
+
+
+const LONG_LIFETIME: i64 = 1_000_000;
+
+
+const SHORT_LIFETIME: i64 = 100;
+
+
+fn lease_row(number: u8, cltt: i64, lifetime: i64) -> String {
+    format!(
+        "10.0.2.{number},aa:bb:cc:dd:ee:{number:02x},01,{lifetime},{},1,0,0,h{number}.example.,0,",
+        cltt + lifetime
+    )
+}
+
+
+#[test]
+fn a_main_file_row_below_a_full_seen_set_is_beyond_seen_and_never_a_duplicate() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let newest = lease_row(1, THIRD_CLTT, SHORT_LIFETIME);
+    let oldest = lease_row(SECOND_LEASE, FIRST_CLTT, SHORT_LIFETIME);
+    write(&path, lines(&[HEADER, &newest, &oldest, &newest]))?;
+    let mut run = fresh();
+    let limits = Limits {
+        max_seen: 1,
+        ..Limits::default()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.2.1"]);
+    assert_eq!((run.counts.processed, run.counts.duplicate, run.counts.beyond_seen), (1, 1, 1));
+    append(&path, &lines(&[&oldest]))?;
+    assert_eq!(step(&path, &mut run, &limits)?, Vec::<String>::new());
+    assert_eq!((run.counts.duplicate, run.counts.beyond_seen), (1, TWO));
+    Ok(())
+}
+
+
+#[test]
+fn a_full_seen_set_keeps_the_newest_created_leases_whatever_their_expiry_order() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let long_old = lease_row(1, FIRST_CLTT, LONG_LIFETIME);
+    let short_mid = lease_row(SECOND_LEASE, SECOND_CLTT, SHORT_LIFETIME);
+    let short_new = lease_row(THIRD_LEASE, THIRD_CLTT, SHORT_LIFETIME);
+    write(&path, lines(&[HEADER, &long_old, &short_mid, &short_new]))?;
+    let mut run = fresh();
+    let limits = Limits {
+        max_seen: SMALL_SEEN,
+        ..Limits::default()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.2.1", "10.0.2.2", "10.0.2.3"]);
+    let survivors: Vec<&str> = run.state.seen.iter().map(|key| key.2.as_str()).collect();
+    assert_eq!(survivors, ["10.0.2.2", "10.0.2.3"]);
+    assert_eq!(run.counts.evicted, 1);
+    Ok(())
+}

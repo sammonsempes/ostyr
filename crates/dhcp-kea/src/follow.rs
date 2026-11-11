@@ -241,14 +241,14 @@ fn count_malformed(counts: &mut Counts, error: &RowError) {
 
 fn handle_row(columns: &Columns, state_seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>, raw: RawLine) {
     match row_text(raw).and_then(|text| convert_row(columns, &text)) {
-        Ok(Converted { event, key, .. }) => {
-            if remember(state_seen, key, limits.max_seen, counts) {
+        Ok(Converted { event, key, .. }) => match remember_key(state_seen, key, limits.max_seen, counts) {
+            Remembered::Fresh => {
                 out.push(event);
                 counts.processed += 1;
-            } else {
-                counts.duplicate += 1;
             }
-        }
+            Remembered::Known => counts.duplicate += 1,
+            Remembered::Beyond => counts.beyond_seen += 1,
+        },
         Err(error) => count_malformed(counts, &error),
     }
 }
@@ -521,6 +521,14 @@ fn column_count_refusals(counts: &Counts) -> u64 {
 }
 
 
+fn warn_beyond_seen(before: u64, counts: &Counts) {
+    let total = counts.beyond_seen;
+    if total > before {
+        warn!(total, "new leases fell below a full seen set and were not emitted");
+    }
+}
+
+
 fn warn_column_count(before: u64, counts: &Counts) {
     let total = column_count_refusals(counts);
     if total > before {
@@ -539,7 +547,9 @@ pub fn poll(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut 
         Some((file, identity, length)) => {
             let before = column_count_refusals(counts);
             let restarts = counts.restarts;
+            let beyond = counts.beyond_seen;
             let result = read_new(Opened { file, identity, length }, state, limits, counts, out);
+            warn_beyond_seen(beyond, counts);
             recover_compacted(path, state, limits, counts, out, counts.restarts > restarts);
             warn_column_count(before, counts);
             result
