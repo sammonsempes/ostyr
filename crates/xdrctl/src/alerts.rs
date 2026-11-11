@@ -83,7 +83,7 @@ pub fn valid_cursor(cursor: &str) -> bool {
 }
 
 
-pub fn list_path(limit: Option<u32>, cursor: Option<&str>) -> Result<String, CliError> {
+pub fn page_path(base: &str, limit: Option<u32>, cursor: Option<&str>) -> Result<String, CliError> {
     if cursor.is_some_and(|value| !valid_cursor(value)) {
         Err(CliError::InvalidArgument("cursor"))
     } else {
@@ -93,12 +93,13 @@ pub fn list_path(limit: Option<u32>, cursor: Option<&str>) -> Result<String, Cli
             .chain(cursor.map(|value| format!("cursor={value}")))
             .collect::<Vec<_>>()
             .join("&");
-        Ok(if query.is_empty() {
-            "/alerts".to_owned()
-        } else {
-            format!("/alerts?{query}")
-        })
+        Ok(if query.is_empty() { base.to_owned() } else { format!("{base}?{query}") })
     }
+}
+
+
+pub fn list_path(limit: Option<u32>, cursor: Option<&str>) -> Result<String, CliError> {
+    page_path("/alerts", limit, cursor)
 }
 
 
