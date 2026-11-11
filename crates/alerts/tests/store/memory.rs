@@ -1,5 +1,5 @@
-use crate::types::Table;
-use alerts::store::{GET_SQL, INSERT_SQL, NEXT_SQL};
+use crate::types::{Table, TriageKey, TriageRow};
+use alerts::store::{GET_SQL, INSERT_SQL, NEXT_SQL, TRIAGE_GET_SQL, TRIAGE_INSERT_SQL, TRIAGE_UPDATE_SQL};
 use alerts::types::Row;
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -7,6 +7,21 @@ use serde_json::Value;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+
+
+pub const STATUS_PARAM: usize = 1;
+
+
+pub const ACTOR_PARAM: usize = 2;
+
+
+pub const NOTE_PARAM: usize = 3;
+
+
+pub const NOW_PARAM: usize = 4;
+
+
+pub const READ_PARAM: usize = 5;
 
 
 pub enum Forced {
@@ -18,6 +33,7 @@ pub enum Forced {
 #[derive(Default)]
 pub struct Db {
     pub tenants: Mutex<BTreeMap<String, Table>>,
+    pub triage: Mutex<BTreeMap<TriageKey, TriageRow>>,
     pub forced: Mutex<VecDeque<Forced>>,
     pub statements: Mutex<Vec<(String, &'static str)>>,
 }
@@ -108,6 +124,58 @@ pub fn select(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, P
 }
 
 
+pub fn triage_statement(
+    db: &Db,
+    tenants: &BTreeMap<String, Table>,
+    scope: &TenantScope,
+    sql: &'static str,
+    params: &[String],
+) -> Result<Vec<Row>, PgError> {
+    let tenant = tenant_of(scope).to_owned();
+    let alert_id = params.first().ok_or_else(malformed)?.clone();
+    let key = (tenant.clone(), alert_id.clone());
+    let mut triage = lock(&db.triage);
+    if sql == TRIAGE_GET_SQL {
+        Ok(triage
+            .get(&key)
+            .map(|(status, actor, note, now, version)| vec![status.clone(), actor.clone(), note.clone(), now.to_string(), version.to_string()])
+            .into_iter()
+            .collect())
+    } else if !tenants.get(&tenant).is_some_and(|table| table.contains_key(&alert_id)) {
+        Ok(vec![vec!["0".to_owned(), String::new()]])
+    } else {
+        let now = params
+            .get(NOW_PARAM)
+            .ok_or_else(malformed)?
+            .parse::<u64>()
+            .map_err(|_source| malformed())?;
+        let version = match (sql == TRIAGE_UPDATE_SQL, triage.get(&key)) {
+            (false, None) => Some(1),
+            (true, Some(current)) => {
+                let read = params
+                    .get(READ_PARAM)
+                    .ok_or_else(malformed)?
+                    .parse::<i64>()
+                    .map_err(|_source| malformed())?;
+                (current.4 == read).then_some(read + 1)
+            }
+            _other => None,
+        };
+        if let Some(next) = version {
+            let row = (
+                params.get(STATUS_PARAM).ok_or_else(malformed)?.clone(),
+                params.get(ACTOR_PARAM).ok_or_else(malformed)?.clone(),
+                params.get(NOTE_PARAM).ok_or_else(malformed)?.clone(),
+                now,
+                next,
+            );
+            triage.insert(key, row);
+        }
+        Ok(vec![vec!["1".to_owned(), version.map_or_else(String::new, |next| next.to_string())]])
+    }
+}
+
+
 pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]) -> Result<Vec<Row>, PgError> {
     lock(&db.statements).push((tenant_of(scope).to_owned(), sql));
     match lock(&db.forced).pop_front() {
@@ -121,6 +189,8 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]
             let table = tenants.entry(tenant_of(scope).to_owned()).or_default();
             if sql == INSERT_SQL {
                 insert(table, params)
+            } else if [TRIAGE_GET_SQL, TRIAGE_INSERT_SQL, TRIAGE_UPDATE_SQL].contains(&sql) {
+                triage_statement(db, &tenants, scope, sql, params)
             } else if sql == GET_SQL {
                 Ok(table
                     .get(params.first().map_or("", String::as_str))

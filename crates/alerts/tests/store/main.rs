@@ -4,12 +4,12 @@ mod types;
 
 use alerts::error::StoreError;
 use alerts::id::{alert_id, is_alert_id, ID_HEX_LENGTH};
-use alerts::model::{Alert, Cursor, Page, Severity, Summary, SEVERITY_COLUMN};
+use alerts::model::{Alert, Cursor, Page, Severity, Summary, TriageChange, TriageStatus, SEVERITY_COLUMN};
 use alerts::store::{
-    check_alert, check_page, format_cursor, get_alert, insert_alerts, list_alerts, parse_cursor, summarise, CREATED_COLUMN, EVENT_IDS_COLUMN,
-    FIRST_SQL, GET_SQL, INSERT_SQL, MAX_ALERTS_PER_INSERT, MAX_CREATED_MICROS, MAX_ENTITY_CHARS, MAX_EVENT_IDS, MAX_EVENT_ID_CHARS,
-    MAX_EVENT_TIME_CHARS, MAX_PAGE_SIZE, MAX_RULE_ID_CHARS, MAX_SUMMARY_BYTES, MAX_TITLE_CHARS, MIGRATIONS, MIGRATION_NAMESPACE, NEXT_SQL,
-    ORIGINAL_BYTES_COLUMN, TRUNCATED_COLUMN,
+    check_alert, check_page, format_cursor, get_alert, get_triage, insert_alerts, list_alerts, parse_cursor, set_triage, summarise, CREATED_COLUMN,
+    EVENT_IDS_COLUMN, FIRST_SQL, GET_SQL, INSERT_SQL, MAX_ALERTS_PER_INSERT, MAX_CREATED_MICROS, MAX_ENTITY_CHARS, MAX_EVENT_IDS, MAX_EVENT_ID_CHARS,
+    MAX_EVENT_TIME_CHARS, MAX_NOTE_CHARS, MAX_PAGE_SIZE, MAX_RULE_ID_CHARS, MAX_SUMMARY_BYTES, MAX_TITLE_CHARS, MIGRATIONS, MIGRATION_NAMESPACE,
+    NEXT_SQL, ORIGINAL_BYTES_COLUMN, TRIAGE_GET_SQL, TRIAGE_INSERT_SQL, TRIAGE_UPDATE_SQL, TRUNCATED_COLUMN,
 };
 use alerts::types::{Row, RowFuture};
 use core_pg::error::PgError;
@@ -25,6 +25,12 @@ const KNOWN_ID: &str = "2d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f
 
 
 const TWO: usize = 2;
+
+
+const THREE: usize = 3;
+
+
+const FOUR: usize = 4;
 
 
 const SEVEN: usize = 7;
@@ -139,7 +145,7 @@ fn migrations_are_valid_and_namespaced() -> TestResult {
     assert!(INSERT_SQL.contains("ON CONFLICT (tenant, id) DO NOTHING"));
     assert!(INSERT_SQL.contains("queued AS (") && INSERT_SQL.contains("INSERT INTO alert_outbox (tenant, id) SELECT $1::text, id FROM written"));
     let outbox = MIGRATIONS.get(1).ok_or("no migration")?;
-    let queued = MIGRATIONS.last().ok_or("no migration")?;
+    let queued = MIGRATIONS.get(TWO).ok_or("no migration")?;
     assert!(queued.sql.contains("ADD COLUMN queued_at timestamptz NOT NULL DEFAULT now()") && queued.sql.contains("(tenant, queued_at)"));
     assert!(
         outbox.sql.contains("CREATE INDEX alert_outbox_by_seq ON alert_outbox (tenant, seq)") && outbox.sql.contains("GENERATED ALWAYS AS IDENTITY")
@@ -148,6 +154,178 @@ fn migrations_are_valid_and_namespaced() -> TestResult {
     [FIRST_SQL, NEXT_SQL, GET_SQL]
         .iter()
         .for_each(|sql| assert!(sql.contains("WHERE tenant = $1")));
+    assert_eq!(MIGRATIONS.len(), FOUR);
+    let triage = MIGRATIONS.get(THREE).ok_or("no migration")?;
+    assert!(triage.sql.contains("PRIMARY KEY (tenant, alert_id)") && triage.sql.contains("REFERENCES alerts (tenant, id) ON DELETE CASCADE"));
+    assert!(triage.sql.contains("CHECK (status IN ('acknowledged', 'closed'))"));
+    [TRIAGE_INSERT_SQL, TRIAGE_UPDATE_SQL]
+        .iter()
+        .for_each(|sql| assert!(sql.contains("tenant = $1") && sql.contains("FROM alerts WHERE tenant = $1 AND id = $2::text")));
+    assert!(TRIAGE_UPDATE_SQL.contains("AND version = $7::text::bigint") && TRIAGE_UPDATE_SQL.contains("version = version + 1"));
+    assert!(TRIAGE_INSERT_SQL.contains("ON CONFLICT (tenant, alert_id) DO NOTHING"));
+    assert!(TRIAGE_GET_SQL.contains("WHERE tenant = $1"));
+    Ok(())
+}
+
+
+pub fn change(status: TriageStatus, actor: &str, note: Option<&str>) -> TriageChange {
+    TriageChange {
+        status,
+        actor: actor.to_owned(),
+        note: note.map(str::to_owned),
+        now: BASE_TIME,
+    }
+}
+
+
+#[tokio::test]
+async fn triage_inserts_then_updates_with_the_right_version() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let one = alert("acme", "r1", &["e1"], BASE_TIME);
+    insert_alerts(&exec, &scope, std::slice::from_ref(&one)).await?;
+    assert_eq!(get_triage(&exec, &scope, &one.id).await?, None);
+    let first = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Acknowledged, "ana", Some("looking")), None).await?;
+    assert_eq!(
+        (first.version, first.status, first.note.as_deref()),
+        (1, TriageStatus::Acknowledged, Some("looking"))
+    );
+    let second = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Closed, "bob", None), Some(1)).await?;
+    assert_eq!(
+        (second.version, second.status, second.note.as_deref(), second.updated_at),
+        (TWO as i64, TriageStatus::Closed, None, BASE_TIME)
+    );
+    assert_eq!(get_triage(&exec, &scope, &one.id).await?, Some(second));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_stale_version_or_a_second_insert_is_a_conflict_and_changes_nothing() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let one = alert("acme", "r1", &["e1"], BASE_TIME);
+    insert_alerts(&exec, &scope, std::slice::from_ref(&one)).await?;
+    let first = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Acknowledged, "ana", None), None).await?;
+    let again = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Closed, "eve", None), None).await;
+    assert!(matches!(again, Err(StoreError::Conflict)));
+    let stale = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Closed, "eve", None), Some(TWO as i64)).await;
+    assert!(matches!(stale, Err(StoreError::Conflict)));
+    assert_eq!(get_triage(&exec, &scope, &one.id).await?, Some(first));
+    let missing_row = alert("acme", "r2", &["e2"], BASE_TIME);
+    insert_alerts(&exec, &scope, std::slice::from_ref(&missing_row)).await?;
+    let none_yet = set_triage(&exec, &scope, &missing_row.id, &change(TriageStatus::Closed, "eve", None), Some(1)).await;
+    assert!(matches!(none_yet, Err(StoreError::Conflict)));
+    assert_eq!(get_triage(&exec, &scope, &missing_row.id).await?, None);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn another_tenants_alert_or_an_unknown_alert_is_not_found_and_writes_nothing() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope_a = tenant_scope("a")?;
+    let scope_b = tenant_scope("b")?;
+    let theirs = alert("b", "r1", &["e1"], BASE_TIME);
+    insert_alerts(&exec, &scope_b, std::slice::from_ref(&theirs)).await?;
+    for expected in [None, Some(1)] {
+        let result = set_triage(&exec, &scope_a, &theirs.id, &change(TriageStatus::Closed, "eve", None), expected).await;
+        assert!(matches!(result, Err(StoreError::NotFound)));
+    }
+    assert!(lock(&db.triage).is_empty());
+    assert_eq!(get_triage(&exec, &scope_a, &theirs.id).await?, None);
+    set_triage(&exec, &scope_b, &theirs.id, &change(TriageStatus::Closed, "bob", None), None).await?;
+    assert_eq!(get_triage(&exec, &scope_a, &theirs.id).await?, None);
+    assert!(get_triage(&exec, &scope_b, &theirs.id).await?.is_some());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn triage_bounds_are_refused_before_any_statement() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let one = alert("acme", "r1", &["e1"], BASE_TIME);
+    insert_alerts(&exec, &scope, std::slice::from_ref(&one)).await?;
+    let before = sent(&db);
+    let long_actor = "a".repeat(MAX_ENTITY_CHARS + 1);
+    let long_note = "n".repeat(MAX_NOTE_CHARS + 1);
+    let mut late = change(TriageStatus::Closed, "ana", None);
+    late.now = MAX_CREATED_MICROS + 1;
+    let refused = [
+        (one.id.as_str(), change(TriageStatus::Closed, "", None)),
+        (one.id.as_str(), change(TriageStatus::Closed, &long_actor, None)),
+        (one.id.as_str(), change(TriageStatus::Closed, "a\0b", None)),
+        (one.id.as_str(), change(TriageStatus::Closed, "ana", Some(&long_note))),
+        (one.id.as_str(), change(TriageStatus::Closed, "ana", Some("x\0y"))),
+        (one.id.as_str(), change(TriageStatus::Closed, "ana", Some(""))),
+        (one.id.as_str(), late),
+        ("not-an-id", change(TriageStatus::Closed, "ana", None)),
+    ];
+    for (id, request) in &refused {
+        assert!(set_triage(&exec, &scope, id, request, None).await.is_err());
+        assert!(set_triage(&exec, &scope, id, request, Some(1)).await.is_err());
+    }
+    assert!(matches!(get_triage(&exec, &scope, "not-an-id").await, Err(StoreError::BadId)));
+    assert_eq!(sent(&db), before);
+    let boundary = change(TriageStatus::Closed, &"a".repeat(MAX_ENTITY_CHARS), Some(&"n".repeat(MAX_NOTE_CHARS)));
+    assert!(set_triage(&exec, &scope, &one.id, &boundary, None).await.is_ok());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn triage_store_failures_are_typed() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let one = alert("acme", "r1", &["e1"], BASE_TIME);
+    let request = change(TriageStatus::Closed, "ana", None);
+    lock(&db.forced).push_back(Forced::Fail);
+    assert!(matches!(set_triage(&exec, &scope, &one.id, &request, None).await, Err(StoreError::Pg(_))));
+    let answers: Vec<Vec<Row>> = vec![
+        Vec::new(),
+        vec![vec!["many".to_owned(), "1".to_owned()]],
+        vec![vec!["1".to_owned()]],
+        vec![vec!["1".to_owned(), "9223372036854775808".to_owned()]],
+        vec![vec!["1".to_owned(), "x".to_owned()]],
+    ];
+    for rows in answers {
+        lock(&db.forced).push_back(Forced::Rows(rows));
+        assert!(set_triage(&exec, &scope, &one.id, &request, None).await.is_err());
+    }
+    lock(&db.forced).push_back(Forced::Fail);
+    assert!(matches!(get_triage(&exec, &scope, &one.id).await, Err(StoreError::Pg(_))));
+    let good = vec!["closed".to_owned(), "ana".to_owned(), String::new(), "5".to_owned(), "1".to_owned()];
+    let damaged_rows: Vec<Row> = [0, THREE, FOUR]
+        .into_iter()
+        .map(|column| {
+            let mut row = good.clone();
+            row.splice(column..=column, ["bad".to_owned()]);
+            row
+        })
+        .chain(std::iter::once(good.iter().take(TWO).cloned().collect()))
+        .collect();
+    for row in damaged_rows {
+        lock(&db.forced).push_back(Forced::Rows(vec![row]));
+        assert!(get_triage(&exec, &scope, &one.id).await.is_err());
+    }
+    lock(&db.forced).push_back(Forced::Rows(vec![good]));
+    assert!(get_triage(&exec, &scope, &one.id).await?.is_some());
+    Ok(())
+}
+
+
+#[test]
+fn triage_status_text_round_trips() -> TestResult {
+    [TriageStatus::Acknowledged, TriageStatus::Closed]
+        .iter()
+        .try_for_each(|status| status.to_string().parse::<TriageStatus>().map(|parsed| assert_eq!(parsed, *status)))?;
+    assert!("new".parse::<TriageStatus>().is_err());
     Ok(())
 }
 

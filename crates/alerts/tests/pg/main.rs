@@ -6,9 +6,9 @@ mod types;
 use alerts::backend::{lease, pg_backend, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
 use alerts::error::StoreError;
 use alerts::id::alert_id;
-use alerts::model::Page;
+use alerts::model::{Page, TriageChange, TriageStatus};
 use alerts::pg::{pg_executor, pg_rows};
-use alerts::store::list_alerts;
+use alerts::store::{get_triage, list_alerts, set_triage};
 use certs::{loopback, make_pki};
 use core_api::logging::reloadable_dispatch;
 use core_audit::log::{append, genesis_log};
@@ -45,6 +45,9 @@ const TWO_ROWS: usize = 2;
 
 
 const PAGE_SIZE: usize = 10;
+
+
+const TRIAGE_TIME: u64 = 5;
 
 
 pub async fn client_with(handler: Handler) -> Result<(Client, Fake, TempDir), Box<dyn Error>> {
@@ -132,6 +135,46 @@ async fn list_alerts_runs_against_a_real_client_scoped_to_the_tenant() -> Result
     let bound: Vec<&String> = statements.iter().filter(|entry| entry.starts_with("PARAMS")).collect();
     assert_eq!(bound.len(), 1, "{statements:?}");
     assert!(bound.iter().all(|entry| entry.as_str() == "PARAMS acme|11"), "{bound:?}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn set_and_get_triage_round_trip_on_a_real_client() -> Result<(), Box<dyn Error>> {
+    let handler: Handler = Arc::new(|sql| {
+        if sql.contains("INSERT INTO alert_triage") {
+            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned()]])
+        } else {
+            Reply::Rows(vec![vec![
+                "closed".to_owned(),
+                "ana".to_owned(),
+                "done".to_owned(),
+                "5".to_owned(),
+                "1".to_owned(),
+            ]])
+        }
+    });
+    let (client, mut fake, _dir) = client_with(handler).await?;
+    let scope = tenant_scope("acme")?;
+    let exec = pg_executor(&client, DEADLINE);
+    let id = alert_id("acme", "r1", &["e1".to_owned()]);
+    let change = TriageChange {
+        status: TriageStatus::Closed,
+        actor: "ana".to_owned(),
+        note: Some("done".to_owned()),
+        now: TRIAGE_TIME,
+    };
+    let written = set_triage(&exec, &scope, &id, &change, None).await?;
+    assert_eq!(written.version, 1);
+    let read = get_triage(&exec, &scope, &id).await?.ok_or("no triage")?;
+    assert_eq!(
+        (read.status, read.actor.as_str(), read.note.as_deref(), read.updated_at),
+        (TriageStatus::Closed, "ana", Some("done"), TRIAGE_TIME)
+    );
+    let statements = drain(&mut fake.statements);
+    let bound: Vec<&String> = statements.iter().filter(|entry| entry.starts_with("PARAMS")).collect();
+    assert_eq!(bound.len(), TWO_ROWS, "{statements:?}");
+    assert!(bound.iter().all(|entry| entry.starts_with("PARAMS acme|")), "{bound:?}");
     Ok(())
 }
 
