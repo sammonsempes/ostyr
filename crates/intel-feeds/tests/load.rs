@@ -40,7 +40,7 @@ const OK: &str = "200 OK";
 const SERVER_ERROR: &str = "500 Internal Server Error";
 
 
-const SCHEMA_REQUESTS: usize = 3;
+const SCHEMA_REQUESTS: usize = 4;
 
 
 const STALL_TIMEOUT_MS: u64 = 100;
@@ -64,7 +64,7 @@ const TWO: usize = 2;
 const DICTIONARY_PORT: u16 = 9440;
 
 
-const TABLE_AND_DICTIONARY: usize = 2;
+const DICTIONARY_INDEX: usize = 3;
 
 
 const CONFIDENCE: u8 = 70;
@@ -159,7 +159,11 @@ fn schema_then_batches_in_order_with_the_key_in_a_header_only() -> TestResult {
     assert!(first.contains("CREATE DATABASE IF NOT EXISTS `ostyr`"));
     assert!(seen.get(1).ok_or("no table")?.contains("CREATE TABLE IF NOT EXISTS `ostyr`.`iocs`"));
     assert!(seen
-        .get(TABLE_AND_DICTIONARY)
+        .get(TWO)
+        .ok_or("no alter")?
+        .contains("ALTER TABLE `ostyr`.`iocs` ADD COLUMN IF NOT EXISTS `tlp`"));
+    assert!(seen
+        .get(DICTIONARY_INDEX)
         .ok_or("no dictionary")?
         .contains("CREATE DICTIONARY IF NOT EXISTS `ostyr`.`ioc_trie`"));
     let insert = seen.get(SCHEMA_REQUESTS).ok_or("no insert")?;

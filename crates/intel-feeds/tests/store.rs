@@ -6,8 +6,8 @@ use intel_feeds::config::{FeedConfig, FeedFormat, Mapping};
 use intel_feeds::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_ROWS_PER_BATCH};
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use intel_feeds::store::{
-    dictionary_ddl, epoch_u32, expiry_epoch, insert_plan, insert_statement, push_line, quote_identifier, settings_for, table_ddl, InsertPlan,
-    StoreError, StoreSettings,
+    dictionary_ddl, epoch_u32, expiry_epoch, insert_plan, insert_statement, push_line, quote_identifier, read_statement, settings_for, table_ddl,
+    tlp_column_ddl, InsertPlan, StoreError, StoreSettings,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -92,7 +92,7 @@ fn first_body(plan: &InsertPlan) -> &str {
 #[test]
 fn table_ddl_golden() -> TestResult {
     let expected = "CREATE TABLE IF NOT EXISTS `intel`.`ioc` (\n    `tenant` String,\n    `ioc_type` LowCardinality(String),\n    `value` String,\n    \
-        `feed` String,\n    `feed_version` String,\n    `confidence` UInt8,\n    `first_seen` DateTime('UTC'),\n    `last_seen` DateTime('UTC'),\n    \
+        `feed` String,\n    `feed_version` String,\n    `confidence` UInt8,\n    `tlp` LowCardinality(String),\n    `first_seen` DateTime('UTC'),\n    `last_seen` DateTime('UTC'),\n    \
         `expires_at` DateTime('UTC'),\n    `version` UInt32\n)\nENGINE = ReplacingMergeTree(`version`)\n\
         ORDER BY (`tenant`, `ioc_type`, `value`)\nTTL `expires_at` DELETE";
     assert_eq!(table_ddl("intel", "ioc")?, expected);
@@ -154,6 +154,7 @@ fn row_carries_source_dates_and_expiry() -> TestResult {
         "feed": "feed",
         "feed_version": "v1",
         "confidence": CONFIDENCE,
+        "tlp": "amber",
         "first_seen": SEEN.unix_timestamp(),
         "last_seen": SEEN.unix_timestamp(),
         "expires_at": LATER.unix_timestamp(),
@@ -267,5 +268,43 @@ fn settings_collect_feed_ttls() -> TestResult {
     let built = settings_for("acme", &[feed("a", Some(1)), feed("b", None)]);
     assert_eq!(built.feed_ttl_seconds, BTreeMap::from([("a".to_owned(), 1)]));
     assert_eq!((built.tenant.as_str(), built.fallback_ttl_seconds), ("acme", DEFAULT_TTL_SECONDS));
+    Ok(())
+}
+
+
+#[test]
+fn the_tlp_is_written_for_each_value() -> TestResult {
+    let names = [
+        (Tlp::Clear, "clear"),
+        (Tlp::Green, "green"),
+        (Tlp::Amber, "amber"),
+        (Tlp::AmberStrict, "amber_strict"),
+        (Tlp::Red, "red"),
+    ];
+    names.iter().try_for_each(|(tlp, name)| -> TestResult {
+        let marked = Ioc {
+            tlp: *tlp,
+            ..ioc("x.example", Some(LATER), source("feed"))
+        };
+        let plan = insert_plan(&[marked], &settings(), NOW);
+        let row: Value = serde_json::from_str(first_body(&plan).trim_end())?;
+        assert_eq!(row.get("tlp").and_then(Value::as_str), Some(*name));
+        Ok(())
+    })
+}
+
+
+#[test]
+fn tlp_column_and_read_statement_golden() -> TestResult {
+    assert_eq!(
+        tlp_column_ddl("intel", "ioc")?,
+        "ALTER TABLE `intel`.`ioc` ADD COLUMN IF NOT EXISTS `tlp` LowCardinality(String) DEFAULT 'red'"
+    );
+    let expected = "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
+        FROM `intel`.`ioc` FINAL WHERE `tenant` = {tenant:String} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
+        AND `expires_at` > toDateTime({now:UInt32}) ORDER BY `ioc_type`, `value` LIMIT {limit:UInt64} FORMAT JSONEachRow";
+    assert_eq!(read_statement("intel", "ioc")?, expected);
+    assert!(read_statement("intel", "a;b").is_err());
+    assert!(tlp_column_ddl("a b", "ioc").is_err());
     Ok(())
 }
