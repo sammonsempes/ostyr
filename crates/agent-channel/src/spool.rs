@@ -228,6 +228,31 @@ pub fn quarantine(path: &Path, rejected: &[EventBatch], max_bytes: u64) -> io::R
 }
 
 
+/// Bytes of overflow lines appended back to the spool per write (a chunk ends once it holds at least this many).
+pub const RETURN_CHUNK_BYTES: usize = 65_536;
+
+
+/// The next chunk of lines: lines are taken until their bytes (newline included) reach `RETURN_CHUNK_BYTES`.
+pub fn next_chunk(rest: &mut dyn Iterator<Item = io::Result<String>>) -> io::Result<Vec<String>> {
+    let mut size = 0;
+    std::iter::from_fn(|| {
+        (size < RETURN_CHUNK_BYTES)
+            .then(|| rest.next())
+            .flatten()
+            .inspect(|line| size += line.as_ref().map_or(1, |text| text.len() + 1))
+    })
+    .collect()
+}
+
+
+/// Appends the lines back to the spool in bounded chunks, one write each; returns how many writes it made.
+pub fn append_chunks(lines: impl Iterator<Item = io::Result<String>>, spool: &Path) -> io::Result<u64> {
+    let mut rest = lines.peekable();
+    std::iter::from_fn(|| rest.peek().is_some().then(|| next_chunk(&mut rest)))
+        .try_fold(0, |writes, chunk| append_back(chunk?.into_iter().map(Ok), spool).map(|_| writes + 1))
+}
+
+
 /// The first `count` lines of the claimed file; any further line goes back to the spool and the claimed file is cut to the first lines.
 pub fn load_claimed(sending: &Path, spool: &Path, count: u64, limit: usize) -> io::Result<Vec<String>> {
     let (first, returned, length) = {
@@ -237,7 +262,7 @@ pub fn load_claimed(sending: &Path, spool: &Path, count: u64, limit: usize) -> i
         let mut texts = spool_texts(&mut reader, limit);
         let wanted = usize::try_from(count).unwrap_or(MAX_SPOOL_BATCHES).min(MAX_SPOOL_BATCHES);
         let first = texts.by_ref().take(wanted).collect::<io::Result<Vec<_>>>()?;
-        let returned = append_back(texts, spool)?;
+        let returned = append_chunks(texts, spool)? > 0;
         (first, returned, length)
     };
     if returned {

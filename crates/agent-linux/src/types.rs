@@ -30,5 +30,8 @@ pub type RunFuture = Pin<Box<dyn Future<Output = Result<String, SensorError>> + 
 pub type RunFn = fn(PathBuf, Vec<String>) -> RunFuture;
 
 
+pub type KillFn = fn(rustix::process::Pid) -> rustix::io::Result<()>;
+
+
 /// Held by every writer of the spool of this process (source, sensor, capabilities), so a call's lines are never interleaved with another's.
 pub type SpoolLock = Arc<Mutex<()>>;

@@ -6,8 +6,8 @@ use agent_linux::error::{SensorError, SourceError};
 use agent_linux::model::SensorSettings;
 use agent_linux::sensor::{
     active_state, classify, export_progress, is_bad, monotonic_seconds, observe, parse_show, restart, restart_arguments, restart_entry, run_bounded,
-    run_command, run_sensor, run_with_deadline, sensor_event_line, show_arguments, state_name, step, tick, valid_sub_state, Action, ActiveState,
-    Observation, Progress, SensorEnv, SensorEvent, SensorState, Supervisor, Unit, HOUR_SECONDS, MAX_EVENTS_PER_HOUR, MAX_OUTPUT_BYTES,
+    run_bounded_with, run_command, run_sensor, run_with_deadline, sensor_event_line, show_arguments, state_name, step, tick, valid_sub_state, Action,
+    ActiveState, Observation, Progress, SensorEnv, SensorEvent, SensorState, Supervisor, Unit, HOUR_SECONDS, MAX_EVENTS_PER_HOUR, MAX_OUTPUT_BYTES,
     MIN_RESTART_INTERVAL_SECONDS,
 };
 use agent_linux::types::{RunFuture, SpoolLock};
@@ -15,7 +15,10 @@ use arc_swap::ArcSwap;
 use core_audit::log::open_file_log;
 use core_audit::model::Outcome;
 use core_config::types::SharedAuditFn;
+use rustix::fs::{mknodat, FileType, Mode, CWD};
+use rustix::process::Pid;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -618,29 +621,11 @@ fn an_unknown_state_held_past_the_window_is_reported_once_and_its_end_too() -> T
 }
 
 
-const WAIT_STEPS: u32 = 1_000;
-
-
-const WAIT_STEP: Duration = Duration::from_millis(10);
+const UNBLOCK_LIMIT: Duration = Duration::from_secs(60);
 
 
 pub fn timeout_run(_program: PathBuf, _arguments: Vec<String>) -> RunFuture {
     Box::pin(async { Err(SensorError::Timeout) })
-}
-
-
-async fn wait_until(condition: impl Fn() -> bool) -> bool {
-    let mut waited = 0;
-    while !condition() && waited < WAIT_STEPS {
-        tokio::time::sleep(WAIT_STEP).await;
-        waited += 1;
-    }
-    condition()
-}
-
-
-fn is_gone(pid: &str) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| stat.contains(") Z"))
 }
 
 
@@ -675,18 +660,81 @@ async fn a_restart_past_its_deadline_is_audited_as_timed_out() -> TestResult {
 }
 
 
+#[derive(Clone, Default)]
+struct SharedBuffer(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+
+impl std::io::Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+fn refused_kill(_group: Pid) -> rustix::io::Result<()> {
+    Err(rustix::io::Errno::SRCH)
+}
+
+
+fn kills_seen(buffer: &SharedBuffer) -> usize {
+    String::from_utf8_lossy(&buffer.0.lock()).matches("no process left").count()
+}
+
+
+#[tokio::test]
+async fn a_finished_command_is_not_followed_by_a_group_kill() -> TestResult {
+    let buffer = SharedBuffer::default();
+    let writer = buffer.clone();
+    let _log = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    assert_eq!(
+        run_bounded_with(PathBuf::from("/bin/echo"), vec!["hi".to_owned()], refused_kill).await?,
+        "hi\n"
+    );
+    assert!(matches!(
+        run_bounded_with(PathBuf::from("/bin/false"), Vec::new(), refused_kill).await,
+        Err(SensorError::Exit(Some(1)))
+    ));
+    assert_eq!(kills_seen(&buffer), 0);
+    assert!(matches!(
+        run_bounded_with(PathBuf::from("/usr/bin/yes"), Vec::new(), refused_kill).await,
+        Err(SensorError::TooLarge(_))
+    ));
+    assert_eq!(kills_seen(&buffer), 1);
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn a_command_that_hangs_with_a_grandchild_leaves_no_process_behind() -> TestResult {
     let dir = tempdir()?;
+    let fifo = dir.path().join("grandchild.fifo");
+    mknodat(CWD, &fifo, FileType::Fifo, Mode::RWXU, 0)?;
+    let grandchild = dir.path().join("grandchild.sh");
+    fs::write(&grandchild, "echo $$\nexec sleep 300\n")?;
     let script = dir.path().join("hang.sh");
-    let pid_file = dir.path().join("grandchild.pid");
-    fs::write(&script, format!("sleep 300 &\necho $! > {}\nwait\n", pid_file.display()))?;
+    fs::write(&script, format!("/bin/sh {} > {} &\nwait\n", grandchild.display(), fifo.display()))?;
     let running = tokio::spawn(run_bounded(PathBuf::from("/bin/sh"), vec![script.display().to_string()]));
-    let written = wait_until(|| fs::read_to_string(&pid_file).is_ok_and(|text| text.ends_with('\n'))).await;
-    assert!(written);
-    let pid = fs::read_to_string(&pid_file)?.trim().to_owned();
-    assert!(!is_gone(&pid));
+    let started = tokio::task::spawn_blocking(move || -> std::io::Result<(BufReader<fs::File>, String)> {
+        let mut input = BufReader::new(fs::File::open(&fifo)?);
+        let mut pid = String::new();
+        input.read_line(&mut pid)?;
+        Ok((input, pid))
+    });
+    let (mut input, pid) = tokio::time::timeout(UNBLOCK_LIMIT, started).await???;
+    assert!(pid.trim().parse::<u32>().is_ok());
     running.abort();
-    assert!(wait_until(|| is_gone(&pid)).await);
+    assert!(running.await.is_err());
+    let drained = tokio::task::spawn_blocking(move || input.read_to_end(&mut Vec::new()));
+    assert_eq!(tokio::time::timeout(UNBLOCK_LIMIT, drained).await???, 0);
     Ok(())
 }

@@ -16,8 +16,9 @@ use agent_channel::proto::EventBatch;
 use agent_channel::server_app::{bind_server, file_events, load_server_file, run_server, run_server_with_clock, ServerFile};
 use agent_channel::sink::{file_sink, load_seen, open_event_store, parse_line, store_batch, EventStore};
 use agent_channel::spool::{
-    append_back, claim_spool, count_lines, finish_spool, line_limit, load_claimed, quarantine, read_sequence, rewrite_lines, rewrite_lines_between,
-    suffixed, write_sequence, SequenceState, ASIDE_SUFFIX, MAX_REJECTED_BYTES, MAX_SPOOL_BATCHES, REJECTED_SUFFIX, SENDING_SUFFIX,
+    append_back, append_chunks, claim_spool, count_lines, finish_spool, line_limit, load_claimed, quarantine, read_sequence, rewrite_lines,
+    rewrite_lines_between, suffixed, write_sequence, SequenceState, ASIDE_SUFFIX, MAX_REJECTED_BYTES, MAX_SPOOL_BATCHES, REJECTED_SUFFIX,
+    RETURN_CHUNK_BYTES, SENDING_SUFFIX,
 };
 use agent_channel::tls::client_config;
 use agent_channel::types::{DialFuture, PauseFuture};
@@ -123,6 +124,12 @@ const FILLER: u8 = 0;
 
 const AGENT_YAML: &str = "server: 127.0.0.1:1\nserver_name: x\ncertificate: c\nkey: k\nplatform_ca: p\ntenant: t\nagent_id: a\n\
 keys_file: k\nstate_file: s\naudit_file: a\nspool_file: s\nsequence_file: q\nexecuted_file: e\n";
+
+
+const LINE_OF_ONE_KIBIBYTE: usize = 1_023;
+
+
+const THREE_CHUNKS: usize = 3;
 
 
 const INVALID_UTF8: &[u8] = &[u8::MAX, u8::MAX - 1, b'\n'];
@@ -1251,5 +1258,33 @@ async fn both_streams_stop_when_the_server_is_gone() -> TestResult {
     .await?;
     assert!(delivery.is_err());
     assert!(matches!(run, Err(AppError::AttemptsExhausted { .. })));
+    Ok(())
+}
+
+
+#[test]
+fn an_overflow_of_three_chunks_goes_back_in_three_whole_writes() -> TestResult {
+    let dir = tempdir()?;
+    let line = "z".repeat(LINE_OF_ONE_KIBIBYTE);
+    let lines_per_chunk = RETURN_CHUNK_BYTES / (LINE_OF_ONE_KIBIBYTE + 1);
+    let all = vec![line.clone(); lines_per_chunk * THREE_CHUNKS];
+    let spool = dir.path().join("spool");
+    let writes = append_chunks(all.iter().cloned().map(Ok), &spool)?;
+    assert_eq!(writes, u64::try_from(THREE_CHUNKS)?);
+    assert_eq!(
+        fs::read_to_string(&spool)?.lines().collect::<Vec<_>>(),
+        all.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    let sending = dir.path().join("sending");
+    fs::write(
+        &sending,
+        format!("first\n{}", all.iter().map(|text| format!("{text}\n")).collect::<String>()),
+    )?;
+    let returned = dir.path().join("returned");
+    assert_eq!(load_claimed(&sending, &returned, 1, LIMIT)?, vec!["first".to_owned()]);
+    assert_eq!(fs::read_to_string(&returned)?.lines().count(), all.len());
+    assert_eq!(fs::read_to_string(&sending)?, "first\n");
+    assert_eq!(append_chunks(std::iter::empty(), &dir.path().join("none"))?, 0);
+    assert!(append_chunks(std::iter::once(Err(io::Error::other("injected"))), &dir.path().join("failed")).is_err());
     Ok(())
 }
