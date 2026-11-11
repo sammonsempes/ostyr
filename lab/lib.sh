@@ -7,6 +7,7 @@ export REPO_DIR
 LAB_POOL="${LAB_POOL:-ostyr-lab}"
 LAB_POOL_PATH="${LAB_POOL_PATH:-/var/lib/libvirt/images/$LAB_POOL}"
 LAB_STATE_ROOT="$LAB_DIR/state"
+LAB_LOCK_DIR="${LAB_LOCK_DIR:-$HOME/.cache/ostyr-lab/locks}"
 LAB_PLUGIN_CACHE="${LAB_PLUGIN_CACHE:-$HOME/.cache/ostyr-lab/plugin-cache}"
 LAB_URI="qemu:///system"
 readonly SECONDS_PER_DAY=86400
@@ -105,6 +106,13 @@ run_tofu() {
     shift
     TF_DATA_DIR="$(state_dir "$task_id")/data" TF_PLUGIN_CACHE_DIR="$LAB_PLUGIN_CACHE" TF_IN_AUTOMATION=1 \
         "${LAB_TOFU_BIN:-tofu}" -chdir="$LAB_DIR/tofu" "$@"
+}
+
+subnet_holder() {
+    local network
+    for network in $(virsh_lab net-list --all --name); do
+        if virsh_lab net-dumpxml "$network" | grep -q "192\.168\.$1\."; then printf '%s ' "$network"; fi
+    done
 }
 
 ensure_plugin_cache() {
