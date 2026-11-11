@@ -6,13 +6,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+agent-channel = { path = "../agent-channel" }
 arc-swap = "1.9.3"
 core-config = { path = "../core-config" }
+core-export = { path = "../core-export" }
 chrono = { version = "0.4", default-features = false }
 crc32fast = "1"
 serde = { version = "1", features = ["derive"] }
 syslog_loose = "0.23"
 thiserror = "2"
+time = "0.3"
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
@@ -21,6 +24,7 @@ rustix = { version = "1.1", features = ["fs", "process"] }
 [dev-dependencies]
 core-audit = { path = "../core-audit" }
 proptest = "1"
+serde_json = "1"
 tempfile = "3"
 
 [lints]

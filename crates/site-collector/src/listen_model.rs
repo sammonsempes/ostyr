@@ -23,6 +23,9 @@ pub const DEFAULT_SOURCE_SHARE_PERCENT: u64 = 50;
 pub const DEFAULT_MAX_SOURCES: usize = 4096;
 
 
+pub const DEFAULT_FORWARD_BATCH_RECORDS: usize = 500;
+
+
 pub const MAX_TENANT_BYTES: usize = 128;
 
 
@@ -67,6 +70,11 @@ pub fn default_unknown_share_percent() -> u64 {
 }
 
 
+pub fn default_forward_batch_records() -> usize {
+    DEFAULT_FORWARD_BATCH_RECORDS
+}
+
+
 pub fn default_max_sources() -> usize {
     DEFAULT_MAX_SOURCES
 }
@@ -87,6 +95,8 @@ pub struct ListenerSettings {
     pub unknown_share_percent: u64,
     #[serde(default = "default_max_sources")]
     pub max_sources: usize,
+    #[serde(default = "default_forward_batch_records")]
+    pub forward_batch_records: usize,
     #[serde(default)]
     pub drop_unknown: bool,
     #[serde(default)]

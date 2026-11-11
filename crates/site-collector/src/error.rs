@@ -1,4 +1,5 @@
 use std::io;
+use std::num::ParseIntError;
 use std::str::Utf8Error;
 use thiserror::Error;
 
@@ -68,8 +69,25 @@ pub enum ListenError {
     Bind(#[source] io::Error),
     #[error("the tenant must hold between 1 and 128 bytes")]
     BadTenant,
+    #[error("the forward batch must hold between 1 and 1000 records")]
+    BadForwardBatch,
     #[error("the admission limits are invalid")]
     Limits(#[from] ConfigError),
     #[error("the settings file cannot be loaded")]
     Settings(#[from] core_config::error::ConfigError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum ForwardError {
+    #[error("spool failure")]
+    Spool(#[from] SpoolError),
+    #[error("forward input/output failure")]
+    Io(#[from] io::Error),
+    #[error("the forward cursor file is not a sequence number")]
+    BadCursor(#[from] ParseIntError),
+    #[error("a spooled record cannot be parsed")]
+    Parse(#[from] ParseError),
+    #[error("an event cannot be encoded")]
+    Encode(#[from] core_export::error::ExportError),
 }

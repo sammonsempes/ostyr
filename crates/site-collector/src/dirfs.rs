@@ -79,6 +79,18 @@ pub fn remove_named(dir: &DirHandle, name: &str) -> io::Result<()> {
 
 
 #[cfg(unix)]
+pub fn rename_named(dir: &DirHandle, from: &str, to: &str) -> io::Result<()> {
+    Ok(rustix::fs::renameat(dir, from, dir, to)?)
+}
+
+
+#[cfg(unix)]
+pub fn sync_directory(dir: &DirHandle) -> io::Result<()> {
+    File::from(dir.try_clone()?).sync_all()
+}
+
+
+#[cfg(unix)]
 pub fn regular_file_names(dir: &DirHandle, max_entries: usize) -> Result<Vec<String>, SpoolError> {
     use rustix::fs::{Dir, FileType};
     let entries = Dir::read_from(dir)
@@ -146,4 +158,16 @@ pub fn remove_named(_dir: &DirHandle, _name: &str) -> io::Result<()> {
 #[cfg(not(unix))]
 pub fn regular_file_names(_dir: &DirHandle, _max_entries: usize) -> Result<Vec<String>, SpoolError> {
     Err(SpoolError::Unsupported)
+}
+
+
+#[cfg(not(unix))]
+pub fn rename_named(_dir: &DirHandle, _from: &str, _to: &str) -> io::Result<()> {
+    unsupported()
+}
+
+
+#[cfg(not(unix))]
+pub fn sync_directory(_dir: &DirHandle) -> io::Result<()> {
+    unsupported()
 }

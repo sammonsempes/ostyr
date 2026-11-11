@@ -1,5 +1,6 @@
 use crate::admission::validate_config;
 use crate::error::ListenError;
+use crate::forward_model::MAX_FORWARD_BATCH_RECORDS;
 use crate::listen_model::{Bound, ListenerSettings, SharedSocket, MAX_TENANT_BYTES, READ_TIMEOUT_MS, SETTINGS_SECTION};
 use crate::model::{BucketLimits, CollectorConfig};
 use arc_swap::ArcSwap;
@@ -51,6 +52,10 @@ pub fn validate_settings(settings: &ListenerSettings) -> Result<SocketAddr, List
         .contains(&settings.tenant.len())
         .then_some(())
         .ok_or(ListenError::BadTenant)?;
+    (1..=MAX_FORWARD_BATCH_RECORDS)
+        .contains(&settings.forward_batch_records)
+        .then_some(())
+        .ok_or(ListenError::BadForwardBatch)?;
     validate_config(&collector_config_of(settings))?;
     parse_listen(&settings.listen)
 }
@@ -73,6 +78,7 @@ pub fn settings_state(settings: &ListenerSettings) -> ConfigState {
         ("source_share_percent", settings.source_share_percent.to_string()),
         ("unknown_share_percent", settings.unknown_share_percent.to_string()),
         ("max_sources", settings.max_sources.to_string()),
+        ("forward_batch_records", settings.forward_batch_records.to_string()),
         ("drop_unknown", settings.drop_unknown.to_string()),
         ("sources", format!("{:?}", settings.sources)),
     ]
