@@ -11,6 +11,8 @@ pub mod error;
 #[cfg(unix)]
 pub mod follow;
 #[cfg(unix)]
+pub mod hostmetrics;
+#[cfg(unix)]
 pub mod model;
 #[cfg(unix)]
 pub mod run;

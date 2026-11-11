@@ -2,6 +2,7 @@
 mod capabilities;
 mod cursor;
 mod follow;
+mod hostmetrics;
 mod run;
 mod sensor;
 mod settings;

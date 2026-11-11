@@ -206,3 +206,59 @@ pub struct Totals {
     pub agent_runs: u64,
     pub waiting: bool,
 }
+
+
+/// Jiffies per CPU state from the aggregate `cpu ` line of `proc/stat`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuTimes {
+    pub user: u64,
+    pub nice: u64,
+    pub system: u64,
+    pub idle: u64,
+    pub iowait: u64,
+    pub irq: u64,
+    pub softirq: u64,
+    pub steal: u64,
+}
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LoadAverage {
+    pub one: f64,
+    pub five: f64,
+    pub fifteen: f64,
+}
+
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountStat {
+    pub mount: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub available_bytes: u64,
+}
+
+
+/// The mounts that answered, how many failed and how many paths were left out by the `MAX_MOUNTS` cap.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountSurvey {
+    pub mounts: Vec<MountStat>,
+    pub failed: u64,
+    pub omitted: u64,
+}
+
+
+/// One reading of the host counters; a value that could not be read is `None`, never a guess.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HostSample {
+    pub cpu: Option<CpuTimes>,
+    pub mem_total_bytes: Option<u64>,
+    pub mem_available_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
+    pub swap_free_bytes: Option<u64>,
+    pub load: Option<LoadAverage>,
+    pub oom_kill: Option<u64>,
+    pub boot_id: Option<String>,
+    pub uptime_seconds: Option<f64>,
+    pub survey: MountSurvey,
+}
