@@ -4,7 +4,7 @@ use crate::diff::diff;
 use crate::error::SigningError;
 use crate::limits::{KEY_FILE_BUFFER_CAPACITY, KEY_FILE_HEX_LENGTH, KEY_FILE_READ_LIMIT, SBOM_SIGNING_CONTEXT};
 use crate::model::{DocumentMeta, DocumentSignature, Limits, Sbom, SbomDiff, SignedDocument, TrustedKey};
-use crate::parse::parse_cyclonedx;
+use crate::parse::parse_document;
 use crate::types::{SignerFn, TrustedKeys};
 use core_audit::log::check_private;
 use data_encoding::HEXLOWER;
@@ -120,7 +120,7 @@ pub fn check_version(previous: u64, next: u64) -> Result<(), SigningError> {
 /// Verifies the bytes, then parses those same bytes.
 pub fn parse_verified(document: &SignedDocument, trusted_keys: &TrustedKeys, now: u64, limits: &Limits) -> Result<Sbom, SigningError> {
     verify_document(&document.bytes, &document.meta, &document.signature, trusted_keys, now, limits)?;
-    Ok(parse_cyclonedx(
+    Ok(parse_document(
         Cursor::new(&document.bytes),
         &document.meta.tenant,
         &document.meta.artefact,

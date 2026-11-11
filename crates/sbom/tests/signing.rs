@@ -13,7 +13,7 @@ use types::TestResult;
 const FIXTURE: &str = include_str!("fixtures/syft-debian.cdx.json");
 
 
-const SECOND: &str = r#"{"components":[{"type":"library","name":"a","version":"1","purl":"pkg:cargo/a@1"}]}"#;
+const SECOND: &str = r#"{"bomFormat":"CycloneDX","components":[{"type":"library","name":"a","version":"1","purl":"pkg:cargo/a@1"}]}"#;
 
 
 const KEY_ID: &str = "sbom-1";
