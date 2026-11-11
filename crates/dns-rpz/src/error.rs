@@ -1,4 +1,7 @@
 use crate::name::NameError;
+use core_config::error::ConfigError;
+use intel_feeds::config::FeedsError;
+use intel_feeds::read::ReadError;
 use ipnet::AddrParseError;
 use std::io;
 use std::num::ParseIntError;
@@ -70,4 +73,17 @@ pub enum ReloadError {
     Failed(Option<i32>),
     #[error("the Unbound control command did not finish within {0} seconds")]
     TimedOut(u64),
+}
+
+
+#[derive(Debug, Error)]
+pub enum SourceError {
+    #[error("the feeds file cannot be loaded")]
+    Config(#[from] ConfigError),
+    #[error("the feeds file is invalid")]
+    Invalid(#[from] FeedsError),
+    #[error("the feeds file has no `clickhouse` section")]
+    Missing,
+    #[error("the ClickHouse read failed")]
+    Read(#[from] ReadError),
 }

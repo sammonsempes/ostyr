@@ -1,5 +1,5 @@
 use crate::error::RpzError;
-use crate::model::Reloader;
+use crate::model::{Reloader, RunSummary};
 use crate::policy::Policy;
 use crate::run::generate;
 use crate::types::{ClockFn, OpenFn};
@@ -8,6 +8,7 @@ use core_config::reload::{current_config, reload, ReloadEngine};
 use core_config::reload_cli::{write_outcome, QUIT_COMMAND};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::error;
 
 
@@ -16,6 +17,7 @@ pub struct Session<'a> {
     pub engine: &'a ReloadEngine<Policy>,
     pub clock: &'a ClockFn<'a>,
     pub open: &'a OpenFn<'a>,
+    pub rejected: &'a AtomicU64,
     pub counter: &'a Path,
     pub output: &'a Path,
     pub reloader: &'a Reloader<'a>,
@@ -28,7 +30,11 @@ pub fn run_generation(session: &mut Session) -> io::Result<()> {
     let policy = current_config(session.engine);
     let result: Result<_, RpzError> = (session.open)()
         .map_err(RpzError::from)
-        .and_then(|mut input| generate(&policy, &mut input, (session.clock)(), session.counter, session.output));
+        .and_then(|mut input| generate(&policy, &mut input, (session.clock)(), session.counter, session.output))
+        .map(|summary| RunSummary {
+            source_bad_rows: session.rejected.load(Ordering::Relaxed),
+            ..summary
+        });
     match result {
         Ok(summary) => {
             serde_json::to_writer(&mut *session.report, &summary)?;
