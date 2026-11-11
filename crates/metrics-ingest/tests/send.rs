@@ -590,10 +590,17 @@ fn every_write_of_the_report_can_fail() -> TestResult {
 #[test]
 fn a_zero_batch_limit_and_invalid_settings_are_errors_before_any_send() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS, 0)?;
-    assert!(matches!(go(&rig, &request(1), "acme", STAMP, Duration::ZERO), Err(RunError::Encode(_))));
+    assert!(matches!(
+        go(&rig, &request(1), "acme", STAMP, Duration::ZERO),
+        Err(RunError::Settings(LoadError::Invalid(SettingsError::Limit {
+            field: "max_batch_rows",
+            ..
+        })))
+    ));
+    let valid = loaded(&self::rig(LONG_TIMEOUT_MS, 1)?)?;
     let bad = MetricsSettings {
         table: "a;b".to_string(),
-        ..loaded(&rig)?
+        ..valid
     };
     let elapsed = || Duration::ZERO;
     assert!(matches!(clickhouse_sender(&bad, &elapsed), Err(SendError::Settings(_))));
