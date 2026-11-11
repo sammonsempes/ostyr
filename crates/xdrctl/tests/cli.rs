@@ -1083,3 +1083,221 @@ fn helpers_validate_and_map() -> TestResult {
     assert!(matches!(map_status(CliError::NotLoggedIn), CliError::NotLoggedIn));
     Ok(())
 }
+
+
+const CASE_SUMMARY: &str = "\"id\":\"INC-2026-0001-extra\",\"title\":\"Phish\",\"severity\":\"high\",\"status\":\"in_progress\",\"assignee\":null,\
+\"case_type\":\"phishing\",\"created_at\":1762857600,\"updated_at\":99999999999999,\"version\":3,\
+\"counts\":{\"tasks\":1,\"observables\":2,\"comments\":3,\"history\":4,\"alerts\":5}";
+
+
+const HOSTILE_CASE: &str = "\"id\":\"c\\u001b1\",\"title\":\"t\\u001b]0;pwned\\u0007\\u202eevil\",\"severity\":\"low\",\"status\":\"new\",\
+\"assignee\":\"a\\u001b\",\"case_type\":null,\"created_at\":0,\"updated_at\":1,\"version\":1,\
+\"counts\":{\"tasks\":0,\"observables\":0,\"comments\":0,\"history\":0,\"alerts\":0}";
+
+
+const CASE_ID_REFUSED: [&str; 8] = ["../alerts", "x?tenant=b", "%2e%2e", "x#y", "a/b", ".hidden", "-x", ""];
+
+
+const CASE_ID_LONG: usize = 129;
+
+
+const CASE_ID_FIRST_TIME: &str = "1970-01-01T00:00:01Z";
+
+
+#[test]
+fn cases_list_paths_and_text() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let page: &'static str = Box::leak(format!("{{\"items\":[{{{CASE_SUMMARY}}}],\"next_cursor\":\"abc_-=\"}}").into_boxed_str());
+    let first = invoke(
+        &offline_args(dir.path(), &["cases", "list", "--limit", "5", "--cursor", "c1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, page),
+    )?;
+    assert_eq!(first.code, SUCCESS);
+    assert!(first.out.contains("INC-2026-000\thigh\tin_progress\tPhish\t-\t-\n"));
+    assert!(first.out.ends_with("next cursor: abc_-=\n"));
+    let last = invoke(
+        &offline_args(dir.path(), &["cases", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert!(last.out.ends_with("no more cases\n"));
+    let plain = invoke(
+        &offline_args(dir.path(), &["cases", "list", "--cursor", "c2"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert_eq!(plain.code, SUCCESS);
+    let urls = seen.borrow().clone();
+    assert_eq!(
+        urls,
+        vec![
+            "https://example.test/cases?limit=5&cursor=c1 Some(\"tok\")",
+            "https://example.test/cases Some(\"tok\")",
+            "https://example.test/cases?cursor=c2 Some(\"tok\")",
+        ]
+    );
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "cases", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, page),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(json.out.trim())?, serde_json::from_str::<Value>(page)?);
+    Ok(())
+}
+
+
+#[test]
+fn cases_show_prints_every_field() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let body: &'static str = Box::leak(
+        format!(
+            "{{{CASE_SUMMARY},\"description\":\"d\\u001b\",\"resolution\":\"benign\",\"template\":null,\
+             \"tasks\":[{{\"title\":\"t\\u202e\",\"status\":\"todo\",\"due\":null,\"log\":[]}}]}}"
+        )
+        .into_boxed_str(),
+    );
+    let shown = invoke(
+        &offline_args(dir.path(), &["cases", "show", "INC-2026-0001.a_b"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, body),
+    )?;
+    assert_eq!(shown.code, SUCCESS);
+    assert!(shown.out.contains("created: 2025-11-11T10:40:00Z\n"));
+    assert!(shown.out.contains("updated: -\n"));
+    assert!(shown.out.contains("counts: tasks 1 observables 2 comments 3 history 4 alerts 5\n"));
+    assert!(shown.out.contains("description: d\\u{1b}\n"));
+    assert!(shown.out.contains("resolution: benign\n"));
+    assert!(shown.out.contains("template: -\n"));
+    assert!(shown.out.contains("task: t\\u{202e} (todo)"));
+    assert_eq!(
+        seen.borrow().first().map(String::as_str),
+        Some("https://example.test/cases/INC-2026-0001.a_b Some(\"tok\")")
+    );
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "cases", "show", "x"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, body),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(json.out.trim())?, serde_json::from_str::<Value>(body)?);
+    assert_eq!(xdrctl::cases::format_time(1), CASE_ID_FIRST_TIME);
+    Ok(())
+}
+
+
+#[test]
+fn cases_hostile_values_are_escaped() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let page: &'static str = Box::leak(format!("{{\"items\":[{{{HOSTILE_CASE}}}],\"next_cursor\":\"x\\u001b\"}}").into_boxed_str());
+    let listed = invoke(&offline_args(dir.path(), &["cases", "list"]), "", &alerts_stub(&seen, STATUS_OK, page))?;
+    let detail: &'static str =
+        Box::leak(format!("{{{HOSTILE_CASE},\"description\":null,\"resolution\":null,\"template\":null,\"tasks\":[]}}").into_boxed_str());
+    let shown = invoke(
+        &offline_args(dir.path(), &["cases", "show", "c1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, detail),
+    )?;
+    for text in [&listed.out, &shown.out] {
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains('\u{7}'));
+        assert!(!text.contains('\u{202e}'));
+        assert!(text.contains("\\u{1b}]0;pwned\\u{7}\\u{202e}evil"));
+    }
+    Ok(())
+}
+
+
+#[test]
+fn cases_bad_ids_and_cursors_make_no_request() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let long = "a".repeat(CASE_ID_LONG);
+    for id in CASE_ID_REFUSED.iter().copied().chain(std::iter::once(long.as_str())) {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["cases", "show", "--", id]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, FAILURE);
+        assert!(outcome.err.contains("invalid case id"));
+    }
+    let cursor = invoke(
+        &offline_args(dir.path(), &["cases", "list", "--cursor=a&tenant=b"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert_eq!(cursor.code, FAILURE);
+    for limit in ["0", "101"] {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["cases", "list", "--limit", limit]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, USAGE_FAILURE);
+    }
+    assert!(seen.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn cases_errors_map_without_the_raw_body() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let body = "{\"error\":{\"code\":\"c\\u001b\",\"message\":\"SECRET\"}}";
+    for (status, expected) in [
+        (STATUS_UNAUTHORIZED, "not valid"),
+        (STATUS_FORBIDDEN, "permission denied"),
+        (STATUS_NOT_FOUND, "not found"),
+        (STATUS_TOO_MANY, "too many"),
+    ] {
+        for args in [vec!["cases", "list"], vec!["cases", "show", "c1"]] {
+            let outcome = invoke(&offline_args(dir.path(), &args), "", &alerts_stub(&seen, status, body))?;
+            assert!(outcome.err.contains(expected));
+            assert!(!outcome.err.contains("SECRET"));
+        }
+    }
+    let other = invoke(&offline_args(dir.path(), &["cases", "list"]), "", &alerts_stub(&seen, STATUS_ERROR, body))?;
+    assert!(other.err.contains("c\\u{1b}"));
+    assert!(!other.err.contains('\u{1b}'));
+    let raw = invoke(
+        &offline_args(dir.path(), &["cases", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_ERROR, "<html>raw</html>"),
+    )?;
+    assert!(!raw.err.contains("<html>"));
+    let bad = invoke(
+        &offline_args(dir.path(), &["cases", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, "[SECRET]"),
+    )?;
+    assert!(bad.err.contains("unexpected reply"));
+    assert!(!bad.err.contains("SECRET"));
+    let bad_show = invoke(
+        &offline_args(dir.path(), &["cases", "show", "c1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, "[]"),
+    )?;
+    assert!(bad_show.err.contains("unexpected reply"));
+    Ok(())
+}
+
+
+#[test]
+fn case_id_grammar() -> TestResult {
+    assert!(xdrctl::cases::valid_case_id("A0._-"));
+    assert!(xdrctl::cases::valid_case_id(&"a".repeat(CASE_ID_LONG - 1)));
+    assert!(!xdrctl::cases::valid_case_id(&"a".repeat(CASE_ID_LONG)));
+    assert!(!xdrctl::cases::valid_case_id("_a"));
+    assert!(!xdrctl::cases::valid_case_id("a b"));
+    assert!(!xdrctl::cases::valid_case_id("é"));
+    Ok(())
+}
