@@ -7,12 +7,12 @@ mod types;
 
 use cert_inventory::error::CertError;
 use cert_inventory::scan::{absorb, no_hook, read_bounded, reason_of, scan, scan_with, Loaded, ScanSettings, ScanState, MAX_DEPTH_CEILING};
-use cert_inventory::walk::{adopt, handle_next, is_swap, level_of, open_root, plan, scan_root, step, Step};
+use cert_inventory::walk::{adopt, handle_next, is_swap, level_of, open_root, plan, resolve_type, scan_root, step, Listed, Step};
 use rcgen::{CertificateParams, KeyPair};
 use rustix::fs::FileType;
 use rustix::io::Errno;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{create_dir_all, remove_dir_all, remove_file, rename, write, File};
 use std::io::{self, Cursor};
 use std::ops::ControlFlow;
@@ -42,6 +42,12 @@ const BIG_LISTING: usize = 1_000;
 
 
 const CAP_BYTES: usize = 4;
+
+
+const EXAMINED_WITH_LINK: usize = 3;
+
+
+const NESTED_LEVELS: usize = 3;
 
 
 fn make_certificate() -> Result<(String, String), Box<dyn Error>> {
@@ -336,5 +342,92 @@ fn every_parse_error_has_a_fixed_reason() -> TestResult {
         reason_of(&CertError::Extension(x509_parser::error::X509Error::InvalidVersion)),
         "extension"
     );
+    Ok(())
+}
+
+
+fn unknown(name: &str) -> Listed {
+    Listed {
+        name: OsString::from(name),
+        file_type: FileType::Unknown,
+    }
+}
+
+
+fn swap_unknown_directory(path: &Path) {
+    if path.file_name() == Some(OsStr::new("u")) && !path.is_symlink() {
+        if let Err(error) = try_swap_unknown(path) {
+            tracing::warn!(%error, "swap failed");
+        }
+    }
+}
+
+
+fn try_swap_unknown(path: &Path) -> io::Result<()> {
+    let top = path.parent().and_then(Path::parent).ok_or_else(|| io::Error::other("no top"))?;
+    remove_dir_all(path)?;
+    symlink(top.join("secret"), path)
+}
+
+
+fn run_unknown_walk(directory: &Path, before_open: fn(&Path), names: &[&str]) -> Result<ScanState, Box<dyn Error>> {
+    let settings = settings_for(&directory.join("root"));
+    let mut state = ScanState::default();
+    let mut stack = vec![open_root(&directory.join("root"))?];
+    names.iter().for_each(|name| {
+        let first = handle_next(&settings, &mut stack, before_open, &mut state, Some(Ok(unknown(name))));
+        let drained = (0..BIG_LISTING).try_for_each(|_| match stack.len() > 1 {
+            true => step(&settings, &mut stack, before_open, &mut state),
+            false => ControlFlow::Break(()),
+        });
+        assert!(first.is_continue() && drained.is_break());
+    });
+    Ok(state)
+}
+
+
+#[test]
+fn an_unknown_directory_and_file_are_resolved_and_scanned() -> TestResult {
+    let (pem, _) = make_certificate()?;
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root/sub/deeper"))?;
+    write(directory.path().join("root/sub/deeper/a.pem"), &pem)?;
+    write(directory.path().join("root/top.pem"), &pem)?;
+    symlink(directory.path().join("root/top.pem"), directory.path().join("root/link.pem"))?;
+    let state = run_unknown_walk(directory.path(), no_hook, &["sub", "top.pem", "link.pem"])?;
+    assert_eq!(state.examined, EXAMINED_WITH_LINK);
+    assert_eq!(state.skipped.not_regular, 1);
+    assert_eq!(state.max_open_dirs, NESTED_LEVELS);
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_directory_swapped_after_the_stat_is_never_followed() -> TestResult {
+    let (pem, _) = make_certificate()?;
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root/u"))?;
+    create_dir_all(directory.path().join("secret"))?;
+    write(directory.path().join("root/u/a.pem"), "x")?;
+    write(directory.path().join("secret/a.pem"), &pem)?;
+    let state = run_unknown_walk(directory.path(), swap_unknown_directory, &["u"])?;
+    assert!(directory.path().join("root/u").is_symlink());
+    assert_eq!(state.skipped.swapped, 1);
+    assert_eq!(state.examined, 0);
+    Ok(())
+}
+
+
+#[test]
+fn resolve_type_keeps_known_types_and_failed_stats() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root/sub"))?;
+    let level = open_root(&directory.path().join("root"))?;
+    assert_eq!(resolve_type(&level.handle, OsStr::new("sub"), FileType::Unknown), FileType::Directory);
+    assert_eq!(
+        resolve_type(&level.handle, OsStr::new("sub"), FileType::RegularFile),
+        FileType::RegularFile
+    );
+    assert_eq!(resolve_type(&level.handle, OsStr::new("missing"), FileType::Unknown), FileType::Unknown);
     Ok(())
 }
