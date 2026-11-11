@@ -1,15 +1,16 @@
 use core_api::reload::current_entry;
-use core_api::types::SharedListener;
+use core_api::types::{SharedListener, StartupReloadFn};
 use core_audit::error::AuditError;
 use core_audit::log::append_declared;
 use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
-use core_config::reload::{open_engine, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
+use core_config::reload::{open_engine, reload, ReloadContext, ReloadEngine, RELOAD_DECLARED_KEYS};
 use core_config::types::{LoaderFn, SharedAuditFn};
 use core_pg::settings::{load_settings, settings_state, PgSettings};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 
 pub const SETTING_PG: &str = "pg_settings";
@@ -107,4 +108,10 @@ pub fn open_pg_engine_from(
         context,
     )?;
     Ok((engine, pg_file))
+}
+
+
+/// The pg engine's reload for `run_loaded`: an edit made before the audit log opened was refused unaudited and left the engine unchanged, so this replays it.
+pub fn startup_reload(engine: Arc<ReloadEngine<PgSettings>>) -> StartupReloadFn {
+    Box::new(move || reload(&engine))
 }

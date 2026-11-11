@@ -2,7 +2,7 @@
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
-use alerts::settings::{open_pg_engine_from, SETTING_PG};
+use alerts::settings::{open_pg_engine_from, startup_reload, SETTING_PG};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
 use core_api::server::{new_listener, run_loaded, stop_listener};
@@ -61,6 +61,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     drop(held);
     let (router, access, documents) = module_parts(&modules, &engine, &permits)?;
     tokio::spawn(stop_on_interrupt(listener.clone()));
+    let startup_engine = Arc::clone(&engine);
     run_loaded(
         Path::new(module_file),
         loaded,
@@ -68,6 +69,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         &[SETTING_PG, SETTING_MODULES],
         listener,
         Some(log),
+        vec![startup_reload(startup_engine)],
     )
     .await?;
     Ok(())

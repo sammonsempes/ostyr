@@ -1,10 +1,13 @@
 use crate::types::{TestError, TestResult};
+use alerts::settings::{open_pg_engine_from, startup_reload};
 use axum::Router;
 use core_api::server::{listening_address, new_listener, run_loaded, stop_listener};
 use core_api::types::AccessTable;
 use core_config::load::load_module;
+use core_config::reload::current_config;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 
@@ -67,7 +70,7 @@ async fn the_start_only_baseline_is_the_loaded_value_not_a_second_read() -> Test
     let running = listener.clone();
     let file = module_file.clone();
     let parts = (Router::new(), AccessTable::new(), vec![]);
-    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None).await });
+    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None, Vec::new()).await });
     listening_address(&listener).await.ok_or("server did not start")?;
     stop_listener(&listener, None);
     assert!(task.await?.is_ok());
@@ -90,7 +93,7 @@ async fn a_file_unchanged_since_the_load_leaves_no_reload_record() -> TestResult
     let running = listener.clone();
     let file = module_file.clone();
     let parts = (Router::new(), AccessTable::new(), vec![]);
-    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None).await });
+    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None, Vec::new()).await });
     listening_address(&listener).await.ok_or("server did not start")?;
     stop_listener(&listener, None);
     assert!(task.await?.is_ok());
@@ -114,12 +117,65 @@ async fn an_allowed_change_made_during_startup_is_applied_by_the_startup_reload(
     let running = listener.clone();
     let file = module_file.clone();
     let parts = (Router::new(), AccessTable::new(), vec![]);
-    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None).await });
+    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &START_ONLY, running, None, Vec::new()).await });
     listening_address(&listener).await.ok_or("server did not start")?;
     stop_listener(&listener, None);
     assert!(task.await?.is_ok());
     let audit = audit_text(dir.path())?;
     assert!(audit.contains("\"applied\""));
     assert!(!audit.contains(REFUSAL_MARKER));
+    Ok(())
+}
+
+
+const PG_TEXT: &str = "host: 127.0.0.1\nport: 5432\ndatabase: ostyr\nuser: ostyr\npassword_file: /run/pg.pass\nca_file: /run/ca.pem\n";
+
+
+const PG_EDITED: &str = "host: 127.0.0.2\nport: 5432\ndatabase: ostyr\nuser: ostyr\npassword_file: /run/pg.pass\nca_file: /run/ca.pem\n";
+
+
+const PG_FILE_NAME: &str = "pg.yaml";
+
+
+async fn serve_with_pg_engine(dir: &Path, edit_after_open: Option<&str>) -> Result<String, TestError> {
+    private_file(&dir.join("store.key"), &[KEY_FILL; KEY_BYTES])?;
+    fs::write(dir.join("compromised.txt"), "passwordpassword\n")?;
+    let pg_file = dir.join(PG_FILE_NAME);
+    fs::write(&pg_file, PG_TEXT)?;
+    let module_file = dir.join("platform.yaml");
+    fs::write(&module_file, format!("{}  pg_settings: {}\n", module_text(dir), pg_file.display()))?;
+    let loaded = load_module(&module_file)?;
+    let listener = new_listener();
+    let (opened, _pg_file) = open_pg_engine_from(&module_file, &loaded, listener.clone(), "platform")?;
+    let engine = Arc::new(opened);
+    edit_after_open.iter().try_for_each(|text| fs::write(&pg_file, text))?;
+    let running = listener.clone();
+    let parts = (Router::new(), AccessTable::new(), vec![]);
+    let startup = vec![startup_reload(Arc::clone(&engine))];
+    let task = tokio::spawn(async move { run_loaded(&module_file, loaded, parts, &START_ONLY, running, None, startup).await });
+    listening_address(&listener).await.ok_or("server did not start")?;
+    stop_listener(&listener, None);
+    task.await??;
+    assert_eq!(current_config(&engine).host, edit_after_open.map_or("127.0.0.1", |_| "127.0.0.2"));
+    audit_text(dir)
+}
+
+
+#[tokio::test]
+async fn a_pg_file_edit_made_before_run_loaded_is_audited_by_the_startup_reload() -> TestResult {
+    let dir = tempdir()?;
+    let audit = serve_with_pg_engine(dir.path(), Some(PG_EDITED)).await?;
+    let pg_records = audit.lines().filter(|line| line.contains(PG_FILE_NAME)).count();
+    assert_eq!(pg_records, 1, "{audit}");
+    assert!(audit.contains("\"applied\""));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unchanged_pg_file_leaves_no_record_at_startup() -> TestResult {
+    let dir = tempdir()?;
+    let audit = serve_with_pg_engine(dir.path(), None).await?;
+    assert!(!audit.contains(PG_FILE_NAME), "{audit}");
     Ok(())
 }
