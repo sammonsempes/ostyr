@@ -5,7 +5,7 @@
 mod types;
 
 
-use core_pg::password::{read_capped, MAX_PASSWORD_BYTES, PASSWORD_CAPACITY};
+use core_pg::password::{read_secret, MAX_PASSWORD_BYTES, PASSWORD_CAPACITY};
 use oncall::error::KeyError;
 use oncall::limits::{MAX_LINK_KEY_BYTES, MIN_LINK_KEY_BYTES};
 use oncall::linkkey::{check_owner_and_mode, key_from_bytes, mode_and_owners, read_link_key};
@@ -99,7 +99,7 @@ fn every_secret_limit_fits_the_preallocated_capacity() -> TestResult {
     let capacity = u64::try_from(PASSWORD_CAPACITY)?;
     assert!(MAX_PASSWORD_BYTES < capacity);
     assert!(MAX_LINK_KEY_BYTES < capacity);
-    let kept: Zeroizing<Vec<u8>> = read_capped(&mut vec![b'k'; usize::try_from(MAX_LINK_KEY_BYTES)?].as_slice(), MAX_LINK_KEY_BYTES, "x")?;
+    let kept: Zeroizing<Vec<u8>> = read_secret(&mut vec![b'k'; usize::try_from(MAX_LINK_KEY_BYTES)?].as_slice(), MAX_LINK_KEY_BYTES, "x")?;
     assert_eq!(kept.capacity(), PASSWORD_CAPACITY);
     Ok(())
 }
