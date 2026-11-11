@@ -1,8 +1,8 @@
-use crate::dirfs::{create_append, open_read, remove_named, rename_named, sync_directory};
+use crate::dirfs::{open_read, write_text_atomic};
 use crate::error::ForwardError;
 use crate::forward_model::{
-    ForwardLimits, ForwardReport, BIDI_CONTROLS, CURSOR_FILE, CURSOR_MAX_BYTES, CURSOR_TEMPORARY, FACILITY_NAMES, MAX_FORWARD_BATCH_RECORDS,
-    MAX_FORWARD_HOST_BYTES, MAX_FORWARD_MESSAGE_BYTES, MAX_RAW_HOST_BYTES, MODULE, UNKNOWN_FACILITY,
+    ForwardLimits, ForwardReport, CURSOR_FILE, CURSOR_MAX_BYTES, CURSOR_TEMPORARY, FACILITY_NAMES, MAX_FORWARD_BATCH_RECORDS, MAX_FORWARD_HOST_BYTES,
+    MAX_FORWARD_MESSAGE_BYTES, MAX_RAW_HOST_BYTES, MODULE, UNKNOWN_FACILITY,
 };
 use crate::model::{SyslogRecord, FACILITY_WEIGHT, MAX_APP_BYTES};
 use crate::parse::parse_syslog;
@@ -12,8 +12,9 @@ use crate::types::{CursorWriter, DirHandle};
 use agent_channel::spool::{append_back, suffixed, SENDING_SUFFIX};
 use core_export::ecs::{blank_event, to_json, EcsEvent, EventFields, HostFields};
 use core_export::types::LabelMap;
+use ecs_normalise::suricata::is_unsafe;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use time::OffsetDateTime;
 
@@ -32,17 +33,9 @@ pub fn read_cursor(dir: &DirHandle) -> Result<u64, ForwardError> {
 }
 
 
-/// Written to a temporary file in the spool directory, synced, renamed over the cursor, directory synced: every step relative to the opened directory.
+/// Written to a temporary file in the spool directory, synced, renamed over the cursor, directory synced.
 pub fn write_cursor(dir: &DirHandle, next: u64) -> io::Result<()> {
-    match remove_named(dir, CURSOR_TEMPORARY) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        Ok(()) | Err(_) => Ok(()),
-    }?;
-    let mut file = create_append(dir, CURSOR_TEMPORARY)?;
-    writeln!(file, "{next}")?;
-    file.sync_all()?;
-    rename_named(dir, CURSOR_TEMPORARY, CURSOR_FILE)?;
-    sync_directory(dir)
+    write_text_atomic(dir, CURSOR_TEMPORARY, CURSOR_FILE, &format!("{next}\n"))
 }
 
 
@@ -53,11 +46,6 @@ pub fn file_bytes(path: &Path) -> io::Result<u64> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error),
     }
-}
-
-
-pub fn is_unsafe_char(character: char) -> bool {
-    character.is_control() || BIDI_CONTROLS.contains(&character)
 }
 
 
@@ -78,9 +66,9 @@ pub fn cut_text(text: &str, max: usize) -> String {
 }
 
 
-/// Control and bidirectional characters removed, then cut.
+/// Characters the ecs-normalise classifier calls unsafe removed, then cut.
 pub fn clean_text(text: &str, max: usize) -> String {
-    cut_text(&text.chars().filter(|character| !is_unsafe_char(*character)).collect::<String>(), max)
+    cut_text(&text.chars().filter(|character| !is_unsafe(*character)).collect::<String>(), max)
 }
 
 
@@ -116,7 +104,7 @@ pub fn event_time(timestamp: Option<i64>, now: OffsetDateTime) -> OffsetDateTime
 }
 
 
-pub fn build_event(sequence: u64, parsed: &SyslogRecord, now: OffsetDateTime) -> EcsEvent {
+pub fn build_event(sequence: u64, epoch: &str, parsed: &SyslogRecord, now: OffsetDateTime) -> EcsEvent {
     let facility = facility_name(parsed.priority);
     let valid_host = parsed.host.as_deref().filter(|host| valid_hostname(host));
     let raw_host = parsed.host.as_deref().filter(|host| !valid_hostname(host));
@@ -124,6 +112,7 @@ pub fn build_event(sequence: u64, parsed: &SyslogRecord, now: OffsetDateTime) ->
         Some(("syslog_facility", facility.to_owned())),
         Some(("syslog_severity", (parsed.priority % FACILITY_WEIGHT).to_string())),
         Some(("collector_sequence", sequence.to_string())),
+        Some(("collector_epoch", epoch.to_owned())),
         parsed.app.as_deref().map(|app| ("syslog_app", clean_text(app, MAX_APP_BYTES))),
         raw_host.map(|host| ("syslog_host_raw", clean_text(host, MAX_RAW_HOST_BYTES))),
         parsed.host.as_ref().map(|_| ("syslog_host_claimed", "true".to_owned())),
@@ -152,10 +141,10 @@ pub fn build_event(sequence: u64, parsed: &SyslogRecord, now: OffsetDateTime) ->
 
 
 /// The JSON line of a spooled record, or none when it no longer parses or encodes (logged with the sequence and the error, never the payload).
-pub fn event_line(record: &Record, now: OffsetDateTime) -> Option<String> {
+pub fn event_line(record: &Record, epoch: &str, now: OffsetDateTime) -> Option<String> {
     let line = parse_syslog(&record.payload, now.year())
         .map_err(ForwardError::from)
-        .and_then(|parsed| to_json(&build_event(record.sequence, &parsed, now)).map_err(ForwardError::from));
+        .and_then(|parsed| to_json(&build_event(record.sequence, epoch, &parsed, now)).map_err(ForwardError::from));
     line.map_err(|error| tracing::warn!(sequence = record.sequence, %error, "spooled record skipped"))
         .ok()
 }
@@ -171,7 +160,7 @@ pub fn forward_batch(
     cursor: u64,
 ) -> Result<ForwardReport, ForwardError> {
     let records = read_from(spool, cursor, max_records.min(MAX_FORWARD_BATCH_RECORDS))?;
-    let lines = records.iter().map(|record| event_line(record, now)).collect::<Vec<_>>();
+    let lines = records.iter().map(|record| event_line(record, &spool.epoch, now)).collect::<Vec<_>>();
     let forwarded = lines.iter().flatten().count() as u64;
     append_back(lines.into_iter().flatten().map(Ok), agent_spool)?;
     if let Some(last) = records.last().map(|record| record.sequence) {

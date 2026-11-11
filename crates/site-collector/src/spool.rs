@@ -1,4 +1,5 @@
 use crate::dirfs::{create_append, directory_facts, open_append, open_directory, open_read, open_write, regular_file_names, remove_named};
+use crate::epoch::open_epoch;
 use crate::error::SpoolError;
 use crate::frame::{encode_frame, frame_len, read_frame};
 use crate::spool_model::{
@@ -145,6 +146,7 @@ pub fn open_spool(dir: &Path, config: SpoolConfig) -> Result<Spool, SpoolError> 
             high_records: 0,
         });
     }
+    let epoch = open_epoch(&handle, segments.back().map_or(0, end_sequence))?;
     let first_active = segments.back().map_or(0, |segment| segment.first_sequence);
     let active = open_append(&handle, &segment_name(first_active))?;
     let mut spool = Spool {
@@ -158,6 +160,7 @@ pub fn open_spool(dir: &Path, config: SpoolConfig) -> Result<Spool, SpoolError> 
         dropped_high: 0,
         truncated_tails,
         saturated: false,
+        epoch,
     };
     enforce_cap(&mut spool, 0)?;
     Ok(spool)

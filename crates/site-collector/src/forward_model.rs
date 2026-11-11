@@ -34,11 +34,6 @@ pub const FACILITY_NAMES: &[&str] = &[
 ];
 
 
-pub const BIDI_CONTROLS: &[char] = &[
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-];
-
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardLimits {
     pub max_records: usize,
@@ -52,3 +47,12 @@ pub struct ForwardReport {
     pub skipped_unparsable: u64,
     pub refused_full: u64,
 }
+
+
+pub const EPOCH_FILE: &str = "spool.epoch";
+
+
+pub const EPOCH_TEMPORARY: &str = "spool.epoch.tmp";
+
+
+pub const EPOCH_BYTES: usize = 16;
