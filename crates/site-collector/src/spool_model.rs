@@ -110,4 +110,5 @@ pub struct Spool {
     pub(crate) dropped_high: u64,
     pub(crate) truncated_tails: u64,
     pub(crate) saturated: bool,
+    pub epoch: String,
 }
