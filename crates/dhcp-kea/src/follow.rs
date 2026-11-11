@@ -4,13 +4,14 @@ use crate::row::{convert_row, Converted};
 use crate::types::{FileIdentity, LeaseKey, MalformedCounts, SeenLeases};
 use core_export::ecs::EcsEvent;
 use ecs_normalise::stream::{read_raw_line, RawLine};
+use std::collections::VecDeque;
 #[cfg(not(unix))]
 use std::fs::symlink_metadata;
 use std::fs::{File, Metadata};
 use std::io::{self, BufReader, Seek, SeekFrom};
 use std::iter::from_fn;
-use std::path::Path;
-use tracing::warn;
+use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
 
 
 const COLUMN_COUNT_KIND: &str = "column-count";
@@ -23,6 +24,12 @@ pub const MAX_SEEN_LEASES: usize = 100_000;
 
 
 pub const MAX_LINES_PER_POLL: usize = 10_000;
+
+
+pub const MAX_OPEN_HANDLES: usize = 8;
+
+
+const COMPACTED_SUFFIX: &str = ".2";
 
 
 /// The bounds of one reader.
@@ -53,6 +60,30 @@ pub struct FollowState {
     pub offset: u64,
     pub columns: Option<Columns>,
     pub seen: SeenLeases,
+    pub queued: VecDeque<Queued>,
+    pub compacted: Option<Compacted>,
+    pub missing_counted: bool,
+}
+
+
+/// The compacted file being read: its handle, identity and offset persist across polls until its end.
+#[derive(Debug)]
+pub struct Compacted {
+    pub file: File,
+    pub identity: FileIdentity,
+    pub offset: u64,
+    pub columns: Option<Columns>,
+    pub floor: Option<i64>,
+    pub emit: bool,
+    pub done: bool,
+}
+
+
+/// A newer file seen while the current one was still draining; it is read from its header once the current one is drained.
+#[derive(Debug)]
+pub struct Queued {
+    pub file: File,
+    pub identity: FileIdentity,
 }
 
 
@@ -64,6 +95,8 @@ pub struct Counts {
     pub restarts: u64,
     pub absent: u64,
     pub refused: u64,
+    pub recovered: u64,
+    pub unrecovered: u64,
     pub malformed: MalformedCounts,
 }
 
@@ -223,47 +256,221 @@ fn read_lines(file: &File, state: &mut FollowState, limits: &Limits, counts: &mu
 }
 
 
-fn drain_replaced(
-    found: FileIdentity,
-    state: &mut FollowState,
-    limits: &Limits,
-    counts: &mut Counts,
-    out: &mut Vec<EcsEvent>,
-) -> Result<bool, KeaError> {
-    match state.open.take() {
-        Some(old) if state.identity != Some(found) => {
-            let read = read_lines(&old, state, limits, counts, out);
-            state.open = Some(old);
-            Ok(read? < limits.max_lines)
+/// The path as it was opened: the handle, its identity and its length.
+#[derive(Debug)]
+pub struct Opened {
+    pub file: File,
+    pub identity: FileIdentity,
+    pub length: u64,
+}
+
+
+fn newest_identity(state: &FollowState) -> Option<FileIdentity> {
+    state.queued.back().map(|queued| queued.identity).or(state.identity)
+}
+
+
+fn queue_new(opened: Opened, state: &mut FollowState) {
+    if state.queued.len() < MAX_OPEN_HANDLES {
+        state.queued.push_back(Queued {
+            file: opened.file,
+            identity: opened.identity,
+        });
+    }
+}
+
+
+fn register(opened: Opened, state: &mut FollowState, counts: &mut Counts) -> File {
+    match (state.open.take(), newest_identity(state)) {
+        (Some(current), Some(newest)) if newest == opened.identity => {
+            if state.queued.is_empty() && opened.length < state.offset {
+                counts.restarts += 1;
+                state.offset = 0;
+                state.columns = None;
+            }
+            current
         }
-        other => {
-            state.open = other;
-            Ok(true)
+        (Some(current), Some(_)) => {
+            queue_new(opened, state);
+            current
+        }
+        (_, _) => {
+            state.identity = Some(opened.identity);
+            state.offset = 0;
+            state.columns = None;
+            opened.file
         }
     }
 }
 
 
-fn read_new(
-    file: File,
-    found: FileIdentity,
-    length: u64,
+fn read_chain_step(
+    current: &mut File,
+    active: bool,
     state: &mut FollowState,
     limits: &Limits,
     counts: &mut Counts,
     out: &mut Vec<EcsEvent>,
-) -> Result<(), KeaError> {
-    if drain_replaced(found, state, limits, counts, out)? {
-        if state.identity != Some(found) || length < state.offset {
-            counts.restarts += u64::from(state.identity.is_some());
-            state.offset = 0;
-            state.columns = None;
+) -> Result<bool, KeaError> {
+    if active {
+        let drained = read_lines(current, state, limits, counts, out)? < limits.max_lines;
+        match drained.then(|| state.queued.pop_front()).flatten() {
+            Some(next) => {
+                counts.restarts += 1;
+                state.offset = 0;
+                state.columns = None;
+                state.identity = Some(next.identity);
+                *current = next.file;
+                Ok(true)
+            }
+            None => Ok(false),
         }
-        state.identity = Some(found);
-        read_lines(&file, state, limits, counts, out)?;
-        state.open = Some(file);
+    } else {
+        Ok(false)
+    }
+}
+
+
+fn read_new(opened: Opened, state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) -> Result<(), KeaError> {
+    let mut current = register(opened, state, counts);
+    let result = (0..=MAX_OPEN_HANDLES).try_fold(true, |active, _| read_chain_step(&mut current, active, state, limits, counts, out));
+    state.open = Some(current);
+    result.map(|_| ())
+}
+
+
+fn compacted_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(COMPACTED_SUFFIX);
+    PathBuf::from(name)
+}
+
+
+fn recover_row(
+    columns: &Columns,
+    seen: &mut SeenLeases,
+    floor: Option<i64>,
+    emit: bool,
+    sink: (&Limits, &mut Counts, &mut Vec<EcsEvent>),
+    raw: RawLine,
+) {
+    let (limits, counts, out) = sink;
+    match row_text(raw).and_then(|text| convert_row(columns, &text)) {
+        Ok(Converted { event, key }) => {
+            let older = floor.is_some_and(|oldest| key.0 < oldest);
+            if !older && remember(seen, key, limits.max_seen, counts) && emit {
+                out.push(event);
+                counts.recovered += 1;
+            }
+        }
+        Err(error) => count_malformed(counts, &error),
+    }
+}
+
+
+fn handle_compacted_line(
+    held: &mut Compacted,
+    seen: &mut SeenLeases,
+    limits: &Limits,
+    counts: &mut Counts,
+    out: &mut Vec<EcsEvent>,
+    raw: RawLine,
+) -> Result<(), KeaError> {
+    match held.columns.as_ref() {
+        None => {
+            let columns = header_text(raw)?;
+            held.columns = Some(columns);
+        }
+        Some(columns) => recover_row(columns, seen, held.floor, held.emit, (limits, counts, out), raw),
     }
     Ok(())
+}
+
+
+/// Reads up to `max_lines` lines of the held compacted file from its saved offset; returns the lines read.
+fn read_held(held: &mut Compacted, seen: &mut SeenLeases, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) -> Result<usize, KeaError> {
+    let file = held.file.try_clone()?;
+    let mut reader = BufReader::new(&file);
+    reader.seek(SeekFrom::Start(held.offset))?;
+    from_fn(|| next_line(&mut reader, limits.max_line).transpose())
+        .take(limits.max_lines)
+        .try_fold(0, |read, item| {
+            let (raw, end) = item?;
+            handle_compacted_line(held, seen, limits, counts, out, raw)?;
+            held.offset = end;
+            Ok::<usize, KeaError>(read + 1)
+        })
+}
+
+
+fn continue_compacted(state: &mut FollowState, limits: &Limits, counts: &mut Counts, out: &mut Vec<EcsEvent>) {
+    match state.compacted.take() {
+        Some(mut held) if !held.done => {
+            match read_held(&mut held, &mut state.seen, limits, counts, out) {
+                Ok(read) => held.done = read < limits.max_lines,
+                Err(error) => {
+                    counts.unrecovered += 1;
+                    held.done = true;
+                    warn!(%error, "the compacted lease file could not be read");
+                }
+            }
+            state.compacted = Some(held);
+        }
+        other => state.compacted = other,
+    }
+}
+
+
+fn count_unrecovered(state: &mut FollowState, counts: &mut Counts, rotated: bool) {
+    if rotated && !state.missing_counted {
+        state.missing_counted = true;
+        counts.unrecovered += 1;
+        warn!("a rotation was seen but the compacted lease file could not be read: leases may be missing");
+    }
+}
+
+
+fn replace_compacted(state: &mut FollowState, counts: &mut Counts, file: File, identity: FileIdentity, emit: bool) {
+    if state.compacted.as_ref().is_some_and(|held| !held.done) {
+        counts.unrecovered += 1;
+        warn!("the compacted lease file was replaced before its end was read: leases may be missing");
+    }
+    state.compacted = Some(Compacted {
+        file,
+        identity,
+        offset: 0,
+        columns: None,
+        floor: state.seen.first().map(|key| key.0),
+        emit,
+        done: false,
+    });
+}
+
+
+/// Follows `<path>.2` (Kea's compacted state): a new identity is read from its header over as many polls as its length needs, so rows lost to a rotation that was never seen come back here.
+fn recover_compacted(
+    path: &Path,
+    state: &mut FollowState,
+    limits: &Limits,
+    counts: &mut Counts,
+    out: &mut Vec<EcsEvent>,
+    first: bool,
+    rotated: bool,
+) {
+    match open_regular(&compacted_path(path)) {
+        Ok(Some((file, found, _))) => {
+            state.missing_counted = false;
+            if state.compacted.as_ref().map(|held| held.identity) != Some(found) {
+                replace_compacted(state, counts, file, found, !first);
+            }
+        }
+        Ok(None) => count_unrecovered(state, counts, rotated),
+        Err(error) => {
+            debug!(%error, "the compacted lease path is not readable");
+            count_unrecovered(state, counts, rotated);
+        }
+    }
+    continue_compacted(state, limits, counts, out);
 }
 
 
@@ -287,9 +494,12 @@ pub fn poll(path: &Path, state: &mut FollowState, limits: &Limits, counts: &mut 
             counts.absent += 1;
             Ok(())
         }
-        Some((file, found, length)) => {
+        Some((file, identity, length)) => {
             let before = column_count_refusals(counts);
-            let result = read_new(file, found, length, state, limits, counts, out);
+            let first = state.identity.is_none();
+            let restarts = counts.restarts;
+            let result = read_new(Opened { file, identity, length }, state, limits, counts, out);
+            recover_compacted(path, state, limits, counts, out, first, counts.restarts > restarts);
             warn_column_count(before, counts);
             result
         }

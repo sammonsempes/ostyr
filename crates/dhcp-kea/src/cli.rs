@@ -38,13 +38,15 @@ pub fn no_pause(_interval: Duration) {}
 /// The counts as one line, never any row content.
 pub fn counts_line(counts: &Counts) -> String {
     format!(
-        "processed={} duplicate={} evicted={} restarts={} absent={} refused={} malformed={}",
+        "processed={} duplicate={} evicted={} restarts={} absent={} refused={} recovered={} unrecovered={} malformed={}",
         counts.processed,
         counts.duplicate,
         counts.evicted,
         counts.restarts,
         counts.absent,
         counts.refused,
+        counts.recovered,
+        counts.unrecovered,
         malformed_summary(counts)
     )
 }
