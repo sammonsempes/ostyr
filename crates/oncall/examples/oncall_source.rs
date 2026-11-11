@@ -9,8 +9,10 @@ use core_pg::query::scoped_query;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::parse_settings;
 use oncall::alert::{Cell, Param, Statement};
-use oncall::alert_source::{parse_source_settings, poll_all, Round};
+use oncall::alert_source::{parse_source_settings, poll_all, Round, SourceSettings, LEASE_SQL};
 use oncall::error::StoreError;
+use oncall::holder::process_holder;
+use oncall::link::os_random;
 use oncall::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use oncall::types::Row;
 use std::io::{stderr, stdout, Write};
@@ -54,6 +56,30 @@ const OTHER_POLLER: &str = "poller-b";
 const FRESH_ALERTS: u64 = 1;
 
 
+const STEAL_ON_LEASE_CALL: usize = 2;
+
+
+const LEASE_DUMP_SQL: &str = "SELECT holder, (expires_at > now())::text FROM oncall_poller_lease";
+
+
+const STEAL_SQL: &str = "UPDATE oncall_poller_lease SET holder = 'poller-thief', expires_at = now() + interval '1 hour'";
+
+
+const EXPIRE_SQL: &str = "UPDATE oncall_poller_lease SET expires_at = now() - interval '1 second'";
+
+
+const PID_NAME: u32 = 1;
+
+
+const GHOST_OFFSET: u64 = ALERTS_PER_TENANT + 50;
+
+
+const FRESH_OFFSET: u64 = ALERTS_PER_TENANT + 10;
+
+
+const GHOST_COUNT_SQL: &str = "SELECT count(*)::text FROM alert_outbox WHERE tenant = $1";
+
+
 const BASE_CREATED: u64 = 1_000;
 
 
@@ -67,7 +93,10 @@ medium: ticket\n  high: page\n  critical: page-now\n";
 
 
 fn summary(round: &Round) -> String {
-    let purged = round.purged.as_ref().map_or_else(|error| error.to_string(), ToString::to_string);
+    let purged = round
+        .purged
+        .as_ref()
+        .map_or_else(|error| error.to_string(), |counts| format!("{counts:?}"));
     let tenants: Vec<String> = round
         .outcomes
         .iter()
@@ -167,6 +196,77 @@ async fn dump(client: &Client, scope: &TenantScope, out: &mut impl Write) -> Res
 }
 
 
+async fn lease_line(client: &Client) -> Result<String, Box<dyn std::error::Error>> {
+    let row = client.query_one(LEASE_DUMP_SQL, &[]).await?;
+    Ok(format!(
+        "lease holder={} unexpired={}",
+        row.try_get::<_, String>(0)?,
+        row.try_get::<_, String>(1)?
+    ))
+}
+
+
+async fn t236_proofs(
+    client: &Client,
+    alerts_exec: alerts::types::Executor<'_, '_>,
+    settings: &SourceSettings,
+    tenants: &[&str],
+    out: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let first = process_holder(Some("poller-b"), "lab", PID_NAME, os_random)?;
+    let second = process_holder(Some("poller-b"), "lab", PID_NAME, os_random)?;
+    writeln!(out, "same label, ids: {first} {second} differ={}", first != second)?;
+    client.execute(EXPIRE_SQL, &[]).await?;
+    let mut exec = |scope: &TenantScope, statement: Statement| execute(client, scope.clone(), statement);
+    writeln!(
+        out,
+        "first poller: {}",
+        summary(&poll_all(alerts_exec, &mut exec, settings, &first, wall_clock, &|| settings.clone()).await)
+    )?;
+    writeln!(
+        out,
+        "same label again: {}",
+        summary(&poll_all(alerts_exec, &mut exec, settings, &second, wall_clock, &|| settings.clone()).await)
+    )?;
+    writeln!(out, "{}", lease_line(client).await?)?;
+    let ghost = format!("{}-ghost", tenants.first().ok_or("no tenant")?);
+    insert_alerts(alerts_exec, &tenant_scope(&ghost)?, &[source_alert(&ghost, GHOST_OFFSET)]).await?;
+    for tenant in tenants {
+        insert_alerts(alerts_exec, &tenant_scope(tenant)?, &[source_alert(tenant, FRESH_OFFSET)]).await?;
+    }
+    let mut lease_calls: usize = 0;
+    let mut stealing = |scope: &TenantScope, statement: Statement| {
+        lease_calls += usize::from(statement.sql == LEASE_SQL);
+        let steal = statement.sql == LEASE_SQL && lease_calls == STEAL_ON_LEASE_CALL;
+        let owned_scope = scope.clone();
+        async move {
+            if steal {
+                client
+                    .execute(STEAL_SQL, &[])
+                    .await
+                    .map_err(|_error| StoreError::BadRow { column: "steal" })?;
+            }
+            execute(client, owned_scope, statement).await
+        }
+    };
+    writeln!(
+        out,
+        "lease taken mid-round: {}",
+        summary(&poll_all(alerts_exec, &mut stealing, settings, &first, wall_clock, &|| settings.clone()).await)
+    )?;
+    writeln!(out, "{}", lease_line(client).await?)?;
+    let left = client.query_one(GHOST_COUNT_SQL, &[&ghost]).await?;
+    writeln!(out, "ghost outbox rows after the stolen round: {}", left.try_get::<_, String>(0)?)?;
+    client.execute(EXPIRE_SQL, &[]).await?;
+    writeln!(
+        out,
+        "next holder purges: {}",
+        summary(&poll_all(alerts_exec, &mut exec, settings, &second, wall_clock, &|| settings.clone()).await)
+    )?;
+    Ok(())
+}
+
+
 async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Result<(), Box<dyn std::error::Error>> {
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, &settings_file.display().to_string())?;
     let client = connect(&settings).await?;
@@ -187,7 +287,7 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
     )?;
     let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement);
     for round_number in 0..=ALERTS_PER_TENANT {
-        let round = poll_all(&alerts_exec, &mut exec, &source_settings, POLLER, wall_clock).await;
+        let round = poll_all(&alerts_exec, &mut exec, &source_settings, POLLER, wall_clock, &|| source_settings.clone()).await;
         writeln!(out, "poll {round_number}: {}", summary(&round))?;
     }
     for tenant in tenants {
@@ -196,7 +296,7 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
         late.created_micros = 1;
         insert_alerts(&alerts_exec, &scope, &[late]).await?;
     }
-    let late = poll_all(&alerts_exec, &mut exec, &source_settings, POLLER, wall_clock).await;
+    let late = poll_all(&alerts_exec, &mut exec, &source_settings, POLLER, wall_clock, &|| source_settings.clone()).await;
     writeln!(out, "late poll: {}", summary(&late))?;
     let ghost = format!("{tenant_a}-ghost");
     let ghost_scope = tenant_scope(&ghost)?;
@@ -221,18 +321,23 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
     writeln!(
         out,
         "added tenant {tenant_b} later: {}",
-        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, POLLER, wall_clock).await)
+        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, POLLER, wall_clock, &|| dated_settings.clone()).await)
     )?;
     writeln!(
         out,
         "other poller: {}",
-        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, OTHER_POLLER, wall_clock).await)
+        summary(
+            &poll_all(&alerts_exec, &mut exec, &dated_settings, OTHER_POLLER, wall_clock, &|| dated_settings
+                .clone())
+            .await
+        )
     )?;
     writeln!(
         out,
         "second round: {}",
-        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, POLLER, wall_clock).await)
+        summary(&poll_all(&alerts_exec, &mut exec, &dated_settings, POLLER, wall_clock, &|| dated_settings.clone()).await)
     )?;
+    t236_proofs(&client, &alerts_exec, &dated_settings, &tenants, &mut out).await?;
     for tenant in tenants {
         writeln!(out, "-- {tenant} on-call alerts")?;
         dump(&client, &tenant_scope(tenant)?, &mut out).await?;

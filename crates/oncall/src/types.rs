@@ -33,3 +33,13 @@ pub type WaitFn = fn(std::time::Duration) -> std::pin::Pin<Box<dyn std::future::
 
 
 pub type ReportFn = fn(&crate::alert_source::Round);
+
+
+pub type PurgedCounts = std::collections::BTreeMap<String, usize>;
+
+
+pub type AuditPurgeFn<'audit> = &'audit dyn Fn(&PurgedCounts);
+
+
+/// Returns the current live settings snapshot (read again just before a purge).
+pub type LiveSettingsFn<'live> = &'live dyn Fn() -> crate::alert_source::SourceSettings;
