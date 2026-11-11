@@ -1,6 +1,7 @@
 use crate::convert::Outcome;
 use crate::error::NormaliseError;
 use core_export::ecs::EcsEvent;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,3 +19,6 @@ pub type SeenIds = BTreeSet<u32>;
 
 
 pub type Label = (String, String);
+
+
+pub type Objects = BTreeMap<String, Box<RawValue>>;
