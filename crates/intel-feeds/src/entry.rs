@@ -3,6 +3,7 @@ use crate::config::FeedConfig;
 use crate::error::EntryError;
 use crate::limits::{DEFAULT_FEED_VERSION, MAX_CONFIDENCE, MAX_TAGS_PER_FIELD, MAX_TAG_BYTES};
 use crate::model::{Ioc, RawEntry, Source, Tags};
+use crate::sample::bounded_text;
 use crate::timestamp::parse_timestamp;
 use std::net::SocketAddr;
 use time::{Duration, OffsetDateTime};
@@ -40,7 +41,7 @@ pub fn confidence_or(text: Option<&str>, default: u8) -> Result<u8, EntryError> 
             .trim()
             .parse::<u8>()
             .map_err(|source| EntryError::Confidence {
-                value: number.to_owned(),
+                value: bounded_text(number),
                 source: Some(source),
             })
             .and_then(|parsed| {
@@ -48,7 +49,7 @@ pub fn confidence_or(text: Option<&str>, default: u8) -> Result<u8, EntryError> 
                     Ok(parsed)
                 } else {
                     Err(EntryError::Confidence {
-                        value: number.to_owned(),
+                        value: bounded_text(number),
                         source: None,
                     })
                 }

@@ -77,3 +77,12 @@ pub const MAX_READ_ROWS: usize = 250_000;
 
 
 pub const MAX_READ_BYTES: u64 = 67_108_864;
+
+
+pub const MAX_SAMPLE_CHARS: usize = 128;
+
+
+pub const MIN_IPV4_PREFIX: u8 = 8;
+
+
+pub const MIN_IPV6_PREFIX: u8 = 16;
