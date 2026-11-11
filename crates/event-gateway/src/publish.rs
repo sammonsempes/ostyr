@@ -13,7 +13,8 @@ use futures_util::future::try_join_all;
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Map, Value};
 use siem_ingest::nats::millis;
-use siem_ingest::tenant::{is_tenant_char, EVENTS_SUBJECT_PREFIX};
+use siem_ingest::settings::DEFAULT_MAX_TENANT_BYTES;
+use siem_ingest::tenant::{is_tenant_char, tenant_from_subject, EVENTS_SUBJECT_PREFIX};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,8 +53,9 @@ pub fn admit(counter: &Arc<AtomicUsize>, max: usize) -> Result<Slot, GatewayErro
 
 /// The tenant and agent id go into a NATS subject and a message id, so only the subject token characters pass.
 pub fn check_identity(identity: &Identity) -> Result<(), GatewayError> {
-    let usable = |text: &str| !text.is_empty() && text.chars().all(is_tenant_char);
-    if usable(&identity.tenant) && usable(&identity.agent_id) {
+    let subject = format!("{EVENTS_SUBJECT_PREFIX}.{}", identity.tenant);
+    let tenant_usable = tenant_from_subject(&subject, EVENTS_SUBJECT_PREFIX, DEFAULT_MAX_TENANT_BYTES).is_ok();
+    if tenant_usable && !identity.agent_id.is_empty() && identity.agent_id.chars().all(is_tenant_char) {
         Ok(())
     } else {
         Err(GatewayError::Identity)

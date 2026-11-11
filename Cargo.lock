@@ -5333,6 +5333,7 @@ dependencies = [
  "bytes",
  "core-audit",
  "core-config",
+ "core-pg",
  "futures-util",
  "log",
  "nkeys",

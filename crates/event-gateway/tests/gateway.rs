@@ -339,9 +339,18 @@ async fn too_many_events_refuse_the_batch() -> TestResult {
 }
 
 
+const SIXTY_FOUR: &str = "a234567890123456789012345678901234567890123456789012345678901234";
+
+
+const SIXTY_FIVE: &str = "a2345678901234567890123456789012345678901234567890123456789012345";
+
+
 #[tokio::test]
 async fn an_identity_that_is_not_a_subject_token_is_refused() -> TestResult {
     assert!(check_identity(&identity("tenant-a", "agent-1")).is_ok());
+    for tenant in ["a", "a-b", "Tenant", SIXTY_FOUR] {
+        assert!(check_identity(&identity(tenant, "agent")).is_ok());
+    }
     for (tenant, agent) in [
         ("a.b", "agent"),
         ("a b", "agent"),
@@ -349,6 +358,9 @@ async fn an_identity_that_is_not_a_subject_token_is_refused() -> TestResult {
         ("", "agent"),
         ("tenant", ""),
         ("tenant", "ag:ent"),
+        ("-x", "agent"),
+        ("_x", "agent"),
+        (SIXTY_FIVE, "agent"),
     ] {
         assert!(matches!(check_identity(&identity(tenant, agent)), Err(GatewayError::Identity)));
     }
