@@ -1,8 +1,8 @@
 use crate::error::StoreError;
 use crate::id::is_alert_id;
 use crate::model::{
-    Alert, AlertDetail, AlertDetailView, AlertListView, AlertView, Backend, Cursor, ListQuery, Page, Summary, Triage, TriageChange, TriageRequest,
-    TriageStatus, TriageView,
+    Alert, AlertDetail, AlertDetailView, AlertListView, AlertView, Backend, Cursor, ListQuery, NoQuery, Page, Summary, Triage, TriageChange,
+    TriageRequest, TriageStatus, TriageView,
 };
 use crate::store::{check_optional, format_cursor, parse_cursor, MAX_NOTE_CHARS, MAX_PAGE_SIZE};
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -16,6 +16,7 @@ use core_api::model::{ApiError, ApiIdentity, Authenticated, ErrorBody, ErrorDeta
 use core_api::routes::route_key;
 use core_api::types::{AccessTable, SharedState};
 use core_auth::rbac::{PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE};
+use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::{json, Value};
@@ -59,6 +60,9 @@ pub const BAD_REQUEST_CODE: &str = "bad_request";
 
 
 pub const CHANGED_CODE: &str = "triage_changed";
+
+
+pub const UNAVAILABLE_CODE: &str = "unavailable";
 
 
 pub const NOT_FOUND_CODE: &str = "not_found";
@@ -166,6 +170,26 @@ pub fn store_failure(error: &StoreError) -> ApiError {
 }
 
 
+/// A database that cannot be reached in time is the 503 with a fixed code, never the database text.
+pub fn unavailable() -> Response {
+    let body = ErrorBody {
+        error: ErrorDetail {
+            code: UNAVAILABLE_CODE.to_owned(),
+            message: "the database is unavailable, retry later".to_owned(),
+        },
+    };
+    (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+}
+
+
+pub fn store_reply(error: &StoreError) -> Result<Response, ApiError> {
+    match error {
+        StoreError::Pg(PgError::ConnectTimeout { .. }) => Ok(unavailable()),
+        other => Err(store_failure(other)),
+    }
+}
+
+
 pub fn not_found() -> Response {
     let body = ErrorBody {
         error: ErrorDetail {
@@ -189,9 +213,10 @@ pub async fn list_flow(identity: &ApiIdentity, backend: &Backend, query: Result<
     let parsed = query?;
     let scope = scope_of(identity).map_err(|error| store_failure(&error))?;
     let page = page_of(&parsed).map_err(|error| store_failure(&error))?;
-    let found = (backend.list)(scope, page).await.map_err(|error| store_failure(&error))?;
-    let view = list_view(&found).map_err(|error| store_failure(&error))?;
-    Ok(Json(view).into_response())
+    match (backend.list)(scope, page).await {
+        Ok(found) => Ok(Json(list_view(&found).map_err(|error| store_failure(&error))?).into_response()),
+        Err(error) => store_reply(&error),
+    }
 }
 
 
@@ -204,7 +229,7 @@ pub async fn get_flow(identity: &ApiIdentity, backend: &Backend, id: Result<Stri
     };
     match found {
         Err(StoreError::BadId) | Ok(None) => Ok(not_found()),
-        Err(error) => Err(store_failure(&error)),
+        Err(error) => store_reply(&error),
         Ok(Some(detail)) => {
             let view = detail_view(&detail).map_err(|error| store_failure(&error))?;
             Ok(Json(view).into_response())
@@ -276,7 +301,7 @@ pub fn triage_failure(error: &StoreError) -> Result<Response, ApiError> {
             };
             Ok((StatusCode::CONFLICT, Json(body)).into_response())
         }
-        other => Err(store_failure(other)),
+        other => store_reply(other),
     }
 }
 
@@ -342,7 +367,8 @@ pub async fn triage_flow(
         (status = 400, description = "Malformed cursor or limit", body = ErrorBody),
         (status = 401, description = "No valid session", body = ErrorBody),
         (status = 403, description = "Permission denied", body = ErrorBody),
-        (status = 429, description = "Too many requests", body = ErrorBody)
+        (status = 429, description = "Too many requests", body = ErrorBody),
+        (status = 503, description = "Database unavailable", body = ErrorBody)
     )
 )]
 pub async fn list_endpoint(
@@ -397,20 +423,25 @@ pub async fn triage_endpoint(
     Extension(identity): Extension<Arc<ApiIdentity>>,
     Extension(backend): Extension<Backend>,
     session: Option<Extension<Authenticated>>,
+    query: Result<Query<NoQuery>, QueryRejection>,
     id: Result<Path<String>, PathRejection>,
     body: Result<Json<TriageRequest>, JsonRejection>,
 ) -> Response {
     let parsed = body.map(|found| found.0).map_err(|rejection| body_failure(&rejection));
-    reply(
-        triage_flow(
-            &identity,
-            session.as_ref().map(|found| &found.0),
-            &backend,
-            id.map(|found| found.0),
-            parsed,
-        )
-        .await,
-    )
+    let outcome = match query {
+        Err(_rejection) => Err(ApiError::BadRequest),
+        Ok(_none) => {
+            triage_flow(
+                &identity,
+                session.as_ref().map(|found| &found.0),
+                &backend,
+                id.map(|found| found.0),
+                parsed,
+            )
+            .await
+        }
+    };
+    reply(outcome)
 }
 
 

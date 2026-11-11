@@ -419,7 +419,7 @@ pub fn check_triage(alert_id: &str, change: &TriageChange) -> Result<(), StoreEr
     check_text("actor", &change.actor, MAX_ENTITY_CHARS)?;
     check_optional("note", change.note.as_deref(), MAX_NOTE_CHARS)?;
     if change.now > MAX_BIGINT {
-        Err(StoreError::BadCreated)
+        Err(StoreError::BadUpdatedAt)
     } else {
         Ok(())
     }

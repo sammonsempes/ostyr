@@ -21,6 +21,8 @@ pub enum StoreError {
     BadEventCount { limit: usize },
     #[error("created time does not fit the column")]
     BadCreated,
+    #[error("triage time does not fit the `updated_at` column")]
+    BadUpdatedAt,
     #[error("summary original size does not fit the column")]
     BadOriginalBytes,
     #[error("summary size fields are inconsistent")]

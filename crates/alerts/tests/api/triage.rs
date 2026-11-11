@@ -5,11 +5,12 @@ use crate::types::{TestError, TestResult};
 use alerts::api::{actor_of, alerts_document, triage_flow, TRIAGE_BODY_LIMIT};
 use alerts::backend::unix_micros;
 use alerts::error::StoreError;
-use alerts::model::{AlertDetail, Backend, Triage, TriageRequest, TriageStatus};
-use alerts::store::MAX_NOTE_CHARS;
+use alerts::model::{AlertDetail, Backend, Triage, TriageChange, TriageRequest, TriageStatus};
+use alerts::store::{check_triage, MAX_NOTE_CHARS};
 use axum::body::Body;
 use axum::http::StatusCode;
 use core_api::model::{ApiError, ApiIdentity};
+use core_pg::error::PgError;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -22,6 +23,9 @@ const SECOND_VERSION: i64 = 2;
 
 
 const HEX_LENGTH: usize = 64;
+
+
+const CONNECT_SECONDS: u64 = 5;
 
 
 const TEN_MEGABYTES: usize = 10_485_760;
@@ -338,6 +342,68 @@ async fn the_document_describes_the_route_and_the_detail_triage() -> TestResult 
         .iter()
         .all(|name| schemas.get(*name).is_some()));
     assert!(schemas.get("AlertDetailView").is_some_and(|detail| detail.to_string().contains("triage")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_query_string_on_triage_is_400_and_never_reaches_the_store() -> TestResult {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fx = fixture_with(|_db| counting(&calls))?;
+    let token = login(&fx.router, ANALYST).await?;
+    let id = "a".repeat(HEX_LENGTH);
+    let body = json!({"status": "closed"}).to_string();
+    for query in ["tenant=b", "x=1", "version=2"] {
+        let response = call(
+            &fx.router,
+            "POST",
+            &format!("/alerts/{id}/triage?{query}"),
+            Some(&token),
+            Body::from(body.clone()),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_connect_deadline_is_503_unavailable_on_every_route() -> TestResult {
+    let fx = fixture_with(|_db| Backend {
+        list: Arc::new(|_scope, _page| Box::pin(async { Err(StoreError::Pg(PgError::ConnectTimeout { seconds: CONNECT_SECONDS })) })),
+        get: Arc::new(|_scope, _id| Box::pin(async { Err(StoreError::Pg(PgError::ConnectTimeout { seconds: CONNECT_SECONDS })) })),
+        triage: Arc::new(|_scope, _id, _change, _expected| {
+            Box::pin(async { Err(StoreError::Pg(PgError::ConnectTimeout { seconds: CONNECT_SECONDS })) })
+        }),
+        clock: fixed_clock,
+    })?;
+    let token = login(&fx.router, ANALYST).await?;
+    let id = "a".repeat(HEX_LENGTH);
+    let (triaged, triage_body) = post(&fx, &id, Some(&token), &json!({"status": "closed"})).await?;
+    assert_eq!(triaged, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(code(&triage_body), Some("unavailable"));
+    assert!(!triage_body.to_string().contains("deadline"));
+    for path in ["/alerts".to_owned(), format!("/alerts/{id}")] {
+        let response = get(&fx.router, &path, Some(&token)).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_too_large_triage_time_names_updated_at() -> TestResult {
+    let change = TriageChange {
+        status: TriageStatus::Closed,
+        actor: "u".to_owned(),
+        note: None,
+        now: u64::MAX,
+    };
+    let refused = check_triage(&"a".repeat(HEX_LENGTH), &change).err().ok_or("accepted")?;
+    assert!(matches!(refused, StoreError::BadUpdatedAt));
+    assert!(refused.to_string().contains("updated_at"));
     Ok(())
 }
 
