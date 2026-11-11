@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use tracing::Level;
 
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -65,7 +66,7 @@ fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     let fixed = arguments.fixed_now.map(|text| OffsetDateTime::parse(text, &Rfc3339)).transpose()?;
     let clock = move || fixed.unwrap_or_else(OffsetDateTime::now_utc);
     let rejected = AtomicU64::new(0);
-    let open = open_source(arguments.ioc_file, &clock, &rejected);
+    let open = open_source(arguments.ioc_file, &rejected);
     let mut report = stderr();
     let reload_context = ReloadContext {
         actor_id: "rpz_run".to_owned(),
@@ -96,6 +97,11 @@ fn start(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
 
 
 fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_writer(stderr)
+        .with_max_level(Level::INFO)
+        .try_init()
+        .map_err(|error| error.to_string())?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [policy_file, audit_file, ioc_file, counter_file, zone_file] => start(&Arguments {

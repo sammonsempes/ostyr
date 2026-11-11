@@ -5,7 +5,7 @@ use std::time::Duration;
 use time::OffsetDateTime;
 
 
-pub type OpenFn<'a> = dyn Fn() -> io::Result<Box<dyn BufRead>> + 'a;
+pub type OpenFn<'a> = dyn Fn(OffsetDateTime) -> io::Result<Box<dyn BufRead>> + 'a;
 
 
 pub type ClockFn<'a> = dyn Fn() -> OffsetDateTime + 'a;

@@ -28,9 +28,10 @@ pub struct Session<'a> {
 /// A failed run is reported and logged, it does not end the session.
 pub fn run_generation(session: &mut Session) -> io::Result<()> {
     let policy = current_config(session.engine);
-    let result: Result<_, RpzError> = (session.open)()
+    let instant = (session.clock)();
+    let result: Result<_, RpzError> = (session.open)(instant)
         .map_err(RpzError::from)
-        .and_then(|mut input| generate(&policy, &mut input, (session.clock)(), session.counter, session.output))
+        .and_then(|mut input| generate(&policy, &mut input, instant, session.counter, session.output))
         .map(|summary| RunSummary {
             source_bad_rows: session.rejected.load(Ordering::Relaxed),
             ..summary
