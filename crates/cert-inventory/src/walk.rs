@@ -41,6 +41,7 @@ pub struct Listed {
 pub enum Step {
     Descend,
     Examine,
+    NotRegular,
     Ignore,
 }
 
@@ -53,18 +54,21 @@ pub fn plan(settings: &ScanSettings, name: &OsStr, file_type: FileType) -> Step 
     } else if file_type == FileType::Directory {
         Step::Descend
     } else if has_wanted_extension(settings, Path::new(name)) {
-        Step::Examine
+        match file_type {
+            FileType::RegularFile | FileType::Unknown => Step::Examine,
+            _ => Step::NotRegular,
+        }
     } else {
         Step::Ignore
     }
 }
 
 
-/// Resolves an `Unknown` reported type with one `fstatat` that does not follow symlinks; any other type, or a failed stat, is kept as reported.
-pub fn resolve_type(parent: &OwnedFd, name: &OsStr, reported: FileType) -> FileType {
+/// Resolves an `Unknown` reported type with one `fstatat` that does not follow symlinks; any other type is kept as reported, a failed stat is returned.
+pub fn resolve_type(parent: &OwnedFd, name: &OsStr, reported: FileType) -> Result<FileType, Errno> {
     match reported {
-        FileType::Unknown => statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_or(reported, |stat| FileType::from_raw_mode(stat.st_mode)),
-        _ => reported,
+        FileType::Unknown => statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map(|stat| FileType::from_raw_mode(stat.st_mode)),
+        _ => Ok(reported),
     }
 }
 
@@ -196,12 +200,37 @@ pub fn handle_next(
 
 fn visit(settings: &ScanSettings, level: &Level, can_descend: bool, before_open: fn(&Path), state: &mut ScanState, listed: &Listed) -> Option<Level> {
     let path = level.path.join(&listed.name);
-    let file_type = resolve_type(&level.handle, &listed.name, listed.file_type);
-    before_open(&path);
-    match plan(settings, &listed.name, file_type) {
-        Step::Descend if can_descend => open_child(level, &listed.name, path, state),
+    match resolve_type(&level.handle, &listed.name, listed.file_type) {
+        Err(Errno::NOENT) => {
+            state.skipped.vanished += 1;
+            None
+        }
+        Err(errno) => count_unreadable(state, io::Error::from(errno), &path),
+        Ok(file_type) => {
+            before_open(&path);
+            act(
+                settings,
+                level,
+                can_descend,
+                state,
+                &listed.name,
+                (path, plan(settings, &listed.name, file_type)),
+            )
+        }
+    }
+}
+
+
+fn act(settings: &ScanSettings, level: &Level, can_descend: bool, state: &mut ScanState, name: &OsStr, planned: (PathBuf, Step)) -> Option<Level> {
+    let (path, step_to_take) = planned;
+    match step_to_take {
+        Step::Descend if can_descend => open_child(level, name, path, state),
         Step::Examine => {
-            examine(settings, state, &path, || load_at(&level.handle, &listed.name, settings.max_file_bytes));
+            examine(settings, state, &path, || load_at(&level.handle, name, settings.max_file_bytes));
+            None
+        }
+        Step::NotRegular => {
+            state.skipped.not_regular += 1;
             None
         }
         Step::Descend | Step::Ignore => None,

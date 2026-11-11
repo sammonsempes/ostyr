@@ -96,6 +96,7 @@ pub struct SkipCounts {
     pub too_large: usize,
     pub swapped: usize,
     pub unreadable: usize,
+    pub vanished: usize,
 }
 
 
