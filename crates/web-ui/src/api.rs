@@ -1,5 +1,5 @@
 use crate::error::ApiFailure;
-use crate::model::{Alert, AlertPage, ApiClient, CaseDetailView, CasePageView};
+use crate::model::{Alert, AlertPage, ApiClient, CaseDetailView, CasePageView, CommentView};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Method, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
@@ -33,6 +33,17 @@ pub const ID_LENGTH: usize = 64;
 pub const MAX_CASE_ID_CHARS: usize = 128;
 
 
+pub const MAX_COMMENT_CHARS: usize = 8_192;
+
+
+pub const CONFLICT_CODES: [(&str, &str); 4] = [
+    ("transition_not_allowed", "error_transition_not_allowed"),
+    ("resolution_required", "error_resolution_required"),
+    ("case_changed", "error_case_changed"),
+    ("full", "error_comment_full"),
+];
+
+
 pub const FORWARDED: HeaderName = HeaderName::from_static("forwarded");
 
 
@@ -42,6 +53,18 @@ pub const JSON_TYPE: HeaderValue = HeaderValue::from_static("application/json");
 #[derive(Debug, Deserialize)]
 pub struct TokenReply {
     pub token: String,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct ErrorDetail {
+    pub code: String,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct ErrorEnvelope {
+    pub error: ErrorDetail,
 }
 
 
@@ -164,8 +187,27 @@ pub async fn call_until(
         .into_iter()
         .fold(request, |pending, text| pending.header(CONTENT_TYPE, JSON_TYPE).body(text));
     let response = request.send().await.map_err(ApiFailure::Unavailable)?;
-    classify(response.status())?;
-    read_capped(response).await
+    match response.status() {
+        StatusCode::CONFLICT => Err(conflict_failure(&read_capped(response).await?)),
+        status => {
+            classify(status)?;
+            read_capped(response).await
+        }
+    }
+}
+
+
+/// A `409` is one of the fixed codes of the cases module, kept as the key of our own text; anything else is a plain status.
+pub fn conflict_failure(body: &[u8]) -> ApiFailure {
+    serde_json::from_slice::<ErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| {
+            CONFLICT_CODES
+                .iter()
+                .find(|(code, _)| *code == envelope.error.code)
+                .map(|(_, key)| ApiFailure::Conflict(key))
+        })
+        .unwrap_or(ApiFailure::Status(StatusCode::CONFLICT.as_u16()))
 }
 
 
@@ -298,6 +340,42 @@ pub async fn get_case(client: &ApiClient, source: IpAddr, token: &SecretString, 
         } else {
             Err(ApiFailure::Malformed("case id differs"))
         }
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// `POST /cases/{id}/actions`: the id is checked first, the action and resolution come from the caller's fixed tables.
+pub async fn post_case_action(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    id: &str,
+    action: &str,
+    resolution: Option<&str>,
+) -> Result<CaseDetailView, ApiFailure> {
+    if valid_case_id(id) {
+        let body = json!({ "action": action, "resolution": resolution }).to_string();
+        let bytes = call(client, source, Method::POST, &format!("cases/{id}/actions"), Some(token), Some(body)).await?;
+        let case: CaseDetailView = serde_json::from_slice(&bytes)?;
+        if case.summary.id == id {
+            Ok(case)
+        } else {
+            Err(ApiFailure::Malformed("case id differs"))
+        }
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// `POST /cases/{id}/comments`: the stored comment is the API's reply, never the submitted text.
+pub async fn post_case_comment(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str, text: &str) -> Result<CommentView, ApiFailure> {
+    if valid_case_id(id) {
+        let body = json!({ "text": text }).to_string();
+        let bytes = call(client, source, Method::POST, &format!("cases/{id}/comments"), Some(token), Some(body)).await?;
+        Ok(serde_json::from_slice(&bytes)?)
     } else {
         Err(ApiFailure::NotFound)
     }

@@ -31,6 +31,8 @@ pub enum ApiFailure {
     BadRequest,
     #[error("the API cannot be reached: {0}")]
     Unavailable(#[source] reqwest::Error),
+    #[error("the API refused the change: {0}")]
+    Conflict(&'static str),
     #[error("the API answered with status {0}")]
     Status(u16),
     #[error("the API answer is larger than the bound")]

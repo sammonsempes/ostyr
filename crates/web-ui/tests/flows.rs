@@ -1235,3 +1235,405 @@ async fn case_api_failures_render_our_own_pages() -> TestResult {
     }
     Ok(())
 }
+
+
+const COMMENT_CAP: usize = 8192;
+
+
+const WRITES_AFTER_BLANK: usize = 2;
+
+
+const OVER_THE_FORM: usize = 120_000;
+
+
+fn writes_of(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.writes.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+fn requests_of(rig: &Harness) -> usize {
+    rig.stub.state.requests.load(Ordering::SeqCst)
+}
+
+
+fn set_conflict(rig: &Harness, code: Option<&str>) -> TestResult {
+    *rig.stub.state.conflict.lock().map_err(|_| "poisoned")? = code.map(str::to_owned);
+    Ok(())
+}
+
+
+fn encoded(fields: &[(&str, &str)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    fields.iter().for_each(|(name, value)| {
+        serializer.append_pair(name, value);
+    });
+    serializer.finish()
+}
+
+
+async fn csrf_of(rig: &Harness, session: &str) -> Result<String, TestError> {
+    let page = fire(rig, get_with("/cases/case-1", session)).await?;
+    Ok(csrf_in(&page.body).ok_or("no token in the page")?)
+}
+
+
+async fn write_form(rig: &Harness, session: &str, path: &str, fields: &[(&str, &str)]) -> Result<Reply, TestError> {
+    let token = csrf_of(rig, session).await?;
+    let mut all = vec![("csrf", token.as_str())];
+    all.extend_from_slice(fields);
+    fire(rig, post_form(path, vec![format!("{SESSION_COOKIE}={session}")], &encoded(&all))).await
+}
+
+
+#[tokio::test]
+async fn case_pages_offer_the_forms_of_their_status() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for (id, offered, refused) in [
+        ("case-new", vec!["start", "close"], vec!["reopen"]),
+        ("case-1", vec!["close"], vec!["start", "reopen"]),
+        ("case-closed", vec!["reopen"], vec!["start", "close"]),
+    ] {
+        let page = fire(&rig, get_with(&format!("/cases/{id}"), &session)).await?;
+        assert!(page.body.contains(&format!("action=\"/cases/{id}/comment\"")), "{id}");
+        assert!(page.body.contains(&format!("maxlength=\"{COMMENT_CAP}\"")) && page.body.contains("<textarea"));
+        offered.iter().for_each(|action| {
+            assert!(page.body.contains(&format!("name=\"action\" value=\"{action}\"")), "{id} {action}");
+        });
+        refused.iter().for_each(|action| {
+            assert!(!page.body.contains(&format!("name=\"action\" value=\"{action}\"")), "{id} {action}");
+        });
+        assert_eq!(page.body.contains("<select name=\"resolution\""), offered.contains(&"close"), "{id}");
+    }
+    let page = fire(&rig, get_with("/cases/case-new", &session)).await?;
+    for resolution in ["true_positive", "false_positive", "benign", "duplicate", "other"] {
+        assert!(page.body.contains(&format!("<option value=\"{resolution}\">")), "{resolution}");
+    }
+    assert!(page.body.contains("action=\"/cases/case-new/action\"") && page.body.contains("Add comment"));
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with("/cases/case-closed", &session)
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Rouvrir") && french.body.contains("Ajouter le commentaire"));
+    set_mode(&rig, Mode::Hostile)?;
+    let weird = fire(&rig, get_with("/cases/case-1", &session)).await?;
+    assert!(!weird.body.contains("name=\"action\"") && weird.body.contains("action=\"/cases/case-1/comment\""));
+    assert!(writes_of(&rig)?.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn every_action_runs_from_its_status() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let started = write_form(&rig, &session, "/cases/case-new/action", &[("action", "start")]).await?;
+    assert_eq!(started.status, StatusCode::OK);
+    assert_hardened(&started);
+    assert!(started.body.contains("In progress") && started.body.contains("Phishing wave") && location_of(&started).is_none());
+    let closed = write_form(
+        &rig,
+        &session,
+        "/cases/case-1/action",
+        &[("action", "close"), ("resolution", "false_positive")],
+    )
+    .await?;
+    assert_eq!(closed.status, StatusCode::OK);
+    assert!(closed.body.contains("Closed") && closed.body.contains("False positive"));
+    let reopened = write_form(&rig, &session, "/cases/case-closed/action", &[("action", "reopen")]).await?;
+    assert_eq!(reopened.status, StatusCode::OK);
+    assert!(reopened.body.contains("In progress"));
+    let from_new = write_form(&rig, &session, "/cases/case-new/action", &[("action", "close"), ("resolution", "other")]).await?;
+    assert_eq!(from_new.status, StatusCode::OK);
+    assert_eq!(
+        writes_of(&rig)?,
+        vec![
+            "/cases/case-new/actions {\"action\":\"start\",\"resolution\":null}".to_owned(),
+            "/cases/case-1/actions {\"action\":\"close\",\"resolution\":\"false_positive\"}".to_owned(),
+            "/cases/case-closed/actions {\"action\":\"reopen\",\"resolution\":null}".to_owned(),
+            "/cases/case-new/actions {\"action\":\"close\",\"resolution\":\"other\"}".to_owned(),
+        ]
+    );
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..post_form(
+                "/cases/case-1/action",
+                vec![format!("{SESSION_COOKIE}={session}")],
+                &encoded(&[("csrf", &csrf_of(&rig, &session).await?), ("action", "close"), ("resolution", "benign")]),
+            )
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Clos"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_write_without_the_session_token_is_refused_before_any_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let other = sign_in(&rig).await?;
+    let foreign = csrf_of(&rig, &other).await?;
+    let cookie = vec![format!("{SESSION_COOKIE}={session}")];
+    for path in ["/cases/case-1/action", "/cases/case-1/comment"] {
+        let fields = if path.ends_with("action") { "action=start" } else { "text=hello" };
+        for body in [
+            fields.to_owned(),
+            format!("csrf=&{fields}"),
+            format!("csrf=wrong&{fields}"),
+            format!("csrf={foreign}&{fields}"),
+        ] {
+            let reply = fire(&rig, post_form(path, cookie.clone(), &body)).await?;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{path} {body}");
+            assert!(reply.body.contains("no longer valid"));
+        }
+        let anonymous = fire(&rig, post_form(path, vec![], &format!("csrf={foreign}&{fields}"))).await?;
+        assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+        assert_eq!(location_of(&anonymous).as_deref(), Some("/login"));
+    }
+    assert!(writes_of(&rig)?.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn ids_outside_the_grammar_are_not_found_on_a_write() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let before = requests_of(&rig);
+    let mut attempts = 0;
+    for bad in ["bad%2Fid", "..%2Fx", "-x", "a%20b", "%2e%2e"] {
+        for (leaf, fields) in [("action", ("action", "start")), ("comment", ("text", "hello"))] {
+            let reply = write_form(&rig, &session, &format!("/cases/{bad}/{leaf}"), &[fields]).await?;
+            attempts += 1;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{bad} {leaf}");
+        }
+    }
+    assert!(writes_of(&rig)?.is_empty());
+    assert_eq!(requests_of(&rig) - before, attempts);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_action_outside_the_fixed_tables_is_refused_before_any_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for fields in [
+        vec![],
+        vec![("action", "")],
+        vec![("action", "delete")],
+        vec![("action", "Start")],
+        vec![("action", "close")],
+        vec![("action", "close"), ("resolution", "mystery")],
+        vec![("action", "close"), ("resolution", "")],
+        vec![("action", "start"), ("resolution", "benign")],
+        vec![("action", "reopen"), ("resolution", "mystery")],
+    ] {
+        let reply = write_form(&rig, &session, "/cases/case-1/action", &fields).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{fields:?}");
+    }
+    assert!(writes_of(&rig)?.is_empty());
+    let started = write_form(&rig, &session, "/cases/case-new/action", &[("action", "start"), ("resolution", "")]).await?;
+    assert_eq!(started.status, StatusCode::OK);
+    assert_eq!(writes_of(&rig)?.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_comment_is_bounded_in_characters_before_any_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let over = "é".repeat(COMMENT_CAP + 1);
+    for text in ["", over.as_str()] {
+        let reply = write_form(&rig, &session, "/cases/case-1/comment", &[("text", text)]).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", text.len());
+    }
+    let missing = write_form(&rig, &session, "/cases/case-1/comment", &[]).await?;
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+    let huge = "x".repeat(OVER_THE_FORM);
+    let too_large = write_form(&rig, &session, "/cases/case-1/comment", &[("text", &huge)]).await?;
+    assert_eq!(too_large.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(writes_of(&rig)?.is_empty());
+    let exact = "é".repeat(COMMENT_CAP);
+    let accepted = write_form(&rig, &session, "/cases/case-1/comment", &[("text", &exact)]).await?;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(writes_of(&rig)?.len(), 1);
+    assert!(accepted.body.contains("Comment added") && accepted.body.contains("... ["));
+    let blank = write_form(&rig, &session, "/cases/case-1/comment", &[("text", "  ")]).await?;
+    assert_eq!(blank.status, StatusCode::OK);
+    assert_eq!(writes_of(&rig)?.len(), WRITES_AFTER_BLANK);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_comment_is_shown_as_the_api_stored_it() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let reply = write_form(&rig, &session, "/cases/case-1/comment", &[("text", "first note\nsecond")]).await?;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_hardened(&reply);
+    assert!(reply.body.contains("first note<br>second<br>"));
+    assert!(reply.body.contains("Comment added") && reply.body.contains("alice") && reply.body.contains("2023-11-14T22:13:20Z"));
+    assert!(reply.body.contains("Phishing wave") && reply.body.contains("action=\"/cases/case-1/comment\""));
+    assert_eq!(
+        writes_of(&rig)?,
+        vec!["/cases/case-1/comments {\"text\":\"first note\\nsecond\"}".to_owned()]
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hostile_comment_from_the_api_is_rendered_escaped() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    set_mode(&rig, Mode::Hostile)?;
+    let reply = write_form(&rig, &session, "/cases/case-1/comment", &[("text", "<script>alert(2)</script>\u{202e}")]).await?;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(!reply.body.contains("<script>") && !reply.body.contains('\u{202e}') && !reply.body.contains("alert(2)"));
+    assert!(reply.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
+    assert!(!reply.body.contains("<img src=x>") && reply.body.contains("&quot;&gt;&lt;img src=x&gt;aaa"));
+    assert!(reply.body.contains("... ["));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_submitted_comment_is_never_echoed_from_the_form() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    set_conflict(&rig, Some("full"))?;
+    let refused = write_form(&rig, &session, "/cases/case-1/comment", &[("text", "SUBMITTED-MARKER")]).await?;
+    assert!(!refused.body.contains("SUBMITTED-MARKER"));
+    let bad = write_form(&rig, &session, "/cases/case-1/comment", &[("text", "")]).await?;
+    assert!(!bad.body.contains("SUBMITTED-MARKER"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn each_conflict_code_is_rendered_with_our_own_text() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for (code, expected) in [
+        ("transition_not_allowed", "not allowed in the current status"),
+        ("resolution_required", "Choose a resolution"),
+        ("case_changed", "changed meanwhile"),
+        ("full", "maximum number of comments"),
+    ] {
+        set_conflict(&rig, Some(code))?;
+        let action = write_form(&rig, &session, "/cases/case-1/action", &[("action", "reopen")]).await?;
+        let comment = write_form(&rig, &session, "/cases/case-1/comment", &[("text", "hello")]).await?;
+        for reply in [action, comment] {
+            assert_eq!(reply.status, StatusCode::CONFLICT, "{code}");
+            assert!(
+                reply.body.contains(expected) && !reply.body.contains(LEAK) && !reply.body.contains(code),
+                "{code}"
+            );
+            assert_hardened(&reply);
+        }
+    }
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..post_form(
+                "/cases/case-1/comment",
+                vec![format!("{SESSION_COOKIE}={session}")],
+                &encoded(&[("csrf", &csrf_of(&rig, &session).await?), ("text", "bonjour")]),
+            )
+        },
+    )
+    .await?;
+    assert!(french.body.contains("nombre maximal"));
+    for code in ["something_else", stub::RAW_CONFLICT] {
+        set_conflict(&rig, Some(code))?;
+        let reply = write_form(&rig, &session, "/cases/case-1/action", &[("action", "reopen")]).await?;
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{code}");
+        assert!(!reply.body.contains(LEAK));
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn api_failures_on_a_write_render_our_own_pages() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for (mode, status) in [
+        (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+        (Mode::Status(StatusCode::NOT_FOUND), StatusCode::NOT_FOUND),
+        (Mode::Status(StatusCode::BAD_REQUEST), StatusCode::BAD_REQUEST),
+        (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+        (Mode::BadId, StatusCode::BAD_GATEWAY),
+    ] {
+        let token = csrf_of(&rig, &session).await?;
+        set_mode(&rig, mode)?;
+        for (path, fields) in [
+            ("/cases/case-1/action", ("action", "reopen")),
+            ("/cases/case-1/comment", ("text", "hello")),
+        ] {
+            let reply = fire(
+                &rig,
+                post_form(path, vec![format!("{SESSION_COOKIE}={session}")], &encoded(&[("csrf", &token), fields])),
+            )
+            .await?;
+            assert_eq!(reply.status, status, "{path}");
+            assert!(!reply.body.contains(LEAK));
+        }
+        set_mode(&rig, Mode::Normal)?;
+    }
+    for (path, fields) in [
+        ("/cases/case-1/action", ("action", "reopen")),
+        ("/cases/case-1/comment", ("text", "hello")),
+    ] {
+        let again = sign_in(&rig).await?;
+        let token = csrf_of(&rig, &again).await?;
+        set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+        let ended = fire(
+            &rig,
+            post_form(path, vec![format!("{SESSION_COOKIE}={again}")], &encoded(&[("csrf", &token), fields])),
+        )
+        .await?;
+        assert_eq!(ended.status, StatusCode::SEE_OTHER);
+        assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+        set_mode(&rig, Mode::Normal)?;
+        let gone = fire(&rig, get_with("/cases/case-1", &again)).await?;
+        assert_eq!(location_of(&gone).as_deref(), Some("/login"));
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_api_calls_refuse_an_invalid_id_without_a_request() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let client = rig.state.api.load_full();
+    let token = SecretString::from("tok-x".to_owned());
+    let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let long = "i".repeat(stub::LONG_CASE_ID_CHARS);
+    for bad in ["../x", "-x", "a b", "x?y", "", long.as_str()] {
+        let action = web_ui::api::post_case_action(&client, source, &token, bad, "start", None).await;
+        assert!(matches!(action, Err(ApiFailure::NotFound)), "{bad}");
+        let comment = web_ui::api::post_case_comment(&client, source, &token, bad, "hello").await;
+        assert!(matches!(comment, Err(ApiFailure::NotFound)), "{bad}");
+        let detail = web_ui::api::get_case(&client, source, &token, bad).await;
+        assert!(matches!(detail, Err(ApiFailure::NotFound)), "{bad}");
+    }
+    assert_eq!(requests_of(&rig), 0);
+    assert!(writes_of(&rig)?.is_empty());
+    let accepted = web_ui::api::post_case_comment(&client, source, &token, "x.y_z-1", "hello").await;
+    assert!(accepted.is_ok());
+    assert_eq!(requests_of(&rig), 1);
+    Ok(())
+}
