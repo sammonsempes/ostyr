@@ -4,6 +4,8 @@ pub mod admission;
 pub mod dirfs;
 pub mod epoch;
 pub mod error;
+pub mod event;
+pub mod event_model;
 pub mod flow;
 pub mod flow_model;
 pub mod forward;
