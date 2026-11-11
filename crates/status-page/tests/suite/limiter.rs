@@ -35,7 +35,7 @@ const RAISED_BURST: u32 = 5;
 const SOURCE_FLOOD: u8 = 50;
 
 
-const FIELD_COUNT: usize = 14;
+const FIELD_COUNT: usize = 15;
 
 
 const MANY_PROXIES: usize = 257;
@@ -203,6 +203,7 @@ fn settings_validation_names_every_bad_field() -> TestResult {
         max_proxy_header_bytes: 1,
         wide_prefix_bits: 0,
         wide_multiplier: 0,
+        publish_interval_seconds: 0,
     };
     let text = validate_settings(&bad).err().map(|error| error.to_string()).ok_or("accepted")?;
     assert_eq!(text.matches(',').count() + 1, FIELD_COUNT);
