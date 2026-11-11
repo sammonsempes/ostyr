@@ -2,11 +2,11 @@ mod memory;
 mod types;
 
 
-use cmdb::error::StoreError;
+use cmdb::error::{CmdbError, StoreError};
 use cmdb::model::{
     Applied, Asset, AssetKind, Attribute, Conflict, DuplicateConflict, IdentityKey, Limits, Observation, Outcome, RefusedConflict, Resolution,
 };
-use cmdb::reconcile::RESERVED_ATTRIBUTE_PREFIX;
+use cmdb::reconcile::{MAX_OBSERVATION_ATTRIBUTES, RESERVED_ATTRIBUTE_PREFIX};
 use cmdb::store::{
     apply_outcome, attempt, changed_assets, check_limits, check_one_conflict_per_triple, conflict_of, event_doc, is_exempt, is_key_signal,
     load_assets, read_table, reconcile_stored, resolution_text, without_duplicates, without_refused, APPLY_SQL, ASSETS_SQL, ASSETS_TABLE,
@@ -1209,5 +1209,47 @@ fn an_outcome_with_two_conflicts_for_one_triple_is_refused() -> TestResult {
         check_one_conflict_per_triple(&doubled),
         Err(StoreError::DuplicateConflict { ref asset, ref attribute, ref source_name }) if asset == "a1" && attribute == "owner" && source_name == "hr"
     ));
+    Ok(())
+}
+
+
+const ATTRIBUTE_VALUE_BYTES: usize = 4_096;
+
+
+#[tokio::test]
+async fn attribute_count_and_invisible_text_are_refused_before_any_store_call() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    let truth = TruthMap::new();
+    let big = "v".repeat(ATTRIBUTE_VALUE_BYTES);
+    let names: Vec<String> = (0..=MAX_OBSERVATION_ATTRIBUTES).map(|i| format!("attr{i}")).collect();
+    let pairs: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), big.as_str())).collect();
+    let over = observation("agent", "SN1", &pairs);
+    let refused = reconcile_stored(&exec, &scope, &over, &truth, &limits).await;
+    assert!(
+        matches!(refused, Err(StoreError::Cmdb(CmdbError::TooManyAttributes { .. }))),
+        "{refused:?}"
+    );
+    assert_eq!(*lock(&db.apply_calls), 0);
+    let hostile: Vec<Observation> = ["a\u{202e}b", "a\u{2066}b", "a\u{200b}b", "a\u{feff}b", "a\u{2028}b"]
+        .iter()
+        .flat_map(|text| {
+            [
+                observation("agent", text, &[]),
+                observation("agent", "SN1", &[(text, "x")]),
+                observation("agent", "SN1", &[("rack", text)]),
+            ]
+        })
+        .collect();
+    for case in &hostile {
+        let result = reconcile_stored(&exec, &scope, case, &truth, &limits).await;
+        assert!(matches!(result, Err(StoreError::Cmdb(CmdbError::ControlCharacter { .. }))));
+    }
+    assert_eq!(*lock(&db.apply_calls), 0);
+    let at_cap = observation("agent", "SN1", pairs.get(..MAX_OBSERVATION_ATTRIBUTES).ok_or("short")?);
+    reconcile_stored(&exec, &scope, &at_cap, &truth, &limits).await?;
+    assert_eq!(*lock(&db.apply_calls), 1);
     Ok(())
 }

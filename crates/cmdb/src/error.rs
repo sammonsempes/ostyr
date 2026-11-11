@@ -11,8 +11,24 @@ pub enum CmdbError {
     ReservedName { field: &'static str },
     #[error("observation field `{field}` is longer than {limit} bytes")]
     FieldTooLong { field: &'static str, limit: usize },
-    #[error("observation field `{field}` holds a control character")]
+    #[error("observation field `{field}` holds a control or invisible character")]
     ControlCharacter { field: &'static str },
+    #[error("observation carries more than {limit} attributes")]
+    TooManyAttributes { limit: usize },
+}
+
+
+#[derive(Debug, Error)]
+pub enum CmdbConfigError {
+    #[error("{0}")]
+    Load(#[from] core_config::error::ConfigError),
+    #[error("{file}: declared asset {index}: {source}")]
+    Declared {
+        file: String,
+        index: usize,
+        #[source]
+        source: CmdbError,
+    },
 }
 
 
