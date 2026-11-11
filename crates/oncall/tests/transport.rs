@@ -15,7 +15,7 @@ use oncall::notify::notify;
 use oncall::secret::{read_secret, secret_text};
 use oncall::settings::{open_settings_engine, parse_settings, settings_state, TransportSettings};
 use oncall::transport::{build_agent, check_text, https_sender, https_url, payload, post, send_one};
-use pki::{spawn_silent, test_pki};
+use pki::{release_silent, spawn_silent, test_pki};
 use sink::{spawn_sink, Seen};
 use std::collections::BTreeMap;
 use std::fs;
@@ -258,12 +258,12 @@ fn the_request_goes_to_the_parsed_url() -> TestResult {
 #[test]
 fn a_server_that_never_answers_fails_on_the_injected_deadline() -> TestResult {
     let (release, wait) = signal();
-    let pki::Silent { port, held } = spawn_silent(wait)?;
+    let silent = spawn_silent(wait)?;
+    let port = silent.port;
     let fixture = fixture(None, SHORT_TIMEOUT_MILLIS)?;
     let outcome = send_one(&fixture.settings, &channel_for(ChannelKind::Webhook, &url_of(port), None), &message());
     assert!(matches!(outcome, Err(TransportError::Request(_))));
-    release.send(())?;
-    held.join().map_err(|_panic| "silent server panicked")??;
+    release_silent(silent, &release)?;
     Ok(())
 }
 
