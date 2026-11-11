@@ -212,7 +212,7 @@ fn latest(source_file: &Path, fallback: &SourceSettings) -> SourceSettings {
 
 async fn poll_loop(pg_file: &Path, source_file: &Path, label: &str) -> Result<(), Box<dyn std::error::Error>> {
     let settings = parse_settings(&std::fs::read_to_string(pg_file)?, &pg_file.display().to_string())?;
-    let client = connect(&settings).await?;
+    let mut client = connect(&settings).await?;
     migrate(&client, ALERT_NAMESPACE, &ALERT_MIGRATIONS, DEADLINE).await?;
     migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE).await?;
     let holder = process_holder(
@@ -224,8 +224,6 @@ async fn poll_loop(pg_file: &Path, source_file: &Path, label: &str) -> Result<()
     let mut out = stdout();
     writeln!(out, "holder {holder}")?;
     out.flush()?;
-    let alerts_exec = alerts_executor(&client);
-    let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement);
     let audit = |counts: &PurgedCounts| audit_purge(counts);
     let hooks = RoundHooks {
         now: wall_clock,
@@ -234,6 +232,14 @@ async fn poll_loop(pg_file: &Path, source_file: &Path, label: &str) -> Result<()
         audit_purge: &audit,
     };
     for _round in 0..MAX_ROUNDS {
+        if client.is_closed() {
+            match connect(&settings).await {
+                Ok(fresh) => client = fresh,
+                Err(error) => tracing::warn!("reconnect failed, retrying next round: {error}"),
+            }
+        }
+        let alerts_exec = alerts_executor(&client);
+        let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement);
         let source = parse_source_settings(&std::fs::read_to_string(source_file)?, &source_file.display().to_string(), wall_clock())?;
         let live = || latest(source_file, &source);
         run_rounds(1, &alerts_exec, &mut exec, &holder, &hooks, &live).await;

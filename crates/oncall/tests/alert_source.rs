@@ -9,7 +9,6 @@ use alerts::types::RowFuture;
 use chrono::{DateTime, Utc};
 use core_pg::error::PgError;
 use core_pg::migrate::check_embedded;
-use core_pg::query::timed_script;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use oncall::alert::{Cell, Param, Statement};
 use oncall::alert_source::{
@@ -1254,7 +1253,7 @@ fn the_purge_statement_carries_the_lease_guard_and_the_server_timeout_is_below_t
     assert!(PURGE_SQL.contains("LIMIT $3::text::bigint FOR UPDATE SKIP LOCKED) o"));
     let shortest_lease = LEASE_FACTOR * MILLIS_PER_SECOND;
     assert!(PURGE_SERVER_TIMEOUT_MILLIS.checked_add(1).is_some_and(|above| above <= shortest_lease));
-    assert!(timed_script("", std::time::Duration::from_millis(PURGE_SERVER_TIMEOUT_MILLIS)).starts_with("SET statement_timeout = 2000;"));
+    assert!(purge_statements().0.ends_with(" = 2000"));
     Ok(())
 }
 
