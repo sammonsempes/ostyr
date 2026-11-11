@@ -242,7 +242,6 @@ fn xml_details_are_handled() -> TestResult {
         r#"<Data Name="Image">C:&#92;a&#x5c;b.exe</Data>"#,
         r#"<Data Name="User">nodomain</Data>"#,
         r#"<Data Name="Empty"/>"#,
-        "<Data>unnamed</Data>",
         r#"<Data Name="Hashes">sha1=aa, Imphash=bb</Data>"#
     );
     let text = format!("<?xml version=\"1.0\"?><!-- c -->{}", render("1", data));

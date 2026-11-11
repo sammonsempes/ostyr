@@ -24,6 +24,12 @@ pub const MAX_FIELD_BYTES: usize = 8_192;
 const MAX_ID_SHOWN: usize = 16;
 
 
+const MAX_ID_DIGITS: usize = 5;
+
+
+const XML_WHITESPACE: [char; 4] = ['\t', '\n', '\r', ' '];
+
+
 /// One Sysmon event reduced to what the mapping reads, whatever its input format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawEvent {
@@ -172,20 +178,25 @@ fn close(state: &mut Partial) -> Result<(), SysmonError> {
             Some(_) => Err(SysmonError::Duplicate("Data")),
             None => Ok(()),
         },
-        Target::Data(None) => Ok(()),
+        Target::Data(None) => Err(SysmonError::MissingAttribute("Data/Name")),
         Target::Nothing => Ok(()),
     }
 }
 
 
 fn add_text(state: &mut Partial, piece: &str) -> Result<(), SysmonError> {
-    state.text.push_str(piece);
-    Ok(())
+    if state.path.is_empty() && !piece.trim_matches(XML_WHITESPACE).is_empty() {
+        Err(SysmonError::OutsideRoot)
+    } else {
+        state.text.push_str(piece);
+        Ok(())
+    }
 }
 
 
 fn append_reference(state: &mut Partial, name: &str, character: Option<char>) -> Result<(), SysmonError> {
     match (character, resolve_predefined_entity(name)) {
+        _ if state.path.is_empty() => Err(SysmonError::OutsideRoot),
         (Some(found), _) => add_text(state, &found.to_string()),
         (None, Some(entity)) => add_text(state, entity),
         (None, None) => Err(SysmonError::UnknownEntity(name.to_string())),
@@ -378,6 +389,14 @@ fn bound_fields(fields: Fields) -> Result<Fields, SysmonError> {
 }
 
 
+fn parse_id(text: &str) -> Option<u32> {
+    let digits = text.trim_ascii();
+    let plain = digits.len() <= MAX_ID_DIGITS && digits.bytes().all(|byte| byte.is_ascii_digit());
+    let no_zero_lead = !digits.starts_with('0') || digits.len() == 1;
+    (plain && no_zero_lead).then(|| digits.parse::<u16>().ok()).flatten().map(u32::from)
+}
+
+
 fn partial(text: &str) -> Result<Partial, SysmonError> {
     if text.len() > MAX_EVENT_BYTES {
         Err(SysmonError::TooLong { max: MAX_EVENT_BYTES })
@@ -394,10 +413,7 @@ pub fn parse_event(text: &str) -> Result<RawEvent, SysmonError> {
     let state = partial(text)?;
     let fields = bound_fields(state.fields)?;
     let id_text = state.event_id.ok_or(SysmonError::MissingField("EventID"))?;
-    let event_id = Some(id_text.trim())
-        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|digits| digits.parse().ok())
-        .ok_or_else(|| SysmonError::BadEventId(id_text.chars().take(MAX_ID_SHOWN).collect()))?;
+    let event_id = parse_id(&id_text).ok_or_else(|| SysmonError::BadEventId(id_text.chars().take(MAX_ID_SHOWN).collect()))?;
     Ok(RawEvent {
         event_id,
         computer: state.computer,
