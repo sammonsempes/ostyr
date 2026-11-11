@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 88;
+pub const TEXT_COUNT: usize = 91;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -93,6 +93,9 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("comment_label", "Add a comment"),
     ("comment_submit", "Add comment"),
     ("comment_added", "Comment added"),
+    ("comment_unloaded", "Comment stored; the case could not be reloaded."),
+    ("comment_signin", "Comment stored; sign in again to continue."),
+    ("case_reload", "Reload the case"),
     (
         "error_transition_not_allowed",
         "This action is not allowed in the current status of the case.",
@@ -188,6 +191,9 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("comment_label", "Ajouter un commentaire"),
     ("comment_submit", "Ajouter le commentaire"),
     ("comment_added", "Commentaire ajouté"),
+    ("comment_unloaded", "Commentaire enregistré ; le dossier n'a pas pu être rechargé."),
+    ("comment_signin", "Commentaire enregistré ; reconnectez-vous pour continuer."),
+    ("case_reload", "Recharger le dossier"),
     (
         "error_transition_not_allowed",
         "Cette action n'est pas permise dans le statut actuel du dossier.",

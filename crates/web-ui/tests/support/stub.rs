@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::net::TcpListener;
 
@@ -63,6 +63,13 @@ pub enum Mode {
 }
 
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReadFault {
+    Status(StatusCode),
+    Hang,
+}
+
+
 pub const LOCK_AFTER: u32 = 3;
 
 
@@ -79,6 +86,8 @@ pub struct StubState {
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
     pub last_query: Mutex<String>,
+    pub read_fault: Mutex<Option<ReadFault>>,
+    pub stored: AtomicBool,
 }
 
 
@@ -395,12 +404,18 @@ pub async fn case_detail_handler(State(state): State<Arc<StubState>>, headers: H
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(format!("/cases/{id}"));
+    let fault = *state.read_fault.lock().unwrap_or_else(PoisonError::into_inner);
+    let stored = state.stored.load(Ordering::SeqCst);
+    if stored && fault == Some(ReadFault::Hang) {
+        std::future::pending::<()>().await;
+    }
     if authorised(&headers) {
-        match mode_of(&state) {
-            Mode::Status(status) => error_reply(status),
-            Mode::Hostile => Json(hostile_detail(&id)).into_response(),
-            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
-            Mode::BadId => Json(case_detail("other", "t", "new")).into_response(),
+        match (mode_of(&state), fault) {
+            (_, Some(ReadFault::Status(status))) if stored => error_reply(status),
+            (Mode::Status(status), _) => error_reply(status),
+            (Mode::Hostile, _) => Json(hostile_detail(&id)).into_response(),
+            (Mode::Oversize, _) => "x".repeat(OVERSIZE_BYTES).into_response(),
+            (Mode::BadId, _) => Json(case_detail("other", "t", "new")).into_response(),
             _ if id == "missing" => error_reply(StatusCode::NOT_FOUND),
             _ => Json(case_detail(&id, "Phishing wave", status_of(&id))).into_response(),
         }
@@ -489,6 +504,7 @@ pub async fn case_comment_handler(State(state): State<Arc<StubState>>, headers: 
     note_write(&state, format!("/cases/{id}/comments"), &body);
     if authorised(&headers) {
         write_failure(&state).unwrap_or_else(|| {
+            state.stored.store(true, Ordering::SeqCst);
             let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let (author, text) = match mode_of(&state) {
                 Mode::Hostile => (hostile_author(), json!(format!("{HOSTILE}\u{202e}"))),
@@ -522,6 +538,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
         last_query: Mutex::new(String::new()),
+        read_fault: Mutex::new(None),
+        stored: AtomicBool::new(false),
     });
     let router = Router::new()
         .route("/auth/login", post(login_handler))

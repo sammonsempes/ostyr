@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
-use stub::{id_of, Mode, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, TOKEN};
+use stub::{id_of, Mode, ReadFault, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, TOKEN};
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Instant};
 use tokio_stream::pending;
@@ -1521,6 +1521,95 @@ async fn a_submitted_comment_is_never_echoed_from_the_form() -> TestResult {
 }
 
 
+fn set_read_fault(rig: &Harness, fault: ReadFault) -> TestResult {
+    *rig.stub.state.read_fault.lock().map_err(|_| "poisoned")? = Some(fault);
+    Ok(())
+}
+
+
+fn assert_stored_notice(reply: &Reply, language_text: &str) {
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_hardened(reply);
+    assert!(reply.body.contains(language_text), "{}", reply.body);
+    assert!(reply.body.contains("Comment added") && reply.body.contains("STORED-REPLY") && reply.body.contains("alice"));
+    assert!(!reply.body.contains(LEAK) && !reply.body.contains("SUBMITTED-MARKER") && !reply.body.contains("Phishing wave"));
+}
+
+
+async fn failed_reread(fault: ReadFault) -> Result<(Harness, String, Reply), TestError> {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let token = csrf_of(&rig, &session).await?;
+    set_read_fault(&rig, fault)?;
+    let body = encoded(&[("csrf", token.as_str()), ("text", "STORED-REPLY")]);
+    let reply = fire(
+        &rig,
+        post_form("/cases/case-1/comment", vec![format!("{SESSION_COOKIE}={session}")], &body),
+    )
+    .await?;
+    Ok((rig, session, reply))
+}
+
+
+#[tokio::test]
+async fn a_failed_reread_shows_the_stored_comment_and_our_text() -> TestResult {
+    for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_GATEWAY, StatusCode::NOT_FOUND] {
+        let (rig, session, reply) = failed_reread(ReadFault::Status(status)).await?;
+        assert_stored_notice(&reply, "Comment stored; the case could not be reloaded.");
+        assert!(reply.body.contains("action=\"/cases/case-1\"") && reply.body.contains("Reload the case"));
+        assert!(reply.body.contains("name=\"csrf\"") || reply.body.contains("/language/"));
+        assert_eq!(writes_of(&rig)?, vec!["/cases/case-1/comments {\"text\":\"STORED-REPLY\"}".to_owned()]);
+        let next = fire(&rig, get_with("/cases/case-1", &session)).await?;
+        assert_ne!(next.status, StatusCode::SEE_OTHER);
+    }
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_reread_shows_the_stored_comment_and_our_text() -> TestResult {
+    let (rig, _session, reply) = failed_reread(ReadFault::Hang).await?;
+    assert_stored_notice(&reply, "Comment stored; the case could not be reloaded.");
+    assert_eq!(writes_of(&rig)?.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unauthorised_reread_ends_the_session_after_the_stored_notice() -> TestResult {
+    let (rig, session, reply) = failed_reread(ReadFault::Status(StatusCode::UNAUTHORIZED)).await?;
+    assert_stored_notice(&reply, "Comment stored; sign in again to continue.");
+    assert!(reply.body.contains("action=\"/login\"") && !reply.body.contains("action=\"/cases/case-1\""));
+    let cleared = set_cookie_of(&reply, SESSION_COOKIE).ok_or("no cleared cookie")?;
+    assert!(cleared.contains("Max-Age=0"), "{cleared}");
+    assert_eq!(writes_of(&rig)?.len(), 1);
+    let next = fire(&rig, get_with("/cases/case-1", &session)).await?;
+    assert_eq!(next.status, StatusCode::SEE_OTHER);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_reread_page_renders_the_stored_comment_escaped() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let token = csrf_of(&rig, &session).await?;
+    set_mode(&rig, Mode::Hostile)?;
+    set_read_fault(&rig, ReadFault::Status(StatusCode::BAD_GATEWAY))?;
+    let body = encoded(&[("csrf", token.as_str()), ("text", "SUBMITTED-MARKER")]);
+    let reply = fire(
+        &rig,
+        post_form("/cases/case-1/comment", vec![format!("{SESSION_COOKIE}={session}")], &body),
+    )
+    .await?;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(!reply.body.contains("<script>") && !reply.body.contains("SUBMITTED-MARKER") && !reply.body.contains('\u{202e}'));
+    assert!(reply.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
+    assert!(reply.body.contains("&quot;&gt;&lt;img src=x&gt;aaa"));
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn each_conflict_code_is_rendered_with_our_own_text() -> TestResult {
     let rig = harness(Mode::Normal).await?;
@@ -1588,7 +1677,8 @@ async fn api_failures_on_a_write_render_our_own_pages() -> TestResult {
                 post_form(path, vec![format!("{SESSION_COOKIE}={session}")], &encoded(&[("csrf", &token), fields])),
             )
             .await?;
-            assert_eq!(reply.status, status, "{path}");
+            let stored_then_unreadable = mode == Mode::BadId && path.ends_with("comment");
+            assert_eq!(reply.status, if stored_then_unreadable { StatusCode::OK } else { status }, "{path}");
             assert!(!reply.body.contains(LEAK));
         }
         set_mode(&rig, Mode::Normal)?;
