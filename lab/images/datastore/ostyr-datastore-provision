@@ -26,6 +26,8 @@ readonly S3_SECRET_FILE="$LAB_DIR/s3-secret-key"
 readonly GARAGE_CAPACITY="1G"
 readonly SERVICE_USER="ostyr"
 readonly SERVICE_DATABASE="ostyr"
+readonly DICTIONARY_USER="ostyr_dict"
+readonly DICTIONARY_TABLE="iocs"
 postgres_conf_dir="$(echo /etc/postgresql/*/main/conf.d)"
 postgres_hba="$(echo /etc/postgresql/*/main/pg_hba.conf)"
 
@@ -57,6 +59,7 @@ postgres_password="$(openssl rand -hex 16)"
 cat >/etc/clickhouse-server/config.d/ostyr.xml <<XML
 <clickhouse>
     <listen_host replace="replace">$server_ip</listen_host>
+    <listen_host>127.0.0.1</listen_host>
     <http_port remove="remove"/>
     <tcp_port remove="remove"/>
     <interserver_http_port remove="remove"/>
@@ -80,8 +83,21 @@ cat >/etc/clickhouse-server/config.d/ostyr.xml <<XML
 XML
 cat >/etc/clickhouse-server/users.d/ostyr.xml <<XML
 <clickhouse>
+    <profiles>
+        <ostyr_dictionary_readonly>
+            <readonly>1</readonly>
+        </ostyr_dictionary_readonly>
+    </profiles>
     <users>
         <default remove="remove"/>
+        <$DICTIONARY_USER>
+            <no_password/>
+            <networks><ip>::1</ip><ip>127.0.0.1</ip></networks>
+            <profile>ostyr_dictionary_readonly</profile>
+            <quota>default</quota>
+            <access_management>0</access_management>
+            <grants><query>GRANT SELECT ON $SERVICE_DATABASE.$DICTIONARY_TABLE</query></grants>
+        </$DICTIONARY_USER>
         <$SERVICE_USER>
             <password_sha256_hex>$(printf '%s' "$clickhouse_password" | sha256sum | cut -d' ' -f1)</password_sha256_hex>
             <networks><ip>::/0</ip></networks>

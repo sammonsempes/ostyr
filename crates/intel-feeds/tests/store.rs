@@ -16,6 +16,9 @@ use time::OffsetDateTime;
 use types::TestResult;
 
 
+const PORT: u16 = 9440;
+
+
 const NOW: OffsetDateTime = datetime!(2026-11-03 12:00:00 UTC);
 
 
@@ -102,10 +105,11 @@ fn dictionary_ddl_golden() -> TestResult {
     let expected = "CREATE DICTIONARY IF NOT EXISTS `intel`.`ioc_ip` (\n    `prefix` String,\n    `feed` String,\n    `feed_version` String,\n    \
         `confidence` UInt8,\n    `first_seen` DateTime('UTC'),\n    `last_seen` DateTime('UTC'),\n    `expires_at` DateTime('UTC')\n)\n\
         PRIMARY KEY `prefix`\n\
-        SOURCE(CLICKHOUSE(QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
+        SOURCE(CLICKHOUSE(USER 'ostyr_dict' HOST '127.0.0.1' PORT 9440 SECURE 1 QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
         FROM `intel`.`ioc` FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `expires_at` > now()'))\n\
         LAYOUT(IP_TRIE)\nLIFETIME(MIN 30 MAX 300)";
-    assert_eq!(dictionary_ddl("intel", "ioc", "ioc_ip")?, expected);
+    assert_eq!(dictionary_ddl("intel", "ioc", "ioc_ip", "ostyr_dict", PORT)?, expected);
+    assert!(!expected.contains("PASSWORD"));
     Ok(())
 }
 
@@ -126,9 +130,12 @@ fn identifiers_are_validated() -> TestResult {
     assert!(quote_identifier(&"a".repeat(MAX_NAME_BYTES)).is_ok());
     assert!(table_ddl("db", "bad name").is_err());
     assert!(table_ddl("bad name", "t").is_err());
-    assert!(dictionary_ddl("db", "bad name", "d").is_err());
-    assert!(dictionary_ddl("db", "t", "bad name").is_err());
-    assert!(dictionary_ddl("bad name", "t", "d").is_err());
+    assert!(dictionary_ddl("db", "bad name", "d", "u", PORT).is_err());
+    assert!(dictionary_ddl("db", "t", "bad name", "u", PORT).is_err());
+    assert!(["", "a' b", "x`y", "-x", "a;b", "u\\"]
+        .iter()
+        .all(|user| dictionary_ddl("db", "t", "d", user, PORT).is_err()));
+    assert!(dictionary_ddl("bad name", "t", "d", "u", PORT).is_err());
     assert!(insert_statement("db", "x`").is_err());
     assert_eq!(StoreError::Identifier("x".to_owned()).to_string(), "invalid identifier `x`");
     Ok(())

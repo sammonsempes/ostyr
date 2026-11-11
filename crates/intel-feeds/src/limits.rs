@@ -55,6 +55,12 @@ pub const MAX_IDENTIFIER_BYTES: usize = 64;
 pub const DEFAULT_TTL_SECONDS: u32 = 2_592_000;
 
 
+pub const DEFAULT_DICTIONARY_PORT: u16 = 9440;
+
+
+pub const DEFAULT_DICTIONARY_USER: &str = "ostyr_dict";
+
+
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 

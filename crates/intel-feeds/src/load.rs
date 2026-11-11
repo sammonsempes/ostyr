@@ -126,7 +126,13 @@ pub fn schema_statements(config: &ClickhouseConfig) -> Result<Vec<String>, Store
     Ok(vec![
         format!("CREATE DATABASE IF NOT EXISTS {}", quote_identifier(&config.database)?),
         table_ddl(&config.database, &config.table)?,
-        dictionary_ddl(&config.database, &config.table, &config.dictionary)?,
+        dictionary_ddl(
+            &config.database,
+            &config.table,
+            &config.dictionary,
+            &config.dictionary_user,
+            config.dictionary_port,
+        )?,
     ])
 }
 

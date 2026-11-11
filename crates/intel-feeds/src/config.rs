@@ -1,4 +1,6 @@
-use crate::limits::{DEFAULT_CONFIDENCE, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE, MAX_TIMEOUT_MS, MAX_USER_BYTES};
+use crate::limits::{
+    DEFAULT_CONFIDENCE, DEFAULT_DICTIONARY_PORT, DEFAULT_DICTIONARY_USER, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE, MAX_TIMEOUT_MS, MAX_USER_BYTES,
+};
 use crate::model::{IocType, Tlp};
 use crate::store::{quote_identifier, StoreError};
 use core_config::error::ConfigError;
@@ -87,6 +89,16 @@ pub struct ExportPolicy {
 }
 
 
+pub fn default_dictionary_port() -> u16 {
+    DEFAULT_DICTIONARY_PORT
+}
+
+
+pub fn default_dictionary_user() -> String {
+    DEFAULT_DICTIONARY_USER.to_owned()
+}
+
+
 pub fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
@@ -103,6 +115,10 @@ pub struct ClickhouseConfig {
     pub database: String,
     pub table: String,
     pub dictionary: String,
+    #[serde(default = "default_dictionary_user")]
+    pub dictionary_user: String,
+    #[serde(default = "default_dictionary_port")]
+    pub dictionary_port: u16,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     pub tenant: String,
@@ -130,6 +146,8 @@ pub enum ClickhouseError {
     Url(#[from] SettingsError),
     #[error("clickhouse.user must be 1 to {MAX_USER_BYTES} printable ASCII characters")]
     User,
+    #[error("clickhouse.dictionary_port must not be 0")]
+    Port,
     #[error("clickhouse.timeout_ms must be within 1..={MAX_TIMEOUT_MS}")]
     Timeout,
 }
@@ -168,12 +186,14 @@ pub fn needs_mapping(format: FeedFormat) -> bool {
 pub fn validate_clickhouse(config: &ClickhouseConfig) -> Result<(), ClickhouseError> {
     tenant_scope(&config.tenant).map_err(ClickhouseError::Tenant)?;
     check_url(&config.url)?;
-    [&config.database, &config.table, &config.dictionary]
+    [&config.database, &config.table, &config.dictionary, &config.dictionary_user]
         .into_iter()
         .try_for_each(|name| quote_identifier(name).map(drop))?;
     let user_ok = !config.user.is_empty() && config.user.len() <= MAX_USER_BYTES && config.user.chars().all(|character| character.is_ascii_graphic());
     if !user_ok {
         Err(ClickhouseError::User)
+    } else if config.dictionary_port == 0 {
+        Err(ClickhouseError::Port)
     } else if config.timeout_ms == 0 || config.timeout_ms > MAX_TIMEOUT_MS {
         Err(ClickhouseError::Timeout)
     } else {
