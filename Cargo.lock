@@ -1678,13 +1678,16 @@ dependencies = [
 name = "dhcp-kea"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "core-export",
+ "core-pg",
  "ecs-normalise",
  "libc",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
