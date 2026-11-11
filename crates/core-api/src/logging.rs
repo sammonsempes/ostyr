@@ -8,7 +8,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, reload, Layer, Registry};
 
 
-pub const FEEDBACK_TARGETS: [&str; 3] = ["notify", "notify_debouncer_full", "inotify"];
+pub const FEEDBACK_TARGETS: [&str; 4] = ["notify", "notify_debouncer_full", "inotify", "core_config::watch"];
 
 
 pub const FEEDBACK_LEVEL: LevelFilter = LevelFilter::INFO;
