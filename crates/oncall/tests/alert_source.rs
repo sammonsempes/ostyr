@@ -13,13 +13,14 @@ use core_pg::query::timed_script;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use oncall::alert::{Cell, Param, Statement};
 use oncall::alert_source::{
-    alert_notice, clean_text, count_answer, map_severity, parse_source_settings, poll_all, poll_tenant, purge_unpolled, purged_counts, record_alert,
-    run_rounds, skip_backlog, source_details, take_lease, validate_source_settings, Round, RoundHooks, SourceSettings, TenantCounts, DETAILS_SQL,
-    FINGERPRINT_PREFIX, LEASE_SQL, PURGE_SQL, RECORD_SQL, SKIP_SQL, UNRECORDED_SQL,
+    alert_notice, clean_text, count_answer, map_severity, parse_source_settings, poll_all, poll_tenant, purge_statements, purge_unpolled,
+    purged_counts, record_alert, run_rounds, skip_backlog, source_details, take_lease, validate_source_settings, Round, RoundHooks, SourceSettings,
+    TenantCounts, DETAILS_SQL, FINGERPRINT_PREFIX, LEASE_SQL, PURGE_SQL, RECORD_SQL, SKIP_SQL, UNRECORDED_SQL,
 };
 use oncall::error::{OncallError, SourceError, StoreError};
 use oncall::limits::{
-    LEASE_FACTOR, MAX_PURGE_PER_ROUND, MAX_SKIP_PER_POLL, MAX_SOURCE_TEXT_CHARS, PURGE_CLIENT_DEADLINE_MILLIS, PURGE_SERVER_TIMEOUT_MILLIS,
+    LEASE_FACTOR, MAX_PURGE_PER_ROUND, MAX_SKIP_PER_POLL, MAX_SOURCE_TEXT_CHARS, PURGE_CLIENT_DEADLINE_MILLIS, PURGE_IDLE_TIMEOUT_MILLIS,
+    PURGE_SERVER_TIMEOUT_MILLIS,
 };
 use oncall::model::{Channel, ChannelKind};
 use oncall::render::render;
@@ -28,6 +29,7 @@ use oncall::types::Row;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::{ready, Ready};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 use types::TestResult;
@@ -40,6 +42,15 @@ const P_PURGE_LIMIT: usize = 1;
 
 
 const P_PURGE_HOLDER: usize = 2;
+
+
+const LIVE_CALLS_BEFORE_RELOAD: usize = 2;
+
+
+const THREE_ROUNDS: usize = 3;
+
+
+const P_PURGE_MARGIN: usize = 3;
 
 
 const P_SEVERITY: usize = 2;
@@ -93,6 +104,8 @@ struct SourceDb {
     bad_count: Mutex<Option<Vec<Vec<String>>>>,
     purge_scopes: Mutex<Vec<String>>,
     purge_holders: Mutex<Vec<String>>,
+    purge_margins: Mutex<Vec<String>>,
+    purge_error: Mutex<Option<PgError>>,
     lease_lost_at_purge: Mutex<bool>,
     queued: Mutex<BTreeMap<String, i64>>,
 }
@@ -234,7 +247,10 @@ fn limit_of(params: &[String]) -> Result<usize, PgError> {
 fn purge_handle(db: &SourceDb, recorded: &Arc<Mutex<Db>>, scope: &TenantScope, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
     lock(&db.purge_scopes).push(tenant_of(scope).to_owned());
     lock(&db.purge_holders).push(params.get(P_PURGE_HOLDER).ok_or_else(malformed)?.clone());
-    if *lock(&db.lease_lost_at_purge) {
+    lock(&db.purge_margins).push(params.get(P_PURGE_MARGIN).ok_or_else(malformed)?.clone());
+    if let Some(error) = lock(&db.purge_error).take() {
+        Err(error)
+    } else if *lock(&db.lease_lost_at_purge) {
         Ok(vec![vec![String::new(), "0".to_owned()]])
     } else {
         purge_rows_of(db, recorded, scope, params)
@@ -596,7 +612,7 @@ async fn rounds_poll_report_and_wait_the_given_number_of_times() -> TestResult {
         report: quiet,
         audit_purge: &|_counts| (),
     };
-    run_rounds(ROUNDS, &alerts_exec, &mut exec, &settings, "poller-a", &hooks, &|| settings.clone()).await;
+    run_rounds(ROUNDS, &alerts_exec, &mut exec, "poller-a", &hooks, &|| settings.clone()).await;
     assert_eq!(lock(&source.reads).len(), ROUNDS * settings.tenants.len());
     assert_eq!(count_for(&db, "acme"), 1);
     Ok(())
@@ -1102,10 +1118,10 @@ async fn rounds_without_the_lease_report_it_and_page_nothing() -> TestResult {
         report: quiet,
         audit_purge: &|_counts| (),
     };
-    run_rounds(ROUNDS, &alerts_exec, &mut exec, &settings, "poller-a", &hooks, &|| settings.clone()).await;
+    run_rounds(ROUNDS, &alerts_exec, &mut exec, "poller-a", &hooks, &|| settings.clone()).await;
     assert!(lock(&source.reads).is_empty() && count_for(&db, "acme") == 0);
     lock(&db).lease_expired = true;
-    run_rounds(1, &alerts_exec, &mut exec, &settings, "poller-a", &hooks, &|| settings.clone()).await;
+    run_rounds(1, &alerts_exec, &mut exec, "poller-a", &hooks, &|| settings.clone()).await;
     assert_eq!(count_for(&db, "acme"), 1);
     Ok(())
 }
@@ -1196,7 +1212,7 @@ async fn purged_rows_are_reported_per_tenant_and_audited_once_per_round() -> Tes
         report: quiet,
         audit_purge: &record,
     };
-    run_rounds(TWICE, &alerts_exec, &mut exec, &settings, "poller-a", &hooks, &|| settings.clone()).await;
+    run_rounds(TWICE, &alerts_exec, &mut exec, "poller-a", &hooks, &|| settings.clone()).await;
     let expected = BTreeMap::from([("ghost".to_owned(), THREE), ("phantom".to_owned(), 1)]);
     assert_eq!(*lock(&audited), vec![expected]);
     Ok(())
@@ -1228,7 +1244,8 @@ async fn an_unusable_holder_id_never_reaches_the_lease_statement() -> TestResult
 
 #[test]
 fn the_purge_statement_carries_the_lease_guard_and_the_server_timeout_is_below_the_client_deadline() -> TestResult {
-    assert!(PURGE_SQL.contains("held AS (SELECT 1 FROM oncall_poller_lease WHERE holder = $4::text AND expires_at > clock_timestamp())"));
+    assert!(PURGE_SQL.contains("held AS (SELECT 1 FROM oncall_poller_lease WHERE holder = $4::text"));
+    assert!(PURGE_SQL.contains("AND expires_at > clock_timestamp() + ($5::text::bigint * interval '1 millisecond') FOR SHARE), seen"));
     assert!(PURGE_SQL.contains("DELETE FROM alert_outbox WHERE EXISTS (SELECT 1 FROM held) AND ctid IN"));
     assert!(PURGE_SQL.contains("AND EXISTS (SELECT 1 FROM held)), gone AS"));
     assert!(PURGE_SQL.contains("WHERE NOT EXISTS (SELECT 1 FROM held)"));
@@ -1280,5 +1297,92 @@ async fn a_tenant_added_to_the_live_snapshot_after_the_round_started_is_not_purg
     let round = poll_all(&alerts_exec, &mut exec, &started, "poller-a", poll_time, &|| live.clone()).await;
     assert!(matches!(&round.purged, Ok(counts) if counts.is_empty()));
     assert!(lock(&source.gone).is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_purge_sends_the_server_timeout_as_its_lease_margin() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = settings()?;
+    let alerts_exec = source_exec(&source, &db);
+    purge_unpolled(&alerts_exec, &settings, "poller-a").await?;
+    assert_eq!(*lock(&source.purge_margins), vec![PURGE_SERVER_TIMEOUT_MILLIS.to_string()]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_purge_past_its_deadline_has_its_own_fixed_text() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let settings = settings()?;
+    let alerts_exec = source_exec(&source, &db);
+    *lock(&source.purge_error) = Some(PgError::Server {
+        code: "57014".to_owned(),
+        class: "other",
+    });
+    let cancelled = purge_unpolled(&alerts_exec, &settings, "poller-a").await.err().ok_or("no error")?;
+    assert!(matches!(cancelled, SourceError::PurgeDeadline));
+    assert_eq!(cancelled.to_string(), "the purge ran past its deadline");
+    *lock(&source.purge_error) = Some(PgError::StatementTimeout { seconds: 1 });
+    assert!(matches!(
+        purge_unpolled(&alerts_exec, &settings, "poller-a").await,
+        Err(SourceError::PurgeDeadline)
+    ));
+    *lock(&source.purge_error) = Some(PgError::Server {
+        code: "40001".to_owned(),
+        class: "other",
+    });
+    let other = purge_unpolled(&alerts_exec, &settings, "poller-a").await.err().ok_or("no error")?;
+    assert_eq!(other.to_string(), "the alert store failed");
+    Ok(())
+}
+
+
+#[test]
+fn the_purge_statements_are_the_timeout_then_the_purge() -> TestResult {
+    let (timeout, idle, purge) = purge_statements();
+    assert_eq!(timeout, format!("SET LOCAL statement_timeout = {PURGE_SERVER_TIMEOUT_MILLIS}"));
+    assert_eq!(
+        idle,
+        format!("SET LOCAL idle_in_transaction_session_timeout = {PURGE_IDLE_TIMEOUT_MILLIS}")
+    );
+    assert!(PURGE_SERVER_TIMEOUT_MILLIS.checked_sub(PURGE_IDLE_TIMEOUT_MILLIS).is_some());
+    assert!(PURGE_IDLE_TIMEOUT_MILLIS.checked_sub(1).is_some());
+    assert_eq!(purge, PURGE_SQL);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_tenant_added_after_the_first_round_is_polled_from_the_second() -> TestResult {
+    let source = SourceDb::default();
+    let db = new_db();
+    let started = settings()?;
+    let grown = SourceSettings {
+        tenants: vec!["acme".to_owned(), "other".to_owned(), "gamma".to_owned()],
+        ..started.clone()
+    };
+    let alerts_exec = source_exec(&source, &db);
+    let mut exec = exec_for(&db);
+    let hooks = RoundHooks {
+        now: poll_time,
+        wait: instant,
+        report: quiet,
+        audit_purge: &|_counts| (),
+    };
+    let calls = AtomicUsize::new(0);
+    let live = || {
+        if calls.fetch_add(1, Ordering::SeqCst) >= LIVE_CALLS_BEFORE_RELOAD {
+            grown.clone()
+        } else {
+            started.clone()
+        }
+    };
+    run_rounds(THREE_ROUNDS, &alerts_exec, &mut exec, "poller-a", &hooks, &live).await;
+    let gamma_reads = lock(&source.reads).iter().filter(|tenant| tenant.as_str() == "gamma").count();
+    assert_eq!(gamma_reads, THREE_ROUNDS - 1);
     Ok(())
 }

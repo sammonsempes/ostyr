@@ -232,5 +232,9 @@ pub const HOLDER_RANDOM_BYTES: usize = 8;
 pub const PURGE_SERVER_TIMEOUT_MILLIS: u64 = 2_000;
 
 
+/// A purge transaction idle for this many milliseconds (a holder stopped before COMMIT) is ended by the server, releasing the lease row lock; at most `PURGE_SERVER_TIMEOUT_MILLIS`.
+pub const PURGE_IDLE_TIMEOUT_MILLIS: u64 = 2_000;
+
+
 /// Client deadline of a purge, milliseconds: always above `PURGE_SERVER_TIMEOUT_MILLIS`, so the server cancels first and nothing commits after the client gave up.
 pub const PURGE_CLIENT_DEADLINE_MILLIS: u64 = 5_000;
