@@ -7,6 +7,9 @@ pub const MAX_OBJECT_BYTES: usize = 65_536;
 pub const MAX_DOCUMENT_BYTES: usize = 67_108_864;
 
 
+pub const MAX_MISP_ATTRIBUTES: usize = 100_000;
+
+
 pub const MAX_PATTERN_BYTES: usize = 4_096;
 
 

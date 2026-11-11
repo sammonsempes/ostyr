@@ -36,6 +36,7 @@ pub enum FeedFormat {
     Crowdsec,
     Csv,
     Json,
+    Misp,
 }
 
 

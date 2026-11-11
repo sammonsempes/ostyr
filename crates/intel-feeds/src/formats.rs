@@ -3,6 +3,7 @@ use crate::entry::build_ioc;
 use crate::error::{reason_key, EntryError, FeedError};
 use crate::limits::{MAX_DOCUMENT_BYTES, MAX_OBJECT_BYTES, MAX_REPORTED_SKIPS};
 use crate::lines::numbered_lines;
+use crate::misp::parse_misp;
 use crate::model::{Collector, FeedSummary, Ioc, RawEntry, SkipSample};
 use crate::stix::parse_pattern;
 use crate::types::{ItemHandler, LineHandler};
@@ -98,7 +99,7 @@ pub fn abusech_layout(format: FeedFormat) -> Option<(Vec<String>, Mapping)> {
         FeedFormat::AbuseChUrlhaus => Some((&URLHAUS_HEADER, urlhaus_mapping())),
         FeedFormat::AbuseChThreatfox => Some((&THREATFOX_HEADER, threatfox_mapping())),
         FeedFormat::AbuseChFeodo => Some((&FEODO_HEADER, feodo_mapping())),
-        FeedFormat::Stix | FeedFormat::Crowdsec | FeedFormat::Csv | FeedFormat::Json => None,
+        FeedFormat::Stix | FeedFormat::Crowdsec | FeedFormat::Csv | FeedFormat::Json | FeedFormat::Misp => None,
     };
     layout.map(|(header, mapping)| (header.iter().map(|name| (*name).to_owned()).collect(), mapping))
 }
@@ -322,5 +323,6 @@ pub fn parse_feed(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTi
         FeedFormat::AbuseChUrlhaus | FeedFormat::AbuseChThreatfox | FeedFormat::AbuseChFeodo | FeedFormat::Csv => parse_csv(feed, reader, now),
         FeedFormat::Json => parse_json_list(feed, reader, now),
         FeedFormat::Stix => parse_stix(feed, reader, now),
+        FeedFormat::Misp => parse_misp(feed, reader, now),
     }
 }
