@@ -1,4 +1,5 @@
 use crate::error::SinkError;
+use crate::id::set_digest;
 use crate::model::{
     AlertRecord, AlertStore, PgStore, HOST_FIELD, MAX_EVENT_MS, MICROS_PER_SECOND, MIN_EVENT_MS, NANOS_PER_MILLI, REPLACEMENT, USER_FIELD,
 };
@@ -90,16 +91,27 @@ pub fn entity_of(record: &AlertRecord, field: &str) -> Option<String> {
 }
 
 
-/// The store's alert: texts bounded, at most `MAX_EVENT_IDS` event ids (the first sorted ones), and an id derived from what is stored.
+/// At most `MAX_EVENT_IDS` ids: a longer sorted set keeps its first `MAX_EVENT_IDS - 1` and ends with the digest of the whole set, so the alert id covers every id.
+pub fn stored_ids(mut sorted: Vec<String>) -> Vec<String> {
+    if sorted.len() > MAX_EVENT_IDS {
+        let digest = set_digest(&sorted);
+        sorted.truncate(MAX_EVENT_IDS - 1);
+        sorted.push(digest);
+    }
+    sorted
+}
+
+
+/// The store's alert: texts bounded, at most `MAX_EVENT_IDS` event ids (the first sorted ones and a digest slot), and an id derived from what is stored.
 pub fn alert_of(record: &AlertRecord, created_micros: u64) -> Result<Alert, SinkError> {
     let rule_id = bounded_text(&record.rule_id, MAX_RULE_ID_CHARS);
-    let mut event_ids: Vec<String> = record
+    let mut sorted_ids: Vec<String> = record
         .event_ids
         .iter()
         .map(|event_id| checked_event_id(event_id))
         .collect::<Result<_, SinkError>>()?;
-    event_ids.sort();
-    event_ids.truncate(MAX_EVENT_IDS);
+    sorted_ids.sort();
+    let event_ids = stored_ids(sorted_ids);
     let summary = summarise(&json!({
         "group": bound_record(record).group,
         "first_ms": record.first_ms,
