@@ -41,6 +41,8 @@ pub struct EventFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,

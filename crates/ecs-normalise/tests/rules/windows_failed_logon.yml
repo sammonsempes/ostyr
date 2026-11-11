@@ -1,0 +1,16 @@
+title: Failed Windows logon
+id: 00000000-0000-4000-8000-000000000256
+status: test
+level: low
+tags:
+  - attack.credential_access
+logsource:
+  category: authentication
+  product: windows
+detection:
+  selection:
+    EventID: 4625
+    TargetUserName: bob
+    TargetDomainName: CORP
+    IpAddress: 10.0.0.9
+  condition: selection

@@ -10,6 +10,7 @@ core-export = { version = "0.0.0", path = "../core-export" }
 quick-xml = "0.41"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+serde_with = { version = "3", default-features = false, features = ["macros", "std"] }
 thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known", "macros"] }
 tracing = "0.1"
