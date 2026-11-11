@@ -25,3 +25,6 @@ pub type Groups = BTreeMap<TenantMonth, Vec<Vec<u8>>>;
 
 
 pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;
+
+
+pub type LimitRow = (&'static str, u64, u64, u64);
