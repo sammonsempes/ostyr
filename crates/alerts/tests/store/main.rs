@@ -15,7 +15,7 @@ use alerts::types::{Row, RowFuture};
 use core_pg::error::PgError;
 use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::{tenant_scope, TenantScope};
-use memory::{handle, lock, Db, Forced};
+use memory::{handle, lock, row_of, Db, Forced};
 use serde_json::json;
 use std::future::ready;
 use types::{Mutation, TestResult};
@@ -776,6 +776,10 @@ fn both_list_statements_order_by_the_table_columns() -> TestResult {
         let output = sql.split(" FROM ").next().ok_or("no select list")?;
         assert!(!output.contains(" AS created") && !output.contains(" AS id"), "{sql}");
         assert!(output.contains("created::text,"));
+        assert!(
+            output.split("::text").skip(1).all(|rest| rest.is_empty() || rest.starts_with(',')),
+            "{sql}"
+        );
         Ok(())
     })
 }
@@ -789,5 +793,31 @@ fn the_memory_store_refuses_a_document_with_missing_fields() -> TestResult {
         .err()
         .ok_or("accepted")?;
     assert!(matches!(error, PgError::Server { .. }));
+    let full = json!({
+        "id": "x", "rule_id": "r", "rule_title": "t", "severity": "low", "event_time": "now", "created": 1, "host_name": null,
+        "user_name": "u", "event_ids": ["e"], "summary": "{}", "summary_truncated": false, "summary_original_bytes": 1
+    });
+    assert!(row_of(&full).is_ok());
+    [
+        "id",
+        "rule_id",
+        "rule_title",
+        "severity",
+        "event_time",
+        "host_name",
+        "user_name",
+        "event_ids",
+        "summary",
+    ]
+    .iter()
+    .try_for_each(|field| -> TestResult {
+        let mut broken = full.clone();
+        broken.as_object_mut().ok_or("not an object")?.remove(*field);
+        assert!(row_of(&broken).is_err(), "{field}");
+        Ok(())
+    })?;
+    let mut wrong_type = full.clone();
+    wrong_type.as_object_mut().ok_or("not an object")?.insert("id".to_owned(), json!(true));
+    assert!(row_of(&wrong_type).is_err());
     Ok(())
 }

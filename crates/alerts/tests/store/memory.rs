@@ -28,27 +28,35 @@ pub fn lock<Guarded>(mutex: &Mutex<Guarded>) -> MutexGuard<'_, Guarded> {
 }
 
 
-pub fn text(doc: &Value, field: &str) -> String {
-    doc.get(field).and_then(Value::as_str).map_or_else(String::new, str::to_owned)
+pub fn text(doc: &Value, field: &str) -> Result<String, PgError> {
+    doc.get(field).and_then(Value::as_str).map(str::to_owned).ok_or_else(malformed)
+}
+
+
+pub fn optional_text(doc: &Value, field: &str) -> Result<String, PgError> {
+    match doc.get(field) {
+        Some(Value::Null) => Ok(String::new()),
+        _other => text(doc, field),
+    }
 }
 
 
 pub fn row_of(doc: &Value) -> Result<(u64, Row), PgError> {
     let created = doc.get("created").and_then(Value::as_u64).ok_or_else(malformed)?;
-    let event_ids = doc.get("event_ids").map_or_else(String::new, Value::to_string);
+    let event_ids = doc.get("event_ids").map(Value::to_string).ok_or_else(malformed)?;
     let flag = doc.get("summary_truncated").and_then(Value::as_bool).ok_or_else(malformed)?;
     let original = doc.get("summary_original_bytes").and_then(Value::as_u64).ok_or_else(malformed)?;
     let row = vec![
-        text(doc, "id"),
-        text(doc, "rule_id"),
-        text(doc, "rule_title"),
-        text(doc, "severity"),
-        text(doc, "event_time"),
+        text(doc, "id")?,
+        text(doc, "rule_id")?,
+        text(doc, "rule_title")?,
+        text(doc, "severity")?,
+        text(doc, "event_time")?,
         created.to_string(),
-        text(doc, "host_name"),
-        text(doc, "user_name"),
+        optional_text(doc, "host_name")?,
+        optional_text(doc, "user_name")?,
         event_ids,
-        text(doc, "summary"),
+        text(doc, "summary")?,
         flag.to_string(),
         original.to_string(),
     ];
@@ -69,7 +77,7 @@ pub fn insert(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgError>
     let docs: Vec<Value> = serde_json::from_str(document).map_err(|_source| malformed())?;
     let fresh = docs.iter().try_fold(0, |count, doc| -> Result<usize, PgError> {
         let row = row_of(doc)?;
-        match table.entry(text(doc, "id")) {
+        match table.entry(text(doc, "id")?) {
             Entry::Vacant(slot) => {
                 slot.insert(row);
                 Ok(count + 1)

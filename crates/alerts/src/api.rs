@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::model::{Alert, AlertListView, AlertView, Backend, Cursor, ListQuery, Page, Summary};
 use crate::store::{format_cursor, parse_cursor, MAX_PAGE_SIZE};
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -169,10 +169,13 @@ pub async fn list_flow(identity: &ApiIdentity, backend: &Backend, query: Result<
 }
 
 
-/// A malformed id cannot name a stored alert, so it is answered like a missing one.
-pub async fn get_flow(identity: &ApiIdentity, backend: &Backend, id: String) -> Result<Response, ApiError> {
+/// A malformed id, or one the extractor refuses (not UTF-8), cannot name a stored alert: it is answered like a missing one, without a store call.
+pub async fn get_flow(identity: &ApiIdentity, backend: &Backend, id: Result<String, PathRejection>) -> Result<Response, ApiError> {
     let scope = scope_of(identity).map_err(|error| store_failure(&error))?;
-    let found = (backend.get)(scope, id).await;
+    let found = match id {
+        Ok(text) => (backend.get)(scope, text).await,
+        Err(_rejection) => Err(StoreError::BadId),
+    };
     match found {
         Err(StoreError::BadId) | Ok(None) => Ok(not_found()),
         Err(error) => Err(store_failure(&error)),
@@ -222,9 +225,9 @@ pub async fn list_endpoint(
 pub async fn get_endpoint(
     Extension(identity): Extension<Arc<ApiIdentity>>,
     Extension(backend): Extension<Backend>,
-    Path(id): Path<String>,
+    id: Result<Path<String>, PathRejection>,
 ) -> Response {
-    reply(get_flow(&identity, &backend, id).await)
+    reply(get_flow(&identity, &backend, id.map(|found| found.0)).await)
 }
 
 
