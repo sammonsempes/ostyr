@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::id::{alert_id, is_alert_id};
-use crate::model::{Alert, AlertPage, Cursor, Page, Severity, Summary, SEVERITY_COLUMN};
+use crate::model::{Alert, AlertPage, Cursor, Page, Severity, Summary, Triage, TriageChange, TriageStatus, SEVERITY_COLUMN};
 use crate::types::{Executor, Row};
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 pub const MIGRATION_NAMESPACE: &str = "alerts";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "001_alerts",
         sql: include_str!("../migrations/001_alerts.sql"),
@@ -23,6 +23,10 @@ pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "003_outbox_queued_at",
         sql: include_str!("../migrations/003_outbox_queued_at.sql"),
+    },
+    Migration {
+        version: "004_alert_triage",
+        sql: include_str!("../migrations/004_alert_triage.sql"),
     },
 ];
 
@@ -44,6 +48,36 @@ pub const NEXT_SQL: &str = "SELECT id, rule_id, rule_title, severity, event_time
 pub const GET_SQL: &str = "SELECT id, rule_id, rule_title, severity, event_time, created::text, COALESCE(host_name, ''), COALESCE(user_name, ''), \
                            event_ids::text, summary, summary_truncated::text, summary_original_bytes::text FROM alerts WHERE tenant = $1 \
                            AND id = $2::text";
+
+
+/// `$1` tenant, `$2` alert id, `$3` status, `$4` actor, `$5` note (empty for none), `$6` time; answers (alert found, new version or empty).
+pub const TRIAGE_INSERT_SQL: &str = include_str!("../migrations/triage_insert.sql");
+
+
+/// As `TRIAGE_INSERT_SQL` plus `$7`, the version the caller read.
+pub const TRIAGE_UPDATE_SQL: &str = include_str!("../migrations/triage_update.sql");
+
+
+pub const TRIAGE_GET_SQL: &str = "SELECT status, actor, COALESCE(note, ''), updated_at::text, version::text FROM alert_triage WHERE tenant = $1 \
+                                  AND alert_id = $2::text";
+
+
+pub const MAX_NOTE_CHARS: usize = 2_048;
+
+
+pub const TRIAGE_STATUS_COLUMN: usize = 0;
+
+
+pub const TRIAGE_ACTOR_COLUMN: usize = 1;
+
+
+pub const TRIAGE_NOTE_COLUMN: usize = 2;
+
+
+pub const TRIAGE_TIME_COLUMN: usize = 3;
+
+
+pub const TRIAGE_VERSION_COLUMN: usize = 4;
 
 
 pub const NUL: char = '\0';
@@ -377,4 +411,79 @@ pub async fn get_alert(exec: Executor<'_, '_>, scope: &TenantScope, id: &str) ->
     check_id(id)?;
     let rows = exec(scope.clone(), GET_SQL, vec![id.to_owned()]).await?;
     rows.first().map(|row| alert_from_row(scope, row)).transpose()
+}
+
+
+pub fn check_triage(alert_id: &str, change: &TriageChange) -> Result<(), StoreError> {
+    check_id(alert_id)?;
+    check_text("actor", &change.actor, MAX_ENTITY_CHARS)?;
+    check_optional("note", change.note.as_deref(), MAX_NOTE_CHARS)?;
+    if change.now > MAX_BIGINT {
+        Err(StoreError::BadCreated)
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn version(row: &Row, column: usize) -> Result<i64, StoreError> {
+    i64::try_from(number(row, column)?).map_err(|_overflow| StoreError::BadRow { column })
+}
+
+
+/// `expected` `None` creates the first triage row, `Some(version)` replaces that version; a lost race is `Conflict`, another tenant's alert `NotFound`.
+pub async fn set_triage(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    alert_id: &str,
+    change: &TriageChange,
+    expected: Option<i64>,
+) -> Result<Triage, StoreError> {
+    check_triage(alert_id, change)?;
+    let mut params = vec![
+        alert_id.to_owned(),
+        change.status.to_string(),
+        change.actor.clone(),
+        change.note.as_ref().map_or_else(String::new, Clone::clone),
+        change.now.to_string(),
+    ];
+    let sql = match expected {
+        None => TRIAGE_INSERT_SQL,
+        Some(read) => {
+            params.push(read.to_string());
+            TRIAGE_UPDATE_SQL
+        }
+    };
+    let rows = exec(scope.clone(), sql, params).await?;
+    let answer = rows.first().ok_or(StoreError::BadRow { column: 0 })?;
+    if number(answer, 0)? == 0 {
+        Err(StoreError::NotFound)
+    } else if cell(answer, 1)?.is_empty() {
+        Err(StoreError::Conflict)
+    } else {
+        Ok(Triage {
+            status: change.status,
+            actor: change.actor.clone(),
+            note: change.note.clone(),
+            updated_at: change.now,
+            version: version(answer, 1)?,
+        })
+    }
+}
+
+
+pub async fn get_triage(exec: Executor<'_, '_>, scope: &TenantScope, alert_id: &str) -> Result<Option<Triage>, StoreError> {
+    check_id(alert_id)?;
+    let rows = exec(scope.clone(), TRIAGE_GET_SQL, vec![alert_id.to_owned()]).await?;
+    rows.first()
+        .map(|row| {
+            Ok(Triage {
+                status: cell(row, TRIAGE_STATUS_COLUMN)?.parse::<TriageStatus>()?,
+                actor: cell(row, TRIAGE_ACTOR_COLUMN)?.to_owned(),
+                note: entity(row, TRIAGE_NOTE_COLUMN)?,
+                updated_at: number(row, TRIAGE_TIME_COLUMN)?,
+                version: version(row, TRIAGE_VERSION_COLUMN)?,
+            })
+        })
+        .transpose()
 }

@@ -43,6 +43,10 @@ pub enum StoreError {
     Document(#[source] serde_json::Error),
     #[error("the stored event list is malformed")]
     BadEvents(#[source] serde_json::Error),
+    #[error("the triage version changed or a triage already exists")]
+    Conflict,
+    #[error("no such alert in this tenant")]
+    NotFound,
     #[error("too many concurrent database requests")]
     Busy,
 }

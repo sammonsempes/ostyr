@@ -53,6 +53,58 @@ impl FromStr for Severity {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TriageStatus {
+    Acknowledged,
+    Closed,
+}
+
+
+impl Display for TriageStatus {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        let name = match self {
+            TriageStatus::Acknowledged => "acknowledged",
+            TriageStatus::Closed => "closed",
+        };
+        formatter.write_str(name)
+    }
+}
+
+
+impl FromStr for TriageStatus {
+    type Err = StoreError;
+
+    fn from_str(text: &str) -> Result<Self, StoreError> {
+        match text {
+            "acknowledged" => Ok(TriageStatus::Acknowledged),
+            "closed" => Ok(TriageStatus::Closed),
+            _ => Err(StoreError::BadRow { column: 0 }),
+        }
+    }
+}
+
+
+/// What a caller asks for: no row means the alert is new; `now` is caller-supplied microseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageChange {
+    pub status: TriageStatus,
+    pub actor: String,
+    pub note: Option<String>,
+    pub now: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Triage {
+    pub status: TriageStatus,
+    pub actor: String,
+    pub note: Option<String>,
+    pub updated_at: u64,
+    pub version: i64,
+}
+
+
 /// The event summary as stored: `text` is cut at `MAX_SUMMARY_BYTES` when `truncated`, and `original_bytes` is the uncut size.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
