@@ -152,10 +152,10 @@ fn symlinks_fifos_sockets_and_directories_are_not_read() -> TestResult {
     let listener = UnixListener::bind(format!("/proc/self/fd/{}/s.pem", root_handle.as_raw_fd()))?;
     let outcome = scan(&settings_for(&root));
     assert!(outcome.records.is_empty());
-    assert_eq!(outcome.examined, SPECIAL_FILES);
-    assert_eq!(outcome.skipped.not_regular, SPECIAL_FILES - 1);
-    assert_eq!(outcome.skipped.unreadable, 1);
-    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(outcome.examined, 0);
+    assert_eq!(outcome.skipped.not_regular, SPECIAL_FILES);
+    assert_eq!(outcome.skipped.unreadable, 0);
+    assert!(outcome.errors.is_empty());
     drop(listener);
     Ok(())
 }

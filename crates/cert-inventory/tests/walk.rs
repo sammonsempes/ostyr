@@ -7,7 +7,7 @@ mod types;
 
 use cert_inventory::error::CertError;
 use cert_inventory::scan::{absorb, no_hook, read_bounded, reason_of, scan, scan_with, Loaded, ScanSettings, ScanState, MAX_DEPTH_CEILING};
-use cert_inventory::walk::{adopt, handle_next, is_swap, level_of, open_root, plan, resolve_type, scan_root, step, Listed, Step};
+use cert_inventory::walk::{adopt, handle_next, is_swap, level_of, open_root, plan, resolve_type, scan_root, step, Level, Listed, Step};
 use rcgen::{CertificateParams, KeyPair};
 use rustix::fs::FileType;
 use rustix::io::Errno;
@@ -18,6 +18,7 @@ use std::io::{self, Cursor};
 use std::ops::ControlFlow;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use tempfile::TempDir;
 use types::TestResult;
@@ -44,7 +45,13 @@ const BIG_LISTING: usize = 1_000;
 const CAP_BYTES: usize = 4;
 
 
-const EXAMINED_WITH_LINK: usize = 3;
+const EXAMINED_WITH_LINK: usize = 2;
+
+
+const OTHER_TYPES: usize = 5;
+
+
+const TWO_NAMES: usize = 2;
 
 
 const NESTED_LEVELS: usize = 3;
@@ -290,7 +297,9 @@ fn plan_decides_per_entry_type_and_name() -> TestResult {
     assert_eq!(plan(&settings, OsStr::new("."), FileType::Directory), Step::Ignore);
     assert_eq!(plan(&settings, OsStr::new(".."), FileType::Directory), Step::Ignore);
     assert_eq!(plan(&settings, OsStr::new("sub"), FileType::Directory), Step::Descend);
-    assert_eq!(plan(&settings, OsStr::new("a.PEM"), FileType::Symlink), Step::Examine);
+    assert_eq!(plan(&settings, OsStr::new("a.PEM"), FileType::Symlink), Step::NotRegular);
+    assert_eq!(plan(&settings, OsStr::new("a.PEM"), FileType::RegularFile), Step::Examine);
+    assert_eq!(plan(&settings, OsStr::new("a.txt"), FileType::CharacterDevice), Step::Ignore);
     assert_eq!(plan(&settings, OsStr::new("a.PEM"), FileType::Unknown), Step::Examine);
     assert_eq!(plan(&settings, OsStr::new("a.txt"), FileType::RegularFile), Step::Ignore);
     assert_eq!(plan(&settings, OsStr::new("noext"), FileType::RegularFile), Step::Ignore);
@@ -423,11 +432,126 @@ fn resolve_type_keeps_known_types_and_failed_stats() -> TestResult {
     let directory = TempDir::new()?;
     create_dir_all(directory.path().join("root/sub"))?;
     let level = open_root(&directory.path().join("root"))?;
-    assert_eq!(resolve_type(&level.handle, OsStr::new("sub"), FileType::Unknown), FileType::Directory);
+    assert_eq!(resolve_type(&level.handle, OsStr::new("sub"), FileType::Unknown), Ok(FileType::Directory));
     assert_eq!(
         resolve_type(&level.handle, OsStr::new("sub"), FileType::RegularFile),
-        FileType::RegularFile
+        Ok(FileType::RegularFile)
     );
-    assert_eq!(resolve_type(&level.handle, OsStr::new("missing"), FileType::Unknown), FileType::Unknown);
+    assert_eq!(resolve_type(&level.handle, OsStr::new("missing"), FileType::Unknown), Err(Errno::NOENT));
+    Ok(())
+}
+
+
+fn run_listed(directory: &Path, listed: Vec<Listed>) -> Result<ScanState, Box<dyn Error>> {
+    let settings = settings_for(&directory.join("root"));
+    let mut state = ScanState::default();
+    let mut stack = vec![open_root(&directory.join("root"))?];
+    listed.into_iter().for_each(|entry| {
+        assert!(handle_next(&settings, &mut stack, no_hook, &mut state, Some(Ok(entry))).is_continue());
+    });
+    Ok(state)
+}
+
+
+#[test]
+fn wanted_names_of_other_types_are_counted_and_never_opened() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root"))?;
+    let listed = [
+        FileType::CharacterDevice,
+        FileType::BlockDevice,
+        FileType::Fifo,
+        FileType::Socket,
+        FileType::Symlink,
+    ]
+    .into_iter()
+    .map(|file_type| Listed {
+        name: OsString::from(format!("{file_type:?}.pem")),
+        file_type,
+    })
+    .collect();
+    let state = run_listed(directory.path(), listed)?;
+    assert_eq!(state.skipped.not_regular, OTHER_TYPES);
+    assert_eq!(state.examined, 0);
+    assert_eq!(state.skipped.unreadable, 0);
+    assert!(state.errors.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_real_fifo_named_pem_is_not_opened() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root"))?;
+    let status = std::process::Command::new("mkfifo").arg(directory.path().join("root/x.pem")).status()?;
+    assert!(status.success());
+    let outcome = scan(&settings_for(&directory.path().join("root")));
+    assert_eq!(outcome.skipped.not_regular, 1);
+    assert_eq!(outcome.examined, 0);
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_entry_that_vanished_is_counted_without_an_error() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root"))?;
+    let state = run_listed(directory.path(), vec![unknown("gone.pem"), unknown("gone.txt")])?;
+    assert_eq!(state.skipped.vanished, TWO_NAMES);
+    assert_eq!(state.skipped.unreadable, 0);
+    assert!(state.errors.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_entry_whose_stat_fails_otherwise_is_unreadable() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root"))?;
+    write(directory.path().join("root/plain"), "x")?;
+    let settings = settings_for(&directory.path().join("root"));
+    let mut state = ScanState::default();
+    let directory_level = open_root(&directory.path().join("root"))?;
+    let file_handle = OwnedFd::from(File::open(directory.path().join("root/plain"))?);
+    let mut stack = vec![Level {
+        handle: file_handle,
+        dir: directory_level.dir,
+        path: directory.path().join("root"),
+    }];
+    assert!(handle_next(&settings, &mut stack, no_hook, &mut state, Some(Ok(unknown("a.pem")))).is_continue());
+    assert_eq!(state.skipped.unreadable, 1);
+    assert_eq!(state.skipped.vanished, 0);
+    assert_eq!(state.errors.len(), 1);
+    Ok(())
+}
+
+
+fn swap_for_socket(path: &Path) {
+    if let Err(error) = try_swap_for_socket(path) {
+        tracing::warn!(%error, "swap failed");
+    }
+}
+
+
+fn try_swap_for_socket(path: &Path) -> io::Result<()> {
+    remove_file(path)?;
+    match path.file_name() == Some(OsStr::new("dir.pem")) {
+        true => create_dir_all(path),
+        false => UnixListener::bind(path).map(drop),
+    }
+}
+
+
+#[test]
+fn a_file_swapped_for_a_socket_or_directory_after_listing_is_judged_on_the_handle() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root"))?;
+    write(directory.path().join("root/swap.pem"), "x")?;
+    write(directory.path().join("root/dir.pem"), "x")?;
+    let outcome = scan_with(&settings_for(&directory.path().join("root")), swap_for_socket, BIG_LISTING);
+    assert_eq!(outcome.skipped.unreadable, 1);
+    assert_eq!(outcome.skipped.not_regular, 1);
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(outcome.examined, TWO_NAMES);
     Ok(())
 }
