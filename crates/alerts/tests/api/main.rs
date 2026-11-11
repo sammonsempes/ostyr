@@ -157,6 +157,11 @@ async fn an_own_alert_is_served_by_id_and_a_malformed_id_is_a_404() -> TestResul
     let malformed = get(&fx.router, "/alerts/not-an-id", Some(&token)).await?;
     assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
     assert_eq!(lock(&fx.db.statements).len(), before);
+    let missing = body_json(get(&fx.router, &format!("/alerts/{}", "0".repeat(HEX_LENGTH)), Some(&token)).await?).await?;
+    let not_utf8 = get(&fx.router, "/alerts/%ff", Some(&token)).await?;
+    assert_eq!(not_utf8.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(not_utf8).await?, missing);
+    assert_eq!(lock(&fx.db.statements).len(), before + 1);
     Ok(())
 }
 
