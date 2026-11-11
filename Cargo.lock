@@ -4081,6 +4081,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "platform"
+version = "0.0.0"
+dependencies = [
+ "alerts",
+ "axum",
+ "cases",
+ "cmdb",
+ "core-api",
+ "core-auth",
+ "core-config",
+ "core-pg",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
+]
+
+[[package]]
 name = "policy-validator"
 version = "0.0.0"
 dependencies = [

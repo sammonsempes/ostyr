@@ -1,0 +1,32 @@
+[package]
+name = "platform"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+axum = "0.8"
+cases = { version = "0.0.0", path = "../cases" }
+cmdb = { version = "0.0.0", path = "../cmdb" }
+core-api = { version = "0.0.0", path = "../core-api" }
+core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+utoipa = "5"
+
+[dev-dependencies]
+core-auth = { version = "0.0.0", path = "../core-auth" }
+serde_json = "1"
+signal-hook = "0.4.6"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tracing = "0.1"
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[lints]
+workspace = true
