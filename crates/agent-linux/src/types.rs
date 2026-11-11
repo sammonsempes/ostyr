@@ -35,3 +35,7 @@ pub type KillFn = fn(rustix::process::Pid) -> rustix::io::Result<()>;
 
 /// Held by every writer of the spool of this process (source, sensor, capabilities), so a call's lines are never interleaved with another's.
 pub type SpoolLock = Arc<Mutex<()>>;
+
+
+/// Reads the file system statistics of a path; a test double injects a canned answer or a failure.
+pub type StatFn = fn(&Path) -> rustix::io::Result<rustix::fs::StatVfs>;
