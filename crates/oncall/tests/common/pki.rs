@@ -4,8 +4,8 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use std::error::Error;
 use std::io;
-use std::net::TcpListener;
-use std::sync::mpsc::Receiver;
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 
@@ -48,4 +48,13 @@ pub fn spawn_silent(release: Receiver<()>) -> Result<Silent, Box<dyn Error>> {
         release.recv().map_err(io::Error::other)
     });
     Ok(Silent { port, held: handle })
+}
+
+
+/// Connects once so a thread still in `accept` returns, then releases and joins it.
+pub fn release_silent(silent: Silent, release: &Sender<()>) -> Result<(), Box<dyn Error>> {
+    let _wake = TcpStream::connect(("127.0.0.1", silent.port))?;
+    release.send(())?;
+    silent.held.join().map_err(|_panic| "silent server panicked")??;
+    Ok(())
 }

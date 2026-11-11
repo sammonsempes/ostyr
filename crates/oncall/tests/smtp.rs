@@ -17,11 +17,12 @@ use oncall::smtp::{data_block, offers_plain, offers_starttls, parse_address, res
 use oncall::store::reason_text;
 use oncall::transport::{send_one, FORBIDDEN_CHARS};
 use oncall::wire::Reply;
-use pki::{spawn_silent, test_pki};
+use pki::{release_silent, spawn_silent, test_pki};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::channel as signal;
 use std::sync::{Arc, Mutex};
@@ -354,8 +355,7 @@ fn a_server_that_never_answers_fails_on_the_injected_timeout() -> TestResult {
     let fixture = make_fixture(None, Some(smtp_settings(silent.port, SmtpTls::Starttls, None)), SHORT_TIMEOUT_MILLIS)?;
     let outcome = send_one(&fixture.settings, &mail_channel(RECIPIENT, None), &message());
     assert!(matches!(outcome, Err(TransportError::Deadline)));
-    release.send(())?;
-    silent.held.join().map_err(|_panic| "silent server panicked")??;
+    release_silent(silent, &release)?;
     Ok(())
 }
 
@@ -373,6 +373,7 @@ fn drip_outcome(payload: &'static [u8]) -> Result<Result<(), TransportError>, Bo
     let fixture = make_fixture(None, Some(smtp_settings(drip.port, SmtpTls::Starttls, None)), LONG_TIMEOUT_MILLIS)?;
     let clock = stepping_clock();
     let outcome = send_mail_with(&fixture.settings, &mail_channel(RECIPIENT, None), &message(), &clock);
+    let _wake = TcpStream::connect(("127.0.0.1", drip.port))?;
     release.send(())?;
     drip.held.join().map_err(|_panic| "drip server panicked")??;
     Ok(outcome)
@@ -410,6 +411,7 @@ fn flood_outcome(payload: Vec<u8>) -> Result<Result<(), TransportError>, Box<dyn
     let flood = spawn_flood(wait, payload)?;
     let fixture = make_fixture(None, Some(smtp_settings(flood.port, SmtpTls::Starttls, None)), TIMEOUT_MILLIS)?;
     let outcome = send_mail(&fixture.settings, &mail_channel(RECIPIENT, None), &message());
+    let _wake = TcpStream::connect(("127.0.0.1", flood.port))?;
     release.send(())?;
     flood.held.join().map_err(|_panic| "flood server panicked")??;
     Ok(outcome)
