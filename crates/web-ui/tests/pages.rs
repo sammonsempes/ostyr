@@ -1,9 +1,13 @@
 use serde_json::{json, Map};
 use std::collections::BTreeSet;
 use types::TestResult;
-use web_ui::model::{Alert, AlertPage, Language, Severity};
-use web_ui::pages::{alert_page, alerts_page, clip, display_value, error_page, login_page, optional};
-use web_ui::strings::{language_tag, severity_class, severity_key, table, text, ENGLISH, FRENCH, MISSING_TEXT};
+use web_ui::api::valid_case_id;
+use web_ui::model::{Alert, AlertPage, CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, Language, Severity};
+use web_ui::pages::{alert_page, alerts_page, case_page, cases_page, clip, display_value, error_page, format_time, login_page, optional};
+use web_ui::strings::{
+    case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key, table, task_status_key, text,
+    ENGLISH, FRENCH, MISSING_TEXT,
+};
 
 
 #[path = "support/types.rs"]
@@ -92,6 +96,17 @@ fn every_page_renders_in_both_languages_without_a_missing_text() -> TestResult {
             alerts_page(language, "token", &page),
             alerts_page(language, "token", &empty),
             alert_page(language, "token", &sample(Severity::Low, None)),
+            cases_page(language, "token", &case_page_view()),
+            cases_page(
+                language,
+                "token",
+                &CasePageView {
+                    items: vec![],
+                    next_cursor: None,
+                },
+            ),
+            case_page(language, "token", &case_detail_view("critical", "closed", Some("duplicate"))),
+            case_page(language, "token", &case_detail_view("x", "y", None)),
         ];
         rendered.extend(ERROR_KEYS.iter().map(|key| error_page(language, Some("token"), key)));
         rendered.extend(ERROR_KEYS.iter().map(|key| error_page(language, None, key)));
@@ -141,5 +156,127 @@ fn values_of_any_json_type_are_displayed() -> TestResult {
     assert_eq!(display_value(Language::English, &json!("text")), "text");
     assert_eq!(display_value(Language::English, &json!(NUMBER)), "3");
     assert_eq!(display_value(Language::English, &json!({"a": [1]})), "{\"a\":[1]}");
+    Ok(())
+}
+
+
+const LONGEST_CASE_ID: usize = 128;
+
+
+const BEFORE_YEAR_ZERO: i64 = -100_000_000_000;
+
+
+fn case_summary(id: &str, severity: &str, status: &str) -> CaseSummaryView {
+    CaseSummaryView {
+        id: id.to_owned(),
+        title: "t".to_owned(),
+        severity: severity.to_owned(),
+        status: status.to_owned(),
+        assignee: None,
+        case_type: None,
+        created_at: 0,
+        updated_at: 0,
+        counts: CaseCountsView {
+            tasks: 0,
+            observables: 0,
+            comments: 0,
+            history: 0,
+            alerts: 0,
+        },
+    }
+}
+
+
+fn case_page_view() -> CasePageView {
+    CasePageView {
+        items: vec![case_summary("ok-1", "low", "new"), case_summary("../x", "medium", "weird")],
+        next_cursor: Some("c-_=".to_owned()),
+    }
+}
+
+
+fn case_detail_view(severity: &str, status: &str, resolution: Option<&str>) -> CaseDetailView {
+    CaseDetailView {
+        summary: case_summary("ok-1", severity, status),
+        description: resolution.map(str::to_owned),
+        resolution: resolution.map(str::to_owned),
+        template: None,
+        tasks: vec![
+            CaseTaskView {
+                title: "a".to_owned(),
+                status: "todo".to_owned(),
+                due: None,
+            },
+            CaseTaskView {
+                title: "b".to_owned(),
+                status: "done".to_owned(),
+                due: Some(0),
+            },
+        ],
+    }
+}
+
+
+#[test]
+fn case_ids_follow_the_link_grammar() -> TestResult {
+    let longest = "a".repeat(LONGEST_CASE_ID);
+    let too_long = "a".repeat(LONGEST_CASE_ID + 1);
+    for good in ["a", "A1", "case-1", "a.b_c", longest.as_str()] {
+        assert!(valid_case_id(good), "{good}");
+    }
+    for bad in ["", "-x", ".x", "_x", "a/b", "a b", "a\n", "é", "%2e", too_long.as_str()] {
+        assert!(!valid_case_id(bad), "{bad}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn times_are_utc_rfc3339_or_unknown() -> TestResult {
+    assert_eq!(format_time(Language::English, 0), "1970-01-01T00:00:00Z");
+    assert_eq!(format_time(Language::English, i64::MAX), "unknown");
+    assert_eq!(format_time(Language::French, BEFORE_YEAR_ZERO), "inconnu");
+    Ok(())
+}
+
+
+#[test]
+fn case_enums_map_to_fixed_texts() -> TestResult {
+    for (value, key) in [
+        ("new", "status_new"),
+        ("in_progress", "status_in_progress"),
+        ("closed", "status_closed"),
+        ("weird", "unknown"),
+    ] {
+        assert_eq!(status_key(value), key);
+    }
+    for (value, key) in [
+        ("todo", "task_todo"),
+        ("in_progress", "status_in_progress"),
+        ("done", "task_done"),
+        ("weird", "unknown"),
+    ] {
+        assert_eq!(task_status_key(value), key);
+    }
+    for (value, key) in [
+        ("true_positive", "res_true_positive"),
+        ("false_positive", "res_false_positive"),
+        ("benign", "res_benign"),
+        ("duplicate", "res_duplicate"),
+        ("other", "res_other"),
+        ("weird", "unknown"),
+    ] {
+        assert_eq!(resolution_key(value), key);
+    }
+    for (value, key, class) in [
+        ("low", "sev_low", "sev-low"),
+        ("medium", "sev_medium", "sev-medium"),
+        ("high", "sev_high", "sev-high"),
+        ("critical", "sev_critical", "sev-critical"),
+        ("weird", "unknown", "sev-unknown"),
+    ] {
+        assert_eq!(case_severity_key(value), key);
+        assert_eq!(case_severity_class(value), class);
+    }
     Ok(())
 }

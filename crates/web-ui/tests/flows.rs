@@ -1037,3 +1037,179 @@ async fn the_request_gets_only_the_time_left_after_the_slots() -> TestResult {
     assert_eq!(started.elapsed(), client.deadline);
     Ok(())
 }
+
+
+const LONGEST_CASE_ID: usize = 128;
+
+
+const CLIPPED_RUN: usize = 300;
+
+
+const UNLINKED_CASES: usize = 6;
+
+
+fn case_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.case_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+fn set_mode(rig: &Harness, mode: Mode) -> TestResult {
+    *rig.stub.state.mode.lock().map_err(|_| "poisoned")? = mode;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn case_list_and_detail_are_rendered() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/cases\""));
+    let first = fire(&rig, get_with("/cases", &session)).await?;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_hardened(&first);
+    assert!(first.body.contains("Phishing wave") && first.body.contains("Ransomware"));
+    assert!(first.body.contains("action=\"/cases/case-1\"") && first.body.contains("action=\"/cases/case-2\""));
+    assert!(first.body.contains(&format!("name=\"cursor\" value=\"{FIRST_CURSOR}\"")));
+    assert!(first.body.contains("In progress") && first.body.contains("2023-11-14T22:13:20Z") && first.body.contains("bob"));
+    let second = fire(&rig, get_with(&format!("/cases?cursor={FIRST_CURSOR}&limit=5"), &session)).await?;
+    assert!(second.body.contains("Old case") && !second.body.contains("Older cases"));
+    let detail = fire(&rig, get_with("/cases/case-1", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_hardened(&detail);
+    for expected in [
+        "Phishing wave",
+        "Initial description",
+        "Benign",
+        "phishing",
+        "Isolate host",
+        "(In progress)",
+        "due 2023-11-14T22:13:20Z",
+        "<dd>6</dd>",
+        "<dd>3</dd>",
+        "Back to the cases",
+    ] {
+        assert!(detail.body.contains(expected), "{expected}: {}", detail.body);
+    }
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with("/cases/case-1", &session)
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Résolution") && french.body.contains("Bénin") && french.body.contains("Retour aux dossiers"));
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/cases", &session)).await?;
+    assert!(empty.body.contains("No case."));
+    let empty_french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with("/cases", &session)
+        },
+    )
+    .await?;
+    assert!(empty_french.body.contains("Aucun dossier."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn hostile_case_list_is_escaped_clipped_and_unlinked() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/cases", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert!(!list.body.contains("<script>") && !list.body.contains("<img") && !list.body.contains("</style>"));
+    assert!(!list.body.contains('\u{202e}'));
+    assert!(list.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
+    assert!(list.body.contains("&lt;img src=x&gt;&lt;/style&gt;"));
+    assert!(list.body.contains("omitted") && !list.body.contains(&"h".repeat(CLIPPED_RUN)));
+    assert!(list.body.contains("action=\"/cases/case-1\""));
+    for forbidden in ["/cases/../x", "/cases/-x", "/cases/a/b", "/cases/%2e%2e", "/cases/line"] {
+        assert!(!list.body.contains(forbidden), "{forbidden}");
+    }
+    assert!(!list.body.contains(&"i".repeat(stub::LONG_CASE_ID_CHARS)));
+    assert_eq!(list.body.matches("not linkable").count(), UNLINKED_CASES);
+    assert!(list.body.contains("unknown") && !list.body.contains("weird"));
+    assert_eq!(case_requests(&rig)?.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn ids_outside_the_grammar_are_not_found_without_a_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let anonymous = fire(&rig, get("/cases/case-1")).await?;
+    assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+    let session = sign_in(&rig).await?;
+    let long = "i".repeat(stub::LONG_CASE_ID_CHARS);
+    for bad in ["-x", "_x", ".x", &long, "..%2Fx", "a%2Fb", "%2e%2e", "line%0Afeed", "a%20b", "caf%C3%A9"] {
+        let reply = fire(&rig, get_with(&format!("/cases/{bad}"), &session)).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{bad}");
+    }
+    assert!(case_requests(&rig)?.is_empty());
+    let edge = "a".repeat(LONGEST_CASE_ID);
+    let accepted = fire(&rig, get_with(&format!("/cases/{edge}"), &session)).await?;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(case_requests(&rig)?, vec![format!("/cases/{edge}")]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn hostile_case_detail_is_escaped_and_bounded() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let detail = fire(&rig, get_with("/cases/case-1", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert!(!detail.body.contains("<script>") && !detail.body.contains('\u{202e}'));
+    assert!(detail.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
+    assert!(!detail.body.contains("weird") && !detail.body.contains("mystery") && !detail.body.contains("odd") && !detail.body.contains("urgent"));
+    assert!(detail.body.contains("unknown"));
+    assert!(detail.body.contains("6 omitted"));
+    assert!(!detail.body.contains("task69"));
+    assert!(!detail.body.contains("9223372036854775807"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn case_api_failures_render_our_own_pages() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for (mode, path, status) in [
+        (Mode::Status(StatusCode::FORBIDDEN), "/cases", StatusCode::FORBIDDEN),
+        (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), "/cases", StatusCode::BAD_GATEWAY),
+        (Mode::Oversize, "/cases", StatusCode::BAD_GATEWAY),
+        (Mode::TooMany, "/cases", StatusCode::BAD_GATEWAY),
+        (Mode::BadCursor, "/cases", StatusCode::BAD_GATEWAY),
+        (Mode::Status(StatusCode::FORBIDDEN), "/cases/case-1", StatusCode::FORBIDDEN),
+        (Mode::Status(StatusCode::NOT_FOUND), "/cases/case-1", StatusCode::NOT_FOUND),
+        (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), "/cases/case-1", StatusCode::BAD_GATEWAY),
+        (Mode::Oversize, "/cases/case-1", StatusCode::BAD_GATEWAY),
+        (Mode::BadId, "/cases/case-1", StatusCode::BAD_GATEWAY),
+        (Mode::Normal, "/cases/missing", StatusCode::NOT_FOUND),
+        (Mode::Normal, "/cases?cursor=a%20b", StatusCode::BAD_REQUEST),
+        (Mode::Normal, "/cases?limit=0", StatusCode::BAD_REQUEST),
+    ] {
+        set_mode(&rig, mode)?;
+        let reply = fire(&rig, get_with(path, &session)).await?;
+        assert_eq!(reply.status, status, "{path}");
+        assert!(!reply.body.contains(LEAK));
+        assert_hardened(&reply);
+    }
+    for path in ["/cases", "/cases/case-1"] {
+        let again = sign_in(&rig).await?;
+        set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+        let ended = fire(&rig, get_with(path, &again)).await?;
+        assert_eq!(ended.status, StatusCode::SEE_OTHER);
+        assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+        let gone = fire(&rig, get_with(path, &again)).await?;
+        assert_eq!(location_of(&gone).as_deref(), Some("/login"));
+        set_mode(&rig, Mode::Normal)?;
+    }
+    Ok(())
+}
