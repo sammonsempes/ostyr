@@ -1,29 +1,35 @@
 use crate::fixture::{
-    case, config_in, fixture, fixture_with, memory_backend, seed_accounts, store, Fixture, ANALYST, AUDITOR, BASE_TIME, NOW, OTHER_TENANT, READER,
-    TENANT,
+    case, config_in, fixture, fixture_rated, fixture_with, memory_backend, seed_accounts, store, Fixture, ANALYST, AUDITOR, BASE_TIME, NOW,
+    OPEN_RATE, OTHER_TENANT, READER, TENANT,
 };
 use crate::http::{body_json, call, get, login};
-use crate::memory::{lock, Db, Forced};
+use crate::memory::{handle, lock, Db, Forced};
 use crate::swap::swap_after_admission;
 use crate::types::{TestError, TestResult};
 use alerts::error::StoreError;
+use alerts::types::RowFuture;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
+use axum::Router;
 use cases::api::{cases_access, cases_document, cases_router};
 use cases::api_model::{ActionName, ActionRequest, CasesBackend};
 use cases::backend::unix_now;
 use cases::error::{CaseStoreError, TransitionError};
 use cases::model::{Case, CaseEventKind, CaseStatus, Resolution};
-use cases::store::{MAX_COMMENTS, MAX_COMMENT_CHARS, MAX_ID_CHARS};
+use cases::store::{APPLY_SQL, MAX_COMMENTS, MAX_COMMENT_CHARS, MAX_ID_CHARS};
+use cases::write::act_on_case;
 use cases::write_api::{action_flow, actor_of, case_action, comment_flow, write_failure, ACTION_BODY_LIMIT, COMMENT_BODY_LIMIT};
 use core_api::model::{ApiError, ApiIdentity};
 use core_api::routes::build_router;
 use core_api::state::{build_state_from_files, RATE_MAX_REQUESTS};
 use core_api::types::SharedState;
+use core_pg::scope::TenantScope;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::sync::Barrier;
+use tokio::task::JoinSet;
 
 
 const HISTORY_AFTER_THREE_ACTIONS: usize = 3;
@@ -324,17 +330,68 @@ async fn a_comment_at_the_cap_is_a_409_and_adds_nothing() -> TestResult {
 }
 
 
+fn gated_backend(db: &Arc<Db>, gate: &Arc<Barrier>) -> CasesBackend {
+    let held_db = Arc::clone(db);
+    let held_gate = Arc::clone(gate);
+    CasesBackend {
+        act: Arc::new(move |scope, id, action, actor, now| {
+            let inner = Arc::clone(&held_db);
+            let barrier = Arc::clone(&held_gate);
+            Box::pin(async move {
+                let gated = |tenant: TenantScope, sql: &'static str, params: Vec<String>| -> RowFuture<'_> {
+                    let waiting = Arc::clone(&barrier);
+                    let store = Arc::clone(&inner);
+                    Box::pin(async move {
+                        if sql == APPLY_SQL {
+                            waiting.wait().await;
+                        }
+                        handle(&store, &tenant, sql, &params)
+                    })
+                };
+                act_on_case(&gated, &scope, &id, action, &actor, now).await
+            })
+        }),
+        ..memory_backend(db)
+    }
+}
+
+
+async fn close_once(router: Router, token: String) -> Result<(StatusCode, Value), String> {
+    close_request(&router, &token).await.map_err(|failure| failure.to_string())
+}
+
+
+async fn close_request(router: &Router, token: &str) -> Result<(StatusCode, Value), TestError> {
+    let body = json!({"action": "close", "resolution": "benign"});
+    let response = call(router, "POST", "/cases/c1/actions", Some(token), Body::from(body.to_string())).await?;
+    let status = response.status();
+    Ok((status, body_json(response).await?))
+}
+
+
 #[tokio::test]
 async fn parallel_closes_leave_one_closed_event() -> TestResult {
-    let (fx, token) = seeded().await?;
-    let body = json!({"action": "close", "resolution": "benign"});
-    let mut codes = Vec::new();
+    let gate = Arc::new(Barrier::new(SOME_PARALLEL));
+    let fx = fixture_rated(OPEN_RATE, |db| gated_backend(db, &gate))?;
+    store(&fx.db, &[case(TENANT, "c1", BASE_TIME)]).await?;
+    let token = login(&fx.router, ANALYST).await?;
+    let mut tasks = JoinSet::new();
+    (0..SOME_PARALLEL).for_each(|_| {
+        tasks.spawn(close_once(fx.router.clone(), token.clone()));
+    });
+    let mut replies = Vec::new();
     for _ in 0..SOME_PARALLEL {
-        codes.push(post(&fx, "/cases/c1/actions", Some(&token), &body).await?.0);
+        replies.push(tasks.join_next().await.ok_or("a request task is missing")???);
     }
-    assert_eq!(codes.iter().filter(|code| **code == StatusCode::OK).count(), 1);
-    assert_eq!(codes.iter().filter(|code| **code == StatusCode::CONFLICT).count(), SOME_PARALLEL - 1);
-    assert_eq!(stored(&fx.db, TENANT, "c1")?.0.history.len(), 1);
+    let conflicts: Vec<_> = replies.iter().filter(|(code, _)| *code == StatusCode::CONFLICT).collect();
+    assert_eq!(replies.iter().filter(|(code, _)| *code == StatusCode::OK).count(), 1);
+    assert_eq!(conflicts.len(), SOME_PARALLEL - 1);
+    assert!(conflicts
+        .iter()
+        .all(|(_, reply)| reply.pointer("/error/code") == Some(&json!("case_changed"))));
+    let (closed, _) = stored(&fx.db, TENANT, "c1")?;
+    assert_eq!(closed.history.len(), 1);
+    assert_eq!(closed.status, CaseStatus::Closed);
     Ok(())
 }
 
