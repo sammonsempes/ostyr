@@ -176,8 +176,13 @@ fn limits_are_typed_errors() -> TestResult {
     assert!(matches!(error_of(&big)?, SysmonError::TooLong { .. }));
     let many: String = (0..=MAX_FIELDS).map(|index| format!(r#"<Data Name="f{index}">v</Data>"#)).collect();
     assert!(matches!(error_of(&render("1", &many))?, SysmonError::TooManyFields { .. }));
-    let long_value = format!(r#"<Data Name="a">{}</Data>"#, "v".repeat(MAX_FIELD_BYTES + 1));
-    assert!(matches!(error_of(&render("1", &long_value))?, SysmonError::FieldTooLong { .. }));
+    let long_value = format!(r#"<Data Name="CommandLine">{}</Data>"#, "v".repeat(MAX_FIELD_BYTES + 1));
+    let cut = json_of(&render("1", &long_value))?;
+    assert!(cut
+        .pointer("/process/command_line")
+        .and_then(Value::as_str)
+        .ok_or("no command line")?
+        .contains("[cut, "));
     let long_name = format!(r#"<Data Name="{}">v</Data>"#, "n".repeat(MAX_FIELD_BYTES + 1));
     assert!(matches!(error_of(&render("1", &long_name))?, SysmonError::FieldTooLong { .. }));
     let exact = format!(r#"<Data Name="a">{}</Data>"#, "v".repeat(MAX_FIELD_BYTES));

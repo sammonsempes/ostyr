@@ -1802,6 +1802,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "serde_with",
  "sigma-sql",
  "thiserror 2.0.21",
  "time",
