@@ -233,6 +233,12 @@ pub struct AlertDetailView {
 }
 
 
+/// `POST /alerts/{id}/triage` query: the route defines none, so any key is a 400.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoQuery {}
+
+
 /// `POST /alerts/{id}/triage` body; the actor and the tenant come from the session, never from here.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

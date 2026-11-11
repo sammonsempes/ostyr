@@ -1,4 +1,4 @@
-//! Usage: alerts_api <module.yaml>. Serves `GET /alerts` and `GET /alerts/{id}` through core-api; `settings.pg_settings` names the core-pg settings file.
+//! Usage: alerts_api <module.yaml>. Serves `GET /alerts`, `GET /alerts/{id}` and `POST /alerts/{id}/triage` through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::api::{alerts_access, alerts_document, alerts_router};
 use alerts::backend::{lease, pg_backend, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
