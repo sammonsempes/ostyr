@@ -15,7 +15,7 @@ pub enum CmdbError {
     ControlCharacter { field: &'static str },
     #[error("observation carries more than {limit} attributes")]
     TooManyAttributes { limit: usize },
-    #[error("observation field `{field}` is empty")]
+    #[error("field `{field}` is empty")]
     EmptyField { field: &'static str },
 }
 

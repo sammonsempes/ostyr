@@ -1,7 +1,7 @@
 use crate::error::{CmdbConfigError, CmdbError};
 use crate::impact::BUSINESS_SERVICE_ATTRIBUTE;
 use crate::model::{Asset, AssetKind, Attribute, Criticality, Lifecycle, Relationship};
-use crate::reconcile::{check_text, MAX_ATTRIBUTE_NAME_BYTES, MAX_VALUE_BYTES};
+use crate::reconcile::{check_text, is_reserved_attribute, is_reserved_source, MAX_ATTRIBUTE_NAME_BYTES, MAX_VALUE_BYTES};
 use crate::summary::MAX_ID_BYTES;
 use crate::types::{KeyMap, TruthMap};
 use core_config::load::load_file;
@@ -65,13 +65,28 @@ pub fn check_declared(declared: &DeclaredAsset) -> Result<(), CmdbError> {
 }
 
 
+pub fn check_not_empty(field: &'static str, text: &str) -> Result<(), CmdbError> {
+    (!text.is_empty()).then_some(()).ok_or(CmdbError::EmptyField { field })
+}
+
+
 pub fn check_relationship(relationship: &Relationship) -> Result<(), CmdbError> {
+    check_not_empty("relationship from", &relationship.from)?;
+    check_not_empty("relationship to", &relationship.to)?;
     check_text("relationship from", &relationship.from, MAX_ID_BYTES)?;
     check_text("relationship to", &relationship.to, MAX_ID_BYTES)
 }
 
 
 pub fn check_truth(attribute: &str, source: &str) -> Result<(), CmdbError> {
+    check_not_empty("source of truth attribute", attribute)?;
+    check_not_empty("source of truth source", source)?;
+    (!is_reserved_attribute(attribute)).then_some(()).ok_or(CmdbError::ReservedName {
+        field: "source of truth attribute",
+    })?;
+    (!is_reserved_source(source)).then_some(()).ok_or(CmdbError::ReservedName {
+        field: "source of truth source",
+    })?;
     check_text("source of truth attribute", attribute, MAX_ATTRIBUTE_NAME_BYTES)?;
     check_text("source of truth source", source, MAX_VALUE_BYTES)
 }
