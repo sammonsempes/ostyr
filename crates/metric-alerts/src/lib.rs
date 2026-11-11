@@ -9,6 +9,7 @@ pub mod fingerprint;
 pub mod forecast;
 pub mod model;
 pub mod query;
+pub mod recover;
 pub mod round;
 pub mod rules;
 pub mod state;

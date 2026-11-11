@@ -11,7 +11,8 @@ use crate::state::AlertState;
 use crate::types::{FetchFn, Timestamp};
 use alerts::error::StoreError;
 use alerts::types::Executor;
-use core_pg::scope::TenantScope;
+use core_pg::error::PgError;
+use core_pg::scope::{tenant_of, TenantScope};
 use siem_ingest::error::InsertClass;
 use siem_schema::metrics::MetricsRetention;
 use std::collections::BTreeMap;
@@ -25,7 +26,29 @@ pub const MAX_ROUND_STATES: usize = 1000;
 /// Previous state per `fingerprint(rule id, selector labels)`; rebuilt every round, so a rule that left the file leaves the map.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoundStates {
+    pub tenant: Option<String>,
+    pub recovered: bool,
     pub states: BTreeMap<String, AlertState>,
+}
+
+
+#[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("these round states belong to another tenant")]
+    TenantMismatch,
+    #[error("the stored alerts could not be read")]
+    Store(#[from] PgError),
+}
+
+
+/// The first use records the tenant; any other tenant afterwards is refused.
+pub fn bind_tenant(states: &mut RoundStates, scope: &TenantScope) -> Result<(), RoundError> {
+    let tenant = states.tenant.get_or_insert_with(|| tenant_of(scope).to_owned());
+    if tenant == tenant_of(scope) {
+        Ok(())
+    } else {
+        Err(RoundError::TenantMismatch)
+    }
 }
 
 
@@ -173,7 +196,8 @@ pub fn evaluate_round(
     settings: &MetricsRetention,
     fetch: FetchFn<'_>,
     states: &mut RoundStates,
-) -> RoundOutcome {
+) -> Result<RoundOutcome, RoundError> {
+    bind_tenant(states, tenant)?;
     let context = RoundContext {
         tenant,
         now,
@@ -193,10 +217,10 @@ pub fn evaluate_round(
         warn!(failed, skipped, "round finished with failed or skipped rules");
     }
     states.states = done.next;
-    RoundOutcome {
+    Ok(RoundOutcome {
         firings: done.firings,
         counts: done.counts,
-    }
+    })
 }
 
 

@@ -5,6 +5,7 @@ use core_pg::migrate::migrate;
 use core_pg::settings::parse_settings;
 use metric_alerts::fetch::{agent_for, fetch_points, load_fetch_settings, read_key};
 use metric_alerts::query::parse_tenant_id;
+use metric_alerts::recover::recover_states;
 use metric_alerts::round::{evaluate_round, store_round, RoundStates};
 use metric_alerts::rules::load_rules;
 use siem_schema::metrics::MetricsRetention;
@@ -52,11 +53,12 @@ async fn scenario(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let mut out = stdout();
     for round in 0..rounds.parse::<u64>()? {
         let now = start + round * ROUND_STEP_SECONDS;
-        let outcome = evaluate_round(&rules, &scope, now, &retention, &fetch, &mut states);
+        let recovered = recover_states(&exec, &scope, &rules, &mut states).await?;
+        let outcome = evaluate_round(&rules, &scope, now, &retention, &fetch, &mut states)?;
         let stored = store_round(&exec, &scope, &outcome, now).await?;
         writeln!(
             out,
-            "round {round} now {now}: {:?} firings {} stored {stored}",
+            "round {round} now {now}: recovered {recovered} {:?} firings {} stored {stored}",
             outcome.counts,
             outcome.firings.len()
         )?;
