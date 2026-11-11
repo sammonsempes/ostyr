@@ -3,7 +3,7 @@ mod fake;
 mod types;
 
 
-use alerts::backend::{lease, pg_backend, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
+use alerts::backend::{lease, pg_backend, unix_micros, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
 use alerts::error::StoreError;
 use alerts::id::alert_id;
 use alerts::model::{Page, TriageChange, TriageStatus};
@@ -235,7 +235,9 @@ pub fn alert_row(id: &str) -> Vec<String> {
 pub fn alert_handler() -> Handler {
     let id = alert_id("acme", "r1", &["e1".to_owned()]);
     Arc::new(move |sql| {
-        if sql.contains("FROM alerts") {
+        if sql.contains("INSERT INTO alert_triage") {
+            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned()]])
+        } else if sql.contains("FROM alerts") {
             Reply::Rows(vec![alert_row(&id)])
         } else {
             Reply::Done
@@ -300,7 +302,17 @@ async fn the_pg_backend_lists_and_gets_through_a_leased_connection() -> Result<(
     assert_eq!(page.alerts.len(), 1);
     let id = alert_id("acme", "r1", &["e1".to_owned()]);
     let found = (backend.get)(scope, id.clone()).await?;
-    assert_eq!(found.map(|alert| alert.id), Some(id));
+    assert_eq!(found.map(|detail| detail.alert.id), Some(id.clone()));
+    let change = TriageChange {
+        status: TriageStatus::Closed,
+        actor: "ana".to_owned(),
+        note: None,
+        now: TRIAGE_TIME,
+    };
+    let written = (backend.triage)(tenant_scope("acme")?, id, change, None).await?;
+    assert_eq!(written.version, 1);
+    assert!(unix_micros() > TRIAGE_TIME);
+    assert!((backend.clock)() > TRIAGE_TIME);
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
     let bound: Vec<String> = drain(&mut served.fake.statements)
         .into_iter()
@@ -335,8 +347,17 @@ async fn the_pg_backend_is_busy_when_no_connection_is_free() -> Result<(), Box<d
     )
     .await;
     assert!(matches!(listed, Err(StoreError::Busy)));
-    let found = (backend.get)(scope, alert_id("acme", "r1", &["e1".to_owned()])).await;
+    let id = alert_id("acme", "r1", &["e1".to_owned()]);
+    let found = (backend.get)(scope.clone(), id.clone()).await;
     assert!(matches!(found, Err(StoreError::Busy)));
+    let change = TriageChange {
+        status: TriageStatus::Closed,
+        actor: "ana".to_owned(),
+        note: None,
+        now: TRIAGE_TIME,
+    };
+    let triaged = (backend.triage)(scope, id, change, None).await;
+    assert!(matches!(triaged, Err(StoreError::Busy)));
     Ok(())
 }
 

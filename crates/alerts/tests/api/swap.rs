@@ -1,8 +1,10 @@
 use crate::fixture::{alert, config_in, memory_backend, seed_accounts, store, ANALYST, BASE_TIME, OTHER_TENANT, TENANT};
-use crate::http::{body_json, get, login};
+use crate::http::{body_json, call, get, login};
+use crate::memory::lock;
 use crate::memory::Db;
 use crate::types::TestResult;
 use alerts::api::{alerts_access, alerts_document, alerts_router};
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{from_fn_with_state, Next};
@@ -50,6 +52,28 @@ async fn an_identity_swap_after_admission_never_serves_the_new_tenant() -> TestR
         .filter_map(|item| item.get("rule_id").and_then(Value::as_str))
         .collect();
     assert_eq!(rules, ["r1"]);
+    assert_eq!(state.identity.load().tenant, OTHER_TENANT);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_triage_after_an_identity_swap_lands_in_the_admitting_tenant() -> TestResult {
+    let dir = tempdir()?;
+    let config = config_in(&dir)?;
+    seed_accounts(&config)?;
+    let db = Arc::new(Db::default());
+    let state: SharedState = Arc::new(build_state_from_files(&config, alerts_access(), vec![alerts_document()])?);
+    let swapping = alerts_router(memory_backend(&db)).layer(from_fn_with_state(state.clone(), swap_after_admission));
+    let router = build_router(state.clone(), swapping);
+    let own = alert(TENANT, "r1", &["e1"], BASE_TIME);
+    store(&db, std::slice::from_ref(&own)).await?;
+    let token = login(&router, ANALYST).await?;
+    let body = || Body::from(r#"{"status":"closed"}"#);
+    let written = call(&router, "POST", &format!("/alerts/{}/triage", own.id), Some(&token), body()).await?;
+    assert_eq!(written.status(), StatusCode::OK);
+    let keys: Vec<(String, String)> = lock(&db.triage).keys().cloned().collect();
+    assert_eq!(keys, [(TENANT.to_owned(), own.id)]);
     assert_eq!(state.identity.load().tenant, OTHER_TENANT);
     Ok(())
 }

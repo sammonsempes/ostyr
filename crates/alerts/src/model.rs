@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use crate::types::{GetFn, ListFn};
+use crate::types::{ClockFn, GetFn, ListFn, TriageFn};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::str::FromStr;
@@ -53,7 +53,7 @@ impl FromStr for Severity {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TriageStatus {
     Acknowledged,
@@ -102,6 +102,14 @@ pub struct Triage {
     pub note: Option<String>,
     pub updated_at: u64,
     pub version: i64,
+}
+
+
+/// An alert with its triage, read in one lease; no triage means the alert is new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertDetail {
+    pub alert: Alert,
+    pub triage: Option<Triage>,
 }
 
 
@@ -157,6 +165,8 @@ pub struct AlertPage {
 pub struct Backend {
     pub list: ListFn,
     pub get: GetFn,
+    pub triage: TriageFn,
+    pub clock: ClockFn,
 }
 
 
@@ -201,4 +211,35 @@ pub struct AlertView {
 pub struct AlertListView {
     pub items: Vec<AlertView>,
     pub next_cursor: Option<String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct TriageView {
+    pub status: String,
+    pub actor: String,
+    pub note: Option<String>,
+    pub updated_at: String,
+    pub version: i64,
+}
+
+
+/// `GET /alerts/{id}`: the alert as listed plus its triage (`null` while the alert is new).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct AlertDetailView {
+    #[serde(flatten)]
+    pub alert: AlertView,
+    pub triage: Option<TriageView>,
+}
+
+
+/// `POST /alerts/{id}/triage` body; the actor and the tenant come from the session, never from here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TriageRequest {
+    pub status: TriageStatus,
+    /// At most 2048 characters, no NUL.
+    pub note: Option<String>,
+    /// The version read from the detail; absent while the alert has no triage.
+    pub version: Option<i64>,
 }

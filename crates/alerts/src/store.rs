@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::id::{alert_id, is_alert_id};
-use crate::model::{Alert, AlertPage, Cursor, Page, Severity, Summary, Triage, TriageChange, TriageStatus, SEVERITY_COLUMN};
+use crate::model::{Alert, AlertDetail, AlertPage, Cursor, Page, Severity, Summary, Triage, TriageChange, TriageStatus, SEVERITY_COLUMN};
 use crate::types::{Executor, Row};
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -486,4 +486,16 @@ pub async fn get_triage(exec: Executor<'_, '_>, scope: &TenantScope, alert_id: &
             })
         })
         .transpose()
+}
+
+
+/// The alert and its triage under one scope, for one lease.
+pub async fn get_detail(exec: Executor<'_, '_>, scope: &TenantScope, id: &str) -> Result<Option<AlertDetail>, StoreError> {
+    match get_alert(exec, scope, id).await? {
+        None => Ok(None),
+        Some(alert) => {
+            let triage = get_triage(exec, scope, &alert.id).await?;
+            Ok(Some(AlertDetail { alert, triage }))
+        }
+    }
 }

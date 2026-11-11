@@ -1,10 +1,11 @@
 use crate::memory::{handle, Db};
 use crate::types::TestError;
 use alerts::api::{alerts_access, alerts_document, alerts_router};
+use alerts::error::StoreError;
 use alerts::id::alert_id;
 use alerts::model::{Alert, Backend, Severity};
-use alerts::store::{get_alert, insert_alerts, list_alerts, summarise};
-use alerts::types::RowFuture;
+use alerts::store::{get_detail, insert_alerts, list_alerts, set_triage, summarise};
+use alerts::types::{RowFuture, TriageFn};
 use axum::Router;
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::model::{ApiConfig, Limits};
@@ -73,6 +74,7 @@ pub fn executor<'a>(db: &'a Db) -> impl Fn(TenantScope, &'static str, Vec<String
 pub fn memory_backend(db: &Arc<Db>) -> Backend {
     let list_db = Arc::clone(db);
     let get_db = Arc::clone(db);
+    let triage_db = Arc::clone(db);
     Backend {
         list: Arc::new(move |scope, page| {
             let held = Arc::clone(&list_db);
@@ -80,9 +82,24 @@ pub fn memory_backend(db: &Arc<Db>) -> Backend {
         }),
         get: Arc::new(move |scope, id| {
             let held = Arc::clone(&get_db);
-            Box::pin(async move { get_alert(&executor(&held), &scope, &id).await })
+            Box::pin(async move { get_detail(&executor(&held), &scope, &id).await })
         }),
+        triage: Arc::new(move |scope, id, change, expected| {
+            let held = Arc::clone(&triage_db);
+            Box::pin(async move { set_triage(&executor(&held), &scope, &id, &change, expected).await })
+        }),
+        clock: fixed_clock,
     }
+}
+
+
+pub fn fixed_clock() -> u64 {
+    BASE_TIME
+}
+
+
+pub fn busy_triage() -> TriageFn {
+    Arc::new(|_scope, _id, _change, _expected| Box::pin(async { Err(StoreError::Busy) }))
 }
 
 
