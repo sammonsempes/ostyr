@@ -12,5 +12,6 @@ A profile is `lab/profiles/<name>.yaml`: a list of VMs (name, base_image, vcpu, 
 | `oidc-pair` | `server` (`ubuntu-2404`) and `zitadel` (`zitadel`: Zitadel + PostgreSQL, TLS from a per-lab CA); `OIDC_REDIRECT_URI` sets the application redirect URI | T016, T026B |
 | `attack-linux` | `attacker` (`attacker`: Atomic Red Team, egress confined to the lab subnet) and `target` (`ubuntu-2404`) | T014, T030 |
 | `datastore-pair` | `datastore` (`datastore`: ClickHouse, NATS JetStream, PostgreSQL, TLS from a per-lab CA, credentials in `/etc/ostyr-lab/datastore.env`) and `client` (`ubuntu-2404` with the nats CLI and psql installed by the setup script) | T018 |
+| `e2e-linux` | the `datastore-pair` VMs (`datastore`, `client`); `e2e-linux.setup.sh` also runs the datastore-pair setup, then installs the Ostyr services on `datastore` and Tetragon plus the Linux agent on `client` (tenant `lab`, agent `agent1`); proof `lab/tests/e2e-alert.sh` | T169 |
 
 The `k3s-node` and `backup-server` images have no profile yet; a task that needs them adds its own.
