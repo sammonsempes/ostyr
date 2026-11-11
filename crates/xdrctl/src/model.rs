@@ -61,6 +61,10 @@ pub enum Command {
         #[command(subcommand)]
         action: AlertsCommand,
     },
+    Cases {
+        #[command(subcommand)]
+        action: CasesCommand,
+    },
 }
 
 
@@ -102,6 +106,70 @@ pub enum AlertsCommand {
     },
     /// Shows one alert by id.
     Show { id: String },
+}
+
+
+#[derive(Subcommand)]
+pub enum CasesCommand {
+    /// Lists cases, newest first; the next cursor is printed when there are more.
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Shows one case by id.
+    Show { id: String },
+}
+
+
+#[derive(Deserialize)]
+pub struct CaseCountsView {
+    pub tasks: u64,
+    pub observables: u64,
+    pub comments: u64,
+    pub history: u64,
+    pub alerts: u64,
+}
+
+
+#[derive(Deserialize)]
+pub struct CaseSummaryView {
+    pub id: String,
+    pub title: String,
+    pub severity: String,
+    pub status: String,
+    pub assignee: Option<String>,
+    pub case_type: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub version: i64,
+    pub counts: CaseCountsView,
+}
+
+
+#[derive(Deserialize)]
+pub struct CaseTaskView {
+    pub title: String,
+    pub status: String,
+}
+
+
+#[derive(Deserialize)]
+pub struct CaseDetailView {
+    #[serde(flatten)]
+    pub summary: CaseSummaryView,
+    pub description: Option<String>,
+    pub resolution: Option<String>,
+    pub template: Option<String>,
+    pub tasks: Vec<CaseTaskView>,
+}
+
+
+#[derive(Deserialize)]
+pub struct CasePageView {
+    pub items: Vec<CaseSummaryView>,
+    pub next_cursor: Option<String>,
 }
 
 
