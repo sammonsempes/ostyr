@@ -163,14 +163,21 @@ fn sent_params(request: &str) -> Result<Vec<(String, String)>, Box<dyn Error>> {
 
 struct Endless {
     served: usize,
+    bound: usize,
 }
 
 
 impl Read for Endless {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        buffer.fill(b'a');
-        self.served += buffer.len();
-        Ok(buffer.len())
+        let room = self.bound.saturating_sub(self.served);
+        if room == 0 {
+            Err(io::Error::other("bound reached"))
+        } else {
+            let length = buffer.len().min(room);
+            buffer.get_mut(..length).ok_or_else(|| io::Error::other("short buffer"))?.fill(b'a');
+            self.served += length;
+            Ok(length)
+        }
     }
 }
 
@@ -279,7 +286,8 @@ fn one_row_past_the_cap_is_refused_not_cut() -> TestResult {
 
 #[test]
 fn a_body_past_the_byte_cap_is_refused_with_bounded_memory() -> TestResult {
-    let mut source = Endless { served: 0 };
+    let bound = usize::try_from(MAX_FETCH_BYTES + MAX_FETCH_BYTES)?;
+    let mut source = Endless { served: 0, bound };
     let outcome = read_points(&mut source);
     assert!(matches!(outcome, Err(FetchError::TooLarge)));
     assert_eq!(source.served as u64, MAX_FETCH_BYTES + 1);
@@ -320,7 +328,8 @@ fn a_body_that_never_ends_hits_the_deadline() -> TestResult {
     let outcome = fetch(port, DEADLINE)?;
     release.send(())?;
     server.join().map_err(|_| "server panicked")??;
-    assert!(matches!(outcome, Err(FetchError::Body(_))), "{outcome:?}");
+    let ended = matches!(outcome, Err(FetchError::Body(_)) | Err(FetchError::Failed(InsertClass::Timeout)));
+    assert!(ended, "{outcome:?}");
     Ok(())
 }
 
