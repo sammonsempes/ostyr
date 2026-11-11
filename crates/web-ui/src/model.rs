@@ -53,6 +53,58 @@ pub struct AlertPage {
 }
 
 
+/// How many entries each growing list of a case holds (contract of the cases module).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct CaseCountsView {
+    pub tasks: u64,
+    pub observables: u64,
+    pub comments: u64,
+    pub history: u64,
+    pub alerts: u64,
+}
+
+
+/// One case of a list; `severity` and `status` stay text so an unknown value is shown as a fixed string, never refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CaseSummaryView {
+    pub id: String,
+    pub title: String,
+    pub severity: String,
+    pub status: String,
+    pub assignee: Option<String>,
+    pub case_type: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub counts: CaseCountsView,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CaseTaskView {
+    pub title: String,
+    pub status: String,
+    pub due: Option<i64>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CaseDetailView {
+    #[serde(flatten)]
+    pub summary: CaseSummaryView,
+    pub description: Option<String>,
+    pub resolution: Option<String>,
+    pub template: Option<String>,
+    pub tasks: Vec<CaseTaskView>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CasePageView {
+    pub items: Vec<CaseSummaryView>,
+    pub next_cursor: Option<String>,
+}
+
+
 /// The API token stays on the server; the browser holds only the random session identifier.
 pub struct Session {
     pub username: String,

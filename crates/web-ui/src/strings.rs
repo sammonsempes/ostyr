@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 42;
+pub const TEXT_COUNT: usize = 77;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -43,6 +43,41 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("none", "none"),
     ("omitted", "omitted"),
     ("cut", "cut"),
+    ("nav_cases", "Cases"),
+    ("title_cases", "Cases"),
+    ("title_case", "Case"),
+    ("cases_empty", "No case."),
+    ("cases_next", "Older cases"),
+    ("col_case_title", "Title"),
+    ("col_status", "Status"),
+    ("col_assignee", "Assignee"),
+    ("col_updated", "Updated"),
+    ("col_created", "Created"),
+    ("col_type", "Type"),
+    ("status_new", "New"),
+    ("status_in_progress", "In progress"),
+    ("status_closed", "Closed"),
+    ("res_true_positive", "True positive"),
+    ("res_false_positive", "False positive"),
+    ("res_benign", "Benign"),
+    ("res_duplicate", "Duplicate"),
+    ("res_other", "Other"),
+    ("task_todo", "To do"),
+    ("task_done", "Done"),
+    ("unknown", "unknown"),
+    ("not_linkable", "not linkable"),
+    ("case_description", "Description"),
+    ("case_resolution", "Resolution"),
+    ("case_template", "Template"),
+    ("case_tasks", "Tasks"),
+    ("case_counts", "Counts"),
+    ("count_tasks", "Tasks"),
+    ("count_observables", "Observables"),
+    ("count_comments", "Comments"),
+    ("count_history", "History"),
+    ("count_alerts", "Alerts"),
+    ("case_due", "due"),
+    ("case_back", "Back to the cases"),
     ("error_generic", "The request could not be completed. Try again later."),
     ("error_forbidden", "You do not have the permission to see alerts."),
     ("error_not_found", "This page does not exist."),
@@ -89,6 +124,41 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("none", "aucun"),
     ("omitted", "omis"),
     ("cut", "coupé"),
+    ("nav_cases", "Dossiers"),
+    ("title_cases", "Dossiers"),
+    ("title_case", "Dossier"),
+    ("cases_empty", "Aucun dossier."),
+    ("cases_next", "Dossiers plus anciens"),
+    ("col_case_title", "Titre"),
+    ("col_status", "Statut"),
+    ("col_assignee", "Responsable"),
+    ("col_updated", "Mis à jour"),
+    ("col_created", "Créé le"),
+    ("col_type", "Type"),
+    ("status_new", "Nouveau"),
+    ("status_in_progress", "En cours"),
+    ("status_closed", "Clos"),
+    ("res_true_positive", "Vrai positif"),
+    ("res_false_positive", "Faux positif"),
+    ("res_benign", "Bénin"),
+    ("res_duplicate", "Doublon"),
+    ("res_other", "Autre"),
+    ("task_todo", "À faire"),
+    ("task_done", "Fait"),
+    ("unknown", "inconnu"),
+    ("not_linkable", "non cliquable"),
+    ("case_description", "Description"),
+    ("case_resolution", "Résolution"),
+    ("case_template", "Modèle"),
+    ("case_tasks", "Tâches"),
+    ("case_counts", "Compteurs"),
+    ("count_tasks", "Tâches"),
+    ("count_observables", "Observables"),
+    ("count_comments", "Commentaires"),
+    ("count_history", "Historique"),
+    ("count_alerts", "Alertes"),
+    ("case_due", "échéance"),
+    ("case_back", "Retour aux dossiers"),
     ("error_generic", "La requête n'a pas pu aboutir. Réessayez plus tard."),
     ("error_forbidden", "Vous n'avez pas le droit de voir les alertes."),
     ("error_not_found", "Cette page n'existe pas."),
@@ -141,5 +211,59 @@ pub fn severity_class(severity: crate::model::Severity) -> &'static str {
         crate::model::Severity::Medium => "sev-medium",
         crate::model::Severity::High => "sev-high",
         crate::model::Severity::Critical => "sev-critical",
+    }
+}
+
+
+pub fn status_key(value: &str) -> &'static str {
+    match value {
+        "new" => "status_new",
+        "in_progress" => "status_in_progress",
+        "closed" => "status_closed",
+        _ => "unknown",
+    }
+}
+
+
+pub fn task_status_key(value: &str) -> &'static str {
+    match value {
+        "todo" => "task_todo",
+        "in_progress" => "status_in_progress",
+        "done" => "task_done",
+        _ => "unknown",
+    }
+}
+
+
+pub fn resolution_key(value: &str) -> &'static str {
+    match value {
+        "true_positive" => "res_true_positive",
+        "false_positive" => "res_false_positive",
+        "benign" => "res_benign",
+        "duplicate" => "res_duplicate",
+        "other" => "res_other",
+        _ => "unknown",
+    }
+}
+
+
+pub fn case_severity_key(value: &str) -> &'static str {
+    match value {
+        "low" => "sev_low",
+        "medium" => "sev_medium",
+        "high" => "sev_high",
+        "critical" => "sev_critical",
+        _ => "unknown",
+    }
+}
+
+
+pub fn case_severity_class(value: &str) -> &'static str {
+    match value {
+        "low" => "sev-low",
+        "medium" => "sev-medium",
+        "high" => "sev-high",
+        "critical" => "sev-critical",
+        _ => "sev-unknown",
     }
 }
