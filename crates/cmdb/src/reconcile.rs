@@ -1,5 +1,6 @@
 use crate::error::CmdbError;
 use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Lifecycle, Observation, Outcome, Resolution};
+use crate::summary::MAX_ID_BYTES;
 use crate::types::TruthMap;
 
 
@@ -19,14 +20,53 @@ pub fn is_reserved_attribute(name: &str) -> bool {
 }
 
 
-/// Refuses the source `cmdb` and attribute names starting with `key:`, which would imitate a key conflict; the error names the field, never the value.
-pub fn check_observation(observation: &Observation) -> Result<(), CmdbError> {
+pub const MAX_VALUE_BYTES: usize = 4_096;
+
+
+pub const MAX_ATTRIBUTE_NAME_BYTES: usize = 256;
+
+
+/// Refuses text over `cap` bytes or holding a control character (NUL and ANSI escapes included); the error names the field, never the value.
+pub fn check_text(field: &'static str, text: &str, cap: usize) -> Result<(), CmdbError> {
+    match (text.len() > cap, text.chars().any(char::is_control)) {
+        (true, _) => Err(CmdbError::FieldTooLong { field, limit: cap }),
+        (false, true) => Err(CmdbError::ControlCharacter { field }),
+        (false, false) => Ok(()),
+    }
+}
+
+
+pub fn check_reserved(observation: &Observation) -> Result<(), CmdbError> {
     let attribute_reserved = observation.attributes.keys().any(|name| is_reserved_attribute(name));
     match (is_reserved_source(&observation.source), attribute_reserved) {
         (true, _) => Err(CmdbError::ReservedName { field: "source" }),
         (false, true) => Err(CmdbError::ReservedName { field: "attributes" }),
         (false, false) => Ok(()),
     }
+}
+
+
+/// Refuses the source `cmdb`, attribute names starting `key:`, and a source, key value, derived asset id, attribute name or value over its cap or with a control character.
+pub fn check_observation(observation: &Observation) -> Result<(), CmdbError> {
+    check_reserved(observation)?;
+    check_text("source", &observation.source, MAX_VALUE_BYTES)?;
+    observation
+        .keys
+        .values()
+        .try_for_each(|value| check_text("keys", value, MAX_VALUE_BYTES))?;
+    observation
+        .attributes
+        .keys()
+        .try_for_each(|name| check_text("attribute name", name, MAX_ATTRIBUTE_NAME_BYTES))?;
+    observation
+        .attributes
+        .values()
+        .try_for_each(|value| check_text("attribute value", value, MAX_VALUE_BYTES))?;
+    observation
+        .keys
+        .iter()
+        .next()
+        .map_or(Ok(()), |(key, value)| check_text("asset id", &format!("{key}:{value}"), MAX_ID_BYTES))
 }
 
 

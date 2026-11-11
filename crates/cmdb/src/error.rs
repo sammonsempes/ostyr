@@ -9,6 +9,10 @@ pub enum CmdbError {
     IdCollision { id: String },
     #[error("observation field `{field}` uses a reserved name")]
     ReservedName { field: &'static str },
+    #[error("observation field `{field}` is longer than {limit} bytes")]
+    FieldTooLong { field: &'static str, limit: usize },
+    #[error("observation field `{field}` holds a control character")]
+    ControlCharacter { field: &'static str },
 }
 
 
