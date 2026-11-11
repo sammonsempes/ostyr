@@ -75,6 +75,7 @@ sleep 1
 status=0
 run_up "$PRESENT_PROFILE" "$PROCEED_SECONDS" || status=$?
 check "up.sh with present images proceeds to apply while build locks are held (status $status)" test -s "$work_dir/applied"
+check "a current image never waits on its build lock" test "$(grep -c "waiting for lock" "$work_dir/up.out")" -eq 0
 check "the provider cache directory was created outside the checkout" test -d "$work_dir/cache"
 LAB_REAPER_ACTIVE=1 "$LAB_DIR/down.sh" "$TASK" >/dev/null 2>&1
 

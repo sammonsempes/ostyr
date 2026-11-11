@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: lab/images/build.sh [--force] <image>   (LAB_FORCE_BUILD=1 is the same as --force)
+# Usage: lab/images/build.sh [--force|--check] <image>   (LAB_FORCE_BUILD=1 is the same as --force; --check takes no lock, builds nothing, exits 0 only when up to date)
 # Builds lab/images/<image>.pkr.hcl with Packer (QEMU, checksum-verified official media) and uploads it as base volume <image>.qcow2.
 # When labs still use the current volume, the new one is installed as <image>-<fingerprint prefix>.qcow2 instead; lab/up.sh resolves the newest
 # version and older unused versions are deleted (here and by lab/down.sh). The build date is recorded in volume <volume>.built.
@@ -9,11 +9,15 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 force="${LAB_FORCE_BUILD:-0}"
+check_only=0
 if [[ "${1:-}" == "--force" ]]; then
     force=1
     shift
+elif [[ "${1:-}" == "--check" ]]; then
+    check_only=1
+    shift
 fi
-image="${1:?usage: build.sh [--force] <image>}"
+image="${1:?usage: build.sh [--force|--check] <image>}"
 [[ "$image" =~ ^[a-z0-9-]+$ ]] || die "invalid image name '$image'"
 template="$LAB_DIR/images/$image.pkr.hcl"
 [[ -f "$template" ]] || die "no template $template"
@@ -46,6 +50,21 @@ inputs_fingerprint() {
 work_dir="$(mktemp -d)"
 trap 'chmod -R u+w "$work_dir" 2>/dev/null; rm -rf "$work_dir"' EXIT
 
+image_is_current() {
+    local inputs current
+    inputs="$(inputs_fingerprint)"
+    current="$(newest_base "$image")"
+    [[ -n "$current" ]] &&
+        virsh_lab vol-download --pool "$LAB_POOL" "$current.inputs" "$work_dir/stored-inputs" >/dev/null 2>&1 &&
+        [[ "$(cat "$work_dir/stored-inputs")" == "$inputs" ]]
+}
+
+ensure_pool
+if ((check_only)); then
+    image_is_current
+    exit $?
+fi
+
 mkdir -p "$LAB_BUILD_LOCK_DIR"
 exec 9>"$LAB_BUILD_LOCK_DIR/$image.lock"
 if ! flock -n 9; then
@@ -53,12 +72,8 @@ if ! flock -n 9; then
     flock 9
 fi
 
-ensure_pool
 inputs="$(inputs_fingerprint)"
-current="$(newest_base "$image")"
-if [[ "$force" != "1" && -n "$current" ]] &&
-    virsh_lab vol-download --pool "$LAB_POOL" "$current.inputs" "$work_dir/stored-inputs" >/dev/null 2>&1 &&
-    [[ "$(cat "$work_dir/stored-inputs")" == "$inputs" ]]; then
+if [[ "$force" != "1" ]] && image_is_current; then
     log "$image up to date (inputs $inputs), use --force to rebuild"
     exit 0
 fi
