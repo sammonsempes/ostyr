@@ -178,8 +178,19 @@ pub enum SourceError {
     Store(#[from] StoreError),
     #[error("no source tenant is configured")]
     NoTenants,
+    #[error("the poller id is not usable")]
+    Holder(#[from] HolderError),
     #[error("the tenant name is not valid")]
     Tenant(#[from] core_pg::error::PgError),
     #[error("no on-call severity is mapped for `{severity}`")]
     Unmapped { severity: String },
+}
+
+
+#[derive(Debug, Error)]
+pub enum HolderError {
+    #[error("the poller id is empty, too long or holds a character outside letters, digits, `-`, `_` and `.`")]
+    Invalid,
+    #[error("no random suffix for the poller id")]
+    Random(#[source] getrandom::Error),
 }

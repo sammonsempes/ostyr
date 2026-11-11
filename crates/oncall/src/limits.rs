@@ -218,3 +218,19 @@ pub const MAX_SKIP_PER_POLL: usize = 1000;
 
 /// The poller lease lasts this many intervals.
 pub const LEASE_FACTOR: u64 = 3;
+
+
+/// Longest poller id, characters.
+pub const MAX_HOLDER_CHARS: usize = 64;
+
+
+/// Random bytes (hex-encoded in the id) that make each process's poller id its own.
+pub const HOLDER_RANDOM_BYTES: usize = 8;
+
+
+/// The server cancels a purge after this many milliseconds (`core_pg::query::timed_script`), before the client deadline gives up and before the shortest lease (`LEASE_FACTOR` seconds).
+pub const PURGE_SERVER_TIMEOUT_MILLIS: u64 = 2_000;
+
+
+/// Client deadline of a purge, milliseconds: always above `PURGE_SERVER_TIMEOUT_MILLIS`, so the server cancels first and nothing commits after the client gave up.
+pub const PURGE_CLIENT_DEADLINE_MILLIS: u64 = 5_000;
