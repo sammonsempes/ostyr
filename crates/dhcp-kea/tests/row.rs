@@ -34,6 +34,12 @@ const ROW_SHUFFLED: &str = "0,pc1.example,1700003600,3,7,3600,192.168.1.10,x,aa:
 const ROW_V6: &str = "2001:db8::1,00:01:00:01:aa:bb,3600,1700003600,7,0,0,1,0,0,0,srv.example.,,0,0,0,,";
 
 
+const ROW_24_START: i64 = 1_700_000_000;
+
+
+const ROW_24_END: i64 = 1_700_003_600;
+
+
 const SHUFFLED_COLUMNS: usize = 9;
 
 
@@ -98,6 +104,17 @@ fn v4_row_of_kea_2_4_is_mapped() -> TestResult {
     assert_eq!(at(&event, "/event/dataset"), "kea.lease");
     assert_eq!(at(&event, "/labels/subnet_id"), "7");
     assert!(event.pointer("/labels/duid").is_none() && event.pointer(&format!("/labels/{HOSTNAME_RAW_LABEL}")).is_none());
+    Ok(())
+}
+
+
+#[test]
+fn the_lease_key_is_ordered_by_creation_time_first() -> TestResult {
+    let converted = convert_row(&parse_header(V4_24)?, ROW_24)?;
+    assert_eq!(
+        converted.key,
+        (ROW_24_START, ROW_24_END, "192.168.1.10".to_string(), "AA-BB-CC-DD-EE-FF".to_string())
+    );
     Ok(())
 }
 
