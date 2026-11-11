@@ -765,13 +765,16 @@ dependencies = [
  "core-pg",
  "data-encoding",
  "rcgen",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tracing",
+ "walkdir",
  "x509-parser",
 ]
 
