@@ -1,6 +1,7 @@
 use agent_linux::cursor::open_state_dir;
 use agent_linux::follow::poll;
 use agent_linux::model::{Follower, Paths, Report, SourceSettings, StateDir};
+use agent_linux::types::SpoolLock;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -36,6 +37,7 @@ pub fn setup() -> Result<Setup, Box<dyn Error>> {
         cursor_file: dir.path().join("cursor"),
         spool: dir.path().join("spool"),
         sending: dir.path().join("spool.sending"),
+        lock: SpoolLock::default(),
     };
     let state = open_state_dir(&paths.cursor_file)?;
     Ok(Setup {
@@ -109,6 +111,9 @@ pub const TINY_LINE_LIMIT: usize = 10;
 
 
 pub const SETTING_COUNT: usize = 4;
+
+
+pub const SENSOR_SETTING_COUNT: usize = 7;
 
 
 pub const RELOADED_MILLIS: u64 = 7;

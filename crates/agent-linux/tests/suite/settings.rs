@@ -1,11 +1,12 @@
-use crate::support::{RELOADED_MILLIS, SETTING_COUNT};
+use crate::support::{RELOADED_MILLIS, SENSOR_SETTING_COUNT, SETTING_COUNT};
 use crate::types::TestResult;
 use agent_channel::app::{reload_context, shared_log_audit};
 use agent_linux::error::SourceError;
 use agent_linux::model::{
-    SourceSettings, DEFAULT_POLL_MILLIS, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS, MAX_SPOOL_BYTES_CEILING,
+    SensorSettings, SourceSettings, DEFAULT_POLL_MILLIS, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS,
+    MAX_RESTARTS_PER_HOUR_CEILING, MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING,
 };
-use agent_linux::settings::{invalid_settings, open_settings_engine, settings_loader, settings_state, validate_settings};
+use agent_linux::settings::{invalid_sensor_settings, invalid_settings, open_settings_engine, settings_loader, settings_state, validate_settings};
 use core_audit::log::open_file_log;
 use core_config::reload::{reload, ReloadOutcome};
 use std::fs;
@@ -45,7 +46,7 @@ fn a_reload_applies_to_the_shared_settings_and_an_invalid_one_is_refused() -> Te
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, shared) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, shared, _sensor) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(shared.load().poll_millis, DEFAULT_POLL_MILLIS);
     write_settings(&path, &format!("settings:\n  poll_millis: {RELOADED_MILLIS}\n"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
@@ -81,7 +82,7 @@ fn the_state_has_one_entry_per_setting() -> TestResult {
     write_settings(&path, "")?;
     let file = settings_loader(path)()?;
     let state = settings_state(&file);
-    assert_eq!(state.len(), SETTING_COUNT);
+    assert_eq!(state.len(), SENSOR_SETTING_COUNT);
     assert_eq!(state.get("agent_linux.poll_millis"), Some(&DEFAULT_POLL_MILLIS.to_string()));
     Ok(())
 }
@@ -135,5 +136,55 @@ fn every_bound_is_accepted_at_its_ceiling_and_refused_one_over() -> TestResult {
     ];
     over.iter()
         .for_each(|(name, settings)| assert_eq!(invalid_settings(settings), vec![*name]));
+    Ok(())
+}
+
+
+#[test]
+fn sensor_bounds_are_refused_at_zero_and_over_their_ceiling_and_a_reload_applies_them() -> TestResult {
+    let ceilings = SensorSettings {
+        window_seconds: MAX_SENSOR_WINDOW_SECONDS,
+        interval_seconds: MAX_SENSOR_INTERVAL_SECONDS,
+        max_restarts_per_hour: MAX_RESTARTS_PER_HOUR_CEILING,
+    };
+    assert!(invalid_sensor_settings(&ceilings).is_empty());
+    let zero_cap = SensorSettings {
+        max_restarts_per_hour: 0,
+        ..ceilings.clone()
+    };
+    assert!(invalid_sensor_settings(&zero_cap).is_empty());
+    let zero = SensorSettings {
+        window_seconds: 0,
+        interval_seconds: 0,
+        ..ceilings.clone()
+    };
+    assert_eq!(invalid_sensor_settings(&zero), vec!["window_seconds", "interval_seconds"]);
+    let over = SensorSettings {
+        window_seconds: MAX_SENSOR_WINDOW_SECONDS + 1,
+        interval_seconds: MAX_SENSOR_INTERVAL_SECONDS + 1,
+        max_restarts_per_hour: MAX_RESTARTS_PER_HOUR_CEILING + 1,
+    };
+    assert_eq!(
+        invalid_sensor_settings(&over),
+        vec!["window_seconds", "interval_seconds", "max_restarts_per_hour"]
+    );
+    let dir = tempdir()?;
+    let path = dir.path().join("agent-linux.yaml");
+    write_settings(&path, "sensor:\n  window_seconds: 0\n")?;
+    let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
+    let context = reload_context(&path, "agent_linux", "tenant", "reload");
+    assert!(matches!(
+        open_settings_engine(path.clone(), shared_log_audit(&log), context),
+        Err(SourceError::Settings(names)) if names.contains("window_seconds")
+    ));
+    write_settings(&path, "")?;
+    let context_again = reload_context(&path, "agent_linux", "tenant", "reload");
+    let (engine, _shared, sensor) = open_settings_engine(path.clone(), shared_log_audit(&log), context_again)?;
+    write_settings(&path, "sensor:\n  window_seconds: 7\n")?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(sensor.load().window_seconds, RELOADED_MILLIS);
+    write_settings(&path, "sensor:\n  interval_seconds: 99\n")?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("interval_seconds")));
+    assert_eq!(sensor.load().window_seconds, RELOADED_MILLIS);
     Ok(())
 }

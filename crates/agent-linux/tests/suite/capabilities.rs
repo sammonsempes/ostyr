@@ -4,6 +4,7 @@ use agent_linux::capabilities::{
     read_bounded, Capabilities, KernelVersion, Knowledge, Missing, Mode, MAX_SMALL_BYTES,
 };
 use agent_linux::error::CapabilityError;
+use agent_linux::types::SpoolLock;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs;
@@ -292,7 +293,7 @@ fn announce_spools_one_event_and_returns_the_mode() -> TestResult {
     let dir = tempdir()?;
     put(dir.path(), "proc/sys/kernel/osrelease", b"4.18.0-1\n")?;
     let spool = dir.path().join("spool");
-    let mode = announce(dir.path(), &spool, read_bounded, MEASURED_AT)?;
+    let mode = announce(dir.path(), &spool, &SpoolLock::default(), read_bounded, MEASURED_AT)?;
     assert_eq!(mode.to_string(), "reduced");
     let text = fs::read_to_string(&spool)?;
     assert_eq!(text.lines().count(), 1);
@@ -311,7 +312,7 @@ fn announce_spools_one_event_and_returns_the_mode() -> TestResult {
 fn announce_fails_when_the_spool_cannot_be_written() -> TestResult {
     let dir = tempdir()?;
     let spool = dir.path().join("missing-dir").join("spool");
-    assert!(announce(dir.path(), &spool, read_bounded, MEASURED_AT).is_err());
+    assert!(announce(dir.path(), &spool, &SpoolLock::default(), read_bounded, MEASURED_AT).is_err());
     Ok(())
 }
 

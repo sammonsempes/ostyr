@@ -131,12 +131,23 @@ pub fn count_lines(path: &Path, limit: usize) -> io::Result<u64> {
 }
 
 
-/// Appends the lines to the spool, creating it only when there is something to append; returns whether it appended.
+/// The lines joined into one text, each followed by a newline; the first failing line fails the whole text.
+pub fn joined_lines(mut lines: &mut dyn Iterator<Item = io::Result<String>>) -> io::Result<String> {
+    Iterator::try_fold(&mut lines, String::new(), |mut text, line| {
+        text.push_str(&line?);
+        text.push('\n');
+        Ok(text)
+    })
+}
+
+
+/// Appends the lines to the spool in one write, creating it only when there is something to append; returns whether it appended.
 pub fn append_back(lines: impl Iterator<Item = io::Result<String>>, spool: &Path) -> io::Result<bool> {
     let mut rest = lines.peekable();
     if rest.peek().is_some() {
+        let text = joined_lines(&mut rest)?;
         let mut out = owner_only(OpenOptions::new().append(true).create(true)).open(spool)?;
-        rest.try_for_each(|line| writeln!(out, "{}", line?))?;
+        out.write_all(text.as_bytes())?;
         out.sync_all()?;
         Ok(true)
     } else {
