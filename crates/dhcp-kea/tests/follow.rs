@@ -4,7 +4,7 @@ mod types;
 
 use core_export::ecs::EcsEvent;
 use dhcp_kea::error::{HeaderError, KeaError};
-use dhcp_kea::follow::{malformed_summary, poll, remember, Counts, FollowState, Limits};
+use dhcp_kea::follow::{malformed_summary, poll, remember, Counts, FollowState, Limits, MAX_OPEN_HANDLES};
 use std::fs::{create_dir, metadata, remove_file, rename, write, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -34,7 +34,28 @@ const ROW_1_RENEWED: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700007200,1,0,0
 const BAD_ADDRESS: &str = "not-an-address,aa:bb:cc:dd:ee:01,01,3600,1700003600,1,0,0,host1.example.,0,";
 
 
+const ROW_5: &str = "10.0.0.5,aa:bb:cc:dd:ee:05,01,3600,1700003600,1,0,0,host5.example.,0,";
+
+
+const ROW_6: &str = "10.0.0.6,aa:bb:cc:dd:ee:06,01,3600,1700003600,1,0,0,host6.example.,0,";
+
+
+const PENDING_ROWS: usize = 40;
+
+
+const ROTATIONS: usize = 12;
+
+
+const MAX_DRAIN_POLLS: usize = 8;
+
+
+const SIX: u64 = 6;
+
+
 const THREE: u64 = 3;
+
+
+const THREE_LINES: usize = 3;
 
 
 const FIVE: u64 = 5;
@@ -444,5 +465,303 @@ fn a_repeated_row_is_a_duplicate_and_a_renewal_is_a_new_event() -> TestResult {
     let mut run = fresh();
     assert_eq!(step(&path, &mut run, &Limits::default())?.len(), TWO_EVENTS);
     assert_eq!(run.counts.duplicate, 1);
+    Ok(())
+}
+
+
+fn rotate(directory: &Path, path: &Path, rows: &[&str]) -> TestResult {
+    rename(path, directory.join("kea-leases4.csv.1"))?;
+    write(path, lines(rows))?;
+    Ok(())
+}
+
+
+fn collect(path: &Path, run: &mut Run, limits: &Limits) -> Result<Vec<String>, KeaError> {
+    (0..MAX_DRAIN_POLLS).try_fold(Vec::new(), |mut all, _| {
+        all.extend(step(path, run, limits)?);
+        Ok(all)
+    })
+}
+
+
+#[test]
+fn a_rotation_during_a_long_drain_loses_no_file() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.1"]);
+    append(&path, &lines(&[ROW_2, ROW_3, ROW_4]))?;
+    rotate(directory.path(), &path, &[HEADER, ROW_5])?;
+    let limits = Limits {
+        max_lines: SMALL_LINES,
+        ..Limits::default()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.2", "10.0.0.3"]);
+    rotate(directory.path(), &path, &[HEADER, ROW_6])?;
+    assert_eq!(collect(&path, &mut run, &limits)?, ["10.0.0.4", "10.0.0.5", "10.0.0.6"]);
+    assert_eq!((run.counts.restarts, run.counts.duplicate, run.counts.processed), (TWO, 0, SIX));
+    assert!(run.state.queued.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn two_rotations_before_one_poll_read_the_old_tail_and_the_newest_file() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.1"]);
+    append(&path, &lines(&[ROW_2]))?;
+    rotate(directory.path(), &path, &[HEADER, ROW_3])?;
+    let rotated = directory.path().join("kea-leases4.csv.1");
+    rename(&rotated, directory.path().join("kea-leases4.csv.3"))?;
+    rotate(directory.path(), &path, &[HEADER, ROW_4])?;
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_2, ROW_3]))?;
+    assert_eq!(step(&path, &mut run, &recovering())?, ["10.0.0.2", "10.0.0.4", "10.0.0.3"]);
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (1, 0));
+    Ok(())
+}
+
+
+const RECOVERY_START: i64 = 1_650_000_000;
+
+
+const LATE_START: i64 = 1_750_000_000;
+
+
+const NEW_ROW: &str = "10.0.0.7,aa:bb:cc:dd:ee:07,01,3600,1800003600,1,0,0,host7.example.,0,";
+
+
+const BAD_LIFETIME_ROW: &str = "10.0.0.8,aa:bb:cc:dd:ee:08,01,abc,1700003600,1,0,0,host8.example.,0,";
+
+
+const OLD_ROW: &str = "10.0.0.9,aa:bb:cc:dd:ee:09,01,3600,1600000000,1,0,0,host9.example.,0,";
+
+
+const BAD_COMPACTED_ROW: &str = "not-an-address,aa:bb:cc:dd:ee:07,01,3600,1700003600,1,0,0,host7.example.,0,";
+
+
+fn recovering() -> Limits {
+    Limits {
+        started: RECOVERY_START,
+        ..Limits::default()
+    }
+}
+
+
+fn set_compacted(directory: &Path, text: &str) -> TestResult {
+    let staging = directory.join("kea-leases4.csv.output");
+    write(&staging, text)?;
+    rename(&staging, directory.join("kea-leases4.csv.2"))?;
+    Ok(())
+}
+
+
+fn started(directory: &Path) -> Result<(std::path::PathBuf, Run), Box<dyn std::error::Error>> {
+    let path = directory.join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.1"]);
+    Ok((path, run))
+}
+
+
+#[test]
+fn the_compacted_file_at_start_is_remembered_and_never_replayed() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_5]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.1"]);
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_5, ROW_6, OLD_ROW]))?;
+    assert_eq!(step(&path, &mut run, &recovering())?, ["10.0.0.6"]);
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (1, 0));
+    let mut restarted = fresh();
+    assert_eq!(step(&path, &mut restarted, &Limits::default())?, ["10.0.0.1"]);
+    assert_eq!(restarted.counts.recovered, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_row_older_than_the_oldest_seen_row_is_not_replayed() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    rotate(directory.path(), &path, &[HEADER, ROW_2])?;
+    set_compacted(directory.path(), &lines(&[HEADER, OLD_ROW, ROW_1, ROW_3]))?;
+    assert_eq!(step(&path, &mut run, &recovering())?, ["10.0.0.2", "10.0.0.3"]);
+    assert_eq!(run.counts.recovered, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_rotation_without_a_readable_compacted_file_is_counted() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    assert_eq!(run.counts.unrecovered, 0);
+    rotate(directory.path(), &path, &[HEADER, ROW_2])?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.2"]);
+    assert_eq!(run.counts.unrecovered, 1);
+    create_dir(directory.path().join("kea-leases4.csv.2"))?;
+    rotate(directory.path(), &path, &[HEADER, ROW_3])?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.3"]);
+    assert_eq!(run.counts.unrecovered, 1);
+    std::fs::remove_dir(directory.path().join("kea-leases4.csv.2"))?;
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_6]))?;
+    assert_eq!(step(&path, &mut run, &recovering())?, ["10.0.0.6"]);
+    remove_file(directory.path().join("kea-leases4.csv.2"))?;
+    rotate(directory.path(), &path, &[HEADER, ROW_5])?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.5"]);
+    assert_eq!(run.counts.unrecovered, TWO);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_compacted_path_that_is_not_a_regular_file_is_never_read_nor_blocking() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    let compacted = directory.path().join("kea-leases4.csv.2");
+    make_fifo(&compacted)?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    remove_file(&compacted)?;
+    let target = directory.path().join("target.csv");
+    write(&target, lines(&[HEADER, ROW_6]))?;
+    std::os::unix::fs::symlink(&target, &compacted)?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (0, 0));
+    Ok(())
+}
+
+
+#[test]
+fn an_unreadable_compacted_file_is_counted_once() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    set_compacted(directory.path(), "not,a,lease,file\n")?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    assert_eq!(run.counts.unrecovered, 1);
+    set_compacted(directory.path(), "")?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, Vec::<String>::new());
+    assert_eq!(run.counts.unrecovered, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_long_compacted_file_is_read_over_several_polls_until_its_end() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    set_compacted(directory.path(), &lines(&[HEADER, BAD_COMPACTED_ROW, ROW_2, ROW_3, ROW_4]))?;
+    let limits = Limits {
+        max_lines: THREE_LINES,
+        ..recovering()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.2"]);
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.3", "10.0.0.4"]);
+    assert_eq!(step(&path, &mut run, &limits)?, Vec::<String>::new());
+    assert_eq!(malformed_summary(&run.counts), "address=1");
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (THREE, 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_compacted_file_replaced_before_its_end_counts_the_unread_part() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_2, ROW_3, ROW_4, ROW_5]))?;
+    let limits = Limits {
+        max_lines: THREE_LINES,
+        ..recovering()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.2", "10.0.0.3"]);
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_6]))?;
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.6"]);
+    assert_eq!(run.counts.unrecovered, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_startup_pass_replaced_before_its_end_replays_no_history_and_loses_no_new_lease() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_2, ROW_3, ROW_4, ROW_5]))?;
+    let limits = Limits {
+        max_lines: THREE_LINES,
+        started: LATE_START,
+        ..Limits::default()
+    };
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.1"]);
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_2, ROW_3, ROW_4, ROW_5, NEW_ROW]))?;
+    assert_eq!(step(&path, &mut run, &limits)?, Vec::<String>::new());
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.7"]);
+    assert_eq!(step(&path, &mut run, &limits)?, Vec::<String>::new());
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (1, 1));
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_2, NEW_ROW]))?;
+    assert_eq!(step(&path, &mut run, &limits)?, Vec::<String>::new());
+    assert_eq!(run.counts.recovered, 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_first_compacted_file_after_a_start_without_one_holds_history_and_new_leases() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    let limits = Limits {
+        started: LATE_START,
+        ..Limits::default()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, Vec::<String>::new());
+    set_compacted(directory.path(), &lines(&[HEADER, ROW_2, ROW_3, ROW_4, NEW_ROW]))?;
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.7"]);
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (1, 0));
+    Ok(())
+}
+
+
+#[test]
+fn rows_whose_creation_time_cannot_be_read_are_counted_once_per_pass() -> TestResult {
+    let directory = tempdir()?;
+    let (path, mut run) = started(directory.path())?;
+    set_compacted(directory.path(), &lines(&[HEADER, BAD_LIFETIME_ROW, ROW_2, BAD_LIFETIME_ROW]))?;
+    assert_eq!(step(&path, &mut run, &recovering())?, ["10.0.0.2"]);
+    assert_eq!(malformed_summary(&run.counts), "valid_lifetime=2");
+    assert_eq!((run.counts.recovered, run.counts.unrecovered), (1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn the_queue_of_open_handles_is_bounded_and_the_oldest_is_drained_first() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    let mut run = fresh();
+    step(&path, &mut run, &Limits::default())?;
+    let pending: Vec<String> = (0..PENDING_ROWS).map(|i| ROW_2.replace("10.0.0.2", &format!("10.9.0.{i}"))).collect();
+    append(&path, &pending.iter().map(|row| format!("{row}\n")).collect::<String>())?;
+    let limits = Limits {
+        max_lines: 1,
+        ..Limits::default()
+    };
+    (0..ROTATIONS).try_for_each(|_| {
+        rotate(directory.path(), &path, &[HEADER, ROW_3])?;
+        step(&path, &mut run, &limits).map(drop)?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    assert_eq!(run.state.queued.len(), MAX_OPEN_HANDLES);
     Ok(())
 }
