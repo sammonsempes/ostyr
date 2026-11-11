@@ -7,7 +7,9 @@ use intel_feeds::error::EntryError;
 use intel_feeds::limits::{MAX_READ_BYTES, MAX_READ_ROWS};
 use intel_feeds::load::LoadError;
 use intel_feeds::model::{Ioc, IocType, Tlp};
-use intel_feeds::read::{clickhouse_time, ioc_line, read_iocs, ReadError, ReadSummary};
+use intel_feeds::read::{
+    clickhouse_time, count_bad, ioc_line, read_iocs, read_iocs_capped, reason_of, total_bad, BadReason, BadRows, ReadCaps, ReadError, ReadSummary,
+};
 use siem_ingest::error::InsertClass;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -39,6 +41,27 @@ const GOOD_ROWS: usize = 3;
 
 
 const BAD_ROWS: u64 = 5;
+
+
+const TWO: u64 = 2;
+
+
+const SMALL_ROWS: usize = 20;
+
+
+const SMALL_BYTES: u64 = 1_024;
+
+
+const SMALL_CAPS: ReadCaps = ReadCaps {
+    rows: SMALL_ROWS,
+    bytes: SMALL_BYTES,
+};
+
+
+const SMALL_BLOCKS: usize = 2;
+
+
+const BAD_TYPE_ROW: &str = r#"{"ioc_type":"mystery","value":"d.example","feed":"f","feed_version":"v1","confidence":70,"tlp":"green","first_seen":"2026-11-03 00:00:00","last_seen":"2026-11-03 00:00:00","expires_at":"2026-12-03 00:00:00"}"#;
 
 
 const PASSWORD: &str = "READPW-77c1d9e2";
@@ -123,17 +146,25 @@ fn read_head(stream: &mut TcpStream) -> io::Result<String> {
 }
 
 
-fn answer<Body>(listener: TcpListener, status: &'static str, body: Body) -> JoinHandle<io::Result<(String, bool)>>
+fn answer_with<Body>(listener: TcpListener, reply_head: String, body: Body) -> JoinHandle<io::Result<(String, bool)>>
 where
     Body: FnOnce(&mut TcpStream) -> io::Result<()> + Send + 'static,
 {
     spawn(move || {
         let (mut stream, _) = listener.accept()?;
         let head = read_head(&mut stream)?;
-        stream.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes())?;
+        stream.write_all(reply_head.as_bytes())?;
         let sent = body(&mut stream).is_ok();
         Ok((head, sent))
     })
+}
+
+
+fn answer<Body>(listener: TcpListener, status: &'static str, body: Body) -> JoinHandle<io::Result<(String, bool)>>
+where
+    Body: FnOnce(&mut TcpStream) -> io::Result<()> + Send + 'static,
+{
+    answer_with(listener, format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n"), body)
 }
 
 
@@ -142,13 +173,17 @@ fn text_body(text: String) -> impl FnOnce(&mut TcpStream) -> io::Result<()> + Se
 }
 
 
-fn endless(first: Vec<u8>, filler: u8) -> impl FnOnce(&mut TcpStream) -> io::Result<()> + Send + 'static {
+fn endless(first: Vec<u8>, filler: u8, blocks: usize) -> impl FnOnce(&mut TcpStream) -> io::Result<()> + Send + 'static {
     move |stream| {
         stream.write_all(&first)?;
         let block = vec![filler; CHUNK];
-        let blocks = (MAX_READ_BYTES as usize / CHUNK) * OVERSHOOT;
         (0..blocks).try_for_each(|_| stream.write_all(&block))
     }
+}
+
+
+fn full_blocks() -> usize {
+    (MAX_READ_BYTES as usize / CHUNK) * OVERSHOOT
 }
 
 
@@ -172,6 +207,7 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
         row("c.example", "weird"),
         row("d.example", "RED"),
         BAD_DATE_ROW.to_owned(),
+        BAD_TYPE_ROW.to_owned(),
         String::new(),
         "not json".to_owned(),
         row("e.example", "amber_strict"),
@@ -180,11 +216,17 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
     let server = answer(rig.listener.try_clone()?, "200 OK", text_body(format!("{body}\n")));
     let mut out = Vec::new();
     let summary = read_iocs(&rig.config, NOW, &mut out)?;
+    assert_eq!(total_bad(&summary.bad), BAD_ROWS + 1);
     assert_eq!(
         summary,
         ReadSummary {
             rows: GOOD_ROWS,
-            bad_rows: BAD_ROWS
+            bad: BadRows {
+                unknown_tlp: TWO,
+                unknown_type: 1,
+                bad_time: 1,
+                bad_json: TWO,
+            }
         }
     );
     let iocs: Vec<Ioc> = String::from_utf8(out)?.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
@@ -210,16 +252,24 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
 #[test]
 fn rows_over_the_cap_fail_and_write_nothing() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let lines = (0..MAX_READ_ROWS + EXTRA_ROWS)
+    let lines = (0..SMALL_ROWS + EXTRA_ROWS)
         .map(|_| row("x.example", "green"))
         .collect::<Vec<_>>()
         .join("\n");
     let server = answer(rig.listener.try_clone()?, "200 OK", text_body(lines));
     let mut out = Vec::new();
-    let failed = read_iocs(&rig.config, NOW, &mut out);
-    assert!(matches!(failed, Err(ReadError::TooManyRows)));
+    let failed = read_iocs_capped(
+        &rig.config,
+        NOW,
+        &mut out,
+        ReadCaps {
+            bytes: MAX_READ_BYTES,
+            ..SMALL_CAPS
+        },
+    );
+    assert!(matches!(failed, Err(ReadError::TooManyRows(SMALL_ROWS))));
     assert!(out.is_empty());
-    assert!(failed.is_err_and(|error| error.to_string().contains("250000")));
+    assert!(failed.is_err_and(|error| error.to_string().contains("more than 20 rows")));
     assert!(server.join().is_ok());
     Ok(())
 }
@@ -228,15 +278,23 @@ fn rows_over_the_cap_fail_and_write_nothing() -> TestResult {
 #[test]
 fn exactly_the_cap_is_read_in_full() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let lines = (0..MAX_READ_ROWS).map(|_| row("x.example", "green")).collect::<Vec<_>>().join("\n");
+    let lines = (0..SMALL_ROWS).map(|_| row("x.example", "green")).collect::<Vec<_>>().join("\n");
     let server = answer(rig.listener.try_clone()?, "200 OK", text_body(format!("{lines}\n")));
     let mut out = Vec::new();
-    let summary = read_iocs(&rig.config, NOW, &mut out)?;
+    let summary = read_iocs_capped(
+        &rig.config,
+        NOW,
+        &mut out,
+        ReadCaps {
+            bytes: MAX_READ_BYTES,
+            ..SMALL_CAPS
+        },
+    )?;
     assert_eq!(
         summary,
         ReadSummary {
-            rows: MAX_READ_ROWS,
-            bad_rows: 0
+            rows: SMALL_ROWS,
+            bad: BadRows::default()
         }
     );
     joined(server)?;
@@ -247,10 +305,10 @@ fn exactly_the_cap_is_read_in_full() -> TestResult {
 #[test]
 fn a_body_over_the_byte_cap_without_newline_fails_bounded() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let server = answer(rig.listener.try_clone()?, "200 OK", endless(Vec::new(), b'a'));
+    let server = answer(rig.listener.try_clone()?, "200 OK", endless(Vec::new(), b'a', full_blocks()));
     let mut out = Vec::new();
     let failed = read_iocs(&rig.config, NOW, &mut out);
-    assert!(matches!(failed, Err(ReadError::TooManyBytes)));
+    assert!(matches!(failed, Err(ReadError::TooManyBytes(MAX_READ_BYTES))));
     assert!(out.is_empty());
     assert!(server.join().is_ok());
     Ok(())
@@ -261,11 +319,33 @@ fn a_body_over_the_byte_cap_without_newline_fails_bounded() -> TestResult {
 fn valid_rows_followed_by_an_oversized_tail_still_fail() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
     let first = format!("{}\n", row("a.example", "green")).into_bytes();
-    let server = answer(rig.listener.try_clone()?, "200 OK", endless(first, b'\n'));
+    let server = answer(rig.listener.try_clone()?, "200 OK", endless(first, b'\n', SMALL_BLOCKS));
     let mut out = Vec::new();
-    assert!(matches!(read_iocs(&rig.config, NOW, &mut out), Err(ReadError::TooManyBytes)));
+    assert!(matches!(
+        read_iocs_capped(&rig.config, NOW, &mut out, SMALL_CAPS),
+        Err(ReadError::TooManyBytes(SMALL_BYTES))
+    ));
     assert!(out.is_empty());
     assert!(server.join().is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_chunked_reply_cut_before_its_end_fails_and_writes_nothing() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let rows = format!("{}\n{}\n", row("a.example", "green"), row("b.example", "green"));
+    let chunk = format!("{:x}\r\n{rows}\r\n", rows.len());
+    let server = answer_with(
+        rig.listener.try_clone()?,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),
+        text_body(chunk),
+    );
+    let mut out = Vec::new();
+    let failed = read_iocs(&rig.config, NOW, &mut out);
+    assert!(matches!(failed, Err(ReadError::Body(_))), "{failed:?}");
+    assert!(out.is_empty());
+    joined(server)?;
     Ok(())
 }
 
@@ -391,5 +471,40 @@ fn rows_parse_only_known_tlps_and_dates() -> TestResult {
     assert_eq!(clickhouse_time(&mut deserializer)?, NOW);
     let mut wrong = serde_json::Deserializer::from_str("\"2026-11-03T12:00:00Z\"");
     assert!(clickhouse_time(&mut wrong).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn each_bad_row_is_counted_under_its_own_reason() -> TestResult {
+    let reasons: Vec<BadReason> = [
+        row("a.example", "weird"),
+        BAD_TYPE_ROW.to_owned(),
+        BAD_DATE_ROW.to_owned(),
+        "not json".to_owned(),
+    ]
+    .into_iter()
+    .map(|line| ioc_line(Ok(line)).err().map(|error| reason_of(&error)).ok_or("row accepted"))
+    .collect::<Result<_, _>>()?;
+    assert_eq!(
+        reasons,
+        vec![BadReason::UnknownTlp, BadReason::UnknownType, BadReason::BadTime, BadReason::BadJson]
+    );
+    let line_reason = ioc_line(Err(EntryError::LineTooLong)).err().map(|error| reason_of(&error));
+    assert_eq!(line_reason, Some(BadReason::BadJson));
+    let counted = reasons.into_iter().fold(BadRows::default(), count_bad);
+    assert_eq!(
+        counted,
+        BadRows {
+            unknown_tlp: 1,
+            unknown_type: 1,
+            bad_time: 1,
+            bad_json: 1
+        }
+    );
+    assert_eq!(BadReason::UnknownTlp.to_string(), "unknown_tlp");
+    assert_eq!(BadReason::UnknownType.to_string(), "unknown_type");
+    assert_eq!(BadReason::BadTime.to_string(), "bad_time");
+    assert_eq!(BadReason::BadJson.to_string(), "bad_json");
     Ok(())
 }
