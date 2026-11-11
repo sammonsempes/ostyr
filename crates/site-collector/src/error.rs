@@ -22,6 +22,8 @@ pub enum ConfigError {
     BadMaxVarbinds,
     #[error("the trap value length cap must be between 1 and its ceiling")]
     BadMaxValueChars,
+    #[error("the flow record cap must be between 1 and its ceiling")]
+    BadMaxFlowRecords,
 }
 
 
