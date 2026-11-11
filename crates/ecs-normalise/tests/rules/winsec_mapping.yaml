@@ -1,0 +1,10 @@
+products:
+  windows: windows
+categories:
+  authentication:
+    event_category: authentication
+    fields:
+      EventID: event.code
+      TargetUserName: user.name
+      TargetDomainName: user.domain
+      IpAddress: source.ip

@@ -176,8 +176,13 @@ fn limits_are_typed_errors() -> TestResult {
     assert!(matches!(error_of(&big)?, SysmonError::TooLong { .. }));
     let many: String = (0..=MAX_FIELDS).map(|index| format!(r#"<Data Name="f{index}">v</Data>"#)).collect();
     assert!(matches!(error_of(&render("1", &many))?, SysmonError::TooManyFields { .. }));
-    let long_value = format!(r#"<Data Name="a">{}</Data>"#, "v".repeat(MAX_FIELD_BYTES + 1));
-    assert!(matches!(error_of(&render("1", &long_value))?, SysmonError::FieldTooLong { .. }));
+    let long_value = format!(r#"<Data Name="CommandLine">{}</Data>"#, "v".repeat(MAX_FIELD_BYTES + 1));
+    let cut = json_of(&render("1", &long_value))?;
+    assert!(cut
+        .pointer("/process/command_line")
+        .and_then(Value::as_str)
+        .ok_or("no command line")?
+        .contains("[cut, "));
     let long_name = format!(r#"<Data Name="{}">v</Data>"#, "n".repeat(MAX_FIELD_BYTES + 1));
     assert!(matches!(error_of(&render("1", &long_name))?, SysmonError::FieldTooLong { .. }));
     let exact = format!(r#"<Data Name="a">{}</Data>"#, "v".repeat(MAX_FIELD_BYTES));
@@ -286,5 +291,24 @@ fn errors_display_and_keep_their_cause() -> TestResult {
         error_of(&"x".repeat(MAX_EVENT_BYTES + 1))?.to_string(),
         "the event is longer than 65536 bytes"
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_flat_sysmon_event_with_a_provider_is_accepted() -> TestResult {
+    let text = r#"{"Provider":{"Name":"Microsoft-Windows-Sysmon"},"EventID":1,"EventData":{"Image":"a"}}"#;
+    let event = parse_event(text)?;
+    assert_eq!(event.provider.as_deref(), Some("Microsoft-Windows-Sysmon"));
+    Ok(())
+}
+
+
+#[test]
+fn serde_json_duplicate_key_message_still_contains_duplicate() -> TestResult {
+    let error = parse_event(r#"{"EventID":1,"EventID":2,"EventData":{}}"#)
+        .err()
+        .ok_or("expected an error")?;
+    assert!(matches!(error, SysmonError::DuplicateKey(_)), "{error}");
     Ok(())
 }
