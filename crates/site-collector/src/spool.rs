@@ -1,4 +1,7 @@
-use crate::dirfs::{create_append, directory_facts, open_append, open_directory, open_read, open_write, regular_file_names, remove_named};
+use crate::dirfs::{
+    create_append, directory_facts, open_append, open_directory, open_read, open_write, regular_file_names, remove_named, sync_directory,
+};
+use crate::epoch::open_epoch;
 use crate::error::SpoolError;
 use crate::frame::{encode_frame, frame_len, read_frame};
 use crate::spool_model::{
@@ -145,6 +148,7 @@ pub fn open_spool(dir: &Path, config: SpoolConfig) -> Result<Spool, SpoolError> 
             high_records: 0,
         });
     }
+    let epoch = open_epoch(&handle, segments.back().map_or(0, end_sequence))?;
     let first_active = segments.back().map_or(0, |segment| segment.first_sequence);
     let active = open_append(&handle, &segment_name(first_active))?;
     let mut spool = Spool {
@@ -158,9 +162,21 @@ pub fn open_spool(dir: &Path, config: SpoolConfig) -> Result<Spool, SpoolError> 
         dropped_high: 0,
         truncated_tails,
         saturated: false,
+        epoch,
     };
     enforce_cap(&mut spool, 0)?;
     Ok(spool)
+}
+
+
+/// The segments holding a record in `from..to` flushed, then the directory, so those records and their file names survive a power cut.
+pub fn sync_range(spool: &Spool, from: u64, to: u64) -> Result<(), SpoolError> {
+    spool
+        .segments
+        .iter()
+        .filter(|segment| segment.first_sequence < to && end_sequence(segment) > from)
+        .try_for_each(|segment| -> Result<(), SpoolError> { Ok(open_read(&spool.dir, &segment_name(segment.first_sequence))?.sync_data()?) })
+        .and_then(|()| sync_directory(&spool.dir).map_err(SpoolError::from))
 }
 
 

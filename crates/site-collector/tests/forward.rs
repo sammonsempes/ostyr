@@ -10,7 +10,7 @@ use site_collector::forward::{
 };
 use site_collector::forward_model::{ForwardLimits, CURSOR_FILE, CURSOR_TEMPORARY, MAX_FORWARD_MESSAGE_BYTES};
 use site_collector::model::{SdElement, SyslogRecord};
-use site_collector::spool::{append, open_spool};
+use site_collector::spool::{append, open_spool, sync_range};
 use site_collector::spool_model::{Priority, Record, Spool, SpoolConfig, MAX_FRAME_BYTES};
 use site_collector::types::DirHandle;
 use std::fs;
@@ -152,7 +152,7 @@ fn feed(fixture: &mut Fixture, payloads: &[&[u8]]) -> TestResult {
 fn records_are_forwarded_once_and_the_cursor_advances() -> TestResult {
     let mut fixture = fixture()?;
     feed(&mut fixture, &[GOOD, GOOD, GOOD])?;
-    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor)?;
+    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor, sync_range)?;
     assert_eq!((report.forwarded, report.skipped_unparsable, report.refused_full), (THREE, 0, 0));
     let events = lines_of(&fixture.agent_spool)?;
     assert_eq!(events.len(), THREE_LINES);
@@ -169,7 +169,7 @@ fn records_are_forwarded_once_and_the_cursor_advances() -> TestResult {
     assert_eq!(text_at(first, "/labels/syslog_host_claimed"), Some("true"));
     assert_eq!(text_at(first, "/@timestamp"), Some("2026-11-10T10:00:00Z"));
     assert_eq!(read_cursor(&spool_handle(&fixture)?)?, FRAMES_IN_TOTAL);
-    let again = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor)?;
+    let again = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor, sync_range)?;
     assert_eq!(again.forwarded, 0);
     assert_eq!(lines_of(&fixture.agent_spool)?.len(), THREE_LINES);
     Ok(())
@@ -180,11 +180,11 @@ fn records_are_forwarded_once_and_the_cursor_advances() -> TestResult {
 fn a_crash_after_the_append_forwards_the_batch_again() -> TestResult {
     let mut fixture = fixture()?;
     feed(&mut fixture, &[GOOD, GOOD])?;
-    let crashed = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, failing_writer);
+    let crashed = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, failing_writer, sync_range);
     assert!(matches!(crashed, Err(ForwardError::Io(_))));
     assert_eq!(lines_of(&fixture.agent_spool)?.len(), TWO);
     assert_eq!(read_cursor(&spool_handle(&fixture)?)?, 0);
-    forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor)?;
+    forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor, sync_range)?;
     let events = lines_of(&fixture.agent_spool)?;
     let sequences = events
         .iter()
@@ -204,13 +204,13 @@ fn a_full_agent_spool_keeps_the_cursor() -> TestResult {
         agent_spool_max_bytes: 1,
         ..limits()
     };
-    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &tight, now()?, write_cursor)?;
+    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &tight, now()?, write_cursor, sync_range)?;
     assert_eq!((report.forwarded, report.refused_full), (0, 1));
     assert_eq!(fs::read_to_string(&fixture.agent_spool)?, "x\n");
     assert_eq!(read_cursor(&spool_handle(&fixture)?)?, 0);
     fs::remove_file(&fixture.agent_spool)?;
     fs::write(root_sending(&fixture), "x\n")?;
-    let claimed = forward_once(&mut fixture.spool, &fixture.agent_spool, &tight, now()?, write_cursor)?;
+    let claimed = forward_once(&mut fixture.spool, &fixture.agent_spool, &tight, now()?, write_cursor, sync_range)?;
     assert_eq!(claimed.refused_full, 1);
     assert!(!fixture.agent_spool.exists());
     Ok(())
@@ -230,7 +230,7 @@ fn hostile_messages_are_cleaned_and_cut() -> TestResult {
         "z".repeat(BIG_MESSAGE)
     );
     feed(&mut fixture, &[hostile.as_bytes()])?;
-    forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor)?;
+    forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor, sync_range)?;
     let raw = fs::read_to_string(&fixture.agent_spool)?;
     assert_eq!(raw.lines().count(), 1);
     let events = lines_of(&fixture.agent_spool)?;
@@ -250,7 +250,7 @@ fn hostile_messages_are_cleaned_and_cut() -> TestResult {
 fn a_record_that_no_longer_parses_is_skipped_and_counted() -> TestResult {
     let mut fixture = fixture()?;
     feed(&mut fixture, &[b"no priority at all", &BAD_BYTES, GOOD])?;
-    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor)?;
+    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor, sync_range)?;
     assert_eq!((report.forwarded, report.skipped_unparsable), (1, TWO as u64));
     assert_eq!(lines_of(&fixture.agent_spool)?.len(), 1);
     assert_eq!(read_cursor(&spool_handle(&fixture)?)?, FRAMES_IN_TOTAL);
@@ -260,6 +260,7 @@ fn a_record_that_no_longer_parses_is_skipped_and_counted() -> TestResult {
             sequence: 0,
             payload: b"junk".to_vec(),
         },
+        "ab",
         now()?,
     );
     assert_eq!(only_bad, None);
@@ -275,15 +276,15 @@ fn the_batch_is_bounded_by_max_records() -> TestResult {
         max_records: LIMIT,
         ..limits()
     };
-    let first = forward_once(&mut fixture.spool, &fixture.agent_spool, &small, now()?, write_cursor)?;
-    let second = forward_once(&mut fixture.spool, &fixture.agent_spool, &small, now()?, write_cursor)?;
+    let first = forward_once(&mut fixture.spool, &fixture.agent_spool, &small, now()?, write_cursor, sync_range)?;
+    let second = forward_once(&mut fixture.spool, &fixture.agent_spool, &small, now()?, write_cursor, sync_range)?;
     assert_eq!((first.forwarded, second.forwarded), (TWO as u64, 1));
     let huge = ForwardLimits {
         max_records: usize::MAX,
         ..limits()
     };
     assert_eq!(
-        forward_once(&mut fixture.spool, &fixture.agent_spool, &huge, now()?, write_cursor)?.forwarded,
+        forward_once(&mut fixture.spool, &fixture.agent_spool, &huge, now()?, write_cursor, sync_range)?.forwarded,
         0
     );
     Ok(())
@@ -295,7 +296,7 @@ fn a_cursor_past_the_spool_is_clamped() -> TestResult {
     let mut fixture = fixture()?;
     fs::write(fixture.root.path().join("spool").join(CURSOR_FILE), FAR_CURSOR)?;
     feed(&mut fixture, &[GOOD])?;
-    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor)?;
+    let report = forward_once(&mut fixture.spool, &fixture.agent_spool, &limits(), now()?, write_cursor, sync_range)?;
     assert_eq!(report.forwarded, 0);
     Ok(())
 }
@@ -353,10 +354,10 @@ fn agent_spool_failures_are_reported() -> TestResult {
     fs::write(&blocker, "x")?;
     assert!(file_bytes(&blocker.join("child")).is_err());
     assert_eq!(file_bytes(&fixture.root.path().join("absent"))?, 0);
-    assert!(forward_once(&mut fixture.spool, &blocker.join("child"), &limits(), now()?, write_cursor).is_err());
+    assert!(forward_once(&mut fixture.spool, &blocker.join("child"), &limits(), now()?, write_cursor, sync_range).is_err());
     let missing_parent = fixture.root.path().join("absent").join("agent.spool");
     assert!(matches!(
-        forward_once(&mut fixture.spool, &missing_parent, &limits(), now()?, write_cursor),
+        forward_once(&mut fixture.spool, &missing_parent, &limits(), now()?, write_cursor, sync_range),
         Err(ForwardError::Io(_))
     ));
     assert_eq!(read_cursor(&spool_handle(&fixture)?)?, 0);
@@ -370,6 +371,7 @@ fn text_helpers_are_bounded() -> TestResult {
     assert_eq!(cut_text("abcdef", THREE_LINES), "abc[+3 bytes cut]");
     assert_eq!(cut_text("aéé", TWO), "a[+4 bytes cut]");
     assert_eq!(clean_text("a\u{0}\u{202e}\u{2066}b", TEN), "ab");
+    assert_eq!(clean_text("a\u{2028}b\u{200b}c\u{feff}d\u{2060}e", TEN), "abcde");
     assert!(valid_hostname("router-1.lan_x:1"));
     assert!(!valid_hostname(""));
     assert!(!valid_hostname("-x"));
@@ -394,9 +396,9 @@ fn an_event_without_host_or_app_carries_no_such_labels() -> TestResult {
         message: "m".to_owned(),
         structured_data: Vec::<SdElement>::new(),
     };
-    let event = build_event(NINE, &parsed, now()?);
+    let event = build_event(NINE, "ab", &parsed, now()?);
     assert!(event.host.is_none());
-    assert_eq!(event.labels.len(), THREE_LINES);
+    assert_eq!(event.labels.len(), THREE_LINES + 1);
     assert_eq!(event.timestamp, now()?);
     Ok(())
 }
