@@ -175,6 +175,7 @@ pub fn is_unsafe(found: char) -> bool {
             | '\u{1160}'
             | '\u{17B4}'
             | '\u{17B5}'
+            | '\u{2800}'
             | '\u{180B}'..='\u{180D}'
             | '\u{180F}'
             | '\u{3164}'
@@ -189,6 +190,29 @@ pub fn is_unsafe(found: char) -> bool {
 pub fn clean(text: &str) -> String {
     let printable: String = text.chars().map(|found| if is_unsafe(found) { REPLACEMENT } else { found }).collect();
     cut_text(&printable, MAX_FIELD_CHARS)
+}
+
+
+/// Identity text (user, host, share, file name): `clean`, plus every non-ASCII space separator and every trailing space replaced.
+pub fn clean_identity(text: &str) -> String {
+    let swapped: String = text
+        .chars()
+        .map(|found| {
+            if !found.is_ascii() && get_general_category(found) == GeneralCategory::SpaceSeparator {
+                REPLACEMENT
+            } else {
+                found
+            }
+        })
+        .collect();
+    let kept = swapped.trim_end_matches(|found: char| found.is_ascii_whitespace());
+    let trailing = swapped.chars().count() - kept.chars().count();
+    clean(&format!("{kept}{}", REPLACEMENT.to_string().repeat(trailing)))
+}
+
+
+pub fn clean_identity_opt(text: Option<&String>) -> Option<String> {
+    text.filter(|found| !found.is_empty()).map(|found| clean_identity(found))
 }
 
 
@@ -228,7 +252,7 @@ fn base_event(eve: &Eve, types: &[&str]) -> EcsEvent {
             module: Some(MODULE.to_string()),
             ..EventFields::default()
         },
-        host: clean_opt(eve.host.as_ref()).map(|name| HostFields {
+        host: clean_identity_opt(eve.host.as_ref()).map(|name| HostFields {
             name: Some(name),
             ..HostFields::default()
         }),

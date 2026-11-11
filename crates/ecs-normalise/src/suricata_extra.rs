@@ -1,6 +1,6 @@
 //! Second slice of the Suricata mapping: `fileinfo`, `smb`, `krb5`, `dcerpc` and the context an `alert` line carries.
 
-use crate::suricata::{checked, clean, clean_opt, non_empty, with_labels, BAD_LABEL_PREFIX};
+use crate::suricata::{checked, clean, clean_identity_opt, clean_opt, non_empty, with_labels, BAD_LABEL_PREFIX};
 use crate::types::Label;
 use core_export::ecs::{
     DnsFields, DnsQuestion, EcsEvent, EventFields, FileFields, HashFields, TlsClientFields, TlsFields, UrlFields, UserAgentFields, UserFields,
@@ -21,6 +21,12 @@ pub const SHA256_CHARS: usize = 64;
 
 
 pub const FAILURE: &str = "failure";
+
+
+pub const PREAUTH_REQUIRED_CODE: u64 = 25;
+
+
+pub const PREAUTH_REQUIRED_NAME: &str = "KDC_ERR_PREAUTH_REQUIRED";
 
 
 #[derive(Debug, Default, Deserialize)]
@@ -80,6 +86,11 @@ pub struct Dcerpc {
 fn bad_label(name: &str, raw: &str) -> Label {
     warn!(name, "a field of the wrong type is kept as a label");
     (format!("{BAD_LABEL_PREFIX}{name}"), clean(raw))
+}
+
+
+fn identity_label(name: &str, text: Option<&String>) -> Option<Label> {
+    clean_identity_opt(text).map(|found| (name.to_string(), found))
 }
 
 
@@ -153,16 +164,22 @@ pub fn smb_event(smb: &Smb, base: EcsEvent) -> EcsEvent {
         [
             text_label("suricata_smb_dialect", smb.dialect.as_ref()),
             text_label("suricata_smb_status", smb.status.as_ref()),
-            text_label("suricata_smb_filename", smb.filename.as_ref()),
-            text_label("suricata_smb_share", smb.share.as_ref()),
+            identity_label("suricata_smb_filename", smb.filename.as_ref()),
+            identity_label("suricata_smb_share", smb.share.as_ref()),
         ],
     )
 }
 
 
-/// `krb5`: an authentication event, a failure when the line carries an `error_code`.
+/// `KDC_ERR_PREAUTH_REQUIRED` (25) is the normal first step of a password login, not a failure.
+pub fn is_preauth_required(code: &Value) -> bool {
+    code.as_u64() == Some(PREAUTH_REQUIRED_CODE) || code.as_str() == Some(PREAUTH_REQUIRED_NAME)
+}
+
+
+/// `krb5`: an authentication event, a failure when the line carries an `error_code` other than the preauth request.
 pub fn krb5_event(krb5: &Krb5, base: EcsEvent) -> EcsEvent {
-    let failed = krb5.error_code.as_ref().is_some_and(|code| !code.is_null());
+    let failed = krb5.error_code.as_ref().is_some_and(|code| !is_preauth_required(code));
     with_labels(
         EcsEvent {
             event: EventFields {
@@ -172,7 +189,7 @@ pub fn krb5_event(krb5: &Krb5, base: EcsEvent) -> EcsEvent {
                 ..base.event.clone()
             },
             user: non_empty(UserFields {
-                name: clean_opt(krb5.cname.as_ref()),
+                name: clean_identity_opt(krb5.cname.as_ref()),
                 ..UserFields::default()
             }),
             ..base
@@ -229,18 +246,22 @@ fn context_text(value: &Value, object: &str, key: &str) -> (Option<String>, Opti
 }
 
 
-fn first_query_name(value: &Value) -> (Option<String>, Option<Label>) {
-    match value
-        .get("dns")
-        .and_then(|dns| dns.get("query"))
-        .and_then(Value::as_array)
-        .and_then(|queries| queries.first())
-    {
-        Some(Value::Object(entry)) => match entry.get("rrname") {
+fn first_entry_name(entry: Option<&Value>) -> (Option<String>, Option<Label>) {
+    match entry {
+        Some(Value::Object(fields)) => match fields.get("rrname") {
             None | Some(Value::Null) => (None, None),
             Some(Value::String(text)) => (Some(clean(text)).filter(|found| !found.is_empty()), None),
             Some(other) => (None, Some(bad_label("alert_dns_query_rrname", &other.to_string()))),
         },
+        Some(Value::Null) | None => (None, None),
+        Some(other) => (None, Some(bad_label("alert_dns_query", &other.to_string()))),
+    }
+}
+
+
+fn first_query_name(value: &Value) -> (Option<String>, Option<Label>) {
+    match value.get("dns").and_then(|dns| dns.get("query")) {
+        Some(Value::Array(queries)) => first_entry_name(queries.first()),
         Some(Value::Null) | None => (None, None),
         Some(other) => (None, Some(bad_label("alert_dns_query", &other.to_string()))),
     }

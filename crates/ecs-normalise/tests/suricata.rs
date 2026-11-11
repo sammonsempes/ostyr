@@ -6,7 +6,7 @@ use ecs_normalise::cli::{log_dispatch, parse_format, run_reporting};
 use ecs_normalise::convert::Outcome;
 use ecs_normalise::error::NormaliseError;
 use ecs_normalise::stream::{error_summary, normalise_stream_capped, normalise_stream_format, Counts, Format, MAX_LOG_ERROR_CHARS};
-use ecs_normalise::suricata::{clean, is_unsafe, parse_eve, MAX_ANSWERS, MAX_FIELD_CHARS};
+use ecs_normalise::suricata::{clean, clean_identity, is_unsafe, parse_eve, MAX_ANSWERS, MAX_FIELD_CHARS};
 use ecs_normalise::suricata_extra::basename;
 use serde_json::Value;
 use std::io::Write;
@@ -451,9 +451,17 @@ fn a_krb5_cname_cannot_pass_for_another_user() -> TestResult {
     assert_eq!(value.pointer("/event/outcome"), None);
     let zero_width = one("\"event_type\":\"krb5\",\"krb5\":{\"cname\":\"admin\\u200b\"}")?;
     assert_ne!(text(&zero_width, "/user/name"), Some("admin"));
-    let numeric = one(r#""event_type":"krb5","krb5":{"error_code":25}"#)?;
+    let numeric = one(r#""event_type":"krb5","krb5":{"error_code":6}"#)?;
     assert_eq!(text(&numeric, "/event/outcome"), Some("failure"));
     assert_eq!(numeric.pointer("/user"), None);
+    let preauth_number = one(r#""event_type":"krb5","krb5":{"error_code":25}"#)?;
+    let preauth_name = one(r#""event_type":"krb5","krb5":{"error_code":"KDC_ERR_PREAUTH_REQUIRED"}"#)?;
+    let other_text = one(r#""event_type":"krb5","krb5":{"error_code":"KDC_ERR_PREAUTH_FAILED"}"#)?;
+    assert_eq!(
+        (preauth_number.pointer("/event/outcome"), preauth_name.pointer("/event/outcome")),
+        (None, None)
+    );
+    assert_eq!(text(&other_text, "/event/outcome"), Some("failure"));
     Ok(())
 }
 
@@ -629,11 +637,51 @@ fn an_alert_dns_context_reads_the_suricata_7_query_list_and_the_flat_form() -> T
     let nothing = one(r#""event_type":"alert","alert":{},"dns":{"query":[null]}"#)?;
     let empty_name = one(r#""event_type":"alert","alert":{},"dns":{"query":[{"rrname":null}]}"#)?;
     let empty_list = one(r#""event_type":"alert","alert":{},"dns":{"query":[]}"#)?;
-    let not_a_list = one(r#""event_type":"alert","alert":{},"dns":{"query":5}"#)?;
+    let null_query = one(r#""event_type":"alert","alert":{},"dns":{"query":null}"#)?;
+    let no_query = one(r#""event_type":"alert","alert":{},"dns":{}"#)?;
     let blank = one(r#""event_type":"alert","alert":{},"dns":{"query":[{"rrname":""}]}"#)?;
-    [nothing, empty_name, empty_list, not_a_list, blank]
+    [nothing, empty_name, empty_list, blank, null_query, no_query]
         .iter()
         .for_each(|found| assert_eq!((found.pointer("/dns"), found.pointer("/labels")), (None, None)));
+    Ok(())
+}
+
+
+#[test]
+fn an_alert_dns_query_of_the_wrong_type_is_kept_as_a_label() -> TestResult {
+    [("\"x\"", "\"x\""), ("5", "5"), (r#"{"rrname":"a.test"}"#, r#"{"rrname":"a.test"}"#)]
+        .iter()
+        .try_for_each(|(raw, shown)| -> TestResult {
+            let value = one(&format!("\"event_type\":\"alert\",\"alert\":{{}},\"dns\":{{\"query\":{raw}}}"))?;
+            assert_eq!(text(&value, "/labels/suricata_bad_alert_dns_query"), Some(*shown));
+            assert_eq!(value.pointer("/dns"), None);
+            Ok(())
+        })
+}
+
+
+const BLANKS: &[char] = &[
+    '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2003}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{3000}', '\u{2800}',
+];
+
+
+#[test]
+fn a_blank_looking_character_cannot_make_an_identity_pass_for_another() -> TestResult {
+    BLANKS.iter().chain([&' ']).try_for_each(|blank| -> TestResult {
+        let krb5 = one(&format!("\"event_type\":\"krb5\",\"krb5\":{{\"cname\":\"admin{blank}\"}}"))?;
+        assert_eq!(text(&krb5, "/user/name"), Some("admin\u{FFFD}"), "{blank:?}");
+        let smb = one(&format!(
+            "\"event_type\":\"smb\",\"smb\":{{\"filename\":\"admin{blank}\",\"share\":\"admin{blank}\"}}"
+        ))?;
+        assert_eq!(text(&smb, "/labels/suricata_smb_filename"), Some("admin\u{FFFD}"), "{blank:?}");
+        assert_eq!(text(&smb, "/labels/suricata_smb_share"), Some("admin\u{FFFD}"), "{blank:?}");
+        let host = one(&format!("\"event_type\":\"flow\",\"flow\":{{}},\"host\":\"admin{blank}\""))?;
+        assert_eq!(text(&host, "/host/name"), Some("admin\u{FFFD}"), "{blank:?}");
+        Ok(())
+    })?;
+    let inner = one(r#""event_type":"krb5","krb5":{"cname":"a b  "}"#)?;
+    assert_eq!(text(&inner, "/user/name"), Some("a b\u{FFFD}\u{FFFD}"));
+    assert_eq!(clean_identity("admin"), "admin");
     Ok(())
 }
 
