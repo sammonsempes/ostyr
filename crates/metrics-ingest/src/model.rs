@@ -1,4 +1,5 @@
 use crate::types::{Dropped, Labels};
+use serde::Deserialize;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 
@@ -53,7 +54,8 @@ pub const DEFAULT_MAX_FUTURE_SKEW_SECONDS: u64 = 300;
 pub const DEFAULT_RAW_RETENTION_SECONDS: u64 = 604_800;
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub max_request_bytes: usize,
     pub max_resources: usize,

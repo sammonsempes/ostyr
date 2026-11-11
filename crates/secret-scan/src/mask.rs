@@ -13,6 +13,18 @@ pub fn escape_bounded(text: &str, max_chars: usize) -> String {
 }
 
 
+/// Escapes like `escape_bounded`; a longer result keeps `max_chars` characters then `[cut, N chars]` with N the full escaped length.
+pub fn escape_marked(text: &str, max_chars: usize) -> String {
+    let escaped: String = text.chars().flat_map(char::escape_debug).collect();
+    let total = escaped.chars().count();
+    if total > max_chars {
+        format!("{}[cut, {total} chars]", escaped.chars().take(max_chars).collect::<String>())
+    } else {
+        escaped
+    }
+}
+
+
 /// Keeps `kept_chars` leading characters only when the text is at least twice as long, then the fixed marker.
 pub fn mask_secret(secret: &str, kept_chars: usize) -> String {
     let kept = if secret.chars().count() >= kept_chars.saturating_mul(KEEP_RATIO) {

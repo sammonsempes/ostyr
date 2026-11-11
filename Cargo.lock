@@ -134,11 +134,13 @@ dependencies = [
  "ecs-normalise",
  "flate2",
  "libc",
+ "parking_lot",
  "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1010,6 +1012,8 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "ipnet",
+ "notify",
+ "notify-debouncer-full",
  "openidconnect",
  "rcgen",
  "rustix 1.1.6",
@@ -3262,11 +3266,23 @@ dependencies = [
 name = "metrics-ingest"
 version = "0.0.0"
 dependencies = [
+ "core-config",
+ "core-pg",
+ "log",
  "opentelemetry-proto",
  "prost",
+ "rcgen",
+ "serde",
  "serde_json",
+ "siem-ingest",
  "siem-schema",
+ "tempfile",
+ "thiserror 2.0.21",
  "time",
+ "tracing",
+ "tracing-subscriber",
+ "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]

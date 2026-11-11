@@ -1,8 +1,8 @@
 use crate::cursor::write_cursor;
 use crate::error::SourceError;
 use crate::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, StateDir, Stop};
+use crate::spool::append_locked;
 use crate::types::StepFn;
-use agent_channel::spool::append_back;
 use core_export::ecs::to_json;
 use ecs_normalise::convert::Outcome;
 use ecs_normalise::stream::{decode, read_raw_line, RawLine};
@@ -278,7 +278,7 @@ pub fn drain(file: &File, cursor: &mut Cursor, paths: &Paths, settings: &SourceS
     let pending = file_len(&paths.spool)? + file_len(&paths.sending)?;
     let context = PassContext { settings, line_limit };
     let pass = read_pass(file, cursor, pending, &context).map_err(|error| SourceError::Undrained(Box::new(error)))?;
-    append_back(pass.lines.into_iter().map(Ok::<String, io::Error>), &paths.spool)?;
+    append_locked(&paths.lock, pass.lines.into_iter().map(Ok::<String, io::Error>), &paths.spool)?;
     cursor.offset = pass.offset;
     cursor.skipping = pass.skipping;
     let stop = if pass.report.stop == Stop::Running {

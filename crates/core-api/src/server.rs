@@ -3,7 +3,7 @@ use crate::middleware::rate_key;
 use crate::model::{
     ApiConfig, Bound, ConnectionGuard, Current, Listener, ListenerSetup, LoadedTls, Rewatch, ServerStop, StateInputs, TlsFiles, WatchStop,
 };
-use crate::reload::{build_settings, content_digest, open_reload, rewatch, watched_files};
+use crate::reload::{apply_log_level, build_settings, content_digest, open_reload, rewatch, watched_files};
 use crate::routes::build_router;
 use crate::state::build_state;
 use crate::types::{AccessTable, ConnectionTable, LogLevelHandle, ServerHandle, SharedLimits, SharedListener, SharedState};
@@ -314,6 +314,7 @@ pub async fn run_module(
         [path] => {
             let module_file = Path::new(path);
             let settings = build_settings(load_module(module_file)?)?;
+            log.iter().for_each(|handle| apply_log_level(handle, &settings));
             let config = settings.config.clone();
             let inputs = StateInputs {
                 key: settings.key.clone(),

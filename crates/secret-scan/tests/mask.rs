@@ -2,7 +2,7 @@
 mod types;
 
 
-use secret_scan::mask::{escape_bounded, mask_secret, masked_excerpt, MASK_MARKER};
+use secret_scan::mask::{escape_bounded, escape_marked, mask_secret, masked_excerpt, MASK_MARKER};
 use types::TestResult;
 
 
@@ -72,5 +72,13 @@ fn excerpt_is_escaped_and_bounded() -> TestResult {
     assert_eq!(escape_bounded("abcdef", THREE), "abc");
     let excerpt = masked_excerpt("line1\nline2 SECRETSECRET1", "SECRETSECRET1", KEPT, NARROW);
     assert_eq!(excerpt, "line1\\nl");
+    Ok(())
+}
+
+
+#[test]
+fn escape_marked_cuts_with_the_full_length() -> TestResult {
+    assert_eq!(escape_marked("a\nb", WIDE), "a\\nb");
+    assert_eq!(escape_marked("abcdef", THREE), "abc[cut, 6 chars]");
     Ok(())
 }

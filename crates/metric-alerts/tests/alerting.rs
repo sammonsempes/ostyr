@@ -10,7 +10,8 @@ use common::types::TestResult;
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use metric_alerts::alerting::{
-    alert_of, firing_alerts, is_valid, severity_of, store_firing_alerts, title_of, Firing, MAX_LABELS, MICROS_PER_SECOND, RULE_ID_PREFIX,
+    alert_of, firing_alerts, is_valid, severity_of, store_firing_alerts, title_of, Firing, MAX_FIRING_LABELS, MAX_LABELS, MICROS_PER_SECOND,
+    RULE_ID_PREFIX,
 };
 use metric_alerts::model::Severity as RuleSeverity;
 use metric_alerts::token::{is_token, shown, MAX_TOKEN_CHARS};
@@ -37,6 +38,9 @@ const HUGE: usize = 100_000;
 
 
 const TWO: usize = 2;
+
+
+const TEN: usize = 10;
 
 
 const EXTRA_FIRINGS: usize = 3;
@@ -399,4 +403,42 @@ async fn five_hundred_and_three_firings_rerun_inserts_nothing() -> TestResult {
     store_firing_alerts(&exec, &scope, &firing_alerts(&scope, &firings, NOW)).await?;
     assert_eq!(store_firing_alerts(&exec, &scope, &firing_alerts(&scope, &firings, LATER)).await?, 0);
     Ok(())
+}
+
+
+#[test]
+fn a_foreign_firing_never_becomes_an_alert() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    assert!(alert_of(&scope, &firing(&other, "r", &[], SINCE), NOW).is_none());
+    assert!(alert_of(&other, &firing(&other, "r", &[], SINCE), NOW).is_some());
+    assert!(firing_alerts(&scope, &[firing(&other, "r", &[], SINCE)], NOW).is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn the_label_count_is_bounded_and_the_title_always_fits() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let huge = build_labels(MAX_FIRING_LABELS * TEN);
+    let huge_pairs: Vec<(&str, &str)> = huge.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    let dropped = firing(&scope, "r", &huge_pairs, SINCE);
+    assert!(!is_valid(&dropped));
+    assert!(alert_of(&scope, &dropped, NOW).is_none());
+    assert!(firing_alerts(&scope, &[dropped], NOW).is_empty());
+    let limit = build_labels(MAX_FIRING_LABELS);
+    let limit_pairs: Vec<(&str, &str)> = limit.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    let alert = alert_of(&scope, &firing(&scope, "r", &limit_pairs, SINCE), NOW).ok_or("no alert")?;
+    assert!(alert.rule_title.chars().count() <= MAX_TITLE_CHARS);
+    assert!(alert.rule_title.ends_with("more)"));
+    let long_value = "p".repeat(MAX_TOKEN_CHARS);
+    let wide: Vec<(String, String)> = (0..MAX_FIRING_LABELS).map(|index| (format!("k{index:04}"), long_value.clone())).collect();
+    let wide_pairs: Vec<(&str, &str)> = wide.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    assert!(title_of("r", &labels(&wide_pairs)).chars().count() <= MAX_TITLE_CHARS);
+    Ok(())
+}
+
+
+pub fn build_labels(count: usize) -> Vec<(String, String)> {
+    (0..count).map(|index| (format!("k{index:05}"), "v".to_owned())).collect()
 }

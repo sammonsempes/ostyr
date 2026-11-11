@@ -1,6 +1,7 @@
 use crate::error::{CapabilityError, SourceError};
+use crate::spool::append_locked;
 use crate::types::ReadFn;
-use agent_channel::spool::append_back;
+use crate::types::SpoolLock;
 use flate2::read::GzDecoder;
 use serde_json::json;
 use std::fmt::{self, Display, Formatter};
@@ -296,12 +297,12 @@ pub fn capabilities_event(capabilities: &Capabilities, mode: &Mode, measured_at:
 
 
 /// Measures, logs the mode once and spools the event; a spool failure is an error, a missing capability is not.
-pub fn announce(root: &Path, spool: &Path, read: ReadFn, measured_at: u64) -> Result<Mode, SourceError> {
+pub fn announce(root: &Path, spool: &Path, lock: &SpoolLock, read: ReadFn, measured_at: u64) -> Result<Mode, SourceError> {
     let capabilities = detect(root, read);
     let mode = effective_mode(&capabilities);
     let missing = missing_names(&mode);
     let mode_name = mode.to_string();
     tracing::info!(mode = %mode_name, missing = ?missing, "effective mode");
-    append_back(once(Ok(capabilities_event(&capabilities, &mode, measured_at))), spool)?;
+    append_locked(lock, once(Ok(capabilities_event(&capabilities, &mode, measured_at))), spool)?;
     Ok(mode)
 }
