@@ -59,3 +59,9 @@ pub const RELOAD_SUBCOMMAND: &str = "auth_zone_reload";
 
 
 pub const RELOAD_AUDIT_ACTION: &str = "dns-rpz.zone_reload";
+
+
+pub const CLICKHOUSE_PREFIX: &str = "clickhouse:";
+
+
+pub const SOURCE_FAILED: &str = "IOC read from ClickHouse failed";
