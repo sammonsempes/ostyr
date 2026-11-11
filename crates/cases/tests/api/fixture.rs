@@ -5,8 +5,9 @@ use axum::Router;
 use cases::api::{cases_access, cases_document, cases_router};
 use cases::api_model::CasesBackend;
 use cases::model::{Case, CaseStatus, Severity, Task, TaskStatus};
-use cases::store::create_case;
+use cases::store::{add_comment, create_case};
 use cases::summary::{get_case_detail, list_case_summaries};
+use cases::write::act_on_case;
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::model::{ApiConfig, Limits};
 use core_api::routes::build_router;
@@ -31,6 +32,9 @@ pub const READER: &str = "reader";
 
 
 pub const ANALYST: &str = "analyst";
+
+
+pub const AUDITOR: &str = "auditor";
 
 
 pub const TENANT: &str = "acme";
@@ -73,9 +77,19 @@ pub fn executor<'a>(db: &'a Db) -> impl Fn(TenantScope, &'static str, Vec<String
 }
 
 
+pub const NOW: i64 = 1_800_000_000;
+
+
+pub fn fixed_clock() -> i64 {
+    NOW
+}
+
+
 pub fn memory_backend(db: &Arc<Db>) -> CasesBackend {
     let list_db = Arc::clone(db);
     let get_db = Arc::clone(db);
+    let act_db = Arc::clone(db);
+    let comment_db = Arc::clone(db);
     CasesBackend {
         list: Arc::new(move |scope, page| {
             let held = Arc::clone(&list_db);
@@ -85,6 +99,15 @@ pub fn memory_backend(db: &Arc<Db>) -> CasesBackend {
             let held = Arc::clone(&get_db);
             Box::pin(async move { get_case_detail(&executor(&held), &scope, &id).await })
         }),
+        act: Arc::new(move |scope, id, action, actor, now| {
+            let held = Arc::clone(&act_db);
+            Box::pin(async move { act_on_case(&executor(&held), &scope, &id, action, &actor, now).await })
+        }),
+        comment: Arc::new(move |scope, id, comment| {
+            let held = Arc::clone(&comment_db);
+            Box::pin(async move { add_comment(&executor(&held), &scope, &id, &comment).await })
+        }),
+        clock: fixed_clock,
     }
 }
 
@@ -174,7 +197,7 @@ pub fn config_in(dir: &TempDir, rate: u32) -> Result<ApiConfig, TestError> {
 
 
 pub fn seed_accounts(config: &ApiConfig) -> Result<(), TestError> {
-    [READER, ANALYST].into_iter().try_for_each(|name| -> Result<(), TestError> {
+    [READER, ANALYST, AUDITOR].into_iter().try_for_each(|name| -> Result<(), TestError> {
         let account = Account {
             username: name.to_owned(),
             password_hash: hash_password(PASSWORD, os_random)?,

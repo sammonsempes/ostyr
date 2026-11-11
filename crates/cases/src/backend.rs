@@ -1,13 +1,18 @@
 use crate::api_model::CasesBackend;
 use crate::error::CaseStoreError;
+use crate::model::Comment;
+use crate::store::add_comment;
 use crate::stored::{CaseDetail, CasePage, SummaryList};
 use crate::summary::{get_case_detail, list_case_summaries};
+use crate::transition::CaseAction;
+use crate::write::act_on_case;
 use alerts::backend::lease;
 use alerts::pg::pg_executor;
 use core_config::reload::ReloadEngine;
 use core_pg::scope::TenantScope;
 use core_pg::settings::PgSettings;
 use std::sync::Arc;
+use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 
 
@@ -38,12 +43,57 @@ pub async fn pg_get(
 }
 
 
+pub async fn pg_act(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    (id, action, actor, now): (String, CaseAction, String, i64),
+) -> Result<CaseDetail, CaseStoreError> {
+    let held = lease(&engine, &permits).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    act_on_case(&executor, &scope, &id, action, &actor, now).await
+}
+
+
+pub async fn pg_comment(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    (id, comment): (String, Comment),
+) -> Result<(), CaseStoreError> {
+    let held = lease(&engine, &permits).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    add_comment(&executor, &scope, &id, &comment).await
+}
+
+
+pub fn unix_now() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
+}
+
+
 /// One connection per request through the alerts `lease`, at most `alerts::backend::MAX_CONNECTIONS` at once, else 429.
 pub fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>) -> CasesBackend {
     let list_engine = Arc::clone(&engine);
     let list_permits = Arc::clone(&permits);
+    let act_engine = Arc::clone(&engine);
+    let act_permits = Arc::clone(&permits);
+    let comment_engine = Arc::clone(&engine);
+    let comment_permits = Arc::clone(&permits);
     CasesBackend {
         list: Arc::new(move |scope, page| Box::pin(pg_list(Arc::clone(&list_engine), Arc::clone(&list_permits), scope, page))),
         get: Arc::new(move |scope, id| Box::pin(pg_get(Arc::clone(&engine), Arc::clone(&permits), scope, id))),
+        act: Arc::new(move |scope, id, action, actor, now| {
+            Box::pin(pg_act(Arc::clone(&act_engine), Arc::clone(&act_permits), scope, (id, action, actor, now)))
+        }),
+        comment: Arc::new(move |scope, id, comment| {
+            Box::pin(pg_comment(
+                Arc::clone(&comment_engine),
+                Arc::clone(&comment_permits),
+                scope,
+                (id, comment),
+            ))
+        }),
+        clock: unix_now,
     }
 }

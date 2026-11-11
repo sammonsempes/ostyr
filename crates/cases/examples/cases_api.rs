@@ -1,4 +1,4 @@
-//! Usage: cases_api <module.yaml>. Serves `GET /cases` and `GET /cases/{id}` through core-api; `settings.pg_settings` names the core-pg settings file.
+//! Usage: cases_api <module.yaml>. Serves the cases routes (reads, actions, comments) through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
 use alerts::settings::{open_pg_engine_as, SETTING_PG};

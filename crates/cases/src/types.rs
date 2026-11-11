@@ -1,6 +1,7 @@
 use crate::error::CaseStoreError;
-use crate::model::ObservableKind;
+use crate::model::{Comment, ObservableKind};
 use crate::stored::{CaseDetail, CasePage, SummaryList};
+use crate::transition::CaseAction;
 use core_pg::scope::TenantScope;
 use std::future::Future;
 use std::pin::Pin;
@@ -18,3 +19,15 @@ pub type SummaryListFn = Arc<dyn Fn(TenantScope, CasePage) -> CaseFuture<Summary
 
 
 pub type DetailGetFn = Arc<dyn Fn(TenantScope, String) -> CaseFuture<Option<CaseDetail>> + Send + Sync>;
+
+
+/// Unix seconds; a function pointer so production and tests share one instantiation.
+pub type ClockFn = fn() -> i64;
+
+
+/// Scope, case id, action, actor, now: applies the action and answers the case as read back.
+pub type ActFn = Arc<dyn Fn(TenantScope, String, CaseAction, String, i64) -> CaseFuture<CaseDetail> + Send + Sync>;
+
+
+/// Scope, case id, comment: appends the comment.
+pub type CommentFn = Arc<dyn Fn(TenantScope, String, Comment) -> CaseFuture<()> + Send + Sync>;

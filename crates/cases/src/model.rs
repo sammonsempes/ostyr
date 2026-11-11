@@ -121,7 +121,7 @@ pub struct Observable {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Comment {
     pub author: String,
     pub at: i64,

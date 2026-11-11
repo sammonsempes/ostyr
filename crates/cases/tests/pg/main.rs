@@ -9,7 +9,10 @@ use alerts::backend::{lease, MAX_CONNECTIONS};
 use alerts::error::StoreError;
 use cases::backend::pg_backend;
 use cases::error::CaseStoreError;
+use cases::model::{Comment, Resolution};
+use cases::store::{APPLY_SQL, COMMENT_SQL, DETAIL_SQL, GET_SQL};
 use cases::stored::CasePage;
+use cases::transition::CaseAction;
 use certs::{loopback, make_pki};
 use core_audit::log::{append, genesis_log};
 use core_config::reload::{ReloadContext, ReloadEngine};
@@ -30,6 +33,18 @@ const DRAIN_LIMIT: usize = 100;
 
 
 const PAGE_SIZE: usize = 10;
+
+
+const WRITE_TIME: i64 = 1_700_000_100;
+
+
+const FIRST_TIME: i64 = 1_700_000_000;
+
+
+const WRITTEN_VERSION: i64 = 2;
+
+
+const VERSION_COLUMN: usize = 8;
 
 
 const STATEMENTS: usize = 2;
@@ -168,6 +183,100 @@ async fn a_full_pool_is_busy_before_any_connection() -> Result<(), Box<dyn Error
     ));
     assert!(matches!(
         (backend.get)(scope, "c1".to_owned()).await,
+        Err(CaseStoreError::Lease(StoreError::Busy))
+    ));
+    Ok(())
+}
+
+
+pub fn get_row() -> Vec<String> {
+    [
+        "c1",
+        "Case c1",
+        "details",
+        "high",
+        "new",
+        "",
+        "alice",
+        "incident",
+        "malware",
+        "1700000000",
+        "1700000000",
+        "1",
+        "[]",
+        "[]",
+        "[]",
+        "[]",
+    ]
+    .iter()
+    .map(|column| (*column).to_owned())
+    .collect()
+}
+
+
+pub fn write_handler() -> Handler {
+    Arc::new(|sql| {
+        if sql == GET_SQL {
+            Reply::Rows(vec![get_row()])
+        } else if sql == APPLY_SQL {
+            Reply::Rows(vec![vec!["2".to_owned()]])
+        } else if sql == DETAIL_SQL {
+            let mut row = detail_row();
+            row.iter_mut().for_each(|cell| {
+                if cell == "new" {
+                    "in_progress".clone_into(cell);
+                }
+            });
+            row.get_mut(VERSION_COLUMN)
+                .into_iter()
+                .for_each(|cell| WRITTEN_VERSION.to_string().clone_into(cell));
+            Reply::Rows(vec![row])
+        } else if sql == COMMENT_SQL {
+            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned(), "0".to_owned()]])
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+#[tokio::test]
+async fn the_pg_backend_acts_and_comments_through_a_leased_connection_scoped_to_the_tenant() -> Result<(), Box<dyn Error>> {
+    let mut served = served(write_handler()).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let scope = tenant_scope("acme")?;
+    let detail = (backend.act)(scope.clone(), "c1".to_owned(), CaseAction::Start, "alice".to_owned(), WRITE_TIME).await?;
+    assert_eq!(detail.summary.version, WRITTEN_VERSION);
+    let comment = Comment {
+        author: "alice".to_owned(),
+        at: WRITE_TIME,
+        text: "hello".to_owned(),
+    };
+    (backend.comment)(scope.clone(), "c1".to_owned(), comment).await?;
+    assert!((backend.clock)() > FIRST_TIME);
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    let bound: Vec<String> = drain(&mut served.fake.statements)
+        .into_iter()
+        .filter(|entry| entry.starts_with("PARAMS"))
+        .collect();
+    assert!(
+        !bound.is_empty() && bound.iter().all(|entry| entry.starts_with("PARAMS acme|")),
+        "{bound:?}"
+    );
+    let busy = pg_backend(Arc::clone(&served.engine), Arc::new(Semaphore::new(0)));
+    let closing = CaseAction::Close(Some(Resolution::Benign));
+    assert!(matches!(
+        (busy.act)(scope.clone(), "c1".to_owned(), closing, "alice".to_owned(), 1).await,
+        Err(CaseStoreError::Lease(StoreError::Busy))
+    ));
+    let again = Comment {
+        author: "alice".to_owned(),
+        at: 1,
+        text: "x".to_owned(),
+    };
+    assert!(matches!(
+        (busy.comment)(scope, "c1".to_owned(), again).await,
         Err(CaseStoreError::Lease(StoreError::Busy))
     ));
     Ok(())
