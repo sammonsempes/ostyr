@@ -1,0 +1,1 @@
+{"Event":{"System":{"Provider":{"Name":"Microsoft-Windows-Security-Auditing"},"EventID":4625,"Channel":"Security","Computer":"WIN-01","TimeCreated":{"SystemTime":"2026-11-03T10:00:00Z"}},"EventData":{"TargetUserName":"bob","TargetDomainName":"CORP","Status":"0xc000006d","SubStatus":"0xc000006a","LogonType":3,"IpAddress":"10.0.0.9"}}}

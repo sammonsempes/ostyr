@@ -25,6 +25,8 @@ const MAX_ID_SHOWN: usize = 16;
 pub struct RawEvent {
     pub event_id: u32,
     pub computer: Option<String>,
+    pub provider: Option<String>,
+    pub channel: Option<String>,
     pub system_time: Option<String>,
     pub fields: Fields,
 }
@@ -36,6 +38,7 @@ enum Target {
     Nothing,
     EventId,
     Computer,
+    Channel,
     Data(String),
 }
 
@@ -46,6 +49,8 @@ struct Partial {
     text: String,
     event_id: Option<String>,
     computer: Option<String>,
+    provider: Option<String>,
+    channel: Option<String>,
     system_time: Option<String>,
     fields: Fields,
 }
@@ -71,6 +76,11 @@ fn open(state: &mut Partial, start: &BytesStart<'_>) -> Result<(), SysmonError> 
     state.target = match start.local_name().as_ref() {
         b"EventID" => Target::EventId,
         b"Computer" => Target::Computer,
+        b"Channel" => Target::Channel,
+        b"Provider" => {
+            state.provider = attribute(start, "Name")?;
+            Target::Nothing
+        }
         b"Data" => attribute(start, "Name")?.map_or(Target::Nothing, Target::Data),
         b"TimeCreated" => {
             state.system_time = attribute(start, "SystemTime")?;
@@ -87,6 +97,7 @@ fn close(state: &mut Partial) -> Result<(), SysmonError> {
     match take(&mut state.target) {
         Target::EventId => state.event_id = Some(text),
         Target::Computer => state.computer = Some(text),
+        Target::Channel => state.channel = Some(text),
         Target::Data(name) => {
             state.fields.insert(name, text);
         }
@@ -165,6 +176,11 @@ fn json_state(text: &str) -> Result<Partial, SysmonError> {
     Ok(Partial {
         event_id: system.get("EventID").and_then(scalar),
         computer: system.get("Computer").and_then(scalar),
+        provider: system
+            .get("Provider")
+            .and_then(|found| found.get("Name").or(Some(found)))
+            .and_then(scalar),
+        channel: system.get("Channel").and_then(scalar),
         system_time: system.get("TimeCreated").and_then(|created| created.get("SystemTime")).and_then(scalar),
         fields,
         ..Partial::default()
@@ -210,6 +226,8 @@ pub fn parse_event(text: &str) -> Result<RawEvent, SysmonError> {
     Ok(RawEvent {
         event_id,
         computer: state.computer,
+        provider: state.provider,
+        channel: state.channel,
         system_time: state.system_time,
         fields: state.fields,
     })
