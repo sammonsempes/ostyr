@@ -175,7 +175,7 @@ pub async fn extended(stream: &mut (impl AsyncWrite + Unpin), session: &mut Sess
             }
         }
         b'D' if body.first() == Some(&b'S') => {
-            let parameters = session.sql.matches('$').count();
+            let parameters = parameter_count(&session.sql);
             let mut description = i16::try_from(parameters).map_err(io::Error::other)?.to_be_bytes().to_vec();
             (0..parameters).for_each(|_| description.extend_from_slice(&TEXT_OID.to_be_bytes()));
             out.extend(frame(b't', &description)?);
@@ -361,4 +361,16 @@ pub async fn start(mode: Mode, expected: &str, handler: Handler) -> io::Result<F
         }
     });
     Ok(Fake { port, passwords, statements })
+}
+
+
+pub fn parameter_count(sql: &str) -> usize {
+    sql.split('$')
+        .skip(1)
+        .filter_map(|tail| {
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<usize>().ok()
+        })
+        .max()
+        .unwrap_or(0)
 }

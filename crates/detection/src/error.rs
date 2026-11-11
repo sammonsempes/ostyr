@@ -31,6 +31,20 @@ pub enum SinkError {
     TenantMismatch,
     #[error("an alert cannot be serialised")]
     Serialize(#[source] serde_json::Error),
+    #[error("the store given is not the one this sink writes to")]
+    WrongStore,
+    #[error("the database refused the alerts")]
+    Database(#[source] core_pg::error::PgError),
+    #[error("the alert store refused the alerts")]
+    Store(#[source] alerts::error::StoreError),
+    #[error("the database runtime cannot start")]
+    Runtime(#[source] std::io::Error),
+    #[error("an event identity is longer than {max} characters")]
+    EventIdTooLong { max: usize },
+    #[error("the event time is outside the supported range")]
+    EventTimeRange(#[source] time::error::ComponentRange),
+    #[error("the event time cannot be written")]
+    EventTimeFormat(#[source] time::error::Format),
 }
 
 
@@ -52,7 +66,7 @@ pub enum DetectionError {
     Sink(#[from] SinkError),
     #[error("input or output failed")]
     Io(#[from] std::io::Error),
-    #[error("the tenant is empty or holds a character outside letters, digits, `-` and `_`")]
+    #[error("the tenant is empty or is refused by core-pg's tenant rule")]
     InvalidTenant,
     #[error("more than {max} tenants")]
     TooManyTenants { max: usize },
