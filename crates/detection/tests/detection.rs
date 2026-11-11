@@ -1957,7 +1957,7 @@ fn the_connection_is_kept_migrated_once_and_survives_a_refusal_from_the_database
     assert!(ids.iter().all(|id| *id == ids.first().copied().flatten()));
     assert_eq!(
         statements.iter().filter(|entry| entry.contains("INSERT INTO schema_migrations")).count(),
-        TWO
+        alerts::store::MIGRATIONS.len()
     );
     let passwords: Vec<Vec<u8>> = std::iter::repeat_with(|| database.fake.passwords.try_recv())
         .take(POLL_ATTEMPTS)
