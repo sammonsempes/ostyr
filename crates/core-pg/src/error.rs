@@ -16,6 +16,8 @@ pub enum PgError {
     NotRegular { file: String },
     #[error("{file}: larger than {limit} bytes")]
     TooLarge { file: String, limit: u64 },
+    #[error("{file}: secret read limit {limit} exceeds the preallocated buffer")]
+    SecretLimit { file: String, limit: u64 },
     #[error("{file}: the password is empty")]
     EmptyPassword { file: String },
     #[error("{file}: no certificate found")]
