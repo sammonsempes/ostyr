@@ -3,7 +3,9 @@ mod types;
 
 
 use cmdb::config::{declared_assets, load_cmdb, to_asset, DECLARED_SOURCE};
+use cmdb::error::CmdbConfigError;
 use cmdb::model::{AssetKind, IdentityKey, Lifecycle, RelationKind};
+use cmdb::summary::MAX_ID_BYTES;
 use core_config::error::ConfigError;
 use types::TestResult;
 
@@ -98,7 +100,7 @@ fn unknown_field_reports_file_and_line() -> TestResult {
     let (_dir, path) = write_config("assets:\n  - id: a\n    kind: server\n    lifecycle: retired\n    colour: red\n")?;
     let error = load_cmdb(&path).err().ok_or("accepted")?;
     let text = error.to_string();
-    assert!(matches!(error, ConfigError::Parse { .. }));
+    assert!(matches!(error, CmdbConfigError::Load(ConfigError::Parse { .. })));
     assert!(text.contains("cmdb.yaml:5:"), "{text}");
     Ok(())
 }
@@ -117,6 +119,43 @@ fn bad_enum_value_names_field_path() -> TestResult {
 fn missing_file_is_io_error() -> TestResult {
     let dir = tempfile::tempdir()?;
     let error = load_cmdb(&dir.path().join("absent.yaml")).err().ok_or("accepted")?;
-    assert!(matches!(error, ConfigError::Io { .. }));
+    assert!(matches!(error, CmdbConfigError::Load(ConfigError::Io { .. })));
+    Ok(())
+}
+
+
+const VALUE_CAP: usize = 4_096;
+
+
+fn declared_with(id: &str, owner: &str, mac: &str) -> String {
+    format!("assets:\n  - id: \"{id}\"\n    kind: server\n    lifecycle: in_service\n    owner: \"{owner}\"\n    keys:\n      mac: \"{mac}\"\n")
+}
+
+
+#[test]
+fn declared_assets_over_a_cap_or_with_invisible_text_are_refused_at_load() -> TestResult {
+    let long_id = "i".repeat(MAX_ID_BYTES + 1);
+    let long_owner = "o".repeat(VALUE_CAP + 1);
+    let cases = [
+        (declared_with(&long_id, "ann", "m1"), "asset id"),
+        (declared_with("a1", &long_owner, "m1"), "attribute value"),
+        (declared_with("a1", "an\\u202en", "m1"), "attribute value"),
+        (declared_with("a\\u200b1", "ann", "m1"), "asset id"),
+        (declared_with("a1", "ann", "m\\u2066"), "keys"),
+    ];
+    cases.iter().try_for_each(|(text, field)| -> TestResult {
+        let (_dir, path) = write_config(text)?;
+        let error = load_cmdb(&path).err().ok_or("accepted")?;
+        let message = error.to_string();
+        assert!(
+            matches!(&error, CmdbConfigError::Declared { index: 0, source, .. } if source.to_string().contains(field)),
+            "{message}"
+        );
+        assert!(message.contains("cmdb.yaml"), "{message}");
+        assert!(!message.contains(&long_id) && !message.contains(&long_owner), "value echoed");
+        Ok(())
+    })?;
+    let (_dir, path) = write_config(&declared_with(&"i".repeat(MAX_ID_BYTES), &"o".repeat(VALUE_CAP), "m1"))?;
+    assert_eq!(load_cmdb(&path)?.assets.len(), 1);
     Ok(())
 }

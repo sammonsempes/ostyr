@@ -4,7 +4,7 @@ mod types;
 
 use cmdb::error::CmdbError;
 use cmdb::model::{Asset, AssetKind, Attribute, Event, IdentityKey, Lifecycle, Observation, Resolution};
-use cmdb::reconcile::{find_asset, new_asset, reconcile};
+use cmdb::reconcile::{find_asset, new_asset, reconcile, MAX_OBSERVATION_ATTRIBUTES};
 use cmdb::types::TruthMap;
 use std::collections::BTreeMap;
 use types::TestResult;
@@ -366,5 +366,64 @@ fn control_characters_are_refused_naming_the_field_only() -> TestResult {
         .for_each(|(case, field)| assert_eq!(refusal(case), Some(CmdbError::ControlCharacter { field })));
     let message = CmdbError::ControlCharacter { field: "keys" }.to_string();
     assert!(!message.contains('\u{1b}'));
+    Ok(())
+}
+
+
+const INVISIBLE: [char; 9] = [
+    '\u{202e}', '\u{2066}', '\u{2069}', '\u{200b}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{feff}', '\u{2060}',
+];
+
+
+#[test]
+fn invisible_characters_are_refused_in_every_text_field() -> TestResult {
+    INVISIBLE.iter().try_for_each(|invisible| -> TestResult {
+        let text = format!("a{invisible}b");
+        let serial = [(IdentityKey::SerialNumber, "S1")];
+        let cases = [
+            (observation("agent", &[(IdentityKey::SerialNumber, &text)], &[]), "keys"),
+            (observation("agent", &serial, &[(&text, "x")]), "attribute name"),
+            (observation("agent", &serial, &[("rack", &text)]), "attribute value"),
+            (observation(&text, &serial, &[]), "source"),
+        ];
+        cases
+            .iter()
+            .for_each(|(case, field)| assert_eq!(refusal(case), Some(CmdbError::ControlCharacter { field }), "{invisible:?}"));
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_non_first_key_and_the_source_are_bounded_exactly() -> TestResult {
+    let mac_at = "m".repeat(VALUE_CAP);
+    let keys_at = [(IdentityKey::SerialNumber, "S1"), (IdentityKey::Mac, mac_at.as_str())];
+    assert!(refusal(&observation(&"a".repeat(VALUE_CAP), &keys_at, &[])).is_none());
+    let mac_over = "m".repeat(VALUE_CAP + 1);
+    let keys_over = [(IdentityKey::SerialNumber, "S1"), (IdentityKey::Mac, mac_over.as_str())];
+    assert_eq!(
+        refusal(&observation("agent", &keys_over, &[])),
+        Some(CmdbError::FieldTooLong {
+            field: "keys",
+            limit: VALUE_CAP
+        })
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_attribute_count_is_capped() -> TestResult {
+    let names: Vec<String> = (0..=MAX_OBSERVATION_ATTRIBUTES).map(|i| format!("attr{i}")).collect();
+    let pairs: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "v")).collect();
+    let at_cap = pairs.get(..MAX_OBSERVATION_ATTRIBUTES).ok_or("short")?;
+    let keys = [(IdentityKey::SerialNumber, "S1")];
+    assert!(refusal(&observation("agent", &keys, at_cap)).is_none());
+    assert_eq!(
+        refusal(&observation("agent", &keys, &pairs)),
+        Some(CmdbError::TooManyAttributes {
+            limit: MAX_OBSERVATION_ATTRIBUTES
+        })
+    );
     Ok(())
 }

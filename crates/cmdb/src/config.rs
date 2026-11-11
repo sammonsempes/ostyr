@@ -1,7 +1,9 @@
+use crate::error::{CmdbConfigError, CmdbError};
 use crate::impact::BUSINESS_SERVICE_ATTRIBUTE;
 use crate::model::{Asset, AssetKind, Attribute, Criticality, Lifecycle, Relationship};
+use crate::reconcile::{check_text, MAX_VALUE_BYTES};
+use crate::summary::MAX_ID_BYTES;
 use crate::types::{KeyMap, TruthMap};
-use core_config::error::ConfigError;
 use core_config::load::load_file;
 use serde::Deserialize;
 use std::path::Path;
@@ -50,8 +52,27 @@ pub struct CmdbConfig {
 }
 
 
-pub fn load_cmdb(path: &Path) -> Result<CmdbConfig, ConfigError> {
-    load_file(path)
+pub fn check_declared(declared: &DeclaredAsset) -> Result<(), CmdbError> {
+    check_text("asset id", &declared.id, MAX_ID_BYTES)?;
+    declared.keys.values().try_for_each(|value| check_text("keys", value, MAX_VALUE_BYTES))?;
+    [&declared.owner, &declared.business_service, &declared.environment, &declared.location]
+        .into_iter()
+        .flatten()
+        .try_for_each(|value| check_text("attribute value", value, MAX_VALUE_BYTES))
+}
+
+
+/// Loads the file and refuses a declared asset whose id, key or attribute breaks the observation caps; the error names file, index and field.
+pub fn load_cmdb(path: &Path) -> Result<CmdbConfig, CmdbConfigError> {
+    let config: CmdbConfig = load_file(path)?;
+    config.assets.iter().enumerate().try_for_each(|(index, declared)| {
+        check_declared(declared).map_err(|source| CmdbConfigError::Declared {
+            file: path.display().to_string(),
+            index,
+            source,
+        })
+    })?;
+    Ok(config)
 }
 
 
