@@ -445,6 +445,31 @@ fn oid_arc_limit_is_exact() -> TestResult {
 }
 
 
+const UNTERMINATED_OID: [u8; 6] = [0x2b, 0x06, 0x01, 0x06, 0x03, 0x92];
+
+
+#[test]
+fn unterminated_last_arc_is_malformed() -> TestResult {
+    let as_name = v2_with(vec![sequence(&[tlv(TAG_OID, &UNTERMINATED_OID), tlv(TAG_NULL, &[])])]);
+    let as_value = v2_with(vec![text_varbind(tlv(TAG_OID, &UNTERMINATED_OID))]);
+    let body = concat(&[
+        tlv(TAG_OID, &UNTERMINATED_OID),
+        tlv(TAG_IP_ADDRESS, AGENT),
+        integer(GENERIC_ENTERPRISE),
+        integer(SPECIFIC_TRAP),
+        unsigned(TAG_TIME_TICKS, UPTIME_TICKS_V1),
+        sequence(&[]),
+    ]);
+    let as_enterprise = message(VERSION_V1, COMMUNITY, tlv(PDU_TRAP_V1, &body));
+    assert_eq!(parse_trap(&as_name, &limits()), Err(TrapDrop::Malformed));
+    assert_eq!(parse_trap(&as_value, &limits()), Err(TrapDrop::Malformed));
+    assert_eq!(parse_trap(&as_enterprise, &limits()), Err(TrapDrop::Malformed));
+    let redacted = parse_default(&v2_with(vec![varbind(COMMUNITY_OID, octets(COMMUNITY))]))?;
+    assert_eq!(redacted.varbinds.first().map(|varbind| varbind.value.as_str()), Some(REDACTED_TEXT));
+    Ok(())
+}
+
+
 #[test]
 fn oid_arc_beyond_u64_is_malformed() -> TestResult {
     let wide: Vec<u8> = std::iter::once(OID_FIRST_BYTE)
