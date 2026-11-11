@@ -1,3 +1,4 @@
+use crate::fetch::FetchError;
 use std::collections::BTreeMap;
 
 
@@ -11,3 +12,6 @@ pub type Labels = BTreeMap<String, String>;
 
 
 pub type QueryParams = Vec<(String, String)>;
+
+
+pub type FetchResult = Result<Vec<Point>, FetchError>;

@@ -3,6 +3,8 @@
 pub mod alerting;
 pub mod error;
 pub mod evaluate;
+pub mod fetch;
+pub mod fetch_cli;
 pub mod fingerprint;
 pub mod forecast;
 pub mod model;

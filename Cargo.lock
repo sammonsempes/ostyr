@@ -3285,11 +3285,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "siem-ingest",
  "siem-schema",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]
