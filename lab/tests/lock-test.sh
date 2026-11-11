@@ -29,8 +29,8 @@ check() {
 
 work_dir="$(mktemp -d)"
 missing_profile_file="$LAB_DIR/profiles/$MISSING_PROFILE.yaml"
-missing_lock="$LAB_STATE_ROOT/build-$MISSING_IMAGE.lock"
-present_lock="$LAB_STATE_ROOT/build-ubuntu-2404.lock"
+missing_lock="$LAB_LOCK_DIR/build-$MISSING_IMAGE.lock"
+present_lock="$LAB_LOCK_DIR/build-ubuntu-2404.lock"
 missing_holder_pid=""
 present_holder_pid=""
 cleanup() {
@@ -40,7 +40,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$LAB_STATE_ROOT"
+mkdir -p "$LAB_STATE_ROOT" "$LAB_LOCK_DIR"
 cat >"$work_dir/fake-binary" <<SCRIPT
 #!/usr/bin/env bash
 if [[ "\${2:-}" == "init" && -n "\${FAKE_INIT_SLEEP:-}" ]]; then

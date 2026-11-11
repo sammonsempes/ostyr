@@ -60,8 +60,8 @@ ensure_base_images() {
     local image resolved
     mapfile -t images < <(awk '$1 == "base_image:" {print $2}' "$profile_file" | sort -u)
     for image in "${images[@]}"; do
-        exec 8>>"$LAB_STATE_ROOT/build-${image%.qcow2}.lock"
-        acquire_lock 8 "$LAB_STATE_ROOT/build-${image%.qcow2}.lock"
+        exec 8>>"$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
+        acquire_lock 8 "$LAB_LOCK_DIR/build-${image%.qcow2}.lock"
         "$LAB_DIR/images/build.sh" "${image%.qcow2}"
         exec 8>&-
         resolved="$(newest_base "${image%.qcow2}")"
@@ -109,14 +109,14 @@ profile="$(resolve_profile)"
 profile_source="$LAB_DIR/profiles/$profile.yaml"
 validate_profile_fields "$profile_source"
 validate_profile_choices "$profile_source"
-mkdir -p "$LAB_STATE_ROOT"
+mkdir -p "$LAB_STATE_ROOT" "$LAB_LOCK_DIR"
 ensure_plugin_cache
-exec 9>>"$LAB_STATE_ROOT/up.lock"
-acquire_lock 9 "$LAB_STATE_ROOT/up.lock"
+exec 9>>"$LAB_LOCK_DIR/up.lock"
+acquire_lock 9 "$LAB_LOCK_DIR/up.lock"
 ensure_pool
 flock -u 9
 ensure_base_images "$profile_source"
-acquire_lock 9 "$LAB_STATE_ROOT/up.lock"
+acquire_lock 9 "$LAB_LOCK_DIR/up.lock"
 vm_count="$(profile_units "$profile_source")"
 [[ -z "$(virsh_lab net-list --all --name | awk -v n="$(lab_prefix "$task_id")" '$0 == n')" ]] || die "lab for $task_id already exists, run lab/down.sh $task_id first"
 check_quota "$vm_count"
@@ -154,7 +154,7 @@ BOUND_SECONDS="${LAB_INIT_TIMEOUT:-$INIT_TIMEOUT_SECONDS}" run_tofu_bounded "$ta
     die "init failed or timed out after ${LAB_INIT_TIMEOUT:-$INIT_TIMEOUT_SECONDS}s: the provider is neither in $LAB_PLUGIN_CACHE nor downloadable"
 }
 run_tofu "$task_id" apply -input=false -auto-approve -no-color -state="$lab_state/lab.tfstate" -var-file="$lab_state/vars.json" ||
-    die "apply failed; run lab/down.sh $task_id to clean up"
+    die "apply failed on 192.168.$subnet_octet.0/24 (held by: $(subnet_holder "$subnet_octet")); run lab/down.sh $task_id to clean up"
 
 flock -u 9
 
