@@ -52,7 +52,8 @@ pub fn priority_of(syslog_priority: u8) -> Priority {
 pub fn count_reason(stats: &mut ListenerStats, reason: DropReason) {
     match reason {
         DropReason::UnknownSource => bump(&mut stats.dropped_unknown),
-        DropReason::TooLarge => bump(&mut stats.dropped_too_long),
+        DropReason::TooLarge | DropReason::TrapTooLarge => bump(&mut stats.dropped_too_long),
+        DropReason::TrapMalformed | DropReason::TrapUnsupported => bump(&mut stats.dropped_parse),
         DropReason::SourceRate | DropReason::UnknownRate | DropReason::GlobalRate => bump(&mut stats.dropped_rate),
         DropReason::SourceTableFull => bump(&mut stats.dropped_table_full),
     }

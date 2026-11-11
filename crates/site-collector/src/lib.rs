@@ -13,6 +13,7 @@ pub mod listen_settings;
 pub mod model;
 pub mod parse;
 pub mod process;
+pub mod snmp;
 pub mod spool;
 pub mod spool_model;
 pub mod types;

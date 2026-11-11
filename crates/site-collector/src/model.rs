@@ -1,7 +1,7 @@
 use crate::error::ParseError;
 use crate::types::{Millis, SourceMap};
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
 
 
@@ -122,6 +122,12 @@ pub enum DropReason {
     GlobalRate,
     #[error("too many distinct sources are tracked")]
     SourceTableFull,
+    #[error("the trap datagram exceeds the size cap")]
+    TrapTooLarge,
+    #[error("the trap datagram is malformed")]
+    TrapMalformed,
+    #[error("the SNMP message is not a v1 or v2c trap or inform")]
+    TrapUnsupported,
 }
 
 
@@ -148,4 +154,99 @@ pub enum Outcome {
     Accepted(SyslogRecord),
     Dropped(DropReason),
     Malformed(ParseError),
+}
+
+
+pub const MAX_TRAP_BYTES: usize = 1472;
+
+
+pub const MAX_OID_ARCS: usize = 128;
+
+
+pub const DEFAULT_MAX_VARBINDS: usize = 32;
+
+
+pub const MAX_VARBINDS_CEILING: usize = 64;
+
+
+pub const DEFAULT_MAX_VALUE_CHARS: usize = 256;
+
+
+pub const MAX_VALUE_CHARS_CEILING: usize = 1024;
+
+
+pub const DIGEST_BYTES: usize = 6;
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrapLimits {
+    pub max_varbinds: usize,
+    pub max_value_chars: usize,
+}
+
+
+impl Default for TrapLimits {
+    fn default() -> Self {
+        Self {
+            max_varbinds: DEFAULT_MAX_VARBINDS,
+            max_value_chars: DEFAULT_MAX_VALUE_CHARS,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrapVersion {
+    V1,
+    V2c,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrapKind {
+    TrapV1,
+    TrapV2,
+    Inform,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrapVarbind {
+    pub oid: String,
+    pub value: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrapRecord {
+    pub version: TrapVersion,
+    pub kind: TrapKind,
+    pub community_digest: String,
+    pub trap_oid: String,
+    pub agent_address: Option<Ipv4Addr>,
+    pub uptime_ticks: u32,
+    pub varbinds: Vec<TrapVarbind>,
+    pub varbinds_omitted: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TrapDrop {
+    #[error("the trap datagram exceeds the size cap")]
+    TooLarge,
+    #[error("the trap datagram is malformed")]
+    Malformed,
+    #[error("the SNMP message is not a v1 or v2c trap or inform")]
+    Unsupported,
+}
+
+
+impl From<TrapDrop> for DropReason {
+    fn from(trap_drop: TrapDrop) -> Self {
+        match trap_drop {
+            TrapDrop::TooLarge => Self::TrapTooLarge,
+            TrapDrop::Malformed => Self::TrapMalformed,
+            TrapDrop::Unsupported => Self::TrapUnsupported,
+        }
+    }
 }

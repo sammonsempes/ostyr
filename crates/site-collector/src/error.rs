@@ -18,6 +18,10 @@ pub enum ConfigError {
     ShareBelowOneMessage,
     #[error("the number of tracked sources must be above zero")]
     ZeroMaxSources,
+    #[error("the trap varbind cap must be between 1 and its ceiling")]
+    BadMaxVarbinds,
+    #[error("the trap value length cap must be between 1 and its ceiling")]
+    BadMaxValueChars,
 }
 
 
