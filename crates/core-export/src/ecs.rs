@@ -56,6 +56,8 @@ pub struct HostFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ip: Vec<String>,
@@ -95,6 +97,8 @@ pub struct EndpointFields {
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packets: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 

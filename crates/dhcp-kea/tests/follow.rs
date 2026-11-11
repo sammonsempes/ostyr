@@ -1,0 +1,408 @@
+#[path = "common/types.rs"]
+mod types;
+
+
+use core_export::ecs::EcsEvent;
+use dhcp_kea::error::{HeaderError, KeaError};
+use dhcp_kea::follow::{malformed_summary, poll, remember, Counts, FollowState, Limits};
+use std::fs::{create_dir, metadata, remove_file, rename, write, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+use tempfile::tempdir;
+use types::TestResult;
+
+
+const HEADER: &str = "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context";
+
+
+const ROW_1: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700003600,1,0,0,host1.example.,0,";
+
+
+const ROW_2: &str = "10.0.0.2,aa:bb:cc:dd:ee:02,01,3600,1700003600,1,0,0,host2.example.,0,";
+
+
+const ROW_3: &str = "10.0.0.3,aa:bb:cc:dd:ee:03,01,3600,1700003600,1,0,0,host3.example.,0,";
+
+
+const ROW_4: &str = "10.0.0.4,aa:bb:cc:dd:ee:04,01,3600,1700003600,1,0,0,host4.example.,0,";
+
+
+const ROW_1_RENEWED: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700007200,1,0,0,host1.example.,0,";
+
+
+const BAD_ADDRESS: &str = "not-an-address,aa:bb:cc:dd:ee:01,01,3600,1700003600,1,0,0,host1.example.,0,";
+
+
+const THREE: u64 = 3;
+
+
+const FIVE: u64 = 5;
+
+
+const TWO: u64 = 2;
+
+
+const HALF: usize = 2;
+
+
+const TWO_EVENTS: usize = 2;
+
+
+const FOUR_EVENTS: usize = 4;
+
+
+const NEWEST_EXPIRE: i64 = 4_000_000_000_000;
+
+
+const SMALL_SEEN: usize = 2;
+
+
+const SMALL_LINES: usize = 2;
+
+
+const HUGE_LINE: usize = 100_000;
+
+
+const MANY_COLUMNS: usize = 1_000;
+
+
+const HUGE_HEADER_COLUMNS: usize = 100_000;
+
+
+struct Run {
+    state: FollowState,
+    counts: Counts,
+}
+
+
+fn fresh() -> Run {
+    Run {
+        state: FollowState::default(),
+        counts: Counts::default(),
+    }
+}
+
+
+fn step(path: &Path, run: &mut Run, limits: &Limits) -> Result<Vec<String>, KeaError> {
+    let mut events: Vec<EcsEvent> = Vec::new();
+    poll(path, &mut run.state, limits, &mut run.counts, &mut events)?;
+    Ok(events
+        .iter()
+        .filter_map(|event| event.source.as_ref().and_then(|source| source.ip.clone()))
+        .collect())
+}
+
+
+fn lines(rows: &[&str]) -> String {
+    rows.iter().map(|row| format!("{row}\n")).collect()
+}
+
+
+fn append(path: &Path, text: &str) -> TestResult {
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+
+#[test]
+fn rows_are_read_once_as_the_file_grows() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_2]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.1", "10.0.0.2"]);
+    assert_eq!(run.state.offset, metadata(&path)?.len());
+    assert!(step(&path, &mut run, &Limits::default())?.is_empty());
+    append(&path, &lines(&[ROW_3]))?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.3"]);
+    assert_eq!((run.counts.processed, run.counts.restarts, run.counts.duplicate), (THREE, 0, 0));
+    Ok(())
+}
+
+
+#[test]
+fn a_half_written_row_waits_for_its_newline() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), 1);
+    let before = run.state.offset;
+    let (first, second) = ROW_2.split_at(ROW_2.len() / HALF);
+    append(&path, first)?;
+    assert!(step(&path, &mut run, &Limits::default())?.is_empty());
+    assert_eq!(run.state.offset, before);
+    append(&path, &format!("{second}\n"))?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.2"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_new_inode_after_cleanup_loses_and_repeats_nothing() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("kea-leases4.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_1_RENEWED, ROW_2, ROW_3]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), FOUR_EVENTS);
+    let compacted = directory.path().join("kea-leases4.csv.completed");
+    write(&compacted, lines(&[HEADER, ROW_1_RENEWED, ROW_2, ROW_3, ROW_4]))?;
+    assert!(metadata(&compacted)?.len() < metadata(&path)?.len() + lines(&[ROW_4]).len() as u64);
+    rename(&compacted, &path)?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.4"]);
+    assert_eq!((run.counts.restarts, run.counts.duplicate, run.counts.processed), (1, THREE, FIVE));
+    append(&path, &lines(&[ROW_1]))?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_file_shorter_than_the_offset_restarts_at_the_header() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_2]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), TWO_EVENTS);
+    write(&path, lines(&[HEADER, ROW_3]))?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.3"]);
+    assert_eq!(run.counts.restarts, 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_seen_set_is_bounded_and_evictions_are_counted() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_2, ROW_3, ROW_4]))?;
+    let mut run = fresh();
+    let limits = Limits {
+        max_seen: SMALL_SEEN,
+        ..Limits::default()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?.len(), FOUR_EVENTS);
+    assert_eq!(run.counts.evicted, TWO);
+    assert_eq!(run.state.seen.len(), SMALL_SEEN);
+    let mut counts = Counts::default();
+    assert!(remember(
+        &mut run.state.seen,
+        (NEWEST_EXPIRE, "a".to_string(), "b".to_string()),
+        SMALL_SEEN,
+        &mut counts
+    ));
+    assert!(!remember(
+        &mut run.state.seen,
+        (NEWEST_EXPIRE, "a".to_string(), "b".to_string()),
+        SMALL_SEEN,
+        &mut counts
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_poll_reads_at_most_its_line_budget_and_resumes() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_2, ROW_3]))?;
+    let mut run = fresh();
+    let limits = Limits {
+        max_lines: SMALL_LINES,
+        ..Limits::default()
+    };
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.1"]);
+    assert_eq!(step(&path, &mut run, &limits)?, ["10.0.0.2", "10.0.0.3"]);
+    assert!(step(&path, &mut run, &limits)?.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_missing_file_is_counted_and_read_when_it_appears() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let mut run = fresh();
+    assert!(step(&path, &mut run, &Limits::default())?.is_empty());
+    assert_eq!(run.counts.absent, 1);
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), 1);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_refused_even_when_it_points_at_a_regular_file() -> TestResult {
+    let directory = tempdir()?;
+    let target = directory.path().join("target.csv");
+    let link = directory.path().join("leases.csv");
+    write(&target, lines(&[HEADER, ROW_1]))?;
+    std::os::unix::fs::symlink(&target, &link)?;
+    assert!(matches!(step(&link, &mut fresh(), &Limits::default()), Err(KeaError::NotRegular)));
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_is_refused() -> TestResult {
+    let directory = tempdir()?;
+    let inner = directory.path().join("leases.csv");
+    create_dir(&inner)?;
+    assert!(matches!(step(&inner, &mut fresh(), &Limits::default()), Err(KeaError::NotRegular)));
+    Ok(())
+}
+
+
+fn make_fifo(path: &Path) -> TestResult {
+    let status = Command::new("mkfifo").arg(path).status()?;
+    assert!(status.success());
+    Ok(())
+}
+
+
+#[test]
+fn a_fifo_without_a_writer_is_refused_and_never_blocks() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    make_fifo(&path)?;
+    assert!(matches!(step(&path, &mut fresh(), &Limits::default()), Err(KeaError::NotRegular)));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_fifo_is_refused_and_never_blocks() -> TestResult {
+    let directory = tempdir()?;
+    let fifo = directory.path().join("pipe");
+    let link = directory.path().join("leases.csv");
+    make_fifo(&fifo)?;
+    std::os::unix::fs::symlink(&fifo, &link)?;
+    assert!(matches!(step(&link, &mut fresh(), &Limits::default()), Err(KeaError::NotRegular)));
+    Ok(())
+}
+
+
+#[test]
+fn a_file_swapped_for_a_fifo_and_back_is_read_again_by_the_same_reader() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), 1);
+    let kept = directory.path().join("kept.csv");
+    rename(&path, &kept)?;
+    assert!(step(&path, &mut run, &Limits::default())?.is_empty());
+    make_fifo(&path)?;
+    assert!(matches!(step(&path, &mut run, &Limits::default()), Err(KeaError::NotRegular)));
+    remove_file(&path)?;
+    write(&path, lines(&[HEADER, ROW_2]))?;
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.2"]);
+    assert_eq!((run.counts.absent, run.counts.restarts), (1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_path_the_system_rejects_is_an_io_error() -> TestResult {
+    let result = step(Path::new("bad\0path"), &mut fresh(), &Limits::default());
+    assert!(matches!(result, Err(KeaError::Io(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_file_that_is_not_a_lease_file_is_refused_at_the_header() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1::/usr/sbin:/usr/sbin/nologin\n")?;
+    let mut run = fresh();
+    assert!(matches!(
+        step(&path, &mut run, &Limits::default()),
+        Err(KeaError::Header(HeaderError::Missing("hwaddr")))
+    ));
+    assert_eq!(run.state.offset, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_header_that_repeats_address_is_refused() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[&format!("{HEADER},address"), ROW_1]))?;
+    assert!(matches!(
+        step(&path, &mut fresh(), &Limits::default()),
+        Err(KeaError::Header(HeaderError::Duplicate("address")))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_header_with_too_many_columns_is_refused_whatever_its_size() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[&vec!["x"; MANY_COLUMNS].join(",")]))?;
+    assert!(matches!(
+        step(&path, &mut fresh(), &Limits::default()),
+        Err(KeaError::Header(HeaderError::TooManyColumns { .. }))
+    ));
+    write(&path, lines(&[&vec!["x"; HUGE_HEADER_COLUMNS].join(",")]))?;
+    assert!(matches!(
+        step(&path, &mut fresh(), &Limits::default()),
+        Err(KeaError::Header(HeaderError::TooLong))
+    ));
+    write(&path, b"address,\xff\n")?;
+    assert!(matches!(
+        step(&path, &mut fresh(), &Limits::default()),
+        Err(KeaError::Header(HeaderError::Utf8(_)))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_oversized_row_is_counted_and_the_next_row_still_read() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let huge = "a".repeat(HUGE_LINE);
+    write(&path, lines(&[HEADER, &huge, ROW_1]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.1"]);
+    append(&path, &huge)?;
+    assert!(step(&path, &mut run, &Limits::default())?.is_empty());
+    assert_eq!(run.counts.malformed.get("line-too-long"), Some(&TWO));
+    Ok(())
+}
+
+
+#[test]
+fn malformed_rows_are_counted_per_kind_without_their_content() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let mut bytes = lines(&[HEADER, BAD_ADDRESS, BAD_ADDRESS, ROW_2]).into_bytes();
+    bytes.extend_from_slice(b"10.0.0.9,\xff\n\n");
+    write(&path, bytes)?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?, ["10.0.0.2"]);
+    let summary = malformed_summary(&run.counts);
+    assert_eq!(summary, "address=2,column-count=1,not-utf8=1");
+    assert!(!summary.contains("not-an-address"));
+    Ok(())
+}
+
+
+#[test]
+fn a_repeated_row_is_a_duplicate_and_a_renewal_is_a_new_event() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_1, ROW_1_RENEWED]))?;
+    let mut run = fresh();
+    assert_eq!(step(&path, &mut run, &Limits::default())?.len(), TWO_EVENTS);
+    assert_eq!(run.counts.duplicate, 1);
+    Ok(())
+}
