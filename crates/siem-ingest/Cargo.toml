@@ -9,6 +9,7 @@ publish = false
 async-nats = { version = "0.52", default-features = false, features = ["ring", "jetstream", "nkeys", "crypto", "server_2_10"] }
 bytes = "1.12.1"
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 futures-util = "0.3.34"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
