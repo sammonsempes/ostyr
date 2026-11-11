@@ -89,3 +89,11 @@ fn the_capped_buffer_is_zeroizing_on_every_path() -> Result<(), Box<dyn Error>> 
     assert!(matches!(read_capped(&mut "abcdef".as_bytes(), TIGHT, "x"), Err(PgError::TooLarge { .. })));
     Ok(())
 }
+
+
+#[test]
+fn a_limit_of_u64_max_does_not_overflow() -> Result<(), Box<dyn std::error::Error>> {
+    let kept: zeroize::Zeroizing<Vec<u8>> = read_capped(&mut "abc".as_bytes(), u64::MAX, "x")?;
+    assert_eq!(kept.as_slice(), b"abc");
+    Ok(())
+}

@@ -61,12 +61,14 @@ fn no_crate_source_installs_a_log_bridge() -> Result<(), Box<dyn Error>> {
         .filter(|entry| entry.path().components().any(|part| part.as_os_str() == "src"))
         .filter(|entry| !entry.path().components().any(|part| part.as_os_str() == "target"))
         .collect();
-    let mut offenders: Vec<String> = Vec::new();
-    for entry in &sources {
-        if bridge_in_file(entry.path(), read_text)? {
-            offenders.push(entry.path().display().to_string());
-        }
-    }
+    let offenders = sources
+        .iter()
+        .filter_map(|entry| match bridge_in_file(entry.path(), read_text) {
+            Ok(true) => Some(Ok(entry.path().display().to_string())),
+            Ok(false) => None,
+            Err(message) => Some(Err(message)),
+        })
+        .collect::<Result<Vec<String>, String>>()?;
     assert!(
         offenders.is_empty(),
         "tokio_postgres logs bound parameters at debug through `log`: {offenders:?}"

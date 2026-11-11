@@ -8,13 +8,13 @@ use zeroize::Zeroizing;
 pub const MAX_PASSWORD_BYTES: u64 = 1024;
 
 
-const PASSWORD_CAPACITY: usize = 1025;
+pub const PASSWORD_CAPACITY: usize = MAX_PASSWORD_BYTES as usize + 1;
 
 
 /// At most `limit` bytes: a larger source is refused rather than cut.
 pub fn read_capped(reader: &mut dyn Read, limit: u64, file: &str) -> Result<Zeroizing<Vec<u8>>, PgError> {
     let mut bytes = Zeroizing::new(Vec::with_capacity(PASSWORD_CAPACITY));
-    let mut limited = reader.take(limit + 1);
+    let mut limited = reader.take(limit.saturating_add(1));
     limited.read_to_end(&mut bytes).map_err(|source| PgError::Io {
         file: file.to_owned(),
         source,

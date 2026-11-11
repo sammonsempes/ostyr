@@ -37,8 +37,7 @@ pub fn check_owner_and_mode(mode: u32, owner: u32, process_user: u32) -> Result<
 }
 
 
-pub fn key_from_bytes(bytes: Vec<u8>) -> Result<LinkKey, KeyError> {
-    let key = Zeroizing::new(bytes);
+pub fn key_from_bytes(key: Zeroizing<Vec<u8>>) -> Result<LinkKey, KeyError> {
     if key.len() < MIN_LINK_KEY_BYTES {
         Err(KeyError::TooShort { min: MIN_LINK_KEY_BYTES })
     } else {
@@ -54,5 +53,5 @@ pub fn read_link_key(path: &Path) -> Result<LinkKey, KeyError> {
     let (mode, owner, process_user) = mode_and_owners(&metadata)?;
     check_owner_and_mode(mode, owner, process_user)?;
     let bytes = read_capped(&mut handle, MAX_LINK_KEY_BYTES, &path.display().to_string())?;
-    key_from_bytes(bytes.to_vec())
+    key_from_bytes(bytes)
 }
