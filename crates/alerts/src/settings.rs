@@ -115,3 +115,9 @@ pub fn open_pg_engine_from(
 pub fn startup_reload(engine: Arc<ReloadEngine<PgSettings>>) -> StartupReloadFn {
     Box::new(move || reload(&engine))
 }
+
+
+/// The startup reloads every API example hands to `run_loaded`: today the pg engine only.
+pub fn api_startup_reloads(engine: Arc<ReloadEngine<PgSettings>>) -> Vec<StartupReloadFn> {
+    vec![startup_reload(engine)]
+}

@@ -2,12 +2,13 @@ use crate::types::{TestError, TestResult};
 use alerts::settings::{open_pg_engine_from, startup_reload};
 use axum::Router;
 use core_api::server::{listening_address, new_listener, run_loaded, stop_listener};
-use core_api::types::AccessTable;
+use core_api::types::{AccessTable, StartupReloadFn};
 use core_config::load::load_module;
-use core_config::reload::current_config;
+use core_config::reload::{current_config, ReloadOutcome};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 use tempfile::tempdir;
 
 
@@ -177,5 +178,36 @@ async fn an_unchanged_pg_file_leaves_no_record_at_startup() -> TestResult {
     let dir = tempdir()?;
     let audit = serve_with_pg_engine(dir.path(), None).await?;
     assert!(!audit.contains(PG_FILE_NAME), "{audit}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_extra_startup_reloads_run_before_the_first_generation_serves() -> TestResult {
+    let dir = tempdir()?;
+    private_file(&dir.path().join("store.key"), &[KEY_FILL; KEY_BYTES])?;
+    fs::write(dir.path().join("compromised.txt"), "passwordpassword\n")?;
+    let module_file = dir.path().join("platform.yaml");
+    fs::write(&module_file, module_text(dir.path()))?;
+    let loaded = load_module(&module_file)?;
+    let listener = new_listener();
+    let running = listener.clone();
+    let probe = listener.clone();
+    let ran = Arc::new(AtomicBool::new(false));
+    let served_before = Arc::new(AtomicBool::new(true));
+    let (ran_flag, served_flag) = (ran.clone(), served_before.clone());
+    let startup: Vec<StartupReloadFn> = vec![Box::new(move || {
+        let bound = probe.current.lock().unwrap_or_else(PoisonError::into_inner).bound.is_some();
+        served_flag.store(bound, Ordering::SeqCst);
+        ran_flag.store(true, Ordering::SeqCst);
+        ReloadOutcome::Unchanged
+    })];
+    let parts = (Router::new(), AccessTable::new(), vec![]);
+    let task = tokio::spawn(async move { run_loaded(&module_file, loaded, parts, &START_ONLY, running, None, startup).await });
+    listening_address(&listener).await.ok_or("server did not start")?;
+    stop_listener(&listener, None);
+    task.await??;
+    assert!(ran.load(Ordering::SeqCst));
+    assert!(!served_before.load(Ordering::SeqCst));
     Ok(())
 }

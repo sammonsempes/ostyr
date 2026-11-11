@@ -1,7 +1,7 @@
 //! Usage: cases_api <module.yaml>. Serves the cases routes (reads, actions, comments) through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::settings::{open_pg_engine_from, startup_reload, SETTING_PG};
+use alerts::settings::{api_startup_reloads, open_pg_engine_from, SETTING_PG};
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use cases::api::{cases_access, cases_document, cases_router};
 use cases::backend::pg_backend;
@@ -70,7 +70,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         &[SETTING_PG],
         listener,
         Some(log),
-        vec![startup_reload(startup_engine)],
+        api_startup_reloads(startup_engine),
     )
     .await?;
     Ok(())
