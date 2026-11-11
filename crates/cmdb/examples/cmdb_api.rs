@@ -1,7 +1,7 @@
 //! Usage: cmdb_api <module.yaml>. Serves `GET /assets` and `GET /assets/{id}` through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::settings::{open_pg_engine_from, SETTING_PG};
+use alerts::settings::{open_pg_engine_from, startup_reload, SETTING_PG};
 use cmdb::api::{cmdb_access, cmdb_document, cmdb_router};
 use cmdb::backend::pg_backend;
 use cmdb::backend::ACTOR;
@@ -60,6 +60,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     drop(held);
     tracing::info!(applied = applied.len(), "cmdb migrations checked");
     tokio::spawn(stop_on_interrupt(listener.clone()));
+    let startup_engine = Arc::clone(&engine);
     run_loaded(
         Path::new(module_file),
         loaded,
@@ -67,6 +68,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         &[SETTING_PG],
         listener,
         Some(log),
+        vec![startup_reload(startup_engine)],
     )
     .await?;
     Ok(())

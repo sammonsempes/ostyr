@@ -2,6 +2,7 @@ use crate::model::{ApiState, Limits, Listener, PreparedAudit, PreparedKey, Rule,
 use arc_swap::ArcSwap;
 use axum::Router;
 use core_auth::error::AuthError;
+use core_config::reload::ReloadOutcome;
 use core_config::secret::SecretRef;
 use openidconnect::{HttpRequest, HttpResponse};
 use secrecy::SecretString;
@@ -16,6 +17,10 @@ pub type SharedState = Arc<ApiState>;
 
 /// A module's extra router, access table and OpenAPI documents, as handed to `run_loaded`.
 pub type ModuleParts = (Router<SharedState>, AccessTable, Vec<utoipa::openapi::OpenApi>);
+
+
+/// A reload of another engine of the process (the core-pg settings), run once by `run_loaded` after the audit log is open.
+pub type StartupReloadFn = Box<dyn Fn() -> ReloadOutcome + Send + Sync>;
 
 
 pub type PendingGenerations = Mutex<BTreeMap<String, u64>>;

@@ -6,7 +6,9 @@ use crate::model::{
 use crate::reload::{apply_log_level, build_settings, content_digest, open_reload, rewatch, watched_files};
 use crate::routes::build_router;
 use crate::state::build_state;
-use crate::types::{AccessTable, ConnectionTable, LogLevelHandle, ModuleParts, ServerHandle, SharedLimits, SharedListener, SharedState};
+use crate::types::{
+    AccessTable, ConnectionTable, LogLevelHandle, ModuleParts, ServerHandle, SharedLimits, SharedListener, SharedState, StartupReloadFn,
+};
 use arc_swap::ArcSwap;
 use axum::extract::ConnectInfo;
 use axum::{Extension, Router};
@@ -16,7 +18,7 @@ use axum_server::Server;
 use core_audit::log::check_private;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
-use core_config::reload::reload;
+use core_config::reload::{reload, ReloadOutcome};
 use hyper_util::rt::TokioTimer;
 use rustls::crypto::ring::default_provider;
 use rustls::version::{TLS12, TLS13};
@@ -316,7 +318,16 @@ pub async fn run_module(
         [path] => {
             let module_file = Path::new(path);
             let loaded = load_module(module_file)?;
-            run_loaded(module_file, loaded, (extra, extra_access, extra_documents), start_only, listener, log).await
+            run_loaded(
+                module_file,
+                loaded,
+                (extra, extra_access, extra_documents),
+                start_only,
+                listener,
+                log,
+                Vec::new(),
+            )
+            .await
         }
         _ => Err(StartupError::Usage(USAGE.to_owned())),
     }
@@ -331,6 +342,7 @@ pub async fn run_loaded(
     start_only: &[&'static str],
     listener: SharedListener,
     log: Option<LogLevelHandle>,
+    startup_reloads: Vec<StartupReloadFn>,
 ) -> Result<(), StartupError> {
     let (extra, extra_access, extra_documents) = parts;
     let settings = build_settings(loaded)?;
@@ -359,6 +371,8 @@ pub async fn run_loaded(
     rewatch(&setup.rewatch, watched_files(module_file, &config))?;
     let startup_outcome = reload(&engine);
     tracing::debug!(?startup_outcome, "startup reload");
+    let extra_outcomes: Vec<ReloadOutcome> = startup_reloads.iter().map(|extra_reload| extra_reload()).collect();
+    tracing::debug!(?extra_outcomes, "startup reload of the extra engines");
     #[cfg(unix)]
     let _signals = core_config::signal::reload_on_signals(engine, &[signal_hook::consts::SIGHUP])?;
     #[cfg(not(unix))]
