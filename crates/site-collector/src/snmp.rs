@@ -31,6 +31,9 @@ const SNMP_TRAP_COMMUNITY: &str = "1.3.6.1.6.3.18.1.4";
 const REDACTED: &str = "[redacted]";
 
 
+const ARC_CONTINUATION_BIT: u8 = 0x80;
+
+
 fn check(condition: bool, error: ConfigError) -> Result<(), ConfigError> {
     condition.then_some(()).ok_or(error)
 }
@@ -72,7 +75,8 @@ pub fn cut_text(text: String, max_chars: usize) -> String {
 
 pub fn oid_text(oid: &Oid) -> Result<String, TrapDrop> {
     let arcs = oid.iter().ok_or(TrapDrop::Malformed)?;
-    (arcs.take(MAX_OID_ARCS + 1).count() <= MAX_OID_ARCS)
+    let terminated = oid.as_bytes().last().is_none_or(|last| last & ARC_CONTINUATION_BIT == 0);
+    (terminated && arcs.take(MAX_OID_ARCS + 1).count() <= MAX_OID_ARCS)
         .then(|| oid.to_id_string())
         .ok_or(TrapDrop::Malformed)
 }
