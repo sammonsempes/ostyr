@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 77;
+pub const TEXT_COUNT: usize = 88;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -86,6 +86,20 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("error_bad_request", "The request is not valid."),
     ("error_unavailable", "The service is not available. Try again later."),
     ("error_full", "The service is busy. Try again later."),
+    ("case_actions", "Actions"),
+    ("action_start", "Start"),
+    ("action_close", "Close"),
+    ("action_reopen", "Reopen"),
+    ("comment_label", "Add a comment"),
+    ("comment_submit", "Add comment"),
+    ("comment_added", "Comment added"),
+    (
+        "error_transition_not_allowed",
+        "This action is not allowed in the current status of the case.",
+    ),
+    ("error_resolution_required", "Choose a resolution to close the case."),
+    ("error_case_changed", "The case changed meanwhile. Reload the page and try again."),
+    ("error_comment_full", "The case holds the maximum number of comments."),
 ];
 
 
@@ -167,6 +181,20 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("error_bad_request", "La requête n'est pas valide."),
     ("error_unavailable", "Le service n'est pas disponible. Réessayez plus tard."),
     ("error_full", "Le service est occupe. Réessayez plus tard."),
+    ("case_actions", "Actions"),
+    ("action_start", "Démarrer"),
+    ("action_close", "Clore"),
+    ("action_reopen", "Rouvrir"),
+    ("comment_label", "Ajouter un commentaire"),
+    ("comment_submit", "Ajouter le commentaire"),
+    ("comment_added", "Commentaire ajouté"),
+    (
+        "error_transition_not_allowed",
+        "Cette action n'est pas permise dans le statut actuel du dossier.",
+    ),
+    ("error_resolution_required", "Choisissez une résolution pour clore le dossier."),
+    ("error_case_changed", "Le dossier a changé entre-temps. Rechargez la page et recommencez."),
+    ("error_comment_full", "Le dossier contient déjà le nombre maximal de commentaires."),
 ];
 
 
@@ -244,6 +272,47 @@ pub fn resolution_key(value: &str) -> &'static str {
         "other" => "res_other",
         _ => "unknown",
     }
+}
+
+
+pub const RESOLUTIONS: [&str; 5] = ["true_positive", "false_positive", "benign", "duplicate", "other"];
+
+
+pub const CLOSE_ACTION: &str = "close";
+
+
+pub const ACTIONS: [&str; 3] = ["start", CLOSE_ACTION, "reopen"];
+
+
+pub fn action_key(value: &str) -> &'static str {
+    match value {
+        "start" => "action_start",
+        CLOSE_ACTION => "action_close",
+        "reopen" => "action_reopen",
+        _ => "unknown",
+    }
+}
+
+
+/// The actions the cases module accepts from a status; an unknown status offers none.
+pub fn allowed_actions(status: &str) -> &'static [&'static str] {
+    match status {
+        "new" => &["start", CLOSE_ACTION],
+        "in_progress" => &[CLOSE_ACTION],
+        "closed" => &["reopen"],
+        _ => &[],
+    }
+}
+
+
+/// The action and resolution of the fixed tables for a submitted pair; `close` takes a resolution, the others none.
+pub fn checked_action(action: &str, resolution: Option<&str>) -> Option<(&'static str, Option<&'static str>)> {
+    let fixed_action = *ACTIONS.iter().find(|candidate| **candidate == action)?;
+    let fixed_resolution = match resolution {
+        Some(value) => Some(*RESOLUTIONS.iter().find(|candidate| **candidate == value)?),
+        None => None,
+    };
+    Some((fixed_action, fixed_resolution)).filter(|(name, chosen)| (*name == CLOSE_ACTION) == chosen.is_some())
 }
 
 
