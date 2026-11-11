@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 use std::future::ready;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
-use synthetic_checks::alerting::{alert_of, kind_name, outage_alerts, since_micros, store_outage_alerts, title_of, Outage, MICROS_PER_SECOND};
+use synthetic_checks::alerting::{
+    alert_of, identity_of, kind_name, outage_alerts, since_micros, store_outage_alerts, title_of, Outage, MICROS_PER_SECOND,
+};
 use synthetic_checks::model::{CheckKind, MAX_LOCATIONS};
 use types::TestResult;
 
@@ -41,6 +43,9 @@ const QUARTER: usize = 4;
 
 
 const DIGEST_LEN: usize = 13;
+
+
+const FULL_DIGEST_LEN: usize = 64;
 
 
 #[derive(Default)]
@@ -281,11 +286,49 @@ fn a_huge_since_is_dropped_never_clamped() -> TestResult {
     let last = MAX_CREATED_MICROS / MICROS_PER_SECOND;
     assert!(alert_of(&scope, &outage("acme", "web", &[], u64::MAX), NOW).is_none());
     assert!(alert_of(&scope, &outage("acme", "web", &[], last + 1), NOW).is_none());
-    assert!(outage_alerts(&scope, &[outage("acme", "web", &[], u64::MAX)], NOW).is_empty());
+    let capture = Arc::new(tempfile::tempfile()?);
+    let writer = Arc::clone(&capture);
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Arc::clone(&writer))
+            .finish(),
+    );
+    let dropped = tracing::dispatcher::with_default(&dispatch, || outage_alerts(&scope, &[outage("acme", "web", &[], u64::MAX)], NOW));
+    assert!(dropped.is_empty());
+    let mut text = String::new();
+    let mut file: &std::fs::File = &capture;
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_string(&mut text)?;
+    assert!(text.contains("rejected=1"), "{text}");
     assert_eq!(outage_alerts(&scope, &[outage("acme", "web", &[], last)], NOW).len(), 1);
     assert_eq!(since_micros(last), Some(last * MICROS_PER_SECOND));
     assert_eq!(since_micros(u64::MAX), None);
     let clamped = alert_of(&scope, &outage("acme", "web", &[], SINCE), u64::MAX).ok_or("no alert")?;
     assert_eq!(clamped.created_micros, MAX_CREATED_MICROS);
+    Ok(())
+}
+
+
+#[test]
+fn the_identity_keeps_the_full_digest_while_the_title_keeps_the_short_form() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let token = alert_of(&scope, &outage("acme", "web", &[], SINCE), NOW).ok_or("no alert")?;
+    assert_eq!(token.event_ids.first().map(String::as_str), Some("check:web"));
+    assert_eq!(identity_of("web"), "web");
+    let hostile = alert_of(&scope, &outage("acme", "a\nb", &[], SINCE), NOW).ok_or("no alert")?;
+    let event = hostile.event_ids.first().ok_or("no event id")?;
+    let full = identity_of("a\nb");
+    assert_eq!(event, &format!("check:{full}"));
+    assert_eq!(full.chars().count(), 1 + FULL_DIGEST_LEN);
+    assert!(full.starts_with('#') && full.chars().skip(1).all(|character| character.is_ascii_hexdigit()));
+    assert!(event.chars().count() <= MAX_EVENT_ID_CHARS);
+    let short = full.chars().take(DIGEST_LEN).collect::<String>();
+    assert!(
+        hostile.rule_title.contains(&short) && !hostile.rule_title.contains(&full),
+        "{}",
+        hostile.rule_title
+    );
+    assert_ne!(identity_of("a\nb"), identity_of("a\nc"));
     Ok(())
 }
