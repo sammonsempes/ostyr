@@ -210,6 +210,7 @@ fn step(state: &mut Partial, event: Event<'_>) -> Result<(), SysmonError> {
         Event::Empty(start) => open(state, &start).and_then(|()| close(state)),
         Event::End(_) => close(state),
         Event::Text(text) => add_text(state, &text.decode()?),
+        Event::CData(_) if state.path.is_empty() => Err(SysmonError::OutsideRoot),
         Event::CData(data) => add_text(state, &data.decode()?),
         Event::GeneralRef(reference) => append_reference(state, &reference.decode()?, reference.resolve_char_ref()?),
         _ => Ok(()),
@@ -380,6 +381,8 @@ fn bound_fields(fields: Fields) -> Result<Fields, SysmonError> {
             .map(|(name, value)| {
                 if name.len() > MAX_FIELD_BYTES {
                     Err(SysmonError::FieldTooLong { max: MAX_FIELD_BYTES })
+                } else if name.is_empty() || name.chars().any(char::is_control) {
+                    Err(SysmonError::BadFieldName(name.chars().take(MAX_ID_SHOWN).collect()))
                 } else {
                     Ok((name, cut_value(value)))
                 }
@@ -390,7 +393,7 @@ fn bound_fields(fields: Fields) -> Result<Fields, SysmonError> {
 
 
 fn parse_id(text: &str) -> Option<u32> {
-    let digits = text.trim_ascii();
+    let digits = text.trim_matches(XML_WHITESPACE);
     let plain = digits.len() <= MAX_ID_DIGITS && digits.bytes().all(|byte| byte.is_ascii_digit());
     let no_zero_lead = !digits.starts_with('0') || digits.len() == 1;
     (plain && no_zero_lead).then(|| digits.parse::<u16>().ok()).flatten().map(u32::from)
