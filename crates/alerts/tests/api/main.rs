@@ -21,6 +21,7 @@ use fixture::{alert, fixture, fixture_with, memory_backend, store, ANALYST, BASE
 use http::{body_json, get, login};
 use memory::{lock, Forced};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use types::TestResult;
 
@@ -157,6 +158,11 @@ async fn an_own_alert_is_served_by_id_and_a_malformed_id_is_a_404() -> TestResul
     let malformed = get(&fx.router, "/alerts/not-an-id", Some(&token)).await?;
     assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
     assert_eq!(lock(&fx.db.statements).len(), before);
+    let missing = body_json(get(&fx.router, &format!("/alerts/{}", "0".repeat(HEX_LENGTH)), Some(&token)).await?).await?;
+    let not_utf8 = get(&fx.router, "/alerts/%ff", Some(&token)).await?;
+    assert_eq!(not_utf8.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(not_utf8).await?, missing);
+    assert_eq!(lock(&fx.db.statements).len(), before + 1);
     Ok(())
 }
 
@@ -263,6 +269,26 @@ async fn database_failures_are_a_generic_500() -> TestResult {
         get(&fx.router, &format!("/alerts/{}", own.id), Some(&token)).await?.status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_path_the_extractor_refuses_never_reaches_the_backend() -> TestResult {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let fx = fixture_with(move |_db| Backend {
+        list: Arc::new(|_scope, _page| Box::pin(async { Err(StoreError::Busy) })),
+        get: Arc::new(move |_scope, _id| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(None) })
+        }),
+    })?;
+    let token = login(&fx.router, ANALYST).await?;
+    assert_eq!(get(&fx.router, "/alerts/%ff", Some(&token)).await?.status(), StatusCode::NOT_FOUND);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(get(&fx.router, "/alerts/abc", Some(&token)).await?.status(), StatusCode::NOT_FOUND);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
