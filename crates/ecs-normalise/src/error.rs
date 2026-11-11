@@ -51,6 +51,8 @@ pub enum SysmonError {
     FieldTooLong { max: usize },
     #[error("the event has more than one `{0}`")]
     Duplicate(&'static str),
+    #[error("the field name {0:?} is empty or holds a control character")]
+    BadFieldName(String),
     #[error("`{0}` is missing its attribute")]
     MissingAttribute(&'static str),
     #[error("`{0}` is given with a namespace prefix")]
