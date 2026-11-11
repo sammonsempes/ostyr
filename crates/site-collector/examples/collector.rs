@@ -43,6 +43,14 @@ const USAGE: &str =
     "usage: collector <settings-file> <audit-file> <spool-dir> [agent-spool-file]; with the last one, admitted records are forwarded every second; stdin: quit (prints the counters and the spool); the settings file is watched";
 
 
+fn error_chain(error: &dyn Error) -> String {
+    std::iter::successors(Some(error), |current| (*current).source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+
 fn current_year() -> i32 {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
     FIRST_YEAR + i32::try_from(seconds / SECONDS_PER_YEAR).unwrap_or(0)
@@ -73,7 +81,7 @@ fn receive_and_forward(
             let line = match forward_once(&mut runtime.spool, path, &limits, OffsetDateTime::now_utc(), write_cursor) {
                 Ok(report) if report == ForwardReport::default() => String::new(),
                 Ok(report) => format!("forward {report:?}"),
-                Err(error) => format!("forward failed: {error}"),
+                Err(error) => format!("forward failed: {}", error_chain(&error)),
             };
             if let Err(error) = (!line.is_empty()).then(|| writeln!(stdout(), "{line}")).transpose() {
                 tracing::error!(%error, "cannot write the forward line");

@@ -2,7 +2,7 @@ use crate::error::SpoolError;
 use crate::spool_model::DirectoryFacts;
 use crate::types::DirHandle;
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 
@@ -49,7 +49,11 @@ fn open_named(dir: &DirHandle, name: &str, flags: rustix::fs::OFlags) -> io::Res
 
 #[cfg(unix)]
 pub fn open_read(dir: &DirHandle, name: &str) -> io::Result<File> {
-    open_named(dir, name, rustix::fs::OFlags::RDONLY)
+    let file = open_named(dir, name, rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK)?;
+    file.metadata()?
+        .is_file()
+        .then_some(file)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"))
 }
 
 
@@ -87,6 +91,14 @@ pub fn rename_named(dir: &DirHandle, from: &str, to: &str) -> io::Result<()> {
 #[cfg(unix)]
 pub fn sync_directory(dir: &DirHandle) -> io::Result<()> {
     File::from(dir.try_clone()?).sync_all()
+}
+
+
+#[cfg(unix)]
+pub fn random_bytes<const LENGTH: usize>() -> io::Result<[u8; LENGTH]> {
+    let mut bytes = [0u8; LENGTH];
+    let filled = rustix::rand::getrandom(&mut bytes, rustix::rand::GetRandomFlags::empty())?;
+    (filled == LENGTH).then_some(bytes).ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))
 }
 
 
@@ -162,6 +174,12 @@ pub fn regular_file_names(_dir: &DirHandle, _max_entries: usize) -> Result<Vec<S
 
 
 #[cfg(not(unix))]
+pub fn random_bytes<const LENGTH: usize>() -> io::Result<[u8; LENGTH]> {
+    unsupported()
+}
+
+
+#[cfg(not(unix))]
 pub fn rename_named(_dir: &DirHandle, _from: &str, _to: &str) -> io::Result<()> {
     unsupported()
 }
@@ -170,4 +188,18 @@ pub fn rename_named(_dir: &DirHandle, _from: &str, _to: &str) -> io::Result<()> 
 #[cfg(not(unix))]
 pub fn sync_directory(_dir: &DirHandle) -> io::Result<()> {
     unsupported()
+}
+
+
+/// Written to a temporary file in the directory, synced, renamed over `name`, directory synced: every step relative to the opened directory.
+pub fn write_text_atomic(dir: &DirHandle, temporary: &str, name: &str, text: &str) -> io::Result<()> {
+    match remove_named(dir, temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        Ok(()) | Err(_) => Ok(()),
+    }?;
+    let mut file = create_append(dir, temporary)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    rename_named(dir, temporary, name)?;
+    sync_directory(dir)
 }

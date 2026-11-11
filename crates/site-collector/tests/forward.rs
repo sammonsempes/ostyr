@@ -260,6 +260,7 @@ fn a_record_that_no_longer_parses_is_skipped_and_counted() -> TestResult {
             sequence: 0,
             payload: b"junk".to_vec(),
         },
+        "ab",
         now()?,
     );
     assert_eq!(only_bad, None);
@@ -370,6 +371,7 @@ fn text_helpers_are_bounded() -> TestResult {
     assert_eq!(cut_text("abcdef", THREE_LINES), "abc[+3 bytes cut]");
     assert_eq!(cut_text("aéé", TWO), "a[+4 bytes cut]");
     assert_eq!(clean_text("a\u{0}\u{202e}\u{2066}b", TEN), "ab");
+    assert_eq!(clean_text("a\u{2028}b\u{200b}c\u{feff}d\u{2060}e", TEN), "abcde");
     assert!(valid_hostname("router-1.lan_x:1"));
     assert!(!valid_hostname(""));
     assert!(!valid_hostname("-x"));
@@ -394,9 +396,9 @@ fn an_event_without_host_or_app_carries_no_such_labels() -> TestResult {
         message: "m".to_owned(),
         structured_data: Vec::<SdElement>::new(),
     };
-    let event = build_event(NINE, &parsed, now()?);
+    let event = build_event(NINE, "ab", &parsed, now()?);
     assert!(event.host.is_none());
-    assert_eq!(event.labels.len(), THREE_LINES);
+    assert_eq!(event.labels.len(), THREE_LINES + 1);
     assert_eq!(event.timestamp, now()?);
     Ok(())
 }
