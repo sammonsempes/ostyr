@@ -94,3 +94,25 @@ pub struct SummaryList {
     pub summaries: Vec<CaseSummary>,
     pub next: Option<CaseCursor>,
 }
+
+
+/// Keyset by alert id: `after` is the last alert id of the previous page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPage {
+    pub after: Option<String>,
+    pub size: usize,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkList {
+    pub alerts: Vec<String>,
+    pub next: Option<String>,
+}
+
+
+/// One alert linked to a case; the alert itself is read through the alerts API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct AlertLink {
+    pub alert_id: String,
+}

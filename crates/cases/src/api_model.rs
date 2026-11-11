@@ -1,6 +1,6 @@
 use crate::model::Resolution;
-use crate::stored::CaseSummary;
-use crate::types::{ActFn, ClockFn, CommentFn, DetailGetFn, SummaryListFn};
+use crate::stored::{AlertLink, CaseSummary};
+use crate::types::{ActFn, ClockFn, CommentFn, DetailGetFn, LinkFn, LinksFn, SummaryListFn};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -12,6 +12,8 @@ pub struct CasesBackend {
     pub get: DetailGetFn,
     pub act: ActFn,
     pub comment: CommentFn,
+    pub link: LinkFn,
+    pub links: LinksFn,
     pub clock: ClockFn,
 }
 
@@ -59,4 +61,20 @@ pub struct ActionRequest {
 #[serde(deny_unknown_fields)]
 pub struct CommentRequest {
     pub text: String,
+}
+
+
+/// `POST /cases/{id}/alerts` body; the tenant and the actor come from the session.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRequest {
+    /// 64 lowercase hexadecimal characters.
+    pub alert_id: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct AlertLinkListView {
+    pub items: Vec<AlertLink>,
+    pub next_cursor: Option<String>,
 }

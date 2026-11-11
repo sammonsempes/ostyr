@@ -98,6 +98,7 @@ async fn history_actor_and_time_are_bounded_before_sql() -> TestResult {
         actor: "a".to_owned(),
         from: CaseStatus::New,
         to: CaseStatus::InProgress,
+        alert_id: None,
     };
     let mut crowded = case("acme", "c1", NOW);
     crowded.history = vec![event; MAX_HISTORY];
@@ -156,6 +157,7 @@ async fn a_stale_snapshot_cannot_push_the_stored_history_past_the_cap() -> TestR
         actor: "a".to_owned(),
         from: CaseStatus::New,
         to: CaseStatus::InProgress,
+        alert_id: None,
     };
     let mut crowded = case("acme", "c1", NOW);
     crowded.history = vec![event; MAX_HISTORY];

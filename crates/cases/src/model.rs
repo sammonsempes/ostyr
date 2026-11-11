@@ -135,6 +135,7 @@ pub enum CaseEventKind {
     Started,
     Closed,
     Reopened,
+    AlertLinked,
 }
 
 
@@ -145,6 +146,9 @@ pub struct CaseEvent {
     pub actor: String,
     pub from: CaseStatus,
     pub to: CaseStatus,
+    /// Set on `alert_linked` events only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_id: Option<String>,
 }
 
 

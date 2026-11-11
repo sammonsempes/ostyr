@@ -4,6 +4,7 @@ pub mod api;
 pub mod api_model;
 pub mod backend;
 pub mod error;
+pub mod links_api;
 pub mod model;
 pub mod observable;
 pub mod sla;

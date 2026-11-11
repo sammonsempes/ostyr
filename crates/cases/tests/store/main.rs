@@ -1,5 +1,6 @@
 mod actions;
 mod appends;
+mod links;
 mod memory;
 mod rows;
 mod summary;
@@ -44,6 +45,9 @@ pub const THREE: usize = 3;
 
 
 pub const FOUR: usize = 4;
+
+
+pub const SIX: usize = 6;
 
 
 const FAR_CREATED: i64 = 1_000;
@@ -212,14 +216,17 @@ async fn another_tenant_cannot_read_list_change_or_attach_with_the_same_id() -> 
     let seen = add_observable(&exec, &other, "c1", &observable(ObservableKind::Ip, "10.0.0.1")).await;
     assert!(matches!(seen, Err(CaseStoreError::NotFound)));
     assert!(matches!(
-        attach_alert(&exec, &other, "c1", OTHER_ALERT).await,
+        attach_alert(&exec, &other, "c1", OTHER_ALERT, ("tester", NOW)).await,
         Err(CaseStoreError::NotFound)
     ));
     assert!(matches!(
-        attach_alert(&exec, &acme, "c1", OTHER_ALERT).await,
+        attach_alert(&exec, &acme, "c1", OTHER_ALERT, ("tester", NOW)).await,
         Err(CaseStoreError::AlertNotFound)
     ));
-    assert!(matches!(attach_alert(&exec, &other, "c1", ALERT).await, Err(CaseStoreError::NotFound)));
+    assert!(matches!(
+        attach_alert(&exec, &other, "c1", ALERT, ("tester", NOW)).await,
+        Err(CaseStoreError::NotFound)
+    ));
     let untouched = stored_case(&db, "acme", "c1").ok_or("missing")?;
     assert_eq!(untouched, case("acme", "c1", NOW));
     let linked = lock(&db.tenants)
@@ -252,6 +259,7 @@ async fn a_case_of_another_tenant_or_not_new_is_refused_before_any_sql() -> Test
                 actor: "a".to_owned(),
                 from: CaseStatus::New,
                 to: CaseStatus::InProgress,
+                alert_id: None,
             })
         },
     ];

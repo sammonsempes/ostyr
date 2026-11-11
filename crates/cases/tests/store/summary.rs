@@ -115,13 +115,13 @@ async fn a_summary_carries_counts_and_never_the_lists() -> TestResult {
     add_observable(&exec, &scope, "c1", &observable(ObservableKind::Ip, "10.0.0.1")).await?;
     know_alert(&db, "acme", ALERT);
     know_alert(&db, "acme", OTHER_ALERT);
-    attach_alert(&exec, &scope, "c1", ALERT).await?;
-    attach_alert(&exec, &scope, "c1", OTHER_ALERT).await?;
+    attach_alert(&exec, &scope, "c1", ALERT, ("tester", NOW)).await?;
+    attach_alert(&exec, &scope, "c1", OTHER_ALERT, ("tester", NOW)).await?;
     let page = CasePage { after: None, size: 1 };
     let found = list_case_summaries(&exec, &scope, &page).await?;
     let summary = found.summaries.first().ok_or("empty")?;
     assert_eq!((summary.counts.tasks, summary.counts.comments, summary.counts.observables), (1, TWO, 1));
-    assert_eq!((summary.counts.history, summary.counts.alerts), (0, TWO));
+    assert_eq!((summary.counts.history, summary.counts.alerts), (TWO, TWO));
     assert_eq!((summary.severity, summary.status, summary.version), (Severity::High, CaseStatus::New, 1));
     assert_eq!(summary.assignee.as_deref(), Some("alice"));
     assert!(found.next.is_none());

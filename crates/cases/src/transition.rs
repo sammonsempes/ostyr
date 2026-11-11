@@ -61,6 +61,7 @@ pub fn apply_action(case: &mut Case, action: CaseAction, actor: &str, now: i64) 
         actor: actor.to_string(),
         from: case.status,
         to: next,
+        alert_id: None,
     };
     case.resolution = resolution_after(action, case.resolution);
     case.status = next;
