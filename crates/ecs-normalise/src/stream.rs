@@ -1,9 +1,10 @@
 use crate::convert::{convert, Outcome};
-use crate::error::{LineError, NormaliseError};
+use crate::error::{LineError, NormaliseError, WinSecError};
 use crate::suricata::{clean, cut_text, parse_eve};
 use crate::sysmon::{normalise_sysmon, UNKNOWN_DATASET};
 use crate::tetragon::Envelope;
 use crate::types::{LineNumber, SeenIds};
+use crate::winsec::normalise_security;
 use core_export::ecs::EcsEvent;
 use serde_json::{from_str, from_value, to_writer, Value};
 use std::io::{self, BufRead, Read, Write};
@@ -38,6 +39,7 @@ pub enum Format {
     Tetragon,
     Sysmon,
     Suricata,
+    WinSecurity,
 }
 
 
@@ -49,6 +51,7 @@ impl FromStr for Format {
             "tetragon" => Ok(Format::Tetragon),
             "sysmon" => Ok(Format::Sysmon),
             "suricata" => Ok(Format::Suricata),
+            "winsec" => Ok(Format::WinSecurity),
             other => Err(NormaliseError::UnknownFormat(other.to_string())),
         }
     }
@@ -129,6 +132,20 @@ pub fn decode(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, 
 /// Turns one raw Suricata EVE line into an outcome, attaching the line number to every error.
 pub fn decode_suricata(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
     line_text(line, raw, max_line).and_then(|text| parse_eve(&text).map_err(|error| LineError { line, error }))
+}
+
+
+/// Turns one raw Windows Security line into an outcome: an unmapped id is `Outcome::Unknown`, not an error.
+pub fn decode_winsec(line: LineNumber, raw: RawLine, max_line: u64) -> Result<Outcome, LineError> {
+    let text = line_text(line, raw, max_line)?;
+    match normalise_security(&text) {
+        Ok(event) => Ok(Outcome::Event(Box::new(event))),
+        Err(WinSecError::Unknown(id)) => Ok(Outcome::Unknown(format!("winsec:{id}"))),
+        Err(error) => Err(LineError {
+            line,
+            error: NormaliseError::WinSecurity(error),
+        }),
+    }
 }
 
 
@@ -252,6 +269,7 @@ pub fn normalise_dyn(mut input: &mut dyn BufRead, mut output: &mut dyn Write, ma
             match format {
                 Format::Tetragon => tally(counts, line, decode(line, raw, max_line), &mut output),
                 Format::Suricata => tally(counts, line, decode_suricata(line, raw, max_line), &mut output),
+                Format::WinSecurity => tally(counts, line, decode_winsec(line, raw, max_line), &mut output),
                 Format::Sysmon => tally_sysmon(counts, line, decode_sysmon(line, raw, max_line, &mut seen), &mut output),
             }
         })

@@ -10,3 +10,4 @@ pub mod sysmon;
 pub mod sysmon_input;
 pub mod tetragon;
 pub mod types;
+pub mod winsec;

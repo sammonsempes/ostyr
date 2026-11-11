@@ -25,6 +25,8 @@ const MAX_ID_SHOWN: usize = 16;
 pub struct RawEvent {
     pub event_id: u32,
     pub computer: Option<String>,
+    pub provider: Option<String>,
+    pub channel: Option<String>,
     pub system_time: Option<String>,
     pub fields: Fields,
 }
@@ -36,16 +38,20 @@ enum Target {
     Nothing,
     EventId,
     Computer,
+    Channel,
     Data(String),
 }
 
 
 #[derive(Debug, Default)]
 struct Partial {
+    path: Vec<Vec<u8>>,
     target: Target,
     text: String,
     event_id: Option<String>,
     computer: Option<String>,
+    provider: Option<String>,
+    channel: Option<String>,
     system_time: Option<String>,
     fields: Fields,
 }
@@ -66,33 +72,56 @@ fn attribute(start: &BytesStart<'_>, name: &str) -> Result<Option<String>, Sysmo
 }
 
 
+fn set_once(slot: &mut Option<String>, value: Option<String>, name: &'static str) -> Result<(), SysmonError> {
+    match (slot.is_some(), value) {
+        (true, Some(_)) => Err(SysmonError::Duplicate(name)),
+        (_, found) => {
+            *slot = found.or_else(|| slot.take());
+            Ok(())
+        }
+    }
+}
+
+
 fn open(state: &mut Partial, start: &BytesStart<'_>) -> Result<(), SysmonError> {
     state.text.clear();
-    state.target = match start.local_name().as_ref() {
-        b"EventID" => Target::EventId,
-        b"Computer" => Target::Computer,
-        b"Data" => attribute(start, "Name")?.map_or(Target::Nothing, Target::Data),
-        b"TimeCreated" => {
-            state.system_time = attribute(start, "SystemTime")?;
+    state.path.push(start.local_name().as_ref().to_vec());
+    let names: Vec<&[u8]> = state.path.iter().map(Vec::as_slice).collect();
+    let place = match names.as_slice() {
+        [b"Event", b"System", b"EventID"] => Target::EventId,
+        [b"Event", b"System", b"Computer"] => Target::Computer,
+        [b"Event", b"System", b"Channel"] => Target::Channel,
+        [b"Event", b"System", b"Provider"] => {
+            let name = attribute(start, "Name")?;
+            set_once(&mut state.provider, name, "Provider")?;
             Target::Nothing
         }
+        [b"Event", b"System", b"TimeCreated"] => {
+            let time = attribute(start, "SystemTime")?;
+            set_once(&mut state.system_time, time, "TimeCreated")?;
+            Target::Nothing
+        }
+        [b"Event", b"EventData", b"Data"] => attribute(start, "Name")?.map_or(Target::Nothing, Target::Data),
         _ => Target::Nothing,
     };
+    state.target = place;
     Ok(())
 }
 
 
 fn close(state: &mut Partial) -> Result<(), SysmonError> {
     let text = take(&mut state.text);
+    state.path.pop();
     match take(&mut state.target) {
-        Target::EventId => state.event_id = Some(text),
-        Target::Computer => state.computer = Some(text),
+        Target::EventId => set_once(&mut state.event_id, Some(text), "EventID"),
+        Target::Computer => set_once(&mut state.computer, Some(text), "Computer"),
+        Target::Channel => set_once(&mut state.channel, Some(text), "Channel"),
         Target::Data(name) => {
             state.fields.insert(name, text);
+            Ok(())
         }
-        Target::Nothing => {}
+        Target::Nothing => Ok(()),
     }
-    Ok(())
 }
 
 
@@ -165,6 +194,11 @@ fn json_state(text: &str) -> Result<Partial, SysmonError> {
     Ok(Partial {
         event_id: system.get("EventID").and_then(scalar),
         computer: system.get("Computer").and_then(scalar),
+        provider: system
+            .get("Provider")
+            .and_then(|found| found.get("Name").or(Some(found)))
+            .and_then(scalar),
+        channel: system.get("Channel").and_then(scalar),
         system_time: system.get("TimeCreated").and_then(|created| created.get("SystemTime")).and_then(scalar),
         fields,
         ..Partial::default()
@@ -172,17 +206,31 @@ fn json_state(text: &str) -> Result<Partial, SysmonError> {
 }
 
 
-fn check_fields(fields: &Fields) -> Result<(), SysmonError> {
+fn cut_value(value: String) -> String {
+    if value.len() > MAX_FIELD_BYTES {
+        let end = (0..=MAX_FIELD_BYTES).rev().find(|at| value.is_char_boundary(*at)).unwrap_or(0);
+        let omitted = value.len() - end;
+        format!("{}[cut, {omitted} bytes]", value.split_at(end).0)
+    } else {
+        value
+    }
+}
+
+
+fn bound_fields(fields: Fields) -> Result<Fields, SysmonError> {
     if fields.len() > MAX_FIELDS {
         Err(SysmonError::TooManyFields { max: MAX_FIELDS })
     } else {
-        fields.iter().try_for_each(|(name, value)| {
-            if name.len() > MAX_FIELD_BYTES || value.len() > MAX_FIELD_BYTES {
-                Err(SysmonError::FieldTooLong { max: MAX_FIELD_BYTES })
-            } else {
-                Ok(())
-            }
-        })
+        fields
+            .into_iter()
+            .map(|(name, value)| {
+                if name.len() > MAX_FIELD_BYTES {
+                    Err(SysmonError::FieldTooLong { max: MAX_FIELD_BYTES })
+                } else {
+                    Ok((name, cut_value(value)))
+                }
+            })
+            .collect()
     }
 }
 
@@ -201,7 +249,7 @@ fn partial(text: &str) -> Result<Partial, SysmonError> {
 /// Parses a rendered Sysmon event (XML, or JSON when the text starts with `{`) within the size, count and length caps.
 pub fn parse_event(text: &str) -> Result<RawEvent, SysmonError> {
     let state = partial(text)?;
-    check_fields(&state.fields)?;
+    let fields = bound_fields(state.fields)?;
     let id_text = state.event_id.ok_or(SysmonError::MissingField("EventID"))?;
     let event_id = id_text
         .trim()
@@ -210,7 +258,9 @@ pub fn parse_event(text: &str) -> Result<RawEvent, SysmonError> {
     Ok(RawEvent {
         event_id,
         computer: state.computer,
+        provider: state.provider,
+        channel: state.channel,
         system_time: state.system_time,
-        fields: state.fields,
+        fields,
     })
 }

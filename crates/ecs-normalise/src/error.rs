@@ -23,9 +23,11 @@ pub enum NormaliseError {
     Io(#[from] io::Error),
     #[error("invalid Sysmon event: {0}")]
     Sysmon(#[source] SysmonError),
-    #[error("usage: normalise [--format tetragon|sysmon|suricata]")]
+    #[error("invalid Windows Security event: {0}")]
+    WinSecurity(#[source] WinSecError),
+    #[error("usage: normalise [--format tetragon|sysmon|suricata|winsec]")]
     Usage,
-    #[error("unknown format `{0}` (expected tetragon, sysmon or suricata)")]
+    #[error("unknown format `{0}` (expected tetragon, sysmon, suricata or winsec)")]
     UnknownFormat(String),
 }
 
@@ -47,6 +49,8 @@ pub enum SysmonError {
     TooManyFields { max: usize },
     #[error("a field name or value is longer than {max} bytes")]
     FieldTooLong { max: usize },
+    #[error("the event has more than one `{0}` in `System`")]
+    Duplicate(&'static str),
     #[error("invalid XML: {0}")]
     Xml(#[from] quick_xml::Error),
     #[error("invalid XML text: {0}")]
@@ -71,4 +75,17 @@ pub enum SysmonError {
     BadTime(#[source] time::error::Parse),
     #[error("a Hashes entry has no `=`")]
     BadHashes,
+}
+
+
+#[derive(Debug, Error)]
+pub enum WinSecError {
+    #[error("invalid event: {0}")]
+    Event(#[from] SysmonError),
+    #[error("the provider is not Microsoft-Windows-Security-Auditing: `{0}`")]
+    Provider(String),
+    #[error("the channel is not Security: `{0}`")]
+    Channel(String),
+    #[error("Windows Security event id {0} is not mapped")]
+    Unknown(u32),
 }
