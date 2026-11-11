@@ -18,6 +18,18 @@ pub const MAX_JSON_NESTING: u32 = 256;
 pub const COMPONENTS_KEY: &str = "components";
 
 
+pub const PACKAGES_KEY: &str = "packages";
+
+
+pub const SPDX_VERSION_KEY: &str = "spdxVersion";
+
+
+pub const BOM_FORMAT_KEY: &str = "bomFormat";
+
+
+pub const MAX_EXTERNAL_REFS: usize = 1024;
+
+
 pub const UNKNOWN_KIND: &str = "unknown";
 
 

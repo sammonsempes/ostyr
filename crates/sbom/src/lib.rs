@@ -1,4 +1,4 @@
-//! CycloneDX SBOM components, conversion to vuln-match packages and diff.
+//! CycloneDX and SPDX SBOM components, conversion to vuln-match packages and diff.
 
 pub mod convert;
 pub mod diff;
@@ -11,6 +11,7 @@ pub mod purl;
 pub mod run;
 pub mod settings;
 pub mod signing;
+pub mod spdx;
 pub mod store;
 pub mod store_settings;
 pub mod transport;

@@ -1,9 +1,10 @@
 //! Pull parsing of a CycloneDX JSON document: nothing is built before it is counted.
 
 use crate::error::SbomError;
-use crate::limits::{COMPONENTS_KEY, MAX_JSON_NESTING, NAME_QUOTES, UNKNOWN_KIND};
-use crate::model::{Component, Frame, FrameKind, Limits, Outcome, ParseState, Partial, Sbom};
+use crate::limits::{BOM_FORMAT_KEY, COMPONENTS_KEY, MAX_JSON_NESTING, NAME_QUOTES, PACKAGES_KEY, SPDX_VERSION_KEY, UNKNOWN_KIND};
+use crate::model::{Component, Format, Frame, FrameKind, Limits, Outcome, ParseState, Partial, Sbom};
 use crate::purl::classify;
+use crate::spdx::{step_package, step_ref, step_refs};
 use crate::types::Reader;
 use std::io::Read;
 use struson::reader::{JsonReader, JsonStreamReader, ReaderSettings, ValueType};
@@ -11,13 +12,24 @@ use struson::reader::{JsonReader, JsonStreamReader, ReaderSettings, ValueType};
 
 /// Reads at most `max_bytes` of the document, then at most `max_components` array elements, however long the input is.
 pub fn parse_cyclonedx<Source: Read>(source: Source, tenant: &str, artefact: &str, limits: &Limits) -> Result<Sbom, SbomError> {
+    parse_format(source, tenant, artefact, limits, Format::Cyclonedx)
+}
+
+
+/// Picks SPDX or CycloneDX from the top-level `spdxVersion` or `bomFormat` member, which must come before the component array.
+pub fn parse_document<Source: Read>(source: Source, tenant: &str, artefact: &str, limits: &Limits) -> Result<Sbom, SbomError> {
+    parse_format(source, tenant, artefact, limits, Format::Unknown)
+}
+
+
+pub fn parse_format<Source: Read>(source: Source, tenant: &str, artefact: &str, limits: &Limits, format: Format) -> Result<Sbom, SbomError> {
     let settings = ReaderSettings {
         max_nesting_depth: Some(MAX_JSON_NESTING),
         track_path: false,
         ..ReaderSettings::default()
     };
     let mut limited = source.take(to_u64(limits.max_bytes.saturating_add(1)));
-    let parsed = parse_stream(JsonStreamReader::new_custom(&mut limited, settings), tenant, artefact, limits);
+    let parsed = parse_stream(JsonStreamReader::new_custom(&mut limited, settings), tenant, artefact, limits, format);
     let oversized = limited.limit() == 0;
     match (oversized, parsed) {
         (true, _) => Err(SbomError::TooLarge { max: limits.max_bytes }),
@@ -31,7 +43,13 @@ pub fn to_u64(value: usize) -> u64 {
 }
 
 
-fn parse_stream<Source: Read>(mut reader: Reader<'_, Source>, tenant: &str, artefact: &str, limits: &Limits) -> Result<Sbom, SbomError> {
+fn parse_stream<Source: Read>(
+    mut reader: Reader<'_, Source>,
+    tenant: &str,
+    artefact: &str,
+    limits: &Limits,
+    format: Format,
+) -> Result<Sbom, SbomError> {
     reader.begin_object()?;
     let mut state = ParseState {
         stack: vec![frame(FrameKind::Root)],
@@ -42,8 +60,10 @@ fn parse_stream<Source: Read>(mut reader: Reader<'_, Source>, tenant: &str, arte
             skipped: 0,
             bad_purls: 0,
             unmapped: 0,
+            extra_purls: 0,
         },
         seen: 0,
+        format,
     };
     std::iter::repeat_with(|| step(&mut reader, &mut state, limits))
         .take(limits.max_bytes)
@@ -52,14 +72,14 @@ fn parse_stream<Source: Read>(mut reader: Reader<'_, Source>, tenant: &str, arte
     match state.stack.is_empty() {
         true => {
             reader.consume_trailing_whitespace()?;
-            Ok(state.sbom)
+            (state.format != Format::Unknown).then_some(state.sbom).ok_or(SbomError::UnknownFormat)
         }
         false => Err(SbomError::TooLarge { max: limits.max_bytes }),
     }
 }
 
 
-fn frame(kind: FrameKind) -> Frame {
+pub fn frame(kind: FrameKind) -> Frame {
     Frame {
         kind,
         partial: Partial::default(),
@@ -74,6 +94,9 @@ pub fn step<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseStat
         Some(FrameKind::Root) => step_root(reader, state, limits).map(Some),
         Some(FrameKind::Components) => step_components(reader, state, limits).map(Some),
         Some(FrameKind::Component) => step_component(reader, state, limits).map(Some),
+        Some(FrameKind::Package) => step_package(reader, state, limits).map(Some),
+        Some(FrameKind::Refs) => step_refs(reader, state).map(Some),
+        Some(FrameKind::Ref) => step_ref(reader, state, limits).map(Some),
     }
 }
 
@@ -81,7 +104,7 @@ pub fn step<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseStat
 fn step_root<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseState, limits: &Limits) -> Result<(), SbomError> {
     if reader.has_next()? {
         let name = read_name(reader, limits)?;
-        open_components(reader, state, &name)
+        read_root_member(reader, state, &name)
     } else {
         reader.end_object()?;
         state.stack.pop();
@@ -90,13 +113,23 @@ fn step_root<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseSta
 }
 
 
-fn open_components<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseState, name: &str) -> Result<(), SbomError> {
-    if name == COMPONENTS_KEY && reader.peek()? == ValueType::Array {
-        reader.begin_array()?;
-        state.stack.push(frame(FrameKind::Components));
-        Ok(())
-    } else {
-        Ok(reader.skip_value()?)
+fn read_root_member<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseState, name: &str) -> Result<(), SbomError> {
+    match (name, reader.peek()?, state.format) {
+        (COMPONENTS_KEY, ValueType::Array, Format::Cyclonedx) | (PACKAGES_KEY, ValueType::Array, Format::Spdx) => {
+            reader.begin_array()?;
+            state.stack.push(frame(FrameKind::Components));
+            Ok(())
+        }
+        (COMPONENTS_KEY | PACKAGES_KEY, ValueType::Array, Format::Unknown) => Err(SbomError::UnknownFormat),
+        (SPDX_VERSION_KEY, ValueType::String, Format::Unknown) => {
+            state.format = Format::Spdx;
+            Ok(reader.skip_value()?)
+        }
+        (BOM_FORMAT_KEY, ValueType::String, Format::Unknown) => {
+            state.format = Format::Cyclonedx;
+            Ok(reader.skip_value()?)
+        }
+        _ => Ok(reader.skip_value()?),
     }
 }
 
@@ -118,12 +151,16 @@ fn step_components<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut Pa
 
 fn open_component<Source: Read>(reader: &mut Reader<'_, Source>, state: &mut ParseState, limits: &Limits) -> Result<(), SbomError> {
     if reader.peek()? == ValueType::Object {
+        let child = match state.format {
+            Format::Spdx => FrameKind::Package,
+            _ => FrameKind::Component,
+        };
         let depth = state.stack.iter().filter(|open| open.kind == FrameKind::Component).count() + 1;
-        (depth <= limits.max_depth)
+        (child == FrameKind::Package || depth <= limits.max_depth)
             .then_some(())
             .ok_or(SbomError::TooDeep { max: limits.max_depth })?;
         reader.begin_object()?;
-        state.stack.push(frame(FrameKind::Component));
+        state.stack.push(frame(child));
         Ok(())
     } else {
         reader.skip_value()?;
@@ -177,7 +214,7 @@ fn store(state: &mut ParseState, name: &str, mut text: Option<String>) {
 
 
 /// A member name is read under a source limit of `max_string_bytes` plus its quotes: a longer one ends the parse.
-fn read_name<Source: Read>(reader: &mut Reader<'_, Source>, limits: &Limits) -> Result<String, SbomError> {
+pub fn read_name<Source: Read>(reader: &mut Reader<'_, Source>, limits: &Limits) -> Result<String, SbomError> {
     let remaining = reader.reader_mut().limit();
     let allowed = remaining.min(to_u64(limits.max_string_bytes.saturating_add(NAME_QUOTES)));
     reader.reader_mut().set_limit(allowed);
@@ -196,7 +233,7 @@ fn read_name<Source: Read>(reader: &mut Reader<'_, Source>, limits: &Limits) -> 
 
 
 /// A string value is streamed through a cap of `max_string_bytes` and the rest is drained unread: `None` when it is longer.
-fn read_text<Source: Read>(reader: &mut Reader<'_, Source>, limits: &Limits) -> Result<Option<String>, SbomError> {
+pub fn read_text<Source: Read>(reader: &mut Reader<'_, Source>, limits: &Limits) -> Result<Option<String>, SbomError> {
     let mut value = reader.next_string_reader()?;
     let mut bytes = Vec::new();
     value
@@ -209,14 +246,17 @@ fn read_text<Source: Read>(reader: &mut Reader<'_, Source>, limits: &Limits) -> 
 
 
 /// A component without a usable name, or with an over-long string, is counted and skipped.
-fn finish(sbom: &mut Sbom, partial: Partial) {
+pub fn finish(sbom: &mut Sbom, partial: Partial) {
     let Partial {
         name: maybe_name,
         version,
         purl,
         kind,
         oversize,
+        extra_purls,
+        ..
     } = partial;
+    sbom.extra_purls += extra_purls;
     match maybe_name.filter(|_| !oversize) {
         None => sbom.skipped += 1,
         Some(component_name) => {
@@ -227,7 +267,7 @@ fn finish(sbom: &mut Sbom, partial: Partial) {
                 name: component_name,
                 version,
                 kind: kind.unwrap_or_else(|| UNKNOWN_KIND.to_string()),
-                purl,
+                purl: purl.filter(|_| classified.outcome != Outcome::Malformed),
                 key: classified.key,
                 package: classified.package,
             });
