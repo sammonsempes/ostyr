@@ -918,6 +918,13 @@ async fn logins_hold_at_most_half_of_the_pool() -> TestResult {
     assert!(login(&base, source, "alice", "secret", None).await.is_ok());
     assert_eq!((base.login_permits.available_permits(), base.permits.available_permits()), (1, POOL));
     let held = base.login_permits.clone().acquire_owned().await?;
+    let patient = ApiClient {
+        http: base.http.clone(),
+        base: base.base.clone(),
+        permits: base.permits.clone(),
+        login_permits: base.login_permits.clone(),
+        deadline: base.deadline,
+    };
     let starved = ApiClient {
         deadline: BLOCKED_WAIT,
         ..base
@@ -926,7 +933,7 @@ async fn logins_hold_at_most_half_of_the_pool() -> TestResult {
         login(&starved, source, "alice", "secret", None).await,
         Err(ApiFailure::Throttled)
     ));
-    assert!(list_alerts(&starved, source, &secret(TOKEN), None, None).await.is_ok());
+    assert!(list_alerts(&patient, source, &secret(TOKEN), None, None).await.is_ok());
     drop(held);
     starved.login_permits.close();
     assert!(matches!(
