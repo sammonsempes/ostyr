@@ -68,3 +68,9 @@ pub const MAX_TIMEOUT_MS: u64 = 600_000;
 
 
 pub const MAX_USER_BYTES: usize = 64;
+
+
+pub const MAX_READ_ROWS: usize = 250_000;
+
+
+pub const MAX_READ_BYTES: u64 = 67_108_864;

@@ -91,6 +91,7 @@ pub fn table_ddl(database: &str, table: &str) -> Result<String, StoreError> {
          `feed` String,\n    \
          `feed_version` String,\n    \
          `confidence` UInt8,\n    \
+         `tlp` LowCardinality(String),\n    \
          `first_seen` DateTime('UTC'),\n    \
          `last_seen` DateTime('UTC'),\n    \
          `expires_at` DateTime('UTC'),\n    \
@@ -99,6 +100,26 @@ pub fn table_ddl(database: &str, table: &str) -> Result<String, StoreError> {
          ENGINE = ReplacingMergeTree(`version`)\n\
          ORDER BY (`tenant`, `ioc_type`, `value`)\n\
          TTL `expires_at` DELETE"
+    ))
+}
+
+
+/// Adds the TLP column to a table created before it existed; such rows read as `red` until the next load rewrites them.
+pub fn tlp_column_ddl(database: &str, table: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS `tlp` LowCardinality(String) DEFAULT 'red'",
+        qualified(database, table)?
+    ))
+}
+
+
+/// One tenant's live network and domain IOCs, one more than the cap so the reader can tell a truncated list from a full one.
+pub fn read_statement(database: &str, table: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
+         FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
+         AND `expires_at` > toDateTime({{now:UInt32}}) ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}} FORMAT JSONEachRow",
+        qualified(database, table)?
     ))
 }
 
@@ -169,6 +190,7 @@ pub fn row_of(ioc: &Ioc, settings: &StoreSettings, now: OffsetDateTime) -> RowOu
                 "feed": source.feed,
                 "feed_version": source.version,
                 "confidence": ioc.confidence,
+                "tlp": ioc.tlp,
                 "first_seen": epoch_u32(ioc.first_seen.unix_timestamp()),
                 "last_seen": epoch_u32(ioc.last_seen.unix_timestamp()),
                 "expires_at": epoch_u32(expires),

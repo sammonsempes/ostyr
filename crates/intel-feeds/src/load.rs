@@ -1,6 +1,6 @@
 use crate::config::{validate_clickhouse, ClickhouseConfig, ClickhouseError, FeedConfig};
 use crate::model::Ioc;
-use crate::store::{dictionary_ddl, insert_plan, insert_statement, quote_identifier, settings_for, table_ddl, Batch, StoreError};
+use crate::store::{dictionary_ddl, insert_plan, insert_statement, quote_identifier, settings_for, table_ddl, tlp_column_ddl, Batch, StoreError};
 use core_pg::error::PgError;
 use core_pg::password::{read_limited, read_password};
 use serde::Serialize;
@@ -121,11 +121,12 @@ pub fn post(
 }
 
 
-/// Database, table and dictionary, each `IF NOT EXISTS`, so a rerun changes nothing.
+/// Database, table, its TLP column and dictionary, each `IF NOT EXISTS`, so a rerun changes nothing.
 pub fn schema_statements(config: &ClickhouseConfig) -> Result<Vec<String>, StoreError> {
     Ok(vec![
         format!("CREATE DATABASE IF NOT EXISTS {}", quote_identifier(&config.database)?),
         table_ddl(&config.database, &config.table)?,
+        tlp_column_ddl(&config.database, &config.table)?,
         dictionary_ddl(
             &config.database,
             &config.table,
@@ -137,7 +138,7 @@ pub fn schema_statements(config: &ClickhouseConfig) -> Result<Vec<String>, Store
 }
 
 
-/// Runs the three statements in order and stops at the first refusal.
+/// Runs the four statements in order and stops at the first refusal.
 pub fn ensure_schema(agent: &Agent, config: &ClickhouseConfig, password: &str, elapsed: &dyn Fn() -> Duration) -> Result<(), LoadError> {
     let budget = Duration::from_millis(config.timeout_ms);
     schema_statements(config)?.into_iter().try_for_each(|statement| {
