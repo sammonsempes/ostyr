@@ -465,6 +465,28 @@ pub fn comment_notice(language: Language, comment: &CommentView) -> Markup {
 }
 
 
+/// The page after a stored comment whose case could not be read again: the stored comment, our own text and a GET form to `target`.
+pub fn comment_unloaded_page(
+    language: Language,
+    csrf: Option<&str>,
+    comment: &CommentView,
+    target: &str,
+    message_key: &str,
+    label_key: &str,
+) -> Markup {
+    layout(
+        language,
+        "title_case",
+        csrf,
+        html! {
+            div { (text(language, message_key)) }
+            (comment_notice(language, comment))
+            (go(target, text(language, label_key)))
+        },
+    )
+}
+
+
 pub fn case_page(language: Language, csrf: &str, case: &CaseDetailView) -> Markup {
     case_page_with(language, csrf, case, None)
 }
