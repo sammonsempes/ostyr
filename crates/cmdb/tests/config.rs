@@ -228,3 +228,22 @@ fn relationships_and_sources_of_truth_are_checked_at_load() -> TestResult {
     assert!(origin.to_string().contains("source of truth source"), "{origin}");
     Ok(())
 }
+
+
+#[test]
+fn empty_and_reserved_names_are_refused_at_load() -> TestResult {
+    [
+        (edge("", "b"), "relationship from"),
+        (edge("a", ""), "relationship to"),
+        ("sources_of_truth:\n  \"\": declared\n".to_string(), "source of truth attribute"),
+        ("sources_of_truth:\n  owner: \"\"\n".to_string(), "source of truth source"),
+        ("sources_of_truth:\n  owner: cmdb\n".to_string(), "source of truth source"),
+        ("sources_of_truth:\n  \"key:serial\": declared\n".to_string(), "source of truth attribute"),
+    ]
+    .iter()
+    .try_for_each(|(text, field)| -> TestResult {
+        let message = config_error(text)?.to_string();
+        assert!(message.contains("cmdb.yaml") && message.contains(field), "{message}");
+        Ok(())
+    })
+}
