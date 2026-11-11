@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,4 +77,36 @@ pub struct KnownSerial {
     pub issuer_der_hex: String,
     pub serial: String,
     pub issuer_key_hash: String,
+}
+
+
+/// One certificate found by a scan with every path it was seen at (at most `MAX_PATHS_PER_CERT`, the rest counted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundCert {
+    pub record: CertRecord,
+    pub paths: Vec<String>,
+    pub paths_omitted: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SkipCounts {
+    pub over_count: usize,
+    pub not_regular: usize,
+    pub too_large: usize,
+    pub swapped: usize,
+    pub unreadable: usize,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanOutcome {
+    pub records: Vec<FoundCert>,
+    pub examined: usize,
+    pub skipped: SkipCounts,
+    pub malformed: BTreeMap<&'static str, usize>,
+    pub max_open_dirs: usize,
+    pub private_keys_refused: usize,
+    pub errors: Vec<String>,
+    pub errors_omitted: usize,
 }
