@@ -1,11 +1,15 @@
-use crate::api::{get_alert, get_case, list_alerts, list_cases, login, logout, valid_case_id, valid_cursor, valid_id};
+use crate::api::{
+    get_alert, get_case, list_alerts, list_cases, login, logout, post_case_action, post_case_comment, valid_case_id, valid_cursor, valid_id,
+    MAX_COMMENT_CHARS,
+};
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, Language, Opened, Principal, WebLimits, WebState};
-use crate::pages::{alert_page, alerts_page, case_page, cases_page, error_page, login_page, STYLESHEET};
+use crate::pages::{alert_page, alerts_page, case_page, case_page_with, cases_page, error_page, login_page, STYLESHEET};
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
     LANGUAGE_COOKIE_SECONDS, LOGIN_COOKIE, LOGIN_COOKIE_SECONDS, SESSION_COOKIE,
 };
+use crate::strings::checked_action;
 use crate::types::{Form, Refused, SharedWeb};
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
@@ -178,6 +182,7 @@ pub fn api_refusal(language: Language, csrf: Option<&str>, failure: &ApiFailure)
         ApiFailure::NotFound => refusal(language, csrf, StatusCode::NOT_FOUND, "error_not_found"),
         ApiFailure::Throttled => refusal(language, csrf, StatusCode::TOO_MANY_REQUESTS, "error_throttled"),
         ApiFailure::BadRequest => refusal(language, csrf, StatusCode::BAD_REQUEST, "error_bad_request"),
+        ApiFailure::Conflict(key) => refusal(language, csrf, StatusCode::CONFLICT, key),
         ApiFailure::Unavailable(_) | ApiFailure::Status(_) | ApiFailure::TooLarge | ApiFailure::Malformed(_) | ApiFailure::Json(_) => {
             refusal(language, csrf, StatusCode::BAD_GATEWAY, "error_unavailable")
         }
@@ -511,6 +516,102 @@ pub async fn show_case(
 }
 
 
+pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
+
+
+pub const FORM_BYTES_PER_CHAR: usize = 12;
+
+
+pub const FORM_OVERHEAD_BYTES: usize = 1024;
+
+
+/// A comment of the API's cap of four-byte characters must fit the form, so this route reads more than `form_bytes`, still bounded.
+pub fn comment_limits(limits: &WebLimits) -> WebLimits {
+    WebLimits {
+        form_bytes: limits.form_bytes.max(COMMENT_FORM_BYTES),
+        ..*limits
+    }
+}
+
+
+/// The session, the form and the CSRF token, in that order and before anything else; the form is returned for the fields.
+pub async fn write_request(state: &WebState, headers: &HeaderMap, body: Body, limits: &WebLimits) -> Result<(Principal, Form), Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let form = read_form(body, limits).await.map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    require(
+        csrf_matches(&principal.csrf, field(&form, "csrf")),
+        language,
+        StatusCode::FORBIDDEN,
+        "error_csrf",
+    )?;
+    Ok((principal, form))
+}
+
+
+pub async fn submit_case_action(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str, body: Body) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let (principal, form) = write_request(state, headers, body, &state.limits).await?;
+    require(valid_case_id(id), language, StatusCode::NOT_FOUND, "error_not_found")?;
+    let resolution = form.get("resolution").map(String::as_str).filter(|value| !value.is_empty());
+    let (action, fixed_resolution) = checked_action(field(&form, "action"), resolution)
+        .ok_or_else(|| Box::new(refusal(language, None, StatusCode::BAD_REQUEST, "error_bad_request")))?;
+    let client = state.api.load_full();
+    let case = post_case_action(&client, source, &principal.token, id, action, fixed_resolution)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &case_page(language, &principal.csrf, &case), &[]))
+}
+
+
+pub async fn case_action_submit(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    merge(submit_case_action(&state, peer.ip(), &headers, &id, body).await)
+}
+
+
+pub fn comment_shaped(text: &str) -> bool {
+    !text.trim().is_empty() && text.chars().count() <= MAX_COMMENT_CHARS
+}
+
+
+pub async fn submit_case_comment(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str, body: Body) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let (principal, form) = write_request(state, headers, body, &comment_limits(&state.limits)).await?;
+    require(valid_case_id(id), language, StatusCode::NOT_FOUND, "error_not_found")?;
+    let text = field(&form, "text");
+    require(comment_shaped(text), language, StatusCode::BAD_REQUEST, "error_bad_request")?;
+    let client = state.api.load_full();
+    let stored = post_case_comment(&client, source, &principal.token, id, text)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    let case = get_case(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(
+        StatusCode::OK,
+        &case_page_with(language, &principal.csrf, &case, Some(&stored)),
+        &[],
+    ))
+}
+
+
+pub async fn case_comment_submit(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    merge(submit_case_comment(&state, peer.ip(), &headers, &id, body).await)
+}
+
+
 pub fn build_router(state: SharedWeb) -> Router {
     Router::new()
         .route("/", get(index))
@@ -521,6 +622,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/alerts/{id}", get(show_alert))
         .route("/cases", get(show_cases))
         .route("/cases/{id}", get(show_case))
+        .route("/cases/{id}/action", post(case_action_submit))
+        .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))
         .fallback(not_found)
         .layer(from_fn(harden))

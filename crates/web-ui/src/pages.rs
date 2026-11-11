@@ -1,7 +1,8 @@
-use crate::api::valid_case_id;
-use crate::model::{Alert, AlertPage, CaseDetailView, CasePageView, CaseSummaryView, Language};
+use crate::api::{valid_case_id, MAX_COMMENT_CHARS};
+use crate::model::{Alert, AlertPage, CaseDetailView, CasePageView, CaseSummaryView, CommentView, Language};
 use crate::strings::{
-    case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key, task_status_key, text,
+    action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
+    task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
 use maud::{html, Markup, DOCTYPE};
 use serde_json::{Map, Value};
@@ -31,7 +32,8 @@ pub const STYLESHEET: &str = "body{font-family:sans-serif;margin:0;color:#1b1f23
 background:#1b1f23;color:#fff}header button{color:#fff;background:none;border:0;font:inherit;cursor:pointer;text-decoration:underline}\
 main{padding:1rem}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ccc;padding:.4rem;text-align:left}\
 .sev-low{color:#0a6}.sev-medium{color:#b80}.sev-high{color:#c30}.sev-critical{color:#c00;font-weight:bold}\
-form.go{display:inline;margin:0}td button,main>form.go button{color:#06c}label{display:block;margin:.5rem 0}.notice{color:#c00}dt{font-weight:bold}";
+form.go{display:inline;margin:0}td button,main>form.go button{color:#06c}label{display:block;margin:.5rem 0}.notice{color:#c00}dt{font-weight:bold}\
+main>form{margin:.5rem 0}textarea{display:block;width:100%;min-height:6rem}.comment{white-space:pre-wrap;border:1px solid #ccc;padding:.5rem}";
 
 
 /// Text from the API or any peer: control and bidirectional-override characters dropped, long values cut with a visible count.
@@ -393,7 +395,71 @@ pub fn description_text(language: Language, description: Option<&String>) -> Str
 }
 
 
+/// One POST form per action the status allows; `close` carries the resolution list of the fixed table.
+pub fn action_form(language: Language, csrf: &str, id: &str, action: &str) -> Markup {
+    html! {
+        form method="post" action=(format!("/cases/{id}/action")) {
+            input type="hidden" name="csrf" value=(csrf);
+            input type="hidden" name="action" value=(action);
+            @if action == CLOSE_ACTION {
+                label {
+                    (text(language, "case_resolution"))
+                    select name="resolution" required {
+                        @for resolution in RESOLUTIONS { option value=(resolution) { (text(language, resolution_key(resolution))) } }
+                    }
+                }
+            }
+            button type="submit" { (text(language, action_key(action))) }
+        }
+    }
+}
+
+
+pub fn comment_form(language: Language, csrf: &str, id: &str) -> Markup {
+    html! {
+        form method="post" action=(format!("/cases/{id}/comment")) {
+            input type="hidden" name="csrf" value=(csrf);
+            label {
+                (text(language, "comment_label"))
+                textarea name="text" required maxlength=(MAX_COMMENT_CHARS) {}
+            }
+            button type="submit" { (text(language, "comment_submit")) }
+        }
+    }
+}
+
+
+/// The write forms exist only for an id inside the case grammar, because the id becomes part of their action.
+pub fn case_forms(language: Language, csrf: &str, case: &CaseDetailView) -> Markup {
+    let id = &case.summary.id;
+    html! {
+        @if valid_case_id(id) {
+            h2 { (text(language, "case_actions")) }
+            @for action in allowed_actions(&case.summary.status) { (action_form(language, csrf, id, action)) }
+            (comment_form(language, csrf, id))
+        }
+    }
+}
+
+
+/// The comment as the API stored it, shown after a successful post.
+pub fn comment_notice(language: Language, comment: &CommentView) -> Markup {
+    html! {
+        div class="comment" {
+            strong { (text(language, "comment_added")) }
+            " " (clip(language, &comment.author, MAX_FIELD_CHARS)) " " (format_time(language, comment.at))
+            div { (clip(language, &comment.text, MAX_TEXT_CHARS)) }
+        }
+    }
+}
+
+
 pub fn case_page(language: Language, csrf: &str, case: &CaseDetailView) -> Markup {
+    case_page_with(language, csrf, case, None)
+}
+
+
+pub fn case_page_with(language: Language, csrf: &str, case: &CaseDetailView, comment: Option<&CommentView>) -> Markup {
     let summary = &case.summary;
     layout(
         language,
@@ -425,7 +491,9 @@ pub fn case_page(language: Language, csrf: &str, case: &CaseDetailView) -> Marku
             (case_tasks(language, case))
             h2 { (text(language, "case_counts")) }
             (case_counts(language, case))
-            (go("/cases", text(language, "case_back")))
+            @if let Some(stored) = comment { (comment_notice(language, stored)) }
+            (case_forms(language, csrf, case))
+            (go("/cases",text(language, "case_back")))
         },
     )
 }

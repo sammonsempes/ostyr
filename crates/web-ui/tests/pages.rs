@@ -2,11 +2,13 @@ use serde_json::{json, Map};
 use std::collections::BTreeSet;
 use types::TestResult;
 use web_ui::api::valid_case_id;
-use web_ui::model::{Alert, AlertPage, CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, Language, Severity};
-use web_ui::pages::{alert_page, alerts_page, case_page, cases_page, clip, display_value, error_page, format_time, login_page, optional};
+use web_ui::model::{Alert, AlertPage, CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, Severity};
+use web_ui::pages::{
+    alert_page, alerts_page, case_page, case_page_with, cases_page, clip, display_value, error_page, format_time, login_page, optional,
+};
 use web_ui::strings::{
-    case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key, table, task_status_key, text,
-    ENGLISH, FRENCH, MISSING_TEXT,
+    action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, language_tag, resolution_key, severity_class, severity_key,
+    status_key, table, task_status_key, text, ACTIONS, ENGLISH, FRENCH, MISSING_TEXT, RESOLUTIONS,
 };
 
 
@@ -20,7 +22,11 @@ const LANGUAGES: [Language; 2] = [Language::English, Language::French];
 const SEVERITIES: [Severity; 4] = [Severity::Low, Severity::Medium, Severity::High, Severity::Critical];
 
 
-const ERROR_KEYS: [&str; 7] = [
+const ERROR_KEYS: [&str; 11] = [
+    "error_transition_not_allowed",
+    "error_resolution_required",
+    "error_case_changed",
+    "error_comment_full",
     "error_generic",
     "error_forbidden",
     "error_not_found",
@@ -112,6 +118,9 @@ fn every_page_renders_in_both_languages_without_a_missing_text() -> TestResult {
             ),
             case_page(language, "token", &case_detail_view("critical", "closed", Some("duplicate"))),
             case_page(language, "token", &case_detail_view("x", "y", None)),
+            case_page(language, "token", &case_detail_view("low", "new", None)),
+            case_page_with(language, "token", &case_detail_view("low", "in_progress", None), Some(&stored_comment())),
+            case_page_with(language, "token", &case_detail_view("low", "closed", Some("benign")), None),
         ];
         rendered.extend(ERROR_KEYS.iter().map(|key| error_page(language, Some("token"), key)));
         rendered.extend(ERROR_KEYS.iter().map(|key| error_page(language, None, key)));
@@ -219,6 +228,53 @@ fn case_detail_view(severity: &str, status: &str, resolution: Option<&str>) -> C
             },
         ],
     }
+}
+
+
+fn stored_comment() -> CommentView {
+    CommentView {
+        author: "alice".to_owned(),
+        at: 0,
+        text: "note".to_owned(),
+    }
+}
+
+
+#[test]
+fn a_case_id_outside_the_grammar_gets_no_write_form() -> TestResult {
+    let mut case = case_detail_view("low", "new", None);
+    case.summary.id = "../x".to_owned();
+    let page = case_page(Language::English, "token", &case).0;
+    assert!(!page.contains("method=\"post\" action=\"/cases/") && !page.contains("<textarea") && !page.contains("../x"));
+    Ok(())
+}
+
+
+#[test]
+fn the_write_forms_use_the_fixed_tables() -> TestResult {
+    assert!(allowed_actions("weird").is_empty());
+    assert_eq!(allowed_actions("new"), ["start", "close"]);
+    assert_eq!(allowed_actions("in_progress"), ["close"]);
+    assert_eq!(allowed_actions("closed"), ["reopen"]);
+    for action in ACTIONS {
+        assert!(ENGLISH.iter().any(|(key, _)| *key == action_key(action)), "{action}");
+    }
+    assert_eq!(action_key("drop"), "unknown");
+    for resolution in RESOLUTIONS {
+        assert_ne!(resolution_key(resolution), "unknown");
+    }
+    assert_eq!(checked_action("start", None), Some(("start", None)));
+    assert_eq!(checked_action("close", Some("benign")), Some(("close", Some("benign"))));
+    for (action, resolution) in [
+        ("close", None),
+        ("close", Some("x")),
+        ("start", Some("benign")),
+        ("x", None),
+        ("", Some("benign")),
+    ] {
+        assert_eq!(checked_action(action, resolution), None, "{action} {resolution:?}");
+    }
+    Ok(())
 }
 
 

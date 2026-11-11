@@ -4,11 +4,19 @@ mod types;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use types::TestResult;
-use web_ui::api::{alerts_path, cases_path, classify, get_alert, get_case, valid_cursor, valid_id, valid_token, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES};
+use web_ui::api::{
+    alerts_path, cases_path, classify, conflict_failure, get_alert, get_case, valid_cursor, valid_id, valid_token, MAX_COMMENT_CHARS,
+    MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
+};
 use web_ui::client::build_client;
+use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
-use web_ui::model::ApiSection;
+use web_ui::model::{ApiSection, WebLimits};
+use web_ui::routes::{comment_limits, comment_shaped, COMMENT_FORM_BYTES};
 use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, session_key, set_cookie};
+
+
+const CONFLICT: u16 = 409;
 
 
 const CONNECTIONS: usize = 4;
@@ -129,6 +137,52 @@ async fn an_invalid_id_is_not_found_without_a_call() -> TestResult {
         get_alert(&client, SOURCE, &token, &"a".repeat(ID_LENGTH)).await,
         Err(ApiFailure::Unavailable(_))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn a_conflict_is_one_of_the_fixed_codes_or_a_plain_status() -> TestResult {
+    for (code, key) in [
+        ("transition_not_allowed", "error_transition_not_allowed"),
+        ("resolution_required", "error_resolution_required"),
+        ("case_changed", "error_case_changed"),
+        ("full", "error_comment_full"),
+    ] {
+        let body = format!("{{\"error\":{{\"code\":\"{code}\",\"message\":\"m\"}}}}");
+        assert!(
+            matches!(conflict_failure(body.as_bytes()), ApiFailure::Conflict(found) if found == key),
+            "{code}"
+        );
+    }
+    for body in ["{\"error\":{\"code\":\"other\",\"message\":\"m\"}}", "not json", "{}", ""] {
+        assert!(matches!(conflict_failure(body.as_bytes()), ApiFailure::Status(CONFLICT)), "{body}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_comment_is_non_blank_and_within_the_cap() -> TestResult {
+    assert!(comment_shaped("a") && comment_shaped(&"é".repeat(MAX_COMMENT_CHARS)));
+    assert!(!comment_shaped("") && !comment_shaped(" \n\t") && !comment_shaped(&"é".repeat(MAX_COMMENT_CHARS + 1)));
+    Ok(())
+}
+
+
+#[test]
+fn the_comment_route_reads_at_least_a_full_comment() -> TestResult {
+    let small = WebLimits {
+        form_bytes: 1,
+        ..DEFAULT_LIMITS
+    };
+    assert_eq!(comment_limits(&small).form_bytes, COMMENT_FORM_BYTES);
+    assert_eq!(comment_limits(&small).login_max, small.login_max);
+    let large = WebLimits {
+        form_bytes: COMMENT_FORM_BYTES + 1,
+        ..DEFAULT_LIMITS
+    };
+    assert_eq!(comment_limits(&large).form_bytes, COMMENT_FORM_BYTES + 1);
     Ok(())
 }
 

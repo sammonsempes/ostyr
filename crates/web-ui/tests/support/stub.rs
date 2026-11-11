@@ -75,6 +75,8 @@ pub struct StubState {
     pub logins: AtomicUsize,
     pub details: AtomicUsize,
     pub case_paths: Mutex<Vec<String>>,
+    pub writes: Mutex<Vec<String>>,
+    pub conflict: Mutex<Option<String>>,
     pub last_query: Mutex<String>,
 }
 
@@ -399,8 +401,95 @@ pub async fn case_detail_handler(State(state): State<Arc<StubState>>, headers: H
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
             Mode::BadId => Json(case_detail("other", "t", "new")).into_response(),
             _ if id == "missing" => error_reply(StatusCode::NOT_FOUND),
-            _ => Json(case_detail(&id, "Phishing wave", "in_progress")).into_response(),
+            _ => Json(case_detail(&id, "Phishing wave", status_of(&id))).into_response(),
         }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub const RAW_CONFLICT: &str = "raw";
+
+
+pub fn status_of(id: &str) -> &'static str {
+    if id.ends_with("-new") {
+        "new"
+    } else if id.ends_with("-closed") {
+        "closed"
+    } else {
+        "in_progress"
+    }
+}
+
+
+pub fn conflict_reply(code: &str) -> Response {
+    if code == RAW_CONFLICT {
+        (StatusCode::CONFLICT, "not json").into_response()
+    } else {
+        (StatusCode::CONFLICT, Json(json!({"error": {"code": code, "message": LEAK}}))).into_response()
+    }
+}
+
+
+pub fn note_write(state: &StubState, path: String, body: &Bytes) {
+    state
+        .writes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(format!("{path} {}", String::from_utf8_lossy(body)));
+}
+
+
+pub fn write_failure(state: &StubState) -> Option<Response> {
+    let conflict = state.conflict.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    match (conflict, mode_of(state)) {
+        (Some(code), _) => Some(conflict_reply(&code)),
+        (None, Mode::Status(status)) => Some(error_reply(status)),
+        _ => None,
+    }
+}
+
+
+pub fn action_reply(id: &str, body: &Value) -> Value {
+    let status = match body.get("action").and_then(Value::as_str) {
+        Some("close") => "closed",
+        _ => "in_progress",
+    };
+    merged(
+        case_detail(id, "Phishing wave", status),
+        json!({"resolution": body.get("resolution").cloned().unwrap_or(Value::Null)}),
+    )
+}
+
+
+pub async fn case_action_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, body: Bytes) -> Response {
+    note_forwarded(&state, &headers);
+    note_write(&state, format!("/cases/{id}/actions"), &body);
+    if authorised(&headers) {
+        write_failure(&state).unwrap_or_else(|| {
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let reply_id = if mode_of(&state) == Mode::BadId { "other" } else { id.as_str() };
+            Json(action_reply(reply_id, &parsed)).into_response()
+        })
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn case_comment_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, body: Bytes) -> Response {
+    note_forwarded(&state, &headers);
+    note_write(&state, format!("/cases/{id}/comments"), &body);
+    if authorised(&headers) {
+        write_failure(&state).unwrap_or_else(|| {
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let text = match mode_of(&state) {
+                Mode::Hostile => json!(format!("{HOSTILE}\u{202e}")),
+                _ => parsed.get("text").cloned().unwrap_or(Value::Null),
+            };
+            (StatusCode::CREATED, Json(json!({"author": "alice", "at": CASE_CREATED, "text": text}))).into_response()
+        })
     } else {
         error_reply(StatusCode::UNAUTHORIZED)
     }
@@ -417,6 +506,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         logins: AtomicUsize::new(0),
         details: AtomicUsize::new(0),
         case_paths: Mutex::new(Vec::new()),
+        writes: Mutex::new(Vec::new()),
+        conflict: Mutex::new(None),
         last_query: Mutex::new(String::new()),
     });
     let router = Router::new()
@@ -426,6 +517,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/alerts/{id}", get(detail_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
+        .route("/cases/{id}/actions", post(case_action_handler))
+        .route("/cases/{id}/comments", post(case_comment_handler))
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

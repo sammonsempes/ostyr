@@ -99,6 +99,14 @@ pub struct CaseDetailView {
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CommentView {
+    pub author: String,
+    pub at: i64,
+    pub text: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CasePageView {
     pub items: Vec<CaseSummaryView>,
     pub next_cursor: Option<String>,
