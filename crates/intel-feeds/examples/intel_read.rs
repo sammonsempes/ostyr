@@ -1,6 +1,6 @@
 use core_config::load::load_file;
 use intel_feeds::config::FeedsFile;
-use intel_feeds::read::read_iocs;
+use intel_feeds::read::{read_iocs, total_bad};
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
 use std::path::Path;
@@ -13,7 +13,7 @@ fn start(feeds_file: &str, fixed_now: Option<&String>) -> Result<(), Box<dyn Err
     let config = feeds.clickhouse.ok_or("the feeds file has no clickhouse section")?;
     let now = fixed_now.map_or(Ok(OffsetDateTime::now_utc()), |text| OffsetDateTime::parse(text, &Rfc3339))?;
     let summary = read_iocs(&config, now, &mut stdout())?;
-    writeln!(stderr(), "rows={} bad_rows={}", summary.rows, summary.bad_rows)?;
+    writeln!(stderr(), "rows={} bad_rows={} {:?}", summary.rows, total_bad(&summary.bad), summary.bad)?;
     Ok(())
 }
 

@@ -9,6 +9,7 @@ use core_pg::password::read_password;
 use serde::{Deserialize, Deserializer};
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::InsertClass;
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::time::Duration;
 use thiserror::Error;
@@ -29,10 +30,10 @@ pub enum ReadError {
     Refused(InsertClass),
     #[error("the reply body could not be read")]
     Body(#[source] io::Error),
-    #[error("more than {MAX_READ_ROWS} rows: the list would be truncated")]
-    TooManyRows,
-    #[error("reply larger than {MAX_READ_BYTES} bytes: the list would be truncated")]
-    TooManyBytes,
+    #[error("more than {0} rows: the list would be truncated")]
+    TooManyRows(usize),
+    #[error("reply larger than {0} bytes: the list would be truncated")]
+    TooManyBytes(u64),
     #[error("the IOC lines could not be written")]
     Output(#[source] io::Error),
 }
@@ -48,38 +49,141 @@ pub enum RowError {
 }
 
 
+/// Why a row was left out; the text is a fixed key, never the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadReason {
+    UnknownTlp,
+    UnknownType,
+    BadTime,
+    BadJson,
+}
+
+
+pub const FIELD_REASONS: [BadReason; 3] = [BadReason::UnknownTlp, BadReason::UnknownType, BadReason::BadTime];
+
+
+impl fmt::Display for BadReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UnknownTlp => "unknown_tlp",
+            Self::UnknownType => "unknown_type",
+            Self::BadTime => "bad_time",
+            Self::BadJson => "bad_json",
+        })
+    }
+}
+
+
+/// Counted rows per reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BadRows {
+    pub unknown_tlp: u64,
+    pub unknown_type: u64,
+    pub bad_time: u64,
+    pub bad_json: u64,
+}
+
+
+pub fn total_bad(bad: &BadRows) -> u64 {
+    bad.unknown_tlp + bad.unknown_type + bad.bad_time + bad.bad_json
+}
+
+
+pub fn count_bad(bad: BadRows, reason: BadReason) -> BadRows {
+    match reason {
+        BadReason::UnknownTlp => BadRows {
+            unknown_tlp: bad.unknown_tlp + 1,
+            ..bad
+        },
+        BadReason::UnknownType => BadRows {
+            unknown_type: bad.unknown_type + 1,
+            ..bad
+        },
+        BadReason::BadTime => BadRows {
+            bad_time: bad.bad_time + 1,
+            ..bad
+        },
+        BadReason::BadJson => BadRows {
+            bad_json: bad.bad_json + 1,
+            ..bad
+        },
+    }
+}
+
+
+/// The reason of a failed row: a field's own fixed key, else bad JSON.
+pub fn reason_of(error: &RowError) -> BadReason {
+    match error {
+        RowError::Line(_) => BadReason::BadJson,
+        RowError::Json(source) => {
+            let text = source.to_string();
+            FIELD_REASONS
+                .into_iter()
+                .find(|reason| text.starts_with(&reason.to_string()))
+                .unwrap_or(BadReason::BadJson)
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadSummary {
     pub rows: usize,
-    pub bad_rows: u64,
+    pub bad: BadRows,
 }
+
+
+/// The caps of one read: rows and reply bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadCaps {
+    pub rows: usize,
+    pub bytes: u64,
+}
+
+
+pub const DEFAULT_CAPS: ReadCaps = ReadCaps {
+    rows: MAX_READ_ROWS,
+    bytes: MAX_READ_BYTES,
+};
 
 
 /// The IOC lines read so far, held until the whole reply is known to be complete.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Collected {
     pub lines: Vec<String>,
-    pub bad_rows: u64,
+    pub bad: BadRows,
 }
 
 
-pub fn clickhouse_time<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<OffsetDateTime, Source::Error> {
+pub fn clickhouse_time<'de, Input: Deserializer<'de>>(deserializer: Input) -> Result<OffsetDateTime, Input::Error> {
     String::deserialize(deserializer).and_then(|text| {
         PrimitiveDateTime::parse(&text, format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"))
             .map(PrimitiveDateTime::assume_utc)
-            .map_err(serde::de::Error::custom)
+            .map_err(|_| serde::de::Error::custom(BadReason::BadTime))
     })
+}
+
+
+pub fn known_tlp<'de, Input: Deserializer<'de>>(deserializer: Input) -> Result<Tlp, Input::Error> {
+    Tlp::deserialize(deserializer).map_err(|_| serde::de::Error::custom(BadReason::UnknownTlp))
+}
+
+
+pub fn known_type<'de, Input: Deserializer<'de>>(deserializer: Input) -> Result<IocType, Input::Error> {
+    IocType::deserialize(deserializer).map_err(|_| serde::de::Error::custom(BadReason::UnknownType))
 }
 
 
 /// One `JSONEachRow` line of the read statement; DateTime columns arrive as `YYYY-MM-DD HH:MM:SS` in UTC.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct StoredRow {
+    #[serde(deserialize_with = "known_type")]
     pub ioc_type: IocType,
     pub value: String,
     pub feed: String,
     pub feed_version: String,
     pub confidence: u8,
+    #[serde(deserialize_with = "known_tlp")]
     pub tlp: Tlp,
     #[serde(deserialize_with = "clickhouse_time")]
     pub first_seen: OffsetDateTime,
@@ -125,6 +229,7 @@ pub fn request_rows(
     password: &str,
     statement: &str,
     now: OffsetDateTime,
+    max_rows: usize,
 ) -> Result<Response<Body>, ReadError> {
     let reply = agent
         .post(&config.url)
@@ -133,7 +238,7 @@ pub fn request_rows(
         .query("query", statement)
         .query("param_tenant", &config.tenant)
         .query("param_now", epoch_u32(now.unix_timestamp()).to_string())
-        .query("param_limit", (MAX_READ_ROWS + 1).to_string())
+        .query("param_limit", (max_rows + 1).to_string())
         .config()
         .timeout_global(Some(Duration::from_millis(config.timeout_ms)))
         .http_status_as_error(false)
@@ -149,15 +254,15 @@ pub fn request_rows(
 
 
 /// Stops at the first row over `MAX_READ_ROWS`; a bad line is counted and the read goes on.
-pub fn collect_rows(reader: &mut dyn BufRead) -> Result<Collected, ReadError> {
+pub fn collect_rows(reader: &mut dyn BufRead, max_rows: usize) -> Result<Collected, ReadError> {
     numbered_lines(reader).try_fold(Collected::default(), |mut collected, line| {
         let numbered = line.map_err(ReadError::Body)?;
         match ioc_line(numbered.text) {
             Ok(json) => collected.lines.push(json),
-            Err(_) => collected.bad_rows += 1,
+            Err(error) => collected.bad = count_bad(collected.bad, reason_of(&error)),
         }
-        if collected.lines.len() > MAX_READ_ROWS {
-            Err(ReadError::TooManyRows)
+        if collected.lines.len() > max_rows {
+            Err(ReadError::TooManyRows(max_rows))
         } else {
             Ok(collected)
         }
@@ -165,17 +270,17 @@ pub fn collect_rows(reader: &mut dyn BufRead) -> Result<Collected, ReadError> {
 }
 
 
-pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime) -> Result<Collected, ReadError> {
+pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime, caps: ReadCaps) -> Result<Collected, ReadError> {
     validate_clickhouse(config).map_err(LoadError::Settings)?;
     let statement = read_statement(&config.database, &config.table)?;
     let password = read_password(&config.password_file).map_err(LoadError::Password)?;
     let key = std::str::from_utf8(&password).map_err(LoadError::PasswordEncoding)?;
     let agent = agent_for(config)?;
-    let response = request_rows(&agent, config, key, &statement, now)?;
-    let mut reader = BufReader::new(response.into_body().into_reader().take(MAX_READ_BYTES + 1));
-    let collected = collect_rows(&mut reader)?;
+    let response = request_rows(&agent, config, key, &statement, now, caps.rows)?;
+    let mut reader = BufReader::new(response.into_body().into_reader().take(caps.bytes + 1));
+    let collected = collect_rows(&mut reader, caps.rows)?;
     if reader.get_ref().limit() == 0 {
-        Err(ReadError::TooManyBytes)
+        Err(ReadError::TooManyBytes(caps.bytes))
     } else {
         Ok(collected)
     }
@@ -184,7 +289,13 @@ pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime) -> Result<Co
 
 /// Reads one tenant's live IOCs and writes them as JSON lines only when the reply was complete: a truncated list is an error, nothing is written.
 pub fn read_iocs(config: &ClickhouseConfig, now: OffsetDateTime, out: &mut dyn Write) -> Result<ReadSummary, ReadError> {
-    let result = collect_iocs(config, now).and_then(|collected| {
+    read_iocs_capped(config, now, out, DEFAULT_CAPS)
+}
+
+
+/// `read_iocs` with the caps as arguments, so tests can use small ones.
+pub fn read_iocs_capped(config: &ClickhouseConfig, now: OffsetDateTime, out: &mut dyn Write, caps: ReadCaps) -> Result<ReadSummary, ReadError> {
+    let result = collect_iocs(config, now, caps).and_then(|collected| {
         collected
             .lines
             .iter()
@@ -192,13 +303,13 @@ pub fn read_iocs(config: &ClickhouseConfig, now: OffsetDateTime, out: &mut dyn W
             .map_err(ReadError::Output)
             .map(|()| ReadSummary {
                 rows: collected.lines.len(),
-                bad_rows: collected.bad_rows,
+                bad: collected.bad,
             })
     });
     match &result {
         Ok(summary) => {
-            let (rows, bad_rows) = (summary.rows, summary.bad_rows);
-            info!(rows, bad_rows, "IOC read done");
+            let (rows, bad) = (summary.rows, summary.bad);
+            info!(rows, bad.unknown_tlp, bad.unknown_type, bad.bad_time, bad.bad_json, "IOC read done");
         }
         Err(_) => warn!("IOC read failed"),
     }
