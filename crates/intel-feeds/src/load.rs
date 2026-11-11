@@ -89,7 +89,7 @@ pub fn agent_for(config: &ClickhouseConfig) -> Result<Agent, LoadError> {
         .as_deref()
         .map(|path| read_limited(path, MAX_CA_BYTES).map_err(LoadError::CaFile))
         .transpose()?;
-    Ok(new_agent(pem.as_deref(), !is_loopback_http(&config.url))?)
+    Ok(new_agent(pem.as_deref().map(Vec::as_slice), !is_loopback_http(&config.url))?)
 }
 
 

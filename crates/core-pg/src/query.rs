@@ -6,9 +6,12 @@ use tokio::time::timeout;
 use tokio_postgres::{Client, Row};
 
 
-/// The `SET` goes in the same message as the script: the server enforces the deadline, and the client gives up at the same instant.
+const MIN_TIMEOUT_MILLIS: u128 = 1;
+
+
+/// A deadline under 1 ms is sent as 1 ms, because 0 disables the server limit. The `SET` goes in the same message as the script: the server enforces the deadline, and the client gives up at the same instant.
 pub fn timed_script(sql: &str, deadline: Duration) -> String {
-    format!("SET statement_timeout = {}; {sql}", deadline.as_millis())
+    format!("SET statement_timeout = {}; {sql}", deadline.as_millis().max(MIN_TIMEOUT_MILLIS))
 }
 
 

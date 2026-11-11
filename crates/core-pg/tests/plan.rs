@@ -9,6 +9,9 @@ use std::error::Error;
 use std::time::Duration;
 
 
+const SUB_MILLI_MICROS: u64 = 500;
+
+
 const MAX_NAMESPACE: usize = 32;
 
 
@@ -125,6 +128,16 @@ fn scripts_take_the_lock_and_record_before_the_sql() -> Result<(), Box<dyn Error
 fn statement_timeout_is_prefixed_in_milliseconds() -> Result<(), Box<dyn Error>> {
     let script = timed_script("SELECT 1", Duration::from_secs(DEADLINE_SECONDS));
     assert_eq!(script, format!("SET statement_timeout = {DEADLINE_MILLIS}; SELECT 1"));
+    Ok(())
+}
+
+
+#[test]
+fn statement_timeout_is_never_zero() -> Result<(), Box<dyn Error>> {
+    assert_eq!(timed_script("X", Duration::ZERO), "SET statement_timeout = 1; X");
+    assert_eq!(timed_script("X", Duration::from_micros(SUB_MILLI_MICROS)), "SET statement_timeout = 1; X");
+    assert_eq!(timed_script("X", Duration::from_millis(1)), "SET statement_timeout = 1; X");
+    assert!(timed_script("X", Duration::from_secs(u64::MAX)).starts_with("SET statement_timeout = 18446744073709551615000;"));
     Ok(())
 }
 

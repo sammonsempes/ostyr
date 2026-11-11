@@ -6,6 +6,12 @@ use std::io::{self, Read};
 use tempfile::tempdir;
 
 
+const ROOM: u64 = 8;
+
+
+const TIGHT: u64 = 2;
+
+
 const HUGE: usize = 2000;
 
 
@@ -70,5 +76,14 @@ fn errors_never_hold_the_password() -> Result<(), Box<dyn Error>> {
     fs::write(&path, "x".repeat(HUGE))?;
     let message = format!("{:?}", read_password(&path));
     assert!(!message.contains("xxxxxxxx"), "{message}");
+    Ok(())
+}
+
+
+#[test]
+fn the_capped_buffer_is_zeroizing_on_every_path() -> Result<(), Box<dyn Error>> {
+    let kept: zeroize::Zeroizing<Vec<u8>> = read_capped(&mut "abc".as_bytes(), ROOM, "x")?;
+    assert_eq!(kept.as_slice(), b"abc");
+    assert!(matches!(read_capped(&mut "abcdef".as_bytes(), TIGHT, "x"), Err(PgError::TooLarge { .. })));
     Ok(())
 }

@@ -85,7 +85,7 @@ pub fn clickhouse_sender<'a>(
         .as_deref()
         .map(|path| read_limited(path, MAX_CA_BYTES).map_err(SendError::CaFile))
         .transpose()?;
-    let agent = new_agent(pem.as_deref(), !is_loopback_http(&settings.url))?;
+    let agent = new_agent(pem.as_deref().map(Vec::as_slice), !is_loopback_http(&settings.url))?;
     let budget = Duration::from_millis(settings.timeout_ms);
     Ok(move |body: &[u8]| {
         let failure = post_batch(&agent, settings, &statement, &key, body, budget.saturating_sub(elapsed()));
