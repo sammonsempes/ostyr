@@ -1652,6 +1652,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dhcp-kea"
+version = "0.0.0"
+dependencies = [
+ "core-export",
+ "ecs-normalise",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
