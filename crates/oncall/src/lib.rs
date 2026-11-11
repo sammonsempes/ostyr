@@ -6,6 +6,7 @@ pub mod channel;
 pub mod error;
 pub mod escalation;
 pub mod grouping;
+pub mod holder;
 pub mod lifecycle;
 pub mod limits;
 pub mod link;
