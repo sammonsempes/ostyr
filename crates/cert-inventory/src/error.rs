@@ -33,3 +33,14 @@ pub enum CtError {
         column: usize,
     },
 }
+
+
+#[derive(Debug, Error)]
+pub enum ScanError {
+    #[error("{name} must be at least 1")]
+    Zero { name: &'static str },
+    #[error("{name} is {value}, above the {max} ceiling")]
+    AboveCeiling { name: &'static str, value: u64, max: u64 },
+    #[error("an extension is 1 to {max} bytes without a dot or a path separator")]
+    BadExtension { max: usize },
+}
