@@ -5,7 +5,7 @@ use crate::error::{OncallError, SourceError, StoreError};
 use crate::holder::validate_holder;
 use crate::limits::{
     LEASE_FACTOR, MAX_FINGERPRINT_BYTES, MAX_PURGE_PER_ROUND, MAX_SKIP_PER_POLL, MAX_SOURCE_INTERVAL_SECONDS, MAX_SOURCE_TENANTS,
-    MAX_SOURCE_TEXT_CHARS, SEVERITY_COUNT,
+    MAX_SOURCE_TEXT_CHARS, PURGE_SERVER_TIMEOUT_MILLIS, SEVERITY_COUNT,
 };
 use crate::model::AlertNotice;
 use crate::rows::{cell_int, cell_text};
@@ -18,6 +18,7 @@ use alerts::store::{alert_from_row, MAX_PAGE_SIZE};
 use alerts::types::{Executor as AlertsExecutor, Row as AlertsRow};
 use chrono::{DateTime, Utc};
 use core_config::parse::parse_document;
+use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +31,10 @@ pub const COLUMN_HOST: usize = 2;
 
 
 pub const COLUMN_USER: usize = 3;
+
+
+/// SQLSTATE of a statement the server cancelled for its `statement_timeout`.
+pub const STATEMENT_CANCELLED: &str = "57014";
 
 
 pub const FINGERPRINT_PREFIX: &str = "alert:";
@@ -54,8 +59,9 @@ pub const RECORD_SQL: &str = "WITH already AS (SELECT 1 FROM oncall_alert_detail
     SELECT (SELECT count(*) FROM detail), (SELECT count(*) FROM already)";
 
 
-/// Params: `$2` JSON array of the polled tenants, `$3` limit, `$4` poller id; `$1` must be a polled tenant. Drops at most `$3` rows of unpolled tenants and only while `$4` holds an unexpired lease (checked inside this statement); answers (tenant, count) rows, or one row with an empty tenant when it does not hold it.
-pub const PURGE_SQL: &str = "WITH RECURSIVE held AS (SELECT 1 FROM oncall_poller_lease WHERE holder = $4::text AND expires_at > clock_timestamp()), \
+/// Params: `$2` JSON array of the polled tenants, `$3` limit, `$4` poller id, `$5` margin in milliseconds; `$1` must be a polled tenant. Drops at most `$3` rows of unpolled tenants and only while `$4` holds a lease with more than `$5` ms left (checked inside this statement, the lease row share-locked until the purge ends); answers (tenant, count) rows, or one row with an empty tenant when it does not hold it.
+pub const PURGE_SQL: &str = "WITH RECURSIVE held AS (SELECT 1 FROM oncall_poller_lease WHERE holder = $4::text \
+    AND expires_at > clock_timestamp() + ($5::text::bigint * interval '1 millisecond') FOR SHARE), \
     seen(tenant) AS (SELECT min(tenant) FROM alert_outbox UNION ALL \
     SELECT (SELECT min(o.tenant) FROM alert_outbox o WHERE o.tenant > seen.tenant) FROM seen WHERE seen.tenant IS NOT NULL), \
     unpolled AS (SELECT tenant FROM seen WHERE tenant IS NOT NULL AND $1::text = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb))) \
@@ -276,6 +282,25 @@ pub fn count_answer(rows: &[AlertsRow]) -> Result<usize, AlertsError> {
 }
 
 
+/// The two statements of one purge transaction, in order: `SET LOCAL statement_timeout` (`PURGE_SERVER_TIMEOUT_MILLIS`) and `PURGE_SQL`; a service executor runs both in one transaction.
+pub fn purge_statements() -> (String, String) {
+    (
+        format!("SET LOCAL statement_timeout = {PURGE_SERVER_TIMEOUT_MILLIS}"),
+        PURGE_SQL.to_owned(),
+    )
+}
+
+
+/// A purge the server cancelled (SQLSTATE 57014) or the client gave up on.
+pub fn purge_error(error: AlertsError) -> SourceError {
+    match error {
+        AlertsError::Pg(PgError::Server { code, .. }) if code == STATEMENT_CANCELLED => SourceError::PurgeDeadline,
+        AlertsError::Pg(PgError::StatementTimeout { .. }) => SourceError::PurgeDeadline,
+        other => SourceError::Alerts(other),
+    }
+}
+
+
 /// Drops, at most `MAX_PURGE_PER_ROUND` rows, the outbox rows of tenants this poller does not serve, while `holder` holds the lease (checked by the statement itself); `None` when it does not.
 pub async fn purge_unpolled(
     alerts_exec: AlertsExecutor<'_, '_>,
@@ -285,8 +310,15 @@ pub async fn purge_unpolled(
     validate_holder(holder)?;
     let first = settings.tenants.first().ok_or(SourceError::NoTenants)?;
     let polled = serde_json::Value::from(settings.tenants.clone()).to_string();
-    let params = vec![polled, MAX_PURGE_PER_ROUND.to_string(), holder.to_owned()];
-    let rows = alerts_exec(tenant_scope(first)?, PURGE_SQL, params).await.map_err(AlertsError::from)?;
+    let params = vec![
+        polled,
+        MAX_PURGE_PER_ROUND.to_string(),
+        holder.to_owned(),
+        PURGE_SERVER_TIMEOUT_MILLIS.to_string(),
+    ];
+    let rows = alerts_exec(tenant_scope(first)?, PURGE_SQL, params)
+        .await
+        .map_err(|error| purge_error(AlertsError::from(error)))?;
     let lost = rows.iter().any(|row| row.first().is_some_and(String::is_empty));
     if lost {
         Ok(None)
@@ -425,12 +457,11 @@ where
 }
 
 
-/// `rounds` polls, `report` after each and `wait` for the interval between them; a poller that lost the lease logs it once, until it holds it again.
+/// `rounds` polls, each on the snapshot `live()` returns at its start, `report` after each and `wait` for the interval between them; a poller that lost the lease logs it once, until it holds it again.
 pub async fn run_rounds<Executor, Pending>(
     rounds: usize,
     alerts_exec: AlertsExecutor<'_, '_>,
     exec: &mut Executor,
-    settings: &SourceSettings,
     holder: &str,
     hooks: &RoundHooks<'_>,
     live: LiveSettingsFn<'_>,
@@ -440,7 +471,8 @@ pub async fn run_rounds<Executor, Pending>(
 {
     let mut warned = false;
     for _round in 0..rounds {
-        let round = poll_all(alerts_exec, exec, settings, holder, hooks.now, live).await;
+        let settings = live();
+        let round = poll_all(alerts_exec, exec, &settings, holder, hooks.now, live).await;
         if matches!(round.leased, Ok(false)) && !warned {
             warn!("another on-call poller holds the lease: this poller does nothing until it expires");
         }

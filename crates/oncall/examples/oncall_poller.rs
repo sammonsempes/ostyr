@@ -7,14 +7,14 @@ use chrono::{DateTime, Utc};
 use core_pg::connect::connect;
 use core_pg::error::{reduce, PgError};
 use core_pg::migrate::migrate;
-use core_pg::query::{scoped_query, timed_script};
+use core_pg::query::scoped_query;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use core_pg::settings::parse_settings;
 use oncall::alert::{Cell, Param, Statement};
-use oncall::alert_source::{parse_source_settings, run_rounds, Round, RoundHooks, SourceSettings, PURGE_SQL};
+use oncall::alert_source::{parse_source_settings, purge_statements, run_rounds, Round, RoundHooks, SourceSettings, PURGE_SQL};
 use oncall::error::StoreError;
 use oncall::holder::process_holder;
-use oncall::limits::{PURGE_CLIENT_DEADLINE_MILLIS, PURGE_SERVER_TIMEOUT_MILLIS};
+use oncall::limits::PURGE_CLIENT_DEADLINE_MILLIS;
 use oncall::link::os_random;
 use oncall::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use oncall::types::{PurgedCounts, Row};
@@ -140,16 +140,23 @@ async fn purge_rows(client: &Client, scope: TenantScope, params: Vec<String>) ->
     let bound: Vec<&(dyn ToSql + Sync)> = std::iter::once(&tenant as &(dyn ToSql + Sync))
         .chain(params.iter().map(|param| param as &(dyn ToSql + Sync)))
         .collect();
-    let server = Duration::from_millis(PURGE_SERVER_TIMEOUT_MILLIS);
+    let (set_timeout, purge) = purge_statements();
     let work = async {
-        client.batch_execute(&timed_script("", server)).await.map_err(reduce)?;
-        client.query(PURGE_SQL, &bound).await.map_err(reduce)
+        client.batch_execute(&format!("BEGIN; {set_timeout}")).await.map_err(reduce)?;
+        let outcome = client.query(&purge, &bound).await.map_err(reduce);
+        let end = if outcome.is_ok() { "COMMIT" } else { "ROLLBACK" };
+        client.batch_execute(end).await.map_err(reduce)?;
+        outcome
     };
-    let rows = tokio::time::timeout(Duration::from_millis(PURGE_CLIENT_DEADLINE_MILLIS), work)
-        .await
-        .map_err(|_elapsed| PgError::StatementTimeout {
-            seconds: PURGE_CLIENT_DEADLINE_MILLIS / MILLIS_PER_SECOND,
-        })??;
+    let finished = tokio::time::timeout(Duration::from_millis(PURGE_CLIENT_DEADLINE_MILLIS), work).await;
+    if finished.is_err() {
+        if let Err(error) = client.batch_execute("ROLLBACK").await {
+            tracing::warn!("rollback after a purge deadline failed: {error}");
+        }
+    }
+    let rows = finished.map_err(|_elapsed| PgError::StatementTimeout {
+        seconds: PURGE_CLIENT_DEADLINE_MILLIS / MILLIS_PER_SECOND,
+    })??;
     rows.iter()
         .map(|row| (0..row.len()).map(|index| row.try_get::<_, String>(index).map_err(reduce)).collect())
         .collect()
@@ -229,7 +236,7 @@ async fn poll_loop(pg_file: &Path, source_file: &Path, label: &str) -> Result<()
     for _round in 0..MAX_ROUNDS {
         let source = parse_source_settings(&std::fs::read_to_string(source_file)?, &source_file.display().to_string(), wall_clock())?;
         let live = || latest(source_file, &source);
-        run_rounds(1, &alerts_exec, &mut exec, &source, &holder, &hooks, &live).await;
+        run_rounds(1, &alerts_exec, &mut exec, &holder, &hooks, &live).await;
     }
     Ok(())
 }

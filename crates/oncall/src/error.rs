@@ -174,6 +174,8 @@ pub enum StoreError {
 pub enum SourceError {
     #[error("the alert store failed")]
     Alerts(#[from] alerts::error::StoreError),
+    #[error("the purge ran past its deadline")]
+    PurgeDeadline,
     #[error("the on-call store failed")]
     Store(#[from] StoreError),
     #[error("no source tenant is configured")]
