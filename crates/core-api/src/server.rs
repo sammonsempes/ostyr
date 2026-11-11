@@ -16,6 +16,7 @@ use axum_server::Server;
 use core_audit::log::check_private;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
+use core_config::reload::reload;
 use hyper_util::rt::TokioTimer;
 use rustls::crypto::ring::default_provider;
 use rustls::version::{TLS12, TLS13};
@@ -356,6 +357,8 @@ pub async fn run_loaded(
     start_first(&setup, &config, tls)?;
     let _stop_server = ServerStop(listener.clone());
     rewatch(&setup.rewatch, watched_files(module_file, &config))?;
+    let startup_outcome = reload(&engine);
+    tracing::debug!(?startup_outcome, "startup reload");
     #[cfg(unix)]
     let _signals = core_config::signal::reload_on_signals(engine, &[signal_hook::consts::SIGHUP])?;
     #[cfg(not(unix))]
