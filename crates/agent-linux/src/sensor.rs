@@ -1,7 +1,7 @@
 use crate::error::{SensorError, SourceError};
 use crate::model::SensorSettings;
 use crate::spool::append_locked;
-use crate::types::{RunFn, RunFuture, SharedSensor, SpoolLock};
+use crate::types::{KillFn, RunFn, RunFuture, SharedSensor, SpoolLock};
 use agent_channel::types::{ClockFn, PauseFn};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::types::SharedAuditFn;
@@ -9,6 +9,7 @@ use rustix::process::{kill_process_group, Pid, Signal};
 use rustix::time::{clock_gettime, ClockId};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::io;
 use std::iter::once;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -247,17 +248,18 @@ pub fn restart_arguments() -> Vec<String> {
 }
 
 
-/// Kills the whole process group of a command when dropped: a deadline or a finished command leaves no grandchild behind.
+/// Kills the whole process group of a command when dropped unless disarmed: a deadline, abort or oversized output leaves no grandchild behind.
 #[derive(Debug)]
 pub struct GroupKill {
     pub group: Option<Pid>,
+    pub kill: KillFn,
 }
 
 
 impl Drop for GroupKill {
     fn drop(&mut self) {
         self.group.into_iter().for_each(|group| {
-            kill_process_group(group, Signal::KILL)
+            (self.kill)(group)
                 .inspect_err(|error| tracing::debug!(%error, "no process left in the command group"))
                 .ok();
         });
@@ -265,8 +267,18 @@ impl Drop for GroupKill {
 }
 
 
-/// Runs the command in its own process group with at most `MAX_OUTPUT_BYTES` of standard output read, a deadline, and the child killed when dropped.
+pub fn kill_group(group: Pid) -> rustix::io::Result<()> {
+    kill_process_group(group, Signal::KILL)
+}
+
+
 pub async fn run_bounded(program: PathBuf, arguments: Vec<String>) -> Result<String, SensorError> {
+    run_bounded_with(program, arguments, kill_group).await
+}
+
+
+/// Runs the command in its own process group with at most `MAX_OUTPUT_BYTES` of standard output read, a deadline, and the child killed when dropped.
+pub async fn run_bounded_with(program: PathBuf, arguments: Vec<String>, kill: KillFn) -> Result<String, SensorError> {
     let mut child = Command::new(program)
         .args(arguments)
         .stdin(Stdio::null())
@@ -275,8 +287,9 @@ pub async fn run_bounded(program: PathBuf, arguments: Vec<String>) -> Result<Str
         .kill_on_drop(true)
         .process_group(0)
         .spawn()?;
-    let _group = GroupKill {
+    let mut guard = GroupKill {
         group: child.id().and_then(|id| Pid::from_raw(id as i32)),
+        kill,
     };
     let mut output = Vec::new();
     for pipe in child.stdout.take().into_iter() {
@@ -286,6 +299,7 @@ pub async fn run_bounded(program: PathBuf, arguments: Vec<String>) -> Result<Str
         Err(SensorError::TooLarge(MAX_OUTPUT_BYTES))
     } else {
         let status = child.wait().await?;
+        guard.group = None;
         if status.success() {
             Ok(String::from_utf8(output)?)
         } else {
@@ -477,6 +491,15 @@ pub async fn restart(env: &SensorEnv, audit: &SharedAuditFn, reason: SensorState
 }
 
 
+/// The event line appended on a blocking thread: the lock and the fsync stay off the async worker.
+pub async fn append_event(env: &SensorEnv, event: &SensorEvent) -> io::Result<bool> {
+    let (lock, spool, line) = (env.lock.clone(), env.spool.clone(), sensor_event_line(event));
+    tokio::task::spawn_blocking(move || append_locked(&lock, once(Ok(line)), &spool))
+        .await
+        .map_err(io::Error::other)?
+}
+
+
 /// One tick: observe, decide, spool the event of a transition, restart while a restart is due.
 pub async fn tick(
     env: &SensorEnv,
@@ -493,7 +516,8 @@ pub async fn tick(
         tracing::info!(state, previous, "sensor state changed");
     }
     if let Some(event) = &action.event {
-        append_locked(&env.lock, once(Ok(sensor_event_line(event))), &env.spool)
+        append_event(env, event)
+            .await
             .inspect_err(|error| tracing::error!(%error, "sensor event not spooled, the agent stops"))?;
     }
     if action.suppressed {
