@@ -185,7 +185,10 @@ fn sequences(spool: &Spool, from: u64) -> Result<Vec<u64>, SpoolError> {
 fn segment_files(dir: &TempDir) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut names = fs::read_dir(dir.path())?
         .map(|entry| entry.map(|found| found.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|name| name.ends_with(".seg"))
+        .collect::<Vec<_>>();
     names.sort();
     Ok(names)
 }
@@ -677,7 +680,7 @@ fn a_directory_replaced_after_open_is_not_followed() -> TestResult {
     fs::create_dir(dir.path())?;
     push(&mut spool, Priority::Low, SOME)?;
     assert!(segment_files(&dir)?.is_empty());
-    assert_eq!(fs::read_dir(&moved)?.count(), ROTATED_FILES);
+    assert_eq!(fs::read_dir(&moved)?.count(), ROTATED_FILES + 1);
     fs::remove_dir_all(&moved)?;
     Ok(())
 }

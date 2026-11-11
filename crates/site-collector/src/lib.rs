@@ -2,6 +2,7 @@
 
 pub mod admission;
 pub mod dirfs;
+pub mod epoch;
 pub mod error;
 pub mod forward;
 pub mod forward_model;

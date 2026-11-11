@@ -10,6 +10,7 @@ agent-channel = { path = "../agent-channel" }
 arc-swap = "1.9.3"
 core-config = { path = "../core-config" }
 core-export = { path = "../core-export" }
+ecs-normalise = { path = "../ecs-normalise" }
 chrono = { version = "0.4", default-features = false }
 crc32fast = "1"
 serde = { version = "1", features = ["derive"] }
@@ -19,7 +20,7 @@ time = "0.3"
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["fs", "process"] }
+rustix = { version = "1.1", features = ["fs", "process", "rand"] }
 
 [dev-dependencies]
 core-audit = { path = "../core-audit" }

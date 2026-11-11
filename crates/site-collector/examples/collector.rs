@@ -7,7 +7,7 @@ use site_collector::listen::{open_runtime, receive_cycle};
 use site_collector::listen_model::{ListenerSettings, Runtime, SharedSocket, MAX_CYCLES};
 use site_collector::listen_settings::open_listener_engine;
 use site_collector::model::MAX_MESSAGE_BYTES;
-use site_collector::spool::{open_spool, read_from, spool_stats};
+use site_collector::spool::{open_spool, read_from, spool_stats, sync_range};
 use site_collector::spool_model::SpoolConfig;
 use std::error::Error;
 use std::io::{stdin, stdout, BufRead, Write};
@@ -43,6 +43,14 @@ const USAGE: &str =
     "usage: collector <settings-file> <audit-file> <spool-dir> [agent-spool-file]; with the last one, admitted records are forwarded every second; stdin: quit (prints the counters and the spool); the settings file is watched";
 
 
+fn error_chain(error: &dyn Error) -> String {
+    std::iter::successors(Some(error), |current| (*current).source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+
 fn current_year() -> i32 {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
     FIRST_YEAR + i32::try_from(seconds / SECONDS_PER_YEAR).unwrap_or(0)
@@ -70,10 +78,10 @@ fn receive_and_forward(
                 max_records: current_config(engine).forward_batch_records,
                 agent_spool_max_bytes: MAX_AGENT_SPOOL_BYTES,
             };
-            let line = match forward_once(&mut runtime.spool, path, &limits, OffsetDateTime::now_utc(), write_cursor) {
+            let line = match forward_once(&mut runtime.spool, path, &limits, OffsetDateTime::now_utc(), write_cursor, sync_range) {
                 Ok(report) if report == ForwardReport::default() => String::new(),
                 Ok(report) => format!("forward {report:?}"),
-                Err(error) => format!("forward failed: {error}"),
+                Err(error) => format!("forward failed: {}", error_chain(&error)),
             };
             if let Err(error) = (!line.is_empty()).then(|| writeln!(stdout(), "{line}")).transpose() {
                 tracing::error!(%error, "cannot write the forward line");
