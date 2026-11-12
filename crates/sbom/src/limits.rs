@@ -1,5 +1,8 @@
 //! Default caps and fixed constants.
 
+use unicode_general_category::GeneralCategory;
+
+
 pub const DEFAULT_MAX_BYTES: usize = 67_108_864;
 
 
@@ -18,7 +21,43 @@ pub const MAX_JSON_NESTING: u32 = 256;
 pub const COMPONENTS_KEY: &str = "components";
 
 
+pub const PACKAGES_KEY: &str = "packages";
+
+
+pub const SPDX_VERSION_KEY: &str = "spdxVersion";
+
+
+pub const BOM_FORMAT_KEY: &str = "bomFormat";
+
+
+pub const MAX_EXTERNAL_REFS: usize = 1024;
+
+
 pub const UNKNOWN_KIND: &str = "unknown";
+
+
+pub const HOSTILE_CATEGORIES: [GeneralCategory; 7] = [
+    GeneralCategory::Control,
+    GeneralCategory::Format,
+    GeneralCategory::LineSeparator,
+    GeneralCategory::ParagraphSeparator,
+    GeneralCategory::Surrogate,
+    GeneralCategory::PrivateUse,
+    GeneralCategory::Unassigned,
+];
+
+
+pub const IGNORABLE_RANGES: [(char, char); 9] = [
+    ('\u{034f}', '\u{034f}'),
+    ('\u{115f}', '\u{1160}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180d}'),
+    ('\u{180f}', '\u{180f}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{fe00}', '\u{fe0f}'),
+    ('\u{ffa0}', '\u{ffa0}'),
+    ('\u{e0100}', '\u{e01ef}'),
+];
 
 
 pub const NO_VERSION: &str = "";

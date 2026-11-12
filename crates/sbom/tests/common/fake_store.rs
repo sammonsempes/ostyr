@@ -36,10 +36,10 @@ pub const SECRET_KEY: &str = "very-secret-key-material";
 pub const NOW: u64 = 1_000;
 
 
-pub const FIRST: &str = r#"{"components":[{"type":"library","name":"a","version":"1","purl":"pkg:cargo/a@1"}]}"#;
+pub const FIRST: &str = r#"{"bomFormat":"CycloneDX","components":[{"type":"library","name":"a","version":"1","purl":"pkg:cargo/a@1"}]}"#;
 
 
-pub const SECOND: &str = r#"{"components":[{"type":"library","name":"a","version":"2","purl":"pkg:cargo/a@2"}]}"#;
+pub const SECOND: &str = r#"{"bomFormat":"CycloneDX","components":[{"type":"library","name":"a","version":"2","purl":"pkg:cargo/a@2"}]}"#;
 
 
 pub fn meta(tenant: &str, version: u64) -> DocumentMeta {

@@ -14,9 +14,11 @@ pub enum SbomError {
     TooDeep { max: usize },
     #[error("a member name is longer than {max} bytes")]
     NameTooLong { max: usize },
+    #[error("the document is neither SPDX nor CycloneDX")]
+    UnknownFormat,
     #[error("cannot read the document")]
     Read(#[from] std::io::Error),
-    #[error("invalid CycloneDX JSON")]
+    #[error("invalid SBOM JSON")]
     Json(#[from] ReaderError),
 }
 
