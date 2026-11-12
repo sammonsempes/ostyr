@@ -1,5 +1,6 @@
 //! A lease for a device the CMDB does not know, as an alert of the alert store (spec section 14).
 
+use crate::cursor::{read_cursor, write_cursor};
 use crate::row::{normalise_mac, valid_hostname, Converted};
 use alerts::error::StoreError;
 use alerts::id::alert_id;
@@ -191,28 +192,93 @@ pub async fn alerted_macs(exec: Executor<'_, '_>, scope: &TenantScope, candidate
 }
 
 
-/// The MACs of the batch already holding a stored alert: chunked lookups of `MAX_LOOKUP_MACS` until `MAX_UNKNOWN_PER_RUN` unalerted MACs are seen.
-pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted], known_macs: &BTreeSet<String>) -> BTreeSet<String> {
+/// What the lookup learned: the MACs to leave out of the run, the scanned MACs in scan order, how many of them already held an alert, and the chunk the next run starts at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lookup {
+    pub skip: BTreeSet<String>,
+    pub scan_order: Vec<String>,
+    pub found: usize,
+    pub next_chunk: usize,
+}
+
+
+/// The chunk to store after a run that scanned `scanned` chunks from `start`: the last one again when it held fresh MACs beyond the run's cap, else the one after it.
+pub fn next_chunk_of(start: usize, scanned: usize, chunk_count: usize, fresh: usize) -> usize {
+    let stay = usize::from(fresh > MAX_UNKNOWN_PER_RUN && scanned > 0);
+    (start + scanned - stay) % chunk_count.max(1)
+}
+
+
+/// The MACs of the batch to leave out of this run and the order to pick the rest in: at most `MAX_LOOKUP_CHUNKS` chunk lookups from the tenant's stored cursor, wrapping around, until enough fresh MACs are seen; every MAC of an unscanned chunk is left out (its turn is a later run).
+pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted], known_macs: &BTreeSet<String>) -> Lookup {
     let candidates = candidate_macs(leases, known_macs);
-    let mut chunks = candidates.chunks(MAX_LOOKUP_MACS).take(MAX_LOOKUP_CHUNKS);
+    let chunks: Vec<&[String]> = candidates.chunks(MAX_LOOKUP_MACS).collect();
+    let chunk_count = chunks.len();
+    let start = read_cursor(exec, scope).await % chunk_count.max(1);
+    let mut order = (0..chunk_count.min(MAX_LOOKUP_CHUNKS)).filter_map(|offset| {
+        let index = (start + offset) % chunk_count;
+        chunks.get(index).map(|chunk| (index, *chunk))
+    });
+    let mut visited: BTreeSet<usize> = BTreeSet::new();
     let mut alerted: BTreeSet<String> = BTreeSet::new();
+    let mut scan_order: Vec<String> = Vec::new();
     let mut fresh = 0;
-    while fresh < MAX_UNKNOWN_PER_RUN {
-        match chunks.next() {
-            Some(chunk) => {
+    let mut scanned = 0;
+    let mut found_total = 0;
+    let mut done = false;
+    while !done && fresh < MAX_UNKNOWN_PER_RUN {
+        match order.next() {
+            Some((index, chunk)) => {
+                visited.insert(index);
                 let found = alerted_macs(exec, scope, chunk).await;
                 fresh += chunk.len() - found.len();
+                scanned += 1;
+                found_total += found.len();
                 alerted.extend(found);
+                scan_order.extend(chunk.iter().cloned());
             }
-            None => fresh = MAX_UNKNOWN_PER_RUN,
+            None => done = true,
         }
     }
-    alerted
+    let deferred = chunks
+        .iter()
+        .enumerate()
+        .filter(|(index, _chunk)| !visited.contains(index))
+        .flat_map(|(_index, chunk)| chunk.iter().cloned());
+    alerted.extend(deferred);
+    if fresh < MAX_UNKNOWN_PER_RUN && scanned < chunk_count {
+        let total = candidates.len();
+        tracing::warn!(total, scanned, start, "dhcp lookup cap reached");
+    }
+    Lookup {
+        skip: alerted,
+        scan_order,
+        found: found_total,
+        next_chunk: next_chunk_of(start, scanned, chunk_count, fresh),
+    }
+}
+
+
+/// Stores the position the next run starts at; call it after the alerts were stored, so a failed insert repeats the chunks instead of skipping them.
+pub async fn advance_cursor(exec: Executor<'_, '_>, scope: &TenantScope, lookup: &Lookup) {
+    write_cursor(exec, scope, lookup.next_chunk).await;
 }
 
 
 /// One alert per distinct unknown MAC of the batch (first lease wins, batch order), at most `MAX_UNKNOWN_PER_RUN`, plus a flood alert past it.
 pub fn unknown_device_alerts(scope: &TenantScope, leases: &[Converted], known_macs: &BTreeSet<String>, now_micros: u64) -> (Vec<Alert>, Rejected) {
+    unknown_device_alerts_in_order(scope, leases, known_macs, now_micros, &[])
+}
+
+
+/// Like `unknown_device_alerts`, but the MACs of `scan_order` come first, in that order (the lookup's scan order, never the batch order); the others follow in batch order.
+pub fn unknown_device_alerts_in_order(
+    scope: &TenantScope,
+    leases: &[Converted],
+    known_macs: &BTreeSet<String>,
+    now_micros: u64,
+    scan_order: &[String],
+) -> (Vec<Alert>, Rejected) {
     let created_micros = now_micros.min(MAX_CREATED_MICROS);
     let bad_known = known_macs
         .iter()
@@ -220,7 +286,9 @@ pub fn unknown_device_alerts(scope: &TenantScope, leases: &[Converted], known_ma
         .count();
     let macs: Vec<Option<String>> = leases.iter().map(mac_of).collect();
     let no_mac = macs.iter().filter(|mac| mac.is_none()).count();
-    let unknown = unknown_of(&macs, leases, known_macs);
+    let rank: BTreeMap<&str, usize> = scan_order.iter().enumerate().map(|(position, mac)| (mac.as_str(), position)).collect();
+    let mut unknown = unknown_of(&macs, leases, known_macs);
+    unknown.sort_by_key(|(mac, _lease)| rank.get(mac).copied().unwrap_or(usize::MAX));
     let omitted = unknown.len().saturating_sub(MAX_UNKNOWN_PER_RUN);
     let mut alerts: Vec<Alert> = unknown
         .iter()

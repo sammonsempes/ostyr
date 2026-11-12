@@ -9,18 +9,21 @@ use alerts::store::{MAX_CREATED_MICROS, MAX_TITLE_CHARS};
 use alerts::types::{Executor, RowFuture};
 use core_export::ecs::{EndpointFields, HostFields};
 use core_pg::error::PgError;
+use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use dhcp_kea::alerting::{
-    alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, peer_fields, store_unknown_device_alerts,
-    unknown_device_alerts, ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_CHUNKS, MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, SECONDS_PER_DAY,
-    UNKNOWN_RULE_ID,
+    advance_cursor, alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, next_chunk_of, peer_fields,
+    store_unknown_device_alerts, unknown_device_alerts, unknown_device_alerts_in_order, Lookup, ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_CHUNKS,
+    MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, SECONDS_PER_DAY, UNKNOWN_RULE_ID,
 };
+use dhcp_kea::cursor::{read_cursor, write_cursor, MIGRATIONS, MIGRATION_NAMESPACE, READ_SQL as CURSOR_READ_SQL, WRITE_SQL as CURSOR_WRITE_SQL};
 use dhcp_kea::header::parse_header;
 use dhcp_kea::row::{convert_row, Converted};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::ready;
-use std::sync::Mutex;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Arc, LazyLock, Mutex};
 use types::TestResult;
 
 
@@ -66,6 +69,15 @@ const TWO_CHUNKS: usize = 2;
 const THREE_CHUNKS: usize = 3;
 
 
+const FOUR_CHUNKS: usize = 4;
+
+
+const FIVE_CHUNKS: usize = 5;
+
+
+const STORED_CURSOR: usize = 7;
+
+
 const HOSTILE_BYTES: usize = 4_096;
 
 
@@ -82,6 +94,22 @@ pub struct Store {
     pub fail_lookup: bool,
     pub fail_from_lookup: Option<usize>,
     pub lookups: Mutex<usize>,
+    pub cursors: Mutex<BTreeMap<String, String>>,
+    pub fail_cursor_read: bool,
+    pub fail_cursor_write: bool,
+}
+
+
+pub fn cursor_statement(store: &Store, scope: &TenantScope, sql: &str, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
+    let mut cursors = store.cursors.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
+    let tenant = tenant_of(scope).to_owned();
+    if sql == CURSOR_READ_SQL {
+        Ok(cursors.get(&tenant).map_or_else(Vec::new, |text| vec![vec![text.clone()]]))
+    } else {
+        let next = params.first().cloned().ok_or(PgError::InvalidTenant)?;
+        cursors.insert(tenant, next.clone());
+        Ok(vec![vec![next]])
+    }
 }
 
 
@@ -126,8 +154,11 @@ pub fn lookups_so_far(store: &Store) -> usize {
 pub fn executor<'a>(store: &'a Store) -> impl Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'a> + 'a {
     move |scope, sql, params| -> RowFuture<'a> {
         let late_failure = store.fail_from_lookup.is_some_and(|from| lookups_so_far(store) >= from);
-        if store.fail || (store.fail_lookup && sql == ALERTED_SQL) || (late_failure && sql == ALERTED_SQL) {
+        let cursor_failure = (store.fail_cursor_read && sql == CURSOR_READ_SQL) || (store.fail_cursor_write && sql == CURSOR_WRITE_SQL);
+        if store.fail || cursor_failure || (store.fail_lookup && sql == ALERTED_SQL) || (late_failure && sql == ALERTED_SQL) {
             Box::pin(ready(Err(PgError::InvalidTenant)))
+        } else if sql == CURSOR_READ_SQL || sql == CURSOR_WRITE_SQL {
+            Box::pin(ready(cursor_statement(store, &scope, sql, &params)))
         } else if sql == ALERTED_SQL {
             Box::pin(ready(lookup(store, &scope, &params)))
         } else {
@@ -360,9 +391,10 @@ fn one_omitted_mac_still_raises_the_flood_alert() -> TestResult {
 
 
 async fn run_once(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted]) -> Result<Vec<Alert>, Box<dyn std::error::Error>> {
-    let skip = alerted_in_batch(exec, scope, leases, &BTreeSet::new()).await;
-    let (alerts, _rejected) = unknown_device_alerts(scope, leases, &skip, NOW_MICROS);
+    let lookup = alerted_in_batch(exec, scope, leases, &BTreeSet::new()).await;
+    let (alerts, _rejected) = unknown_device_alerts_in_order(scope, leases, &lookup.skip, NOW_MICROS, &lookup.scan_order);
     store_unknown_device_alerts(exec, scope, &alerts).await?;
+    advance_cursor(exec, scope, &lookup).await;
     Ok(alerts)
 }
 
@@ -414,7 +446,7 @@ async fn a_lookup_failure_falls_back_to_batch_order() -> TestResult {
     };
     let exec = executor(&store);
     let leases = many_leases(FLOOD_MACS)?;
-    assert!(alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await.is_empty());
+    assert!(alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await.skip.is_empty());
     let first = run_once(&exec, &scope, &leases).await?;
     let second = run_once(&exec, &scope, &leases).await?;
     assert_eq!((first.len(), second.len()), (MAX_UNKNOWN_PER_RUN + 1, MAX_UNKNOWN_PER_RUN + 1));
@@ -536,7 +568,7 @@ async fn every_run_progresses_past_the_lookup_window_to_the_last_devices() -> Te
     let leases = many_leases(total)?;
     let last = leases.get(total - EXTRA..).ok_or("no tail")?;
     let last_ids = unknown_ids(&unknown_device_alerts(&scope, last, &BTreeSet::new(), NOW_MICROS).0);
-    let runs = total / MAX_UNKNOWN_PER_RUN + 1;
+    let runs = total / MAX_UNKNOWN_PER_RUN + TWO_CHUNKS;
     let mut inserted_per_run = Vec::new();
     for _run in 0..runs {
         let alerts = run_once(&exec, &scope, &leases).await?;
@@ -588,8 +620,8 @@ async fn a_lookup_failure_mid_chunk_keeps_the_earlier_answers_and_stops() -> Tes
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    let alerted = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
-    assert_eq!((alerted.len(), lookups_so_far(&store)), (MAX_LOOKUP_MACS, 1));
+    let alerted = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await.skip;
+    assert_eq!((alerted.len(), lookups_so_far(&store)), (MAX_LOOKUP_MACS * TWO_CHUNKS, 1));
     let known_or_alerted = alerted;
     let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &known_or_alerted, NOW_MICROS);
     assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
@@ -607,6 +639,369 @@ async fn a_second_tenant_with_the_same_macs_sees_none_as_alerted() -> TestResult
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    assert!(alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await.is_empty());
+    let skipped = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await.skip;
+    let candidates = candidate_macs(&leases, &BTreeSet::new());
+    let second_chunk: BTreeSet<String> = candidates.iter().skip(MAX_LOOKUP_MACS).cloned().collect();
+    assert_eq!(skipped, second_chunk);
+    Ok(())
+}
+
+
+const SPOOFED: usize = MAX_LOOKUP_MACS * MAX_LOOKUP_CHUNKS;
+
+
+const SIXTY_THOUSAND: usize = 60_000;
+
+
+const MANY_GENUINE: usize = 300;
+
+
+const GENUINE: usize = 3;
+
+
+const FAR_CURSOR: usize = 1_000_001;
+
+
+const WRAPPED_START: usize = 10;
+
+
+const CAP_WARNING: &str = "lookup cap reached";
+
+
+static ANCHOR: LazyLock<tracing::Dispatch> = LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+fn store_alerted_range(store: &Store, leases: &[Converted], range: std::ops::Range<usize>) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    let macs: Vec<String> = candidate_macs(leases, &BTreeSet::new())
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _mac)| range.contains(index))
+        .map(|(_index, mac)| mac)
+        .collect();
+    macs.iter().try_for_each(|mac| {
+        let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
+        store
+            .rows
+            .lock()
+            .map(|mut rows| rows.insert(("acme".to_owned(), id)))
+            .map(|_inserted| ())
+            .map_err(|_poisoned| "poisoned")
+    })?;
+    Ok(macs.into_iter().collect())
+}
+
+
+fn store_alerted(store: &Store, leases: &[Converted], count: usize) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    store_alerted_range(store, leases, 0..count)
+}
+
+
+fn set_cursor(store: &Store, tenant: &str, value: &str) -> TestResult {
+    store
+        .cursors
+        .lock()
+        .map_err(|_poisoned| "poisoned")?
+        .insert(tenant.to_owned(), value.to_owned());
+    Ok(())
+}
+
+
+fn cursor_of(store: &Store, tenant: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    Ok(store.cursors.lock().map_err(|_poisoned| "poisoned")?.get(tenant).cloned())
+}
+
+
+async fn run_cursor(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted]) -> Result<usize, Box<dyn std::error::Error>> {
+    Ok(unknown_ids(&run_once(exec, scope, leases).await?).len())
+}
+
+
+fn genuine_stored(store: &Store, leases: &[Converted], genuine: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let tail = leases.get(leases.len() - genuine..).ok_or("no tail")?;
+    let rows = store.rows.lock().map_err(|_poisoned| "poisoned")?;
+    let stored = candidate_macs(tail, &BTreeSet::new())
+        .iter()
+        .filter(|mac| rows.contains(&("acme".to_owned(), alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]))))
+        .count();
+    Ok(stored)
+}
+
+
+#[tokio::test]
+async fn spoofed_leases_filling_the_lookup_cap_do_not_hide_the_genuine_tail() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SPOOFED + MANY_GENUINE)?;
+    store_alerted(&store, &leases, SPOOFED)?;
+    let mut stored_after = Vec::new();
+    for _run in 0..THREE_CHUNKS {
+        run_cursor(&exec, &scope, &leases).await?;
+        stored_after.push(genuine_stored(&store, &leases, MANY_GENUINE)?);
+    }
+    assert_eq!(stored_after, [0, MAX_UNKNOWN_PER_RUN, MANY_GENUINE]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn sixty_thousand_alerted_leases_still_reach_the_genuine_tail() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted(&store, &leases, SIXTY_THOUSAND)?;
+    let before = lookups_so_far(&store);
+    run_cursor(&exec, &scope, &leases).await?;
+    assert_eq!(
+        (
+            lookups_so_far(&store) - before,
+            genuine_stored(&store, &leases, GENUINE)?,
+            cursor_of(&store, "acme")?
+        ),
+        (MAX_LOOKUP_CHUNKS, 0, Some("10".to_owned()))
+    );
+    run_cursor(&exec, &scope, &leases).await?;
+    assert_eq!(genuine_stored(&store, &leases, GENUINE)?, GENUINE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_cursor_moves_the_scan_whatever_the_clock_or_the_cadence() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted(&store, &leases, SIXTY_THOUSAND)?;
+    let positions: Vec<Option<String>> = {
+        let mut seen = Vec::new();
+        for _run in 0..THREE_CHUNKS {
+            run_cursor(&exec, &scope, &leases).await?;
+            seen.push(cursor_of(&store, "acme")?);
+        }
+        seen
+    };
+    assert_eq!(positions, [Some("10".to_owned()), Some("7".to_owned()), Some("4".to_owned())]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_scan_wraps_around_the_end_of_the_candidate_list() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SPOOFED + GENUINE)?;
+    let alerted = store_alerted(&store, &leases, SPOOFED)?;
+    set_cursor(&store, "acme", &WRAPPED_START.to_string())?;
+    let before = lookups_so_far(&store);
+    let lookup = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    assert_eq!(lookups_so_far(&store) - before, MAX_LOOKUP_CHUNKS);
+    let first_mac = candidate_macs(&leases, &BTreeSet::new()).into_iter().next().ok_or("no mac")?;
+    assert!(lookup.skip.contains(&first_mac));
+    assert_eq!(lookup.skip, alerted);
+    assert_eq!(
+        lookup.scan_order.first().map(String::as_str),
+        candidate_macs(&leases, &BTreeSet::new())
+            .get(WRAPPED_START * MAX_LOOKUP_MACS)
+            .map(String::as_str)
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_wrapped_window_serves_its_own_tail_before_the_head_chunks() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted_range(&store, &leases, SPOOFED..SIXTY_THOUSAND)?;
+    set_cursor(&store, "acme", &WRAPPED_START.to_string())?;
+    let inserted = run_cursor(&exec, &scope, &leases).await?;
+    assert_eq!((inserted, genuine_stored(&store, &leases, GENUINE)?), (MAX_UNKNOWN_PER_RUN, GENUINE));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_cursor_past_the_chunk_count_wraps_like_its_remainder() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SPOOFED + GENUINE)?;
+    store_alerted(&store, &leases, SPOOFED)?;
+    set_cursor(&store, "acme", &FAR_CURSOR.to_string())?;
+    let far = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    set_cursor(&store, "acme", &(FAR_CURSOR % (MAX_LOOKUP_CHUNKS + 1)).to_string())?;
+    let remainder = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    assert_eq!(far, remainder);
+    let empty = Store::default();
+    let empty_exec = executor(&empty);
+    let small = many_leases(GENUINE)?;
+    assert_eq!(alerted_in_batch(&empty_exec, &scope, &small, &BTreeSet::new()).await.next_chunk, 0);
+    assert_eq!(alerted_in_batch(&empty_exec, &scope, &[], &BTreeSet::new()).await, Lookup::default());
+    Ok(())
+}
+
+
+#[test]
+fn the_next_chunk_stays_on_a_chunk_with_leftover_fresh_macs_else_moves_on() -> TestResult {
+    assert_eq!(next_chunk_of(0, 0, 0, 0), 0);
+    assert_eq!(next_chunk_of(TWO_CHUNKS, THREE_CHUNKS, FIVE_CHUNKS, MAX_UNKNOWN_PER_RUN), 0);
+    assert_eq!(next_chunk_of(TWO_CHUNKS, THREE_CHUNKS, FIVE_CHUNKS, MAX_UNKNOWN_PER_RUN + 1), FOUR_CHUNKS);
+    assert_eq!(next_chunk_of(FOUR_CHUNKS, 1, FIVE_CHUNKS, 0), 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn each_tenant_has_its_own_cursor() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted(&store, &leases, SIXTY_THOUSAND)?;
+    run_cursor(&exec, &scope, &leases).await?;
+    assert_eq!((cursor_of(&store, "acme")?, cursor_of(&store, "other")?), (Some("10".to_owned()), None));
+    let lookup = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await;
+    assert_eq!(lookup.found, 0);
+    advance_cursor(&exec, &other, &lookup).await;
+    assert_eq!(
+        (cursor_of(&store, "acme")?, cursor_of(&store, "other")?),
+        (Some("10".to_owned()), Some("0".to_owned()))
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_deleted_cursor_restarts_at_the_first_chunk() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted(&store, &leases, SIXTY_THOUSAND)?;
+    run_cursor(&exec, &scope, &leases).await?;
+    store.cursors.lock().map_err(|_poisoned| "poisoned")?.clear();
+    assert_eq!(read_cursor(&exec, &scope).await, 0);
+    run_cursor(&exec, &scope, &leases).await?;
+    assert_eq!(cursor_of(&store, "acme")?, Some("10".to_owned()));
+    Ok(())
+}
+
+
+fn capture_dispatch() -> Result<(Arc<std::fs::File>, tracing::Dispatch), Box<dyn std::error::Error>> {
+    let capture = Arc::new(tempfile::tempfile()?);
+    let writer = Arc::clone(&capture);
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Arc::clone(&writer))
+            .finish(),
+    );
+    Ok((capture, dispatch))
+}
+
+
+fn captured_text(capture: &Arc<std::fs::File>) -> Result<String, Box<dyn std::error::Error>> {
+    let mut text = String::new();
+    let mut file: &std::fs::File = capture;
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+
+#[tokio::test]
+async fn a_failed_cursor_write_warns_once_and_the_next_run_repeats_from_the_old_cursor() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let scope = tenant_scope("acme")?;
+    let store = Store {
+        fail_cursor_write: true,
+        ..Store::default()
+    };
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted(&store, &leases, SPOOFED)?;
+    set_cursor(&store, "acme", &WRAPPED_START.to_string())?;
+    let (capture, dispatch) = capture_dispatch()?;
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    let first = run_cursor(&exec, &scope, &leases).await?;
+    drop(guard);
+    let text = captured_text(&capture)?;
+    assert_eq!(text.matches("cursor not stored").count(), 1, "{text}");
+    assert_eq!((first > 0, cursor_of(&store, "acme")?), (true, Some(WRAPPED_START.to_string())));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unreadable_cursor_warns_once_and_starts_at_the_first_chunk() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let scope = tenant_scope("acme")?;
+    let failing = Store {
+        fail_cursor_read: true,
+        ..Store::default()
+    };
+    let failing_exec = executor(&failing);
+    let garbled = Store::default();
+    let garbled_exec = executor(&garbled);
+    set_cursor(&garbled, "acme", "not a number")?;
+    let valid = Store::default();
+    let valid_exec = executor(&valid);
+    set_cursor(&valid, "acme", &STORED_CURSOR.to_string())?;
+    let (capture, dispatch) = capture_dispatch()?;
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    let answers = (
+        read_cursor(&failing_exec, &scope).await,
+        read_cursor(&garbled_exec, &scope).await,
+        read_cursor(&valid_exec, &scope).await,
+    );
+    write_cursor(&valid_exec, &scope, GENUINE).await;
+    drop(guard);
+    let text = captured_text(&capture)?;
+    assert_eq!(answers, (0, 0, STORED_CURSOR));
+    assert_eq!(text.matches("cursor unreadable").count(), TWO_CHUNKS, "{text}");
+    assert_eq!(cursor_of(&valid, "acme")?, Some(GENUINE.to_string()));
+    Ok(())
+}
+
+
+#[test]
+fn the_cursor_statements_bind_the_tenant_and_the_migration_is_valid() -> TestResult {
+    assert!(CURSOR_READ_SQL.contains("tenant = $1") && CURSOR_WRITE_SQL.contains("VALUES ($1,") && CURSOR_WRITE_SQL.contains("ON CONFLICT (tenant)"));
+    check_namespace(MIGRATION_NAMESPACE)?;
+    check_embedded(&MIGRATIONS)?;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_cap_warning_is_emitted_once_per_capped_run_only() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let capped = many_leases(SPOOFED + GENUINE)?;
+    store_alerted(&store, &capped, SPOOFED)?;
+    let exhausted = many_leases(GENUINE)?;
+    let full = many_leases(MAX_UNKNOWN_PER_RUN)?;
+    let (capture, dispatch) = capture_dispatch()?;
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    alerted_in_batch(&exec, &scope, &capped, &BTreeSet::new()).await;
+    let after_capped = capture.metadata()?.len();
+    alerted_in_batch(&exec, &scope, &exhausted, &BTreeSet::new()).await;
+    alerted_in_batch(&exec, &scope, &full, &BTreeSet::new()).await;
+    drop(guard);
+    let text = captured_text(&capture)?;
+    assert!(after_capped > 0);
+    assert_eq!(text.matches(CAP_WARNING).count(), 1, "{text}");
+    assert!(
+        text.contains("total=50003") && text.contains("scanned=10") && text.contains("start=0"),
+        "{text}"
+    );
     Ok(())
 }

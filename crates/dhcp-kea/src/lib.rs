@@ -2,6 +2,7 @@
 
 pub mod alerting;
 pub mod cli;
+pub mod cursor;
 pub mod error;
 pub mod follow;
 pub mod header;
