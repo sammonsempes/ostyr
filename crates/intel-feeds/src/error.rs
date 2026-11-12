@@ -16,6 +16,8 @@ pub enum CanonError {
     Url(#[source] url::ParseError),
     #[error("URL without a host or longer than {MAX_URL_BYTES} bytes")]
     UrlShape,
+    #[error("network or domain too broad to match on")]
+    TooBroad,
     #[error("hash must be {expected} hexadecimal characters")]
     Hash { expected: usize },
 }
@@ -91,6 +93,7 @@ pub fn reason_key(error: &EntryError) -> &'static str {
         EntryError::MissingField(_) => "missing_field",
         EntryError::Timestamp { .. } => "invalid_timestamp",
         EntryError::Confidence { .. } => "invalid_confidence",
+        EntryError::Canon(CanonError::TooBroad) => "too_broad",
         EntryError::Canon(_) => "invalid_value",
         EntryError::UnsupportedPattern => "unsupported_pattern",
         EntryError::NotForDetection => "not_for_detection",

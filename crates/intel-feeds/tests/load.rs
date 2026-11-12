@@ -253,7 +253,7 @@ fn a_server_that_never_answers_hits_the_deadline() -> TestResult {
 
 #[test]
 fn a_spent_deadline_sends_nothing() -> TestResult {
-    let rig = rig(STALL_TIMEOUT_MS)?;
+    let rig = rig(LONG_TIMEOUT_MS)?;
     let spent = || ONE_HOUR;
     assert!(matches!(
         load_iocs(&rig.config, &iocs(1), &[], NOW, &spent),

@@ -1,5 +1,5 @@
 use crate::error::CanonError;
-use crate::limits::{MAX_URL_BYTES, MD5_HEX_LENGTH, SHA1_HEX_LENGTH, SHA256_HEX_LENGTH};
+use crate::limits::{MAX_URL_BYTES, MD5_HEX_LENGTH, MIN_IPV4_PREFIX, MIN_IPV6_PREFIX, SHA1_HEX_LENGTH, SHA256_HEX_LENGTH};
 use crate::model::{Canonical, IocType};
 use ipnet::IpNet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -19,24 +19,40 @@ pub fn canonical_address(text: &str) -> Result<Canonical, CanonError> {
 }
 
 
-/// Host bits are cleared: `10.1.2.3/8` becomes `10.0.0.0/8`.
-pub fn canonical_network(text: &str) -> Result<Canonical, CanonError> {
-    let network: IpNet = text.parse().map_err(CanonError::Network)?;
-    Ok(Canonical {
-        ioc_type: IocType::Cidr,
-        value: network.trunc().to_string(),
-    })
+/// An IPv4 network shorter than `/8` or an IPv6 one shorter than `/16` would match a large part of the internet.
+pub fn is_too_broad(network: &IpNet) -> bool {
+    match network {
+        IpNet::V4(version4) => version4.prefix_len() < MIN_IPV4_PREFIX,
+        IpNet::V6(version6) => version6.prefix_len() < MIN_IPV6_PREFIX,
+    }
 }
 
 
-/// Lowercase, no trailing dot, IDNA to punycode with STD3 rules; idna also enforces the DNS length limits.
+/// Host bits are cleared: `10.1.2.3/8` becomes `10.0.0.0/8`.
+pub fn canonical_network(text: &str) -> Result<Canonical, CanonError> {
+    let network: IpNet = text.parse().map_err(CanonError::Network)?;
+    if is_too_broad(&network) {
+        Err(CanonError::TooBroad)
+    } else {
+        Ok(Canonical {
+            ioc_type: IocType::Cidr,
+            value: network.trunc().to_string(),
+        })
+    }
+}
+
+
+/// A single label (a whole TLD) is too broad. Lowercase, no trailing dot, IDNA to punycode with STD3 rules; idna also enforces the DNS length limits.
 pub fn canonical_domain(text: &str) -> Result<Canonical, CanonError> {
-    idna::domain_to_ascii_strict(text.trim_end_matches('.'))
-        .map(|ascii| Canonical {
+    let ascii = idna::domain_to_ascii_strict(text.trim_end_matches('.')).map_err(CanonError::Domain)?;
+    if ascii.contains('.') {
+        Ok(Canonical {
             ioc_type: IocType::Domain,
             value: ascii,
         })
-        .map_err(CanonError::Domain)
+    } else {
+        Err(CanonError::TooBroad)
+    }
 }
 
 
