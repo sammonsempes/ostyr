@@ -8,7 +8,7 @@ use alerts::store::{get_detail, insert_alerts, list_alerts, set_triage, summaris
 use alerts::types::{RowFuture, TriageFn};
 use axum::Router;
 use core_api::config::DEFAULT_LOG_LEVEL;
-use core_api::model::{ApiConfig, Limits};
+use core_api::model::{ApiConfig, ApiState, Limits};
 use core_api::routes::build_router;
 use core_api::state::{build_state_from_files, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
 use core_api::types::SharedState;
@@ -23,6 +23,7 @@ use std::future::ready;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
+use time::OffsetDateTime;
 
 
 pub const PASSWORD: &str = "correct horse battery staple";
@@ -196,12 +197,33 @@ pub fn seed_accounts(config: &ApiConfig) -> Result<(), TestError> {
 }
 
 
+pub const FROZEN_SECONDS: i64 = 1_800_000_000;
+
+
+pub fn frozen_clock() -> OffsetDateTime {
+    OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(FROZEN_SECONDS)
+}
+
+
+pub fn with_frozen_clock(state: ApiState) -> ApiState {
+    ApiState {
+        clock: frozen_clock,
+        ..state
+    }
+}
+
+
 pub fn fixture_with(backend: impl FnOnce(&Arc<Db>) -> Backend) -> Result<Fixture, TestError> {
+    fixture_adjusted(std::convert::identity, backend)
+}
+
+
+pub fn fixture_adjusted(adjust: fn(ApiState) -> ApiState, backend: impl FnOnce(&Arc<Db>) -> Backend) -> Result<Fixture, TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
     seed_accounts(&config)?;
     let db = Arc::new(Db::default());
-    let built = build_state_from_files(&config, alerts_access(), vec![alerts_document()])?;
+    let built = adjust(build_state_from_files(&config, alerts_access(), vec![alerts_document()])?);
     let state: SharedState = Arc::new(built);
     let router = build_router(state.clone(), alerts_router(backend(&db)));
     Ok(Fixture {
