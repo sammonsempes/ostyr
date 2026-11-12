@@ -331,7 +331,7 @@ pub async fn end_remote(client: &ApiClient, source: IpAddr, tokens: &[SecretStri
     for token in tokens {
         logout(client, source, token)
             .await
-            .unwrap_or_else(|failure| tracing::warn!(%failure, "the API did not confirm the logout of a dropped session"));
+            .unwrap_or_else(|failure| tracing::warn!(class = failure_class(&failure), "the API did not confirm the logout of a dropped session"));
     }
 }
 
@@ -422,7 +422,7 @@ pub async fn submit_logout(state: &WebState, source: IpAddr, headers: &HeaderMap
     let client = state.api.load_full();
     logout(&client, source, &principal.token)
         .await
-        .unwrap_or_else(|failure| tracing::warn!(%failure, "the API did not confirm the logout"));
+        .unwrap_or_else(|failure| tracing::warn!(class = failure_class(&failure), "the API did not confirm the logout"));
     drop_session(state, &principal.key);
     Ok(redirect("/login", &[clear_cookie(SESSION_COOKIE)]))
 }
