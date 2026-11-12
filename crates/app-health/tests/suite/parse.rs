@@ -207,6 +207,17 @@ fn non_utf8_is_refused() -> TestResult {
 
 
 #[test]
+fn non_utf8_error_keeps_no_input_bytes() -> TestResult {
+    let bytes: &[u8] = b"SECRET\xff";
+    let error = parse_chrony_tracking(bytes, MAX_BYTES).err().ok_or("expected an error")?;
+    assert!(!format!("{error:?}").contains("SECRET"));
+    assert!(!format!("{error}").contains("SECRET"));
+    assert!(std::error::Error::source(&error).is_some());
+    Ok(())
+}
+
+
+#[test]
 fn read_failure_is_an_error() -> TestResult {
     assert!(matches!(parse_chrony_tracking(FailingReader, MAX_BYTES), Err(NtpError::Read(_))));
     assert!(matches!(parse_timedatectl(FailingReader, MAX_BYTES), Err(NtpError::Read(_))));

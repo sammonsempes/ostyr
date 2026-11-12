@@ -1,4 +1,4 @@
 Result=success
-ExecMainExitTimestamp=@1794518854
+ExecMainExitTimestamp=@1794526591
 ExecMainStatus=0
 Id=ostyr-ok.service

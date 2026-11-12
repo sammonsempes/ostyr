@@ -1,5 +1,6 @@
 Id=logrotate.timer
 LoadState=loaded
 ActiveState=active
+Unit=logrotate.service
 NextElapseUSecRealtime=@1794528636
 LastTriggerUSec=@1794442914

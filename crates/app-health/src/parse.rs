@@ -15,7 +15,7 @@ pub fn read_bounded(reader: &mut dyn Read, max_bytes: u64) -> Result<String, Ntp
     if bytes.len() as u64 > max_bytes {
         Err(NtpError::Oversized { limit: max_bytes })
     } else {
-        Ok(String::from_utf8(bytes)?)
+        Ok(String::from_utf8(bytes).map_err(|error| error.utf8_error())?)
     }
 }
 

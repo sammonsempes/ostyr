@@ -152,13 +152,15 @@ pub fn parse_unit_show<Input: Read>(mut reader: Input, max_bytes: u64, expected_
 }
 
 
-/// Precedence: NotFound > Failed > Flapping > Stopped > Disabled > Healthy. A restarting unit is `activating`, so Flapping outranks Stopped.
+/// Precedence: NotFound > NotLoaded (any load state but `loaded`) > Failed > Flapping > Stopped > Disabled > Healthy. A restarting unit is `activating`, so Flapping outranks Stopped.
 pub fn assess_unit(expectation: &Expectation, previous: Option<&UnitState>, current: &UnitState) -> UnitHealth {
     let grown = previous.and_then(|before| current.restarts.checked_sub(before.restarts));
     let flapping = grown.filter(|restarts| *restarts >= expectation.flap_restarts);
     let enabled = matches!(current.file_state, Some(UnitFileState::Enabled | UnitFileState::EnabledRuntime));
     if current.load == Some(LoadState::NotFound) {
         UnitHealth::NotFound
+    } else if current.load != Some(LoadState::Loaded) {
+        UnitHealth::NotLoaded
     } else if current.active == Some(ActiveState::Failed) {
         UnitHealth::Failed
     } else if let Some(restarts) = flapping {

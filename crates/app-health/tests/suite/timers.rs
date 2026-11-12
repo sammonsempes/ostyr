@@ -82,10 +82,10 @@ const LAB_SERVICE_MISSING: &str = include_str!("../fixtures/lab-service-missing.
 const LAB_SERVICE_UNIX: &str = include_str!("../fixtures/lab-service-unix-ok.txt");
 
 
-const LAB_TRIGGER: u64 = 1_794_518_853;
+const LAB_TRIGGER: u64 = 1_794_526_590;
 
 
-const LAB_EXIT: u64 = 1_794_518_854;
+const LAB_EXIT: u64 = 1_794_526_591;
 
 
 const LAB_NEXT_2099: u64 = 4_070_908_800;
@@ -108,7 +108,7 @@ impl Read for FailingReader {
 
 
 fn timer_show(load: &str, active: &str, last: &str, next: &str) -> String {
-    format!("Id={TIMER}\nLoadState={load}\nActiveState={active}\nLastTriggerUSec={last}\nNextElapseUSecRealtime={next}\n")
+    format!("Id={TIMER}\nLoadState={load}\nActiveState={active}\nUnit={SERVICE}\nLastTriggerUSec={last}\nNextElapseUSecRealtime={next}\n")
 }
 
 
@@ -129,6 +129,7 @@ fn expectation() -> TimerExpectation {
 fn timer_state(load: LoadState, active: ActiveState, last: Option<u64>) -> TimerState {
     TimerState {
         load: Some(load),
+        unit: Some(SERVICE.to_string()),
         active: Some(active),
         last_trigger_unix: last,
         next_elapse_unix: None,
@@ -487,6 +488,26 @@ fn lab_captures_parse_and_assess() -> TestResult {
 
 
 #[test]
+fn lab_misnamed_and_masked_captures_are_never_healthy() -> TestResult {
+    let misnamed = lab_health(
+        "ostyr-misnamed.timer",
+        include_str!("../fixtures/lab-timer-misnamed.txt"),
+        "ostyr-misnamed.service",
+        include_str!("../fixtures/lab-service-misnamed.txt"),
+    )?;
+    assert_eq!(misnamed, TimerHealth::WrongService);
+    let masked = lab_health(
+        "ostyr-masked.timer",
+        include_str!("../fixtures/lab-timer-masked.txt"),
+        "ostyr-masked.service",
+        include_str!("../fixtures/lab-service-masked.txt"),
+    )?;
+    assert_eq!(masked, TimerHealth::NotLoaded);
+    Ok(())
+}
+
+
+#[test]
 fn lab_unix_timestamp_captures_parse() -> TestResult {
     let timer = parse_timer_show(LAB_TIMER_UNIX.as_bytes(), MAX_SHOW, "logrotate.timer")?;
     assert_eq!((timer.last_trigger_unix, timer.next_elapse_unix), (Some(UNIX_TRIGGER), Some(UNIX_NEXT)));
@@ -496,7 +517,7 @@ fn lab_unix_timestamp_captures_parse() -> TestResult {
 }
 
 
-const ROCKY_TRIGGER: u64 = 1_794_519_071;
+const ROCKY_TRIGGER: u64 = 1_794_526_825;
 
 
 #[test]
@@ -545,5 +566,73 @@ fn line_cap_has_an_upper_bound() -> TestResult {
     assert_eq!(at_limit.lines.len(), 1);
     let refused = log_excerpt("a\n".as_bytes(), 1, LINE_LIMIT + 1);
     assert!(matches!(refused, Err(NtpError::OutOfRange { field: "max_bytes" })));
+    Ok(())
+}
+
+
+#[test]
+fn any_load_state_but_loaded_is_never_healthy() -> TestResult {
+    let want = expectation();
+    [
+        LoadState::Masked,
+        LoadState::Error,
+        LoadState::BadSetting,
+        LoadState::Stub,
+        LoadState::Merged,
+    ]
+    .iter()
+    .for_each(|load| {
+        let state = timer_state(*load, ActiveState::Active, Some(NOW));
+        assert_eq!(assess_timer(&want, &state, &good_run(), NOW), TimerHealth::NotLoaded, "{load:?}");
+    });
+    let mut absent = good_timer(Some(NOW));
+    absent.load = None;
+    assert_eq!(assess_timer(&want, &absent, &good_run(), NOW), TimerHealth::NotLoaded);
+    [("masked", LoadState::Masked), ("error", LoadState::Error)]
+        .iter()
+        .try_for_each(|(word, expected)| {
+            let parsed = parse_timer_show(timer_show(word, "active", "@100", "").as_bytes(), MAX_SHOW, TIMER)?;
+            assert_eq!(parsed.load, Some(*expected));
+            Ok::<(), NtpError>(())
+        })?;
+    ["weird", ""].iter().try_for_each(|word| {
+        let parsed = parse_timer_show(timer_show(word, "active", "@100", "").as_bytes(), MAX_SHOW, TIMER)?;
+        assert_eq!(assess_timer(&want, &parsed, &good_run(), EPOCH_SECONDS), TimerHealth::NotLoaded, "{word}");
+        Ok::<(), NtpError>(())
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn a_timer_starting_another_unit_is_a_wrong_service() -> TestResult {
+    let want = expectation();
+    let mut other = good_timer(Some(NOW));
+    other.unit = Some("other.service".to_string());
+    assert_eq!(assess_timer(&want, &other, &good_run(), NOW), TimerHealth::WrongService);
+    let mut none = good_timer(Some(NOW));
+    none.unit = None;
+    assert_eq!(assess_timer(&want, &none, &good_run(), NOW), TimerHealth::WrongService);
+    let named = TimerExpectation {
+        service: Some("other.service".to_string()),
+        ..expectation()
+    };
+    assert_eq!(assess_timer(&named, &other, &good_run(), NOW), TimerHealth::Healthy);
+    assert_eq!(assess_timer(&named, &good_timer(Some(NOW)), &good_run(), NOW), TimerHealth::WrongService);
+    let failed = run(Some(ServiceResult::ExitCode), 1);
+    assert_eq!(assess_timer(&want, &other, &failed, NOW), TimerHealth::WrongService);
+    Ok(())
+}
+
+
+#[test]
+fn the_unit_key_is_parsed_and_checked() -> TestResult {
+    let parsed = parse_timer_show(timer_show("loaded", "active", "@1", "").as_bytes(), MAX_SHOW, TIMER)?;
+    assert_eq!((parsed.unit.as_deref(), parsed.unknown_values), (Some(SERVICE), 0));
+    let hostile = timer_show("loaded", "active", "@1", "").replace(&format!("Unit={SERVICE}"), "Unit=-x.service");
+    let refused = parse_timer_show(hostile.as_bytes(), MAX_SHOW, TIMER)?;
+    assert_eq!((refused.unit, refused.unknown_values), (None, 1));
+    let empty = timer_show("loaded", "active", "@1", "").replace(&format!("Unit={SERVICE}"), "Unit=");
+    assert_eq!(parse_timer_show(empty.as_bytes(), MAX_SHOW, TIMER)?.unit, None);
     Ok(())
 }
