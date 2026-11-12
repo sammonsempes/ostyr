@@ -150,6 +150,7 @@ fn run_loads_into_clickhouse_when_configured_and_reports_the_summary() -> TestRe
         Ok(LoadOutcome {
             rows_per_batch: vec![iocs.len()],
             batches_planned: 1,
+            not_canonical: 0,
             failure: None,
         })
     };

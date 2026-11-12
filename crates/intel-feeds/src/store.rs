@@ -1,3 +1,4 @@
+use crate::canon::canonicalise;
 use crate::config::FeedConfig;
 use crate::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_IDENTIFIER_BYTES, MAX_ROWS_PER_BATCH};
 use crate::model::Ioc;
@@ -32,6 +33,7 @@ pub struct InsertPlan {
     pub expired: u64,
     pub unsourced: u64,
     pub oversized: u64,
+    pub not_canonical: u64,
 }
 
 
@@ -47,6 +49,7 @@ pub enum RowOutcome {
     Kept(String),
     Expired,
     Unsourced,
+    NotCanonical,
 }
 
 
@@ -128,7 +131,7 @@ pub fn read_statement(database: &str, table: &str) -> Result<String, StoreError>
     Ok(format!(
         "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
          FROM {} FINAL WHERE `tenant` = {{tenant:String}} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
-         AND `expires_at` > toDateTime({{now:UInt32}}) ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}} FORMAT JSONEachRow",
+         AND `checked` = 1 AND `expires_at` > toDateTime({{now:UInt32}}) ORDER BY `ioc_type`, `value` LIMIT {{limit:UInt64}} FORMAT JSONEachRow",
         qualified(database, table)?
     ))
 }
@@ -187,9 +190,16 @@ pub fn epoch_u32(seconds: i64) -> u32 {
 }
 
 
+/// True when `canonicalise` gives back exactly this type and value, so `checked = 1` is true whatever the caller.
+pub fn is_canonical(ioc: &Ioc) -> bool {
+    canonicalise(ioc.ioc_type, &ioc.value).is_ok_and(|canonical| canonical.ioc_type == ioc.ioc_type && canonical.value == ioc.value)
+}
+
+
 pub fn row_of(ioc: &Ioc, settings: &StoreSettings, now: OffsetDateTime) -> RowOutcome {
     let expires = expiry_epoch(ioc, settings);
     match ioc.sources.first() {
+        _ if !is_canonical(ioc) => RowOutcome::NotCanonical,
         None => RowOutcome::Unsourced,
         Some(_) if expires <= now.unix_timestamp() => RowOutcome::Expired,
         Some(source) => RowOutcome::Kept(
@@ -242,10 +252,11 @@ pub fn insert_plan(iocs: &[Ioc], settings: &StoreSettings, now: OffsetDateTime) 
         RowOutcome::Kept(line) => push_line(&mut plan, &line),
         RowOutcome::Expired => plan.expired += 1,
         RowOutcome::Unsourced => plan.unsourced += 1,
+        RowOutcome::NotCanonical => plan.not_canonical += 1,
     });
-    let left_out = (plan.expired, plan.unsourced, plan.oversized);
-    if left_out.0 + left_out.1 + left_out.2 > 0 {
-        warn!(?left_out, "IOCs left out: expired, unsourced, oversized");
+    let left_out = (plan.expired, plan.unsourced, plan.oversized, plan.not_canonical);
+    if left_out.0 + left_out.1 + left_out.2 + left_out.3 > 0 {
+        warn!(?left_out, "IOCs left out: expired, unsourced, oversized, not canonical");
     }
     plan
 }

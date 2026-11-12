@@ -6,8 +6,8 @@ use intel_feeds::config::{FeedConfig, FeedFormat, Mapping};
 use intel_feeds::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_ROWS_PER_BATCH};
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use intel_feeds::store::{
-    checked_column_ddl, dictionary_ddl, epoch_u32, expiry_epoch, insert_plan, insert_statement, push_line, quote_identifier, read_statement,
-    settings_for, table_ddl, tlp_column_ddl, InsertPlan, StoreError, StoreSettings,
+    checked_column_ddl, dictionary_ddl, epoch_u32, expiry_epoch, insert_plan, insert_statement, push_line, quote_identifier, read_statement, row_of,
+    settings_for, table_ddl, tlp_column_ddl, InsertPlan, RowOutcome, StoreError, StoreSettings,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -35,6 +35,9 @@ const EXPIRED_COUNT: u64 = 2;
 
 
 const HALF: usize = 2;
+
+
+const REFUSED_COUNT: u64 = 5;
 
 
 const ROWS_KEPT: usize = 3;
@@ -237,11 +240,12 @@ fn batches_split_at_the_byte_bound_and_oversized_is_dropped() -> TestResult {
 #[test]
 fn quotes_and_backticks_round_trip_as_json() -> TestResult {
     let nasty = "a'b\"c`d\\e\nf";
-    let plan = insert_plan(&[ioc(nasty, None, source("fe`ed'"))], &settings(), NOW);
+    assert_eq!(insert_plan(&[ioc(nasty, None, source("feed"))], &settings(), NOW).not_canonical, 1);
+    let plan = insert_plan(&[ioc("good.example", None, source("fe`ed'"))], &settings(), NOW);
     let body = first_body(&plan);
     assert_eq!(body.matches('\n').count(), 1);
     let row: Value = serde_json::from_str(body.trim_end())?;
-    assert_eq!(row.get("value"), Some(&json!(nasty)));
+    assert_eq!(row.get("value"), Some(&json!("good.example")));
     assert_eq!(row.get("feed"), Some(&json!("fe`ed'")));
     Ok(())
 }
@@ -314,9 +318,37 @@ fn tlp_column_and_read_statement_golden() -> TestResult {
     );
     let expected = "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
         FROM `intel`.`ioc` FINAL WHERE `tenant` = {tenant:String} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
-        AND `expires_at` > toDateTime({now:UInt32}) ORDER BY `ioc_type`, `value` LIMIT {limit:UInt64} FORMAT JSONEachRow";
+        AND `checked` = 1 AND `expires_at` > toDateTime({now:UInt32}) ORDER BY `ioc_type`, `value` LIMIT {limit:UInt64} FORMAT JSONEachRow";
     assert_eq!(read_statement("intel", "ioc")?, expected);
     assert!(read_statement("intel", "a;b").is_err());
     assert!(tlp_column_ddl("a b", "ioc").is_err());
+    Ok(())
+}
+
+
+#[test]
+fn row_of_refuses_a_non_canonical_ioc() -> TestResult {
+    let with = |ioc_type: IocType, value: &str| Ioc {
+        ioc_type,
+        ..ioc(value, None, source("feed"))
+    };
+    let refused = [
+        with(IocType::Ipv6, "::ffff:0:0/97"),
+        with(IocType::Domain, "Example.COM"),
+        with(IocType::Cidr, "0.0.0.0/0"),
+        with(IocType::Ipv4, "not an address"),
+        with(IocType::Ipv6, "::ffff:192.0.2.1"),
+    ];
+    refused
+        .iter()
+        .for_each(|candidate| assert_eq!(row_of(candidate, &settings(), NOW), RowOutcome::NotCanonical));
+    assert!(matches!(
+        row_of(&ioc("good.example", None, source("feed")), &settings(), NOW),
+        RowOutcome::Kept(_)
+    ));
+    let mut all = refused.to_vec();
+    all.push(ioc("good.example", None, source("feed")));
+    let plan = insert_plan(&all, &settings(), NOW);
+    assert_eq!((plan.not_canonical, plan.rows), (REFUSED_COUNT, 1));
     Ok(())
 }

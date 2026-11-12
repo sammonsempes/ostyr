@@ -9,7 +9,6 @@ use intel_feeds::limits::{MAX_ROWS_PER_BATCH, MAX_TIMEOUT_MS, MAX_USER_BYTES};
 use intel_feeds::load::{agent_for, load_iocs, post, schema_statements, summarise, BatchFailure, LoadError, LoadOutcome};
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use intel_feeds::store::{insert_plan, settings_for};
-use serde_json::Value;
 use siem_ingest::clickhouse::MAX_CA_BYTES;
 use siem_ingest::error::InsertClass;
 use std::cell::Cell;
@@ -354,17 +353,14 @@ fn user_and_timeout_are_bounded() -> TestResult {
 
 
 #[test]
-fn a_value_with_a_newline_or_a_nul_stays_one_json_row() -> TestResult {
+fn a_value_with_a_newline_or_a_nul_is_refused_and_counted() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS]);
     let hostile = vec![ioc("a\nb\u{0}c"), ioc("x\r\ny")];
-    load_iocs(&rig.config, &hostile, &[], NOW, &idle)?;
+    let outcome = load_iocs(&rig.config, &hostile, &[], NOW, &idle)?;
     let seen = joined(server)?;
-    let insert = seen.get(SCHEMA_REQUESTS).ok_or("no insert")?;
-    let body = insert.split("\r\n\r\n").nth(1).ok_or("no body")?;
-    assert_eq!(body.lines().count(), TWO);
-    let values: Vec<Value> = body.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
-    assert_eq!(values.first().and_then(|row| row["value"].as_str()), Some("a\nb\u{0}c"));
+    assert_eq!(seen.len(), SCHEMA_REQUESTS);
+    assert_eq!((outcome.not_canonical, outcome.batches_planned), (TWO as u64, 0));
     Ok(())
 }
 
