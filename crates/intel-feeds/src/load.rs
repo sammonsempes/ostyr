@@ -49,6 +49,7 @@ pub struct BatchFailure {
 pub struct LoadOutcome {
     pub rows_per_batch: Vec<usize>,
     pub batches_planned: usize,
+    pub not_canonical: u64,
     pub failure: Option<BatchFailure>,
 }
 
@@ -123,7 +124,7 @@ pub fn post(
 }
 
 
-/// Database, table, its TLP column and dictionary, each `IF NOT EXISTS`, so a rerun changes nothing.
+/// Database and table `IF NOT EXISTS`, the TLP and checked columns `ADD COLUMN IF NOT EXISTS`, the dictionary `CREATE OR REPLACE` (NOT_LOADED until its first lookup).
 pub fn schema_statements(config: &ClickhouseConfig) -> Result<Vec<String>, StoreError> {
     Ok(vec![
         format!("CREATE DATABASE IF NOT EXISTS {}", quote_identifier(&config.database)?),
@@ -191,6 +192,7 @@ pub fn send_batches(
     Ok(LoadOutcome {
         rows_per_batch: stored,
         batches_planned: batches.len(),
+        not_canonical: 0,
         failure,
     })
 }
@@ -210,5 +212,9 @@ pub fn load_iocs(
     let key = std::str::from_utf8(&password).map_err(LoadError::PasswordEncoding)?;
     let agent = agent_for(config)?;
     ensure_schema(&agent, config, key, elapsed)?;
-    send_batches(&agent, config, key, &plan.batches, elapsed)
+    let outcome = send_batches(&agent, config, key, &plan.batches, elapsed)?;
+    Ok(LoadOutcome {
+        not_canonical: plan.not_canonical,
+        ..outcome
+    })
 }
