@@ -64,6 +64,15 @@ const SPARE_AT_THRESHOLD: u64 = 10;
 const THREE: usize = 3;
 
 
+const SOME_MINOR: u64 = 7;
+
+
+const OTHER_MAJOR: u64 = 2;
+
+
+const WIDE_EXIT: u64 = 300;
+
+
 fn verdict(document: &Value) -> Result<Health, Box<dyn std::error::Error>> {
     Ok(assess(&report_from(document)?))
 }
@@ -82,7 +91,12 @@ fn nvme_with(field: &str, value: u64) -> Result<Value, String> {
 fn healthy_ata_and_nvme() -> TestResult {
     assert_eq!(verdict(&fixture(ATA_HEALTHY)?)?, Health::Healthy);
     assert_eq!(verdict(&fixture(NVME_HEALTHY)?)?, Health::Healthy);
-    let no_threshold = set(fixture(NVME_HEALTHY)?, &format!("{NVME_LOG}/available_spare_threshold"), Value::Null)?;
+    let mut no_threshold = fixture(NVME_HEALTHY)?;
+    no_threshold
+        .pointer_mut(NVME_LOG)
+        .and_then(Value::as_object_mut)
+        .ok_or("no log")?
+        .remove("available_spare_threshold");
     assert_eq!(verdict(&no_threshold)?, Health::Healthy);
     let no_log = set(fixture(NVME_HEALTHY)?, NVME_LOG, json!({}))?;
     assert_eq!(verdict(&no_log)?, Health::Healthy);
@@ -143,17 +157,115 @@ fn blind_spot_beats_everything() -> TestResult {
     );
     let nothing_found = set(open_failed.clone(), EXIT, json!(FOUND_NOTHING_BIT))?;
     assert_eq!(verdict(&nothing_found)?, Health::BlindSpot(BlindReason::CommandFailed(FOUND_NOTHING_BIT)));
-    let no_verdict = set(fixture(ATA_FAILED)?, PASSED, Value::Null)?;
+    let no_verdict = set(set(fixture(ATA_FAILED)?, EXIT, json!(0))?, "/smart_status", json!({}))?;
     assert_eq!(verdict(&no_verdict)?, Health::BlindSpot(BlindReason::NoVerdict));
     assert_eq!(
-        verdict(&json!({"smart_status": {"passed": true}}))?,
+        verdict(&json!({"json_format_version": [1, 0], "smart_status": {"passed": true}}))?,
         Health::BlindSpot(BlindReason::ExitStatusMissing)
     );
-    assert_eq!(verdict(&json!({}))?, Health::BlindSpot(BlindReason::ExitStatusMissing));
-    let other_bits_only = set(open_failed, EXIT, json!(OTHER_BIT | SMART_FAILING_BIT))?;
     assert_eq!(
-        verdict(&other_bits_only)?,
-        Health::PredictiveFailure(vec!["attribute 5 Reallocated_Sector_Ct".to_string()])
+        verdict(&json!({"json_format_version": [1, 0]}))?,
+        Health::BlindSpot(BlindReason::ExitStatusMissing)
+    );
+    let other_bit_only = set(open_failed, EXIT, json!(OTHER_BIT))?;
+    assert_eq!(
+        verdict(&other_bit_only)?,
+        Health::PredictiveFailure(vec!["attribute 5 Reallocated_Sector_Ct".to_string(), "exit status bit 4".to_string()])
     );
     Ok(())
+}
+
+
+fn blind(field: &str) -> Health {
+    Health::BlindSpot(BlindReason::UnreadableHealthField(field.to_string()))
+}
+
+
+#[test]
+fn exit_bits_three_and_four() -> TestResult {
+    let healthy = fixture(ATA_HEALTHY)?;
+    assert_eq!(verdict(&set(healthy.clone(), EXIT, json!(SMART_FAILING_BIT))?)?, Health::Failing);
+    assert_eq!(
+        verdict(&set(healthy.clone(), EXIT, json!(SMART_FAILING_BIT | OTHER_BIT))?)?,
+        Health::Failing
+    );
+    assert_eq!(
+        verdict(&set(healthy.clone(), EXIT, json!(OTHER_BIT))?)?,
+        Health::PredictiveFailure(vec!["exit status bit 4".to_string()])
+    );
+    assert_eq!(verdict(&set(healthy.clone(), EXIT, json!(OTHER_BIT << 1))?)?, Health::Healthy);
+    let no_verdict = set(set(healthy.clone(), EXIT, json!(SMART_FAILING_BIT))?, "/smart_status", json!({}))?;
+    assert_eq!(verdict(&no_verdict)?, Health::Failing);
+    let command_failed = set(healthy, EXIT, json!(SMART_FAILING_BIT | OPEN_FAILED_BIT))?;
+    assert_eq!(
+        verdict(&command_failed)?,
+        Health::BlindSpot(BlindReason::CommandFailed(SMART_FAILING_BIT | OPEN_FAILED_BIT))
+    );
+    Ok(())
+}
+
+
+#[test]
+fn format_version_must_be_one() -> TestResult {
+    let unknown = Health::BlindSpot(BlindReason::UnknownFormat);
+    let healthy = fixture(ATA_HEALTHY)?;
+    assert_eq!(
+        verdict(&set(healthy.clone(), "/json_format_version", json!([1, SOME_MINOR]))?)?,
+        Health::Healthy
+    );
+    assert_eq!(verdict(&set(healthy.clone(), "/json_format_version", json!([OTHER_MAJOR, 0]))?)?, unknown);
+    assert_eq!(verdict(&set(healthy.clone(), "/json_format_version", json!([1]))?)?, unknown);
+    assert_eq!(verdict(&set(healthy.clone(), "/json_format_version", json!([1, "x"]))?)?, unknown);
+    assert_eq!(verdict(&set(healthy.clone(), "/json_format_version", json!("1.0"))?)?, unknown);
+    let mut absent = healthy;
+    absent.as_object_mut().ok_or("not an object")?.remove("json_format_version");
+    assert_eq!(verdict(&absent)?, unknown);
+    assert_eq!(
+        verdict(&set(fixture(ATA_FAILED)?, "/json_format_version", json!([OTHER_MAJOR, 0]))?)?,
+        unknown
+    );
+    Ok(())
+}
+
+
+#[test]
+fn rejected_health_fields_are_blind_spots() -> TestResult {
+    assert_eq!(verdict(&nvme_text("critical_warning", "4")?)?, blind("nvme critical_warning"));
+    assert_eq!(verdict(&nvme_text("available_spare", "x")?)?, blind("nvme available_spare"));
+    assert_eq!(verdict(&nvme_text("media_errors", "x")?)?, blind("nvme media_errors"));
+    assert_eq!(verdict(&set(fixture(ATA_HEALTHY)?, PASSED, json!("yes"))?)?, blind("smart_status.passed"));
+    assert_eq!(verdict(&set(fixture(ATA_HEALTHY)?, PASSED, Value::Null)?)?, blind("smart_status.passed"));
+    let row = "/ata_smart_attributes/table/0";
+    assert_eq!(
+        verdict(&set(fixture(ATA_HEALTHY)?, &format!("{row}/when_failed"), json!("soon"))?)?,
+        blind("attribute 5 when_failed")
+    );
+    assert_eq!(
+        verdict(&set(fixture(ATA_HEALTHY)?, &format!("{row}/value"), json!("x"))?)?,
+        blind("attribute 5 value")
+    );
+    assert_eq!(
+        verdict(&set(fixture(ATA_HEALTHY)?, &format!("{row}/thresh"), json!("x"))?)?,
+        blind("attribute 5 thresh")
+    );
+    assert_eq!(
+        verdict(&set(fixture(ATA_HEALTHY)?, &format!("{row}/flags/prefailure"), json!(1))?)?,
+        blind("attribute 5 prefailure")
+    );
+    let non_prefail = "/ata_smart_attributes/table/1/value";
+    assert_eq!(verdict(&set(fixture(ATA_HEALTHY)?, non_prefail, json!("x"))?)?, Health::Healthy);
+    let failing = set(fixture(ATA_HEALTHY)?, PASSED, json!(false))?;
+    assert_eq!(verdict(&set(failing, &format!("{row}/when_failed"), json!("soon"))?)?, Health::Failing);
+    let wide_exit = set(fixture(ATA_HEALTHY)?, EXIT, json!(WIDE_EXIT))?;
+    assert_eq!(verdict(&wide_exit)?, Health::BlindSpot(BlindReason::ExitStatusMissing));
+    Ok(())
+}
+
+
+fn nvme_text(field: &str, value: &str) -> Result<Value, String> {
+    set(
+        fixture(NVME_HEALTHY).map_err(|error| error.to_string())?,
+        &format!("{NVME_LOG}/{field}"),
+        json!(value),
+    )
 }

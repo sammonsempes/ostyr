@@ -61,14 +61,18 @@ pub struct SmartReport {
     pub omitted_attributes: usize,
     pub nvme: Option<NvmeHealth>,
     pub rejected_fields: usize,
+    pub format_major: Option<u64>,
+    pub unreadable_health: Vec<String>,
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlindReason {
     ExitStatusMissing,
     CommandFailed(u8),
     NoVerdict,
+    UnknownFormat,
+    UnreadableHealthField(String),
 }
 
 

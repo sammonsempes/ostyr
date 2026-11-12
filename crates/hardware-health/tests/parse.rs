@@ -2,10 +2,11 @@ mod common;
 
 
 use common::{fixture, report_from, set, TestResult};
+use hardware_health::assess::assess;
 use hardware_health::error::SmartError;
 use hardware_health::grammar::is_clean_ident;
 use hardware_health::limits::default_limits;
-use hardware_health::model::{Limits, Protocol, WhenFailed};
+use hardware_health::model::{BlindReason, Health, Limits, Protocol, WhenFailed};
 use hardware_health::parse::parse_smartctl;
 use serde_json::json;
 use std::io::Read;
@@ -243,6 +244,43 @@ fn hostile_strings_are_dropped_and_counted() -> TestResult {
 
 
 #[test]
+fn label_grammar() -> TestResult {
+    let good = ["a", "/dev/sda", "Samsung SSD 860 EVO", "WD-WCC6Y0.1_x:y/z"];
+    let bad = [" -x", "a,b=c", "x\"y", "{}", "a ", " a", ".a", "a(b)", "a\tb"];
+    assert!(good.iter().all(|text| is_clean_ident(text)));
+    assert!(bad.iter().all(|text| !is_clean_ident(text)));
+    Ok(())
+}
+
+
+#[test]
+fn format_major_and_unreadable_names() -> TestResult {
+    let report = report_from(&fixture(ATA_HEALTHY)?)?;
+    assert_eq!((report.format_major, report.unreadable_health.is_empty()), (Some(1), true));
+    let bad_format = report_from(&json!({"json_format_version": [1, "x"]}))?;
+    assert_eq!((bad_format.format_major, bad_format.rejected_fields), (None, 1));
+    let not_array = report_from(&json!({"json_format_version": 1}))?;
+    assert_eq!((not_array.format_major, not_array.rejected_fields), (None, 1));
+    let wrong = report_from(&fixture(WRONG_TYPES)?)?;
+    let expected: Vec<String> = [
+        "smart_status.passed",
+        "exit_status",
+        "attribute 9 prefailure",
+        "attribute 9 when_failed",
+        "attribute 9 value",
+        "attribute 9 thresh",
+        "nvme critical_warning",
+        "nvme available_spare",
+    ]
+    .iter()
+    .map(|name| name.to_string())
+    .collect();
+    assert_eq!(wrong.unreadable_health, expected);
+    Ok(())
+}
+
+
+#[test]
 fn wrong_types_hit_only_their_field() -> TestResult {
     let report = report_from(&fixture(WRONG_TYPES)?)?;
     assert_eq!(
@@ -281,5 +319,6 @@ fn negative_temperature_and_duplicate_keys() -> TestResult {
 fn real_capture_of_a_disk_without_smart() -> TestResult {
     let report = parse_smartctl(VDA.as_bytes(), &default_limits())?;
     assert_eq!((report.exit_status, report.smart_passed, report.attributes.len()), (Some(1), None, 0));
+    assert_eq!(assess(&report), Health::BlindSpot(BlindReason::CommandFailed(1)));
     Ok(())
 }

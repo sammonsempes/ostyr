@@ -7,6 +7,9 @@ use serde_json::Value;
 use std::io::Read;
 
 
+const FORMAT_VERSION_LEN: usize = 2;
+
+
 pub fn parse_smartctl<Input: Read>(mut reader: Input, limits: &Limits) -> Result<SmartReport, SmartError> {
     let bytes = read_bounded(&mut reader, limits.max_bytes)?;
     let root: Value = serde_json::from_slice(&bytes)?;
@@ -58,6 +61,26 @@ fn text(found: Option<&Value>, rejected: &mut usize) -> Option<String> {
 }
 
 
+fn flag_unreadable(unreadable: &mut Vec<String>, name: String, found: Option<&Value>, parsed_is_none: bool) {
+    if found.is_some() && parsed_is_none {
+        unreadable.push(name);
+    }
+}
+
+
+fn format_major(root: &Value, rejected: &mut usize) -> Option<u64> {
+    let versions = accepted(root.get("json_format_version"), rejected, Value::is_array).and_then(Value::as_array);
+    let numbers: Option<Vec<u64>> = versions.and_then(|items| items.iter().map(Value::as_u64).collect());
+    let major = numbers
+        .filter(|items| items.len() == FORMAT_VERSION_LEN)
+        .and_then(|items| items.first().copied());
+    if versions.is_some() && major.is_none() {
+        *rejected += 1;
+    }
+    major
+}
+
+
 fn exit_status(root: &Value, rejected: &mut usize) -> Option<u8> {
     let wide = unsigned(lookup(root, &["smartctl", "exit_status"]), rejected);
     let narrow = wide.and_then(|value| u8::try_from(value).ok());
@@ -93,28 +116,46 @@ fn when_failed(row: &Value, rejected: &mut usize) -> Option<WhenFailed> {
 }
 
 
-fn attribute(row: &Value, rejected: &mut usize) -> Option<Attribute> {
-    row.get("id").and_then(Value::as_u64).map(|id| Attribute {
-        id,
-        name: text(row.get("name"), rejected),
-        value: unsigned(row.get("value"), rejected),
-        worst: unsigned(row.get("worst"), rejected),
-        threshold: unsigned(row.get("thresh"), rejected),
-        when_failed: when_failed(row, rejected),
-        prefailure: accepted(lookup(row, &["flags", "prefailure"]), rejected, Value::is_boolean).and_then(Value::as_bool),
-        raw_value: unsigned(lookup(row, &["raw", "value"]), rejected),
+fn attribute(row: &Value, rejected: &mut usize, unreadable: &mut Vec<String>) -> Option<Attribute> {
+    row.get("id").and_then(Value::as_u64).map(|id| {
+        let when = when_failed(row, rejected);
+        let value = unsigned(row.get("value"), rejected);
+        let threshold = unsigned(row.get("thresh"), rejected);
+        let prefailure_node = lookup(row, &["flags", "prefailure"]);
+        let prefailure = accepted(prefailure_node, rejected, Value::is_boolean).and_then(Value::as_bool);
+        let mut flagged = vec![("prefailure", prefailure_node, prefailure.is_none())];
+        if prefailure != Some(false) {
+            flagged.extend([
+                ("when_failed", row.get("when_failed"), when.is_none()),
+                ("value", row.get("value"), value.is_none()),
+                ("thresh", row.get("thresh"), threshold.is_none()),
+            ]);
+        }
+        flagged
+            .into_iter()
+            .for_each(|(field, node, absent)| flag_unreadable(unreadable, format!("attribute {id} {field}"), node, absent));
+        Attribute {
+            id,
+            name: text(row.get("name"), rejected),
+            value,
+            worst: unsigned(row.get("worst"), rejected),
+            threshold,
+            when_failed: when,
+            prefailure,
+            raw_value: unsigned(lookup(row, &["raw", "value"]), rejected),
+        }
     })
 }
 
 
-fn attributes(root: &Value, limits: &Limits, rejected: &mut usize) -> (Vec<Attribute>, usize) {
+fn attributes(root: &Value, limits: &Limits, rejected: &mut usize, unreadable: &mut Vec<String>) -> (Vec<Attribute>, usize) {
     let table = accepted(lookup(root, &["ata_smart_attributes", "table"]), rejected, Value::is_array).and_then(Value::as_array);
     let rows = table.map_or(&[][..], Vec::as_slice);
     let kept = rows
         .iter()
         .take(limits.max_attributes)
         .filter_map(|row| {
-            let parsed = attribute(row, rejected);
+            let parsed = attribute(row, rejected, unreadable);
             if parsed.is_none() {
                 *rejected += 1;
             }
@@ -125,13 +166,20 @@ fn attributes(root: &Value, limits: &Limits, rejected: &mut usize) -> (Vec<Attri
 }
 
 
-fn nvme(root: &Value, rejected: &mut usize) -> Option<NvmeHealth> {
-    root.get("nvme_smart_health_information_log").map(|log| NvmeHealth {
-        critical_warning: unsigned(log.get("critical_warning"), rejected),
-        available_spare: unsigned(log.get("available_spare"), rejected),
-        available_spare_threshold: unsigned(log.get("available_spare_threshold"), rejected),
-        percentage_used: unsigned(log.get("percentage_used"), rejected),
-        media_errors: unsigned(log.get("media_errors"), rejected),
+fn nvme(root: &Value, rejected: &mut usize, unreadable: &mut Vec<String>) -> Option<NvmeHealth> {
+    root.get("nvme_smart_health_information_log").map(|log| {
+        let mut field = |name: &str| {
+            let parsed = unsigned(log.get(name), rejected);
+            flag_unreadable(unreadable, format!("nvme {name}"), log.get(name), parsed.is_none());
+            parsed
+        };
+        NvmeHealth {
+            critical_warning: field("critical_warning"),
+            available_spare: field("available_spare"),
+            available_spare_threshold: field("available_spare_threshold"),
+            percentage_used: field("percentage_used"),
+            media_errors: field("media_errors"),
+        }
     })
 }
 
@@ -146,8 +194,22 @@ fn assemble(root: &Value, limits: &Limits) -> SmartReport {
     let smart_passed = accepted(lookup(root, &["smart_status", "passed"]), &mut rejected, Value::is_boolean).and_then(Value::as_bool);
     let temperature_celsius = accepted(lookup(root, &["temperature", "current"]), &mut rejected, Value::is_i64).and_then(Value::as_i64);
     let power_on_hours = unsigned(lookup(root, &["power_on_time", "hours"]), &mut rejected);
-    let (attribute_list, omitted_attributes) = attributes(root, limits, &mut rejected);
-    let nvme_health = nvme(root, &mut rejected);
+    let format = format_major(root, &mut rejected);
+    let mut unreadable = Vec::new();
+    flag_unreadable(
+        &mut unreadable,
+        "smart_status.passed".to_string(),
+        lookup(root, &["smart_status", "passed"]),
+        smart_passed.is_none(),
+    );
+    flag_unreadable(
+        &mut unreadable,
+        "exit_status".to_string(),
+        lookup(root, &["smartctl", "exit_status"]),
+        exit.is_none(),
+    );
+    let (attribute_list, omitted_attributes) = attributes(root, limits, &mut rejected, &mut unreadable);
+    let nvme_health = nvme(root, &mut rejected, &mut unreadable);
     SmartReport {
         device_name,
         protocol: protocol_kind,
@@ -161,5 +223,7 @@ fn assemble(root: &Value, limits: &Limits) -> SmartReport {
         omitted_attributes,
         nvme: nvme_health,
         rejected_fields: rejected,
+        format_major: format,
+        unreadable_health: unreadable,
     }
 }
