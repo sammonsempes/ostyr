@@ -97,3 +97,51 @@ pub const METHOD_STORED: u16 = 0;
 
 
 pub const METHOD_DEFLATED: u16 = 8;
+
+
+pub const MAX_KEV_BYTES: u64 = 8_388_608;
+
+
+pub const MAX_KEV_ENTRIES: usize = 100_000;
+
+
+pub const MAX_EPSS_BYTES: u64 = 134_217_728;
+
+
+pub const MAX_EPSS_ROWS: usize = 1_000_000;
+
+
+pub const MAX_EPSS_LINE_BYTES: usize = 1024;
+
+
+pub const MAX_CATALOGUE_TEXT_CHARS: usize = 128;
+
+
+pub const CVE_ID_PREFIX: &str = "CVE";
+
+
+pub const CVE_YEAR_DIGITS: usize = 4;
+
+
+pub const CVE_SEQUENCE_MIN_DIGITS: usize = 4;
+
+
+pub const CVE_SEQUENCE_MAX_DIGITS: usize = 7;
+
+
+pub const CVE_ID_PARTS: usize = 3;
+
+
+pub const CUT_MARKER: &str = "[cut]";
+
+
+pub const EPSS_HEADER: &str = "cve,epss,percentile";
+
+
+pub const EPSS_META_PREFIX: &str = "#";
+
+
+pub const EPSS_MODEL_KEY: &str = "model_version";
+
+
+pub const EPSS_DATE_KEY: &str = "score_date";
