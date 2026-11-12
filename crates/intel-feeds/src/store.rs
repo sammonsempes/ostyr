@@ -95,7 +95,8 @@ pub fn table_ddl(database: &str, table: &str) -> Result<String, StoreError> {
          `first_seen` DateTime('UTC'),\n    \
          `last_seen` DateTime('UTC'),\n    \
          `expires_at` DateTime('UTC'),\n    \
-         `version` UInt32\n\
+         `version` UInt32,\n    \
+         `checked` UInt8 DEFAULT 0\n\
          )\n\
          ENGINE = ReplacingMergeTree(`version`)\n\
          ORDER BY (`tenant`, `ioc_type`, `value`)\n\
@@ -108,6 +109,15 @@ pub fn table_ddl(database: &str, table: &str) -> Result<String, StoreError> {
 pub fn tlp_column_ddl(database: &str, table: &str) -> Result<String, StoreError> {
     Ok(format!(
         "ALTER TABLE {} ADD COLUMN IF NOT EXISTS `tlp` LowCardinality(String) DEFAULT 'red'",
+        qualified(database, table)?
+    ))
+}
+
+
+/// Adds the checked flag to a table created before it existed; such rows read as 0 and stay out of the dictionary until a load rewrites them.
+pub fn checked_column_ddl(database: &str, table: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS `checked` UInt8 DEFAULT 0",
         qualified(database, table)?
     ))
 }
@@ -130,7 +140,7 @@ pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str, user: &str,
     quote_identifier(user)?;
     let target = qualified(database, dictionary)?;
     Ok(format!(
-        "CREATE DICTIONARY IF NOT EXISTS {target} (\n    \
+        "CREATE OR REPLACE DICTIONARY {target} (\n    \
          `prefix` String,\n    \
          `feed` String,\n    \
          `feed_version` String,\n    \
@@ -141,7 +151,7 @@ pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str, user: &str,
          )\n\
          PRIMARY KEY `prefix`\n\
          SOURCE(CLICKHOUSE(USER '{user}' HOST '127.0.0.1' PORT {port} SECURE 1 QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
-         FROM {source} FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `expires_at` > now()'))\n\
+         FROM {source} FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `checked` = 1 AND `expires_at` > now()'))\n\
          LAYOUT(IP_TRIE)\n\
          LIFETIME(MIN 30 MAX 300)"
     ))
@@ -195,6 +205,7 @@ pub fn row_of(ioc: &Ioc, settings: &StoreSettings, now: OffsetDateTime) -> RowOu
                 "last_seen": epoch_u32(ioc.last_seen.unix_timestamp()),
                 "expires_at": epoch_u32(expires),
                 "version": epoch_u32(ioc.last_seen.unix_timestamp()),
+                "checked": 1,
             })
             .to_string(),
         ),

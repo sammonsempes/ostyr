@@ -40,7 +40,7 @@ const OK: &str = "200 OK";
 const SERVER_ERROR: &str = "500 Internal Server Error";
 
 
-const SCHEMA_REQUESTS: usize = 4;
+const SCHEMA_REQUESTS: usize = 5;
 
 
 const STALL_TIMEOUT_MS: u64 = 100;
@@ -64,7 +64,7 @@ const TWO: usize = 2;
 const DICTIONARY_PORT: u16 = 9440;
 
 
-const DICTIONARY_INDEX: usize = 3;
+const DICTIONARY_INDEX: usize = 4;
 
 
 const CONFIDENCE: u8 = 70;
@@ -165,7 +165,7 @@ fn schema_then_batches_in_order_with_the_key_in_a_header_only() -> TestResult {
     assert!(seen
         .get(DICTIONARY_INDEX)
         .ok_or("no dictionary")?
-        .contains("CREATE DICTIONARY IF NOT EXISTS `ostyr`.`ioc_trie`"));
+        .contains("CREATE OR REPLACE DICTIONARY `ostyr`.`ioc_trie`"));
     let insert = seen.get(SCHEMA_REQUESTS).ok_or("no insert")?;
     let head = insert.lines().next().ok_or("no head")?;
     assert!(head.starts_with("POST /?query=INSERT"), "{head}");
@@ -253,7 +253,7 @@ fn a_server_that_never_answers_hits_the_deadline() -> TestResult {
 
 #[test]
 fn a_spent_deadline_sends_nothing() -> TestResult {
-    let rig = rig(STALL_TIMEOUT_MS)?;
+    let rig = rig(LONG_TIMEOUT_MS)?;
     let spent = || ONE_HOUR;
     assert!(matches!(
         load_iocs(&rig.config, &iocs(1), &[], NOW, &spent),
@@ -269,8 +269,8 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
             Duration::ZERO
         }
     };
-    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS]);
     rig.listener.set_nonblocking(false)?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS]);
     let outcome = load_iocs(&rig.config, &iocs(1), &[], NOW, &late)?;
     assert_eq!(outcome.rows_per_batch, Vec::<usize>::new());
     assert_eq!(outcome.failure.map(|failure| failure.class), Some(InsertClass::Timeout));
@@ -465,7 +465,9 @@ fn a_trace_subscriber_never_sees_the_key() -> TestResult {
 #[test]
 fn schema_statements_are_idempotent_and_post_without_a_statement_sends_the_body() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    assert!(schema_statements(&rig.config)?.iter().all(|text| text.contains("IF NOT EXISTS")));
+    assert!(schema_statements(&rig.config)?
+        .iter()
+        .all(|text| text.contains("IF NOT EXISTS") || text.starts_with("CREATE OR REPLACE DICTIONARY")));
     let bad = ClickhouseConfig {
         table: "a;b".to_owned(),
         ..rig.config.clone()

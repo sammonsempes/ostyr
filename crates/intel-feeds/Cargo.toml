@@ -12,6 +12,7 @@ csv = "1"
 idna = "1"
 ipnet = "2"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
+psl = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
@@ -20,6 +21,7 @@ thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known", "macros"] }
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+unicode-general-category = "1.1.0"
 url = "2"
 uuid = { version = "1", default-features = false }
 
