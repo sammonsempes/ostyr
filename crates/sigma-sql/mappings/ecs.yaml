@@ -33,3 +33,15 @@ categories:
       Initiated: network.direction
       User: user.name
       ProcessId: process.pid
+services:
+  security:
+    provider: Microsoft-Windows-Security-Auditing
+    fields:
+      EventID: event.code
+      TargetUserName: user.name
+      SubjectUserName: user.name
+      TargetDomainName: user.domain
+      SubjectDomainName: user.domain
+      IpAddress: source.ip
+      IpPort: source.port
+      Computer: host.name

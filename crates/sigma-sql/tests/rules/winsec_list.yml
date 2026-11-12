@@ -1,0 +1,13 @@
+title: Logon outcome ids
+id: 00000000-0000-4000-8000-000000000295
+status: test
+level: low
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID:
+      - 4624
+      - 4625
+  condition: selection

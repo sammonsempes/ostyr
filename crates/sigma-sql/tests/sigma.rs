@@ -526,3 +526,75 @@ proptest! {
         prop_assert!(!unescaped.contains('%') && !unescaped.contains('_') && !unescaped.contains('\\'));
     }
 }
+
+
+fn security_rule(detection: &str) -> String {
+    format!("title: T\nlogsource:\n  product: windows\n  service: security\ndetection:\n  selection:\n    {detection}\n  condition: selection\n")
+}
+
+
+#[test]
+fn security_service_goldens() -> TestResult {
+    let provider = "`host.os.type` = 'windows' AND `event.provider` = 'Microsoft-Windows-Security-Auditing'";
+    assert_eq!(
+        compile(&read_to_string("tests/rules/winsec_4625.yml")?)?,
+        format!("SELECT `event.id` FROM `events` WHERE {provider} AND ((`event.code` ilike '4625' AND `user.name` ilike '%admin'))")
+    );
+    assert_eq!(
+        compile(&read_to_string("tests/rules/winsec_list.yml")?)?,
+        format!("SELECT `event.id` FROM `events` WHERE {provider} AND ((`event.code` ilike '4624' OR `event.code` ilike '4625'))")
+    );
+    assert_eq!(
+        compile(&security_rule("SubjectUserName: \"O'Brien\""))?,
+        format!("SELECT `event.id` FROM `events` WHERE {provider} AND (`user.name` ilike 'O\\'Brien')")
+    );
+    Ok(())
+}
+
+
+#[test]
+fn security_service_refuses_label_fields_and_bad_ids() -> TestResult {
+    let error = error_of(&security_rule("LogonType: 3"))?;
+    assert!(
+        matches!(&error, SigmaError::UnmappedField { field, .. } if field == "LogonType"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("LogonType"));
+    ["EventID: 4.5", "EventID: true", "EventID: null", "EventID: [4624, 4.5]"]
+        .iter()
+        .try_for_each(|detection| -> TestResult {
+            let refused = error_of(&security_rule(detection))?;
+            assert!(matches!(refused, SigmaError::BadValue { .. }), "{detection}: {refused}");
+            Ok(())
+        })
+}
+
+
+#[test]
+fn security_service_refuses_bad_logsources() -> TestResult {
+    let both =
+        "title: T\nlogsource:\n  category: process_creation\n  service: security\ndetection:\n  selection:\n    EventID: 1\n  condition: selection\n";
+    let unknown = "title: T\nlogsource:\n  product: windows\n  service: sysmon\ndetection:\n  selection:\n    EventID: 1\n  condition: selection\n";
+    let neither = "title: T\nlogsource:\n  product: windows\ndetection:\n  selection:\n    EventID: 1\n  condition: selection\n";
+    [both, unknown, neither].iter().try_for_each(|text| -> TestResult {
+        let error = error_of(text)?;
+        assert!(matches!(error, SigmaError::Unsupported { .. }), "{text}: {error}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn service_columns_are_checked_as_identifiers() -> TestResult {
+    let bad = "products: {}\ncategories: {}\nservices:\n  s:\n    provider: p\n    fields:\n      A: 'x y'\n";
+    assert!(matches!(parse_mapping(bad), Err(SigmaError::BadIdentifier(_))));
+    Ok(())
+}
+
+
+#[test]
+fn security_event_id_text_is_kept_as_written() -> TestResult {
+    let sql = compile(&security_rule("EventID|startswith: '46'"))?;
+    assert!(sql.ends_with("AND (`event.code` ilike '46%')"), "{sql}");
+    Ok(())
+}

@@ -4,7 +4,7 @@ use crate::mapping::FieldMapping;
 use crate::rule::{parse_rule, Rule};
 use crate::selection::{compile_selection, Context};
 use crate::sql::{quote_identifier, sql_literal};
-use crate::types::SelectionSql;
+use crate::types::{FieldTable, SelectionSql};
 
 
 #[derive(Debug, Clone)]
@@ -25,6 +25,9 @@ impl Default for SqlOptions {
 
 
 pub const CATEGORY_COLUMN: &str = "`event.category`";
+
+
+pub const PROVIDER_COLUMN: &str = "`event.provider`";
 
 
 pub const OS_COLUMN: &str = "`host.os.type`";
@@ -50,26 +53,47 @@ fn os_filter(rule: &Rule, mapping: &FieldMapping) -> Result<Vec<String>, SigmaEr
 }
 
 
-/// Compiles one Sigma rule text to a `SELECT` of the matching event ids; the logsource becomes a filter on category and operating system.
+struct Source<'a> {
+    label: &'a str,
+    fields: &'a FieldTable,
+    filter: String,
+}
+
+
+fn logsource_source<'a>(rule: &'a Rule, mapping: &'a FieldMapping) -> Result<Source<'a>, SigmaError> {
+    match (rule.logsource.category.as_deref(), rule.logsource.service.as_deref()) {
+        (Some(category), None) => mapping
+            .categories
+            .get(category)
+            .map(|found| Source {
+                label: category,
+                fields: &found.fields,
+                filter: format!("has({CATEGORY_COLUMN}, {})", sql_literal(&found.event_category)),
+            })
+            .ok_or_else(|| unsupported(rule, format!("logsource category {category}"))),
+        (None, Some(service)) => mapping
+            .services
+            .get(service)
+            .map(|found| Source {
+                label: service,
+                fields: &found.fields,
+                filter: format!("{PROVIDER_COLUMN} = {}", sql_literal(&found.provider)),
+            })
+            .ok_or_else(|| unsupported(rule, format!("logsource service {service}"))),
+        (Some(_), Some(_)) => Err(unsupported(rule, "logsource with both category and service".to_string())),
+        (None, None) => Err(unsupported(rule, "logsource without category or service".to_string())),
+    }
+}
+
+
+/// Compiles one Sigma rule text to a `SELECT` of the matching event ids; the logsource becomes a filter on category or provider and operating system.
 pub fn compile_rule(text: &str, mapping: &FieldMapping, options: &SqlOptions) -> Result<String, SigmaError> {
     let rule = parse_rule(text)?;
-    let category = rule
-        .logsource
-        .category
-        .as_deref()
-        .ok_or_else(|| unsupported(&rule, "logsource without category".to_string()))?;
-    let category_mapping = mapping
-        .categories
-        .get(category)
-        .ok_or_else(|| unsupported(&rule, format!("logsource category {category}")))?;
-    match rule.logsource.service {
-        Some(_) => Err(unsupported(&rule, "logsource service".to_string())),
-        None => Ok(()),
-    }?;
+    let source = logsource_source(&rule, mapping)?;
     let context = Context {
         rule: &rule.title,
-        category,
-        mapping: category_mapping,
+        category: source.label,
+        fields: source.fields,
     };
     let selections: SelectionSql = rule
         .selections
@@ -77,9 +101,12 @@ pub fn compile_rule(text: &str, mapping: &FieldMapping, options: &SqlOptions) ->
         .map(|(name, value)| compile_selection(&context, value).map(|sql| (name.clone(), sql)))
         .collect::<Result<_, _>>()?;
     let condition = compile_condition(&rule.title, &rule.condition, &selections)?;
-    let mut filters = vec![format!("has({CATEGORY_COLUMN}, {})", sql_literal(&category_mapping.event_category))];
-    filters.extend(os_filter(&rule, mapping)?);
-    filters.push(condition);
+    let os = os_filter(&rule, mapping)?;
+    let filters: Vec<String> = if rule.logsource.service.is_some() {
+        os.into_iter().chain([source.filter, condition]).collect()
+    } else {
+        [source.filter].into_iter().chain(os).chain([condition]).collect()
+    };
     Ok(format!(
         "SELECT {} FROM {} WHERE {}",
         quote_identifier(&options.id_column)?,
