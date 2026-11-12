@@ -11,7 +11,7 @@ use cases::store::{
 use cases::stored::{CaseCursor, CasePage};
 use cases::summary::{detail_from_row, get_case_detail, list_case_summaries, summary_from_row};
 use core_pg::scope::tenant_scope;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 
 const TOTAL: usize = 120;
@@ -27,7 +27,7 @@ pub fn entry() -> Entry {
     Entry {
         case: case("acme", "c1", NOW),
         version: 1,
-        alerts: BTreeSet::new(),
+        alerts: BTreeMap::new(),
     }
 }
 
@@ -121,7 +121,7 @@ async fn a_summary_carries_counts_and_never_the_lists() -> TestResult {
     let found = list_case_summaries(&exec, &scope, &page).await?;
     let summary = found.summaries.first().ok_or("empty")?;
     assert_eq!((summary.counts.tasks, summary.counts.comments, summary.counts.observables), (1, TWO, 1));
-    assert_eq!((summary.counts.history, summary.counts.alerts), (TWO, TWO));
+    assert_eq!((summary.counts.history, summary.counts.alerts), (0, TWO));
     assert_eq!((summary.severity, summary.status, summary.version), (Severity::High, CaseStatus::New, 1));
     assert_eq!(summary.assignee.as_deref(), Some("alice"));
     assert!(found.next.is_none());

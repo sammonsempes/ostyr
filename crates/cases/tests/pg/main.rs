@@ -283,15 +283,21 @@ async fn the_pg_backend_acts_and_comments_through_a_leased_connection_scoped_to_
 }
 
 
+const LINKED_AT: i64 = 7;
+
+
+const LINKED_AT_TEXT: &str = "7";
+
+
 const ALERT: &str = "2d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f0b894fee";
 
 
 pub fn link_handler() -> Handler {
     Arc::new(|sql| {
         if sql == ATTACH_SQL {
-            Reply::Rows(vec![["1", "1", "1", "0", "0", "0"].map(str::to_owned).to_vec()])
+            Reply::Rows(vec![["1", "1", "1", "0", "0"].map(str::to_owned).to_vec()])
         } else if sql == LINKS_SQL || sql == LINKS_AFTER_SQL {
-            Reply::Rows(vec![vec!["c1".to_owned(), ALERT.to_owned()]])
+            Reply::Rows(vec![["c1", ALERT, "alice", LINKED_AT_TEXT].map(str::to_owned).to_vec()])
         } else {
             Reply::Done
         }
@@ -308,7 +314,12 @@ async fn the_pg_backend_links_and_lists_alerts_scoped_to_the_tenant() -> Result<
     let added = (backend.link)(scope.clone(), "c1".to_owned(), ALERT.to_owned(), "alice".to_owned(), WRITE_TIME).await?;
     assert!(added);
     let first = (backend.links)(scope.clone(), "c1".to_owned(), LinkPage { after: None, size: 1 }).await?;
-    assert_eq!(first.alerts, vec![ALERT.to_owned()]);
+    assert_eq!(first.alerts.len(), 1);
+    let item = first.alerts.first().ok_or("no link")?;
+    assert_eq!(
+        (item.alert_id.as_str(), item.linked_by.as_deref(), item.linked_at),
+        (ALERT, Some("alice"), Some(LINKED_AT))
+    );
     let after = LinkPage {
         after: Some(ALERT.to_owned()),
         size: 1,

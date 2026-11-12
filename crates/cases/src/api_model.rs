@@ -1,5 +1,5 @@
 use crate::model::Resolution;
-use crate::stored::{AlertLink, CaseSummary};
+use crate::stored::{AlertLinkItem, CaseSummary};
 use crate::types::{ActFn, ClockFn, CommentFn, DetailGetFn, LinkFn, LinksFn, SummaryListFn};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -75,6 +75,6 @@ pub struct LinkRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct AlertLinkListView {
-    pub items: Vec<AlertLink>,
+    pub items: Vec<AlertLinkItem>,
     pub next_cursor: Option<String>,
 }

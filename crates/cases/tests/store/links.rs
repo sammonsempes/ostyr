@@ -5,9 +5,10 @@ use crate::{executor, force, know_alert, sent, stored_case, ALERT, NOW, OTHER_AL
 use cases::error::CaseStoreError;
 use cases::model::{CaseEvent, CaseEventKind, CaseStatus};
 use cases::store::{
-    attach_alert, check_link_page, create_case, list_links, LINKS_AFTER_SQL, LINKS_SQL, MAX_HISTORY, MAX_ID_CHARS, MAX_NAME_CHARS, MAX_PAGE_SIZE,
+    attach_alert, check_link_page, create_case, list_links, ATTACH_SQL, LINKS_AFTER_SQL, LINKS_SQL, MAX_HISTORY, MAX_ID_CHARS, MAX_NAME_CHARS,
+    MAX_PAGE_SIZE,
 };
-use cases::stored::LinkPage;
+use cases::stored::{AlertLinkItem, LinkPage};
 use core_pg::scope::tenant_scope;
 
 
@@ -37,7 +38,7 @@ fn first_page(size: usize) -> LinkPage {
 
 
 #[tokio::test]
-async fn a_new_link_records_one_alert_linked_event_and_a_replay_records_none() -> TestResult {
+async fn a_new_link_is_attributed_on_its_row_and_a_replay_keeps_the_first() -> TestResult {
     let db = Db::default();
     let exec = executor(&db);
     let scope = tenant_scope("acme")?;
@@ -45,18 +46,16 @@ async fn a_new_link_records_one_alert_linked_event_and_a_replay_records_none() -
     know_alert(&db, "acme", ALERT);
     assert!(attach_alert(&exec, &scope, "c1", ALERT, (ACTOR, LATER)).await?);
     assert!(!attach_alert(&exec, &scope, "c1", ALERT, ("other", LATER + 1)).await?);
-    let history = stored_case(&db, "acme", "c1").ok_or("missing")?.history;
+    let listed = list_links(&exec, &scope, "c1", &first_page(PAGE)).await?;
     assert_eq!(
-        history,
-        vec![CaseEvent {
-            kind: CaseEventKind::AlertLinked,
-            at: LATER,
-            actor: ACTOR.to_owned(),
-            from: CaseStatus::New,
-            to: CaseStatus::New,
-            alert_id: Some(ALERT.to_owned()),
+        listed.alerts,
+        vec![AlertLinkItem {
+            alert_id: ALERT.to_owned(),
+            linked_by: Some(ACTOR.to_owned()),
+            linked_at: Some(LATER),
         }]
     );
+    assert!(stored_case(&db, "acme", "c1").ok_or("missing")?.history.is_empty());
     let version = lock(&db.tenants).get("acme").and_then(|table| table.get("c1")).map(|entry| entry.version);
     assert_eq!(version, Some(1));
     Ok(())
@@ -64,14 +63,13 @@ async fn a_new_link_records_one_alert_linked_event_and_a_replay_records_none() -
 
 
 #[tokio::test]
-async fn a_full_history_refuses_a_new_link_but_not_a_replay() -> TestResult {
+async fn a_full_history_does_not_refuse_a_link() -> TestResult {
     let db = Db::default();
     let exec = executor(&db);
     let scope = tenant_scope("acme")?;
     create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
     know_alert(&db, "acme", ALERT);
     know_alert(&db, "acme", OTHER_ALERT);
-    assert!(attach_alert(&exec, &scope, "c1", ALERT, (ACTOR, NOW)).await?);
     let filler = CaseEvent {
         kind: CaseEventKind::AlertLinked,
         at: NOW,
@@ -87,10 +85,34 @@ async fn a_full_history_refuses_a_new_link_but_not_a_replay() -> TestResult {
         .case
         .history
         .resize(MAX_HISTORY, filler);
-    let refused = attach_alert(&exec, &scope, "c1", OTHER_ALERT, (ACTOR, NOW)).await;
-    assert!(matches!(refused, Err(CaseStoreError::Full { what: "history", .. })));
-    assert!(!attach_alert(&exec, &scope, "c1", ALERT, (ACTOR, NOW)).await?);
+    assert!(attach_alert(&exec, &scope, "c1", OTHER_ALERT, (ACTOR, NOW)).await?);
     assert_eq!(stored_case(&db, "acme", "c1").ok_or("missing")?.history.len(), MAX_HISTORY);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unattributed_row_lists_as_unknown_and_a_bad_time_cell_is_a_typed_error() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
+    lock(&db.tenants)
+        .get_mut("acme")
+        .and_then(|table| table.get_mut("c1"))
+        .ok_or("missing")?
+        .alerts
+        .insert(ALERT.to_owned(), None);
+    let listed = list_links(&exec, &scope, "c1", &first_page(PAGE)).await?;
+    assert_eq!(
+        listed.alerts.first().map(|link| (link.linked_by.clone(), link.linked_at)),
+        Some((None, None))
+    );
+    force(&db, Forced::Rows(vec![["c1", ALERT, "alice", "soon"].map(str::to_owned).to_vec()]));
+    assert!(matches!(
+        list_links(&exec, &scope, "c1", &first_page(1)).await,
+        Err(CaseStoreError::BadRow { .. })
+    ));
     Ok(())
 }
 
@@ -102,7 +124,7 @@ async fn a_lost_race_on_a_new_link_reads_as_not_added() -> TestResult {
     let scope = tenant_scope("acme")?;
     create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
     know_alert(&db, "acme", ALERT);
-    force(&db, Forced::Rows(vec![["1", "1", "0", "0", "0", "0"].map(str::to_owned).to_vec()]));
+    force(&db, Forced::Rows(vec![["1", "1", "0", "0", "0"].map(str::to_owned).to_vec()]));
     assert!(!attach_alert(&exec, &scope, "c1", ALERT, (ACTOR, NOW)).await?);
     Ok(())
 }
@@ -165,7 +187,11 @@ async fn links_page_by_alert_id_without_duplicate_or_gap() -> TestResult {
     .await?;
     assert_eq!((first.alerts.len(), second.alerts.len(), third.alerts.len()), (PAGE, PAGE, LAST_PAGE));
     assert!(first.next.is_some() && second.next.is_some() && third.next.is_none());
-    let all: Vec<String> = [first, second, third].into_iter().flat_map(|page| page.alerts).collect();
+    let all: Vec<String> = [first, second, third]
+        .into_iter()
+        .flat_map(|page| page.alerts)
+        .map(|link| link.alert_id)
+        .collect();
     assert_eq!(all, (0..TOTAL).map(alert_number).collect::<Vec<String>>());
     Ok(())
 }
@@ -270,5 +296,11 @@ fn every_link_statement_is_scoped_to_the_tenant_and_the_case() -> TestResult {
         assert!(sql.contains("ORDER BY case_alerts.alert_id"), "{sql}");
     });
     assert!(LINKS_AFTER_SQL.contains("case_alerts.alert_id > $3::text"));
+    [LINKS_SQL, LINKS_AFTER_SQL]
+        .iter()
+        .for_each(|sql| assert!(sql.contains("case_alerts.linked_by") && sql.contains("case_alerts.linked_at")));
+    assert!(ATTACH_SQL.contains("INSERT INTO case_alerts (tenant, case_id, alert_id, linked_by, linked_at)"));
+    assert!(ATTACH_SQL.contains("SELECT $1::text, $2::text, $3::text, $6::text, $5::text::bigint"));
+    assert!(!ATTACH_SQL.contains("history"));
     Ok(())
 }
