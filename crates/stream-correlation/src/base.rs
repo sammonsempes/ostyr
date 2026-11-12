@@ -9,11 +9,14 @@ use sigma_sql::condition::{compile_condition, tokenize};
 use sigma_sql::error::SigmaError;
 use sigma_sql::mapping::FieldMapping;
 use sigma_sql::rule::{parse_rule, Rule};
-use sigma_sql::types::SelectionSql;
+use sigma_sql::types::{FieldTable, SelectionSql};
 use std::collections::BTreeMap;
 
 
 pub const CATEGORY_FIELD: &str = "event.category";
+
+
+pub const PROVIDER_FIELD: &str = "event.provider";
 
 
 pub const OS_FIELD: &str = "host.os.type";
@@ -33,7 +36,8 @@ pub struct BaseRule {
     pub name: Option<String>,
     pub level: Level,
     pub source: String,
-    pub event_category: String,
+    pub event_category: Option<String>,
+    pub provider: Option<String>,
     pub os: Option<String>,
     pub selections: BTreeMap<String, Selection>,
     pub steps: Vec<Step>,
@@ -63,29 +67,53 @@ fn os_filter(rule: &Rule, mapping: &FieldMapping) -> Result<Option<String>, Sigm
 }
 
 
+struct Source<'a> {
+    label: &'a str,
+    fields: &'a FieldTable,
+    event_category: Option<String>,
+    provider: Option<String>,
+}
+
+
+fn logsource<'a>(rule: &Rule, mapping: &'a FieldMapping) -> Result<Source<'a>, SigmaError> {
+    match (rule.logsource.category.as_deref(), rule.logsource.service.as_deref()) {
+        (Some(category), None) => mapping
+            .categories
+            .get_key_value(category)
+            .map(|(label, found)| Source {
+                label,
+                fields: &found.fields,
+                event_category: Some(found.event_category.clone()),
+                provider: None,
+            })
+            .ok_or_else(|| unsupported(rule, "logsource category".to_string())),
+        (None, Some(service)) => mapping
+            .services
+            .get_key_value(service)
+            .map(|(label, found)| Source {
+                label,
+                fields: &found.fields,
+                event_category: None,
+                provider: Some(found.provider.clone()),
+            })
+            .ok_or_else(|| unsupported(rule, "logsource service".to_string())),
+        (Some(_), Some(_)) => Err(unsupported(rule, "logsource with both category and service".to_string())),
+        (None, None) => Err(unsupported(rule, "logsource without category or service".to_string())),
+    }
+}
+
+
 /// Compiles the text of one Sigma rule; `name` is the rule's `name` key, which the SQL parser drops.
 pub fn compile_base(text: &str, name: Option<String>, mapping: &FieldMapping) -> Result<BaseRule, CorrelationError> {
     let rule = parse_rule(text).map_err(redacted)?;
     check_title(rule.id.as_deref().unwrap_or(UNTITLED), &rule.title)?;
     let level = parse_level(&rule.title, rule.level.as_deref())?.unwrap_or(DEFAULT_LEVEL);
-    let category = rule
-        .logsource
-        .category
-        .as_deref()
-        .ok_or_else(|| unsupported(&rule, "logsource without category".to_string()))?;
-    let category_mapping = mapping
-        .categories
-        .get(category)
-        .ok_or_else(|| unsupported(&rule, "logsource category".to_string()))?;
-    match rule.logsource.service {
-        Some(_) => Err(unsupported(&rule, "logsource service".to_string())),
-        None => Ok(()),
-    }?;
+    let source = logsource(&rule, mapping)?;
     let selections = rule
         .selections
         .iter()
         .map(|(key, value)| {
-            compile_selection(&rule.title, category, category_mapping, value)
+            compile_selection(&rule.title, source.label, source.fields, value)
                 .map(|compiled| (key.clone(), compiled))
                 .map_err(redacted)
         })
@@ -102,7 +130,8 @@ pub fn compile_base(text: &str, name: Option<String>, mapping: &FieldMapping) ->
         name,
         level,
         source: text.to_string(),
-        event_category: category_mapping.event_category.clone(),
+        event_category: source.event_category,
+        provider: source.provider,
         selections,
         steps,
     })
@@ -116,7 +145,12 @@ fn has_value(event: &Value, path: &str, expected: &str) -> bool {
 
 /// True when the event is in the rule's logsource and its detection condition holds.
 pub fn base_matches(rule: &BaseRule, event: &Value) -> bool {
-    let in_logsource = has_value(event, CATEGORY_FIELD, &rule.event_category) && rule.os.as_ref().is_none_or(|os| has_value(event, OS_FIELD, os));
+    let in_logsource = rule
+        .event_category
+        .as_ref()
+        .is_none_or(|category| has_value(event, CATEGORY_FIELD, category))
+        && rule.provider.as_ref().is_none_or(|provider| has_value(event, PROVIDER_FIELD, provider))
+        && rule.os.as_ref().is_none_or(|os| has_value(event, OS_FIELD, os));
     in_logsource && {
         let results: SelectionResults = rule
             .selections
