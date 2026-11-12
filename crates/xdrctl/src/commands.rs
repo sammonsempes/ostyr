@@ -212,10 +212,11 @@ pub fn plan_json(changes: &Plan) -> serde_json::Value {
 }
 
 
+/// Escapes every line with `printable`, keeping newlines as separators.
 pub fn plan_text(changes: &Plan) -> Result<String, CliError> {
     let mut buffer = Vec::new();
     write_plan(changes, &mut buffer)?;
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
+    Ok(String::from_utf8_lossy(&buffer).split('\n').map(printable).collect::<Vec<_>>().join("\n"))
 }
 
 

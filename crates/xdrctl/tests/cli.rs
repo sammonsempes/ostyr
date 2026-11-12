@@ -1404,3 +1404,73 @@ fn printable_marks_backslashes() -> TestResult {
     assert_eq!(xdrctl::alerts::printable("\u{202e}"), "\\u{202e}");
     Ok(())
 }
+
+
+#[test]
+fn plan_text_and_prompt_escape_hidden_characters() -> TestResult {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let desired = root.join("desired");
+    let state = root.join("state");
+    fs::create_dir_all(&desired)?;
+    fs::create_dir_all(&state)?;
+    fs::write(desired.join("plain.yaml"), "a: 1\n")?;
+    fs::write(desired.join("k\u{1b}[2J\u{202e}.yaml"), "v: \u{1b}[2J \u{202e} \u{2028} \\u{1b}\n")?;
+    let desired_text = desired.display().to_string();
+    let state_text = state.display().to_string();
+    let send = fixed(STATUS_OK, "{}");
+    let planned = invoke(&offline_args(root, &["plan", &desired_text, "--state", &state_text]), "", &send)?;
+    assert_eq!(planned.code, SUCCESS);
+    assert!(planned.out.contains("Create plain.yaml"));
+    assert!(planned.out.contains("\\u{1b}[2J"));
+    assert!(planned.out.contains("\\u{202e}"));
+    assert!(planned.out.contains("\\u{2028}"));
+    assert!(planned.out.contains("\\\\u{1b}"));
+    assert!(!planned.out.contains(['\u{1b}', '\u{202e}', '\u{2028}']));
+    assert!(planned.out.contains('\n'));
+
+    let changes = core_config::plan::plan(&xdrctl::commands::read_dir_state(&desired)?, &xdrctl::commands::read_dir_state(&state)?);
+    let mut prompt = Vec::new();
+    let mut input = std::io::Cursor::new(b"n\n".to_vec());
+    assert!(!xdrctl::commands::confirmed(&changes, &mut input, &mut prompt)?);
+    let shown = String::from_utf8(prompt)?;
+    assert!(shown.contains("\\u{1b}[2J"));
+    assert!(!shown.contains(['\u{1b}', '\u{202e}', '\u{2028}']));
+    Ok(())
+}
+
+
+const ORDINARY_PLAN_OUT: &str = "Create a.yaml\n--- a/a.yaml\n+++ b/a.yaml\n@@ -0,0 +1 @@\n+x: 1\n\
+Update b.yaml\n--- a/b.yaml\n+++ b/b.yaml\n@@ -1 +1 @@\n-y: 1\n+y: 2\n\
+Delete stray.yaml\n--- a/stray.yaml\n+++ b/stray.yaml\n@@ -1 +0,0 @@\n-z: 3\n\n";
+
+
+const ORDINARY_PLAN_PROMPT: &str = "Create a.yaml\n--- a/a.yaml\n+++ b/a.yaml\n@@ -0,0 +1 @@\n+x: 1\n\
+Update b.yaml\n--- a/b.yaml\n+++ b/b.yaml\n@@ -1 +1 @@\n-y: 1\n+y: 2\n\
+Delete stray.yaml\n--- a/stray.yaml\n+++ b/stray.yaml\n@@ -1 +0,0 @@\n-z: 3\nApply 3 change(s)? [y/N] ";
+
+
+#[test]
+fn ordinary_plan_text_is_exact() -> TestResult {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let desired = root.join("desired");
+    let state = root.join("state");
+    fs::create_dir_all(&desired)?;
+    fs::create_dir_all(&state)?;
+    fs::write(desired.join("a.yaml"), "x: 1\n")?;
+    fs::write(desired.join("b.yaml"), "y: 2\n")?;
+    fs::write(state.join("b.yaml"), "y: 1\n")?;
+    fs::write(state.join("stray.yaml"), "z: 3\n")?;
+    let desired_text = desired.display().to_string();
+    let state_text = state.display().to_string();
+    let send = fixed(STATUS_OK, "{}");
+    let planned = invoke(&offline_args(root, &["plan", &desired_text, "--state", &state_text]), "", &send)?;
+    assert_eq!(planned.out, ORDINARY_PLAN_OUT);
+    let changes = core_config::plan::plan(&xdrctl::commands::read_dir_state(&desired)?, &xdrctl::commands::read_dir_state(&state)?);
+    let mut prompt = Vec::new();
+    let mut input = std::io::Cursor::new(b"n\n".to_vec());
+    assert!(!xdrctl::commands::confirmed(&changes, &mut input, &mut prompt)?);
+    assert_eq!(String::from_utf8(prompt)?, ORDINARY_PLAN_PROMPT);
+    Ok(())
+}
