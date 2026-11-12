@@ -1,0 +1,1 @@
+{"json_format_version":[1,0],"smartctl":{"exit_status":2,"messages":[{"string":"/dev/zz: Unable to detect device type","severity":"error"}]},"smart_status":{"passed":true},"ata_smart_attributes":{"table":[{"id":5,"name":"Reallocated_Sector_Ct","when_failed":"now","flags":{"prefailure":true}}]}}
