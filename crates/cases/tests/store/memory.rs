@@ -1,8 +1,9 @@
 use crate::types::Table;
 use alerts::types::Row;
-use cases::model::{Case, CaseEvent, CaseStatus, Comment, Observable};
+use cases::model::{Case, CaseEvent, CaseEventKind, CaseStatus, Comment, Observable};
 use cases::store::{
-    APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, FIRST_SUMMARY_SQL, GET_SQL, INSERT_SQL, NEXT_SQL, NEXT_SUMMARY_SQL, OBSERVABLE_SQL,
+    APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, FIRST_SUMMARY_SQL, GET_SQL, INSERT_SQL, LINKS_AFTER_SQL, LINKS_SQL, NEXT_SQL, NEXT_SUMMARY_SQL,
+    OBSERVABLE_SQL,
 };
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -12,6 +13,15 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 
 pub const CAP_INDEX: usize = 2;
+
+
+pub const NOW_INDEX: usize = 3;
+
+
+pub const ACTOR_INDEX: usize = 4;
+
+
+pub const HISTORY_CAP_INDEX: usize = 5;
 
 
 pub enum Forced {
@@ -243,21 +253,69 @@ pub fn observable(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgEr
 
 pub fn attach(table: &mut Table, known: &BTreeSet<String>, params: &[String]) -> Result<Vec<Row>, PgError> {
     let cap = param(params, CAP_INDEX)?.parse::<usize>().map_err(|_source| malformed())?;
+    let now = param(params, NOW_INDEX)?.parse::<i64>().map_err(|_source| malformed())?;
+    let actor = param(params, ACTOR_INDEX)?.clone();
+    let history_cap = param(params, HISTORY_CAP_INDEX)?.parse::<usize>().map_err(|_source| malformed())?;
     let alert = param(params, 1)?;
     let alert_found = known.contains(alert);
     Ok(match table.get_mut(param(params, 0)?) {
         Some(entry) => {
             let linked = entry.alerts.len();
-            let added = alert_found && linked < cap && entry.alerts.insert(alert.clone());
+            let history = entry.case.history.len();
+            let same = entry.alerts.contains(alert);
+            let added = alert_found && linked < cap && history < history_cap && entry.alerts.insert(alert.clone());
+            if added {
+                let status = entry.case.status;
+                entry.case.history.push(CaseEvent {
+                    kind: CaseEventKind::AlertLinked,
+                    at: now,
+                    actor,
+                    from: status,
+                    to: status,
+                    alert_id: Some(alert.clone()),
+                });
+            }
             vec![vec![
                 "1".to_owned(),
                 usize::from(alert_found).to_string(),
                 usize::from(added).to_string(),
                 linked.to_string(),
+                history.to_string(),
+                usize::from(same).to_string(),
             ]]
         }
-        None => vec![vec!["0".to_owned(), usize::from(alert_found).to_string(), "0".to_owned(), "0".to_owned()]],
+        None => vec![vec![
+            "0".to_owned(),
+            usize::from(alert_found).to_string(),
+            "0".to_owned(),
+            "0".to_owned(),
+            "0".to_owned(),
+            "0".to_owned(),
+        ]],
     })
+}
+
+
+pub fn links(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, PgError> {
+    let limit = param(params, params.len().saturating_sub(1))?
+        .parse::<usize>()
+        .map_err(|_source| malformed())?;
+    let after = if sql == LINKS_AFTER_SQL { Some(param(params, 1)?.clone()) } else { None };
+    let id = param(params, 0)?;
+    Ok(table.get(id).map_or_else(Vec::new, |entry| {
+        let rows: Vec<Row> = entry
+            .alerts
+            .iter()
+            .filter(|alert| after.as_ref().is_none_or(|last| *alert > last))
+            .take(limit)
+            .map(|alert| vec![id.clone(), alert.clone()])
+            .collect();
+        if rows.is_empty() {
+            vec![vec![id.clone(), String::new()]]
+        } else {
+            rows
+        }
+    }))
 }
 
 
@@ -291,6 +349,8 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]
                 observable(table, params)
             } else if sql == ATTACH_SQL {
                 attach(table, &known, params)
+            } else if sql == LINKS_SQL || sql == LINKS_AFTER_SQL {
+                links(table, sql, params)
             } else {
                 select(table, sql, params)
             }

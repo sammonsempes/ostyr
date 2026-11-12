@@ -1,6 +1,6 @@
 use crate::memory::{row_of, Db, Entry, Forced};
 use crate::types::TestResult;
-use crate::{case, comment, executor, force, observable, ALERT, FOUR, NOW};
+use crate::{case, comment, executor, force, observable, ALERT, NOW, SIX};
 use alerts::types::Row;
 use cases::error::CaseStoreError;
 use cases::model::ObservableKind;
@@ -72,19 +72,19 @@ async fn a_malformed_answer_is_a_typed_error() -> TestResult {
     ));
     force(&db, Forced::Rows(Vec::new()));
     assert!(matches!(
-        attach_alert(&exec, &scope, "c1", ALERT).await,
+        attach_alert(&exec, &scope, "c1", ALERT, ("tester", NOW)).await,
         Err(CaseStoreError::BadRow { .. })
     ));
     force(
         &db,
-        Forced::Rows(vec![vec!["1".to_owned(); FOUR]
+        Forced::Rows(vec![vec!["1".to_owned(); SIX]
             .into_iter()
             .enumerate()
             .map(|(index, cell)| if index == 1 { "x".to_owned() } else { cell })
             .collect()]),
     );
     assert!(matches!(
-        attach_alert(&exec, &scope, "c1", ALERT).await,
+        attach_alert(&exec, &scope, "c1", ALERT, ("tester", NOW)).await,
         Err(CaseStoreError::BadNumber { .. })
     ));
     create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
@@ -119,6 +119,9 @@ async fn a_failing_store_is_a_typed_error_for_every_operation() -> TestResult {
         Err(CaseStoreError::Pg(_))
     ));
     force(&db, Forced::Fail);
-    assert!(matches!(attach_alert(&exec, &scope, "c1", ALERT).await, Err(CaseStoreError::Pg(_))));
+    assert!(matches!(
+        attach_alert(&exec, &scope, "c1", ALERT, ("tester", NOW)).await,
+        Err(CaseStoreError::Pg(_))
+    ));
     Ok(())
 }

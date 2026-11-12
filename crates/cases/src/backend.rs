@@ -1,8 +1,8 @@
 use crate::api_model::CasesBackend;
 use crate::error::CaseStoreError;
 use crate::model::Comment;
-use crate::store::add_comment;
-use crate::stored::{CaseDetail, CasePage, SummaryList};
+use crate::store::{add_comment, attach_alert, list_links};
+use crate::stored::{CaseDetail, CasePage, LinkList, LinkPage, SummaryList};
 use crate::summary::{get_case_detail, list_case_summaries};
 use crate::transition::CaseAction;
 use crate::write::act_on_case;
@@ -67,6 +67,30 @@ pub async fn pg_comment(
 }
 
 
+pub async fn pg_link(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    (id, alert_id, actor, now): (String, String, String, i64),
+) -> Result<bool, CaseStoreError> {
+    let held = lease(&engine, &permits).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    attach_alert(&executor, &scope, &id, &alert_id, (&actor, now)).await
+}
+
+
+pub async fn pg_links(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    (id, page): (String, LinkPage),
+) -> Result<LinkList, CaseStoreError> {
+    let held = lease(&engine, &permits).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    list_links(&executor, &scope, &id, &page).await
+}
+
+
 pub fn unix_now() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
@@ -80,6 +104,10 @@ pub fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>
     let act_permits = Arc::clone(&permits);
     let comment_engine = Arc::clone(&engine);
     let comment_permits = Arc::clone(&permits);
+    let link_engine = Arc::clone(&engine);
+    let link_permits = Arc::clone(&permits);
+    let links_engine = Arc::clone(&engine);
+    let links_permits = Arc::clone(&permits);
     CasesBackend {
         list: Arc::new(move |scope, page| Box::pin(pg_list(Arc::clone(&list_engine), Arc::clone(&list_permits), scope, page))),
         get: Arc::new(move |scope, id| Box::pin(pg_get(Arc::clone(&engine), Arc::clone(&permits), scope, id))),
@@ -94,6 +122,15 @@ pub fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>
                 (id, comment),
             ))
         }),
+        link: Arc::new(move |scope, id, alert_id, actor, now| {
+            Box::pin(pg_link(
+                Arc::clone(&link_engine),
+                Arc::clone(&link_permits),
+                scope,
+                (id, alert_id, actor, now),
+            ))
+        }),
+        links: Arc::new(move |scope, id, page| Box::pin(pg_links(Arc::clone(&links_engine), Arc::clone(&links_permits), scope, (id, page)))),
         clock: unix_now,
     }
 }

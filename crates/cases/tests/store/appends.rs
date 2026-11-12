@@ -166,21 +166,27 @@ async fn an_alert_attaches_once_and_only_from_the_same_tenant() -> TestResult {
     create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
     know_alert(&db, "acme", ALERT);
     know_alert(&db, "other", OTHER_ALERT);
-    assert!(attach_alert(&exec, &scope, "c1", ALERT).await?);
-    assert!(!attach_alert(&exec, &scope, "c1", ALERT).await?);
+    assert!(attach_alert(&exec, &scope, "c1", ALERT, ("tester", NOW)).await?);
+    assert!(!attach_alert(&exec, &scope, "c1", ALERT, ("tester", NOW)).await?);
     assert!(matches!(
-        attach_alert(&exec, &scope, "c1", OTHER_ALERT).await,
+        attach_alert(&exec, &scope, "c1", OTHER_ALERT, ("tester", NOW)).await,
         Err(CaseStoreError::AlertNotFound)
     ));
-    assert!(matches!(attach_alert(&exec, &scope, "none", ALERT).await, Err(CaseStoreError::NotFound)));
+    assert!(matches!(
+        attach_alert(&exec, &scope, "none", ALERT, ("tester", NOW)).await,
+        Err(CaseStoreError::NotFound)
+    ));
     let before = sent(&db);
     assert!(matches!(
-        attach_alert(&exec, &scope, "c1", &ALERT.to_uppercase()).await,
+        attach_alert(&exec, &scope, "c1", &ALERT.to_uppercase(), ("tester", NOW)).await,
         Err(CaseStoreError::BadAlertId)
     ));
-    assert!(matches!(attach_alert(&exec, &scope, "c1", "a\0").await, Err(CaseStoreError::BadAlertId)));
     assert!(matches!(
-        attach_alert(&exec, &scope, "", ALERT).await,
+        attach_alert(&exec, &scope, "c1", "a\0", ("tester", NOW)).await,
+        Err(CaseStoreError::BadAlertId)
+    ));
+    assert!(matches!(
+        attach_alert(&exec, &scope, "", ALERT, ("tester", NOW)).await,
         Err(CaseStoreError::FieldEmpty { .. })
     ));
     assert_eq!(sent(&db), before);
@@ -198,9 +204,9 @@ async fn alerts_stop_at_the_cap() -> TestResult {
         know_alert(&db, "acme", &format!("{index:064x}"));
     }
     for index in 0..MAX_ALERTS_PER_CASE {
-        assert!(attach_alert(&exec, &scope, "c1", &format!("{index:064x}")).await?);
+        assert!(attach_alert(&exec, &scope, "c1", &format!("{index:064x}"), ("tester", NOW)).await?);
     }
-    let over = attach_alert(&exec, &scope, "c1", &format!("{MAX_ALERTS_PER_CASE:064x}")).await;
+    let over = attach_alert(&exec, &scope, "c1", &format!("{MAX_ALERTS_PER_CASE:064x}"), ("tester", NOW)).await;
     assert!(matches!(over, Err(CaseStoreError::Full { what: "alerts", .. })));
     Ok(())
 }

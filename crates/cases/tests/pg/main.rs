@@ -10,8 +10,8 @@ use alerts::error::StoreError;
 use cases::backend::pg_backend;
 use cases::error::CaseStoreError;
 use cases::model::{Comment, Resolution};
-use cases::store::{APPLY_SQL, COMMENT_SQL, DETAIL_SQL, GET_SQL};
-use cases::stored::CasePage;
+use cases::store::{APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, GET_SQL, LINKS_AFTER_SQL, LINKS_SQL};
+use cases::stored::{CasePage, LinkPage};
 use cases::transition::CaseAction;
 use certs::{loopback, make_pki};
 use core_audit::log::{append, genesis_log};
@@ -277,6 +277,59 @@ async fn the_pg_backend_acts_and_comments_through_a_leased_connection_scoped_to_
     };
     assert!(matches!(
         (busy.comment)(scope, "c1".to_owned(), again).await,
+        Err(CaseStoreError::Lease(StoreError::Busy))
+    ));
+    Ok(())
+}
+
+
+const ALERT: &str = "2d6c7e2fdf972aab0077338ff3c04044ccb108f41661aa365bea425f0b894fee";
+
+
+pub fn link_handler() -> Handler {
+    Arc::new(|sql| {
+        if sql == ATTACH_SQL {
+            Reply::Rows(vec![["1", "1", "1", "0", "0", "0"].map(str::to_owned).to_vec()])
+        } else if sql == LINKS_SQL || sql == LINKS_AFTER_SQL {
+            Reply::Rows(vec![vec!["c1".to_owned(), ALERT.to_owned()]])
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+#[tokio::test]
+async fn the_pg_backend_links_and_lists_alerts_scoped_to_the_tenant() -> Result<(), Box<dyn Error>> {
+    let mut served = served(link_handler()).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let scope = tenant_scope("acme")?;
+    let added = (backend.link)(scope.clone(), "c1".to_owned(), ALERT.to_owned(), "alice".to_owned(), WRITE_TIME).await?;
+    assert!(added);
+    let first = (backend.links)(scope.clone(), "c1".to_owned(), LinkPage { after: None, size: 1 }).await?;
+    assert_eq!(first.alerts, vec![ALERT.to_owned()]);
+    let after = LinkPage {
+        after: Some(ALERT.to_owned()),
+        size: 1,
+    };
+    assert_eq!((backend.links)(scope.clone(), "c1".to_owned(), after).await?.alerts.len(), 1);
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    let bound: Vec<String> = drain(&mut served.fake.statements)
+        .into_iter()
+        .filter(|entry| entry.starts_with("PARAMS"))
+        .collect();
+    assert!(
+        !bound.is_empty() && bound.iter().all(|entry| entry.starts_with("PARAMS acme|")),
+        "{bound:?}"
+    );
+    let busy = pg_backend(Arc::clone(&served.engine), Arc::new(Semaphore::new(0)));
+    assert!(matches!(
+        (busy.link)(scope.clone(), "c1".to_owned(), ALERT.to_owned(), "alice".to_owned(), 1).await,
+        Err(CaseStoreError::Lease(StoreError::Busy))
+    ));
+    assert!(matches!(
+        (busy.links)(scope, "c1".to_owned(), LinkPage { after: None, size: 1 }).await,
         Err(CaseStoreError::Lease(StoreError::Busy))
     ));
     Ok(())

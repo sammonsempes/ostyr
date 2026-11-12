@@ -5,7 +5,7 @@ use axum::Router;
 use cases::api::{cases_access, cases_document, cases_router};
 use cases::api_model::CasesBackend;
 use cases::model::{Case, CaseStatus, Severity, Task, TaskStatus};
-use cases::store::{add_comment, create_case};
+use cases::store::{add_comment, attach_alert, create_case, list_links};
 use cases::summary::{get_case_detail, list_case_summaries};
 use cases::write::act_on_case;
 use core_api::config::DEFAULT_LOG_LEVEL;
@@ -90,6 +90,8 @@ pub fn memory_backend(db: &Arc<Db>) -> CasesBackend {
     let get_db = Arc::clone(db);
     let act_db = Arc::clone(db);
     let comment_db = Arc::clone(db);
+    let link_db = Arc::clone(db);
+    let links_db = Arc::clone(db);
     CasesBackend {
         list: Arc::new(move |scope, page| {
             let held = Arc::clone(&list_db);
@@ -106,6 +108,14 @@ pub fn memory_backend(db: &Arc<Db>) -> CasesBackend {
         comment: Arc::new(move |scope, id, comment| {
             let held = Arc::clone(&comment_db);
             Box::pin(async move { add_comment(&executor(&held), &scope, &id, &comment).await })
+        }),
+        link: Arc::new(move |scope, id, alert_id, actor, now| {
+            let held = Arc::clone(&link_db);
+            Box::pin(async move { attach_alert(&executor(&held), &scope, &id, &alert_id, (&actor, now)).await })
+        }),
+        links: Arc::new(move |scope, id, page| {
+            let held = Arc::clone(&links_db);
+            Box::pin(async move { list_links(&executor(&held), &scope, &id, &page).await })
         }),
         clock: fixed_clock,
     }

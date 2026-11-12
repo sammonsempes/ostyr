@@ -1,6 +1,6 @@
 use crate::error::CaseStoreError;
 use crate::model::{Comment, ObservableKind};
-use crate::stored::{CaseDetail, CasePage, SummaryList};
+use crate::stored::{CaseDetail, CasePage, LinkList, LinkPage, SummaryList};
 use crate::transition::CaseAction;
 use core_pg::scope::TenantScope;
 use std::future::Future;
@@ -31,3 +31,11 @@ pub type ActFn = Arc<dyn Fn(TenantScope, String, CaseAction, String, i64) -> Cas
 
 /// Scope, case id, comment: appends the comment.
 pub type CommentFn = Arc<dyn Fn(TenantScope, String, Comment) -> CaseFuture<()> + Send + Sync>;
+
+
+/// Scope, case id, alert id, actor, now: links the alert; `true` when newly linked.
+pub type LinkFn = Arc<dyn Fn(TenantScope, String, String, String, i64) -> CaseFuture<bool> + Send + Sync>;
+
+
+/// Scope, case id, page: the alert ids linked to the case.
+pub type LinksFn = Arc<dyn Fn(TenantScope, String, LinkPage) -> CaseFuture<LinkList> + Send + Sync>;
