@@ -6,12 +6,15 @@ mod types;
 
 use fixtures::{list, node, pod, set};
 use k8s_inventory::limits::{Limits, COLLECTION_SLACK};
-use k8s_inventory::parse::{parse_nodes, parse_pods};
+use k8s_inventory::parse::{parse_nodes, parse_pods, OWNERS_SCANNED};
 use serde_json::{json, Map, Value};
 use types::TestResult;
 
 
 const OVER_SLACK: usize = 9;
+
+
+const OVER_OWNER_SLACK: usize = 65;
 
 
 fn tight() -> Limits {
@@ -39,9 +42,13 @@ fn labels_of(count: usize) -> Value {
 #[test]
 fn a_collection_above_the_slack_refuses_the_element() -> TestResult {
     assert_eq!(COLLECTION_SLACK + 1, OVER_SLACK);
+    assert_eq!(OWNERS_SCANNED * COLLECTION_SLACK + 1, OVER_OWNER_SLACK);
     let many_containers = pod_with("/spec/containers", json!(vec![json!({"image": "a"}); OVER_SLACK]))?;
     assert_eq!(parse_pods(many_containers.as_slice(), &tight())?.skipped.bad_field, 1);
-    let many_owners = pod_with("/metadata/ownerReferences", json!(vec![json!({"kind": "A", "name": "b"}); OVER_SLACK]))?;
+    let many_owners = pod_with(
+        "/metadata/ownerReferences",
+        json!(vec![json!({"kind": "A", "name": "b"}); OVER_OWNER_SLACK]),
+    )?;
     assert_eq!(parse_pods(many_owners.as_slice(), &Limits::default())?.skipped.bad_field, 1);
     let many_labels = pod_with("/metadata/labels", labels_of(OVER_SLACK))?;
     assert_eq!(parse_pods(many_labels.as_slice(), &tight())?.skipped.bad_field, 1);

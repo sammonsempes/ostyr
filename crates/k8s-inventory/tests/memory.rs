@@ -87,9 +87,9 @@ fn pod_peak(build: fn() -> Result<String, Box<dyn Error>>) -> Result<(Result<Ski
 fn hostile_shapes_at_the_byte_cap_stay_within_the_peak_bound() -> TestResult {
     let nest = nested();
     let skipped_one = Skipped {
-        unparsable: 0,
         bad_field: 1,
-        duplicate: 0,
+        refused_uids: vec!["u".to_owned()],
+        ..Skipped::default()
     };
     let (root, root_peak) = pod_peak(root_items)?;
     assert!(matches!(root, Err(ParseError::TooManyItems { .. })));

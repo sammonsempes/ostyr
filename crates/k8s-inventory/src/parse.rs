@@ -21,7 +21,7 @@ pub const POD_LIST_KIND: &str = "PodList";
 pub const NODE_LIST_KIND: &str = "NodeList";
 
 
-pub const OWNERS_KEPT: usize = 1;
+pub const OWNERS_SCANNED: usize = 8;
 
 
 pub const INTERNAL_IP: &str = "InternalIP";
@@ -42,6 +42,21 @@ struct RawOwner<'a> {
     kind: Option<Cow<'a, str>>,
     #[serde(borrow)]
     name: Option<Cow<'a, str>>,
+    controller: Option<bool>,
+}
+
+
+#[derive(Deserialize, Default)]
+struct RawUidMetadata<'a> {
+    #[serde(borrow)]
+    uid: Option<Cow<'a, str>>,
+}
+
+
+#[derive(Deserialize)]
+struct RawUidElement<'a> {
+    #[serde(borrow, default)]
+    metadata: RawUidMetadata<'a>,
 }
 
 
@@ -191,7 +206,7 @@ pub fn bounded_seq<'a, Entry: Deserialize<'a>>(raw: Option<&'a RawValue>, cap: u
 }
 
 
-/// A JSON object counted entry by entry without allocating, built only when its count is within `cap * COLLECTION_SLACK`.
+/// A JSON object counted entry by entry without allocating (duplicate keys count once each, like containers), built only when its count is within `cap * COLLECTION_SLACK`.
 pub fn bounded_labels(raw: Option<&RawValue>, cap: usize) -> Result<LabelsAndExtra<'_>, SkipReason> {
     let text = raw.map_or("{}", |value| value.get());
     let mut counter = serde_json::Deserializer::from_str(text);
@@ -200,7 +215,7 @@ pub fn bounded_labels(raw: Option<&RawValue>, cap: usize) -> Result<LabelsAndExt
         Err(SkipReason::BadField)
     } else {
         let labels = serde_json::from_str::<BorrowedLabels>(text).map_err(unparsable)?;
-        let extra = labels.len().saturating_sub(cap);
+        let extra = entries.len().saturating_sub(cap);
         Ok((labels, extra))
     }
 }
@@ -221,8 +236,8 @@ pub fn convert_pod(raw: &RawValue, limits: &Limits) -> Result<PodItem, SkipReaso
         .take(limits.max_labels)
         .map(|(key, value)| label_of(key, value))
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (owners, _) = bounded_seq::<RawOwner>(metadata.owners, OWNERS_KEPT)?;
-    let owner = owners.first();
+    let (owners, _) = bounded_seq::<RawOwner>(metadata.owners, OWNERS_SCANNED)?;
+    let owner = owners.iter().find(|candidate| candidate.controller == Some(true)).or(owners.first());
     Ok(PodItem {
         namespace: required_of(metadata.namespace.as_deref(), limits)?,
         name: required_of(metadata.name.as_deref(), limits)?,
@@ -267,6 +282,17 @@ pub fn pod_uid(pod: &PodItem) -> &str {
 
 pub fn node_uid(node: &NodeItem) -> &str {
     &node.uid
+}
+
+
+/// The uid of an element that was refused, when it is readable and passes the text grammar; nothing else of the element is kept.
+pub fn refused_uid(raw: &RawValue, limits: &Limits) -> Option<String> {
+    let element = serde_json::from_str::<RawUidElement>(raw.get()).ok()?;
+    element
+        .metadata
+        .uid
+        .filter(|uid| valid_text(uid, limits.max_text_bytes))
+        .map(Cow::into_owned)
 }
 
 
@@ -323,7 +349,10 @@ pub fn parse_list<Source: Read, Item>(
         match convert(raw, limits) {
             Ok(item) if seen.insert(uid_of(&item).to_owned()) => parsed.items.push(item),
             Ok(_) => count_skip(&mut parsed.skipped, SkipReason::Duplicate),
-            Err(reason) => count_skip(&mut parsed.skipped, reason),
+            Err(reason) => {
+                count_skip(&mut parsed.skipped, reason);
+                parsed.skipped.refused_uids.extend(refused_uid(raw, limits));
+            }
         }
     }
     let skipped_total = parsed.skipped.unparsable + parsed.skipped.bad_field + parsed.skipped.duplicate;
