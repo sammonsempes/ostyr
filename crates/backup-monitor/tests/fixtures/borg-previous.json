@@ -1,0 +1,44 @@
+{
+    "archives": [
+        {
+            "archive": "web1-1",
+            "barchive": "web1-1",
+            "id": "0d4791c1ed6b7f4274ad09cf45dcf41cdc4ec4b2b9f8fe6b96b5992cd2c1700d",
+            "name": "web1-1",
+            "start": "2026-11-12T13:30:39.000000",
+            "time": "2026-11-12T13:30:39.000000"
+        },
+        {
+            "archive": "web1-2",
+            "barchive": "web1-2",
+            "id": "9e754c9ccd48a45189e2ea5ff13cfb9f5f53191b6a9f48e6627f4afb3d8af044",
+            "name": "web1-2",
+            "start": "2026-11-12T13:31:07.000000",
+            "time": "2026-11-12T13:31:07.000000"
+        },
+        {
+            "archive": "web1-3",
+            "barchive": "web1-3",
+            "id": "53c06afb9d09a809c614d39e9f7ebb48a0b95758ec534178e06ba389e5abbaf8",
+            "name": "web1-3",
+            "start": "2026-11-12T13:31:33.000000",
+            "time": "2026-11-12T13:31:33.000000"
+        },
+        {
+            "archive": "web1-4",
+            "barchive": "web1-4",
+            "id": "4752f7492eafa3ad38d962f8aa6f06292dfed161064b3ef4952193fb522efd32",
+            "name": "web1-4",
+            "start": "2026-11-12T13:31:53.000000",
+            "time": "2026-11-12T13:31:53.000000"
+        }
+    ],
+    "encryption": {
+        "mode": "none"
+    },
+    "repository": {
+        "id": "8ff9e8256a6089f1357840c0fc88b498c541e8948af3317219d4117ce4243ab5",
+        "last_modified": "2026-11-12T13:31:53.000000",
+        "location": "/srv/borg"
+    }
+}

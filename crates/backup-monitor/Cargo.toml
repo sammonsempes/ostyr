@@ -1,0 +1,18 @@
+[package]
+name = "backup-monitor"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+time = { version = "0.3", features = ["parsing", "macros"] }
+unicode-general-category = "1"
+
+[lints]
+workspace = true
