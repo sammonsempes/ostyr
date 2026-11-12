@@ -1,4 +1,4 @@
-//! Live proof: `unknown_devices <pg.yaml> <leases.csv> <known.txt> <tenant>` stores one alert per unknown MAC of the leases file.
+//! Live proof (the `UNKNOWN_DEVICES_DEADLINE_SECS` environment variable raises the 30 s query deadline on a slow lab): `unknown_devices <pg.yaml> <leases.csv> <known.txt> <tenant>` stores one alert per unknown MAC of the leases file.
 
 use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS, MIGRATION_NAMESPACE};
@@ -21,14 +21,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const USAGE: &str = "usage: unknown_devices <pg.yaml> <leases.csv> <known.txt> <tenant>";
 
 
-const DEADLINE: Duration = Duration::from_secs(30);
+const DEFAULT_DEADLINE_SECS: u64 = 30;
+
+
+const DEADLINE_ENV: &str = "UNKNOWN_DEVICES_DEADLINE_SECS";
+
+
+fn deadline_from(setting: Option<&str>) -> Duration {
+    let secs = setting.map_or(Ok(DEFAULT_DEADLINE_SECS), |text| text.parse::<u64>().map_err(|error| error.to_string()));
+    match secs {
+        Ok(value) if value > 0 => Duration::from_secs(value),
+        _ => {
+            tracing::warn!("{DEADLINE_ENV} is not a positive number of seconds, using the default");
+            Duration::from_secs(DEFAULT_DEADLINE_SECS)
+        }
+    }
+}
 
 
 async fn scenario(settings_file: &Path, leases_file: &Path, known_file: &Path, tenant: &str) -> Result<(), Box<dyn Error>> {
+    let deadline = deadline_from(std::env::var(DEADLINE_ENV).ok().as_deref());
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, &settings_file.display().to_string())?;
     let client = connect(&settings).await?;
-    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE).await?;
-    migrate(&client, CURSOR_NAMESPACE, &CURSOR_MIGRATIONS, DEADLINE).await?;
+    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, deadline).await?;
+    migrate(&client, CURSOR_NAMESPACE, &CURSOR_MIGRATIONS, deadline).await?;
     let text = std::fs::read_to_string(leases_file)?;
     let mut lines = text.lines();
     let columns = parse_header(lines.next().unwrap_or(""))?;
@@ -37,7 +53,7 @@ async fn scenario(settings_file: &Path, leases_file: &Path, known_file: &Path, t
     let bad_rows = malformed.len();
     let known: BTreeSet<String> = std::fs::read_to_string(known_file)?.lines().map(str::to_owned).collect();
     let scope = tenant_scope(tenant)?;
-    let exec = pg_executor(&client, DEADLINE);
+    let exec = pg_executor(&client, deadline);
     let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
     let lookup = alerted_in_batch(&exec, &scope, &leases, &known).await;
     let known_or_alerted: BTreeSet<String> = known.union(&lookup.skip).cloned().collect();
