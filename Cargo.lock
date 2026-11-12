@@ -929,8 +929,13 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "siem-ingest",
+ "siem-schema",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
+ "ureq 3.5.1",
 ]
 
 [[package]]

@@ -14,3 +14,7 @@ pub type DayMap = BTreeMap<Date, Decimal>;
 
 
 pub type SkipCounts = BTreeMap<SkipReason, u64>;
+
+
+/// A cost point before the common columns are added: day, dimension, the two key parts and the amount.
+pub type Point = (Date, &'static str, String, String, Decimal);

@@ -13,8 +13,15 @@ metrics-ingest = { version = "0.0.0", path = "../metrics-ingest" }
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
+siem-schema = { version = "0.0.0", path = "../siem-schema" }
 thiserror = "2"
 time = { version = "0.3", features = ["parsing"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
