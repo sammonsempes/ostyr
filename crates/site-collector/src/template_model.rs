@@ -1,5 +1,5 @@
 use crate::flow_model::{FlowLimits, FlowRecord};
-use crate::types::{ExporterMap, TemplateMap};
+use crate::types::{ExporterMap, SourceKeySet, TemplateMap};
 use std::net::IpAddr;
 
 
@@ -189,6 +189,7 @@ pub struct TemplateStats {
 pub struct TemplateCache {
     pub templates: TemplateMap,
     pub exporters: ExporterMap,
+    pub declared: SourceKeySet,
     pub tick: u64,
     pub stats: TemplateStats,
 }

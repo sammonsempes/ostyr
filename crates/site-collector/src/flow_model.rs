@@ -1,7 +1,10 @@
 use crate::model::DropReason;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use thiserror::Error;
+
+
+pub const V5_VERSION: u16 = 5;
 
 
 pub const FLOW_HEADER_BYTES: usize = 24;
@@ -49,13 +52,29 @@ pub const DEFAULT_TEMPLATE_AGE_SECONDS: u64 = 1800;
 pub const MAX_TEMPLATE_AGE_SECONDS: u64 = 86_400;
 
 
+pub const DEFAULT_EXPORTERS_PER_SOURCE_KEY: usize = 4;
+
+
+pub const MAX_EXPORTERS_PER_SOURCE_KEY: usize = 64;
+
+
+pub const DEFAULT_TEMPLATES_TOTAL: usize = 4096;
+
+
+pub const MAX_TEMPLATES_TOTAL: usize = 65_536;
+
+
+pub const FLOW_FRAME_VERSION: u8 = 1;
+
+
 pub const DEFAULT_TEMPLATE_RECORDS: usize = 1000;
 
 
 pub const MAX_TEMPLATE_RECORDS: usize = MAX_TEMPLATE_DATAGRAM_BYTES;
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct FlowLimits {
     pub max_records_per_datagram: usize,
     pub max_templates_per_exporter: usize,
@@ -64,6 +83,8 @@ pub struct FlowLimits {
     pub max_record_bytes: usize,
     pub max_template_age_seconds: u64,
     pub max_template_records_per_datagram: usize,
+    pub max_exporters_per_source_key: usize,
+    pub max_templates_total: usize,
 }
 
 
@@ -77,6 +98,8 @@ impl Default for FlowLimits {
             max_record_bytes: DEFAULT_RECORD_BYTES,
             max_template_age_seconds: DEFAULT_TEMPLATE_AGE_SECONDS,
             max_template_records_per_datagram: DEFAULT_TEMPLATE_RECORDS,
+            max_exporters_per_source_key: DEFAULT_EXPORTERS_PER_SOURCE_KEY,
+            max_templates_total: DEFAULT_TEMPLATES_TOTAL,
         }
     }
 }
@@ -100,6 +123,16 @@ pub struct FlowRecord {
     pub tos: u8,
     pub source_as: u32,
     pub destination_as: u32,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlowFrame<'a> {
+    #[serde(rename = "v")]
+    pub version: u8,
+    pub exporter: IpAddr,
+    #[serde(flatten)]
+    pub record: &'a FlowRecord,
 }
 
 

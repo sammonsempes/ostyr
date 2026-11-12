@@ -2,13 +2,11 @@
 
 use crate::error::ConfigError;
 use crate::flow_model::{
-    FlowBatch, FlowDrop, FlowLimits, FlowRecord, FLOW_HEADER_BYTES, FLOW_RECORD_BYTES, MAX_FIELDS_PER_TEMPLATE, MAX_FLOW_DATAGRAM_BYTES,
-    MAX_FLOW_RECORDS, MAX_RECORD_BYTES, MAX_TEMPLATES_PER_EXPORTER, MAX_TEMPLATE_AGE_SECONDS, MAX_TEMPLATE_EXPORTERS, MAX_TEMPLATE_RECORDS,
+    FlowBatch, FlowDrop, FlowLimits, FlowRecord, FLOW_HEADER_BYTES, FLOW_RECORD_BYTES, MAX_EXPORTERS_PER_SOURCE_KEY, MAX_FIELDS_PER_TEMPLATE,
+    MAX_FLOW_DATAGRAM_BYTES, MAX_FLOW_RECORDS, MAX_RECORD_BYTES, MAX_TEMPLATES_PER_EXPORTER, MAX_TEMPLATES_TOTAL, MAX_TEMPLATE_AGE_SECONDS,
+    MAX_TEMPLATE_EXPORTERS, MAX_TEMPLATE_RECORDS, V5_VERSION,
 };
 use std::net::{IpAddr, Ipv4Addr};
-
-
-const NETFLOW_VERSION: u16 = 5;
 
 
 const U16_BYTES: usize = 2;
@@ -83,6 +81,8 @@ pub fn validate_flow_limits(limits: &FlowLimits) -> Result<(), ConfigError> {
         (1..=MAX_RECORD_BYTES).contains(&limits.max_record_bytes),
         (1..=MAX_TEMPLATE_AGE_SECONDS).contains(&limits.max_template_age_seconds),
         (1..=MAX_TEMPLATE_RECORDS).contains(&limits.max_template_records_per_datagram),
+        (1..=MAX_EXPORTERS_PER_SOURCE_KEY).contains(&limits.max_exporters_per_source_key),
+        (1..=MAX_TEMPLATES_TOTAL).contains(&limits.max_templates_total),
     ];
     within.iter().all(|ok| *ok).then_some(()).ok_or(ConfigError::BadFlowTemplateLimit)
 }
@@ -148,7 +148,7 @@ pub fn read_records(rest: &mut &[u8], count: usize, export_ms: i64, uptime_ms: u
 pub fn parse_netflow_v5(datagram: &[u8], limits: &FlowLimits) -> Result<FlowBatch, FlowDrop> {
     (datagram.len() <= MAX_FLOW_DATAGRAM_BYTES).then_some(()).ok_or(FlowDrop::TooLarge)?;
     let mut rest = datagram;
-    (read_u16(&mut rest)? == NETFLOW_VERSION).then_some(()).ok_or(FlowDrop::Unsupported)?;
+    (read_u16(&mut rest)? == V5_VERSION).then_some(()).ok_or(FlowDrop::Unsupported)?;
     let count = usize::from(read_u16(&mut rest)?);
     let uptime_ms = read_u32(&mut rest)?;
     let unix_secs = read_u32(&mut rest)?;

@@ -6,13 +6,14 @@ use core_audit::log::{append, open_file_log};
 use core_config::reload::{open_engine, reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use site_collector::admission::{collector_config, source_counters, tracked_sources, untracked_dropped};
 use site_collector::error::ListenError;
+use site_collector::flow_model::FlowLimits;
 use site_collector::forward_model::MAX_FORWARD_BATCH_RECORDS;
 use site_collector::listen::{
     bump, count_reason, handle_datagram, listener_tenant, open_runtime, priority_of, prune_if_due, receive_cycle, run, sync_settings,
 };
 use site_collector::listen_model::{
-    ListenerSettings, Runtime, SharedSocket, DEFAULT_BURST, DEFAULT_FORWARD_BATCH_RECORDS, DEFAULT_MAX_SOURCES, DEFAULT_RATE_PER_SECOND,
-    DEFAULT_SOURCE_SHARE_PERCENT, MAX_TENANT_BYTES, PRUNE_INTERVAL_MS,
+    ListenerKind, ListenerSettings, Runtime, SharedSocket, DEFAULT_BURST, DEFAULT_FORWARD_BATCH_RECORDS, DEFAULT_MAX_SOURCES,
+    DEFAULT_RATE_PER_SECOND, DEFAULT_SOURCE_SHARE_PERCENT, MAX_TENANT_BYTES, PRUNE_INTERVAL_MS,
 };
 use site_collector::listen_settings::{
     bind_socket, collector_config_of, open_listener_engine, parse_listen, rebind, settings_loader, settings_state, source_key, validate_settings,
@@ -83,6 +84,8 @@ fn source(last: u8) -> SocketAddr {
 fn settings() -> ListenerSettings {
     ListenerSettings {
         listen: "127.0.0.1:0".to_owned(),
+        kind: ListenerKind::Syslog,
+        flow: FlowLimits::default(),
         tenant: "acme".to_owned(),
         rate_per_second: DEFAULT_RATE_PER_SECOND,
         burst: DEFAULT_BURST,

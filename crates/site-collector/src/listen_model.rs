@@ -1,5 +1,7 @@
+use crate::flow_model::FlowLimits;
 use crate::model::Collector;
 use crate::spool_model::Spool;
+use crate::template_model::TemplateCache;
 use crate::types::Millis;
 use arc_swap::ArcSwap;
 use serde::Deserialize;
@@ -80,10 +82,23 @@ pub fn default_max_sources() -> usize {
 }
 
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenerKind {
+    #[default]
+    Syslog,
+    Netflow,
+}
+
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerSettings {
     pub listen: String,
+    #[serde(default)]
+    pub kind: ListenerKind,
+    #[serde(default)]
+    pub flow: FlowLimits,
     pub tenant: String,
     #[serde(default = "default_rate_per_second")]
     pub rate_per_second: u64,
@@ -115,6 +130,8 @@ pub struct ListenerStats {
     pub dropped_too_long: u64,
     pub dropped_parse: u64,
     pub dropped_unknown: u64,
+    pub flows_accepted: u64,
+    pub flow_records: u64,
     pub spool_errors: u64,
     pub receive_errors: u64,
 }
@@ -131,6 +148,7 @@ pub struct Bound {
 pub struct SharedSocket {
     pub bound: ArcSwap<Bound>,
     pub rebind_failures: AtomicU64,
+    pub kind: ListenerKind,
 }
 
 
@@ -139,6 +157,7 @@ pub struct Runtime {
     pub collector: Collector,
     pub spool: Spool,
     pub stats: ListenerStats,
+    pub templates: TemplateCache,
     pub applied: Arc<ListenerSettings>,
     pub last_prune_ms: Millis,
 }

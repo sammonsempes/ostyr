@@ -1,6 +1,7 @@
 //! The bounded per-exporter template cache of NetFlow v9 and IPFIX (spec section 22).
 
 use crate::flow_model::{FlowDrop, FlowLimits};
+use crate::listen_settings::source_key;
 use crate::template_model::{ExporterState, Template, TemplateCache, TemplateKey, MILLIS_PER_SECOND};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -111,9 +112,63 @@ pub fn evict_least_recent_exporter(cache: &mut TemplateCache) -> usize {
         .iter()
         .min_by_key(|(_, state)| state.last_used)
         .map(|(exporter, _)| *exporter);
-    let keys = oldest.map(|exporter| keys_in(cache, exporter, None)).unwrap_or_else(Vec::new);
+    oldest.map_or(0, |exporter| evict_exporter(cache, exporter))
+}
+
+
+pub fn is_declared(cache: &TemplateCache, exporter: IpAddr) -> bool {
+    cache.declared.contains(&source_key(exporter))
+}
+
+
+pub fn exporters_under_key(cache: &TemplateCache, exporter: IpAddr) -> usize {
+    let key = source_key(exporter);
+    cache.exporters.keys().filter(|known| source_key(**known) == key).count()
+}
+
+
+/// The exporter to evict for `newcomer`: the least recent undeclared one, or for a declared newcomer only, the least recent declared one.
+pub fn eviction_victim(cache: &TemplateCache, newcomer: IpAddr) -> Option<IpAddr> {
+    let least_recent = |declared: bool| {
+        cache
+            .exporters
+            .iter()
+            .filter(|(exporter, _)| **exporter != newcomer && is_declared(cache, **exporter) == declared)
+            .min_by_key(|(_, state)| state.last_used)
+            .map(|(exporter, _)| *exporter)
+    };
+    least_recent(false).or_else(|| is_declared(cache, newcomer).then(|| least_recent(true)).flatten())
+}
+
+
+pub fn evict_exporter(cache: &mut TemplateCache, exporter: IpAddr) -> usize {
+    let keys = keys_in(cache, exporter, None);
     cache.stats.evicted_exporters = cache.stats.evicted_exporters.saturating_add(u64::from(!keys.is_empty()));
     remove_templates(cache, &keys)
+}
+
+
+/// Only called for a template that is not a redefinition.
+pub fn needs_room(cache: &TemplateCache, key: &TemplateKey, limits: &FlowLimits) -> bool {
+    let new_exporter = !cache.exporters.contains_key(&key.exporter);
+    (new_exporter && cache.exporters.len() >= limits.max_template_exporters) || cache.templates.len() >= limits.max_templates_total
+}
+
+
+/// Evicts whole exporters until the template fits; false when no exporter may be evicted for this newcomer.
+pub fn make_room(cache: &mut TemplateCache, key: &TemplateKey, limits: &FlowLimits) -> bool {
+    (0..=limits.max_template_exporters.max(cache.exporters.len()))
+        .find_map(|_| {
+            if !needs_room(cache, key, limits) {
+                Some(true)
+            } else {
+                eviction_victim(cache, key.exporter).map_or(Some(false), |victim| {
+                    evict_exporter(cache, victim);
+                    None
+                })
+            }
+        })
+        .unwrap_or(false)
 }
 
 
@@ -121,10 +176,9 @@ pub fn store_template(cache: &mut TemplateCache, key: TemplateKey, template: Tem
     let replaces = cache.templates.contains_key(&key);
     let known = cache.exporters.get(&key.exporter).copied();
     let exporter_full = known.is_some_and(|state| state.templates >= limits.max_templates_per_exporter);
-    (replaces || !exporter_full).then_some(()).ok_or_else(|| refuse(cache))?;
-    if known.is_none() && cache.exporters.len() >= limits.max_template_exporters {
-        evict_least_recent_exporter(cache);
-    }
+    let key_full = known.is_none() && exporters_under_key(cache, key.exporter) >= limits.max_exporters_per_source_key;
+    (replaces || !(exporter_full || key_full)).then_some(()).ok_or_else(|| refuse(cache))?;
+    (replaces || make_room(cache, &key, limits)).then_some(()).ok_or_else(|| refuse(cache))?;
     if !replaces {
         cache.tick = cache.tick.saturating_add(1);
         let tick = cache.tick;
