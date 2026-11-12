@@ -1,3 +1,6 @@
+use crate::listen_model::ListenerKind;
+
+
 pub const CURSOR_FILE: &str = "forward.cursor";
 
 
@@ -36,6 +39,7 @@ pub const FACILITY_NAMES: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardLimits {
+    pub kind: ListenerKind,
     pub max_records: usize,
     pub agent_spool_max_bytes: u64,
 }
@@ -45,6 +49,7 @@ pub struct ForwardLimits {
 pub struct ForwardReport {
     pub forwarded: u64,
     pub skipped_unparsable: u64,
+    pub skipped_unknown_version: u64,
     pub refused_full: u64,
 }
 

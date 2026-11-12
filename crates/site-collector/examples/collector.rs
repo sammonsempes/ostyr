@@ -74,6 +74,7 @@ fn receive_and_forward(
         if let (true, Some(path)) = (due, agent_spool) {
             last_forward = now();
             let limits = ForwardLimits {
+                kind: runtime.applied.kind,
                 max_records: current_config(engine).forward_batch_records,
                 agent_spool_max_bytes: MAX_AGENT_SPOOL_BYTES,
             };

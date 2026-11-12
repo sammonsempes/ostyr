@@ -7,6 +7,7 @@ pub mod error;
 pub mod event;
 pub mod event_model;
 pub mod flow;
+pub mod flow_frame;
 pub mod flow_listen;
 pub mod flow_model;
 pub mod forward;

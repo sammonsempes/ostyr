@@ -9,6 +9,7 @@ use site_collector::forward::{
     build_event, clean_text, cut_text, event_line, event_time, facility_name, file_bytes, forward_once, read_cursor, valid_hostname, write_cursor,
 };
 use site_collector::forward_model::{ForwardLimits, CURSOR_FILE, CURSOR_TEMPORARY, MAX_FORWARD_MESSAGE_BYTES};
+use site_collector::listen_model::ListenerKind;
 use site_collector::model::{SdElement, SyslogRecord};
 use site_collector::spool::{append, open_spool, sync_range};
 use site_collector::spool_model::{Priority, Record, Spool, SpoolConfig, MAX_FRAME_BYTES};
@@ -98,6 +99,7 @@ fn now() -> Result<OffsetDateTime, time::error::ComponentRange> {
 
 fn limits() -> ForwardLimits {
     ForwardLimits {
+        kind: ListenerKind::Syslog,
         max_records: MANY,
         agent_spool_max_bytes: ONE_MIB,
     }
@@ -260,10 +262,11 @@ fn a_record_that_no_longer_parses_is_skipped_and_counted() -> TestResult {
             sequence: 0,
             payload: b"junk".to_vec(),
         },
+        ListenerKind::Syslog,
         "ab",
         now()?,
     );
-    assert_eq!(only_bad, None);
+    assert!(only_bad.is_err());
     Ok(())
 }
 

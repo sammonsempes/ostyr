@@ -1,9 +1,12 @@
 use crate::dirfs::{open_read, write_text_atomic};
-use crate::error::ForwardError;
+use crate::error::{FlowFrameError, ForwardError};
+use crate::event::flow_events;
+use crate::flow_frame::{decode_flow_frame, single_flow_batch};
 use crate::forward_model::{
     ForwardLimits, ForwardReport, CURSOR_FILE, CURSOR_MAX_BYTES, CURSOR_TEMPORARY, FACILITY_NAMES, MAX_FORWARD_BATCH_RECORDS, MAX_FORWARD_HOST_BYTES,
     MAX_FORWARD_MESSAGE_BYTES, MAX_RAW_HOST_BYTES, MODULE, UNKNOWN_FACILITY,
 };
+use crate::listen_model::ListenerKind;
 use crate::model::{SyslogRecord, FACILITY_WEIGHT, MAX_APP_BYTES};
 use crate::parse::parse_syslog;
 use crate::spool::{acknowledge, read_from};
@@ -140,40 +143,66 @@ pub fn build_event(sequence: u64, epoch: &str, parsed: &SyslogRecord, now: Offse
 }
 
 
-/// The JSON line of a spooled record, or none when it no longer parses or encodes (logged with the sequence and the error, never the payload).
-pub fn event_line(record: &Record, epoch: &str, now: OffsetDateTime) -> Option<String> {
-    let line = parse_syslog(&record.payload, now.year())
-        .map_err(ForwardError::from)
-        .and_then(|parsed| to_json(&build_event(record.sequence, epoch, &parsed, now)).map_err(ForwardError::from));
-    line.map_err(|error| tracing::warn!(sequence = record.sequence, %error, "spooled record skipped"))
-        .ok()
+/// The event lines of a spooled record by listener kind: one for a syslog message or a flow frame, an error when the payload is not that kind's.
+pub fn event_line(record: &Record, kind: ListenerKind, epoch: &str, now: OffsetDateTime) -> Result<Vec<String>, ForwardError> {
+    match kind {
+        ListenerKind::Syslog => {
+            let parsed = parse_syslog(&record.payload, now.year())?;
+            Ok(vec![to_json(&build_event(record.sequence, epoch, &parsed, now))?])
+        }
+        ListenerKind::Netflow => {
+            let (exporter, flow) = decode_flow_frame(&record.payload)?;
+            let batch = single_flow_batch(flow);
+            Ok(flow_events(&batch, exporter, epoch, record.sequence, now)
+                .iter()
+                .map(to_json)
+                .collect::<Result<Vec<_>, _>>()?)
+        }
+    }
 }
 
 
-/// Reads the records after the cursor, syncs the segments and directory holding them (once, only for a non-empty batch) so every forwarded sequence is durable, appends their event lines to the agent spool in one call, then moves the cursor and acknowledges.
+pub fn is_unknown_version(error: &ForwardError) -> bool {
+    matches!(error, ForwardError::Frame(FlowFrameError::UnknownVersion(_)))
+}
+
+
+/// Reads the records after the cursor, syncs the segments and directory holding them (once, only for a non-empty batch) so every forwarded sequence is durable, appends their event lines to the agent spool in one call, then moves the cursor and acknowledges. A record that does not decode is counted, logged once for the batch, and the cursor moves past it.
 pub fn forward_batch(
     spool: &mut Spool,
     agent_spool: &Path,
-    max_records: usize,
+    limits: &ForwardLimits,
     now: OffsetDateTime,
     write_cursor_to: CursorWriter,
     sync_to: SyncFn,
     cursor: u64,
 ) -> Result<ForwardReport, ForwardError> {
-    let records = read_from(spool, cursor, max_records.min(MAX_FORWARD_BATCH_RECORDS))?;
-    let lines = records.iter().map(|record| event_line(record, &spool.epoch, now)).collect::<Vec<_>>();
-    let forwarded = lines.iter().flatten().count() as u64;
+    let records = read_from(spool, cursor, limits.max_records.min(MAX_FORWARD_BATCH_RECORDS))?;
+    let outcomes = records
+        .iter()
+        .map(|record| event_line(record, limits.kind, &spool.epoch, now).map_err(|error| (record.sequence, error)))
+        .collect::<Vec<_>>();
+    let failures = outcomes.iter().filter_map(|outcome| outcome.as_ref().err()).collect::<Vec<_>>();
+    let unknown_version = failures.iter().filter(|(_, error)| is_unknown_version(error)).count() as u64;
+    let malformed = failures.len() as u64 - unknown_version;
+    let first_failure = failures.first().map(|(sequence, error)| format!("sequence {sequence}: {error:?}"));
+    if let Some(first) = first_failure {
+        tracing::warn!(malformed, unknown_version, %first, "spooled records skipped");
+    }
+    let lines = outcomes.into_iter().flatten().flatten().collect::<Vec<_>>();
+    let forwarded = lines.len() as u64;
     if let Some(last) = records.last().map(|record| record.sequence) {
         sync_to(spool, cursor, last.saturating_add(1))?;
     }
-    append_back(lines.into_iter().flatten().map(Ok), agent_spool)?;
+    append_back(lines.into_iter().map(Ok), agent_spool)?;
     if let Some(last) = records.last().map(|record| record.sequence) {
         write_cursor_to(&spool.dir, last.saturating_add(1))?;
         acknowledge(spool, last)?;
     }
     Ok(ForwardReport {
         forwarded,
-        skipped_unparsable: records.len() as u64 - forwarded,
+        skipped_unparsable: malformed,
+        skipped_unknown_version: unknown_version,
         refused_full: 0,
     })
 }
@@ -197,6 +226,6 @@ pub fn forward_once(
             ..ForwardReport::default()
         })
     } else {
-        forward_batch(spool, agent_spool, limits.max_records, now, write_cursor_to, sync_to, cursor)
+        forward_batch(spool, agent_spool, limits, now, write_cursor_to, sync_to, cursor)
     }
 }

@@ -67,6 +67,10 @@ pub const MAX_TEMPLATES_TOTAL: usize = 65_536;
 pub const FLOW_FRAME_VERSION: u8 = 1;
 
 
+/// The most a stored flow frame may hold: four IPv6 texts, the numbers and the field names come to under 700 bytes.
+pub const MAX_FLOW_FRAME_BYTES: usize = 1024;
+
+
 pub const DEFAULT_TEMPLATE_RECORDS: usize = 75;
 
 
@@ -105,7 +109,8 @@ impl Default for FlowLimits {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowRecord {
     pub source: IpAddr,
     pub destination: IpAddr,
