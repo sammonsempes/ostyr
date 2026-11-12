@@ -1,4 +1,4 @@
-use crate::types::{CostMap, DayMap, SkipCounts};
+use crate::types::{CostMap, DayMap, SkipCounts, StoredMap};
 use core_pg::scope::TenantScope;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -44,6 +44,25 @@ impl Default for Limits {
 }
 
 
+pub const DIMENSION_TOTAL: &str = "total";
+
+
+pub const DIMENSION_ACCOUNT_SERVICE: &str = "account_service";
+
+
+pub const DIMENSION_TAG: &str = "tag";
+
+
+pub const DIMENSION_OTHER: &str = "other";
+
+
+pub const DIMENSION_TAG_OTHER: &str = "tag_other";
+
+
+/// Account label of the cost of accounts beyond `max_series`.
+pub const OVERFLOW_ACCOUNT: &str = "";
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkipReason {
     Oversized,
@@ -71,6 +90,7 @@ pub struct CostTable {
     pub day_totals: DayMap,
     pub by_account_service: CostMap,
     pub by_tag: CostMap,
+    pub account_rows: StoredMap,
     pub other: OtherBucket,
     pub tag_other: OtherBucket,
     pub skipped: SkipCounts,

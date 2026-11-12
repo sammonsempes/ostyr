@@ -1,6 +1,9 @@
 use crate::error::CostError;
-use crate::model::{Columns, CostTable, Limits, OtherBucket, Row, SkipReason, State};
-use crate::types::SkipCounts;
+use crate::model::{
+    Columns, CostTable, Limits, OtherBucket, Row, SkipReason, State, DIMENSION_ACCOUNT_SERVICE, DIMENSION_OTHER, DIMENSION_TAG, DIMENSION_TAG_OTHER,
+    DIMENSION_TOTAL, OVERFLOW_ACCOUNT,
+};
+use crate::types::{SkipCounts, StoredKey};
 use core_pg::scope::{tenant_scope, TenantScope};
 use csv::{ErrorKind, Reader, ReaderBuilder, StringRecord};
 use metrics_ingest::decode::is_forbidden;
@@ -171,13 +174,48 @@ pub fn add_other(bucket: &mut OtherBucket, amount: Decimal) -> Result<(), CostEr
 }
 
 
-pub fn post_tag(state: &mut State, row_day: time::Date, pair: (String, String), amount: Decimal, limits: &Limits) -> Result<(), CostError> {
+/// Adds an amount to the per-account row of one dimension.
+pub fn add_stored(table: &mut CostTable, key: StoredKey, amount: Decimal) -> Result<(), CostError> {
+    add_cost(table.account_rows.entry(key).or_insert(Decimal::ZERO), amount)
+}
+
+
+pub fn post_tag(
+    state: &mut State,
+    (row_day, label): (time::Date, &str),
+    pair: (String, String),
+    amount: Decimal,
+    limits: &Limits,
+) -> Result<(), CostError> {
     if admits(&state.pairs, &pair, limits.max_series) {
         state.pairs.insert(pair.clone());
         let (key, value) = pair;
+        add_stored(
+            &mut state.table,
+            (row_day, label.to_owned(), DIMENSION_TAG, key.clone(), value.clone()),
+            amount,
+        )?;
         add_cost(state.table.by_tag.entry((row_day, key, value)).or_insert(Decimal::ZERO), amount)
     } else {
+        add_stored(
+            &mut state.table,
+            (row_day, label.to_owned(), DIMENSION_TAG_OTHER, String::new(), String::new()),
+            amount,
+        )?;
         add_other(&mut state.table.tag_other, amount)
+    }
+}
+
+
+/// The account's own name while it is within `max_series`, else the shared overflow label.
+pub fn account_label(state: &mut State, account: &str, limits: &Limits) -> (bool, String) {
+    let owned = account.to_owned();
+    let within = admits(&state.accounts, &owned, limits.max_series);
+    if within {
+        state.accounts.insert(owned.clone());
+        (true, owned)
+    } else {
+        (false, OVERFLOW_ACCOUNT.to_owned())
     }
 }
 
@@ -193,18 +231,34 @@ pub fn post_row(state: &mut State, row: Row, limits: &Limits) -> Result<(), Cost
     } = row;
     state.table.accepted += 1;
     add_cost(state.table.day_totals.entry(day).or_insert(Decimal::ZERO), amount)?;
-    let tracked = admits(&state.accounts, &account, limits.max_series) && admits(&state.services, &service, limits.max_series);
+    let (within, label) = account_label(state, &account, limits);
+    add_stored(
+        &mut state.table,
+        (day, label.clone(), DIMENSION_TOTAL, String::new(), String::new()),
+        amount,
+    )?;
+    let tracked = within && admits(&state.services, &service, limits.max_series);
     if tracked {
-        state.accounts.insert(account.clone());
         state.services.insert(service.clone());
+        add_stored(
+            &mut state.table,
+            (day, label.clone(), DIMENSION_ACCOUNT_SERVICE, service.clone(), String::new()),
+            amount,
+        )?;
         add_cost(
             state.table.by_account_service.entry((day, account, service)).or_insert(Decimal::ZERO),
             amount,
         )?;
     } else {
+        add_stored(
+            &mut state.table,
+            (day, label.clone(), DIMENSION_OTHER, String::new(), String::new()),
+            amount,
+        )?;
         add_other(&mut state.table.other, amount)?;
     }
-    tags.into_iter().try_for_each(|pair| post_tag(state, day, pair, amount, limits))
+    let tag_scope = (day, label.as_str());
+    tags.into_iter().try_for_each(|pair| post_tag(state, tag_scope, pair, amount, limits))
 }
 
 
@@ -262,6 +316,7 @@ pub fn new_state(tenant: TenantScope) -> State {
             day_totals: BTreeMap::new(),
             by_account_service: BTreeMap::new(),
             by_tag: BTreeMap::new(),
+            account_rows: BTreeMap::new(),
             other: OtherBucket {
                 cost: Decimal::ZERO,
                 count: 0,
