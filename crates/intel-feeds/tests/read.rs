@@ -226,6 +226,7 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
                 unknown_type: 1,
                 bad_time: 1,
                 bad_json: TWO,
+                too_broad: 0,
             }
         }
     );
@@ -499,12 +500,28 @@ fn each_bad_row_is_counted_under_its_own_reason() -> TestResult {
             unknown_tlp: 1,
             unknown_type: 1,
             bad_time: 1,
-            bad_json: 1
+            bad_json: 1,
+            too_broad: 0
         }
     );
     assert_eq!(BadReason::UnknownTlp.to_string(), "unknown_tlp");
     assert_eq!(BadReason::UnknownType.to_string(), "unknown_type");
     assert_eq!(BadReason::BadTime.to_string(), "bad_time");
     assert_eq!(BadReason::BadJson.to_string(), "bad_json");
+    Ok(())
+}
+
+
+#[test]
+fn rows_stored_before_the_breadth_rule_are_skipped_and_counted() -> TestResult {
+    let broad_network = row("0.0.0.0/0", "green").replace("\"domain\"", "\"cidr\"");
+    let rows = [row("com", "green"), broad_network, row("example.com", "green")];
+    let results: Vec<Result<String, _>> = rows.into_iter().map(|line| ioc_line(Ok(line))).collect();
+    let reasons: Vec<Option<BadReason>> = results.iter().map(|result| result.as_ref().err().map(reason_of)).collect();
+    assert_eq!(reasons, vec![Some(BadReason::TooBroad), Some(BadReason::TooBroad), None]);
+    assert_eq!(BadReason::TooBroad.to_string(), "too_broad");
+    let counted = [BadReason::TooBroad, BadReason::TooBroad].into_iter().fold(BadRows::default(), count_bad);
+    assert_eq!(counted.too_broad, TWO);
+    assert_eq!(total_bad(&counted), TWO);
     Ok(())
 }

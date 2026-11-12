@@ -131,3 +131,102 @@ fn type_names_of_feeds_are_understood() -> TestResult {
     assert_eq!(type_from_name("ip:port"), None);
     Ok(())
 }
+
+
+fn assert_too_broad(ioc_type: IocType, value: &str) {
+    assert!(matches!(value_of(ioc_type, value), Err(CanonError::TooBroad)), "{value}");
+}
+
+
+#[test]
+fn embedded_ipv4_networks_are_judged_by_their_ipv4_breadth() -> TestResult {
+    [
+        "::ffff:0.0.0.0/96",
+        "::ffff:0:0/100",
+        "::ffff:0:0/103",
+        "::ffff:0:0/32",
+        "::/32",
+        "::/48",
+        "::/100",
+        "64:ff9b::/96",
+        "64:ff9b::/103",
+        "::/96",
+        "::ffff:0:0/95",
+        "64:ff9b::/95",
+        "64:ff9b::/64",
+        "64:ff9b::/32",
+        "64:ff9b::/16",
+        "64:ff9b:1::/48",
+        "64:ff9b:1::/64",
+        "::/95",
+        "::/64",
+    ]
+    .iter()
+    .for_each(|value| assert_too_broad(IocType::Cidr, value));
+    assert_too_broad(IocType::Cidr, "10.0.0.0/7");
+    assert_eq!(value_of(IocType::Cidr, "::ffff:10.0.0.0/104")?, (IocType::Cidr, "10.0.0.0/8".to_owned()));
+    assert_eq!(value_of(IocType::Cidr, "::ffff:10.1.2.3/128")?, (IocType::Cidr, "10.1.2.3/32".to_owned()));
+    assert_eq!(value_of(IocType::Cidr, "64:ff9b::a00:0/104")?.1, "64:ff9b::a00:0/104");
+    assert_eq!(value_of(IocType::Cidr, "::a00:0/104")?.1, "::a00:0/104");
+    assert_eq!(value_of(IocType::Cidr, "2001:db8::/32")?.1, "2001:db8::/32");
+    Ok(())
+}
+
+
+#[test]
+fn public_suffixes_and_single_labels_are_refused() -> TestResult {
+    ["com", "co.uk", "github.io", "localhost", "com."]
+        .iter()
+        .for_each(|value| assert_too_broad(IocType::Domain, value));
+    assert_eq!(value_of(IocType::Domain, "example.co.uk")?.1, "example.co.uk");
+    assert_eq!(value_of(IocType::Domain, "evil.github.io")?.1, "evil.github.io");
+    Ok(())
+}
+
+
+const EMBEDDING_SEEDS: [u128; 4] = [
+    0x0000_0000_0000_0000_0000_ffff_0000_0000,
+    0,
+    0x0064_ff9b_0000_0000_0000_0000_0000_0000,
+    0x0064_ff9b_0001_0000_0000_0000_0000_0000,
+];
+
+
+const MAX_PREFIX: u8 = 128;
+
+
+fn is_refused(address: u128, prefix: u8) -> bool {
+    let text = format!("{}/{prefix}", std::net::Ipv6Addr::from(address));
+    matches!(value_of(IocType::Cidr, &text), Err(CanonError::TooBroad))
+}
+
+
+#[test]
+fn refusal_of_embedding_networks_is_monotonic() -> TestResult {
+    let mut state: u64 = SEED;
+    (0..EMBEDDING_SEEDS.len() * PROPERTY_ROUNDS).try_for_each(|round| -> TestResult {
+        state = state.wrapping_mul(LCG_MULTIPLIER).wrapping_add(LCG_INCREMENT);
+        let seed = EMBEDDING_SEEDS.get(round % EMBEDDING_SEEDS.len()).ok_or("no seed")?;
+        let address = seed | u128::from(state >> LOW_SHIFT);
+        let prefix = u8::try_from(state % u64::from(MAX_PREFIX + 1))?;
+        (0..prefix)
+            .filter(|_| is_refused(address, prefix))
+            .for_each(|shorter| assert!(is_refused(address, shorter), "{address:x}/{prefix} refused but /{shorter} not"));
+        Ok(())
+    })
+}
+
+
+const PROPERTY_ROUNDS: usize = 500;
+
+
+const LOW_SHIFT: u32 = 32;
+
+
+const SEED: u64 = 0x2545_f491_4f6c_dd1d;
+
+
+const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+
+
+const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;

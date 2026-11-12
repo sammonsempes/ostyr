@@ -80,8 +80,19 @@ pub fn tags_tlp(tags: Option<&Value>) -> TlpReading {
 }
 
 
-/// `true`, `1` and `"1"` or `"true"`; anything else, an absent field included, is false.
-pub fn flag(object: &Map<String, Value>, name: &str) -> bool {
+/// Fails closed: not set only when absent, `false`, `0`, `"0"` or `"false"`; any other value reads as set.
+pub fn flag_fails_to_true(object: &Map<String, Value>, name: &str) -> bool {
+    match object.get(name) {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::String(text)) => !(text == "0" || text.eq_ignore_ascii_case("false")),
+        Some(Value::Number(number)) => number.as_u64() != Some(0),
+        Some(_) => true,
+    }
+}
+
+
+/// Fails safe: only `true`, `1`, `"1"` or `"true"` is set; anything else, an absent field included, is not.
+pub fn flag_fails_to_false(object: &Map<String, Value>, name: &str) -> bool {
     match object.get(name) {
         Some(Value::Bool(set)) => *set,
         Some(Value::String(text)) => text == "1" || text.eq_ignore_ascii_case("true"),
@@ -178,9 +189,9 @@ pub fn attribute_iocs(
 /// `unknown` counts the items whose event or attribute carried an unknown `tlp:` tag.
 pub fn misp_item(feed: &FeedConfig, now: OffsetDateTime, event: TlpReading, unknown: &Cell<u64>, attribute: &Value) -> Result<Vec<Ioc>, EntryError> {
     let object = attribute.as_object().ok_or(EntryError::NotAnObject)?;
-    if flag(object, "deleted") {
+    if flag_fails_to_true(object, "deleted") {
         Err(EntryError::Deleted)
-    } else if !flag(object, "to_ids") {
+    } else if !flag_fails_to_false(object, "to_ids") {
         Err(EntryError::NotForDetection)
     } else {
         attribute_iocs(feed, now, event, object).map(|(iocs, unreadable)| {
