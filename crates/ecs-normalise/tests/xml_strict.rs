@@ -123,6 +123,39 @@ fn every_xml_fixture_refuses_each_tampering() -> TestResult {
 
 
 #[test]
+fn any_cdata_outside_the_root_is_refused() -> TestResult {
+    outside(&format!("{VALID}<![CDATA[ ]]>"))?;
+    outside(&format!("{VALID}<![CDATA[]]>"))?;
+    outside(&format!("<![CDATA[]]>{VALID}"))?;
+    assert_eq!(parse_event(&format!("{VALID}\n  \r\n"))?.event_id, EVENT_ID);
+    Ok(())
+}
+
+
+#[test]
+fn form_feed_and_vertical_tab_are_not_id_whitespace() -> TestResult {
+    ["\u{c}4625", "4625\u{c}", "\u{b}4625", "4625\u{b}"].iter().try_for_each(|id| {
+        let text = VALID.replace("<EventID>4625</EventID>", &format!("<EventID>{id}</EventID>"));
+        assert!(matches!(sysmon_error(&text)?, SysmonError::BadEventId(_)), "{id:?}");
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+
+#[test]
+fn empty_or_control_data_names_are_refused() -> TestResult {
+    ["", "A&#10;B", "A&#9;B", "&#127;"].iter().try_for_each(|name| {
+        let text = VALID.replace("</EventData>", &format!("<Data Name=\"{name}\">x</Data></EventData>"));
+        assert!(matches!(sysmon_error(&text)?, SysmonError::BadFieldName(_)), "{name:?}");
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+    let json = r#"{"Event":{"System":{"EventID":1},"EventData":{"":"x"}}}"#;
+    assert!(matches!(sysmon_error(json)?, SysmonError::BadFieldName(_)));
+    Ok(())
+}
+
+
+#[test]
 fn smuggled_data_names_keep_their_errors() -> TestResult {
     let twice = VALID.replace(
         "</EventData>",
