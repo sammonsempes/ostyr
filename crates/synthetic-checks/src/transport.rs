@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 pub const ECHO_PAYLOAD_BYTES: usize = 16;
 
 
-pub const MAX_FOREIGN_REPLIES: usize = 8;
+pub const MAX_FOREIGN_REPLIES: usize = 4096;
 
 
 pub const ICMP_HEADER_BYTES: usize = 8;
@@ -62,7 +62,7 @@ pub fn await_reply(next: &mut dyn FnMut() -> io::Result<(Vec<u8>, IpAddr)>, targ
             Ok((reply, source)) => reply_matches(&reply, source, target, payload).then_some(Ok(())),
             Err(error) => Some(Err(error)),
         })
-        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, FOREIGN_FLOOD)))
+        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::QuotaExceeded, FOREIGN_FLOOD)))
 }
 
 
@@ -94,7 +94,7 @@ pub fn receive(socket: &UdpSocket, deadline: Instant) -> io::Result<(Vec<u8>, Ip
 }
 
 
-/// An unprivileged ICMP datagram socket connected to the target: the kernel owns the identifier and only delivers replies to our requests.
+/// An unprivileged ICMP datagram socket connected to the target: the kernel owns the identifier and delivers replies carrying our identifier from any source.
 pub fn open_ping_socket(target: IpAddr) -> io::Result<UdpSocket> {
     let (domain, protocol) = if target.is_ipv4() {
         (Domain::IPV4, Protocol::ICMPV4)

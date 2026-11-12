@@ -2,6 +2,7 @@ use crate::error::{CheckError, GuardError, ProbeError};
 use crate::load::validate_nat64_prefix;
 use crate::model::{MAX_BODY_EXCERPT_BYTES, MAX_TIMEOUT_SECONDS};
 use crate::target::{checked_ip, guard_address_nat64, probe_socket, CheckedAddr};
+use crate::transport::MAX_FOREIGN_REPLIES;
 use crate::types::{Clock, Connect, Fetch, Handshake, Ping, Resolve};
 use ipnet::{IpNet, Ipv6Net};
 use std::io;
@@ -353,6 +354,7 @@ pub fn icmp_probe(address: CheckedAddr, limits: &ProbeLimits, ping: &Ping<'_>, c
     let left = remaining(clock, &deadline)?;
     ping(checked_ip(&address), left).map_err(|error| match error.kind() {
         io::ErrorKind::TimedOut => ProbeError::Timeout { limit: deadline.limit },
+        io::ErrorKind::QuotaExceeded => ProbeError::ForeignFlood { max: MAX_FOREIGN_REPLIES },
         _ => ProbeError::Transport(error),
     })?;
     remaining(clock, &deadline)?;
