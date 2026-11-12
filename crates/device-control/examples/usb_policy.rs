@@ -1,7 +1,7 @@
 //! `check <policy> <now>` prints a summary, `render <policy> <now>` the USBGuard rule file, `evaluate <policy> <now> <vendor> <product> <classes>` a decision.
 
 use device_control::evaluate::{class_only_allows, evaluate, next_change};
-use device_control::model::UsbDevice;
+use device_control::model::{Matched, UsbDevice};
 use device_control::parse::load_policy;
 use device_control::render::{render_usbguard, summarize};
 use std::io::Write;
@@ -39,9 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match command.as_str() {
         "check" => {
             writeln!(out, "{} next_change={:?}", summarize(&policy, now), next_change(&policy, now))?;
-            class_only_allows(&policy)
-                .iter()
-                .try_for_each(|index| writeln!(out, "warning: rule {index} allows a class alone and no block rule covers class 08"))?;
+            class_only_allows(&policy, now).iter().try_for_each(|matched| match matched {
+                Matched::Exception(index) => writeln!(out, "warning: exception {index} allows a class alone and wins over every block"),
+                Matched::Rule(index) => writeln!(out, "warning: rule {index} allows a class alone and no block on class 08 alone exists"),
+                other => writeln!(out, "warning: {other:?}"),
+            })?;
         }
         "render" => {
             let file = render_usbguard(&policy, now)?;
