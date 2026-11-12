@@ -13,6 +13,10 @@ pub type CostMap = BTreeMap<CostKey, Decimal>;
 pub type DayMap = BTreeMap<Date, Decimal>;
 
 
+/// First and last day of a range.
+pub type DayRange = (Date, Date);
+
+
 pub type SkipCounts = BTreeMap<SkipReason, u64>;
 
 

@@ -1,4 +1,4 @@
-use crate::types::{CostMap, DayMap, SkipCounts, StoredMap};
+use crate::types::{CostMap, DayMap, DayRange, SkipCounts, StoredMap};
 use core_pg::scope::TenantScope;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -87,6 +87,8 @@ pub struct CostTable {
     pub by_account_service: CostMap,
     pub by_tag: CostMap,
     pub account_rows: StoredMap,
+    pub seen_accounts: BTreeSet<String>,
+    pub seen_days: Option<DayRange>,
     pub other: OtherBucket,
     pub tag_other: OtherBucket,
     pub skipped: SkipCounts,

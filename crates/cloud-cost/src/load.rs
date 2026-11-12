@@ -22,14 +22,19 @@ pub const MAX_REPLACE_ACCOUNTS: usize = 1001;
 pub const MAX_REPLACE_ACCOUNT_BYTES: usize = 65_536;
 
 
+pub const MAX_TOTAL_ACCOUNTS: usize = 100_000;
+
+
 #[derive(Debug, Error)]
 pub enum LoadError {
     #[error(transparent)]
     Settings(#[from] CostSettingsError),
     #[error("the table's tenant differs from the settings tenant")]
     TenantMismatch,
-    #[error("the export names more billing accounts, or longer names, than one replace statement carries")]
+    #[error("the export names more billing accounts than the total cap, or a name longer than one replace statement carries")]
     TooManyAccounts,
+    #[error("the export names billing accounts but no row has a readable day")]
+    NoCoveredDay,
     #[error("the ClickHouse password file could not be used")]
     Password(#[source] PgError),
     #[error("the ClickHouse password is not valid UTF-8")]
@@ -42,8 +47,8 @@ pub enum LoadError {
     Statement(#[from] SchemaError),
     #[error("schema statement refused: {0:?}")]
     Schema(InsertClass),
-    #[error("replacing the covered days refused: {0:?}")]
-    Replace(InsertClass),
+    #[error("replacing the covered days refused ({class:?}) after {done} of {total} account batches")]
+    Replace { done: usize, total: usize, class: InsertClass },
 }
 
 
@@ -131,7 +136,30 @@ pub fn ensure_schema(agent: &Agent, config: &CostLoadConfig, password: &str, ela
 }
 
 
-/// Removes the tenant's rows of the export's billing accounts for the days it covers, so a corrected export replaces the old one and no other account is touched.
+/// Account names cut into batches of at most `MAX_REPLACE_ACCOUNTS` names and `MAX_REPLACE_ACCOUNT_BYTES` bytes, in order.
+pub fn account_batches(accounts: &[String]) -> Vec<Vec<String>> {
+    accounts
+        .iter()
+        .fold(Vec::<(Vec<String>, usize)>::new(), |mut batches, account| {
+            let fits = batches
+                .last()
+                .is_some_and(|(names, bytes)| names.len() < MAX_REPLACE_ACCOUNTS && bytes + account.len() <= MAX_REPLACE_ACCOUNT_BYTES);
+            if !fits {
+                batches.push((Vec::new(), 0));
+            }
+            batches.last_mut().into_iter().for_each(|(names, bytes)| {
+                names.push(account.clone());
+                *bytes += account.len();
+            });
+            batches
+        })
+        .into_iter()
+        .map(|(names, _)| names)
+        .collect()
+}
+
+
+/// Removes the tenant's rows of the export's accounts, batch by batch, over the export's whole day range; no other account is touched.
 pub fn replace_days(
     agent: &Agent,
     config: &CostLoadConfig,
@@ -141,17 +169,23 @@ pub fn replace_days(
     elapsed: &dyn Fn() -> Duration,
 ) -> Result<(), LoadError> {
     let budget = Duration::from_millis(config.timeout_ms);
-    let statement = Statement {
-        text: delete_statement(config)?,
-        params: vec![
-            ("tenant".to_owned(), config.tenant.clone()),
-            ("accounts".to_owned(), array_literal(accounts)),
-            ("first".to_owned(), days.0.to_string()),
-            ("last".to_owned(), days.1.to_string()),
-        ],
-        body: String::new(),
-    };
-    post(agent, config, password, &statement, budget.saturating_sub(elapsed())).map_or(Ok(()), |class| Err(LoadError::Replace(class)))
+    let text = delete_statement(config)?;
+    let batches = account_batches(accounts);
+    let total = batches.len();
+    batches.iter().enumerate().try_for_each(|(done, names)| {
+        let statement = Statement {
+            text: text.clone(),
+            params: vec![
+                ("tenant".to_owned(), config.tenant.clone()),
+                ("accounts".to_owned(), array_literal(names)),
+                ("first".to_owned(), days.0.to_string()),
+                ("last".to_owned(), days.1.to_string()),
+            ],
+            body: String::new(),
+        };
+        post(agent, config, password, &statement, budget.saturating_sub(elapsed()))
+            .map_or(Ok(()), |class| Err(LoadError::Replace { done, total, class }))
+    })
 }
 
 
@@ -202,7 +236,8 @@ pub fn send_batches(
 pub fn store_export(config: &CostLoadConfig, export: &Export, version: u64, elapsed: &dyn Fn() -> Duration) -> Result<LoadOutcome, LoadError> {
     let plan = insert_plan(&plan_rows(&export.table, &config.tenant, &export.source, version));
     match covered_days(&export.table) {
-        None => Ok(LoadOutcome::default()),
+        None if export.table.seen_accounts.is_empty() => Ok(LoadOutcome::default()),
+        None => Err(LoadError::NoCoveredDay),
         Some(days) => {
             let password = read_password(&config.password_file).map_err(LoadError::Password)?;
             let key = std::str::from_utf8(&password).map_err(LoadError::PasswordEncoding)?;
@@ -219,10 +254,10 @@ pub fn store_export(config: &CostLoadConfig, export: &Export, version: u64, elap
 pub fn load_table(config: &CostLoadConfig, export: &Export, version: u64, elapsed: &dyn Fn() -> Duration) -> Result<LoadOutcome, LoadError> {
     validate_config(config)?;
     let accounts = account_set(&export.table);
-    let account_bytes: usize = accounts.iter().map(String::len).sum();
+    let longest = accounts.iter().map(String::len).max().unwrap_or(0);
     if tenant_of(&export.table.tenant) != config.tenant {
         Err(LoadError::TenantMismatch)
-    } else if accounts.len() > MAX_REPLACE_ACCOUNTS || account_bytes > MAX_REPLACE_ACCOUNT_BYTES {
+    } else if accounts.len() > MAX_TOTAL_ACCOUNTS || longest > MAX_REPLACE_ACCOUNT_BYTES {
         Err(LoadError::TooManyAccounts)
     } else {
         store_export(config, export, version, elapsed)

@@ -1,5 +1,6 @@
 use cloud_cost::error::CostError;
 use cloud_cost::focus::{add_cost, parse_amount, read_focus};
+use cloud_cost::load::MAX_TOTAL_ACCOUNTS;
 use cloud_cost::model::{CostTable, Limits, SkipReason};
 use core_pg::scope::tenant_of;
 use rust_decimal::Decimal;
@@ -415,9 +416,60 @@ fn amounts_are_plain_decimals() -> Result<(), Box<dyn Error>> {
 
 
 #[test]
+fn only_valid_short_account_labels_are_seen_for_the_replace() -> Result<(), Box<dyn Error>> {
+    let rows = vec![
+        row("1", "", &at("2026-11-01"), "Compute", ""),
+        row("1", "evil\u{202e}", &at("2026-11-01"), "Compute", ""),
+        row("1", &"a".repeat(FIELD_CAP + 1), &at("2026-11-01"), "Compute", ""),
+        row("x", "skipped", &at("2026-11-01"), "Compute", ""),
+        row("1", "kept", &at("2026-11-01"), "Compute", ""),
+    ];
+    let limits = Limits {
+        max_field_bytes: FIELD_CAP,
+        ..Limits::default()
+    };
+    let table = read(&rows, &limits)?;
+    assert_eq!(table.seen_accounts, ["kept".to_owned(), "skipped".to_owned()].into_iter().collect());
+    Ok(())
+}
+
+
+#[test]
 fn default_limits_are_bounded() -> Result<(), Box<dyn Error>> {
     let limits = Limits::default();
     assert!(limits.max_bytes > 0 && limits.max_rows > 0 && limits.max_field_bytes > 0);
     assert!(limits.max_tags_per_row > 0 && limits.max_series > 0);
+    Ok(())
+}
+
+
+const SEEN_FIRST: u8 = 2;
+
+
+const SEEN_LAST: u8 = 9;
+
+
+#[test]
+fn seen_accounts_stop_growing_past_the_total_cap() -> Result<(), Box<dyn Error>> {
+    let rows: Vec<String> = (0..=MAX_TOTAL_ACCOUNTS + 1)
+        .map(|number| row("1", &format!("a{number}"), &at("2026-11-01"), "Compute", ""))
+        .collect();
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(table.seen_accounts.len(), MAX_TOTAL_ACCOUNTS + 1);
+    Ok(())
+}
+
+
+#[test]
+fn seen_days_cover_every_row_with_a_valid_account_and_a_readable_day() -> Result<(), Box<dyn Error>> {
+    let rows = [
+        row("1", "a", &at("2026-11-05"), "Compute", ""),
+        row("x", "b", &at("2026-11-09"), "Compute", ""),
+        row("1", "c", &at("2026-11-02"), "Compute", ""),
+        row("1", "d", "nonsense", "Compute", ""),
+        row("1", "", &at("2020-01-01"), "Compute", ""),
+    ];
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(table.seen_days, Some((day(SEEN_FIRST)?, day(SEEN_LAST)?)));
     Ok(())
 }
