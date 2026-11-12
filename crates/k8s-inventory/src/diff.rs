@@ -29,6 +29,7 @@ pub fn node_ref(node: &NodeItem) -> ItemRef {
 pub fn diff_items<Item: PartialEq>(
     previous: &[Item],
     current: &[Item],
+    refused: &[String],
     uid_of: fn(&Item) -> &str,
     ref_of: fn(&Item) -> ItemRef,
     out: &mut InventoryDiff,
@@ -37,8 +38,12 @@ pub fn diff_items<Item: PartialEq>(
     let after = current.iter().map(|item| (uid_of(item), item)).collect::<BTreeMap<_, _>>();
     out.created
         .extend(after.iter().filter(|(uid, _)| !before.contains_key(*uid)).map(|(_, item)| ref_of(item)));
-    out.retired
-        .extend(before.iter().filter(|(uid, _)| !after.contains_key(*uid)).map(|(_, item)| ref_of(item)));
+    out.retired.extend(
+        before
+            .iter()
+            .filter(|(uid, _)| !after.contains_key(*uid) && !refused.iter().any(|refused_uid| refused_uid == **uid))
+            .map(|(_, item)| ref_of(item)),
+    );
     out.changed.extend(
         after
             .iter()
@@ -48,13 +53,35 @@ pub fn diff_items<Item: PartialEq>(
 }
 
 
-/// Refused when the two inventories differ in tenant or cluster; a recreated pod with the same name has a new uid: one retire plus one create.
+/// A uid refused in the current list is never retired: it is listed under `unreadable`. Refused when the two inventories differ in tenant or cluster; a recreated pod with the same name has a new uid: one retire plus one create.
 pub fn diff(previous: &Inventory, current: &Inventory) -> Result<InventoryDiff, InventoryError> {
     if previous.tenant != current.tenant || previous.cluster != current.cluster {
         Err(InventoryError::ScopeMismatch)?;
     }
     let mut result = InventoryDiff::default();
-    diff_items(&previous.pods, &current.pods, pod_uid, pod_ref, &mut result);
-    diff_items(&previous.nodes, &current.nodes, node_uid, node_ref, &mut result);
+    diff_items(
+        &previous.pods,
+        &current.pods,
+        &current.skipped_pods.refused_uids,
+        pod_uid,
+        pod_ref,
+        &mut result,
+    );
+    diff_items(
+        &previous.nodes,
+        &current.nodes,
+        &current.skipped_nodes.refused_uids,
+        node_uid,
+        node_ref,
+        &mut result,
+    );
+    result.unreadable.extend(
+        current
+            .skipped_pods
+            .refused_uids
+            .iter()
+            .chain(&current.skipped_nodes.refused_uids)
+            .cloned(),
+    );
     Ok(result)
 }

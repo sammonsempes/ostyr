@@ -38,11 +38,12 @@ pub enum SkipReason {
 }
 
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Skipped {
     pub unparsable: usize,
     pub bad_field: usize,
     pub duplicate: usize,
+    pub refused_uids: Vec<String>,
 }
 
 
@@ -74,4 +75,5 @@ pub struct InventoryDiff {
     pub created: Vec<ItemRef>,
     pub retired: Vec<ItemRef>,
     pub changed: Vec<ItemRef>,
+    pub unreadable: Vec<String>,
 }

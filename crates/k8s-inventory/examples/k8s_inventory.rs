@@ -1,7 +1,9 @@
 //! Usage: `k8s_inventory <pods.json> <nodes.json> [previous-pods.json]`. Prints the inventory and, with a previous pod list, the diff.
 use core_pg::scope::tenant_of;
 use k8s_inventory::diff::diff;
-use k8s_inventory::inventory::{build_inventory, Inventory};
+use k8s_inventory::inventory::{
+    build_inventory, inventory_cluster, inventory_nodes, inventory_pods, inventory_skipped_nodes, inventory_skipped_pods, inventory_tenant, Inventory,
+};
 use k8s_inventory::limits::Limits;
 use k8s_inventory::model::{ItemRef, Parsed, PodItem};
 use k8s_inventory::parse::{parse_nodes, parse_pods};
@@ -50,14 +52,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     writeln!(
         out,
         "tenant={} cluster={} pods={} nodes={} skipped_pods={:?} skipped_nodes={:?}",
-        tenant_of(&current.tenant),
-        current.cluster,
-        current.pods.len(),
-        current.nodes.len(),
-        current.skipped_pods,
-        current.skipped_nodes
+        tenant_of(inventory_tenant(&current)),
+        inventory_cluster(&current),
+        inventory_pods(&current).len(),
+        inventory_nodes(&current).len(),
+        inventory_skipped_pods(&current),
+        inventory_skipped_nodes(&current)
     )?;
-    current.pods.iter().try_for_each(|pod| {
+    inventory_pods(&current).iter().try_for_each(|pod| {
         writeln!(
             out,
             "pod {}/{} uid={} node={:?} phase={:?} owner={:?}/{:?} images={:?} extra_containers={} labels={} extra_labels={}",
@@ -74,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             pod.extra_labels
         )
     })?;
-    current.nodes.iter().try_for_each(|node| {
+    inventory_nodes(&current).iter().try_for_each(|node| {
         writeln!(
             out,
             "node {} uid={} kubelet={:?} os={:?} addresses={:?}",
@@ -82,10 +84,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         )
     })?;
     if let Some(previous_path) = arguments.get(PREVIOUS_ARGUMENT) {
-        let previous = Inventory {
-            pods: pods_of(previous_path, &limits)?.items,
-            ..current.clone()
-        };
+        let previous = build_inventory(
+            TENANT,
+            CLUSTER,
+            pods_of(previous_path, &limits)?,
+            parse_nodes(File::open(arguments.get(1).ok_or("missing nodes.json")?)?, &limits)?,
+        )?;
         let changes = diff(&previous, &current)?;
         changes
             .created
@@ -99,6 +103,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .changed
             .iter()
             .try_for_each(|item| writeln!(out, "{}", line_of("changed", item)))?;
+        changes.unreadable.iter().try_for_each(|uid| writeln!(out, "unreadable uid={uid}"))?;
     }
     Ok(())
 }

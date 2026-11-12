@@ -3,15 +3,45 @@ use crate::model::{NodeItem, Parsed, PodItem, Skipped};
 use core_pg::scope::{tenant_scope, TenantScope};
 
 
-/// One cluster's pods and nodes for one tenant; the scope is fixed at construction.
+/// One cluster's pods and nodes for one tenant; only `build_inventory` builds one, the fields are read through the `inventory_*` functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inventory {
-    pub tenant: TenantScope,
-    pub cluster: String,
-    pub pods: Vec<PodItem>,
-    pub nodes: Vec<NodeItem>,
-    pub skipped_pods: Skipped,
-    pub skipped_nodes: Skipped,
+    pub(crate) tenant: TenantScope,
+    pub(crate) cluster: String,
+    pub(crate) pods: Vec<PodItem>,
+    pub(crate) nodes: Vec<NodeItem>,
+    pub(crate) skipped_pods: Skipped,
+    pub(crate) skipped_nodes: Skipped,
+}
+
+
+pub fn inventory_tenant(inventory: &Inventory) -> &TenantScope {
+    &inventory.tenant
+}
+
+
+pub fn inventory_cluster(inventory: &Inventory) -> &str {
+    &inventory.cluster
+}
+
+
+pub fn inventory_pods(inventory: &Inventory) -> &[PodItem] {
+    &inventory.pods
+}
+
+
+pub fn inventory_nodes(inventory: &Inventory) -> &[NodeItem] {
+    &inventory.nodes
+}
+
+
+pub fn inventory_skipped_pods(inventory: &Inventory) -> &Skipped {
+    &inventory.skipped_pods
+}
+
+
+pub fn inventory_skipped_nodes(inventory: &Inventory) -> &Skipped {
+    &inventory.skipped_nodes
 }
 
 
