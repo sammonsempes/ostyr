@@ -7,14 +7,16 @@ use crate::fetch::FetchError;
 use crate::fingerprint::fingerprint;
 use crate::model::{Rule, RuleFile};
 use crate::query::{capacity_sql, latest_value, rule_sql};
+use crate::recover::{held_since, needs_recovery};
 use crate::state::AlertState;
 use crate::types::{FetchFn, Timestamp};
 use alerts::error::StoreError;
 use alerts::types::Executor;
-use core_pg::scope::TenantScope;
+use core_pg::error::PgError;
+use core_pg::scope::{tenant_of, TenantScope};
 use siem_ingest::error::InsertClass;
 use siem_schema::metrics::MetricsRetention;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use tracing::warn;
 
@@ -25,7 +27,31 @@ pub const MAX_ROUND_STATES: usize = 1000;
 /// Previous state per `fingerprint(rule id, selector labels)`; rebuilt every round, so a rule that left the file leaves the map.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoundStates {
+    pub tenant: Option<String>,
+    pub recovered: bool,
+    pub recovery_attempts: u32,
+    pub candidates: BTreeMap<String, Timestamp>,
     pub states: BTreeMap<String, AlertState>,
+}
+
+
+#[derive(Debug, Error)]
+pub enum RoundError {
+    #[error("these round states belong to another tenant")]
+    TenantMismatch,
+    #[error("the stored alerts could not be read")]
+    Store(#[from] PgError),
+}
+
+
+/// The first use records the tenant; any other tenant afterwards is refused.
+pub fn bind_tenant(states: &mut RoundStates, scope: &TenantScope) -> Result<(), RoundError> {
+    let tenant = states.tenant.get_or_insert_with(|| tenant_of(scope).to_owned());
+    if tenant == tenant_of(scope) {
+        Ok(())
+    } else {
+        Err(RoundError::TenantMismatch)
+    }
 }
 
 
@@ -52,6 +78,8 @@ pub enum RoundFault {
     Query(#[from] RuleError),
     #[error("the fetch failed")]
     Fetch(#[from] FetchError),
+    #[error("the restart recovery has not finished")]
+    RecoveryPending,
 }
 
 
@@ -76,6 +104,7 @@ pub struct Accumulator {
     pub next: BTreeMap<String, AlertState>,
     pub firings: Vec<Firing>,
     pub counts: RoundCounts,
+    pub evaluated_keys: BTreeSet<String>,
 }
 
 
@@ -83,6 +112,7 @@ pub struct Accumulator {
 pub fn class_of(fault: &RoundFault) -> &'static str {
     match fault {
         RoundFault::Query(_) => "query",
+        RoundFault::RecoveryPending => "recovery_pending",
         RoundFault::Fetch(FetchError::Failed(class)) => match class {
             InsertClass::ParseError => "parse_error",
             InsertClass::Unavailable => "unavailable",
@@ -106,7 +136,7 @@ pub fn state_key(rule: &Rule) -> String {
 
 
 /// Fetches the rule's series (and the latest capacity of a metric forecast) and evaluates; any failure leaves the caller's state alone.
-pub fn evaluate_rule(rule: &Rule, context: &RoundContext<'_>, previous: &AlertState) -> Result<Evaluated, RoundFault> {
+pub fn evaluate_rule(rule: &Rule, context: &RoundContext<'_>, previous: &AlertState, candidate: Option<Timestamp>) -> Result<Evaluated, RoundFault> {
     let query = rule_sql(rule, context.tenant, context.now, context.settings)?;
     let series = (context.fetch)(&query)?;
     let capacity_query = capacity_sql(rule, context.tenant, context.now, context.settings)?;
@@ -115,8 +145,11 @@ pub fn evaluate_rule(rule: &Rule, context: &RoundContext<'_>, previous: &AlertSt
         .map(|asked| (context.fetch)(asked).map(|rows| latest_value(&rows)))
         .transpose()?
         .flatten();
+    let resumed = candidate
+        .filter(|since| held_since(rule, &series, *since, context.now))
+        .map_or(*previous, |since| AlertState::Firing { since });
     Ok(Evaluated {
-        state: evaluate_with_capacity(rule, &series, capacity, previous, context.now),
+        state: evaluate_with_capacity(rule, &series, capacity, &resumed, context.now),
         capacity_missing: capacity_query.is_some() && capacity.is_none(),
     })
 }
@@ -144,8 +177,15 @@ pub fn step_rule(mut acc: Accumulator, rule: &Rule, context: &RoundContext<'_>) 
     } else {
         context.states.states.get(&key).copied().unwrap_or(AlertState::Inactive)
     };
-    let state = match evaluate_rule(rule, context, &previous) {
+    let candidate = context.states.candidates.get(&key).copied();
+    let attempt = if needs_recovery(rule) && !context.states.recovered {
+        Err(RoundFault::RecoveryPending)
+    } else {
+        evaluate_rule(rule, context, &previous, candidate)
+    };
+    let state = match attempt {
         Ok(evaluated) => {
+            acc.evaluated_keys.insert(key.clone());
             acc.counts.evaluated += 1;
             acc.counts.capacity_missing += usize::from(evaluated.capacity_missing);
             evaluated.state
@@ -165,7 +205,7 @@ pub fn step_rule(mut acc: Accumulator, rule: &Rule, context: &RoundContext<'_>) 
 }
 
 
-/// Evaluates every rule for the tenant. A rule whose fetch failed keeps its previous state, a state beyond `MAX_ROUND_STATES` is counted and evaluated from `Inactive`.
+/// Evaluates every rule for the tenant; an absence rule waits (counted as `recovery_pending`) until the restart recovery has finished. A rule whose fetch failed keeps its previous state, a state beyond `MAX_ROUND_STATES` is counted and evaluated from `Inactive`.
 pub fn evaluate_round(
     rules: &RuleFile,
     tenant: &TenantScope,
@@ -173,7 +213,8 @@ pub fn evaluate_round(
     settings: &MetricsRetention,
     fetch: FetchFn<'_>,
     states: &mut RoundStates,
-) -> RoundOutcome {
+) -> Result<RoundOutcome, RoundError> {
+    bind_tenant(states, tenant)?;
     let context = RoundContext {
         tenant,
         now,
@@ -185,6 +226,7 @@ pub fn evaluate_round(
         next: BTreeMap::new(),
         firings: Vec::new(),
         counts: RoundCounts::default(),
+        evaluated_keys: BTreeSet::new(),
     };
     let done = rules.rules.iter().fold(start, |acc, rule| step_rule(acc, rule, &context));
     let failed: usize = done.counts.fetch_failures.values().sum();
@@ -192,11 +234,12 @@ pub fn evaluate_round(
     if failed > 0 || skipped > 0 {
         warn!(failed, skipped, "round finished with failed or skipped rules");
     }
+    states.candidates.retain(|key, _| !done.evaluated_keys.contains(key));
     states.states = done.next;
-    RoundOutcome {
+    Ok(RoundOutcome {
         firings: done.firings,
         counts: done.counts,
-    }
+    })
 }
 
 
