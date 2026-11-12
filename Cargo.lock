@@ -1697,6 +1697,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "device-control"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "serde",
+ "thiserror 2.0.21",
+ "time",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "dhcp-kea"
 version = "0.0.0"
 dependencies = [
