@@ -1,12 +1,15 @@
 use backup_monitor::error::BackupError;
 use backup_monitor::model::{Limits, Listing, SkipReason};
-use backup_monitor::parse::{parse_borg, parse_restic};
+use backup_monitor::parse::{parse_borg, parse_restic, reserve_exact};
 use backup_monitor::text::{is_hidden, valid_id, valid_text};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::io::Read;
 use time::macros::datetime;
 use time::OffsetDateTime;
+
+
+const ECHO_REPEATS: usize = 100;
 
 
 const FIRST: u32 = 1;
@@ -193,8 +196,49 @@ fn a_huge_listing_is_never_read_whole() -> Result<(), Box<dyn Error>> {
 fn unreadable_and_invalid_inputs_are_errors() -> Result<(), Box<dyn Error>> {
     let limits = Limits::default();
     assert!(matches!(parse_restic(FailingReader, "repo", &limits), Err(BackupError::Read(_))));
+    assert!(matches!(parse_borg(FailingReader, false, &limits), Err(BackupError::Read(_))));
     assert!(matches!(parse_restic(&b"[1,"[..], "repo", &limits), Err(BackupError::Json(_))));
     assert!(matches!(parse_borg(&b"{"[..], false, &limits), Err(BackupError::Json(_))));
+    Ok(())
+}
+
+
+#[test]
+fn an_impossible_byte_limit_is_refused_before_reading() -> Result<(), Box<dyn Error>> {
+    let limits = Limits {
+        max_bytes: u64::MAX,
+        ..Limits::default()
+    };
+    let mut reader = std::io::repeat(b' ').take(u64::MAX);
+    let result = parse_restic(&mut reader, "repo", &limits);
+    assert!(matches!(result, Err(BackupError::Reservation { .. })));
+    assert_eq!(reader.limit(), u64::MAX);
+    let refused = reserve_exact(u64::MAX).err().ok_or("reservation accepted")?;
+    assert!(matches!(refused, BackupError::Reservation { .. }));
+    assert!(refused.source().is_some());
+    assert!(reserve_exact(HUGE_CAP)?.capacity() > HUGE_CAP as usize);
+    Ok(())
+}
+
+
+#[test]
+fn a_json_error_keeps_only_its_position() -> Result<(), Box<dyn Error>> {
+    let limits = Limits::default();
+    let echoed = format!("{}\u{202e}", "secret".repeat(ECHO_REPEATS));
+    let inputs = [format!("[\"{echoed}\" x"), format!("{{\"{echoed}\": }}"), format!("[\"{echoed}\"")];
+    inputs.iter().try_for_each(|input| -> Result<(), Box<dyn Error>> {
+        let error = parse_restic(input.as_bytes(), "repo", &limits).err().ok_or("accepted")?;
+        let chain = format!("{error} {error:?} {:?}", error.source().map(ToString::to_string));
+        assert!(matches!(error, BackupError::Json(_)));
+        assert!(error.source().is_none());
+        assert!(!chain.contains("secret") && !chain.contains('\u{202e}'), "{chain}");
+        Ok(())
+    })?;
+    let wrong_type = format!("[{{\"id\": \"{echoed}\", \"paths\": \"{echoed}\"}}]");
+    let listing = parse_restic(wrong_type.as_bytes(), "repo", &limits)?;
+    assert_eq!(listing.snapshots.len(), 0);
+    let error = parse_borg(&b"{\n\"repository\": }"[..], false, &limits).err().ok_or("accepted")?;
+    assert_eq!(error.to_string(), "listing is not valid JSON: Syntax at line 2 column 15");
     Ok(())
 }
 
@@ -348,18 +392,31 @@ fn borg_time_falls_back_to_the_time_field_and_accepts_whole_seconds() -> Result<
 #[test]
 fn borg_wrong_typed_containers_refuse_the_listing() -> Result<(), Box<dyn Error>> {
     let limits = Limits::default();
-    let bodies = [
-        json!([]),
-        json!({"archives": []}),
-        json!({"repository": WRONG_NUMBER, "archives": []}),
-        json!({"repository": {"id": "short"}, "archives": []}),
-        json!({"repository": {"id": id(FIRST)}}),
-        json!({"repository": {"id": id(FIRST)}, "archives": {}}),
-        borg_root(json!(["x"])),
+    let root = "listing is not an object";
+    let repository = "repository id";
+    let archives = "archives is not an array";
+    let rows = [
+        (json!([]), root),
+        (json!([{"id": id(FIRST)}, [borg_item(FIRST, "host-a")]]), root),
+        (json!(["x", []]), root),
+        (json!(WRONG_NUMBER), root),
+        (json!([[id(FIRST)], [borg_item(FIRST, "host-a")]]), root),
+        (json!({"archives": []}), repository),
+        (json!({"repository": WRONG_NUMBER, "archives": []}), repository),
+        (json!({"repository": {"id": "short"}, "archives": []}), repository),
+        (json!({"repository": [id(FIRST)], "archives": []}), repository),
+        (json!({"repository": [{"id": id(FIRST)}], "archives": []}), repository),
+        (json!({"repository": {"id": id(FIRST)}}), archives),
+        (json!({"repository": {"id": id(FIRST)}, "archives": {}}), archives),
+        (borg_root(json!(["x"])), "snapshot is not an object"),
     ];
-    bodies
-        .iter()
-        .for_each(|body| assert!(matches!(borg(body, true, &limits), Err(BackupError::Malformed { .. })), "{body}"));
+    rows.iter().for_each(|(body, what)| {
+        let result = borg(body, true, &limits);
+        assert!(
+            matches!(&result, Err(BackupError::Malformed { what: found }) if found == what),
+            "{body}: {result:?}"
+        );
+    });
     Ok(())
 }
 
