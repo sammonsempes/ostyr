@@ -6,7 +6,7 @@ use core_pg::connect::connect;
 use core_pg::migrate::migrate;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::parse_settings;
-use dhcp_kea::alerting::{store_unknown_device_alerts, unknown_device_alerts};
+use dhcp_kea::alerting::{alerted_macs, candidate_macs, store_unknown_device_alerts, unknown_device_alerts};
 use dhcp_kea::header::parse_header;
 use dhcp_kea::row::convert_row;
 use std::collections::BTreeSet;
@@ -30,16 +30,21 @@ async fn scenario(settings_file: &Path, leases_file: &Path, known_file: &Path, t
     let text = std::fs::read_to_string(leases_file)?;
     let mut lines = text.lines();
     let columns = parse_header(lines.next().unwrap_or(""))?;
-    let leases: Vec<_> = lines.filter_map(|line| convert_row(&columns, line).ok()).collect();
+    let (converted, malformed): (Vec<_>, Vec<_>) = lines.map(|line| convert_row(&columns, line)).partition(Result::is_ok);
+    let leases: Vec<_> = converted.into_iter().flatten().collect();
+    let bad_rows = malformed.len();
     let known: BTreeSet<String> = std::fs::read_to_string(known_file)?.lines().map(str::to_owned).collect();
     let scope = tenant_scope(tenant)?;
-    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
-    let (alerts, rejected) = unknown_device_alerts(&scope, &leases, &known, now);
     let exec = pg_executor(&client, DEADLINE);
+    let alerted = alerted_macs(&exec, &scope, &candidate_macs(&leases, &known)).await;
+    let skipped = alerted.len();
+    let known_or_alerted: BTreeSet<String> = known.union(&alerted).cloned().collect();
+    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let (alerts, rejected) = unknown_device_alerts(&scope, &leases, &known_or_alerted, now);
     let inserted = store_unknown_device_alerts(&exec, &scope, &alerts).await?;
     writeln!(
         stdout(),
-        "leases={} alerts={} inserted={inserted} no_mac={} bad_known={}",
+        "leases={} bad_rows={bad_rows} already_alerted={skipped} alerts={} inserted={inserted} no_mac={} bad_known={}",
         leases.len(),
         alerts.len(),
         rejected.no_mac,

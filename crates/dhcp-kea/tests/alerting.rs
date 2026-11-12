@@ -6,13 +6,13 @@ use alerts::error::StoreError;
 use alerts::id::alert_id;
 use alerts::model::{Alert, Severity};
 use alerts::store::{MAX_CREATED_MICROS, MAX_TITLE_CHARS};
-use alerts::types::RowFuture;
+use alerts::types::{Executor, RowFuture};
 use core_export::ecs::{EndpointFields, HostFields};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use dhcp_kea::alerting::{
-    flood_alert, mac_of, micros_of, peer_fields, store_unknown_device_alerts, unknown_device_alerts, FLOOD_RULE_ID, MAX_UNKNOWN_PER_RUN,
-    MICROS_PER_SECOND, UNKNOWN_RULE_ID,
+    alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, peer_fields, store_unknown_device_alerts, unknown_device_alerts,
+    ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, SECONDS_PER_DAY, UNKNOWN_RULE_ID,
 };
 use dhcp_kea::header::parse_header;
 use dhcp_kea::row::{convert_row, Converted};
@@ -50,6 +50,9 @@ const EXPIRE_RENEWED: i64 = CLTT + 9_000;
 const TOO_LONG_HOSTNAME: usize = 300;
 
 
+const FLOOD_MACS: usize = 450;
+
+
 const BAD_KNOWN: usize = 2;
 
 
@@ -69,6 +72,8 @@ const SUMMARY_LIMIT: usize = 512;
 pub struct Store {
     pub rows: Mutex<BTreeSet<(String, String)>>,
     pub fail: bool,
+    pub fail_lookup: bool,
+    pub lookups: Mutex<usize>,
 }
 
 
@@ -88,10 +93,29 @@ pub fn run(store: &Store, scope: &TenantScope, params: &[String]) -> Result<Vec<
 }
 
 
+pub fn lookup(store: &Store, scope: &TenantScope, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
+    let ids: Vec<String> = params
+        .first()
+        .ok_or(PgError::InvalidTenant)
+        .and_then(|text| serde_json::from_str(text).map_err(|_bad| PgError::InvalidTenant))?;
+    let mut count = store.lookups.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
+    *count += 1;
+    let rows = store.rows.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
+    let tenant = tenant_of(scope).to_owned();
+    Ok(ids
+        .into_iter()
+        .filter(|id| rows.contains(&(tenant.clone(), id.clone())))
+        .map(|id| vec![id])
+        .collect())
+}
+
+
 pub fn executor<'a>(store: &'a Store) -> impl Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'a> + 'a {
-    move |scope, _sql, params| -> RowFuture<'a> {
-        if store.fail {
+    move |scope, sql, params| -> RowFuture<'a> {
+        if store.fail || (store.fail_lookup && sql == ALERTED_SQL) {
             Box::pin(ready(Err(PgError::InvalidTenant)))
+        } else if sql == ALERTED_SQL {
+            Box::pin(ready(lookup(store, &scope, &params)))
         } else {
             Box::pin(ready(run(store, &scope, &params)))
         }
@@ -286,8 +310,125 @@ fn a_flood_is_cut_with_one_visible_alert() -> TestResult {
     let exact = many_leases(MAX_UNKNOWN_PER_RUN)?;
     let (uncut, _uncut_rejected) = unknown_device_alerts(&scope, &exact, &BTreeSet::new(), NOW_MICROS);
     assert_eq!(uncut.len(), MAX_UNKNOWN_PER_RUN);
-    assert_ne!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&scope, 1, NOW_MICROS + 1).id);
-    assert_eq!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&scope, EXTRA, NOW_MICROS).id);
+    Ok(())
+}
+
+
+#[test]
+fn a_flood_alert_is_one_per_tenant_and_utc_day() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    let same_day = NOW_MICROS + MICROS_PER_SECOND;
+    let next_day = NOW_MICROS + SECONDS_PER_DAY * MICROS_PER_SECOND;
+    assert_eq!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&scope, EXTRA, same_day).id);
+    assert_ne!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&scope, 1, next_day).id);
+    assert_ne!(flood_alert(&scope, 1, NOW_MICROS).id, flood_alert(&other, 1, NOW_MICROS).id);
+    assert_eq!(flood_alert(&scope, 1, NOW_MICROS).event_ids, ["flood", "day:2023-11-14"]);
+    assert_eq!(
+        (day_of(NOW_MICROS).as_str(), day_of(0).as_str(), day_of(u64::MAX).as_str()),
+        ("2023-11-14", "1970-01-01", "9999-12-31")
+    );
+    Ok(())
+}
+
+
+#[test]
+fn one_omitted_mac_still_raises_the_flood_alert() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let leases = many_leases(MAX_UNKNOWN_PER_RUN + 1)?;
+    let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &BTreeSet::new(), NOW_MICROS);
+    assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
+    let flood = alerts.last().ok_or("no flood")?;
+    assert_eq!(flood.rule_id, FLOOD_RULE_ID);
+    assert_eq!(summary_of(flood)?.get("omitted").and_then(Value::as_u64), Some(1));
+    Ok(())
+}
+
+
+async fn run_once(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted]) -> Result<Vec<Alert>, Box<dyn std::error::Error>> {
+    let candidates = candidate_macs(leases, &BTreeSet::new());
+    let skip = alerted_macs(exec, scope, &candidates).await;
+    let (alerts, _rejected) = unknown_device_alerts(scope, leases, &skip, NOW_MICROS);
+    store_unknown_device_alerts(exec, scope, &alerts).await?;
+    Ok(alerts)
+}
+
+
+fn unknown_ids(alerts: &[Alert]) -> BTreeSet<String> {
+    alerts
+        .iter()
+        .filter(|alert| alert.rule_id == UNKNOWN_RULE_ID)
+        .map(|alert| alert.id.clone())
+        .collect()
+}
+
+
+#[tokio::test]
+async fn later_runs_reach_the_devices_the_first_run_cut() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(FLOOD_MACS)?;
+    let first = run_once(&exec, &scope, &leases).await?;
+    let second = run_once(&exec, &scope, &leases).await?;
+    let third = run_once(&exec, &scope, &leases).await?;
+    let fourth = run_once(&exec, &scope, &leases).await?;
+    let (first_ids, second_ids, third_ids) = (unknown_ids(&first), unknown_ids(&second), unknown_ids(&third));
+    let rest = FLOOD_MACS - MAX_UNKNOWN_PER_RUN - MAX_UNKNOWN_PER_RUN;
+    assert_eq!(
+        (first_ids.len(), second_ids.len(), third_ids.len()),
+        (MAX_UNKNOWN_PER_RUN, MAX_UNKNOWN_PER_RUN, rest)
+    );
+    assert!(first_ids.is_disjoint(&second_ids) && first_ids.is_disjoint(&third_ids) && second_ids.is_disjoint(&third_ids));
+    let first_flood = first.last().ok_or("no flood")?;
+    assert_eq!(
+        summary_of(first_flood)?.get("omitted").and_then(Value::as_u64),
+        Some((FLOOD_MACS - MAX_UNKNOWN_PER_RUN) as u64)
+    );
+    assert_eq!((first.len(), third.len()), (MAX_UNKNOWN_PER_RUN + 1, rest));
+    assert!(fourth.is_empty());
+    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), FLOOD_MACS + 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_lookup_failure_falls_back_to_batch_order() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store {
+        fail_lookup: true,
+        ..Store::default()
+    };
+    let exec = executor(&store);
+    let leases = many_leases(FLOOD_MACS)?;
+    let candidates = candidate_macs(&leases, &BTreeSet::new());
+    assert!(alerted_macs(&exec, &scope, &candidates).await.is_empty());
+    let first = run_once(&exec, &scope, &leases).await?;
+    let second = run_once(&exec, &scope, &leases).await?;
+    assert_eq!((first.len(), second.len()), (MAX_UNKNOWN_PER_RUN + 1, MAX_UNKNOWN_PER_RUN + 1));
+    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), MAX_UNKNOWN_PER_RUN + 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_lookup_is_bounded_scoped_and_skipped_when_empty() -> TestResult {
+    let acme = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(MAX_LOOKUP_MACS + EXTRA)?;
+    let candidates = candidate_macs(&leases, &BTreeSet::new());
+    assert_eq!(candidates.len(), MAX_LOOKUP_MACS);
+    assert!(alerted_macs(&exec, &acme, &[]).await.is_empty());
+    assert_eq!(*store.lookups.lock().map_err(|_poisoned| "poisoned")?, 0);
+    let (alerts, _rejected) = unknown_device_alerts(&acme, &leases, &BTreeSet::new(), NOW_MICROS);
+    store_unknown_device_alerts(&exec, &acme, &alerts).await?;
+    assert_eq!(alerted_macs(&exec, &acme, &candidates).await.len(), MAX_UNKNOWN_PER_RUN);
+    assert!(alerted_macs(&exec, &other, &candidates).await.is_empty());
+    let too_many: Vec<String> = candidates.iter().chain(candidates.iter()).cloned().collect();
+    assert_eq!(alerted_macs(&exec, &acme, &too_many).await.len(), MAX_UNKNOWN_PER_RUN);
+    assert_eq!(*store.lookups.lock().map_err(|_poisoned| "poisoned")?, EXTRA);
     Ok(())
 }
 
