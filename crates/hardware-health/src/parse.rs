@@ -128,10 +128,12 @@ fn attribute(row: &Value, rejected: &mut usize, unreadable: &mut Vec<String>) ->
             unreadable.push(format!("attribute {id} flags"));
         }
         let prefailure = accepted(prefailure_node, rejected, Value::is_boolean).and_then(Value::as_bool);
-        let mut flagged = vec![("prefailure", prefailure_node, prefailure.is_none())];
+        let mut flagged = vec![
+            ("prefailure", prefailure_node, prefailure.is_none()),
+            ("when_failed", row.get("when_failed"), when.is_none()),
+        ];
         if prefailure != Some(false) {
             flagged.extend([
-                ("when_failed", row.get("when_failed"), when.is_none()),
                 ("value", row.get("value"), value.is_none()),
                 ("thresh", row.get("thresh"), threshold.is_none()),
             ]);
@@ -183,6 +185,9 @@ fn nvme(root: &Value, rejected: &mut usize, unreadable: &mut Vec<String>) -> Opt
         if !log.is_object() {
             unreadable.push("nvme log".to_string());
         }
+        if log.is_object() && log.get("critical_warning").is_none() {
+            unreadable.push("nvme critical_warning".to_string());
+        }
         let mut field = |name: &str| {
             let parsed = unsigned(log.get(name), rejected);
             flag_unreadable(unreadable, format!("nvme {name}"), log.get(name), parsed.is_none());
@@ -224,8 +229,9 @@ fn assemble(root: &Value, limits: &Limits) -> SmartReport {
         exit.is_none(),
     );
     let (attribute_list, omitted_attributes) = attributes(root, limits, &mut rejected, &mut unreadable);
+    let is_nvme = protocol_kind == Some(Protocol::Nvme);
     let nvme_health = nvme(root, &mut rejected, &mut unreadable);
-    if protocol_kind == Some(Protocol::Nvme) && nvme_health.is_none() {
+    if is_nvme && nvme_health.is_none() {
         unreadable.push("nvme log".to_string());
     }
     SmartReport {

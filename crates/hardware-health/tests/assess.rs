@@ -100,7 +100,7 @@ fn healthy_ata_and_nvme() -> TestResult {
         .remove("available_spare_threshold");
     assert_eq!(verdict(&no_threshold)?, Health::Healthy);
     let no_log = set(fixture(NVME_HEALTHY)?, NVME_LOG, json!({}))?;
-    assert_eq!(verdict(&no_log)?, Health::Healthy);
+    assert_eq!(verdict(&no_log)?, blind("nvme critical_warning"));
     Ok(())
 }
 
@@ -357,7 +357,7 @@ fn rows_past_the_cap_are_a_blind_spot() -> TestResult {
 const SOME_NUMBER: u64 = 7;
 
 
-const OLD_AGE_BIT: u8 = 32;
+const PAST_THRESHOLD_BIT: u8 = 32;
 
 
 const ERROR_LOG_BIT: u8 = 64;
@@ -374,21 +374,21 @@ fn degraded(causes: &[&str]) -> Health {
 #[test]
 fn exit_bits_five_to_seven_degrade() -> TestResult {
     let at = |status: u8| replaced(ATA_HEALTHY, EXIT, json!(status));
-    assert_eq!(at(OLD_AGE_BIT)?, degraded(&["old_age"]));
+    assert_eq!(at(PAST_THRESHOLD_BIT)?, degraded(&["past_threshold"]));
     assert_eq!(at(ERROR_LOG_BIT)?, degraded(&["error_log"]));
     assert_eq!(at(SELF_TEST_LOG_BIT)?, degraded(&["self_test_log"]));
     assert_eq!(
-        at(OLD_AGE_BIT | ERROR_LOG_BIT | SELF_TEST_LOG_BIT)?,
-        degraded(&["old_age", "error_log", "self_test_log"])
+        at(PAST_THRESHOLD_BIT | ERROR_LOG_BIT | SELF_TEST_LOG_BIT)?,
+        degraded(&["past_threshold", "error_log", "self_test_log"])
     );
     assert_eq!(
-        at(OLD_AGE_BIT | OTHER_BIT)?,
+        at(PAST_THRESHOLD_BIT | OTHER_BIT)?,
         Health::PredictiveFailure(vec!["exit status bit 4".to_string()])
     );
-    assert_eq!(at(OLD_AGE_BIT | SMART_FAILING_BIT)?, Health::Failing);
+    assert_eq!(at(PAST_THRESHOLD_BIT | SMART_FAILING_BIT)?, Health::Failing);
     assert_eq!(
-        at(OLD_AGE_BIT | PARSE_FAILED_BIT)?,
-        Health::BlindSpot(BlindReason::CommandFailed(OLD_AGE_BIT | PARSE_FAILED_BIT))
+        at(PAST_THRESHOLD_BIT | PARSE_FAILED_BIT)?,
+        Health::BlindSpot(BlindReason::CommandFailed(PAST_THRESHOLD_BIT | PARSE_FAILED_BIT))
     );
     let unreadable = set(set(fixture(ATA_HEALTHY)?, EXIT, json!(ERROR_LOG_BIT))?, PASSED, json!("yes"))?;
     assert_eq!(verdict(&unreadable)?, blind("smart_status.passed"));
@@ -400,7 +400,7 @@ fn exit_bits_five_to_seven_degrade() -> TestResult {
 fn failing_row_without_prefailure_flag_is_blind() -> TestResult {
     let row = format!("{TABLE}/1");
     let now = set(fixture(ATA_HEALTHY)?, &format!("{row}/when_failed"), json!("now"))?;
-    assert_eq!(verdict(&now)?, Health::Healthy);
+    assert_eq!(verdict(&now)?, degraded(&["attribute 9 Power_On_Hours"]));
     let empty_flags = set(now.clone(), &format!("{row}/flags"), json!({}))?;
     assert_eq!(verdict(&empty_flags)?, blind("attribute 9 flags"));
     let mut no_flags = now.clone();
@@ -426,5 +426,74 @@ fn nvme_without_its_log_is_blind() -> TestResult {
     assert_eq!(verdict(&ata_like)?, Health::Healthy);
     let failed = set(document, PASSED, json!(false))?;
     assert_eq!(verdict(&failed)?, Health::Failing);
+    Ok(())
+}
+
+
+#[test]
+fn nvme_log_without_critical_warning_is_blind() -> TestResult {
+    let mut document = fixture(NVME_HEALTHY)?;
+    document
+        .pointer_mut(NVME_LOG)
+        .and_then(Value::as_object_mut)
+        .ok_or("no log")?
+        .remove("critical_warning");
+    assert_eq!(verdict(&document)?, blind("nvme critical_warning"));
+    let empty = set(document.clone(), NVME_LOG, json!({}))?;
+    assert_eq!(verdict(&empty)?, blind("nvme critical_warning"));
+    let ata_like = set(document.clone(), "/device/protocol", json!("ATA"))?;
+    assert_eq!(verdict(&ata_like)?, blind("nvme critical_warning"));
+    let mut no_protocol = set(document, NVME_LOG, json!({}))?;
+    no_protocol
+        .pointer_mut("/device")
+        .and_then(Value::as_object_mut)
+        .ok_or("no device")?
+        .remove("protocol");
+    assert_eq!(verdict(&no_protocol)?, blind("nvme critical_warning"));
+    let mut padded = no_protocol;
+    padded
+        .pointer_mut("/device")
+        .and_then(Value::as_object_mut)
+        .ok_or("no device")?
+        .insert("protocol".to_string(), json!("NVMe "));
+    assert_eq!(verdict(&padded)?, blind("nvme critical_warning"));
+    Ok(())
+}
+
+
+#[test]
+fn unusable_when_failed_is_blind_on_every_row() -> TestResult {
+    let usage = format!("{TABLE}/1/when_failed");
+    let prefail = format!("{TABLE}/0/when_failed");
+    [json!(null), json!(1), json!("NOW"), json!("soon")]
+        .into_iter()
+        .try_for_each(|value| -> TestResult {
+            let on_usage = set(fixture(ATA_HEALTHY)?, &usage, value.clone())?;
+            assert_eq!(verdict(&on_usage)?, blind("attribute 9 when_failed"));
+            let on_prefail = set(fixture(ATA_HEALTHY)?, &prefail, value)?;
+            assert_eq!(verdict(&on_prefail)?, blind("attribute 5 when_failed"));
+            Ok(())
+        })?;
+    let mut absent = fixture(ATA_HEALTHY)?;
+    absent
+        .pointer_mut(&format!("{TABLE}/1"))
+        .and_then(Value::as_object_mut)
+        .ok_or("no row")?
+        .remove("when_failed");
+    assert_eq!(verdict(&absent)?, Health::Healthy);
+    Ok(())
+}
+
+
+#[test]
+fn usage_attribute_failing_now_degrades() -> TestResult {
+    let row = format!("{TABLE}/1");
+    let now = set(fixture(ATA_HEALTHY)?, &format!("{row}/when_failed"), json!("now"))?;
+    let flagged = set(now, &format!("{row}/flags"), json!({"prefailure": false}))?;
+    assert_eq!(verdict(&flagged)?, degraded(&["attribute 9 Power_On_Hours"]));
+    let past = set(flagged.clone(), &format!("{row}/when_failed"), json!("past"))?;
+    assert_eq!(verdict(&past)?, Health::Healthy);
+    let with_bit = set(flagged, EXIT, json!(PAST_THRESHOLD_BIT))?;
+    assert_eq!(verdict(&with_bit)?, degraded(&["attribute 9 Power_On_Hours", "past_threshold"]));
     Ok(())
 }

@@ -185,12 +185,17 @@ fn read_failure_is_reported_with_its_cause() -> TestResult {
 fn malformed_input_quotes_nothing() -> TestResult {
     let secret = b"{\"serial_number\": SECRETTEXT}";
     let error = parse_smartctl(secret.as_slice(), &default_limits()).err().ok_or("expected an error")?;
-    assert!(matches!(error, SmartError::Malformed(_)));
+    assert!(matches!(error, SmartError::Malformed { .. }));
     assert!(!error.to_string().contains("SECRETTEXT"));
+    assert!(!format!("{error:?}").contains("SECRETTEXT"));
+    let marker = parse_smartctl(b"{\"model_name\": \"SECRETTEXT\" \"x\"}".as_slice(), &default_limits())
+        .err()
+        .ok_or("expected an error")?;
+    assert!(!marker.to_string().contains("SECRETTEXT") && !format!("{marker:?}").contains("SECRETTEXT"));
     let invalid_utf8 = parse_smartctl(b"{\"model_name\": \"\xff\xfe\"}".as_slice(), &default_limits());
-    assert!(matches!(invalid_utf8, Err(SmartError::Malformed(_))));
+    assert!(matches!(invalid_utf8, Err(SmartError::Malformed { .. })));
     let nan = parse_smartctl(b"{\"temperature\": {\"current\": NaN}}".as_slice(), &default_limits());
-    assert!(matches!(nan, Err(SmartError::Malformed(_))));
+    assert!(matches!(nan, Err(SmartError::Malformed { .. })));
     let not_object = parse_smartctl(b"[1, 2]".as_slice(), &default_limits());
     assert!(matches!(not_object, Err(SmartError::NotAnObject)));
     Ok(())
@@ -204,9 +209,12 @@ fn depth_bomb_is_malformed() -> TestResult {
         ..default_limits()
     };
     let bomb = "[".repeat(DEPTH);
-    assert!(matches!(parse_smartctl(bomb.as_bytes(), &limits), Err(SmartError::Malformed(_))));
+    assert!(matches!(parse_smartctl(bomb.as_bytes(), &limits), Err(SmartError::Malformed { .. })));
     let nested_object = format!("{}1{}", "{\"a\":".repeat(DEPTH), "}".repeat(DEPTH));
-    assert!(matches!(parse_smartctl(nested_object.as_bytes(), &limits), Err(SmartError::Malformed(_))));
+    assert!(matches!(
+        parse_smartctl(nested_object.as_bytes(), &limits),
+        Err(SmartError::Malformed { .. })
+    ));
     Ok(())
 }
 
