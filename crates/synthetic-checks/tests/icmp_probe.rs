@@ -122,3 +122,14 @@ fn an_address_outside_the_scope_never_reaches_the_ping() -> TestResult {
     assert_eq!(calls.get(), 1);
     Ok(())
 }
+
+
+#[test]
+fn a_flooded_ping_is_a_distinct_error_not_a_timeout() -> TestResult {
+    let ping = |_: IpAddr, _: Duration| Err(io::Error::new(io::ErrorKind::QuotaExceeded, "flood"));
+    let error = icmp_probe(guard_address(PUBLIC.parse()?, &[])?, &limits()?, &ping, &|| Duration::ZERO)
+        .err()
+        .ok_or("expected an error")?;
+    assert!(matches!(error, ProbeError::ForeignFlood { max } if max == synthetic_checks::transport::MAX_FOREIGN_REPLIES));
+    Ok(())
+}

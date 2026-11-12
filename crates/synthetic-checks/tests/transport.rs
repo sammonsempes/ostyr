@@ -186,7 +186,7 @@ fn a_flood_of_foreign_packets_ends_after_a_bounded_number_of_reads() -> TestResu
         Ok((message(ECHO_REPLY_V4, &FOREIGN_PAYLOAD), target_v4()))
     };
     let error = await_reply(&mut next, target_v4(), &PAYLOAD).err().ok_or("expected an error")?;
-    assert_eq!(error.kind(), ErrorKind::TimedOut);
+    assert_eq!(error.kind(), ErrorKind::QuotaExceeded);
     assert_eq!(error.to_string(), FOREIGN_FLOOD);
     assert_eq!(reads.get(), MAX_FOREIGN_REPLIES);
     Ok(())
