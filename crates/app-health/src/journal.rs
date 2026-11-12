@@ -1,7 +1,7 @@
 //! Bounded excerpt of `journalctl -o cat` output for an alert.
 
 use crate::error::NtpError;
-use crate::limits::{MAX_EXCERPT_LINES, MAX_JOURNAL_BYTES, MIN_LINE_BYTES};
+use crate::limits::{MAX_EXCERPT_LINES, MAX_JOURNAL_BYTES, MAX_LINE_BYTES, MIN_LINE_BYTES};
 use crate::model::Excerpt;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
@@ -44,7 +44,7 @@ fn escape_char(character: char) -> String {
 
 
 /// One log line: escaped first, then the escaped text plus the marker is at most `max_bytes`; the marker counts the omitted raw bytes.
-pub fn clean_line(raw: &[u8], max_bytes: usize) -> String {
+fn clean_line(raw: &[u8], max_bytes: usize) -> String {
     let text = String::from_utf8_lossy(raw);
     let fits = text.chars().map(escaped_len).sum::<usize>() <= max_bytes;
     let marker_len = format!("… [{} bytes omitted]", text.len()).len();
@@ -78,7 +78,7 @@ pub fn log_excerpt<Input: Read>(mut reader: Input, max_lines: usize, max_bytes: 
 pub fn excerpt_from(reader: &mut dyn Read, max_lines: usize, max_bytes: usize) -> Result<Excerpt, NtpError> {
     if max_lines > MAX_EXCERPT_LINES {
         Err(NtpError::OutOfRange { field: "max_lines" })
-    } else if max_bytes < MIN_LINE_BYTES {
+    } else if !(MIN_LINE_BYTES..=MAX_LINE_BYTES).contains(&max_bytes) {
         Err(NtpError::OutOfRange { field: "max_bytes" })
     } else {
         read_excerpt(reader, max_lines, max_bytes)

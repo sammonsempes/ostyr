@@ -1,0 +1,5 @@
+NextElapseUSecRealtime=
+LastTriggerUSec=Thu 2026-11-12 21:27:33 UTC
+Id=ostyr-ok.timer
+LoadState=loaded
+ActiveState=active

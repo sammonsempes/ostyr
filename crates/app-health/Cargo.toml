@@ -9,6 +9,7 @@ publish = false
 core-config = { version = "0.0.0", path = "../core-config" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+time = { version = "0.3", features = ["parsing", "macros"] }
 unicode-general-category = "1"
 
 [lints]

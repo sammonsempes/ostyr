@@ -1,0 +1,4 @@
+Result=success
+ExecMainExitTimestamp=@1794518854
+ExecMainStatus=0
+Id=ostyr-ok.service

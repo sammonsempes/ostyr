@@ -49,7 +49,7 @@ fn check_expectation(expectation: &Expectation) -> Result<(), NtpError> {
 }
 
 
-fn load_state(text: &str) -> Option<LoadState> {
+pub fn load_state(text: &str) -> Option<LoadState> {
     match text {
         "loaded" => Some(LoadState::Loaded),
         "not-found" => Some(LoadState::NotFound),
@@ -63,7 +63,7 @@ fn load_state(text: &str) -> Option<LoadState> {
 }
 
 
-fn active_state(text: &str) -> Option<ActiveState> {
+pub fn active_state(text: &str) -> Option<ActiveState> {
     match text {
         "active" => Some(ActiveState::Active),
         "inactive" => Some(ActiveState::Inactive),
@@ -99,7 +99,7 @@ fn file_state(text: &str) -> Option<UnitFileState> {
 }
 
 
-fn count(text: &str) -> Result<u32, NtpError> {
+pub fn count(text: &str) -> Result<u32, NtpError> {
     let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     digits
         .then_some(text)
@@ -108,12 +108,13 @@ fn count(text: &str) -> Result<u32, NtpError> {
 }
 
 
-fn collect_pairs(text: &str) -> Result<BTreeMap<&str, &str>, NtpError> {
+/// Splits on `\n` only into `key=value` pairs; a key outside `keys`, a repeated key or a value ending in `\r` is `Malformed`.
+pub fn collect_pairs<'a>(text: &'a str, keys: &[&str]) -> Result<BTreeMap<&'a str, &'a str>, NtpError> {
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     text.split_terminator('\n').try_for_each(|line| {
         let (key, value) = line
             .split_once('=')
-            .filter(|(key, value)| SHOW_KEYS.contains(key) && !value.ends_with('\r'))
+            .filter(|(key, value)| keys.contains(key) && !value.ends_with('\r'))
             .ok_or(NtpError::Malformed { reason: "unexpected line" })?;
         match seen.insert(key, value) {
             Some(_) => Err(NtpError::Malformed { reason: "duplicate key" }),
@@ -127,7 +128,7 @@ fn collect_pairs(text: &str) -> Result<BTreeMap<&str, &str>, NtpError> {
 /// Exactly the seven requested keys, each once, `Id` equal to `expected_unit`; a value outside its known set is `None` and counted.
 pub fn parse_unit_show<Input: Read>(mut reader: Input, max_bytes: u64, expected_unit: &str) -> Result<UnitState, NtpError> {
     let text = read_bounded(&mut reader, max_bytes)?;
-    let pairs = collect_pairs(&text)?;
+    let pairs = collect_pairs(&text, &SHOW_KEYS)?;
     let field = |key: &str| pairs.get(key).copied().ok_or(NtpError::Malformed { reason: "missing key" });
     if field("Id")? != expected_unit {
         Err(NtpError::Malformed { reason: "unexpected unit" })
