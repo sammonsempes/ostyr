@@ -33,5 +33,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
       - name: Fetch dependencies
         run: cargo fetch --locked
+      - name: Allow unprivileged ping sockets, like the development host
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
       - name: Run the gate as root, like the development host
         run: sudo env "HOME=$HOME" "PATH=$PATH" "CARGO_HOME=$HOME/.cargo" "RUSTUP_HOME=$HOME/.rustup" .github/gate-run.sh "$(id -un)" "$PWD" "$HOME"
