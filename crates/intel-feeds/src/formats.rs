@@ -5,6 +5,7 @@ use crate::limits::{MAX_DOCUMENT_BYTES, MAX_OBJECT_BYTES, MAX_REPORTED_SKIPS};
 use crate::lines::numbered_lines;
 use crate::misp::parse_misp;
 use crate::model::{Collector, FeedSummary, Ioc, RawEntry, SkipSample};
+use crate::sample::bounded_text;
 use crate::stix::parse_pattern;
 use crate::types::{ItemHandler, LineHandler};
 use csv::StringRecord;
@@ -126,12 +127,10 @@ pub fn record(collector: &mut Collector, line: u64, outcome: Result<Vec<Ioc>, En
         Err(EntryError::UnsupportedPattern) => collector.summary.unsupported += 1,
         Err(error) => {
             *collector.summary.skipped.entry(reason_key(&error)).or_insert(0) += 1;
-            debug!(feed = collector.summary.feed, line, %error, "entry skipped");
+            let reason = bounded_text(&error.to_string());
+            debug!(feed = collector.summary.feed, line, %reason, "entry skipped");
             if collector.summary.samples.len() < MAX_REPORTED_SKIPS {
-                collector.summary.samples.push(SkipSample {
-                    line,
-                    reason: error.to_string(),
-                });
+                collector.summary.samples.push(SkipSample { line, reason });
             }
         }
     }

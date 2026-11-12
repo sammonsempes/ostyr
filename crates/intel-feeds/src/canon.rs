@@ -1,7 +1,10 @@
 use crate::error::CanonError;
-use crate::limits::{MAX_URL_BYTES, MD5_HEX_LENGTH, SHA1_HEX_LENGTH, SHA256_HEX_LENGTH};
+use crate::limits::{
+    EMBEDDING_BASES, EMBEDDING_HEADS, EMBEDDING_PREFIX, EMBEDDING_SHIFT, LOCAL_NAT64_HEAD, LOCAL_NAT64_MIN_PREFIX, LOCAL_NAT64_SHIFT, MAPPED_HEAD,
+    MAX_URL_BYTES, MD5_HEX_LENGTH, MIN_IPV4_PREFIX, MIN_IPV6_PREFIX, SHA1_HEX_LENGTH, SHA256_HEX_LENGTH,
+};
 use crate::model::{Canonical, IocType};
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::Url;
 
@@ -19,24 +22,66 @@ pub fn canonical_address(text: &str) -> Result<Canonical, CanonError> {
 }
 
 
-/// Host bits are cleared: `10.1.2.3/8` becomes `10.0.0.0/8`.
-pub fn canonical_network(text: &str) -> Result<Canonical, CanonError> {
-    let network: IpNet = text.parse().map_err(CanonError::Network)?;
-    Ok(Canonical {
-        ioc_type: IocType::Cidr,
-        value: network.trunc().to_string(),
-    })
+/// The top 96 bits of an IPv6 network inside an IPv4-embedding `/96` range (mapped, compatible, NAT64).
+pub fn embedding_head(network: &Ipv6Net) -> Option<u128> {
+    (network.prefix_len() >= EMBEDDING_PREFIX)
+        .then(|| u128::from(network.network()) >> EMBEDDING_SHIFT)
+        .filter(|head| EMBEDDING_HEADS.contains(head))
 }
 
 
-/// Lowercase, no trailing dot, IDNA to punycode with STD3 rules; idna also enforces the DNS length limits.
+/// An IPv6 network shorter than `/96` that holds the base of an IPv4-embedding range (mapped, compatible, both NAT64 prefixes) is too broad.
+pub fn covers_embedding_base(network: &Ipv6Net) -> bool {
+    network.prefix_len() < EMBEDDING_PREFIX && EMBEDDING_BASES.iter().any(|base| network.contains(&Ipv6Addr::from(*base)))
+}
+
+
+/// A network shorter than `/104` inside the RFC 8215 local-use `64:ff9b:1::/48` may be an operator NAT64 prefix of any RFC 6052 length: too broad.
+pub fn inside_local_nat64(network: &Ipv6Net) -> bool {
+    network.prefix_len() < LOCAL_NAT64_MIN_PREFIX && u128::from(network.network()) >> LOCAL_NAT64_SHIFT == LOCAL_NAT64_HEAD
+}
+
+
+/// A mapped network becomes IPv4; any embedding network is judged by its IPv4 prefix length, and one covering the mapped range is refused.
+pub fn canonical_network(text: &str) -> Result<Canonical, CanonError> {
+    let network: IpNet = text.parse().map_err(CanonError::Network)?;
+    let truncated = network.trunc();
+    let (version4, too_broad_network) = match &truncated {
+        IpNet::V4(address) => (None, address.prefix_len() < MIN_IPV4_PREFIX),
+        IpNet::V6(address) => {
+            let embedded = embedding_head(address).map(|head| (head, address.prefix_len().saturating_sub(EMBEDDING_PREFIX)));
+            let mapped = embedded
+                .filter(|(head, _prefix)| *head == MAPPED_HEAD)
+                .and_then(|(_head, prefix)| address.network().to_ipv4_mapped().and_then(|base| Ipv4Net::new(base, prefix).ok()));
+            let too_broad = covers_embedding_base(address)
+                || inside_local_nat64(address)
+                || address.prefix_len() < MIN_IPV6_PREFIX
+                || embedded.is_some_and(|(_head, prefix)| prefix < MIN_IPV4_PREFIX);
+            (mapped, too_broad)
+        }
+    };
+    if too_broad_network {
+        Err(CanonError::TooBroad)
+    } else {
+        Ok(Canonical {
+            ioc_type: IocType::Cidr,
+            value: version4.map_or_else(|| truncated.to_string(), |mapped| mapped.to_string()),
+        })
+    }
+}
+
+
+/// A public suffix (`com`, `co.uk`, `github.io`) or a single label is too broad. Lowercase, no trailing dot, IDNA to punycode with STD3 rules.
 pub fn canonical_domain(text: &str) -> Result<Canonical, CanonError> {
-    idna::domain_to_ascii_strict(text.trim_end_matches('.'))
-        .map(|ascii| Canonical {
+    let ascii = idna::domain_to_ascii_strict(text.trim_end_matches('.')).map_err(CanonError::Domain)?;
+    if psl::domain(ascii.as_bytes()).is_some() {
+        Ok(Canonical {
             ioc_type: IocType::Domain,
             value: ascii,
         })
-        .map_err(CanonError::Domain)
+    } else {
+        Err(CanonError::TooBroad)
+    }
 }
 
 

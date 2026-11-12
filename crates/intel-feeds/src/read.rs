@@ -1,5 +1,6 @@
+use crate::canon::canonicalise;
 use crate::config::{validate_clickhouse, ClickhouseConfig};
-use crate::error::EntryError;
+use crate::error::{CanonError, EntryError};
 use crate::limits::{MAX_READ_BYTES, MAX_READ_ROWS};
 use crate::lines::numbered_lines;
 use crate::load::{agent_for, LoadError};
@@ -46,6 +47,10 @@ pub enum RowError {
     Line(#[from] EntryError),
     #[error("unusable row")]
     Json(#[from] serde_json::Error),
+    #[error("row too broad")]
+    TooBroad,
+    #[error("row not canonical")]
+    NotCanonical,
 }
 
 
@@ -56,6 +61,8 @@ pub enum BadReason {
     UnknownType,
     BadTime,
     BadJson,
+    TooBroad,
+    NotCanonical,
 }
 
 
@@ -69,6 +76,8 @@ impl fmt::Display for BadReason {
             Self::UnknownType => "unknown_type",
             Self::BadTime => "bad_time",
             Self::BadJson => "bad_json",
+            Self::TooBroad => "too_broad",
+            Self::NotCanonical => "not_canonical",
         })
     }
 }
@@ -81,11 +90,13 @@ pub struct BadRows {
     pub unknown_type: u64,
     pub bad_time: u64,
     pub bad_json: u64,
+    pub too_broad: u64,
+    pub not_canonical: u64,
 }
 
 
 pub fn total_bad(bad: &BadRows) -> u64 {
-    bad.unknown_tlp + bad.unknown_type + bad.bad_time + bad.bad_json
+    bad.unknown_tlp + bad.unknown_type + bad.bad_time + bad.bad_json + bad.too_broad + bad.not_canonical
 }
 
 
@@ -107,6 +118,14 @@ pub fn count_bad(bad: BadRows, reason: BadReason) -> BadRows {
             bad_json: bad.bad_json + 1,
             ..bad
         },
+        BadReason::TooBroad => BadRows {
+            too_broad: bad.too_broad + 1,
+            ..bad
+        },
+        BadReason::NotCanonical => BadRows {
+            not_canonical: bad.not_canonical + 1,
+            ..bad
+        },
     }
 }
 
@@ -115,6 +134,8 @@ pub fn count_bad(bad: BadRows, reason: BadReason) -> BadRows {
 pub fn reason_of(error: &RowError) -> BadReason {
     match error {
         RowError::Line(_) => BadReason::BadJson,
+        RowError::TooBroad => BadReason::TooBroad,
+        RowError::NotCanonical => BadReason::NotCanonical,
         RowError::Json(source) => {
             let text = source.to_string();
             FIELD_REASONS
@@ -214,10 +235,22 @@ impl From<StoredRow> for Ioc {
 }
 
 
+/// A stored row that is too broad, fails `canonicalise` or differs from its canonical form is refused again here.
+pub fn refuse_broad(row: StoredRow) -> Result<StoredRow, RowError> {
+    match canonicalise(row.ioc_type, &row.value) {
+        Err(CanonError::TooBroad) => Err(RowError::TooBroad),
+        Err(_) => Err(RowError::NotCanonical),
+        Ok(canonical) if canonical.value != row.value || canonical.ioc_type != row.ioc_type => Err(RowError::NotCanonical),
+        Ok(_) => Ok(row),
+    }
+}
+
+
 /// A row that does not parse (unknown TLP or type included) is an error, never a default.
 pub fn ioc_line(text: Result<String, EntryError>) -> Result<String, RowError> {
     text.map_err(RowError::from)
         .and_then(|line| serde_json::from_str::<StoredRow>(&line).map_err(RowError::from))
+        .and_then(refuse_broad)
         .and_then(|row| serde_json::to_string(&Ioc::from(row)).map_err(RowError::from))
 }
 
@@ -309,7 +342,7 @@ pub fn read_iocs_capped(config: &ClickhouseConfig, now: OffsetDateTime, out: &mu
     match &result {
         Ok(summary) => {
             let (rows, bad) = (summary.rows, summary.bad);
-            info!(rows, bad.unknown_tlp, bad.unknown_type, bad.bad_time, bad.bad_json, "IOC read done");
+            info!(rows, ?bad, "IOC read done");
         }
         Err(_) => warn!("IOC read failed"),
     }

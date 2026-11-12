@@ -15,6 +15,7 @@ pub mod misp;
 pub mod model;
 pub mod read;
 pub mod run;
+pub mod sample;
 pub mod stix;
 pub mod store;
 pub mod timestamp;
