@@ -44,6 +44,7 @@ pub struct Sbom {
     pub skipped: usize,
     pub bad_purls: usize,
     pub unmapped: usize,
+    pub extra_purls: usize,
 }
 
 
@@ -75,6 +76,17 @@ pub enum FrameKind {
     Root,
     Components,
     Component,
+    Package,
+    Refs,
+    Ref,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Unknown,
+    Cyclonedx,
+    Spdx,
 }
 
 
@@ -85,6 +97,10 @@ pub struct Partial {
     pub purl: Option<String>,
     pub kind: Option<String>,
     pub oversize: bool,
+    pub ref_type: Option<String>,
+    pub ref_category: Option<String>,
+    pub refs: usize,
+    pub extra_purls: usize,
 }
 
 
@@ -100,6 +116,7 @@ pub struct ParseState {
     pub stack: Vec<Frame>,
     pub sbom: Sbom,
     pub seen: usize,
+    pub format: Format,
 }
 
 

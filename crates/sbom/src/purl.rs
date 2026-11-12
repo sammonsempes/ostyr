@@ -1,9 +1,10 @@
 //! Package URL to diff key and vuln-match ecosystem.
 
-use crate::limits::{DISTRO_QUALIFIER, NO_NAMESPACE, UPSTREAM_QUALIFIER};
+use crate::limits::{DISTRO_QUALIFIER, HOSTILE_CATEGORIES, IGNORABLE_RANGES, NO_NAMESPACE, UPSTREAM_QUALIFIER};
 use crate::model::{Classified, Outcome};
 use packageurl::PackageUrl;
 use std::str::FromStr;
+use unicode_general_category::get_general_category;
 use vuln_match::model::Package;
 
 
@@ -24,14 +25,44 @@ const RPM_DISTROS: [(&str, &str); 7] = [
 pub fn classify(purl: Option<&str>, name: &str, version: Option<&str>) -> Classified {
     match purl {
         None => fallback(name, Outcome::NoPurl),
-        Some(text) => match PackageUrl::from_str(text) {
-            Err(error) => {
-                tracing::debug!(%error, purl = ?text, "malformed package URL");
+        Some(text) => match PackageUrl::from_str(text)
+            .ok()
+            .filter(|parsed| !text_is_hostile(text) && !purl_is_hostile(parsed))
+            .ok_or(())
+        {
+            Err(()) => {
+                tracing::debug!(purl = ?text, "malformed or hostile package URL");
                 fallback(name, Outcome::Malformed)
             }
             Ok(parsed) => classify_parsed(&parsed, version),
         },
     }
+}
+
+
+/// A character of a hostile Unicode category or a default-ignorable one: never kept in a component.
+pub fn text_is_hostile(text: &str) -> bool {
+    text.chars().any(|character| {
+        HOSTILE_CATEGORIES.contains(&get_general_category(character))
+            || IGNORABLE_RANGES.iter().any(|(first, last)| (*first..=*last).contains(&character))
+    })
+}
+
+
+/// Any decoded field of the purl holding a hostile character.
+pub fn purl_is_hostile(parsed: &PackageUrl) -> bool {
+    let fields = [
+        Some(parsed.ty()),
+        parsed.namespace(),
+        Some(parsed.name()),
+        parsed.version(),
+        parsed.subpath(),
+    ];
+    let qualifiers = parsed
+        .qualifiers()
+        .iter()
+        .flat_map(|(key, value)| [Some(key.as_ref()), Some(value.as_ref())]);
+    fields.into_iter().chain(qualifiers).flatten().any(text_is_hostile)
 }
 
 

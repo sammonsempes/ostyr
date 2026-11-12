@@ -4984,6 +4984,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-general-category",
  "ureq 3.5.1",
  "url",
  "vuln-match",

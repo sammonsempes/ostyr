@@ -19,6 +19,7 @@ tempfile = "3"
 thiserror = "2"
 tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+unicode-general-category = "1"
 url = "2"
 zeroize = "1"
 vuln-match = { version = "0.0.0", path = "../vuln-match" }
