@@ -10,13 +10,25 @@ const HUGE: usize = 10_000_000;
 const MANY_LINES: usize = 1_000_000;
 
 
-const LINE_CAP: usize = 16;
+const LINE_CAP: usize = 64;
 
 
 const WIDE_CAP: usize = 200;
 
 
-const TINY_CAP: usize = 3;
+const TOO_MANY_LINES: usize = 201;
+
+
+const MAX_LINES: usize = 200;
+
+
+const BELOW_MIN_CAP: usize = 63;
+
+
+const ESC_COUNT: usize = 512;
+
+
+const ESC_CAP: usize = 100;
 
 
 const KEEP_TWO: usize = 2;
@@ -26,6 +38,9 @@ const KEEP_THREE: usize = 3;
 
 
 const KEEP_FIVE: usize = 5;
+
+
+const KEEP_TEN: usize = 10;
 
 
 const SHORT_LINE: usize = 100;
@@ -79,12 +94,47 @@ fn unsafe_characters_are_escaped() -> TestResult {
 
 #[test]
 fn long_lines_are_cut_on_a_character_boundary_with_a_marker() -> TestResult {
-    let excerpt = log_excerpt("0123456789abcdefXYZ\n".as_bytes(), 1, LINE_CAP)?;
-    assert_eq!(excerpt.lines, ["0123456789abcdef… [3 bytes omitted]"]);
-    let wide = log_excerpt("aé€é\n".as_bytes(), 1, TINY_CAP)?;
-    assert_eq!(wide.lines, ["aé… [5 bytes omitted]"]);
-    let exact = log_excerpt("0123456789abcdef\n".as_bytes(), 1, LINE_CAP)?;
-    assert_eq!(exact.lines, ["0123456789abcdef"]);
+    let raw = format!("{}XYZ", "0123456789".repeat(KEEP_TEN));
+    let excerpt = log_excerpt(format!("{raw}\n").as_bytes(), 1, LINE_CAP)?;
+    let line = excerpt.lines.first().ok_or("no line")?;
+    assert!(line.len() <= LINE_CAP);
+    assert!(line.starts_with("0123456789"));
+    assert!(line.ends_with(" bytes omitted]"));
+    let wide = log_excerpt("é".repeat(LINE_CAP).as_bytes(), 1, LINE_CAP)?;
+    let wide_line = wide.lines.first().ok_or("no line")?;
+    assert!(wide_line.len() <= LINE_CAP);
+    assert!(wide_line.contains("é… ["));
+    let exact = "0123456789abcdef".repeat(KEEP_FIVE - 1);
+    let fits = log_excerpt(format!("{exact}\n").as_bytes(), 1, LINE_CAP)?;
+    assert_eq!(fits.lines, [exact]);
+    Ok(())
+}
+
+
+#[test]
+fn escaping_comes_before_the_cut() -> TestResult {
+    let raw = "\u{1b}".repeat(ESC_COUNT);
+    let excerpt = log_excerpt(raw.as_bytes(), 1, ESC_CAP)?;
+    let line = excerpt.lines.first().ok_or("no line")?;
+    assert!(line.len() <= ESC_CAP);
+    assert!(line.starts_with("\\u{1b}\\u{1b}"));
+    let kept = line.matches("\\u{1b}").count();
+    assert!(line.ends_with(&format!("… [{} bytes omitted]", ESC_COUNT - kept)));
+    Ok(())
+}
+
+
+#[test]
+fn line_and_cap_bounds_are_refused() -> TestResult {
+    assert!(log_excerpt("a\n".as_bytes(), MAX_LINES, LINE_CAP).is_ok());
+    assert!(matches!(
+        log_excerpt("a\n".as_bytes(), TOO_MANY_LINES, LINE_CAP),
+        Err(NtpError::OutOfRange { field: "max_lines" })
+    ));
+    assert!(matches!(
+        log_excerpt("a\n".as_bytes(), 1, BELOW_MIN_CAP),
+        Err(NtpError::OutOfRange { field: "max_bytes" })
+    ));
     Ok(())
 }
 
@@ -114,7 +164,9 @@ fn a_ten_megabyte_line_is_cut() -> TestResult {
     let excerpt = log_excerpt(raw.as_bytes(), KEEP_THREE, LINE_CAP)?;
     assert!(excerpt.input_truncated);
     let line = excerpt.lines.first().ok_or("no line")?;
-    assert!(line.starts_with("xxxxxxxxxxxxxxxx… ["));
+    assert!(line.starts_with("xxxxxxxxxxxxxxxx"));
+    assert!(line.contains("… ["));
+    assert!(line.len() <= LINE_CAP);
     assert!(line.len() < SHORT_LINE);
     Ok(())
 }

@@ -16,7 +16,7 @@ pub fn is_clean_ident(text: &str) -> bool {
 }
 
 
-/// A unit name of `[A-Za-z0-9:_.@-]`, a non-empty stem and a known suffix, no leading `-`.
+/// A unit name of `[A-Za-z0-9:_.@-]`, a non-empty stem starting with `[A-Za-z0-9]` and a known suffix.
 pub fn is_unit_name(text: &str) -> bool {
     let charset = text
         .chars()
@@ -25,7 +25,7 @@ pub fn is_unit_name(text: &str) -> bool {
     let suffixed = UNIT_SUFFIXES
         .iter()
         .any(|suffix| text.strip_suffix(suffix).is_some_and(|stem| !stem.is_empty()));
-    charset && bounded && suffixed && !text.starts_with('-')
+    charset && bounded && suffixed && text.starts_with(|character: char| character.is_ascii_alphanumeric())
 }
 
 

@@ -110,10 +110,10 @@ fn count(text: &str) -> Result<u32, NtpError> {
 
 fn collect_pairs(text: &str) -> Result<BTreeMap<&str, &str>, NtpError> {
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
-    text.lines().try_for_each(|line| {
+    text.split_terminator('\n').try_for_each(|line| {
         let (key, value) = line
             .split_once('=')
-            .filter(|(key, _)| SHOW_KEYS.contains(key))
+            .filter(|(key, value)| SHOW_KEYS.contains(key) && !value.ends_with('\r'))
             .ok_or(NtpError::Malformed { reason: "unexpected line" })?;
         match seen.insert(key, value) {
             Some(_) => Err(NtpError::Malformed { reason: "duplicate key" }),

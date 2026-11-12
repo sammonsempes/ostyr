@@ -34,3 +34,9 @@ pub const MAX_SUB_STATE_CHARS: usize = 64;
 
 
 pub const MAX_JOURNAL_BYTES: u64 = 4_194_304;
+
+
+pub const MAX_EXCERPT_LINES: usize = 200;
+
+
+pub const MIN_LINE_BYTES: usize = 64;
