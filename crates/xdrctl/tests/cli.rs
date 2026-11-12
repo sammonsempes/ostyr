@@ -1373,3 +1373,34 @@ fn hidden_characters_are_escaped_in_error_lines() -> TestResult {
         Ok(())
     })
 }
+
+
+#[test]
+fn whoami_text_escapes_hidden_characters_and_backslashes() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let name = "a\\u001b[2J\\u202e\\u061c\\\\u{202e}\\u2028\\u009b";
+    let body: &'static str = Box::leak(format!("{{\"username\":\"{name}\",\"roles\":[\"{name}\",\"r\"],\"mfa_enrolled\":true}}").into_boxed_str());
+    let seen = RefCell::new(Vec::new());
+    let text = invoke(&offline_args(dir.path(), &["whoami"]), "", &alerts_stub(&seen, STATUS_OK, body))?;
+    HIDDEN_RAW.iter().for_each(|raw| assert!(!text.out.contains(*raw)));
+    assert!(!text.out.contains('\u{1b}'));
+    assert!(text.out.contains("\\\\u{202e}"));
+    assert!(text.out.contains("a\\u{1b}[2J\\u{202e}\\u{61c}"));
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "whoami"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, body),
+    )?;
+    assert!(!json.out.contains('\u{1b}'));
+    assert!(json.out.contains("\\u202e"));
+    Ok(())
+}
+
+
+#[test]
+fn printable_marks_backslashes() -> TestResult {
+    assert_eq!(xdrctl::alerts::printable("\\u{"), "\\\\u{");
+    assert_eq!(xdrctl::alerts::printable("\u{202e}"), "\\u{202e}");
+    Ok(())
+}

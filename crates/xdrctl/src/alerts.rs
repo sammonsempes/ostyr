@@ -40,12 +40,14 @@ pub fn is_hidden(character: char) -> bool {
 }
 
 
-/// Escapes control and hidden characters so a hostile value cannot drive the terminal.
+/// Escapes control, hidden characters and backslashes so a hostile value cannot drive the terminal.
 pub fn printable(text: &str) -> String {
     text.chars()
         .map(|character| {
             if is_hidden(character) {
                 character.escape_unicode().to_string()
+            } else if character == '\\' {
+                "\\\\".to_owned()
             } else {
                 character.to_string()
             }
