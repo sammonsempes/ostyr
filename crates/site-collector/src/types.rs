@@ -1,10 +1,12 @@
 use crate::error::SpoolError;
 use crate::model::SourceState;
 use crate::spool_model::{Segment, Spool};
+use crate::template_model::{ExporterState, Template, TemplateKey};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 
 pub type Millis = u64;
@@ -46,3 +48,9 @@ pub type SyncFn = fn(&Spool, u64, u64) -> Result<(), SpoolError>;
 
 
 pub type DirSyncFn = fn(&DirHandle) -> io::Result<()>;
+
+
+pub type TemplateMap = BTreeMap<TemplateKey, Arc<Template>>;
+
+
+pub type ExporterMap = BTreeMap<IpAddr, ExporterState>;

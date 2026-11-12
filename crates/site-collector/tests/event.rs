@@ -140,13 +140,13 @@ fn varbind(value: String) -> TrapVarbind {
 
 fn flow_at(start_ms: i64, end_ms: i64, protocol: u8) -> FlowRecord {
     FlowRecord {
-        source: FLOW_SOURCE,
-        destination: FLOW_DESTINATION,
-        next_hop: FLOW_SOURCE,
+        source: IpAddr::V4(FLOW_SOURCE),
+        destination: IpAddr::V4(FLOW_DESTINATION),
+        next_hop: IpAddr::V4(FLOW_SOURCE),
         input_interface: 1,
         output_interface: 0,
-        packets: FLOW_PACKETS,
-        octets: FLOW_OCTETS,
+        packets: u64::from(FLOW_PACKETS),
+        octets: u64::from(FLOW_OCTETS),
         start_unix_ms: start_ms,
         end_unix_ms: end_ms,
         source_port: FLOW_PORT,

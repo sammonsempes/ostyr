@@ -152,7 +152,9 @@ fn count_drop(counters: &mut SourceCounters, verdict: &Result<(), DropReason>) {
             | DropReason::TrapUnsupported
             | DropReason::FlowTooLarge
             | DropReason::FlowMalformed
-            | DropReason::FlowUnsupported,
+            | DropReason::FlowUnsupported
+            | DropReason::FlowNoTemplate
+            | DropReason::FlowTemplateRefused,
         ) => {}
         Err(DropReason::UnknownSource) => counters.dropped_unknown = counters.dropped_unknown.saturating_add(1),
         Err(DropReason::TooLarge) => counters.dropped_size = counters.dropped_size.saturating_add(1),

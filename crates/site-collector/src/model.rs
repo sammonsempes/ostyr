@@ -134,6 +134,10 @@ pub enum DropReason {
     FlowMalformed,
     #[error("the flow datagram is not NetFlow version 5")]
     FlowUnsupported,
+    #[error("the flow data has no known template")]
+    FlowNoTemplate,
+    #[error("the flow template was refused by a cap")]
+    FlowTemplateRefused,
 }
 
 
