@@ -77,3 +77,24 @@ pub const MAX_READ_ROWS: usize = 250_000;
 
 
 pub const MAX_READ_BYTES: u64 = 67_108_864;
+
+
+pub const MAX_SAMPLE_CHARS: usize = 128;
+
+
+pub const MIN_IPV4_PREFIX: u8 = 8;
+
+
+pub const MIN_IPV6_PREFIX: u8 = 16;
+
+
+pub const EMBEDDING_PREFIX: u8 = 96;
+
+
+pub const EMBEDDING_SHIFT: u32 = 32;
+
+
+pub const MAPPED_HEAD: u128 = 0xffff;
+
+
+pub const EMBEDDING_HEADS: [u128; 3] = [MAPPED_HEAD, 0, 0x0064_ff9b_0000_0000_0000_0000];

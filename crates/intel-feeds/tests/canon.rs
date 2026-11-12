@@ -131,3 +131,45 @@ fn type_names_of_feeds_are_understood() -> TestResult {
     assert_eq!(type_from_name("ip:port"), None);
     Ok(())
 }
+
+
+fn assert_too_broad(ioc_type: IocType, value: &str) {
+    assert!(matches!(value_of(ioc_type, value), Err(CanonError::TooBroad)), "{value}");
+}
+
+
+#[test]
+fn embedded_ipv4_networks_are_judged_by_their_ipv4_breadth() -> TestResult {
+    [
+        "::ffff:0.0.0.0/96",
+        "::ffff:0:0/100",
+        "::ffff:0:0/103",
+        "::ffff:0:0/32",
+        "::/32",
+        "::/48",
+        "::/100",
+        "64:ff9b::/96",
+        "64:ff9b::/103",
+        "::/96",
+    ]
+    .iter()
+    .for_each(|value| assert_too_broad(IocType::Cidr, value));
+    assert_too_broad(IocType::Cidr, "10.0.0.0/7");
+    assert_eq!(value_of(IocType::Cidr, "::ffff:10.0.0.0/104")?, (IocType::Cidr, "10.0.0.0/8".to_owned()));
+    assert_eq!(value_of(IocType::Cidr, "::ffff:10.1.2.3/128")?, (IocType::Cidr, "10.1.2.3/32".to_owned()));
+    assert_eq!(value_of(IocType::Cidr, "64:ff9b::a00:0/104")?.1, "64:ff9b::a00:0/104");
+    assert_eq!(value_of(IocType::Cidr, "::a00:0/104")?.1, "::a00:0/104");
+    assert_eq!(value_of(IocType::Cidr, "2001:db8::/32")?.1, "2001:db8::/32");
+    Ok(())
+}
+
+
+#[test]
+fn public_suffixes_and_single_labels_are_refused() -> TestResult {
+    ["com", "co.uk", "github.io", "localhost", "com."]
+        .iter()
+        .for_each(|value| assert_too_broad(IocType::Domain, value));
+    assert_eq!(value_of(IocType::Domain, "example.co.uk")?.1, "example.co.uk");
+    assert_eq!(value_of(IocType::Domain, "evil.github.io")?.1, "evil.github.io");
+    Ok(())
+}

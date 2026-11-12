@@ -14,9 +14,13 @@ use clock::now;
 use fixtures::fixture;
 use intel_feeds::config::{FeedConfig, FeedFormat};
 use intel_feeds::error::{reason_key, EntryError, FeedError};
-use intel_feeds::limits::{MAX_MISP_ATTRIBUTES, MAX_OBJECT_BYTES};
-use intel_feeds::misp::{flag, ip_part, known_level, misp_parts, tags_tlp, tlp_of_tag, unix_as_rfc3339, BAD_TLP, NO_TLP};
+use intel_feeds::limits::{MAX_MISP_ATTRIBUTES, MAX_OBJECT_BYTES, MAX_SAMPLE_CHARS};
+use intel_feeds::misp::{
+    flag_fails_to_false, flag_fails_to_true, ip_part, known_level, misp_parts, tags_tlp, tlp_of_tag, unix_as_rfc3339, BAD_TLP, NO_TLP,
+};
 use intel_feeds::model::{Collector, Ioc, IocType, Tlp};
+use intel_feeds::sample::bounded_text;
+use intel_feeds::timestamp::parse_timestamp;
 use parsing::parse_text;
 use serde_json::{json, Value};
 use std::fs;
@@ -33,6 +37,12 @@ const TIMESTAMP_SECONDS: i64 = 1_762_000_000;
 
 
 const TWO: u64 = 2;
+
+
+const ENVELOPE_ROOM: usize = 1_000;
+
+
+const MAX_SAMPLE_BYTES: usize = 2_048;
 
 
 const THREE: u64 = 3;
@@ -286,10 +296,128 @@ fn the_table_and_helpers_behave() -> TestResult {
     assert_eq!(tags_tlp(Some(&Value::Null)), NO_TLP);
     let object: Value = serde_json::from_str(r#"{"a": "TRUE", "b": "0", "c": 1, "d": 2, "e": null}"#)?;
     let map = object.as_object().ok_or("object")?;
-    assert!(flag(map, "a") && flag(map, "c"));
-    assert!(!flag(map, "b") && !flag(map, "d") && !flag(map, "e") && !flag(map, "missing"));
+    assert!(flag_fails_to_false(map, "a") && flag_fails_to_false(map, "c"));
+    assert!(!flag_fails_to_false(map, "b") && !flag_fails_to_false(map, "d") && !flag_fails_to_false(map, "e"));
+    assert!(!flag_fails_to_false(map, "missing") && !flag_fails_to_true(map, "missing") && flag_fails_to_true(map, "e"));
     assert_eq!(reason_key(&EntryError::NotForDetection), "not_for_detection");
     assert_eq!(reason_key(&EntryError::Deleted), "deleted");
     assert_eq!(reason_key(&EntryError::ControlCharacter), "control_character");
+    Ok(())
+}
+
+
+fn deleted_attribute(deleted: &str) -> String {
+    format!(r#"{{"Event": {{"Attribute": [{{"type": "domain", "value": "gone.example", "to_ids": true{deleted}}}]}}}}"#)
+}
+
+
+#[test]
+fn deleted_fails_closed() -> TestResult {
+    let kept = [
+        "",
+        r#", "deleted": false"#,
+        r#", "deleted": 0"#,
+        r#", "deleted": "0""#,
+        r#", "deleted": "false""#,
+    ];
+    kept.iter().try_for_each(|deleted| -> TestResult {
+        let collector = parse_text(&misp_feed(Tlp::Green), &deleted_attribute(deleted))?;
+        assert_eq!(collector.iocs.len(), 1, "{deleted}");
+        Ok(())
+    })?;
+    let dropped = [
+        r#", "deleted": 1.0"#,
+        r#", "deleted": " 1""#,
+        r#", "deleted": "yes""#,
+        r#", "deleted": {}"#,
+        r#", "deleted": null"#,
+        r#", "deleted": true"#,
+        r#", "deleted": 2"#,
+    ];
+    dropped.iter().try_for_each(|deleted| -> TestResult {
+        let collector = parse_text(&misp_feed(Tlp::Green), &deleted_attribute(deleted))?;
+        assert!(collector.iocs.is_empty(), "{deleted}");
+        assert_eq!(collector.summary.skipped.get("deleted"), Some(&1), "{deleted}");
+        Ok(())
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn a_huge_timestamp_is_cut_and_escaped_in_the_sample() -> TestResult {
+    let digits = "9".repeat(MAX_OBJECT_BYTES - ENVELOPE_ROOM);
+    let huge = format!("{digits}\\u001b[2J");
+    let text = format!(r#"{{"Event": {{"Attribute": [{{"type": "domain", "value": "a.example", "to_ids": true, "first_seen": "{huge}"}}]}}}}"#);
+    let collector = parse_text(&misp_feed(Tlp::Green), &text)?;
+    let sample = collector.summary.samples.first().ok_or("no sample")?;
+    assert!(sample.reason.len() < MAX_SAMPLE_BYTES);
+    let full_reason = parse_timestamp(&format!("{digits}\u{1b}[2J")).err().ok_or("no error")?.to_string();
+    let expected_omitted = full_reason.chars().count() - MAX_SAMPLE_CHARS;
+    assert!(expected_omitted > MAX_OBJECT_BYTES / TWO as usize);
+    assert!(sample.reason.ends_with(&format!("… [{expected_omitted} omitted]")));
+    assert!(!sample.reason.contains('\u{1b}'));
+    assert_eq!(bounded_text("short\u{202e}"), "short\\u{202e}");
+    assert_eq!(bounded_text("a\u{1b}"), "a\\u{1b}");
+    assert_eq!(bounded_text("a\\u{1b}"), "a\\u{5c}u{1b}");
+    assert_eq!(bounded_text("a\u{2028}\u{2029}"), "a\\u{2028}\\u{2029}");
+    assert_eq!(bounded_text(&"x".repeat(MAX_SAMPLE_CHARS)).len(), MAX_SAMPLE_CHARS);
+    assert!(bounded_text(&"x".repeat(MAX_SAMPLE_CHARS + TWO as usize)).ends_with("… [2 omitted]"));
+    Ok(())
+}
+
+
+#[test]
+fn over_broad_indicators_are_refused_in_misp() -> TestResult {
+    let refused = [
+        "0.0.0.0/0",
+        "10.0.0.0/7",
+        "::/0",
+        "2001::/15",
+        "com",
+        "com.",
+        "co.uk",
+        "github.io",
+        "::ffff:0.0.0.0/96",
+        "::ffff:0:0/100",
+        "::ffff:0:0/32",
+        "::/32",
+        "::/100",
+        "64:ff9b::/100",
+    ];
+    refused.iter().try_for_each(|value| -> TestResult {
+        let kind = if value.contains('/') || value.contains(':') {
+            "ip-dst"
+        } else {
+            "domain"
+        };
+        let text = format!(r#"{{"Event": {{"Attribute": [{{"type": "{kind}", "value": "{value}", "to_ids": true}}]}}}}"#);
+        let collector = parse_text(&misp_feed(Tlp::Green), &text)?;
+        assert!(collector.iocs.is_empty(), "{value}");
+        assert_eq!(collector.summary.skipped.get("too_broad"), Some(&1), "{value}");
+        Ok(())
+    })?;
+    ["10.0.0.0/8", "2001::/16"].iter().try_for_each(|value| -> TestResult {
+        let text = format!(r#"{{"Event": {{"Attribute": [{{"type": "ip-dst", "value": "{value}", "to_ids": true}}]}}}}"#);
+        assert_eq!(parse_text(&misp_feed(Tlp::Green), &text)?.iocs.len(), 1, "{value}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn over_broad_indicators_are_refused_in_other_formats() -> TestResult {
+    let json = r#"[{"value": "0.0.0.0/0"}, {"value": "com"}, {"value": "::/0"}, {"value": "10.0.0.0/8"}]"#;
+    let mut json_feed = feed("json", FeedFormat::Json);
+    json_feed.mapping.value = Some("value".to_owned());
+    let collector = parse_text(&json_feed, json)?;
+    assert_eq!(collector.iocs.len(), 1);
+    assert_eq!(collector.summary.skipped.get("too_broad"), Some(&THREE));
+    let csv = "value\n0.0.0.0/0\ncom.\n2001::/15\n";
+    let mut csv_feed = feed("csv", FeedFormat::Csv);
+    csv_feed.mapping.value = Some("value".to_owned());
+    let csv_collector = parse_text(&csv_feed, csv)?;
+    assert!(csv_collector.iocs.is_empty());
+    assert_eq!(csv_collector.summary.skipped.get("too_broad"), Some(&THREE));
     Ok(())
 }
