@@ -79,6 +79,8 @@ pub enum ListenError {
     BadTenant,
     #[error("the forward batch must hold between 1 and 1000 records")]
     BadForwardBatch,
+    #[error("the listener kind cannot change on reload: restart the collector")]
+    KindChanged,
     #[error("the admission limits are invalid")]
     Limits(#[from] ConfigError),
     #[error("the settings file cannot be loaded")]
@@ -98,4 +100,13 @@ pub enum ForwardError {
     Parse(#[from] ParseError),
     #[error("an event cannot be encoded")]
     Encode(#[from] core_export::error::ExportError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum FlowStoreError {
+    #[error("a flow record cannot be encoded")]
+    Encode(#[from] serde_json::Error),
+    #[error("a flow record cannot be appended to the spool")]
+    Spool(#[from] SpoolError),
 }

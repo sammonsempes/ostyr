@@ -129,6 +129,9 @@ pub fn apply_template(cache: &mut TemplateCache, mut progress: Progress, def: Te
         } else {
             withdraw_template(cache, &key);
         }
+    } else if progress.exporter_refused {
+        refuse(cache);
+        progress.refused = progress.refused.saturating_add(1);
     } else {
         let template = build_template(def.fields, session.now_ms);
         let allowed = (1..=session.limits.max_record_bytes).contains(&template.min_record_bytes);
@@ -137,6 +140,7 @@ pub fn apply_template(cache: &mut TemplateCache, mut progress: Progress, def: Te
         } else {
             Err(refuse(cache))
         };
+        progress.exporter_refused = allowed && stored.is_err() && !cache.exporters.contains_key(&session.exporter);
         progress.refused = progress.refused.saturating_add(usize::from(stored.is_err()));
     }
     progress

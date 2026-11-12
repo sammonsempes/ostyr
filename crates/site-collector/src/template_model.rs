@@ -1,5 +1,5 @@
 use crate::flow_model::{FlowLimits, FlowRecord};
-use crate::types::{ExporterMap, TemplateMap};
+use crate::types::{ExporterMap, KeyCountMap, LruIndex, SourceKeySet, TemplateMap};
 use std::net::IpAddr;
 
 
@@ -182,6 +182,7 @@ pub struct TemplateStats {
     pub expired_templates: u64,
     pub refused_templates: u64,
     pub no_template_sets: u64,
+    pub index_steps: u64,
 }
 
 
@@ -189,6 +190,10 @@ pub struct TemplateStats {
 pub struct TemplateCache {
     pub templates: TemplateMap,
     pub exporters: ExporterMap,
+    pub declared: SourceKeySet,
+    pub per_key: KeyCountMap,
+    pub undeclared_lru: LruIndex,
+    pub declared_lru: LruIndex,
     pub tick: u64,
     pub stats: TemplateStats,
 }
@@ -213,6 +218,7 @@ pub struct Progress {
     pub records: Vec<FlowRecord>,
     pub no_template: usize,
     pub refused: usize,
+    pub exporter_refused: bool,
 }
 
 
