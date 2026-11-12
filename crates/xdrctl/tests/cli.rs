@@ -1404,3 +1404,37 @@ fn printable_marks_backslashes() -> TestResult {
     assert_eq!(xdrctl::alerts::printable("\u{202e}"), "\\u{202e}");
     Ok(())
 }
+
+
+#[test]
+fn plan_text_and_prompt_escape_hidden_characters() -> TestResult {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let desired = root.join("desired");
+    let state = root.join("state");
+    fs::create_dir_all(&desired)?;
+    fs::create_dir_all(&state)?;
+    fs::write(desired.join("plain.yaml"), "a: 1\n")?;
+    fs::write(desired.join("k\u{1b}[2J\u{202e}.yaml"), "v: \u{1b}[2J \u{202e} \u{2028} \\u{1b}\n")?;
+    let desired_text = desired.display().to_string();
+    let state_text = state.display().to_string();
+    let send = fixed(STATUS_OK, "{}");
+    let planned = invoke(&offline_args(root, &["plan", &desired_text, "--state", &state_text]), "", &send)?;
+    assert_eq!(planned.code, SUCCESS);
+    assert!(planned.out.contains("Create plain.yaml"));
+    assert!(planned.out.contains("\\u{1b}[2J"));
+    assert!(planned.out.contains("\\u{202e}"));
+    assert!(planned.out.contains("\\u{2028}"));
+    assert!(planned.out.contains("\\\\u{1b}"));
+    assert!(!planned.out.contains(['\u{1b}', '\u{202e}', '\u{2028}']));
+    assert!(planned.out.contains('\n'));
+
+    let changes = core_config::plan::plan(&xdrctl::commands::read_dir_state(&desired)?, &xdrctl::commands::read_dir_state(&state)?);
+    let mut prompt = Vec::new();
+    let mut input = std::io::Cursor::new(b"n\n".to_vec());
+    assert!(!xdrctl::commands::confirmed(&changes, &mut input, &mut prompt)?);
+    let shown = String::from_utf8(prompt)?;
+    assert!(shown.contains("\\u{1b}[2J"));
+    assert!(!shown.contains(['\u{1b}', '\u{202e}', '\u{2028}']));
+    Ok(())
+}
