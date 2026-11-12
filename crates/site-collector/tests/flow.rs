@@ -134,6 +134,9 @@ const FUZZ_SHAPED_ODDS: f64 = 0.5;
 const VERSION_BYTES: usize = 2;
 
 
+const COUNT_END: usize = 4;
+
+
 const FIXTURE: &[u8] = include_bytes!("fixtures/netflow/v5-softflowd.bin");
 
 
@@ -434,6 +437,14 @@ fn random_datagrams_never_panic() -> TestResult {
         if rng.gen_bool(FUZZ_SHAPED_ODDS) {
             bytes.splice(0..prefix, VERSION.to_be_bytes().into_iter().take(prefix));
         }
+        let count = rng.gen_range(1..=THIRTY);
+        let mut consistent: Vec<u8> = (0..FLOW_HEADER_BYTES + FLOW_RECORD_BYTES * usize::from(count))
+            .map(|_| rng.gen())
+            .collect();
+        consistent.splice(0..VERSION_BYTES, VERSION.to_be_bytes());
+        consistent.splice(VERSION_BYTES..COUNT_END, count.to_be_bytes());
+        let batch = parse_netflow_v5(&consistent, &limits)?;
+        assert_eq!(batch.records.len(), usize::from(count));
         Ok(total + usize::from(parse_netflow_v5(&bytes, &limits).is_ok()))
     })?;
     assert!(accepted <= FUZZ_ROUNDS);
