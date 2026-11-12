@@ -18,3 +18,5 @@ pkg-containers.githubusercontent.com
 gcr.io
 github.com
 objects.githubusercontent.com
+pypi.org
+files.pythonhosted.org
