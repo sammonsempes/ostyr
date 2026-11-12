@@ -1,4 +1,4 @@
-use device_control::evaluate::{evaluate, expired_exceptions, next_change};
+use device_control::evaluate::{class_only_allows, evaluate, expired_exceptions, next_change};
 use device_control::limits::MAX_INTERFACES;
 use device_control::model::{Action, Decision, Matched, Policy, UsbDevice};
 use device_control::parse::parse_policy;
@@ -154,7 +154,7 @@ fn matching_is_exact_on_every_attribute() -> Result<(), Box<dyn Error>> {
         ),
         (device("046d", "c52b", None, &["09"]), Decision::Allow { rule: Matched::Rule(1) }),
         (device("046d", "c52c", None, &["09"]), Decision::Block { rule: Matched::Default }),
-        (device("1d6c", "0002", None, &[]), Decision::Block { rule: Matched::Default }),
+        (device("1d6c", "0002", None, &["09"]), Decision::Block { rule: Matched::Default }),
     ];
     cases.iter().try_for_each(|(usb, expected)| {
         assert_eq!(evaluate(&enforce, usb, now), *expected);
@@ -283,5 +283,50 @@ fn next_change_is_the_nearest_future_expiry() -> Result<(), Box<dyn Error>> {
     assert_eq!(next_change(&subject, at(BEFORE_EXPIRY)?), Some(at(FIRST_EXPIRY)?));
     assert_eq!(next_change(&subject, at(FIRST_EXPIRY)?), Some(at(SECOND_EXPIRY)?));
     assert_eq!(next_change(&subject, at(SECOND_EXPIRY)?), None);
+    Ok(())
+}
+
+
+#[test]
+fn a_device_without_interface_is_invalid_in_both_modes() -> Result<(), Box<dyn Error>> {
+    let now = at(LONG_AFTER)?;
+    let enforce = parse_policy(
+        &mut "mode: enforce\ndefault: allow\nrules:\n  - {action: block, class: \"08\"}\n".as_bytes(),
+        "p.yaml",
+    )?;
+    let bare = device("1d6b", "0002", None, &[]);
+    assert_eq!(
+        evaluate(&enforce, &bare, now),
+        Decision::Block {
+            rule: Matched::InvalidDevice
+        }
+    );
+    let audit = parse_policy(&mut "default: allow\n".as_bytes(), "p.yaml")?;
+    assert_eq!(
+        evaluate(&audit, &bare, now),
+        Decision::Audit {
+            would: Action::Block,
+            rule: Matched::InvalidDevice
+        }
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_class_only_allow_admits_a_composite_device_and_is_listed() -> Result<(), Box<dyn Error>> {
+    let now = at(LONG_AFTER)?;
+    let text =
+        "mode: enforce\ndefault: block\nrules:\n  - {action: allow, class: \"03\"}\n  - {action: allow, vendor: \"1d6b\", product: \"0002\"}\n";
+    let risky = parse_policy(&mut text.as_bytes(), "p.yaml")?;
+    let composite = device("dead", "beef", None, &["03", "08"]);
+    assert_eq!(evaluate(&risky, &composite, now), Decision::Allow { rule: Matched::Rule(0) });
+    assert_eq!(class_only_allows(&risky), vec![0]);
+    let paired = format!("{text}  - {{action: block, class: \"08\"}}\n");
+    assert_eq!(class_only_allows(&parse_policy(&mut paired.as_bytes(), "p.yaml")?), Vec::<usize>::new());
+    let vendor_block = format!("{text}  - {{action: block, vendor: \"0781\"}}\n");
+    assert_eq!(class_only_allows(&parse_policy(&mut vendor_block.as_bytes(), "p.yaml")?), vec![0]);
+    let narrowed = "default: block\nrules:\n  - {action: allow, class: \"03\", vendor: \"1d6b\"}\n  - {action: block, class: \"03\"}\n";
+    assert_eq!(class_only_allows(&parse_policy(&mut narrowed.as_bytes(), "p.yaml")?), Vec::<usize>::new());
     Ok(())
 }

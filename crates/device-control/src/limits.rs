@@ -20,3 +20,6 @@ pub const MAX_OWNER_CHARS: usize = 64;
 
 
 pub const MAX_REASON_CHARS: usize = 200;
+
+
+pub const STORAGE_CLASS: &str = "08";
