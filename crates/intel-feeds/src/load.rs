@@ -60,6 +60,7 @@ pub struct LoadSummary {
     pub clickhouse_rows_sent: usize,
     pub clickhouse_batches_stored: usize,
     pub clickhouse_batches_failed: usize,
+    pub clickhouse_rows_not_canonical: u64,
     pub failed_batch: Option<usize>,
     pub error: Option<String>,
 }
@@ -71,6 +72,7 @@ pub fn summarise(result: &Result<LoadOutcome, LoadError>) -> LoadSummary {
             clickhouse_rows_sent: outcome.rows_per_batch.iter().sum(),
             clickhouse_batches_stored: outcome.rows_per_batch.len(),
             clickhouse_batches_failed: outcome.batches_planned - outcome.rows_per_batch.len(),
+            clickhouse_rows_not_canonical: outcome.not_canonical,
             failed_batch: outcome.failure.map(|failure| failure.index),
             error: outcome.failure.map(|failure| format!("batch refused: {:?}", failure.class)),
         },
@@ -78,6 +80,7 @@ pub fn summarise(result: &Result<LoadOutcome, LoadError>) -> LoadSummary {
             clickhouse_rows_sent: 0,
             clickhouse_batches_stored: 0,
             clickhouse_batches_failed: 0,
+            clickhouse_rows_not_canonical: 0,
             failed_batch: None,
             error: Some(error.to_string()),
         },

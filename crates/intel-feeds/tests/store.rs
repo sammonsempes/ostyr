@@ -2,6 +2,7 @@
 mod types;
 
 
+use intel_feeds::canon::canonicalise;
 use intel_feeds::config::{FeedConfig, FeedFormat, Mapping};
 use intel_feeds::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_ROWS_PER_BATCH};
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
@@ -247,6 +248,24 @@ fn quotes_and_backticks_round_trip_as_json() -> TestResult {
     let row: Value = serde_json::from_str(body.trim_end())?;
     assert_eq!(row.get("value"), Some(&json!("good.example")));
     assert_eq!(row.get("feed"), Some(&json!("fe`ed'")));
+    Ok(())
+}
+
+
+#[test]
+fn a_canonical_value_that_json_escapes_round_trips() -> TestResult {
+    let canonical = canonicalise(IocType::Url, "foo://h/a\\b\"c'd`e")?;
+    let row_ioc = Ioc {
+        ioc_type: IocType::Url,
+        value: canonical.value.clone(),
+        ..ioc("x", None, source("feed"))
+    };
+    let plan = insert_plan(&[row_ioc], &settings(), NOW);
+    assert_eq!(plan.not_canonical, 0);
+    let body = first_body(&plan);
+    assert_eq!(body.matches('\n').count(), 1);
+    let row: Value = serde_json::from_str(body.trim_end())?;
+    assert_eq!(row.get("value"), Some(&json!(canonical.value)));
     Ok(())
 }
 

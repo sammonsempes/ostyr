@@ -31,6 +31,9 @@ const EXPECTED_IOCS: usize = 3;
 const EXPECTED_ROWS: usize = 2;
 
 
+const SKIPPED_ROWS: u64 = 4;
+
+
 const SECOND_FEED: &str = "  - name: extra\n    format: crowdsec\n    path: extra.txt\n";
 
 
@@ -150,7 +153,7 @@ fn run_loads_into_clickhouse_when_configured_and_reports_the_summary() -> TestRe
         Ok(LoadOutcome {
             rows_per_batch: vec![iocs.len()],
             batches_planned: 1,
-            not_canonical: 0,
+            not_canonical: SKIPPED_ROWS,
             failure: None,
         })
     };
@@ -170,6 +173,7 @@ fn run_loads_into_clickhouse_when_configured_and_reports_the_summary() -> TestRe
     let last = text.lines().last().ok_or("no summary")?;
     assert!(last.contains("\"clickhouse_rows_sent\":2"), "{last}");
     assert!(last.contains("\"clickhouse_batches_failed\":0"), "{last}");
+    assert!(last.contains("\"clickhouse_rows_not_canonical\":4"), "{last}");
     let first_pass = text.lines().next().ok_or("no feed summary")?.len() + 1;
     let mut cut = StopAfter { left: first_pass };
     let mut failing = Session {

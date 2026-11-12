@@ -10,7 +10,7 @@ use clock::now;
 use intel_feeds::canon::canonicalise;
 use intel_feeds::config::FeedFormat;
 use intel_feeds::entry::build_ioc;
-use intel_feeds::model::RawEntry;
+use intel_feeds::model::{IocType, RawEntry};
 use intel_feeds::stix::parse_pattern;
 use parsing::parse_text;
 use proptest::prelude::*;
@@ -18,6 +18,37 @@ use support::feed;
 
 
 const CASES: u32 = 512;
+
+
+const MAX_PORT: u32 = 70_000;
+
+
+const FIXTURE_VALUES: [(IocType, &str); 8] = [
+    (IocType::Domain, "Example.COM."),
+    (IocType::Domain, "xn--bcher-kva.example"),
+    (IocType::Ipv6, "::ffff:1.2.3.4"),
+    (IocType::Cidr, "10.1.2.3/16"),
+    (IocType::Url, "HTTP://Example.com:80/a/../b?q=1#frag"),
+    (IocType::Url, "foo://h/a\\b\"c"),
+    (IocType::Md5, "D41D8CD98F00B204E9800998ECF8427E"),
+    (IocType::Sha1, "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"),
+];
+
+
+fn is_idempotent(declared: IocType, raw: &str) -> bool {
+    canonicalise(declared, raw).map_or(true, |first| {
+        canonicalise(first.ioc_type, &first.value).is_ok_and(|second| second.ioc_type == first.ioc_type && second.value == first.value)
+    })
+}
+
+
+#[test]
+fn canonicalise_is_idempotent_on_the_fixture_values() -> Result<(), String> {
+    let cases = FIXTURE_VALUES.iter().filter(|(declared, raw)| canonicalise(*declared, raw).is_err());
+    assert_eq!(cases.count(), 0);
+    assert!(FIXTURE_VALUES.iter().all(|(declared, raw)| is_idempotent(*declared, raw)));
+    Ok(())
+}
 
 
 proptest! {
@@ -44,6 +75,19 @@ proptest! {
                 });
             }
         });
+    }
+
+    #[test]
+    fn canonicalise_is_idempotent_on_generated_urls_and_domains(
+        host in "[A-Za-z0-9.-]{1,40}",
+        path in "[ -~]{0,60}",
+        port in 0u32..MAX_PORT,
+    ) {
+        prop_assert!(is_idempotent(IocType::Domain, &host));
+        let url = format!("http://{host}:{port}/{path}");
+        prop_assert!(is_idempotent(IocType::Url, &url));
+        let other = format!("foo://{host}/{path}");
+        prop_assert!(is_idempotent(IocType::Url, &other));
     }
 
     #[test]
