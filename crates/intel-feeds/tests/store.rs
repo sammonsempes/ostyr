@@ -6,8 +6,8 @@ use intel_feeds::config::{FeedConfig, FeedFormat, Mapping};
 use intel_feeds::limits::{DEFAULT_TTL_SECONDS, MAX_BATCH_BYTES, MAX_ROWS_PER_BATCH};
 use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use intel_feeds::store::{
-    dictionary_ddl, epoch_u32, expiry_epoch, insert_plan, insert_statement, push_line, quote_identifier, read_statement, settings_for, table_ddl,
-    tlp_column_ddl, InsertPlan, StoreError, StoreSettings,
+    checked_column_ddl, dictionary_ddl, epoch_u32, expiry_epoch, insert_plan, insert_statement, push_line, quote_identifier, read_statement,
+    settings_for, table_ddl, tlp_column_ddl, InsertPlan, StoreError, StoreSettings,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -93,7 +93,7 @@ fn first_body(plan: &InsertPlan) -> &str {
 fn table_ddl_golden() -> TestResult {
     let expected = "CREATE TABLE IF NOT EXISTS `intel`.`ioc` (\n    `tenant` String,\n    `ioc_type` LowCardinality(String),\n    `value` String,\n    \
         `feed` String,\n    `feed_version` String,\n    `confidence` UInt8,\n    `tlp` LowCardinality(String),\n    `first_seen` DateTime('UTC'),\n    `last_seen` DateTime('UTC'),\n    \
-        `expires_at` DateTime('UTC'),\n    `version` UInt32\n)\nENGINE = ReplacingMergeTree(`version`)\n\
+        `expires_at` DateTime('UTC'),\n    `version` UInt32,\n    `checked` UInt8 DEFAULT 0\n)\nENGINE = ReplacingMergeTree(`version`)\n\
         ORDER BY (`tenant`, `ioc_type`, `value`)\nTTL `expires_at` DELETE";
     assert_eq!(table_ddl("intel", "ioc")?, expected);
     Ok(())
@@ -102,11 +102,11 @@ fn table_ddl_golden() -> TestResult {
 
 #[test]
 fn dictionary_ddl_golden() -> TestResult {
-    let expected = "CREATE DICTIONARY IF NOT EXISTS `intel`.`ioc_ip` (\n    `prefix` String,\n    `feed` String,\n    `feed_version` String,\n    \
+    let expected = "CREATE OR REPLACE DICTIONARY `intel`.`ioc_ip` (\n    `prefix` String,\n    `feed` String,\n    `feed_version` String,\n    \
         `confidence` UInt8,\n    `first_seen` DateTime('UTC'),\n    `last_seen` DateTime('UTC'),\n    `expires_at` DateTime('UTC')\n)\n\
         PRIMARY KEY `prefix`\n\
         SOURCE(CLICKHOUSE(USER 'ostyr_dict' HOST '127.0.0.1' PORT 9440 SECURE 1 QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
-        FROM `intel`.`ioc` FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `expires_at` > now()'))\n\
+        FROM `intel`.`ioc` FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `checked` = 1 AND `expires_at` > now()'))\n\
         LAYOUT(IP_TRIE)\nLIFETIME(MIN 30 MAX 300)";
     assert_eq!(dictionary_ddl("intel", "ioc", "ioc_ip", "ostyr_dict", PORT)?, expected);
     assert!(!expected.contains("PASSWORD"));
@@ -159,6 +159,7 @@ fn row_carries_source_dates_and_expiry() -> TestResult {
         "last_seen": SEEN.unix_timestamp(),
         "expires_at": LATER.unix_timestamp(),
         "version": SEEN.unix_timestamp(),
+        "checked": 1,
     });
     assert_eq!(row, expected);
     Ok(())
@@ -291,6 +292,17 @@ fn the_tlp_is_written_for_each_value() -> TestResult {
         assert_eq!(row.get("tlp").and_then(Value::as_str), Some(*name));
         Ok(())
     })
+}
+
+
+#[test]
+fn checked_column_golden() -> TestResult {
+    assert_eq!(
+        checked_column_ddl("intel", "ioc")?,
+        "ALTER TABLE `intel`.`ioc` ADD COLUMN IF NOT EXISTS `checked` UInt8 DEFAULT 0"
+    );
+    assert!(checked_column_ddl("a b", "ioc").is_err());
+    Ok(())
 }
 
 

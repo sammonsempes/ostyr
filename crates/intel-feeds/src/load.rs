@@ -1,6 +1,8 @@
 use crate::config::{validate_clickhouse, ClickhouseConfig, ClickhouseError, FeedConfig};
 use crate::model::Ioc;
-use crate::store::{dictionary_ddl, insert_plan, insert_statement, quote_identifier, settings_for, table_ddl, tlp_column_ddl, Batch, StoreError};
+use crate::store::{
+    checked_column_ddl, dictionary_ddl, insert_plan, insert_statement, quote_identifier, settings_for, table_ddl, tlp_column_ddl, Batch, StoreError,
+};
 use core_pg::error::PgError;
 use core_pg::password::{read_limited, read_password};
 use serde::Serialize;
@@ -127,6 +129,7 @@ pub fn schema_statements(config: &ClickhouseConfig) -> Result<Vec<String>, Store
         format!("CREATE DATABASE IF NOT EXISTS {}", quote_identifier(&config.database)?),
         table_ddl(&config.database, &config.table)?,
         tlp_column_ddl(&config.database, &config.table)?,
+        checked_column_ddl(&config.database, &config.table)?,
         dictionary_ddl(
             &config.database,
             &config.table,
