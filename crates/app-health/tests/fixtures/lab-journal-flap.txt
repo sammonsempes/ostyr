@@ -1,0 +1,20 @@
+t334-flap.service: Scheduled restart job, restart counter is at 31.
+Started t334-flap.service - T334 flapping.
+flap-failure-line
+t334-flap.service: Main process exited, code=exited, status=1/FAILURE
+t334-flap.service: Failed with result 'exit-code'.
+t334-flap.service: Scheduled restart job, restart counter is at 32.
+Started t334-flap.service - T334 flapping.
+flap-failure-line
+t334-flap.service: Main process exited, code=exited, status=1/FAILURE
+t334-flap.service: Failed with result 'exit-code'.
+t334-flap.service: Scheduled restart job, restart counter is at 33.
+Started t334-flap.service - T334 flapping.
+flap-failure-line
+t334-flap.service: Main process exited, code=exited, status=1/FAILURE
+t334-flap.service: Failed with result 'exit-code'.
+t334-flap.service: Scheduled restart job, restart counter is at 34.
+Started t334-flap.service - T334 flapping.
+flap-failure-line
+t334-flap.service: Main process exited, code=exited, status=1/FAILURE
+t334-flap.service: Failed with result 'exit-code'.

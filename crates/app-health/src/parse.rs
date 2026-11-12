@@ -9,7 +9,7 @@ use std::io::Read;
 const HEX_ID_CHARS: usize = 8;
 
 
-fn read_bounded(reader: &mut dyn Read, max_bytes: u64) -> Result<String, NtpError> {
+pub fn read_bounded(reader: &mut dyn Read, max_bytes: u64) -> Result<String, NtpError> {
     let mut bytes = Vec::new();
     reader.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max_bytes {

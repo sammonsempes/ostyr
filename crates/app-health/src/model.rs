@@ -1,5 +1,6 @@
 //! Data types.
 
+use crate::limits::DEFAULT_FLAP_RESTARTS;
 use serde::Deserialize;
 
 
@@ -71,4 +72,102 @@ pub struct Measure {
     pub name: &'static str,
     pub unit: &'static str,
     pub value: f64,
+}
+
+
+pub fn default_flap_restarts() -> u32 {
+    DEFAULT_FLAP_RESTARTS
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Expectation {
+    pub unit: String,
+    pub should_run: bool,
+    pub should_be_enabled: bool,
+    #[serde(default = "default_flap_restarts")]
+    pub flap_restarts: u32,
+}
+
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectationsFile {
+    pub units: Vec<Expectation>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadState {
+    Loaded,
+    NotFound,
+    Masked,
+    Error,
+    BadSetting,
+    Stub,
+    Merged,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveState {
+    Active,
+    Inactive,
+    Failed,
+    Activating,
+    Deactivating,
+    Reloading,
+    Maintenance,
+    Refreshing,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitFileState {
+    Enabled,
+    EnabledRuntime,
+    Linked,
+    LinkedRuntime,
+    Alias,
+    Masked,
+    MaskedRuntime,
+    Static,
+    Indirect,
+    Disabled,
+    Generated,
+    Transient,
+    Bad,
+    Empty,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitState {
+    pub load: Option<LoadState>,
+    pub active: Option<ActiveState>,
+    pub sub_state: Option<String>,
+    pub file_state: Option<UnitFileState>,
+    pub restarts: u32,
+    pub exec_main_status: u32,
+    pub unknown_values: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitHealth {
+    Healthy,
+    NotFound,
+    Failed,
+    Flapping { restarts: u32 },
+    Stopped,
+    Disabled,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Excerpt {
+    pub lines: Vec<String>,
+    pub omitted: usize,
+    pub input_truncated: bool,
 }

@@ -1,0 +1,7 @@
+NRestarts=0
+ExecMainStatus=15
+Id=t334-steady.service
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+UnitFileState=enabled

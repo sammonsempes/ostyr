@@ -1,0 +1,10 @@
+units:
+  - unit: t334-flap.service
+    should_run: true
+    should_be_enabled: true
+  - unit: t334-steady.service
+    should_run: true
+    should_be_enabled: true
+  - unit: t334-missing.service
+    should_run: true
+    should_be_enabled: false
