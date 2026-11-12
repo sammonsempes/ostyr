@@ -2,6 +2,7 @@
 
 use crate::model::AssetFinding;
 use crate::priority::priority_of;
+pub use crate::text::is_cve_id;
 use alerts::error::StoreError;
 use alerts::id::alert_id;
 use alerts::model::{Alert, Severity};
@@ -16,21 +17,6 @@ pub const KEV_RULE_ID: &str = "vuln.kev";
 
 
 pub const MAX_TOKEN_CHARS: usize = 100;
-
-
-pub const CVE_PREFIX: &str = "CVE-";
-
-
-pub const CVE_ZERO_YEAR: &str = "0000";
-
-
-pub const CVE_YEAR_DIGITS: usize = 4;
-
-
-pub const CVE_SEQUENCE_MIN_DIGITS: usize = 4;
-
-
-pub const CVE_SEQUENCE_MAX_DIGITS: usize = 19;
 
 
 pub const CRITICAL_FROM_PRIORITY: u32 = 15_000;
@@ -48,19 +34,6 @@ pub fn is_token(text: &str) -> bool {
     text.chars().take(MAX_TOKEN_CHARS + 1).count() <= MAX_TOKEN_CHARS
         && characters.next().is_some_and(|first| first.is_ascii_alphanumeric() || first == '@')
         && characters.all(|next| next.is_ascii_alphanumeric() || TOKEN_PUNCTUATION.contains(next))
-}
-
-
-/// `CVE-` then four year digits, `-`, then 4 to 19 digits; uppercase only.
-pub fn is_cve_id(text: &str) -> bool {
-    let sequence = text.strip_prefix(CVE_PREFIX).and_then(|rest| rest.split_once('-'));
-    sequence.is_some_and(|(year, number)| {
-        year.len() == CVE_YEAR_DIGITS
-            && year != CVE_ZERO_YEAR
-            && year.bytes().all(|byte| byte.is_ascii_digit())
-            && (CVE_SEQUENCE_MIN_DIGITS..=CVE_SEQUENCE_MAX_DIGITS).contains(&number.len())
-            && number.bytes().all(|byte| byte.is_ascii_digit())
-    })
 }
 
 

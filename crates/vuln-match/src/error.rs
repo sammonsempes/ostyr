@@ -64,3 +64,33 @@ pub enum EolError {
     #[error("end-of-life table: {0}")]
     Config(#[from] core_config::error::ConfigError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum KevError {
+    #[error("cannot read the KEV catalogue")]
+    Io(#[from] std::io::Error),
+    #[error("KEV catalogue exceeds the limit of {max} bytes")]
+    TooLarge { max: u64 },
+    #[error("KEV catalogue holds {count} entries, the limit is {max}")]
+    TooMany { count: usize, max: usize },
+    #[error("invalid KEV JSON")]
+    Json(#[from] serde_json::Error),
+}
+
+
+#[derive(Debug, Error)]
+pub enum EpssError {
+    #[error("cannot read the EPSS file")]
+    Io(#[from] std::io::Error),
+    #[error("EPSS file exceeds the limit of {max} bytes")]
+    TooLarge { max: u64 },
+    #[error("EPSS line {line} exceeds the limit of {max} bytes")]
+    LineTooLong { line: usize, max: usize },
+    #[error("EPSS file holds more than {max} rows")]
+    TooMany { max: usize },
+    #[error("EPSS first line is not a model version and score date comment")]
+    BadMeta,
+    #[error("EPSS header is not cve,epss,percentile")]
+    BadHeader,
+}
