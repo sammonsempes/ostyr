@@ -1,0 +1,3 @@
+max_offset_seconds: 0.5
+max_stratum: 5
+require_synchronized: true
