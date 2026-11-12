@@ -4,6 +4,13 @@ use crate::model::{Action, Mode, Policy, Rule, RuleFile};
 use time::OffsetDateTime;
 
 
+/// USBGuard refuses `*:*:*` and `equals { }`, so a device with no interface is matched by `none-of` over all 256 classes.
+pub fn no_interface_rule() -> String {
+    let classes: String = (0..=u8::MAX).map(|class| format!(" {class:02x}:*:*")).collect();
+    format!("block with-interface none-of {{{classes} }}\n")
+}
+
+
 pub fn target(action: Action) -> &'static str {
     match action {
         Action::Allow => "allow",
@@ -28,7 +35,7 @@ pub fn rule_line(rule: &Rule) -> String {
 }
 
 
-/// Live exceptions first, then block rules, then allow rules, in file order; USBGuard applies the first matching line.
+/// With default allow a leading rule blocks a device with no interface, as `evaluate` does. Live exceptions next, then block rules, then allow rules, in file order; USBGuard applies the first matching line.
 pub fn render_usbguard(policy: &Policy, now: OffsetDateTime) -> Result<RuleFile, RenderError> {
     match policy.mode {
         Mode::Audit => Err(RenderError::AuditMode),
@@ -40,11 +47,15 @@ pub fn render_usbguard(policy: &Policy, now: OffsetDateTime) -> Result<RuleFile,
                 .map(|exception| &exception.rule);
             let blocks = policy.rules.iter().filter(|rule| rule.action == Action::Block);
             let allows = policy.rules.iter().filter(|rule| rule.action == Action::Allow);
-            let rules = exceptions
+            let body: String = exceptions
                 .chain(blocks)
                 .chain(allows)
                 .map(|rule| format!("{}\n", rule_line(rule)))
                 .collect();
+            let rules = match policy.default {
+                Action::Allow => format!("{}{body}", no_interface_rule()),
+                Action::Block => body,
+            };
             Ok(RuleFile {
                 rules,
                 implicit_target: policy.default,

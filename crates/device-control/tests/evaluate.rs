@@ -321,12 +321,34 @@ fn a_class_only_allow_admits_a_composite_device_and_is_listed() -> Result<(), Bo
     let risky = parse_policy(&mut text.as_bytes(), "p.yaml")?;
     let composite = device("dead", "beef", None, &["03", "08"]);
     assert_eq!(evaluate(&risky, &composite, now), Decision::Allow { rule: Matched::Rule(0) });
-    assert_eq!(class_only_allows(&risky), vec![0]);
+    assert_eq!(class_only_allows(&risky), vec![Matched::Rule(0)]);
     let paired = format!("{text}  - {{action: block, class: \"08\"}}\n");
-    assert_eq!(class_only_allows(&parse_policy(&mut paired.as_bytes(), "p.yaml")?), Vec::<usize>::new());
+    assert_eq!(class_only_allows(&parse_policy(&mut paired.as_bytes(), "p.yaml")?), Vec::<Matched>::new());
     let vendor_block = format!("{text}  - {{action: block, vendor: \"0781\"}}\n");
-    assert_eq!(class_only_allows(&parse_policy(&mut vendor_block.as_bytes(), "p.yaml")?), vec![0]);
+    assert_eq!(
+        class_only_allows(&parse_policy(&mut vendor_block.as_bytes(), "p.yaml")?),
+        vec![Matched::Rule(0)]
+    );
     let narrowed = "default: block\nrules:\n  - {action: allow, class: \"03\", vendor: \"1d6b\"}\n  - {action: block, class: \"03\"}\n";
-    assert_eq!(class_only_allows(&parse_policy(&mut narrowed.as_bytes(), "p.yaml")?), Vec::<usize>::new());
+    assert_eq!(
+        class_only_allows(&parse_policy(&mut narrowed.as_bytes(), "p.yaml")?),
+        Vec::<Matched>::new()
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_narrow_block_does_not_silence_and_exceptions_are_listed() -> Result<(), Box<dyn Error>> {
+    let narrow = "default: block\nrules:\n  - {action: allow, class: \"03\"}\n  - {action: block, class: \"08\", vendor: \"0781\"}\n";
+    assert_eq!(
+        class_only_allows(&parse_policy(&mut narrow.as_bytes(), "p.yaml")?),
+        vec![Matched::Rule(0)]
+    );
+    let exception = "default: block\nrules:\n  - {action: block, class: \"08\"}\nexceptions:\n  - rule: {action: allow, class: \"03\"}\n    owner: alice\n    expires: 2030-01-01T00:00:00Z\n    reason: x\n  - rule: {action: allow, class: \"03\", vendor: \"1d6b\"}\n    owner: alice\n    expires: 2030-01-01T00:00:00Z\n    reason: x\n";
+    assert_eq!(
+        class_only_allows(&parse_policy(&mut exception.as_bytes(), "p.yaml")?),
+        vec![Matched::Exception(0)]
+    );
     Ok(())
 }

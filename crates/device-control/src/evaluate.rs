@@ -115,22 +115,29 @@ pub fn expired_exceptions(policy: &Policy, now: OffsetDateTime) -> Vec<&Exceptio
 }
 
 
-/// Indexes of the allow rules that match on a class alone, when no block rule covers mass storage (class `08`).
-pub fn class_only_allows(policy: &Policy) -> Vec<usize> {
+/// True for an allow rule that matches on a class alone.
+pub fn is_class_only_allow(rule: &Rule) -> bool {
+    rule.action == Action::Allow && rule.class.is_some() && rule.vendor.is_none() && rule.serial.is_none()
+}
+
+
+/// Class-only allow rules (when no block on class `08` alone exists) and every class-only allow exception, which wins over any block.
+pub fn class_only_allows(policy: &Policy) -> Vec<Matched> {
     let storage_blocked = policy
         .rules
         .iter()
-        .any(|rule| rule.action == Action::Block && rule.class.as_ref().is_some_and(|class| class.0 == STORAGE_CLASS));
-    policy
+        .any(|rule| rule.action == Action::Block && rule.class.as_ref().is_some_and(|class| class.0 == STORAGE_CLASS) && rule.vendor.is_none());
+    let rules = policy
         .rules
         .iter()
         .enumerate()
-        .filter(|(_, rule)| !storage_blocked && rule.action == Action::Allow && rule.class.is_some())
-        .filter(|(_, rule)| {
-            [rule.vendor.is_none(), rule.product.is_none(), rule.serial.is_none()]
-                .into_iter()
-                .all(|none| none)
-        })
-        .map(|(index, _)| index)
-        .collect()
+        .filter(|(_, rule)| !storage_blocked && is_class_only_allow(rule))
+        .map(|(index, _)| Matched::Rule(index));
+    let exceptions = policy
+        .exceptions
+        .iter()
+        .enumerate()
+        .filter(|(_, exception)| is_class_only_allow(&exception.rule))
+        .map(|(index, _)| Matched::Exception(index));
+    rules.chain(exceptions).collect()
 }
