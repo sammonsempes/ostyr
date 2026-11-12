@@ -59,7 +59,7 @@ pub fn link_page_of(query: &ListQuery) -> Result<LinkPage, CaseStoreError> {
 pub fn links_view(found: LinkList) -> AlertLinkListView {
     AlertLinkListView {
         next_cursor: found.next.as_deref().map(encode_link_cursor),
-        items: found.alerts.into_iter().map(|alert_id| AlertLink { alert_id }).collect(),
+        items: found.alerts,
     }
 }
 
@@ -134,7 +134,7 @@ pub async fn links_flow(
         (status = 401, description = "No valid session", body = ErrorBody),
         (status = 403, description = "Permission denied", body = ErrorBody),
         (status = 404, description = "No such case, or code alert_not_found for an alert absent from the tenant", body = ErrorBody),
-        (status = 409, description = "The case holds the maximum number of alerts (alerts_full) or history events", body = ErrorBody),
+        (status = 409, description = "The case holds the maximum number of alerts (alerts_full)", body = ErrorBody),
         (status = 413, description = "Body too large", body = ErrorBody),
         (status = 429, description = "Too many requests", body = ErrorBody)
     )
@@ -166,7 +166,7 @@ pub async fn link_endpoint(
     params(("id" = String, Path, description = "Case id"), ListQuery),
     security(("bearer" = [])),
     responses(
-        (status = 200, description = "One page of linked alert ids, ascending", body = AlertLinkListView),
+        (status = 200, description = "One page of linked alerts with who linked them and when, ascending by alert id", body = AlertLinkListView),
         (status = 400, description = "Malformed cursor or limit", body = ErrorBody),
         (status = 401, description = "No valid session", body = ErrorBody),
         (status = 403, description = "Permission denied", body = ErrorBody),

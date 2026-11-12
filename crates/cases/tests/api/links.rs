@@ -9,7 +9,6 @@ use cases::api::cases_document;
 use cases::api_model::{CasesBackend, LinkRequest, ListQuery};
 use cases::error::CaseStoreError;
 use cases::links_api::{decode_link_cursor, encode_link_cursor, link_failure, link_flow, links_flow, ALERTS_PATH, LINK_BODY_LIMIT};
-use cases::model::CaseEventKind;
 use cases::store::MAX_ALERTS_PER_CASE;
 use core_api::model::{ApiError, ApiIdentity};
 use serde_json::{json, Value};
@@ -88,7 +87,7 @@ fn code_of(reply: &Value) -> Option<&str> {
 
 
 #[tokio::test]
-async fn a_link_is_201_then_200_with_one_row_and_one_history_event() -> TestResult {
+async fn a_link_is_201_then_200_with_one_attributed_row_and_no_history_event() -> TestResult {
     let (fx, token) = seeded().await?;
     let body = json!({"alert_id": ALERT});
     let (created, reply) = post(&fx, "/cases/c1/alerts", Some(&token), &body).await?;
@@ -96,12 +95,13 @@ async fn a_link_is_201_then_200_with_one_row_and_one_history_event() -> TestResu
     let (replayed, again) = post(&fx, "/cases/c1/alerts", Some(&token), &body).await?;
     assert_eq!((replayed, again), (StatusCode::OK, json!({"alert_id": ALERT})));
     assert_eq!(linked(&fx.db, TENANT, "c1")?, 1);
+    let reader = login(&fx.router, ANALYST).await?;
+    let (_status, listed) = read(&fx, "/cases/c1/alerts", &reader).await?;
+    assert_eq!(listed.pointer("/items/0/linked_by"), Some(&json!(ANALYST)));
+    assert_eq!(listed.pointer("/items/0/linked_at"), Some(&json!(NOW)));
     let tenants = lock(&fx.db.tenants);
     let history = &tenants.get(TENANT).and_then(|table| table.get("c1")).ok_or("missing")?.case.history;
-    assert_eq!(history.len(), 1);
-    let event = history.first().ok_or("no event")?;
-    assert_eq!((event.kind, event.actor.as_str(), event.at), (CaseEventKind::AlertLinked, ANALYST, NOW));
-    assert_eq!(event.alert_id.as_deref(), Some(ALERT));
+    assert!(history.is_empty());
     Ok(())
 }
 
@@ -144,6 +144,8 @@ async fn bad_bodies_and_ids_never_reach_the_store() -> TestResult {
     let forged = [
         json!({"alert_id": ALERT, "tenant": OTHER_TENANT}),
         json!({"alert_id": ALERT, "actor": "root"}),
+        json!({"alert_id": ALERT, "linked_by": "root"}),
+        json!({"alert_id": ALERT, "linked_at": 1}),
         json!({}),
         json!({"alert_id": true}),
     ];
@@ -205,7 +207,7 @@ async fn the_cap_is_a_409_alerts_full() -> TestResult {
     {
         let mut tenants = lock(&fx.db.tenants);
         let entry = tenants.get_mut(TENANT).and_then(|table| table.get_mut("c1")).ok_or("missing")?;
-        entry.alerts = (0..MAX_ALERTS_PER_CASE).map(alert_number).collect();
+        entry.alerts = (0..MAX_ALERTS_PER_CASE).map(|index| (alert_number(index), None)).collect();
     }
     let over = post(
         &fx,
@@ -228,7 +230,7 @@ async fn links_page_by_cursor_in_ascending_order() -> TestResult {
     {
         let mut tenants = lock(&fx.db.tenants);
         let entry = tenants.get_mut(TENANT).and_then(|table| table.get_mut("c1")).ok_or("missing")?;
-        entry.alerts = (0..TOTAL).map(alert_number).collect();
+        entry.alerts = (0..TOTAL).map(|index| (alert_number(index), None)).collect();
     }
     let first = read(&fx, &format!("/cases/c1/alerts?limit={PAGE}"), &token).await?;
     let cursor_one = first.1.get("next_cursor").and_then(Value::as_str).ok_or("no cursor")?.to_owned();
@@ -386,5 +388,46 @@ async fn the_flows_refuse_a_missing_session_an_unusable_tenant_and_a_refused_bod
         Some(ApiError::BadRequest)
     );
     assert!(lock(&fx.db.statements).is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_replay_keeps_the_first_attribution_and_an_old_row_lists_as_unknown() -> TestResult {
+    let (fx, token) = seeded().await?;
+    know(&fx.db, TENANT, FOREIGN_ALERT);
+    {
+        let mut tenants = lock(&fx.db.tenants);
+        let entry = tenants.get_mut(TENANT).and_then(|table| table.get_mut("c1")).ok_or("missing")?;
+        entry.alerts.insert(FOREIGN_ALERT.to_owned(), None);
+    }
+    let body = json!({"alert_id": ALERT});
+    assert_eq!(post(&fx, "/cases/c1/alerts", Some(&token), &body).await?.0, StatusCode::CREATED);
+    assert_eq!(post(&fx, "/cases/c1/alerts", Some(&token), &body).await?.0, StatusCode::OK);
+    let (_status, listed) = read(&fx, "/cases/c1/alerts", &token).await?;
+    assert_eq!(listed.pointer("/items/0/linked_by"), Some(&json!(ANALYST)));
+    assert_eq!(listed.pointer("/items/1/alert_id"), Some(&json!(FOREIGN_ALERT)));
+    assert_eq!(listed.pointer("/items/1/linked_by"), Some(&Value::Null));
+    assert_eq!(listed.pointer("/items/1/linked_at"), Some(&Value::Null));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_case_with_the_maximum_links_can_still_be_closed() -> TestResult {
+    let (fx, token) = seeded().await?;
+    {
+        let mut tenants = lock(&fx.db.tenants);
+        let entry = tenants.get_mut(TENANT).and_then(|table| table.get_mut("c1")).ok_or("missing")?;
+        entry.alerts = (0..MAX_ALERTS_PER_CASE).map(|index| (alert_number(index), None)).collect();
+    }
+    let closed = post(
+        &fx,
+        "/cases/c1/actions",
+        Some(&token),
+        &json!({"action": "close", "resolution": "duplicate"}),
+    )
+    .await?;
+    assert_eq!(closed.0, StatusCode::OK, "{}", closed.1);
     Ok(())
 }

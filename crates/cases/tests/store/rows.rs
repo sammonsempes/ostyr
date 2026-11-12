@@ -8,14 +8,14 @@ use cases::store::{add_comment, add_observable, attach_alert, create_case, get_c
 use cases::stored::CasePage;
 use cases::transition::CaseAction;
 use core_pg::scope::tenant_scope;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 
 pub fn good_row() -> Result<Row, Box<dyn std::error::Error>> {
     let entry = Entry {
         case: case("acme", "c1", NOW),
         version: 1,
-        alerts: BTreeSet::new(),
+        alerts: BTreeMap::new(),
     };
     Ok(row_of(&entry)?)
 }
