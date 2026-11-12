@@ -5665,6 +5665,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

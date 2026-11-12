@@ -32,6 +32,7 @@ tracing = "0.1"
 tokio-postgres = "0.7"
 tempfile = "3"
 time = "0.3"
+tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util", "io-util"] }
 
 [lints]
