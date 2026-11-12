@@ -50,6 +50,8 @@ pub enum ProbeError {
     Resolve(#[source] std::io::Error),
     #[error("transport failed")]
     Transport(#[source] std::io::Error),
+    #[error("more than {max} foreign ICMP packets arrived before the reply")]
+    ForeignFlood { max: usize },
     #[error("the {limit:?} check deadline passed")]
     Timeout { limit: Duration },
     #[error("more than {max} redirects")]
