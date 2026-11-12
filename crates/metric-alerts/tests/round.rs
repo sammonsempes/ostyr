@@ -24,6 +24,14 @@ use std::sync::Mutex;
 const NOW: u64 = 1_700_000_000;
 
 
+fn recovered_states() -> RoundStates {
+    RoundStates {
+        recovered: true,
+        ..RoundStates::default()
+    }
+}
+
+
 const STEP: u64 = 60;
 
 
@@ -169,11 +177,11 @@ fn a_threshold_fires_after_the_hold_over_three_rounds() -> TestResult {
     let scope = tenant_scope("acme")?;
     let rules = file(vec![threshold("disk", HOLD)]);
     let settings = MetricsRetention::default();
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let source = fake(Box::new(|query| Ok(vec![(to_of(query)?, BREACH)])));
-    let first = evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&source, query), &mut states);
-    let second = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&source, query), &mut states);
-    let third = evaluate_round(&rules, &scope, NOW + HOLD, &settings, &|query| ask(&source, query), &mut states);
+    let first = evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&source, query), &mut states)?;
+    let second = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&source, query), &mut states)?;
+    let third = evaluate_round(&rules, &scope, NOW + HOLD, &settings, &|query| ask(&source, query), &mut states)?;
     assert!(first.firings.is_empty() && second.firings.is_empty());
     assert_eq!(third.firings.len(), 1);
     let firing = third.firings.first().ok_or("no firing")?;
@@ -193,9 +201,9 @@ fn a_failed_fetch_keeps_the_previous_state_and_the_other_rules_run() -> TestResu
         rule("quiet", "cpu", Condition::Absence { interval: STEP }, 0),
     ]);
     let settings = MetricsRetention::default();
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let good = fake(Box::new(|query| Ok(breaching(to_of(query)?))));
-    evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&good, query), &mut states);
+    evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&good, query), &mut states)?;
     let bad = fake(Box::new(|query| {
         if param(query, "metric") == "disk.used" {
             unavailable()
@@ -203,11 +211,11 @@ fn a_failed_fetch_keeps_the_previous_state_and_the_other_rules_run() -> TestResu
             Ok(breaching(NOW + STEP))
         }
     }));
-    let second = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&bad, query), &mut states);
+    let second = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&bad, query), &mut states)?;
     assert_eq!(second.counts.fetch_failures.get("unavailable"), Some(&1));
     assert_eq!(second.counts.evaluated, 1);
     assert!(states.states.values().any(|state| *state == AlertState::Pending { since: NOW - STEP }));
-    let third = evaluate_round(&rules, &scope, NOW + HOLD, &settings, &|query| ask(&good, query), &mut states);
+    let third = evaluate_round(&rules, &scope, NOW + HOLD, &settings, &|query| ask(&good, query), &mut states)?;
     assert_eq!(third.firings.len(), 1);
     assert!(third.counts.fetch_failures.is_empty());
     Ok(())
@@ -219,11 +227,11 @@ fn a_failed_fetch_never_resolves_a_firing_alert() -> TestResult {
     let scope = tenant_scope("acme")?;
     let rules = file(vec![threshold("disk", 0)]);
     let settings = MetricsRetention::default();
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let good = fake(Box::new(|query| Ok(breaching(to_of(query)?))));
-    let first = evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&good, query), &mut states);
+    let first = evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&good, query), &mut states)?;
     let bad = fake(Box::new(|_| unavailable()));
-    let second = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&bad, query), &mut states);
+    let second = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&bad, query), &mut states)?;
     assert_eq!(first.firings, second.firings);
     assert!(states.states.values().all(|state| matches!(state, AlertState::Firing { .. })));
     Ok(())
@@ -250,7 +258,7 @@ fn a_metric_capacity_is_fetched_with_the_last_value() -> TestResult {
         name: "disk.total".to_owned(),
     })]);
     let source = fake(forecast_script(Some(CAPACITY_VALUE)));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let outcome = evaluate_round(
         &rules,
         &scope,
@@ -258,7 +266,7 @@ fn a_metric_capacity_is_fetched_with_the_last_value() -> TestResult {
         &MetricsRetention::default(),
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     let queries = seen(&source)?;
     assert_eq!(queries.len(), TWO);
     let capacity = queries.get(1).ok_or("no capacity query")?;
@@ -277,7 +285,7 @@ fn a_missing_capacity_holds_nothing() -> TestResult {
         name: "disk.total".to_owned(),
     })]);
     let source = fake(forecast_script(None));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let outcome = evaluate_round(
         &rules,
         &scope,
@@ -285,7 +293,7 @@ fn a_missing_capacity_holds_nothing() -> TestResult {
         &MetricsRetention::default(),
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     assert!(outcome.firings.is_empty());
     assert_eq!((outcome.counts.capacity_missing, outcome.counts.evaluated), (1, 1));
     Ok(())
@@ -305,7 +313,7 @@ fn a_capacity_fetch_failure_counts_and_keeps_the_state() -> TestResult {
             Ok(Vec::new())
         }
     }));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let outcome = evaluate_round(
         &rules,
         &scope,
@@ -313,7 +321,7 @@ fn a_capacity_fetch_failure_counts_and_keeps_the_state() -> TestResult {
         &MetricsRetention::default(),
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     assert_eq!(outcome.counts.fetch_failures.get("unavailable"), Some(&1));
     assert_eq!(outcome.counts.evaluated, 0);
     Ok(())
@@ -327,10 +335,10 @@ fn two_tenants_never_share_states_or_firings() -> TestResult {
     let rules = file(vec![threshold("disk", 0)]);
     let settings = MetricsRetention::default();
     let source = fake(Box::new(tenant_series));
-    let mut states_a = RoundStates::default();
-    let mut states_b = RoundStates::default();
-    let outcome_a = evaluate_round(&rules, &scope_a, NOW, &settings, &|query| ask(&source, query), &mut states_a);
-    let outcome_b = evaluate_round(&rules, &scope_b, NOW, &settings, &|query| ask(&source, query), &mut states_b);
+    let mut states_a = recovered_states();
+    let mut states_b = recovered_states();
+    let outcome_a = evaluate_round(&rules, &scope_a, NOW, &settings, &|query| ask(&source, query), &mut states_a)?;
+    let outcome_b = evaluate_round(&rules, &scope_b, NOW, &settings, &|query| ask(&source, query), &mut states_b)?;
     assert_eq!(outcome_a.firings.len(), 1);
     assert!(outcome_b.firings.is_empty());
     assert!(outcome_a.firings.iter().all(|firing| tenant_of(&firing.tenant) == "a"));
@@ -346,7 +354,7 @@ fn rules_beyond_the_state_cap_are_counted_and_evaluated_from_inactive() -> TestR
     let scope = tenant_scope("acme")?;
     let rules = file((0..=MAX_ROUND_STATES).map(|index| threshold(&format!("r{index}"), 0)).collect());
     let source = fake(Box::new(|query| Ok(breaching(to_of(query)?))));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let outcome = evaluate_round(
         &rules,
         &scope,
@@ -354,7 +362,7 @@ fn rules_beyond_the_state_cap_are_counted_and_evaluated_from_inactive() -> TestR
         &MetricsRetention::default(),
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     assert_eq!(outcome.counts.skipped_by_cap, 1);
     assert_eq!(states.states.len(), MAX_ROUND_STATES);
     assert_eq!(outcome.firings.len(), MAX_ROUND_STATES + 1);
@@ -367,7 +375,7 @@ fn a_rule_that_left_the_file_leaves_the_states() -> TestResult {
     let scope = tenant_scope("acme")?;
     let settings = MetricsRetention::default();
     let source = fake(Box::new(|query| Ok(breaching(to_of(query)?))));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     evaluate_round(
         &file(vec![threshold("one", 0), threshold("two", 0)]),
         &scope,
@@ -375,7 +383,7 @@ fn a_rule_that_left_the_file_leaves_the_states() -> TestResult {
         &settings,
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     assert_eq!(states.states.len(), TWO);
     evaluate_round(
         &file(vec![threshold("one", 0)]),
@@ -384,7 +392,7 @@ fn a_rule_that_left_the_file_leaves_the_states() -> TestResult {
         &settings,
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     assert_eq!(states.states.len(), 1);
     Ok(())
 }
@@ -396,7 +404,7 @@ fn a_rule_that_cannot_compile_is_counted_without_a_fetch() -> TestResult {
     let mut bad = threshold("bad", 0);
     bad.selector = (0..SELECTOR_COUNT).map(|index| (format!("l{index}"), "v".to_owned())).collect();
     let source = fake(Box::new(|_| Ok(Vec::new())));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let outcome = evaluate_round(
         &file(vec![bad]),
         &scope,
@@ -404,7 +412,7 @@ fn a_rule_that_cannot_compile_is_counted_without_a_fetch() -> TestResult {
         &MetricsRetention::default(),
         &|query| ask(&source, query),
         &mut states,
-    );
+    )?;
     assert_eq!(outcome.counts.fetch_failures.get("query"), Some(&1));
     assert!(seen(&source)?.is_empty());
     Ok(())
@@ -456,13 +464,13 @@ async fn storing_a_round_twice_inserts_once() -> TestResult {
     let scope = tenant_scope("acme")?;
     let rules = file(vec![threshold("disk", 0)]);
     let source = fake(Box::new(|query| Ok(breaching(to_of(query)?))));
-    let mut states = RoundStates::default();
+    let mut states = recovered_states();
     let settings = MetricsRetention::default();
-    let outcome = evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&source, query), &mut states);
+    let outcome = evaluate_round(&rules, &scope, NOW, &settings, &|query| ask(&source, query), &mut states)?;
     let store = Store::default();
     let exec = |caller: TenantScope, _sql: &'static str, params: Vec<String>| -> RowFuture<'_> { Box::pin(ready(run(&store, &caller, &params))) };
     let first = store_round(&exec, &scope, &outcome, NOW).await?;
-    let again = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&source, query), &mut states);
+    let again = evaluate_round(&rules, &scope, NOW + STEP, &settings, &|query| ask(&source, query), &mut states)?;
     let rerun = store_round(&exec, &scope, &again, NOW + STEP).await?;
     assert_eq!((first, rerun), (1, 0));
     Ok(())
