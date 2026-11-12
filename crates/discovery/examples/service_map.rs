@@ -10,6 +10,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 
 const USAGE: &str = "usage: service_map <scope.yaml> <flow-datagram-file>... [--known <addresses-file>]";
@@ -57,10 +58,11 @@ fn parse(bytes: &[u8], cache: &mut TemplateCache) -> Result<FlowBatch, Box<dyn E
 
 fn feed(map: &mut ServiceMap, files: &[&String]) -> Result<(), Box<dyn Error>> {
     let mut cache = TemplateCache::default();
+    let now_ms = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     files.iter().try_for_each(|path| {
         let batch = parse(&read_capped(path, MAX_TEMPLATE_DATAGRAM_BYTES)?, &mut cache)?;
         batch.records.iter().for_each(|record| {
-            observe(map, EXAMPLE_TENANT, record, batch.export_unix_ms);
+            observe(map, EXAMPLE_TENANT, record, now_ms);
         });
         Ok::<(), Box<dyn Error>>(())
     })
@@ -70,7 +72,12 @@ fn feed(map: &mut ServiceMap, files: &[&String]) -> Result<(), Box<dyn Error>> {
 fn known_from(path: Option<&String>) -> Result<Vec<IpAddr>, Box<dyn Error>> {
     let text = path.map_or(Ok(String::new()), |name| {
         let mut text = String::new();
-        std::fs::File::open(name)?.take(MAX_KNOWN_BYTES).read_to_string(&mut text)?;
+        std::fs::File::open(name)?.take(MAX_KNOWN_BYTES + 1).read_to_string(&mut text)?;
+        if u64::try_from(text.len())? > MAX_KNOWN_BYTES {
+            Err(format!(
+                "the known-device file is longer than {MAX_KNOWN_BYTES} bytes, refused rather than cut"
+            ))?;
+        }
         Ok::<String, Box<dyn Error>>(text)
     })?;
     Ok(text.split_whitespace().map(str::parse).collect::<Result<Vec<IpAddr>, _>>()?)

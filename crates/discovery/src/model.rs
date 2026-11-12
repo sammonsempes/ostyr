@@ -36,6 +36,9 @@ pub const WELL_KNOWN_PORT_LIMIT: u16 = 1024;
 pub const MAX_SERVICES_PER_CANDIDATE: usize = 32;
 
 
+pub const TCP_SYN: u8 = 0x02;
+
+
 pub const PROTOCOL_SCTP: u8 = 132;
 
 
