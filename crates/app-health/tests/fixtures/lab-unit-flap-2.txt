@@ -1,0 +1,7 @@
+NRestarts=11
+ExecMainStatus=1
+Id=t334-flap.service
+LoadState=loaded
+ActiveState=activating
+SubState=auto-restart
+UnitFileState=enabled
