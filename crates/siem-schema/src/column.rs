@@ -19,6 +19,10 @@ pub enum ColumnType {
     SumFloat64,
     SumUInt64,
     LastFloat64,
+    TimestampNanos,
+    Id16,
+    Id8,
+    TextMap,
 }
 
 
@@ -48,6 +52,10 @@ impl fmt::Display for ColumnType {
             ColumnType::SumFloat64 => "SimpleAggregateFunction(sum, Float64)",
             ColumnType::SumUInt64 => "SimpleAggregateFunction(sum, UInt64)",
             ColumnType::LastFloat64 => "SimpleAggregateFunction(anyLast, Float64)",
+            ColumnType::TimestampNanos => "DateTime64(9, 'UTC')",
+            ColumnType::Id16 => "FixedString(16)",
+            ColumnType::Id8 => "FixedString(8)",
+            ColumnType::TextMap => "Map(String, String)",
         };
         formatter.write_str(sql)
     }
