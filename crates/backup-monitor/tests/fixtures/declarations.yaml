@@ -1,0 +1,12 @@
+tenant: lab
+hostname_from_name: true
+critical:
+  - host: web1
+    max_age_hours: 24
+  - host: db1
+    max_age_hours: 24
+repositories:
+  - repository: restic
+    expected_min_snapshots: 3
+  - repository: 8ff9e8256a6089f1357840c0fc88b498c541e8948af3317219d4117ce4243ab5
+    expected_min_snapshots: 3

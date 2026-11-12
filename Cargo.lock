@@ -529,6 +529,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backup-monitor"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "core-pg",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "base16ct"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
