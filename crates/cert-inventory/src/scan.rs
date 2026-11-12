@@ -85,6 +85,7 @@ pub enum Loaded {
     Bytes(Vec<u8>),
     NotRegular,
     TooLarge,
+    Vanished,
 }
 
 
@@ -205,6 +206,7 @@ pub fn examine(settings: &ScanSettings, state: &mut ScanState, path: &Path, open
             Ok(Loaded::Bytes(bytes)) => absorb(state, path, &bytes),
             Ok(Loaded::NotRegular) => state.skipped.not_regular += 1,
             Ok(Loaded::TooLarge) => state.skipped.too_large += 1,
+            Ok(Loaded::Vanished) => state.skipped.vanished += 1,
             Err(error) => {
                 state.skipped.unreadable += 1;
                 record_error(state, format!("{}: {}", error.kind(), cut_path(path)));

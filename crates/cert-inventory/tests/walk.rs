@@ -16,7 +16,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{create_dir_all, remove_dir_all, remove_file, rename, write, File};
 use std::io::{self, Cursor};
 use std::ops::ControlFlow;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -518,11 +518,48 @@ fn an_unknown_entry_whose_stat_fails_otherwise_is_unreadable() -> TestResult {
         dir: directory_level.dir,
         path: directory.path().join("root"),
     }];
-    assert!(handle_next(&settings, &mut stack, no_hook, &mut state, Some(Ok(unknown("a.pem")))).is_continue());
+    assert!(handle_next(&settings, &mut stack, mark_hook, &mut state, Some(Ok(unknown("a.pem")))).is_continue());
     assert_eq!(state.skipped.unreadable, 1);
     assert_eq!(state.skipped.vanished, 0);
+    assert_eq!(state.examined, 0);
     assert_eq!(state.errors.len(), 1);
+    assert!(!directory.path().join("root/a.pem.hooked").exists());
     Ok(())
+}
+
+
+fn mark_hook(path: &Path) {
+    if let Err(error) = write(path.with_extension("pem.hooked"), "x") {
+        tracing::warn!(%error, "mark failed");
+    }
+}
+
+
+fn remove_listed_file(path: &Path) {
+    if let Err(error) = remove_file(path) {
+        tracing::warn!(%error, "remove failed");
+    }
+}
+
+
+#[test]
+fn a_file_deleted_between_listing_and_open_is_vanished_without_an_error() -> TestResult {
+    let directory = TempDir::new()?;
+    create_dir_all(directory.path().join("root"))?;
+    write(directory.path().join("root/gone.pem"), "x")?;
+    let outcome = scan_with(&settings_for(&directory.path().join("root")), remove_listed_file, BIG_LISTING);
+    assert_eq!(outcome.skipped.vanished, 1);
+    assert_eq!(outcome.skipped.unreadable, 0);
+    assert_eq!(outcome.examined, 1);
+    assert!(outcome.errors.is_empty());
+    Ok(())
+}
+
+
+fn bind_short(path: &Path) -> io::Result<()> {
+    let parent = File::open(path.parent().ok_or_else(|| io::Error::other("no parent"))?)?;
+    let name = path.file_name().ok_or_else(|| io::Error::other("no name"))?;
+    UnixListener::bind(Path::new("/proc/self/fd").join(parent.as_raw_fd().to_string()).join(name)).map(drop)
 }
 
 
@@ -537,7 +574,7 @@ fn try_swap_for_socket(path: &Path) -> io::Result<()> {
     remove_file(path)?;
     match path.file_name() == Some(OsStr::new("dir.pem")) {
         true => create_dir_all(path),
-        false => UnixListener::bind(path).map(drop),
+        false => bind_short(path),
     }
 }
 

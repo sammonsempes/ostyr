@@ -16,7 +16,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::{create_dir_all, write, File};
 use std::io::{self, Cursor, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -172,7 +172,12 @@ fn load_at_refuses_a_symlink_and_reports_a_missing_file() -> TestResult {
         load_at(&level.handle, OsStr::new("swapped.pem"), MAX_FILE_BYTES_CEILING)?,
         Loaded::NotRegular
     );
-    assert!(load_at(&level.handle, OsStr::new("missing.pem"), MAX_FILE_BYTES_CEILING).is_err());
+    assert_eq!(
+        load_at(&level.handle, OsStr::new("missing.pem"), MAX_FILE_BYTES_CEILING)?,
+        Loaded::Vanished
+    );
+    let file_handle = OwnedFd::from(File::open(directory.path().join("real.pem"))?);
+    assert!(load_at(&file_handle, OsStr::new("x.pem"), MAX_FILE_BYTES_CEILING).is_err());
     assert!(matches!(
         load_at(&level.handle, OsStr::new("real.pem"), MAX_FILE_BYTES_CEILING)?,
         Loaded::Bytes(_)

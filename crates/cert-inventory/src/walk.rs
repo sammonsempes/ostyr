@@ -92,6 +92,7 @@ pub fn load_at(parent: &OwnedFd, name: &OsStr, max_bytes: u64) -> io::Result<Loa
     match openat(parent, name, FILE_FLAGS, Mode::empty()) {
         Ok(handle) => load_handle(File::from(handle), max_bytes),
         Err(Errno::LOOP) => Ok(Loaded::NotRegular),
+        Err(Errno::NOENT) => Ok(Loaded::Vanished),
         Err(errno) => Err(io::Error::from(errno)),
     }
 }
