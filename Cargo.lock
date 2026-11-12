@@ -3085,6 +3085,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "k8s-inventory"
+version = "0.0.0"
+dependencies = [
+ "core-pg",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "tracing",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "kbkdf"
 version = "0.1.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
