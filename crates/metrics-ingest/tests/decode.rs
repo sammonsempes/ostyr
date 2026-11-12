@@ -45,10 +45,13 @@ const COUNT_TWO: u64 = 2;
 const SIX: usize = 6;
 
 
+const SEVEN: usize = 7;
+
+
 const COUNT_THREE: u64 = 3;
 
 
-const COUNT_SIXTEEN: u64 = 16;
+const COUNT_TWENTY_SIX: u64 = 26;
 
 
 const CUMULATIVE: i32 = 2;
@@ -276,9 +279,9 @@ fn data_point_count_is_bounded_over_every_type() -> TestResult {
             metric("x", None),
         ],
     );
-    assert_eq!(run(&bytes, &limits).refusal, Some(Refusal::TooManyDataPoints { count: FIVE }));
+    assert_eq!(run(&bytes, &limits).refusal, Some(Refusal::TooManyDataPoints { count: SEVEN }));
     let exact = Limits {
-        max_data_points: FIVE,
+        max_data_points: SEVEN,
         ..Limits::default()
     };
     assert_eq!(run(&bytes, &exact).refusal, None);
@@ -685,7 +688,8 @@ fn resource_labels_are_validated_once_and_merged_per_point() -> TestResult {
 #[test]
 fn bidirectional_and_separator_characters_are_refused() -> TestResult {
     let forbidden = [
-        "\u{202e}", "\u{2028}", "\u{2029}", "\u{200f}", "\u{2066}", "\u{61c}", "\u{200b}", "\u{feff}",
+        "\u{202e}", "\u{2028}", "\u{2029}", "\u{200f}", "\u{2066}", "\u{61c}", "\u{200b}", "\u{feff}", "\u{200c}", "\u{200d}", "\u{2060}",
+        "\u{180e}", "\u{ad}",
     ];
     let metrics: Vec<Metric> = forbidden
         .iter()
@@ -696,12 +700,27 @@ fn bidirectional_and_separator_characters_are_refused() -> TestResult {
         .map(|character| one_gauge("g", vec![text("k", &format!("v{character}"))]));
     let outcome = run(&encode(Vec::new(), metrics.into_iter().chain(labelled).collect()), &Limits::default());
     assert!(outcome.rows.is_empty());
-    assert_eq!(dropped(&outcome, DropReason::ControlCharacter), Some(COUNT_SIXTEEN));
+    assert_eq!(dropped(&outcome, DropReason::ControlCharacter), Some(COUNT_TWENTY_SIX));
     let fine = run(
         &encode(Vec::new(), vec![one_gauge("g", vec![text("k", "caf\u{e9} \u{2013} \u{4e2d}")])]),
         &Limits::default(),
     );
     assert_eq!(fine.rows.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_header_counts_every_point_of_every_type() -> TestResult {
+    let metrics: Vec<Metric> = typed_metrics(&[])
+        .into_iter()
+        .map(|described| Metric {
+            name: "n\u{202e}".to_string(),
+            ..described
+        })
+        .collect();
+    let outcome = run(&encode(Vec::new(), metrics), &Limits::default());
+    assert_eq!(dropped(&outcome, DropReason::ControlCharacter), Some(to_count(SIX)));
     Ok(())
 }
 

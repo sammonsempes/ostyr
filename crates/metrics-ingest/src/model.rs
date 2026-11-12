@@ -151,6 +151,26 @@ pub enum DropReason {
 }
 
 
+/// Wire counts of one request: resources, scopes, metrics counted as at least one point, exemplars, attributes and value elements.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Totals {
+    pub resources: usize,
+    pub scopes: usize,
+    pub points: usize,
+    pub extras: usize,
+    pub attributes: usize,
+}
+
+
+/// The wire field numbers of one metric data kind: the data message, and in its points the attributes and the exemplars or quantiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointKind {
+    pub data_field: u32,
+    pub attributes_field: u32,
+    pub extras_field: u32,
+}
+
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Refusal {
     TooLarge { bytes: usize },
@@ -158,6 +178,13 @@ pub enum Refusal {
     TooManyResources { count: usize },
     TooManyDataPoints { count: usize },
     TooManyAttributes { count: usize },
+}
+
+
+impl From<prost::DecodeError> for Refusal {
+    fn from(error: prost::DecodeError) -> Self {
+        Refusal::Malformed(error)
+    }
 }
 
 
