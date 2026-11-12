@@ -312,10 +312,11 @@ fn sums_that_overflow_are_errors() -> Result<(), Box<dyn Error>> {
     let table = table_of(&[
         line(DECIMAL_MAX, "acct1", day, "s1", ""),
         line(DECIMAL_MIN, "acct2", day, "s3", ""),
-        line(DECIMAL_MAX, "acct1", day, "s2", ""),
+        line(DECIMAL_MAX, "acct3", day, "s1", ""),
     ])?;
-    assert!(evaluate(&table, Scope::Account("acct1".to_string())).is_err());
-    assert_eq!(percents(&evaluate(&table, Scope::Account("acct2".to_string()))?), Vec::<u32>::new());
+    assert!(evaluate(&table, Scope::Service("s1".to_string())).is_err());
+    assert_eq!(percents(&evaluate(&table, Scope::Service("s3".to_string()))?), Vec::<u32>::new());
+    assert!(table_of(&[line(DECIMAL_MAX, "acct1", day, "s1", ""), line(DECIMAL_MAX, "acct1", day, "s2", "")]).is_err());
     Ok(())
 }
 
