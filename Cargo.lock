@@ -5631,6 +5631,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "software-catalog"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "patch-inventory",
+ "serde",
+ "thiserror 2.0.21",
+ "vuln-match",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
