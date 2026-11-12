@@ -16,6 +16,8 @@ pub enum SchemaError {
     },
     #[error("raw metrics retention of {0} days exceeds {1}")]
     RawRetentionTooLong(u32, u32),
+    #[error("trace retention of {0} days is outside 1..={1}")]
+    InvalidTraceDays(u32, u32),
     #[error("no metrics table covers a range of {0} s at a step of {1} s")]
     NoMetricsTable(u64, u64),
     #[error("move after {0} days is not before the retention of {1} days")]

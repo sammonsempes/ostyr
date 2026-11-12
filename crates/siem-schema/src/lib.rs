@@ -7,4 +7,5 @@ pub mod identifier;
 pub mod metrics;
 pub mod migrate;
 pub mod schema;
+pub mod traces;
 pub mod ttl;
