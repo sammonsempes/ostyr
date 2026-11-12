@@ -82,6 +82,7 @@ pub enum Health {
     BlindSpot(BlindReason),
     Failing,
     PredictiveFailure(Vec<String>),
+    Degraded(Vec<String>),
     Healthy,
 }
 

@@ -12,6 +12,15 @@ pub const DISK_FAILING_BIT: u8 = 0b1000;
 pub const PREFAIL_BELOW_THRESHOLD_BIT: u8 = 0b1_0000;
 
 
+pub const OLD_AGE_BIT: u8 = 0b10_0000;
+
+
+pub const ERROR_LOG_BIT: u8 = 0b100_0000;
+
+
+pub const SELF_TEST_LOG_BIT: u8 = 0b1000_0000;
+
+
 pub const SUPPORTED_FORMAT_MAJOR: u64 = 1;
 
 
@@ -20,6 +29,7 @@ pub const WEAR_LIMIT_PERCENT: u64 = 100;
 
 pub fn assess(report: &SmartReport) -> Health {
     let causes = predictive_causes(report);
+    let degraded = degraded_causes(report);
     match (report.exit_status, report.smart_passed, report.unreadable_health.first()) {
         _ if report.format_major != Some(SUPPORTED_FORMAT_MAJOR) => Health::BlindSpot(BlindReason::UnknownFormat),
         (None, _, _) => Health::BlindSpot(BlindReason::ExitStatusMissing),
@@ -29,8 +39,9 @@ pub fn assess(report: &SmartReport) -> Health {
         (_, _, Some(name)) => Health::BlindSpot(BlindReason::UnreadableHealthField(name.clone())),
         _ if report.omitted_attributes > 0 => Health::BlindSpot(BlindReason::TooManyAttributes),
         (_, None, _) => Health::BlindSpot(BlindReason::NoVerdict),
-        _ if causes.is_empty() => Health::Healthy,
-        _ => Health::PredictiveFailure(causes),
+        _ if !causes.is_empty() => Health::PredictiveFailure(causes),
+        _ if degraded.is_empty() => Health::Healthy,
+        _ => Health::Degraded(degraded),
     }
 }
 
@@ -64,4 +75,18 @@ fn predictive_causes(report: &SmartReport) -> Vec<String> {
         .is_some_and(|status| status & PREFAIL_BELOW_THRESHOLD_BIT != 0)
         .then(|| "exit status bit 4".to_string());
     report.attributes.iter().filter_map(attribute_cause).chain(nvme).chain(exit_bit).collect()
+}
+
+
+fn degraded_causes(report: &SmartReport) -> Vec<String> {
+    let status = report.exit_status.unwrap_or(0);
+    [
+        (OLD_AGE_BIT, "old_age"),
+        (ERROR_LOG_BIT, "error_log"),
+        (SELF_TEST_LOG_BIT, "self_test_log"),
+    ]
+    .iter()
+    .filter(|(bit, _)| status & bit != 0)
+    .map(|(_, cause)| (*cause).to_string())
+    .collect()
 }
