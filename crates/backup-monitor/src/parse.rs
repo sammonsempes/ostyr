@@ -1,4 +1,4 @@
-use crate::error::BackupError;
+use crate::error::{json_failure, BackupError};
 use crate::model::{Limits, Listing, SkipReason, Snapshot};
 use crate::text::{is_hidden, valid_id, valid_text};
 use crate::types::SkipCounts;
@@ -17,9 +17,19 @@ pub const BORG_TIME_FORMAT: &[BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second][optional [.[subsecond]]]");
 
 
+/// One buffer of `limit + 1` bytes, reserved once; a size the allocator refuses is `TooLarge`.
+pub fn reserve_exact(limit: u64) -> Result<Vec<u8>, BackupError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(usize::try_from(limit).unwrap_or(usize::MAX).saturating_add(1))
+        .map_err(|_| BackupError::TooLarge { limit })?;
+    Ok(bytes)
+}
+
+
 /// Reads at most `limit` bytes: `take(limit + 1)` then `limit() == 0` means the source held more.
 pub fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, BackupError> {
-    let mut bytes = Vec::new();
+    let mut bytes = reserve_exact(limit)?;
     let mut limited = reader.take(limit.saturating_add(1));
     limited.read_to_end(&mut bytes).map_err(BackupError::Read)?;
     if limited.limit() == 0 {
@@ -36,7 +46,7 @@ pub fn raw_items<'a>(text: &'a str, what: &'static str, max_items: usize) -> Res
     if counted.len() > max_items {
         Err(BackupError::TooManySnapshots { limit: max_items })
     } else {
-        serde_json::from_str(text).map_err(BackupError::Json)
+        serde_json::from_str(text).map_err(json_failure)
     }
 }
 
@@ -49,7 +59,8 @@ pub struct BorgRepository {
 
 #[derive(Deserialize)]
 pub struct BorgRoot<'a> {
-    pub repository: Option<BorgRepository>,
+    #[serde(borrow)]
+    pub repository: Option<&'a RawValue>,
     #[serde(borrow)]
     pub archives: Option<&'a RawValue>,
 }
@@ -203,7 +214,7 @@ pub fn collect(
 /// `restic snapshots --json`; restic prints no repository id, so the caller names the repository (checked before any element is read).
 pub fn parse_restic(reader: impl Read, repository: &str, limits: &Limits) -> Result<Listing, BackupError> {
     let bytes = read_bounded(reader, limits.max_bytes)?;
-    let root: &RawValue = serde_json::from_slice(&bytes).map_err(BackupError::Json)?;
+    let root: &RawValue = serde_json::from_slice(&bytes).map_err(json_failure)?;
     if valid_text(repository, limits.max_text_chars) {
         let items = raw_items(root.get(), "snapshots is not an array", limits.max_snapshots)?;
         collect(repository.to_owned(), &items, |fields| restic_snapshot(fields, limits))
@@ -216,12 +227,18 @@ pub fn parse_restic(reader: impl Read, repository: &str, limits: &Limits) -> Res
 /// `borg list --json`; the repository is `repository.id`.
 pub fn parse_borg(reader: impl Read, hostname_from_name: bool, limits: &Limits) -> Result<Listing, BackupError> {
     let bytes = read_bounded(reader, limits.max_bytes)?;
-    let document: &RawValue = serde_json::from_slice(&bytes).map_err(BackupError::Json)?;
-    let root: BorgRoot = serde_json::from_str(document.get()).map_err(|_| BackupError::Malformed {
-        what: "listing is not an object",
-    })?;
+    let document: &RawValue = serde_json::from_slice(&bytes).map_err(json_failure)?;
+    let root: BorgRoot = Some(document.get())
+        .filter(|text| text.starts_with('{'))
+        .and_then(|text| serde_json::from_str(text).ok())
+        .ok_or(BackupError::Malformed {
+            what: "listing is not an object",
+        })?;
     let repository = root
         .repository
+        .map(RawValue::get)
+        .filter(|text| text.starts_with('{'))
+        .and_then(|text| serde_json::from_str::<BorgRepository>(text).ok())
         .and_then(|found| found.id)
         .filter(|id| valid_id(id))
         .ok_or(BackupError::Malformed { what: "repository id" })?;
