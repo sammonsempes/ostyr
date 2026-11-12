@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::model::{IncidentInput, IncidentUpdateInput};
-use crate::store_model::{Cell, IncidentRef, NewIncident, Param, Statement};
+use crate::store_model::{Cell, IncidentRef, NewIncident, Param, PublishedRead, Statement};
 use crate::types::Row;
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -11,10 +11,16 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "status_page";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "status_0001",
-    sql: include_str!("../migrations/status_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "status_0001",
+        sql: include_str!("../migrations/status_0001.sql"),
+    },
+    Migration {
+        version: "status_0002",
+        sql: include_str!("../migrations/status_0002.sql"),
+    },
+];
 
 
 pub const MAX_PUBLISHED: u32 = 500;
@@ -53,6 +59,12 @@ pub const COL_STARTED_AT: usize = 3;
 pub const COL_RESOLVED_AT: usize = 4;
 
 
+pub const COL_TOTAL: usize = 0;
+
+
+pub const COL_ONGOING: usize = 1;
+
+
 pub const COL_UPDATE_AT: usize = 1;
 
 
@@ -77,14 +89,19 @@ pub const RESOLVE_SQL: &str = "UPDATE status_incidents SET resolved_at = $4, ver
     WHERE tenant = $1 AND id = $2 AND version = $3 AND resolved_at IS NULL RETURNING id, version";
 
 
-/// Params: `$2` limit. No internal note or assignee column is selected.
+/// Params: `$2` limit. Unresolved first, so the limit never cuts an ongoing outage before a resolved one; no internal note or assignee column.
 pub const PUBLISHED_SQL: &str = "SELECT id, service, public_title, started_at, resolved_at FROM status_incidents \
-    WHERE tenant = $1 AND published ORDER BY started_at DESC, id DESC LIMIT $2";
+    WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2";
 
 
 /// Params: `$2` limit, the same one as `PUBLISHED_SQL`. No internal note column is selected.
 pub const UPDATES_SQL: &str = "SELECT incident, at, message FROM status_incident_updates WHERE tenant = $1 AND incident IN \
-    (SELECT id FROM status_incidents WHERE tenant = $1 AND published ORDER BY started_at DESC, id DESC LIMIT $2) ORDER BY incident, at, seq";
+    (SELECT id FROM status_incidents WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2) \
+    ORDER BY incident, at, seq";
+
+
+/// No param. Columns: published incidents of the tenant, the unresolved ones among them.
+pub const COUNTS_SQL: &str = "SELECT count(*), count(*) FILTER (WHERE resolved_at IS NULL) FROM status_incidents WHERE tenant = $1 AND published";
 
 
 pub fn is_refused(character: char, multiline: bool) -> bool {
@@ -267,7 +284,7 @@ pub fn decode_incident(tenant: &str, row: &Row, grouped: &BTreeMap<i64, Vec<Inci
 }
 
 
-/// The newest published incidents of the tenant, at most `limit` (itself at most `MAX_PUBLISHED`), ready for `render`.
+/// The published incidents of the tenant, unresolved first then newest first, at most `limit` (itself at most `MAX_PUBLISHED`), ready for `render`.
 pub async fn published_incidents<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, limit: u32) -> Result<Vec<IncidentInput>, StoreError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
@@ -281,4 +298,26 @@ where
         let grouped = group_updates(&updates)?;
         incidents.iter().map(|row| decode_incident(tenant_of(scope), row, &grouped)).collect()
     }
+}
+
+
+pub fn count_of(rows: &[Row], index: usize, column: &'static str) -> Result<usize, StoreError> {
+    let row = rows.first().ok_or(StoreError::BadRow { column })?;
+    usize::try_from(cell_int(row, index, column)?).map_err(|_negative| StoreError::BadRow { column })
+}
+
+
+/// The rows plus the tenant's exact counts, so the page can state what the limit left out.
+pub async fn read_published<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, limit: u32) -> Result<PublishedRead, StoreError>
+where
+    Executor: FnMut(&TenantScope, Statement) -> Pending,
+    Pending: Future<Output = Result<Vec<Row>, StoreError>>,
+{
+    let incidents = published_incidents(exec, scope, limit).await?;
+    let counts = run(exec, scope, COUNTS_SQL, Vec::new()).await?;
+    Ok(PublishedRead {
+        incidents,
+        total: count_of(&counts, COL_TOTAL, "total")?,
+        ongoing: count_of(&counts, COL_ONGOING, "ongoing")?,
+    })
 }

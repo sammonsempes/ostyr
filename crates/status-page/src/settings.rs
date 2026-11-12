@@ -1,8 +1,8 @@
 use crate::error::StatusPageError;
 use crate::model::{
     PageSettings, MAX_CONNECTIONS_LIMIT, MAX_CONNECTIONS_PER_SOURCE_LIMIT, MAX_CONNECTION_TIMEOUT_SECONDS, MAX_HEADERS_LIMIT, MAX_HEADER_BYTES_LIMIT,
-    MAX_HEADER_READ_TIMEOUT_SECONDS, MAX_PROXY_HEADER_BYTES_LIMIT, MAX_SOURCES_LIMIT, MAX_TRUSTED_PROXIES, MAX_WIDE_MULTIPLIER, MAX_WIDE_PREFIX_BITS,
-    MIN_HEADER_BYTES, MIN_PROXY_HEADER_BYTES, SETTINGS_SECTION,
+    MAX_HEADER_READ_TIMEOUT_SECONDS, MAX_PROXY_HEADER_BYTES_LIMIT, MAX_PUBLISH_INTERVAL_SECONDS, MAX_SOURCES_LIMIT, MAX_TRUSTED_PROXIES,
+    MAX_WIDE_MULTIPLIER, MAX_WIDE_PREFIX_BITS, MIN_HEADER_BYTES, MIN_PROXY_HEADER_BYTES, MIN_PUBLISH_INTERVAL_SECONDS, SETTINGS_SECTION,
 };
 use crate::types::{BoxError, SharedSettings};
 use arc_swap::ArcSwap;
@@ -58,6 +58,10 @@ pub fn invalid_settings(settings: &PageSettings) -> Vec<&'static str> {
         (
             "wide_multiplier",
             settings.wide_multiplier == 0 || settings.wide_multiplier > MAX_WIDE_MULTIPLIER,
+        ),
+        (
+            "publish_interval_seconds",
+            !(MIN_PUBLISH_INTERVAL_SECONDS..=MAX_PUBLISH_INTERVAL_SECONDS).contains(&settings.publish_interval_seconds),
         ),
     ]
     .into_iter()

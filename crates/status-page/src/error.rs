@@ -20,6 +20,10 @@ pub enum StatusPageError {
     OutputTooLarge { format: &'static str, limit: usize },
     #[error("page settings out of range: {0}")]
     InvalidSettings(String),
+    #[error("`pg_file` and the incident reader must be given together")]
+    ReaderMismatch,
+    #[error(transparent)]
+    Pg(#[from] core_pg::error::PgError),
     #[error("snapshot of tenant `{snapshot}` refused by the page of tenant `{page}`")]
     SnapshotTenant { page: String, snapshot: String },
     #[error(transparent)]
@@ -43,6 +47,10 @@ pub enum StoreError {
     LimitOutOfRange { limit: u32, max: u32 },
     #[error("no such incident for this tenant, a stale version, or the update limit is reached")]
     Conflict,
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error("the incident read exceeded its deadline")]
+    ReadTimeout,
     #[error("unexpected value in column `{column}`")]
     BadRow { column: &'static str },
     #[error(transparent)]

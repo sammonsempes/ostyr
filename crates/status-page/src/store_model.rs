@@ -38,3 +38,12 @@ pub struct IncidentRef {
     pub id: i64,
     pub version: i64,
 }
+
+
+/// What one read of the store gives: the incidents within the limit and the exact counts of the tenant's published incidents.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PublishedRead {
+    pub incidents: Vec<crate::model::IncidentInput>,
+    pub total: usize,
+    pub ongoing: usize,
+}
