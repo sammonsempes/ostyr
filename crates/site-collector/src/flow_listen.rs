@@ -50,7 +50,13 @@ pub fn flow_priority(runtime: &Runtime, source: SocketAddr) -> Priority {
 }
 
 
-pub fn store_record(runtime: &mut Runtime, exporter: IpAddr, priority: Priority, record: &FlowRecord, encode: FrameEncoder) {
+pub fn store_record(
+    runtime: &mut Runtime,
+    exporter: IpAddr,
+    priority: Priority,
+    record: &FlowRecord,
+    encode: FrameEncoder,
+) -> Result<(), FlowStoreError> {
     let frame = FlowFrame {
         version: FLOW_FRAME_VERSION,
         exporter,
@@ -58,13 +64,20 @@ pub fn store_record(runtime: &mut Runtime, exporter: IpAddr, priority: Priority,
     };
     let stored = encode(&frame)
         .map_err(FlowStoreError::from)
-        .and_then(|payload| append(&mut runtime.spool, priority, &payload).map_err(FlowStoreError::from));
-    match stored {
-        Ok(_) => bump(&mut runtime.stats.flow_records),
-        Err(error) => {
-            bump(&mut runtime.stats.spool_errors);
-            tracing::error!(%error, %exporter, "cannot store a flow record");
-        }
+        .and_then(|payload| append(&mut runtime.spool, priority, &payload).map(|_| ()).map_err(FlowStoreError::from));
+    match &stored {
+        Ok(()) => bump(&mut runtime.stats.flow_records),
+        Err(_) => bump(&mut runtime.stats.spool_errors),
+    }
+    stored
+}
+
+
+/// One error line for a datagram, whatever the number of records it could not store.
+pub fn log_store_failures(exporter: IpAddr, failures: &[FlowStoreError]) {
+    let count = failures.len();
+    if let Some(first) = failures.first() {
+        tracing::error!(count, %first, %exporter, "cannot store flow records");
     }
 }
 
@@ -90,9 +103,11 @@ pub fn store_flows(runtime: &mut Runtime, source: SocketAddr, payload: &[u8], no
             let over_budget = batch.records.len().saturating_sub(admitted.len());
             runtime.stats.flow_records_over_budget = runtime.stats.flow_records_over_budget.saturating_add(over_budget as u64);
             let priority = flow_priority(runtime, source);
-            admitted
+            let failures = admitted
                 .into_iter()
-                .for_each(|record| store_record(runtime, exporter, priority, record, encode));
+                .filter_map(|record| store_record(runtime, exporter, priority, record, encode).err())
+                .collect::<Vec<_>>();
+            log_store_failures(exporter, &failures);
         }
         Err(flow_drop) => {
             tracing::debug!(%source, %flow_drop, "flow datagram dropped");
