@@ -1,0 +1,22 @@
+[package]
+name = "traces-ingest"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
+metrics-ingest = { version = "0.0.0", path = "../metrics-ingest" }
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
