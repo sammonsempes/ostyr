@@ -3,10 +3,9 @@ use core_config::reload::{current_config, ReloadContext, ReloadEngine};
 use core_config::watch::watch_files;
 use site_collector::forward::{forward_once, write_cursor};
 use site_collector::forward_model::{ForwardLimits, ForwardReport, MAX_AGENT_SPOOL_BYTES};
-use site_collector::listen::{open_runtime, receive_cycle};
+use site_collector::listen::{open_runtime, receive_buffer_len, receive_cycle};
 use site_collector::listen_model::{ListenerSettings, Runtime, SharedSocket, MAX_CYCLES};
 use site_collector::listen_settings::open_listener_engine;
-use site_collector::model::MAX_MESSAGE_BYTES;
 use site_collector::spool::{open_spool, read_from, spool_stats, sync_range};
 use site_collector::spool_model::SpoolConfig;
 use std::error::Error;
@@ -66,7 +65,7 @@ fn receive_and_forward(
 ) {
     let started = Instant::now();
     let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut buffer = vec![0u8; MAX_MESSAGE_BYTES + 1];
+    let mut buffer = vec![0u8; receive_buffer_len(runtime.applied.kind)];
     let mut recv = |target: &mut [u8]| shared.bound.load().socket.recv_from(target);
     let mut last_forward = 0;
     (0..MAX_CYCLES).take_while(|_| !shutdown.load(Ordering::Relaxed)).for_each(|_| {

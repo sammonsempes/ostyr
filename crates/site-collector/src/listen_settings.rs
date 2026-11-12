@@ -1,8 +1,10 @@
 use crate::admission::validate_config;
 use crate::error::ListenError;
+use crate::flow::validate_flow_limits;
 use crate::forward_model::MAX_FORWARD_BATCH_RECORDS;
 use crate::listen_model::{Bound, ListenerSettings, SharedSocket, MAX_TENANT_BYTES, READ_TIMEOUT_MS, SETTINGS_SECTION};
 use crate::model::{BucketLimits, CollectorConfig};
+use crate::types::SourceKeySet;
 use arc_swap::ArcSwap;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -26,6 +28,11 @@ pub fn source_key(address: IpAddr) -> IpAddr {
 }
 
 
+pub fn declared_keys(settings: &ListenerSettings) -> SourceKeySet {
+    settings.sources.iter().copied().map(source_key).collect()
+}
+
+
 pub fn collector_config_of(settings: &ListenerSettings) -> CollectorConfig {
     CollectorConfig {
         global: BucketLimits {
@@ -34,7 +41,7 @@ pub fn collector_config_of(settings: &ListenerSettings) -> CollectorConfig {
         },
         source_share_percent: settings.source_share_percent,
         unknown_share_percent: settings.unknown_share_percent,
-        sources: settings.sources.iter().copied().map(source_key).collect(),
+        sources: declared_keys(settings),
         drop_unknown: settings.drop_unknown,
         max_sources: settings.max_sources,
     }
@@ -57,6 +64,7 @@ pub fn validate_settings(settings: &ListenerSettings) -> Result<SocketAddr, List
         .then_some(())
         .ok_or(ListenError::BadForwardBatch)?;
     validate_config(&collector_config_of(settings))?;
+    validate_flow_limits(&settings.flow)?;
     parse_listen(&settings.listen)
 }
 
@@ -72,6 +80,8 @@ pub fn bind_socket(address: SocketAddr) -> Result<UdpSocket, ListenError> {
 pub fn settings_state(settings: &ListenerSettings) -> ConfigState {
     [
         ("listen", format!("{:?}", settings.listen)),
+        ("kind", format!("{:?}", settings.kind)),
+        ("flow", format!("{:?}", settings.flow)),
         ("tenant", format!("{:?}", settings.tenant)),
         ("rate_per_second", settings.rate_per_second.to_string()),
         ("burst", settings.burst.to_string()),
@@ -108,6 +118,7 @@ pub fn address_changed(shared: &SharedSocket, address: SocketAddr) -> bool {
 /// Validates the candidate and proves its new address can be bound, then releases it at once: no socket is held outside the applied state.
 pub fn check_bindable(shared: &SharedSocket, candidate: &ListenerSettings) -> Result<(), ListenError> {
     let address = validate_settings(candidate)?;
+    (candidate.kind == shared.kind).then_some(()).ok_or(ListenError::KindChanged)?;
     address_changed(shared, address)
         .then(|| bind_socket(address))
         .transpose()
@@ -160,6 +171,7 @@ pub fn open_listener_engine(
             socket: bind_socket(address)?,
         }),
         rebind_failures: AtomicU64::new(0),
+        kind: first.kind,
     });
     let subscribed = ReloadEngine {
         subscribers: vec![listener_subscriber(Arc::clone(&shared))],

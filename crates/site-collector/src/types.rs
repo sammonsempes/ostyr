@@ -1,8 +1,9 @@
 use crate::error::SpoolError;
+use crate::flow_model::FlowFrame;
 use crate::model::SourceState;
 use crate::spool_model::{Segment, Spool};
 use crate::template_model::{ExporterState, Template, TemplateKey};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -54,3 +55,15 @@ pub type TemplateMap = BTreeMap<TemplateKey, Arc<Template>>;
 
 
 pub type ExporterMap = BTreeMap<IpAddr, ExporterState>;
+
+
+pub type SourceKeySet = BTreeSet<IpAddr>;
+
+
+pub type FrameEncoder = fn(&FlowFrame) -> Result<Vec<u8>, serde_json::Error>;
+
+
+pub type KeyCountMap = BTreeMap<IpAddr, usize>;
+
+
+pub type LruIndex = BTreeSet<(u64, IpAddr)>;

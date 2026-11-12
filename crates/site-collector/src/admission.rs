@@ -120,8 +120,8 @@ fn check_known(known: bool, drop_unknown: bool) -> Result<(), DropReason> {
 }
 
 
-fn check_size(len: usize) -> Result<(), DropReason> {
-    (len <= MAX_MESSAGE_BYTES).then_some(()).ok_or(DropReason::TooLarge)
+fn check_size(len: usize, max_len: usize) -> Result<(), DropReason> {
+    (len <= max_len).then_some(()).ok_or(DropReason::TooLarge)
 }
 
 
@@ -166,6 +166,12 @@ fn count_drop(counters: &mut SourceCounters, verdict: &Result<(), DropReason>) {
 
 
 pub fn admit(collector: &mut Collector, source: SourceId, len: usize, now: Millis) -> Result<(), DropReason> {
+    admit_up_to(collector, source, len, MAX_MESSAGE_BYTES, now)
+}
+
+
+/// The whole admission chain with the datagram size cap of the listener kind.
+pub fn admit_up_to(collector: &mut Collector, source: SourceId, len: usize, max_len: usize, now: Millis) -> Result<(), DropReason> {
     let known = collector.config.sources.contains(&source);
     let table_full = !known && !collector.sources.contains_key(&source) && collector.sources.len() >= collector.config.max_sources;
     if table_full {
@@ -176,12 +182,24 @@ pub fn admit(collector: &mut Collector, source: SourceId, len: usize, now: Milli
         state.last_seen_ms = now;
         state.counters.unknown_seen = state.counters.unknown_seen.saturating_add(u64::from(!known));
         let verdict = check_known(known, collector.config.drop_unknown)
-            .and_then(|()| check_size(len))
+            .and_then(|()| check_size(len, max_len))
             .and_then(|()| check_bucket(&mut state.bucket, &collector.source_limits, now, DropReason::SourceRate))
             .and_then(|()| check_unknown_rate(known, &mut collector.unknown, &collector.unknown_limits, now))
             .and_then(|()| check_bucket(&mut collector.global, &collector.global_limits, now, DropReason::GlobalRate));
         count_drop(&mut state.counters, &verdict);
         verdict
+    }
+}
+
+
+/// The charge of one more flow record of a datagram already admitted: a token from the source, undeclared-combined (undeclared only) and global buckets.
+pub fn admit_extra_record(collector: &mut Collector, source: SourceId, now: Millis) -> Result<(), DropReason> {
+    let known = collector.config.sources.contains(&source);
+    match collector.sources.get_mut(&source) {
+        None => Err(DropReason::SourceTableFull),
+        Some(state) => check_bucket(&mut state.bucket, &collector.source_limits, now, DropReason::SourceRate)
+            .and_then(|()| check_unknown_rate(known, &mut collector.unknown, &collector.unknown_limits, now))
+            .and_then(|()| check_bucket(&mut collector.global, &collector.global_limits, now, DropReason::GlobalRate)),
     }
 }
 
