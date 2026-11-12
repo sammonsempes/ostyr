@@ -1,0 +1,1 @@
+{"json_format_version":[1,0],"smartctl":{"exit_status":8},"device":{"name":"/dev/sdc","protocol":"ATA"},"smart_status":{"passed":false},"ata_smart_attributes":{"table":[{"id":5,"name":"Reallocated_Sector_Ct","when_failed":"now","flags":{"prefailure":true}}]}}
