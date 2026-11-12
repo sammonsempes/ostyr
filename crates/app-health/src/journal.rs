@@ -1,7 +1,7 @@
 //! Bounded excerpt of `journalctl -o cat` output for an alert.
 
 use crate::error::NtpError;
-use crate::limits::MAX_JOURNAL_BYTES;
+use crate::limits::{MAX_EXCERPT_LINES, MAX_JOURNAL_BYTES, MIN_LINE_BYTES};
 use crate::model::Excerpt;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
@@ -25,29 +25,41 @@ pub fn is_unsafe_char(character: char) -> bool {
 }
 
 
-/// One log line: cut at `max_bytes` on a character boundary with a visible marker, unsafe characters written as `\u{..}`.
+fn escaped_len(character: char) -> usize {
+    if is_unsafe_char(character) {
+        character.escape_unicode().count()
+    } else {
+        character.len_utf8()
+    }
+}
+
+
+fn escape_char(character: char) -> String {
+    if is_unsafe_char(character) {
+        character.escape_unicode().collect()
+    } else {
+        character.to_string()
+    }
+}
+
+
+/// One log line: escaped first, then the escaped text plus the marker is at most `max_bytes`; the marker counts the omitted raw bytes.
 pub fn clean_line(raw: &[u8], max_bytes: usize) -> String {
     let text = String::from_utf8_lossy(raw);
-    let kept: String = text
+    let fits = text.chars().map(escaped_len).sum::<usize>() <= max_bytes;
+    let marker_len = format!("… [{} bytes omitted]", text.len()).len();
+    let budget = if fits { max_bytes } else { max_bytes.saturating_sub(marker_len) };
+    let kept: Vec<(usize, String)> = text
         .chars()
         .scan(0, |used, character| {
-            *used += character.len_utf8();
+            *used += escaped_len(character);
             Some((*used, character))
         })
-        .take_while(|(used, _)| *used <= max_bytes)
-        .map(|(_, character)| character)
+        .take_while(|(used, _)| *used <= budget)
+        .map(|(_, character)| (character.len_utf8(), escape_char(character)))
         .collect();
-    let omitted = text.len() - kept.len();
-    let escaped: String = kept
-        .chars()
-        .flat_map(|character| {
-            if is_unsafe_char(character) {
-                character.escape_unicode().collect::<Vec<char>>()
-            } else {
-                vec![character]
-            }
-        })
-        .collect();
+    let omitted = text.len() - kept.iter().map(|(source_len, _)| source_len).sum::<usize>();
+    let escaped: String = kept.into_iter().map(|(_, piece)| piece).collect();
     if omitted > 0 {
         format!("{escaped}… [{omitted} bytes omitted]")
     } else {
@@ -56,7 +68,7 @@ pub fn clean_line(raw: &[u8], max_bytes: usize) -> String {
 }
 
 
-/// The last `max_lines` lines, each through `clean_line`, and how many earlier lines were dropped; at most `MAX_JOURNAL_BYTES` are read.
+/// The last `max_lines` (at most `MAX_EXCERPT_LINES`) lines, each through `clean_line`, and how many earlier lines were dropped; at most `MAX_JOURNAL_BYTES` are read.
 pub fn log_excerpt<Input: Read>(mut reader: Input, max_lines: usize, max_bytes: usize) -> Result<Excerpt, NtpError> {
     excerpt_from(&mut reader, max_lines, max_bytes)
 }
@@ -64,6 +76,17 @@ pub fn log_excerpt<Input: Read>(mut reader: Input, max_lines: usize, max_bytes: 
 
 /// Same as `log_excerpt` over a trait object, so the body is one instantiation for coverage.
 pub fn excerpt_from(reader: &mut dyn Read, max_lines: usize, max_bytes: usize) -> Result<Excerpt, NtpError> {
+    if max_lines > MAX_EXCERPT_LINES {
+        Err(NtpError::OutOfRange { field: "max_lines" })
+    } else if max_bytes < MIN_LINE_BYTES {
+        Err(NtpError::OutOfRange { field: "max_bytes" })
+    } else {
+        read_excerpt(reader, max_lines, max_bytes)
+    }
+}
+
+
+fn read_excerpt(reader: &mut dyn Read, max_lines: usize, max_bytes: usize) -> Result<Excerpt, NtpError> {
     let mut buffered = BufReader::new(reader.take(MAX_JOURNAL_BYTES + 1));
     let mut window: VecDeque<String> = VecDeque::new();
     let mut total = 0;

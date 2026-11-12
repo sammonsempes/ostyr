@@ -174,6 +174,11 @@ fn name_grammar_boundaries() -> TestResult {
     assert!(is_unit_name("x.socket"));
     assert!(is_unit_name(&format!("{}.service", "a".repeat(MAX_NAME - ".service".len()))));
     assert!(!is_unit_name(&format!("{}.service", "a".repeat(MAX_NAME))));
+    assert!(!is_unit_name("..service"));
+    assert!(!is_unit_name(".x.service"));
+    assert!(!is_unit_name("-x.service"));
+    assert!(!is_unit_name("_x.service"));
+    assert!(is_unit_name("0.service"));
     assert!(is_sub_state("start-pre"));
     assert!(!is_sub_state(""));
     assert!(!is_sub_state("a b"));
@@ -369,5 +374,18 @@ fn precedence_at_each_boundary() -> TestResult {
     assert_eq!(assess_unit(&want, Some(&before), &restarting), UnitHealth::Flapping { restarts: FLAP });
     let stopped_disabled = state(LoadState::Loaded, ActiveState::Inactive, UnitFileState::Disabled, 0);
     assert_eq!(assess_unit(&want, Some(&before), &stopped_disabled), UnitHealth::Stopped);
+    Ok(())
+}
+
+
+#[test]
+fn a_trailing_carriage_return_is_malformed() -> TestResult {
+    let crlf = healthy_show().replace('\n', "\r\n");
+    assert!(matches!(
+        parse_unit_show(crlf.as_bytes(), MAX_SHOW, UNIT),
+        Err(NtpError::Malformed { .. })
+    ));
+    let one = healthy_show().replacen("LoadState=loaded", "LoadState=loaded\r", 1);
+    assert!(matches!(parse_unit_show(one.as_bytes(), MAX_SHOW, UNIT), Err(NtpError::Malformed { .. })));
     Ok(())
 }
