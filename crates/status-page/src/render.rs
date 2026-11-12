@@ -113,6 +113,20 @@ pub fn render(
     now: i64,
     limits: &Limits,
 ) -> Result<RenderedPage, StatusPageError> {
+    render_omitting(config, states, incidents, figures, now, limits, 0)
+}
+
+
+/// As `render`, and the page states that `omitted` older incidents are not shown.
+pub fn render_omitting(
+    config: &PageConfig,
+    states: &[ServiceState],
+    incidents: &[IncidentInput],
+    figures: &[FigureInput],
+    now: i64,
+    limits: &Limits,
+    omitted: usize,
+) -> Result<RenderedPage, StatusPageError> {
     validate_config(config, limits)?;
     check_inputs(config, states, incidents, figures, limits)?;
     let declared: BTreeSet<&str> = config.components.iter().map(|component| component.service.as_str()).collect();
@@ -155,6 +169,7 @@ pub fn render(
         maintenance: components.iter().any(|component| component.state == ComponentState::Maintenance),
         components,
         incidents: public_incidents,
+        omitted_incidents: omitted,
     };
     let json = serde_json::to_string(&page)?;
     check_output("json", &json, limits.max_json_bytes)?;

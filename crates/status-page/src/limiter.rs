@@ -4,7 +4,7 @@ use arc_swap::ArcSwapOption;
 use lru::LruCache;
 use std::net::{IpAddr, Ipv6Addr};
 use std::num::NonZeroUsize;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,6 +52,7 @@ pub fn new_state(tenant: String, settings: SharedSettings, now: Box<NowFn>) -> P
         sources: Arc::default(),
         wide_sources: Arc::default(),
         proxy_malformed: AtomicUsize::new(0),
+        publish_skipped: AtomicU64::new(0),
     }
 }
 

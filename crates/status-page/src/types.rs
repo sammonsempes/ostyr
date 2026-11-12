@@ -1,5 +1,7 @@
-use crate::model::{PageSettings, PageState};
+use crate::error::StoreError;
+use crate::model::{IncidentInput, PageSettings, PageState};
 use arc_swap::ArcSwap;
+use core_pg::scope::TenantScope;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::future::Future;
@@ -32,6 +34,13 @@ pub type IncomingConnections = Pin<Box<dyn Stream<Item = io::Result<TcpStream>> 
 
 
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+
+pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<IncidentInput>, StoreError>> + Send>>;
+
+
+/// Reads the published incidents of the tenant scope it is given; production connects to PostgreSQL, tests answer from memory.
+pub type IncidentReadFn = Box<dyn Fn(TenantScope) -> ReadFuture + Send + Sync>;
 
 
 pub type Row = Vec<crate::store_model::Cell>;
