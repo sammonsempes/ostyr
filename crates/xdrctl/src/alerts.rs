@@ -27,8 +27,9 @@ pub const STATUS_NOT_FOUND: u16 = 404;
 pub const STATUS_TOO_MANY: u16 = 429;
 
 
-pub const BIDI_CONTROLS: &[char] = &[
-    '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+pub const HIDDEN_CHARS: &[char] = &[
+    '\u{061c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}',
+    '\u{2067}', '\u{2068}', '\u{2069}', '\u{feff}',
 ];
 
 
@@ -36,8 +37,22 @@ pub const BIDI_CONTROLS: &[char] = &[
 pub fn printable(text: &str) -> String {
     text.chars()
         .map(|character| {
-            if character.is_control() || BIDI_CONTROLS.contains(&character) {
+            if character.is_control() || HIDDEN_CHARS.contains(&character) {
                 character.escape_unicode().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
+
+/// Rewrites every hidden character of serialised JSON as a `\uXXXX` escape (they only occur inside strings).
+pub fn escape_json(json: &str) -> String {
+    json.chars()
+        .map(|character| {
+            if HIDDEN_CHARS.contains(&character) {
+                format!("\\u{:04x}", u32::from(character))
             } else {
                 character.to_string()
             }
