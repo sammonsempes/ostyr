@@ -16,3 +16,5 @@ mod support;
 mod types;
 #[path = "stream/windows.rs"]
 mod windows;
+#[path = "stream/winsec.rs"]
+mod winsec;
