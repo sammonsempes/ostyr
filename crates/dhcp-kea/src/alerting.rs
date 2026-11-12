@@ -35,6 +35,9 @@ pub const MAX_LOOKUP_MACS: usize = MAX_UNKNOWN_PER_RUN * LOOKUP_FACTOR;
 pub const MAX_LOOKUP_CHUNKS: usize = 10;
 
 
+pub const ROTATION_SECONDS: u64 = 10;
+
+
 pub const SECONDS_PER_DAY: u64 = 86_400;
 
 
@@ -191,21 +194,56 @@ pub async fn alerted_macs(exec: Executor<'_, '_>, scope: &TenantScope, candidate
 }
 
 
-/// The MACs of the batch already holding a stored alert: chunked lookups of `MAX_LOOKUP_MACS` until `MAX_UNKNOWN_PER_RUN` unalerted MACs are seen.
-pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted], known_macs: &BTreeSet<String>) -> BTreeSet<String> {
+/// The rotation number of a Unix time in seconds: it advances every `ROTATION_SECONDS`, so no state is stored.
+pub fn rotation_of(now_seconds: u64) -> u64 {
+    now_seconds / ROTATION_SECONDS
+}
+
+
+/// The MACs of the batch to leave out of this run: those holding a stored alert in the scanned chunks, and every MAC of the chunks not scanned (their turn is a later rotation); at most `MAX_LOOKUP_CHUNKS` chunk lookups from the window `rotation` selects, until enough fresh MACs are seen.
+pub async fn alerted_in_batch(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    leases: &[Converted],
+    known_macs: &BTreeSet<String>,
+    rotation: u64,
+) -> BTreeSet<String> {
     let candidates = candidate_macs(leases, known_macs);
-    let mut chunks = candidates.chunks(MAX_LOOKUP_MACS).take(MAX_LOOKUP_CHUNKS);
+    let chunks: Vec<&[String]> = candidates.chunks(MAX_LOOKUP_MACS).collect();
+    let chunk_count = chunks.len();
+    let window_count = chunk_count.div_ceil(MAX_LOOKUP_CHUNKS).max(1);
+    let start = usize::try_from(rotation % window_count as u64).unwrap_or(0) * MAX_LOOKUP_CHUNKS;
+    let mut order = (0..chunk_count.min(MAX_LOOKUP_CHUNKS)).filter_map(|offset| {
+        let index = (start + offset) % chunk_count;
+        chunks.get(index).map(|chunk| (index, *chunk))
+    });
+    let mut visited: BTreeSet<usize> = BTreeSet::new();
     let mut alerted: BTreeSet<String> = BTreeSet::new();
     let mut fresh = 0;
-    while fresh < MAX_UNKNOWN_PER_RUN {
-        match chunks.next() {
-            Some(chunk) => {
+    let mut scanned = 0;
+    let mut done = false;
+    while !done && fresh < MAX_UNKNOWN_PER_RUN {
+        match order.next() {
+            Some((index, chunk)) => {
+                visited.insert(index);
                 let found = alerted_macs(exec, scope, chunk).await;
                 fresh += chunk.len() - found.len();
+                scanned += 1;
                 alerted.extend(found);
             }
-            None => fresh = MAX_UNKNOWN_PER_RUN,
+            None => done = true,
         }
+    }
+    let deferred = chunks
+        .iter()
+        .enumerate()
+        .filter(|(index, _chunk)| !visited.contains(index))
+        .flat_map(|(_index, chunk)| chunk.iter().cloned());
+    alerted.extend(deferred);
+    if fresh < MAX_UNKNOWN_PER_RUN && scanned < chunk_count {
+        let first_chunk = start % chunk_count;
+        let total = candidates.len();
+        tracing::warn!(total, scanned, first_chunk, "dhcp lookup cap reached");
     }
     alerted
 }

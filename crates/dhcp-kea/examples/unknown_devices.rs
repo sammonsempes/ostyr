@@ -6,7 +6,7 @@ use core_pg::connect::connect;
 use core_pg::migrate::migrate;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::parse_settings;
-use dhcp_kea::alerting::{alerted_in_batch, store_unknown_device_alerts, unknown_device_alerts};
+use dhcp_kea::alerting::{alerted_in_batch, rotation_of, store_unknown_device_alerts, unknown_device_alerts, MICROS_PER_SECOND};
 use dhcp_kea::header::parse_header;
 use dhcp_kea::row::convert_row;
 use std::collections::BTreeSet;
@@ -36,10 +36,11 @@ async fn scenario(settings_file: &Path, leases_file: &Path, known_file: &Path, t
     let known: BTreeSet<String> = std::fs::read_to_string(known_file)?.lines().map(str::to_owned).collect();
     let scope = tenant_scope(tenant)?;
     let exec = pg_executor(&client, DEADLINE);
-    let alerted = alerted_in_batch(&exec, &scope, &leases, &known).await;
+    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let rotation = rotation_of(now / MICROS_PER_SECOND);
+    let alerted = alerted_in_batch(&exec, &scope, &leases, &known, rotation).await;
     let skipped = alerted.len();
     let known_or_alerted: BTreeSet<String> = known.union(&alerted).cloned().collect();
-    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
     let (alerts, rejected) = unknown_device_alerts(&scope, &leases, &known_or_alerted, now);
     let inserted = store_unknown_device_alerts(&exec, &scope, &alerts).await?;
     writeln!(

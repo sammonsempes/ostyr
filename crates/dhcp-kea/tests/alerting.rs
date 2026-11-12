@@ -11,16 +11,17 @@ use core_export::ecs::{EndpointFields, HostFields};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use dhcp_kea::alerting::{
-    alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, peer_fields, store_unknown_device_alerts,
-    unknown_device_alerts, ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_CHUNKS, MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, SECONDS_PER_DAY,
-    UNKNOWN_RULE_ID,
+    alerted_in_batch, alerted_macs, candidate_macs, day_of, flood_alert, mac_of, micros_of, peer_fields, rotation_of, store_unknown_device_alerts,
+    unknown_device_alerts, ALERTED_SQL, FLOOD_RULE_ID, MAX_LOOKUP_CHUNKS, MAX_LOOKUP_MACS, MAX_UNKNOWN_PER_RUN, MICROS_PER_SECOND, ROTATION_SECONDS,
+    SECONDS_PER_DAY, UNKNOWN_RULE_ID,
 };
 use dhcp_kea::header::parse_header;
 use dhcp_kea::row::{convert_row, Converted};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::future::ready;
-use std::sync::Mutex;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Arc, LazyLock, Mutex};
 use types::TestResult;
 
 
@@ -360,7 +361,7 @@ fn one_omitted_mac_still_raises_the_flood_alert() -> TestResult {
 
 
 async fn run_once(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted]) -> Result<Vec<Alert>, Box<dyn std::error::Error>> {
-    let skip = alerted_in_batch(exec, scope, leases, &BTreeSet::new()).await;
+    let skip = alerted_in_batch(exec, scope, leases, &BTreeSet::new(), 0).await;
     let (alerts, _rejected) = unknown_device_alerts(scope, leases, &skip, NOW_MICROS);
     store_unknown_device_alerts(exec, scope, &alerts).await?;
     Ok(alerts)
@@ -414,7 +415,7 @@ async fn a_lookup_failure_falls_back_to_batch_order() -> TestResult {
     };
     let exec = executor(&store);
     let leases = many_leases(FLOOD_MACS)?;
-    assert!(alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await.is_empty());
+    assert!(alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new(), 0).await.is_empty());
     let first = run_once(&exec, &scope, &leases).await?;
     let second = run_once(&exec, &scope, &leases).await?;
     assert_eq!((first.len(), second.len()), (MAX_UNKNOWN_PER_RUN + 1, MAX_UNKNOWN_PER_RUN + 1));
@@ -567,7 +568,7 @@ async fn the_chunk_count_per_run_is_capped() -> TestResult {
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
     let before = *store.lookups.lock().map_err(|_poisoned| "poisoned")?;
-    alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new(), 0).await;
     let after = *store.lookups.lock().map_err(|_poisoned| "poisoned")?;
     assert_eq!(after - before, MAX_LOOKUP_CHUNKS);
     Ok(())
@@ -588,8 +589,8 @@ async fn a_lookup_failure_mid_chunk_keeps_the_earlier_answers_and_stops() -> Tes
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    let alerted = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
-    assert_eq!((alerted.len(), lookups_so_far(&store)), (MAX_LOOKUP_MACS, 1));
+    let alerted = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new(), 0).await;
+    assert_eq!((alerted.len(), lookups_so_far(&store)), (MAX_LOOKUP_MACS * TWO_CHUNKS, 1));
     let known_or_alerted = alerted;
     let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &known_or_alerted, NOW_MICROS);
     assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
@@ -607,6 +608,191 @@ async fn a_second_tenant_with_the_same_macs_sees_none_as_alerted() -> TestResult
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    assert!(alerted_in_batch(&exec, &other, &leases, &BTreeSet::new()).await.is_empty());
+    let skipped = alerted_in_batch(&exec, &other, &leases, &BTreeSet::new(), 0).await;
+    let candidates = candidate_macs(&leases, &BTreeSet::new());
+    let second_chunk: BTreeSet<String> = candidates.iter().skip(MAX_LOOKUP_MACS).cloned().collect();
+    assert_eq!(skipped, second_chunk);
     Ok(())
 }
+
+
+const SPOOFED: usize = MAX_LOOKUP_MACS * MAX_LOOKUP_CHUNKS;
+
+
+const SIXTY_THOUSAND: usize = 60_000;
+
+
+const MANY_GENUINE: usize = 300;
+
+
+const GENUINE: usize = 3;
+
+
+const FAR_ROTATION: u64 = 1_000_001;
+
+
+const CAP_WARNING: &str = "lookup cap reached";
+
+
+static ANCHOR: LazyLock<tracing::Dispatch> = LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+fn store_alerted(store: &Store, leases: &[Converted], count: usize) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    let macs: Vec<String> = candidate_macs(leases, &BTreeSet::new()).into_iter().take(count).collect();
+    macs.iter().try_for_each(|mac| {
+        let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
+        store
+            .rows
+            .lock()
+            .map(|mut rows| rows.insert(("acme".to_owned(), id)))
+            .map(|_inserted| ())
+            .map_err(|_poisoned| "poisoned")
+    })?;
+    Ok(macs.into_iter().collect())
+}
+
+
+async fn run_rotation(exec: Executor<'_, '_>, scope: &TenantScope, leases: &[Converted], rotation: u64) -> Result<usize, Box<dyn std::error::Error>> {
+    let skip = alerted_in_batch(exec, scope, leases, &BTreeSet::new(), rotation).await;
+    let (alerts, _rejected) = unknown_device_alerts(scope, leases, &skip, NOW_MICROS);
+    Ok(store_unknown_device_alerts(exec, scope, &alerts).await?)
+}
+
+
+fn genuine_stored(store: &Store, leases: &[Converted], genuine: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let tail = leases.get(leases.len() - genuine..).ok_or("no tail")?;
+    let rows = store.rows.lock().map_err(|_poisoned| "poisoned")?;
+    let stored = candidate_macs(tail, &BTreeSet::new())
+        .iter()
+        .filter(|mac| rows.contains(&("acme".to_owned(), alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]))))
+        .count();
+    Ok(stored)
+}
+
+
+#[tokio::test]
+async fn spoofed_leases_filling_the_lookup_cap_do_not_hide_the_genuine_tail() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SPOOFED + MANY_GENUINE)?;
+    store_alerted(&store, &leases, SPOOFED)?;
+    let stored_after: Vec<usize> = {
+        let mut counts = Vec::new();
+        for rotation in 0..ROTATIONS {
+            run_rotation(&exec, &scope, &leases, rotation).await?;
+            counts.push(genuine_stored(&store, &leases, MANY_GENUINE)?);
+        }
+        counts
+    };
+    assert_eq!(stored_after, [0, MAX_UNKNOWN_PER_RUN, MAX_UNKNOWN_PER_RUN, MANY_GENUINE]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn sixty_thousand_alerted_leases_still_reach_the_genuine_tail() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SIXTY_THOUSAND + GENUINE)?;
+    store_alerted(&store, &leases, SIXTY_THOUSAND)?;
+    let before = lookups_so_far(&store);
+    run_rotation(&exec, &scope, &leases, 0).await?;
+    assert_eq!(
+        (lookups_so_far(&store) - before, genuine_stored(&store, &leases, GENUINE)?),
+        (MAX_LOOKUP_CHUNKS, 0)
+    );
+    run_rotation(&exec, &scope, &leases, 1).await?;
+    assert_eq!(genuine_stored(&store, &leases, GENUINE)?, GENUINE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_window_wraps_around_the_end_of_the_candidate_list() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SPOOFED + GENUINE)?;
+    let alerted = store_alerted(&store, &leases, SPOOFED)?;
+    let before = lookups_so_far(&store);
+    let seen = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new(), 1).await;
+    assert_eq!(lookups_so_far(&store) - before, MAX_LOOKUP_CHUNKS);
+    let first_mac = candidate_macs(&leases, &BTreeSet::new()).into_iter().next().ok_or("no mac")?;
+    assert!(seen.contains(&first_mac));
+    assert_eq!(seen, alerted);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_rotation_past_the_window_count_wraps_like_its_remainder() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let leases = many_leases(SPOOFED + GENUINE)?;
+    store_alerted(&store, &leases, SPOOFED)?;
+    let far = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new(), FAR_ROTATION).await;
+    let odd = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new(), 1).await;
+    assert_eq!(far, odd);
+    let empty = Store::default();
+    let empty_exec = executor(&empty);
+    let small = many_leases(GENUINE)?;
+    assert!(alerted_in_batch(&empty_exec, &scope, &small, &BTreeSet::new(), u64::MAX).await.is_empty());
+    assert!(alerted_in_batch(&empty_exec, &scope, &[], &BTreeSet::new(), FAR_ROTATION)
+        .await
+        .is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn the_rotation_advances_with_the_clock_only() -> TestResult {
+    assert_eq!(
+        (rotation_of(0), rotation_of(ROTATION_SECONDS - 1), rotation_of(ROTATION_SECONDS)),
+        (0, 0, 1)
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_cap_warning_is_emitted_once_per_capped_run_only() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    let capped = many_leases(SPOOFED + GENUINE)?;
+    store_alerted(&store, &capped, SPOOFED)?;
+    let exhausted = many_leases(GENUINE)?;
+    let full = many_leases(MAX_UNKNOWN_PER_RUN)?;
+    let capture = Arc::new(tempfile::tempfile()?);
+    let writer = Arc::clone(&capture);
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Arc::clone(&writer))
+            .finish(),
+    );
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    alerted_in_batch(&exec, &scope, &capped, &BTreeSet::new(), 0).await;
+    let after_capped = capture.metadata()?.len();
+    alerted_in_batch(&exec, &scope, &exhausted, &BTreeSet::new(), 0).await;
+    alerted_in_batch(&exec, &scope, &full, &BTreeSet::new(), 0).await;
+    drop(guard);
+    let mut text = String::new();
+    let mut file: &std::fs::File = &capture;
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_string(&mut text)?;
+    assert!(after_capped > 0);
+    assert_eq!(text.matches(CAP_WARNING).count(), 1, "{text}");
+    assert!(
+        text.contains("total=50003") && text.contains("scanned=10") && text.contains("first_chunk=0"),
+        "{text}"
+    );
+    Ok(())
+}
+
+
+const ROTATIONS: u64 = 4;
