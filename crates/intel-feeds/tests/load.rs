@@ -18,12 +18,13 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use stub::{serve, stall};
 use tempfile::{tempdir, TempDir};
 use time::macros::datetime;
 use time::OffsetDateTime;
+use tracing::Dispatch;
 use types::TestResult;
 
 
@@ -85,7 +86,11 @@ struct Rig {
 }
 
 
+static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish()));
+
+
 fn rig(timeout_ms: u64) -> Result<Rig, Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
@@ -493,9 +498,14 @@ fn an_unreachable_server_is_unavailable_and_an_error_is_summarised() -> TestResu
         Some(InsertClass::Unavailable)
     );
     let summary = summarise(&Err(LoadError::Schema(InsertClass::Timeout)));
-    assert_eq!(summary.clickhouse_rows_sent, 0);
+    assert_eq!((summary.clickhouse_rows_sent, summary.clickhouse_rows_not_canonical), (0, 0));
     assert!(summary.error.is_some_and(|text| text.contains("Timeout")));
     let clean = summarise(&Ok(LoadOutcome::default()));
     assert_eq!(clean.error, None);
+    let skipped = summarise(&Ok(LoadOutcome {
+        not_canonical: TWO as u64,
+        ..LoadOutcome::default()
+    }));
+    assert_eq!(skipped.clickhouse_rows_not_canonical, TWO as u64);
     Ok(())
 }
