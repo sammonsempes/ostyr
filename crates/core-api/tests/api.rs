@@ -377,7 +377,7 @@ async fn deny_by_default_and_permission_checks() -> TestResult {
 
 #[tokio::test]
 async fn rate_limit_is_per_source() -> TestResult {
-    let fx = fixture()?;
+    let fx = fixture_with(with_frozen_clock)?;
     let total = usize::try_from(RATE_MAX_REQUESTS)? + EXTRA_REQUESTS;
     let mut statuses = Vec::new();
     for _ in 0..total {
@@ -887,7 +887,7 @@ async fn the_source_table_refuses_new_sources_only_and_idle_sources_expire() -> 
 
 #[tokio::test]
 async fn a_known_source_over_its_quota_stays_refused_in_a_full_table() -> TestResult {
-    let fx = fixture_with(small_source_table)?;
+    let fx = fixture_with(|state| small_source_table(with_frozen_clock(state)?))?;
     let first = client(SOURCE_A).ip();
     let results: Vec<bool> = (0..=RATE_MAX_REQUESTS).map(|_| admit_source(&fx.state, first)).collect();
     assert_eq!(results.iter().filter(|admitted| **admitted).count(), usize::try_from(RATE_MAX_REQUESTS)?);
@@ -899,7 +899,7 @@ async fn a_known_source_over_its_quota_stays_refused_in_a_full_table() -> TestRe
         .map_err(|_| "poisoned")?
         .get(&rate_key(first))
         .ok_or("no window")?;
-    assert!(OffsetDateTime::now_utc() - window.started < time::Duration::seconds(RATE_WINDOW_SECONDS));
+    assert!(frozen_clock() - window.started < time::Duration::seconds(RATE_WINDOW_SECONDS));
     Ok(())
 }
 
