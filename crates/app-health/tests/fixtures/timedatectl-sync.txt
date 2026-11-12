@@ -1,0 +1,4 @@
+NTP=yes
+NTPSynchronized=yes
+Timezone=Europe/Paris
+CanNTP=yes
