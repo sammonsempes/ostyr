@@ -1,7 +1,7 @@
 use crate::error::CaseStoreError;
 use crate::model::{Case, CaseStatus, Comment, Observable, Task};
 use crate::observable::normalise_value;
-use crate::stored::{CaseCursor, CaseList, CasePage, Labels, LinkList, LinkPage, Parts, Stored};
+use crate::stored::{AlertLinkItem, CaseCursor, CaseList, CasePage, Labels, LinkList, LinkPage, Parts, Stored};
 use crate::transition::{apply_action, CaseAction};
 use alerts::id::is_alert_id;
 use alerts::types::{Executor, Row};
@@ -13,10 +13,16 @@ use serde_json::{json, Value};
 pub const MIGRATION_NAMESPACE: &str = "cases";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "001_cases",
-    sql: include_str!("../migrations/001_cases.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "001_cases",
+        sql: include_str!("../migrations/001_cases.sql"),
+    },
+    Migration {
+        version: "002_link_attribution",
+        sql: include_str!("../migrations/002_link_attribution.sql"),
+    },
+];
 
 
 /// `$1` tenant, `$2` JSON document of the case; answers the id when the row is new.
@@ -35,11 +41,11 @@ pub const COMMENT_SQL: &str = include_str!("../migrations/comment.sql");
 pub const OBSERVABLE_SQL: &str = include_str!("../migrations/observable.sql");
 
 
-/// `$2` case id, `$3` alert id, `$4` cap, `$5` now, `$6` actor, `$7` history cap; answers found case, found alert, added, linked, history, same.
+/// `$2` case id, `$3` alert id, `$4` cap, `$5` now, `$6` actor; answers found case, found alert, added, linked, same.
 pub const ATTACH_SQL: &str = include_str!("../migrations/attach.sql");
 
 
-/// `$2` case id, `$3` page size; answers (case id, alert id or empty) rows of the case, so an empty page of an existing case is one row.
+/// `$2` case id, `$3` page size; answers (case id, alert id, linked by, linked at; empty when unknown) rows of the case, so an empty page of an existing case is one row.
 pub const LINKS_SQL: &str = include_str!("../migrations/links.sql");
 
 
@@ -249,13 +255,16 @@ pub const ATTACH_ADDED_COLUMN: usize = 2;
 pub const ATTACH_LINKED_COLUMN: usize = 3;
 
 
-pub const ATTACH_HISTORY_COLUMN: usize = 4;
-
-
-pub const ATTACH_SAME_COLUMN: usize = 5;
+pub const ATTACH_SAME_COLUMN: usize = 4;
 
 
 pub const LINK_ALERT_COLUMN: usize = 1;
+
+
+pub const LINK_BY_COLUMN: usize = 2;
+
+
+pub const LINK_AT_COLUMN: usize = 3;
 
 
 pub fn check_text(field: &'static str, value: &str, limit: usize) -> Result<(), CaseStoreError> {
@@ -628,7 +637,7 @@ pub async fn add_observable(exec: Executor<'_, '_>, scope: &TenantScope, case_id
 }
 
 
-/// Stores the alert id and the `alert_linked` event; the case and the alert must both exist in the scope's tenant. `true` when newly linked.
+/// Stores the alert id with its actor and time on the link row; the case and the alert must both exist in the scope's tenant. `true` when newly linked.
 pub async fn attach_alert(
     exec: Executor<'_, '_>,
     scope: &TenantScope,
@@ -647,7 +656,6 @@ pub async fn attach_alert(
             MAX_ALERTS_PER_CASE.to_string(),
             now.to_string(),
             actor.to_owned(),
-            MAX_HISTORY.to_string(),
         ];
         let rows = exec(scope.clone(), ATTACH_SQL, params).await?;
         let answer = rows.first().ok_or(CaseStoreError::BadRow { column: ID_COLUMN })?;
@@ -664,15 +672,31 @@ pub async fn attach_alert(
                 what: "alerts",
                 limit: MAX_ALERTS_PER_CASE,
             })
-        } else if count(answer, ATTACH_HISTORY_COLUMN)? >= MAX_HISTORY {
-            Err(CaseStoreError::Full {
-                what: "history",
-                limit: MAX_HISTORY,
-            })
         } else {
             Ok(false)
         }
     }
+}
+
+
+/// An empty actor or time is a link written before the attribution columns existed: unknown.
+pub fn link_of(row: &Row) -> Result<AlertLinkItem, CaseStoreError> {
+    let linked_by = cell(row, LINK_BY_COLUMN)?;
+    let linked_at = cell(row, LINK_AT_COLUMN)?;
+    let at = if linked_at.is_empty() {
+        None
+    } else {
+        Some(
+            linked_at
+                .parse::<i64>()
+                .map_err(|_source| CaseStoreError::BadRow { column: LINK_AT_COLUMN })?,
+        )
+    };
+    Ok(AlertLinkItem {
+        alert_id: cell(row, LINK_ALERT_COLUMN)?.to_owned(),
+        linked_by: (!linked_by.is_empty()).then(|| linked_by.to_owned()),
+        linked_at: at,
+    })
 }
 
 
@@ -688,7 +712,7 @@ pub fn check_link_page(page: &LinkPage) -> Result<(), CaseStoreError> {
 }
 
 
-/// The alert ids linked to the case in ascending order; `NotFound` when the case is absent from the tenant.
+/// The alerts linked to the case with their attribution, in ascending alert id order; `NotFound` when the case is absent from the tenant.
 pub async fn list_links(exec: Executor<'_, '_>, scope: &TenantScope, case_id: &str, page: &LinkPage) -> Result<LinkList, CaseStoreError> {
     check_text("id", case_id, MAX_ID_CHARS)?;
     check_link_page(page)?;
@@ -702,14 +726,14 @@ pub async fn list_links(exec: Executor<'_, '_>, scope: &TenantScope, case_id: &s
     } else {
         let mut alerts = rows
             .iter()
-            .map(|row| cell(row, LINK_ALERT_COLUMN).map(str::to_owned))
-            .collect::<Result<Vec<String>, CaseStoreError>>()?
+            .map(link_of)
+            .collect::<Result<Vec<AlertLinkItem>, CaseStoreError>>()?
             .into_iter()
-            .filter(|alert_id| !alert_id.is_empty())
-            .collect::<Vec<String>>();
+            .filter(|link| !link.alert_id.is_empty())
+            .collect::<Vec<AlertLinkItem>>();
         let more = alerts.len() > page.size;
         alerts.truncate(page.size);
-        let next = alerts.last().filter(|_last| more).cloned();
+        let next = alerts.last().filter(|_last| more).map(|last| last.alert_id.clone());
         Ok(LinkList { alerts, next })
     }
 }

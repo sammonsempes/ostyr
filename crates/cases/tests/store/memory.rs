@@ -1,6 +1,6 @@
 use crate::types::Table;
 use alerts::types::Row;
-use cases::model::{Case, CaseEvent, CaseEventKind, CaseStatus, Comment, Observable};
+use cases::model::{Case, CaseEvent, CaseStatus, Comment, Observable};
 use cases::store::{
     APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, FIRST_SUMMARY_SQL, GET_SQL, INSERT_SQL, LINKS_AFTER_SQL, LINKS_SQL, NEXT_SQL, NEXT_SUMMARY_SQL,
     OBSERVABLE_SQL,
@@ -21,9 +21,6 @@ pub const NOW_INDEX: usize = 3;
 pub const ACTOR_INDEX: usize = 4;
 
 
-pub const HISTORY_CAP_INDEX: usize = 5;
-
-
 pub enum Forced {
     Fail,
     Rows(Vec<Row>),
@@ -33,7 +30,7 @@ pub enum Forced {
 pub struct Entry {
     pub case: Case,
     pub version: i64,
-    pub alerts: BTreeSet<String>,
+    pub alerts: BTreeMap<String, Option<(String, i64)>>,
 }
 
 
@@ -151,7 +148,7 @@ pub fn insert(table: &mut Table, tenant: &str, params: &[String]) -> Result<Vec<
             Entry {
                 case,
                 version: 1,
-                alerts: BTreeSet::new(),
+                alerts: BTreeMap::new(),
             },
         );
         Ok(vec![vec![id]])
@@ -255,39 +252,27 @@ pub fn attach(table: &mut Table, known: &BTreeSet<String>, params: &[String]) ->
     let cap = param(params, CAP_INDEX)?.parse::<usize>().map_err(|_source| malformed())?;
     let now = param(params, NOW_INDEX)?.parse::<i64>().map_err(|_source| malformed())?;
     let actor = param(params, ACTOR_INDEX)?.clone();
-    let history_cap = param(params, HISTORY_CAP_INDEX)?.parse::<usize>().map_err(|_source| malformed())?;
     let alert = param(params, 1)?;
     let alert_found = known.contains(alert);
     Ok(match table.get_mut(param(params, 0)?) {
         Some(entry) => {
             let linked = entry.alerts.len();
-            let history = entry.case.history.len();
-            let same = entry.alerts.contains(alert);
-            let added = alert_found && linked < cap && history < history_cap && entry.alerts.insert(alert.clone());
+            let same = entry.alerts.contains_key(alert);
+            let added = alert_found && linked < cap && !same;
             if added {
-                let status = entry.case.status;
-                entry.case.history.push(CaseEvent {
-                    kind: CaseEventKind::AlertLinked,
-                    at: now,
-                    actor,
-                    from: status,
-                    to: status,
-                    alert_id: Some(alert.clone()),
-                });
+                entry.alerts.insert(alert.clone(), Some((actor, now)));
             }
             vec![vec![
                 "1".to_owned(),
                 usize::from(alert_found).to_string(),
                 usize::from(added).to_string(),
                 linked.to_string(),
-                history.to_string(),
                 usize::from(same).to_string(),
             ]]
         }
         None => vec![vec![
             "0".to_owned(),
             usize::from(alert_found).to_string(),
-            "0".to_owned(),
             "0".to_owned(),
             "0".to_owned(),
             "0".to_owned(),
@@ -306,12 +291,17 @@ pub fn links(table: &Table, sql: &str, params: &[String]) -> Result<Vec<Row>, Pg
         let rows: Vec<Row> = entry
             .alerts
             .iter()
-            .filter(|alert| after.as_ref().is_none_or(|last| *alert > last))
+            .filter(|(alert, _who)| after.as_ref().is_none_or(|last| *alert > last))
             .take(limit)
-            .map(|alert| vec![id.clone(), alert.clone()])
+            .map(|(alert, who)| {
+                let (by, at) = who
+                    .clone()
+                    .map_or_else(|| (String::new(), String::new()), |(actor, time)| (actor, time.to_string()));
+                vec![id.clone(), alert.clone(), by, at]
+            })
             .collect();
         if rows.is_empty() {
-            vec![vec![id.clone(), String::new()]]
+            vec![vec![id.clone(), String::new(), String::new(), String::new()]]
         } else {
             rows
         }

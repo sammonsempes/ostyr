@@ -106,7 +106,7 @@ pub struct LinkPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkList {
-    pub alerts: Vec<String>,
+    pub alerts: Vec<AlertLinkItem>,
     pub next: Option<String>,
 }
 
@@ -115,4 +115,13 @@ pub struct LinkList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct AlertLink {
     pub alert_id: String,
+}
+
+
+/// A listed link: who linked the alert and when, `None` for a link written before the attribution columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct AlertLinkItem {
+    pub alert_id: String,
+    pub linked_by: Option<String>,
+    pub linked_at: Option<i64>,
 }

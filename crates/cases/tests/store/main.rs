@@ -148,10 +148,13 @@ fn every_statement_is_scoped_to_the_tenant() -> TestResult {
         .for_each(|sql| assert!(sql.contains("ORDER BY cases.created_at DESC, cases.id DESC")));
     check_embedded(&MIGRATIONS)?;
     check_namespace(MIGRATION_NAMESPACE)?;
-    assert!(MIGRATIONS.iter().all(|migration| migration.sql.contains("PRIMARY KEY (tenant, id)")));
+    assert!(MIGRATIONS.iter().any(|migration| migration.sql.contains("PRIMARY KEY (tenant, id)")));
     assert!(MIGRATIONS
         .iter()
-        .all(|migration| migration.sql.contains("cases (tenant, created_at DESC, id DESC)")));
+        .any(|migration| migration.sql.contains("cases (tenant, created_at DESC, id DESC)")));
+    assert!(MIGRATIONS.iter().any(|migration| migration
+        .sql
+        .contains("ALTER TABLE case_alerts ADD COLUMN linked_by text, ADD COLUMN linked_at bigint")));
     Ok(())
 }
 
