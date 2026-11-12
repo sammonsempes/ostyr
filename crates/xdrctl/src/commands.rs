@@ -1,3 +1,4 @@
+use crate::alerts::printable;
 use crate::error::CliError;
 use crate::model::{ApplyArgs, Context, ErrorBody, HttpMethod, HttpRequest, LoginBody, LoginReply, MeReply, Report, Session};
 use crate::session::{load_session, remove_session, save_session};
@@ -117,7 +118,7 @@ pub fn login(ctx: &Context, username: &str, totp_code: Option<&str>, input: &mut
     let parsed: LoginReply = serde_json::from_str(&reply).map_err(bad_reply(FIRST_SUCCESS))?;
     save_session(&ctx.session_file, &Session { server, token: parsed.token })?;
     Ok(Report {
-        text: format!("logged in as {username}"),
+        text: format!("logged in as {}", printable(username)),
         json: json!({ "username": username }),
     })
 }
@@ -143,7 +144,12 @@ pub fn current_user(ctx: &Context) -> Result<MeReply, CliError> {
 pub fn whoami(ctx: &Context) -> Result<Report, CliError> {
     let me = current_user(ctx)?;
     Ok(Report {
-        text: format!("{} roles={} mfa={}", me.username, me.roles.join(","), me.mfa_enrolled),
+        text: format!(
+            "{} roles={} mfa={}",
+            printable(&me.username),
+            printable(&me.roles.join(",")),
+            me.mfa_enrolled
+        ),
         json: json!({ "username": me.username, "roles": me.roles, "mfa_enrolled": me.mfa_enrolled }),
     })
 }
@@ -187,7 +193,7 @@ pub fn validate_file(path: &Path) -> Result<String, CliError> {
 pub fn config_validate(dir: &Path) -> Result<Report, CliError> {
     let names = yaml_files(dir)?.iter().map(|path| validate_file(path)).collect::<Result<Vec<_>, _>>()?;
     Ok(Report {
-        text: names.iter().map(|name| format!("ok {name}")).collect::<Vec<_>>().join("\n"),
+        text: names.iter().map(|name| format!("ok {}", printable(name))).collect::<Vec<_>>().join("\n"),
         json: json!({ "validated": names }),
     })
 }
