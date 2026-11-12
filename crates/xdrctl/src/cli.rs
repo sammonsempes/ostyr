@@ -1,4 +1,4 @@
-use crate::alerts::{alerts_list, alerts_show, printable};
+use crate::alerts::{alerts_list, alerts_show, escape_json, printable};
 use crate::cases::{cases_list, cases_show};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
@@ -62,7 +62,7 @@ pub fn render(format: OutputFormat, report: &Report, out: &mut dyn Write) -> Res
     match format {
         OutputFormat::Text => writeln!(out, "{}", report.text).map_err(CliError::from),
         OutputFormat::Json => {
-            let line = serde_json::to_string(&report.json)?;
+            let line = escape_json(&serde_json::to_string(&report.json)?);
             writeln!(out, "{line}").map_err(CliError::from)
         }
     }
@@ -72,7 +72,7 @@ pub fn render(format: OutputFormat, report: &Report, out: &mut dyn Write) -> Res
 pub fn render_error(format: OutputFormat, error: &CliError, err: &mut dyn Write) -> io::Result<()> {
     match format {
         OutputFormat::Text => writeln!(err, "error: {}", printable(&error.to_string())),
-        OutputFormat::Json => writeln!(err, "{}", json!({ "error": error.to_string() })),
+        OutputFormat::Json => writeln!(err, "{}", escape_json(&json!({ "error": error.to_string() }).to_string())),
     }
 }
 
