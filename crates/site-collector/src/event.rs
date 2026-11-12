@@ -129,8 +129,8 @@ pub fn flow_event(flow: &FlowRecord, batch: &FlowBatch, exporter: IpAddr, epoch:
         source: Some(EndpointFields {
             ip: Some(flow.source.to_string()),
             port: Some(flow.source_port),
-            bytes: Some(u64::from(flow.octets)),
-            packets: Some(u64::from(flow.packets)),
+            bytes: Some(flow.octets),
+            packets: Some(flow.packets),
             ..EndpointFields::default()
         }),
         destination: Some(EndpointFields {

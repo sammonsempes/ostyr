@@ -10,7 +10,7 @@ use site_collector::flow_model::{FlowDrop, FlowLimits, FLOW_HEADER_BYTES, FLOW_R
 use site_collector::listen::count_reason;
 use site_collector::listen_model::ListenerStats;
 use site_collector::model::DropReason;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use types::TestResult;
 
 
@@ -251,13 +251,16 @@ fn golden_fields() -> TestResult {
     assert_eq!(flow.source, SOURCE);
     assert_eq!(flow.destination, DESTINATION);
     assert_eq!(flow.next_hop, NEXT_HOP);
-    assert_eq!((flow.input_interface, flow.output_interface), INTERFACES);
-    assert_eq!((flow.packets, flow.octets), (PACKETS, OCTETS));
+    assert_eq!(
+        (flow.input_interface, flow.output_interface),
+        (u32::from(INTERFACES.0), u32::from(INTERFACES.1))
+    );
+    assert_eq!((flow.packets, flow.octets), (u64::from(PACKETS), u64::from(OCTETS)));
     assert_eq!(flow.start_unix_ms, batch.export_unix_ms - TEN_SECONDS);
     assert_eq!(flow.end_unix_ms, batch.export_unix_ms - ONE_SECOND);
     assert_eq!((flow.source_port, flow.destination_port), (SRC_PORT, DST_PORT));
     assert_eq!((flow.tcp_flags, flow.protocol, flow.tos), (TCP_FLAGS, PROTOCOL_TCP, TOS));
-    assert_eq!((flow.source_as, flow.destination_as), (AS_NUMBER, NEXT_AS_NUMBER));
+    assert_eq!((flow.source_as, flow.destination_as), (u32::from(AS_NUMBER), u32::from(NEXT_AS_NUMBER)));
     Ok(())
 }
 
@@ -329,7 +332,10 @@ fn other_versions_are_unsupported() -> TestResult {
 
 #[test]
 fn record_cap_below_count_is_too_large() -> TestResult {
-    let limits = FlowLimits { max_records_per_datagram: 1 };
+    let limits = FlowLimits {
+        max_records_per_datagram: 1,
+        ..FlowLimits::default()
+    };
     assert_eq!(parse_netflow_v5(&plain(TWO, TWO_RECORDS), &limits), Err(FlowDrop::TooLarge));
     assert!(parse_netflow_v5(&plain(1, 1), &limits).is_ok());
     Ok(())
@@ -340,14 +346,22 @@ fn record_cap_below_count_is_too_large() -> TestResult {
 fn limits_validation() -> TestResult {
     assert_eq!(FlowLimits::default().max_records_per_datagram, MAX_FLOW_RECORDS);
     assert!(validate_flow_limits(&FlowLimits::default()).is_ok());
-    assert!(validate_flow_limits(&FlowLimits { max_records_per_datagram: 1 }).is_ok());
+    assert!(validate_flow_limits(&FlowLimits {
+        max_records_per_datagram: 1,
+        ..FlowLimits::default()
+    })
+    .is_ok());
     assert_eq!(
-        validate_flow_limits(&FlowLimits { max_records_per_datagram: 0 }),
+        validate_flow_limits(&FlowLimits {
+            max_records_per_datagram: 0,
+            ..FlowLimits::default()
+        }),
         Err(ConfigError::BadMaxFlowRecords)
     );
     assert_eq!(
         validate_flow_limits(&FlowLimits {
-            max_records_per_datagram: MAX_FLOW_RECORDS + 1
+            max_records_per_datagram: MAX_FLOW_RECORDS + 1,
+            ..FlowLimits::default()
         }),
         Err(ConfigError::BadMaxFlowRecords)
     );
@@ -460,14 +474,17 @@ fn live_fixture_parses() -> TestResult {
     assert_eq!((batch.export_unix_ms, batch.exporter_uptime_ms), (FIXTURE_EXPORT_MS, FIXTURE_UPTIME));
     let query = batch.records.first().ok_or("no record")?;
     let answer = batch.records.get(1).ok_or("no answer")?;
-    assert_eq!((query.source, query.destination), (LOOPBACK, RESOLVER));
+    assert_eq!((query.source, query.destination), (IpAddr::V4(LOOPBACK), IpAddr::V4(RESOLVER)));
     assert_eq!(
         (query.source_port, query.destination_port, query.protocol),
         (FIXTURE_PORT, DNS_PORT, PROTOCOL_UDP)
     );
-    assert_eq!((query.packets, query.octets), FIXTURE_QUERY);
+    assert_eq!((query.packets, query.octets), (u64::from(FIXTURE_QUERY.0), u64::from(FIXTURE_QUERY.1)));
     assert_eq!((query.start_unix_ms, query.end_unix_ms), (FIXTURE_START_MS, FIXTURE_END_MS));
-    assert_eq!((answer.source, answer.destination), (RESOLVER, LOOPBACK));
-    assert_eq!((answer.packets, answer.octets), FIXTURE_ANSWER);
+    assert_eq!((answer.source, answer.destination), (IpAddr::V4(RESOLVER), IpAddr::V4(LOOPBACK)));
+    assert_eq!(
+        (answer.packets, answer.octets),
+        (u64::from(FIXTURE_ANSWER.0), u64::from(FIXTURE_ANSWER.1))
+    );
     Ok(())
 }

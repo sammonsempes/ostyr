@@ -2,9 +2,10 @@
 
 use crate::error::ConfigError;
 use crate::flow_model::{
-    FlowBatch, FlowDrop, FlowLimits, FlowRecord, FLOW_HEADER_BYTES, FLOW_RECORD_BYTES, MAX_FLOW_DATAGRAM_BYTES, MAX_FLOW_RECORDS,
+    FlowBatch, FlowDrop, FlowLimits, FlowRecord, FLOW_HEADER_BYTES, FLOW_RECORD_BYTES, MAX_FIELDS_PER_TEMPLATE, MAX_FLOW_DATAGRAM_BYTES,
+    MAX_FLOW_RECORDS, MAX_RECORD_BYTES, MAX_TEMPLATES_PER_EXPORTER, MAX_TEMPLATE_AGE_SECONDS, MAX_TEMPLATE_EXPORTERS, MAX_TEMPLATE_RECORDS,
 };
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 
 const NETFLOW_VERSION: u16 = 5;
@@ -50,17 +51,17 @@ pub fn skip(rest: &mut &[u8], count: usize) -> Result<(), FlowDrop> {
 }
 
 
-fn read_u8(rest: &mut &[u8]) -> Result<u8, FlowDrop> {
+pub fn read_u8(rest: &mut &[u8]) -> Result<u8, FlowDrop> {
     Ok(u8::from_be_bytes(take::<PAD_BYTE>(rest)?))
 }
 
 
-fn read_u16(rest: &mut &[u8]) -> Result<u16, FlowDrop> {
+pub fn read_u16(rest: &mut &[u8]) -> Result<u16, FlowDrop> {
     Ok(u16::from_be_bytes(take::<U16_BYTES>(rest)?))
 }
 
 
-fn read_u32(rest: &mut &[u8]) -> Result<u32, FlowDrop> {
+pub fn read_u32(rest: &mut &[u8]) -> Result<u32, FlowDrop> {
     Ok(u32::from_be_bytes(take::<U32_BYTES>(rest)?))
 }
 
@@ -74,7 +75,16 @@ pub fn validate_flow_limits(limits: &FlowLimits) -> Result<(), ConfigError> {
     (1..=MAX_FLOW_RECORDS)
         .contains(&limits.max_records_per_datagram)
         .then_some(())
-        .ok_or(ConfigError::BadMaxFlowRecords)
+        .ok_or(ConfigError::BadMaxFlowRecords)?;
+    let within = [
+        (1..=MAX_TEMPLATES_PER_EXPORTER).contains(&limits.max_templates_per_exporter),
+        (1..=MAX_TEMPLATE_EXPORTERS).contains(&limits.max_template_exporters),
+        (1..=MAX_FIELDS_PER_TEMPLATE).contains(&limits.max_fields_per_template),
+        (1..=MAX_RECORD_BYTES).contains(&limits.max_record_bytes),
+        (1..=MAX_TEMPLATE_AGE_SECONDS).contains(&limits.max_template_age_seconds),
+        (1..=MAX_TEMPLATE_RECORDS).contains(&limits.max_template_records_per_datagram),
+    ];
+    within.iter().all(|ok| *ok).then_some(()).ok_or(ConfigError::BadFlowTemplateLimit)
 }
 
 
@@ -90,13 +100,13 @@ pub fn absolute_ms(export_ms: i64, uptime_ms: u32, stamp_ms: u32) -> i64 {
 
 
 pub fn read_record(rest: &mut &[u8], export_ms: i64, uptime_ms: u32) -> Result<FlowRecord, FlowDrop> {
-    let source = read_ipv4(rest)?;
-    let destination = read_ipv4(rest)?;
-    let next_hop = read_ipv4(rest)?;
-    let input_interface = read_u16(rest)?;
-    let output_interface = read_u16(rest)?;
-    let packets = read_u32(rest)?;
-    let octets = read_u32(rest)?;
+    let source = IpAddr::V4(read_ipv4(rest)?);
+    let destination = IpAddr::V4(read_ipv4(rest)?);
+    let next_hop = IpAddr::V4(read_ipv4(rest)?);
+    let input_interface = u32::from(read_u16(rest)?);
+    let output_interface = u32::from(read_u16(rest)?);
+    let packets = u64::from(read_u32(rest)?);
+    let octets = u64::from(read_u32(rest)?);
     let first = read_u32(rest)?;
     let last = read_u32(rest)?;
     let source_port = read_u16(rest)?;
@@ -105,8 +115,8 @@ pub fn read_record(rest: &mut &[u8], export_ms: i64, uptime_ms: u32) -> Result<F
     let tcp_flags = read_u8(rest)?;
     let protocol = read_u8(rest)?;
     let tos = read_u8(rest)?;
-    let source_as = read_u16(rest)?;
-    let destination_as = read_u16(rest)?;
+    let source_as = u32::from(read_u16(rest)?);
+    let destination_as = u32::from(read_u16(rest)?);
     skip(rest, MASK_BYTES)?;
     skip(rest, PAD_WORD)?;
     Ok(FlowRecord {

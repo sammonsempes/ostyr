@@ -24,6 +24,8 @@ pub enum ConfigError {
     BadMaxValueChars,
     #[error("the flow record cap must be between 1 and its ceiling")]
     BadMaxFlowRecords,
+    #[error("a flow template cap must be between 1 and its ceiling")]
+    BadFlowTemplateLimit,
 }
 
 

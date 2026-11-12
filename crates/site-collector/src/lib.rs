@@ -20,4 +20,7 @@ pub mod process;
 pub mod snmp;
 pub mod spool;
 pub mod spool_model;
+pub mod template;
+pub mod template_model;
+pub mod template_parse;
 pub mod types;
