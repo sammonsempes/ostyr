@@ -22,7 +22,10 @@ use cases::stored::{CaseCursor, SummaryList};
 use core_api::model::{ApiError, ApiIdentity};
 use core_api::state::RATE_MAX_REQUESTS;
 use data_encoding::BASE64URL_NOPAD;
-use fixture::{case, executor, fixed_clock, fixture, fixture_with, memory_backend, store, ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT};
+use fixture::{
+    case, executor, fixed_clock, fixture, fixture_adjusted, fixture_with, memory_backend, store, with_frozen_clock, ANALYST, BASE_TIME, OTHER_TENANT,
+    READER, TENANT,
+};
 use http::{body_json, get, login, BODY_READ_LIMIT};
 use memory::{lock, Forced};
 use serde_json::{json, Value};
@@ -218,7 +221,7 @@ async fn no_session_is_401_and_a_role_without_cases_read_is_403_before_any_store
 
 #[tokio::test]
 async fn an_unauthenticated_flood_is_rate_limited_before_any_store_call() -> TestResult {
-    let fx = fixture_with(memory_backend)?;
+    let fx = fixture_adjusted(RATE_MAX_REQUESTS, with_frozen_clock, memory_backend)?;
     let mut last = StatusCode::OK;
     for _ in 0..(RATE_MAX_REQUESTS as usize + FLOOD) {
         last = get(&fx.router, "/cases", None).await?.status();
