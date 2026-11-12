@@ -5,7 +5,10 @@ use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use status_page::app::{run_app_with, AppFile};
 use status_page::error::{StatusPageError, StoreError};
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
-use status_page::publish::{error_class, fetch, first_publish, omission_changed, publisher, render_class, tick, MAX_RENDERS_PER_TICK, READ_DEADLINE};
+use status_page::publish::{
+    declared_services, error_class, fetch, first_publish, fit_page, omission_changed, omission_reason, publisher, render_class, tick,
+    MAX_RENDERS_PER_TICK, READ_DEADLINE,
+};
 use status_page::settings::validate_settings;
 use status_page::store_model::PublishedRead;
 use status_page::types::IncidentReadFn;
@@ -82,6 +85,7 @@ struct Fake {
     hidden: usize,
     hidden_ongoing: usize,
     seen: Vec<String>,
+    services_seen: Vec<Vec<String>>,
 }
 
 
@@ -99,6 +103,7 @@ fn incident(tenant: &str, title: &str) -> IncidentInput {
         started_at: 0,
         resolved_at: None,
         updates: Vec::new(),
+        omitted_updates: 0,
         internal_note: SECRET_NOTE.to_owned(),
         assignee: "alice".to_owned(),
         asset_ids: vec!["asset-1".to_owned()],
@@ -123,13 +128,15 @@ fn config() -> PageConfig {
 }
 
 
-fn answer(shared: &Arc<Mutex<Fake>>, scope: &TenantScope) -> Result<(Vec<IncidentInput>, Fake), StoreError> {
+fn answer(shared: &Arc<Mutex<Fake>>, scope: &TenantScope, services: Vec<String>) -> Result<(Vec<IncidentInput>, Fake), StoreError> {
     let mut fake = shared.lock().map_err(lock_error)?;
     fake.seen.push(tenant_of(scope).to_owned());
+    fake.services_seen.push(services.clone());
     let rows = fake
         .incidents
         .iter()
         .filter(|row| fake.leak || row.tenant == tenant_of(scope))
+        .filter(|row| services.contains(&row.service))
         .cloned()
         .collect();
     Ok((
@@ -148,10 +155,10 @@ fn answer(shared: &Arc<Mutex<Fake>>, scope: &TenantScope) -> Result<(Vec<Inciden
 
 fn reader(shared: &Arc<Mutex<Fake>>) -> IncidentReadFn {
     let outer = Arc::clone(shared);
-    Box::new(move |scope| {
+    Box::new(move |scope, services| {
         let inner = Arc::clone(&outer);
         Box::pin(async move {
-            let (rows, flags) = answer(&inner, &scope)?;
+            let (rows, flags) = answer(&inner, &scope, services)?;
             sleep(Duration::from_secs(flags.delay_seconds)).await;
             if flags.never {
                 std::future::pending::<()>().await;
@@ -362,7 +369,7 @@ async fn a_read_that_never_answers_hits_the_deadline_and_keeps_the_page() -> Tes
     tick(&config(), &state, &read, &scope).await;
     assert_eq!(started.elapsed(), READ_DEADLINE);
     assert_eq!(*served(&state)?, *before);
-    let refused = fetch(&read, &scope, Duration::from_secs(1)).await;
+    let refused = fetch(&read, &scope, vec![SERVICE.to_owned()], Duration::from_secs(1)).await;
     assert!(matches!(refused, Err(StoreError::ReadTimeout)));
     Ok(())
 }
@@ -542,13 +549,16 @@ fn the_oversize_is_reported_once_per_change_and_the_renders_per_tick_are_bounded
     let some = (OMITTED, 1);
     let more_ongoing = (OMITTED, 1 + 1);
     let more = (OMITTED + 1, 1 + 1);
-    assert!(!omission_changed(&state, none));
-    assert!(omission_changed(&state, some));
-    assert!(!omission_changed(&state, some));
-    assert!(omission_changed(&state, more_ongoing));
-    assert!(omission_changed(&state, more));
-    assert!(!omission_changed(&state, none));
-    assert!(omission_changed(&state, more_ongoing));
+    assert!(!omission_changed(&state, none, false));
+    assert!(omission_changed(&state, some, false));
+    assert!(!omission_changed(&state, some, false));
+    assert!(omission_changed(&state, some, true));
+    assert!(!omission_changed(&state, some, true));
+    assert!(omission_changed(&state, some, false));
+    assert!(omission_changed(&state, more_ongoing, false));
+    assert!(omission_changed(&state, more, false));
+    assert!(!omission_changed(&state, none, false));
+    assert!(omission_changed(&state, more_ongoing, false));
     assert_eq!(MAX_RENDERS_PER_TICK, RENDERS);
     Ok(())
 }
@@ -665,5 +675,44 @@ async fn pg_file_and_the_reader_must_come_together_and_the_tenant_must_be_valid(
     .await;
     assert!(matches!(bad, Err(StatusPageError::Pg(_))));
     assert!(shared.lock().map_err(|_poisoned| "lock")?.seen.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn only_the_declared_services_are_asked_for_and_the_others_are_never_counted() -> TestResult {
+    let _listener = listen();
+    let (state, _clock) = state_with(PageSettings::default());
+    let mut other = incident(TENANT, "Undeclared outage");
+    other.service = "svc-unlisted".to_owned();
+    let shared = shared_with(vec![incident(TENANT, "Website down"), other]);
+    first_publish(&config(), &state, &reader(&shared), &tenant_scope(TENANT)?).await?;
+    let page = served(&state)?;
+    assert!(page.json.contains("Website down") && !page.json.contains("Undeclared outage") && !page.json.contains("svc-unlisted"));
+    assert!(!page.json.contains("omitted") && !page.html.contains("not shown") && !page.html.contains("does not list"));
+    assert_eq!(shared.lock().map_err(|_poisoned| "lock")?.services_seen, vec![vec![SERVICE.to_owned()]]);
+    Ok(())
+}
+
+
+#[test]
+fn the_omission_reason_names_the_size_fit_or_the_read_limit() -> TestResult {
+    assert_eq!(omission_reason(true), "size");
+    assert_eq!(omission_reason(false), "read_limit");
+    let read_limit = PublishedRead {
+        incidents: vec![incident(TENANT, "One")],
+        total: HIDDEN_RESOLVED,
+        ongoing: 1,
+    };
+    let (_first, omitted) = fit_page(&config(), &read_limit)?;
+    assert_eq!((omitted.all, omitted.reason), (HIDDEN_RESOLVED - 1, "read_limit"));
+    let sized = PublishedRead {
+        incidents: resolved_set(),
+        total: resolved_set().len(),
+        ongoing: 0,
+    };
+    let (_second, cut) = fit_page(&config(), &sized)?;
+    assert!(cut.all > 0 && cut.reason == "size");
+    assert_eq!(declared_services(&config()), vec![SERVICE.to_owned()]);
     Ok(())
 }

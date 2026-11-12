@@ -46,12 +46,18 @@ pub fn incident_item(incident: &PublicIncident) -> String {
         .iter()
         .map(|update| format!("<li>{}: {}</li>", update.at, encode_text(&update.message)))
         .collect();
+    let cut = if incident.omitted_updates > 0 {
+        format!("<p>{} older updates not shown.</p>", incident.omitted_updates)
+    } else {
+        String::new()
+    };
     format!(
-        "<li><h3>{}</h3><p>{}, started {}</p><ul>{}</ul></li>",
+        "<li><h3>{}</h3><p>{}, started {}</p><ul>{}</ul>{}</li>",
         encode_text(&incident.title),
         encode_text(&incident.component),
         incident.started_at,
-        updates
+        updates,
+        cut
     )
 }
 

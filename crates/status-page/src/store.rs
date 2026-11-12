@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use crate::model::{IncidentInput, IncidentUpdateInput};
+use crate::model::{IncidentInput, IncidentUpdateInput, DEFAULT_LIMITS};
 use crate::store_model::{Cell, IncidentRef, NewIncident, Param, PublishedRead, Statement};
 use crate::types::Row;
 use core_pg::migrate::Migration;
@@ -27,6 +27,18 @@ pub const MAX_PUBLISHED: u32 = 500;
 
 
 pub const MAX_UPDATES_PER_INCIDENT: i64 = 100;
+
+
+/// Newest updates the public read takes per incident; the others are counted, not read.
+pub const MAX_UPDATES_READ_PER_INCIDENT: i64 = 20;
+
+
+/// Bytes of update messages one read takes in all, in incident order then newest first; what it cuts is counted per incident.
+pub const MAX_UPDATE_BYTES_PER_TICK: i64 = 2_000_000;
+
+
+/// Declared services one read takes: the page model's component limit.
+pub const MAX_DECLARED_SERVICES: usize = DEFAULT_LIMITS.max_components;
 
 
 pub const MAX_SERVICE_CHARACTERS: usize = 128;
@@ -65,6 +77,9 @@ pub const COL_TOTAL: usize = 0;
 pub const COL_ONGOING: usize = 1;
 
 
+pub const COL_UPDATE_COUNT: usize = 5;
+
+
 pub const COL_UPDATE_AT: usize = 1;
 
 
@@ -89,19 +104,25 @@ pub const RESOLVE_SQL: &str = "UPDATE status_incidents SET resolved_at = $4, ver
     WHERE tenant = $1 AND id = $2 AND version = $3 AND resolved_at IS NULL RETURNING id, version";
 
 
-/// Params: `$2` limit. Unresolved first, so the limit never cuts an ongoing outage before a resolved one; no internal note or assignee column.
-pub const PUBLISHED_SQL: &str = "SELECT id, service, public_title, started_at, resolved_at FROM status_incidents \
-    WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2";
+/// Params: `$2` limit, `$3` declared services (`text[]`). Unresolved first, so the limit never cuts an ongoing outage before a resolved one; no internal note column; last column is the exact update count.
+pub const PUBLISHED_SQL: &str = "SELECT id, service, public_title, started_at, resolved_at, \
+    (SELECT count(*) FROM status_incident_updates WHERE tenant = $1 AND incident = status_incidents.id) FROM status_incidents \
+    WHERE tenant = $1 AND published AND service = ANY($3) ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2";
 
 
-/// Params: `$2` limit, the same one as `PUBLISHED_SQL`. No internal note column is selected.
-pub const UPDATES_SQL: &str = "SELECT incident, at, message FROM status_incident_updates WHERE tenant = $1 AND incident IN \
-    (SELECT id FROM status_incidents WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2) \
-    ORDER BY incident, at, seq";
+/// Params: `$2` incident limit and `$5` declared services (as `PUBLISHED_SQL`), `$3` updates per incident, `$4` message bytes in all. No internal note column is selected.
+pub const UPDATES_SQL: &str = "WITH p AS (SELECT id, (resolved_at IS NULL) AS open, started_at FROM status_incidents \
+    WHERE tenant = $1 AND published AND service = ANY($5) ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2), \
+    r AS (SELECT u.incident, u.at, u.message, u.seq, \
+    sum(octet_length(u.message)) OVER (ORDER BY p.open DESC, p.started_at DESC, p.id DESC, u.at DESC, u.seq DESC) AS running \
+    FROM p CROSS JOIN LATERAL (SELECT incident, at, message, seq FROM status_incident_updates \
+    WHERE tenant = $1 AND incident = p.id ORDER BY at DESC, seq DESC LIMIT $3) u) \
+    SELECT incident, at, message FROM r WHERE running <= $4 ORDER BY incident, at, seq";
 
 
-/// No param. Columns: published incidents of the tenant, the unresolved ones among them.
-pub const COUNTS_SQL: &str = "SELECT count(*), count(*) FILTER (WHERE resolved_at IS NULL) FROM status_incidents WHERE tenant = $1 AND published";
+/// Params: `$2` declared services. Columns: published incidents of the tenant on them, the unresolved ones among them.
+pub const COUNTS_SQL: &str =
+    "SELECT count(*), count(*) FILTER (WHERE resolved_at IS NULL) FROM status_incidents WHERE tenant = $1 AND published AND service = ANY($2)";
 
 
 pub fn is_refused(character: char, multiline: bool) -> bool {
@@ -268,6 +289,9 @@ pub fn group_updates(rows: &[Row]) -> Result<BTreeMap<i64, Vec<IncidentUpdateInp
 /// The internal note, assignee, assets and addresses are never selected: they come back empty.
 pub fn decode_incident(tenant: &str, row: &Row, grouped: &BTreeMap<i64, Vec<IncidentUpdateInput>>) -> Result<IncidentInput, StoreError> {
     let id = cell_int(row, COL_ID, "id")?;
+    let update_count =
+        usize::try_from(cell_int(row, COL_UPDATE_COUNT, "update_count")?).map_err(|_negative| StoreError::BadRow { column: "update_count" })?;
+    let updates = grouped.get(&id).map_or_else(Vec::new, Clone::clone);
     Ok(IncidentInput {
         tenant: tenant.to_owned(),
         service: cell_text(row, COL_SERVICE, "service")?,
@@ -275,7 +299,8 @@ pub fn decode_incident(tenant: &str, row: &Row, grouped: &BTreeMap<i64, Vec<Inci
         public_title: cell_text(row, COL_TITLE, "public_title")?,
         started_at: cell_int(row, COL_STARTED_AT, "started_at")?,
         resolved_at: cell_optional_int(row, COL_RESOLVED_AT, "resolved_at")?,
-        updates: grouped.get(&id).map_or_else(Vec::new, Clone::clone),
+        omitted_updates: update_count.saturating_sub(updates.len()),
+        updates,
         internal_note: String::new(),
         assignee: String::new(),
         asset_ids: Vec::new(),
@@ -284,8 +309,27 @@ pub fn decode_incident(tenant: &str, row: &Row, grouped: &BTreeMap<i64, Vec<Inci
 }
 
 
-/// The published incidents of the tenant, unresolved first then newest first, at most `limit` (itself at most `MAX_PUBLISHED`), ready for `render`.
-pub async fn published_incidents<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, limit: u32) -> Result<Vec<IncidentInput>, StoreError>
+/// At most `MAX_DECLARED_SERVICES` services, each within the page model's text limit and free of control characters.
+pub fn check_services(services: &[String]) -> Result<(), StoreError> {
+    if services.len() > MAX_DECLARED_SERVICES {
+        Err(StoreError::TooManyServices {
+            limit: MAX_DECLARED_SERVICES,
+        })
+    } else {
+        services
+            .iter()
+            .try_for_each(|service| check_text("service", service, DEFAULT_LIMITS.max_text_bytes, false))
+    }
+}
+
+
+/// The published incidents of the tenant on the declared services, unresolved first then newest first, at most `limit` (itself at most `MAX_PUBLISHED`).
+pub async fn published_incidents<Executor, Pending>(
+    exec: &mut Executor,
+    scope: &TenantScope,
+    services: &[String],
+    limit: u32,
+) -> Result<Vec<IncidentInput>, StoreError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
@@ -293,8 +337,21 @@ where
     if limit == 0 || limit > MAX_PUBLISHED {
         Err(StoreError::LimitOutOfRange { limit, max: MAX_PUBLISHED })
     } else {
-        let incidents = run(exec, scope, PUBLISHED_SQL, vec![Param::Int(i64::from(limit))]).await?;
-        let updates = run(exec, scope, UPDATES_SQL, vec![Param::Int(i64::from(limit))]).await?;
+        check_services(services)?;
+        let incidents = run(
+            exec,
+            scope,
+            PUBLISHED_SQL,
+            vec![Param::Int(i64::from(limit)), Param::Texts(services.to_vec())],
+        )
+        .await?;
+        let update_params = vec![
+            Param::Int(i64::from(limit)),
+            Param::Int(MAX_UPDATES_READ_PER_INCIDENT),
+            Param::Int(MAX_UPDATE_BYTES_PER_TICK),
+            Param::Texts(services.to_vec()),
+        ];
+        let updates = run(exec, scope, UPDATES_SQL, update_params).await?;
         let grouped = group_updates(&updates)?;
         incidents.iter().map(|row| decode_incident(tenant_of(scope), row, &grouped)).collect()
     }
@@ -307,14 +364,19 @@ pub fn count_of(rows: &[Row], index: usize, column: &'static str) -> Result<usiz
 }
 
 
-/// The rows plus the tenant's exact counts, so the page can state what the limit left out.
-pub async fn read_published<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, limit: u32) -> Result<PublishedRead, StoreError>
+/// The rows plus the exact counts of the declared services, so the page can state what the limit left out.
+pub async fn read_published<Executor, Pending>(
+    exec: &mut Executor,
+    scope: &TenantScope,
+    services: &[String],
+    limit: u32,
+) -> Result<PublishedRead, StoreError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    let incidents = published_incidents(exec, scope, limit).await?;
-    let counts = run(exec, scope, COUNTS_SQL, Vec::new()).await?;
+    let incidents = published_incidents(exec, scope, services, limit).await?;
+    let counts = run(exec, scope, COUNTS_SQL, vec![Param::Texts(services.to_vec())]).await?;
     Ok(PublishedRead {
         incidents,
         total: count_of(&counts, COL_TOTAL, "total")?,

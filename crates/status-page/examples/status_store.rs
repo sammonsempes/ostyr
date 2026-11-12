@@ -44,6 +44,7 @@ fn bound(params: &[Param]) -> Vec<Box<dyn ToSql + Sync>> {
                 Param::Int(value) => Box::new(*value),
                 Param::Text(value) => Box::new(value.clone()),
                 Param::Bool(value) => Box::new(*value),
+                Param::Texts(value) => Box::new(value.clone()),
             }
         })
         .collect()
@@ -142,7 +143,8 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
         "A resolves its own: {:?}",
         resolve_incident(&mut exec, &scope_a, updated, STARTED + STEP).await?
     )?;
-    let published = published_incidents(&mut exec, &scope_a, MAX_PUBLISHED).await?;
+    let services = vec![SERVICE.to_owned()];
+    let published = published_incidents(&mut exec, &scope_a, &services, MAX_PUBLISHED).await?;
     let page = render(&page_config(tenant_a), &[], &published, &[], STARTED + STEP, &DEFAULT_LIMITS)?;
     writeln!(out, "-- tenant A page JSON\n{}", page.json)?;
     writeln!(
