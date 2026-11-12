@@ -438,19 +438,24 @@ async fn later_runs_reach_the_devices_the_first_run_cut() -> TestResult {
 
 
 #[tokio::test]
-async fn a_lookup_failure_falls_back_to_batch_order() -> TestResult {
+async fn a_lookup_failure_alerts_nothing_raises_no_flood_and_keeps_the_cursor() -> TestResult {
     let scope = tenant_scope("acme")?;
     let store = Store {
         fail_lookup: true,
         ..Store::default()
     };
     let exec = executor(&store);
+    set_cursor(&store, "acme", "1")?;
     let leases = many_leases(FLOOD_MACS)?;
-    assert!(alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await.skip.is_empty());
+    let lookup = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    assert!(lookup.failed && lookup.scan_order.is_empty() && lookup.found == 0);
+    assert_eq!(lookup.skip.len(), FLOOD_MACS);
     let first = run_once(&exec, &scope, &leases).await?;
-    let second = run_once(&exec, &scope, &leases).await?;
-    assert_eq!((first.len(), second.len()), (MAX_UNKNOWN_PER_RUN + 1, MAX_UNKNOWN_PER_RUN + 1));
-    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), MAX_UNKNOWN_PER_RUN + 1);
+    assert!(first.is_empty());
+    assert!(store.rows.lock().map_err(|_poisoned| "poisoned")?.is_empty());
+    assert_eq!(cursor_of(&store, "acme")?, Some("1".to_owned()));
+    let failing = alerted_macs(&exec, &scope, &candidate_macs(&leases, &BTreeSet::new())).await;
+    assert!(failing.is_err());
     Ok(())
 }
 
@@ -465,14 +470,14 @@ async fn the_lookup_is_bounded_scoped_and_skipped_when_empty() -> TestResult {
     let all = candidate_macs(&leases, &BTreeSet::new());
     assert_eq!(all.len(), MAX_LOOKUP_MACS + EXTRA);
     let candidates: Vec<String> = all.into_iter().take(MAX_LOOKUP_MACS).collect();
-    assert!(alerted_macs(&exec, &acme, &[]).await.is_empty());
+    assert!(alerted_macs(&exec, &acme, &[]).await?.is_empty());
     assert_eq!(*store.lookups.lock().map_err(|_poisoned| "poisoned")?, 0);
     let (alerts, _rejected) = unknown_device_alerts(&acme, &leases, &BTreeSet::new(), NOW_MICROS);
     store_unknown_device_alerts(&exec, &acme, &alerts).await?;
-    assert_eq!(alerted_macs(&exec, &acme, &candidates).await.len(), MAX_UNKNOWN_PER_RUN);
-    assert!(alerted_macs(&exec, &other, &candidates).await.is_empty());
+    assert_eq!(alerted_macs(&exec, &acme, &candidates).await?.len(), MAX_UNKNOWN_PER_RUN);
+    assert!(alerted_macs(&exec, &other, &candidates).await?.is_empty());
     let too_many: Vec<String> = candidates.iter().chain(candidates.iter()).cloned().collect();
-    assert_eq!(alerted_macs(&exec, &acme, &too_many).await.len(), MAX_UNKNOWN_PER_RUN);
+    assert_eq!(alerted_macs(&exec, &acme, &too_many).await?.len(), MAX_UNKNOWN_PER_RUN);
     assert_eq!(*store.lookups.lock().map_err(|_poisoned| "poisoned")?, EXTRA);
     Ok(())
 }
@@ -607,7 +612,7 @@ async fn the_chunk_count_per_run_is_capped() -> TestResult {
 
 
 #[tokio::test]
-async fn a_lookup_failure_mid_chunk_keeps_the_earlier_answers_and_stops() -> TestResult {
+async fn a_lookup_failure_mid_scan_discards_the_earlier_answers_and_stores_nothing() -> TestResult {
     let scope = tenant_scope("acme")?;
     let store = Store {
         fail_from_lookup: Some(1),
@@ -620,11 +625,13 @@ async fn a_lookup_failure_mid_chunk_keeps_the_earlier_answers_and_stops() -> Tes
         let id = alert_id("acme", UNKNOWN_RULE_ID, &[format!("mac:{mac}")]);
         store.rows.lock().map_err(|_poisoned| "poisoned")?.insert(("acme".to_owned(), id));
     }
-    let alerted = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await.skip;
-    assert_eq!((alerted.len(), lookups_so_far(&store)), (MAX_LOOKUP_MACS * TWO_CHUNKS, 1));
-    let known_or_alerted = alerted;
-    let (alerts, _rejected) = unknown_device_alerts(&scope, &leases, &known_or_alerted, NOW_MICROS);
-    assert_eq!(alerts.len(), MAX_UNKNOWN_PER_RUN + 1);
+    let stored = store.rows.lock().map_err(|_poisoned| "poisoned")?.len();
+    let lookup = alerted_in_batch(&exec, &scope, &leases, &BTreeSet::new()).await;
+    assert!(lookup.failed);
+    assert_eq!((lookup.skip.len(), lookups_so_far(&store)), (MAX_LOOKUP_MACS * THREE_CHUNKS, 1));
+    let (alerts, _rejected) = unknown_device_alerts_in_order(&scope, &leases, &lookup.skip, NOW_MICROS, &lookup.scan_order);
+    assert!(alerts.is_empty());
+    assert_eq!(store.rows.lock().map_err(|_poisoned| "poisoned")?.len(), stored);
     Ok(())
 }
 

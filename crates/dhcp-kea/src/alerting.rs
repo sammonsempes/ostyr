@@ -163,8 +163,8 @@ pub fn candidate_macs(leases: &[Converted], known_macs: &BTreeSet<String>) -> Ve
 }
 
 
-/// The candidates already holding a stored alert of the tenant (one query, at most `MAX_LOOKUP_MACS` ids); empty on failure.
-pub async fn alerted_macs(exec: Executor<'_, '_>, scope: &TenantScope, candidates: &[String]) -> BTreeSet<String> {
+/// The candidates already holding a stored alert of the tenant (one query, at most `MAX_LOOKUP_MACS` ids); the error text when the query fails.
+pub async fn alerted_macs(exec: Executor<'_, '_>, scope: &TenantScope, candidates: &[String]) -> Result<BTreeSet<String>, String> {
     let tenant = tenant_of(scope);
     let by_id: BTreeMap<String, &String> = candidates
         .iter()
@@ -177,28 +177,24 @@ pub async fn alerted_macs(exec: Executor<'_, '_>, scope: &TenantScope, candidate
         let document = json!(by_id.keys().collect::<Vec<_>>()).to_string();
         exec(scope.clone(), ALERTED_SQL, vec![document]).await.map_err(|error| error.to_string())
     };
-    match found {
-        Ok(rows) => rows
-            .iter()
+    found.map(|rows| {
+        rows.iter()
             .filter_map(|row| row.first())
             .filter_map(|id| by_id.get(id.as_str()))
             .map(|mac| (*mac).clone())
-            .collect(),
-        Err(reason) => {
-            tracing::warn!(reason, "dhcp already-alerted lookup failed, cap in batch order");
-            BTreeSet::new()
-        }
-    }
+            .collect()
+    })
 }
 
 
-/// What the lookup learned: the MACs to leave out of the run, the scanned MACs in scan order, how many of them already held an alert, and the chunk the next run starts at.
+/// What the lookup learned: the MACs to leave out of the run, the scanned MACs in scan order, how many of them already held an alert, the chunk the next run starts at, and whether a query failed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lookup {
     pub skip: BTreeSet<String>,
     pub scan_order: Vec<String>,
     pub found: usize,
     pub next_chunk: usize,
+    pub failed: bool,
 }
 
 
@@ -226,20 +222,59 @@ pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, lease
     let mut scanned = 0;
     let mut found_total = 0;
     let mut done = false;
+    let mut failure: Option<String> = None;
     while !done && fresh < MAX_UNKNOWN_PER_RUN {
         match order.next() {
             Some((index, chunk)) => {
                 visited.insert(index);
-                let found = alerted_macs(exec, scope, chunk).await;
-                fresh += chunk.len() - found.len();
-                scanned += 1;
-                found_total += found.len();
-                alerted.extend(found);
-                scan_order.extend(chunk.iter().cloned());
+                match alerted_macs(exec, scope, chunk).await {
+                    Ok(found) => {
+                        fresh += chunk.len() - found.len();
+                        scanned += 1;
+                        found_total += found.len();
+                        alerted.extend(found);
+                        scan_order.extend(chunk.iter().cloned());
+                    }
+                    Err(reason) => {
+                        failure = Some(reason);
+                        done = true;
+                    }
+                }
             }
             None => done = true,
         }
     }
+    if let Some(reason) = failure {
+        tracing::warn!(reason, "dhcp already-alerted lookup failed, run alerts nothing");
+        failed_lookup(candidates, start)
+    } else {
+        finish_lookup(&chunks, &visited, alerted, scan_order, (start, scanned, fresh, found_total))
+    }
+}
+
+
+/// The lookup of a failed run: every candidate is left out (fresh and alerted cannot be told apart), so no alert and no flood; the cursor stays.
+pub fn failed_lookup(candidates: Vec<String>, start: usize) -> Lookup {
+    Lookup {
+        skip: candidates.into_iter().collect(),
+        failed: true,
+        next_chunk: start,
+        ..Lookup::default()
+    }
+}
+
+
+/// The lookup of a run whose queries all answered: the unscanned chunks join the skipped MACs.
+pub fn finish_lookup(
+    chunks: &[&[String]],
+    visited: &BTreeSet<usize>,
+    mut alerted: BTreeSet<String>,
+    scan_order: Vec<String>,
+    progress: (usize, usize, usize, usize),
+) -> Lookup {
+    let (start, scanned, fresh, found_total) = progress;
+    let chunk_count = chunks.len();
+    let total: usize = chunks.iter().map(|chunk| chunk.len()).sum();
     let deferred = chunks
         .iter()
         .enumerate()
@@ -247,7 +282,6 @@ pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, lease
         .flat_map(|(_index, chunk)| chunk.iter().cloned());
     alerted.extend(deferred);
     if fresh < MAX_UNKNOWN_PER_RUN && scanned < chunk_count {
-        let total = candidates.len();
         tracing::warn!(total, scanned, start, "dhcp lookup cap reached");
     }
     Lookup {
@@ -255,13 +289,16 @@ pub async fn alerted_in_batch(exec: Executor<'_, '_>, scope: &TenantScope, lease
         scan_order,
         found: found_total,
         next_chunk: next_chunk_of(start, scanned, chunk_count, fresh),
+        failed: false,
     }
 }
 
 
 /// Stores the position the next run starts at; call it after the alerts were stored, so a failed insert repeats the chunks instead of skipping them.
 pub async fn advance_cursor(exec: Executor<'_, '_>, scope: &TenantScope, lookup: &Lookup) {
-    write_cursor(exec, scope, lookup.next_chunk).await;
+    if !lookup.failed {
+        write_cursor(exec, scope, lookup.next_chunk).await;
+    }
 }
 
 
