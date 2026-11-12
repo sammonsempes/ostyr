@@ -1,5 +1,5 @@
 use crate::error::DiscoveryError;
-use crate::model::{Counters, EdgeKey, EdgeStats, Observation, Scope, ServiceMap, LOWEST_KEY, PROTOCOL_SCTP, WELL_KNOWN_PORT_LIMIT};
+use crate::model::{Counters, EdgeKey, EdgeStats, Observation, Scope, ServiceMap, LOWEST_KEY, PROTOCOL_SCTP, TCP_SYN, WELL_KNOWN_PORT_LIMIT};
 use crate::scope::in_scope;
 use crate::types::Millis;
 use core_pg::scope::{tenant_of, tenant_scope};
@@ -51,12 +51,18 @@ pub fn edges(map: &ServiceMap) -> impl Iterator<Item = (&EdgeKey, &EdgeStats)> {
 }
 
 
+/// A TCP record carrying SYN from a higher to a lower port: the client's side of a connection, so the destination serves.
+pub fn is_client_syn(record: &FlowRecord) -> bool {
+    record.protocol == PROTOCOL_TCP && record.tcp_flags & TCP_SYN != 0 && record.source_port > record.destination_port
+}
+
+
 /// The edge of one record: client, service side and service port (rule in the crate notes).
 pub fn edge_key(record: &FlowRecord) -> EdgeKey {
     let source = record.source.to_canonical();
     let destination = record.destination.to_canonical();
     let has_ports = matches!(record.protocol, PROTOCOL_TCP | PROTOCOL_UDP | PROTOCOL_SCTP);
-    let source_serves = record.source_port < WELL_KNOWN_PORT_LIMIT && record.source_port < record.destination_port;
+    let source_serves = !is_client_syn(record) && record.source_port < WELL_KNOWN_PORT_LIMIT && record.source_port < record.destination_port;
     match (has_ports, source_serves) {
         (false, _) => EdgeKey {
             source,
@@ -76,6 +82,25 @@ pub fn edge_key(record: &FlowRecord) -> EdgeKey {
             port: record.destination_port,
             protocol: record.protocol,
         },
+    }
+}
+
+
+/// The edge a record is recorded on: the reply of a service on a port of 1024 or above joins the edge its connection already has.
+pub fn resolve_key(map: &ServiceMap, record: &FlowRecord) -> EdgeKey {
+    let key = edge_key(record);
+    let service_is_source = EdgeKey {
+        source: record.destination.to_canonical(),
+        destination: record.source.to_canonical(),
+        port: record.source_port,
+        protocol: record.protocol,
+    };
+    let has_ports = matches!(record.protocol, PROTOCOL_TCP | PROTOCOL_UDP | PROTOCOL_SCTP);
+    let joins = has_ports && !is_client_syn(record) && !map.edges.contains_key(&key) && map.edges.contains_key(&service_is_source);
+    if joins {
+        service_is_source
+    } else {
+        key
     }
 }
 
@@ -128,7 +153,7 @@ fn observe_in_tenant(map: &mut ServiceMap, record: &FlowRecord, now_ms: Millis) 
     if owned {
         let (first_ms, last_ms, clamped) = seen_times(record, now_ms);
         map.counters.clamped_times += u64::from(clamped);
-        record_edge(map, edge_key(record), record, first_ms, last_ms);
+        record_edge(map, resolve_key(map, record), record, first_ms, last_ms);
         Observation::Recorded
     } else {
         map.counters.out_of_scope += 1;
@@ -156,6 +181,6 @@ pub fn expire(map: &mut ServiceMap, now_ms: Millis) -> usize {
     expired.iter().for_each(|(_, key)| {
         map.edges.remove(key);
     });
-    map.counters.expired += u64::try_from(expired.len()).unwrap_or(u64::MAX);
+    map.counters.expired = expired.iter().fold(map.counters.expired, |count, _| count.saturating_add(1));
     expired.len()
 }

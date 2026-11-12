@@ -187,3 +187,42 @@ fn membership_follows_the_ranges() -> TestResult {
         Ok::<(), Box<dyn Error>>(())
     })
 }
+
+
+const MAPPED_RANGES: [&str; 5] = ["::ffff:10.0.0.0/104", "::ffff:0:0/96", "::/96", "::1/128", "::/32"];
+
+
+const BYTE_VALUES: usize = 256;
+
+
+#[test]
+fn ranges_that_merge_beyond_the_minimum_prefix_are_refused() -> TestResult {
+    let all_slash_8: Vec<String> = (0..BYTE_VALUES).map(|first| format!("{first}.0.0.0/8")).collect();
+    let texts: Vec<&str> = all_slash_8.iter().map(String::as_str).collect();
+    let refused = validate_scope(&file_of(&texts, THIRTY, None)?);
+    assert!(matches!(refused, Err(DiscoveryError::RangeTooBroad { .. })), "{refused:?}");
+    let pair = validate_scope(&file_of(&["10.0.0.0/8", "11.0.0.0/8"], THIRTY, None)?);
+    assert!(matches!(pair, Err(DiscoveryError::RangeTooBroad { .. })), "{pair:?}");
+    let six = validate_scope(&file_of(&["2001::/32", "2001:1::/32"], THIRTY, None)?);
+    assert!(matches!(six, Err(DiscoveryError::RangeTooBroad { .. })), "{six:?}");
+    assert_eq!(
+        validate_scope(&file_of(&["10.0.0.0/8", "12.0.0.0/8"], THIRTY, None)?)?.ranges.len(),
+        FILE_RANGES
+    );
+    Ok(())
+}
+
+
+#[test]
+fn mapped_and_compatible_ranges_are_refused_with_their_own_error() -> TestResult {
+    MAPPED_RANGES.iter().try_for_each(|mapped| {
+        let refused = validate_scope(&file_of(&["10.0.0.0/24", mapped], THIRTY, None)?);
+        assert!(matches!(refused, Err(DiscoveryError::MappedRange { .. })), "{mapped}: {refused:?}");
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+    assert_eq!(
+        validate_scope(&file_of(&["2001:db8::/32", "10.0.0.0/24"], THIRTY, None)?)?.ranges.len(),
+        FILE_RANGES
+    );
+    Ok(())
+}

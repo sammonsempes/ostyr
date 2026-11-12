@@ -350,3 +350,91 @@ fn counters_saturate_instead_of_wrapping() -> TestResult {
     assert_eq!((stats.bytes, stats.packets, stats.flows), (u64::MAX, u64::MAX, TWICE));
     Ok(())
 }
+
+
+const SERVICE_PORT: u16 = 8080;
+
+
+const LOW_CLIENT_PORT: u16 = 900;
+
+
+const SYN: u8 = 0x02;
+
+
+const SYN_ACK: u8 = 0x12;
+
+
+const ACK_ONLY: u8 = 0x10;
+
+
+fn flagged(record: FlowRecord, flags: u8) -> FlowRecord {
+    FlowRecord { tcp_flags: flags, ..record }
+}
+
+
+#[test]
+fn a_service_above_1023_keeps_one_edge_with_its_replies() -> TestResult {
+    let mut map = map_with(BIG_CAP, RETENTION_DAYS)?;
+    let request = flagged(flow(CLIENT, SERVER, (CLIENT_PORT, SERVICE_PORT), TCP, (NOW_MS, NOW_MS))?, SYN_ACK);
+    let reply = flagged(flow(SERVER, CLIENT, (SERVICE_PORT, CLIENT_PORT), TCP, (NOW_MS, NOW_MS))?, SYN_ACK);
+    observe(&mut map, TENANT, &request, NOW_MS);
+    observe(&mut map, TENANT, &reply, NOW_MS);
+    assert_eq!(edge_count(&map), 1);
+    let stats = edge(&map, &key(CLIENT, SERVER, SERVICE_PORT, TCP)?).ok_or("edge missing")?;
+    assert_eq!(stats.flows, TWICE);
+    Ok(())
+}
+
+
+#[test]
+fn a_syn_from_a_higher_port_marks_the_destination_as_the_service() -> TestResult {
+    let syn = flagged(flow(SERVER, CLIENT, (HIGH_PORT, SSH_PORT), TCP, (NOW_MS, NOW_MS))?, SYN);
+    assert_eq!(edge_key(&syn), key(SERVER, CLIENT, SSH_PORT, TCP)?);
+    let wins_over_low_source = flagged(flow(SERVER, CLIENT, (HIGH_PORT, HTTPS), TCP, (NOW_MS, NOW_MS))?, SYN);
+    assert_eq!(edge_key(&wins_over_low_source), key(SERVER, CLIENT, HTTPS, TCP)?);
+    let no_syn = flagged(flow(SERVER, CLIENT, (HIGH_PORT, SSH_PORT), TCP, (NOW_MS, NOW_MS))?, ACK_ONLY);
+    assert_eq!(edge_key(&no_syn), key(SERVER, CLIENT, SSH_PORT, TCP)?);
+    let udp = flagged(flow(CLIENT, SERVER, (SSH_PORT, DNS_PORT), UDP, (NOW_MS, NOW_MS))?, SYN);
+    assert_eq!(edge_key(&udp), key(SERVER, CLIENT, SSH_PORT, UDP)?);
+    let tcp_lower_source = flagged(flow(CLIENT, SERVER, (SSH_PORT, DNS_PORT), TCP, (NOW_MS, NOW_MS))?, SYN);
+    assert_eq!(edge_key(&tcp_lower_source), key(SERVER, CLIENT, SSH_PORT, TCP)?);
+    Ok(())
+}
+
+
+#[test]
+fn a_client_syn_never_joins_the_reverse_edge_and_a_low_client_port_is_a_known_limit() -> TestResult {
+    let mut map = map_with(BIG_CAP, RETENTION_DAYS)?;
+    let request = flagged(flow(CLIENT, SERVER, (LOW_CLIENT_PORT, SERVICE_PORT), TCP, (NOW_MS, NOW_MS))?, SYN);
+    let syn_ack = flagged(flow(SERVER, CLIENT, (SERVICE_PORT, LOW_CLIENT_PORT), TCP, (NOW_MS, NOW_MS))?, SYN_ACK);
+    observe(&mut map, TENANT, &request, NOW_MS);
+    observe(&mut map, TENANT, &syn_ack, NOW_MS);
+    assert_eq!(
+        edge(&map, &key(SERVER, CLIENT, LOW_CLIENT_PORT, TCP)?).ok_or("edge missing")?.flows,
+        TWICE
+    );
+    let normal = flagged(flow(CLIENT, SERVER, (CLIENT_PORT, SERVICE_PORT), TCP, (NOW_MS, NOW_MS))?, SYN_ACK);
+    observe(&mut map, TENANT, &normal, NOW_MS);
+    let own = flagged(flow(SERVER, CLIENT, (HIGH_PORT, SERVICE_PORT), TCP, (NOW_MS, NOW_MS))?, SYN);
+    observe(&mut map, TENANT, &own, NOW_MS);
+    assert_eq!(edge(&map, &key(SERVER, CLIENT, SERVICE_PORT, TCP)?).ok_or("edge missing")?.flows, 1);
+    assert_eq!(edge(&map, &key(CLIENT, SERVER, SERVICE_PORT, TCP)?).ok_or("edge missing")?.flows, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_reply_without_a_matching_edge_and_other_protocols_keep_their_own_edge() -> TestResult {
+    let mut map = map_with(BIG_CAP, RETENTION_DAYS)?;
+    let lonely_reply = flow(SERVER, CLIENT, (SERVICE_PORT, CLIENT_PORT), TCP, (NOW_MS, NOW_MS))?;
+    observe(&mut map, TENANT, &lonely_reply, NOW_MS);
+    assert_eq!(edge_count(&map), 1);
+    assert!(edge(&map, &key(SERVER, CLIENT, CLIENT_PORT, TCP)?).is_some());
+    let echo = flow(CLIENT, SERVER, (0, ICMP_ECHO_FIELD), ICMP, (NOW_MS, NOW_MS))?;
+    let echo_reply = flow(SERVER, CLIENT, (0, 0), ICMP, (NOW_MS, NOW_MS))?;
+    observe(&mut map, TENANT, &echo, NOW_MS);
+    observe(&mut map, TENANT, &echo_reply, NOW_MS);
+    assert_eq!(edge_count(&map), THREE);
+    assert!(edge(&map, &key(SERVER, CLIENT, 0, ICMP)?).is_some());
+    Ok(())
+}

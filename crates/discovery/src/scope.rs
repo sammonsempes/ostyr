@@ -5,8 +5,8 @@ use crate::model::{
 };
 use crate::types::ScopeResult;
 use core_config::load::load_file;
-use ipnet::IpNet;
-use std::net::IpAddr;
+use ipnet::{IpNet, Ipv6Net};
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::Path;
 
 
@@ -32,6 +32,33 @@ fn check_prefix(range: &IpNet) -> Result<(), DiscoveryError> {
 }
 
 
+const MAPPED_PREFIX: u8 = 96;
+
+
+const MAPPED_SEGMENT: u16 = 0xffff;
+
+
+const COMPATIBLE_BLOCK: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::UNSPECIFIED, MAPPED_PREFIX);
+
+
+const MAPPED_BLOCK: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0, 0, 0, 0, 0, MAPPED_SEGMENT, 0, 0), MAPPED_PREFIX);
+
+
+fn check_not_mapped(range: &IpNet) -> Result<(), DiscoveryError> {
+    let overlaps = match range {
+        IpNet::V4(_) => false,
+        IpNet::V6(net) => [COMPATIBLE_BLOCK, MAPPED_BLOCK]
+            .iter()
+            .any(|block| block.contains(net) || net.contains(block)),
+    };
+    if overlaps {
+        Err(DiscoveryError::MappedRange { range: *range })
+    } else {
+        Ok(())
+    }
+}
+
+
 fn check_retention(days: u32) -> Result<(), DiscoveryError> {
     if (MIN_RETENTION_DAYS..=MAX_RETENTION_DAYS).contains(&days) {
         Ok(())
@@ -50,15 +77,17 @@ fn check_edges(max_edges: usize) -> Result<(), DiscoveryError> {
 }
 
 
-/// Checks a scope file: range count and prefixes (before anything is merged), retention and edge cap; ranges are masked, merged and sorted.
+/// Checks a scope file: range count, prefixes and mapped ranges (before anything is merged, prefixes again after), retention and edge cap; ranges are masked, merged and sorted.
 pub fn validate_scope(file: &ScopeFile) -> ScopeResult {
     check_count(file.owned_ranges.len())?;
     file.owned_ranges.iter().try_for_each(check_prefix)?;
+    file.owned_ranges.iter().try_for_each(check_not_mapped)?;
     check_retention(file.retention_days)?;
     let max_edges = file.max_edges.unwrap_or(DEFAULT_MAX_EDGES);
     check_edges(max_edges)?;
     let masked: Vec<IpNet> = file.owned_ranges.iter().map(IpNet::trunc).collect();
     let mut ranges = IpNet::aggregate(&masked);
+    ranges.iter().try_for_each(check_prefix)?;
     ranges.sort();
     Ok(Scope {
         ranges,
