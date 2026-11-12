@@ -178,10 +178,13 @@ fn attributes(root: &Value, limits: &Limits, rejected: &mut usize, unreadable: &
 }
 
 
-fn nvme(root: &Value, rejected: &mut usize, unreadable: &mut Vec<String>) -> Option<NvmeHealth> {
+fn nvme(root: &Value, is_nvme: bool, rejected: &mut usize, unreadable: &mut Vec<String>) -> Option<NvmeHealth> {
     root.get("nvme_smart_health_information_log").map(|log| {
         if !log.is_object() {
             unreadable.push("nvme log".to_string());
+        }
+        if is_nvme && log.is_object() && log.get("critical_warning").is_none() {
+            unreadable.push("nvme critical_warning".to_string());
         }
         let mut field = |name: &str| {
             let parsed = unsigned(log.get(name), rejected);
@@ -224,8 +227,9 @@ fn assemble(root: &Value, limits: &Limits) -> SmartReport {
         exit.is_none(),
     );
     let (attribute_list, omitted_attributes) = attributes(root, limits, &mut rejected, &mut unreadable);
-    let nvme_health = nvme(root, &mut rejected, &mut unreadable);
-    if protocol_kind == Some(Protocol::Nvme) && nvme_health.is_none() {
+    let is_nvme = protocol_kind == Some(Protocol::Nvme);
+    let nvme_health = nvme(root, is_nvme, &mut rejected, &mut unreadable);
+    if is_nvme && nvme_health.is_none() {
         unreadable.push("nvme log".to_string());
     }
     SmartReport {

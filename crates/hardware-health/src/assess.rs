@@ -12,7 +12,7 @@ pub const DISK_FAILING_BIT: u8 = 0b1000;
 pub const PREFAIL_BELOW_THRESHOLD_BIT: u8 = 0b1_0000;
 
 
-pub const OLD_AGE_BIT: u8 = 0b10_0000;
+pub const PAST_THRESHOLD_BIT: u8 = 0b10_0000;
 
 
 pub const ERROR_LOG_BIT: u8 = 0b100_0000;
@@ -78,15 +78,22 @@ fn predictive_causes(report: &SmartReport) -> Vec<String> {
 }
 
 
+fn usage_cause(attribute: &Attribute) -> Option<String> {
+    let failing = attribute.prefailure == Some(false) && attribute.when_failed == Some(WhenFailed::Now);
+    failing.then(|| format!("attribute {} {}", attribute.id, attribute.name.as_deref().unwrap_or("unnamed")))
+}
+
+
 fn degraded_causes(report: &SmartReport) -> Vec<String> {
     let status = report.exit_status.unwrap_or(0);
-    [
-        (OLD_AGE_BIT, "old_age"),
+    let usage = report.attributes.iter().filter_map(usage_cause);
+    let bits = [
+        (PAST_THRESHOLD_BIT, "past_threshold"),
         (ERROR_LOG_BIT, "error_log"),
         (SELF_TEST_LOG_BIT, "self_test_log"),
     ]
     .iter()
     .filter(|(bit, _)| status & bit != 0)
-    .map(|(_, cause)| (*cause).to_string())
-    .collect()
+    .map(|(_, cause)| (*cause).to_string());
+    usage.chain(bits).collect()
 }
