@@ -27,6 +27,7 @@ fn bound(params: &[Param]) -> Vec<Box<dyn ToSql + Sync + Send>> {
                 Param::Int(value) => Box::new(*value),
                 Param::Text(value) => Box::new(value.clone()),
                 Param::Bool(value) => Box::new(*value),
+                Param::Texts(value) => Box::new(value.clone()),
             }
         })
         .collect()
@@ -52,19 +53,19 @@ async fn execute(client: &Client, scope: TenantScope, statement: Statement, dead
 
 
 /// One read: the core-pg settings are loaded afresh, one connection is opened (connect timeout) and queried under the statement timeout.
-async fn read_once(pg_file: &Path, scope: &TenantScope) -> Result<PublishedRead, StoreError> {
+async fn read_once(pg_file: &Path, scope: &TenantScope, services: &[String]) -> Result<PublishedRead, StoreError> {
     let settings = load_settings(pg_file)?;
     let deadline = Duration::from_secs(settings.statement_timeout_secs);
     let client = connect(&settings).await?;
     let mut exec = |query_scope: &TenantScope, statement: Statement| execute(&client, query_scope.clone(), statement, deadline);
-    read_published(&mut exec, scope, MAX_PUBLISHED).await
+    read_published(&mut exec, scope, services, MAX_PUBLISHED).await
 }
 
 
 fn pg_reader(pg_file: PathBuf) -> IncidentReadFn {
-    Box::new(move |scope| {
+    Box::new(move |scope, services| {
         let path = pg_file.clone();
-        Box::pin(async move { read_once(&path, &scope).await })
+        Box::pin(async move { read_once(&path, &scope, &services).await })
     })
 }
 

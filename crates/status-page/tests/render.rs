@@ -5,9 +5,10 @@ mod types;
 use status_page::error::StatusPageError;
 use status_page::html::{figure_text, percent_text, state_label};
 use status_page::model::{
-    ComponentConfig, ComponentState, FigureInput, IncidentInput, IncidentUpdateInput, Limits, PageConfig, PublicFigure, ServiceState, DEFAULT_LIMITS,
+    ComponentConfig, ComponentState, FigureInput, IncidentInput, IncidentUpdateInput, Limits, Omitted, PageConfig, PublicFigure, ServiceState,
+    DEFAULT_LIMITS,
 };
-use status_page::render::{render, worst_state};
+use status_page::render::{render, render_omitting, worst_state};
 use types::TestResult;
 
 
@@ -109,6 +110,7 @@ fn incident(service: &str, published: bool, title: &str, started_at: i64) -> Inc
             message: "We are investigating".to_string(),
             internal_note: SECRET_NOTE.to_string(),
         }],
+        omitted_updates: 0,
         internal_note: SECRET_NOTE.to_string(),
         assignee: "alice".to_string(),
         asset_ids: vec![ASSET.to_string()],
@@ -365,5 +367,38 @@ fn bounds_are_enforced() -> TestResult {
         })
         .collect();
     assert_eq!(seen, expected);
+    Ok(())
+}
+
+
+const CUT_UPDATES: usize = 3;
+
+
+const UNLISTED: usize = 2;
+
+
+#[test]
+fn a_cut_of_updates_and_of_incidents_is_stated_never_silent() -> TestResult {
+    let plain = render(
+        &config(),
+        &[],
+        &[incident("svc-web-internal", true, "Plain", 1)],
+        &[],
+        NOW,
+        &DEFAULT_LIMITS,
+    )?;
+    assert!(!plain.json.contains("omitted_updates") && !plain.json.contains("undeclared"));
+    assert!(!plain.html.contains("older updates") && !plain.html.contains("does not list"));
+    let mut cut = incident("svc-web-internal", true, "Cut", 1);
+    cut.omitted_updates = CUT_UPDATES;
+    let omitted = Omitted {
+        all: UNLISTED,
+        ongoing: 0,
+        reason: "size",
+    };
+    let page = render_omitting(&config(), &[], &[cut], &[], NOW, &DEFAULT_LIMITS, omitted)?;
+    assert!(page.json.contains("\"omitted_updates\":3"));
+    assert!(page.html.contains("3 older updates not shown."));
+    assert!(page.json.contains("\"omitted_incidents\":2"));
     Ok(())
 }

@@ -4,7 +4,7 @@ use ipnet::IpNet;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 
@@ -124,6 +124,7 @@ pub struct IncidentInput {
     pub started_at: i64,
     pub resolved_at: Option<i64>,
     pub updates: Vec<IncidentUpdateInput>,
+    pub omitted_updates: usize,
     pub internal_note: String,
     pub assignee: String,
     pub asset_ids: Vec<String>,
@@ -169,6 +170,8 @@ pub struct PublicIncident {
     pub started_at: i64,
     pub resolved_at: Option<i64>,
     pub updates: Vec<PublicUpdate>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_updates: usize,
 }
 
 
@@ -185,6 +188,15 @@ pub struct PublicPage {
     pub omitted_incidents: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted_ongoing: usize,
+}
+
+
+/// What a page leaves out of its declared services: all incidents, the ongoing ones among them; `reason` is for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Omitted {
+    pub all: usize,
+    pub ongoing: usize,
+    pub reason: &'static str,
 }
 
 
@@ -388,6 +400,7 @@ pub struct PageState {
     pub publish_skipped: AtomicU64,
     pub omitted_seen: AtomicUsize,
     pub omitted_ongoing_seen: AtomicUsize,
+    pub omitted_size_seen: AtomicBool,
 }
 
 

@@ -4,6 +4,7 @@ pub enum Param {
     Int(i64),
     Text(String),
     Bool(bool),
+    Texts(Vec<String>),
 }
 
 

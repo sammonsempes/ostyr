@@ -1,5 +1,5 @@
 use crate::error::{StatusPageError, StoreError};
-use crate::model::{IncidentInput, PageConfig, PageState, RenderedPage, DEFAULT_LIMITS};
+use crate::model::{IncidentInput, Omitted, PageConfig, PageState, RenderedPage, DEFAULT_LIMITS};
 use crate::render::render_omitting;
 use crate::snapshot::{publish, snapshot_of};
 use crate::store_model::PublishedRead;
@@ -30,8 +30,10 @@ pub fn error_class(error: &StoreError) -> &'static str {
 
 
 /// One read under an overall deadline, on top of the connect and statement timeouts the reader takes from the core-pg settings.
-pub async fn fetch(read: &IncidentReadFn, scope: &TenantScope, deadline: Duration) -> Result<PublishedRead, StoreError> {
-    timeout(deadline, read(scope.clone())).await.map_err(|_elapsed| StoreError::ReadTimeout)?
+pub async fn fetch(read: &IncidentReadFn, scope: &TenantScope, services: Vec<String>, deadline: Duration) -> Result<PublishedRead, StoreError> {
+    timeout(deadline, read(scope.clone(), services))
+        .await
+        .map_err(|_elapsed| StoreError::ReadTimeout)?
 }
 
 
@@ -42,8 +44,24 @@ pub const MAX_FIT_ATTEMPTS: u32 = 6;
 pub const MAX_RENDERS_PER_TICK: u32 = MAX_FIT_ATTEMPTS + 2;
 
 
-/// Fits the page: unresolved stay, the resolved set is halved per attempt; returns what it leaves out (all, ongoing), rows beyond the limit included.
-pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPage, (usize, usize)), StatusPageError> {
+/// The services the page declares: the only ones the store is asked about.
+pub fn declared_services(config: &PageConfig) -> Vec<String> {
+    config.components.iter().map(|component| component.service.clone()).collect()
+}
+
+
+/// Why the page leaves incidents out: the size fit, else the read limit.
+pub fn omission_reason(size_cut: bool) -> &'static str {
+    if size_cut {
+        "size"
+    } else {
+        "read_limit"
+    }
+}
+
+
+/// Fits the page: unresolved stay, the resolved set is halved per attempt; returns what it leaves out, rows beyond the limit included.
+pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPage, Omitted), StatusPageError> {
     let (mut published, unpublished): (Vec<IncidentInput>, Vec<IncidentInput>) =
         read.incidents.iter().cloned().partition(|incident| incident.published);
     published.sort_by_key(|incident| {
@@ -63,7 +81,11 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPa
     kept_counts
         .map(|kept| {
             let subset: Vec<IncidentInput> = published.iter().take(kept).chain(unpublished.iter()).cloned().collect();
-            let omitted = (total - kept, ongoing - kept.min(unresolved));
+            let omitted = Omitted {
+                all: total - kept,
+                ongoing: ongoing - kept.min(unresolved),
+                reason: omission_reason(kept < published.len()),
+            };
             (render_omitting(config, &[], &subset, &[], 0, &DEFAULT_LIMITS, omitted), omitted)
         })
         .find(|(rendered, _omitted)| !matches!(rendered, Err(StatusPageError::OutputTooLarge { .. })))
@@ -75,8 +97,8 @@ pub fn fit_page(config: &PageConfig, read: &PublishedRead) -> Result<(RenderedPa
 }
 
 
-/// Every component is `unknown` (no state is passed) until the checks feed is wired; returns what was left out for size (all, ongoing).
-pub fn publish_page(config: &PageConfig, state: &PageState, read: &PublishedRead) -> Result<(usize, usize), StatusPageError> {
+/// Every component is `unknown` (no state is passed) until the checks feed is wired; returns what the page left out.
+pub fn publish_page(config: &PageConfig, state: &PageState, read: &PublishedRead) -> Result<Omitted, StatusPageError> {
     let (rendered, omitted) = fit_page(config, read)?;
     publish(state, snapshot_of(&config.tenant, &rendered)).map(|()| omitted)
 }
@@ -84,11 +106,13 @@ pub fn publish_page(config: &PageConfig, state: &PageState, read: &PublishedRead
 
 /// The page before `serve` accepts: a failed read or render gives a page without incidents, never a missing one.
 pub async fn first_publish(config: &PageConfig, state: &PageState, read: &IncidentReadFn, scope: &TenantScope) -> Result<(), StatusPageError> {
-    let fetched = fetch(read, scope, READ_DEADLINE).await.unwrap_or_else(|error| {
-        let class = error_class(&error);
-        tracing::warn!(class, "first incident read failed");
-        PublishedRead::default()
-    });
+    let fetched = fetch(read, scope, declared_services(config), READ_DEADLINE)
+        .await
+        .unwrap_or_else(|error| {
+            let class = error_class(&error);
+            tracing::warn!(class, "first incident read failed");
+            PublishedRead::default()
+        });
     let omitted = publish_page(config, state, &fetched).or_else(|error| {
         let class = render_class(&error);
         tracing::warn!(class, "first render failed, publishing without incidents");
@@ -108,29 +132,30 @@ pub fn render_class(error: &StatusPageError) -> &'static str {
 }
 
 
-/// True when what the page leaves out differs from the previous tick and something is left out; remembers it.
-pub fn omission_changed(state: &PageState, counts: (usize, usize)) -> bool {
+/// True when what the page leaves out (the two counts or the size reason) differs from the previous tick and something is left out; remembers it.
+pub fn omission_changed(state: &PageState, counts: (usize, usize), size_cut: bool) -> bool {
     let (omitted, ongoing) = counts;
     let seen = (
         state.omitted_seen.swap(omitted, Ordering::SeqCst),
         state.omitted_ongoing_seen.swap(ongoing, Ordering::SeqCst),
     );
-    omitted > 0 && seen != counts
+    let size_seen = state.omitted_size_seen.swap(size_cut, Ordering::SeqCst);
+    omitted > 0 && (seen != counts || size_seen != size_cut)
 }
 
 
 /// Logs once per change of what the page leaves out, not at every tick.
-pub fn log_omitted(state: &PageState, counts: (usize, usize)) {
-    let (omitted, ongoing) = counts;
-    if omission_changed(state, counts) {
-        tracing::warn!(omitted, ongoing, "incidents left out of the page for size");
+pub fn log_omitted(state: &PageState, left_out: Omitted) {
+    let (omitted, ongoing, reason) = (left_out.all, left_out.ongoing, left_out.reason);
+    if omission_changed(state, (omitted, ongoing), reason == omission_reason(true)) {
+        tracing::warn!(omitted, ongoing, reason, "incidents left out of the page");
     }
 }
 
 
 /// A failed read or render keeps the snapshot already served and logs the error class only.
 pub async fn tick(config: &PageConfig, state: &PageState, read: &IncidentReadFn, scope: &TenantScope) {
-    let failed = match fetch(read, scope, READ_DEADLINE).await {
+    let failed = match fetch(read, scope, declared_services(config), READ_DEADLINE).await {
         Ok(fetched) => publish_page(config, state, &fetched).map_or_else(
             |error| Some(render_class(&error)),
             |omitted| {

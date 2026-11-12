@@ -40,8 +40,8 @@ pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub type ReadFuture = Pin<Box<dyn Future<Output = Result<PublishedRead, StoreError>> + Send>>;
 
 
-/// Reads the published incidents of the tenant scope it is given; production connects to PostgreSQL, tests answer from memory.
-pub type IncidentReadFn = Box<dyn Fn(TenantScope) -> ReadFuture + Send + Sync>;
+/// Reads the published incidents of the tenant scope on the declared services it is given; production connects to PostgreSQL, tests answer from memory.
+pub type IncidentReadFn = Box<dyn Fn(TenantScope, Vec<String>) -> ReadFuture + Send + Sync>;
 
 
 pub type Row = Vec<crate::store_model::Cell>;

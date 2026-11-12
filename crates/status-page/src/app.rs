@@ -93,6 +93,7 @@ pub fn sample_inputs(config: &PageConfig) -> (Vec<ServiceState>, Vec<IncidentInp
             started_at: 0,
             resolved_at: None,
             updates: Vec::new(),
+            omitted_updates: 0,
             internal_note: String::new(),
             assignee: String::new(),
             asset_ids: Vec::new(),

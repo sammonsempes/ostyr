@@ -43,6 +43,8 @@ pub enum StoreError {
     TextTooLong { field: &'static str, limit: usize },
     #[error("text `{field}` is empty or holds a control character")]
     TextInvalid { field: &'static str },
+    #[error("more than {limit} declared services")]
+    TooManyServices { limit: usize },
     #[error("limit {limit} is outside 1..={max}")]
     LimitOutOfRange { limit: u32, max: u32 },
     #[error("no such incident for this tenant, a stale version, or the update limit is reached")]
