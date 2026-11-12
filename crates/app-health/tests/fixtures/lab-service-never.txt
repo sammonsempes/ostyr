@@ -1,0 +1,4 @@
+Result=success
+ExecMainExitTimestamp=
+ExecMainStatus=0
+Id=ostyr-never.service

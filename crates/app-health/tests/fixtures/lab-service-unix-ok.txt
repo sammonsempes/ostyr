@@ -1,0 +1,4 @@
+Id=logrotate.service
+Result=success
+ExecMainExitTimestamp=@1794442915
+ExecMainStatus=0

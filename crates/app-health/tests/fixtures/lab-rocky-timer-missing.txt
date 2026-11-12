@@ -1,0 +1,5 @@
+NextElapseUSecRealtime=
+LastTriggerUSec=
+Id=ostyr-missing.timer
+LoadState=not-found
+ActiveState=inactive

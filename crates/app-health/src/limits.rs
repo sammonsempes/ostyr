@@ -40,3 +40,15 @@ pub const MAX_EXCERPT_LINES: usize = 200;
 
 
 pub const MIN_LINE_BYTES: usize = 64;
+
+
+pub const MIN_MAX_AGE_SECONDS: u64 = 60;
+
+
+pub const MAX_MAX_AGE_SECONDS: u64 = 31_536_000;
+
+
+pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
+
+
+pub const MAX_LINE_BYTES: usize = 65_536;

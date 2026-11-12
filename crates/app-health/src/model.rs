@@ -171,3 +171,65 @@ pub struct Excerpt {
     pub omitted: usize,
     pub input_truncated: bool,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimerExpectation {
+    pub timer: String,
+    pub service: Option<String>,
+    pub max_age_seconds: u64,
+}
+
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimerExpectationsFile {
+    pub timers: Vec<TimerExpectation>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimerState {
+    pub load: Option<LoadState>,
+    pub active: Option<ActiveState>,
+    pub last_trigger_unix: Option<u64>,
+    pub next_elapse_unix: Option<u64>,
+    pub unknown_values: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceResult {
+    Success,
+    Protocol,
+    Timeout,
+    ExitCode,
+    Signal,
+    CoreDump,
+    Watchdog,
+    StartLimitHit,
+    Resources,
+    OomKill,
+    ExecCondition,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRun {
+    pub result: Option<ServiceResult>,
+    pub exec_main_status: u32,
+    pub last_exit_unix: Option<u64>,
+    pub unknown_values: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerHealth {
+    Healthy,
+    NotFound,
+    LastRunFailed,
+    Overdue,
+    BlindSpot,
+    Inactive,
+}

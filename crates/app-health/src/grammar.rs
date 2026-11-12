@@ -34,3 +34,9 @@ pub fn is_sub_state(text: &str) -> bool {
     let charset = text.chars().all(|character| character.is_ascii_alphanumeric() || character == '-');
     charset && !text.is_empty() && text.chars().count() <= MAX_SUB_STATE_CHARS
 }
+
+
+/// A unit name (see `is_unit_name`) ending in `suffix`.
+pub fn is_unit_name_with(text: &str, suffix: &str) -> bool {
+    is_unit_name(text) && text.ends_with(suffix)
+}
