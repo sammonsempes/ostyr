@@ -100,6 +100,23 @@ pub enum ForwardError {
     Parse(#[from] ParseError),
     #[error("an event cannot be encoded")]
     Encode(#[from] core_export::error::ExportError),
+    #[error("a spooled flow frame cannot be decoded")]
+    Frame(#[from] FlowFrameError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum FlowFrameError {
+    #[error("the flow frame is {0} bytes, over the record bound")]
+    TooLarge(usize),
+    #[error("the flow frame is not a strict flow record")]
+    Json(#[from] serde_json::Error),
+    #[error("the flow frame has no integer version")]
+    MissingVersion,
+    #[error("the flow frame has version {0}, not a known one")]
+    UnknownVersion(u64),
+    #[error("the flow frame has no exporter")]
+    MissingExporter,
 }
 
 

@@ -10,6 +10,7 @@ use site_collector::epoch::{load_epoch, new_epoch, valid_epoch};
 use site_collector::error::SpoolError;
 use site_collector::forward::{forward_once, read_cursor, write_cursor};
 use site_collector::forward_model::{ForwardLimits, CURSOR_FILE, EPOCH_FILE};
+use site_collector::listen_model::ListenerKind;
 use site_collector::spool::{append, open_spool, segment_name, spool_stats, sync_range, sync_range_with};
 use site_collector::spool_model::{Priority, Spool, SpoolConfig, MAX_FRAME_BYTES};
 use site_collector::types::DirHandle;
@@ -53,6 +54,7 @@ fn config() -> SpoolConfig {
 
 fn limits() -> ForwardLimits {
     ForwardLimits {
+        kind: ListenerKind::Syslog,
         max_records: MANY,
         agent_spool_max_bytes: ONE_MIB,
     }
