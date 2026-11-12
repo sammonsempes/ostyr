@@ -1,4 +1,4 @@
-use crate::limits::{CLASS_DIGITS, ID_DIGITS, MAX_INTERFACES};
+use crate::limits::{CLASS_DIGITS, ID_DIGITS, MAX_INTERFACES, STORAGE_CLASS};
 use crate::model::{Action, Decision, Exception, Matched, Mode, Policy, Rule, UsbDevice};
 use crate::types::InterfaceTriple;
 use crate::validate::is_lower_hex;
@@ -45,7 +45,7 @@ pub fn first_exception(policy: &Policy, device: &UsbDevice, now: OffsetDateTime)
 }
 
 
-/// Lowercases the hexadecimal fields (Windows reports `VID_0781`) and returns `None` when vendor, product or a class is not a valid code.
+/// Lowercases the hexadecimal fields (Windows reports `VID_0781`) and returns `None` when vendor, product or a class is invalid or there is no interface.
 pub fn normalise_device(device: &UsbDevice) -> Option<UsbDevice> {
     let vendor = device.vendor.to_ascii_lowercase();
     let product = device.product.to_ascii_lowercase();
@@ -54,10 +54,14 @@ pub fn normalise_device(device: &UsbDevice) -> Option<UsbDevice> {
         .iter()
         .map(|(class, subclass, protocol)| (class.to_ascii_lowercase(), subclass.clone(), protocol.clone()))
         .collect();
-    let valid = [is_lower_hex(&vendor, ID_DIGITS), is_lower_hex(&product, ID_DIGITS)]
-        .into_iter()
-        .chain(interfaces.iter().map(|(class, _, _)| is_lower_hex(class, CLASS_DIGITS)))
-        .all(|ok| ok);
+    let valid = [
+        !interfaces.is_empty(),
+        is_lower_hex(&vendor, ID_DIGITS),
+        is_lower_hex(&product, ID_DIGITS),
+    ]
+    .into_iter()
+    .chain(interfaces.iter().map(|(class, _, _)| is_lower_hex(class, CLASS_DIGITS)))
+    .all(|ok| ok);
     valid.then(|| UsbDevice {
         vendor,
         product,
@@ -108,4 +112,25 @@ pub fn evaluate(policy: &Policy, device: &UsbDevice, now: OffsetDateTime) -> Dec
 
 pub fn expired_exceptions(policy: &Policy, now: OffsetDateTime) -> Vec<&Exception> {
     policy.exceptions.iter().filter(|exception| !is_live(exception, now)).collect()
+}
+
+
+/// Indexes of the allow rules that match on a class alone, when no block rule covers mass storage (class `08`).
+pub fn class_only_allows(policy: &Policy) -> Vec<usize> {
+    let storage_blocked = policy
+        .rules
+        .iter()
+        .any(|rule| rule.action == Action::Block && rule.class.as_ref().is_some_and(|class| class.0 == STORAGE_CLASS));
+    policy
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| !storage_blocked && rule.action == Action::Allow && rule.class.is_some())
+        .filter(|(_, rule)| {
+            [rule.vendor.is_none(), rule.product.is_none(), rule.serial.is_none()]
+                .into_iter()
+                .all(|none| none)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
