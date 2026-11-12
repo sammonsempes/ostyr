@@ -29,6 +29,14 @@ pub const MAX_PUBLISHED: u32 = 500;
 pub const MAX_UPDATES_PER_INCIDENT: i64 = 100;
 
 
+/// Newest updates the public read takes per incident; the others are counted, not read.
+pub const MAX_UPDATES_READ_PER_INCIDENT: i64 = 20;
+
+
+/// Bytes of update messages one read takes in all, in incident order then newest first; what it cuts is counted per incident.
+pub const MAX_UPDATE_BYTES_PER_TICK: i64 = 2_000_000;
+
+
 pub const MAX_SERVICE_CHARACTERS: usize = 128;
 
 
@@ -65,6 +73,9 @@ pub const COL_TOTAL: usize = 0;
 pub const COL_ONGOING: usize = 1;
 
 
+pub const COL_UPDATE_COUNT: usize = 5;
+
+
 pub const COL_UPDATE_AT: usize = 1;
 
 
@@ -89,15 +100,20 @@ pub const RESOLVE_SQL: &str = "UPDATE status_incidents SET resolved_at = $4, ver
     WHERE tenant = $1 AND id = $2 AND version = $3 AND resolved_at IS NULL RETURNING id, version";
 
 
-/// Params: `$2` limit. Unresolved first, so the limit never cuts an ongoing outage before a resolved one; no internal note or assignee column.
-pub const PUBLISHED_SQL: &str = "SELECT id, service, public_title, started_at, resolved_at FROM status_incidents \
+/// Params: `$2` limit. Unresolved first, so the limit never cuts an ongoing outage before a resolved one; no internal note column; last column is the exact update count.
+pub const PUBLISHED_SQL: &str = "SELECT id, service, public_title, started_at, resolved_at, \
+    (SELECT count(*) FROM status_incident_updates WHERE tenant = $1 AND incident = status_incidents.id) FROM status_incidents \
     WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2";
 
 
-/// Params: `$2` limit, the same one as `PUBLISHED_SQL`. No internal note column is selected.
-pub const UPDATES_SQL: &str = "SELECT incident, at, message FROM status_incident_updates WHERE tenant = $1 AND incident IN \
-    (SELECT id FROM status_incidents WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2) \
-    ORDER BY incident, at, seq";
+/// Params: `$2` incident limit (as `PUBLISHED_SQL`), `$3` updates per incident, `$4` message bytes in all. No internal note column is selected.
+pub const UPDATES_SQL: &str = "WITH p AS (SELECT id, (resolved_at IS NULL) AS open, started_at FROM status_incidents \
+    WHERE tenant = $1 AND published ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2), \
+    r AS (SELECT u.incident, u.at, u.message, u.seq, \
+    sum(octet_length(u.message)) OVER (ORDER BY p.open DESC, p.started_at DESC, p.id DESC, u.at DESC, u.seq DESC) AS running \
+    FROM p CROSS JOIN LATERAL (SELECT incident, at, message, seq FROM status_incident_updates \
+    WHERE tenant = $1 AND incident = p.id ORDER BY at DESC, seq DESC LIMIT $3) u) \
+    SELECT incident, at, message FROM r WHERE running <= $4 ORDER BY incident, at, seq";
 
 
 /// No param. Columns: published incidents of the tenant, the unresolved ones among them.
@@ -268,6 +284,9 @@ pub fn group_updates(rows: &[Row]) -> Result<BTreeMap<i64, Vec<IncidentUpdateInp
 /// The internal note, assignee, assets and addresses are never selected: they come back empty.
 pub fn decode_incident(tenant: &str, row: &Row, grouped: &BTreeMap<i64, Vec<IncidentUpdateInput>>) -> Result<IncidentInput, StoreError> {
     let id = cell_int(row, COL_ID, "id")?;
+    let update_count =
+        usize::try_from(cell_int(row, COL_UPDATE_COUNT, "update_count")?).map_err(|_negative| StoreError::BadRow { column: "update_count" })?;
+    let updates = grouped.get(&id).map_or_else(Vec::new, Clone::clone);
     Ok(IncidentInput {
         tenant: tenant.to_owned(),
         service: cell_text(row, COL_SERVICE, "service")?,
@@ -275,7 +294,8 @@ pub fn decode_incident(tenant: &str, row: &Row, grouped: &BTreeMap<i64, Vec<Inci
         public_title: cell_text(row, COL_TITLE, "public_title")?,
         started_at: cell_int(row, COL_STARTED_AT, "started_at")?,
         resolved_at: cell_optional_int(row, COL_RESOLVED_AT, "resolved_at")?,
-        updates: grouped.get(&id).map_or_else(Vec::new, Clone::clone),
+        omitted_updates: update_count.saturating_sub(updates.len()),
+        updates,
         internal_note: String::new(),
         assignee: String::new(),
         asset_ids: Vec::new(),
@@ -294,7 +314,12 @@ where
         Err(StoreError::LimitOutOfRange { limit, max: MAX_PUBLISHED })
     } else {
         let incidents = run(exec, scope, PUBLISHED_SQL, vec![Param::Int(i64::from(limit))]).await?;
-        let updates = run(exec, scope, UPDATES_SQL, vec![Param::Int(i64::from(limit))]).await?;
+        let update_params = vec![
+            Param::Int(i64::from(limit)),
+            Param::Int(MAX_UPDATES_READ_PER_INCIDENT),
+            Param::Int(MAX_UPDATE_BYTES_PER_TICK),
+        ];
+        let updates = run(exec, scope, UPDATES_SQL, update_params).await?;
         let grouped = group_updates(&updates)?;
         incidents.iter().map(|row| decode_incident(tenant_of(scope), row, &grouped)).collect()
     }

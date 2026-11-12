@@ -46,12 +46,18 @@ pub fn incident_item(incident: &PublicIncident) -> String {
         .iter()
         .map(|update| format!("<li>{}: {}</li>", update.at, encode_text(&update.message)))
         .collect();
+    let cut = if incident.omitted_updates > 0 {
+        format!("<p>{} older updates not shown.</p>", incident.omitted_updates)
+    } else {
+        String::new()
+    };
     format!(
-        "<li><h3>{}</h3><p>{}, started {}</p><ul>{}</ul></li>",
+        "<li><h3>{}</h3><p>{}, started {}</p><ul>{}</ul>{}</li>",
         encode_text(&incident.title),
         encode_text(&incident.component),
         incident.started_at,
-        updates
+        updates,
+        cut
     )
 }
 
@@ -70,10 +76,15 @@ pub fn render_html(page: &PublicPage) -> String {
     } else {
         String::new()
     };
+    let undeclared = if page.omitted_undeclared > 0 {
+        format!("<p>{} of them on services this page does not list.</p>", page.omitted_undeclared)
+    } else {
+        String::new()
+    };
     let maintenance = if page.maintenance { "<p>Maintenance in progress.</p>" } else { "" };
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{title}</title></head><body><h1>{title}</h1>\
-         <p>{}</p>{maintenance}<ul>{components}</ul><h2>Incidents</h2><ul>{incidents}</ul>{omitted}<p>Generated at {}</p></body></html>",
+         <p>{}</p>{maintenance}<ul>{components}</ul><h2>Incidents</h2><ul>{incidents}</ul>{omitted}{undeclared}<p>Generated at {}</p></body></html>",
         state_label(page.state),
         page.generated_at
     )

@@ -5,7 +5,10 @@ use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use status_page::app::{run_app_with, AppFile};
 use status_page::error::{StatusPageError, StoreError};
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
-use status_page::publish::{error_class, fetch, first_publish, omission_changed, publisher, render_class, tick, MAX_RENDERS_PER_TICK, READ_DEADLINE};
+use status_page::publish::{
+    error_class, fetch, first_publish, fit_page, omission_changed, omission_reason, publisher, render_class, tick, MAX_RENDERS_PER_TICK,
+    READ_DEADLINE,
+};
 use status_page::settings::validate_settings;
 use status_page::store_model::PublishedRead;
 use status_page::types::IncidentReadFn;
@@ -99,6 +102,7 @@ fn incident(tenant: &str, title: &str) -> IncidentInput {
         started_at: 0,
         resolved_at: None,
         updates: Vec::new(),
+        omitted_updates: 0,
         internal_note: SECRET_NOTE.to_owned(),
         assignee: "alice".to_owned(),
         asset_ids: vec!["asset-1".to_owned()],
@@ -665,5 +669,57 @@ async fn pg_file_and_the_reader_must_come_together_and_the_tenant_must_be_valid(
     .await;
     assert!(matches!(bad, Err(StatusPageError::Pg(_))));
     assert!(shared.lock().map_err(|_poisoned| "lock")?.seen.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn an_incident_on_a_service_no_component_declares_is_counted_not_dropped_silently() -> TestResult {
+    let _listener = listen();
+    let (state, _clock) = state_with(PageSettings::default());
+    let mut other = incident(TENANT, "Undeclared outage");
+    other.service = "svc-unlisted".to_owned();
+    let shared = shared_with(vec![incident(TENANT, "Website down"), other]);
+    first_publish(&config(), &state, &reader(&shared), &tenant_scope(TENANT)?).await?;
+    let page = served(&state)?;
+    assert!(page.json.contains("Website down") && !page.json.contains("Undeclared outage") && !page.json.contains("svc-unlisted"));
+    assert!(page.json.contains("\"omitted_incidents\":1") && page.json.contains("\"omitted_ongoing\":1"));
+    assert!(page.json.contains("\"omitted_undeclared\":1"));
+    assert!(page.html.contains("1 of them on services this page does not list."));
+    Ok(())
+}
+
+
+#[test]
+fn the_omission_reason_names_size_the_read_limit_or_undeclared_services() -> TestResult {
+    assert_eq!(omission_reason(true, 1), "size");
+    assert_eq!(omission_reason(false, 1), "read_limit");
+    assert_eq!(omission_reason(false, 0), "undeclared");
+    let read_limit = PublishedRead {
+        incidents: vec![incident(TENANT, "One")],
+        total: HIDDEN_RESOLVED,
+        ongoing: 1,
+    };
+    let (_first, omitted) = fit_page(&config(), &read_limit)?;
+    assert_eq!((omitted.all, omitted.undeclared, omitted.reason), (HIDDEN_RESOLVED - 1, 0, "read_limit"));
+    let sized = PublishedRead {
+        incidents: resolved_set(),
+        total: resolved_set().len(),
+        ongoing: 0,
+    };
+    let (_second, cut) = fit_page(&config(), &sized)?;
+    assert!(cut.all > 0 && cut.reason == "size");
+    let mut other = incident(TENANT, "Other");
+    other.service = "svc-unlisted".to_owned();
+    let hidden = PublishedRead {
+        incidents: vec![other],
+        total: 1,
+        ongoing: 1,
+    };
+    let (_third, unlisted) = fit_page(&config(), &hidden)?;
+    assert_eq!(
+        (unlisted.all, unlisted.ongoing, unlisted.undeclared, unlisted.reason),
+        (1, 1, 1, "undeclared")
+    );
     Ok(())
 }

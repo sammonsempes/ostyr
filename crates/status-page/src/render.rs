@@ -2,8 +2,8 @@ use crate::config::{check_count, check_text, validate_config};
 use crate::error::StatusPageError;
 use crate::html::render_html;
 use crate::model::{
-    ComponentState, Dropped, FigureInput, IncidentInput, Limits, PageConfig, PublicComponent, PublicFigure, PublicIncident, PublicPage, PublicUpdate,
-    RenderedPage, ServiceState,
+    ComponentState, Dropped, FigureInput, IncidentInput, Limits, Omitted, PageConfig, PublicComponent, PublicFigure, PublicIncident, PublicPage,
+    PublicUpdate, RenderedPage, ServiceState,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +82,7 @@ pub fn public_incident(incident: &IncidentInput, component: &str) -> PublicIncid
                 message: update.message.clone(),
             })
             .collect(),
+        omitted_updates: incident.omitted_updates,
     }
 }
 
@@ -113,11 +114,11 @@ pub fn render(
     now: i64,
     limits: &Limits,
 ) -> Result<RenderedPage, StatusPageError> {
-    render_omitting(config, states, incidents, figures, now, limits, (0, 0))
+    render_omitting(config, states, incidents, figures, now, limits, Omitted::default())
 }
 
 
-/// As `render`, and the page states that `omitted` incidents (`.0`, of which `.1` are ongoing) are not shown.
+/// As `render`, and the page states the incidents `omitted` says it leaves out.
 pub fn render_omitting(
     config: &PageConfig,
     states: &[ServiceState],
@@ -125,7 +126,7 @@ pub fn render_omitting(
     figures: &[FigureInput],
     now: i64,
     limits: &Limits,
-    omitted: (usize, usize),
+    omitted: Omitted,
 ) -> Result<RenderedPage, StatusPageError> {
     validate_config(config, limits)?;
     check_inputs(config, states, incidents, figures, limits)?;
@@ -169,8 +170,9 @@ pub fn render_omitting(
         maintenance: components.iter().any(|component| component.state == ComponentState::Maintenance),
         components,
         incidents: public_incidents,
-        omitted_incidents: omitted.0,
-        omitted_ongoing: omitted.1,
+        omitted_incidents: omitted.all,
+        omitted_ongoing: omitted.ongoing,
+        omitted_undeclared: omitted.undeclared,
     };
     let json = serde_json::to_string(&page)?;
     check_output("json", &json, limits.max_json_bytes)?;

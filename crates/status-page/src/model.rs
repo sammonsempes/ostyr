@@ -124,6 +124,7 @@ pub struct IncidentInput {
     pub started_at: i64,
     pub resolved_at: Option<i64>,
     pub updates: Vec<IncidentUpdateInput>,
+    pub omitted_updates: usize,
     pub internal_note: String,
     pub assignee: String,
     pub asset_ids: Vec<String>,
@@ -169,6 +170,8 @@ pub struct PublicIncident {
     pub started_at: i64,
     pub resolved_at: Option<i64>,
     pub updates: Vec<PublicUpdate>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_updates: usize,
 }
 
 
@@ -185,6 +188,18 @@ pub struct PublicPage {
     pub omitted_incidents: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted_ongoing: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_undeclared: usize,
+}
+
+
+/// What a page leaves out: all incidents, the ongoing ones among them, the ones on a service no component declares; `reason` is for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Omitted {
+    pub all: usize,
+    pub ongoing: usize,
+    pub undeclared: usize,
+    pub reason: &'static str,
 }
 
 
