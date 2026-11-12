@@ -1,13 +1,16 @@
+#[path = "common/logging.rs"]
+mod logging;
 #[path = "common/types.rs"]
 mod types;
 
 
-use ecs_normalise::cli::{log_dispatch, parse_format, run_reporting};
+use ecs_normalise::cli::{parse_format, run_reporting};
 use ecs_normalise::convert::Outcome;
 use ecs_normalise::error::NormaliseError;
 use ecs_normalise::stream::{error_summary, normalise_stream_capped, normalise_stream_format, Counts, Format, MAX_LOG_ERROR_CHARS};
 use ecs_normalise::suricata::{clean, clean_identity, is_unsafe, parse_eve, MAX_ANSWERS, MAX_FIELD_CHARS};
 use ecs_normalise::suricata_extra::basename;
+use logging::capture_dispatch;
 use serde_json::Value;
 use std::io::Write;
 use std::process::ExitCode;
@@ -572,7 +575,7 @@ fn an_own_object_that_is_not_an_object_is_malformed() -> TestResult {
 fn the_cli_log_shows_malformed_and_unknown_lines_at_warn() -> TestResult {
     let captured = SharedBuffer(Arc::new(Mutex::new(Vec::new())));
     let sink = captured.clone();
-    let dispatch = log_dispatch(BoxMakeWriter::new(move || sink.clone()));
+    let dispatch = capture_dispatch(BoxMakeWriter::new(move || sink.clone()));
     let input = format!("not json\n{{\"timestamp\":\"{STAMP}\",\"event_type\":\"stats\"}}\n");
     tracing::dispatcher::with_default(&dispatch, || run(&input, BIG_CAP))?;
     let log = String::from_utf8(captured.0.lock().unwrap_or_else(PoisonError::into_inner).clone())?;
