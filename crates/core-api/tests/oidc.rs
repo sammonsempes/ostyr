@@ -56,13 +56,13 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{sleep, spawn, JoinHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{spawn, JoinHandle};
 use std::time::Duration as StdDuration;
 use tempfile::tempdir;
 use time::{Duration, OffsetDateTime};
-use tokio::time::sleep as sleep_async;
+use tokio::sync::Notify;
 use types::{TestError, TestResult};
 
 
@@ -535,13 +535,44 @@ async fn a_full_pending_table_refuses_starts_with_429() -> TestResult {
 }
 
 
-const POLL_MILLIS: u64 = 5;
+const HANG_GUARD: StdDuration = StdDuration::from_secs(120);
 
 
-const RELEASE_WAIT_POLLS: u32 = 12000;
+struct Gate {
+    open: Mutex<bool>,
+    changed: Condvar,
+}
 
 
-const ARRIVAL_WAIT_POLLS: u32 = 12000;
+fn poisoned<Guard>(_error: std::sync::PoisonError<Guard>) -> io::Error {
+    io::Error::other("gate poisoned")
+}
+
+
+fn new_gate() -> Arc<Gate> {
+    Arc::new(Gate {
+        open: Mutex::new(false),
+        changed: Condvar::new(),
+    })
+}
+
+
+fn open_gate(gate: &Gate) -> Result<(), io::Error> {
+    *gate.open.lock().map_err(poisoned)? = true;
+    gate.changed.notify_all();
+    Ok(())
+}
+
+
+fn wait_open(gate: &Gate) -> Result<(), io::Error> {
+    let guard = gate.open.lock().map_err(poisoned)?;
+    let (_guard, result) = gate.changed.wait_timeout_while(guard, HANG_GUARD, |open| !*open).map_err(poisoned)?;
+    if result.timed_out() {
+        Err(io::Error::other("hang guard expired"))
+    } else {
+        Ok(())
+    }
+}
 
 
 const STALL_CLIENTS: u8 = 8;
@@ -564,23 +595,15 @@ async fn status_of(router: axum::Router, offset: u8, target: String, cookie: Opt
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResult {
     let cell = TokenCell::default();
-    let released = Arc::new(AtomicBool::new(false));
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let arrivals = Arc::new(AtomicUsize::new(0));
+    let released = new_gate();
+    let arrivals = Arc::new(Notify::new());
     let provider_released = Arc::clone(&released);
-    let provider_timed_out = Arc::clone(&timed_out);
     let provider_arrivals = Arc::clone(&arrivals);
     let runtime = runtime_over(
         CONFIG_TEXT,
         Box::new(move |request| {
-            provider_arrivals.fetch_add(1, Ordering::SeqCst);
-            let opened = (0..RELEASE_WAIT_POLLS).find(|_| {
-                sleep(StdDuration::from_millis(POLL_MILLIS));
-                provider_released.load(Ordering::SeqCst)
-            });
-            if opened.is_none() {
-                provider_timed_out.store(true, Ordering::SeqCst);
-            }
+            provider_arrivals.notify_one();
+            wait_open(&provider_released)?;
             respond(&cell, request)
         }),
     )?;
@@ -593,12 +616,7 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
     let starts = (1..=STALL_CLIENTS)
         .map(|offset| tokio::spawn(status_of(fx.router.clone(), offset, "/auth/oidc/start".to_owned(), None)))
         .collect::<Vec<_>>();
-    let mut waited = 0;
-    while arrivals.load(Ordering::SeqCst) == 0 && waited < ARRIVAL_WAIT_POLLS {
-        sleep_async(StdDuration::from_millis(POLL_MILLIS)).await;
-        waited += 1;
-    }
-    assert!(arrivals.load(Ordering::SeqCst) > 0);
+    tokio::time::timeout(HANG_GUARD, arrivals.notified()).await?;
     let forged = (1..=STALL_CLIENTS)
         .map(|offset| {
             let state = format!("forged-{offset}");
@@ -612,12 +630,10 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
     for handle in forged {
         assert_eq!(handle.await??, StatusCode::UNAUTHORIZED);
     }
-    assert!(!released.load(Ordering::SeqCst));
-    released.store(true, Ordering::SeqCst);
+    open_gate(&released)?;
     for handle in starts {
         assert_eq!(handle.await??, StatusCode::OK);
     }
-    assert!(!timed_out.load(Ordering::SeqCst));
     Ok(())
 }
 
@@ -626,19 +642,16 @@ async fn a_slow_provider_and_forged_callbacks_do_not_stall_the_api() -> TestResu
 async fn a_login_in_flight_during_an_identity_change_is_refused() -> TestResult {
     let cell = TokenCell::default();
     let held = Arc::new(AtomicBool::new(false));
-    let released = Arc::new(AtomicBool::new(false));
-    let arrivals = Arc::new(AtomicUsize::new(0));
+    let released = new_gate();
+    let arrivals = Arc::new(Notify::new());
     let (provider_held, provider_released, provider_arrivals, provider_cell) =
         (Arc::clone(&held), Arc::clone(&released), Arc::clone(&arrivals), cell.clone());
     let runtime = runtime_over(
         CONFIG_TEXT,
         Box::new(move |request| {
             if provider_held.load(Ordering::SeqCst) {
-                provider_arrivals.fetch_add(1, Ordering::SeqCst);
-                (0..RELEASE_WAIT_POLLS).find(|_| {
-                    sleep(StdDuration::from_millis(POLL_MILLIS));
-                    provider_released.load(Ordering::SeqCst)
-                });
+                provider_arrivals.notify_one();
+                wait_open(&provider_released)?;
             }
             respond(&provider_cell, request)
         }),
@@ -654,12 +667,7 @@ async fn a_login_in_flight_during_an_identity_change_is_refused() -> TestResult 
     held.store(true, Ordering::SeqCst);
     let target = format!("/auth/oidc/callback?{}", query_for(&started));
     let inflight = tokio::spawn(status_of(fx.router.clone(), CLIENT_OFFSET, target, Some(started.cookie.clone())));
-    let mut waited = 0;
-    while arrivals.load(Ordering::SeqCst) == 0 && waited < ARRIVAL_WAIT_POLLS {
-        sleep_async(StdDuration::from_millis(POLL_MILLIS)).await;
-        waited += 1;
-    }
-    assert!(arrivals.load(Ordering::SeqCst) > 0);
+    tokio::time::timeout(HANG_GUARD, arrivals.notified()).await?;
     let original = fx.state.identity.load_full();
     let away = ApiIdentity {
         tenant: "other-tenant".to_owned(),
@@ -672,7 +680,7 @@ async fn a_login_in_flight_during_an_identity_change_is_refused() -> TestResult 
     };
     fx.state.identity.store(Arc::new(away));
     fx.state.identity.store(Arc::new(back));
-    released.store(true, Ordering::SeqCst);
+    open_gate(&released)?;
     assert_eq!(inflight.await??, StatusCode::UNAUTHORIZED);
     assert!(has_reason(&fx, "auth.login", "identity_changed")?);
     assert!(lock_auth(&fx.state).sessions.is_empty());
