@@ -31,7 +31,24 @@ const MAX_VERSION_CHARS: usize = 128;
 const RPM_PUNCTUATION: &str = "._+~^";
 
 
-const RPM_ARCHITECTURES: [&str; 7] = ["x86_64", "aarch64", "i686", "noarch", "ppc64le", "s390x", "src"];
+const RPM_ARCHITECTURES: [&str; 13] = [
+    "x86_64",
+    "aarch64",
+    "i686",
+    "noarch",
+    "ppc64le",
+    "s390x",
+    "src",
+    "i386",
+    "i586",
+    "armv7hl",
+    "ppc64",
+    "nosrc",
+    "x86_64_v2",
+];
+
+
+const DEBIAN_FORBIDDEN_TAIL: [char; 4] = ['+', '-', '~', '.'];
 
 
 pub fn source_ok(source: &Source) -> bool {
@@ -53,10 +70,17 @@ pub fn version_ok(entry: &Entry) -> bool {
         && text.chars().count() <= MAX_VERSION_CHARS
         && is_plain_text(text)
         && match manager {
-            Manager::Apt => parse_version(family_of(manager), text).is_ok(),
+            Manager::Apt => deb_pin_ok(text) && parse_version(family_of(manager), text).is_ok(),
             Manager::Dnf => rpm_pin_ok(text) && parse_version(family_of(manager), text).is_ok(),
             Manager::Winget | Manager::Msi => true,
         }
+}
+
+
+pub fn deb_pin_ok(text: &str) -> bool {
+    let upstream_and_revision = text.rsplit_once('-').unwrap_or((text, "x"));
+    let upstream = upstream_and_revision.0.split_once(':').map_or(upstream_and_revision.0, |(_, rest)| rest);
+    !upstream.is_empty() && !upstream_and_revision.1.is_empty() && !text.ends_with(DEBIAN_FORBIDDEN_TAIL)
 }
 
 

@@ -267,3 +267,17 @@ fn a_held_package_is_reported_held_not_updated() -> TestResult {
     assert!(result.actions.iter().all(|action| action.arguments.is_empty()));
     Ok(())
 }
+
+
+#[test]
+fn an_explicit_uninstall_of_a_held_package_is_held_without_a_vector() -> TestResult {
+    let mut nano = apt_entry("nano", "nano", "1.0");
+    nano.uninstall = true;
+    let cat = catalogue(vec![nano]);
+    let mut held = row(Manager::Apt, "nano", "1.0");
+    held.held = true;
+    let result = plan(&cat, &assignment(&[], &["nano"]), &installed(vec![held]), &offer(&cat))?;
+    assert_eq!(kinds(&result), [(ActionKind::Held, "nano".to_string())]);
+    assert!(result.actions.iter().all(|action| action.arguments.is_empty()));
+    Ok(())
+}

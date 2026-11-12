@@ -140,9 +140,10 @@ pub fn compare(entry: &Entry, row: &InstalledRow) -> Option<ActionKind> {
 
 
 pub fn removal_action(entry: &Entry, installed: &Installed) -> Option<Action> {
-    row_of(entry, installed)
-        .filter(|_| entry.uninstall)
-        .map(|row| action_of(ActionKind::Uninstall, entry, Some(row)))
+    row_of(entry, installed).filter(|_| entry.uninstall).map(|row| {
+        let kind = if row.held { ActionKind::Held } else { ActionKind::Uninstall };
+        action_of(kind, entry, Some(row))
+    })
 }
 
 
