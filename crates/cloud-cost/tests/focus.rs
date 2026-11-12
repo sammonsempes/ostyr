@@ -415,6 +415,25 @@ fn amounts_are_plain_decimals() -> Result<(), Box<dyn Error>> {
 
 
 #[test]
+fn only_valid_short_account_labels_are_seen_for_the_replace() -> Result<(), Box<dyn Error>> {
+    let rows = vec![
+        row("1", "", &at("2026-11-01"), "Compute", ""),
+        row("1", "evil\u{202e}", &at("2026-11-01"), "Compute", ""),
+        row("1", &"a".repeat(FIELD_CAP + 1), &at("2026-11-01"), "Compute", ""),
+        row("x", "skipped", &at("2026-11-01"), "Compute", ""),
+        row("1", "kept", &at("2026-11-01"), "Compute", ""),
+    ];
+    let limits = Limits {
+        max_field_bytes: FIELD_CAP,
+        ..Limits::default()
+    };
+    let table = read(&rows, &limits)?;
+    assert_eq!(table.seen_accounts, ["kept".to_owned(), "skipped".to_owned()].into_iter().collect());
+    Ok(())
+}
+
+
+#[test]
 fn default_limits_are_bounded() -> Result<(), Box<dyn Error>> {
     let limits = Limits::default();
     assert!(limits.max_bytes > 0 && limits.max_rows > 0 && limits.max_field_bytes > 0);

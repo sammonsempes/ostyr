@@ -283,9 +283,21 @@ pub fn apply_row(state: &mut State, parsed: Result<Row, SkipReason>, limits: &Li
 }
 
 
+/// Every row names its account for the replace, skipped or not, when the label is valid and within the field cap.
+pub fn note_account(state: &mut State, record: &StringRecord, columns: &Columns, limits: &Limits) {
+    let account = account_of(record, columns);
+    if is_label(&account) && account.len() <= limits.max_field_bytes {
+        state.table.seen_accounts.insert(account);
+    }
+}
+
+
 pub fn classify(state: &mut State, result: Result<StringRecord, csv::Error>, columns: &Columns, limits: &Limits) -> Result<(), CostError> {
     match result {
-        Ok(record) => apply_row(state, parse_row(&record, columns, limits), limits),
+        Ok(record) => {
+            note_account(state, &record, columns, limits);
+            apply_row(state, parse_row(&record, columns, limits), limits)
+        }
         Err(error) if matches!(error.kind(), ErrorKind::Io(_)) => Err(CostError::Read(error)),
         Err(_) => {
             count_skip(&mut state.table.skipped, SkipReason::Malformed);
@@ -315,6 +327,7 @@ pub fn new_state(tenant: TenantScope) -> State {
             by_account_service: BTreeMap::new(),
             by_tag: BTreeMap::new(),
             account_rows: BTreeMap::new(),
+            seen_accounts: BTreeSet::new(),
             other: OtherBucket {
                 cost: Decimal::ZERO,
                 count: 0,

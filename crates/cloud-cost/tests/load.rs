@@ -5,7 +5,8 @@ mod types;
 
 
 use cloud_cost::load::{
-    agent_for, load_table, post, BatchFailure, LoadError, LoadOutcome, Statement, MAX_REPLACE_ACCOUNTS, MAX_REPLACE_ACCOUNT_BYTES,
+    account_batches, agent_for, load_table, post, BatchFailure, LoadError, LoadOutcome, Statement, MAX_REPLACE_ACCOUNTS, MAX_REPLACE_ACCOUNT_BYTES,
+    MAX_TOTAL_ACCOUNTS,
 };
 use cloud_cost::model::{CostTable, Limits};
 use cloud_cost::settings::CostLoadConfig;
@@ -69,6 +70,15 @@ const JANUARY_ROWS: usize = 4;
 
 
 const SECOND_BATCH_ROWS: usize = 1;
+
+
+const MANY_ACCOUNTS: usize = 2500;
+
+
+const MANY_BATCHES: usize = 3;
+
+
+const HEAVY_PARTS: usize = 3;
 
 
 struct Rig {
@@ -247,18 +257,10 @@ fn too_many_accounts_are_refused_before_any_io() -> TestResult {
     let mut rig = rig(LONG_TIMEOUT_MS)?;
     fs::remove_file(&rig.config.password_file)?;
     let wide = wide_export()?;
-    let first_day = wide.table.day_totals.keys().next().copied().ok_or("no day")?;
-    let accounts = (0..=MAX_REPLACE_ACCOUNTS)
-        .map(|number| {
-            (
-                (first_day, format!("a{number}"), "total", String::new(), String::new()),
-                rust_decimal::Decimal::ONE,
-            )
-        })
-        .collect();
+    let accounts = (0..=MAX_TOTAL_ACCOUNTS).map(|number| format!("a{number}")).collect();
     let many = Export {
         table: CostTable {
-            account_rows: accounts,
+            seen_accounts: accounts,
             ..wide.table.clone()
         },
         source: wide.source.clone(),
@@ -266,18 +268,7 @@ fn too_many_accounts_are_refused_before_any_io() -> TestResult {
     assert!(matches!(load_table(&rig.config, &many, VERSION, &idle), Err(LoadError::TooManyAccounts)));
     let long = Export {
         table: CostTable {
-            account_rows: [(
-                (
-                    first_day,
-                    "x".repeat(MAX_REPLACE_ACCOUNT_BYTES + 1),
-                    "total",
-                    String::new(),
-                    String::new(),
-                ),
-                rust_decimal::Decimal::ONE,
-            )]
-            .into_iter()
-            .collect(),
+            seen_accounts: ["x".repeat(MAX_REPLACE_ACCOUNT_BYTES + 1)].into_iter().collect(),
             ..wide.table
         },
         source: wide.source,
@@ -356,7 +347,13 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
     rig.listener.set_nonblocking(false)?;
     let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS]);
     let failed = load_table(&rig.config, &january()?, VERSION, &late);
-    assert!(matches!(failed, Err(LoadError::Replace(InsertClass::Timeout))));
+    assert!(matches!(
+        failed,
+        Err(LoadError::Replace {
+            class: InsertClass::Timeout,
+            ..
+        })
+    ));
     assert_eq!(joined(server)?.len(), SCHEMA_REQUESTS);
     let after_delete = Cell::new(0);
     let last = || {
@@ -397,7 +394,14 @@ fn refusals_are_classified_without_reading_the_message() -> TestResult {
     joined(server)?;
     let delete_refused = serve(rig.listener.try_clone()?, vec![OK, OK, SERVER_ERROR]);
     let replace = load_table(&rig.config, &january()?, VERSION, &idle);
-    assert!(matches!(replace, Err(LoadError::Replace(InsertClass::Unavailable))));
+    assert!(matches!(
+        replace,
+        Err(LoadError::Replace {
+            done: 0,
+            total: 1,
+            class: InsertClass::Unavailable
+        })
+    ));
     joined(delete_refused)?;
     let insert_refused = serve(rig.listener.try_clone()?, vec![OK, OK, OK, "302 Found"]);
     let outcome = load_table(&rig.config, &january()?, VERSION, &idle)?;
@@ -498,5 +502,87 @@ fn a_zero_remaining_budget_posts_nothing() -> TestResult {
         Some(InsertClass::Timeout)
     );
     assert!(untouched(&rig.listener)?);
+    Ok(())
+}
+
+
+#[test]
+fn many_accounts_are_replaced_in_bounded_batches_before_the_insert() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let names: Vec<String> = (0..MANY_ACCOUNTS).map(|number| format!("a{number}")).collect();
+    let lines: Vec<String> = names.iter().map(|name| format!("1,USD,{name},2026-01-05T10:00:00Z,compute,")).collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let export = export_of(&refs, "acme")?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS + MANY_BATCHES + 1]);
+    let outcome = load_table(&rig.config, &export, VERSION, &idle)?;
+    assert_eq!(outcome.failure, None);
+    let seen = joined(server)?;
+    let deletes: Vec<&String> = seen.iter().filter(|request| request.contains("param_accounts")).collect();
+    assert_eq!(deletes.len(), MANY_BATCHES);
+    assert!(seen.get(SCHEMA_REQUESTS + MANY_BATCHES).ok_or("no insert")?.contains("INSERT"));
+    assert!(deletes.iter().all(|request| request.contains("param_tenant=acme")));
+    assert!(deletes.iter().all(|request| request.contains("param_first=2026-01-05")));
+    let named = |name: &str| deletes.iter().filter(|request| request.contains(&format!("%27{name}%27"))).count();
+    assert!(names.iter().all(|name| named(name) == 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_second_delete_batch_names_the_batches_done() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let lines: Vec<String> = (0..MANY_ACCOUNTS)
+        .map(|number| format!("1,USD,a{number},2026-01-05T10:00:00Z,compute,"))
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, SERVER_ERROR]);
+    let failed = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle);
+    assert!(matches!(
+        failed,
+        Err(LoadError::Replace {
+            done: 1,
+            total: MANY_BATCHES,
+            class: InsertClass::Unavailable
+        })
+    ));
+    joined(server)?;
+    Ok(())
+}
+
+
+#[test]
+fn an_account_whose_rows_are_all_skipped_is_still_replaced() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let export = export_of(
+        &[
+            "1,USD,acct1,2026-01-05T10:00:00Z,compute,",
+            "2,EUR,acct2,2026-01-05T10:00:00Z,compute,",
+            "x,USD,acct3,2026-01-05T10:00:00Z,compute,",
+        ],
+        "acme",
+    )?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    load_table(&rig.config, &export, VERSION, &idle)?;
+    let seen = joined(server)?;
+    let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
+    assert!(
+        delete.contains("acct1") && delete.contains("acct2") && delete.contains("acct3"),
+        "{delete}"
+    );
+    let insert = body_of(seen.get(REQUESTS_BEFORE_INSERT).ok_or("no insert")?);
+    assert!(!insert.contains("acct2") && !insert.contains("acct3"));
+    Ok(())
+}
+
+
+#[test]
+fn batches_respect_the_name_count_and_the_byte_cap() -> TestResult {
+    let counted: Vec<String> = (0..=MAX_REPLACE_ACCOUNTS).map(|number| number.to_string()).collect();
+    let counted_sizes: Vec<usize> = account_batches(&counted).iter().map(Vec::len).collect();
+    assert_eq!(counted_sizes, vec![MAX_REPLACE_ACCOUNTS, 1]);
+    let heavy = vec!["x".repeat(MAX_REPLACE_ACCOUNT_BYTES / HEAVY_PARTS * (HEAVY_PARTS - 1)); HEAVY_PARTS];
+    let heavy_sizes: Vec<usize> = account_batches(&heavy).iter().map(Vec::len).collect();
+    assert_eq!(heavy_sizes, vec![1; HEAVY_PARTS]);
+    assert!(account_batches(&[]).is_empty());
     Ok(())
 }

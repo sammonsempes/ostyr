@@ -4,7 +4,6 @@ use crate::types::Point;
 use serde_json::json;
 use siem_schema::error::SchemaError;
 use siem_schema::identifier::quote_identifier;
-use std::collections::BTreeSet;
 use time::Date;
 
 
@@ -85,15 +84,9 @@ pub fn delete_statement(config: &CostLoadConfig) -> Result<String, SchemaError> 
 }
 
 
-/// The distinct billing account labels of the table, in order.
+/// The distinct billing account labels seen in any row of the export, skipped or not, in order.
 pub fn account_set(table: &CostTable) -> Vec<String> {
-    table
-        .account_rows
-        .keys()
-        .map(|(_, account, _, _, _)| account.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    table.seen_accounts.iter().cloned().collect()
 }
 
 

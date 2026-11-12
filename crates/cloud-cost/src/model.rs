@@ -87,6 +87,7 @@ pub struct CostTable {
     pub by_account_service: CostMap,
     pub by_tag: CostMap,
     pub account_rows: StoredMap,
+    pub seen_accounts: BTreeSet<String>,
     pub other: OtherBucket,
     pub tag_other: OtherBucket,
     pub skipped: SkipCounts,
