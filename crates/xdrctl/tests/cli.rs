@@ -1301,3 +1301,75 @@ fn case_id_grammar() -> TestResult {
     assert!(!xdrctl::cases::valid_case_id("é"));
     Ok(())
 }
+
+
+const HIDDEN_JSON: &str = "a\\u061c\\u202e\\u2066\\u200b\\ufeff\\u009b31m\\u007f\\u2028\\u2060\\u00adz";
+
+
+const HIDDEN_ORIGINAL: &str = "a\u{061c}\u{202e}\u{2066}\u{200b}\u{feff}\u{9b}31m\u{7f}\u{2028}\u{2060}\u{ad}z";
+
+
+const HIDDEN_CALLS: usize = 4;
+
+
+const HIDDEN_RAW: [char; 10] = [
+    '\u{061c}', '\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{9b}', '\u{7f}', '\u{2028}', '\u{2060}', '\u{ad}',
+];
+
+
+#[test]
+fn hidden_characters_are_escaped_in_text_and_json() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let alert = format!(
+        "{{\"id\":\"ab\",\"rule_id\":\"r\",\"rule_title\":\"{HIDDEN_JSON}\",\"severity\":\"low\",\"event_time\":\"2026\",\"created\":\"2026\",\
+         \"host_name\":null,\"user_name\":null,\"event_ids\":[],\"summary\":{{}},\"summary_truncated\":false}}"
+    );
+    let case = format!(
+        "\"id\":\"c1\",\"title\":\"{HIDDEN_JSON}\",\"severity\":\"low\",\"status\":\"new\",\"assignee\":null,\"case_type\":null,\
+         \"created_at\":0,\"updated_at\":1,\"version\":1,\"counts\":{{\"tasks\":0,\"observables\":0,\"comments\":0,\"history\":0,\"alerts\":0}}"
+    );
+    let alert_page: &'static str = Box::leak(format!("{{\"items\":[{alert}],\"next_cursor\":null}}").into_boxed_str());
+    let alert_body: &'static str = Box::leak(alert.into_boxed_str());
+    let case_page: &'static str = Box::leak(format!("{{\"items\":[{{{case}}}],\"next_cursor\":null}}").into_boxed_str());
+    let case_body: &'static str =
+        Box::leak(format!("{{{case},\"description\":null,\"resolution\":null,\"template\":null,\"tasks\":[]}}").into_boxed_str());
+    let calls: [(&[&str], &'static str); HIDDEN_CALLS] = [
+        (&["alerts", "list"], alert_page),
+        (&["alerts", "show", "ab"], alert_body),
+        (&["cases", "list"], case_page),
+        (&["cases", "show", "c1"], case_body),
+    ];
+    let original = HIDDEN_ORIGINAL;
+    calls.iter().try_for_each(|(words, body)| -> TestResult {
+        let text = invoke(&offline_args(dir.path(), words), "", &alerts_stub(&seen, STATUS_OK, body))?;
+        let mut json_words = vec!["--output", "json"];
+        json_words.extend(words.iter());
+        let json = invoke(&offline_args(dir.path(), &json_words), "", &alerts_stub(&seen, STATUS_OK, body))?;
+        HIDDEN_RAW.iter().for_each(|raw| {
+            assert!(!text.out.contains(*raw));
+            assert!(!json.out.contains(*raw));
+        });
+        assert!(json.out.contains("\\u202e"));
+        let parsed: serde_json::Value = serde_json::from_str(&json.out)?;
+        assert!(parsed.to_string().contains(original));
+        Ok(())
+    })
+}
+
+
+#[test]
+fn hidden_characters_are_escaped_in_error_lines() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let body: &'static str = Box::leak(format!("{{\"error\":{{\"code\":\"{HIDDEN_JSON}\",\"message\":\"{HIDDEN_JSON}\"}}}}").into_boxed_str());
+    ["text", "json"].iter().try_for_each(|format| -> TestResult {
+        let words = ["--output", format, "alerts", "list"];
+        let outcome = invoke(&offline_args(dir.path(), &words), "", &alerts_stub(&seen, STATUS_ERROR, body))?;
+        assert!(outcome.err.contains("u{ad}") || outcome.err.contains("u00ad"));
+        HIDDEN_RAW.iter().for_each(|raw| assert!(!outcome.err.contains(*raw)));
+        Ok(())
+    })
+}

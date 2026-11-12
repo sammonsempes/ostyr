@@ -1,6 +1,7 @@
 use crate::commands::{bad_reply, call_with_session, FIRST_SUCCESS};
 use crate::error::CliError;
 use crate::model::{AlertPage, AlertView, Context, HttpMethod, Report};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 
 pub const SHORT_ID_CHARS: usize = 12;
@@ -27,17 +28,42 @@ pub const STATUS_NOT_FOUND: u16 = 404;
 pub const STATUS_TOO_MANY: u16 = 429;
 
 
-pub const BIDI_CONTROLS: &[char] = &[
-    '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-];
+pub const UTF16_UNITS_MAX: usize = 2;
 
 
-/// Escapes control and bidirectional characters so a hostile value cannot drive the terminal.
+/// True for control, format (Cf, bidirectional and zero-width included) and line or paragraph separator characters.
+pub fn is_hidden(character: char) -> bool {
+    matches!(
+        get_general_category(character),
+        GeneralCategory::Control | GeneralCategory::Format | GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator
+    )
+}
+
+
+/// Escapes control and hidden characters so a hostile value cannot drive the terminal.
 pub fn printable(text: &str) -> String {
     text.chars()
         .map(|character| {
-            if character.is_control() || BIDI_CONTROLS.contains(&character) {
+            if is_hidden(character) {
                 character.escape_unicode().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
+
+/// Rewrites every hidden character of serialised JSON as `\uXXXX` escapes (they only occur inside strings).
+pub fn escape_json(json: &str) -> String {
+    json.chars()
+        .map(|character| {
+            if is_hidden(character) {
+                character
+                    .encode_utf16(&mut [0; UTF16_UNITS_MAX])
+                    .iter()
+                    .map(|unit| format!("\\u{unit:04x}"))
+                    .collect()
             } else {
                 character.to_string()
             }
