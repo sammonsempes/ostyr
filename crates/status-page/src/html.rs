@@ -60,10 +60,20 @@ pub fn render_html(page: &PublicPage) -> String {
     let components: String = page.components.iter().map(component_item).collect();
     let incidents: String = page.incidents.iter().map(incident_item).collect();
     let title = encode_text(&page.title);
+    let omitted = if page.omitted_ongoing > 0 {
+        format!(
+            "<p>{} incidents not shown, {} of them ongoing.</p>",
+            page.omitted_incidents, page.omitted_ongoing
+        )
+    } else if page.omitted_incidents > 0 {
+        format!("<p>{} older incidents not shown.</p>", page.omitted_incidents)
+    } else {
+        String::new()
+    };
     let maintenance = if page.maintenance { "<p>Maintenance in progress.</p>" } else { "" };
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{title}</title></head><body><h1>{title}</h1>\
-         <p>{}</p>{maintenance}<ul>{components}</ul><h2>Incidents</h2><ul>{incidents}</ul><p>Generated at {}</p></body></html>",
+         <p>{}</p>{maintenance}<ul>{components}</ul><h2>Incidents</h2><ul>{incidents}</ul>{omitted}<p>Generated at {}</p></body></html>",
         state_label(page.state),
         page.generated_at
     )

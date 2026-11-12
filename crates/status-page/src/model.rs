@@ -4,7 +4,7 @@ use ipnet::IpNet;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 
@@ -181,6 +181,15 @@ pub struct PublicPage {
     pub maintenance: bool,
     pub components: Vec<PublicComponent>,
     pub incidents: Vec<PublicIncident>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_incidents: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_ongoing: usize,
+}
+
+
+pub fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 
@@ -245,6 +254,15 @@ pub const DEFAULT_WIDE_PREFIX_BITS: u8 = 48;
 pub const DEFAULT_WIDE_MULTIPLIER: u32 = 8;
 
 
+pub const MIN_PUBLISH_INTERVAL_SECONDS: u64 = 5;
+
+
+pub const MAX_PUBLISH_INTERVAL_SECONDS: u64 = 3600;
+
+
+pub const DEFAULT_PUBLISH_INTERVAL_SECONDS: u64 = 60;
+
+
 pub const MIN_PROXY_HEADER_BYTES: usize = 52;
 
 
@@ -299,6 +317,7 @@ pub struct PageSettings {
     pub max_proxy_header_bytes: usize,
     pub wide_prefix_bits: u8,
     pub wide_multiplier: u32,
+    pub publish_interval_seconds: u64,
 }
 
 
@@ -319,6 +338,7 @@ impl Default for PageSettings {
             max_proxy_header_bytes: DEFAULT_MAX_PROXY_HEADER_BYTES,
             wide_prefix_bits: DEFAULT_WIDE_PREFIX_BITS,
             wide_multiplier: DEFAULT_WIDE_MULTIPLIER,
+            publish_interval_seconds: DEFAULT_PUBLISH_INTERVAL_SECONDS,
         }
     }
 }
@@ -365,6 +385,9 @@ pub struct PageState {
     pub sources: SourceConnections,
     pub wide_sources: SourceConnections,
     pub proxy_malformed: AtomicUsize,
+    pub publish_skipped: AtomicU64,
+    pub omitted_seen: AtomicUsize,
+    pub omitted_ongoing_seen: AtomicUsize,
 }
 
 

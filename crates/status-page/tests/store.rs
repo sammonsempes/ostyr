@@ -8,8 +8,9 @@ use status_page::error::StoreError;
 use status_page::model::{ComponentConfig, PageConfig, DEFAULT_LIMITS};
 use status_page::render::render;
 use status_page::store::{
-    add_update, create_incident, published_incidents, resolve_incident, CREATE_SQL, MAX_MESSAGE_CHARACTERS, MAX_NOTE_CHARACTERS, MAX_PUBLISHED,
-    MAX_SERVICE_CHARACTERS, MAX_TITLE_CHARACTERS, MAX_UPDATES_PER_INCIDENT, MIGRATIONS, PUBLISHED_SQL, RESOLVE_SQL, UPDATES_SQL, UPDATE_SQL,
+    add_update, count_of, create_incident, published_incidents, read_published, resolve_incident, COUNTS_SQL, CREATE_SQL, MAX_MESSAGE_CHARACTERS,
+    MAX_NOTE_CHARACTERS, MAX_PUBLISHED, MAX_SERVICE_CHARACTERS, MAX_TITLE_CHARACTERS, MAX_UPDATES_PER_INCIDENT, MIGRATIONS, PUBLISHED_SQL,
+    RESOLVE_SQL, UPDATES_SQL, UPDATE_SQL,
 };
 use status_page::store_model::{Cell, IncidentRef, NewIncident, Param, Statement};
 use status_page::types::Row;
@@ -203,7 +204,7 @@ fn newest_published<'db>(db: &'db Db, tenant: &str, params: &[Param]) -> Result<
         .iter()
         .filter(|incident| incident.tenant == tenant && incident.published)
         .collect();
-    shown.sort_by_key(|incident| std::cmp::Reverse((incident.started_at, incident.id)));
+    shown.sort_by_key(|incident| std::cmp::Reverse((incident.resolved_at.is_none(), incident.started_at, incident.id)));
     shown.truncate(limit);
     Ok(shown)
 }
@@ -222,6 +223,19 @@ fn fake_published(db: &Db, tenant: &str, params: &[Param]) -> Result<Vec<Row>, S
             ]
         })
         .collect())
+}
+
+
+fn fake_counts(db: &Db, tenant: &str) -> Result<Vec<Row>, StoreError> {
+    let shown: Vec<&StoredIncident> = db
+        .incidents
+        .iter()
+        .filter(|incident| incident.tenant == tenant && incident.published)
+        .collect();
+    let ongoing = shown.iter().filter(|incident| incident.resolved_at.is_none()).count();
+    let total = i64::try_from(shown.len()).map_err(|_overflow| bad("fake total"))?;
+    let open = i64::try_from(ongoing).map_err(|_overflow| bad("fake ongoing"))?;
+    Ok(vec![vec![int_cell(total), int_cell(open)]])
 }
 
 
@@ -250,6 +264,7 @@ fn execute(db: &Rc<RefCell<Db>>, scope: &TenantScope, statement: Statement) -> R
         RESOLVE_SQL => fake_resolve(&mut state, tenant, &statement.params),
         PUBLISHED_SQL => fake_published(&state, tenant, &statement.params),
         UPDATES_SQL => fake_updates(&state, tenant, &statement.params),
+        COUNTS_SQL => fake_counts(&state, tenant),
         _ => Err(bad("fake sql")),
     }
 }
@@ -301,8 +316,25 @@ fn the_migration_is_valid_and_keys_every_table_by_tenant() -> TestResult {
 
 
 #[test]
+fn the_second_migration_indexes_the_unresolved_first_order_of_the_public_reads() -> TestResult {
+    let migration = MIGRATIONS.get(1).ok_or("no second migration")?;
+    assert_eq!(migration.version, "status_0002");
+    assert!(migration
+        .sql
+        .contains("(tenant, (resolved_at IS NULL) DESC, started_at DESC, id DESC) WHERE published"));
+    [PUBLISHED_SQL, UPDATES_SQL].iter().for_each(|sql| {
+        assert!(
+            sql.contains("ORDER BY (resolved_at IS NULL) DESC, started_at DESC, id DESC LIMIT $2"),
+            "{sql}"
+        )
+    });
+    Ok(())
+}
+
+
+#[test]
 fn every_statement_filters_on_the_tenant_bound_as_the_first_parameter() -> TestResult {
-    [UPDATE_SQL, RESOLVE_SQL, PUBLISHED_SQL, UPDATES_SQL]
+    [UPDATE_SQL, RESOLVE_SQL, PUBLISHED_SQL, UPDATES_SQL, COUNTS_SQL]
         .iter()
         .for_each(|sql| assert!(sql.contains("tenant = $1"), "{sql}"));
     assert!(CREATE_SQL.contains("(tenant, ") && CREATE_SQL.contains("VALUES ($1, "));
@@ -312,7 +344,7 @@ fn every_statement_filters_on_the_tenant_bound_as_the_first_parameter() -> TestR
 
 #[test]
 fn the_public_statements_never_select_internal_columns() -> TestResult {
-    [PUBLISHED_SQL, UPDATES_SQL].iter().for_each(|sql| {
+    [PUBLISHED_SQL, UPDATES_SQL, COUNTS_SQL].iter().for_each(|sql| {
         assert!(!sql.contains("internal_note"), "{sql}");
         assert!(!sql.contains("assignee"), "{sql}");
     });
@@ -440,11 +472,11 @@ async fn published_incidents_hide_unpublished_ones_and_every_internal_note() -> 
     assert_eq!(incidents.len(), TWO);
     assert_eq!(
         incidents.iter().map(|incident| incident.public_title.as_str()).collect::<Vec<_>>(),
-        ["Mail slow", "Website down"]
+        ["Website down", "Mail slow"]
     );
-    let older = incidents.get(1).ok_or("missing")?;
-    assert_eq!(older.updates.len(), TWO);
-    assert_eq!(incidents.first().map(|incident| incident.resolved_at), Some(Some(END)));
+    let ongoing = incidents.first().ok_or("missing")?;
+    assert_eq!(ongoing.updates.len(), TWO);
+    assert_eq!(incidents.get(1).map(|incident| incident.resolved_at), Some(Some(END)));
     assert!(incidents.iter().all(|incident| incident.published && incident.tenant == TENANT_A));
     let dump = format!("{incidents:?}");
     assert!(!dump.contains("SECRET"));
@@ -685,5 +717,106 @@ async fn malformed_public_rows_are_refused_with_the_column_name() -> TestResult 
         published_incidents(&mut short, &scope, 1).await,
         Err(StoreError::BadRow { column: "at" })
     ));
+    Ok(())
+}
+
+
+fn stored(id: i64, started_at: i64, resolved: bool) -> StoredIncident {
+    StoredIncident {
+        tenant: TENANT_A.to_owned(),
+        id,
+        service: "svc-web-internal".to_owned(),
+        title: format!("incident-{id}"),
+        published: true,
+        started_at,
+        resolved_at: resolved.then_some(started_at + 1),
+        version: 0,
+    }
+}
+
+
+const MORE_THAN_THE_LIMIT: i64 = 600;
+
+
+const OLD_ONGOING: i64 = 4;
+
+
+#[tokio::test]
+async fn the_limit_never_cuts_an_ongoing_outage_before_a_resolved_incident_and_the_counts_are_exact() -> TestResult {
+    let db = Rc::<RefCell<Db>>::default();
+    {
+        let mut state = db.try_borrow_mut()?;
+        state.incidents.extend((1..=OLD_ONGOING).map(|id| stored(id, id, false)));
+        state
+            .incidents
+            .extend((OLD_ONGOING + 1..=MORE_THAN_THE_LIMIT).map(|id| stored(id, START + id, true)));
+    }
+    let mut exec = executor(&db);
+    let scope = tenant_scope(TENANT_A)?;
+    let read = read_published(&mut exec, &scope, MAX_PUBLISHED).await?;
+    assert_eq!(read.incidents.len(), usize::try_from(MAX_PUBLISHED)?);
+    assert_eq!(
+        read.incidents.iter().filter(|incident| incident.resolved_at.is_none()).count(),
+        usize::try_from(OLD_ONGOING)?
+    );
+    assert_eq!(read.total, usize::try_from(MORE_THAN_THE_LIMIT)?);
+    assert_eq!(read.ongoing, usize::try_from(OLD_ONGOING)?);
+    let counts = db.try_borrow()?.log.iter().filter(|statement| statement.sql == COUNTS_SQL).count();
+    assert_eq!(counts, 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_counts_follow_the_tenant_scope() -> TestResult {
+    let db = Rc::<RefCell<Db>>::default();
+    let mut exec = executor(&db);
+    let scope_a = tenant_scope(TENANT_A)?;
+    let scope_b = tenant_scope(TENANT_B)?;
+    create_incident(&mut exec, &scope_a, &new_incident("A one", true, START)).await?;
+    create_incident(&mut exec, &scope_a, &new_incident("A hidden", false, START)).await?;
+    create_incident(&mut exec, &scope_b, &new_incident("B one", true, START)).await?;
+    create_incident(&mut exec, &scope_b, &new_incident("B two", true, START)).await?;
+    let read = read_published(&mut exec, &scope_a, MAX_PUBLISHED).await?;
+    assert_eq!((read.incidents.len(), read.total, read.ongoing), (1, 1, 1));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn malformed_counts_are_refused_with_the_column_name() -> TestResult {
+    let scope = tenant_scope(TENANT_A)?;
+    let counted = |rows: Vec<Row>| {
+        move |_scope: &TenantScope, statement: Statement| {
+            let answer = if statement.sql == COUNTS_SQL { rows.clone() } else { Vec::new() };
+            ready(Ok::<Vec<Row>, StoreError>(answer))
+        }
+    };
+    let mut none = counted(Vec::new());
+    assert!(matches!(
+        read_published(&mut none, &scope, 1).await,
+        Err(StoreError::BadRow { column: "total" })
+    ));
+    let mut negative = counted(vec![vec![int_cell(-1), int_cell(0)]]);
+    assert!(matches!(
+        read_published(&mut negative, &scope, 1).await,
+        Err(StoreError::BadRow { column: "total" })
+    ));
+    let mut text = counted(vec![vec![int_cell(1), text_cell("x")]]);
+    assert!(matches!(
+        read_published(&mut text, &scope, 1).await,
+        Err(StoreError::BadRow { column: "ongoing" })
+    ));
+    let mut short = counted(vec![vec![int_cell(1)]]);
+    assert!(matches!(
+        read_published(&mut short, &scope, 1).await,
+        Err(StoreError::BadRow { column: "ongoing" })
+    ));
+    let mut failing = |_scope: &TenantScope, _statement: Statement| ready(Err::<Vec<Row>, StoreError>(bad("down")));
+    assert!(matches!(
+        read_published(&mut failing, &scope, 1).await,
+        Err(StoreError::BadRow { column: "down" })
+    ));
+    assert_eq!(count_of(&[vec![int_cell(TWO_I64)]], 0, "total")?, TWO);
     Ok(())
 }
