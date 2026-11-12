@@ -1,0 +1,21 @@
+[package]
+name = "grc"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["serde-well-known", "parsing"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

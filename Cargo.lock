@@ -2341,6 +2341,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "grc"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "core-pg",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+]
+
+[[package]]
 name = "group"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
