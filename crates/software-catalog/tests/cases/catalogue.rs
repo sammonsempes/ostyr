@@ -263,3 +263,26 @@ fn digest_publisher_and_uninstall_rules() -> TestResult {
     assert_eq!(problem(apt), None);
     Ok(())
 }
+
+
+#[test]
+fn a_debian_pin_has_upstream_and_revision_and_no_modifier_tail() -> TestResult {
+    let apt = |version: &str| problem(entry("x", Source::Apt("nano".to_string()), version));
+    ["7.2-", "7.2-1-", "7.2+", "7.2~", "7.2.", "-1", "1:-1", "1:"]
+        .iter()
+        .for_each(|version| assert_eq!(apt(version), Some("version"), "{version}"));
+    ["7.2-1", "7.2", "1:7.2-1", "7.2-1~bpo1", "7.2+dfsg-1"]
+        .iter()
+        .for_each(|version| assert_eq!(apt(version), None, "{version}"));
+    Ok(())
+}
+
+
+#[test]
+fn the_six_extra_rpm_architectures_are_refused_in_a_release() -> TestResult {
+    let dnf = |version: &str| problem(entry("x", Source::Dnf("foo".to_string()), version));
+    ["i386", "i586", "armv7hl", "ppc64", "nosrc", "x86_64_v2"]
+        .iter()
+        .for_each(|arch| assert_eq!(dnf(&format!("1.0-1.{arch}")), Some("version"), "{arch}"));
+    Ok(())
+}
