@@ -3597,6 +3597,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "net-topology"
+version = "0.0.0"
+dependencies = [
+ "core-pg",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "network-devices"
 version = "0.0.0"
 dependencies = [

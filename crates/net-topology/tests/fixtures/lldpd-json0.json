@@ -1,0 +1,89 @@
+{
+  "lldp": [
+    {
+      "interface": [
+        {
+          "name": "vx0",
+          "via": "LLDP",
+          "rid": "1",
+          "age": "0 day, 00:01:01",
+          "chassis": [
+            {
+              "id": [
+                {
+                  "type": "mac",
+                  "value": "52:54:00:a6:c9:ce"
+                }
+              ],
+              "name": [
+                {
+                  "value": "client"
+                }
+              ],
+              "descr": [
+                {
+                  "value": "Ubuntu 24.04.5 LTS Linux 6.8.0-149-generic #149-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:21:10 UTC 2026 x86_64"
+                }
+              ],
+              "mgmt-ip": [
+                {
+                  "value": "192.168.101.84"
+                },
+                {
+                  "value": "fe80::5054:ff:fea6:c9ce"
+                }
+              ],
+              "mgmt-iface": [
+                {
+                  "value": "2"
+                },
+                {
+                  "value": "2"
+                }
+              ],
+              "capability": [
+                {
+                  "type": "Bridge",
+                  "enabled": false
+                },
+                {
+                  "type": "Router",
+                  "enabled": false
+                },
+                {
+                  "type": "Wlan",
+                  "enabled": false
+                },
+                {
+                  "type": "Station",
+                  "enabled": true
+                }
+              ]
+            }
+          ],
+          "port": [
+            {
+              "id": [
+                {
+                  "type": "mac",
+                  "value": "b2:c8:e3:64:f6:ff"
+                }
+              ],
+              "descr": [
+                {
+                  "value": "vx0"
+                }
+              ],
+              "ttl": [
+                {
+                  "value": "120"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
