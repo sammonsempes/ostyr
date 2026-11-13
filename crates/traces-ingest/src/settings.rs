@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 
-pub const CEILING_FACTOR: u64 = 10;
+pub const CEILING_FACTOR: usize = 5;
 
 
 pub const LIMIT_COUNT: usize = 20;
@@ -47,101 +47,103 @@ pub fn to_metrics_settings(settings: &TracesSettings) -> MetricsSettings {
 }
 
 
-/// Ten times the default: the largest value whose worst accepted shape was not measured.
-pub fn ceiling(default: usize) -> u64 {
-    to_u64(default) * CEILING_FACTOR
+/// The largest value accepted for each field; the memory-shaping ones are measured by `tests/memory_ceiling.rs`.
+pub fn ceiling_limits() -> Limits {
+    let defaults = Limits::default();
+    Limits {
+        max_request_bytes: defaults.max_request_bytes * CEILING_FACTOR,
+        max_resource_spans: defaults.max_resource_spans * CEILING_FACTOR,
+        max_spans: defaults.max_spans * CEILING_FACTOR,
+        max_total_attributes: defaults.max_total_attributes * CEILING_FACTOR,
+        max_events_total: defaults.max_events_total * CEILING_FACTOR,
+        max_links_total: defaults.max_links_total * CEILING_FACTOR,
+        max_value_elements_total: defaults.max_value_elements_total * CEILING_FACTOR,
+        max_entity_refs_total: defaults.max_entity_refs_total * CEILING_FACTOR,
+        max_entity_keys_total: defaults.max_entity_keys_total * CEILING_FACTOR,
+        max_attributes_per_span: defaults.max_attributes_per_span * CEILING_FACTOR,
+        max_events_per_span: defaults.max_events_per_span * CEILING_FACTOR,
+        max_links_per_span: defaults.max_links_per_span * CEILING_FACTOR,
+        max_name_bytes: defaults.max_name_bytes * CEILING_FACTOR,
+        max_attribute_key_bytes: defaults.max_attribute_key_bytes * CEILING_FACTOR,
+        max_attribute_value_bytes: defaults.max_attribute_value_bytes * CEILING_FACTOR,
+        max_status_message_bytes: defaults.max_status_message_bytes * CEILING_FACTOR,
+        max_future_skew_seconds: defaults.max_future_skew_seconds * to_u64(CEILING_FACTOR),
+        max_batch_rows: defaults.max_batch_rows * CEILING_FACTOR,
+        max_batch_bytes: defaults.max_batch_bytes * CEILING_FACTOR,
+        retention_seconds: MAX_RETENTION_SECONDS_CEILING,
+    }
 }
 
 
 /// Every field of `Limits` within its floor and its ceiling; the first one outside is named.
 pub fn validate_trace_limits(limits: &Limits) -> Result<(), SettingsError> {
-    let defaults = Limits::default();
+    let top = ceiling_limits();
     let rows: [LimitRow; LIMIT_COUNT] = [
-        (
-            "max_request_bytes",
-            to_u64(limits.max_request_bytes),
-            1,
-            ceiling(defaults.max_request_bytes),
-        ),
-        (
-            "max_resource_spans",
-            to_u64(limits.max_resource_spans),
-            1,
-            ceiling(defaults.max_resource_spans),
-        ),
-        ("max_spans", to_u64(limits.max_spans), 1, ceiling(defaults.max_spans)),
+        ("max_request_bytes", to_u64(limits.max_request_bytes), 1, to_u64(top.max_request_bytes)),
+        ("max_resource_spans", to_u64(limits.max_resource_spans), 1, to_u64(top.max_resource_spans)),
+        ("max_spans", to_u64(limits.max_spans), 1, to_u64(top.max_spans)),
         (
             "max_total_attributes",
             to_u64(limits.max_total_attributes),
             1,
-            ceiling(defaults.max_total_attributes),
+            to_u64(top.max_total_attributes),
         ),
-        ("max_events_total", to_u64(limits.max_events_total), 1, ceiling(defaults.max_events_total)),
-        ("max_links_total", to_u64(limits.max_links_total), 1, ceiling(defaults.max_links_total)),
+        ("max_events_total", to_u64(limits.max_events_total), 1, to_u64(top.max_events_total)),
+        ("max_links_total", to_u64(limits.max_links_total), 1, to_u64(top.max_links_total)),
         (
             "max_value_elements_total",
             to_u64(limits.max_value_elements_total),
             1,
-            ceiling(defaults.max_value_elements_total),
+            to_u64(top.max_value_elements_total),
         ),
         (
             "max_entity_refs_total",
             to_u64(limits.max_entity_refs_total),
             1,
-            ceiling(defaults.max_entity_refs_total),
+            to_u64(top.max_entity_refs_total),
         ),
         (
             "max_entity_keys_total",
             to_u64(limits.max_entity_keys_total),
             1,
-            ceiling(defaults.max_entity_keys_total),
+            to_u64(top.max_entity_keys_total),
         ),
         (
             "max_attributes_per_span",
             to_u64(limits.max_attributes_per_span),
             1,
-            ceiling(defaults.max_attributes_per_span),
+            to_u64(top.max_attributes_per_span),
         ),
         (
             "max_events_per_span",
             to_u64(limits.max_events_per_span),
             1,
-            ceiling(defaults.max_events_per_span),
+            to_u64(top.max_events_per_span),
         ),
-        (
-            "max_links_per_span",
-            to_u64(limits.max_links_per_span),
-            1,
-            ceiling(defaults.max_links_per_span),
-        ),
-        ("max_name_bytes", to_u64(limits.max_name_bytes), 1, ceiling(defaults.max_name_bytes)),
+        ("max_links_per_span", to_u64(limits.max_links_per_span), 1, to_u64(top.max_links_per_span)),
+        ("max_name_bytes", to_u64(limits.max_name_bytes), 1, to_u64(top.max_name_bytes)),
         (
             "max_attribute_key_bytes",
             to_u64(limits.max_attribute_key_bytes),
             1,
-            ceiling(defaults.max_attribute_key_bytes),
+            to_u64(top.max_attribute_key_bytes),
         ),
         (
             "max_attribute_value_bytes",
             to_u64(limits.max_attribute_value_bytes),
             1,
-            ceiling(defaults.max_attribute_value_bytes),
+            to_u64(top.max_attribute_value_bytes),
         ),
         (
             "max_status_message_bytes",
             to_u64(limits.max_status_message_bytes),
             1,
-            ceiling(defaults.max_status_message_bytes),
+            to_u64(top.max_status_message_bytes),
         ),
-        (
-            "max_future_skew_seconds",
-            limits.max_future_skew_seconds,
-            0,
-            defaults.max_future_skew_seconds * CEILING_FACTOR,
-        ),
-        ("max_batch_rows", to_u64(limits.max_batch_rows), 1, ceiling(defaults.max_batch_rows)),
-        ("max_batch_bytes", to_u64(limits.max_batch_bytes), 1, ceiling(defaults.max_batch_bytes)),
-        ("retention_seconds", limits.retention_seconds, 1, MAX_RETENTION_SECONDS_CEILING),
+        ("max_future_skew_seconds", limits.max_future_skew_seconds, 0, top.max_future_skew_seconds),
+        ("max_batch_rows", to_u64(limits.max_batch_rows), 1, to_u64(top.max_batch_rows)),
+        ("max_batch_bytes", to_u64(limits.max_batch_bytes), 1, to_u64(top.max_batch_bytes)),
+        ("retention_seconds", limits.retention_seconds, 1, top.retention_seconds),
     ];
     check_limit_rows(&rows)
 }

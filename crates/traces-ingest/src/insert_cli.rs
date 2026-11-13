@@ -3,6 +3,7 @@ use crate::run::{run_insert, write_report, RunError};
 use crate::sampling::{parse_sampling, SamplingError};
 use core_pg::error::PgError;
 use core_pg::password::read_limited;
+use metrics_ingest::settings::{LoadError, SettingsError};
 use metrics_ingest::types::ElapsedFn;
 use std::io::{self, Write};
 use std::path::Path;
@@ -79,7 +80,7 @@ pub fn run_insert_cli(args: &[String], now_nanos: u64, elapsed: &ElapsedFn, out:
 }
 
 
-/// One fixed line per failure: no error chain, no server or file content.
+/// One fixed line per failure: no error chain, no server or file content; a refused limit names its field and bounds only.
 pub fn insert_error_text(error: &InsertCliError) -> String {
     match error {
         InsertCliError::Usage => INSERT_USAGE.to_string(),
@@ -88,6 +89,9 @@ pub fn insert_error_text(error: &InsertCliError) -> String {
         InsertCliError::Output(_) => "the report could not be written".to_string(),
         InsertCliError::BatchFailed(index) => format!("batch {index} failed, see the report"),
         InsertCliError::RequestRefused => "the request was refused, see the report".to_string(),
+        InsertCliError::Run(RunError::Settings(LoadError::Invalid(SettingsError::Limit { field, floor, ceiling }))) => {
+            format!("limits.{field} must be within {floor}..={ceiling}")
+        }
         InsertCliError::Run(_) => "the settings or the sender are refused".to_string(),
     }
 }
