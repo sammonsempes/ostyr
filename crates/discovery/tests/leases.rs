@@ -10,7 +10,7 @@ use consts::{CLTT, MAC_A};
 use core_export::ecs::EcsEvent;
 use discovery::leases::{lease_hints, lease_of, Skip};
 use discovery::model::{LeaseLimits, TenantEvent};
-use kea::lease_event;
+use kea::{lease_event, lease_event_at, LIFETIME};
 use std::error::Error;
 use std::net::IpAddr;
 use types::TestResult;
@@ -154,19 +154,21 @@ fn events_that_are_not_assigned_leases_are_counted_by_reason() -> TestResult {
     let mut no_start = lease_event("10.0.0.1", Some(MAC_A), None, CLTT)?;
     no_start.event.start = None;
     let mut declined = lease_event("10.0.0.1", Some(MAC_A), None, CLTT)?;
-    declined.event.action = Some("lease-declined".to_string());
+    declined.event.action = Some("lease-state-3".to_string());
+    let no_end = lease_event_at("10.0.0.1", Some(MAC_A), None, CLTT)?;
     let bad_address = lease_event("not-an-ip", Some(MAC_A), None, CLTT)?;
     let mut no_source = lease_event("10.0.0.1", Some(MAC_A), None, CLTT)?;
     no_source.source = None;
     let no_mac = lease_event("10.0.0.1", None, None, CLTT)?;
     let bad_mac = lease_event("10.0.0.1", Some("zz"), None, CLTT)?;
-    let events = [other_dataset, no_start, declined, bad_address, no_source, no_mac, bad_mac];
+    let events = [other_dataset, no_start, declined, no_end, bad_address, no_source, no_mac, bad_mac];
     let hints = hints_of(&events, TENANT, &LeaseLimits::default());
     assert!(hints.leases.is_empty());
     assert_eq!(hints.counters.not_lease, PAIR);
     assert_eq!(hints.counters.not_assigned, 1);
     assert_eq!(hints.counters.bad_address, PAIR);
     assert_eq!(hints.counters.no_mac, PAIR);
+    assert_eq!(hints.counters.no_expiry, 1);
     Ok(())
 }
 
@@ -180,5 +182,103 @@ fn a_mapped_address_is_canonical_and_lease_of_reports_skips() -> Result<(), Box<
     let mut declined = mapped;
     declined.event.action = None;
     assert_eq!(lease_of(&declined), Err(Skip::NotAssigned));
+    Ok(())
+}
+
+
+fn with_action(event: EcsEvent, action: &str) -> EcsEvent {
+    EcsEvent {
+        event: core_export::ecs::EventFields {
+            action: Some(action.to_string()),
+            ..event.event
+        },
+        ..event
+    }
+}
+
+
+#[test]
+fn a_lease_keeps_its_expiry() -> TestResult {
+    let events = [lease_event("10.0.0.5", Some(MAC_A), None, CLTT)?];
+    let hints = hints_of(&events, TENANT, &LeaseLimits::default());
+    let lease = hints.leases.get(&"10.0.0.5".parse::<IpAddr>()?).ok_or("missing")?;
+    assert_eq!(lease.expires, CLTT + LIFETIME);
+    assert!(!lease.released);
+    Ok(())
+}
+
+
+#[test]
+fn a_later_reclaim_or_decline_releases_the_address_and_is_counted() -> TestResult {
+    for action in ["lease-expired-reclaimed", "lease-declined"] {
+        let events = [
+            lease_event("10.0.0.5", Some(MAC_A), None, CLTT)?,
+            with_action(lease_event("10.0.0.5", Some(MAC_A), None, CLTT + STEP)?, action),
+        ];
+        let hints = hints_of(&events, TENANT, &LeaseLimits::default());
+        assert!(hints.leases.get(&"10.0.0.5".parse::<IpAddr>()?).ok_or("missing")?.released);
+        assert_eq!(hints.counters.released, 1);
+        assert_eq!(hints.counters.not_assigned, 0);
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_reclaim_older_than_the_assignment_changes_nothing() -> TestResult {
+    let events = [
+        lease_event("10.0.0.5", Some(MAC_A), None, CLTT)?,
+        with_action(lease_event("10.0.0.5", Some(MAC_A), None, CLTT - STEP)?, "lease-expired-reclaimed"),
+    ];
+    let hints = hints_of(&events, TENANT, &LeaseLimits::default());
+    assert!(!hints.leases.get(&"10.0.0.5".parse::<IpAddr>()?).ok_or("missing")?.released);
+    Ok(())
+}
+
+
+#[test]
+fn an_assignment_older_than_a_reclaim_does_not_revive_the_address() -> TestResult {
+    let events = [
+        with_action(lease_event("10.0.0.5", Some(MAC_A), None, CLTT)?, "lease-declined"),
+        lease_event("10.0.0.5", Some(MAC_A), None, CLTT - STEP)?,
+    ];
+    let hints = hints_of(&events, TENANT, &LeaseLimits::default());
+    assert!(hints.leases.get(&"10.0.0.5".parse::<IpAddr>()?).ok_or("missing")?.released);
+    Ok(())
+}
+
+
+#[test]
+fn a_release_without_a_mac_is_stored_released_and_an_assignment_without_one_is_skipped() -> TestResult {
+    for action in ["lease-declined", "lease-expired-reclaimed", "lease-released"] {
+        let events = [
+            lease_event("10.0.0.5", Some(MAC_A), None, CLTT)?,
+            with_action(lease_event("10.0.0.5", None, None, CLTT + STEP)?, action),
+        ];
+        let hints = hints_of(&events, TENANT, &LeaseLimits::default());
+        let lease = hints.leases.get(&"10.0.0.5".parse::<IpAddr>()?).ok_or("missing")?;
+        assert!(lease.released);
+        assert!(lease.mac.is_empty());
+        assert_eq!(hints.counters.released, 1);
+        assert_eq!(hints.counters.no_mac, 0);
+    }
+    let assigned = [lease_event("10.0.0.5", None, None, CLTT)?];
+    let hints = hints_of(&assigned, TENANT, &LeaseLimits::default());
+    assert!(hints.leases.is_empty());
+    assert_eq!(hints.counters.no_mac, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_decline_one_second_after_the_assignment_or_at_the_same_time_wins() -> TestResult {
+    for offset in [1, 0] {
+        let events = [
+            lease_event("10.0.0.5", Some(MAC_A), None, CLTT)?,
+            with_action(lease_event("10.0.0.5", None, None, CLTT + offset)?, "lease-declined"),
+        ];
+        let hints = hints_of(&events, TENANT, &LeaseLimits::default());
+        assert!(hints.leases.get(&"10.0.0.5".parse::<IpAddr>()?).ok_or("missing")?.released);
+    }
     Ok(())
 }
