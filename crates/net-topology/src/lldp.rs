@@ -12,7 +12,7 @@ use std::io::Read;
 use std::net::IpAddr;
 
 
-pub const EMPTY_LIST: &str = "[]";
+const NO_LIST: &str = "[]";
 
 
 pub const OBJECT_START: u8 = b'{';
@@ -126,6 +126,15 @@ struct Context<'a> {
 }
 
 
+fn shape(error: serde_json::Error) -> ListError {
+    ListError::Shape {
+        category: error.classify(),
+        line: error.line(),
+        column: error.column(),
+    }
+}
+
+
 fn malformed(error: serde_json::Error) -> ParseError {
     ParseError::Malformed {
         category: error.classify(),
@@ -147,7 +156,7 @@ fn refused_list(_error: ListError) -> SkipReason {
 
 fn parse_error(error: ListError, list: &'static str) -> ParseError {
     match error {
-        ListError::Shape(inner) => malformed(inner),
+        ListError::Shape { category, line, column } => ParseError::Malformed { category, line, column },
         ListError::TooMany { count, max } => ParseError::TooMany { list, count, max },
     }
 }
@@ -155,12 +164,12 @@ fn parse_error(error: ListError, list: &'static str) -> ParseError {
 
 /// A JSON array counted without allocating (`IgnoredAny` is zero-sized), its elements listed as raw text only when the count is within `max`.
 pub fn bounded_list(raw: Option<&RawValue>, max: usize) -> Result<RawList<'_>, ListError> {
-    let text = raw.map_or("[]", |value| value.get());
-    let count = serde_json::from_str::<Vec<IgnoredAny>>(text).map_err(ListError::Shape)?.len();
+    let text = raw.map_or(NO_LIST, |value| value.get());
+    let count = serde_json::from_str::<Vec<IgnoredAny>>(text).map_err(shape)?.len();
     if count > max {
         Err(ListError::TooMany { count, max })
     } else {
-        serde_json::from_str::<RawList>(text).map_err(ListError::Shape)
+        serde_json::from_str::<RawList>(text).map_err(shape)
     }
 }
 
@@ -169,7 +178,7 @@ pub fn bounded_list(raw: Option<&RawValue>, max: usize) -> Result<RawList<'_>, L
 fn tolerant_list<'a>(raw: Option<&'a RawValue>, max: usize, list: &'static str) -> Result<Option<RawList<'a>>, ParseError> {
     match bounded_list(raw, max) {
         Ok(items) => Ok(Some(items)),
-        Err(ListError::Shape(_)) => Ok(None),
+        Err(ListError::Shape { .. }) => Ok(None),
         Err(too_many) => Err(parse_error(too_many, list)),
     }
 }
@@ -227,9 +236,9 @@ fn id_of(raw: Option<&RawValue>, limits: &Limits) -> Result<NeighbourId, SkipRea
 }
 
 
-fn name_of(raw: Option<&RawValue>, limits: &Limits) -> Result<Option<String>, SkipReason> {
+fn name_of(raw: Option<&RawValue>, limits: &Limits) -> Result<(Option<String>, bool), SkipReason> {
     let entries = bounded_list(raw, NAME_LIST_MAX).map_err(refused_list)?;
-    entries
+    let name = entries
         .first()
         .map(|entry| {
             let parsed: RawName = serde_json::from_str(entry.get()).map_err(unparsable)?;
@@ -240,7 +249,8 @@ fn name_of(raw: Option<&RawValue>, limits: &Limits) -> Result<Option<String>, Sk
                 .map(str::to_owned))
         })
         .transpose()
-        .map(Option::flatten)
+        .map(Option::flatten)?;
+    Ok((name, !entries.is_empty()))
 }
 
 
@@ -257,8 +267,8 @@ fn convert(chassis_raw: &RawValue, port_raw: &RawValue, local_port: Option<&str>
     let chassis: RawChassis = serde_json::from_str(chassis_raw.get()).map_err(unparsable)?;
     let port: RawPort = serde_json::from_str(port_raw.get()).map_err(unparsable)?;
     bounded_list(chassis.capability, context.limits.max_capabilities).map_err(refused_list)?;
-    let remote_name = name_of(chassis.name, context.limits)?;
-    let dropped = remote_name.is_none() && chassis.name.is_some_and(|value| value.get() != EMPTY_LIST);
+    let (remote_name, listed) = name_of(chassis.name, context.limits)?;
+    let dropped = remote_name.is_none() && listed;
     let observation = Observation {
         local_host: context.local_host.to_owned(),
         local_port: required_text(local_port, context.limits)?,
@@ -406,4 +416,29 @@ pub fn parse_lldpd<Source: Read>(reader: Source, local_host: &str, now: i64, lim
     check_host(local_host, limits)?;
     let mut buffer = read_limited(reader, limits.max_bytes)?;
     parse_buffer(&mut buffer, local_host, now, limits)
+}
+
+
+/// Parses the report of one local port (`lldpcli -f json0 show neighbors ports <port> details`): its own byte cap, and a neighbour of another port refuses it.
+pub fn parse_lldpd_port<Source: Read>(reader: Source, local_host: &str, local_port: &str, now: i64, limits: &Limits) -> Result<Parsed, ParseError> {
+    check_host(local_host, limits)?;
+    if limits.max_port_bytes > limits.max_bytes {
+        Err(ParseError::InvalidPortBytes {
+            per_port: limits.max_port_bytes,
+            per_host: limits.max_bytes,
+        })
+    } else {
+        let mut buffer = read_limited(reader, limits.max_port_bytes)?;
+        let parsed = parse_buffer(&mut buffer, local_host, now, limits)?;
+        let foreign = parsed
+            .observations
+            .iter()
+            .filter(|observation| observation.local_port != local_port)
+            .count();
+        if foreign > 0 {
+            Err(ParseError::WrongPort { count: foreign })
+        } else {
+            Ok(parsed)
+        }
+    }
 }

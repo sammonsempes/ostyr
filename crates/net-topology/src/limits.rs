@@ -1,6 +1,9 @@
 pub const DEFAULT_MAX_BYTES: u64 = 4_194_304;
 
 
+pub const DEFAULT_MAX_PORT_BYTES: u64 = 2_097_152;
+
+
 pub const DEFAULT_MAX_INTERFACES: usize = 512;
 
 
@@ -22,6 +25,7 @@ pub const DEFAULT_MAX_LINKS_PER_PORT: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
     pub max_bytes: u64,
+    pub max_port_bytes: u64,
     pub max_interfaces: usize,
     pub max_neighbours_per_interface: usize,
     pub max_capabilities: usize,
@@ -35,6 +39,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_bytes: DEFAULT_MAX_BYTES,
+            max_port_bytes: DEFAULT_MAX_PORT_BYTES,
             max_interfaces: DEFAULT_MAX_INTERFACES,
             max_neighbours_per_interface: DEFAULT_MAX_NEIGHBOURS_PER_INTERFACE,
             max_capabilities: DEFAULT_MAX_CAPABILITIES,
