@@ -10,7 +10,7 @@ use site_collector::dirfs::open_directory;
 use site_collector::error::ForwardError;
 use site_collector::forward::{
     build_event, clean_text, cut_text, event_line, event_time, facility_name, file_bytes, forward_once, read_cursor, report_time_substitutions,
-    time_out_of_range, valid_hostname, write_cursor,
+    representable_time, time_out_of_range, valid_hostname, write_cursor,
 };
 use site_collector::forward_model::{EventLines, ForwardLimits, CURSOR_FILE, CURSOR_TEMPORARY, MAX_FORWARD_MESSAGE_BYTES};
 use site_collector::listen_model::ListenerKind;
@@ -392,6 +392,25 @@ fn text_helpers_are_bounded() -> TestResult {
     assert_eq!(event_time(None, now()?), now()?);
     assert_eq!(event_time(Some(i64::MAX), now()?), now()?);
     assert_eq!(event_time(Some(0), now()?), OffsetDateTime::UNIX_EPOCH);
+    Ok(())
+}
+
+
+const LAST_SECOND_OF_9999: i64 = 253_402_300_799;
+
+
+const LAST_YEAR: i32 = 9999;
+
+
+#[test]
+fn the_year_9999_upper_bound_is_explicit() -> TestResult {
+    let last_second = LAST_SECOND_OF_9999;
+    assert_eq!(representable_time(last_second).map(|time| time.year()), Some(LAST_YEAR));
+    assert!(representable_time(last_second + 1).is_none());
+    assert!(representable_time(i64::MAX).is_none());
+    assert_eq!(event_time(Some(last_second + 1), now()?), now()?);
+    assert!(time_out_of_range(Some(last_second + 1)));
+    assert!(!time_out_of_range(Some(last_second)));
     Ok(())
 }
 

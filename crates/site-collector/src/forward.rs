@@ -97,10 +97,13 @@ pub fn facility_name(priority: u8) -> &'static str {
 const YEAR_ZERO_UNIX_SECONDS: i64 = -62_167_219_200;
 
 
+const YEAR_9999_END_UNIX_SECONDS: i64 = 253_402_300_799;
+
+
 /// The time of a unix second count when it is a year 0 to 9999 time that JSON can encode.
 pub fn representable_time(seconds: i64) -> Option<OffsetDateTime> {
     Some(seconds)
-        .filter(|value| *value >= YEAR_ZERO_UNIX_SECONDS)
+        .filter(|value| (YEAR_ZERO_UNIX_SECONDS..=YEAR_9999_END_UNIX_SECONDS).contains(value))
         .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
 }
 
