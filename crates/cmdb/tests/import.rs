@@ -3,7 +3,7 @@ mod types;
 
 
 use cmdb::error::ImportError;
-use cmdb::import::{import_file, import_reader, load_mapping, ImportFormat, ImportMapping, ImportReport, RejectedRow};
+use cmdb::import::{header_error, import_file, import_reader, load_mapping, ImportFormat, ImportMapping, ImportReport, RejectedRow};
 use cmdb::model::{Asset, AssetKind, Attribute, IdentityKey, Lifecycle, Resolution};
 use cmdb::types::TruthMap;
 use std::collections::BTreeMap;
@@ -337,5 +337,24 @@ fn files_and_mapping_load_from_disk() -> TestResult {
     assert!(matches!(missing, Err(ImportError::Io(_))));
     std::fs::write(&mapping_path, "format: xml\n")?;
     assert!(load_mapping(&mapping_path).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn import_errors_never_carry_file_bytes() -> TestResult {
+    let secret: &[u8] = b"SECRET\xff,more";
+    let invalid = import_reader(secret, &mapping(ImportFormat::Csv), &[], &TruthMap::new())
+        .err()
+        .ok_or("no error")?;
+    let record = csv::Reader::from_reader(secret).headers().err().ok_or("no csv error")?;
+    let header = header_error(record);
+    assert!(matches!(header, ImportError::Header { .. }));
+    [invalid, header].iter().for_each(|error| {
+        let shown = format!("{error} {error:?}");
+        ["SECRET", "bytes:", "83, 69, 67"]
+            .iter()
+            .for_each(|marker| assert!(!shown.contains(marker), "{shown}"));
+    });
     Ok(())
 }

@@ -89,7 +89,7 @@ pub fn load_mapping(path: &Path) -> Result<ImportMapping, ImportError> {
 pub fn read_bounded<Input: Read>(reader: Input, limit: u64) -> Result<String, ImportError> {
     let mut bytes = Vec::new();
     reader.take(limit + 1).read_to_end(&mut bytes)?;
-    let text = String::from_utf8(bytes)?;
+    let text = String::from_utf8(bytes).map_err(|error| error.utf8_error())?;
     let within = text.len() as u64 <= limit;
     within.then_some(text).ok_or(ImportError::TooLarge { limit })
 }
@@ -127,9 +127,17 @@ pub fn json_rows(text: &str, max_rows: usize) -> Vec<RawRow> {
 }
 
 
+/// Keeps the line of a header error and drops the rest, since a csv error can hold the record bytes.
+pub fn header_error(error: csv::Error) -> ImportError {
+    ImportError::Header {
+        line: error.position().map_or(0, csv::Position::line),
+    }
+}
+
+
 pub fn csv_rows(text: &str, mapping: &ImportMapping, max_rows: usize) -> Result<Vec<RawRow>, ImportError> {
     let mut reader = csv::ReaderBuilder::new().from_reader(text.as_bytes());
-    let headers = reader.headers().map_err(ImportError::Header)?.clone();
+    let headers = reader.headers().map_err(header_error)?.clone();
     mapping
         .keys
         .values()
