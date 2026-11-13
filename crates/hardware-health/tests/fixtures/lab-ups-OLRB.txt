@@ -1,0 +1,23 @@
+battery.charge: 100
+battery.runtime: 1800
+battery.voltage: 13.4
+device.mfr: Lab
+device.model: Dummy
+device.type: ups
+driver.debug: 0
+driver.flag.allow_killpower: 0
+driver.name: dummy-ups
+driver.parameter.mode: dummy-once
+driver.parameter.pollinterval: 2
+driver.parameter.port: /etc/nut/lab.dev
+driver.parameter.synchronous: auto
+driver.state: updateinfo
+driver.version: 2.8.1
+driver.version.internal: 0.18
+input.voltage: 230.0
+output.voltage: 230.0
+ups.load: 23
+ups.mfr: Lab
+ups.model: Dummy
+ups.status: OL RB
+ups.temperature: 28.5
