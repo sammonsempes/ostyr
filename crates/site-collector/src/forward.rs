@@ -3,8 +3,8 @@ use crate::error::{FlowFrameError, ForwardError};
 use crate::event::flow_events;
 use crate::flow_frame::{decode_flow_frame, single_flow_batch};
 use crate::forward_model::{
-    ForwardLimits, ForwardReport, CURSOR_FILE, CURSOR_MAX_BYTES, CURSOR_TEMPORARY, FACILITY_NAMES, MAX_FORWARD_BATCH_RECORDS, MAX_FORWARD_HOST_BYTES,
-    MAX_FORWARD_MESSAGE_BYTES, MAX_RAW_HOST_BYTES, MODULE, UNKNOWN_FACILITY,
+    EventLines, ForwardLimits, ForwardReport, CURSOR_FILE, CURSOR_MAX_BYTES, CURSOR_TEMPORARY, FACILITY_NAMES, MAX_FORWARD_BATCH_RECORDS,
+    MAX_FORWARD_HOST_BYTES, MAX_FORWARD_MESSAGE_BYTES, MAX_RAW_HOST_BYTES, MODULE, UNKNOWN_FACILITY,
 };
 use crate::listen_model::ListenerKind;
 use crate::model::{SyslogRecord, FACILITY_WEIGHT, MAX_APP_BYTES};
@@ -94,16 +94,26 @@ pub fn facility_name(priority: u8) -> &'static str {
 }
 
 
-/// The record time, or the forward time when the record has none or an unrepresentable one.
+const YEAR_ZERO_UNIX_SECONDS: i64 = -62_167_219_200;
+
+
+/// The time of a unix second count when it is a year 0 to 9999 time that JSON can encode.
+pub fn representable_time(seconds: i64) -> Option<OffsetDateTime> {
+    Some(seconds)
+        .filter(|value| *value >= YEAR_ZERO_UNIX_SECONDS)
+        .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
+}
+
+
+/// The record time, or the forward time when the record has none or an unrepresentable one; never logs, the caller counts.
 pub fn event_time(timestamp: Option<i64>, now: OffsetDateTime) -> OffsetDateTime {
-    match timestamp.map(OffsetDateTime::from_unix_timestamp) {
-        Some(Ok(time)) => time,
-        Some(Err(error)) => {
-            tracing::warn!(%error, "record time out of range, the forward time is used");
-            now
-        }
-        None => now,
-    }
+    timestamp.and_then(representable_time).unwrap_or(now)
+}
+
+
+/// True when the record carries a time that cannot be represented, so `event_time` replaces it.
+pub fn time_out_of_range(timestamp: Option<i64>) -> bool {
+    timestamp.is_some_and(|seconds| representable_time(seconds).is_none())
 }
 
 
@@ -143,20 +153,34 @@ pub fn build_event(sequence: u64, epoch: &str, parsed: &SyslogRecord, now: Offse
 }
 
 
+/// The number of record times replaced in a batch, logged once when above zero (never per record).
+pub fn report_time_substitutions(produced: &[EventLines]) -> u64 {
+    let time_substituted = produced.iter().map(|event| event.time_substituted).sum::<u64>();
+    if time_substituted > 0 {
+        tracing::warn!(time_substituted, "record times out of range, the forward time is used");
+    }
+    time_substituted
+}
+
+
 /// The event lines of a spooled record by listener kind: one for a syslog message or a flow frame, an error when the payload is not that kind's.
-pub fn event_line(record: &Record, kind: ListenerKind, epoch: &str, now: OffsetDateTime) -> Result<Vec<String>, ForwardError> {
+pub fn event_line(record: &Record, kind: ListenerKind, epoch: &str, now: OffsetDateTime) -> Result<EventLines, ForwardError> {
     match kind {
         ListenerKind::Syslog => {
             let parsed = parse_syslog(&record.payload, now.year())?;
-            Ok(vec![to_json(&build_event(record.sequence, epoch, &parsed, now))?])
+            Ok(EventLines {
+                lines: vec![to_json(&build_event(record.sequence, epoch, &parsed, now))?],
+                time_substituted: u64::from(time_out_of_range(parsed.timestamp)),
+            })
         }
         ListenerKind::Netflow => {
             let (exporter, flow) = decode_flow_frame(&record.payload)?;
             let batch = single_flow_batch(flow);
-            Ok(flow_events(&batch, exporter, epoch, record.sequence, now)
+            let lines = flow_events(&batch, exporter, epoch, record.sequence, now)
                 .iter()
                 .map(to_json)
-                .collect::<Result<Vec<_>, _>>()?)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(EventLines { lines, time_substituted: 0 })
         }
     }
 }
@@ -206,7 +230,9 @@ pub fn forward_batch(
     if let Some(first) = first_failure {
         tracing::warn!(malformed, unknown_version, %first, "spooled records skipped");
     }
-    let lines = outcomes.into_iter().flatten().flatten().collect::<Vec<_>>();
+    let produced = outcomes.into_iter().flatten().collect::<Vec<_>>();
+    let time_substituted = report_time_substitutions(&produced);
+    let lines = produced.into_iter().flat_map(|event| event.lines).collect::<Vec<_>>();
     let forwarded = lines.len() as u64;
     if let Some(last) = records.last().map(|record| record.sequence) {
         sync_to(spool, cursor, last.saturating_add(1))?;
@@ -221,6 +247,7 @@ pub fn forward_batch(
         skipped_unparsable: malformed,
         skipped_unknown_version: unknown_version,
         refused_full: 0,
+        time_substituted,
     })
 }
 

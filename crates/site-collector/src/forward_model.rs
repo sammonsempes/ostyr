@@ -51,6 +51,15 @@ pub struct ForwardReport {
     pub skipped_unparsable: u64,
     pub skipped_unknown_version: u64,
     pub refused_full: u64,
+    pub time_substituted: u64,
+}
+
+
+/// The event lines of one record and how many of its times were replaced by the forward time.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EventLines {
+    pub lines: Vec<String>,
+    pub time_substituted: u64,
 }
 
 
