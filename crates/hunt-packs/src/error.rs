@@ -31,6 +31,8 @@ pub enum PackError {
     TooManyEntries { dir: String },
     #[error("{file}: a symbolic link is refused")]
     Symlink { file: String },
+    #[error("{file}: not a regular file")]
+    NotRegular { file: String },
     #[error("cannot read the directory")]
     Scan(#[from] std::io::Error),
 }

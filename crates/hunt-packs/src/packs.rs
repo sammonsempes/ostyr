@@ -3,6 +3,8 @@ use crate::model::{HuntPack, HuntPackFile, LoadedPack, Source};
 use crate::text::valid_text;
 use core_config::parse::{parse_document, read_text};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(unix))]
+use std::fs::symlink_metadata;
 use std::fs::{read_dir, DirEntry, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -83,9 +85,40 @@ pub fn parse_packs(reader: &mut dyn Read, file: &str) -> Result<HuntPackFile, Pa
 }
 
 
+/// Opens a file for reading without following a symlink and without blocking on a pipe.
+#[cfg(unix)]
+pub fn open_regular(path: &Path) -> io::Result<File> {
+    use rustix::fs::OFlags;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+        .open(path)
+}
+
+
+#[cfg(not(unix))]
+pub fn open_regular(path: &Path) -> io::Result<File> {
+    symlink_metadata(path).and_then(|found| {
+        if found.is_symlink() {
+            Err(io::Error::other("symbolic link"))
+        } else {
+            File::open(path)
+        }
+    })
+}
+
+
+/// One pack file through the handle that was checked: a symlink, a pipe or a directory is refused.
 pub fn load_file(path: &Path) -> Result<HuntPackFile, PackError> {
     let file = path.display().to_string();
-    let mut handle = File::open(path).map_err(|source| core_config::error::ConfigError::Io { file: file.clone(), source })?;
+    let mut handle = open_regular(path).map_err(|source| core_config::error::ConfigError::Io { file: file.clone(), source })?;
+    handle
+        .metadata()
+        .is_ok_and(|found| found.is_file())
+        .then_some(())
+        .ok_or_else(|| PackError::NotRegular { file: file.clone() })?;
     parse_packs(&mut handle, &file)
 }
 

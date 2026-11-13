@@ -2651,6 +2651,7 @@ name = "hunt-packs"
 version = "0.0.0"
 dependencies = [
  "core-config",
+ "rustix 1.1.6",
  "serde",
  "sha2 0.10.9",
  "tempfile",
