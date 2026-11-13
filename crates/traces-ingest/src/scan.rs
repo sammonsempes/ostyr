@@ -121,21 +121,37 @@ pub fn count_nested(bytes: &[u8], tag: u32) -> Result<usize, DecodeError> {
 }
 
 
-/// Elements of the array or key-value list held by one `AnyValue`, counted without decoding.
-pub fn container_elements(value: &[u8]) -> Result<usize, DecodeError> {
-    fields(value).try_fold(usize::default(), |total, field| {
+/// A key-value list entry weighs its `value` fields, at least 1, so the children collected never outnumber the count.
+pub fn entry_weight(entry: &[u8]) -> Result<usize, DecodeError> {
+    count_nested(entry, KEY_VALUE_VALUE_FIELD).map(|values| values.max(1))
+}
+
+
+pub fn list_weight(list: &[u8]) -> Result<usize, DecodeError> {
+    fields(list).try_fold(usize::default(), |total, field| {
         let (tag, payload) = field?;
         match payload {
-            Some(container) if tag == ANY_ARRAY_FIELD || tag == ANY_KVLIST_FIELD => {
-                count_nested(container, ELEMENTS_FIELD).map(|count| total.saturating_add(count))
-            }
+            Some(entry) if tag == ELEMENTS_FIELD => entry_weight(entry).map(|weight| total.saturating_add(weight)),
             _ => Ok(total),
         }
     })
 }
 
 
-/// The `AnyValue`s one level below `value`: array elements, and the value of every key-value list entry.
+/// Elements of the array or key-value list held by one `AnyValue`, counted without decoding.
+pub fn container_elements(value: &[u8]) -> Result<usize, DecodeError> {
+    fields(value).try_fold(usize::default(), |total, field| {
+        let (tag, payload) = field?;
+        match payload {
+            Some(array) if tag == ANY_ARRAY_FIELD => count_nested(array, ELEMENTS_FIELD).map(|count| total.saturating_add(count)),
+            Some(list) if tag == ANY_KVLIST_FIELD => list_weight(list).map(|count| total.saturating_add(count)),
+            _ => Ok(total),
+        }
+    })
+}
+
+
+/// The `AnyValue`s one level below `value`: array elements, and the value fields of every key-value list entry; call only under the cap.
 pub fn children_of(value: &[u8]) -> Result<Vec<&[u8]>, DecodeError> {
     fields(value).try_fold(Vec::new(), |mut children, field| {
         let (tag, payload) = field?;
@@ -183,7 +199,7 @@ pub fn scan_value(value: &[u8], totals: &mut Totals, limits: &Limits) -> Result<
 
 pub fn scan_attributes(owner: &[u8], tag: u32, totals: &mut Totals, limits: &Limits) -> Result<(), Refusal> {
     for_each_nested(owner, tag, &mut |pair| {
-        totals.attributes = totals.attributes.saturating_add(1);
+        totals.attributes = totals.attributes.saturating_add(entry_weight(pair)?);
         for_each_nested(pair, KEY_VALUE_VALUE_FIELD, &mut |value| scan_value(value, totals, limits))
     })
 }
@@ -233,7 +249,7 @@ pub fn scan_resource_spans(resource_spans: &[u8], totals: &mut Totals, limits: &
 
 
 pub fn check_totals(totals: &Totals, limits: &Limits) -> Result<(), Refusal> {
-    let widest = totals.scopes.max(totals.spans);
+    let widest = totals.scopes.saturating_add(totals.spans);
     if totals.resources > limits.max_resource_spans {
         Err(Refusal::TooManyResourceSpans { count: totals.resources })
     } else if widest > limits.max_spans {

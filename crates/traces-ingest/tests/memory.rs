@@ -165,6 +165,21 @@ fn empty_entries() -> Vec<u8> {
 }
 
 
+fn duplicate_values() -> Vec<u8> {
+    [VALUE_TAG, 0].repeat(many() - FRAMING_SLACK)
+}
+
+
+fn duplicate_entry_values() -> Vec<u8> {
+    held_value(&framed(KVLIST_TAG, &framed(ELEMENT_TAG, &duplicate_values())))
+}
+
+
+fn duplicate_attribute_values() -> Vec<u8> {
+    in_span(&framed(ATTRIBUTE_FIELD, &duplicate_values()))
+}
+
+
 fn empty_values() -> Vec<u8> {
     held_value(&framed(ARRAY_TAG, &empty_fields(ELEMENT_TAG)))
 }
@@ -257,6 +272,16 @@ fn attacks() -> Vec<Attack> {
             name: "empty key-value entries",
             build: empty_entries,
             expected: "TooManyValueElements",
+        },
+        Attack {
+            name: "one list entry with duplicate value fields",
+            build: duplicate_entry_values,
+            expected: "TooManyValueElements",
+        },
+        Attack {
+            name: "one attribute with duplicate value fields",
+            build: duplicate_attribute_values,
+            expected: "TooManyAttributes",
         },
         Attack {
             name: "empty array values",

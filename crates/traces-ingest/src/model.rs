@@ -17,10 +17,10 @@ pub const DEFAULT_MAX_REQUEST_BYTES: usize = 4_194_304;
 pub const DEFAULT_MAX_RESOURCE_SPANS: usize = 256;
 
 
-pub const DEFAULT_MAX_SPANS: usize = 50_000;
+pub const DEFAULT_MAX_SPANS: usize = 30_000;
 
 
-pub const DEFAULT_MAX_TOTAL_ATTRIBUTES: usize = 500_000;
+pub const DEFAULT_MAX_TOTAL_ATTRIBUTES: usize = 100_000;
 
 
 pub const DEFAULT_MAX_EVENTS_TOTAL: usize = 100_000;
@@ -62,6 +62,15 @@ pub const DEFAULT_MAX_STATUS_MESSAGE_BYTES: usize = 1_024;
 pub const DEFAULT_MAX_FUTURE_SKEW_SECONDS: u64 = 300;
 
 
+pub const DEFAULT_MAX_BATCH_ROWS: usize = 5_000;
+
+
+pub const DEFAULT_MAX_BATCH_BYTES: usize = 4_194_304;
+
+
+pub const DEFAULT_RETENTION_SECONDS: u64 = 604_800;
+
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_request_bytes: usize,
@@ -81,6 +90,9 @@ pub struct Limits {
     pub max_attribute_value_bytes: usize,
     pub max_status_message_bytes: usize,
     pub max_future_skew_seconds: u64,
+    pub max_batch_rows: usize,
+    pub max_batch_bytes: usize,
+    pub retention_seconds: u64,
 }
 
 
@@ -104,6 +116,9 @@ impl Default for Limits {
             max_attribute_value_bytes: DEFAULT_MAX_ATTRIBUTE_VALUE_BYTES,
             max_status_message_bytes: DEFAULT_MAX_STATUS_MESSAGE_BYTES,
             max_future_skew_seconds: DEFAULT_MAX_FUTURE_SKEW_SECONDS,
+            max_batch_rows: DEFAULT_MAX_BATCH_ROWS,
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            retention_seconds: DEFAULT_RETENTION_SECONDS,
         }
     }
 }

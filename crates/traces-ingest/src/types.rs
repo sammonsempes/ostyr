@@ -1,9 +1,13 @@
+use crate::insert::RefusedSpan;
 use crate::model::{DropReason, SPAN_ID_BYTES, TRACE_ID_BYTES};
 use prost::DecodeError;
 use std::collections::BTreeMap;
 
 
 pub type Dropped = BTreeMap<DropReason, u64>;
+
+
+pub type RefusedCounts = BTreeMap<RefusedSpan, u64>;
 
 
 pub type Attributes = Vec<(String, String)>;
