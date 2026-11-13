@@ -4,8 +4,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ListError {
-    #[error("not a JSON array: {0}")]
-    Shape(#[source] serde_json::Error),
+    #[error("not a JSON array ({category:?}) at line {line} column {column}")]
+    Shape {
+        category: serde_json::error::Category,
+        line: usize,
+        column: usize,
+    },
     #[error("list holds {count} entries, above the {max} limit")]
     TooMany { count: usize, max: usize },
 }
@@ -25,6 +29,10 @@ pub enum ParseError {
     },
     #[error("the {list} list holds {count} entries, above the {max} limit")]
     TooMany { list: &'static str, count: usize, max: usize },
+    #[error("{count} observations are not of the requested local port")]
+    WrongPort { count: usize },
+    #[error("max_port_bytes {per_port} is above max_bytes {per_host}")]
+    InvalidPortBytes { per_port: u64, per_host: u64 },
     #[error("the local host name is not valid text")]
     InvalidHost,
     #[error("max_links_per_port {per_port} is above max_links_per_host {per_host}")]
