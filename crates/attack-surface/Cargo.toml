@@ -1,0 +1,20 @@
+[package]
+name = "attack-surface"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+core-config = { version = "0.0.0", path = "../core-config" }
+ipnet = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+unicode-general-category = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
