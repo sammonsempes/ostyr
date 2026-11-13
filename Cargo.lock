@@ -6460,6 +6460,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "siem-schema",
  "tempfile",
  "thiserror 2.0.21",
 ]

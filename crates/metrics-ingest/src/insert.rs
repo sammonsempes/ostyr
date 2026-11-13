@@ -132,8 +132,14 @@ pub fn moment(nanos: u64) -> Moment {
 
 /// True when the sample time is no older than the raw retention and no more than the future skew ahead of `now_nanos`.
 pub fn in_range(nanos: u64, now_nanos: u64, limits: &Limits) -> bool {
-    let oldest = now_nanos.saturating_sub(limits.raw_retention_seconds.saturating_mul(NANOS_PER_SECOND));
-    let newest = now_nanos.saturating_add(limits.max_future_skew_seconds.saturating_mul(NANOS_PER_SECOND));
+    in_window(nanos, now_nanos, limits.raw_retention_seconds, limits.max_future_skew_seconds)
+}
+
+
+/// True when `nanos` is no older than `retention_seconds` and no more than `skew_seconds` ahead of `now_nanos`.
+pub fn in_window(nanos: u64, now_nanos: u64, retention_seconds: u64, skew_seconds: u64) -> bool {
+    let oldest = now_nanos.saturating_sub(retention_seconds.saturating_mul(NANOS_PER_SECOND));
+    let newest = now_nanos.saturating_add(skew_seconds.saturating_mul(NANOS_PER_SECOND));
     nanos >= oldest && nanos <= newest
 }
 
@@ -162,7 +168,8 @@ pub fn encode_row(row: &SampleRow) -> Result<Vec<u8>, RefusedRow> {
 }
 
 
-fn flush(accumulator: Accumulator) -> Accumulator {
+/// Closes the open batch and starts an empty one.
+pub fn flush(accumulator: Accumulator) -> Accumulator {
     let mut batches = accumulator.batches;
     batches.push(Batch {
         body: accumulator.body,
@@ -182,7 +189,13 @@ fn refuse(refused: &mut BTreeMap<RefusedRow, u64>, reason: RefusedRow) {
 
 
 fn append(accumulator: Accumulator, line: &[u8], limits: &Limits) -> Accumulator {
-    let full = accumulator.rows >= limits.max_batch_rows || accumulator.body.len() + line.len() > limits.max_batch_bytes;
+    append_line(accumulator, line, limits.max_batch_rows, limits.max_batch_bytes)
+}
+
+
+/// Adds one line to the open batch, closing it first when the row or byte cap would be passed.
+pub fn append_line(accumulator: Accumulator, line: &[u8], max_rows: usize, max_bytes: usize) -> Accumulator {
+    let full = accumulator.rows >= max_rows || accumulator.body.len() + line.len() > max_bytes;
     let mut ready = if full { flush(accumulator) } else { accumulator };
     ready.body.extend_from_slice(line);
     ready.rows += 1;

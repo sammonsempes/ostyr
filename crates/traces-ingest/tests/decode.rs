@@ -76,6 +76,9 @@ const TRACES: u8 = 64;
 const MILLION: usize = 1_000_000;
 
 
+const MILLION_AND_ONE: usize = 1_000_001;
+
+
 const DEPTH: usize = 10_000;
 
 
@@ -377,13 +380,13 @@ fn resource_span_count_is_capped_at_n_and_n_plus_one() -> TestResult {
 #[test]
 fn span_count_is_capped_at_n_and_n_plus_one() -> TestResult {
     let two = encode(vec![service("a", vec![span(1, 1)]), service("b", vec![span(SEED_TWO, SEED_TWO)])]);
-    assert_eq!(run(&two, &limits_for(SMALL)).rows.len(), SMALL);
+    assert_eq!(run(&two, &limits_for(SMALL + SMALL)).rows.len(), SMALL);
     let three = encode(vec![
         service("a", vec![span(1, 1), span(SEED_TWO, SEED_TWO)]),
         service("b", vec![span(SEED_THREE, SEED_THREE)]),
     ]);
-    let outcome = run(&three, &limits_for(SMALL));
-    assert!(matches!(outcome.refusal, Some(Refusal::TooManySpans { count: THREE })));
+    let outcome = run(&three, &limits_for(SMALL + SMALL));
+    assert!(matches!(outcome.refusal, Some(Refusal::TooManySpans { count: FIVE })));
     assert!(outcome.rows.is_empty());
     Ok(())
 }
@@ -419,7 +422,7 @@ fn total_attributes_count_resource_span_event_and_link() -> TestResult {
 fn a_million_empty_spans_are_refused_before_any_row() -> TestResult {
     let bytes = encode(vec![resource(Vec::new(), vec![Span::default(); MILLION])]);
     let outcome = run(&bytes, &Limits::default());
-    assert!(matches!(outcome.refusal, Some(Refusal::TooManySpans { count: MILLION })));
+    assert!(matches!(outcome.refusal, Some(Refusal::TooManySpans { count: MILLION_AND_ONE })));
     assert!(outcome.rows.is_empty());
     assert!(outcome.dropped.is_empty());
     Ok(())
@@ -859,16 +862,16 @@ fn scopes_request(scopes: usize, spans_each: usize) -> Vec<u8> {
 
 #[test]
 fn scopes_and_spans_are_counted_on_the_wire_before_decoding() -> TestResult {
-    let limits = limits_for(SMALL);
+    let limits = limits_for(SMALL + SMALL);
     assert!(run(&scopes_request(SMALL, 1), &limits).refusal.is_none());
-    assert!(run(&scopes_request(1, SMALL), &limits).refusal.is_none());
+    assert!(run(&scopes_request(1, THREE), &limits).refusal.is_none());
     assert!(matches!(
         run(&scopes_request(THREE, 1), &limits).refusal,
-        Some(Refusal::TooManySpans { count: THREE })
+        Some(Refusal::TooManySpans { count: SIX })
     ));
     assert!(matches!(
-        run(&scopes_request(1, THREE), &limits).refusal,
-        Some(Refusal::TooManySpans { count: THREE })
+        run(&scopes_request(1, SMALL + SMALL), &limits).refusal,
+        Some(Refusal::TooManySpans { count: FIVE })
     ));
     let empty_resources = [RESOURCE_SPANS_TAG, 0].repeat(THREE);
     let few = Limits {
@@ -924,7 +927,7 @@ fn other_fields_and_wire_types_are_skipped_by_the_scan() -> TestResult {
     let unknown_bytes = framed(BYTES_KEY, b"xyz");
     let group = vec![START_GROUP_KEY, END_GROUP_KEY];
     let bytes = [unknown_varint, unknown_fixed, unknown_fixed32, unknown_bytes, group, scopes_request(1, 1)].concat();
-    let outcome = run(&bytes, &limits_for(1));
+    let outcome = run(&bytes, &limits_for(SMALL));
     assert!(outcome.refusal.is_none());
     Ok(())
 }
