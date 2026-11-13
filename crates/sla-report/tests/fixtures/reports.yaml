@@ -1,0 +1,26 @@
+reports:
+  - id: weekly-web
+    tenant: acme
+    title: Weekly web availability
+    services: [web, api]
+    cadence: weekly
+    utc_offset_minutes: 60
+    objective_ppm: 999000
+    formats: [csv, json]
+  - id: monthly-db
+    tenant: acme
+    title: Monthly database availability
+    services: [db]
+    cadence: monthly
+    utc_offset_minutes: -300
+    objective_ppm: 999500
+    grace_seconds: 7200
+    formats: [csv]
+  - id: quarterly-all
+    tenant: globex
+    title: Quarterly summary
+    services: [web, api, db]
+    cadence: quarterly
+    utc_offset_minutes: 0
+    objective_ppm: 990000
+    formats: [json]

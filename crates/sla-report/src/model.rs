@@ -123,3 +123,59 @@ pub struct Report {
     pub lines: Vec<ReportLine>,
     pub totals: ReportTotals,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cadence {
+    Weekly,
+    Monthly,
+    Quarterly,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFormat {
+    Csv,
+    Json,
+    Pdf,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportDefinition {
+    pub id: String,
+    pub tenant: String,
+    pub title: String,
+    pub services: Vec<String>,
+    pub cadence: Cadence,
+    pub utc_offset_minutes: i32,
+    pub objective_ppm: u32,
+    #[serde(default = "default_grace_seconds")]
+    pub grace_seconds: i64,
+    pub formats: Vec<ReportFormat>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportFile {
+    pub reports: Vec<ReportDefinition>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: i64,
+    pub end: i64,
+}
+
+
+pub const DEFAULT_GRACE_SECONDS: i64 = 3_600;
+
+
+pub fn default_grace_seconds() -> i64 {
+    DEFAULT_GRACE_SECONDS
+}
