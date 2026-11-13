@@ -140,3 +140,78 @@ pub struct UpsThresholds {
     #[serde(default = "crate::limits::default_min_runtime_seconds")]
     pub min_runtime_seconds: u32,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedfishLimits {
+    pub max_bytes: u64,
+    pub max_sensors: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedfishHealth {
+    Ok,
+    Warning,
+    Critical,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedfishState {
+    Enabled,
+    Disabled,
+    StandbyOffline,
+    StandbySpare,
+    InTest,
+    Starting,
+    Absent,
+    UnavailableOffline,
+    Deferring,
+    Quiesced,
+    Updating,
+    Qualified,
+    Degraded,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading<Value> {
+    Found(Value),
+    Unreadable,
+    Missing,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentKind {
+    Chassis,
+    System,
+    Temperature,
+    Fan,
+    PowerSupply,
+    Voltage,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Component {
+    pub kind: ComponentKind,
+    pub index: usize,
+    pub name: Option<String>,
+    pub health: Reading<RedfishHealth>,
+    pub state: Reading<RedfishState>,
+    pub reading: Reading<f64>,
+    pub upper_critical: Reading<f64>,
+    pub unit: &'static str,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RedfishReport {
+    pub components: Vec<Component>,
+    pub chassis_rollup: Reading<RedfishHealth>,
+    pub missing_documents: Vec<&'static str>,
+    pub refused_collections: Vec<&'static str>,
+    pub unreadable: Vec<&'static str>,
+}
