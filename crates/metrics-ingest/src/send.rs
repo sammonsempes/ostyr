@@ -1,4 +1,4 @@
-use crate::settings::{validated_statement, MetricsSettings, SettingsError, MAX_CA_BYTES};
+use crate::settings::{validate_connection, validated_statement, MetricsSettings, SettingsError, MAX_CA_BYTES};
 use crate::types::ElapsedFn;
 use core_pg::error::PgError;
 use core_pg::password::{read_limited, read_password};
@@ -78,6 +78,17 @@ pub fn clickhouse_sender<'a>(
     elapsed: &'a ElapsedFn<'a>,
 ) -> Result<impl FnMut(&[u8]) -> Result<(), SendError> + 'a, SendError> {
     let statement = validated_statement(settings)?;
+    statement_sender(settings, statement, elapsed)
+}
+
+
+/// The same sender for another INSERT statement of the caller; the connection settings are validated here, the statement is the caller's.
+pub fn statement_sender<'a>(
+    settings: &'a MetricsSettings,
+    statement: String,
+    elapsed: &'a ElapsedFn<'a>,
+) -> Result<impl FnMut(&[u8]) -> Result<(), SendError> + 'a, SendError> {
+    validate_connection(settings)?;
     let password = read_password(&settings.password_file).map_err(SendError::Password)?;
     let key = Zeroizing::new(std::str::from_utf8(&password).map_err(SendError::PasswordEncoding)?.to_owned());
     let pem = settings

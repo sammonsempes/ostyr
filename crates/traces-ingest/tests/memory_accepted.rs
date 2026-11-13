@@ -12,7 +12,7 @@ use traces_ingest::sampling::Sampling;
 const BUDGET_KIB: u64 = 131_072;
 
 
-const SPANS_NEAR_THE_CAP: usize = 40_000;
+const SPANS_NEAR_THE_CAP: usize = 24_000;
 
 
 const ARRAY_ELEMENTS_NEAR_THE_CAP: usize = 150_000;

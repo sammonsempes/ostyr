@@ -5,7 +5,7 @@ use common::types::TestResult;
 use traces_ingest::decode::decode_traces;
 use traces_ingest::model::{Limits, Refusal, Totals};
 use traces_ingest::sampling::Sampling;
-use traces_ingest::scan::scan_request;
+use traces_ingest::scan::{entry_weight, list_weight, scan_request};
 
 
 const TENANT: &str = "tenant-a";
@@ -24,6 +24,24 @@ const FIVE: usize = 5;
 
 
 const SEVEN: usize = 7;
+
+
+const VALUE: [u8; 2] = [0x12, 0];
+
+
+const EMPTY_ENTRY: [u8; 2] = [0x0a, 0];
+
+
+const ONE_VALUE_ENTRY: [u8; 7] = [0x0a, 5, 0x0a, 1, b'k', 0x12, 0];
+
+
+const TWO_VALUE_ENTRY: [u8; 6] = [0x0a, 4, 0x12, 0, 0x12, 0];
+
+
+const OTHER_FIELD: [u8; 2] = [0x10, 1];
+
+
+const LENGTH_PAST_END: [u8; 2] = [0x0a, 0x7f];
 
 
 const DEEP: usize = 150;
@@ -466,5 +484,20 @@ fn a_malformed_entity_reference_is_malformed() -> TestResult {
     })?;
     let id_ok_description_broken = resource_holding(&entity_ref(&[ID_KEYS_TAG, 0, DESCRIPTION_KEYS_TAG, TRUNCATED_LENGTH]));
     assert!(matches!(run(&id_ok_description_broken, &Limits::default()), Some(Refusal::Malformed(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_list_entry_weighs_its_value_fields_at_least_one() -> TestResult {
+    assert_eq!(entry_weight(&[])?, 1);
+    assert_eq!(entry_weight(&VALUE)?, 1);
+    assert_eq!(entry_weight(&OTHER_FIELD)?, 1);
+    assert_eq!(entry_weight(&VALUE.repeat(FIVE))?, FIVE);
+    let entries = [EMPTY_ENTRY.to_vec(), ONE_VALUE_ENTRY.to_vec(), TWO_VALUE_ENTRY.to_vec()].concat();
+    assert_eq!(list_weight(&entries)?, 1 + 1 + TWO);
+    assert_eq!(list_weight(&OTHER_FIELD)?, 0);
+    assert_eq!(list_weight(&VALUE)?, 0);
+    assert!(list_weight(&LENGTH_PAST_END).is_err());
     Ok(())
 }

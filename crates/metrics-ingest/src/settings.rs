@@ -134,9 +134,15 @@ pub enum LoadError {
 
 /// URL by siem-ingest's rule (https, or http on loopback), identifiers by the siem-schema grammar, user and timeout bounded; returns the INSERT statement.
 pub fn validated_statement(settings: &MetricsSettings) -> Result<String, SettingsError> {
-    check_url(&settings.url)?;
+    validate_connection(settings)?;
     validate_limits(&settings.limits)?;
-    let statement = insert_statement(settings)?;
+    insert_statement(settings)
+}
+
+
+/// URL, user and timeout only: what any INSERT to this server needs, whatever the table.
+pub fn validate_connection(settings: &MetricsSettings) -> Result<(), SettingsError> {
+    check_url(&settings.url)?;
     let user_ok =
         !settings.user.is_empty() && settings.user.len() <= MAX_USER_BYTES && settings.user.chars().all(|character| character.is_ascii_graphic());
     if !user_ok {
@@ -144,7 +150,7 @@ pub fn validated_statement(settings: &MetricsSettings) -> Result<String, Setting
     } else if settings.timeout_ms == 0 || settings.timeout_ms > MAX_TIMEOUT_MS {
         Err(SettingsError::Timeout)
     } else {
-        Ok(statement)
+        Ok(())
     }
 }
 
