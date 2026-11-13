@@ -229,6 +229,12 @@ pub fn validate_limits(limits: &Limits) -> Result<(), SettingsError> {
         ),
         ("raw_retention_seconds", limits.raw_retention_seconds, 1, RAW_RETENTION_SECONDS_CEILING),
     ];
+    check_limit_rows(&rows)
+}
+
+
+/// Each (field, value, floor, ceiling) row within its range; the first one outside is named.
+pub fn check_limit_rows(rows: &[LimitRow]) -> Result<(), SettingsError> {
     rows.iter().try_for_each(|&(field, value, floor, ceiling)| {
         if value < floor || value > ceiling {
             Err(SettingsError::Limit { field, floor, ceiling })

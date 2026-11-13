@@ -8,4 +8,5 @@ pub mod model;
 pub mod run;
 pub mod sampling;
 pub mod scan;
+pub mod settings;
 pub mod types;

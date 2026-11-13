@@ -1,11 +1,12 @@
 use crate::decode::decode_traces;
 use crate::insert::{encode_spans, insert_statement};
-use crate::model::{Limits, Refusal};
+use crate::model::Refusal;
 use crate::sampling::Sampling;
+use crate::settings::{load_traces_settings, to_metrics_settings};
 use crate::types::{Dropped, RefusedCounts};
 use metrics_ingest::insert::{insert_batches, EncodeError};
 use metrics_ingest::send::{statement_sender, SendError};
-use metrics_ingest::settings::{load_settings, LoadError, SettingsError};
+use metrics_ingest::settings::{LoadError, SettingsError};
 use metrics_ingest::types::ElapsedFn;
 use std::io::{self, Write};
 use std::path::Path;
@@ -48,14 +49,14 @@ pub fn run_insert(
     now_nanos: u64,
     elapsed: &ElapsedFn,
 ) -> Result<RunReport, RunError> {
-    let settings = load_settings(settings_path)?;
-    let statement = insert_statement(&settings.database, &settings.table)?;
-    let limits = Limits::default();
-    let outcome = decode_traces(request, tenant, &limits, sampling, now_nanos);
-    let encoded = encode_spans(&outcome.rows, &limits, now_nanos)?;
+    let traces = load_traces_settings(settings_path)?;
+    let statement = insert_statement(&traces.database, &traces.table)?;
+    let outcome = decode_traces(request, tenant, &traces.limits, sampling, now_nanos);
+    let encoded = encode_spans(&outcome.rows, &traces.limits, now_nanos)?;
     let sent = if encoded.batches.is_empty() {
         Ok(0)
     } else {
+        let settings = to_metrics_settings(&traces);
         let mut send = statement_sender(&settings, statement, elapsed)?;
         insert_batches(&encoded.batches, |body| send(body).map_err(|error| error.to_string()))
     };
