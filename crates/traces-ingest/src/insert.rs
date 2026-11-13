@@ -1,7 +1,7 @@
 use crate::decode::to_hex;
 use crate::model::{Limits, SpanRow, SPAN_ID_BYTES};
 use crate::types::{RefusedCounts, SpanId};
-use metrics_ingest::insert::{append_line, flush, in_window, Accumulator, Batch, EncodeError};
+use metrics_ingest::insert::{in_window, Batch, EncodeError};
 use metrics_ingest::settings::SettingsError;
 use serde_json::{json, Map, Value};
 use siem_schema::identifier::quote_identifier;
@@ -142,34 +142,74 @@ pub fn admit(row: &SpanRow, now_nanos: u64, limits: &Limits) -> Result<Vec<u8>, 
 }
 
 
-/// Cuts rows into batches within the row and byte caps; refused rows are counted, never sent or truncated.
-pub fn encode_spans(rows: &[SpanRow], limits: &Limits, now_nanos: u64) -> Result<Encoded, EncodeError> {
+#[derive(Debug)]
+pub struct Pending {
+    pub body: Vec<u8>,
+    pub rows: usize,
+    pub refused: RefusedCounts,
+}
+
+
+/// Hands the open batch to `emit` with its capacity shrunk to its length, and starts an empty one.
+pub fn close_batch(pending: Pending, emit: &mut dyn FnMut(Batch)) -> Pending {
+    let mut body = pending.body;
+    body.shrink_to_fit();
+    emit(Batch { body, rows: pending.rows });
+    Pending {
+        body: Vec::new(),
+        rows: 0,
+        refused: pending.refused,
+    }
+}
+
+
+/// Adds one line to the open batch, closing it first when the row or byte cap would be passed.
+pub fn push_line(pending: Pending, line: &[u8], limits: &Limits, emit: &mut dyn FnMut(Batch)) -> Pending {
+    let full = pending.rows >= limits.max_batch_rows || pending.body.len() + line.len() > limits.max_batch_bytes;
+    let mut ready = if full { close_batch(pending, emit) } else { pending };
+    ready.body.extend_from_slice(line);
+    ready.rows += 1;
+    ready
+}
+
+
+/// Encodes one row, which is dropped here; a refused row is counted.
+pub fn take_row(pending: Pending, row: SpanRow, now_nanos: u64, limits: &Limits, emit: &mut dyn FnMut(Batch)) -> Pending {
+    match admit(&row, now_nanos, limits) {
+        Ok(line) => push_line(pending, &line, limits, emit),
+        Err(reason) => {
+            let mut counted = pending;
+            *counted.refused.entry(reason).or_insert(0) += 1;
+            counted
+        }
+    }
+}
+
+
+/// Consumes the rows one by one and hands every closed batch to `emit` in row order, so only the open batch is alive; refused rows are counted.
+pub fn stream_spans(rows: Vec<SpanRow>, limits: &Limits, now_nanos: u64, emit: &mut dyn FnMut(Batch)) -> Result<RefusedCounts, EncodeError> {
     if limits.max_batch_rows == 0 {
         Err(EncodeError::ZeroBatchRows)
     } else if limits.max_batch_bytes == 0 {
         Err(EncodeError::ZeroBatchBytes)
     } else {
-        let start = (
-            Accumulator {
-                batches: Vec::new(),
-                body: Vec::new(),
-                rows: 0,
-            },
-            RefusedCounts::new(),
-        );
-        let (open, refused) = rows
-            .iter()
-            .fold(start, |(accumulator, mut counts), row| match admit(row, now_nanos, limits) {
-                Ok(line) => (append_line(accumulator, &line, limits.max_batch_rows, limits.max_batch_bytes), counts),
-                Err(reason) => {
-                    *counts.entry(reason).or_insert(0) += 1;
-                    (accumulator, counts)
-                }
-            });
-        let closed = if open.rows == 0 { open } else { flush(open) };
-        Ok(Encoded {
-            batches: closed.batches,
-            refused,
-        })
+        let start = Pending {
+            body: Vec::new(),
+            rows: 0,
+            refused: RefusedCounts::new(),
+        };
+        let open = rows
+            .into_iter()
+            .fold(start, |pending, row| take_row(pending, row, now_nanos, limits, emit));
+        let closed = if open.rows == 0 { open } else { close_batch(open, emit) };
+        Ok(closed.refused)
     }
+}
+
+
+/// Cuts rows into batches within the row and byte caps and keeps them all; the sending path streams them with `stream_spans` instead.
+pub fn encode_spans(rows: &[SpanRow], limits: &Limits, now_nanos: u64) -> Result<Encoded, EncodeError> {
+    let mut batches = Vec::new();
+    let refused = stream_spans(rows.to_vec(), limits, now_nanos, &mut |batch| batches.push(batch))?;
+    Ok(Encoded { batches, refused })
 }
