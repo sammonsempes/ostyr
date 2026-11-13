@@ -31,3 +31,32 @@ pub enum ExportError {
     #[error("cannot flush the report")]
     Io(#[from] std::io::Error),
 }
+
+
+#[derive(Debug, Error)]
+pub enum ScheduleError {
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error("{file}: larger than {max} bytes")]
+    FileTooLarge { file: String, max: u64 },
+    #[error("{file}: {count} reports, at most {max} allowed")]
+    TooManyReports { file: String, count: usize, max: usize },
+    #[error("{file}: report #{index}: invalid `{field}`")]
+    Invalid { file: String, index: usize, field: &'static str },
+    #[error("{file}: report #{index}: the `pdf` format is not yet supported")]
+    PdfNotSupported { file: String, index: usize },
+    #[error("{file}: duplicate report id `{id}`")]
+    DuplicateId { file: String, id: String },
+    #[error("UTC offset of {minutes} minutes is out of range or not a multiple of 15")]
+    InvalidOffset { minutes: i32 },
+    #[error("grace of {seconds} seconds is out of range")]
+    InvalidGrace { seconds: i64 },
+    #[error("{requested} periods requested, at most {max} allowed")]
+    TooManyPeriods { requested: usize, max: usize },
+    #[error("time is outside the RFC 3339 range of years 0 to 9999")]
+    OutOfRange,
+    #[error("invalid calendar value")]
+    Time(#[from] time::error::ComponentRange),
+    #[error("cannot format a time")]
+    Format(#[from] time::error::Format),
+}
