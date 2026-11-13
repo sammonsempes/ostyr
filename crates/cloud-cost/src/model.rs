@@ -67,6 +67,7 @@ pub enum SkipReason {
     BadDate,
     BadTags,
     MixedCurrency,
+    DayOutOfRange,
 }
 
 
