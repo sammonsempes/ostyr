@@ -22,6 +22,9 @@ pub const COUNTS_EVERY_POLLS: u64 = 60;
 pub const MAX_FOLLOW_POLLS: u64 = 1_000_000_000;
 
 
+pub const MAX_ONE_SHOT_POLLS: u64 = 1_000_000;
+
+
 /// The path and whether to keep following the file.
 pub fn parse_args(args: &[&str]) -> Result<(PathBuf, bool), KeaError> {
     match args {
@@ -111,9 +114,23 @@ pub fn report(result: Result<Counts, KeaError>, err: &mut dyn Write) -> io::Resu
 }
 
 
-/// A one-shot run refuses a path that is not a regular file, a follow only counts it.
-pub fn one_shot(path: &Path, out: &mut dyn Write, err: &mut dyn Write) -> Result<Counts, KeaError> {
-    let counts = follow_file(path, 1, out, err, no_pause)?;
+/// A one-shot run reads the whole file in polls of at most `MAX_LINES_PER_POLL` lines, and refuses a path that is not a regular file.
+pub fn one_shot(path: &Path, out: &mut dyn Write, _err: &mut dyn Write) -> Result<Counts, KeaError> {
+    let limits = Limits {
+        started: OffsetDateTime::now_utc().unix_timestamp(),
+        ..Limits::default()
+    };
+    let mut state = FollowState::default();
+    let mut counts = Counts::default();
+    (0..MAX_ONE_SHOT_POLLS).try_fold(false, |done, _| {
+        if done {
+            Ok::<bool, KeaError>(true)
+        } else {
+            let before = state.offset;
+            poll_once(path, &mut state, &limits, &mut counts, out)?;
+            Ok(state.offset == before)
+        }
+    })?;
     if counts.refused == 0 {
         Ok(counts)
     } else {
