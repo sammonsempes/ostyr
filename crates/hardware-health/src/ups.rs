@@ -168,7 +168,8 @@ fn status_flags(report: &mut UpsReport, value: &str) -> BTreeSet<UpsFlag> {
     let unknown = parsed.iter().filter(|flag| flag.is_none()).count();
     report.rejected_fields += unknown;
     let flags: BTreeSet<UpsFlag> = parsed.into_iter().flatten().collect();
-    if unknown > 0 || flags.contains(&UpsFlag::NoComm) {
+    let contradictory = flags.contains(&UpsFlag::Online) && flags.contains(&UpsFlag::OnBattery);
+    if unknown > 0 || flags.contains(&UpsFlag::NoComm) || contradictory {
         report.unreadable.push("ups.status".to_string());
     }
     flags

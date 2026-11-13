@@ -101,6 +101,11 @@ fn protocol(root: &Value, rejected: &mut usize) -> Option<Protocol> {
 }
 
 
+fn is_nvme_lookalike(kind: &Option<Protocol>) -> bool {
+    matches!(kind, Some(Protocol::Other(name)) if name.eq_ignore_ascii_case("NVMe"))
+}
+
+
 fn when_failed(row: &Value, rejected: &mut usize) -> Option<WhenFailed> {
     let label = accepted(row.get("when_failed"), rejected, Value::is_string).and_then(Value::as_str);
     let parsed = label.and_then(|name| match name {
@@ -238,7 +243,7 @@ fn assemble(root: &Value, limits: &Limits) -> SmartReport {
         &mut unreadable,
         "device.protocol".to_string(),
         lookup(root, &["device", "protocol"]),
-        protocol_kind.is_none() && nvme_health.is_none(),
+        (protocol_kind.is_none() || is_nvme_lookalike(&protocol_kind)) && nvme_health.is_none(),
     );
     SmartReport {
         device_name,

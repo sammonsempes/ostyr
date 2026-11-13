@@ -15,7 +15,7 @@ pub fn assess_ups(report: &UpsReport, thresholds: &UpsThresholds) -> Health {
     };
     let listed = report.unreadable.iter().find(|name| DECIDING_FIELDS.contains(&name.as_str()));
     let blind_field = listed.cloned();
-    let status_unreadable = report.unreadable.iter().any(|name| name == "ups.status") || flags.contains(&UpsFlag::NoComm);
+    let status_unreadable = report.unreadable.iter().any(|name| name == "ups.status");
     let causes = degraded_causes(report, &flags, thresholds);
     match (blind_field, ()) {
         _ if status_unreadable => Health::BlindSpot(BlindReason::UnreadableHealthField("ups.status".to_string())),
@@ -42,8 +42,10 @@ fn degraded_causes(report: &UpsReport, flags: &BTreeSet<UpsFlag>, thresholds: &U
         .battery_runtime
         .is_some_and(|seconds| seconds < f64::from(thresholds.min_runtime_seconds));
     let no_line = !flags.contains(&UpsFlag::Online) && !flags.contains(&UpsFlag::OnBattery);
+    let discharging_on_line = flags.contains(&UpsFlag::Online) && flags.contains(&UpsFlag::Discharging);
     [
         (flags.contains(&UpsFlag::OnBattery), "on battery"),
+        (discharging_on_line, "discharging on line"),
         (flags.contains(&UpsFlag::LowBattery), "low battery"),
         (flags.contains(&UpsFlag::ReplaceBattery), "replace battery"),
         (flags.contains(&UpsFlag::Alarm), "alarm"),

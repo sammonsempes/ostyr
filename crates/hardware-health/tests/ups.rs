@@ -229,7 +229,7 @@ fn failing_flags() -> TestResult {
 #[test]
 fn no_line_status_is_degraded() -> TestResult {
     assert_eq!(verdict(&charged("CHRG"))?, degraded(&["line status unknown"]));
-    assert_eq!(verdict(&charged("OL TRIM BOOST DISCHRG"))?, Health::Healthy);
+    assert_eq!(verdict(&charged("OL TRIM BOOST"))?, Health::Healthy);
     Ok(())
 }
 
@@ -459,9 +459,7 @@ fn every_documented_flag_after_online_is_known() -> TestResult {
         Ok(())
     })?;
     assert_eq!(verdict(&charged("OL NOCOMM"))?, blind("ups.status"));
-    let others = [
-        "LB", "RB", "CHRG", "DISCHRG", "BYPASS", "TRIM", "BOOST", "ALARM", "OB", "OVER", "FSD", "OFF",
-    ];
+    let others = ["LB", "RB", "CHRG", "DISCHRG", "BYPASS", "TRIM", "BOOST", "ALARM", "OVER", "FSD", "OFF"];
     others.iter().try_for_each(|flag| -> TestResult {
         let report = parse(&charged(&format!("OL {flag}")))?;
         assert!(report.unreadable.is_empty(), "{flag}");
@@ -520,5 +518,16 @@ fn eco_and_wait_read_as_unknown_flags() -> TestResult {
 #[test]
 fn absent_status_does_not_record_charge() -> TestResult {
     assert!(parse("ups.load: 5\n")?.unreadable.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn contradictory_status_is_blind_and_discharging_on_line_is_degraded() -> TestResult {
+    assert_eq!(verdict(&charged("OB OL"))?, blind("ups.status"));
+    assert_eq!(verdict(&charged("OL OB LB"))?, blind("ups.status"));
+    assert_eq!(parse(&charged("OB OL"))?.unreadable, vec!["ups.status".to_string()]);
+    assert_eq!(verdict(&charged("OL DISCHRG"))?, degraded(&["discharging on line"]));
+    assert_eq!(verdict(&charged("OB DISCHRG"))?, degraded(&["on battery"]));
     Ok(())
 }
