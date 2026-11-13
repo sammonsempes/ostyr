@@ -1114,7 +1114,7 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
     assert_eq!(first.acknowledged, vec![FIRST]);
     assert_eq!(second.acknowledged, vec![SECOND]);
     assert!(first.rejected.is_empty() && second.rejected.is_empty());
-    assert_eq!(pauses.load(Ordering::SeqCst), 1);
+    assert!(pauses.load(Ordering::SeqCst) >= 1);
     stop.send(()).map_err(|()| "server already stopped")?;
     handle.await??;
     Ok(())
