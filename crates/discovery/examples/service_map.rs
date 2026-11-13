@@ -121,13 +121,22 @@ fn inventory_from(path: &str) -> Result<Vec<Asset>, Box<dyn Error>> {
 }
 
 
-fn leases_from(path: &str) -> Result<Vec<core_export::ecs::EcsEvent>, Box<dyn Error>> {
+fn leases_from(path: &str) -> Result<(Vec<core_export::ecs::EcsEvent>, usize), Box<dyn Error>> {
     let text = String::from_utf8(read_capped(path, usize::try_from(MAX_LEASE_BYTES)?)?)?;
     let mut lines = text.lines();
     let columns = parse_header(lines.next().ok_or(USAGE)?)?;
-    Ok(lines
-        .map(|line| convert_row(&columns, line).map(|converted| converted.event))
-        .collect::<Result<Vec<_>, _>>()?)
+    Ok(
+        lines.fold((Vec::new(), 0), |(mut events, refused), line| match convert_row(&columns, line) {
+            Ok(converted) => {
+                events.push(converted.event);
+                (events, refused)
+            }
+            Err(error) => {
+                tracing::warn!("a lease row was refused: {error}");
+                (events, refused + 1)
+            }
+        }),
+    )
 }
 
 
@@ -152,7 +161,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     writeln!(out, "{}", serde_json::json!({ "counters": counters(&map) }))?;
     if let Some(leases_path) = flag_value(&arguments, "--leases")? {
         let inventory = inventory_from(flag_value(&arguments, "--inventory")?.ok_or(USAGE)?)?;
-        let events = leases_from(leases_path)?;
+        let (events, refused_rows) = leases_from(leases_path)?;
         let hints = lease_hints(
             EXAMPLE_TENANT,
             events.iter().map(|event| TenantEvent {
@@ -161,7 +170,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }),
             &LeaseLimits::default(),
         );
-        let (observed, observe_counters) = observations(&found, &hints, &inventory, &ObserveLimits::default());
+        let (observed, observe_counters) = observations(EXAMPLE_TENANT, &found, &hints, &inventory, &ObserveLimits::default());
         observed.iter().try_for_each(|observation| {
             writeln!(
                 out,
@@ -172,7 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         writeln!(
             out,
             "{}",
-            serde_json::json!({ "hint_counters": hints.counters, "observe_counters": observe_counters })
+            serde_json::json!({ "hint_counters": hints.counters, "observe_counters": observe_counters, "refused_lease_rows": refused_rows })
         )?;
     }
     Ok(())
