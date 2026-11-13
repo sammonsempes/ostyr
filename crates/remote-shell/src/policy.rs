@@ -46,6 +46,13 @@ pub struct ShellPolicy {
 }
 
 
+/// A policy that went through `validate_policy`: the field is private, so no other code builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPolicy {
+    policy: ShellPolicy,
+}
+
+
 impl Default for ShellPolicy {
     fn default() -> Self {
         ShellPolicy {
@@ -59,23 +66,37 @@ impl Default for ShellPolicy {
 }
 
 
-/// Reads at most `MAX_POLICY_BYTES` from `reader`, parses strictly and checks every duration against its ceiling; `file` only labels errors.
-pub fn parse_policy(reader: &mut dyn Read, file: &str) -> Result<ShellPolicy, PolicyError> {
-    let text = read_text_capped(reader, file, MAX_POLICY_BYTES)?;
-    let policy = parse_document::<ShellPolicy>(&text, file)?;
-    validate_policy(&policy, file)?;
-    Ok(policy)
+/// The defaults all sit inside their ceilings (checked by a test), so they need no validation call.
+impl Default for ValidatedPolicy {
+    fn default() -> Self {
+        ValidatedPolicy {
+            policy: ShellPolicy::default(),
+        }
+    }
 }
 
 
-pub fn load_policy(path: &Path) -> Result<ShellPolicy, PolicyError> {
+/// Reads at most `MAX_POLICY_BYTES` from `reader`, parses strictly and checks every duration against its ceiling; `file` only labels errors.
+pub fn parse_policy(reader: &mut dyn Read, file: &str) -> Result<ValidatedPolicy, PolicyError> {
+    let text = read_text_capped(reader, file, MAX_POLICY_BYTES)?;
+    let policy = parse_document::<ShellPolicy>(&text, file)?;
+    validate_policy(&policy, file)
+}
+
+
+pub fn load_policy(path: &Path) -> Result<ValidatedPolicy, PolicyError> {
     let file = path.display().to_string();
     let mut handle = File::open(path).map_err(|source| ConfigError::Io { file: file.clone(), source })?;
     parse_policy(&mut handle, &file)
 }
 
 
-pub fn validate_policy(policy: &ShellPolicy, file: &str) -> Result<(), PolicyError> {
+pub fn policy_of(validated: &ValidatedPolicy) -> &ShellPolicy {
+    &validated.policy
+}
+
+
+pub fn validate_policy(policy: &ShellPolicy, file: &str) -> Result<ValidatedPolicy, PolicyError> {
     let checks = [
         ("idle_timeout_seconds", policy.idle_timeout_seconds, CEILING_IDLE_TIMEOUT_SECONDS),
         ("max_duration_seconds", policy.max_duration_seconds, CEILING_MAX_DURATION_SECONDS),
@@ -86,13 +107,13 @@ pub fn validate_policy(policy: &ShellPolicy, file: &str) -> Result<(), PolicyErr
             CEILING_APPROVAL_MAX_AGE_SECONDS,
         ),
     ];
-    checks
-        .iter()
-        .find(|(_, value, ceiling)| !(1..=*ceiling).contains(value))
-        .map_or(Ok(()), |(field, _, _)| {
+    checks.iter().find(|(_, value, ceiling)| !(1..=*ceiling).contains(value)).map_or_else(
+        || Ok(ValidatedPolicy { policy: policy.clone() }),
+        |(field, _, _)| {
             Err(PolicyError::Invalid {
                 file: file.to_string(),
                 field,
             })
-        })
+        },
+    )
 }

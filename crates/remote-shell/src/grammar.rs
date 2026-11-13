@@ -4,13 +4,13 @@ pub const MAX_SUBJECT_BYTES: usize = 255;
 pub const MAX_REFERENCE_BYTES: usize = 128;
 
 
-pub const SUBJECT_PUNCTUATION: &str = "-_.@:+/=";
+pub const SUBJECT_PUNCTUATION: &str = "-_.@:+/=|";
 
 
 pub const REFERENCE_PUNCTUATION: &str = "_.:/-";
 
 
-/// An OIDC subject: 1 to 255 bytes of ASCII letters, digits and `-_.@:+/=` only: an allowlist, so no look-alike or hidden character.
+/// An OIDC subject: 1 to 255 bytes of ASCII letters, digits and `-_.@:+/=|` only: an allowlist, so no look-alike or hidden character.
 pub fn valid_subject(subject: &str) -> bool {
     (1..=MAX_SUBJECT_BYTES).contains(&subject.len())
         && subject

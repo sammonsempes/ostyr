@@ -1,5 +1,5 @@
 use crate::grammar::{valid_reference, valid_subject};
-use crate::policy::ShellPolicy;
+use crate::policy::{policy_of, ShellPolicy, ValidatedPolicy};
 use crate::types::{ApproverRoles, Seconds};
 use cmdb::model::Criticality;
 use core_auth::rbac::is_allowed;
@@ -218,7 +218,7 @@ pub fn check_open(
 
 
 pub fn decide_open(
-    policy: &ShellPolicy,
+    validated: &ValidatedPolicy,
     catalog: &RoleCatalog,
     request: &OpenRequest,
     requester_roles: &RoleSet,
@@ -226,6 +226,7 @@ pub fn decide_open(
     evidence: &Evidence,
     now: Seconds,
 ) -> OpenDecision {
+    let policy = policy_of(validated);
     match check_open(policy, catalog, request, requester_roles, asset_criticality, evidence, now) {
         Ok(approved_by) => OpenDecision::Allowed {
             idle_timeout: policy.idle_timeout_seconds,

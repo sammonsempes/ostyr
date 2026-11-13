@@ -6,9 +6,9 @@ use common::types::TestResult;
 use core_config::error::ConfigError;
 use remote_shell::error::PolicyError;
 use remote_shell::policy::{
-    load_policy, parse_policy, ShellPolicy, CEILING_APPROVAL_MAX_AGE_SECONDS, CEILING_IDLE_TIMEOUT_SECONDS, CEILING_MAX_DURATION_SECONDS,
-    CEILING_MFA_MAX_AGE_SECONDS, DEFAULT_APPROVAL_MAX_AGE_SECONDS, DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_MAX_DURATION_SECONDS,
-    DEFAULT_MFA_MAX_AGE_SECONDS, MAX_POLICY_BYTES,
+    load_policy, parse_policy, policy_of, validate_policy, ShellPolicy, ValidatedPolicy, CEILING_APPROVAL_MAX_AGE_SECONDS,
+    CEILING_IDLE_TIMEOUT_SECONDS, CEILING_MAX_DURATION_SECONDS, CEILING_MFA_MAX_AGE_SECONDS, DEFAULT_APPROVAL_MAX_AGE_SECONDS,
+    DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_MAX_DURATION_SECONDS, DEFAULT_MFA_MAX_AGE_SECONDS, MAX_POLICY_BYTES,
 };
 use std::io::{self, Read};
 
@@ -38,7 +38,7 @@ const SHORT_IDLE: u64 = 60;
 
 
 fn parse(text: &str) -> Result<ShellPolicy, PolicyError> {
-    parse_policy(&mut text.as_bytes(), FILE)
+    parse_policy(&mut text.as_bytes(), FILE).map(|validated| policy_of(&validated).clone())
 }
 
 
@@ -122,7 +122,7 @@ fn load_policy_reads_a_file_and_reports_a_missing_one() -> TestResult {
     let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
     let path = directory.path().join(FILE);
     std::fs::write(&path, format!("idle_timeout_seconds: {SHORT_IDLE}\n"))?;
-    assert_eq!(load_policy(&path)?.idle_timeout_seconds, SHORT_IDLE);
+    assert_eq!(policy_of(&load_policy(&path)?).idle_timeout_seconds, SHORT_IDLE);
     assert!(matches!(
         load_policy(&directory.path().join("missing.yaml")),
         Err(PolicyError::Config(ConfigError::Io { .. }))
@@ -135,5 +135,25 @@ fn load_policy_reads_a_file_and_reports_a_missing_one() -> TestResult {
 fn an_invalid_field_error_names_the_file_and_the_field() -> TestResult {
     let error = parse("mfa_max_age_seconds: 0\n").err().ok_or("no error")?;
     assert_eq!(error.to_string(), format!("{FILE}: invalid `mfa_max_age_seconds`"));
+    Ok(())
+}
+
+
+#[test]
+fn a_hand_built_policy_is_validated_before_use() -> TestResult {
+    let zero = ShellPolicy {
+        idle_timeout_seconds: 0,
+        ..ShellPolicy::default()
+    };
+    assert!(matches!(
+        validate_policy(&zero, FILE),
+        Err(PolicyError::Invalid {
+            field: "idle_timeout_seconds",
+            ..
+        })
+    ));
+    let validated: ValidatedPolicy = validate_policy(&ShellPolicy::default(), FILE)?;
+    assert_eq!(policy_of(&validated), &ShellPolicy::default());
+    assert_eq!(validated, ValidatedPolicy::default());
     Ok(())
 }
