@@ -2634,6 +2634,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
+name = "hunt-packs"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
