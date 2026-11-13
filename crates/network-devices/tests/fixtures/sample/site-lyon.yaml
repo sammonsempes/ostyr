@@ -8,4 +8,4 @@ devices:
       polling: true
       version: v2c
       accept_insecure: true
-      credentials: sites/lyon/lobby-printer.snmp
+      credentials: acme/lyon/lobby-printer.snmp
