@@ -3,7 +3,7 @@ mod common;
 
 use common::types::TestResult;
 use metrics_ingest::cardinality::CardinalityState;
-use metrics_ingest::decode::{decode_request, to_count};
+use metrics_ingest::decode::{allocation_bytes, decode_request, to_count};
 use metrics_ingest::model::{DropReason, Limits, MetricKind, Outcome, Refusal};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value::Value as AnyKind, AnyValue, ArrayValue, KeyValue};
@@ -779,19 +779,19 @@ fn state_byte_budget_is_per_tenant_and_counts_new_text_only() -> TestResult {
 }
 
 
-const ROW_BYTES_PLAIN: usize = 85;
+const ROW_BYTES_PLAIN: usize = 384;
 
 
-const ROW_BYTES_WITH_LABEL: usize = 136;
+const ROW_BYTES_WITH_LABEL: usize = 512;
 
 
-const ROW_BYTES_HISTOGRAM: usize = 137;
+const ROW_BYTES_HISTOGRAM: usize = 448;
 
 
 const POINTS_PAST_THE_ROW_BUDGET: usize = 4;
 
 
-const THIRD_ROW_BYTES: usize = 255;
+const THIRD_ROW_BYTES: usize = 1_152;
 
 
 fn row_limit(bytes: usize) -> Limits {
@@ -847,5 +847,17 @@ fn buckets_count_in_the_row_bytes() -> TestResult {
     assert_eq!((kept.rows.len(), kept.row_bytes), (1, ROW_BYTES_HISTOGRAM));
     let refused = run(&bytes, &row_limit(ROW_BYTES_HISTOGRAM - 1));
     assert!(refused.refusal.is_some());
+    Ok(())
+}
+
+
+const ALLOCATION_CASES: [(usize, usize); 7] = [(0, 0), (1, 32), (24, 32), (25, 48), (40, 48), (41, 64), (usize::MAX, usize::MAX)];
+
+
+#[test]
+fn allocations_round_to_the_allocator_chunk() -> TestResult {
+    ALLOCATION_CASES
+        .iter()
+        .for_each(|(length, bytes)| assert_eq!(allocation_bytes(*length), *bytes));
     Ok(())
 }

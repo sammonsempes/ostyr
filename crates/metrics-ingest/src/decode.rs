@@ -12,7 +12,16 @@ use std::mem::size_of;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
-pub const STRINGS_IN_ROW: usize = 3;
+pub const MIN_ALLOCATION_BYTES: usize = 32;
+
+
+pub const ALLOCATION_ALIGN_BYTES: usize = 16;
+
+
+pub const ALLOCATION_HEADER_BYTES: usize = 8;
+
+
+pub const ROWS_CAPACITY_FACTOR: usize = 2;
 
 
 pub struct Series<'a> {
@@ -272,20 +281,38 @@ pub fn scalar_text(value: &AnyKind) -> Option<String> {
 }
 
 
-/// Bytes one row will own: its strings, labels and buckets, plus the fixed size of each `String` and element.
+/// Bytes the allocator hands out for `length` bytes: 0 when empty, else `length` plus an 8-byte header rounded up to 16, at least 32 (glibc minimum chunk).
+pub fn allocation_bytes(length: usize) -> usize {
+    if length == 0 {
+        0
+    } else {
+        length
+            .saturating_add(ALLOCATION_HEADER_BYTES)
+            .div_ceil(ALLOCATION_ALIGN_BYTES)
+            .saturating_mul(ALLOCATION_ALIGN_BYTES)
+            .max(MIN_ALLOCATION_BYTES)
+    }
+}
+
+
+/// Bytes one row will own: `SampleRow` twice (the `rows` vector may be up to twice full), plus every heap block at its allocated size.
 pub fn row_bytes(tenant: &str, series: &Series, labels: &Labels, buckets: &[Bucket]) -> usize {
     let strings = [tenant.len(), series.name.len(), series.unit.len()]
         .iter()
-        .fold(STRINGS_IN_ROW * size_of::<String>(), |total, length| total.saturating_add(*length));
-    let label_bytes = labels.iter().fold(usize::MIN, |total: usize, (key, value)| {
-        total
-            .saturating_add(size_of::<(String, String)>())
-            .saturating_add(key.len())
-            .saturating_add(value.len())
-    });
+        .fold(ROWS_CAPACITY_FACTOR * size_of::<SampleRow>(), |total, length| {
+            total.saturating_add(allocation_bytes(*length))
+        });
+    let label_bytes = labels.iter().fold(
+        allocation_bytes(labels.len().saturating_mul(size_of::<(String, String)>())),
+        |total, (key, value)| {
+            total
+                .saturating_add(allocation_bytes(key.len()))
+                .saturating_add(allocation_bytes(value.len()))
+        },
+    );
     strings
         .saturating_add(label_bytes)
-        .saturating_add(buckets.len().saturating_mul(size_of::<Bucket>()))
+        .saturating_add(allocation_bytes(buckets.len().saturating_mul(size_of::<Bucket>())))
 }
 
 
