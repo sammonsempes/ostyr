@@ -1,5 +1,5 @@
 use crate::grammar::{valid_reference, valid_subject};
-use crate::policy::{policy_of, ShellPolicy, ValidatedPolicy};
+use crate::policy::{policy_of, ValidatedPolicy};
 use crate::types::{ApproverRoles, Seconds};
 use cmdb::model::Criticality;
 use core_auth::rbac::is_allowed;
@@ -133,7 +133,7 @@ pub fn check_role(catalog: &RoleCatalog, roles: &RoleSet) -> Result<(), OpenRefu
 }
 
 
-pub fn check_mfa(policy: &ShellPolicy, request: &OpenRequest, mfa: Option<&MfaProof>, now: Seconds) -> Result<(), OpenRefusal> {
+pub fn check_mfa(policy: &ValidatedPolicy, request: &OpenRequest, mfa: Option<&MfaProof>, now: Seconds) -> Result<(), OpenRefusal> {
     let proof = mfa.ok_or(OpenRefusal::MfaMissing)?;
     (proof.request_id == request.request_id)
         .then_some(())
@@ -143,12 +143,14 @@ pub fn check_mfa(policy: &ShellPolicy, request: &OpenRequest, mfa: Option<&MfaPr
     let age = age_of(proof.verified_at, now)
         .filter(|_| proof.verified_at >= request.created_at)
         .ok_or(OpenRefusal::MfaNotFresh)?;
-    (age <= policy.mfa_max_age_seconds).then_some(()).ok_or(OpenRefusal::MfaExpired)
+    (age <= policy_of(policy).mfa_max_age_seconds)
+        .then_some(())
+        .ok_or(OpenRefusal::MfaExpired)
 }
 
 
 pub fn approval_valid(
-    policy: &ShellPolicy,
+    policy: &ValidatedPolicy,
     catalog: &RoleCatalog,
     request: &OpenRequest,
     evidence: &Evidence,
@@ -159,7 +161,7 @@ pub fn approval_valid(
         .approver_roles
         .get(&approval.approver)
         .is_some_and(|roles| is_allowed(catalog, roles, PERMISSION_REMOTE_SHELL_APPROVE));
-    let fresh = age_of(approval.approved_at, now).is_some_and(|age| age <= policy.approval_max_age_seconds);
+    let fresh = age_of(approval.approved_at, now).is_some_and(|age| age <= policy_of(policy).approval_max_age_seconds);
     let after_request = approval.approved_at >= request.created_at;
     [
         approval.request_id == request.request_id,
@@ -177,7 +179,7 @@ pub fn approval_valid(
 
 /// The cap is checked first, before any approval is read, and whatever the criticality; one valid approval is the second person.
 pub fn check_approvals(
-    policy: &ShellPolicy,
+    policy: &ValidatedPolicy,
     catalog: &RoleCatalog,
     request: &OpenRequest,
     criticality: Option<Criticality>,
@@ -187,7 +189,7 @@ pub fn check_approvals(
     (evidence.approvals.len() <= MAX_APPROVALS)
         .then_some(())
         .ok_or(OpenRefusal::TooManyApprovals)?;
-    match criticality.unwrap_or(UNKNOWN_ASSET_CRITICALITY) >= policy.dual_approval_from {
+    match criticality.unwrap_or(UNKNOWN_ASSET_CRITICALITY) >= policy_of(policy).dual_approval_from {
         true => evidence
             .approvals
             .iter()
@@ -201,7 +203,7 @@ pub fn check_approvals(
 
 /// Checks run in this order and the first failure is the one reason: tenant, requester, request id, asset, role, ticket, MFA, approval.
 pub fn check_open(
-    policy: &ShellPolicy,
+    policy: &ValidatedPolicy,
     catalog: &RoleCatalog,
     request: &OpenRequest,
     requester_roles: &RoleSet,
@@ -227,7 +229,7 @@ pub fn decide_open(
     now: Seconds,
 ) -> OpenDecision {
     let policy = policy_of(validated);
-    match check_open(policy, catalog, request, requester_roles, asset_criticality, evidence, now) {
+    match check_open(validated, catalog, request, requester_roles, asset_criticality, evidence, now) {
         Ok(approved_by) => OpenDecision::Allowed {
             idle_timeout: policy.idle_timeout_seconds,
             max_duration: policy.max_duration_seconds,

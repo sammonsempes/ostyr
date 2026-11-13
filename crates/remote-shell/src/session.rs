@@ -1,5 +1,5 @@
 use crate::open::MAX_CLOCK_SKEW_SECONDS;
-use crate::policy::{policy_of, ShellPolicy, ValidatedPolicy};
+use crate::policy::{policy_of, ValidatedPolicy};
 use crate::types::Seconds;
 
 
@@ -56,9 +56,9 @@ pub fn clock_went_back(opened_at: Seconds, last_activity: Seconds, now: Seconds)
 
 
 /// Maximum duration is checked before idle; both close at exactly the threshold.
-pub fn expiry(policy: &ShellPolicy, opened_at: Seconds, last_activity: Seconds, now: Seconds) -> Option<CloseReason> {
-    let too_long = elapsed(opened_at, now) >= policy.max_duration_seconds;
-    let idle = elapsed(last_activity, now) >= policy.idle_timeout_seconds;
+pub fn expiry(policy: &ValidatedPolicy, opened_at: Seconds, last_activity: Seconds, now: Seconds) -> Option<CloseReason> {
+    let too_long = elapsed(opened_at, now) >= policy_of(policy).max_duration_seconds;
+    let idle = elapsed(last_activity, now) >= policy_of(policy).idle_timeout_seconds;
     too_long.then_some(CloseReason::MaxDuration).or(idle.then_some(CloseReason::IdleTimeout))
 }
 
@@ -79,7 +79,7 @@ pub fn session_step(policy: &ValidatedPolicy, state: SessionState, event: Sessio
         SessionState::Closed(reason) => SessionState::Closed(reason),
         SessionState::Open { opened_at, last_activity } => match terminal_reason(event)
             .or_else(|| clock_went_back(opened_at, last_activity, now))
-            .or_else(|| expiry(policy_of(policy), opened_at, last_activity, now))
+            .or_else(|| expiry(policy, opened_at, last_activity, now))
         {
             Some(reason) => SessionState::Closed(reason),
             None => SessionState::Open {
