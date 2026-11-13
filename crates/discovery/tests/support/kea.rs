@@ -3,7 +3,17 @@ use std::error::Error;
 use time::OffsetDateTime;
 
 
+pub const LIFETIME: i64 = 3600;
+
+
 pub fn lease_event(address: &str, mac: Option<&str>, hostname: Option<&str>, cltt: i64) -> Result<EcsEvent, Box<dyn Error>> {
+    let mut event = lease_event_at(address, mac, hostname, cltt)?;
+    event.event.end = Some(OffsetDateTime::from_unix_timestamp(cltt + LIFETIME)?);
+    Ok(event)
+}
+
+
+pub fn lease_event_at(address: &str, mac: Option<&str>, hostname: Option<&str>, cltt: i64) -> Result<EcsEvent, Box<dyn Error>> {
     let start = OffsetDateTime::from_unix_timestamp(cltt)?;
     Ok(EcsEvent {
         event: EventFields {
