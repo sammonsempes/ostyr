@@ -301,7 +301,7 @@ pub async fn run_bounded_with(program: PathBuf, arguments: Vec<String>, kill: Ki
         let status = child.wait().await?;
         guard.group = None;
         if status.success() {
-            Ok(String::from_utf8(output)?)
+            Ok(String::from_utf8(output).map_err(|error| SensorError::Utf8(error.utf8_error()))?)
         } else {
             Err(SensorError::Exit(status.code()))
         }

@@ -485,6 +485,19 @@ async fn a_spool_that_cannot_be_written_stops_the_tick_with_an_error() -> TestRe
 
 
 #[tokio::test]
+async fn invalid_utf8_error_never_carries_the_output() -> TestResult {
+    let error = run_bounded(PathBuf::from("/usr/bin/printf"), vec!["SECRET\\377".to_owned()])
+        .await
+        .err()
+        .ok_or("no error")?;
+    let shown = format!("{error} {error:?}");
+    assert!(matches!(error, SensorError::Utf8(_)));
+    assert!(!shown.contains("SECRET") && !shown.contains("bytes") && !shown.contains("83, 69, 67"));
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn real_commands_are_bounded_in_output_time_and_status() -> TestResult {
     let ok = run_bounded(PathBuf::from("/bin/echo"), vec!["hello".to_owned()]).await?;
     assert_eq!(ok, "hello\n");

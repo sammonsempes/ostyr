@@ -22,8 +22,8 @@ pub enum SensorError {
     TooLarge(u64),
     #[error("the command failed with status {0:?}")]
     Exit(Option<i32>),
-    #[error("the command output is not UTF-8: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("the command output is not UTF-8")]
+    Utf8(#[source] std::str::Utf8Error),
     #[error("the command output is not what systemctl show prints")]
     Parse,
 }
