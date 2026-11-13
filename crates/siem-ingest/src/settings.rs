@@ -96,6 +96,9 @@ pub const DEFAULT_CLICKHOUSE_PASSWORD_FILE: &str = "/etc/ostyr/clickhouse-ingest
 pub const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
 
 
+pub const MAX_URL_BYTES: usize = 2048;
+
+
 /// Every setting is bounded by `validate_settings`; the defaults pass it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -223,13 +226,13 @@ pub fn is_loopback_http(value: &str) -> bool {
 pub fn check_url(value: &str) -> Result<(), SettingsError> {
     let parsed = value.parse::<Uri>();
     let scheme_ok = parsed.as_ref().is_ok_and(|uri| uri.scheme_str() == Some("https")) || is_loopback_http(value);
-    let bare = !value.contains(['?', '#', '@']);
+    let bare = !value.contains(['?', '#', '@']) && value.len() <= MAX_URL_BYTES;
     if scheme_ok && bare {
         Ok(())
     } else {
         Err(SettingsError::Invalid {
             field: "clickhouse_url",
-            reason: "must be https, or http on loopback, without userinfo, query or fragment",
+            reason: "must be https, or http on loopback, without userinfo, query or fragment, at most 2048 bytes",
         })
     }
 }
