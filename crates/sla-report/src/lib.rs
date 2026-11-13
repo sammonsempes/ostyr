@@ -5,4 +5,6 @@ pub mod error;
 pub mod export;
 pub mod model;
 pub mod report;
+pub mod run;
 pub mod schedule;
+pub mod types;

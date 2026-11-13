@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckResult {
     pub tenant: String,
@@ -47,7 +50,7 @@ pub struct Limits {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub struct ErrorBudget {
     pub allowed_seconds: i64,
     pub consumed_seconds: i64,
@@ -65,7 +68,7 @@ pub struct Totals {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct SlaFigure {
     pub up_seconds: i64,
     pub down_seconds: i64,
@@ -170,6 +173,38 @@ pub struct ReportFile {
 pub struct Span {
     pub start: i64,
     pub end: i64,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Written,
+    AlreadyWritten,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Progress {
+    pub written: usize,
+    pub already_written: usize,
+    pub failed: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionRun {
+    pub progress: Progress,
+    pub last_done: Option<i64>,
+    pub stopped: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunSummary {
+    pub written: usize,
+    pub already_written: usize,
+    pub failed: usize,
+    pub last_done: BTreeMap<String, i64>,
 }
 
 
