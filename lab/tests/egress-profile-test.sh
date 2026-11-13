@@ -37,6 +37,7 @@ printf 'egress: open\nvms:\n  - name: a\n    base_image: ubuntu-2404.qcow2\n' >"
 printf 'a.example.com\n.example.org\n' >"$work/allow.txt"
 
 expect "default egress is none" test "$(profile_egress "$work/none.yaml")" = none
+expect "ubuntu-pair-proxy has egress proxy" test "$(profile_egress "$(dirname "${BASH_SOURCE[0]}")/../profiles/ubuntu-pair-proxy.yaml")" = proxy
 expect "egress proxy is read" test "$(profile_egress "$work/proxy.yaml")" = proxy
 expect "proxy refused for an attack profile" fails refused "$work/attack.yaml"
 expect "none accepted for an attack profile" test "$(profile_egress "$work/attack-none.yaml")" = none
