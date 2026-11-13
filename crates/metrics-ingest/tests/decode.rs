@@ -3,7 +3,7 @@ mod common;
 
 use common::types::TestResult;
 use metrics_ingest::cardinality::CardinalityState;
-use metrics_ingest::decode::{decode_request, to_count};
+use metrics_ingest::decode::{allocation_bytes, decode_request, to_count};
 use metrics_ingest::model::{DropReason, Limits, MetricKind, Outcome, Refusal};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value::Value as AnyKind, AnyValue, ArrayValue, KeyValue};
@@ -779,19 +779,34 @@ fn state_byte_budget_is_per_tenant_and_counts_new_text_only() -> TestResult {
 }
 
 
-const ROW_BYTES_PLAIN: usize = 85;
+const ROW_BYTES_PLAIN: usize = 528;
 
 
-const ROW_BYTES_WITH_LABEL: usize = 136;
+const THREE_ROWS: usize = 3;
 
 
-const ROW_BYTES_HISTOGRAM: usize = 137;
+const STATE_BYTES_PLAIN: usize = 67;
+
+
+const STATE_BYTES_HISTOGRAM: usize = 71;
+
+
+const STATE_BYTES_WITH_LABEL: usize = 329;
+
+
+const STATE_BYTES_SECOND_SERIES: usize = 264;
+
+
+const ROW_BYTES_WITH_LABEL: usize = 656 + STATE_BYTES_WITH_LABEL;
+
+
+const ROW_BYTES_HISTOGRAM: usize = 592 + STATE_BYTES_HISTOGRAM;
 
 
 const POINTS_PAST_THE_ROW_BUDGET: usize = 4;
 
 
-const THIRD_ROW_BYTES: usize = 255;
+const THIRD_ROW_BYTES: usize = 3 * ROW_BYTES_PLAIN + STATE_BYTES_PLAIN;
 
 
 fn row_limit(bytes: usize) -> Limits {
@@ -810,16 +825,22 @@ fn gauge_of(points: usize, attributes: &[KeyValue]) -> Vec<u8> {
 
 #[test]
 fn rows_within_the_row_byte_budget_are_kept_and_counted() -> TestResult {
-    let outcome = run(&gauge_of(SMALL, &[]), &row_limit(SMALL * ROW_BYTES_PLAIN));
+    let outcome = run(&gauge_of(SMALL, &[]), &row_limit(SMALL * ROW_BYTES_PLAIN + STATE_BYTES_PLAIN));
     assert!(outcome.refusal.is_none());
-    assert_eq!((outcome.rows.len(), outcome.row_bytes), (SMALL, SMALL * ROW_BYTES_PLAIN));
+    assert_eq!(
+        (outcome.rows.len(), outcome.row_bytes),
+        (SMALL, SMALL * ROW_BYTES_PLAIN + STATE_BYTES_PLAIN)
+    );
     Ok(())
 }
 
 
 #[test]
 fn rows_past_the_row_byte_budget_refuse_the_whole_request() -> TestResult {
-    let outcome = run(&gauge_of(POINTS_PAST_THE_ROW_BUDGET, &[]), &row_limit(SMALL * ROW_BYTES_PLAIN));
+    let outcome = run(
+        &gauge_of(POINTS_PAST_THE_ROW_BUDGET, &[]),
+        &row_limit(SMALL * ROW_BYTES_PLAIN + STATE_BYTES_PLAIN),
+    );
     assert_eq!(outcome.refusal, Some(Refusal::TooManyRowBytes { bytes: THIRD_ROW_BYTES }));
     assert!(outcome.rows.is_empty());
     Ok(())
@@ -838,6 +859,24 @@ fn a_label_counts_its_bytes_and_its_fixed_size() -> TestResult {
 
 
 #[test]
+fn a_new_series_counts_its_state_bytes_in_the_row_budget() -> TestResult {
+    let list = vec![
+        number(vec![text("k", "vv")], Some(NumberKind::AsInt(1))),
+        number(vec![text("k", "ww")], Some(NumberKind::AsInt(1))),
+        number(vec![text("k", "ww")], Some(NumberKind::AsInt(1))),
+    ];
+    let bytes = encode(Vec::new(), vec![gauge("cpu", list)]);
+    let rows_bytes = THREE_ROWS * (ROW_BYTES_WITH_LABEL - STATE_BYTES_WITH_LABEL);
+    let total = rows_bytes + STATE_BYTES_WITH_LABEL + STATE_BYTES_SECOND_SERIES;
+    let kept = run(&bytes, &row_limit(total));
+    assert_eq!((kept.rows.len(), kept.row_bytes), (THREE_ROWS, total));
+    let refused = run(&bytes, &row_limit(total - 1));
+    assert!(refused.refusal.is_some());
+    Ok(())
+}
+
+
+#[test]
 fn buckets_count_in_the_row_bytes() -> TestResult {
     let bytes = encode(
         Vec::new(),
@@ -847,5 +886,17 @@ fn buckets_count_in_the_row_bytes() -> TestResult {
     assert_eq!((kept.rows.len(), kept.row_bytes), (1, ROW_BYTES_HISTOGRAM));
     let refused = run(&bytes, &row_limit(ROW_BYTES_HISTOGRAM - 1));
     assert!(refused.refusal.is_some());
+    Ok(())
+}
+
+
+const ALLOCATION_CASES: [(usize, usize); 7] = [(0, 0), (1, 32), (24, 32), (25, 48), (40, 48), (41, 64), (usize::MAX, usize::MAX)];
+
+
+#[test]
+fn allocations_round_to_the_allocator_chunk() -> TestResult {
+    ALLOCATION_CASES
+        .iter()
+        .for_each(|(length, bytes)| assert_eq!(allocation_bytes(*length), *bytes));
     Ok(())
 }
