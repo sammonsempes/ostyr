@@ -356,3 +356,40 @@ fn json_values_that_are_not_text_or_numbers_are_missing() -> TestResult {
     assert_eq!(skipped(&collector, "missing_field"), JSON_NOT_TEXT);
     Ok(())
 }
+
+
+const CRAFTED_TIME: &str = "9999-12-31T23:00:00-02:00";
+
+
+#[test]
+fn a_crafted_time_is_refused_and_counted_in_every_format() -> TestResult {
+    let mapping = Mapping {
+        value: Some("ioc".to_owned()),
+        first_seen: Some("seen".to_owned()),
+        ..Mapping::default()
+    };
+    let mut csv = feed("generic", FeedFormat::Csv);
+    csv.mapping = mapping.clone();
+    let csv_text = format!("ioc,seen\nbad.example,{CRAFTED_TIME}\ngood.example,2026-11-01T00:00:00Z\n");
+    let mut json = feed("list", FeedFormat::Json);
+    json.mapping = mapping;
+    let json_text = format!(r#"[{{"ioc":"bad.example","seen":"{CRAFTED_TIME}"}},{{"ioc":"good.example","seen":"2026-11-01T00:00:00Z"}}]"#);
+    let stix_text = format!(
+        r#"{{"objects":[{{"type":"indicator","pattern":"[domain-name:value = 'bad.example']","valid_from":"{CRAFTED_TIME}"}},{{"type":"indicator","pattern":"[domain-name:value = 'good.example']","valid_from":"2026-11-01T00:00:00Z"}}]}}"#
+    );
+    let misp_text = format!(
+        r#"{{"Event":{{"Attribute":[{{"type":"domain","value":"bad.example","to_ids":true,"first_seen":"{CRAFTED_TIME}"}},{{"type":"domain","value":"good.example","to_ids":true}}]}}}}"#
+    );
+    let cases = [
+        (csv, csv_text),
+        (json, json_text),
+        (feed("stix", FeedFormat::Stix), stix_text),
+        (feed("misp", FeedFormat::Misp), misp_text),
+    ];
+    cases.iter().try_for_each(|(config, text)| -> TestResult {
+        let collector = parse_text(config, text)?;
+        assert_eq!(values_of(&collector), vec!["good.example".to_owned()], "{}", config.name);
+        assert_eq!(skipped(&collector, "invalid_timestamp"), 1, "{}", config.name);
+        Ok(())
+    })
+}
