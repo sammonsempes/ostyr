@@ -1,0 +1,20 @@
+packs:
+  - id: beaconing-regular-interval
+    title: Outbound connections at a regular interval
+    hypothesis: A compromised host calls its command server at a fixed period
+    technique: T1071
+    source: clickhouse
+    query: >-
+      SELECT src_ip, dst_ip, count() AS connections, stddevPop(gap) AS jitter FROM connection_gaps
+      WHERE tenant = {tenant:String} GROUP BY src_ip, dst_ip HAVING connections > 20 AND jitter < 2 LIMIT 1000
+    schedule_seconds: 21600
+    window_seconds: 172800
+    cost:
+      max_rows: 50000
+      max_seconds: 60
+      max_bytes_read: 4294967296
+    baseline:
+      max_matches: 0
+    tests:
+      - corpus: corpus/beacon-60s.ndjson
+        expect_matches: 1

@@ -1,0 +1,15 @@
+packs:
+  - id: osquery-cron-persistence
+    title: Unexpected cron entries
+    hypothesis: An adversary installs a cron job to survive a reboot
+    technique: T1053.003
+    source: osquery
+    query: SELECT command, path FROM crontab WHERE command LIKE '%curl%' OR command LIKE '%wget%';
+    schedule_seconds: 900
+    window_seconds: 900
+    cost:
+      max_rows: 1000
+      max_seconds: 10
+    baseline:
+      max_matches: 0
+    tests: []

@@ -1,0 +1,20 @@
+packs:
+  - id: rare-parent-child
+    title: Rare parent and child process pairs
+    hypothesis: An adversary launches a shell from an office or browser process
+    technique: T1059.001
+    source: clickhouse
+    query: >-
+      SELECT parent_image, image, count() AS runs FROM events WHERE tenant = {tenant:String} AND category = 'process'
+      GROUP BY parent_image, image HAVING runs < 3 ORDER BY runs LIMIT 1000
+    schedule_seconds: 3600
+    window_seconds: 86400
+    cost:
+      max_rows: 100000
+      max_seconds: 30
+      max_bytes_read: 1073741824
+    baseline:
+      max_matches: 5
+    tests:
+      - corpus: corpus/process-rare-parent.ndjson
+        expect_matches: 2
