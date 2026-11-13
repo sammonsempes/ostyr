@@ -5,7 +5,7 @@ use std::time::Duration;
 pub type MalformedCounts = BTreeMap<String, u64>;
 
 
-pub type LeaseKey = (i64, i64, String, String);
+pub type LeaseKey = (i64, i64, String, String, u32);
 
 
 pub type SeenLeases = BTreeSet<LeaseKey>;
