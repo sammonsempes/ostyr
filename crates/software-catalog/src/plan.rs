@@ -69,11 +69,27 @@ pub fn lookup<'catalogue>(catalogue: &'catalogue Catalogue, name: &str) -> Resul
 }
 
 
-pub fn row_of<'installed>(entry: &Entry, installed: &'installed Installed) -> Option<&'installed InstalledRow> {
-    installed
+pub fn row_of(entry: &Entry, installed: &Installed) -> Option<InstalledRow> {
+    let rows: Vec<&InstalledRow> = installed
         .rows
         .iter()
-        .find(|row| row.manager == manager_of(&entry.source) && row.package == package_of(&entry.source))
+        .filter(|row| row.manager == manager_of(&entry.source) && row.package == package_of(&entry.source))
+        .collect();
+    let held = rows.iter().any(|row| row.held);
+    rows.into_iter()
+        .max_by(|left, right| order_rows(left, right))
+        .map(|row| InstalledRow { held, ..row.clone() })
+}
+
+
+pub fn order_rows(left: &InstalledRow, right: &InstalledRow) -> Ordering {
+    let family = family_of(left.manager);
+    match (parse_version(family, &left.version), parse_version(family, &right.version)) {
+        (Ok(first), Ok(second)) => first.cmp(&second),
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Err(_)) => Ordering::Equal,
+    }
 }
 
 
@@ -99,8 +115,8 @@ pub fn action_of(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>) ->
 
 pub fn wanted_action(entry: &Entry, installed: &Installed, available: &Available) -> Option<Action> {
     let row = row_of(entry, installed);
-    let kind = row.map_or(Some(ActionKind::Install), |found| compare(entry, found));
-    kind.map(|found| action_of(gate(found, entry, row, available), entry, row))
+    let kind = row.as_ref().map_or(Some(ActionKind::Install), |found| compare(entry, found));
+    kind.map(|found| action_of(gate(found, entry, row.as_ref(), available), entry, row.as_ref()))
 }
 
 
@@ -142,7 +158,7 @@ pub fn compare(entry: &Entry, row: &InstalledRow) -> Option<ActionKind> {
 pub fn removal_action(entry: &Entry, installed: &Installed) -> Option<Action> {
     row_of(entry, installed).filter(|_| entry.uninstall).map(|row| {
         let kind = if row.held { ActionKind::Held } else { ActionKind::Uninstall };
-        action_of(kind, entry, Some(row))
+        action_of(kind, entry, Some(&row))
     })
 }
 
