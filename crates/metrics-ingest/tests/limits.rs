@@ -71,6 +71,18 @@ fn table() -> Vec<Row> {
             1,
             MAX_TOTAL_ATTRIBUTES_CEILING,
         ),
+        (
+            "max_entity_refs_total",
+            |limits, value| limits.max_entity_refs_total = size(value),
+            1,
+            MAX_ENTITY_REFS_TOTAL_CEILING,
+        ),
+        (
+            "max_entity_keys_total",
+            |limits, value| limits.max_entity_keys_total = size(value),
+            1,
+            MAX_ENTITY_KEYS_TOTAL_CEILING,
+        ),
         ("max_labels", |limits, value| limits.max_labels = size(value), 1, MAX_LABELS_CEILING),
         (
             "max_label_key_bytes",

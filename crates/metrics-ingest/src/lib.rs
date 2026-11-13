@@ -6,6 +6,7 @@ pub mod decode;
 pub mod insert;
 pub mod model;
 pub mod run;
+pub mod scan;
 pub mod send;
 pub mod settings;
 pub mod types;
