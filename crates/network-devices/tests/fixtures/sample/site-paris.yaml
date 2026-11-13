@@ -13,7 +13,7 @@ devices:
       security_level: auth_priv
       auth_protocol: sha256
       priv_protocol: aes128
-      credentials: sites/paris/core-sw1.snmp
+      credentials: acme/paris/core-sw1.snmp
   - name: edge-fw1
     tenant: acme
     kind: firewall

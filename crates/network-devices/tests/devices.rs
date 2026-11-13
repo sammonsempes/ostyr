@@ -34,7 +34,7 @@ const BASE: &str = "devices:
       security_level: auth_priv
       auth_protocol: sha256
       priv_protocol: aes128
-      credentials: sites/acme/core-sw1.snmp
+      credentials: acme/core-sw1.snmp
 ";
 
 
@@ -48,6 +48,9 @@ const SECURITY_LINE: &str = "      security_level: auth_priv\n";
 
 
 const SECOND_INDEX: usize = 1;
+
+
+const TOO_MANY: &str = "\"site.yaml\": too many elements";
 
 
 const BASE_TRAPS: u32 = 600;
@@ -131,8 +134,7 @@ fn defaults_apply_to_a_minimal_push_only_device() -> TestResult {
 #[test]
 fn each_rule_refuses_an_input_valid_except_for_it() -> TestResult {
     let long_name = "a".repeat(MAX_NAME_BYTES + 1);
-    let long_reference = "a".repeat(MAX_REFERENCE_BYTES + 1);
-    let many_addresses = (0..=MAX_ADDRESSES).map(|i| format!("192.0.2.{}", i + 1)).collect::<Vec<_>>().join(", ");
+    let long_reference = format!("acme/{}", "a".repeat(MAX_REFERENCE_BYTES));
     let over_traps = (MAX_TRAPS_PER_MINUTE + 1).to_string();
     let over_flows = (MAX_FLOW_RECORDS_PER_SECOND + 1).to_string();
     let over_stale = (MAX_STALE_SECONDS + 1).to_string();
@@ -144,14 +146,13 @@ fn each_rule_refuses_an_input_valid_except_for_it() -> TestResult {
         (changed("name: core-sw1", &format!("name: {long_name}")), "name"),
         (changed("tenant: acme", "tenant: -x"), "tenant"),
         (changed("addresses: [192.0.2.10, \"2001:db8::1\"]", "addresses: []"), "addresses"),
-        (changed("192.0.2.10, \"2001:db8::1\"", &many_addresses), "addresses"),
-        (changed("sites/acme/core-sw1.snmp", "../../etc/shadow"), "snmp.credentials"),
-        (changed("sites/acme/core-sw1.snmp", "/etc/shadow"), "snmp.credentials"),
-        (changed("sites/acme/core-sw1.snmp", "-x"), "snmp.credentials"),
-        (changed("sites/acme/core-sw1.snmp", "\"sites/\\u202Ea\""), "snmp.credentials"),
-        (changed("sites/acme/core-sw1.snmp", "sites//a"), "snmp.credentials"),
-        (changed("sites/acme/core-sw1.snmp", "sites/a/"), "snmp.credentials"),
-        (changed("sites/acme/core-sw1.snmp", &long_reference), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", "../../etc/shadow"), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", "/etc/shadow"), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", "-x"), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", "\"acme/\\u202Ea\""), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", "acme//a"), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", "acme/a/"), "snmp.credentials"),
+        (changed("acme/core-sw1.snmp", &long_reference), "snmp.credentials"),
         (changed("agent_managed: false", "agent_managed: true"), "snmp.polling"),
         (changed("version: v3", "version: v2c"), "snmp.version"),
         (changed("version: v3", "version: v1"), "snmp.version"),
@@ -186,7 +187,7 @@ fn each_rule_refuses_an_input_valid_except_for_it() -> TestResult {
         let found = refused_field(text)?;
         (found == *field)
             .then_some(())
-            .ok_or_else(|| format!("expected {field}, got {found}").into())
+            .ok_or_else(|| Box::<dyn Error>::from(format!("expected {field}, got {found}")))
     })
 }
 
@@ -260,7 +261,6 @@ fn an_address_is_claimed_once_per_tenant_by_source_key() -> TestResult {
     let clashes = [
         [block("a", "acme", &["192.0.2.1"]), block("b", "acme", &["192.0.2.1"])],
         [block("a", "acme", &["2001:db8::1"]), block("b", "acme", &["2001:db8::2"])],
-        [block("a", "acme", &["192.0.2.1"]), block("b", "acme", &["::ffff:192.0.2.1"])],
     ];
     clashes.iter().try_for_each(|blocks| match parse(&file_of(blocks)) {
         Err(DeviceError::DuplicateAddress { index, .. }) if index == SECOND_INDEX => Ok(()),
@@ -269,15 +269,78 @@ fn an_address_is_claimed_once_per_tenant_by_source_key() -> TestResult {
 }
 
 
+fn parse_message(text: &str) -> Result<String, Box<dyn Error>> {
+    match parse(text) {
+        Err(error @ (DeviceError::TooManyElements { .. } | DeviceError::InvalidDocument { .. })) => Ok(error.to_string()),
+        other => Err(format!("expected a parse error, got {other:?}").into()),
+    }
+}
+
+
 #[test]
-fn too_many_devices_are_refused_after_the_size_cap_bounds_them() -> TestResult {
+fn too_many_devices_are_refused_before_the_element_after_the_cap_is_read() -> TestResult {
     let line = "  - {name: d, tenant: acme, kind: switch, addresses: [192.0.2.1], stale_after_seconds: 900}\n";
     let text = format!("devices:\n{}", line.repeat(MAX_DEVICES_PER_FILE + 1));
     assert!(text.len() as u64 <= MAX_FILE_BYTES);
-    match parse(&text) {
-        Err(DeviceError::TooManyDevices { count, .. }) if count == MAX_DEVICES_PER_FILE + 1 => Ok(()),
-        other => Err(format!("expected TooManyDevices, got {other:?}").into()),
-    }
+    assert_eq!(parse_message(&text)?, TOO_MANY);
+    let unread = format!("{text}  - not-a-device\n");
+    assert_eq!(parse_message(&unread)?, TOO_MANY);
+    Ok(())
+}
+
+
+#[test]
+fn too_many_addresses_are_refused_before_the_element_after_the_cap_is_read() -> TestResult {
+    let nine = (0..=MAX_ADDRESSES).map(|i| format!("192.0.2.{}", i + 1)).collect::<Vec<_>>().join(", ");
+    assert_eq!(parse_message(&changed("192.0.2.10, \"2001:db8::1\"", &nine))?, TOO_MANY);
+    let unread = format!("{nine}, not-an-address");
+    assert_eq!(parse_message(&changed("192.0.2.10, \"2001:db8::1\"", &unread))?, TOO_MANY);
+    let exact = (0..MAX_ADDRESSES).map(|i| format!("192.0.2.{}", i + 1)).collect::<Vec<_>>().join(", ");
+    assert_eq!(parse(&changed("192.0.2.10, \"2001:db8::1\"", &exact))?.devices.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_device_address_of_an_unusable_class_is_refused() -> TestResult {
+    let refused = [
+        "0.0.0.0",
+        "::",
+        "::1",
+        "127.0.0.1",
+        "224.0.0.1",
+        "ff02::1",
+        "255.255.255.255",
+        "::ffff:192.0.2.1",
+        "::2",
+        "::127.0.0.1",
+        "::7f00:1",
+        "0.1.2.3",
+        "169.254.1.1",
+        "fe80::1",
+    ];
+    refused.iter().try_for_each(|address| {
+        let found = refused_field(&file_of(&[block("sw", "acme", &[address])]))?;
+        (found == "addresses")
+            .then_some(())
+            .ok_or_else(|| Box::<dyn Error>::from(format!("{address}: expected addresses, got {found}")))
+    })?;
+    let mixed = file_of(&[block("sw", "acme", &["192.0.2.1", "::"])]);
+    assert_eq!(refused_field(&mixed)?, "addresses");
+    Ok(())
+}
+
+
+#[test]
+fn credentials_must_start_with_the_device_tenant() -> TestResult {
+    assert_eq!(parse(&changed("acme/core-sw1.snmp", "acme/core.snmp"))?.devices.len(), 1);
+    let refused = ["other/core.snmp", "core.snmp", "acmex/core.snmp", "acme", "acme.snmp/x"];
+    refused.iter().try_for_each(|reference| {
+        let found = refused_field(&changed("acme/core-sw1.snmp", reference))?;
+        (found == "snmp.credentials")
+            .then_some(())
+            .ok_or_else(|| Box::<dyn Error>::from(format!("{reference}: expected snmp.credentials, got {found}")))
+    })
 }
 
 
@@ -296,30 +359,39 @@ fn an_oversized_or_unreadable_file_is_refused() -> TestResult {
 
 #[test]
 fn the_credentials_reference_is_never_opened() -> TestResult {
-    let loaded = parse(&changed("sites/acme/core-sw1.snmp", "no/such/dir/never-read.snmp"))?;
+    let loaded = parse(&changed("acme/core-sw1.snmp", "acme/no/such/never-read.snmp"))?;
     assert_eq!(loaded.devices.len(), 1);
     Ok(())
 }
 
 
 #[test]
-fn a_secret_file_content_never_reaches_debug_or_display() -> TestResult {
-    let directory = tempfile::tempdir()?;
+fn a_marker_in_the_input_only_appears_where_it_is_expected() -> TestResult {
     let marker = "MARKER-SECRET-VALUE";
-    std::fs::create_dir_all(directory.path().join("sites/acme"))?;
-    std::fs::write(directory.path().join("sites/acme/core-sw1.snmp"), marker)?;
-    let loaded = parse(BASE)?;
-    assert!(!format!("{loaded:?}").contains(marker));
+    let loaded = parse(&changed("acme/core-sw1.snmp", &format!("acme/{marker}.snmp")))?;
+    assert!(format!("{loaded:?}").contains(marker));
     let refusals = [
-        changed("sites/acme/core-sw1.snmp", "../sites/acme/core-sw1.snmp"),
-        changed("auth_protocol: sha256", "auth_protocol: md5"),
+        changed("name: core-sw1", &format!("name: {marker}/x")),
+        changed("acme/core-sw1.snmp", &format!("other/{marker}")),
+        changed("acme/core-sw1.snmp", &format!("../{marker}")),
+        changed("kind: switch", &format!("kind: {marker}")),
+        changed("auth_protocol: sha256", &format!("auth_protocol: {marker}")),
+        changed("192.0.2.10", &format!("{marker}-not-an-address")),
+        changed("stale_after_seconds: 900", &format!("stale_after_seconds: 900\n    {marker}: 1")),
+        changed("version: v3", &format!("version: !{marker} v3")),
+        changed("    kind: switch", &format!("    kind: switch\n    kind: {marker}")),
+        changed("    kind: switch", &format!("    kind: switch\n    {marker}: 1")),
+        format!("devices:\n  - name: a\n    {marker}: !{marker} x\n  - [{marker}"),
+        format!("devices: !{marker} [1]"),
     ];
     refusals.iter().try_for_each(|text| {
-        let error = parse(text).err().ok_or("expected a refusal")?;
-        assert!(!format!("{error:?} {error}").contains(marker));
-        Ok::<(), Box<dyn Error>>(())
+        let error = parse(text).err().ok_or_else(|| format!("expected a refusal: {text}"))?;
+        let shown = format!("{error:?} {error}");
+        (!shown.contains(marker))
+            .then_some(())
+            .ok_or_else(|| Box::<dyn Error>::from(format!("marker leaked: {shown}")))
     })?;
-    let invalid = parse(&changed("sites/acme/core-sw1.snmp", "-x")).err().ok_or("expected a refusal")?;
+    let invalid = parse(&changed("acme/core-sw1.snmp", "-x")).err().ok_or("expected a refusal")?;
     assert_eq!(invalid.to_string(), "\"site.yaml\": device #0: invalid `snmp.credentials`");
     Ok(())
 }
@@ -330,6 +402,7 @@ fn the_plan_lists_polled_devices_sorted_by_tenant_and_name() -> TestResult {
     let polled = |name: &str, tenant: &str, address: &str| {
         let text = changed("name: core-sw1", &format!("name: {name}"))
             .replacen("tenant: acme", &format!("tenant: {tenant}"), 1)
+            .replacen("credentials: acme/", &format!("credentials: {tenant}/"), 1)
             .replacen("192.0.2.10, \"2001:db8::1\"", address, 1);
         parse(&text).map(|loaded| loaded.devices)
     };
@@ -342,7 +415,7 @@ fn the_plan_lists_polled_devices_sorted_by_tenant_and_name() -> TestResult {
     assert_eq!(order, vec![("acme", "beta"), ("acme", "zeta"), ("globex", "alpha")]);
     let first = plan.first().ok_or("empty plan")?;
     assert_eq!(first.version, SnmpVersion::V3);
-    assert_eq!(first.credentials, "sites/acme/core-sw1.snmp");
+    assert_eq!(first.credentials, "acme/core-sw1.snmp");
     assert_eq!(first.addresses.len(), 1);
     Ok(())
 }
