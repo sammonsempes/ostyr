@@ -1,4 +1,4 @@
 Result=exit-code
-ExecMainExitTimestamp=@1794519072
+ExecMainExitTimestamp=@1794526826
 ExecMainStatus=1
 Id=ostyr-bad.service

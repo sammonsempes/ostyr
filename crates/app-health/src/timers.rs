@@ -1,7 +1,7 @@
 //! Timer expectations file, strict parse of `systemctl show --timestamp=unix` for a timer and its service, and the health of a timer.
 
 use crate::error::NtpError;
-use crate::grammar::is_unit_name_with;
+use crate::grammar::{is_unit_name, is_unit_name_with};
 use crate::limits::{MAX_CLOCK_SKEW_SECONDS, MAX_EXPECTATIONS_BYTES, MAX_MAX_AGE_SECONDS, MAX_UNITS, MIN_MAX_AGE_SECONDS};
 use crate::model::{ActiveState, LoadState, ServiceResult, ServiceRun, TimerExpectation, TimerExpectationsFile, TimerHealth, TimerState};
 use crate::parse::read_bounded;
@@ -17,7 +17,7 @@ use time::PrimitiveDateTime;
 pub const UTC_FORMAT: &[FormatItem<'static>] = format_description!("[weekday repr:short] [year]-[month]-[day] [hour]:[minute]:[second] UTC");
 
 
-pub const TIMER_KEYS: [&str; 5] = ["Id", "LoadState", "ActiveState", "LastTriggerUSec", "NextElapseUSecRealtime"];
+pub const TIMER_KEYS: [&str; 6] = ["Id", "LoadState", "ActiveState", "Unit", "LastTriggerUSec", "NextElapseUSecRealtime"];
 
 
 pub const SERVICE_KEYS: [&str; 4] = ["Id", "Result", "ExecMainStatus", "ExecMainExitTimestamp"];
@@ -138,12 +138,15 @@ pub fn parse_timer_show<Input: Read>(mut reader: Input, max_bytes: u64, expected
     let pairs = checked_pairs(&text, &TIMER_KEYS, expected_unit)?;
     let load = load_state(value(&pairs, "LoadState")?);
     let active = active_state(value(&pairs, "ActiveState")?);
+    let unit = Some(value(&pairs, "Unit")?).filter(|name| is_unit_name(name)).map(str::to_string);
+    let unit_unknown = unit.is_none();
     Ok(TimerState {
         load,
+        unit,
         active,
         last_trigger_unix: timestamp(value(&pairs, "LastTriggerUSec")?)?,
         next_elapse_unix: timestamp(value(&pairs, "NextElapseUSecRealtime")?)?,
-        unknown_values: usize::from(load.is_none()) + usize::from(active.is_none()),
+        unknown_values: usize::from(load.is_none()) + usize::from(active.is_none()) + usize::from(unit_unknown),
     })
 }
 
@@ -175,11 +178,15 @@ fn freshness(max_age_seconds: u64, last_trigger: Option<u64>, now_unix: u64) -> 
 }
 
 
-/// Precedence: NotFound > LastRunFailed > Overdue or BlindSpot (never triggered, too old, or a trigger beyond the clock skew) > Inactive > Healthy.
+/// Precedence: NotFound > NotLoaded > WrongService (the timer's `Unit` is not the expected service) > LastRunFailed > Overdue or BlindSpot (never triggered, too old, or a trigger beyond the clock skew) > Inactive > Healthy.
 pub fn assess_timer(expectation: &TimerExpectation, timer: &TimerState, service: &ServiceRun, now_unix: u64) -> TimerHealth {
     let succeeded = service.result == Some(ServiceResult::Success) && service.exec_main_status == 0;
     if timer.load == Some(LoadState::NotFound) {
         TimerHealth::NotFound
+    } else if timer.load != Some(LoadState::Loaded) {
+        TimerHealth::NotLoaded
+    } else if timer.unit.as_deref() != Some(service_unit(expectation).as_str()) {
+        TimerHealth::WrongService
     } else if !succeeded {
         TimerHealth::LastRunFailed
     } else if let Some(problem) = freshness(expectation.max_age_seconds, timer.last_trigger_unix, now_unix) {

@@ -1,0 +1,7 @@
+NRestarts=0
+ExecMainStatus=0
+Id=ostyr-masked.service
+LoadState=masked
+ActiveState=inactive
+SubState=dead
+UnitFileState=masked

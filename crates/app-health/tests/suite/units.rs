@@ -389,3 +389,38 @@ fn a_trailing_carriage_return_is_malformed() -> TestResult {
     assert!(matches!(parse_unit_show(one.as_bytes(), MAX_SHOW, UNIT), Err(NtpError::Malformed { .. })));
     Ok(())
 }
+
+
+#[test]
+fn any_load_state_but_loaded_is_never_healthy() -> TestResult {
+    let want = expectation(true, true);
+    [
+        LoadState::Masked,
+        LoadState::Error,
+        LoadState::BadSetting,
+        LoadState::Stub,
+        LoadState::Merged,
+    ]
+    .iter()
+    .for_each(|load| {
+        let current = state(*load, ActiveState::Active, UnitFileState::Enabled, 0);
+        assert_eq!(assess_unit(&want, None, &current), UnitHealth::NotLoaded, "{load:?}");
+    });
+    let mut absent = good(0);
+    absent.load = None;
+    assert_eq!(assess_unit(&want, None, &absent), UnitHealth::NotLoaded);
+    Ok(())
+}
+
+
+#[test]
+fn lab_masked_unit_capture_is_not_loaded() -> TestResult {
+    let masked = parse_unit_show(
+        include_str!("../fixtures/lab-unit-masked.txt").as_bytes(),
+        MAX_SHOW,
+        "ostyr-masked.service",
+    )?;
+    assert_eq!(masked.load, Some(LoadState::Masked));
+    assert_eq!(assess_unit(&expectation(false, false), None, &masked), UnitHealth::NotLoaded);
+    Ok(())
+}
