@@ -5,6 +5,7 @@ ports.ubuntu.com
 deb.debian.org
 security.debian.org
 dl.rockylinux.org
+download.proxmox.com
 .rockylinux.org
 crates.io
 static.crates.io
