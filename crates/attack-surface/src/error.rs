@@ -48,6 +48,12 @@ pub enum CommandError {
     UnknownTarget { shown: String },
     #[error("argument value `{shown}` is refused")]
     BadValue { shown: String },
+    #[error("target `{shown}` is refused: {source}")]
+    BadTarget {
+        shown: String,
+        #[source]
+        source: Refusal,
+    },
 }
 
 
