@@ -122,7 +122,9 @@ pub fn string_list(raw: Option<&RawValue>, max_count: usize, accept: impl Fn(&st
 
 
 pub fn parse_rfc3339(text: &str) -> Option<OffsetDateTime> {
-    OffsetDateTime::parse(text, &Rfc3339).ok().map(|time| time.to_offset(UtcOffset::UTC))
+    OffsetDateTime::parse(text, &Rfc3339)
+        .ok()
+        .and_then(|time| time.checked_to_offset(UtcOffset::UTC))
 }
 
 
