@@ -6,12 +6,17 @@ license.workspace = true
 publish = false
 
 [dependencies]
+cmdb = { version = "0.0.0", path = "../cmdb" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-export = { version = "0.0.0", path = "../core-export" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+dhcp-kea = { version = "0.0.0", path = "../dhcp-kea" }
 ipnet = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 site-collector = { version = "0.0.0", path = "../site-collector" }
 thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+tracing = "0.1"
 
 [dev-dependencies]
 serde_json = "1"
