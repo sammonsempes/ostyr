@@ -146,6 +146,18 @@ const SMALL_RATE: u32 = 2;
 const RATE_WINDOW: u64 = 1;
 
 
+/// Server handshake deadline of the rate test, the largest the settings accept.
+const HANDSHAKE_SECONDS: u64 = 60;
+
+
+/// First-request and request deadlines of the rate test, far beyond any run.
+const FAR_SECONDS: u64 = 3600;
+
+
+/// Dials of the rate test: one, then the refused one and its retry.
+const EXPECTED_DIALS: u32 = 3;
+
+
 struct FailingWriter;
 
 
@@ -1077,7 +1089,10 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
     let Fixture { server, agent } = fixture(dir.path())?;
     fs::write(
         &server.settings_file,
-        format!("max_requests_per_window: {SMALL_RATE}\nrate_window_seconds: {RATE_WINDOW}\n"),
+        format!(
+            "max_requests_per_window: {SMALL_RATE}\nrate_window_seconds: {RATE_WINDOW}\nhandshake_timeout_seconds: {HANDSHAKE_SECONDS}\n\
+             first_request_timeout_seconds: {FAR_SECONDS}\nrequest_timeout_seconds: {FAR_SECONDS}\n"
+        ),
     )?;
     let listener = bind_server(&server).await?;
     let listener_address = listener.local_addr()?;
@@ -1101,7 +1116,13 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
         key: agent.key.clone(),
         platform_ca: agent.platform_ca.clone(),
     })?;
-    let dial = dialer(listener_address, config, agent.server_name.clone());
+    let real_dial = dialer(listener_address, config, agent.server_name.clone());
+    let dials = Arc::new(AtomicU32::new(0));
+    let counted_dials = Arc::clone(&dials);
+    let dial = move || -> DialFuture {
+        counted_dials.fetch_add(1, Ordering::SeqCst);
+        real_dial()
+    };
     let pauses = Arc::new(AtomicU32::new(0));
     let counted = Arc::clone(&pauses);
     let pause = move |_delay: Duration| -> PauseFuture {
@@ -1109,11 +1130,12 @@ async fn a_backlog_over_the_server_rate_limit_is_all_delivered_and_none_quaranti
         elapsed.fetch_add(RATE_WINDOW, Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     };
-    let first = bounded(deliver_events(dial.as_ref(), &pause, vec![batch(FIRST)])).await??;
-    let second = bounded(deliver_events(dial.as_ref(), &pause, vec![batch(SECOND)])).await??;
+    let first = bounded(deliver_events(&dial, &pause, vec![batch(FIRST)])).await??;
+    let second = bounded(deliver_events(&dial, &pause, vec![batch(SECOND)])).await??;
     assert_eq!(first.acknowledged, vec![FIRST]);
     assert_eq!(second.acknowledged, vec![SECOND]);
     assert!(first.rejected.is_empty() && second.rejected.is_empty());
+    assert_eq!(dials.load(Ordering::SeqCst), EXPECTED_DIALS);
     assert_eq!(pauses.load(Ordering::SeqCst), 1);
     stop.send(()).map_err(|()| "server already stopped")?;
     handle.await??;

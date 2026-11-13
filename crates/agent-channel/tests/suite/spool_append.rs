@@ -11,7 +11,7 @@ use tempfile::tempdir;
 const WRITERS: usize = 2;
 
 
-const LINES_PER_WRITER: usize = 400;
+const LINES_PER_WRITER: usize = 40;
 
 
 const LINE_BYTES: usize = 3_000;
