@@ -137,6 +137,7 @@ fn report(runtime: &Runtime) -> Result<(), Box<dyn Error>> {
 
 
 fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [settings, audit, spool] => start(settings, audit, spool, None),

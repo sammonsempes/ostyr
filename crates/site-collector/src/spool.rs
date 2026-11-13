@@ -161,6 +161,8 @@ pub fn open_spool(dir: &Path, config: SpoolConfig) -> Result<Spool, SpoolError> 
         dropped_low: 0,
         dropped_high: 0,
         truncated_tails,
+        unlink_failures: 0,
+        missing_segments: 0,
         saturated: false,
         epoch,
     };
@@ -198,16 +200,12 @@ fn rotate(spool: &mut Spool) -> Result<(), SpoolError> {
 }
 
 
-fn remove_segment_file(dir: &DirHandle, segment: &Segment) -> Result<(), SpoolError> {
-    match remove_named(dir, &segment_name(segment.first_sequence)) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            tracing::warn!(?segment, "spool segment file already gone, forgetting it");
-            Ok(())
-        }
-        other => other
-            .inspect_err(|error| tracing::warn!(?segment, %error, "could not unlink a segment, kept tracked"))
-            .map_err(SpoolError::from),
-    }
+fn remove_segment_file(spool: &mut Spool, segment: &Segment) -> Result<(), SpoolError> {
+    let removed = remove_named(&spool.dir, &segment_name(segment.first_sequence));
+    let missing = matches!(&removed, Err(error) if error.kind() == io::ErrorKind::NotFound);
+    spool.missing_segments += u64::from(missing);
+    spool.unlink_failures += u64::from(removed.is_err() && !missing);
+    (if missing { Ok(()) } else { removed }).map_err(SpoolError::from)
 }
 
 
@@ -221,13 +219,12 @@ fn drop_victim(spool: &mut Spool) -> Result<(), SpoolError> {
         .unwrap_or(0);
     let victim = (sealed > 0).then(|| spool.segments.get(index).cloned()).flatten();
     victim.into_iter().try_for_each(|segment| -> Result<(), SpoolError> {
-        remove_segment_file(&spool.dir, &segment)?;
+        remove_segment_file(spool, &segment)?;
         spool.segments.remove(index);
         spool.total_bytes = spool.total_bytes.saturating_sub(segment.bytes);
         spool.dropped_low += segment.low_records;
         spool.dropped_high += segment.high_records;
         spool.saturated = true;
-        tracing::warn!(?segment, "spool full: dropped a segment");
         Ok(())
     })
 }
@@ -270,10 +267,7 @@ pub fn append_with(spool: &mut Spool, priority: Priority, payload: &[u8], writer
     }
     enforce_cap(spool, size)?;
     let active_bytes_after = spool.segments.back().map_or(0, |segment| segment.bytes);
-    writer(&mut spool.active, &frame).or_else(|error| {
-        tracing::warn!(%error, kept_bytes = active_bytes_after, "spool write failed, cutting the active segment back");
-        spool.active.set_len(active_bytes_after).and(Err(error))
-    })?;
+    writer(&mut spool.active, &frame).or_else(|error| spool.active.set_len(active_bytes_after).and(Err(error)))?;
     spool.segments.back_mut().into_iter().for_each(|segment| {
         segment.bytes += size;
         match priority {
@@ -305,7 +299,7 @@ pub fn acknowledge(spool: &mut Spool, sequence: u64) -> Result<(), SpoolError> {
                 .cloned()
                 .into_iter()
                 .try_for_each(|segment| -> Result<(), SpoolError> {
-                    remove_segment_file(&spool.dir, &segment)?;
+                    remove_segment_file(spool, &segment)?;
                     spool.segments.pop_front();
                     spool.total_bytes = spool.total_bytes.saturating_sub(segment.bytes);
                     Ok(())
@@ -350,6 +344,8 @@ pub fn spool_stats(spool: &Spool) -> SpoolStats {
         dropped_low: spool.dropped_low,
         dropped_high: spool.dropped_high,
         truncated_tails: spool.truncated_tails,
+        unlink_failures: spool.unlink_failures,
+        missing_segments: spool.missing_segments,
         saturated: spool.saturated,
         total_bytes: spool.total_bytes,
         next_sequence: spool.next_sequence,

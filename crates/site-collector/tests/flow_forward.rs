@@ -1,16 +1,19 @@
 #![cfg(unix)]
 
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
 
+use logging::captured;
 use serde_json::{json, Value};
 use site_collector::dirfs::open_directory;
 use site_collector::error::{FlowFrameError, ForwardError};
 use site_collector::flow_frame::{decode_flow_frame, single_flow_batch};
 use site_collector::flow_listen::encode_frame;
 use site_collector::flow_model::{FlowFrame, FlowLimits, FlowRecord, FLOW_FRAME_VERSION, MAX_FLOW_FRAME_BYTES};
-use site_collector::forward::{event_line, forward_once, is_unknown_version, read_cursor, write_cursor};
+use site_collector::forward::{event_line, forward_error_kind, forward_once, is_unknown_version, read_cursor, write_cursor};
 use site_collector::forward_model::{ForwardLimits, ForwardReport};
 use site_collector::listen::handle_datagram;
 use site_collector::listen_model::{ListenerKind, ListenerSettings, Runtime};
@@ -335,6 +338,44 @@ fn an_unknown_version_is_refused_and_counted_apart() -> TestResult {
     feed(&mut fixture, &[&frame_with("v", json!(UNKNOWN_FRAME_VERSION))?, &good])?;
     let report = forward(&mut fixture, ListenerKind::Netflow)?;
     assert_eq!((report.forwarded, report.skipped_unparsable, report.skipped_unknown_version), (1, 0, 1));
+    Ok(())
+}
+
+
+const MARKER: &str = "SECRETMARK";
+
+
+const MALFORMED_FRAMES: u64 = 3;
+
+
+#[test]
+fn a_skipped_frame_is_logged_without_any_frame_text() -> TestResult {
+    let mut fixture = fixture()?;
+    let long_marker = MARKER.repeat(MANY);
+    feed(
+        &mut fixture,
+        &[
+            &frame_with("protocol", json!(MARKER))?,
+            &frame_with("source_port", json!(long_marker))?,
+            &frame_with("exporter", json!(MARKER))?,
+            &frame_with("v", json!(UNKNOWN_FRAME_VERSION))?,
+        ],
+    )?;
+    let (outcome, log) = captured(|| forward(&mut fixture, ListenerKind::Netflow));
+    let report = outcome?;
+    assert_eq!((report.skipped_unparsable, report.skipped_unknown_version), (MALFORMED_FRAMES, 1));
+    assert!(log.contains("spooled records skipped"), "{log}");
+    assert!(
+        log.contains("sequence 0: the flow frame is not a strict flow record (Data, line 0, column 0)"),
+        "{log}"
+    );
+    assert!(!log.contains(MARKER), "{log}");
+    assert_eq!(
+        forward_error_kind(&ForwardError::Io(std::io::Error::other(MARKER))),
+        "forward input/output failure"
+    );
+    let unknown = ForwardError::Frame(FlowFrameError::UnknownVersion(UNKNOWN_FRAME_VERSION));
+    assert_eq!(forward_error_kind(&unknown), "the flow frame has version 2, not a known one");
     Ok(())
 }
 

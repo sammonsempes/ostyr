@@ -1,7 +1,10 @@
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
 
+use logging::captured;
 use site_collector::dirfs::{directory_facts, open_directory, regular_file_names};
 use site_collector::error::SpoolError;
 use site_collector::frame::encode_frame;
@@ -770,6 +773,17 @@ fn a_partial_write_is_cut_back_and_confirmed_records_survive() -> TestResult {
 fn write_one_byte_then_fail(file: &mut File, frame: &[u8]) -> io::Result<()> {
     file.write_all(frame.get(..1).ok_or(io::ErrorKind::InvalidInput)?)?;
     Err(io::ErrorKind::StorageFull.into())
+}
+
+
+#[test]
+fn a_failed_write_logs_nothing_itself_the_caller_logs_once() -> TestResult {
+    let dir = scratch()?;
+    let mut spool = open_in(&dir)?;
+    let (failed, log) = captured(|| append_with(&mut spool, Priority::Low, &[b'y'; PAYLOAD], write_one_byte_then_fail).is_err());
+    assert!(failed);
+    assert_eq!(log, "");
+    Ok(())
 }
 
 
