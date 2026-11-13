@@ -1,4 +1,4 @@
-use crate::cardinality::{admit_series, CardinalityState};
+use crate::cardinality::{admit_series, new_series_cost, CardinalityState};
 use crate::model::{Bucket, DropReason, Limits, MetricKind, Outcome, Refusal, SampleRow};
 use crate::scan::scan_request;
 use crate::types::{LabelMap, Labels, ResourceLabels};
@@ -12,7 +12,16 @@ use std::mem::size_of;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
-pub const STRINGS_IN_ROW: usize = 3;
+pub const MIN_ALLOCATION_BYTES: usize = 32;
+
+
+pub const ALLOCATION_ALIGN_BYTES: usize = 16;
+
+
+pub const ALLOCATION_HEADER_BYTES: usize = 8;
+
+
+pub const ROWS_CAPACITY_FACTOR: usize = 3;
 
 
 pub struct Series<'a> {
@@ -272,20 +281,38 @@ pub fn scalar_text(value: &AnyKind) -> Option<String> {
 }
 
 
-/// Bytes one row will own: its strings, labels and buckets, plus the fixed size of each `String` and element.
+/// Bytes the allocator hands out for `length` bytes: 0 when empty, else `length` plus an 8-byte header rounded up to 16, at least 32 (glibc minimum chunk).
+pub fn allocation_bytes(length: usize) -> usize {
+    if length == 0 {
+        0
+    } else {
+        length
+            .saturating_add(ALLOCATION_HEADER_BYTES)
+            .div_ceil(ALLOCATION_ALIGN_BYTES)
+            .saturating_mul(ALLOCATION_ALIGN_BYTES)
+            .max(MIN_ALLOCATION_BYTES)
+    }
+}
+
+
+/// Bytes one row will own: `SampleRow` three times (the `rows` vector reallocates: old and new block live together), plus every heap block at its allocated capacity.
 pub fn row_bytes(tenant: &str, series: &Series, labels: &Labels, buckets: &[Bucket]) -> usize {
     let strings = [tenant.len(), series.name.len(), series.unit.len()]
         .iter()
-        .fold(STRINGS_IN_ROW * size_of::<String>(), |total, length| total.saturating_add(*length));
-    let label_bytes = labels.iter().fold(usize::MIN, |total: usize, (key, value)| {
-        total
-            .saturating_add(size_of::<(String, String)>())
-            .saturating_add(key.len())
-            .saturating_add(value.len())
-    });
+        .fold(ROWS_CAPACITY_FACTOR * size_of::<SampleRow>(), |total, length| {
+            total.saturating_add(allocation_bytes(*length))
+        });
+    let label_bytes = labels.iter().fold(
+        allocation_bytes(labels.capacity().saturating_mul(size_of::<(String, String)>())),
+        |total, (key, value)| {
+            total
+                .saturating_add(allocation_bytes(key.capacity()))
+                .saturating_add(allocation_bytes(value.capacity()))
+        },
+    );
     strings
         .saturating_add(label_bytes)
-        .saturating_add(buckets.len().saturating_mul(size_of::<Bucket>()))
+        .saturating_add(allocation_bytes(buckets.len().saturating_mul(size_of::<Bucket>())))
 }
 
 
@@ -301,7 +328,8 @@ pub fn admit_new_point(series: &Series, point: Point, limits: &Limits, state: &m
         point_labels(series.resource, point.attributes, limits).map(|labels| (row_bytes(&outcome.tenant, series, &labels, &point.buckets), labels));
     match built {
         Ok((cost, labels)) => {
-            let total = outcome.row_bytes.saturating_add(cost);
+            let state_cost = new_series_cost(state, &outcome.tenant, series.name, &labels);
+            let total = outcome.row_bytes.saturating_add(cost).saturating_add(state_cost);
             if total > limits.max_row_bytes_total {
                 outcome.rows = Vec::new();
                 outcome.refusal = Some(Refusal::TooManyRowBytes { bytes: total });

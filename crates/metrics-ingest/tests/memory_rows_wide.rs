@@ -1,4 +1,6 @@
 mod common;
+#[path = "memory_support/measure.rs"]
+mod measure;
 mod memory_support;
 #[path = "common/peak.rs"]
 mod peak;
@@ -7,8 +9,10 @@ mod rows;
 
 
 use common::types::TestResult;
+use measure::measure;
 use metrics_ingest::model::Limits;
-use rows::{measure, request};
+use metrics_ingest::model::{DEFAULT_MAX_LABEL_KEY_BYTES, DEFAULT_MAX_LABEL_VALUE_BYTES};
+use rows::request;
 
 
 const ALL_POINTS: usize = 49_999;
@@ -23,5 +27,19 @@ fn wide_resource_labels_stay_in_budget() -> TestResult {
         max_labels: WIDE_LABELS,
         ..Limits::default()
     };
-    measure("64 resource labels", &request(ALL_POINTS, WIDE_LABELS, true), &limits)
+    let (rows, accepted) = measure(
+        "64 resource labels",
+        &request(
+            ALL_POINTS,
+            WIDE_LABELS,
+            true,
+            DEFAULT_MAX_LABEL_KEY_BYTES,
+            DEFAULT_MAX_LABEL_VALUE_BYTES,
+            None,
+        ),
+        &limits,
+        1,
+    )?;
+    assert_eq!((rows, accepted), (0, false));
+    Ok(())
 }

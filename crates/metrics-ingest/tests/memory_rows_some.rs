@@ -1,4 +1,6 @@
 mod common;
+#[path = "memory_support/measure.rs"]
+mod measure;
 mod memory_support;
 #[path = "common/peak.rs"]
 mod peak;
@@ -7,8 +9,10 @@ mod rows;
 
 
 use common::types::TestResult;
+use measure::measure;
 use metrics_ingest::model::Limits;
-use rows::{measure, request};
+use metrics_ingest::model::{DEFAULT_MAX_LABEL_KEY_BYTES, DEFAULT_MAX_LABEL_VALUE_BYTES};
+use rows::request;
 
 
 const SOME_POINTS: usize = 10_000;
@@ -19,5 +23,19 @@ const LABELS: usize = 32;
 
 #[test]
 fn resource_labels_on_some_points_stay_in_budget() -> TestResult {
-    measure("resource labels, some points", &request(SOME_POINTS, LABELS, true), &Limits::default())
+    let (rows, accepted) = measure(
+        "resource labels, some points",
+        &request(
+            SOME_POINTS,
+            LABELS,
+            true,
+            DEFAULT_MAX_LABEL_KEY_BYTES,
+            DEFAULT_MAX_LABEL_VALUE_BYTES,
+            None,
+        ),
+        &Limits::default(),
+        1,
+    )?;
+    assert_eq!((rows, accepted), (0, false));
+    Ok(())
 }

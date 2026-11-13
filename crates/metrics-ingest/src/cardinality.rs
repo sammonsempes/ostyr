@@ -62,6 +62,17 @@ pub fn series_cost(tenant: &TenantCardinality, key: &SeriesKey) -> usize {
 }
 
 
+/// Bytes admitting `(name, labels)` would add to the tenant's state: 0 for a known series, else `series_cost`.
+pub fn new_series_cost(state: &CardinalityState, tenant: &str, name: &str, labels: &Labels) -> usize {
+    let key = (name.to_string(), labels.clone());
+    match state.tenants.get(tenant) {
+        Some(entry) if entry.series.contains(&key) => 0,
+        Some(entry) => series_cost(entry, &key),
+        None => series_cost(&TenantCardinality::default(), &key),
+    }
+}
+
+
 pub fn admit_series(state: &mut CardinalityState, tenant: &str, name: &str, labels: &Labels, limits: &Limits) -> Result<(), DropReason> {
     let entry = state.tenants.entry(tenant.to_string()).or_default();
     let key = (name.to_string(), labels.clone());
