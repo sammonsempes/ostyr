@@ -1,5 +1,6 @@
 //! The flow side of the listener: admission, version detection, parsing over the template cache, one spool frame per record.
 
+
 use crate::admission::{admit_extra_record, admit_up_to, collector_config};
 use crate::error::FlowStoreError;
 use crate::flow::parse_netflow_v5;
@@ -8,8 +9,8 @@ use crate::listen::{bump, count_reason};
 use crate::listen_model::Runtime;
 use crate::listen_settings::source_key;
 use crate::model::DropReason;
-use crate::spool::append;
-use crate::spool_model::Priority;
+use crate::spool::{append, spool_stats};
+use crate::spool_model::{Priority, SpoolStats};
 use crate::template_model::{TemplateCache, IPFIX_VERSION, V9_VERSION};
 use crate::template_parse::{parse_ipfix, parse_netflow_v9};
 use crate::types::{FrameEncoder, Millis};
@@ -50,7 +51,13 @@ pub fn flow_priority(runtime: &Runtime, source: SocketAddr) -> Priority {
 }
 
 
-pub fn store_record(runtime: &mut Runtime, exporter: IpAddr, priority: Priority, record: &FlowRecord, encode: FrameEncoder) {
+pub fn store_record(
+    runtime: &mut Runtime,
+    exporter: IpAddr,
+    priority: Priority,
+    record: &FlowRecord,
+    encode: FrameEncoder,
+) -> Result<(), FlowStoreError> {
     let frame = FlowFrame {
         version: FLOW_FRAME_VERSION,
         exporter,
@@ -58,13 +65,26 @@ pub fn store_record(runtime: &mut Runtime, exporter: IpAddr, priority: Priority,
     };
     let stored = encode(&frame)
         .map_err(FlowStoreError::from)
-        .and_then(|payload| append(&mut runtime.spool, priority, &payload).map_err(FlowStoreError::from));
-    match stored {
-        Ok(_) => bump(&mut runtime.stats.flow_records),
-        Err(error) => {
-            bump(&mut runtime.stats.spool_errors);
-            tracing::error!(%error, %exporter, "cannot store a flow record");
-        }
+        .and_then(|payload| append(&mut runtime.spool, priority, &payload).map(|_| ()).map_err(FlowStoreError::from));
+    match &stored {
+        Ok(()) => bump(&mut runtime.stats.flow_records),
+        Err(_) => bump(&mut runtime.stats.spool_errors),
+    }
+    stored
+}
+
+
+/// One line for a datagram, whatever the number of records it could not store or the segments the spool had to drop or could not unlink.
+pub fn log_store_failures(exporter: IpAddr, failures: &[FlowStoreError], before: &SpoolStats, after: &SpoolStats) {
+    let count = failures.len();
+    let dropped_records = (after.dropped_low + after.dropped_high).saturating_sub(before.dropped_low + before.dropped_high);
+    let unlink_failures = after.unlink_failures.saturating_sub(before.unlink_failures);
+    let missing_segments = after.missing_segments.saturating_sub(before.missing_segments);
+    let housekeeping = dropped_records + unlink_failures + missing_segments;
+    if let Some(first) = failures.first() {
+        tracing::error!(count, dropped_records, unlink_failures, missing_segments, %first, %exporter, "cannot store flow records");
+    } else if housekeeping > 0 {
+        tracing::warn!(dropped_records, unlink_failures, missing_segments, %exporter, "spool full during a flow datagram");
     }
 }
 
@@ -90,9 +110,13 @@ pub fn store_flows(runtime: &mut Runtime, source: SocketAddr, payload: &[u8], no
             let over_budget = batch.records.len().saturating_sub(admitted.len());
             runtime.stats.flow_records_over_budget = runtime.stats.flow_records_over_budget.saturating_add(over_budget as u64);
             let priority = flow_priority(runtime, source);
-            admitted
+            let before = spool_stats(&runtime.spool);
+            let failures = admitted
                 .into_iter()
-                .for_each(|record| store_record(runtime, exporter, priority, record, encode));
+                .filter_map(|record| store_record(runtime, exporter, priority, record, encode).err())
+                .collect::<Vec<_>>();
+            let after = spool_stats(&runtime.spool);
+            log_store_failures(exporter, &failures, &before, &after);
         }
         Err(flow_drop) => {
             tracing::debug!(%source, %flow_drop, "flow datagram dropped");

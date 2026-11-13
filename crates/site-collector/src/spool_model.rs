@@ -91,6 +91,8 @@ pub struct SpoolStats {
     pub dropped_low: u64,
     pub dropped_high: u64,
     pub truncated_tails: u64,
+    pub unlink_failures: u64,
+    pub missing_segments: u64,
     pub saturated: bool,
     pub total_bytes: u64,
     pub next_sequence: u64,
@@ -109,6 +111,8 @@ pub struct Spool {
     pub(crate) dropped_low: u64,
     pub(crate) dropped_high: u64,
     pub(crate) truncated_tails: u64,
+    pub(crate) unlink_failures: u64,
+    pub(crate) missing_segments: u64,
     pub(crate) saturated: bool,
     pub epoch: String,
 }

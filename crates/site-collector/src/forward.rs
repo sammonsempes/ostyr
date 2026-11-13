@@ -162,6 +162,21 @@ pub fn event_line(record: &Record, kind: ListenerKind, epoch: &str, now: OffsetD
 }
 
 
+/// A fixed reduction of an error for the log: never a value quoted from a frame.
+pub fn forward_error_kind(error: &ForwardError) -> String {
+    match error {
+        ForwardError::Frame(FlowFrameError::Json(source)) => format!(
+            "the flow frame is not a strict flow record ({:?}, line {}, column {})",
+            source.classify(),
+            source.line(),
+            source.column()
+        ),
+        ForwardError::Frame(inner) => inner.to_string(),
+        other => other.to_string(),
+    }
+}
+
+
 pub fn is_unknown_version(error: &ForwardError) -> bool {
     matches!(error, ForwardError::Frame(FlowFrameError::UnknownVersion(_)))
 }
@@ -185,7 +200,9 @@ pub fn forward_batch(
     let failures = outcomes.iter().filter_map(|outcome| outcome.as_ref().err()).collect::<Vec<_>>();
     let unknown_version = failures.iter().filter(|(_, error)| is_unknown_version(error)).count() as u64;
     let malformed = failures.len() as u64 - unknown_version;
-    let first_failure = failures.first().map(|(sequence, error)| format!("sequence {sequence}: {error:?}"));
+    let first_failure = failures
+        .first()
+        .map(|(sequence, error)| format!("sequence {sequence}: {}", forward_error_kind(error)));
     if let Some(first) = first_failure {
         tracing::warn!(malformed, unknown_version, %first, "spooled records skipped");
     }

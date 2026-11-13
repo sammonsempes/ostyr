@@ -1,9 +1,12 @@
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
 
 use core_audit::log::{append, open_file_log};
 use core_config::reload::{reload, ReloadContext, ReloadOutcome};
+use logging::captured;
 use site_collector::admission::admit_extra_record;
 use site_collector::error::{ConfigError, ListenError};
 use site_collector::flow::validate_flow_limits;
@@ -549,6 +552,121 @@ fn encode_and_spool_failures_are_counted_per_record() -> TestResult {
     assert_eq!((runtime.stats.spool_errors, runtime.stats.flow_records), (TWO * V5_RECORDS, 0));
     handle_flow_with(&mut runtime, v4_source(1), V5, NOW, encode_frame);
     assert_eq!(runtime.stats.flow_records, V5_RECORDS);
+    Ok(())
+}
+
+
+const BIG_DATAGRAM_RECORDS: usize = 30;
+
+
+fn template_and_data(records: usize) -> Vec<u8> {
+    v9(0, &[template_set(TEMPLATE_ID), data_set(TEMPLATE_ID, records)])
+}
+
+
+#[test]
+fn a_failing_spool_logs_one_line_per_datagram_with_the_count() -> TestResult {
+    let dir = TempDir::new()?;
+    let mut runtime = runtime_in(dir.path(), flow_settings())?;
+    let datagram = template_and_data(BIG_DATAGRAM_RECORDS);
+    let ((), log) = captured(|| handle_flow_with(&mut runtime, v4_source(1), &datagram, NOW, oversized_encoder));
+    assert_eq!(runtime.stats.spool_errors, BIG_DATAGRAM_RECORDS as u64);
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains("count=30"), "{log}");
+    assert!(log.contains("cannot store flow records"), "{log}");
+    let ((), quiet) = captured(|| handle_flow_with(&mut runtime, v4_source(1), V5, NOW, encode_frame));
+    assert_eq!(quiet, "");
+    assert_eq!((runtime.stats.flows_accepted, runtime.stats.accepted), (TWO, 0));
+    Ok(())
+}
+
+
+const FILL_SOURCES: u8 = 20;
+
+
+fn small_spool_runtime(dir: &Path) -> Result<Runtime, Box<dyn std::error::Error>> {
+    let spool_dir = dir.join("spool");
+    fs::create_dir_all(&spool_dir)?;
+    let spool = open_spool(
+        &spool_dir,
+        SpoolConfig {
+            segment_max_bytes: MAX_FRAME_BYTES,
+            total_max_bytes: MAX_FRAME_BYTES * TWO,
+        },
+    )?;
+    Ok(open_runtime(Arc::new(flow_settings()), spool)?)
+}
+
+
+fn fill_until_dropping(runtime: &mut Runtime) {
+    let datagram = template_and_data(BIG_DATAGRAM_RECORDS);
+    (1..=FILL_SOURCES).for_each(|last| handle_flow_datagram(runtime, v4_source(last), &datagram, NOW));
+}
+
+
+#[test]
+fn a_full_spool_that_cannot_unlink_its_victim_logs_one_line_per_datagram() -> TestResult {
+    let dir = TempDir::new()?;
+    let mut runtime = small_spool_runtime(dir.path())?;
+    fill_until_dropping(&mut runtime);
+    assert!(spool_stats(&runtime.spool).saturated);
+    let spool_dir = dir.path().join("spool");
+    let mut names = fs::read_dir(&spool_dir)?
+        .map(|entry| entry.map(|found| found.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.retain(|path| path.extension().is_some_and(|extension| extension == "seg"));
+    names.sort();
+    names.pop();
+    names.iter().try_for_each(|path| -> TestResult {
+        fs::remove_file(path)?;
+        Ok(fs::create_dir(path)?)
+    })?;
+    let before = spool_stats(&runtime.spool);
+    let datagram = template_and_data(BIG_DATAGRAM_RECORDS);
+    let ((), log) = captured(|| handle_flow_datagram(&mut runtime, v4_source(FILL_SOURCES + 1), &datagram, NOW));
+    let after = spool_stats(&runtime.spool);
+    assert!(after.unlink_failures > before.unlink_failures);
+    assert!(runtime.stats.spool_errors > 0);
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains("unlink_failures="), "{log}");
+    Ok(())
+}
+
+
+#[test]
+fn a_working_spool_dropping_segments_logs_at_most_one_line_per_datagram() -> TestResult {
+    let dir = TempDir::new()?;
+    let mut runtime = small_spool_runtime(dir.path())?;
+    fill_until_dropping(&mut runtime);
+    let before = spool_stats(&runtime.spool);
+    let datagram = template_and_data(BIG_DATAGRAM_RECORDS);
+    let ((), log) = captured(|| handle_flow_datagram(&mut runtime, v4_source(FILL_SOURCES + 1), &datagram, NOW));
+    let after = spool_stats(&runtime.spool);
+    assert!(after.dropped_low > before.dropped_low);
+    assert_eq!(runtime.stats.spool_errors, 0);
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains("spool full during a flow datagram"), "{log}");
+    Ok(())
+}
+
+
+#[test]
+fn a_vanished_segment_is_counted_not_logged_per_record() -> TestResult {
+    let dir = TempDir::new()?;
+    let mut runtime = small_spool_runtime(dir.path())?;
+    fill_until_dropping(&mut runtime);
+    let mut names = fs::read_dir(dir.path().join("spool"))?
+        .map(|entry| entry.map(|found| found.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.retain(|path| path.extension().is_some_and(|extension| extension == "seg"));
+    names.sort();
+    names.pop();
+    names.iter().try_for_each(fs::remove_file)?;
+    let before = spool_stats(&runtime.spool);
+    let datagram = template_and_data(BIG_DATAGRAM_RECORDS);
+    let ((), log) = captured(|| handle_flow_datagram(&mut runtime, v4_source(FILL_SOURCES + 1), &datagram, NOW));
+    assert!(spool_stats(&runtime.spool).missing_segments > before.missing_segments);
+    assert_eq!(log.lines().count(), 1, "{log}");
     Ok(())
 }
 
