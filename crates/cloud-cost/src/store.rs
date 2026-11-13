@@ -1,10 +1,9 @@
 use crate::model::CostTable;
 use crate::settings::CostLoadConfig;
-use crate::types::Point;
+use crate::types::{DayRange, Point};
 use serde_json::json;
 use siem_schema::error::SchemaError;
 use siem_schema::identifier::quote_identifier;
-use std::collections::BTreeSet;
 use time::Date;
 
 
@@ -85,33 +84,28 @@ pub fn delete_statement(config: &CostLoadConfig) -> Result<String, SchemaError> 
 }
 
 
-/// The distinct billing account labels of the table, in order.
+/// The distinct billing account labels seen in any row of the export, skipped or not, in order.
 pub fn account_set(table: &CostTable) -> Vec<String> {
-    table
-        .account_rows
-        .keys()
-        .map(|(_, account, _, _, _)| account.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    table.seen_accounts.iter().cloned().collect()
+}
+
+
+/// One quoted `String` item with backslash and quote escaped.
+pub fn quote_item(item: &str) -> String {
+    format!("'{}'", item.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 
 /// ClickHouse text of an `Array(String)` parameter: quoted items with backslash and quote escaped.
 pub fn array_literal(items: &[String]) -> String {
-    let quoted = items
-        .iter()
-        .map(|item| format!("'{}'", item.replace('\\', "\\\\").replace('\'', "\\'")))
-        .collect::<Vec<_>>();
+    let quoted = items.iter().map(|item| quote_item(item)).collect::<Vec<_>>();
     format!("[{}]", quoted.join(","))
 }
 
 
-/// First and last day of the export; `None` for a table without a day.
-pub fn covered_days(table: &CostTable) -> Option<(Date, Date)> {
-    let first = table.day_totals.first_key_value().map(|(day, _)| *day);
-    let last = table.day_totals.last_key_value().map(|(day, _)| *day);
-    first.zip(last)
+/// First and last readable day of any row naming a valid account, accepted or skipped; `None` when there is none.
+pub fn covered_days(table: &CostTable) -> Option<DayRange> {
+    table.seen_days
 }
 
 

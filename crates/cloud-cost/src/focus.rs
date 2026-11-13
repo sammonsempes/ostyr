@@ -1,9 +1,10 @@
 use crate::error::CostError;
+use crate::load::MAX_TOTAL_ACCOUNTS;
 use crate::model::{
     Columns, CostTable, Limits, OtherBucket, Row, SkipReason, State, DIMENSION_ACCOUNT_SERVICE, DIMENSION_OTHER, DIMENSION_TAG, DIMENSION_TAG_OTHER,
     DIMENSION_TOTAL,
 };
-use crate::types::{SkipCounts, StoredKey};
+use crate::types::{DayRange, SkipCounts, StoredKey};
 use core_pg::scope::{tenant_scope, TenantScope};
 use csv::{ErrorKind, Reader, ReaderBuilder, StringRecord};
 use metrics_ingest::decode::is_forbidden;
@@ -13,6 +14,14 @@ use std::io::Read;
 use std::str::FromStr;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
+
+
+/// Julian day of 1970-01-01, the first day of ClickHouse's `Date`.
+pub const EPOCH_JULIAN_DAY: i32 = 2_440_588;
+
+
+/// Days from 1970-01-01 to 2149-06-06, the last day of ClickHouse's `Date` (a `u16`).
+pub const DATE_LAST_OFFSET: i32 = 65_535;
 
 
 pub const COLUMN_AMOUNT: &str = "BilledCost";
@@ -283,9 +292,46 @@ pub fn apply_row(state: &mut State, parsed: Result<Row, SkipReason>, limits: &Li
 }
 
 
+/// The earliest and latest day of a range once `day` is added.
+pub fn widen(range: Option<DayRange>, day: time::Date) -> DayRange {
+    range.map_or((day, day), |(first, last)| (first.min(day), last.max(day)))
+}
+
+
+/// True when ClickHouse's `Date` holds the day (1970-01-01 to 2149-06-06); it saturates a parameter outside it.
+pub fn in_date_range(day: time::Date) -> bool {
+    (0..=DATE_LAST_OFFSET).contains(&(day.to_julian_day() - EPOCH_JULIAN_DAY))
+}
+
+
+/// A readable day inside the `Date` range widens the replace range; one outside it is only counted, so no row can widen the delete to all history.
+pub fn note_day(table: &mut CostTable, parsed: Result<time::Date, SkipReason>) {
+    match parsed {
+        Ok(day) if in_date_range(day) => table.seen_days = Some(widen(table.seen_days, day)),
+        Ok(_) => table.days_out_of_range += 1,
+        Err(_) => {}
+    }
+}
+
+
+/// Every row with a valid account label names its account and its day for the replace, skipped or not; the set stops growing past the total cap.
+pub fn note_account(state: &mut State, record: &StringRecord, columns: &Columns, limits: &Limits) {
+    let account = account_of(record, columns);
+    if is_label(&account) && account.len() <= limits.max_field_bytes {
+        if admits(&state.table.seen_accounts, &account, MAX_TOTAL_ACCOUNTS + 1) {
+            state.table.seen_accounts.insert(account);
+        }
+        note_day(&mut state.table, parse_day(field(record, columns.start)));
+    }
+}
+
+
 pub fn classify(state: &mut State, result: Result<StringRecord, csv::Error>, columns: &Columns, limits: &Limits) -> Result<(), CostError> {
     match result {
-        Ok(record) => apply_row(state, parse_row(&record, columns, limits), limits),
+        Ok(record) => {
+            note_account(state, &record, columns, limits);
+            apply_row(state, parse_row(&record, columns, limits), limits)
+        }
         Err(error) if matches!(error.kind(), ErrorKind::Io(_)) => Err(CostError::Read(error)),
         Err(_) => {
             count_skip(&mut state.table.skipped, SkipReason::Malformed);
@@ -315,6 +361,9 @@ pub fn new_state(tenant: TenantScope) -> State {
             by_account_service: BTreeMap::new(),
             by_tag: BTreeMap::new(),
             account_rows: BTreeMap::new(),
+            seen_accounts: BTreeSet::new(),
+            seen_days: None,
+            days_out_of_range: 0,
             other: OtherBucket {
                 cost: Decimal::ZERO,
                 count: 0,

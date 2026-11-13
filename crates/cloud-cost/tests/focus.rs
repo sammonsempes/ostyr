@@ -1,5 +1,6 @@
 use cloud_cost::error::CostError;
 use cloud_cost::focus::{add_cost, parse_amount, read_focus};
+use cloud_cost::load::MAX_TOTAL_ACCOUNTS;
 use cloud_cost::model::{CostTable, Limits, SkipReason};
 use core_pg::scope::tenant_of;
 use rust_decimal::Decimal;
@@ -415,9 +416,112 @@ fn amounts_are_plain_decimals() -> Result<(), Box<dyn Error>> {
 
 
 #[test]
+fn only_valid_short_account_labels_are_seen_for_the_replace() -> Result<(), Box<dyn Error>> {
+    let rows = vec![
+        row("1", "", &at("2026-11-01"), "Compute", ""),
+        row("1", "evil\u{202e}", &at("2026-11-01"), "Compute", ""),
+        row("1", &"a".repeat(FIELD_CAP + 1), &at("2026-11-01"), "Compute", ""),
+        row("x", "skipped", &at("2026-11-01"), "Compute", ""),
+        row("1", "kept", &at("2026-11-01"), "Compute", ""),
+    ];
+    let limits = Limits {
+        max_field_bytes: FIELD_CAP,
+        ..Limits::default()
+    };
+    let table = read(&rows, &limits)?;
+    assert_eq!(table.seen_accounts, ["kept".to_owned(), "skipped".to_owned()].into_iter().collect());
+    Ok(())
+}
+
+
+#[test]
 fn default_limits_are_bounded() -> Result<(), Box<dyn Error>> {
     let limits = Limits::default();
     assert!(limits.max_bytes > 0 && limits.max_rows > 0 && limits.max_field_bytes > 0);
     assert!(limits.max_tags_per_row > 0 && limits.max_series > 0);
+    Ok(())
+}
+
+
+const SEEN_FIRST: u8 = 2;
+
+
+const SEEN_LAST: u8 = 9;
+
+
+#[test]
+fn seen_accounts_stop_growing_past_the_total_cap() -> Result<(), Box<dyn Error>> {
+    let rows: Vec<String> = (0..=MAX_TOTAL_ACCOUNTS + 1)
+        .map(|number| row("1", &format!("a{number}"), &at("2026-11-01"), "Compute", ""))
+        .collect();
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(table.seen_accounts.len(), MAX_TOTAL_ACCOUNTS + 1);
+    Ok(())
+}
+
+
+#[test]
+fn seen_days_cover_every_row_with_a_valid_account_and_a_readable_day() -> Result<(), Box<dyn Error>> {
+    let rows = [
+        row("1", "a", &at("2026-11-05"), "Compute", ""),
+        row("x", "b", &at("2026-11-09"), "Compute", ""),
+        row("1", "c", &at("2026-11-02"), "Compute", ""),
+        row("1", "d", "nonsense", "Compute", ""),
+        row("1", "", &at("2020-01-01"), "Compute", ""),
+    ];
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(table.seen_days, Some((day(SEEN_FIRST)?, day(SEEN_LAST)?)));
+    Ok(())
+}
+
+
+const OUT_OF_RANGE_ROWS: u64 = 4;
+
+
+const SEVEN_ACCOUNTS: usize = 7;
+
+
+fn iso(text: &str) -> Result<Date, Box<dyn Error>> {
+    Ok(Date::parse(text, &time::format_description::well_known::Iso8601::DATE)?)
+}
+
+
+#[test]
+fn days_outside_the_date_range_never_widen_the_replace_range() -> Result<(), Box<dyn Error>> {
+    let rows = [
+        row("1", "a", &at("2026-11-05"), "Compute", ""),
+        row("x", "b", &at("1900-01-01"), "Compute", ""),
+        row("x", "c", &at("2200-01-01"), "Compute", ""),
+        row("x", "d", &at("1969-12-31"), "Compute", ""),
+        row("x", "e", &at("2149-06-07"), "Compute", ""),
+        row("x", "f", &at("1970-01-01"), "Compute", ""),
+        row("x", "g", &at("2149-06-06"), "Compute", ""),
+    ];
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(table.days_out_of_range, OUT_OF_RANGE_ROWS);
+    assert_eq!(table.seen_days, Some((iso("1970-01-01")?, iso("2149-06-06")?)));
+    assert_eq!(table.seen_accounts.len(), SEVEN_ACCOUNTS);
+    Ok(())
+}
+
+
+#[test]
+fn a_csv_malformed_row_marks_no_account() -> Result<(), Box<dyn Error>> {
+    let table = read(
+        &["1,USD,ghost".to_owned(), row("1", "a", &at("2026-11-05"), "Compute", "")],
+        &Limits::default(),
+    )?;
+    assert_eq!(skipped(&table, SkipReason::Malformed), 1);
+    assert_eq!(table.seen_accounts.len(), 1);
+    assert!(!table.seen_accounts.contains("ghost"));
+    Ok(())
+}
+
+
+#[test]
+fn only_out_of_range_days_leave_the_replace_range_empty() -> Result<(), Box<dyn Error>> {
+    let table = read(&[row("1", "a", &at("1900-01-01"), "Compute", "")], &Limits::default())?;
+    assert_eq!(table.seen_days, None);
+    assert_eq!(table.days_out_of_range, 1);
     Ok(())
 }

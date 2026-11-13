@@ -12,7 +12,7 @@ use cloud_cost::store::{
 };
 use core_pg::scope::tenant_scope;
 use rust_decimal::Decimal;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use time::{Date, Month};
@@ -199,6 +199,9 @@ fn an_empty_table_has_no_days_and_no_rows() -> TestResult {
         by_account_service: BTreeMap::new(),
         by_tag: BTreeMap::new(),
         account_rows: BTreeMap::new(),
+        seen_accounts: BTreeSet::new(),
+        seen_days: None,
+        days_out_of_range: 0,
         other: OtherBucket {
             cost: Decimal::ZERO,
             count: 0,

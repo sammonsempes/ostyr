@@ -5,7 +5,8 @@ mod types;
 
 
 use cloud_cost::load::{
-    agent_for, load_table, post, BatchFailure, LoadError, LoadOutcome, Statement, MAX_REPLACE_ACCOUNTS, MAX_REPLACE_ACCOUNT_BYTES,
+    account_batches, agent_for, item_cost, load_table, post, request_url_len, BatchFailure, LoadError, LoadOutcome, Statement, MAX_REPLACE_ACCOUNTS,
+    MAX_TOTAL_ACCOUNTS, MAX_URL_BYTES,
 };
 use cloud_cost::model::{CostTable, Limits};
 use cloud_cost::settings::CostLoadConfig;
@@ -21,7 +22,7 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::Duration;
-use stub::{serve, stall};
+use stub::{finish, serve, stall, Server};
 use tempfile::{tempdir, TempDir};
 use types::TestResult;
 
@@ -69,6 +70,30 @@ const JANUARY_ROWS: usize = 4;
 
 
 const SECOND_BATCH_ROWS: usize = 1;
+
+
+const MANY_ACCOUNTS: usize = 2500;
+
+
+const MANY_BATCHES: usize = 3;
+
+
+const HEAVY_PARTS: usize = 3;
+
+
+const PLAIN_ITEM_COST: usize = 10;
+
+
+const QUOTE_ITEM_COST: usize = 15;
+
+
+const LONG_NAME: usize = 57;
+
+
+const QUOTE_NAMES: usize = 130;
+
+
+const QUOTE_RUN: usize = 1000;
 
 
 struct Rig {
@@ -128,6 +153,11 @@ fn joined<Output>(handle: std::thread::JoinHandle<io::Result<Output>>) -> Result
 }
 
 
+fn finished(server: Server) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(finish(server)?)
+}
+
+
 fn body_of(request: &str) -> &str {
     request.split_once("\r\n\r\n").map_or("", |(_, body)| body)
 }
@@ -140,7 +170,7 @@ fn schema_replace_then_insert_in_order_with_the_key_in_a_header_only() -> TestRe
     let outcome = load_table(&rig.config, &january()?, VERSION, &idle)?;
     assert_eq!(outcome.failure, None);
     assert_eq!(outcome.batches_planned, 1);
-    let seen = joined(server)?;
+    let seen = finished(server)?;
     let head = |index: usize| -> Result<&str, Box<dyn Error>> { Ok(seen.get(index).ok_or("missing request")?.lines().next().unwrap_or("")) };
     assert!(
         head(0)?.contains("CREATE+DATABASE") || head(0)?.contains("CREATE%20DATABASE"),
@@ -176,7 +206,7 @@ fn a_rerun_of_the_same_file_sends_identical_rows() -> TestResult {
     let server = serve(rig.listener.try_clone()?, vec![OK; (REQUESTS_BEFORE_INSERT + 1) * TWICE]);
     load_table(&rig.config, &export, VERSION, &idle)?;
     load_table(&rig.config, &again, VERSION, &idle)?;
-    let seen = joined(server)?;
+    let seen = finished(server)?;
     let first = body_of(seen.get(REQUESTS_BEFORE_INSERT).ok_or("no insert")?);
     let second = body_of(seen.get(REQUESTS_BEFORE_INSERT * TWICE + 1).ok_or("no insert")?);
     assert!(!first.is_empty());
@@ -197,7 +227,7 @@ fn a_corrected_export_deletes_the_covered_days_before_inserting_its_own_source()
     let server = serve(rig.listener.try_clone()?, vec![OK; (REQUESTS_BEFORE_INSERT + 1) * TWICE]);
     load_table(&rig.config, &original, VERSION, &idle)?;
     load_table(&rig.config, &corrected, VERSION, &idle)?;
-    let seen = joined(server)?;
+    let seen = finished(server)?;
     let second_delete = seen.get(REQUESTS_BEFORE_INSERT + 1 + SCHEMA_REQUESTS).ok_or("no delete")?;
     assert!(second_delete.contains("DELETE"));
     assert!(second_delete.contains("param_tenant=acme"));
@@ -217,7 +247,7 @@ fn another_tenant_deletes_only_its_own_rows() -> TestResult {
     let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
     let other = export_of(&["1,USD,acct,2026-01-05T10:00:00Z,compute,"], "globex")?;
     load_table(&rig.config, &other, VERSION, &idle)?;
-    let seen = joined(server)?;
+    let seen = finished(server)?;
     let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
     assert!(delete.contains("param_tenant=globex"));
     assert!(!delete.contains("acme"));
@@ -234,7 +264,7 @@ fn the_delete_names_every_account_of_the_export_and_no_other() -> TestResult {
         "acme",
     )?;
     load_table(&rig.config, &export, VERSION, &idle)?;
-    let seen = joined(server)?;
+    let seen = finished(server)?;
     let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
     assert!(delete.contains("param_accounts=%5B%27acct2%27%2C%27it%5C%27s%27%5D"), "{delete}");
     assert!(!delete.contains("acct1"), "{delete}");
@@ -247,18 +277,10 @@ fn too_many_accounts_are_refused_before_any_io() -> TestResult {
     let mut rig = rig(LONG_TIMEOUT_MS)?;
     fs::remove_file(&rig.config.password_file)?;
     let wide = wide_export()?;
-    let first_day = wide.table.day_totals.keys().next().copied().ok_or("no day")?;
-    let accounts = (0..=MAX_REPLACE_ACCOUNTS)
-        .map(|number| {
-            (
-                (first_day, format!("a{number}"), "total", String::new(), String::new()),
-                rust_decimal::Decimal::ONE,
-            )
-        })
-        .collect();
+    let accounts = (0..=MAX_TOTAL_ACCOUNTS).map(|number| format!("a{number}")).collect();
     let many = Export {
         table: CostTable {
-            account_rows: accounts,
+            seen_accounts: accounts,
             ..wide.table.clone()
         },
         source: wide.source.clone(),
@@ -266,24 +288,27 @@ fn too_many_accounts_are_refused_before_any_io() -> TestResult {
     assert!(matches!(load_table(&rig.config, &many, VERSION, &idle), Err(LoadError::TooManyAccounts)));
     let long = Export {
         table: CostTable {
-            account_rows: [(
-                (
-                    first_day,
-                    "x".repeat(MAX_REPLACE_ACCOUNT_BYTES + 1),
-                    "total",
-                    String::new(),
-                    String::new(),
-                ),
-                rust_decimal::Decimal::ONE,
-            )]
-            .into_iter()
-            .collect(),
+            seen_accounts: ["a".to_owned(), "x".repeat(MAX_URL_BYTES)].into_iter().collect(),
             ..wide.table
         },
         source: wide.source,
     };
-    assert!(matches!(load_table(&rig.config, &long, VERSION, &idle), Err(LoadError::TooManyAccounts)));
+    assert!(matches!(load_table(&rig.config, &long, VERSION, &idle), Err(LoadError::AccountTooLong)));
     rig.config.tenant = "acme".to_owned();
+    assert!(untouched(&rig.listener)?);
+    Ok(())
+}
+
+
+#[test]
+fn a_url_over_the_cap_from_the_settings_is_refused_before_any_io() -> TestResult {
+    let mut rig = rig(LONG_TIMEOUT_MS)?;
+    fs::remove_file(&rig.config.password_file)?;
+    rig.config.url = format!("{}/{}", rig.config.url, "p".repeat(MAX_URL_BYTES));
+    assert!(matches!(
+        load_table(&rig.config, &january()?, VERSION, &idle),
+        Err(LoadError::RequestTooLong)
+    ));
     assert!(untouched(&rig.listener)?);
     Ok(())
 }
@@ -356,8 +381,14 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
     rig.listener.set_nonblocking(false)?;
     let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS]);
     let failed = load_table(&rig.config, &january()?, VERSION, &late);
-    assert!(matches!(failed, Err(LoadError::Replace(InsertClass::Timeout))));
-    assert_eq!(joined(server)?.len(), SCHEMA_REQUESTS);
+    assert!(matches!(
+        failed,
+        Err(LoadError::Replace {
+            class: InsertClass::Timeout,
+            ..
+        })
+    ));
+    assert_eq!(finished(server)?.len(), SCHEMA_REQUESTS);
     let after_delete = Cell::new(0);
     let last = || {
         after_delete.set(after_delete.get() + 1);
@@ -370,7 +401,7 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
     let second = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT]);
     let outcome = load_table(&rig.config, &january()?, VERSION, &last)?;
     assert_eq!(outcome.failure.map(|failure| failure.class), Some(InsertClass::Timeout));
-    assert_eq!(joined(second)?.len(), REQUESTS_BEFORE_INSERT);
+    assert_eq!(finished(second)?.len(), REQUESTS_BEFORE_INSERT);
     Ok(())
 }
 
@@ -394,16 +425,23 @@ fn refusals_are_classified_without_reading_the_message() -> TestResult {
     let server = serve(rig.listener.try_clone()?, vec!["401 Unauthorized"]);
     let failed = load_table(&rig.config, &january()?, VERSION, &idle);
     assert!(matches!(failed, Err(LoadError::Schema(InsertClass::Unauthorized))));
-    joined(server)?;
+    finished(server)?;
     let delete_refused = serve(rig.listener.try_clone()?, vec![OK, OK, SERVER_ERROR]);
     let replace = load_table(&rig.config, &january()?, VERSION, &idle);
-    assert!(matches!(replace, Err(LoadError::Replace(InsertClass::Unavailable))));
-    joined(delete_refused)?;
+    assert!(matches!(
+        replace,
+        Err(LoadError::Replace {
+            done: 0,
+            total: 1,
+            class: InsertClass::Unavailable
+        })
+    ));
+    finished(delete_refused)?;
     let insert_refused = serve(rig.listener.try_clone()?, vec![OK, OK, OK, "302 Found"]);
     let outcome = load_table(&rig.config, &january()?, VERSION, &idle)?;
     assert_eq!(outcome.failure.map(|failure| failure.class), Some(InsertClass::Rejected));
     assert_eq!(outcome.batches_planned, 1);
-    joined(insert_refused)?;
+    finished(insert_refused)?;
     Ok(())
 }
 
@@ -444,7 +482,7 @@ fn a_failed_second_batch_is_reported_with_the_first_as_stored() -> TestResult {
             class: InsertClass::Unavailable
         })
     );
-    joined(server)?;
+    finished(server)?;
     Ok(())
 }
 
@@ -497,6 +535,237 @@ fn a_zero_remaining_budget_posts_nothing() -> TestResult {
         post(&agent, &rig.config, PASSWORD, &statement, Duration::ZERO),
         Some(InsertClass::Timeout)
     );
+    assert!(untouched(&rig.listener)?);
+    Ok(())
+}
+
+
+#[test]
+fn many_accounts_are_replaced_in_bounded_batches_before_the_insert() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let names: Vec<String> = (0..MANY_ACCOUNTS).map(|number| format!("a{number}")).collect();
+    let lines: Vec<String> = names.iter().map(|name| format!("1,USD,{name},2026-01-05T10:00:00Z,compute,")).collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let export = export_of(&refs, "acme")?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS + MANY_BATCHES + 1]);
+    let outcome = load_table(&rig.config, &export, VERSION, &idle)?;
+    assert_eq!(outcome.failure, None);
+    let seen = finished(server)?;
+    let deletes: Vec<&String> = seen.iter().filter(|request| request.contains("param_accounts")).collect();
+    assert_eq!(deletes.len(), MANY_BATCHES);
+    assert!(seen.get(SCHEMA_REQUESTS + MANY_BATCHES).ok_or("no insert")?.contains("INSERT"));
+    assert!(deletes.iter().all(|request| request.contains("param_tenant=acme")));
+    assert!(deletes.iter().all(|request| request.contains("param_first=2026-01-05")));
+    let named = |name: &str| deletes.iter().filter(|request| request.contains(&format!("%27{name}%27"))).count();
+    assert!(names.iter().all(|name| named(name) == 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_second_delete_batch_names_the_batches_done() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let lines: Vec<String> = (0..MANY_ACCOUNTS)
+        .map(|number| format!("1,USD,a{number},2026-01-05T10:00:00Z,compute,"))
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, SERVER_ERROR]);
+    let failed = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle);
+    assert!(matches!(
+        failed,
+        Err(LoadError::Replace {
+            done: 1,
+            total: MANY_BATCHES,
+            class: InsertClass::Unavailable
+        })
+    ));
+    finished(server)?;
+    Ok(())
+}
+
+
+#[test]
+fn an_account_whose_rows_are_all_skipped_is_still_replaced() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let export = export_of(
+        &[
+            "1,USD,acct1,2026-01-05T10:00:00Z,compute,",
+            "2,EUR,acct2,2026-01-05T10:00:00Z,compute,",
+            "x,USD,acct3,2026-01-05T10:00:00Z,compute,",
+        ],
+        "acme",
+    )?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    load_table(&rig.config, &export, VERSION, &idle)?;
+    let seen = finished(server)?;
+    let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
+    assert!(
+        delete.contains("acct1") && delete.contains("acct2") && delete.contains("acct3"),
+        "{delete}"
+    );
+    let insert = body_of(seen.get(REQUESTS_BEFORE_INSERT).ok_or("no insert")?);
+    assert!(!insert.contains("acct2") && !insert.contains("acct3"));
+    Ok(())
+}
+
+
+#[test]
+fn batches_respect_the_name_count_and_the_url_cap() -> TestResult {
+    let counted: Vec<String> = (0..=MAX_REPLACE_ACCOUNTS).map(|number| number.to_string()).collect();
+    let counted_sizes: Vec<usize> = account_batches(0, &counted)?.iter().map(Vec::len).collect();
+    assert_eq!(counted_sizes, vec![MAX_REPLACE_ACCOUNTS, 1]);
+    let heavy = vec!["x".repeat(MAX_URL_BYTES / HEAVY_PARTS * (HEAVY_PARTS - 1)); HEAVY_PARTS];
+    let heavy_sizes: Vec<usize> = account_batches(0, &heavy)?.iter().map(Vec::len).collect();
+    assert_eq!(heavy_sizes, vec![1; HEAVY_PARTS]);
+    assert!(account_batches(0, &[])?.is_empty());
+    assert!(matches!(account_batches(0, &["x".repeat(MAX_URL_BYTES)]), Err(LoadError::AccountTooLong)));
+    assert!(matches!(
+        account_batches(MAX_URL_BYTES, &["x".to_owned()]),
+        Err(LoadError::AccountTooLong)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_item_costs_its_escaped_and_encoded_form() -> TestResult {
+    assert_eq!(item_cost("a"), PLAIN_ITEM_COST);
+    assert_eq!(item_cost("'"), QUOTE_ITEM_COST);
+    assert_eq!(item_cost("\\"), QUOTE_ITEM_COST);
+    Ok(())
+}
+
+
+#[test]
+fn the_computed_url_length_matches_the_url_ureq_builds() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let statement = Statement {
+        text: "SELECT 'a b' + é \\ \"q\" {x:String} ~-._!*()".to_owned(),
+        params: vec![
+            ("accounts".to_owned(), "['x y','\\'z','é€','a,b']".to_owned()),
+            ("tenant".to_owned(), "acme".to_owned()),
+        ],
+        body: String::new(),
+    };
+    let server = serve(rig.listener.try_clone()?, vec![OK]);
+    let agent = agent_for(&rig.config)?;
+    assert_eq!(post(&agent, &rig.config, PASSWORD, &statement, ONE_HOUR), None);
+    let seen = finished(server)?;
+    let target = seen
+        .first()
+        .and_then(|request| request.split_whitespace().nth(1))
+        .ok_or("no request line")?;
+    assert_eq!(request_url_len(&rig.config, &statement), rig.config.url.len() + target.len(), "{target}");
+    Ok(())
+}
+
+
+fn target_of(request: &str) -> usize {
+    request.split_whitespace().nth(1).map_or(0, str::len)
+}
+
+
+#[test]
+fn long_plain_names_load_in_batches_whose_urls_stay_under_the_cap() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let lines: Vec<String> = (0..=MAX_REPLACE_ACCOUNTS)
+        .map(|number| format!("1,USD,{number:0>width$},2026-01-05T10:00:00Z,compute,", width = LONG_NAME))
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS + MANY_BATCHES + 1]);
+    let outcome = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle)?;
+    assert_eq!(outcome.failure, None);
+    let seen = finished(server)?;
+    let deletes = deletes_of(&seen);
+    assert!(deletes.len() > 1);
+    assert!(deletes.iter().all(|request| target_of(request) + rig.config.url.len() <= MAX_URL_BYTES));
+    Ok(())
+}
+
+
+#[test]
+fn quote_heavy_names_load_in_small_batches() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let lines: Vec<String> = (0..QUOTE_NAMES)
+        .map(|number| format!("1,USD,\"{number:0>5}{}\",2026-01-05T10:00:00Z,compute,", "'".repeat(QUOTE_RUN)))
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let server = serve(rig.listener.try_clone()?, vec![OK; QUOTE_NAMES + SCHEMA_REQUESTS + 1]);
+    let outcome = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle)?;
+    assert_eq!(outcome.failure, None);
+    let seen = finished(server)?;
+    let deletes = deletes_of(&seen);
+    assert!(deletes.len() > MANY_BATCHES);
+    assert!(deletes.iter().all(|request| target_of(request) + rig.config.url.len() <= MAX_URL_BYTES));
+    Ok(())
+}
+
+
+fn deletes_of(seen: &[String]) -> Vec<&String> {
+    seen.iter().filter(|request| request.contains("param_accounts")).collect()
+}
+
+
+#[test]
+fn skipped_rows_widen_the_delete_range_and_name_their_accounts() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let export = export_of(
+        &[
+            "1,USD,acct1,2026-01-05T10:00:00Z,compute,",
+            "x,USD,acct31,2026-01-07T10:00:00Z,compute,",
+            "2,EUR,acct32,2026-01-03T10:00:00Z,compute,",
+        ],
+        "acme",
+    )?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    load_table(&rig.config, &export, VERSION, &idle)?;
+    let seen = finished(server)?;
+    let deletes = deletes_of(&seen);
+    assert_eq!(deletes.len(), 1);
+    let delete = deletes.first().ok_or("no delete")?;
+    assert!(
+        delete.contains("param_first=2026-01-03") && delete.contains("param_last=2026-01-07"),
+        "{delete}"
+    );
+    assert!(
+        delete.contains("acct1") && delete.contains("acct31") && delete.contains("acct32"),
+        "{delete}"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_export_of_only_skipped_rows_replaces_their_days() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let export = export_of(
+        &["x,USD,acct1,2026-01-05T10:00:00Z,compute,", "y,USD,acct2,2026-01-06T10:00:00Z,compute,"],
+        "acme",
+    )?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT]);
+    let outcome = load_table(&rig.config, &export, VERSION, &idle)?;
+    assert_eq!(outcome.failure, None);
+    let seen = finished(server)?;
+    let deletes = deletes_of(&seen);
+    let delete = deletes.first().ok_or("no delete")?;
+    assert!(
+        delete.contains("param_first=2026-01-05") && delete.contains("param_last=2026-01-06"),
+        "{delete}"
+    );
+    assert!(delete.contains("acct1") && delete.contains("acct2"), "{delete}");
+    Ok(())
+}
+
+
+#[test]
+fn accounts_without_a_readable_day_are_refused_before_any_io() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    fs::remove_file(&rig.config.password_file)?;
+    let export = export_of(&["1,USD,acct1,not-a-day,compute,"], "acme")?;
+    assert!(matches!(load_table(&rig.config, &export, VERSION, &idle), Err(LoadError::NoCoveredDay)));
+    assert!(untouched(&rig.listener)?);
+    let empty = export_of(&[], "acme")?;
+    assert_eq!(load_table(&rig.config, &empty, VERSION, &idle)?, LoadOutcome::default());
     assert!(untouched(&rig.listener)?);
     Ok(())
 }
