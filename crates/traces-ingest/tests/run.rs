@@ -414,3 +414,37 @@ fn every_write_of_the_report_can_fail() -> TestResult {
     assert!(write_report(&report, &mut FailAfter { left: REPORT_WRITES }).is_ok());
     Ok(())
 }
+
+
+const LOWERED_SPANS: usize = 10;
+
+
+fn with_limits(rig: &Rig, section: &str) -> TestResult {
+    let mut text = fs::read_to_string(&rig.settings)?;
+    text.push_str(section);
+    fs::write(&rig.settings, text)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_lowered_span_limit_from_the_settings_file_refuses_a_larger_request() -> TestResult {
+    let rig = rig()?;
+    with_limits(&rig, &format!("limits:\n  max_spans: {LOWERED_SPANS}\n"))?;
+    let seeds = (1..).take(LOWERED_SPANS + 1).map(|seed: u8| span(seed, NOW, TRACE_ID_BYTES)).collect();
+    let report = go(&rig, &request(seeds), "acme")?;
+    assert!(matches!(report.refusal, Some(Refusal::TooManySpans { .. })));
+    assert_eq!((report.rows, report.batches_sent), (0, 0));
+    assert!(untouched(&rig.listener)?);
+    Ok(())
+}
+
+
+#[test]
+fn an_out_of_range_limit_is_a_settings_error_before_any_work() -> TestResult {
+    let rig = rig()?;
+    with_limits(&rig, "limits:\n  max_spans: 0\n")?;
+    assert!(matches!(go(&rig, &good(), "acme"), Err(RunError::Settings(_))));
+    assert!(untouched(&rig.listener)?);
+    Ok(())
+}

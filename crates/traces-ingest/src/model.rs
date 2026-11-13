@@ -1,6 +1,7 @@
 use crate::types::{Attributes, Dropped, SpanId, TraceId};
 use core_pg::error::PgError;
 use opentelemetry_proto::tonic::trace::v1::{span::SpanKind, status::StatusCode};
+use serde::Deserialize;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use thiserror::Error;
 
@@ -71,7 +72,8 @@ pub const DEFAULT_MAX_BATCH_BYTES: usize = 4_194_304;
 pub const DEFAULT_RETENTION_SECONDS: u64 = 604_800;
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub max_request_bytes: usize,
     pub max_resource_spans: usize,
