@@ -450,6 +450,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "attack-surface"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
