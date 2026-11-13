@@ -248,6 +248,13 @@ fn an_external_scope_refuses_every_non_public_range() -> TestResult {
         ("fe80::/64", "wrong_class"),
         ("fc00::/48", "wrong_class"),
         ("ff02::/48", "wrong_class"),
+        ("2001:2::/48", "wrong_class"),
+        ("2001:20::1/128", "wrong_class"),
+        ("2001:2f::/48", "wrong_class"),
+        ("192.88.99.1", "wrong_class"),
+        ("192.88.99.0/24", "wrong_class"),
+        ("64:ff9b::808:808", "wrong_class"),
+        ("64:ff9b:1::/48", "wrong_class"),
     ];
     table.iter().try_for_each(|(value, expected)| assert_refused("external", value, expected))
 }

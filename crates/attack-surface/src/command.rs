@@ -1,5 +1,6 @@
 use crate::error::CommandError;
 use crate::model::{PortRange, Scope};
+use crate::scope::check_range;
 use crate::text::{shown, valid_argument};
 use crate::types::ArgsResult;
 use std::ffi::OsString;
@@ -34,7 +35,7 @@ fn safe_value(value: &str) -> Result<(), CommandError> {
 }
 
 
-/// The argument vector of one naabu run (never a shell string): `target` must be one of `scope.targets` and no value may start with `-`.
+/// The argument vector of one naabu run (never a shell string): `target` must be one of `scope.targets`, pass the class and breadth checks of `validate_scope` again and no value may start with `-`.
 pub fn naabu_args(scope: &Scope, target: &str) -> ArgsResult {
     scope
         .targets
@@ -45,6 +46,10 @@ pub fn naabu_args(scope: &Scope, target: &str) -> ArgsResult {
     let ports = ports_text(&scope.ports);
     safe_value(target)?;
     safe_value(&ports)?;
+    check_range(target, scope.kind).map_err(|source| CommandError::BadTarget {
+        shown: shown(target),
+        source,
+    })?;
     let rate = scope.rate_per_second.to_string();
     Ok(FIXED_ARGUMENTS
         .iter()

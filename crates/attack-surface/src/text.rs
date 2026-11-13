@@ -16,7 +16,7 @@ pub fn is_hidden(character: char) -> bool {
 }
 
 
-/// At most the first `SHOWN_BYTES` bytes with hidden characters escaped, and `...` when the value was cut.
+/// At most the first `SHOWN_BYTES` bytes with every character that is not ASCII graphic or a space escaped, and `...` when the value was cut.
 pub fn shown(value: &str) -> String {
     let kept: String = value
         .char_indices()
@@ -26,10 +26,10 @@ pub fn shown(value: &str) -> String {
     let body: String = kept
         .chars()
         .flat_map(|character| {
-            if is_hidden(character) {
-                character.escape_unicode().collect::<Vec<_>>()
-            } else {
+            if character.is_ascii_graphic() || character == ' ' {
                 vec![character]
+            } else {
+                character.escape_unicode().collect::<Vec<_>>()
             }
         })
         .collect();

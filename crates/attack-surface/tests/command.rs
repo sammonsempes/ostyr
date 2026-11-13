@@ -115,3 +115,35 @@ fn ports_are_written_in_naabu_syntax() -> TestResult {
     assert_eq!(ports_text(&[]), "");
     Ok(())
 }
+
+
+#[test]
+fn a_hand_built_scope_cannot_carry_a_name_a_broad_range_or_a_wrong_class() -> TestResult {
+    let ports = vec![PortRange { first: SSH, last: SSH }];
+    [
+        "scan.example.com",
+        "0.0.0.0/0",
+        "10.0.0.0/16",
+        "8.0.0.0/8",
+        "64:ff9b::808:808",
+        "192.88.99.0/24",
+    ]
+    .iter()
+    .try_for_each(|target| -> TestResult {
+        let error = naabu_args(&hand_scope(target, ports.clone()), target).err().ok_or("a vector was built")?;
+        assert!(matches!(error, CommandError::BadTarget { .. }), "{target}: {error}");
+        assert!(error.source().is_some(), "{error}");
+        Ok(())
+    })?;
+    let internal = Scope {
+        kind: ScopeKind::Internal,
+        ..hand_scope("8.8.8.0/24", ports.clone())
+    };
+    assert!(matches!(naabu_args(&internal, "8.8.8.0/24"), Err(CommandError::BadTarget { .. })));
+    let fine = Scope {
+        kind: ScopeKind::Internal,
+        ..hand_scope("10.1.0.0/16", ports)
+    };
+    assert!(naabu_args(&fine, "10.1.0.0/16").is_ok());
+    Ok(())
+}

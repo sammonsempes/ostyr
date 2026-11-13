@@ -22,7 +22,7 @@ const PRIVATE_BLOCKS: [IpNet; 4] = [
 ];
 
 
-const EXTERNAL_BLOCKED: [IpNet; 18] = [
+const EXTERNAL_BLOCKED: [IpNet; 23] = [
     IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(0, 0, 0, 0), 8)),
     IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(10, 0, 0, 0), 8)),
     IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(100, 64, 0, 0), 10)),
@@ -41,6 +41,11 @@ const EXTERNAL_BLOCKED: [IpNet; 18] = [
     IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32)),
     IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16)),
     IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20)),
+    IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(192, 88, 99, 0), 24)),
+    IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x2001, 2, 0, 0, 0, 0, 0, 0), 48)),
+    IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x2001, 0x20, 0, 0, 0, 0, 0, 0), 28)),
+    IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96)),
+    IpNet::V6(Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48)),
 ];
 
 
@@ -130,10 +135,16 @@ fn check_net(net: &IpNet, kind: ScopeKind, value: &str) -> Result<(), Refusal> {
 }
 
 
-fn check_value(entry: &TargetEntry, kind: ScopeKind) -> Result<IpNet, Refusal> {
-    let net = parse_target(&entry.value).ok_or_else(|| Refusal::BadTarget { shown: shown(&entry.value) })?;
-    check_net(&net, kind, &entry.value)?;
+/// Parses one target text and applies the class and breadth rules of `validate_scope`; also used by `naabu_args`.
+pub fn check_range(value: &str, kind: ScopeKind) -> Result<IpNet, Refusal> {
+    let net = parse_target(value).ok_or_else(|| Refusal::BadTarget { shown: shown(value) })?;
+    check_net(&net, kind, value)?;
     Ok(net)
+}
+
+
+fn check_value(entry: &TargetEntry, kind: ScopeKind) -> Result<IpNet, Refusal> {
+    check_range(&entry.value, kind)
 }
 
 
