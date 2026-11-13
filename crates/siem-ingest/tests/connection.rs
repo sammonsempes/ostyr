@@ -5,7 +5,7 @@ use siem_ingest::clickhouse::{
 };
 use siem_ingest::error::{InsertClass, InsertError, SettingsError};
 use siem_ingest::model::Document;
-use siem_ingest::settings::{settings_state, validate_settings, IngestSettings};
+use siem_ingest::settings::{check_url, settings_state, validate_settings, IngestSettings, MAX_URL_BYTES};
 use std::error::Error;
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -249,5 +249,19 @@ fn credentials_are_a_path_in_the_state_never_inline() -> Result<(), Box<dyn Erro
     let state = settings_state(&IngestSettings::default());
     assert!(state.contains_key("clickhouse_password_file"));
     assert!(!state.contains_key("clickhouse_password"));
+    Ok(())
+}
+
+
+#[test]
+fn clickhouse_url_length_is_bounded() -> Result<(), Box<dyn Error>> {
+    let prefix = "https://db.example:8443/";
+    let at_cap = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
+    let over_cap = format!("{at_cap}a");
+    assert_eq!(at_cap.len(), MAX_URL_BYTES);
+    assert!(check_url(&at_cap).is_ok());
+    let refused = check_url(&over_cap).err().map(|error| error.to_string());
+    assert!(refused.as_ref().is_some_and(|text| text.contains("clickhouse_url")));
+    assert!(refused.is_some_and(|text| !text.contains(&over_cap)));
     Ok(())
 }

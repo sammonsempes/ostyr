@@ -5,8 +5,8 @@ mod types;
 
 
 use cloud_cost::load::{
-    account_batches, agent_for, item_cost, load_table, post, request_url_len, BatchFailure, LoadError, LoadOutcome, Statement, MAX_REPLACE_ACCOUNTS,
-    MAX_TOTAL_ACCOUNTS, MAX_URL_BYTES,
+    account_batches, agent_for, item_cost, load_table, post, replace_statements, request_url_len, BatchFailure, LoadError, LoadOutcome, Statement,
+    MAX_REPLACE_ACCOUNTS, MAX_TOTAL_ACCOUNTS, MAX_URL_BYTES,
 };
 use cloud_cost::model::{CostTable, Limits};
 use cloud_cost::settings::CostLoadConfig;
@@ -306,8 +306,12 @@ fn a_url_over_the_cap_from_the_settings_is_refused_before_any_io() -> TestResult
     fs::remove_file(&rig.config.password_file)?;
     rig.config.url = format!("{}/{}", rig.config.url, "p".repeat(MAX_URL_BYTES));
     assert!(matches!(
-        load_table(&rig.config, &january()?, VERSION, &idle),
+        replace_statements(&rig.config, (time::Date::MIN, time::Date::MAX), &[]),
         Err(LoadError::RequestTooLong)
+    ));
+    assert!(matches!(
+        load_table(&rig.config, &january()?, VERSION, &idle),
+        Err(LoadError::Settings(_))
     ));
     assert!(untouched(&rig.listener)?);
     Ok(())
