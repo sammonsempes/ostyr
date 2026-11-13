@@ -8,7 +8,11 @@ use opentelemetry_proto::tonic::metrics::v1::{metric::Data, number_data_point::V
 use prost::Message;
 use std::collections::BTreeMap;
 use std::iter::once;
+use std::mem::size_of;
 use unicode_general_category::{get_general_category, GeneralCategory};
+
+
+pub const STRINGS_IN_ROW: usize = 3;
 
 
 pub struct Series<'a> {
@@ -46,6 +50,7 @@ pub fn decode_request(bytes: &[u8], tenant: &str, limits: &Limits, state: &mut C
         rows: Vec::new(),
         dropped: BTreeMap::new(),
         refusal: None,
+        row_bytes: 0,
     };
     match parse_request(bytes, limits) {
         Ok(request) => collect(&request, limits, state, &mut outcome),
@@ -267,21 +272,62 @@ pub fn scalar_text(value: &AnyKind) -> Option<String> {
 }
 
 
+/// Bytes one row will own: its strings, labels and buckets, plus the fixed size of each `String` and element.
+pub fn row_bytes(tenant: &str, series: &Series, labels: &Labels, buckets: &[Bucket]) -> usize {
+    let strings = [tenant.len(), series.name.len(), series.unit.len()]
+        .iter()
+        .fold(STRINGS_IN_ROW * size_of::<String>(), |total, length| total.saturating_add(*length));
+    let label_bytes = labels.iter().fold(usize::MIN, |total: usize, (key, value)| {
+        total
+            .saturating_add(size_of::<(String, String)>())
+            .saturating_add(key.len())
+            .saturating_add(value.len())
+    });
+    strings
+        .saturating_add(label_bytes)
+        .saturating_add(buckets.len().saturating_mul(size_of::<Bucket>()))
+}
+
+
 pub fn admit_point(series: &Series, point: Point, limits: &Limits, state: &mut CardinalityState, outcome: &mut Outcome) {
-    let admitted = point_labels(series.resource, point.attributes, limits)
-        .and_then(|labels| admit_series(state, &outcome.tenant, series.name, &labels, limits).map(|()| labels));
-    match admitted {
-        Ok(labels) => outcome.rows.push(SampleRow {
-            tenant: outcome.tenant.clone(),
-            name: series.name.to_string(),
-            unit: series.unit.to_string(),
-            kind: series.kind,
-            monotonic: series.monotonic,
-            labels,
-            timestamp_nanos: point.timestamp_nanos,
-            value: point.value,
-            buckets: point.buckets,
-        }),
+    if outcome.refusal.is_none() {
+        admit_new_point(series, point, limits, state, outcome);
+    }
+}
+
+
+pub fn admit_new_point(series: &Series, point: Point, limits: &Limits, state: &mut CardinalityState, outcome: &mut Outcome) {
+    let built =
+        point_labels(series.resource, point.attributes, limits).map(|labels| (row_bytes(&outcome.tenant, series, &labels, &point.buckets), labels));
+    match built {
+        Ok((cost, labels)) => {
+            let total = outcome.row_bytes.saturating_add(cost);
+            if total > limits.max_row_bytes_total {
+                outcome.rows = Vec::new();
+                outcome.refusal = Some(Refusal::TooManyRowBytes { bytes: total });
+            } else {
+                match admit_series(state, &outcome.tenant, series.name, &labels, limits) {
+                    Ok(()) => push_row(series, point, labels, total, outcome),
+                    Err(reason) => count_drop(outcome, reason, 1),
+                }
+            }
+        }
         Err(reason) => count_drop(outcome, reason, 1),
     }
+}
+
+
+pub fn push_row(series: &Series, point: Point, labels: Labels, total: usize, outcome: &mut Outcome) {
+    outcome.row_bytes = total;
+    outcome.rows.push(SampleRow {
+        tenant: outcome.tenant.clone(),
+        name: series.name.to_string(),
+        unit: series.unit.to_string(),
+        kind: series.kind,
+        monotonic: series.monotonic,
+        labels,
+        timestamp_nanos: point.timestamp_nanos,
+        value: point.value,
+        buckets: point.buckets,
+    });
 }

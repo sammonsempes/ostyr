@@ -20,7 +20,7 @@ pub const MAX_TIMEOUT_MS: u64 = 300_000;
 pub const MAX_USER_BYTES: usize = 128;
 
 
-pub const LIMIT_COUNT: usize = 19;
+pub const LIMIT_COUNT: usize = 20;
 
 
 pub const MAX_CA_BYTES: u64 = 65_536;
@@ -42,6 +42,9 @@ pub const MAX_ENTITY_REFS_TOTAL_CEILING: u64 = 10_240;
 
 
 pub const MAX_ENTITY_KEYS_TOTAL_CEILING: u64 = 40_960;
+
+
+pub const MAX_ROW_BYTES_TOTAL_CEILING: u64 = 335_544_320;
 
 
 pub const MAX_LABELS_CEILING: u64 = 320;
@@ -175,6 +178,7 @@ pub fn validate_limits(limits: &Limits) -> Result<(), SettingsError> {
             1,
             MAX_ENTITY_KEYS_TOTAL_CEILING,
         ),
+        ("max_row_bytes_total", to_u64(limits.max_row_bytes_total), 1, MAX_ROW_BYTES_TOTAL_CEILING),
         ("max_labels", to_u64(limits.max_labels), 1, MAX_LABELS_CEILING),
         ("max_label_key_bytes", to_u64(limits.max_label_key_bytes), 1, MAX_LABEL_KEY_BYTES_CEILING),
         (

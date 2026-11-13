@@ -21,6 +21,9 @@ pub const DEFAULT_MAX_ENTITY_REFS_TOTAL: usize = 1_024;
 pub const DEFAULT_MAX_ENTITY_KEYS_TOTAL: usize = 4_096;
 
 
+pub const DEFAULT_MAX_ROW_BYTES_TOTAL: usize = 33_554_432;
+
+
 pub const DEFAULT_MAX_LABELS: usize = 32;
 
 
@@ -69,6 +72,7 @@ pub struct Limits {
     pub max_total_attributes: usize,
     pub max_entity_refs_total: usize,
     pub max_entity_keys_total: usize,
+    pub max_row_bytes_total: usize,
     pub max_labels: usize,
     pub max_label_key_bytes: usize,
     pub max_label_value_bytes: usize,
@@ -94,6 +98,7 @@ impl Default for Limits {
             max_total_attributes: DEFAULT_MAX_TOTAL_ATTRIBUTES,
             max_entity_refs_total: DEFAULT_MAX_ENTITY_REFS_TOTAL,
             max_entity_keys_total: DEFAULT_MAX_ENTITY_KEYS_TOTAL,
+            max_row_bytes_total: DEFAULT_MAX_ROW_BYTES_TOTAL,
             max_labels: DEFAULT_MAX_LABELS,
             max_label_key_bytes: DEFAULT_MAX_LABEL_KEY_BYTES,
             max_label_value_bytes: DEFAULT_MAX_LABEL_VALUE_BYTES,
@@ -192,6 +197,7 @@ pub enum Refusal {
     TooManyAttributes { count: usize },
     TooManyEntityRefs { count: usize },
     TooManyEntityKeys { count: usize },
+    TooManyRowBytes { bytes: usize },
 }
 
 
@@ -208,6 +214,7 @@ pub struct Outcome {
     pub rows: Vec<SampleRow>,
     pub dropped: Dropped,
     pub refusal: Option<Refusal>,
+    pub row_bytes: usize,
 }
 
 

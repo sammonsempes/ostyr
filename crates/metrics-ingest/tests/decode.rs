@@ -777,3 +777,75 @@ fn state_byte_budget_is_per_tenant_and_counts_new_text_only() -> TestResult {
     assert_eq!(dropped(&outcome_b, DropReason::StateBytesCap), Some(1));
     Ok(())
 }
+
+
+const ROW_BYTES_PLAIN: usize = 85;
+
+
+const ROW_BYTES_WITH_LABEL: usize = 136;
+
+
+const ROW_BYTES_HISTOGRAM: usize = 137;
+
+
+const POINTS_PAST_THE_ROW_BUDGET: usize = 4;
+
+
+const THIRD_ROW_BYTES: usize = 255;
+
+
+fn row_limit(bytes: usize) -> Limits {
+    Limits {
+        max_row_bytes_total: bytes,
+        ..Limits::default()
+    }
+}
+
+
+fn gauge_of(points: usize, attributes: &[KeyValue]) -> Vec<u8> {
+    let list = (0..points).map(|_| number(attributes.to_vec(), Some(NumberKind::AsInt(1)))).collect();
+    encode(Vec::new(), vec![gauge("cpu", list)])
+}
+
+
+#[test]
+fn rows_within_the_row_byte_budget_are_kept_and_counted() -> TestResult {
+    let outcome = run(&gauge_of(SMALL, &[]), &row_limit(SMALL * ROW_BYTES_PLAIN));
+    assert!(outcome.refusal.is_none());
+    assert_eq!((outcome.rows.len(), outcome.row_bytes), (SMALL, SMALL * ROW_BYTES_PLAIN));
+    Ok(())
+}
+
+
+#[test]
+fn rows_past_the_row_byte_budget_refuse_the_whole_request() -> TestResult {
+    let outcome = run(&gauge_of(POINTS_PAST_THE_ROW_BUDGET, &[]), &row_limit(SMALL * ROW_BYTES_PLAIN));
+    assert_eq!(outcome.refusal, Some(Refusal::TooManyRowBytes { bytes: THIRD_ROW_BYTES }));
+    assert!(outcome.rows.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_label_counts_its_bytes_and_its_fixed_size() -> TestResult {
+    let labels = [text("k", "vv")];
+    let kept = run(&gauge_of(1, &labels), &row_limit(ROW_BYTES_WITH_LABEL));
+    assert_eq!((kept.rows.len(), kept.row_bytes), (1, ROW_BYTES_WITH_LABEL));
+    let refused = run(&gauge_of(1, &labels), &row_limit(ROW_BYTES_WITH_LABEL - 1));
+    assert_eq!(refused.refusal, Some(Refusal::TooManyRowBytes { bytes: ROW_BYTES_WITH_LABEL }));
+    Ok(())
+}
+
+
+#[test]
+fn buckets_count_in_the_row_bytes() -> TestResult {
+    let bytes = encode(
+        Vec::new(),
+        vec![histogram(vec![1, COUNT_TWO, COUNT_THREE], vec![HALF, ONE_F], Some(SUM_VALUE))],
+    );
+    let kept = run(&bytes, &row_limit(ROW_BYTES_HISTOGRAM));
+    assert_eq!((kept.rows.len(), kept.row_bytes), (1, ROW_BYTES_HISTOGRAM));
+    let refused = run(&bytes, &row_limit(ROW_BYTES_HISTOGRAM - 1));
+    assert!(refused.refusal.is_some());
+    Ok(())
+}
