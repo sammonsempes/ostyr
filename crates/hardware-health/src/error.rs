@@ -17,6 +17,18 @@ pub enum SmartError {
     },
     #[error("smartctl output is not a JSON object")]
     NotAnObject,
+    #[error("upsc output has more than {limit} lines")]
+    TooManyLines { limit: usize },
+    #[error("upsc output is not valid UTF-8")]
+    NotUtf8(#[from] std::str::Utf8Error),
+    #[error("upsc output repeats a variable name")]
+    DuplicateKey,
+    #[error("thresholds file is larger than {limit} bytes")]
+    ThresholdsTooLarge { limit: usize },
+    #[error("thresholds file is not valid")]
+    Thresholds(#[source] Box<serde_saphyr::Error>),
+    #[error("min_battery_charge must be between 1 and 100")]
+    ChargeThresholdRange,
 }
 
 
