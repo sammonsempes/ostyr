@@ -1,0 +1,21 @@
+devices:
+  - name: core-sw1
+    tenant: acme
+    kind: switch
+    addresses: [192.0.2.10, "2001:db8:1::1"]
+    stale_after_seconds: 900
+    volumes:
+      max_traps_per_minute: 600
+      max_flow_records_per_second: 5000
+    snmp:
+      polling: true
+      version: v3
+      security_level: auth_priv
+      auth_protocol: sha256
+      priv_protocol: aes128
+      credentials: sites/paris/core-sw1.snmp
+  - name: edge-fw1
+    tenant: acme
+    kind: firewall
+    addresses: [192.0.2.1]
+    stale_after_seconds: 900

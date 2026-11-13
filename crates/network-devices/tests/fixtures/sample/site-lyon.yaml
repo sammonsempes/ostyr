@@ -1,0 +1,11 @@
+devices:
+  - name: lobby-printer
+    tenant: acme
+    kind: printer
+    addresses: [198.51.100.20]
+    stale_after_seconds: 3600
+    snmp:
+      polling: true
+      version: v2c
+      accept_insecure: true
+      credentials: sites/lyon/lobby-printer.snmp
