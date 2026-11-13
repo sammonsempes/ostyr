@@ -57,9 +57,9 @@ pub enum ImportError {
     #[error("import file exceeds {limit} rows")]
     TooManyRows { limit: usize },
     #[error("import file is not valid UTF-8: {0}")]
-    NotUtf8(#[from] std::string::FromUtf8Error),
-    #[error("import file header cannot be read: {0}")]
-    Header(#[source] csv::Error),
+    NotUtf8(#[from] std::str::Utf8Error),
+    #[error("import file header cannot be read (line {line})")]
+    Header { line: u64 },
     #[error("mapped column `{column}` is missing from the import file")]
     MissingColumn { column: String },
     #[error("import mapping field `{field}` uses a reserved name")]
