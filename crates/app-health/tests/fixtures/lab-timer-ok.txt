@@ -1,5 +1,6 @@
+Unit=ostyr-ok.service
 NextElapseUSecRealtime=
-LastTriggerUSec=Thu 2026-11-12 21:27:33 UTC
+LastTriggerUSec=Thu 2026-11-12 23:36:30 UTC
 Id=ostyr-ok.timer
 LoadState=loaded
 ActiveState=active

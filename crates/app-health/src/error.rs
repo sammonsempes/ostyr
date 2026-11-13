@@ -11,7 +11,7 @@ pub enum NtpError {
     #[error("tool output is larger than {limit} bytes")]
     Oversized { limit: u64 },
     #[error("tool output is not valid UTF-8")]
-    NotUtf8(#[from] std::string::FromUtf8Error),
+    NotUtf8(#[from] std::str::Utf8Error),
     #[error("tool output is malformed: {reason}")]
     Malformed { reason: &'static str },
     #[error("thresholds file is invalid")]

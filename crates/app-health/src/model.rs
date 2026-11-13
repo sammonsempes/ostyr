@@ -158,6 +158,7 @@ pub struct UnitState {
 pub enum UnitHealth {
     Healthy,
     NotFound,
+    NotLoaded,
     Failed,
     Flapping { restarts: u32 },
     Stopped,
@@ -192,6 +193,7 @@ pub struct TimerExpectationsFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerState {
     pub load: Option<LoadState>,
+    pub unit: Option<String>,
     pub active: Option<ActiveState>,
     pub last_trigger_unix: Option<u64>,
     pub next_elapse_unix: Option<u64>,
@@ -228,6 +230,8 @@ pub struct ServiceRun {
 pub enum TimerHealth {
     Healthy,
     NotFound,
+    NotLoaded,
+    WrongService,
     LastRunFailed,
     Overdue,
     BlindSpot,
