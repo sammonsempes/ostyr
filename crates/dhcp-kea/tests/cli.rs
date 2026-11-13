@@ -96,6 +96,8 @@ fn a_failing_output_is_an_error() -> TestResult {
     let mut counts_out = Vec::new();
     let result = follow_file(&path, 1, &mut sink, &mut counts_out, no_pause);
     assert!(matches!(result, Err(KeaError::Io(_))));
+    let mut one_shot_sink: &mut [u8] = &mut [];
+    assert!(matches!(one_shot(&path, &mut one_shot_sink, &mut counts_out), Err(KeaError::Io(_))));
     let mut failing_err: &mut [u8] = &mut [];
     assert!(report(Ok(Counts::default()), &mut failing_err).is_err());
     assert!(report(Err(KeaError::Usage), &mut failing_err).is_err());
@@ -156,5 +158,51 @@ fn a_follow_started_at_a_given_time_recovers_leases_created_after_it() -> TestRe
     let mut counts_out = Vec::new();
     let counts = follow_file_since(&path, 1, (&mut out, &mut counts_out), no_pause, STARTED_AT_EPOCH)?;
     assert_eq!((counts.processed, counts.recovered), (1, 1));
+    Ok(())
+}
+
+
+const MANY_ROWS: u32 = 25_000;
+
+
+const OCTET: u32 = 256;
+
+
+const BASE_EXPIRE: u32 = 1_700_003_600;
+
+
+#[test]
+fn a_one_shot_reads_a_file_larger_than_one_poll() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let header = CSV.lines().next().ok_or("header")?;
+    let rows: String = (0..MANY_ROWS)
+        .map(|i| {
+            format!(
+                "10.{}.{}.{},aa:bb:cc:dd:ee:01,01,3600,{},1,0,0,host.example.,0,\n",
+                i / OCTET / OCTET,
+                i / OCTET % OCTET,
+                i % OCTET,
+                BASE_EXPIRE + i
+            )
+        })
+        .collect();
+    write(&path, format!("{header}\n{rows}"))?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let counts = one_shot(&path, &mut out, &mut err)?;
+    assert_eq!(counts.processed, u64::from(MANY_ROWS));
+    assert_eq!(String::from_utf8(out)?.lines().count(), MANY_ROWS as usize);
+    Ok(())
+}
+
+
+#[test]
+fn a_one_shot_on_a_missing_file_counts_it_absent() -> TestResult {
+    let directory = tempdir()?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let counts = one_shot(&directory.path().join("none.csv"), &mut out, &mut err)?;
+    assert_eq!(counts.absent, 1);
     Ok(())
 }
