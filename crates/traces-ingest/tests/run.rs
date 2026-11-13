@@ -448,3 +448,52 @@ fn an_out_of_range_limit_is_a_settings_error_before_any_work() -> TestResult {
     assert!(untouched(&rig.listener)?);
     Ok(())
 }
+
+
+const OLD_SECONDS: u64 = 10;
+
+
+#[test]
+fn a_lowered_batch_row_limit_from_the_settings_file_splits_the_batches() -> TestResult {
+    let rig = rig()?;
+    with_limits(&rig, "limits:\n  max_batch_rows: 1\n")?;
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK]);
+    let report = go(&rig, &good(), "acme")?;
+    assert_eq!((report.rows, report.batches_planned, report.batches_sent), (SPANS, SPANS, SPANS));
+    joined(server)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_lowered_retention_from_the_settings_file_refuses_older_spans() -> TestResult {
+    let rig = rig()?;
+    with_limits(&rig, "limits:\n  retention_seconds: 1\n")?;
+    let old = request(vec![span(1, NOW - OLD_SECONDS * NANOS_PER_SECOND, TRACE_ID_BYTES)]);
+    let report = go(&rig, &old, "acme")?;
+    assert_eq!(report.refused.get(&RefusedSpan::TimestampOutOfRange), Some(&1));
+    assert_eq!((report.batches_planned, report.batches_sent), (0, 0));
+    assert!(untouched(&rig.listener)?);
+    Ok(())
+}
+
+
+#[test]
+fn the_cli_names_the_refused_limit_and_never_the_password() -> TestResult {
+    let rig = rig()?;
+    files(&rig, b"default_ratio: 1.0\n")?;
+    with_limits(&rig, "limits:\n  max_batch_rows: 0\n")?;
+    let error = run_insert_cli(
+        &args(&rig, "request.pb", "sampling.yaml", "acme"),
+        NOW,
+        &|| Duration::ZERO,
+        &mut Vec::new(),
+    )
+    .err()
+    .ok_or("no error")?;
+    let text = insert_error_text(&error);
+    assert_eq!(text, "limits.max_batch_rows must be within 1..=25000");
+    assert!(!text.contains(PASSWORD) && !text.contains("password"));
+    assert!(untouched(&rig.listener)?);
+    Ok(())
+}

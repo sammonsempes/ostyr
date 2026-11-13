@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 use traces_ingest::model::Limits;
-use traces_ingest::settings::{ceiling, load_traces_settings, to_metrics_settings, CEILING_FACTOR, MAX_RETENTION_SECONDS_CEILING};
+use traces_ingest::settings::{ceiling_limits, load_traces_settings, to_metrics_settings};
 
 
 const CONNECTION: &str = "url: https://ch.example:8443\nuser: ostyr\npassword_file: /nonexistent/pw\ndatabase: ostyr\ntable: trace_spans\n";
@@ -32,28 +32,28 @@ fn refusal(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
 
 
 fn fields() -> Vec<(&'static str, u64, u64)> {
-    let defaults = Limits::default();
+    let top = ceiling_limits();
     vec![
-        ("max_request_bytes", 1, ceiling(defaults.max_request_bytes)),
-        ("max_resource_spans", 1, ceiling(defaults.max_resource_spans)),
-        ("max_spans", 1, ceiling(defaults.max_spans)),
-        ("max_total_attributes", 1, ceiling(defaults.max_total_attributes)),
-        ("max_events_total", 1, ceiling(defaults.max_events_total)),
-        ("max_links_total", 1, ceiling(defaults.max_links_total)),
-        ("max_value_elements_total", 1, ceiling(defaults.max_value_elements_total)),
-        ("max_entity_refs_total", 1, ceiling(defaults.max_entity_refs_total)),
-        ("max_entity_keys_total", 1, ceiling(defaults.max_entity_keys_total)),
-        ("max_attributes_per_span", 1, ceiling(defaults.max_attributes_per_span)),
-        ("max_events_per_span", 1, ceiling(defaults.max_events_per_span)),
-        ("max_links_per_span", 1, ceiling(defaults.max_links_per_span)),
-        ("max_name_bytes", 1, ceiling(defaults.max_name_bytes)),
-        ("max_attribute_key_bytes", 1, ceiling(defaults.max_attribute_key_bytes)),
-        ("max_attribute_value_bytes", 1, ceiling(defaults.max_attribute_value_bytes)),
-        ("max_status_message_bytes", 1, ceiling(defaults.max_status_message_bytes)),
-        ("max_future_skew_seconds", 0, defaults.max_future_skew_seconds * CEILING_FACTOR),
-        ("max_batch_rows", 1, ceiling(defaults.max_batch_rows)),
-        ("max_batch_bytes", 1, ceiling(defaults.max_batch_bytes)),
-        ("retention_seconds", 1, MAX_RETENTION_SECONDS_CEILING),
+        ("max_request_bytes", 1, top.max_request_bytes as u64),
+        ("max_resource_spans", 1, top.max_resource_spans as u64),
+        ("max_spans", 1, top.max_spans as u64),
+        ("max_total_attributes", 1, top.max_total_attributes as u64),
+        ("max_events_total", 1, top.max_events_total as u64),
+        ("max_links_total", 1, top.max_links_total as u64),
+        ("max_value_elements_total", 1, top.max_value_elements_total as u64),
+        ("max_entity_refs_total", 1, top.max_entity_refs_total as u64),
+        ("max_entity_keys_total", 1, top.max_entity_keys_total as u64),
+        ("max_attributes_per_span", 1, top.max_attributes_per_span as u64),
+        ("max_events_per_span", 1, top.max_events_per_span as u64),
+        ("max_links_per_span", 1, top.max_links_per_span as u64),
+        ("max_name_bytes", 1, top.max_name_bytes as u64),
+        ("max_attribute_key_bytes", 1, top.max_attribute_key_bytes as u64),
+        ("max_attribute_value_bytes", 1, top.max_attribute_value_bytes as u64),
+        ("max_status_message_bytes", 1, top.max_status_message_bytes as u64),
+        ("max_future_skew_seconds", 0, top.max_future_skew_seconds),
+        ("max_batch_rows", 1, top.max_batch_rows as u64),
+        ("max_batch_bytes", 1, top.max_batch_bytes as u64),
+        ("retention_seconds", 1, top.retention_seconds),
     ]
 }
 
@@ -113,7 +113,8 @@ fn unknown_keys_and_negative_numbers_are_refused() -> TestResult {
     let (_top_dir, top) = file("surprise: 1\n")?;
     refusal(&top)?;
     let (_neg_dir, negative) = file("limits:\n  max_spans: -1\n")?;
-    assert!(refusal(&negative)?.contains("max_spans") || refusal(&negative)?.contains("-1"));
+    let message = refusal(&negative)?;
+    assert!(message.contains("at `limits.max_spans`: invalid u64"), "{message}");
     Ok(())
 }
 
