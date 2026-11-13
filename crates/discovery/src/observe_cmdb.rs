@@ -1,5 +1,7 @@
 use crate::error::DiscoveryError;
-use crate::model::{Candidate, Lease, LeaseHints, ObserveCounters, ObserveLimits, ServiceRef, NANOS_PER_MILLI, OBSERVATION_SOURCE};
+use crate::model::{
+    Candidate, Lease, LeaseHints, ObserveCounters, ObserveLimits, ServiceRef, MILLIS_PER_SECOND, NANOS_PER_MILLI, OBSERVATION_SOURCE,
+};
 use cmdb::model::{Asset, IdentityKey, Observation};
 use cmdb::reconcile::check_observation;
 use cmdb::types::{KeyMap, ObservedMap};
@@ -7,6 +9,14 @@ use std::collections::BTreeMap;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tracing::warn;
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    Valid,
+    Expired,
+    Released,
+}
 
 
 pub const PROTOCOL_TCP: u8 = 6;
@@ -38,12 +48,12 @@ fn attributes_of(candidate: &Candidate, lease: &Lease) -> Result<ObservedMap, Di
     let services: Vec<String> = candidate.services.iter().map(service_text).collect();
     let omitted = (candidate.services_omitted > 0).then(|| ("discovery.services_omitted".to_string(), candidate.services_omitted.to_string()));
     let hostname = lease.hostname.as_ref().map(|name| ("discovery.hostname".to_string(), name.clone()));
+    let listed = (!services.is_empty()).then(|| ("discovery.services".to_string(), services.join(",")));
     let always = [
         ("discovery.ip".to_string(), candidate.address.to_string()),
-        ("discovery.services".to_string(), services.join(",")),
         ("discovery.last_seen".to_string(), rfc3339_of(candidate.last_seen_ms)?),
     ];
-    Ok(always.into_iter().chain(omitted).chain(hostname).collect())
+    Ok(always.into_iter().chain(listed).chain(omitted).chain(hostname).collect())
 }
 
 
@@ -60,11 +70,25 @@ pub fn observation_of(candidate: &Candidate, lease: &Lease, asset: &Asset) -> Re
 }
 
 
+/// A lease explains a flow only while it is neither released nor expired: the candidate's last seen time must be at or before the expiry.
+pub fn hint_state(lease: &Lease, candidate: &Candidate) -> Hint {
+    if lease.released {
+        Hint::Released
+    } else if candidate.last_seen_ms > lease.expires.saturating_mul(MILLIS_PER_SECOND) {
+        Hint::Expired
+    } else {
+        Hint::Valid
+    }
+}
+
+
 fn step(found: &mut Vec<Observation>, counters: &mut ObserveCounters, candidate: &Candidate, matched: Option<(&Lease, &Asset)>, cap: usize) {
-    match matched {
-        None => counters.unmatched += 1,
-        Some(_) if found.len() >= cap => counters.beyond_cap += 1,
-        Some((lease, asset)) => match observation_of(candidate, lease, asset) {
+    let state = matched.map(|(lease, _)| hint_state(lease, candidate));
+    match (matched, state) {
+        (Some(_), Some(Hint::Released)) => counters.released += 1,
+        (Some(_), Some(Hint::Expired)) => counters.expired += 1,
+        (Some(_), _) if found.len() >= cap => counters.beyond_cap += 1,
+        (Some((lease, asset)), _) => match observation_of(candidate, lease, asset) {
             Ok(observation) => {
                 counters.observed += 1;
                 found.push(observation);
@@ -75,12 +99,14 @@ fn step(found: &mut Vec<Observation>, counters: &mut ObserveCounters, candidate:
                 counters.rejected += 1;
             }
         },
+        (None, _) => counters.unmatched += 1,
     }
 }
 
 
-/// Observations for the candidates whose lease MAC is the Mac key of an asset of `inventory`; discovery never creates an asset.
+/// Observations for candidates whose lease MAC keys an asset of `inventory`; hints of another tenant are refused (`wrong_tenant`).
 pub fn observations(
+    tenant: &str,
     candidates: &[Candidate],
     hints: &LeaseHints,
     inventory: &[Asset],
@@ -93,12 +119,17 @@ pub fn observations(
         .collect();
     let mut found = Vec::new();
     let mut counters = ObserveCounters::default();
+    let same_tenant = hints.tenant == tenant;
     candidates.iter().for_each(|candidate| {
         let matched = hints
             .leases
             .get(&candidate.address)
             .and_then(|lease| by_mac.get(lease.mac.as_str()).map(|asset| (lease, *asset)));
-        step(&mut found, &mut counters, candidate, matched, limits.max_observations);
+        if same_tenant {
+            step(&mut found, &mut counters, candidate, matched, limits.max_observations);
+        } else {
+            counters.wrong_tenant += 1;
+        }
     });
     (found, counters)
 }

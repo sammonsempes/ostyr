@@ -49,6 +49,15 @@ pub const NANOS_PER_MILLI: i128 = 1_000_000;
 pub const LEASE_ASSIGNED: &str = "lease-assigned";
 
 
+pub const LEASE_DECLINED: &str = "lease-declined";
+
+
+pub const LEASE_RECLAIMED: &str = "lease-expired-reclaimed";
+
+
+pub const MILLIS_PER_SECOND: i64 = 1000;
+
+
 pub const OBSERVATION_SOURCE: &str = "discovery";
 
 
@@ -191,12 +200,14 @@ impl Default for LeaseLimits {
 }
 
 
-/// `mac` is in the ECS form, `hostname` passed the DNS grammar, `cltt` is the lease creation time in Unix seconds.
+/// `mac` is in the ECS form, `hostname` passed the DNS grammar, `cltt` is the lease creation time and `expires` its end, in Unix seconds; `released` is a decline or a reclaim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
     pub mac: String,
     pub hostname: Option<String>,
     pub cltt: i64,
+    pub expires: i64,
+    pub released: bool,
 }
 
 
@@ -207,6 +218,8 @@ pub struct HintCounters {
     pub not_assigned: u64,
     pub bad_address: u64,
     pub no_mac: u64,
+    pub no_expiry: u64,
+    pub released: u64,
     pub bad_hostname: u64,
     pub beyond_cap: u64,
 }
@@ -242,4 +255,7 @@ pub struct ObserveCounters {
     pub unmatched: u64,
     pub rejected: u64,
     pub beyond_cap: u64,
+    pub wrong_tenant: u64,
+    pub expired: u64,
+    pub released: u64,
 }

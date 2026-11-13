@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }),
             &LeaseLimits::default(),
         );
-        let (observed, observe_counters) = observations(&found, &hints, &inventory, &ObserveLimits::default());
+        let (observed, observe_counters) = observations(EXAMPLE_TENANT, &found, &hints, &inventory, &ObserveLimits::default());
         observed.iter().try_for_each(|observation| {
             writeln!(
                 out,

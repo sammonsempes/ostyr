@@ -16,6 +16,9 @@ use std::net::IpAddr;
 use types::TestResult;
 
 
+const TENANT: &str = "acme";
+
+
 const KNOWN_ADDRESS: &str = "10.0.0.5";
 
 
@@ -58,6 +61,9 @@ const BEFORE_YEAR_ZERO: i64 = 300_000_000_000_000;
 const UNKNOWN_ADDRESS: &str = "10.0.0.6";
 
 
+const MILLIS: i64 = 1000;
+
+
 const SEEN_MS: i64 = 1_800_000_000_000;
 
 
@@ -84,6 +90,8 @@ fn hints(entries: &[(&str, &str, Option<&str>)]) -> Result<LeaseHints, Box<dyn s
                         mac: mac.to_string(),
                         hostname: hostname.map(str::to_string),
                         cltt: CLTT,
+                        expires: i64::MAX,
+                        released: false,
                     },
                 ))
             })
@@ -118,7 +126,7 @@ fn a_known_mac_becomes_an_observation_and_an_unknown_one_is_counted() -> TestRes
         (UNKNOWN_ADDRESS, "AA-BB-CC-DD-EE-99", Some("spoof")),
     ])?;
     let inventory = [asset_with_mac("mac:AA-BB-CC-DD-EE-01", MAC_A)];
-    let (found, counters) = observations(&candidates, &lease_hints, &inventory, &ObserveLimits::default());
+    let (found, counters) = observations(TENANT, &candidates, &lease_hints, &inventory, &ObserveLimits::default());
     assert_eq!(found.len(), 1);
     assert_eq!(counters.observed, 1);
     assert_eq!(counters.unmatched, PAIR);
@@ -146,6 +154,7 @@ fn the_hostname_is_an_attribute_never_a_key_even_when_reserved_looking() -> Test
     let candidates = [candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?];
     let inventory = [asset_with_mac("a", MAC_A)];
     let (found, counters) = observations(
+        TENANT,
         &candidates,
         &hints(&[(KNOWN_ADDRESS, MAC_A, Some("cmdb"))])?,
         &inventory,
@@ -168,6 +177,7 @@ fn an_observation_the_cmdb_checks_refuse_is_counted_never_returned() -> TestResu
     let hostile = "a".repeat(HUGE_HOSTNAME);
     let inventory = [asset_with_mac("a", MAC_A)];
     let (found, counters) = observations(
+        TENANT,
         &candidates,
         &hints(&[(KNOWN_ADDRESS, MAC_A, Some(&hostile))])?,
         &inventory,
@@ -187,7 +197,7 @@ fn times_out_of_range_are_refused() -> TestResult {
     ];
     let inventory = [asset_with_mac("a", MAC_A)];
     let lease_hints = hints(&[(KNOWN_ADDRESS, MAC_A, None), ("10.0.0.8", MAC_A, None)])?;
-    let (found, counters) = observations(&candidates, &lease_hints, &inventory, &ObserveLimits::default());
+    let (found, counters) = observations(TENANT, &candidates, &lease_hints, &inventory, &ObserveLimits::default());
     assert!(found.is_empty());
     assert_eq!(counters.rejected, PAIR);
     assert!(rfc3339_of(i64::MAX).is_err());
@@ -201,7 +211,7 @@ fn observations_beyond_the_cap_are_counted() -> TestResult {
     let candidates = [candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?, candidate("10.0.0.8", vec![], 0, SEEN_MS)?];
     let inventory = [asset_with_mac("a", MAC_A)];
     let lease_hints = hints(&[(KNOWN_ADDRESS, MAC_A, None), ("10.0.0.8", MAC_A, None)])?;
-    let (found, counters) = observations(&candidates, &lease_hints, &inventory, &ObserveLimits { max_observations: 1 });
+    let (found, counters) = observations(TENANT, &candidates, &lease_hints, &inventory, &ObserveLimits { max_observations: 1 });
     assert_eq!(found.len(), 1);
     assert_eq!(counters.beyond_cap, 1);
     Ok(())
@@ -214,6 +224,7 @@ fn the_first_asset_of_a_mac_wins_and_its_kind_is_used() -> TestResult {
     second.kind = cmdb::model::AssetKind::Server;
     let inventory = [asset_with_mac("first", MAC_A), second];
     let (found, _) = observations(
+        TENANT,
         &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
         &hints(&[(KNOWN_ADDRESS, MAC_A, None)])?,
         &inventory,
@@ -230,6 +241,7 @@ fn an_asset_without_a_mac_key_matches_nothing() -> TestResult {
     let mut named = asset_with_mac("named", MAC_A);
     named.keys.clear();
     let (found, counters) = observations(
+        TENANT,
         &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
         &hints(&[(KNOWN_ADDRESS, MAC_A, None)])?,
         &[named],
@@ -244,5 +256,114 @@ fn an_asset_without_a_mac_key_matches_nothing() -> TestResult {
         }),
         "7/99"
     );
+    Ok(())
+}
+
+
+fn lease_hints_with(address: &str, expires: i64, released: bool, tenant: &str) -> Result<LeaseHints, Box<dyn std::error::Error>> {
+    let mut found = hints(&[(address, MAC_A, None)])?;
+    found.tenant = tenant.to_string();
+    found.leases.values_mut().for_each(|lease| {
+        lease.expires = expires;
+        lease.released = released;
+    });
+    Ok(found)
+}
+
+
+#[test]
+fn a_lease_hints_only_up_to_its_expiry() -> TestResult {
+    let expiry_seconds = SEEN_MS / MILLIS;
+    let inventory = [asset_with_mac("a", MAC_A)];
+    let at_expiry = observations(
+        TENANT,
+        &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
+        &lease_hints_with(KNOWN_ADDRESS, expiry_seconds, false, TENANT)?,
+        &inventory,
+        &ObserveLimits::default(),
+    );
+    assert_eq!(at_expiry.0.len(), 1);
+    assert_eq!(at_expiry.1.expired, 0);
+    let after_expiry = observations(
+        TENANT,
+        &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS + 1)?],
+        &lease_hints_with(KNOWN_ADDRESS, expiry_seconds, false, TENANT)?,
+        &inventory,
+        &ObserveLimits::default(),
+    );
+    assert!(after_expiry.0.is_empty());
+    assert_eq!(after_expiry.1.expired, 1);
+    assert_eq!(after_expiry.1.unmatched, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_released_lease_never_hints() -> TestResult {
+    let inventory = [asset_with_mac("a", MAC_A)];
+    let (found, counters) = observations(
+        TENANT,
+        &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
+        &lease_hints_with(KNOWN_ADDRESS, i64::MAX, true, TENANT)?,
+        &inventory,
+        &ObserveLimits::default(),
+    );
+    assert!(found.is_empty());
+    assert_eq!(counters.released, 1);
+    Ok(())
+}
+
+
+#[test]
+fn hints_of_another_tenant_are_refused_and_counted() -> TestResult {
+    let inventory = [asset_with_mac("a", MAC_A)];
+    let (found, counters) = observations(
+        TENANT,
+        &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
+        &lease_hints_with(KNOWN_ADDRESS, i64::MAX, false, "globex")?,
+        &inventory,
+        &ObserveLimits::default(),
+    );
+    assert!(found.is_empty());
+    assert_eq!(counters.wrong_tenant, 1);
+    assert_eq!(counters.unmatched, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_candidate_serving_nothing_has_no_services_attribute() -> TestResult {
+    let inventory = [asset_with_mac("a", MAC_A)];
+    let (found, _) = observations(
+        TENANT,
+        &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
+        &hints(&[(KNOWN_ADDRESS, MAC_A, None)])?,
+        &inventory,
+        &ObserveLimits::default(),
+    );
+    assert!(!found.first().ok_or("missing")?.attributes.contains_key("discovery.services"));
+    Ok(())
+}
+
+
+#[test]
+fn the_mac_index_agrees_with_the_cmdb_first_asset_rule() -> TestResult {
+    let mut second = asset_with_mac("second", MAC_A);
+    second.kind = cmdb::model::AssetKind::Server;
+    let mut third = asset_with_mac("third", "AA-BB-CC-DD-EE-02");
+    third.kind = cmdb::model::AssetKind::NetworkDevice;
+    let inventory = [asset_with_mac("first", MAC_A), second, third];
+    for mac in [MAC_A, "AA-BB-CC-DD-EE-02"] {
+        let (found, _) = observations(
+            TENANT,
+            &[candidate(KNOWN_ADDRESS, vec![], 0, SEEN_MS)?],
+            &hints(&[(KNOWN_ADDRESS, mac, None)])?,
+            &inventory,
+            &ObserveLimits::default(),
+        );
+        let observation = found.first().ok_or("missing")?;
+        let expected = cmdb::reconcile::find_asset(&inventory, observation).ok_or("cmdb found none")?;
+        assert_eq!(observation.kind, expected.kind);
+    }
     Ok(())
 }
