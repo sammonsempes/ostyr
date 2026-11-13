@@ -504,3 +504,13 @@ fn a_repeated_key_refuses_the_listing_and_escapes_are_decoded() -> Result<(), Bo
     assert_eq!(listing.snapshots.first().and_then(|snapshot| snapshot.host.as_deref()), Some("web"));
     Ok(())
 }
+
+
+#[test]
+fn a_time_outside_the_utc_range_is_skipped_not_a_panic() -> Result<(), Box<dyn Error>> {
+    let restic_listing = restic(&restic_with("time", json!("9999-12-31T23:00:00-02:00")), &Limits::default())?;
+    assert!(skipped_once(&restic_listing, SkipReason::BadTime));
+    let borg_listing = borg(&borg_with("start", json!("9999-12-31T23:00:00-02:00")), true, &Limits::default())?;
+    assert!(skipped_once(&borg_listing, SkipReason::BadTime));
+    Ok(())
+}
