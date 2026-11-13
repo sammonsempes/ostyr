@@ -497,3 +497,20 @@ fn usage_attribute_failing_now_degrades() -> TestResult {
     assert_eq!(verdict(&with_bit)?, degraded(&["attribute 9 Power_On_Hours", "past_threshold"]));
     Ok(())
 }
+
+
+#[test]
+fn nvme_protocol_in_wrong_case_is_blind_without_a_log() -> TestResult {
+    let mut document = fixture(NVME_HEALTHY)?;
+    document
+        .as_object_mut()
+        .ok_or("not an object")?
+        .remove("nvme_smart_health_information_log");
+    let lower = set(document.clone(), "/device/protocol", json!("nvme"))?;
+    assert_eq!(verdict(&lower)?, blind("device.protocol"));
+    let upper = set(document, "/device/protocol", json!("NVME"))?;
+    assert_eq!(verdict(&upper)?, blind("device.protocol"));
+    let with_log = set(fixture(NVME_HEALTHY)?, "/device/protocol", json!("nvme"))?;
+    assert_eq!(verdict(&with_log)?, Health::Healthy);
+    Ok(())
+}
