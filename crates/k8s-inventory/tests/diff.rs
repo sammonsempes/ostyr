@@ -10,7 +10,7 @@ use fixtures::{node, pod, set};
 use inventory::inventory_of;
 use k8s_inventory::diff::diff;
 use k8s_inventory::error::InventoryError;
-use k8s_inventory::inventory::build_inventory;
+use k8s_inventory::inventory::{build_inventory, inventory_cluster, inventory_skipped_nodes, inventory_skipped_pods, inventory_tenant};
 use k8s_inventory::limits::Limits;
 use k8s_inventory::model::{ItemKind, Parsed, Skipped};
 use serde_json::json;
@@ -100,7 +100,16 @@ fn skipped_counts_travel_with_the_inventory() -> TestResult {
     let bad = json!({"kind": "PodList", "items": [{"metadata": {"name": "x"}}]}).to_string();
     let pods = k8s_inventory::parse::parse_pods(bad.as_bytes(), &limits)?;
     let inventory = build_inventory("acme", "prod-1", pods, empty())?;
-    assert_eq!(inventory.skipped_pods.bad_field, 1);
-    assert_eq!(inventory.skipped_nodes, Skipped::default());
+    assert_eq!(inventory_skipped_pods(&inventory).bad_field, 1);
+    assert_eq!(inventory_skipped_nodes(&inventory), &Skipped::default());
+    Ok(())
+}
+
+
+#[test]
+fn the_scope_is_read_back_through_the_accessors() -> TestResult {
+    let built = inventory_of(vec![], vec![])?;
+    assert_eq!(core_pg::scope::tenant_of(inventory_tenant(&built)), "acme");
+    assert_eq!(inventory_cluster(&built), "prod-1");
     Ok(())
 }
