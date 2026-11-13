@@ -1,4 +1,4 @@
-use crate::common::{available, catalogue, entry, row, TestResult};
+use crate::common::{available, catalogue, entry, row, RemovalPlan, TestResult};
 use software_catalog::installed_rpm::parse_rpm_installed;
 use software_catalog::limits::Limits;
 use software_catalog::model::{ActionKind, Assignment, Installed, Manager, Source};
@@ -122,5 +122,61 @@ fn the_fixture_kernels_plan_the_same_in_both_orders() -> TestResult {
     assert!(kinds_of(&installed, equal)?.is_empty());
     assert_eq!(kinds_of(&installed, between)?, vec![ActionKind::NewerThanCatalogue]);
     assert_eq!(kinds_of(&installed, above)?, vec![ActionKind::Update]);
+    Ok(())
+}
+
+
+fn removal(rows: &[(&str, &str)], held: bool) -> Result<RemovalPlan, Box<dyn std::error::Error>> {
+    let installed = Installed {
+        rows: rows
+            .iter()
+            .map(|(package, version)| {
+                let mut found = row(Manager::Dnf, package, version);
+                found.held = held;
+                found
+            })
+            .collect(),
+        ..Installed::default()
+    };
+    let mut removable = entry("pkg", Source::Dnf("pkg".to_string()), "1.0-1");
+    removable.uninstall = true;
+    let assignment = Assignment {
+        install: vec![],
+        remove: vec!["pkg".to_string()],
+    };
+    let result = plan(&catalogue(vec![removable]), &assignment, &installed, &available(Manager::Dnf, &["pkg"]))?;
+    Ok(result
+        .actions
+        .iter()
+        .filter(|action| action.name == "pkg")
+        .map(|action| (action.kind, action.arguments.clone()))
+        .collect())
+}
+
+
+#[test]
+fn uninstall_of_a_package_with_several_rows_has_no_vector() -> TestResult {
+    let two = [("pkg", "0:1.0-1"), ("pkg", "0:2.0-1")];
+    assert_eq!(removal(&two, false)?, vec![(ActionKind::UninstallAmbiguous, Vec::<String>::new())]);
+    assert_eq!(removal(&two, true)?, vec![(ActionKind::Held, Vec::<String>::new())]);
+    let installed = parse_rpm_installed(Cursor::new(LAB_CAPTURE.as_bytes()), &Limits::default())?;
+    let mut kernel = entry("kernel", Source::Dnf("kernel".to_string()), "5.14.0-687.66.1.el9_8");
+    kernel.uninstall = true;
+    let assignment = Assignment {
+        install: vec![],
+        remove: vec!["kernel".to_string()],
+    };
+    let result = plan(&catalogue(vec![kernel]), &assignment, &installed, &available(Manager::Dnf, &["kernel"]))?;
+    let action = result.actions.iter().find(|found| found.name == "kernel").ok_or("kernel")?;
+    assert_eq!(action.kind, ActionKind::UninstallAmbiguous);
+    assert!(action.arguments.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn uninstall_of_a_single_row_package_keeps_the_erase_vector() -> TestResult {
+    let erase = vec!["rpm".to_string(), "--erase".to_string(), "pkg".to_string()];
+    assert_eq!(removal(&[("pkg", "0:1.0-1")], false)?, vec![(ActionKind::Uninstall, erase)]);
     Ok(())
 }
