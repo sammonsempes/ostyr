@@ -104,6 +104,7 @@ pub enum ActionKind {
     NotInCatalogue,
     Unavailable,
     Held,
+    UninstallAmbiguous,
 }
 
 

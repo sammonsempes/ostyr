@@ -50,8 +50,14 @@ pub fn arguments(kind: ActionKind, entry: &Entry) -> Vec<String> {
         (ActionKind::Uninstall, Source::Dnf(package)) => words(&["rpm", "--erase", package]),
         (ActionKind::Uninstall, Source::Winget(id)) => words(&["winget", "uninstall", "--id", id, "--exact"]),
         (ActionKind::Uninstall, Source::Msi(_))
-        | (ActionKind::NewerThanCatalogue | ActionKind::Unknown | ActionKind::NotInCatalogue | ActionKind::Unavailable | ActionKind::Held, _) => {
-            Vec::new()
-        }
+        | (
+            ActionKind::NewerThanCatalogue
+            | ActionKind::Unknown
+            | ActionKind::NotInCatalogue
+            | ActionKind::Unavailable
+            | ActionKind::Held
+            | ActionKind::UninstallAmbiguous,
+            _,
+        ) => Vec::new(),
     }
 }

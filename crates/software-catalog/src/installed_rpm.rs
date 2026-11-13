@@ -4,13 +4,10 @@ use crate::error::InstalledError;
 use crate::installed::parse_with;
 use crate::limits::Limits;
 use crate::model::{Installed, InstalledRow, Line, Manager};
-use crate::validate::{rpm_pin_ok, RPM_ARCHITECTURES};
+use crate::validate::{rpm_pin_ok, GPG_PUBKEY, RPM_ARCHITECTURES};
 use patch_inventory::scan::is_forbidden;
 use patch_inventory::validate::{is_plain_text, is_rpm_architecture, is_rpm_name};
 use std::io::Read;
-
-
-const GPG_PUBKEY: &str = "gpg-pubkey";
 
 
 pub fn parse_rpm_line(line: &[u8], limits: &Limits) -> Option<Line> {

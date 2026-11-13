@@ -5,7 +5,7 @@ use std::io::Read;
 pub mod types;
 
 
-pub use types::TestResult;
+pub use types::{RemovalPlan, TestResult};
 
 
 pub const FINGERPRINT: &str = "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678";

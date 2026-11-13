@@ -7,6 +7,9 @@ use patch_inventory::validate::{is_dpkg_name, is_plain_text, is_rpm_name};
 use vuln_match::version::parse_version;
 
 
+pub const GPG_PUBKEY: &str = "gpg-pubkey";
+
+
 const FIELD_NAME: &str = "name";
 
 
@@ -56,7 +59,7 @@ pub fn source_ok(source: &Source) -> bool {
     is_clean(package)
         && match source {
             Source::Apt(_) => is_dpkg_name(package),
-            Source::Dnf(_) => is_rpm_name(package),
+            Source::Dnf(_) => is_rpm_name(package) && package != GPG_PUBKEY,
             Source::Winget(_) => is_winget_id(package),
             Source::Msi(_) => is_msi_key(package),
         }

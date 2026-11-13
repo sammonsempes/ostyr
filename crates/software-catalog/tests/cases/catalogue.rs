@@ -286,3 +286,12 @@ fn the_six_extra_rpm_architectures_are_refused_in_a_release() -> TestResult {
         .for_each(|arch| assert_eq!(dnf(&format!("1.0-1.{arch}")), Some("version"), "{arch}"));
     Ok(())
 }
+
+
+#[test]
+fn a_dnf_entry_for_gpg_pubkey_is_refused_as_a_source() -> TestResult {
+    assert_eq!(problem(entry("key", Source::Dnf("gpg-pubkey".to_string()), "1.0-1")), Some("source"));
+    assert_eq!(problem(entry("key", Source::Dnf("gpg-pubkeys".to_string()), "1.0-1")), None);
+    assert_eq!(problem(entry("key", Source::Dnf("bad name".to_string()), "1.0-1")), Some("source"));
+    Ok(())
+}

@@ -82,6 +82,15 @@ pub fn row_of(entry: &Entry, installed: &Installed) -> Option<InstalledRow> {
 }
 
 
+pub fn row_count(entry: &Entry, installed: &Installed) -> usize {
+    installed
+        .rows
+        .iter()
+        .filter(|row| row.manager == manager_of(&entry.source) && row.package == package_of(&entry.source))
+        .count()
+}
+
+
 pub fn order_rows(left: &InstalledRow, right: &InstalledRow) -> Ordering {
     let family = family_of(left.manager);
     match (parse_version(family, &left.version), parse_version(family, &right.version)) {
@@ -157,7 +166,11 @@ pub fn compare(entry: &Entry, row: &InstalledRow) -> Option<ActionKind> {
 
 pub fn removal_action(entry: &Entry, installed: &Installed) -> Option<Action> {
     row_of(entry, installed).filter(|_| entry.uninstall).map(|row| {
-        let kind = if row.held { ActionKind::Held } else { ActionKind::Uninstall };
+        let kind = match (row.held, row_count(entry, installed) > 1) {
+            (true, _) => ActionKind::Held,
+            (false, true) => ActionKind::UninstallAmbiguous,
+            (false, false) => ActionKind::Uninstall,
+        };
         action_of(kind, entry, Some(&row))
     })
 }
