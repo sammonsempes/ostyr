@@ -101,9 +101,12 @@ pub fn is_label(text: &str) -> bool {
 
 
 pub fn parse_day(text: &str) -> Result<time::Date, SkipReason> {
-    OffsetDateTime::parse(text, &Rfc3339)
-        .map(|moment| moment.to_offset(UtcOffset::UTC).date())
-        .map_err(|_| SkipReason::BadDate)
+    OffsetDateTime::parse(text, &Rfc3339).map_err(|_| SkipReason::BadDate).and_then(|moment| {
+        moment
+            .checked_to_offset(UtcOffset::UTC)
+            .map(|utc| utc.date())
+            .ok_or(SkipReason::DayOutOfRange)
+    })
 }
 
 
@@ -139,7 +142,8 @@ pub fn build_row(record: &StringRecord, columns: &Columns, limits: &Limits) -> R
     let labels_valid = is_label(&account) && is_label(service) && is_label(currency);
     if labels_valid {
         let amount = parse_amount(field(record, columns.amount)).ok_or(SkipReason::BadAmount)?;
-        let day = parse_day(field(record, columns.start))?;
+        let day =
+            parse_day(field(record, columns.start)).and_then(|parsed| in_date_range(parsed).then_some(parsed).ok_or(SkipReason::DayOutOfRange))?;
         let tags = match columns.tags {
             Some(index) => parse_tags(field(record, index), limits)?,
             None => Vec::new(),

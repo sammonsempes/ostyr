@@ -481,6 +481,9 @@ const OUT_OF_RANGE_ROWS: u64 = 4;
 const SEVEN_ACCOUNTS: usize = 7;
 
 
+const DAY_REJECTED_ROWS: u64 = 2;
+
+
 fn iso(text: &str) -> Result<Date, Box<dyn Error>> {
     Ok(Date::parse(text, &time::format_description::well_known::Iso8601::DATE)?)
 }
@@ -523,5 +526,40 @@ fn only_out_of_range_days_leave_the_replace_range_empty() -> Result<(), Box<dyn 
     let table = read(&[row("1", "a", &at("1900-01-01"), "Compute", "")], &Limits::default())?;
     assert_eq!(table.seen_days, None);
     assert_eq!(table.days_out_of_range, 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_accepted_row_outside_the_date_range_is_skipped_not_stored() -> Result<(), Box<dyn Error>> {
+    let rows = [
+        row("1", "a", &at("1900-01-01"), "Compute", ""),
+        row("2", "a", &at("2200-01-01"), "Compute", ""),
+        row("3", "a", &at("2026-02-01"), "Compute", ""),
+    ];
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(skipped(&table, SkipReason::DayOutOfRange), DAY_REJECTED_ROWS);
+    assert_eq!(table.accepted, 1);
+    let stored_day = iso("2026-02-01")?;
+    assert!(!table.account_rows.is_empty());
+    assert!(table.account_rows.keys().all(|key| key.0 == stored_day));
+    Ok(())
+}
+
+
+#[test]
+fn a_crafted_offset_day_is_skipped_never_a_panic() -> Result<(), Box<dyn Error>> {
+    let rows = [
+        row("1", "a", "9999-12-31T23:00:00-02:00", "Compute", ""),
+        row("2", "a", "-9999-01-01T00:00:00+02:00", "Compute", ""),
+        row("3", "a", &at("2026-02-01"), "Compute", ""),
+    ];
+    let table = read(&rows, &Limits::default())?;
+    assert_eq!(table.accepted, 1);
+    assert_eq!(
+        skipped(&table, SkipReason::DayOutOfRange) + skipped(&table, SkipReason::BadDate),
+        DAY_REJECTED_ROWS
+    );
+    assert!(skipped(&table, SkipReason::DayOutOfRange) >= 1);
     Ok(())
 }
