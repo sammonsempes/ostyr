@@ -259,3 +259,32 @@ fn extra_labels_count_the_entries_before_merging_like_containers() -> TestResult
     assert_eq!((item.labels.len(), item.extra_labels, item.extra_containers), (1, 1, 1));
     Ok(())
 }
+
+
+#[test]
+fn a_refused_element_sharing_a_kept_uid_is_a_duplicate_in_either_order() -> TestResult {
+    let refused_first = vec![labelled("big", "u1", LABELS_OVER_CAP)?, pod("keep", "u1")];
+    let kept_first = vec![pod("keep", "u1"), labelled("big", "u1", LABELS_OVER_CAP)?];
+    [refused_first, kept_first].into_iter().try_for_each(|items| -> TestResult {
+        let parsed = parse_pods(list("PodList", items).as_slice(), &Limits::default())?;
+        assert_eq!(parsed.items.len(), 1);
+        assert!(parsed.skipped.refused_uids.is_empty());
+        assert_eq!(parsed.skipped.duplicate, 1);
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_built_by_hand_shared_uid_in_the_previous_list_is_retired_only() -> TestResult {
+    let limits = Limits::default();
+    let mut shared = parse_pods(list("PodList", vec![pod("keep", "u1")]).as_slice(), &limits)?;
+    shared.skipped.refused_uids.push("u1".to_owned());
+    let nodes = parse_nodes(list("NodeList", vec![]).as_slice(), &limits)?;
+    let previous = build_inventory("acme", "prod-1", shared, nodes)?;
+    let current = inventory(vec![], vec![])?;
+    let changes = diff(&previous, &current)?;
+    assert_eq!(changes.retired.len(), 1);
+    assert!(changes.retired_unreadable.is_empty());
+    Ok(())
+}

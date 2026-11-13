@@ -323,6 +323,14 @@ fn malformed(error: serde_json::Error) -> ParseError {
 }
 
 
+/// A refused uid equal to a kept uid is dropped and counted `duplicate`: the kept element wins, whatever the order in the list.
+pub fn drop_shadowed_refusals(skipped: &mut Skipped, kept: &HashSet<String>) {
+    let before = skipped.refused_uids.len();
+    skipped.refused_uids.retain(|uid| !kept.contains(uid));
+    skipped.duplicate += before - skipped.refused_uids.len();
+}
+
+
 /// Reads at most `max_bytes`, checks kind and item count on the raw list, then parses each element alone; a duplicate uid is skipped.
 pub fn parse_list<Source: Read, Item>(
     reader: Source,
@@ -364,6 +372,7 @@ pub fn parse_list<Source: Read, Item>(
             }
         }
     }
+    drop_shadowed_refusals(&mut parsed.skipped, &seen);
     let skipped_total = parsed.skipped.unparsable + parsed.skipped.bad_field + parsed.skipped.duplicate;
     if skipped_total > 0 {
         tracing::warn!(kind, skipped_total, "elements skipped");
