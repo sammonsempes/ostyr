@@ -1,4 +1,5 @@
 use crate::model::DropReason;
+use prost::DecodeError;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -28,3 +29,7 @@ pub type ElapsedFn<'a> = dyn Fn() -> Duration + 'a;
 
 
 pub type LimitRow = (&'static str, u64, u64, u64);
+
+
+/// One wire field: its tag and its payload when length-delimited; the length is validated against the buffer.
+pub type WireField<'a> = Result<(u32, Option<&'a [u8]>), DecodeError>;

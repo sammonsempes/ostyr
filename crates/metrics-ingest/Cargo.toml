@@ -11,6 +11,7 @@ core-pg = { version = "0.0.0", path = "../core-pg" }
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "metrics"] }
 prost = "0.14"
+unicode-general-category = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
