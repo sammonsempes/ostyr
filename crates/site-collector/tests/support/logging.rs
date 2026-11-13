@@ -1,9 +1,10 @@
 use std::io::Write;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
-use tracing::Dispatch;
+use tracing::{Dispatch, Level};
 
 
-static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+static ANCHOR: LazyLock<Dispatch> =
+    LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_max_level(Level::TRACE).with_writer(std::io::sink).finish()));
 
 
 struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
@@ -28,6 +29,7 @@ pub fn captured<Output>(action: impl FnOnce() -> Output) -> (Output, String) {
     let writer_buffer = Arc::clone(&buffer);
     let dispatch = Dispatch::new(
         tracing_subscriber::fmt()
+            .with_max_level(Level::TRACE)
             .with_ansi(false)
             .with_writer(move || SharedBuffer(Arc::clone(&writer_buffer)))
             .finish(),

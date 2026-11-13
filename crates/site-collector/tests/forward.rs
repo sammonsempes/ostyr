@@ -1,14 +1,18 @@
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
 
+use logging::captured;
 use serde_json::Value;
 use site_collector::dirfs::open_directory;
 use site_collector::error::ForwardError;
 use site_collector::forward::{
-    build_event, clean_text, cut_text, event_line, event_time, facility_name, file_bytes, forward_once, read_cursor, valid_hostname, write_cursor,
+    build_event, clean_text, cut_text, event_line, event_time, facility_name, file_bytes, forward_once, read_cursor, report_time_substitutions,
+    time_out_of_range, valid_hostname, write_cursor,
 };
-use site_collector::forward_model::{ForwardLimits, CURSOR_FILE, CURSOR_TEMPORARY, MAX_FORWARD_MESSAGE_BYTES};
+use site_collector::forward_model::{EventLines, ForwardLimits, CURSOR_FILE, CURSOR_TEMPORARY, MAX_FORWARD_MESSAGE_BYTES};
 use site_collector::listen_model::ListenerKind;
 use site_collector::model::{SdElement, SyslogRecord};
 use site_collector::spool::{append, open_spool, sync_range};
@@ -20,6 +24,9 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use types::TestResult;
+
+
+const BATCH_RECORDS: usize = 1000;
 
 
 const NOW_SECONDS: i64 = 1_800_000_000;
@@ -403,5 +410,26 @@ fn an_event_without_host_or_app_carries_no_such_labels() -> TestResult {
     assert!(event.host.is_none());
     assert_eq!(event.labels.len(), THREE_LINES + 1);
     assert_eq!(event.timestamp, now()?);
+    Ok(())
+}
+
+
+#[test]
+fn a_batch_of_out_of_range_times_logs_one_line_with_the_count() -> TestResult {
+    assert!(time_out_of_range(Some(i64::MAX)));
+    assert!(!time_out_of_range(Some(0)));
+    assert!(!time_out_of_range(None));
+    let produced = (0..BATCH_RECORDS)
+        .map(|_| EventLines {
+            lines: vec!["{}".to_owned()],
+            time_substituted: 1,
+        })
+        .collect::<Vec<_>>();
+    let (count, log) = captured(|| report_time_substitutions(&produced));
+    assert_eq!(count, BATCH_RECORDS as u64);
+    assert_eq!(log.lines().count(), 1);
+    assert!(log.contains("time_substituted=1000"));
+    let (none, quiet) = captured(|| report_time_substitutions(&[EventLines::default()]));
+    assert_eq!((none, quiet.as_str()), (0, ""));
     Ok(())
 }
