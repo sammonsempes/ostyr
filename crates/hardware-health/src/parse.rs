@@ -234,6 +234,12 @@ fn assemble(root: &Value, limits: &Limits) -> SmartReport {
     if is_nvme && nvme_health.is_none() {
         unreadable.push("nvme log".to_string());
     }
+    flag_unreadable(
+        &mut unreadable,
+        "device.protocol".to_string(),
+        lookup(root, &["device", "protocol"]),
+        protocol_kind.is_none() && nvme_health.is_none(),
+    );
     SmartReport {
         device_name,
         protocol: protocol_kind,

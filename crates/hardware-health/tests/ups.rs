@@ -32,6 +32,9 @@ const CHRG: &str = include_str!("fixtures/lab-ups-CHRG.txt");
 const BYPASS: &str = include_str!("fixtures/lab-ups-BYPASS.txt");
 
 
+const NOCHARGE: &str = include_str!("fixtures/lab-ups-nocharge.txt");
+
+
 const STALE: &str = include_str!("fixtures/lab-ups-stale.txt");
 
 
@@ -62,7 +65,7 @@ const DEFAULT_CHARGE: u8 = 50;
 const DEFAULT_RUNTIME: u32 = 300;
 
 
-const FLAG_COUNT: usize = 13;
+const FLAG_COUNT: usize = 17;
 
 
 const FULL_CHARGE: f64 = 100.0;
@@ -132,6 +135,16 @@ fn verdict(text: &str) -> Result<Health, SmartError> {
 }
 
 
+fn charged(status: &str) -> String {
+    format!("ups.status: {status}\nbattery.charge: 100\n")
+}
+
+
+fn blind(field: &str) -> Health {
+    Health::BlindSpot(BlindReason::UnreadableHealthField(field.to_string()))
+}
+
+
 fn degraded(causes: &[&str]) -> Health {
     Health::Degraded(causes.iter().map(|cause| (*cause).to_string()).collect())
 }
@@ -195,7 +208,7 @@ fn empty_status_is_blind() -> TestResult {
     assert_eq!(verdict("ups.status: \n")?, Health::BlindSpot(BlindReason::NoVerdict));
     assert_eq!(verdict("")?, Health::BlindSpot(BlindReason::NoVerdict));
     assert_eq!(
-        verdict("ups.status: FROB\n")?,
+        verdict(&charged("FROB"))?,
         Health::BlindSpot(BlindReason::UnreadableHealthField("ups.status".to_string()))
     );
     Ok(())
@@ -204,26 +217,25 @@ fn empty_status_is_blind() -> TestResult {
 
 #[test]
 fn failing_flags() -> TestResult {
-    assert_eq!(verdict("ups.status: OB LB\n")?, Health::Failing);
-    assert_eq!(verdict("ups.status: OL FSD\n")?, Health::Failing);
-    assert_eq!(verdict("ups.status: OFF\n")?, Health::Failing);
-    assert_eq!(verdict("ups.status: OL OVER\n")?, Health::Failing);
-    assert_eq!(verdict("ups.status: OL LB\n")?, Health::Healthy);
+    assert_eq!(verdict(&charged("OB LB"))?, Health::Failing);
+    assert_eq!(verdict(&charged("OL FSD"))?, Health::Failing);
+    assert_eq!(verdict(&charged("OFF"))?, Health::Failing);
+    assert_eq!(verdict(&charged("OL OVER"))?, Health::Failing);
+    assert_eq!(verdict(&charged("OL LB"))?, Health::Degraded(vec!["low battery".to_string()]));
     Ok(())
 }
 
 
 #[test]
 fn no_line_status_is_degraded() -> TestResult {
-    assert_eq!(verdict("ups.status: CHRG\n")?, degraded(&["line status unknown"]));
-    assert_eq!(verdict("ups.status: OL TRIM BOOST DISCHRG\n")?, Health::Healthy);
+    assert_eq!(verdict(&charged("CHRG"))?, degraded(&["line status unknown"]));
+    assert_eq!(verdict(&charged("OL TRIM BOOST DISCHRG"))?, Health::Healthy);
     Ok(())
 }
 
 
 #[test]
 fn rejected_charge_or_runtime_is_blind_whatever_the_line() -> TestResult {
-    let blind = |field: &str| Health::BlindSpot(BlindReason::UnreadableHealthField(field.to_string()));
     let values = ["-1", "150", "NaN", "1e400", "inf"];
     ["OL", "OB"].iter().try_for_each(|status| -> TestResult {
         values.iter().try_for_each(|value| -> TestResult {
@@ -234,8 +246,11 @@ fn rejected_charge_or_runtime_is_blind_whatever_the_line() -> TestResult {
             Ok(())
         })
     })?;
-    assert_eq!(verdict("ups.status: OL\nbattery.runtime: NaN\n")?, blind("battery.runtime"));
-    assert_eq!(verdict("ups.status: OL\nups.load: NaN\n")?, Health::Healthy);
+    assert_eq!(
+        verdict("ups.status: OL\nbattery.charge: 9\nbattery.runtime: NaN\n")?,
+        blind("battery.runtime")
+    );
+    assert_eq!(verdict("ups.status: OL\nbattery.charge: 100\nups.load: NaN\n")?, Health::Healthy);
     assert_eq!(parse("ups.status: OB\nbattery.charge: 150\n")?.rejected_fields, 1);
     Ok(())
 }
@@ -266,7 +281,8 @@ fn bad_numbers_are_rejected_and_counted() -> TestResult {
     let values = ["NaN", "1e400", "inf", "abc", ""];
     fields.iter().try_for_each(|field| -> TestResult {
         values.iter().try_for_each(|value| -> TestResult {
-            let report = parse(&format!("ups.status: OL\n{field}: {value}\n"))?;
+            let charge = if *field == "battery.charge" { "" } else { "battery.charge: 80\n" };
+            let report = parse(&format!("ups.status: OL\n{charge}{field}: {value}\n"))?;
             assert_eq!(report.rejected_fields, 1, "{field} {value}");
             assert_eq!(report.unreadable, vec![(*field).to_string()]);
             Ok(())
@@ -357,7 +373,7 @@ fn bad_utf8_and_read_errors_are_refused() -> TestResult {
 #[test]
 fn every_flag_is_known() -> TestResult {
     let names = [
-        "OL", "OB", "LB", "RB", "CHRG", "DISCHRG", "BYPASS", "OVER", "TRIM", "BOOST", "FSD", "ALARM", "OFF",
+        "OL", "OB", "LB", "RB", "CHRG", "DISCHRG", "BYPASS", "OVER", "TRIM", "BOOST", "FSD", "ALARM", "OFF", "HB", "CAL", "TEST", "NOCOMM",
     ];
     let flags: Option<Vec<UpsFlag>> = names.iter().map(|name| flag_of(name)).collect();
     let distinct: std::collections::BTreeSet<UpsFlag> = flags.ok_or("unknown flag")?.into_iter().collect();
@@ -411,5 +427,98 @@ fn measures_carry_the_ups_label_only() -> TestResult {
     let unlabelled = ups_measures(&parse(OL)?, "-bad,name");
     assert!(unlabelled.iter().all(|item| item.labels.is_empty()));
     assert!(ups_measures(&parse(STALE)?, "lab").is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn missing_charge_is_blind_missing_runtime_is_healthy() -> TestResult {
+    assert_eq!(verdict(NOCHARGE)?, blind("battery.charge"));
+    assert_eq!(verdict("ups.status: OL\n")?, blind("battery.charge"));
+    assert_eq!(verdict("ups.status: OL\nbattery.charge: 100\n")?, Health::Healthy);
+    assert_eq!(verdict(&charged("OL"))?, Health::Healthy);
+    Ok(())
+}
+
+
+#[test]
+fn status_splits_on_ascii_space_only() -> TestResult {
+    assert_eq!(verdict(&charged("OL\u{2003}LB"))?, blind("ups.status"));
+    assert_eq!(verdict(&charged("OL\u{00A0}OB"))?, blind("ups.status"));
+    assert_eq!(verdict(&charged("OL  LB"))?, blind("ups.status"));
+    assert_eq!(verdict(&charged("OL "))?, blind("ups.status"));
+    Ok(())
+}
+
+
+#[test]
+fn every_documented_flag_after_online_is_known() -> TestResult {
+    let degrading = [("HB", "battery high"), ("CAL", "calibrating"), ("TEST", "self test")];
+    degrading.iter().try_for_each(|(flag, cause)| -> TestResult {
+        assert_eq!(verdict(&charged(&format!("OL {flag}")))?, degraded(&[cause]));
+        Ok(())
+    })?;
+    assert_eq!(verdict(&charged("OL NOCOMM"))?, blind("ups.status"));
+    let others = [
+        "LB", "RB", "CHRG", "DISCHRG", "BYPASS", "TRIM", "BOOST", "ALARM", "OB", "OVER", "FSD", "OFF",
+    ];
+    others.iter().try_for_each(|flag| -> TestResult {
+        let report = parse(&charged(&format!("OL {flag}")))?;
+        assert!(report.unreadable.is_empty(), "{flag}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn failing_status_outranks_unreadable_battery_fields() -> TestResult {
+    let statuses = ["OB LB", "OL FSD", "OFF", "OL OVER"];
+    statuses.iter().try_for_each(|status| -> TestResult {
+        assert_eq!(
+            verdict(&format!("ups.status: {status}\nbattery.charge: NaN\n"))?,
+            Health::Failing,
+            "{status}"
+        );
+        assert_eq!(verdict(&format!("ups.status: {status}\n"))?, Health::Failing, "{status}");
+        Ok(())
+    })?;
+    let report = parse("ups.status: OB LB\nbattery.charge: NaN\n")?;
+    assert_eq!(report.unreadable, vec!["battery.charge".to_string()]);
+    assert_eq!(verdict("ups.status: FROB LB OB\nbattery.charge: NaN\n")?, blind("ups.status"));
+    Ok(())
+}
+
+
+#[test]
+fn missing_charge_is_recorded_under_failing() -> TestResult {
+    ["OB LB", "OL FSD", "OFF", "OL OVER"].iter().try_for_each(|status| -> TestResult {
+        let text = format!("ups.status: {status}\n");
+        assert_eq!(verdict(&text)?, Health::Failing, "{status}");
+        assert_eq!(parse(&text)?.unreadable, vec!["battery.charge".to_string()], "{status}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn nocomm_is_recorded_as_unreadable_status() -> TestResult {
+    let text = charged("OL NOCOMM");
+    assert_eq!(verdict(&text)?, blind("ups.status"));
+    assert_eq!(parse(&text)?.unreadable, vec!["ups.status".to_string()]);
+    Ok(())
+}
+
+
+#[test]
+fn eco_and_wait_read_as_unknown_flags() -> TestResult {
+    assert_eq!(verdict(&charged("OL ECO"))?, blind("ups.status"));
+    assert_eq!(verdict(&charged("WAIT"))?, blind("ups.status"));
+    Ok(())
+}
+
+
+#[test]
+fn absent_status_does_not_record_charge() -> TestResult {
+    assert!(parse("ups.load: 5\n")?.unreadable.is_empty());
     Ok(())
 }

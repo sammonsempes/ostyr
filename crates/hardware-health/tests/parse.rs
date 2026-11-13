@@ -332,3 +332,20 @@ fn real_capture_of_a_disk_without_smart() -> TestResult {
     assert_eq!(assess(&report), Health::BlindSpot(BlindReason::CommandFailed(1)));
     Ok(())
 }
+
+
+#[test]
+fn refused_protocol_without_nvme_log_is_blind() -> TestResult {
+    let blind = Health::BlindSpot(BlindReason::UnreadableHealthField("device.protocol".to_string()));
+    let refused = [json!("NVMe "), json!("-NVMe"), json!(true), json!(null)];
+    refused.iter().try_for_each(|value| -> TestResult {
+        let report = report_from(&set(fixture(ATA_HEALTHY)?, "/device/protocol", value.clone())?)?;
+        assert_eq!(assess(&report), blind, "{value}");
+        Ok(())
+    })?;
+    let with_log = report_from(&set(fixture(NVME_HEALTHY)?, "/device/protocol", json!("NVMe "))?)?;
+    assert_eq!(assess(&with_log), Health::Healthy);
+    let absent = report_from(&fixture(ATA_HEALTHY)?)?;
+    assert_eq!(assess(&absent), Health::Healthy);
+    Ok(())
+}

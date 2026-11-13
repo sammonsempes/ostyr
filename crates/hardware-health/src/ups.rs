@@ -7,6 +7,9 @@ use std::collections::BTreeSet;
 use std::io::Read;
 
 
+pub const CHARGE_FIELD: &str = "battery.charge";
+
+
 pub const MAX_KEY_CHARS: usize = 64;
 
 
@@ -40,7 +43,16 @@ fn collect(text: &str, max_lines: usize) -> Result<UpsReport, SmartError> {
         let mut report = empty_report();
         let mut seen = BTreeSet::new();
         text.lines().try_for_each(|line| apply(line, &mut report, &mut seen))?;
+        record_missing_charge(&mut report);
         Ok(report)
+    }
+}
+
+
+fn record_missing_charge(report: &mut UpsReport) {
+    let listed = report.unreadable.iter().any(|name| name == CHARGE_FIELD);
+    if report.status.is_some() && report.battery_charge.is_none() && !listed {
+        report.unreadable.push(CHARGE_FIELD.to_string());
     }
 }
 
@@ -137,19 +149,29 @@ pub fn flag_of(token: &str) -> Option<UpsFlag> {
         "FSD" => Some(UpsFlag::ForcedShutdown),
         "ALARM" => Some(UpsFlag::Alarm),
         "OFF" => Some(UpsFlag::Off),
+        "HB" => Some(UpsFlag::HighBattery),
+        "CAL" => Some(UpsFlag::Calibrating),
+        "TEST" => Some(UpsFlag::Test),
+        "NOCOMM" => Some(UpsFlag::NoComm),
         _ => None,
     }
 }
 
 
 fn status_flags(report: &mut UpsReport, value: &str) -> BTreeSet<UpsFlag> {
-    let parsed: Vec<Option<UpsFlag>> = value.split_whitespace().map(flag_of).collect();
+    let parsed: Vec<Option<UpsFlag>> = Some(value)
+        .filter(|text| !text.is_empty())
+        .into_iter()
+        .flat_map(|text| text.split(' '))
+        .map(flag_of)
+        .collect();
     let unknown = parsed.iter().filter(|flag| flag.is_none()).count();
     report.rejected_fields += unknown;
-    if unknown > 0 {
+    let flags: BTreeSet<UpsFlag> = parsed.into_iter().flatten().collect();
+    if unknown > 0 || flags.contains(&UpsFlag::NoComm) {
         report.unreadable.push("ups.status".to_string());
     }
-    parsed.into_iter().flatten().collect()
+    flags
 }
 
 
