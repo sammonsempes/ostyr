@@ -314,3 +314,44 @@ fn a_v6_file_without_a_hwaddr_column_has_no_mac() -> TestResult {
     assert_eq!(at(&event, "/source/ip"), "2001:db8::1");
     Ok(())
 }
+
+
+const LIVE_ASSIGNED: &str = "10.77.0.100,aa:bb:cc:dd:ee:ff,01:aa:bb:cc:dd:ee:ff,600,1794542009,1,0,0,,0,,0";
+
+
+const LIVE_DECLINED: &str = "10.77.0.100,,,600,1794542009,1,0,0,,1,,0";
+
+
+#[test]
+fn a_declined_row_without_a_mac_is_a_declined_event_after_the_assignment() -> TestResult {
+    let assigned = convert_row(&parse_header(V4_26)?, LIVE_ASSIGNED)?;
+    let declined = convert_row(&parse_header(V4_26)?, LIVE_DECLINED)?;
+    let json = event_json(V4_26, LIVE_DECLINED)?;
+    assert_eq!(at(&json, "/event/action"), "lease-declined");
+    assert_eq!(at(&json, "/source/mac"), "<absent>");
+    assert_eq!(at(&json, "/source/ip"), "10.77.0.100");
+    assert_eq!(assigned.event.event.action.as_deref(), Some("lease-assigned"));
+    assert_eq!(assigned.event.event.start, declined.event.event.start);
+    assert_ne!(assigned.key, declined.key);
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_hwaddr_on_another_v4_state_stays_malformed() -> TestResult {
+    ["0", "2", "7"].iter().try_for_each(|state| -> TestResult {
+        let row = LIVE_DECLINED.replace(",,1,,0", &format!(",,{state},,0"));
+        assert_eq!(failure(V4_26, &row)?, "hwaddr", "state {state}");
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_row_with_a_zero_lifetime_is_a_release_never_an_assignment() -> TestResult {
+    let released = LIVE_ASSIGNED.replace(",600,", ",0,");
+    assert_eq!(at(&event_json(V4_26, &released)?, "/event/action"), "lease-released");
+    let reclaimed = released.replace(",,0,,0", ",,2,,0");
+    assert_eq!(at(&event_json(V4_26, &reclaimed)?, "/event/action"), "lease-expired-reclaimed");
+    Ok(())
+}

@@ -101,9 +101,9 @@ fn address_of(family: Family, text: &str) -> Result<String, RowError> {
 }
 
 
-fn mac_of(family: Family, text: &str) -> Result<Option<String>, RowError> {
-    match (family, text.is_empty()) {
-        (Family::V6, true) => Ok(None),
+fn mac_of(family: Family, state: u32, text: &str) -> Result<Option<String>, RowError> {
+    match (family, state, text.is_empty()) {
+        (Family::V6, _, true) | (Family::V4, STATE_DECLINED, true) => Ok(None),
         _ => normalise_mac(text).map(Some).ok_or(RowError::Mac),
     }
 }
@@ -114,8 +114,9 @@ fn seconds(text: &str, error: RowError) -> Result<i64, RowError> {
 }
 
 
-fn action_of(state: u32) -> String {
+fn action_of(state: u32, lifetime: i64) -> String {
     match state {
+        STATE_DEFAULT if lifetime == 0 => "lease-released".to_string(),
         STATE_DEFAULT => "lease-assigned".to_string(),
         STATE_DECLINED => "lease-declined".to_string(),
         STATE_EXPIRED_RECLAIMED => "lease-expired-reclaimed".to_string(),
@@ -131,12 +132,12 @@ pub fn convert_row(columns: &Columns, text: &str) -> Result<Converted, RowError>
         Err(RowError::ColumnCount)
     } else {
         let address = address_of(columns.family, field(&fields, columns.address))?;
-        let mac = mac_of(columns.family, columns.hwaddr.map_or("", |index| field(&fields, index)))?;
+        let state = u32::from_str(field(&fields, columns.state)).map_err(|_| RowError::State)?;
+        let mac = mac_of(columns.family, state, columns.hwaddr.map_or("", |index| field(&fields, index)))?;
         let end = seconds(field(&fields, columns.expire), RowError::Expire)?;
         let lifetime = seconds(field(&fields, columns.valid_lifetime), RowError::Lifetime)?;
         let start = end.checked_sub(lifetime).filter(|found| *found >= 0).ok_or(RowError::Range)?;
         let subnet = u32::from_str(field(&fields, columns.subnet_id)).map_err(|_| RowError::Subnet)?;
-        let state = u32::from_str(field(&fields, columns.state)).map_err(|_| RowError::State)?;
         let (hostname, raw_label) = hostname_fields(field(&fields, columns.hostname));
         let duid = columns.duid.map(|index| field(&fields, index)).filter(|found| !found.is_empty());
         let labels = [
@@ -152,7 +153,7 @@ pub fn convert_row(columns: &Columns, text: &str) -> Result<Converted, RowError>
                 kind: Some("event".to_string()),
                 category: vec!["network".to_string()],
                 types: vec!["info".to_string()],
-                action: Some(action_of(state)),
+                action: Some(action_of(state, lifetime)),
                 dataset: Some(DATASET.to_string()),
                 module: Some(MODULE.to_string()),
                 start: Some(timestamp),
