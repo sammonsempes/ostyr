@@ -94,3 +94,45 @@ pub struct Measure {
     pub value: f64,
     pub labels: Vec<(String, String)>,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UpsFlag {
+    Online,
+    OnBattery,
+    LowBattery,
+    ReplaceBattery,
+    Charging,
+    Discharging,
+    Bypass,
+    Overload,
+    Trim,
+    Boost,
+    ForcedShutdown,
+    Alarm,
+    Off,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpsReport {
+    pub status: Option<std::collections::BTreeSet<UpsFlag>>,
+    pub battery_charge: Option<f64>,
+    pub battery_runtime: Option<f64>,
+    pub input_voltage: Option<f64>,
+    pub output_voltage: Option<f64>,
+    pub load: Option<f64>,
+    pub temperature: Option<f64>,
+    pub rejected_fields: usize,
+    pub unreadable: Vec<String>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsThresholds {
+    #[serde(default = "crate::limits::default_min_battery_charge")]
+    pub min_battery_charge: u8,
+    #[serde(default = "crate::limits::default_min_runtime_seconds")]
+    pub min_runtime_seconds: u32,
+}
