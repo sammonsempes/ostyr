@@ -13,6 +13,7 @@ pub const DEFAULT_MAX_FLOW_RECORDS_PER_SECOND: u32 = 10_000;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceFile {
+    #[serde(deserialize_with = "crate::bounded::bounded_devices")]
     pub devices: Vec<Device>,
 }
 
@@ -36,6 +37,7 @@ pub struct Device {
     pub name: String,
     pub tenant: String,
     pub kind: DeviceKind,
+    #[serde(deserialize_with = "crate::bounded::bounded_addresses")]
     pub addresses: Vec<IpAddr>,
     #[serde(default)]
     pub agent_managed: bool,

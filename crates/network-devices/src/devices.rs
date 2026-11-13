@@ -5,6 +5,7 @@ use core_pg::scope::tenant_scope;
 use site_collector::listen_settings::source_key;
 use std::collections::BTreeSet;
 use std::io::Read;
+use std::net::IpAddr;
 
 
 pub const MAX_FILE_BYTES: u64 = 262_144;
@@ -38,12 +39,6 @@ pub const MAX_STALE_SECONDS: u64 = 2_592_000;
 pub fn parse_device_file(reader: &mut dyn Read, file: &str) -> Result<LoadResult, DeviceError> {
     let text = read_text_capped(reader, file, MAX_FILE_BYTES)?;
     let parsed = parse_document::<DeviceFile>(&text, file)?;
-    (parsed.devices.len() <= MAX_DEVICES_PER_FILE)
-        .then_some(())
-        .ok_or_else(|| DeviceError::TooManyDevices {
-            file: file.to_owned(),
-            count: parsed.devices.len(),
-        })?;
     parsed.devices.iter().enumerate().try_for_each(|(index, device)| {
         validate_device(device).map_err(|field| DeviceError::Invalid {
             file: file.to_owned(),
@@ -64,7 +59,10 @@ pub fn validate_device(device: &Device) -> Result<(), &'static str> {
     let checks = [
         ("name", name_ok(&device.name)),
         ("tenant", tenant_scope(&device.tenant).is_ok()),
-        ("addresses", (1..=MAX_ADDRESSES).contains(&device.addresses.len())),
+        (
+            "addresses",
+            (1..=MAX_ADDRESSES).contains(&device.addresses.len()) && device.addresses.iter().all(address_ok),
+        ),
         (
             "volumes.max_traps_per_minute",
             (1..=MAX_TRAPS_PER_MINUTE).contains(&device.volumes.max_traps_per_minute),
@@ -75,7 +73,10 @@ pub fn validate_device(device: &Device) -> Result<(), &'static str> {
         ),
         ("stale_after_seconds", (1..=MAX_STALE_SECONDS).contains(&device.stale_after_seconds)),
     ];
-    let snmp_failure = device.snmp.as_ref().and_then(|snmp| failed_snmp_field(snmp, device.agent_managed));
+    let snmp_failure = device
+        .snmp
+        .as_ref()
+        .and_then(|snmp| failed_snmp_field(snmp, &device.tenant, device.agent_managed));
     first_failed(&checks).or(snmp_failure).map_or(Ok(()), Err)
 }
 
@@ -85,10 +86,13 @@ pub fn first_failed(checks: &[(&'static str, bool)]) -> Option<&'static str> {
 }
 
 
-pub fn failed_snmp_field(snmp: &SnmpSettings, agent_managed: bool) -> Option<&'static str> {
+pub fn failed_snmp_field(snmp: &SnmpSettings, tenant: &str, agent_managed: bool) -> Option<&'static str> {
     let is_v3 = snmp.version == SnmpVersion::V3;
     first_failed(&[
-        ("snmp.credentials", reference_ok(&snmp.credentials)),
+        (
+            "snmp.credentials",
+            reference_ok(&snmp.credentials) && tenant_bound(&snmp.credentials, tenant),
+        ),
         ("snmp.polling", !(snmp.polling && agent_managed)),
         ("snmp.version", is_v3 || snmp.accept_insecure),
         ("snmp.v3", !is_v3 || v3_complete(snmp)),
@@ -113,6 +117,22 @@ pub fn segment_ok(segment: &str) -> bool {
 
 pub fn name_ok(name: &str) -> bool {
     name.len() <= MAX_NAME_BYTES && segment_ok(name)
+}
+
+
+/// A reference whose first path segment is the device tenant, so a tenant cannot name another tenant's secret.
+pub fn tenant_bound(reference: &str, tenant: &str) -> bool {
+    reference.strip_prefix(tenant).is_some_and(|rest| rest.starts_with('/'))
+}
+
+
+/// A usable source: not unspecified, loopback, multicast, the IPv4 broadcast or IPv4-mapped IPv6 (`source_key` folds `::` and `::1` together).
+pub fn address_ok(address: &IpAddr) -> bool {
+    let refused = match address {
+        IpAddr::V4(v4) => [v4.is_unspecified(), v4.is_loopback(), v4.is_multicast(), v4.is_broadcast()],
+        IpAddr::V6(v6) => [v6.is_unspecified(), v6.is_loopback(), v6.is_multicast(), v6.to_ipv4_mapped().is_some()],
+    };
+    !refused.contains(&true)
 }
 
 
