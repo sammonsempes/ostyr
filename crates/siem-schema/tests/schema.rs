@@ -1,10 +1,16 @@
 use siem_schema::column::{Column, ColumnType};
 use siem_schema::create::render_create_table;
 use siem_schema::error::SchemaError;
-use siem_schema::identifier::{quote_identifier, validate_identifier};
+use siem_schema::identifier::{quote_identifier, validate_identifier, MAX_IDENTIFIER_BYTES};
 use siem_schema::migrate::{render_migration, render_ttl_migration};
 use siem_schema::schema::default_columns;
 use siem_schema::ttl::{render_ttl, TierRetention, TtlSettings, MAX_RETENTION_DAYS, MAX_TIERS};
+
+
+const HOSTILE_BYTES: usize = 10_000;
+
+
+const MAX_ERROR_BYTES: usize = 200;
 
 
 const DEFAULT_DAYS: u32 = 30;
@@ -178,6 +184,20 @@ fn ttl_validation() -> Result<(), SchemaError> {
         tiers: vec![tier("gold", 0)],
     };
     assert_eq!(render_ttl(&bad_days), Err(SchemaError::InvalidDays(0, MAX_RETENTION_DAYS)));
+    Ok(())
+}
+
+
+#[test]
+fn identifier_length_is_bounded() -> Result<(), SchemaError> {
+    let longest = "a".repeat(MAX_IDENTIFIER_BYTES);
+    assert_eq!(validate_identifier(&longest)?, longest);
+    let too_long = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+    assert!(matches!(validate_identifier(&too_long), Err(SchemaError::InvalidIdentifier(_))));
+    let hostile = "A".repeat(HOSTILE_BYTES);
+    let message = validate_identifier(&hostile).err().map(|error| error.to_string());
+    assert!(message.as_ref().is_some_and(|text| text.len() < MAX_ERROR_BYTES));
+    assert!(message.is_some_and(|text| text.contains("… [9936 bytes omitted]")));
     Ok(())
 }
 
