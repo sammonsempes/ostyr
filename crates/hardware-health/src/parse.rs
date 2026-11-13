@@ -21,7 +21,7 @@ pub fn parse_smartctl<Input: Read>(mut reader: Input, limits: &Limits) -> Result
 }
 
 
-fn read_bounded(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, SmartError> {
+pub fn read_bounded(reader: &mut dyn Read, max_bytes: u64) -> Result<Vec<u8>, SmartError> {
     let mut bytes = Vec::new();
     reader.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max_bytes {
