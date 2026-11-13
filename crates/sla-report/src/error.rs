@@ -1,3 +1,4 @@
+use crate::types::FiguresError;
 use thiserror::Error;
 
 
@@ -59,4 +60,23 @@ pub enum ScheduleError {
     Time(#[from] time::error::ComponentRange),
     #[error("cannot format a time")]
     Format(#[from] time::error::Format),
+}
+
+
+#[derive(Debug, Error)]
+pub enum RunError {
+    #[error("invalid report id")]
+    InvalidId,
+    #[error("the `pdf` format is not supported")]
+    PdfNotSupported,
+    #[error("cannot read the figures of a service")]
+    Figures(#[source] FiguresError),
+    #[error(transparent)]
+    Sla(#[from] SlaError),
+    #[error(transparent)]
+    Schedule(#[from] ScheduleError),
+    #[error(transparent)]
+    Export(#[from] ExportError),
+    #[error("cannot write the report file")]
+    Io(#[from] std::io::Error),
 }

@@ -11,8 +11,10 @@ core-pg = { version = "0.0.0", path = "../core-pg" }
 csv = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
+tracing = "0.1"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 
 [lints]

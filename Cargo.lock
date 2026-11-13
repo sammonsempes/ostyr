@@ -5842,8 +5842,10 @@ dependencies = [
  "csv",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tracing",
  "unicode-properties",
 ]
 
