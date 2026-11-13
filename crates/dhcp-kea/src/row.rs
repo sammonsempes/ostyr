@@ -146,7 +146,7 @@ pub fn convert_row(columns: &Columns, text: &str) -> Result<Converted, RowError>
         ];
         let timestamp = OffsetDateTime::from_unix_timestamp(start).map_err(|_| RowError::Range)?;
         let event_end = OffsetDateTime::from_unix_timestamp(end).map_err(|_| RowError::Range)?;
-        let key = (start, end, address.clone(), mac.clone().unwrap_or_else(String::new));
+        let key = (start, end, address.clone(), mac.clone().unwrap_or_else(String::new), state);
         let event = EcsEvent {
             event: EventFields {
                 kind: Some("event".to_string()),

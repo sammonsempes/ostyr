@@ -113,7 +113,7 @@ fn the_lease_key_is_ordered_by_creation_time_first() -> TestResult {
     let converted = convert_row(&parse_header(V4_24)?, ROW_24)?;
     assert_eq!(
         converted.key,
-        (ROW_24_START, ROW_24_END, "192.168.1.10".to_string(), "AA-BB-CC-DD-EE-FF".to_string())
+        (ROW_24_START, ROW_24_END, "192.168.1.10".to_string(), "AA-BB-CC-DD-EE-FF".to_string(), 0)
     );
     Ok(())
 }

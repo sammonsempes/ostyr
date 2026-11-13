@@ -17,6 +17,18 @@ use types::TestResult;
 const HEADER: &str = "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context";
 
 
+const TWO_KEYS: usize = 2;
+
+
+const ALTERNATIONS: usize = 10_000;
+
+
+const ALTERNATING_ROWS: usize = 20_001;
+
+
+const ALTERNATING_DUPLICATES: u64 = 19_998;
+
+
 const ROW_1: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700003600,1,0,0,host1.example.,0,";
 
 
@@ -27,6 +39,12 @@ const ROW_3: &str = "10.0.0.3,aa:bb:cc:dd:ee:03,01,3600,1700003600,1,0,0,host3.e
 
 
 const ROW_4: &str = "10.0.0.4,aa:bb:cc:dd:ee:04,01,3600,1700003600,1,0,0,host4.example.,0,";
+
+
+const ROW_1_RECLAIMED: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700003600,1,0,0,,2,";
+
+
+const ROW_1_DECLINED: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700003600,1,0,0,,1,";
 
 
 const ROW_1_RENEWED: &str = "10.0.0.1,aa:bb:cc:dd:ee:01,01,3600,1700007200,1,0,0,host1.example.,0,";
@@ -260,13 +278,13 @@ fn the_seen_set_is_bounded_and_evictions_are_counted() -> TestResult {
     let mut counts = Counts::default();
     assert!(remember(
         &mut run.state.seen,
-        (NEWEST_EXPIRE, NEWEST_EXPIRE, "a".to_string(), "b".to_string()),
+        (NEWEST_EXPIRE, NEWEST_EXPIRE, "a".to_string(), "b".to_string(), 0),
         SMALL_SEEN,
         &mut counts
     ));
     assert!(!remember(
         &mut run.state.seen,
-        (NEWEST_EXPIRE, NEWEST_EXPIRE, "a".to_string(), "b".to_string()),
+        (NEWEST_EXPIRE, NEWEST_EXPIRE, "a".to_string(), "b".to_string(), 0),
         SMALL_SEEN,
         &mut counts
     ));
@@ -463,6 +481,51 @@ fn malformed_rows_are_counted_per_kind_without_their_content() -> TestResult {
     let summary = malformed_summary(&run.counts);
     assert_eq!(summary, "address=2,column-count=1,not-utf8=1");
     assert!(!summary.contains("not-an-address"));
+    Ok(())
+}
+
+
+fn actions(path: &Path, run: &mut Run) -> Result<Vec<String>, KeaError> {
+    let mut events: Vec<EcsEvent> = Vec::new();
+    poll(path, &mut run.state, &Limits::default(), &mut run.counts, &mut events)?;
+    Ok(events.iter().filter_map(|event| event.event.action.clone()).collect())
+}
+
+
+#[test]
+fn a_reclaimed_or_declined_row_is_its_own_event_and_a_repeat_is_a_duplicate() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    write(&path, lines(&[HEADER, ROW_1, ROW_1_RECLAIMED, ROW_1_RECLAIMED, ROW_1_DECLINED]))?;
+    let mut run = fresh();
+    let found = actions(&path, &mut run)?;
+    assert_eq!(found, ["lease-assigned", "lease-expired-reclaimed", "lease-declined"]);
+    assert_eq!((run.counts.duplicate, run.counts.processed), (1, THREE));
+    Ok(())
+}
+
+
+#[test]
+fn alternating_assigned_and_reclaimed_rows_stay_within_the_seen_cap() -> TestResult {
+    let directory = tempdir()?;
+    let path = directory.path().join("leases.csv");
+    let rows: Vec<&str> = std::iter::once(HEADER)
+        .chain((0..ALTERNATIONS).flat_map(|_| [ROW_1, ROW_1_RECLAIMED]))
+        .collect();
+    write(&path, lines(&rows))?;
+    let mut run = fresh();
+    let limits = Limits {
+        max_lines: ALTERNATING_ROWS,
+        ..Limits::default()
+    };
+    let found = {
+        let mut events: Vec<EcsEvent> = Vec::new();
+        poll(&path, &mut run.state, &limits, &mut run.counts, &mut events)?;
+        events.len()
+    };
+    assert_eq!(found, TWO_KEYS);
+    assert_eq!(run.state.seen.len(), TWO_KEYS);
+    assert_eq!(run.counts.duplicate, ALTERNATING_DUPLICATES);
     Ok(())
 }
 
@@ -805,8 +868,8 @@ fn numbered_rows() -> Vec<String> {
 fn a_new_short_lease_is_not_the_first_victim_of_a_full_set() -> TestResult {
     let mut seen = SeenLeases::new();
     let mut counts = Counts::default();
-    let history = (1, LONG_EXPIRE, "a".to_string(), "b".to_string());
-    let fresh = (TWO_CLTT, SHORT_EXPIRE, "c".to_string(), "d".to_string());
+    let history = (1, LONG_EXPIRE, "a".to_string(), "b".to_string(), 0);
+    let fresh = (TWO_CLTT, SHORT_EXPIRE, "c".to_string(), "d".to_string(), 0);
     assert_eq!(remember_key(&mut seen, history.clone(), 1, &mut counts), Remembered::Fresh);
     assert_eq!(remember_key(&mut seen, fresh.clone(), 1, &mut counts), Remembered::Fresh);
     assert!(!seen.contains(&history));
@@ -819,8 +882,8 @@ fn a_new_short_lease_is_not_the_first_victim_of_a_full_set() -> TestResult {
 fn a_key_evicted_on_its_own_insert_is_not_fresh() -> TestResult {
     let mut seen = SeenLeases::new();
     let mut counts = Counts::default();
-    let newest = (NEWEST_EXPIRE, NEWEST_EXPIRE, "a".to_string(), "b".to_string());
-    let oldest = (1, 1, "a".to_string(), "b".to_string());
+    let newest = (NEWEST_EXPIRE, NEWEST_EXPIRE, "a".to_string(), "b".to_string(), 0);
+    let oldest = (1, 1, "a".to_string(), "b".to_string(), 0);
     assert_eq!(remember_key(&mut seen, newest.clone(), 1, &mut counts), Remembered::Fresh);
     assert_eq!(remember_key(&mut seen, oldest.clone(), 1, &mut counts), Remembered::Beyond);
     assert_eq!(remember_key(&mut seen, newest.clone(), 1, &mut counts), Remembered::Known);
