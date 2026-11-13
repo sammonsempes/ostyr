@@ -950,6 +950,7 @@ dependencies = [
  "core-pg",
  "csv",
  "metrics-ingest",
+ "percent-encoding",
  "rust_decimal",
  "serde",
  "serde_json",
