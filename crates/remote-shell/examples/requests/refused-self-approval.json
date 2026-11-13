@@ -1,0 +1,12 @@
+{
+  "catalog": {"shell_operator": ["remote_shell.open"], "shell_approver": ["remote_shell.approve"]},
+  "request": {"request_id": "req-refused-self-approval", "tenant": "acme", "requester": "alice", "asset": "db-1", "ticket": "INC-4521", "created_at": 1799999940},
+  "requester_roles": ["shell_operator"],
+  "asset_criticality": "critical",
+  "evidence": {
+    "mfa": {"request_id": "req-refused-self-approval", "verified_at": 1799999970},
+    "approvals": [{"request_id": "req-refused-self-approval", "tenant": "acme", "approver": "alice", "approved_at": 1799999980}],
+    "approver_roles": {"alice": ["shell_operator", "shell_approver"]}
+  },
+  "now": 1800000000
+}
