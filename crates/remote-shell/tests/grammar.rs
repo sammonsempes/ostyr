@@ -10,6 +10,9 @@ fn subjects_with_plain_characters_are_valid() -> TestResult {
     assert!(valid_subject("alice"));
     assert!(valid_subject("alice.b@example.org"));
     assert!(valid_subject("auth0:x"));
+    assert!(valid_subject("auth0|123"));
+    assert!(valid_subject("a||"));
+    assert!(valid_subject("|x"));
     assert!(valid_subject(&"a".repeat(MAX_SUBJECT_BYTES)));
     Ok(())
 }

@@ -8,7 +8,7 @@ use remote_shell::open::{
     age_of, decide_open, Approval, Evidence, MfaProof, OpenDecision, OpenRefusal, OpenRequest, MAX_APPROVALS, MAX_CLOCK_SKEW_SECONDS,
     PERMISSION_REMOTE_SHELL_APPROVE, PERMISSION_REMOTE_SHELL_OPEN,
 };
-use remote_shell::policy::{ShellPolicy, DEFAULT_APPROVAL_MAX_AGE_SECONDS, DEFAULT_MFA_MAX_AGE_SECONDS};
+use remote_shell::policy::{validate_policy, ShellPolicy, ValidatedPolicy, DEFAULT_APPROVAL_MAX_AGE_SECONDS, DEFAULT_MFA_MAX_AGE_SECONDS};
 use remote_shell::types::Seconds;
 
 
@@ -95,7 +95,7 @@ fn evidence(approvals: Vec<Approval>) -> Evidence {
 
 fn decide(request: &OpenRequest, criticality: Option<Criticality>, evidence: &Evidence) -> OpenDecision {
     decide_open(
-        &ShellPolicy::default(),
+        &ValidatedPolicy::default(),
         &catalog(),
         request,
         &roles(&["operator"]),
@@ -182,7 +182,7 @@ fn an_invalid_request_id_is_refused_even_when_the_proof_carries_the_same_one() -
 #[test]
 fn a_requester_without_the_role_is_refused() -> TestResult {
     let decision = decide_open(
-        &ShellPolicy::default(),
+        &ValidatedPolicy::default(),
         &catalog(),
         &request(),
         &roles(&["approver", "unknown"]),
@@ -480,9 +480,10 @@ fn the_policy_may_lower_the_dual_approval_threshold() -> TestResult {
         dual_approval_from: Criticality::High,
         ..ShellPolicy::default()
     };
+    let checked = validate_policy(&strict, "strict")?;
     let decide_with = |criticality| {
         decide_open(
-            &strict,
+            &checked,
             &catalog(),
             &request(),
             &roles(&["operator"]),
@@ -512,7 +513,8 @@ fn the_first_failing_check_is_the_one_reported() -> TestResult {
         mfa: None,
         ..evidence(Vec::new())
     };
-    let run = |request: &OpenRequest, roles_held: &RoleSet| decide_open(&ShellPolicy::default(), &catalog(), request, roles_held, None, &none, NOW);
+    let run =
+        |request: &OpenRequest, roles_held: &RoleSet| decide_open(&ValidatedPolicy::default(), &catalog(), request, roles_held, None, &none, NOW);
     let no_roles = RoleSet::new();
     assert_eq!(run(&broken, &no_roles), refused(OpenRefusal::Tenant));
     let tenant_fixed = OpenRequest {

@@ -1,5 +1,5 @@
 use crate::open::MAX_CLOCK_SKEW_SECONDS;
-use crate::policy::ShellPolicy;
+use crate::policy::{policy_of, ShellPolicy, ValidatedPolicy};
 use crate::types::Seconds;
 
 
@@ -74,12 +74,12 @@ pub fn refreshed(event: SessionEvent, last_activity: Seconds, now: Seconds) -> S
 
 
 /// Only `Input` refreshes the idle timer; a closed session stays closed whatever follows.
-pub fn session_step(policy: &ShellPolicy, state: SessionState, event: SessionEvent, now: Seconds) -> SessionState {
+pub fn session_step(policy: &ValidatedPolicy, state: SessionState, event: SessionEvent, now: Seconds) -> SessionState {
     match state {
         SessionState::Closed(reason) => SessionState::Closed(reason),
         SessionState::Open { opened_at, last_activity } => match terminal_reason(event)
             .or_else(|| clock_went_back(opened_at, last_activity, now))
-            .or_else(|| expiry(policy, opened_at, last_activity, now))
+            .or_else(|| expiry(policy_of(policy), opened_at, last_activity, now))
         {
             Some(reason) => SessionState::Closed(reason),
             None => SessionState::Open {
