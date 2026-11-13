@@ -61,6 +61,12 @@ const REPORT_WRITES: usize = 64;
 const SPANS: usize = 2;
 
 
+const FIVE_SPANS: u8 = 5;
+
+
+const SENT_BEFORE_FAILURE: usize = 2;
+
+
 const NOT_UTF8: [u8; 2] = [0xff, 0xfe];
 
 
@@ -461,6 +467,27 @@ fn a_lowered_batch_row_limit_from_the_settings_file_splits_the_batches() -> Test
     let report = go(&rig, &good(), "acme")?;
     assert_eq!((report.rows, report.batches_planned, report.batches_sent), (SPANS, SPANS, SPANS));
     joined(server)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_third_batch_stops_the_sends_and_keeps_the_counts() -> TestResult {
+    let rig = rig()?;
+    with_limits(&rig, "limits:\n  max_batch_rows: 1\n")?;
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK, SERVER_ERROR]);
+    let spans = (1..=FIVE_SPANS).map(|seed| span(seed, NOW, TRACE_ID_BYTES)).collect();
+    let report = go(&rig, &request(spans), "acme")?;
+    assert_eq!(
+        (report.rows, report.batches_planned, report.batches_sent, report.failed_batch),
+        (
+            usize::from(FIVE_SPANS),
+            usize::from(FIVE_SPANS),
+            SENT_BEFORE_FAILURE,
+            Some(SENT_BEFORE_FAILURE)
+        )
+    );
+    assert_eq!(joined(server)?.len(), SENT_BEFORE_FAILURE + 1);
     Ok(())
 }
 

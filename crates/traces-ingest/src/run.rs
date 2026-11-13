@@ -1,10 +1,10 @@
 use crate::decode::decode_traces;
-use crate::insert::{encode_spans, insert_statement};
+use crate::insert::{insert_statement, stream_spans};
 use crate::model::Refusal;
 use crate::sampling::Sampling;
 use crate::settings::{load_traces_settings, to_metrics_settings};
 use crate::types::{Dropped, RefusedCounts};
-use metrics_ingest::insert::{insert_batches, EncodeError};
+use metrics_ingest::insert::{Batch, EncodeError};
 use metrics_ingest::send::{statement_sender, SendError};
 use metrics_ingest::settings::{LoadError, SettingsError};
 use metrics_ingest::types::ElapsedFn;
@@ -52,24 +52,37 @@ pub fn run_insert(
     let traces = load_traces_settings(settings_path)?;
     let statement = insert_statement(&traces.database, &traces.table)?;
     let outcome = decode_traces(request, tenant, &traces.limits, sampling, now_nanos);
-    let encoded = encode_spans(&outcome.rows, &traces.limits, now_nanos)?;
-    let sent = if encoded.batches.is_empty() {
-        Ok(0)
-    } else {
-        let settings = to_metrics_settings(&traces);
-        let mut send = statement_sender(&settings, statement, elapsed)?;
-        insert_batches(&encoded.batches, |body| send(body).map_err(|error| error.to_string()))
+    let row_count = outcome.rows.len();
+    let settings = to_metrics_settings(&traces);
+    let mut link = None;
+    let mut planned = 0;
+    let mut sent = 0;
+    let mut failed = None;
+    let mut emit = |batch: Batch| {
+        planned += 1;
+        let delivered = failed.is_none()
+            && match link.get_or_insert_with(|| statement_sender(&settings, statement.clone(), elapsed)) {
+                Ok(send) => send(&batch.body).is_ok(),
+                Err(_) => false,
+            };
+        if delivered {
+            sent += 1;
+        } else if failed.is_none() {
+            failed = Some(sent);
+        }
     };
+    let refused = stream_spans(outcome.rows, &traces.limits, now_nanos, &mut emit)?;
+    link.and_then(Result::err).map_or(Ok(()), |error| Err(RunError::Send(error)))?;
     Ok(RunReport {
         tenant: outcome.tenant,
-        rows: outcome.rows.len(),
+        rows: row_count,
         dropped: outcome.dropped,
         sampled_out: outcome.sampled_out,
         refusal: outcome.refusal,
-        refused: encoded.refused,
-        batches_planned: encoded.batches.len(),
-        batches_sent: sent.as_ref().map_or_else(|failed| failed.sent, |count| *count),
-        failed_batch: sent.err().map(|failed| failed.sent),
+        refused,
+        batches_planned: planned,
+        batches_sent: sent,
+        failed_batch: failed,
     })
 }
 
