@@ -3,7 +3,9 @@ use crate::common::{
     claims, setup, token_for, FOURTH_LINE, GARBAGE_BYTE, LIFETIME, LINE_COUNT, NOW, PEER, RELAY_SEED, SECOND_NONCE, SEED_LENGTH, TENANT, THIRD_LINE,
 };
 use data_encoding::HEXLOWER;
-use remote_desktop::cli::{line_verdict, read_line, signing_key_from, verify_session, write_issued, write_keypair, LINE_LIMIT};
+use remote_desktop::cli::{
+    check_owner_and_mode, line_verdict, read_line, read_signing_key, signing_key_from, verify_session, write_issued, write_keypair, LINE_LIMIT,
+};
 use remote_desktop::error::CliError;
 use remote_desktop::model::{Line, MAX_TOKEN_BYTES};
 use remote_desktop::sign::{new_identifiers, os_random};
@@ -84,6 +86,44 @@ impl Read for ServesThenFails {
 }
 
 
+const OWNER_ONLY: u32 = 0o600;
+
+
+const GROUP_READABLE: u32 = 0o640;
+
+
+const WORLD_READABLE: u32 = 0o644;
+
+
+const OTHER_USER: u32 = 4242;
+
+
+const ROOT_USER: u32 = 0;
+
+
+const OVERSIZE_SEED_FILE: usize = 200;
+
+
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) -> io::Result<()> {
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
+}
+
+
+#[cfg(not(unix))]
+fn set_mode(_path: &std::path::Path, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+
+fn seed_file(dir: &tempfile::TempDir, name: &str, text: &str, mode: u32) -> Result<String, Box<dyn std::error::Error>> {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text)?;
+    set_mode(&path, mode)?;
+    Ok(path.display().to_string())
+}
+
+
 fn failing_fill(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
     Err(getrandom::Error::UNSUPPORTED)
 }
@@ -117,6 +157,81 @@ fn run(input: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
 
 fn json(lifetime: u64, subject: &str) -> String {
     format!("{{\"key_id\":\"relay-1\",\"tenant\":\"{TENANT}\",\"device_peer_id\":\"{PEER}\",\"viewer_subject\":\"{subject}\",\"lifetime_seconds\":{lifetime}}}")
+}
+
+
+#[test]
+fn the_seed_is_read_from_a_private_file_and_never_from_the_command_line() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let hex = HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]);
+    let private = seed_file(&dir, "private", &format!("{hex}\n"), OWNER_ONLY)?;
+    assert_eq!(
+        read_signing_key(std::path::Path::new(&private))?.to_bytes(),
+        signing_key_from(&hex)?.to_bytes()
+    );
+    let mut out = Vec::new();
+    assert!(matches!(
+        write_issued(&[&hex, &json(LIFETIME, "alice")], NOW, os_random, &mut out),
+        Err(CliError::SeedFile(_))
+    ));
+    assert!(out.is_empty());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_seed_file_open_to_group_or_other_is_refused_before_it_is_read() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let hex = HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]);
+    [WORLD_READABLE, GROUP_READABLE].iter().try_for_each(|mode| {
+        let path = seed_file(&dir, "open", &hex, *mode)?;
+        assert!(matches!(read_signing_key(std::path::Path::new(&path)), Err(CliError::SeedMode)));
+        let mut out = Vec::new();
+        assert!(matches!(
+            write_issued(&[&path, &json(LIFETIME, "alice")], NOW, os_random, &mut out),
+            Err(CliError::SeedMode)
+        ));
+        assert!(out.is_empty());
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn the_owner_check_names_a_seed_file_of_another_user() -> TestResult {
+    assert!(matches!(
+        check_owner_and_mode(OWNER_ONLY, OTHER_USER, ROOT_USER),
+        Err(CliError::SeedOwner)
+    ));
+    assert!(check_owner_and_mode(OWNER_ONLY, ROOT_USER, ROOT_USER).is_ok());
+    assert!(matches!(
+        check_owner_and_mode(WORLD_READABLE, ROOT_USER, ROOT_USER),
+        Err(CliError::SeedMode)
+    ));
+    assert!(matches!(
+        check_owner_and_mode(GROUP_READABLE, ROOT_USER, ROOT_USER),
+        Err(CliError::SeedMode)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_bad_seed_file_is_refused() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let missing = dir.path().join("missing");
+    assert!(matches!(read_signing_key(&missing), Err(CliError::SeedFile(_))));
+    assert!(matches!(read_signing_key(dir.path()), Err(CliError::SeedFile(_))));
+    let binary = dir.path().join("binary");
+    std::fs::write(&binary, [GARBAGE_BYTE, GARBAGE_BYTE - 1])?;
+    set_mode(&binary, OWNER_ONLY)?;
+    assert!(matches!(read_signing_key(&binary), Err(CliError::SeedText)));
+    let large = seed_file(&dir, "large", &"a".repeat(OVERSIZE_SEED_FILE), OWNER_ONLY)?;
+    assert!(matches!(read_signing_key(std::path::Path::new(&large)), Err(CliError::SeedFile(_))));
+    let short = seed_file(&dir, "short", "abcd", OWNER_ONLY)?;
+    assert!(matches!(read_signing_key(std::path::Path::new(&short)), Err(CliError::Seed)));
+    Ok(())
 }
 
 
@@ -160,7 +275,8 @@ fn identifiers_come_from_one_draw_and_a_failed_draw_is_reported() -> TestResult 
 
 #[test]
 fn an_issued_token_is_verified_by_the_session() -> TestResult {
-    let seed = HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]);
+    let dir = tempfile::tempdir()?;
+    let seed = seed_file(&dir, "seed", &HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]), OWNER_ONLY)?;
     let mut out = Vec::new();
     write_issued(&[&seed, &json(LIFETIME, "alice")], NOW, os_random, &mut out)?;
     let token = String::from_utf8(out)?;
@@ -174,7 +290,8 @@ fn an_issued_token_is_verified_by_the_session() -> TestResult {
 
 #[test]
 fn issuing_reports_its_failures() -> TestResult {
-    let seed = HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]);
+    let dir = tempfile::tempdir()?;
+    let seed = seed_file(&dir, "seed", &HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]), OWNER_ONLY)?;
     let valid = json(LIFETIME, "alice");
     assert!(matches!(write_issued(&[&seed], NOW, os_random, &mut Vec::new()), Err(CliError::Usage(_))));
     assert!(matches!(
@@ -191,7 +308,7 @@ fn issuing_reports_its_failures() -> TestResult {
         Err(CliError::Random(_))
     ));
     assert!(matches!(
-        write_issued(&["zz", &valid], NOW, os_random, &mut Vec::new()),
+        write_issued(&[&seed_file(&dir, "bad", "zz", OWNER_ONLY)?, &valid], NOW, os_random, &mut Vec::new()),
         Err(CliError::Hex(_))
     ));
     let large = json(LIFETIME, &"a".repeat(MAX_TOKEN_BYTES));

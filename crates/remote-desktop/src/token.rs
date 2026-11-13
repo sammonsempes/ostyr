@@ -1,10 +1,11 @@
+use crate::claims::{check_claims, check_expectation, check_issuable};
 use crate::codec::{decode_exact, signing_message};
 use crate::error::{IssueError, TokenError, VerifierError};
 use crate::model::{
     Envelope, RelayClaims, RelayKey, RelayKeys, ReplaySet, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_LIVE_TOKENS_CEILING,
     MAX_TOKEN_BYTES,
 };
-use crate::replay::accept_nonce;
+use crate::replay::{accept_nonce, observe_clock};
 use crate::types::SignerFn;
 use core_config::reload::{current_config, ReloadEngine};
 use data_encoding::BASE64URL_NOPAD;
@@ -45,6 +46,7 @@ pub fn seal(signer: &SignerFn, key_id: &str, claims: Vec<u8>) -> Result<String, 
 
 /// The signer is injected: the private key never has to live in this crate.
 pub fn issue_token(signer: &SignerFn, claims: &RelayClaims) -> Result<String, IssueError> {
+    check_issuable(claims)?;
     seal(signer, &claims.key_id, postcard::to_stdvec(claims)?)
 }
 
@@ -62,6 +64,16 @@ pub fn check_key(key: &RelayKey, now: u64) -> Result<(), TokenError> {
     if key.revoked {
         Err(TokenError::KeyRevoked)
     } else if now < key.not_before || now > key.not_after {
+        Err(TokenError::KeyOutsideValidity)
+    } else {
+        Ok(())
+    }
+}
+
+
+/// The key must cover the whole token life: a token never outlives its key.
+pub fn check_key_covers(key: &RelayKey, claims: &RelayClaims) -> Result<(), TokenError> {
+    if key.not_before > claims.not_before || key.not_after < claims.expires_at {
         Err(TokenError::KeyOutsideValidity)
     } else {
         Ok(())
@@ -114,18 +126,22 @@ pub fn check_target(claims: &RelayClaims, expected_peer: &str, expected_tenant: 
 
 /// The signature is verified over the received bytes before the claims are decoded; the single-use check comes last so a refused token burns nothing.
 pub fn check_token(verifier: &Verifier, token: &str, expected_peer: &str, expected_tenant: &str, now: u64) -> Result<RelayClaims, TokenError> {
+    check_expectation(expected_peer, expected_tenant)?;
     check_size(token)?;
+    let clock = observe_clock(verifier, now);
     let bytes = BASE64URL_NOPAD.decode(token.as_bytes()).map_err(TokenError::BadEncoding)?;
     let envelope: Envelope = decode_exact(&bytes)?;
     let keys = current_config(&verifier.keys);
     let key = keys.keys.get(&envelope.key_id).ok_or(TokenError::UnknownKey)?;
-    check_key(key, now)?;
+    check_key(key, clock)?;
     check_signature(key, &envelope)?;
     let claims: RelayClaims = decode_exact(&envelope.claims)?;
+    check_claims(&claims)?;
     check_binding(&envelope.key_id, &claims)?;
-    check_times(&claims, now)?;
+    check_times(&claims, clock)?;
+    check_key_covers(key, &claims)?;
     check_target(&claims, expected_peer, expected_tenant)?;
-    accept_nonce(verifier, claims.nonce, claims.expires_at, now)?;
+    accept_nonce(verifier, claims.nonce, claims.expires_at, clock)?;
     Ok(claims)
 }
 

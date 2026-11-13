@@ -1,5 +1,6 @@
 //! Short-lived signed relay session token for remote desktop (spec section 21).
 
+pub mod claims;
 pub mod cli;
 pub mod codec;
 pub mod error;

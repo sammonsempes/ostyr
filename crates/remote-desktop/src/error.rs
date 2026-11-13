@@ -1,4 +1,5 @@
 use crate::types::BoxError;
+use core_pg::error::PgError;
 use std::io;
 use thiserror::Error;
 
@@ -9,6 +10,20 @@ pub enum CodecError {
     Postcard(#[from] postcard::Error),
     #[error("trailing bytes after the encoded value")]
     TrailingBytes,
+}
+
+
+/// Which claim broke its grammar; never the value.
+#[derive(Debug, Error)]
+pub enum ClaimError {
+    #[error("the tenant claim is invalid")]
+    Tenant(#[source] PgError),
+    #[error("the viewer subject claim is invalid")]
+    Subject,
+    #[error("the device peer id claim is invalid")]
+    Peer,
+    #[error("the key id claim is invalid")]
+    KeyId,
 }
 
 
@@ -39,6 +54,10 @@ pub enum TokenError {
     Expired,
     #[error("token starts in the future beyond the clock skew")]
     NotYetValid,
+    #[error("token claims refused: {0}")]
+    Claims(#[from] ClaimError),
+    #[error("the expected peer or tenant is invalid")]
+    BadExpectation,
     #[error("token is for another device")]
     WrongPeer,
     #[error("token is for another tenant")]
@@ -58,6 +77,12 @@ pub enum IssueError {
     Signer(#[source] BoxError),
     #[error("the token would be larger than the maximum")]
     TooLarge,
+    #[error("claims refused: {0}")]
+    Claims(#[from] ClaimError),
+    #[error("the token would expire at or before its start")]
+    InvalidLifetime,
+    #[error("the token lifetime would be longer than the maximum")]
+    LifetimeTooLong,
 }
 
 
@@ -93,4 +118,16 @@ pub enum CliError {
     Random(#[from] getrandom::Error),
     #[error("cannot write: {0}")]
     Io(#[from] io::Error),
+    #[error("cannot read the seed file: {0}")]
+    SeedFile(#[from] PgError),
+    #[error("the seed file is not text")]
+    SeedText,
+    #[error("the seed file grants access to group or other")]
+    SeedMode,
+    #[error("the seed file belongs to another user")]
+    SeedOwner,
+    #[error("seed file permissions cannot be checked on this platform")]
+    Unsupported,
+    #[error("cannot inspect the seed file: {0}")]
+    Inspect(#[source] io::Error),
 }

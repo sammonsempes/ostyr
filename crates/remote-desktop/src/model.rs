@@ -24,6 +24,21 @@ pub const MAX_LIVE_TOKENS_CEILING: usize = 100_000;
 pub const MAX_PRUNE_PER_CALL: usize = 64;
 
 
+pub const MAX_SUBJECT_BYTES: usize = 255;
+
+
+pub const MAX_PEER_ID_DIGITS: usize = 20;
+
+
+pub const MAX_KEY_ID_BYTES: usize = 64;
+
+
+pub const MAX_SEED_FILE_BYTES: u64 = 128;
+
+
+pub const GROUP_OTHER_MASK: u32 = 0o077;
+
+
 pub const NONCE_LENGTH: usize = 16;
 
 
@@ -112,12 +127,13 @@ pub struct RawKeyFile {
 }
 
 
-/// `by_expiry` orders the same nonces by `expires_at` so pruning never scans the whole set.
+/// `high_water` is the highest clock reading seen; `by_expiry` orders the nonces by `expires_at` so pruning never scans the set.
 #[derive(Debug, Default)]
 pub struct ReplaySet {
     pub nonces: BTreeSet<Nonce>,
     pub by_expiry: BTreeSet<(u64, Nonce)>,
     pub refused_full: u64,
+    pub high_water: u64,
 }
 
 

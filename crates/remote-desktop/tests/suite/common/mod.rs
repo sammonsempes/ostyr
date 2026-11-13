@@ -8,7 +8,7 @@ use ed25519_dalek::SigningKey;
 use remote_desktop::keys::open_keys_engine;
 use remote_desktop::model::{RelayClaims, RelayKeys, Verifier, NONCE_LENGTH, SESSION_ID_LENGTH};
 use remote_desktop::sign::memory_signer;
-use remote_desktop::token::{issue_token, open_verifier};
+use remote_desktop::token::{issue_token, open_verifier, seal};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -47,6 +47,15 @@ pub const SMALL_CAP: usize = 8;
 
 
 pub const SECOND_NONCE: u8 = 2;
+
+
+pub const HALF_LIFETIME: u64 = 30;
+
+
+pub const HEAD_START: u64 = 10;
+
+
+pub const KEY_GAP: u64 = 5;
 
 
 pub const THIRD_NONCE: u8 = 3;
@@ -160,6 +169,15 @@ pub fn claims(nonce: u8) -> RelayClaims {
 
 pub fn token_with(claims: &RelayClaims, seed: u8) -> Result<String, Box<dyn std::error::Error>> {
     Ok(issue_token(&memory_signer(signing_key(seed)), claims)?)
+}
+
+
+pub fn token_unchecked(claims: &RelayClaims) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(seal(
+        &memory_signer(signing_key(RELAY_SEED)),
+        &claims.key_id,
+        postcard::to_stdvec(claims)?,
+    )?)
 }
 
 

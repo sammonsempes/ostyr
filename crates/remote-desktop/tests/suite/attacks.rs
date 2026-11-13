@@ -1,5 +1,7 @@
 use crate::common::types::TestResult;
-use crate::common::{claims, relay_keys_text, setup, setup_with, token_for, NOW, PEER, SECOND_NONCE, SLACK, SMALL_CAP, TENANT, THIRD_NONCE};
+use crate::common::{
+    claims, relay_keys_text, setup, setup_with, token_for, token_unchecked, NOW, PEER, SECOND_NONCE, SLACK, SMALL_CAP, TENANT, THIRD_NONCE,
+};
 use data_encoding::BASE64URL_NOPAD;
 use remote_desktop::model::CLOCK_SKEW_SECONDS;
 use remote_desktop::token::verify_token;
@@ -78,7 +80,7 @@ fn extreme_times_are_refused_without_overflow() -> TestResult {
     longest.not_before = 0;
     longest.expires_at = u64::MAX;
     assert_eq!(
-        verify_token(&setup.verifier, &token_for(&longest)?, PEER, TENANT, NOW)
+        verify_token(&setup.verifier, &token_unchecked(&longest)?, PEER, TENANT, NOW)
             .err()
             .ok_or("accepted")?
             .to_string(),
@@ -88,7 +90,7 @@ fn extreme_times_are_refused_without_overflow() -> TestResult {
     empty.not_before = u64::MAX;
     empty.expires_at = u64::MAX;
     assert_eq!(
-        verify_token(&setup.verifier, &token_for(&empty)?, PEER, TENANT, NOW)
+        verify_token(&setup.verifier, &token_unchecked(&empty)?, PEER, TENANT, NOW)
             .err()
             .ok_or("accepted")?
             .to_string(),
@@ -99,10 +101,16 @@ fn extreme_times_are_refused_without_overflow() -> TestResult {
     far.not_before = u64::MAX - 1;
     far.expires_at = u64::MAX;
     assert_eq!(
-        verify_token(&wide.verifier, &token_for(&far)?, PEER, TENANT, u64::MAX - CLOCK_SKEW_SECONDS - SLACK)
-            .err()
-            .ok_or("accepted")?
-            .to_string(),
+        verify_token(
+            &wide.verifier,
+            &token_unchecked(&far)?,
+            PEER,
+            TENANT,
+            u64::MAX - CLOCK_SKEW_SECONDS - SLACK
+        )
+        .err()
+        .ok_or("accepted")?
+        .to_string(),
         "token starts in the future beyond the clock skew"
     );
     Ok(())
