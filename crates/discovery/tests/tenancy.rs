@@ -44,6 +44,9 @@ const MILLIS: i64 = 1000;
 const DECLINE_PROBATION: i64 = 86_400;
 
 
+const GAP_FLOW_END: i64 = 2;
+
+
 fn kea_mac(mac: &str) -> String {
     mac.replace('-', ":")
 }
@@ -113,6 +116,28 @@ fn another_mac_after_a_release_starts_a_new_tenancy() -> TestResult {
     assert_eq!(lease.tenancy_start, START + LIFETIME);
     assert_eq!(observed(&hints, flow(START + HALF + 1, START + LIFETIME + 1)?, MAC_TWO), (0, 1));
     assert_eq!(observed(&hints, flow(START + LIFETIME, START + LIFETIME + 1)?, MAC_TWO), (1, 0));
+    Ok(())
+}
+
+
+#[test]
+fn a_reassignment_after_expiry_starts_a_new_tenancy() -> TestResult {
+    let hints = hints_of(&[assignment(MAC_ONE, START), assignment(MAC_ONE, START + LIFETIME + 1)])?;
+    let lease = hints.leases.get(&ADDRESS.parse::<IpAddr>()?).ok_or("missing")?;
+    assert_eq!(lease.tenancy_start, START + LIFETIME + 1);
+    assert_eq!(
+        observed(&hints, flow(START + LIFETIME, START + LIFETIME + GAP_FLOW_END)?, MAC_ONE),
+        (0, 1)
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_renewal_at_the_exact_expiry_second_keeps_the_tenancy() -> TestResult {
+    let hints = hints_of(&[assignment(MAC_ONE, START), assignment(MAC_ONE, START + LIFETIME)])?;
+    let lease = hints.leases.get(&ADDRESS.parse::<IpAddr>()?).ok_or("missing")?;
+    assert_eq!(lease.tenancy_start, START);
     Ok(())
 }
 

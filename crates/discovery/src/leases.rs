@@ -64,7 +64,7 @@ fn count_skip(counters: &mut HintCounters, skip: Skip) {
 
 
 fn continued(held: &Lease, lease: Lease) -> Lease {
-    let same_tenancy = !held.released && !lease.released && held.mac == lease.mac;
+    let same_tenancy = !held.released && !lease.released && held.mac == lease.mac && lease.cltt <= held.expires;
     Lease {
         tenancy_start: if same_tenancy { held.tenancy_start } else { lease.cltt },
         ..lease
