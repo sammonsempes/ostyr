@@ -1,0 +1,8 @@
+egress: proxy
+vms:
+  - name: pve
+    base_image: debian-12.qcow2
+    vcpu: 4
+    ssh_user: debian
+    memory_gb: 8
+    disk_gb: 40
