@@ -8,10 +8,11 @@ mod rows;
 
 use common::types::TestResult;
 use metrics_ingest::model::Limits;
+use metrics_ingest::model::{DEFAULT_MAX_LABEL_KEY_BYTES, DEFAULT_MAX_LABEL_VALUE_BYTES};
 use rows::{measure, request};
 
 
-const LARGEST_ACCEPTED_POINTS: usize = 2_412;
+const LARGEST_ACCEPTED_POINTS: usize = 2_184;
 
 
 const LABELS: usize = 32;
@@ -19,5 +20,15 @@ const LABELS: usize = 32;
 
 #[test]
 fn the_largest_accepted_request_stays_in_budget() -> TestResult {
-    measure("largest accepted", &request(LARGEST_ACCEPTED_POINTS, LABELS, true), &Limits::default())
+    let bytes = request(
+        LARGEST_ACCEPTED_POINTS,
+        LABELS,
+        true,
+        DEFAULT_MAX_LABEL_KEY_BYTES,
+        DEFAULT_MAX_LABEL_VALUE_BYTES,
+        None,
+    );
+    let (rows, accepted) = measure("largest accepted", &bytes, &Limits::default(), 1)?;
+    assert_eq!((rows, accepted), (LARGEST_ACCEPTED_POINTS, true));
+    Ok(())
 }

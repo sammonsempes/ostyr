@@ -8,6 +8,7 @@ mod rows;
 
 use common::types::TestResult;
 use metrics_ingest::model::Limits;
+use metrics_ingest::model::{DEFAULT_MAX_LABEL_KEY_BYTES, DEFAULT_MAX_LABEL_VALUE_BYTES};
 use rows::{measure, request};
 
 
@@ -19,5 +20,12 @@ const LABELS: usize = 32;
 
 #[test]
 fn resource_labels_on_every_point_stay_in_budget() -> TestResult {
-    measure("resource labels, all points", &request(ALL_POINTS, LABELS, true), &Limits::default())
+    let (rows, accepted) = measure(
+        "resource labels, all points",
+        &request(ALL_POINTS, LABELS, true, DEFAULT_MAX_LABEL_KEY_BYTES, DEFAULT_MAX_LABEL_VALUE_BYTES, None),
+        &Limits::default(),
+        1,
+    )?;
+    assert_eq!((rows, accepted), (0, false));
+    Ok(())
 }
