@@ -44,6 +44,8 @@ pub enum EntryError {
         #[source]
         source: time::error::Parse,
     },
+    #[error("timestamp `{value}` is out of range in UTC")]
+    TimestampRange { value: String },
     #[error("invalid confidence `{value}`")]
     Confidence {
         value: String,
@@ -91,7 +93,7 @@ pub fn reason_key(error: &EntryError) -> &'static str {
         EntryError::Csv(_) => "malformed_csv",
         EntryError::NotAnObject => "not_an_object",
         EntryError::MissingField(_) => "missing_field",
-        EntryError::Timestamp { .. } => "invalid_timestamp",
+        EntryError::Timestamp { .. } | EntryError::TimestampRange { .. } => "invalid_timestamp",
         EntryError::Confidence { .. } => "invalid_confidence",
         EntryError::Canon(CanonError::TooBroad) => "too_broad",
         EntryError::Canon(_) => "invalid_value",
