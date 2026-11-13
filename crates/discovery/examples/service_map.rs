@@ -1,6 +1,12 @@
+use cmdb::model::{Asset, AssetKind, IdentityKey, Lifecycle};
+use dhcp_kea::header::parse_header;
+use dhcp_kea::row::convert_row;
 use discovery::candidates::{candidates, known_devices};
+use discovery::leases::lease_hints;
 use discovery::map::{counters, edges, new_service_map, observe};
 use discovery::model::ServiceMap;
+use discovery::model::{LeaseLimits, ObserveLimits, TenantEvent};
+use discovery::observe_cmdb::observations;
 use discovery::scope::load_scope;
 use site_collector::flow::parse_netflow_v5;
 use site_collector::flow_model::{FlowBatch, FlowLimits, MAX_TEMPLATE_DATAGRAM_BYTES};
@@ -13,7 +19,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 
-const USAGE: &str = "usage: service_map <scope.yaml> <flow-datagram-file>... [--known <addresses-file>]";
+const USAGE: &str =
+    "usage: service_map <scope.yaml> <flow-datagram-file>... [--known <addresses-file>] [--leases <kea-leases4.csv> --inventory <id-mac-file>]";
 
 
 const EXAMPLE_TENANT: &str = "example";
@@ -29,6 +36,9 @@ const NETFLOW_V9: u16 = 9;
 
 
 const IPFIX: u16 = 10;
+
+
+const MAX_LEASE_BYTES: u64 = 16_777_216;
 
 
 const MAX_KNOWN_BYTES: u64 = 1_048_576;
@@ -84,21 +94,86 @@ fn known_from(path: Option<&String>) -> Result<Vec<IpAddr>, Box<dyn Error>> {
 }
 
 
+fn flag_value<'a>(arguments: &'a [String], name: &str) -> Result<Option<&'a String>, Box<dyn Error>> {
+    arguments
+        .iter()
+        .position(|argument| argument == name)
+        .map(|at| arguments.get(at + 1).ok_or(USAGE.into()))
+        .transpose()
+}
+
+
+fn inventory_from(path: &str) -> Result<Vec<Asset>, Box<dyn Error>> {
+    let text = String::from_utf8(read_capped(path, usize::try_from(MAX_KNOWN_BYTES)?)?)?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (id, mac) = line.split_once(' ').ok_or(USAGE)?;
+            Ok(Asset {
+                id: id.to_string(),
+                kind: AssetKind::Workstation,
+                lifecycle: Lifecycle::InService,
+                keys: [(IdentityKey::Mac, mac.trim().to_string())].into_iter().collect(),
+                attributes: Default::default(),
+            })
+        })
+        .collect()
+}
+
+
+fn leases_from(path: &str) -> Result<Vec<core_export::ecs::EcsEvent>, Box<dyn Error>> {
+    let text = String::from_utf8(read_capped(path, usize::try_from(MAX_LEASE_BYTES)?)?)?;
+    let mut lines = text.lines();
+    let columns = parse_header(lines.next().ok_or(USAGE)?)?;
+    Ok(lines
+        .map(|line| convert_row(&columns, line).map(|converted| converted.event))
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let known_at = arguments.iter().position(|argument| argument == "--known");
-    let split = known_at.unwrap_or(arguments.len());
+    let split = arguments
+        .iter()
+        .position(|argument| argument.starts_with("--"))
+        .unwrap_or(arguments.len());
     let scope_path = arguments.first().filter(|_| split > 0).ok_or(USAGE)?;
     let files: Vec<&String> = arguments.iter().take(split).skip(1).collect();
-    let known_path = known_at.map(|at| arguments.get(at + 1).ok_or(USAGE)).transpose()?;
+    let known_path = flag_value(&arguments, "--known")?;
     let mut map = new_service_map(EXAMPLE_TENANT, load_scope(Path::new(scope_path))?)?;
     feed(&mut map, &files)?;
     let known = known_devices(known_from(known_path)?);
+    let found = candidates(&map, &known);
     let mut out = std::io::stdout();
     edges(&map).try_for_each(|(key, stats)| writeln!(out, "{}", serde_json::json!({ "edge": key, "stats": stats })))?;
-    candidates(&map, &known)
+    found
         .iter()
         .try_for_each(|candidate| writeln!(out, "{}", serde_json::json!({ "candidate": candidate })))?;
     writeln!(out, "{}", serde_json::json!({ "counters": counters(&map) }))?;
+    if let Some(leases_path) = flag_value(&arguments, "--leases")? {
+        let inventory = inventory_from(flag_value(&arguments, "--inventory")?.ok_or(USAGE)?)?;
+        let events = leases_from(leases_path)?;
+        let hints = lease_hints(
+            EXAMPLE_TENANT,
+            events.iter().map(|event| TenantEvent {
+                tenant: EXAMPLE_TENANT,
+                event,
+            }),
+            &LeaseLimits::default(),
+        );
+        let (observed, observe_counters) = observations(&found, &hints, &inventory, &ObserveLimits::default());
+        observed.iter().try_for_each(|observation| {
+            writeln!(
+                out,
+                "{}",
+                serde_json::json!({ "observation": { "source": observation.source, "keys": observation.keys, "attributes": observation.attributes } })
+            )
+        })?;
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({ "hint_counters": hints.counters, "observe_counters": observe_counters })
+        )?;
+    }
     Ok(())
 }

@@ -1803,14 +1803,19 @@ dependencies = [
 name = "discovery"
 version = "0.0.0"
 dependencies = [
+ "cmdb",
  "core-config",
+ "core-export",
  "core-pg",
+ "dhcp-kea",
  "ipnet",
  "serde",
  "serde_json",
  "site-collector",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
+ "tracing",
 ]
 
 [[package]]

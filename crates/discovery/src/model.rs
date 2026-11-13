@@ -1,4 +1,5 @@
-use crate::types::{EdgeMap, Millis, SeenIndex};
+use crate::types::{EdgeMap, LeaseMap, Millis, SeenIndex};
+use core_export::ecs::EcsEvent;
 use core_pg::scope::TenantScope;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,21 @@ pub const WELL_KNOWN_PORT_LIMIT: u16 = 1024;
 
 
 pub const MAX_SERVICES_PER_CANDIDATE: usize = 32;
+
+
+pub const DEFAULT_MAX_LEASES: usize = 100_000;
+
+
+pub const DEFAULT_MAX_OBSERVATIONS: usize = 100_000;
+
+
+pub const NANOS_PER_MILLI: i128 = 1_000_000;
+
+
+pub const LEASE_ASSIGNED: &str = "lease-assigned";
+
+
+pub const OBSERVATION_SOURCE: &str = "discovery";
 
 
 pub const TCP_SYN: u8 = 0x02;
@@ -149,4 +165,81 @@ pub struct Gathered {
     pub first_seen_ms: Millis,
     pub last_seen_ms: Millis,
     pub services: BTreeSet<ServiceRef>,
+}
+
+
+/// A lease event and the tenant its collector shipped it for; the event itself carries no tenant.
+#[derive(Debug, Clone, Copy)]
+pub struct TenantEvent<'a> {
+    pub tenant: &'a str,
+    pub event: &'a EcsEvent,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseLimits {
+    pub max_leases: usize,
+}
+
+
+impl Default for LeaseLimits {
+    fn default() -> Self {
+        Self {
+            max_leases: DEFAULT_MAX_LEASES,
+        }
+    }
+}
+
+
+/// `mac` is in the ECS form, `hostname` passed the DNS grammar, `cltt` is the lease creation time in Unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    pub mac: String,
+    pub hostname: Option<String>,
+    pub cltt: i64,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct HintCounters {
+    pub wrong_tenant: u64,
+    pub not_lease: u64,
+    pub not_assigned: u64,
+    pub bad_address: u64,
+    pub no_mac: u64,
+    pub bad_hostname: u64,
+    pub beyond_cap: u64,
+}
+
+
+/// The latest lease of each address for one tenant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseHints {
+    pub tenant: String,
+    pub leases: LeaseMap,
+    pub counters: HintCounters,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObserveLimits {
+    pub max_observations: usize,
+}
+
+
+impl Default for ObserveLimits {
+    fn default() -> Self {
+        Self {
+            max_observations: DEFAULT_MAX_OBSERVATIONS,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct ObserveCounters {
+    pub observed: u64,
+    pub unmatched: u64,
+    pub rejected: u64,
+    pub beyond_cap: u64,
 }
