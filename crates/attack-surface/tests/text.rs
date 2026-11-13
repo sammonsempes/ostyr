@@ -18,7 +18,7 @@ fn shown_keeps_sixty_four_bytes_and_marks_the_cut() -> TestResult {
     assert_eq!(shown(&exact), exact);
     assert_eq!(shown(&format!("{exact}b")), format!("{exact}..."));
     let multibyte = "\u{e9}".repeat(TWO_BYTE_CHARACTERS);
-    assert_eq!(shown(&multibyte), format!("{}...", "\u{e9}".repeat(TWO_BYTE_CHARACTERS - 1)));
+    assert_eq!(shown(&multibyte), format!("{}...", "\\u{e9}".repeat(TWO_BYTE_CHARACTERS - 1)));
     assert_eq!(shown(""), "");
     Ok(())
 }
@@ -27,6 +27,15 @@ fn shown_keeps_sixty_four_bytes_and_marks_the_cut() -> TestResult {
 #[test]
 fn shown_escapes_hidden_characters() -> TestResult {
     assert_eq!(shown("a\u{202e}b\nc"), "a\\u{202e}b\\u{a}c");
+    Ok(())
+}
+
+
+#[test]
+fn shown_escapes_look_alikes_and_keeps_ascii_graphic_and_space() -> TestResult {
+    assert_eq!(shown("TICKET-\u{421}1"), "TICKET-\\u{421}1");
+    assert_eq!(shown("a\u{2800}b"), "a\\u{2800}b");
+    assert_eq!(shown("a b~!"), "a b~!");
     Ok(())
 }
 
