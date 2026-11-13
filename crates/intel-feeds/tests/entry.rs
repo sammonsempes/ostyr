@@ -43,6 +43,24 @@ fn timestamps_accept_rfc3339_and_the_abusech_layout() -> TestResult {
 
 
 #[test]
+fn a_time_that_leaves_the_range_in_utc_is_refused_not_a_panic() -> TestResult {
+    [
+        "9999-12-31T23:00:00-02:00",
+        "9999-12-31T23:59:59-00:01",
+        "0000-01-01T00:00:00+00:01",
+        "0000-01-01T00:30:00+01:00",
+    ]
+    .iter()
+    .for_each(|text| assert!(matches!(parse_timestamp(text), Err(EntryError::TimestampRange { .. })), "{text}"));
+    assert_eq!(parse_timestamp("2026-11-01T02:00:00+02:00")?, parse_timestamp("2026-11-01T00:00:00Z")?);
+    assert_eq!(parse_timestamp("2026-11-01T02:00:00+02:00")?.offset(), time::UtcOffset::UTC);
+    let error = parse_timestamp("9999-12-31T23:00:00-02:00").err().ok_or("no error")?;
+    assert_eq!(intel_feeds::error::reason_key(&error), "invalid_timestamp");
+    Ok(())
+}
+
+
+#[test]
 fn absent_times_fall_back_and_bad_ones_are_errors() -> TestResult {
     assert_eq!(time_or(None, now())?, now());
     assert_eq!(time_or(Some("2026-11-01 08:30:00"), now())?, parse_timestamp("2026-11-01 08:30:00")?);
