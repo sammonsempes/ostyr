@@ -1,0 +1,5 @@
+idle_timeout_seconds: 600
+max_duration_seconds: 7200
+mfa_max_age_seconds: 120
+approval_max_age_seconds: 900
+dual_approval_from: critical
