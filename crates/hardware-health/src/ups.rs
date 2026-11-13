@@ -137,13 +137,22 @@ pub fn flag_of(token: &str) -> Option<UpsFlag> {
         "FSD" => Some(UpsFlag::ForcedShutdown),
         "ALARM" => Some(UpsFlag::Alarm),
         "OFF" => Some(UpsFlag::Off),
+        "HB" => Some(UpsFlag::HighBattery),
+        "CAL" => Some(UpsFlag::Calibrating),
+        "TEST" => Some(UpsFlag::Test),
+        "NOCOMM" => Some(UpsFlag::NoComm),
         _ => None,
     }
 }
 
 
 fn status_flags(report: &mut UpsReport, value: &str) -> BTreeSet<UpsFlag> {
-    let parsed: Vec<Option<UpsFlag>> = value.split_whitespace().map(flag_of).collect();
+    let parsed: Vec<Option<UpsFlag>> = Some(value)
+        .filter(|text| !text.is_empty())
+        .into_iter()
+        .flat_map(|text| text.split(' '))
+        .map(flag_of)
+        .collect();
     let unknown = parsed.iter().filter(|flag| flag.is_none()).count();
     report.rejected_fields += unknown;
     if unknown > 0 {

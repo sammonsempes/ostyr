@@ -111,6 +111,10 @@ pub enum UpsFlag {
     ForcedShutdown,
     Alarm,
     Off,
+    HighBattery,
+    Calibrating,
+    Test,
+    NoComm,
 }
 
 

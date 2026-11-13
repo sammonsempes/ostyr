@@ -13,14 +13,16 @@ pub fn assess_ups(report: &UpsReport, thresholds: &UpsThresholds) -> Health {
         Some(found) => found.clone(),
         None => BTreeSet::new(),
     };
-    let blind_field = report.unreadable.iter().find(|name| DECIDING_FIELDS.contains(&name.as_str()));
-    let status_unreadable = report.unreadable.iter().any(|name| name == "ups.status");
+    let listed = report.unreadable.iter().find(|name| DECIDING_FIELDS.contains(&name.as_str()));
+    let missing_charge = report.battery_charge.is_none().then_some("battery.charge".to_string());
+    let blind_field = listed.cloned().or(missing_charge);
+    let status_unreadable = report.unreadable.iter().any(|name| name == "ups.status") || flags.contains(&UpsFlag::NoComm);
     let causes = degraded_causes(report, &flags, thresholds);
     match (blind_field, ()) {
         _ if status_unreadable => Health::BlindSpot(BlindReason::UnreadableHealthField("ups.status".to_string())),
         _ if flags.is_empty() => Health::BlindSpot(BlindReason::NoVerdict),
-        (Some(name), ()) => Health::BlindSpot(BlindReason::UnreadableHealthField(name.clone())),
         _ if is_failing(&flags) => Health::Failing,
+        (Some(name), ()) => Health::BlindSpot(BlindReason::UnreadableHealthField(name)),
         _ if causes.is_empty() => Health::Healthy,
         _ => Health::Degraded(causes),
     }
@@ -48,6 +50,9 @@ fn degraded_causes(report: &UpsReport, flags: &BTreeSet<UpsFlag>, thresholds: &U
         (charge_low, "battery charge below threshold"),
         (runtime_low, "battery runtime below threshold"),
         (flags.contains(&UpsFlag::Bypass), "bypass"),
+        (flags.contains(&UpsFlag::HighBattery), "battery high"),
+        (flags.contains(&UpsFlag::Calibrating), "calibrating"),
+        (flags.contains(&UpsFlag::Test), "self test"),
         (no_line, "line status unknown"),
     ]
     .iter()
