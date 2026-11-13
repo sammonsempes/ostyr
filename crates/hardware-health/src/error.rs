@@ -27,6 +27,14 @@ pub enum SmartError {
     ThresholdsTooLarge { limit: usize },
     #[error("thresholds file is not valid")]
     Thresholds(#[source] Box<serde_saphyr::Error>),
+    #[error("document nesting is deeper than {limit} levels")]
+    TooDeep { limit: usize },
+    #[error("redfish {document} document refused")]
+    Document {
+        document: &'static str,
+        #[source]
+        source: Box<SmartError>,
+    },
     #[error("min_battery_charge must be between 1 and 100")]
     ChargeThresholdRange,
 }
