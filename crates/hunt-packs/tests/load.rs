@@ -202,6 +202,42 @@ fn check_reports_a_write_failure() -> TestResult {
 }
 
 
+#[cfg(unix)]
+#[test]
+fn a_symlink_passed_to_load_file_is_refused() -> TestResult {
+    let dir = tempdir()?;
+    let target = dir.path().join("real.txt");
+    write(&target, pack_yaml("a", "T1059"))?;
+    let link = dir.path().join("x.yaml");
+    symlink(&target, &link)?;
+    assert!(matches!(load_file(&link), Err(PackError::Config(_))));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_without_blocking() -> TestResult {
+    use rustix::fs::{mknodat, FileType, Mode, CWD};
+    let dir = tempdir()?;
+    let fifo = dir.path().join("x.yaml");
+    mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)?;
+    assert!(matches!(load_file(&fifo), Err(PackError::NotRegular { .. })));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_directory_named_yaml_is_refused() -> TestResult {
+    let dir = tempdir()?;
+    let sub = dir.path().join("x.yaml");
+    create_dir(&sub)?;
+    assert!(matches!(load_file(&sub), Err(PackError::NotRegular { .. })));
+    Ok(())
+}
+
+
 #[test]
 fn committed_sample_packs_are_valid() -> TestResult {
     let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join("packs");
