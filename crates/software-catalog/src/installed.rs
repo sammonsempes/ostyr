@@ -61,12 +61,21 @@ pub fn parse_line(line: &[u8], limits: &Limits) -> Option<Line> {
 
 
 pub fn parse_installed<Source: Read>(reader: Source, limits: &Limits) -> Result<Installed, InstalledError> {
+    parse_with(reader, limits, parse_line)
+}
+
+
+pub fn parse_with<Source: Read>(
+    reader: Source,
+    limits: &Limits,
+    line_parser: fn(&[u8], &Limits) -> Option<Line>,
+) -> Result<Installed, InstalledError> {
     let buffer = read_input(reader, limits)?;
     Ok(buffer
         .split(|byte| *byte == NEWLINE)
         .filter(|line| !line.is_empty())
         .fold(Installed::default(), |mut installed, line| {
-            match parse_line(line, limits) {
+            match line_parser(line, limits) {
                 Some(Line::Row(row)) if installed.rows.len() < limits.max_installed => installed.rows.push(row),
                 Some(Line::Row(_)) => installed.over_limit += 1,
                 Some(Line::NotInstalled) => installed.not_installed += 1,

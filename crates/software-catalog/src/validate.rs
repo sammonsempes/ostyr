@@ -31,7 +31,7 @@ const MAX_VERSION_CHARS: usize = 128;
 const RPM_PUNCTUATION: &str = "._+~^";
 
 
-const RPM_ARCHITECTURES: [&str; 13] = [
+pub const RPM_ARCHITECTURES: [&str; 13] = [
     "x86_64",
     "aarch64",
     "i686",

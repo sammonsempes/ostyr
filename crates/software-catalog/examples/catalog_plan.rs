@@ -3,6 +3,7 @@
 use software_catalog::available::parse_available;
 use software_catalog::catalogue::{parse_assignment, parse_catalogue, read_text};
 use software_catalog::installed::parse_installed;
+use software_catalog::installed_rpm::parse_rpm_installed;
 use software_catalog::limits::Limits;
 use software_catalog::model::Manager;
 use software_catalog::plan::plan;
@@ -45,7 +46,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let catalogue = parse_catalogue(&read_text(open(1)?, &limits)?, &limits)?;
     let assignment = parse_assignment(&read_text(open(ASSIGNMENT_ARGUMENT)?, &limits)?, &limits)?;
-    let installed = parse_installed(open(INSTALLED_ARGUMENT)?, &limits)?;
+    let installed = match manager {
+        Manager::Dnf => parse_rpm_installed(open(INSTALLED_ARGUMENT)?, &limits)?,
+        _ => parse_installed(open(INSTALLED_ARGUMENT)?, &limits)?,
+    };
     let available = parse_available(open(AVAILABLE_ARGUMENT)?, manager, &limits)?;
     let result = plan(&catalogue, &assignment, &installed, &available)?;
     let mut out = std::io::stdout();
