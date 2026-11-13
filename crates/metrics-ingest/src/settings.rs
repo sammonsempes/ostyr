@@ -20,7 +20,7 @@ pub const MAX_TIMEOUT_MS: u64 = 300_000;
 pub const MAX_USER_BYTES: usize = 128;
 
 
-pub const LIMIT_COUNT: usize = 17;
+pub const LIMIT_COUNT: usize = 19;
 
 
 pub const MAX_CA_BYTES: u64 = 65_536;
@@ -35,7 +35,13 @@ pub const MAX_RESOURCES_CEILING: u64 = 2_560;
 pub const MAX_DATA_POINTS_CEILING: u64 = 500_000;
 
 
-pub const MAX_TOTAL_ATTRIBUTES_CEILING: u64 = 20_000_000;
+pub const MAX_TOTAL_ATTRIBUTES_CEILING: u64 = 5_000_000;
+
+
+pub const MAX_ENTITY_REFS_TOTAL_CEILING: u64 = 10_240;
+
+
+pub const MAX_ENTITY_KEYS_TOTAL_CEILING: u64 = 40_960;
 
 
 pub const MAX_LABELS_CEILING: u64 = 320;
@@ -156,6 +162,18 @@ pub fn validate_limits(limits: &Limits) -> Result<(), SettingsError> {
             to_u64(limits.max_total_attributes),
             1,
             MAX_TOTAL_ATTRIBUTES_CEILING,
+        ),
+        (
+            "max_entity_refs_total",
+            to_u64(limits.max_entity_refs_total),
+            1,
+            MAX_ENTITY_REFS_TOTAL_CEILING,
+        ),
+        (
+            "max_entity_keys_total",
+            to_u64(limits.max_entity_keys_total),
+            1,
+            MAX_ENTITY_KEYS_TOTAL_CEILING,
         ),
         ("max_labels", to_u64(limits.max_labels), 1, MAX_LABELS_CEILING),
         ("max_label_key_bytes", to_u64(limits.max_label_key_bytes), 1, MAX_LABEL_KEY_BYTES_CEILING),

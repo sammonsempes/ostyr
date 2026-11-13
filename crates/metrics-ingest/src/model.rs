@@ -12,7 +12,13 @@ pub const DEFAULT_MAX_RESOURCES: usize = 256;
 pub const DEFAULT_MAX_DATA_POINTS: usize = 50_000;
 
 
-pub const DEFAULT_MAX_TOTAL_ATTRIBUTES: usize = 2_000_000;
+pub const DEFAULT_MAX_TOTAL_ATTRIBUTES: usize = 500_000;
+
+
+pub const DEFAULT_MAX_ENTITY_REFS_TOTAL: usize = 1_024;
+
+
+pub const DEFAULT_MAX_ENTITY_KEYS_TOTAL: usize = 4_096;
 
 
 pub const DEFAULT_MAX_LABELS: usize = 32;
@@ -61,6 +67,8 @@ pub struct Limits {
     pub max_resources: usize,
     pub max_data_points: usize,
     pub max_total_attributes: usize,
+    pub max_entity_refs_total: usize,
+    pub max_entity_keys_total: usize,
     pub max_labels: usize,
     pub max_label_key_bytes: usize,
     pub max_label_value_bytes: usize,
@@ -84,6 +92,8 @@ impl Default for Limits {
             max_resources: DEFAULT_MAX_RESOURCES,
             max_data_points: DEFAULT_MAX_DATA_POINTS,
             max_total_attributes: DEFAULT_MAX_TOTAL_ATTRIBUTES,
+            max_entity_refs_total: DEFAULT_MAX_ENTITY_REFS_TOTAL,
+            max_entity_keys_total: DEFAULT_MAX_ENTITY_KEYS_TOTAL,
             max_labels: DEFAULT_MAX_LABELS,
             max_label_key_bytes: DEFAULT_MAX_LABEL_KEY_BYTES,
             max_label_value_bytes: DEFAULT_MAX_LABEL_VALUE_BYTES,
@@ -151,6 +161,28 @@ pub enum DropReason {
 }
 
 
+/// Wire counts of one request: resources, scopes, metrics counted as at least one point, exemplars, attributes and value elements, entity references and their keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Totals {
+    pub resources: usize,
+    pub scopes: usize,
+    pub points: usize,
+    pub extras: usize,
+    pub attributes: usize,
+    pub entity_refs: usize,
+    pub entity_keys: usize,
+}
+
+
+/// The wire field numbers of one metric data kind: the data message, and in its points the attributes and the exemplars or quantiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointKind {
+    pub data_field: u32,
+    pub attributes_field: u32,
+    pub extras_field: u32,
+}
+
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Refusal {
     TooLarge { bytes: usize },
@@ -158,6 +190,15 @@ pub enum Refusal {
     TooManyResources { count: usize },
     TooManyDataPoints { count: usize },
     TooManyAttributes { count: usize },
+    TooManyEntityRefs { count: usize },
+    TooManyEntityKeys { count: usize },
+}
+
+
+impl From<prost::DecodeError> for Refusal {
+    fn from(error: prost::DecodeError) -> Self {
+        Refusal::Malformed(error)
+    }
 }
 
 

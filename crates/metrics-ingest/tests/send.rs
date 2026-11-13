@@ -51,7 +51,7 @@ const OK: &str = "200 OK";
 const SERVER_ERROR: &str = "500 Internal Server Error";
 
 
-const LONG_TIMEOUT_MS: u64 = 60_000;
+const LONG_TIMEOUT_MS: u64 = MAX_TIMEOUT_MS;
 
 
 const STALL_TIMEOUT_MS: u64 = 100;

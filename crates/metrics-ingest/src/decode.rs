@@ -1,5 +1,6 @@
 use crate::cardinality::{admit_series, CardinalityState};
 use crate::model::{Bucket, DropReason, Limits, MetricKind, Outcome, Refusal, SampleRow};
+use crate::scan::scan_request;
 use crate::types::{LabelMap, Labels, ResourceLabels};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value::Value as AnyKind, KeyValue};
@@ -7,6 +8,7 @@ use opentelemetry_proto::tonic::metrics::v1::{metric::Data, number_data_point::V
 use prost::Message;
 use std::collections::BTreeMap;
 use std::iter::once;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 
 pub struct Series<'a> {
@@ -55,9 +57,8 @@ pub fn decode_request(bytes: &[u8], tenant: &str, limits: &Limits, state: &mut C
 
 pub fn parse_request(bytes: &[u8], limits: &Limits) -> Result<ExportMetricsServiceRequest, Refusal> {
     check_size(bytes.len(), limits)?;
-    let request = ExportMetricsServiceRequest::decode(bytes).map_err(Refusal::Malformed)?;
-    check_counts(&request, limits)?;
-    Ok(request)
+    scan_request(bytes, limits)?;
+    ExportMetricsServiceRequest::decode(bytes).map_err(Refusal::Malformed)
 }
 
 
@@ -66,46 +67,6 @@ pub fn check_size(bytes: usize, limits: &Limits) -> Result<(), Refusal> {
         Err(Refusal::TooLarge { bytes })
     } else {
         Ok(())
-    }
-}
-
-
-pub fn check_counts(request: &ExportMetricsServiceRequest, limits: &Limits) -> Result<(), Refusal> {
-    let resources = request.resource_metrics.len();
-    let metrics = || {
-        request
-            .resource_metrics
-            .iter()
-            .flat_map(|resource| resource.scope_metrics.iter())
-            .flat_map(|scope| scope.metrics.iter())
-    };
-    let points: usize = metrics().map(points_in).sum();
-    let resource_attributes: usize = request
-        .resource_metrics
-        .iter()
-        .map(|resource| resource.resource.as_ref().map_or(0, |described| described.attributes.len()))
-        .sum();
-    let attributes = metrics().map(attributes_in).sum::<usize>().saturating_add(resource_attributes);
-    if resources > limits.max_resources {
-        Err(Refusal::TooManyResources { count: resources })
-    } else if points > limits.max_data_points {
-        Err(Refusal::TooManyDataPoints { count: points })
-    } else if attributes > limits.max_total_attributes {
-        Err(Refusal::TooManyAttributes { count: attributes })
-    } else {
-        Ok(())
-    }
-}
-
-
-pub fn attributes_in(metric: &Metric) -> usize {
-    match &metric.data {
-        Some(Data::Gauge(gauge)) => gauge.data_points.iter().map(|point| point.attributes.len()).sum(),
-        Some(Data::Sum(sum)) => sum.data_points.iter().map(|point| point.attributes.len()).sum(),
-        Some(Data::Histogram(histogram)) => histogram.data_points.iter().map(|point| point.attributes.len()).sum(),
-        Some(Data::ExponentialHistogram(histogram)) => histogram.data_points.iter().map(|point| point.attributes.len()).sum(),
-        Some(Data::Summary(summary)) => summary.data_points.iter().map(|point| point.attributes.len()).sum(),
-        None => 0,
     }
 }
 
@@ -133,13 +94,15 @@ pub fn collect(request: &ExportMetricsServiceRequest, limits: &Limits, state: &m
 }
 
 
-/// Control characters, separators, bidirectional marks and invisible format characters (U+061C, U+200B, U+FEFF).
+/// Unicode control, format, line and paragraph separator characters, plus the bidirectional marks, Hangul fillers, the combining grapheme joiner and invisible characters listed below.
 pub fn is_forbidden(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{061c}' | '\u{200b}' | '\u{2028}'..='\u{2029}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
-        )
+    matches!(
+        get_general_category(character),
+        GeneralCategory::Control | GeneralCategory::Format | GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator
+    ) || matches!(
+        character,
+        '\u{034f}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{3164}' | '\u{feff}' | '\u{ffa0}'
+    )
 }
 
 
