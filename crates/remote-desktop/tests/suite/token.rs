@@ -1,16 +1,14 @@
 use crate::common::types::{ClaimsChange, RefusalCase, TestResult};
 use crate::common::{
-    claims, relay_keys_text, setup, setup_with, signing_key, token_for, token_with, Setup, AGENT_SEED, CASE_COUNT, GARBAGE_BYTE, GARBAGE_LENGTH,
-    KEY_ID, LIFETIME, NOW, OTHER_SEED, PEER, RELAY_SEED, SECOND_NONCE, SHORT_SIGNATURE_LENGTH, SMALL_CAP, TENANT,
+    claims, relay_keys_text, setup, setup_with, signing_key, token_for, token_unchecked, token_with, Setup, AGENT_SEED, CASE_COUNT, GARBAGE_BYTE,
+    GARBAGE_LENGTH, HALF_LIFETIME, HEAD_START, KEY_GAP, KEY_ID, LIFETIME, NOW, OTHER_SEED, PEER, RELAY_SEED, SECOND_NONCE, SHORT_SIGNATURE_LENGTH,
+    SMALL_CAP, TENANT,
 };
 use data_encoding::BASE64URL_NOPAD;
 use remote_desktop::error::{CodecError, IssueError, TokenError, VerifierError};
-use remote_desktop::model::{Envelope, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_LIVE_TOKENS_CEILING, MAX_TOKEN_BYTES};
+use remote_desktop::model::{Envelope, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_LIVE_TOKENS_CEILING, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES};
 use remote_desktop::sign::memory_signer;
 use remote_desktop::token::{check_token, issue_token, open_verifier, seal, verify_token};
-
-
-const OVERSIZE_SUBJECT: usize = 600;
 
 
 fn refusal_at(setup: &Setup, token: &str, now: u64) -> Result<String, Box<dyn std::error::Error>> {
@@ -25,7 +23,7 @@ fn refusal_of(change: ClaimsChange, now: u64) -> Result<String, Box<dyn std::err
     let setup = setup()?;
     let mut changed = claims(1);
     change(&mut changed);
-    refusal_at(&setup, &token_for(&changed)?, now)
+    refusal_at(&setup, &token_unchecked(&changed)?, now)
 }
 
 
@@ -157,8 +155,44 @@ fn a_revoked_key_and_a_key_outside_its_validity_are_refused() -> TestResult {
     assert_eq!(refusal_at(&not_yet, &token, NOW)?, "signing key is outside its validity period");
     let ended = setup_with(&relay_keys_text(NOW - LIFETIME, NOW - 1, false), SMALL_CAP)?;
     assert_eq!(refusal_at(&ended, &token, NOW)?, "signing key is outside its validity period");
-    let edge = setup_with(&relay_keys_text(NOW, NOW, false), SMALL_CAP)?;
+    let edge = setup_with(&relay_keys_text(NOW, NOW + LIFETIME, false), SMALL_CAP)?;
     assert_eq!(verify_token(&edge.verifier, &token, PEER, TENANT, NOW)?, claims(1));
+    Ok(())
+}
+
+
+#[test]
+fn a_key_must_be_valid_for_the_whole_token_life() -> TestResult {
+    let short = setup_with(&relay_keys_text(NOW - LIFETIME, NOW + HALF_LIFETIME, false), SMALL_CAP)?;
+    assert_eq!(
+        refusal_at(&short, &token_for(&claims(1))?, NOW)?,
+        "signing key is outside its validity period"
+    );
+    let mut early = claims(SECOND_NONCE);
+    early.not_before = NOW - HEAD_START;
+    early.expires_at = NOW + LIFETIME - HEAD_START;
+    let late_key = setup_with(&relay_keys_text(NOW - KEY_GAP, NOW + LIFETIME, false), SMALL_CAP)?;
+    assert_eq!(
+        refusal_at(&late_key, &token_for(&early)?, NOW)?,
+        "signing key is outside its validity period"
+    );
+    let exact = setup_with(&relay_keys_text(NOW - HEAD_START, NOW + LIFETIME - HEAD_START, false), SMALL_CAP)?;
+    assert_eq!(verify_token(&exact.verifier, &token_for(&early)?, PEER, TENANT, NOW)?, early);
+    Ok(())
+}
+
+
+#[test]
+fn a_backward_clock_step_does_not_revive_a_token_expired_by_an_earlier_reading() -> TestResult {
+    let setup = setup()?;
+    let mut brief = claims(1);
+    brief.expires_at = NOW + HALF_LIFETIME;
+    let brief_token = token_for(&brief)?;
+    let long_token = token_for(&claims(SECOND_NONCE))?;
+    verify_token(&setup.verifier, &brief_token, PEER, TENANT, NOW)?;
+    verify_token(&setup.verifier, &long_token, PEER, TENANT, NOW + HALF_LIFETIME)?;
+    assert_eq!(refusal_at(&setup, &brief_token, NOW)?, "token is expired");
+    assert_eq!(refusal_at(&setup, &long_token, NOW)?, "token was already used");
     Ok(())
 }
 
@@ -238,7 +272,7 @@ fn issuing_refuses_a_failing_signer_and_an_oversize_token() -> TestResult {
     assert!(matches!(refused, IssueError::Signer(_)));
     assert_eq!(refused.to_string(), "the signer failed: vault down");
     let mut large = claims(1);
-    large.viewer_subject = "a".repeat(OVERSIZE_SUBJECT);
+    large.viewer_subject = "a".repeat(MAX_SUBJECT_BYTES);
     let too_large = issue_token(&memory_signer(signing_key(RELAY_SEED)), &large).err().ok_or("issued")?;
     assert!(matches!(too_large, IssueError::TooLarge));
     Ok(())

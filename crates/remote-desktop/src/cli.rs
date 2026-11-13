@@ -1,14 +1,19 @@
 use crate::error::{CliError, TokenError};
-use crate::model::{IssueRequest, Line, RelayClaims, Verifier, MAX_TOKEN_BYTES};
+use crate::model::{IssueRequest, Line, RelayClaims, Verifier, GROUP_OTHER_MASK, MAX_SEED_FILE_BYTES, MAX_TOKEN_BYTES};
 use crate::sign::{memory_signer, new_identifiers};
 use crate::token::{issue_token, verify_token};
 use crate::types::FillFn;
+use core_pg::password::{open_regular, read_secret};
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH};
+use std::fs::Metadata;
 use std::io::{self, BufRead, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 
-pub const ISSUE_USAGE: &str = "issue <seed-hex> <claims-json>";
+pub const ISSUE_USAGE: &str = "issue <seed-file> <claims-json>";
 
 
 /// A token, a carriage return and a line feed, plus one byte to tell an oversize line from a full one.
@@ -32,10 +37,47 @@ pub fn signing_key_from(seed_hex: &str) -> Result<SigningKey, CliError> {
 }
 
 
+/// Mode bits and owner of the opened handle, with the effective user of the process.
+#[cfg(unix)]
+pub fn mode_and_owners(metadata: &Metadata) -> Result<(u32, u32, u32), CliError> {
+    Ok((metadata.mode(), metadata.uid(), rustix::process::geteuid().as_raw()))
+}
+
+
+#[cfg(not(unix))]
+pub fn mode_and_owners(_metadata: &Metadata) -> Result<(u32, u32, u32), CliError> {
+    Err(CliError::Unsupported)
+}
+
+
+/// The seed file must grant nothing to group or other and belong to the process user.
+pub fn check_owner_and_mode(mode: u32, owner: u32, process_user: u32) -> Result<(), CliError> {
+    if mode & GROUP_OTHER_MASK != 0 {
+        Err(CliError::SeedMode)
+    } else if owner != process_user {
+        Err(CliError::SeedOwner)
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Opened without blocking, regular file, mode and owner judged on the opened handle, bounded read, then the hex seed.
+pub fn read_signing_key(path: &Path) -> Result<SigningKey, CliError> {
+    let mut handle = open_regular(path).map_err(|_| CliError::SeedFile)?;
+    let metadata = handle.metadata().map_err(CliError::Inspect)?;
+    let (mode, owner, process_user) = mode_and_owners(&metadata)?;
+    check_owner_and_mode(mode, owner, process_user)?;
+    let bytes = read_secret(&mut handle, MAX_SEED_FILE_BYTES, "").map_err(|_| CliError::SeedFile)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| CliError::SeedText)?;
+    signing_key_from(text.trim())
+}
+
+
 /// Writes the token as one line; the session id and the nonce are random, the token starts now.
 pub fn write_issued<Output: Write>(args: &[&str], now: u64, fill: FillFn, out: &mut Output) -> Result<(), CliError> {
     match args {
-        [seed, claims_json] => {
+        [seed_file, claims_json] => {
             let request: IssueRequest = serde_json::from_str(claims_json)?;
             let (session_id, nonce) = new_identifiers(fill)?;
             let claims = RelayClaims {
@@ -48,7 +90,7 @@ pub fn write_issued<Output: Write>(args: &[&str], now: u64, fill: FillFn, out: &
                 expires_at: now.saturating_add(request.lifetime_seconds),
                 nonce,
             };
-            let token = issue_token(&memory_signer(signing_key_from(seed)?), &claims)?;
+            let token = issue_token(&memory_signer(read_signing_key(Path::new(seed_file))?), &claims)?;
             writeln!(out, "{token}")?;
             Ok(())
         }

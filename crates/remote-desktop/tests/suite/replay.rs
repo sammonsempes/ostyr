@@ -12,6 +12,9 @@ const TOKEN_COUNT: u64 = 200_000;
 const EXPIRY: u64 = 1_000;
 
 
+const TWO_LIVE: usize = 2;
+
+
 fn nonce(number: u64) -> [u8; NONCE_LENGTH] {
     let mut bytes = [0; NONCE_LENGTH];
     bytes.iter_mut().zip(number.to_be_bytes()).for_each(|(slot, byte)| *slot = byte);
@@ -95,5 +98,19 @@ fn the_verifier_counts_live_tokens_and_full_refusals_with_an_injected_clock() ->
     fresh.expires_at = later + LIFETIME;
     verify_token(&setup.verifier, &token_for(&fresh)?, PEER, TENANT, later)?;
     assert_eq!(live_tokens(&setup.verifier), 1);
+    Ok(())
+}
+
+
+#[test]
+fn pruning_runs_against_the_highest_clock_reading_seen() -> TestResult {
+    let mut set = ReplaySet::default();
+    let total = MAX_PRUNE_PER_CALL as u64 + MAX_PRUNE_PER_CALL as u64;
+    (0..total).try_for_each(|number| admit(&mut set, nonce(number), EXPIRY, 0, DEFAULT_LIVE_TOKENS))?;
+    admit(&mut set, nonce(TOKEN_COUNT), EXPIRY + EXPIRY, EXPIRY, DEFAULT_LIVE_TOKENS)?;
+    assert_eq!(set.nonces.len(), MAX_PRUNE_PER_CALL + 1);
+    admit(&mut set, nonce(TOKEN_COUNT + 1), EXPIRY + EXPIRY, 0, DEFAULT_LIVE_TOKENS)?;
+    assert_eq!(set.high_water, EXPIRY);
+    assert_eq!(set.nonces.len(), TWO_LIVE);
     Ok(())
 }

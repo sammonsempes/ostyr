@@ -1,4 +1,5 @@
 mod attacks;
+mod claims;
 mod cli;
 mod common;
 mod keys;

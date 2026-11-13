@@ -22,7 +22,9 @@ pub fn prune(set: &mut ReplaySet, now: u64) {
 
 /// A full set refuses the new token: a live nonce is never evicted to make room.
 pub fn admit(set: &mut ReplaySet, nonce: Nonce, expires_at: u64, now: u64, max_live_tokens: usize) -> Result<(), TokenError> {
-    prune(set, now);
+    set.high_water = set.high_water.max(now);
+    let horizon = set.high_water;
+    prune(set, horizon);
     if set.nonces.contains(&nonce) {
         Err(TokenError::Replayed)
     } else if set.nonces.len() >= max_live_tokens {
@@ -33,6 +35,14 @@ pub fn admit(set: &mut ReplaySet, nonce: Nonce, expires_at: u64, now: u64, max_l
         set.by_expiry.insert((expires_at, nonce));
         Ok(())
     }
+}
+
+
+/// Records the clock reading and returns the highest one seen, so a clock stepped back never revives an expired token.
+pub fn observe_clock(verifier: &Verifier, now: u64) -> u64 {
+    let mut set = verifier.replay.lock().unwrap_or_else(PoisonError::into_inner);
+    set.high_water = set.high_water.max(now);
+    set.high_water
 }
 
 
