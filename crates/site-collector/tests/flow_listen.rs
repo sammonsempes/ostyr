@@ -1,9 +1,12 @@
+#[path = "support/logging.rs"]
+mod logging;
 #[path = "support/types.rs"]
 mod types;
 
 
 use core_audit::log::{append, open_file_log};
 use core_config::reload::{reload, ReloadContext, ReloadOutcome};
+use logging::captured;
 use site_collector::admission::admit_extra_record;
 use site_collector::error::{ConfigError, ListenError};
 use site_collector::flow::validate_flow_limits;
@@ -549,6 +552,31 @@ fn encode_and_spool_failures_are_counted_per_record() -> TestResult {
     assert_eq!((runtime.stats.spool_errors, runtime.stats.flow_records), (TWO * V5_RECORDS, 0));
     handle_flow_with(&mut runtime, v4_source(1), V5, NOW, encode_frame);
     assert_eq!(runtime.stats.flow_records, V5_RECORDS);
+    Ok(())
+}
+
+
+const BIG_DATAGRAM_RECORDS: usize = 30;
+
+
+fn template_and_data(records: usize) -> Vec<u8> {
+    v9(0, &[template_set(TEMPLATE_ID), data_set(TEMPLATE_ID, records)])
+}
+
+
+#[test]
+fn a_failing_spool_logs_one_line_per_datagram_with_the_count() -> TestResult {
+    let dir = TempDir::new()?;
+    let mut runtime = runtime_in(dir.path(), flow_settings())?;
+    let datagram = template_and_data(BIG_DATAGRAM_RECORDS);
+    let ((), log) = captured(|| handle_flow_with(&mut runtime, v4_source(1), &datagram, NOW, oversized_encoder));
+    assert_eq!(runtime.stats.spool_errors, BIG_DATAGRAM_RECORDS as u64);
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(log.contains("count=30"), "{log}");
+    assert!(log.contains("cannot store flow records"), "{log}");
+    let ((), quiet) = captured(|| handle_flow_with(&mut runtime, v4_source(1), V5, NOW, encode_frame));
+    assert_eq!(quiet, "");
+    assert_eq!((runtime.stats.flows_accepted, runtime.stats.accepted), (TWO, 0));
     Ok(())
 }
 

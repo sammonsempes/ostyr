@@ -270,10 +270,7 @@ pub fn append_with(spool: &mut Spool, priority: Priority, payload: &[u8], writer
     }
     enforce_cap(spool, size)?;
     let active_bytes_after = spool.segments.back().map_or(0, |segment| segment.bytes);
-    writer(&mut spool.active, &frame).or_else(|error| {
-        tracing::warn!(%error, kept_bytes = active_bytes_after, "spool write failed, cutting the active segment back");
-        spool.active.set_len(active_bytes_after).and(Err(error))
-    })?;
+    writer(&mut spool.active, &frame).or_else(|error| spool.active.set_len(active_bytes_after).and(Err(error)))?;
     spool.segments.back_mut().into_iter().for_each(|segment| {
         segment.bytes += size;
         match priority {
