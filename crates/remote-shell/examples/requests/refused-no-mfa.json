@@ -1,0 +1,12 @@
+{
+  "catalog": {"shell_operator": ["remote_shell.open"], "shell_approver": ["remote_shell.approve"]},
+  "request": {"request_id": "req-refused-no-mfa", "tenant": "acme", "requester": "alice", "asset": "host-7", "ticket": "INC-4521", "created_at": 1799999940},
+  "requester_roles": ["shell_operator"],
+  "asset_criticality": "medium",
+  "evidence": {
+    "mfa": null,
+    "approvals": [],
+    "approver_roles": {}
+  },
+  "now": 1800000000
+}
