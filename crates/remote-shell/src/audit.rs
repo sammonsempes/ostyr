@@ -23,9 +23,9 @@ pub struct AuditFields {
 }
 
 
-/// Any character outside ASCII graphic and space becomes `\u{hex}`, so the audit never holds a control, bidi or blank character.
+/// Any character outside ASCII graphic (backslash excluded) and space becomes `\u{hex}`, so the audit never holds a control, bidi or blank character.
 pub fn escape_char(character: char) -> String {
-    match character.is_ascii_graphic() || character == ' ' {
+    match (character.is_ascii_graphic() && character != '\\') || character == ' ' {
         true => character.to_string(),
         false => format!("\\u{{{:x}}}", u32::from(character)),
     }

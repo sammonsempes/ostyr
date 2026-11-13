@@ -12,6 +12,9 @@ const EXTRA: usize = 5;
 const HUGE: usize = 10_000;
 
 
+const FORGED_OMITTED: usize = 9;
+
+
 const CREATED_AT: i64 = 1_800_000_000;
 
 
@@ -128,5 +131,41 @@ fn approvers_are_escaped_too() -> TestResult {
         approved_by: vec!["bo\u{202e}b".to_string()],
     };
     assert_eq!(open_audit(&request(), &decision).approvers, vec!["bo\\u{202e}b".to_string()]);
+    Ok(())
+}
+
+
+#[test]
+fn a_literal_backslash_text_differs_from_the_real_control_character() -> TestResult {
+    let refused = OpenDecision::Refused(OpenRefusal::Requester);
+    let literal = open_audit(
+        &OpenRequest {
+            requester: "a\\u{a}b".to_string(),
+            ..request()
+        },
+        &refused,
+    );
+    let real = open_audit(
+        &OpenRequest {
+            requester: "a\nb".to_string(),
+            ..request()
+        },
+        &refused,
+    );
+    assert_ne!(literal.requester, real.requester);
+    assert_eq!(literal.requester, "a\\u{5c}u{a}b");
+    assert_eq!(real.requester, "a\\u{a}b");
+    Ok(())
+}
+
+
+#[test]
+fn a_forged_cut_marker_differs_from_a_real_cut() -> TestResult {
+    let forged = escape_cut(&format!("{}...[+9 chars]", "a".repeat(MAX_AUDIT_CHARS + EXTRA)));
+    let real = escape_cut(&"a".repeat(MAX_AUDIT_CHARS + FORGED_OMITTED));
+    assert_ne!(forged, real);
+    assert!(forged.ends_with("...[+18 chars]"));
+    assert!(real.ends_with("...[+9 chars]"));
+    assert_eq!(escape_cut("a\\"), "a\\u{5c}");
     Ok(())
 }
