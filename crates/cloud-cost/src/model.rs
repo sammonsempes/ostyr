@@ -65,6 +65,7 @@ pub enum SkipReason {
     Malformed,
     BadAmount,
     BadDate,
+    DayOutOfRange,
     BadTags,
     MixedCurrency,
 }

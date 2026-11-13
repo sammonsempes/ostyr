@@ -139,7 +139,8 @@ pub fn build_row(record: &StringRecord, columns: &Columns, limits: &Limits) -> R
     let labels_valid = is_label(&account) && is_label(service) && is_label(currency);
     if labels_valid {
         let amount = parse_amount(field(record, columns.amount)).ok_or(SkipReason::BadAmount)?;
-        let day = parse_day(field(record, columns.start))?;
+        let day =
+            parse_day(field(record, columns.start)).and_then(|parsed| in_date_range(parsed).then_some(parsed).ok_or(SkipReason::DayOutOfRange))?;
         let tags = match columns.tags {
             Some(index) => parse_tags(field(record, index), limits)?,
             None => Vec::new(),
