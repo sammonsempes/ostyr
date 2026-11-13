@@ -3,7 +3,7 @@ mod types;
 
 
 use k8s_inventory::diff::diff;
-use k8s_inventory::inventory::{build_inventory, Inventory};
+use k8s_inventory::inventory::{build_inventory, inventory_nodes, inventory_pods, inventory_skipped_pods, Inventory};
 use k8s_inventory::limits::Limits;
 use k8s_inventory::parse::{parse_nodes, parse_pods};
 use types::TestResult;
@@ -41,13 +41,17 @@ fn inventory_of(pods: &[u8]) -> Result<Inventory, Box<dyn std::error::Error>> {
 #[test]
 fn live_k3s_captures_parse_without_skips() -> TestResult {
     let after = inventory_of(PODS_AFTER)?;
-    assert_eq!(after.pods.len(), PODS_AFTER_COUNT);
-    assert_eq!(after.nodes.len(), 1);
+    assert_eq!(inventory_pods(&after).len(), PODS_AFTER_COUNT);
+    assert_eq!(inventory_nodes(&after).len(), 1);
     assert_eq!(
-        (after.skipped_pods.bad_field, after.skipped_pods.unparsable, after.skipped_pods.duplicate),
+        (
+            inventory_skipped_pods(&after).bad_field,
+            inventory_skipped_pods(&after).unparsable,
+            inventory_skipped_pods(&after).duplicate
+        ),
         (0, 0, 0)
     );
-    let node = after.nodes.first().ok_or("no node")?;
+    let node = inventory_nodes(&after).first().ok_or("no node")?;
     assert_eq!(node.name, "k3s");
     assert_eq!(node.addresses.len(), 1);
     Ok(())

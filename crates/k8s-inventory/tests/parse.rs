@@ -147,12 +147,8 @@ fn a_malformed_element_is_skipped_with_its_reason() -> TestResult {
     ])?;
     assert_eq!(parsed.items.len(), 1);
     assert_eq!(
-        parsed.skipped,
-        Skipped {
-            unparsable: TWO,
-            bad_field: EIGHT,
-            duplicate: 0
-        }
+        (parsed.skipped.unparsable, parsed.skipped.bad_field, parsed.skipped.duplicate),
+        (TWO, EIGHT, 0)
     );
     Ok(())
 }
@@ -306,12 +302,8 @@ fn node_addresses_are_capped_and_bad_ones_skip_the_node() -> TestResult {
     let parsed = nodes_of(vec![bad_ip, no_ip, bad_version, no_uid, bare, json!(1)])?;
     assert_eq!(parsed.items.len(), 1);
     assert_eq!(
-        parsed.skipped,
-        Skipped {
-            unparsable: 1,
-            bad_field: FOUR,
-            duplicate: 0
-        }
+        (parsed.skipped.unparsable, parsed.skipped.bad_field, parsed.skipped.duplicate),
+        (1, FOUR, 0)
     );
     Ok(())
 }

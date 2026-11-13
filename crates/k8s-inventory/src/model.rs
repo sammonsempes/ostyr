@@ -38,11 +38,13 @@ pub enum SkipReason {
 }
 
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Skipped {
     pub unparsable: usize,
     pub bad_field: usize,
     pub duplicate: usize,
+    pub uid_lost: usize,
+    pub refused_uids: Vec<String>,
 }
 
 
@@ -69,9 +71,19 @@ pub struct ItemRef {
 }
 
 
+/// An item known by kind and uid only: it was refused, so its names are never kept.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnreadableRef {
+    pub kind: ItemKind,
+    pub uid: String,
+}
+
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InventoryDiff {
     pub created: Vec<ItemRef>,
     pub retired: Vec<ItemRef>,
     pub changed: Vec<ItemRef>,
+    pub unreadable: Vec<UnreadableRef>,
+    pub retired_unreadable: Vec<UnreadableRef>,
 }
