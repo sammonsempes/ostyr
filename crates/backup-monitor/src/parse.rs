@@ -5,7 +5,7 @@ use crate::types::SkipCounts;
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use time::format_description::well_known::Rfc3339;
 use time::format_description::BorrowedFormatItem;
@@ -116,7 +116,27 @@ pub struct PbsVerification {
 
 #[derive(Deserialize)]
 pub struct PbsFile {
-    pub filename: Option<String>,
+    pub filename: String,
+    #[serde(default, deserialize_with = "strict")]
+    pub size: Option<u64>,
+    #[serde(default, rename = "crypt-mode", deserialize_with = "strict")]
+    pub crypt_mode: Option<PbsCryptMode>,
+}
+
+
+/// The schema's `crypt-mode` enum.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PbsCryptMode {
+    None,
+    Encrypt,
+    SignOnly,
+}
+
+
+/// An absent key is `None`, but a present one (`null` included) must have the type.
+pub fn strict<'de, Value: Deserialize<'de>, Source: Deserializer<'de>>(deserializer: Source) -> Result<Option<Value>, Source::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 
@@ -267,7 +287,7 @@ pub fn names_manifest(item: &RawValue) -> Option<bool> {
     Some(item.get())
         .filter(|text| text.starts_with('{'))
         .and_then(|text| serde_json::from_str::<PbsFile>(text).ok())
-        .map(|file| file.filename.as_deref() == Some(PBS_MANIFEST))
+        .map(|file| file.filename == PBS_MANIFEST)
 }
 
 
@@ -339,26 +359,34 @@ pub fn skip(counts: &mut SkipCounts, reason: SkipReason) {
 }
 
 
-/// Parses the elements one at a time, so only one is ever expanded; a repeated id is skipped as `Duplicate`.
+/// Parses the elements one at a time, so only one is ever expanded; every copy of a repeated id is unusable and counted as `Duplicate`.
 pub fn collect(
     repository: String,
     items: &[&RawValue],
     parse_one: impl Fn(&RawElement) -> Result<Snapshot, SkipReason>,
 ) -> Result<Listing, BackupError> {
+    let parsed = items
+        .iter()
+        .map(|item| Ok(parse_one(&element(item)?)))
+        .collect::<Result<Vec<_>, BackupError>>()?;
+    let copies = parsed.iter().flatten().fold(BTreeMap::<&str, usize>::new(), |mut counts, snapshot| {
+        *counts.entry(snapshot.id.as_str()).or_insert(0) += 1;
+        counts
+    });
+    let repeated: BTreeSet<String> = copies.into_iter().filter(|(_, count)| *count > 1).map(|(id, _)| id.to_owned()).collect();
     let start = Listing {
         repository,
         snapshots: Vec::new(),
         skipped: SkipCounts::new(),
     };
-    let mut seen = BTreeSet::new();
-    items.iter().try_fold(start, |mut listing, item| {
-        match parse_one(&element(item)?) {
-            Ok(snapshot) if seen.insert(snapshot.id.clone()) => listing.snapshots.push(snapshot),
-            Ok(_) => skip(&mut listing.skipped, SkipReason::Duplicate),
+    Ok(parsed.into_iter().fold(start, |mut listing, outcome| {
+        match outcome {
+            Ok(snapshot) if repeated.contains(&snapshot.id) => skip(&mut listing.skipped, SkipReason::Duplicate),
+            Ok(snapshot) => listing.snapshots.push(snapshot),
             Err(reason) => skip(&mut listing.skipped, reason),
         }
-        Ok(listing)
-    })
+        listing
+    }))
 }
 
 
