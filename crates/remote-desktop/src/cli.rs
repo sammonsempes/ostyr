@@ -1,15 +1,17 @@
 use crate::error::{CliError, TokenError};
-use crate::model::{IssueRequest, Line, RelayClaims, Verifier, GROUP_OTHER_MASK, MAX_SEED_FILE_BYTES, MAX_TOKEN_BYTES};
+use crate::model::{
+    IssueRequest, Line, RelayClaims, Verifier, GROUP_OTHER_MASK, MAX_SEED_FILE_BYTES, MAX_TOKEN_BYTES, PUBLIC_FILE_MODE, SEED_FILE_MODE,
+};
 use crate::sign::{memory_signer, new_identifiers};
 use crate::token::{issue_token, verify_token};
 use crate::types::FillFn;
 use core_pg::password::{open_regular, read_secret};
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH};
-use std::fs::Metadata;
+use std::fs::{File, Metadata};
 use std::io::{self, BufRead, Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -21,17 +23,45 @@ pub const ISSUE_USAGE: &str = "issue <seed-file> <claims-json>";
 pub const LINE_LIMIT: usize = MAX_TOKEN_BYTES + 3;
 
 
-/// Writes `seed <hex>` and `public <hex>` for a fresh random key.
-pub fn write_keypair<Output: Write>(fill: FillFn, out: &mut Output) -> Result<(), CliError> {
+/// Creates a new file that did not exist, with the given mode from the first byte; an existing path is refused and never followed.
+#[cfg(unix)]
+pub fn create_new_file(path: &Path, mode: u32) -> Result<File, CliError> {
+    Ok(std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path)?)
+}
+
+
+#[cfg(not(unix))]
+pub fn create_new_file(_path: &Path, _mode: u32) -> Result<File, CliError> {
+    Err(CliError::Unsupported)
+}
+
+
+/// One hex text and a newline.
+pub fn write_hex_line<Output: Write>(out: &mut Output, hex: &[u8]) -> Result<(), CliError> {
+    out.write_all(hex)?;
+    out.write_all(b"\n")?;
+    Ok(())
+}
+
+
+/// The seed file is created and written last, after the public file; a failure leaves the public file and no path-based removal.
+pub fn write_seed_file(seed_path: &Path, seed_hex: &[u8]) -> Result<(), CliError> {
+    let mut seed_file = create_new_file(seed_path, SEED_FILE_MODE)?;
+    write_hex_line(&mut seed_file, seed_hex)
+}
+
+
+/// Creates the public file (mode 644) then the seed file (mode 600), never overwriting; prints `public <hex>` only.
+pub fn write_keypair_files<Output: Write>(fill: FillFn, seed_path: &Path, public_path: &Path, out: &mut Output) -> Result<(), CliError> {
     let mut seed = Zeroizing::new([0; SECRET_KEY_LENGTH]);
     fill(&mut *seed)?;
     let public = SigningKey::from_bytes(&seed).verifying_key();
+    let public_hex = HEXLOWER.encode(&public.to_bytes());
     let mut seed_hex = Zeroizing::new(vec![0; HEXLOWER.encode_len(SECRET_KEY_LENGTH)]);
     HEXLOWER.encode_mut(seed.as_slice(), &mut seed_hex);
-    out.write_all(b"seed ")?;
-    out.write_all(&seed_hex)?;
-    out.write_all(b"\n")?;
-    writeln!(out, "public {}", HEXLOWER.encode(&public.to_bytes()))?;
+    write_hex_line(&mut create_new_file(public_path, PUBLIC_FILE_MODE)?, public_hex.as_bytes())?;
+    write_seed_file(seed_path, &seed_hex).map_err(|cause| CliError::PublicKept(Box::new(cause)))?;
+    writeln!(out, "public {public_hex}")?;
     Ok(())
 }
 
