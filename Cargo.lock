@@ -2675,8 +2675,10 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-subscriber",
  "unicode-general-category",
  "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]
