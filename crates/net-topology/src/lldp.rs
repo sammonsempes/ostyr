@@ -1,6 +1,7 @@
 use crate::error::{ListError, ParseError};
-use crate::limits::Limits;
+use crate::limits::{Limits, MAX_HOST_READ_BYTES_CEILING};
 use crate::model::{IdSubtype, NeighbourId, Observation, Parsed, SkipReason, Skipped};
+use crate::ports::valid_port;
 use crate::text::valid_text;
 use crate::types::RawList;
 use serde::de::IgnoredAny;
@@ -135,7 +136,7 @@ fn shape(error: serde_json::Error) -> ListError {
 }
 
 
-fn malformed(error: serde_json::Error) -> ParseError {
+pub fn malformed(error: serde_json::Error) -> ParseError {
     ParseError::Malformed {
         category: error.classify(),
         line: error.line(),
@@ -154,7 +155,7 @@ fn refused_list(_error: ListError) -> SkipReason {
 }
 
 
-fn parse_error(error: ListError, list: &'static str) -> ParseError {
+pub fn parse_error(error: ListError, list: &'static str) -> ParseError {
     match error {
         ListError::Shape { category, line, column } => ParseError::Malformed { category, line, column },
         ListError::TooMany { count, max } => ParseError::TooMany { list, count, max },
@@ -330,7 +331,7 @@ fn read_interface(raw: &RawValue, context: &Context, parsed: &mut Parsed) -> Res
 }
 
 
-fn require_object(bytes: &[u8]) -> Result<(), ParseError> {
+pub fn require_object(bytes: &[u8]) -> Result<(), ParseError> {
     if is_object(bytes) {
         Ok(())
     } else {
@@ -351,7 +352,7 @@ fn read_block(raw: &RawValue, context: &Context, parsed: &mut Parsed) -> Result<
 }
 
 
-fn read_limited<Source: Read>(reader: Source, max_bytes: u64) -> Result<Vec<u8>, ParseError> {
+pub fn read_limited<Source: Read>(reader: Source, max_bytes: u64) -> Result<Vec<u8>, ParseError> {
     let mut buffer = Vec::new();
     let mut limited = reader.take(max_bytes.saturating_add(1));
     limited.read_to_end(&mut buffer).map_err(ParseError::Read)?;
@@ -363,8 +364,15 @@ fn read_limited<Source: Read>(reader: Source, max_bytes: u64) -> Result<Vec<u8>,
 }
 
 
-fn check_host(local_host: &str, limits: &Limits) -> Result<(), ParseError> {
-    if limits.max_links_per_port > limits.max_links_per_host {
+/// Checks the host name and the limits that every read depends on.
+pub fn check_host(local_host: &str, limits: &Limits) -> Result<(), ParseError> {
+    if limits.max_host_read_bytes < limits.max_port_bytes || limits.max_host_read_bytes > MAX_HOST_READ_BYTES_CEILING {
+        Err(ParseError::InvalidHostBytes {
+            budget: limits.max_host_read_bytes,
+            per_port: limits.max_port_bytes,
+            ceiling: MAX_HOST_READ_BYTES_CEILING,
+        })
+    } else if limits.max_links_per_port > limits.max_links_per_host {
         Err(ParseError::InvalidLimits {
             per_port: limits.max_links_per_port,
             per_host: limits.max_links_per_host,
@@ -419,26 +427,44 @@ pub fn parse_lldpd<Source: Read>(reader: Source, local_host: &str, now: i64, lim
 }
 
 
-/// Parses the report of one local port (`lldpcli -f json0 show neighbors ports <port> details`): its own byte cap, and a neighbour of another port refuses it.
-pub fn parse_lldpd_port<Source: Read>(reader: Source, local_host: &str, local_port: &str, now: i64, limits: &Limits) -> Result<Parsed, ParseError> {
-    check_host(local_host, limits)?;
+/// Refuses a per-port cap above the whole-report cap.
+pub fn check_port_bytes(limits: &Limits) -> Result<(), ParseError> {
     if limits.max_port_bytes > limits.max_bytes {
         Err(ParseError::InvalidPortBytes {
             per_port: limits.max_port_bytes,
             per_host: limits.max_bytes,
         })
     } else {
-        let mut buffer = read_limited(reader, limits.max_port_bytes)?;
-        let parsed = parse_buffer(&mut buffer, local_host, now, limits)?;
-        let foreign = parsed
-            .observations
-            .iter()
-            .filter(|observation| observation.local_port != local_port)
-            .count();
-        if foreign > 0 {
-            Err(ParseError::WrongPort { count: foreign })
-        } else {
-            Ok(parsed)
-        }
+        Ok(())
+    }
+}
+
+
+/// Checks the host, the port name and the limits of one per-port read, before anything is read.
+pub fn check_port(local_host: &str, local_port: &str, limits: &Limits) -> Result<(), ParseError> {
+    check_host(local_host, limits)?;
+    check_port_bytes(limits)?;
+    if valid_port(local_port) {
+        Ok(())
+    } else {
+        Err(ParseError::InvalidPort)
+    }
+}
+
+
+/// Parses the report of one local port (`lldpcli -f json0 show neighbors ports <port> details`): its own byte cap, and a neighbour of another port refuses it.
+pub fn parse_lldpd_port<Source: Read>(reader: Source, local_host: &str, local_port: &str, now: i64, limits: &Limits) -> Result<Parsed, ParseError> {
+    check_port(local_host, local_port, limits)?;
+    let mut buffer = read_limited(reader, limits.max_port_bytes)?;
+    let parsed = parse_buffer(&mut buffer, local_host, now, limits)?;
+    let foreign = parsed
+        .observations
+        .iter()
+        .filter(|observation| observation.local_port != local_port)
+        .count();
+    if foreign > 0 {
+        Err(ParseError::WrongPort { count: foreign })
+    } else {
+        Ok(parsed)
     }
 }

@@ -33,6 +33,10 @@ pub enum ParseError {
     WrongPort { count: usize },
     #[error("max_port_bytes {per_port} is above max_bytes {per_host}")]
     InvalidPortBytes { per_port: u64, per_host: u64 },
+    #[error("max_host_read_bytes {budget} is below max_port_bytes {per_port} or above {ceiling}")]
+    InvalidHostBytes { budget: u64, per_port: u64, ceiling: u64 },
+    #[error("the local port name is not a valid interface name")]
+    InvalidPort,
     #[error("the local host name is not valid text")]
     InvalidHost,
     #[error("max_links_per_port {per_port} is above max_links_per_host {per_host}")]
