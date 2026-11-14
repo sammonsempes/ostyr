@@ -8,8 +8,8 @@ mod stub;
 use common::types::TestResult;
 use hunt_packs::model::Source;
 use hunt_packs::run::{
-    count_statement, pack_refusal, parse_count, read_count, refusal_text, run_pack, server_settings, window_text, HuntOutcome, PackRefusal, RunError,
-    MAX_COUNT_BYTES,
+    count_statement, failure_line, pack_refusal, parse_count, read_count, refusal_text, run_pack, server_settings, shown_tenant, window_text,
+    HuntOutcome, PackRefusal, RunError, MAX_COUNT_BYTES,
 };
 use metric_alerts::fetch::agent_for;
 use sample::{pack, param, sent_params, settings, NOW, PASSWORD};
@@ -382,4 +382,15 @@ fn reply_within(
     body: Vec<u8>,
 ) -> std::thread::JoinHandle<io::Result<String>> {
     std::thread::spawn(move || serve(accept_within(&listener, polls)?, status, extra, &body))
+}
+
+
+#[test]
+fn the_failure_line_names_a_valid_tenant_and_hides_a_bad_one() -> TestResult {
+    let line = failure_line(&pack(), "acme", &RunError::Malformed);
+    assert_eq!(line, "hunt run failed: pack sample tenant acme: the reply is not one unsigned count");
+    assert!(failure_line(&pack(), "-x\n", &RunError::Malformed).contains("tenant #:"));
+    assert_eq!(shown_tenant("acme"), "acme");
+    assert_eq!(shown_tenant("a b"), "#");
+    Ok(())
 }
