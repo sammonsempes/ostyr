@@ -17,6 +17,9 @@ const MAX_UID_UNITS: usize = 2_000;
 const DISPLAY_FLOOD_CHARACTERS: [usize; 5] = [600, 513, 147, 146, 73];
 
 
+const CUT_FLOOD_CHARACTERS: usize = 513;
+
+
 const INDEX_DIGITS: usize = 6;
 
 
@@ -145,8 +148,15 @@ fn every_flood_is_refused() -> TestResult {
     })?;
     DISPLAY_FLOOD_CHARACTERS.iter().try_for_each(|characters| {
         let flood = display_flood(*characters)?;
-        let outcome = parse(&flood)?;
-        assert!(matches!(outcome, Ok(count) if count > 0), "{outcome:?}");
+        let parsed = parse_prowler_ocsf(flood.as_bytes(), "lab", "a", &Limits::default())?;
+        let first = parsed.items.first().ok_or("no finding kept")?;
+        let expect_cut = *characters >= CUT_FLOOD_CHARACTERS;
+        assert!(
+            (first.title_cut > 0) == expect_cut && (first.detail_cut > 0) == expect_cut,
+            "{characters} characters: title_cut {} detail_cut {}",
+            first.title_cut,
+            first.detail_cut
+        );
         Ok::<(), Box<dyn Error>>(())
     })?;
     let root = parse(&root_flood()?);
