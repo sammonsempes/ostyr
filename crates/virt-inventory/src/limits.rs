@@ -1,3 +1,6 @@
+use serde::Deserialize;
+
+
 pub const DEFAULT_MAX_BYTES: u64 = 16_777_216;
 
 
@@ -16,7 +19,8 @@ pub const DEFAULT_MAX_PRIVILEGES: usize = 128;
 pub const DEFAULT_MAX_GRANTS: usize = 100_000;
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Limits {
     pub max_bytes: u64,
     pub max_items: usize,

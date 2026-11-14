@@ -1,3 +1,4 @@
+use crate::degraded::degraded_nodes;
 use crate::error::InventoryError;
 use crate::model::{Parsed, Resource, Skipped};
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -10,6 +11,7 @@ pub struct Inventory {
     pub(crate) cluster: String,
     pub(crate) items: Vec<Resource>,
     pub(crate) skipped: Skipped,
+    pub(crate) degraded_nodes: Vec<String>,
 }
 
 
@@ -33,6 +35,12 @@ pub fn inventory_skipped(inventory: &Inventory) -> &Skipped {
 }
 
 
+/// Nodes whose guests all answered `unknown` (a stalled pvestatd); their guests are `unreadable` in a diff, never `changed`.
+pub fn inventory_degraded_nodes(inventory: &Inventory) -> &[String] {
+    &inventory.degraded_nodes
+}
+
+
 /// The tenant and the cluster id follow the core-pg tenant grammar (at most 64 characters, no leading `-`).
 pub fn build_inventory(tenant: &str, cluster: &str, parsed: Parsed) -> Result<Inventory, InventoryError> {
     let scope = tenant_scope(tenant).map_err(InventoryError::Tenant)?;
@@ -40,6 +48,7 @@ pub fn build_inventory(tenant: &str, cluster: &str, parsed: Parsed) -> Result<In
     Ok(Inventory {
         tenant: scope,
         cluster: cluster.to_owned(),
+        degraded_nodes: degraded_nodes(&parsed.items),
         items: parsed.items,
         skipped: parsed.skipped,
     })
