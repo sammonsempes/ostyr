@@ -8,7 +8,8 @@ mod types;
 use fake::{install_script, is_gone, scratch};
 use net_topology::model::RunFailure;
 use net_topology::runner::{
-    read_output, reap_killed, run_command, run_lldpcli, sigchld_ignored, wait_exit, wait_polls, MAX_DEADLINE_SECONDS, WAIT_POLL_MILLIS,
+    read_output, reap_killed, run_command, run_lldpcli, sigchld_ignored, wait_exit, wait_polls, MAX_DEADLINE_SECONDS, MAX_STATUS_BYTES,
+    WAIT_POLL_MILLIS,
 };
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -71,6 +72,30 @@ const MEMORY_LIMIT: &str = "--as=419430400";
 
 fn pid_in(path: &Path) -> Result<u32, Box<dyn std::error::Error>> {
     Ok(std::fs::read_to_string(path)?.trim().parse::<u32>()?)
+}
+
+
+const SIGKILL_BIT_INDEX: u32 = 8;
+
+
+const KILL_BIT: u64 = 1 << SIGKILL_BIT_INDEX;
+
+
+const HEX: u32 = 16;
+
+
+fn is_signalled(pid: u32) -> Result<bool, Box<dyn std::error::Error>> {
+    match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+        Ok(text) => {
+            let pending = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("ShdPnd:").or_else(|| line.strip_prefix("SigPnd:")))
+                .any(|mask| u64::from_str_radix(mask.trim(), HEX).is_ok_and(|bits| bits & KILL_BIT != 0));
+            Ok(pending || text.lines().any(|line| line.starts_with("State:\tZ")))
+        }
+    }
 }
 
 
@@ -429,8 +454,57 @@ fn an_already_reaped_child_is_never_signalled() -> TestResult {
     child.wait()?;
     let bystander = pid_in(&pid_file)?;
     reap_killed(&mut child, &mut Instant::now);
-    let survived = !wait_gone(bystander);
+    let signalled = is_signalled(bystander);
     Command::new("kill").arg("-9").arg(bystander.to_string()).status()?;
-    assert!(survived);
+    assert!(!signalled?);
+    Ok(())
+}
+
+
+fn status_of_size(size: u64, mask_line: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let tail = format!("{mask_line}\n");
+    let pad = usize::try_from(size)? - tail.len() - "Pad:\n".len();
+    Ok(format!("Pad:{}\n{tail}", "x".repeat(pad)))
+}
+
+
+#[test]
+fn a_status_file_at_the_cap_is_read_and_one_byte_more_is_refused() -> TestResult {
+    let dir = scratch()?;
+    let at_cap = dir.path().join("at_cap");
+    let over = dir.path().join("over");
+    std::fs::write(&at_cap, status_of_size(MAX_STATUS_BYTES, "SigIgn:\t0000000000000001")?)?;
+    std::fs::write(&over, status_of_size(MAX_STATUS_BYTES + 1, "SigIgn:\t0000000000000001")?)?;
+    assert_eq!(sigchld_ignored(&at_cap), Ok(false));
+    assert_eq!(sigchld_ignored(&over), Err(RunFailure::Unwaitable));
+    Ok(())
+}
+
+
+#[test]
+fn a_cut_or_signed_sigign_line_is_refused() -> TestResult {
+    let dir = scratch()?;
+    let write = |name: &str, text: &str| -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text)?;
+        Ok(path)
+    };
+    assert_eq!(sigchld_ignored(&write("short", "SigIgn:\t000000000001000")?), Err(RunFailure::Unwaitable));
+    assert_eq!(
+        sigchld_ignored(&write("short_nl", "SigIgn:\t000000000001000\n")?),
+        Err(RunFailure::Unwaitable)
+    );
+    assert_eq!(
+        sigchld_ignored(&write("plus", "SigIgn:\t+000000000010000\n")?),
+        Err(RunFailure::Unwaitable)
+    );
+    assert_eq!(
+        sigchld_ignored(&write("inner", "SigIgn:\t00000000 0010000\n")?),
+        Err(RunFailure::Unwaitable)
+    );
+    assert_eq!(
+        sigchld_ignored(&write("long", "SigIgn:\t00000000000100000\n")?),
+        Err(RunFailure::Unwaitable)
+    );
     Ok(())
 }
