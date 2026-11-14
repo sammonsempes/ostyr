@@ -54,6 +54,10 @@ pub const SECRETS: &str = "secrets";
 pub const TOKEN_SUBRESOURCE: &str = "serviceaccounts/token";
 
 
+/// `get` on `nodes/log` returns the node's whole `/var/log` through the kubelet; the stock `view` role does not grant it.
+pub const NODE_LOG: &str = "nodes/log";
+
+
 /// Subresources whose read verbs reach the kubelet or a pod stream: `get` on `nodes/proxy` runs commands in any container.
 pub const ACTIVE_SUFFIXES: [&str; 4] = ["/proxy", "/exec", "/attach", "/portforward"];
 
@@ -294,6 +298,7 @@ pub fn grants_more_than_reading(groups: &[String], resource: &str) -> bool {
     resource.contains(WILDCARD)
         || (resource == SECRETS && groups.iter().any(String::is_empty))
         || resource == TOKEN_SUBRESOURCE
+        || resource == NODE_LOG
         || ACTIVE_SUFFIXES.iter().any(|suffix| resource.ends_with(suffix))
 }
 

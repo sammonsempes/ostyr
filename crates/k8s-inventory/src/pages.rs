@@ -93,7 +93,9 @@ pub fn merge_pages<Item>(pages: Vec<Page<Item>>, page_limits: &PageLimits, uid_o
     let mut seen = HashSet::new();
     pages.into_iter().for_each(|page| merge_page(&mut merged, &mut seen, page.parsed, uid_of));
     let mut unique = HashSet::new();
+    let refused_before = merged.skipped.refused_uids.len();
     merged.skipped.refused_uids.retain(|uid| unique.insert(uid.clone()));
+    merged.skipped.duplicate += refused_before - merged.skipped.refused_uids.len();
     drop_shadowed_refusals(&mut merged.skipped, &seen);
     let skipped_total = merged.skipped.unparsable + merged.skipped.bad_field + merged.skipped.duplicate;
     if skipped_total > 0 {

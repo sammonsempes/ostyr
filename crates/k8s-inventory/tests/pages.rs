@@ -126,7 +126,7 @@ fn a_refused_uid_seen_on_two_pages_is_listed_once() -> TestResult {
     let refused = json!({"metadata": {"name": "Web", "namespace": "default", "uid": uid("u-r")}});
     let result = merged(vec![pod_page(vec![refused.clone()], Some("t1"))?, pod_page(vec![refused], None)?])?;
     assert_eq!(result.skipped.refused_uids, vec![uid("u-r")]);
-    assert_eq!(result.skipped.bad_field, TWO);
+    assert_eq!((result.skipped.bad_field, result.skipped.duplicate), (TWO, 1));
     Ok(())
 }
 
