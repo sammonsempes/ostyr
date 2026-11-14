@@ -354,8 +354,8 @@ fn restic_host_at_253_characters_is_accepted() -> Result<(), Box<dyn Error>> {
 fn a_repeated_id_is_skipped_as_duplicate() -> Result<(), Box<dyn Error>> {
     let items = json!([restic_item(FIRST), restic_item(FIRST), restic_item(SECOND)]);
     let listing = restic(&items, &Limits::default())?;
-    assert_eq!(listing.snapshots.len(), TWO);
-    assert_eq!(listing.skipped.get(&SkipReason::Duplicate), Some(&1));
+    assert_eq!(listing.snapshots.len(), 1);
+    assert_eq!(listing.skipped.get(&SkipReason::Duplicate), Some(&COPIES));
     Ok(())
 }
 
@@ -462,8 +462,8 @@ fn borg_host_of_253_characters_and_duplicates() -> Result<(), Box<dyn Error>> {
     let name = format!("{}-y", "a".repeat(HOST_MAX));
     let item = borg_item(FIRST, &name);
     let listing = borg(&borg_root(json!([item.clone(), item])), true, &Limits::default())?;
-    assert_eq!(listing.snapshots.len(), 1);
-    assert_eq!(listing.skipped.get(&SkipReason::Duplicate), Some(&1));
+    assert_eq!(listing.snapshots.len(), 0);
+    assert_eq!(listing.skipped.get(&SkipReason::Duplicate), Some(&COPIES));
     Ok(())
 }
 
@@ -514,3 +514,6 @@ fn a_time_outside_the_utc_range_is_skipped_not_a_panic() -> Result<(), Box<dyn E
     assert!(skipped_once(&borg_listing, SkipReason::BadTime));
     Ok(())
 }
+
+
+const COPIES: u64 = 2;

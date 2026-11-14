@@ -269,8 +269,12 @@ fn files_at_the_cap_are_counted_and_one_more_is_refused() -> Result<(), Box<dyn 
         max_paths: PATH_CAP,
         ..Limits::default()
     };
-    let at_cap = with(item("vm", "1"), "files", json!([{}, {}, {}]));
-    let over = with(item("vm", "2"), "files", json!([{}, {}, {}, {}]));
+    let at_cap = with(item("vm", "1"), "files", json!([{"filename": "a"}, {"filename": "b"}, {"filename": "c"}]));
+    let over = with(
+        item("vm", "2"),
+        "files",
+        json!([{"filename": "a"}, {"filename": "b"}, {"filename": "c"}, {"filename": "d"}]),
+    );
     let listing = parse_pbs(json!([at_cap, over]).to_string().as_bytes(), "store1", &limits)?;
     assert_eq!(listing.snapshots.len(), 1);
     assert_eq!(
@@ -289,7 +293,62 @@ fn files_at_the_cap_are_counted_and_one_more_is_refused() -> Result<(), Box<dyn 
 #[test]
 fn a_repeated_snapshot_is_a_duplicate() -> Result<(), Box<dyn Error>> {
     let listing = pbs(&json!([item("vm", "1"), item("vm", "1")]))?;
-    assert_eq!((listing.snapshots.len(), listing.skipped.get(&SkipReason::Duplicate)), (1, Some(&1)));
+    assert_eq!((listing.snapshots.len(), listing.skipped.get(&SkipReason::Duplicate)), (0, Some(&COPIES)));
+    Ok(())
+}
+
+
+#[test]
+fn an_ok_copy_then_a_failed_copy_of_one_id_covers_nothing_in_either_order() -> Result<(), Box<dyn Error>> {
+    let good = item("vm", "9001");
+    let bad = with(item("vm", "9001"), "verification", json!({"state": "failed"}));
+    let outcomes = [json!([good.clone(), bad.clone()]), json!([bad, good])]
+        .iter()
+        .map(|listing| {
+            let parsed = pbs(listing)?;
+            let counts = (parsed.snapshots.len(), parsed.skipped.get(&SkipReason::Duplicate).copied());
+            Ok((counts, statuses(parsed)?.contains(&CoverageStatus::Ok)))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    assert_eq!(outcomes, vec![((0, Some(COPIES)), false), ((0, Some(COPIES)), false)]);
+    Ok(())
+}
+
+
+#[test]
+fn files_entries_are_checked_in_full() -> Result<(), Box<dyn Error>> {
+    assert!(refused_as(
+        with(item("vm", "1"), "files", json!([{"filename": null}])),
+        SkipReason::BadPaths
+    )?);
+    assert!(refused_as(with(item("vm", "1"), "files", json!([{}])), SkipReason::BadPaths)?);
+    assert!(refused_as(
+        with(item("vm", "1"), "files", json!([{"filename": "a", "size": "x"}])),
+        SkipReason::BadPaths
+    )?);
+    assert!(refused_as(
+        with(item("vm", "1"), "files", json!([{"filename": "a", "size": null}])),
+        SkipReason::BadPaths
+    )?);
+    assert!(refused_as(
+        with(item("vm", "1"), "files", json!([{"filename": "a", "crypt-mode": "rot13"}])),
+        SkipReason::BadPaths
+    )?);
+    assert!(refused_as(
+        with(item("vm", "1"), "files", json!([{"filename": "a", "crypt-mode": null}])),
+        SkipReason::BadPaths
+    )?);
+    let accepted = ["none", "encrypt", "sign-only"]
+        .iter()
+        .map(|mode| {
+            pbs(&json!([with(
+                item("vm", "1"),
+                "files",
+                json!([{"filename": "a", "size": 1, "crypt-mode": mode}])
+            )]))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(accepted.iter().all(|listing| listing.snapshots.len() == 1));
     Ok(())
 }
 
@@ -392,7 +451,7 @@ fn the_live_listing_after_a_corrupted_chunk_leaves_the_container_uncovered() -> 
 #[test]
 fn a_snapshot_without_a_manifest_or_a_size_never_covers_and_is_counted() -> Result<(), Box<dyn Error>> {
     let no_files = with(without(without(item("vm", "9001"), "size"), "verification"), "files", json!([]));
-    let no_manifest = with(item("vm", "9001"), "files", json!([{"filename": "a.pxar.didx"}, {}]));
+    let no_manifest = with(item("vm", "9001"), "files", json!([{"filename": "a.pxar.didx"}, {"filename": "b"}]));
     let no_size = without(item("vm", "9001"), "size");
     [no_files, no_manifest, no_size].into_iter().try_for_each(|snapshot| {
         let listing = pbs(&json!([snapshot]))?;
@@ -460,3 +519,6 @@ fn a_live_snapshot_left_by_a_killed_server_stays_uncovered_after_a_failed_verify
     assert_eq!(statuses, vec![CoverageStatus::Missing, CoverageStatus::Missing, CoverageStatus::Ok]);
     Ok(())
 }
+
+
+const COPIES: u64 = 2;

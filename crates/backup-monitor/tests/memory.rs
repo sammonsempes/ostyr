@@ -10,7 +10,7 @@ const MEBIBYTE: usize = 1024 * 1024;
 const LISTING_BYTES: usize = 8 * MEBIBYTE;
 
 
-const PEAK_BUDGET_KIB: u64 = 40 * 1024;
+const PEAK_BUDGET_KIB: u64 = 2 * 1024;
 
 
 const SMALL_COUNT: usize = 10;
