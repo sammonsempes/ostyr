@@ -106,7 +106,7 @@ pub struct Header {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum FramePayload {
     Header(Header),
     Data { direction: Direction, bytes: Vec<u8> },
@@ -114,7 +114,7 @@ pub enum FramePayload {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DataFrame {
     pub seq: u64,
     pub at: i64,
@@ -131,7 +131,7 @@ pub struct Trailer {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Recording {
     pub header: Header,
     pub frames: Vec<DataFrame>,
@@ -224,7 +224,7 @@ pub struct ReadState {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RawFrame {
     pub seq: u64,
     pub at: i64,
@@ -232,7 +232,7 @@ pub struct RawFrame {
 }
 
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct ParsedBody<'a> {
     pub kind: u8,
     pub prev: ChainHash,
@@ -313,9 +313,13 @@ pub fn encode_frame(prev: &ChainHash, seq: u64, at: i64, payload: &FramePayload)
     body.extend_from_slice(&seq.to_le_bytes());
     body.extend_from_slice(&at.to_le_bytes());
     encode_payload(&mut body, payload)?;
-    let mut frame = (body.len() as u32).to_le_bytes().to_vec();
-    frame.extend_from_slice(&body);
-    Ok(frame)
+    if body.len() > MAX_BODY_BYTES as usize {
+        Err(RecordingError::FrameTooLarge)
+    } else {
+        let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        Ok(frame)
+    }
 }
 
 
@@ -331,6 +335,7 @@ fn append_frame(writer: &mut RecordingWriter<'_>, payload: &FramePayload, at: i6
             Err(RecordingError::Full)
         } else {
             writer.write.write_all(&frame).map_err(RecordingError::Write)?;
+            writer.write.flush().map_err(RecordingError::Write)?;
             writer.prev = frame_hash(&frame);
             writer.next_seq += 1;
             writer.last_at = at;
@@ -348,7 +353,7 @@ fn append(writer: &mut RecordingWriter<'_>, payload: &FramePayload, at: i64) -> 
 }
 
 
-/// Writes the header frame at once; any error means the caller must end the session (`RecordingFailed`).
+/// Writes and flushes the header frame at once, as `push` does each frame; any error means the caller must end the session (`RecordingFailed`).
 pub fn new_writer<'a>(write: &'a mut dyn Write, header: &Header, limits: Limits) -> Result<RecordingWriter<'a>, RecordingError> {
     check_limits(&limits)?;
     let mut writer = RecordingWriter {
@@ -381,12 +386,11 @@ pub fn push(writer: &mut RecordingWriter<'_>, direction: Direction, bytes: &[u8]
 }
 
 
-/// Writes the trailer and returns the final hash, which the storage slice records in the audit.
+/// Writes and flushes the trailer, and returns the final hash, which the storage slice records in the audit.
 pub fn close(writer: &mut RecordingWriter<'_>, reason: &str, at: i64) -> Result<ChainHash, RecordingError> {
     let payload = FramePayload::Trailer { reason: reason.to_string() };
     let hash = append(writer, &payload, at)?;
     writer.closed = true;
-    writer.write.flush().map_err(RecordingError::Write)?;
     Ok(hash)
 }
 
@@ -595,6 +599,16 @@ fn check_end(reader: &mut dyn Read, frame: u64) -> Result<(), RecordingError> {
 }
 
 
+fn probe_after_cap(reader: &mut dyn Read, frame: u64) -> RecordingError {
+    let mut probe = [0; 1];
+    match reader.read_exact(&mut probe) {
+        Ok(()) => frame_error(frame, Check::Full),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => frame_error(frame, Check::TrailerMissing),
+        Err(error) => RecordingError::Read { frame, source: error },
+    }
+}
+
+
 fn read_header(reader: &mut dyn Read, state: &mut ReadState, limits: &Limits) -> Result<Header, RecordingError> {
     let first = read_raw_frame(reader, state, limits)?;
     match first.payload {
@@ -635,7 +649,7 @@ pub fn read_recording(reader: &mut dyn Read, limits: &Limits) -> Result<Recordin
             FramePayload::Header(_) => Err(frame_error(raw.seq, Check::Kind))?,
         }
     }
-    let ended = trailer.ok_or(frame_error(state.expected_seq, Check::Full))?;
+    let ended = trailer.ok_or_else(|| probe_after_cap(reader, state.expected_seq))?;
     check_end(reader, state.expected_seq)?;
     Ok(Recording {
         header,

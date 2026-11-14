@@ -17,7 +17,7 @@ const START: i64 = 1_000;
 const MEMORY_LIMIT_ENV: &str = "REMOTE_SHELL_RECORDING_MEMORY_CHILD";
 
 
-const MEMORY_LIMIT_BYTES: &str = "--as=2147483648";
+const MEMORY_LIMIT_BYTES: &str = "--as=268435456";
 
 
 const MEMORY_FLOOD_FRAMES: u64 = 200_000;
@@ -120,6 +120,15 @@ const SERVED_PREFIX_TAIL: usize = 1;
 
 
 const SERVED_BODY: usize = 4;
+
+
+const FRAMES_FLUSHED: usize = 4;
+
+
+const SECOND_DATA_FLUSH: usize = 3;
+
+
+const CLOSE_FLUSH: usize = 3;
 
 
 pub struct FailingWrite {
@@ -249,10 +258,7 @@ fn trailer_payload() -> FramePayload {
 
 
 fn expect(result: Result<Recording, RecordingError>, expected_frame: u64, expected_check: Check) {
-    assert!(
-        matches!(&result, Err(RecordingError::Frame { frame, check }) if *frame == expected_frame && *check == expected_check),
-        "{result:?}"
-    );
+    assert!(matches!(&result, Err(RecordingError::Frame { frame, check }) if *frame == expected_frame && *check == expected_check));
 }
 
 
@@ -499,9 +505,10 @@ fn writer_errors_are_returned() -> TestResult {
         Err(RecordingError::Write(_))
     ));
     let mut flush_only = FailingWrite { fail_flush_only: true };
-    let mut writer = new_writer(&mut flush_only, &header(), Limits::default())?;
-    push(&mut writer, Direction::In, b"a", START)?;
-    assert!(matches!(close(&mut writer, "x", START), Err(RecordingError::Write(_))));
+    assert!(matches!(
+        new_writer(&mut flush_only, &header(), Limits::default()),
+        Err(RecordingError::Write(_))
+    ));
     let mut out = Vec::new();
     let mut ok = new_writer(&mut out, &header(), Limits::default())?;
     close(&mut ok, "x", START)?;
@@ -635,20 +642,98 @@ fn the_writer_latches_after_a_partial_write() -> TestResult {
 }
 
 
+pub struct FlushFailsOn {
+    pub received: Vec<u8>,
+    pub flushes: usize,
+    pub fail_on: usize,
+}
+
+
+impl Write for FlushFailsOn {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.received.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flushes += 1;
+        if self.flushes == self.fail_on {
+            Err(io::Error::other("injected"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+
 #[test]
-fn the_writer_latches_after_a_failed_flush() -> TestResult {
-    let mut probe = Vec::new();
-    let mut probe_writer = new_writer(&mut probe, &header(), Limits::default())?;
-    close(&mut probe_writer, "x", START)?;
-    let mut sink = LimitedWrite {
+fn every_frame_is_flushed_and_a_failed_flush_latches() -> TestResult {
+    let mut counted = FlushFailsOn {
         received: Vec::new(),
-        room: usize::MAX,
-        fail_flush: true,
+        flushes: 0,
+        fail_on: usize::MAX,
+    };
+    let mut ok_writer = new_writer(&mut counted, &header(), Limits::default())?;
+    push(&mut ok_writer, Direction::In, b"a", START)?;
+    push(&mut ok_writer, Direction::In, b"b", START)?;
+    close(&mut ok_writer, "x", START)?;
+    assert_eq!(counted.flushes, FRAMES_FLUSHED);
+    let mut sink = FlushFailsOn {
+        received: Vec::new(),
+        flushes: 0,
+        fail_on: SECOND_DATA_FLUSH,
     };
     let mut writer = new_writer(&mut sink, &header(), Limits::default())?;
-    assert!(matches!(close(&mut writer, "x", START), Err(RecordingError::Write(_))));
-    assert!(matches!(close(&mut writer, "y", START), Err(RecordingError::Closed)));
-    assert_eq!(sink.received.len(), probe.len());
+    push(&mut writer, Direction::In, b"a", START)?;
+    assert!(matches!(push(&mut writer, Direction::In, b"b", START), Err(RecordingError::Write(_))));
+    assert!(matches!(push(&mut writer, Direction::In, b"c", START), Err(RecordingError::Closed)));
+    assert!(matches!(close(&mut writer, "x", START), Err(RecordingError::Closed)));
+    let mut closing = FlushFailsOn {
+        received: Vec::new(),
+        flushes: 0,
+        fail_on: CLOSE_FLUSH,
+    };
+    let mut closer = new_writer(&mut closing, &header(), Limits::default())?;
+    push(&mut closer, Direction::In, b"a", START)?;
+    assert!(matches!(close(&mut closer, "x", START), Err(RecordingError::Write(_))));
+    assert!(matches!(push(&mut closer, Direction::In, b"c", START), Err(RecordingError::Closed)));
+    Ok(())
+}
+
+
+#[test]
+fn encode_frame_refuses_a_body_above_the_declared_maximum() -> TestResult {
+    let at_cap = FramePayload::Data {
+        direction: Direction::In,
+        bytes: vec![0; MAX_FRAME_BYTES],
+    };
+    let frame = encode_frame(&GENESIS_HASH, 0, 0, &at_cap)?;
+    assert_eq!(frame.len(), usize::try_from(MAX_BODY_BYTES)? + PREFIX_LEN);
+    let above = FramePayload::Data {
+        direction: Direction::In,
+        bytes: vec![0; MAX_FRAME_BYTES + 1],
+    };
+    assert!(matches!(encode_frame(&GENESIS_HASH, 0, 0, &above), Err(RecordingError::FrameTooLarge)));
+    Ok(())
+}
+
+
+#[test]
+fn a_recording_ending_at_max_frames_without_trailer_is_missing_its_trailer() -> TestResult {
+    let (bytes, _) = sample()?;
+    let frames = split_frames(&bytes)?;
+    let without_trailer: Vec<&Vec<u8>> = frames.iter().take(KEPT_WITHOUT_TRAILER).collect();
+    let limits = Limits {
+        max_frames: KEPT_WITHOUT_TRAILER as u64,
+        ..Limits::default()
+    };
+    expect(read(&join(&without_trailer), &limits), TRAILER_SEQ, Check::TrailerMissing);
+    expect(read(&bytes, &limits), TRAILER_SEQ, Check::Full);
+    let mut failing = FailAfter {
+        data: join(&without_trailer),
+        served: 0,
+    };
+    assert!(matches!(read_recording(&mut failing, &limits), Err(RecordingError::Read { .. })));
     Ok(())
 }
 
@@ -716,26 +801,26 @@ fn every_prefix_of_a_payload_is_malformed() -> TestResult {
     let body: Vec<u8> = whole.iter().skip(PREFIX_LEN).copied().collect();
     assert!(parse_body(&body).is_ok());
     let fixed = usize::try_from(FIXED_BODY_BYTES)?;
-    assert!((0..fixed).all(|cut| parse_body(&prefix_of(&body, cut)) == Err(Check::Malformed)));
+    assert!((0..fixed).all(|cut| parse_body(&prefix_of(&body, cut)).err() == Some(Check::Malformed)));
     Ok(())
 }
 
 
 #[test]
 fn malformed_payloads_are_named() -> TestResult {
-    assert_eq!(parse_payload(KIND_UNKNOWN, &[], 0), Err(Check::Kind));
-    assert_eq!(parse_payload(KIND_HEADER, &[BAD_VERSION], 0), Err(Check::Version));
-    assert_eq!(parse_payload(KIND_DATA, &[DIRECTION_UNKNOWN, 1], 0), Err(Check::Malformed));
+    assert_eq!(parse_payload(KIND_UNKNOWN, &[], 0).err(), Some(Check::Kind));
+    assert_eq!(parse_payload(KIND_HEADER, &[BAD_VERSION], 0).err(), Some(Check::Version));
+    assert_eq!(parse_payload(KIND_DATA, &[DIRECTION_UNKNOWN, 1], 0).err(), Some(Check::Malformed));
     let mut trailing = payload_of(&trailer_payload())?;
     trailing.push(0);
-    assert_eq!(parse_payload(KIND_TRAILER, &trailing, 0), Err(Check::Malformed));
+    assert_eq!(parse_payload(KIND_TRAILER, &trailing, 0).err(), Some(Check::Malformed));
     let mut header_trailing = payload_of(&head_payload())?;
     header_trailing.push(0);
-    assert_eq!(parse_payload(KIND_HEADER, &header_trailing, 0), Err(Check::Malformed));
+    assert_eq!(parse_payload(KIND_HEADER, &header_trailing, 0).err(), Some(Check::Malformed));
     let bad_utf8 = [GOOD_VERSION, 1, 0, BYTE_FF];
-    assert_eq!(parse_payload(KIND_HEADER, &bad_utf8, 0), Err(Check::Malformed));
+    assert_eq!(parse_payload(KIND_HEADER, &bad_utf8, 0).err(), Some(Check::Malformed));
     let too_long = [GOOD_VERSION, BYTE_FF, BYTE_FF];
-    assert_eq!(parse_payload(KIND_HEADER, &too_long, 0), Err(Check::Malformed));
+    assert_eq!(parse_payload(KIND_HEADER, &too_long, 0).err(), Some(Check::Malformed));
     Ok(())
 }
 
@@ -750,7 +835,7 @@ fn read_failures_name_the_frame() -> TestResult {
             served: 0,
         };
         let result = read_recording(&mut reader, &limits);
-        assert!(matches!(result, Err(RecordingError::Read { .. })), "{served}: {result:?}");
+        assert!(matches!(result, Err(RecordingError::Read { .. })), "{served}");
     }
     let mut late = FailAfter {
         data: bytes.clone(),
@@ -808,11 +893,14 @@ fn hostile_input_is_refused_in_bounded_memory() -> TestResult {
     let mut out = Vec::new();
     let mut writer = new_writer(&mut out, &header(), Limits::default())?;
     (1..MEMORY_FLOOD_FRAMES).try_for_each(|_| push(&mut writer, Direction::In, b"", START))?;
+    close(&mut writer, "user", START)?;
     let capped = Limits {
         max_frames: MEMORY_FLOOD_CAP,
         ..Limits::default()
     };
     expect(read(&out, &capped), MEMORY_FLOOD_CAP, Check::Full);
+    let recording = read(&out, &Limits::default())?;
+    assert_eq!(recording.frames.len() as u64, MEMORY_FLOOD_FRAMES - 1);
     Ok(())
 }
 
