@@ -11,6 +11,7 @@ use std::io::{self, BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 
 pub const ISSUE_USAGE: &str = "issue <seed-file> <claims-json>";
@@ -22,17 +23,20 @@ pub const LINE_LIMIT: usize = MAX_TOKEN_BYTES + 3;
 
 /// Writes `seed <hex>` and `public <hex>` for a fresh random key.
 pub fn write_keypair<Output: Write>(fill: FillFn, out: &mut Output) -> Result<(), CliError> {
-    let mut seed = [0; SECRET_KEY_LENGTH];
-    fill(&mut seed)?;
+    let mut seed = Zeroizing::new([0; SECRET_KEY_LENGTH]);
+    fill(&mut *seed)?;
     let public = SigningKey::from_bytes(&seed).verifying_key();
-    writeln!(out, "seed {}", HEXLOWER.encode(&seed))?;
+    writeln!(out, "seed {}", HEXLOWER.encode(seed.as_slice()))?;
     writeln!(out, "public {}", HEXLOWER.encode(&public.to_bytes()))?;
     Ok(())
 }
 
 
 pub fn signing_key_from(seed_hex: &str) -> Result<SigningKey, CliError> {
-    let seed = <[u8; SECRET_KEY_LENGTH]>::try_from(HEXLOWER.decode(seed_hex.as_bytes())?.as_slice()).map_err(|_| CliError::Seed)?;
+    let input = seed_hex.as_bytes();
+    let mut decoded = Zeroizing::new(vec![0; HEXLOWER.decode_len(input.len())?]);
+    HEXLOWER.decode_mut(input, &mut decoded).map_err(|partial| partial.error)?;
+    let seed = Zeroizing::new(<[u8; SECRET_KEY_LENGTH]>::try_from(decoded.as_slice()).map_err(|_| CliError::Seed)?);
     Ok(SigningKey::from_bytes(&seed))
 }
 
