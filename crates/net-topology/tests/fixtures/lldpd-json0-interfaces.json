@@ -1,0 +1,91 @@
+{
+  "lldp": [
+    {
+      "interface": [
+        {
+          "name": "vx0",
+          "status": [
+            {
+              "value": "RX and TX"
+            }
+          ],
+          "chassis": [
+            {
+              "id": [
+                {
+                  "type": "mac",
+                  "value": "52:54:00:8e:36:45"
+                }
+              ],
+              "name": [
+                {
+                  "value": "server"
+                }
+              ],
+              "descr": [
+                {
+                  "value": "Ubuntu 24.04.5 LTS Linux 6.8.0-149-generic #149-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 23 13:21:10 UTC 2026 x86_64"
+                }
+              ],
+              "mgmt-ip": [
+                {
+                  "value": "192.168.102.222"
+                },
+                {
+                  "value": "fe80::5054:ff:fe8e:3645"
+                }
+              ],
+              "mgmt-iface": [
+                {
+                  "value": "2"
+                },
+                {
+                  "value": "2"
+                }
+              ],
+              "capability": [
+                {
+                  "type": "Bridge",
+                  "enabled": false
+                },
+                {
+                  "type": "Router",
+                  "enabled": false
+                },
+                {
+                  "type": "Wlan",
+                  "enabled": false
+                },
+                {
+                  "type": "Station",
+                  "enabled": true
+                }
+              ]
+            }
+          ],
+          "port": [
+            {
+              "id": [
+                {
+                  "type": "mac",
+                  "value": "66:fe:75:51:e8:8d"
+                }
+              ],
+              "descr": [
+                {
+                  "value": "vx0"
+                }
+              ]
+            }
+          ],
+          "ttl": [
+            {
+              "ttl": "120"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+

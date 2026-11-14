@@ -12,3 +12,6 @@ pub type RawList<'a> = Vec<&'a RawValue>;
 
 
 pub type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+
+pub type RunPortFn = fn(&str, u64) -> std::io::Result<Vec<u8>>;
