@@ -481,6 +481,22 @@ fn a_literal_escape_in_a_title_is_stored_raw_and_shown_with_its_backslash_escape
 
 
 #[test]
+fn a_finding_with_duplicate_json_keys_is_unparsable_and_never_counted_by_status() -> TestResult {
+    let document = r#"[{"status_code":"PASS","status_code":"FAIL","severity":"High"}]"#;
+    let parsed = parse_prowler_ocsf(document.as_bytes(), TENANT, ACCOUNT, &Limits::default())?;
+    assert!(parsed.items.is_empty());
+    assert_eq!(
+        parsed.skipped,
+        Skipped {
+            unparsable: 1,
+            ..Skipped::default()
+        }
+    );
+    Ok(())
+}
+
+
+#[test]
 fn unparsable_findings_are_counted_and_never_fail_the_document() -> TestResult {
     let parsed = parse(&[
         json!(true),

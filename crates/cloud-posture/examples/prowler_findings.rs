@@ -1,8 +1,8 @@
-//! Usage: `prowler_findings <ocsf.json> <tenant> <account>`. Prints the counts and one escaped line per FAIL finding.
+//! Usage: `prowler_findings <ocsf.json> <tenant> <account>`. Prints the counts and one line per FAIL finding, every text field escaped and quoted.
 use cloud_posture::limits::Limits;
 use cloud_posture::model::{Finding, Findings, Severity, Status};
 use cloud_posture::prowler::parse_prowler_ocsf;
-use cloud_posture::text::{escaped_whole, shown};
+use cloud_posture::report::fail_line;
 use core_pg::scope::tenant_of;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -28,24 +28,6 @@ fn status_key(finding: &Finding) -> Status {
 
 fn severity_key(finding: &Finding) -> Severity {
     finding.severity
-}
-
-
-fn fail_line(finding: &Finding) -> String {
-    format!(
-        "FAIL {:?} uid={} check={} provider={} account={} region={} resource={} type={} time={} title={} detail={}",
-        finding.severity,
-        escaped_whole(&finding.uid),
-        finding.check_id,
-        finding.provider,
-        finding.account,
-        finding.region,
-        finding.resource_uid,
-        finding.resource_type,
-        finding.time_unix,
-        shown(&finding.title, finding.title_cut),
-        shown(&finding.detail, finding.detail_cut)
-    )
 }
 
 
