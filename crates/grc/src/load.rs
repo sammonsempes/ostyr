@@ -24,6 +24,9 @@ pub const MAX_INDICATOR_CHARS: usize = 128;
 pub const MAX_TITLE_CHARS: usize = 200;
 
 
+pub const MAX_OWNER_BYTES: usize = 128;
+
+
 pub const MAX_AGE_HOURS: u32 = 8_760;
 
 
@@ -33,6 +36,17 @@ pub fn is_identifier(text: &str, max: usize) -> bool {
     text.len() <= max
         && characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
         && characters.all(|next| next.is_ascii_alphanumeric() || matches!(next, '.' | '_' | '-'))
+}
+
+
+/// An identity: `[a-z0-9._@+-]`, 1 to `MAX_OWNER_BYTES` bytes, never a leading `-`.
+pub fn is_owner(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_OWNER_BYTES
+        && !text.starts_with('-')
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'@' | b'+' | b'-'))
 }
 
 

@@ -1,5 +1,5 @@
 use crate::error::GrcError;
-use crate::load::{is_identifier, is_printable_text, MAX_ID_CHARS, MAX_INDICATOR_CHARS, MAX_TITLE_CHARS};
+use crate::load::{is_identifier, is_owner, is_printable_text, MAX_ID_CHARS, MAX_INDICATOR_CHARS, MAX_TITLE_CHARS};
 use crate::model::{IndicatorValue, ManualEvidence};
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text_capped};
@@ -64,7 +64,7 @@ pub fn parse_manual(reader: &mut dyn Read, file: &str) -> Result<Vec<ManualEvide
     } else if !parsed
         .evidence
         .iter()
-        .all(|record| is_identifier(&record.control, MAX_ID_CHARS) && is_printable_text(&record.owner, MAX_TITLE_CHARS))
+        .all(|record| is_identifier(&record.control, MAX_ID_CHARS) && is_owner(&record.owner))
     {
         Err(invalid(file, "a manual evidence record has an invalid control or owner"))
     } else {
