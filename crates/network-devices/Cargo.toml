@@ -8,7 +8,9 @@ publish = false
 [dependencies]
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+ipnet = "2"
 serde = { version = "1", features = ["derive"] }
+serde-untagged = "0.1.9"
 site-collector = { version = "0.0.0", path = "../site-collector" }
 thiserror = "2"
 
