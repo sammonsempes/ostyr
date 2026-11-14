@@ -2672,6 +2672,8 @@ dependencies = [
  "siem-ingest",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-postgres",
  "tracing",
  "unicode-general-category",
  "ureq 3.5.1",
