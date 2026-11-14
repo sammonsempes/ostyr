@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 granit-parser = "2"
+petgraph = { version = "0.8", features = ["graphmap"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 ra-ap-rustc_lexer = "0.181"

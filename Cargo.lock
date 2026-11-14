@@ -1549,6 +1549,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "granit-parser",
+ "petgraph",
  "proc-macro2",
  "quote",
  "ra-ap-rustc_lexer",
@@ -4185,6 +4186,7 @@ dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
  "indexmap 2.14.2",
+ "serde",
 ]
 
 [[package]]
