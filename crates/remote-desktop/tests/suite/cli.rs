@@ -18,6 +18,12 @@ const TEN_MEBIBYTES: usize = 10 * 1024 * 1024;
 const SMALL_CHUNK: usize = 16;
 
 
+const PUBLIC_LINE_CALL: usize = 4;
+
+
+const KEYGEN_LINES: usize = 2;
+
+
 struct FailingWriter;
 
 
@@ -46,15 +52,16 @@ impl Write for FlushFails {
 }
 
 
-struct SecondWriteFails {
+struct FailsAtCall {
     writes: usize,
+    failing_call: usize,
 }
 
 
-impl Write for SecondWriteFails {
+impl Write for FailsAtCall {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.writes += 1;
-        if self.writes > 1 && buffer.contains(&b'\n') {
+        if self.writes == self.failing_call {
             Err(io::Error::other("closed"))
         } else {
             Ok(buffer.len())
@@ -243,14 +250,19 @@ fn keygen_writes_a_seed_and_its_public_key() -> TestResult {
     write_keypair(fixed_fill, &mut out)?;
     let text = String::from_utf8(out)?;
     let seed = text.lines().next().and_then(|line| line.strip_prefix("seed ")).ok_or("no seed")?;
-    assert_eq!(HEXLOWER.decode(seed.as_bytes())?.len(), SEED_LENGTH);
-    assert!(text.lines().nth(1).ok_or("no public")?.starts_with("public "));
+    let fill: Vec<u8> = (0..SEED_LENGTH).map(|index| index as u8).collect();
+    assert_eq!(seed, HEXLOWER.encode(&fill));
+    let public = text.lines().nth(1).ok_or("no public")?;
+    let expected_public = signing_key_from(&HEXLOWER.encode(&fill))?.verifying_key();
+    assert_eq!(public, format!("public {}", HEXLOWER.encode(&expected_public.to_bytes())));
+    assert_eq!(text.lines().count(), KEYGEN_LINES);
     assert!(matches!(write_keypair(failing_fill, &mut Vec::new()), Err(CliError::Random(_))));
     assert!(matches!(write_keypair(fixed_fill, &mut FailingWriter), Err(CliError::Io(_))));
-    assert!(matches!(
-        write_keypair(fixed_fill, &mut SecondWriteFails { writes: 0 }),
-        Err(CliError::Io(_))
-    ));
+    (1..=PUBLIC_LINE_CALL).try_for_each(|failing_call| {
+        let refusal = write_keypair(fixed_fill, &mut FailsAtCall { writes: 0, failing_call });
+        assert!(matches!(refusal, Err(CliError::Io(_))), "call {failing_call}");
+        Ok::<(), CliError>(())
+    })?;
     Ok(())
 }
 
