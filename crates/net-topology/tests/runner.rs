@@ -7,11 +7,30 @@ mod types;
 
 use fake::{install_script, is_gone, scratch};
 use net_topology::model::RunFailure;
-use net_topology::runner::{run_command, run_lldpcli};
+use net_topology::runner::{read_output, reap_killed, run_command, run_lldpcli, wait_exit, wait_polls, MAX_DEADLINE_SECONDS, WAIT_POLL_MILLIS};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use types::TestResult;
+
+
+const LONG_DEADLINE_SECONDS: u64 = 120;
+
+
+const LONG_DEADLINE_POLLS: usize = 12_001;
+
+
+const TWO_POLLS: usize = 2;
+
+
+const TWO_CALLS: u32 = 2;
+
+
+const OLD_WAIT_CAP: usize = 6_200;
+
+
+const MAX_DEADLINE_POLLS: usize = 360_001;
 
 
 const PATIENT: Duration = Duration::from_secs(60);
@@ -114,6 +133,98 @@ fn a_child_that_closes_stdout_and_keeps_running_times_out() -> TestResult {
     let program = install_script(dir.path(), "lldpcli", &body)?;
     assert_eq!(run_command(&program, &[], CAP, IMPATIENT), Err(RunFailure::TimedOut));
     assert!(wait_gone(pid_in(&pid_file)?));
+    Ok(())
+}
+
+
+#[test]
+fn a_same_group_grandchild_does_not_survive_a_normal_exit() -> TestResult {
+    let dir = scratch()?;
+    let pid_file = dir.path().join("pid");
+    let body = format!("sleep 4242 >/dev/null 2>&1 &\necho $! > {}\necho done", pid_file.display());
+    let program = install_script(dir.path(), "lldpcli", &body)?;
+    let output = run_command(&program, &[], CAP, PATIENT).map_err(|failure| format!("{failure:?}"))?;
+    assert_eq!(output, b"done\n");
+    assert!(wait_gone(pid_in(&pid_file)?));
+    Ok(())
+}
+
+
+#[test]
+fn the_wait_cap_follows_the_deadline() -> TestResult {
+    assert_eq!(wait_polls(Duration::ZERO), 1);
+    assert_eq!(wait_polls(Duration::from_millis(WAIT_POLL_MILLIS)), TWO_POLLS);
+    assert_eq!(wait_polls(Duration::from_secs(LONG_DEADLINE_SECONDS)), LONG_DEADLINE_POLLS);
+    assert!(wait_polls(Duration::from_secs(LONG_DEADLINE_SECONDS)) > OLD_WAIT_CAP);
+    assert_eq!(wait_polls(Duration::from_secs(MAX_DEADLINE_SECONDS)), MAX_DEADLINE_POLLS);
+    assert_eq!(
+        wait_polls(Duration::from_secs(MAX_DEADLINE_SECONDS + MAX_DEADLINE_SECONDS)),
+        MAX_DEADLINE_POLLS
+    );
+    Ok(())
+}
+
+
+fn sleeper() -> Result<std::process::Child, Box<dyn std::error::Error>> {
+    Ok(Command::new("sleep").arg("60").stdin(Stdio::null()).stdout(Stdio::null()).spawn()?)
+}
+
+
+#[test]
+fn a_wait_past_the_clock_deadline_times_out_before_the_count_is_spent() -> TestResult {
+    let mut child = sleeper()?;
+    let start = Instant::now();
+    let mut calls = u32::MIN;
+    let mut clock = || {
+        calls += 1;
+        start + Duration::from_secs(LONG_DEADLINE_SECONDS) * (calls - 1)
+    };
+    let verdict = wait_exit(&mut child, start + Duration::from_secs(LONG_DEADLINE_SECONDS), &mut clock);
+    assert!(matches!(verdict, Ok(None)));
+    assert!(calls <= TWO_CALLS + 1);
+    assert!(wait_polls(Duration::from_secs(LONG_DEADLINE_SECONDS)) > OLD_WAIT_CAP);
+    child.kill()?;
+    child.wait()?;
+    Ok(())
+}
+
+
+#[test]
+fn a_kill_reap_with_an_expired_clock_returns() -> TestResult {
+    let mut child = sleeper()?;
+    let start = Instant::now();
+    let mut calls = u32::MIN;
+    let mut clock = || {
+        calls += 1;
+        start + Duration::from_secs(LONG_DEADLINE_SECONDS) * calls
+    };
+    reap_killed(&mut child, &mut clock);
+    assert!(calls >= TWO_CALLS);
+    child.wait()?;
+    Ok(())
+}
+
+
+#[test]
+fn a_child_that_cannot_be_waited_on_is_unwaitable_and_not_signalled() -> TestResult {
+    let mut child = Command::new("true").spawn()?;
+    child.wait()?;
+    let verdict = wait_exit(&mut child, Instant::now() + PATIENT, &mut Instant::now);
+    assert!(matches!(verdict, Err(RunFailure::Unwaitable)));
+    Ok(())
+}
+
+
+#[test]
+fn an_expired_deadline_stops_the_read_even_with_data_in_the_pipe() -> TestResult {
+    let (mut reader, mut writer) = std::io::pipe()?;
+    writer.write_all(b"data that is already there")?;
+    assert_eq!(read_output(&mut reader, HUGE_CAP, Instant::now()), Err(RunFailure::TimedOut));
+    drop(writer);
+    let (mut open_reader, mut open_writer) = std::io::pipe()?;
+    open_writer.write_all(b"fine")?;
+    drop(open_writer);
+    assert_eq!(read_output(&mut open_reader, HUGE_CAP, Instant::now() + PATIENT), Ok(b"fine".to_vec()));
     Ok(())
 }
 
