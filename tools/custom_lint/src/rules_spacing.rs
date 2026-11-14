@@ -17,19 +17,30 @@ pub fn group_name(item: &Item) -> Option<&'static str> {
 }
 
 
-pub fn blank_lines_between(source: &str, previous_end: usize, next_start: usize) -> usize {
+pub fn blank_prefix_counts(source: &str) -> Vec<usize> {
     source
         .lines()
-        .skip(previous_end)
-        .take(next_start.saturating_sub(previous_end + 1))
-        .filter(|line| line.trim().is_empty())
-        .count()
+        .scan(0, |blank_total, line| {
+            *blank_total += usize::from(line.trim().is_empty());
+            Some(*blank_total)
+        })
+        .fold(vec![0], |mut counts, total| {
+            counts.push(total);
+            counts
+        })
 }
 
 
-pub fn spacing_violation(context: &Context, previous: &Item, next: &Item) -> Option<Violation> {
+pub fn blank_lines_between(prefix: &[usize], previous_end: usize, next_start: usize) -> usize {
+    let total = prefix.last().copied().unwrap_or(0);
+    let count_before = |line_count: usize| prefix.get(line_count).copied().unwrap_or(total);
+    count_before(next_start.max(previous_end + 1) - 1) - count_before(previous_end)
+}
+
+
+pub fn spacing_violation(context: &Context, prefix: &[usize], previous: &Item, next: &Item) -> Option<Violation> {
     let next_start = next.span().start();
-    let blank_lines = blank_lines_between(&context.source, previous.span().end().line, next_start.line);
+    let blank_lines = blank_lines_between(prefix, previous.span().end().line, next_start.line);
     let group = group_name(previous).filter(|name| group_name(next) == Some(*name));
     let (required, message) = match group {
         Some(name) => (0, format!("expected no blank line inside a {name} group")),
@@ -43,11 +54,12 @@ pub fn spacing_violation(context: &Context, previous: &Item, next: &Item) -> Opt
 
 
 pub fn item_spacing(context: &Context) -> Vec<Violation> {
+    let prefix = blank_prefix_counts(&context.source);
     context
         .file
         .items
         .iter()
         .zip(context.file.items.iter().skip(1))
-        .filter_map(|(previous, next)| spacing_violation(context, previous, next))
+        .filter_map(|(previous, next)| spacing_violation(context, &prefix, previous, next))
         .collect()
 }

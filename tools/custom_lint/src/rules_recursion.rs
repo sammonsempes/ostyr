@@ -85,7 +85,6 @@ pub fn callees(function: &ItemFn, aliases: &BTreeMap<String, String>, names: &BT
 
 pub struct Reach<'a> {
     pub recursive: BTreeSet<&'a str>,
-    pub steps: usize,
 }
 
 
@@ -94,7 +93,6 @@ pub fn recursive_functions(graph: &CallGraph) -> Reach<'_> {
         .iter()
         .flat_map(|(name, targets)| targets.iter().map(move |target| (name.as_str(), target.as_str())))
         .collect();
-    let steps = graph.len() + edges.len();
     let digraph = DiGraphMap::<&str, ()>::from_edges(edges);
     let recursive = kosaraju_scc(&digraph)
         .into_iter()
@@ -103,7 +101,7 @@ pub fn recursive_functions(graph: &CallGraph) -> Reach<'_> {
             _ => component,
         })
         .collect();
-    Reach { recursive, steps }
+    Reach { recursive }
 }
 
 

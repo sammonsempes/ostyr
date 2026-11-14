@@ -141,3 +141,19 @@ pub fn comments_are_not_blank_lines() -> anyhow::Result<()> {
     assert!(report("use a::b;\n// note\nuse c::d;\n")?.is_empty());
     Ok(())
 }
+
+
+#[test]
+pub fn same_line_items_have_no_blank_lines() -> anyhow::Result<()> {
+    assert_eq!(report("fn a() {} fn b() {}\n")?, vec![expected("1:11", "0")]);
+    Ok(())
+}
+
+
+#[test]
+pub fn last_item_without_trailing_newline_and_crlf() -> anyhow::Result<()> {
+    assert!(report("fn a() {}\n\n\nfn b() {}")?.is_empty());
+    assert!(report("fn a() {}\r\n\r\n\r\nfn b() {}\r\n")?.is_empty());
+    assert_eq!(report("fn a() {}\r\n\r\nfn b() {}\r\n")?, vec![expected("3:1", "1")]);
+    Ok(())
+}
