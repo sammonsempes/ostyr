@@ -1,7 +1,12 @@
+#[path = "common/private.rs"]
+mod private;
+
+
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
 use core_config::reload::ReloadEngine;
+use private::write_private;
 use siem_ingest::clickhouse::clickhouse_sink;
 use siem_ingest::model::Document;
 use siem_ingest::settings::{open_settings, IngestSettings};
@@ -115,7 +120,7 @@ fn rig(timeout_ms: u64, bind: bool) -> Result<Rig, Box<dyn Error>> {
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    fs::write(dir.path().join("password"), "s3cret\n")?;
+    write_private(dir.path().join("password"), "s3cret\n")?;
     let yaml = format!(
         "clickhouse_url: \"http://127.0.0.1:{port}\"\nclickhouse_password_file: \"{}\"\ninsert_timeout_ms: {timeout_ms}\n",
         dir.path().join("password").display()
@@ -319,7 +324,7 @@ fn no_log_record_carries_the_server_body_or_the_row() -> Result<(), Box<dyn Erro
     let rig = rig(STALL_TIMEOUT_MS, false)?;
     (rig.sink)("tenant-a", &[document("{")]).err().ok_or("should fail")?;
     let mut sent = self::rig(LONG_TIMEOUT_MS, true)?;
-    fs::write(sent.dir.path().join("password"), TRACE_PASSWORD)?;
+    write_private(sent.dir.path().join("password"), TRACE_PASSWORD)?;
     let server = serve(
         sent.listener.take().ok_or("no listener")?,
         Reply {

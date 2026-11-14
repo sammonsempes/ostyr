@@ -56,7 +56,7 @@ pub async fn client_with(handler: Handler) -> Result<(Client, Fake, TempDir), Bo
     let dir = tempdir()?;
     let password_file = dir.path().join("pg.pass");
     let ca_file = dir.path().join("ca.pem");
-    std::fs::write(&password_file, "p")?;
+    write_secret(&password_file, "p")?;
     std::fs::write(&ca_file, &pki.ca_pem)?;
     let text = format!(
         "host: 127.0.0.1\nport: {}\ndatabase: ostyr\nuser: ostyr\npassword_file: {}\nca_file: {}\n",
@@ -249,7 +249,7 @@ pub fn alert_handler() -> Handler {
 pub fn settings_for(port: u16, dir: &TempDir, ca_pem: &str) -> Result<String, Box<dyn Error>> {
     let password_file = dir.path().join("pg.pass");
     let ca_file = dir.path().join("ca.pem");
-    std::fs::write(&password_file, "p")?;
+    write_secret(&password_file, "p")?;
     std::fs::write(&ca_file, ca_pem)?;
     Ok(format!(
         "host: 127.0.0.1\nport: {port}\ndatabase: ostyr\nuser: ostyr\npassword_file: {}\nca_file: {}\n",
@@ -397,4 +397,20 @@ async fn a_bridged_log_at_trace_never_carries_a_bound_parameter() -> Result<(), 
     assert!(!text.contains(MARKER), "{text}");
     assert!(!text.contains("tokio_postgres"), "{text}");
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

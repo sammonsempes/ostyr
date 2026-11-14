@@ -68,6 +68,8 @@ pub enum InsertError {
     Class(InsertClass),
     #[error("the ClickHouse password file could not be read")]
     Credentials(#[source] std::io::Error),
+    #[error("the ClickHouse password file is refused: {0}")]
+    CredentialsFile(#[source] core_config::secret_file::SecretFileError),
     #[error("the ClickHouse password file exceeds the size cap")]
     CredentialsTooLarge,
     #[error("the ClickHouse CA file could not be read")]

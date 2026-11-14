@@ -1731,7 +1731,7 @@ fn database() -> Result<Database, Box<dyn Error + Send + Sync>> {
     let handler = pg_handler(Arc::clone(&failing), Arc::clone(&hangup), Arc::clone(&script), Arc::clone(&migrate));
     let fake = runtime.block_on(fake::start(Mode::Tls(pki.server), "p", handler))?;
     let files = tempdir()?;
-    fs::write(files.path().join("pg.pass"), "p")?;
+    write_secret(files.path().join("pg.pass"), "p")?;
     fs::write(files.path().join("ca.pem"), &pki.ca_pem)?;
     let section = format!(
         "postgres:\n  host: 127.0.0.1\n  port: {}\n  database: ostyr\n  user: ostyr\n  password_file: {}\n  ca_file: {}\n  connect_timeout_secs: 2\n",
@@ -2619,4 +2619,20 @@ fn an_alert_over_the_id_cap_stores_a_digest_slot_and_two_tails_give_two_ids() ->
     assert_eq!(stored_ids(exact.clone()), exact);
     assert!(!set_digest(&exact).is_empty());
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

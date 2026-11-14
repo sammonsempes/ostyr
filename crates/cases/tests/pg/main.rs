@@ -117,7 +117,7 @@ pub async fn served(handler: Handler) -> Result<Served, Box<dyn Error>> {
     let dir = tempdir()?;
     let password_file = dir.path().join("pg.pass");
     let ca_file = dir.path().join("ca.pem");
-    std::fs::write(&password_file, "p")?;
+    write_secret(&password_file, "p")?;
     std::fs::write(&ca_file, &pki.ca_pem)?;
     let settings_text = format!(
         "host: 127.0.0.1\nport: {}\ndatabase: ostyr\nuser: ostyr\npassword_file: {}\nca_file: {}\n",
@@ -344,4 +344,20 @@ async fn the_pg_backend_links_and_lists_alerts_scoped_to_the_tenant() -> Result<
         Err(CaseStoreError::Lease(StoreError::Busy))
     ));
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

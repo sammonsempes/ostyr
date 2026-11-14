@@ -913,14 +913,17 @@ fn the_token_and_the_ca_are_read_through_checked_files() -> TestResult {
 
 #[cfg(unix)]
 #[test]
-fn a_symlinked_token_is_read_through_the_checked_handle() -> TestResult {
+fn a_symlinked_token_is_refused_on_the_open_itself() -> TestResult {
     let rig = rig(handler(standard()))?;
     let target = write_file(rig.dir.path(), "real-token", TOKEN)?;
     let link = rig.dir.path().join("link-token");
     std::os::unix::fs::symlink(&target, &link)?;
     let mut linked = rig.settings.clone();
     linked.token_file = link.clone();
-    assert!(open_session(&linked).is_ok());
+    assert!(matches!(
+        open_session(&linked).err().ok_or("opened")?,
+        FetchError::Token(core_pg::error::PgError::SecretSymlink { .. })
+    ));
     let to_dir = rig.dir.path().join("link-dir");
     std::os::unix::fs::symlink(rig.dir.path(), &to_dir)?;
     linked.token_file = to_dir;

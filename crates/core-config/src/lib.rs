@@ -13,6 +13,7 @@ pub mod reload;
 pub mod reload_cli;
 pub mod schema;
 pub mod secret;
+pub mod secret_file;
 #[cfg(unix)]
 pub mod signal;
 pub mod types;

@@ -865,6 +865,31 @@ fn the_client_secret_file_must_be_private() -> TestResult {
 }
 
 
+#[cfg(unix)]
+#[test]
+fn a_symlinked_or_fifo_secret_file_is_refused_and_a_big_one_is_cut() -> TestResult {
+    use core_api::server::{read_private, MAX_PRIVATE_FILE_BYTES};
+    let dir = tempdir()?;
+    let target = dir.path().join("target");
+    private_file(&target, b"s3cret\n")?;
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&target, &link)?;
+    assert!(read_secret(&link).is_err());
+    assert!(matches!(read_private(&link), Err(StartupError::InsecureFile(_))));
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(matches!(read_private(&fifo), Err(StartupError::InsecureFile(_))));
+    let big = dir.path().join("big");
+    private_file(&big, &vec![b'x'; usize::try_from(MAX_PRIVATE_FILE_BYTES)? + 1])?;
+    let refused = read_private(&big).err().ok_or("accepted")?;
+    assert!(matches!(refused, StartupError::FileTooLarge { .. }));
+    assert!(refused.to_string().contains(&big.display().to_string()));
+    private_file(&big, &vec![b'x'; usize::try_from(MAX_PRIVATE_FILE_BYTES)?])?;
+    assert_eq!(read_private(&big)?.len() as u64, MAX_PRIVATE_FILE_BYTES);
+    Ok(())
+}
+
+
 fn oidc_files_in(dir: &Path, config_text: &str) -> Result<OidcFiles, TestError> {
     let config = dir.join("oidc.yaml");
     fs::write(&config, config_text)?;

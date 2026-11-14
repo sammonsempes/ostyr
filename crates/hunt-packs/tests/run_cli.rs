@@ -57,7 +57,7 @@ impl Write for Refusing {
 
 fn files(port: u16) -> Result<(TempDir, Vec<String>), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    fs::write(dir.path().join("password"), "pw\n")?;
+    write_secret(dir.path().join("password"), "pw\n")?;
     let packs = dir.path().join("packs");
     fs::create_dir(&packs)?;
     fs::write(packs.join("one.yaml"), PACKS)?;
@@ -142,4 +142,20 @@ fn a_failing_writer_is_reported() -> TestResult {
     server.join().map_err(|_| "server thread")??;
     assert!(matches!(outcome, Err(RunCliError::Output(_))));
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }
