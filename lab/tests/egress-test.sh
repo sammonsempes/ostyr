@@ -93,6 +93,20 @@ https_refused() {
     grep -q '403' <<<"$output"
 }
 
+release_host_allowed() {
+    local output
+    output="$(vm "curl -sS -o /dev/null -w '%{http_code}' --max-time $PROBE_TIMEOUT_SECONDS https://release-assets.githubusercontent.com/ 2>&1" || true)"
+    log "https to release-assets.githubusercontent.com: $output"
+    ! grep -q '403' <<<"$output" && ! grep -q 'CONNECT tunnel failed' <<<"$output"
+}
+
+neighbour_host_refused() {
+    local output
+    output="$(vm "curl -sS --max-time $PROBE_TIMEOUT_SECONDS https://evil.githubusercontent.com/ 2>&1" || true)"
+    log "https to evil.githubusercontent.com: $output"
+    grep -q '403' <<<"$output"
+}
+
 direct_fails() {
     vm "sudo ip route replace default via $bridge_address; curl --noproxy '*' -sS --connect-timeout $PROBE_TIMEOUT_SECONDS https://$PUBLIC_ADDRESS"
 }
@@ -119,6 +133,8 @@ check "docker pull through the proxy" docker_pull_works
 check "plain http to a host off the allowlist gets 403" refused_with_403
 check "plain http to an allowlisted host on another port gets 403" odd_port_refused
 check "https to a host off the allowlist is refused" https_refused
+check "the GitHub release asset host is allowed" release_host_allowed
+check "a neighbouring githubusercontent host is refused" neighbour_host_refused
 check "the refusal is logged" proxy_log_has "example.com"
 check "direct connection to a public address fails" fails direct_fails
 check "host LAN address tcp 22 unreachable" fails tcp_reaches "$host_lan_address" 22
