@@ -5,5 +5,6 @@ pub mod error;
 pub mod limits;
 pub mod model;
 pub mod prowler;
+pub mod report;
 pub mod text;
 pub mod types;

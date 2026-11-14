@@ -14,7 +14,7 @@ use types::TestResult;
 const MAX_UID_UNITS: usize = 2_000;
 
 
-const DISPLAY_FLOOD_CHARACTERS: [usize; 3] = [147, 146, 73];
+const DISPLAY_FLOOD_CHARACTERS: [usize; 5] = [600, 513, 147, 146, 73];
 
 
 const INDEX_DIGITS: usize = 6;
