@@ -1,3 +1,4 @@
+use crate::limits::MAX_CONTINUE_BYTES;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
@@ -14,6 +15,16 @@ pub const UUID_LENGTH: usize = 36;
 
 
 pub const UUID_HYPHENS: [usize; 4] = [8, 13, 18, 23];
+
+
+/// A `continue` token goes back to the API server as a query value: ASCII letters, digits, `-`, `_`, `=` and `.`, 1 to `MAX_CONTINUE_BYTES` bytes.
+pub fn valid_continue(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= MAX_CONTINUE_BYTES
+        && token
+            .chars()
+            .all(|next| next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '=' | '.'))
+}
 
 
 /// True for control, format (bidirectional and zero-width included) and line or paragraph separator characters.
