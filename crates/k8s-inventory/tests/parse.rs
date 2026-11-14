@@ -177,6 +177,18 @@ fn a_text_above_the_cap_skips_the_element() -> TestResult {
 
 
 #[test]
+fn a_pod_name_with_an_upper_case_or_look_alike_letter_is_refused_and_counted() -> TestResult {
+    let mut upper = pod("x", "u1");
+    set(&mut upper, "/metadata/name", json!("Web"))?;
+    let mut hangul_filler = pod("x", "u2");
+    set(&mut hangul_filler, "/metadata/name", json!("web\u{3164}"))?;
+    let parsed = pods_of(vec![upper, hangul_filler])?;
+    assert_eq!((parsed.items.len(), parsed.skipped.bad_field), (0, TWO));
+    Ok(())
+}
+
+
+#[test]
 fn a_recreated_pod_keeps_its_name_but_a_repeated_uid_is_a_duplicate() -> TestResult {
     let parsed = pods_of(vec![pod("web", "u1"), pod("web", "u2"), pod("other", "u1")])?;
     assert_eq!(parsed.items.len(), TWO);
