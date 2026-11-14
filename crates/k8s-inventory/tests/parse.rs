@@ -6,7 +6,7 @@ mod reader;
 mod types;
 
 
-use fixtures::{list, node, pod, set};
+use fixtures::{list, node, pod, set, uid};
 use k8s_inventory::error::ParseError;
 use k8s_inventory::limits::{Limits, DEFAULT_MAX_BYTES, DEFAULT_MAX_CONTAINERS, DEFAULT_MAX_ITEMS};
 use k8s_inventory::model::{NodeItem, PodItem, Skipped};
@@ -15,6 +15,9 @@ use reader::FailingReader;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use types::TestResult;
+
+
+const UID: &str = "00000000-0000-4000-8000-000000000001";
 
 
 const SMALL_BYTES: u64 = 64;
@@ -30,6 +33,12 @@ const FOUR: usize = 4;
 
 
 const EIGHT: usize = 8;
+
+
+const NAMESPACE_OVER: usize = 64;
+
+
+const LONG_NAME: usize = 70;
 
 
 const PADDING: usize = 28;
@@ -64,7 +73,7 @@ fn a_full_pod_is_parsed() -> TestResult {
     let expected = PodItem {
         namespace: "default".to_owned(),
         name: "web-1".to_owned(),
-        uid: "uid-1".to_owned(),
+        uid: uid("uid-1"),
         node_name: Some("node-a".to_owned()),
         phase: Some("Running".to_owned()),
         images: vec!["nginx:1.27".to_owned(), "busybox:1".to_owned()],
@@ -87,7 +96,7 @@ fn a_full_pod_is_parsed() -> TestResult {
 #[test]
 fn a_minimal_pod_needs_only_namespace_name_and_uid() -> TestResult {
     let parsed = pods_of(vec![
-        json!({"metadata": {"name": "p", "namespace": "n", "uid": "u"}, "unknown": {"deep": [1, 1]}}),
+        json!({"metadata": {"name": "p", "namespace": "n", "uid": UID}, "unknown": {"deep": [1, 1]}}),
     ])?;
     let item = parsed.items.first().ok_or("no item")?;
     assert_eq!((item.node_name.clone(), item.phase.clone(), item.owner_kind.clone()), (None, None, None));
@@ -263,7 +272,7 @@ fn a_node_is_parsed_with_its_internal_addresses() -> TestResult {
     let parsed = nodes_of(vec![node("node-a", "n1")])?;
     let expected = NodeItem {
         name: "node-a".to_owned(),
-        uid: "n1".to_owned(),
+        uid: uid("n1"),
         kubelet_version: Some("v1.30.2+k3s1".to_owned()),
         os_image: Some("Ubuntu 24.04 LTS".to_owned()),
         addresses: vec!["10.0.0.5".parse()?],
@@ -298,7 +307,7 @@ fn node_addresses_are_capped_and_bad_ones_skip_the_node() -> TestResult {
     set(&mut bad_version, "/status/nodeInfo/kubeletVersion", json!("v1\u{202e}"))?;
     let mut no_uid = node("nouid", "n6");
     set(&mut no_uid, "/metadata/uid", Value::Null)?;
-    let bare = json!({"metadata": {"name": "bare", "uid": "n7"}});
+    let bare = json!({"metadata": {"name": "bare", "uid": UID}});
     let parsed = nodes_of(vec![bad_ip, no_ip, bad_version, no_uid, bare, json!(1)])?;
     assert_eq!(parsed.items.len(), 1);
     assert_eq!(
@@ -313,5 +322,26 @@ fn node_addresses_are_capped_and_bad_ones_skip_the_node() -> TestResult {
 fn a_node_uid_repeated_is_a_duplicate() -> TestResult {
     let parsed = nodes_of(vec![node("a", "n1"), node("b", "n1")])?;
     assert_eq!((parsed.items.len(), parsed.skipped.duplicate), (1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_namespace_is_a_dns_label_not_a_subdomain() -> TestResult {
+    let mut dotted = pod("web", "u-dot");
+    set(&mut dotted, "/metadata/namespace", json!("a.b"))?;
+    let mut long = pod("web", "u-long");
+    set(&mut long, "/metadata/namespace", json!("a".repeat(NAMESPACE_OVER)))?;
+    let long_name = pod(&"w".repeat(LONG_NAME), "u-name");
+    let parsed = pods_of(vec![dotted, long, long_name])?;
+    assert_eq!((parsed.items.len(), parsed.skipped.bad_field), (1, TWO));
+    Ok(())
+}
+
+
+#[test]
+fn uids_of_tags_with_the_same_tail_are_distinct() -> TestResult {
+    assert_ne!(uid("first-shared-tail"), uid("other-shared-tail"));
+    assert_eq!(uid("same"), uid("same"));
     Ok(())
 }

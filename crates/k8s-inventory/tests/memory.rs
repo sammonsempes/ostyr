@@ -16,10 +16,10 @@ const PEAK_BOUND_KIB: u64 = 65_536;
 const NEST_DEPTH: usize = 100;
 
 
-const POD_HEAD: &str = r#"{"kind":"PodList","items":[{"metadata":{"name":"p","namespace":"n","uid":"u"}"#;
+const POD_HEAD: &str = r#"{"kind":"PodList","items":[{"metadata":{"name":"p","namespace":"n","uid":"00000000-0000-4000-8000-000000000001"}"#;
 
 
-const NODE_HEAD: &str = r#"{"kind":"NodeList","items":[{"metadata":{"name":"p","uid":"u"},"status":{"addresses":"#;
+const NODE_HEAD: &str = r#"{"kind":"NodeList","items":[{"metadata":{"name":"p","uid":"00000000-0000-4000-8000-000000000001"},"status":{"addresses":"#;
 
 
 fn peak_kib() -> Result<u64, Box<dyn Error>> {
@@ -40,10 +40,12 @@ fn nested() -> String {
 }
 
 
-const OWNER_HEAD: &str = r#"{"kind":"PodList","items":[{"metadata":{"name":"p","namespace":"n","uid":"u","ownerReferences":"#;
+const OWNER_HEAD: &str =
+    r#"{"kind":"PodList","items":[{"metadata":{"name":"p","namespace":"n","uid":"00000000-0000-4000-8000-000000000001","ownerReferences":"#;
 
 
-const LABEL_HEAD: &str = r#"{"kind":"PodList","items":[{"metadata":{"name":"p","namespace":"n","uid":"u","labels":"#;
+const LABEL_HEAD: &str =
+    r#"{"kind":"PodList","items":[{"metadata":{"name":"p","namespace":"n","uid":"00000000-0000-4000-8000-000000000001","labels":"#;
 
 
 fn root_items() -> Result<String, Box<dyn Error>> {
@@ -88,7 +90,7 @@ fn hostile_shapes_at_the_byte_cap_stay_within_the_peak_bound() -> TestResult {
     let nest = nested();
     let skipped_one = Skipped {
         bad_field: 1,
-        refused_uids: vec!["u".to_owned()],
+        refused_uids: vec!["00000000-0000-4000-8000-000000000001".to_owned()],
         ..Skipped::default()
     };
     let (root, root_peak) = pod_peak(root_items)?;
