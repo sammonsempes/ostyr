@@ -49,3 +49,54 @@ impl From<serde_json::Error> for SmartError {
         }
     }
 }
+
+
+#[derive(Debug, Error)]
+pub enum FetchError {
+    #[error("device file is larger than {limit} bytes")]
+    DevicesTooLarge { limit: usize },
+    #[error("device file is not valid")]
+    Devices(#[source] Box<serde_saphyr::Error>),
+    #[error("device file declares more than {limit} devices")]
+    TooManyDevices { limit: usize },
+    #[error("device {index}: field {field} is refused")]
+    InvalidDevice { index: usize, field: &'static str },
+    #[error("tenant is refused")]
+    Tenant(#[source] core_pg::error::PgError),
+    #[error("password file refused")]
+    Password(#[source] core_pg::error::PgError),
+    #[error("CA file refused")]
+    CaFile(#[source] core_pg::error::PgError),
+    #[error("CA certificate refused")]
+    CaInvalid(#[source] ureq::Error),
+}
+
+
+#[derive(Debug, Error)]
+pub enum GetError {
+    #[error("deadline reached")]
+    Expired,
+    #[error("request failed")]
+    Transport(#[source] ureq::Error),
+    #[error("status {0}")]
+    Status(u16),
+    #[error("reading the body failed")]
+    Body(#[source] std::io::Error),
+    #[error("body is larger than the limit")]
+    Oversized,
+}
+
+
+#[derive(Debug, Error)]
+pub enum DiscoverError {
+    #[error("document nesting is deeper than the limit")]
+    TooDeep,
+    #[error("document is not valid JSON ({category:?})")]
+    Malformed { category: serde_json::error::Category },
+    #[error("no Members array")]
+    NoMembers,
+    #[error("more than {limit} members")]
+    TooMany { limit: usize },
+    #[error("a member id is refused")]
+    BadId,
+}

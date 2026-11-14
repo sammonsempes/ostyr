@@ -216,3 +216,51 @@ pub struct RedfishReport {
     pub refused_collections: Vec<&'static str>,
     pub unreadable: Vec<&'static str>,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedfishDevice {
+    pub name: String,
+    pub base_url: String,
+    pub ca_file: Option<String>,
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
+    pub username: String,
+    pub password_file: String,
+    pub timeout_ms: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedfishDeviceFile {
+    pub devices: Vec<RedfishDevice>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleCheck {
+    NotAdministrator,
+    Administrator,
+    Unknown,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceReport {
+    pub device: String,
+    pub tenant: String,
+    pub health: Health,
+    pub unverified_tls: bool,
+    pub role: RoleCheck,
+}
+
+
+pub struct FetchSession {
+    pub agent: ureq::Agent,
+    pub auth: zeroize::Zeroizing<String>,
+    pub base: String,
+    pub deadline: std::time::Instant,
+    pub max_bytes: u64,
+}

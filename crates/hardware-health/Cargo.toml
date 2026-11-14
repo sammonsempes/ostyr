@@ -6,10 +6,22 @@ license.workspace = true
 publish = false
 
 [dependencies]
+base64 = "0.22"
+core-pg = { version = "0.0.0", path = "../core-pg" }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "2"
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
+tracing = "0.1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+zeroize = "1"
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tempfile = "3"
+base64 = "0.22"
+rustls-pki-types = "1"
 
 [lints]
 workspace = true

@@ -2431,10 +2431,19 @@ dependencies = [
 name = "hardware-health"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "core-pg",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
+ "tracing",
+ "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]

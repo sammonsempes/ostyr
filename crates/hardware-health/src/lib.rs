@@ -9,5 +9,7 @@ pub mod model;
 pub mod parse;
 pub mod redfish;
 pub mod redfish_assess;
+pub mod redfish_devices;
+pub mod redfish_fetch;
 pub mod ups;
 pub mod ups_assess;
