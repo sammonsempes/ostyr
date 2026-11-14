@@ -137,6 +137,10 @@ fn a_manual_control_or_owner_outside_the_grammar_is_refused() -> TestResult {
         MANUAL.replace("A.5.1", "-x"),
         MANUAL.replace("owner: ciso", "owner: \"a\\u202Eb\""),
         MANUAL.replace("owner: ciso", "owner: \" \""),
+        MANUAL.replace("owner: ciso", "owner: Alice"),
+        MANUAL.replace("owner: ciso", "owner: \"alice\\u3164\""),
+        MANUAL.replace("owner: ciso", "owner: \"-x\""),
+        MANUAL.replace("owner: ciso", "owner: \"\""),
     ] {
         assert!(
             matches!(parse_manual(&mut text.as_bytes(), "m.yaml"), Err(GrcError::Invalid { .. })),
