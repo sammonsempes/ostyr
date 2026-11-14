@@ -10,7 +10,7 @@ use k8s_inventory::error::ParseError;
 use k8s_inventory::inventory::build_inventory;
 use k8s_inventory::limits::{Limits, PageLimits, CEILING_PAGES, CEILING_TOTAL_ITEMS, DEFAULT_MAX_PAGES, DEFAULT_MAX_TOTAL_ITEMS, MAX_CONTINUE_BYTES};
 use k8s_inventory::model::{NodeItem, Page, Parsed, PodItem};
-use k8s_inventory::pages::{merge_node_pages, merge_pages, merge_pod_pages, page_size, remaining_budget};
+use k8s_inventory::pages::{merge_node_pages, merge_pages, merge_pod_pages, page_next, page_parsed, page_raw_count, page_size, remaining_budget};
 use k8s_inventory::parse::{parse_nodes, parse_nodes_page, parse_pods, parse_pods_page, pod_uid};
 use k8s_inventory::text::valid_continue;
 use serde_json::{json, Value};
@@ -86,7 +86,7 @@ fn three_pages_of_the_live_fixture_merge_to_the_one_document_read() -> TestResul
         .zip(tokens)
         .map(|(chunk, token)| pod_page(chunk, token))
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(pages.first().and_then(|page| page.next.as_deref()), Some("first-token"));
+    assert_eq!(pages.first().and_then(page_next), Some("first-token"));
     assert_eq!(merged(pages)?, whole);
     Ok(())
 }
@@ -194,7 +194,11 @@ fn a_page_that_crosses_the_budget_is_refused_before_any_element_is_converted() -
     assert!(matches!(refused, Err(ParseError::TooManyItems { count: THREE, max: TWO })));
     let accepted = parse_pods_page(page_text("PodList", items, None).as_slice(), &limits, THREE)?;
     assert_eq!(
-        (accepted.raw_count, accepted.parsed.items.len(), accepted.parsed.skipped.unparsable),
+        (
+            page_raw_count(&accepted),
+            page_parsed(&accepted).items.len(),
+            page_parsed(&accepted).skipped.unparsable
+        ),
         (THREE, TWO, 1)
     );
     Ok(())
@@ -232,16 +236,16 @@ fn every_bad_continue_is_refused_without_echoing_a_byte() -> TestResult {
 #[test]
 fn an_empty_or_absent_continue_is_the_last_page_and_a_real_k3s_token_is_kept() -> TestResult {
     let empty = pod_page(vec![], None)?;
-    assert_eq!(empty.next, None);
+    assert_eq!(page_next(&empty), None);
     let absent = parse_pods_page(br#"{"kind":"PodList","items":[]}"#.as_slice(), &Limits::default(), 1)?;
-    assert_eq!(absent.next, None);
+    assert_eq!(page_next(&absent), None);
     let nulled = parse_pods_page(br#"{"kind":"PodList","metadata":null,"items":[]}"#.as_slice(), &Limits::default(), 1)?;
-    assert_eq!(nulled.next, None);
+    assert_eq!(page_next(&nulled), None);
     let real = pod_page(vec![], Some(K3S_TOKEN))?;
-    assert_eq!(real.next.as_deref(), Some(K3S_TOKEN));
+    assert_eq!(page_next(&real), Some(K3S_TOKEN));
     assert!(!valid_continue(""));
     let longest = "a".repeat(MAX_CONTINUE_BYTES);
-    assert_eq!(pod_page(vec![], Some(&longest))?.next, Some(longest));
+    assert_eq!(page_next(&pod_page(vec![], Some(&longest))?), Some(longest.as_str()));
     Ok(())
 }
 
@@ -307,7 +311,7 @@ fn node_pages_merge_like_pod_pages() -> TestResult {
     )?;
     assert_eq!((result.items.len(), result.skipped.duplicate), (TWO, 1));
     let listed = parse_nodes_page(list("NodeList", vec![node("n3", "n3")]).as_slice(), &Limits::default(), 1)?;
-    assert_eq!((listed.next, listed.raw_count), (None, 1));
+    assert_eq!((page_next(&listed), page_raw_count(&listed)), (None, 1));
     let whole = parse_nodes(NODES, &Limits::default())?;
     let one = merge_node_pages(
         vec![parse_nodes_page(NODES, &Limits::default(), DEFAULT_MAX_TOTAL_ITEMS)?],
