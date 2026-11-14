@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
