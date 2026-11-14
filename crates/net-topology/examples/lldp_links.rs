@@ -1,16 +1,16 @@
-//! Usage: `lldp_links host <interfaces-report> <port-report-dir> <host> <now>` collects every port of a host from `<dir>/<port>.json`; or `lldp_links <report> <host> [now [stale_after [previous_report previous_now [port]]]]`. Prints the links of an `lldpcli -f json0` report, merged onto an earlier report, with staleness.
-use net_topology::collect::collect_host;
+//! Usage: `lldp_links live <lldpcli> <host> <now>` runs `lldpcli` for the interfaces and every port; `lldp_links host <interfaces-report> <port-report-dir> <host> <now>` collects every port of a host from `<dir>/<port>.json`; or `lldp_links <report> <host> [now [stale_after [previous_report previous_now [port]]]]`. Prints the links of an `lldpcli -f json0` report, merged onto an earlier report, with staleness.
+use net_topology::collect::{collect_host, HostRead};
 use net_topology::limits::Limits;
 use net_topology::links::{build_links, is_stale, merge_observations};
 use net_topology::lldp::{parse_lldpd, parse_lldpd_port};
-use net_topology::model::{Link, Skipped};
+use net_topology::model::{Link, RunFailure, Skipped};
 use net_topology::ports::parse_ports;
 use net_topology::types::AnyError;
 use std::fs::File;
 use std::io::{stdout, Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 
 const NOW_ARGUMENT: usize = 2;
@@ -43,16 +43,72 @@ const HOST_NOW_ARGUMENT: usize = 4;
 const HOST_MODE: &str = "host";
 
 
+const LIVE_MODE: &str = "live";
+
+
+#[cfg(unix)]
+const LIVE_HOST_ARGUMENT: usize = 2;
+
+
+#[cfg(unix)]
+const LIVE_NOW_ARGUMENT: usize = 3;
+
+
+#[cfg(unix)]
+const INTERFACES_ARGUMENTS: [&str; 3] = ["-f", "json0", "show"];
+
+
 static PORT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 
-fn run_from_dir(port: &str, cap: u64) -> std::io::Result<Vec<u8>> {
+#[cfg(unix)]
+static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
+
+
+fn read_file(port: &str, cap: u64) -> std::io::Result<Vec<u8>> {
     let dir = PORT_DIR.get().ok_or_else(|| std::io::Error::other("no port directory"))?;
     let mut buffer = Vec::new();
     File::open(dir.join(format!("{port}.json")))?
         .take(cap.saturating_add(1))
         .read_to_end(&mut buffer)?;
     Ok(buffer)
+}
+
+
+fn run_from_dir(port: &str, cap: u64, _timeout: Duration) -> Result<Vec<u8>, RunFailure> {
+    Ok(read_file(port, cap)?)
+}
+
+
+#[cfg(unix)]
+fn run_live(port: &str, cap: u64, timeout: Duration) -> Result<Vec<u8>, RunFailure> {
+    PROGRAM.get().map_or(Err(RunFailure::Spawn), |program| {
+        net_topology::runner::run_lldpcli(program, port, cap, timeout)
+    })
+}
+
+
+#[cfg(unix)]
+fn live_mode(arguments: &[String]) -> Result<(), AnyError> {
+    let program = arguments.get(1).ok_or("missing lldpcli path")?;
+    let host = arguments.get(LIVE_HOST_ARGUMENT).ok_or("missing host")?;
+    let now = arguments.get(LIVE_NOW_ARGUMENT).ok_or("missing now")?.parse::<i64>()?;
+    PROGRAM.set(PathBuf::from(program)).map_err(|_| "program already set")?;
+    let limits = Limits::default();
+    let timeout = Duration::from_secs(limits.port_timeout_seconds);
+    let mut listing = INTERFACES_ARGUMENTS.to_vec();
+    listing.push("interfaces");
+    let report =
+        net_topology::runner::run_command(&PathBuf::from(program), &listing, limits.max_bytes, timeout).map_err(|failure| format!("{failure:?}"))?;
+    let list = parse_ports(report.as_slice(), &limits)?;
+    let read = collect_host(host, &list.ports, now, &limits, run_live, &mut Instant::now)?;
+    print_host(&read, list.refused_ports)
+}
+
+
+#[cfg(not(unix))]
+fn live_mode(_arguments: &[String]) -> Result<(), AnyError> {
+    Err("live mode needs a Unix host".into())
 }
 
 
@@ -64,17 +120,24 @@ fn host_mode(arguments: &[String]) -> Result<(), AnyError> {
     PORT_DIR.set(PathBuf::from(dir)).map_err(|_| "port directory already set")?;
     let limits = Limits::default();
     let list = parse_ports(File::open(interfaces)?, &limits)?;
-    let read = collect_host(host, &list.ports, now, &limits, run_from_dir)?;
-    let links = build_links(TENANT, read.observations)?;
+    let read = collect_host(host, &list.ports, now, &limits, run_from_dir, &mut Instant::now)?;
+    print_host(&read, list.refused_ports)
+}
+
+
+fn print_host(read: &HostRead, listed_refusals: usize) -> Result<(), AnyError> {
+    let links = build_links(TENANT, read.observations.clone())?;
     let mut out = stdout();
     writeln!(
         out,
-        "links {} ports_run {} failed {} skipped_budget {} refused_ports {}",
+        "links {} ports_run {} failed {} skipped_budget {} skipped_time {} refused_ports {} excess_ports {}",
         links.len(),
         read.ports_run,
         read.failed_ports.len(),
         read.skipped_budget,
-        read.refused_ports + list.refused_ports
+        read.skipped_time,
+        read.refused_ports + listed_refusals,
+        read.excess_ports
     )?;
     read.failed_ports
         .iter()
@@ -101,10 +164,10 @@ fn links_of(path: &str, host: &str, port: Option<&str>, now: i64, limits: &Limit
 
 fn main() -> Result<(), AnyError> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-    if arguments.first().map(String::as_str) == Some(HOST_MODE) {
-        host_mode(&arguments)
-    } else {
-        report_mode(&arguments)
+    match arguments.first().map(String::as_str) {
+        Some(HOST_MODE) => host_mode(&arguments),
+        Some(LIVE_MODE) => live_mode(&arguments),
+        _ => report_mode(&arguments),
     }
 }
 

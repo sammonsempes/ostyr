@@ -74,3 +74,24 @@ pub struct Merged {
     pub links: Vec<Link>,
     pub refused_new: usize,
 }
+
+
+/// Why one `lldpcli` run produced no report; a category only, never output text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunFailure {
+    TimedOut,
+    TooLarge,
+    Failed { code: Option<i32>, read: u64 },
+    Spawn,
+    Io,
+    Refused,
+}
+
+
+impl From<std::io::Error> for RunFailure {
+    fn from(error: std::io::Error) -> Self {
+        let kind = error.kind();
+        tracing::debug!(?kind, "lldpcli run failed on an I/O error");
+        Self::Io
+    }
+}
