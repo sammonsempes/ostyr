@@ -12,7 +12,7 @@ use virt_inventory::error::ParseError;
 use virt_inventory::inventory::build_inventory;
 use virt_inventory::limits::Limits;
 use virt_inventory::model::{ItemKey, Parsed, ResourceKind};
-use virt_inventory::proxmox::{parse_permissions, parse_resources, valid_acl_path, valid_display_name};
+use virt_inventory::proxmox::{parse_permissions, parse_resources, valid_acl_path, valid_display_name, QEMU_STATUS_VALUES};
 
 
 const SEGMENT_MAX: usize = 64;
@@ -174,28 +174,6 @@ fn refused_node_and_storage_keys_read_only_their_own_parts() -> TestResult {
 const DUPLICATES: usize = 2;
 
 
-const QEMU_RUN_STATES: [&str; 18] = [
-    "debug",
-    "inmigrate",
-    "internal-error",
-    "io-error",
-    "paused",
-    "postmigrate",
-    "prelaunch",
-    "finish-migrate",
-    "restore-vm",
-    "running",
-    "save-vm",
-    "shutdown",
-    "suspended",
-    "watchdog",
-    "guest-panicked",
-    "colo",
-    "stopped",
-    "unknown",
-];
-
-
 fn guests_with_status(statuses: &[&str]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
     statuses
         .iter()
@@ -227,7 +205,25 @@ fn status_is_one_of_the_documented_values() -> TestResult {
         (parsed.skipped.bad_field, parsed.skipped.refused_keys.len(), parsed.skipped.key_lost),
         (bad.len(), bad.len(), 0)
     );
-    assert_eq!(parsed_of(guests_with_status(&QEMU_RUN_STATES)?)?.items.len(), QEMU_RUN_STATES.len());
+    assert_eq!(parsed_of(guests_with_status(&QEMU_STATUS_VALUES)?)?.items.len(), QEMU_STATUS_VALUES.len());
+    Ok(())
+}
+
+
+const RELEASE_PINS: [(&str, &str, &str); 5] = [
+    ("9.2", "debug", "colo"),
+    ("10.0", "inmigrate", "guest-panicked"),
+    ("10.1", "restore-vm", "save-vm"),
+    ("10.2", "watchdog", "suspended"),
+    ("11.0", "io-error", "internal-error"),
+];
+
+
+#[test]
+fn each_qemu_release_pins_two_states_by_name() -> TestResult {
+    assert!(RELEASE_PINS
+        .iter()
+        .all(|(_, first, second)| QEMU_STATUS_VALUES.contains(first) && QEMU_STATUS_VALUES.contains(second)));
     Ok(())
 }
 
