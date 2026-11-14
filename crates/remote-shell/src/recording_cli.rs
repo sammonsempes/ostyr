@@ -1,6 +1,6 @@
 use crate::recording::{close, new_writer, push, read_recording, Direction, Header, Limits, RecordingError};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::ParseIntError;
 use std::path::Path;
 use thiserror::Error;
@@ -45,7 +45,7 @@ pub fn clock_at(start: i64, step: i64, index: usize) -> Result<i64, RecordCliErr
 
 
 fn record(path: &Path, start: i64, step: i64, input: &mut dyn BufRead) -> Result<(), RecordCliError> {
-    let mut file = File::create(path)?;
+    let mut file = BufWriter::new(File::create(path)?);
     let header = Header {
         session_id: "example-session".to_string(),
         tenant: "tenant-a".to_string(),
