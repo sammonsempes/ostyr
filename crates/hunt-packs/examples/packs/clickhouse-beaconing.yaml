@@ -5,8 +5,11 @@ packs:
     technique: T1071
     source: clickhouse
     query: >-
-      SELECT src_ip, dst_ip, count() AS connections, stddevPop(gap) AS jitter FROM connection_gaps
-      WHERE tenant = {tenant:String} AND ts >= {window_start:DateTime64(3)} AND ts < {window_end:DateTime64(3)} GROUP BY src_ip, dst_ip HAVING connections > 20 AND jitter < 2 LIMIT 1000
+      SELECT `host.name`, `destination.ip`, count() AS connections, stddevPop(dateDiff('second', previous, seen)) AS jitter FROM (
+      SELECT `host.name`, `destination.ip`, `@timestamp` AS seen, lagInFrame(`@timestamp`) OVER (PARTITION BY `host.name`, `destination.ip` ORDER BY `@timestamp` ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS previous
+      FROM events WHERE `tenant` = {tenant:String} AND `@timestamp` >= {window_start:DateTime64(3)} AND `@timestamp` < {window_end:DateTime64(3)}
+      AND has(`event.category`, 'network') AND `destination.ip` != '')
+      WHERE previous > toDateTime64(0, 3) GROUP BY `host.name`, `destination.ip` HAVING connections > 20 AND jitter < 2 LIMIT 1000
     schedule_seconds: 21600
     window_seconds: 172800
     cost:

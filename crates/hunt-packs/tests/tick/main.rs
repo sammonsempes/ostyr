@@ -324,6 +324,30 @@ async fn a_state_inside_the_clock_skew_is_accepted() -> TestResult {
     )
     .await?;
     assert_eq!(report.packs.first().ok_or("no entry")?.status, PackStatus::Done);
+    assert!(log.borrow().is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_state_one_second_past_the_clock_skew_is_in_the_future() -> TestResult {
+    let (store, calls, log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = recorder(&log, never);
+    record_done(&mut exec, "a", "p", H5).await?;
+    let packs = [pack("p", Source::Clickhouse)];
+    let report = tick(
+        &tenants(&["a"]),
+        &packs,
+        H5 - MAX_CLOCK_SKEW - 1,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(report.packs.first().ok_or("no entry")?.status, PackStatus::StateInFuture);
+    assert!(log.borrow().is_empty());
+    assert_eq!(stored(&store, "a", "p"), Some(H5));
     Ok(())
 }
 
@@ -549,6 +573,7 @@ async fn store_errors_stop_the_pack() -> TestResult {
     let first = write.packs.first().ok_or("no entry")?;
     assert!(matches!(first.status, PackStatus::StoreFailed(_)));
     assert!(first.runs.is_empty());
+    assert_eq!(*log.borrow(), vec![call("a", "p", H5)]);
     assert_eq!(stored(&store, "a", "p"), None);
     Ok(())
 }

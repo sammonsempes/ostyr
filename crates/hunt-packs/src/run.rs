@@ -212,7 +212,21 @@ pub fn execute_pack(
 }
 
 
-/// Runs one clickhouse pack once for one tenant and window; one `warn!` with the pack id and the fixed text per failed run.
+/// The shown tenant: only a tenant `tenant_scope` accepts is named, anything else is `#`.
+pub fn shown_tenant(tenant: &str) -> String {
+    tenant_scope(tenant).map_or_else(|_| "#".to_owned(), |scope| tenant_of(&scope).to_owned())
+}
+
+
+/// The one log line of a failed run: pack, shown tenant and the fixed error text.
+pub fn failure_line(pack: &HuntPack, tenant: &str, error: &RunError) -> String {
+    let id = shown_id(&pack.id);
+    let shown = shown_tenant(tenant);
+    format!("hunt run failed: pack {id} tenant {shown}: {error}")
+}
+
+
+/// Runs one clickhouse pack once for one tenant and window; one `warn!` with the pack id, the tenant and the fixed text per failed run.
 pub fn run_pack(
     agent: &Agent,
     settings: &FetchSettings,
@@ -224,9 +238,8 @@ pub fn run_pack(
 ) -> Result<HuntOutcome, RunError> {
     let outcome = execute_pack(agent, settings, password, pack, tenant, now, remaining);
     if let Err(error) = &outcome {
-        let text = error.to_string();
-        let id = shown_id(&pack.id);
-        warn!("hunt run failed: pack {id}: {text}");
+        let line = failure_line(pack, tenant, error);
+        warn!("{line}");
     }
     outcome
 }
