@@ -1,4 +1,7 @@
+use crate::settings::{MAX_BYTES_CAP, MAX_TIMEOUT_MS, MAX_URL_BYTES, MIN_TIMEOUT_MS};
+use core_config::error::ConfigError;
 use core_pg::error::PgError;
+use siem_ingest::error::{InsertClass, InsertError};
 use thiserror::Error;
 
 
@@ -42,4 +45,42 @@ pub enum ReadOnlyError {
     NoRights,
     #[error("the token holds privileges beyond the read-only set: {privileges:?} ({omitted} more)")]
     HasWriteRights { privileges: Vec<String>, omitted: usize },
+}
+
+
+/// Every text is fixed: the token, a body and the server's message never reach an error.
+#[derive(Debug, Error)]
+pub enum FetchError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("api_url must be https with a host, no userinfo, query, fragment or path, at most {MAX_URL_BYTES} bytes")]
+    Url,
+    #[error("timeout_ms must be within {MIN_TIMEOUT_MS}..={MAX_TIMEOUT_MS}")]
+    Timeout,
+    #[error("limits.max_bytes must be within 1..={MAX_BYTES_CAP}")]
+    MaxBytes,
+    #[error(transparent)]
+    Scope(#[from] InventoryError),
+    #[error("the CA file could not be used")]
+    CaFile(#[source] PgError),
+    #[error("the token file could not be used")]
+    TokenFile(#[source] PgError),
+    #[error("the token must be user@realm!tokenid=secret in ASCII letters, digits and @!=._-")]
+    TokenShape,
+    #[error(transparent)]
+    Agent(#[from] InsertError),
+    #[error("the request failed: {0:?}")]
+    Transport(InsertClass),
+    #[error("the server answered status {0}")]
+    Status(u16),
+    #[error("the answer body could not be read")]
+    Body(#[source] std::io::Error),
+    #[error("the answer is above the {max} byte limit")]
+    TooLarge { max: u64 },
+    #[error("the permissions answer is refused")]
+    Permissions(#[source] ParseError),
+    #[error("the resources answer is refused")]
+    Resources(#[source] ParseError),
+    #[error("the token is not read-only: {0}")]
+    WritableCredential(#[source] ReadOnlyError),
 }

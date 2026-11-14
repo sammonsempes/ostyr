@@ -6918,12 +6918,19 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "virt-inventory"
 version = "0.0.0"
 dependencies = [
+ "core-config",
  "core-pg",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "serde_with",
+ "siem-ingest",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "ureq 3.5.1",
+ "zeroize",
 ]
 
 [[package]]
