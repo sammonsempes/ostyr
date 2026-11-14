@@ -32,4 +32,10 @@ check "missing digest argument is refused" fails "$SETUP" --check-key "$KEY"
 check "the pinned key passes" "$SETUP" --check-key "$KEY" "$DIGEST"
 check "a wrong key fails" fails "$SETUP" --check-key "$work_dir/proxmox-release-bookworm.gpg" "$DIGEST"
 check "the real run refuses a state dir without vms.txt" fails "$SETUP" "$work_dir" ostyr-x
+readonly REMOTE="$LAB_DIR/profiles/proxmox-single.remote.sh"
+apt_lines_without_lock="$(grep -E '^\s*apt-get ' "$REMOTE" | grep -vc 'DPkg::Lock::Timeout=600' || true)"
+check "the remote script waits for cloud-init" grep -q 'timeout "\$CLOUD_INIT_WAIT_SECONDS" cloud-init status --wait' "$REMOTE"
+check "every apt-get line has the lock timeout" test "$apt_lines_without_lock" = 0
+check "debconf-set-selections runs after the cloud-init wait" \
+    awk '/cloud-init status --wait/ {seen=1} /debconf-set-selections/ {exit !seen}' "$REMOTE"
 exit "$failures"
