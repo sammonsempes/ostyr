@@ -285,6 +285,10 @@ pub fn health_of(session: &FetchSession, limits: &RedfishLimits) -> Health {
 
 
 pub fn poll_device(device: &RedfishDevice, tenant: &TenantScope, limits: &RedfishLimits) -> Result<DeviceReport, FetchError> {
+    if device.insecure_skip_verify {
+        let name = device.name.as_str();
+        warn!(name, "redfish device read without certificate verification");
+    }
     check_device(0, device)?;
     let password = read_password(Path::new(&device.password_file)).map_err(FetchError::Password)?;
     let session = FetchSession {
@@ -294,10 +298,6 @@ pub fn poll_device(device: &RedfishDevice, tenant: &TenantScope, limits: &Redfis
         deadline: Instant::now() + Duration::from_millis(device.timeout_ms),
         max_bytes: limits.max_bytes,
     };
-    if device.insecure_skip_verify {
-        let name = device.name.as_str();
-        warn!(name, "redfish device read without certificate verification");
-    }
     let role = role_of(&session, &device.username);
     let health = match role {
         RoleCheck::Administrator => blind(ADMIN_REFUSED),

@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use core_pg::scope::tenant_scope;
 use hardware_health::error::{DiscoverError, FetchError, GetError};
-use hardware_health::limits::{default_redfish_limits, MAX_ID_BYTES, MAX_MEMBERS};
+use hardware_health::limits::{default_redfish_limits, DEFAULT_MAX_BYTES, MAX_ID_BYTES, MAX_MEMBERS};
 use hardware_health::model::{BlindReason, DeviceReport, FetchSession, Health, RedfishDevice, RoleCheck};
 use hardware_health::redfish::parse_redfish;
 use hardware_health::redfish_assess::assess_redfish;
@@ -78,7 +78,7 @@ const LONG_TIMEOUT_MS: u64 = 20_000;
 const SHORT_TIMEOUT_MS: u64 = 300;
 
 
-const MEMBER_COUNT: usize = 1_000_000;
+const MEMBER_COUNT: usize = 300_000;
 
 
 const MEMORY_LIMIT: &str = "--as=1073741824";
@@ -622,6 +622,12 @@ fn memory_limited_child() -> TestResult {
             }
         })?;
         assert_eq!(poll(&hostile)?.health, blind("chassis document"));
+        let body = format!(r#"{{"Members":[{}{{}}]}}"#, "{},".repeat(MEMBER_COUNT));
+        assert!(u64::try_from(body.len())? < DEFAULT_MAX_BYTES);
+        assert!(matches!(
+            member_paths(body.as_bytes(), "/redfish/v1/Chassis"),
+            Err(DiscoverError::TooMany { .. })
+        ));
     }
     Ok(())
 }

@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 report.unverified_tls,
                 role_name(report.role)
             ),
-            Err(error) => writeln!(out, "device={} error={error}", device.name),
+            Err(error) => writeln!(out, "device={} error={error} unverified_tls={}", device.name, device.insecure_skip_verify),
         })?;
     Ok(())
 }

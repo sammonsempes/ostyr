@@ -55,8 +55,13 @@ impl From<serde_json::Error> for SmartError {
 pub enum FetchError {
     #[error("device file is larger than {limit} bytes")]
     DevicesTooLarge { limit: usize },
-    #[error("device file is not valid")]
-    Devices(#[source] Box<serde_saphyr::Error>),
+    #[error("device file is not valid at line {line} column {column}")]
+    Devices {
+        line: u64,
+        column: u64,
+        #[source]
+        source: Box<serde_saphyr::Error>,
+    },
     #[error("device file declares more than {limit} devices")]
     TooManyDevices { limit: usize },
     #[error("device {index}: field {field} is refused")]

@@ -2,8 +2,9 @@
 
 use crate::error::FetchError;
 use crate::grammar::is_clean_ident;
-use crate::limits::{MAX_DEVICES, MAX_DEVICES_BYTES, MAX_PATH_TEXT_BYTES, MAX_TIMEOUT_MS, MAX_USERNAME_CHARS, MIN_TIMEOUT_MS};
+use crate::limits::{MAX_DEVICES, MAX_DEVICES_BYTES, MAX_PATH_TEXT_BYTES, MAX_TIMEOUT_MS, MAX_USERNAME_CHARS, MIN_PORT, MIN_TIMEOUT_MS};
 use crate::model::{RedfishDevice, RedfishDeviceFile};
+use serde::de::Error as _;
 use std::collections::BTreeSet;
 use ureq::http::Uri;
 
@@ -27,12 +28,14 @@ pub fn is_base_url(text: &str) -> bool {
     let trimmed = text.trim_end_matches('/');
     text.parse::<Uri>().is_ok_and(|uri| {
         let authority = uri.authority().map_or("", |found| found.as_str());
+        let port_text = authority.rsplit_once(':').map(|(_, port)| port).filter(|port| !port.ends_with(']'));
         [
             text.len() <= MAX_PATH_TEXT_BYTES,
             uri.scheme_str() == Some("https"),
             uri.path() == "/",
             uri.query().is_none(),
             !authority.is_empty(),
+            port_text.is_none_or(|port| port.parse::<u16>().is_ok_and(|number| number >= MIN_PORT)),
             !authority.contains('@'),
             trimmed == format!("https://{authority}"),
         ]
@@ -81,11 +84,23 @@ pub fn validated(devices: Vec<RedfishDevice>) -> Result<Vec<RedfishDevice>, Fetc
 }
 
 
+/// Keeps the line and column only, as `core-config` does; the parser's own message can quote the file.
+pub fn device_file_error(error: serde_saphyr::Error) -> FetchError {
+    let (line, column) = error.location().map_or((0, 0), |known| (known.line(), known.column()));
+    FetchError::Devices {
+        line,
+        column,
+        source: Box::new(serde_saphyr::Error::custom("device file is not valid")),
+    }
+}
+
+
 pub fn parse_devices(text: &str) -> Result<Vec<RedfishDevice>, FetchError> {
     if text.len() > MAX_DEVICES_BYTES {
         Err(FetchError::DevicesTooLarge { limit: MAX_DEVICES_BYTES })
     } else {
-        let file: RedfishDeviceFile = serde_saphyr::from_str(text).map_err(|error| FetchError::Devices(Box::new(error)))?;
+        let options = serde_saphyr::options! { with_snippet: false };
+        let file: RedfishDeviceFile = serde_saphyr::from_str_with_options(text, options).map_err(device_file_error)?;
         validated(file.devices)
     }
 }

@@ -99,3 +99,6 @@ pub const ACCOUNTS_COLLECTION: &str = "/redfish/v1/AccountService/Accounts";
 
 
 pub const ADMINISTRATOR_ROLE: &str = "Administrator";
+
+
+pub const MIN_PORT: u16 = 1;
