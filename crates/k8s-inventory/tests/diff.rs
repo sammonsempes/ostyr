@@ -6,7 +6,7 @@ mod inventory;
 mod types;
 
 
-use fixtures::{node, pod, set};
+use fixtures::{node, pod, set, uid};
 use inventory::inventory_of;
 use k8s_inventory::diff::diff;
 use k8s_inventory::error::InventoryError;
@@ -36,9 +36,9 @@ fn created_retired_and_changed_are_keyed_by_uid() -> TestResult {
     let current = inventory_of(vec![running, pod("new", "u-new")], vec![node("n", "n-1"), node("fresh", "n-new")])?;
     let changes = diff(&previous, &current)?;
     let uids = |refs: &[k8s_inventory::model::ItemRef]| refs.iter().map(|item| item.uid.clone()).collect::<Vec<_>>();
-    assert_eq!(uids(&changes.created), vec!["u-new", "n-new"]);
-    assert_eq!(uids(&changes.retired), vec!["u-gone", "n-old"]);
-    assert_eq!(uids(&changes.changed), vec!["u-keep"]);
+    assert_eq!(uids(&changes.created), vec![uid("u-new"), uid("n-new")]);
+    assert_eq!(uids(&changes.retired), vec![uid("u-gone"), uid("n-old")]);
+    assert_eq!(uids(&changes.changed), vec![uid("u-keep")]);
     let created_pod = changes.created.first().ok_or("no created")?;
     assert_eq!(
         (created_pod.kind, created_pod.namespace.as_deref(), created_pod.name.as_str()),
@@ -58,7 +58,7 @@ fn a_recreated_pod_with_the_same_name_is_a_retire_plus_a_create() -> TestResult 
     assert_eq!(changes.created.len(), 1);
     assert_eq!(changes.retired.len(), 1);
     assert!(changes.changed.is_empty());
-    assert_eq!(changes.retired.first().map(|item| item.uid.as_str()), Some("uid-old"));
+    assert_eq!(changes.retired.first().map(|item| item.uid.as_str()), Some(uid("uid-old").as_str()));
     Ok(())
 }
 

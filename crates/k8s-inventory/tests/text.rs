@@ -2,7 +2,10 @@
 mod types;
 
 
-use k8s_inventory::text::{alphanumeric_edges, is_hidden, valid_label_key, valid_label_value, valid_prefix, valid_segment, valid_text};
+use k8s_inventory::text::{
+    alphanumeric_edges, is_hidden, valid_dns_label, valid_label_key, valid_label_value, valid_prefix, valid_segment, valid_subdomain, valid_text,
+    valid_uid,
+};
 use types::TestResult;
 
 
@@ -16,6 +19,12 @@ const OVER_SEGMENT: usize = 64;
 
 
 const PARTS: usize = 30;
+
+
+const LONG_NAME: usize = 70;
+
+
+const SUBDOMAIN_MAX: usize = 253;
 
 
 #[test]
@@ -99,5 +108,45 @@ fn label_keys_and_values_follow_the_grammar() -> TestResult {
     assert!(!valid_label_value("-v"));
     assert!(!valid_label_value("v\u{202e}"));
     assert!(!valid_label_value(&"v".repeat(OVER_SEGMENT)));
+    Ok(())
+}
+
+
+const LIVE_UID: &str = "070d5076-c236-4f29-b589-e60176370304";
+
+
+const SUBDOMAIN_LABELS: usize = 127;
+
+
+#[test]
+fn uids_are_lowercase_ascii_uuids() -> TestResult {
+    assert!(valid_uid(LIVE_UID));
+    assert!(!valid_uid(&format!("{LIVE_UID}\u{3164}")));
+    assert!(!valid_uid(&LIVE_UID.to_uppercase()));
+    assert!(!valid_uid(&LIVE_UID.replacen('-', "", 1)));
+    assert!(!valid_uid(&format!("{LIVE_UID}a")));
+    assert!(!valid_uid(&LIVE_UID.replacen('0', "g", 1)));
+    assert!(!valid_uid(&LIVE_UID.replacen('-', "0", 1)));
+    assert!(!valid_uid(""));
+    Ok(())
+}
+
+
+#[test]
+fn names_are_dns_subdomains_and_namespaces_dns_labels() -> TestResult {
+    assert!(valid_subdomain("web-1.example"));
+    assert!(!valid_subdomain("web\u{3164}"));
+    assert!(!valid_subdomain("Web"));
+    assert!(!valid_subdomain("-web"));
+    let at_cap = vec!["a"; SUBDOMAIN_LABELS].join(".");
+    assert!(valid_subdomain(&at_cap));
+    assert!(!valid_subdomain(&format!("{at_cap}b")));
+    assert!(valid_dns_label("kube-system"));
+    assert!(!valid_dns_label("kube-system\u{200b}"));
+    assert!(!valid_dns_label("a.b"));
+    assert!(!valid_dns_label(&"a".repeat(OVER_SEGMENT)));
+    assert!(valid_subdomain(&"a".repeat(LONG_NAME)));
+    assert!(valid_subdomain(&"a".repeat(SUBDOMAIN_MAX)));
+    assert!(!valid_subdomain(&"a".repeat(SUBDOMAIN_MAX + 1)));
     Ok(())
 }

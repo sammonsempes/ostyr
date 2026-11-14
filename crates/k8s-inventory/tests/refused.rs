@@ -4,7 +4,7 @@ mod fixtures;
 mod types;
 
 
-use fixtures::{list, node, pod, set};
+use fixtures::{list, node, pod, set, uid};
 use k8s_inventory::diff::diff;
 use k8s_inventory::inventory::{build_inventory, Inventory};
 use k8s_inventory::limits::Limits;
@@ -57,8 +57,8 @@ fn inventory(pods: Vec<Value>, nodes: Vec<Value>) -> Result<Inventory, Box<dyn s
 }
 
 
-fn unreadable(kind: ItemKind, uid: &str) -> UnreadableRef {
-    UnreadableRef { kind, uid: uid.to_owned() }
+fn unreadable(kind: ItemKind, tag: &str) -> UnreadableRef {
+    UnreadableRef { kind, uid: uid(tag) }
 }
 
 
@@ -167,12 +167,12 @@ fn a_pod_over_every_collection_cap_is_unreadable_never_retired() -> TestResult {
     )?;
     let changes = diff(&previous, &current)?;
     let retired = changes.retired.iter().map(|item| item.uid.as_str()).collect::<Vec<_>>();
-    assert_eq!(retired, vec!["u-gone"]);
+    assert_eq!(retired, vec![uid("u-gone")]);
     assert_eq!(
         changes.unreadable,
         vec![
-            unreadable(ItemKind::Pod, "u-big"),
             unreadable(ItemKind::Pod, "u-c"),
+            unreadable(ItemKind::Pod, "u-big"),
             unreadable(ItemKind::Node, "n-1")
         ]
     );
@@ -200,6 +200,47 @@ fn a_refused_element_without_a_usable_uid_is_counted_not_listed() -> TestResult 
     assert_eq!((parsed.skipped.bad_field, parsed.skipped.unparsable), (THREE, TWO));
     assert!(parsed.skipped.refused_uids.is_empty());
     assert_eq!(parsed.skipped.uid_lost, FOUR + 1);
+    Ok(())
+}
+
+
+#[test]
+fn look_alike_uids_and_names_are_refused_and_lose_the_refusal() -> TestResult {
+    let honest = uid("u-honest");
+    let forged = format!("{honest}\u{3164}");
+    let mut twin = pod("web", "x");
+    set(&mut twin, "/metadata/uid", json!(forged))?;
+    let mut crowded_twin = labelled("web", "x", LABELS_OVER_CAP)?;
+    set(&mut crowded_twin, "/metadata/uid", json!(forged))?;
+    let mut hidden_namespace = pod("web2", "u-ns");
+    set(&mut hidden_namespace, "/metadata/namespace", json!("kube-system\u{200b}"))?;
+    let parsed = parse_pods(
+        list("PodList", vec![pod("web", "u-honest"), twin, crowded_twin, hidden_namespace]).as_slice(),
+        &Limits::default(),
+    )?;
+    assert_eq!(parsed.items.len(), 1);
+    assert_eq!(parsed.skipped.bad_field, THREE);
+    assert_eq!(parsed.skipped.refused_uids, vec![uid("u-ns")]);
+    assert_eq!(parsed.skipped.uid_lost, TWO);
+    assert_eq!(parsed.items.first().map(|item| item.uid.clone()), Some(honest));
+    Ok(())
+}
+
+
+#[test]
+fn look_alike_nodes_are_refused_and_lose_the_refusal() -> TestResult {
+    let forged_uid = format!("{}\u{3164}", uid("n-honest"));
+    let mut twin = node("node-a", "x");
+    set(&mut twin, "/metadata/uid", json!(forged_uid))?;
+    let forged_name = node("Node\u{3164}", "n-other");
+    let parsed = parse_nodes(
+        list("NodeList", vec![node("node-a", "n-honest"), twin, forged_name]).as_slice(),
+        &Limits::default(),
+    )?;
+    assert_eq!(parsed.items.len(), 1);
+    assert_eq!(parsed.skipped.bad_field, TWO);
+    assert_eq!(parsed.skipped.uid_lost, 1);
+    assert_eq!(parsed.skipped.refused_uids, vec![uid("n-other")]);
     Ok(())
 }
 
@@ -253,7 +294,7 @@ fn extra_labels_count_the_entries_before_merging_like_containers() -> TestResult
         max_containers: 1,
         ..Limits::default()
     };
-    let body = r#"{"kind":"PodList","items":[{"metadata":{"name":"w","namespace":"d","uid":"u","labels":{"a":"1","a":"2"}},"spec":{"containers":[{"image":"i"},{"image":"j"}]}}]}"#;
+    let body = r#"{"kind":"PodList","items":[{"metadata":{"name":"w","namespace":"d","uid":"00000000-0000-4000-8000-000000000001","labels":{"a":"1","a":"2"}},"spec":{"containers":[{"image":"i"},{"image":"j"}]}}]}"#;
     let parsed = parse_pods(body.as_bytes(), &limits)?;
     let item = parsed.items.first().ok_or("no item")?;
     assert_eq!((item.labels.len(), item.extra_labels, item.extra_containers), (1, 1, 1));
@@ -279,7 +320,7 @@ fn a_refused_element_sharing_a_kept_uid_is_a_duplicate_in_either_order() -> Test
 fn a_built_by_hand_shared_uid_in_the_previous_list_is_retired_only() -> TestResult {
     let limits = Limits::default();
     let mut shared = parse_pods(list("PodList", vec![pod("keep", "u1")]).as_slice(), &limits)?;
-    shared.skipped.refused_uids.push("u1".to_owned());
+    shared.skipped.refused_uids.push(uid("u1"));
     let nodes = parse_nodes(list("NodeList", vec![]).as_slice(), &limits)?;
     let previous = build_inventory("acme", "prod-1", shared, nodes)?;
     let current = inventory(vec![], vec![])?;
