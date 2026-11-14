@@ -10,7 +10,10 @@ const MEBIBYTE: usize = 1024 * 1024;
 const LISTING_BYTES: usize = 8 * MEBIBYTE;
 
 
-const SHAPE_BUDGET_KIB: u64 = 64 * 1024;
+const SHAPE_BUDGET_KIB: u64 = 48 * 1024;
+
+
+const FIRST_SHAPE_BUDGET_KIB: u64 = 24 * 1024;
 
 
 const SHAPES: usize = 4;
@@ -68,6 +71,8 @@ fn hostile_element_shapes_never_expand_more_than_one_element() -> Result<(), Box
         let shape = hostile_shape(index);
         let outcome = parse_restic(shape.as_bytes(), "repo", &limits);
         assert!(matches!(outcome, Err(BackupError::Malformed { .. })), "{outcome:?}");
+        let growth = peak_kib()?.saturating_sub(before);
+        assert!(growth < FIRST_SHAPE_BUDGET_KIB || index > 0, "shape {index} grew by {growth} KiB");
         Ok(())
     })?;
     let growth = peak_kib()?.saturating_sub(before);
