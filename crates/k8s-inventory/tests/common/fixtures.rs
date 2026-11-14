@@ -2,12 +2,25 @@ use serde_json::{json, Value};
 use std::error::Error;
 
 
-pub fn pod(name: &str, uid: &str) -> Value {
+pub const UID_TAIL: usize = 12;
+
+
+pub const UID_PREFIX: &str = "00000000-0000-4000-8000-";
+
+
+pub fn uid(tag: &str) -> String {
+    let hex = tag.bytes().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let tail = hex.chars().rev().take(UID_TAIL).collect::<Vec<_>>().into_iter().rev().collect::<String>();
+    format!("{UID_PREFIX}{tail:0>UID_TAIL$}")
+}
+
+
+pub fn pod(name: &str, uid_tag: &str) -> Value {
     json!({
         "metadata": {
             "name": name,
             "namespace": "default",
-            "uid": uid,
+            "uid": uid(uid_tag),
             "creationTimestamp": "2024-05-01T10:00:00Z",
             "labels": {"app": "web", "app.kubernetes.io/name": "nginx"},
             "ownerReferences": [{"kind": "ReplicaSet", "name": "web-1"}]
@@ -18,9 +31,9 @@ pub fn pod(name: &str, uid: &str) -> Value {
 }
 
 
-pub fn node(name: &str, uid: &str) -> Value {
+pub fn node(name: &str, uid_tag: &str) -> Value {
     json!({
-        "metadata": {"name": name, "uid": uid},
+        "metadata": {"name": name, "uid": uid(uid_tag)},
         "status": {
             "nodeInfo": {"kubeletVersion": "v1.30.2+k3s1", "osImage": "Ubuntu 24.04 LTS"},
             "addresses": [{"type": "InternalIP", "address": "10.0.0.5"}, {"type": "Hostname", "address": "node-a"}]

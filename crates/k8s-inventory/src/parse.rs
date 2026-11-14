@@ -1,7 +1,7 @@
 use crate::error::ParseError;
 use crate::limits::{Limits, COLLECTION_SLACK};
 use crate::model::{NodeItem, Parsed, PodItem, SkipReason, Skipped};
-use crate::text::{valid_label_key, valid_label_value, valid_text};
+use crate::text::{valid_dns_label, valid_label_key, valid_label_value, valid_subdomain, valid_text, valid_uid};
 use crate::types::{BorrowedLabels, LabelsAndExtra};
 use serde::de::IgnoredAny;
 use serde::Deserialize;
@@ -165,6 +165,11 @@ fn required_of(value: Option<&str>, limits: &Limits) -> Result<String, SkipReaso
 }
 
 
+fn identity_of(value: Option<&str>, accepts: fn(&str) -> bool) -> Result<String, SkipReason> {
+    value.filter(|text| accepts(text)).map(str::to_owned).ok_or(SkipReason::BadField)
+}
+
+
 fn label_of(key: &str, value: &str) -> Result<(String, String), SkipReason> {
     if valid_label_key(key) && valid_label_value(value) {
         Ok((key.to_owned(), value.to_owned()))
@@ -239,9 +244,9 @@ pub fn convert_pod(raw: &RawValue, limits: &Limits) -> Result<PodItem, SkipReaso
     let (owners, _) = bounded_seq::<RawOwner>(metadata.owners, OWNERS_SCANNED)?;
     let owner = owners.iter().find(|candidate| candidate.controller == Some(true)).or(owners.first());
     Ok(PodItem {
-        namespace: required_of(metadata.namespace.as_deref(), limits)?,
-        name: required_of(metadata.name.as_deref(), limits)?,
-        uid: required_of(metadata.uid.as_deref(), limits)?,
+        namespace: identity_of(metadata.namespace.as_deref(), valid_dns_label)?,
+        name: identity_of(metadata.name.as_deref(), valid_subdomain)?,
+        uid: identity_of(metadata.uid.as_deref(), valid_uid)?,
         node_name: text_of(pod.spec.node_name.as_deref(), limits)?,
         phase: text_of(pod.status.phase.as_deref(), limits)?,
         images,
@@ -265,8 +270,8 @@ pub fn convert_node(raw: &RawValue, limits: &Limits) -> Result<NodeItem, SkipRea
         .map(|address| ip_of(address.address.as_deref()))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(NodeItem {
-        name: required_of(node.metadata.name.as_deref(), limits)?,
-        uid: required_of(node.metadata.uid.as_deref(), limits)?,
+        name: identity_of(node.metadata.name.as_deref(), valid_subdomain)?,
+        uid: identity_of(node.metadata.uid.as_deref(), valid_uid)?,
         kubelet_version: text_of(node.status.node_info.kubelet_version.as_deref(), limits)?,
         os_image: text_of(node.status.node_info.os_image.as_deref(), limits)?,
         addresses,
@@ -286,13 +291,9 @@ pub fn node_uid(node: &NodeItem) -> &str {
 
 
 /// The uid of an element that was refused, when it is readable and passes the text grammar; nothing else of the element is kept.
-pub fn refused_uid(raw: &RawValue, limits: &Limits) -> Option<String> {
+pub fn refused_uid(raw: &RawValue) -> Option<String> {
     let element = serde_json::from_str::<RawUidElement>(raw.get()).ok()?;
-    element
-        .metadata
-        .uid
-        .filter(|uid| valid_text(uid, limits.max_text_bytes))
-        .map(Cow::into_owned)
+    element.metadata.uid.filter(|uid| valid_uid(uid)).map(Cow::into_owned)
 }
 
 
@@ -368,7 +369,7 @@ pub fn parse_list<Source: Read, Item>(
             Ok(_) => count_skip(&mut parsed.skipped, SkipReason::Duplicate),
             Err(reason) => {
                 count_skip(&mut parsed.skipped, reason);
-                keep_refused_uid(&mut parsed.skipped, refused_uid(raw, limits));
+                keep_refused_uid(&mut parsed.skipped, refused_uid(raw));
             }
         }
     }
