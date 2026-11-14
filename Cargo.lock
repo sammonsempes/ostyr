@@ -2456,6 +2456,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "tracing-subscriber",
  "ureq 3.5.1",
  "zeroize",
 ]
