@@ -11,6 +11,7 @@ use std::io::{self, BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 
 pub const ISSUE_USAGE: &str = "issue <seed-file> <claims-json>";
@@ -32,7 +33,8 @@ pub fn write_keypair<Output: Write>(fill: FillFn, out: &mut Output) -> Result<()
 
 
 pub fn signing_key_from(seed_hex: &str) -> Result<SigningKey, CliError> {
-    let seed = <[u8; SECRET_KEY_LENGTH]>::try_from(HEXLOWER.decode(seed_hex.as_bytes())?.as_slice()).map_err(|_| CliError::Seed)?;
+    let decoded = Zeroizing::new(HEXLOWER.decode(seed_hex.as_bytes())?);
+    let seed = Zeroizing::new(<[u8; SECRET_KEY_LENGTH]>::try_from(decoded.as_slice()).map_err(|_| CliError::Seed)?);
     Ok(SigningKey::from_bytes(&seed))
 }
 
