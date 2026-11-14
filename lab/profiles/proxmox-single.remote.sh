@@ -8,6 +8,7 @@ readonly KEY_PATH="/etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg"
 readonly NODE="pve"
 readonly TEMPLATE_PATTERN="debian-12-standard"
 readonly API_ATTEMPTS=60
+readonly CLOUD_INIT_WAIT_SECONDS=1800
 
 address="${1:?usage: proxmox-single.remote.sh <address> <key-sha512>}"
 digest="${2:?usage: proxmox-single.remote.sh <address> <key-sha512>}"
@@ -16,6 +17,7 @@ export DEBIAN_FRONTEND=noninteractive
 echo "$digest  /tmp/proxmox-release-bookworm.gpg" | sha512sum --check --status || { echo "key digest mismatch" >&2; exit 1; }
 
 if ! dpkg-query -W -f='${Status}' proxmox-ve 2>/dev/null | grep -q 'install ok installed'; then
+    timeout "$CLOUD_INIT_WAIT_SECONDS" cloud-init status --wait || { echo "cloud-init did not finish within ${CLOUD_INIT_WAIT_SECONDS}s" >&2; exit 1; }
     install -m 0644 /tmp/proxmox-release-bookworm.gpg "$KEY_PATH"
     echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" >/etc/apt/sources.list.d/pve-install-repo.list
     hostnamectl set-hostname "$NODE"
@@ -23,8 +25,8 @@ if ! dpkg-query -W -f='${Status}' proxmox-ve 2>/dev/null | grep -q 'install ok i
     sed -i '/^127\.0\.1\.1/d' /etc/hosts
     grep -q " $NODE\$" /etc/hosts || echo "$address $NODE.lab.test $NODE" >>/etc/hosts
     echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
-    apt-get update
-    apt-get install -y proxmox-ve postfix open-iscsi chrony
+    apt-get -o DPkg::Lock::Timeout=600 update
+    apt-get -o DPkg::Lock::Timeout=600 install -y proxmox-ve postfix open-iscsi chrony
 fi
 systemctl enable --now pve-cluster pvedaemon pveproxy pvestatd >/dev/null
 
