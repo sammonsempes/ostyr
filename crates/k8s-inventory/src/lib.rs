@@ -1,11 +1,14 @@
 //! Bounded inventory of Kubernetes pods and nodes from the API list JSON, and the diff between two inventories (spec section 22).
 
+pub mod access;
 pub mod diff;
 pub mod error;
+pub mod fetch;
 pub mod inventory;
 pub mod limits;
 pub mod model;
 pub mod pages;
 pub mod parse;
+pub mod settings;
 pub mod text;
 pub mod types;
