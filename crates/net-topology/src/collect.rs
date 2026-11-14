@@ -32,8 +32,8 @@ pub struct HostRead {
     pub ports_run: usize,
     pub skipped_budget: usize,
     pub skipped_time: usize,
-    pub refused_ports: usize,
-    pub excess_ports: usize,
+    pub invalid_ports: usize,
+    pub over_cap_ports: usize,
 }
 
 
@@ -186,8 +186,8 @@ pub fn collect_host(local_host: &str, ports: &[String], now: i64, limits: &Limit
             ports_run: 0,
             skipped_budget: 0,
             skipped_time: 0,
-            refused_ports: distinct.len() - valid.len(),
-            excess_ports: valid.len() - selected.len(),
+            invalid_ports: distinct.len() - valid.len(),
+            over_cap_ports: valid.len() - selected.len(),
         },
         consumed: 0,
         started,

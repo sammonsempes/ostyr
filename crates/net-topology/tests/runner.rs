@@ -491,6 +491,10 @@ fn a_cut_or_signed_sigign_line_is_refused() -> TestResult {
     };
     assert_eq!(sigchld_ignored(&write("short", "SigIgn:\t000000000001000")?), Err(RunFailure::Unwaitable));
     assert_eq!(
+        sigchld_ignored(&write("exact_no_nl", "SigIgn:\t0000000000010000")?),
+        Err(RunFailure::Unwaitable)
+    );
+    assert_eq!(
         sigchld_ignored(&write("short_nl", "SigIgn:\t000000000001000\n")?),
         Err(RunFailure::Unwaitable)
     );

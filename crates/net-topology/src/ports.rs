@@ -37,11 +37,12 @@ struct RawNamed<'a> {
 }
 
 
-/// The distinct valid port names of an interface report, and how many entries were refused.
+/// The distinct valid port names of an interface report, and how many entries were refused, by cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortList {
     pub ports: Vec<String>,
-    pub refused_ports: usize,
+    pub unreadable_ports: usize,
+    pub invalid_ports: usize,
 }
 
 
@@ -84,9 +85,10 @@ pub fn parse_ports<Source: Read>(reader: Source, limits: &Limits) -> Result<Port
         debug!(unreadable, "interface entries that are not objects");
     }
     let valid = names.iter().flatten().filter(|name| valid_port(name)).collect::<BTreeSet<_>>();
-    let refused_ports = unreadable + names.len() - names.iter().flatten().filter(|name| valid_port(name)).count();
+    let invalid_ports = names.len() - names.iter().flatten().filter(|name| valid_port(name)).count();
     Ok(PortList {
         ports: valid.into_iter().cloned().collect(),
-        refused_ports,
+        unreadable_ports: unreadable,
+        invalid_ports,
     })
 }

@@ -11,6 +11,7 @@ use serde_json::value::RawValue;
 use std::borrow::Cow;
 use std::io::Read;
 use std::net::IpAddr;
+use tracing::debug;
 
 
 const NO_LIST: &str = "[]";
@@ -310,10 +311,11 @@ pub fn is_object(bytes: &[u8]) -> bool {
 
 
 fn read_interface(raw: &RawValue, context: &Context, parsed: &mut Parsed) -> Result<(), ParseError> {
-    match serde_json::from_str::<RawInterface>(raw.get())
-        .ok()
-        .filter(|_| is_object(raw.get().as_bytes()))
-    {
+    let decoded = serde_json::from_str::<RawInterface>(raw.get()).map_err(|error| error.classify());
+    if let Err(category) = &decoded {
+        debug!(?category, "an interface entry cannot be decoded");
+    }
+    match decoded.ok().filter(|_| is_object(raw.get().as_bytes())) {
         Some(interface) => {
             let max = context.limits.max_neighbours_per_interface;
             let chassis = tolerant_list(interface.chassis, max, LIST_CHASSIS)?;
