@@ -5,7 +5,7 @@ packs:
     technique: T1059.001
     source: clickhouse
     query: >-
-      SELECT parent_image, image, count() AS runs FROM events WHERE tenant = {tenant:String} AND category = 'process'
+      SELECT parent_image, image, count() AS runs FROM events WHERE tenant = {tenant:String} AND ts >= {window_start:DateTime64(3)} AND ts < {window_end:DateTime64(3)} AND category = 'process'
       GROUP BY parent_image, image HAVING runs < 3 ORDER BY runs LIMIT 1000
     schedule_seconds: 3600
     window_seconds: 86400

@@ -6,7 +6,7 @@ packs:
     source: clickhouse
     query: >-
       SELECT src_ip, dst_ip, count() AS connections, stddevPop(gap) AS jitter FROM connection_gaps
-      WHERE tenant = {tenant:String} GROUP BY src_ip, dst_ip HAVING connections > 20 AND jitter < 2 LIMIT 1000
+      WHERE tenant = {tenant:String} AND ts >= {window_start:DateTime64(3)} AND ts < {window_end:DateTime64(3)} GROUP BY src_ip, dst_ip HAVING connections > 20 AND jitter < 2 LIMIT 1000
     schedule_seconds: 21600
     window_seconds: 172800
     cost:

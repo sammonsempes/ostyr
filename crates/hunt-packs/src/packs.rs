@@ -70,6 +70,15 @@ pub const SUBTECHNIQUE_DIGITS: usize = 3;
 pub const STATEMENT_END: char = ';';
 
 
+pub const TENANT_PARAM: &str = "{tenant:String}";
+
+
+pub const WINDOW_START_PARAM: &str = "{window_start:DateTime64(3)}";
+
+
+pub const WINDOW_END_PARAM: &str = "{window_end:DateTime64(3)}";
+
+
 pub const YAML_EXTENSION: &str = "yaml";
 
 
@@ -151,7 +160,7 @@ pub fn validate_pack(file: &str, pack: &HuntPack) -> Result<(), PackError> {
         ("title", valid_text(&pack.title, MAX_TITLE_BYTES)),
         ("hypothesis", valid_text(&pack.hypothesis, MAX_HYPOTHESIS_BYTES)),
         ("technique", is_technique(&pack.technique)),
-        ("query", query_ok(&pack.query)),
+        ("query", query_ok(&pack.query) && (!clickhouse || params_ok(&pack.query))),
         (
             "schedule_seconds",
             (MIN_SCHEDULE_SECONDS..=MAX_SCHEDULE_SECONDS).contains(&pack.schedule_seconds),
@@ -204,6 +213,14 @@ pub fn query_ok(query: &str) -> bool {
     let body = query.trim_end().trim_end_matches(STATEMENT_END);
     let trailing = query.trim_end().len() - body.len();
     query.len() <= MAX_QUERY_BYTES && !body.trim().is_empty() && !query.contains('\0') && !body.contains(STATEMENT_END) && trailing <= 1
+}
+
+
+/// A clickhouse query names the tenant and both window parameters; a text check, not isolation.
+pub fn params_ok(query: &str) -> bool {
+    [TENANT_PARAM, WINDOW_START_PARAM, WINDOW_END_PARAM]
+        .iter()
+        .all(|name| query.contains(name))
 }
 
 
