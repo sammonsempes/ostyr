@@ -21,6 +21,21 @@ pub fn check_page_limits(page_limits: &PageLimits) -> Result<(), ParseError> {
 }
 
 
+pub fn page_parsed<Item>(page: &Page<Item>) -> &Parsed<Item> {
+    &page.parsed
+}
+
+
+pub fn page_next<Item>(page: &Page<Item>) -> Option<&str> {
+    page.next.as_deref()
+}
+
+
+pub fn page_raw_count<Item>(page: &Page<Item>) -> usize {
+    page.raw_count
+}
+
+
 /// The raw elements of the pages already read.
 pub fn items_read<Item>(pages: &[Page<Item>]) -> usize {
     pages.iter().fold(0, |total: usize, page| total.saturating_add(page.raw_count))

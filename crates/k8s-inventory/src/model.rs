@@ -55,12 +55,12 @@ pub struct Parsed<Item> {
 }
 
 
-/// One page of a paged list: its items, the `continue` token of the next page (`None` on the last page) and its raw element count.
+/// One page of a paged list, built only by the page parsers and read through the `page_*` functions: its items, the `continue` token of the next page (`None` on the last page) and its raw element count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<Item> {
-    pub parsed: Parsed<Item>,
-    pub next: Option<String>,
-    pub raw_count: usize,
+    pub(crate) parsed: Parsed<Item>,
+    pub(crate) next: Option<String>,
+    pub(crate) raw_count: usize,
 }
 
 

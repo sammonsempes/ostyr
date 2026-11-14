@@ -1,3 +1,4 @@
+use core_config::error::ConfigError;
 use core_pg::error::PgError;
 use thiserror::Error;
 
@@ -35,4 +36,46 @@ pub enum InventoryError {
     Cluster(#[source] PgError),
     #[error("the two inventories are not of the same tenant and cluster")]
     ScopeMismatch,
+}
+
+
+/// Every text is fixed: the token, the URL, a continue token and a response body never reach an error.
+#[derive(Debug, Error)]
+pub enum FetchError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error("api_url must be https://host[:port] with no path, query, fragment or userinfo, at most 255 bytes")]
+    ApiUrl,
+    #[error("{field} is outside its allowed range {min}..={max}")]
+    Range { field: &'static str, min: u64, max: u64 },
+    #[error(transparent)]
+    Scope(#[from] InventoryError),
+    #[error("the token file could not be used")]
+    Token(#[source] PgError),
+    #[error("the token is not printable ASCII without spaces")]
+    TokenEncoding,
+    #[error("the CA file could not be used")]
+    CaFile(#[source] PgError),
+    #[error("the CA file holds no valid certificate")]
+    CaInvalid(#[source] ureq::Error),
+    #[error("the API request failed")]
+    Transport(#[source] ureq::Error),
+    #[error("the run deadline passed")]
+    Deadline,
+    #[error("the API answered status {status}")]
+    Status { status: u16 },
+    #[error("the answer body could not be read")]
+    Body(#[source] std::io::Error),
+    #[error("an answer is above the {max} byte page limit")]
+    TooLarge { max: u64 },
+    #[error("the run read more than {max} bytes")]
+    RunTooLarge { max: u64 },
+    #[error("the access review answer is malformed ({category:?})")]
+    ReviewMalformed { category: serde_json::error::Category },
+    #[error("the credential may {verb} {resource}: it is not read-only, nothing was listed")]
+    WritableCredential { verb: &'static str, resource: &'static str },
+    #[error("the credential may not list {resource}")]
+    MissingRead { resource: &'static str },
+    #[error(transparent)]
+    Parse(#[from] ParseError),
 }
