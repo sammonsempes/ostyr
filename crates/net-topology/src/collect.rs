@@ -83,7 +83,7 @@ pub fn run_failure_category(failure: &RunFailure) -> PortFailure {
         RunFailure::TooLarge => PortFailure::TooLarge,
         RunFailure::Failed { .. } => PortFailure::Failed,
         RunFailure::Spawn => PortFailure::Spawn,
-        RunFailure::Io => PortFailure::Io,
+        RunFailure::Io | RunFailure::Unwaitable => PortFailure::Io,
         RunFailure::Refused => PortFailure::Rejected,
     }
 }
@@ -94,7 +94,7 @@ pub fn charge_of(failure: &RunFailure, max_port_bytes: u64) -> u64 {
     match failure {
         RunFailure::Failed { read, .. } => *read,
         RunFailure::Spawn | RunFailure::Refused => 0,
-        RunFailure::TooLarge | RunFailure::TimedOut | RunFailure::Io => max_port_bytes,
+        RunFailure::TooLarge | RunFailure::TimedOut | RunFailure::Io | RunFailure::Unwaitable => max_port_bytes,
     }
 }
 

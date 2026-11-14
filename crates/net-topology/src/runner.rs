@@ -2,8 +2,10 @@
 
 use crate::model::RunFailure;
 use crate::ports::valid_port;
+use crate::types::ClockFn;
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
-use rustix::process::{kill_process_group, Pid, Signal};
+use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
+use std::fs::File;
 use std::io::{self, PipeReader, PipeWriter, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -19,9 +21,6 @@ pub const READ_CHUNK_BYTES: usize = 65_536;
 pub const WAIT_POLL_MILLIS: u64 = 10;
 
 
-pub const MAX_WAIT_POLLS: usize = 6_200;
-
-
 pub const REAP_GRACE_MILLIS: u64 = 2_000;
 
 
@@ -29,6 +28,21 @@ pub const MAX_DEADLINE_SECONDS: u64 = 3_600;
 
 
 pub const NEW_PROCESS_GROUP: i32 = 0;
+
+
+pub const PROC_STATUS: &str = "/proc/self/status";
+
+
+pub const MAX_STATUS_BYTES: u64 = 65_536;
+
+
+pub const SIGCHLD_NUMBER: u32 = 17;
+
+
+pub const HEX_RADIX: u32 = 16;
+
+
+pub const SIGIGN_PREFIX: &str = "SigIgn:";
 
 
 pub const LLDPCLI_PREFIX: [&str; 5] = ["-f", "json0", "show", "neighbors", "ports"];
@@ -63,7 +77,7 @@ fn spawn(program: &Path, arguments: &[&str], stdout: PipeWriter) -> io::Result<C
 }
 
 
-fn read_step(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until: Instant) -> Result<Option<Output>, RunFailure> {
+fn read_ready(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until: Instant) -> Result<Option<Output>, RunFailure> {
     let remaining = until.saturating_duration_since(Instant::now());
     let timeout = Timespec {
         tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
@@ -84,8 +98,17 @@ fn read_step(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until:
 }
 
 
+fn read_step(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until: Instant) -> Result<Option<Output>, RunFailure> {
+    if Instant::now() >= until {
+        Ok(Some(Output::TimedOut))
+    } else {
+        read_ready(reader, buffer, limit, until)
+    }
+}
+
+
 /// Reads stdout until EOF, more than `cap` bytes, or `until`; at most `cap + 1` bytes are ever kept.
-fn read_output(reader: &mut PipeReader, cap: u64, until: Instant) -> Result<Vec<u8>, RunFailure> {
+pub fn read_output(reader: &mut PipeReader, cap: u64, until: Instant) -> Result<Vec<u8>, RunFailure> {
     let limit = usize::try_from(cap).unwrap_or(usize::MAX).saturating_add(1);
     let mut buffer = Vec::new();
     (0..=limit)
@@ -104,17 +127,51 @@ fn complete_or_fail(output: Output) -> Result<Vec<u8>, RunFailure> {
 }
 
 
-fn wait_exit(child: &mut Child, until: Instant) -> io::Result<Option<ExitStatus>> {
-    (0..MAX_WAIT_POLLS)
-        .find_map(|_| match child.try_wait() {
-            Ok(None) if Instant::now() < until => {
-                thread::sleep(Duration::from_millis(WAIT_POLL_MILLIS));
-                None
-            }
-            Ok(None) => Some(Ok(None)),
-            other => Some(other),
+/// Backstop count of wait rounds that covers `remaining` (capped at the maximum deadline); the clock is the primary stop (each round sleeps `WAIT_POLL_MILLIS`).
+pub fn wait_polls(remaining: Duration) -> usize {
+    let capped = remaining.min(Duration::from_secs(MAX_DEADLINE_SECONDS));
+    usize::try_from(capped.as_millis() / u128::from(WAIT_POLL_MILLIS))
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+}
+
+
+fn exited(child: &Child) -> Result<bool, RunFailure> {
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    waitid(WaitId::Pid(Pid::from_child(child)), options)
+        .map(|status| status.is_some())
+        .map_err(|errno| {
+            let code = errno.raw_os_error();
+            debug!(code, "the child cannot be waited on");
+            RunFailure::Unwaitable
         })
-        .unwrap_or(Ok(None))
+}
+
+
+fn reap_after_exit(child: &mut Child) -> Result<Option<ExitStatus>, RunFailure> {
+    let group = kill_process_group(Pid::from_child(child), Signal::KILL);
+    let failed = group.is_err();
+    debug!(failed, "process group cleared after exit");
+    Ok(Some(child.wait()?))
+}
+
+
+fn wait_round(child: &mut Child, until: Instant, clock: ClockFn) -> Option<Result<Option<ExitStatus>, RunFailure>> {
+    match exited(child) {
+        Ok(false) if clock() >= until => Some(Ok(None)),
+        Ok(false) => {
+            thread::sleep(Duration::from_millis(WAIT_POLL_MILLIS));
+            None
+        }
+        other => Some(other.and_then(|_| reap_after_exit(child))),
+    }
+}
+
+
+/// Waits for the exit until `until` on `clock`, or the derived round count; `None` is a timeout.
+pub fn wait_exit(child: &mut Child, until: Instant, clock: ClockFn) -> Result<Option<ExitStatus>, RunFailure> {
+    let rounds = wait_polls(until.saturating_duration_since(clock()));
+    (0..rounds).find_map(|_| wait_round(child, until, clock)).unwrap_or(Ok(None))
 }
 
 
@@ -127,7 +184,7 @@ fn kill_all(child: &mut Child) {
 
 
 fn finish(child: &mut Child, bytes: Vec<u8>, until: Instant) -> Result<Vec<u8>, RunFailure> {
-    match wait_exit(child, until)? {
+    match wait_exit(child, until, &mut Instant::now)? {
         Some(status) if status.success() => Ok(bytes),
         Some(status) => Err(RunFailure::Failed {
             code: status.code(),
@@ -138,21 +195,62 @@ fn finish(child: &mut Child, bytes: Vec<u8>, until: Instant) -> Result<Vec<u8>, 
 }
 
 
-fn reap_killed(child: &mut Child) {
-    kill_all(child);
-    let reaped = matches!(wait_exit(child, Instant::now() + Duration::from_millis(REAP_GRACE_MILLIS)), Ok(Some(_)));
-    debug!(reaped, "lldpcli reaped after a kill");
+/// Kills the group and the pid, then reaps within `REAP_GRACE_MILLIS` on `clock`; a child that cannot be waited on is never signalled.
+pub fn reap_killed(child: &mut Child, clock: ClockFn) {
+    let waitable = exited(child).is_ok();
+    debug!(waitable, "lldpcli checked before the kill");
+    if waitable {
+        kill_all(child);
+        let until = clock() + Duration::from_millis(REAP_GRACE_MILLIS);
+        let reaped = matches!(wait_exit(child, until, clock), Ok(Some(_)));
+        debug!(reaped, "lldpcli reaped after a kill");
+    }
+}
+
+
+fn unwaitable(reason: &str) -> RunFailure {
+    debug!(reason, "the SIGCHLD disposition cannot be read");
+    RunFailure::Unwaitable
+}
+
+
+/// True when the `SigIgn` mask of the status file at `status` has SIGCHLD set; a file or a mask that cannot be read is `Unwaitable` (no `/proc`: refuse).
+pub fn sigchld_ignored(status: &Path) -> Result<bool, RunFailure> {
+    let mut text = String::new();
+    File::open(status)
+        .and_then(|file| file.take(MAX_STATUS_BYTES).read_to_string(&mut text))
+        .map_err(|error| {
+            let kind = error.kind();
+            debug!(?kind, "the status file cannot be read");
+            RunFailure::Unwaitable
+        })?;
+    let mask = text
+        .lines()
+        .find_map(|line| line.strip_prefix(SIGIGN_PREFIX))
+        .ok_or_else(|| unwaitable("no SigIgn line"))?;
+    let bits = u64::from_str_radix(mask.trim(), HEX_RADIX).map_err(|_| unwaitable("SigIgn is not hexadecimal"))?;
+    Ok(bits & (1 << (SIGCHLD_NUMBER - 1)) != 0)
+}
+
+
+fn require_waitable(status: &Path) -> Result<(), RunFailure> {
+    if sigchld_ignored(status)? {
+        Err(unwaitable("SIGCHLD is ignored"))
+    } else {
+        Ok(())
+    }
 }
 
 
 /// Runs `program` with `arguments` (cleared environment, own process group, stdout capped at `cap` bytes, stderr discarded) within `deadline`.
 pub fn run_command(program: &Path, arguments: &[&str], cap: u64, deadline: Duration) -> Result<Vec<u8>, RunFailure> {
+    require_waitable(Path::new(PROC_STATUS))?;
     let until = Instant::now() + deadline.min(Duration::from_secs(MAX_DEADLINE_SECONDS));
     let (mut reader, writer) = io::pipe()?;
     let mut child = spawn(program, arguments, writer).map_err(spawn_failure)?;
     let verdict = read_output(&mut reader, cap, until).and_then(|bytes| finish(&mut child, bytes, until));
-    if !matches!(verdict, Ok(_) | Err(RunFailure::Failed { .. })) {
-        reap_killed(&mut child);
+    if !matches!(verdict, Ok(_) | Err(RunFailure::Failed { .. } | RunFailure::Unwaitable)) {
+        reap_killed(&mut child, &mut Instant::now);
     }
     verdict
 }

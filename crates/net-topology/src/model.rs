@@ -85,6 +85,7 @@ pub enum RunFailure {
     Spawn,
     Io,
     Refused,
+    Unwaitable,
 }
 
 
