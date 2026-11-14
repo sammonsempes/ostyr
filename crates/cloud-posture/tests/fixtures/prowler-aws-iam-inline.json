@@ -1,0 +1,48 @@
+[
+ {
+  "finding_info": {
+   "uid": "prowler-aws-iam_inline_policy_no_administrative_privileges-123456789012-us-east-1-alice/a-readonly",
+   "title": "Ensure inline policies that allow full \"*:*\" administrative privileges are not associated to IAM identities",
+   "types": ["Infrastructure"]
+  },
+  "metadata": { "event_code": "iam_inline_policy_no_administrative_privileges" },
+  "status_code": "PASS",
+  "status_detail": "Inline policy a-readonly attached to user alice does not allow '*:*' administrative privileges.",
+  "severity": "High",
+  "time": 1794646103,
+  "resources": [{ "uid": "arn:aws:iam::123456789012:user/alice", "type": "AwsIamUser", "name": "alice", "labels": [], "data": { "details": "" } }],
+  "cloud": { "account": { "uid": "123456789012", "name": "fixture" }, "provider": "aws", "region": "us-east-1" },
+  "unmapped": {
+   "provider": "aws",
+   "provider_uid": "123456789012",
+   "categories": ["iam"],
+   "depends_on": [],
+   "related_to": [],
+   "additional_urls": [],
+   "compliance": { "CIS-1.4": ["1.16"] }
+  }
+ },
+ {
+  "finding_info": {
+   "uid": "prowler-aws-iam_inline_policy_no_administrative_privileges-123456789012-us-east-1-alice/z-admin",
+   "title": "Ensure inline policies that allow full \"*:*\" administrative privileges are not associated to IAM identities",
+   "types": ["Infrastructure"]
+  },
+  "metadata": { "event_code": "iam_inline_policy_no_administrative_privileges" },
+  "status_code": "FAIL",
+  "status_detail": "Inline policy z-admin attached to user alice allows '*:*' administrative privileges.",
+  "severity": "High",
+  "time": 1794646103,
+  "resources": [{ "uid": "arn:aws:iam::123456789012:user/alice", "type": "AwsIamUser", "name": "alice", "labels": [], "data": { "details": "" } }],
+  "cloud": { "account": { "uid": "123456789012", "name": "fixture" }, "provider": "aws", "region": "us-east-1" },
+  "unmapped": {
+   "provider": "aws",
+   "provider_uid": "123456789012",
+   "categories": ["iam"],
+   "depends_on": [],
+   "related_to": [],
+   "additional_urls": [],
+   "compliance": { "CIS-1.4": ["1.16"] }
+  }
+ }
+]
