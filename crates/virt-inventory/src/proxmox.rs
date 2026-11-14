@@ -1,7 +1,6 @@
 use crate::error::ParseError;
 use crate::limits::Limits;
 use crate::model::{ItemKey, Parsed, PathPrivileges, Permissions, Resource, ResourceKind, SkipReason, Skipped};
-use k8s_inventory::text::valid_text;
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -210,7 +209,8 @@ pub fn valid_display_name(text: &str, limits: &Limits) -> bool {
 
 /// The identity of an element from its kind, vmid, node and storage; `None` when a needed part is missing or refused.
 pub fn identity_of(kind: ResourceKind, vmid: Option<u64>, node: Option<&str>, storage: Option<&str>) -> Option<String> {
-    let node_name = node.filter(|name| valid_node(name));
+    let folded = node.filter(|name| valid_node(name)).map(str::to_ascii_lowercase);
+    let node_name = folded.as_deref();
     match kind {
         ResourceKind::Qemu | ResourceKind::Lxc => vmid.filter(|id| (MIN_VMID..=MAX_VMID).contains(id)).map(|id| id.to_string()),
         ResourceKind::Node => node_name.map(str::to_owned),
@@ -221,10 +221,51 @@ pub fn identity_of(kind: ResourceKind, vmid: Option<u64>, node: Option<&str>, st
 }
 
 
-fn text_of(value: Option<&str>, limits: &Limits) -> Result<Option<String>, SkipReason> {
+/// Every QEMU `RunState` (QAPI `query-status`) plus `stopped`: `pvestatd` reports `qmpstatus || status || 'stopped'` for a VM.
+pub const QEMU_STATUS_VALUES: [&str; 17] = [
+    "debug",
+    "inmigrate",
+    "internal-error",
+    "io-error",
+    "paused",
+    "postmigrate",
+    "prelaunch",
+    "finish-migrate",
+    "restore-vm",
+    "running",
+    "save-vm",
+    "shutdown",
+    "suspended",
+    "watchdog",
+    "guest-panicked",
+    "colo",
+    "stopped",
+];
+
+
+pub const LXC_STATUS_VALUES: [&str; 2] = ["running", "stopped"];
+
+
+pub const NODE_STATUS_VALUES: [&str; 3] = ["online", "offline", "unknown"];
+
+
+pub const STORAGE_STATUS_VALUES: [&str; 2] = ["available", "unknown"];
+
+
+pub fn status_values(kind: ResourceKind) -> &'static [&'static str] {
+    match kind {
+        ResourceKind::Qemu => &QEMU_STATUS_VALUES,
+        ResourceKind::Lxc => &LXC_STATUS_VALUES,
+        ResourceKind::Node => &NODE_STATUS_VALUES,
+        ResourceKind::Storage => &STORAGE_STATUS_VALUES,
+    }
+}
+
+
+fn status_of(kind: ResourceKind, value: Option<&str>) -> Result<Option<String>, SkipReason> {
     value
         .map(|text| {
-            if valid_text(text, limits.max_text_bytes) {
+            if status_values(kind).contains(&text) {
                 Ok(text.to_owned())
             } else {
                 Err(SkipReason::BadField)
@@ -259,8 +300,8 @@ pub fn convert_resource(raw: &RawValue, limits: &Limits) -> Result<(Resource, bo
         kind,
         key,
         name,
-        node: node.to_owned(),
-        status: text_of(element.status.as_deref(), limits)?,
+        node: node.to_ascii_lowercase(),
+        status: status_of(kind, element.status.as_deref())?,
         max_cpu: number_of(element.maxcpu, MAX_CPU)?,
         max_mem: number_of(element.maxmem, MAX_BYTES_VALUE)?,
         max_disk: number_of(element.maxdisk, MAX_BYTES_VALUE)?,
