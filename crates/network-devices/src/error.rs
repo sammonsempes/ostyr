@@ -1,4 +1,4 @@
-use crate::devices::{MAX_DEVICES, MAX_DEVICES_PER_FILE};
+use crate::devices::MAX_DEVICES;
 use crate::load::MAX_FILE_ENTRIES;
 use core_config::error::ConfigError;
 use thiserror::Error;
@@ -9,8 +9,10 @@ use thiserror::Error;
 pub enum DeviceError {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error("{file:?}: {count} devices, at most {} allowed per file", MAX_DEVICES_PER_FILE)]
-    TooManyDevices { file: String, count: usize },
+    #[error("{file:?}: too many elements")]
+    TooManyElements { file: String },
+    #[error("{file:?}: invalid document")]
+    InvalidDocument { file: String },
     #[error("{directory:?}: more than {} devices in all", MAX_DEVICES)]
     TooManyDevicesInAll { directory: String },
     #[error("{file:?}: device #{index}: invalid `{field}`")]

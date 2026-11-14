@@ -17,6 +17,21 @@ pub struct DeviceFile {
 }
 
 
+/// Pass 1 mirror of `DeviceFile`: only the two sequences, counted through the bounded visitor, every other field ignored.
+#[derive(Debug, Deserialize)]
+pub struct CountFile {
+    #[serde(default, deserialize_with = "crate::bounded::count_devices")]
+    pub devices: Vec<CountDevice>,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct CountDevice {
+    #[serde(default, deserialize_with = "crate::bounded::count_addresses")]
+    pub addresses: Vec<serde::de::IgnoredAny>,
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
