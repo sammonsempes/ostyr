@@ -52,7 +52,7 @@ fn the_live_interfaces_report_parses() -> TestResult {
     let live = include_bytes!("fixtures/lldpd-json0-interfaces.json");
     let list = parse_ports(live.as_slice(), &Limits::default())?;
     assert!(list.ports.iter().any(|port| port == "vx0"));
-    assert_eq!(list.refused_ports, 0);
+    assert_eq!(list.invalid_ports + list.unreadable_ports, 0);
     list.ports.iter().for_each(|port| assert!(valid_port(port)));
     Ok(())
 }
@@ -87,9 +87,11 @@ fn refused_names_are_not_ports() -> TestResult {
 fn refused_and_repeated_entries_are_counted_or_merged() -> TestResult {
     let list = parse(&names(&["eth1", "eth0", "eth1", "eth0,eth1", "-x"]))?;
     assert_eq!(list.ports, vec!["eth0".to_string(), "eth1".to_string()]);
-    assert_eq!(list.refused_ports, TWO_REFUSED);
+    assert_eq!(list.invalid_ports, TWO_REFUSED);
     let odd = parse(r#"{"lldp":[{"interface":[{"via":"x"},"text",{"name":5}]}]}"#)?;
-    assert_eq!(odd.refused_ports, THREE_REFUSED);
+    assert_eq!(odd.invalid_ports, 1);
+    assert_eq!(odd.unreadable_ports, TWO_REFUSED);
+    assert_eq!(odd.invalid_ports + odd.unreadable_ports, THREE_REFUSED);
     assert!(parse(r#"{"lldp":[{}]}"#)?.ports.is_empty());
     Ok(())
 }

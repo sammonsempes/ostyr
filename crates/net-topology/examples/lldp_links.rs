@@ -102,7 +102,7 @@ fn live_mode(arguments: &[String]) -> Result<(), AnyError> {
         net_topology::runner::run_command(&PathBuf::from(program), &listing, limits.max_bytes, timeout).map_err(|failure| format!("{failure:?}"))?;
     let list = parse_ports(report.as_slice(), &limits)?;
     let read = collect_host(host, &list.ports, now, &limits, run_live, &mut Instant::now)?;
-    print_host(&read, list.refused_ports)
+    print_host(&read, list.invalid_ports + list.unreadable_ports)
 }
 
 
@@ -121,7 +121,7 @@ fn host_mode(arguments: &[String]) -> Result<(), AnyError> {
     let limits = Limits::default();
     let list = parse_ports(File::open(interfaces)?, &limits)?;
     let read = collect_host(host, &list.ports, now, &limits, run_from_dir, &mut Instant::now)?;
-    print_host(&read, list.refused_ports)
+    print_host(&read, list.invalid_ports + list.unreadable_ports)
 }
 
 
@@ -130,14 +130,14 @@ fn print_host(read: &HostRead, listed_refusals: usize) -> Result<(), AnyError> {
     let mut out = stdout();
     writeln!(
         out,
-        "links {} ports_run {} failed {} skipped_budget {} skipped_time {} refused_ports {} excess_ports {}",
+        "links {} ports_run {} failed {} skipped_budget {} skipped_time {} invalid_ports {} over_cap_ports {}",
         links.len(),
         read.ports_run,
         read.failed_ports.len(),
         read.skipped_budget,
         read.skipped_time,
-        read.refused_ports + listed_refusals,
-        read.excess_ports
+        read.invalid_ports + listed_refusals,
+        read.over_cap_ports
     )?;
     read.failed_ports
         .iter()

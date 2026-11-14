@@ -148,17 +148,17 @@ fn a_repeated_name_runs_once() -> TestResult {
     let read = collect_host(HOST, &ports(&["eth0", "eth0"]), NOW, &Limits::default(), dispatch, &mut frozen())?;
     assert_eq!(read.ports_run, 1);
     assert_eq!(read.observations.len(), 1);
-    assert_eq!(read.refused_ports, 0);
+    assert_eq!(read.invalid_ports, 0);
     Ok(())
 }
 
 
 #[test]
-fn refused_names_and_excess_ports_are_never_run() -> TestResult {
+fn refused_names_and_over_cap_ports_are_never_run() -> TestResult {
     let hostile = ports(&["vx0,eth0", "--help", "eth0"]);
     let read = collect_host(HOST, &hostile, NOW, &Limits::default(), dispatch, &mut frozen())?;
     assert_eq!(read.ports_run, 1);
-    assert_eq!(read.refused_ports, TWO);
+    assert_eq!(read.invalid_ports, TWO);
     let limits = Limits {
         max_interfaces: SMALL_INTERFACES,
         ..Limits::default()
@@ -166,8 +166,8 @@ fn refused_names_and_excess_ports_are_never_run() -> TestResult {
     let many = (0..LARGE_PORT_COUNT).map(|i| format!("p{i}")).collect::<Vec<_>>();
     let capped = collect_host(HOST, &many, NOW, &limits, dispatch, &mut frozen())?;
     assert_eq!(capped.ports_run, SMALL_INTERFACES);
-    assert_eq!(capped.refused_ports, 0);
-    assert_eq!(capped.excess_ports, LARGE_PORT_COUNT - SMALL_INTERFACES);
+    assert_eq!(capped.invalid_ports, 0);
+    assert_eq!(capped.over_cap_ports, LARGE_PORT_COUNT - SMALL_INTERFACES);
     Ok(())
 }
 
