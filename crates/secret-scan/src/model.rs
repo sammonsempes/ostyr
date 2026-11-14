@@ -55,6 +55,22 @@ pub struct Finding {
 }
 
 
+/// What the private copy of the scanned tree did: nothing cut, skipped or counted is silent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyCounts {
+    pub entries: usize,
+    pub bytes: u64,
+    pub truncated_files: usize,
+    pub skipped_special: usize,
+    pub skipped_swapped: usize,
+    pub skipped_vanished: usize,
+    pub config_files: usize,
+    pub foreign_owner_files: usize,
+    pub other_device: usize,
+    pub renamed_names: usize,
+}
+
+
 /// One report belongs to one tenant and one scan scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
@@ -63,4 +79,6 @@ pub struct Report {
     pub findings: Vec<Finding>,
     pub malformed: usize,
     pub skipped: usize,
+    #[serde(default)]
+    pub copy: CopyCounts,
 }
