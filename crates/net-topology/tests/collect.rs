@@ -2,7 +2,7 @@
 mod types;
 
 
-use net_topology::collect::{collect_host, failure_of, PortFailure};
+use net_topology::collect::{charge_of, collect_host, failure_of, run_failure_category, PortFailure};
 use net_topology::error::ParseError;
 use net_topology::limits::{Limits, MAX_HOST_READ_BYTES_CEILING};
 use net_topology::model::RunFailure;
@@ -467,5 +467,16 @@ fn the_runner_receives_the_configured_port_deadline() -> TestResult {
     let read = collect_host(HOST, &ports(&["eth1"]), NOW, &limits, custom_timeout_only, &mut frozen())?;
     assert!(read.failed_ports.is_empty());
     assert_eq!(read.observations.len(), 1);
+    Ok(())
+}
+
+
+const UNWAITABLE_CHARGE: u64 = 7;
+
+
+#[test]
+fn an_unwaitable_child_is_an_io_failure_charged_at_the_worst_case() -> TestResult {
+    assert_eq!(run_failure_category(&RunFailure::Unwaitable), PortFailure::Io);
+    assert_eq!(charge_of(&RunFailure::Unwaitable, UNWAITABLE_CHARGE), UNWAITABLE_CHARGE);
     Ok(())
 }
