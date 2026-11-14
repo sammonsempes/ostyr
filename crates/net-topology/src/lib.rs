@@ -7,5 +7,7 @@ pub mod links;
 pub mod lldp;
 pub mod model;
 pub mod ports;
+#[cfg(unix)]
+pub mod runner;
 pub mod text;
 pub mod types;

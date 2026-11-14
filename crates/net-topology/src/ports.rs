@@ -7,6 +7,7 @@ use serde_json::value::RawValue;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::io::Read;
+use tracing::debug;
 
 
 pub const MAX_PORT_NAME_BYTES: usize = 15;
@@ -51,18 +52,21 @@ pub fn valid_port(name: &str) -> bool {
 }
 
 
-fn name_of(raw: &RawValue) -> Option<String> {
-    serde_json::from_str::<RawNamed>(raw.get())
-        .ok()
-        .and_then(|interface| interface.name.map(Cow::into_owned))
-}
-
-
-fn block_names(block: &RawValue, limits: &Limits) -> Result<Vec<Option<String>>, ParseError> {
+fn block_names(block: &RawValue, limits: &Limits) -> Result<(Vec<Option<String>>, usize), ParseError> {
     require_object(block.get().as_bytes())?;
     let parsed: RawBlock = serde_json::from_str(block.get()).map_err(malformed)?;
     let list = bounded_list(parsed.interface, limits.max_interfaces).map_err(|error| parse_error(error, LIST_INTERFACE))?;
-    Ok(list.iter().map(|interface| name_of(interface)).collect())
+    let outcomes = list
+        .iter()
+        .map(|interface| serde_json::from_str::<RawNamed>(interface.get()))
+        .collect::<Vec<_>>();
+    let unreadable = outcomes.iter().filter(|outcome| outcome.is_err()).count();
+    let names = outcomes
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|interface| interface.name.map(Cow::into_owned))
+        .collect();
+    Ok((names, unreadable))
 }
 
 
@@ -73,15 +77,14 @@ pub fn parse_ports<Source: Read>(reader: Source, limits: &Limits) -> Result<Port
     require_object(&buffer)?;
     let root: RawRoot = serde_json::from_slice(&buffer).map_err(malformed)?;
     let blocks = bounded_list(Some(root.lldp), MAX_BLOCKS).map_err(|error| parse_error(error, LIST_LLDP))?;
-    let names = blocks
-        .iter()
-        .map(|block| block_names(block, limits))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let read = blocks.iter().map(|block| block_names(block, limits)).collect::<Result<Vec<_>, _>>()?;
+    let unreadable = read.iter().map(|(_names, count)| count).sum::<usize>();
+    let names = read.into_iter().flat_map(|(listed, _count)| listed).collect::<Vec<_>>();
+    if unreadable > 0 {
+        debug!(unreadable, "interface entries that are not objects");
+    }
     let valid = names.iter().flatten().filter(|name| valid_port(name)).collect::<BTreeSet<_>>();
-    let refused_ports = names.len() - names.iter().flatten().filter(|name| valid_port(name)).count();
+    let refused_ports = unreadable + names.len() - names.iter().flatten().filter(|name| valid_port(name)).count();
     Ok(PortList {
         ports: valid.into_iter().cloned().collect(),
         refused_ports,

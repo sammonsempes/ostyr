@@ -1,4 +1,4 @@
-use crate::model::NeighbourId;
+use crate::model::{NeighbourId, RunFailure};
 use serde_json::value::RawValue;
 
 
@@ -14,4 +14,7 @@ pub type RawList<'a> = Vec<&'a RawValue>;
 pub type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
 
-pub type RunPortFn = fn(&str, u64) -> std::io::Result<Vec<u8>>;
+pub type RunPortFn = fn(&str, u64, std::time::Duration) -> Result<Vec<u8>, RunFailure>;
+
+
+pub type ClockFn<'a> = &'a mut dyn FnMut() -> std::time::Instant;

@@ -35,6 +35,10 @@ pub enum ParseError {
     InvalidPortBytes { per_port: u64, per_host: u64 },
     #[error("max_host_read_bytes {budget} is below max_port_bytes {per_port} or above {ceiling}")]
     InvalidHostBytes { budget: u64, per_port: u64, ceiling: u64 },
+    #[error("port_timeout_seconds {value} is outside {min}..={max}")]
+    InvalidPortSeconds { value: u64, min: u64, max: u64 },
+    #[error("max_host_seconds {budget} is below port_timeout_seconds {per_port} or above {ceiling}")]
+    InvalidHostSeconds { budget: u64, per_port: u64, ceiling: u64 },
     #[error("the local port name is not a valid interface name")]
     InvalidPort,
     #[error("the local host name is not valid text")]
