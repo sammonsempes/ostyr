@@ -7,7 +7,7 @@ use hunt_packs::model::{Baseline, Cost, HuntPack, PackTest, Source};
 use hunt_packs::packs::{
     is_pack_id, is_technique, parse_packs, validate_pack, validate_pack_file, MAX_BYTES_READ_CEILING, MAX_CORPUS_BYTES, MAX_FILE_BYTES,
     MAX_HYPOTHESIS_BYTES, MAX_PACKS, MAX_QUERY_BYTES, MAX_ROWS_CEILING, MAX_SCHEDULE_SECONDS, MAX_SECONDS_CEILING, MAX_TESTS, MAX_TITLE_BYTES,
-    MAX_WINDOW_SECONDS, MIN_SCHEDULE_SECONDS, MIN_WINDOW_SECONDS,
+    MAX_WINDOW_SECONDS, MIN_SCHEDULE_SECONDS, MIN_WINDOW_SECONDS, TENANT_PARAM, WINDOW_END_PARAM, WINDOW_START_PARAM,
 };
 use hunt_packs::text::{is_hidden, valid_text};
 use std::error::Error;
@@ -22,6 +22,9 @@ impl Read for FailingReader {
         Err(io::Error::other("injected failure"))
     }
 }
+
+
+pub const PARAMS: &str = "{tenant:String} {window_start:DateTime64(3)} {window_end:DateTime64(3)}";
 
 
 const FILE: &str = "packs.yaml";
@@ -55,7 +58,7 @@ pub fn pack() -> HuntPack {
         hypothesis: "A shell starts from an office process".to_string(),
         technique: "T1059.001".to_string(),
         source: Source::Clickhouse,
-        query: format!("SELECT '{QUERY_MARKER}' FROM events;"),
+        query: format!("SELECT '{QUERY_MARKER}' FROM events WHERE {PARAMS};"),
         schedule_seconds: SCHEDULE,
         window_seconds: WINDOW,
         cost: Cost {
@@ -151,10 +154,23 @@ fn query_checks() -> TestResult {
     assert_eq!(field_refused(|candidate| candidate.query = "SELECT 1\0".to_string())?, "query");
     assert_eq!(field_refused(|candidate| candidate.query = "a".repeat(MAX_QUERY_BYTES + 1))?, "query");
     let mut trailing = pack();
-    trailing.query = "SELECT 1\n;\n".to_string();
+    trailing.query = format!("SELECT 1 {PARAMS}\n;\n");
     validate_pack(FILE, &trailing)?;
-    trailing.query = "SELECT 1".to_string();
+    trailing.query = format!("SELECT 1 {PARAMS}");
     validate_pack(FILE, &trailing)?;
+    [TENANT_PARAM, WINDOW_START_PARAM, WINDOW_END_PARAM].iter().try_for_each(|missing| {
+        let without = PARAMS.replace(missing, "");
+        assert_eq!(
+            field_refused(|candidate| candidate.query = format!("SELECT '{QUERY_MARKER}' {without}"))?,
+            "query"
+        );
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+    let mut osquery = pack();
+    osquery.source = Source::Osquery;
+    osquery.cost.max_bytes_read = None;
+    osquery.query = "SELECT 1".to_string();
+    validate_pack(FILE, &osquery)?;
     Ok(())
 }
 
