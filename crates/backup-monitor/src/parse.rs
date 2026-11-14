@@ -1,8 +1,8 @@
 use crate::error::{json_failure, BackupError};
-use crate::model::{Limits, Listing, SkipReason, Snapshot};
-use crate::text::{is_hidden, valid_id, valid_text};
+use crate::model::{Limits, Listing, PbsDetail, SkipReason, Snapshot, Verification, OWNER_DISPLAY_CHARS};
+use crate::text::{display_text, is_hidden, valid_id, valid_text};
 use crate::types::SkipCounts;
-use serde::de::IgnoredAny;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use std::collections::BTreeSet;
@@ -89,6 +89,34 @@ pub struct RawElement<'a> {
     pub paths: Option<&'a RawValue>,
     #[serde(default, borrow, deserialize_with = "present")]
     pub tags: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present", rename = "backup-type")]
+    pub backup_type: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present", rename = "backup-id")]
+    pub backup_id: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present", rename = "backup-time")]
+    pub backup_time: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    pub owner: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    pub protected: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    pub verification: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    pub files: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    pub size: Option<&'a RawValue>,
+}
+
+
+#[derive(Deserialize)]
+pub struct PbsVerification {
+    pub state: String,
+}
+
+
+#[derive(Deserialize)]
+pub struct PbsFile {
+    pub filename: Option<String>,
 }
 
 
@@ -148,6 +176,7 @@ pub fn restic_snapshot(fields: &RawElement, limits: &Limits) -> Result<Snapshot,
         host: Some(host),
         paths,
         tags,
+        pbs: None,
     })
 }
 
@@ -181,6 +210,126 @@ pub fn borg_snapshot(fields: &RawElement, from_name: bool, limits: &Limits) -> R
         host,
         paths: Vec::new(),
         tags: Vec::new(),
+        pbs: None,
+    })
+}
+
+
+pub const PBS_BACKUP_TYPES: [&str; 3] = ["vm", "ct", "host"];
+
+
+pub const PBS_MAX_YEAR: i32 = 9999;
+
+
+pub const PBS_MANIFEST: &str = "index.json.blob";
+
+
+/// An absent key is `None`; a present value of the wrong type (`null` included) is `BadField`.
+pub fn typed_field<Value: DeserializeOwned>(raw: Option<&RawValue>) -> Result<Option<Value>, SkipReason> {
+    raw.map(|found| serde_json::from_str(found.get()).map_err(|_| SkipReason::BadField))
+        .transpose()
+}
+
+
+/// The element count of an optional array, taken with zero-size items; above `max_items` or wrong-typed is `None`.
+pub fn counted_items(raw: Option<&RawValue>, max_items: usize) -> Option<usize> {
+    raw.map_or(Some(0), |found| {
+        serde_json::from_str::<Vec<IgnoredAny>>(found.get())
+            .ok()
+            .map(|counted| counted.len())
+            .filter(|count| *count <= max_items)
+    })
+}
+
+
+/// A verification object holds a required `state`: `ok` verified, `failed` failed, any other value or shape is `BadField`; an absent object is unverified.
+pub fn pbs_verification(raw: Option<&RawValue>) -> Result<Verification, SkipReason> {
+    let state = raw
+        .map(|found| {
+            Some(found.get())
+                .filter(|text| text.starts_with('{'))
+                .and_then(|text| serde_json::from_str::<PbsVerification>(text).ok())
+                .map(|verification| verification.state)
+                .ok_or(SkipReason::BadField)
+        })
+        .transpose()?;
+    match state.as_deref() {
+        None => Ok(Verification::Unverified),
+        Some("ok") => Ok(Verification::Verified),
+        Some("failed") => Ok(Verification::Failed),
+        Some(_) => Err(SkipReason::BadField),
+    }
+}
+
+
+/// Whether one `files` entry (an object, never an array) names the manifest.
+pub fn names_manifest(item: &RawValue) -> Option<bool> {
+    Some(item.get())
+        .filter(|text| text.starts_with('{'))
+        .and_then(|text| serde_json::from_str::<PbsFile>(text).ok())
+        .map(|file| file.filename.as_deref() == Some(PBS_MANIFEST))
+}
+
+
+/// The file count (taken first, against `max_items`) and whether the manifest is listed; a wrong-typed list or entry is `None`.
+pub fn pbs_files(raw: Option<&RawValue>, max_items: usize) -> Option<(usize, bool)> {
+    let count = counted_items(raw, max_items)?;
+    match raw {
+        None => Some((count, false)),
+        Some(found) => serde_json::from_str::<Vec<&RawValue>>(found.get())
+            .ok()?
+            .into_iter()
+            .map(names_manifest)
+            .try_fold(false, |seen, named| named.map(|is_manifest| seen || is_manifest))
+            .map(|manifest| (count, manifest)),
+    }
+}
+
+
+/// The manifest is written when a backup finishes, so a listed manifest and a size mean a finished snapshot.
+pub fn pbs_detail(fields: &RawElement, limits: &Limits) -> Result<PbsDetail, SkipReason> {
+    let (files, manifest) = pbs_files(fields.files, limits.max_paths).ok_or(SkipReason::BadPaths)?;
+    let size = typed_field::<u64>(fields.size)?;
+    Ok(PbsDetail {
+        owner: typed_field::<String>(fields.owner)?.map(|text| display_text(&text, OWNER_DISPLAY_CHARS)),
+        protected: typed_field::<bool>(fields.protected)?.unwrap_or(false),
+        verification: pbs_verification(fields.verification)?,
+        size,
+        files,
+        complete: manifest && size.is_some(),
+    })
+}
+
+
+/// The backup time (epoch seconds, schema minimum 1) must fit RFC 3339: year 9999 at most.
+pub fn pbs_time(raw: Option<&RawValue>) -> Option<OffsetDateTime> {
+    raw.and_then(|found| serde_json::from_str::<i64>(found.get()).ok())
+        .filter(|seconds| *seconds >= 1)
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .filter(|time| time.year() <= PBS_MAX_YEAR)
+}
+
+
+/// The host is `<type>/<id>` (for example `vm/100`); the snapshot id is the host plus the epoch time, which is unique in one datastore.
+pub fn pbs_snapshot(fields: &RawElement, limits: &Limits) -> Result<Snapshot, SkipReason> {
+    let kind = text_field(fields.backup_type)
+        .filter(|text| PBS_BACKUP_TYPES.contains(&text.as_str()))
+        .ok_or(SkipReason::BadHost)?;
+    let name = text_field(fields.backup_id)
+        .filter(|text| valid_text(text, limits.max_text_chars))
+        .ok_or(SkipReason::BadHost)?;
+    let host = Some(format!("{kind}/{name}"))
+        .filter(|key| key.len() <= limits.max_text_chars)
+        .ok_or(SkipReason::BadHost)?;
+    let time = pbs_time(fields.backup_time).ok_or(SkipReason::BadTime)?;
+    let detail = pbs_detail(fields, limits)?;
+    Ok(Snapshot {
+        id: format!("{host}/{}", time.unix_timestamp()),
+        time,
+        host: Some(host),
+        paths: Vec::new(),
+        tags: Vec::new(),
+        pbs: Some(detail),
     })
 }
 
@@ -249,4 +398,17 @@ pub fn parse_borg(reader: impl Read, hostname_from_name: bool, limits: &Limits) 
     })?;
     let items = raw_items(archives.get(), "archives is not an array", limits.max_snapshots)?;
     collect(repository, &items, |fields| borg_snapshot(fields, hostname_from_name, limits))
+}
+
+
+/// `proxmox-backup-client snapshot list --output-format json`; the caller names the repository, as for restic.
+pub fn parse_pbs(reader: impl Read, repository: &str, limits: &Limits) -> Result<Listing, BackupError> {
+    let bytes = read_bounded(reader, limits.max_bytes)?;
+    let root: &RawValue = serde_json::from_slice(&bytes).map_err(json_failure)?;
+    if valid_text(repository, limits.max_text_chars) {
+        let items = raw_items(root.get(), "snapshots is not an array", limits.max_snapshots)?;
+        collect(repository.to_owned(), &items, |fields| pbs_snapshot(fields, limits))
+    } else {
+        Err(BackupError::Malformed { what: "repository name" })
+    }
 }

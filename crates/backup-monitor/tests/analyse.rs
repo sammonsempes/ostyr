@@ -86,6 +86,7 @@ fn snapshot(number: u32, host: &str, time: OffsetDateTime) -> Snapshot {
         host: Some(host.to_owned()),
         paths: Vec::new(),
         tags: Vec::new(),
+        pbs: None,
     }
 }
 

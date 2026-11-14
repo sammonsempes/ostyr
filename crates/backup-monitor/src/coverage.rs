@@ -1,8 +1,42 @@
-use crate::model::{Coverage, CoverageStatus, Declarations, Listing};
+use crate::model::{Coverage, CoverageStatus, Declarations, Listing, Snapshot, Verification};
 use time::{Duration, OffsetDateTime};
 
 
 pub const FUTURE_SKEW_SECONDS: i64 = 300;
+
+
+/// A snapshot whose verification failed, or that is still being written or never finished, is not a usable backup.
+pub fn unusable(snapshot: &Snapshot) -> bool {
+    snapshot
+        .pbs
+        .as_ref()
+        .is_some_and(|detail| detail.verification == Verification::Failed || !detail.complete)
+}
+
+
+/// Snapshots without a manifest or a size: a backup in progress, or one a dead server never finished (its verification cannot be listed).
+pub fn incomplete_count(listing: &Listing) -> usize {
+    listing
+        .snapshots
+        .iter()
+        .filter(|snapshot| snapshot.pbs.as_ref().is_some_and(|detail| !detail.complete))
+        .count()
+}
+
+
+/// Snapshots a server never verified (restic and Borg listings carry no verification and count as none).
+pub fn unverified_count(listing: &Listing) -> usize {
+    listing
+        .snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot
+                .pbs
+                .as_ref()
+                .is_some_and(|detail| detail.complete && detail.verification == Verification::Unverified)
+        })
+        .count()
+}
 
 
 /// The newest snapshot of `host` across the listings, ignoring any dated after `horizon`.
@@ -10,7 +44,7 @@ pub fn newest_for(listings: &[Listing], host: &str, horizon: OffsetDateTime) -> 
     listings
         .iter()
         .flat_map(|listing| listing.snapshots.iter())
-        .filter(|snapshot| snapshot.host.as_deref() == Some(host) && snapshot.time <= horizon)
+        .filter(|snapshot| snapshot.host.as_deref() == Some(host) && snapshot.time <= horizon && !unusable(snapshot))
         .map(|snapshot| snapshot.time)
         .max()
 }
