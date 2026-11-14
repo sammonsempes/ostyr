@@ -11,6 +11,7 @@ core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2.11.1"
 ed25519-dalek = "3"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 packageurl = "0.7"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

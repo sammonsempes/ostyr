@@ -9,6 +9,7 @@ publish = false
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 metric-alerts = { version = "0.0.0", path = "../metric-alerts" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_with = { version = "3", default-features = false, features = ["std"] }

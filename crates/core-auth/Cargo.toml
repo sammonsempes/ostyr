@@ -11,6 +11,7 @@ chacha20poly1305 = "0.10"
 core-audit = { path = "../core-audit" }
 core-config = { path = "../core-config" }
 data-encoding = "2.11.1"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 openidconnect = { version = "4.1.0", default-features = false, features = ["ureq"] }
 getrandom = { version = "0.4.3", features = ["std"] }
 secrecy = "0.10.3"

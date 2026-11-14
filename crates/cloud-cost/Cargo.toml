@@ -9,6 +9,7 @@ publish = false
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 csv = "1"
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 metrics-ingest = { version = "0.0.0", path = "../metrics-ingest" }
 percent-encoding = "2"
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
