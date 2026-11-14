@@ -2,8 +2,10 @@
 
 pub mod check;
 pub mod cli;
+pub mod due;
 pub mod error;
 pub mod model;
 pub mod packs;
 pub mod run;
+pub mod schedule;
 pub mod text;
