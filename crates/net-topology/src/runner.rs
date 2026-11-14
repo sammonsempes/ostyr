@@ -3,7 +3,7 @@
 use crate::model::RunFailure;
 use crate::ports::valid_port;
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
-use rustix::process::{kill_process_group, Pid, Signal};
+use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
 use std::io::{self, PipeReader, PipeWriter, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -17,9 +17,6 @@ pub const READ_CHUNK_BYTES: usize = 65_536;
 
 
 pub const WAIT_POLL_MILLIS: u64 = 10;
-
-
-pub const MAX_WAIT_POLLS: usize = 6_200;
 
 
 pub const REAP_GRACE_MILLIS: u64 = 2_000;
@@ -63,7 +60,7 @@ fn spawn(program: &Path, arguments: &[&str], stdout: PipeWriter) -> io::Result<C
 }
 
 
-fn read_step(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until: Instant) -> Result<Option<Output>, RunFailure> {
+fn read_ready(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until: Instant) -> Result<Option<Output>, RunFailure> {
     let remaining = until.saturating_duration_since(Instant::now());
     let timeout = Timespec {
         tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
@@ -84,8 +81,17 @@ fn read_step(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until:
 }
 
 
+fn read_step(reader: &mut PipeReader, buffer: &mut Vec<u8>, limit: usize, until: Instant) -> Result<Option<Output>, RunFailure> {
+    if Instant::now() >= until {
+        Ok(Some(Output::TimedOut))
+    } else {
+        read_ready(reader, buffer, limit, until)
+    }
+}
+
+
 /// Reads stdout until EOF, more than `cap` bytes, or `until`; at most `cap + 1` bytes are ever kept.
-fn read_output(reader: &mut PipeReader, cap: u64, until: Instant) -> Result<Vec<u8>, RunFailure> {
+pub fn read_output(reader: &mut PipeReader, cap: u64, until: Instant) -> Result<Vec<u8>, RunFailure> {
     let limit = usize::try_from(cap).unwrap_or(usize::MAX).saturating_add(1);
     let mut buffer = Vec::new();
     (0..=limit)
@@ -104,15 +110,37 @@ fn complete_or_fail(output: Output) -> Result<Vec<u8>, RunFailure> {
 }
 
 
+/// Number of wait rounds that covers `remaining` (capped at the maximum deadline), so the count is the deadline (each round sleeps `WAIT_POLL_MILLIS`).
+pub fn wait_polls(remaining: Duration) -> usize {
+    let capped = remaining.min(Duration::from_secs(MAX_DEADLINE_SECONDS));
+    usize::try_from(capped.as_millis() / u128::from(WAIT_POLL_MILLIS))
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+}
+
+
+fn exited(child: &Child) -> io::Result<bool> {
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+    Ok(waitid(WaitId::Pid(Pid::from_child(child)), options)?.is_some())
+}
+
+
+fn reap_after_exit(child: &mut Child) -> io::Result<Option<ExitStatus>> {
+    let group = kill_process_group(Pid::from_child(child), Signal::KILL);
+    let failed = group.is_err();
+    debug!(failed, "process group cleared after exit");
+    child.wait().map(Some)
+}
+
+
 fn wait_exit(child: &mut Child, until: Instant) -> io::Result<Option<ExitStatus>> {
-    (0..MAX_WAIT_POLLS)
-        .find_map(|_| match child.try_wait() {
-            Ok(None) if Instant::now() < until => {
+    (0..wait_polls(until.saturating_duration_since(Instant::now())))
+        .find_map(|_| match exited(child) {
+            Ok(false) => {
                 thread::sleep(Duration::from_millis(WAIT_POLL_MILLIS));
                 None
             }
-            Ok(None) => Some(Ok(None)),
-            other => Some(other),
+            other => Some(other.and_then(|_| reap_after_exit(child))),
         })
         .unwrap_or(Ok(None))
 }

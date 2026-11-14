@@ -7,11 +7,27 @@ mod types;
 
 use fake::{install_script, is_gone, scratch};
 use net_topology::model::RunFailure;
-use net_topology::runner::{run_command, run_lldpcli};
+use net_topology::runner::{read_output, run_command, run_lldpcli, wait_polls, MAX_DEADLINE_SECONDS, WAIT_POLL_MILLIS};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use types::TestResult;
+
+
+const LONG_DEADLINE_SECONDS: u64 = 120;
+
+
+const LONG_DEADLINE_POLLS: usize = 12_001;
+
+
+const TWO_POLLS: usize = 2;
+
+
+const OLD_WAIT_CAP: usize = 6_200;
+
+
+const MAX_DEADLINE_POLLS: usize = 360_001;
 
 
 const PATIENT: Duration = Duration::from_secs(60);
@@ -114,6 +130,48 @@ fn a_child_that_closes_stdout_and_keeps_running_times_out() -> TestResult {
     let program = install_script(dir.path(), "lldpcli", &body)?;
     assert_eq!(run_command(&program, &[], CAP, IMPATIENT), Err(RunFailure::TimedOut));
     assert!(wait_gone(pid_in(&pid_file)?));
+    Ok(())
+}
+
+
+#[test]
+fn a_same_group_grandchild_does_not_survive_a_normal_exit() -> TestResult {
+    let dir = scratch()?;
+    let pid_file = dir.path().join("pid");
+    let body = format!("sleep 4242 >/dev/null 2>&1 &\necho $! > {}\necho done", pid_file.display());
+    let program = install_script(dir.path(), "lldpcli", &body)?;
+    let output = run_command(&program, &[], CAP, PATIENT).map_err(|failure| format!("{failure:?}"))?;
+    assert_eq!(output, b"done\n");
+    assert!(wait_gone(pid_in(&pid_file)?));
+    Ok(())
+}
+
+
+#[test]
+fn the_wait_cap_follows_the_deadline() -> TestResult {
+    assert_eq!(wait_polls(Duration::ZERO), 1);
+    assert_eq!(wait_polls(Duration::from_millis(WAIT_POLL_MILLIS)), TWO_POLLS);
+    assert_eq!(wait_polls(Duration::from_secs(LONG_DEADLINE_SECONDS)), LONG_DEADLINE_POLLS);
+    assert!(wait_polls(Duration::from_secs(LONG_DEADLINE_SECONDS)) > OLD_WAIT_CAP);
+    assert_eq!(wait_polls(Duration::from_secs(MAX_DEADLINE_SECONDS)), MAX_DEADLINE_POLLS);
+    assert_eq!(
+        wait_polls(Duration::from_secs(MAX_DEADLINE_SECONDS + MAX_DEADLINE_SECONDS)),
+        MAX_DEADLINE_POLLS
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_expired_deadline_stops_the_read_even_with_data_in_the_pipe() -> TestResult {
+    let (mut reader, mut writer) = std::io::pipe()?;
+    writer.write_all(b"data that is already there")?;
+    assert_eq!(read_output(&mut reader, HUGE_CAP, Instant::now()), Err(RunFailure::TimedOut));
+    drop(writer);
+    let (mut open_reader, mut open_writer) = std::io::pipe()?;
+    open_writer.write_all(b"fine")?;
+    drop(open_writer);
+    assert_eq!(read_output(&mut open_reader, HUGE_CAP, Instant::now() + PATIENT), Ok(b"fine".to_vec()));
     Ok(())
 }
 
