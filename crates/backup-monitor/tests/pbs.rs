@@ -316,6 +316,26 @@ fn an_ok_copy_then_a_failed_copy_of_one_id_covers_nothing_in_either_order() -> R
 
 
 #[test]
+fn a_pbs_copy_that_does_not_parse_leaves_the_good_copy_and_no_duplicate() -> Result<(), Box<dyn Error>> {
+    let good = item("vm", "9001");
+    let bad = with(item("vm", "9001"), "backup-time", json!(YEAR_10000));
+    let outcomes = [json!([good.clone(), bad.clone()]), json!([bad, good])]
+        .iter()
+        .map(|listing| {
+            let parsed = pbs(listing)?;
+            Ok((
+                parsed.snapshots.len(),
+                parsed.skipped.get(&SkipReason::BadTime).copied(),
+                parsed.skipped.get(&SkipReason::Duplicate).copied(),
+            ))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    assert_eq!(outcomes, vec![(1, Some(1), None), (1, Some(1), None)]);
+    Ok(())
+}
+
+
+#[test]
 fn files_entries_are_checked_in_full() -> Result<(), Box<dyn Error>> {
     assert!(refused_as(
         with(item("vm", "1"), "files", json!([{"filename": null}])),
