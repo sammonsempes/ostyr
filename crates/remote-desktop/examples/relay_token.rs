@@ -1,14 +1,14 @@
 use core_audit::log::{append, genesis_log};
 use core_config::reload::ReloadContext;
 use core_config::watch::watch_files;
-use remote_desktop::cli::{verify_session, write_issued, write_keypair};
+use remote_desktop::cli::{verify_session, write_issued, write_keypair_files};
 use remote_desktop::keys::open_keys_engine;
 use remote_desktop::model::DEFAULT_LIVE_TOKENS;
 use remote_desktop::sign::os_random;
 use remote_desktop::token::open_verifier;
 use std::error::Error;
 use std::io::{sink, stderr, stdin, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
 
-const USAGE: &str = "usage: relay_token keygen (redirect to a mode 600 file) | issue <seed-file> <claims-json> | verify <keys-file> <peer> <tenant> [<agent-command-keys-file>]";
+const USAGE: &str = "usage: relay_token keygen <seed-file> <public-file> (new files: seed mode 600, public mode 644) | issue <seed-file> <claims-json> | verify <keys-file> <peer> <tenant> [<agent-command-keys-file>]";
 
 
 fn now_seconds() -> u64 {
@@ -52,7 +52,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
-        ["keygen"] => Ok(write_keypair(os_random, &mut stdout())?),
+        ["keygen", seed_file, public_file] => Ok(write_keypair_files(
+            os_random,
+            Path::new(seed_file),
+            Path::new(public_file),
+            &mut stdout(),
+        )?),
         ["issue", rest @ ..] => Ok(write_issued(rest, now_seconds(), os_random, &mut stdout())?),
         ["verify", keys_file, peer, tenant] => verify(keys_file, peer, tenant, None),
         ["verify", keys_file, peer, tenant, agent_keys] => verify(keys_file, peer, tenant, Some(agent_keys)),
