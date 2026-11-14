@@ -977,6 +977,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cloud-posture"
+version = "0.0.0"
+dependencies = [
+ "core-pg",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "cmdb"
 version = "0.0.0"
 dependencies = [
