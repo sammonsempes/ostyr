@@ -18,6 +18,12 @@ pub enum ParseError {
     WrongKind { expected: &'static str },
     #[error("list holds {count} items, above the {max} limit")]
     TooManyItems { count: usize, max: usize },
+    #[error("the continue token is outside the allowed grammar")]
+    BadContinue,
+    #[error("the page run is not complete: it must end on a page without a continue token, within the page limit")]
+    Incomplete,
+    #[error("the page limits are above their ceilings")]
+    BadPageLimits,
 }
 
 

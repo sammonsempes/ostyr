@@ -19,6 +19,41 @@ pub const DEFAULT_MAX_ADDRESSES: usize = 16;
 pub const DEFAULT_MAX_TEXT_BYTES: usize = 512;
 
 
+pub const PAGE_POD_BYTES: u64 = 32_768;
+
+
+pub const MAX_CONTINUE_BYTES: usize = 4_096;
+
+
+pub const DEFAULT_MAX_PAGES: usize = 64;
+
+
+pub const DEFAULT_MAX_TOTAL_ITEMS: usize = 20_000;
+
+
+pub const CEILING_PAGES: usize = 1_024;
+
+
+pub const CEILING_TOTAL_ITEMS: usize = 200_000;
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageLimits {
+    pub max_pages: usize,
+    pub max_total_items: usize,
+}
+
+
+impl Default for PageLimits {
+    fn default() -> Self {
+        Self {
+            max_pages: DEFAULT_MAX_PAGES,
+            max_total_items: DEFAULT_MAX_TOTAL_ITEMS,
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
     pub max_bytes: u64,

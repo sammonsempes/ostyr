@@ -5,6 +5,7 @@ pub mod error;
 pub mod inventory;
 pub mod limits;
 pub mod model;
+pub mod pages;
 pub mod parse;
 pub mod text;
 pub mod types;

@@ -1,7 +1,7 @@
 use crate::error::ParseError;
 use crate::limits::{Limits, COLLECTION_SLACK};
-use crate::model::{NodeItem, Parsed, PodItem, SkipReason, Skipped};
-use crate::text::{valid_dns_label, valid_label_key, valid_label_value, valid_subdomain, valid_text, valid_uid};
+use crate::model::{NodeItem, Page, Parsed, PodItem, SkipReason, Skipped};
+use crate::text::{valid_continue, valid_dns_label, valid_label_key, valid_label_value, valid_subdomain, valid_text, valid_uid};
 use crate::types::{BorrowedLabels, LabelsAndExtra};
 use serde::de::IgnoredAny;
 use serde::Deserialize;
@@ -28,11 +28,20 @@ pub const INTERNAL_IP: &str = "InternalIP";
 
 
 #[derive(Deserialize)]
-struct RawList<'a> {
+pub struct RawList<'a> {
     #[serde(borrow)]
     kind: Cow<'a, str>,
     #[serde(borrow)]
     items: &'a RawValue,
+    #[serde(borrow)]
+    metadata: Option<RawListMetadata<'a>>,
+}
+
+
+#[derive(Deserialize)]
+struct RawListMetadata<'a> {
+    #[serde(borrow, rename = "continue")]
+    next: Option<Cow<'a, str>>,
 }
 
 
@@ -332,14 +341,34 @@ pub fn drop_shadowed_refusals(skipped: &mut Skipped, kept: &HashSet<String>) {
 }
 
 
-/// Reads at most `max_bytes`, checks kind and item count on the raw list, then parses each element alone; a duplicate uid is skipped.
-pub fn parse_list<Source: Read, Item>(
+/// The `continue` token of a page: absent or empty is the last page, anything outside the grammar refuses the page (no token text in the error).
+pub fn next_token(list: &RawList) -> Result<Option<String>, ParseError> {
+    let token = list
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.next.as_deref())
+        .filter(|text| !text.is_empty());
+    token
+        .map(|text| {
+            if valid_continue(text) {
+                Ok(text.to_owned())
+            } else {
+                Err(ParseError::BadContinue)
+            }
+        })
+        .transpose()
+}
+
+
+/// Reads at most `max_bytes`, checks kind, token and item count (at most `budget`) on the raw list, then parses each element alone; a duplicate uid is skipped.
+pub fn parse_list_page<Source: Read, Item>(
     reader: Source,
     limits: &Limits,
+    budget: usize,
     kind: &'static str,
     convert: fn(&RawValue, &Limits) -> Result<Item, SkipReason>,
     uid_of: fn(&Item) -> &str,
-) -> Result<Parsed<Item>, ParseError> {
+) -> Result<Page<Item>, ParseError> {
     let mut buffer = Vec::new();
     let mut limited = reader.take(limits.max_bytes.saturating_add(1));
     limited.read_to_end(&mut buffer).map_err(ParseError::Read)?;
@@ -350,12 +379,11 @@ pub fn parse_list<Source: Read, Item>(
     if list.kind != kind {
         Err(ParseError::WrongKind { expected: kind })?;
     }
+    let next = next_token(&list)?;
     let count = serde_json::from_str::<Vec<IgnoredAny>>(list.items.get()).map_err(malformed)?.len();
-    if count > limits.max_items {
-        Err(ParseError::TooManyItems {
-            count,
-            max: limits.max_items,
-        })?;
+    let max = limits.max_items.min(budget);
+    if count > max {
+        Err(ParseError::TooManyItems { count, max })?;
     }
     let items = serde_json::from_str::<Vec<&RawValue>>(list.items.get()).map_err(malformed)?;
     let mut parsed = Parsed {
@@ -378,7 +406,37 @@ pub fn parse_list<Source: Read, Item>(
     if skipped_total > 0 {
         tracing::warn!(kind, skipped_total, "elements skipped");
     }
-    Ok(parsed)
+    Ok(Page {
+        parsed,
+        next,
+        raw_count: count,
+    })
+}
+
+
+/// A whole list in one read: a list that announces a `continue` token is partial, so it is `Incomplete`, never returned.
+pub fn parse_list<Source: Read, Item>(
+    reader: Source,
+    limits: &Limits,
+    kind: &'static str,
+    convert: fn(&RawValue, &Limits) -> Result<Item, SkipReason>,
+    uid_of: fn(&Item) -> &str,
+) -> Result<Parsed<Item>, ParseError> {
+    let page = parse_list_page(reader, limits, limits.max_items, kind, convert, uid_of)?;
+    if page.next.is_some() {
+        Err(ParseError::Incomplete)?;
+    }
+    Ok(page.parsed)
+}
+
+
+pub fn parse_pods_page<Source: Read>(reader: Source, limits: &Limits, budget: usize) -> Result<Page<PodItem>, ParseError> {
+    parse_list_page(reader, limits, budget, POD_LIST_KIND, convert_pod, pod_uid)
+}
+
+
+pub fn parse_nodes_page<Source: Read>(reader: Source, limits: &Limits, budget: usize) -> Result<Page<NodeItem>, ParseError> {
+    parse_list_page(reader, limits, budget, NODE_LIST_KIND, convert_node, node_uid)
 }
 
 

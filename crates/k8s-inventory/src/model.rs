@@ -55,6 +55,15 @@ pub struct Parsed<Item> {
 }
 
 
+/// One page of a paged list: its items, the `continue` token of the next page (`None` on the last page) and its raw element count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<Item> {
+    pub parsed: Parsed<Item>,
+    pub next: Option<String>,
+    pub raw_count: usize,
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ItemKind {
     Pod,
