@@ -259,7 +259,14 @@ fn keygen_writes_a_seed_and_its_public_key() -> TestResult {
 fn the_signing_key_comes_from_a_32_byte_hex_seed() -> TestResult {
     assert!(signing_key_from(&HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH])).is_ok());
     assert!(matches!(signing_key_from("abcd"), Err(CliError::Seed)));
+    let wrong_length = signing_key_from("abcdef0123").err().ok_or("accepted")?;
+    assert!(matches!(wrong_length, CliError::Seed));
+    assert!(!wrong_length.to_string().contains("abcdef0123"));
+    assert!(!format!("{wrong_length:?}").contains("abcdef0123"));
     assert!(matches!(signing_key_from("zz"), Err(CliError::Hex(_))));
+    assert!(matches!(signing_key_from("abc"), Err(CliError::Hex(_))));
+    let bad_last = format!("{}Z", "ab".repeat(SEED_LENGTH - 1) + "a");
+    assert!(matches!(signing_key_from(&bad_last), Err(CliError::Hex(_))));
     Ok(())
 }
 
