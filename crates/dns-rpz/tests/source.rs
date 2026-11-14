@@ -88,7 +88,7 @@ fn rig(tenant: &str) -> Result<Rig, Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let password = dir.path().join("password");
-    fs::write(&password, format!("{PASSWORD}\n"))?;
+    write_secret(&password, format!("{PASSWORD}\n"))?;
     let feeds = dir.path().join("feeds.yaml");
     fs::write(&feeds, feeds_text(listener.local_addr()?.port(), tenant, &password))?;
     Ok(Rig { dir, feeds, listener })
@@ -385,4 +385,20 @@ fn a_failed_source_leaves_one_warn_line_without_secrets() -> TestResult {
     );
     assert!(!text.contains(PASSWORD) && !text.contains("SECRET"), "{text}");
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

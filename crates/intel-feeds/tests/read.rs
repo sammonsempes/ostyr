@@ -105,7 +105,7 @@ fn rig(timeout_ms: u64) -> Result<Rig, Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    fs::write(dir.path().join("password"), format!("{PASSWORD}\n"))?;
+    write_secret(dir.path().join("password"), format!("{PASSWORD}\n"))?;
     let config = ClickhouseConfig {
         url: format!("http://127.0.0.1:{port}"),
         user: "ostyr".to_owned(),
@@ -412,7 +412,7 @@ fn settings_and_secrets_are_refused_before_any_connection() -> TestResult {
     rig.config.tenant = "-x".to_owned();
     assert!(read_iocs(&rig.config, NOW, &mut out).is_err());
     rig.config.tenant = "tenant-a".to_owned();
-    fs::write(&rig.config.password_file, NOT_UTF8)?;
+    write_secret(&rig.config.password_file, NOT_UTF8)?;
     assert!(matches!(
         read_iocs(&rig.config, NOW, &mut out),
         Err(ReadError::Setup(LoadError::PasswordEncoding(_)))
@@ -426,7 +426,7 @@ fn settings_and_secrets_are_refused_before_any_connection() -> TestResult {
         rig.dir.path().join("junk.pem"),
         "-----BEGIN CERTIFICATE-----\nnot base64 !\n-----END CERTIFICATE-----\n",
     )?;
-    fs::write(&rig.config.password_file, PASSWORD)?;
+    write_secret(&rig.config.password_file, PASSWORD)?;
     rig.config.ca_file = Some(rig.dir.path().join("junk.pem"));
     assert!(matches!(
         read_iocs(&rig.config, NOW, &mut out),
@@ -566,4 +566,20 @@ fn rows_that_are_not_canonical_are_skipped_and_counted() -> TestResult {
     assert_eq!(counted.not_canonical, TWO);
     assert_eq!(total_bad(&counted), TWO);
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

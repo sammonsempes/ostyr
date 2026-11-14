@@ -176,6 +176,7 @@ pub fn seen_of(stub: &Stub) -> Result<Vec<Seen>, Box<dyn Error>> {
 pub fn write_file(dir: &Path, name: &str, text: &str) -> Result<String, Box<dyn Error>> {
     let path = dir.join(name);
     fs::write(&path, text)?;
+    set_secret_mode(&path)?;
     Ok(path.display().to_string())
 }
 
@@ -211,4 +212,19 @@ pub fn review_of(seen: &Seen) -> Option<(String, String)> {
     let verb = value.pointer("/spec/resourceAttributes/verb")?.as_str()?.to_owned();
     let resource = value.pointer("/spec/resourceAttributes/resource")?.as_str()?.to_owned();
     Some((verb, resource))
+}
+
+
+pub const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+pub fn set_secret_mode(path: &Path) -> Result<(), Box<dyn Error>> {
+    Ok(fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))?)
+}
+
+
+#[cfg(not(unix))]
+pub fn set_secret_mode(_path: &Path) -> Result<(), Box<dyn Error>> {
+    Ok(())
 }

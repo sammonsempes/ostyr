@@ -14,6 +14,12 @@ pub enum PgError {
     },
     #[error("{file}: not a regular file")]
     NotRegular { file: String },
+    #[error("{file}: secret file is a symlink")]
+    SecretSymlink { file: String },
+    #[error("{file}: secret file grants permissions to group or other")]
+    SecretMode { file: String },
+    #[error("{file}: secret file is owned by neither the process user nor root")]
+    SecretOwner { file: String },
     #[error("{file}: larger than {limit} bytes")]
     TooLarge { file: String, limit: u64 },
     #[error("{file}: secret read limit {limit} exceeds the preallocated buffer")]

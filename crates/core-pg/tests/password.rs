@@ -9,6 +9,22 @@ use tempfile::tempdir;
 const ROOM: u64 = 8;
 
 
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: &std::path::Path, content: impl AsRef<[u8]>) -> io::Result<()> {
+    fs::write(path, content)?;
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: &std::path::Path, content: impl AsRef<[u8]>) -> io::Result<()> {
+    fs::write(path, content)
+}
+
+
 const TIGHT: u64 = 2;
 
 
@@ -29,7 +45,7 @@ impl Read for Failing {
 fn trailing_line_breaks_are_trimmed() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let path = dir.path().join("pass");
-    fs::write(&path, "s3cret pass\r\n\n")?;
+    write_secret(&path, "s3cret pass\r\n\n")?;
     assert_eq!(read_password(&path)?.as_slice(), b"s3cret pass");
     Ok(())
 }
@@ -40,9 +56,9 @@ fn password_at_the_cap_is_read_and_one_more_byte_is_refused() -> Result<(), Box<
     let dir = tempdir()?;
     let path = dir.path().join("pass");
     let at_cap = usize::try_from(MAX_PASSWORD_BYTES)?;
-    fs::write(&path, "a".repeat(at_cap))?;
+    write_secret(&path, "a".repeat(at_cap))?;
     assert_eq!(read_password(&path)?.len(), at_cap);
-    fs::write(&path, "a".repeat(at_cap + 1))?;
+    write_secret(&path, "a".repeat(at_cap + 1))?;
     assert!(matches!(read_password(&path), Err(PgError::TooLarge { .. })));
     Ok(())
 }
@@ -52,9 +68,9 @@ fn password_at_the_cap_is_read_and_one_more_byte_is_refused() -> Result<(), Box<
 fn empty_and_blank_passwords_are_refused() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let path = dir.path().join("pass");
-    fs::write(&path, "")?;
+    write_secret(&path, "")?;
     assert!(matches!(read_password(&path), Err(PgError::EmptyPassword { .. })));
-    fs::write(&path, "\n\n")?;
+    write_secret(&path, "\n\n")?;
     assert!(matches!(read_password(&path), Err(PgError::EmptyPassword { .. })));
     Ok(())
 }
@@ -75,7 +91,7 @@ fn missing_file_and_failing_reader_are_io_errors() -> Result<(), Box<dyn Error>>
 fn errors_never_hold_the_password() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let path = dir.path().join("pass");
-    fs::write(&path, "x".repeat(HUGE))?;
+    write_secret(&path, "x".repeat(HUGE))?;
     let message = format!("{:?}", read_password(&path));
     assert!(!message.contains("xxxxxxxx"), "{message}");
     Ok(())
