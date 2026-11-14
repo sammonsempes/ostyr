@@ -1,6 +1,6 @@
 use crate::error::BackupError;
 use crate::model::{Declarations, DeclarationsFile, DEFAULT_MAX_TEXT_CHARS};
-use crate::text::valid_text;
+use crate::text::{valid_host_key, valid_text};
 use core_config::parse::parse_document;
 use core_pg::scope::tenant_scope;
 use std::collections::BTreeSet;
@@ -28,7 +28,7 @@ pub fn all_unique<'a>(names: impl Iterator<Item = &'a str>) -> bool {
 pub fn problem(file: &DeclarationsFile) -> Option<&'static str> {
     if file.critical.len() > MAX_ENTRIES || file.repositories.len() > MAX_ENTRIES {
         Some("entry count")
-    } else if !file.critical.iter().all(|entry| valid_text(&entry.host, DEFAULT_MAX_TEXT_CHARS)) {
+    } else if !file.critical.iter().all(|entry| valid_host_key(&entry.host, DEFAULT_MAX_TEXT_CHARS)) {
         Some("critical host")
     } else if !file
         .critical
