@@ -1,10 +1,10 @@
-//! Usage: backup_report <restic|borg> <previous.json> <current.json> <declarations.yaml> <now RFC 3339> <repository> (restic name, ignored for borg).
+//! Usage: backup_report <restic|borg|pbs> <previous.json> <current.json> <declarations.yaml> <now RFC 3339> <repository> (restic and PBS name, ignored for borg); a listing path written `pbs:<file>` is read as a PBS listing.
 
 use backup_monitor::compare::compare;
-use backup_monitor::coverage::coverage;
+use backup_monitor::coverage::{coverage, unverified_count};
 use backup_monitor::declarations::load_declarations;
 use backup_monitor::model::{CoverageStatus, FindingKind, Limits, Listing};
-use backup_monitor::parse::{parse_borg, parse_restic};
+use backup_monitor::parse::{parse_borg, parse_pbs, parse_restic};
 use core_config::parse::read_file;
 use core_pg::scope::tenant_of;
 use std::error::Error;
@@ -37,8 +37,10 @@ const USAGE: &str = "usage: backup_report <restic|borg> <previous.json> <current
 
 
 fn read_listing(kind: &str, path: &str, from_name: bool, repository: &str) -> Result<Listing, Box<dyn Error>> {
-    let file = File::open(path)?;
-    match kind {
+    let pbs_path = path.strip_prefix("pbs:");
+    let file = File::open(pbs_path.unwrap_or(path))?;
+    match pbs_path.map_or(kind, |_| "pbs") {
+        "pbs" => Ok(parse_pbs(file, repository, &Limits::default())?),
         "restic" => Ok(parse_restic(file, repository, &Limits::default())?),
         "borg" => Ok(parse_borg(file, from_name, &Limits::default())?),
         _ => Err(USAGE.into()),
@@ -59,7 +61,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let current = read_listing(kind, current_path, declarations.hostname_from_name, repository)?;
     let mut out = stdout();
     writeln!(out, "tenant {}", tenant_of(&declarations.tenant))?;
-    writeln!(out, "snapshots {} skipped {:?}", current.snapshots.len(), current.skipped)?;
+    writeln!(
+        out,
+        "snapshots {} skipped {:?} unverified {}",
+        current.snapshots.len(),
+        current.skipped,
+        unverified_count(&current)
+    )?;
     coverage(std::slice::from_ref(&current), &declarations, now)
         .iter()
         .try_for_each(|entry| match &entry.status {

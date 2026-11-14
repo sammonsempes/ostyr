@@ -1,8 +1,29 @@
-use crate::model::{Coverage, CoverageStatus, Declarations, Listing};
+use crate::model::{Coverage, CoverageStatus, Declarations, Listing, Snapshot, Verification};
 use time::{Duration, OffsetDateTime};
 
 
 pub const FUTURE_SKEW_SECONDS: i64 = 300;
+
+
+/// A snapshot whose server-side verification failed is not a usable backup.
+pub fn verification_failed(snapshot: &Snapshot) -> bool {
+    snapshot.pbs.as_ref().is_some_and(|detail| detail.verification == Verification::Failed)
+}
+
+
+/// Snapshots a server never verified (restic and Borg listings carry no verification and count as none).
+pub fn unverified_count(listing: &Listing) -> usize {
+    listing
+        .snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot
+                .pbs
+                .as_ref()
+                .is_some_and(|detail| detail.verification == Verification::Unverified)
+        })
+        .count()
+}
 
 
 /// The newest snapshot of `host` across the listings, ignoring any dated after `horizon`.
@@ -10,7 +31,7 @@ pub fn newest_for(listings: &[Listing], host: &str, horizon: OffsetDateTime) -> 
     listings
         .iter()
         .flat_map(|listing| listing.snapshots.iter())
-        .filter(|snapshot| snapshot.host.as_deref() == Some(host) && snapshot.time <= horizon)
+        .filter(|snapshot| snapshot.host.as_deref() == Some(host) && snapshot.time <= horizon && !verification_failed(snapshot))
         .map(|snapshot| snapshot.time)
         .max()
 }

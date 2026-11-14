@@ -25,6 +25,9 @@ pub const DEFAULT_MAX_PATH_BYTES: usize = 4096;
 pub const DEFAULT_MAX_NAME_CHARS: usize = 255;
 
 
+pub const OWNER_DISPLAY_CHARS: usize = 128;
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
     pub max_bytes: u64,
@@ -60,7 +63,26 @@ pub enum SkipReason {
     BadName,
     BadPaths,
     BadTags,
+    BadField,
     Duplicate,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verification {
+    Verified,
+    Failed,
+    Unverified,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PbsDetail {
+    pub owner: Option<String>,
+    pub protected: bool,
+    pub verification: Verification,
+    pub size: Option<u64>,
+    pub files: usize,
 }
 
 
@@ -71,6 +93,7 @@ pub struct Snapshot {
     pub host: Option<String>,
     pub paths: Vec<String>,
     pub tags: Vec<String>,
+    pub pbs: Option<PbsDetail>,
 }
 
 
