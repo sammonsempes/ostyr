@@ -36,11 +36,19 @@ pub fn create_new_file(_path: &Path, _mode: u32) -> Result<File, CliError> {
 }
 
 
-/// One hex text and a newline.
+/// One hex text and a newline, written in a single `write_all` of a wiped buffer so the file never holds the hex without its newline.
 pub fn write_hex_line<Output: Write>(out: &mut Output, hex: &[u8]) -> Result<(), CliError> {
-    out.write_all(hex)?;
-    out.write_all(b"\n")?;
+    let mut line = Zeroizing::new(Vec::with_capacity(hex.len() + 1));
+    line.extend_from_slice(hex);
+    line.push(b'\n');
+    out.write_all(&line)?;
     Ok(())
+}
+
+
+/// The public hex line; a failure is reported by kind, and the file is left behind.
+pub fn write_public_hex<Output: Write>(out: &mut Output, hex: &[u8]) -> Result<(), CliError> {
+    write_hex_line(out, hex).map_err(|cause| CliError::PublicWriteFailed(Box::new(cause)))
 }
 
 
@@ -60,22 +68,22 @@ pub fn write_seed_file_checked(seed_path: &Path, seed_hex: &[u8], check: fn(&Fil
 }
 
 
-/// The seed file is created and written last, after the public file; a failure leaves the public file and no path-based removal.
-pub fn write_seed_file(seed_path: &Path, seed_hex: &[u8]) -> Result<(), CliError> {
-    write_seed_file_checked(seed_path, seed_hex, check_seed_handle)
-}
-
-
 /// Creates the public file (mode 644) then the seed file (mode 600), never overwriting; prints `public <hex>` only.
-pub fn write_keypair_files<Output: Write>(fill: FillFn, seed_path: &Path, public_path: &Path, out: &mut Output) -> Result<(), CliError> {
+pub fn write_keypair_files<Output: Write>(
+    fill: FillFn,
+    seed_path: &Path,
+    public_path: &Path,
+    out: &mut Output,
+    check: fn(&File) -> Result<(), CliError>,
+) -> Result<(), CliError> {
     let mut seed = Zeroizing::new([0; SECRET_KEY_LENGTH]);
     fill(&mut *seed)?;
     let public = SigningKey::from_bytes(&seed).verifying_key();
     let public_hex = HEXLOWER.encode(&public.to_bytes());
     let mut seed_hex = Zeroizing::new(vec![0; HEXLOWER.encode_len(SECRET_KEY_LENGTH)]);
     HEXLOWER.encode_mut(seed.as_slice(), &mut seed_hex);
-    write_hex_line(&mut create_new_file(public_path, PUBLIC_FILE_MODE)?, public_hex.as_bytes())?;
-    write_seed_file(seed_path, &seed_hex).map_err(|cause| CliError::PublicKept(Box::new(cause)))?;
+    write_public_hex(&mut create_new_file(public_path, PUBLIC_FILE_MODE)?, public_hex.as_bytes())?;
+    write_seed_file_checked(seed_path, &seed_hex, check).map_err(|cause| CliError::PublicKept(Box::new(cause)))?;
     writeln!(out, "public {public_hex}")?;
     Ok(())
 }
