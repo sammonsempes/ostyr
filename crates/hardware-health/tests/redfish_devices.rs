@@ -48,6 +48,8 @@ fn every_invalid_field_is_refused_by_name() -> TestResult {
         ("https://10.0.0.5:443/", "http://10.0.0.5:443/", "base_url"),
         ("https://10.0.0.5:443/", "https://u:p@10.0.0.5:443/", "base_url"),
         ("https://10.0.0.5:443/", "https://10.0.0.5:443/x", "base_url"),
+        ("https://10.0.0.5:443/", "https://10.0.0.5:99999/", "base_url"),
+        ("https://10.0.0.5:443/", "https://10.0.0.5:0/", "base_url"),
         ("https://10.0.0.5:443/", "https://10.0.0.5:443/?a=b", "base_url"),
         (
             "ca_file: /etc/ca.pem",
@@ -79,10 +81,10 @@ fn the_file_is_bounded_strict_and_unique() -> TestResult {
     let many = format!("devices:\n{}", one.replace("bmc1", "bmcX").repeat(OVER_DEVICES));
     assert!(matches!(refused(&many)?, FetchError::TooManyDevices { .. }));
     assert!(matches!(refused(&" ".repeat(OVER_BYTES))?, FetchError::DevicesTooLarge { .. }));
-    assert!(matches!(refused(&format!("{VALID}extra: 1\n"))?, FetchError::Devices(_)));
+    assert!(matches!(refused(&format!("{VALID}extra: 1\n"))?, FetchError::Devices { .. }));
     assert!(matches!(
         refused(&VALID.replace("timeout_ms: 5000", "timeout_ms: 5000\n    shell: x"))?,
-        FetchError::Devices(_)
+        FetchError::Devices { .. }
     ));
     assert!(matches!(
         refused(&format!("{VALID}{one}"))?,
@@ -92,6 +94,24 @@ fn the_file_is_bounded_strict_and_unique() -> TestResult {
         .chain((0..OVER_DEVICES - 1).map(|index| one.replace("bmc1", &format!("bmc{index}"))))
         .collect();
     assert_eq!(parse_devices(&capped)?.len(), OVER_DEVICES - 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_file_reports_its_position_and_quotes_nothing() -> TestResult {
+    let error = refused(&format!("{VALID}secret_marker: 1\n"))?;
+    let line = match &error {
+        FetchError::Devices { line, .. } => *line,
+        _ => 0,
+    };
+    assert!(line > 0);
+    let shown = std::iter::successors(Some(&error as &dyn std::error::Error), |current| current.source())
+        .map(|current| format!("{current} {current:?}"))
+        .collect::<String>();
+    assert!(!shown.contains("secret_marker"), "{shown}");
+    let located = refused("devices: [")?;
+    assert!(matches!(located, FetchError::Devices { .. }));
     Ok(())
 }
 
