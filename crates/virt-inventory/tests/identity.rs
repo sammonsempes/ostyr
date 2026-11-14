@@ -169,3 +169,169 @@ fn refused_node_and_storage_keys_read_only_their_own_parts() -> TestResult {
     assert_eq!(lost.skipped.key_lost, LOST_KEYS);
     Ok(())
 }
+
+
+const DUPLICATES: usize = 2;
+
+
+const QEMU_RUN_STATES: [&str; 18] = [
+    "debug",
+    "inmigrate",
+    "internal-error",
+    "io-error",
+    "paused",
+    "postmigrate",
+    "prelaunch",
+    "finish-migrate",
+    "restore-vm",
+    "running",
+    "save-vm",
+    "shutdown",
+    "suspended",
+    "watchdog",
+    "guest-panicked",
+    "colo",
+    "stopped",
+    "unknown",
+];
+
+
+fn guests_with_status(statuses: &[&str]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    statuses
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let mut element = guest("qemu", &(VMID_BASE + index).to_string(), "a");
+            set(&mut element, "/status", &Value::String((*text).to_owned()).to_string()).map(|()| element)
+        })
+        .collect()
+}
+
+
+#[test]
+fn status_is_one_of_the_documented_values() -> TestResult {
+    let bad = [
+        "run\u{3164}",
+        "Running",
+        "stopped ",
+        "",
+        "running\u{200b}",
+        "prelaunch ",
+        "online",
+        "Unknown",
+        "unknown ",
+    ];
+    let parsed = parsed_of(guests_with_status(&bad)?)?;
+    assert!(parsed.items.is_empty());
+    assert_eq!(
+        (parsed.skipped.bad_field, parsed.skipped.refused_keys.len(), parsed.skipped.key_lost),
+        (bad.len(), bad.len(), 0)
+    );
+    assert_eq!(parsed_of(guests_with_status(&QEMU_RUN_STATES)?)?.items.len(), QEMU_RUN_STATES.len());
+    Ok(())
+}
+
+
+#[test]
+fn a_zero_width_status_is_unreadable_never_retired() -> TestResult {
+    let previous = build_inventory("acme", "pve-1", parsed_of(vec![guest("qemu", "100", "a")])?)?;
+    let mut hostile = guest("qemu", "100", "a");
+    set(&mut hostile, "/status", "\"running\\u200b\"")?;
+    let current = build_inventory("acme", "pve-1", parsed_of(vec![hostile])?)?;
+    let changes = diff(&previous, &current)?;
+    assert!(changes.retired.is_empty());
+    assert_eq!(changes.unreadable, vec![qemu_key()]);
+    Ok(())
+}
+
+
+#[test]
+fn node_names_are_case_folded() -> TestResult {
+    let parsed = parsed_of(vec![node("PVE"), node("pve"), storage("PVE", "local"), storage("pve", "local")])?;
+    let keys = parsed
+        .items
+        .iter()
+        .map(|item| (item.node.as_str(), item.key.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(keys, [("pve", "pve"), ("pve", "pve/local")]);
+    assert_eq!(parsed.skipped.duplicate, DUPLICATES);
+    Ok(())
+}
+
+
+fn status_items(kind: &str, statuses: &[&str]) -> Result<Parsed, Box<dyn std::error::Error>> {
+    let items = statuses
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let mut element = match kind {
+                "node" => node(&format!("n{index}")),
+                "storage" => storage("pve", &format!("s{index}")),
+                _ => guest(kind, &(VMID_BASE + index).to_string(), "a"),
+            };
+            set(&mut element, "/status", &Value::String((*text).to_owned()).to_string()).map(|()| element)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parsed_of(items)?)
+}
+
+
+#[test]
+fn each_kind_accepts_only_its_own_statuses() -> TestResult {
+    assert_eq!(status_items("lxc", &["running", "stopped", "unknown"])?.items.len(), THREE);
+    assert_eq!(
+        status_items("lxc", &["prelaunch", "io-error", "online", "Unknown", "unknown "])?
+            .items
+            .len(),
+        0
+    );
+    assert_eq!(status_items("node", &["online", "offline", "unknown"])?.items.len(), THREE);
+    assert_eq!(status_items("node", &["prelaunch", "running", "available"])?.items.len(), 0);
+    assert_eq!(status_items("storage", &["available", "unknown"])?.items.len(), TWO);
+    assert_eq!(status_items("storage", &["prelaunch", "online"])?.items.len(), 0);
+    assert_eq!(status_items("qemu", &["io-error"])?.items.len(), 1);
+    Ok(())
+}
+
+
+const TWO: usize = 2;
+
+
+const THREE: usize = 3;
+
+
+const PRELAUNCH: &[u8] = include_bytes!("fixtures/resources-prelaunch.json");
+
+
+#[test]
+fn a_live_prelaunch_guest_is_an_item() -> TestResult {
+    let parsed = parse_resources(PRELAUNCH, &Limits::default())?;
+    let status = parsed
+        .items
+        .iter()
+        .find(|item| item.key == "9002")
+        .and_then(|item| item.status.as_deref());
+    assert_eq!(status, Some("prelaunch"));
+    assert_eq!(parsed.skipped.bad_field, 0);
+    Ok(())
+}
+
+
+const UNKNOWN: &[u8] = include_bytes!("fixtures/resources-unknown.json");
+
+
+const UNKNOWN_GUESTS: usize = 4;
+
+
+#[test]
+fn a_live_unknown_answer_keeps_every_guest() -> TestResult {
+    let parsed = parse_resources(UNKNOWN, &Limits::default())?;
+    let unknown_guests = parsed
+        .items
+        .iter()
+        .filter(|item| item.status.as_deref() == Some("unknown") && item.key.parse::<u64>().is_ok())
+        .count();
+    assert_eq!(unknown_guests, UNKNOWN_GUESTS);
+    assert_eq!((parsed.skipped.bad_field, parsed.skipped.refused_keys.len()), (0, 0));
+    Ok(())
+}

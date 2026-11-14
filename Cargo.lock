@@ -6914,7 +6914,6 @@ name = "virt-inventory"
 version = "0.0.0"
 dependencies = [
  "core-pg",
- "k8s-inventory",
  "serde",
  "serde_json",
  "serde_with",
