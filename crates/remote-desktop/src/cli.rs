@@ -26,7 +26,11 @@ pub fn write_keypair<Output: Write>(fill: FillFn, out: &mut Output) -> Result<()
     let mut seed = Zeroizing::new([0; SECRET_KEY_LENGTH]);
     fill(&mut *seed)?;
     let public = SigningKey::from_bytes(&seed).verifying_key();
-    writeln!(out, "seed {}", HEXLOWER.encode(seed.as_slice()))?;
+    let mut seed_hex = Zeroizing::new(vec![0; HEXLOWER.encode_len(SECRET_KEY_LENGTH)]);
+    HEXLOWER.encode_mut(seed.as_slice(), &mut seed_hex);
+    out.write_all(b"seed ")?;
+    out.write_all(&seed_hex)?;
+    out.write_all(b"\n")?;
     writeln!(out, "public {}", HEXLOWER.encode(&public.to_bytes()))?;
     Ok(())
 }

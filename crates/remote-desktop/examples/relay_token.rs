@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
 
-const USAGE: &str = "usage: relay_token keygen | issue <seed-file> <claims-json> | verify <keys-file> <peer> <tenant> [<agent-command-keys-file>]";
+const USAGE: &str = "usage: relay_token keygen (redirect to a mode 600 file) | issue <seed-file> <claims-json> | verify <keys-file> <peer> <tenant> [<agent-command-keys-file>]";
 
 
 fn now_seconds() -> u64 {
