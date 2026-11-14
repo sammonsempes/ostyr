@@ -17,7 +17,7 @@ use siem_ingest::error::InsertClass;
 use std::io::{self, Read};
 use std::net::TcpListener;
 use std::time::Duration;
-use stub::{reply, reply_within};
+use stub::{reply, serve};
 
 
 const COUNT: u64 = 42;
@@ -354,4 +354,32 @@ fn a_client_that_never_connects_fails_the_stand_in() -> TestResult {
         .ok_or("served")?;
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     Ok(())
+}
+
+
+fn accept_within(listener: &TcpListener, polls: usize) -> io::Result<std::net::TcpStream> {
+    listener.set_nonblocking(true)?;
+    let stream = (0..polls)
+        .find_map(|_| match listener.accept() {
+            Ok((stream, _)) => Some(Ok(stream)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::yield_now();
+                None
+            }
+            Err(error) => Some(Err(error)),
+        })
+        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, "no client connected")))?;
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+
+fn reply_within(
+    listener: TcpListener,
+    polls: usize,
+    status: &'static str,
+    extra: &'static str,
+    body: Vec<u8>,
+) -> std::thread::JoinHandle<io::Result<String>> {
+    std::thread::spawn(move || serve(accept_within(&listener, polls)?, status, extra, &body))
 }
