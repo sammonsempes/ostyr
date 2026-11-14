@@ -6,5 +6,7 @@ pub mod error;
 pub mod grammar;
 pub mod open;
 pub mod policy;
+pub mod recording;
+pub mod recording_cli;
 pub mod session;
 pub mod types;
