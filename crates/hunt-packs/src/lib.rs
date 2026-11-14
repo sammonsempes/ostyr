@@ -8,4 +8,5 @@ pub mod model;
 pub mod packs;
 pub mod run;
 pub mod schedule;
+pub mod store;
 pub mod text;
