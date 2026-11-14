@@ -118,6 +118,8 @@ pub enum CliError {
     Random(#[from] getrandom::Error),
     #[error("cannot write: {0}")]
     Io(#[from] io::Error),
+    #[error("the public file was created but the seed file was not: {0}")]
+    PublicKept(#[source] Box<CliError>),
     #[error("the seed file could not be read")]
     SeedFile,
     #[error("the seed file is not text")]

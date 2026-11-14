@@ -45,6 +45,12 @@ pub const MAX_SEED_FILE_BYTES: u64 = 128;
 pub const GROUP_OTHER_MASK: u32 = 0o077;
 
 
+pub const SEED_FILE_MODE: u32 = 0o600;
+
+
+pub const PUBLIC_FILE_MODE: u32 = 0o644;
+
+
 pub const NONCE_LENGTH: usize = 16;
 
 
