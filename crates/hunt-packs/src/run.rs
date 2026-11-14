@@ -34,6 +34,23 @@ pub const MIN_YEAR: i32 = 0;
 pub const MAX_YEAR: i32 = 9999;
 
 
+pub const COST_CODES: [u32; 4] = [158, 159, 307, 396];
+
+
+pub const READONLY_CODE: u32 = 164;
+
+
+pub const QUERY_CODES: [u32; 2] = [62, 47];
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackRefusal {
+    Cost,
+    ReadOnly,
+    Query,
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HuntOutcome {
     pub matches: u64,
@@ -54,10 +71,36 @@ pub enum RunError {
     Window,
     #[error("run refused: {}", class_text(*.0))]
     Failed(InsertClass),
+    #[error("{}", refusal_text(*.0))]
+    PackRefused(PackRefusal),
     #[error("the reply body could not be read")]
     Body(#[source] io::Error),
     #[error("the reply is not one unsigned count")]
     Malformed,
+}
+
+
+/// Fixed text per refusal class; a scheduler must not retry these as an outage.
+pub fn refusal_text(refusal: PackRefusal) -> &'static str {
+    match refusal {
+        PackRefusal::Cost => "pack refused: over its cost limit",
+        PackRefusal::ReadOnly => "pack refused: it writes under a read-only run",
+        PackRefusal::Query => "pack refused: the query is not valid",
+    }
+}
+
+
+/// The pack-specific class of an error reply, decided on the ClickHouse exception code only.
+pub fn pack_refusal(code: Option<u32>) -> Option<PackRefusal> {
+    code.and_then(|found| {
+        if COST_CODES.contains(&found) {
+            Some(PackRefusal::Cost)
+        } else if found == READONLY_CODE {
+            Some(PackRefusal::ReadOnly)
+        } else {
+            QUERY_CODES.contains(&found).then_some(PackRefusal::Query)
+        }
+    })
 }
 
 
@@ -153,9 +196,12 @@ pub fn execute_pack(
         .build()
         .send(count_statement(&pack.query))
         .map_err(|error| RunError::Failed(classify_transport(&error)))?;
-    match classify_reply(response.status(), exception_code(response.headers())) {
-        Some(class) => Err(RunError::Failed(class)),
-        None => {
+    let code = exception_code(response.headers());
+    let refusal = pack_refusal(code).filter(|_| !response.status().is_success());
+    match (refusal, classify_reply(response.status(), code)) {
+        (Some(refused), _) => Err(RunError::PackRefused(refused)),
+        (None, Some(class)) => Err(RunError::Failed(class)),
+        (None, None) => {
             let matches = read_count(response.into_body().into_reader())?;
             Ok(HuntOutcome {
                 matches,

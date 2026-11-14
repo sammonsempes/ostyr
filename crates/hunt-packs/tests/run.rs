@@ -7,14 +7,17 @@ mod stub;
 
 use common::types::TestResult;
 use hunt_packs::model::Source;
-use hunt_packs::run::{count_statement, parse_count, read_count, run_pack, server_settings, window_text, HuntOutcome, RunError, MAX_COUNT_BYTES};
+use hunt_packs::run::{
+    count_statement, pack_refusal, parse_count, read_count, refusal_text, run_pack, server_settings, window_text, HuntOutcome, PackRefusal, RunError,
+    MAX_COUNT_BYTES,
+};
 use metric_alerts::fetch::agent_for;
 use sample::{pack, param, sent_params, settings, NOW, PASSWORD};
 use siem_ingest::error::InsertClass;
 use std::io::{self, Read};
 use std::net::TcpListener;
 use std::time::Duration;
-use stub::reply;
+use stub::{reply, reply_within};
 
 
 const COUNT: u64 = 42;
@@ -54,6 +57,9 @@ const PARSE_CODE: &str = "X-ClickHouse-Exception-Code: 27\r\n";
 
 
 const MAX_ROWS_LIMIT: &str = "1000";
+
+
+const NEVER_POLLS: usize = 3;
 
 
 struct Endless {
@@ -285,5 +291,67 @@ fn statement_and_settings() -> TestResult {
     assert!(matches!(server_settings(&candidate), Err(RunError::NoByteLimit)));
     let texts = [RunError::UnsupportedSource, RunError::Window, RunError::NoByteLimit, RunError::Malformed];
     texts.iter().for_each(|error| assert!(!error.to_string().is_empty()));
+    Ok(())
+}
+
+
+#[test]
+fn pack_refusals_are_told_from_an_outage() -> TestResult {
+    let cases = [
+        ("X-ClickHouse-Exception-Code: 158\r\n", PackRefusal::Cost),
+        ("X-ClickHouse-Exception-Code: 159\r\n", PackRefusal::Cost),
+        ("X-ClickHouse-Exception-Code: 307\r\n", PackRefusal::Cost),
+        ("X-ClickHouse-Exception-Code: 396\r\n", PackRefusal::Cost),
+        ("X-ClickHouse-Exception-Code: 164\r\n", PackRefusal::ReadOnly),
+        ("X-ClickHouse-Exception-Code: 62\r\n", PackRefusal::Query),
+        ("X-ClickHouse-Exception-Code: 47\r\n", PackRefusal::Query),
+    ];
+    cases.into_iter().try_for_each(|(extra, expected)| {
+        let (outcome, _) = run_against("500 Internal Server Error", extra, SECRET.as_bytes().to_vec())?;
+        let error = outcome.err().ok_or("accepted")?;
+        let text = format!("{error} {error:?}");
+        assert!(matches!(&error, RunError::PackRefused(found) if *found == expected), "{text}");
+        assert!(!text.contains(SECRET), "{text}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[test]
+fn an_unknown_code_is_still_an_outage() -> TestResult {
+    let (outcome, _) = run_against("500 Internal Server Error", "X-ClickHouse-Exception-Code: 999\r\n", Vec::new())?;
+    assert!(matches!(outcome, Err(RunError::Failed(InsertClass::Unavailable))), "{outcome:?}");
+    assert_eq!(pack_refusal(None), None);
+    assert_eq!(pack_refusal(Some(1)), None);
+    Ok(())
+}
+
+
+#[test]
+fn a_success_reply_with_a_refusal_code_is_not_refused() -> TestResult {
+    let (outcome, _) = run_against(OK, "X-ClickHouse-Exception-Code: 158\r\n", b"1\n".to_vec())?;
+    assert!(outcome.is_ok(), "{outcome:?}");
+    Ok(())
+}
+
+
+#[test]
+fn refusal_texts_name_the_class_only() -> TestResult {
+    let texts = [PackRefusal::Cost, PackRefusal::ReadOnly, PackRefusal::Query].map(refusal_text);
+    assert!(texts.iter().all(|text| text.starts_with("pack refused: ")));
+    assert_eq!(texts.iter().collect::<std::collections::HashSet<_>>().len(), texts.len());
+    Ok(())
+}
+
+
+#[test]
+fn a_client_that_never_connects_fails_the_stand_in() -> TestResult {
+    let bound = TcpListener::bind("127.0.0.1:0")?;
+    let error = reply_within(bound, NEVER_POLLS, OK, "", Vec::new())
+        .join()
+        .map_err(|_| "server thread")?
+        .err()
+        .ok_or("served")?;
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     Ok(())
 }
