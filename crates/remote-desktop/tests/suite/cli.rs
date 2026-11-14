@@ -4,8 +4,8 @@ use crate::common::{
 };
 use data_encoding::HEXLOWER;
 use remote_desktop::cli::{
-    check_owner_and_mode, line_verdict, read_line, read_signing_key, signing_key_from, verify_session, write_hex_line, write_issued,
-    write_keypair_files, write_seed_file_checked, LINE_LIMIT,
+    check_owner_and_mode, check_seed_handle, line_verdict, read_line, read_signing_key, signing_key_from, verify_session, write_hex_line,
+    write_issued, write_keypair_files, write_public_hex, write_seed_file_checked, LINE_LIMIT,
 };
 use remote_desktop::error::CliError;
 use remote_desktop::model::{Line, MAX_TOKEN_BYTES};
@@ -239,7 +239,7 @@ fn keygen_creates_a_private_seed_file_and_a_public_file() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (seed_path, public_path) = (dir.path().join("seed"), dir.path().join("public"));
     let mut out = Vec::new();
-    write_keypair_files(fixed_fill, &seed_path, &public_path, &mut out)?;
+    write_keypair_files(fixed_fill, &seed_path, &public_path, &mut out, check_seed_handle)?;
     let seed_text = std::fs::read_to_string(&seed_path)?;
     assert_eq!(seed_text, format!("{}\n", fixed_seed_hex()));
     assert_eq!(mode_of(&seed_path)?, OWNER_ONLY);
@@ -256,7 +256,13 @@ fn keygen_creates_a_private_seed_file_and_a_public_file() -> TestResult {
 fn keygen_never_prints_the_seed() -> TestResult {
     let dir = tempfile::tempdir()?;
     let mut out = Vec::new();
-    write_keypair_files(fixed_fill, &dir.path().join("seed"), &dir.path().join("public"), &mut out)?;
+    write_keypair_files(
+        fixed_fill,
+        &dir.path().join("seed"),
+        &dir.path().join("public"),
+        &mut out,
+        check_seed_handle,
+    )?;
     assert!(!String::from_utf8(out)?.contains(&fixed_seed_hex()));
     Ok(())
 }
@@ -267,7 +273,7 @@ fn keygen_refuses_an_existing_seed_path_and_leaves_it_unchanged() -> TestResult 
     let dir = tempfile::tempdir()?;
     let (seed_path, public_path) = (dir.path().join("seed"), dir.path().join("public"));
     std::fs::write(&seed_path, "keep")?;
-    let refusal = write_keypair_files(fixed_fill, &seed_path, &public_path, &mut Vec::new());
+    let refusal = write_keypair_files(fixed_fill, &seed_path, &public_path, &mut Vec::new(), check_seed_handle);
     assert!(matches!(refusal, Err(CliError::PublicKept(_))));
     assert_eq!(std::fs::read_to_string(&seed_path)?, "keep");
     let expected_public = HEXLOWER.encode(&signing_key_from(&fixed_seed_hex())?.verifying_key().to_bytes());
@@ -283,7 +289,7 @@ fn keygen_refuses_an_existing_public_path_and_never_creates_the_seed() -> TestRe
     std::fs::write(&public_path, "keep")?;
     let mut out = Vec::new();
     assert!(matches!(
-        write_keypair_files(fixed_fill, &seed_path, &public_path, &mut out),
+        write_keypair_files(fixed_fill, &seed_path, &public_path, &mut out, check_seed_handle),
         Err(CliError::Io(_))
     ));
     assert!(matches!(std::fs::symlink_metadata(&seed_path), Err(error) if error.kind() == io::ErrorKind::NotFound));
@@ -300,7 +306,7 @@ fn keygen_does_not_follow_a_symlink_at_the_seed_path() -> TestResult {
     let target = dir.path().join("target");
     let seed_path = dir.path().join("seed");
     std::os::unix::fs::symlink(&target, &seed_path)?;
-    let refusal = write_keypair_files(fixed_fill, &seed_path, &dir.path().join("public"), &mut Vec::new());
+    let refusal = write_keypair_files(fixed_fill, &seed_path, &dir.path().join("public"), &mut Vec::new(), check_seed_handle);
     assert!(matches!(refusal, Err(CliError::PublicKept(_))));
     assert!(!target.exists());
     Ok(())
@@ -312,7 +318,7 @@ fn a_failing_draw_writes_nothing() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (seed_path, public_path) = (dir.path().join("seed"), dir.path().join("public"));
     assert!(matches!(
-        write_keypair_files(failing_fill, &seed_path, &public_path, &mut Vec::new()),
+        write_keypair_files(failing_fill, &seed_path, &public_path, &mut Vec::new(), check_seed_handle),
         Err(CliError::Random(_))
     ));
     assert!(!seed_path.exists() && !public_path.exists());
@@ -325,7 +331,7 @@ fn a_missing_seed_directory_keeps_the_public_file_and_names_its_kind() -> TestRe
     let dir = tempfile::tempdir()?;
     let public_path = dir.path().join("public");
     let missing = dir.path().join("missing").join("seed");
-    let refusal = write_keypair_files(fixed_fill, &missing, &public_path, &mut Vec::new())
+    let refusal = write_keypair_files(fixed_fill, &missing, &public_path, &mut Vec::new(), check_seed_handle)
         .err()
         .ok_or("accepted")?;
     assert!(matches!(refusal, CliError::PublicKept(_)));
@@ -356,7 +362,6 @@ fn a_refused_seed_handle_gets_no_byte_and_nothing_is_removed() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn the_handle_check_refuses_a_lax_mode_and_accepts_a_private_file() -> TestResult {
-    use remote_desktop::cli::check_seed_handle;
     let dir = tempfile::tempdir()?;
     let lax_path = dir.path().join("lax");
     let lax = std::fs::File::create(&lax_path)?;
@@ -375,7 +380,7 @@ fn a_failing_stdout_leaves_both_files() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (seed_path, public_path) = (dir.path().join("seed"), dir.path().join("public"));
     assert!(matches!(
-        write_keypair_files(fixed_fill, &seed_path, &public_path, &mut FailingWriter),
+        write_keypair_files(fixed_fill, &seed_path, &public_path, &mut FailingWriter, check_seed_handle),
         Err(CliError::Io(_))
     ));
     assert!(seed_path.exists() && public_path.exists());
@@ -555,5 +560,53 @@ fn io_failures_stop_the_session() -> TestResult {
             Err(format!("a reader failing after {remaining} bytes did not stop the session"))
         }
     })?;
+    Ok(())
+}
+
+
+#[test]
+fn keygen_applies_the_check_it_is_given_before_any_seed_byte() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (seed_path, public_path) = (dir.path().join("seed"), dir.path().join("public"));
+    let refusal = write_keypair_files(fixed_fill, &seed_path, &public_path, &mut Vec::new(), refusing_check)
+        .err()
+        .ok_or("accepted")?;
+    assert!(matches!(refusal, CliError::PublicKept(cause) if matches!(*cause, CliError::SeedMode)));
+    assert_eq!(std::fs::metadata(&seed_path)?.len(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_public_write_is_named_by_kind() -> TestResult {
+    let refusal = write_public_hex(&mut FailingWriter, b"ab").err().ok_or("accepted")?;
+    assert!(matches!(refusal, CliError::PublicWriteFailed(_)));
+    assert!(refusal.to_string().contains("public file"));
+    Ok(())
+}
+
+
+struct CountingWriter {
+    calls: usize,
+}
+
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.calls += 1;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+#[test]
+fn the_hex_and_its_newline_go_out_in_one_write() -> TestResult {
+    let mut writer = CountingWriter { calls: 0 };
+    write_hex_line(&mut writer, b"abcd")?;
+    assert_eq!(writer.calls, 1);
     Ok(())
 }

@@ -1,7 +1,7 @@
 use core_audit::log::{append, genesis_log};
 use core_config::reload::ReloadContext;
 use core_config::watch::watch_files;
-use remote_desktop::cli::{verify_session, write_issued, write_keypair_files};
+use remote_desktop::cli::{check_seed_handle, verify_session, write_issued, write_keypair_files};
 use remote_desktop::keys::open_keys_engine;
 use remote_desktop::model::DEFAULT_LIVE_TOKENS;
 use remote_desktop::sign::os_random;
@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Path::new(seed_file),
             Path::new(public_file),
             &mut stdout(),
+            check_seed_handle,
         )?),
         ["issue", rest @ ..] => Ok(write_issued(rest, now_seconds(), os_random, &mut stdout())?),
         ["verify", keys_file, peer, tenant] => verify(keys_file, peer, tenant, None),
