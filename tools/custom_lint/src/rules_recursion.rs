@@ -3,6 +3,7 @@ use crate::{
     tokens::{is_keyword, significant_tokens, Token},
     types::CallGraph,
 };
+use petgraph::{algo::kosaraju_scc, graphmap::DiGraphMap};
 use quote::ToTokens;
 use ra_ap_rustc_lexer::TokenKind;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,19 +83,27 @@ pub fn callees(function: &ItemFn, aliases: &BTreeMap<String, String>, names: &BT
 }
 
 
-pub fn extend_reach(reach: &CallGraph) -> CallGraph {
-    reach
-        .iter()
-        .map(|(name, targets)| {
-            let further = targets.iter().flat_map(|target| reach.get(target).into_iter().flatten());
-            (name.clone(), targets.iter().chain(further).cloned().collect())
-        })
-        .collect()
+pub struct Reach<'a> {
+    pub recursive: BTreeSet<&'a str>,
+    pub steps: usize,
 }
 
 
-pub fn is_recursive(reach: &CallGraph, name: &str) -> bool {
-    reach.get(name).is_some_and(|targets| targets.contains(name))
+pub fn recursive_functions(graph: &CallGraph) -> Reach<'_> {
+    let edges: Vec<(&str, &str)> = graph
+        .iter()
+        .flat_map(|(name, targets)| targets.iter().map(move |target| (name.as_str(), target.as_str())))
+        .collect();
+    let steps = graph.len() + edges.len();
+    let digraph = DiGraphMap::<&str, ()>::from_edges(edges);
+    let recursive = kosaraju_scc(&digraph)
+        .into_iter()
+        .flat_map(|component| match component.as_slice() {
+            [single] if !digraph.contains_edge(single, single) => Vec::new(),
+            _ => component,
+        })
+        .collect();
+    Reach { recursive, steps }
 }
 
 
@@ -142,10 +151,10 @@ pub fn recursion_in_crate(contexts: &[&Context]) -> Vec<Violation> {
             .extend(callees(located.function, &located.file.aliases, &names));
         graph
     });
-    let reach = (0..names.len()).fold(edges, |current, _| extend_reach(&current));
+    let reach = recursive_functions(&edges);
     functions
         .iter()
-        .filter(|located| is_recursive(&reach, &located.function.sig.ident.to_string()))
+        .filter(|located| reach.recursive.contains(located.function.sig.ident.to_string().as_str()))
         .map(|located| {
             let function = located.function;
             let start = function.sig.ident.span().start();
