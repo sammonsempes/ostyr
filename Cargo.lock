@@ -6909,6 +6909,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "virt-inventory"
+version = "0.0.0"
+dependencies = [
+ "core-pg",
+ "k8s-inventory",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "vuln-match"
 version = "0.0.0"
 dependencies = [

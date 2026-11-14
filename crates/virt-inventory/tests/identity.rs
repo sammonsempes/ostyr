@@ -1,0 +1,171 @@
+#[path = "common/fixtures.rs"]
+mod fixtures;
+#[path = "common/types.rs"]
+mod types;
+
+
+use fixtures::{data, guest, node, set, storage, value};
+use serde_json::Value;
+use types::TestResult;
+use virt_inventory::diff::diff;
+use virt_inventory::error::ParseError;
+use virt_inventory::inventory::build_inventory;
+use virt_inventory::limits::Limits;
+use virt_inventory::model::{ItemKey, Parsed, ResourceKind};
+use virt_inventory::proxmox::{parse_permissions, parse_resources, valid_acl_path, valid_display_name};
+
+
+const SEGMENT_MAX: usize = 64;
+
+
+const SEGMENTS_MAX: usize = 8;
+
+
+const NODE_MAX: usize = 63;
+
+
+const ACCEPTED_NODES: usize = 4;
+
+
+const ACCEPTED_STORAGES: usize = 3;
+
+
+const VMID_BASE: usize = 100;
+
+
+const LOST_KEYS: usize = 2;
+
+
+fn parsed_of(items: Vec<Value>) -> Result<Parsed, ParseError> {
+    parse_resources(data(items).as_slice(), &Limits::default())
+}
+
+
+fn qemu_key() -> ItemKey {
+    ItemKey {
+        kind: ResourceKind::Qemu,
+        key: "100".to_owned(),
+    }
+}
+
+
+#[test]
+fn look_alike_node_names_are_refused() -> TestResult {
+    let names = ["pve\u{3164}", "pve\u{a0}", "pve ", "\u{440}ve", "-pve", "pve-", "", "a_b", "a.b"];
+    let parsed = parsed_of(names.iter().map(|name| node(name)).collect())?;
+    assert!(parsed.items.is_empty());
+    assert_eq!((parsed.skipped.bad_field, parsed.skipped.key_lost), (names.len(), names.len()));
+    let accepted = parsed_of(vec![node("pve"), node("pve-2"), node("a"), node(&"a".repeat(NODE_MAX))])?;
+    assert_eq!(accepted.items.len(), ACCEPTED_NODES);
+    let too_long = parsed_of(vec![node(&"a".repeat(NODE_MAX + 1))])?;
+    assert_eq!(too_long.skipped.bad_field, 1);
+    Ok(())
+}
+
+
+#[test]
+fn look_alike_storage_ids_are_refused() -> TestResult {
+    let ids = ["lvm\u{3164}", "lvm ", "-lvm", "1lvm", "", "l/vm", "l\u{430}"];
+    let parsed = parsed_of(ids.iter().map(|id| storage("pve", id)).collect())?;
+    assert!(parsed.items.is_empty());
+    assert_eq!(parsed.skipped.bad_field, ids.len());
+    let accepted = parsed_of(vec![
+        storage("pve", "local-lvm"),
+        storage("pve", "a.b_c"),
+        storage("pve", &"a".repeat(SEGMENT_MAX)),
+    ])?;
+    assert_eq!(accepted.items.len(), ACCEPTED_STORAGES);
+    let too_long = parsed_of(vec![storage("pve", &"a".repeat(SEGMENT_MAX + 1))])?;
+    assert_eq!(too_long.skipped.bad_field, 1);
+    Ok(())
+}
+
+
+#[test]
+fn look_alike_acl_paths_are_refused() -> TestResult {
+    let good = ["/", "/vms/100", "/storage/local-lvm", "/access/groups", "/a/b@pve/c:d.e_f"];
+    good.iter().for_each(|path| assert!(valid_acl_path(path), "{path}"));
+    let long = format!("/{}", "a".repeat(SEGMENT_MAX + 1));
+    let deep = "/a".repeat(SEGMENTS_MAX + 1);
+    let bad = [
+        "/vms/100\u{3164}",
+        "vms",
+        "",
+        "/vms/",
+        "//",
+        "/a b",
+        "/a\nb",
+        "/\u{430}",
+        long.as_str(),
+        deep.as_str(),
+    ];
+    bad.iter().for_each(|path| assert!(!valid_acl_path(path), "{path:?}"));
+    assert!(valid_acl_path(&"/a".repeat(SEGMENTS_MAX)));
+    let body = r#"{"data":{"/vms/100ㅤ":{"VM.Audit":1}}}"#;
+    assert!(matches!(
+        parse_permissions(body.as_bytes(), &Limits::default()),
+        Err(ParseError::BadPermission)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_look_alike_guest_name_is_dropped_and_counted_with_the_item_kept() -> TestResult {
+    let names = ["web\u{3164}", "web\u{202e}", r"a\nb", "web ", " web", "a  b", ""];
+    let each = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| parsed_of(vec![guest("qemu", &(VMID_BASE + index).to_string(), name)]))
+        .collect::<Result<Vec<_>, _>>()?;
+    each.iter().for_each(|one| {
+        assert_eq!((one.items.len(), one.skipped.name_dropped, one.skipped.bad_field), (1, 1, 0));
+        assert!(one.items.iter().all(|item| item.name.is_none()));
+    });
+    let kept = parsed_of(vec![guest("qemu", "100", "web-1"), guest("qemu", "101", "my vm")])?;
+    assert_eq!(kept.skipped.name_dropped, 0);
+    assert!(valid_display_name("my vm", &Limits::default()));
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_present_guest_is_unreadable_never_retired() -> TestResult {
+    let previous = build_inventory("acme", "pve-1", parsed_of(vec![guest("qemu", "100", "a")])?)?;
+    let mut wrong_node = guest("qemu", "100", "a");
+    set(&mut wrong_node, "/node", "5")?;
+    let wrong_storage = value(r#"{"type":"qemu","vmid":100,"node":"pve","storage":7}"#);
+    let mut mistyped_name = guest("qemu", "100", "a");
+    set(&mut mistyped_name, "/name", "[]")?;
+    for element in [wrong_node, wrong_storage, mistyped_name] {
+        let current = build_inventory("acme", "pve-1", parsed_of(vec![element.clone()])?)?;
+        let changes = diff(&previous, &current)?;
+        assert!(changes.retired.is_empty(), "retired");
+        assert_eq!(changes.unreadable, vec![qemu_key()], "{element}");
+    }
+    let repeated_other = br#"{"data":[{"type":"qemu","vmid":100,"node":"pve","status":"a","status":"b"}]}"#;
+    let kept = parse_resources(repeated_other.as_slice(), &Limits::default())?;
+    assert_eq!((kept.skipped.refused_keys, kept.skipped.key_lost), (vec![qemu_key()], 0));
+    let duplicate_vmid = br#"{"data":[{"type":"qemu","vmid":100,"vmid":101,"node":"pve"}]}"#;
+    assert_eq!(parse_resources(duplicate_vmid.as_slice(), &Limits::default())?.skipped.key_lost, 1);
+    Ok(())
+}
+
+
+#[test]
+fn refused_node_and_storage_keys_read_only_their_own_parts() -> TestResult {
+    let mut host = node("pve");
+    set(&mut host, "/maxcpu", "99999999")?;
+    set(&mut host, "/status", "5")?;
+    let mut volume = storage("pve", "local");
+    set(&mut volume, "/maxdisk", "-1")?;
+    let parsed = parsed_of(vec![host, volume])?;
+    let keys = parsed.skipped.refused_keys.iter().map(|key| key.key.as_str()).collect::<Vec<_>>();
+    assert_eq!(keys, ["pve", "pve/local"]);
+    let lost = parsed_of(vec![
+        value(r#"{"type":"node","node":5,"maxcpu":99999999}"#),
+        value(r#"{"type":"storage","node":"pve","storage":5,"maxdisk":-1}"#),
+    ])?;
+    assert_eq!(lost.skipped.key_lost, LOST_KEYS);
+    Ok(())
+}
