@@ -360,6 +360,45 @@ fn a_repeated_id_is_skipped_as_duplicate() -> Result<(), Box<dyn Error>> {
 }
 
 
+fn kept_and_skips(listing: &Listing) -> (usize, Option<u64>, Option<u64>) {
+    (
+        listing.snapshots.len(),
+        listing.skipped.get(&SkipReason::BadTime).copied(),
+        listing.skipped.get(&SkipReason::Duplicate).copied(),
+    )
+}
+
+
+#[test]
+fn a_restic_copy_that_does_not_parse_leaves_the_good_copy_and_no_duplicate() -> Result<(), Box<dyn Error>> {
+    let good = restic_item(FIRST);
+    let bad = set_field(restic_item(FIRST), "time", json!("yesterday"));
+    let outcomes = [json!([good.clone(), bad.clone()]), json!([bad, good])]
+        .iter()
+        .map(|listing| restic(listing, &Limits::default()).map(|parsed| kept_and_skips(&parsed)))
+        .collect::<Result<Vec<_>, BackupError>>()?;
+    assert_eq!(outcomes, vec![(1, Some(1), None), (1, Some(1), None)]);
+    Ok(())
+}
+
+
+#[test]
+fn a_borg_copy_that_does_not_parse_leaves_the_good_copy_and_no_duplicate() -> Result<(), Box<dyn Error>> {
+    let good = borg_item(FIRST, "web1-monday");
+    let bad = set_field(
+        set_field(borg_item(FIRST, "web1-monday"), "start", json!("yesterday")),
+        "time",
+        json!("yesterday"),
+    );
+    let outcomes = [borg_root(json!([good.clone(), bad.clone()])), borg_root(json!([bad, good]))]
+        .iter()
+        .map(|listing| borg(listing, true, &Limits::default()).map(|parsed| kept_and_skips(&parsed)))
+        .collect::<Result<Vec<_>, BackupError>>()?;
+    assert_eq!(outcomes, vec![(1, Some(1), None), (1, Some(1), None)]);
+    Ok(())
+}
+
+
 #[test]
 fn borg_listing_reads_naive_time_as_utc() -> Result<(), Box<dyn Error>> {
     let listing = borg(&borg_root(json!([borg_item(FIRST, "web1-monday")])), true, &Limits::default())?;
