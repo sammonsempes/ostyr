@@ -5,3 +5,5 @@ pub mod error;
 pub mod mask;
 pub mod model;
 pub mod report;
+#[cfg(unix)]
+pub mod scan;
