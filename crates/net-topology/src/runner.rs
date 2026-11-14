@@ -33,7 +33,7 @@ pub const NEW_PROCESS_GROUP: i32 = 0;
 pub const PROC_STATUS: &str = "/proc/self/status";
 
 
-pub const MAX_STATUS_BYTES: u64 = 65_536;
+pub const MAX_STATUS_BYTES: u64 = 1_048_576;
 
 
 pub const SIGCHLD_NUMBER: u32 = 17;
@@ -43,6 +43,12 @@ pub const HEX_RADIX: u32 = 16;
 
 
 pub const SIGIGN_PREFIX: &str = "SigIgn:";
+
+
+pub const SIGIGN_DIGITS: usize = 16;
+
+
+pub const BITS_PER_HEX_DIGIT: u32 = 4;
 
 
 pub const LLDPCLI_PREFIX: [&str; 5] = ["-f", "json0", "show", "neighbors", "ports"];
@@ -214,21 +220,37 @@ fn unwaitable(reason: &str) -> RunFailure {
 }
 
 
-/// True when the `SigIgn` mask of the status file at `status` has SIGCHLD set; a file or a mask that cannot be read is `Unwaitable` (no `/proc`: refuse).
+fn sigign_bits(text: &str) -> Result<u64, RunFailure> {
+    let mask = text
+        .split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .find_map(|line| line.strip_prefix(SIGIGN_PREFIX))
+        .ok_or_else(|| unwaitable("no complete SigIgn line"))?;
+    let digits = mask.trim_start_matches([' ', '\t']).trim_end_matches('\n');
+    let bits = digits.chars().try_fold(u64::MIN, |bits, digit| {
+        digit.to_digit(HEX_RADIX).map(|value| (bits << BITS_PER_HEX_DIGIT) | u64::from(value))
+    });
+    bits.filter(|_| digits.len() == SIGIGN_DIGITS)
+        .ok_or_else(|| unwaitable("SigIgn is not 16 hexadecimal digits"))
+}
+
+
+/// True when the `SigIgn` mask of the status file at `status` has SIGCHLD set; a file cut at the cap or a mask that cannot be read is `Unwaitable`.
 pub fn sigchld_ignored(status: &Path) -> Result<bool, RunFailure> {
     let mut text = String::new();
-    File::open(status)
-        .and_then(|file| file.take(MAX_STATUS_BYTES).read_to_string(&mut text))
+    let read = File::open(status)
+        .and_then(|file| file.take(MAX_STATUS_BYTES + 1).read_to_string(&mut text))
         .map_err(|error| {
             let kind = error.kind();
             debug!(?kind, "the status file cannot be read");
             RunFailure::Unwaitable
         })?;
-    let mask = text
-        .lines()
-        .find_map(|line| line.strip_prefix(SIGIGN_PREFIX))
-        .ok_or_else(|| unwaitable("no SigIgn line"))?;
-    let bits = u64::from_str_radix(mask.trim(), HEX_RADIX).map_err(|_| unwaitable("SigIgn is not hexadecimal"))?;
+    let cut = u64::try_from(read).map_or(true, |count| count > MAX_STATUS_BYTES);
+    let bits = if cut {
+        Err(unwaitable("the status file reaches the cap"))
+    } else {
+        sigign_bits(&text)
+    }?;
     Ok(bits & (1 << (SIGCHLD_NUMBER - 1)) != 0)
 }
 
