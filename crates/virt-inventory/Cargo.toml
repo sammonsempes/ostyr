@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 core-pg = { version = "0.0.0", path = "../core-pg" }
-k8s-inventory = { version = "0.0.0", path = "../k8s-inventory" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_with = { version = "3", default-features = false, features = ["std"] }
