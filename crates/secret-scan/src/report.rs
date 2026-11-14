@@ -64,12 +64,12 @@ fn not_an_array(error: serde_json::Error) -> ReportError {
 }
 
 
-fn classify(entry: &RawValue, patterns: &[Pattern], limits: &Limits) -> Outcome {
-    match serde_json::from_str::<RawFinding>(entry.get()) {
-        Ok(raw) if patterns.iter().any(|pattern| pattern.matches(&raw.file)) => Outcome::Skipped,
-        Ok(raw) => Outcome::Kept(Finding {
-            file: escape_marked(&raw.file, MAX_FIELD_CHARS),
-            file_digest: path_digest(&raw.file),
+fn classify(entry: &RawValue, patterns: &[Pattern], limits: &Limits, map_path: &dyn Fn(&str) -> String) -> Outcome {
+    match serde_json::from_str::<RawFinding>(entry.get()).map(|raw| (map_path(&raw.file), raw)) {
+        Ok((path, _)) if patterns.iter().any(|pattern| pattern.matches(&path)) => Outcome::Skipped,
+        Ok((path, raw)) => Outcome::Kept(Finding {
+            file: escape_marked(&path, MAX_FIELD_CHARS),
+            file_digest: path_digest(&path),
             start_line: raw.start_line,
             end_line: raw.end_line,
             commit: raw
@@ -88,8 +88,26 @@ fn classify(entry: &RawValue, patterns: &[Pattern], limits: &Limits) -> Outcome 
 }
 
 
+fn keep_path(file: &str) -> String {
+    file.to_string()
+}
+
+
 /// Parses one gitleaks JSON report for one tenant and scan scope into masked findings.
 pub fn parse_report<Source: Read>(reader: Source, limits: &Limits, tenant: &str, scope_id: &str, scope: &ScanScope) -> Result<Report, ReportError> {
+    parse_report_mapped(reader, limits, tenant, scope_id, scope, &keep_path)
+}
+
+
+/// `parse_report` with every reported path passed through `map_path` first (scope globs, shown path and digest use the mapped path).
+pub fn parse_report_mapped<Source: Read>(
+    reader: Source,
+    limits: &Limits,
+    tenant: &str,
+    scope_id: &str,
+    scope: &ScanScope,
+    map_path: &dyn Fn(&str) -> String,
+) -> Result<Report, ReportError> {
     tenant_scope(tenant).map_err(ReportError::InvalidTenant)?;
     let patterns = scope
         .skipped_paths
@@ -103,7 +121,10 @@ pub fn parse_report<Source: Read>(reader: Source, limits: &Limits, tenant: &str,
         Err(ReportError::TooManyFindings { max: limits.max_findings })
     } else {
         let entries = serde_json::from_slice::<Vec<&RawValue>>(&buffer).map_err(not_an_array)?;
-        let outcomes = entries.iter().map(|entry| classify(entry, &patterns, limits)).collect::<Vec<_>>();
+        let outcomes = entries
+            .iter()
+            .map(|entry| classify(entry, &patterns, limits, map_path))
+            .collect::<Vec<_>>();
         let malformed = outcomes.iter().filter(|outcome| matches!(outcome, Outcome::Malformed)).count();
         let skipped = outcomes.iter().filter(|outcome| matches!(outcome, Outcome::Skipped)).count();
         let findings = outcomes
