@@ -326,3 +326,15 @@ fn summary_and_event_id_agree_without_a_commit() -> TestResult {
     assert!(alert.summary.text.contains(r#""commit":"none""#));
     Ok(())
 }
+
+
+#[test]
+fn a_finding_of_the_canary_rule_is_dropped_and_never_counted() -> TestResult {
+    let report = br#"[{"File":"/a","StartLine":1,"EndLine":1,"RuleID":"ostyr-canary","Match":"m","Secret":"m"},
+        {"File":"/skipped/b","StartLine":1,"EndLine":1,"RuleID":"ostyr-canary","Match":"m","Secret":"m"},
+        {"File":"/c","StartLine":1,"EndLine":1,"RuleID":"other","Match":"m","Secret":"m"}]"#;
+    let parsed = parse_report(report.as_slice(), &Limits::default(), "acme", "s", &scope_skipping(&["/skipped/*"]))?;
+    assert_eq!((parsed.findings.len(), parsed.skipped, parsed.malformed), (1, 0, 0));
+    assert_eq!(parsed.findings.first().map(|finding| finding.rule_id.as_str()), Some("other"));
+    Ok(())
+}
