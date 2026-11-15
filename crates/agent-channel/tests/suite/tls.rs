@@ -20,6 +20,7 @@ const BROKEN_CERTIFICATE_PEM: &str = "-----BEGIN CERTIFICATE-----\n!!!\n-----END
 const JUNK_CERTIFICATE_PEM: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
 
 
+#[cfg(unix)]
 #[test]
 fn key_file_readable_by_others_is_refused() -> TestResult {
     let dir = tempdir()?;
@@ -31,6 +32,7 @@ fn key_file_readable_by_others_is_refused() -> TestResult {
 }
 
 
+#[cfg(unix)]
 #[test]
 fn group_readable_key_is_refused_by_both_configurations() -> TestResult {
     let dir = tempdir()?;
@@ -41,6 +43,18 @@ fn group_readable_key_is_refused_by_both_configurations() -> TestResult {
     client.key = write_file(dir.path(), "loose-agent.key", &fs::read_to_string(&client.key)?, WORLD_READABLE_MODE)?;
     assert!(matches!(server_config(&server), Err(ChannelError::KeyPermissions { .. })));
     assert!(matches!(client_config(&client), Err(ChannelError::KeyPermissions { .. })));
+    Ok(())
+}
+
+
+#[cfg(windows)]
+#[test]
+fn windows_key_file_is_read_without_a_mode_check() -> TestResult {
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let leaf = issue(&platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
+    let path = write_file(dir.path(), "agent.key", &leaf.key_pem, WORLD_READABLE_MODE)?;
+    assert_eq!(read_private_key(&path)?.pem.expose_secret(), leaf.key_pem.as_str());
     Ok(())
 }
 

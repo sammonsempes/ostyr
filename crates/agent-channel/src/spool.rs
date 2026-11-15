@@ -7,9 +7,10 @@ use core_audit::log::owner_only;
 use prost::encoding::encoded_len_varint;
 use prost::Message;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 
 /// Event lines claimed from the spool file per run; the rest goes back to the spool for the next run.
@@ -141,17 +142,91 @@ pub fn joined_lines(mut lines: &mut dyn Iterator<Item = io::Result<String>>) -> 
 }
 
 
-/// Appends the lines to the spool in one write, creating it only when there is something to append; returns whether it appended.
+/// Lock attempts of one append before it fails with `SPOOL_LOCK_BUSY`.
+pub const SPOOL_LOCK_ATTEMPTS: u32 = 3_000;
+
+
+/// Pause between two lock attempts; with `SPOOL_LOCK_ATTEMPTS` the deadline is about 30 seconds.
+pub const SPOOL_LOCK_PAUSE: Duration = Duration::from_millis(10);
+
+
+/// The fixed error text of an append that never got the spool lock.
+pub const SPOOL_LOCK_BUSY: &str = "spool lock held by another process, append abandoned";
+
+
+/// The Windows error code of a read refused by a byte-range lock.
+pub const WINDOWS_LOCK_VIOLATION: i32 = 33;
+
+
+/// Sleeps `SPOOL_LOCK_PAUSE`.
+pub fn pause_between_lock_attempts() {
+    std::thread::sleep(SPOOL_LOCK_PAUSE);
+}
+
+
+/// Takes the lock through `try_lock`, trying at most `attempts` times and calling `pause` after each refusal; the fixed `SPOOL_LOCK_BUSY` error when all fail.
+pub fn lock_bounded(attempts: u32, try_lock: &mut dyn FnMut() -> Result<(), TryLockError>, pause: &mut dyn FnMut()) -> io::Result<()> {
+    (0..attempts)
+        .find_map(|_| match try_lock() {
+            Ok(()) => Some(Ok(())),
+            Err(TryLockError::WouldBlock) => {
+                pause();
+                None
+            }
+            Err(TryLockError::Error(error)) => Some(Err(error)),
+        })
+        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, SPOOL_LOCK_BUSY)))
+}
+
+
+/// Whether the error is a Windows read refused because a producer holds the spool lock.
+pub fn is_lock_violation(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_LOCK_VIOLATION)
+}
+
+
+/// Appends the lines to the spool in one write under an exclusive lock of the file (released when it closes), creating it only when there is something to append; returns whether it appended.
 pub fn append_back(lines: impl Iterator<Item = io::Result<String>>, spool: &Path) -> io::Result<bool> {
+    append_locked(lines, spool, SPOOL_LOCK_ATTEMPTS, &mut pause_between_lock_attempts)
+}
+
+
+/// Writes the text in one `write_all` under the exclusive lock of the spool, released when the handle drops (before the caller syncs).
+pub fn write_locked(text: &str, spool: &Path, attempts: u32, pause: &mut dyn FnMut()) -> io::Result<()> {
+    let mut out = owner_only(OpenOptions::new().read(true).append(true).create(true)).open(spool)?;
+    lock_bounded(attempts, &mut || out.try_lock(), pause)?;
+    out.write_all(text.as_bytes())
+}
+
+
+/// `append_back` with the lock attempts and the pause between them given.
+pub fn append_locked(lines: impl Iterator<Item = io::Result<String>>, spool: &Path, attempts: u32, pause: &mut dyn FnMut()) -> io::Result<bool> {
     let mut rest = lines.peekable();
     if rest.peek().is_some() {
         let text = joined_lines(&mut rest)?;
-        let mut out = owner_only(OpenOptions::new().append(true).create(true)).open(spool)?;
-        out.write_all(text.as_bytes())?;
-        out.sync_all()?;
+        write_locked(&text, spool, attempts, pause)?;
+        OpenOptions::new().append(true).open(spool)?.sync_all()?;
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+
+/// How many lines of the spool the next claim takes, or none when a producer holds its lock (Windows): the claim is left for the next run, logged.
+pub fn lines_to_claim(path: &Path, limit: usize) -> io::Result<Option<u64>> {
+    lines_to_claim_with(path, limit, count_lines)
+}
+
+
+/// `lines_to_claim` with the counting function given.
+pub fn lines_to_claim_with(path: &Path, limit: usize, count: fn(&Path, usize) -> io::Result<u64>) -> io::Result<Option<u64>> {
+    match count(path, limit) {
+        Err(error) if is_lock_violation(&error) => {
+            tracing::warn!(%error, "spool locked by a producer, claim left for the next run");
+            Ok(None)
+        }
+        other => other.map(Some),
     }
 }
 
@@ -274,8 +349,12 @@ pub fn load_claimed(sending: &Path, spool: &Path, count: u64, limit: usize) -> i
 
 /// Renames a fresh spool to the sending file after recording the new sequences, unless a sending file is already there (a crashed run).
 pub fn claim_fresh(file: &AgentFile, sending: &Path) -> Result<(), AppError> {
-    if !sending.try_exists()? && file.spool_file.try_exists()? {
-        let count = count_lines(&file.spool_file, line_limit(file))?;
+    let claimable = if !sending.try_exists()? && file.spool_file.try_exists()? {
+        lines_to_claim(&file.spool_file, line_limit(file))?
+    } else {
+        None
+    };
+    if let Some(count) = claimable {
         let state = read_sequence(&file.sequence_file)?;
         let used = state
             .used
