@@ -409,6 +409,11 @@ fn thresholds_are_strict() -> TestResult {
     assert!(matches!(parse_thresholds("min_battery_charges: 5\n"), Err(SmartError::Thresholds(_))));
     assert!(matches!(parse_thresholds("min_runtime_seconds: -1\n"), Err(SmartError::Thresholds(_))));
     assert!(matches!(parse_thresholds("- a\n"), Err(SmartError::Thresholds(_))));
+    let leaked = parse_thresholds("min_battery_charge: hunter2-secret\n").err().ok_or("accepted")?;
+    let shown = std::iter::successors(Some(&leaked as &dyn std::error::Error), |current| current.source())
+        .map(|current| format!("{current} {current:?}"))
+        .collect::<String>();
+    assert!(!shown.contains("hunter2"), "{shown}");
     let huge = format!("min_runtime_seconds: 1\n{}", " ".repeat(hardware_health::limits::MAX_THRESHOLDS_BYTES));
     assert!(matches!(parse_thresholds(&huge), Err(SmartError::ThresholdsTooLarge { .. })));
     Ok(())

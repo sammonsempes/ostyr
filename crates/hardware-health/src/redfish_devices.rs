@@ -24,18 +24,26 @@ pub fn base_of(device: &RedfishDevice) -> &str {
 }
 
 
+/// A port is ASCII digits with no leading zero (so no `+`), a `u16` of at least `MIN_PORT`.
+pub fn is_port_text(port: &str) -> bool {
+    let digits = port.bytes().all(|byte| byte.is_ascii_digit());
+    digits && !port.starts_with('0') && port.parse::<u16>().is_ok_and(|number| number >= MIN_PORT)
+}
+
+
 pub fn is_base_url(text: &str) -> bool {
     let trimmed = text.trim_end_matches('/');
     text.parse::<Uri>().is_ok_and(|uri| {
         let authority = uri.authority().map_or("", |found| found.as_str());
-        let port_text = authority.rsplit_once(':').map(|(_, port)| port).filter(|port| !port.ends_with(']'));
+        let split = authority.rsplit_once(':').filter(|(_, port)| !port.ends_with(']'));
+        let host = split.map_or(authority, |(host, _)| host);
         [
             text.len() <= MAX_PATH_TEXT_BYTES,
             uri.scheme_str() == Some("https"),
             uri.path() == "/",
             uri.query().is_none(),
-            !authority.is_empty(),
-            port_text.is_none_or(|port| port.parse::<u16>().is_ok_and(|number| number >= MIN_PORT)),
+            !host.is_empty(),
+            split.is_none_or(|(_, port)| is_port_text(port)),
             !authority.contains('@'),
             trimmed == format!("https://{authority}"),
         ]
