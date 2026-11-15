@@ -4,7 +4,7 @@ use crate::export::parse_export;
 use crate::scan::find_sources;
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 
 const DEFAULT_ROOT: &str = ".";
@@ -14,6 +14,18 @@ const EXPORT_ARG: usize = 1;
 
 
 const ROOT_ARG: usize = 2;
+
+
+const FIRST_SCOPE_ARG: usize = 3;
+
+
+/// Keeps the sources under one of the scope directories (relative to the root); no directory keeps all.
+pub fn in_scope(sources: Vec<PathBuf>, root: &Path, scope: &[String]) -> Vec<PathBuf> {
+    sources
+        .into_iter()
+        .filter(|source| scope.is_empty() || scope.iter().any(|dir| source.starts_with(root.join(dir))))
+        .collect()
+}
 
 
 pub fn run<Output: Write>(args: &[String], mut out: Output) -> Result<bool, GateError> {
@@ -28,7 +40,8 @@ pub fn run<Output: Write>(args: &[String], mut out: Output) -> Result<bool, Gate
         path: root.to_path_buf(),
         source,
     })?;
-    let violations = check(&export, &find_sources(&resolved)?)?;
+    let scope: Vec<String> = args.iter().skip(FIRST_SCOPE_ARG).cloned().collect();
+    let violations = check(&export, &in_scope(find_sources(&resolved)?, &resolved, &scope))?;
     violations
         .iter()
         .try_for_each(|violation| writeln!(out, "{violation}"))
