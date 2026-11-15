@@ -13,7 +13,7 @@ use secret_scan::alerting::{
     COMMIT_HEX_CHARS, DIGEST_CHARS, MAX_PATH_CHARS, MAX_TOKEN_CHARS, NO_COMMIT,
 };
 use secret_scan::error::ReportError;
-use secret_scan::model::{Finding, Limits, Report, ScanScope};
+use secret_scan::model::{CopyCounts, Finding, Limits, Report, ScanScope};
 use secret_scan::report::parse_report;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -103,6 +103,7 @@ fn report(tenant: &str, findings: Vec<Finding>) -> Report {
         findings,
         malformed: 0,
         skipped: 0,
+        copy: CopyCounts::default(),
     }
 }
 
