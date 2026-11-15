@@ -1,0 +1,139 @@
+use crate::error::ConnectorError;
+use crate::manifest::valid_file_name;
+use crate::model::{Limits, Package, MANIFEST_NAME, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, SIGNATURE_NAME};
+use crate::package::{digest_bytes, hash_capped, io_at, io_error, read_capped};
+use crate::types::{InspectFn, ListerFn};
+use rustix::fs::{openat, Dir, Mode, OFlags, CWD};
+use rustix::io::Errno;
+use std::fs::File;
+use std::io;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+
+
+pub const MAX_SHOWN_NAME_CHARS: usize = 64;
+
+
+pub const EXTRA_ENTRIES: usize = 4;
+
+
+/// A name that cannot be shown as is: lossy, escaped and cut.
+pub fn shown_name(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .take(MAX_SHOWN_NAME_CHARS)
+        .flat_map(char::escape_default)
+        .collect()
+}
+
+
+/// A package file name is an ASCII allowlist, so no two names can be one canonical entry (no `..`, no normalisation variants).
+pub fn file_name_text(bytes: &[u8]) -> Result<String, ConnectorError> {
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(name) if valid_file_name(&name) => Ok(name),
+        _ => Err(ConnectorError::BadFileName { name: shown_name(bytes) }),
+    }
+}
+
+
+pub fn errno_error(label: &str) -> impl Fn(Errno) -> ConnectorError + '_ {
+    move |errno| io_error(label, io::Error::from(errno))
+}
+
+
+/// The raw names of at most `limit` entries, the dot entries included.
+pub fn raw_entries(directory: &OwnedFd, limit: usize) -> Result<Vec<Vec<u8>>, Errno> {
+    Dir::read_from(directory).and_then(|entries| {
+        entries
+            .take(limit)
+            .map(|entry| entry.map(|found| found.file_name().to_bytes().to_vec()))
+            .collect()
+    })
+}
+
+
+/// The entry names of the opened directory: at most `max_files` files plus the signature are read before the count is refused.
+pub fn list_names_with(lister: ListerFn, directory: &OwnedFd, label: &str, max_files: usize) -> Result<Vec<String>, ConnectorError> {
+    let entries = lister(directory, max_files.saturating_add(EXTRA_ENTRIES)).map_err(errno_error(label))?;
+    let names: Vec<&Vec<u8>> = entries
+        .iter()
+        .filter(|name| name.as_slice() != b"." && name.as_slice() != b"..")
+        .collect();
+    (names.len() <= max_files.saturating_add(1))
+        .then_some(())
+        .ok_or(ConnectorError::TooManyFiles { max: max_files })?;
+    names.iter().map(|name| file_name_text(name)).collect()
+}
+
+
+pub fn list_names(directory: &OwnedFd, label: &str, max_files: usize) -> Result<Vec<String>, ConnectorError> {
+    list_names_with(raw_entries, directory, label, max_files)
+}
+
+
+/// `O_NOFOLLOW` turns a symlink into `ELOOP`; `O_NONBLOCK` keeps a FIFO from blocking the open.
+pub fn open_entry(directory: &OwnedFd, name: &str) -> Result<File, ConnectorError> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    openat(directory, name, flags, Mode::empty())
+        .map(File::from)
+        .map_err(|errno| match errno {
+            Errno::LOOP => ConnectorError::Symlink { path: name.to_owned() },
+            other => io_error(name, io::Error::from(other)),
+        })
+}
+
+
+/// A regular file with one link, judged on the metadata of the handle that is read; `inspect` is injected so a failing `fstat` can be tested.
+pub fn check_regular_with(inspect: InspectFn, handle: &File, name: &str) -> Result<(), ConnectorError> {
+    let metadata = inspect(handle).map_err(io_at(name))?;
+    metadata
+        .is_file()
+        .then_some(())
+        .ok_or_else(|| ConnectorError::NotRegular { path: name.to_owned() })?;
+    (metadata.nlink() <= 1)
+        .then_some(())
+        .ok_or_else(|| ConnectorError::HardLinked { path: name.to_owned() })
+}
+
+
+pub fn check_regular(handle: &File, name: &str) -> Result<(), ConnectorError> {
+    check_regular_with(File::metadata, handle, name)
+}
+
+
+/// The manifest and the signature are read into memory (bounded); the manifest bytes are hashed from the buffer that is kept for parsing.
+pub fn read_entry(directory: &OwnedFd, limits: &Limits, mut package: Package, name: &str) -> Result<Package, ConnectorError> {
+    let mut handle = open_entry(directory, name)?;
+    check_regular(&handle, name)?;
+    match name {
+        SIGNATURE_NAME => package.signature = Some(read_capped(&mut handle, MAX_SIGNATURE_BYTES, name)?),
+        MANIFEST_NAME => {
+            package.manifest = read_capped(&mut handle, MAX_MANIFEST_BYTES as u64, name)?;
+            let digest = digest_bytes(&package.manifest);
+            package.total_bytes = package.total_bytes.saturating_add(digest.size);
+            package.files.insert(name.to_owned(), digest);
+        }
+        _ => {
+            let digest = hash_capped(&mut handle, limits.max_file_bytes, name)?;
+            package.total_bytes = package.total_bytes.saturating_add(digest.size);
+            package.files.insert(name.to_owned(), digest);
+        }
+    }
+    (package.total_bytes <= limits.max_package_bytes)
+        .then_some(package)
+        .ok_or(ConnectorError::PackageTooLarge {
+            max: limits.max_package_bytes,
+        })
+}
+
+
+/// The directory is opened once with `O_DIRECTORY | O_NOFOLLOW`; every name is then opened relative to that handle.
+pub fn scan_directory(directory: &Path, limits: &Limits) -> Result<Package, ConnectorError> {
+    let label = directory.display().to_string();
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = openat(CWD, directory, flags, Mode::empty()).map_err(errno_error(&label))?;
+    list_names(&handle, &label, limits.max_files)?
+        .iter()
+        .try_fold(Package::default(), |package, name| read_entry(&handle, limits, package, name))
+}
