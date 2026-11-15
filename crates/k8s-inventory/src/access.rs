@@ -42,6 +42,10 @@ pub const READ_VERBS: [&str; 3] = ["get", "list", "watch"];
 pub const NON_RESOURCE_VERB: &str = "get";
 
 
+/// The kube-apiserver `/logs` handler serves the control-plane host's `/var/log`.
+pub const LOGS_URL: &str = "/logs";
+
+
 pub const CREATE_VERB: &str = "create";
 
 
@@ -335,14 +339,27 @@ pub fn resource_offence(rule: &RawRule) -> Result<Option<Offence>, FetchError> {
 }
 
 
-/// A non-resource rule may only `get`.
+/// A non-resource URL names `/logs`, anything under it, or a trailing-`*` glob whose prefix covers `/logs/`.
+pub fn covers_logs(url: &str) -> bool {
+    let under_logs = url == LOGS_URL || url.starts_with("/logs/");
+    let glob_over_logs = url.strip_suffix(WILDCARD).is_some_and(|prefix| "/logs/".starts_with(prefix));
+    under_logs || glob_over_logs
+}
+
+
+/// A non-resource rule may only `get`, and not on `/logs` or a glob covering it.
 pub fn non_resource_offence(rule: &RawRule) -> Result<Option<Offence>, FetchError> {
     let verbs = strings_of(rule.verbs, "verbs")?;
     let urls = strings_of(rule.urls, "nonResourceURLs")?;
-    Ok(verbs
+    let by_verb = verbs
         .iter()
         .find(|verb| verb.as_str() != NON_RESOURCE_VERB)
-        .map(|verb| offence_of(verb, &[], &urls)))
+        .map(|verb| offence_of(verb, &[], &urls));
+    let by_url = urls
+        .iter()
+        .find(|url| covers_logs(url))
+        .map(|url| offence_of(NON_RESOURCE_VERB, &[], std::slice::from_ref(url)));
+    Ok(by_verb.or(by_url))
 }
 
 

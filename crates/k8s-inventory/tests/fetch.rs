@@ -498,6 +498,38 @@ fn a_non_resource_rule_may_only_get() -> TestResult {
 
 
 #[test]
+fn a_non_resource_get_on_logs_or_a_glob_covering_it_is_refused() -> TestResult {
+    let refused = ["/logs", "/logs/", "/logs/a", "*", "/*", "/l*", "/logs*", "/logs/*", "/logs/x*"];
+    refused.into_iter().try_for_each(|url| -> TestResult {
+        let status = with_field(
+            view_status(),
+            "nonResourceRules",
+            json!([{"verbs": ["get"], "nonResourceURLs": ["/healthz", url]}]),
+        );
+        let (error, lists) = refused_with(rules_of_status(status))?;
+        assert_eq!(offence(&error), ("get".to_owned(), String::new(), url.to_owned()));
+        assert_eq!(lists, 0);
+        Ok(())
+    })?;
+    let allowed = [
+        "/api/*",
+        "/apis/*",
+        "/healthz",
+        "/livez",
+        "/readyz",
+        "/version",
+        "/openapi/*",
+        "/log",
+        "/logsx",
+        "/m*",
+    ];
+    let status = with_field(view_status(), "nonResourceRules", json!([{"verbs": ["get"], "nonResourceURLs": allowed}]));
+    run(&rig(rules_of_status(status))?)?;
+    Ok(())
+}
+
+
+#[test]
 fn an_incomplete_or_failed_review_is_refused_and_empty_statuses_pass() -> TestResult {
     let incomplete = with_field(view_status(), "incomplete", json!(true));
     let (error, lists) = refused_with(rules_of_status(incomplete))?;
