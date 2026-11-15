@@ -120,6 +120,20 @@ fn a_refused_file_reports_its_position_and_quotes_nothing() -> TestResult {
 fn the_text_grammars() -> TestResult {
     assert!(is_base_url("https://h:1"));
     assert!(!is_base_url("https://"));
+    [
+        "https://:443",
+        "https://:443/",
+        "https://h:0",
+        "https://h:+443",
+        "https://h:0443",
+        "https://h:",
+        "https://h:65536",
+    ]
+    .iter()
+    .for_each(|text| assert!(!is_base_url(text), "{text}"));
+    ["https://h", "https://h:8443", "https://[::1]:443", "https://h:65535"]
+        .iter()
+        .for_each(|text| assert!(is_base_url(text), "{text}"));
     assert!(!is_base_url("ftp://h"));
     assert!(!is_base_url(&format!("https://{}", "h".repeat(OVER_HOST))));
     assert!(is_username("a.b_c@d-e"));

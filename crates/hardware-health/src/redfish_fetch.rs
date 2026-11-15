@@ -285,11 +285,11 @@ pub fn health_of(session: &FetchSession, limits: &RedfishLimits) -> Health {
 
 
 pub fn poll_device(device: &RedfishDevice, tenant: &TenantScope, limits: &RedfishLimits) -> Result<DeviceReport, FetchError> {
+    check_device(0, device)?;
     if device.insecure_skip_verify {
         let name = device.name.as_str();
         warn!(name, "redfish device read without certificate verification");
     }
-    check_device(0, device)?;
     let password = read_password(Path::new(&device.password_file)).map_err(FetchError::Password)?;
     let session = FetchSession {
         agent: build_agent(device)?,
