@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "ad-posture"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "ecs-normalise",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
