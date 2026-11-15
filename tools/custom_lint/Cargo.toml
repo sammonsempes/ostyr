@@ -19,6 +19,7 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
+toml_edit = "0.25"
 
 [lints]
 workspace = true
