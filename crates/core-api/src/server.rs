@@ -15,10 +15,10 @@ use axum::{Extension, Router};
 use axum_server::from_tcp;
 use axum_server::tls_rustls::{from_tcp_rustls, RustlsConfig};
 use axum_server::Server;
-use core_audit::log::check_private;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
 use core_config::reload::{reload, ReloadOutcome};
+use core_config::secret_file::{open_secret, SecretFileError};
 use hyper_util::rt::TokioTimer;
 use rustls::crypto::ring::default_provider;
 use rustls::version::{TLS12, TLS13};
@@ -56,21 +56,42 @@ pub fn check_transport(address: SocketAddr, tls: Option<&TlsFiles>) -> Result<()
 }
 
 
-/// Opens a file that must grant nothing to group or other; the refusal names the file.
+pub const MAX_PRIVATE_FILE_BYTES: u64 = 65_536;
+
+
+/// Opens a secret file through the shared checks (no symlink, regular, own or root owner, no group or other bit); the refusal names the file.
 pub fn open_private(path: &Path) -> Result<File, StartupError> {
-    let file = File::open(path)?;
-    check_private(&file).map_err(|source| StartupError::InsecureFile {
-        file: path.display().to_string(),
-        source,
-    })?;
-    Ok(file)
+    open_secret(path).map_err(private_refusal)
+}
+
+
+/// A failed open keeps its `Io` form; a refused check names the file and the check.
+pub fn private_refusal(error: SecretFileError) -> StartupError {
+    match error {
+        SecretFileError::Io { source, .. } => StartupError::Io(source),
+        other => StartupError::InsecureFile(other),
+    }
+}
+
+
+/// The whole content of a private file, at most `MAX_PRIVATE_FILE_BYTES`, read from the handle that was checked.
+pub fn read_private(path: &Path) -> Result<Vec<u8>, StartupError> {
+    let mut bytes = Vec::new();
+    open_private(path)?.take(MAX_PRIVATE_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PRIVATE_FILE_BYTES {
+        Err(StartupError::FileTooLarge {
+            file: path.display().to_string(),
+            limit: MAX_PRIVATE_FILE_BYTES,
+        })
+    } else {
+        Ok(bytes)
+    }
 }
 
 
 /// TLS 1.2 and 1.3 only; the key is read from the handle whose mode was checked and every digest comes from the bytes parsed.
 pub fn load_tls(files: &TlsFiles) -> Result<LoadedTls, StartupError> {
-    let mut key_bytes = Vec::new();
-    open_private(&files.key)?.read_to_end(&mut key_bytes)?;
+    let key_bytes = read_private(&files.key)?;
     let certificate_bytes = fs::read(&files.certificate)?;
     let certificates = CertificateDer::pem_slice_iter(&certificate_bytes).collect::<Result<Vec<_>, _>>()?;
     let key = PrivateKeyDer::from_pem_slice(&key_bytes)?;

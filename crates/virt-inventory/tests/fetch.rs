@@ -73,7 +73,7 @@ struct Rig {
 
 fn settings_for(directory: &Path, port: u16, ca_pem: &str, limits: Limits) -> Result<FetchSettings, Box<dyn Error>> {
     fs::write(directory.join("ca.pem"), ca_pem)?;
-    fs::write(directory.join("token"), format!("{TOKEN}\n"))?;
+    write_secret(directory.join("token"), format!("{TOKEN}\n"))?;
     Ok(FetchSettings {
         api_url: format!("https://{SERVER_NAME}:{port}"),
         ca_file: directory.join("ca.pem"),
@@ -275,7 +275,7 @@ fn unusable_files_are_refused_without_the_token_in_the_text() -> TestResult {
     rigged.settings.ca_file = good.ca_file.clone();
     rigged.settings.token_file = directory.join("missing-token");
     assert!(matches!(refusal(fetch_inventory(&rigged.settings))?, FetchError::TokenFile(_)));
-    fs::write(directory.join("bad-token"), format!("{TOKEN}\nx"))?;
+    write_secret(directory.join("bad-token"), format!("{TOKEN}\nx"))?;
     rigged.settings.token_file = directory.join("bad-token");
     let shaped = refusal(fetch_inventory(&rigged.settings))?;
     assert!(matches!(shaped, FetchError::TokenShape));
@@ -348,4 +348,20 @@ fn the_token_must_be_an_ascii_allowlist_with_user_and_secret() -> TestResult {
             _ => Err(format!("{token:?} was accepted")),
         })
         .map_err(Into::into)
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

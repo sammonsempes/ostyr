@@ -137,7 +137,7 @@ fn rig_with(handler: impl Fn(&str, &str) -> Reply + Send + Sync + 'static, timeo
     let standin = start(handler)?;
     let dir = tempfile::tempdir()?;
     std::fs::write(dir.path().join("ca.pem"), &standin.ca_pem)?;
-    std::fs::write(dir.path().join("password"), format!("{PASSWORD}\n"))?;
+    write_secret(dir.path().join("password"), format!("{PASSWORD}\n"))?;
     let device = RedfishDevice {
         name: "bmc1".to_owned(),
         base_url: format!("https://127.0.0.1:{}", standin.port),
@@ -518,14 +518,17 @@ fn the_password_never_reaches_an_error_text() -> TestResult {
 
 #[cfg(unix)]
 #[test]
-fn a_password_file_must_be_a_regular_file_and_a_symlink_is_followed() -> TestResult {
+fn a_password_file_must_be_a_regular_file_and_a_symlink_is_refused() -> TestResult {
     let mut rig = rig(mockup)?;
     rig.device.password_file = rig.dir.path().display().to_string();
     assert!(matches!(poll_error(&rig)?, FetchError::Password(_)));
     let link = rig.dir.path().join("link");
     std::os::unix::fs::symlink(rig.dir.path().join("password"), &link)?;
     rig.device.password_file = link.display().to_string();
-    assert_eq!(poll(&rig)?.health, file_verdict()?);
+    assert!(matches!(
+        poll_error(&rig)?,
+        FetchError::Password(core_pg::error::PgError::SecretSymlink { .. })
+    ));
     Ok(())
 }
 
@@ -630,4 +633,20 @@ fn memory_limited_child() -> TestResult {
         ));
     }
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

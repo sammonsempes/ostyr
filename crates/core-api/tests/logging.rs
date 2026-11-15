@@ -26,6 +26,7 @@ const KEY_BYTES: usize = 32;
 const KEY_FILL: u8 = 7;
 
 
+#[cfg(unix)]
 const OWNER_ONLY: u32 = 0o600;
 
 

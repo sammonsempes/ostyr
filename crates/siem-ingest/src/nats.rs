@@ -10,6 +10,7 @@ use async_nats::Event;
 use async_nats::{ConnectOptions, HeaderMap};
 use bytes::Bytes;
 use core_config::reload::{current_config, ReloadEngine};
+use core_config::secret_file::{open_secret, SecretFileError};
 use core_config::types::BoxError;
 use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt};
@@ -44,17 +45,42 @@ pub const REASON_HEADER: &str = "Ostyr-Reason";
 pub const FIRST_TOKEN: AckToken = 1;
 
 
-/// At most `cap` bytes of a file: a longer one is refused, and the content never reaches an error text.
-pub fn read_bounded(path: &Path, what: &'static str, cap: u64) -> Result<Vec<u8>, NatsError> {
+/// At most `cap` bytes of a reader: a longer one is refused, and the content never reaches an error text.
+pub fn read_capped<Source: Read>(reader: Source, what: &'static str, cap: u64) -> Result<Vec<u8>, NatsError> {
     let mut content = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(cap + 1).read_to_end(&mut content))
+    reader
+        .take(cap + 1)
+        .read_to_end(&mut content)
         .map_err(|source| NatsError::File { what, source })?;
     if content.len() as u64 > cap {
         Err(NatsError::FileTooLarge { what })
     } else {
         Ok(content)
     }
+}
+
+
+/// At most `cap` bytes of a non-secret file (the CA).
+pub fn read_bounded(path: &Path, what: &'static str, cap: u64) -> Result<Vec<u8>, NatsError> {
+    File::open(path)
+        .map_err(|source| NatsError::File { what, source })
+        .and_then(|file| read_capped(file, what, cap))
+}
+
+
+/// A failed open keeps its `File` form; a refused check names the file and the check.
+pub fn secret_failure(what: &'static str, error: SecretFileError) -> NatsError {
+    match error {
+        SecretFileError::Io { source, .. } => NatsError::File { what, source },
+        other => NatsError::SecretFile { what, source: other },
+    }
+}
+
+
+/// At most `cap` bytes of a secret file, opened without following a symlink and refused unless private and owned by the process user or root.
+pub fn read_secret_bounded(path: &Path, what: &'static str, cap: u64) -> Result<Vec<u8>, NatsError> {
+    let handle = open_secret(path).map_err(|error| secret_failure(what, error))?;
+    read_capped(handle, what, cap)
 }
 
 
@@ -104,12 +130,12 @@ pub fn connect_options(settings: &IngestSettings, dropped: Arc<AtomicBool>) -> R
     let credentials = settings
         .nats_credentials_file
         .as_deref()
-        .map(|path| read_bounded(path, "credentials", MAX_NATS_FILE_BYTES))
+        .map(|path| read_secret_bounded(path, "credentials", MAX_NATS_FILE_BYTES))
         .transpose()?;
     let password = settings
         .nats_password_file
         .as_deref()
-        .map(|path| read_bounded(path, "password", MAX_NATS_FILE_BYTES))
+        .map(|path| read_secret_bounded(path, "password", MAX_NATS_FILE_BYTES))
         .transpose()?;
     let base = ConnectOptions::new()
         .name(MODULE)

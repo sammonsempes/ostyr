@@ -1,6 +1,8 @@
 mod common;
 #[path = "../../siem-ingest/tests/nats_stub/mod.rs"]
 mod nats_stub;
+#[path = "common/private.rs"]
+mod private;
 
 
 use agent_channel::model::Identity;
@@ -21,6 +23,7 @@ use event_gateway::session::{backoff_delay, new_gateway, settings_of};
 use event_gateway::settings::{open_settings, path_text, settings_state, validate_settings};
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Stub};
 use nkeys::KeyPair;
+use private::write_private;
 use serde_json::Value;
 use siem_ingest::error::NatsError;
 use std::error::Error;
@@ -655,7 +658,7 @@ fn the_backoff_doubles_and_stops_at_its_ceiling() -> TestResult {
 fn a_bad_ca_or_credentials_file_is_a_typed_error_without_its_content() -> TestResult {
     let rig_dir = tempdir()?;
     let garbage = rig_dir.path().join("garbage");
-    fs::write(&garbage, "SECRET-CONTENT")?;
+    write_private(&garbage, "SECRET-CONTENT")?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     for settings in [
         GatewaySettings {
@@ -711,7 +714,7 @@ async fn credentials_and_payloads_never_reach_a_trace_subscriber() -> TestResult
     let stub = start_stub(None, |state| state.nonce = true)?;
     let dir = tempdir()?;
     let password_path = dir.path().join("nats.password");
-    fs::write(&password_path, format!("{TRACE_PASSWORD}\n"))?;
+    write_private(&password_path, format!("{TRACE_PASSWORD}\n"))?;
     let extra = format!("nats_user: ops\nnats_password_file: \"{}\"\n", password_path.display());
     let first = rig(&yaml(stub.port, &extra))?;
     let event = format!("{{\"marker\":\"{TRACE_PAYLOAD}\"}}");
@@ -720,7 +723,7 @@ async fn credentials_and_payloads_never_reach_a_trace_subscriber() -> TestResult
     let pair = KeyPair::new_user();
     let seed = pair.seed()?;
     let credentials_path = dir.path().join("nats.creds");
-    fs::write(
+    write_private(
         &credentials_path,
         format!("-----BEGIN NATS USER JWT-----\n{TRACE_JWT}\n------END NATS USER JWT------\n\n-----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n"),
     )?;
@@ -921,5 +924,48 @@ async fn the_summary_task_logs_every_period_until_dropped() -> TestResult {
     drop(guard);
     let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
     assert_eq!(logs.matches("refused batches since the start").count(), TWO);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+const LAX_MODE: u32 = 0o644;
+
+
+#[cfg(unix)]
+#[test]
+fn a_lax_symlinked_or_fifo_nats_secret_file_is_refused_before_any_connect() -> TestResult {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = tempdir()?;
+    let lax = dir.path().join("lax");
+    fs::write(&lax, "nats-lax-644")?;
+    fs::set_permissions(&lax, fs::Permissions::from_mode(LAX_MODE))?;
+    let private_file = dir.path().join("private");
+    write_private(&private_file, "other-service-secret")?;
+    let link = dir.path().join("link");
+    symlink(&private_file, &link)?;
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    for path in [&lax, &link, &fifo] {
+        for settings in [
+            GatewaySettings {
+                nats_password_file: Some(path.clone()),
+                nats_user: Some("ops".to_owned()),
+                ..GatewaySettings::default()
+            },
+            GatewaySettings {
+                nats_credentials_file: Some(path.clone()),
+                ..GatewaySettings::default()
+            },
+        ] {
+            let error = runtime
+                .block_on(event_gateway::session::open_session(&Arc::new(settings)))
+                .err()
+                .ok_or("accepted")?;
+            assert!(matches!(error, GatewayError::Nats(NatsError::SecretFile { .. })));
+            assert!(!error.to_string().contains("nats-lax-644") && !error.to_string().contains("other-service-secret"));
+        }
+    }
     Ok(())
 }

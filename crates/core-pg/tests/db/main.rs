@@ -16,10 +16,26 @@ use tokio::sync::mpsc::UnboundedReceiver;
 pub const DRAIN_LIMIT: usize = 100;
 
 
+pub const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+pub fn restrict(path: &Path) -> Result<(), Box<dyn Error>> {
+    Ok(fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))?)
+}
+
+
+#[cfg(not(unix))]
+pub fn restrict(_path: &Path) -> Result<(), Box<dyn Error>> {
+    Ok(())
+}
+
+
 pub fn settings_for(dir: &Path, port: u16, ca_pem: &str, password: &str, connect_timeout: u64) -> Result<PgSettings, Box<dyn Error>> {
     let password_file = dir.join("pg.pass");
     let ca_file = dir.join("ca.pem");
     fs::write(&password_file, password)?;
+    restrict(&password_file)?;
     fs::write(&ca_file, ca_pem)?;
     let text = format!(
         "host: 127.0.0.1\nport: {port}\ndatabase: ostyr\nuser: ostyr\npassword_file: {}\nca_file: {}\nconnect_timeout_secs: {connect_timeout}\n",

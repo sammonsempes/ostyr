@@ -35,12 +35,10 @@ pub enum StartupError {
     ForwarderTooWide { entry: String, minimum: u8 },
     #[error("setting `{name}` must be between {minimum} and {maximum}")]
     OutOfRange { name: &'static str, minimum: String, maximum: String },
-    #[error("{file}: {source}")]
-    InsecureFile {
-        file: String,
-        #[source]
-        source: AuditError,
-    },
+    #[error("{0}")]
+    InsecureFile(#[source] core_config::secret_file::SecretFileError),
+    #[error("{file}: larger than {limit} bytes")]
+    FileTooLarge { file: String, limit: u64 },
     #[error(
         "the key file {key_file} does not decrypt {failed} of {total} stored TOTP secrets, and no key kept at {previous} opens them either: \
          restore the key that sealed them"

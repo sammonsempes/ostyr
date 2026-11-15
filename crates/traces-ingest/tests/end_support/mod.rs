@@ -153,7 +153,7 @@ max_status_message_bytes: {}\n  max_future_skew_seconds: {}\n  max_batch_rows: {
 pub fn check_end_to_end(limits: &Limits, budget_kib: u64, fail_at: Option<usize>) -> TestResult {
     let dir = tempdir()?;
     let server = serve(fail_at)?;
-    write(dir.path().join("password"), "pw\n")?;
+    write_secret(dir.path().join("password"), "pw\n")?;
     let settings = dir.path().join("settings.yaml");
     write(
         &settings,
@@ -193,4 +193,20 @@ pub fn check_end_to_end(limits: &Limits, budget_kib: u64, fail_at: Option<usize>
     assert_eq!(handled, run.batches_sent + usize::from(fail_at.is_some()));
     assert!(growth < budget_kib, "{growth} KiB");
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> io::Result<()> {
+    write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> io::Result<()> {
+    write(path.as_ref(), content)
 }

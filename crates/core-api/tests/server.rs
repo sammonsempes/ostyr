@@ -196,6 +196,14 @@ fn tls_material_is_validated() -> TestResult {
     assert_eq!(matches!(tls_server_config(&files), Err(StartupError::InsecureFile { .. })), cfg!(unix));
     set_mode(&files.key, fixture::OWNER_ONLY)?;
 
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("key.link");
+        std::os::unix::fs::symlink(&files.key, &link)?;
+        let linked = TlsFiles { key: link, ..files.clone() };
+        assert!(matches!(tls_server_config(&linked), Err(StartupError::InsecureFile(_))));
+    }
+
     let missing_key = TlsFiles {
         key: dir.path().join("absent.key"),
         ..files.clone()

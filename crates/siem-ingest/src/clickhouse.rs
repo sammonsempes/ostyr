@@ -3,6 +3,7 @@ use crate::model::Document;
 use crate::settings::{is_loopback_http, IngestSettings};
 use crate::types::SinkFn;
 use core_config::reload::{current_config, ReloadEngine};
+use core_config::secret_file::{open_secret, SecretFileError};
 use serde_json::{Map, Value};
 use siem_schema::schema::{TENANT_COLUMN, TENANT_TIER_COLUMN};
 use std::fs::File;
@@ -144,8 +145,17 @@ pub fn agent_for(settings: &IngestSettings) -> Result<Agent, InsertError> {
 }
 
 
+/// A failed open keeps its `Credentials` form; a refused check names the file and the check.
+pub fn credentials_failure(error: SecretFileError) -> InsertError {
+    match error {
+        SecretFileError::Io { source, .. } => InsertError::Credentials(source),
+        other => InsertError::CredentialsFile(other),
+    }
+}
+
+
 pub fn read_password(path: &Path) -> Result<String, InsertError> {
-    read_secret(File::open(path).map_err(InsertError::Credentials)?)
+    read_secret(open_secret(path).map_err(credentials_failure)?)
 }
 
 

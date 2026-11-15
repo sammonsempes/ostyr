@@ -541,9 +541,25 @@ fn the_password_is_read_through_the_checked_reader() -> TestResult {
         ..settings(1)
     };
     assert!(matches!(read_key(&with_file), Err(FetchError::Password(_))));
-    fs::write(&file, format!("{PASSWORD}\n"))?;
+    write_secret(&file, format!("{PASSWORD}\n"))?;
     assert_eq!(read_key(&with_file)?.as_str(), PASSWORD);
-    fs::write(&file, BAD_BYTES)?;
+    write_secret(&file, BAD_BYTES)?;
     assert!(matches!(read_key(&with_file), Err(FetchError::PasswordEncoding(_))));
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

@@ -40,6 +40,8 @@ pub enum ExportError {
     Secret(#[source] BoxError),
     #[error(transparent)]
     Config(#[from] core_config::error::ConfigError),
+    #[error("the token file is refused: {0}")]
+    SecretFile(#[source] core_config::secret_file::SecretFileError),
     #[error("the token file {path} is larger than {max} bytes")]
     TokenTooLarge { path: String, max: usize },
     #[error("the token file {0} is empty")]

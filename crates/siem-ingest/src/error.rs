@@ -68,6 +68,8 @@ pub enum InsertError {
     Class(InsertClass),
     #[error("the ClickHouse password file could not be read")]
     Credentials(#[source] std::io::Error),
+    #[error("the ClickHouse password file is refused: {0}")]
+    CredentialsFile(#[source] core_config::secret_file::SecretFileError),
     #[error("the ClickHouse password file exceeds the size cap")]
     CredentialsTooLarge,
     #[error("the ClickHouse CA file could not be read")]
@@ -96,6 +98,12 @@ pub enum NatsError {
         what: &'static str,
         #[source]
         source: std::io::Error,
+    },
+    #[error("the NATS {what} file is refused: {source}")]
+    SecretFile {
+        what: &'static str,
+        #[source]
+        source: core_config::secret_file::SecretFileError,
     },
     #[error("the NATS {what} file exceeds the size cap")]
     FileTooLarge { what: &'static str },

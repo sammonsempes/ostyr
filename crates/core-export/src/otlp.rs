@@ -1,9 +1,9 @@
 use crate::config::OtlpConfig;
 use crate::ecs::{to_json, EcsEvent};
 use crate::error::ExportError;
+use core_config::secret_file::{open_secret, SecretFileError};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs::File;
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::Path;
@@ -50,6 +50,18 @@ pub struct LogsResponse {
 }
 
 
+/// A failed open keeps its `Io` form; a refused check names the file and the check.
+pub fn token_refusal(error: SecretFileError) -> ExportError {
+    match error {
+        SecretFileError::Io { file, source } => ExportError::Io {
+            context: format!("read token file {file}"),
+            source,
+        },
+        other => ExportError::SecretFile(other),
+    }
+}
+
+
 /// Reads the bearer token: at most `MAX_TOKEN_BYTES`, surrounding whitespace removed, never echoed in an error.
 pub fn read_token(path: &Path) -> Result<String, ExportError> {
     let shown = path.display().to_string();
@@ -58,8 +70,8 @@ pub fn read_token(path: &Path) -> Result<String, ExportError> {
         source,
     };
     let mut text = String::new();
-    File::open(path)
-        .map_err(io_error)?
+    open_secret(path)
+        .map_err(token_refusal)?
         .take(TOKEN_READ_LIMIT)
         .read_to_string(&mut text)
         .map_err(io_error)?;
