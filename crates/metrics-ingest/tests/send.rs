@@ -98,7 +98,7 @@ fn rig(timeout_ms: u64, rows_per_batch: usize) -> Result<Rig, Box<dyn std::error
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    fs::write(dir.path().join("password"), format!("{PASSWORD}\n"))?;
+    write_secret(dir.path().join("password"), format!("{PASSWORD}\n"))?;
     let settings = dir.path().join("settings.yaml");
     fs::write(
         &settings,
@@ -397,9 +397,9 @@ fn the_password_file_is_checked_when_read() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS, 1)?;
     let password = rig.dir.path().join("password");
     let elapsed = || Duration::ZERO;
-    fs::write(&password, vec![b'p'; OVERSIZE_PASSWORD])?;
+    write_secret(&password, vec![b'p'; OVERSIZE_PASSWORD])?;
     assert!(matches!(clickhouse_sender(&loaded(&rig)?, &elapsed), Err(SendError::Password(_))));
-    fs::write(&password, "\n")?;
+    write_secret(&password, "\n")?;
     assert!(matches!(clickhouse_sender(&loaded(&rig)?, &elapsed), Err(SendError::Password(_))));
     let pipe = fifo(&rig, "pipe")?;
     let on_pipe = MetricsSettings {
@@ -407,7 +407,7 @@ fn the_password_file_is_checked_when_read() -> TestResult {
         ..loaded(&rig)?
     };
     assert!(matches!(clickhouse_sender(&on_pipe, &elapsed), Err(SendError::Password(_))));
-    fs::write(&password, NOT_UTF8)?;
+    write_secret(&password, NOT_UTF8)?;
     assert!(matches!(clickhouse_sender(&loaded(&rig)?, &elapsed), Err(SendError::PasswordEncoding(_))));
     let failed = go(&rig, &request(1), "acme", STAMP, Duration::ZERO);
     assert!(matches!(failed, Err(RunError::Send(SendError::PasswordEncoding(_)))));
@@ -606,4 +606,20 @@ fn a_zero_batch_limit_and_invalid_settings_are_errors_before_any_send() -> TestR
     assert!(matches!(clickhouse_sender(&bad, &elapsed), Err(SendError::Settings(_))));
     assert!(untouched(&rig.listener)?);
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

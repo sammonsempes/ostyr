@@ -4,7 +4,6 @@ mod types;
 
 use intel_feeds::config::ClickhouseConfig;
 use intel_feeds::read::read_iocs;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -83,7 +82,7 @@ fn a_trace_subscriber_never_sees_the_key_or_a_value() -> TestResult {
     tracing::subscriber::set_global_default(subscriber)?;
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    fs::write(dir.path().join("password"), PASSWORD)?;
+    write_secret(dir.path().join("password"), PASSWORD)?;
     let config = ClickhouseConfig {
         url: format!("http://127.0.0.1:{}", listener.local_addr()?.port()),
         user: "ostyr".to_owned(),
@@ -111,4 +110,20 @@ fn a_trace_subscriber_never_sees_the_key_or_a_value() -> TestResult {
     assert!(!logged.contains(PASSWORD));
     assert!(!logged.contains("secretvalue"));
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

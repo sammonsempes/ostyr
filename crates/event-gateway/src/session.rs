@@ -6,7 +6,7 @@ use async_nats::jetstream::Context;
 use async_nats::{Client, ConnectOptions};
 use core_config::reload::{current_config, ReloadEngine};
 use siem_ingest::error::NatsError;
-use siem_ingest::nats::{bounded, mark_dropped, millis, read_bounded, tls_config, MAX_NATS_FILE_BYTES};
+use siem_ingest::nats::{bounded, mark_dropped, millis, read_bounded, read_secret_bounded, tls_config, MAX_NATS_FILE_BYTES};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,12 +32,12 @@ pub fn connect_options(settings: &GatewaySettings, dropped: Arc<AtomicBool>) -> 
     let credentials = settings
         .nats_credentials_file
         .as_deref()
-        .map(|path| read_bounded(path, "credentials", MAX_NATS_FILE_BYTES))
+        .map(|path| read_secret_bounded(path, "credentials", MAX_NATS_FILE_BYTES))
         .transpose()?;
     let password = settings
         .nats_password_file
         .as_deref()
-        .map(|path| read_bounded(path, "password", MAX_NATS_FILE_BYTES))
+        .map(|path| read_secret_bounded(path, "password", MAX_NATS_FILE_BYTES))
         .transpose()?;
     let base = ConnectOptions::new()
         .name(MODULE)

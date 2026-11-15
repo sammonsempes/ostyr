@@ -1,4 +1,5 @@
 use crate::error::PgError;
+use core_config::secret_file::open_secret;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::Path;
@@ -82,7 +83,7 @@ pub fn read_limited(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, PgErr
 /// The password bytes without the trailing line break, read afresh at each connect.
 pub fn read_password(path: &Path) -> Result<Zeroizing<Vec<u8>>, PgError> {
     let file = path.display().to_string();
-    let mut handle = open_regular(path)?;
+    let mut handle = open_secret(path)?;
     let mut bytes = read_secret(&mut handle, MAX_PASSWORD_BYTES, &file)?;
     let kept = bytes.iter().rposition(|byte| *byte != b'\n' && *byte != b'\r').map_or(0, |last| last + 1);
     bytes.truncate(kept);

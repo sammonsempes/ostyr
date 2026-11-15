@@ -265,3 +265,39 @@ fn clickhouse_url_length_is_bounded() -> Result<(), Box<dyn Error>> {
     assert!(refused.is_some_and(|text| !text.contains(&over_cap)));
     Ok(())
 }
+
+
+#[cfg(unix)]
+const LAX_MODE: u32 = 0o644;
+
+
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+#[test]
+fn a_lax_symlinked_or_fifo_password_file_is_refused() -> Result<(), Box<dyn Error>> {
+    use siem_ingest::clickhouse::read_password;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = tempfile::tempdir()?;
+    let lax = dir.path().join("lax");
+    std::fs::write(&lax, "lax-secret-644")?;
+    std::fs::set_permissions(&lax, std::fs::Permissions::from_mode(LAX_MODE))?;
+    let refused = read_password(&lax).err().ok_or("accepted")?;
+    assert!(matches!(refused, InsertError::CredentialsFile(_)));
+    let shown = format!("{refused} {:?}", std::error::Error::source(&refused));
+    assert!(shown.contains(&lax.display().to_string()));
+    assert!(!shown.contains("lax-secret-644"));
+    let private = dir.path().join("private");
+    std::fs::write(&private, "other-secret")?;
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(PRIVATE_MODE))?;
+    let link = dir.path().join("link");
+    symlink(&private, &link)?;
+    assert!(matches!(read_password(&link), Err(InsertError::CredentialsFile(_))));
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(matches!(read_password(&fifo), Err(InsertError::CredentialsFile(_))));
+    assert!(matches!(read_password(&dir.path().join("none")), Err(InsertError::Credentials(_))));
+    Ok(())
+}

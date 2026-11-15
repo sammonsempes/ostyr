@@ -1,4 +1,6 @@
 mod nats_stub;
+#[path = "common/private.rs"]
+mod private;
 
 
 use async_nats::jetstream;
@@ -8,6 +10,7 @@ use core_audit::model::NewEntry;
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Queued, Stub, StubState};
 use nkeys::KeyPair;
+use private::write_private;
 use rcgen::generate_simple_self_signed;
 use rustls::crypto::ring::default_provider;
 use rustls::ServerConfig;
@@ -440,7 +443,7 @@ fn a_tls_first_connection_with_a_ca_file_and_credentials_works() -> Result<(), B
     let ca_path = dir.path().join("ca.pem");
     let credentials_path = dir.path().join("nats.creds");
     fs::write(&ca_path, ca_pem)?;
-    fs::write(&credentials_path, credentials_text()?)?;
+    write_private(&credentials_path, credentials_text()?)?;
     let extra = format!(
         "nats_tls_first: true\nnats_ca_file: \"{}\"\nnats_credentials_file: \"{}\"\n",
         ca_path.display(),
@@ -474,6 +477,10 @@ fn files_are_read_bounded_and_refused_when_unusable() -> Result<(), Box<dyn Erro
         read_bounded(&dir.path().join("missing"), "CA", MAX_NATS_FILE_BYTES),
         Err(NatsError::File { what: "CA", .. })
     ));
+    assert!(matches!(
+        read_bounded(dir.path(), "CA", MAX_NATS_FILE_BYTES),
+        Err(NatsError::File { what: "CA", .. })
+    ));
     assert_eq!(read_bounded(&big, "CA", MAX_NATS_FILE_BYTES + 1)?.len(), MAX_NATS_FILE_BYTES as usize + 1);
     assert!(matches!(tls_config(NO_CERTIFICATE_PEM), Err(NatsError::CaEmpty)));
     assert!(matches!(tls_config(GARBAGE_PEM), Err(NatsError::CaInvalid(_))));
@@ -485,7 +492,7 @@ fn files_are_read_bounded_and_refused_when_unusable() -> Result<(), Box<dyn Erro
 fn connect_options_refuse_bad_ca_and_credentials_files() -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = tempdir()?;
     let junk = dir.path().join("junk");
-    fs::write(&junk, "junk")?;
+    write_private(&junk, "junk")?;
     let dropped_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let with_ca = IngestSettings {
         nats_ca_file: Some(junk.clone()),
@@ -530,7 +537,7 @@ fn a_user_and_a_password_file_authenticate_the_connection() -> Result<(), Box<dy
     })?;
     let dir = tempdir()?;
     let password_path = dir.path().join("nats.password");
-    fs::write(&password_path, "s3cret\n")?;
+    write_private(&password_path, "s3cret\n")?;
     let extra = format!("nats_user: ops\nnats_password_file: \"{}\"\n", password_path.display());
     let engine = engine_for(&dir, &yaml(stub.port, NORMAL_MS, &extra))?;
     let link = link_for(&engine)?;
@@ -701,7 +708,7 @@ fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error
     })?;
     let dir = tempdir()?;
     let password_path = dir.path().join("nats.password");
-    fs::write(&password_path, format!("{TRACE_PASSWORD}\n"))?;
+    write_private(&password_path, format!("{TRACE_PASSWORD}\n"))?;
     let extra = format!("nats_user: ops\nnats_password_file: \"{}\"\n", password_path.display());
     let engine = engine_for(&dir, &yaml(stub.port, NORMAL_MS, &extra))?;
     let link = link_for(&engine)?;
@@ -716,7 +723,7 @@ fn a_trace_subscriber_never_sees_the_nats_password() -> Result<(), Box<dyn Error
     let pair = KeyPair::new_user();
     let seed = pair.seed()?;
     let credentials_path = dir.path().join("nats.creds");
-    fs::write(
+    write_private(
         &credentials_path,
         format!(
             "-----BEGIN NATS USER JWT-----\n{TRACE_JWT}\n------END NATS USER JWT------\n\n-----BEGIN USER NKEY SEED-----\n{seed}\n------END USER NKEY SEED------\n"
@@ -756,5 +763,48 @@ fn an_in_progress_acknowledgement_covers_every_held_message_and_keeps_them_held(
     let settings = current_config(&rig.engine);
     let slot = rig.link.session.lock().map_err(|_| "poisoned")?;
     assert_eq!(rig.link.runtime.block_on(progress_in(&slot, &settings))?, 1);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+const LAX_MODE: u32 = 0o644;
+
+
+#[cfg(unix)]
+#[test]
+fn lax_symlinked_or_fifo_nats_secret_files_are_refused_before_any_connect() -> Result<(), Box<dyn Error + Send + Sync>> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = tempdir()?;
+    let lax = dir.path().join("lax");
+    fs::write(&lax, "nats-lax-644")?;
+    fs::set_permissions(&lax, fs::Permissions::from_mode(LAX_MODE))?;
+    let private_file = dir.path().join("private");
+    write_private(&private_file, "other-service-secret")?;
+    let link = dir.path().join("link");
+    symlink(&private_file, &link)?;
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    let dropped_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for path in [&lax, &link, &fifo] {
+        let password = IngestSettings {
+            nats_user: Some("ops".to_owned()),
+            nats_password_file: Some(path.clone()),
+            ..IngestSettings::default()
+        };
+        let refused = connect_options(&password, Arc::clone(&dropped_flag)).err().ok_or("password accepted")?;
+        assert!(matches!(refused, NatsError::SecretFile { what: "password", .. }));
+        let shown = format!("{refused} {:?}", Error::source(&refused));
+        assert!(shown.contains(&path.display().to_string()));
+        assert!(!shown.contains("nats-lax-644") && !shown.contains("other-service-secret"));
+        let credentials = IngestSettings {
+            nats_credentials_file: Some(path.clone()),
+            ..IngestSettings::default()
+        };
+        let refused_credentials = connect_options(&credentials, Arc::clone(&dropped_flag))
+            .err()
+            .ok_or("credentials accepted")?;
+        assert!(matches!(refused_credentials, NatsError::SecretFile { what: "credentials", .. }));
+    }
     Ok(())
 }

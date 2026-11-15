@@ -4,7 +4,7 @@ use crate::middleware::rate_key;
 use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
 use crate::reload::content_digest;
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
-use crate::server::open_private;
+use crate::server::read_private;
 use crate::state::{auth_context, auth_inputs, lock_auth, remember_callback_account};
 use crate::types::SharedState;
 use axum::extract::rejection::QueryRejection;
@@ -33,7 +33,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use secrecy::{ExposeSecret, SecretString};
 use std::fs::{read, read_to_string};
-use std::io::{self, Read};
+use std::io;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -83,14 +83,6 @@ pub fn binding_cookie(headers: &HeaderMap) -> Option<String> {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|text| text.split(';'))
         .find_map(|pair| pair.trim().strip_prefix(prefix.as_str()).map(str::to_owned))
-}
-
-
-/// The whole content of a file that must be private, read from the handle that was checked.
-pub fn read_private(path: &Path) -> Result<Vec<u8>, StartupError> {
-    let mut bytes = Vec::new();
-    open_private(path)?.read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 

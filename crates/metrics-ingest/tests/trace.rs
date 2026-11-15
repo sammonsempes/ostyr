@@ -84,7 +84,7 @@ fn a_trace_subscriber_never_sees_the_key_or_the_url() -> TestResult {
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    fs::write(dir.path().join("password"), format!("{PASSWORD}\n"))?;
+    write_secret(dir.path().join("password"), format!("{PASSWORD}\n"))?;
     let settings = dir.path().join("settings.yaml");
     let text = format!(
         "url: http://127.0.0.1:{port}\nuser: ostyr\npassword_file: {}\ndatabase: ostyr\ntable: metric_samples\nlimits:\n  max_batch_rows: 1\n",
@@ -106,4 +106,20 @@ fn a_trace_subscriber_never_sees_the_key_or_the_url() -> TestResult {
     assert!(!logged.contains("127.0.0.1"));
     assert!(!logged.contains("INSERT"));
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }

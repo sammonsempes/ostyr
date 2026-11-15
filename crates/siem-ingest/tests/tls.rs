@@ -1,6 +1,11 @@
+#[path = "common/private.rs"]
+mod private;
+
+
 use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
+use private::write_private;
 use rcgen::generate_simple_self_signed;
 use rustls::crypto::ring::default_provider;
 use rustls::version::{TLS12, TLS13};
@@ -100,7 +105,7 @@ fn serve_tls_once(pki: &Pki) -> Result<Server, Box<dyn Error>> {
 
 
 fn settings_file(dir: &TempDir, port: u16, ca_file: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    fs::write(dir.path().join("password"), "s3cret\n")?;
+    write_private(dir.path().join("password"), "s3cret\n")?;
     let path = dir.path().join("ingest.yaml");
     fs::write(
         &path,

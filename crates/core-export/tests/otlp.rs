@@ -1,3 +1,5 @@
+#[path = "common/private.rs"]
+mod private;
 #[path = "common/types.rs"]
 mod types;
 
@@ -8,8 +10,8 @@ use core_export::error::ExportError;
 use core_export::otlp::{
     check_endpoint, describe_response_error, log_record, otlp_batches, prepare_otlp, read_token, rejected_records, MAX_TOKEN_BYTES,
 };
+use private::write_private;
 use serde_json::{json, Value};
-use std::fs;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 use types::TestResult;
@@ -143,21 +145,49 @@ fn rejected_records_reads_a_number_or_a_string() -> TestResult {
 fn the_token_is_trimmed_and_never_part_of_an_error() -> TestResult {
     let dir = tempdir()?;
     let good = dir.path().join("good");
-    fs::write(&good, "  s3cret-token\n")?;
+    write_private(&good, "  s3cret-token\n")?;
     assert_eq!(read_token(&good)?, "s3cret-token");
     let empty = dir.path().join("empty");
-    fs::write(&empty, " \n")?;
+    write_private(&empty, " \n")?;
     assert!(matches!(read_token(&empty), Err(ExportError::TokenEmpty(_))));
     let big = dir.path().join("big");
-    fs::write(&big, "s3cret".repeat(MAX_TOKEN_BYTES))?;
+    write_private(&big, "s3cret".repeat(MAX_TOKEN_BYTES))?;
     let too_large = read_token(&big).err().ok_or("expected an error")?;
     assert!(matches!(too_large, ExportError::TokenTooLarge { .. }));
     assert!(!too_large.to_string().contains("s3cret"));
     let binary = dir.path().join("binary");
-    fs::write(&binary, INVALID_UTF8)?;
+    write_private(&binary, INVALID_UTF8)?;
     assert!(matches!(read_token(&binary), Err(ExportError::Io { .. })));
     assert!(matches!(read_token(&dir.path().join("missing")), Err(ExportError::Io { .. })));
-    assert!(matches!(read_token(dir.path()), Err(ExportError::Io { .. })));
+    assert!(matches!(read_token(dir.path()), Err(ExportError::SecretFile(_))));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+const LAX_MODE: u32 = 0o644;
+
+
+#[cfg(unix)]
+#[test]
+fn a_lax_symlinked_or_fifo_token_file_is_refused_without_a_read() -> TestResult {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = tempdir()?;
+    let lax = dir.path().join("lax");
+    std::fs::write(&lax, "s3cret-token")?;
+    std::fs::set_permissions(&lax, std::fs::Permissions::from_mode(LAX_MODE))?;
+    let refused = read_token(&lax).err().ok_or("accepted")?;
+    assert!(matches!(refused, ExportError::SecretFile(_)));
+    assert!(refused.to_string().contains(&lax.display().to_string()));
+    assert!(!refused.to_string().contains("s3cret-token"));
+    let private = dir.path().join("private");
+    write_private(&private, "s3cret-token")?;
+    let link = dir.path().join("link");
+    symlink(&private, &link)?;
+    assert!(matches!(read_token(&link), Err(ExportError::SecretFile(_))));
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(matches!(read_token(&fifo), Err(ExportError::SecretFile(_))));
     Ok(())
 }
 
@@ -196,7 +226,7 @@ fn only_https_or_explicit_loopback_http_without_a_token_is_accepted() -> TestRes
 fn prepare_reads_the_token_once_and_refuses_an_empty_batch() -> TestResult {
     let dir = tempdir()?;
     let token = dir.path().join("token");
-    fs::write(&token, " tok \n")?;
+    write_private(&token, " tok \n")?;
     let shown = token.display().to_string();
     assert_eq!(
         prepare_otlp(&with_endpoint("https://c.example/", false, Some(&shown)))?,
@@ -220,7 +250,7 @@ fn prepare_reads_the_token_once_and_refuses_an_empty_batch() -> TestResult {
 fn a_token_with_a_control_character_is_refused_without_echoing_it() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("token");
-    fs::write(&path, "s3cret\r\nX-Evil: 1")?;
+    write_private(&path, "s3cret\r\nX-Evil: 1")?;
     let error = read_token(&path).err().ok_or("expected an error")?;
     assert!(matches!(error, ExportError::TokenInvalid(_)));
     assert!(!error.to_string().contains("s3cret"));

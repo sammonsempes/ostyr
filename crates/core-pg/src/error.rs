@@ -1,3 +1,4 @@
+use core_config::secret_file::SecretFileError;
 use rustls_pki_types::pem;
 use std::io;
 use thiserror::Error;
@@ -14,6 +15,12 @@ pub enum PgError {
     },
     #[error("{file}: not a regular file")]
     NotRegular { file: String },
+    #[error("{file}: secret file is a symlink")]
+    SecretSymlink { file: String },
+    #[error("{file}: secret file grants permissions to group or other")]
+    SecretMode { file: String },
+    #[error("{file}: secret file is owned by neither the process user nor root")]
+    SecretOwner { file: String },
     #[error("{file}: larger than {limit} bytes")]
     TooLarge { file: String, limit: u64 },
     #[error("{file}: secret read limit {limit} exceeds the preallocated buffer")]
@@ -105,5 +112,18 @@ pub fn reduce(error: tokio_postgres::Error) -> PgError {
             }
         }
         None => PgError::Client(error),
+    }
+}
+
+
+impl From<SecretFileError> for PgError {
+    fn from(error: SecretFileError) -> Self {
+        match error {
+            SecretFileError::Io { file, source } => Self::Io { file, source },
+            SecretFileError::NotRegular { file } => Self::NotRegular { file },
+            SecretFileError::Symlink { file } => Self::SecretSymlink { file },
+            SecretFileError::Mode { file } => Self::SecretMode { file },
+            SecretFileError::Owner { file } => Self::SecretOwner { file },
+        }
     }
 }

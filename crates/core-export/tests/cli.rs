@@ -2,6 +2,8 @@
 mod http_sink;
 #[path = "common/pki.rs"]
 mod pki;
+#[path = "common/private.rs"]
+mod private;
 #[path = "common/tls_sink.rs"]
 mod tls_sink;
 #[path = "common/types.rs"]
@@ -17,6 +19,7 @@ use core_export::error::ExportError;
 use core_export::reload::open_export_engine;
 use core_export::types::BoxError;
 use core_export::webhook::RetryPolicy;
+use private::write_private;
 use std::fs;
 use std::io;
 use std::net::{TcpListener, UdpSocket};
@@ -172,7 +175,7 @@ fn run_sends_otlp_with_the_token_from_a_file_and_audits_to_a_file() -> TestResul
     let authority = pki::test_pki()?;
     let http_sink::HttpSink { port, bodies } = http_sink::spawn_http_sink(Some(authority.server_config.clone()), vec![STATUS_OK])?;
     let token = dir.path().join("token");
-    fs::write(&token, "tok\n")?;
+    write_private(&token, "tok\n")?;
     let ca = dir.path().join("ca.pem");
     fs::write(&ca, &authority.ca_pem)?;
     let config = dir.path().join("export.yaml");

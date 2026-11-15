@@ -1,5 +1,7 @@
 #[path = "common/http_sink.rs"]
 mod http_sink;
+#[path = "common/private.rs"]
+mod private;
 #[path = "common/types.rs"]
 mod types;
 
@@ -15,6 +17,7 @@ use core_export::pipeline::export_otlp;
 use core_export::reload::{export_state, open_export_engine, validate_otlp, validate_webhook};
 use core_export::types::BoxError;
 use core_export::webhook::RetryPolicy;
+use private::write_private;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -228,7 +231,7 @@ fn validation_refuses_each_unusable_otlp_setting() -> TestResult {
     assert!(validate_otlp(&parse("https://c.example", "  batch_size: 0\n")?).is_err());
     assert!(validate_otlp(&parse("https://c.example", "  token_file: /nonexistent/token\n")?).is_err());
     let token = dir.path().join("token");
-    fs::write(&token, "tok")?;
+    write_private(&token, "tok")?;
     assert!(validate_otlp(&parse("https://c.example", &format!("  token_file: {}\n", token.display()))?).is_ok());
     assert!(validate_otlp(&parse_export("webhook:\n  url: https://x.example\n  buffer_dir: /b\n", "test")?).is_ok());
     Ok(())

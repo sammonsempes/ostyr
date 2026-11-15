@@ -107,7 +107,7 @@ fn rig(timeout_ms: u64) -> Result<Rig, Box<dyn Error>> {
     let dir = tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
-    fs::write(dir.path().join("password"), format!("{PASSWORD}\n"))?;
+    write_secret(dir.path().join("password"), format!("{PASSWORD}\n"))?;
     let config = CostLoadConfig {
         url: format!("http://127.0.0.1:{port}"),
         user: "ostyr".to_owned(),
@@ -494,17 +494,17 @@ fn a_failed_second_batch_is_reported_with_the_first_as_stored() -> TestResult {
 #[test]
 fn password_and_ca_files_are_bounded_and_checked() -> TestResult {
     let mut rig = rig(LONG_TIMEOUT_MS)?;
-    fs::write(&rig.config.password_file, vec![b'a'; OVER_PASSWORD])?;
+    write_secret(&rig.config.password_file, vec![b'a'; OVER_PASSWORD])?;
     assert!(matches!(
         load_table(&rig.config, &january()?, VERSION, &idle),
         Err(LoadError::Password(_))
     ));
-    fs::write(&rig.config.password_file, NOT_UTF8)?;
+    write_secret(&rig.config.password_file, NOT_UTF8)?;
     assert!(matches!(
         load_table(&rig.config, &january()?, VERSION, &idle),
         Err(LoadError::PasswordEncoding(_))
     ));
-    fs::write(&rig.config.password_file, PASSWORD)?;
+    write_secret(&rig.config.password_file, PASSWORD)?;
     let fifo = rig.dir.path().join("ca.fifo");
     assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
     rig.config.ca_file = Some(fifo);
@@ -772,4 +772,20 @@ fn accounts_without_a_readable_day_are_refused_before_any_io() -> TestResult {
     assert_eq!(load_table(&rig.config, &empty, VERSION, &idle)?, LoadOutcome::default());
     assert!(untouched(&rig.listener)?);
     Ok(())
+}
+
+
+const SECRET_MODE: u32 = 0o600;
+
+
+#[cfg(unix)]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)?;
+    std::fs::set_permissions(path.as_ref(), std::os::unix::fs::PermissionsExt::from_mode(SECRET_MODE))
+}
+
+
+#[cfg(not(unix))]
+fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), content)
 }
