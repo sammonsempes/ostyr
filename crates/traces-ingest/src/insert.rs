@@ -108,7 +108,7 @@ pub fn encode_span(row: &SpanRow) -> Result<Vec<u8>, RefusedSpan> {
                 .iter()
                 .map(|(key, value)| (key.clone(), Value::String(value.clone())))
                 .collect();
-            let object = json!({
+            let mut object = json!({
                 "tenant": row.tenant,
                 "trace_id": to_hex(&row.trace_id),
                 "span_id": to_hex(&row.span_id),
@@ -124,6 +124,7 @@ pub fn encode_span(row: &SpanRow) -> Result<Vec<u8>, RefusedSpan> {
                 "event_count": row.event_count,
                 "link_count": row.link_count,
             });
+            object.sort_all_objects();
             format!("{object}\n").into_bytes()
         })
 }

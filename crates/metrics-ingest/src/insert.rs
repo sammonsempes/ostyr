@@ -152,7 +152,7 @@ pub fn encode_row(row: &SampleRow) -> Result<Vec<u8>, RefusedRow> {
         .map(|(key, value)| (key.clone(), Value::String(value.clone())))
         .collect();
     if row.value.is_finite() {
-        let object = json!({
+        let mut object = json!({
             "tenant": row.tenant,
             "metric": row.name,
             "unit": row.unit,
@@ -161,6 +161,7 @@ pub fn encode_row(row: &SampleRow) -> Result<Vec<u8>, RefusedRow> {
             "@timestamp": moment(row.timestamp_nanos).text,
             "value": row.value,
         });
+        object.sort_all_objects();
         Ok(format!("{object}\n").into_bytes())
     } else {
         Err(RefusedRow::NonFiniteValue)

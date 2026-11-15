@@ -90,6 +90,7 @@ pub fn parse_rule(text: &str) -> Result<Rule, SigmaError> {
         .filter(|key| !METADATA_KEYS.contains(&key.as_str()))
         .try_for_each(|key| Err(unsupported(&title, &format!("top-level key {key}"))))?;
     let mut detection = raw.detection;
+    detection.values_mut().for_each(Value::sort_all_objects);
     let condition = condition_text(&title, &mut detection)?;
     if detection.contains_key("timeframe") {
         Err(unsupported(&title, "timeframe"))

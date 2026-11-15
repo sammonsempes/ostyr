@@ -11,8 +11,11 @@ pub const PLATFORM_SCHEMA_FILE: &str = "platform.schema.json";
 pub const MODULE_SCHEMA_FILE: &str = "module.schema.json";
 
 
+/// Keys are sorted explicitly: `yara-x` turns on `serde_json/preserve_order` workspace-wide, which would otherwise reorder the file.
 pub fn schema_text<Schema: JsonSchema>() -> String {
-    format!("{:#}\n", schema_for!(Schema).as_value())
+    let mut value = schema_for!(Schema).as_value().clone();
+    value.sort_all_objects();
+    format!("{value:#}\n")
 }
 
 
