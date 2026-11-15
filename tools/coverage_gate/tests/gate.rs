@@ -362,3 +362,21 @@ fn executable_code_detection() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+
+fn scoped_args(export: &Path, root: &Path, dir: &str) -> Vec<String> {
+    let mut arguments = args(export, root);
+    arguments.push(dir.to_string());
+    arguments
+}
+
+
+#[test]
+fn scope_keeps_only_the_listed_directories() -> anyhow::Result<()> {
+    let (_dir, root) = workspace()?;
+    let export = write_export(&root, LINE_MISSED)?;
+    assert!(!run(&scoped_args(&export, &root, "crates/demo"), Vec::new())?);
+    assert!(run(&scoped_args(&export, &root, "crates/other"), Vec::new())?);
+    assert!(!run(&args(&export, &root), Vec::new())?);
+    Ok(())
+}
