@@ -42,14 +42,16 @@ lint() {
 }
 
 gate() {
-  if [ -n "${COVERAGE_GATE:-}" ]; then "$COVERAGE_GATE" "$EXPORT" "$ROOT"; else low cargo run --offline -q -p coverage_gate -- "$EXPORT" "$ROOT"; fi
+  local -a dirs=("${SCOPE_DIRS[@]+"${SCOPE_DIRS[@]}"}")
+  if [ -n "${COVERAGE_GATE:-}" ]; then "$COVERAGE_GATE" "$EXPORT" "$ROOT" "${dirs[@]+"${dirs[@]}"}"
+  else low cargo run --offline -q -p coverage_gate -- "$EXPORT" "$ROOT" "${dirs[@]+"${dirs[@]}"}"; fi
 }
 
 covered_tests() {
   local scratch="$GATE_DIR/tmp-$$"
   mkdir -p "$scratch"
   local status=0
-  TMPDIR="$scratch" low cargo +nightly llvm-cov --offline --branch --fail-under-lines 100 --json --output-path "$EXPORT" || status=$?
+  TMPDIR="$scratch" low cargo +nightly llvm-cov --offline --branch "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" --fail-under-lines 100 --json --output-path "$EXPORT" || status=$?
   rm -rf "$scratch"
   return "$status"
 }
@@ -117,9 +119,77 @@ if docs_only; then
   exit 0
 fi
 
+SCOPE_JQ='
+  . as $meta
+  | ($meta.workspace_members) as $members
+  | [$meta.packages[] | select(.id as $id | $members | index($id)) | {id, name, dir: (.manifest_path | ltrimstr($root + "/") | rtrimstr("/Cargo.toml"))}] as $pkgs
+  | [$staged[] | . as $path | {path: $path, hit: ($pkgs | map(select(.dir as $dir | $path | startswith($dir + "/"))) | first)}] as $hits
+  | ($hits | map(select(.hit == null)) | first) as $outside
+  | if $outside != null then "FULL " + $outside.path + " is outside every package"
+    else
+      ($hits | map(.hit.id) | unique) as $seed
+      | def grow($set): ([$meta.resolve.nodes[] | select(any(.deps[]; .pkg as $dep | $set | index($dep))) | .id | select(. as $id | $members | index($id))] + $set | unique);
+        ($seed | until(. as $set | grow($set) == $set; grow(.))) as $closed
+      | $pkgs[] | select(.id as $id | $closed | index($id)) | "PKG " + .name + " " + .dir
+    end'
+
+forced_full_path() {
+  case "$1" in
+    Cargo.toml | Cargo.lock | rust-toolchain.toml | rustfmt.toml | clippy.toml | .githooks/* | tools/custom_lint/* | tools/coverage_gate/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+compute_scope() {
+  SCOPE_PKGS=()
+  SCOPE_DIRS=()
+  SCOPE_REASON=""
+  local staged path line metadata
+  staged=$(git diff --cached --name-only --no-renames --diff-filter=ACMRD)
+  if [ "${GATE_SCOPE:-}" = full ]; then
+    SCOPE_REASON="GATE_SCOPE=full"
+  else
+    while IFS= read -r path; do
+      if [ -z "$SCOPE_REASON" ] && forced_full_path "$path"; then SCOPE_REASON="$path changes the whole workspace"; fi
+    done <<<"$staged"
+  fi
+  if [ -z "$SCOPE_REASON" ]; then
+    metadata=$(low cargo metadata --offline --format-version 1 2>/dev/null || true)
+    if [ -z "$metadata" ]; then
+      SCOPE_REASON="no cargo metadata"
+    else
+      while IFS= read -r line; do
+        case "$line" in
+          "FULL "*) SCOPE_REASON="${line#FULL }" ;;
+          "PKG "*)
+            SCOPE_PKGS+=("$(cut -d' ' -f2 <<<"$line")")
+            SCOPE_DIRS+=("$(cut -d' ' -f3 <<<"$line")")
+            ;;
+        esac
+      done < <(jq -r --arg root "$ROOT" --argjson staged "$(jq -R . <<<"$staged" | jq -s .)" "$SCOPE_JQ" <<<"$metadata")
+      if [ -z "$SCOPE_REASON" ] && [ "${#SCOPE_PKGS[@]}" -eq 0 ]; then SCOPE_REASON="no package resolved"; fi
+    fi
+  fi
+  if [ -n "$SCOPE_REASON" ]; then
+    SCOPE_PKGS=()
+    SCOPE_DIRS=()
+    echo "pre-commit: scope full workspace ($SCOPE_REASON)" >&2
+  else
+    echo "pre-commit: scope ${#SCOPE_PKGS[@]} packages: ${SCOPE_PKGS[*]}" >&2
+  fi
+}
+
+package_args() {
+  local name
+  PACKAGE_ARGS=()
+  for name in "${SCOPE_PKGS[@]+"${SCOPE_PKGS[@]}"}"; do PACKAGE_ARGS+=(-p "$name"); done
+}
+
+compute_scope
 prepare_gate_dir
-step "1/5 cargo +nightly fmt --check" low cargo +nightly fmt --check
-step "2/5 cargo clippy" low cargo clippy --offline --all-targets -- -D warnings
+package_args
+step "1/5 cargo +nightly fmt --check" low cargo +nightly fmt --check "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}"
+step "2/5 cargo clippy" low cargo clippy --offline "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" --all-targets -- -D warnings
 step "3/5 custom_lint" lint
 step "4/5 cargo llvm-cov" covered_tests
 step "5/5 coverage_gate" gate
