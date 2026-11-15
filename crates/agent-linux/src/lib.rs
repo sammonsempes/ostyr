@@ -13,7 +13,11 @@ pub mod follow;
 #[cfg(unix)]
 pub mod hostmetrics;
 #[cfg(unix)]
+pub mod isolation;
+#[cfg(unix)]
 pub mod model;
+#[cfg(unix)]
+pub mod nft;
 #[cfg(unix)]
 pub mod run;
 #[cfg(unix)]

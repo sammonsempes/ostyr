@@ -1,7 +1,7 @@
 use crate::error::SourceError;
 use crate::model::{
-    LinuxFile, SensorSettings, SourceSettings, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS, MAX_RESTARTS_PER_HOUR_CEILING,
-    MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING, SETTINGS_SECTION,
+    LinuxFile, SensorSettings, SourceSettings, MAX_DNS_RESOLVERS, MAX_ENDPOINTS, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS,
+    MAX_RESTARTS_PER_HOUR_CEILING, MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING, SETTINGS_SECTION,
 };
 use crate::types::{SharedSensor, SharedSource};
 use arc_swap::ArcSwap;
@@ -54,6 +54,20 @@ pub fn invalid_sensor_settings(settings: &SensorSettings) -> Vec<&'static str> {
 }
 
 
+/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, a relative `nft_path`.
+pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
+    [
+        ("isolation.endpoints", file.isolation.endpoints.len() > MAX_ENDPOINTS),
+        ("isolation.ports", file.isolation.endpoints.iter().any(|endpoint| endpoint.port == 0)),
+        ("isolation.dns", file.isolation.dns.len() > MAX_DNS_RESOLVERS),
+        ("nft_path", !file.nft_path.is_absolute()),
+    ]
+    .into_iter()
+    .filter_map(|(name, invalid)| invalid.then_some(name))
+    .collect()
+}
+
+
 pub fn validate_settings(settings: &SourceSettings) -> Result<(), SourceError> {
     let invalid = invalid_settings(settings);
     if invalid.is_empty() {
@@ -66,7 +80,10 @@ pub fn validate_settings(settings: &SourceSettings) -> Result<(), SourceError> {
 
 pub fn validate_file(file: &LinuxFile) -> Result<(), SourceError> {
     validate_settings(&file.settings)?;
-    let invalid = invalid_sensor_settings(&file.sensor);
+    let invalid: Vec<&str> = invalid_sensor_settings(&file.sensor)
+        .into_iter()
+        .chain(invalid_isolation_settings(file))
+        .collect();
     if invalid.is_empty() {
         Ok(())
     } else {
