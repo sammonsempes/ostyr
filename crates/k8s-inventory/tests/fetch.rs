@@ -443,6 +443,8 @@ fn a_read_verb_on_a_resource_that_grants_more_is_refused_and_nothing_is_listed()
         (rule(&["get", "list"], &[""], &["secrets"]), ("get", "", "secrets")),
         (rule(&["get"], &[""], &["serviceaccounts/token"]), ("get", "", "serviceaccounts/token")),
         (rule(&["get"], &[""], &["nodes/log"]), ("get", "", "nodes/log")),
+        (rule(&["get"], &[""], &["nodes/configz"]), ("get", "", "nodes/configz")),
+        (rule(&["get"], &[""], &["*/log"]), ("get", "", "*/log")),
         (rule(&["get"], &[""], &["pods/exec"]), ("get", "", "pods/exec")),
         (rule(&["get"], &[""], &["pods/attach"]), ("get", "", "pods/attach")),
         (rule(&["get"], &[""], &["pods/portforward"]), ("get", "", "pods/portforward")),
@@ -458,7 +460,20 @@ fn a_read_verb_on_a_resource_that_grants_more_is_refused_and_nothing_is_listed()
     })?;
     let harmless = [
         rule(&["get", "list"], &["apps"], &["secrets"]),
-        rule(&["get", "list"], &[""], &["pods/log", "nodes/stats", "nodes", "serviceaccounts"]),
+        rule(
+            &["get", "list"],
+            &[""],
+            &[
+                "pods/log",
+                "nodes/stats",
+                "nodes/metrics",
+                "nodes/spec",
+                "nodes/healthz",
+                "nodes/pods",
+                "nodes",
+                "serviceaccounts",
+            ],
+        ),
         rule(&["get"], &[], &[]),
     ];
     harmless.into_iter().try_for_each(|allowed| -> TestResult {
