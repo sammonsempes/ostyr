@@ -15,9 +15,12 @@ use hardware_health::redfish_assess::assess_redfish;
 use hardware_health::redfish_fetch::{basic_header, build_agent, fetch_document, get_body, is_member_path, member_paths, poll_device, role_in};
 use standin::{reply, requests, start, Reply, Standin};
 use std::error::Error;
+use std::io::Write;
 use std::net::TcpListener;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use tracing::Dispatch;
 use types::TestResult;
 
 
@@ -636,6 +639,7 @@ fn memory_limited_child() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 
@@ -649,4 +653,76 @@ fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) ->
 #[cfg(not(unix))]
 fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path.as_ref(), content)
+}
+
+
+pub static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+pub struct Sink(pub Arc<Mutex<Vec<u8>>>);
+
+
+impl Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().map_err(|_| std::io::Error::other("poisoned"))?.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+fn captured(action: impl FnOnce() -> TestResult) -> Result<String, Box<dyn Error>> {
+    LazyLock::force(&ANCHOR);
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&buffer);
+    let dispatch = Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer(move || Sink(Arc::clone(&writer)))
+            .with_ansi(false)
+            .finish(),
+    );
+    tracing::dispatcher::with_default(&dispatch, action)?;
+    let bytes = buffer.lock().map_err(|_| "poisoned")?.clone();
+    Ok(String::from_utf8(bytes)?)
+}
+
+
+const INSECURE_WARNING: &str = "redfish device read without certificate verification";
+
+
+fn warning_text(log: &str) -> Option<String> {
+    log.lines()
+        .find(|line| line.contains(INSECURE_WARNING))
+        .and_then(|line| line.split_once(": "))
+        .map(|(_, text)| text.trim_end().to_owned())
+}
+
+
+#[test]
+fn the_insecure_warning_is_logged_once_per_read_with_the_checked_name_only() -> TestResult {
+    let mut insecure = rig(mockup)?;
+    insecure.device.ca_file = None;
+    insecure.device.insecure_skip_verify = true;
+    let ok_log = captured(|| poll(&insecure).map(|_| ()))?;
+    assert_eq!(ok_log.matches(INSECURE_WARNING).count(), 1, "{ok_log}");
+    assert_eq!(warning_text(&ok_log), Some(format!("{INSECURE_WARNING} name=\"bmc1\"")), "{ok_log}");
+    assert!(!ok_log.contains(PASSWORD));
+    let mut failing = rig(mockup)?;
+    failing.device.ca_file = None;
+    failing.device.insecure_skip_verify = true;
+    failing.device.password_file = failing.dir.path().join("absent").display().to_string();
+    let error_log = captured(|| poll_error(&failing).map(|_| ()))?;
+    assert_eq!(error_log.matches(INSECURE_WARNING).count(), 1, "{error_log}");
+    assert_eq!(warning_text(&error_log), Some(format!("{INSECURE_WARNING} name=\"bmc1\"")), "{error_log}");
+    let mut unchecked = rig(mockup)?;
+    unchecked.device.ca_file = None;
+    unchecked.device.insecure_skip_verify = true;
+    unchecked.device.name = "-evil\nname".to_owned();
+    let refused_log = captured(|| poll_error(&unchecked).map(|_| ()))?;
+    assert!(!refused_log.contains("evil"), "{refused_log}");
+    assert!(requests(&unchecked.standin).is_empty());
+    Ok(())
 }

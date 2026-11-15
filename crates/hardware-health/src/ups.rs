@@ -3,6 +3,7 @@
 use crate::error::SmartError;
 use crate::limits::MAX_THRESHOLDS_BYTES;
 use crate::model::{UpsFlag, UpsReport, UpsThresholds};
+use serde::de::Error as _;
 use std::collections::BTreeSet;
 use std::io::Read;
 
@@ -176,11 +177,20 @@ fn status_flags(report: &mut UpsReport, value: &str) -> BTreeSet<UpsFlag> {
 }
 
 
+/// The parser's own message quotes the offending value, so only a fixed source is kept.
+pub fn thresholds_error(error: serde_saphyr::Error) -> SmartError {
+    let location = format!("{:?}", error.location());
+    tracing::debug!(location, "thresholds file refused");
+    SmartError::Thresholds(Box::new(serde_saphyr::Error::custom("thresholds file is not valid")))
+}
+
+
 pub fn parse_thresholds(text: &str) -> Result<UpsThresholds, SmartError> {
     if text.len() > MAX_THRESHOLDS_BYTES {
         Err(SmartError::ThresholdsTooLarge { limit: MAX_THRESHOLDS_BYTES })
     } else {
-        let thresholds: UpsThresholds = serde_saphyr::from_str(text).map_err(|error| SmartError::Thresholds(Box::new(error)))?;
+        let options = serde_saphyr::options! { with_snippet: false };
+        let thresholds: UpsThresholds = serde_saphyr::from_str_with_options(text, options).map_err(thresholds_error)?;
         if (MIN_CHARGE_THRESHOLD..=MAX_CHARGE_THRESHOLD).contains(&thresholds.min_battery_charge) {
             Ok(thresholds)
         } else {
