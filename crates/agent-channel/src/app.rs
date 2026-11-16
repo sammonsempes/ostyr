@@ -89,6 +89,20 @@ pub enum BoundedLine {
 
 /// Reads one line of at most `limit` bytes; `None` at the end of the input.
 pub fn read_bounded_line<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) -> io::Result<Option<BoundedLine>> {
+    read_line_ended(reader, limit).map(|read| read.map(|(line, _)| line))
+}
+
+
+/// One undecoded line: its bytes, or the bytes consumed by a line longer than the limit (newline included); and whether a newline ended it (an oversized line counts as ended: it is skipped, never used).
+#[derive(Debug, PartialEq, Eq)]
+pub struct RawLine {
+    pub content: Result<Vec<u8>, usize>,
+    pub complete: bool,
+}
+
+
+/// Reads one line of at most `limit` bytes without decoding it; `None` at the end of the input.
+pub fn read_raw_line<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) -> io::Result<Option<RawLine>> {
     let mut buffer = Vec::new();
     let read = Read::take(&mut *reader, u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(LINE_SLACK)).read_until(b'\n', &mut buffer)?;
     if read == 0 {
@@ -100,15 +114,46 @@ pub fn read_bounded_line<Input: BufRead + ?Sized>(reader: &mut Input, limit: usi
         }
         if buffer.len() > limit {
             let skipped = if complete { 1 } else { reader.skip_until(b'\n')? };
-            Ok(Some(BoundedLine::Oversized {
-                bytes: buffer.len().saturating_add(skipped),
+            Ok(Some(RawLine {
+                content: Err(buffer.len().saturating_add(skipped)),
+                complete: true,
             }))
         } else {
-            String::from_utf8(buffer)
-                .map(|text| Some(BoundedLine::Text(text)))
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            Ok(Some(RawLine {
+                content: Ok(buffer),
+                complete,
+            }))
         }
     }
+}
+
+
+/// The decoded line of a raw one and whether a newline ended it; invalid UTF-8 is `InvalidData`.
+pub fn decode_line(raw: RawLine) -> io::Result<(BoundedLine, bool)> {
+    match raw.content {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(|text| (BoundedLine::Text(text), raw.complete))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        Err(bytes) => Ok((BoundedLine::Oversized { bytes }, raw.complete)),
+    }
+}
+
+
+/// `read_bounded_line` with whether a newline ended the line.
+pub fn read_line_ended<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) -> io::Result<Option<(BoundedLine, bool)>> {
+    read_raw_line(reader, limit)?.map(decode_line).transpose()
+}
+
+
+/// The lines of a reader ended by a newline, each at most `limit` bytes; an unterminated last line is left out and never decoded (a producer may still be writing it, or died mid-character).
+pub fn terminated_lines<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) -> impl Iterator<Item = io::Result<BoundedLine>> + '_ {
+    std::iter::repeat_with(move || read_raw_line(reader, limit))
+        .map_while(Result::transpose)
+        .map_while(|read| match read {
+            Ok(raw) if raw.complete => Some(decode_line(raw).map(|(line, _)| line)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
 }
 
 

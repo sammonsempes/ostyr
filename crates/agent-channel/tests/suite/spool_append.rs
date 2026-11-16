@@ -1,16 +1,17 @@
 use crate::types::TestResult;
 use agent_channel::agent_app::AgentFile;
+use agent_channel::spool::SequenceState;
 use agent_channel::spool::{
-    append_back, append_locked, append_locked_between, claim_spool, claim_spool_with, finish_spool, finish_spool_with, is_lock_violation,
-    lines_to_claim, lines_to_claim_with, lock_bounded, pause_between_lock_attempts, write_locked_with, Spool, SPOOL_LOCK_BUSY,
-    WINDOWS_LOCK_VIOLATION,
+    append_back, append_locked, append_locked_between, claim_fresh_with, claim_locked, claim_spool, claim_spool_in, claim_spool_with, count_lines,
+    finish_spool, finish_spool_with, is_lock_violation, lines_to_claim, lines_to_claim_with, load_claimed, lock_bounded, pause_between_lock_attempts,
+    write_locked_with, Spool, SPOOL_LOCK_BUSY, WINDOWS_LOCK_VIOLATION,
 };
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
-use std::sync::Barrier;
+use std::sync::{mpsc, Barrier};
 use std::thread::scope;
 use tempfile::tempdir;
 
@@ -195,9 +196,9 @@ fn a_lock_released_during_the_wait_lets_the_append_through() -> TestResult {
     let dir = tempdir()?;
     let spool = dir.path().join("spool");
     let mut held = Some(holder(&spool)?);
-    assert!(append_locked(std::iter::once(Ok("late".to_owned())), &spool, ATTEMPTS, &mut || drop(
-        held.take()
-    ))?);
+    assert!(append_locked(std::iter::once(Ok("late".to_owned())), &spool, WAIT_ATTEMPTS, &mut || {
+        drop(held.take())
+    })?);
     assert_eq!(fs::read_to_string(&spool)?, "late\n");
     Ok(())
 }
@@ -291,12 +292,12 @@ fn agent_file(dir: &Path) -> AgentFile {
 }
 
 
-fn locked_load(_sending: &Path, _spool: &Path, _count: u64, _limit: usize) -> io::Result<Vec<String>> {
+fn locked_load(_claimed: &File, _spool: &Path, _count: u64, _limit: usize) -> io::Result<(Vec<String>, bool)> {
     Err(io::Error::from_raw_os_error(WINDOWS_LOCK_VIOLATION))
 }
 
 
-fn refused_load(_sending: &Path, _spool: &Path, _count: u64, _limit: usize) -> io::Result<Vec<String>> {
+fn refused_load(_claimed: &File, _spool: &Path, _count: u64, _limit: usize) -> io::Result<(Vec<String>, bool)> {
     Err(io::Error::other("refused"))
 }
 
@@ -341,11 +342,13 @@ fn an_append_that_waited_while_the_agent_delivered_the_claim_never_loses_its_lin
     fs::write(&spool, "first\n")?;
     let mut held = Some(holder(&spool)?);
     let mut finished = false;
-    let appended = append_locked(std::iter::once(Ok("second".to_owned())), &spool, ATTEMPTS, &mut || {
-        if let Ok(claim) = claim_spool(&file) {
-            drop(held.take());
-            finished = finish_spool(&claim, &[1]).is_ok();
-        }
+    let appended = append_locked(std::iter::once(Ok("second".to_owned())), &spool, WAIT_ATTEMPTS, &mut || {
+        held.take().into_iter().for_each(|lock| {
+            drop(lock);
+            if let Ok(claim) = claim_spool(&file) {
+                finished = finish_spool(&claim, &[1]).is_ok();
+            }
+        });
     })?;
     assert!(appended && finished);
     assert!(!claimed.exists());
@@ -360,10 +363,12 @@ fn a_spool_replaced_by_another_producer_while_waiting_gets_the_line() -> TestRes
     let spool = dir.path().join("spool");
     let aside = dir.path().join("aside");
     let mut held = Some(holder(&spool)?);
-    let appended = append_locked(std::iter::once(Ok("waiter".to_owned())), &spool, ATTEMPTS, &mut || {
-        logged(fs::rename(&spool, &aside));
-        logged(fs::write(&spool, "other\n"));
-        drop(held.take());
+    let appended = append_locked(std::iter::once(Ok("waiter".to_owned())), &spool, WAIT_ATTEMPTS, &mut || {
+        held.take().into_iter().for_each(|lock| {
+            logged(fs::rename(&spool, &aside));
+            logged(fs::write(&spool, "other\n"));
+            drop(lock);
+        });
     })?;
     assert!(appended);
     assert_eq!(fs::read_to_string(&spool)?, "other\nwaiter\n");
@@ -399,12 +404,40 @@ fn a_claimed_file_locked_by_a_producer_is_kept_by_finish() -> TestResult {
         batches: Vec::new(),
         sending: sending.clone(),
         sending_bytes: 0,
+        sequence_file: dir.path().join("sequence"),
+        state: SequenceState::default(),
     };
     let _held = holder(&sending)?;
     let mut pauses = 0;
     finish_spool_with(&claimed, &[], ATTEMPTS, &mut || pauses += 1)?;
     assert_eq!(pauses, ATTEMPTS);
     assert!(sending.exists());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn finish_that_waited_for_the_lock_never_removes_a_file_replaced_meanwhile() -> TestResult {
+    let dir = tempdir()?;
+    let sending = dir.path().join("spool.sending");
+    fs::write(&sending, "one\n")?;
+    let claimed = Spool {
+        batches: Vec::new(),
+        sending: sending.clone(),
+        sending_bytes: ONE_LINE_BYTES,
+        sequence_file: dir.path().join("sequence"),
+        state: SequenceState::default(),
+    };
+    let mut held = Some(holder(&sending)?);
+    finish_spool_with(&claimed, &[], ATTEMPTS, &mut || {
+        held.take().into_iter().for_each(|lock| {
+            drop(lock);
+            logged(fs::remove_file(&sending));
+            logged(fs::write(&sending, "two\n"));
+        });
+    })?;
+    assert_eq!(fs::read_to_string(&sending)?, "two\n");
     Ok(())
 }
 
@@ -424,6 +457,13 @@ fn an_empty_locked_claimed_file_is_never_removed_by_finish() -> TestResult {
 
 
 const WAIT_ATTEMPTS: u32 = 1_000_000;
+
+
+#[cfg(unix)]
+const ONE_LINE_BYTES: u64 = 4;
+
+
+const SECOND_SEQUENCE: u64 = 2;
 
 
 const SIGNAL_DIRECTORY_VARIABLE: &str = "OSTYR_SPOOL_CHILD_SIGNALS";
@@ -568,4 +608,329 @@ fn logged<Sent, Failure: std::fmt::Display>(outcome: Result<Sent, Failure>) {
     if let Err(error) = outcome {
         tracing::error!(%error, "test channel failed");
     }
+}
+
+
+#[test]
+fn a_claim_waits_for_an_appender_inside_its_locked_write_then_takes_its_line_whole() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let spool = dir.path().join("spool");
+    let sending = dir.path().join("spool.sending");
+    let (inside_sender, inside) = mpsc::channel();
+    let (release_sender, release) = mpsc::channel();
+    let (done_sender, done) = mpsc::channel();
+    let mut pauses = 0;
+    scope(|workers| -> TestResult {
+        let spool_ref = &spool;
+        let appender = workers.spawn(move || {
+            let appended = append_locked_between(std::iter::once(Ok("whole".to_owned())), spool_ref, ATTEMPTS, &mut || (), &mut || {
+                logged(inside_sender.send(()));
+                logged(release.recv());
+            });
+            logged(done_sender.send(()));
+            appended
+        });
+        inside.recv()?;
+        claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || {
+            pauses += 1;
+            logged(release_sender.send(()));
+            logged(done.recv());
+        })?;
+        logged(release_sender.send(()));
+        assert!(appender.join().map_err(|_| "appender panicked")??);
+        Ok(())
+    })?;
+    assert!(pauses >= 1);
+    assert_eq!(fs::read_to_string(&sending)?, "whole\n");
+    assert!(!spool.exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_claim_that_never_gets_the_lock_defers_and_a_later_one_succeeds() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let spool = dir.path().join("spool");
+    let sending = dir.path().join("spool.sending");
+    fs::write(&spool, "a\n")?;
+    let held = holder(&spool)?;
+    let mut pauses = 0;
+    claim_fresh_with(&file, &sending, ATTEMPTS, &mut || pauses += 1)?;
+    assert_eq!(pauses, ATTEMPTS);
+    assert!(spool.exists() && !sending.exists() && !file.sequence_file.exists());
+    drop(held);
+    claim_fresh_with(&file, &sending, ATTEMPTS, &mut || ())?;
+    assert_eq!(fs::read_to_string(&sending)?, "a\n");
+    Ok(())
+}
+
+
+const TERMINATED_LINE_LIMIT: usize = 100;
+
+
+#[test]
+fn an_unterminated_last_line_is_never_counted_or_loaded_and_a_claim_sets_it_aside() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let spool = dir.path().join("spool");
+    let sending = dir.path().join("spool.sending");
+    fs::write(&spool, "a\nb")?;
+    assert_eq!(count_lines(&spool, TERMINATED_LINE_LIMIT)?, 1);
+    assert_eq!(
+        load_claimed(&File::open(&spool)?, &dir.path().join("back"), u64::MAX, TERMINATED_LINE_LIMIT)?,
+        (vec!["a".to_owned()], false)
+    );
+    fs::write(&spool, "b")?;
+    claim_fresh_with(&file, &sending, ATTEMPTS, &mut || ())?;
+    assert!(spool.exists() && !sending.exists());
+    assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "b\n");
+    OpenOptions::new().append(true).open(&spool)?.write_all(b"c\n")?;
+    let claimed = claim_spool(&file)?;
+    assert_eq!(claimed.batches.len(), 1);
+    assert_eq!(claimed.batches.first().map(|batch| batch.ecs_json.clone()), Some(b"c".to_vec()));
+    Ok(())
+}
+
+
+fn sent_texts(spool: &Spool) -> Vec<String> {
+    spool
+        .batches
+        .iter()
+        .map(|batch| String::from_utf8_lossy(&batch.ecs_json).into_owned())
+        .collect()
+}
+
+
+fn sequences(spool: &Spool) -> Vec<u64> {
+    spool.batches.iter().map(|batch| batch.sequence).collect()
+}
+
+
+const WEDGE_ROUNDS: usize = 5;
+
+
+#[test]
+fn a_torn_tail_of_a_claimed_spool_is_set_aside_and_later_events_are_delivered() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    fs::write(&file.spool_file, "a\nzzz")?;
+    let mut rounds = Vec::new();
+    (0..WEDGE_ROUNDS).try_for_each(|index| -> TestResult {
+        let claimed = claim_spool(&file)?;
+        rounds.push((sent_texts(&claimed), sequences(&claimed)));
+        finish_spool(&claimed, &sequences(&claimed))?;
+        assert!(!claimed.sending.exists());
+        append_back(std::iter::once(Ok(format!("event-{index}"))), &file.spool_file)?;
+        Ok(())
+    })?;
+    let expected: Vec<(Vec<String>, Vec<u64>)> = std::iter::once("a".to_owned())
+        .chain((0..WEDGE_ROUNDS).map(|index| format!("event-{index}")))
+        .zip(1..=WEDGE_ROUNDS as u64)
+        .map(|(text, sequence)| (vec![text], vec![sequence]))
+        .collect();
+    assert_eq!(rounds, expected);
+    assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "zzz\n");
+    Ok(())
+}
+
+
+#[test]
+fn an_invalid_utf8_tail_is_quarantined_lossily_and_cut_from_the_claim() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    fs::write(&file.spool_file, b"a\nb\n\xff\xfe")?;
+    let claimed = claim_spool(&file)?;
+    assert_eq!(sent_texts(&claimed), vec!["a".to_owned(), "b".to_owned()]);
+    assert_eq!(claimed.sending_bytes, "a\nb\n".len() as u64);
+    assert_eq!(fs::read(&claimed.sending)?, b"a\nb\n");
+    assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "\u{fffd}\u{fffd}\n");
+    Ok(())
+}
+
+
+#[test]
+fn a_claimed_file_that_ends_in_a_newline_or_is_empty_keeps_its_bytes() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    fs::write(dir.path().join("spool.sending"), "a\nb\n")?;
+    fs::write(&file.sequence_file, "2 2\n")?;
+    let claimed = claim_spool(&file)?;
+    assert_eq!(claimed.sending_bytes, "a\nb\n".len() as u64);
+    assert!(!dir.path().join("spool.rejected").exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_torn_tail_in_a_claimed_file_that_cannot_be_locked_is_left_whole_for_the_next_run() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let sending = dir.path().join("spool.sending");
+    fs::write(&sending, "a\nzzz")?;
+    fs::write(&file.sequence_file, "1 1\n")?;
+    let mut pauses = 0;
+    let deferred = claim_spool_in(&file, load_claimed, 0, &mut || pauses += 1)?;
+    assert!(deferred.batches.is_empty());
+    assert_eq!(deferred.sending_bytes, u64::MAX);
+    assert_eq!(fs::read_to_string(&sending)?, "a\nzzz");
+    assert!(!dir.path().join("spool.rejected").exists());
+    Ok(())
+}
+
+
+fn stale_claim(delivered: bool) -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let sending = dir.path().join("spool.sending");
+    fs::write(&file.spool_file, "1\n")?;
+    let mut held = Some(holder(&file.spool_file)?);
+    let mut pauses = 0;
+    claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || {
+        pauses += 1;
+        drop(held.take());
+        if pauses == 1 {
+            logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || ()));
+            logged(fs::write(&file.spool_file, "7\n"));
+            if delivered {
+                logged(fs::remove_file(&sending));
+            }
+        }
+    })?;
+    assert_eq!(fs::read_to_string(&file.spool_file)?, "7\n");
+    assert_eq!(fs::read_to_string(&file.sequence_file)?, "1 1\n");
+    assert_eq!(sending.exists(), !delivered);
+    Ok(())
+}
+
+
+#[test]
+fn a_claim_that_waited_while_another_claimed_the_spool_defers_and_overwrites_nothing() -> TestResult {
+    stale_claim(false)
+}
+
+
+#[test]
+fn a_claim_that_waited_while_another_claimed_and_delivered_the_spool_defers_on_the_stale_handle() -> TestResult {
+    stale_claim(true)
+}
+
+
+#[test]
+fn a_locked_current_spool_is_never_renamed_over_an_existing_sending_file() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let sending = dir.path().join("spool.sending");
+    fs::write(&file.spool_file, "7\n")?;
+    fs::write(&sending, "1\n")?;
+    let spool = holder(&file.spool_file)?;
+    claim_locked(&file, &sending, &spool)?;
+    assert_eq!(fs::read_to_string(&sending)?, "1\n");
+    assert_eq!(fs::read_to_string(&file.spool_file)?, "7\n");
+    assert!(!file.sequence_file.exists());
+    Ok(())
+}
+
+
+#[test]
+fn an_event_appended_after_a_dead_tail_is_never_glued_onto_it() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    fs::write(&file.spool_file, "zzz")?;
+    assert!(claim_spool(&file)?.batches.is_empty());
+    append_back(std::iter::once(Ok("{\"event\":1}".to_owned())), &file.spool_file)?;
+    let claimed = claim_spool(&file)?;
+    assert_eq!(sent_texts(&claimed), vec!["{\"event\":1}".to_owned()]);
+    assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "zzz\n");
+    Ok(())
+}
+
+
+#[test]
+fn an_append_before_each_claim_never_glues_an_event_onto_a_dead_tail() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    fs::write(&file.spool_file, "a\nzzz")?;
+    let mut sent = Vec::new();
+    (0..WEDGE_ROUNDS).try_for_each(|index| -> TestResult {
+        append_back(std::iter::once(Ok(format!("event-{index}"))), &file.spool_file)?;
+        let claimed = claim_spool(&file)?;
+        sent.extend(sent_texts(&claimed).into_iter().zip(sequences(&claimed)));
+        finish_spool(&claimed, &sequences(&claimed))?;
+        assert!(!claimed.sending.exists());
+        Ok(())
+    })?;
+    let expected: Vec<(String, u64)> = std::iter::once("a".to_owned())
+        .chain((0..WEDGE_ROUNDS).map(|index| format!("event-{index}")))
+        .zip(1..)
+        .collect();
+    assert_eq!(sent, expected);
+    assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "zzz\n");
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_second_claimer_that_waited_while_the_first_claimed_a_new_file_defers_and_loads_nothing() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let sending = dir.path().join("spool.sending");
+    fs::write(&sending, "one\n")?;
+    fs::write(&file.sequence_file, "1 1\n")?;
+    let mut held = Some(holder(&sending)?);
+    let mut pauses = 0;
+    let deferred = claim_spool_in(&file, load_claimed, WAIT_ATTEMPTS, &mut || {
+        pauses += 1;
+        held.take().into_iter().for_each(|lock| {
+            drop(lock);
+            logged(fs::remove_file(&sending));
+            logged(fs::write(&file.spool_file, "two\n"));
+            logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || ()));
+        });
+    })?;
+    assert!(pauses >= 1);
+    assert!(deferred.batches.is_empty());
+    assert_eq!(deferred.sending_bytes, u64::MAX);
+    assert_eq!(fs::read_to_string(&sending)?, "two\n");
+    assert_eq!(fs::read_to_string(&file.sequence_file)?, "2 1\n");
+    finish_spool(&deferred, &[])?;
+    assert_eq!(fs::read_to_string(&sending)?, "two\n");
+    let next = claim_spool(&file)?;
+    assert_eq!(sent_texts(&next), vec!["two".to_owned()]);
+    assert_eq!(sequences(&next), vec![SECOND_SEQUENCE]);
+    Ok(())
+}
+
+
+#[test]
+fn finish_never_removes_a_claimed_file_that_a_later_claim_replaced() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let sending = dir.path().join("spool.sending");
+    fs::write(&file.spool_file, "one\n")?;
+    let loaded = claim_spool(&file)?;
+    assert_eq!(sent_texts(&loaded), vec!["one".to_owned()]);
+    finish_spool(&loaded.clone(), &[1])?;
+    assert!(!sending.exists());
+    append_back(std::iter::once(Ok("two".to_owned())), &file.spool_file)?;
+    let rival = claim_spool(&file)?;
+    assert_eq!(sent_texts(&rival), vec!["two".to_owned()]);
+    assert_eq!(fs::metadata(&sending)?.len(), loaded.sending_bytes);
+    finish_spool(&loaded, &[1])?;
+    assert_eq!(fs::read_to_string(&sending)?, "two\n");
+    finish_spool(&rival, &[SECOND_SEQUENCE])?;
+    assert!(!sending.exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_claimed_file_that_cannot_be_opened_fails_the_claim() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    fs::create_dir(dir.path().join("spool.sending"))?;
+    assert!(claim_spool(&file).is_err());
+    Ok(())
 }

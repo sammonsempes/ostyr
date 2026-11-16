@@ -228,9 +228,14 @@ pub async fn settle_and_join(
     delivery: Result<Delivered, ChannelError>,
     handle: JoinHandle<u64>,
 ) -> Result<(EventsOutcome, u64), AppError> {
-    let settled = settle_events(file, spool, delivery);
+    let settled = tokio::task::spawn_blocking({
+        let owned_file = file.clone();
+        let owned_spool = spool.clone();
+        move || settle_events(&owned_file, &owned_spool, delivery)
+    })
+    .await;
     let joined = handle.await;
-    let events = settled?;
+    let events = settled??;
     let executed = joined?;
     Ok((events, executed))
 }
@@ -245,7 +250,11 @@ pub async fn run_agent(file: &AgentFile, pause: &PauseFn) -> Result<AgentOutcome
         platform_ca: file.platform_ca.clone(),
     })?;
     let dial = dialer(address, config, file.server_name.clone());
-    let spool = claim_spool(file)?;
+    let spool = tokio::task::spawn_blocking({
+        let owned = file.clone();
+        move || claim_spool(&owned)
+    })
+    .await??;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let keys = Arc::new(open_keys_engine(
         file.keys_file.clone(),

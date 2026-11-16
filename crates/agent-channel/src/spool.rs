@@ -1,15 +1,16 @@
 use crate::agent_app::AgentFile;
-use crate::app::{bounded_lines, BoundedLine};
+use crate::app::{terminated_lines, BoundedLine};
 use crate::error::AppError;
 use crate::model::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::proto::EventBatch;
+use crate::types::LoadFn;
 use core_audit::log::owner_only;
 use prost::encoding::encoded_len_varint;
 use prost::Message;
 use same_file::Handle;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -48,6 +49,18 @@ pub struct Spool {
     pub batches: Vec<EventBatch>,
     pub sending: PathBuf,
     pub sending_bytes: u64,
+    pub sequence_file: PathBuf,
+    pub state: SequenceState,
+}
+
+
+/// What a claim read from the claimed file under its lock (`returned`: overflow lines went back to the spool, the file is still to be cut); the default is no claimed file.
+#[derive(Debug, Default)]
+pub struct Claimed {
+    pub lines: Vec<String>,
+    pub state: SequenceState,
+    pub sending_bytes: u64,
+    pub returned: bool,
 }
 
 
@@ -106,9 +119,9 @@ pub fn line_limit(file: &AgentFile) -> usize {
 }
 
 
-/// The text lines of a reader, an oversized one (more than `limit` bytes) skipped with a counted log line (number, length, never the content).
+/// The newline-ended text lines of a reader (an unterminated last line stays out), an oversized one (more than `limit` bytes) skipped with a counted log line (number, length, never the content).
 pub fn spool_texts<Input: BufRead>(reader: &mut Input, limit: usize) -> impl Iterator<Item = io::Result<String>> + '_ {
-    bounded_lines(reader, limit)
+    terminated_lines(reader, limit)
         .enumerate()
         .scan(u64::MIN, |refused, (index, line)| {
             Some(match line {
@@ -127,7 +140,13 @@ pub fn spool_texts<Input: BufRead>(reader: &mut Input, limit: usize) -> impl Ite
 
 /// How many lines the next claim takes: the first `MAX_SPOOL_BATCHES` of the spool.
 pub fn count_lines(path: &Path, limit: usize) -> io::Result<u64> {
-    let mut reader = BufReader::new(File::open(path)?);
+    count_lines_of(&File::open(path)?, limit)
+}
+
+
+/// `count_lines` on an open file, read through that handle (a lock held on it does not refuse it).
+pub fn count_lines_of(file: &File, limit: usize) -> io::Result<u64> {
+    let mut reader = BufReader::new(file);
     let taken = spool_texts(&mut reader, limit).take(MAX_SPOOL_BATCHES).collect::<io::Result<Vec<_>>>()?;
     Ok(taken.len() as u64)
 }
@@ -147,7 +166,7 @@ pub fn joined_lines(mut lines: &mut dyn Iterator<Item = io::Result<String>>) -> 
 pub const SPOOL_LOCK_ATTEMPTS: u32 = 3_000;
 
 
-/// Pause between two lock attempts; with `SPOOL_LOCK_ATTEMPTS` the deadline is about 30 seconds.
+/// Pause between two lock attempts; with `SPOOL_LOCK_ATTEMPTS` one round lasts about 30 seconds, and an append runs up to `SPOOL_REOPEN_ROUNDS` rounds.
 pub const SPOOL_LOCK_PAUSE: Duration = Duration::from_millis(10);
 
 
@@ -223,13 +242,13 @@ pub fn open_locked_once(
     pause: &mut dyn FnMut(),
     is_current: fn(&File, &Path) -> io::Result<bool>,
 ) -> io::Result<Option<File>> {
-    let out = owner_only(OpenOptions::new().read(true).append(true).create(true)).open(spool)?;
+    let out = owner_only(OpenOptions::new().read(true).write(true).create(true)).open(spool)?;
     lock_bounded(attempts, &mut || out.try_lock(), pause)?;
     Ok(is_current(&out, spool)?.then_some(out))
 }
 
 
-/// Writes the text in one `write_all` under the exclusive lock of the spool, then runs `between` and syncs the same handle, lock still held.
+/// Sets a dead unterminated tail aside, then writes the text in one `write_all` at the end under the exclusive lock of the spool, then runs `between` and syncs the same handle, lock still held.
 pub fn write_locked(text: &str, spool: &Path, attempts: u32, pause: &mut dyn FnMut(), between: &mut dyn FnMut()) -> io::Result<()> {
     write_locked_with(text, spool, attempts, pause, between, is_current_spool)
 }
@@ -245,6 +264,8 @@ pub fn write_locked_with(
     is_current: fn(&File, &Path) -> io::Result<bool>,
 ) -> io::Result<()> {
     let mut out = open_locked_with(spool, attempts, pause, is_current)?;
+    cut_tail(spool, &out)?;
+    out.seek(SeekFrom::End(0))?;
     out.write_all(text.as_bytes())?;
     between();
     out.sync_all()
@@ -259,7 +280,19 @@ pub fn append_locked(lines: impl Iterator<Item = io::Result<String>>, spool: &Pa
 
 /// `append_locked` with `between` run after the write and before the sync of the written handle.
 pub fn append_locked_between(
-    lines: impl Iterator<Item = io::Result<String>>,
+    mut lines: impl Iterator<Item = io::Result<String>>,
+    spool: &Path,
+    attempts: u32,
+    pause: &mut dyn FnMut(),
+    between: &mut dyn FnMut(),
+) -> io::Result<bool> {
+    append_dyn(&mut lines, spool, attempts, pause, between)
+}
+
+
+/// The body of `append_locked_between` on a trait object, so one instance holds every branch (a generic one is covered per instantiation).
+pub fn append_dyn(
+    lines: &mut dyn Iterator<Item = io::Result<String>>,
     spool: &Path,
     attempts: u32,
     pause: &mut dyn FnMut(),
@@ -338,7 +371,7 @@ pub fn quarantine(path: &Path, rejected: &[EventBatch], max_bytes: u64) -> io::R
         Ok(0)
     } else {
         let mut lines = match File::open(path) {
-            Ok(file) => spool_texts(&mut BufReader::new(file), DEFAULT_MAX_MESSAGE_BYTES).collect::<io::Result<Vec<_>>>()?,
+            Ok(file) => spool_texts(&mut BufReader::new(&file), DEFAULT_MAX_MESSAGE_BYTES).collect::<io::Result<Vec<_>>>()?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => Err(error)?,
         };
@@ -391,34 +424,22 @@ pub fn append_chunks(lines: impl Iterator<Item = io::Result<String>>, spool: &Pa
 }
 
 
-/// The first `count` lines of the claimed file; any further line goes back to the spool and the claimed file is cut to the first lines.
-pub fn load_claimed(sending: &Path, spool: &Path, count: u64, limit: usize) -> io::Result<Vec<String>> {
-    let (first, returned, length) = {
-        let file = File::open(sending)?;
-        let length = file.metadata()?.len();
-        let mut reader = BufReader::new(file);
-        let mut texts = spool_texts(&mut reader, limit);
-        let wanted = usize::try_from(count).unwrap_or(MAX_SPOOL_BATCHES).min(MAX_SPOOL_BATCHES);
-        let first = texts.by_ref().take(wanted).collect::<io::Result<Vec<_>>>()?;
-        let returned = append_chunks(texts, spool)? > 0;
-        (first, returned, length)
-    };
-    if returned {
-        rewrite_lines(sending, &first, length)?;
-    }
-    Ok(first)
+/// The first `count` lines of the locked claimed file, read through its handle, and whether further lines went back to the spool (the claimed file is then still to be cut to the first lines, once its handle is closed).
+pub fn load_claimed(claimed: &File, spool: &Path, count: u64, limit: usize) -> io::Result<(Vec<String>, bool)> {
+    let mut stream = claimed;
+    stream.rewind()?;
+    let mut reader = BufReader::new(claimed);
+    let mut texts = spool_texts(&mut reader, limit);
+    let wanted = usize::try_from(count).unwrap_or(MAX_SPOOL_BATCHES).min(MAX_SPOOL_BATCHES);
+    let first = texts.by_ref().take(wanted).collect::<io::Result<Vec<_>>>()?;
+    let returned = append_chunks(texts, spool)? > 0;
+    Ok((first, returned))
 }
 
 
 /// The claimed lines, or none when a producer holds the lock of the claimed file (Windows): the claim is left for the next run, logged.
-pub fn claimed_lines_with(
-    sending: &Path,
-    spool: &Path,
-    count: u64,
-    limit: usize,
-    load: fn(&Path, &Path, u64, usize) -> io::Result<Vec<String>>,
-) -> io::Result<Option<Vec<String>>> {
-    match load(sending, spool, count, limit) {
+pub fn claimed_lines_with(claimed: &File, spool: &Path, count: u64, limit: usize, load: LoadFn) -> io::Result<Option<(Vec<String>, bool)>> {
+    match load(claimed, spool, count, limit) {
         Err(error) if is_lock_violation(&error) => {
             tracing::warn!(%error, "claimed spool locked by a producer, left for the next run");
             Ok(None)
@@ -428,14 +449,41 @@ pub fn claimed_lines_with(
 }
 
 
-/// Renames a fresh spool to the sending file after recording the new sequences, unless a sending file is already there (a crashed run).
-pub fn claim_fresh(file: &AgentFile, sending: &Path) -> Result<(), AppError> {
-    let claimable = if !sending.try_exists()? && file.spool_file.try_exists()? {
-        lines_to_claim(&file.spool_file, line_limit(file))?
+/// Renames a fresh spool to the sending file after recording the new sequences, unless a sending file is already there (a crashed run), with the lock attempts and the pause given; the count, the sequence record and the rename all run under the spool lock, so no append is half written.
+pub fn claim_fresh_with(file: &AgentFile, sending: &Path, attempts: u32, pause: &mut dyn FnMut()) -> Result<(), AppError> {
+    if !sending.try_exists()? && file.spool_file.try_exists()? {
+        let spool = OpenOptions::new().read(true).write(true).open(&file.spool_file)?;
+        match lock_bounded(attempts, &mut || spool.try_lock(), pause) {
+            Ok(()) => claim_locked(file, sending, &spool),
+            Err(error) => {
+                tracing::warn!(%error, "spool not locked, claim left for the next run");
+                Ok(())
+            }
+        }
     } else {
-        None
-    };
-    if let Some(count) = claimable {
+        Ok(())
+    }
+}
+
+
+/// Once locked, claims only when the handle is still the spool and no sending file exists (another claim got there first: logged, left for the next run).
+pub fn claim_locked(file: &AgentFile, sending: &Path, spool: &File) -> Result<(), AppError> {
+    if is_current_spool(spool, &file.spool_file)? && !sending.try_exists()? {
+        claim_counted(file, sending, spool)
+    } else {
+        tracing::warn!("spool claimed by another run meanwhile, claim left for the next run");
+        Ok(())
+    }
+}
+
+
+/// Sets the dead tail of the locked spool aside, counts its lines, records the sequences and renames it to `sending` (the lock and the checks of `claim_locked` stand for a no-replace rename); a spool without a complete line stays.
+pub fn claim_counted(file: &AgentFile, sending: &Path, spool: &File) -> Result<(), AppError> {
+    cut_tail(&file.spool_file, spool)?;
+    let mut stream = spool;
+    stream.rewind()?;
+    let count = count_lines_of(spool, line_limit(file))?;
+    if count > 0 {
         let state = read_sequence(&file.sequence_file)?;
         let used = state
             .used
@@ -445,6 +493,55 @@ pub fn claim_fresh(file: &AgentFile, sending: &Path) -> Result<(), AppError> {
         Ok(fs::rename(&file.spool_file, sending)?)
     } else {
         Ok(())
+    }
+}
+
+
+/// The start of the last newline-separated segment of the file, read from its current position.
+pub fn last_segment_start(file: &File) -> io::Result<u64> {
+    let mut reader = BufReader::new(file);
+    std::iter::repeat_with(|| reader.skip_until(b'\n'))
+        .take_while(|read| !matches!(read, Ok(0)))
+        .try_fold((0, 0), |(_, end), bytes| Ok((end, end + bytes? as u64)))
+        .map(|(start, _)| start)
+}
+
+
+/// A lossy text turns an invalid byte into three bytes, so the quarantined tail is a third of the message limit at most.
+pub const REPLACEMENT_FACTOR: usize = 3;
+
+
+/// Bytes of an unterminated tail kept in the quarantine (the rest is counted in the log only).
+pub const TAIL_QUARANTINE_BYTES: usize = DEFAULT_MAX_MESSAGE_BYTES / REPLACEMENT_FACTOR;
+
+
+/// Moves the bytes after the last newline of the locked file to the quarantine of `spool` and cuts the file there; nothing when it ends in a newline. Under the lock such a tail is always dead (a crashed or failed appender), so it is never completed.
+pub fn cut_tail(spool: &Path, locked: &File) -> io::Result<()> {
+    let length = locked.metadata()?.len();
+    let mut handle = locked;
+    if length == 0 {
+        Ok(())
+    } else {
+        handle.seek(SeekFrom::Start(length - 1))?;
+        let mut last = [u8::MIN; 1];
+        handle.read_exact(&mut last)?;
+        if last == *b"\n" {
+            Ok(())
+        } else {
+            handle.rewind()?;
+            let start = last_segment_start(locked)?;
+            handle.seek(SeekFrom::Start(start))?;
+            let mut tail = Vec::new();
+            Read::take(&mut handle, TAIL_QUARANTINE_BYTES as u64).read_to_end(&mut tail)?;
+            let batch = EventBatch {
+                ecs_json: String::from_utf8_lossy(&tail).into_owned().into_bytes(),
+                ..EventBatch::default()
+            };
+            quarantine(&suffixed(spool, REJECTED_SUFFIX), &[batch], MAX_REJECTED_BYTES)?;
+            let bytes = length - start;
+            tracing::warn!(bytes, "unterminated tail set aside in the quarantine");
+            Ok(locked.set_len(start)?)
+        }
     }
 }
 
@@ -471,29 +568,107 @@ pub fn claim_spool(file: &AgentFile) -> Result<Spool, AppError> {
 
 
 /// `claim_spool` with the loading function given; a claimed file that is locked keeps its bytes (`sending_bytes` of `u64::MAX`, never equal to its length) so `finish_spool` cannot remove it.
-pub fn claim_spool_with(file: &AgentFile, load: fn(&Path, &Path, u64, usize) -> io::Result<Vec<String>>) -> Result<Spool, AppError> {
+pub fn claim_spool_with(file: &AgentFile, load: LoadFn) -> Result<Spool, AppError> {
+    claim_spool_in(file, load, SPOOL_LOCK_ATTEMPTS, &mut pause_between_lock_attempts)
+}
+
+
+/// `claim_spool_with` with the lock attempts and the pause given.
+pub fn claim_spool_in(file: &AgentFile, load: LoadFn, attempts: u32, pause: &mut dyn FnMut()) -> Result<Spool, AppError> {
     let sending = suffixed(&file.spool_file, SENDING_SUFFIX);
-    claim_fresh(file, &sending)?;
-    let state = read_sequence(&file.sequence_file)?;
-    let (lines, sending_bytes) = if sending.try_exists()? {
-        let before = fs::metadata(&sending)?.len();
-        match claimed_lines_with(&sending, &file.spool_file, state.count, line_limit(file), load)? {
-            Some(lines) => (lines, before.min(fs::metadata(&sending)?.len())),
-            None => (Vec::new(), u64::MAX),
-        }
-    } else {
-        (Vec::new(), 0)
+    claim_fresh_with(file, &sending, attempts, pause)?;
+    let loaded = match open_sending(&sending)? {
+        Some(handle) => load_sending(file, &sending, &handle, load, attempts, pause)?,
+        None => Claimed {
+            state: read_sequence(&file.sequence_file)?,
+            ..Claimed::default()
+        },
     };
-    let first = state
+    let claimed = cut_returned(&sending, loaded)?;
+    let first = claimed
+        .state
         .used
-        .saturating_sub(state.count)
+        .saturating_sub(claimed.state.count)
         .checked_add(1)
         .ok_or_else(|| AppError::SequenceOverflow(file.sequence_file.clone()))?;
     Ok(Spool {
-        batches: batches_of(lines, first, file),
+        batches: batches_of(claimed.lines, first, file),
         sending,
-        sending_bytes,
+        sending_bytes: claimed.sending_bytes,
+        sequence_file: file.sequence_file.clone(),
+        state: claimed.state,
     })
+}
+
+
+/// Cuts the claimed file to the lines taken once the lock handle is closed (a rename over an open file is refused on Windows); if a late write made it longer it stays whole and its bytes stay those read, so `finish_spool` keeps it.
+pub fn cut_returned(sending: &Path, claimed: Claimed) -> Result<Claimed, AppError> {
+    let rewritten = claimed.returned && rewrite_lines(sending, &claimed.lines, claimed.sending_bytes)?;
+    let sending_bytes = if rewritten {
+        fs::metadata(sending)?.len()
+    } else {
+        claimed.sending_bytes
+    };
+    Ok(Claimed { sending_bytes, ..claimed })
+}
+
+
+/// Opens the claimed file, none when there is none (another run removed it meanwhile).
+pub fn open_sending(sending: &Path) -> io::Result<Option<File>> {
+    match OpenOptions::new().read(true).write(true).open(sending) {
+        Ok(handle) => Ok(Some(handle)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+
+/// A claim that read nothing and keeps the claimed file whole (`sending_bytes` of `u64::MAX`).
+pub fn deferred_claim() -> Claimed {
+    Claimed {
+        sending_bytes: u64::MAX,
+        ..Claimed::default()
+    }
+}
+
+
+/// Locks the claimed file and, if the handle is still the file at `sending`, reads everything the claim needs through it; otherwise defers, logged.
+pub fn load_sending(
+    file: &AgentFile,
+    sending: &Path,
+    handle: &File,
+    load: LoadFn,
+    attempts: u32,
+    pause: &mut dyn FnMut(),
+) -> Result<Claimed, AppError> {
+    match lock_bounded(attempts, &mut || handle.try_lock(), pause) {
+        Ok(()) if is_current_spool(handle, sending)? => read_locked(file, handle, load),
+        Ok(()) => {
+            tracing::warn!("claimed spool replaced while waiting for its lock, left for the next run");
+            Ok(deferred_claim())
+        }
+        Err(error) => {
+            tracing::warn!(%error, "claimed spool not locked, left for the next run");
+            Ok(deferred_claim())
+        }
+    }
+}
+
+
+/// Under the lock of the claimed file: its sequence state, its tail set aside, and its lines.
+pub fn read_locked(file: &AgentFile, handle: &File, load: LoadFn) -> Result<Claimed, AppError> {
+    let state = read_sequence(&file.sequence_file)?;
+    cut_tail(&file.spool_file, handle)?;
+    let sending_bytes = handle.metadata()?.len();
+    match claimed_lines_with(handle, &file.spool_file, state.count, line_limit(file), load)? {
+        Some((lines, returned)) => Ok(Claimed {
+            lines,
+            state,
+            sending_bytes,
+            returned,
+        }),
+        None => Ok(Claimed { state, ..deferred_claim() }),
+    }
 }
 
 
@@ -508,9 +683,9 @@ pub fn finish_spool_with(spool: &Spool, acknowledged: &[u64], attempts: u32, pau
     if spool.batches.iter().all(|batch| acknowledged.contains(&batch.sequence)) && spool.sending.try_exists()? {
         let claimed = OpenOptions::new().read(true).append(true).open(&spool.sending)?;
         match lock_bounded(attempts, &mut || claimed.try_lock(), pause) {
-            Ok(()) if claimed.metadata()?.len() == spool.sending_bytes => Ok(fs::remove_file(&spool.sending)?),
+            Ok(()) if finished_file_is_loaded(&claimed, spool)? => Ok(fs::remove_file(&spool.sending)?),
             Ok(()) => {
-                tracing::warn!("claimed spool grew after it was read, kept for the next run");
+                tracing::warn!("claimed spool grew or was replaced after it was read, kept for the next run");
                 Ok(())
             }
             Err(error) => {
@@ -521,4 +696,12 @@ pub fn finish_spool_with(spool: &Spool, acknowledged: &[u64], attempts: u32, pau
     } else {
         Ok(())
     }
+}
+
+
+/// Whether the locked claimed file is still the one this claim loaded: the handle is the file at the path, its length and the sequence state are unchanged.
+pub fn finished_file_is_loaded(claimed: &File, spool: &Spool) -> Result<bool, AppError> {
+    Ok(is_current_spool(claimed, &spool.sending)?
+        && claimed.metadata()?.len() == spool.sending_bytes
+        && read_sequence(&spool.sequence_file)? == spool.state)
 }
