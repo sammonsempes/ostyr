@@ -5,13 +5,15 @@ mod types;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use types::TestResult;
 use web_ui::api::{
-    alerts_path, cases_path, classify, conflict_failure, get_alert, get_case, valid_cursor, valid_id, valid_token, MAX_COMMENT_CHARS,
-    MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
+    alerts_path, assets_path, cases_path, check_asset_detail, check_asset_page, classify, conflict_failure, encode_asset_id, get_alert, get_case,
+    valid_asset_cursor, valid_asset_id, valid_cursor, valid_id, valid_token, MAX_ASSET_ATTRIBUTES, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES,
+    MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
 use web_ui::model::{ApiSection, WebLimits};
+use web_ui::model::{AssetDetailView, AssetPageView};
 use web_ui::routes::{comment_limits, comment_shaped, COMMENT_FORM_BYTES};
 use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, session_key, set_cookie};
 
@@ -206,5 +208,86 @@ async fn an_invalid_case_id_is_not_found_without_a_call() -> TestResult {
     let token = secrecy::SecretString::from("t".to_owned());
     assert!(matches!(get_case(&client, SOURCE, &token, "-x").await, Err(ApiFailure::NotFound)));
     assert!(matches!(get_case(&client, SOURCE, &token, "ok-1").await, Err(ApiFailure::Unavailable(_))));
+    Ok(())
+}
+
+
+#[test]
+fn asset_ids_cursors_and_paths() -> TestResult {
+    for hidden in [
+        '\u{200b}',
+        '\u{202e}',
+        '\u{2028}',
+        '\u{feff}',
+        '\u{3164}',
+        '\u{ad}',
+        '\n',
+        '\0',
+        '\u{e0041}',
+        '\u{61c}',
+        '\u{115f}',
+        '\u{2800}',
+        '\u{ffa0}',
+        '\u{180e}',
+        '\u{206a}',
+        '\u{34f}',
+        '\u{fe0f}',
+        '\u{e000}',
+        '\u{378}',
+    ] {
+        assert!(!valid_asset_id(&format!("a{hidden}b")), "{hidden:?}");
+    }
+    assert!(valid_asset_id("serial:A/B?c#d %e"));
+    assert!(valid_asset_id(&"x".repeat(MAX_ASSET_ID_BYTES)));
+    assert!(!valid_asset_id(&"x".repeat(MAX_ASSET_ID_BYTES + 1)));
+    for bad in ["", ".", ".."] {
+        assert!(!valid_asset_id(bad));
+    }
+    assert!(valid_asset_id("..."));
+    assert!(valid_asset_cursor(&"a".repeat(MAX_ASSET_CURSOR_CHARS)));
+    for bad in ["", "a b", "a/b", &"a".repeat(MAX_ASSET_CURSOR_CHARS + 1)] {
+        assert!(!valid_asset_cursor(bad));
+    }
+    assert_eq!(encode_asset_id("a-b.c*_"), "a-b.c*_");
+    assert_eq!(encode_asset_id("a b+c~"), "a%20b%2Bc%7E");
+    assert_eq!(assets_path(None, None), "assets?");
+    assert_eq!(assets_path(Some("a=b"), Some(LIMIT)), "assets?cursor=a%3Db&limit=7");
+    Ok(())
+}
+
+
+const PAGE_ITEMS: usize = 101;
+
+
+fn summary_json() -> serde_json::Value {
+    serde_json::json!({"id": "a", "kind": "k", "lifecycle": "l", "version": 1, "counts": {"keys": 0, "attributes": 0, "open_conflicts": 0}})
+}
+
+
+fn asset_with(keys: usize, attributes: usize, id: &str) -> Result<AssetDetailView, serde_json::Error> {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "kind": "k", "lifecycle": "l", "version": 1, "counts": {"keys": 0, "attributes": 0, "open_conflicts": 0},
+        "keys": vec![serde_json::json!({"key": "k", "value": "v"}); keys],
+        "attributes": vec![serde_json::json!({"name": "n", "value": "v", "source": "s"}); attributes],
+        "truncated": false
+    }))
+}
+
+
+fn page_with(items: usize, cursor: Option<&str>) -> Result<AssetPageView, serde_json::Error> {
+    serde_json::from_value(serde_json::json!({"items": vec![summary_json(); items], "next_cursor": cursor}))
+}
+
+
+#[test]
+fn asset_answers_are_bounded() -> TestResult {
+    assert!(check_asset_detail(&asset_with(MAX_ASSET_KEYS, MAX_ASSET_ATTRIBUTES, "a")?, "a").is_ok());
+    assert!(check_asset_detail(&asset_with(MAX_ASSET_KEYS + 1, 0, "a")?, "a").is_err());
+    assert!(check_asset_detail(&asset_with(0, MAX_ASSET_ATTRIBUTES + 1, "a")?, "a").is_err());
+    assert!(check_asset_detail(&asset_with(0, 0, "a")?, "b").is_err());
+    assert!(check_asset_page(&page_with(1, Some("abc"))?).is_ok());
+    assert!(check_asset_page(&page_with(1, None)?).is_ok());
+    assert!(check_asset_page(&page_with(PAGE_ITEMS, None)?).is_err());
+    assert!(check_asset_page(&page_with(1, Some("a b"))?).is_err());
     Ok(())
 }

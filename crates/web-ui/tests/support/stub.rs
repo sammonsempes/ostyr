@@ -82,6 +82,7 @@ pub struct StubState {
     pub logins: AtomicUsize,
     pub details: AtomicUsize,
     pub case_paths: Mutex<Vec<String>>,
+    pub asset_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -518,6 +519,141 @@ pub async fn case_comment_handler(State(state): State<Arc<StubState>>, headers: 
 }
 
 
+pub const ODD_ASSET_ID: &str = "serial:A/B?c#d %e \u{e9}";
+
+
+pub const ASSET_KEYS: u32 = 2;
+
+
+pub const ASSET_ATTRIBUTES: u32 = 4;
+
+
+pub const BIG_ASSET: &str = "big";
+
+
+pub const BIG_VALUE_BYTES: usize = 4096;
+
+
+pub const BIG_ATTRIBUTES: usize = 500;
+
+
+pub const MANY_ATTRIBUTES: usize = 501;
+
+
+pub fn asset(id: &str, kind: &str) -> Value {
+    json!({"id": id, "kind": kind, "lifecycle": "active", "version": 1, "counts": {"keys": ASSET_KEYS, "attributes": ASSET_ATTRIBUTES, "open_conflicts": 1}})
+}
+
+
+pub fn asset_detail(id: &str, attributes: Vec<Value>, truncated: bool) -> Value {
+    merged(
+        asset(id, "server"),
+        json!({
+            "keys": [{"key": "serial", "value": "A1"}, {"key": "hostname", "value": "srv-1"}],
+            "attributes": attributes, "truncated": truncated
+        }),
+    )
+}
+
+
+pub fn attribute(name: &str, value: &str) -> Value {
+    json!({"name": name, "value": value, "source": "agent"})
+}
+
+
+pub fn hostile_assets() -> Vec<Value> {
+    vec![
+        asset(&format!("a{HOSTILE}"), "kind"),
+        asset("gap:victim\u{e0041}", "server"),
+        asset("gap:\u{61c}mitciv", "server"),
+        asset("gap:\u{115f}x", "server"),
+        asset("gap:\u{2800}x", "server"),
+        asset("gap:\u{ffa0}x", "server"),
+        asset("gap:\u{180e}x", "server"),
+        asset("gap:victim", &format!("{HOSTILE}\u{202e}kind")),
+        asset("gap:kind-tag", "k\u{e0041}"),
+        asset("gap:kept", "server"),
+    ]
+}
+
+
+pub fn hostile_asset_detail(id: &str) -> Value {
+    let huge = "v".repeat(BIG_VALUE_BYTES);
+    merged(
+        asset_detail(
+            id,
+            vec![
+                attribute(
+                    HOSTILE,
+                    &format!("{HOSTILE}\u{202e}\u{e0041}\u{61c}\u{115f}\u{2800}\u{ffa0}\u{180e}{huge}"),
+                ),
+                attribute("name", "<script>alert(2)</script>"),
+            ],
+            false,
+        ),
+        json!({"kind": format!("{HOSTILE}\u{202e}"), "keys": [{"key": HOSTILE, "value": format!("{HOSTILE}\u{202e}")}]}),
+    )
+}
+
+
+pub async fn assets_handler(
+    State(state): State<Arc<StubState>>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+    uri: axum::http::Uri,
+) -> Response {
+    note_forwarded(&state, &headers);
+    state.asset_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Hostile => Json(page(hostile_assets(), None)).into_response(),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(page((0..MANY_ITEMS).map(|_| asset("c", "t")).collect(), None)).into_response(),
+            Mode::BadCursor => Json(page(vec![asset("c", "t")], Some("a b"))).into_response(),
+            Mode::BadId => Json(page(vec![asset("a\u{202e}b", "t")], None)).into_response(),
+            Mode::Normal => match query.get("cursor").map(String::as_str) {
+                None => Json(page(vec![asset("srv-1", "server"), asset(ODD_ASSET_ID, "switch")], Some(FIRST_CURSOR))).into_response(),
+                Some(FIRST_CURSOR) => Json(page(vec![asset("srv-3", "laptop")], None)).into_response(),
+                Some(_) => error_reply(StatusCode::BAD_REQUEST),
+            },
+            _ => Json(page(vec![], None)).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn asset_detail_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    {
+        let mut seen = state.asset_paths.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.push(uri.path().to_owned());
+        seen.push(format!("id={id}"));
+    }
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Hostile => Json(hostile_asset_detail(&id)).into_response(),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::BadId => Json(asset_detail("other", vec![], false)).into_response(),
+            Mode::TooMany => Json(asset_detail(&id, (0..MANY_ATTRIBUTES).map(|_| attribute("n", "v")).collect(), true)).into_response(),
+            _ if id == "missing" => error_reply(StatusCode::NOT_FOUND),
+            _ if id == BIG_ASSET => Json(asset_detail(
+                &id,
+                (0..BIG_ATTRIBUTES).map(|index| attribute(&format!("n{index}"), "v")).collect(),
+                true,
+            ))
+            .into_response(),
+            _ => Json(asset_detail(&id, vec![attribute("os", "linux")], false)).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub async fn count_request(State(state): State<Arc<StubState>>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
     next.run(request).await
@@ -534,6 +670,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         logins: AtomicUsize::new(0),
         details: AtomicUsize::new(0),
         case_paths: Mutex::new(Vec::new()),
+        asset_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -546,6 +683,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/auth/logout", post(logout_handler))
         .route("/alerts", get(alerts_handler))
         .route("/alerts/{id}", get(detail_handler))
+        .route("/assets", get(assets_handler))
+        .route("/assets/{id}", get(asset_detail_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))
