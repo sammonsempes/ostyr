@@ -13,6 +13,8 @@ pub enum CmdbError {
     FieldTooLong { field: &'static str, limit: usize },
     #[error("observation field `{field}` holds a control or invisible character")]
     ControlCharacter { field: &'static str },
+    #[error("observation field `{field}` has edge, doubled or non-space whitespace that renders like another value")]
+    AmbiguousText { field: &'static str },
     #[error("observation carries more than {limit} attributes")]
     TooManyAttributes { limit: usize },
     #[error("field `{field}` is empty")]

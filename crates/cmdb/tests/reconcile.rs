@@ -427,3 +427,49 @@ fn the_attribute_count_is_capped() -> TestResult {
     );
     Ok(())
 }
+
+
+#[test]
+fn whitespace_twins_are_refused_in_every_identity_text() -> TestResult {
+    let forms = [
+        "victim ",
+        " victim",
+        "vic  tim",
+        "victim\u{a0}",
+        "vic\u{3000}tim",
+        "vic\u{2007}tim",
+        "vic\u{c}tim",
+        "vic\u{b}tim",
+        "vic\ttim",
+    ];
+    forms.iter().try_for_each(|form| -> TestResult {
+        [IdentityKey::SerialNumber, IdentityKey::Mac, IdentityKey::CloudId, IdentityKey::Name]
+            .iter()
+            .try_for_each(|key| -> TestResult {
+                let refused = reconcile(&[], &observation("agent", &[(*key, form)], &[]), &TruthMap::new());
+                assert!(refused.is_err(), "{form:?} accepted");
+                Ok(())
+            })?;
+        let source = reconcile(&[], &observation(form, &[(IdentityKey::SerialNumber, "SN1")], &[]), &TruthMap::new());
+        assert!(source.is_err(), "source {form:?} accepted");
+        Ok(())
+    })?;
+    let refused = reconcile(&[], &observation("agent ", &[(IdentityKey::SerialNumber, "SN1")], &[]), &TruthMap::new());
+    assert_eq!(refused.err(), Some(CmdbError::AmbiguousText { field: "source" }));
+    let doubled = reconcile(&[], &observation("agent", &[(IdentityKey::Name, "a  b")], &[]), &TruthMap::new());
+    assert_eq!(doubled.err(), Some(CmdbError::AmbiguousText { field: "keys" }));
+    Ok(())
+}
+
+
+#[test]
+fn single_inner_space_and_free_text_are_accepted() -> TestResult {
+    let accepted = reconcile(
+        &[],
+        &observation("agent", &[(IdentityKey::Name, "vic tim")], &[("owner", "alice  ")]),
+        &TruthMap::new(),
+    )?;
+    assert_eq!(accepted.inventory.first().map(|found| found.id.as_str()), Some("name:vic tim"));
+    reconcile(&[], &observation("agent", &[(IdentityKey::Name, "victim")], &[]), &TruthMap::new())?;
+    Ok(())
+}

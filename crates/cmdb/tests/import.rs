@@ -358,3 +358,18 @@ fn import_errors_never_carry_file_bytes() -> TestResult {
     });
     Ok(())
 }
+
+
+#[test]
+fn row_with_a_whitespace_twin_is_rejected_alone() -> TestResult {
+    let report = run(
+        "serial,owner,site\nSN1,a,p\nvic  tim,b,p\nSN3,c,p\n",
+        ImportFormat::Csv,
+        &[],
+        &TruthMap::new(),
+    )?;
+    assert_eq!(report.created, vec!["serial_number:SN1", "serial_number:SN3"]);
+    assert_eq!(report.rejected.len(), 1);
+    assert_eq!(report.rejected.first().map(|row| row.line), Some(THIRD_LINE));
+    Ok(())
+}
