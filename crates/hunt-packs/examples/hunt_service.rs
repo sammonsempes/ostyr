@@ -10,7 +10,7 @@ use hunt_packs::clock::Reading;
 use hunt_packs::model::HuntPack;
 use hunt_packs::run::{run_pack, RunError};
 use hunt_packs::schedule::due_runs;
-use hunt_packs::service::run_service;
+use hunt_packs::service::{run_service, SettingsSource};
 use hunt_packs::settings::open_hunt;
 use hunt_packs::store::{Param, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
 use hunt_packs::tick::Hooks;
@@ -130,7 +130,11 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
             tracing::error!("service already stopped");
         }
     });
-    let report = run_service(&engine, &mut clock, &mut sleep, &mut stop_rx, UNBOUNDED_ROUNDS, &mut exec, &mut hooks).await;
+    let source = SettingsSource {
+        engine: &engine,
+        path: Path::new(&hunt_file),
+    };
+    let report = run_service(&source, &mut clock, &mut sleep, &mut stop_rx, UNBOUNDED_ROUNDS, &mut exec, &mut hooks).await;
     tracing::info!("{report:?}");
     Ok(())
 }

@@ -13,7 +13,7 @@ use hunt_packs::model::HuntPack;
 use hunt_packs::packs::{load_packs_partial, MAX_ENTRIES};
 use hunt_packs::run::{HuntOutcome, RunError};
 use hunt_packs::schedule::due_runs;
-use hunt_packs::service::{run_service, tick_round, ServiceReport};
+use hunt_packs::service::{reload_round, run_service, settings_digest, tick_round, ServiceReport, SettingsSource};
 use hunt_packs::settings::{open_hunt, HuntSettings};
 use hunt_packs::store::{Param, GET_SQL, SET_SQL};
 use hunt_packs::tick::{Hooks, DEFAULT_MAX_TENANTS};
@@ -69,6 +69,18 @@ const FIRST_CALL: usize = 0;
 
 
 const TWO_STEP: i64 = 2;
+
+
+const SIX: u64 = 6;
+
+
+const FIVE: u64 = 5;
+
+
+const OTHER_INVALID: u64 = 6;
+
+
+const THIRD_CALL: usize = 3;
 
 
 const PACK_TEXT: &str = "packs:
@@ -208,7 +220,12 @@ async fn drive(rig: &Rig, max_ticks: u64, hang: bool, on_sleep: &mut OnSleep<'_>
         }
     };
     let mut stop = rig.stop_rx.clone();
-    let report = run_service(&rig.engine, &mut clock, &mut sleep, &mut stop, max_ticks, &mut exec, &mut hooks).await;
+    let hunt_file = rig.dir.path().join("hunt.yaml");
+    let source = SettingsSource {
+        engine: &rig.engine,
+        path: &hunt_file,
+    };
+    let report = run_service(&source, &mut clock, &mut sleep, &mut stop, max_ticks, &mut exec, &mut hooks).await;
     let failures = rig.errors.borrow().clone();
     failures.is_empty().then_some(report).ok_or_else(|| failures.join(", ").into())
 }
@@ -323,6 +340,115 @@ async fn an_invalid_edit_keeps_the_old_settings_and_is_audited_denied() -> TestR
     assert_eq!((report.reloads_applied, report.reloads_refused), (0, 1));
     assert_eq!(denied(&rig)?, 1);
     assert_eq!(rig.wall.get(), START + TWO_STEP * tick_step());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_invalid_file_left_in_place_is_audited_once_and_skipped_after() -> TestResult {
+    let rig = rig()?;
+    let report = drive(&rig, SIX, false, &mut |index, held| {
+        if index == 0 {
+            write_hunt(held, "/nonexistent/pg.yaml", TOO_FAST, "[a]")?;
+        }
+        Ok(())
+    })
+    .await?;
+    assert_eq!((report.reloads_refused, report.reloads_skipped), (1, FIVE - 1));
+    assert_eq!(denied(&rig)?, 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_second_invalid_edit_is_audited_again() -> TestResult {
+    let rig = rig()?;
+    let report = drive(&rig, SIX, false, &mut |index, held| {
+        if index == 0 {
+            write_hunt(held, "/nonexistent/pg.yaml", TOO_FAST, "[a]")?;
+        }
+        if index == THIRD_CALL {
+            write_hunt(held, "/nonexistent/pg.yaml", OTHER_INVALID, "[a]")?;
+        }
+        Ok(())
+    })
+    .await?;
+    assert_eq!((report.reloads_refused, report.reloads_skipped), (TWO, THIRD_CALL as u64));
+    assert_eq!(denied(&rig)?, TWO_SIZE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn invalid_then_restored_then_invalid_again_is_audited_twice() -> TestResult {
+    let rig = rig()?;
+    let report = drive(&rig, FIVE, false, &mut |index, held| {
+        if index == 0 || index == TWO_SIZE {
+            write_hunt(held, "/nonexistent/pg.yaml", TOO_FAST, "[a]")?;
+        }
+        if index == 1 {
+            write_hunt(held, "/nonexistent/pg.yaml", TICK, "[a, b]")?;
+        }
+        Ok(())
+    })
+    .await?;
+    assert_eq!((report.reloads_refused, report.reloads_skipped, report.reloads_applied), (TWO, 1, 0));
+    assert_eq!(denied(&rig)?, TWO_SIZE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unreadable_file_is_never_skipped() -> TestResult {
+    let rig = rig()?;
+    let report = drive(&rig, FOUR, false, &mut |index, held| {
+        if index == 0 {
+            fs::remove_file(held.dir.path().join("hunt.yaml"))?;
+        }
+        Ok(())
+    })
+    .await?;
+    assert_eq!((report.reloads_refused, report.reloads_skipped), (THIRD_CALL as u64, 0));
+    assert!(settings_digest(&rig.dir.path().join("hunt.yaml")).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_file_changed_during_the_reload_is_not_remembered_as_refused() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("hunt.yaml");
+    fs::write(&file, hunt_text(dir.path(), "/nonexistent/pg.yaml", TICK, "[a]"))?;
+    let touched = file.clone();
+    let text = hunt_text(dir.path(), "/nonexistent/pg.yaml", TOO_FAST, "[a]");
+    let context = ReloadContext {
+        actor_id: "hunt".to_owned(),
+        tenant: "example".to_owned(),
+        module: "hunt-packs".to_owned(),
+        target: "hunt.yaml".to_owned(),
+        request_id: "hunt-reload".to_owned(),
+    };
+    let log = genesis_log(io::sink());
+    let engine = open_hunt(
+        file.clone(),
+        Box::new(move |entry| {
+            fs::write(&touched, &text).map_err(|_| AuditError::LogPoisoned)?;
+            append(&log, entry)
+        }),
+        context,
+    )?;
+    fs::write(
+        &file,
+        hunt_text(dir.path(), "/nonexistent/pg.yaml", OTHER_INVALID, "[a]").replace("tick_seconds: 6", "tick_seconds: 7"),
+    )?;
+    let mut remembered = None;
+    let mut report = ServiceReport::default();
+    reload_round(&engine, &file, &mut remembered, &mut report);
+    assert_eq!((report.reloads_refused, remembered.is_none()), (1, true));
+    reload_round(&engine, &file, &mut remembered, &mut report);
+    assert_eq!((report.reloads_refused, remembered.is_some()), (TWO, true));
+    reload_round(&engine, &file, &mut remembered, &mut report);
+    assert_eq!((report.reloads_refused, report.reloads_skipped), (TWO, 1));
     Ok(())
 }
 
