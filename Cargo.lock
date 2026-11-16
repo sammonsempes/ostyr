@@ -3104,6 +3104,7 @@ dependencies = [
 name = "intel-feeds"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "core-audit",
  "core-config",
  "core-pg",
@@ -3113,6 +3114,9 @@ dependencies = [
  "log",
  "proptest",
  "psl",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha1 0.10.7",
@@ -3128,6 +3132,7 @@ dependencies = [
  "ureq 3.5.1",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
