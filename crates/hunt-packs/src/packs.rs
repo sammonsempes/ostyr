@@ -1,4 +1,4 @@
-use crate::error::PackError;
+use crate::error::{shown_id, PackError};
 use crate::model::{HuntPack, HuntPackFile, LoadedPack, Source};
 use crate::text::valid_text;
 use core_config::parse::{parse_document, read_text};
@@ -8,6 +8,7 @@ use std::fs::symlink_metadata;
 use std::fs::{read_dir, DirEntry, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
@@ -310,4 +311,56 @@ pub fn load_packs(dir: &Path) -> Result<Vec<LoadedPack>, PackError> {
             .map(|()| first_seen)
     })?;
     Ok(loaded)
+}
+
+
+/// The packs of the files that loaded, and how many files were refused; one bad file never hides the others.
+pub struct PackSet {
+    pub packs: Vec<LoadedPack>,
+    pub refused: usize,
+}
+
+
+/// The `*.yaml` candidates of `dir` in name order; a symbolic link named `*.yaml` is counted, not fatal.
+pub fn lenient_files(dir: &Path) -> Result<(Vec<PathBuf>, usize), PackError> {
+    let listed: Vec<Result<Option<PathBuf>, PackError>> = read_dir(dir)?.take(MAX_ENTRIES + 1).map(yaml_path).collect();
+    (listed.len() <= MAX_ENTRIES).then_some(()).ok_or_else(|| PackError::TooManyEntries {
+        dir: dir.display().to_string(),
+    })?;
+    let refused = listed.iter().filter(|entry| entry.is_err()).count();
+    let mut paths: Vec<PathBuf> = listed.into_iter().filter_map(Result::ok).flatten().collect();
+    paths.sort();
+    Ok((paths, refused))
+}
+
+
+/// Every file alone: a file that fails to load, or holds an id taken by an earlier file, is refused whole and counted.
+pub fn load_packs_partial(dir: &Path) -> Result<PackSet, PackError> {
+    let (paths, listing_refused) = lenient_files(dir)?;
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    let mut set = PackSet {
+        packs: Vec::new(),
+        refused: listing_refused,
+    };
+    paths.iter().for_each(|path| {
+        let file = path.display().to_string();
+        match load_file(path) {
+            Ok(content) => match content.packs.iter().find(|pack| taken.contains(&pack.id)) {
+                Some(duplicate) => {
+                    let shown = shown_id(&duplicate.id);
+                    warn!("hunt pack file refused: {file}: pack `{shown}` already defined");
+                    set.refused += 1;
+                }
+                None => content.packs.into_iter().for_each(|pack| {
+                    taken.insert(pack.id.clone());
+                    set.packs.push(LoadedPack { file: file.clone(), pack });
+                }),
+            },
+            Err(error) => {
+                warn!("hunt pack file refused: {error}");
+                set.refused += 1;
+            }
+        }
+    });
+    Ok(set)
 }
