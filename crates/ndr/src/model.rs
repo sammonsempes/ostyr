@@ -130,4 +130,5 @@ pub struct TickCounts {
 pub struct TickOutcome {
     pub events: Vec<EcsEvent>,
     pub counts: TickCounts,
+    pub deferred_hashes: Vec<String>,
 }

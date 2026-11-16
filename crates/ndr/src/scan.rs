@@ -185,9 +185,16 @@ pub fn read_line(groups: &mut Groups, line: &str, limits: &Limits, outcome: &mut
 /// Scans one hash, or defers it once `max_files_per_tick` files are in this tick.
 pub fn handle_group(context: &Context, sha256: &str, sightings: &[Sighting], now: OffsetDateTime, outcome: &mut TickOutcome) {
     match file_total(outcome) >= context.limits.max_files_per_tick as u64 {
-        true => outcome.counts.deferred += 1,
+        true => defer(outcome, sha256),
         false => scan_group(context, sha256, sightings, now, outcome),
     }
+}
+
+
+/// Counts a hash as deferred and keeps it for the caller.
+pub fn defer(outcome: &mut TickOutcome, sha256: &str) {
+    outcome.counts.deferred += 1;
+    outcome.deferred_hashes.push(sha256.to_string());
 }
 
 
