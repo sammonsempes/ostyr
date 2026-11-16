@@ -1,6 +1,7 @@
 use crate::types::SpoolLock;
 use serde::Deserialize;
 use std::fs::File;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 
@@ -35,6 +36,15 @@ pub const DEFAULT_MAX_LINES_PER_POLL: u64 = 10_000;
 
 
 pub const DEFAULT_SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
+
+
+pub const DEFAULT_NFT_PATH: &str = "/usr/sbin/nft";
+
+
+pub const MAX_ENDPOINTS: usize = 8;
+
+
+pub const MAX_DNS_RESOLVERS: usize = 4;
 
 
 pub const DEFAULT_SENSOR_WINDOW_SECONDS: u64 = 120;
@@ -108,6 +118,29 @@ pub fn default_systemctl_path() -> PathBuf {
 }
 
 
+pub fn default_nft_path() -> PathBuf {
+    PathBuf::from(DEFAULT_NFT_PATH)
+}
+
+
+/// A platform or relay endpoint the isolated host may still reach: a parsed address, so no setting text reaches the ruleset, and a TCP port.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Endpoint {
+    pub address: IpAddr,
+    pub port: u16,
+}
+
+
+/// What network isolation still lets through: the endpoints, and the DNS resolvers only when named.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct IsolationSettings {
+    pub endpoints: Vec<Endpoint>,
+    pub dns: Vec<IpAddr>,
+}
+
+
 /// The settings file; `settings` and `sensor` are live-reloaded, the paths (`systemctl_path` included) are read at start.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +155,10 @@ pub struct LinuxFile {
     pub sensor: SensorSettings,
     #[serde(default = "default_systemctl_path")]
     pub systemctl_path: PathBuf,
+    #[serde(default)]
+    pub isolation: IsolationSettings,
+    #[serde(default = "default_nft_path")]
+    pub nft_path: PathBuf,
 }
 
 
@@ -261,4 +298,72 @@ pub struct HostSample {
     pub boot_id: Option<String>,
     pub uptime_seconds: Option<f64>,
     pub survey: MountSurvey,
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+
+/// One accept rule of the isolation table: loopback of the named hook, a destination address and port, or the tracked replies of one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    Loopback(&'static str),
+    Destination { address: IpAddr, protocol: Protocol, port: u16 },
+    Reply { address: IpAddr, protocol: Protocol, port: u16 },
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsolationStatus {
+    Absent,
+    Active,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct TableJson {
+    pub family: String,
+    pub name: String,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct ChainJson {
+    pub family: String,
+    pub table: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub hook: Option<String>,
+    pub prio: Option<i64>,
+    pub policy: Option<String>,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct RuleJson {
+    pub family: String,
+    pub table: String,
+    pub chain: String,
+    pub expr: Vec<serde_json::Value>,
+}
+
+
+/// One element of the `nftables` array of `nft -j`; an element holding none of the known keys is a mismatch.
+#[derive(Debug, Deserialize)]
+pub struct ItemJson {
+    pub table: Option<TableJson>,
+    pub chain: Option<ChainJson>,
+    pub rule: Option<RuleJson>,
+    pub metainfo: Option<Box<serde_json::value::RawValue>>,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct ListingJson {
+    pub nftables: Vec<Box<serde_json::value::RawValue>>,
 }
