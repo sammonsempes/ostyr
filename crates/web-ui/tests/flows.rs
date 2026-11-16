@@ -23,13 +23,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
-use stub::{id_of, Mode, ReadFault, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, TOKEN};
+use stub::{id_of, Mode, ReadFault, BIG_ASSET, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, ODD_ASSET_ID, TOKEN};
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Instant};
 use tokio_stream::pending;
 use types::TestError;
 use types::TestResult;
-use web_ui::api::{forwarded_value, header_from_text, list_alerts, login};
+use web_ui::api::{encode_asset_id, forwarded_value, header_from_text, list_alerts, login, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES};
 use web_ui::client::{build_client, login_slots};
 use web_ui::error::ApiFailure;
 use web_ui::model::{ApiClient, ApiSection, Session};
@@ -1865,5 +1865,217 @@ async fn a_failed_relogin_logout_logs_the_failure_class_only() -> TestResult {
         drop(guard);
         assert_class_only(&logged_text(&buffer), class);
     }
+    Ok(())
+}
+
+
+const PAIR: usize = 2;
+
+
+const SHOWN_VALUE_CHARS: usize = 400;
+
+
+const CLIP_CHARS: usize = 512;
+
+
+const HOSTILE_UNREADABLE_ROWS: usize = 8;
+
+
+fn asset_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.asset_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+fn api_requests(rig: &Harness) -> usize {
+    rig.stub.state.requests.load(Ordering::SeqCst)
+}
+
+
+#[tokio::test]
+async fn asset_list_and_detail_are_rendered() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/assets\""));
+    let first = fire(&rig, get_with("/assets", &session)).await?;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_hardened(&first);
+    let odd_link = format!("action=\"/assets/{}\"", encode_asset_id(ODD_ASSET_ID));
+    assert_eq!(encode_asset_id(ODD_ASSET_ID), "serial%3AA%2FB%3Fc%23d%20%25e%20%C3%A9");
+    assert!(first.body.contains(&odd_link), "{}", first.body);
+    assert!(first.body.contains("action=\"/assets/srv-1\"") && first.body.contains("switch") && first.body.contains("active"));
+    assert!(first.body.contains(&format!("name=\"cursor\" value=\"{FIRST_CURSOR}\"")) && !first.body.contains("name=\"limit\""));
+    let limited = fire(&rig, get_with("/assets?limit=5", &session)).await?;
+    assert!(limited.body.contains("name=\"limit\" value=\"5\""));
+    let second = fire(&rig, get_with(&format!("/assets?cursor={FIRST_CURSOR}&limit=5"), &session)).await?;
+    assert!(second.body.contains("laptop") && !second.body.contains("Next assets"));
+    let detail = fire(&rig, get_with(&format!("/assets/{}", encode_asset_id(ODD_ASSET_ID)), &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_hardened(&detail);
+    for expected in ["serial", "A1", "hostname", "os", "linux", "agent", "Open conflicts", "Back to the assets"] {
+        assert!(detail.body.contains(expected), "{expected}: {}", detail.body);
+    }
+    assert!(!detail.body.contains("Some attributes are not shown."));
+    let seen = asset_requests(&rig)?;
+    let tail = seen.get(seen.len().saturating_sub(PAIR)..).ok_or("no requests")?;
+    assert_eq!(tail, [format!("/assets/{}", encode_asset_id(ODD_ASSET_ID)), format!("id={ODD_ASSET_ID}")]);
+    let big = fire(&rig, get_with(&format!("/assets/{BIG_ASSET}"), &session)).await?;
+    assert_eq!(big.status, StatusCode::OK);
+    assert!(big.body.contains("Some attributes are not shown.") && big.body.contains("n499"));
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with(&format!("/assets/{BIG_ASSET}"), &session)
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Certains attributs ne sont pas affichés.") && french.body.contains("Retour aux actifs"));
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/assets", &session)).await?;
+    assert!(empty.body.contains("No asset."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn asset_inputs_are_refused_before_any_api_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let baseline = api_requests(&rig);
+    let long_id = "x".repeat(MAX_ASSET_ID_BYTES + 1);
+    let long_cursor = "a".repeat(MAX_ASSET_CURSOR_CHARS + 1);
+    for path in [
+        "/assets?cursor=a%20b".to_owned(),
+        "/assets?cursor=".to_owned(),
+        "/assets?limit=0".to_owned(),
+        "/assets?limit=101".to_owned(),
+        format!("/assets?cursor={long_cursor}"),
+    ] {
+        let reply = fire(&rig, get_with(&path, &session)).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{path}");
+    }
+    for bad in [
+        "..",
+        ".",
+        "%2e%2e",
+        "%2E",
+        "a%E2%80%AEb",
+        "a%E2%80%8Bb",
+        "a%0Ab",
+        "a%00b",
+        "%E3%85%A4",
+        &long_id,
+    ] {
+        let reply = fire(&rig, get_with(&format!("/assets/{bad}"), &session)).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{bad}");
+    }
+    let anonymous = fire(&rig, get("/assets")).await?;
+    assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+    let anonymous_detail = fire(&rig, get("/assets/srv-1")).await?;
+    assert_eq!(anonymous_detail.status, StatusCode::SEE_OTHER);
+    assert_eq!(api_requests(&rig), baseline);
+    let edge_cursor = "a".repeat(MAX_ASSET_CURSOR_CHARS);
+    let accepted = fire(&rig, get_with(&format!("/assets?cursor={edge_cursor}"), &session)).await?;
+    assert_eq!(accepted.status, StatusCode::BAD_REQUEST);
+    assert_eq!(api_requests(&rig), baseline + 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn asset_ids_never_change_the_api_path() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for (raw, id) in [
+        ("..%2Falerts", "../alerts"),
+        ("x%3Ftenant%3Db", "x?tenant=b"),
+        ("%252e%252e", "%2e%2e"),
+        ("a%23b%20c", "a#b c"),
+    ] {
+        let reply = fire(&rig, get_with(&format!("/assets/{raw}"), &session)).await?;
+        assert_eq!(reply.status, StatusCode::OK, "{raw}");
+        let seen = asset_requests(&rig)?;
+        let tail = seen.get(seen.len().saturating_sub(PAIR)..).ok_or("no requests")?;
+        assert_eq!(tail, [format!("/assets/{}", encode_asset_id(id)), format!("id={id}")]);
+        assert!(!tail.iter().any(|entry| entry.contains("tenant=") && !entry.starts_with("id=")));
+    }
+    assert!(!asset_requests(&rig)?
+        .iter()
+        .any(|entry| entry == "/assets" || entry.starts_with("/alerts")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn hostile_asset_values_are_escaped_and_bounded() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/assets", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert!(!list.body.contains("<script>") && !list.body.contains('\u{202e}') && list.body.contains("&lt;script&gt;"));
+    assert_eq!(list.body.matches("Unreadable asset.").count(), HOSTILE_UNREADABLE_ROWS);
+    for hidden in ['\u{e0041}', '\u{61c}', '\u{115f}', '\u{2800}', '\u{ffa0}', '\u{180e}'] {
+        assert!(!list.body.contains(hidden), "{hidden:?}");
+    }
+    assert!(!list.body.contains("gap:victim") && !list.body.contains("gap:kind-tag"));
+    assert!(list.body.contains("action=\"/assets/gap%3Akept\""));
+    let before = api_requests(&rig);
+    for hidden in ["%F3%A0%81%81", "%D8%9C", "%E1%85%9F", "%E2%A0%80", "%EF%BE%A0", "%E1%A0%8E"] {
+        let refused = fire(&rig, get_with(&format!("/assets/gap%3Avictim{hidden}"), &session)).await?;
+        assert_eq!(refused.status, StatusCode::NOT_FOUND, "{hidden}");
+    }
+    assert_eq!(api_requests(&rig), before);
+    let id = format!("a{HOSTILE}");
+    let detail = fire(&rig, get_with(&format!("/assets/{}", encode_asset_id(&id)), &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert!(!detail.body.contains("<script>") && !detail.body.contains('\u{202e}'));
+    assert!(detail.body.contains("&lt;script&gt;alert(2)&lt;/script&gt;") && detail.body.contains("omitted]"));
+    for hidden in ['\u{e0041}', '\u{61c}', '\u{115f}', '\u{2800}', '\u{ffa0}', '\u{180e}'] {
+        assert!(!detail.body.contains(hidden), "{hidden:?}");
+    }
+    assert!(detail.body.contains(&"v".repeat(SHOWN_VALUE_CHARS)) && !detail.body.contains(&"v".repeat(CLIP_CHARS + 1)));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn asset_api_failures_render_the_page_of_their_class() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for path in ["/assets", "/assets/srv-1"] {
+        for (mode, status) in [
+            (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+            (Mode::Status(StatusCode::NOT_FOUND), StatusCode::NOT_FOUND),
+            (Mode::Status(StatusCode::TOO_MANY_REQUESTS), StatusCode::TOO_MANY_REQUESTS),
+            (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+            (Mode::Oversize, StatusCode::BAD_GATEWAY),
+            (Mode::TooMany, StatusCode::BAD_GATEWAY),
+            (Mode::BadId, StatusCode::BAD_GATEWAY),
+        ] {
+            set_mode(&rig, mode)?;
+            let reply = fire(&rig, get_with(path, &session)).await?;
+            let expected = if mode == Mode::BadId && path == "/assets" {
+                StatusCode::OK
+            } else {
+                status
+            };
+            assert_eq!(reply.status, expected, "{path}");
+            assert!(!reply.body.contains(LEAK));
+            assert_hardened(&reply);
+        }
+    }
+    set_mode(&rig, Mode::BadCursor)?;
+    let cursor = fire(&rig, get_with("/assets", &session)).await?;
+    assert_eq!(cursor.status, StatusCode::BAD_GATEWAY);
+    set_mode(&rig, Mode::Normal)?;
+    let missing = fire(&rig, get_with("/assets/missing", &session)).await?;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/assets", &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    let gone = fire(&rig, get_with("/assets/srv-1", &session)).await?;
+    assert_eq!(location_of(&gone).as_deref(), Some("/login"));
+    assert!(!gone.body.contains("srv-1"));
     Ok(())
 }

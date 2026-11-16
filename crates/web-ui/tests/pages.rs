@@ -2,10 +2,13 @@ use serde_json::{json, Map};
 use std::collections::BTreeSet;
 use types::TestResult;
 use web_ui::api::valid_case_id;
-use web_ui::model::{Alert, AlertPage, CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, Severity};
+use web_ui::model::{
+    Alert, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView, CaseCountsView,
+    CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, Severity,
+};
 use web_ui::pages::{
-    alert_page, alerts_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page, format_time, login_page,
-    optional, MAX_COMMENT_LINES,
+    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page,
+    format_time, login_page, optional, MAX_COMMENT_LINES,
 };
 use web_ui::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, language_tag, resolution_key, severity_class, severity_key,
@@ -108,6 +111,20 @@ fn every_page_renders_in_both_languages_without_a_missing_text() -> TestResult {
             login_page(language, "token", true),
             alerts_page(language, "token", &page),
             alerts_page(language, "token", &empty),
+            assets_page(language, "token", &asset_page_view(Some("cursor")), Some(KEPT_LIMIT)),
+            assets_page(language, "token", &asset_page_view(Some("cursor")), None),
+            assets_page(language, "token", &asset_page_view(None), None),
+            assets_page(
+                language,
+                "token",
+                &AssetPageView {
+                    items: vec![],
+                    next_cursor: None,
+                },
+                None,
+            ),
+            asset_page(language, "token", &asset_detail_view(true)),
+            asset_page(language, "token", &asset_detail_view(false)),
             alert_page(language, "token", &sample(Severity::Low, None)),
             cases_page(language, "token", &case_page_view(), Some(KEPT_LIMIT)),
             cases_page(language, "token", &case_page_view(), None),
@@ -161,6 +178,7 @@ fn the_pages_hold_no_script_and_no_inline_style() -> TestResult {
 #[test]
 fn clip_drops_controls_and_marks_the_cut() -> TestResult {
     assert_eq!(clip(Language::English, "ab\ncd\u{202e}\u{2066}", CLIP_LIMIT), "abcd");
+    assert_eq!(clip(Language::English, "a\u{e0041}\u{61c}\u{115f}\u{2800}b", CLIP_LIMIT), "ab");
     assert_eq!(clip(Language::English, "abcdefgh", CLIP_LIMIT), "abcde... [3 omitted]");
     assert_eq!(clip(Language::French, "abcdefgh", CLIP_LIMIT), "abcde... [3 omis]");
     assert_eq!(optional(Language::English, None), "none");
@@ -360,5 +378,70 @@ fn a_comment_keeps_its_line_breaks_and_cuts_long_ones() -> TestResult {
     let long = comment_notice(Language::English, &comment(&many)).0;
     assert_eq!(long.matches("<br>").count(), MAX_COMMENT_LINES);
     assert!(long.contains("... [3 omitted]"));
+    Ok(())
+}
+
+
+const ATTRIBUTE_COUNT: u64 = 2;
+
+
+const UNREADABLE_ROWS: usize = 3;
+
+
+fn asset_summary_view() -> AssetSummaryView {
+    AssetSummaryView {
+        id: "srv/1".to_owned(),
+        kind: "server".to_owned(),
+        lifecycle: "active".to_owned(),
+        counts: AssetCountsView {
+            keys: 1,
+            attributes: ATTRIBUTE_COUNT,
+            open_conflicts: 0,
+        },
+    }
+}
+
+
+fn asset_page_view(next: Option<&str>) -> AssetPageView {
+    AssetPageView {
+        items: vec![asset_summary_view()],
+        next_cursor: next.map(str::to_owned),
+    }
+}
+
+
+fn asset_detail_view(truncated: bool) -> AssetDetailView {
+    AssetDetailView {
+        summary: asset_summary_view(),
+        keys: vec![AssetKeyView {
+            key: "serial".to_owned(),
+            value: "A1".to_owned(),
+        }],
+        attributes: vec![AssetAttributeView {
+            name: "os".to_owned(),
+            value: "linux".to_owned(),
+            source: "agent".to_owned(),
+        }],
+        truncated,
+    }
+}
+
+
+#[test]
+fn unreadable_asset_rows_are_one_fixed_row() -> TestResult {
+    let mut bad_kind = asset_summary_view();
+    bad_kind.kind = "k\u{e0041}".to_owned();
+    let mut bad_life = asset_summary_view();
+    bad_life.lifecycle = "l\u{61c}".to_owned();
+    let mut bad_id = asset_summary_view();
+    bad_id.id = "gap:\u{115f}".to_owned();
+    let page = AssetPageView {
+        items: vec![bad_kind, bad_life, bad_id, asset_summary_view()],
+        next_cursor: None,
+    };
+    let html = assets_page(Language::English, "token", &page, None).into_string();
+    assert_eq!(html.matches("Unreadable asset.").count(), UNREADABLE_ROWS);
+    assert_eq!(html.matches("action=\"/assets/srv%2F1\"").count(), 1);
+    assert!(!html.contains("gap:") && !html.contains('\u{e0041}'));
     Ok(())
 }

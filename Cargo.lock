@@ -7198,6 +7198,7 @@ dependencies = [
  "core-auth",
  "core-config",
  "data-encoding",
+ "ecs-normalise",
  "getrandom 0.4.3",
  "http-body-util",
  "maud",

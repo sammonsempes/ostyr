@@ -1,5 +1,6 @@
 use crate::error::ApiFailure;
-use crate::model::{Alert, AlertPage, ApiClient, CaseDetailView, CasePageView, CommentView};
+use crate::model::{Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CommentView};
+use ecs_normalise::suricata::is_unsafe;
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Method, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
@@ -9,7 +10,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
-use url::form_urlencoded::Serializer;
+use url::form_urlencoded::{byte_serialize, Serializer};
 
 
 pub const MAX_BODY_BYTES: usize = 1_048_576;
@@ -25,6 +26,18 @@ pub const MAX_TOKEN_BYTES: usize = 4096;
 
 
 pub const MAX_CURSOR_CHARS: usize = 512;
+
+
+pub const MAX_ASSET_ID_BYTES: usize = 512;
+
+
+pub const MAX_ASSET_CURSOR_CHARS: usize = 768;
+
+
+pub const MAX_ASSET_KEYS: usize = 64;
+
+
+pub const MAX_ASSET_ATTRIBUTES: usize = 500;
 
 
 pub const ID_LENGTH: usize = 64;
@@ -288,6 +301,88 @@ pub async fn get_alert(client: &ApiClient, source: IpAddr, token: &SecretString,
         } else {
             Err(ApiFailure::Malformed("alert id differs"))
         }
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// An asset id may become a link and an API path: 1 to 512 bytes, no character `ecs_normalise::suricata::is_unsafe` refuses, and never a dot segment.
+pub fn valid_asset_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ASSET_ID_BYTES && id != "." && id != ".." && id.chars().all(|character| !is_unsafe(character))
+}
+
+
+/// The cursor of the CMDB: URL-safe base64 of an id, so up to 768 characters.
+pub fn valid_asset_cursor(cursor: &str) -> bool {
+    !cursor.is_empty()
+        && cursor.len() <= MAX_ASSET_CURSOR_CHARS
+        && cursor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'=')
+}
+
+
+/// The id as one path segment: every byte outside ASCII alphanumerics and `*-._` is percent-encoded (the form encoder's `+` for a space is rewritten, a real `+` is `%2B`).
+pub fn encode_asset_id(id: &str) -> String {
+    byte_serialize(id.as_bytes()).collect::<String>().replace('+', "%20")
+}
+
+
+pub fn check_asset_page(page: &AssetPageView) -> Result<(), ApiFailure> {
+    if page.items.len() > MAX_ITEMS {
+        Err(ApiFailure::Malformed("too many items"))
+    } else if page.next_cursor.as_deref().is_some_and(|cursor| !valid_asset_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn check_asset_detail(asset: &AssetDetailView, id: &str) -> Result<(), ApiFailure> {
+    if asset.summary.id != id {
+        Err(ApiFailure::Malformed("asset id differs"))
+    } else if asset.keys.len() > MAX_ASSET_KEYS || asset.attributes.len() > MAX_ASSET_ATTRIBUTES {
+        Err(ApiFailure::Malformed("too many entries"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn assets_path(cursor: Option<&str>, limit: Option<u32>) -> String {
+    let mut query = Serializer::new(String::new());
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    limit.iter().for_each(|value| {
+        query.append_pair("limit", &value.to_string());
+    });
+    format!("assets?{}", query.finish())
+}
+
+
+pub async fn list_assets(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<AssetPageView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &assets_path(cursor, limit), Some(token), None).await?;
+    let page: AssetPageView = serde_json::from_slice(&bytes)?;
+    check_asset_page(&page).map(|()| page)
+}
+
+
+/// An identifier outside the asset grammar is a missing asset without any call; the path holds the encoded id only.
+pub async fn get_asset(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<AssetDetailView, ApiFailure> {
+    if valid_asset_id(id) {
+        let path = format!("assets/{}", encode_asset_id(id));
+        let bytes = call(client, source, Method::GET, &path, Some(token), None).await?;
+        let asset: AssetDetailView = serde_json::from_slice(&bytes)?;
+        check_asset_detail(&asset, id).map(|()| asset)
     } else {
         Err(ApiFailure::NotFound)
     }
