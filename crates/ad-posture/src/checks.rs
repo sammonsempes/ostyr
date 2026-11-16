@@ -101,6 +101,12 @@ pub const REASON_INCOMPLETE_GROUP_SIZE: &str = "the privileged group size is inc
 pub const FIX_INCOMPLETE: &str = "inspect the unreadable values on the domain controller, then export again";
 
 
+pub const KERBEROAST_FIELDS: [&str; 2] = ["servicePrincipalName", "objectClass"];
+
+
+pub const INACTIVE_FIELDS: [&str; 2] = ["memberOf", "objectClass"];
+
+
 pub const SCORE_MAX: u32 = 100;
 
 
@@ -181,9 +187,16 @@ pub fn has_over_limit(entry: &Entry, fields: &[&str]) -> bool {
 
 /// The gaps of an entry as text built from field names and numbers only.
 pub fn gap_detail(entry: &Entry) -> String {
+    gap_detail_of(entry, &[])
+}
+
+
+/// The gaps of the listed fields only (all of them when `fields` is empty), as text built from field names and numbers only.
+pub fn gap_detail_of(entry: &Entry, fields: &[&str]) -> String {
     entry
         .gaps
         .iter()
+        .filter(|gap| fields.is_empty() || fields.contains(&gap.field))
         .map(|gap| {
             let limit = if gap.over_limit { " (list over its count, none kept)" } else { "" };
             format!("{} dropped {}{limit}", gap.field, gap.dropped)
@@ -387,7 +400,7 @@ pub fn check_kerberoastable(entry: &Entry) -> Option<Finding> {
             Severity::High,
             entry.dn.clone(),
             (REASON_KERBEROASTABLE, FIX_KERBEROASTABLE),
-            gap_detail(entry),
+            gap_detail_of(entry, &KERBEROAST_FIELDS),
         )
     })
 }
@@ -401,7 +414,7 @@ pub fn check_incomplete_kerberoast(entry: &Entry, domain: Option<&str>, keys: &B
             incomplete_severity(entry, domain, keys),
             entry.dn.clone(),
             (REASON_INCOMPLETE_KERBEROAST, FIX_INCOMPLETE),
-            gap_detail(entry),
+            gap_detail_of(entry, &KERBEROAST_FIELDS),
         )
     })
 }
@@ -492,7 +505,7 @@ pub fn check_incomplete_inactive(entry: &Entry, domain: Option<&str>, keys: &BTr
             incomplete_severity(entry, domain, keys),
             entry.dn.clone(),
             (REASON_INCOMPLETE_INACTIVE, FIX_INCOMPLETE),
-            gap_detail(entry),
+            gap_detail_of(entry, &INACTIVE_FIELDS),
         )
     })
 }
