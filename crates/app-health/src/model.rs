@@ -237,3 +237,91 @@ pub enum TimerHealth {
     BlindSpot,
     Inactive,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgSettings {
+    pub max_connections: u32,
+    pub in_recovery: bool,
+    pub version_num: u32,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgConnections {
+    pub client_backends: u32,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgActivity {
+    pub durations_ms: Vec<u64>,
+    pub at_least: bool,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaState {
+    Startup,
+    Catchup,
+    Streaming,
+    Backup,
+    Stopping,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgReplica {
+    pub application_name: Option<String>,
+    pub state: Option<ReplicaState>,
+    pub replay_lag_ms: Option<u64>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgReplication {
+    pub replicas: Vec<PgReplica>,
+    pub rejected_names: usize,
+    pub unknown_values: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbRole {
+    Primary,
+    Replica,
+    #[serde(rename = "any")]
+    Unconstrained,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbExpectation {
+    pub name: String,
+    pub role: DbRole,
+    pub max_connections_ratio: f64,
+    pub slow_query_ms: u64,
+    pub max_replay_lag_ms: u64,
+    pub min_replicas: u32,
+}
+
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbExpectationsFile {
+    pub databases: Vec<DbExpectation>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbHealth {
+    Healthy,
+    BlindSpot,
+    WrongRole,
+    ReplicaMissing,
+    ReplicationLag { lag_ms: u64 },
+    Saturated { connections: u32 },
+    SlowQueries { count: usize },
+}
