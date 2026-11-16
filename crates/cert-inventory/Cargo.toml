@@ -7,14 +7,18 @@ publish = false
 
 [dependencies]
 alerts = { version = "0.0.0", path = "../alerts" }
+core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 data-encoding = "2"
+psl = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 thiserror = "2"
 time = "0.3"
 tracing = "0.1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 x509-parser = "0.18"
 
 [target.'cfg(unix)'.dependencies]
@@ -24,6 +28,8 @@ rustix = { version = "1.1", features = ["fs"] }
 walkdir = "2"
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

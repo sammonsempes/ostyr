@@ -72,11 +72,7 @@ pub fn parse_entries(bytes: &[u8], limits: &CtLimits) -> Result<CtOutcome, CtErr
             max: limits.max_json_bytes,
         })
     } else {
-        let response: EntriesResponse = serde_json::from_slice(bytes).map_err(|error| CtError::Json {
-            category: error.classify(),
-            line: error.line(),
-            column: error.column(),
-        })?;
+        let response: EntriesResponse = serde_json::from_slice(bytes).map_err(|error| json_error(&error))?;
         if response.entries.len() > limits.max_entries {
             Err(CtError::TooManyEntries { max: limits.max_entries })
         } else {
@@ -87,6 +83,16 @@ pub fn parse_entries(bytes: &[u8], limits: &CtLimits) -> Result<CtOutcome, CtErr
                 entries: results.into_iter().filter_map(Result::ok).collect(),
             })
         }
+    }
+}
+
+
+/// Category and position only: serde_json messages repeat the offending input.
+pub fn json_error(error: &serde_json::Error) -> CtError {
+    CtError::Json {
+        category: error.classify(),
+        line: error.line(),
+        column: error.column(),
     }
 }
 
