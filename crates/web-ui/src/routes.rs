@@ -1,10 +1,13 @@
 use crate::api::{
-    get_alert, get_case, list_alerts, list_cases, login, logout, post_case_action, post_case_comment, valid_case_id, valid_cursor, valid_id,
-    MAX_COMMENT_CHARS,
+    get_alert, get_asset, get_case, list_alerts, list_assets, list_cases, login, logout, post_case_action, post_case_comment, valid_asset_cursor,
+    valid_case_id, valid_cursor, valid_id, MAX_COMMENT_CHARS,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
-use crate::pages::{alert_page, alerts_page, case_page, case_page_with, cases_page, comment_unloaded_page, error_page, login_page, STYLESHEET};
+use crate::pages::{
+    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, comment_unloaded_page, error_page, login_page,
+    STYLESHEET,
+};
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
     LANGUAGE_COOKIE_SECONDS, LOGIN_COOKIE, LOGIN_COOKIE_SECONDS, SESSION_COOKIE,
@@ -544,6 +547,62 @@ pub async fn show_case(
 }
 
 
+pub fn parse_asset_cursor(query: &BTreeMap<String, String>) -> Result<Option<&str>, FormRefusal> {
+    query
+        .get("cursor")
+        .map(|text| {
+            Some(text.as_str())
+                .filter(|cursor| valid_asset_cursor(cursor))
+                .ok_or(FormRefusal::Malformed)
+        })
+        .transpose()
+}
+
+
+pub async fn show_assets_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let cursor = parse_asset_cursor(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let limit = parse_limit(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let client = state.api.load_full();
+    let page = list_assets(&client, source, &principal.token, cursor, limit)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &assets_page(language, &principal.csrf, &page, limit), &[]))
+}
+
+
+pub async fn show_assets(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_assets_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_asset_page(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let asset = get_asset(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &asset_page(language, &principal.csrf, &asset), &[]))
+}
+
+
+pub async fn show_asset(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    merge(show_asset_page(&state, peer.ip(), &headers, &id).await)
+}
+
+
 pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
 
 
@@ -682,6 +741,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/alerts/{id}", get(show_alert))
         .route("/cases", get(show_cases))
         .route("/cases/{id}", get(show_case))
+        .route("/assets", get(show_assets))
+        .route("/assets/{id}", get(show_asset))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))

@@ -2,10 +2,13 @@ use serde_json::{json, Map};
 use std::collections::BTreeSet;
 use types::TestResult;
 use web_ui::api::valid_case_id;
-use web_ui::model::{Alert, AlertPage, CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, Severity};
+use web_ui::model::{
+    Alert, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView, CaseCountsView,
+    CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, Severity,
+};
 use web_ui::pages::{
-    alert_page, alerts_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page, format_time, login_page,
-    optional, MAX_COMMENT_LINES,
+    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page,
+    format_time, login_page, optional, MAX_COMMENT_LINES,
 };
 use web_ui::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, language_tag, resolution_key, severity_class, severity_key,
@@ -108,6 +111,20 @@ fn every_page_renders_in_both_languages_without_a_missing_text() -> TestResult {
             login_page(language, "token", true),
             alerts_page(language, "token", &page),
             alerts_page(language, "token", &empty),
+            assets_page(language, "token", &asset_page_view(Some("cursor")), Some(KEPT_LIMIT)),
+            assets_page(language, "token", &asset_page_view(Some("cursor")), None),
+            assets_page(language, "token", &asset_page_view(None), None),
+            assets_page(
+                language,
+                "token",
+                &AssetPageView {
+                    items: vec![],
+                    next_cursor: None,
+                },
+                None,
+            ),
+            asset_page(language, "token", &asset_detail_view(true)),
+            asset_page(language, "token", &asset_detail_view(false)),
             alert_page(language, "token", &sample(Severity::Low, None)),
             cases_page(language, "token", &case_page_view(), Some(KEPT_LIMIT)),
             cases_page(language, "token", &case_page_view(), None),
@@ -361,4 +378,46 @@ fn a_comment_keeps_its_line_breaks_and_cuts_long_ones() -> TestResult {
     assert_eq!(long.matches("<br>").count(), MAX_COMMENT_LINES);
     assert!(long.contains("... [3 omitted]"));
     Ok(())
+}
+
+
+const ATTRIBUTE_COUNT: u64 = 2;
+
+
+fn asset_summary_view() -> AssetSummaryView {
+    AssetSummaryView {
+        id: "srv/1".to_owned(),
+        kind: "server".to_owned(),
+        lifecycle: "active".to_owned(),
+        counts: AssetCountsView {
+            keys: 1,
+            attributes: ATTRIBUTE_COUNT,
+            open_conflicts: 0,
+        },
+    }
+}
+
+
+fn asset_page_view(next: Option<&str>) -> AssetPageView {
+    AssetPageView {
+        items: vec![asset_summary_view()],
+        next_cursor: next.map(str::to_owned),
+    }
+}
+
+
+fn asset_detail_view(truncated: bool) -> AssetDetailView {
+    AssetDetailView {
+        summary: asset_summary_view(),
+        keys: vec![AssetKeyView {
+            key: "serial".to_owned(),
+            value: "A1".to_owned(),
+        }],
+        attributes: vec![AssetAttributeView {
+            name: "os".to_owned(),
+            value: "linux".to_owned(),
+            source: "agent".to_owned(),
+        }],
+        truncated,
+    }
 }

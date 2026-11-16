@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 91;
+pub const TEXT_COUNT: usize = 109;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -103,6 +103,24 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("error_resolution_required", "Choose a resolution to close the case."),
     ("error_case_changed", "The case changed meanwhile. Reload the page and try again."),
     ("error_comment_full", "The case holds the maximum number of comments."),
+    ("nav_assets", "Assets"),
+    ("title_assets", "Assets"),
+    ("title_asset", "Asset"),
+    ("assets_empty", "No asset."),
+    ("assets_next", "Next assets"),
+    ("col_asset_id", "Identifier"),
+    ("col_kind", "Kind"),
+    ("col_lifecycle", "Life cycle"),
+    ("col_name", "Name"),
+    ("col_value", "Value"),
+    ("col_source", "Source"),
+    ("count_keys", "Identity keys"),
+    ("count_attributes", "Attributes"),
+    ("count_conflicts", "Open conflicts"),
+    ("asset_keys", "Identity keys"),
+    ("asset_attributes", "Attributes"),
+    ("asset_truncated", "Some attributes are not shown."),
+    ("asset_back", "Back to the assets"),
 ];
 
 
@@ -201,6 +219,24 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("error_resolution_required", "Choisissez une résolution pour clore le dossier."),
     ("error_case_changed", "Le dossier a changé entre-temps. Rechargez la page et recommencez."),
     ("error_comment_full", "Le dossier contient déjà le nombre maximal de commentaires."),
+    ("nav_assets", "Actifs"),
+    ("title_assets", "Actifs"),
+    ("title_asset", "Actif"),
+    ("assets_empty", "Aucun actif."),
+    ("assets_next", "Actifs suivants"),
+    ("col_asset_id", "Identifiant"),
+    ("col_kind", "Type"),
+    ("col_lifecycle", "Cycle de vie"),
+    ("col_name", "Nom"),
+    ("col_value", "Valeur"),
+    ("col_source", "Source"),
+    ("count_keys", "Clés d'identité"),
+    ("count_attributes", "Attributs"),
+    ("count_conflicts", "Conflits ouverts"),
+    ("asset_keys", "Clés d'identité"),
+    ("asset_attributes", "Attributs"),
+    ("asset_truncated", "Certains attributs ne sont pas affichés."),
+    ("asset_back", "Retour aux actifs"),
 ];
 
 
