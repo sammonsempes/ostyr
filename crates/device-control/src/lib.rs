@@ -2,9 +2,12 @@
 
 pub mod error;
 pub mod evaluate;
+pub mod extension_grammar;
+pub mod extensions;
 pub mod limits;
 pub mod model;
 pub mod parse;
 pub mod render;
+pub mod render_extensions;
 pub mod types;
 pub mod validate;
