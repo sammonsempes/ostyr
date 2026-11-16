@@ -259,7 +259,7 @@ fn fixture(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
         WORLD_READABLE_MODE,
     )?;
     let commands_dir = dir.join("commands");
-    let agent_commands = commands_dir.join("acme:agent-1");
+    let agent_commands = commands_dir.join("acme@agent-1");
     fs::create_dir_all(&agent_commands)?;
     fs::write(agent_commands.join("1-valid"), signed(1)?)?;
     fs::write(agent_commands.join("2-junk"), b"junk")?;
@@ -657,6 +657,7 @@ fn the_events_file_must_open() -> TestResult {
 async fn the_command_source_reads_a_bounded_directory() -> TestResult {
     let dir = tempdir()?;
     let agent_dir = agent_directory(dir.path(), &identity());
+    assert_eq!(agent_dir.file_name().and_then(|name| name.to_str()), Some("acme@agent-1"));
     fs::create_dir_all(&agent_dir)?;
     (0..=MAX_COMMAND_FILES).try_for_each(|index| fs::write(agent_dir.join(format!("{index:03}")), b"x"))?;
     let source = command_source(dir.path().to_path_buf());
