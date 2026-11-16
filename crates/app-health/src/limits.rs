@@ -52,3 +52,33 @@ pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
 
 
 pub const MAX_LINE_BYTES: usize = 65_536;
+
+
+pub const MAX_DATABASES: usize = 512;
+
+
+pub const MAX_ACTIVITY_ROWS: usize = 1000;
+
+
+pub const MAX_REPLICATION_ROWS: usize = 256;
+
+
+pub const MAX_SETTINGS_ROWS: usize = 1;
+
+
+pub const MIN_SLOW_QUERY_MS: u64 = 100;
+
+
+pub const MAX_DB_MS: u64 = 86_400_000;
+
+
+pub const MAX_MIN_REPLICAS: u32 = 16;
+
+
+pub const MAX_RATIO_LIMIT: f64 = 1.0;
+
+
+pub const MIN_RATIO_EXCLUSIVE: f64 = 0.0;
+
+
+pub const MAX_APPLICATION_NAME_CHARS: usize = 64;

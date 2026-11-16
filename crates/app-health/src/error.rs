@@ -16,6 +16,8 @@ pub enum NtpError {
     Malformed { reason: &'static str },
     #[error("thresholds file is invalid")]
     Config(#[from] ConfigError),
+    #[error("tool output has more than {limit} rows")]
+    TooManyRows { limit: usize },
     #[error("threshold {field} is out of range")]
     OutOfRange { field: &'static str },
 }

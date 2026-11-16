@@ -1,0 +1,13 @@
+databases:
+  - name: primary
+    role: primary
+    max_connections_ratio: 0.8
+    slow_query_ms: 4000
+    max_replay_lag_ms: 5000
+    min_replicas: 1
+  - name: replica
+    role: replica
+    max_connections_ratio: 0.8
+    slow_query_ms: 4000
+    max_replay_lag_ms: 5000
+    min_replicas: 0
