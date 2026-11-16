@@ -1,6 +1,6 @@
 use crate::domain::covers_zone;
 use crate::error::CtError;
-use crate::model::{CtEntry, CtLimits, CtOutcome, KnownSerial};
+use crate::model::{CtEntry, CtLimits, CtOutcome, KnownSerial, NamesShown};
 use crate::parse::{all_dns_names, record_with_names, serial_hex, MAX_DNS_NAMES};
 use data_encoding::{BASE64, HEXLOWER};
 use serde::Deserialize;
@@ -244,4 +244,13 @@ fn common_name_text(attribute: &AttributeTypeAndValue<'_>) -> Option<String> {
     } else {
         attribute.as_str().map(str::to_string).ok()
     }
+}
+
+
+/// At most `max` names, those covering a watched zone first, and how many were left out.
+pub fn names_to_show(names: &[String], zones: &[String], max: usize) -> NamesShown {
+    let (matched, others): (Vec<&String>, Vec<&String>) = names.iter().partition(|name| zones.iter().any(|zone| covers_zone(name, zone)));
+    let shown = matched.into_iter().chain(others).take(max).cloned().collect::<Vec<_>>();
+    let omitted = names.len().saturating_sub(shown.len());
+    NamesShown { shown, omitted }
 }

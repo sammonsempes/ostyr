@@ -90,8 +90,8 @@ pub enum TransportKind {
 /// No variant carries text from the log: statuses are numbers, parse errors are reduced to a category and a position.
 #[derive(Debug, Error)]
 pub enum FetchError {
-    #[error("log URL refused")]
-    Url(#[source] siem_ingest::error::SettingsError),
+    #[error("log URL refused: https, or http on loopback, without userinfo, query or fragment")]
+    Url,
     #[error("HTTP agent refused")]
     Agent(#[source] siem_ingest::error::InsertError),
     #[error("start is above end")]
@@ -110,8 +110,10 @@ pub enum FetchError {
     Server,
     #[error("unexpected HTTP status {0}")]
     Status(u16),
-    #[error("the answer body could not be read")]
-    Body,
+    #[error("the answer body could not be read ({0:?})")]
+    Body(std::io::ErrorKind),
+    #[error("the answer body hit the deadline")]
+    Timeout,
     #[error("the tree head answer is above {max} bytes")]
     SthTooLarge { max: usize },
     #[error("the log answered no entry for a valid range")]

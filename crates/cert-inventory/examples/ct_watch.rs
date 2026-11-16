@@ -1,5 +1,5 @@
 //! Usage: `ct_watch <watch.yaml> <log-url> <start> <count>`, optional env `CT_WATCH_CA` (PEM file). Prints the unexpected entries and the next start.
-use cert_inventory::ct::{unexpected_for_domains, DEFAULT_LIMITS};
+use cert_inventory::ct::{names_to_show, unexpected_for_domains, DEFAULT_LIMITS};
 use cert_inventory::fetch::{get_range, get_sth, open_log, RangeRequest};
 use cert_inventory::watch::load_watch_list;
 use std::error::Error;
@@ -51,12 +51,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         unexpected.len()
     )?;
     unexpected.iter().try_for_each(|entry| {
+        let names = names_to_show(&entry.all_dns_names, &watch.zones, MAX_NAMES_SHOWN);
         writeln!(
             out,
-            "{} precert={} names={:?}",
-            entry.record.fingerprint_sha256,
-            entry.precert,
-            entry.all_dns_names.iter().take(MAX_NAMES_SHOWN).collect::<Vec<_>>()
+            "{} precert={} names={:?} omitted={}",
+            entry.record.fingerprint_sha256, entry.precert, names.shown, names.omitted
         )
     })?;
     writeln!(out, "next_start={}", fetched.next_start)?;

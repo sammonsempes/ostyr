@@ -66,7 +66,7 @@ pub struct Fetched {
 
 /// The URL must pass `check_url`; the agent follows no redirect, ignores the environment proxy and speaks https unless the URL is loopback http.
 pub fn open_log(url: &str, ca_pem: Option<&[u8]>, timeout: Duration) -> Result<CtLog, FetchError> {
-    check_url(url).map_err(FetchError::Url)?;
+    check_url(url).map_err(|_| FetchError::Url)?;
     let agent = new_agent(ca_pem, !is_loopback_http(url)).map_err(FetchError::Agent)?;
     Ok(CtLog {
         agent,
@@ -89,9 +89,9 @@ pub fn get_sth(log: &CtLog) -> Result<Sth, FetchError> {
 /// Checks the range before any request, refuses an answer holding more entries than asked, and reports the next start.
 pub fn get_range(log: &CtLog, request: &RangeRequest, limits: &CtLimits) -> Result<Fetched, FetchError> {
     check_range(request)?;
-    let asked = request.end - request.start + 1;
+    let asked = (request.end - request.start + 1).min(MAX_RANGE);
     let bounded = CtLimits {
-        max_entries: limits.max_entries.min(usize::try_from(asked).unwrap_or(usize::MAX)),
+        max_entries: limits.max_entries.min(asked as usize),
         ..*limits
     };
     let query = format!("get-entries?start={}&end={}", request.start, request.end);
@@ -128,7 +128,7 @@ fn check_range(request: &RangeRequest) -> Result<(), FetchError> {
 
 /// At most `max + 1` bytes are read, so the caller can tell an oversized body from one exactly at the cap.
 fn get_body(log: &CtLog, operation: &str, max: usize) -> Result<Vec<u8>, FetchError> {
-    check_url(&log.url).map_err(FetchError::Url)?;
+    check_url(&log.url).map_err(|_| FetchError::Url)?;
     let mut response = log
         .agent
         .get(format!("{}/ct/v1/{operation}", log.url))
@@ -148,7 +148,7 @@ fn get_body(log: &CtLog, operation: &str, max: usize) -> Result<Vec<u8>, FetchEr
             .reader()
             .take(limit)
             .read_to_end(&mut bytes)
-            .map_err(|_| FetchError::Body)?;
+            .map_err(|error| body_error(&error))?;
         Ok(bytes)
     } else {
         Err(status_error(status))
@@ -172,5 +172,19 @@ fn transport_kind(error: &ureq::Error) -> TransportKind {
         ureq::Error::Timeout(_) => TransportKind::Timeout,
         ureq::Error::Io(source) if source.kind() == ErrorKind::InvalidData => TransportKind::Tls,
         _ => TransportKind::Other,
+    }
+}
+
+
+/// Only the kind is kept: an `io::Error` from ureq's reader can wrap a ureq error whose text may carry log bytes.
+pub fn body_error(error: &std::io::Error) -> FetchError {
+    let wrapped_timeout = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+        .is_some_and(|inner| matches!(inner, ureq::Error::Timeout(_)));
+    if error.kind() == ErrorKind::TimedOut || wrapped_timeout {
+        FetchError::Timeout
+    } else {
+        FetchError::Body(error.kind())
     }
 }

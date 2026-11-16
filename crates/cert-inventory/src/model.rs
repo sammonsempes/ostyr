@@ -111,3 +111,11 @@ pub struct ScanOutcome {
     pub errors: Vec<String>,
     pub errors_omitted: usize,
 }
+
+
+/// The names an operator report prints and how many were cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamesShown {
+    pub shown: Vec<String>,
+    pub omitted: usize,
+}
