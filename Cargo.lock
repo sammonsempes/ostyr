@@ -1104,6 +1104,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-manifest"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "data-encoding",
+ "ed25519-dalek 3.0.0",
+ "rustix 1.1.6",
+ "semver",
+ "serde",
+ "serde-saphyr",
+ "serde-untagged",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5580,6 +5598,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
