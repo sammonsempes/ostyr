@@ -310,7 +310,7 @@ fn a_list_owned_by_another_user_or_writable_by_others_is_refused() -> TestResult
     assert!(judge_list(name, OWNER_ONLY, OTHER_USER, OTHER_USER).is_ok());
     assert!(matches!(
         judge_list(name, READABLE, OTHER_USER, OTHER_USER + 1),
-        Err(ListError::Untrusted(_))
+        Err(ListError::ForeignOwner { .. })
     ));
     assert!(matches!(
         judge_list(name, WORLD_WRITABLE, OTHER_USER, OTHER_USER),
