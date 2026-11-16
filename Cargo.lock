@@ -7274,6 +7274,7 @@ dependencies = [
  "core-auth",
  "core-config",
  "data-encoding",
+ "ecs-normalise",
  "getrandom 0.4.3",
  "http-body-util",
  "maud",
@@ -7295,6 +7296,8 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "unicode-bidi",
+ "unicode-normalization",
  "url",
 ]
 
