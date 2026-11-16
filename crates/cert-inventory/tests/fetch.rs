@@ -4,15 +4,16 @@ mod standin;
 mod types;
 
 
-use cert_inventory::ct::{unexpected_for_domains, DEFAULT_LIMITS};
+use cert_inventory::ct::{names_to_show, unexpected_for_domains, DEFAULT_LIMITS};
 use cert_inventory::error::{CtError, FetchError, TransportKind};
-use cert_inventory::fetch::{get_range, get_sth, open_log, status_error, CtLog, RangeRequest, Sth, MAX_RANGE, MAX_STH_BYTES};
+use cert_inventory::fetch::{body_error, get_range, get_sth, open_log, status_error, CtLog, RangeRequest, Sth, MAX_RANGE, MAX_STH_BYTES};
 use cert_inventory::model::CtLimits;
 use data_encoding::BASE64;
 use rcgen::{CertificateParams, KeyPair};
 use serde_json::json;
 use standin::{reply, requests, start, Reply, Standin};
 use std::error::Error;
+use std::io;
 use std::net::TcpListener;
 use std::time::Duration;
 use types::TestResult;
@@ -379,20 +380,7 @@ fn a_short_body_is_a_body_error() -> TestResult {
         ..reply(STATUS_OK, "{")
     })?;
     let outcome = get_range(&log_of(&standin, TIMEOUT)?, &request(0, 1), &DEFAULT_LIMITS);
-    assert!(matches!(outcome, Err(FetchError::Body)));
-    Ok(())
-}
-
-
-#[test]
-fn a_slow_log_hits_the_deadline() -> TestResult {
-    let standin = start(|_method, _path| Reply {
-        declared: HUGE_DECLARED,
-        hold: true,
-        ..reply(STATUS_OK, "{")
-    })?;
-    let outcome = get_range(&log_of(&standin, SHORT_TIMEOUT)?, &request(0, 1), &DEFAULT_LIMITS);
-    assert!(matches!(outcome, Err(FetchError::Body | FetchError::Transport(TransportKind::Timeout))));
+    assert!(matches!(outcome, Err(FetchError::Body(_))));
     Ok(())
 }
 
@@ -429,8 +417,8 @@ fn a_closed_port_is_another_transport_error() -> TestResult {
 
 #[test]
 fn log_urls_are_checked() -> TestResult {
-    assert!(matches!(open_log("http://example.org", None, TIMEOUT), Err(FetchError::Url(_))));
-    assert!(matches!(open_log("https://example.org/?x=1", None, TIMEOUT), Err(FetchError::Url(_))));
+    assert!(matches!(open_log("http://example.org", None, TIMEOUT), Err(FetchError::Url)));
+    assert!(matches!(open_log("https://example.org/?x=1", None, TIMEOUT), Err(FetchError::Url)));
     assert!(matches!(
         open_log("https://example.org", Some(b"not a pem"), TIMEOUT),
         Err(FetchError::Agent(_))
@@ -441,7 +429,7 @@ fn log_urls_are_checked() -> TestResult {
         url: "http://example.org".to_string(),
         ..good
     };
-    assert!(matches!(get_sth(&forged), Err(FetchError::Url(_))));
+    assert!(matches!(get_sth(&forged), Err(FetchError::Url)));
     Ok(())
 }
 
@@ -460,5 +448,55 @@ fn a_rogue_certificate_behind_decoy_names_is_reported() -> TestResult {
     assert!(unexpected
         .iter()
         .all(|entry| entry.all_dns_names.contains(&"rogue.victim.example".to_string())));
+    Ok(())
+}
+
+
+#[test]
+fn a_slow_body_is_a_timeout() -> TestResult {
+    let standin = start(|_method, _path| Reply {
+        declared: HUGE_DECLARED,
+        hold: true,
+        ..reply(STATUS_OK, "{")
+    })?;
+    let outcome = get_range(&log_of(&standin, SHORT_TIMEOUT)?, &request(0, 1), &DEFAULT_LIMITS);
+    assert!(matches!(outcome, Err(FetchError::Timeout)), "{outcome:?}");
+    Ok(())
+}
+
+
+#[test]
+fn body_errors_keep_a_fixed_kind() -> TestResult {
+    let timed_out = io::Error::from(io::ErrorKind::TimedOut);
+    let wrapped = io::Error::other(ureq::Error::Timeout(ureq::Timeout::Global));
+    let wrapped_other = io::Error::other(ureq::Error::BodyStalled);
+    let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+    assert!(matches!(body_error(&timed_out), FetchError::Timeout));
+    assert!(matches!(body_error(&wrapped), FetchError::Timeout));
+    assert!(matches!(body_error(&wrapped_other), FetchError::Body(io::ErrorKind::Other)));
+    assert!(matches!(body_error(&reset), FetchError::Body(io::ErrorKind::ConnectionReset)));
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_url_names_no_clickhouse_setting() -> TestResult {
+    let refused = open_log("http://example.org", None, TIMEOUT).err().ok_or("accepted")?;
+    assert!(!chain_text(&refused).contains("clickhouse"));
+    Ok(())
+}
+
+
+#[test]
+fn a_matched_name_is_shown_behind_decoys() -> TestResult {
+    let mut decoys = (0..DECOYS).map(|index| format!("decoy{index}.example.net")).collect::<Vec<_>>();
+    decoys.push("rogue.victim.example".to_string());
+    let watched = vec!["victim.example".to_string()];
+    let shown = names_to_show(&decoys, &watched, THREE);
+    assert_eq!(shown.shown.first().map(String::as_str), Some("rogue.victim.example"));
+    assert_eq!(shown.shown.len(), THREE);
+    assert_eq!(shown.omitted, DECOYS + 1 - THREE);
+    let few = names_to_show(&names("a.example.org"), &watched, THREE);
+    assert_eq!(few.omitted, 0);
     Ok(())
 }
