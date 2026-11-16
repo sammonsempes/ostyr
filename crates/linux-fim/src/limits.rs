@@ -76,6 +76,15 @@ pub const REVERSED_ANCESTOR_POLICY_PREFIX: &str = "ostyr-fimb-";
 pub const REVERSED_TOKEN_POLICY_PREFIX: &str = "ostyr-fimu-";
 
 
+pub const FULL_SOURCE_POLICY_PREFIX: &str = "ostyr-fimp-";
+
+
+pub const FULL_TARGET_POLICY_PREFIX: &str = "ostyr-fimq-";
+
+
+pub const FULL_NAME_POLICY_PREFIX: &str = "ostyr-fimv-";
+
+
 pub const UNKNOWN_PROCESS: &str = "unknown";
 
 

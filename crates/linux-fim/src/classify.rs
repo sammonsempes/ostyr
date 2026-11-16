@@ -1,8 +1,8 @@
 use crate::limits::{
-    MAX_FIELD_BYTES, MAX_KPROBE_ARGS, REVERSED_ANCESTOR_POLICY_PREFIX, REVERSED_NAMES_POLICY_PREFIX, REVERSED_TOKEN_POLICY_PREFIX,
-    TOKEN_POLICY_PREFIX, UNKNOWN_PROCESS, UNRESOLVED_NAME,
+    FULL_NAME_POLICY_PREFIX, FULL_SOURCE_POLICY_PREFIX, FULL_TARGET_POLICY_PREFIX, MAX_FIELD_BYTES, MAX_KPROBE_ARGS, REVERSED_ANCESTOR_POLICY_PREFIX,
+    REVERSED_NAMES_POLICY_PREFIX, REVERSED_TOKEN_POLICY_PREFIX, TOKEN_POLICY_PREFIX, UNKNOWN_PROCESS, UNRESOLVED_NAME,
 };
-use crate::model::FimEvent;
+use crate::model::{FimEvent, WatchSets};
 use crate::policy::{
     HOOK_CHMOD, HOOK_CHOWN, HOOK_FILE_TRUNCATE, HOOK_LINK, HOOK_MKNOD, HOOK_MMAP, HOOK_OPEN, HOOK_PATH_TRUNCATE, HOOK_PERMISSION, HOOK_REMOVEXATTR,
     HOOK_REMOVE_ACL, HOOK_RENAME, HOOK_RMDIR, HOOK_SETXATTR, HOOK_SET_ACL, HOOK_SYMLINK, HOOK_UNLINK,
@@ -36,6 +36,23 @@ const SECOND_PAIR: usize = 2;
 
 
 const LINK_REVERSED_EXISTING: usize = 2;
+
+
+const FULL_PREFIXES: &[&str] = &[FULL_SOURCE_POLICY_PREFIX, FULL_TARGET_POLICY_PREFIX, FULL_NAME_POLICY_PREFIX];
+
+
+const TOKEN_PREFIXES: &[&str] = &[TOKEN_POLICY_PREFIX, REVERSED_TOKEN_POLICY_PREFIX];
+
+
+const TARGET_FIRST_RENAME_PREFIXES: &[&str] = &[
+    REVERSED_NAMES_POLICY_PREFIX,
+    REVERSED_ANCESTOR_POLICY_PREFIX,
+    REVERSED_TOKEN_POLICY_PREFIX,
+    FULL_TARGET_POLICY_PREFIX,
+];
+
+
+const CREATED_FIRST_LINK_PREFIXES: &[&str] = &[REVERSED_NAMES_POLICY_PREFIX, REVERSED_TOKEN_POLICY_PREFIX, FULL_NAME_POLICY_PREFIX];
 
 
 const LINK_FORWARD_CREATED: usize = 2;
@@ -95,13 +112,13 @@ pub struct ProcessInfo {
 }
 
 
-/// Maps one Tetragon export line to an event of one of the policies; a line over the hard cap or with too many arguments is `Oversized`.
-pub fn classify(line: &str, max_line_bytes: usize, policies: &[String]) -> Option<FimEvent> {
+/// Maps an export line to an event of one of the policies (`sets`: the declared paths); a line over the caps is `Oversized`.
+pub fn classify(line: &str, max_line_bytes: usize, policies: &[String], sets: &WatchSets) -> Option<FimEvent> {
     if line.len() > max_line_bytes || arg_count(line) > MAX_KPROBE_ARGS {
         oversized_of(line, policies)
     } else {
         match serde_json::from_str::<ExportLine>(line) {
-            Ok(parsed) => parsed.process_kprobe.and_then(|kprobe| event_of(kprobe, policies)),
+            Ok(parsed) => parsed.process_kprobe.and_then(|kprobe| event_of(kprobe, policies, sets)),
             Err(error) => {
                 let reason = error.to_string();
                 tracing::debug!(reason, "export line is not JSON of the expected shape");
@@ -135,7 +152,7 @@ pub fn oversized_of(line: &str, policies: &[String]) -> Option<FimEvent> {
 
 
 /// The event of a kprobe of one of the policies, its path taken from the argument the hook names.
-pub fn event_of(kprobe: ProcessKprobe, policies: &[String]) -> Option<FimEvent> {
+pub fn event_of(kprobe: ProcessKprobe, policies: &[String], sets: &WatchSets) -> Option<FimEvent> {
     let ours = kprobe.policy_name.as_ref().is_some_and(|name| policies.contains(name));
     let function = kprobe.function_name.as_deref().unwrap_or(NO_FUNCTION);
     let process = kprobe
@@ -143,39 +160,39 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String]) -> Option<FimEvent> 
         .and_then(|info| info.binary)
         .map_or_else(|| UNKNOWN_PROCESS.to_string(), |binary| escape_field(&binary));
     let policy = kprobe.policy_name.as_deref().unwrap_or(NO_FUNCTION);
-    let token_policy = policy.starts_with(TOKEN_POLICY_PREFIX) || policy.starts_with(REVERSED_TOKEN_POLICY_PREFIX);
-    let reversed = [
-        REVERSED_NAMES_POLICY_PREFIX,
-        REVERSED_ANCESTOR_POLICY_PREFIX,
-        REVERSED_TOKEN_POLICY_PREFIX,
-    ]
-    .iter()
-    .any(|prefix| policy.starts_with(prefix));
+    let token_policy = has_prefix(policy, TOKEN_PREFIXES);
+    let full = has_prefix(policy, FULL_PREFIXES);
+    let severity = token_policy || full;
     let args = &kprobe.args;
-    match (ours, function, token_policy) {
+    let first = pair_of(0, full);
+    match (ours, function, severity) {
         (false, _, _) => None,
         (true, HOOK_OPEN, _) => Some(honeytoken_of(path_at(args, 0), policy, function, &process)),
-        (true, HOOK_UNLINK | HOOK_RMDIR, true) => Some(honeytoken_of(joined_at(args, 0, 1), policy, function, &process)),
-        (true, HOOK_LINK, honeytoken) => {
-            let (existing, created) = if reversed {
-                (name_at(args, LINK_REVERSED_EXISTING), joined_name(args, 0, 1))
+        (true, HOOK_UNLINK | HOOK_RMDIR, true) => Some(removal_of(real_at(args, first, sets), token_policy, policy, function, &process, sets)),
+        (true, HOOK_LINK, _) => {
+            let (existing, created) = if has_prefix(policy, CREATED_FIRST_LINK_PREFIXES) {
+                (name_at(args, LINK_REVERSED_EXISTING), real_name(args, first, sets))
             } else {
-                (name_at(args, 0), joined_name(args, 1, LINK_FORWARD_CREATED))
+                (name_at(args, 0), real_name(args, (1, LINK_FORWARD_CREATED), sets))
             };
+            let honeytoken = severity && (is_token_side(&existing, token_policy, true, sets) || is_token_side(&created, token_policy, false, sets));
             Some(FimEvent::Link {
                 existing,
                 created,
                 process,
                 honeytoken,
-                name_match: !reversed,
+                name_match: !has_prefix(policy, CREATED_FIRST_LINK_PREFIXES),
             })
         }
-        (true, HOOK_RENAME, honeytoken) => {
-            let (source, target) = if reversed {
-                (joined_name(args, SECOND_PAIR, SECOND_PAIR + 1), joined_name(args, 0, 1))
+        (true, HOOK_RENAME, _) => {
+            let first_side = real_name(args, first, sets);
+            let second_side = real_name(args, pair_of(SECOND_PAIR, full), sets);
+            let (source, target) = if has_prefix(policy, TARGET_FIRST_RENAME_PREFIXES) {
+                (second_side, first_side)
             } else {
-                (joined_name(args, 0, 1), joined_name(args, SECOND_PAIR, SECOND_PAIR + 1))
+                (first_side, second_side)
             };
+            let honeytoken = severity && (is_token_side(&source, token_policy, false, sets) || is_token_side(&target, token_policy, false, sets));
             Some(FimEvent::Rename {
                 source,
                 target,
@@ -185,7 +202,7 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String]) -> Option<FimEvent> 
         }
         (true, hook, _) => WRITE_HOOKS.contains(&hook).then(|| {
             let found = if SPLIT_HOOKS.contains(&hook) {
-                joined_at(args, 0, 1)
+                real_at(args, first, sets)
             } else {
                 path_at(args, 0)
             };
@@ -199,6 +216,63 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String]) -> Option<FimEvent> 
             )
         }),
     }
+}
+
+
+/// Whether the policy name starts with one of the prefixes.
+pub fn has_prefix(policy: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| policy.starts_with(prefix))
+}
+
+
+/// The positions (directory, name) of the pair that starts at `position`: a full-path policy lists the dentry first.
+pub fn pair_of(position: usize, full: bool) -> (usize, usize) {
+    if full {
+        (position + 1, position)
+    } else {
+        (position, position + 1)
+    }
+}
+
+
+/// A removal in a honeytoken or full-path policy: a honeytoken when it names a declared one, else a write (by name only in a honeytoken policy).
+pub fn removal_of(found: Option<String>, token_policy: bool, policy: &str, function: &str, process: &str, sets: &WatchSets) -> FimEvent {
+    found.map_or_else(
+        || missing_path(policy, function, process),
+        |path| {
+            if is_token_side(&path, false, false, sets) {
+                FimEvent::Honeytoken {
+                    path,
+                    process: process.to_string(),
+                }
+            } else {
+                FimEvent::Write {
+                    path,
+                    process: process.to_string(),
+                    name_match: token_policy,
+                }
+            }
+        },
+    )
+}
+
+
+/// Whether a path is a declared honeytoken or a directory above one (`trust_unresolved`: the marker counts; `by_name`: a token path may end with it).
+pub fn is_token_side(side: &str, trust_unresolved: bool, by_name: bool, sets: &WatchSets) -> bool {
+    let candidates = sets.tokens.iter().chain(sets.token_ancestors.iter());
+    (trust_unresolved && side == UNRESOLVED_NAME)
+        || candidates
+            .into_iter()
+            .any(|token| token == side || (by_name && side.len() > 1 && token.ends_with(side)))
+}
+
+
+/// Whether a path is declared in the role: a watched file, a honeytoken, a directory above them, or under a prefix.
+pub fn declared(path: &str, sets: &WatchSets) -> bool {
+    [&sets.files, &sets.tokens, &sets.ancestors, &sets.token_ancestors]
+        .iter()
+        .any(|group| group.iter().any(|declared_path| declared_path == path))
+        || sets.prefixes.iter().any(|prefix| path.starts_with(prefix.as_str()))
 }
 
 
@@ -245,17 +319,30 @@ pub fn raw_at(args: &[KprobeValue], position: usize) -> Option<&str> {
 }
 
 
-/// The escaped path of a directory argument followed by the final component of a dentry argument: a dentry alone stops at its mount root.
-pub fn joined_at(args: &[KprobeValue], directory: usize, name: usize) -> Option<String> {
+/// The directory path followed by the final component of the dentry argument: a dentry alone stops at its mount root.
+pub fn joined_raw(args: &[KprobeValue], (directory, name): (usize, usize)) -> Option<String> {
     let parent = raw_at(args, directory)?;
     let leaf = raw_at(args, name)?.rsplit('/').next().filter(|part| !part.is_empty())?;
-    Some(escape_field(&format!("{}/{leaf}", parent.trim_end_matches('/'))))
+    Some(format!("{}/{leaf}", parent.trim_end_matches('/')))
 }
 
 
-/// The joined path of a directory and a name argument, or the visible unresolved marker.
-pub fn joined_name(args: &[KprobeValue], directory: usize, name: usize) -> String {
-    joined_at(args, directory, name).unwrap_or_else(|| UNRESOLVED_NAME.to_string())
+/// The escaped real path of a pair: the joined path when declared, else the declared dentry path (a bind mount), else the joined path.
+pub fn real_at(args: &[KprobeValue], pair: (usize, usize), sets: &WatchSets) -> Option<String> {
+    let joined = joined_raw(args, pair);
+    let dentry = raw_at(args, pair.1).filter(|path| declared(path, sets)).map(str::to_string);
+    joined
+        .clone()
+        .filter(|path| declared(path, sets))
+        .or(dentry)
+        .or(joined)
+        .map(|path| escape_field(&path))
+}
+
+
+/// The real path of a pair, or the visible unresolved marker.
+pub fn real_name(args: &[KprobeValue], pair: (usize, usize), sets: &WatchSets) -> String {
+    real_at(args, pair, sets).unwrap_or_else(|| UNRESOLVED_NAME.to_string())
 }
 
 
