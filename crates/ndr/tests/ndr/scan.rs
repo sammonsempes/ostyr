@@ -62,6 +62,15 @@ fn setup(script: &str) -> Result<(Fixture, Rules), Box<dyn std::error::Error>> {
 }
 
 
+const TWO_DEFERRED: u64 = 2;
+
+
+const FLOOD_LINES: usize = 100_000;
+
+
+const LINE_CAP: usize = 500;
+
+
 #[test]
 fn the_scan_arguments_are_the_ones_the_fake_expects() -> TestResult {
     let args = scan_args(Path::new("/w/rules.yarc"), Path::new("/w/copy"));
@@ -173,6 +182,41 @@ fn files_beyond_the_tick_cap_are_deferred_and_lines_beyond_the_line_cap_are_not_
     };
     let short = scan_tick(&fake.yr, &rules, root.path(), lines.iter().map(String::as_str), &few_lines, now());
     assert_eq!((short.counts.lines, short.counts.scanned), (1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn deferred_hashes_are_returned_in_hash_order() -> TestResult {
+    let (fake, rules) = setup(FAKE_YR)?;
+    let root = tempfile::tempdir()?;
+    [SHA_A, SHA_B, SHA_C].iter().try_for_each(|sha| store(root.path(), sha, EICAR))?;
+    let lines = [SHA_C, SHA_A, SHA_B].map(fileinfo_line);
+    let capped = Limits {
+        max_files_per_tick: ONE_FILE,
+        ..Limits::default()
+    };
+    let outcome = scan_tick(&fake.yr, &rules, root.path(), lines.iter().map(String::as_str), &capped, now());
+    assert_eq!((outcome.counts.scanned, outcome.counts.deferred), (1, TWO_DEFERRED));
+    assert_eq!(outcome.deferred_hashes, vec![SHA_B.to_string(), SHA_C.to_string()]);
+    assert_eq!(outcome.deferred_hashes.len() as u64, outcome.counts.deferred);
+    Ok(())
+}
+
+
+#[test]
+fn deferred_hashes_are_bounded_by_the_line_cap() -> TestResult {
+    let (fake, rules) = setup(FAKE_YR)?;
+    let root = tempfile::tempdir()?;
+    let lines: Vec<String> = (0..FLOOD_LINES).map(|i| fileinfo_line(&format!("{i:064x}"))).collect();
+    let capped = Limits {
+        max_files_per_tick: ONE_FILE,
+        max_lines_per_tick: LINE_CAP,
+        ..Limits::default()
+    };
+    let outcome = scan_tick(&fake.yr, &rules, root.path(), lines.iter().map(String::as_str), &capped, now());
+    assert_eq!(outcome.deferred_hashes.len(), LINE_CAP - 1);
+    assert_eq!(outcome.counts.lines, LINE_CAP as u64);
     Ok(())
 }
 

@@ -21,6 +21,33 @@ const MODE_GROUP_WRITABLE: u32 = 0o775;
 const NOBODY: u32 = 65_534;
 
 
+pub struct OwnerGuard {
+    path: PathBuf,
+    owner: u32,
+}
+
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        if let Err(error) = rustix::fs::chown(&self.path, Some(rustix::fs::Uid::from_raw(self.owner)), None) {
+            tracing::warn!(kind = ?error, "chown back failed");
+        }
+    }
+}
+
+
+pub fn hand_to_nobody(path: &Path, owner: u32) -> Result<OwnerGuard, Box<dyn std::error::Error>> {
+    let guard = OwnerGuard {
+        path: path.to_path_buf(),
+        owner,
+    };
+    if owner == 0 {
+        rustix::fs::chown(path, Some(rustix::fs::Uid::from_raw(NOBODY)), None)?;
+    }
+    Ok(guard)
+}
+
+
 const WRITABLE: &str = "it or a directory on its path is writable by group or others";
 
 
@@ -84,9 +111,7 @@ fn a_program_owned_by_another_user_is_refused() -> TestResult {
     let own = own_dir()?;
     let plain = plain_program(own.path())?;
     let owner = rustix::process::geteuid().as_raw();
-    if owner == 0 {
-        rustix::fs::chown(&plain.program, Some(rustix::fs::Uid::from_raw(NOBODY)), None)?;
-    }
+    let _restore = hand_to_nobody(&plain.program, owner)?;
     let result = check_program_as(&plain, owner + 1);
     assert!(matches!(
         result,
@@ -106,9 +131,7 @@ fn a_directory_owned_by_another_user_is_refused() -> TestResult {
     fs::create_dir(&nested)?;
     let plain = plain_program(&nested)?;
     let owner = rustix::process::geteuid().as_raw();
-    if owner == 0 {
-        rustix::fs::chown(&nested, Some(rustix::fs::Uid::from_raw(NOBODY)), None)?;
-    }
+    let _restore = hand_to_nobody(&nested, owner)?;
     assert!(matches!(
         check_program_as(&plain, owner + 1),
         Err(NdrError::Program {
