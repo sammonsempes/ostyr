@@ -6,12 +6,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 ecs-normalise = { version = "0.0.0", path = "../ecs-normalise" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
+core-api = { version = "0.0.0", path = "../core-api" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tempfile = "3"
 
 [lints]

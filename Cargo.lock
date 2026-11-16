@@ -5198,11 +5198,15 @@ dependencies = [
 name = "risk-score"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "core-api",
  "core-config",
+ "core-pg",
  "ecs-normalise",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
