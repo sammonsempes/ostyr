@@ -2786,6 +2786,7 @@ name = "hunt-packs"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "core-audit",
  "core-config",
  "core-pg",
  "log",
@@ -2800,6 +2801,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "unicode-general-category",
  "ureq 3.5.1",

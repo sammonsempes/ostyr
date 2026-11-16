@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "sync"] }
 tracing = "0.1"
 unicode-general-category = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
@@ -23,10 +24,12 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
 siem-schema = { version = "0.0.0", path = "../siem-schema" }
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "time"] }
 tokio-postgres = "0.7"
+tracing-log = "0.2"
 tracing-subscriber = "0.3"
 zeroize = "1"
 
