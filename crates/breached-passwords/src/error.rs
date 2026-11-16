@@ -16,8 +16,12 @@ pub enum ListError {
     NotRegular { file: String },
     #[error("{file}: list is a symlink")]
     Symlink { file: String },
-    #[error("list refused: {0}")]
-    Untrusted(#[source] SecretFileError),
+    #[error("{file}: list is owned by neither the process user nor root")]
+    ForeignOwner {
+        file: String,
+        #[source]
+        source: SecretFileError,
+    },
     #[error("{file}: list is writable by group or other")]
     Writable { file: String },
     #[error("cannot read the list: {source}")]

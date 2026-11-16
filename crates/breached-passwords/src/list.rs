@@ -84,7 +84,10 @@ pub fn handle_metadata(handle: &File) -> io::Result<Metadata> {
 
 /// The owner rule of the secret files, reused, then a list wording for a group or other write bit (the list stays readable).
 pub fn judge_list(file: &str, mode: u32, owner: u32, process_user: u32) -> Result<(), ListError> {
-    judge_secret(file, true, 0, owner, process_user).map_err(ListError::Untrusted)?;
+    judge_secret(file, true, 0, owner, process_user).map_err(|source| ListError::ForeignOwner {
+        file: file.to_owned(),
+        source,
+    })?;
     if mode & WRITE_BITS == 0 {
         Ok(())
     } else {
@@ -129,7 +132,7 @@ pub fn read_entry(line: &[u8], previous: Option<&NtHash>, start: u64) -> Result<
 /// The targets sorted and deduplicated: the keys the pass joins the list against.
 pub fn sorted_keys(targets: &[NtHash]) -> Vec<NtHash> {
     let mut keys = targets.to_vec();
-    keys.sort_by(|left, right| left.0.as_slice().cmp(right.0.as_slice()));
+    keys.sort_unstable_by(|left, right| left.0.as_slice().cmp(right.0.as_slice()));
     keys.dedup_by(|left, right| left.0.as_slice() == right.0.as_slice());
     keys
 }
