@@ -47,6 +47,7 @@ fn hand_scope(target: &str, ports: Vec<PortRange>) -> Scope {
         ports,
         ranges: Vec::new(),
         targets: vec![target.to_string()],
+        attested: Vec::new(),
     }
 }
 

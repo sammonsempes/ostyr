@@ -1,3 +1,4 @@
+use crate::error::ScanFailure;
 use ipnet::IpNet;
 use serde::Deserialize;
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -120,6 +121,7 @@ pub struct Scope {
     pub ports: Vec<PortRange>,
     pub ranges: Vec<IpNet>,
     pub targets: Vec<String>,
+    pub attested: Vec<String>,
 }
 
 
@@ -163,4 +165,36 @@ pub struct Counts {
 pub struct Report {
     pub found: Vec<Found>,
     pub counts: Counts,
+}
+
+
+pub const MAX_RUN_ADDRESSES_V4: u128 = 65_536;
+
+
+pub const MAX_RUN_ADDRESSES_V6: u128 = 256;
+
+
+pub const MAX_TARGET_PREFIX_V6: u8 = 120;
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Scanned { kept: usize, counts: Counts },
+    OwnershipUnverified,
+    TooWide,
+    Failed(ScanFailure),
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetReport {
+    pub index: usize,
+    pub outcome: Outcome,
+}
+
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanReport {
+    pub found: Vec<Found>,
+    pub targets: Vec<TargetReport>,
 }

@@ -13,6 +13,9 @@ serde_json = "1"
 thiserror = "2"
 unicode-general-category = "1"
 
+[target.'cfg(unix)'.dependencies]
+net-topology = { version = "0.0.0", path = "../net-topology" }
+
 [dev-dependencies]
 tempfile = "3"
 
