@@ -2,8 +2,8 @@
 
 use crate::allow::{checked_rules, read_rules};
 use crate::copy::{
-    check_limits, copy_tree, counts_of, create_private, data_path, no_hook, original_path, run_path, write_file, write_ignore, CopyLimits,
-    IGNORE_FILE_NAME, TREE_DIR,
+    check_limits, check_work_dir, copy_tree, counts_of, create_private, data_path, no_hook, original_path, run_path, write_file, write_ignore,
+    CopyLimits, IGNORE_FILE_NAME, TREE_DIR,
 };
 use crate::error::ReportError;
 use crate::model::{Limits, Report, ScanScope};
@@ -50,6 +50,12 @@ pub const IGNORE_NAME: &str = "ignore";
 
 
 pub const CONFIG_NAME: &str = "config.toml";
+
+
+pub const STALE_MARGIN_SECONDS: u64 = 600;
+
+
+pub const SCAN_BUDGETS: u64 = 2;
 
 
 pub const NEW_PROCESS_GROUP: i32 = 0;
@@ -134,6 +140,8 @@ pub enum ScanError {
     NoSandbox,
     #[error("refused rules file key: {0}")]
     BadRulesKey(String),
+    #[error("the gitleaks program lies inside the scanned tree")]
+    ProgramInTree,
     #[error("the scanned tree holds a .gitleaksignore")]
     IgnoreFileInTree,
     #[error("copy limit reached: {0}")]
@@ -211,7 +219,22 @@ pub fn check_settings(run: &RunSettings) -> Result<(), ScanError> {
         (MIN_POLL_MILLIS..=MAX_POLL_MILLIS).contains(&run.poll_millis),
         ScanError::BadSettings("poll_millis out of range"),
     )?;
+    check_work_dir(&run.work_dir)?;
     check_limits(&run.copy)
+}
+
+
+/// The age after which a private directory is stale: the copy budget and the gitleaks budget at the longest timeout, the reap polls and a margin.
+pub fn stale_after(poll_millis: u64) -> Duration {
+    let budgets = MAX_TIMEOUT_SECONDS.saturating_mul(SCAN_BUDGETS);
+    let reaping = REAP_POLLS.saturating_mul(poll_millis).div_ceil(MILLIS_PER_SECOND);
+    Duration::from_secs(budgets.saturating_add(reaping).saturating_add(STALE_MARGIN_SECONDS))
+}
+
+
+/// The sandbox binds the copy at the original path after the program, so a program below that path would be hidden by the copy.
+pub fn check_program_outside(program: &Path, original: &Path) -> Result<(), ScanError> {
+    ensure(!program.starts_with(original), ScanError::ProgramInTree)
 }
 
 
@@ -491,6 +514,7 @@ pub fn scan_with_ticks(
     check_fuse(&run.fuse_conf)?;
     check_fuse_sys_admin(&run.fuse_sys_admin)?;
     check_path(path)?;
+    check_program_outside(program, path)?;
     check_bwrap(&run.bwrap)?;
     let rules = read_rules(&run.rules, run.rules_uid)?;
     checked_rules(&rules)?;

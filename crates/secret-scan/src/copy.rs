@@ -153,6 +153,8 @@ pub struct CopySummary {
     pub config_files: usize,
     pub foreign_owner_files: usize,
     pub other_device: usize,
+    pub denied_entries: usize,
+    pub leased_files: usize,
     pub renamed: Vec<OsString>,
 }
 
@@ -227,6 +229,37 @@ pub fn tolerate(errno: Errno, counter: &mut usize, tolerated: bool) -> Result<()
 }
 
 
+/// `EACCES` and `EWOULDBLOCK` skip and count one entry; any other errno is tolerated only when `tolerated`, counted by `fallback`.
+pub fn tolerate_entry(errno: Errno, state: &mut CopySummary, fallback: fn(&mut CopySummary) -> &mut usize, tolerated: bool) -> Result<(), ScanError> {
+    match errno {
+        Errno::ACCESS => {
+            state.denied_entries += 1;
+            Ok(())
+        }
+        Errno::WOULDBLOCK => {
+            state.leased_files += 1;
+            Ok(())
+        }
+        _ => tolerate(errno, fallback(state), tolerated),
+    }
+}
+
+
+fn swapped(state: &mut CopySummary) -> &mut usize {
+    &mut state.skipped_swapped
+}
+
+
+fn vanished(state: &mut CopySummary) -> &mut usize {
+    &mut state.skipped_vanished
+}
+
+
+fn special(state: &mut CopySummary) -> &mut usize {
+    &mut state.skipped_special
+}
+
+
 /// Opens a source file below its parent handle without following a link and without blocking.
 pub fn open_file(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, Errno> {
     openat(parent, name, FILE_FLAGS, Mode::empty())
@@ -252,15 +285,31 @@ fn check_ancestor(handle: &OwnedFd, expected_uid: u32) -> Result<(), ScanError> 
 }
 
 
+/// The work directory is absolute and holds only names (no `..`, no `.`), checked before anything is opened.
+pub fn check_work_dir(work_dir: &Path) -> Result<(), ScanError> {
+    ensure(work_dir.is_absolute(), ScanError::BadSettings("work directory is not absolute"))?;
+    ensure(
+        work_dir
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_))),
+        ScanError::BadSettings("work directory has a component other than a name"),
+    )
+}
+
+
+fn names_of(path: &Path) -> impl Iterator<Item = &OsStr> {
+    path.components().filter_map(|part| match part {
+        Component::Normal(name) => Some(name),
+        _ => None,
+    })
+}
+
+
 /// Opens the work root from `/` one component at a time without following a link; every ancestor is checked, never trusted by path.
 pub fn open_work_root(work_dir: &Path, expected_uid: u32) -> Result<OwnedFd, ScanError> {
-    ensure(work_dir.is_absolute(), ScanError::BadSettings("work directory is not absolute"))?;
+    check_work_dir(work_dir)?;
     let start = openat(rustix::fs::CWD, "/", DIRECTORY_FLAGS, Mode::empty()).map_err(io_error)?;
-    let work = work_dir.components().skip(1).try_fold(start, |parent, part| {
-        let name = match part {
-            Component::Normal(name) => Ok(name),
-            _ => Err(ScanError::BadSettings("work directory has a component other than a name")),
-        }?;
+    let work = names_of(work_dir).try_fold(start, |parent, name| {
         check_ancestor(&parent, expected_uid)?;
         openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(io_error)
     })?;
@@ -279,17 +328,29 @@ pub fn open_work_root(work_dir: &Path, expected_uid: u32) -> Result<OwnedFd, Sca
 
 /// Creates the private directory under the work root, whose ancestors are root's or the caller's and not group or other writable.
 pub fn create_private(work_dir: &Path, expected_uid: u32) -> Result<PrivateDir, ScanError> {
+    create_private_with(work_dir, expected_uid, make_dir)
+}
+
+
+/// `create_private` with the step that makes `data` and `run` injected; the directory is owned by a guard from its creation, so a failing step leaves nothing.
+pub fn create_private_with(
+    work_dir: &Path,
+    expected_uid: u32,
+    make: fn(&OwnedFd, &OsStr) -> Result<OwnedFd, ScanError>,
+) -> Result<PrivateDir, ScanError> {
     let work = open_work_root(work_dir, expected_uid)?;
-    let path = tempfile::Builder::new()
+    let created = tempfile::Builder::new()
         .prefix(DIR_PREFIX)
         .permissions(Permissions::from_mode(PRIVATE_DIR_MODE))
-        .tempdir_in(work_dir)?
-        .keep();
-    let name = path.file_name().map_or_else(OsString::new, OsStr::to_os_string);
+        .tempdir_in(work_dir)?;
+    let name = created.path().file_name().map_or_else(OsString::new, OsStr::to_os_string);
     let root = openat(&work, &name, DIRECTORY_FLAGS, Mode::empty()).map_err(io_error)?;
-    make_dir(&root, OsStr::new(DATA_DIR)).map(drop)?;
-    let run = make_dir(&root, OsStr::new(RUN_DIR))?;
-    Ok(PrivateDir { work, name, root, run, path })
+    let run = root.try_clone()?;
+    let path = created.keep();
+    let mut private = PrivateDir { work, name, root, run, path };
+    make(&private.root, OsStr::new(DATA_DIR)).map(drop)?;
+    private.run = make(&private.root, OsStr::new(RUN_DIR))?;
+    Ok(private)
 }
 
 
@@ -316,15 +377,10 @@ pub fn run_path(private: &PrivateDir) -> PathBuf {
 /// Opens the scan root from `/` one component at a time without following a link; a link or a non-directory anywhere is refused.
 pub fn open_root(path: &Path) -> Result<OwnedFd, ScanError> {
     let start = openat(rustix::fs::CWD, "/", DIRECTORY_FLAGS, Mode::empty()).map_err(io_error)?;
-    path.components()
-        .filter_map(|part| match part {
-            Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .try_fold(start, |parent, name| match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
-            Err(Errno::LOOP | Errno::NOTDIR) => Err(ScanError::BadPath("symlink in path")),
-            other => other.map_err(io_error),
-        })
+    names_of(path).try_fold(start, |parent, name| match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+        Err(Errno::LOOP | Errno::NOTDIR) => Err(ScanError::BadPath("symlink in path")),
+        other => other.map_err(io_error),
+    })
 }
 
 
@@ -398,7 +454,7 @@ pub fn destination(ctx: &Ctx, state: &mut CopySummary, name: &OsStr) -> Result<O
 fn open_tree_dir(ctx: &Ctx, level: &Level, open: usize, state: &mut CopySummary, name: &OsStr) -> Result<Option<Level>, ScanError> {
     check_room(ctx, level, open)?;
     match openat(&level.src, name, DIRECTORY_FLAGS, Mode::empty()) {
-        Err(errno) => tolerate(errno, &mut state.skipped_swapped, is_swap(errno)).map(|()| None),
+        Err(errno) => tolerate_entry(errno, state, swapped, is_swap(errno)).map(|()| None),
         Ok(src) if !same_device(ctx, &src)? => {
             state.other_device += 1;
             Ok(None)
@@ -415,7 +471,7 @@ fn open_tree_dir(ctx: &Ctx, level: &Level, open: usize, state: &mut CopySummary,
 /// Copies only the `config` file of the `.git` directory of `level`, as `STAGED_NAME` beside it, through the handle of that directory.
 pub fn copy_git_config(ctx: &Ctx, level: &Level, state: &mut CopySummary) -> Result<Option<Level>, ScanError> {
     match openat(&level.src, GIT_DIR_NAME, DIRECTORY_FLAGS, Mode::empty()) {
-        Err(errno) => tolerate(errno, &mut state.skipped_swapped, is_swap(errno)).map(|()| None),
+        Err(errno) => tolerate_entry(errno, state, swapped, is_swap(errno)).map(|()| None),
         Ok(git) if !same_device(ctx, &git)? => {
             state.other_device += 1;
             Ok(None)
@@ -472,12 +528,8 @@ pub fn copy_regular(
         Ok(handle) => copy_handle(ctx, dst, File::from(handle), destination, dir_uid, state),
         Err(errno) => {
             let missing = errno == Errno::NOENT;
-            let counter = if missing {
-                &mut state.skipped_vanished
-            } else {
-                &mut state.skipped_special
-            };
-            tolerate(errno, counter, missing || matches!(errno, Errno::LOOP | Errno::NXIO))
+            let fallback = if missing { vanished } else { special };
+            tolerate_entry(errno, state, fallback, missing || matches!(errno, Errno::LOOP | Errno::NXIO))
         }
     }
 }
@@ -520,7 +572,7 @@ pub fn visit_entry(
     ensure(state.entries <= ctx.limits.max_entries, ScanError::CopyLimit("entries"))?;
     ensure(!(ctx.expired)(), ScanError::TimedOut)?;
     match resolve_type(&level.src, name, reported) {
-        Err(errno) => tolerate(errno, &mut state.skipped_vanished, errno == Errno::NOENT).map(|()| None),
+        Err(errno) => tolerate_entry(errno, state, vanished, errno == Errno::NOENT).map(|()| None),
         Ok(file_type) => {
             (ctx.before_open)(&ctx.root.join(&level.rel).join(name));
             ensure(!name.as_bytes().starts_with(RESERVED_PREFIX.as_bytes()), ScanError::NameClash)?;
@@ -613,6 +665,8 @@ pub fn counts_of(summary: &CopySummary) -> CopyCounts {
         config_files: summary.config_files,
         foreign_owner_files: summary.foreign_owner_files,
         other_device: summary.other_device,
+        denied_entries: summary.denied_entries,
+        leased_files: summary.leased_files,
         renamed_names: summary.renamed.len(),
     }
 }

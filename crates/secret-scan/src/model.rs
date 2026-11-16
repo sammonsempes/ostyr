@@ -67,6 +67,8 @@ pub struct CopyCounts {
     pub config_files: usize,
     pub foreign_owner_files: usize,
     pub other_device: usize,
+    pub denied_entries: usize,
+    pub leased_files: usize,
     pub renamed_names: usize,
 }
 

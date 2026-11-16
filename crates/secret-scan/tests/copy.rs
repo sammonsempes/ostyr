@@ -6,10 +6,10 @@ mod types;
 use rustix::fs::{openat, Dir, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use secret_scan::copy::{
-    check_limits, copy_git_config, copy_regular, copy_tree, counts_of, create_private, data_path, destination, display_path, doomed_of, is_swap,
-    name_tail, no_hook, open_file, open_root, open_work_root, original_path, remove_private, remove_step, resolve_type, run_path, sweep_stale,
-    tolerate, visit_entry, write_ignore, CopyLimits, CopySummary, Ctx, Doomed, Level, PrivateDir, CEILING_BYTES, CEILING_ENTRIES, DATA_DIR,
-    RENAMED_PREFIX, STAGED_NAME,
+    check_limits, check_work_dir, copy_git_config, copy_regular, copy_tree, counts_of, create_private, create_private_with, data_path, destination,
+    display_path, doomed_of, is_swap, name_tail, no_hook, open_file, open_root, open_work_root, original_path, remove_private, remove_step,
+    resolve_type, run_path, sweep_stale, tolerate, tolerate_entry, visit_entry, write_ignore, CopyLimits, CopySummary, Ctx, Doomed, Level,
+    PrivateDir, CEILING_BYTES, CEILING_ENTRIES, DATA_DIR, RENAMED_PREFIX, STAGED_NAME,
 };
 use secret_scan::scan::ScanError;
 use std::ffi::{OsStr, OsString};
@@ -516,7 +516,110 @@ fn the_work_directory_is_checked_on_its_handle() -> TestResult {
 
 
 fn failing_open(_parent: &OwnedFd, _name: &OsStr) -> Result<OwnedFd, Errno> {
+    Err(Errno::IO)
+}
+
+
+fn denied_open(_parent: &OwnedFd, _name: &OsStr) -> Result<OwnedFd, Errno> {
     Err(Errno::ACCESS)
+}
+
+
+fn leased_open(_parent: &OwnedFd, _name: &OsStr) -> Result<OwnedFd, Errno> {
+    Err(Errno::WOULDBLOCK)
+}
+
+
+fn skipped(state: &mut CopySummary) -> &mut usize {
+    &mut state.skipped_special
+}
+
+
+fn fail_data(_parent: &OwnedFd, _name: &OsStr) -> Result<OwnedFd, ScanError> {
+    Err(ScanError::BadSettings("injected data failure"))
+}
+
+
+fn fail_run(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, ScanError> {
+    if name == OsStr::new("run") {
+        Err(ScanError::BadSettings("injected run failure"))
+    } else {
+        rustix::fs::mkdirat(parent, name, Mode::RWXU).map_err(std::io::Error::from)?;
+        Ok(openat(parent, name, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).map_err(std::io::Error::from)?)
+    }
+}
+
+
+#[test]
+fn a_denied_or_leased_entry_is_counted_and_skipped_and_the_scan_goes_on() -> TestResult {
+    let env = setup()?;
+    fs::write(env.tree.join("f"), "x")?;
+    let private = create_private(&env.work, owner())?;
+    let level = level_in(&env, &private)?;
+    let limits = CopyLimits::default();
+    let base = ctx_of(&env, &limits, same_dev(&env)?);
+    let mut summary = CopySummary::default();
+    let names = (OsStr::new("f"), OsStr::new("f"));
+    let denied = Ctx {
+        open_file: denied_open,
+        ..ctx_of(&env, &limits, same_dev(&env)?)
+    };
+    copy_regular(&denied, &level.src, &level.dst, names, level.uid, &mut summary)?;
+    let leased = Ctx {
+        open_file: leased_open,
+        ..ctx_of(&env, &limits, same_dev(&env)?)
+    };
+    copy_regular(&leased, &level.src, &level.dst, names, level.uid, &mut summary)?;
+    assert_eq!((summary.denied_entries, summary.leased_files, summary.skipped_special), (1, 1, 0));
+    copy_regular(&base, &level.src, &level.dst, names, level.uid, &mut summary)?;
+    assert_eq!(fs::read_to_string(data_path(&private).join("f"))?, "x");
+    let counts = counts_of(&summary);
+    assert_eq!((counts.denied_entries, counts.leased_files), (1, 1));
+    let mut state = CopySummary::default();
+    tolerate_entry(Errno::ACCESS, &mut state, skipped, false)?;
+    tolerate_entry(Errno::WOULDBLOCK, &mut state, skipped, false)?;
+    tolerate_entry(Errno::LOOP, &mut state, skipped, true)?;
+    assert!(tolerate_entry(Errno::IO, &mut state, skipped, false).is_err());
+    assert_eq!((state.denied_entries, state.leased_files, state.skipped_special), (1, 1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_step_of_the_private_directory_leaves_nothing_behind() -> TestResult {
+    let env = setup()?;
+    assert!(matches!(
+        create_private_with(&env.work, owner(), fail_data),
+        Err(ScanError::BadSettings("injected data failure"))
+    ));
+    assert!(work_is_empty(&env)?);
+    assert!(matches!(
+        create_private_with(&env.work, owner(), fail_run),
+        Err(ScanError::BadSettings("injected run failure"))
+    ));
+    assert!(work_is_empty(&env)?);
+    Ok(())
+}
+
+
+#[test]
+fn the_work_directory_is_checked_before_anything_is_opened() -> TestResult {
+    let env = setup()?;
+    let hostile = env.work.join("absent/../elsewhere");
+    assert!(matches!(
+        check_work_dir(&hostile),
+        Err(ScanError::BadSettings("work directory has a component other than a name"))
+    ));
+    assert!(matches!(
+        sweep_stale(&hostile, owner(), Duration::ZERO),
+        Err(ScanError::BadSettings("work directory has a component other than a name"))
+    ));
+    assert!(matches!(
+        check_work_dir(Path::new("relative")),
+        Err(ScanError::BadSettings("work directory is not absolute"))
+    ));
+    assert!(check_work_dir(&env.work).is_ok());
+    Ok(())
 }
 
 
@@ -831,6 +934,8 @@ fn counts_of_carries_every_count() -> TestResult {
         config_files: FIVE + TWO,
         foreign_owner_files: FIVE + THREE,
         other_device: FIVE + FOUR,
+        denied_entries: FIVE + FIVE,
+        leased_files: FIVE + FIVE + 1,
         renamed: vec![OsString::new(); FIVE * TWO],
     };
     let counts = counts_of(&summary);
@@ -845,9 +950,24 @@ fn counts_of_carries_every_count() -> TestResult {
             counts.config_files,
             counts.foreign_owner_files,
             counts.other_device,
+            counts.denied_entries,
+            counts.leased_files,
             counts.renamed_names,
         ],
-        [1, TWO, THREE, FOUR, FIVE, FIVE + 1, FIVE + TWO, FIVE + THREE, FIVE + FOUR, FIVE * TWO]
+        [
+            1,
+            TWO,
+            THREE,
+            FOUR,
+            FIVE,
+            FIVE + 1,
+            FIVE + TWO,
+            FIVE + THREE,
+            FIVE + FOUR,
+            FIVE * TWO,
+            FIVE * TWO + 1,
+            FIVE * TWO
+        ]
     );
     Ok(())
 }

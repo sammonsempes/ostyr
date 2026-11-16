@@ -7,8 +7,8 @@ use secret_scan::copy::{RENAMED_PREFIX, STAGED_NAME};
 use secret_scan::error::ReportError;
 use secret_scan::model::{Limits, ScanScope};
 use secret_scan::scan::{
-    bwrap_arguments, check_bwrap, check_no_ignore_file, check_path, kill_all, library_dirs, never_expired, run_settings, sandbox_ancestors,
-    scan_arguments, scan_directory, scan_with_ticks, RunSettings, ScanError, ScanTarget, MAX_PATH_BYTES,
+    bwrap_arguments, check_bwrap, check_no_ignore_file, check_path, check_program_outside, kill_all, library_dirs, never_expired, run_settings,
+    sandbox_ancestors, scan_arguments, scan_directory, scan_with_ticks, stale_after, RunSettings, ScanError, ScanTarget, MAX_PATH_BYTES,
 };
 use secret_scan::scan::{check_fuse, check_fuse_sys_admin, check_hardlinks, FUSE_CONF_BYTES, FUSE_SYS_ADMIN_BYTES};
 use std::ffi::OsString;
@@ -73,6 +73,15 @@ const FAKE_BWRAP: &str = "while [ \"$1\" != -- ]; do printf '%s\\n' \"$1\" >> \"
 
 
 const PAIR: usize = 2;
+
+
+const STALE_MARGIN: u64 = 600;
+
+
+const MAX_POLL: u64 = 1000;
+
+
+const REAP_COUNT: u64 = 1000;
 
 
 const FAILING_BWRAP: &str = "exit 1";
@@ -642,6 +651,48 @@ fn bad_run_settings_are_refused_before_any_directory() -> TestResult {
 
 
 #[test]
+fn a_work_directory_with_a_parent_component_is_a_settings_error_before_anything_else() -> TestResult {
+    let env = setup()?;
+    let program = script(&env, "fake", &empty_report())?;
+    let hostile = RunSettings {
+        work_dir: env.work.join("missing/../elsewhere"),
+        rules: env.root.path().join("absent-rules"),
+        ..settings(&env)
+    };
+    assert!(matches!(
+        scan(&env, &program, LONG_TICKS, &hostile),
+        Err(ScanError::BadSettings("work directory has a component other than a name"))
+    ));
+    assert!(work_is_empty(&env)?);
+    Ok(())
+}
+
+
+#[test]
+fn a_program_inside_the_scanned_tree_is_refused_before_anything_is_created() -> TestResult {
+    let env = setup()?;
+    let inside = script(&env, "outside", &empty_report())?;
+    let moved = env.tree.join("gitleaks");
+    fs::rename(&inside, &moved)?;
+    assert!(matches!(scan(&env, &moved, LONG_TICKS, &settings(&env)), Err(ScanError::ProgramInTree)));
+    assert!(matches!(check_program_outside(&moved, Path::new("/")), Err(ScanError::ProgramInTree)));
+    assert!(check_program_outside(&moved, &env.work).is_ok());
+    assert!(check_program_outside(&env.tree.join("gitleaks-sibling"), &env.tree.join("gitleaks")).is_ok());
+    assert!(work_is_empty(&env)?);
+    Ok(())
+}
+
+
+#[test]
+fn the_stale_age_covers_both_budgets_the_reap_polls_and_a_margin() -> TestResult {
+    assert_eq!(stale_after(1).as_secs(), PAIR as u64 * TIMEOUT_SECONDS + 1 + STALE_MARGIN);
+    assert_eq!(stale_after(MAX_POLL).as_secs(), PAIR as u64 * TIMEOUT_SECONDS + REAP_COUNT + STALE_MARGIN);
+    assert!(stale_after(u64::MAX).as_secs() > stale_after(MAX_POLL).as_secs());
+    Ok(())
+}
+
+
+#[test]
 fn a_fifo_at_the_rules_path_is_refused_without_blocking() -> TestResult {
     let env = setup()?;
     let fifo = env.root.path().join("rules.fifo");
@@ -838,6 +889,7 @@ fn the_report_carries_every_count_of_the_copy() -> TestResult {
     assert_eq!(copy.renamed_names, 1);
     assert_eq!(copy.foreign_owner_files, 0);
     assert_eq!(copy.other_device, 0);
+    assert_eq!((copy.denied_entries, copy.leased_files), (0, 0));
     assert_eq!(copy.bytes, EXPECTED_BYTES);
     Ok(())
 }
