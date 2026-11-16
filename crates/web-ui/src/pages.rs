@@ -1,9 +1,12 @@
-use crate::api::{valid_case_id, MAX_COMMENT_CHARS};
-use crate::model::{Alert, AlertPage, CaseDetailView, CasePageView, CaseSummaryView, CommentView, Language};
+use crate::api::{encode_asset_id, valid_asset_id, valid_case_id, MAX_COMMENT_CHARS};
+use crate::model::{
+    Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CommentView, Language,
+};
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
     task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
+use ecs_normalise::suricata::is_unsafe;
 use maud::{html, Markup, DOCTYPE};
 use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
@@ -53,7 +56,7 @@ pub fn clip(language: Language, value: &str, max: usize) -> String {
 
 
 pub fn displayable(character: char) -> bool {
-    !character.is_control() && !matches!(character, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    !is_unsafe(character)
 }
 
 
@@ -110,6 +113,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                     @if let Some(token) = csrf {
                         (go("/alerts", text(language, "nav_alerts")))
                         (go("/cases", text(language, "nav_cases")))
+                        (go("/assets", text(language, "nav_assets")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -344,6 +348,137 @@ pub fn cases_page(language: Language, csrf: &str, page: &CasePageView, limit: Op
                     button type="submit" { (text(language, "cases_next")) }
                 }
             }
+        },
+    )
+}
+
+
+/// A list row is readable only when its id may become a link and its kind and life cycle hold no character `is_unsafe` refuses.
+pub fn asset_readable(asset: &AssetSummaryView) -> bool {
+    valid_asset_id(&asset.id) && !asset.kind.chars().any(is_unsafe) && !asset.lifecycle.chars().any(is_unsafe)
+}
+
+
+pub fn asset_row(language: Language, asset: &AssetSummaryView) -> Markup {
+    if asset_readable(asset) {
+        asset_row_readable(language, asset)
+    } else {
+        html! {
+            tr { td colspan="6" { (text(language, "asset_unreadable")) } }
+        }
+    }
+}
+
+
+pub fn asset_row_readable(language: Language, asset: &AssetSummaryView) -> Markup {
+    let link = format!("/assets/{}", encode_asset_id(&asset.id));
+    html! {
+        tr {
+            td { (go(&link, &asset.id)) }
+            td { (clip(language, &asset.kind, MAX_FIELD_CHARS)) }
+            td { (clip(language, &asset.lifecycle, MAX_FIELD_CHARS)) }
+            td { (asset.counts.keys) }
+            td { (asset.counts.attributes) }
+            td { (asset.counts.open_conflicts) }
+        }
+    }
+}
+
+
+pub fn assets_page(language: Language, csrf: &str, page: &AssetPageView, limit: Option<u32>) -> Markup {
+    layout(
+        language,
+        "title_assets",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_assets")) }
+            @if page.items.is_empty() {
+                div { (text(language, "assets_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_asset_id")) }
+                            th { (text(language, "col_kind")) }
+                            th { (text(language, "col_lifecycle")) }
+                            th { (text(language, "count_keys")) }
+                            th { (text(language, "count_attributes")) }
+                            th { (text(language, "count_conflicts")) }
+                        }
+                    }
+                    tbody {
+                        @for asset in &page.items { (asset_row(language, asset)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &page.next_cursor {
+                form method="get" action="/assets" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    @if let Some(kept) = limit {
+                        input type="hidden" name="limit" value=(kept);
+                    }
+                    button type="submit" { (text(language, "assets_next")) }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn asset_page(language: Language, csrf: &str, asset: &AssetDetailView) -> Markup {
+    let counts = asset.summary.counts;
+    layout(
+        language,
+        "title_asset",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_asset")) " " (asset.summary.id) }
+            dl {
+                dt { (text(language, "col_kind")) }
+                dd { (clip(language, &asset.summary.kind, MAX_FIELD_CHARS)) }
+                dt { (text(language, "col_lifecycle")) }
+                dd { (clip(language, &asset.summary.lifecycle, MAX_FIELD_CHARS)) }
+                dt { (text(language, "count_keys")) }
+                dd { (counts.keys) }
+                dt { (text(language, "count_attributes")) }
+                dd { (counts.attributes) }
+                dt { (text(language, "count_conflicts")) }
+                dd { (counts.open_conflicts) }
+            }
+            h2 { (text(language, "asset_keys")) }
+            table {
+                tbody {
+                    @for entry in &asset.keys {
+                        tr {
+                            td { (clip(language, &entry.key, MAX_FIELD_CHARS)) }
+                            td { (clip(language, &entry.value, MAX_VALUE_CHARS)) }
+                        }
+                    }
+                }
+            }
+            h2 { (text(language, "asset_attributes")) }
+            table {
+                thead {
+                    tr {
+                        th { (text(language, "col_name")) }
+                        th { (text(language, "col_value")) }
+                        th { (text(language, "col_source")) }
+                    }
+                }
+                tbody {
+                    @for entry in &asset.attributes {
+                        tr {
+                            td { (clip(language, &entry.name, MAX_FIELD_CHARS)) }
+                            td { (clip(language, &entry.value, MAX_VALUE_CHARS)) }
+                            td { (clip(language, &entry.source, MAX_FIELD_CHARS)) }
+                        }
+                    }
+                }
+            }
+            @if asset.truncated {
+                div class="notice" { (text(language, "asset_truncated")) }
+            }
+            (go("/assets", text(language, "asset_back")))
         },
     )
 }
