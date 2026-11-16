@@ -61,13 +61,13 @@ pub fn finish_package(package: Package) -> Result<Package, ConnectorError> {
 }
 
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub fn read_package_with(directory: &Path, limits: &Limits) -> Result<Package, ConnectorError> {
     crate::scan::scan_directory(directory, limits).and_then(finish_package)
 }
 
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub fn read_package_with(_directory: &Path, _limits: &Limits) -> Result<Package, ConnectorError> {
     Err(ConnectorError::Unsupported)
 }

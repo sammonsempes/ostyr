@@ -3,15 +3,15 @@ use crate::common::VALID_MANIFEST;
 use connector_manifest::error::ConnectorError;
 use connector_manifest::model::{Limits, Package, MANIFEST_NAME, MAX_FILE_NAME_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, SIGNATURE_NAME};
 use connector_manifest::package::{digest_bytes, hash_capped, read_capped, read_package, read_package_with};
-use connector_manifest::scan::{check_regular_with, list_names, list_names_with, shown_name};
+use connector_manifest::scan::{check_regular_with, list_names, list_names_with, open_at, open_entry_with, shown_name};
 use data_encoding::HEXLOWER;
-use rustix::fs::{mknodat, FileType, Mode, CWD};
+use rustix::fs::{fcntl_getfl, mknodat, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
-use std::os::fd::OwnedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -31,6 +31,9 @@ const SPARE_BYTES: u64 = 4;
 
 
 const SHOWN_CUT: usize = 64;
+
+
+const OTHER_REGULAR_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
 
 
 const NOT_UTF8_NAME: &[u8] = b"bad\xff.py";
@@ -289,5 +292,67 @@ fn a_failing_directory_listing_or_stat_is_reported_with_the_path() -> TestResult
     let file = File::open(directory.path().join("main.py"))?;
     assert!(matches!(check_regular_with(failing_inspect, &file, "main.py"), Err(ConnectorError::Io { path, .. }) if path == "main.py"));
     assert!(list_names(&handle, "dir", SHOWN_CUT)?.contains(&"main.py".to_owned()));
+    Ok(())
+}
+
+
+fn only_o_path_reaches_a_device(_directory: BorrowedFd<'_>, _path: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+    flags.contains(OFlags::PATH).then_some(()).ok_or(Errno::PERM)?;
+    open_at(CWD, "/dev/null", flags)
+}
+
+
+fn reopens_the_manifest(directory: BorrowedFd<'_>, path: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+    let target = if flags.contains(OFlags::PATH) { path } else { OTHER_REGULAR_FILE };
+    open_at(directory, target, flags)
+}
+
+
+fn fails_on_a_reopened_handle(handle: &File) -> io::Result<Metadata> {
+    let flags = fcntl_getfl(handle)?;
+    if flags.contains(OFlags::PATH) {
+        handle.metadata()
+    } else {
+        Err(io::Error::other("fstat failed"))
+    }
+}
+
+
+#[test]
+fn a_device_swapped_in_after_the_listing_is_only_ever_opened_with_o_path() -> TestResult {
+    let directory = package_dir()?;
+    let handle = OwnedFd::from(File::open(directory.path())?);
+    assert!(matches!(
+        open_entry_with(only_o_path_reaches_a_device, File::metadata, &handle, "main.py"),
+        Err(ConnectorError::NotRegular { path }) if path == "main.py"
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_reopened_inode_that_differs_from_the_judged_one_is_refused() -> TestResult {
+    let directory = package_dir()?;
+    let handle = OwnedFd::from(File::open(directory.path())?);
+    assert!(matches!(
+        open_entry_with(reopens_the_manifest, File::metadata, &handle, "main.py"),
+        Err(ConnectorError::Swapped { path }) if path == "main.py"
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_open_or_reopened_fstat_is_reported_with_the_path() -> TestResult {
+    let directory = package_dir()?;
+    let handle = OwnedFd::from(File::open(directory.path())?);
+    assert!(matches!(
+        open_entry_with(open_at, fails_on_a_reopened_handle, &handle, "main.py"),
+        Err(ConnectorError::Io { path, .. }) if path == "main.py"
+    ));
+    assert!(matches!(
+        open_entry_with(open_at, File::metadata, &handle, "absent.py"),
+        Err(ConnectorError::Io { path, .. }) if path == "absent.py"
+    ));
     Ok(())
 }

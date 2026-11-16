@@ -1,4 +1,7 @@
-use crate::model::{ActionSpec, ConfigField, RawKey, Right, MAX_ACTIONS, MAX_CONFIG_FIELDS, MAX_RIGHTS, MAX_TARGETS, MAX_TRUSTED_KEYS};
+use crate::model::{
+    ActionSpec, ConfigField, RawKey, Right, MAX_ACTIONS, MAX_CONFIG_FIELDS, MAX_RIGHTS, MAX_TARGETS, MAX_TRUSTED_KEYS, MAX_VERSION_BYTES,
+};
+use semver::Version;
 use serde::de::{Deserialize, Deserializer, Error, SeqAccess};
 use serde_untagged::UntaggedEnumVisitor;
 
@@ -46,4 +49,21 @@ pub fn targets<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<V
 
 pub fn keys<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Vec<RawKey>, Source::Error> {
     bounded_seq(deserializer, MAX_TRUSTED_KEYS)
+}
+
+
+pub const VERSION_TOO_LONG: &str = "invalid `version`: too long";
+
+
+/// A version text over `MAX_VERSION_BYTES` is refused before semver parsing.
+pub fn version<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Version, Source::Error> {
+    UntaggedEnumVisitor::new()
+        .expecting("a version")
+        .string(|text| {
+            (text.len() <= MAX_VERSION_BYTES)
+                .then_some(text)
+                .ok_or_else(|| Error::custom(VERSION_TOO_LONG))
+                .and_then(|short| Version::parse(short).map_err(Error::custom))
+        })
+        .deserialize(deserializer)
 }

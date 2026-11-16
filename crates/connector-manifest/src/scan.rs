@@ -2,12 +2,12 @@ use crate::error::ConnectorError;
 use crate::manifest::valid_file_name;
 use crate::model::{Limits, Package, MANIFEST_NAME, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, SIGNATURE_NAME};
 use crate::package::{digest_bytes, hash_capped, io_at, io_error, read_capped};
-use crate::types::{InspectFn, ListerFn};
+use crate::types::{InspectFn, ListerFn, OpenFn};
 use rustix::fs::{openat, statat, AtFlags, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use std::fs::File;
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -93,22 +93,44 @@ pub fn precheck_entry(directory: &OwnedFd, name: &str) -> Result<(), ConnectorEr
 }
 
 
-/// `O_NOFOLLOW` and `O_NONBLOCK` and `O_NOCTTY` cover an entry swapped after the precheck (the handle is judged again after the open).
+/// The real `openat`, injected into `open_entry_with` so a test can see which flags reach which path.
+pub fn open_at(directory: BorrowedFd<'_>, path: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+    openat(directory, path, flags, Mode::empty())
+}
+
+
+/// A handle's verdict through the injected `fstat`; returns the identity (device, inode) of the inode it judged.
+pub fn judged_identity(inspect: InspectFn, handle: &File, name: &str) -> Result<(u64, u64), ConnectorError> {
+    let metadata = inspect(handle).map_err(io_at(name))?;
+    judge_entry(FileType::from_raw_mode(metadata.mode()), metadata.nlink() <= 1, name)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+
+/// `O_PATH` opens no driver for any file type; the judged inode is then reopened through `/proc/self/fd` and must be the same one.
+pub fn open_entry_with(opener: OpenFn, inspect: InspectFn, directory: &OwnedFd, name: &str) -> Result<File, ConnectorError> {
+    let anchor = opener(directory.as_fd(), name, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC)
+        .map(File::from)
+        .map_err(errno_error(name))?;
+    let judged = judged_identity(inspect, &anchor, name)?;
+    let proc_path = format!("/proc/self/fd/{}", anchor.as_raw_fd());
+    let handle = opener(CWD, &proc_path, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC)
+        .map(File::from)
+        .map_err(errno_error(name))?;
+    (judged_identity(inspect, &handle, name)? == judged)
+        .then_some(handle)
+        .ok_or_else(|| ConnectorError::Swapped { path: name.to_owned() })
+}
+
+
 pub fn open_entry(directory: &OwnedFd, name: &str) -> Result<File, ConnectorError> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    openat(directory, name, flags, Mode::empty()).map(File::from).map_err(errno_error(name))
+    open_entry_with(open_at, File::metadata, directory, name)
 }
 
 
 /// The handle that is read is judged again on its own metadata; `inspect` is injected so a failing `fstat` can be tested.
 pub fn check_regular_with(inspect: InspectFn, handle: &File, name: &str) -> Result<(), ConnectorError> {
-    let metadata = inspect(handle).map_err(io_at(name))?;
-    judge_entry(FileType::from_raw_mode(metadata.mode()), metadata.nlink() <= 1, name)
-}
-
-
-pub fn check_regular(handle: &File, name: &str) -> Result<(), ConnectorError> {
-    check_regular_with(File::metadata, handle, name)
+    judged_identity(inspect, handle, name).map(|_| ())
 }
 
 
@@ -116,7 +138,6 @@ pub fn check_regular(handle: &File, name: &str) -> Result<(), ConnectorError> {
 pub fn read_entry(directory: &OwnedFd, limits: &Limits, mut package: Package, name: &str) -> Result<Package, ConnectorError> {
     precheck_entry(directory, name)?;
     let mut handle = open_entry(directory, name)?;
-    check_regular(&handle, name)?;
     match name {
         SIGNATURE_NAME => package.signature = Some(read_capped(&mut handle, MAX_SIGNATURE_BYTES, name)?),
         MANIFEST_NAME => {
