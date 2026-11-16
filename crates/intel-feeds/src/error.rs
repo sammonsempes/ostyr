@@ -1,4 +1,8 @@
-use crate::limits::{MAX_DOCUMENT_BYTES, MAX_MISP_ATTRIBUTES, MAX_URL_BYTES};
+use crate::config::TaxiiConfigError;
+use crate::limits::{MAX_DOCUMENT_BYTES, MAX_MISP_ATTRIBUTES, MAX_TAXII_OBJECTS_PER_PAGE, MAX_URL_BYTES};
+use core_pg::error::PgError;
+use serde_json::error::Category;
+use siem_ingest::error::InsertError;
 use std::io;
 use std::str::Utf8Error;
 use thiserror::Error;
@@ -82,6 +86,8 @@ pub enum FeedError {
     NotAnEvent,
     #[error("more than {MAX_MISP_ATTRIBUTES} attributes in the event")]
     TooManyAttributes,
+    #[error("a TAXII feed is polled, not read from a file")]
+    PollOnly,
 }
 
 
@@ -102,4 +108,50 @@ pub fn reason_key(error: &EntryError) -> &'static str {
         EntryError::Deleted => "deleted",
         EntryError::ControlCharacter => "control_character",
     }
+}
+
+
+/// Fixed text per class: a server's body, header values, the password and the `Authorization` header never reach an error.
+#[derive(Debug, Error)]
+pub enum TaxiiError {
+    #[error(transparent)]
+    Settings(#[from] TaxiiConfigError),
+    #[error("the feed has no taxii section")]
+    NoSection,
+    #[error("the TAXII password file could not be used")]
+    Password(#[source] PgError),
+    #[error("the TAXII CA file could not be used")]
+    CaFile(#[source] PgError),
+    #[error("the TAXII client could not be built")]
+    Agent(#[source] InsertError),
+    #[error("the cursor is out of range in UTC")]
+    CursorRange,
+    #[error("the cursor cannot be written as RFC 3339")]
+    Cursor(#[source] time::error::Format),
+    #[error("the TAXII server refused the credentials")]
+    Unauthorized,
+    #[error("the TAXII collection is unknown to the server")]
+    UnknownCollection,
+    #[error("the TAXII server refused version 2.1")]
+    VersionRefused,
+    #[error("the TAXII server is unavailable")]
+    Unavailable,
+    #[error("the TAXII server answered status {0}")]
+    Status(u16),
+    #[error("the TAXII poll ran out of time")]
+    Timeout,
+    #[error("the TAXII server connection failed")]
+    Connect,
+    #[error("the TAXII TLS handshake failed")]
+    Tls,
+    #[error("the TAXII connection failed with an I/O error of kind {kind:?}")]
+    Io { kind: io::ErrorKind },
+    #[error("the TAXII request broke the HTTP protocol")]
+    Protocol,
+    #[error("a TAXII page is larger than {MAX_DOCUMENT_BYTES} bytes")]
+    PageTooLarge,
+    #[error("a TAXII page is not a valid envelope ({category:?} at line {line} column {column})")]
+    Envelope { category: Category, line: usize, column: usize },
+    #[error("a TAXII page holds more than {MAX_TAXII_OBJECTS_PER_PAGE} objects")]
+    TooManyObjects,
 }

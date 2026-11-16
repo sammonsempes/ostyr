@@ -16,5 +16,6 @@ pub fn feed(name: &str, format: FeedFormat) -> FeedConfig {
         default_confidence: TEST_CONFIDENCE,
         tlp: Tlp::Amber,
         ttl_seconds: None,
+        taxii: None,
     }
 }
