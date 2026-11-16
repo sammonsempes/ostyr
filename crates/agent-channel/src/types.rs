@@ -5,8 +5,10 @@ use agent_command::model::Command;
 use arc_swap::ArcSwap;
 use core_config::types::SharedAuditFn;
 use std::error::Error;
+use std::fs::File;
 use std::future::Future;
 use std::io::{self, Write};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -100,3 +102,7 @@ pub type PauseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Waits for the given delay; injected so tests do not sleep.
 pub type PauseFn = dyn Fn(Duration) -> PauseFuture + Send + Sync;
+
+
+/// Reads the first lines of a locked claimed file and whether the overflow went back to the spool; injected so tests can fail it.
+pub type LoadFn = fn(&File, &Path, u64, usize) -> io::Result<(Vec<String>, bool)>;

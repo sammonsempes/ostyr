@@ -820,7 +820,10 @@ fn lines_that_raced_the_claim_or_exceed_the_cap_return_to_the_spool() -> TestRes
     assert_eq!(count_lines(&agent.spool_file, LIMIT)?, u64::try_from(MAX_SPOOL_BATCHES)?);
     assert_eq!(claim_spool(&agent)?.batches.len(), MAX_SPOOL_BATCHES);
     assert_eq!(fs::read_to_string(&agent.spool_file)?, "x\nx\n");
-    assert_eq!(load_claimed(&sending, &agent.spool_file, u64::MAX, LIMIT)?.len(), MAX_SPOOL_BATCHES);
+    assert_eq!(
+        load_claimed(&fs::File::open(&sending)?, &agent.spool_file, u64::MAX, LIMIT)?.0.len(),
+        MAX_SPOOL_BATCHES
+    );
     assert_eq!(fs::read_to_string(&agent.spool_file)?.lines().count(), TWICE);
     append_back(std::iter::empty(), &dir.path().join("none"))?;
     assert!(!dir.path().join("none").exists());
@@ -841,7 +844,7 @@ fn an_oversized_spool_line_is_refused_and_counted_not_buffered() -> TestResult {
     fs::write(dir.path().join("invalid"), INVALID_UTF8)?;
     assert!(count_lines(&dir.path().join("invalid"), LIMIT).is_err());
     assert!(count_lines(&dir.path().join("missing"), LIMIT).is_err());
-    assert!(load_claimed(&dir.path().join("missing"), &agent.spool_file, 1, LIMIT).is_err());
+    assert!(load_claimed(&fs::File::open(dir.path().join("invalid"))?, &agent.spool_file, 1, LIMIT).is_err());
     Ok(())
 }
 
@@ -1303,9 +1306,12 @@ fn an_overflow_of_three_chunks_goes_back_in_three_whole_writes() -> TestResult {
         format!("first\n{}", all.iter().map(|text| format!("{text}\n")).collect::<String>()),
     )?;
     let returned = dir.path().join("returned");
-    assert_eq!(load_claimed(&sending, &returned, 1, LIMIT)?, vec!["first".to_owned()]);
+    assert_eq!(
+        load_claimed(&fs::File::open(&sending)?, &returned, 1, LIMIT)?,
+        (vec!["first".to_owned()], true)
+    );
     assert_eq!(fs::read_to_string(&returned)?.lines().count(), all.len());
-    assert_eq!(fs::read_to_string(&sending)?, "first\n");
+    assert_eq!(fs::read_to_string(&sending)?.lines().count(), all.len() + 1);
     assert_eq!(append_chunks(std::iter::empty(), &dir.path().join("none"))?, 0);
     assert!(append_chunks(std::iter::once(Err(io::Error::other("injected"))), &dir.path().join("failed")).is_err());
     Ok(())
