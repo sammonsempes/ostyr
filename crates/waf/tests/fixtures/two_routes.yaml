@@ -1,0 +1,9 @@
+routes:
+  - hosts: [app.example.test]
+    paths: [/api/]
+    backends: ["127.0.0.1:9001"]
+    health:
+      path: /health
+      interval_seconds: 20
+  - hosts: [Web.Example.Test, www.example.test]
+    backends: ["127.0.0.1:9002", "127.0.0.1:9003"]
