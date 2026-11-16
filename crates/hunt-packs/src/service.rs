@@ -4,12 +4,17 @@ use crate::settings::{tick_limits, HuntSettings};
 use crate::store::Param;
 use crate::tick::{tick, Hooks};
 use crate::types::{ClockFn, SleepFn};
+use core_config::error::ConfigError;
+use core_config::parse::{read_text_capped, MAX_FILE_BYTES};
 use core_config::reload::{current_config, reload, ReloadEngine, ReloadOutcome};
 use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
+use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::future::Future;
+use std::path::Path;
 use tokio::sync::watch::Receiver;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 
 /// What the loop did, summed over its rounds.
@@ -21,6 +26,7 @@ pub struct ServiceReport {
     pub clock_jumps: u64,
     pub reloads_applied: u64,
     pub reloads_refused: u64,
+    pub reloads_skipped: u64,
     pub refused_files: usize,
     pub refused_tenants: usize,
     pub pack_dir_failures: u64,
@@ -32,19 +38,56 @@ pub struct ServiceReport {
 pub const MAX_ROUNDS: u64 = 1_000_000_000;
 
 
+/// The settings engine and the file it loads, polled once per round.
+pub struct SettingsSource<'source> {
+    pub engine: &'source ReloadEngine<HuntSettings>,
+    pub path: &'source Path,
+}
+
+
 pub struct ServiceState {
     pub guard: ClockGuard,
     pub report: ServiceReport,
     pub closed: bool,
+    pub refused_digest: Option<String>,
 }
 
 
-/// One reload attempt per round; the outcome is counted, the old settings stay when it is refused.
-pub fn reload_round(engine: &ReloadEngine<HuntSettings>, report: &mut ServiceReport) {
-    match reload(engine) {
-        ReloadOutcome::Applied { .. } => report.reloads_applied += 1,
-        ReloadOutcome::Refused { .. } => report.reloads_refused += 1,
-        ReloadOutcome::Unchanged => (),
+/// SHA-256 of the settings file, read through core-config's capped reader.
+pub fn settings_digest(path: &Path) -> Result<String, ConfigError> {
+    let file = path.display().to_string();
+    let mut handle = File::open(path).map_err(|source| ConfigError::Io { file: file.clone(), source })?;
+    let text = read_text_capped(&mut handle, &file, MAX_FILE_BYTES)?;
+    Ok(format!("{:x}", Sha256::digest(text.as_bytes())))
+}
+
+
+/// The digest, or `None` (logged) when the file cannot be read: then the reload runs and refuses it by itself.
+pub fn digest_or_none(path: &Path) -> Option<String> {
+    settings_digest(path)
+        .inspect_err(|error| {
+            let text = error.to_string();
+            debug!("hunt settings digest unavailable: {text}");
+        })
+        .ok()
+}
+
+
+/// One reload per round, skipped while the file holds the already refused bytes (remembered only if unchanged during the reload).
+pub fn reload_round(engine: &ReloadEngine<HuntSettings>, settings_path: &Path, refused_digest: &mut Option<String>, report: &mut ServiceReport) {
+    let before = digest_or_none(settings_path);
+    if before.is_some() && before == *refused_digest {
+        report.reloads_skipped += 1;
+    } else {
+        let outcome = reload(engine);
+        let after = digest_or_none(settings_path);
+        let refused = matches!(outcome, ReloadOutcome::Refused { .. });
+        match outcome {
+            ReloadOutcome::Applied { .. } => report.reloads_applied += 1,
+            ReloadOutcome::Refused { .. } => report.reloads_refused += 1,
+            ReloadOutcome::Unchanged => (),
+        }
+        *refused_digest = if refused && before == after { before } else { None };
     }
 }
 
@@ -83,7 +126,7 @@ where
 
 /// One round: reload, read both clocks, run the tick unless the wall clock jumped; gives the seconds to sleep.
 pub async fn round<Executor, Pending>(
-    engine: &ReloadEngine<HuntSettings>,
+    source: &SettingsSource<'_>,
     clock: &mut ClockFn<'_>,
     exec: &mut Executor,
     hooks: &mut Hooks<'_>,
@@ -93,8 +136,8 @@ where
     Executor: FnMut(&TenantScope, &'static str, Vec<Param>) -> Pending,
     Pending: Future<Output = Result<Vec<i64>, PgError>>,
 {
-    reload_round(engine, &mut state.report);
-    let settings = current_config(engine);
+    reload_round(source.engine, source.path, &mut state.refused_digest, &mut state.report);
+    let settings = current_config(source.engine);
     state.report.rounds += 1;
     let reading = clock();
     match judge(&mut state.guard, reading) {
@@ -120,7 +163,7 @@ pub async fn pause(sleep: &mut SleepFn<'_>, stop: &mut Receiver<bool>, seconds: 
 
 /// The loop: `while !stopped && rounds < max_ticks`, each round one reload, one clock check, at most one tick, then a sleep.
 pub async fn run_service<Executor, Pending>(
-    engine: &ReloadEngine<HuntSettings>,
+    source: &SettingsSource<'_>,
     clock: &mut ClockFn<'_>,
     sleep: &mut SleepFn<'_>,
     stop: &mut Receiver<bool>,
@@ -136,9 +179,10 @@ where
         guard: ClockGuard::default(),
         report: ServiceReport::default(),
         closed: false,
+        refused_digest: None,
     };
     while !state.closed && !*stop.borrow() && state.report.rounds < max_ticks.min(MAX_ROUNDS) {
-        let seconds = round(engine, clock, exec, hooks, &mut state).await;
+        let seconds = round(source, clock, exec, hooks, &mut state).await;
         state.closed = pause(sleep, stop, seconds).await;
     }
     let ServiceState { report, .. } = state;
