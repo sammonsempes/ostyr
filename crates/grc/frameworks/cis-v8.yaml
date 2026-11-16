@@ -1,0 +1,101 @@
+framework: cis-v8
+version: 8
+controls:
+  - id: 1
+    title: Inventory and control of enterprise assets
+    kind: technical
+    indicator: assets.owned_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 2
+    title: Inventory and control of software assets
+    kind: organisational
+  - id: 3
+    title: Data protection
+    kind: technical
+    indicator: encryption.workstation_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 4
+    title: Secure configuration of assets and software
+    kind: technical
+    indicator: hardening.mean_score_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 5
+    title: Account management
+    kind: technical
+    indicator: identity.inactive_accounts
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: 6
+    title: Access control management
+    kind: technical
+    indicator: identity.privileged_without_mfa
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: 7
+    title: Continuous vulnerability management
+    kind: technical
+    indicator: vuln.kev_mean_days_to_fix
+    max_age_hours: 48
+    compliant: {at_most: 14}
+    partial: {at_most: 30}
+  - id: 8
+    title: Audit log management
+    kind: technical
+    indicator: logging.active_sources_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 9
+    title: Email and web browser protections
+    kind: organisational
+  - id: 10
+    title: Malware defences
+    kind: technical
+    indicator: endpoint.full_protection_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 11
+    title: Data recovery
+    kind: technical
+    indicator: backup.days_since_restore_test
+    max_age_hours: 48
+    compliant: {at_most: 90}
+    partial: {at_most: 180}
+  - id: 12
+    title: Network infrastructure management
+    kind: organisational
+  - id: 13
+    title: Network monitoring and defence
+    kind: organisational
+  - id: 14
+    title: Security awareness and skills training
+    kind: organisational
+  - id: 15
+    title: Service provider management
+    kind: organisational
+  - id: 16
+    title: Application software security
+    kind: organisational
+  - id: 17
+    title: Incident response management
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: 18
+    title: Penetration testing
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}

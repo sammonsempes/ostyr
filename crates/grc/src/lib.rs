@@ -1,5 +1,6 @@
 //! GRC slice 1 (spec section 13): frameworks as code, deterministic control evaluation, hashed evidence.
 
+pub mod builtin;
 pub mod error;
 pub mod evaluate;
 pub mod evidence;

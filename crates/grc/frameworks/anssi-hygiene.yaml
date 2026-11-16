@@ -1,0 +1,177 @@
+framework: anssi-hygiene
+version: 2
+controls:
+  - id: 1
+    title: Train the operational teams
+    kind: organisational
+  - id: 2
+    title: Raise user awareness
+    kind: organisational
+  - id: 3
+    title: Control the risks of outsourced administration
+    kind: organisational
+  - id: 4
+    title: Identify the most sensitive information and servers
+    kind: technical
+    indicator: assets.owned_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 5
+    title: Organise arrival, departure and role change procedures
+    kind: organisational
+  - id: 6
+    title: Identify every person accessing the system
+    kind: technical
+    indicator: identity.inactive_accounts
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: 7
+    title: Grant the right access to sensitive resources
+    kind: organisational
+  - id: 8
+    title: Set password rules
+    kind: organisational
+  - id: 9
+    title: Use authentication suited to the stakes
+    kind: technical
+    indicator: identity.privileged_without_mfa
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: 10
+    title: Define a workstation security standard
+    kind: technical
+    indicator: hardening.mean_score_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 11
+    title: Manage mobile devices
+    kind: organisational
+  - id: 12
+    title: Activate and configure the firewall
+    kind: organisational
+  - id: 13
+    title: Encrypt sensitive data on mobile devices
+    kind: technical
+    indicator: encryption.workstation_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 14
+    title: Secure the network connections of mobile workers
+    kind: organisational
+  - id: 15
+    title: Protect the internal network from the Internet
+    kind: organisational
+  - id: 16
+    title: Segregate the network by need
+    kind: organisational
+  - id: 17
+    title: Secure the Wi-Fi networks
+    kind: organisational
+  - id: 18
+    title: Use secure protocols
+    kind: organisational
+  - id: 19
+    title: Secure the remote access of third parties
+    kind: organisational
+  - id: 20
+    title: Secure the administration network and tools
+    kind: organisational
+  - id: 21
+    title: Separate administration accounts from user accounts
+    kind: organisational
+  - id: 22
+    title: Prohibit Internet access from administration accounts
+    kind: organisational
+  - id: 23
+    title: Restrict administrator rights
+    kind: organisational
+  - id: 24
+    title: Restrict installation of applications and equipment
+    kind: organisational
+  - id: 25
+    title: Protect against malware
+    kind: technical
+    indicator: endpoint.full_protection_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 26
+    title: Update software on a regular schedule
+    kind: technical
+    indicator: patch.on_time_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 27
+    title: Plan for security updates
+    kind: technical
+    indicator: vuln.kev_mean_days_to_fix
+    max_age_hours: 48
+    compliant: {at_most: 14}
+    partial: {at_most: 30}
+  - id: 28
+    title: Control the removable media
+    kind: organisational
+  - id: 29
+    title: Secure physical access to premises
+    kind: organisational
+  - id: 30
+    title: Secure the premises and equipment
+    kind: organisational
+  - id: 31
+    title: Define a backup policy
+    kind: technical
+    indicator: backup.days_since_restore_test
+    max_age_hours: 48
+    compliant: {at_most: 90}
+    partial: {at_most: 180}
+  - id: 32
+    title: Prepare a business continuity plan
+    kind: organisational
+  - id: 33
+    title: Activate and centralise logging
+    kind: technical
+    indicator: logging.active_sources_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 34
+    title: Define a log analysis process
+    kind: organisational
+  - id: 35
+    title: Prepare incident response
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: 36
+    title: Audit security regularly
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 37
+    title: Appoint a security officer
+    kind: organisational
+  - id: 38
+    title: Define a security policy
+    kind: organisational
+  - id: 39
+    title: Secure the websites and applications
+    kind: organisational
+  - id: 40
+    title: Control the exposure of the system to the Internet
+    kind: organisational
+  - id: 41
+    title: Review access rights
+    kind: organisational
+  - id: 42
+    title: Protect the data processed by external services
+    kind: organisational

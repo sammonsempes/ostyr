@@ -1,0 +1,334 @@
+framework: iso27001-2022
+version: 2022
+controls:
+  - id: A.5.1
+    title: Information security policies
+    kind: organisational
+  - id: A.5.2
+    title: Security roles and responsibilities
+    kind: organisational
+  - id: A.5.3
+    title: Segregation of duties
+    kind: organisational
+  - id: A.5.4
+    title: Management responsibilities
+    kind: organisational
+  - id: A.5.5
+    title: Contact with authorities
+    kind: organisational
+  - id: A.5.6
+    title: Contact with special interest groups
+    kind: organisational
+  - id: A.5.7
+    title: Threat intelligence
+    kind: organisational
+  - id: A.5.8
+    title: Security in project management
+    kind: organisational
+  - id: A.5.9
+    title: Inventory of assets
+    kind: technical
+    indicator: assets.owned_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.5.10
+    title: Acceptable use of assets
+    kind: organisational
+  - id: A.5.11
+    title: Return of assets
+    kind: organisational
+  - id: A.5.12
+    title: Classification of information
+    kind: organisational
+  - id: A.5.13
+    title: Labelling of information
+    kind: organisational
+  - id: A.5.14
+    title: Information transfer
+    kind: organisational
+  - id: A.5.15
+    title: Access control rules
+    kind: organisational
+  - id: A.5.16
+    title: Identity management
+    kind: organisational
+  - id: A.5.17
+    title: Authentication information
+    kind: organisational
+  - id: A.5.18
+    title: Access rights review
+    kind: technical
+    indicator: identity.inactive_accounts
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: A.5.19
+    title: Security in supplier relationships
+    kind: organisational
+  - id: A.5.20
+    title: Security in supplier agreements
+    kind: organisational
+  - id: A.5.21
+    title: ICT supply chain
+    kind: organisational
+  - id: A.5.22
+    title: Supplier service monitoring
+    kind: organisational
+  - id: A.5.23
+    title: Security of cloud services
+    kind: organisational
+  - id: A.5.24
+    title: Incident management planning
+    kind: organisational
+  - id: A.5.25
+    title: Assessment of security events
+    kind: organisational
+  - id: A.5.26
+    title: Incident response
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: A.5.27
+    title: Learning from incidents
+    kind: organisational
+  - id: A.5.28
+    title: Collection of evidence
+    kind: organisational
+  - id: A.5.29
+    title: Security during disruption
+    kind: organisational
+  - id: A.5.30
+    title: ICT readiness for continuity
+    kind: organisational
+  - id: A.5.31
+    title: Legal and contractual requirements
+    kind: organisational
+  - id: A.5.32
+    title: Intellectual property rights
+    kind: organisational
+  - id: A.5.33
+    title: Protection of records
+    kind: technical
+    indicator: logging.retention_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.5.34
+    title: Privacy and personal data protection
+    kind: organisational
+  - id: A.5.35
+    title: Independent review of security
+    kind: organisational
+  - id: A.5.36
+    title: Compliance with policies and standards
+    kind: organisational
+  - id: A.5.37
+    title: Documented operating procedures
+    kind: organisational
+  - id: A.6.1
+    title: Screening
+    kind: organisational
+  - id: A.6.2
+    title: Terms of employment
+    kind: organisational
+  - id: A.6.3
+    title: Awareness and training
+    kind: organisational
+  - id: A.6.4
+    title: Disciplinary process
+    kind: organisational
+  - id: A.6.5
+    title: Responsibilities after employment ends
+    kind: organisational
+  - id: A.6.6
+    title: Confidentiality agreements
+    kind: organisational
+  - id: A.6.7
+    title: Remote working
+    kind: organisational
+  - id: A.6.8
+    title: Security event reporting
+    kind: organisational
+  - id: A.7.1
+    title: Physical security perimeters
+    kind: organisational
+  - id: A.7.2
+    title: Physical entry
+    kind: organisational
+  - id: A.7.3
+    title: Securing offices and rooms
+    kind: organisational
+  - id: A.7.4
+    title: Physical security monitoring
+    kind: organisational
+  - id: A.7.5
+    title: Physical and environmental threats
+    kind: organisational
+  - id: A.7.6
+    title: Working in secure areas
+    kind: organisational
+  - id: A.7.7
+    title: Clear desk and clear screen
+    kind: organisational
+  - id: A.7.8
+    title: Equipment siting and protection
+    kind: organisational
+  - id: A.7.9
+    title: Assets off premises
+    kind: organisational
+  - id: A.7.10
+    title: Storage media
+    kind: organisational
+  - id: A.7.11
+    title: Supporting utilities
+    kind: organisational
+  - id: A.7.12
+    title: Cabling security
+    kind: organisational
+  - id: A.7.13
+    title: Equipment maintenance
+    kind: organisational
+  - id: A.7.14
+    title: Secure disposal or reuse of equipment
+    kind: organisational
+  - id: A.8.1
+    title: User endpoint devices
+    kind: technical
+    indicator: encryption.workstation_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.8.2
+    title: Privileged access rights
+    kind: technical
+    indicator: identity.privileged_without_mfa
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: A.8.3
+    title: Information access restriction
+    kind: organisational
+  - id: A.8.4
+    title: Access to source code
+    kind: organisational
+  - id: A.8.5
+    title: Secure authentication
+    kind: organisational
+  - id: A.8.6
+    title: Capacity management
+    kind: organisational
+  - id: A.8.7
+    title: Protection against malware
+    kind: technical
+    indicator: endpoint.full_protection_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.8.8
+    title: Management of technical vulnerabilities
+    kind: technical
+    indicator: vuln.kev_mean_days_to_fix
+    max_age_hours: 48
+    compliant: {at_most: 14}
+    partial: {at_most: 30}
+  - id: A.8.9
+    title: Configuration management
+    kind: technical
+    indicator: hardening.mean_score_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.8.10
+    title: Information deletion
+    kind: organisational
+  - id: A.8.11
+    title: Data masking
+    kind: organisational
+  - id: A.8.12
+    title: Data leakage prevention
+    kind: organisational
+  - id: A.8.13
+    title: Information backup
+    kind: technical
+    indicator: backup.days_since_restore_test
+    max_age_hours: 48
+    compliant: {at_most: 90}
+    partial: {at_most: 180}
+  - id: A.8.14
+    title: Redundancy of facilities
+    kind: organisational
+  - id: A.8.15
+    title: Logging
+    kind: technical
+    indicator: logging.active_sources_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.8.16
+    title: Monitoring activities
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.8.17
+    title: Clock synchronisation
+    kind: organisational
+  - id: A.8.18
+    title: Privileged utility programs
+    kind: organisational
+  - id: A.8.19
+    title: Software installation on systems
+    kind: technical
+    indicator: patch.on_time_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: A.8.20
+    title: Network security
+    kind: organisational
+  - id: A.8.21
+    title: Security of network services
+    kind: organisational
+  - id: A.8.22
+    title: Network segregation
+    kind: organisational
+  - id: A.8.23
+    title: Web filtering
+    kind: organisational
+  - id: A.8.24
+    title: Use of cryptography
+    kind: organisational
+  - id: A.8.25
+    title: Secure development lifecycle
+    kind: organisational
+  - id: A.8.26
+    title: Application security requirements
+    kind: organisational
+  - id: A.8.27
+    title: Secure system architecture
+    kind: organisational
+  - id: A.8.28
+    title: Secure coding
+    kind: organisational
+  - id: A.8.29
+    title: Security testing in development
+    kind: organisational
+  - id: A.8.30
+    title: Outsourced development
+    kind: organisational
+  - id: A.8.31
+    title: Separation of environments
+    kind: organisational
+  - id: A.8.32
+    title: Change management
+    kind: organisational
+  - id: A.8.33
+    title: Test information
+    kind: organisational
+  - id: A.8.34
+    title: Audit testing protection
+    kind: organisational

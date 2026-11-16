@@ -1,9 +1,9 @@
+use grc::builtin::resolve_framework;
 use grc::error::GrcError;
 use grc::evaluate::evaluate_framework;
 use grc::evidence::verify_evidence;
 use grc::export::{to_csv, to_json, to_markdown};
 use grc::inputs::{load_indicators, load_manual};
-use grc::load::load_framework;
 use grc::render::{write_report, write_risks};
 use grc::report::{build_report, ComplianceReport};
 use grc::risk::{load_risks, Register};
@@ -15,7 +15,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 
-const USAGE: &str = "usage: grc_evaluate <framework.yaml> <indicators.json> <manual.yaml> <tenant> <now RFC 3339> [<control>=<old digest>] [--risks <risks.yaml>] [--format markdown|csv|json] [--out <path>]";
+const USAGE: &str = "usage: grc_evaluate <framework.yaml|builtin:name> <indicators.json> <manual.yaml> <tenant> <now RFC 3339> [<control>=<old digest>] [--risks <risks.yaml>] [--format markdown|csv|json] [--out <path>]";
 
 
 const RISKS_FLAG: &str = "--risks";
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Err(USAGE.into())
     } else {
         let argument = |index: usize| arguments.get(index).map_or("", String::as_str);
-        let framework = load_framework(Path::new(argument(FRAMEWORK_ARGUMENT)))?;
+        let framework = resolve_framework(argument(FRAMEWORK_ARGUMENT))?;
         let indicators = load_indicators(Path::new(argument(INDICATORS_ARGUMENT)))?;
         let manual = load_manual(Path::new(argument(MANUAL_ARGUMENT)))?;
         let now = OffsetDateTime::parse(argument(REQUIRED_ARGUMENTS), &Rfc3339)?;

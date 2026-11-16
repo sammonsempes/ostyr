@@ -1,0 +1,105 @@
+framework: dora
+version: 2022
+controls:
+  - id: art5
+    title: ICT governance and organisation
+    kind: organisational
+  - id: art6
+    title: ICT risk management framework
+    kind: organisational
+  - id: art7
+    title: ICT systems, protocols and tools
+    kind: organisational
+  - id: art8
+    title: Identification of ICT assets
+    kind: technical
+    indicator: assets.owned_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art9
+    title: Protection and prevention
+    kind: technical
+    indicator: endpoint.full_protection_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art10
+    title: Detection of anomalies
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art11
+    title: Response and recovery
+    kind: organisational
+  - id: art12
+    title: Backup policies and restoration
+    kind: technical
+    indicator: backup.days_since_restore_test
+    max_age_hours: 48
+    compliant: {at_most: 90}
+    partial: {at_most: 180}
+  - id: art13
+    title: Learning and evolving
+    kind: organisational
+  - id: art14
+    title: Communication plans
+    kind: organisational
+  - id: art15
+    title: Further harmonisation of ICT risk tools
+    kind: organisational
+  - id: art16
+    title: Simplified ICT risk framework
+    kind: organisational
+  - id: art17
+    title: ICT incident management process
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: art18
+    title: Classification of incidents
+    kind: organisational
+  - id: art19
+    title: Reporting of major incidents
+    kind: organisational
+  - id: art20
+    title: Harmonised reporting content
+    kind: organisational
+  - id: art21
+    title: Centralised incident reporting
+    kind: organisational
+  - id: art22
+    title: Supervisory feedback
+    kind: organisational
+  - id: art23
+    title: Payment-related incidents
+    kind: organisational
+  - id: art24
+    title: General requirements for resilience testing
+    kind: organisational
+  - id: art25
+    title: Testing of ICT tools and systems
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art26
+    title: Advanced threat-led penetration testing
+    kind: organisational
+  - id: art27
+    title: Requirements for testers
+    kind: organisational
+  - id: art28
+    title: Principles for third-party ICT risk
+    kind: organisational
+  - id: art29
+    title: Assessment of ICT concentration risk
+    kind: organisational
+  - id: art30
+    title: Key contractual provisions
+    kind: organisational
