@@ -81,8 +81,8 @@ pub enum FetchError {
 pub enum GetError {
     #[error("deadline reached")]
     Expired,
-    #[error("request failed")]
-    Transport(#[source] ureq::Error),
+    #[error("request failed: {0}")]
+    Transport(TransportKind),
     #[error("status {0}")]
     Status(u16),
     #[error("reading the body failed")]
@@ -104,4 +104,33 @@ pub enum DiscoverError {
     TooMany { limit: usize },
     #[error("a member id is refused")]
     BadId,
+}
+
+
+/// What a failed connection tells: a fixed class, never text the peer chose (a rustls name error lists the certificate names raw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TransportKind {
+    #[error("the request timed out")]
+    Timeout,
+    #[error("the TLS handshake was refused")]
+    Tls,
+    #[error("the connection could not be made")]
+    Connect,
+    #[error("an I/O failure ({kind})")]
+    Io { kind: std::io::ErrorKind },
+    #[error("the HTTP exchange was refused")]
+    Protocol,
+}
+
+
+/// A certificate refusal is a ureq `Io` of kind `InvalidData`.
+pub fn transport_kind(error: &ureq::Error) -> TransportKind {
+    match error {
+        ureq::Error::Timeout(_) => TransportKind::Timeout,
+        ureq::Error::Tls(_) => TransportKind::Tls,
+        ureq::Error::Io(source) if source.kind() == std::io::ErrorKind::InvalidData => TransportKind::Tls,
+        ureq::Error::Io(source) => TransportKind::Io { kind: source.kind() },
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => TransportKind::Connect,
+        _ => TransportKind::Protocol,
+    }
 }

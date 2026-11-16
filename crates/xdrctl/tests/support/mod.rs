@@ -9,7 +9,8 @@ use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
 use core_auth::store::update_store_file;
-use rcgen::generate_simple_self_signed;
+use rcgen::string::Ia5String;
+use rcgen::{CertificateParams, KeyPair, SanType};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::net::SocketAddr;
@@ -171,12 +172,20 @@ pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<Socket
 
 
 pub fn start_live() -> Result<Live, TestError> {
+    start_live_named(vec![SanType::DnsName(Ia5String::try_from("localhost".to_owned())?)])
+}
+
+
+pub fn start_live_named(names: Vec<SanType>) -> Result<Live, TestError> {
     let dir = tempdir()?;
-    let generated = generate_simple_self_signed(vec!["localhost".to_owned()])?;
+    let signing_key = KeyPair::generate()?;
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params.subject_alt_names = names;
+    let certified = params.self_signed(&signing_key)?;
     let certificate = dir.path().join("server.pem");
     let key = dir.path().join("server.key");
-    fs::write(&certificate, generated.cert.pem())?;
-    fs::write(&key, generated.signing_key.serialize_pem())?;
+    fs::write(&certificate, certified.pem())?;
+    fs::write(&key, signing_key.serialize_pem())?;
     set_mode(&key, OWNER_ONLY)?;
     let key_file = dir.path().join("store.key");
     fs::write(&key_file, [KEY_FILL; KEY_BYTES])?;
