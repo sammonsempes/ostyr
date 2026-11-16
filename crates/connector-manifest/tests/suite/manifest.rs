@@ -5,7 +5,7 @@ use connector_manifest::error::ConnectorError;
 use connector_manifest::manifest::{in_grammar, parse_manifest, valid_file_name, valid_name, valid_scope};
 use connector_manifest::model::{
     Access, Approval, ConfigKind, MAX_ACTIONS, MAX_ALIASES, MAX_CONFIG_FIELDS, MAX_DEFAULT_BYTES, MAX_FILE_NAME_BYTES, MAX_MANIFEST_BYTES,
-    MAX_NAME_BYTES, MAX_RIGHTS, MAX_SCOPE_BYTES, MAX_TARGETS,
+    MAX_NAME_BYTES, MAX_RIGHTS, MAX_SCOPE_BYTES, MAX_TARGETS, MAX_VERSION_BYTES,
 };
 
 
@@ -280,5 +280,22 @@ fn the_grammar_functions_apply_their_length_and_character_rules() -> TestResult 
     assert!(!valid_file_name(".hidden"));
     assert!(!valid_file_name("a".repeat(MAX_FILE_NAME_BYTES + 1).as_str()));
     assert!(!in_grammar("", MAX_NAME_BYTES, char::is_alphanumeric, char::is_alphanumeric));
+    Ok(())
+}
+
+
+const VERSION_PREFIX: &str = "1.0.0-";
+
+
+#[test]
+fn a_version_over_the_cap_is_refused_before_parsing_and_one_at_the_cap_is_read() -> TestResult {
+    let long = format!("{VERSION_PREFIX}{}", "a".repeat(MAX_VERSION_BYTES + 1 - VERSION_PREFIX.len()));
+    assert_eq!(long.len(), MAX_VERSION_BYTES + 1);
+    assert!(matches!(
+        refused(&manifest_with("1.2.3", &long))?,
+        ConnectorError::Document { message, .. } if message.contains("`version`")
+    ));
+    let exact = format!("{VERSION_PREFIX}{}", "a".repeat(MAX_VERSION_BYTES - VERSION_PREFIX.len()));
+    assert_eq!(parse_manifest(manifest_with("1.2.3", &exact).as_bytes())?.version.to_string(), exact);
     Ok(())
 }

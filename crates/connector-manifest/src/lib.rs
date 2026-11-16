@@ -7,7 +7,7 @@ pub mod keys;
 pub mod manifest;
 pub mod model;
 pub mod package;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod scan;
 pub mod types;
 pub mod verify;

@@ -1,7 +1,7 @@
 mod common;
 mod keys;
 mod manifest;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod package;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod verify;

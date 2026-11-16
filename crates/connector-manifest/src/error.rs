@@ -25,6 +25,8 @@ pub enum ConnectorError {
     Symlink { path: String },
     #[error("{path}: not a regular file")]
     NotRegular { path: String },
+    #[error("{path}: file was replaced while it was opened")]
+    Swapped { path: String },
     #[error("{path}: file has more than one hard link")]
     HardLinked { path: String },
     #[error("{path}: file is larger than {max} bytes")]

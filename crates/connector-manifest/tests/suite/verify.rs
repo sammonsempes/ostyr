@@ -6,7 +6,8 @@ use connector_manifest::keys::parse_trusted_keys;
 use connector_manifest::model::{TrustedKeys, MANIFEST_NAME, MAX_KEY_FILE_BYTES, SIGNATURE_NAME};
 use connector_manifest::package::read_package;
 use connector_manifest::verify::{
-    check_package, parse_signature_file, read_document, sign_directory, sign_package, signed_document, verify_package, write_signature, MAGIC_LINE,
+    check_package, parse_signature_file, read_document, sign_directory, sign_package, signed_document, verify_package, write_signature,
+    write_signature_with, MAGIC_LINE,
 };
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{Signer, SECRET_KEY_LENGTH};
@@ -494,6 +495,54 @@ fn the_signature_file_is_world_readable() -> TestResult {
     assert_eq!(
         fs::metadata(directory.path().join(SIGNATURE_NAME))?.permissions().mode() & MODE_BITS,
         PUBLIC_MODE
+    );
+    Ok(())
+}
+
+
+fn failing_writer(_file: &mut fs::File, _bytes: &[u8]) -> io::Result<()> {
+    Err(io::Error::other("write interrupted"))
+}
+
+
+fn names(directory: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut found = fs::read_dir(directory)?
+        .map(|entry| entry.map(|item| item.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<String>, _>>()?;
+    found.sort();
+    Ok(found)
+}
+
+
+#[test]
+fn an_interrupted_sign_leaves_the_package_verifying_with_its_old_signature_and_no_extra_entry() -> TestResult {
+    let directory = signed_dir()?;
+    let before = names(directory.path())?;
+    let old = fs::read(directory.path().join(SIGNATURE_NAME))?;
+    assert!(matches!(
+        write_signature_with(failing_writer, directory.path(), "new"),
+        Err(ConnectorError::Io { .. })
+    ));
+    assert_eq!(names(directory.path())?, before);
+    assert_eq!(fs::read(directory.path().join(SIGNATURE_NAME))?, old);
+    assert!(verify_package(directory.path(), &trusted(NOT_AFTER)?, NOW).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_stale_temporary_file_next_to_the_package_does_not_block_it() -> TestResult {
+    let parent = tempfile::tempdir()?;
+    let directory = parent.path().join("package");
+    fs::create_dir(&directory)?;
+    put(&directory, MANIFEST_NAME, VALID_MANIFEST.as_bytes())?;
+    put(&directory, "main.py", CODE)?;
+    put(parent.path(), ".tmpSTALE", b"left by kill -9")?;
+    write_signature(&directory, &sign_package(&read_package(&directory)?, KEY_ID, &signing_key())?)?;
+    assert!(verify_package(&directory, &trusted(NOT_AFTER)?, NOW).is_ok());
+    assert_eq!(
+        names(&directory)?,
+        vec![SIGNATURE_NAME.to_owned(), MANIFEST_NAME.to_owned(), "main.py".to_owned()]
     );
     Ok(())
 }

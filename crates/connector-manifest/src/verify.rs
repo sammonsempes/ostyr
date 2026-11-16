@@ -3,10 +3,12 @@ use crate::keys::load_signing_key;
 use crate::manifest::{parse_manifest, valid_file_name, valid_name};
 use crate::model::{FileDigest, Package, SignatureFile, TrustedKeys, Verified, SIGNATURE_NAME};
 use crate::package::{io_at, io_error, read_package};
+use crate::types::WriteFn;
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{Signature, Signer, SigningKey, SIGNATURE_LENGTH};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 
@@ -21,6 +23,9 @@ pub const SHA256_HEX_LEN: usize = 64;
 
 
 pub const SIGNATURE_MODE: u32 = 0o644;
+
+
+pub const PARENT_DIRECTORY: &str = "..";
 
 
 /// The signed document: the magic line, then one `<path> <sha256> <size>` line per file, sorted by path, the signature file excluded.
@@ -170,16 +175,27 @@ pub fn make_public(_file: &std::fs::File) -> std::io::Result<()> {
 }
 
 
-/// Written to a temporary file in the directory then renamed over `connector.sig`, so a symlink there is replaced, never followed.
-pub fn write_signature(directory: &Path, text: &str) -> Result<(), ConnectorError> {
+/// The real writer, injected into `write_signature_with` so a test can fail the write after the temporary file exists.
+pub fn write_all_bytes(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    file.write_all(bytes)
+}
+
+
+/// Staged in the parent directory (never in the package, so an interrupted `sign` leaves no entry the file-name grammar refuses) and renamed over `connector.sig`.
+pub fn write_signature_with(writer: WriteFn, directory: &Path, text: &str) -> Result<(), ConnectorError> {
     let label = directory.display().to_string();
-    let mut staged = NamedTempFile::new_in(directory).map_err(io_at(&label))?;
-    staged.write_all(text.as_bytes()).map_err(io_at(&label))?;
+    let mut staged = NamedTempFile::new_in(directory.join(PARENT_DIRECTORY)).map_err(io_at(&label))?;
+    writer(staged.as_file_mut(), text.as_bytes()).map_err(io_at(&label))?;
     make_public(staged.as_file()).map_err(io_at(&label))?;
     staged
         .persist(directory.join(SIGNATURE_NAME))
         .map(|_| ())
         .map_err(|error| io_error(&label, error.error))
+}
+
+
+pub fn write_signature(directory: &Path, text: &str) -> Result<(), ConnectorError> {
+    write_signature_with(write_all_bytes, directory, text)
 }
 
 

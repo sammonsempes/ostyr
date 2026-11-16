@@ -46,6 +46,9 @@ pub const MAX_KEY_FILE_BYTES: u64 = 256;
 pub const MAX_SIGNATURE_BYTES: u64 = 131_072;
 
 
+pub const MAX_VERSION_BYTES: usize = 64;
+
+
 pub const MAX_NAME_BYTES: usize = 64;
 
 
@@ -117,6 +120,7 @@ pub struct ConfigField {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub name: String,
+    #[serde(deserialize_with = "crate::bounded::version")]
     pub version: Version,
     pub publisher: String,
     #[serde(deserialize_with = "crate::bounded::rights")]
