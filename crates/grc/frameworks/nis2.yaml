@@ -1,0 +1,65 @@
+framework: nis2
+version: 2022
+controls:
+  - id: art21-2-a
+    title: Risk analysis and security policies
+    kind: organisational
+  - id: art21-2-b
+    title: Incident handling
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: art21-2-c
+    title: Business continuity and backups
+    kind: technical
+    indicator: backup.days_since_restore_test
+    max_age_hours: 48
+    compliant: {at_most: 90}
+    partial: {at_most: 180}
+  - id: art21-2-d
+    title: Supply chain security
+    kind: organisational
+  - id: art21-2-e
+    title: Secure acquisition, development and vulnerability handling
+    kind: technical
+    indicator: vuln.kev_mean_days_to_fix
+    max_age_hours: 48
+    compliant: {at_most: 14}
+    partial: {at_most: 30}
+  - id: art21-2-f
+    title: Assessing the effectiveness of measures
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art21-2-g
+    title: Cyber hygiene and training
+    kind: technical
+    indicator: hardening.mean_score_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art21-2-h
+    title: Cryptography and encryption policy
+    kind: technical
+    indicator: encryption.workstation_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art21-2-i
+    title: Human resources, access control and asset management
+    kind: technical
+    indicator: assets.owned_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art21-2-j
+    title: Multi-factor authentication and secure communications
+    kind: technical
+    indicator: identity.privileged_without_mfa
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}

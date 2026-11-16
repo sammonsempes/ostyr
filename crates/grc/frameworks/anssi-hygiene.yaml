@@ -1,0 +1,177 @@
+framework: anssi-hygiene
+version: 2
+controls:
+  - id: 1
+    title: Train the operational teams in information security
+    kind: organisational
+  - id: 2
+    title: Raise users awareness of basic security practices
+    kind: organisational
+  - id: 3
+    title: Control the risks of IT outsourcing
+    kind: organisational
+  - id: 4
+    title: Identify the most sensitive data and servers and keep a network map
+    kind: technical
+    indicator: assets.owned_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 5
+    title: Keep an exhaustive inventory of privileged accounts
+    kind: organisational
+  - id: 6
+    title: Organise user arrival, departure and role change procedures
+    kind: technical
+    indicator: identity.inactive_accounts
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: 7
+    title: Allow only controlled devices onto the network
+    kind: organisational
+  - id: 8
+    title: Name every person accessing the system and separate user and admin roles
+    kind: organisational
+  - id: 9
+    title: Grant the right permissions on sensitive resources
+    kind: organisational
+  - id: 10
+    title: Define and check password choice and sizing rules
+    kind: organisational
+  - id: 11
+    title: Protect passwords stored on systems
+    kind: organisational
+  - id: 12
+    title: Change default credentials on devices and services
+    kind: organisational
+  - id: 13
+    title: Prefer strong authentication where possible
+    kind: technical
+    indicator: identity.privileged_without_mfa
+    max_age_hours: 48
+    compliant: {at_most: 0}
+    partial: {at_most: 5}
+  - id: 14
+    title: Set a minimum security level across the whole fleet
+    kind: technical
+    indicator: hardening.mean_score_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 15
+    title: Protect against threats from removable media
+    kind: organisational
+  - id: 16
+    title: Use central management to harmonise security policies
+    kind: technical
+    indicator: endpoint.full_protection_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 17
+    title: Enable and configure the local firewall of workstations
+    kind: organisational
+  - id: 18
+    title: Encrypt sensitive data sent over the Internet
+    kind: organisational
+  - id: 19
+    title: Segment the network and partition the zones
+    kind: organisational
+  - id: 20
+    title: Secure Wi-Fi access networks and separate usages
+    kind: organisational
+  - id: 21
+    title: Use secure protocols whenever they exist
+    kind: organisational
+  - id: 22
+    title: Provide a secure Internet access gateway
+    kind: organisational
+  - id: 23
+    title: Isolate Internet-facing services from the rest of the system
+    kind: organisational
+  - id: 24
+    title: Protect the corporate mailbox
+    kind: organisational
+  - id: 25
+    title: Secure dedicated network links with partners
+    kind: organisational
+  - id: 26
+    title: Control and protect access to server rooms and technical premises
+    kind: organisational
+  - id: 27
+    title: Forbid Internet access from administration workstations and servers
+    kind: organisational
+  - id: 28
+    title: Use a dedicated partitioned network for administration
+    kind: organisational
+  - id: 29
+    title: Limit administrator rights on workstations to operational need
+    kind: organisational
+  - id: 30
+    title: Physically secure mobile devices
+    kind: organisational
+  - id: 31
+    title: Encrypt sensitive data, notably on easily lost hardware
+    kind: technical
+    indicator: encryption.workstation_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 32
+    title: Secure the network connection of mobile workers
+    kind: organisational
+  - id: 33
+    title: Adopt dedicated security policies for mobile devices
+    kind: organisational
+  - id: 34
+    title: Define an update policy for system components
+    kind: technical
+    indicator: patch.on_time_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 35
+    title: Anticipate end of software support and limit dependencies
+    kind: technical
+    indicator: vuln.kev_mean_days_to_fix
+    max_age_hours: 48
+    compliant: {at_most: 14}
+    partial: {at_most: 30}
+  - id: 36
+    title: Enable and configure logs of the most important components
+    kind: technical
+    indicator: logging.active_sources_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 37
+    title: Define and apply a backup policy for critical components
+    kind: technical
+    indicator: backup.days_since_restore_test
+    max_age_hours: 48
+    compliant: {at_most: 90}
+    partial: {at_most: 180}
+  - id: 38
+    title: Run regular security checks and audits and apply corrective actions
+    kind: technical
+    indicator: detection.test_success_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: 39
+    title: Appoint an information security officer and make them known
+    kind: organisational
+  - id: 40
+    title: Define a security incident handling procedure
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: 41
+    title: Carry out a formal risk analysis
+    kind: organisational
+  - id: 42
+    title: Prefer products and services qualified by ANSSI
+    kind: organisational

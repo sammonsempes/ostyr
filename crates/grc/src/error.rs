@@ -14,6 +14,8 @@ pub enum GrcError {
         line: usize,
         column: usize,
     },
+    #[error("unknown built-in framework {name:?}")]
+    UnknownBuiltin { name: String },
     #[error("{file}: {reason}")]
     Invalid { file: String, reason: String },
     #[error(transparent)]
