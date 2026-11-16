@@ -1,10 +1,11 @@
+use axum::Router;
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::example::{example_access, example_document, example_router};
 use core_api::model::{ApiConfig, Limits, TlsFiles};
 use core_api::routes::build_router;
 use core_api::server::serve;
 use core_api::state::{build_state_from_files, MAX_TRACKED_ATTEMPTS, MAX_TRACKED_SOURCES, RATE_MAX_REQUESTS, RATE_WINDOW_SECONDS};
-use core_api::types::{ServerHandle, SharedState};
+use core_api::types::{AccessTable, ServerHandle, SharedState};
 use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
+use utoipa::openapi::OpenApi as OpenApiDocument;
 use xdrctl::cli::run_reporting;
 use xdrctl::types::SendFn;
 
@@ -144,11 +146,29 @@ pub fn mode_of(_path: &Path) -> Result<u32, TestError> {
 }
 
 
-pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<SocketAddr>) -> TestResult {
+pub struct Routes {
+    pub role: &'static str,
+    pub router: Router<SharedState>,
+    pub access: AccessTable,
+    pub documents: Vec<OpenApiDocument>,
+}
+
+
+pub fn example_routes() -> Routes {
+    Routes {
+        role: "reader",
+        router: example_router(),
+        access: example_access(),
+        documents: vec![example_document()],
+    }
+}
+
+
+pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<SocketAddr>, routes: Routes) -> TestResult {
     let account = Account {
         username: USER.to_owned(),
         password_hash: hash_password(PASSWORD, os_random)?,
-        roles: ["reader".to_owned()].into(),
+        roles: [routes.role.to_owned()].into(),
         totp: None,
         sessions_valid_after: None,
     };
@@ -157,8 +177,8 @@ pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<Socket
         Ok(())
     })?
     .saved?;
-    let state: SharedState = Arc::new(build_state_from_files(&config, example_access(), vec![example_document()])?);
-    let router = build_router(state, example_router());
+    let state: SharedState = Arc::new(build_state_from_files(&config, routes.access, routes.documents)?);
+    let router = build_router(state, routes.router);
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
         let running = handle.clone();
@@ -172,11 +192,21 @@ pub fn run_server(config: ApiConfig, handle: ServerHandle, sender: Sender<Socket
 
 
 pub fn start_live() -> Result<Live, TestError> {
-    start_live_named(vec![SanType::DnsName(Ia5String::try_from("localhost".to_owned())?)])
+    start_live_with(example_routes())
+}
+
+
+pub fn start_live_with(routes: Routes) -> Result<Live, TestError> {
+    start_live_custom(vec![SanType::DnsName(Ia5String::try_from("localhost".to_owned())?)], routes)
 }
 
 
 pub fn start_live_named(names: Vec<SanType>) -> Result<Live, TestError> {
+    start_live_custom(names, example_routes())
+}
+
+
+pub fn start_live_custom(names: Vec<SanType>, routes: Routes) -> Result<Live, TestError> {
     let dir = tempdir()?;
     let signing_key = KeyPair::generate()?;
     let mut params = CertificateParams::new(Vec::<String>::new())?;
@@ -219,7 +249,7 @@ pub fn start_live_named(names: Vec<SanType>) -> Result<Live, TestError> {
     let handle = ServerHandle::new();
     let (sender, receiver) = channel();
     let running = handle.clone();
-    thread::spawn(move || run_server(config, running, sender).map_err(|error| error.to_string()));
+    thread::spawn(move || run_server(config, running, sender, routes).map_err(|error| error.to_string()));
     let address = receiver.recv()?;
     Ok(Live {
         dir,

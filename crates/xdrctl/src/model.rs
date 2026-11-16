@@ -65,6 +65,10 @@ pub enum Command {
         #[command(subcommand)]
         action: CasesCommand,
     },
+    Assets {
+        #[command(subcommand)]
+        action: AssetsCommand,
+    },
 }
 
 
@@ -106,6 +110,70 @@ pub enum AlertsCommand {
     },
     /// Shows one alert by id.
     Show { id: String },
+}
+
+
+#[derive(Subcommand)]
+pub enum AssetsCommand {
+    /// Lists assets ordered by id; the next cursor is printed when there are more.
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Shows one asset by id.
+    Show { id: String },
+}
+
+
+#[derive(Deserialize)]
+pub struct AssetCountsView {
+    pub keys: u64,
+    pub attributes: u64,
+    pub open_conflicts: u64,
+}
+
+
+#[derive(Deserialize)]
+pub struct AssetSummaryView {
+    pub id: String,
+    pub kind: String,
+    pub lifecycle: String,
+    pub version: u64,
+    pub counts: AssetCountsView,
+}
+
+
+#[derive(Deserialize)]
+pub struct AssetKeyView {
+    pub key: String,
+    pub value: String,
+}
+
+
+#[derive(Deserialize)]
+pub struct AssetAttributeView {
+    pub name: String,
+    pub value: String,
+    pub source: String,
+}
+
+
+#[derive(Deserialize)]
+pub struct AssetDetailView {
+    #[serde(flatten)]
+    pub summary: AssetSummaryView,
+    pub keys: Vec<AssetKeyView>,
+    pub attributes: Vec<AssetAttributeView>,
+    pub truncated: bool,
+}
+
+
+#[derive(Deserialize)]
+pub struct AssetPageView {
+    pub items: Vec<AssetSummaryView>,
+    pub next_cursor: Option<String>,
 }
 
 
