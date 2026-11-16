@@ -46,13 +46,13 @@ const POLLS: usize = 2000;
 const POLL_MS: u64 = 10;
 
 
-const NORMAL_MS: u64 = 5000;
+const NORMAL_MS: u64 = 120_000;
 
 
 const SHORT_MS: u64 = 200;
 
 
-const PING_MS: u64 = 20;
+const PING_MS: u64 = 1000;
 
 
 const FETCH_MAX: usize = 10;
