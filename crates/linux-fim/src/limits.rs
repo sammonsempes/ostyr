@@ -1,0 +1,49 @@
+use crate::model::Limits;
+
+
+pub const SUPPORTED_VERSION: u32 = 1;
+
+
+pub const MAX_TABLE_BYTES: usize = 65_536;
+
+
+pub const MAX_ROLES: usize = 32;
+
+
+pub const MAX_WATCHED: usize = 64;
+
+
+pub const MAX_HONEYTOKENS: usize = 32;
+
+
+pub const MAX_PATH_BYTES: usize = 255;
+
+
+pub const MAX_ROLE_NAME_BYTES: usize = 32;
+
+
+pub const MAX_SELECTOR_VALUES: usize = 8;
+
+
+pub const MAX_EVENT_LINE_BYTES: usize = 32_768;
+
+
+pub const MAX_FIELD_BYTES: usize = 1024;
+
+
+pub const POLICY_PREFIX: &str = "ostyr-fim-";
+
+
+pub const UNKNOWN_PROCESS: &str = "unknown";
+
+
+pub fn default_limits() -> Limits {
+    Limits {
+        max_table_bytes: MAX_TABLE_BYTES,
+        max_roles: MAX_ROLES,
+        max_watched: MAX_WATCHED,
+        max_honeytokens: MAX_HONEYTOKENS,
+        max_path_bytes: MAX_PATH_BYTES,
+        max_selector_values: MAX_SELECTOR_VALUES,
+    }
+}

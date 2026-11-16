@@ -1,0 +1,119 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fim-server
+spec:
+  kprobes:
+  - call: security_file_permission
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: int
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+  - call: security_path_truncate
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_file_truncate
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_path_mknod
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d
+        - /etc/systemd/system
+        - /usr/bin
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
