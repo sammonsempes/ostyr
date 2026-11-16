@@ -288,6 +288,7 @@ fn settings_collect_feed_ttls() -> TestResult {
         default_confidence: CONFIDENCE,
         tlp: Tlp::Amber,
         ttl_seconds: ttl,
+        taxii: None,
     };
     let built = settings_for("acme", &[feed("a", Some(1)), feed("b", None)]);
     assert_eq!(built.feed_ttl_seconds, BTreeMap::from([("a".to_owned(), 1)]));

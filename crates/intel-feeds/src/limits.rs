@@ -115,3 +115,39 @@ pub const EMBEDDING_BASES: [u128; 4] = [
     0x0064_ff9b_0000_0000_0000_0000_0000_0000,
     0x0064_ff9b_0001_0000_0000_0000_0000_0000,
 ];
+
+
+pub const MAX_TAXII_OBJECTS_PER_PAGE: usize = 1_000;
+
+
+pub const MAX_TAXII_NEXT_BYTES: usize = 1_024;
+
+
+pub const MAX_TAXII_COLLECTION_BYTES: usize = 64;
+
+
+pub const MAX_TAXII_HEADER_BYTES: usize = 64;
+
+
+pub const DEFAULT_TAXII_MAX_PAGES: u32 = 10;
+
+
+pub const LIMIT_TAXII_MAX_PAGES: u32 = 100;
+
+
+pub const DEFAULT_TAXII_PAGE_LIMIT: u32 = 500;
+
+
+pub const LIMIT_TAXII_PAGE_LIMIT: u32 = 1_000;
+
+
+pub const MAX_TAXII_IOCS: usize = 250_000;
+
+
+pub const CURSOR_SKEW_SECONDS: i64 = 300;
+
+
+pub const TAXII_ACCEPT: &str = "application/taxii+json;version=2.1";
+
+
+pub const TAXII_DATE_HEADER: &str = "X-TAXII-Date-Added-Last";
