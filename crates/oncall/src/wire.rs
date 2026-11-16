@@ -101,7 +101,9 @@ pub fn pump_read(conn: &mut ClientConnection, tcp: &mut TcpStream, deadline: Ins
     if conn.read_tls(tcp).map_err(io_error)? == 0 {
         Err(TransportError::Closed)
     } else {
-        conn.process_new_packets().map(|_state| ()).map_err(TransportError::Tls)
+        conn.process_new_packets()
+            .map(|_state| ())
+            .map_err(|_peer_error| TransportError::Handshake)
     }
 }
 

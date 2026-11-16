@@ -119,7 +119,7 @@ pub fn root_store(settings: &TransportSettings) -> Result<RootCertStore, Transpo
             } else {
                 certificates
                     .into_iter()
-                    .try_for_each(|certificate| roots.add(certificate).map_err(TransportError::Tls))
+                    .try_for_each(|certificate| roots.add(certificate).map_err(TransportError::TlsSetup))
             }
         }
         None => {
@@ -134,7 +134,7 @@ pub fn root_store(settings: &TransportSettings) -> Result<RootCertStore, Transpo
 pub fn tls_plan(settings: &TransportSettings, smtp: &SmtpSettings) -> Result<TlsPlan, TransportError> {
     let config = ClientConfig::builder_with_provider(Arc::new(default_provider()))
         .with_safe_default_protocol_versions()
-        .map_err(TransportError::Tls)?
+        .map_err(TransportError::TlsSetup)?
         .with_root_certificates(root_store(settings)?)
         .with_no_client_auth();
     let name = ServerName::try_from(smtp.host.clone()).map_err(TransportError::InvalidHost)?;
@@ -210,7 +210,7 @@ pub fn offers_plain(capabilities: &Reply) -> bool {
 
 /// Starts TLS on the open socket: the handshake runs under the total deadline and the certificate is checked against the plan.
 pub fn upgrade(link: &mut Link, plan: &TlsPlan) -> Result<(), TransportError> {
-    let mut connection = ClientConnection::new(plan.config.clone(), plan.name.clone()).map_err(TransportError::Tls)?;
+    let mut connection = ClientConnection::new(plan.config.clone(), plan.name.clone()).map_err(TransportError::TlsSetup)?;
     handshake(&mut connection, &mut link.tcp, link.deadline, link.clock)?;
     link.tls = Some(connection);
     Ok(())

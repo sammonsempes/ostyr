@@ -1,5 +1,5 @@
 use crate::access::check_read_only;
-use crate::error::{FetchError, ParseError};
+use crate::error::{transport_kind, FetchError, ParseError};
 use crate::inventory::{build_inventory, Inventory};
 use crate::limits::{Limits, PageLimits};
 use crate::model::{NodeItem, Page, PodItem};
@@ -170,7 +170,7 @@ pub fn get_reply(session: &mut Session, path: &str, query: &[(&str, &str)], cap:
         .timeout_global(Some(left))
         .build()
         .call()
-        .map_err(FetchError::Transport)?;
+        .map_err(|error| FetchError::Transport(transport_kind(&error)))?;
     read_reply(session, response, cap)
 }
 
@@ -187,7 +187,7 @@ pub fn post_reply(session: &mut Session, path: &str, body: &str, cap: u64) -> Re
         .timeout_global(Some(left))
         .build()
         .send(body)
-        .map_err(FetchError::Transport)?;
+        .map_err(|error| FetchError::Transport(transport_kind(&error)))?;
     read_reply(session, response, cap)
 }
 

@@ -221,14 +221,14 @@ fn a_certificate_outside_the_configured_ca_or_the_system_roots_is_refused() -> T
     )?;
     assert!(matches!(
         send_one(&wrong_ca.settings, &mail_channel(RECIPIENT, None), &message()),
-        Err(TransportError::Tls(_))
+        Err(TransportError::Handshake)
     ));
     assert!(relay.done.join().is_ok());
     let system_roots = spawn_relay(server_pki.server_config.clone(), Mode::Implicit, None)?;
     let no_ca = make_fixture(None, Some(smtp_settings(system_roots.port, SmtpTls::Implicit, None)), TIMEOUT_MILLIS)?;
     assert!(matches!(
         send_one(&no_ca.settings, &mail_channel(RECIPIENT, None), &message()),
-        Err(TransportError::Tls(_))
+        Err(TransportError::Handshake)
     ));
     assert!(system_roots.done.join().is_ok());
     Ok(())
@@ -619,7 +619,7 @@ fn a_missing_or_unusable_ca_file_is_refused() -> TestResult {
     )?;
     assert!(matches!(
         send_one(&junk.settings, &mail_channel(RECIPIENT, None), &message()),
-        Err(TransportError::Tls(_))
+        Err(TransportError::TlsSetup(_))
     ));
     let empty = make_fixture(
         Some("no certificate here\n"),

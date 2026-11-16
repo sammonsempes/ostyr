@@ -1,4 +1,4 @@
-use crate::error::TransportError;
+use crate::error::{transport_kind, TransportError};
 use crate::load::read_file_limited;
 use crate::model::{Channel, ChannelKind, Message};
 use crate::secret::read_secret;
@@ -109,7 +109,7 @@ pub fn post(agent: &Agent, url: &Url, payload: &Payload) -> Result<(), Transport
         .iter()
         .fold(request, |pending, (name, value)| pending.header(*name, value.as_str()))
         .send(payload.body.as_str())
-        .map_err(TransportError::Request)?;
+        .map_err(|error| TransportError::Request(transport_kind(&error)))?;
     if response.status().is_success() {
         Ok(())
     } else {
