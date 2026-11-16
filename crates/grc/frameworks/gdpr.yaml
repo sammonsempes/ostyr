@@ -1,0 +1,20 @@
+framework: gdpr
+version: 2016
+controls:
+  - id: art32
+    title: Security of processing
+    kind: technical
+    indicator: encryption.workstation_ratio
+    max_age_hours: 48
+    compliant: {at_least: 0.95}
+    partial: {at_least: 0.8}
+  - id: art33
+    title: Breach notification to the authority
+    kind: technical
+    indicator: incident.mean_hours_to_close
+    max_age_hours: 48
+    compliant: {at_most: 72}
+    partial: {at_most: 168}
+  - id: art34
+    title: Breach communication to data subjects
+    kind: organisational
