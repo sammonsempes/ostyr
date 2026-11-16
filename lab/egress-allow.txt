@@ -22,3 +22,9 @@ objects.githubusercontent.com
 release-assets.githubusercontent.com
 pypi.org
 files.pythonhosted.org
+packages.mozilla.org
+dl.google.com
+clients2.google.com
+addons.mozilla.org
+clients2.googleusercontent.com
+.gvt1.com

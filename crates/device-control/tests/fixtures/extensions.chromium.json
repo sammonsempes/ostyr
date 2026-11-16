@@ -1,0 +1,17 @@
+{
+  "ExtensionSettings": {
+    "*": {
+      "installation_mode": "blocked"
+    },
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+      "installation_mode": "blocked"
+    },
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+      "installation_mode": "force_installed",
+      "update_url": "https://clients2.google.com/service/update2/crx"
+    },
+    "cjpalhdlnbpafiamejdnhcphjbkeiagm": {
+      "installation_mode": "allowed"
+    }
+  }
+}

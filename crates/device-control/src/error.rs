@@ -1,4 +1,4 @@
-use crate::limits::{MAX_REASON_CHARS, MAX_RULES};
+use crate::limits::{MAX_EXTENSIONS, MAX_REASON_CHARS, MAX_RULES};
 use core_config::error::ConfigError;
 use thiserror::Error;
 
@@ -21,6 +21,18 @@ pub enum ValidationError {
     ProductWithoutVendor,
     #[error("a serial number is allowed on an allow rule only")]
     SerialOnBlock,
+    #[error("not a valid Chromium extension id: exactly 32 characters a to p")]
+    ChromiumId,
+    #[error("not a valid Firefox extension id")]
+    FirefoxId,
+    #[error("not a valid update URL: https only, ASCII host and path, at most 2048 bytes")]
+    UpdateUrl,
+    #[error("a force entry needs an update_url")]
+    UpdateUrlRequired,
+    #[error("update_url is allowed on a force entry only")]
+    UpdateUrlForbidden,
+    #[error("duplicate extension for the same browser and id")]
+    DuplicateExtension,
 }
 
 
@@ -36,11 +48,20 @@ pub enum PolicyError {
     },
     #[error("{file}: {count} rules and exceptions, more than {MAX_RULES}")]
     TooManyRules { file: String, count: usize },
+    #[error("{file}: {count} extensions, more than {MAX_EXTENSIONS}")]
+    TooManyExtensions { file: String, count: usize },
+    #[error("{file}: extension {index}: {source}")]
+    Extension {
+        file: String,
+        index: usize,
+        #[source]
+        source: ValidationError,
+    },
 }
 
 
 #[derive(Debug, Error)]
 pub enum RenderError {
-    #[error("USBGuard has no audit mode: render only an enforce policy")]
+    #[error("no audit mode in a rule file or browser policy: render only an enforce policy")]
     AuditMode,
 }
