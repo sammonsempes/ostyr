@@ -2431,9 +2431,11 @@ version = "0.0.0"
 dependencies = [
  "core-config",
  "core-pg",
+ "csv",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sla-report",
  "tempfile",
  "thiserror 2.0.21",
  "time",

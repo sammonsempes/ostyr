@@ -24,4 +24,10 @@ pub enum GrcError {
     Duplicate,
     #[error("the evidence digest does not match its fields")]
     EvidenceMismatch,
+    #[error("cannot write the CSV report")]
+    Csv(#[from] csv::Error),
+    #[error("cannot write the report")]
+    Io(#[from] std::io::Error),
+    #[error("cannot write the JSON report")]
+    Serialize(#[from] serde_json::Error),
 }
