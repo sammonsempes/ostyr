@@ -41,14 +41,19 @@ pub fn deleted(previous: &Listing, current: &Listing, declarations: &Declaration
 
 
 pub fn below_floor(current: &Listing, declarations: &Declarations) -> Option<Finding> {
-    let count = current.snapshots.len();
+    below_floor_named(&current.repository, current.snapshots.len(), declarations)
+}
+
+
+/// The floor declared for `repository` against a snapshot `count`; a restic listing is keyed on its config id, its floor on the declared name.
+pub fn below_floor_named(repository: &str, count: usize, declarations: &Declarations) -> Option<Finding> {
     declarations
         .repositories
         .iter()
-        .find(|entry| entry.repository == current.repository && count < entry.expected_min_snapshots)
+        .find(|entry| entry.repository == repository && count < entry.expected_min_snapshots)
         .map(|entry| Finding {
             tenant: declarations.tenant.clone(),
-            repository: current.repository.clone(),
+            repository: repository.to_owned(),
             kind: FindingKind::RetentionBelowFloor {
                 count,
                 floor: entry.expected_min_snapshots,

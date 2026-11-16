@@ -6,5 +6,7 @@ pub mod declarations;
 pub mod error;
 pub mod model;
 pub mod parse;
+#[cfg(unix)]
+pub mod restic;
 pub mod text;
 pub mod types;

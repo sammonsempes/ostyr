@@ -580,10 +580,13 @@ version = "0.0.0"
 dependencies = [
  "core-config",
  "core-pg",
+ "net-topology",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tracing",
  "unicode-general-category",
 ]
 

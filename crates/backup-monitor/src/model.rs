@@ -119,6 +119,17 @@ pub struct CriticalHost {
 pub struct RepositoryFloor {
     pub repository: String,
     pub expected_min_snapshots: usize,
+    #[serde(default)]
+    pub restic: Option<ResticSource>,
+}
+
+
+/// Where one restic repository lives and the file holding its password; both are checked when the run is planned, not when the file loads.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResticSource {
+    pub location: String,
+    pub password_file: String,
 }
 
 
