@@ -1,0 +1,645 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fim-server
+spec:
+  kprobes:
+  - call: security_file_permission
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: int
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+  - call: security_path_truncate
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_file_truncate
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_path_mknod
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d
+        - /etc/systemd/system
+        - /usr/bin
+  - call: security_mmap_file
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: uint32
+    - index: 2
+      type: uint32
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+      - index: 2
+        operator: Mask
+        values:
+        - "1"
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      - index: 2
+        operator: Mask
+        values:
+        - "1"
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimn-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws
+        - /var
+        - /var/backups
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 2
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fima-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc
+        - /root
+        - /root/.ssh
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc
+        - /root
+        - /root/.ssh
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc
+        - /root
+        - /root/.ssh
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimd-server
+spec:
+  kprobes:
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_path_chmod
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_path_chown
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimx-server
+spec:
+  kprobes:
+  - call: security_inode_setxattr
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_inode_removexattr
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_inode_set_acl
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+  - call: security_inode_remove_acl
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimt-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+        - /root
+        - /root/.aws
+        - /root/.ssh
+        - /var
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+        - /root
+        - /root/.aws
+        - /root/.ssh
+        - /var
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /var/backups
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root
+        - /root/.aws
+        - /root/.ssh
+        - /var
+        - /var/backups
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 2
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
