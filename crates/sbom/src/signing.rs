@@ -7,6 +7,7 @@ use crate::model::{DocumentMeta, DocumentSignature, Limits, Sbom, SbomDiff, Sign
 use crate::parse::parse_document;
 use crate::types::{SignerFn, TrustedKeys};
 use core_audit::log::check_private;
+use core_config::secret_file::open_secret;
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{Signature, Signer, SigningKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH};
 use sha2::{Digest, Sha256};
@@ -201,7 +202,7 @@ pub fn read_private_text(file: File, limit: u64, capacity: usize) -> Result<Zero
 
 
 pub fn load_private_text(path: &Path, limit: u64, capacity: usize) -> Result<Zeroizing<String>, SigningError> {
-    read_private_text(open_regular(path)?, limit, capacity)
+    read_private_text(open_secret(path)?, limit, capacity)
 }
 
 
@@ -230,5 +231,5 @@ pub fn non_blocking(options: &mut OpenOptions) -> &mut OpenOptions {
 
 
 pub fn load_signing_key(path: &Path) -> Result<SigningKey, SigningError> {
-    read_signing_key(open_regular(path)?)
+    read_signing_key(open_secret(path)?)
 }

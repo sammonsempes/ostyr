@@ -7,7 +7,7 @@ use crate::server::{bind_socket, check_transport, load_tls, retire_socket, spawn
 use crate::state::{check_store_key, lock_auth, previous_key_path, read_compromised_digested, unopened_secrets};
 use crate::types::{LogLevelHandle, PendingAudit, PendingKey, PendingSockets, ServerHandle, SharedState, WatchGuard};
 use axum_server::tls_rustls::RustlsConfig;
-use core_audit::log::{append_declared, check_private, open_file_log};
+use core_audit::log::{append_declared, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::read_key_file;
 use core_auth::error::AuthError;
@@ -19,6 +19,7 @@ use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
 use core_config::reload::{module_state, open_engine, reload_entry, ReloadContext, ReloadEngine, Subscriber, RELOAD_DECLARED_KEYS};
+use core_config::secret_file::open_secret as open_secret_file;
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use core_config::watch::watch_files;
 use data_encoding::HEXLOWER;
@@ -26,7 +27,6 @@ use same_file::Handle;
 use secrecy::{ExposeSecret, SecretSlice};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -268,8 +268,7 @@ pub fn apply_log_level(handle: &LogLevelHandle, settings: &ApiSettings) {
 
 /// Opens the store once and checks (mode) and parses that very handle; a missing file is an error here, never an empty store.
 pub fn read_store_handle(path: &Path) -> Result<(AccountMap, CredentialMap), BoxError> {
-    let file = File::open(path)?;
-    check_private(&file)?;
+    let file = open_secret_file(path)?;
     load_store(file).map_err(BoxError::from)
 }
 

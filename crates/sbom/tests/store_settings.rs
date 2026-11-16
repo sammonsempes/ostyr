@@ -4,6 +4,7 @@ mod types;
 
 
 use core_config::load::load_file;
+use core_config::secret_file::SecretFileError;
 use sbom::error::{SigningError, StoreError};
 use sbom::model::HttpResponse;
 use sbom::store_settings::{open_bucket, open_store, read_credential, validate_store_settings, StoreSettings};
@@ -136,7 +137,10 @@ fn credentials_follow_the_key_file_pattern() -> TestResult {
     write_private(&path, b"  AKID \n")?;
     assert_eq!(read_credential(&path)?.as_str(), "AKID");
     fs::set_permissions(&path, fs::Permissions::from_mode(OPEN_MODE))?;
-    assert!(matches!(read_credential(&path), Err(StoreError::Signing(SigningError::KeyNotPrivate(_)))));
+    assert!(matches!(
+        read_credential(&path),
+        Err(StoreError::Signing(SigningError::KeyFile(SecretFileError::Mode { .. })))
+    ));
     write_private(&path, b" \n")?;
     assert!(matches!(read_credential(&path), Err(StoreError::BadCredential)));
     write_private(&path, b"AK\x07ID")?;
@@ -145,7 +149,13 @@ fn credentials_follow_the_key_file_pattern() -> TestResult {
     assert!(matches!(read_credential(&path), Err(StoreError::Signing(SigningError::KeyTooLarge))));
     assert!(matches!(
         read_credential(directory.path()),
-        Err(StoreError::Signing(SigningError::KeyNotRegular))
+        Err(StoreError::Signing(SigningError::KeyFile(SecretFileError::NotRegular { .. })))
+    ));
+    let link = directory.path().join("cred.link");
+    std::os::unix::fs::symlink(&path, &link)?;
+    assert!(matches!(
+        read_credential(&link),
+        Err(StoreError::Signing(SigningError::KeyFile(SecretFileError::Symlink { .. })))
     ));
     Ok(())
 }

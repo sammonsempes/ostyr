@@ -1,4 +1,5 @@
 use core_audit::error::AuditError;
+use core_config::secret_file::SecretFileError;
 use rustls::server::VerifierBuilderError;
 use rustls_pki_types::pem;
 use std::error::Error;
@@ -35,11 +36,11 @@ pub enum ChannelError {
         #[source]
         source: io::Error,
     },
-    #[error("{path}: the key file must not be accessible by group or other: {source}")]
+    #[error("{path}: the key file is refused")]
     KeyPermissions {
         path: PathBuf,
         #[source]
-        source: AuditError,
+        source: SecretFileError,
     },
     #[error("{path}: {source}")]
     Pem {

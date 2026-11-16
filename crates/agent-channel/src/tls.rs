@@ -1,7 +1,7 @@
 use crate::error::ChannelError;
 use crate::model::{ClientTlsPaths, PrivateKeyPem, ServerTlsPaths, ALPN_H2};
 use crate::types::{SharedClientConfig, SharedServerConfig};
-use core_audit::log::check_private;
+use core_config::secret_file::{open_secret, SecretFileError};
 use rustls::crypto::ring::default_provider;
 use rustls::crypto::CryptoProvider;
 use rustls::server::WebPkiClientVerifier;
@@ -10,7 +10,6 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use secrecy::{ExposeSecret, SecretString};
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -27,10 +26,12 @@ pub fn read_private_key(path: &Path) -> Result<PrivateKeyPem, ChannelError> {
         path: path.to_path_buf(),
         source,
     };
-    let mut file = File::open(path).map_err(io_error)?;
-    check_private(&file).map_err(|source| ChannelError::KeyPermissions {
-        path: path.to_path_buf(),
-        source,
+    let mut file = open_secret(path).map_err(|refusal| match refusal {
+        SecretFileError::Io { source, .. } => io_error(source),
+        refused => ChannelError::KeyPermissions {
+            path: path.to_path_buf(),
+            source: refused,
+        },
     })?;
     let mut pem = String::new();
     file.read_to_string(&mut pem).map_err(io_error)?;

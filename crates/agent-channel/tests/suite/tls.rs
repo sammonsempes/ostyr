@@ -34,6 +34,24 @@ fn key_file_readable_by_others_is_refused() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn a_symlinked_or_fifo_key_is_refused_and_the_private_file_is_read() -> TestResult {
+    let dir = tempdir()?;
+    let platform = make_platform()?;
+    let leaf = issue(&platform.agent_ca, &agent_spec(&[AGENT_URI]))?;
+    let real = write_file(dir.path(), "agent.key", &leaf.key_pem, PRIVATE_MODE)?;
+    let link = dir.path().join("link.key");
+    std::os::unix::fs::symlink(&real, &link)?;
+    assert!(matches!(read_private_key(&link), Err(ChannelError::KeyPermissions { .. })));
+    let fifo = dir.path().join("fifo.key");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(matches!(read_private_key(&fifo), Err(ChannelError::KeyPermissions { .. })));
+    assert_eq!(read_private_key(&real)?.pem.expose_secret(), leaf.key_pem.as_str());
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
 fn group_readable_key_is_refused_by_both_configurations() -> TestResult {
     let dir = tempdir()?;
     let platform = make_platform()?;
