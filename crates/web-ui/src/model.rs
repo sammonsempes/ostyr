@@ -113,6 +113,56 @@ pub struct CasePageView {
 }
 
 
+/// How many entries an asset holds; the CMDB's `version` field is ignored (the pages do not show it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct AssetCountsView {
+    pub keys: u64,
+    pub attributes: u64,
+    pub open_conflicts: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssetSummaryView {
+    pub id: String,
+    pub kind: String,
+    pub lifecycle: String,
+    pub counts: AssetCountsView,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssetKeyView {
+    pub key: String,
+    pub value: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssetAttributeView {
+    pub name: String,
+    pub value: String,
+    pub source: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssetDetailView {
+    #[serde(flatten)]
+    pub summary: AssetSummaryView,
+    pub keys: Vec<AssetKeyView>,
+    pub attributes: Vec<AssetAttributeView>,
+    pub truncated: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssetPageView {
+    pub items: Vec<AssetSummaryView>,
+    pub next_cursor: Option<String>,
+}
+
+
 /// The API token stays on the server; the browser holds only the random session identifier.
 pub struct Session {
     pub username: String,
