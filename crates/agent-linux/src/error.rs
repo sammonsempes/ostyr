@@ -73,3 +73,36 @@ pub enum SourceError {
     #[error("cursor file {} does not hold `<dev> <ino> <offset>`", .0.display())]
     Cursor(PathBuf),
 }
+
+
+#[derive(Debug, Error)]
+pub enum IsolationError {
+    #[error("nft could not run: {0}")]
+    Io(#[from] io::Error),
+    #[error("nft did not finish in time")]
+    Timeout,
+    #[error("nft wrote more than {0} bytes")]
+    TooLarge(u64),
+    #[error("nft failed with status {code:?}: {stderr}")]
+    Exit { code: Option<i32>, stderr: String },
+    #[error("nft output is not UTF-8")]
+    Utf8(#[source] std::str::Utf8Error),
+    #[error("nft output is not a table listing: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("isolation needs at least one endpoint")]
+    NoEndpoints,
+    #[error("the table is not the one that was applied: {0}")]
+    Mismatch(String),
+    #[error(transparent)]
+    State(#[from] SourceError),
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error(transparent)]
+    Audit(#[from] core_audit::error::AuditError),
+    #[error(transparent)]
+    App(#[from] agent_channel::error::AppError),
+    #[error("settings out of range: {0}")]
+    Settings(String),
+    #[error("unknown action, expected isolate, release or status")]
+    Usage,
+}
