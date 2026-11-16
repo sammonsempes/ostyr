@@ -1,3 +1,4 @@
+use crate::harness::HANG_GUARD_SECONDS;
 use crate::types::TestResult;
 use agent_channel::agent_app::AgentFile;
 use agent_channel::spool::SequenceState;
@@ -95,7 +96,7 @@ const CHILD_PROCESSES: usize = 2;
 const CHILD_LINES: usize = 200;
 
 
-const CHILD_ATTEMPTS: u32 = 12_000;
+const CHILD_ATTEMPTS: u32 = u32::MAX;
 
 
 const CHILD_LINE_BYTES: usize = 4_000;
@@ -138,6 +139,33 @@ fn spool_child_appends_when_asked() -> TestResult {
 }
 
 
+fn wait_for_children(mut children: Vec<std::process::Child>) -> Result<(), Box<dyn std::error::Error>> {
+    let outcome = (0..HANG_GUARD_SECONDS).find_map(|_second| {
+        let statuses = children.iter_mut().map(|child| child.try_wait()).collect::<io::Result<Vec<_>>>();
+        match statuses {
+            Err(error) => Some(Err(error)),
+            Ok(done) if done.iter().all(Option::is_some) => Some(Ok(done)),
+            Ok(_) => {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                None
+            }
+        }
+    });
+    match outcome {
+        Some(statuses) => statuses?
+            .into_iter()
+            .flatten()
+            .all(|status| status.success())
+            .then_some(())
+            .ok_or("a child appender failed".into()),
+        None => {
+            children.iter_mut().try_for_each(|child| child.kill())?;
+            Err("a child appender hung: the spool lock was never obtained before the hang guard".into())
+        }
+    }
+}
+
+
 #[test]
 fn two_processes_appending_to_one_spool_lose_no_line() -> TestResult {
     let dir = tempdir()?;
@@ -152,10 +180,7 @@ fn two_processes_appending_to_one_spool_lose_no_line() -> TestResult {
                 .spawn()
         })
         .collect::<io::Result<Vec<_>>>()?;
-    children.into_iter().try_for_each(|mut child| -> Result<(), Box<dyn std::error::Error>> {
-        let status = child.wait()?;
-        Ok(status.success().then_some(()).ok_or("a child appender failed")?)
-    })?;
+    wait_for_children(children)?;
     let text = fs::read_to_string(&spool)?;
     let found: BTreeSet<&str> = text.lines().collect();
     let expected: Vec<String> = (0..CHILD_PROCESSES)
