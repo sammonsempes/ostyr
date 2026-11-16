@@ -6,10 +6,9 @@ mod unix_run {
     use secret_scan::alerting::secret_alerts;
     use secret_scan::copy::sweep_stale;
     use secret_scan::model::{Limits, ScanScope};
-    use secret_scan::scan::{run_settings, scan_directory, ScanTarget};
+    use secret_scan::scan::{run_settings, scan_directory, stale_after, ScanTarget};
     use std::io::Write;
     use std::path::PathBuf;
-    use std::time::Duration;
 
 
     const ARGUMENTS: usize = 6;
@@ -30,9 +29,6 @@ mod unix_run {
     const POLL_MILLIS: u64 = 100;
 
 
-    const STALE_SECONDS: u64 = 7200;
-
-
     const MICROS_PER_SECOND: u64 = 1_000_000;
 
 
@@ -42,7 +38,7 @@ mod unix_run {
         let [program, rules, directory, tenant, scope_id, timeout] = <&[String; ARGUMENTS]>::try_from(arguments.as_slice())
             .map_err(|_| "usage: secret_scan <gitleaks> <rules> <dir> <tenant> <scope-id> <timeout-seconds>")?;
         let work_dir = std::env::temp_dir();
-        let swept = sweep_stale(&work_dir, rustix::process::geteuid().as_raw(), Duration::from_secs(STALE_SECONDS))?;
+        let swept = sweep_stale(&work_dir, rustix::process::geteuid().as_raw(), stale_after(POLL_MILLIS))?;
         writeln!(out, "swept={swept}")?;
         let run = run_settings(
             PathBuf::from(PRLIMIT),
