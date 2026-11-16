@@ -12,9 +12,9 @@ pub const MAX_COMMAND_FILES: usize = 64;
 pub const MAX_ENVELOPE_FILE_BYTES: u64 = 65_536;
 
 
-/// One directory per agent, named `<tenant>:<agent-id>`: the colon is not in the identity charset, so no path can escape `root`.
+/// One directory per agent, named `<tenant>@<agent-id>`: the `@` is not in the identity charset, so no path can escape `root`, and it is a valid file name on Windows (a colon there names an NTFS stream).
 pub fn agent_directory(root: &Path, identity: &Identity) -> PathBuf {
-    root.join(format!("{}:{}", identity.tenant, identity.agent_id))
+    root.join(format!("{}@{}", identity.tenant, identity.agent_id))
 }
 
 

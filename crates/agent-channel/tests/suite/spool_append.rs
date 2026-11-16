@@ -95,7 +95,7 @@ const CHILD_PROCESSES: usize = 2;
 const CHILD_LINES: usize = 200;
 
 
-const CHILD_ATTEMPTS: u32 = 1_000_000;
+const CHILD_ATTEMPTS: u32 = 12_000;
 
 
 const CHILD_LINE_BYTES: usize = 4_000;
@@ -178,7 +178,7 @@ fn holder(path: &Path) -> io::Result<File> {
 fn a_held_spool_lock_fails_the_append_at_the_deadline_with_the_fixed_error() -> TestResult {
     let dir = tempdir()?;
     let spool = dir.path().join("spool");
-    let _held = holder(&spool)?;
+    let held = holder(&spool)?;
     let mut pauses = 0;
     let error = append_locked(std::iter::once(Ok("a".to_owned())), &spool, ATTEMPTS, &mut || pauses += 1)
         .err()
@@ -186,6 +186,7 @@ fn a_held_spool_lock_fails_the_append_at_the_deadline_with_the_fixed_error() -> 
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert_eq!(error.to_string(), SPOOL_LOCK_BUSY);
     assert_eq!(pauses, ATTEMPTS);
+    drop(held);
     assert_eq!(fs::read_to_string(&spool)?, "");
     Ok(())
 }
@@ -456,7 +457,7 @@ fn an_empty_locked_claimed_file_is_never_removed_by_finish() -> TestResult {
 }
 
 
-const WAIT_ATTEMPTS: u32 = 1_000_000;
+const WAIT_ATTEMPTS: u32 = 10_000;
 
 
 #[cfg(unix)]
@@ -826,6 +827,7 @@ fn a_locked_current_spool_is_never_renamed_over_an_existing_sending_file() -> Te
     fs::write(&sending, "1\n")?;
     let spool = holder(&file.spool_file)?;
     claim_locked(&file, &sending, &spool)?;
+    drop(spool);
     assert_eq!(fs::read_to_string(&sending)?, "1\n");
     assert_eq!(fs::read_to_string(&file.spool_file)?, "7\n");
     assert!(!file.sequence_file.exists());
