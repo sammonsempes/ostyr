@@ -44,3 +44,78 @@ pub enum ScanError {
     #[error("an extension is 1 to {max} bytes without a dot or a path separator")]
     BadExtension { max: usize },
 }
+
+
+/// Why one watched zone is refused; fixed text only, the zone itself is never echoed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ZoneReason {
+    #[error("longer than the hostname limit")]
+    TooLong,
+    #[error("a label is empty, too long, or starts or ends with a hyphen")]
+    BadLabel,
+    #[error("only a-z, 0-9, hyphen and dot are allowed")]
+    BadCharacter,
+    #[error("a zone has at least two labels")]
+    TooFewLabels,
+    #[error("an IP address or a numeric top-level label")]
+    IpLiteral,
+    #[error("a public suffix alone watches every registrant")]
+    PublicSuffix,
+    #[error("listed twice")]
+    Duplicate,
+}
+
+
+#[derive(Debug, Error)]
+pub enum WatchError {
+    #[error(transparent)]
+    File(#[from] core_config::error::ConfigError),
+    #[error("tenant name refused")]
+    Tenant(#[source] core_pg::error::PgError),
+    #[error("more than {max} zones")]
+    TooManyZones { max: usize },
+    #[error("zone {index} refused: {reason}")]
+    Zone { index: usize, reason: ZoneReason },
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Timeout,
+    Tls,
+    Other,
+}
+
+
+/// No variant carries text from the log: statuses are numbers, parse errors are reduced to a category and a position.
+#[derive(Debug, Error)]
+pub enum FetchError {
+    #[error("log URL refused")]
+    Url(#[source] siem_ingest::error::SettingsError),
+    #[error("HTTP agent refused")]
+    Agent(#[source] siem_ingest::error::InsertError),
+    #[error("start is above end")]
+    StartAfterEnd,
+    #[error("end {end} is not below the tree size {tree_size}")]
+    BeyondTree { end: u64, tree_size: u64 },
+    #[error("a range holds at most {max} entries")]
+    RangeTooWide { max: u64 },
+    #[error("transport failure: {0:?}")]
+    Transport(TransportKind),
+    #[error("the log refused the range (400)")]
+    RangeRefused,
+    #[error("the log rate-limited the request (429)")]
+    RateLimited,
+    #[error("the log failed (5xx)")]
+    Server,
+    #[error("unexpected HTTP status {0}")]
+    Status(u16),
+    #[error("the answer body could not be read")]
+    Body,
+    #[error("the tree head answer is above {max} bytes")]
+    SthTooLarge { max: usize },
+    #[error("the log answered no entry for a valid range")]
+    Empty,
+    #[error(transparent)]
+    Ct(#[from] CtError),
+}
