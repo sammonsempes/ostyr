@@ -1,0 +1,12 @@
+tls:
+  issuer: acme
+  directory: https://acme.example.test:14000/dir
+  email: ops@example.test
+  hsts_max_age_seconds: 63072000
+  hsts_include_subdomains: true
+routes:
+  - hosts: [app.example.test]
+    paths: [/api/]
+    backends: ["127.0.0.1:9001"]
+  - hosts: [Web.Example.Test, www.example.test]
+    backends: ["127.0.0.1:9002"]
