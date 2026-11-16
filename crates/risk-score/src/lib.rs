@@ -3,4 +3,5 @@
 pub mod error;
 pub mod model;
 pub mod score;
+pub mod source;
 pub mod weights;

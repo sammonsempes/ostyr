@@ -16,4 +16,6 @@ pub enum RiskError {
     BadEntityId { max: usize },
     #[error("false positive rate is above one million per million")]
     RateOutOfRange,
+    #[error("alerts store: {0}")]
+    Store(#[from] alerts::error::StoreError),
 }
