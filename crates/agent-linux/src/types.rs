@@ -1,4 +1,5 @@
 use crate::error::CapabilityError;
+use crate::error::IsolationError;
 use crate::error::SensorError;
 use crate::model::{Paths, SensorSettings, SourceSettings};
 use arc_swap::ArcSwap;
@@ -35,6 +36,13 @@ pub type KillFn = fn(rustix::process::Pid) -> rustix::io::Result<()>;
 
 /// Held by every writer of the spool of this process (source, sensor, capabilities), so a call's lines are never interleaved with another's.
 pub type SpoolLock = Arc<Mutex<()>>;
+
+
+pub type NftFuture = Pin<Box<dyn Future<Output = Result<String, IsolationError>> + Send>>;
+
+
+/// Runs `nft` with arguments and returns its bounded standard output; a test double injects a canned answer.
+pub type NftFn = fn(PathBuf, Vec<String>) -> NftFuture;
 
 
 /// Reads the file system statistics of a path; a test double injects a canned answer or a failure.
