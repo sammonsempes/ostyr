@@ -85,6 +85,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-pki-types",
+ "same-file",
  "secrecy",
  "serde",
  "signal-hook",

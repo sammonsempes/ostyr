@@ -6,10 +6,12 @@ use crate::proto::EventBatch;
 use core_audit::log::owner_only;
 use prost::encoding::encoded_len_varint;
 use prost::Message;
+use same_file::Handle;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 
 /// Event lines claimed from the spool file per run; the rest goes back to the spool for the next run.
@@ -141,17 +143,153 @@ pub fn joined_lines(mut lines: &mut dyn Iterator<Item = io::Result<String>>) -> 
 }
 
 
-/// Appends the lines to the spool in one write, creating it only when there is something to append; returns whether it appended.
+/// Lock attempts of one append before it fails with `SPOOL_LOCK_BUSY`.
+pub const SPOOL_LOCK_ATTEMPTS: u32 = 3_000;
+
+
+/// Pause between two lock attempts; with `SPOOL_LOCK_ATTEMPTS` the deadline is about 30 seconds.
+pub const SPOOL_LOCK_PAUSE: Duration = Duration::from_millis(10);
+
+
+/// The fixed error text of an append that never got the spool lock.
+pub const SPOOL_LOCK_BUSY: &str = "spool lock held by another process, append abandoned";
+
+
+/// The Windows error code of a read refused by a byte-range lock.
+pub const WINDOWS_LOCK_VIOLATION: i32 = 33;
+
+
+/// Sleeps `SPOOL_LOCK_PAUSE`.
+pub fn pause_between_lock_attempts() {
+    std::thread::sleep(SPOOL_LOCK_PAUSE);
+}
+
+
+/// Takes the lock through `try_lock`, trying at most `attempts` times and calling `pause` after each refusal; the fixed `SPOOL_LOCK_BUSY` error when all fail.
+pub fn lock_bounded(attempts: u32, try_lock: &mut dyn FnMut() -> Result<(), TryLockError>, pause: &mut dyn FnMut()) -> io::Result<()> {
+    (0..attempts)
+        .find_map(|_| match try_lock() {
+            Ok(()) => Some(Ok(())),
+            Err(TryLockError::WouldBlock) => {
+                pause();
+                None
+            }
+            Err(TryLockError::Error(error)) => Some(Err(error)),
+        })
+        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, SPOOL_LOCK_BUSY)))
+}
+
+
+/// Whether the error is a Windows read refused because a producer holds the spool lock.
+pub fn is_lock_violation(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_LOCK_VIOLATION)
+}
+
+
+/// Appends the lines to the spool in one write under an exclusive lock of the file (released when it closes), creating it only when there is something to append; returns whether it appended.
 pub fn append_back(lines: impl Iterator<Item = io::Result<String>>, spool: &Path) -> io::Result<bool> {
+    append_locked(lines, spool, SPOOL_LOCK_ATTEMPTS, &mut pause_between_lock_attempts)
+}
+
+
+/// How many times an append opens the spool again after finding, once locked, that the path names another file.
+pub const SPOOL_REOPEN_ROUNDS: u32 = 3;
+
+
+/// Whether the locked handle is still the file at `spool`; a missing or unopenable path (Windows delete-pending) is not.
+pub fn is_current_spool(out: &File, spool: &Path) -> io::Result<bool> {
+    match Handle::from_path(spool) {
+        Ok(current) => Ok(Handle::from_file(out.try_clone()?)? == current),
+        Err(error) => {
+            tracing::warn!(%error, "spool path not openable after the lock, opening it again");
+            Ok(false)
+        }
+    }
+}
+
+
+/// Opens the spool and locks it, retrying from the open while the locked handle is no longer the file at `spool`; the fixed `SPOOL_LOCK_BUSY` error when the rounds are spent.
+pub fn open_locked_with(spool: &Path, attempts: u32, pause: &mut dyn FnMut(), is_current: fn(&File, &Path) -> io::Result<bool>) -> io::Result<File> {
+    (0..SPOOL_REOPEN_ROUNDS)
+        .find_map(|_| open_locked_once(spool, attempts, pause, is_current).transpose())
+        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, SPOOL_LOCK_BUSY)))
+}
+
+
+/// One round of `open_locked_with`: the locked handle, or none when the path names another file by then.
+pub fn open_locked_once(
+    spool: &Path,
+    attempts: u32,
+    pause: &mut dyn FnMut(),
+    is_current: fn(&File, &Path) -> io::Result<bool>,
+) -> io::Result<Option<File>> {
+    let out = owner_only(OpenOptions::new().read(true).append(true).create(true)).open(spool)?;
+    lock_bounded(attempts, &mut || out.try_lock(), pause)?;
+    Ok(is_current(&out, spool)?.then_some(out))
+}
+
+
+/// Writes the text in one `write_all` under the exclusive lock of the spool, then runs `between` and syncs the same handle, lock still held.
+pub fn write_locked(text: &str, spool: &Path, attempts: u32, pause: &mut dyn FnMut(), between: &mut dyn FnMut()) -> io::Result<()> {
+    write_locked_with(text, spool, attempts, pause, between, is_current_spool)
+}
+
+
+/// `write_locked` with the identity check given.
+pub fn write_locked_with(
+    text: &str,
+    spool: &Path,
+    attempts: u32,
+    pause: &mut dyn FnMut(),
+    between: &mut dyn FnMut(),
+    is_current: fn(&File, &Path) -> io::Result<bool>,
+) -> io::Result<()> {
+    let mut out = open_locked_with(spool, attempts, pause, is_current)?;
+    out.write_all(text.as_bytes())?;
+    between();
+    out.sync_all()
+}
+
+
+/// `append_back` with the lock attempts and the pause between them given.
+pub fn append_locked(lines: impl Iterator<Item = io::Result<String>>, spool: &Path, attempts: u32, pause: &mut dyn FnMut()) -> io::Result<bool> {
+    append_locked_between(lines, spool, attempts, pause, &mut || ())
+}
+
+
+/// `append_locked` with `between` run after the write and before the sync of the written handle.
+pub fn append_locked_between(
+    lines: impl Iterator<Item = io::Result<String>>,
+    spool: &Path,
+    attempts: u32,
+    pause: &mut dyn FnMut(),
+    between: &mut dyn FnMut(),
+) -> io::Result<bool> {
     let mut rest = lines.peekable();
     if rest.peek().is_some() {
         let text = joined_lines(&mut rest)?;
-        let mut out = owner_only(OpenOptions::new().append(true).create(true)).open(spool)?;
-        out.write_all(text.as_bytes())?;
-        out.sync_all()?;
+        write_locked(&text, spool, attempts, pause, between)?;
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+
+/// How many lines of the spool the next claim takes, or none when a producer holds its lock (Windows): the claim is left for the next run, logged.
+pub fn lines_to_claim(path: &Path, limit: usize) -> io::Result<Option<u64>> {
+    lines_to_claim_with(path, limit, count_lines)
+}
+
+
+/// `lines_to_claim` with the counting function given.
+pub fn lines_to_claim_with(path: &Path, limit: usize, count: fn(&Path, usize) -> io::Result<u64>) -> io::Result<Option<u64>> {
+    match count(path, limit) {
+        Err(error) if is_lock_violation(&error) => {
+            tracing::warn!(%error, "spool locked by a producer, claim left for the next run");
+            Ok(None)
+        }
+        other => other.map(Some),
     }
 }
 
@@ -272,10 +410,32 @@ pub fn load_claimed(sending: &Path, spool: &Path, count: u64, limit: usize) -> i
 }
 
 
+/// The claimed lines, or none when a producer holds the lock of the claimed file (Windows): the claim is left for the next run, logged.
+pub fn claimed_lines_with(
+    sending: &Path,
+    spool: &Path,
+    count: u64,
+    limit: usize,
+    load: fn(&Path, &Path, u64, usize) -> io::Result<Vec<String>>,
+) -> io::Result<Option<Vec<String>>> {
+    match load(sending, spool, count, limit) {
+        Err(error) if is_lock_violation(&error) => {
+            tracing::warn!(%error, "claimed spool locked by a producer, left for the next run");
+            Ok(None)
+        }
+        other => other.map(Some),
+    }
+}
+
+
 /// Renames a fresh spool to the sending file after recording the new sequences, unless a sending file is already there (a crashed run).
 pub fn claim_fresh(file: &AgentFile, sending: &Path) -> Result<(), AppError> {
-    if !sending.try_exists()? && file.spool_file.try_exists()? {
-        let count = count_lines(&file.spool_file, line_limit(file))?;
+    let claimable = if !sending.try_exists()? && file.spool_file.try_exists()? {
+        lines_to_claim(&file.spool_file, line_limit(file))?
+    } else {
+        None
+    };
+    if let Some(count) = claimable {
         let state = read_sequence(&file.sequence_file)?;
         let used = state
             .used
@@ -306,13 +466,21 @@ pub fn batches_of(lines: Vec<String>, first: u64, file: &AgentFile) -> Vec<Event
 
 /// Claims the spool: sequences continue from the sequence file across runs and a crashed claim is resent with the same sequences.
 pub fn claim_spool(file: &AgentFile) -> Result<Spool, AppError> {
+    claim_spool_with(file, load_claimed)
+}
+
+
+/// `claim_spool` with the loading function given; a claimed file that is locked keeps its bytes (`sending_bytes` of `u64::MAX`, never equal to its length) so `finish_spool` cannot remove it.
+pub fn claim_spool_with(file: &AgentFile, load: fn(&Path, &Path, u64, usize) -> io::Result<Vec<String>>) -> Result<Spool, AppError> {
     let sending = suffixed(&file.spool_file, SENDING_SUFFIX);
     claim_fresh(file, &sending)?;
     let state = read_sequence(&file.sequence_file)?;
     let (lines, sending_bytes) = if sending.try_exists()? {
         let before = fs::metadata(&sending)?.len();
-        let lines = load_claimed(&sending, &file.spool_file, state.count, line_limit(file))?;
-        (lines, before.min(fs::metadata(&sending)?.len()))
+        match claimed_lines_with(&sending, &file.spool_file, state.count, line_limit(file), load)? {
+            Some(lines) => (lines, before.min(fs::metadata(&sending)?.len())),
+            None => (Vec::new(), u64::MAX),
+        }
     } else {
         (Vec::new(), 0)
     };
@@ -331,12 +499,24 @@ pub fn claim_spool(file: &AgentFile) -> Result<Spool, AppError> {
 
 /// Removes the claimed file once every batch of it is acknowledged and nothing was appended to it since it was read; otherwise it stays.
 pub fn finish_spool(spool: &Spool, acknowledged: &[u64]) -> Result<(), AppError> {
+    finish_spool_with(spool, acknowledged, SPOOL_LOCK_ATTEMPTS, &mut pause_between_lock_attempts)
+}
+
+
+/// `finish_spool` with the lock attempts and the pause given; the claimed file is locked across the length check and the removal.
+pub fn finish_spool_with(spool: &Spool, acknowledged: &[u64], attempts: u32, pause: &mut dyn FnMut()) -> Result<(), AppError> {
     if spool.batches.iter().all(|batch| acknowledged.contains(&batch.sequence)) && spool.sending.try_exists()? {
-        if fs::metadata(&spool.sending)?.len() == spool.sending_bytes {
-            Ok(fs::remove_file(&spool.sending)?)
-        } else {
-            tracing::warn!("claimed spool grew after it was read, kept for the next run");
-            Ok(())
+        let claimed = OpenOptions::new().read(true).append(true).open(&spool.sending)?;
+        match lock_bounded(attempts, &mut || claimed.try_lock(), pause) {
+            Ok(()) if claimed.metadata()?.len() == spool.sending_bytes => Ok(fs::remove_file(&spool.sending)?),
+            Ok(()) => {
+                tracing::warn!("claimed spool grew after it was read, kept for the next run");
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(%error, "claimed spool not locked, kept for the next run");
+                Ok(())
+            }
         }
     } else {
         Ok(())

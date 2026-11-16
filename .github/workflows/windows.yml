@@ -34,7 +34,7 @@ jobs:
         timeout-minutes: 45
         run: >-
           cargo test --locked
-          -p app-health -p core-redact -p device-control
+          -p agent-channel -p app-health -p core-redact -p device-control
           -p discovery -p grc -p hunt-stats -p metric-alerts
           -p patch-inventory -p patch-rollout
           -p secret-scan -p siem-schema -p sla-report -p software-catalog

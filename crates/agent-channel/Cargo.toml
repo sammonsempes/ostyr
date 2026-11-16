@@ -20,6 +20,7 @@ prost = "0.14"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+same-file = "1.0.6"
 secrecy = "0.10.3"
 serde = { version = "1", features = ["derive"] }
 socket2 = "0.6"
