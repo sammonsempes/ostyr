@@ -18,5 +18,6 @@ pub mod run;
 pub mod sample;
 pub mod stix;
 pub mod store;
+pub mod taxii;
 pub mod timestamp;
 pub mod types;

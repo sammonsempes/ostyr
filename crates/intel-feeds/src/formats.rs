@@ -100,7 +100,7 @@ pub fn abusech_layout(format: FeedFormat) -> Option<(Vec<String>, Mapping)> {
         FeedFormat::AbuseChUrlhaus => Some((&URLHAUS_HEADER, urlhaus_mapping())),
         FeedFormat::AbuseChThreatfox => Some((&THREATFOX_HEADER, threatfox_mapping())),
         FeedFormat::AbuseChFeodo => Some((&FEODO_HEADER, feodo_mapping())),
-        FeedFormat::Stix | FeedFormat::Crowdsec | FeedFormat::Csv | FeedFormat::Json | FeedFormat::Misp => None,
+        FeedFormat::Stix | FeedFormat::Crowdsec | FeedFormat::Csv | FeedFormat::Json | FeedFormat::Misp | FeedFormat::Taxii21 => None,
     };
     layout.map(|(header, mapping)| (header.iter().map(|name| (*name).to_owned()).collect(), mapping))
 }
@@ -323,5 +323,6 @@ pub fn parse_feed(feed: &FeedConfig, reader: &mut dyn BufRead, now: OffsetDateTi
         FeedFormat::Json => parse_json_list(feed, reader, now),
         FeedFormat::Stix => parse_stix(feed, reader, now),
         FeedFormat::Misp => parse_misp(feed, reader, now),
+        FeedFormat::Taxii21 => Err(FeedError::PollOnly),
     }
 }

@@ -1,5 +1,6 @@
 use crate::limits::{
-    DEFAULT_CONFIDENCE, DEFAULT_DICTIONARY_PORT, DEFAULT_DICTIONARY_USER, DEFAULT_TIMEOUT_MS, MAX_CONFIDENCE, MAX_TIMEOUT_MS, MAX_USER_BYTES,
+    DEFAULT_CONFIDENCE, DEFAULT_DICTIONARY_PORT, DEFAULT_DICTIONARY_USER, DEFAULT_TAXII_MAX_PAGES, DEFAULT_TAXII_PAGE_LIMIT, DEFAULT_TIMEOUT_MS,
+    LIMIT_TAXII_MAX_PAGES, LIMIT_TAXII_PAGE_LIMIT, MAX_CONFIDENCE, MAX_TAXII_COLLECTION_BYTES, MAX_TIMEOUT_MS, MAX_USER_BYTES,
 };
 use crate::model::{IocType, Tlp};
 use crate::store::{quote_identifier, StoreError};
@@ -37,6 +38,7 @@ pub enum FeedFormat {
     Csv,
     Json,
     Misp,
+    Taxii21,
 }
 
 
@@ -65,6 +67,7 @@ pub fn default_confidence() -> u8 {
 pub struct FeedConfig {
     pub name: String,
     pub format: FeedFormat,
+    #[serde(default)]
     pub path: PathBuf,
     pub version: Option<String>,
     #[serde(default)]
@@ -74,6 +77,8 @@ pub struct FeedConfig {
     #[serde(default)]
     pub tlp: Tlp,
     pub ttl_seconds: Option<u32>,
+    #[serde(default)]
+    pub taxii: Option<TaxiiConfig>,
 }
 
 
@@ -87,6 +92,34 @@ pub struct ExportPolicy {
     pub min_confidence: u8,
     #[serde(default)]
     pub types: Option<Vec<IocType>>,
+}
+
+
+pub fn default_taxii_max_pages() -> u32 {
+    DEFAULT_TAXII_MAX_PAGES
+}
+
+
+pub fn default_taxii_page_limit() -> u32 {
+    DEFAULT_TAXII_PAGE_LIMIT
+}
+
+
+/// One TAXII 2.1 collection: the password is read from `password_file` at each poll and never held here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaxiiConfig {
+    pub api_root: String,
+    pub collection: String,
+    pub user: String,
+    pub password_file: PathBuf,
+    pub ca_file: Option<PathBuf>,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_taxii_max_pages")]
+    pub max_pages: u32,
+    #[serde(default = "default_taxii_page_limit")]
+    pub page_limit: u32,
 }
 
 
@@ -155,7 +188,28 @@ pub enum ClickhouseError {
 
 
 #[derive(Debug, Error)]
+pub enum TaxiiConfigError {
+    #[error("a taxii21 feed needs a `taxii` section, and no other format takes one")]
+    Section,
+    #[error("taxii.api_root refused")]
+    ApiRoot(#[from] SettingsError),
+    #[error("taxii.collection must be 1 to {MAX_TAXII_COLLECTION_BYTES} characters of [A-Za-z0-9-]")]
+    Collection,
+    #[error("taxii.user must be 1 to {MAX_USER_BYTES} printable ASCII characters without `:`")]
+    User,
+    #[error("taxii.timeout_ms must be within 1..={MAX_TIMEOUT_MS}")]
+    Timeout,
+    #[error("taxii.max_pages must be within 1..={LIMIT_TAXII_MAX_PAGES}")]
+    Pages,
+    #[error("taxii.page_limit must be within 1..={LIMIT_TAXII_PAGE_LIMIT}")]
+    PageLimit,
+}
+
+
+#[derive(Debug, Error)]
 pub enum FeedsError {
+    #[error("feed `{0}`: {1}")]
+    Taxii(String, #[source] TaxiiConfigError),
     #[error("feed name `{0}` is empty or used twice")]
     Name(String),
     #[error("feed `{0}`: default confidence above {MAX_CONFIDENCE}")]
@@ -175,6 +229,45 @@ pub enum OpenError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Invalid(#[from] FeedsError),
+}
+
+
+pub fn collection_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_TAXII_COLLECTION_BYTES
+        && name.chars().all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
+
+/// URL by siem-ingest's rule, collection an ASCII allowlist, user printable without `:` (Basic auth), counts and timeout within their limits.
+pub fn validate_taxii(config: &TaxiiConfig) -> Result<(), TaxiiConfigError> {
+    check_url(&config.api_root)?;
+    let user_ok = !config.user.is_empty()
+        && config.user.len() <= MAX_USER_BYTES
+        && config.user.chars().all(|character| character.is_ascii_graphic() && character != ':');
+    if !collection_ok(&config.collection) {
+        Err(TaxiiConfigError::Collection)
+    } else if !user_ok {
+        Err(TaxiiConfigError::User)
+    } else if config.timeout_ms == 0 || config.timeout_ms > MAX_TIMEOUT_MS {
+        Err(TaxiiConfigError::Timeout)
+    } else if config.max_pages == 0 || config.max_pages > LIMIT_TAXII_MAX_PAGES {
+        Err(TaxiiConfigError::Pages)
+    } else if config.page_limit == 0 || config.page_limit > LIMIT_TAXII_PAGE_LIMIT {
+        Err(TaxiiConfigError::PageLimit)
+    } else {
+        Ok(())
+    }
+}
+
+
+/// A taxii21 feed carries a valid `taxii` section; any other feed carries none.
+pub fn validate_feed_taxii(feed: &FeedConfig) -> Result<(), TaxiiConfigError> {
+    match (feed.format == FeedFormat::Taxii21, feed.taxii.as_ref()) {
+        (true, Some(taxii)) => validate_taxii(taxii),
+        (false, None) => Ok(()),
+        (true, None) | (false, Some(_)) => Err(TaxiiConfigError::Section),
+    }
 }
 
 
@@ -214,7 +307,7 @@ pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
         } else if needs_mapping(feed.format) && feed.mapping.value.is_none() {
             Err(FeedsError::MappingValue(feed.name.clone()))
         } else {
-            Ok(())
+            validate_feed_taxii(feed).map_err(|error| FeedsError::Taxii(feed.name.clone(), error))
         }
     });
     feeds?;
