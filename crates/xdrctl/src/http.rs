@@ -1,4 +1,4 @@
-use crate::error::ClientError;
+use crate::error::{transport_kind, ClientError};
 use crate::model::{HttpMethod, HttpReply, HttpRequest};
 use std::fs;
 use std::path::Path;
@@ -19,7 +19,7 @@ pub fn load_roots(path: &Path) -> Result<RootCerts, ClientError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let certificate = Certificate::from_pem(&pem)?;
+    let certificate = Certificate::from_pem(&pem).map_err(ClientError::CaInvalid)?;
     Ok(RootCerts::Specific(Arc::new(vec![certificate])))
 }
 
@@ -44,6 +44,12 @@ pub fn method_of(method: HttpMethod) -> Method {
 }
 
 
+/// Only the fixed kind of a ureq failure is kept, never its text.
+pub fn transport_error(error: ureq::Error) -> ClientError {
+    ClientError::Transport(transport_kind(&error))
+}
+
+
 /// Sends one request and returns the status and body, whatever the status.
 pub fn send_request(ca_file: Option<&Path>, request: &HttpRequest) -> Result<HttpReply, ClientError> {
     let agent = build_agent(ca_file)?;
@@ -54,8 +60,8 @@ pub fn send_request(ca_file: Option<&Path>, request: &HttpRequest) -> Result<Htt
     let authorized = request.token.iter().fold(builder, |current, token| {
         current.header("Authorization", format!("{BEARER_PREFIX}{token}"))
     });
-    let mut response = agent.run(authorized.body(request.body.clone())?)?;
+    let mut response = agent.run(authorized.body(request.body.clone())?).map_err(transport_error)?;
     let status = response.status().as_u16();
-    let body = response.body_mut().read_to_string()?;
+    let body = response.body_mut().read_to_string().map_err(transport_error)?;
     Ok(HttpReply { status, body })
 }

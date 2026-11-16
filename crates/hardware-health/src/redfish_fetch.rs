@@ -1,6 +1,6 @@
 //! Fetches the Redfish documents of one declared BMC with GET requests only and assesses them.
 
-use crate::error::{DiscoverError, FetchError, GetError};
+use crate::error::{transport_kind, DiscoverError, FetchError, GetError};
 use crate::limits::{
     ACCOUNTS_COLLECTION, ADMINISTRATOR_ROLE, AUTH_CAPACITY, CHASSIS_COLLECTION, HTTP_OK, MAX_CA_BYTES, MAX_ID_BYTES, MAX_MEMBERS, MAX_NESTING_DEPTH,
     SYSTEMS_COLLECTION,
@@ -102,7 +102,7 @@ pub fn get_body(session: &FetchSession, url: &str, left: Duration) -> Result<Vec
         .timeout_global(Some(left))
         .build()
         .call()
-        .map_err(GetError::Transport)?;
+        .map_err(|error| GetError::Transport(transport_kind(&error)))?;
     let status = response.status().as_u16();
     if status == HTTP_OK {
         let limit = session.max_bytes.saturating_add(1);
