@@ -5113,6 +5113,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "risk-score"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "ecs-normalise",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "rpm-version"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
