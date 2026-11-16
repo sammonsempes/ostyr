@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::fs;
 use std::io::{repeat, Read};
+use std::path::Path;
 use waf::cli::render_to;
 use waf::error::WafError;
 use waf::limits::{
@@ -13,6 +14,9 @@ use waf::model::{Budget, Refusal, Rendered};
 use waf::order::{TOO_MANY_BYTES, TOO_MANY_RENDERED};
 use waf::render::{render_reader, render_text, render_text_capped};
 use waf::validate::{BAD_HOST, MALFORMED, REPEATED_HOST};
+
+
+const NO_DIR: &str = "/nonexistent";
 
 
 const GOLDEN_YAML: &str = "tests/fixtures/two_routes.yaml";
@@ -355,7 +359,7 @@ fn the_largest_file_the_grammar_admits_never_meets_the_output_guard() -> Result<
     let text = json!({"routes": routes}).to_string();
     let mut written = Vec::new();
     let mut report = Vec::new();
-    let count = render_to(&mut text.as_bytes(), &mut written, &mut report)?;
+    let count = render_to(&mut text.as_bytes(), &mut written, &mut report, Path::new(NO_DIR))?;
     assert!(written.len() <= MAX_JSON_BYTES);
     assert!(count > 0);
     assert!(count < routes.len());
