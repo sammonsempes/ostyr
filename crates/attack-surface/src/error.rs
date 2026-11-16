@@ -62,3 +62,48 @@ pub enum ResultsError {
     #[error("cannot read the scanner output: {0}")]
     Read(#[from] std::io::Error),
 }
+
+
+/// Why one naabu run produced no report; a category only, never scanner output.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ScanFailure {
+    #[error("the scanner did not finish before the deadline")]
+    Timeout,
+    #[error("the scanner failed (exit code {code:?})")]
+    Failed { code: Option<i32> },
+    #[error("the scanner printed more than the output cap")]
+    Oversized,
+    #[error("the scanner could not be started or waited on")]
+    Unavailable,
+    #[error("the target was refused before any run")]
+    Refused,
+}
+
+
+#[derive(Debug, Error)]
+pub enum RunError {
+    #[error("the run covers {v4} IPv4 and {v6} IPv6 addresses, above {max_v4} and {max_v6}")]
+    TooBroad { v4: u128, v6: u128, max_v4: u128, max_v6: u128 },
+}
+
+
+impl From<ResultsError> for ScanFailure {
+    fn from(_error: ResultsError) -> Self {
+        ScanFailure::Unavailable
+    }
+}
+
+
+#[cfg(unix)]
+impl From<net_topology::model::RunFailure> for ScanFailure {
+    fn from(failure: net_topology::model::RunFailure) -> Self {
+        use net_topology::model::RunFailure;
+        match failure {
+            RunFailure::TimedOut => ScanFailure::Timeout,
+            RunFailure::TooLarge => ScanFailure::Oversized,
+            RunFailure::Failed { code, .. } => ScanFailure::Failed { code },
+            RunFailure::Refused => ScanFailure::Refused,
+            RunFailure::Spawn | RunFailure::Io | RunFailure::Unwaitable => ScanFailure::Unavailable,
+        }
+    }
+}
