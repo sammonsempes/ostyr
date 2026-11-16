@@ -499,3 +499,17 @@ fn a_refused_spn_never_scores_above_a_plain_spn() -> Result<(), Box<dyn Error>> 
     assert!(score_of_entry(over)? <= base);
     Ok(())
 }
+
+
+#[test]
+fn a_finding_names_only_the_gaps_of_the_fields_its_check_reads() -> Result<(), Box<dyn Error>> {
+    let plain = Entry {
+        spns: vec!["http/x".to_owned()],
+        ..with_gap(entry("CN=svc", &["user"], UAC_NORMAL), "memberOf", false)
+    };
+    let roast = check_kerberoastable(&plain).ok_or("no finding")?;
+    assert!(!roast.detail.contains("memberOf"));
+    let dropped = check_dropped(&plain).ok_or("no finding")?;
+    assert!(dropped.detail.contains("memberOf"));
+    Ok(())
+}
