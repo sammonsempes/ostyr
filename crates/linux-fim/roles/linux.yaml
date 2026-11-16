@@ -1,0 +1,28 @@
+version: 1
+roles:
+  - name: server
+    watched:
+      - { path: /etc/passwd, kind: file }
+      - { path: /etc/shadow, kind: file }
+      - { path: /etc/sudoers, kind: file }
+      - { path: /etc/ld.so.preload, kind: file }
+      - { path: /root/.ssh/authorized_keys, kind: file }
+      - { path: /etc/cron.d/, kind: prefix }
+      - { path: /etc/systemd/system/, kind: prefix }
+      - { path: /usr/bin/, kind: prefix }
+    honeytokens:
+      - { path: /root/.aws/credentials, kind: aws_credentials }
+      - { path: /root/.ssh/id_rsa_backup, kind: ssh_key }
+      - { path: /root/passwords.txt, kind: password_file }
+      - { path: /var/backups/.canary, kind: canary }
+  - name: workstation
+    watched:
+      - { path: /etc/passwd, kind: file }
+      - { path: /etc/shadow, kind: file }
+      - { path: /etc/sudoers, kind: file }
+      - { path: /etc/ld.so.preload, kind: file }
+      - { path: /etc/sudoers.d/, kind: prefix }
+      - { path: /etc/cron.d/, kind: prefix }
+    honeytokens:
+      - { path: /root/.aws/credentials, kind: aws_credentials }
+      - { path: /root/passwords.txt, kind: password_file }

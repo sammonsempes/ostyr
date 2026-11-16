@@ -1,0 +1,281 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fim-workstation
+spec:
+  kprobes:
+  - call: security_file_permission
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: int
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+  - call: security_path_truncate
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+  - call: security_file_truncate
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    ignore:
+      callNotFound: true
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+  - call: security_path_mknod
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d
+        - /etc/cron.d
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/passwords.txt
+  - call: security_mmap_file
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: uint32
+    - index: 2
+      type: uint32
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+      - index: 2
+        operator: Mask
+        values:
+        - "1"
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      - index: 1
+        operator: Mask
+        values:
+        - "2"
+      - index: 2
+        operator: Mask
+        values:
+        - "1"
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimn-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 2
+      type: path
+    - index: 3
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 2
+      type: dentry
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/passwords.txt
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+  - call: security_path_chmod
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+  - call: security_path_chown
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
