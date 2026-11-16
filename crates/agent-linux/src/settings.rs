@@ -1,13 +1,14 @@
 use crate::error::SourceError;
 use crate::model::{
-    LinuxFile, SensorSettings, SourceSettings, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS, MAX_RESTARTS_PER_HOUR_CEILING,
-    MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING, SETTINGS_SECTION,
+    LinuxFile, SensorSettings, SourceSettings, MAX_DNS_RESOLVERS, MAX_ENDPOINTS, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS,
+    MAX_RESTARTS_PER_HOUR_CEILING, MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING, SETTINGS_SECTION,
 };
 use crate::types::{SharedSensor, SharedSource};
 use arc_swap::ArcSwap;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +55,32 @@ pub fn invalid_sensor_settings(settings: &SensorSettings) -> Vec<&'static str> {
 }
 
 
+/// An address no peer can have: unspecified, loopback, multicast or the IPv4 broadcast, an IPv4-mapped IPv6 form judged as the IPv4 address.
+pub fn unusable_address(address: &IpAddr) -> bool {
+    let canonical = address.to_canonical();
+    canonical.is_unspecified() || canonical.is_loopback() || canonical.is_multicast() || matches!(canonical, IpAddr::V4(v4) if v4.is_broadcast())
+}
+
+
+/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, a relative `nft_path`.
+pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
+    [
+        ("isolation.endpoints", file.isolation.endpoints.len() > MAX_ENDPOINTS),
+        ("isolation.ports", file.isolation.endpoints.iter().any(|endpoint| endpoint.port == 0)),
+        ("isolation.dns", file.isolation.dns.len() > MAX_DNS_RESOLVERS),
+        (
+            "isolation.endpoints.address",
+            file.isolation.endpoints.iter().any(|endpoint| unusable_address(&endpoint.address)),
+        ),
+        ("isolation.dns.address", file.isolation.dns.iter().any(unusable_address)),
+        ("nft_path", !file.nft_path.is_absolute()),
+    ]
+    .into_iter()
+    .filter_map(|(name, invalid)| invalid.then_some(name))
+    .collect()
+}
+
+
 pub fn validate_settings(settings: &SourceSettings) -> Result<(), SourceError> {
     let invalid = invalid_settings(settings);
     if invalid.is_empty() {
@@ -66,7 +93,10 @@ pub fn validate_settings(settings: &SourceSettings) -> Result<(), SourceError> {
 
 pub fn validate_file(file: &LinuxFile) -> Result<(), SourceError> {
     validate_settings(&file.settings)?;
-    let invalid = invalid_sensor_settings(&file.sensor);
+    let invalid: Vec<&str> = invalid_sensor_settings(&file.sensor)
+        .into_iter()
+        .chain(invalid_isolation_settings(file))
+        .collect();
     if invalid.is_empty() {
         Ok(())
     } else {
