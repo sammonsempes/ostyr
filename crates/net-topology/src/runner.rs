@@ -71,10 +71,11 @@ fn spawn_failure(error: io::Error) -> RunFailure {
 }
 
 
-fn spawn(program: &Path, arguments: &[&str], stdout: PipeWriter) -> io::Result<Child> {
+fn spawn(program: &Path, arguments: &[&str], environment: &[(&str, &str)], stdout: PipeWriter) -> io::Result<Child> {
     Command::new(program)
         .args(arguments)
         .env_clear()
+        .envs(environment.iter().copied())
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(Stdio::null())
@@ -266,10 +267,22 @@ fn require_waitable(status: &Path) -> Result<(), RunFailure> {
 
 /// Runs `program` with `arguments` (cleared environment, own process group, stdout capped at `cap` bytes, stderr discarded) within `deadline`.
 pub fn run_command(program: &Path, arguments: &[&str], cap: u64, deadline: Duration) -> Result<Vec<u8>, RunFailure> {
+    run_command_with_env(program, arguments, &[], cap, deadline)
+}
+
+
+/// `run_command` with exactly the variables in `environment` (fixed by the caller, never inherited).
+pub fn run_command_with_env(
+    program: &Path,
+    arguments: &[&str],
+    environment: &[(&str, &str)],
+    cap: u64,
+    deadline: Duration,
+) -> Result<Vec<u8>, RunFailure> {
     require_waitable(Path::new(PROC_STATUS))?;
     let until = Instant::now() + deadline.min(Duration::from_secs(MAX_DEADLINE_SECONDS));
     let (mut reader, writer) = io::pipe()?;
-    let mut child = spawn(program, arguments, writer).map_err(spawn_failure)?;
+    let mut child = spawn(program, arguments, environment, writer).map_err(spawn_failure)?;
     let verdict = read_output(&mut reader, cap, until).and_then(|bytes| finish(&mut child, bytes, until));
     if !matches!(verdict, Ok(_) | Err(RunFailure::Failed { .. } | RunFailure::Unwaitable)) {
         reap_killed(&mut child, &mut Instant::now);

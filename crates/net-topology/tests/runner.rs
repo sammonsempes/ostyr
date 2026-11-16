@@ -8,8 +8,8 @@ mod types;
 use fake::{install_script, is_gone, scratch};
 use net_topology::model::RunFailure;
 use net_topology::runner::{
-    read_output, reap_killed, run_command, run_lldpcli, sigchld_ignored, wait_exit, wait_polls, MAX_DEADLINE_SECONDS, MAX_STATUS_BYTES,
-    WAIT_POLL_MILLIS,
+    read_output, reap_killed, run_command, run_command_with_env, run_lldpcli, sigchld_ignored, wait_exit, wait_polls, MAX_DEADLINE_SECONDS,
+    MAX_STATUS_BYTES, WAIT_POLL_MILLIS,
 };
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -116,6 +116,17 @@ fn the_argument_vector_is_exact() -> TestResult {
     let program = install_script(dir.path(), "lldpcli", r#"for a in "$@"; do echo "$a"; done"#)?;
     let output = run_lldpcli(&program, "vx0", HUGE_CAP, PATIENT).map_err(|failure| format!("{failure:?}"))?;
     assert_eq!(String::from_utf8(output)?, "-f\njson0\nshow\nneighbors\nports\nvx0\ndetails\n");
+    Ok(())
+}
+
+
+#[test]
+fn only_the_given_variables_reach_the_child() -> TestResult {
+    let dir = scratch()?;
+    let program = install_script(dir.path(), "printer", r#"printenv FIXED; printenv HOME || echo none"#)?;
+    let output = run_command_with_env(&program, &[], &[("FIXED", "value"), ("PATH", "/usr/bin:/bin")], HUGE_CAP, PATIENT)
+        .map_err(|failure| format!("{failure:?}"))?;
+    assert_eq!(String::from_utf8(output)?, "value\nnone\n");
     Ok(())
 }
 
