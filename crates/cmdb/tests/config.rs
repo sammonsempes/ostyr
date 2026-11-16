@@ -247,3 +247,26 @@ fn empty_and_reserved_names_are_refused_at_load() -> TestResult {
         Ok(())
     })
 }
+
+
+#[test]
+fn declared_whitespace_twins_are_refused_with_their_index() -> TestResult {
+    let bad_id = "assets:\n  - id: \"web1 \"\n    kind: server\n    lifecycle: in_service\n";
+    let (_dir, path) = write_config(bad_id)?;
+    let error = load_cmdb(&path).err().ok_or("accepted")?;
+    assert!(matches!(error, CmdbConfigError::Declared { index: 0, .. }), "{error}");
+    let bad_key = "assets:\n  - id: web1\n    kind: server\n    lifecycle: in_service\n    keys:\n      name: \"a  b\"\n";
+    let (_dir2, path2) = write_config(bad_key)?;
+    assert!(load_cmdb(&path2).is_err());
+    let bad_edge = "relationships:\n  - from: \"a\u{a0}b\"\n    kind: runs_on\n    to: c\n";
+    let (_dir3, path3) = write_config(bad_edge)?;
+    let edge_error = load_cmdb(&path3).err().ok_or("accepted")?;
+    assert!(matches!(edge_error, CmdbConfigError::Relationship { index: 0, .. }), "{edge_error}");
+    let bad_truth = "sources_of_truth:\n  owner: \"declared \"\n";
+    let (_dir4, path4) = write_config(bad_truth)?;
+    assert!(load_cmdb(&path4).is_err());
+    let free = "assets:\n  - id: web1\n    kind: server\n    lifecycle: in_service\n    owner: \"alice  \"\n";
+    let (_dir5, path5) = write_config(free)?;
+    load_cmdb(&path5)?;
+    Ok(())
+}

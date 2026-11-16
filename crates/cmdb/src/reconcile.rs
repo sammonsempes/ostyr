@@ -2,7 +2,7 @@ use crate::error::CmdbError;
 use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Lifecycle, Observation, Outcome, Resolution};
 use crate::summary::MAX_ID_BYTES;
 use crate::types::TruthMap;
-use ecs_normalise::suricata::is_unsafe;
+use ecs_normalise::suricata::{clean_identity, is_unsafe};
 
 
 pub const RESERVED_SOURCE: &str = "cmdb";
@@ -40,6 +40,24 @@ pub fn check_text(field: &'static str, text: &str, cap: usize) -> Result<(), Cmd
 }
 
 
+pub fn is_foreign_space(found: char) -> bool {
+    let text = found.to_string();
+    found != ' ' && clean_identity(&text) != text
+}
+
+
+pub fn is_ambiguous(text: &str) -> bool {
+    text.starts_with(' ') || text.ends_with(' ') || text.contains("  ") || text.chars().any(is_foreign_space)
+}
+
+
+/// `check_text` for identity text: also refuses edge or doubled spaces and any other whitespace, which render like another value; names the field only.
+pub fn check_identity(field: &'static str, text: &str, cap: usize) -> Result<(), CmdbError> {
+    check_text(field, text, cap)?;
+    (!is_ambiguous(text)).then_some(()).ok_or(CmdbError::AmbiguousText { field })
+}
+
+
 pub fn check_reserved(observation: &Observation) -> Result<(), CmdbError> {
     let attribute_reserved = observation.attributes.keys().any(|name| is_reserved_attribute(name));
     match (is_reserved_source(&observation.source), attribute_reserved) {
@@ -58,11 +76,11 @@ pub fn check_observation(observation: &Observation) -> Result<(), CmdbError> {
         .ok_or(CmdbError::TooManyAttributes {
             limit: MAX_OBSERVATION_ATTRIBUTES,
         })?;
-    check_text("source", &observation.source, MAX_VALUE_BYTES)?;
+    check_identity("source", &observation.source, MAX_VALUE_BYTES)?;
     observation
         .keys
         .values()
-        .try_for_each(|value| check_text("keys", value, MAX_VALUE_BYTES))?;
+        .try_for_each(|value| check_identity("keys", value, MAX_VALUE_BYTES))?;
     observation
         .attributes
         .keys()
@@ -75,7 +93,7 @@ pub fn check_observation(observation: &Observation) -> Result<(), CmdbError> {
         .keys
         .iter()
         .next()
-        .map_or(Ok(()), |(key, value)| check_text("asset id", &format!("{key}:{value}"), MAX_ID_BYTES))
+        .map_or(Ok(()), |(key, value)| check_identity("asset id", &format!("{key}:{value}"), MAX_ID_BYTES))
 }
 
 
