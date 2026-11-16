@@ -92,3 +92,45 @@ pub const STATIC_RESPONSE: &str = "static_response";
 
 
 pub const ROUTE_SEPARATOR_BYTES: usize = 2;
+
+
+pub const TLS_LISTEN_ADDRESS: &str = ":443";
+
+
+pub const PROTOCOL_MIN: &str = "tls1.2";
+
+
+pub const MAX_HSTS_SECONDS: u64 = 63_072_000;
+
+
+pub const DEFAULT_HSTS_SECONDS: u64 = 31_536_000;
+
+
+pub const HSTS_HEADER: &str = "Strict-Transport-Security";
+
+
+pub const MAX_DIRECTORY_BYTES: usize = 2_048;
+
+
+pub const MAX_EMAIL_BYTES: usize = 254;
+
+
+pub const MAX_LOCAL_BYTES: usize = 64;
+
+
+pub const MAX_CA_ROOT_BYTES: u64 = 65_536;
+
+
+pub const CA_ROOT_LABEL: &str = "ca_root_file";
+
+
+pub const HTTPS_PREFIX: &str = "https://";
+
+
+pub const ACME_MODULE: &str = "acme";
+
+
+pub const INTERNAL_MODULE: &str = "internal";
+
+
+pub const SUBJECT_BYTES: usize = 18;

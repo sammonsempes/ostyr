@@ -1,0 +1,6 @@
+tls:
+  issuer: internal
+  hsts_max_age_seconds: 0
+routes:
+  - hosts: [app.example.test]
+    backends: ["127.0.0.1:9001"]

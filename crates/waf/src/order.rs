@@ -1,7 +1,7 @@
 use crate::caddy::CaddyRoute;
 use crate::error::WafError;
-use crate::limits::{CATCH_ALL_UPSTREAMS, ROUTE_INDENT_BYTES, ROUTE_SEPARATOR_BYTES};
-use crate::model::{Budget, Refusal, Route};
+use crate::limits::{CATCH_ALL_UPSTREAMS, ROUTE_INDENT_BYTES, ROUTE_SEPARATOR_BYTES, SUBJECT_BYTES};
+use crate::model::{Budget, Refusal, Route, Tls};
 use crate::render::{caddy_config, caddy_route};
 use crate::validate::{prefix_key, SHADOWED};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,9 +73,19 @@ pub fn caddy_route_bytes(route: &CaddyRoute) -> Result<usize, WafError> {
 }
 
 
-/// The bytes a route adds to the document, one Caddy route per path key.
-pub fn route_bytes(route: &Route) -> Result<usize, WafError> {
-    route_keys(route).into_iter().map(|key| caddy_route_bytes(&caddy_route(route, key))).sum()
+/// The bytes a route adds to the document, one Caddy route per path key, and with TLS an upper bound for its host subjects.
+pub fn route_bytes(route: &Route, tls: Option<&Tls>) -> Result<usize, WafError> {
+    let hsts = tls.and_then(|value| value.hsts.as_deref());
+    let routes: Result<usize, WafError> = route_keys(route)
+        .into_iter()
+        .map(|key| caddy_route_bytes(&caddy_route(route, key, hsts)))
+        .sum();
+    let subjects: usize = if tls.is_some() {
+        route.hosts.iter().map(|host| host.len() + SUBJECT_BYTES).sum()
+    } else {
+        0
+    };
+    routes.map(|bytes| bytes + subjects)
 }
 
 
@@ -92,13 +102,13 @@ pub fn overflow(upstreams: usize, bytes: usize, budget: &Budget) -> Option<&'sta
 
 
 /// Keeps routes in file order while their upstreams and bytes fit `budget`; the first that does not fit and every later one are refused.
-pub fn cap_rendered(placed: Vec<(usize, Route)>, budget: &Budget) -> Result<(Vec<Route>, Vec<Refusal>), WafError> {
+pub fn cap_rendered(placed: Vec<(usize, Route)>, budget: &Budget, tls: Option<&Tls>) -> Result<(Vec<Route>, Vec<Refusal>), WafError> {
     let mut upstreams = CATCH_ALL_UPSTREAMS;
-    let mut bytes = serde_json::to_vec_pretty(&caddy_config(Vec::new()))?.len() + 1;
+    let mut bytes = serde_json::to_vec_pretty(&caddy_config(Vec::new(), tls))?.len() + 1;
     let mut stopped: Option<&'static str> = None;
     let mut kept = Vec::new();
     let mut refused = Vec::new();
-    let sizes = placed.iter().map(|(_, route)| route_bytes(route)).collect::<Result<Vec<_>, _>>()?;
+    let sizes = placed.iter().map(|(_, route)| route_bytes(route, tls)).collect::<Result<Vec<_>, _>>()?;
     placed.into_iter().zip(sizes).for_each(|((index, route), size)| {
         upstreams += route_upstreams(&route);
         bytes += size;

@@ -7129,6 +7129,7 @@ name = "waf"
 version = "0.0.0"
 dependencies = [
  "core-config",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tempfile",

@@ -1,0 +1,163 @@
+{
+  "apps": {
+    "http": {
+      "servers": {
+        "main": {
+          "listen": [
+            ":443"
+          ],
+          "automatic_https": {
+            "disable_redirects": false
+          },
+          "tls_connection_policies": [
+            {
+              "protocol_min": "tls1.2"
+            }
+          ],
+          "routes": [
+            {
+              "match": [
+                {
+                  "header": {
+                    "X-Ostyr-Proxied": [
+                      "1"
+                    ]
+                  }
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 508
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": [
+                    "app.example.test"
+                  ],
+                  "path": [
+                    "/api",
+                    "/api/*"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "127.0.0.1:9001"
+                    }
+                  ],
+                  "health_checks": {
+                    "active": {
+                      "uri": "/",
+                      "interval": "10s"
+                    },
+                    "passive": {
+                      "fail_duration": "30s",
+                      "max_fails": 3
+                    }
+                  },
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Ostyr-Proxied": [
+                          "1"
+                        ]
+                      }
+                    },
+                    "response": {
+                      "set": {
+                        "Strict-Transport-Security": [
+                          "max-age=63072000; includeSubDomains"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": [
+                    "web.example.test",
+                    "www.example.test"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "127.0.0.1:9002"
+                    }
+                  ],
+                  "health_checks": {
+                    "active": {
+                      "uri": "/",
+                      "interval": "10s"
+                    },
+                    "passive": {
+                      "fail_duration": "30s",
+                      "max_fails": 3
+                    }
+                  },
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Ostyr-Proxied": [
+                          "1"
+                        ]
+                      }
+                    },
+                    "response": {
+                      "set": {
+                        "Strict-Transport-Security": [
+                          "max-age=63072000; includeSubDomains"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 404
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": [
+              "app.example.test",
+              "web.example.test",
+              "www.example.test"
+            ],
+            "issuers": [
+              {
+                "module": "acme",
+                "ca": "https://acme.example.test:14000/dir",
+                "email": "ops@example.test"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
