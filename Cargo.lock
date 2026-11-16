@@ -712,6 +712,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "breached-passwords"
+version = "0.0.0"
+dependencies = [
+ "core-config",
+ "data-encoding",
+ "libc",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
