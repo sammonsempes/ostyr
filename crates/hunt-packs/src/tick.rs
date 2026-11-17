@@ -1,7 +1,8 @@
 use crate::error::shown_id;
 use crate::model::{HuntPack, Source};
+use crate::run::HuntOutcome;
 use crate::schedule::{RunWindow, ScheduleError};
-use crate::store::{last_done, record_done, Param, StateError};
+use crate::store::{last_done, record_done, record_finding, Param, StateError};
 use crate::types::{DueFn, RunFn};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -74,6 +75,7 @@ pub enum PackStatus {
     FutureEnd,
     RunFailed(String),
     StoreFailed(String),
+    FindingStoreFailed(String),
     ScheduleFailed(String),
 }
 
@@ -101,6 +103,7 @@ pub struct TickReport {
     pub deferred: usize,
     pub skipped_osquery: usize,
     pub refused_tenants: usize,
+    pub findings_failed: usize,
 }
 
 
@@ -159,7 +162,38 @@ where
 }
 
 
-/// One window: refuse an end after `now`, run, then record; a failed run records nothing.
+fn finding_failure(tenant: &str, pack_id: &str, error: &StateError) -> PackStatus {
+    let id = shown_id(pack_id);
+    let text = error.to_string();
+    warn!("hunt finding store failed: tenant {tenant} pack {id}: {text}");
+    PackStatus::FindingStoreFailed(text)
+}
+
+
+/// A finding is stored before the run state moves, so a failure leaves the window to run again; the insert is idempotent.
+pub async fn persist<Executor, Pending>(
+    exec: &mut Executor,
+    tenant: &str,
+    pack: &HuntPack,
+    window: &RunWindow,
+    outcome: &HuntOutcome,
+) -> Result<i64, PackStatus>
+where
+    Executor: FnMut(&TenantScope, &'static str, Vec<Param>) -> Pending,
+    Pending: Future<Output = Result<Vec<i64>, PgError>>,
+{
+    if outcome.finding {
+        record_finding(exec, tenant, &pack.id, window, outcome.matches, pack.baseline.max_matches)
+            .await
+            .map_err(|error| finding_failure(tenant, &pack.id, &error))?;
+    }
+    record_done(exec, tenant, &pack.id, window.end)
+        .await
+        .map_err(|error| store_failure(tenant, &pack.id, &error))
+}
+
+
+/// One window: refuse an end after `now`, run, store the finding if any, then record; a failed run or finding records nothing.
 pub async fn run_window<Executor, Pending>(
     exec: &mut Executor,
     report: &mut PackReport,
@@ -176,7 +210,7 @@ pub async fn run_window<Executor, Pending>(
     } else {
         report.attempted += 1;
         match run(pack, &report.tenant, window.end) {
-            Ok(outcome) => match record_done(exec, &report.tenant, &pack.id, window.end).await {
+            Ok(outcome) => match persist(exec, &report.tenant, pack, window, &outcome).await {
                 Ok(stored) => {
                     report.runs.push(RunRecord {
                         end: window.end,
@@ -184,7 +218,7 @@ pub async fn run_window<Executor, Pending>(
                     });
                     report.last_end = Some(stored);
                 }
-                Err(error) => report.status = store_failure(&report.tenant, &pack.id, &error),
+                Err(status) => report.status = status,
             },
             Err(error) => report.status = PackStatus::RunFailed(error.to_string()),
         }
@@ -267,6 +301,7 @@ where
                 let entry = tick_pack(exec, tenant, pack, now, limits, budget, &mut *hooks).await;
                 budget = budget.saturating_sub(entry.attempted);
                 report.deferred += usize::from(entry.status == PackStatus::Deferred);
+                report.findings_failed += usize::from(matches!(entry.status, PackStatus::FindingStoreFailed(_)));
                 report.packs.push(entry);
             } else {
                 report.skipped_osquery += 1;
@@ -275,6 +310,7 @@ where
     }
     let (packs_seen, deferred, skipped) = (report.packs.len(), report.deferred, report.skipped_osquery);
     let runs: usize = report.packs.iter().map(|entry| entry.runs.len()).sum();
-    info!("hunt tick: {packs_seen} packs, {runs} runs, {deferred} deferred, {skipped} osquery skipped");
+    let failed = report.findings_failed;
+    info!("hunt tick: {packs_seen} packs, {runs} runs, {deferred} deferred, {skipped} osquery skipped, {failed} finding stores failed");
     Ok(report)
 }
