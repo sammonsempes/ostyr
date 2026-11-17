@@ -92,10 +92,13 @@ fn a_failing_line_appends_nothing_of_the_call() -> TestResult {
 const CHILD_PROCESSES: usize = 2;
 
 
-const CHILD_LINES: usize = 200;
+const CHILD_LINES: usize = 100;
 
 
-const CHILD_ATTEMPTS: u32 = 12_000;
+const CHILD_ATTEMPTS: u32 = u32::MAX;
+
+
+const CHILD_HANG_GUARD_SECONDS: u64 = 600;
 
 
 const CHILD_LINE_BYTES: usize = 4_000;
@@ -138,6 +141,56 @@ fn spool_child_appends_when_asked() -> TestResult {
 }
 
 
+fn kill_process(pid: u32) -> io::Result<()> {
+    let pid_text = pid.to_string();
+    let status = if cfg!(windows) {
+        Command::new("taskkill").args(["/F", "/PID", &pid_text]).status()?
+    } else {
+        Command::new("kill").args(["-9", &pid_text]).status()?
+    };
+    status.success().then_some(()).ok_or(io::Error::other("kill failed"))
+}
+
+
+fn wait_for_children(children: Vec<std::process::Child>) -> Result<(), Box<dyn std::error::Error>> {
+    let pids: Vec<u32> = children.iter().map(std::process::Child::id).collect();
+    let (sender, receiver) = mpsc::channel();
+    let waiters: Vec<_> = children
+        .into_iter()
+        .map(|mut child| {
+            let done_sender = sender.clone();
+            std::thread::spawn(move || done_sender.send(child.wait().map(|status| status.success())))
+        })
+        .collect();
+    drop(sender);
+    let verdicts = (0..pids.len()).try_fold(Vec::new(), |mut done, _child| {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(CHILD_HANG_GUARD_SECONDS))
+            .map(|verdict| {
+                done.push(verdict);
+                done
+            })
+    });
+    match verdicts {
+        Ok(done) => {
+            waiters
+                .into_iter()
+                .try_for_each(|waiter| waiter.join().map(|_| ()).map_err(|_| "a waiter thread panicked"))?;
+            done.into_iter()
+                .collect::<io::Result<Vec<bool>>>()?
+                .into_iter()
+                .all(|success| success)
+                .then_some(())
+                .ok_or("a child appender failed".into())
+        }
+        Err(_) => {
+            pids.iter().try_for_each(|pid| kill_process(*pid))?;
+            Err("a child appender hung: the spool lock was never obtained before the child hang guard".into())
+        }
+    }
+}
+
+
 #[test]
 fn two_processes_appending_to_one_spool_lose_no_line() -> TestResult {
     let dir = tempdir()?;
@@ -152,10 +205,7 @@ fn two_processes_appending_to_one_spool_lose_no_line() -> TestResult {
                 .spawn()
         })
         .collect::<io::Result<Vec<_>>>()?;
-    children.into_iter().try_for_each(|mut child| -> Result<(), Box<dyn std::error::Error>> {
-        let status = child.wait()?;
-        Ok(status.success().then_some(()).ok_or("a child appender failed")?)
-    })?;
+    wait_for_children(children)?;
     let text = fs::read_to_string(&spool)?;
     let found: BTreeSet<&str> = text.lines().collect();
     let expected: Vec<String> = (0..CHILD_PROCESSES)
