@@ -175,6 +175,7 @@ async fn an_odd_reply_is_an_error() -> Result<(), Box<dyn Error>> {
     assert!(matches!(record_done(&mut empty, "acme", PACK, NEWER).await, Err(StateError::BadReply)));
     let mut two = |_scope: &TenantScope, _sql: &'static str, _params: Vec<Param>| ready(Ok::<Vec<i64>, PgError>(vec![1, SECOND]));
     assert!(matches!(last_done(&mut two, "acme", PACK).await, Err(StateError::BadReply)));
+    assert!(matches!(record_done(&mut two, "acme", PACK, NEWER).await, Err(StateError::BadReply)));
     let mut wild = |_scope: &TenantScope, _sql: &'static str, _params: Vec<Param>| ready(Ok::<Vec<i64>, PgError>(vec![YEAR_10000]));
     assert!(matches!(last_done(&mut wild, "acme", PACK).await, Err(StateError::OutOfRange(_))));
     Ok(())
@@ -194,7 +195,10 @@ fn single_end_reads_none_one_or_refuses() -> TestResult {
 fn the_migration_is_embedded_and_its_namespace_valid() -> Result<(), Box<dyn Error>> {
     check_embedded(&MIGRATIONS)?;
     check_namespace(MIGRATION_NAMESPACE)?;
-    assert!(MIGRATIONS.iter().all(|migration| migration.sql.contains("PRIMARY KEY (tenant, pack_id")));
+    assert!(MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version != "hunt_packs_0003")
+        .all(|migration| migration.sql.contains("PRIMARY KEY (tenant, pack_id")));
     assert!(!STATEMENT_DEADLINE.is_zero());
     Ok(())
 }

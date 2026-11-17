@@ -15,7 +15,10 @@ use hunt_packs::types::RunFn;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::{ready, Ready};
+use std::io::Write;
 use std::rc::Rc;
+use std::sync::{Arc, LazyLock, Mutex};
+use tracing::Dispatch;
 use types::{Calls, Log, Store, TestResult};
 
 
@@ -689,5 +692,79 @@ async fn a_replayed_window_inserts_its_finding_once() -> TestResult {
     .await?;
     assert_eq!(log.borrow().len(), TWO);
     assert_eq!(findings_in(&store), 1);
+    Ok(())
+}
+
+
+static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+
+impl Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().map_err(|_| std::io::Error::other("poisoned"))?.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+fn huge_baseline() -> Result<HuntPack, std::num::TryFromIntError> {
+    let mut big = pack("p", Source::Clickhouse);
+    big.baseline.max_matches = u64::try_from(i64::MAX)? + 1;
+    Ok(big)
+}
+
+
+#[tokio::test]
+async fn a_finding_refused_for_good_records_the_window_once_and_never_reruns_it() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&captured);
+    let dispatch = Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Sink(Arc::clone(&writer)))
+            .finish(),
+    );
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let (store, calls, log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = recorder(&log, never);
+    let packs = [huge_baseline()?];
+    let first = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    let entry = first.packs.first().ok_or("no entry")?;
+    assert_eq!(entry.status, PackStatus::Done);
+    assert_eq!((entry.findings_refused, first.findings_refused, first.findings_failed), (1, 1, 0));
+    assert_eq!(stored(&store, "a", "p"), Some(H4));
+    assert_eq!(findings_in(&store), 0);
+    let again = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(again.findings_refused, 0);
+    assert_eq!(log.borrow().len(), 1);
+    let text = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    let refusals = text.lines().filter(|line| line.contains("hunt finding refused for good")).count();
+    assert_eq!(refusals, 1);
+    assert!(text.contains("tenant a pack p"));
     Ok(())
 }

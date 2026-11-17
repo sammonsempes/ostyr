@@ -5,10 +5,12 @@ use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
-    list_findings, record_finding, FindingPage, FindingRow, Param, StateError, FINDING_SQL, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
+    count_oversized, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, CursorError, FindingPage, FindingRow, Param,
+    StateError, FINDING_SQL, ID_BYTE_CAP, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS, OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
 };
 use hunt_packs::types::ListResult;
 use std::cell::RefCell;
+use std::error::Error;
 use std::future::{ready, Ready};
 use std::rc::Rc;
 use types::{Rows, Seen, TestResult};
@@ -27,6 +29,9 @@ const LATER: i64 = 3_000;
 
 
 const THREE: i64 = 3;
+
+
+const ID_CAP: usize = 64;
 
 
 const SECOND: i64 = 2;
@@ -99,11 +104,15 @@ fn list_exec(store: &Rows, seen: &Seen) -> impl FnMut(&TenantScope, &'static str
     move |scope, sql, params| {
         log.borrow_mut().push((tenant_of(scope).to_owned(), sql, params.clone()));
         let answer = match params.as_slice() {
-            [Param::Int(end), Param::Text(pack), Param::Int(limit)] => {
+            [Param::Int(end), Param::Text(pack), Param::Int(limit), Param::Int(cap)] => {
                 let mut matching: Vec<FindingRow> = rows
                     .borrow()
                     .iter()
-                    .filter(|(owner, stored)| owner == tenant_of(scope) && (stored.window_end, &stored.pack_id) > (*end, pack))
+                    .filter(|(owner, stored)| {
+                        owner == tenant_of(scope)
+                            && (stored.window_end, &stored.pack_id) > (*end, pack)
+                            && i64::try_from(stored.pack_id.len()).is_ok_and(|length| length <= *cap)
+                    })
                     .map(|(_, stored)| stored.clone())
                     .collect();
                 matching.sort_by(|left, right| (left.window_end, &left.pack_id).cmp(&(right.window_end, &right.pack_id)));
@@ -126,8 +135,14 @@ fn fresh() -> (Rows, Seen) {
 fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
     assert!(FINDING_SQL.contains("VALUES ($1, $2, $3, $4, $5, $6, now())"));
     assert!(FINDING_SQL.contains("ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING window_end"));
-    assert!(LIST_SQL.contains("WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) ORDER BY window_end, pack_id LIMIT $4"));
+    assert!(LIST_SQL.contains(
+        "WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= $5::bigint ORDER BY window_end, pack_id LIMIT $4"
+    ));
     assert!(!LIST_SQL.contains("OFFSET"));
+    assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > $2::bigint LIMIT $3::bigint"));
+    assert_eq!(usize::try_from(ID_BYTE_CAP)?, ID_CAP);
+    let constraint = MIGRATIONS.last().ok_or("no migration")?.sql;
+    assert!(constraint.contains(&format!("CHECK (octet_length(pack_id) BETWEEN 1 AND {ID_BYTE_CAP}) NOT VALID")));
     assert!(MIGRATIONS
         .iter()
         .any(|migration| migration.sql.contains("ON hunt_pack_findings (tenant, window_end, pack_id)")));
@@ -168,11 +183,11 @@ async fn a_refused_finding_sends_nothing() -> TestResult {
     let too_big = u64::try_from(i64::MAX)? + 1;
     assert!(matches!(
         record_finding(&mut exec, "acme", PACK, &window(), too_big, 0).await,
-        Err(StateError::CountOutOfRange)
+        Err(StateError::CountOutOfRange(_))
     ));
     assert!(matches!(
         record_finding(&mut exec, "acme", PACK, &window(), 1, too_big).await,
-        Err(StateError::CountOutOfRange)
+        Err(StateError::CountOutOfRange(_))
     ));
     assert!(matches!(
         record_finding(&mut exec, "acme", "-x", &window(), 1, 0).await,
@@ -304,4 +319,180 @@ async fn a_row_with_an_invalid_pack_id_is_skipped_and_counted() -> TestResult {
     let mut failing = |_scope: &TenantScope, _sql: &'static str, _params: Vec<Param>| ready(Err::<Vec<FindingRow>, PgError>(PgError::LegacyRecords));
     assert!(matches!(list_findings(&mut failing, "a", 0, "", 1).await, Err(StateError::Pg(_))));
     Ok(())
+}
+
+
+#[tokio::test]
+async fn the_count_error_keeps_its_cause_and_is_permanent() -> TestResult {
+    let (store, seen) = fresh();
+    let mut exec = insert_exec(&store, &seen);
+    let too_big = u64::try_from(i64::MAX)? + 1;
+    let error = record_finding(&mut exec, "acme", PACK, &window(), too_big, 0)
+        .await
+        .err()
+        .ok_or("accepted")?;
+    assert!(error.source().is_some());
+    assert!(is_permanent(&error));
+    assert!(is_permanent(&StateError::InvalidPackId));
+    assert!(!is_permanent(&StateError::BadReply));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_page_of_skipped_rows_still_gives_the_next_cursor() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("Bad Id", END)),
+        ("a".to_owned(), row("Bad Two", LATER)),
+        ("a".to_owned(), row("fine", LATER + 1)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let page = list_findings(&mut exec, "a", 0, "", SECOND).await?;
+    assert_eq!((page.rows.len(), page.skipped), (0, SECOND_USIZE));
+    assert_eq!(page.next, Some((LATER, "Bad Two".to_owned())));
+    let following = list_findings(&mut exec, "a", LATER, "Bad Two", SECOND).await?;
+    assert_eq!((following.rows.len(), following.skipped, following.next), (1, 0, None));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_printed_cursor_of_an_escaped_id_round_trips_and_lists_the_row_between() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("Bad Id", END)),
+        ("a".to_owned(), row("beta", END)),
+        ("a".to_owned(), row("x\u{1b}[31mred", END)),
+        ("a".to_owned(), row("x-hidden", END)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let first = list_findings(&mut exec, "a", 0, "", THREE).await?;
+    let (end, pack) = first.next.ok_or("no cursor")?;
+    let printed = format_cursor(end, &pack);
+    assert!(printed.is_ascii() && !printed.chars().any(char::is_control));
+    let (parsed_end, parsed_pack) = parse_cursor(&printed)?;
+    assert_eq!((parsed_end, parsed_pack.as_str()), (END, pack.as_str()));
+    let second = list_findings(&mut exec, "a", parsed_end, &parsed_pack, THREE).await?;
+    let listed: Vec<&str> = second.rows.iter().map(|found| found.pack_id.as_str()).collect();
+    assert_eq!(listed, ["x-hidden"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_cursor_other_than_the_printed_form_is_refused() -> TestResult {
+    assert_eq!(parse_cursor("1")?, (1, String::new()));
+    let too_long = format!("1:{}", "61".repeat(ID_CAP + 1));
+    let refused = ["x", "1:6", "1:6G", "1:4A", "1:zz", "1:ff", "1:é", too_long.as_str()];
+    assert!(refused.iter().all(|text| parse_cursor(text) == Err(CursorError::Malformed)));
+    assert_eq!(parse_cursor(&format!("1:{}", "61".repeat(ID_CAP)))?.1.len(), ID_CAP);
+    Ok(())
+}
+
+
+#[test]
+fn the_error_texts_are_fixed() -> TestResult {
+    assert!(CursorError::Malformed.to_string().contains("lowercase hex"));
+    assert!(StateError::InvalidPackId.to_string().contains("invalid pack id"));
+    assert!(StateError::BadReply.to_string().contains("unexpected number of rows"));
+    let conversion = i64::try_from(u64::MAX).err().ok_or("fits")?;
+    assert!(StateError::CountOutOfRange(conversion).to_string().contains("match count"));
+    let range = hunt_packs::schedule::checked_time(YEAR_10000).err().ok_or("in range")?;
+    assert!(StateError::OutOfRange(range).to_string().contains("years 0 to 9999"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_id_of_exactly_the_cap_lists_and_round_trips_while_one_byte_more_is_never_read() -> TestResult {
+    let (store, seen) = fresh();
+    let exact = "y".repeat(ID_CAP);
+    let over = "y".repeat(ID_CAP + 1);
+    let wide = "é".repeat(ID_CAP / SECOND_USIZE + 1);
+    store.borrow_mut().extend([
+        ("a".to_owned(), row(&exact, END)),
+        ("a".to_owned(), row(&over, END)),
+        ("a".to_owned(), row(&wide, END)),
+        ("a".to_owned(), row("zz", LATER)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let first = list_findings(&mut exec, "a", 0, "", 1).await?;
+    let (end, pack) = first.next.ok_or("no cursor")?;
+    assert_eq!(pack, exact);
+    let printed = format_cursor(end, &pack);
+    assert_eq!(parse_cursor(&printed)?, (END, exact.clone()));
+    let second = list_findings(&mut exec, "a", END, &exact, MAX_FINDINGS_PAGE).await?;
+    let listed: Vec<&str> = second.rows.iter().map(|found| found.pack_id.as_str()).collect();
+    assert_eq!(listed, ["zz"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_page_of_only_short_invalid_rows_is_still_paged_past_with_oversized_rows_present() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("Bad Id", END)),
+        ("a".to_owned(), row(&"Y".repeat(ID_CAP + SECOND_USIZE), END)),
+        ("a".to_owned(), row("Bad Two", LATER)),
+        ("a".to_owned(), row("fine", LATER + 1)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let page = list_findings(&mut exec, "a", 0, "", SECOND).await?;
+    assert_eq!((page.rows.len(), page.skipped), (0, SECOND_USIZE));
+    let (end, pack) = page.next.ok_or("no cursor")?;
+    let following = list_findings(&mut exec, "a", end, &pack, SECOND).await?;
+    assert_eq!(following.rows.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_oversized_count_is_bound_under_the_tenant_and_a_bad_reply_is_refused() -> TestResult {
+    let (_, seen) = fresh();
+    assert_eq!(count_oversized(&mut count_exec(&seen, one_row), "a").await?, THREE);
+    let call = seen.borrow().first().cloned().ok_or("no call")?;
+    assert_eq!((call.0.as_str(), call.1), ("a", OVERSIZED_SQL));
+    assert_eq!(call.2, vec![Param::Int(ID_BYTE_CAP), Param::Int(OVERSIZED_REPORT_CAP + 1)]);
+    assert!(matches!(
+        count_oversized(&mut count_exec(&seen, no_row), "a").await,
+        Err(StateError::BadReply)
+    ));
+    assert!(matches!(
+        count_oversized(&mut count_exec(&seen, no_row), "-x").await,
+        Err(StateError::Pg(_))
+    ));
+    assert!(matches!(
+        count_oversized(&mut count_exec(&seen, store_down), "a").await,
+        Err(StateError::Pg(_))
+    ));
+    Ok(())
+}
+
+
+fn count_exec(
+    seen: &Seen,
+    answer: fn() -> Result<Vec<i64>, PgError>,
+) -> impl FnMut(&TenantScope, &'static str, Vec<Param>) -> Ready<Result<Vec<i64>, PgError>> {
+    let log = Rc::clone(seen);
+    move |scope, sql, params| {
+        log.borrow_mut().push((tenant_of(scope).to_owned(), sql, params));
+        ready(answer())
+    }
+}
+
+
+fn one_row() -> Result<Vec<i64>, PgError> {
+    Ok(vec![THREE])
+}
+
+
+fn no_row() -> Result<Vec<i64>, PgError> {
+    Ok(Vec::new())
+}
+
+
+fn store_down() -> Result<Vec<i64>, PgError> {
+    Err(PgError::LegacyRecords)
 }

@@ -5,7 +5,8 @@ use core_pg::query::scoped_query;
 use core_pg::scope::TenantScope;
 use core_pg::settings::parse_settings;
 use hunt_packs::store::{
-    last_done, list_findings, record_done, FindingRow, Param, MAX_FINDINGS_PAGE, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE,
+    count_oversized, format_cursor, last_done, list_findings, parse_cursor, record_done, FindingRow, Param, MAX_FINDINGS_PAGE, MIGRATIONS,
+    MIGRATION_NAMESPACE, OVERSIZED_REPORT_CAP, STATEMENT_DEADLINE,
 };
 use std::io::{stderr, stdout, Write};
 use std::process::ExitCode;
@@ -69,12 +70,6 @@ async fn execute_list(client: &Client, scope: TenantScope, sql: &'static str, pa
 }
 
 
-fn parse_cursor(text: Option<&String>) -> Result<(i64, String), Box<dyn std::error::Error>> {
-    let (end, pack) = text.map_or(("0", ""), |value| value.split_once(':').unwrap_or((value.as_str(), "")));
-    Ok((end.parse()?, pack.to_owned()))
-}
-
-
 async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let (cursor, limit) = match rest {
         [] => (None, None),
@@ -82,10 +77,27 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
         [since, limit] => (Some(since), Some(limit)),
         _ => Err(USAGE)?,
     };
-    let (since_end, since_pack) = parse_cursor(cursor)?;
+    let (since_end, since_pack) = cursor.map(String::as_str).map_or(Ok((0, String::new())), parse_cursor)?;
     let limit_count: i64 = limit.map_or(Ok(MAX_FINDINGS_PAGE), |text| text.parse())?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute_list(client, scope.clone(), sql, params);
     let page = list_findings(&mut exec, tenant, since_end, &since_pack, limit_count).await?;
+    let skipped = page.skipped;
+    (skipped == 0).then_some(()).map_or_else(
+        || writeln!(stderr(), "skipped {skipped} stored rows with an invalid pack id"),
+        |()| Ok(()),
+    )?;
+    let mut count_exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute(client, scope.clone(), sql, params);
+    let oversized = count_oversized(&mut count_exec, tenant).await?;
+    let oversized_text = if oversized > OVERSIZED_REPORT_CAP {
+        format!("more than {OVERSIZED_REPORT_CAP}")
+    } else {
+        oversized.to_string()
+    };
+    (oversized == 0).then_some(()).map_or_else(
+        || writeln!(stderr(), "{oversized_text} stored rows with an over-long pack id are not listed"),
+        |()| Ok(()),
+    )?;
+    let cursor_line = page.next.iter().map(|(end, pack)| format!("next\t{}", format_cursor(*end, pack)));
     let lines: Vec<String> = page
         .rows
         .iter()
@@ -95,6 +107,7 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
                 row.window_end, row.pack_id, row.window_start, row.matches, row.max_matches
             )
         })
+        .chain(cursor_line)
         .collect();
     Ok(lines)
 }
