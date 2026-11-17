@@ -1,7 +1,9 @@
 //! The `assets.owned_ratio` indicator, written in the JSON input format of the compliance evaluation (spec section 13).
 
-use crate::config::OWNER_ATTRIBUTE;
+use crate::config::{DECLARED_SOURCE, OWNER_ATTRIBUTE};
 use crate::model::{Asset, Lifecycle, Snapshot};
+use crate::reconcile::{check_identity, MAX_VALUE_BYTES};
+use crate::types::TruthMap;
 use serde_json::{json, Value};
 
 
@@ -20,16 +22,20 @@ pub fn is_in_service(asset: &Asset) -> bool {
 }
 
 
-pub fn is_owned(asset: &Asset) -> bool {
-    asset.attributes.get(OWNER_ATTRIBUTE).is_some_and(|owner| !owner.value.trim().is_empty())
+/// An owner counts when it comes from `declared` or the configured source of truth for `owner`, holds an ASCII alphanumeric and has unambiguous text.
+pub fn is_owned(asset: &Asset, truth: &TruthMap) -> bool {
+    asset.attributes.get(OWNER_ATTRIBUTE).is_some_and(|owner| {
+        let trusted = owner.source == DECLARED_SOURCE || truth.get(OWNER_ATTRIBUTE).is_some_and(|source| *source == owner.source);
+        trusted && owner.value.chars().any(|found| found.is_ascii_alphanumeric()) && check_identity("owner", &owner.value, MAX_VALUE_BYTES).is_ok()
+    })
 }
 
 
-/// Counts in-service assets; one is owned when its `owner` attribute is present and not blank.
-pub fn owned_ratio(snapshot: &Snapshot) -> Ratio {
+/// Counts in-service assets; one is owned when `is_owned` holds.
+pub fn owned_ratio(snapshot: &Snapshot, truth: &TruthMap) -> Ratio {
     let in_service: Vec<&Asset> = snapshot.assets.iter().filter(|asset| is_in_service(asset)).collect();
     Ratio {
-        owned: in_service.iter().filter(|asset| is_owned(asset)).count(),
+        owned: in_service.iter().filter(|asset| is_owned(asset, truth)).count(),
         total: in_service.len(),
     }
 }
