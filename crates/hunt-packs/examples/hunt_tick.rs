@@ -8,7 +8,7 @@ use hunt_packs::model::HuntPack;
 use hunt_packs::packs::load_packs;
 use hunt_packs::run::{run_pack, RunError};
 use hunt_packs::schedule::due_runs;
-use hunt_packs::store::{Param, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
+use hunt_packs::store::{Param, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
 use hunt_packs::tick::{tick, Hooks, TickLimits};
 use metric_alerts::fetch::{agent_for, load_fetch_settings, read_key};
 use std::io::{stderr, stdout, Write};
@@ -57,7 +57,7 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let packs: Vec<HuntPack> = load_packs(Path::new(dir))?.into_iter().map(|item| item.pack).collect();
     let settings = parse_settings(&std::fs::read_to_string(pg_file)?, pg_file)?;
     let client = connect(&settings).await?;
-    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, STATEMENT_DEADLINE).await?;
+    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, MIGRATION_DEADLINE).await?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute(&client, scope.clone(), sql, params);
     let remaining = Duration::from_millis(fetch_settings.timeout_ms);
     let mut runner = |pack: &HuntPack, tenant: &str, end: i64| {

@@ -13,7 +13,7 @@ use thiserror::Error;
 pub const MIGRATION_NAMESPACE: &str = "hunt_packs";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "hunt_packs_0001",
         sql: include_str!("../migrations/hunt_packs_0001.sql"),
@@ -26,11 +26,19 @@ pub const MIGRATIONS: [Migration; 3] = [
         version: "hunt_packs_0003",
         sql: include_str!("../migrations/hunt_packs_0003.sql"),
     },
+    Migration {
+        version: "hunt_packs_0004",
+        sql: include_str!("../migrations/hunt_packs_0004.sql"),
+    },
 ];
 
 
 /// Server and client deadline of every statement (`core_pg::query::scoped_query` sends `SET statement_timeout` first).
 pub const STATEMENT_DEADLINE: Duration = Duration::from_secs(10);
+
+
+/// Deadline of the migrations, which may build an index on a cold database.
+pub const MIGRATION_DEADLINE: Duration = Duration::from_secs(120);
 
 
 /// Params: `$2` pack id. At most one row, the last completed run end.
@@ -49,7 +57,7 @@ pub const FINDING_SQL: &str = "INSERT INTO hunt_pack_findings (tenant, pack_id, 
 
 
 /// The longest stored pack id in bytes (the `hunt_packs_0003` constraint); a longer stored id is never read, so a cursor always parses back.
-pub const ID_BYTE_CAP: i64 = 64;
+pub const ID_BYTE_CAP: i64 = MAX_ID_CHARS as i64;
 
 
 /// Most oversized rows counted for the report; one more is fetched to tell "more than".
@@ -61,9 +69,9 @@ pub const LIST_SQL: &str = "SELECT pack_id, window_start, window_end, matches, m
     WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= $5::bigint ORDER BY window_end, pack_id LIMIT $4";
 
 
-/// Params: `$2` id byte cap, `$3` count limit. One row: the tenant's rows with a pack id over the cap, at most `$3`.
+/// Params: `$2` count limit. One row: the tenant's rows with a pack id over 64 bytes (the literal of the `hunt_packs_0004` partial index).
 pub const OVERSIZED_SQL: &str =
-    "SELECT count(*) FROM (SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) > $2::bigint LIMIT $3::bigint) oversized";
+    "SELECT count(*) FROM (SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) > 64 LIMIT $2::bigint) oversized";
 
 
 /// The largest page `list_findings` asks for, whatever the caller passes.
@@ -226,7 +234,7 @@ where
     Pending: Future<Output = Result<Vec<i64>, PgError>>,
 {
     let scope = tenant_scope(tenant)?;
-    let rows = exec(&scope, OVERSIZED_SQL, vec![Param::Int(ID_BYTE_CAP), Param::Int(OVERSIZED_REPORT_CAP + 1)]).await?;
+    let rows = exec(&scope, OVERSIZED_SQL, vec![Param::Int(OVERSIZED_REPORT_CAP + 1)]).await?;
     match rows.as_slice() {
         [count] => Ok(*count),
         _ => Err(StateError::BadReply),

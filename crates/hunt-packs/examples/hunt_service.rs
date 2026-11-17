@@ -12,7 +12,7 @@ use hunt_packs::run::{run_pack, RunError};
 use hunt_packs::schedule::due_runs;
 use hunt_packs::service::{run_service, SettingsSource};
 use hunt_packs::settings::open_hunt;
-use hunt_packs::store::{Param, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
+use hunt_packs::store::{Param, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
 use hunt_packs::tick::Hooks;
 use hunt_packs::types::SleepFuture;
 use metric_alerts::fetch::{agent_for, load_fetch_settings, read_key};
@@ -92,7 +92,7 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
         )?;
         connect(&settings).await?
     };
-    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, STATEMENT_DEADLINE).await?;
+    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, MIGRATION_DEADLINE).await?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute(&client, scope.clone(), sql, params);
     let mut runner = |pack: &HuntPack, tenant: &str, end: i64| {
         let fetch_settings = load_fetch_settings(Path::new(&current_config(&engine).clickhouse_settings)).map_err(|_| RunError::Window)?;
