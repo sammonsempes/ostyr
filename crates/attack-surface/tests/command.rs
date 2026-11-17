@@ -1,6 +1,6 @@
 use attack_surface::command::{naabu_args, ports_text, MAX_VALUE_BYTES};
 use attack_surface::error::CommandError;
-use attack_surface::model::{PortRange, Scope, ScopeKind};
+use attack_surface::model::{PortRange, Scope, ScopeKind, MAX_RATE};
 use attack_surface::scope::parse_scope;
 use std::error::Error;
 use std::ffi::OsString;
@@ -146,5 +146,36 @@ fn a_hand_built_scope_cannot_carry_a_name_a_broad_range_or_a_wrong_class() -> Te
         ..hand_scope("10.1.0.0/16", ports)
     };
     assert!(naabu_args(&fine, "10.1.0.0/16").is_ok());
+    Ok(())
+}
+
+
+const RATE_MAX: u32 = u32::MAX;
+
+
+const SSH_PORT: u16 = 22;
+
+
+fn rated(rate: u32) -> Scope {
+    Scope {
+        rate_per_second: rate,
+        ..hand_scope(
+            "8.8.8.0/24",
+            vec![PortRange {
+                first: SSH_PORT,
+                last: SSH_PORT,
+            }],
+        )
+    }
+}
+
+
+#[test]
+fn a_hand_built_rate_outside_the_bound_is_refused() -> TestResult {
+    let results = [0, RATE_MAX, MAX_RATE + 1]
+        .map(|rate| matches!(naabu_args(&rated(rate), "8.8.8.0/24"), Err(CommandError::BadRate { value, .. }) if value == rate));
+    assert_eq!(results, [true, true, true]);
+    assert!(naabu_args(&rated(MAX_RATE), "8.8.8.0/24").is_ok());
+    assert!(naabu_args(&rated(1), "8.8.8.0/24").is_ok());
     Ok(())
 }

@@ -182,6 +182,7 @@ pub enum Outcome {
     Scanned { kept: usize, counts: Counts },
     OwnershipUnverified,
     TooWide,
+    Deferred,
     Failed(ScanFailure),
 }
 

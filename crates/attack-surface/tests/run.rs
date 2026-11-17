@@ -1,12 +1,13 @@
 #![cfg(unix)]
 use attack_surface::error::{ResultsError, RunError, ScanFailure};
 use attack_surface::model::{Counts, Found, Limits, Outcome, ScanReport, Scope, ScopeKind, TargetReport};
-use attack_surface::run::{check_run_total, outcome_of, plan_target, run_target, scan_scope, summary_line, Plan};
+use attack_surface::run::{check_run_total, outcome_of, plan_target, run_target, scan_scope, scan_scope_until, summary_line, Plan};
 use attack_surface::scope::parse_scope;
 use net_topology::model::RunFailure;
 use std::error::Error;
 use std::io::Error as IoError;
 use std::net::IpAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use types::TestResult;
@@ -97,7 +98,7 @@ fn outcome_at(report: &ScanReport, index: usize) -> Option<&Outcome> {
 #[test]
 fn only_in_scope_results_are_kept_and_the_rest_counted() -> TestResult {
     let scope = scope_of(EXTERNAL_TWO)?;
-    let report = scan_scope(&fixture("ok.sh"), &scope, &Limits::default(), generous())?;
+    let report = scan_scope(&fixture("ok.sh"), &scope, &Limits::default(), generous(), generous())?;
     assert_eq!(report.found, vec![found("8.8.8.8", SSH)?, found("9.9.9.9", SSH)?]);
     assert_eq!(report.targets.len(), TWO);
     let expected = Outcome::Scanned {
@@ -111,7 +112,7 @@ fn only_in_scope_results_are_kept_and_the_rest_counted() -> TestResult {
     assert_eq!(outcome_at(&report, 0), Some(&expected));
     assert_eq!(
         summary_line(&report),
-        "2 targets: 2 scanned, 0 ownership_unverified, 0 too_wide, 0 failed"
+        "2 targets: 2 scanned, 0 ownership_unverified, 0 too_wide, 0 deferred, 0 failed"
     );
     Ok(())
 }
@@ -120,7 +121,7 @@ fn only_in_scope_results_are_kept_and_the_rest_counted() -> TestResult {
 #[test]
 fn a_wrongly_typed_field_never_reaches_any_text_of_the_report() -> TestResult {
     let scope = scope_of(EXTERNAL_TWO)?;
-    let report = scan_scope(&fixture("ok.sh"), &scope, &Limits::default(), generous())?;
+    let report = scan_scope(&fixture("ok.sh"), &scope, &Limits::default(), generous(), generous())?;
     let debug = format!("{report:?}");
     assert!(!debug.contains("MARKER"));
     let failure = ScanFailure::from(ResultsError::Read(IoError::other("TYPED-MARKER")));
@@ -134,13 +135,19 @@ fn a_wrongly_typed_field_never_reaches_any_text_of_the_report() -> TestResult {
 #[test]
 fn a_target_that_times_out_is_named_and_the_next_one_still_runs() -> TestResult {
     let scope = scope_of(EXTERNAL_TWO)?;
-    let report = scan_scope(&fixture("sleep.sh"), &scope, &Limits::default(), Duration::from_secs(DEADLINE_SECONDS))?;
+    let report = scan_scope(
+        &fixture("sleep.sh"),
+        &scope,
+        &Limits::default(),
+        Duration::from_secs(DEADLINE_SECONDS),
+        generous(),
+    )?;
     assert_eq!(outcome_at(&report, 0), Some(&Outcome::Failed(ScanFailure::Timeout)));
     assert!(matches!(outcome_at(&report, 1), Some(Outcome::Scanned { kept: 1, .. })));
     assert_eq!(report.found, vec![found("9.9.9.9", SSH)?]);
     assert_eq!(
         summary_line(&report),
-        "2 targets: 1 scanned, 0 ownership_unverified, 0 too_wide, 1 failed"
+        "2 targets: 1 scanned, 0 ownership_unverified, 0 too_wide, 0 deferred, 1 failed"
     );
     Ok(())
 }
@@ -153,7 +160,7 @@ fn an_output_over_the_cap_is_oversized() -> TestResult {
         max_bytes: SHORT_CAP,
         ..Limits::default()
     };
-    let report = scan_scope(&fixture("big.sh"), &scope, &limits, generous())?;
+    let report = scan_scope(&fixture("big.sh"), &scope, &limits, generous(), generous())?;
     assert_eq!(outcome_at(&report, 0), Some(&Outcome::Failed(ScanFailure::Oversized)));
     assert_eq!(outcome_at(&report, 1), Some(&Outcome::Failed(ScanFailure::Oversized)));
     assert!(report.found.is_empty());
@@ -164,7 +171,7 @@ fn an_output_over_the_cap_is_oversized() -> TestResult {
 #[test]
 fn an_exit_code_is_reported_without_the_stderr_text() -> TestResult {
     let scope = scope_of(EXTERNAL_TWO)?;
-    let report = scan_scope(&fixture("fail.sh"), &scope, &Limits::default(), generous())?;
+    let report = scan_scope(&fixture("fail.sh"), &scope, &Limits::default(), generous(), generous())?;
     let expected = Outcome::Failed(ScanFailure::Failed { code: Some(EXIT_ONE) });
     assert_eq!(outcome_at(&report, 0), Some(&expected));
     assert!(report.found.is_empty());
@@ -189,14 +196,14 @@ targets:
     ownership: {method: dns_txt, reference: TXT-3}
 ";
     let scope = scope_of(text)?;
-    let report = scan_scope(&missing(), &scope, &Limits::default(), generous())?;
+    let report = scan_scope(&missing(), &scope, &Limits::default(), generous(), generous())?;
     assert_eq!(report.targets.len(), THREE);
     assert_eq!(outcome_at(&report, 0), Some(&Outcome::TooWide));
     assert_eq!(outcome_at(&report, 1), Some(&Outcome::OwnershipUnverified));
     assert_eq!(outcome_at(&report, TWO), Some(&Outcome::OwnershipUnverified));
     assert_eq!(
         summary_line(&report),
-        "3 targets: 0 scanned, 2 ownership_unverified, 1 too_wide, 0 failed"
+        "3 targets: 0 scanned, 2 ownership_unverified, 1 too_wide, 0 deferred, 0 failed"
     );
     Ok(())
 }
@@ -212,7 +219,7 @@ targets:
     ownership: {method: attestation, reference: TICKET-1}
 ";
     let scope = scope_of(text)?;
-    let report = scan_scope(&missing(), &scope, &Limits::default(), generous())?;
+    let report = scan_scope(&missing(), &scope, &Limits::default(), generous(), generous())?;
     assert_eq!(outcome_at(&report, 0), Some(&Outcome::Failed(ScanFailure::Unavailable)));
     Ok(())
 }
@@ -228,7 +235,7 @@ targets:
     ownership: {method: dns_txt, reference: TXT-1}
 ";
     let scope = scope_of(text)?;
-    let report = scan_scope(&fixture("ok.sh"), &scope, &Limits::default(), generous())?;
+    let report = scan_scope(&fixture("ok.sh"), &scope, &Limits::default(), generous(), generous())?;
     assert!(matches!(outcome_at(&report, 0), Some(Outcome::Scanned { kept: 0, .. })));
     Ok(())
 }
@@ -245,7 +252,7 @@ targets:
   - value: 10.1.0.0/17
     ownership: {method: attestation, reference: TICKET-2}
 ";
-    let result = scan_scope(&missing(), &scope_of(wide_v4)?, &Limits::default(), generous());
+    let result = scan_scope(&missing(), &scope_of(wide_v4)?, &Limits::default(), generous(), generous());
     assert!(matches!(result, Err(RunError::TooBroad { v4: V4_OVER, v6: 0, .. })));
     let wide_v6 = "kind: external
 rate_per_second: 100
@@ -256,7 +263,7 @@ targets:
   - value: 2a00:1450::100/120
     ownership: {method: attestation, reference: TICKET-2}
 ";
-    let result_v6 = scan_scope(&missing(), &scope_of(wide_v6)?, &Limits::default(), generous());
+    let result_v6 = scan_scope(&missing(), &scope_of(wide_v6)?, &Limits::default(), generous(), generous());
     let error = result_v6.err().ok_or("accepted")?;
     assert!(matches!(error, RunError::TooBroad { v4: 0, v6: V6_OVER, .. }));
     assert!(error.to_string().contains("512"));
@@ -294,7 +301,7 @@ fn a_hand_built_scope_is_refused_before_any_spawn() -> TestResult {
     ];
     cases.iter().try_for_each(|(kind, target)| -> TestResult {
         let scope = hand(kind, target)?;
-        let report = scan_scope(&missing(), &scope, &Limits::default(), generous())?;
+        let report = scan_scope(&missing(), &scope, &Limits::default(), generous(), generous())?;
         let outcome = outcome_at(&report, 0).ok_or("no outcome")?;
         let wide_v6 = matches!(outcome, Outcome::TooWide);
         assert!(*outcome == Outcome::Failed(ScanFailure::Refused) || wide_v6, "{target}: {outcome:?}");
@@ -361,7 +368,69 @@ fn an_unattested_hand_built_external_target_is_unverified() -> TestResult {
     };
     assert_eq!(
         summary_line(&report),
-        "1 targets: 0 scanned, 0 ownership_unverified, 1 too_wide, 0 failed"
+        "1 targets: 0 scanned, 0 ownership_unverified, 1 too_wide, 0 deferred, 0 failed"
     );
+    Ok(())
+}
+
+
+const THREE_TARGETS: &str = "kind: external
+rate_per_second: 100
+ports: [22]
+targets:
+  - value: 8.8.8.0/24
+    ownership: {method: attestation, reference: TICKET-1}
+  - value: 9.9.9.0/24
+    ownership: {method: dns_txt, reference: TICKET-2}
+  - value: 7.7.7.0/24
+    ownership: {method: attestation, reference: TICKET-3}
+";
+
+
+const SCRIPT_MODE: u32 = 0o700;
+
+
+#[test]
+fn a_total_deadline_already_passed_defers_every_scan_and_never_spawns() -> TestResult {
+    let scope = scope_of(THREE_TARGETS)?;
+    let report = scan_scope(&missing(), &scope, &Limits::default(), generous(), Duration::ZERO)?;
+    let outcomes = report
+        .targets
+        .iter()
+        .map(|target| (target.index, target.outcome.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes,
+        vec![(0, Outcome::Deferred), (1, Outcome::Deferred), (TWO, Outcome::OwnershipUnverified)]
+    );
+    assert!(report.found.is_empty());
+    assert_eq!(
+        summary_line(&report),
+        "3 targets: 0 scanned, 1 ownership_unverified, 0 too_wide, 2 deferred, 0 failed"
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_deadline_fired_by_the_first_run_defers_the_rest() -> TestResult {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
+    let marker = dir.path().join("marker");
+    let script = dir.path().join("fake.sh");
+    let body = format!(
+        "#!/bin/sh\n: > '{}'\nprintf '%s\\n' '{{\"ip\":\"8.8.8.8\",\"port\":22}}'\n",
+        marker.display()
+    );
+    std::fs::write(&script, body)?;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(SCRIPT_MODE))?;
+    let scope = scope_of(THREE_TARGETS)?;
+    let report = scan_scope_until(&script, &scope, &Limits::default(), generous(), &|| marker.exists())?;
+    let deferred = report
+        .targets
+        .iter()
+        .map(|target| target.outcome == Outcome::Deferred)
+        .collect::<Vec<_>>();
+    assert_eq!(deferred, vec![false, true, false]);
+    assert_eq!(report.found, vec![found("8.8.8.8", SSH)?]);
     Ok(())
 }
