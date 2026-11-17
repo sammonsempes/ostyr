@@ -7,7 +7,7 @@ mod types;
 
 
 use cmdb::model::{AssetKind, IdentityKey, Limits};
-use cmdb::store::ATTEMPT_CEILING;
+use cmdb::store::{ASSETS_TABLE, ATTEMPT_CEILING, ATTRIBUTES_TABLE, KEYS_TABLE};
 use cmdb::types::{RowFuture, TruthMap};
 use core_pg::scope::TenantScope;
 use fixtures::{data, guest, node, set, storage};
@@ -20,7 +20,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use tracing::Dispatch;
 use types::TestResult;
 use virt_inventory::cmdb_sync::{
-    asset_kind, cloud_id, kind_text, observation_of, observations, source_of, sync, MAX_ID_PART_BYTES, PAGE_OBSERVATIONS,
+    asset_kind, blocked_cap, cap_label, cloud_id, kind_text, observation_of, observations, refused_page, source_of, sync, Room, MAX_ID_PART_BYTES,
+    PAGE_OBSERVATIONS,
 };
 use virt_inventory::error::SyncError;
 use virt_inventory::model::{Parsed, Resource, ResourceKind};
@@ -430,7 +431,7 @@ async fn less_room_than_a_page_cuts_across_pages_and_warns() -> TestResult {
     assert_eq!((report.created, report.refused_no_room), (ROOM_CAP, MANY_GUESTS - ROOM_CAP));
     assert_eq!(stored_ids(&db)?.len(), ROOM_CAP);
     let logged = String::from_utf8(lock(&buffer).clone())?;
-    assert!(logged.contains("tenant at the asset cap, 200 creations refused, inventory incomplete"));
+    assert!(logged.contains("tenant at the asset cap, 200 creations and 0 updates refused, inventory incomplete"));
     Ok(())
 }
 
@@ -487,7 +488,8 @@ async fn a_concurrent_writer_that_takes_the_room_after_the_snapshot_is_met_by_th
         Box::pin(ready(handle(&db, &scope, sql, &params)))
     };
     let report = sync(&exec, &settings("a", "pve-1"), &three()?, &TruthMap::new(), &capped(TWO)).await?;
-    assert_eq!((report.created, report.refused_no_room), (0, THREE));
+    assert_eq!((report.created, report.refused_no_room, report.refused_attribute_room), (0, THREE, 0));
+    assert_eq!(report.cap, Some(ASSETS_TABLE));
     assert_eq!(stored_ids(&db)?.len(), TWO);
     Ok(())
 }
@@ -500,7 +502,11 @@ async fn updates_that_still_pass_the_child_cap_are_counted_refused_not_looped() 
     let exec = executor(&db);
     let one = parsed_of(vec![guest("qemu", "100", "web")])?;
     let report = sync(&exec, &settings("a", "pve-1"), &one, &TruthMap::new(), &child_capped(1)).await?;
-    assert_eq!((report.created, report.updated, report.refused_no_room), (0, 0, 1));
+    assert_eq!(
+        (report.created, report.updated, report.refused_no_room, report.refused_attribute_room),
+        (0, 0, 0, 1)
+    );
+    assert_eq!(report.cap, Some(ATTRIBUTES_TABLE));
     Ok(())
 }
 
@@ -535,5 +541,97 @@ async fn no_room_for_identity_keys_refuses_the_creations() -> TestResult {
     let exec = executor(&db);
     let report = sync(&exec, &settings("a", "pve-1"), &three()?, &TruthMap::new(), &child_capped(0)).await?;
     assert_eq!((report.created, report.refused_no_room), (0, THREE));
+    Ok(())
+}
+
+
+async fn warning_of(limits: &Limits) -> Result<(virt_inventory::cmdb_sync::SyncReport, String), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let writer = buffer.clone();
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Capture(writer.clone()))
+            .finish(),
+    );
+    let db = Db::default();
+    let exec = executor(&db);
+    let report = sync(&exec, &settings("a", "pve-1"), &three()?, &TruthMap::new(), limits).await?;
+    drop(guard);
+    let logged = String::from_utf8(lock(&buffer).clone())?;
+    Ok((report, logged))
+}
+
+
+#[tokio::test]
+async fn the_warning_names_the_asset_cap() -> TestResult {
+    let (report, logged) = warning_of(&capped(0)).await?;
+    assert_eq!(report.cap, Some(ASSETS_TABLE));
+    assert!(logged.contains("tenant at the asset cap, 3 creations and 0 updates refused"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_warning_names_the_key_row_cap() -> TestResult {
+    let (report, logged) = warning_of(&child_capped(0)).await?;
+    assert_eq!(report.cap, Some(KEYS_TABLE));
+    assert!(logged.contains("tenant at the identity key row cap, 3 creations"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_warning_names_the_attribute_row_cap() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let parsed = three()?;
+    let (found, _) = observations("pve-1", &parsed.items);
+    let most = found
+        .iter()
+        .map(|observation| observation.attributes.len())
+        .max()
+        .ok_or("no observation")?;
+    let report = sync(&exec, &settings("a", "pve-1"), &parsed, &TruthMap::new(), &child_capped(most)).await?;
+    assert_eq!(report.cap, Some(ATTRIBUTES_TABLE));
+    assert_eq!((report.created, report.refused_no_room), (1, TWO));
+    Ok(())
+}
+
+
+#[test]
+fn a_page_refused_for_the_asset_cap_counts_creations_and_for_a_row_cap_updates() -> TestResult {
+    let assets = refused_page(ASSETS_TABLE, THREE);
+    assert_eq!(
+        (assets.refused_no_room, assets.refused_attribute_room, assets.cap),
+        (THREE, 0, Some(ASSETS_TABLE))
+    );
+    let rows = refused_page(ATTRIBUTES_TABLE, THREE);
+    assert_eq!(
+        (rows.refused_no_room, rows.refused_attribute_room, rows.cap),
+        (0, THREE, Some(ATTRIBUTES_TABLE))
+    );
+    Ok(())
+}
+
+
+#[test]
+fn the_labels_and_blocked_caps_follow_the_room() -> TestResult {
+    let parsed = three()?;
+    let (found, _) = observations("pve-1", &parsed.items);
+    let one = found.first().ok_or("no observation")?;
+    let full = Room {
+        assets: 1,
+        keys: 1,
+        attributes: ROOM_CAP,
+    };
+    assert_eq!(blocked_cap(&Room { assets: 0, ..full }, one), ASSETS_TABLE);
+    assert_eq!(blocked_cap(&Room { keys: 0, ..full }, one), KEYS_TABLE);
+    assert_eq!(blocked_cap(&Room { attributes: 0, ..full }, one), ATTRIBUTES_TABLE);
+    assert_eq!(
+        [ASSETS_TABLE, KEYS_TABLE, ATTRIBUTES_TABLE].map(cap_label),
+        ["asset", "identity key row", "attribute row"]
+    );
     Ok(())
 }
