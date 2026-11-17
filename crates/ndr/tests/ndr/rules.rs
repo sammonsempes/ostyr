@@ -1,12 +1,20 @@
 use crate::support::{
-    fixture, logging_on, quick_limits, write_rule, TestResult, BAD_RULE, EICAR_RULE, EXIT_OK, FAKE_YR, SECOND_RULE, SLEEP, THREE, TWO,
+    fixture, logging_on, quick_limits, write_rule, TestResult, BAD_RULE, EICAR_RULE, EXIT_OK, FAKE_YR, GROUP_UMASK, SECOND_RULE, SLEEP, STAT_YR,
+    THREE, TWO,
 };
+use core_config::trusted_dir::TrustedDirError;
 use ndr::error::NdrError;
 use ndr::model::Limits;
 use ndr::rules::{compile_args, describe, is_rule_file, list_rule_files, load_rules, read_rule, rule_files_from, swap_rules};
+use rustix::fs::Mode;
+use rustix::process::{getuid, umask};
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+
+const MODE_GROUP_WRITABLE: u32 = 0o775;
 
 
 #[test]
@@ -213,7 +221,7 @@ fn loading_from_a_missing_directory_or_into_a_missing_work_dir_fails() -> TestRe
     };
     assert!(matches!(
         load_rules(&missing_work, dir.path(), &Limits::default()),
-        Err(NdrError::Workspace(_))
+        Err(NdrError::WorkDir(_))
     ));
     Ok(())
 }
@@ -225,5 +233,41 @@ fn a_rule_copy_that_cannot_be_written_is_refused() -> TestResult {
     write_rule(dir.path(), "a.yar", EICAR_RULE)?;
     let result = ndr::rules::copy_rule(&dir.path().join("a.yar"), &dir.path().join("absent"), 0, Limits::default().max_rule_bytes);
     assert!(matches!(result, Err(NdrError::Workspace(_))));
+    Ok(())
+}
+
+
+#[test]
+fn the_rules_directory_and_its_copies_are_private_under_a_group_umask() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    write_rule(dir.path(), "a.yar", EICAR_RULE)?;
+    write_rule(dir.path(), "b.yar", SECOND_RULE)?;
+    let fake = fixture(STAT_YR)?;
+    let previous = umask(Mode::from_raw_mode(GROUP_UMASK));
+    let loaded = load_rules(&fake.yr, dir.path(), &Limits::default());
+    umask(previous);
+    let _rules = loaded?;
+    let report = fs::read_to_string(fake.work_dir.path().join("report-compile"))?;
+    let owner = getuid().as_raw();
+    let expected = format!("700 {owner}\n600 {owner}\n600 {owner}\n");
+    assert_eq!(report, expected);
+    Ok(())
+}
+
+
+#[test]
+fn a_work_directory_others_can_write_is_refused_before_any_run() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    write_rule(dir.path(), "a.yar", EICAR_RULE)?;
+    let fake = fixture(STAT_YR)?;
+    fs::set_permissions(fake.work_dir.path(), fs::Permissions::from_mode(MODE_GROUP_WRITABLE))?;
+    let result = load_rules(&fake.yr, dir.path(), &Limits::default());
+    assert!(matches!(
+        result,
+        Err(NdrError::WorkDir(TrustedDirError::Refused(
+            "work directory is writable by group or others"
+        )))
+    ));
+    assert_eq!(fs::read_dir(fake.work_dir.path())?.count(), 0);
     Ok(())
 }

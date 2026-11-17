@@ -8,6 +8,7 @@ use crate::copy::{
 use crate::error::ReportError;
 use crate::model::{Limits, Report, ScanScope};
 use crate::report::parse_report_mapped;
+use core_config::trusted_dir::TrustedDirError;
 use rustix::process::{kill_process, kill_process_group, Pid, Signal};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -166,6 +167,16 @@ pub enum ScanError {
     Report(#[from] ReportError),
     #[error("scan i/o: {0}")]
     Io(#[from] io::Error),
+}
+
+
+impl From<TrustedDirError> for ScanError {
+    fn from(error: TrustedDirError) -> Self {
+        match error {
+            TrustedDirError::Refused(reason) => Self::BadSettings(reason),
+            TrustedDirError::Io(source) => Self::Io(source),
+        }
+    }
 }
 
 
