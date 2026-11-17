@@ -32,12 +32,14 @@ use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::net::TcpSocket;
 use tokio::time::sleep;
+use tracing::instrument::WithSubscriber;
 use tracing::level_filters::{LevelFilter, STATIC_MAX_LEVEL};
+use tracing::Dispatch;
 
 
 const TWO: usize = 2;
@@ -801,6 +803,73 @@ fn a_first_settings_file_that_does_not_parse_is_refused() -> TestResult {
         context,
     );
     assert!(matches!(outcome.err(), Some(GatewayError::Config(_))));
+    Ok(())
+}
+
+
+const WIDE_DIRECTIVES: &str = "trace,async_nats=trace,async_nats::connector=trace";
+
+
+const MARKER: &str = "peer-san-marker";
+
+
+const ESCAPE: char = '\u{1b}';
+
+
+static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish()));
+
+
+fn hostile_server() -> Result<(Arc<rustls::ServerConfig>, String), Box<dyn Error + Send + Sync>> {
+    let generated = rcgen::generate_simple_self_signed(vec![format!("{MARKER}{ESCAPE}.example")])?;
+    let certificate = rustls::pki_types::CertificateDer::from(generated.cert.der().to_vec());
+    let key = rustls::pki_types::PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()));
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], key)?;
+    Ok((Arc::new(config), generated.cert.pem()))
+}
+
+
+async fn connect_logs(dispatch: Dispatch, captured: &Arc<Mutex<Vec<u8>>>) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let (server_config, ca_pem) = hostile_server()?;
+    let stub = start_stub(Some(server_config), |_| ())?;
+    let dir = tempdir()?;
+    let ca_path = dir.path().join("ca.pem");
+    fs::write(&ca_path, ca_pem)?;
+    let extra = format!("nats_tls_first: true\nnats_ca_file: \"{}\"\n", ca_path.display());
+    let rig = rig(&yaml(stub.port, &extra).replace("127.0.0.1", "localhost"))?;
+    let settings = settings_of(&rig.gateway);
+    let outcome = event_gateway::session::open_session(&settings).with_subscriber(dispatch).await;
+    assert!(outcome.is_err());
+    let bytes = captured.lock().map_err(|error| error.to_string())?.clone();
+    Ok(String::from_utf8(bytes)?)
+}
+
+
+#[tokio::test]
+async fn the_production_filter_keeps_peer_certificate_names_out_of_the_gateway_log() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let subscriber = siem_ingest::logging::build_subscriber(move || writer.clone(), Some(WIDE_DIRECTIVES))?;
+    let logs = connect_logs(Dispatch::new(subscriber), &captured).await?;
+    assert!(!logs.contains(MARKER) && !logs.contains(ESCAPE), "{logs}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_filter_without_the_cap_shows_the_marker_in_the_gateway_log() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let uncapped = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let logs = connect_logs(Dispatch::new(uncapped), &captured).await?;
+    assert!(logs.contains(MARKER), "the probe must see the library line: {logs}");
     Ok(())
 }
 

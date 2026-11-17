@@ -195,6 +195,7 @@ pub fn failure_class(failure: &ApiFailure) -> &'static str {
         ApiFailure::Throttled => "throttled",
         ApiFailure::BadRequest => "bad_request",
         ApiFailure::Unavailable(_) => "unavailable",
+        ApiFailure::Handshake(_) => "handshake",
         ApiFailure::Conflict(_) => "conflict",
         ApiFailure::Status(_) => "status",
         ApiFailure::TooLarge => "too_large",
@@ -214,9 +215,12 @@ pub fn api_refusal(language: Language, csrf: Option<&str>, failure: &ApiFailure)
         ApiFailure::Throttled => refusal(language, csrf, StatusCode::TOO_MANY_REQUESTS, "error_throttled"),
         ApiFailure::BadRequest => refusal(language, csrf, StatusCode::BAD_REQUEST, "error_bad_request"),
         ApiFailure::Conflict(key) => refusal(language, csrf, StatusCode::CONFLICT, key),
-        ApiFailure::Unavailable(_) | ApiFailure::Status(_) | ApiFailure::TooLarge | ApiFailure::Malformed(_) | ApiFailure::Json(_) => {
-            refusal(language, csrf, StatusCode::BAD_GATEWAY, "error_unavailable")
-        }
+        ApiFailure::Unavailable(_)
+        | ApiFailure::Handshake(_)
+        | ApiFailure::Status(_)
+        | ApiFailure::TooLarge
+        | ApiFailure::Malformed(_)
+        | ApiFailure::Json(_) => refusal(language, csrf, StatusCode::BAD_GATEWAY, "error_unavailable"),
     }
 }
 

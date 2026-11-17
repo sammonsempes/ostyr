@@ -4,6 +4,7 @@ mod harness;
 mod hostile;
 mod identity;
 mod keepalive;
+mod peer_text;
 mod pki;
 mod preface;
 mod resilience;

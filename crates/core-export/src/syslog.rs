@@ -1,5 +1,5 @@
 use crate::ecs::{to_json, EcsEvent};
-use crate::error::ExportError;
+use crate::error::{without_peer_text, ExportError};
 use std::io::{self, Write};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use time::format_description::well_known::Rfc3339;
@@ -83,7 +83,7 @@ pub fn frame(message: &str) -> String {
 fn io_error(context: &str, source: std::io::Error) -> ExportError {
     ExportError::Io {
         context: context.to_string(),
-        source,
+        source: without_peer_text(source),
     }
 }
 

@@ -1,6 +1,7 @@
 //! Usage: `event_gateway <server.yaml> <gateway.yaml>`. The server file is the `channel_server` one (its `events_file` is not used here).
 use agent_channel::server_app::{bind_server, load_server_file};
 use event_gateway::run::{load_gateway_file, run_gateway};
+use siem_ingest::logging::build_subscriber;
 use std::error::Error;
 use std::path::Path;
 
@@ -8,12 +9,16 @@ use std::path::Path;
 const GATEWAY_ARGUMENT: usize = 2;
 
 
+const LOG_VARIABLE: &str = "RUST_LOG";
+
+
 const USAGE: &str = "usage: event_gateway <server.yaml> <gateway.yaml>";
 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).try_init()?;
+    let directives = std::env::var(LOG_VARIABLE).ok();
+    tracing::subscriber::set_global_default(build_subscriber(std::io::stderr, directives.as_deref())?)?;
     let server_path = std::env::args().nth(1).ok_or(USAGE)?;
     let gateway_path = std::env::args().nth(GATEWAY_ARGUMENT).ok_or(USAGE)?;
     let server = load_server_file(Path::new(&server_path))?;

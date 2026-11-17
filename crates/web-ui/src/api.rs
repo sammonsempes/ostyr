@@ -1,4 +1,4 @@
-use crate::error::ApiFailure;
+use crate::error::{unavailable, ApiFailure};
 use crate::model::{Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CommentView};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
@@ -132,7 +132,7 @@ pub async fn read_capped(mut response: Response) -> Result<Vec<u8>, ApiFailure> 
     let mut finished = false;
     let mut reads = usize::MIN;
     while !finished && reads < MAX_BODY_READS && body.len() <= MAX_BODY_BYTES {
-        let chunk = response.chunk().await.map_err(ApiFailure::Unavailable)?;
+        let chunk = response.chunk().await.map_err(unavailable)?;
         finished = chunk.is_none();
         chunk.iter().for_each(|piece| body.extend_from_slice(piece));
         reads += 1;
@@ -201,7 +201,7 @@ pub async fn call_until(
     request = body
         .into_iter()
         .fold(request, |pending, text| pending.header(CONTENT_TYPE, JSON_TYPE).body(text));
-    let response = request.send().await.map_err(ApiFailure::Unavailable)?;
+    let response = request.send().await.map_err(unavailable)?;
     match response.status() {
         StatusCode::CONFLICT => Err(conflict_failure(&read_capped(response).await?)),
         status => {

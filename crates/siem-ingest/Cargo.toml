@@ -21,6 +21,7 @@ thiserror = "2"
 time = { version = "0.3", features = ["serde-well-known"] }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time", "net", "io-util", "sync"] }
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
+tracing-subscriber = "0.3"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
@@ -29,7 +30,6 @@ nkeys = "0.4.5"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
 tokio = { version = "1.54.1", features = ["rt", "time", "net", "io-util", "sync", "macros", "test-util"] }
-tracing-subscriber = "0.3"
 
 [lints]
 workspace = true
