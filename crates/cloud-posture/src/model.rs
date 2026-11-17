@@ -74,10 +74,11 @@ pub struct Findings {
 }
 
 
-/// One declared Kubernetes cluster; `context` is the account Prowler reports, so it is unique inside a declarations file.
+/// One declared Kubernetes cluster; `kubeconfig_file` is relative to `tenant_directory` and opened beneath it; `context` is the account Prowler reports, so it is unique inside a declarations file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cluster {
     pub name: String,
+    pub tenant_directory: std::path::PathBuf,
     pub kubeconfig_file: std::path::PathBuf,
     pub context: String,
 }

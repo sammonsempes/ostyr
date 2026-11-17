@@ -1,4 +1,6 @@
 use crate::model::KubeconfigFault;
+#[cfg(unix)]
+use core_config::trusted_dir::TrustedDirError;
 use core_pg::error::PgError;
 use thiserror::Error;
 
@@ -46,6 +48,9 @@ pub enum ScanError {
     Kubeconfig { fault: KubeconfigFault },
     #[error("cannot prepare the work directory: {0}")]
     Workdir(#[source] std::io::Error),
+    #[cfg(unix)]
+    #[error("the work directory is not trusted: {0}")]
+    UntrustedWorkdir(#[source] TrustedDirError),
     #[error("prowler could not be started")]
     Spawn,
     #[error("prowler ran past its deadline")]
