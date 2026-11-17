@@ -65,3 +65,30 @@ pub const CLICKHOUSE_PREFIX: &str = "clickhouse:";
 
 
 pub const SOURCE_FAILED: &str = "IOC read from ClickHouse failed";
+
+
+pub const MAX_PAGE_TEXT_CHARS: usize = 120;
+
+
+pub const MAX_PORT_DIGITS: usize = 5;
+
+
+pub const MAX_HOST_HEADER_BYTES: usize = MAX_NAME_BYTES + 1 + MAX_PORT_DIGITS;
+
+
+pub const ESCAPE_FACTOR: usize = 6;
+
+
+pub const PAGE_FIXED_BYTES: usize = 2_048;
+
+
+pub const HOST_SHOWN_COUNT: usize = 2;
+
+
+pub const MAX_PAGE_BYTES: usize = PAGE_FIXED_BYTES + ESCAPE_FACTOR * (HOST_SHOWN_COUNT * MAX_NAME_BYTES + 2 * MAX_PAGE_TEXT_CHARS);
+
+
+pub const UNKNOWN_DOMAIN_EN: &str = "unknown domain";
+
+
+pub const UNKNOWN_DOMAIN_FR: &str = "domaine inconnu";

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
+html-escape = "0.2"
 idna = "1"
 intel-feeds = { version = "0.0.0", path = "../intel-feeds" }
 ipnet = "2"

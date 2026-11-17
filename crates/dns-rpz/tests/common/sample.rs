@@ -27,5 +27,6 @@ pub fn sample_policy() -> Policy {
         allowlist: Allowlist::default(),
         actions: Actions::default(),
         unbound: Unbound::default(),
+        sinkhole_page: None,
     }
 }

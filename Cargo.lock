@@ -1969,6 +1969,7 @@ version = "0.0.0"
 dependencies = [
  "core-audit",
  "core-config",
+ "html-escape",
  "idna",
  "intel-feeds",
  "ipnet",
