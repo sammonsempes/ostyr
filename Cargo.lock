@@ -7201,8 +7201,12 @@ name = "waf"
 version = "0.0.0"
 dependencies = [
  "core-config",
+ "data-encoding",
+ "rustix 1.1.6",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
