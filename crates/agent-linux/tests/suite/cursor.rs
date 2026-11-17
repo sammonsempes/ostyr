@@ -1,5 +1,5 @@
 use crate::types::TestResult;
-use agent_linux::cursor::{open_state_dir, read_cursor, state_dir_fault, write_cursor, MAX_CURSOR_BYTES};
+use agent_linux::cursor::{open_state_dir, read_counter, read_cursor, set_aside, state_dir_fault, write_cursor, MAX_CURSOR_BYTES};
 use agent_linux::error::{SourceError, StateDirReason};
 use agent_linux::model::Cursor;
 use std::fs;
@@ -229,5 +229,37 @@ fn a_swapped_state_path_does_not_redirect_the_cursor_write() -> TestResult {
     assert_eq!(fs::read_dir(&attacker)?.count(), 0);
     assert_eq!(read_cursor(&state, &cursor_file)?, cursor);
     assert!(moved.join("cursor").is_file());
+    Ok(())
+}
+
+
+const ASIDE_SECONDS: u64 = 42;
+
+
+#[test]
+fn an_oversized_counter_and_an_oversized_cursor_each_get_their_own_error() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("state");
+    let state = open_state_dir(&path)?;
+    fs::write(&path, " ".repeat(MAX_CURSOR_BYTES + 1))?;
+    assert!(matches!(read_counter(&state, &path), Err(SourceError::Counter(_))));
+    assert!(matches!(read_cursor(&state, &path), Err(SourceError::Cursor(_))));
+    assert!(matches!(read_counter(&state, Path::new("/")), Err(SourceError::Cursor(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_state_file_is_renamed_aside_through_the_held_directory() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("state");
+    let state = open_state_dir(&path)?;
+    fs::write(&path, "bad")?;
+    let aside = set_aside(&state, &path, ASIDE_SECONDS)?;
+    assert_eq!(aside, Path::new("state.corrupt-42"));
+    assert!(!path.exists());
+    assert_eq!(fs::read_to_string(dir.path().join("state.corrupt-42"))?, "bad");
+    assert!(set_aside(&state, &path, ASIDE_SECONDS).is_err());
+    assert!(set_aside(&state, Path::new("/"), ASIDE_SECONDS).is_err());
     Ok(())
 }

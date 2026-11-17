@@ -36,4 +36,6 @@ write_files:
     content: |
       [http]
       proxy = "${proxy_url}"
+bootcmd:
+  - [ sed, -i, -e, "/^proxy=/d", -e, "/^\\[main\\]/a proxy=${proxy_url}", /etc/dnf/dnf.conf ]
 %{ endif ~}

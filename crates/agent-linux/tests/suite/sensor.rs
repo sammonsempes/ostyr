@@ -5,10 +5,10 @@ use agent_channel::types::PauseFuture;
 use agent_linux::error::{SensorError, SourceError};
 use agent_linux::model::SensorSettings;
 use agent_linux::sensor::{
-    active_state, classify, export_progress, is_bad, monotonic_seconds, observe, parse_show, restart, restart_arguments, restart_entry, run_bounded,
-    run_bounded_with, run_command, run_sensor, run_with_deadline, sensor_event_line, show_arguments, state_name, step, tick, valid_sub_state, Action,
-    ActiveState, Observation, Progress, SensorEnv, SensorEvent, SensorState, Supervisor, Unit, HOUR_SECONDS, MAX_EVENTS_PER_HOUR, MAX_OUTPUT_BYTES,
-    MIN_RESTART_INTERVAL_SECONDS,
+    active_state, check_credentials, classify, credentials_event_line, credentials_fault, export_progress, is_bad, monotonic_seconds, observe,
+    parse_show, restart, restart_arguments, restart_entry, run_bounded, run_bounded_with, run_command, run_sensor, run_with_deadline,
+    sensor_event_line, show_arguments, state_name, step, tick, valid_sub_state, Action, ActiveState, Observation, Progress, SensorEnv, SensorEvent,
+    SensorState, Supervisor, Unit, HOUR_SECONDS, MAX_EVENTS_PER_HOUR, MAX_OUTPUT_BYTES, MIN_RESTART_INTERVAL_SECONDS,
 };
 use agent_linux::types::{RunFuture, SpoolLock};
 use arc_swap::ArcSwap;
@@ -121,6 +121,7 @@ pub fn environment(dir: &Path) -> SensorEnv {
         spool: dir.join("spool"),
         lock: SpoolLock::default(),
         tenant: "t1".to_owned(),
+        credentials_file: dir.join("process-cred"),
         run: fake_run,
     }
 }
@@ -427,6 +428,7 @@ async fn a_scripted_run_spools_one_event_per_transition_and_restarts_within_the_
     let clock = move || ticked.load(Ordering::SeqCst) * TICK;
     let first = steps.first().ok_or("no steps")?;
     fs::write(&env.systemctl, &first.0)?;
+    fs::write(&env.credentials_file, "true\n")?;
     append(&env.export, "first\n")?;
     let shared = Arc::new(ArcSwap::from_pointee(settings(CAP)));
     let last = run_sensor(&shared, &env, audit.as_ref(), total, &pause, &clock, &clock).await?;
@@ -749,5 +751,51 @@ async fn a_command_that_hangs_with_a_grandchild_leaves_no_process_behind() -> Te
     assert!(running.await.is_err());
     let drained = tokio::task::spawn_blocking(move || input.read_to_end(&mut Vec::new()));
     assert_eq!(tokio::time::timeout(UNBLOCK_LIMIT, drained).await???, 0);
+    Ok(())
+}
+
+
+const CREDENTIALS_OVERSIZED: usize = 100;
+
+
+#[test]
+fn the_credentials_setting_is_checked_for_absent_false_unreadable_and_true() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let path = dir.path().join("process-cred");
+    assert_eq!(credentials_fault(&path), Some("absent"));
+    fs::write(&path, "false")?;
+    assert_eq!(credentials_fault(&path), Some("disabled"));
+    fs::write(&path, "x".repeat(CREDENTIALS_OVERSIZED))?;
+    assert_eq!(credentials_fault(&path), Some("unreadable"));
+    assert_eq!(credentials_fault(dir.path()), Some("unreadable"));
+    fs::write(&path, "true\n")?;
+    assert_eq!(credentials_fault(&path), None);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn credentials_off_is_spooled_once_at_start_only_when_the_setting_is_not_true() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let env = environment(dir.path());
+    check_credentials(&env).await?;
+    let first = lines(&env.spool)?;
+    assert_eq!(first.len(), 1);
+    let event: serde_json::Value = serde_json::from_str(first.first().ok_or("no line")?)?;
+    assert_eq!(event.pointer("/agent/sensor/state"), Some(&serde_json::Value::from("credentials_off")));
+    assert_eq!(event.pointer("/agent/sensor/reason"), Some(&serde_json::Value::from("absent")));
+    assert_eq!(event.pointer("/event/kind"), Some(&serde_json::Value::from("agent.sensor")));
+    fs::write(&env.credentials_file, "true")?;
+    check_credentials(&env).await?;
+    assert_eq!(lines(&env.spool)?.len(), 1);
+    assert!(credentials_event_line("disabled").contains("disabled"));
+    let blocked = SensorEnv {
+        spool: dir.path().to_path_buf(),
+        credentials_file: dir.path().join("absent"),
+        ..env
+    };
+    assert!(matches!(check_credentials(&blocked).await, Err(SourceError::Io(_))));
     Ok(())
 }

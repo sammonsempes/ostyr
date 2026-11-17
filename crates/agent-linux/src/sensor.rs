@@ -1,3 +1,4 @@
+use crate::capabilities::read_bounded;
 use crate::error::{SensorError, SourceError};
 use crate::model::{CommandSpec, SensorSettings};
 use crate::spool::append_locked;
@@ -24,6 +25,12 @@ pub const SENSOR_NAME: &str = "tetragon";
 
 
 pub const UNIT_NAME: &str = "tetragon.service";
+
+
+pub const CREDENTIALS_CAP: u64 = 64;
+
+
+pub const CREDENTIALS_OFF: &str = "credentials_off";
 
 
 pub const AUDIT_MODULE: &str = "agent_linux_sensor";
@@ -151,6 +158,7 @@ pub struct SensorEnv {
     pub spool: PathBuf,
     pub lock: SpoolLock,
     pub tenant: String,
+    pub credentials_file: PathBuf,
     pub run: RunFn,
 }
 
@@ -464,6 +472,45 @@ pub fn step(supervisor: &Supervisor, observation: &Observation, now: u64, wall: 
 }
 
 
+/// Why Tetragon does not export `process_credentials`: its `enable-process-cred` file is absent, holds anything but `true`, or cannot be read; `None` when it holds `true`.
+pub fn credentials_fault(path: &Path) -> Option<&'static str> {
+    match read_bounded(path, CREDENTIALS_CAP) {
+        Ok(Some(bytes)) if bytes.trim_ascii() == b"true" => None,
+        Ok(Some(_)) => Some("disabled"),
+        Ok(None) => Some("absent"),
+        Err(error) => {
+            tracing::warn!(%error, "tetragon credentials setting unreadable");
+            Some("unreadable")
+        }
+    }
+}
+
+
+pub fn credentials_event_line(reason: &str) -> String {
+    json!({
+        "event": {"kind": "agent.sensor"},
+        "agent": {"sensor": {"name": SENSOR_NAME, "state": CREDENTIALS_OFF, "reason": reason}},
+    })
+    .to_string()
+}
+
+
+/// At start: spools one `credentials_off` sensor event when Tetragon is not set to export process credentials (the agent never writes Tetragon's configuration).
+pub async fn check_credentials(env: &SensorEnv) -> Result<(), SourceError> {
+    let path = env.credentials_file.clone();
+    let fault = tokio::task::spawn_blocking(move || credentials_fault(&path)).await?;
+    match fault {
+        Some(reason) => {
+            tracing::warn!(reason, "tetragon does not export process credentials, the honeytoken rule is blind");
+            let (lock, spool, line) = (env.lock.clone(), env.spool.clone(), credentials_event_line(reason));
+            tokio::task::spawn_blocking(move || append_locked(&lock, once(Ok(line)), &spool)).await??;
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+
 /// The ECS event of a transition (kind `agent.sensor`); the tenant is the channel identity's.
 pub fn sensor_event_line(event: &SensorEvent) -> String {
     json!({
@@ -572,6 +619,7 @@ pub async fn run_sensor(
     monotonic: &ClockFn,
     wall: &ClockFn,
 ) -> Result<Supervisor, SourceError> {
+    check_credentials(env).await?;
     let mut supervisor = Supervisor::default();
     for _ in 0..max_ticks {
         let settings = shared.load_full();

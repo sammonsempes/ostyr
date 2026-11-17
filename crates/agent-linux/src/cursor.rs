@@ -102,14 +102,12 @@ pub fn read_cursor(state: &StateDir, cursor_file: &Path) -> Result<Cursor, Sourc
 }
 
 
-/// Reads at most `MAX_CURSOR_BYTES` from the opened handle, after checking it is a regular file; a longer file is refused.
-pub fn read_state_text(file: File, path: &Path) -> Result<String, SourceError> {
+/// Reads at most `MAX_CURSOR_BYTES` from the opened handle, after checking it is a regular file; a longer file is refused with the caller's own error.
+pub fn read_state_text(file: File, path: &Path, too_large: fn(PathBuf) -> SourceError) -> Result<String, SourceError> {
     if file.metadata()?.is_file() {
         let mut text = String::new();
         let read = file.take(MAX_CURSOR_BYTES as u64 + 1).read_to_string(&mut text)?;
-        (read <= MAX_CURSOR_BYTES)
-            .then_some(text)
-            .ok_or_else(|| SourceError::Cursor(path.to_path_buf()))
+        (read <= MAX_CURSOR_BYTES).then_some(text).ok_or_else(|| too_large(path.to_path_buf()))
     } else {
         Err(SourceError::NotRegular(path.to_path_buf()))
     }
@@ -117,19 +115,29 @@ pub fn read_state_text(file: File, path: &Path) -> Result<String, SourceError> {
 
 
 pub fn read_cursor_file(file: File, path: &Path) -> Result<Cursor, SourceError> {
-    parse_cursor(&read_state_text(file, path)?).ok_or_else(|| SourceError::Cursor(path.to_path_buf()))
+    parse_cursor(&read_state_text(file, path, SourceError::Cursor)?).ok_or_else(|| SourceError::Cursor(path.to_path_buf()))
 }
 
 
 /// The run counter of the update inventory: a missing file is zero, anything but a decimal number is refused.
 pub fn read_counter(state: &StateDir, path: &Path) -> Result<u64, SourceError> {
     match open_state_file(state, path)? {
-        Some(file) => read_state_text(file, path)?
+        Some(file) => read_state_text(file, path, SourceError::Counter)?
             .trim()
             .parse::<u64>()
             .map_err(|_| SourceError::Counter(path.to_path_buf())),
         None => Ok(0),
     }
+}
+
+
+/// Renames a state file to `<name>.corrupt-<seconds>` in the same directory, through the held handle; the new name is returned.
+pub fn set_aside(state: &StateDir, path: &Path, seconds: u64) -> Result<PathBuf, SourceError> {
+    let name = leaf(path)?;
+    let mut aside = name.clone();
+    aside.push(format!(".corrupt-{seconds}"));
+    renameat(&state.handle, &name, &state.handle, &aside).map_err(io::Error::from)?;
+    Ok(PathBuf::from(aside))
 }
 
 

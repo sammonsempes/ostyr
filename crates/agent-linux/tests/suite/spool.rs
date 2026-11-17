@@ -5,7 +5,7 @@ use agent_channel::app::shared_log_audit;
 use agent_linux::follow::poll;
 use agent_linux::model::SourceSettings;
 use agent_linux::sensor::{tick, SensorEnv, Supervisor};
-use agent_linux::spool::append_locked;
+use agent_linux::spool::{append_locked, append_within};
 use agent_linux::types::SpoolLock;
 use core_audit::log::open_file_log;
 use std::fs;
@@ -111,5 +111,26 @@ async fn the_source_and_the_sensor_share_one_spool_and_every_line_parses() -> Te
     spooled
         .iter()
         .try_for_each(|line| serde_json::from_str::<serde_json::Value>(line).map(|_| ()))?;
+    Ok(())
+}
+
+
+const BOUND_BYTES: u64 = 10;
+
+
+#[test]
+fn append_within_refuses_a_batch_over_the_bound_and_counts_the_sending_file() -> TestResult {
+    let dir = tempdir()?;
+    let (spool, sending, lock) = (dir.path().join("spool"), dir.path().join("sending"), SpoolLock::default());
+    let batch = vec!["abcd".to_owned(), "efg".to_owned()];
+    assert!(append_within(&lock, &spool, &sending, BOUND_BYTES, &batch)?);
+    assert_eq!(fs::read_to_string(&spool)?, "abcd\nefg\n");
+    assert!(!append_within(&lock, &spool, &sending, BOUND_BYTES, &batch)?);
+    fs::remove_file(&spool)?;
+    fs::write(&sending, "xxx")?;
+    assert!(!append_within(&lock, &spool, &sending, BOUND_BYTES, &batch)?);
+    assert!(!spool.exists());
+    assert!(append_within(&lock, &spool, &sending, BOUND_BYTES, &[])?);
+    assert!(append_within(&lock, &spool, &sending.join("below"), BOUND_BYTES, &batch).is_err());
     Ok(())
 }

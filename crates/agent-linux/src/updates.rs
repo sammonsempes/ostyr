@@ -1,8 +1,7 @@
-use crate::cursor::{read_counter, write_state_text};
+use crate::cursor::{read_counter, set_aside, write_state_text};
 use crate::error::{SensorError, SourceError};
-use crate::follow::file_len;
-use crate::model::{CommandSpec, Failure, Manager, SourceSettings, StateDir, UpdateEnv, UpdateSettings};
-use crate::spool::append_locked;
+use crate::model::{CommandSpec, Failure, Manager, SourceSettings, StateDir, SummaryFacts, UpdateEnv, UpdateSettings};
+use crate::spool::{append_locked, append_within};
 use crate::types::{Collected, SharedSource, SharedUpdates};
 use agent_channel::types::{ClockFn, PauseFn};
 use patch_inventory::apt::parse_apt;
@@ -12,6 +11,7 @@ use patch_inventory::model::{Device, SkipReason, Update};
 use patch_inventory::types::SkipCounts;
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::iter::once;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -46,6 +46,12 @@ pub const DATASET_SUMMARY: &str = "ostyr.updates.summary";
 pub const OUTCOME_OK: &str = "ok";
 
 
+pub const OUTCOME_COUNTER_RESET: &str = "counter_reset";
+
+
+pub const MAX_UPDATE_EVENTS_PER_RUN: usize = 5_000;
+
+
 pub const OUTCOME_SPOOL_FULL: &str = "spool_full";
 
 
@@ -77,7 +83,8 @@ pub fn failure_of_command(error: SensorError) -> Failure {
         SensorError::Timeout => Failure::TimedOut,
         SensorError::TooLarge(_) => Failure::TooLarge,
         SensorError::Io(_) => Failure::Spawn,
-        SensorError::Exit(_) | SensorError::Utf8(_) | SensorError::Parse => Failure::Exit,
+        SensorError::Exit(code) => Failure::Exit(code),
+        SensorError::Utf8(_) | SensorError::Parse => Failure::Exit(None),
     }
 }
 
@@ -94,7 +101,7 @@ pub fn outcome_name(failure: Failure) -> &'static str {
     match failure {
         Failure::TimedOut => "timed_out",
         Failure::TooLarge => "too_large",
-        Failure::Exit => "exit",
+        Failure::Exit(_) => "exit",
         Failure::Spawn => "spawn",
     }
 }
@@ -190,20 +197,22 @@ pub fn event_line(run_id: u64, update: &Update) -> String {
 }
 
 
-pub fn summary_line(run_id: u64, outcome: &str, count: usize, skipped: &SkipCounts, oversized: usize, lists_age_seconds: Option<u64>) -> String {
+pub fn summary_line(facts: &SummaryFacts, skipped: &SkipCounts) -> String {
     let mut reasons: Map<String, Value> = skipped
         .iter()
         .map(|(reason, total)| (skip_name(*reason).to_owned(), json!(total)))
         .collect();
-    if oversized > 0 {
-        reasons.insert(SKIP_EVENT_TOO_LONG.to_owned(), json!(oversized));
+    if facts.oversized > 0 {
+        reasons.insert(SKIP_EVENT_TOO_LONG.to_owned(), json!(facts.oversized));
     }
     let details = present(vec![
-        ("run_id", Some(json!(run_id))),
-        ("count", Some(json!(count))),
-        ("outcome", Some(json!(outcome))),
+        ("run_id", Some(json!(facts.run_id))),
+        ("count", Some(json!(facts.count))),
+        ("outcome", Some(json!(facts.outcome))),
+        ("exit_code", facts.exit_code.map(|code| json!(code))),
+        ("truncated", (facts.truncated > 0).then(|| json!(facts.truncated))),
         ("skipped", Some(Value::Object(reasons))),
-        ("lists_age_seconds", lists_age_seconds.map(|age| json!(age))),
+        ("lists_age_seconds", facts.lists_age_seconds.map(|age| json!(age))),
     ]);
     json!({
         "event": {"kind": "state", "category": ["package"], "type": ["info"], "dataset": DATASET_SUMMARY},
@@ -223,10 +232,25 @@ pub fn next_run_id(state: &StateDir, counter_file: &Path) -> Result<u64, SourceE
 }
 
 
+/// The run id of this run: a counter that is not a usable number is renamed aside through the held handle, logged once, and the ids restart at 1 (`true`).
+pub fn claim_run_id(state: &StateDir, counter_file: &Path, now: u64) -> Result<(u64, bool), SourceError> {
+    match next_run_id(state, counter_file) {
+        Err(SourceError::Counter(_) | SourceError::NotRegular(_)) => {
+            let aside = set_aside(state, counter_file, now)?;
+            let aside_name = aside.display().to_string();
+            tracing::warn!(aside = %aside_name, "run counter unusable, set aside, run ids restart at 1");
+            write_state_text(state, counter_file, "1\n")?;
+            Ok((1, true))
+        }
+        other => other.map(|run_id| (run_id, false)),
+    }
+}
+
+
 /// The lines of one run, on a blocking thread: persist the run id, then append the events and the summary in one write. `false` when the run id could not be persisted and nothing was appended.
 pub fn publish(env: &UpdateEnv, manager: Manager, source: &SourceSettings, collected: &Collected, now: u64) -> Result<bool, SourceError> {
-    match next_run_id(&env.state, &env.counter_file) {
-        Ok(run_id) => append_run(env, manager, source, collected, run_id, now).map(|()| true),
+    match claim_run_id(&env.state, &env.counter_file, now) {
+        Ok((run_id, reset)) => append_run(env, manager, source, collected, (run_id, reset), now).map(|()| true),
         Err(error) => {
             tracing::warn!(%error, "update run id not persisted, the run is dropped");
             Ok(false)
@@ -235,32 +259,55 @@ pub fn publish(env: &UpdateEnv, manager: Manager, source: &SourceSettings, colle
 }
 
 
-/// All the events and the summary in one write, or only a `spool_full` summary when they would push the spool over its bound.
+/// At most `max_events` events and the summary in one write checked under the spool lock (`truncated` counts the omitted updates), or only a `spool_full` summary when they would push the spool over its bound; a reset run (`run_id`, `true`) appends the `counter_reset` summary alone.
 pub fn append_run(
     env: &UpdateEnv,
     manager: Manager,
     source: &SourceSettings,
     collected: &Collected,
-    run_id: u64,
+    (run_id, reset): (u64, bool),
     now: u64,
 ) -> Result<(), SourceError> {
     let age = (manager == Manager::Apt).then(|| lists_age(&env.lists_dir, now)).flatten();
-    let (updates, skipped, outcome) = match collected {
-        Ok(inventory) => (inventory.updates.as_slice(), inventory.skipped.clone(), OUTCOME_OK),
-        Err(failure) => (&[][..], SkipCounts::new(), outcome_name(*failure)),
+    let (updates, skipped, outcome, exit_code) = match (collected, reset) {
+        (_, true) => (&[][..], SkipCounts::new(), OUTCOME_COUNTER_RESET, None),
+        (Ok(inventory), false) => (inventory.updates.as_slice(), inventory.skipped.clone(), OUTCOME_OK, None),
+        (Err(failure), false) => (
+            &[][..],
+            SkipCounts::new(),
+            outcome_name(*failure),
+            match failure {
+                Failure::Exit(code) => *code,
+                _ => None,
+            },
+        ),
     };
-    let events: Vec<String> = updates.iter().map(|update| event_line(run_id, update)).collect();
-    let kept: Vec<String> = events.iter().filter(|line| line.len() <= env.line_limit).cloned().collect();
-    let oversized = events.len() - kept.len();
-    let pending = file_len(&env.spool)? + file_len(&env.sending)?;
-    let bytes: u64 = kept.iter().map(|line| line.len() as u64 + 1).sum();
-    let lines: Vec<String> = if pending.saturating_add(bytes) > source.max_spool_bytes {
-        vec![summary_line(run_id, OUTCOME_SPOOL_FULL, 0, &skipped, oversized, age)]
-    } else {
-        let summary = summary_line(run_id, outcome, kept.len(), &skipped, oversized, age);
-        kept.into_iter().chain([summary]).collect()
+    let scanned = updates.len().min(env.max_events);
+    let kept: Vec<String> = updates
+        .iter()
+        .take(scanned)
+        .map(|update| event_line(run_id, update))
+        .filter(|line| line.len() <= env.line_limit)
+        .collect();
+    let facts = SummaryFacts {
+        run_id,
+        outcome,
+        count: kept.len(),
+        oversized: scanned - kept.len(),
+        truncated: updates.len() - scanned,
+        exit_code,
+        lists_age_seconds: age,
     };
-    append_locked(&env.lock, lines.into_iter().map(Ok), &env.spool)?;
+    let lines: Vec<String> = kept.into_iter().chain(once(summary_line(&facts, &skipped))).collect();
+    let fitted = append_within(&env.lock, &env.spool, &env.sending, source.max_spool_bytes, &lines)?;
+    if !fitted {
+        let full = SummaryFacts {
+            outcome: OUTCOME_SPOOL_FULL,
+            count: 0,
+            ..facts
+        };
+        append_locked(&env.lock, once(Ok(summary_line(&full, &skipped))), &env.spool)?;
+    }
     Ok(())
 }
 
