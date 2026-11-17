@@ -2,11 +2,12 @@
 
 use rustix::fs::{mknodat, FileType, Mode, CWD};
 use rustix::io::Errno;
+use rustix::process::{kill_process, Pid, Signal};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread::sleep;
+use std::sync::mpsc;
 use std::time::Duration;
 use waf::cli::render_to;
 use waf::error::WafError;
@@ -16,10 +17,7 @@ use waf::tls::{check_ca_root, read_failure, NOT_REGULAR_FILE};
 const FIFO_MODE: u32 = 0o600;
 
 
-const POLL_PAUSE: Duration = Duration::from_millis(50);
-
-
-const MAX_POLLS: usize = 1_200;
+const HANG_GUARD: Duration = Duration::from_secs(900);
 
 
 const CHILD_TEST: &str = "child_renders_the_routes_file";
@@ -47,16 +45,15 @@ fn run_capped(routes: &Path) -> Result<bool, Box<dyn Error>> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let finished = (0..MAX_POLLS).find_map(|_| {
-        child.try_wait().ok().flatten().or_else(|| {
-            sleep(POLL_PAUSE);
-            None
-        })
-    });
-    if finished.is_none() {
-        child.kill()?;
+    let pid = Pid::from_child(&child);
+    let (sender, receiver) = mpsc::channel();
+    let waiter = std::thread::spawn(move || sender.send(child.wait()));
+    let outcome = receiver.recv_timeout(HANG_GUARD);
+    if outcome.is_err() {
+        kill_process(pid, Signal::KILL)?;
     }
-    Ok(finished.is_some_and(|status| status.success()))
+    waiter.join().map_err(|_| "waiter thread panicked")??;
+    Ok(outcome.is_ok_and(|status| status.is_ok_and(|exit| exit.success())))
 }
 
 

@@ -11,7 +11,7 @@ use waf::order::TOO_MANY_BYTES;
 use waf::render::{render_text, render_text_capped};
 use waf::tls::{
     check_ca_root, check_directory, check_email, check_hsts, check_pem, check_tls, ACME_FIELDS_MISSING, BAD_CA_ROOT_PATH, BAD_DIRECTORY, BAD_EMAIL,
-    BAD_HSTS, INTERNAL_FIELDS, NOT_ONLY_CERTIFICATES, NOT_REGULAR_FILE, NO_CERTIFICATE,
+    BAD_HSTS, INTERNAL_FIELDS, NOT_ONLY_CERTIFICATES, NOT_REGULAR_FILE, NOT_X509, NO_CERTIFICATE,
 };
 
 
@@ -543,5 +543,21 @@ fn a_marker_in_the_middle_of_a_line_refuses_the_file() -> Result<(), Box<dyn Err
         check_pem(&format!("{canonical}x -----BEGIN PRIVATE KEY-----\n")),
         Err(NOT_ONLY_CERTIFICATES)
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_key_relabelled_as_a_certificate_is_refused() -> Result<(), Box<dyn Error>> {
+    let canonical = fs::read_to_string(CA_PEM)?;
+    let relabelled = "-----BEGIN CERTIFICATE-----\nMC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END CERTIFICATE-----\n";
+    let truncated: String = canonical.lines().take(HALF).map(|line| format!("{line}\n")).collect::<String>() + "-----END CERTIFICATE-----\n";
+    assert_eq!(check_pem(relabelled), Err(NOT_X509));
+    assert_eq!(check_pem(&format!("{canonical}{relabelled}")), Err(NOT_X509));
+    assert_eq!(check_pem(&truncated), Err(NOT_X509));
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("key.pem");
+    fs::write(&file, relabelled)?;
+    assert_eq!(check_ca_root(&file.to_string_lossy()).err().and_then(refused_reason), Some(NOT_X509));
     Ok(())
 }
