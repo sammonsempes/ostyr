@@ -132,9 +132,9 @@ pub async fn publish_one(jetstream: &Context, event: Outgoing) -> Result<(), Gat
 }
 
 
-/// The cause stays in the source chain; the text of the error is fixed.
+/// Only the fixed kind is kept: the ack payload and the server's error description are peer text and are dropped.
 pub fn publish_failure(error: PublishError) -> GatewayError {
-    GatewayError::Publish(Box::new(error))
+    GatewayError::Publish(error.kind())
 }
 
 
