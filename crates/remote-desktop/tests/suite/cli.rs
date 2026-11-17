@@ -2,10 +2,11 @@ use crate::common::types::TestResult;
 use crate::common::{
     claims, setup, token_for, FOURTH_LINE, GARBAGE_BYTE, LIFETIME, LINE_COUNT, NOW, PEER, RELAY_SEED, SECOND_NONCE, SEED_LENGTH, TENANT, THIRD_LINE,
 };
+use core_config::secret_file::SecretFileError;
 use data_encoding::HEXLOWER;
 use remote_desktop::cli::{
-    check_owner_and_mode, check_seed_handle, line_verdict, read_line, read_signing_key, signing_key_from, verify_session, write_hex_line,
-    write_issued, write_keypair_files, write_public_hex, write_seed_file_checked, LINE_LIMIT,
+    check_owner_and_mode, check_seed_handle, line_verdict, read_line, read_signing_key, seed_refusal, signing_key_from, verify_session, without_path,
+    write_hex_line, write_issued, write_keypair_files, write_public_hex, write_seed_file_checked, LINE_LIMIT,
 };
 use remote_desktop::error::CliError;
 use remote_desktop::model::{Line, MAX_TOKEN_BYTES};
@@ -157,7 +158,8 @@ fn the_seed_is_read_from_a_private_file_and_never_from_the_command_line() -> Tes
     let refused = write_issued(&[&hex, &json(LIFETIME, "alice")], NOW, os_random, &mut out)
         .err()
         .ok_or("accepted")?;
-    assert!(matches!(refused, CliError::SeedFile));
+    assert!(matches!(refused, CliError::SeedOpen(_)));
+    assert!(!std::error::Error::source(&refused).ok_or("no cause")?.to_string().contains(&hex));
     assert!(!refused.to_string().contains(&hex));
     assert!(!format!("{refused:?}").contains(&hex));
     assert!(out.is_empty());
@@ -185,6 +187,59 @@ fn a_seed_file_open_to_group_or_other_is_refused_before_it_is_read() -> TestResu
 
 
 #[test]
+fn every_secret_file_refusal_keeps_its_variant_and_cause() -> TestResult {
+    let file = || "seed".to_owned();
+    assert!(matches!(seed_refusal(SecretFileError::Owner { file: file() }), CliError::SeedOwner));
+    assert!(matches!(seed_refusal(SecretFileError::Mode { file: file() }), CliError::SeedMode));
+    assert!(matches!(seed_refusal(SecretFileError::Symlink { file: file() }), CliError::SeedOpen(_)));
+    assert!(matches!(
+        seed_refusal(SecretFileError::Symlink { file: file() }),
+        CliError::SeedOpen(SecretFileError::Symlink { file: kept }) if kept.is_empty()
+    ));
+    assert!(matches!(
+        seed_refusal(SecretFileError::NotRegular { file: file() }),
+        CliError::SeedOpen(_)
+    ));
+    assert!(matches!(
+        seed_refusal(SecretFileError::Io {
+            file: file(),
+            source: std::io::Error::other("x")
+        }),
+        CliError::SeedOpen(_)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_path_is_emptied_from_every_refusal() -> TestResult {
+    let file = || "seed".to_owned();
+    assert!(matches!(without_path(SecretFileError::Mode { file: file() }), SecretFileError::Mode { file: kept } if kept.is_empty()));
+    assert!(matches!(without_path(SecretFileError::Owner { file: file() }), SecretFileError::Owner { file: kept } if kept.is_empty()));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_or_a_fifo_as_seed_file_is_refused_before_it_is_read() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let hex = HEXLOWER.encode(&[RELAY_SEED; SEED_LENGTH]);
+    let target = seed_file(&dir, "target", &hex, OWNER_ONLY)?;
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&target, &link)?;
+    assert!(matches!(
+        read_signing_key(&link),
+        Err(CliError::SeedOpen(SecretFileError::Symlink { .. }))
+    ));
+    let fifo = dir.path().join("pipe");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(matches!(read_signing_key(&fifo), Err(CliError::SeedOpen(_))));
+    Ok(())
+}
+
+
+#[test]
 fn the_owner_check_names_a_seed_file_of_another_user() -> TestResult {
     assert!(matches!(
         check_owner_and_mode(OWNER_ONLY, OTHER_USER, ROOT_USER),
@@ -207,8 +262,8 @@ fn the_owner_check_names_a_seed_file_of_another_user() -> TestResult {
 fn a_bad_seed_file_is_refused() -> TestResult {
     let dir = tempfile::tempdir()?;
     let missing = dir.path().join("missing");
-    assert!(matches!(read_signing_key(&missing), Err(CliError::SeedFile)));
-    assert!(matches!(read_signing_key(dir.path()), Err(CliError::SeedFile)));
+    assert!(matches!(read_signing_key(&missing), Err(CliError::SeedOpen(_))));
+    assert!(matches!(read_signing_key(dir.path()), Err(CliError::SeedOpen(_))));
     let binary = dir.path().join("binary");
     std::fs::write(&binary, [GARBAGE_BYTE, GARBAGE_BYTE - 1])?;
     set_mode(&binary, OWNER_ONLY)?;

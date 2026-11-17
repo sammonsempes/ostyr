@@ -124,6 +124,8 @@ pub enum CliError {
     PublicWriteFailed(#[source] Box<CliError>),
     #[error("the seed file could not be read")]
     SeedFile,
+    #[error("the seed file is refused by the secret-file checks")]
+    SeedOpen(#[source] core_config::secret_file::SecretFileError),
     #[error("the seed file is not text")]
     SeedText,
     #[error("the seed file grants access to group or other")]
