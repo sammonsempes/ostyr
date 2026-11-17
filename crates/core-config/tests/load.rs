@@ -286,3 +286,68 @@ fn a_fifo_is_refused_without_blocking_and_a_missing_file_is_io() -> TestResult {
     ));
     Ok(())
 }
+
+
+#[cfg(unix)]
+const CONTENT_LENGTH: u64 = 3;
+
+
+#[cfg(unix)]
+const SHORT_CAP: u64 = 2;
+
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_device_or_fifo_or_directory_is_refused_and_the_cap_holds() -> TestResult {
+    use core_config::parse::{read_bytes_capped, NOT_REGULAR_REASON};
+    let dir = tempfile::tempdir()?;
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    let to_fifo = dir.path().join("to_fifo");
+    std::os::unix::fs::symlink(&fifo, &to_fifo)?;
+    let to_zero = dir.path().join("to_zero");
+    std::os::unix::fs::symlink("/dev/zero", &to_zero)?;
+    [fifo, to_fifo, to_zero, dir.path().to_path_buf()]
+        .iter()
+        .try_for_each(|path| -> TestResult {
+            assert!(matches!(read_bytes_capped(path, 1), Err(ConfigError::WatchedFile { reason, .. }) if reason == NOT_REGULAR_REASON));
+            Ok(())
+        })?;
+    let regular = dir.path().join("regular");
+    std::fs::write(&regular, b"abc")?;
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&regular, &link)?;
+    assert_eq!(read_bytes_capped(&link, CONTENT_LENGTH)?, b"abc");
+    assert!(matches!(
+        read_bytes_capped(&link, SHORT_CAP),
+        Err(ConfigError::TooLarge { max: SHORT_CAP, .. })
+    ));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn failing_reopen(_path: &std::path::Path) -> io::Result<std::fs::File> {
+    Err(io::Error::other("reopen reached"))
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_refused_anchor_never_reaches_the_reopen() -> TestResult {
+    use core_config::parse::open_regular_through;
+    let dir = tempfile::tempdir()?;
+    let to_zero = dir.path().join("to_zero");
+    std::os::unix::fs::symlink("/dev/zero", &to_zero)?;
+    assert!(matches!(
+        open_regular_through(&to_zero, "zero", failing_reopen),
+        Err(ConfigError::WatchedFile { .. })
+    ));
+    let regular = dir.path().join("regular");
+    std::fs::write(&regular, b"abc")?;
+    assert!(matches!(
+        open_regular_through(&regular, "regular", failing_reopen),
+        Err(ConfigError::Io { .. })
+    ));
+    Ok(())
+}
