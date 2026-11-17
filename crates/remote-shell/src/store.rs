@@ -13,10 +13,16 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "remote_shell";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "rshell_0001",
-    sql: include_str!("../migrations/rshell_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "rshell_0001",
+        sql: include_str!("../migrations/rshell_0001.sql"),
+    },
+    Migration {
+        version: "rshell_0002",
+        sql: include_str!("../migrations/rshell_0002.sql"),
+    },
+];
 
 
 pub const MAX_PAGE: u32 = 200;

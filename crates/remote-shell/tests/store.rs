@@ -681,6 +681,37 @@ fn the_migration_is_embedded_and_named() -> TestResult {
 }
 
 
+#[test]
+fn the_second_migration_refuses_truncate_and_pins_the_reason_tokens() -> TestResult {
+    let second = MIGRATIONS.get(1).ok_or("no second migration")?;
+    assert_eq!(second.version, "rshell_0002");
+    assert!(second.sql.contains("BEFORE TRUNCATE ON remote_shell_sessions"));
+    assert!(second.sql.contains("FOR EACH STATEMENT"));
+    let listed = second
+        .sql
+        .split("IN (")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .ok_or("no reason list")?;
+    let mut in_sql: Vec<String> = listed.split(',').map(|token| token.trim().trim_matches('\'').to_owned()).collect();
+    let mut in_rust: Vec<String> = [
+        CloseReason::IdleTimeout,
+        CloseReason::MaxDuration,
+        CloseReason::RecordingFailed,
+        CloseReason::ChannelDead,
+        CloseReason::UserClose,
+        CloseReason::ClockSkew,
+    ]
+    .iter()
+    .map(|reason| reason_token(*reason).to_owned())
+    .collect();
+    in_sql.sort();
+    in_rust.sort();
+    assert_eq!(in_sql, in_rust);
+    Ok(())
+}
+
+
 fn recording(tenant: &str, session_id: &str) -> Recording {
     Recording {
         header: header(tenant, session_id, OPENED),
