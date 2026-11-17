@@ -15,3 +15,9 @@ pub type Counts = BTreeMap<&'static str, u64>;
 
 
 pub type RunnerFn<'a> = dyn Fn(&str, &[String], Duration) -> io::Result<CommandStatus> + 'a;
+
+
+pub type ConnectionOutcome = Result<Result<(), hyper::Error>, tokio::time::error::Elapsed>;
+
+
+pub type PageResponse = hyper::Response<http_body_util::Full<bytes::Bytes>>;

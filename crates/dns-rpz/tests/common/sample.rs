@@ -28,5 +28,6 @@ pub fn sample_policy() -> Policy {
         actions: Actions::default(),
         unbound: Unbound::default(),
         sinkhole_page: None,
+        sinkhole_server: None,
     }
 }

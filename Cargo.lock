@@ -1968,9 +1968,14 @@ dependencies = [
 name = "dns-rpz"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "core-audit",
  "core-config",
+ "futures-util",
  "html-escape",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "idna",
  "intel-feeds",
  "ipnet",
@@ -1980,6 +1985,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "wait-timeout",
