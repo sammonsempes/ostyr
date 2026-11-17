@@ -264,3 +264,24 @@ fn state_lists_every_present_field() -> TestResult {
     assert_eq!(state.get("secrets.db").map(String::as_str), Some("vault://x"));
     Ok(())
 }
+
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_swapped_in_for_a_live_reload_is_refused_and_the_old_value_kept() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    replace_file(&path, &module_text("30d"))?;
+    let (audit, recorded) = recording_audit();
+    let engine = engine_for(&path, audit, Vec::new())?;
+    fs::remove_file(&path)?;
+    assert!(std::process::Command::new("mkfifo").arg(&path).status()?.success());
+    let outcome = reload(&engine);
+    assert!(
+        matches!(&outcome, ReloadOutcome::Refused { reason } if reason.contains("not a regular file")),
+        "{outcome:?}"
+    );
+    assert_eq!(retention(&engine).as_deref(), Some("30d"));
+    assert_eq!(entries(&recorded)?.len(), 1);
+    Ok(())
+}

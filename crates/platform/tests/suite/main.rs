@@ -1,3 +1,4 @@
+mod fifo;
 mod fixture;
 mod merge;
 mod parse;
