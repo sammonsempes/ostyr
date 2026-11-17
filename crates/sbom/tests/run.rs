@@ -214,7 +214,7 @@ fn arguments_are_separate_and_typed() -> TestResult {
 #[test]
 fn environment_is_cleared_and_explicit() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(env | sort | tr '\\n' ' ')\"")?;
+    let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(env | tr '\\n' ' ')\"")?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     let seen = sbom
         .components
