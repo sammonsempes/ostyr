@@ -16,7 +16,7 @@ use rustls::crypto::ring::default_provider;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use siem_ingest::error::NatsError;
+use siem_ingest::error::{class_of, handshake_class, rustls_in, without_peer_tls, NatsError, TlsClass};
 use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
 use siem_ingest::nats::{
@@ -29,6 +29,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
@@ -806,5 +807,184 @@ fn lax_symlinked_or_fifo_nats_secret_files_are_refused_before_any_connect() -> R
             .ok_or("credentials accepted")?;
         assert!(matches!(refused_credentials, NatsError::SecretFile { what: "credentials", .. }));
     }
+    Ok(())
+}
+
+
+const MARKER: &str = "peer-san-marker";
+
+
+const ESCAPE: char = '\u{1b}';
+
+
+fn chain(error: &(dyn Error + 'static)) -> String {
+    std::iter::successors(Some(error), |inner| (*inner).source())
+        .map(|inner| format!("{inner} {inner:?}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+
+fn hostile_material() -> Result<(Arc<ServerConfig>, String), Box<dyn Error + Send + Sync>> {
+    let generated = generate_simple_self_signed(vec![format!("{MARKER}{ESCAPE}.example")])?;
+    let certificate_pem = generated.cert.pem();
+    let certificates = CertificateDer::pem_slice_iter(certificate_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+    let key = PrivateKeyDer::from_pem_slice(generated.signing_key.serialize_pem().as_bytes())?;
+    let config = ServerConfig::builder_with_provider(Arc::new(default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)?;
+    Ok((Arc::new(config), certificate_pem))
+}
+
+
+#[test]
+fn a_hostile_certificate_name_never_reaches_the_connect_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (server_config, ca_pem) = hostile_material()?;
+    let stub = start_stub(Some(server_config), |_state| {})?;
+    let dir = tempdir()?;
+    let ca_path = dir.path().join("ca.pem");
+    fs::write(&ca_path, &ca_pem)?;
+    let extra = format!("nats_tls_first: true\nnats_ca_file: \"{}\"\n", ca_path.display());
+    let text = yaml(stub.port, NORMAL_MS, &extra).replace("127.0.0.1", HOST);
+    let control = Builder::new_current_thread().enable_all().build()?.block_on(
+        async_nats::ConnectOptions::new()
+            .tls_first()
+            .tls_client_config(tls_config(ca_pem.as_bytes())?)
+            .connect(format!("nats://{HOST}:{}", stub.port)),
+    );
+    let raw = control.err().ok_or("connected")?;
+    assert!(
+        chain(&raw).contains(MARKER),
+        "the control: async-nats itself carries the peer text: {}",
+        chain(&raw)
+    );
+    let engine = engine_for(&dir, &text)?;
+    let link = link_for(&engine)?;
+    let error = fetch_batch(&link, FETCH_MAX).err().ok_or("fetched")?;
+    let shown = chain(error.as_ref());
+    assert!(!shown.contains(MARKER) && !shown.contains(ESCAPE) && !shown.contains("u{1b}"), "{shown}");
+    assert!(matches!(error.downcast_ref::<NatsError>(), Some(NatsError::Request(_))), "{shown}");
+    Ok(())
+}
+
+
+#[test]
+fn rustls_errors_are_classed_without_their_text() -> Result<(), Box<dyn Error + Send + Sync>> {
+    assert_eq!(
+        class_of(&rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)),
+        TlsClass::Certificate
+    );
+    assert_eq!(class_of(&rustls::Error::NoCertificatesPresented), TlsClass::Certificate);
+    assert_eq!(
+        class_of(&rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure)),
+        TlsClass::Alert
+    );
+    assert_eq!(class_of(&rustls::Error::HandshakeNotComplete), TlsClass::Protocol);
+    assert!(rustls_in(&rustls::Error::HandshakeNotComplete).is_some());
+    let wrapped = io::Error::new(io::ErrorKind::InvalidData, rustls::Error::NoCertificatesPresented);
+    assert_eq!(handshake_class(&wrapped), Some(TlsClass::Certificate));
+    assert_eq!(handshake_class(&io::Error::from(io::ErrorKind::BrokenPipe)), None);
+    assert_eq!(handshake_class(&io::Error::new(io::ErrorKind::BrokenPipe, "text")), None);
+    let fixed = without_peer_tls(Box::new(wrapped));
+    assert_eq!(fixed.to_string(), TlsClass::Certificate.to_string());
+    let kept = without_peer_tls(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "kept text")));
+    assert!(kept.to_string().contains("kept text"));
+    assert!(!TlsClass::Alert.to_string().is_empty() && !TlsClass::Protocol.to_string().is_empty());
+    Ok(())
+}
+
+
+const WIDE_DIRECTIVES: &str = "trace,async_nats=trace,async_nats::connector=trace";
+
+
+static ANCHOR: std::sync::LazyLock<tracing::Dispatch> =
+    std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish()));
+
+
+fn connect_logs(dispatch: &tracing::Dispatch, captured: &Arc<Mutex<Vec<u8>>>) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let (server_config, ca_pem) = hostile_material()?;
+    let stub = start_stub(Some(server_config), |_state| {})?;
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    let client_config = tls_config(ca_pem.as_bytes())?;
+    let outcome = tracing::dispatcher::with_default(dispatch, || {
+        runtime
+            .block_on(
+                async_nats::ConnectOptions::new()
+                    .tls_first()
+                    .tls_client_config(client_config)
+                    .connect(format!("nats://localhost:{}", stub.port)),
+            )
+            .err()
+            .ok_or("connected")
+            .map(|_| ())
+            .map_err(Box::<dyn Error + Send + Sync>::from)
+    });
+    outcome?;
+    let bytes = captured.lock().map_err(|error| error.to_string())?.clone();
+    Ok(String::from_utf8(bytes)?)
+}
+
+
+#[test]
+fn the_production_filter_keeps_peer_certificate_names_out_of_the_async_nats_log() -> Result<(), Box<dyn Error + Send + Sync>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let subscriber = siem_ingest::logging::build_subscriber(move || writer.clone(), Some(WIDE_DIRECTIVES))?;
+    let logs = connect_logs(&tracing::Dispatch::new(subscriber), &captured)?;
+    assert!(!logs.contains(MARKER) && !logs.contains(ESCAPE), "{logs}");
+    Ok(())
+}
+
+
+#[test]
+fn a_filter_without_the_cap_shows_the_marker() -> Result<(), Box<dyn Error + Send + Sync>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let uncapped = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let logs = connect_logs(&tracing::Dispatch::new(uncapped), &captured)?;
+    assert!(logs.contains(MARKER), "the probe must see the library line: {logs}");
+    Ok(())
+}
+
+
+#[test]
+fn the_cap_holds_over_every_directive_and_other_targets_are_untouched() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let wide = tracing_subscriber::filter::Targets::from_str(WIDE_DIRECTIVES)?;
+    assert!(!siem_ingest::logging::log_allowed(&wide, "async_nats::connector", &tracing::Level::DEBUG));
+    assert!(!siem_ingest::logging::log_allowed(&wide, "async_nats", &tracing::Level::TRACE));
+    assert!(siem_ingest::logging::log_allowed(&wide, "async_nats::connector", &tracing::Level::INFO));
+    assert!(siem_ingest::logging::log_allowed(&wide, "siem_ingest::nats", &tracing::Level::TRACE));
+    assert!(!siem_ingest::logging::log_allowed(
+        &tracing_subscriber::filter::Targets::from_str("warn")?,
+        "siem_ingest::nats",
+        &tracing::Level::INFO
+    ));
+    assert!(
+        siem_ingest::logging::is_capped_target("async_nats")
+            && siem_ingest::logging::is_capped_target("async_nats::x")
+            && !siem_ingest::logging::is_capped_target("async_natsx")
+    );
+    assert!(siem_ingest::logging::build_subscriber(io::sink, Some("=[")).is_err());
+    std::sync::LazyLock::force(&ANCHOR);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let subscriber = siem_ingest::logging::build_subscriber(move || writer.clone(), None)?;
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::debug!(target: "async_nats::connector", "hidden-line");
+        tracing::info!(target: "async_nats::connector", "capped-info-line");
+        tracing::debug!(target: "other::module", "shown-line");
+    });
+    let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
+    assert!(
+        logs.contains("shown-line") && logs.contains("capped-info-line") && !logs.contains("hidden-line"),
+        "{logs}"
+    );
+    assert!(!logs.contains(ESCAPE), "{logs}");
     Ok(())
 }

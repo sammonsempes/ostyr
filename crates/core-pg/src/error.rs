@@ -1,5 +1,6 @@
 use core_config::secret_file::SecretFileError;
 use rustls_pki_types::pem;
+use std::error::Error;
 use std::io;
 use thiserror::Error;
 
@@ -45,6 +46,8 @@ pub enum PgError {
     Server { code: String, class: &'static str },
     #[error("database client error")]
     Client(#[source] tokio_postgres::Error),
+    #[error("TLS handshake with the server failed: {0}")]
+    Handshake(TlsClass),
     #[error("invalid tenant scope: expected 1 to 64 characters of [A-Za-z0-9_.-] starting with a letter or digit")]
     InvalidTenant,
     #[error("invalid migration version `{version}`: expected 1 to 64 characters of [0-9a-z_]")]
@@ -111,8 +114,57 @@ pub fn reduce(error: tokio_postgres::Error) -> PgError {
                 code,
             }
         }
-        None => PgError::Client(error),
+        None => handshake_class(&error).map_or_else(|| PgError::Client(error), PgError::Handshake),
     }
+}
+
+
+/// What a server's TLS failure is called: never the rustls text, which can list the server certificate's names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum TlsClass {
+    #[error("the certificate was refused")]
+    Certificate,
+    #[error("the TLS alert was received")]
+    Alert,
+    #[error("the TLS exchange was refused")]
+    Protocol,
+}
+
+
+pub fn class_of(error: &rustls::Error) -> TlsClass {
+    match error {
+        rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented => TlsClass::Certificate,
+        rustls::Error::AlertReceived(_) => TlsClass::Alert,
+        _ => TlsClass::Protocol,
+    }
+}
+
+
+/// The rustls error itself, or the one an `io::Error` wraps (its `source` skips the wrapped error).
+pub fn rustls_in<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
+    error.downcast_ref::<rustls::Error>().or_else(|| {
+        error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    })
+}
+
+
+/// The next cause: the error an `io::Error` wraps (its `source` skips it), else the plain `source`.
+pub fn next_cause<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a (dyn Error + 'static)> {
+    error
+        .downcast_ref::<io::Error>()
+        .and_then(io::Error::get_ref)
+        .map(|inner| inner as &(dyn Error + 'static))
+        .or_else(|| error.source())
+}
+
+
+pub fn handshake_class(error: &(dyn Error + 'static)) -> Option<TlsClass> {
+    std::iter::successors(Some(error), |inner| next_cause(*inner))
+        .find_map(rustls_in)
+        .map(class_of)
 }
 
 

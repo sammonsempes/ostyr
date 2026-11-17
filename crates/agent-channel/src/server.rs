@@ -1,4 +1,4 @@
-use crate::error::{ChannelError, IdentityError};
+use crate::error::{error_class, serve_kind, ChannelError, IdentityError};
 use crate::identity::{identity_from_chain, serials_from_chain};
 use crate::limits::{bounded_text, bump, open_slot};
 use crate::model::{
@@ -147,7 +147,7 @@ pub async fn handshake(
         accepted = timeout(limit, acceptor.accept(stream)) => accepted.map_err(|_elapsed| handshake_timed_out(state, seconds)),
         Ok(()) = evicted => Err(ChannelError::HandshakeEvicted),
     };
-    finished?.map_err(ChannelError::Handshake)
+    finished?.map_err(|error| ChannelError::Handshake(error_class(&error)))
 }
 
 
@@ -188,7 +188,7 @@ pub async fn run_connection(
             .keep_alive_timeout(Duration::from_secs(SERVER_KEEPALIVE_TIMEOUT_SECONDS));
         tokio::select! {
             served = builder.serve_connection(TokioIo::new(tls), TowerToHyperService::new(service)) => {
-                served.map_err(ChannelError::Serve)
+                served.map_err(|error| ChannelError::Serve(serve_kind(&*error)))
             }
             closed = watch_revocation(revocations, &serials) => Err(closed),
             late = first_request_deadline(&first_request, limit, &state) => Err(late),

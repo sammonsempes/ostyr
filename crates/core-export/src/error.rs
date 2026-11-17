@@ -65,3 +65,63 @@ pub enum ExportError {
 pub struct PermanentRejection {
     pub status: u16,
 }
+
+
+/// What a failed delivery tells: a fixed class, never text the peer chose (a rustls name error lists the certificate names raw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TransportKind {
+    #[error("the request timed out")]
+    Timeout,
+    #[error("the TLS handshake was refused")]
+    Tls,
+    #[error("the connection could not be made")]
+    Connect,
+    #[error("an I/O failure ({kind})")]
+    Io { kind: io::ErrorKind },
+    #[error("the HTTP exchange was refused")]
+    Protocol,
+}
+
+
+/// A certificate refusal is a ureq `Rustls` or an `Io` of kind `InvalidData`.
+pub fn transport_kind(error: &ureq::Error) -> TransportKind {
+    match error {
+        ureq::Error::Timeout(_) => TransportKind::Timeout,
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => TransportKind::Tls,
+        ureq::Error::Io(source) if source.kind() == io::ErrorKind::InvalidData => TransportKind::Tls,
+        ureq::Error::Io(source) => TransportKind::Io { kind: source.kind() },
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => TransportKind::Connect,
+        _ => TransportKind::Protocol,
+    }
+}
+
+
+/// A status answer keeps its ureq error (a number, read by `classify_status`); every other failure becomes its fixed kind.
+pub fn peer_failure(error: ureq::Error) -> BoxError {
+    match error {
+        ureq::Error::StatusCode(_) => BoxError::from(error),
+        other => BoxError::from(transport_kind(&other)),
+    }
+}
+
+
+/// The next cause: the error an `io::Error` wraps (its `source` skips it), else the plain `source`.
+pub fn next_cause<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a (dyn std::error::Error + 'static)> {
+    error
+        .downcast_ref::<io::Error>()
+        .and_then(io::Error::get_ref)
+        .map(|inner| inner as &(dyn std::error::Error + 'static))
+        .or_else(|| error.source())
+}
+
+
+/// The same kind with a fixed text when a rustls error sits inside, so a peer's handshake error is never logged or kept.
+pub fn without_peer_text(error: io::Error) -> io::Error {
+    let inner_tls = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |cause| next_cause(*cause))
+        .any(|cause| cause.is::<rustls::Error>());
+    if inner_tls {
+        io::Error::new(error.kind(), TransportKind::Tls)
+    } else {
+        error
+    }
+}

@@ -1,4 +1,4 @@
-use crate::error::ChannelError;
+use crate::error::{without_peer_text, ChannelError};
 use crate::limits::bounded_text;
 use crate::model::{
     CommandRun, CommandVerdict, Delivered, Delivery, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS,
@@ -41,7 +41,7 @@ pub async fn connect_channel(address: SocketAddr, config: SharedClientConfig, se
         let attempt_name = name.clone();
         async move {
             let tcp = TcpStream::connect(address).await?;
-            let tls = attempt_connector.connect(attempt_name, tcp).await?;
+            let tls = attempt_connector.connect(attempt_name, tcp).await.map_err(without_peer_text)?;
             Ok::<_, io::Error>(TokioIo::new(tls))
         }
     });

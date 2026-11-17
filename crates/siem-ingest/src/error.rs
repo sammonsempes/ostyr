@@ -1,4 +1,7 @@
 use core_config::error::ConfigError;
+use core_config::types::BoxError;
+use std::error::Error;
+use std::io;
 use thiserror::Error;
 
 
@@ -125,4 +128,62 @@ pub enum NatsError {
     NotConnected,
     #[error("the acknowledgement token is unknown to the NATS session")]
     UnknownToken,
+}
+
+
+/// What a server's TLS failure is called: never the rustls text, which can list the server certificate's names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum TlsClass {
+    #[error("the certificate was refused")]
+    Certificate,
+    #[error("the TLS alert was received")]
+    Alert,
+    #[error("the TLS exchange was refused")]
+    Protocol,
+}
+
+
+pub fn class_of(error: &rustls::Error) -> TlsClass {
+    match error {
+        rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented => TlsClass::Certificate,
+        rustls::Error::AlertReceived(_) => TlsClass::Alert,
+        _ => TlsClass::Protocol,
+    }
+}
+
+
+/// The rustls error itself, or the one an `io::Error` wraps (its `source` skips the wrapped error).
+pub fn rustls_in<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
+    error.downcast_ref::<rustls::Error>().or_else(|| {
+        error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    })
+}
+
+
+/// The next cause: the error an `io::Error` wraps (its `source` skips it), else the plain `source`.
+pub fn next_cause<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a (dyn Error + 'static)> {
+    error
+        .downcast_ref::<io::Error>()
+        .and_then(io::Error::get_ref)
+        .map(|inner| inner as &(dyn Error + 'static))
+        .or_else(|| error.source())
+}
+
+
+pub fn handshake_class(error: &(dyn Error + 'static)) -> Option<TlsClass> {
+    std::iter::successors(Some(error), |inner| next_cause(*inner))
+        .find_map(rustls_in)
+        .map(class_of)
+}
+
+
+/// A failure with a rustls error anywhere in its chain becomes its fixed class; any other keeps its cause.
+pub fn without_peer_tls(error: BoxError) -> BoxError {
+    match handshake_class(error.as_ref()) {
+        Some(class) => BoxError::from(class),
+        None => error,
+    }
 }
