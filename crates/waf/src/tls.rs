@@ -15,6 +15,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::fs::File;
+use x509_parser::parse_x509_certificate;
 
 
 pub const ACME_FIELDS_MISSING: &str = "the acme issuer needs a directory and an email";
@@ -39,6 +40,9 @@ pub const NOT_ONLY_CERTIFICATES: &str = "ca_root_file holds a section that is no
 
 
 pub const NOT_REGULAR_FILE: &str = "ca_root_file is not a regular file";
+
+
+pub const NOT_X509: &str = "ca_root_file holds a certificate section that is not an X.509 certificate";
 
 
 pub const BAD_HSTS: &str = "invalid hsts_max_age_seconds";
@@ -115,6 +119,12 @@ pub fn stray_marker(text: &str) -> bool {
 }
 
 
+/// True when the DER is exactly one X.509 certificate, with nothing after it.
+pub fn is_x509(der: &[u8]) -> bool {
+    parse_x509_certificate(der).is_ok_and(|(rest, _)| rest.is_empty())
+}
+
+
 /// The certificates of `text` re-encoded as PEM, nothing else of the text; a section that is not a certificate or a malformed one refuses it all.
 pub fn check_pem(text: &str) -> Result<String, &'static str> {
     if stray_marker(text) {
@@ -127,6 +137,8 @@ pub fn check_pem(text: &str) -> Result<String, &'static str> {
         Err(NOT_ONLY_CERTIFICATES)
     } else if certificates.is_empty() {
         Err(NO_CERTIFICATE)
+    } else if !certificates.iter().all(|der| is_x509(der)) {
+        Err(NOT_X509)
     } else {
         Ok(certificates.iter().map(|der| encode_certificate(der)).collect())
     }
