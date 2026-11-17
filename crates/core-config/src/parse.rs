@@ -2,8 +2,12 @@ use crate::error::ConfigError;
 use serde::de::{DeserializeOwned, Error as _};
 use serde_path_to_error::{Path as FieldPath, Segment};
 use serde_saphyr::{Error as YamlError, ExternalMessageSource, Location};
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{File, Metadata};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -43,25 +47,59 @@ pub fn read_text(reader: &mut dyn Read, file: &str) -> Result<String, ConfigErro
 pub const NOT_REGULAR_REASON: &str = "not a regular file";
 
 
+fn io_at(file: &str) -> impl FnOnce(std::io::Error) -> ConfigError + '_ {
+    move |source| ConfigError::Io {
+        file: file.to_string(),
+        source,
+    }
+}
+
+
+fn refuse_unless_regular(metadata: &Metadata, file: &str) -> Result<(), ConfigError> {
+    metadata.is_file().then_some(()).ok_or_else(|| ConfigError::WatchedFile {
+        file: file.to_string(),
+        reason: NOT_REGULAR_REASON.to_string(),
+    })
+}
+
+
+/// `O_PATH` follows symlinks and runs no driver, the handle is judged by `fstat`, then reopened non-blocking through `/proc/self/fd`.
+#[cfg(unix)]
 pub fn open_regular(path: &Path, file: &str) -> Result<File, ConfigError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NONBLOCK);
-    let (handle, metadata) = options
-        .open(path)
-        .and_then(|opened| opened.metadata().map(|described| (opened, described)))
-        .map_err(|source| ConfigError::Io {
-            file: file.to_string(),
-            source,
-        })?;
-    if metadata.is_file() {
-        Ok(handle)
+    let mut anchor_options = OpenOptions::new();
+    anchor_options.read(true).custom_flags(libc::O_PATH | libc::O_CLOEXEC);
+    let anchor = anchor_options.open(path).map_err(io_at(file))?;
+    refuse_unless_regular(&anchor.metadata().map_err(io_at(file))?, file)?;
+    let mut reopen_options = OpenOptions::new();
+    reopen_options
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC);
+    let handle = reopen_options
+        .open(format!("/proc/self/fd/{}", anchor.as_raw_fd()))
+        .map_err(io_at(file))?;
+    refuse_unless_regular(&handle.metadata().map_err(io_at(file))?, file)?;
+    Ok(handle)
+}
+
+
+#[cfg(not(unix))]
+pub fn open_regular(path: &Path, file: &str) -> Result<File, ConfigError> {
+    let handle = File::open(path).map_err(io_at(file))?;
+    refuse_unless_regular(&handle.metadata().map_err(io_at(file))?, file)?;
+    Ok(handle)
+}
+
+
+/// The bytes of a regular file, at most `max`; one more is `TooLarge`, a non-regular file is refused before any driver open.
+pub fn read_bytes_capped(path: &Path, max: u64) -> Result<Vec<u8>, ConfigError> {
+    let file = path.display().to_string();
+    let handle = open_regular(path, &file)?;
+    let mut bytes = Vec::new();
+    handle.take(max.saturating_add(1)).read_to_end(&mut bytes).map_err(io_at(&file))?;
+    if bytes.len() as u64 > max {
+        Err(ConfigError::TooLarge { file, max })
     } else {
-        Err(ConfigError::WatchedFile {
-            file: file.to_string(),
-            reason: NOT_REGULAR_REASON.to_string(),
-        })
+        Ok(bytes)
     }
 }
 

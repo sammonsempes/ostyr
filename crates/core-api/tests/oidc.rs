@@ -1208,3 +1208,16 @@ async fn an_oidc_account_deleted_from_the_file_is_dropped_unless_a_callback_made
     assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
     Ok(())
 }
+
+
+#[test]
+fn an_oidc_configuration_that_is_not_utf8_is_a_startup_error() -> TestResult {
+    let dir = tempdir()?;
+    let files = oidc_files_in(dir.path(), CONFIG_TEXT)?;
+    fs::write(&files.config, NOT_UTF8)?;
+    assert!(matches!(load_oidc(&files, &builtin_catalog()), Err(StartupError::Io(_))));
+    Ok(())
+}
+
+
+const NOT_UTF8: &[u8] = &[u8::MAX];

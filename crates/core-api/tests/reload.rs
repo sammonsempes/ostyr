@@ -2689,3 +2689,94 @@ fn an_unchanged_start_only_setting_lets_other_changes_through() -> TestResult {
     assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
     Ok(())
 }
+
+
+#[cfg(unix)]
+const NOT_REGULAR_KINDS: usize = 4;
+
+
+#[cfg(unix)]
+const KIND_DIRECTORY: usize = 2;
+
+
+#[cfg(unix)]
+fn remove_any(path: &Path) -> Result<(), TestError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => Err(error)?,
+    }
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn make_not_regular(path: &Path, kind: usize) -> Result<(), TestError> {
+    let scratch = path.with_extension("scratch");
+    remove_any(path)?;
+    remove_any(&scratch)?;
+    match kind {
+        0 => assert!(std::process::Command::new("mkfifo").arg(path).status()?.success()),
+        1 => {
+            assert!(std::process::Command::new("mkfifo").arg(&scratch).status()?.success());
+            std::os::unix::fs::symlink(&scratch, path)?;
+        }
+        KIND_DIRECTORY => fs::create_dir(path)?,
+        _ => std::os::unix::fs::symlink("/dev/zero", path)?,
+    }
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn files_extra(dir: &Path, material: &Pki) -> Result<String, TestError> {
+    write_pki(dir, material)?;
+    fs::write(dir.join("ca.pem"), &material.certificate)?;
+    Ok(format!(
+        "{}{}  oidc_ca_file: {}\n",
+        tls_extra(dir),
+        oidc_settings(dir, "first.secret")?,
+        dir.join("ca.pem").display()
+    ))
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_non_regular_file_at_any_reloaded_path_is_refused_at_start_and_on_reload() -> TestResult {
+    let material = pki()?;
+    let names = ["compromised.txt", "server.pem", "oidc.yaml", "ca.pem"];
+    names.iter().try_for_each(|name| -> TestResult {
+        (0..NOT_REGULAR_KINDS).try_for_each(|kind| -> TestResult {
+            let dir = tempdir()?;
+            let extra = files_extra(dir.path(), &material)?;
+            let running = live_with(dir, &extra, None)?;
+            let target = running.dir.path().join(name);
+            let original = fs::read(&target)?;
+            let oidc_before = running.state.oidc.load_full().ok_or("no oidc")?;
+            make_not_regular(&target, kind)?;
+            assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }), "{name} kind {kind}");
+            assert!(running.state.compromised.load().contains("passwordpassword"));
+            assert!(Arc::ptr_eq(&oidc_before, &running.state.oidc.load_full().ok_or("no oidc")?));
+            assert!(build_settings(load_module(&running.module_file)?).is_err(), "{name} kind {kind}");
+            remove_any(&target)?;
+            fs::write(&target, &original)?;
+            assert!(!matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+            Ok(())
+        })
+    })
+}
+
+
+#[test]
+fn a_file_over_the_public_cap_is_refused_by_the_checked_reader() -> TestResult {
+    let dir = tempdir()?;
+    let big = dir.path().join("big");
+    fs::File::create(&big)?.set_len(core_api::server::MAX_PUBLIC_FILE_BYTES + 1)?;
+    assert!(matches!(
+        core_api::server::read_public(&big),
+        Err(StartupError::Config(ConfigError::TooLarge { .. }))
+    ));
+    Ok(())
+}
