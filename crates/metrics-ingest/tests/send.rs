@@ -289,9 +289,9 @@ fn each_status_has_its_fixed_class() -> TestResult {
 fn an_unreachable_server_is_a_failed_batch() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS, 1)?;
     let settings = loaded(&rig)?;
-    let free = TcpListener::bind("127.0.0.1:0")?;
-    let port = free.local_addr()?.port();
-    drop(free);
+    let hangup = TcpListener::bind("127.0.0.1:0")?;
+    let port = hangup.local_addr()?.port();
+    let closer = std::thread::spawn(move || hangup.accept().map(drop));
     let moved = MetricsSettings {
         url: format!("http://127.0.0.1:{port}"),
         ..settings
@@ -299,6 +299,7 @@ fn an_unreachable_server_is_a_failed_batch() -> TestResult {
     let elapsed = || Duration::ZERO;
     let mut send = clickhouse_sender(&moved, &elapsed)?;
     assert!(send(b"{}\n").is_err());
+    closer.join().map_err(|_| "closer thread panicked")??;
     Ok(())
 }
 
