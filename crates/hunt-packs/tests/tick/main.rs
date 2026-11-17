@@ -6,7 +6,7 @@ use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::model::{Baseline, Cost, HuntPack, Source};
 use hunt_packs::run::{HuntOutcome, RunError};
 use hunt_packs::schedule::{due_runs, RunWindow, ScheduleError};
-use hunt_packs::store::{last_done, record_done, Param, GET_SQL, SET_SQL};
+use hunt_packs::store::{last_done, record_done, Param, FINDING_SQL, GET_SQL, SET_SQL};
 use hunt_packs::tick::{
     check_limits, tick, Hooks, PackStatus, RunRecord, TickError, TickLimits, DEFAULT_MAX_RUNS_PER_TICK, MAX_CLOCK_SKEW, MAX_RUNS_PER_TICK_CEILING,
     MAX_TENANTS_CEILING,
@@ -131,6 +131,12 @@ fn answer(store: &Store, scope: &TenantScope, sql: &'static str, params: &[Param
             let stored = map.entry((tenant, pack.clone())).or_insert(*end);
             *stored = (*stored).max(*end);
             Ok(vec![*stored])
+        }
+        (FINDING_SQL, [Param::Text(pack), _, Param::Int(end), Param::Int(matches), _]) => {
+            let key = (tenant, format!("{pack}@{end}"));
+            let fresh = !map.contains_key(&key);
+            map.entry(key).or_insert(*matches);
+            Ok(if fresh { vec![*end] } else { Vec::new() })
         }
         _ => Err(PgError::InvalidTenant),
     }
@@ -429,7 +435,7 @@ async fn the_per_tick_cap_defers_the_rest() -> TestResult {
     assert_eq!(*log.borrow(), vec![call("a", "p", H3), call("a", "p", H4)]);
     assert_eq!(stored(&store, "a", "p"), Some(H4));
     assert_eq!(stored(&store, "a", "q"), None);
-    assert_eq!(*calls.borrow() - before, 1 + TWO);
+    assert_eq!(*calls.borrow() - before, 1 + TWO + 1);
     Ok(())
 }
 
@@ -575,5 +581,113 @@ async fn store_errors_stop_the_pack() -> TestResult {
     assert!(first.runs.is_empty());
     assert_eq!(*log.borrow(), vec![call("a", "p", H5)]);
     assert_eq!(stored(&store, "a", "p"), None);
+    Ok(())
+}
+
+
+fn findings_in(store: &Store) -> usize {
+    store.borrow().keys().filter(|(_, key)| key.contains('@')).count()
+}
+
+
+#[tokio::test]
+async fn a_finding_is_stored_and_the_state_advances() -> TestResult {
+    let (store, calls, log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = recorder(&log, never);
+    let packs = [pack("p", Source::Clickhouse)];
+    let report = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(report.findings_failed, 0);
+    assert_eq!(stored(&store, "a", &format!("p@{H4}")), Some(1));
+    assert_eq!(stored(&store, "a", "p"), Some(H4));
+    let quiet = tick(
+        &tenants(&["b"]),
+        &packs,
+        H5 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(quiet.packs.first().ok_or("no entry")?.status, PackStatus::Done);
+    assert_eq!(findings_in(&store), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_finding_store_keeps_the_state_and_the_window_runs_again() -> TestResult {
+    let (store, calls, log) = fresh();
+    let mut run = recorder(&log, never);
+    let packs = [pack("p", Source::Clickhouse)];
+    let mut broken = fake_failing(&store, &calls, FINDING_SQL);
+    let failed = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut broken,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    let first = failed.packs.first().ok_or("no entry")?;
+    assert!(matches!(first.status, PackStatus::FindingStoreFailed(_)));
+    assert!(first.runs.is_empty());
+    assert_eq!(failed.findings_failed, 1);
+    assert_eq!(stored(&store, "a", "p"), None);
+    assert_eq!(findings_in(&store), 0);
+    let mut exec = fake(&store, &calls);
+    let again = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(again.packs.first().ok_or("no entry")?.status, PackStatus::Done);
+    assert_eq!(*log.borrow(), vec![call("a", "p", H4), call("a", "p", H4)]);
+    assert_eq!(findings_in(&store), 1);
+    assert_eq!(stored(&store, "a", "p"), Some(H4));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_replayed_window_inserts_its_finding_once() -> TestResult {
+    let (store, calls, log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = recorder(&log, never);
+    let packs = [pack("p", Source::Clickhouse)];
+    tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    store.borrow_mut().remove(&("a".to_owned(), "p".to_owned()));
+    tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(log.borrow().len(), TWO);
+    assert_eq!(findings_in(&store), 1);
     Ok(())
 }
