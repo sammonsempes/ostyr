@@ -1239,6 +1239,26 @@ const ATTRIBUTE_VALUE_BYTES: usize = 4_096;
 
 
 #[tokio::test]
+async fn the_declared_source_is_refused_before_any_store_call() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = Limits::default();
+    for name in ["declared", "Declared", " declared"] {
+        let forged = observation(name, "SN1", &[("owner", "mallory")]);
+        let refused = reconcile_stored(&exec, &scope, &forged, &TruthMap::new(), &limits).await;
+        assert!(
+            matches!(refused, Err(StoreError::Cmdb(CmdbError::ReservedName { field: "source" }))),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(*lock(&db.apply_calls), 0);
+    assert!(lock(&db.reads).is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn attribute_count_and_invisible_text_are_refused_before_any_store_call() -> TestResult {
     let db = Db::default();
     let exec = executor(&db);

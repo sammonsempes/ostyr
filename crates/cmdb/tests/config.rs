@@ -11,7 +11,7 @@ use types::TestResult;
 
 
 const VALID: &str = "sources_of_truth:
-  owner: declared
+  owner: directory
 assets:
   - id: web1
     kind: server
@@ -52,7 +52,7 @@ fn write_config(text: &str) -> Result<(tempfile::TempDir, std::path::PathBuf), B
 fn valid_file_loads_into_assets() -> TestResult {
     let (_dir, path) = write_config(VALID)?;
     let config = load_cmdb(&path)?;
-    assert_eq!(config.sources_of_truth.get("owner"), Some(&"declared".to_string()));
+    assert_eq!(config.sources_of_truth.get("owner"), Some(&"directory".to_string()));
     assert_eq!(config.relationships.first().map(|edge| edge.kind), Some(RelationKind::RunsOn));
     let assets = declared_assets(&config);
     assert_eq!(assets.len(), DECLARED_COUNT);
@@ -221,7 +221,7 @@ fn relationships_and_sources_of_truth_are_checked_at_load() -> TestResult {
     assert!(to.contains("relationship to"), "{to}");
     let from = config_error(&edge(&long, "b"))?.to_string();
     assert!(from.contains("relationship from"), "{from}");
-    let attribute = config_error("sources_of_truth:\n  \"ow\\u202en\": declared\n")?;
+    let attribute = config_error("sources_of_truth:\n  \"ow\\u202en\": directory\n")?;
     assert!(matches!(&attribute, CmdbConfigError::SourceOfTruth { index: 0, .. }), "{attribute}");
     assert!(attribute.to_string().contains("source of truth attribute"));
     let origin = config_error("sources_of_truth:\n  owner: \"dec\\u202elared\"\n")?;
@@ -238,6 +238,8 @@ fn empty_and_reserved_names_are_refused_at_load() -> TestResult {
         ("sources_of_truth:\n  \"\": declared\n".to_string(), "source of truth attribute"),
         ("sources_of_truth:\n  owner: \"\"\n".to_string(), "source of truth source"),
         ("sources_of_truth:\n  owner: cmdb\n".to_string(), "source of truth source"),
+        ("sources_of_truth:\n  owner: declared\n".to_string(), "source of truth source"),
+        ("sources_of_truth:\n  owner: \" Declared\"\n".to_string(), "source of truth source"),
         ("sources_of_truth:\n  \"key:serial\": declared\n".to_string(), "source of truth attribute"),
     ]
     .iter()
@@ -262,7 +264,7 @@ fn declared_whitespace_twins_are_refused_with_their_index() -> TestResult {
     let (_dir3, path3) = write_config(bad_edge)?;
     let edge_error = load_cmdb(&path3).err().ok_or("accepted")?;
     assert!(matches!(edge_error, CmdbConfigError::Relationship { index: 0, .. }), "{edge_error}");
-    let bad_truth = "sources_of_truth:\n  owner: \"declared \"\n";
+    let bad_truth = "sources_of_truth:\n  owner: \"directory \"\n";
     let (_dir4, path4) = write_config(bad_truth)?;
     assert!(load_cmdb(&path4).is_err());
     let free = "assets:\n  - id: web1\n    kind: server\n    lifecycle: in_service\n    owner: \"alice  \"\n";

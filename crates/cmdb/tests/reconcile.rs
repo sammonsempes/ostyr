@@ -269,6 +269,18 @@ fn reserved_names_are_refused_by_reconcile_itself() -> TestResult {
         reconcile(&inventory, &forged_attribute, &TruthMap::new()),
         Err(CmdbError::ReservedName { field: "attributes" })
     ));
+    ["declared", "Declared", " declared", "DECLARED "]
+        .iter()
+        .try_for_each(|name| -> TestResult {
+            let forged = observation(name, &[(IdentityKey::SerialNumber, "S1")], &[("owner", "mallory")]);
+            assert!(matches!(
+                reconcile(&inventory, &forged, &TruthMap::new()),
+                Err(CmdbError::ReservedName { field: "source" })
+            ));
+            Ok(())
+        })?;
+    let cyrillic = observation("d\u{435}clared", &[(IdentityKey::SerialNumber, "S1")], &[("owner", "x")]);
+    assert!(reconcile(&inventory, &cyrillic, &TruthMap::new()).is_ok());
     let honest = observation("agent", &[(IdentityKey::SerialNumber, "S1")], &[("keyboard", "us")]);
     assert!(reconcile(&inventory, &honest, &TruthMap::new()).is_ok());
     Ok(())

@@ -1,3 +1,4 @@
+use crate::config::DECLARED_SOURCE;
 use crate::error::CmdbError;
 use crate::model::{Asset, Attribute, Conflict, Event, IdentityKey, Lifecycle, Observation, Outcome, Resolution};
 use crate::summary::MAX_ID_BYTES;
@@ -12,7 +13,8 @@ pub const RESERVED_ATTRIBUTE_PREFIX: &str = "key:";
 
 
 pub fn is_reserved_source(source: &str) -> bool {
-    source.trim().eq_ignore_ascii_case(RESERVED_SOURCE)
+    let name = source.trim();
+    name.eq_ignore_ascii_case(RESERVED_SOURCE) || name.eq_ignore_ascii_case(DECLARED_SOURCE)
 }
 
 
