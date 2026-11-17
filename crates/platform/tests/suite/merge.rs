@@ -1,4 +1,4 @@
-use crate::fixture::parts_of;
+use crate::fixture::{parts_of, unweighted_parts};
 use crate::types::TestResult;
 use core_api::model::{Requirement, Rule};
 use core_api::routes::{core_access, route_key};
@@ -8,7 +8,7 @@ use platform::merge::{merge_access, migration_plan, module_access};
 use platform::model::Module;
 
 
-const ALL: [Module; 3] = [Module::Alerts, Module::Cases, Module::Cmdb];
+const ALL: [Module; 4] = [Module::Alerts, Module::Cases, Module::Cmdb, Module::Risk];
 
 
 fn table(keys: &[&str], permission: &str) -> AccessTable {
@@ -62,9 +62,12 @@ fn a_core_key_is_refused() -> TestResult {
 
 
 #[test]
-fn the_three_modules_have_disjoint_tables() -> TestResult {
+fn the_four_modules_have_disjoint_tables() -> TestResult {
     let merged = merge_access(ALL.iter().map(|module| module_access(*module)).collect())?;
     assert_eq!(merged.len(), ALL.iter().map(|module| module_access(*module).len()).sum::<usize>());
+    let risk_key = module_access(Module::Risk).into_keys().next().ok_or("no risk route")?;
+    let doubled = merge_access(vec![module_access(Module::Risk), module_access(Module::Risk)]);
+    assert_eq!(doubled, Err(PlatformError::DuplicateRoute(risk_key)));
     Ok(())
 }
 
@@ -76,6 +79,10 @@ fn migrations_run_in_dependency_order() -> TestResult {
     assert_eq!(names(&[Module::Cases]), ["alerts", "cases"]);
     assert_eq!(names(&[Module::Alerts]), ["alerts"]);
     assert_eq!(names(&[Module::Cmdb]), ["cmdb"]);
+    assert_eq!(names(&[Module::Risk]), ["alerts"]);
+    assert_eq!(names(&[Module::Risk, Module::Alerts]), ["alerts"]);
+    assert_eq!(names(&[Module::Alerts, Module::Risk]), ["alerts"]);
+    assert_eq!(names(&[Module::Risk, Module::Cmdb]), ["alerts", "cmdb"]);
     assert!(migration_plan(&[Module::Cases])
         .iter()
         .all(|(_namespace, migrations)| !migrations.is_empty()));
@@ -85,11 +92,20 @@ fn migrations_run_in_dependency_order() -> TestResult {
 
 #[test]
 fn module_parts_access_is_the_union_of_each_selected_module_table() -> TestResult {
-    let (_dir, (_router, access, _documents)) = parts_of("alerts,cases,cmdb")?;
+    let (_dir, (_router, access, _documents)) = parts_of("alerts,cases,cmdb,risk")?;
     let expected: Vec<String> = ALL.iter().flat_map(|module| module_access(*module).into_keys()).collect();
     assert_eq!(access.len(), expected.len());
     assert!(expected.iter().all(|key| access.contains_key(key)));
     let (_cases_dir, (_cases_router, cases_access, _cases_documents)) = parts_of("cases")?;
     assert_eq!(cases_access, module_access(Module::Cases));
+    Ok(())
+}
+
+
+#[test]
+fn module_parts_refuses_risk_without_a_weights_engine() -> TestResult {
+    let error = unweighted_parts("alerts,risk")?.err().ok_or("built")?;
+    assert_eq!(error, PlatformError::MissingWeightsFile);
+    assert!(unweighted_parts("alerts,cases")?.is_ok());
     Ok(())
 }

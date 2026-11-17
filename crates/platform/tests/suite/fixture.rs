@@ -13,9 +13,12 @@ use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
 use core_auth::store::update_store_file;
-use platform::merge::{module_parts, modules_of, shared_permits, ACTOR};
+use core_config::reload::{open_engine, ReloadContext};
+use platform::error::PlatformError;
+use platform::merge::{module_parts, modules_of, shared_permits, weights_file_of, ACTOR};
 use platform::model::Module;
 use platform::types::Parts;
+use risk_score::weights::{weights_loader, weights_state};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -53,6 +56,9 @@ const CLIENT_PORT: u16 = 40_000;
 
 
 const BODY_READ_LIMIT: usize = 1_048_576;
+
+
+pub const WEIGHTS_TEXT: &str = "severity_points:\n  low: 1\n  medium: 2\n  high: 3\n  critical: 4\nrare_threshold_per_million: 1000\nentity_rare_bonus_permille: 100\nfleet_rare_bonus_permille: 100\nfull_score_points: 10\n";
 
 
 const PG_TEXT: &str = "host: 127.0.0.1\nport: 1\ndatabase: ostyr\nuser: ostyr\npassword_file: /run/pg.pass\nca_file: /run/ca.pem\n";
@@ -135,6 +141,11 @@ pub fn module_text(modules: &str, pg_file: &Path) -> String {
 }
 
 
+pub fn module_text_with_weights(modules: &str, pg_file: &Path, weights_file: &Path) -> String {
+    format!("{}  risk.weights_file: {}\n", module_text(modules, pg_file), weights_file.display())
+}
+
+
 fn prepared(modules: &str) -> Result<(TempDir, ApiConfig, Parts), TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
@@ -142,12 +153,46 @@ fn prepared(modules: &str) -> Result<(TempDir, ApiConfig, Parts), TestError> {
     let pg_file = dir.path().join("pg.yaml");
     fs::write(&pg_file, PG_TEXT)?;
     let module_file = dir.path().join("platform.yaml");
-    fs::write(&module_file, module_text(modules, &pg_file))?;
-    let selected: Vec<Module> = modules_of(&core_config::load::load_module(&module_file)?.settings)?;
+    let weights_file = dir.path().join("weights.yaml");
+    fs::write(&weights_file, WEIGHTS_TEXT)?;
+    fs::write(&module_file, module_text_with_weights(modules, &pg_file, &weights_file))?;
+    let loaded = core_config::load::load_module(&module_file)?;
+    let selected: Vec<Module> = modules_of(&loaded.settings)?;
     let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, new_listener(), ACTOR)?;
     let engine = Arc::new(opened);
-    let parts = module_parts(&selected, &engine, &shared_permits())?;
+    let weights = match weights_file_of(&loaded.settings, &selected)? {
+        Some(file) => {
+            let context = ReloadContext {
+                actor_id: ACTOR.to_owned(),
+                tenant: "acme".to_owned(),
+                module: "platform".to_owned(),
+                target: file.display().to_string(),
+                request_id: "test".to_owned(),
+            };
+            Some(Arc::new(open_engine(
+                weights_loader(file),
+                weights_state,
+                Vec::new(),
+                alerts::settings::module_audit(new_listener()),
+                context,
+            )?))
+        }
+        None => None,
+    };
+    let parts = module_parts(&selected, &engine, &shared_permits(), weights.as_ref())?;
     Ok((dir, config, parts))
+}
+
+
+pub fn unweighted_parts(modules: &str) -> Result<Result<Parts, PlatformError>, TestError> {
+    let dir = tempdir()?;
+    let pg_file = dir.path().join("pg.yaml");
+    let module_file = dir.path().join("platform.yaml");
+    fs::write(&pg_file, PG_TEXT)?;
+    fs::write(&module_file, module_text(modules, &pg_file))?;
+    let selected = modules_of(&core_config::load::load_module(&module_file)?.settings)?;
+    let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, new_listener(), ACTOR)?;
+    Ok(module_parts(&selected, &Arc::new(opened), &shared_permits(), None))
 }
 
 

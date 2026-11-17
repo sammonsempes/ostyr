@@ -1,11 +1,15 @@
 use crate::types::TestResult;
 use core_config::types::SettingsMap;
 use platform::error::PlatformError;
-use platform::merge::{modules_of, parse_modules, MAX_MODULES_CHARS, SETTING_MODULES};
+use platform::merge::{modules_of, parse_modules, weights_file_of, MAX_MODULES_CHARS, SETTING_MODULES, SETTING_WEIGHTS_FILE};
 use platform::model::Module;
+use std::path::PathBuf;
 
 
 const LONG_VALUE_CHARS: usize = 10_000;
+
+
+const ALL_MODULES: usize = 4;
 
 
 #[test]
@@ -13,6 +17,32 @@ fn valid_lists_parse_in_order_and_trim() -> TestResult {
     assert_eq!(parse_modules("alerts,cases")?, [Module::Alerts, Module::Cases]);
     assert_eq!(parse_modules(" cases ")?, [Module::Cases]);
     assert_eq!(parse_modules("cmdb, alerts ,cases")?, [Module::Cmdb, Module::Alerts, Module::Cases]);
+    assert_eq!(parse_modules("risk")?, [Module::Risk]);
+    Ok(())
+}
+
+
+#[test]
+fn the_longest_list_fits_the_limit() -> TestResult {
+    let all = "alerts, cases, cmdb, risk";
+    assert!(all.chars().count() <= MAX_MODULES_CHARS);
+    assert_eq!(parse_modules(all)?.len(), ALL_MODULES);
+    Ok(())
+}
+
+
+#[test]
+fn the_weights_file_is_required_only_with_risk() -> TestResult {
+    let mut settings = SettingsMap::new();
+    assert_eq!(weights_file_of(&settings, &[Module::Alerts])?, None);
+    assert_eq!(
+        weights_file_of(&settings, &[Module::Risk, Module::Alerts]),
+        Err(PlatformError::MissingWeightsFile)
+    );
+    assert!(PlatformError::MissingWeightsFile.to_string().contains(SETTING_WEIGHTS_FILE));
+    settings.insert(SETTING_WEIGHTS_FILE.to_owned(), "/etc/w.yaml".to_owned());
+    assert_eq!(weights_file_of(&settings, &[Module::Risk])?, Some(PathBuf::from("/etc/w.yaml")));
+    assert_eq!(weights_file_of(&settings, &[Module::Cmdb])?, None);
     Ok(())
 }
 

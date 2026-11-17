@@ -3,4 +3,5 @@ pub enum Module {
     Alerts,
     Cases,
     Cmdb,
+    Risk,
 }

@@ -4511,6 +4511,7 @@ dependencies = [
  "core-auth",
  "core-config",
  "core-pg",
+ "risk-score",
  "serde_json",
  "signal-hook",
  "tempfile",

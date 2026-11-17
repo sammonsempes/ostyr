@@ -1,18 +1,20 @@
-//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb) through one core-api process; `settings.pg_settings` names the core-pg settings file.
+//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb, risk); `risk` also needs `settings.risk.weights_file` through one core-api process; `settings.pg_settings` names the core-pg settings file.
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
-use alerts::settings::{api_startup_reloads, open_pg_engine_from, SETTING_PG};
+use alerts::settings::{api_startup_reloads, module_audit, open_pg_engine_from, DEFAULT_TENANT, SETTING_PG};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
 use core_api::server::{new_listener, run_loaded, stop_listener};
-use core_api::types::SharedListener;
+use core_api::types::{SharedListener, StartupReloadFn};
 use core_config::load::load_module;
+use core_config::reload::{open_engine, reload, ReloadContext};
 #[cfg(unix)]
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
-use platform::merge::{migration_plan, module_parts, modules_of, shared_permits, ACTOR, SETTING_MODULES};
+use platform::merge::{migration_plan, module_parts, modules_of, shared_permits, weights_file_of, ACTOR, SETTING_MODULES, SETTING_WEIGHTS_FILE};
+use risk_score::weights::{weights_loader, weights_state};
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
 use std::path::{Path, PathBuf};
@@ -26,6 +28,9 @@ const SHUTDOWN_GRACE_SECONDS: u64 = 5;
 
 
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
+
+
+const STARTUP_REQUEST: &str = "startup";
 
 
 const USAGE: &str = "usage: platform_api <module.yaml>";
@@ -43,6 +48,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let module_file = arguments.first().ok_or(USAGE)?;
     let loaded = load_module(Path::new(module_file))?;
     let modules = modules_of(&loaded.settings)?;
+    let weights_file = weights_file_of(&loaded.settings, &modules)?;
     let (dispatch, log) = reloadable_dispatch(BoxMakeWriter::new(stdout), DEFAULT_LOG_LEVEL);
     tracing::dispatcher::set_global_default(dispatch)?;
     tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
@@ -52,6 +58,34 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let _watch = watch_files(Arc::clone(&engine), &[PathBuf::from(module_file), pg_file], RELOAD_DEBOUNCE)?;
     #[cfg(unix)]
     let _signals = reload_on_signals(Arc::clone(&engine), &[signal_hook::consts::SIGHUP])?;
+    let weights = match &weights_file {
+        Some(file) => {
+            let context = ReloadContext {
+                actor_id: ACTOR.to_owned(),
+                tenant: loaded.tenant.clone().unwrap_or_else(|| DEFAULT_TENANT.to_owned()),
+                module: loaded.name.clone(),
+                target: file.display().to_string(),
+                request_id: STARTUP_REQUEST.to_owned(),
+            };
+            Some(Arc::new(open_engine(
+                weights_loader(file.clone()),
+                weights_state,
+                Vec::new(),
+                module_audit(listener.clone()),
+                context,
+            )?))
+        }
+        None => None,
+    };
+    let _weights_watch = match (&weights, &weights_file) {
+        (Some(weights_engine), Some(file)) => Some(watch_files(Arc::clone(weights_engine), std::slice::from_ref(file), RELOAD_DEBOUNCE)?),
+        _ => None,
+    };
+    #[cfg(unix)]
+    let _weights_signals = match &weights {
+        Some(weights_engine) => Some(reload_on_signals(Arc::clone(weights_engine), &[signal_hook::consts::SIGHUP])?),
+        None => None,
+    };
     let permits = shared_permits();
     let held = lease(&engine, &permits).await?;
     for (namespace, migrations) in migration_plan(&modules) {
@@ -59,17 +93,20 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         tracing::info!(namespace, applied = applied.len(), "migrations checked");
     }
     drop(held);
-    let (router, access, documents) = module_parts(&modules, &engine, &permits)?;
+    let (router, access, documents) = module_parts(&modules, &engine, &permits, weights.as_ref())?;
     tokio::spawn(stop_on_interrupt(listener.clone()));
-    let startup_engine = Arc::clone(&engine);
+    let mut startup_reloads = api_startup_reloads(Arc::clone(&engine));
+    if let Some(weights_engine) = weights {
+        startup_reloads.push(Box::new(move || reload(&weights_engine)) as StartupReloadFn);
+    }
     run_loaded(
         Path::new(module_file),
         loaded,
         (router, access, documents),
-        &[SETTING_PG, SETTING_MODULES],
+        &[SETTING_PG, SETTING_MODULES, SETTING_WEIGHTS_FILE],
         listener,
         Some(log),
-        api_startup_reloads(startup_engine),
+        startup_reloads,
     )
     .await?;
     Ok(())
