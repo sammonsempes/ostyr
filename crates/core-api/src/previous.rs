@@ -1,5 +1,5 @@
 use crate::state::previous_key_path;
-use core_audit::log::{append_declared, check_private, owner_only, AuditLog};
+use core_audit::log::{append_declared, owner_only, AuditLog};
 use core_audit::model::{NewEntry, Outcome};
 use core_auth::cli::{KEY_READ_LIMIT, KEY_READ_LIMIT_BYTES};
 use core_auth::error::AuthError;
@@ -8,6 +8,7 @@ use core_auth::secretbox::KEY_BYTES;
 use core_auth::store::{parent_directory, sync_directory, TEMP_SUFFIX_BYTES};
 use core_auth::types::{RandomFn, StoreKey};
 use core_config::reload::{reload_entry, ReloadContext, RELOAD_DECLARED_KEYS};
+use core_config::secret_file::{open_secret, SecretFileError};
 use data_encoding::HEXLOWER;
 use secrecy::{ExposeSecret, SecretSlice};
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -70,18 +71,16 @@ pub fn check_previous_metadata(metadata: &Metadata) -> io::Result<()> {
 
 /// Reads the previous key through one handle (no symlink, regular, owned, private, bounded); a missing file is `None`.
 pub fn read_previous_key(path: &Path) -> Result<Option<StoreKey>, AuthError> {
-    match open_no_follow(path) {
+    match open_secret(path) {
         Ok(file) => {
-            check_previous_metadata(&file.metadata()?)?;
-            check_private(&file).map_err(AuthError::KeyFile)?;
             let mut bytes = Vec::with_capacity(KEY_READ_LIMIT_BYTES);
             file.take(KEY_READ_LIMIT).read_to_end(&mut bytes)?;
             (bytes.len() == KEY_BYTES)
                 .then(|| Some(SecretSlice::from(bytes)))
                 .ok_or(AuthError::InvalidKey)
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(AuthError::Io(error)),
+        Err(SecretFileError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AuthError::KeyFile(error)),
     }
 }
 

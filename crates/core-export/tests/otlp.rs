@@ -178,8 +178,9 @@ fn a_lax_symlinked_or_fifo_token_file_is_refused_without_a_read() -> TestResult 
     std::fs::set_permissions(&lax, std::fs::Permissions::from_mode(LAX_MODE))?;
     let refused = read_token(&lax).err().ok_or("accepted")?;
     assert!(matches!(refused, ExportError::SecretFile(_)));
-    assert!(refused.to_string().contains(&lax.display().to_string()));
-    assert!(!refused.to_string().contains("s3cret-token"));
+    let shown = format!("{refused} {:?}", std::error::Error::source(&refused));
+    assert!(shown.contains(&lax.display().to_string()));
+    assert!(!shown.contains("s3cret-token"));
     let private = dir.path().join("private");
     write_private(&private, "s3cret-token")?;
     let link = dir.path().join("link");

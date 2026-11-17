@@ -68,7 +68,7 @@ pub fn open_private(path: &Path) -> Result<File, StartupError> {
 /// A failed open keeps its `Io` form; a refused check names the file and the check.
 pub fn private_refusal(error: SecretFileError) -> StartupError {
     match error {
-        SecretFileError::Io { source, .. } => StartupError::Io(source),
+        SecretFileError::Io { ref source, .. } => StartupError::Io(io::Error::new(source.kind(), error)),
         other => StartupError::InsecureFile(other),
     }
 }

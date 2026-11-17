@@ -9,15 +9,16 @@ use crate::service::{
     revoke_token, Context, Denial, Enrolment, LoginRequest, State, ACTION_LOGIN, ACTION_SESSION_REVOKE, ANONYMOUS_ACTOR,
 };
 use crate::session::revoke_session;
-use crate::store::{open_regular, read_store_locked, update_store_file, Updated};
+use crate::store::{read_store_locked, update_store_file, Updated};
 use crate::totp::{code_for_step, unix_seconds, TOTP_STEP_SECONDS};
 use crate::types::{Clock, RandomFn, RoleCatalog, RoleSet, StoreKey};
 use crate::webauthn::{
     build_webauthn, list_credentials, parse_webauthn_config, passkey_login_start, register_finish, register_start, remove_credential,
     rename_credential, webauthn_login_finish, webauthn_login_start, Assertion, RegistrationRequest,
 };
-use core_audit::log::{check_private, open_file_log};
+use core_audit::log::open_file_log;
 use core_audit::model::Outcome;
+use core_config::secret_file::open_secret;
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use serde::Serialize;
@@ -70,8 +71,7 @@ pub fn show_enrolment(enrolment: Enrolment) -> String {
 
 
 pub fn read_key_file(path: &str) -> Result<StoreKey, AuthError> {
-    let file = open_regular(Path::new(path))?;
-    check_private(&file).map_err(AuthError::KeyFile)?;
+    let file = open_secret(Path::new(path)).map_err(AuthError::KeyFile)?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(KEY_READ_LIMIT_BYTES));
     file.take(KEY_READ_LIMIT).read_to_end(&mut bytes)?;
     if bytes.len() == KEY_BYTES {

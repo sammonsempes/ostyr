@@ -2124,6 +2124,23 @@ fn a_group_readable_moved_store_is_refused_through_the_handle_that_is_parsed() -
 }
 
 
+#[cfg(unix)]
+#[test]
+fn a_symlinked_or_fifo_moved_store_is_refused_and_a_private_one_loads() -> TestResult {
+    let dir = tempdir()?;
+    let real = dir.path().join("real.json");
+    save_store_file(&real, &AccountMap::new(), &CredentialMap::new(), os_random)?;
+    let link = dir.path().join("link.json");
+    std::os::unix::fs::symlink(&real, &link)?;
+    assert!(read_store_handle(&link).is_err_and(|error| error.to_string().contains("symlink")));
+    let fifo = dir.path().join("store.fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(read_store_handle(&fifo).is_err_and(|error| error.to_string().contains("not a regular file")));
+    assert!(read_store_handle(&real).is_ok());
+    Ok(())
+}
+
+
 fn failing_random(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
     Err(getrandom::Error::UNSUPPORTED)
 }

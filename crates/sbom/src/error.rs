@@ -156,6 +156,8 @@ pub enum SigningError {
     VersionNotIncreasing { previous: u64, next: u64 },
     #[error("cannot read the key file")]
     KeyIo(#[from] std::io::Error),
+    #[error("the key file is refused")]
+    KeyFile(#[from] core_config::secret_file::SecretFileError),
     #[error("the key file is not private")]
     KeyNotPrivate(#[from] core_audit::error::AuditError),
     #[error("the key file is larger than the limit")]

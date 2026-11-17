@@ -88,7 +88,7 @@ pub enum AuthError {
     #[error("account store version {found} is not supported")]
     UnsupportedVersion { found: u32 },
     #[error("key file rejected: {0}")]
-    KeyFile(#[source] AuditError),
+    KeyFile(core_config::secret_file::SecretFileError),
     #[error("audit failed: {0}")]
     Audit(#[from] AuditError),
     #[error("system clock is before 1970")]

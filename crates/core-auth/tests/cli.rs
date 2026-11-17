@@ -7,7 +7,6 @@ mod types;
 
 
 #[cfg(unix)]
-use core_audit::error::AuditError;
 #[cfg(unix)]
 use core_audit::log::{genesis_log, AuditLog};
 use core_audit::verify::verify;
@@ -32,6 +31,7 @@ use core_auth::session::hash_token;
 use core_auth::store::{load_accounts_file, update_store_file};
 #[cfg(unix)]
 use core_auth::types::{CompromisedSet, RoleCatalog, StoreKey};
+use core_config::secret_file::SecretFileError;
 use data_encoding::BASE32_NOPAD;
 use failing_reader::FailingReader;
 use failing_writer::FailingWriter;
@@ -307,7 +307,7 @@ fn key_files_must_be_private_and_exactly_32_bytes() -> TestResult {
     {
         write_key(space.directory.path(), vec![KEY_FILL; KEY_LENGTH], GROUP_READABLE)?;
         let loose = run(&paths(&space), "".as_bytes(), &mut output, fixed_clock, os_random);
-        assert!(matches!(loose, Err(AuthError::KeyFile(AuditError::InsecurePermissions { .. }))));
+        assert!(matches!(loose, Err(AuthError::KeyFile(SecretFileError::Mode { .. }))));
         assert!(!space.directory.path().join("audit.log").exists());
     }
     Ok(())
@@ -321,7 +321,25 @@ fn a_fifo_at_the_key_path_is_refused_without_blocking() -> TestResult {
     let fifo = space.directory.path().join("key.fifo");
     assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
     let result = read_key_file(&fifo.to_string_lossy());
-    assert!(matches!(result, Err(AuthError::Io(_))));
+    assert!(matches!(result, Err(AuthError::KeyFile(SecretFileError::NotRegular { .. }))));
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
+fn a_symlink_at_the_key_path_is_refused_and_a_private_key_works() -> TestResult {
+    let space = workspace()?;
+    let real = space.directory.path().join("real.key");
+    fs::write(&real, vec![KEY_FILL; KEY_LENGTH])?;
+    fs::set_permissions(&real, fs::Permissions::from_mode(OWNER_ONLY))?;
+    let link = space.directory.path().join("link.key");
+    std::os::unix::fs::symlink(&real, &link)?;
+    assert!(matches!(
+        read_key_file(&link.to_string_lossy()),
+        Err(AuthError::KeyFile(SecretFileError::Symlink { .. }))
+    ));
+    assert!(read_key_file(&real.to_string_lossy()).is_ok());
     Ok(())
 }
 
@@ -335,7 +353,7 @@ fn bad_arguments_and_files_are_reported() -> TestResult {
     let missing_key = replaced(&paths(&space), KEY_PATH, space.directory.path().join("absent-key").display().to_string());
     assert!(matches!(
         run(&missing_key, "".as_bytes(), &mut output, fixed_clock, os_random),
-        Err(AuthError::Io(_))
+        Err(AuthError::KeyFile(SecretFileError::Io { .. }))
     ));
     let missing_list = replaced(
         &paths(&space),

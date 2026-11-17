@@ -35,8 +35,8 @@ pub enum StartupError {
     ForwarderTooWide { entry: String, minimum: u8 },
     #[error("setting `{name}` must be between {minimum} and {maximum}")]
     OutOfRange { name: &'static str, minimum: String, maximum: String },
-    #[error("{0}")]
-    InsecureFile(#[source] core_config::secret_file::SecretFileError),
+    #[error(transparent)]
+    InsecureFile(core_config::secret_file::SecretFileError),
     #[error("{file}: larger than {limit} bytes")]
     FileTooLarge { file: String, limit: u64 },
     #[error(
