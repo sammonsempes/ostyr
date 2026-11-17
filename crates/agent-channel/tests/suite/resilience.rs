@@ -238,6 +238,7 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     let held = std::net::TcpListener::bind("127.0.0.1:0")?;
     held.set_nonblocking(true)?;
     let address = held.local_addr()?;
+    tracing::info!("restart test: starting the first server");
     let first = bounded(start_server_on(
         &paths,
         empty_revocation(&paths)?,
@@ -262,14 +263,17 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
         })
     };
     let delivery = tokio::spawn(async move { deliver_events(&dial, &pause, batches(BATCHES)).await });
+    tracing::info!("restart test: waiting for the first client pause");
     let delay = bounded(delay_receiver.recv()).await?.ok_or("the client never paused")?;
     assert!(delay <= Duration::from_millis(BACKOFF_MAX_MILLIS));
+    tracing::info!("restart test: stopping the first server");
     bounded(stop_server(first)).await??;
     let second_state = make_state(
         patient_settings(),
         recording_sink(Arc::clone(&after_restart)),
         envelope_source(Vec::new()),
     );
+    tracing::info!("restart test: starting the second server");
     let second = bounded(start_server_on(
         &paths,
         empty_revocation(&paths)?,
@@ -278,11 +282,23 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     ))
     .await??;
     gate.notify_one();
+    tracing::info!("restart test: waiting for the delivery to finish");
     let acknowledged = bounded(delivery).await???.acknowledged;
-    assert_eq!(acknowledged, (1..=BATCHES).collect::<Vec<u64>>());
-    assert_eq!(sequences(&before_restart)?, (1..=FIRST_RUN_BATCHES).collect::<Vec<u64>>());
-    assert_eq!(sequences(&after_restart)?, (FIRST_RUN_BATCHES + 1..=BATCHES).collect::<Vec<u64>>());
-    assert!(delay_receiver.try_recv().is_err());
+    let stored_before = sequences(&before_restart)?;
+    let stored_after = sequences(&after_restart)?;
+    assert_eq!(acknowledged, (1..=BATCHES).collect::<Vec<u64>>(), "acknowledged {acknowledged:?}");
+    assert_eq!(
+        stored_before,
+        (1..=FIRST_RUN_BATCHES).collect::<Vec<u64>>(),
+        "stored before {stored_before:?}"
+    );
+    assert_eq!(
+        stored_after,
+        (FIRST_RUN_BATCHES + 1..=BATCHES).collect::<Vec<u64>>(),
+        "stored after {stored_after:?}"
+    );
+    assert!(delay_receiver.try_recv().is_err(), "a second pause was announced");
+    tracing::info!("restart test: stopping the second server");
     bounded(stop_server(second)).await?
 }
 

@@ -18,6 +18,7 @@ use futures_util::{stream, StreamExt};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -184,16 +185,26 @@ async fn a_server_holding_the_stream_open_without_acknowledging_ends_in_give_up(
     let state = make_state(patient_settings(), stalling_sink(Arc::clone(&entered)), envelope_source(Vec::new()));
     let server = start_server_state(&paths, empty_revocation(&paths)?, state).await?;
     let address = server.address;
+    let dials = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&dials);
     let dial = move || -> DialFuture {
         let dial_config = Arc::clone(&config);
-        Box::pin(async move { connect_channel(address, dial_config, SERVER_NAME).await })
+        let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
+        Box::pin(async move {
+            if first {
+                connect_channel(address, dial_config, SERVER_NAME).await
+            } else {
+                std::future::pending().await
+            }
+        })
     };
     let pause = |_delay: Duration| -> PauseFuture { Box::pin(async {}) };
     let delivery = tokio::spawn(async move { deliver_events(&dial, &pause, batches(1)).await });
     bounded(entered.notified()).await?;
     tokio::time::pause();
     let outcome = timeout(Duration::from_secs(LONG_WAIT_SECONDS), delivery).await??;
-    assert!(matches!(outcome, Err(ChannelError::RetriesExhausted { .. })));
+    assert!(matches!(outcome, Err(ChannelError::RetriesExhausted { .. })), "outcome: {outcome:?}");
+    assert_eq!(dials.load(Ordering::SeqCst), MAX_RECONNECT_ATTEMPTS, "dials");
     Ok(())
 }
 

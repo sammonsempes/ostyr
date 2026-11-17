@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 
 static LOGGING: LazyLock<Option<String>> = LazyLock::new(|| {
@@ -34,8 +35,16 @@ static LOGGING: LazyLock<Option<String>> = LazyLock::new(|| {
 });
 
 
+pub const TRACE_ENVIRONMENT: &str = "AGENT_CHANNEL_TRACE";
+
+
 pub fn scoped_logging() -> tracing::subscriber::DefaultGuard {
-    tracing::subscriber::set_default(tracing_subscriber::fmt().with_writer(std::io::sink).finish())
+    let writer = if std::env::var_os(TRACE_ENVIRONMENT).is_some() {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::sink)
+    };
+    tracing::subscriber::set_default(tracing_subscriber::fmt().with_writer(writer).with_ansi(false).finish())
 }
 
 
