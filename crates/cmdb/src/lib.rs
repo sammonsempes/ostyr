@@ -5,6 +5,7 @@ pub mod api_model;
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod grc_indicator;
 pub mod impact;
 pub mod import;
 pub mod model;
