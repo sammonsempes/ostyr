@@ -1038,3 +1038,50 @@ fn a_lax_symlinked_or_fifo_nats_secret_file_is_refused_before_any_connect() -> T
     }
     Ok(())
 }
+
+
+const PROBE_BYTES: usize = 2_000_000;
+
+
+const LOG_BYTES_BOUND: usize = 4096;
+
+
+fn pre_tls_server(form: &str) -> Result<u16, Box<dyn Error + Send + Sync>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let quote = if form == "-ERR" { "'" } else { "" };
+    let bytes = format!("{form} {quote}{MARKER}{ESCAPE}[31m{}\r\n", "A".repeat(PROBE_BYTES)).into_bytes();
+    std::thread::spawn(move || -> io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        stream.write_all(&bytes)?;
+        io::copy(&mut stream, &mut io::sink()).map(|_| ())
+    });
+    Ok(port)
+}
+
+
+#[tokio::test]
+async fn a_server_that_speaks_before_tls_leaves_no_text_in_the_gateway_error_or_log() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    for form in ["-ERR", "BOGUS"] {
+        let rig = rig(&yaml(pre_tls_server(form)?, ""))?;
+        let settings = settings_of(&rig.gateway);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(Arc::clone(&captured));
+        let subscriber = siem_ingest::logging::build_subscriber(move || writer.clone(), Some("trace"))?;
+        let outcome = event_gateway::session::open_session(&settings)
+            .with_subscriber(Dispatch::new(subscriber))
+            .await;
+        let error = outcome.err().ok_or("connected")?;
+        let shown = std::iter::successors(Some(&error as &(dyn Error + 'static)), |inner| (*inner).source())
+            .map(|inner| format!("{inner} {inner:?}"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let logs = String::from_utf8(captured.lock().map_err(|poisoned| poisoned.to_string())?.clone())?;
+        for text in [&shown, &logs] {
+            assert!(!text.contains(MARKER) && !text.contains(ESCAPE) && !text.contains("u{1b}"), "{text}");
+        }
+        assert!(logs.len() < LOG_BYTES_BOUND, "{} log bytes", logs.len());
+    }
+    Ok(())
+}

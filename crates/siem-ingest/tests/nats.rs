@@ -16,7 +16,7 @@ use rustls::crypto::ring::default_provider;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use siem_ingest::error::{class_of, handshake_class, rustls_in, without_peer_tls, NatsError, TlsClass};
+use siem_ingest::error::{class_of, handshake_class, rustls_in, without_peer_text, NatsError, PeerFailure, TlsClass};
 use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
 use siem_ingest::nats::{
@@ -886,10 +886,14 @@ fn rustls_errors_are_classed_without_their_text() -> Result<(), Box<dyn Error + 
     assert_eq!(handshake_class(&wrapped), Some(TlsClass::Certificate));
     assert_eq!(handshake_class(&io::Error::from(io::ErrorKind::BrokenPipe)), None);
     assert_eq!(handshake_class(&io::Error::new(io::ErrorKind::BrokenPipe, "text")), None);
-    let fixed = without_peer_tls(Box::new(wrapped));
-    assert_eq!(fixed.to_string(), TlsClass::Certificate.to_string());
-    let kept = without_peer_tls(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "kept text")));
-    assert!(kept.to_string().contains("kept text"));
+    let fixed = without_peer_text(Box::new(wrapped));
+    assert_eq!(fixed.to_string(), format!("the TLS exchange failed: {}", TlsClass::Certificate));
+    assert!(fixed.source().is_none());
+    let kept = without_peer_text(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "peer text")));
+    assert_eq!(kept.downcast_ref::<PeerFailure>(), Some(&PeerFailure::Io(io::ErrorKind::BrokenPipe)));
+    assert!(!format!("{kept} {kept:?}").contains("peer text") && kept.source().is_none());
+    let other = without_peer_text(Box::new(std::fmt::Error));
+    assert_eq!(other.downcast_ref::<PeerFailure>(), Some(&PeerFailure::Other));
     assert!(!TlsClass::Alert.to_string().is_empty() && !TlsClass::Protocol.to_string().is_empty());
     Ok(())
 }
@@ -958,7 +962,7 @@ fn the_cap_holds_over_every_directive_and_other_targets_are_untouched() -> Resul
     let wide = tracing_subscriber::filter::Targets::from_str(WIDE_DIRECTIVES)?;
     assert!(!siem_ingest::logging::log_allowed(&wide, "async_nats::connector", &tracing::Level::DEBUG));
     assert!(!siem_ingest::logging::log_allowed(&wide, "async_nats", &tracing::Level::TRACE));
-    assert!(siem_ingest::logging::log_allowed(&wide, "async_nats::connector", &tracing::Level::INFO));
+    assert!(!siem_ingest::logging::log_allowed(&wide, "async_nats::connector", &tracing::Level::ERROR));
     assert!(siem_ingest::logging::log_allowed(&wide, "siem_ingest::nats", &tracing::Level::TRACE));
     assert!(!siem_ingest::logging::log_allowed(
         &tracing_subscriber::filter::Targets::from_str("warn")?,
@@ -982,9 +986,110 @@ fn the_cap_holds_over_every_directive_and_other_targets_are_untouched() -> Resul
     });
     let logs = String::from_utf8(captured.lock().map_err(|error| error.to_string())?.clone())?;
     assert!(
-        logs.contains("shown-line") && logs.contains("capped-info-line") && !logs.contains("hidden-line"),
+        logs.contains("shown-line") && !logs.contains("capped-info-line") && !logs.contains("hidden-line"),
         "{logs}"
     );
     assert!(!logs.contains(ESCAPE), "{logs}");
+    Ok(())
+}
+
+
+const PROBE_BYTES: usize = 2_000_000;
+
+
+const LOG_BYTES_BOUND: usize = 4096;
+
+
+fn probe(form: &str) -> Vec<u8> {
+    let filler = if form == "-ERR" { "A" } else { "B" };
+    format!(
+        "{form} {}{MARKER}{ESCAPE}[31m{}\r\n",
+        if form == "-ERR" { "'" } else { "" },
+        filler.repeat(PROBE_BYTES)
+    )
+    .into_bytes()
+}
+
+
+fn speak_first(bytes: Vec<u8>, tls: Option<Arc<ServerConfig>>) -> Result<u16, Box<dyn Error + Send + Sync>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    std::thread::spawn(move || -> io::Result<()> {
+        let (stream, _) = listener.accept()?;
+        match tls {
+            Some(config) => {
+                let connection = rustls::ServerConnection::new(config).map_err(io::Error::other)?;
+                let mut secured = rustls::StreamOwned::new(connection, stream);
+                secured.write_all(&bytes)?;
+                secured.flush()?;
+                io::copy(&mut secured, &mut io::sink()).map(|_| ())
+            }
+            None => {
+                let mut plain = stream;
+                plain.write_all(&bytes)?;
+                io::copy(&mut plain, &mut io::sink()).map(|_| ())
+            }
+        }
+    });
+    Ok(port)
+}
+
+
+fn hostile_attempt(port: u16, host: &str, extra: &str) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let dir = tempdir()?;
+    let text = yaml(port, NORMAL_MS, extra).replace("127.0.0.1", host);
+    let engine = engine_for(&dir, &text)?;
+    let link = link_for(&engine)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(Arc::clone(&captured));
+    let dispatch = tracing::Dispatch::new(siem_ingest::logging::build_subscriber(move || writer.clone(), Some("trace"))?);
+    let outcome = tracing::dispatcher::with_default(&dispatch, || fetch_batch(&link, FETCH_MAX));
+    let error = outcome.err().ok_or("fetched")?;
+    let logs = String::from_utf8(captured.lock().map_err(|poisoned| poisoned.to_string())?.clone())?;
+    Ok((chain(error.as_ref()), logs))
+}
+
+
+fn assert_clean(shown: &str, logs: &str) {
+    for text in [shown, logs] {
+        assert!(
+            !text.contains(MARKER) && !text.contains(ESCAPE) && !text.contains("u{1b}") && !text.contains("x1b"),
+            "{text}"
+        );
+    }
+    assert!(logs.len() < LOG_BYTES_BOUND, "{} log bytes", logs.len());
+}
+
+
+#[test]
+fn a_server_that_speaks_before_tls_leaves_no_text_in_the_error_or_the_log() -> Result<(), Box<dyn Error + Send + Sync>> {
+    for form in ["-ERR", "BOGUS"] {
+        let control_port = speak_first(probe(form), None)?;
+        let control = Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async_nats::ConnectOptions::new().connect(format!("nats://127.0.0.1:{control_port}")));
+        let raw = control.err().ok_or("connected")?;
+        assert!(chain(&raw).contains(MARKER), "the control: the raw library error carries the peer text");
+        let port = speak_first(probe(form), None)?;
+        let (shown, logs) = hostile_attempt(port, "127.0.0.1", "")?;
+        assert_clean(&shown, &logs);
+        assert!(shown.contains("the NATS server request failed"), "{shown}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_server_error_after_a_good_handshake_leaves_no_text_in_the_error_or_the_log() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (server_config, ca_pem) = tls_material()?;
+    let dir = tempdir()?;
+    let ca_path = dir.path().join("ca.pem");
+    fs::write(&ca_path, &ca_pem)?;
+    let extra = format!("nats_tls_first: true\nnats_ca_file: \"{}\"\n", ca_path.display());
+    let port = speak_first(probe("-ERR"), Some(server_config))?;
+    let (shown, logs) = hostile_attempt(port, HOST, &extra)?;
+    assert_clean(&shown, &logs);
     Ok(())
 }
