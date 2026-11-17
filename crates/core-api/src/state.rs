@@ -4,6 +4,7 @@ use crate::oidc::load_oidc;
 use crate::previous::{read_previous_key, record_previous, remove_stale_previous, retire_previous, ROTATION_RESUMED};
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
 use crate::routes::{core_access, openapi_document};
+use crate::server::read_public;
 use crate::types::AccessTable;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use core_audit::log::{open_file_log, AuditLog};
@@ -24,7 +25,7 @@ use core_auth::types::{AccountMap, AttemptMap, CompromisedSet, CredentialMap, St
 use core_config::reload::ReloadContext;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -219,7 +220,7 @@ pub fn read_compromised(path: &Path) -> Result<CompromisedSet, StartupError> {
 
 /// The list and the digest of the very bytes it was parsed from.
 pub fn read_compromised_digested(path: &Path) -> Result<(CompromisedSet, String), StartupError> {
-    let bytes = fs::read(path)?;
+    let bytes = read_public(path)?;
     Ok((load_compromised(BufReader::new(bytes.as_slice()))?, content_digest(&bytes)))
 }
 

@@ -15,8 +15,10 @@ use axum::{Extension, Router};
 use axum_server::from_tcp;
 use axum_server::tls_rustls::{from_tcp_rustls, RustlsConfig};
 use axum_server::Server;
+use core_config::error::ConfigError;
 use core_config::load::load_module;
 use core_config::model::ModuleConfig;
+use core_config::parse::read_bytes_capped;
 use core_config::reload::{reload, ReloadOutcome};
 use core_config::secret_file::{open_secret, SecretFileError};
 use hyper_util::rt::TokioTimer;
@@ -26,7 +28,7 @@ use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use socket2::SockRef;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
 use std::path::Path;
@@ -59,6 +61,9 @@ pub fn check_transport(address: SocketAddr, tls: Option<&TlsFiles>) -> Result<()
 pub const MAX_PRIVATE_FILE_BYTES: u64 = 65_536;
 
 
+pub const MAX_PUBLIC_FILE_BYTES: u64 = 67_108_864;
+
+
 /// Opens a secret file through the shared checks (no symlink, regular, own or root owner, no group or other bit); the refusal names the file.
 pub fn open_private(path: &Path) -> Result<File, StartupError> {
     open_secret(path).map_err(private_refusal)
@@ -70,6 +75,21 @@ pub fn private_refusal(error: SecretFileError) -> StartupError {
     match error {
         SecretFileError::Io { ref source, .. } => StartupError::Io(io::Error::new(source.kind(), error)),
         other => StartupError::InsecureFile(other),
+    }
+}
+
+
+/// A public file (certificate, list, provider configuration) through the shared checked reader: non-blocking, regular, at most the cap.
+pub fn read_public(path: &Path) -> Result<Vec<u8>, StartupError> {
+    read_bytes_capped(path, MAX_PUBLIC_FILE_BYTES).map_err(public_refusal)
+}
+
+
+/// A failed open keeps its `Io` form, as before the checked reader; a refused file or a size over the cap stays a `ConfigError`.
+pub fn public_refusal(error: ConfigError) -> StartupError {
+    match error {
+        ConfigError::Io { ref source, .. } => StartupError::Io(io::Error::new(source.kind(), error)),
+        other => StartupError::Config(other),
     }
 }
 
@@ -92,7 +112,7 @@ pub fn read_private(path: &Path) -> Result<Vec<u8>, StartupError> {
 /// TLS 1.2 and 1.3 only; the key is read from the handle whose mode was checked and every digest comes from the bytes parsed.
 pub fn load_tls(files: &TlsFiles) -> Result<LoadedTls, StartupError> {
     let key_bytes = read_private(&files.key)?;
-    let certificate_bytes = fs::read(&files.certificate)?;
+    let certificate_bytes = read_public(&files.certificate)?;
     let certificates = CertificateDer::pem_slice_iter(&certificate_bytes).collect::<Result<Vec<_>, _>>()?;
     let key = PrivateKeyDer::from_pem_slice(&key_bytes)?;
     let mut config = ServerConfig::builder_with_provider(Arc::new(default_provider()))

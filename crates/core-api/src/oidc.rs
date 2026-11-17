@@ -4,7 +4,7 @@ use crate::middleware::rate_key;
 use crate::model::{ApiError, ApiState, CallbackQuery, LoginReply, OidcFiles, OidcRuntime, RequestId, StartReply};
 use crate::reload::content_digest;
 use crate::routes::{REASON_LOCKED, REASON_TABLE_FULL, TOKEN_TYPE};
-use crate::server::read_private;
+use crate::server::{read_private, read_public};
 use crate::state::{auth_context, auth_inputs, lock_auth, remember_callback_account};
 use crate::types::SharedState;
 use axum::extract::rejection::QueryRejection;
@@ -32,7 +32,6 @@ use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use secrecy::{ExposeSecret, SecretString};
-use std::fs::{read, read_to_string};
 use std::io;
 use std::net::IpAddr;
 use std::path::Path;
@@ -153,9 +152,10 @@ pub fn oidc_fingerprint(salt: &[u8], files: &OidcFiles, yaml: &[u8], ca_pem: Opt
 
 
 pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime, StartupError> {
-    let text = read_to_string(&files.config)?;
+    let text =
+        String::from_utf8(read_public(&files.config)?).map_err(|source| StartupError::Io(io::Error::new(io::ErrorKind::InvalidData, source)))?;
     let config = parse_oidc_config(&text, &files.config.display().to_string(), catalog)?;
-    let ca_pem = files.ca_file.as_deref().map(read).transpose()?;
+    let ca_pem = files.ca_file.as_deref().map(read_public).transpose()?;
     let agent = provider_agent(ca_pem.as_deref())?;
     let secret_bytes = read_private(&files.secret_file)?;
     let secret_file = files.secret_file.clone();
