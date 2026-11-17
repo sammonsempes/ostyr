@@ -831,11 +831,33 @@ async fn a_malformed_apply_answer_is_refused() -> TestResult {
         Err(StoreError::BadDuplicates(_))
     ));
     assert!(matches!(
-        apply_answer(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned()]]).await,
+        apply_answer(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned(), String::new()]]).await,
         Err(StoreError::VersionConflict)
     ));
     let entry = r#"[{"asset":"a","attribute":"owner","observed_source":"hr"}]"#.to_owned();
-    let listed = apply_answer(vec![vec!["true".to_owned(), entry.clone(), entry]]).await?;
+    assert!(matches!(
+        apply_answer(vec![vec!["true".to_owned(), "[]".to_owned(), "[]".to_owned()]]).await,
+        Err(StoreError::BadRow { .. })
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec!["true".to_owned(), "[]".to_owned(), "[]".to_owned(), "cmdb_events".to_owned()]]).await,
+        Err(StoreError::BadRow { .. })
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec![
+            "true".to_owned(),
+            "[]".to_owned(),
+            "[]".to_owned(),
+            "cmdb_attributes".to_owned()
+        ]])
+        .await,
+        Err(StoreError::CapReached { table: "cmdb_attributes" })
+    ));
+    assert!(matches!(
+        apply_answer(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned(), "cmdb_assets".to_owned()]]).await,
+        Err(StoreError::VersionConflict)
+    ));
+    let listed = apply_answer(vec![vec!["true".to_owned(), entry.clone(), entry, String::new()]]).await?;
     assert_eq!(listed.refused.len(), 1);
     assert_eq!(listed.refused.first().map(|refused| refused.attribute.as_str()), Some("owner"));
     assert_eq!(listed.duplicates.first().map(|known| known.observed_source.as_str()), Some("hr"));
@@ -1271,5 +1293,102 @@ async fn a_refused_observation_costs_no_statement() -> TestResult {
     assert_eq!(statements.load(std::sync::atomic::Ordering::SeqCst), 0);
     reconcile_stored(&counting, &scope, &observation("agent", "SN1", &[]), &TruthMap::new(), &Limits::default()).await?;
     assert!(statements.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    Ok(())
+}
+
+
+pub fn capped(max_assets: usize, max_child_rows: usize) -> Limits {
+    Limits {
+        page_size: SMALL_PAGE,
+        max_assets,
+        max_child_rows,
+        ..Limits::default()
+    }
+}
+
+
+#[tokio::test]
+async fn a_creation_past_the_asset_cap_is_refused_whole_while_an_update_applies() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = capped(1, SMALL_ROWS);
+    let truth = TruthMap::new();
+    reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("owner", "ann")]), &truth, &limits).await?;
+    let refused = reconcile_stored(&exec, &scope, &observation("agent", "SN2", &[("owner", "bob")]), &truth, &limits).await;
+    assert!(matches!(refused, Err(StoreError::CapReached { table: "cmdb_assets" })), "{refused:?}");
+    reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("owner", "cy")]), &truth, &limits).await?;
+    let loaded = load_assets(&exec, &scope, &limits).await?;
+    assert_eq!(loaded.assets.len(), 1);
+    assert_eq!(loaded.versions.get("serial_number:SN1"), Some(&SECOND_VERSION));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn two_applies_from_one_snapshot_never_pass_the_asset_cap() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let limits = capped(1, SMALL_ROWS);
+    let truth = TruthMap::new();
+    let first_snapshot = load_assets(&exec, &scope, &limits).await?;
+    let second_snapshot = load_assets(&exec, &scope, &limits).await?;
+    let first = cmdb::reconcile::reconcile(&first_snapshot.assets, &observation("agent", "SN1", &[]), &truth)?;
+    let second = cmdb::reconcile::reconcile(&second_snapshot.assets, &observation("agent", "SN2", &[]), &truth)?;
+    apply_outcome(&exec, &scope, &first_snapshot, &first, &limits).await?;
+    let late = apply_outcome(&exec, &scope, &second_snapshot, &second, &limits).await;
+    assert!(matches!(late, Err(StoreError::CapReached { table: "cmdb_assets" })));
+    assert_eq!(load_assets(&exec, &scope, &limits).await?.assets.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_creation_past_the_key_or_attribute_cap_is_refused_while_updates_apply() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let truth = TruthMap::new();
+    let keys = reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[]), &truth, &capped(SMALL_ROWS, 0)).await;
+    assert!(matches!(keys, Err(StoreError::CapReached { table: "cmdb_identity_keys" })), "{keys:?}");
+    let limits = capped(SMALL_ROWS, 1);
+    let attributes = reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("a", "1"), ("b", "2")]), &truth, &limits).await;
+    assert!(
+        matches!(attributes, Err(StoreError::CapReached { table: "cmdb_attributes" })),
+        "{attributes:?}"
+    );
+    assert!(load_assets(&exec, &scope, &limits).await?.assets.is_empty());
+    reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("a", "1")]), &truth, &limits).await?;
+    reconcile_stored(&exec, &scope, &observation("agent", "SN1", &[("a", "2")]), &truth, &limits).await?;
+    let loaded = load_assets(&exec, &scope, &limits).await?;
+    assert_eq!(loaded.versions.get("serial_number:SN1"), Some(&SECOND_VERSION));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_caps_of_one_tenant_do_not_bind_another() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let truth = TruthMap::new();
+    let limits = capped(1, SMALL_ROWS);
+    let first = tenant_scope("acme")?;
+    let other = tenant_scope("globex")?;
+    reconcile_stored(&exec, &first, &observation("agent", "SN1", &[]), &truth, &limits).await?;
+    reconcile_stored(&exec, &other, &observation("agent", "SN1", &[]), &truth, &limits).await?;
+    assert_eq!(load_assets(&exec, &other, &limits).await?.assets.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn apply_takes_the_tenant_lock_before_any_row_lock_and_gates_every_write_on_the_caps() -> TestResult {
+    let migration = MIGRATIONS.get(THREE).ok_or("no fourth migration")?.sql;
+    assert!(migration.contains("pg_advisory_xact_lock(1129270338, hashtext(tenant_name))"));
+    assert!(migration.contains("VOLATILE"));
+    assert!(APPLY_SQL.contains("FROM cmdb_tenant_room($1)"));
+    assert!(APPLY_SQL.contains("(SELECT n_assets FROM room) IS NOT NULL"));
+    assert_eq!(APPLY_SQL.matches("(SELECT go FROM gate)").count(), FIVE + 1);
     Ok(())
 }

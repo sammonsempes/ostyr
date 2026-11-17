@@ -11,6 +11,20 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 const KEY_CAP_PARAM: usize = 2;
 
 
+const ASSET_CAP_PARAM: usize = 3;
+
+
+const CHILD_CAP_PARAM: usize = 4;
+
+
+pub struct Caps {
+    pub conflicts: usize,
+    pub key_conflicts: usize,
+    pub assets: usize,
+    pub children: usize,
+}
+
+
 #[derive(Default)]
 pub struct Tenant {
     pub assets: BTreeMap<String, StoredAsset>,
@@ -129,6 +143,41 @@ pub fn owns_foreign_key(tenant: &Tenant, assets: &[Value]) -> bool {
                 .is_some_and(|owner| *owner != text(asset, "id"))
         })
     })
+}
+
+
+pub fn new_children(tenant: &Tenant, assets: &[Value]) -> (usize, usize, usize) {
+    let created = assets.iter().filter(|asset| !tenant.assets.contains_key(&text(asset, "id"))).count();
+    let keys = assets
+        .iter()
+        .flat_map(|asset| items(asset, "keys").into_iter().map(move |key| (text(asset, "id"), key)))
+        .filter(|(id, key)| tenant.keys.get(&(text(key, "key"), text(key, "value"))) != Some(id))
+        .count();
+    let attributes = assets
+        .iter()
+        .flat_map(|asset| {
+            items(asset, "attributes")
+                .into_iter()
+                .map(move |attribute| (text(asset, "id"), attribute))
+        })
+        .filter(|(id, attribute)| !tenant.attributes.contains_key(&(id.clone(), text(attribute, "name"))))
+        .count();
+    (created, keys, attributes)
+}
+
+
+/// Mirrors `apply.sql`: the table whose store cap the apply would pass, if any (assets, then keys, then attributes).
+pub fn exceeded_table(tenant: &Tenant, assets: &[Value], caps: &Caps) -> &'static str {
+    let (created, keys, attributes) = new_children(tenant, assets);
+    if created > 0 && tenant.assets.len() + created > caps.assets {
+        "cmdb_assets"
+    } else if keys > 0 && tenant.keys.len() + keys > caps.children {
+        "cmdb_identity_keys"
+    } else if attributes > 0 && tenant.attributes.len() + attributes > caps.children {
+        "cmdb_attributes"
+    } else {
+        ""
+    }
 }
 
 
@@ -283,17 +332,20 @@ pub fn refused_list(candidates: &[Value], admitted: &[Value]) -> String {
 }
 
 
-pub fn apply(tenant: &mut Tenant, document: &Value, caps: (usize, usize)) -> Result<(bool, String, String), PgError> {
+pub fn apply(tenant: &mut Tenant, document: &Value, caps: &Caps) -> Result<(bool, String, String, String), PgError> {
     let assets = items(document, "assets");
     let fresh = !is_stale(tenant, &assets);
-    if fresh && owns_foreign_key(tenant, &assets) {
+    let exceeded = exceeded_table(tenant, &assets, caps);
+    if fresh && !exceeded.is_empty() {
+        Ok((true, "[]".to_owned(), "[]".to_owned(), exceeded.to_owned()))
+    } else if fresh && owns_foreign_key(tenant, &assets) {
         Err(unique_violation())
     } else {
         let mut refused = "[]".to_owned();
         let mut duplicates = "[]".to_owned();
         if fresh {
             let candidates = fresh_conflicts(tenant, document);
-            let new_conflicts = admitted_conflicts(tenant, candidates.clone(), caps.0, caps.1);
+            let new_conflicts = admitted_conflicts(tenant, candidates.clone(), caps.conflicts, caps.key_conflicts);
             refused = refused_list(&candidates, &new_conflicts);
             duplicates = duplicate_list(tenant, document);
             assets
@@ -310,7 +362,7 @@ pub fn apply(tenant: &mut Tenant, document: &Value, caps: (usize, usize)) -> Res
             tenant.events.extend(items(document, "events"));
             tenant.applies += 1;
         }
-        Ok((fresh, refused, duplicates))
+        Ok((fresh, refused, duplicates, String::new()))
     }
 }
 
@@ -339,14 +391,19 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &str, params: &[String]) -> Res
     if sql == APPLY_SQL {
         *lock(&db.apply_calls) += 1;
         match lock(&db.forced).pop_front() {
-            Some(Forced::Stale) => Ok(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned()]]),
+            Some(Forced::Stale) => Ok(vec![vec!["false".to_owned(), "[]".to_owned(), "[]".to_owned(), String::new()]]),
             Some(Forced::UniqueViolation) => Err(unique_violation()),
             Some(Forced::OtherError) => Err(other_error()),
             None => {
                 let document: Value = serde_json::from_str(params.first().map_or("null", String::as_str)).unwrap_or(Value::Null);
-                let cap = params.get(1).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
-                let key_cap = params.get(KEY_CAP_PARAM).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
-                apply(tenant, &document, (cap, key_cap)).map(|(applied, refused, duplicates)| vec![vec![applied.to_string(), refused, duplicates]])
+                let number = |index: usize| params.get(index).and_then(|text| text.parse::<usize>().ok()).unwrap_or(0);
+                let caps = Caps {
+                    conflicts: number(1),
+                    key_conflicts: number(KEY_CAP_PARAM),
+                    assets: number(ASSET_CAP_PARAM),
+                    children: number(CHILD_CAP_PARAM),
+                };
+                apply(tenant, &document, &caps).map(|(applied, refused, duplicates, cap)| vec![vec![applied.to_string(), refused, duplicates, cap]])
             }
         }
     } else {

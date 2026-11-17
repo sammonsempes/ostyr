@@ -5,15 +5,42 @@ changed AS (
     SELECT a->>'id' AS id, a->>'kind' AS kind, a->>'lifecycle' AS lifecycle, (a->>'version')::bigint AS version, (a->>'touch')::boolean AS touch, a
     FROM doc, jsonb_array_elements(body->'assets') AS a
 ),
+room AS (
+    SELECT n_assets, n_keys, n_attributes FROM cmdb_tenant_room($1)
+),
 locked AS (
     SELECT c.id
     FROM cmdb_assets t
     JOIN changed c ON t.id = c.id AND t.version = c.version
-    WHERE t.tenant = $1
+    WHERE t.tenant = $1 AND (SELECT n_assets FROM room) IS NOT NULL
     FOR UPDATE OF t
 ),
 guard AS (
     SELECT (SELECT count(*) FROM locked) = (SELECT count(*) FROM changed WHERE version > 0) AS ok
+),
+new_rows AS (
+    SELECT (SELECT count(*) FROM changed WHERE version = 0) AS n_assets,
+        (SELECT count(*) FROM changed c, jsonb_array_elements(c.a->'keys') AS k
+         WHERE NOT EXISTS (
+             SELECT 1 FROM cmdb_identity_keys o
+             WHERE o.tenant = $1 AND o.key = k->>'key' AND o.value = k->>'value' AND o.asset = c.id
+         )) AS n_keys,
+        (SELECT count(*) FROM changed c, jsonb_array_elements(c.a->'attributes') AS n
+         WHERE NOT EXISTS (
+             SELECT 1 FROM cmdb_attributes o WHERE o.tenant = $1 AND o.asset = c.id AND o.name = n->>'name'
+         )) AS n_attributes
+),
+exceeded AS (
+    SELECT CASE
+        WHEN w.n_assets > 0 AND r.n_assets + w.n_assets > $5::text::bigint THEN 'cmdb_assets'
+        WHEN w.n_keys > 0 AND r.n_keys + w.n_keys > $6::text::bigint THEN 'cmdb_identity_keys'
+        WHEN w.n_attributes > 0 AND r.n_attributes + w.n_attributes > $6::text::bigint THEN 'cmdb_attributes'
+        ELSE ''
+    END AS table_name
+    FROM room r, new_rows w
+),
+gate AS (
+    SELECT (SELECT ok FROM guard) AND (SELECT table_name FROM exceeded) = '' AS go
 ),
 incoming AS (
     SELECT DISTINCT f->>'asset' AS asset, f->>'attribute' AS attribute, f->>'current_value' AS current_value,
@@ -58,14 +85,14 @@ admitted AS (
 ),
 inserted AS (
     INSERT INTO cmdb_assets (tenant, id, kind, lifecycle, version)
-    SELECT $1, id, kind, lifecycle, 1 FROM changed WHERE version = 0 AND (SELECT ok FROM guard)
+    SELECT $1, id, kind, lifecycle, 1 FROM changed WHERE version = 0 AND (SELECT go FROM gate)
     RETURNING id
 ),
 updated AS (
     UPDATE cmdb_assets t
     SET kind = c.kind, lifecycle = c.lifecycle, version = t.version + 1
     FROM changed c
-    WHERE t.tenant = $1 AND t.id = c.id AND t.version = c.version AND c.version > 0 AND (SELECT ok FROM guard)
+    WHERE t.tenant = $1 AND t.id = c.id AND t.version = c.version AND c.version > 0 AND (SELECT go FROM gate)
       AND (c.touch OR EXISTS (SELECT 1 FROM admitted WHERE admitted.asset = c.id))
     RETURNING t.id
 ),
@@ -73,7 +100,7 @@ written_keys AS (
     INSERT INTO cmdb_identity_keys (tenant, key, value, asset)
     SELECT $1, k->>'key', k->>'value', c.id
     FROM changed c, jsonb_array_elements(c.a->'keys') AS k
-    WHERE (SELECT ok FROM guard)
+    WHERE (SELECT go FROM gate)
       AND NOT EXISTS (
           SELECT 1 FROM cmdb_identity_keys o
           WHERE o.tenant = $1 AND o.key = k->>'key' AND o.value = k->>'value' AND o.asset = c.id
@@ -84,7 +111,7 @@ written_attributes AS (
     INSERT INTO cmdb_attributes (tenant, asset, name, value, source)
     SELECT $1, c.id, n->>'name', n->>'value', n->>'source'
     FROM changed c, jsonb_array_elements(c.a->'attributes') AS n
-    WHERE (SELECT ok FROM guard)
+    WHERE (SELECT go FROM gate)
     ON CONFLICT (tenant, asset, name) DO UPDATE SET value = EXCLUDED.value, source = EXCLUDED.source
     RETURNING asset
 ),
@@ -92,14 +119,14 @@ written_conflicts AS (
     INSERT INTO cmdb_conflicts (tenant, asset, attribute, current_value, current_source, observed_value, observed_source, resolution)
     SELECT $1, asset, attribute, current_value, current_source, observed_value, observed_source, resolution
     FROM admitted
-    WHERE (SELECT ok FROM guard)
+    WHERE (SELECT go FROM gate)
     RETURNING asset
 ),
 written_events AS (
     INSERT INTO cmdb_events (tenant, asset, kind, lifecycle)
     SELECT $1, e->>'asset', e->>'kind', e->>'lifecycle'
     FROM doc, jsonb_array_elements(body->'events') AS e
-    WHERE (SELECT ok FROM guard)
+    WHERE (SELECT go FROM gate)
     RETURNING asset
 )
 SELECT (SELECT ok FROM guard)::text, (
@@ -108,4 +135,6 @@ SELECT (SELECT ok FROM guard)::text, (
 )::text, (
     SELECT coalesce(json_agg(json_build_object('asset', asset, 'attribute', attribute, 'observed_source', observed_source)), '[]'::json)
     FROM duplicates
+)::text, (
+    SELECT CASE WHEN (SELECT ok FROM guard) THEN (SELECT table_name FROM exceeded) ELSE '' END
 )::text
