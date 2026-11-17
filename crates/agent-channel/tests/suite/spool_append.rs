@@ -686,7 +686,11 @@ fn a_claim_waits_for_an_appender_inside_its_locked_write_then_takes_its_line_who
         claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || {
             pauses += 1;
             logged(release_sender.send(()));
-            logged(done.recv());
+            if pauses == 1 {
+                logged(done.recv());
+            } else {
+                pause_between_lock_attempts();
+            }
         })?;
         logged(release_sender.send(()));
         assert!(appender.join().map_err(|_| "appender panicked")??);
@@ -712,7 +716,7 @@ fn a_claim_that_never_gets_the_lock_defers_and_a_later_one_succeeds() -> TestRes
     assert_eq!(pauses, ATTEMPTS);
     assert!(spool.exists() && !sending.exists() && !file.sequence_file.exists());
     drop(held);
-    claim_fresh_with(&file, &sending, ATTEMPTS, &mut || ())?;
+    claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts)?;
     assert_eq!(fs::read_to_string(&sending)?, "a\n");
     Ok(())
 }
@@ -734,7 +738,7 @@ fn an_unterminated_last_line_is_never_counted_or_loaded_and_a_claim_sets_it_asid
         (vec!["a".to_owned()], false)
     );
     fs::write(&spool, "b")?;
-    claim_fresh_with(&file, &sending, ATTEMPTS, &mut || ())?;
+    claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts)?;
     assert!(spool.exists() && !sending.exists());
     assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "b\n");
     OpenOptions::new().append(true).open(&spool)?.write_all(b"c\n")?;
@@ -842,7 +846,7 @@ fn stale_claim(delivered: bool) -> TestResult {
         pauses += 1;
         drop(held.take());
         if pauses == 1 {
-            logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || ()));
+            logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts));
             logged(fs::write(&file.spool_file, "7\n"));
             if delivered {
                 logged(fs::remove_file(&sending));
@@ -939,7 +943,7 @@ fn a_second_claimer_that_waited_while_the_first_claimed_a_new_file_defers_and_lo
             drop(lock);
             logged(fs::remove_file(&sending));
             logged(fs::write(&file.spool_file, "two\n"));
-            logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut || ()));
+            logged(claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts));
         });
     })?;
     assert!(pauses >= 1);
