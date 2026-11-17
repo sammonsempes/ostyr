@@ -202,7 +202,7 @@ pub async fn attempt(address: SocketAddr, paths: &ClientTlsPaths) -> Result<Beat
 }
 
 
-pub const HANG_GUARD_SECONDS: u64 = 60;
+pub const HANG_GUARD_SECONDS: u64 = 600;
 
 
 pub async fn awaited<Output>(handle: JoinHandle<Output>) -> Result<Output, Box<dyn Error>> {

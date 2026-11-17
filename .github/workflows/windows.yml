@@ -34,8 +34,12 @@ jobs:
         timeout-minutes: 45
         run: >-
           cargo test --locked
-          -p agent-channel -p app-health -p core-redact -p device-control
+          -p app-health -p core-redact -p device-control
           -p discovery -p grc -p hunt-stats -p metric-alerts
           -p patch-inventory -p patch-rollout
           -p secret-scan -p siem-schema -p sla-report -p software-catalog
           -p vuln-match
+      - name: Run the tests of agent-channel
+        shell: bash
+        timeout-minutes: 15
+        run: cargo test --locked -p agent-channel
