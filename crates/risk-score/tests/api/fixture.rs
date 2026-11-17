@@ -95,6 +95,7 @@ pub enum Mode {
     Fail,
     Hang,
     Gated,
+    GatedFail,
 }
 
 
@@ -181,7 +182,7 @@ pub async fn run(script: Arc<Script>, scope: TenantScope, weights: Arc<Weights>)
     let mode = *lock(&script.mode);
     match mode {
         Mode::Hang => std::future::pending::<()>().await,
-        Mode::Gated => {
+        Mode::Gated | Mode::GatedFail => {
             if let Ok(permit) = script.gate.acquire().await {
                 permit.forget();
             }
@@ -190,7 +191,7 @@ pub async fn run(script: Arc<Script>, scope: TenantScope, weights: Arc<Weights>)
     }
     let found = lock(&script.outcomes).get(tenant_of(&scope)).cloned();
     match (mode, found) {
-        (Mode::Fail, _) => Err(RiskError::OutOfRange { key: MARKER }),
+        (Mode::Fail | Mode::GatedFail, _) => Err(RiskError::OutOfRange { key: MARKER }),
         (_, Some(answer)) => Ok(answer),
         (_, None) => Ok(outcome_of(Vec::new())),
     }

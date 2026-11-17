@@ -20,10 +20,11 @@ use risk_score::model::{EntityKind, SeverityPoints, Weights};
 use std::error::Error;
 use std::io::sink;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
-use types::Handler;
+use types::{Handler, Running};
 
 
 const NOW: i64 = 1_800_000_000;
@@ -36,6 +37,85 @@ const AGE_SECONDS: i64 = 100;
 
 
 const DRAIN_LIMIT: usize = 100;
+
+
+pub fn query_handler(reply: Reply) -> Handler {
+    Arc::new(move |sql| if sql.contains("FROM alerts") { reply.clone() } else { Reply::Done })
+}
+
+
+const HANG_DETECTOR: Duration = Duration::from_secs(120);
+
+
+const STATEMENT_SECONDS: u64 = 30;
+
+
+pub async fn until_alerts_query(statements: &mut UnboundedReceiver<String>) -> Result<(), Box<dyn Error>> {
+    let mut seen = false;
+    for _ in 0..DRAIN_LIMIT {
+        if !seen {
+            seen = statements.recv().await.ok_or("fake closed")?.contains("FROM alerts");
+        }
+    }
+    Ok(())
+}
+
+
+pub async fn hanging_computation(served: &mut Served, permits: &Arc<Semaphore>) -> Result<Running, Box<dyn Error>> {
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(permits));
+    let task = tokio::spawn(backend(tenant_scope("acme")?, Arc::new(weights()), NOW));
+    until_alerts_query(&mut served.fake.statements).await?;
+    Ok(task)
+}
+
+
+#[tokio::test]
+async fn a_dropped_computation_cancels_its_query_and_then_returns_its_permit() -> Result<(), Box<dyn Error>> {
+    let mut served = served(query_handler(Reply::Hang)).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let task = hanging_computation(&mut served, &permits).await?;
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
+    task.abort();
+    assert!(task.await.is_err());
+    let all = u32::try_from(MAX_CONNECTIONS)?;
+    tokio::time::timeout(HANG_DETECTOR, permits.acquire_many(all)).await??.forget();
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_cancel_keeps_the_permit_for_the_statement_deadline() -> Result<(), Box<dyn Error>> {
+    let mut served = served(query_handler(Reply::Hang)).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let task = hanging_computation(&mut served, &permits).await?;
+    std::fs::remove_file(served._dir.path().join("ca.pem"))?;
+    tokio::time::pause();
+    task.abort();
+    assert!(task.await.is_err());
+    for _ in 0..DRAIN_LIMIT {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
+    tokio::time::advance(Duration::from_secs(STATEMENT_SECONDS + 1)).await;
+    for _ in 0..DRAIN_LIMIT {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_computation_still_cancels_before_it_returns_its_permit() -> Result<(), Box<dyn Error>> {
+    let served = served(query_handler(Reply::Error("XX000"))).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let result = backend(tenant_scope("acme")?, Arc::new(weights()), NOW).await;
+    assert!(matches!(result, Err(RiskError::Store(_))));
+    let all = u32::try_from(MAX_CONNECTIONS)?;
+    tokio::time::timeout(HANG_DETECTOR, permits.acquire_many(all)).await??.forget();
+    Ok(())
+}
 
 
 #[cfg(unix)]

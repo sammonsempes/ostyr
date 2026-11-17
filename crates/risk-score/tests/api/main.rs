@@ -11,19 +11,22 @@ use core_auth::rbac::PERMISSION_ALERTS_READ;
 use core_config::reload::{reload, ReloadOutcome};
 use core_pg::scope::tenant_of;
 use fixture::{
-    calls, fixture, fixture_with, lock, outcome_of, scope, score, set_mode, set_outcome, ticking_clock, weights_engine, Mode, ANALYST, FIRST_NOW,
-    FULL_POINTS, MARKER, OTHER_TENANT, OUT_OF_RANGE_TEXT, READER, SWAPPED_POINTS, SWAPPED_TEXT, TENANT,
+    calls, fixture, fixture_with, lock, outcome_of, scope, score, set_mode, set_outcome, ticking_clock, weights_engine, Mode, Script, ANALYST,
+    FIRST_NOW, FULL_POINTS, MARKER, OTHER_TENANT, OUT_OF_RANGE_TEXT, READER, SWAPPED_POINTS, SWAPPED_TEXT, TENANT,
 };
 use http::{body_json, get, login};
 use risk_score::api::{
     entity_ref, kind_name, limit_name, parse_kind, parse_limit, risk_access, risk_document, scope_of, DEFAULT_LIMIT, GET_PATH, LIST_PATH,
     MAX_LIST_LIMIT,
 };
-use risk_score::api_model::{Failure, RiskState, Unavailable};
+use risk_score::api_model::{Failure, Joined, RiskState, Unavailable};
 use risk_score::backend::{system_clock, system_now};
-use risk_score::cache::{default_bounds, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS};
+use risk_score::cache::{
+    await_flight, default_bounds, is_live, join, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS,
+};
 use risk_score::model::EntityKind;
 use risk_score::source::{Limit, Truncated};
+use risk_score::types::Flight;
 use risk_score::weights::weights_state;
 use serde_json::{json, Value};
 use std::io::Write;
@@ -31,7 +34,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tracing::subscriber::set_default;
-use types::{TestError, TestResult};
+use types::{Flown, TestError, TestResult};
 
 
 const THREE: usize = 3;
@@ -313,6 +316,7 @@ async fn a_computation_past_the_deadline_is_a_503_and_nothing_is_cached() -> Tes
     assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error_code(&body_json(timed_out).await?), Some("unavailable"));
     assert_eq!(calls(&fx.script), 1);
+    settle().await;
     set_mode(&fx.script, Mode::Answer);
     assert_eq!(get(&fx.router, LIST_PATH, Some(&token)).await?.status(), StatusCode::OK);
     assert_eq!(calls(&fx.script), TWO);
@@ -471,6 +475,233 @@ async fn a_tenant_beyond_the_cap_computes_uncached_and_is_counted() -> TestResul
     assert_eq!(uncached_count(&fx.risk.uncached), TWO as u64);
     assert_eq!(fx.risk.uncached.load(Ordering::Relaxed), TWO as u64);
     assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    Ok(())
+}
+
+
+const FIVE: usize = 5;
+
+
+const MANY_TENANTS: usize = 12;
+
+
+async fn release_once(script: &Script) -> Result<(), TestError> {
+    script.entered.acquire().await?.forget();
+    tokio::task::yield_now().await;
+    script.gate.add_permits(1);
+    Ok(())
+}
+
+
+async fn run_many(state: &RiskState, tenant: &str, count: usize) -> Result<Vec<Flown>, TestError> {
+    let mut set = tokio::task::JoinSet::new();
+    (0..count).try_for_each(|_| {
+        let owned = state.clone();
+        let tenant_scope = scope(tenant)?;
+        set.spawn(async move { scores_for(&owned, tenant_scope).await });
+        Ok::<(), TestError>(())
+    })?;
+    let mut results = Vec::new();
+    for _ in 0..count {
+        if let Some(joined) = set.join_next().await {
+            results.push(joined?);
+        }
+    }
+    Ok(results)
+}
+
+
+#[tokio::test]
+async fn a_tenant_beyond_the_cap_still_has_a_single_flight() -> TestResult {
+    let fx = fixture_with(capped)?;
+    scores_for(&fx.risk, scope("tenant-a")?).await?;
+    scores_for(&fx.risk, scope("tenant-b")?).await?;
+    set_mode(&fx.script, Mode::Gated);
+    let before = calls(&fx.script);
+    let (results, released) = tokio::join!(run_many(&fx.risk, "tenant-c", FIVE), release_once(&fx.script));
+    released?;
+    assert_eq!(calls(&fx.script) - before, 1);
+    assert!(results?.iter().all(Result::is_ok));
+    assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn waiters_share_a_failure_and_the_next_request_runs_once() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::GatedFail);
+    let (results, released) = tokio::join!(run_many(&fx.risk, TENANT, FIVE), release_once(&fx.script));
+    released?;
+    assert_eq!(calls(&fx.script), 1);
+    let answers = results?;
+    assert_eq!(answers.len(), FIVE);
+    assert!(answers.iter().all(|result| *result == Err(Unavailable)));
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    set_mode(&fx.script, Mode::Answer);
+    scores_for(&fx.risk, scope(TENANT)?).await?;
+    assert_eq!(calls(&fx.script), TWO);
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn waiters_share_a_deadline_and_start_no_computation_of_their_own() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Hang);
+    let answers = run_many(&fx.risk, TENANT, FIVE).await?;
+    assert_eq!(calls(&fx.script), 1);
+    assert_eq!(answers.len(), FIVE);
+    assert!(answers.iter().all(|result| *result == Err(Unavailable)));
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    Ok(())
+}
+
+
+const SIX: usize = 6;
+
+
+const NINE_SECONDS: Duration = Duration::from_secs(9);
+
+
+async fn settle() {
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn stale_and_idle_entries_are_removed_and_the_map_stays_bounded() -> TestResult {
+    let fx = fixture_with(capped)?;
+    for index in 0..MANY_TENANTS {
+        scores_for(&fx.risk, scope(&format!("tenant-{index}"))?).await?;
+    }
+    assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    tokio::time::advance(Duration::from_secs(CACHE_SECONDS) + ONE_SECOND).await;
+    scores_for(&fx.risk, scope("tenant-x")?).await?;
+    assert_eq!(lock(&fx.risk.slots).len(), 1);
+    set_mode(&fx.script, Mode::Hang);
+    let cancelled = tokio::time::timeout(Duration::ZERO, scores_for(&fx.risk, scope("tenant-y")?)).await;
+    assert!(cancelled.is_err());
+    assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    settle().await;
+    tokio::time::advance(Duration::from_secs(MAX_COMPUTE_SECONDS) + ONE_SECOND).await;
+    settle().await;
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    set_mode(&fx.script, Mode::Answer);
+    scores_for(&fx.risk, scope("tenant-x")?).await?;
+    assert_eq!(lock(&fx.risk.slots).len(), 1);
+    let weights = core_config::reload::current_config(&fx.engine);
+    assert!(lock(&fx.risk.slots).values().all(|entry| is_live(entry, &weights, &fx.risk.bounds)));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_dropped_leader_does_not_cancel_or_restart_the_computation() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Hang);
+    let started = tokio::time::Instant::now();
+    let cancelled = tokio::time::timeout(Duration::ZERO, scores_for(&fx.risk, scope(TENANT)?)).await;
+    assert!(cancelled.is_err());
+    let answers = run_many(&fx.risk, TENANT, FIVE).await?;
+    assert_eq!(calls(&fx.script), 1);
+    assert!(answers.iter().all(|result| *result == Err(Unavailable)));
+    assert_eq!(started.elapsed(), Duration::from_secs(MAX_COMPUTE_SECONDS));
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_chain_of_dropped_requests_is_answered_by_the_first_deadline() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Hang);
+    let started = tokio::time::Instant::now();
+    for _ in 0..SIX {
+        let cancelled = tokio::time::timeout(Duration::ZERO, scores_for(&fx.risk, scope(TENANT)?)).await;
+        assert!(cancelled.is_err());
+        settle().await;
+        tokio::time::advance(NINE_SECONDS).await;
+    }
+    let victim = scores_for(&fx.risk, scope(TENANT)?).await;
+    assert_eq!(victim, Err(Unavailable));
+    assert_eq!(calls(&fx.script), 1);
+    assert_eq!(started.elapsed(), Duration::from_secs(MAX_COMPUTE_SECONDS));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_result_of_a_dropped_leaders_flight_is_shared_and_cached() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Gated);
+    let cancelled = tokio::time::timeout(Duration::ZERO, scores_for(&fx.risk, scope(TENANT)?)).await;
+    assert!(cancelled.is_err());
+    let (answer, released) = tokio::join!(scores_for(&fx.risk, scope(TENANT)?), release_once(&fx.script));
+    released?;
+    let first = answer?;
+    settle().await;
+    assert!(Arc::ptr_eq(&first, &scores_for(&fx.risk, scope(TENANT)?).await?));
+    assert_eq!(calls(&fx.script), 1);
+    Ok(())
+}
+
+
+fn flight_of(joined: Joined) -> Option<Flight> {
+    match joined {
+        Joined::Wait(flight) => Some(flight),
+        Joined::Hit(_) => None,
+    }
+}
+
+
+#[tokio::test]
+async fn a_fresh_result_joins_as_a_hit_without_a_flight() -> TestResult {
+    let fx = fixture()?;
+    let first = scores_for(&fx.risk, scope(TENANT)?).await?;
+    let weights = core_config::reload::current_config(&fx.engine);
+    let joined = join(&fx.risk, scope(TENANT)?, &weights);
+    assert!(matches!(&joined, Joined::Hit(hit) if Arc::ptr_eq(hit, &first)));
+    assert!(flight_of(joined).is_none());
+    Ok(())
+}
+
+
+#[test]
+fn a_flight_dropped_with_its_runtime_leaves_no_slot_and_answers_its_waiters() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Hang);
+    LazyLock::force(&ANCHOR);
+    let captured = Capture(Arc::default());
+    let guard = set_default(
+        tracing_subscriber::fmt()
+            .with_writer({
+                let sink = captured.clone();
+                move || sink.clone()
+            })
+            .with_ansi(false)
+            .finish(),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let weights = core_config::reload::current_config(&fx.engine);
+    let joined = {
+        let _entered = runtime.enter();
+        join(&fx.risk, scope(TENANT)?, &weights)
+    };
+    let receiver = flight_of(joined).ok_or("no flight")?;
+    runtime.block_on(async { tokio::task::yield_now().await });
+    assert_eq!(lock(&fx.risk.slots).len(), 1);
+    drop(runtime);
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    let waiter = tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build()?;
+    let answer = waiter.block_on(await_flight(&fx.risk, receiver));
+    assert_eq!(answer, Err(Unavailable));
+    let (sender, closed) = tokio::sync::watch::channel::<Option<Flown>>(None);
+    drop(sender);
+    assert_eq!(waiter.block_on(await_flight(&fx.risk, closed)), Err(Unavailable));
+    drop(guard);
+    let logs = String::from_utf8(lock(&captured.0).clone())?;
+    assert!(logs.contains("flight ended without a result"), "{logs}");
     Ok(())
 }
 
