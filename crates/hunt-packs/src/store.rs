@@ -1,10 +1,11 @@
-use crate::packs::is_pack_id;
+use crate::packs::{is_pack_id, MAX_ID_CHARS};
 use crate::schedule::{checked_time, RunWindow, ScheduleError};
 use crate::types::ListResult;
 use core_pg::error::PgError;
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_scope, TenantScope};
 use std::future::Future;
+use std::num::TryFromIntError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -69,9 +70,15 @@ pub enum StateError {
     #[error("a run end is outside years 0 to 9999")]
     OutOfRange(#[source] ScheduleError),
     #[error("a match count does not fit the store")]
-    CountOutOfRange,
+    CountOutOfRange(#[source] TryFromIntError),
     #[error("the store answered with an unexpected number of rows")]
     BadReply,
+}
+
+
+/// A refusal no retry can fix (the value itself is wrong), as opposed to a store failure that may pass on the next tick.
+pub fn is_permanent(error: &StateError) -> bool {
+    matches!(error, StateError::CountOutOfRange(_) | StateError::InvalidPackId)
 }
 
 
@@ -128,11 +135,12 @@ pub struct FindingRow {
 }
 
 
-/// Rows after the cursor; a stored row with an invalid pack id is left out and counted in `skipped`.
+/// Rows after the cursor, bad pack ids counted in `skipped`; `next` is the last row READ (skipped included), set only on a full page.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FindingPage {
     pub rows: Vec<FindingRow>,
     pub skipped: usize,
+    pub next: Option<(i64, String)>,
 }
 
 
@@ -152,8 +160,8 @@ where
     let scope = checked_key(tenant, pack_id)?;
     checked_time(window.start).map_err(StateError::OutOfRange)?;
     checked_time(window.end).map_err(StateError::OutOfRange)?;
-    let matches_stored = i64::try_from(matches).map_err(|_| StateError::CountOutOfRange)?;
-    let baseline_stored = i64::try_from(max_matches).map_err(|_| StateError::CountOutOfRange)?;
+    let matches_stored = i64::try_from(matches).map_err(StateError::CountOutOfRange)?;
+    let baseline_stored = i64::try_from(max_matches).map_err(StateError::CountOutOfRange)?;
     let params = vec![
         Param::Text(pack_id.to_owned()),
         Param::Int(window.start),
@@ -183,9 +191,56 @@ where
     let capped = limit.clamp(1, MAX_FINDINGS_PAGE);
     let params = vec![Param::Int(since_end), Param::Text(since_pack.to_owned()), Param::Int(capped)];
     let rows = exec(&scope, LIST_SQL, params).await?;
+    let full = i64::try_from(rows.len()).is_ok_and(|read| read >= capped);
+    let next = rows.last().filter(|_| full).map(|row| (row.window_end, row.pack_id.clone()));
     let (valid, refused): (Vec<FindingRow>, Vec<FindingRow>) = rows.into_iter().partition(|row| is_pack_id(&row.pack_id));
     Ok(FindingPage {
         rows: valid,
         skipped: refused.len(),
+        next,
     })
+}
+
+
+const HEX_RADIX: u32 = 16;
+
+
+const HEX_DIGITS_PER_BYTE: usize = 2;
+
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CursorError {
+    #[error("the cursor is not `<end>` or `<end>:<lowercase hex of the pack id>`")]
+    Malformed,
+}
+
+
+/// `<end>:<lowercase hex of the pack id bytes>`: any stored id, control characters included, prints and parses back unchanged.
+pub fn format_cursor(end: i64, pack_id: &str) -> String {
+    let hex: String = pack_id.bytes().map(|byte| format!("{byte:02x}")).collect();
+    format!("{end}:{hex}")
+}
+
+
+fn unhex(hex: &str) -> Option<Vec<u8>> {
+    let lowercase = hex.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    let bounded = hex.len() <= MAX_ID_CHARS * HEX_DIGITS_PER_BYTE && hex.len().is_multiple_of(HEX_DIGITS_PER_BYTE);
+    let digits: Vec<char> = hex.chars().collect();
+    (lowercase && bounded)
+        .then(|| {
+            digits
+                .chunks(HEX_DIGITS_PER_BYTE)
+                .map(|pair| u8::from_str_radix(&pair.iter().collect::<String>(), HEX_RADIX).ok())
+                .collect::<Option<Vec<u8>>>()
+        })
+        .flatten()
+}
+
+
+/// Reads `<end>` (the pack part empty) or the form `format_cursor` prints; anything else is refused.
+pub fn parse_cursor(text: &str) -> Result<(i64, String), CursorError> {
+    let (end, hex) = text.split_once(':').unwrap_or((text, ""));
+    let end_value: i64 = end.parse().map_err(|_| CursorError::Malformed)?;
+    let bytes = unhex(hex).ok_or(CursorError::Malformed)?;
+    String::from_utf8(bytes).map(|pack| (end_value, pack)).map_err(|_| CursorError::Malformed)
 }

@@ -5,10 +5,12 @@ use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
-    list_findings, record_finding, FindingPage, FindingRow, Param, StateError, FINDING_SQL, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
+    format_cursor, is_permanent, list_findings, parse_cursor, record_finding, CursorError, FindingPage, FindingRow, Param, StateError, FINDING_SQL,
+    LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
 };
 use hunt_packs::types::ListResult;
 use std::cell::RefCell;
+use std::error::Error;
 use std::future::{ready, Ready};
 use std::rc::Rc;
 use types::{Rows, Seen, TestResult};
@@ -27,6 +29,9 @@ const LATER: i64 = 3_000;
 
 
 const THREE: i64 = 3;
+
+
+const ID_CAP: usize = 64;
 
 
 const SECOND: i64 = 2;
@@ -168,11 +173,11 @@ async fn a_refused_finding_sends_nothing() -> TestResult {
     let too_big = u64::try_from(i64::MAX)? + 1;
     assert!(matches!(
         record_finding(&mut exec, "acme", PACK, &window(), too_big, 0).await,
-        Err(StateError::CountOutOfRange)
+        Err(StateError::CountOutOfRange(_))
     ));
     assert!(matches!(
         record_finding(&mut exec, "acme", PACK, &window(), 1, too_big).await,
-        Err(StateError::CountOutOfRange)
+        Err(StateError::CountOutOfRange(_))
     ));
     assert!(matches!(
         record_finding(&mut exec, "acme", "-x", &window(), 1, 0).await,
@@ -303,5 +308,74 @@ async fn a_row_with_an_invalid_pack_id_is_skipped_and_counted() -> TestResult {
     assert_eq!((page.rows.len(), page.skipped), (1, 1));
     let mut failing = |_scope: &TenantScope, _sql: &'static str, _params: Vec<Param>| ready(Err::<Vec<FindingRow>, PgError>(PgError::LegacyRecords));
     assert!(matches!(list_findings(&mut failing, "a", 0, "", 1).await, Err(StateError::Pg(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_count_error_keeps_its_cause_and_is_permanent() -> TestResult {
+    let (store, seen) = fresh();
+    let mut exec = insert_exec(&store, &seen);
+    let too_big = u64::try_from(i64::MAX)? + 1;
+    let error = record_finding(&mut exec, "acme", PACK, &window(), too_big, 0)
+        .await
+        .err()
+        .ok_or("accepted")?;
+    assert!(error.source().is_some());
+    assert!(is_permanent(&error));
+    assert!(is_permanent(&StateError::InvalidPackId));
+    assert!(!is_permanent(&StateError::BadReply));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_page_of_skipped_rows_still_gives_the_next_cursor() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("Bad Id", END)),
+        ("a".to_owned(), row("Bad Two", LATER)),
+        ("a".to_owned(), row("fine", LATER + 1)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let page = list_findings(&mut exec, "a", 0, "", SECOND).await?;
+    assert_eq!((page.rows.len(), page.skipped), (0, SECOND_USIZE));
+    assert_eq!(page.next, Some((LATER, "Bad Two".to_owned())));
+    let following = list_findings(&mut exec, "a", LATER, "Bad Two", SECOND).await?;
+    assert_eq!((following.rows.len(), following.skipped, following.next), (1, 0, None));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_printed_cursor_of_an_escaped_id_round_trips_and_lists_the_row_between() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("Bad Id", END)),
+        ("a".to_owned(), row("beta", END)),
+        ("a".to_owned(), row("x\u{1b}[31mred", END)),
+        ("a".to_owned(), row("x-hidden", END)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let first = list_findings(&mut exec, "a", 0, "", THREE).await?;
+    let (end, pack) = first.next.ok_or("no cursor")?;
+    let printed = format_cursor(end, &pack);
+    assert!(printed.is_ascii() && !printed.chars().any(char::is_control));
+    let (parsed_end, parsed_pack) = parse_cursor(&printed)?;
+    assert_eq!((parsed_end, parsed_pack.as_str()), (END, pack.as_str()));
+    let second = list_findings(&mut exec, "a", parsed_end, &parsed_pack, THREE).await?;
+    let listed: Vec<&str> = second.rows.iter().map(|found| found.pack_id.as_str()).collect();
+    assert_eq!(listed, ["x-hidden"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_cursor_other_than_the_printed_form_is_refused() -> TestResult {
+    assert_eq!(parse_cursor("1")?, (1, String::new()));
+    let too_long = format!("1:{}", "61".repeat(ID_CAP + 1));
+    let refused = ["x", "1:6", "1:6G", "1:4A", "1:zz", "1:ff", "1:é", too_long.as_str()];
+    assert!(refused.iter().all(|text| parse_cursor(text) == Err(CursorError::Malformed)));
+    assert_eq!(parse_cursor(&format!("1:{}", "61".repeat(ID_CAP)))?.1.len(), ID_CAP);
     Ok(())
 }
