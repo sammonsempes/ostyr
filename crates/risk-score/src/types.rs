@@ -1,4 +1,4 @@
-use crate::api_model::Cached;
+use crate::api_model::{Computed, Entry, Unavailable};
 use crate::error::RiskError;
 use crate::model::Weights;
 use crate::source::Outcome;
@@ -19,7 +19,14 @@ pub type ComputeFn = Arc<dyn Fn(TenantScope, Arc<Weights>, i64) -> ComputeFuture
 pub type NowFn = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 
-pub type Slot = Arc<tokio::sync::Mutex<Option<Cached>>>;
+pub type FlightResult = Result<Arc<Computed>, Unavailable>;
 
 
-pub type SlotMap = BTreeMap<String, Slot>;
+/// The outcome of one computation, shared by every request that waited for it: `None` until the flight task ends.
+pub type Flight = tokio::sync::watch::Receiver<Option<FlightResult>>;
+
+
+pub type FlightSender = tokio::sync::watch::Sender<Option<FlightResult>>;
+
+
+pub type SlotMap = BTreeMap<String, Entry>;

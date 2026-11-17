@@ -1,6 +1,7 @@
+use crate::cache::conclude;
 use crate::model::Weights;
 use crate::source::Outcome;
-use crate::types::{ComputeFn, NowFn, SlotMap};
+use crate::types::{ComputeFn, Flight, FlightResult, FlightSender, NowFn, SlotMap};
 use core_api::model::ApiError;
 use core_config::reload::ReloadEngine;
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,38 @@ pub struct Cached {
 }
 
 
-#[derive(Debug, Error, PartialEq, Eq)]
+/// One tenant's slot: its last result and the flight a request may join.
+pub struct Entry {
+    pub cached: Option<Cached>,
+    pub flight: Option<Flight>,
+}
+
+
+/// What the flight task owns: dropped when the task ends, which finishes the slot and answers the waiters.
+pub struct FlightRun {
+    pub state: RiskState,
+    pub tenant: String,
+    pub weights: Arc<Weights>,
+    pub started: Instant,
+    pub result: Option<FlightResult>,
+    pub sender: FlightSender,
+}
+
+
+impl Drop for FlightRun {
+    fn drop(&mut self) {
+        conclude(self);
+    }
+}
+
+
+pub enum Joined {
+    Hit(Arc<Computed>),
+    Wait(Flight),
+}
+
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[error("risk scores are unavailable")]
 pub struct Unavailable;
 

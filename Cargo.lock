@@ -5260,6 +5260,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tokio-postgres-rustls",
  "tokio-rustls",
  "tower",
  "tracing",

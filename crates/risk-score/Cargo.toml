@@ -15,7 +15,8 @@ core-pg = { version = "0.0.0", path = "../core-pg" }
 ecs-normalise = { version = "0.0.0", path = "../ecs-normalise" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio-postgres-rustls = "0.13"
 tracing = "0.1"
 utoipa = { version = "5", features = ["axum_extras"] }
 
