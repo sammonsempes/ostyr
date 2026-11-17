@@ -65,6 +65,10 @@ pub enum ConnectorError {
     Unsupported,
     #[error("the system clock is before the Unix epoch")]
     Clock,
+    #[error("the OpenAPI document is not valid ({category}) at line {line} column {column}")]
+    OpenApi { category: String, line: usize, column: usize },
+    #[error("the OpenAPI document exceeds the bound on {bound} ({max})")]
+    OpenApiBound { bound: &'static str, max: usize },
     #[error("usage: {0}")]
     Usage(&'static str),
 }
