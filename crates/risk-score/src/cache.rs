@@ -1,6 +1,6 @@
 use crate::api_model::{Bounds, Cached, Computed, Entry, FlightRun, Joined, RiskState, Unavailable};
 use crate::model::Weights;
-use crate::types::{ComputeFn, Flight, NowFn};
+use crate::types::{ComputeFn, Flight, NowFn, SlotMap};
 use core_config::reload::{current_config, ReloadEngine};
 use core_pg::scope::{tenant_of, TenantScope};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -76,7 +76,11 @@ pub async fn compute_once(state: &RiskState, scope: TenantScope, weights: Arc<We
 
 
 pub fn fresh_entry() -> Entry {
-    Entry { cached: None, flight: None }
+    Entry {
+        cached: None,
+        flight: None,
+        flight_weights: None,
+    }
 }
 
 
@@ -86,27 +90,31 @@ pub fn is_live(entry: &Entry, weights: &Arc<Weights>, bounds: &Bounds) -> bool {
 }
 
 
-/// The flight of the tenant: the running one, else a new task the flight owns, so no request drop cancels or restarts it.
-pub fn start_flight(state: &RiskState, entry: &mut Entry, scope: TenantScope, weights: &Arc<Weights>) -> Flight {
-    let running = entry.flight.clone();
-    running.unwrap_or_else(|| {
-        let (sender, receiver) = watch::channel(None);
-        let run = FlightRun {
-            state: state.clone(),
-            tenant: tenant_of(&scope).to_owned(),
-            weights: Arc::clone(weights),
-            started: Instant::now(),
-            result: None,
-            sender,
-        };
-        tokio::spawn(run_flight(run, scope));
-        entry.flight = Some(receiver.clone());
-        receiver
-    })
+/// The tenant's running flight of these weights, else a new one: the task is spawned by the caller once the slot lock is released.
+pub fn start_flight(state: &RiskState, entry: &mut Entry, scope: TenantScope, weights: &Arc<Weights>) -> (Flight, Option<(FlightRun, TenantScope)>) {
+    let same_weights = entry.flight_weights.as_ref().is_some_and(|started| Arc::ptr_eq(started, weights));
+    let running = entry.flight.clone().filter(|_| same_weights);
+    match running {
+        Some(receiver) => (receiver, None),
+        None => {
+            let (sender, receiver) = watch::channel(None);
+            let run = FlightRun {
+                state: state.clone(),
+                tenant: tenant_of(&scope).to_owned(),
+                weights: Arc::clone(weights),
+                started: Instant::now(),
+                result: None,
+                sender,
+            };
+            entry.flight = Some(receiver.clone());
+            entry.flight_weights = Some(Arc::clone(weights));
+            (receiver, Some((run, scope)))
+        }
+    }
 }
 
 
-/// The tenant's fresh result, else its flight (started if none): stale and idle entries are removed on the way.
+/// The tenant's fresh result, else its flight of the current weights (started if none): stale and idle entries are removed on the way.
 pub fn join(state: &RiskState, scope: TenantScope, weights: &Arc<Weights>) -> Joined {
     let mut slots = lock(&state.slots);
     slots.retain(|_, entry| is_live(entry, weights, &state.bounds));
@@ -118,17 +126,42 @@ pub fn join(state: &RiskState, scope: TenantScope, weights: &Arc<Weights>) -> Jo
         .map(|cached| Arc::clone(&cached.computed));
     match hit {
         Some(computed) => Joined::Hit(computed),
-        None => Joined::Wait(start_flight(state, entry, scope, weights)),
+        None => {
+            let (receiver, pending) = start_flight(state, entry, scope, weights);
+            drop(slots);
+            pending.into_iter().for_each(|(run, run_scope)| {
+                tokio::spawn(run_flight(run, run_scope));
+            });
+            Joined::Wait(receiver)
+        }
     }
 }
 
 
-/// Called when the flight ends: the entry is replaced by a cached one, or removed.
+/// Called when the flight ends: the entry is replaced by a cached one, or removed; a flight of replaced weights leaves the slot to its successor.
 pub fn finish(state: &RiskState, tenant: &str, weights: Arc<Weights>, started: Instant, result: &Result<Arc<Computed>, Unavailable>) {
     let current = current_config(&state.weights);
     let mut slots = lock(&state.slots);
+    let superseded = slots
+        .get(tenant)
+        .and_then(|entry| entry.flight_weights.as_ref())
+        .is_some_and(|flying| !Arc::ptr_eq(flying, &weights));
+    if !superseded {
+        settle(state, &mut slots, &current, tenant, (weights, started), result);
+    }
+}
+
+
+pub fn settle(
+    state: &RiskState,
+    slots: &mut SlotMap,
+    current: &Arc<Weights>,
+    tenant: &str,
+    (weights, started): (Arc<Weights>, Instant),
+    result: &Result<Arc<Computed>, Unavailable>,
+) {
     slots.remove(tenant);
-    slots.retain(|_, entry| is_live(entry, &current, &state.bounds));
+    slots.retain(|_, entry| is_live(entry, current, &state.bounds));
     let room = slots.values().filter(|entry| entry.cached.is_some()).count() < state.bounds.max_tenants;
     match (result, room) {
         (Ok(computed), true) => {
@@ -142,6 +175,7 @@ pub fn finish(state: &RiskState, tenant: &str, weights: Arc<Weights>, started: I
                 Entry {
                     cached: Some(cached),
                     flight: None,
+                    flight_weights: None,
                 },
             );
         }

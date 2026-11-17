@@ -54,6 +54,7 @@ pub struct Cached {
 pub struct Entry {
     pub cached: Option<Cached>,
     pub flight: Option<Flight>,
+    pub flight_weights: Option<Arc<Weights>>,
 }
 
 
