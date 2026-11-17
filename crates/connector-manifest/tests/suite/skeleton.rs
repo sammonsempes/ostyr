@@ -7,7 +7,7 @@ use connector_manifest::model::{
 };
 use connector_manifest::openapi::{openapi_error, parse_document};
 use connector_manifest::output::{
-    create_package, create_package_with, open_parent, split_target, write_skeleton, write_skeleton_with, write_staged_with,
+    create_package, create_package_with, open_parent, remove_package, split_target, write_skeleton, write_skeleton_with, write_staged_with,
 };
 use connector_manifest::skeleton::{build_skeleton, fallback_shape, skeleton_from_file, valid_path, valid_url, Skeleton};
 use connector_manifest::verify::write_all_bytes;
@@ -804,5 +804,155 @@ fn a_directory_that_cannot_be_held_is_removed_again() -> TestResult {
     let result = create_package_with(refusing_opener, held, "package".to_owned(), "package");
     assert!(matches!(result, Err(ConnectorError::Io { .. })));
     assert_eq!(fs::read_dir(parent.path())?.count(), 0);
+    Ok(())
+}
+
+
+fn other_directory_opener(parent: BorrowedFd<'_>, _name: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+    rustix::fs::openat(parent, "other", flags, rustix::fs::Mode::empty())
+}
+
+
+fn file_opener(parent: BorrowedFd<'_>, _name: &str, _flags: OFlags) -> Result<OwnedFd, Errno> {
+    rustix::fs::openat(parent, "other", OFlags::RDONLY | OFlags::CLOEXEC, rustix::fs::Mode::empty())
+}
+
+
+const OTHER_MODE: u32 = 0o755;
+
+
+const PRIVATE_MODE: u32 = 0o700;
+
+
+fn refused_with(opener: connector_manifest::types::OpenFn, prepare: fn(&Path) -> io::Result<()>) -> TestResult {
+    let parent = TempDir::new()?;
+    let other = parent.path().join("other");
+    fs::create_dir(&other)?;
+    fs::set_permissions(&other, fs::Permissions::from_mode(PRIVATE_MODE))?;
+    prepare(&other)?;
+    let held = open_parent(parent.path())?;
+    let result = create_package_with(opener, held, "package".to_owned(), "package");
+    assert!(matches!(result, Err(ConnectorError::Invalid { field: "out-dir" })));
+    assert!(parent.path().join("package").is_dir());
+    assert!(other.exists());
+    Ok(())
+}
+
+
+fn add_file(path: &Path) -> io::Result<()> {
+    fs::write(path.join("x"), "x")
+}
+
+
+fn widen(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(OTHER_MODE))
+}
+
+
+fn replace_with_file(path: &Path) -> io::Result<()> {
+    fs::remove_dir(path)?;
+    fs::write(path, "x")
+}
+
+
+#[test]
+fn a_handle_that_is_not_the_new_empty_private_directory_is_refused() -> TestResult {
+    refused_with(other_directory_opener, add_file)?;
+    refused_with(other_directory_opener, widen)?;
+    refused_with(file_opener, replace_with_file)?;
+    Ok(())
+}
+
+
+fn set_setuid(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(SETUID_MODE))
+}
+
+
+fn set_sticky(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(STICKY_MODE))
+}
+
+
+fn set_setgid(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(SETGID_MODE))
+}
+
+
+const SPECIAL_AND_PERMISSION_MASK: u32 = 0o7777;
+
+
+const SETUID_MODE: u32 = 0o4700;
+
+
+const STICKY_MODE: u32 = 0o1700;
+
+
+const SETGID_MODE: u32 = 0o2700;
+
+
+const SETGID_PARENT_MODE: u32 = 0o2755;
+
+
+#[test]
+fn a_held_directory_with_a_special_bit_its_parent_lacks_is_refused() -> TestResult {
+    refused_with(other_directory_opener, set_setuid)?;
+    refused_with(other_directory_opener, set_sticky)?;
+    refused_with(other_directory_opener, set_setgid)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_setgid_parent_still_receives_the_package() -> TestResult {
+    let parent = TempDir::new()?;
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(SETGID_PARENT_MODE))?;
+    let held = open_parent(parent.path())?;
+    let package = create_package(held, "package".to_owned(), "package")?;
+    write_staged_with(write_all_bytes, &package, "connector.yaml", "text")?;
+    assert_eq!(
+        fs::metadata(parent.path().join("package"))?.permissions().mode() & SPECIAL_AND_PERMISSION_MASK,
+        SETGID_MODE
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_genuine_package_is_removed_through_its_own_name() -> TestResult {
+    let parent = TempDir::new()?;
+    let held = open_parent(parent.path())?;
+    let package = create_package(held, "package".to_owned(), "package")?;
+    assert!(remove_package(&package.parent, &package.directory, "package").is_empty());
+    assert!(!parent.path().join("package").exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_planted_empty_directory_survives_the_removal_of_the_moved_one() -> TestResult {
+    let parent = TempDir::new()?;
+    let target = parent.path().join("package");
+    let held = open_parent(parent.path())?;
+    let package = create_package(held, "package".to_owned(), "package")?;
+    write_staged_with(write_all_bytes, &package, "connector.yaml", "text")?;
+    fs::rename(&target, parent.path().join("moved"))?;
+    fs::create_dir(&target)?;
+    drop(package);
+    assert!(target.is_dir());
+    assert!(!parent.path().join("moved").join("connector.yaml").exists());
+    assert!(parent.path().join("moved").is_dir());
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_whose_name_is_gone_is_not_removed_and_not_reported() -> TestResult {
+    let parent = TempDir::new()?;
+    let held = open_parent(parent.path())?;
+    let package = create_package(held, "package".to_owned(), "package")?;
+    fs::rename(parent.path().join("package"), parent.path().join("moved"))?;
+    assert!(remove_package(&package.parent, &package.directory, "package").is_empty());
+    assert!(parent.path().join("moved").is_dir());
     Ok(())
 }

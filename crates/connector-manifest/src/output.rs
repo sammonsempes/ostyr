@@ -8,10 +8,10 @@ use std::path::Path;
 use {
     crate::model::{DIRECTORY_MODE, FILE_MODE},
     crate::package::io_at,
-    crate::scan::{errno_error, open_at},
+    crate::scan::{errno_error, open_at, raw_entries},
     crate::types::OpenFn,
     core_config::trusted_dir::open_trusted_dir,
-    rustix::fs::{mkdirat, openat, renameat, unlinkat, AtFlags, Mode, OFlags},
+    rustix::fs::{fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
     rustix::io::Errno,
     rustix::process::geteuid,
     std::fs::File,
@@ -55,6 +55,20 @@ pub fn report_failure(errno: Errno) {
 }
 
 
+/// The entry at `name` on the parent is removed only if it is the held directory (same device and inode); an impostor is left in place.
+#[cfg(target_os = "linux")]
+pub fn remove_directory_entry(parent: &OwnedFd, directory: &OwnedFd, name: &str) -> Result<(), Errno> {
+    let same = fstat(directory)
+        .and_then(|held| statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map(|found| (held.st_dev, held.st_ino) == (found.st_dev, found.st_ino)))?;
+    if same {
+        unlinkat(parent, name, AtFlags::REMOVEDIR)
+    } else {
+        log::warn!("the skeleton directory was replaced, the entry at its name is left in place");
+        Ok(())
+    }
+}
+
+
 /// The files through the held directory, then the directory through the held parent; a missing entry is fine, any other failure is returned.
 #[cfg(target_os = "linux")]
 pub fn remove_package(parent: &OwnedFd, directory: &OwnedFd, name: &str) -> Vec<Errno> {
@@ -64,7 +78,7 @@ pub fn remove_package(parent: &OwnedFd, directory: &OwnedFd, name: &str) -> Vec<
         .map(|file| (*file).to_owned())
         .chain(staged)
         .map(|file| unlinkat(directory, file.as_str(), AtFlags::empty()))
-        .chain(std::iter::once(name).map(|directory_name| unlinkat(parent, directory_name, AtFlags::REMOVEDIR)))
+        .chain(std::iter::once(name).map(|directory_name| remove_directory_entry(parent, directory, directory_name)))
         .filter_map(Result::err)
         .filter(|errno| *errno != Errno::NOENT)
         .collect()
@@ -95,6 +109,22 @@ pub fn split_target(directory: &Path, label: &str) -> Result<(PathBuf, String), 
 
 
 #[cfg(target_os = "linux")]
+pub const MAX_EMPTY_ENTRIES: usize = 2;
+
+
+#[cfg(target_os = "linux")]
+pub const PERMISSION_MASK: u32 = 0o777;
+
+
+#[cfg(target_os = "linux")]
+pub const SPECIAL_MASK: u32 = 0o7000;
+
+
+#[cfg(target_os = "linux")]
+pub const SETGID_BIT: u32 = 0o2000;
+
+
+#[cfg(target_os = "linux")]
 pub const CREATE_FLAGS: OFlags = OFlags::WRONLY
     .union(OFlags::CREATE)
     .union(OFlags::EXCL)
@@ -119,7 +149,33 @@ pub fn create_package(parent: OwnedFd, name: String, label: &str) -> Result<Pack
 }
 
 
-/// A directory that cannot be held is removed again before the error is returned; the opener is injected.
+/// The held handle must be an empty directory owned by this user with mode 0700 and no special bit but the setgid its parent has.
+#[cfg(target_os = "linux")]
+pub fn check_held_directory(parent: &OwnedFd, directory: &OwnedFd, label: &str) -> Result<(), ConnectorError> {
+    let inherited = fstat(parent).map_err(errno_error(label))?.st_mode & SETGID_BIT;
+    fstat(directory)
+        .map_err(errno_error(label))
+        .and_then(|stat| {
+            let shaped = [
+                stat.st_mode & SPECIAL_MASK & !inherited == 0,
+                FileType::from_raw_mode(stat.st_mode) == FileType::Directory,
+                stat.st_uid == geteuid().as_raw(),
+                stat.st_mode & PERMISSION_MASK == DIRECTORY_MODE,
+            ]
+            .iter()
+            .all(|check| *check);
+            shaped.then_some(()).ok_or(ConnectorError::Invalid { field: "out-dir" })
+        })
+        .and_then(|()| raw_entries(directory, MAX_EMPTY_ENTRIES + 1).map_err(errno_error(label)))
+        .and_then(|entries| {
+            (entries.len() <= MAX_EMPTY_ENTRIES)
+                .then_some(())
+                .ok_or(ConnectorError::Invalid { field: "out-dir" })
+        })
+}
+
+
+/// A directory that cannot be held is removed again; one that is not the directory just made is refused and its name left alone; the opener is injected.
 #[cfg(target_os = "linux")]
 pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label: &str) -> Result<Package, ConnectorError> {
     mkdirat(&parent, name.as_str(), Mode::from_raw_mode(DIRECTORY_MODE)).map_err(errno_error(label))?;
@@ -131,6 +187,7 @@ pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label:
         .into_iter()
         .for_each(report_failure);
     let directory = held.map_err(errno_error(label))?;
+    check_held_directory(&parent, &directory, label)?;
     Ok(Package {
         parent,
         directory,
