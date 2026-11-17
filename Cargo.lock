@@ -5233,14 +5233,28 @@ name = "risk-score"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
  "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "ecs-normalise",
+ "rcgen",
+ "rustls",
  "serde",
+ "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
