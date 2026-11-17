@@ -213,3 +213,26 @@ fn the_page_is_deterministic_and_bounded() -> TestResult {
     assert!(render_page(Some(&worst), Some("<".repeat(HUGE_HEADER_BYTES).as_bytes())).html.len() <= MAX_PAGE_BYTES);
     Ok(())
 }
+
+
+#[test]
+fn a_hex_ipv4_literal_is_an_address_and_shows_unknown_domain() -> TestResult {
+    for host in ["0x7f.0x1", "0x7f000001", "0X7F.0X1", "a.0x", "example.0xff"] {
+        let html = html_of(host.as_bytes());
+        assert!(html.contains(UNKNOWN), "{host}");
+        assert!(!html.contains(host));
+    }
+    assert!(html_of(b"a.0xg").contains("<strong>a.0xg</strong>"));
+    assert!(html_of(b"x0x1.example").contains("x0x1.example"));
+    Ok(())
+}
+
+
+#[test]
+fn uts46_mapping_shows_the_name_a_browser_resolves() -> TestResult {
+    assert!(html_of("a\u{200b}b.example".as_bytes()).contains("<strong>ab.example</strong>"));
+    assert!(html_of("a\u{ad}b.example".as_bytes()).contains("<strong>ab.example</strong>"));
+    assert!(html_of("a\u{3002}example".as_bytes()).contains("<strong>a.example</strong>"));
+    assert!(html_of("a\u{3164}b.example".as_bytes()).contains("<strong>ab.example</strong>"));
+    Ok(())
+}

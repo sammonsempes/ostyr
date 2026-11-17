@@ -92,3 +92,63 @@ pub const UNKNOWN_DOMAIN_EN: &str = "unknown domain";
 
 
 pub const UNKNOWN_DOMAIN_FR: &str = "domaine inconnu";
+
+
+pub const DEFAULT_SINKHOLE_MAX_CONNECTIONS: usize = 512;
+
+
+pub const MAX_SINKHOLE_CONNECTIONS: usize = 10_000;
+
+
+pub const DEFAULT_SINKHOLE_PER_SOURCE: usize = 8;
+
+
+pub const MAX_SINKHOLE_PER_SOURCE: usize = 256;
+
+
+pub const DEFAULT_HEADER_READ_TIMEOUT_MS: u64 = 5_000;
+
+
+pub const MAX_HEADER_READ_TIMEOUT_MS: u64 = 60_000;
+
+
+pub const DEFAULT_RESPONSE_TIMEOUT_MS: u64 = 10_000;
+
+
+pub const MAX_RESPONSE_TIMEOUT_MS: u64 = 300_000;
+
+
+pub const MAX_REQUEST_HEAD_BYTES: usize = 8_192;
+
+
+pub const MAX_REQUEST_HEADERS: usize = 32;
+
+
+pub const ACCEPT_BACKOFF_MILLIS: u64 = 100;
+
+
+pub const REPORT_INTERVAL_SECONDS: u64 = 60;
+
+
+pub const IPV6_HOST_BITS: u32 = 64;
+
+
+pub const HTML_TYPE: &str = "text/html; charset=utf-8";
+
+
+pub const CSP_VALUE: &str = "default-src 'none'";
+
+
+pub const ALLOWED_METHODS: &str = "GET, HEAD";
+
+
+pub const REFUSED_TEXT: &str = "connections refused at the caps";
+
+
+pub const CUT_TEXT: &str = "connections cut by a deadline or a protocol error";
+
+
+pub const FAILED_TEXT: &str = "accepts that failed";
+
+
+pub const COUNTER_CLASSES: usize = 3;

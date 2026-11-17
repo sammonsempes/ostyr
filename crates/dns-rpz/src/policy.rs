@@ -1,8 +1,9 @@
 use crate::error::PolicyError;
 use crate::limits::{
-    DEFAULT_EXPIRE_SECONDS, DEFAULT_MAX_RECORDS, DEFAULT_MIN_CONFIDENCE, DEFAULT_NEGATIVE_TTL_SECONDS, DEFAULT_REFRESH_SECONDS,
-    DEFAULT_RETRY_SECONDS, DEFAULT_TTL_SECONDS, DEFAULT_UNBOUND_COMMAND, DEFAULT_UNBOUND_TIMEOUT_SECONDS, DEFAULT_ZONEFILE, MAX_PAGE_TEXT_CHARS,
-    MAX_RECORDS_LIMIT, MAX_SETTING_BYTES, MAX_UNBOUND_TIMEOUT_SECONDS,
+    DEFAULT_EXPIRE_SECONDS, DEFAULT_HEADER_READ_TIMEOUT_MS, DEFAULT_MAX_RECORDS, DEFAULT_MIN_CONFIDENCE, DEFAULT_NEGATIVE_TTL_SECONDS,
+    DEFAULT_REFRESH_SECONDS, DEFAULT_RESPONSE_TIMEOUT_MS, DEFAULT_RETRY_SECONDS, DEFAULT_SINKHOLE_MAX_CONNECTIONS, DEFAULT_SINKHOLE_PER_SOURCE,
+    DEFAULT_TTL_SECONDS, DEFAULT_UNBOUND_COMMAND, DEFAULT_UNBOUND_TIMEOUT_SECONDS, DEFAULT_ZONEFILE, MAX_HEADER_READ_TIMEOUT_MS, MAX_PAGE_TEXT_CHARS,
+    MAX_RECORDS_LIMIT, MAX_RESPONSE_TIMEOUT_MS, MAX_SETTING_BYTES, MAX_SINKHOLE_CONNECTIONS, MAX_SINKHOLE_PER_SOURCE, MAX_UNBOUND_TIMEOUT_SECONDS,
 };
 use crate::name::normalise_name;
 use core_config::error::ConfigError;
@@ -13,7 +14,8 @@ use intel_feeds::limits::MAX_CONFIDENCE;
 use intel_feeds::model::Tlp;
 use ipnet::IpNet;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 
@@ -136,6 +138,42 @@ pub struct SinkholePage {
 }
 
 
+/// The sinkhole listener: `listen` is read at start only, the bounds apply to the next connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SinkholeServer {
+    pub listen: SocketAddr,
+    #[serde(default = "default_sinkhole_connections")]
+    pub max_connections: usize,
+    #[serde(default = "default_sinkhole_per_source")]
+    pub max_connections_per_source: usize,
+    #[serde(default = "default_header_read_timeout")]
+    pub header_read_timeout_ms: u64,
+    #[serde(default = "default_response_timeout")]
+    pub response_timeout_ms: u64,
+}
+
+
+pub fn default_sinkhole_connections() -> usize {
+    DEFAULT_SINKHOLE_MAX_CONNECTIONS
+}
+
+
+pub fn default_sinkhole_per_source() -> usize {
+    DEFAULT_SINKHOLE_PER_SOURCE
+}
+
+
+pub fn default_header_read_timeout() -> u64 {
+    DEFAULT_HEADER_READ_TIMEOUT_MS
+}
+
+
+pub fn default_response_timeout() -> u64 {
+    DEFAULT_RESPONSE_TIMEOUT_MS
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -160,6 +198,8 @@ pub struct Policy {
     pub unbound: Unbound,
     #[serde(default)]
     pub sinkhole_page: Option<SinkholePage>,
+    #[serde(default)]
+    pub sinkhole_server: Option<SinkholeServer>,
 }
 
 
@@ -300,6 +340,33 @@ pub fn check_sinkhole_page(page: &SinkholePage) -> Result<(), PolicyError> {
 }
 
 
+/// Each bound inside its range; the total deadline covers the header read.
+pub fn check_sinkhole_server(server: &SinkholeServer) -> Result<(), PolicyError> {
+    let checks = [
+        (
+            "sinkhole_server.max_connections",
+            (1..=MAX_SINKHOLE_CONNECTIONS).contains(&server.max_connections),
+        ),
+        (
+            "sinkhole_server.max_connections_per_source",
+            (1..=MAX_SINKHOLE_PER_SOURCE).contains(&server.max_connections_per_source),
+        ),
+        (
+            "sinkhole_server.header_read_timeout_ms",
+            (1..=MAX_HEADER_READ_TIMEOUT_MS).contains(&server.header_read_timeout_ms),
+        ),
+        (
+            "sinkhole_server.response_timeout_ms",
+            (server.header_read_timeout_ms..=MAX_RESPONSE_TIMEOUT_MS).contains(&server.response_timeout_ms),
+        ),
+    ];
+    checks
+        .into_iter()
+        .find(|(_, valid)| !valid)
+        .map_or(Ok(()), |(field, _)| Err(PolicyError::Setting(field.to_owned())))
+}
+
+
 pub fn check_unbound(unbound: &Unbound) -> Result<(), PolicyError> {
     check_setting("unbound.command", &unbound.command)?;
     check_setting("unbound.zonefile", &unbound.zonefile)?;
@@ -341,6 +408,7 @@ pub fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
     check_rule("ipv6", &policy.actions.ipv6)?;
     check_rule("cidr", &policy.actions.cidr)?;
     policy.sinkhole_page.as_ref().map_or(Ok(()), check_sinkhole_page)?;
+    policy.sinkhole_server.as_ref().map_or(Ok(()), check_sinkhole_server)?;
     check_unbound(&policy.unbound)
 }
 
@@ -371,4 +439,49 @@ pub fn open_policy(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadCont
     )?;
     validate_policy(&current_config(&engine))?;
     Ok(engine)
+}
+
+
+pub fn listen_of(policy: &Policy) -> Option<SocketAddr> {
+    policy.sinkhole_server.map(|server| server.listen)
+}
+
+
+/// A file that adds, removes or changes the listen address is refused (so audited): it is read at start only.
+pub fn load_fixed_listen(path: &Path, baseline: Option<SocketAddr>) -> Result<Policy, ConfigError> {
+    let policy = load_file::<Policy>(path)?;
+    if listen_of(&policy) == baseline {
+        Ok(policy)
+    } else {
+        Err(ConfigError::WatchedFile {
+            file: "sinkhole_server.listen".to_owned(),
+            reason: "read at start only, restart the service to change it".to_owned(),
+        })
+    }
+}
+
+
+/// The engine whose every load, the first included, must carry `baseline` as listen address.
+pub fn open_with_listen(
+    path: PathBuf,
+    baseline: Option<SocketAddr>,
+    audit: Box<SharedAuditFn>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<Policy>, OpenError> {
+    let engine = open_engine(
+        Box::new(move || load_fixed_listen(&path, baseline)),
+        policy_state,
+        vec![policy_subscriber()],
+        audit,
+        context,
+    )?;
+    validate_policy(&current_config(&engine))?;
+    Ok(engine)
+}
+
+
+/// Like `open_policy`, with the listen address of the first read held fixed by every reload.
+pub fn open_serving_policy(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadContext) -> Result<ReloadEngine<Policy>, OpenError> {
+    let baseline = listen_of(&load_file::<Policy>(&path)?);
+    open_with_listen(path, baseline, audit, context)
 }

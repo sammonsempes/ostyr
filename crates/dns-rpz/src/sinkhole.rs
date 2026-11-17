@@ -27,6 +27,13 @@ pub fn strip_port(text: &str) -> Result<&str, HostError> {
 }
 
 
+/// The WHATWG "ends in a number" test: all decimal digits, or `0x` followed only by hex digits (so `0x7f.0x1` is an address, not a name).
+pub fn is_number_label(label: &str) -> bool {
+    let hexadecimal = label.strip_prefix("0x").or_else(|| label.strip_prefix("0X"));
+    label.bytes().all(|byte| byte.is_ascii_digit()) || hexadecimal.is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+
 /// The A-label form of the requested name; every other form is refused with a fixed error that never holds the bytes.
 pub fn derive_host(header: Option<&[u8]>) -> Result<String, HostError> {
     let bytes = header.ok_or(HostError::Missing)?;
@@ -38,11 +45,7 @@ pub fn derive_host(header: Option<&[u8]>) -> Result<String, HostError> {
         Err(HostError::TrailingDot)?;
     }
     let ascii = normalise_name(name)?;
-    if ascii
-        .rsplit('.')
-        .next()
-        .is_some_and(|label| label.bytes().all(|byte| byte.is_ascii_digit()))
-    {
+    if ascii.rsplit('.').next().is_some_and(is_number_label) {
         Err(HostError::NumericName)?;
     }
     Ok(ascii)

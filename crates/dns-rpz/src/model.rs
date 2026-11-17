@@ -69,3 +69,39 @@ pub struct RenderedPage {
     pub status: u16,
     pub html: String,
 }
+
+
+/// Open connections in all and per source key, under one lock so the caps are checked and taken together.
+#[derive(Debug, Default)]
+pub struct Admission {
+    pub total: usize,
+    pub sources: std::collections::BTreeMap<std::net::IpAddr, usize>,
+}
+
+
+/// Shared by the accept loop and every connection: the admission table and the counters reported once per interval.
+#[derive(Debug, Default)]
+pub struct ServeState {
+    pub admission: std::sync::Arc<std::sync::Mutex<Admission>>,
+    pub refused: std::sync::atomic::AtomicU64,
+    pub cut: std::sync::atomic::AtomicU64,
+    pub failed: std::sync::atomic::AtomicU64,
+    pub reported_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+
+/// Releases the connection's slot when dropped.
+#[derive(Debug)]
+pub struct ConnectionGuard {
+    pub admission: std::sync::Arc<std::sync::Mutex<Admission>>,
+    pub key: std::net::IpAddr,
+}
+
+
+/// How a connection ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionClass {
+    Closed,
+    Failed,
+    Deadline,
+}
