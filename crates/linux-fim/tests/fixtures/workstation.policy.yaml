@@ -133,6 +133,12 @@ spec:
     args:
     - index: 0
       type: file
+    - index: 0
+      type: uint64
+      resolve: f_inode.i_ino
+    - index: 0
+      type: uint32
+      resolve: f_inode.i_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -142,6 +148,15 @@ spec:
         values:
         - /root/.aws/credentials
         - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
 ---
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -511,10 +526,14 @@ spec:
       type: path
     - index: 1
       type: dentry
-    - index: 2
-      type: path
     - index: 3
       type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -532,6 +551,15 @@ spec:
         - /passwords.txt
         - /root
         - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_unlink
     syscall: false
     args:
@@ -539,6 +567,12 @@ spec:
       type: path
     - index: 1
       type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -553,6 +587,15 @@ spec:
         values:
         - /credentials
         - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_rmdir
     syscall: false
     args:
@@ -560,6 +603,12 @@ spec:
       type: path
     - index: 1
       type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -574,6 +623,15 @@ spec:
         values:
         - /root
         - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_link
     syscall: false
     args:
@@ -583,6 +641,12 @@ spec:
       type: path
     - index: 2
       type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -592,6 +656,15 @@ spec:
         values:
         - /credentials
         - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
 ---
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -708,10 +781,14 @@ spec:
       type: path
     - index: 3
       type: dentry
-    - index: 0
-      type: path
     - index: 1
       type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -729,6 +806,15 @@ spec:
         - /passwords.txt
         - /root
         - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_link
     syscall: false
     args:
@@ -738,6 +824,12 @@ spec:
       type: dentry
     - index: 0
       type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -752,3 +844,1749 @@ spec:
         values:
         - /credentials
         - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimp-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimq-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 3
+      type: dentry
+    - index: 2
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimv-workstation
+spec:
+  kprobes:
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 2
+      type: dentry
+    - index: 1
+      type: path
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimof-workstation
+spec:
+  kprobes:
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 0
+      type: uint64
+      resolve: f_inode.i_ino
+    - index: 0
+      type: uint32
+      resolve: f_inode.i_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimtf-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+        - /
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+        - /root
+        - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /
+        - /root
+      - index: 1
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimuf-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 2
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+        - /
+      - index: 3
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+        - /root
+        - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+      - index: 2
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimpf-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimqf-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 3
+      type: dentry
+    - index: 2
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimvf-workstation
+spec:
+  kprobes:
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 2
+      type: dentry
+    - index: 1
+      type: path
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimow-workstation
+spec:
+  kprobes:
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 0
+      type: uint64
+      resolve: f_inode.i_ino
+    - index: 0
+      type: uint32
+      resolve: f_inode.i_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimtw-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+        - /
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+        - /root
+        - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /
+        - /root
+      - index: 1
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimuw-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 2
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+        - /
+      - index: 3
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+        - /root
+        - /.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root
+      - index: 2
+        operator: Postfix
+        values:
+        - /credentials
+        - /passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimpw-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimqw-workstation
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 3
+      type: dentry
+    - index: 2
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimvw-workstation
+spec:
+  kprobes:
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 2
+      type: dentry
+    - index: 1
+      type: path
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /etc
+        - /etc/sudoers.d
+        - /etc/cron.d
+        - /root/.aws/credentials
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/passwords.txt
+        - /root
+        - /root/.aws
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/sudoers.d/
+        - /etc/cron.d/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns

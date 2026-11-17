@@ -1,9 +1,15 @@
 use crate::error::PolicyError;
 use crate::limits::{
-    ANCESTOR_POLICY_PREFIX, ATTRIBUTE_POLICY_PREFIX, DELETE_POLICY_PREFIX, NAMES_POLICY_PREFIX, POLICY_PREFIX, REVERSED_ANCESTOR_POLICY_PREFIX,
-    REVERSED_NAMES_POLICY_PREFIX, REVERSED_TOKEN_POLICY_PREFIX, TOKEN_POLICY_PREFIX,
+    ANCESTOR_POLICY_PREFIX, ATTRIBUTE_POLICY_PREFIX, DELETE_POLICY_PREFIX, FOREIGN_FULL_NAME_POLICY_PREFIX, FOREIGN_FULL_SOURCE_POLICY_PREFIX,
+    FOREIGN_FULL_TARGET_POLICY_PREFIX, FOREIGN_OPEN_POLICY_PREFIX, FOREIGN_REVERSED_TOKEN_POLICY_PREFIX, FOREIGN_TOKEN_POLICY_PREFIX,
+    FULL_NAME_POLICY_PREFIX, FULL_SOURCE_POLICY_PREFIX, FULL_TARGET_POLICY_PREFIX, NAMES_POLICY_PREFIX, POLICY_PREFIX,
+    REVERSED_ANCESTOR_POLICY_PREFIX, REVERSED_NAMES_POLICY_PREFIX, REVERSED_TOKEN_POLICY_PREFIX, TOKEN_POLICY_PREFIX, USER_FULL_NAME_POLICY_PREFIX,
+    USER_FULL_SOURCE_POLICY_PREFIX, USER_FULL_TARGET_POLICY_PREFIX, USER_OPEN_POLICY_PREFIX, USER_REVERSED_TOKEN_POLICY_PREFIX,
+    USER_TOKEN_POLICY_PREFIX,
 };
-use crate::model::{Ignore, Kprobe, KprobeArg, Limits, MatchArg, Metadata, Role, Selector, Spec, TracingPolicy, WatchKind, WatchSets};
+use crate::model::{
+    Ignore, Kprobe, KprobeArg, Limits, MatchArg, MatchNamespace, Metadata, PlantedIdentity, Role, Selector, Spec, TracingPolicy, WatchKind, WatchSets,
+};
 use crate::types::SerializeFn;
 use serde_saphyr::SerializeError;
 
@@ -86,6 +92,30 @@ const OPERATOR_MASK: &str = "Mask";
 const OPERATOR_POSTFIX: &str = "Postfix";
 
 
+const OPERATOR_IN: &str = "In";
+
+
+const OPERATOR_NOT_IN: &str = "NotIn";
+
+
+const NAMESPACE_MNT: &str = "Mnt";
+
+
+const NAMESPACE_USER: &str = "User";
+
+
+const HOST_BOTH: &[(&str, &str)] = &[(NAMESPACE_MNT, OPERATOR_IN), (NAMESPACE_USER, OPERATOR_IN)];
+
+
+const FOREIGN_MOUNT: &[(&str, &str)] = &[(NAMESPACE_MNT, OPERATOR_NOT_IN)];
+
+
+const FOREIGN_USER: &[(&str, &str)] = &[(NAMESPACE_MNT, OPERATOR_IN), (NAMESPACE_USER, OPERATOR_NOT_IN)];
+
+
+const HOST_NAMESPACE: &str = "host_ns";
+
+
 const TYPE_FILE: &str = "file";
 
 
@@ -99,6 +129,33 @@ const TYPE_DENTRY: &str = "dentry";
 
 
 const TYPE_UINT32: &str = "uint32";
+
+
+const TYPE_UINT64: &str = "uint64";
+
+
+const FILE_IDENTITY: (&str, &str) = ("f_inode.i_ino", "f_inode.i_sb.s_dev");
+
+
+const DENTRY_IDENTITY: (&str, &str) = ("d_inode.i_ino", "d_sb.s_dev");
+
+
+const DEVICE_MAJOR_SHIFT: u32 = 8;
+
+
+const DEVICE_MAJOR_MASK: u64 = 0xfff;
+
+
+const DEVICE_HIGH_SHIFT: u32 = 32;
+
+
+const DEVICE_MINOR_MASK: u64 = 0xff;
+
+
+const DEVICE_MINOR_HIGH_SHIFT: u32 = 12;
+
+
+const KERNEL_MINOR_BITS: u32 = 20;
 
 
 const PATH_INDEX: u32 = 0;
@@ -167,10 +224,67 @@ pub fn build_policies(role: &Role, limits: &Limits) -> Result<Vec<TracingPolicy>
         (ancestor_policy_name(&role.name), ancestor_kprobes(&sets, max)),
         (delete_policy_name(&role.name), delete_kprobes(&sets, max)),
         (attribute_policy_name(&role.name), attribute_kprobes(&sets, max)),
-        (token_policy_name(&role.name), token_kprobes(&sets, max)),
+        (token_policy_name(&role.name), in_namespace(token_kprobes(&sets, max), HOST_BOTH)),
         (reversed_names_policy_name(&role.name), reversed_name_kprobes(&sets, max)),
         (reversed_ancestor_policy_name(&role.name), reversed_ancestor_kprobes(&sets, max)),
-        (reversed_token_policy_name(&role.name), reversed_token_kprobes(&sets, max)),
+        (
+            reversed_token_policy_name(&role.name),
+            in_namespace(reversed_token_kprobes(&sets, max), HOST_BOTH),
+        ),
+        (
+            full_source_policy_name(&role.name),
+            in_namespace(full_source_kprobes(&sets, max), HOST_BOTH),
+        ),
+        (
+            full_target_policy_name(&role.name),
+            in_namespace(full_target_kprobes(&sets, max), HOST_BOTH),
+        ),
+        (full_name_policy_name(&role.name), in_namespace(full_name_kprobes(&sets, max), HOST_BOTH)),
+        (
+            foreign_open_policy_name(&role.name),
+            in_namespace(vec![open_kprobe(&sets, max)], FOREIGN_MOUNT),
+        ),
+        (
+            foreign_token_policy_name(&role.name),
+            in_namespace(token_kprobes(&sets, max), FOREIGN_MOUNT),
+        ),
+        (
+            foreign_reversed_token_policy_name(&role.name),
+            in_namespace(reversed_token_kprobes(&sets, max), FOREIGN_MOUNT),
+        ),
+        (
+            foreign_full_source_policy_name(&role.name),
+            in_namespace(full_source_kprobes(&sets, max), FOREIGN_MOUNT),
+        ),
+        (
+            foreign_full_target_policy_name(&role.name),
+            in_namespace(full_target_kprobes(&sets, max), FOREIGN_MOUNT),
+        ),
+        (
+            foreign_full_name_policy_name(&role.name),
+            in_namespace(full_name_kprobes(&sets, max), FOREIGN_MOUNT),
+        ),
+        (
+            user_open_policy_name(&role.name),
+            in_namespace(vec![open_kprobe(&sets, max)], FOREIGN_USER),
+        ),
+        (user_token_policy_name(&role.name), in_namespace(token_kprobes(&sets, max), FOREIGN_USER)),
+        (
+            user_reversed_token_policy_name(&role.name),
+            in_namespace(reversed_token_kprobes(&sets, max), FOREIGN_USER),
+        ),
+        (
+            user_full_source_policy_name(&role.name),
+            in_namespace(full_source_kprobes(&sets, max), FOREIGN_USER),
+        ),
+        (
+            user_full_target_policy_name(&role.name),
+            in_namespace(full_target_kprobes(&sets, max), FOREIGN_USER),
+        ),
+        (
+            user_full_name_policy_name(&role.name),
+            in_namespace(full_name_kprobes(&sets, max), FOREIGN_USER),
+        ),
     ];
     let policies: Vec<TracingPolicy> = groups
         .into_iter()
@@ -281,7 +395,22 @@ pub fn watch_sets(role: &Role) -> WatchSets {
         tokens,
         ancestors,
         token_ancestors,
+        planted: Vec::new(),
     }
+}
+
+
+/// The sets with the identities of the planted files (and of the directories above them) the plan recorded at plant time.
+pub fn with_planted(sets: WatchSets, planted: Vec<PlantedIdentity>) -> WatchSets {
+    WatchSets { planted, ..sets }
+}
+
+
+/// The kernel device number (`s_dev`, 12 bit major and 20 bit minor) of a `st_dev` as `stat` reports it on Linux.
+pub fn kernel_device(st_dev: u64) -> u32 {
+    let major = ((st_dev >> DEVICE_MAJOR_SHIFT) & DEVICE_MAJOR_MASK) | ((st_dev >> DEVICE_HIGH_SHIFT) & !DEVICE_MAJOR_MASK);
+    let minor = (st_dev & DEVICE_MINOR_MASK) | ((st_dev >> DEVICE_MINOR_HIGH_SHIFT) & !DEVICE_MINOR_MASK);
+    ((major << KERNEL_MINOR_BITS) | minor) as u32
 }
 
 
@@ -389,6 +518,21 @@ pub fn policy_names(role_name: &str) -> Vec<String> {
         reversed_names_policy_name(role_name),
         reversed_ancestor_policy_name(role_name),
         reversed_token_policy_name(role_name),
+        full_source_policy_name(role_name),
+        full_target_policy_name(role_name),
+        full_name_policy_name(role_name),
+        foreign_open_policy_name(role_name),
+        foreign_token_policy_name(role_name),
+        foreign_reversed_token_policy_name(role_name),
+        foreign_full_source_policy_name(role_name),
+        foreign_full_target_policy_name(role_name),
+        foreign_full_name_policy_name(role_name),
+        user_open_policy_name(role_name),
+        user_token_policy_name(role_name),
+        user_reversed_token_policy_name(role_name),
+        user_full_source_policy_name(role_name),
+        user_full_target_policy_name(role_name),
+        user_full_name_policy_name(role_name),
     ]
 }
 
@@ -408,6 +552,96 @@ pub fn reversed_ancestor_policy_name(role_name: &str) -> String {
 /// The name of the policy of a role that matches renames and links of honeytokens on the target and the new name, listed first.
 pub fn reversed_token_policy_name(role_name: &str) -> String {
     format!("{REVERSED_TOKEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full dentry path of a rename source and of an unlink (a bind mount of the root filesystem).
+pub fn full_source_policy_name(role_name: &str) -> String {
+    format!("{FULL_SOURCE_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full dentry path of a rename target and of a directory removal.
+pub fn full_target_policy_name(role_name: &str) -> String {
+    format!("{FULL_TARGET_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full dentry path of a new symlink and of a new hard link name.
+pub fn full_name_policy_name(role_name: &str) -> String {
+    format!("{FULL_NAME_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches honeytoken opens outside the host mount namespace (never honeytoken severity).
+pub fn foreign_open_policy_name(role_name: &str) -> String {
+    format!("{FOREIGN_OPEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches honeytoken renames, removals and links outside the host mount namespace (never honeytoken severity).
+pub fn foreign_token_policy_name(role_name: &str) -> String {
+    format!("{FOREIGN_TOKEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches target-first honeytoken renames and links outside the host mount namespace (never honeytoken severity).
+pub fn foreign_reversed_token_policy_name(role_name: &str) -> String {
+    format!("{FOREIGN_REVERSED_TOKEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full-path rename source and unlink outside the host mount namespace (never honeytoken severity).
+pub fn foreign_full_source_policy_name(role_name: &str) -> String {
+    format!("{FOREIGN_FULL_SOURCE_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full-path rename target and rmdir outside the host mount namespace (never honeytoken severity).
+pub fn foreign_full_target_policy_name(role_name: &str) -> String {
+    format!("{FOREIGN_FULL_TARGET_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full-path new symlink and link name outside the host mount namespace (never honeytoken severity).
+pub fn foreign_full_name_policy_name(role_name: &str) -> String {
+    format!("{FOREIGN_FULL_NAME_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches honeytoken opens in the host mount namespace but another user namespace (never honeytoken severity).
+pub fn user_open_policy_name(role_name: &str) -> String {
+    format!("{USER_OPEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches honeytoken renames, removals and links in the host mount namespace but another user namespace (never honeytoken severity).
+pub fn user_token_policy_name(role_name: &str) -> String {
+    format!("{USER_TOKEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches target-first honeytoken renames and links in the host mount namespace but another user namespace (never honeytoken severity).
+pub fn user_reversed_token_policy_name(role_name: &str) -> String {
+    format!("{USER_REVERSED_TOKEN_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full-path rename source and unlink in the host mount namespace but another user namespace (never honeytoken severity).
+pub fn user_full_source_policy_name(role_name: &str) -> String {
+    format!("{USER_FULL_SOURCE_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full-path rename target and rmdir in the host mount namespace but another user namespace (never honeytoken severity).
+pub fn user_full_target_policy_name(role_name: &str) -> String {
+    format!("{USER_FULL_TARGET_POLICY_PREFIX}{role_name}")
+}
+
+
+/// The name of the policy of a role that matches the full-path new symlink and link name in the host mount namespace but another user namespace (never honeytoken severity).
+pub fn user_full_name_policy_name(role_name: &str) -> String {
+    format!("{USER_FULL_NAME_POLICY_PREFIX}{role_name}")
 }
 
 
@@ -447,13 +681,72 @@ pub fn content_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
             false,
             watch_selectors(PATH_INDEX, &sets.files, &sets.prefixes, &[shared_mask], max),
         ),
+        bind_kprobe(open_kprobe(sets, max), HOST_BOTH),
+    ]
+}
+
+
+/// The kprobe on opens of honeytokens: the resolved path of a `file` argument, then the inode number and the device of the opened file.
+pub fn open_kprobe(sets: &WatchSets, max: usize) -> Kprobe {
+    identified(
         kprobe(
             HOOK_OPEN,
             &[(0, TYPE_FILE)],
             false,
             watch_selectors(PATH_INDEX, &sets.tokens, &[], &[], max),
         ),
-    ]
+        PATH_INDEX,
+        FILE_IDENTITY,
+    )
+}
+
+
+/// The kprobe with two resolved arguments appended, the inode number and the device of the argument at `index` (Tetragon takes 5 arguments at most).
+pub fn identified(probe: Kprobe, index: u32, fields: (&str, &str)) -> Kprobe {
+    let (inode, device) = fields;
+    let args = probe
+        .args
+        .into_iter()
+        .chain([resolved_arg(index, TYPE_UINT64, inode), resolved_arg(index, TYPE_UINT32, device)])
+        .collect();
+    Kprobe { args, ..probe }
+}
+
+
+/// An argument read from a field of the structure the hook receives.
+pub fn resolved_arg(index: u32, arg_type: &str, field: &str) -> KprobeArg {
+    KprobeArg {
+        index,
+        arg_type: arg_type.to_string(),
+        resolve: Some(field.to_string()),
+    }
+}
+
+
+/// The kprobes with every selector bound to the (namespace, operator) conditions, ANDed: a path rendered in another namespace is not trusted.
+pub fn in_namespace(kprobes: Vec<Kprobe>, conditions: &[(&str, &str)]) -> Vec<Kprobe> {
+    kprobes.into_iter().map(|probe| bind_kprobe(probe, conditions)).collect()
+}
+
+
+/// One kprobe with the namespace conditions added to each of its selectors.
+pub fn bind_kprobe(probe: Kprobe, conditions: &[(&str, &str)]) -> Kprobe {
+    let selectors = probe
+        .selectors
+        .into_iter()
+        .map(|selector| Selector {
+            match_namespaces: conditions
+                .iter()
+                .map(|(namespace, operator)| MatchNamespace {
+                    namespace: (*namespace).to_string(),
+                    operator: (*operator).to_string(),
+                    values: vec![HOST_NAMESPACE.to_string()],
+                })
+                .collect(),
+            ..selector
+        })
+        .collect();
+    Kprobe { selectors, ..probe }
 }
 
 
@@ -484,10 +777,14 @@ pub fn ancestor_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
 /// The kprobes on honeytokens: a rename, removal or hard link of one, or a rename or removal of a directory above it (opens are in the contents policy).
 pub fn token_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
     vec![
-        rename_kprobe(&union(&sets.tokens, &sets.token_ancestors), &[], max),
-        directory_kprobe(HOOK_UNLINK, &sets.tokens, &[], max),
-        directory_kprobe(HOOK_RMDIR, &sets.token_ancestors, &[], max),
-        link_kprobe(&sets.tokens, &[], max),
+        token_rename_kprobe(&union(&sets.tokens, &sets.token_ancestors), max),
+        identified(directory_kprobe(HOOK_UNLINK, &sets.tokens, &[], max), DENTRY_INDEX, DENTRY_IDENTITY),
+        identified(
+            directory_kprobe(HOOK_RMDIR, &sets.token_ancestors, &[], max),
+            DENTRY_INDEX,
+            DENTRY_IDENTITY,
+        ),
+        identified(link_kprobe(&sets.tokens, &[], max), LINK_CREATED_INDEX, DENTRY_IDENTITY),
     ]
 }
 
@@ -510,8 +807,120 @@ pub fn reversed_ancestor_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
 /// The reversed kprobes on honeytokens and the directories above them.
 pub fn reversed_token_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
     vec![
-        reversed_rename_kprobe(&union(&sets.tokens, &sets.token_ancestors), &[], max),
-        reversed_link_kprobe(&sets.tokens, &[], max),
+        reversed_token_rename_kprobe(&union(&sets.tokens, &sets.token_ancestors), max),
+        identified(reversed_link_kprobe(&sets.tokens, &[], max), LINK_CREATED_INDEX, DENTRY_IDENTITY),
+    ]
+}
+
+
+/// Every path a name hook can name, the directories above included: the values of the full-path dentry selectors.
+pub fn full_path_values(sets: &WatchSets) -> Vec<String> {
+    union(&union(&sets.files, &sets.ancestors), &union(&sets.tokens, &sets.token_ancestors))
+}
+
+
+/// A kprobe listing the dentry first and matching its full path (`Equal` on paths, `Prefix` on prefixes): right on the root filesystem and through a bind mount of it.
+pub fn full_path_kprobe(call: &str, first: u32, arguments: &[(u32, &str)], sets: &WatchSets, max: usize) -> Kprobe {
+    kprobe(
+        call,
+        arguments,
+        false,
+        watch_selectors(first, &full_path_values(sets), &sets.prefixes, &[], max),
+    )
+}
+
+
+/// The full-path kprobes on a rename source and an unlink.
+pub fn full_source_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
+    vec![
+        identified(
+            full_path_kprobe(
+                HOOK_RENAME,
+                RENAME_SOURCE_INDEX,
+                &[
+                    (RENAME_SOURCE_INDEX, TYPE_DENTRY),
+                    (RENAME_SOURCE_DIR_INDEX, TYPE_PATH),
+                    (RENAME_TARGET_INDEX, TYPE_DENTRY),
+                ],
+                sets,
+                max,
+            ),
+            RENAME_SOURCE_INDEX,
+            DENTRY_IDENTITY,
+        ),
+        identified(
+            full_path_kprobe(
+                HOOK_UNLINK,
+                DENTRY_INDEX,
+                &[(DENTRY_INDEX, TYPE_DENTRY), (PATH_INDEX, TYPE_PATH)],
+                sets,
+                max,
+            ),
+            DENTRY_INDEX,
+            DENTRY_IDENTITY,
+        ),
+    ]
+}
+
+
+/// The full-path kprobes on a rename target and a directory removal.
+pub fn full_target_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
+    vec![
+        identified(
+            full_path_kprobe(
+                HOOK_RENAME,
+                RENAME_TARGET_INDEX,
+                &[
+                    (RENAME_TARGET_INDEX, TYPE_DENTRY),
+                    (RENAME_TARGET_DIR_INDEX, TYPE_PATH),
+                    (RENAME_SOURCE_INDEX, TYPE_DENTRY),
+                ],
+                sets,
+                max,
+            ),
+            RENAME_TARGET_INDEX,
+            DENTRY_IDENTITY,
+        ),
+        identified(
+            full_path_kprobe(
+                HOOK_RMDIR,
+                DENTRY_INDEX,
+                &[(DENTRY_INDEX, TYPE_DENTRY), (PATH_INDEX, TYPE_PATH)],
+                sets,
+                max,
+            ),
+            DENTRY_INDEX,
+            DENTRY_IDENTITY,
+        ),
+    ]
+}
+
+
+/// The full-path kprobes on a new symlink and a new hard link name.
+pub fn full_name_kprobes(sets: &WatchSets, max: usize) -> Vec<Kprobe> {
+    vec![
+        full_path_kprobe(
+            HOOK_SYMLINK,
+            DENTRY_INDEX,
+            &[(DENTRY_INDEX, TYPE_DENTRY), (PATH_INDEX, TYPE_PATH)],
+            sets,
+            max,
+        ),
+        identified(
+            full_path_kprobe(
+                HOOK_LINK,
+                LINK_CREATED_INDEX,
+                &[
+                    (LINK_CREATED_INDEX, TYPE_DENTRY),
+                    (LINK_DIR_INDEX, TYPE_PATH),
+                    (LINK_EXISTING_INDEX, TYPE_DENTRY),
+                ],
+                sets,
+                max,
+            ),
+            LINK_CREATED_INDEX,
+            DENTRY_IDENTITY,
+        ),
     ]
 }
 
@@ -558,6 +967,44 @@ pub fn rename_kprobe(files: &[String], prefixes: &[String], max: usize) -> Kprob
         ],
         false,
         split_selectors(RENAME_SOURCE_DIR_INDEX, RENAME_SOURCE_INDEX, files, prefixes, max),
+    )
+}
+
+
+/// A honeytoken rename kprobe: the source (directory path and dentry) listed first, the target as a dentry, then the identity of the source.
+pub fn token_rename_kprobe(files: &[String], max: usize) -> Kprobe {
+    identified(
+        kprobe(
+            HOOK_RENAME,
+            &[
+                (RENAME_SOURCE_DIR_INDEX, TYPE_PATH),
+                (RENAME_SOURCE_INDEX, TYPE_DENTRY),
+                (RENAME_TARGET_INDEX, TYPE_DENTRY),
+            ],
+            false,
+            split_selectors(RENAME_SOURCE_DIR_INDEX, RENAME_SOURCE_INDEX, files, &[], max),
+        ),
+        RENAME_SOURCE_INDEX,
+        DENTRY_IDENTITY,
+    )
+}
+
+
+/// A honeytoken rename kprobe matching the target (directory path and dentry), listed first, then the source dentry and the identity of the target.
+pub fn reversed_token_rename_kprobe(files: &[String], max: usize) -> Kprobe {
+    identified(
+        kprobe(
+            HOOK_RENAME,
+            &[
+                (RENAME_TARGET_DIR_INDEX, TYPE_PATH),
+                (RENAME_TARGET_INDEX, TYPE_DENTRY),
+                (RENAME_SOURCE_INDEX, TYPE_DENTRY),
+            ],
+            false,
+            split_selectors(RENAME_TARGET_DIR_INDEX, RENAME_TARGET_INDEX, files, &[], max),
+        ),
+        RENAME_TARGET_INDEX,
+        DENTRY_IDENTITY,
     )
 }
 
@@ -669,6 +1116,7 @@ pub fn split_selectors(dir_index: u32, name_index: u32, files: &[String], prefix
                     values: chunk.to_vec(),
                 },
             ],
+            match_namespaces: Vec::new(),
         })
     });
     let tree_directories: Vec<String> = prefixes.iter().map(|prefix| directory_of(prefix)).collect();
@@ -686,6 +1134,7 @@ pub fn name_selectors(index: u32, files: &[String], prefixes: &[String], max_val
             operator: OPERATOR_POSTFIX.to_string(),
             values: chunk.to_vec(),
         }],
+        match_namespaces: Vec::new(),
     });
     postfix.chain(watch_selectors(index, &[], prefixes, &[], max_values)).collect()
 }
@@ -708,6 +1157,7 @@ pub fn kprobe(call: &str, arguments: &[(u32, &str)], call_not_found: bool, selec
         .map(|(index, arg_type)| KprobeArg {
             index: *index,
             arg_type: (*arg_type).to_string(),
+            resolve: None,
         })
         .collect();
     Kprobe {
@@ -735,6 +1185,7 @@ pub fn watch_selectors(index: u32, files: &[String], prefixes: &[String], extra:
             };
             Selector {
                 match_args: std::iter::once(path).chain(extra.iter().cloned()).collect(),
+                match_namespaces: Vec::new(),
             }
         })
         .collect()

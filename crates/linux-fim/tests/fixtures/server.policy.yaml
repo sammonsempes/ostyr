@@ -142,6 +142,12 @@ spec:
     args:
     - index: 0
       type: file
+    - index: 0
+      type: uint64
+      resolve: f_inode.i_ino
+    - index: 0
+      type: uint32
+      resolve: f_inode.i_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -153,6 +159,15 @@ spec:
         - /root/.ssh/id_rsa_backup
         - /root/passwords.txt
         - /var/backups/.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
 ---
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -655,10 +670,14 @@ spec:
       type: path
     - index: 1
       type: dentry
-    - index: 2
-      type: path
     - index: 3
       type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -679,6 +698,15 @@ spec:
         - /id_rsa_backup
         - /passwords.txt
         - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
     - matchArgs:
       - index: 0
         operator: Equal
@@ -696,6 +724,15 @@ spec:
         - /.aws
         - /.ssh
         - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
     - matchArgs:
       - index: 0
         operator: Equal
@@ -710,6 +747,15 @@ spec:
         operator: Postfix
         values:
         - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_unlink
     syscall: false
     args:
@@ -717,6 +763,12 @@ spec:
       type: path
     - index: 1
       type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -735,6 +787,15 @@ spec:
         - /id_rsa_backup
         - /passwords.txt
         - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_rmdir
     syscall: false
     args:
@@ -742,6 +803,12 @@ spec:
       type: path
     - index: 1
       type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -759,6 +826,15 @@ spec:
         - /.aws
         - /.ssh
         - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
     - matchArgs:
       - index: 0
         operator: Equal
@@ -770,6 +846,15 @@ spec:
         operator: Postfix
         values:
         - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_link
     syscall: false
     args:
@@ -779,6 +864,12 @@ spec:
       type: path
     - index: 2
       type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -790,6 +881,15 @@ spec:
         - /id_rsa_backup
         - /passwords.txt
         - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
 ---
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -950,10 +1050,14 @@ spec:
       type: path
     - index: 3
       type: dentry
-    - index: 0
-      type: path
     - index: 1
       type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -974,6 +1078,15 @@ spec:
         - /id_rsa_backup
         - /passwords.txt
         - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
     - matchArgs:
       - index: 2
         operator: Equal
@@ -991,6 +1104,15 @@ spec:
         - /.aws
         - /.ssh
         - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
     - matchArgs:
       - index: 2
         operator: Equal
@@ -1005,6 +1127,15 @@ spec:
         operator: Postfix
         values:
         - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
   - call: security_path_link
     syscall: false
     args:
@@ -1014,6 +1145,12 @@ spec:
       type: dentry
     - index: 0
       type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
     ignore:
       callNotFound: false
     selectors:
@@ -1032,3 +1169,2397 @@ spec:
         - /id_rsa_backup
         - /passwords.txt
         - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimp-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimq-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 3
+      type: dentry
+    - index: 2
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimv-server
+spec:
+  kprobes:
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 2
+      type: dentry
+    - index: 1
+      type: path
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: In
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimof-server
+spec:
+  kprobes:
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 0
+      type: uint64
+      resolve: f_inode.i_ino
+    - index: 0
+      type: uint32
+      resolve: f_inode.i_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimtf-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+        - /.ssh
+        - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /
+        - /root
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+        - /.ssh
+        - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /
+        - /root
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimuf-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 2
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 3
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 3
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+        - /.ssh
+        - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 3
+        operator: Postfix
+        values:
+        - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+      - index: 2
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimpf-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimqf-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 3
+      type: dentry
+    - index: 2
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimvf-server
+spec:
+  kprobes:
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 2
+      type: dentry
+    - index: 1
+      type: path
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimow-server
+spec:
+  kprobes:
+  - call: security_file_open
+    syscall: false
+    args:
+    - index: 0
+      type: file
+    - index: 0
+      type: uint64
+      resolve: f_inode.i_ino
+    - index: 0
+      type: uint32
+      resolve: f_inode.i_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+        - /var/backups/.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimtw-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+        - /.ssh
+        - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+      - index: 1
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /
+        - /root
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+        - /.ssh
+        - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /
+        - /root
+        - /var
+      - index: 1
+        operator: Postfix
+        values:
+        - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 0
+      type: dentry
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimuw-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 2
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 3
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 3
+        operator: Postfix
+        values:
+        - /root
+        - /.aws
+        - /.ssh
+        - /var
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+        - /
+        - /var
+      - index: 3
+        operator: Postfix
+        values:
+        - /backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /root/.aws
+        - /root/.ssh
+        - /root
+        - /var/backups
+      - index: 2
+        operator: Postfix
+        values:
+        - /credentials
+        - /id_rsa_backup
+        - /passwords.txt
+        - /.canary
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimpw-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 3
+      type: dentry
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimqw-server
+spec:
+  kprobes:
+  - call: security_path_rename
+    syscall: false
+    args:
+    - index: 3
+      type: dentry
+    - index: 2
+      type: path
+    - index: 1
+      type: dentry
+    - index: 3
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 3
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 3
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_rmdir
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    - index: 1
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 1
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ostyr-fimvw-server
+spec:
+  kprobes:
+  - call: security_path_symlink
+    syscall: false
+    args:
+    - index: 1
+      type: dentry
+    - index: 0
+      type: path
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    args:
+    - index: 2
+      type: dentry
+    - index: 1
+      type: path
+    - index: 0
+      type: dentry
+    - index: 2
+      type: uint64
+      resolve: d_inode.i_ino
+    - index: 2
+      type: uint32
+      resolve: d_sb.s_dev
+    ignore:
+      callNotFound: false
+    selectors:
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/ld.so.preload
+        - /root/.ssh/authorized_keys
+        - /etc
+        - /root
+        - /root/.ssh
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc/cron.d
+        - /etc/systemd
+        - /etc/systemd/system
+        - /usr
+        - /usr/bin
+        - /root/.aws/credentials
+        - /root/.ssh/id_rsa_backup
+        - /root/passwords.txt
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /var/backups/.canary
+        - /root/.aws
+        - /var
+        - /var/backups
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/cron.d/
+        - /etc/systemd/system/
+        - /usr/bin/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values:
+        - host_ns
+      - namespace: User
+        operator: NotIn
+        values:
+        - host_ns
