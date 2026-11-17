@@ -12,7 +12,7 @@ use core_audit::error::AuditError;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
 use core_config::reload::{reload, ReloadContext, ReloadEngine, ReloadOutcome};
-use event_gateway::error::GatewayError;
+use event_gateway::error::{encode_failed, GatewayError};
 use event_gateway::model::{Gateway, GatewaySettings};
 use event_gateway::model::{RefusalCounts, Refusals};
 use event_gateway::publish::{
@@ -450,9 +450,35 @@ async fn an_event_that_is_not_exactly_one_object_refuses_the_whole_batch() -> Te
     let rig = rig(&yaml(stub.port, ""))?;
     for bad in ["{\"tenant\":\"b\",\"event\":1} x", "not json", "[1,2]", "{\"a\":1}{\"b\":2}"] {
         let outcome = publish_batch(&rig.gateway, &identity("a", "agent-1"), &batch(1, &["{\"event\":0}", bad])).await;
-        assert!(matches!(outcome, Err(GatewayError::NotAnObject(_))));
+        assert!(matches!(outcome, Err(GatewayError::NotAnObject { .. })));
     }
     assert!(published(&stub).is_empty());
+    Ok(())
+}
+
+
+const HOSTILE_BYTES: usize = 100_000;
+
+
+#[test]
+fn a_hostile_json_string_never_reaches_the_not_an_object_error() -> TestResult {
+    let hostile = format!("\"MARKER\\u001b{}\"", "a".repeat(HOSTILE_BYTES));
+    let error = forced_payload(hostile.as_bytes(), "a")
+        .err()
+        .ok_or("a string was accepted as an object")?;
+    assert!(matches!(error, GatewayError::NotAnObject { .. }));
+    let encode = encode_failed(
+        serde_json::from_str::<serde_json::Map<String, Value>>(&hostile)
+            .err()
+            .ok_or("no parse error")?,
+    );
+    assert!(matches!(encode, GatewayError::Encode { .. }));
+    [error, encode].iter().for_each(|failure| {
+        assert!(failure.source().is_none());
+        for text in [failure.to_string(), format!("{failure:?}")] {
+            assert!(!text.contains("MARKER") && !text.contains('\u{1b}') && text.len() < HOSTILE_BYTES);
+        }
+    });
     Ok(())
 }
 
