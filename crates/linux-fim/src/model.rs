@@ -147,6 +147,8 @@ pub enum FimEvent {
         path: String,
         process: String,
         name_match: bool,
+        mount_ambiguous: bool,
+        dentry_path: Option<String>,
     },
     Honeytoken {
         path: String,
@@ -158,12 +160,17 @@ pub enum FimEvent {
         process: String,
         honeytoken: bool,
         name_match: bool,
+        mount_ambiguous: bool,
+        created_dentry: Option<String>,
     },
     Rename {
         source: String,
         target: String,
         process: String,
         honeytoken: bool,
+        mount_ambiguous: bool,
+        source_dentry: Option<String>,
+        target_dentry: Option<String>,
     },
     MissingPath {
         policy: String,

@@ -1,4 +1,4 @@
-use crate::support::fixture;
+use crate::support::{fixture, sets};
 use crate::types::TestResult;
 use linux_fim::classify::classify;
 use linux_fim::limits::{MAX_EVENT_LINE_BYTES, MAX_KPROBE_ARGS};
@@ -17,8 +17,8 @@ fn kprobe_line(policy: &str, function: &str, args: &serde_json::Value, process: 
 }
 
 
-fn named_event(name: &str) -> Result<Option<FimEvent>, std::io::Error> {
-    Ok(classify(&fixture(name)?, MAX_EVENT_LINE_BYTES, &policies()))
+fn named_event(name: &str) -> Result<Option<FimEvent>, Box<dyn std::error::Error>> {
+    Ok(classify(&fixture(name)?, MAX_EVENT_LINE_BYTES, &policies(), &sets()?))
 }
 
 
@@ -66,11 +66,11 @@ fn removals_in_the_honeytoken_policy_are_honeytoken_events() -> TestResult {
     let rmdir = kprobe_line("ostyr-fimt-server", "security_path_rmdir", &rmdir_args, &json!({"binary": "/usr/bin/rm"}));
     let watched = unlink.replace("ostyr-fimt-server", "ostyr-fimd-server");
     assert!(
-        matches!(classify(&unlink, MAX_EVENT_LINE_BYTES, &policies()), Some(FimEvent::Honeytoken { path, .. }) if path == "/root/.aws/credentials")
+        matches!(classify(&unlink, MAX_EVENT_LINE_BYTES, &policies(), &sets()?), Some(FimEvent::Honeytoken { path, .. }) if path == "/root/.aws/credentials")
     );
-    assert!(matches!(classify(&rmdir, MAX_EVENT_LINE_BYTES, &policies()), Some(FimEvent::Honeytoken { path, .. }) if path == "/root/.aws"));
+    assert!(matches!(classify(&rmdir, MAX_EVENT_LINE_BYTES, &policies(), &sets()?), Some(FimEvent::Honeytoken { path, .. }) if path == "/root/.aws"));
     assert!(matches!(
-        classify(&watched, MAX_EVENT_LINE_BYTES, &policies()),
+        classify(&watched, MAX_EVENT_LINE_BYTES, &policies(), &sets()?),
         Some(FimEvent::Write { .. })
     ));
     Ok(())
@@ -82,14 +82,14 @@ fn a_line_with_too_many_arguments_is_oversized_never_dropped() -> TestResult {
     let many: Vec<serde_json::Value> = (0..=MAX_KPROBE_ARGS).map(|_| json!({"int_arg": 1})).collect();
     let line = kprobe_line("ostyr-fim-server", "security_file_permission", &json!(many), &json!({"binary": "/bin/x"}));
     assert_eq!(
-        classify(&line, MAX_EVENT_LINE_BYTES, &policies()),
+        classify(&line, MAX_EVENT_LINE_BYTES, &policies(), &sets()?),
         Some(FimEvent::Oversized {
             policy: "ostyr-fim-server".to_string(),
             bytes: line.len()
         })
     );
     let other = line.replace("ostyr-fim-server", "other");
-    assert_eq!(classify(&other, MAX_EVENT_LINE_BYTES, &policies()), None);
+    assert_eq!(classify(&other, MAX_EVENT_LINE_BYTES, &policies(), &sets()?), None);
     Ok(())
 }
 
@@ -99,7 +99,7 @@ fn the_oversized_match_needs_the_compact_form_tetragon_writes() -> TestResult {
     let line = kprobe_line("ostyr-fim-server", "security_file_permission", &json!([]), &json!({}));
     assert!(line.contains("\"policy_name\":\"ostyr-fim-server\""));
     let forged = line.replace("\"policy_name\":", "\"policy_name\": ");
-    assert_eq!(classify(&forged, line.len() - 1, &policies()), None);
+    assert_eq!(classify(&forged, line.len() - 1, &policies(), &sets()?), None);
     Ok(())
 }
 
