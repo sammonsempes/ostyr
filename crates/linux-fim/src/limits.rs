@@ -76,6 +76,33 @@ pub const REVERSED_ANCESTOR_POLICY_PREFIX: &str = "ostyr-fimb-";
 pub const REVERSED_TOKEN_POLICY_PREFIX: &str = "ostyr-fimu-";
 
 
+pub const FULL_SOURCE_POLICY_PREFIX: &str = "ostyr-fimp-";
+
+
+pub const FULL_TARGET_POLICY_PREFIX: &str = "ostyr-fimq-";
+
+
+pub const FULL_NAME_POLICY_PREFIX: &str = "ostyr-fimv-";
+
+
+pub const FOREIGN_OPEN_POLICY_PREFIX: &str = "ostyr-fimof-";
+
+
+pub const FOREIGN_TOKEN_POLICY_PREFIX: &str = "ostyr-fimtf-";
+
+
+pub const FOREIGN_REVERSED_TOKEN_POLICY_PREFIX: &str = "ostyr-fimuf-";
+
+
+pub const FOREIGN_FULL_SOURCE_POLICY_PREFIX: &str = "ostyr-fimpf-";
+
+
+pub const FOREIGN_FULL_TARGET_POLICY_PREFIX: &str = "ostyr-fimqf-";
+
+
+pub const FOREIGN_FULL_NAME_POLICY_PREFIX: &str = "ostyr-fimvf-";
+
+
 pub const UNKNOWN_PROCESS: &str = "unknown";
 
 

@@ -130,6 +130,16 @@ pub struct Ignore {
 #[serde(rename_all = "camelCase")]
 pub struct Selector {
     pub match_args: Vec<MatchArg>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub match_namespaces: Vec<MatchNamespace>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatchNamespace {
+    pub namespace: String,
+    pub operator: String,
+    pub values: Vec<String>,
 }
 
 
@@ -147,6 +157,9 @@ pub enum FimEvent {
         path: String,
         process: String,
         name_match: bool,
+        mount_ambiguous: bool,
+        foreign_mount_ns: bool,
+        dentry_path: Option<String>,
     },
     Honeytoken {
         path: String,
@@ -158,12 +171,19 @@ pub enum FimEvent {
         process: String,
         honeytoken: bool,
         name_match: bool,
+        mount_ambiguous: bool,
+        foreign_mount_ns: bool,
+        created_dentry: Option<String>,
     },
     Rename {
         source: String,
         target: String,
         process: String,
         honeytoken: bool,
+        mount_ambiguous: bool,
+        foreign_mount_ns: bool,
+        source_dentry: Option<String>,
+        target_dentry: Option<String>,
     },
     MissingPath {
         policy: String,
