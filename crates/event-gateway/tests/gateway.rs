@@ -24,7 +24,7 @@ use event_gateway::settings::{open_settings, path_text, settings_state, validate
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Stub};
 use nkeys::KeyPair;
 use private::write_private;
-use serde_json::Value;
+use serde_json::{json, Value};
 use siem_ingest::error::NatsError;
 use std::error::Error;
 use std::fs;
@@ -311,6 +311,47 @@ async fn a_stub_that_refuses_the_publish_leaves_the_batch_unacknowledged() -> Te
     let rig = rig(&yaml(stub.port, ""))?;
     let outcome = publish_batch(&rig.gateway, &identity("tenant-a", "agent-1"), &batch(1, &["{\"event\":1}"])).await;
     assert!(matches!(outcome, Err(GatewayError::Publish(_))));
+    Ok(())
+}
+
+
+const MARKER_REPEATS: usize = 2000;
+
+
+const API_CODE: u32 = 503;
+
+
+const API_ERR_CODE: u32 = 10077;
+
+
+fn chain_text(error: &(dyn Error + 'static)) -> String {
+    std::iter::successors(Some(error), |cause: &&(dyn Error + 'static)| (**cause).source())
+        .map(|cause| format!("{cause} {cause:?}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+
+async fn publish_error_text(body: Value) -> Result<String, Box<dyn Error + Send + Sync>> {
+    let stub = start_stub(None, |state| state.publish_body = Some(body))?;
+    let rig = rig(&yaml(stub.port, ""))?;
+    let outcome = publish_batch(&rig.gateway, &identity("tenant-a", "agent-1"), &batch(1, &["{\"event\":1}"])).await;
+    let error = outcome.err().ok_or("the publish was acknowledged")?;
+    assert!(matches!(error, GatewayError::Publish(_)));
+    Ok(chain_text(&error))
+}
+
+
+#[tokio::test]
+async fn a_hostile_ack_or_api_error_text_never_reaches_the_publish_error() -> TestResult {
+    let marker = format!("PEERMARKER{ESCAPE}").repeat(MARKER_REPEATS);
+    let invalid_ack = publish_error_text(json!({"stream": marker, "seq": marker})).await?;
+    let api_error = publish_error_text(json!({"error": {"code": API_CODE, "err_code": API_ERR_CODE, "description": marker}})).await?;
+    [invalid_ack, api_error].iter().for_each(|text| {
+        assert!(!text.contains("PEERMARKER"));
+        assert!(!text.contains(ESCAPE));
+        assert!(!text.is_empty());
+    });
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 use agent_channel::error::AppError;
-use agent_channel::types::BoxError;
+use async_nats::jetstream::context::PublishErrorKind;
 use core_audit::error::AuditError;
 use core_config::error::{ConfigError, WatchError};
 use siem_ingest::error::{NatsError, SettingsError};
@@ -29,8 +29,8 @@ pub enum GatewayError {
     NotAnObject(#[source] serde_json::Error),
     #[error("an event could not be re-encoded with the identity tenant")]
     Encode(#[source] serde_json::Error),
-    #[error("NATS refused or did not confirm an event")]
-    Publish(#[source] BoxError),
+    #[error("NATS refused or did not confirm an event: {0}")]
+    Publish(PublishErrorKind),
     #[error(transparent)]
     App(#[from] AppError),
     #[error(transparent)]

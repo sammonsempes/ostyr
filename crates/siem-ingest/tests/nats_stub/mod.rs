@@ -98,6 +98,7 @@ pub struct StubState {
     pub silent_pull: bool,
     pub pull_status: Option<String>,
     pub fail_publish: bool,
+    pub publish_body: Option<Value>,
     pub silent_publish: bool,
     pub max_payload: usize,
     pub nonce: bool,
@@ -396,6 +397,8 @@ pub fn route(state: &mut StubState, subject: &str, reply: Option<&str>, headers:
         });
         Ok(if state.silent_publish {
             Vec::new()
+        } else if let Some(body) = state.publish_body.clone() {
+            plain_reply(reply, body)
         } else if state.fail_publish {
             plain_reply(
                 reply,
