@@ -3,13 +3,17 @@ mod transport_text;
 
 
 use clap::Parser;
+use cmdb::api::{cmdb_access, cmdb_document, cmdb_router};
+use cmdb::api_model::CmdbBackend;
+use cmdb::stored::{AssetCounts, AssetDetail, AssetSummary, KeyView, SummaryList};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use support::{
-    broken_input, invoke, live_args, mode_of, offline_args, session_file, set_mode, start_live, words, BrokenOutput, Live, TestError, TestResult,
-    OWNER_ONLY, PASSWORD, USER,
+    broken_input, invoke, live_args, mode_of, offline_args, session_file, set_mode, start_live, start_live_with, words, BrokenOutput, Live, Routes,
+    TestError, TestResult, OWNER_ONLY, PASSWORD, USER,
 };
 use tempfile::tempdir;
 use xdrctl::alerts::{list_path, map_status, valid_cursor, valid_id};
@@ -1288,6 +1292,368 @@ fn cases_errors_map_without_the_raw_body() -> TestResult {
         &alerts_stub(&seen, STATUS_OK, "[]"),
     )?;
     assert!(bad_show.err.contains("unexpected reply"));
+    Ok(())
+}
+
+
+const ASSET_COUNTS: &str = "\"counts\":{\"keys\":2,\"attributes\":3,\"open_conflicts\":1}";
+
+
+const ASSET_LONG: usize = 513;
+
+
+const ARABIC_INDEX: usize = 2;
+
+
+const ASSET_SERVER_PREFIX: &str = "https://example.test/assets/";
+
+
+const ASSET_PATHS: [(&str, &str); 7] = [
+    ("a/b", "a%2Fb"),
+    ("..", "%2E%2E"),
+    (".", "%2E"),
+    ("x?tenant=b", "x%3Ftenant%3Db"),
+    ("%41", "%2541"),
+    ("é", "%C3%A9"),
+    ("\u{3164}", "%E3%85%A4"),
+];
+
+
+const ASSET_REFUSED: [&str; 7] = ["", "\u{202e}", "-x", "a\u{1b}b", "a\u{7f}", "a\u{200b}", "a\nb"];
+
+
+fn asset_detail_body(id: &str, extra: &str) -> &'static str {
+    Box::leak(
+        format!(
+            "{{\"id\":\"{id}\",\"kind\":\"host\",\"lifecycle\":\"active\",\"version\":4,{ASSET_COUNTS},\
+             \"keys\":[{{\"key\":\"serial_number\",\"value\":\"s1\"}}],\
+             \"attributes\":[{{\"name\":\"owner\",\"value\":\"bob\",\"source\":\"declared\"}}],\"truncated\":false{extra}}}"
+        )
+        .into_boxed_str(),
+    )
+}
+
+
+#[test]
+fn assets_ids_become_one_encoded_path_segment() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let body = asset_detail_body("x", "");
+    let long = "a".repeat(ASSET_LONG - 1);
+    ASSET_PATHS
+        .iter()
+        .copied()
+        .chain(std::iter::once((long.as_str(), long.as_str())))
+        .try_for_each(|(id, segment)| -> TestResult {
+            let outcome = invoke(
+                &offline_args(dir.path(), &["assets", "show", "--", id]),
+                "",
+                &alerts_stub(&seen, STATUS_OK, body),
+            )?;
+            assert_eq!(outcome.code, SUCCESS);
+            let expected = format!("{ASSET_SERVER_PREFIX}{segment} Some(\"tok\")");
+            assert_eq!(seen.borrow().last(), Some(&expected));
+            Ok(())
+        })?;
+    assert_eq!(seen.borrow().len(), ASSET_PATHS.len() + 1);
+    Ok(())
+}
+
+
+#[test]
+fn assets_bad_ids_and_cursors_make_no_request() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let long = "a".repeat(ASSET_LONG);
+    for id in ASSET_REFUSED.iter().copied().chain(std::iter::once(long.as_str())) {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["assets", "show", "--", id]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, FAILURE);
+        assert!(outcome.err.contains("invalid asset id"));
+    }
+    for cursor in ["--cursor=a&tenant=b", "--cursor=a%2e", "--cursor="] {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["assets", "list", cursor]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, FAILURE);
+    }
+    for limit in ["0", "101"] {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["assets", "list", "--limit", limit]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, USAGE_FAILURE);
+    }
+    assert!(seen.borrow().is_empty());
+    assert!(xdrctl::assets::valid_asset_id(&"a".repeat(ASSET_LONG - 1)));
+    Ok(())
+}
+
+
+#[test]
+fn assets_list_paths_and_text() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let page: &'static str = Box::leak(
+        format!(
+            "{{\"items\":[{{\"id\":\"a/b\",\"kind\":\"host\",\"lifecycle\":\"active\",\"version\":4,{ASSET_COUNTS}}}],\"next_cursor\":\"YS9i\"}}"
+        )
+        .into_boxed_str(),
+    );
+    let first = invoke(
+        &offline_args(dir.path(), &["assets", "list", "--limit", "5", "--cursor", "c1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, page),
+    )?;
+    assert_eq!(first.code, SUCCESS);
+    assert!(first.out.starts_with("id\tkind\tlifecycle\tversion\tkeys\tattributes\topen conflicts\n"));
+    assert!(first.out.contains("a/b\thost\tactive\t4\t2\t3\t1\n"));
+    assert!(first.out.ends_with("next cursor: YS9i\n"));
+    let last = invoke(
+        &offline_args(dir.path(), &["assets", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+    )?;
+    assert!(last.out.ends_with("no more assets\n"));
+    assert_eq!(
+        seen.borrow().clone(),
+        vec![
+            "https://example.test/assets?limit=5&cursor=c1 Some(\"tok\")",
+            "https://example.test/assets Some(\"tok\")"
+        ]
+    );
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "assets", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, page),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(json.out.trim())?, serde_json::from_str::<Value>(page)?);
+    Ok(())
+}
+
+
+#[test]
+fn assets_show_prints_keys_attributes_and_truncation() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let plain = invoke(
+        &offline_args(dir.path(), &["assets", "show", "h1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, asset_detail_body("h1", "")),
+    )?;
+    assert!(plain
+        .out
+        .contains("id: h1\nkind: host\nlifecycle: active\nversion: 4\ncounts: keys 2 attributes 3 open conflicts 1\n"));
+    assert!(plain.out.contains("key: serial_number = s1\n"));
+    assert!(plain.out.ends_with("attribute: owner = bob (source declared)\n"));
+    assert!(!plain.out.contains("truncated"));
+    let cut: &'static str = Box::leak(
+        asset_detail_body("h1", "")
+            .replace("\"truncated\":false", "\"truncated\":true")
+            .into_boxed_str(),
+    );
+    let shown = invoke(
+        &offline_args(dir.path(), &["assets", "show", "h1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, cut),
+    )?;
+    assert!(shown.out.ends_with("truncated (showing 1 of 2 keys, 1 of 3 attributes)\n"));
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "assets", "show", "h1"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, cut),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(json.out.trim())?, serde_json::from_str::<Value>(cut)?);
+    Ok(())
+}
+
+
+#[test]
+fn assets_bidi_ids_print_differently_and_json_keeps_them() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let before = asset_detail_body("serial_number:\\u05d012", "");
+    let after = asset_detail_body("serial_number:12\\u05d0", "");
+    let arabic = asset_detail_body("n\\u0627\\u0661", "");
+    let shown: Vec<String> = [before, after, arabic]
+        .iter()
+        .map(|body| -> Result<String, TestError> {
+            Ok(invoke(
+                &offline_args(dir.path(), &["assets", "show", "x"]),
+                "",
+                &alerts_stub(&seen, STATUS_OK, body),
+            )?
+            .out)
+        })
+        .collect::<Result<_, _>>()?;
+    assert!(shown.first().is_some_and(|text| text.contains("id: serial_number:\\u{5d0}12\n")));
+    assert!(shown.get(1).is_some_and(|text| text.contains("id: serial_number:12\\u{5d0}\n")));
+    assert!(shown.get(ARABIC_INDEX).is_some_and(|text| text.contains("id: n\\u{627}\\u{661}\n")));
+    assert_ne!(shown.first(), shown.get(1));
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "assets", "show", "x"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, before),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<Value>(json.out.trim())?.get("id"),
+        Some(&Value::from("serial_number:\u{5d0}12"))
+    );
+    let page: &'static str = Box::leak(
+        format!("{{\"items\":[{{\"id\":\"s:\\u05d01\",\"kind\":\"k\",\"lifecycle\":\"l\",\"version\":1,{ASSET_COUNTS}}}],\"next_cursor\":null}}")
+            .into_boxed_str(),
+    );
+    let listed = invoke(&offline_args(dir.path(), &["assets", "list"]), "", &alerts_stub(&seen, STATUS_OK, page))?;
+    assert!(listed.out.contains("s:\\u{5d0}1\tk\tl\t"));
+    Ok(())
+}
+
+
+#[test]
+fn assets_hostile_values_are_escaped_in_text_and_json() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let hostile = "a\\u001b[2J\\u202e\\\\u{202e}";
+    let body: &'static str = Box::leak(
+        format!(
+            "{{\"id\":\"{hostile}\",\"kind\":\"{hostile}\",\"lifecycle\":\"{hostile}\",\"version\":1,{ASSET_COUNTS},\
+             \"keys\":[{{\"key\":\"{hostile}\",\"value\":\"{hostile}\"}}],\
+             \"attributes\":[{{\"name\":\"{hostile}\",\"value\":\"{hostile}\",\"source\":\"{hostile}\"}}],\"truncated\":false}}"
+        )
+        .into_boxed_str(),
+    );
+    let page: &'static str = Box::leak(
+        format!("{{\"items\":[{{\"id\":\"{hostile}\",\"kind\":\"{hostile}\",\"lifecycle\":\"{hostile}\",\"version\":1,{ASSET_COUNTS}}}],\"next_cursor\":\"{hostile}\"}}")
+            .into_boxed_str(),
+    );
+    [(&["assets", "show", "x"][..], body), (&["assets", "list"][..], page)]
+        .iter()
+        .try_for_each(|(words, reply)| -> TestResult {
+            let text = invoke(&offline_args(dir.path(), words), "", &alerts_stub(&seen, STATUS_OK, reply))?;
+            assert!(!text.out.contains(['\u{1b}', '\u{202e}']));
+            assert!(text.out.contains("a\\u{1b}[2J\\u{202e}\\\\u{202e}"));
+            let mut json_words = vec!["--output", "json"];
+            json_words.extend(words.iter());
+            let json = invoke(&offline_args(dir.path(), &json_words), "", &alerts_stub(&seen, STATUS_OK, reply))?;
+            assert!(!json.out.contains(['\u{1b}', '\u{202e}']));
+            assert!(json.out.contains("\\u001b") && json.out.contains("\\u202e"));
+            Ok(())
+        })
+}
+
+
+#[test]
+fn assets_errors_map_without_the_raw_body() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let body = "{\"error\":{\"code\":\"c\\u001b\",\"message\":\"SECRET\"}}";
+    for (status, expected) in [
+        (STATUS_UNAUTHORIZED, "not valid"),
+        (STATUS_FORBIDDEN, "permission denied"),
+        (STATUS_NOT_FOUND, "not found"),
+        (STATUS_TOO_MANY, "too many"),
+    ] {
+        for args in [vec!["assets", "list"], vec!["assets", "show", "c1"]] {
+            let outcome = invoke(&offline_args(dir.path(), &args), "", &alerts_stub(&seen, status, body))?;
+            assert!(outcome.err.contains(expected));
+            assert!(!outcome.err.contains("SECRET"));
+        }
+    }
+    let other = invoke(
+        &offline_args(dir.path(), &["assets", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_ERROR, body),
+    )?;
+    assert!(other.err.contains("c\\u{1b}"));
+    for args in [vec!["assets", "list"], vec!["assets", "show", "c1"]] {
+        let bad = invoke(&offline_args(dir.path(), &args), "", &alerts_stub(&seen, STATUS_OK, "[SECRET]"))?;
+        assert!(bad.err.contains("unexpected reply"));
+        assert!(!bad.err.contains("SECRET"));
+    }
+    Ok(())
+}
+
+
+fn live_summary(id: &str) -> AssetSummary {
+    AssetSummary {
+        id: id.to_owned(),
+        kind: "host".to_owned(),
+        lifecycle: "active".to_owned(),
+        version: 1,
+        counts: AssetCounts {
+            keys: 1,
+            attributes: 1,
+            open_conflicts: 0,
+        },
+    }
+}
+
+
+fn live_assets_routes() -> Routes {
+    let backend = CmdbBackend {
+        list: Arc::new(|_scope, _page| {
+            Box::pin(async {
+                Ok(SummaryList {
+                    summaries: vec![live_summary("a/b")],
+                    next: Some("a/b".to_owned()),
+                })
+            })
+        }),
+        get: Arc::new(|_scope, id| {
+            Box::pin(async move {
+                Ok((id != "missing").then(|| AssetDetail {
+                    summary: live_summary(&id),
+                    keys: vec![KeyView {
+                        key: "serial_number".to_owned(),
+                        value: id.clone(),
+                    }],
+                    attributes: vec![],
+                    truncated: false,
+                }))
+            })
+        }),
+    };
+    Routes {
+        role: "analyst",
+        router: cmdb_router(backend),
+        access: cmdb_access(),
+        documents: vec![cmdb_document()],
+    }
+}
+
+
+#[test]
+fn assets_against_the_live_api() -> TestResult {
+    let live = start_live_with(live_assets_routes())?;
+    let login = invoke(&live_args(&live, &["login", "--username", USER]), &format!("{PASSWORD}\n"), &send_request)?;
+    assert_eq!(login.code, SUCCESS);
+    let listed = invoke(&live_args(&live, &["assets", "list", "--limit", "1"]), "", &send_request)?;
+    assert_eq!(listed.code, SUCCESS);
+    assert!(listed.out.contains("a/b\thost\tactive\t1\t1\t1\t0\n"));
+    assert!(listed.out.contains("next cursor: YS9i\n"));
+    let second = invoke(&live_args(&live, &["assets", "list", "--cursor", "YS9i"]), "", &send_request)?;
+    assert_eq!(second.code, SUCCESS);
+    for (id, key) in [("a/b", "a/b"), ("x?tenant=b", "x?tenant=b"), ("%41", "%41"), ("..", "..")] {
+        let shown = invoke(&live_args(&live, &["assets", "show", "--", id]), "", &send_request)?;
+        assert_eq!(shown.code, SUCCESS);
+        assert!(shown.out.contains(&format!("key: serial_number = {key}\n")));
+    }
+    let missing = invoke(&live_args(&live, &["assets", "show", "missing"]), "", &send_request)?;
+    assert_eq!(missing.code, FAILURE);
+    assert!(missing.err.contains("not found"));
     Ok(())
 }
 

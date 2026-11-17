@@ -1,8 +1,9 @@
 use crate::alerts::{alerts_list, alerts_show, escape_json, printable};
+use crate::assets::{assets_list, assets_show};
 use crate::cases::{cases_list, cases_show};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
-use crate::model::{AlertsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report};
+use crate::model::{AlertsCommand, AssetsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report};
 use crate::session::session_path;
 use crate::types::SendFn;
 use clap::Parser;
@@ -54,6 +55,12 @@ pub fn execute(
         Command::Cases {
             action: CasesCommand::Show { id },
         } => cases_show(&ctx, id),
+        Command::Assets {
+            action: AssetsCommand::List { limit, cursor },
+        } => assets_list(&ctx, *limit, cursor.as_deref()),
+        Command::Assets {
+            action: AssetsCommand::Show { id },
+        } => assets_show(&ctx, id),
     }
 }
 

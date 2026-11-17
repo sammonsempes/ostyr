@@ -7833,13 +7833,16 @@ dependencies = [
 name = "xdrctl"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "clap",
+ "cmdb",
  "core-api",
  "core-audit",
  "core-auth",
  "core-config",
  "dirs",
  "log",
+ "percent-encoding",
  "rcgen",
  "serde",
  "serde_json",
@@ -7847,8 +7850,10 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "unicode-bidi",
  "unicode-general-category",
  "ureq 3.5.1",
+ "utoipa",
 ]
 
 [[package]]
