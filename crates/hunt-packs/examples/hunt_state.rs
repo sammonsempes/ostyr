@@ -6,7 +6,7 @@ use core_pg::scope::TenantScope;
 use core_pg::settings::parse_settings;
 use hunt_packs::store::{
     count_oversized, format_cursor, last_done, list_findings, parse_cursor, record_done, FindingRow, Param, MAX_FINDINGS_PAGE, MIGRATIONS,
-    MIGRATION_NAMESPACE, OVERSIZED_REPORT_CAP, STATEMENT_DEADLINE,
+    MIGRATION_DEADLINE, MIGRATION_NAMESPACE, OVERSIZED_REPORT_CAP, STATEMENT_DEADLINE,
 };
 use std::io::{stderr, stdout, Write};
 use std::process::ExitCode;
@@ -117,7 +117,7 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let [settings_file, action, tenant, rest @ ..] = args else { Err(USAGE)? };
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, settings_file)?;
     let client = connect(&settings).await?;
-    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, STATEMENT_DEADLINE).await?;
+    migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, MIGRATION_DEADLINE).await?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute(&client, scope.clone(), sql, params);
     let lines = match (action.as_str(), rest) {
         ("get", [pack]) => vec![format!("{:?}", last_done(&mut exec, tenant, pack).await?)],

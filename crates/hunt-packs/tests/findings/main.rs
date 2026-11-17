@@ -3,6 +3,7 @@ mod types;
 
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
+use hunt_packs::packs::MAX_ID_CHARS;
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
     count_oversized, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, CursorError, FindingPage, FindingRow, Param,
@@ -139,10 +140,19 @@ fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
         "WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= $5::bigint ORDER BY window_end, pack_id LIMIT $4"
     ));
     assert!(!LIST_SQL.contains("OFFSET"));
-    assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > $2::bigint LIMIT $3::bigint"));
+    assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > 64 LIMIT $2::bigint"));
+    assert!(OVERSIZED_SQL.contains(&format!("octet_length(pack_id) > {ID_BYTE_CAP} ")));
     assert_eq!(usize::try_from(ID_BYTE_CAP)?, ID_CAP);
-    let constraint = MIGRATIONS.last().ok_or("no migration")?.sql;
+    assert_eq!(ID_BYTE_CAP, i64::try_from(MAX_ID_CHARS)?);
+    let constraint = MIGRATIONS
+        .iter()
+        .find(|migration| migration.version == "hunt_packs_0003")
+        .ok_or("no 0003")?
+        .sql;
     assert!(constraint.contains(&format!("CHECK (octet_length(pack_id) BETWEEN 1 AND {ID_BYTE_CAP}) NOT VALID")));
+    let partial = MIGRATIONS.last().ok_or("no migration")?;
+    assert_eq!(partial.version, "hunt_packs_0004");
+    assert!(partial.sql.contains(&format!("(tenant) WHERE octet_length(pack_id) > {ID_BYTE_CAP};")));
     assert!(MIGRATIONS
         .iter()
         .any(|migration| migration.sql.contains("ON hunt_pack_findings (tenant, window_end, pack_id)")));
@@ -454,7 +464,7 @@ async fn the_oversized_count_is_bound_under_the_tenant_and_a_bad_reply_is_refuse
     assert_eq!(count_oversized(&mut count_exec(&seen, one_row), "a").await?, THREE);
     let call = seen.borrow().first().cloned().ok_or("no call")?;
     assert_eq!((call.0.as_str(), call.1), ("a", OVERSIZED_SQL));
-    assert_eq!(call.2, vec![Param::Int(ID_BYTE_CAP), Param::Int(OVERSIZED_REPORT_CAP + 1)]);
+    assert_eq!(call.2, vec![Param::Int(OVERSIZED_REPORT_CAP + 1)]);
     assert!(matches!(
         count_oversized(&mut count_exec(&seen, no_row), "a").await,
         Err(StateError::BadReply)

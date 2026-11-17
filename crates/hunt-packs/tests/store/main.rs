@@ -5,7 +5,7 @@ use core_pg::error::PgError;
 use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::store::{
-    last_done, record_done, single_end, Param, StateError, GET_SQL, MIGRATIONS, MIGRATION_NAMESPACE, SET_SQL, STATEMENT_DEADLINE,
+    last_done, record_done, single_end, Param, StateError, GET_SQL, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE, SET_SQL, STATEMENT_DEADLINE,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -197,8 +197,9 @@ fn the_migration_is_embedded_and_its_namespace_valid() -> Result<(), Box<dyn Err
     check_namespace(MIGRATION_NAMESPACE)?;
     assert!(MIGRATIONS
         .iter()
-        .filter(|migration| migration.version != "hunt_packs_0003")
+        .filter(|migration| migration.version < "hunt_packs_0003")
         .all(|migration| migration.sql.contains("PRIMARY KEY (tenant, pack_id")));
     assert!(!STATEMENT_DEADLINE.is_zero());
+    assert!(MIGRATION_DEADLINE > STATEMENT_DEADLINE);
     Ok(())
 }
