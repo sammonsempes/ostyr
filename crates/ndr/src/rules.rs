@@ -7,8 +7,9 @@ use crate::model::{Limits, Yr};
 use crate::reader::read_capped;
 use std::error::Error;
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io;
+use std::fs::{self, File, OpenOptions, Permissions};
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -17,6 +18,12 @@ const MAX_LOG_CHARS: usize = 1_000;
 
 
 const COMPILED_NAME: &str = "rules.yarc";
+
+
+const PRIVATE_DIR_MODE: u32 = 0o700;
+
+
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 
 /// A rule file is a regular name ending in `.yar` or `.yara`.
@@ -83,7 +90,13 @@ pub struct Rules {
 pub fn copy_rule(path: &Path, workspace: &Path, index: usize, max_bytes: u64) -> Result<PathBuf, NdrError> {
     let text = read_rule(path, max_bytes)?;
     let copy = workspace.join(format!("rule-{index:05}.yar"));
-    fs::write(&copy, text).map_err(NdrError::Workspace)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .open(&copy)
+        .map_err(NdrError::Workspace)?;
+    file.write_all(text.as_bytes()).map_err(NdrError::Workspace)?;
     Ok(copy)
 }
 
@@ -107,6 +120,7 @@ pub fn load_rules(yr: &Yr, dir: &Path, limits: &Limits) -> Result<Rules, NdrErro
     let files = list_rule_files(dir, limits)?;
     let workspace = tempfile::Builder::new()
         .prefix("ndr-rules-")
+        .permissions(Permissions::from_mode(PRIVATE_DIR_MODE))
         .tempdir_in(&yr.work_dir)
         .map_err(NdrError::Workspace)?;
     let sources = files

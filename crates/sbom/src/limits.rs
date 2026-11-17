@@ -84,6 +84,10 @@ pub const SYFT_STATE_KEY: &str = "syft.settings";
 pub const HOME_PREFIX: &str = "syft-";
 
 
+/// The mode of the private syft home: tempfile would otherwise apply the umask.
+pub const PRIVATE_DIR_MODE: u32 = 0o700;
+
+
 pub const STDERR_EXCERPT_BYTES: usize = 256;
 
 

@@ -2,8 +2,8 @@
 
 use crate::error::{ResourceKind, RunError, SbomError};
 use crate::limits::{
-    BLOCK_BYTES, DRAIN_CHUNK_BYTES, FILE_MARKERS, HELPERS_PER_RUN, HOME_PREFIX, MEMORY_MARKERS, REAP_POLL_MILLIS, STDERR_EXCERPT_BYTES,
-    SYFT_ARGUMENTS,
+    BLOCK_BYTES, DRAIN_CHUNK_BYTES, FILE_MARKERS, HELPERS_PER_RUN, HOME_PREFIX, MEMORY_MARKERS, PRIVATE_DIR_MODE, REAP_POLL_MILLIS,
+    STDERR_EXCERPT_BYTES, SYFT_ARGUMENTS,
 };
 use crate::model::{Limits, Sbom, Stderr, Verdict, WatchPlan};
 use crate::parse::{parse_cyclonedx, to_u64};
@@ -14,9 +14,9 @@ use rustix::io::Errno;
 use rustix::process::{kill_process, kill_process_group, Pid, Signal};
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, Permissions};
 use std::io::{self, PipeReader, PipeWriter, Read};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -321,7 +321,10 @@ pub fn generate_with<Spawn: FnMut(Job) -> io::Result<()>>(
     check_binary(&settings.binary)?;
     check_archive(target, settings.max_archive_bytes)?;
     let slots = reserve_helpers(helpers, settings.max_live_helpers).ok_or(RunError::Busy)?;
-    let home = tempfile::Builder::new().prefix(HOME_PREFIX).tempdir_in(&settings.work_dir)?;
+    let home = tempfile::Builder::new()
+        .prefix(HOME_PREFIX)
+        .permissions(Permissions::from_mode(PRIVATE_DIR_MODE))
+        .tempdir_in(&settings.work_dir)?;
     let (stdout_reader, stdout_writer) = io::pipe()?;
     let (stderr_reader, stderr_writer) = io::pipe()?;
     let child = spawn_syft(settings, &source, home.path(), stdout_writer, stderr_writer)?;

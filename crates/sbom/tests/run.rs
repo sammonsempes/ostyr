@@ -4,7 +4,8 @@
 mod types;
 
 
-use rustix::process::Pid;
+use rustix::fs::Mode;
+use rustix::process::{getuid, umask, Pid};
 use sbom::error::{ResourceKind, RunError, SbomError, SettingsError, TargetError};
 use sbom::model::{Stderr, Verdict, WatchPlan};
 use sbom::run::{
@@ -58,6 +59,9 @@ const FLOOD_BYTES: &str = "5000000";
 
 
 const EXIT_CODE: i32 = 3;
+
+
+const GROUP_UMASK: u32 = 0o002;
 
 
 const LONG_STDERR: usize = 1000;
@@ -208,6 +212,22 @@ fn environment_is_cleared_and_explicit() -> TestResult {
     assert!(seen.contains("home="));
     assert!(!seen.contains("proxy"));
     assert!(!seen.contains("cargo"));
+    Ok(())
+}
+
+
+#[test]
+fn the_syft_home_is_private_under_a_group_umask() -> TestResult {
+    let dir = TempDir::new()?;
+    let binary = fake_syft(
+        &dir,
+        "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(/usr/bin/stat -c '%a-%u' \"$HOME\")\"",
+    )?;
+    let previous = umask(Mode::from_raw_mode(GROUP_UMASK));
+    let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
+    umask(previous);
+    let seen = result?.components.first().map(|component| component.name.clone()).ok_or("no component")?;
+    assert_eq!(seen, format!("700-{}", getuid().as_raw()));
     Ok(())
 }
 

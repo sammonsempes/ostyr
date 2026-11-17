@@ -88,10 +88,16 @@ pub const STDERR_TIMEOUT: &str = "stderr_timeout";
 pub const EXIT_ONE_SCAN: &str = "exit_one_scan";
 
 
+pub const STAT_YR: &str = "stat_yr";
+
+
+pub const GROUP_UMASK: u32 = 0o002;
+
+
 const COMPILE_OK: &str = "compile) : > \"$3\"; exit 0;;";
 
 
-const FAKE_SCRIPT_COUNT: usize = 13;
+const FAKE_SCRIPT_COUNT: usize = 14;
 
 
 const FAKE_BODY: &str = r#"#!/bin/sh
@@ -120,6 +126,27 @@ exit 2
 "#;
 
 
+const STAT_BODY: &str = r#"#!/bin/sh
+case "$1" in
+compile)
+    out="$3"
+    ws="${out%/*}"
+    shift 4
+    /usr/bin/stat -c '%a %u' "$ws" "$@" > "${ws%/*}/report-compile"
+    : > "$out"
+    exit 0
+    ;;
+scan)
+    shift 11
+    ws="${1%/*}"
+    /usr/bin/stat -c '%a %u' "$ws" "$1" > "${ws%/*}/report-scan"
+    exit 0
+    ;;
+esac
+exit 2
+"#;
+
+
 /// Every fake `yr`, written once before any test starts a child: writing an executable while another thread forks gives ETXTBSY.
 const FAKE_SCRIPTS: [(&str, &str); FAKE_SCRIPT_COUNT] = [
     (FAKE_YR, FAKE_BODY),
@@ -141,6 +168,7 @@ const FAKE_SCRIPTS: [(&str, &str); FAKE_SCRIPT_COUNT] = [
         "#!/bin/sh\ncase \"$1\" in\nCOMPILE_OK\nscan) echo 'error: scanning x: timeout' >&2; exit 0;;\nesac\n",
     ),
     (EXIT_ONE_SCAN, "#!/bin/sh\ncase \"$1\" in\nCOMPILE_OK\nscan) exit 1;;\nesac\n"),
+    (STAT_YR, STAT_BODY),
 ];
 
 
