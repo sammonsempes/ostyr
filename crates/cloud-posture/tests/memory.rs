@@ -134,18 +134,25 @@ fn parse(input: &str) -> Result<Result<usize, Skipped>, ParseError> {
 }
 
 
-fn every_flood_is_refused() -> TestResult {
+fn uid_flood_is_kept() -> TestResult {
     let kept = parse(&uid_flood());
     assert!(
         matches!(kept, Ok(Ok(DEFAULT_MAX_FINDINGS))),
         "every finding uid is its own identity: {kept:?}"
     );
-    [r"\\", "a"].iter().try_for_each(|unit| {
-        let flood = long_uid_flood(unit)?;
-        let outcome = parse(&flood)?;
-        assert!(matches!(outcome, Ok(count) if count > 0), "{outcome:?}");
-        Ok::<(), Box<dyn Error>>(())
-    })?;
+    Ok(())
+}
+
+
+fn long_uid_flood_is_kept(unit: &str) -> TestResult {
+    let flood = long_uid_flood(unit)?;
+    let outcome = parse(&flood)?;
+    assert!(matches!(outcome, Ok(count) if count > 0), "{outcome:?}");
+    Ok(())
+}
+
+
+fn display_floods_are_cut() -> TestResult {
     DISPLAY_FLOOD_CHARACTERS.iter().try_for_each(|characters| {
         let flood = display_flood(*characters)?;
         let parsed = parse_prowler_ocsf(flood.as_bytes(), "lab", "a", &Limits::default())?;
@@ -158,9 +165,18 @@ fn every_flood_is_refused() -> TestResult {
             first.detail_cut
         );
         Ok::<(), Box<dyn Error>>(())
-    })?;
+    })
+}
+
+
+fn root_flood_is_refused() -> TestResult {
     let root = parse(&root_flood()?);
     assert!(matches!(root, Err(ParseError::TooManyFindings { .. })), "{root:?}");
+    Ok(())
+}
+
+
+fn field_floods_are_refused_alone() -> TestResult {
     let refused_alone = Skipped {
         bad_field: 1,
         refused_by_status: BTreeMap::from([(Status::Fail, 1)]),
@@ -176,19 +192,17 @@ fn every_flood_is_refused() -> TestResult {
 }
 
 
-#[test]
-fn memory_limited_child_refuses_every_flood() -> TestResult {
-    std::env::var(MEMORY_CHILD_ENV).map_or(Ok(()), |_marker| every_flood_is_refused())
+fn in_child(body: fn() -> TestResult) -> TestResult {
+    std::env::var(MEMORY_CHILD_ENV).map_or(Ok(()), |_marker| body())
 }
 
 
-#[test]
-fn floods_at_the_byte_cap_are_refused_under_an_address_space_limit() -> TestResult {
+fn run_in_limited_child(test_name: &str) -> TestResult {
     let output = std::process::Command::new("prlimit")
         .arg(ADDRESS_SPACE_LIMIT)
         .arg("--")
         .arg(std::env::current_exe()?)
-        .args(["--exact", "memory_limited_child_refuses_every_flood", "--test-threads=1"])
+        .args(["--exact", test_name, "--test-threads=1"])
         .env(MEMORY_CHILD_ENV, "1")
         .output()?;
     assert!(
@@ -199,4 +213,76 @@ fn floods_at_the_byte_cap_are_refused_under_an_address_space_limit() -> TestResu
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "the child test did not run");
     Ok(())
+}
+
+
+#[test]
+fn child_uid_flood() -> TestResult {
+    in_child(uid_flood_is_kept)
+}
+
+
+#[test]
+fn child_long_uid_backslash_flood() -> TestResult {
+    in_child(|| long_uid_flood_is_kept(r"\\"))
+}
+
+
+#[test]
+fn child_long_uid_plain_flood() -> TestResult {
+    in_child(|| long_uid_flood_is_kept("a"))
+}
+
+
+#[test]
+fn child_display_floods() -> TestResult {
+    in_child(display_floods_are_cut)
+}
+
+
+#[test]
+fn child_root_flood() -> TestResult {
+    in_child(root_flood_is_refused)
+}
+
+
+#[test]
+fn child_field_floods() -> TestResult {
+    in_child(field_floods_are_refused_alone)
+}
+
+
+#[test]
+fn uid_flood_is_kept_under_an_address_space_limit() -> TestResult {
+    run_in_limited_child("child_uid_flood")
+}
+
+
+#[test]
+fn backslash_uid_flood_is_kept_under_an_address_space_limit() -> TestResult {
+    run_in_limited_child("child_long_uid_backslash_flood")
+}
+
+
+#[test]
+fn plain_uid_flood_is_kept_under_an_address_space_limit() -> TestResult {
+    run_in_limited_child("child_long_uid_plain_flood")
+}
+
+
+#[test]
+fn display_floods_are_cut_under_an_address_space_limit() -> TestResult {
+    run_in_limited_child("child_display_floods")
+}
+
+
+#[test]
+fn root_flood_is_refused_under_an_address_space_limit() -> TestResult {
+    run_in_limited_child("child_root_flood")
+}
+
+
+#[test]
+fn field_floods_are_refused_under_an_address_space_limit() -> TestResult {
+    run_in_limited_child("child_field_floods")
 }
