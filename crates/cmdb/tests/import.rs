@@ -278,6 +278,15 @@ fn reserved_source_and_attribute_prefix_are_refused_naming_the_field_only() -> T
         .ok_or("accepted")?;
     assert!(matches!(refused_source, ImportError::ReservedName { field: "source" }));
     assert!(!refused_source.to_string().contains("CMDB"));
+    ["declared", "Declared", " declared"].iter().try_for_each(|name| -> TestResult {
+        let mut forged = mapping(ImportFormat::Csv);
+        forged.source = (*name).to_string();
+        let refused = import_reader(CSV_TEXT.as_bytes(), &forged, &[], &TruthMap::new())
+            .err()
+            .ok_or("accepted")?;
+        assert!(matches!(refused, ImportError::ReservedName { field: "source" }));
+        Ok(())
+    })?;
     let mut reserved_attribute = mapping(ImportFormat::Csv);
     reserved_attribute.attributes.insert("Key:mac".to_string(), "site".to_string());
     let refused_attribute = import_reader(CSV_TEXT.as_bytes(), &reserved_attribute, &[], &TruthMap::new())
@@ -309,6 +318,8 @@ fn reserved_names_are_refused_when_the_mapping_loads() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("mapping.yaml");
     std::fs::write(&path, "format: csv\nsource: cmdb\nkind: server\nkeys:\n  serial_number: serial\n")?;
+    assert!(matches!(load_mapping(&path), Err(ImportError::ReservedName { field: "source" })));
+    std::fs::write(&path, "format: csv\nsource: Declared\nkind: server\nkeys:\n  serial_number: serial\n")?;
     assert!(matches!(load_mapping(&path), Err(ImportError::ReservedName { field: "source" })));
     std::fs::write(
         &path,
