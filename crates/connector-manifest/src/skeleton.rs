@@ -248,25 +248,29 @@ pub fn plan(candidates: &[Candidate<'_>]) -> (Vec<Planned>, Summary) {
 }
 
 
-/// The vendor URLs that pass the grammar, sorted, and how many were refused.
+/// The vendor URLs that pass the grammar, sorted, and how many entries were refused; a repeated valid URL is collapsed and not counted.
 pub fn server_urls(document: &Document) -> (BTreeSet<String>, usize) {
-    let urls: BTreeSet<String> = document
+    let valid: Vec<&str> = document
         .servers
         .iter()
-        .filter_map(|server| server.url.as_deref())
+        .filter_map(|server| server.as_ref().and_then(|found| found.url.as_deref()))
         .filter(|url| valid_url(url))
-        .map(str::to_owned)
         .collect();
-    (urls.clone(), document.servers.len() - urls.len())
+    (valid.iter().map(|url| (*url).to_owned()).collect(), document.servers.len() - valid.len())
 }
 
 
-/// One `secret_file` field name per `http` or `apiKey` scheme; any other, bad or duplicate scheme is counted.
+/// One `secret_file` field name per `http` or `apiKey` scheme; any other, bad, wrong-typed or duplicate scheme is counted.
 pub fn secret_fields(document: &Document) -> (BTreeSet<String>, usize) {
-    let schemes: &Vec<(String, Scheme)> = &document.components.security_schemes;
+    let schemes: &Vec<(String, Option<Scheme>)> = &document.components.security_schemes;
     let names: BTreeSet<String> = schemes
         .iter()
-        .filter(|(_, scheme)| scheme.kind.as_deref().is_some_and(|kind| SECRET_SCHEME_TYPES.contains(&kind)))
+        .filter(|(_, scheme)| {
+            scheme
+                .as_ref()
+                .and_then(|found| found.kind.as_deref())
+                .is_some_and(|kind| SECRET_SCHEME_TYPES.contains(&kind))
+        })
         .map(|(key, _)| format!("{SECRET_PREFIX}{}", key.to_ascii_lowercase()))
         .filter(|name| valid_name(name))
         .collect();

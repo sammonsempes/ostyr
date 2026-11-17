@@ -68,13 +68,13 @@ pub struct Scheme {
 #[derive(Debug, Default, Deserialize)]
 pub struct RawComponents {
     #[serde(default, rename = "securitySchemes", deserialize_with = "schemes")]
-    pub security_schemes: Bounded<(String, Scheme)>,
+    pub security_schemes: Bounded<(String, Box<RawValue>)>,
 }
 
 
 #[derive(Debug, Default)]
 pub struct Components {
-    pub security_schemes: Vec<(String, Scheme)>,
+    pub security_schemes: Vec<(String, Option<Scheme>)>,
 }
 
 
@@ -84,7 +84,7 @@ pub struct RawDocument {
     #[serde(default, deserialize_with = "paths")]
     pub paths: Bounded<(String, Box<RawValue>)>,
     #[serde(default, deserialize_with = "servers")]
-    pub servers: Bounded<Server>,
+    pub servers: Bounded<Box<RawValue>>,
     #[serde(default)]
     pub components: RawComponents,
 }
@@ -94,7 +94,7 @@ pub struct RawDocument {
 pub struct Document {
     pub openapi: Option<String>,
     pub paths: Vec<(String, Option<PathItem>)>,
-    pub servers: Vec<Server>,
+    pub servers: Vec<Option<Server>>,
     pub components: Components,
 }
 
@@ -186,9 +186,15 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, ConnectorError> {
     Ok(Document {
         openapi: raw.openapi,
         paths,
-        servers: within(raw.servers, "servers")?,
+        servers: within(raw.servers, "servers")?
+            .iter()
+            .map(|raw_server| lenient::<Server>(raw_server))
+            .collect(),
         components: Components {
-            security_schemes: within(raw.components.security_schemes, "security schemes")?,
+            security_schemes: within(raw.components.security_schemes, "security schemes")?
+                .into_iter()
+                .map(|(key, raw_scheme)| (key, lenient::<Scheme>(&raw_scheme)))
+                .collect(),
         },
     })
 }
