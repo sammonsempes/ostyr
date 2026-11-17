@@ -4,7 +4,12 @@ use axum::body::Body;
 use axum::http::StatusCode;
 
 
-const ROUTES: [(&str, &str); 3] = [("/alerts", "alerts"), ("/cases", "cases"), ("/assets", "cmdb")];
+const ROUTES: [(&str, &str); 4] = [
+    ("/alerts", "alerts"),
+    ("/cases", "cases"),
+    ("/assets", "cmdb"),
+    ("/risk/entities", "risk"),
+];
 
 
 async fn status(router: &axum::Router, method: &str, path: &str, token: Option<&str>) -> Result<StatusCode, crate::types::TestError> {
@@ -19,7 +24,7 @@ fn denied(code: StatusCode) -> bool {
 
 #[tokio::test]
 async fn one_session_reaches_every_selected_module() -> TestResult {
-    let fx = fixture("alerts,cases,cmdb")?;
+    let fx = fixture("alerts,cases,cmdb,risk")?;
     let token = login(&fx.router, ANALYST).await?;
     for (path, _module) in ROUTES {
         let code = status(&fx.router, "GET", path, Some(&token)).await?;
@@ -32,7 +37,7 @@ async fn one_session_reaches_every_selected_module() -> TestResult {
 
 #[tokio::test]
 async fn the_permission_survives_the_merge() -> TestResult {
-    let fx = fixture("alerts,cases,cmdb")?;
+    let fx = fixture("alerts,cases,cmdb,risk")?;
     let token = login(&fx.router, READER).await?;
     for (path, _module) in ROUTES {
         assert_eq!(status(&fx.router, "GET", path, Some(&token)).await?, StatusCode::FORBIDDEN, "{path}");
@@ -46,7 +51,14 @@ async fn an_unselected_module_is_denied_by_default() -> TestResult {
     let fx = fixture("alerts")?;
     let token = login(&fx.router, ANALYST).await?;
     assert!(!denied(status(&fx.router, "GET", "/alerts", Some(&token)).await?));
-    for path in ["/cases", "/cases/abc", "/assets", "/assets/abc"] {
+    for path in [
+        "/cases",
+        "/cases/abc",
+        "/assets",
+        "/assets/abc",
+        "/risk/entities",
+        "/risk/entities/host/web01",
+    ] {
         assert_eq!(status(&fx.router, "GET", path, Some(&token)).await?, StatusCode::FORBIDDEN, "{path}");
         assert_eq!(status(&fx.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
     }
@@ -56,7 +68,7 @@ async fn an_unselected_module_is_denied_by_default() -> TestResult {
 
 #[tokio::test]
 async fn other_methods_are_denied_on_every_module_route() -> TestResult {
-    let fx = fixture("alerts,cases,cmdb")?;
+    let fx = fixture("alerts,cases,cmdb,risk")?;
     let token = login(&fx.router, ANALYST).await?;
     for (path, _module) in ROUTES {
         for method in ["HEAD", "PUT", "POST", "DELETE"] {
@@ -74,5 +86,32 @@ async fn the_document_lists_the_selected_modules_only() -> TestResult {
     let paths = document.get("paths").ok_or("no paths")?;
     assert!(paths.get("/alerts").is_some() && paths.get("/cases").is_some());
     assert!(paths.get("/assets").is_none());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn risk_alone_is_mounted_and_an_unknown_risk_path_is_404() -> TestResult {
+    let fx = fixture("risk")?;
+    let token = login(&fx.router, ANALYST).await?;
+    let code = status(&fx.router, "GET", "/risk/entities", Some(&token)).await?;
+    assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{code}");
+    assert_eq!(
+        status(&fx.router, "GET", "/risk/entities/nokind/x", Some(&token)).await?,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(status(&fx.router, "GET", "/alerts", Some(&token)).await?, StatusCode::FORBIDDEN);
+    let reader = login(&fx.router, READER).await?;
+    assert_eq!(status(&fx.router, "GET", "/risk/entities", Some(&reader)).await?, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_document_lists_the_risk_paths_when_selected() -> TestResult {
+    let fx = fixture("alerts,risk")?;
+    let document = body_json(call(&fx.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
+    let paths = document.get("paths").ok_or("no paths")?;
+    assert!(paths.get("/risk/entities").is_some() && paths.get("/alerts").is_some());
     Ok(())
 }

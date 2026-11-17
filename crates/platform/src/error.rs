@@ -15,4 +15,6 @@ pub enum PlatformError {
     UnknownModule { index: usize },
     #[error("settings.modules entry {index} repeats an earlier module")]
     DuplicateModule { index: usize },
+    #[error("settings.risk.weights_file is required by the risk module")]
+    MissingWeightsFile,
 }
