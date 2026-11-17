@@ -42,4 +42,15 @@ jobs:
       - name: Run the tests of agent-channel
         shell: bash
         timeout-minutes: 15
-        run: cargo test --locked -p agent-channel
+        run: >-
+          cargo test --locked -p agent-channel --
+          --skip a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches
+      - name: Run the agent-channel restart test alone
+        if: always()
+        shell: bash
+        timeout-minutes: 5
+        env:
+          AGENT_CHANNEL_TRACE: "1"
+        run: >-
+          cargo test --locked -p agent-channel --
+          --exact resilience::a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches --nocapture
