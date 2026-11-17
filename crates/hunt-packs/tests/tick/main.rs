@@ -691,3 +691,45 @@ async fn a_replayed_window_inserts_its_finding_once() -> TestResult {
     assert_eq!(findings_in(&store), 1);
     Ok(())
 }
+
+
+fn huge_baseline() -> Result<HuntPack, std::num::TryFromIntError> {
+    let mut big = pack("p", Source::Clickhouse);
+    big.baseline.max_matches = u64::try_from(i64::MAX)? + 1;
+    Ok(big)
+}
+
+
+#[tokio::test]
+async fn a_finding_refused_for_good_records_the_window_once_and_never_reruns_it() -> TestResult {
+    let (store, calls, log) = fresh();
+    let mut exec = fake(&store, &calls);
+    let mut run = recorder(&log, never);
+    let packs = [huge_baseline()?];
+    let first = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    let entry = first.packs.first().ok_or("no entry")?;
+    assert_eq!(entry.status, PackStatus::Done);
+    assert_eq!((entry.findings_refused, first.findings_refused, first.findings_failed), (1, 1, 0));
+    assert_eq!(stored(&store, "a", "p"), Some(H4));
+    assert_eq!(findings_in(&store), 0);
+    let again = tick(
+        &tenants(&["a"]),
+        &packs,
+        H4 + SLACK,
+        &TickLimits::default(),
+        &mut exec,
+        &mut hooks(&mut run),
+    )
+    .await?;
+    assert_eq!(again.findings_refused, 0);
+    assert_eq!(log.borrow().len(), 1);
+    Ok(())
+}

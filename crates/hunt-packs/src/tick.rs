@@ -2,7 +2,7 @@ use crate::error::shown_id;
 use crate::model::{HuntPack, Source};
 use crate::run::HuntOutcome;
 use crate::schedule::{RunWindow, ScheduleError};
-use crate::store::{last_done, record_done, record_finding, Param, StateError};
+use crate::store::{is_permanent, last_done, record_done, record_finding, Param, StateError};
 use crate::types::{DueFn, RunFn};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -93,6 +93,7 @@ pub struct PackReport {
     pub attempted: usize,
     pub runs: Vec<RunRecord>,
     pub last_end: Option<i64>,
+    pub findings_refused: usize,
     pub status: PackStatus,
 }
 
@@ -104,6 +105,7 @@ pub struct TickReport {
     pub skipped_osquery: usize,
     pub refused_tenants: usize,
     pub findings_failed: usize,
+    pub findings_refused: usize,
 }
 
 
@@ -170,26 +172,47 @@ fn finding_failure(tenant: &str, pack_id: &str, error: &StateError) -> PackStatu
 }
 
 
-/// A finding is stored before the run state moves, so a failure leaves the window to run again; the insert is idempotent.
+fn finding_refusal(tenant: &str, pack_id: &str) {
+    let id = shown_id(pack_id);
+    warn!("hunt finding refused for good, window recorded without it: tenant {tenant} pack {id}");
+}
+
+
+/// What `persist` stored: the run end now held, and whether a finding was refused for good and dropped.
+pub struct Persisted {
+    pub stored: i64,
+    pub refused: bool,
+}
+
+
+/// Finding first, then state: a transient failure re-runs the window; a permanent refusal is logged and the window recorded without it.
 pub async fn persist<Executor, Pending>(
     exec: &mut Executor,
     tenant: &str,
     pack: &HuntPack,
     window: &RunWindow,
     outcome: &HuntOutcome,
-) -> Result<i64, PackStatus>
+) -> Result<Persisted, PackStatus>
 where
     Executor: FnMut(&TenantScope, &'static str, Vec<Param>) -> Pending,
     Pending: Future<Output = Result<Vec<i64>, PgError>>,
 {
-    if outcome.finding {
-        record_finding(exec, tenant, &pack.id, window, outcome.matches, pack.baseline.max_matches)
-            .await
-            .map_err(|error| finding_failure(tenant, &pack.id, &error))?;
-    }
-    record_done(exec, tenant, &pack.id, window.end)
+    let refused = if outcome.finding {
+        match record_finding(exec, tenant, &pack.id, window, outcome.matches, pack.baseline.max_matches).await {
+            Ok(_) => false,
+            Err(error) if is_permanent(&error) => {
+                finding_refusal(tenant, &pack.id);
+                true
+            }
+            Err(error) => Err(finding_failure(tenant, &pack.id, &error))?,
+        }
+    } else {
+        false
+    };
+    let stored = record_done(exec, tenant, &pack.id, window.end)
         .await
-        .map_err(|error| store_failure(tenant, &pack.id, &error))
+        .map_err(|error| store_failure(tenant, &pack.id, &error))?;
+    Ok(Persisted { stored, refused })
 }
 
 
@@ -211,12 +234,13 @@ pub async fn run_window<Executor, Pending>(
         report.attempted += 1;
         match run(pack, &report.tenant, window.end) {
             Ok(outcome) => match persist(exec, &report.tenant, pack, window, &outcome).await {
-                Ok(stored) => {
+                Ok(persisted) => {
                     report.runs.push(RunRecord {
                         end: window.end,
                         finding: outcome.finding,
                     });
-                    report.last_end = Some(stored);
+                    report.findings_refused += usize::from(persisted.refused);
+                    report.last_end = Some(persisted.stored);
                 }
                 Err(status) => report.status = status,
             },
@@ -246,6 +270,7 @@ where
         attempted: 0,
         runs: Vec::new(),
         last_end: None,
+        findings_refused: 0,
         status: PackStatus::Done,
     };
     if budget == 0 {
@@ -301,6 +326,7 @@ where
                 let entry = tick_pack(exec, tenant, pack, now, limits, budget, &mut *hooks).await;
                 budget = budget.saturating_sub(entry.attempted);
                 report.deferred += usize::from(entry.status == PackStatus::Deferred);
+                report.findings_refused += entry.findings_refused;
                 report.findings_failed += usize::from(matches!(entry.status, PackStatus::FindingStoreFailed(_)));
                 report.packs.push(entry);
             } else {

@@ -5,6 +5,7 @@ use core_pg::error::PgError;
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_scope, TenantScope};
 use std::future::Future;
+use std::num::TryFromIntError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -69,9 +70,15 @@ pub enum StateError {
     #[error("a run end is outside years 0 to 9999")]
     OutOfRange(#[source] ScheduleError),
     #[error("a match count does not fit the store")]
-    CountOutOfRange,
+    CountOutOfRange(#[source] TryFromIntError),
     #[error("the store answered with an unexpected number of rows")]
     BadReply,
+}
+
+
+/// A refusal no retry can fix (the value itself is wrong), as opposed to a store failure that may pass on the next tick.
+pub fn is_permanent(error: &StateError) -> bool {
+    matches!(error, StateError::CountOutOfRange(_) | StateError::InvalidPackId)
 }
 
 
@@ -128,11 +135,12 @@ pub struct FindingRow {
 }
 
 
-/// Rows after the cursor; a stored row with an invalid pack id is left out and counted in `skipped`.
+/// Rows after the cursor, bad pack ids counted in `skipped`; `next` is the last row READ (skipped included), set only on a full page.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FindingPage {
     pub rows: Vec<FindingRow>,
     pub skipped: usize,
+    pub next: Option<(i64, String)>,
 }
 
 
@@ -152,8 +160,8 @@ where
     let scope = checked_key(tenant, pack_id)?;
     checked_time(window.start).map_err(StateError::OutOfRange)?;
     checked_time(window.end).map_err(StateError::OutOfRange)?;
-    let matches_stored = i64::try_from(matches).map_err(|_| StateError::CountOutOfRange)?;
-    let baseline_stored = i64::try_from(max_matches).map_err(|_| StateError::CountOutOfRange)?;
+    let matches_stored = i64::try_from(matches).map_err(StateError::CountOutOfRange)?;
+    let baseline_stored = i64::try_from(max_matches).map_err(StateError::CountOutOfRange)?;
     let params = vec![
         Param::Text(pack_id.to_owned()),
         Param::Int(window.start),
@@ -183,9 +191,12 @@ where
     let capped = limit.clamp(1, MAX_FINDINGS_PAGE);
     let params = vec![Param::Int(since_end), Param::Text(since_pack.to_owned()), Param::Int(capped)];
     let rows = exec(&scope, LIST_SQL, params).await?;
+    let full = i64::try_from(rows.len()).is_ok_and(|read| read >= capped);
+    let next = rows.last().filter(|_| full).map(|row| (row.window_end, row.pack_id.clone()));
     let (valid, refused): (Vec<FindingRow>, Vec<FindingRow>) = rows.into_iter().partition(|row| is_pack_id(&row.pack_id));
     Ok(FindingPage {
         rows: valid,
         skipped: refused.len(),
+        next,
     })
 }

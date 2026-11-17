@@ -5,10 +5,11 @@ use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
-    list_findings, record_finding, FindingPage, FindingRow, Param, StateError, FINDING_SQL, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
+    is_permanent, list_findings, record_finding, FindingPage, FindingRow, Param, StateError, FINDING_SQL, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS,
 };
 use hunt_packs::types::ListResult;
 use std::cell::RefCell;
+use std::error::Error;
 use std::future::{ready, Ready};
 use std::rc::Rc;
 use types::{Rows, Seen, TestResult};
@@ -168,11 +169,11 @@ async fn a_refused_finding_sends_nothing() -> TestResult {
     let too_big = u64::try_from(i64::MAX)? + 1;
     assert!(matches!(
         record_finding(&mut exec, "acme", PACK, &window(), too_big, 0).await,
-        Err(StateError::CountOutOfRange)
+        Err(StateError::CountOutOfRange(_))
     ));
     assert!(matches!(
         record_finding(&mut exec, "acme", PACK, &window(), 1, too_big).await,
-        Err(StateError::CountOutOfRange)
+        Err(StateError::CountOutOfRange(_))
     ));
     assert!(matches!(
         record_finding(&mut exec, "acme", "-x", &window(), 1, 0).await,
@@ -303,5 +304,40 @@ async fn a_row_with_an_invalid_pack_id_is_skipped_and_counted() -> TestResult {
     assert_eq!((page.rows.len(), page.skipped), (1, 1));
     let mut failing = |_scope: &TenantScope, _sql: &'static str, _params: Vec<Param>| ready(Err::<Vec<FindingRow>, PgError>(PgError::LegacyRecords));
     assert!(matches!(list_findings(&mut failing, "a", 0, "", 1).await, Err(StateError::Pg(_))));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_count_error_keeps_its_cause_and_is_permanent() -> TestResult {
+    let (store, seen) = fresh();
+    let mut exec = insert_exec(&store, &seen);
+    let too_big = u64::try_from(i64::MAX)? + 1;
+    let error = record_finding(&mut exec, "acme", PACK, &window(), too_big, 0)
+        .await
+        .err()
+        .ok_or("accepted")?;
+    assert!(error.source().is_some());
+    assert!(is_permanent(&error));
+    assert!(is_permanent(&StateError::InvalidPackId));
+    assert!(!is_permanent(&StateError::BadReply));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_page_of_skipped_rows_still_gives_the_next_cursor() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("Bad Id", END)),
+        ("a".to_owned(), row("Bad Two", LATER)),
+        ("a".to_owned(), row("fine", LATER + 1)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let page = list_findings(&mut exec, "a", 0, "", SECOND).await?;
+    assert_eq!((page.rows.len(), page.skipped), (0, SECOND_USIZE));
+    assert_eq!(page.next, Some((LATER, "Bad Two".to_owned())));
+    let following = list_findings(&mut exec, "a", LATER, "Bad Two", SECOND).await?;
+    assert_eq!((following.rows.len(), following.skipped, following.next), (1, 0, None));
     Ok(())
 }

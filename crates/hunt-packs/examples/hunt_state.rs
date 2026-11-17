@@ -86,6 +86,12 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
     let limit_count: i64 = limit.map_or(Ok(MAX_FINDINGS_PAGE), |text| text.parse())?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute_list(client, scope.clone(), sql, params);
     let page = list_findings(&mut exec, tenant, since_end, &since_pack, limit_count).await?;
+    let skipped = page.skipped;
+    (skipped == 0).then_some(()).map_or_else(
+        || writeln!(stderr(), "skipped {skipped} stored rows with an invalid pack id"),
+        |()| Ok(()),
+    )?;
+    let cursor_line = page.next.iter().map(|(end, pack)| format!("next\t{end}:{}", pack.escape_debug()));
     let lines: Vec<String> = page
         .rows
         .iter()
@@ -95,6 +101,7 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
                 row.window_end, row.pack_id, row.window_start, row.matches, row.max_matches
             )
         })
+        .chain(cursor_line)
         .collect();
     Ok(lines)
 }
