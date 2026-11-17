@@ -121,3 +121,55 @@ fn a_failing_input_stream_is_reported() -> TestResult {
     assert_eq!(direction_of(1), Direction::Out);
     Ok(())
 }
+
+
+fn read_back(file: &str) -> Result<remote_shell::recording::Recording, Box<dyn std::error::Error>> {
+    Ok(remote_shell::recording::read_recording(
+        &mut std::fs::File::open(file)?,
+        &remote_shell::recording::Limits::default(),
+    )?)
+}
+
+
+#[test]
+fn a_recording_takes_a_checked_tenant_and_session() -> TestResult {
+    let directory = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
+    let file = directory.path().join("r.bin").display().to_string();
+    run(
+        &["record", &file, "1", "1", "--tenant", "globex", "--session", "s-9"],
+        b"ls\n",
+        &mut Vec::new(),
+    )?;
+    let recording = read_back(&file)?;
+    assert_eq!(
+        (recording.header.tenant.as_str(), recording.header.session_id.as_str()),
+        ("globex", "s-9")
+    );
+    run(&["record", &file, "1", "1"], b"", &mut Vec::new())?;
+    let default = read_back(&file)?;
+    assert_eq!(
+        (default.header.tenant.as_str(), default.header.session_id.as_str()),
+        ("tenant-a", "example-session")
+    );
+    for session in ["-x", "a\u{3164}", "a\0b", ""] {
+        assert!(matches!(
+            run(&["record", &file, "1", "1", "--session", session], b"", &mut Vec::new()),
+            Err(RecordCliError::Session)
+        ));
+    }
+    for tenant in ["-x", "a b", ""] {
+        assert!(matches!(
+            run(&["record", &file, "1", "1", "--tenant", tenant], b"", &mut Vec::new()),
+            Err(RecordCliError::Tenant(_))
+        ));
+    }
+    assert!(matches!(
+        run(&["record", &file, "1", "1", "--other", "x"], b"", &mut Vec::new()),
+        Err(RecordCliError::Usage)
+    ));
+    assert!(matches!(
+        run(&["record", &file, "1", "1", "--tenant"], b"", &mut Vec::new()),
+        Err(RecordCliError::Usage)
+    ));
+    Ok(())
+}

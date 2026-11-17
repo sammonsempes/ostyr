@@ -12,3 +12,6 @@ pub const HASH_LEN: usize = 32;
 
 
 pub type ChainHash = [u8; HASH_LEN];
+
+
+pub type Row = Vec<crate::store_model::Cell>;
