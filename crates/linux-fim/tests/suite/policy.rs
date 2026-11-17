@@ -7,16 +7,31 @@ use linux_fim::error::PolicyError;
 use linux_fim::limits::{default_limits, MAX_EQUAL_SELECTORS, MAX_POSTFIX_SELECTORS, MAX_SELECTOR_VALUES};
 use linux_fim::model::{Kprobe, Limits, Role, TracingPolicy, WatchKind};
 use linux_fim::policy::{
-    ancestor_policy_name, ancestors_of, attribute_policy_name, build_policies, delete_policy_name, directory_of, name_selectors, names_policy_name,
-    parent_of, policy_name, policy_names, render_policy, render_with, reversed_ancestor_policy_name, reversed_names_policy_name,
-    reversed_token_policy_name, slash_name_of, split_selectors, token_policy_name, union, unique, watch_selectors, HOOK_CHMOD, HOOK_CHOWN,
-    HOOK_FILE_TRUNCATE, HOOK_LINK, HOOK_MKNOD, HOOK_MMAP, HOOK_OPEN, HOOK_PATH_TRUNCATE, HOOK_PERMISSION, HOOK_REMOVEXATTR, HOOK_REMOVE_ACL,
-    HOOK_RENAME, HOOK_RMDIR, HOOK_SETXATTR, HOOK_SET_ACL, HOOK_SYMLINK, HOOK_UNLINK, MAP_SHARED_MASK, MAY_WRITE_MASK,
+    ancestor_policy_name, ancestors_of, attribute_policy_name, build_policies, delete_policy_name, directory_of, foreign_full_name_policy_name,
+    foreign_full_source_policy_name, foreign_full_target_policy_name, foreign_open_policy_name, foreign_reversed_token_policy_name,
+    foreign_token_policy_name, full_name_policy_name, full_source_policy_name, full_target_policy_name, name_selectors, names_policy_name, parent_of,
+    policy_name, policy_names, render_policy, render_with, reversed_ancestor_policy_name, reversed_names_policy_name, reversed_token_policy_name,
+    slash_name_of, split_selectors, token_policy_name, union, unique, user_full_name_policy_name, user_full_source_policy_name,
+    user_full_target_policy_name, user_open_policy_name, user_reversed_token_policy_name, user_token_policy_name, watch_selectors, HOOK_CHMOD,
+    HOOK_CHOWN, HOOK_FILE_TRUNCATE, HOOK_LINK, HOOK_MKNOD, HOOK_MMAP, HOOK_OPEN, HOOK_PATH_TRUNCATE, HOOK_PERMISSION, HOOK_REMOVEXATTR,
+    HOOK_REMOVE_ACL, HOOK_RENAME, HOOK_RMDIR, HOOK_SETXATTR, HOOK_SET_ACL, HOOK_SYMLINK, HOOK_UNLINK, MAP_SHARED_MASK, MAY_WRITE_MASK,
 };
 use linux_fim::roles::load_roles;
 use serde::ser::Error as SerError;
 use serde_saphyr::SerializeError;
 use std::fs;
+
+
+const HOST_CONDITION_COUNT: usize = 2;
+
+
+const HOST_CONDITIONS: &str = "Mnt In [\"host_ns\"]; User In [\"host_ns\"]";
+
+
+const MOUNT_TWIN_CONDITIONS: &str = "Mnt NotIn [\"host_ns\"]";
+
+
+const USER_TWIN_CONDITIONS: &str = "Mnt In [\"host_ns\"]; User NotIn [\"host_ns\"]";
 
 
 const LINK_CREATED_INDEX: u32 = 2;
@@ -31,7 +46,7 @@ const RENAME_SOURCE_DIR: u32 = 0;
 const RENAME_TARGET_DIR: u32 = 2;
 
 
-const TOKEN_ONLY_EXTRA_POLICIES: usize = 2;
+const TOKEN_ONLY_EXTRA_POLICIES: usize = 17;
 
 
 fn named_role(name: &str) -> Result<Role, Box<dyn std::error::Error>> {
@@ -206,7 +221,22 @@ fn the_policy_names_carry_the_role_and_never_collide() -> TestResult {
             "ostyr-fimt-a",
             "ostyr-fimr-a",
             "ostyr-fimb-a",
-            "ostyr-fimu-a"
+            "ostyr-fimu-a",
+            "ostyr-fimp-a",
+            "ostyr-fimq-a",
+            "ostyr-fimv-a",
+            "ostyr-fimof-a",
+            "ostyr-fimtf-a",
+            "ostyr-fimuf-a",
+            "ostyr-fimpf-a",
+            "ostyr-fimqf-a",
+            "ostyr-fimvf-a",
+            "ostyr-fimow-a",
+            "ostyr-fimtw-a",
+            "ostyr-fimuw-a",
+            "ostyr-fimpw-a",
+            "ostyr-fimqw-a",
+            "ostyr-fimvw-a"
         ]
     );
     assert_eq!(
@@ -219,7 +249,22 @@ fn the_policy_names_carry_the_role_and_never_collide() -> TestResult {
             token_policy_name("a"),
             reversed_names_policy_name("a"),
             reversed_ancestor_policy_name("a"),
-            reversed_token_policy_name("a")
+            reversed_token_policy_name("a"),
+            full_source_policy_name("a"),
+            full_target_policy_name("a"),
+            full_name_policy_name("a"),
+            foreign_open_policy_name("a"),
+            foreign_token_policy_name("a"),
+            foreign_reversed_token_policy_name("a"),
+            foreign_full_source_policy_name("a"),
+            foreign_full_target_policy_name("a"),
+            foreign_full_name_policy_name("a"),
+            user_open_policy_name("a"),
+            user_token_policy_name("a"),
+            user_reversed_token_policy_name("a"),
+            user_full_source_policy_name("a"),
+            user_full_target_policy_name("a"),
+            user_full_name_policy_name("a")
         ],
         policy_names("a")
     );
@@ -633,5 +678,157 @@ fn directories_and_names_are_chunked_apart_and_prefixes_keep_the_directory_only(
     assert_eq!(last, Some(vec![strings(&["/srv/tree"])]));
     assert_eq!(name_selectors(0, &[], &[], SMALL_CAP).len(), 0);
     assert_eq!(name_selectors(0, &files, &[], 0).len(), files.len());
+    Ok(())
+}
+
+
+#[test]
+fn the_full_path_policies_list_the_dentry_first_and_match_its_whole_path() -> TestResult {
+    let server = named_role("server")?;
+    let expected = [
+        ("ostyr-fimp-server", [(HOOK_RENAME, RENAME_SOURCE), (HOOK_UNLINK, SYMLINK_NAME)]),
+        ("ostyr-fimq-server", [(HOOK_RENAME, RENAME_TARGET), (HOOK_RMDIR, SYMLINK_NAME)]),
+        ("ostyr-fimv-server", [(HOOK_SYMLINK, SYMLINK_NAME), (HOOK_LINK, LINK_CREATED_INDEX)]),
+    ];
+    for (name, hooks) in expected {
+        for (call, dentry_index) in hooks {
+            let probe = kprobe_in(&server, name, call)?;
+            let first = probe.args.first().map(|arg| (arg.index, arg.arg_type.clone()));
+            assert_eq!(first, Some((dentry_index, "dentry".to_string())), "{name} {call}");
+            assert!(probe.selectors.iter().all(|selector| selector.match_args.len() == 1), "{name} {call}");
+            assert!(probe
+                .selectors
+                .iter()
+                .flat_map(|selector| selector.match_args.iter())
+                .all(|arg| arg.index == dentry_index));
+            let equal = values_of(&probe, dentry_index, "Equal");
+            assert!(["/etc/passwd", "/root/.aws/credentials", "/root"]
+                .iter()
+                .all(|wanted| equal.iter().any(|value| value == wanted)));
+            assert_eq!(
+                values_of(&probe, dentry_index, "Prefix"),
+                ["/etc/cron.d/", "/etc/systemd/system/", "/usr/bin/"],
+                "{name} {call}"
+            );
+        }
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_full_path_policies_stay_within_the_tetragon_caps_for_the_default_roles() -> TestResult {
+    let limits = default_limits();
+    let full = ["ostyr-fimp-", "ostyr-fimq-", "ostyr-fimv-"];
+    for name in ["server", "workstation"] {
+        for policy in build_policies(&named_role(name)?, &limits)? {
+            if full.iter().any(|prefix| policy.metadata.name.starts_with(prefix)) {
+                assert!(policy
+                    .spec
+                    .kprobes
+                    .iter()
+                    .all(|probe| probe.selectors.len() <= limits.max_kprobe_selectors));
+                assert!(selectors_with(&policy, "Equal") <= limits.max_equal_selectors);
+                assert!(selectors_with(&policy, "Prefix") <= limits.max_prefix_selectors);
+            }
+        }
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_role_with_only_honeytokens_has_full_path_policies_without_a_prefix_selector() -> TestResult {
+    let tokens_only = role("a", &[], &["/srv/a"]);
+    let probe = kprobe_in(&tokens_only, "ostyr-fimp-a", HOOK_UNLINK)?;
+    assert_eq!(values_of(&probe, SYMLINK_NAME, "Equal"), ["/srv/a", "/srv"]);
+    assert!(values_of(&probe, SYMLINK_NAME, "Prefix").is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn honeytoken_severity_policies_are_bound_to_the_host_mount_namespace() -> TestResult {
+    let server = named_role("server")?;
+    let operator_of = |policy: &str| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        Ok(policy_of(&server, policy)?
+            .spec
+            .kprobes
+            .iter()
+            .flat_map(|probe| probe.selectors.iter())
+            .filter(|selector| !selector.match_namespaces.is_empty())
+            .map(|selector| {
+                selector
+                    .match_namespaces
+                    .iter()
+                    .map(|namespace| format!("{} {} {:?}", namespace.namespace, namespace.operator, namespace.values))
+                    .collect::<Vec<String>>()
+                    .join("; ")
+            })
+            .collect())
+    };
+    [
+        "ostyr-fimt-server",
+        "ostyr-fimu-server",
+        "ostyr-fimp-server",
+        "ostyr-fimq-server",
+        "ostyr-fimv-server",
+    ]
+    .iter()
+    .try_for_each(|policy| -> TestResult {
+        let bound = operator_of(policy)?;
+        assert!(!bound.is_empty());
+        assert!(bound.iter().all(|text| text == HOST_CONDITIONS), "{policy}");
+        Ok(())
+    })?;
+    [
+        "ostyr-fimtf-server",
+        "ostyr-fimuf-server",
+        "ostyr-fimpf-server",
+        "ostyr-fimqf-server",
+        "ostyr-fimvf-server",
+        "ostyr-fimof-server",
+    ]
+    .iter()
+    .try_for_each(|policy| -> TestResult {
+        let bound = operator_of(policy)?;
+        assert!(!bound.is_empty());
+        assert!(bound.iter().all(|text| text == MOUNT_TWIN_CONDITIONS), "{policy}");
+        Ok(())
+    })?;
+    [
+        "ostyr-fimtw-server",
+        "ostyr-fimuw-server",
+        "ostyr-fimpw-server",
+        "ostyr-fimqw-server",
+        "ostyr-fimvw-server",
+        "ostyr-fimow-server",
+    ]
+    .iter()
+    .try_for_each(|policy| -> TestResult {
+        let bound = operator_of(policy)?;
+        assert!(!bound.is_empty());
+        assert!(bound.iter().all(|text| text == USER_TWIN_CONDITIONS), "{policy}");
+        Ok(())
+    })?;
+    assert!(operator_of("ostyr-fimn-server")?.is_empty());
+    let contents = policy_of(&server, "ostyr-fim-server")?;
+    let open = contents
+        .spec
+        .kprobes
+        .iter()
+        .find(|probe| probe.call == HOOK_OPEN)
+        .ok_or("no open kprobe")?;
+    assert!(open
+        .selectors
+        .iter()
+        .all(|selector| selector.match_namespaces.len() == HOST_CONDITION_COUNT));
+    let write = contents
+        .spec
+        .kprobes
+        .iter()
+        .find(|probe| probe.call == HOOK_PERMISSION)
+        .ok_or("no write kprobe")?;
+    assert!(write.selectors.iter().all(|selector| selector.match_namespaces.is_empty()));
     Ok(())
 }

@@ -1,5 +1,7 @@
+mod captured;
 mod classify;
 mod cli;
+mod credentials;
 mod events;
 mod policy;
 mod roles;
