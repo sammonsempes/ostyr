@@ -1,12 +1,13 @@
 use crate::error::ConnectorError;
 use crate::keys::load_trusted_keys;
+use crate::skeleton::{skeleton_from_file, summary_line, write_skeleton};
 use crate::verify::{sign_directory, verify_package};
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTimeError};
 
 
-pub const USAGE: &str = "connector-manifest verify <dir> <trusted-keys.yaml> | connector-manifest sign <dir> <key-file>";
+pub const USAGE: &str = "connector-manifest verify <dir> <keys.yaml> | sign <dir> <key-file> | skeleton <openapi.json> <name> <publisher> <out-dir>";
 
 
 /// A clock before the epoch is refused: reading it as 0 would make every key look current.
@@ -33,6 +34,12 @@ pub fn run(args: &[&str], now: u64, out: &mut dyn Write) -> Result<(), Connector
         ["sign", directory, key_file] => {
             let files = sign_directory(Path::new(directory), Path::new(key_file))?;
             writeln!(out, "signed {directory} files={files}")?;
+            Ok(())
+        }
+        ["skeleton", openapi, name, publisher, out_directory] => {
+            let skeleton = skeleton_from_file(Path::new(openapi), name, publisher)?;
+            write_skeleton(Path::new(out_directory), &skeleton)?;
+            writeln!(out, "{}", summary_line(&skeleton.summary))?;
             Ok(())
         }
         _ => Err(ConnectorError::Usage(USAGE)),
