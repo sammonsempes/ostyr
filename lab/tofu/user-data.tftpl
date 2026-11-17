@@ -28,9 +28,10 @@ write_files:
     content: |
       [Service]
       Environment="HTTP_PROXY=${proxy_url}" "HTTPS_PROXY=${proxy_url}" "NO_PROXY=localhost,127.0.0.1"
-  - path: /etc/dnf/dnf.conf.d/ostyr-proxy.conf
+  - path: /etc/dnf/dnf.conf
+    append: true
     content: |
-      [main]
+
       proxy=${proxy_url}
   - path: /root/.cargo/config.toml
     content: |

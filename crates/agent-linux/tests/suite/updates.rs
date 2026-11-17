@@ -3,7 +3,7 @@ use crate::types::TestResult;
 use agent_channel::types::PauseFuture;
 use agent_linux::cursor::{open_state_dir, read_counter};
 use agent_linux::error::{SensorError, SourceError};
-use agent_linux::model::{CommandSpec, Failure, Manager, SourceSettings, UpdateEnv, UpdateSettings};
+use agent_linux::model::{CommandSpec, Failure, Manager, SourceSettings, SummaryFacts, UpdateEnv, UpdateSettings};
 use agent_linux::sensor::{run_spec_deadline, run_spec_with, run_update_command};
 use agent_linux::types::{SharedSource, SharedUpdates, SpoolLock, UpdateFuture, UpdateRunFn};
 use agent_linux::updates::{
@@ -39,6 +39,15 @@ const INVALID_BYTE: u8 = 0xff;
 
 
 const LINE_LIMIT: usize = 1_000_000;
+
+
+const MAX_EVENTS: usize = 1_000;
+
+
+const OVERSIZED_COUNTER: usize = 200;
+
+
+const COUNTER_FORMS: usize = 3;
 
 
 const FAILURE_KINDS: usize = 4;
@@ -118,6 +127,7 @@ fn fixture(run: fn(CommandSpec, Duration) -> UpdateFuture) -> Result<Fixture, Bo
         tenant: "t1".to_owned(),
         device_id: "d1".to_owned(),
         line_limit: LINE_LIMIT,
+        max_events: MAX_EVENTS,
         limits: default_limits(),
         run,
     };
@@ -298,15 +308,19 @@ fn errors_map_to_the_outcomes() -> TestResult {
         failure_of_command(SensorError::Utf8(
             String::from_utf8(vec![INVALID_BYTE]).err().ok_or("valid")?.utf8_error()
         )),
-        Failure::Exit
+        Failure::Exit(None)
     );
-    assert_eq!(failure_of_command(SensorError::Parse), Failure::Exit);
-    assert_eq!(failure_of_command(SensorError::Exit(None)), Failure::Exit);
+    assert_eq!(failure_of_command(SensorError::Parse), Failure::Exit(None));
+    assert_eq!(failure_of_command(SensorError::Exit(None)), Failure::Exit(None));
+    assert_eq!(
+        failure_of_command(SensorError::Exit(Some(CODE_AVAILABLE))),
+        Failure::Exit(Some(CODE_AVAILABLE))
+    );
     assert_eq!(failure_of_inventory(&InventoryError::Read(io::Error::other("x"))), Failure::Spawn);
     assert_eq!(failure_of_inventory(&InventoryError::TooLarge { limit: 1 }), Failure::TooLarge);
     assert_eq!(failure_of_inventory(&InventoryError::TooManyLines { limit: 1 }), Failure::TooLarge);
     assert_eq!(
-        [Failure::TimedOut, Failure::TooLarge, Failure::Exit, Failure::Spawn].map(outcome_name),
+        [Failure::TimedOut, Failure::TooLarge, Failure::Exit(None), Failure::Spawn].map(outcome_name),
         ["timed_out", "too_large", "exit", "spawn"]
     );
     assert_eq!(
@@ -490,19 +504,183 @@ async fn a_run_id_that_cannot_be_persisted_appends_nothing() -> TestResult {
     fixture.env.counter_file = PathBuf::from("/");
     assert_eq!(run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?, 0);
     assert!(!fixture.env.spool.exists());
-    fs::write(fixture.dir.path().join("cursor.updates-run"), format!("{}\n", u64::MAX))?;
     fixture.env.counter_file = fixture.dir.path().join("cursor.updates-run");
+    fs::write(&fixture.env.counter_file, format!("{}\n", u64::MAX))?;
     assert!(matches!(
         next_run_id(&fixture.env.state, &fixture.env.counter_file),
         Err(SourceError::Counter(_))
     ));
-    assert_eq!(run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?, 0);
     fs::write(&fixture.env.counter_file, "garbage")?;
     assert!(matches!(
         read_counter(&fixture.env.state, &fixture.env.counter_file),
         Err(SourceError::Counter(_))
     ));
+    fs::write(&fixture.env.counter_file, "x".repeat(OVERSIZED_COUNTER))?;
+    assert!(matches!(
+        read_counter(&fixture.env.state, &fixture.env.counter_file),
+        Err(SourceError::Counter(_))
+    ));
+    Ok(())
+}
+
+
+fn summaries(path: &Path) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    Ok(parsed(path)?
+        .into_iter()
+        .filter(|line| at(line, "/event/dataset") == Some(&Value::from("ostyr.updates.summary")))
+        .collect())
+}
+
+
+#[tokio::test]
+async fn a_corrupt_counter_is_set_aside_and_the_ids_restart_at_one() -> TestResult {
+    let corrupt_forms: [&str; COUNTER_FORMS] = ["garbage", "18446744073709551615\n", &"9".repeat(OVERSIZED_COUNTER)];
+    for form in corrupt_forms {
+        let fixture = fixture(apt_ok)?;
+        fs::write(&fixture.env.counter_file, form)?;
+        assert_eq!(run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?, 1);
+        let aside = fixture.dir.path().join(format!("cursor.updates-run.corrupt-{NOW}"));
+        assert_eq!(fs::read_to_string(&aside)?, form);
+        assert_eq!(fs::read_to_string(&fixture.env.counter_file)?, "1\n");
+        let records = parsed(&fixture.env.spool)?;
+        assert_eq!(records.len(), 1);
+        let reset = records.first().ok_or("no summary")?;
+        assert_eq!(detail(reset, "outcome"), Some(&Value::from("counter_reset")));
+        assert_eq!(detail(reset, "run_id"), Some(&Value::from(1)));
+        assert_eq!(detail(reset, "count"), Some(&Value::from(0)));
+        run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?;
+        let ids: Vec<Option<u64>> = summaries(&fixture.env.spool)?
+            .iter()
+            .map(|line| detail(line, "run_id").and_then(Value::as_u64))
+            .collect();
+        assert_eq!(ids, vec![Some(1), Some(TWO)]);
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_counter_reset_stays_visible_when_the_spool_is_full() -> TestResult {
+    let fixture = fixture(apt_ok)?;
+    fs::write(&fixture.env.counter_file, "garbage")?;
+    run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(TINY_SPOOL), 1).await?;
+    let records = parsed(&fixture.env.spool)?;
+    assert_eq!(records.len(), 1);
+    let summary = records.first().ok_or("no summary")?;
+    assert_eq!(detail(summary, "outcome"), Some(&Value::from("spool_full")));
+    assert_eq!(detail(summary, "counter_reset"), Some(&Value::from(true)));
+    assert_eq!(detail(summary, "run_id"), Some(&Value::from(1)));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_symlinked_counter_is_set_aside_like_the_other_bad_forms() -> TestResult {
+    let fixture = fixture(apt_ok)?;
+    let target = fixture.dir.path().join("target");
+    fs::write(&target, "5\n")?;
+    std::os::unix::fs::symlink(&target, &fixture.env.counter_file)?;
+    assert_eq!(run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?, 1);
+    let aside = fixture.dir.path().join(format!("cursor.updates-run.corrupt-{NOW}"));
+    assert!(fs::symlink_metadata(&aside)?.is_symlink());
+    assert_eq!(fs::read_to_string(&fixture.env.counter_file)?, "1\n");
+    assert_eq!(fs::read_to_string(&target)?, "5\n");
+    let records = parsed(&fixture.env.spool)?;
+    assert_eq!(
+        detail(records.first().ok_or("no summary")?, "outcome"),
+        Some(&Value::from("counter_reset"))
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_counter_that_is_a_directory_is_set_aside_too() -> TestResult {
+    let fixture = fixture(apt_ok)?;
+    fs::create_dir(&fixture.env.counter_file)?;
+    assert_eq!(run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?, 1);
+    assert!(fixture.dir.path().join(format!("cursor.updates-run.corrupt-{NOW}")).is_dir());
+    assert_eq!(fs::read_to_string(&fixture.env.counter_file)?, "1\n");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_counter_that_cannot_be_set_aside_drops_the_run() -> TestResult {
+    let fixture = fixture(apt_ok)?;
+    fs::write(&fixture.env.counter_file, "garbage")?;
+    let blocker = fixture.dir.path().join(format!("cursor.updates-run.corrupt-{NOW}"));
+    fs::create_dir(&blocker)?;
+    fs::write(blocker.join("held"), "x")?;
+    assert_eq!(run_rounds(&fixture, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?, 0);
     assert!(!fixture.env.spool.exists());
+    assert_eq!(fs::read_to_string(&fixture.env.counter_file)?, "garbage");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_run_over_the_event_cap_appends_the_cap_then_a_summary_with_the_omitted_count() -> TestResult {
+    let mut capped = fixture(apt_ok)?;
+    capped.env.max_events = TWO as usize;
+    run_rounds(&capped, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?;
+    let records = parsed(&capped.env.spool)?;
+    assert_eq!(records.len(), TWO as usize + 1);
+    let summary = records.last().ok_or("no summary")?;
+    assert_eq!(detail(summary, "count"), Some(&Value::from(TWO)));
+    assert_eq!(detail(summary, "truncated"), Some(&Value::from(APT_UPDATES - TWO as usize)));
+    assert_eq!(detail(summary, "outcome"), Some(&Value::from("ok")));
+    let mut roomy = fixture(apt_ok)?;
+    roomy.env.max_events = APT_UPDATES;
+    run_rounds(&roomy, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?;
+    let all = parsed(&roomy.env.spool)?;
+    assert_eq!(all.len(), APT_UPDATES + 1);
+    assert!(detail(all.last().ok_or("no summary")?, "truncated").is_none());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_spool_bound_counts_the_summary_line_under_the_lock() -> TestResult {
+    let whole = fixture(apt_ok)?;
+    run_rounds(&whole, &updates_of(Manager::Apt), &source_of(u64::MAX), 1).await?;
+    let total = fs::metadata(&whole.env.spool)?.len();
+    let exact = fixture(apt_ok)?;
+    run_rounds(&exact, &updates_of(Manager::Apt), &source_of(total), 1).await?;
+    assert_eq!(parsed(&exact.env.spool)?.len(), APT_UPDATES + 1);
+    let short = fixture(apt_ok)?;
+    run_rounds(&short, &updates_of(Manager::Apt), &source_of(total - 1), 1).await?;
+    let records = parsed(&short.env.spool)?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(detail(records.first().ok_or("no summary")?, "outcome"), Some(&Value::from("spool_full")));
+    let sending = fixture(apt_ok)?;
+    fs::write(&sending.env.sending, "x")?;
+    run_rounds(&sending, &updates_of(Manager::Apt), &source_of(total), 1).await?;
+    assert_eq!(parsed(&sending.env.spool)?.len(), 1);
+    Ok(())
+}
+
+
+fn unparsable(_: CommandSpec, _: Duration) -> UpdateFuture {
+    failing(SensorError::Parse)
+}
+
+
+#[tokio::test]
+async fn a_failed_command_summary_carries_its_exit_code() -> TestResult {
+    let coded = fixture(exited)?;
+    run_rounds(&coded, &updates_of(Manager::Dnf), &source_of(u64::MAX), 1).await?;
+    let summary = summaries(&coded.env.spool)?.pop().ok_or("no summary")?;
+    assert_eq!(detail(&summary, "outcome"), Some(&Value::from("exit")));
+    assert_eq!(detail(&summary, "exit_code"), Some(&Value::from(1)));
+    let uncoded = fixture(unparsable)?;
+    run_rounds(&uncoded, &updates_of(Manager::Dnf), &source_of(u64::MAX), 1).await?;
+    let other = summaries(&uncoded.env.spool)?.pop().ok_or("no summary")?;
+    assert_eq!(detail(&other, "outcome"), Some(&Value::from("exit")));
+    assert!(detail(&other, "exit_code").is_none());
+    let timed = fixture(timed_out)?;
+    run_rounds(&timed, &updates_of(Manager::Dnf), &source_of(u64::MAX), 1).await?;
+    assert!(detail(&summaries(&timed.env.spool)?.pop().ok_or("no summary")?, "exit_code").is_none());
     Ok(())
 }
 
@@ -574,7 +752,17 @@ fn an_event_has_only_the_fields_it_knows() -> TestResult {
     assert_eq!(at(&full_line, "/package/version"), Some(&Value::from("1")));
     assert_eq!(at(&full_line, "/ostyr/update/severity"), Some(&Value::from("important")));
     let skipped: SkipCounts = [(SkipReason::Malformed, STRING_ROUNDS)].into_iter().collect();
-    let summary: Value = serde_json::from_str(&summary_line(RUN_ID, "ok", 1, &skipped, 0, None))?;
+    let facts = SummaryFacts {
+        run_id: RUN_ID,
+        outcome: "ok",
+        count: 1,
+        oversized: 0,
+        truncated: 0,
+        exit_code: None,
+        lists_age_seconds: None,
+        counter_reset: false,
+    };
+    let summary: Value = serde_json::from_str(&summary_line(&facts, &skipped))?;
     assert_eq!(at(&summary, "/ostyr/update/skipped/malformed"), Some(&Value::from(STRING_ROUNDS)));
     assert!(at(&summary, "/ostyr/update/skipped/event_too_long").is_none());
     Ok(())

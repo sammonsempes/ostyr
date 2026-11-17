@@ -120,11 +120,13 @@ fn write_files(dir: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std:
             root = dir.display()
         ),
     )?;
+    fs::write(dir.join("process-cred"), "true")?;
     let config = dir.join("linux.yaml");
     fs::write(
         &config,
         format!(
-            "agent_file: {root}/agent.yaml\nexport_path: {root}/export.json\ncursor_file: {root}/cursor\naudit_file: {root}/linux-audit\nsystemctl_path: {root}/no-systemctl\n",
+            "agent_file: {root}/agent.yaml\nexport_path: {root}/export.json\ncursor_file: {root}/cursor\naudit_file: {root}/linux-audit\n\
+             systemctl_path: {root}/no-systemctl\ncredentials_path: {root}/process-cred\n",
             root = dir.display()
         ),
     )?;

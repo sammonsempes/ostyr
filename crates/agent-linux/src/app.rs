@@ -6,7 +6,7 @@ use crate::run::run_source;
 use crate::sensor::{monotonic_seconds, run_command, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
 use crate::types::SpoolLock;
-use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX};
+use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVENTS_PER_RUN};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
@@ -77,6 +77,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
         spool: agent.spool_file.clone(),
         lock: Arc::clone(&paths.lock),
         tenant: agent.tenant.clone(),
+        credentials_file: file.credentials_path.clone(),
         run: run_command,
     };
     let sensor_audit = shared_log_audit(&log);
@@ -105,6 +106,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
         tenant: agent.tenant.clone(),
         device_id: agent.agent_id.clone(),
         line_limit: line_limit(&agent),
+        max_events: MAX_UPDATE_EVENTS_PER_RUN,
         limits: default_limits(),
         run: run_update_command,
     };

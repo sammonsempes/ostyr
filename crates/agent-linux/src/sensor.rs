@@ -9,9 +9,10 @@ use rustix::process::{kill_process_group, Pid, Signal};
 use rustix::time::{clock_gettime, ClockId};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Read};
 use std::iter::once;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -24,6 +25,15 @@ pub const SENSOR_NAME: &str = "tetragon";
 
 
 pub const UNIT_NAME: &str = "tetragon.service";
+
+
+pub const CREDENTIALS_CAP: u64 = 64;
+
+
+pub const CREDENTIALS_TRUE: [&str; 6] = ["1", "t", "T", "TRUE", "true", "True"];
+
+
+pub const CREDENTIALS_OFF: &str = "credentials_off";
 
 
 pub const AUDIT_MODULE: &str = "agent_linux_sensor";
@@ -151,6 +161,7 @@ pub struct SensorEnv {
     pub spool: PathBuf,
     pub lock: SpoolLock,
     pub tenant: String,
+    pub credentials_file: PathBuf,
     pub run: RunFn,
 }
 
@@ -464,6 +475,68 @@ pub fn step(supervisor: &Supervisor, observation: &Observation, now: u64, wall: 
 }
 
 
+/// Why Tetragon does not export `process_credentials`: its `enable-process-cred` file is absent, holds anything but `true`, or cannot be read; `None` when it holds `true`.
+pub fn credentials_fault(path: &Path) -> Option<&'static str> {
+    match read_credentials(path) {
+        Ok(Some(bytes)) if is_go_true(bytes.trim_ascii()) => None,
+        Ok(Some(_)) => Some("disabled"),
+        Ok(None) => Some("absent"),
+        Err(error) => {
+            tracing::warn!(%error, "tetragon credentials setting unreadable");
+            Some("unreadable")
+        }
+    }
+}
+
+
+/// The true forms of Go's `strconv.ParseBool`, which Tetragon applies to the file; the flag and `tetragon.yaml` forms of the setting are not seen.
+pub fn is_go_true(text: &[u8]) -> bool {
+    CREDENTIALS_TRUE.iter().any(|form| form.as_bytes() == text)
+}
+
+
+/// Opened without following a symlink or blocking on a FIFO; absent is `None`, anything but a regular file of at most `CREDENTIALS_CAP` bytes is an error.
+pub fn read_credentials(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path) {
+        Ok(file) if file.metadata()?.is_file() => {
+            let mut bytes = Vec::new();
+            file.take(CREDENTIALS_CAP + 1).read_to_end(&mut bytes)?;
+            (bytes.len() as u64 <= CREDENTIALS_CAP)
+                .then_some(Some(bytes))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "credentials setting too large"))
+        }
+        Ok(_) => Err(io::Error::new(io::ErrorKind::InvalidInput, "credentials setting is not a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+
+pub fn credentials_event_line(reason: &str) -> String {
+    json!({
+        "event": {"kind": "agent.sensor"},
+        "agent": {"sensor": {"name": SENSOR_NAME, "state": CREDENTIALS_OFF, "reason": reason}},
+    })
+    .to_string()
+}
+
+
+/// At start: spools one `credentials_off` sensor event when Tetragon is not set to export process credentials (the agent never writes Tetragon's configuration).
+pub async fn check_credentials(env: &SensorEnv) -> Result<(), SourceError> {
+    let path = env.credentials_file.clone();
+    let fault = tokio::task::spawn_blocking(move || credentials_fault(&path)).await?;
+    match fault {
+        Some(reason) => {
+            tracing::warn!(reason, "tetragon does not export process credentials, the honeytoken rule is blind");
+            let (lock, spool, line) = (env.lock.clone(), env.spool.clone(), credentials_event_line(reason));
+            tokio::task::spawn_blocking(move || append_locked(&lock, once(Ok(line)), &spool)).await??;
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+
 /// The ECS event of a transition (kind `agent.sensor`); the tenant is the channel identity's.
 pub fn sensor_event_line(event: &SensorEvent) -> String {
     json!({
@@ -572,6 +645,7 @@ pub async fn run_sensor(
     monotonic: &ClockFn,
     wall: &ClockFn,
 ) -> Result<Supervisor, SourceError> {
+    check_credentials(env).await?;
     let mut supervisor = Supervisor::default();
     for _ in 0..max_ticks {
         let settings = shared.load_full();

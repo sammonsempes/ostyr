@@ -1,7 +1,7 @@
 use crate::cursor::write_cursor;
 use crate::error::SourceError;
 use crate::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, StateDir, Stop};
-use crate::spool::append_locked;
+use crate::spool::append_within;
 use crate::types::StepFn;
 use core_export::ecs::to_json;
 use ecs_normalise::convert::Outcome;
@@ -273,20 +273,35 @@ pub fn read_pass(file: &File, cursor: &Cursor, pending: u64, context: &PassConte
 }
 
 
-/// Reads, appends the events to the spool, then moves the cursor (a crash between replays, never skips); a read failure is `Undrained`.
+/// Reads, then settles the pass (append under the lock, then the cursor: a crash between replays, never skips); a read failure is `Undrained`.
 pub fn drain(file: &File, cursor: &mut Cursor, paths: &Paths, settings: &SourceSettings, line_limit: usize) -> Result<Report, SourceError> {
     let pending = file_len(&paths.spool)? + file_len(&paths.sending)?;
     let context = PassContext { settings, line_limit };
     let pass = read_pass(file, cursor, pending, &context).map_err(|error| SourceError::Undrained(Box::new(error)))?;
-    append_locked(&paths.lock, pass.lines.into_iter().map(Ok::<String, io::Error>), &paths.spool)?;
-    cursor.offset = pass.offset;
-    cursor.skipping = pass.skipping;
-    let stop = if pass.report.stop == Stop::Running {
-        Stop::Capped
+    settle_pass(cursor, paths, settings, pass)
+}
+
+
+/// Appends the pass under the spool lock and moves the cursor; when the spool filled meanwhile nothing is written or moved and the poll reports `Stop::Full`.
+pub fn settle_pass(cursor: &mut Cursor, paths: &Paths, settings: &SourceSettings, pass: Pass) -> Result<Report, SourceError> {
+    let last_bytes = pass.lines.last().map_or(0, |line| line.len() as u64 + 1);
+    let bound = settings.max_spool_bytes.saturating_add(last_bytes).saturating_sub(1);
+    let fitted = append_within(&paths.lock, &paths.spool, &paths.sending, bound, &pass.lines)?;
+    if fitted {
+        cursor.offset = pass.offset;
+        cursor.skipping = pass.skipping;
+        let stop = if pass.report.stop == Stop::Running {
+            Stop::Capped
+        } else {
+            pass.report.stop
+        };
+        Ok(Report { stop, ..pass.report })
     } else {
-        pass.report.stop
-    };
-    Ok(Report { stop, ..pass.report })
+        Ok(Report {
+            stop: Stop::Full,
+            ..Report::default()
+        })
+    }
 }
 
 
