@@ -2,8 +2,10 @@ use crate::error::ConfigError;
 use serde::de::{DeserializeOwned, Error as _};
 use serde_path_to_error::{Path as FieldPath, Segment};
 use serde_saphyr::{Error as YamlError, ExternalMessageSource, Location};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 
@@ -38,9 +40,36 @@ pub fn read_text(reader: &mut dyn Read, file: &str) -> Result<String, ConfigErro
 }
 
 
+pub const NOT_REGULAR_REASON: &str = "not a regular file";
+
+
+pub fn open_regular(path: &Path, file: &str) -> Result<File, ConfigError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let (handle, metadata) = options
+        .open(path)
+        .and_then(|opened| opened.metadata().map(|described| (opened, described)))
+        .map_err(|source| ConfigError::Io {
+            file: file.to_string(),
+            source,
+        })?;
+    if metadata.is_file() {
+        Ok(handle)
+    } else {
+        Err(ConfigError::WatchedFile {
+            file: file.to_string(),
+            reason: NOT_REGULAR_REASON.to_string(),
+        })
+    }
+}
+
+
+/// Opens without blocking (a FIFO at the path cannot hang the reader) and refuses a non-regular file on the opened handle.
 pub fn read_file(path: &Path) -> Result<String, ConfigError> {
     let file = path.display().to_string();
-    let mut handle = File::open(path).map_err(|source| ConfigError::Io { file: file.clone(), source })?;
+    let mut handle = open_regular(path, &file)?;
     read_text(&mut handle, &file)
 }
 

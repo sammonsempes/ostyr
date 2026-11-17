@@ -268,3 +268,21 @@ fn an_over_cap_file_cut_inside_a_character_is_too_large_and_a_huge_cap_does_not_
     assert!(matches!(bad, ConfigError::Io { .. }));
     Ok(())
 }
+
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_without_blocking_and_a_missing_file_is_io() -> TestResult {
+    use core_config::parse::{read_file, NOT_REGULAR_REASON};
+    let dir = tempfile::tempdir()?;
+    let fifo = dir.path().join("fifo.yaml");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(matches!(read_file(&fifo), Err(ConfigError::WatchedFile { reason, .. }) if reason == NOT_REGULAR_REASON));
+    assert!(matches!(load_module(&fifo), Err(ConfigError::WatchedFile { .. })));
+    assert!(matches!(read_file(&dir.path().join("absent")), Err(ConfigError::Io { .. })));
+    assert!(matches!(
+        read_file(dir.path()),
+        Err(ConfigError::Io { .. }) | Err(ConfigError::WatchedFile { .. })
+    ));
+    Ok(())
+}

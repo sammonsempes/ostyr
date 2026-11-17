@@ -1,4 +1,4 @@
-//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb, risk); `risk` also needs `settings.risk.weights_file` through one core-api process; `settings.pg_settings` names the core-pg settings file.
+//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb, risk); `risk` also needs `settings.risk.weights_file`.
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
