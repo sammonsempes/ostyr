@@ -150,6 +150,7 @@ dependencies = [
  "flate2",
  "libc",
  "parking_lot",
+ "patch-inventory",
  "rustix 1.1.6",
  "serde",
  "serde_json",

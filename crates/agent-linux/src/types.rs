@@ -1,13 +1,15 @@
 use crate::error::CapabilityError;
 use crate::error::IsolationError;
 use crate::error::SensorError;
-use crate::model::{Paths, SensorSettings, SourceSettings};
+use crate::model::{CommandSpec, Failure, Paths, SensorSettings, SourceSettings, UpdateSettings};
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
+use patch_inventory::model::Inventory;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 
 pub type SharedSource = Arc<ArcSwap<SourceSettings>>;
@@ -47,3 +49,17 @@ pub type NftFn = fn(PathBuf, Vec<String>) -> NftFuture;
 
 /// Reads the file system statistics of a path; a test double injects a canned answer or a failure.
 pub type StatFn = fn(&Path) -> rustix::io::Result<rustix::fs::StatVfs>;
+
+
+pub type SharedUpdates = Arc<ArcSwap<UpdateSettings>>;
+
+
+pub type UpdateFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, SensorError>> + Send>>;
+
+
+/// Runs one command under a deadline and returns its bounded standard output; a test double injects a canned answer.
+pub type UpdateRunFn = fn(CommandSpec, Duration) -> UpdateFuture;
+
+
+/// What an update run found: the inventory, or why it found nothing.
+pub type Collected = Result<Inventory, Failure>;

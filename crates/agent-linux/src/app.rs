@@ -1,10 +1,12 @@
 use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
+use crate::cursor::open_state_dir;
 use crate::error::SourceError;
-use crate::model::{LinuxFile, Paths, Totals, LINUX_MODULE};
+use crate::model::{LinuxFile, Paths, Totals, UpdateEnv, LINUX_MODULE};
 use crate::run::run_source;
-use crate::sensor::{monotonic_seconds, run_command, run_sensor, SensorEnv};
+use crate::sensor::{monotonic_seconds, run_command, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
 use crate::types::SpoolLock;
+use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
@@ -12,6 +14,7 @@ use agent_channel::types::PauseFn;
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
+use patch_inventory::limits::default_limits;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +59,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
         .is_absolute()
         .then_some(())
         .ok_or_else(|| SourceError::NotAbsolute(file.systemctl_path.clone()))?;
-    let (engine, shared, sensor_settings) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
+    let (engine, shared, sensor_settings, update_settings) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
     let reloadable = Arc::new(engine);
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
     let _signals = keep_signals(Arc::clone(&reloadable))?;
@@ -90,6 +93,26 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
         .await
         .map(|_| ())
     };
-    let (totals, runs, ()) = tokio::try_join!(source, cycles, sensor)?;
+    let cursor_file = file.cursor_file.clone();
+    let state = tokio::task::spawn_blocking(move || open_state_dir(&cursor_file)).await??;
+    let update_env = UpdateEnv {
+        lists_dir: APT_LISTS_DIR.into(),
+        spool: paths.spool.clone(),
+        sending: paths.sending.clone(),
+        counter_file: suffixed(&file.cursor_file, COUNTER_SUFFIX),
+        state: Arc::new(state),
+        lock: Arc::clone(&paths.lock),
+        tenant: agent.tenant.clone(),
+        device_id: agent.agent_id.clone(),
+        line_limit: line_limit(&agent),
+        limits: default_limits(),
+        run: run_update_command,
+    };
+    let updates = async {
+        run_updates(&update_settings, &shared, &update_env, max_polls, pause, &monotonic_seconds, &now_seconds)
+            .await
+            .map(|_| ())
+    };
+    let (totals, runs, (), ()) = tokio::try_join!(source, cycles, sensor, updates)?;
     Ok(Totals { agent_runs: runs, ..totals })
 }

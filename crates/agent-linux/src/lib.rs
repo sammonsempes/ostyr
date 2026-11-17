@@ -28,3 +28,5 @@ pub mod settings;
 pub mod spool;
 #[cfg(unix)]
 pub mod types;
+#[cfg(unix)]
+pub mod updates;

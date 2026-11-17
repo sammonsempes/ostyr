@@ -70,6 +70,8 @@ pub enum SourceError {
     Settings(String),
     #[error("{} is not a regular file", .0.display())]
     NotRegular(PathBuf),
+    #[error("run counter file {} does not hold a number below the maximum", .0.display())]
+    Counter(PathBuf),
     #[error("cursor file {} does not hold `<dev> <ino> <offset>`", .0.display())]
     Cursor(PathBuf),
 }
