@@ -36,6 +36,10 @@ for template in "$IMAGES_DIR"/*.pkr.hcl; do
         touch "$work_dir/cloudbase.msi"
         extra_vars=(-var "drivers_dir=$work_dir/drivers" -var "cloudbase_msi=$work_dir/cloudbase.msi")
     fi
+    if [[ "$(basename "$template")" == datastore.pkr.hcl ]]; then
+        touch "$work_dir/garage-binary"
+        extra_vars=(-var "garage_binary=$work_dir/garage-binary")
+    fi
     check "packer validate $(basename "$template")" packer validate \
         -var "ssh_private_key_file=$work_dir/key" -var "ssh_public_key=$(cat "$work_dir/key.pub")" "${extra_vars[@]}" "$template"
 done
