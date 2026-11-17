@@ -712,7 +712,7 @@ fn a_claim_that_never_gets_the_lock_defers_and_a_later_one_succeeds() -> TestRes
     assert_eq!(pauses, ATTEMPTS);
     assert!(spool.exists() && !sending.exists() && !file.sequence_file.exists());
     drop(held);
-    claim_fresh_with(&file, &sending, ATTEMPTS, &mut || ())?;
+    claim_fresh_with(&file, &sending, WAIT_ATTEMPTS, &mut pause_between_lock_attempts)?;
     assert_eq!(fs::read_to_string(&sending)?, "a\n");
     Ok(())
 }
