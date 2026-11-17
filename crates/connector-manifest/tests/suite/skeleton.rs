@@ -6,12 +6,18 @@ use connector_manifest::model::{
     MAX_URL_BYTES,
 };
 use connector_manifest::openapi::{openapi_error, parse_document};
-use connector_manifest::output::{split_target, write_skeleton, write_skeleton_with};
+use connector_manifest::output::{
+    create_package, create_package_with, open_parent, split_target, write_skeleton, write_skeleton_with, write_staged_with,
+};
 use connector_manifest::skeleton::{build_skeleton, fallback_shape, skeleton_from_file, valid_path, valid_url, Skeleton};
+use connector_manifest::verify::write_all_bytes;
+use rustix::fs::OFlags;
+use rustix::io::Errno;
 use serde::Deserialize;
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -258,6 +264,7 @@ fn the_server_count_is_bounded() -> TestResult {
         generate(&servers(MAX_OPENAPI_SERVERS + 1, ",@")),
         Err(ConnectorError::OpenApi { .. })
     ));
+    assert!(matches!(generate(&document("", ",\"servers\":[@]")), Err(ConnectorError::OpenApi { .. })));
     Ok(())
 }
 
@@ -632,7 +639,7 @@ fn a_failed_cleanup_is_logged_and_does_not_panic() -> TestResult {
 fn an_unreadable_entry_inside_the_cap_is_a_category_error() -> TestResult {
     let syntax = generate(&document("\"/a\":@", ""));
     assert!(matches!(syntax, Err(ConnectorError::OpenApi { .. })));
-    let scheme = generate(&document("", ",\"components\":{\"securitySchemes\":{\"x\":5}}"));
+    let scheme = generate(&document("", ",\"components\":{\"securitySchemes\":{\"x\":5,\"y\":@}}"));
     assert!(matches!(scheme, Err(ConnectorError::OpenApi { .. })));
     Ok(())
 }
@@ -719,8 +726,8 @@ fn an_element_that_repeats_a_bound_message_is_skipped_alone_not_taken_for_a_boun
     assert_eq!(skeleton.summary.bad_operation, 1);
     assert_eq!(skeleton.summary.bad_parameter, 1);
     assert_eq!(skeleton.summary.operations, SPOOF_OPERATION_COUNT);
-    let top = generate(&document("", ",\"servers\":[\"too many servers\"]"));
-    assert!(matches!(top, Err(ConnectorError::OpenApi { .. })));
+    let top = generate(&document("", ",\"servers\":[\"too many servers\"]"))?;
+    assert_eq!(top.summary.bad_server, 1);
     Ok(())
 }
 
@@ -743,5 +750,59 @@ fn a_generated_shaped_id_is_counted_and_a_userinfo_url_is_refused() -> TestResul
     assert_eq!(skeleton.summary.bad_operation_id, 1);
     assert!(!valid_url("https://user:pass@a.example"));
     assert!(!valid_url("https://a.example@evil.example"));
+    Ok(())
+}
+
+
+#[test]
+fn a_wrong_typed_server_or_scheme_is_skipped_alone_and_counted() -> TestResult {
+    let servers = ",\"servers\":[\"x\",{\"url\":\"https://ok.example\"}]";
+    let schemes = ",\"components\":{\"securitySchemes\":{\"a\":\"x\",\"b\":{\"type\":\"http\"}}}";
+    let skeleton = generate(&document("", &format!("{servers}{schemes}")))?;
+    assert_eq!(skeleton.summary.bad_server, 1);
+    assert_eq!(skeleton.summary.bad_scheme, 1);
+    assert!(skeleton.operations.contains("https://ok.example"));
+    assert!(skeleton.manifest.contains("secret_b"));
+    Ok(())
+}
+
+
+#[test]
+fn a_duplicate_valid_server_is_collapsed_and_not_counted() -> TestResult {
+    let servers = ",\"servers\":[{\"url\":\"https://a.example\"},{\"url\":\"https://a.example\"},{\"url\":\"ftp://b.example\"}]";
+    let skeleton = generate(&document("", servers))?;
+    assert_eq!(skeleton.summary.bad_server, 1);
+    assert_eq!(skeleton.operations.matches("https://a.example").count(), 1);
+    Ok(())
+}
+
+
+fn refusing_opener(_parent: BorrowedFd<'_>, _name: &str, _flags: OFlags) -> Result<OwnedFd, Errno> {
+    Err(Errno::IO)
+}
+
+
+#[test]
+fn the_files_land_in_the_created_directory_even_if_its_name_is_swapped() -> TestResult {
+    let parent = TempDir::new()?;
+    let target = parent.path().join("package");
+    let held = open_parent(parent.path())?;
+    let package = create_package(held, "package".to_owned(), "package")?;
+    fs::rename(&target, parent.path().join("moved"))?;
+    fs::create_dir(&target)?;
+    write_staged_with(write_all_bytes, &package, "connector.yaml", "text")?;
+    assert_eq!(fs::read_to_string(parent.path().join("moved").join("connector.yaml"))?, "text");
+    assert_eq!(fs::read_dir(&target)?.count(), 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_that_cannot_be_held_is_removed_again() -> TestResult {
+    let parent = TempDir::new()?;
+    let held = open_parent(parent.path())?;
+    let result = create_package_with(refusing_opener, held, "package".to_owned(), "package");
+    assert!(matches!(result, Err(ConnectorError::Io { .. })));
+    assert_eq!(fs::read_dir(parent.path())?.count(), 0);
     Ok(())
 }

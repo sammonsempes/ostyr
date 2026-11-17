@@ -2,7 +2,6 @@ use crate::model::{
     ActionSpec, ConfigField, RawKey, Right, MAX_ACTIONS, MAX_CONFIG_FIELDS, MAX_OPENAPI_PARAMETERS, MAX_OPENAPI_PATHS, MAX_OPENAPI_SCHEMES,
     MAX_OPENAPI_SERVERS, MAX_RIGHTS, MAX_TARGETS, MAX_TRUSTED_KEYS, MAX_VERSION_BYTES,
 };
-use crate::openapi::{Scheme, Server};
 use semver::Version;
 use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess};
 use serde_json::value::RawValue;
@@ -99,7 +98,7 @@ pub fn paths<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Bou
 }
 
 
-pub fn schemes<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Bounded<(String, Scheme)>, Source::Error> {
+pub fn schemes<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Bounded<(String, Box<RawValue>)>, Source::Error> {
     bounded_entries_outcome(deserializer, MAX_OPENAPI_SCHEMES)
 }
 
@@ -109,7 +108,7 @@ pub fn parameters<'de, Source: Deserializer<'de>>(deserializer: Source) -> Resul
 }
 
 
-pub fn servers<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Bounded<Server>, Source::Error> {
+pub fn servers<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Bounded<Box<RawValue>>, Source::Error> {
     bounded_seq_outcome(deserializer, MAX_OPENAPI_SERVERS)
 }
 

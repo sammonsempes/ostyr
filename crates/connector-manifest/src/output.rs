@@ -8,13 +8,14 @@ use std::path::Path;
 use {
     crate::model::{DIRECTORY_MODE, FILE_MODE},
     crate::package::io_at,
-    crate::scan::errno_error,
+    crate::scan::{errno_error, open_at},
+    crate::types::OpenFn,
     core_config::trusted_dir::open_trusted_dir,
     rustix::fs::{mkdirat, openat, renameat, unlinkat, AtFlags, Mode, OFlags},
     rustix::io::Errno,
     rustix::process::geteuid,
     std::fs::File,
-    std::os::fd::OwnedFd,
+    std::os::fd::{AsFd, OwnedFd},
     std::path::PathBuf,
 };
 
@@ -41,6 +42,7 @@ pub fn write_skeleton_with(_writer: WriteFn, _directory: &Path, _skeleton: &Skel
 #[derive(Debug)]
 pub struct Package {
     pub parent: OwnedFd,
+    pub directory: OwnedFd,
     pub name: String,
     pub complete: bool,
 }
@@ -53,16 +55,16 @@ pub fn report_failure(errno: Errno) {
 }
 
 
-/// The files written and the directory, relative to the held parent; a missing entry is fine, any other failure is returned.
+/// The files through the held directory, then the directory through the held parent; a missing entry is fine, any other failure is returned.
 #[cfg(target_os = "linux")]
-pub fn remove_package(parent: &OwnedFd, name: &str) -> Vec<Errno> {
+pub fn remove_package(parent: &OwnedFd, directory: &OwnedFd, name: &str) -> Vec<Errno> {
     let staged: Vec<String> = FILES.iter().map(|file| format!("{file}{STAGED_SUFFIX}")).collect();
     FILES
         .iter()
-        .map(|file| format!("{name}/{file}"))
-        .chain(staged.iter().map(|file| format!("{name}/{file}")))
-        .map(|path| unlinkat(parent, path.as_str(), AtFlags::empty()))
-        .chain(std::iter::once(name).map(|directory| unlinkat(parent, directory, AtFlags::REMOVEDIR)))
+        .map(|file| (*file).to_owned())
+        .chain(staged)
+        .map(|file| unlinkat(directory, file.as_str(), AtFlags::empty()))
+        .chain(std::iter::once(name).map(|directory_name| unlinkat(parent, directory_name, AtFlags::REMOVEDIR)))
         .filter_map(Result::err)
         .filter(|errno| *errno != Errno::NOENT)
         .collect()
@@ -75,7 +77,7 @@ impl Drop for Package {
         let failures = if self.complete {
             Vec::new()
         } else {
-            remove_package(&self.parent, &self.name)
+            remove_package(&self.parent, &self.directory, &self.name)
         };
         failures.into_iter().for_each(report_failure);
     }
@@ -101,17 +103,37 @@ pub const CREATE_FLAGS: OFlags = OFlags::WRONLY
 
 
 #[cfg(target_os = "linux")]
+pub const DIRECTORY_FLAGS: OFlags = OFlags::DIRECTORY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC).union(OFlags::RDONLY);
+
+
+#[cfg(target_os = "linux")]
 pub fn open_parent(path: &Path) -> Result<OwnedFd, ConnectorError> {
     Ok(open_trusted_dir(path, geteuid().as_raw())?)
 }
 
 
-/// `mkdirat` fails on any existing name, a symbolic link included, so there is no check-then-create window.
+/// `mkdirat` fails on any existing name, a symbolic link included; the new directory is then held, and every file is made relative to that handle.
 #[cfg(target_os = "linux")]
 pub fn create_package(parent: OwnedFd, name: String, label: &str) -> Result<Package, ConnectorError> {
+    create_package_with(open_at, parent, name, label)
+}
+
+
+/// A directory that cannot be held is removed again before the error is returned; the opener is injected.
+#[cfg(target_os = "linux")]
+pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label: &str) -> Result<Package, ConnectorError> {
     mkdirat(&parent, name.as_str(), Mode::from_raw_mode(DIRECTORY_MODE)).map_err(errno_error(label))?;
+    let held = opener(parent.as_fd(), name.as_str(), DIRECTORY_FLAGS);
+    held.as_ref()
+        .err()
+        .map(|_| unlinkat(&parent, name.as_str(), AtFlags::REMOVEDIR))
+        .and_then(Result::err)
+        .into_iter()
+        .for_each(report_failure);
+    let directory = held.map_err(errno_error(label))?;
     Ok(Package {
         parent,
+        directory,
         name,
         complete: false,
     })
@@ -121,12 +143,11 @@ pub fn create_package(parent: OwnedFd, name: String, label: &str) -> Result<Pack
 /// Staged in the new directory under a name only this process creates (`O_EXCL`), then renamed within it; the writer is injected.
 #[cfg(target_os = "linux")]
 pub fn write_staged_with(writer: WriteFn, package: &Package, file_name: &str, text: &str) -> Result<(), ConnectorError> {
-    let target = format!("{}/{file_name}", package.name);
-    let staged = format!("{target}{STAGED_SUFFIX}");
+    let staged = format!("{file_name}{STAGED_SUFFIX}");
     let mut file =
-        File::from(openat(&package.parent, staged.as_str(), CREATE_FLAGS, Mode::from_raw_mode(FILE_MODE)).map_err(errno_error(file_name))?);
+        File::from(openat(&package.directory, staged.as_str(), CREATE_FLAGS, Mode::from_raw_mode(FILE_MODE)).map_err(errno_error(file_name))?);
     writer(&mut file, text.as_bytes()).map_err(io_at(file_name))?;
-    renameat(&package.parent, staged.as_str(), &package.parent, target.as_str()).map_err(errno_error(file_name))
+    renameat(&package.directory, staged.as_str(), &package.directory, file_name).map_err(errno_error(file_name))
 }
 
 
