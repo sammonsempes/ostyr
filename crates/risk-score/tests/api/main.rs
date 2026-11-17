@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use core_api::model::{ApiError, ApiIdentity, Requirement};
 use core_api::routes::route_key;
 use core_auth::rbac::PERMISSION_ALERTS_READ;
-use core_config::reload::{reload, ReloadOutcome};
+use core_config::reload::{current_config, reload, ReloadOutcome};
 use core_pg::scope::tenant_of;
 use fixture::{
     calls, fixture, fixture_with, lock, outcome_of, scope, score, set_mode, set_outcome, ticking_clock, weights_engine, Mode, Script, ANALYST,
@@ -22,7 +22,7 @@ use risk_score::api::{
 use risk_score::api_model::{Failure, Joined, RiskState, Unavailable};
 use risk_score::backend::{system_clock, system_now};
 use risk_score::cache::{
-    await_flight, default_bounds, is_live, join, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS,
+    await_flight, default_bounds, finish, is_live, join, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS,
 };
 use risk_score::model::EntityKind;
 use risk_score::source::{Limit, Truncated};
@@ -571,7 +571,7 @@ async fn settle() {
 
 
 #[tokio::test(start_paused = true)]
-async fn stale_and_idle_entries_are_removed_and_the_map_stays_bounded() -> TestResult {
+async fn a_flight_survives_a_dropped_request_while_stale_and_idle_entries_are_removed_and_the_map_stays_bounded() -> TestResult {
     let fx = fixture_with(capped)?;
     for index in 0..MANY_TENANTS {
         scores_for(&fx.risk, scope(&format!("tenant-{index}"))?).await?;
@@ -787,5 +787,72 @@ fn the_weights_state_names_every_value() -> TestResult {
     let state = weights_state(&core_config::reload::current_config(&engine));
     assert_eq!(state.len(), EIGHT);
     assert_eq!(state.get("full_score_points").map(String::as_str), Some("100"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_request_after_a_swap_never_joins_a_flight_of_the_old_weights() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Gated);
+    let old_state = fx.risk.clone();
+    let old_scope = scope(TENANT)?;
+    let old_request = tokio::spawn(async move { scores_for(&old_state, old_scope).await });
+    fx.script.entered.acquire().await?.forget();
+    std::fs::write(&fx.weights_file, SWAPPED_TEXT)?;
+    assert!(matches!(reload(&fx.engine), ReloadOutcome::Applied { .. }));
+    let new_state = fx.risk.clone();
+    let new_scope = scope(TENANT)?;
+    let new_request = tokio::spawn(async move { scores_for(&new_state, new_scope).await });
+    fx.script.entered.acquire().await?.forget();
+    assert_eq!(lock(&fx.script.weights_seen).as_slice(), [FULL_POINTS, SWAPPED_POINTS]);
+    fx.script.gate.add_permits(1);
+    let old_result = old_request.await??;
+    settle().await;
+    let flying = lock(&fx.risk.slots)
+        .get(TENANT)
+        .map(|entry| (entry.cached.is_none(), entry.flight.is_some()));
+    assert_eq!(flying, Some((true, true)));
+    fx.script.gate.add_permits(1);
+    let new_result = new_request.await??;
+    settle().await;
+    assert!(!Arc::ptr_eq(&old_result, &new_result));
+    assert!(Arc::ptr_eq(&new_result, &scores_for(&fx.risk, scope(TENANT)?).await?));
+    assert_eq!(calls(&fx.script), TWO);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_superseded_flight_ending_after_its_successor_leaves_the_cached_result() -> TestResult {
+    let fx = fixture()?;
+    let old_weights = current_config(&fx.engine);
+    let old_result = scores_for(&fx.risk, scope(TENANT)?).await?;
+    std::fs::write(&fx.weights_file, SWAPPED_TEXT)?;
+    assert!(matches!(reload(&fx.engine), ReloadOutcome::Applied { .. }));
+    let new_result = scores_for(&fx.risk, scope(TENANT)?).await?;
+    finish(&fx.risk, TENANT, old_weights, tokio::time::Instant::now(), &Ok(old_result));
+    assert!(Arc::ptr_eq(&new_result, &scores_for(&fx.risk, scope(TENANT)?).await?));
+    assert_eq!(calls(&fx.script), TWO);
+    Ok(())
+}
+
+
+#[test]
+fn a_join_on_a_shut_down_runtime_releases_the_slot_lock_before_spawning() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Hang);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let handle = runtime.handle().clone();
+    drop(runtime);
+    let weights = core_config::reload::current_config(&fx.engine);
+    let joined = {
+        let _entered = handle.enter();
+        join(&fx.risk, scope(TENANT)?, &weights)
+    };
+    let receiver = flight_of(joined).ok_or("no flight")?;
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    let waiter = tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build()?;
+    assert_eq!(waiter.block_on(await_flight(&fx.risk, receiver)), Err(Unavailable));
     Ok(())
 }
