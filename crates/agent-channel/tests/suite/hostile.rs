@@ -200,9 +200,15 @@ async fn a_server_holding_the_stream_open_without_acknowledging_ends_in_give_up(
     };
     let pause = |_delay: Duration| -> PauseFuture { Box::pin(async {}) };
     let delivery = tokio::spawn(async move { deliver_events(&dial, &pause, batches(1)).await });
-    bounded(entered.notified()).await?;
+    bounded(entered.notified())
+        .await
+        .map_err(|_| "elapsed: waiting for the stalled sink to be entered")?;
     tokio::time::pause();
-    let outcome = timeout(Duration::from_secs(LONG_WAIT_SECONDS), delivery).await??;
+    let give_up_seconds = ATTEMPT_TIMEOUT_SECONDS * (u64::from(MAX_RECONNECT_ATTEMPTS) + 1);
+    let joined = timeout(Duration::from_secs(give_up_seconds), delivery)
+        .await
+        .map_err(|_| "elapsed: waiting for the delivery to give up")?;
+    let outcome = joined?;
     assert!(matches!(outcome, Err(ChannelError::RetriesExhausted { .. })), "outcome: {outcome:?}");
     assert_eq!(dials.load(Ordering::SeqCst), MAX_RECONNECT_ATTEMPTS, "dials");
     Ok(())

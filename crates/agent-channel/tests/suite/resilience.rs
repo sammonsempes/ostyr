@@ -1,6 +1,6 @@
 use crate::bounds::Capture;
 use crate::harness::{
-    attempt, bounded, client_paths, empty_revocation, init_logging, make_platform, scoped_logging, server_paths, start_server_on, start_server_state,
+    attempt, bounded, client_paths, empty_revocation, init_logging, make_platform, scoped_logging, server_paths, start_server_state,
     start_single_state, stop_server,
 };
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::sleep;
 
@@ -113,8 +113,10 @@ fn failing_after(stored: Stored, accepted: usize) -> EventSink {
         Box::pin(async move {
             let mut held = sink_stored.lock().map_err(|_| "poisoned")?;
             if held.len() >= accepted {
+                tracing::info!("restart test: sink refuses a batch");
                 Err("disk full".into())
             } else {
+                tracing::info!("restart test: sink accepted a batch");
                 held.push((identity, event_batch.sequence));
                 Ok(())
             }
@@ -235,20 +237,21 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
         failing_after(Arc::clone(&before_restart), ACCEPTED_BEFORE_RESTART),
         envelope_source(Vec::new()),
     );
-    let held = std::net::TcpListener::bind("127.0.0.1:0")?;
-    held.set_nonblocking(true)?;
-    let address = held.local_addr()?;
     tracing::info!("restart test: starting the first server");
-    let first = bounded(start_server_on(
-        &paths,
-        empty_revocation(&paths)?,
-        first_state,
-        TcpListener::from_std(held.try_clone()?)?,
-    ))
-    .await??;
+    let first = bounded(start_server_state(&paths, empty_revocation(&paths)?, first_state)).await??;
+    let current = Arc::new(Mutex::new(first.address));
+    let dialled = Arc::clone(&current);
     let dial = move || -> DialFuture {
         let dial_config = Arc::clone(&config);
-        Box::pin(async move { connect_channel(address, dial_config, SERVER_NAME).await })
+        let target = dialled
+            .lock()
+            .map(|held| *held)
+            .map_err(|_| ChannelError::StreamEnded { unacknowledged: 0 });
+        tracing::info!("restart test: the client dials");
+        Box::pin(async move {
+            let address = target?;
+            connect_channel(address, dial_config, SERVER_NAME).await
+        })
     };
     let (delay_sender, mut delay_receiver) = mpsc::unbounded_channel::<Duration>();
     let gate = Arc::new(Notify::new());
@@ -274,13 +277,8 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
         envelope_source(Vec::new()),
     );
     tracing::info!("restart test: starting the second server");
-    let second = bounded(start_server_on(
-        &paths,
-        empty_revocation(&paths)?,
-        second_state,
-        TcpListener::from_std(held)?,
-    ))
-    .await??;
+    let second = bounded(start_server_state(&paths, empty_revocation(&paths)?, second_state)).await??;
+    *current.lock().map_err(|_| "poisoned")? = second.address;
     gate.notify_one();
     tracing::info!("restart test: waiting for the delivery to finish");
     let acknowledged = bounded(delivery).await???.acknowledged;
