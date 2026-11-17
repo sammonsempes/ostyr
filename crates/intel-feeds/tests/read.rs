@@ -388,8 +388,8 @@ fn a_reply_that_never_ends_hits_the_deadline() -> TestResult {
 #[test]
 fn an_unreachable_server_is_refused_as_unavailable() -> TestResult {
     let mut rig = rig(LONG_TIMEOUT_MS)?;
-    let free = TcpListener::bind("127.0.0.1:0")?;
-    rig.config.url = format!("http://127.0.0.1:{}", free.local_addr()?.port());
+    let free = TcpListener::bind("[::1]:0")?;
+    rig.config.url = format!("http://[::1]:{}", free.local_addr()?.port());
     drop(free);
     let mut out = Vec::new();
     assert!(matches!(
