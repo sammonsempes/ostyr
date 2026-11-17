@@ -1,6 +1,6 @@
 use crate::model::Weights;
 use crate::source::Outcome;
-use crate::types::{ComputeFn, NowFn, SlotMap};
+use crate::types::{ComputeFn, Flight, NowFn, SlotMap};
 use core_api::model::ApiError;
 use core_config::reload::ReloadEngine;
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,20 @@ pub struct Cached {
 }
 
 
-#[derive(Debug, Error, PartialEq, Eq)]
+/// One tenant's slot: its last result and the flight a request may join.
+pub struct Entry {
+    pub cached: Option<Cached>,
+    pub flight: Flight,
+}
+
+
+pub enum Joined {
+    Hit(Arc<Computed>),
+    Wait(Flight),
+}
+
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[error("risk scores are unavailable")]
 pub struct Unavailable;
 

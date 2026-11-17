@@ -11,8 +11,8 @@ use core_auth::rbac::PERMISSION_ALERTS_READ;
 use core_config::reload::{reload, ReloadOutcome};
 use core_pg::scope::tenant_of;
 use fixture::{
-    calls, fixture, fixture_with, lock, outcome_of, scope, score, set_mode, set_outcome, ticking_clock, weights_engine, Mode, ANALYST, FIRST_NOW,
-    FULL_POINTS, MARKER, OTHER_TENANT, OUT_OF_RANGE_TEXT, READER, SWAPPED_POINTS, SWAPPED_TEXT, TENANT,
+    calls, fixture, fixture_with, lock, outcome_of, scope, score, set_mode, set_outcome, ticking_clock, weights_engine, Mode, Script, ANALYST,
+    FIRST_NOW, FULL_POINTS, MARKER, OTHER_TENANT, OUT_OF_RANGE_TEXT, READER, SWAPPED_POINTS, SWAPPED_TEXT, TENANT,
 };
 use http::{body_json, get, login};
 use risk_score::api::{
@@ -21,7 +21,7 @@ use risk_score::api::{
 };
 use risk_score::api_model::{Failure, RiskState, Unavailable};
 use risk_score::backend::{system_clock, system_now};
-use risk_score::cache::{default_bounds, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS};
+use risk_score::cache::{default_bounds, is_live, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS};
 use risk_score::model::EntityKind;
 use risk_score::source::{Limit, Truncated};
 use risk_score::weights::weights_state;
@@ -31,7 +31,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tracing::subscriber::set_default;
-use types::{TestError, TestResult};
+use types::{Flown, TestError, TestResult};
 
 
 const THREE: usize = 3;
@@ -471,6 +471,108 @@ async fn a_tenant_beyond_the_cap_computes_uncached_and_is_counted() -> TestResul
     assert_eq!(uncached_count(&fx.risk.uncached), TWO as u64);
     assert_eq!(fx.risk.uncached.load(Ordering::Relaxed), TWO as u64);
     assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    Ok(())
+}
+
+
+const FIVE: usize = 5;
+
+
+const MANY_TENANTS: usize = 12;
+
+
+async fn release_once(script: &Script) -> Result<(), TestError> {
+    script.entered.acquire().await?.forget();
+    tokio::task::yield_now().await;
+    script.gate.add_permits(1);
+    Ok(())
+}
+
+
+async fn run_many(state: &RiskState, tenant: &str, count: usize) -> Result<Vec<Flown>, TestError> {
+    let mut set = tokio::task::JoinSet::new();
+    (0..count).try_for_each(|_| {
+        let owned = state.clone();
+        let tenant_scope = scope(tenant)?;
+        set.spawn(async move { scores_for(&owned, tenant_scope).await });
+        Ok::<(), TestError>(())
+    })?;
+    let mut results = Vec::new();
+    for _ in 0..count {
+        if let Some(joined) = set.join_next().await {
+            results.push(joined?);
+        }
+    }
+    Ok(results)
+}
+
+
+#[tokio::test]
+async fn a_tenant_beyond_the_cap_still_has_a_single_flight() -> TestResult {
+    let fx = fixture_with(capped)?;
+    scores_for(&fx.risk, scope("tenant-a")?).await?;
+    scores_for(&fx.risk, scope("tenant-b")?).await?;
+    set_mode(&fx.script, Mode::Gated);
+    let before = calls(&fx.script);
+    let (results, released) = tokio::join!(run_many(&fx.risk, "tenant-c", FIVE), release_once(&fx.script));
+    released?;
+    assert_eq!(calls(&fx.script) - before, 1);
+    assert!(results?.iter().all(Result::is_ok));
+    assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn waiters_share_a_failure_and_the_next_request_runs_once() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::GatedFail);
+    let (results, released) = tokio::join!(run_many(&fx.risk, TENANT, FIVE), release_once(&fx.script));
+    released?;
+    assert_eq!(calls(&fx.script), 1);
+    let answers = results?;
+    assert_eq!(answers.len(), FIVE);
+    assert!(answers.iter().all(|result| *result == Err(Unavailable)));
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    set_mode(&fx.script, Mode::Answer);
+    scores_for(&fx.risk, scope(TENANT)?).await?;
+    assert_eq!(calls(&fx.script), TWO);
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn waiters_share_a_deadline_and_start_no_computation_of_their_own() -> TestResult {
+    let fx = fixture()?;
+    set_mode(&fx.script, Mode::Hang);
+    let answers = run_many(&fx.risk, TENANT, FIVE).await?;
+    assert_eq!(calls(&fx.script), 1);
+    assert_eq!(answers.len(), FIVE);
+    assert!(answers.iter().all(|result| *result == Err(Unavailable)));
+    assert_eq!(lock(&fx.risk.slots).len(), 0);
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn stale_and_idle_entries_are_removed_and_the_map_stays_bounded() -> TestResult {
+    let fx = fixture_with(capped)?;
+    for index in 0..MANY_TENANTS {
+        scores_for(&fx.risk, scope(&format!("tenant-{index}"))?).await?;
+    }
+    assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    tokio::time::advance(Duration::from_secs(CACHE_SECONDS) + ONE_SECOND).await;
+    scores_for(&fx.risk, scope("tenant-x")?).await?;
+    assert_eq!(lock(&fx.risk.slots).len(), 1);
+    set_mode(&fx.script, Mode::Hang);
+    let cancelled = tokio::time::timeout(Duration::ZERO, scores_for(&fx.risk, scope("tenant-y")?)).await;
+    assert!(cancelled.is_err());
+    assert_eq!(lock(&fx.risk.slots).len(), TWO);
+    set_mode(&fx.script, Mode::Answer);
+    scores_for(&fx.risk, scope("tenant-x")?).await?;
+    assert_eq!(lock(&fx.risk.slots).len(), 1);
+    let weights = core_config::reload::current_config(&fx.engine);
+    assert!(lock(&fx.risk.slots).values().all(|entry| is_live(entry, &weights, &fx.risk.bounds)));
     Ok(())
 }
 
