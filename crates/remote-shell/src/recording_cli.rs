@@ -1,4 +1,7 @@
+use crate::grammar::valid_reference;
 use crate::recording::{close, new_writer, push, read_recording, Direction, Header, Limits, RecordingError};
+use core_pg::error::PgError;
+use core_pg::scope::tenant_scope;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::ParseIntError;
@@ -12,12 +15,25 @@ pub const CLOSE_REASON: &str = "example";
 pub const DIRECTIONS: usize = 2;
 
 
+pub const OPTION_PAIR: usize = 2;
+
+
+pub const DEFAULT_TENANT: &str = "tenant-a";
+
+
+pub const DEFAULT_SESSION: &str = "example-session";
+
+
 #[derive(Debug, Error)]
 pub enum RecordCliError {
-    #[error("usage: shell_record record <file> <start> <step> | verify <file>")]
+    #[error("usage: shell_record record <file> <start> <step> [--tenant <tenant>] [--session <id>] | verify <file>")]
     Usage,
     #[error("start and step must be integers")]
     Number(#[from] ParseIntError),
+    #[error("the session id is outside its grammar")]
+    Session,
+    #[error("the tenant is refused")]
+    Tenant(#[from] PgError),
     #[error("the fake clock overflowed")]
     Clock,
     #[error("file or stream error")]
@@ -44,11 +60,30 @@ pub fn clock_at(start: i64, step: i64, index: usize) -> Result<i64, RecordCliErr
 }
 
 
-fn record(path: &Path, start: i64, step: i64, input: &mut dyn BufRead) -> Result<(), RecordCliError> {
+/// The tenant and session id of a recording, from `--tenant` and `--session` pairs; each is checked as the register checks it.
+pub fn identity_of(options: &[String]) -> Result<(String, String), RecordCliError> {
+    let (tenant, session) = options.chunks(OPTION_PAIR).try_fold(
+        (DEFAULT_TENANT.to_owned(), DEFAULT_SESSION.to_owned()),
+        |(tenant, session), pair| match pair {
+            [flag, value] if flag == "--tenant" => Ok((value.clone(), session)),
+            [flag, value] if flag == "--session" => Ok((tenant, value.clone())),
+            _ => Err(RecordCliError::Usage),
+        },
+    )?;
+    tenant_scope(&tenant)?;
+    if valid_reference(&session) {
+        Ok((tenant, session))
+    } else {
+        Err(RecordCliError::Session)
+    }
+}
+
+
+fn record(path: &Path, start: i64, step: i64, identity: (String, String), input: &mut dyn BufRead) -> Result<(), RecordCliError> {
     let mut file = BufWriter::new(File::create(path)?);
     let header = Header {
-        session_id: "example-session".to_string(),
-        tenant: "tenant-a".to_string(),
+        session_id: identity.1,
+        tenant: identity.0,
         requester: "alice".to_string(),
         asset: "asset-1".to_string(),
         ticket: "TICKET-1".to_string(),
@@ -76,10 +111,12 @@ fn verify(path: &Path, out: &mut dyn Write) -> Result<(), RecordCliError> {
 }
 
 
-/// `record <file> <start> <step>` turns stdin lines into alternating input and output frames; `verify <file>` prints the verdict.
+/// `record <file> <start> <step> [--tenant T] [--session S]` turns stdin lines into alternating input and output frames; `verify <file>` prints the verdict.
 pub fn run_record_cli(args: &[String], input: &mut dyn BufRead, out: &mut dyn Write) -> Result<(), RecordCliError> {
     match args {
-        [command, file, start, step] if command == "record" => record(Path::new(file), start.parse()?, step.parse()?, input),
+        [command, file, start, step, options @ ..] if command == "record" => {
+            record(Path::new(file), start.parse()?, step.parse()?, identity_of(options)?, input)
+        }
         [command, file] if command == "verify" => verify(Path::new(file), out),
         _ => Err(RecordCliError::Usage),
     }
