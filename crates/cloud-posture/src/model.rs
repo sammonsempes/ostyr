@@ -99,6 +99,7 @@ pub enum KubeconfigFault {
     Unreadable,
     NotRegular,
     Symlink,
+    Linked,
     Mode,
     Owner,
 }
