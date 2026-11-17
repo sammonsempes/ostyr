@@ -238,7 +238,13 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     let held = std::net::TcpListener::bind("127.0.0.1:0")?;
     held.set_nonblocking(true)?;
     let address = held.local_addr()?;
-    let first = start_server_on(&paths, empty_revocation(&paths)?, first_state, TcpListener::from_std(held.try_clone()?)?).await?;
+    let first = bounded(start_server_on(
+        &paths,
+        empty_revocation(&paths)?,
+        first_state,
+        TcpListener::from_std(held.try_clone()?)?,
+    ))
+    .await??;
     let dial = move || -> DialFuture {
         let dial_config = Arc::clone(&config);
         Box::pin(async move { connect_channel(address, dial_config, SERVER_NAME).await })
@@ -258,20 +264,26 @@ async fn a_server_restart_mid_stream_resends_exactly_the_unacknowledged_batches(
     let delivery = tokio::spawn(async move { deliver_events(&dial, &pause, batches(BATCHES)).await });
     let delay = bounded(delay_receiver.recv()).await?.ok_or("the client never paused")?;
     assert!(delay <= Duration::from_millis(BACKOFF_MAX_MILLIS));
-    stop_server(first).await?;
+    bounded(stop_server(first)).await??;
     let second_state = make_state(
         patient_settings(),
         recording_sink(Arc::clone(&after_restart)),
         envelope_source(Vec::new()),
     );
-    let second = start_server_on(&paths, empty_revocation(&paths)?, second_state, TcpListener::from_std(held)?).await?;
+    let second = bounded(start_server_on(
+        &paths,
+        empty_revocation(&paths)?,
+        second_state,
+        TcpListener::from_std(held)?,
+    ))
+    .await??;
     gate.notify_one();
     let acknowledged = bounded(delivery).await???.acknowledged;
     assert_eq!(acknowledged, (1..=BATCHES).collect::<Vec<u64>>());
     assert_eq!(sequences(&before_restart)?, (1..=FIRST_RUN_BATCHES).collect::<Vec<u64>>());
     assert_eq!(sequences(&after_restart)?, (FIRST_RUN_BATCHES + 1..=BATCHES).collect::<Vec<u64>>());
     assert!(delay_receiver.try_recv().is_err());
-    stop_server(second).await
+    bounded(stop_server(second)).await?
 }
 
 
