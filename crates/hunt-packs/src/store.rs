@@ -1,10 +1,11 @@
-use crate::packs::is_pack_id;
+use crate::packs::{is_pack_id, MAX_ID_CHARS};
 use crate::schedule::{checked_time, RunWindow, ScheduleError};
 use crate::types::ListResult;
 use core_pg::error::PgError;
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_scope, TenantScope};
 use std::future::Future;
+use std::num::TryFromIntError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -12,7 +13,7 @@ use thiserror::Error;
 pub const MIGRATION_NAMESPACE: &str = "hunt_packs";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "hunt_packs_0001",
         sql: include_str!("../migrations/hunt_packs_0001.sql"),
@@ -20,6 +21,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "hunt_packs_0002",
         sql: include_str!("../migrations/hunt_packs_0002.sql"),
+    },
+    Migration {
+        version: "hunt_packs_0003",
+        sql: include_str!("../migrations/hunt_packs_0003.sql"),
     },
 ];
 
@@ -43,9 +48,22 @@ pub const FINDING_SQL: &str = "INSERT INTO hunt_pack_findings (tenant, pack_id, 
     VALUES ($1, $2, $3, $4, $5, $6, now()) ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING window_end";
 
 
-/// Params: `$2` cursor window end, `$3` cursor pack id, `$4` limit. Rows after the cursor in `(window_end, pack_id)` order, the limit applied here.
+/// The longest stored pack id in bytes (the `hunt_packs_0003` constraint); a longer stored id is never read, so a cursor always parses back.
+pub const ID_BYTE_CAP: i64 = 64;
+
+
+/// Most oversized rows counted for the report; one more is fetched to tell "more than".
+pub const OVERSIZED_REPORT_CAP: i64 = 1000;
+
+
+/// Params: `$2` cursor window end, `$3` cursor pack id, `$4` limit, `$5` id byte cap. Rows after the cursor in `(window_end, pack_id)` order.
 pub const LIST_SQL: &str = "SELECT pack_id, window_start, window_end, matches, max_matches FROM hunt_pack_findings \
-    WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) ORDER BY window_end, pack_id LIMIT $4";
+    WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= $5::bigint ORDER BY window_end, pack_id LIMIT $4";
+
+
+/// Params: `$2` id byte cap, `$3` count limit. One row: the tenant's rows with a pack id over the cap, at most `$3`.
+pub const OVERSIZED_SQL: &str =
+    "SELECT count(*) FROM (SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) > $2::bigint LIMIT $3::bigint) oversized";
 
 
 /// The largest page `list_findings` asks for, whatever the caller passes.
@@ -69,9 +87,15 @@ pub enum StateError {
     #[error("a run end is outside years 0 to 9999")]
     OutOfRange(#[source] ScheduleError),
     #[error("a match count does not fit the store")]
-    CountOutOfRange,
+    CountOutOfRange(#[source] TryFromIntError),
     #[error("the store answered with an unexpected number of rows")]
     BadReply,
+}
+
+
+/// A refusal no retry can fix (the value itself is wrong), as opposed to a store failure that may pass on the next tick.
+pub fn is_permanent(error: &StateError) -> bool {
+    matches!(error, StateError::CountOutOfRange(_) | StateError::InvalidPackId)
 }
 
 
@@ -128,11 +152,12 @@ pub struct FindingRow {
 }
 
 
-/// Rows after the cursor; a stored row with an invalid pack id is left out and counted in `skipped`.
+/// Rows after the cursor, bad pack ids counted in `skipped`; `next` is the last row READ (skipped included), set only on a full page.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FindingPage {
     pub rows: Vec<FindingRow>,
     pub skipped: usize,
+    pub next: Option<(i64, String)>,
 }
 
 
@@ -152,8 +177,8 @@ where
     let scope = checked_key(tenant, pack_id)?;
     checked_time(window.start).map_err(StateError::OutOfRange)?;
     checked_time(window.end).map_err(StateError::OutOfRange)?;
-    let matches_stored = i64::try_from(matches).map_err(|_| StateError::CountOutOfRange)?;
-    let baseline_stored = i64::try_from(max_matches).map_err(|_| StateError::CountOutOfRange)?;
+    let matches_stored = i64::try_from(matches).map_err(StateError::CountOutOfRange)?;
+    let baseline_stored = i64::try_from(max_matches).map_err(StateError::CountOutOfRange)?;
     let params = vec![
         Param::Text(pack_id.to_owned()),
         Param::Int(window.start),
@@ -181,11 +206,78 @@ where
     let scope = tenant_scope(tenant)?;
     checked_time(since_end).map_err(StateError::OutOfRange)?;
     let capped = limit.clamp(1, MAX_FINDINGS_PAGE);
-    let params = vec![Param::Int(since_end), Param::Text(since_pack.to_owned()), Param::Int(capped)];
-    let rows = exec(&scope, LIST_SQL, params).await?;
+    let cursor = (Param::Int(since_end), Param::Text(since_pack.to_owned()));
+    let rows = exec(&scope, LIST_SQL, vec![cursor.0, cursor.1, Param::Int(capped), Param::Int(ID_BYTE_CAP)]).await?;
+    let full = i64::try_from(rows.len()).is_ok_and(|read| read >= capped);
+    let next = rows.last().filter(|_| full).map(|row| (row.window_end, row.pack_id.clone()));
     let (valid, refused): (Vec<FindingRow>, Vec<FindingRow>) = rows.into_iter().partition(|row| is_pack_id(&row.pack_id));
     Ok(FindingPage {
         rows: valid,
         skipped: refused.len(),
+        next,
     })
+}
+
+
+/// How many of the tenant's stored rows have a pack id over `ID_BYTE_CAP` (never listed), counted up to `OVERSIZED_REPORT_CAP + 1`.
+pub async fn count_oversized<Executor, Pending>(exec: &mut Executor, tenant: &str) -> Result<i64, StateError>
+where
+    Executor: FnMut(&TenantScope, &'static str, Vec<Param>) -> Pending,
+    Pending: Future<Output = Result<Vec<i64>, PgError>>,
+{
+    let scope = tenant_scope(tenant)?;
+    let rows = exec(&scope, OVERSIZED_SQL, vec![Param::Int(ID_BYTE_CAP), Param::Int(OVERSIZED_REPORT_CAP + 1)]).await?;
+    match rows.as_slice() {
+        [count] => Ok(*count),
+        _ => Err(StateError::BadReply),
+    }
+}
+
+
+const HEX_RADIX: u32 = 16;
+
+
+const HEX_DIGITS_PER_BYTE: usize = 2;
+
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CursorError {
+    #[error("the cursor is not `<end>` or `<end>:<lowercase hex of the pack id>`")]
+    Malformed,
+}
+
+
+/// `<end>:<lowercase hex of the pack id bytes>`: any stored id, control characters included, prints and parses back unchanged.
+pub fn format_cursor(end: i64, pack_id: &str) -> String {
+    let hex: String = pack_id.bytes().map(|byte| format!("{byte:02x}")).collect();
+    format!("{end}:{hex}")
+}
+
+
+fn unhex(hex: &str) -> Option<Vec<u8>> {
+    let lowercase = hex.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    let bounded = hex.len() <= MAX_ID_CHARS * HEX_DIGITS_PER_BYTE && hex.len().is_multiple_of(HEX_DIGITS_PER_BYTE);
+    let valid = lowercase && bounded;
+    valid.then_some(hex).and_then(|digits| {
+        (0..digits.len())
+            .step_by(HEX_DIGITS_PER_BYTE)
+            .map(|start| hex_byte(digits, start))
+            .collect()
+    })
+}
+
+
+fn hex_byte(digits: &str, start: usize) -> Option<u8> {
+    digits
+        .get(start..start + HEX_DIGITS_PER_BYTE)
+        .and_then(|pair| u8::from_str_radix(pair, HEX_RADIX).ok())
+}
+
+
+/// Reads `<end>` (the pack part empty) or the form `format_cursor` prints; anything else is refused.
+pub fn parse_cursor(text: &str) -> Result<(i64, String), CursorError> {
+    let (end, hex) = text.split_once(':').unwrap_or((text, ""));
+    let end_value: i64 = end.parse().map_err(|_| CursorError::Malformed)?;
+    let bytes = unhex(hex).ok_or(CursorError::Malformed)?;
+    String::from_utf8(bytes).map(|pack| (end_value, pack)).map_err(|_| CursorError::Malformed)
 }
