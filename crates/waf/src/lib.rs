@@ -1,10 +1,12 @@
 //! Caddy JSON configuration rendered from a declarative YAML routes file.
 
 pub mod caddy;
+pub mod cadir;
 pub mod cli;
 pub mod error;
 pub mod limits;
 pub mod model;
 pub mod order;
 pub mod render;
+pub mod tls;
 pub mod validate;

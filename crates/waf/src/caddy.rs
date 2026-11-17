@@ -11,6 +11,59 @@ pub struct CaddyConfig {
 #[derive(Debug, Serialize)]
 pub struct Apps {
     pub http: Http,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsApp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pki: Option<PkiApp>,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct PkiApp {
+    pub certificate_authorities: Authorities,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct Authorities {
+    pub local: LocalAuthority,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct LocalAuthority {
+    pub install_trust: bool,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct TlsApp {
+    pub automation: Automation,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct Automation {
+    pub policies: Vec<Policy>,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct Policy {
+    pub subjects: Vec<String>,
+    pub issuers: Vec<IssuerConfig>,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct IssuerConfig {
+    pub module: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub trusted_roots_pem_files: Vec<String>,
 }
 
 
@@ -24,13 +77,24 @@ pub struct Http {
 pub struct Server {
     pub listen: Vec<String>,
     pub automatic_https: AutomaticHttps,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tls_connection_policies: Vec<ConnectionPolicy>,
     pub routes: Vec<CaddyRoute>,
 }
 
 
 #[derive(Debug, Serialize)]
 pub struct AutomaticHttps {
-    pub disable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_redirects: Option<bool>,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionPolicy {
+    pub protocol_min: &'static str,
 }
 
 
@@ -80,6 +144,8 @@ pub struct Handler {
 #[derive(Debug, Serialize)]
 pub struct Headers {
     pub request: RequestHeaders,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<RequestHeaders>,
 }
 
 
