@@ -16,7 +16,7 @@ use rustls::crypto::ring::default_provider;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use siem_ingest::error::NatsError;
+use siem_ingest::error::{class_of, handshake_class, rustls_in, without_peer_tls, NatsError, TlsClass};
 use siem_ingest::model::{AckAction, Link, Wiring};
 use siem_ingest::nats::release_held;
 use siem_ingest::nats::{
@@ -806,5 +806,89 @@ fn lax_symlinked_or_fifo_nats_secret_files_are_refused_before_any_connect() -> R
             .ok_or("credentials accepted")?;
         assert!(matches!(refused_credentials, NatsError::SecretFile { what: "credentials", .. }));
     }
+    Ok(())
+}
+
+
+const MARKER: &str = "peer-san-marker";
+
+
+const ESCAPE: char = '\u{1b}';
+
+
+fn chain(error: &(dyn Error + 'static)) -> String {
+    std::iter::successors(Some(error), |inner| (*inner).source())
+        .map(|inner| format!("{inner} {inner:?}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+
+fn hostile_material() -> Result<(Arc<ServerConfig>, String), Box<dyn Error + Send + Sync>> {
+    let generated = generate_simple_self_signed(vec![format!("{MARKER}{ESCAPE}.example")])?;
+    let certificate_pem = generated.cert.pem();
+    let certificates = CertificateDer::pem_slice_iter(certificate_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+    let key = PrivateKeyDer::from_pem_slice(generated.signing_key.serialize_pem().as_bytes())?;
+    let config = ServerConfig::builder_with_provider(Arc::new(default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)?;
+    Ok((Arc::new(config), certificate_pem))
+}
+
+
+#[test]
+fn a_hostile_certificate_name_never_reaches_the_connect_error() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (server_config, ca_pem) = hostile_material()?;
+    let stub = start_stub(Some(server_config), |_state| {})?;
+    let dir = tempdir()?;
+    let ca_path = dir.path().join("ca.pem");
+    fs::write(&ca_path, &ca_pem)?;
+    let extra = format!("nats_tls_first: true\nnats_ca_file: \"{}\"\n", ca_path.display());
+    let text = yaml(stub.port, NORMAL_MS, &extra).replace("127.0.0.1", HOST);
+    let control = Builder::new_current_thread().enable_all().build()?.block_on(
+        async_nats::ConnectOptions::new()
+            .tls_first()
+            .tls_client_config(tls_config(ca_pem.as_bytes())?)
+            .connect(format!("nats://{HOST}:{}", stub.port)),
+    );
+    let raw = control.err().ok_or("connected")?;
+    assert!(
+        chain(&raw).contains(MARKER),
+        "the control: async-nats itself carries the peer text: {}",
+        chain(&raw)
+    );
+    let engine = engine_for(&dir, &text)?;
+    let link = link_for(&engine)?;
+    let error = fetch_batch(&link, FETCH_MAX).err().ok_or("fetched")?;
+    let shown = chain(error.as_ref());
+    assert!(!shown.contains(MARKER) && !shown.contains(ESCAPE) && !shown.contains("u{1b}"), "{shown}");
+    assert!(matches!(error.downcast_ref::<NatsError>(), Some(NatsError::Request(_))), "{shown}");
+    Ok(())
+}
+
+
+#[test]
+fn rustls_errors_are_classed_without_their_text() -> Result<(), Box<dyn Error + Send + Sync>> {
+    assert_eq!(
+        class_of(&rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)),
+        TlsClass::Certificate
+    );
+    assert_eq!(class_of(&rustls::Error::NoCertificatesPresented), TlsClass::Certificate);
+    assert_eq!(
+        class_of(&rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure)),
+        TlsClass::Alert
+    );
+    assert_eq!(class_of(&rustls::Error::HandshakeNotComplete), TlsClass::Protocol);
+    assert!(rustls_in(&rustls::Error::HandshakeNotComplete).is_some());
+    let wrapped = io::Error::new(io::ErrorKind::InvalidData, rustls::Error::NoCertificatesPresented);
+    assert_eq!(handshake_class(&wrapped), Some(TlsClass::Certificate));
+    assert_eq!(handshake_class(&io::Error::from(io::ErrorKind::BrokenPipe)), None);
+    assert_eq!(handshake_class(&io::Error::new(io::ErrorKind::BrokenPipe, "text")), None);
+    let fixed = without_peer_tls(Box::new(wrapped));
+    assert_eq!(fixed.to_string(), TlsClass::Certificate.to_string());
+    let kept = without_peer_tls(Box::new(io::Error::new(io::ErrorKind::BrokenPipe, "kept text")));
+    assert!(kept.to_string().contains("kept text"));
+    assert!(!TlsClass::Alert.to_string().is_empty() && !TlsClass::Protocol.to_string().is_empty());
     Ok(())
 }

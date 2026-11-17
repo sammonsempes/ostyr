@@ -65,3 +65,51 @@ pub enum ExportError {
 pub struct PermanentRejection {
     pub status: u16,
 }
+
+
+/// What a failed delivery tells: a fixed class, never text the peer chose (a rustls name error lists the certificate names raw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TransportKind {
+    #[error("the request timed out")]
+    Timeout,
+    #[error("the TLS handshake was refused")]
+    Tls,
+    #[error("the connection could not be made")]
+    Connect,
+    #[error("an I/O failure ({kind})")]
+    Io { kind: io::ErrorKind },
+    #[error("the HTTP exchange was refused")]
+    Protocol,
+}
+
+
+/// A certificate refusal is a ureq `Rustls` or an `Io` of kind `InvalidData`.
+pub fn transport_kind(error: &ureq::Error) -> TransportKind {
+    match error {
+        ureq::Error::Timeout(_) => TransportKind::Timeout,
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => TransportKind::Tls,
+        ureq::Error::Io(source) if source.kind() == io::ErrorKind::InvalidData => TransportKind::Tls,
+        ureq::Error::Io(source) => TransportKind::Io { kind: source.kind() },
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => TransportKind::Connect,
+        _ => TransportKind::Protocol,
+    }
+}
+
+
+/// A status answer keeps its ureq error (a number, read by `classify_status`); every other failure becomes its fixed kind.
+pub fn peer_failure(error: ureq::Error) -> BoxError {
+    match error {
+        ureq::Error::StatusCode(_) => BoxError::from(error),
+        other => BoxError::from(transport_kind(&other)),
+    }
+}
+
+
+/// The same kind with a fixed text when a rustls error sits inside, so a peer's handshake error is never logged or kept.
+pub fn without_peer_text(error: io::Error) -> io::Error {
+    if error.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) {
+        io::Error::new(error.kind(), TransportKind::Tls)
+    } else {
+        error
+    }
+}

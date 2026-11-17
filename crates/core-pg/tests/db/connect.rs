@@ -4,16 +4,20 @@ use crate::settings_for;
 use core_audit::log::{append, genesis_log};
 use core_audit::model::NewEntry;
 use core_config::reload::{reload, ReloadContext, ReloadOutcome};
-use core_pg::connect::{connect, connect_current, connect_with_driver};
+use core_pg::connect::{connect, connect_current, connect_with_driver, pg_config};
 use core_pg::error::PgError;
+use core_pg::error::{class_of, handshake_class, rustls_in, TlsClass};
 use core_pg::query::execute_script;
 use core_pg::settings::open_settings;
+use core_pg::tls::client_config;
 use rcgen::SanType;
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -61,7 +65,7 @@ async fn an_unknown_ca_is_refused() -> Result<(), Box<dyn Error>> {
     let fake = start(Mode::Tls(pki.server), "p", always(Reply::Done)).await?;
     let dir = tempdir()?;
     let settings = settings_for(dir.path(), fake.port, &other.ca_pem, "p", DEADLINE.as_secs())?;
-    assert!(matches!(connect(&settings).await, Err(PgError::Client(_))));
+    assert!(matches!(connect(&settings).await, Err(PgError::Handshake(_))));
     Ok(())
 }
 
@@ -72,7 +76,7 @@ async fn a_certificate_for_another_host_is_refused() -> Result<(), Box<dyn Error
     let fake = start(Mode::Tls(pki.server), "p", always(Reply::Done)).await?;
     let dir = tempdir()?;
     let settings = settings_for(dir.path(), fake.port, &pki.ca_pem, "p", DEADLINE.as_secs())?;
-    assert!(matches!(connect(&settings).await, Err(PgError::Client(_))));
+    assert!(matches!(connect(&settings).await, Err(PgError::Handshake(_))));
     Ok(())
 }
 
@@ -181,5 +185,63 @@ async fn a_reload_changes_new_connections_and_leaves_open_ones() -> Result<(), B
     execute_script(&held, "SELECT 1", DEADLINE).await?;
     execute_script(&fresh, "SELECT 1", DEADLINE).await?;
     assert!(first.statements.recv().await.is_some() && second.statements.recv().await.is_some());
+    Ok(())
+}
+
+
+const MARKER: &str = "peer-san-marker";
+
+
+const ESCAPE: char = '\u{1b}';
+
+
+fn chain(error: &(dyn Error + 'static)) -> String {
+    std::iter::successors(Some(error), |inner| (*inner).source())
+        .map(|inner| format!("{inner} {inner:?}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+
+#[tokio::test]
+async fn a_hostile_certificate_name_never_reaches_the_error() -> Result<(), Box<dyn Error>> {
+    let pki = make_pki(SanType::DnsName(format!("{MARKER}{ESCAPE}.example").try_into()?))?;
+    let fake = start(Mode::Tls(pki.server), "p", always(Reply::Done)).await?;
+    let dir = tempdir()?;
+    let settings = settings_for(dir.path(), fake.port, &pki.ca_pem, "p", DEADLINE.as_secs())?;
+    let tls = MakeRustlsConnect::new(client_config(Path::new(&settings.ca_file))?);
+    let raw = pg_config(&settings, b"p").connect(tls).await.err().ok_or("connected")?;
+    assert!(
+        chain(&raw).contains(MARKER),
+        "the control: tokio-postgres itself carries the peer text: {}",
+        chain(&raw)
+    );
+    let error = connect(&settings).await.err().ok_or("connected")?;
+    assert!(matches!(error, PgError::Handshake(TlsClass::Certificate)), "{error:?}");
+    let shown = chain(&error);
+    assert!(!shown.contains(MARKER) && !shown.contains(ESCAPE) && !shown.contains("u{1b}"), "{shown}");
+    Ok(())
+}
+
+
+#[test]
+fn rustls_errors_are_classed_without_their_text() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        class_of(&rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)),
+        TlsClass::Certificate
+    );
+    assert_eq!(class_of(&rustls::Error::NoCertificatesPresented), TlsClass::Certificate);
+    assert_eq!(
+        class_of(&rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure)),
+        TlsClass::Alert
+    );
+    assert_eq!(class_of(&rustls::Error::HandshakeNotComplete), TlsClass::Protocol);
+    assert!(rustls_in(&rustls::Error::HandshakeNotComplete).is_some());
+    let wrapped = io::Error::new(io::ErrorKind::InvalidData, rustls::Error::NoCertificatesPresented);
+    assert_eq!(handshake_class(&wrapped), Some(TlsClass::Certificate));
+    let plain = io::Error::new(io::ErrorKind::BrokenPipe, "text");
+    assert_eq!(handshake_class(&plain), None);
+    assert_eq!(handshake_class(&io::Error::from(io::ErrorKind::BrokenPipe)), None);
+    assert!(!TlsClass::Alert.to_string().is_empty() && !TlsClass::Protocol.to_string().is_empty());
     Ok(())
 }

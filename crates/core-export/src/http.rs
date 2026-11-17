@@ -1,4 +1,4 @@
-use crate::error::{ExportError, PermanentRejection};
+use crate::error::{peer_failure, ExportError, PermanentRejection};
 use crate::otlp::{rejected_records, MAX_RESPONSE_BYTES};
 use crate::types::BoxError;
 use std::time::Duration;
@@ -42,7 +42,7 @@ pub fn send_json(agent: &Agent, url: &str, token: Option<&str>, body: &str) -> R
         Some(value) => request.header("Authorization", format!("Bearer {value}")).send(body),
         None => request.send(body),
     };
-    outcome.map_err(BoxError::from)
+    outcome.map_err(peer_failure)
 }
 
 

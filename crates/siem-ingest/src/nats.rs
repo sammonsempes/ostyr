@@ -1,4 +1,4 @@
-use crate::error::NatsError;
+use crate::error::{without_peer_tls, NatsError};
 use crate::model::{AckAction, Delivery, Link, Session, Wiring};
 use crate::parse::truncate_reason;
 use crate::settings::{IngestSettings, MODULE};
@@ -111,7 +111,7 @@ where
     tokio::time::timeout(limit, pending)
         .await
         .map_err(NatsError::Timeout)?
-        .map_err(|failure| NatsError::Request(failure.into()))
+        .map_err(|failure| NatsError::Request(without_peer_tls(failure.into())))
 }
 
 

@@ -2,7 +2,7 @@ use crate::pki::{issue, make_authority, server_spec, write_file, write_leaf, Aut
 use crate::revocation_support::{open_revocation, Revocation, RevocationControl};
 use crate::state::default_state;
 use agent_channel::client::{connect_channel, heartbeat};
-use agent_channel::error::ChannelError;
+use agent_channel::error::{error_class, ChannelError};
 use agent_channel::identity::serial_from_certificate;
 use agent_channel::model::{Admission, ClientTlsPaths, ServerTlsPaths, ALPN_H2};
 use agent_channel::proto::BeatReply;
@@ -171,7 +171,7 @@ pub async fn start_single_state(paths: &ServerTlsPaths, revocation: Revocation, 
     let address = listener.local_addr()?;
     let acceptor = TlsAcceptor::from(server_config(paths)?);
     let handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.map_err(ChannelError::Handshake)?;
+        let (stream, _) = listener.accept().await.map_err(|error| ChannelError::Handshake(error_class(&error)))?;
         let admission = single_admission(&state);
         run_connection(stream, acceptor, channel_router(Arc::clone(&state)), state, revocation.watcher, admission).await
     });

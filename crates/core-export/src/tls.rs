@@ -1,4 +1,4 @@
-use crate::error::ExportError;
+use crate::error::{without_peer_text, ExportError};
 use crate::syslog::write_frames;
 use crate::types::TlsStream;
 use rustls::crypto::ring::default_provider;
@@ -48,7 +48,8 @@ pub fn close_within(stream: &mut TlsStream, timeout: Duration) -> Result<(), Exp
         .and_then(|()| stream.sock.shutdown(Shutdown::Write))
         .and_then(|()| io::copy(stream, &mut io::sink()).map(drop));
     if let Err(error) = drained {
-        tracing::debug!(%error, "syslog close: peer did not finish the TLS shutdown");
+        let shown = without_peer_text(error);
+        tracing::debug!(%shown, "syslog close: peer did not finish the TLS shutdown");
     }
     Ok(())
 }

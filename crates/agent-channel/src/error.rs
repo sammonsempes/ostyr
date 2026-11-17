@@ -11,6 +11,63 @@ use tonic::Status;
 use x509_parser::error::X509Error;
 
 
+/// What a peer's TLS failure is called: never the rustls text, which can list the peer certificate's names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum TlsClass {
+    #[error("the certificate was refused")]
+    Certificate,
+    #[error("the TLS alert was received")]
+    Alert,
+    #[error("the TLS exchange was refused")]
+    Protocol,
+    #[error("the connection failed")]
+    Other,
+}
+
+
+pub fn class_of(error: &rustls::Error) -> TlsClass {
+    match error {
+        rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented => TlsClass::Certificate,
+        rustls::Error::AlertReceived(_) => TlsClass::Alert,
+        _ => TlsClass::Protocol,
+    }
+}
+
+
+/// The rustls error itself, or the one an `io::Error` wraps (its `source` skips the wrapped error).
+pub fn rustls_in<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
+    error.downcast_ref::<rustls::Error>().or_else(|| {
+        error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    })
+}
+
+
+/// The next cause: the error an `io::Error` wraps (its `source` skips it), else the plain `source`.
+pub fn next_cause<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a (dyn Error + 'static)> {
+    error
+        .downcast_ref::<io::Error>()
+        .and_then(io::Error::get_ref)
+        .map(|inner| inner as &(dyn Error + 'static))
+        .or_else(|| error.source())
+}
+
+
+pub fn error_class(error: &(dyn Error + 'static)) -> TlsClass {
+    std::iter::successors(Some(error), |inner| next_cause(*inner))
+        .find_map(rustls_in)
+        .map_or(TlsClass::Other, class_of)
+}
+
+
+/// The same kind with a fixed text, so a peer's handshake error is never carried further.
+pub fn without_peer_text(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), error_class(&error))
+}
+
+
 #[derive(Debug, Error)]
 pub enum IdentityError {
     #[error("the peer presented no certificate")]
@@ -59,7 +116,7 @@ pub enum ChannelError {
     #[error("invalid server name: {0}")]
     ServerName(#[from] rustls_pki_types::InvalidDnsNameError),
     #[error("TLS handshake failed: {0}")]
-    Handshake(#[source] io::Error),
+    Handshake(TlsClass),
     #[error("TLS handshake not finished after {seconds} seconds, connection dropped")]
     HandshakeTimeout { seconds: u64 },
     #[error("no HTTP/2 request {seconds} seconds after the TLS handshake, connection dropped")]
@@ -77,7 +134,7 @@ pub enum ChannelError {
     #[error("the revocation list is no longer maintained, connection closed: {0}")]
     RevocationClosed(#[source] RecvError),
     #[error("connection failed: {0}")]
-    Serve(#[source] Box<dyn Error + Send + Sync>),
+    Serve(TlsClass),
     #[error("cannot connect: {0}")]
     Transport(#[from] tonic::transport::Error),
     #[error("call refused: {0}")]
