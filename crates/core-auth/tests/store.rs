@@ -4,8 +4,6 @@ mod failing_writer;
 mod types;
 
 
-#[cfg(unix)]
-use core_audit::error::AuditError;
 use core_auth::error::AuthError;
 use core_auth::model::{Account, TotpEnrolment};
 use core_auth::random::os_random;
@@ -14,6 +12,8 @@ use core_auth::store::{
     sync_directory, update_store_file, STORE_VERSION,
 };
 use core_auth::types::{AccountMap, CredentialMap};
+#[cfg(unix)]
+use core_config::secret_file::SecretFileError;
 use failing_writer::FailingWriter;
 use std::fs;
 #[cfg(unix)]
@@ -162,7 +162,7 @@ fn loose_modes_are_refused() -> TestResult {
     fs::set_permissions(&path, Permissions::from_mode(LOOSE))?;
     assert!(matches!(
         load_accounts_file(&path),
-        Err(AuthError::Audit(AuditError::InsecurePermissions { .. }))
+        Err(AuthError::StoreFile(SecretFileError::Mode { .. }))
     ));
     Ok(())
 }
@@ -245,7 +245,7 @@ fn io_failures_are_reported() -> TestResult {
     let directory = tempdir()?;
     let blocker = directory.path().join("blocker");
     fs::write(&blocker, "")?;
-    assert!(matches!(load_accounts_file(&blocker.join("child")), Err(AuthError::Io(_))));
+    assert!(matches!(load_accounts_file(&blocker.join("child")), Err(AuthError::StoreFile(_))));
     assert!(matches!(
         save_store_file(
             &directory.path().join("missing").join("a.json"),
@@ -380,7 +380,27 @@ fn a_fifo_at_the_store_path_is_refused_without_blocking() -> TestResult {
     let directory = tempdir()?;
     let path = directory.path().join("accounts.json");
     assert!(std::process::Command::new("mkfifo").arg(&path).status()?.success());
-    assert!(matches!(load_accounts_file(&path), Err(AuthError::Io(_))));
+    assert!(matches!(load_accounts_file(&path), Err(AuthError::StoreFile(_))));
+    Ok(())
+}
+
+
+#[test]
+#[cfg(unix)]
+fn a_symlink_at_the_store_path_is_refused_and_the_private_target_still_reads() -> TestResult {
+    let directory = tempdir()?;
+    let real = directory.path().join("real.json");
+    let mut bytes = Vec::new();
+    save_accounts(&mut bytes, &sample())?;
+    fs::write(&real, &bytes)?;
+    fs::set_permissions(&real, Permissions::from_mode(OWNER_ONLY))?;
+    assert_eq!(load_accounts_file(&real)?.len(), sample().len());
+    let link = directory.path().join("link.json");
+    symlink(&real, &link)?;
+    assert!(matches!(
+        load_accounts_file(&link),
+        Err(AuthError::StoreFile(SecretFileError::Symlink { .. }))
+    ));
     Ok(())
 }
 

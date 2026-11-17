@@ -1,38 +1,18 @@
 use crate::error::KeyError;
 use crate::limits::{MAX_LINK_KEY_BYTES, MIN_LINK_KEY_BYTES};
 use crate::types::LinkKey;
-use core_pg::password::{open_regular, read_secret};
-use std::fs::Metadata;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use core_config::secret_file::{open_secret, SecretFileError};
+use core_pg::password::read_secret;
 use std::path::Path;
 use zeroize::Zeroizing;
 
 
-pub const GROUP_OTHER_MASK: u32 = 0o077;
-
-
-/// Mode bits and owner of the opened handle, with the effective user of the process.
-#[cfg(unix)]
-pub fn mode_and_owners(metadata: &Metadata) -> Result<(u32, u32, u32), KeyError> {
-    Ok((metadata.mode(), metadata.uid(), rustix::process::geteuid().as_raw()))
-}
-
-
-#[cfg(not(unix))]
-pub fn mode_and_owners(_metadata: &Metadata) -> Result<(u32, u32, u32), KeyError> {
-    Err(KeyError::Unsupported)
-}
-
-
-/// The key file must grant nothing to group or other and belong to the process user.
-pub fn check_owner_and_mode(mode: u32, owner: u32, process_user: u32) -> Result<(), KeyError> {
-    if mode & GROUP_OTHER_MASK != 0 {
-        Err(KeyError::Mode)
-    } else if owner != process_user {
-        Err(KeyError::Owner)
-    } else {
-        Ok(())
+/// Mode and owner refusals keep their own variants; every other refusal is `Open`.
+pub fn key_refusal(error: SecretFileError) -> KeyError {
+    match error {
+        SecretFileError::Mode { .. } => KeyError::Mode(error),
+        SecretFileError::Owner { .. } => KeyError::Owner(error),
+        SecretFileError::Io { .. } | SecretFileError::NotRegular { .. } | SecretFileError::Symlink { .. } => KeyError::Open(error),
     }
 }
 
@@ -46,12 +26,23 @@ pub fn key_from_bytes(key: Zeroizing<Vec<u8>>) -> Result<LinkKey, KeyError> {
 }
 
 
-/// Reads the signing key of the acknowledgement links: opened without blocking, regular file, mode and owner judged on the opened handle, bounded read.
+/// The key file checks need Unix modes and owners: elsewhere the key is refused before any read.
+#[cfg(unix)]
+pub fn require_unix() -> Result<(), KeyError> {
+    Ok(())
+}
+
+
+#[cfg(not(unix))]
+pub fn require_unix() -> Result<(), KeyError> {
+    Err(KeyError::Unsupported)
+}
+
+
+/// Reads the signing key of the acknowledgement links: opened through the shared secret-file checks, then a bounded read.
 pub fn read_link_key(path: &Path) -> Result<LinkKey, KeyError> {
-    let mut handle = open_regular(path)?;
-    let metadata = handle.metadata().map_err(KeyError::Inspect)?;
-    let (mode, owner, process_user) = mode_and_owners(&metadata)?;
-    check_owner_and_mode(mode, owner, process_user)?;
+    require_unix()?;
+    let mut handle = open_secret(path).map_err(key_refusal)?;
     let bytes = read_secret(&mut handle, MAX_LINK_KEY_BYTES, &path.display().to_string())?;
     key_from_bytes(bytes)
 }
