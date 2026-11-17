@@ -5,11 +5,14 @@ use crate::support::{
 use crate::types::TestResult;
 use agent_linux::cursor::{read_cursor, write_cursor};
 use agent_linux::error::SourceError;
-use agent_linux::follow::{file_len, log_states, open_export, poll_stepped, track};
-use agent_linux::model::{Cursor, Follower, Notes, Paths, SourceSettings, Stop};
+use agent_linux::follow::{file_len, log_states, open_export, poll_stepped, settle_pass, track, Pass};
+use agent_linux::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, Stop};
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt};
 use std::process::Command;
+
+
+const FILLED_BYTES: usize = 500;
 
 
 #[test]
@@ -479,5 +482,36 @@ fn a_state_is_logged_on_entry_and_exit_with_its_poll_count() -> TestResult {
     );
     log_states(&mut notes, false, false, 0, 1);
     assert_eq!(notes, Notes::default());
+    Ok(())
+}
+
+
+#[test]
+fn a_spool_that_filled_since_the_read_is_not_written_and_the_cursor_stays() -> TestResult {
+    let _log = scoped_logging();
+    let setup = setup()?;
+    fs::write(&setup.paths.spool, "x".repeat(FILLED_BYTES))?;
+    let settings = SourceSettings {
+        max_spool_bytes: 1,
+        ..SourceSettings::default()
+    };
+    let pass = |lines: Vec<String>| Pass {
+        lines,
+        offset: FILLED_BYTES as u64,
+        pending: 0,
+        line_number: 0,
+        skipping: false,
+        report: Report {
+            spooled: 1,
+            ..Report::default()
+        },
+    };
+    let mut cursor = Cursor::default();
+    let refused = settle_pass(&mut cursor, &setup.paths, &settings, pass(vec!["line".to_owned()]))?;
+    assert_eq!((refused.stop, refused.spooled), (Stop::Full, 0));
+    assert_eq!(cursor, Cursor::default());
+    assert_eq!(file_len(&setup.paths.spool)?, FILLED_BYTES as u64);
+    let moved = settle_pass(&mut cursor, &setup.paths, &settings, pass(Vec::new()))?;
+    assert_eq!((moved.stop, cursor.offset), (Stop::Capped, FILLED_BYTES as u64));
     Ok(())
 }

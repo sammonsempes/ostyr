@@ -334,6 +334,7 @@ tar -C /tmp/tetragon-release -xzf /tmp/tetragon.tar.gz
 /tmp/tetragon-release/tetragon-v1.8.0-amd64/install.sh >/dev/null
 printf '%s' '{"event_set":["PROCESS_EXEC"]}' >/etc/tetragon/tetragon.conf.d/export-allowlist
 printf 'false' >/etc/tetragon/tetragon.conf.d/export-file-compress
+printf 'true' >/etc/tetragon/tetragon.conf.d/enable-process-cred
 rm -rf /tmp/tetragon-release /tmp/tetragon.tar.gz
 systemctl restart tetragon
 systemctl daemon-reload

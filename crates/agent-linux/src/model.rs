@@ -40,6 +40,9 @@ pub const DEFAULT_MAX_LINES_PER_POLL: u64 = 10_000;
 pub const DEFAULT_SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
 
 
+pub const DEFAULT_CREDENTIALS_PATH: &str = "/etc/tetragon/tetragon.conf.d/enable-process-cred";
+
+
 pub const DEFAULT_NFT_PATH: &str = "/usr/sbin/nft";
 
 
@@ -178,8 +181,22 @@ pub struct CommandSpec {
 pub enum Failure {
     TimedOut,
     TooLarge,
-    Exit,
+    Exit(Option<i32>),
     Spawn,
+}
+
+
+/// The facts of one run's summary line; `exit_code` is the status of a command that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SummaryFacts<'a> {
+    pub run_id: u64,
+    pub outcome: &'a str,
+    pub count: usize,
+    pub oversized: usize,
+    pub truncated: usize,
+    pub exit_code: Option<i32>,
+    pub lists_age_seconds: Option<u64>,
+    pub counter_reset: bool,
 }
 
 
@@ -195,6 +212,7 @@ pub struct UpdateEnv {
     pub tenant: String,
     pub device_id: String,
     pub line_limit: usize,
+    pub max_events: usize,
     pub limits: Limits,
     pub run: UpdateRunFn,
 }
@@ -202,6 +220,11 @@ pub struct UpdateEnv {
 
 pub fn default_systemctl_path() -> PathBuf {
     PathBuf::from(DEFAULT_SYSTEMCTL_PATH)
+}
+
+
+pub fn default_credentials_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CREDENTIALS_PATH)
 }
 
 
@@ -246,6 +269,8 @@ pub struct LinuxFile {
     pub systemctl_path: PathBuf,
     #[serde(default)]
     pub isolation: IsolationSettings,
+    #[serde(default = "default_credentials_path")]
+    pub credentials_path: PathBuf,
     #[serde(default = "default_nft_path")]
     pub nft_path: PathBuf,
 }
