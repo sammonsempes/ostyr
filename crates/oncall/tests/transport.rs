@@ -1,5 +1,7 @@
 #[path = "common/pki.rs"]
 mod pki;
+#[path = "common/private.rs"]
+mod private;
 #[path = "common/sink.rs"]
 mod sink;
 #[path = "common/types.rs"]
@@ -8,6 +10,8 @@ mod types;
 
 use core_audit::log::{append, genesis_log};
 use core_config::reload::{current_config, reload, ReloadContext, ReloadEngine, ReloadOutcome};
+#[cfg(unix)]
+use core_config::secret_file::SecretFileError;
 use oncall::error::TransportError;
 use oncall::limits::{MAX_SECRET_BYTES, MAX_SECRET_DIRS, MAX_TIMEOUT_MILLIS};
 use oncall::model::{AlertNotice, Channel, ChannelKind, Message};
@@ -16,6 +20,7 @@ use oncall::secret::{read_secret, secret_text};
 use oncall::settings::{open_settings_engine, parse_settings, settings_state, TransportSettings};
 use oncall::transport::{build_agent, check_text, https_sender, https_url, payload, post, send_one};
 use pki::{release_silent, spawn_silent, test_pki};
+use private::write_private;
 use sink::{spawn_sink, Seen};
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,6 +32,22 @@ use std::sync::{Arc, Mutex};
 use tempfile::{tempdir, TempDir};
 use tracing::Dispatch;
 use types::TestResult;
+
+
+#[cfg(unix)]
+const WORLD_READABLE: u32 = 0o644;
+
+
+#[cfg(unix)]
+const GROUP_READABLE: u32 = 0o640;
+
+
+#[cfg(unix)]
+const OTHER_WRITABLE_BIT: u32 = 0o604;
+
+
+#[cfg(unix)]
+const FOREIGN_UID: u32 = 65534;
 
 
 const INVALID_UTF8: &[u8] = &[u8::MAX, u8::MAX - 1];
@@ -84,7 +105,7 @@ fn fixture(ca_pem: Option<&str>, timeout_millis: u64) -> Result<Fixture, Box<dyn
     let directory = tempdir()?;
     let secrets = directory.path().join("secrets");
     fs::create_dir(&secrets)?;
-    fs::write(secrets.join("token"), format!("{SECRET}\n"))?;
+    write_private(&secrets.join("token"), format!("{SECRET}\n"))?;
     let ca_file = match ca_pem {
         Some(pem) => {
             let path = directory.path().join("ca.pem");
@@ -326,7 +347,55 @@ fn a_symlink_leaving_the_tenant_directory_is_refused() -> TestResult {
     std::os::unix::fs::symlink(&outside, fixture.directory.path().join("secrets").join("link"))?;
     assert!(matches!(
         read_secret(&fixture.settings, TENANT, "link"),
-        Err(TransportError::SecretFile(_))
+        Err(TransportError::SecretFile(_) | TransportError::SecretRefused(_))
+    ));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_another_private_file_inside_the_directory_is_refused() -> TestResult {
+    let fixture = fixture(None, TIMEOUT_MILLIS)?;
+    let secrets = fixture.directory.path().join("secrets");
+    std::os::unix::fs::symlink(secrets.join("token"), secrets.join("alias"))?;
+    assert!(matches!(
+        read_secret(&fixture.settings, TENANT, "alias"),
+        Err(TransportError::SecretRefused(SecretFileError::Symlink { .. }))
+    ));
+    assert_eq!(read_secret(&fixture.settings, TENANT, "token")?.as_str(), SECRET);
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_secret_file_open_to_group_or_other_is_refused() -> TestResult {
+    let fixture = fixture(None, TIMEOUT_MILLIS)?;
+    let secrets = fixture.directory.path().join("secrets");
+    [WORLD_READABLE, GROUP_READABLE, OTHER_WRITABLE_BIT].iter().try_for_each(|mode| {
+        let path = secrets.join("loose");
+        fs::write(&path, SECRET)?;
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(*mode))?;
+        assert!(matches!(
+            read_secret(&fixture.settings, TENANT, "loose"),
+            Err(TransportError::SecretRefused(SecretFileError::Mode { .. }))
+        ));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_secret_file_of_another_user_is_refused() -> TestResult {
+    let fixture = fixture(None, TIMEOUT_MILLIS)?;
+    let path = fixture.directory.path().join("secrets").join("token");
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(WORLD_READABLE))?;
+    std::os::unix::fs::chown(&path, Some(FOREIGN_UID), None)?;
+    assert!(matches!(
+        read_secret(&fixture.settings, TENANT, "token"),
+        Err(TransportError::SecretRefused(SecretFileError::Owner { .. }))
     ));
     Ok(())
 }
@@ -340,12 +409,12 @@ fn a_fifo_or_directory_as_secret_file_is_refused_without_blocking() -> TestResul
     assert!(std::process::Command::new("mkfifo").arg(secrets.join("pipe")).status()?.success());
     assert!(matches!(
         read_secret(&fixture.settings, TENANT, "pipe"),
-        Err(TransportError::SecretFile(_))
+        Err(TransportError::SecretRefused(SecretFileError::NotRegular { .. }))
     ));
     fs::create_dir(secrets.join("subdir"))?;
     assert!(matches!(
         read_secret(&fixture.settings, TENANT, "subdir"),
-        Err(TransportError::SecretFile(_))
+        Err(TransportError::SecretRefused(SecretFileError::NotRegular { .. }))
     ));
     Ok(())
 }
@@ -370,12 +439,12 @@ fn a_missing_secrets_directory_is_refused() -> TestResult {
 fn an_oversized_or_malformed_secret_is_refused() -> TestResult {
     let fixture = fixture(None, TIMEOUT_MILLIS)?;
     let secrets = fixture.directory.path().join("secrets");
-    fs::write(secrets.join("big"), vec![b'a'; MAX_SECRET_BYTES as usize + 1])?;
+    write_private(&secrets.join("big"), vec![b'a'; MAX_SECRET_BYTES as usize + 1])?;
     assert!(matches!(
         read_secret(&fixture.settings, TENANT, "big"),
         Err(TransportError::SecretTooLarge { .. })
     ));
-    fs::write(secrets.join("max"), vec![b'a'; MAX_SECRET_BYTES as usize])?;
+    write_private(&secrets.join("max"), vec![b'a'; MAX_SECRET_BYTES as usize])?;
     assert_eq!(read_secret(&fixture.settings, TENANT, "max")?.len() as u64, MAX_SECRET_BYTES);
     assert!(matches!(
         secret_text(&vec![b'a'; MAX_SECRET_BYTES as usize + 1]),
@@ -539,7 +608,7 @@ fn the_log_bridge_at_trace_never_sees_the_bearer_token_or_the_url_path() -> Test
     let sink = spawn_sink(pki.server_config.clone(), vec![(STATUS_OK, String::new())])?;
     let fixture = fixture(Some(&pki.ca_pem), TIMEOUT_MILLIS)?;
     let secrets = fixture.directory.path().join("secrets");
-    fs::write(secrets.join("token"), TRACE_SECRET)?;
+    write_private(&secrets.join("token"), TRACE_SECRET)?;
     let target = format!("https://localhost:{}{TRACE_URL_PATH}", sink.port);
     send_one(&fixture.settings, &channel_for(ChannelKind::Webhook, &target, Some("token")), &message())?;
     sink.seen.join().map_err(|_panic| "sink panicked")??;

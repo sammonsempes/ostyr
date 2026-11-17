@@ -42,6 +42,8 @@ pub enum TransportError {
     NoSecretsDir,
     #[error("the secret file is refused")]
     SecretFile(#[source] std::io::Error),
+    #[error("the secret file is refused by the secret-file checks")]
+    SecretRefused(#[source] core_config::secret_file::SecretFileError),
     #[error("the secret file is larger than {max} bytes")]
     SecretTooLarge { max: u64 },
     #[error("the secret is empty or not printable text")]
@@ -125,14 +127,12 @@ pub enum LinkError<UsedError: std::error::Error + 'static> {
 pub enum KeyError {
     #[error(transparent)]
     File(#[from] core_pg::error::PgError),
-    #[error("the key file cannot be inspected")]
-    Inspect(#[source] std::io::Error),
+    #[error("the key file is refused by the secret-file checks")]
+    Open(#[source] core_config::secret_file::SecretFileError),
     #[error("the key file grants access to group or other")]
-    Mode,
+    Mode(#[source] core_config::secret_file::SecretFileError),
     #[error("the key file is not owned by the service user")]
-    Owner,
-    #[error("key file ownership cannot be checked on this platform")]
-    Unsupported,
+    Owner(#[source] core_config::secret_file::SecretFileError),
     #[error("the key is shorter than {min} bytes")]
     TooShort { min: usize },
 }

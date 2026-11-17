@@ -5,7 +5,8 @@ use crate::model::{
 use crate::sign::{memory_signer, new_identifiers};
 use crate::token::{issue_token, verify_token};
 use crate::types::FillFn;
-use core_pg::password::{open_regular, read_secret};
+use core_config::secret_file::{open_secret, SecretFileError};
+use core_pg::password::read_secret;
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH};
 use std::fs::{File, Metadata};
@@ -123,12 +124,32 @@ pub fn check_owner_and_mode(mode: u32, owner: u32, process_user: u32) -> Result<
 }
 
 
-/// Opened without blocking, regular file, mode and owner judged on the opened handle, bounded read, then the hex seed.
+/// The refusal without the path text: a hex seed passed where the path belongs must never be echoed by the error chain.
+pub fn without_path(error: SecretFileError) -> SecretFileError {
+    let file = String::new();
+    match error {
+        SecretFileError::Io { source, .. } => SecretFileError::Io { file, source },
+        SecretFileError::NotRegular { .. } => SecretFileError::NotRegular { file },
+        SecretFileError::Symlink { .. } => SecretFileError::Symlink { file },
+        SecretFileError::Mode { .. } => SecretFileError::Mode { file },
+        SecretFileError::Owner { .. } => SecretFileError::Owner { file },
+    }
+}
+
+
+/// Mode and owner refusals keep their own variants; every other refusal is `SeedOpen`, with its cause but not its path.
+pub fn seed_refusal(error: SecretFileError) -> CliError {
+    match error {
+        SecretFileError::Mode { .. } => CliError::SeedMode,
+        SecretFileError::Owner { .. } => CliError::SeedOwner,
+        SecretFileError::Io { .. } | SecretFileError::NotRegular { .. } | SecretFileError::Symlink { .. } => CliError::SeedOpen(without_path(error)),
+    }
+}
+
+
+/// Opened through the shared secret-file checks (no symlink, regular file, owner, mode), bounded read, then the hex seed.
 pub fn read_signing_key(path: &Path) -> Result<SigningKey, CliError> {
-    let mut handle = open_regular(path).map_err(|_| CliError::SeedFile)?;
-    let metadata = handle.metadata().map_err(CliError::Inspect)?;
-    let (mode, owner, process_user) = mode_and_owners(&metadata)?;
-    check_owner_and_mode(mode, owner, process_user)?;
+    let mut handle = open_secret(path).map_err(seed_refusal)?;
     let bytes = read_secret(&mut handle, MAX_SEED_FILE_BYTES, "").map_err(|_| CliError::SeedFile)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| CliError::SeedText)?;
     signing_key_from(text.trim())

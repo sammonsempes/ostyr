@@ -2,6 +2,8 @@
 mod mailsink;
 #[path = "common/pki.rs"]
 mod pki;
+#[path = "common/private.rs"]
+mod private;
 #[path = "common/types.rs"]
 mod types;
 
@@ -18,6 +20,7 @@ use oncall::store::reason_text;
 use oncall::transport::{send_one, FORBIDDEN_CHARS};
 use oncall::wire::Reply;
 use pki::{release_silent, spawn_silent, test_pki};
+use private::write_private;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
@@ -103,7 +106,7 @@ fn make_fixture(ca_pem: Option<&str>, smtp: Option<SmtpSettings>, timeout_millis
     let directory = tempdir()?;
     let secrets = directory.path().join("secrets");
     fs::create_dir(&secrets)?;
-    fs::write(secrets.join("smtp-pass"), format!("{PASSWORD}\n"))?;
+    write_private(&secrets.join("smtp-pass"), format!("{PASSWORD}\n"))?;
     let ca_file = match ca_pem {
         Some(pem) => {
             let path = directory.path().join("ca.pem");

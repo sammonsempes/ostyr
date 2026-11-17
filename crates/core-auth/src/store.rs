@@ -4,13 +4,12 @@ use crate::oidc::EXTERNAL_PASSWORD_HASH;
 use crate::random::random_array;
 use crate::service::OIDC_PREFIX;
 use crate::types::{AccountMap, CredentialMap, RandomFn};
-use core_audit::log::{check_private, owner_only};
+use core_audit::log::owner_only;
+use core_config::secret_file::{open_secret, SecretFileError};
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 
@@ -102,38 +101,12 @@ pub fn save_accounts<Output: Write>(output: Output, accounts: &AccountMap) -> Re
 }
 
 
-/// Opens `path` for reading without blocking on a FIFO or device, and refuses anything but a regular file, judged on the opened handle.
-pub fn open_regular(path: &Path) -> io::Result<File> {
-    let file = non_blocking(OpenOptions::new().read(true)).open(path)?;
-    if file.metadata()?.is_file() {
-        Ok(file)
-    } else {
-        Err(io::Error::new(ErrorKind::InvalidInput, "not a regular file"))
-    }
-}
-
-
-#[cfg(unix)]
-pub fn non_blocking(options: &mut OpenOptions) -> &mut OpenOptions {
-    options.custom_flags(libc::O_NONBLOCK)
-}
-
-
-#[cfg(not(unix))]
-pub fn non_blocking(options: &mut OpenOptions) -> &mut OpenOptions {
-    options
-}
-
-
-/// A missing file is an empty store; an existing file must grant nothing to group or other.
+/// A missing file is an empty store; an existing file goes through `open_secret` (no symlink, regular file, owner, no group or other bit).
 pub fn load_store_file(path: &Path) -> Result<(AccountMap, CredentialMap), AuthError> {
-    match open_regular(path) {
-        Ok(file) => {
-            check_private(&file)?;
-            load_store(file)
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok((AccountMap::new(), CredentialMap::new())),
-        Err(error) => Err(AuthError::Io(error)),
+    match open_secret(path) {
+        Ok(file) => load_store(file),
+        Err(SecretFileError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Ok((AccountMap::new(), CredentialMap::new())),
+        Err(error) => Err(AuthError::StoreFile(error)),
     }
 }
 
