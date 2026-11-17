@@ -56,6 +56,8 @@ pub enum WatchKind {
 pub struct Honeytoken {
     pub path: String,
     pub kind: HoneytokenKind,
+    #[serde(default)]
+    pub owner_uid: u32,
 }
 
 
@@ -76,6 +78,16 @@ pub struct WatchSets {
     pub tokens: Vec<String>,
     pub ancestors: Vec<String>,
     pub token_ancestors: Vec<String>,
+    pub planted: Vec<PlantedIdentity>,
+}
+
+
+/// The identity of a planted file or of a directory above one: the kernel device number (`s_dev`) and the inode number, recorded at plant time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlantedIdentity {
+    pub path: String,
+    pub device: u32,
+    pub inode: u64,
 }
 
 
@@ -116,6 +128,8 @@ pub struct KprobeArg {
     pub index: u32,
     #[serde(rename = "type")]
     pub arg_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolve: Option<String>,
 }
 
 
@@ -130,6 +144,16 @@ pub struct Ignore {
 #[serde(rename_all = "camelCase")]
 pub struct Selector {
     pub match_args: Vec<MatchArg>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub match_namespaces: Vec<MatchNamespace>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatchNamespace {
+    pub namespace: String,
+    pub operator: String,
+    pub values: Vec<String>,
 }
 
 
@@ -147,23 +171,34 @@ pub enum FimEvent {
         path: String,
         process: String,
         name_match: bool,
+        mount_ambiguous: bool,
+        foreign_mount_ns: bool,
+        dentry_path: Option<String>,
     },
     Honeytoken {
         path: String,
         process: String,
     },
     Link {
+        /// The bare dentry of the link source: it can read like a declared path, so it never gives honeytoken severity.
         existing: String,
         created: String,
         process: String,
         honeytoken: bool,
         name_match: bool,
+        mount_ambiguous: bool,
+        foreign_mount_ns: bool,
+        created_dentry: Option<String>,
     },
     Rename {
         source: String,
         target: String,
         process: String,
         honeytoken: bool,
+        mount_ambiguous: bool,
+        foreign_mount_ns: bool,
+        source_dentry: Option<String>,
+        target_dentry: Option<String>,
     },
     MissingPath {
         policy: String,
