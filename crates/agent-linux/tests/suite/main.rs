@@ -11,3 +11,4 @@ mod settings;
 mod spool;
 mod support;
 mod types;
+mod updates;

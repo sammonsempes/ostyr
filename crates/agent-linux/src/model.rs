@@ -1,8 +1,10 @@
-use crate::types::SpoolLock;
+use crate::types::{SpoolLock, UpdateRunFn};
+use patch_inventory::model::Limits;
 use serde::Deserialize;
 use std::fs::File;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 
 pub const SETTINGS_SECTION: &str = "agent_linux";
@@ -65,6 +67,21 @@ pub const MAX_SENSOR_INTERVAL_SECONDS: u64 = 30;
 pub const MAX_RESTARTS_PER_HOUR_CEILING: u64 = 60;
 
 
+pub const MIN_UPDATE_INTERVAL_SECONDS: u64 = 300;
+
+
+pub const DEFAULT_UPDATE_INTERVAL_SECONDS: u64 = 21_600;
+
+
+pub const MAX_UPDATE_INTERVAL_SECONDS: u64 = 604_800;
+
+
+pub const DEFAULT_UPDATE_DEADLINE_SECONDS: u64 = 120;
+
+
+pub const MAX_UPDATE_DEADLINE_SECONDS: u64 = 600;
+
+
 /// Upper bound of the polls and agent runs of one process; the cap exists because the rules forbid an unbounded loop.
 pub const MAX_POLLS: u64 = u64::MAX;
 
@@ -113,6 +130,76 @@ impl Default for SensorSettings {
 }
 
 
+/// The package manager whose missing updates are listed; `none` (the default) lists nothing, the agent never guesses the family.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Manager {
+    Apt,
+    Dnf,
+    #[default]
+    None,
+}
+
+
+/// The live-reloaded bounds of the update inventory: the manager, seconds between runs, and the deadline of each command.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct UpdateSettings {
+    pub manager: Manager,
+    pub interval_seconds: u64,
+    pub deadline_seconds: u64,
+}
+
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            manager: Manager::None,
+            interval_seconds: DEFAULT_UPDATE_INTERVAL_SECONDS,
+            deadline_seconds: DEFAULT_UPDATE_DEADLINE_SECONDS,
+        }
+    }
+}
+
+
+/// One command of the generalised bounded runner: `environment` of `None` inherits the agent's, `Some` clears it and sets exactly those variables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub program: PathBuf,
+    pub arguments: Vec<String>,
+    pub environment: Option<Vec<(String, String)>>,
+    pub accepted_codes: Vec<i32>,
+    pub max_output: u64,
+}
+
+
+/// Why a run listed nothing; the name is the `outcome` of the summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    TimedOut,
+    TooLarge,
+    Exit,
+    Spawn,
+}
+
+
+/// Where the update inventory reads and writes; `run` is injected, the program paths are constants of `updates.rs`.
+#[derive(Clone, Debug)]
+pub struct UpdateEnv {
+    pub lists_dir: PathBuf,
+    pub spool: PathBuf,
+    pub sending: PathBuf,
+    pub counter_file: PathBuf,
+    pub state: Arc<StateDir>,
+    pub lock: SpoolLock,
+    pub tenant: String,
+    pub device_id: String,
+    pub line_limit: usize,
+    pub limits: Limits,
+    pub run: UpdateRunFn,
+}
+
+
 pub fn default_systemctl_path() -> PathBuf {
     PathBuf::from(DEFAULT_SYSTEMCTL_PATH)
 }
@@ -141,7 +228,7 @@ pub struct IsolationSettings {
 }
 
 
-/// The settings file; `settings` and `sensor` are live-reloaded, the paths (`systemctl_path` included) are read at start.
+/// The settings file; `settings`, `sensor` and `updates` are live-reloaded, the paths (`systemctl_path` included) are read at start.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinuxFile {
@@ -153,6 +240,8 @@ pub struct LinuxFile {
     pub settings: SourceSettings,
     #[serde(default)]
     pub sensor: SensorSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
     #[serde(default = "default_systemctl_path")]
     pub systemctl_path: PathBuf,
     #[serde(default)]

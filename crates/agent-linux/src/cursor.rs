@@ -77,33 +77,58 @@ fn leaf(path: &Path) -> Result<OsString, SourceError> {
 }
 
 
-/// A missing file is the initial state; anything else that is not a cursor is refused. Opened relative to the state directory, without following a symlink or blocking on a FIFO.
-pub fn read_cursor(state: &StateDir, cursor_file: &Path) -> Result<Cursor, SourceError> {
-    let name = leaf(cursor_file)?;
+/// Opens a file of the state directory relative to it, without following a symlink or blocking on a FIFO; a missing file is `None`.
+pub fn open_state_file(state: &StateDir, path: &Path) -> Result<Option<File>, SourceError> {
+    let name = leaf(path)?;
     match openat(
         &state.handle,
         &name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
-        Ok(fd) => read_cursor_file(File::from(fd), cursor_file),
-        Err(errno) if errno == rustix::io::Errno::NOENT => Ok(Cursor::default()),
+        Ok(fd) => Ok(Some(File::from(fd))),
+        Err(errno) if errno == rustix::io::Errno::NOENT => Ok(None),
         Err(errno) => Err(SourceError::Io(errno.into())),
     }
 }
 
 
-/// Reads at most `MAX_CURSOR_BYTES` from the opened handle, after checking it is a regular file.
-pub fn read_cursor_file(file: File, path: &Path) -> Result<Cursor, SourceError> {
+/// A missing file is the initial state; anything else that is not a cursor is refused.
+pub fn read_cursor(state: &StateDir, cursor_file: &Path) -> Result<Cursor, SourceError> {
+    match open_state_file(state, cursor_file)? {
+        Some(file) => read_cursor_file(file, cursor_file),
+        None => Ok(Cursor::default()),
+    }
+}
+
+
+/// Reads at most `MAX_CURSOR_BYTES` from the opened handle, after checking it is a regular file; a longer file is refused.
+pub fn read_state_text(file: File, path: &Path) -> Result<String, SourceError> {
     if file.metadata()?.is_file() {
         let mut text = String::new();
         let read = file.take(MAX_CURSOR_BYTES as u64 + 1).read_to_string(&mut text)?;
-        match parse_cursor(&text) {
-            Some(cursor) if read <= MAX_CURSOR_BYTES => Ok(cursor),
-            _ => Err(SourceError::Cursor(path.to_path_buf())),
-        }
+        (read <= MAX_CURSOR_BYTES)
+            .then_some(text)
+            .ok_or_else(|| SourceError::Cursor(path.to_path_buf()))
     } else {
         Err(SourceError::NotRegular(path.to_path_buf()))
+    }
+}
+
+
+pub fn read_cursor_file(file: File, path: &Path) -> Result<Cursor, SourceError> {
+    parse_cursor(&read_state_text(file, path)?).ok_or_else(|| SourceError::Cursor(path.to_path_buf()))
+}
+
+
+/// The run counter of the update inventory: a missing file is zero, anything but a decimal number is refused.
+pub fn read_counter(state: &StateDir, path: &Path) -> Result<u64, SourceError> {
+    match open_state_file(state, path)? {
+        Some(file) => read_state_text(file, path)?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| SourceError::Counter(path.to_path_buf())),
+        None => Ok(0),
     }
 }
 
@@ -118,8 +143,8 @@ pub fn remove_stale(state: &StateDir, name: &Path) -> io::Result<()> {
 
 
 /// Written to a fresh temporary file in the state directory (a stale one, or a symlink planted in its place, is removed first and never followed), synced, then renamed there.
-pub fn write_cursor(state: &StateDir, cursor_file: &Path, cursor: Cursor) -> Result<(), SourceError> {
-    let name = leaf(cursor_file)?;
+pub fn write_state_text(state: &StateDir, path: &Path, text: &str) -> Result<(), SourceError> {
+    let name = leaf(path)?;
     let mut temporary_name = name.clone();
     temporary_name.push(TEMPORARY_SUFFIX);
     let temporary = PathBuf::from(temporary_name);
@@ -132,7 +157,16 @@ pub fn write_cursor(state: &StateDir, cursor_file: &Path, cursor: Cursor) -> Res
     )
     .map_err(io::Error::from)?;
     let mut out = File::from(fd);
-    writeln!(out, "{} {} {} {}", cursor.dev, cursor.ino, cursor.offset, u8::from(cursor.skipping))?;
+    out.write_all(text.as_bytes())?;
     out.sync_all()?;
     Ok(renameat(&state.handle, &temporary, &state.handle, &name).map_err(io::Error::from)?)
+}
+
+
+pub fn write_cursor(state: &StateDir, cursor_file: &Path, cursor: Cursor) -> Result<(), SourceError> {
+    write_state_text(
+        state,
+        cursor_file,
+        &format!("{} {} {} {}\n", cursor.dev, cursor.ino, cursor.offset, u8::from(cursor.skipping)),
+    )
 }
