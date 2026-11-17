@@ -155,3 +155,55 @@ fn the_captured_directory_identities_on_token_paths_are_flagged() -> TestResult 
     assert!(events.iter().all(is_flagged_write));
     Ok(())
 }
+
+
+const SECOND_EVENT: usize = 1;
+
+
+const THIRD_EVENT: usize = 2;
+
+
+const ROOT_LEVEL_LINES: &str = include_str!("../fixtures/root-level-lines.jsonl");
+
+
+#[test]
+fn the_captured_top_level_directory_events_are_honeytokens() -> TestResult {
+    let sets = with_planted(
+        watch_sets(&role(
+            "lab",
+            &[],
+            &["/root/passwords.txt", "/home/bob/.aws/credentials", "/var/backups/.canary"],
+        )),
+        parse_planted(PLANTED_ALL)?,
+    );
+    let events = classified_lines(ROOT_LEVEL_LINES, &sets);
+    assert!(matches!(
+        events.first(),
+        Some(Some(FimEvent::Rename { source, honeytoken: true, mount_ambiguous: false, .. })) if source == "/root"
+    ));
+    assert!(matches!(events.get(SECOND_EVENT), Some(Some(FimEvent::Honeytoken { path, .. })) if path == "/home"));
+    assert!(matches!(events.get(THIRD_EVENT), Some(Some(FimEvent::Honeytoken { path, .. })) if path == "/var"));
+    assert_eq!(events.len(), THIRD_EVENT + 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_captured_top_level_directory_events_without_a_plan_are_flagged() -> TestResult {
+    let sets = watch_sets(&role(
+        "lab",
+        &[],
+        &["/root/passwords.txt", "/home/bob/.aws/credentials", "/var/backups/.canary"],
+    ));
+    let events = classified_lines(ROOT_LEVEL_LINES, &sets);
+    assert!(matches!(
+        events.first(),
+        Some(Some(FimEvent::Rename {
+            honeytoken: false,
+            mount_ambiguous: true,
+            ..
+        }))
+    ));
+    assert!(events.iter().skip(1).all(is_flagged_write));
+    Ok(())
+}

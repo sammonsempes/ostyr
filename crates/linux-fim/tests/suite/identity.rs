@@ -98,6 +98,11 @@ fn named(path: &str) -> serde_json::Value {
 }
 
 
+fn pathless() -> serde_json::Value {
+    json!({"path_arg": {"permission": "drwxr-xr-x"}})
+}
+
+
 fn opened(path: &str) -> serde_json::Value {
     json!({"file_arg": {"path": path}})
 }
@@ -193,7 +198,7 @@ fn a_directory_identity_never_proves_an_open() -> TestResult {
 
 #[test]
 fn an_ancestor_identity_proves_a_rename_of_that_ancestor_only() -> TestResult {
-    let ancestor = [named("/"), named("/root"), named("/moved")];
+    let ancestor = [pathless(), named("/root"), named("/moved")];
     let token = [named("/root"), named("/passwords.txt"), named("/moved")];
     assert!(matches!(
         event("ostyr-fimt-a", "security_path_rename", &ancestor, &identity(DEVICE, ROOT_DIR_INODE)),
@@ -408,5 +413,39 @@ fn a_stat_device_is_turned_into_the_kernel_device() -> TestResult {
     assert_eq!(kernel_device(STAT_ROOT_DEVICE), DEVICE);
     assert_eq!(kernel_device(STAT_SMALL_MINOR), (SCSI_MAJOR << KERNEL_MINOR_BITS) | 1);
     assert_eq!(kernel_device(STAT_WIDE_MINOR), (SCSI_MAJOR << KERNEL_MINOR_BITS) | WIDE_MINOR);
+    Ok(())
+}
+
+
+#[test]
+fn a_missing_directory_path_is_root_only_when_the_leaf_is_declared_under_a_severity_policy() -> TestResult {
+    let undeclared = [pathless(), named("/tmp"), named("/moved")];
+    assert!(matches!(
+        event("ostyr-fimt-a", "security_path_rename", &undeclared, &identity(DEVICE, ROOT_DIR_INODE)),
+        Some(FimEvent::Rename { source, honeytoken: false, .. }) if source == UNRESOLVED_NAME
+    ));
+    let declared_leaf = [pathless(), named("/root")];
+    assert!(matches!(
+        event("ostyr-fimn-a", "security_path_rename", &declared_leaf, &identity(DEVICE, ROOT_DIR_INODE)),
+        Some(FimEvent::Rename { source, honeytoken: false, .. }) if source == UNRESOLVED_NAME
+    ));
+    assert!(matches!(
+        event("ostyr-fimt-a", "security_path_unlink", &undeclared, &identity(DEVICE, ROOT_DIR_INODE)),
+        Some(FimEvent::MissingPath { .. })
+    ));
+    let not_a_path = [json!({"size_arg": "1"}), named("/root")];
+    assert!(matches!(
+        event("ostyr-fimt-a", "security_path_unlink", &not_a_path, &identity(DEVICE, ROOT_DIR_INODE)),
+        Some(FimEvent::MissingPath { .. })
+    ));
+    assert!(matches!(
+        event(
+            "ostyr-fimd-a",
+            "security_path_unlink",
+            &[pathless(), named("/root")],
+            &identity(DEVICE, ROOT_DIR_INODE)
+        ),
+        Some(FimEvent::MissingPath { .. })
+    ));
     Ok(())
 }
