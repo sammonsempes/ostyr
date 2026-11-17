@@ -1,4 +1,4 @@
-use crate::error::GatewayError;
+use crate::error::{encode_failed, not_an_object, GatewayError};
 use crate::model::{Gateway, GatewaySettings, RefusalCounts, Refusals, Slot, SummaryTask};
 use crate::session::{session_for, settings_of};
 use agent_channel::model::Identity;
@@ -71,9 +71,9 @@ pub fn events_of(ecs_json: &[u8]) -> Vec<&[u8]> {
 
 /// Every event is parsed as exactly one JSON object and re-encoded with the identity tenant written over `tenant`; anything else is refused.
 pub fn forced_payload(event: &[u8], tenant: &str) -> Result<Bytes, GatewayError> {
-    let mut fields = serde_json::from_slice::<Map<String, Value>>(event).map_err(GatewayError::NotAnObject)?;
+    let mut fields = serde_json::from_slice::<Map<String, Value>>(event).map_err(not_an_object)?;
     fields.insert(TENANT_FIELD.to_owned(), Value::String(tenant.to_owned()));
-    serde_json::to_vec(&fields).map(Bytes::from).map_err(GatewayError::Encode)
+    serde_json::to_vec(&fields).map(Bytes::from).map_err(encode_failed)
 }
 
 
@@ -161,7 +161,7 @@ pub async fn publish_batch(gateway: &Gateway, identity: &Identity, batch: &Event
 /// The counter of a refusal kind; failures of NATS itself are not refusals.
 pub fn counter_for<'a>(refusals: &'a Refusals, error: &GatewayError) -> Option<&'a AtomicU64> {
     match error {
-        GatewayError::NotAnObject(_) => Some(&refusals.not_an_object),
+        GatewayError::NotAnObject { .. } => Some(&refusals.not_an_object),
         GatewayError::PayloadTooLarge { .. } => Some(&refusals.payload_too_large),
         GatewayError::TooManyEvents { .. } => Some(&refusals.too_many_events),
         GatewayError::Identity => Some(&refusals.invalid_identity),
