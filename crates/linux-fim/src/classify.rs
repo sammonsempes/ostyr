@@ -195,14 +195,15 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String], sets: &WatchSets) ->
     let severity_policy = token_policy || full;
     let severity = severity_policy && !foreign;
     let args = &kprobe.args;
+    let root = severity_policy.then_some(sets);
     let first = pair_of(0, full);
     match (ours, function, severity_policy) {
         (false, _, _) => None,
         (true, HOOK_OPEN, _) => Some(open_of(path_at(args, 0), (policy, function, &process), (sets, foreign, identity))),
         (true, HOOK_UNLINK | HOOK_RMDIR, true) => {
-            let ambiguous = ambiguous_dentry(args, first, full, sets);
+            let ambiguous = ambiguous_dentry(args, first, full, (sets, severity_policy));
             Some(removal_of(
-                real_at(args, first),
+                real_at(args, first, root),
                 ambiguous,
                 token_policy,
                 (policy, function, &process),
@@ -213,7 +214,7 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String], sets: &WatchSets) ->
             let created_first = has_prefix(policy, CREATED_FIRST_LINK_PREFIXES);
             let created_pair = if created_first { first } else { (1, LINK_FORWARD_CREATED) };
             let existing = name_at(args, if created_first { LINK_REVERSED_EXISTING } else { 0 });
-            let (created, created_dentry) = side_of(args, created_pair, full, sets);
+            let (created, created_dentry) = side_of(args, created_pair, full, (sets, severity_policy));
             let hit = severity && created_dentry.is_none() && is_token_side(&created, token_policy, sets);
             let honeytoken = hit && is_planted(identity, &created, sets);
             Some(FimEvent::Link {
@@ -229,11 +230,11 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String], sets: &WatchSets) ->
         }
         (true, HOOK_RENAME, _) => {
             let target_first = has_prefix(policy, TARGET_FIRST_RENAME_PREFIXES);
-            let first_side = side_of(args, first, full, sets);
+            let first_side = side_of(args, first, full, (sets, severity_policy));
             let second_side = if severity_policy {
                 (name_at(args, SECOND_NAME), None)
             } else {
-                side_of(args, pair_of(SECOND_PAIR, full), full, sets)
+                side_of(args, pair_of(SECOND_PAIR, full), full, (sets, severity_policy))
             };
             let ((source, source_dentry), (target, target_dentry)) = if target_first {
                 (second_side, first_side)
@@ -258,8 +259,12 @@ pub fn event_of(kprobe: ProcessKprobe, policies: &[String], sets: &WatchSets) ->
         }
         (true, hook, _) => WRITE_HOOKS.contains(&hook).then(|| {
             let split = SPLIT_HOOKS.contains(&hook);
-            let found = if split { real_at(args, first) } else { path_at(args, 0) };
-            let dentry_path = if split { ambiguous_dentry(args, first, full, sets) } else { None };
+            let found = if split { real_at(args, first, root) } else { path_at(args, 0) };
+            let dentry_path = if split {
+                ambiguous_dentry(args, first, full, (sets, severity_policy))
+            } else {
+                None
+            };
             found.map_or_else(
                 || missing_path(policy, hook, &process),
                 |path| FimEvent::Write {
@@ -428,29 +433,42 @@ pub fn raw_at(args: &[KprobeValue], position: usize) -> Option<&str> {
 }
 
 
-/// The directory path followed by the final component of the dentry argument: a dentry alone stops at its mount root.
-pub fn joined_raw(args: &[KprobeValue], (directory, name): (usize, usize)) -> Option<String> {
-    let parent = raw_at(args, directory)?;
+/// The directory path and the last dentry component; with `root`, a directory with no `path` is `/` when `/<leaf>` is declared.
+pub fn joined_raw(args: &[KprobeValue], (directory, name): (usize, usize), root: Option<&WatchSets>) -> Option<String> {
     let leaf = raw_at(args, name)?.rsplit('/').next().filter(|part| !part.is_empty())?;
+    let parent = raw_at(args, directory).or_else(|| root_parent(args, directory, leaf, root))?;
     Some(format!("{}/{leaf}", parent.trim_end_matches('/')))
 }
 
 
+/// `/` for a directory argument present with no path, when the policy proves it: the leaf under `/` is a declared path.
+pub fn root_parent(args: &[KprobeValue], directory: usize, leaf: &str, root: Option<&WatchSets>) -> Option<&'static str> {
+    let pathless = args
+        .get(directory)
+        .and_then(|value| value.file_arg.as_ref().or(value.path_arg.as_ref()))
+        .is_some_and(|found| found.path.is_none());
+    let candidate = format!("/{leaf}");
+    let proven = root.is_some_and(|sets| declared(&candidate, sets));
+    (pathless && proven).then_some("/")
+}
+
+
 /// The escaped joined path of a pair: the directory path and the last component of the dentry, never the dentry path alone.
-pub fn real_at(args: &[KprobeValue], pair: (usize, usize)) -> Option<String> {
-    joined_raw(args, pair).map(|path| escape_field(&path))
+pub fn real_at(args: &[KprobeValue], pair: (usize, usize), root: Option<&WatchSets>) -> Option<String> {
+    joined_raw(args, pair, root).map(|path| escape_field(&path))
 }
 
 
 /// The real path of a pair, or the visible unresolved marker.
-pub fn real_name(args: &[KprobeValue], pair: (usize, usize)) -> String {
-    real_at(args, pair).unwrap_or_else(|| UNRESOLVED_NAME.to_string())
+pub fn real_name(args: &[KprobeValue], pair: (usize, usize), root: Option<&WatchSets>) -> String {
+    real_at(args, pair, root).unwrap_or_else(|| UNRESOLVED_NAME.to_string())
 }
 
 
-/// The escaped dentry path when a dentry-first policy matched it but the joined path is another, undeclared one (a bind mount, or a filesystem root a user writes).
-pub fn ambiguous_dentry(args: &[KprobeValue], pair: (usize, usize), full: bool, sets: &WatchSets) -> Option<String> {
-    joined_raw(args, pair)
+/// The escaped dentry path when the joined path is another, undeclared one (`scope`: the sets, and whether a missing root directory is proven).
+pub fn ambiguous_dentry(args: &[KprobeValue], pair: (usize, usize), full: bool, scope: (&WatchSets, bool)) -> Option<String> {
+    let (sets, rooted) = scope;
+    joined_raw(args, pair, rooted.then_some(sets))
         .zip(raw_at(args, pair.1))
         .filter(|(joined, dentry)| full && joined != dentry && !declared(joined, sets) && declared(dentry, sets))
         .map(|(_, dentry)| escape_field(dentry))
@@ -458,8 +476,9 @@ pub fn ambiguous_dentry(args: &[KprobeValue], pair: (usize, usize), full: bool, 
 
 
 /// The real path of a pair and its ambiguous dentry path, if any.
-pub fn side_of(args: &[KprobeValue], pair: (usize, usize), full: bool, sets: &WatchSets) -> (String, Option<String>) {
-    (real_name(args, pair), ambiguous_dentry(args, pair, full, sets))
+pub fn side_of(args: &[KprobeValue], pair: (usize, usize), full: bool, scope: (&WatchSets, bool)) -> (String, Option<String>) {
+    let (sets, rooted) = scope;
+    (real_name(args, pair, rooted.then_some(sets)), ambiguous_dentry(args, pair, full, scope))
 }
 
 
