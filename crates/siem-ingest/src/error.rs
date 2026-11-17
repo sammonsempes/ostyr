@@ -180,10 +180,31 @@ pub fn handshake_class(error: &(dyn Error + 'static)) -> Option<TlsClass> {
 }
 
 
-/// A failure with a rustls error anywhere in its chain becomes its fixed class; any other keeps its cause.
-pub fn without_peer_tls(error: BoxError) -> BoxError {
-    match handshake_class(error.as_ref()) {
-        Some(class) => BoxError::from(class),
-        None => error,
-    }
+/// What a failed peer exchange is called: fixed text, never a byte the peer sent (an unauthenticated server speaks before TLS).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum PeerFailure {
+    #[error("the TLS exchange failed: {0}")]
+    Tls(TlsClass),
+    #[error("the connection failed: {0:?}")]
+    Io(io::ErrorKind),
+    #[error("the request failed")]
+    Other,
+}
+
+
+/// The `io::ErrorKind` of the first `io::Error` in the cause chain.
+pub fn io_kind(error: &(dyn Error + 'static)) -> Option<io::ErrorKind> {
+    std::iter::successors(Some(error), |inner| next_cause(*inner))
+        .find_map(|cause| cause.downcast_ref::<io::Error>())
+        .map(io::Error::kind)
+}
+
+
+/// Any failure of an exchange with the server becomes a fixed class with no source: the cause chain can hold peer text (T506).
+pub fn without_peer_text(error: BoxError) -> BoxError {
+    let failure = handshake_class(error.as_ref())
+        .map(PeerFailure::Tls)
+        .or_else(|| io_kind(error.as_ref()).map(PeerFailure::Io))
+        .unwrap_or(PeerFailure::Other);
+    BoxError::from(failure)
 }

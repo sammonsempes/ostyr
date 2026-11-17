@@ -1,4 +1,4 @@
-//! The one log subscriber every binary linking async-nats builds: the library logs peer certificate names raw at DEBUG, so its target is capped.
+//! The one log subscriber every binary linking async-nats builds: the library logs peer text raw, so its target is dropped.
 use std::str::FromStr;
 use tracing::{Level, Subscriber};
 use tracing_subscriber::filter::{filter_fn, ParseError, Targets};
@@ -13,9 +13,6 @@ pub const CAPPED_TARGET: &str = "async_nats";
 pub const CAPPED_PREFIX: &str = "async_nats::";
 
 
-pub const CAPPED_LEVEL: Level = Level::INFO;
-
-
 pub const DEFAULT_DIRECTIVES: &str = "debug";
 
 
@@ -25,13 +22,13 @@ pub fn is_capped_target(target: &str) -> bool {
 }
 
 
-/// The cap applies after the operator's directives, so no directive can raise an async-nats event above INFO.
+/// The drop applies after the operator's directives, so no directive can bring an async-nats event back.
 pub fn log_allowed(targets: &Targets, target: &str, level: &Level) -> bool {
-    targets.would_enable(target, level) && !(is_capped_target(target) && level > &CAPPED_LEVEL)
+    targets.would_enable(target, level) && !is_capped_target(target)
 }
 
 
-/// Operator directives (the `RUST_LOG` text, DEBUG for everything when absent) under the async-nats cap.
+/// Operator directives (the `RUST_LOG` text, DEBUG for everything when absent) without the async-nats target.
 pub fn build_subscriber<Writer>(writer: Writer, directives: Option<&str>) -> Result<impl Subscriber + Send + Sync, ParseError>
 where
     Writer: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,

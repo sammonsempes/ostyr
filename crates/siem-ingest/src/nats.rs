@@ -1,4 +1,4 @@
-use crate::error::{without_peer_tls, NatsError};
+use crate::error::{without_peer_text, NatsError};
 use crate::model::{AckAction, Delivery, Link, Session, Wiring};
 use crate::parse::truncate_reason;
 use crate::settings::{IngestSettings, MODULE};
@@ -102,7 +102,7 @@ pub fn tls_config(pem: &[u8]) -> Result<ClientConfig, NatsError> {
 }
 
 
-/// Runs a request under a deadline; the cause of a failure stays in the source chain.
+/// Runs a request under a deadline; a failure becomes a fixed class, since its cause can hold text the peer sent.
 pub async fn bounded<Output, Failure, Pending>(limit: Duration, pending: Pending) -> Result<Output, NatsError>
 where
     Failure: Into<BoxError>,
@@ -111,7 +111,7 @@ where
     tokio::time::timeout(limit, pending)
         .await
         .map_err(NatsError::Timeout)?
-        .map_err(|failure| NatsError::Request(without_peer_tls(failure.into())))
+        .map_err(|failure| NatsError::Request(without_peer_text(failure.into())))
 }
 
 
