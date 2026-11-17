@@ -113,7 +113,7 @@ pub const TINY_LINE_LIMIT: usize = 10;
 pub const SETTING_COUNT: usize = 4;
 
 
-pub const SENSOR_SETTING_COUNT: usize = 7;
+pub const SENSOR_SETTING_COUNT: usize = 10;
 
 
 pub const RELOADED_MILLIS: u64 = 7;

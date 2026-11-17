@@ -1,7 +1,7 @@
 use crate::error::{SensorError, SourceError};
-use crate::model::SensorSettings;
+use crate::model::{CommandSpec, SensorSettings};
 use crate::spool::append_locked;
-use crate::types::{KillFn, RunFn, RunFuture, SharedSensor, SpoolLock};
+use crate::types::{KillFn, RunFn, RunFuture, SharedSensor, SpoolLock, UpdateFuture};
 use agent_channel::types::{ClockFn, PauseFn};
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::types::SharedAuditFn;
@@ -279,33 +279,65 @@ pub async fn run_bounded(program: PathBuf, arguments: Vec<String>) -> Result<Str
 
 /// Runs the command in its own process group with at most `MAX_OUTPUT_BYTES` of standard output read, a deadline, and the child killed when dropped.
 pub async fn run_bounded_with(program: PathBuf, arguments: Vec<String>, kill: KillFn) -> Result<String, SensorError> {
-    let mut child = Command::new(program)
-        .args(arguments)
+    let spec = CommandSpec {
+        program,
+        arguments,
+        environment: None,
+        accepted_codes: vec![0],
+        max_output: MAX_OUTPUT_BYTES,
+    };
+    let output = run_spec_with(spec, kill).await?;
+    String::from_utf8(output).map_err(|error| SensorError::Utf8(error.utf8_error()))
+}
+
+
+/// The generalised runner: own process group, stdin and stderr null, standard output read at most `max_output` bytes, success only on an accepted exit code, the environment cleared when the spec sets one.
+pub async fn run_spec_with(spec: CommandSpec, kill: KillFn) -> Result<Vec<u8>, SensorError> {
+    let mut command = Command::new(spec.program);
+    command
+        .args(spec.arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .process_group(0)
-        .spawn()?;
+        .process_group(0);
+    spec.environment.into_iter().for_each(|variables| {
+        command.env_clear().envs(variables);
+    });
+    let mut child = command.spawn()?;
     let mut guard = GroupKill {
         group: child.id().and_then(|id| Pid::from_raw(id as i32)),
         kill,
     };
     let mut output = Vec::new();
     for pipe in child.stdout.take().into_iter() {
-        pipe.take(MAX_OUTPUT_BYTES + 1).read_to_end(&mut output).await?;
+        pipe.take(spec.max_output + 1).read_to_end(&mut output).await?;
     }
-    if output.len() as u64 > MAX_OUTPUT_BYTES {
-        Err(SensorError::TooLarge(MAX_OUTPUT_BYTES))
+    if output.len() as u64 > spec.max_output {
+        Err(SensorError::TooLarge(spec.max_output))
     } else {
         let status = child.wait().await?;
         guard.group = None;
-        if status.success() {
-            Ok(String::from_utf8(output).map_err(|error| SensorError::Utf8(error.utf8_error()))?)
+        if status.code().is_some_and(|code| spec.accepted_codes.contains(&code)) {
+            Ok(output)
         } else {
             Err(SensorError::Exit(status.code()))
         }
     }
+}
+
+
+/// The generalised runner under a deadline: when it passes the future is dropped, which kills the whole process group.
+pub async fn run_spec_deadline(spec: CommandSpec, deadline: Duration) -> Result<Vec<u8>, SensorError> {
+    tokio::time::timeout(deadline, run_spec_with(spec, kill_group))
+        .await
+        .map_err(|_| SensorError::Timeout)?
+}
+
+
+/// The production `UpdateRunFn`.
+pub fn run_update_command(spec: CommandSpec, deadline: Duration) -> UpdateFuture {
+    Box::pin(run_spec_deadline(spec, deadline))
 }
 
 
