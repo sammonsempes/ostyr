@@ -1,3 +1,4 @@
+use crate::model::KubeconfigFault;
 use core_pg::error::PgError;
 use thiserror::Error;
 
@@ -20,4 +21,43 @@ pub enum ParseError {
     },
     #[error("document holds {count} findings, above the {max} limit")]
     TooManyFindings { count: usize, max: usize },
+}
+
+
+#[derive(Debug, Error)]
+pub enum DeclarationError {
+    #[error("cannot read the declarations: {0}")]
+    Read(#[source] std::io::Error),
+    #[error("declarations are above the {max} byte limit")]
+    TooLarge { max: u64 },
+    #[error("declarations are not the expected YAML document")]
+    Malformed,
+    #[error("invalid tenant: {0}")]
+    Tenant(#[source] PgError),
+    #[error("declarations hold {count} clusters, above the {max} limit")]
+    TooManyClusters { count: usize, max: usize },
+}
+
+
+/// Why one cluster scan gave no findings; fixed text, never Prowler output, a path or a credential.
+#[derive(Debug, Error)]
+pub enum ScanError {
+    #[error("the kubeconfig was refused ({fault:?})")]
+    Kubeconfig { fault: KubeconfigFault },
+    #[error("cannot prepare the work directory: {0}")]
+    Workdir(#[source] std::io::Error),
+    #[error("prowler could not be started")]
+    Spawn,
+    #[error("prowler ran past its deadline")]
+    Timeout,
+    #[error("prowler failed with code {code:?}")]
+    Failed { code: Option<i32> },
+    #[error("prowler wrote no output file")]
+    NoOutput,
+    #[error("the output file is not a regular file of this user")]
+    BadOutputFile,
+    #[error("cluster declaration {index} was refused")]
+    BadDeclaration { index: usize },
+    #[error("the output cannot be parsed: {0}")]
+    Parse(#[from] ParseError),
 }

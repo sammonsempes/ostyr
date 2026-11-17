@@ -72,3 +72,32 @@ pub struct Findings {
     pub items: Vec<Finding>,
     pub skipped: Skipped,
 }
+
+
+/// One declared Kubernetes cluster; `context` is the account Prowler reports, so it is unique inside a declarations file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cluster {
+    pub name: String,
+    pub kubeconfig_file: std::path::PathBuf,
+    pub context: String,
+}
+
+
+/// One tenant's declarations: the clusters that run and the indexes of the entries refused.
+#[derive(Debug)]
+pub struct Declarations {
+    pub tenant: TenantScope,
+    pub clusters: Vec<Cluster>,
+    pub refused: Vec<usize>,
+}
+
+
+/// Which kubeconfig check refused the file, never its path or content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KubeconfigFault {
+    Unreadable,
+    NotRegular,
+    Symlink,
+    Mode,
+    Owner,
+}
