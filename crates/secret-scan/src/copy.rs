@@ -2,6 +2,7 @@
 
 use crate::model::CopyCounts;
 use crate::scan::{ensure, ScanError, IGNORE_NAME};
+use core_config::trusted_dir::{check_trusted_path, open_trusted_dir};
 use rustix::fs::{fstat, mkdirat, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
@@ -38,9 +39,6 @@ pub const CEILING_BYTES: u64 = 16 << 30;
 
 
 pub const GROUP_OTHER_WRITE: u32 = 0o022;
-
-
-pub const STICKY_BIT: u32 = 0o1000;
 
 
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
@@ -272,28 +270,9 @@ fn make_dir(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, ScanError> {
 }
 
 
-fn check_ancestor(handle: &OwnedFd, expected_uid: u32) -> Result<(), ScanError> {
-    let stat = fstat(handle).map_err(io_error)?;
-    ensure(
-        stat.st_uid == 0 || stat.st_uid == expected_uid,
-        ScanError::BadSettings("work directory ancestor is not owned by root or the caller"),
-    )?;
-    ensure(
-        stat.st_mode & GROUP_OTHER_WRITE == 0 || stat.st_mode & STICKY_BIT != 0,
-        ScanError::BadSettings("work directory ancestor is writable by group or others"),
-    )
-}
-
-
 /// The work directory is absolute and holds only names (no `..`, no `.`), checked before anything is opened.
 pub fn check_work_dir(work_dir: &Path) -> Result<(), ScanError> {
-    ensure(work_dir.is_absolute(), ScanError::BadSettings("work directory is not absolute"))?;
-    ensure(
-        work_dir
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_))),
-        ScanError::BadSettings("work directory has a component other than a name"),
-    )
+    Ok(check_trusted_path(work_dir)?)
 }
 
 
@@ -305,24 +284,9 @@ fn names_of(path: &Path) -> impl Iterator<Item = &OsStr> {
 }
 
 
-/// Opens the work root from `/` one component at a time without following a link; every ancestor is checked, never trusted by path.
+/// Opens the work root through the shared trusted-directory rule of core-config.
 pub fn open_work_root(work_dir: &Path, expected_uid: u32) -> Result<OwnedFd, ScanError> {
-    check_work_dir(work_dir)?;
-    let start = openat(rustix::fs::CWD, "/", DIRECTORY_FLAGS, Mode::empty()).map_err(io_error)?;
-    let work = names_of(work_dir).try_fold(start, |parent, name| {
-        check_ancestor(&parent, expected_uid)?;
-        openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(io_error)
-    })?;
-    let stat = fstat(&work).map_err(io_error)?;
-    ensure(
-        stat.st_uid == expected_uid,
-        ScanError::BadSettings("work directory is not owned by the caller"),
-    )?;
-    ensure(
-        stat.st_mode & GROUP_OTHER_WRITE == 0,
-        ScanError::BadSettings("work directory is writable by group or others"),
-    )?;
-    Ok(work)
+    Ok(open_trusted_dir(work_dir, expected_uid)?)
 }
 
 

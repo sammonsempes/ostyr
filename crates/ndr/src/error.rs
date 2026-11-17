@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use core_config::trusted_dir::TrustedDirError;
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -25,6 +27,9 @@ pub enum NdrError {
     NoRules,
     #[error("the yr program {path} is refused: {reason}")]
     Program { path: PathBuf, reason: &'static str },
+    #[cfg(unix)]
+    #[error("the work directory is not trusted")]
+    WorkDir(#[source] TrustedDirError),
     #[error("cannot prepare the private work directory")]
     Workspace(#[source] io::Error),
     #[error("cannot start yr")]

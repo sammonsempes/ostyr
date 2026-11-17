@@ -9,6 +9,9 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 
+const MODE_PRIVATE: u32 = 0o700;
+
+
 const MODE_PLAIN: u32 = 0o644;
 
 
@@ -59,7 +62,9 @@ const NOT_ABSOLUTE: &str = "the path is not absolute or holds a .. component";
 
 pub fn own_dir() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
     ready()?;
-    Ok(tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?)
+    Ok(tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(MODE_PRIVATE))
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))?)
 }
 
 

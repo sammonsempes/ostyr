@@ -4,7 +4,9 @@
 mod types;
 
 
-use rustix::process::Pid;
+use core_config::trusted_dir::TrustedDirError;
+use rustix::fs::Mode;
+use rustix::process::{getuid, umask, Pid};
 use sbom::error::{ResourceKind, RunError, SbomError, SettingsError, TargetError};
 use sbom::model::{Stderr, Verdict, WatchPlan};
 use sbom::run::{
@@ -15,6 +17,7 @@ use sbom::settings::{SyftSettings, Target};
 use sbom::types::{DeadlineFn, Helpers, Job};
 use std::fs;
 use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -58,6 +61,20 @@ const FLOOD_BYTES: &str = "5000000";
 
 
 const EXIT_CODE: i32 = 3;
+
+
+const GROUP_UMASK: u32 = 0o002;
+
+
+const PRIVATE_MODE: u32 = 0o700;
+
+
+const GROUP_WRITABLE_MODE: u32 = 0o775;
+
+
+fn private_dir() -> io::Result<TempDir> {
+    tempfile::Builder::new().permissions(fs::Permissions::from_mode(PRIVATE_MODE)).tempdir()
+}
 
 
 const LONG_STDERR: usize = 1000;
@@ -173,7 +190,7 @@ const LIVE_HELPERS: usize = 8;
 
 #[test]
 fn good_run_parses_fixture_and_carries_scope() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'"))?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     assert_eq!(sbom.components.len(), FIXTURE_COMPONENTS);
@@ -185,7 +202,7 @@ fn good_run_parses_fixture_and_carries_scope() -> TestResult {
 
 #[test]
 fn arguments_are_separate_and_typed() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$*\"")?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     let name = sbom.components.first().map(|component| component.name.as_str());
@@ -196,7 +213,7 @@ fn arguments_are_separate_and_typed() -> TestResult {
 
 #[test]
 fn environment_is_cleared_and_explicit() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(env | sort | tr '\\n' ' ')\"")?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     let seen = sbom
@@ -213,6 +230,22 @@ fn environment_is_cleared_and_explicit() -> TestResult {
 
 
 #[test]
+fn the_syft_home_is_private_under_a_group_umask() -> TestResult {
+    let dir = private_dir()?;
+    let binary = fake_syft(
+        &dir,
+        "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(/usr/bin/stat -c '%a-%u' \"$HOME\")\"",
+    )?;
+    let previous = umask(Mode::from_raw_mode(GROUP_UMASK));
+    let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
+    umask(previous);
+    let seen = result?.components.first().map(|component| component.name.clone()).ok_or("no component")?;
+    assert_eq!(seen, format!("700-{}", getuid().as_raw()));
+    Ok(())
+}
+
+
+#[test]
 fn environment_names_are_fixed() -> TestResult {
     let names: Vec<String> = child_environment(Path::new("/w/h")).into_iter().map(|(name, _)| name).collect();
     assert_eq!(names, ["HOME", "XDG_CACHE_HOME", "SYFT_CACHE_DIR", "TMPDIR", "SYFT_CHECK_FOR_APP_UPDATE"]);
@@ -222,7 +255,7 @@ fn environment_names_are_fixed() -> TestResult {
 
 #[test]
 fn oversized_output_is_too_large() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'"))?;
     let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     limited.max_stdout_bytes = SMALL_STDOUT;
@@ -234,7 +267,7 @@ fn oversized_output_is_too_large() -> TestResult {
 
 #[test]
 fn endless_output_stops_at_the_component_cap() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "printf '{\"components\":['\nexec yes '{\"name\":\"a\"},'")?;
     let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     limited.max_components = MAX_COMPONENTS;
@@ -246,7 +279,7 @@ fn endless_output_stops_at_the_component_cap() -> TestResult {
 
 #[test]
 fn silent_hang_is_killed_at_the_deadline() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "exec sleep 3600")?;
     let result = run_expiring(&settings(&dir, binary, LONG_DEADLINE_MILLIS), at_once);
     assert!(matches!(result, Err(RunError::TimedOut)));
@@ -256,7 +289,7 @@ fn silent_hang_is_killed_at_the_deadline() -> TestResult {
 
 #[test]
 fn background_holder_of_the_pipe_dies_with_the_group() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "sleep 3600 &\nwait")?;
     let result = run_expiring(&settings(&dir, binary, LONG_DEADLINE_MILLIS), at_once);
     assert!(matches!(result, Err(RunError::TimedOut)));
@@ -266,7 +299,7 @@ fn background_holder_of_the_pipe_dies_with_the_group() -> TestResult {
 
 #[test]
 fn non_zero_exit_is_typed() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'\nexit {EXIT_CODE}"))?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(matches!(result, Err(RunError::Failed { code: Some(EXIT_CODE), .. })));
@@ -276,7 +309,7 @@ fn non_zero_exit_is_typed() -> TestResult {
 
 #[test]
 fn garbage_output_is_a_parse_error() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "echo nonsense")?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(matches!(result, Err(RunError::Sbom(_))));
@@ -286,7 +319,7 @@ fn garbage_output_is_a_parse_error() -> TestResult {
 
 #[test]
 fn stderr_flood_is_drained_and_capped() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, &format!("yes noise | head -c {FLOOD_BYTES} >&2\ncat '{FIXTURE}'"))?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     assert_eq!(sbom.components.len(), FIXTURE_COMPONENTS);
@@ -341,7 +374,7 @@ fn drain_reports_a_read_failure() -> TestResult {
 
 #[test]
 fn refused_targets_never_spawn() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let absent = dir.path().join("absent");
     let configured = settings(&dir, absent, LONG_DEADLINE_MILLIS);
     let helpers = fresh_helpers();
@@ -357,7 +390,7 @@ fn refused_targets_never_spawn() -> TestResult {
 
 #[test]
 fn invalid_settings_are_refused() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let mut bad = settings(&dir, PathBuf::from("syft"), LONG_DEADLINE_MILLIS);
     bad.binary = PathBuf::from("relative-syft");
     assert!(matches!(run(&bad), Err(RunError::Settings(SettingsError::Invalid("binary")))));
@@ -367,7 +400,7 @@ fn invalid_settings_are_refused() -> TestResult {
 
 #[test]
 fn binary_must_exist_and_be_a_regular_file() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let missing = run(&settings(&dir, dir.path().join("absent"), LONG_DEADLINE_MILLIS));
     assert!(matches!(missing, Err(RunError::Io(_))));
     let directory = run(&settings(&dir, dir.path().to_path_buf(), LONG_DEADLINE_MILLIS));
@@ -378,7 +411,7 @@ fn binary_must_exist_and_be_a_regular_file() -> TestResult {
 
 #[test]
 fn non_executable_binary_fails_to_run_and_non_executable_prlimit_fails_to_spawn() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let path = dir.path().join("plain");
     fs::write(&path, "x")?;
     let unusable = run(&settings(&dir, path.clone(), LONG_DEADLINE_MILLIS));
@@ -393,11 +426,29 @@ fn non_executable_binary_fails_to_run_and_non_executable_prlimit_fails_to_spawn(
 
 #[test]
 fn missing_work_directory_is_an_io_error() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "exit 0")?;
     let mut configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     configured.work_dir = dir.path().join("no-such-dir");
-    assert!(matches!(run(&configured), Err(RunError::Io(_))));
+    assert!(matches!(run(&configured), Err(RunError::WorkDir(TrustedDirError::Io(_)))));
+    Ok(())
+}
+
+
+#[test]
+fn a_work_directory_others_can_write_is_refused_before_syft_starts() -> TestResult {
+    let dir = private_dir()?;
+    let binary = fake_syft(&dir, "touch \"$HOME/../started\"; exit 0")?;
+    let configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE_MODE))?;
+    let result = run(&configured);
+    assert!(matches!(
+        result,
+        Err(RunError::WorkDir(TrustedDirError::Refused(
+            "work directory is writable by group or others"
+        )))
+    ));
+    assert!(!dir.path().join("started").exists());
     Ok(())
 }
 
@@ -431,7 +482,7 @@ fn holder_attempt(limited: &SyftSettings, pid_file: &Path) -> Result<Option<Help
 
 #[test]
 fn setsid_holder_of_the_pipes_cannot_stall_the_run_or_pile_up_helpers() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let pid_file = dir.path().join("holder.pid");
     let binary = fake_syft(&dir, &format!("setsid sleep 3600 &\necho $! > '{}'\nexec sleep 3600", pid_file.display()))?;
     let mut limited = settings(&dir, binary, DEADLINE_MILLIS);
@@ -463,7 +514,7 @@ fn helper_slots_are_reserved_and_released() -> TestResult {
 
 #[test]
 fn failing_exit_with_empty_output_keeps_the_code_and_the_parse_error() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, &format!("exit {EXIT_CODE}"))?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(matches!(
@@ -549,7 +600,7 @@ fn process_exists(pid: &str) -> bool {
 
 #[test]
 fn child_that_left_the_group_is_killed_by_pid_at_the_deadline() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let pid_file = dir.path().join("child.pid");
     let body = format!(
         "exec perl -e 'setpgrp(0, getpgrp(getppid())); open(F, \">{}\"); print F \"$$\\n\"; close F; open(R, \">$ENV{{HOME}}/ready\"); close R; sleep 3600'",
@@ -565,7 +616,7 @@ fn child_that_left_the_group_is_killed_by_pid_at_the_deadline() -> TestResult {
 
 #[test]
 fn child_that_left_the_group_and_closed_its_pipes_is_killed_by_pid() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let pid_file = dir.path().join("child.pid");
     let body = format!(
         "exec perl -e 'setpgrp(0, getpgrp(getppid())); open(F, \">{}\"); print F \"$$\\n\"; close F; close STDOUT; close STDERR; sleep 3600'",
@@ -581,7 +632,7 @@ fn child_that_left_the_group_and_closed_its_pipes_is_killed_by_pid() -> TestResu
 
 #[test]
 fn complete_document_with_a_lingering_child_is_killed_and_reported() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'\nexec 1>&-\nexec 2>&-\nexec sleep 3600"))?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(matches!(result, Err(RunError::Failed { code: None, source: None })));
@@ -605,7 +656,7 @@ fn failing_after(allowed: usize) -> impl FnMut(Job) -> io::Result<()> {
 fn failed_helper_spawn_kills_the_child_and_returns_the_error() -> TestResult {
     let scope = ("t", "a");
     let outcomes = (0..HELPERS_STARTED).map(|allowed| -> Result<(), Box<dyn std::error::Error>> {
-        let dir = TempDir::new()?;
+        let dir = private_dir()?;
         let binary = fake_syft(&dir, "exec sleep 3600")?;
         let configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
         let result = generate_with(failing_after(allowed), never_expired, &configured, &fresh_helpers(), &target(), scope);
@@ -656,7 +707,7 @@ fn work_dir_leftovers(dir: &TempDir) -> io::Result<usize> {
 
 #[test]
 fn the_child_runs_under_the_configured_address_space_limit() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let body = "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(ulimit -v)\"";
     let binary = fake_syft(&dir, body)?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
@@ -668,7 +719,7 @@ fn the_child_runs_under_the_configured_address_space_limit() -> TestResult {
 
 #[test]
 fn allocating_past_the_limit_is_a_typed_memory_error_and_the_home_is_removed() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let body = format!("head -c {BIG_ALLOCATION} /dev/zero | tr '\\0' x | tail -n 1");
     let binary = fake_syft(&dir, &body)?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
@@ -689,7 +740,7 @@ fn allocating_past_the_limit_is_a_typed_memory_error_and_the_home_is_removed() -
 
 #[test]
 fn writing_past_the_limit_is_a_typed_file_error_and_the_home_is_removed() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let body = "exec dd if=/dev/zero of=\"$HOME/big\" bs=1M count=8";
     let binary = fake_syft(&dir, body)?;
     let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
@@ -712,7 +763,7 @@ fn writing_past_the_limit_is_a_typed_file_error_and_the_home_is_removed() -> Tes
 
 #[test]
 fn archives_are_checked_on_the_opened_handle() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let archive = dir.path().join("image.tar");
     fs::write(&archive, vec![b'a'; ARCHIVE_BYTES])?;
     let oversize = check_archive(&Target::OciArchive(archive.clone()), SMALL_ARCHIVE_LIMIT);
@@ -742,7 +793,7 @@ fn archives_are_checked_on_the_opened_handle() -> TestResult {
 
 #[test]
 fn an_oversize_archive_never_spawns() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let archive = dir.path().join("image.tar");
     fs::File::create(&archive)?.set_len(ARCHIVE_LIMIT + 1)?;
     let binary = fake_syft(&dir, "exit 0")?;
@@ -868,7 +919,7 @@ fn killed_by_hand(mut child: Child) -> TestResult {
 
 #[test]
 fn writing_past_the_disk_bound_is_a_typed_disk_error_and_the_home_is_removed() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, WRITE_STEPS)?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(
@@ -888,7 +939,7 @@ fn writing_past_the_disk_bound_is_a_typed_disk_error_and_the_home_is_removed() -
 
 #[test]
 fn too_many_entries_in_the_home_is_a_typed_disk_error() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, MANY_FILES)?;
     let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     limited.max_run_entries = SMALL_ENTRY_LIMIT;
@@ -910,7 +961,7 @@ fn too_many_entries_in_the_home_is_a_typed_disk_error() -> TestResult {
 
 #[test]
 fn the_child_temporary_directory_is_its_private_home() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$TMPDIR\"")?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     let name = sbom.components.first().map(|component| component.name.clone()).ok_or("no component")?;
@@ -921,7 +972,7 @@ fn the_child_temporary_directory_is_its_private_home() -> TestResult {
 
 #[test]
 fn the_limits_are_in_force_from_the_first_instruction() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let body = "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(ulimit -v)\"";
     let binary = fake_syft(&dir, body)?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
@@ -933,7 +984,7 @@ fn the_limits_are_in_force_from_the_first_instruction() -> TestResult {
 
 #[test]
 fn only_the_kept_tail_of_stderr_classifies_a_failure() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let early = fake_syft(&dir, "echo 'out of memory' >&2\nyes noise | head -c 5000 >&2\nexit 1")?;
     let ignored = run(&settings(&dir, early, LONG_DEADLINE_MILLIS));
     assert!(matches!(ignored, Err(RunError::Failed { code: Some(1), .. })), "{ignored:?}");
@@ -955,7 +1006,7 @@ fn only_the_kept_tail_of_stderr_classifies_a_failure() -> TestResult {
 
 #[test]
 fn a_missing_or_irregular_prlimit_refuses_the_run() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let binary = fake_syft(&dir, "exit 0")?;
     let mut configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     configured.prlimit_binary = dir.path().join("absent");
@@ -969,7 +1020,7 @@ fn a_missing_or_irregular_prlimit_refuses_the_run() -> TestResult {
 
 #[test]
 fn the_walk_measures_blocks_and_entries_and_stops_at_the_cap() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     fs::write(dir.path().join("big"), vec![b'a'; BIG_FILE_BYTES])?;
     assert!(disk_exceeded(dir.path(), TINY_DISK, ENTRY_LIMIT)?);
     assert!(!disk_exceeded(dir.path(), HUGE_DISK, ENTRY_LIMIT)?);
@@ -985,7 +1036,7 @@ fn the_walk_measures_blocks_and_entries_and_stops_at_the_cap() -> TestResult {
 
 #[test]
 fn a_vanished_entry_counts_as_nothing_and_other_walk_errors_are_typed() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let file = dir.path().join("file");
     fs::write(&file, "x")?;
     let vanished = walkdir::WalkDir::new(dir.path().join("absent")).into_iter().next().ok_or("no entry")?;
@@ -1000,7 +1051,7 @@ fn a_vanished_entry_counts_as_nothing_and_other_walk_errors_are_typed() -> TestR
 
 #[test]
 fn the_watchdog_decides_on_close_disk_overrun_and_ticks_out() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let (closed_sender, closed_receiver) = mpsc::channel::<()>();
     drop(closed_sender);
     let finished = sleeper()?;
@@ -1045,7 +1096,7 @@ fn killing_a_reaped_pid_is_an_error() -> TestResult {
 
 #[test]
 fn the_watch_schedule_covers_the_deadline_with_ticks_no_longer_than_it() -> TestResult {
-    let dir = TempDir::new()?;
+    let dir = private_dir()?;
     let mut configured = settings(&dir, PathBuf::from("/bin/true"), LONG_DEADLINE_MILLIS);
     configured.disk_poll_millis = POLL_MILLIS;
     configured.deadline_millis = THREE_TICKS_MILLIS;

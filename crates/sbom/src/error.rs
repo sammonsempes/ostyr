@@ -74,6 +74,8 @@ pub enum RunError {
     Settings(#[from] SettingsError),
     #[error(transparent)]
     Target(#[from] TargetError),
+    #[error("the work directory is not trusted")]
+    WorkDir(#[from] core_config::trusted_dir::TrustedDirError),
     #[error("the syft binary is not a regular file")]
     NotRegular,
     #[error("syft exceeded its deadline and was killed")]

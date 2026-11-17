@@ -25,7 +25,7 @@ tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1", features = ["process", "fs"] }
 signal-hook = "0.4.6"
 
 [dev-dependencies]

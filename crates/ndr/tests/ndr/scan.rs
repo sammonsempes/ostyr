@@ -1,6 +1,6 @@
 use crate::support::{
     field, fileinfo_line, fixture, logging_on, now, quick_limits, store, write_rule, Fixture, TestResult, EICAR, EICAR_RULE, EXIT_ONE_SCAN, FAKE_YR,
-    FLOOD_SCAN, HANG_SCAN, SHA_A, SHA_B, SHA_C, SHA_D, STDERR_TIMEOUT, TINY_LIMIT,
+    FLOOD_SCAN, GROUP_UMASK, HANG_SCAN, SHA_A, SHA_B, SHA_C, SHA_D, STAT_YR, STDERR_TIMEOUT, TINY_LIMIT,
 };
 use ndr::error::NdrError;
 use ndr::exec::Captured;
@@ -9,6 +9,8 @@ use ndr::rules::{load_rules, Rules};
 use ndr::scan::{
     classify, file_total, is_identifier, log_bad_line, matched_rules, parse_matches, record_scan, scan_args, scan_group, scan_tick, Context,
 };
+use rustix::fs::Mode;
+use rustix::process::{getuid, umask};
 use std::fs;
 use std::path::Path;
 
@@ -448,5 +450,19 @@ fn a_hard_link_in_the_filestore_is_refused_and_counted() -> TestResult {
     let outcome = scan_tick(&fake.yr, &rules, root.path(), lines.iter().map(String::as_str), &Limits::default(), now());
     assert_eq!((outcome.counts.refused, outcome.counts.scanned), (1, 0));
     assert!(outcome.events.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn the_scan_copy_is_private_under_a_group_umask() -> TestResult {
+    let (fake, rules) = setup(STAT_YR)?;
+    let previous = umask(Mode::from_raw_mode(GROUP_UMASK));
+    let scanned = matched_rules(&fake.yr, &rules, EICAR, &Limits::default());
+    umask(previous);
+    scanned?;
+    let report = fs::read_to_string(fake.work_dir.path().join("report-scan"))?;
+    let owner = getuid().as_raw();
+    assert_eq!(report, format!("700 {owner}\n600 {owner}\n"));
     Ok(())
 }
