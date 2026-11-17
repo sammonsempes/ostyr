@@ -3,6 +3,7 @@
 pub mod detect;
 pub mod error;
 pub mod id;
+pub mod logging;
 pub mod model;
 pub mod pg;
 pub mod run;

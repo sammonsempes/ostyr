@@ -1,18 +1,22 @@
 //! Usage: detect <detection.yaml> <stop-file>. Runs the detection service with the alert sink of the `sink` setting until the stop file exists.
 
+use detection::logging::service_subscriber;
 use detection::run::run_service;
 use detection::store::commit_alerts;
 use std::error::Error;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use tracing::Level;
+
+
+const LOG_VARIABLE: &str = "RUST_LOG";
 
 
 pub const USAGE: &str = "usage: detect <detection.yaml> <stop-file>";
 
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing_subscriber::fmt().with_max_level(Level::INFO).with_writer(io::stderr).try_init()?;
+    let directives = std::env::var(LOG_VARIABLE).ok();
+    tracing::subscriber::set_global_default(service_subscriber(io::stderr, directives.as_deref())?)?;
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let settings_path = PathBuf::from(arguments.first().ok_or(USAGE)?);
     let stop_path = PathBuf::from(arguments.get(1).ok_or(USAGE)?);
