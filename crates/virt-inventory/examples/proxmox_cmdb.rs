@@ -1,4 +1,4 @@
-//! Usage: `proxmox_cmdb <fetch-settings.yaml> <pg-settings.yaml>`. Fetches the Proxmox inventory (read-only token check first) and syncs it into the tenant's CMDB.
+//! Usage: `proxmox_cmdb <fetch-settings.yaml> <pg-settings.yaml> [<max-assets> [<max-child-rows>]]` (the optional caps are for lab proofs). Fetches the Proxmox inventory (read-only token check first) and syncs it into the tenant's CMDB.
 use cmdb::model::Limits;
 use cmdb::pg::pg_executor;
 use cmdb::store::{MIGRATIONS, MIGRATION_NAMESPACE};
@@ -21,6 +21,12 @@ use virt_inventory::settings::load_settings;
 const PG_ARGUMENT: usize = 1;
 
 
+const ASSETS_ARGUMENT: usize = 2;
+
+
+const CHILD_ROWS_ARGUMENT: usize = 3;
+
+
 const STATEMENT_DEADLINE_SECONDS: u64 = 30;
 
 
@@ -40,7 +46,21 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let deadline = Duration::from_secs(STATEMENT_DEADLINE_SECONDS);
     migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, deadline).await?;
     let executor = pg_executor(&client, deadline);
-    let report = sync(&executor, &settings, &parsed, &Default::default(), &Limits::default()).await?;
+    let defaults = Limits::default();
+    let limits = Limits {
+        max_assets: arguments
+            .get(ASSETS_ARGUMENT)
+            .map(|text| text.parse())
+            .transpose()?
+            .unwrap_or(defaults.max_assets),
+        max_child_rows: arguments
+            .get(CHILD_ROWS_ARGUMENT)
+            .map(|text| text.parse())
+            .transpose()?
+            .unwrap_or(defaults.max_child_rows),
+        ..defaults
+    };
+    let report = sync(&executor, &settings, &parsed, &Default::default(), &limits).await?;
     writeln!(stdout(), "{report:?}")?;
     Ok(())
 }

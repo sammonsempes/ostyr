@@ -4,7 +4,7 @@ use crate::settings::FetchSettings;
 use cmdb::error::StoreError;
 use cmdb::model::{Asset, AssetKind, Event, IdentityKey, Limits, Observation, Outcome, Snapshot};
 use cmdb::reconcile::{check_observation, reconcile};
-use cmdb::store::{apply_outcome, check_one_conflict_per_triple, load_assets, ATTEMPT_CEILING};
+use cmdb::store::{apply_outcome, check_one_conflict_per_triple, load_assets, ASSETS_TABLE, ATTEMPT_CEILING, ATTRIBUTES_TABLE, KEYS_TABLE};
 use cmdb::types::{Executor, KeyMap, ObservedMap, TruthMap};
 use core_pg::scope::{tenant_scope, TenantScope};
 use std::collections::BTreeSet;
@@ -44,6 +44,8 @@ pub struct SyncReport {
     pub duplicate_conflicts: usize,
     pub refused_by_cmdb: usize,
     pub refused_no_room: usize,
+    pub refused_attribute_room: usize,
+    pub cap: Option<&'static str>,
     pub unapplied: usize,
 }
 
@@ -57,6 +59,8 @@ pub struct PageResult {
     pub duplicate_conflicts: usize,
     pub refused_by_cmdb: usize,
     pub refused_no_room: usize,
+    pub refused_attribute_room: usize,
+    pub cap: Option<&'static str>,
 }
 
 
@@ -194,6 +198,7 @@ pub struct Folded {
     pub outcome: Outcome,
     pub refused: usize,
     pub no_room: usize,
+    pub cap: Option<&'static str>,
     pub room: Room,
     pub created: BTreeSet<String>,
     pub changed: BTreeSet<String>,
@@ -213,6 +218,28 @@ pub fn relevant(inventory: &[Asset], observation: &Observation) -> Vec<Asset> {
 }
 
 
+/// The store table whose cap a creation that does not fit runs into: assets, then identity keys, then attributes.
+pub fn blocked_cap(room: &Room, observation: &Observation) -> &'static str {
+    if room.assets < 1 {
+        ASSETS_TABLE
+    } else if room.keys < observation.keys.len() {
+        KEYS_TABLE
+    } else {
+        ATTRIBUTES_TABLE
+    }
+}
+
+
+/// The words the warning uses for a store table.
+pub fn cap_label(table: &str) -> &'static str {
+    match table {
+        ASSETS_TABLE => "asset",
+        KEYS_TABLE => "identity key row",
+        _ => "attribute row",
+    }
+}
+
+
 /// Replaces the asset with the same id in place, or appends it.
 pub fn put_asset(inventory: &mut Vec<Asset>, asset: Asset) {
     match inventory.iter_mut().find(|existing| existing.id == asset.id) {
@@ -228,6 +255,8 @@ pub fn fold_one(folded: &mut Folded, observation: &Observation, truth: &TruthMap
     match reconcile(&subset, observation, truth) {
         Err(_) => folded.refused += 1,
         Ok(next) if created_count(&next) > 0 && !take_room(&mut folded.room, observation) => {
+            let blocked = blocked_cap(&folded.room, observation);
+            folded.cap.get_or_insert(blocked);
             folded.no_room += 1;
         }
         Ok(next) => {
@@ -263,6 +292,7 @@ pub fn reconcile_page(assets: &[Asset], page: &[Observation], truth: &TruthMap, 
         },
         refused: 0,
         no_room: 0,
+        cap: None,
         room,
         created: BTreeSet::new(),
         changed: BTreeSet::new(),
@@ -300,6 +330,8 @@ pub async fn try_page(
         duplicate_conflicts: applied.duplicates.len(),
         refused_by_cmdb: folded.refused,
         refused_no_room: folded.no_room,
+        refused_attribute_room: 0,
+        cap: folded.cap,
     })
 }
 
@@ -335,14 +367,26 @@ pub async fn apply_page(
     limits: &Limits,
 ) -> Result<PageResult, StoreError> {
     match apply_attempts(exec, scope, page, truth, limits, true).await {
-        Err(StoreError::CapReached { .. }) => match apply_attempts(exec, scope, page, truth, limits, false).await {
-            Err(StoreError::CapReached { .. }) => Ok(PageResult {
-                refused_no_room: page.len(),
-                ..PageResult::default()
+        Err(StoreError::CapReached { table: first }) => match apply_attempts(exec, scope, page, truth, limits, false).await {
+            Err(StoreError::CapReached { table }) => Ok(refused_page(table, page.len())),
+            other => other.map(|done| PageResult {
+                cap: done.cap.or(Some(first)),
+                ..done
             }),
-            other => other,
         },
         other => other,
+    }
+}
+
+
+/// A page the store refuses even without creations: an asset cap counts creations, a row cap counts updates.
+pub fn refused_page(table: &'static str, rows: usize) -> PageResult {
+    let assets = table == ASSETS_TABLE;
+    PageResult {
+        refused_no_room: if assets { rows } else { 0 },
+        refused_attribute_room: if assets { 0 } else { rows },
+        cap: Some(table),
+        ..PageResult::default()
     }
 }
 
@@ -355,6 +399,8 @@ pub fn add_page(report: &mut SyncReport, done: &PageResult) {
     report.duplicate_conflicts += done.duplicate_conflicts;
     report.refused_by_cmdb += done.refused_by_cmdb;
     report.refused_no_room += done.refused_no_room;
+    report.refused_attribute_room += done.refused_attribute_room;
+    report.cap = report.cap.or(done.cap);
 }
 
 
@@ -384,11 +430,13 @@ pub async fn sync(
     let unapplied = report.unapplied;
     let refused = report.counters.refused + report.refused_by_cmdb;
     let no_room = report.refused_no_room;
+    let no_row_room = report.refused_attribute_room;
+    let cap = cap_label(report.cap.unwrap_or(ASSETS_TABLE));
     if unapplied > 0 || refused > 0 {
         warn!("proxmox cmdb sync: {unapplied} observations unapplied, {refused} refused");
     }
-    if no_room > 0 {
-        warn!("proxmox cmdb sync: tenant at the asset cap, {no_room} creations refused, inventory incomplete");
+    if no_room + no_row_room > 0 {
+        warn!("proxmox cmdb sync: tenant at the {cap} cap, {no_room} creations and {no_row_room} updates refused, inventory incomplete");
     }
     Ok(report)
 }
