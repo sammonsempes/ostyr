@@ -1,5 +1,5 @@
 use crate::error::CommandError;
-use crate::model::{PortRange, Scope};
+use crate::model::{PortRange, Scope, MAX_RATE, MIN_RATE};
 use crate::scope::check_range;
 use crate::text::{shown, valid_argument};
 use crate::types::ArgsResult;
@@ -43,6 +43,14 @@ pub fn naabu_args(scope: &Scope, target: &str) -> ArgsResult {
         .any(|listed| listed == target)
         .then_some(())
         .ok_or_else(|| CommandError::UnknownTarget { shown: shown(target) })?;
+    (MIN_RATE..=MAX_RATE)
+        .contains(&scope.rate_per_second)
+        .then_some(())
+        .ok_or(CommandError::BadRate {
+            value: scope.rate_per_second,
+            min: MIN_RATE,
+            max: MAX_RATE,
+        })?;
     let ports = ports_text(&scope.ports);
     safe_value(target)?;
     safe_value(&ports)?;

@@ -20,6 +20,10 @@ const PARSE_FLAG: &str = "--parse";
 const DEADLINE_SECONDS: u64 = 600;
 
 
+#[cfg(unix)]
+const TOTAL_SECONDS: u64 = 3600;
+
+
 const OUTPUT_POSITION: usize = 2;
 
 
@@ -47,7 +51,13 @@ fn run_naabu(scope_file: &str, program: &str, seconds: Option<&String>) -> Resul
     use attack_surface::run::{scan_scope, summary_line};
     let scope = load_scope(Path::new(scope_file))?;
     let deadline = seconds.map_or(Ok(DEADLINE_SECONDS), |text| text.parse::<u64>())?;
-    let report = scan_scope(Path::new(program), &scope, &Limits::default(), std::time::Duration::from_secs(deadline))?;
+    let report = scan_scope(
+        Path::new(program),
+        &scope,
+        &Limits::default(),
+        std::time::Duration::from_secs(deadline),
+        std::time::Duration::from_secs(TOTAL_SECONDS),
+    )?;
     let mut out = stdout();
     report
         .targets

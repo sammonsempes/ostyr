@@ -10,7 +10,7 @@ use ipnet::IpNet;
 use net_topology::runner::run_command;
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 
 pub enum Plan {
@@ -87,17 +87,33 @@ fn execute(program: &Path, scope: &Scope, limits: &Limits, deadline: Duration, t
 }
 
 
-/// Runs naabu once per target of a validated `scope` and keeps the in-scope open ports; a failing target is named by its index and the others still run.
-pub fn scan_scope(program: &Path, scope: &Scope, limits: &Limits, deadline: Duration) -> ScanResult {
+/// Runs naabu once per target of a validated `scope`; once `total` has passed the targets left are `Outcome::Deferred`, never started.
+pub fn scan_scope(program: &Path, scope: &Scope, limits: &Limits, deadline: Duration, total: Duration) -> ScanResult {
+    let started = Instant::now();
+    scan_scope_until(program, scope, limits, deadline, &|| started.elapsed() >= total)
+}
+
+
+/// `scan_scope` with the total deadline given as a check, asked before each run and never again once it answered true.
+pub fn scan_scope_until(program: &Path, scope: &Scope, limits: &Limits, deadline: Duration, expired: &dyn Fn() -> bool) -> ScanResult {
     let plans = scope.targets.iter().map(|target| plan_target(scope, target)).collect::<Vec<_>>();
     check_run_total(&plans)?;
-    let done = scope
+    let (done, _) = scope
         .targets
         .iter()
         .zip(plans)
         .enumerate()
-        .map(|(index, (target, plan))| (index, execute(program, scope, limits, deadline, target, plan)))
-        .collect::<Vec<_>>();
+        .fold((Vec::new(), false), |(mut reached, past), (index, (target, plan))| {
+            let scan = matches!(plan, Plan::Scan(_));
+            let late = past || (scan && expired());
+            let result = if scan && late {
+                (Outcome::Deferred, Vec::new())
+            } else {
+                execute(program, scope, limits, deadline, target, plan)
+            };
+            reached.push((index, result));
+            (reached, late)
+        });
     let found = done
         .iter()
         .flat_map(|(_, (_, kept))| kept.iter().map(|item| (item.ip, item.port)))
@@ -110,15 +126,16 @@ pub fn scan_scope(program: &Path, scope: &Scope, limits: &Limits, deadline: Dura
 }
 
 
-/// One line: how many targets were scanned, left unproven, too wide or failed.
+/// One line: how many targets were scanned, left unproven, too wide, deferred or failed.
 pub fn summary_line(report: &ScanReport) -> String {
     let count = |wanted: fn(&Outcome) -> bool| report.targets.iter().filter(|target| wanted(&target.outcome)).count();
     format!(
-        "{} targets: {} scanned, {} ownership_unverified, {} too_wide, {} failed",
+        "{} targets: {} scanned, {} ownership_unverified, {} too_wide, {} deferred, {} failed",
         report.targets.len(),
         count(|outcome| matches!(outcome, Outcome::Scanned { .. })),
         count(|outcome| matches!(outcome, Outcome::OwnershipUnverified)),
         count(|outcome| matches!(outcome, Outcome::TooWide)),
+        count(|outcome| matches!(outcome, Outcome::Deferred)),
         count(|outcome| matches!(outcome, Outcome::Failed(_))),
     )
 }

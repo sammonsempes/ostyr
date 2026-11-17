@@ -48,6 +48,8 @@ pub enum CommandError {
     UnknownTarget { shown: String },
     #[error("argument value `{shown}` is refused")]
     BadValue { shown: String },
+    #[error("rate {value} is outside {min} to {max}")]
+    BadRate { value: u32, min: u32, max: u32 },
     #[error("target `{shown}` is refused: {source}")]
     BadTarget {
         shown: String,
