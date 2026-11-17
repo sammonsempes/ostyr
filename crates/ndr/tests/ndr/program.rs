@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 const MODE_PRIVATE: u32 = 0o700;
 
 
+const MODE_TRAVERSABLE: u32 = 0o755;
+
+
 const MODE_PLAIN: u32 = 0o644;
 
 
@@ -65,6 +68,13 @@ pub fn own_dir() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
     Ok(tempfile::Builder::new()
         .permissions(fs::Permissions::from_mode(MODE_PRIVATE))
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))?)
+}
+
+
+pub fn private_dir(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(MODE_TRAVERSABLE))?;
+    Ok(())
 }
 
 
@@ -133,7 +143,7 @@ fn a_program_owned_by_another_user_is_refused() -> TestResult {
 fn a_directory_owned_by_another_user_is_refused() -> TestResult {
     let own = own_dir()?;
     let nested = own.path().join("nested");
-    fs::create_dir(&nested)?;
+    private_dir(&nested)?;
     let plain = plain_program(&nested)?;
     let owner = rustix::process::geteuid().as_raw();
     let _restore = hand_to_nobody(&nested, owner)?;
@@ -152,7 +162,7 @@ fn a_directory_owned_by_another_user_is_refused() -> TestResult {
 fn a_root_owned_program_in_a_directory_others_can_write_is_refused() -> TestResult {
     let own = own_dir()?;
     let shared = own.path().join("shared");
-    fs::create_dir(&shared)?;
+    private_dir(&shared)?;
     let plain = plain_program(&shared)?;
     check_program(&plain)?;
     fs::set_permissions(&shared, fs::Permissions::from_mode(MODE_WORLD_WRITABLE))?;
@@ -167,7 +177,7 @@ fn a_root_owned_program_in_a_directory_others_can_write_is_refused() -> TestResu
 fn a_symlink_anywhere_in_the_path_is_refused() -> TestResult {
     let own = own_dir()?;
     let real = own.path().join("real");
-    fs::create_dir(&real)?;
+    private_dir(&real)?;
     let plain = plain_program(&real)?;
     symlink(&real, own.path().join("link"))?;
     symlink(&plain.program, own.path().join("yr-link"))?;
