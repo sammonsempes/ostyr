@@ -46,6 +46,9 @@ pub const MAX_POSTFIX_SELECTORS: usize = 8;
 pub const MAX_EVENT_LINE_BYTES: usize = 4_194_304;
 
 
+pub const MAX_CAPTURE_BYTES: usize = 67_108_864;
+
+
 pub const MAX_FIELD_BYTES: usize = 1024;
 
 
@@ -74,6 +77,51 @@ pub const REVERSED_ANCESTOR_POLICY_PREFIX: &str = "ostyr-fimb-";
 
 
 pub const REVERSED_TOKEN_POLICY_PREFIX: &str = "ostyr-fimu-";
+
+
+pub const FULL_SOURCE_POLICY_PREFIX: &str = "ostyr-fimp-";
+
+
+pub const FULL_TARGET_POLICY_PREFIX: &str = "ostyr-fimq-";
+
+
+pub const FULL_NAME_POLICY_PREFIX: &str = "ostyr-fimv-";
+
+
+pub const FOREIGN_OPEN_POLICY_PREFIX: &str = "ostyr-fimof-";
+
+
+pub const FOREIGN_TOKEN_POLICY_PREFIX: &str = "ostyr-fimtf-";
+
+
+pub const FOREIGN_REVERSED_TOKEN_POLICY_PREFIX: &str = "ostyr-fimuf-";
+
+
+pub const FOREIGN_FULL_SOURCE_POLICY_PREFIX: &str = "ostyr-fimpf-";
+
+
+pub const FOREIGN_FULL_TARGET_POLICY_PREFIX: &str = "ostyr-fimqf-";
+
+
+pub const FOREIGN_FULL_NAME_POLICY_PREFIX: &str = "ostyr-fimvf-";
+
+
+pub const USER_OPEN_POLICY_PREFIX: &str = "ostyr-fimow-";
+
+
+pub const USER_TOKEN_POLICY_PREFIX: &str = "ostyr-fimtw-";
+
+
+pub const USER_REVERSED_TOKEN_POLICY_PREFIX: &str = "ostyr-fimuw-";
+
+
+pub const USER_FULL_SOURCE_POLICY_PREFIX: &str = "ostyr-fimpw-";
+
+
+pub const USER_FULL_TARGET_POLICY_PREFIX: &str = "ostyr-fimqw-";
+
+
+pub const USER_FULL_NAME_POLICY_PREFIX: &str = "ostyr-fimvw-";
 
 
 pub const UNKNOWN_PROCESS: &str = "unknown";

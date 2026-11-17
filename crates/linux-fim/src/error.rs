@@ -102,4 +102,8 @@ pub enum CliError {
     NoRole(String),
     #[error("the role is refused: {0}")]
     Policy(#[from] PolicyError),
+    #[error("line {line} of the planted identities is not `path`, `st_dev` and `inode` separated by tabs")]
+    Planted { line: usize },
+    #[error("the file is longer than {max} bytes")]
+    TooLarge { max: usize },
 }
