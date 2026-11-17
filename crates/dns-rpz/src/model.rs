@@ -61,3 +61,11 @@ pub struct Reloader<'a> {
     pub audit: &'a core_config::types::SharedAuditFn,
     pub context: &'a core_config::reload::ReloadContext,
 }
+
+
+/// The sinkhole page as served: the status and the HTML bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPage {
+    pub status: u16,
+    pub html: String,
+}

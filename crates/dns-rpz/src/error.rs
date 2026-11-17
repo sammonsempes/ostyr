@@ -6,6 +6,7 @@ use ipnet::AddrParseError;
 use std::io;
 use std::num::ParseIntError;
 use std::path::PathBuf;
+use std::str::Utf8Error;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -86,4 +87,23 @@ pub enum SourceError {
     Missing,
     #[error("the ClickHouse read failed")]
     Read(#[from] ReadError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum HostError {
+    #[error("no Host header")]
+    Missing,
+    #[error("Host header too long")]
+    TooLong,
+    #[error("Host header is not UTF-8")]
+    NotUtf8(#[from] Utf8Error),
+    #[error("Host header port is not 1 to 5 digits")]
+    BadPort,
+    #[error("Host header name ends with a dot")]
+    TrailingDot,
+    #[error("Host header name ends with a number")]
+    NumericName,
+    #[error("Host header name is not a valid domain name")]
+    InvalidName(#[from] NameError),
 }

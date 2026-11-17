@@ -1,8 +1,8 @@
 use crate::error::PolicyError;
 use crate::limits::{
     DEFAULT_EXPIRE_SECONDS, DEFAULT_MAX_RECORDS, DEFAULT_MIN_CONFIDENCE, DEFAULT_NEGATIVE_TTL_SECONDS, DEFAULT_REFRESH_SECONDS,
-    DEFAULT_RETRY_SECONDS, DEFAULT_TTL_SECONDS, DEFAULT_UNBOUND_COMMAND, DEFAULT_UNBOUND_TIMEOUT_SECONDS, DEFAULT_ZONEFILE, MAX_RECORDS_LIMIT,
-    MAX_SETTING_BYTES, MAX_UNBOUND_TIMEOUT_SECONDS,
+    DEFAULT_RETRY_SECONDS, DEFAULT_TTL_SECONDS, DEFAULT_UNBOUND_COMMAND, DEFAULT_UNBOUND_TIMEOUT_SECONDS, DEFAULT_ZONEFILE, MAX_PAGE_TEXT_CHARS,
+    MAX_RECORDS_LIMIT, MAX_SETTING_BYTES, MAX_UNBOUND_TIMEOUT_SECONDS,
 };
 use crate::name::normalise_name;
 use core_config::error::ConfigError;
@@ -127,6 +127,15 @@ pub fn default_zonefile() -> String {
 }
 
 
+/// Texts of the sinkhole information page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SinkholePage {
+    pub contact: String,
+    pub organisation: String,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -149,6 +158,8 @@ pub struct Policy {
     pub actions: Actions,
     #[serde(default)]
     pub unbound: Unbound,
+    #[serde(default)]
+    pub sinkhole_page: Option<SinkholePage>,
 }
 
 
@@ -267,6 +278,28 @@ pub fn check_setting(field: &str, value: &str) -> Result<(), PolicyError> {
 }
 
 
+/// ASCII printable or a Latin letter (French accents included): an allowlist, so no control, format, bidirectional or invisible character passes.
+pub fn is_page_char(character: char) -> bool {
+    (' '..='~').contains(&character) || (('\u{c0}'..='\u{24f}').contains(&character) && character != '\u{d7}' && character != '\u{f7}')
+}
+
+
+/// Page text: 1 to `MAX_PAGE_TEXT_CHARS` characters of the allowlist with something visible; the error names the field only.
+pub fn check_page_text(field: &str, value: &str) -> Result<(), PolicyError> {
+    if value.trim().is_empty() || value.chars().count() > MAX_PAGE_TEXT_CHARS || !value.chars().all(is_page_char) {
+        Err(PolicyError::Setting(field.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn check_sinkhole_page(page: &SinkholePage) -> Result<(), PolicyError> {
+    check_page_text("sinkhole_page.contact", &page.contact)?;
+    check_page_text("sinkhole_page.organisation", &page.organisation)
+}
+
+
 pub fn check_unbound(unbound: &Unbound) -> Result<(), PolicyError> {
     check_setting("unbound.command", &unbound.command)?;
     check_setting("unbound.zonefile", &unbound.zonefile)?;
@@ -307,6 +340,7 @@ pub fn validate_policy(policy: &Policy) -> Result<(), PolicyError> {
     check_rule("ipv4", &policy.actions.ipv4)?;
     check_rule("ipv6", &policy.actions.ipv6)?;
     check_rule("cidr", &policy.actions.cidr)?;
+    policy.sinkhole_page.as_ref().map_or(Ok(()), check_sinkhole_page)?;
     check_unbound(&policy.unbound)
 }
 

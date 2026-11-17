@@ -10,6 +10,7 @@ pub mod policy;
 pub mod run;
 pub mod select;
 pub mod serial;
+pub mod sinkhole;
 pub mod source;
 pub mod trigger;
 pub mod types;
