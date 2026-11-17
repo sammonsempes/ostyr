@@ -84,3 +84,16 @@ pub enum FetchError {
     #[error("the token is not read-only: {0}")]
     WritableCredential(#[source] ReadOnlyError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum SyncError {
+    #[error("invalid tenant: {0}")]
+    Tenant(#[source] PgError),
+    #[error("invalid cluster id: {0}")]
+    Cluster(#[source] PgError),
+    #[error("the {field} of a resource is not a plain identifier")]
+    BadIdentity { field: &'static str },
+    #[error("cmdb store: {0}")]
+    Store(#[from] cmdb::error::StoreError),
+}

@@ -111,6 +111,8 @@ pub enum StoreError {
     BadDuplicates(#[source] serde_json::Error),
     #[error("the outcome carries two conflicts for asset `{asset}`, attribute `{attribute}`, source `{source_name}`")]
     DuplicateConflict { asset: String, attribute: String, source_name: String },
+    #[error("the apply would take the tenant's `{table}` rows past the store cap; nothing was written")]
+    CapReached { table: &'static str },
     #[error("an asset changed since it was read")]
     VersionConflict,
     #[error("still conflicting after {attempts} attempts")]

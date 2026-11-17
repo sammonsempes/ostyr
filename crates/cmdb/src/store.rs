@@ -46,7 +46,7 @@ pub const KEY_CURSOR: [usize; 2] = [1, 2];
 pub const ATTRIBUTE_CURSOR: [usize; 2] = [0, 1];
 
 
-/// One statement (one implicit transaction): `$1` tenant, `$2` JSON changes, `$3` open-conflict cap, `$4` open key-conflict cap; answers the applied flag, the refused conflicts and the duplicates of open ones, each as a JSON array.
+/// One statement (one implicit transaction): `$1` tenant, `$2` JSON changes, `$3` open-conflict cap, `$4` open key-conflict cap, `$5` asset cap, `$6` identity key and attribute row cap; answers the applied flag, the refused conflicts and the duplicates of open ones (JSON arrays), and the table whose cap the apply would pass (empty if none).
 pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
 
 
@@ -71,6 +71,9 @@ pub const MAX_OPEN_KEY_CONFLICTS_CEILING: usize = 10_000;
 pub const DUPLICATES_COLUMN: usize = 2;
 
 
+pub const CAP_COLUMN: usize = 3;
+
+
 pub const KIND_COLUMN: usize = 1;
 
 
@@ -92,7 +95,7 @@ pub const SOURCE_COLUMN: usize = 3;
 pub const MIGRATION_NAMESPACE: &str = "cmdb";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "001_cmdb",
         sql: include_str!("../migrations/001_cmdb.sql"),
@@ -104,6 +107,10 @@ pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "003_cmdb_read_indexes",
         sql: include_str!("../migrations/003_cmdb_read_indexes.sql"),
+    },
+    Migration {
+        version: "004_cmdb_tenant_room",
+        sql: include_str!("../migrations/004_cmdb_tenant_room.sql"),
     },
 ];
 
@@ -366,6 +373,8 @@ pub async fn apply_outcome(
             document.to_string(),
             limits.max_open_conflicts.to_string(),
             limits.max_open_key_conflicts.to_string(),
+            limits.max_assets.to_string(),
+            limits.max_child_rows.to_string(),
         ],
     )
     .await
@@ -375,11 +384,22 @@ pub async fn apply_outcome(
     let refused: Vec<RefusedConflict> = serde_json::from_str(cell(answer, 1, CONFLICTS_TABLE)?).map_err(StoreError::BadRefused)?;
     let duplicates: Vec<DuplicateConflict> =
         serde_json::from_str(cell(answer, DUPLICATES_COLUMN, CONFLICTS_TABLE)?).map_err(StoreError::BadDuplicates)?;
-    if applied {
+    let cap = cell(answer, CAP_COLUMN, CONFLICTS_TABLE)?;
+    if !applied {
+        Err(StoreError::VersionConflict)
+    } else if cap.is_empty() {
         Ok(Applied { refused, duplicates })
     } else {
-        Err(StoreError::VersionConflict)
+        Err(StoreError::CapReached {
+            table: capped_table(cap).ok_or(StoreError::BadRow { table: CONFLICTS_TABLE })?,
+        })
     }
+}
+
+
+/// The table named by the statement, as one of the three constants; anything else is a malformed answer.
+pub fn capped_table(name: &str) -> Option<&'static str> {
+    [ASSETS_TABLE, KEYS_TABLE, ATTRIBUTES_TABLE].into_iter().find(|table| *table == name)
 }
 
 
