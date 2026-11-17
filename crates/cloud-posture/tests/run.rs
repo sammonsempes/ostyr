@@ -8,7 +8,7 @@ mod types;
 use cloud_posture::error::{ParseError, ScanError};
 use cloud_posture::limits::Limits;
 use cloud_posture::model::{Cluster, KubeconfigFault};
-use cloud_posture::run::{cluster_scan, log_removal, open_output, remove_directory, scan_error_of, STDOUT_CAP_BYTES};
+use cloud_posture::run::{cluster_scan, fault_of_errno, log_removal, open_output, remove_directory, scan_error_of, STDOUT_CAP_BYTES};
 use fake::{install_script, scratch};
 use net_topology::model::RunFailure;
 use std::error::Error;
@@ -44,6 +44,9 @@ const OWNER_ONLY_MODE: u32 = 0o600;
 
 
 const GROUP_READ_MODE: u32 = 0o640;
+
+
+const GROUP_WRITABLE_MODE: u32 = 0o775;
 
 
 const DIRECTORY_LINE: usize = 8;
@@ -90,7 +93,8 @@ fn setup(context: &str) -> Result<Setup, Box<dyn Error>> {
     std::fs::set_permissions(&kubeconfig, std::fs::Permissions::from_mode(OWNER_ONLY_MODE))?;
     let cluster = Cluster {
         name: "lab-cluster".to_owned(),
-        kubeconfig_file: kubeconfig.clone(),
+        tenant_directory: root.path().to_path_buf(),
+        kubeconfig_file: PathBuf::from("kubeconfig"),
         context: context.to_owned(),
     };
     Ok(Setup {
@@ -109,6 +113,11 @@ fn find_directory(body: &str) -> String {
 
 fn scan(setup: &Setup, program: &Path, deadline: Duration) -> Result<cloud_posture::model::Findings, ScanError> {
     cluster_scan(program, TENANT, &setup.cluster, &setup.work, &Limits::default(), deadline)
+}
+
+
+fn scan_in(setup: &Setup, program: &Path, workdir: &Path) -> Result<cloud_posture::model::Findings, ScanError> {
+    cluster_scan(program, TENANT, &setup.cluster, workdir, &Limits::default(), PATIENT)
 }
 
 
@@ -304,23 +313,37 @@ fn a_bad_kubeconfig_is_refused_before_any_spawn() -> TestResult {
     let link = setup.root.path().join("link");
     symlink(&setup.kubeconfig, &link)?;
     let linked = Cluster {
-        kubeconfig_file: link,
+        kubeconfig_file: PathBuf::from("link"),
         ..setup.cluster.clone()
     };
     let by_link = cluster_scan(&program, TENANT, &linked, &setup.work, &Limits::default(), PATIENT);
     assert_eq!(fault(by_link.err()), Some(KubeconfigFault::Symlink));
     let directory = Cluster {
-        kubeconfig_file: setup.work.clone(),
+        kubeconfig_file: PathBuf::from("work"),
         ..setup.cluster.clone()
     };
     let by_directory = cluster_scan(&program, TENANT, &directory, &setup.work, &Limits::default(), PATIENT);
     assert_eq!(fault(by_directory.err()), Some(KubeconfigFault::NotRegular));
     let absent = Cluster {
-        kubeconfig_file: setup.root.path().join("absent"),
+        kubeconfig_file: PathBuf::from("absent"),
         ..setup.cluster.clone()
     };
     let by_absent = cluster_scan(&program, TENANT, &absent, &setup.work, &Limits::default(), PATIENT);
     assert_eq!(fault(by_absent.err()), Some(KubeconfigFault::Unreadable));
+    let no_tenant = Cluster {
+        tenant_directory: setup.root.path().join("no-tenant-directory"),
+        ..setup.cluster.clone()
+    };
+    let by_tenant = cluster_scan(&program, TENANT, &no_tenant, &setup.work, &Limits::default(), PATIENT);
+    assert_eq!(fault(by_tenant.err()), Some(KubeconfigFault::Unreadable));
+    let tenant_link = setup.root.path().join("tenant-link");
+    symlink(setup.root.path(), &tenant_link)?;
+    let linked_tenant = Cluster {
+        tenant_directory: tenant_link,
+        ..setup.cluster.clone()
+    };
+    let by_linked_tenant = cluster_scan(&program, TENANT, &linked_tenant, &setup.work, &Limits::default(), PATIENT);
+    assert_eq!(fault(by_linked_tenant.err()), Some(KubeconfigFault::Unreadable));
     assert!(!counter.exists());
     Ok(())
 }
@@ -338,7 +361,75 @@ fn a_missing_work_directory_is_a_typed_error() -> TestResult {
         &Limits::default(),
         PATIENT,
     );
-    assert!(matches!(result, Err(ScanError::Workdir(_))));
+    assert!(matches!(result, Err(ScanError::UntrustedWorkdir(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_kernel_without_openat2_is_refused_never_a_path_open() -> TestResult {
+    assert_eq!(fault_of_errno(rustix::io::Errno::NOSYS), KubeconfigFault::Unreadable);
+    assert_eq!(fault_of_errno(rustix::io::Errno::LOOP), KubeconfigFault::Symlink);
+    assert_eq!(fault_of_errno(rustix::io::Errno::XDEV), KubeconfigFault::Symlink);
+    Ok(())
+}
+
+
+#[test]
+fn a_symlinked_directory_in_the_kubeconfig_path_is_refused() -> TestResult {
+    let setup = setup("default")?;
+    let counter = setup.root.path().join("runs");
+    let program = install_script(setup.root.path(), "prowler", &format!("echo run >> {}", counter.display()))?;
+    let tenant = setup.root.path().join("tenant");
+    let other = setup.root.path().join("other");
+    std::fs::create_dir(&tenant)?;
+    std::fs::create_dir(&other)?;
+    std::fs::copy(&setup.kubeconfig, other.join("kube"))?;
+    symlink("../other", tenant.join("d"))?;
+    let cluster = Cluster {
+        tenant_directory: tenant,
+        kubeconfig_file: PathBuf::from("d/kube"),
+        ..setup.cluster.clone()
+    };
+    let result = cluster_scan(&program, TENANT, &cluster, &setup.work, &Limits::default(), PATIENT);
+    assert!(matches!(
+        result,
+        Err(ScanError::Kubeconfig {
+            fault: KubeconfigFault::Symlink
+        })
+    ));
+    let escape = Cluster {
+        kubeconfig_file: PathBuf::from("../other/kube"),
+        ..cluster
+    };
+    let escaped = cluster_scan(&program, TENANT, &escape, &setup.work, &Limits::default(), PATIENT);
+    assert!(matches!(
+        escaped,
+        Err(ScanError::Kubeconfig {
+            fault: KubeconfigFault::Symlink
+        })
+    ));
+    assert!(!counter.exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_relative_or_dash_work_directory_and_a_group_writable_one_are_refused_before_any_spawn() -> TestResult {
+    let setup = setup("default")?;
+    let counter = setup.root.path().join("runs");
+    let program = install_script(setup.root.path(), "prowler", &format!("echo run >> {}", counter.display()))?;
+    let refused = |workdir: &Path| matches!(scan_in(&setup, &program, workdir), Err(ScanError::UntrustedWorkdir(_)));
+    assert!(refused(Path::new("work")));
+    assert!(refused(Path::new("-x")));
+    assert!(refused(Path::new("/tmp/../tmp")));
+    let loose = setup.root.path().join("loose");
+    std::fs::create_dir(&loose)?;
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(GROUP_WRITABLE_MODE))?;
+    let inside = loose.join("work");
+    std::fs::create_dir(&inside)?;
+    assert!(refused(&inside));
+    assert!(!counter.exists());
     Ok(())
 }
 

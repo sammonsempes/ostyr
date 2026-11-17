@@ -51,7 +51,10 @@ fn a_good_file_keeps_every_cluster() -> TestResult {
     assert!(parsed.refused.is_empty());
     assert_eq!(parsed.clusters.first().map(|cluster| cluster.context.as_str()), Some("ctx-a"));
     assert_eq!(
-        parsed.clusters.first().map(|cluster| cluster.kubeconfig_file.clone()),
+        parsed
+            .clusters
+            .first()
+            .map(|cluster| cluster.tenant_directory.join(&cluster.kubeconfig_file)),
         Some(Path::new("/srv/secrets/lab/rancher/k3s.yaml").to_path_buf())
     );
     Ok(())

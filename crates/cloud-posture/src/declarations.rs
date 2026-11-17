@@ -66,7 +66,8 @@ pub fn cluster_of(value: serde_json::Value, tenant_directory: &Path) -> Option<C
         .filter(|raw| valid_kubeconfig_path(&raw.kubeconfig_file))
         .map(|raw| Cluster {
             name: raw.name,
-            kubeconfig_file: tenant_directory.join(raw.kubeconfig_file),
+            tenant_directory: tenant_directory.to_path_buf(),
+            kubeconfig_file: raw.kubeconfig_file.into(),
             context: raw.context,
         })
 }

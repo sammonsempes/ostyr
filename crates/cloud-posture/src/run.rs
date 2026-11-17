@@ -2,9 +2,12 @@ use crate::error::ScanError;
 use crate::limits::Limits;
 use crate::model::{Cluster, Findings, KubeconfigFault};
 use crate::prowler::parse_prowler_ocsf;
-use core_config::secret_file::{open_secret, SecretFileError};
+use core_config::secret_file::{judge_secret, SecretFileError};
+use core_config::trusted_dir::open_trusted_dir;
 use net_topology::model::RunFailure;
 use net_topology::runner::run_command_with_env;
+use rustix::fs::{fstat, openat2, Mode, OFlags, ResolveFlags};
+use rustix::io::Errno;
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind};
 use std::os::fd::AsRawFd;
@@ -36,14 +39,51 @@ pub const SEARCH_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 pub const FIXED_ARGUMENTS: [&str; 1] = ["kubernetes"];
 
 
-/// The kubeconfig check that refused the file, without its path.
+/// The handle check that refused the file, without its path (open failures never reach it: `fault_of_errno`).
 pub fn kubeconfig_fault(error: &SecretFileError) -> KubeconfigFault {
     match error {
-        SecretFileError::Io { .. } => KubeconfigFault::Unreadable,
-        SecretFileError::NotRegular { .. } => KubeconfigFault::NotRegular,
-        SecretFileError::Symlink { .. } => KubeconfigFault::Symlink,
         SecretFileError::Mode { .. } => KubeconfigFault::Mode,
         SecretFileError::Owner { .. } => KubeconfigFault::Owner,
+        SecretFileError::Io { .. } | SecretFileError::NotRegular { .. } | SecretFileError::Symlink { .. } => KubeconfigFault::NotRegular,
+    }
+}
+
+
+/// The kubeconfig opened beneath the tenant directory (`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), then judged on the handle like `open_secret`.
+pub fn open_kubeconfig(cluster: &Cluster) -> Result<File, KubeconfigFault> {
+    let tenant = open_trusted_directory_handle(&cluster.tenant_directory)?;
+    let opened = openat2(
+        &tenant,
+        &cluster.kubeconfig_file,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(fault_of_errno)?;
+    let stat = fstat(&opened).map_err(|_| KubeconfigFault::Unreadable)?;
+    let is_file = stat.st_mode & libc::S_IFMT == libc::S_IFREG;
+    judge_secret("", is_file, stat.st_mode, stat.st_uid, rustix::process::geteuid().as_raw()).map_err(|error| kubeconfig_fault(&error))?;
+    Ok(File::from(opened))
+}
+
+
+/// The tenant directory, opened without following a link in its last component.
+pub fn open_trusted_directory_handle(directory: &Path) -> Result<rustix::fd::OwnedFd, KubeconfigFault> {
+    rustix::fs::open(
+        directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(fault_of_errno)
+}
+
+
+/// A link or an escape is `Symlink`; a kernel without `openat2` (`ENOSYS`) is `Unreadable`, never a path open.
+pub fn fault_of_errno(errno: Errno) -> KubeconfigFault {
+    if errno == Errno::LOOP || errno == Errno::XDEV {
+        KubeconfigFault::Symlink
+    } else {
+        KubeconfigFault::Unreadable
     }
 }
 
@@ -116,9 +156,8 @@ pub fn cluster_scan(
     limits: &Limits,
     deadline: Duration,
 ) -> Result<Findings, ScanError> {
-    let kubeconfig = open_secret(&cluster.kubeconfig_file).map_err(|error| ScanError::Kubeconfig {
-        fault: kubeconfig_fault(&error),
-    })?;
+    open_trusted_dir(workdir, rustix::process::geteuid().as_raw()).map_err(ScanError::UntrustedWorkdir)?;
+    let kubeconfig = open_kubeconfig(cluster).map_err(|fault| ScanError::Kubeconfig { fault })?;
     let directory = tempfile::Builder::new()
         .prefix(WORKDIR_PREFIX)
         .permissions(Permissions::from_mode(WORKDIR_MODE))
