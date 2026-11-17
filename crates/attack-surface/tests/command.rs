@@ -47,6 +47,7 @@ fn hand_scope(target: &str, ports: Vec<PortRange>) -> Scope {
         ports,
         ranges: Vec::new(),
         targets: vec![target.to_string()],
+        attested: Vec::new(),
     }
 }
 
@@ -60,7 +61,7 @@ fn strings(args: &[OsString]) -> Vec<String> {
 fn the_argument_vector_is_exact_for_each_kind_of_target() -> TestResult {
     let scope = scope_of(SCOPE_TEXT)?;
     let expected = |target: &str| {
-        vec!["-json", "-silent", "-rate", "100", "-p", "22,80,8000-8100", "-host", target]
+        vec!["-json", "-silent", "-duc", "-rate", "100", "-p", "22,80,8000-8100", "-host", target]
             .into_iter()
             .map(String::from)
             .collect::<Vec<_>>()

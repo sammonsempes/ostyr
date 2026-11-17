@@ -1,7 +1,7 @@
 use crate::error::{Refusal, ScopeError};
 use crate::model::{
-    PortEntry, PortRange, Scope, ScopeFile, ScopeKind, TargetEntry, MAX_FILE_BYTES, MAX_PORTS, MAX_PORT_ENTRIES, MAX_RATE, MAX_REFERENCE_BYTES,
-    MAX_TARGETS, MIN_PORT, MIN_PREFIX_V4, MIN_PREFIX_V6, MIN_RATE,
+    OwnershipMethod, PortEntry, PortRange, Scope, ScopeFile, ScopeKind, TargetEntry, MAX_FILE_BYTES, MAX_PORTS, MAX_PORT_ENTRIES, MAX_RATE,
+    MAX_REFERENCE_BYTES, MAX_TARGETS, MIN_PORT, MIN_PREFIX_V4, MIN_PREFIX_V6, MIN_RATE,
 };
 use crate::text::{shown, valid_reference};
 use crate::types::ScopeResult;
@@ -165,7 +165,7 @@ fn check_target(entry: &TargetEntry, kind: ScopeKind, file: &str, index: usize) 
 }
 
 
-fn address_count(net: &IpNet) -> u128 {
+pub fn address_count(net: &IpNet) -> u128 {
     1u128 << (net.max_prefix_len() - net.prefix_len())
 }
 
@@ -273,6 +273,22 @@ fn check_ports(entries: &[PortEntry], file: &str) -> Result<Vec<PortRange>, Scop
 }
 
 
+/// The listed targets whose every entry is an attestation: a target also declared by `dns_txt`, which no check proves yet, is not attested.
+fn attested_targets(parsed: &ScopeFile, nets: &[IpNet]) -> Vec<String> {
+    let by_method = |method: OwnershipMethod| -> BTreeSet<String> {
+        parsed
+            .targets
+            .iter()
+            .zip(nets)
+            .filter(|(entry, _)| entry.ownership.method == method)
+            .map(|(_, net)| net.to_string())
+            .collect()
+    };
+    let unproven = by_method(OwnershipMethod::DnsTxt);
+    by_method(OwnershipMethod::Attestation).difference(&unproven).cloned().collect()
+}
+
+
 /// Checks every rule of a scope file; `file` only labels errors. Ranges are masked and merged, targets sorted and deduplicated.
 pub fn validate_scope(parsed: &ScopeFile, file: &str) -> ScopeResult {
     check_rate(parsed.rate_per_second).map_err(|refusal| refuse(file, "rate_per_second", refusal))?;
@@ -288,12 +304,14 @@ pub fn validate_scope(parsed: &ScopeFile, file: &str) -> ScopeResult {
     check_total(&ranges).map_err(|refusal| refuse(file, "targets", refusal))?;
     ranges.sort();
     let listed: BTreeSet<String> = nets.iter().map(IpNet::to_string).collect();
+    let attested = attested_targets(parsed, &nets);
     Ok(Scope {
         kind: parsed.kind,
         rate_per_second: parsed.rate_per_second,
         ports,
         ranges,
         targets: listed.into_iter().collect(),
+        attested,
     })
 }
 

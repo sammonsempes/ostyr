@@ -9,7 +9,7 @@ use std::ffi::OsString;
 pub const MAX_VALUE_BYTES: usize = 4096;
 
 
-pub const FIXED_ARGUMENTS: [&str; 2] = ["-json", "-silent"];
+pub const FIXED_ARGUMENTS: [&str; 3] = ["-json", "-silent", "-duc"];
 
 
 /// The port list in naabu's `-p` syntax: `22,80,8000-8100`.
