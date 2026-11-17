@@ -8,7 +8,10 @@ mod types;
 use cloud_posture::error::{ParseError, ScanError};
 use cloud_posture::limits::Limits;
 use cloud_posture::model::{Cluster, KubeconfigFault};
-use cloud_posture::run::{cluster_scan, fault_of_errno, log_removal, open_output, remove_directory, scan_error_of, STDOUT_CAP_BYTES};
+use cloud_posture::run::{
+    cluster_scan, fault_of_errno, kubeconfig_fault, log_removal, open_output, remove_directory, scan_error_of, STDOUT_CAP_BYTES,
+};
+use core_config::secret_file::SecretFileError;
 use fake::{install_script, scratch};
 use net_topology::model::RunFailure;
 use std::error::Error;
@@ -477,6 +480,43 @@ fn the_work_directory_is_private_under_a_loose_umask() -> TestResult {
     let fields = seen.split_whitespace().collect::<Vec<_>>();
     assert_eq!(fields.first(), Some(&"700"));
     assert_eq!(fields.get(OWNER_FIELD), fields.get(EUID_FIELD));
+    Ok(())
+}
+
+
+#[test]
+fn a_hard_linked_kubeconfig_is_refused_before_any_spawn() -> TestResult {
+    let setup = setup("default")?;
+    let counter = setup.root.path().join("runs");
+    let program = install_script(setup.root.path(), "prowler", &format!("echo run >> {}", counter.display()))?;
+    std::fs::hard_link(&setup.kubeconfig, setup.root.path().join("second-name"))?;
+    let refused = scan(&setup, &program, PATIENT).err();
+    assert!(matches!(
+        refused,
+        Some(ScanError::Kubeconfig {
+            fault: KubeconfigFault::Linked
+        })
+    ));
+    assert!(!counter.exists());
+    Ok(())
+}
+
+
+#[test]
+fn the_handle_check_mapping_is_total() -> TestResult {
+    let io = || std::io::Error::from(std::io::ErrorKind::Other);
+    let file = || String::new();
+    assert_eq!(kubeconfig_fault(&SecretFileError::Mode { file: file() }), KubeconfigFault::Mode);
+    assert_eq!(kubeconfig_fault(&SecretFileError::Owner { file: file() }), KubeconfigFault::Owner);
+    assert_eq!(
+        kubeconfig_fault(&SecretFileError::NotRegular { file: file() }),
+        KubeconfigFault::NotRegular
+    );
+    assert_eq!(kubeconfig_fault(&SecretFileError::Symlink { file: file() }), KubeconfigFault::NotRegular);
+    assert_eq!(
+        kubeconfig_fault(&SecretFileError::Io { file: file(), source: io() }),
+        KubeconfigFault::NotRegular
+    );
     Ok(())
 }
 

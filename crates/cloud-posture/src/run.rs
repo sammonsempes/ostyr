@@ -18,6 +18,9 @@ use tempfile::TempDir;
 use tracing::{debug, info, warn};
 
 
+pub const KUBECONFIG_LABEL: &str = "kubeconfig";
+
+
 pub const OUTPUT_STEM: &str = "posture";
 
 
@@ -44,31 +47,36 @@ pub fn kubeconfig_fault(error: &SecretFileError) -> KubeconfigFault {
     match error {
         SecretFileError::Mode { .. } => KubeconfigFault::Mode,
         SecretFileError::Owner { .. } => KubeconfigFault::Owner,
-        SecretFileError::Io { .. } | SecretFileError::NotRegular { .. } | SecretFileError::Symlink { .. } => KubeconfigFault::NotRegular,
+        _ => KubeconfigFault::NotRegular,
     }
 }
 
 
-/// The kubeconfig opened beneath the tenant directory (`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), then judged on the handle like `open_secret`.
+/// The kubeconfig opened beneath the tenant directory (no symlink, no mount crossing), judged on the handle, one link only.
 pub fn open_kubeconfig(cluster: &Cluster) -> Result<File, KubeconfigFault> {
-    let tenant = open_trusted_directory_handle(&cluster.tenant_directory)?;
+    let tenant = open_directory_nofollow(&cluster.tenant_directory)?;
     let opened = openat2(
         &tenant,
         &cluster.kubeconfig_file,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
         Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
     )
     .map_err(fault_of_errno)?;
     let stat = fstat(&opened).map_err(|_| KubeconfigFault::Unreadable)?;
     let is_file = stat.st_mode & libc::S_IFMT == libc::S_IFREG;
-    judge_secret("", is_file, stat.st_mode, stat.st_uid, rustix::process::geteuid().as_raw()).map_err(|error| kubeconfig_fault(&error))?;
-    Ok(File::from(opened))
+    judge_secret(KUBECONFIG_LABEL, is_file, stat.st_mode, stat.st_uid, rustix::process::geteuid().as_raw())
+        .map_err(|error| kubeconfig_fault(&error))?;
+    if stat.st_nlink == 1 {
+        Ok(File::from(opened))
+    } else {
+        Err(KubeconfigFault::Linked)
+    }
 }
 
 
 /// The tenant directory, opened without following a link in its last component.
-pub fn open_trusted_directory_handle(directory: &Path) -> Result<rustix::fd::OwnedFd, KubeconfigFault> {
+pub fn open_directory_nofollow(directory: &Path) -> Result<rustix::fd::OwnedFd, KubeconfigFault> {
     rustix::fs::open(
         directory,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
