@@ -7161,6 +7161,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "virt-inventory"
 version = "0.0.0"
 dependencies = [
+ "cmdb",
  "core-config",
  "core-pg",
  "log",
@@ -7172,6 +7173,7 @@ dependencies = [
  "siem-ingest",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "ureq 3.5.1",
  "zeroize",

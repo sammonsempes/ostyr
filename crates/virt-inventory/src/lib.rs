@@ -1,5 +1,6 @@
 //! Bounded inventory of Proxmox VE resources from the management API answers, the read-only token check and the diff between two inventories (spec section 22).
 
+pub mod cmdb_sync;
 pub mod degraded;
 pub mod diff;
 pub mod error;
