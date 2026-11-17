@@ -274,7 +274,7 @@ async fn an_oversized_head_is_refused_without_the_page() -> TestResult {
 }
 
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slow_head_is_closed_and_nothing_is_rendered() -> TestResult {
     let directory = tempdir()?;
     let block =
@@ -282,7 +282,9 @@ async fn a_slow_head_is_closed_and_nothing_is_rendered() -> TestResult {
     let running = start(&write_policy(directory.path(), &block)?).await?;
     let mut stream = TcpStream::connect(running.address).await?;
     send(&mut stream, b"GET / HTTP/1.1\r\nHo").await?;
+    let started = tokio::time::Instant::now();
     assert!(!read_all(&mut stream).await?.contains("<html"));
+    assert!(started.elapsed() < Duration::from_millis(SHORT_TIMEOUT_MS * TWO));
     finish(running).await
 }
 
