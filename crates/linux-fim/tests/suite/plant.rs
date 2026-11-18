@@ -5,15 +5,16 @@ use linux_fim::error::{CliError, PlantError, PlantRefusal};
 use linux_fim::limits::default_limits;
 use linux_fim::model::{Honeytoken, HoneytokenKind, Limits, PlantReport, PlantedIdentity, Role};
 use linux_fim::plant::{
-    binary_verdict, check_unloaded, directory_verdict, file_verdict, first_cause, first_failure, list_first, list_from, loaded_count,
-    log_reap_failure, made_verdict, no_step, os_claim, os_list_policies, os_ops, os_random, pick_binary, plant_command, plant_role, planted_text,
-    read_listing, read_until, reap, spawn_listing, stat_device, wait_readable, wait_until, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
+    binary_verdict, check_unloaded, directory_verdict, file_verdict, first_cause, first_failure, first_refusal, fresh_token, group_outcome,
+    list_first, list_from, loaded_count, log_reap_failure, made_verdict, no_step, os_claim, os_list_policies, os_ops, os_random, own_outcome,
+    pick_binary, plant_command, plant_role, planted_text, read_listing, read_until, reap, spawn_listing, stat_device, wait_readable, wait_until,
+    FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
 };
 use linux_fim::policy::kernel_device;
 use rustix::fs::inotify::{add_watch, init, CreateFlags, WatchFlags};
 use rustix::fs::{mkdirat, mknodat, renameat, FileType, Mode, RawMode, CWD};
 use rustix::io::{ioctl_fionread, read, Errno};
-use rustix::process::geteuid;
+use rustix::process::{geteuid, kill_process_group, Pid, Signal};
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
@@ -21,6 +22,8 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tempfile::{tempdir_in, TempDir};
 
@@ -29,6 +32,9 @@ const BYTE_RANGE: usize = 256;
 
 
 const TEST_DEADLINE: Duration = Duration::from_secs(30);
+
+
+const HANG_GUARD: Duration = Duration::from_secs(60);
 
 
 const SMALL_READS: usize = 300;
@@ -954,11 +960,11 @@ fn the_os_listing_reads_the_host_without_failing_on_a_missing_tetra() -> TestRes
 }
 
 
-#[test]
-fn a_listing_left_running_is_cut_at_the_deadline_and_its_group_is_killed() -> TestResult {
+fn left_running_listing(group_leader: &mpsc::Sender<u32>) -> TestResult {
     let dir = tree()?;
     let lock = dir.path().join("lock");
     let mut child = spawn_listing("/usr/bin/flock", &[lock.to_str().ok_or("path")?, "/usr/bin/yes"])?;
+    group_leader.send(child.id())?;
     let mut held = File::from(OwnedFd::from(child.stdout.take().ok_or("no output pipe")?));
     wait_readable(&held, Instant::now() + TEST_DEADLINE)?;
     let (stand_in, closed) = io::pipe()?;
@@ -967,6 +973,107 @@ fn a_listing_left_running_is_cut_at_the_deadline_and_its_group_is_killed() -> Te
     let failure = read_listing(child, Duration::ZERO).err().ok_or("a running listing succeeded")?;
     assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
     assert!(drain_to_end(&mut held)?);
+    Ok(())
+}
+
+
+fn watch_for_a_hang(leader: &mpsc::Receiver<u32>, finished: &mpsc::Receiver<()>, fired: &AtomicBool) {
+    let pid = leader
+        .recv_timeout(HANG_GUARD)
+        .ok()
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(Pid::from_raw);
+    finished.recv_timeout(HANG_GUARD).err().iter().for_each(|_| {
+        fired.store(true, Ordering::SeqCst);
+        pid.iter().for_each(|group| {
+            kill_process_group(*group, Signal::KILL).map_or_else(|errno| assert_eq!(errno, Errno::SRCH), drop);
+        });
+    });
+}
+
+
+#[test]
+fn a_listing_left_running_is_cut_at_the_deadline_and_its_group_is_killed() -> TestResult {
+    let (leader_sender, leader) = mpsc::channel();
+    let (finished_sender, finished) = mpsc::channel();
+    let fired = std::sync::Arc::new(AtomicBool::new(false));
+    let watched = std::sync::Arc::clone(&fired);
+    let watchdog = std::thread::spawn(move || watch_for_a_hang(&leader, &finished, &watched));
+    let outcome = left_running_listing(&leader_sender);
+    finished_sender.send(())?;
+    watchdog.join().map_err(|_| "the watchdog panicked")?;
+    assert!(!fired.load(Ordering::SeqCst), "the exit wait hung and the watchdog killed the group");
+    outcome
+}
+
+
+fn rename_leaf_away(parent: &OwnedFd, name: &str) {
+    assert!(renameat(parent, name, parent, "moved-away").is_ok());
+}
+
+
+#[test]
+fn a_failed_cleanup_keeps_the_refusal_that_started_it() -> TestResult {
+    let dir = tree()?;
+    let parent = OwnedFd::from(File::open(dir.path())?);
+    let handle = OwnedFd::from(OpenOptions::new().write(true).create_new(true).open(dir.path().join("leaf"))?);
+    let hooked = PlantOps {
+        claim: fail_file_claim,
+        after_create: rename_leaf_away,
+        ..ops(dir.path())
+    };
+    let failure = fresh_token(&hooked, geteuid().as_raw(), &parent, "leaf", handle, "content")
+        .err()
+        .ok_or("a refused claim passed")?;
+    assert!(matches!(failure, PlantRefusal::Io(ref error) if error.kind() == io::ErrorKind::PermissionDenied));
+    assert!(
+        matches!(first_refusal(PlantRefusal::Io(io::Error::other("first")), Err(Errno::IO)), Err(PlantRefusal::Io(ref error)) if error.to_string() == "first")
+    );
+    assert!(first_refusal(PlantRefusal::Io(io::Error::other("first")), Ok(())).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_group_already_gone_or_a_child_already_reaped_is_not_a_failure() -> TestResult {
+    assert!(group_outcome(Ok(())).is_none());
+    assert!(group_outcome(Err(Errno::SRCH)).is_none());
+    assert!(group_outcome(Err(Errno::PERM)).is_some());
+    assert!(own_outcome(Ok(())).is_none());
+    assert!(own_outcome(Err(io::Error::from(io::ErrorKind::InvalidInput))).is_none());
+    assert!(own_outcome(Err(io::Error::from(io::ErrorKind::PermissionDenied))).is_some());
+    let mut quick = Command::new("/bin/true").spawn()?;
+    quick.wait()?;
+    assert!(own_outcome(quick.kill()).is_none());
+    reap(&mut quick);
+    Ok(())
+}
+
+
+#[test]
+fn a_skipped_candidate_gives_way_to_the_next_one_and_an_all_bad_list_fails_closed() -> TestResult {
+    let dir = tree()?;
+    let owner = geteuid().as_raw();
+    let bad = dir.path().join("bad");
+    fs::create_dir(&bad)?;
+    let bad_tetra = good_tetra(&bad)?;
+    fs::set_permissions(&bad_tetra, fs::Permissions::from_mode(WORLD_WRITABLE))?;
+    let good = dir.path().join("good");
+    fs::create_dir(&good)?;
+    let good_path = good.join("echo");
+    fs::copy("/usr/bin/echo", &good_path)?;
+    let bad_text = bad_tetra.to_str().ok_or("path")?;
+    let good_text = good_path.to_str().ok_or("path")?;
+    assert_eq!(pick_binary(&[bad_text, good_text], owner)?, Some(good_text));
+    assert_eq!(pick_binary(&["/nonexistent/tetra", bad_text, good_text], owner)?, Some(good_text));
+    assert!(pick_binary(&[bad_text, "/nonexistent/tetra"], owner).is_err());
+    assert!(pick_binary(&["/nonexistent/tetra", bad_text], owner).is_err());
+    assert_eq!(
+        list_first(&[bad_text, good_text], owner, TEST_DEADLINE)?,
+        "tracingpolicy list
+"
+    );
+    assert!(list_first(&[bad_text], owner, TEST_DEADLINE).is_err());
     Ok(())
 }
 
