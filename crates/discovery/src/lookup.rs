@@ -10,7 +10,7 @@ use tracing::warn;
 
 
 pub const ALERTED_SQL: &str = "SELECT id FROM alerts WHERE tenant = $1 AND rule_id = 'discovery.unmanaged_device' \
-                               AND id IN (SELECT jsonb_array_elements_text($2::text::jsonb))";
+                               AND id = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb)))";
 
 
 /// The ids of the chunk already holding a stored alert of the tenant (one query); the error text when the query fails.

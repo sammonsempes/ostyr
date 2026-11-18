@@ -72,7 +72,7 @@ pub fn flood_alert(scope: &TenantScope, cut: usize, unchecked: usize, created_mi
         id: alert_id(&tenant, FLOOD_RULE_ID, &event_ids),
         tenant,
         rule_id: FLOOD_RULE_ID.to_owned(),
-        rule_title: format!("Unmanaged-device alerts cut at {MAX_UNMANAGED_PER_RUN}, {cut} cut, {unchecked} not checked"),
+        rule_title: format!("Unmanaged-device alerts: {MAX_UNMANAGED_PER_RUN} raised this run, {cut} more not raised, {unchecked} not checked"),
         severity: Severity::Medium,
         event_time: created_micros.to_string(),
         created_micros,

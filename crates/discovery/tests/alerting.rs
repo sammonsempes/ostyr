@@ -405,7 +405,10 @@ fn the_run_is_capped_by_first_seen_and_a_flood_alert_names_the_rest() -> TestRes
 fn the_flood_title_and_summary_keep_cut_and_unchecked_apart() -> TestResult {
     let scope = tenant_scope(TENANT)?;
     let flood = flood_alert(&scope, CUT_COUNT, UNCHECKED_COUNT, FLOOD_MICROS);
-    assert!(flood.rule_title.ends_with("7 cut, 9 not checked"));
+    assert_eq!(
+        flood.rule_title,
+        "Unmanaged-device alerts: 100 raised this run, 7 more not raised, 9 not checked"
+    );
     assert!(flood.summary.text.contains("\"cut\":7") && flood.summary.text.contains("\"unchecked\":9"));
     Ok(())
 }
@@ -809,5 +812,49 @@ fn the_next_chunk_stays_on_a_chunk_with_more_fresh_ids_than_the_run_alerts() -> 
     assert_eq!(next_chunk_of(0, 0, 0, 0), 0);
     assert_eq!(MIGRATION_NAMESPACE, "discovery");
     assert_eq!(MIGRATIONS.len(), 1);
+    Ok(())
+}
+
+
+const TITLE_CUTS: [usize; 3] = [0, 1, 21];
+
+
+const TITLE_UNCHECKED: [usize; 2] = [0, LOOKUP_CHUNK];
+
+
+#[test]
+fn the_flood_title_reads_plainly_for_each_count() -> TestResult {
+    let scope = tenant_scope(TENANT)?;
+    TITLE_CUTS.iter().for_each(|cut| {
+        TITLE_UNCHECKED.iter().for_each(|unchecked| {
+            let title = flood_alert(&scope, *cut, *unchecked, FLOOD_MICROS).rule_title;
+            assert_eq!(
+                title,
+                format!("Unmanaged-device alerts: 100 raised this run, {cut} more not raised, {unchecked} not checked")
+            );
+        });
+    });
+    Ok(())
+}
+
+
+#[test]
+fn the_flood_identity_ignores_the_counts() -> TestResult {
+    let scope = tenant_scope(TENANT)?;
+    let first = flood_alert(&scope, 1, 0, FLOOD_MICROS);
+    let second = flood_alert(&scope, CUT_COUNT, UNCHECKED_COUNT, FLOOD_MICROS);
+    assert_eq!(first.id, second.id);
+    assert_eq!(first.event_ids, second.event_ids);
+    Ok(())
+}
+
+
+#[test]
+fn the_lookup_statement_is_a_primary_key_probe() -> TestResult {
+    assert_eq!(
+        ALERTED_SQL,
+        "SELECT id FROM alerts WHERE tenant = $1 AND rule_id = 'discovery.unmanaged_device' \
+         AND id = ANY(ARRAY(SELECT jsonb_array_elements_text($2::text::jsonb)))"
+    );
     Ok(())
 }
