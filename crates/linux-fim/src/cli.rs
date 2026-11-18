@@ -97,3 +97,15 @@ pub fn role_of(table_path: &Path, role_name: &str, limits: &Limits) -> Result<Ro
     let found = table.roles.into_iter().find(|candidate| candidate.name == role_name);
     found.ok_or_else(|| CliError::NoRole(role_name.to_string()))
 }
+
+
+#[cfg(not(target_os = "linux"))]
+pub mod plant {
+    use crate::error::PlantError;
+    use crate::model::{Limits, PlantReport, Role};
+
+    /// Planting decoys needs Linux: the other targets only report that.
+    pub fn plant_role(_role: &Role, _limits: &Limits) -> Result<PlantReport, PlantError> {
+        Err(PlantError::Unsupported)
+    }
+}

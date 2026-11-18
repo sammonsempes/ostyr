@@ -1,3 +1,4 @@
+use crate::error::PlantRefusal;
 use serde::{Deserialize, Serialize};
 
 
@@ -88,6 +89,14 @@ pub struct PlantedIdentity {
     pub path: String,
     pub device: u32,
     pub inode: u64,
+}
+
+
+/// The identities planted by one run (directories above a token included, no path twice) and the tokens refused alone, by index.
+#[derive(Debug)]
+pub struct PlantReport {
+    pub planted: Vec<PlantedIdentity>,
+    pub refused: Vec<(usize, PlantRefusal)>,
 }
 
 
