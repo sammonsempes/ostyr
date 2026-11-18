@@ -102,10 +102,11 @@ pub struct LeaseInterval {
 }
 
 
-/// A lookup answer: at most `MAX_LOOKUP_ROWS` intervals, newest first, and whether more matched.
+/// A lookup answer: at most `MAX_LOOKUP_ROWS` intervals, newest first, the stored rows that could not be read, and whether more matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupResult {
     pub intervals: Vec<LeaseInterval>,
+    pub skipped: usize,
     pub truncated: bool,
 }
 
@@ -116,7 +117,7 @@ pub fn check_settings(settings: &HistorySettings) -> Result<(), HistoryError> {
 }
 
 
-fn in_range(seconds: i64) -> bool {
+pub fn in_range(seconds: i64) -> bool {
     u64::try_from(seconds).is_ok_and(|found| found <= MAX_DAY_SECONDS)
 }
 
@@ -271,16 +272,15 @@ fn interval_of(row: &[String]) -> Option<LeaseInterval> {
 }
 
 
-fn bounded(rows: &[Vec<String>]) -> Result<LookupResult, HistoryError> {
-    let intervals: Vec<LeaseInterval> = rows
-        .iter()
-        .take(MAX_LOOKUP_ROWS)
-        .map(|row| interval_of(row).ok_or(HistoryError::Answer))
-        .collect::<Result<_, _>>()?;
-    Ok(LookupResult {
+/// A stored row `interval_of` refuses is skipped and counted, never fails the lookup.
+fn bounded(rows: &[Vec<String>]) -> LookupResult {
+    let read: Vec<Option<LeaseInterval>> = rows.iter().take(MAX_LOOKUP_ROWS).map(|row| interval_of(row)).collect();
+    let intervals: Vec<LeaseInterval> = read.iter().flatten().cloned().collect();
+    LookupResult {
+        skipped: read.len() - intervals.len(),
         intervals,
         truncated: rows.len() > MAX_LOOKUP_ROWS,
-    })
+    }
 }
 
 
@@ -290,7 +290,7 @@ pub async fn lease_at(exec: Executor<'_, '_>, scope: &TenantScope, address: &str
     in_range(at).then_some(()).ok_or(HistoryError::TimeRange)?;
     let limit = MAX_LOOKUP_ROWS + 1;
     let rows = exec(scope.clone(), AT_SQL, vec![parsed.to_string(), at.to_string(), limit.to_string()]).await?;
-    bounded(&rows)
+    Ok(bounded(&rows))
 }
 
 
@@ -300,5 +300,5 @@ pub async fn leases_of_mac(exec: Executor<'_, '_>, scope: &TenantScope, mac: &st
     (in_range(from) && in_range(to)).then_some(()).ok_or(HistoryError::TimeRange)?;
     let limit = MAX_LOOKUP_ROWS + 1;
     let rows = exec(scope.clone(), MAC_SQL, vec![normal, from.to_string(), to.to_string(), limit.to_string()]).await?;
-    bounded(&rows)
+    Ok(bounded(&rows))
 }

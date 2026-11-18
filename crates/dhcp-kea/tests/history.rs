@@ -722,8 +722,10 @@ async fn bad_inputs_and_bad_answers_are_typed_errors() -> TestResult {
         store_history(short_exec, &scope, &HistorySettings::default(), NOW, &batch).await,
         Err(HistoryError::Answer)
     ));
-    assert!(matches!(lease_at(garbled_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
-    assert!(matches!(lease_at(wide_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
+    let garbled_found = lease_at(garbled_exec, &scope, "10.0.0.5", NOW).await?;
+    let wide_found = lease_at(wide_exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((garbled_found.intervals.len(), garbled_found.skipped), (0, 1));
+    assert_eq!((wide_found.intervals.len(), wide_found.skipped), (0, 1));
     assert!(matches!(lease_at(exec, &scope, "10.0.0.5 or 1=1", NOW).await, Err(HistoryError::Address)));
     assert!(matches!(
         lease_at(exec, &scope, "10.0.0.5", YEAR_10000).await,
@@ -786,8 +788,11 @@ async fn each_numeric_column_of_a_lookup_row_is_checked_and_empty_columns_are_no
     let subnet_exec: Executor = &executor(&bad_subnet);
     let good_exec: Executor = &executor(&good);
     let found = lease_at(good_exec, &scope, "10.0.0.5", NOW).await?;
-    assert!(matches!(lease_at(ends_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
-    assert!(matches!(lease_at(subnet_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
+    let ends_found = lease_at(ends_exec, &scope, "10.0.0.5", NOW).await?;
+    let subnet_found = lease_at(subnet_exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((ends_found.intervals.len(), ends_found.skipped), (0, 1));
+    assert_eq!((subnet_found.intervals.len(), subnet_found.skipped), (0, 1));
+    assert_eq!(found.skipped, 0);
     assert_eq!(
         found.intervals.first().map(|interval| (interval.mac.clone(), interval.hostname.clone())),
         Some((None, None))
