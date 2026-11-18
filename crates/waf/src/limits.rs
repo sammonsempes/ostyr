@@ -260,3 +260,15 @@ pub const START_DIFF: &str = "initial configuration";
 
 
 pub const UNTRUSTED_ADMIN: &str = "the admin socket directory must be absolute, owned by the running user or root, and closed to group and others";
+
+
+pub const UNTRUSTED_PROGRAM: &str = "caddy_program must be a regular file that, with its directories, belongs to root or this user, closed to others";
+
+
+pub const UNTRUSTED_SETTINGS: &str = "the settings file directory must be absolute, owned by the running user, closed to group and others";
+
+
+pub const UNTRUSTED_SETTINGS_FILE: &str = "the settings file must be a regular file owned by root or this user, closed to group and others";
+
+
+pub const PROC_FD_DIRECTORY: &str = "/proc/self/fd/";

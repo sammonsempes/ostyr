@@ -11,7 +11,7 @@ mod unix {
     use std::sync::Arc;
     use std::time::Duration;
     use tracing::{info, Level};
-    use waf::apply::{load_settings, open_apply};
+    use waf::apply::{load_trusted_settings, open_apply};
     use waf::runner::run_with_deadline;
 
 
@@ -30,7 +30,7 @@ mod unix {
         let mut arguments = std::env::args().skip(1);
         let settings_file = arguments.next().ok_or(USAGE)?;
         let audit_file = arguments.next().ok_or(USAGE)?;
-        let settings = load_settings(Path::new(&settings_file))?;
+        let settings = load_trusted_settings(Path::new(&settings_file))?;
         let watched = [PathBuf::from(&settings.routes_file), PathBuf::from(&settings_file)];
         let log = Arc::new(open_file_log(Path::new(&audit_file))?);
         let context = ReloadContext {
