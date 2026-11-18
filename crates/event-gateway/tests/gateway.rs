@@ -19,7 +19,7 @@ use event_gateway::publish::{
     admit, check_identity, count_refusal, events_of, forced_payload, gateway_sink, log_summary, message_id, outgoing_events, publish_batch,
     refusal_counts, spawn_summary,
 };
-use event_gateway::session::{backoff_delay, new_gateway, settings_of};
+use event_gateway::session::{backoff_delay, is_fresh, new_gateway, open_session, settings_of};
 use event_gateway::settings::{open_settings, path_text, settings_state, validate_settings};
 use nats_stub::{kill_connections, lock, start_stub, wait_until, Stub};
 use nkeys::KeyPair;
@@ -535,6 +535,19 @@ async fn a_dropped_connection_is_replaced_on_the_next_publish() -> TestResult {
     }
     assert!(recovered);
     assert!(lock(&stub.hub).connects.len() >= TWO);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_session_whose_connection_dropped_is_stale_and_a_live_one_is_fresh() -> TestResult {
+    let stub = start_stub(None, |_| ())?;
+    let rig = rig(&yaml(stub.port, ""))?;
+    let settings = settings_of(&rig.gateway);
+    let session = open_session(&settings).await?;
+    assert!(is_fresh(&session, &settings));
+    session.dropped.store(true, Ordering::SeqCst);
+    assert!(!is_fresh(&session, &settings));
     Ok(())
 }
 
