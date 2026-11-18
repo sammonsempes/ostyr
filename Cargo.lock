@@ -889,6 +889,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "ureq 3.5.1",
  "walkdir",
  "x509-parser",
