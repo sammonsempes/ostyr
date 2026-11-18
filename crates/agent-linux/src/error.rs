@@ -108,3 +108,30 @@ pub enum IsolationError {
     #[error("unknown action, expected isolate, release or status")]
     Usage,
 }
+
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OsqueryError {
+    #[error("the query is refused: {0}")]
+    BadQuery(&'static str),
+    #[error("a path osquery needs is refused: {0}")]
+    Untrusted(&'static str),
+    #[error("osquery could not start: {0:?}")]
+    Spawn(io::ErrorKind),
+    #[error("osquery did not finish in time")]
+    Deadline,
+    #[error("osquery wrote more than the allowed output or rows")]
+    TooLarge,
+    #[error("osquery was stopped by a limit (memory, CPU time, temp file size or temp space) or by a signal")]
+    ResourceLimit,
+    #[error("the private temp space could not be prepared at step {step}")]
+    Sandbox {
+        step: &'static str,
+        #[source]
+        source: Box<OsqueryError>,
+    },
+    #[error("osquery failed with status {0}")]
+    Exit(i32),
+    #[error("osquery output is not a JSON array at line {line} column {column}")]
+    NotJson { line: usize, column: usize },
+}
