@@ -6,5 +6,6 @@ pub mod cursor;
 pub mod error;
 pub mod follow;
 pub mod header;
+pub mod history;
 pub mod row;
 pub mod types;
