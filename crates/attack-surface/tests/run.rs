@@ -4,10 +4,10 @@ use attack_surface::model::{Counts, Found, Limits, Outcome, ScanReport, Scope, S
 use attack_surface::run::{check_run_total, outcome_of, plan_target, run_target, scan_scope, scan_scope_until, summary_line, Plan};
 use attack_surface::scope::parse_scope;
 use net_topology::model::RunFailure;
+use std::cell::Cell;
 use std::error::Error;
 use std::io::Error as IoError;
 use std::net::IpAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use types::TestResult;
@@ -387,9 +387,6 @@ targets:
 ";
 
 
-const SCRIPT_MODE: u32 = 0o700;
-
-
 #[test]
 fn a_total_deadline_already_passed_defers_every_scan_and_never_spawns() -> TestResult {
     let scope = scope_of(THREE_TARGETS)?;
@@ -414,23 +411,15 @@ fn a_total_deadline_already_passed_defers_every_scan_and_never_spawns() -> TestR
 
 #[test]
 fn a_deadline_fired_by_the_first_run_defers_the_rest() -> TestResult {
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
-    let marker = dir.path().join("marker");
-    let script = dir.path().join("fake.sh");
-    let body = format!(
-        "#!/bin/sh\n: > '{}'\nprintf '%s\\n' '{{\"ip\":\"8.8.8.8\",\"port\":22}}'\n",
-        marker.display()
-    );
-    std::fs::write(&script, body)?;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(SCRIPT_MODE))?;
+    let asked = Cell::new(false);
     let scope = scope_of(THREE_TARGETS)?;
-    let report = scan_scope_until(&script, &scope, &Limits::default(), generous(), &|| marker.exists())?;
+    let report = scan_scope_until(&fixture("ok.sh"), &scope, &Limits::default(), generous(), &|| asked.replace(true))?;
     let deferred = report
         .targets
         .iter()
         .map(|target| target.outcome == Outcome::Deferred)
         .collect::<Vec<_>>();
     assert_eq!(deferred, vec![false, true, false]);
-    assert_eq!(report.found, vec![found("8.8.8.8", SSH)?]);
+    assert_eq!(report.found, vec![found("8.8.8.8", SSH)?, found("9.9.9.9", SSH)?]);
     Ok(())
 }
