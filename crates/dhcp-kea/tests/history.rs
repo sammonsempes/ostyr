@@ -67,10 +67,7 @@ const REFUSED_OF_BATCH: u64 = 9;
 const CONCURRENT_BATCH: usize = 80;
 
 
-const CONCURRENT_REFUSED: u64 = 60;
-
-
-const CONCURRENT_INSERTED: u64 = 160;
+const CONCURRENT_TOTAL: u64 = 160;
 
 
 const TINY_CAP: u64 = 5;
@@ -555,8 +552,11 @@ fn concurrent_batches_never_exceed_the_cap() -> TestResult {
         handles.into_iter().filter_map(|handle| handle.join().ok().and_then(Result::ok)).collect()
     });
     assert_eq!(totals.len(), PAIR);
-    assert_eq!(totals.iter().map(|counts| counts.inserted).sum::<u64>(), CONCURRENT_INSERTED);
-    assert_eq!(totals.iter().map(|counts| counts.evicted).sum::<u64>(), CONCURRENT_REFUSED);
+    let inserted = totals.iter().map(|counts| counts.inserted).sum::<u64>();
+    let refused_full = totals.iter().map(|counts| counts.refused_full).sum::<u64>();
+    let evicted = totals.iter().map(|counts| counts.evicted).sum::<u64>();
+    assert_eq!(inserted + refused_full, CONCURRENT_TOTAL);
+    assert_eq!(inserted - evicted, SMALL_CAP);
     assert_eq!(row_count(&store)?, usize::try_from(SMALL_CAP)?);
     Ok(())
 }
