@@ -180,6 +180,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-gateway"
+version = "0.0.0"
+dependencies = [
+ "core-audit",
+ "core-config",
+ "getrandom 0.4.3",
+ "log",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "ureq 3.5.1",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "alert-grouping"
 version = "0.0.0"
 dependencies = [
