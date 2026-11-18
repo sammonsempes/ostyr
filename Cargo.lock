@@ -3475,6 +3475,8 @@ dependencies = [
 name = "linux-fim"
 version = "0.0.0"
 dependencies = [
+ "core-config",
+ "rustix 1.1.6",
  "serde",
  "serde-saphyr",
  "serde_json",

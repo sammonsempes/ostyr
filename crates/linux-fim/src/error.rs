@@ -106,4 +106,36 @@ pub enum CliError {
     Planted { line: usize },
     #[error("the file is longer than {max} bytes")]
     TooLarge { max: usize },
+    #[error("the decoys could not be planted: {0}")]
+    Plant(#[from] PlantError),
+}
+
+
+/// Why one honeytoken was not planted: a fixed reason or the OS error, never a path or content.
+#[derive(Debug, Error)]
+pub enum PlantRefusal {
+    #[error("the token path has no directory and file name")]
+    Path,
+    #[error("a directory above the token is refused: {0}")]
+    Directory(&'static str),
+    #[error("the file at the token path is refused: {0}")]
+    File(&'static str),
+    #[error("a system call failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+
+#[derive(Debug, Error)]
+pub enum PlantError {
+    #[error("{count} honeytokens, more than the {max} a role holds")]
+    TooMany { count: usize, max: usize },
+    #[error("planting decoys is supported on Linux only")]
+    Unsupported,
+    #[error("the output path has no directory and file name")]
+    OutputPath,
+    #[cfg(target_os = "linux")]
+    #[error("the output directory is refused: {0}")]
+    Directory(#[from] core_config::trusted_dir::TrustedDirError),
+    #[error("the planted identities could not be written: {0}")]
+    Io(#[from] std::io::Error),
 }
