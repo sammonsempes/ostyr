@@ -8,10 +8,16 @@ use core_pg::scope::TenantScope;
 pub const MIGRATION_NAMESPACE: &str = "dhcp_kea";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "001_dhcp_lookup_cursor",
-    sql: include_str!("../migrations/001_dhcp_lookup_cursor.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "001_dhcp_lookup_cursor",
+        sql: include_str!("../migrations/001_dhcp_lookup_cursor.sql"),
+    },
+    Migration {
+        version: "002_dhcp_lease_history",
+        sql: include_str!("../migrations/002_dhcp_lease_history.sql"),
+    },
+];
 
 
 pub const READ_SQL: &str = "SELECT next_chunk::text FROM dhcp_lookup_cursor WHERE tenant = $1";

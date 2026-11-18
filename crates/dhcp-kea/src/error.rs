@@ -56,3 +56,20 @@ pub enum KeaError {
     #[error("usage: kea_leases <csv> [--follow]")]
     Usage,
 }
+
+
+#[derive(Debug, Error)]
+pub enum HistoryError {
+    #[error("history store: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("history settings out of range")]
+    Settings,
+    #[error("time outside the supported range")]
+    TimeRange,
+    #[error("not an IP address")]
+    Address,
+    #[error("not a MAC address")]
+    Mac,
+    #[error("the store answered an unexpected shape")]
+    Answer,
+}
