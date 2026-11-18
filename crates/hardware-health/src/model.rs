@@ -264,3 +264,62 @@ pub struct FetchSession {
     pub deadline: std::time::Instant,
     pub max_bytes: u64,
 }
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmartSettings {
+    #[serde(default = "crate::limits::default_smartctl")]
+    pub program: std::path::PathBuf,
+    #[serde(default = "crate::limits::default_deadline_seconds")]
+    pub deadline_seconds: u64,
+    #[serde(default = "crate::limits::default_round_deadline_seconds")]
+    pub round_deadline_seconds: u64,
+}
+
+
+/// Why one smartctl run produced no report; a category only, never output or stderr text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FailureClass {
+    #[error("smartctl passed its deadline")]
+    TimedOut,
+    #[error("smartctl output is over the cap")]
+    TooLarge,
+    #[error("smartctl could not be started")]
+    Spawn,
+    #[error("smartctl run failed on an I/O error")]
+    Io,
+    #[error("the smartctl child cannot be waited on")]
+    Unwaitable,
+    #[error("smartctl was ended by a signal")]
+    Signalled,
+    #[error("smartctl refused its command line")]
+    CommandLine,
+    #[error("smartctl could not open the device")]
+    OpenFailed,
+    #[error("smartctl output is not readable")]
+    Unparsable,
+    #[error("the scan lists too many devices")]
+    TooManyDevices,
+    #[error("the smartctl program is not trusted")]
+    ProgramRefused,
+    #[error("the round deadline passed before this device was read")]
+    Deferred,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOutput {
+    pub bytes: Vec<u8>,
+    pub exit_code: Option<i32>,
+    pub elapsed: std::time::Duration,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunReport {
+    pub scan_failed: Option<FailureClass>,
+    pub reports: Vec<(String, SmartReport)>,
+    pub refused_devices: usize,
+    pub failed: Vec<(String, FailureClass)>,
+}

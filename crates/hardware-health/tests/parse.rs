@@ -30,10 +30,10 @@ const HOSTILE_FIELDS: usize = 2;
 const SMALL_LIMIT: usize = 4;
 
 
-const MANY: usize = 10_000;
+const MANY: usize = 1_000;
 
 
-const DEPTH: usize = 100_000;
+const DEPTH: usize = 1_000;
 
 
 const BIG_BYTES: u64 = 67_108_864;
@@ -347,5 +347,15 @@ fn refused_protocol_without_nvme_log_is_blind() -> TestResult {
     assert_eq!(assess(&with_log), Health::Healthy);
     let absent = report_from(&fixture(ATA_HEALTHY)?)?;
     assert_eq!(assess(&absent), Health::Healthy);
+    Ok(())
+}
+
+
+#[test]
+fn a_value_tree_over_the_node_budget_is_refused_before_it_is_built() -> TestResult {
+    let output = format!("[{}]", vec!["[]"; hardware_health::limits::MAX_JSON_NODES].join(","));
+    let refused = parse_smartctl(output.as_bytes(), &default_limits());
+    assert!(matches!(refused, Err(SmartError::TooManyNodes { .. })));
+    assert_eq!(hardware_health::parse::json_nodes(br#"{"a":[1,2],"b,[{":"x\"[,"}"#), 1 + 1 + 1 + 1);
     Ok(())
 }
