@@ -5,21 +5,23 @@ use linux_fim::error::{CliError, PlantError, PlantRefusal};
 use linux_fim::limits::default_limits;
 use linux_fim::model::{Honeytoken, HoneytokenKind, Limits, PlantReport, PlantedIdentity, Role};
 use linux_fim::plant::{
-    check_unloaded, directory_verdict, file_verdict, first_failure, list_from, loaded_count, made_verdict, no_step, os_claim, os_list_policies,
-    os_ops, os_random, plant_command, plant_role, planted_text, stat_device, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
+    binary_verdict, check_unloaded, directory_verdict, file_verdict, first_cause, first_failure, list_first, list_from, loaded_count,
+    log_reap_failure, made_verdict, no_step, os_claim, os_list_policies, os_ops, os_random, pick_binary, plant_command, plant_role, planted_text,
+    read_listing, read_until, reap, spawn_listing, stat_device, wait_readable, wait_until, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
 };
 use linux_fim::policy::kernel_device;
 use rustix::fs::inotify::{add_watch, init, CreateFlags, WatchFlags};
 use rustix::fs::{mkdirat, mknodat, renameat, FileType, Mode, RawMode, CWD};
-use rustix::io::{read, Errno};
+use rustix::io::{ioctl_fionread, read, Errno};
 use rustix::process::geteuid;
 use std::error::Error;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{ChildStdout, Command};
+use std::time::{Duration, Instant};
 use tempfile::{tempdir_in, TempDir};
 
 
@@ -27,6 +29,21 @@ const BYTE_RANGE: usize = 256;
 
 
 const TEST_DEADLINE: Duration = Duration::from_secs(30);
+
+
+const SMALL_READS: usize = 300;
+
+
+const DRAIN_CHUNK: usize = 4096;
+
+
+const MAX_DRAIN_READS: usize = 4096;
+
+
+const MAX_SPINS: usize = 1_000_000;
+
+
+const WORLD_WRITABLE: u32 = 0o777;
 
 
 const GROUP_WRITABLE: u32 = 0o770;
@@ -888,7 +905,7 @@ fn the_listing_counts_only_ostyr_fim_names() -> TestResult {
 fn the_real_listing_runs_the_binary_and_fails_closed() -> TestResult {
     assert_eq!(list_from("/bin/echo", TEST_DEADLINE)?, "tracingpolicy list\n");
     assert!(list_from("/bin/false", TEST_DEADLINE).is_err());
-    assert_eq!(list_from("/nonexistent/tetra", TEST_DEADLINE)?, "");
+    assert!(list_from("/nonexistent/tetra", TEST_DEADLINE).is_err());
     assert!(list_from("/", TEST_DEADLINE).is_err());
     Ok(())
 }
@@ -933,5 +950,214 @@ fn a_failed_output_rename_leaves_no_staged_file() -> TestResult {
 fn the_os_listing_reads_the_host_without_failing_on_a_missing_tetra() -> TestResult {
     let listing = os_list_policies();
     assert!(listing.map_or(true, |text| loaded_count(&text) < usize::MAX));
+    Ok(())
+}
+
+
+#[test]
+fn a_listing_left_running_is_cut_at_the_deadline_and_its_group_is_killed() -> TestResult {
+    let dir = tree()?;
+    let lock = dir.path().join("lock");
+    let mut child = spawn_listing("/usr/bin/flock", &[lock.to_str().ok_or("path")?, "/usr/bin/yes"])?;
+    let mut held = File::from(OwnedFd::from(child.stdout.take().ok_or("no output pipe")?));
+    wait_readable(&held, Instant::now() + TEST_DEADLINE)?;
+    let (stand_in, closed) = io::pipe()?;
+    drop(closed);
+    child.stdout = Some(ChildStdout::from(OwnedFd::from(stand_in)));
+    let failure = read_listing(child, Duration::ZERO).err().ok_or("a running listing succeeded")?;
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    assert!(drain_to_end(&mut held)?);
+    Ok(())
+}
+
+
+fn drain_to_end(held: &mut File) -> io::Result<bool> {
+    let mut chunk = [u8::MIN; DRAIN_CHUNK];
+    let mut ended = false;
+    let mut reads = 0;
+    while !ended && reads < MAX_DRAIN_READS {
+        wait_readable(held, Instant::now() + TEST_DEADLINE)?;
+        ended = held.read(&mut chunk)? == 0;
+        reads += 1;
+    }
+    Ok(ended)
+}
+
+
+#[test]
+fn waiting_for_an_exit_stops_at_the_deadline_and_sees_an_exit() -> TestResult {
+    let mut running = Command::new("/bin/sleep").arg("3600").spawn()?;
+    let timed_out = wait_until(&mut running, Instant::now()).err().ok_or("a running child exited")?;
+    assert_eq!(timed_out.kind(), io::ErrorKind::TimedOut);
+    reap(&mut running);
+    assert!(running.try_wait()?.is_some());
+    reap(&mut running);
+    let mut quick = Command::new("/bin/true").spawn()?;
+    assert!(wait_until(&mut quick, Instant::now() + TEST_DEADLINE)?.success());
+    Ok(())
+}
+
+
+fn feed_one_byte_at_a_time(mut writer: PipeWriter, probe: PipeReader) -> io::Result<()> {
+    (0..SMALL_READS).try_for_each(|_| {
+        writer.write_all(b"x")?;
+        (0..MAX_SPINS)
+            .find(|_| {
+                std::thread::yield_now();
+                ioctl_fionread(&probe).map_or(true, |pending| pending == 0)
+            })
+            .map(drop)
+            .ok_or(io::Error::other("a byte was never read"))
+    })
+}
+
+
+#[test]
+fn a_listing_in_many_small_reads_is_accepted() -> TestResult {
+    let (reader, writer) = io::pipe()?;
+    let probe = reader.try_clone()?;
+    let feeder = std::thread::spawn(move || feed_one_byte_at_a_time(writer, probe));
+    let bytes = read_until(&mut File::from(OwnedFd::from(reader)), Instant::now() + TEST_DEADLINE)?;
+    feeder.join().map_err(|_| "the feeder panicked")??;
+    assert_eq!(bytes.len(), SMALL_READS);
+    Ok(())
+}
+
+
+fn good_tetra(dir: &Path) -> Result<PathBuf, io::Error> {
+    let tetra = dir.join("tetra");
+    fs::write(&tetra, "")?;
+    fs::set_permissions(&tetra, fs::Permissions::from_mode(WORLD_READABLE))?;
+    Ok(tetra)
+}
+
+
+fn refused(path: &Path, owner: u32) -> Result<io::Error, Box<dyn Error>> {
+    let text = path.to_str().ok_or("path")?;
+    let error = pick_binary(&[text], owner).err().ok_or("a bad tetra was picked")?;
+    assert_ne!(error.kind(), io::ErrorKind::NotFound);
+    Ok(error)
+}
+
+
+#[test]
+fn the_tetra_binary_is_the_first_existing_trusted_candidate() -> TestResult {
+    let dir = tree()?;
+    let present = good_tetra(dir.path())?;
+    let present_text = present.to_str().ok_or("path")?;
+    let owner = geteuid().as_raw();
+    assert_eq!(pick_binary(&["/nonexistent/tetra", present_text], owner)?, Some(present_text));
+    assert_eq!(pick_binary(&["/nonexistent/tetra"], owner)?, None);
+    assert!(pick_binary(&[present_text], owner + 1).is_err());
+    assert!(pick_binary(&["/etc/passwd/tetra"], owner).is_err());
+    assert!(pick_binary(&["tetra"], owner).is_err());
+    assert_eq!(list_first(&["/nonexistent/tetra"], owner, TEST_DEADLINE)?, "");
+    let echo = dir.path().join("echo");
+    fs::copy("/usr/bin/echo", &echo)?;
+    assert_eq!(list_first(&[echo.to_str().ok_or("path")?], owner, TEST_DEADLINE)?, "tracingpolicy list\n");
+    log_reap_failure(&io::Error::other("reap"));
+    Ok(())
+}
+
+
+#[test]
+fn a_root_owned_tetra_that_anyone_can_write_is_refused() -> TestResult {
+    let dir = tree()?;
+    let tetra = good_tetra(dir.path())?;
+    fs::set_permissions(&tetra, fs::Permissions::from_mode(WORLD_WRITABLE))?;
+    assert!(refused(&tetra, geteuid().as_raw())?.to_string().contains("writable"));
+    fs::set_permissions(&tetra, fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    refused(&tetra, geteuid().as_raw())?;
+    Ok(())
+}
+
+
+#[test]
+fn a_tetra_in_a_shared_directory_or_below_one_is_refused() -> TestResult {
+    let dir = tree()?;
+    let shared = dir.path().join("shared");
+    fs::create_dir(&shared)?;
+    let tetra = good_tetra(&shared)?;
+    fs::set_permissions(&shared, fs::Permissions::from_mode(WORLD_WRITABLE))?;
+    refused(&tetra, geteuid().as_raw())?;
+    fs::set_permissions(&shared, fs::Permissions::from_mode(WORLD_READABLE))?;
+    let inner = shared.join("inner");
+    fs::create_dir(&inner)?;
+    let below = good_tetra(&inner)?;
+    assert_eq!(pick_binary(&[below.to_str().ok_or("path")?], geteuid().as_raw())?, below.to_str());
+    fs::set_permissions(&shared, fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    refused(&below, geteuid().as_raw())?;
+    Ok(())
+}
+
+
+#[test]
+fn a_symlink_to_a_good_tetra_is_refused() -> TestResult {
+    let dir = tree()?;
+    let tetra = good_tetra(dir.path())?;
+    let link = dir.path().join("link");
+    symlink(&tetra, &link)?;
+    refused(&link, geteuid().as_raw())?;
+    let dangling = dir.path().join("dangling");
+    symlink(dir.path().join("absent"), &dangling)?;
+    refused(&dangling, geteuid().as_raw())?;
+    Ok(())
+}
+
+
+#[test]
+fn a_tetra_that_is_not_a_plain_root_owned_file_fails_the_verdict() -> TestResult {
+    let good = FileFacts {
+        regular: true,
+        single_link: true,
+        uid: 0,
+        mode: WORLD_READABLE,
+        has_content: true,
+    };
+    assert_eq!(binary_verdict(&good, 0), Ok(()));
+    assert!(binary_verdict(&FileFacts { regular: false, ..good }, 0).is_err());
+    assert!(binary_verdict(&FileFacts { uid: 1, ..good }, 0).is_err());
+    assert!(binary_verdict(
+        &FileFacts {
+            mode: WORLD_WRITABLE,
+            ..good
+        },
+        0
+    )
+    .is_err());
+    let dir = tree()?;
+    refused(dir.path(), geteuid().as_raw())?;
+    Ok(())
+}
+
+
+#[test]
+fn a_checked_tetra_that_cannot_start_is_an_error_not_an_empty_listing() -> TestResult {
+    let dir = tree()?;
+    let tetra = dir.path().join("tetra");
+    fs::write(&tetra, "#!/nonexistent/interpreter\n")?;
+    fs::set_permissions(&tetra, fs::Permissions::from_mode(WORLD_READABLE))?;
+    let text = tetra.to_str().ok_or("path")?;
+    assert_eq!(pick_binary(&[text], geteuid().as_raw())?, Some(text));
+    let failure = list_first(&[text], geteuid().as_raw(), TEST_DEADLINE)
+        .err()
+        .ok_or("a missing interpreter read as no policy")?;
+    assert_eq!(failure.kind(), io::ErrorKind::NotFound);
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_cleanup_keeps_the_first_cause() -> TestResult {
+    assert!(matches!(first_cause(PlantError::OutputPath, Err(Errno::IO)), Err(PlantError::OutputPath)));
+    assert!(matches!(first_cause(PlantError::OutputPath, Ok(())), Err(PlantError::OutputPath)));
+    Ok(())
+}
+
+
+#[test]
+fn a_listing_failure_keeps_its_cause_as_the_source() -> TestResult {
+    let failure = PlantError::PolicyList(io::Error::other("tetra failed"));
+    assert_eq!(failure.source().ok_or("no source")?.to_string(), "tetra failed");
     Ok(())
 }
