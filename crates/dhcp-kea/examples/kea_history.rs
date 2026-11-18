@@ -6,12 +6,15 @@ use core_pg::migrate::migrate;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::parse_settings;
 use dhcp_kea::cursor::{MIGRATIONS, MIGRATION_NAMESPACE};
+use dhcp_kea::follow::MAX_LINE_BYTES;
 use dhcp_kea::header::parse_header;
-use dhcp_kea::history::{lease_at, store_history, HistorySettings};
+use dhcp_kea::history::{lease_at, store_history, HistorySettings, MAX_HISTORY_BATCH};
 use dhcp_kea::row::convert_row;
+use ecs_normalise::stream::{read_raw_line, RawLine};
 use serde_json::json;
 use std::error::Error;
-use std::io::{stderr, stdout, Write};
+use std::fs::File;
+use std::io::{stderr, stdout, BufReader, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,7 +25,18 @@ use time::OffsetDateTime;
 const USAGE: &str = "usage: kea_history <pg.yaml> <leases.csv> <tenant> [lookup <ip> <rfc3339>]";
 
 
+const MAX_BATCHES: usize = 100_000;
+
+
 const DEADLINE: Duration = Duration::from_secs(60);
+
+
+fn text_of(line: RawLine) -> Option<String> {
+    match line {
+        RawLine::Text(bytes) => String::from_utf8(bytes).ok(),
+        RawLine::TooLong => None,
+    }
+}
 
 
 async fn scenario(settings_file: &Path, leases_file: &Path, tenant: &str, lookup: Option<(&str, &str)>) -> Result<(), Box<dyn Error>> {
@@ -46,14 +60,36 @@ async fn scenario(settings_file: &Path, leases_file: &Path, tenant: &str, lookup
             writeln!(stdout(), "intervals={} truncated={}", found.intervals.len(), found.truncated)?;
         }
         None => {
-            let text = std::fs::read_to_string(leases_file)?;
-            let mut lines = text.lines();
-            let columns = parse_header(lines.next().unwrap_or(""))?;
-            let (converted, malformed): (Vec<_>, Vec<_>) = lines.map(|line| convert_row(&columns, line)).partition(Result::is_ok);
-            let leases: Vec<_> = converted.into_iter().flatten().collect();
+            let mut reader = BufReader::new(File::open(leases_file)?);
+            let header = read_raw_line(&mut reader, MAX_LINE_BYTES)?
+                .and_then(text_of)
+                .ok_or("no usable header line")?;
+            let columns = parse_header(&header)?;
             let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
-            let counts = store_history(&exec, &scope, &HistorySettings::default(), now, &leases).await?;
-            writeln!(stdout(), "leases={} bad_rows={} {counts:?}", leases.len(), malformed.len())?;
+            let mut lines = std::iter::from_fn(|| read_raw_line(&mut reader, MAX_LINE_BYTES).transpose());
+            let mut done = false;
+            let mut batches = 0;
+            while !done && batches < MAX_BATCHES {
+                let batch_lines = lines.by_ref().take(MAX_HISTORY_BATCH).collect::<Result<Vec<_>, _>>()?;
+                done = batch_lines.len() < MAX_HISTORY_BATCH;
+                let (converted, malformed): (Vec<_>, Vec<_>) = batch_lines
+                    .into_iter()
+                    .map(|line| {
+                        text_of(line)
+                            .ok_or("line too long or not UTF-8")
+                            .and_then(|text| convert_row(&columns, &text).map_err(|_bad| "bad row"))
+                    })
+                    .partition(Result::is_ok);
+                let leases: Vec<_> = converted.into_iter().flatten().collect();
+                let counts = store_history(&exec, &scope, &HistorySettings::default(), now, &leases).await?;
+                writeln!(
+                    stdout(),
+                    "batch={batches} leases={} bad_rows={} {counts:?}",
+                    leases.len(),
+                    malformed.len()
+                )?;
+                batches += 1;
+            }
         }
     }
     Ok(())
