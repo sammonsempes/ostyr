@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tempfile::{tempdir_in, TempDir};
 
@@ -106,8 +107,31 @@ const PLANTED_BESIDE_ONE_REFUSAL: usize = 4;
 const PLANTED_BESIDE_ONE_REFUSAL_OF_TWO: usize = 3;
 
 
-fn tree() -> Result<TempDir, io::Error> {
-    tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+static SHARED_EXECUTABLES: LazyLock<Result<PathBuf, String>> = LazyLock::new(write_executables);
+
+
+fn write_executables() -> Result<PathBuf, String> {
+    let dir = tempfile::Builder::new()
+        .prefix("executables-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .map_err(|error| error.to_string())?
+        .keep();
+    fs::copy("/usr/bin/echo", dir.join("echo")).map_err(|error| error.to_string())?;
+    let broken = dir.join("broken");
+    fs::write(&broken, "#!/nonexistent/interpreter\n").map_err(|error| error.to_string())?;
+    fs::set_permissions(&broken, fs::Permissions::from_mode(WORLD_READABLE)).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+
+fn executable(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    Ok(SHARED_EXECUTABLES.as_ref().map_err(|error| error.clone())?.join(name))
+}
+
+
+fn tree() -> Result<TempDir, Box<dyn Error>> {
+    executable("echo")?;
+    Ok(tempdir_in(env!("CARGO_TARGET_TMPDIR"))?)
 }
 
 
@@ -909,6 +933,7 @@ fn the_listing_counts_only_ostyr_fim_names() -> TestResult {
 
 #[test]
 fn the_real_listing_runs_the_binary_and_fails_closed() -> TestResult {
+    executable("echo")?;
     assert_eq!(list_from("/bin/echo", TEST_DEADLINE)?, "tracingpolicy list\n");
     assert!(list_from("/bin/false", TEST_DEADLINE).is_err());
     assert!(list_from("/nonexistent/tetra", TEST_DEADLINE).is_err());
@@ -919,6 +944,7 @@ fn the_real_listing_runs_the_binary_and_fails_closed() -> TestResult {
 
 #[test]
 fn a_listing_that_never_returns_is_cut_at_the_deadline_and_fails_closed() -> TestResult {
+    executable("echo")?;
     let hang = format!("{}/tests/fixtures/tetra-hang.sh", env!("CARGO_MANIFEST_DIR"));
     let failure = list_from(&hang, Duration::ZERO).err().ok_or("a hanging listing succeeded")?;
     assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
@@ -928,6 +954,7 @@ fn a_listing_that_never_returns_is_cut_at_the_deadline_and_fails_closed() -> Tes
 
 #[test]
 fn an_endless_listing_is_refused_as_too_long() -> TestResult {
+    executable("echo")?;
     let failure = list_from("/usr/bin/yes", TEST_DEADLINE).err().ok_or("an endless listing succeeded")?;
     assert!(failure.to_string().contains("too long"));
     Ok(())
@@ -954,6 +981,7 @@ fn a_failed_output_rename_leaves_no_staged_file() -> TestResult {
 
 #[test]
 fn the_os_listing_reads_the_host_without_failing_on_a_missing_tetra() -> TestResult {
+    executable("echo")?;
     let listing = os_list_policies();
     assert!(listing.map_or(true, |text| loaded_count(&text) < usize::MAX));
     Ok(())
@@ -1036,6 +1064,7 @@ fn a_failed_cleanup_keeps_the_refusal_that_started_it() -> TestResult {
 
 #[test]
 fn a_group_already_gone_or_a_child_already_reaped_is_not_a_failure() -> TestResult {
+    executable("echo")?;
     assert!(group_outcome(Ok(())).is_none());
     assert!(group_outcome(Err(Errno::SRCH)).is_none());
     assert!(group_outcome(Err(Errno::PERM)).is_some());
@@ -1058,10 +1087,7 @@ fn a_skipped_candidate_gives_way_to_the_next_one_and_an_all_bad_list_fails_close
     fs::create_dir(&bad)?;
     let bad_tetra = good_tetra(&bad)?;
     fs::set_permissions(&bad_tetra, fs::Permissions::from_mode(WORLD_WRITABLE))?;
-    let good = dir.path().join("good");
-    fs::create_dir(&good)?;
-    let good_path = good.join("echo");
-    fs::copy("/usr/bin/echo", &good_path)?;
+    let good_path = executable("echo")?;
     let bad_text = bad_tetra.to_str().ok_or("path")?;
     let good_text = good_path.to_str().ok_or("path")?;
     assert_eq!(pick_binary(&[bad_text, good_text], owner)?, Some(good_text));
@@ -1093,6 +1119,7 @@ fn drain_to_end(held: &mut File) -> io::Result<bool> {
 
 #[test]
 fn waiting_for_an_exit_stops_at_the_deadline_and_sees_an_exit() -> TestResult {
+    executable("echo")?;
     let mut running = Command::new("/bin/sleep").arg("3600").spawn()?;
     let timed_out = wait_until(&mut running, Instant::now()).err().ok_or("a running child exited")?;
     assert_eq!(timed_out.kind(), io::ErrorKind::TimedOut);
@@ -1159,8 +1186,7 @@ fn the_tetra_binary_is_the_first_existing_trusted_candidate() -> TestResult {
     assert!(pick_binary(&["/etc/passwd/tetra"], owner).is_err());
     assert!(pick_binary(&["tetra"], owner).is_err());
     assert_eq!(list_first(&["/nonexistent/tetra"], owner, TEST_DEADLINE)?, "");
-    let echo = dir.path().join("echo");
-    fs::copy("/usr/bin/echo", &echo)?;
+    let echo = executable("echo")?;
     assert_eq!(list_first(&[echo.to_str().ok_or("path")?], owner, TEST_DEADLINE)?, "tracingpolicy list\n");
     log_reap_failure(&io::Error::other("reap"));
     Ok(())
@@ -1240,10 +1266,7 @@ fn a_tetra_that_is_not_a_plain_root_owned_file_fails_the_verdict() -> TestResult
 
 #[test]
 fn a_checked_tetra_that_cannot_start_is_an_error_not_an_empty_listing() -> TestResult {
-    let dir = tree()?;
-    let tetra = dir.path().join("tetra");
-    fs::write(&tetra, "#!/nonexistent/interpreter\n")?;
-    fs::set_permissions(&tetra, fs::Permissions::from_mode(WORLD_READABLE))?;
+    let tetra = executable("broken")?;
     let text = tetra.to_str().ok_or("path")?;
     assert_eq!(pick_binary(&[text], geteuid().as_raw())?, Some(text));
     let failure = list_first(&[text], geteuid().as_raw(), TEST_DEADLINE)
