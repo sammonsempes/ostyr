@@ -63,13 +63,20 @@ pub async fn scan(exec: Executor<'_, '_>, scope: &TenantScope, ids: &[String]) -
             fresh: Vec::new(),
             next_chunk: start,
             failed: true,
+            deferred: 0,
         }
     } else {
         let next_chunk = next_chunk_of(start, scanned, chunk_count, fresh.len());
+        let scanned_ids: usize = order.iter().take(scanned).map(|chunk| chunk.len()).sum();
+        let deferred = ids.len().saturating_sub(scanned_ids);
+        if deferred > 0 && fresh.len() < MAX_UNMANAGED_PER_RUN {
+            warn!(deferred, scanned, "discovery lookup cap reached");
+        }
         Lookup {
             fresh,
             next_chunk,
             failed: false,
+            deferred,
         }
     }
 }

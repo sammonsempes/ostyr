@@ -128,11 +128,11 @@ pub fn unmanaged_devices<'a>(
 }
 
 
-/// The alerts of the fresh ids (at most `MAX_UNMANAGED_PER_RUN`, in the given order) plus a flood alert for the rest, and the number of ids left out.
-pub fn alerts_of(scope: &TenantScope, devices: &[Device<'_>], fresh: &[String], now_micros: u64) -> (Vec<Alert>, usize) {
+/// The alerts of the fresh ids (at most `MAX_UNMANAGED_PER_RUN`, in the given order) plus a flood alert for the rest and the `deferred` unscanned ids, and the number left out.
+pub fn alerts_of(scope: &TenantScope, devices: &[Device<'_>], fresh: &[String], deferred: usize, now_micros: u64) -> (Vec<Alert>, usize) {
     let created_micros = now_micros.min(MAX_CREATED_MICROS);
     let by_id: BTreeMap<&str, &Device<'_>> = devices.iter().map(|device| (device.id.as_str(), device)).collect();
-    let omitted = fresh.len().saturating_sub(MAX_UNMANAGED_PER_RUN);
+    let omitted = fresh.len().saturating_sub(MAX_UNMANAGED_PER_RUN) + deferred;
     let mut alerts: Vec<Alert> = fresh
         .iter()
         .take(MAX_UNMANAGED_PER_RUN)
@@ -157,7 +157,7 @@ pub fn unmanaged_alerts(
 ) -> (Vec<Alert>, Skipped) {
     let (devices, mut skipped) = unmanaged_devices(scope, candidates, hints, inventory, known);
     let ids: Vec<String> = devices.iter().map(|device| device.id.clone()).collect();
-    let (alerts, omitted) = alerts_of(scope, &devices, &ids, now_micros);
+    let (alerts, omitted) = alerts_of(scope, &devices, &ids, 0, now_micros);
     skipped.omitted = omitted;
     (alerts, skipped)
 }
@@ -176,8 +176,10 @@ pub async fn raise_unmanaged_alerts(
     let (devices, mut skipped) = unmanaged_devices(scope, candidates, hints, inventory, known);
     let ids: Vec<String> = devices.iter().map(|device| device.id.clone()).collect();
     let lookup = scan(exec, scope, &ids).await;
-    let (alerts, omitted) = alerts_of(scope, &devices, &lookup.fresh, now_micros);
+    let (alerts, omitted) = alerts_of(scope, &devices, &lookup.fresh, lookup.deferred, now_micros);
     skipped.omitted = omitted;
+    skipped.deferred = lookup.deferred;
+    skipped.lookup_failed = lookup.failed;
     let stored = store_unmanaged_alerts(exec, scope, &alerts).await;
     if !lookup.failed && stored.failed == 0 {
         write_cursor(exec, scope, lookup.next_chunk).await;

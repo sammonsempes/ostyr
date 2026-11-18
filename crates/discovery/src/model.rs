@@ -288,12 +288,13 @@ pub struct Device<'a> {
 }
 
 
-/// What the already-alerted lookup learned: the ids without a stored alert in scan order, the chunk the next run starts at, and whether a query failed.
+/// What the already-alerted lookup learned: the ids without a stored alert in scan order, the chunk the next run starts at, whether a query failed, and the ids left unscanned.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lookup {
     pub fresh: Vec<String>,
     pub next_chunk: usize,
     pub failed: bool,
+    pub deferred: usize,
 }
 
 
@@ -315,6 +316,8 @@ pub struct Skipped {
     pub known: usize,
     pub managed: usize,
     pub omitted: usize,
+    pub deferred: usize,
+    pub lookup_failed: bool,
 }
 
 
