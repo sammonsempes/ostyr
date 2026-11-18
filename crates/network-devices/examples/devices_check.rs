@@ -12,7 +12,7 @@ use network_devices::load::load_devices;
 use network_devices::model::Device;
 use network_devices::plan::polling_plan;
 use std::error::Error;
-use std::io::{stdout, Write};
+use std::io::{stderr, stdout, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,6 +61,10 @@ async fn write_cmdb(module_file: &str, devices: &[Device]) -> Result<usize, Box<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_writer(stderr)
+        .try_init()
+        .map_err(|error| error.to_string())?;
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let (directory, module) = match arguments.as_slice() {
         [directory] => Ok((directory, None)),
