@@ -22,6 +22,10 @@ pub const MAX_CREDENTIAL_BYTES: u64 = 1024;
 pub const DIGEST_CHARS: usize = 16;
 
 
+/// Transient refusals named per round; the others are only counted.
+pub const TRANSIENT_BUDGET: usize = 10;
+
+
 pub const GZIP_SUFFIX: &str = ".gz";
 
 
@@ -155,20 +159,34 @@ pub fn process_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> O
 }
 
 
-/// Objects past `max_objects_per_run` attempts are not even looked up this round and count as `deferred`.
+/// A permanent refusal is always named and counts against `max_objects_per_run`; a transient one only counts in `transient_refused`, and is named up to `TRANSIENT_BUDGET`.
+pub fn refuse(mut report: FetchReport, object: &ListedObject, refusal: Refusal) -> FetchReport {
+    let digest = key_digest(&object.key);
+    if permanent_reason(&refusal).is_some() {
+        report.permanent_refused += 1;
+        warn!("object refused: key digest {digest}, {refusal:?}");
+        report.refused.push((digest, refusal));
+    } else {
+        report.transient_refused += 1;
+        if report.transient_refused <= TRANSIENT_BUDGET {
+            warn!("object refused: key digest {digest}, {refusal:?}");
+            report.refused.push((digest, refusal));
+        }
+    }
+    report
+}
+
+
+/// Loaded and permanently refused objects count against `max_objects_per_run`, so unreadable objects never starve the readable ones behind them; the rest is `deferred` and not looked up.
 pub fn handle_object(mut report: FetchReport, run: &SourceRun<'_>, object: &ListedObject, now: u64) -> FetchReport {
-    if report.loaded + report.refused.len() >= run.source.max_objects_per_run {
+    if report.loaded + report.permanent_refused >= run.source.max_objects_per_run {
         report.deferred += 1;
     } else {
         match process_object(run, object, now) {
             ObjectOutcome::Loaded => report.loaded += 1,
             ObjectOutcome::AlreadyLoaded => report.already_loaded += 1,
             ObjectOutcome::AlreadyRefused => report.already_refused += 1,
-            ObjectOutcome::Refused(refusal) => {
-                let digest = key_digest(&object.key);
-                warn!("object refused: key digest {digest}, {refusal:?}");
-                report.refused.push((digest, refusal));
-            }
+            ObjectOutcome::Refused(refusal) => report = refuse(report, object, refusal),
         }
     }
     report
@@ -211,6 +229,8 @@ pub fn merge_reports(mut total: FetchReport, found: FetchReport) -> FetchReport 
     total.loaded += found.loaded;
     total.deferred += found.deferred;
     total.incomplete_listings += found.incomplete_listings;
+    total.permanent_refused += found.permanent_refused;
+    total.transient_refused += found.transient_refused;
     total.refused.extend(found.refused);
     total.failed_sources.extend(found.failed_sources);
     total

@@ -4,7 +4,7 @@ mod types;
 
 use cloud_cost::fetch::{
     fetch_new, fetch_source, gunzip_capped, key_digest, load_class, merge_reports, parse_credentials, read_credentials, DIGEST_CHARS,
-    MAX_CREDENTIAL_BYTES,
+    MAX_CREDENTIAL_BYTES, TRANSIENT_BUDGET,
 };
 use cloud_cost::fetch_error::{FetchError, HttpClass, HttpFailure, LedgerFailure, Refusal};
 use cloud_cost::fetch_model::{
@@ -69,6 +69,9 @@ const STATUS_FORBIDDEN: u16 = 403;
 
 
 const THREE: usize = 3;
+
+
+const UNREADABLE: usize = 15;
 
 
 const IDENTITY_FIELDS: usize = 4;
@@ -609,6 +612,24 @@ fn the_per_run_cap_defers_the_rest_and_the_page_cap_is_reported() -> TestResult 
         .insert("again".to_owned(), ok(page(&[entry("p/a.csv", "e")], Some("again")).as_bytes()));
     let truncated = round(&rig, &settings(&rig, vec![source("main", "acme")]), &endless, &Limits::default());
     assert_eq!(truncated.incomplete_listings, 1);
+    Ok(())
+}
+
+
+#[test]
+fn unreadable_objects_never_starve_a_readable_one() -> TestResult {
+    let rig = rig()?;
+    let mut capped = source("main", "acme");
+    capped.max_objects_per_run = 1;
+    let keys: Vec<String> = (0..UNREADABLE).map(|number| format!("p/a{number:02}.csv")).collect();
+    let mut entries: Vec<(&str, &str, Reply)> = keys.iter().map(|key| (key.as_str(), "e", status(STATUS_FORBIDDEN, MARKER))).collect();
+    entries.push(("p/z.csv", "e", ok(january("acct").as_bytes())));
+    entries.push(("p/zz.csv", "e", ok(january("acct").as_bytes())));
+    let fake = with_objects(&entries, None);
+    let report = round(&rig, &settings(&rig, vec![capped]), &fake, &Limits::default());
+    assert_eq!((report.loaded, report.deferred, report.permanent_refused), (1, 1, 0));
+    assert_eq!((report.transient_refused, report.refused.len()), (UNREADABLE, TRANSIENT_BUDGET));
+    assert!(report.refused.iter().all(|(_, reason)| *reason == Refusal::Status(STATUS_FORBIDDEN)));
     Ok(())
 }
 

@@ -137,6 +137,8 @@ pub struct FetchReport {
     pub loaded: usize,
     pub deferred: usize,
     pub incomplete_listings: usize,
+    pub permanent_refused: usize,
+    pub transient_refused: usize,
     pub refused: Vec<(String, Refusal)>,
     pub failed_sources: Vec<(String, FetchError)>,
 }
