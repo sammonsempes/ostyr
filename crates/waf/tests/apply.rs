@@ -23,7 +23,8 @@ use std::time::Duration;
 use waf::admin::open_admin_directory;
 use waf::apply::{
     applied_state, check_settings, check_start_only, config_error, config_id, discard, file_trusted, judge_program, late_audit, load_trusted_routes,
-    load_trusted_settings, load_trusted_settings_file, open_apply, path_text_ok, refused_text, render_applied, render_applied_capped,
+    load_trusted_settings, load_trusted_settings_file, open_apply, open_apply_audited, path_text_ok, refused_text, render_applied,
+    render_applied_capped, start_refusal,
 };
 use waf::error::{DeliverError, OpenError, WafError};
 use waf::model::{Applied, ApplySettings, CommandStatus, Refusal};
@@ -1292,5 +1293,141 @@ fn an_untrusted_routes_file_refuses_the_start_and_a_reload_keeps_the_old_routes_
     assert_eq!(current_config(&engine).json, old);
     assert_eq!(calls(&fixture).len(), before);
     assert!(fs::read_to_string(audit)?.contains(ROUTES_FILE_TEXT));
+    Ok(())
+}
+
+
+const CA_ROOT_FILE_TEXT: &str = "ca_root_file must be a regular file";
+
+
+const CA_ROOT_DIRECTORY_TEXT: &str = "ca_root_file directory must be absolute";
+
+
+const CA_ROUTES_PREFIX: &str = "tls:\n  issuer: acme\n  directory: https://acme.example.test/d\n  email: ops@example.test\n  ca_root_file: ";
+
+
+const CA_ROUTES_SUFFIX: &str = "\nroutes:\n  - hosts: [a.test]\n    backends: [\"127.0.0.1:9001\"]\n";
+
+
+fn ca_fixture() -> Result<(Fixture, PathBuf), Box<dyn Error>> {
+    let fixture = fixture("")?;
+    let directory = fixture.dir.path().join("ca");
+    fs::create_dir(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let root = directory.join("root.pem");
+    fs::copy(CA_PEM, &root)?;
+    fs::write(&fixture.routes, format!("{CA_ROUTES_PREFIX}{}{CA_ROUTES_SUFFIX}", root.to_string_lossy()))?;
+    Ok((fixture, root))
+}
+
+
+fn audit_lines(fixture: &Fixture) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(fs::read_to_string(fixture.dir.path().join("audit.log"))?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+
+#[test]
+fn a_ca_root_file_is_judged_like_the_routes_file() -> Result<(), Box<dyn Error>> {
+    let (fixture, root) = ca_fixture()?;
+    let settings = settings_of(&fixture);
+    assert!(render_applied(&settings, 0).is_ok());
+    fs::set_permissions(&root, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    assert!(render_applied(&settings, 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_FILE_TEXT)));
+    fs::set_permissions(&root, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let real = root.with_file_name("real.pem");
+    fs::rename(&root, &real)?;
+    symlink(&real, &root)?;
+    assert!(render_applied(&settings, 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_FILE_TEXT)));
+    fs::remove_file(&root)?;
+    fs::rename(&real, &root)?;
+    assert!(render_applied(&settings, 0).is_ok());
+    let directory = root.parent().ok_or("no parent")?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(GROUP_WRITABLE_DIRECTORY))?;
+    assert!(render_applied(&settings, 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_DIRECTORY_TEXT)));
+    assert!(!file_trusted(REGULAR_FILE_MODE, FOREIGN_OWNER, RUNNING_USER));
+    assert!(file_trusted(REGULAR_FILE_MODE, 0, RUNNING_USER));
+    Ok(())
+}
+
+
+#[test]
+fn the_owner_predicate_takes_the_euid_it_is_given() -> Result<(), Box<dyn Error>> {
+    assert!(file_trusted(REGULAR_FILE_MODE, FOREIGN_OWNER, FOREIGN_OWNER));
+    assert!(!file_trusted(REGULAR_FILE_MODE, FOREIGN_OWNER, RUNNING_USER));
+    assert!(!file_trusted(REGULAR_FILE_MODE, RUNNING_USER, FOREIGN_OWNER));
+    assert!(file_trusted(REGULAR_FILE_MODE, 0, FOREIGN_OWNER));
+    Ok(())
+}
+
+
+#[test]
+fn a_reload_with_an_untrusted_ca_root_keeps_the_old_configuration_and_is_audited() -> Result<(), Box<dyn Error>> {
+    let (fixture, root) = ca_fixture()?;
+    let (engine, _audit) = engine_of(&fixture)?;
+    let before = calls(&fixture).len();
+    let old = current_config(&engine).json.clone();
+    fs::set_permissions(&root, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    fs::write(&root, "")?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains(CA_ROOT_FILE_TEXT)));
+    assert_eq!(current_config(&engine).json, old);
+    assert_eq!(calls(&fixture).len(), before);
+    assert!(audit_lines(&fixture)?.last().is_some_and(|line| line.contains("denied")));
+    Ok(())
+}
+
+
+#[test]
+fn a_start_refused_for_a_bad_file_writes_one_denied_entry_and_never_reaches_caddy() -> Result<(), Box<dyn Error>> {
+    let routes = fixture(ONE_ROUTE)?;
+    fs::set_permissions(&routes.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    let (settings, _root) = ca_fixture()?;
+    fs::set_permissions(&settings.settings_file, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    let (ca, root) = ca_fixture()?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    let texts = [(&routes, ROUTES_FILE_TEXT), (&settings, SETTINGS_FILE_TEXT), (&ca, CA_ROOT_FILE_TEXT)];
+    texts.iter().try_for_each(|(fixture, text)| -> Result<(), Box<dyn Error>> {
+        assert!(matches!(try_open(fixture)?.err(), Some(OpenError::Config(_))));
+        let lines = audit_lines(fixture)?;
+        assert_eq!(lines.len(), 1);
+        assert!(lines
+            .iter()
+            .all(|line| line.contains("denied") && line.contains("refused") && line.contains(text)));
+        assert!(calls(fixture).is_empty());
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_refusal_at_start_is_returned_even_when_its_audit_fails() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    let failure = open_apply(&fixture.settings_file, fake, Box::new(|_entry| Err(AuditError::LogPoisoned)), context()).err();
+    assert!(matches!(failure, Some(OpenError::Config(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_sink_that_cannot_open_is_named_with_the_refusal_when_there_is_one() -> Result<(), Box<dyn Error>> {
+    let good = fixture(ONE_ROUTE)?;
+    let bad = fixture(ONE_ROUTE)?;
+    fs::set_permissions(&bad.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    assert!(start_refusal(&good.settings_file).is_none());
+    assert!(start_refusal(&bad.settings_file).is_some());
+    let only_sink = open_apply_audited(&good.settings_file, fake, Err(AuditError::LogPoisoned), context()).err();
+    assert!(matches!(only_sink, Some(OpenError::NoSink(_))));
+    let both = open_apply_audited(&bad.settings_file, fake, Err(AuditError::LogPoisoned), context())
+        .err()
+        .ok_or("opened")?;
+    assert!(matches!(both, OpenError::NoSinkAndRefused { .. }));
+    let text = both.to_string();
+    assert!(text.contains("audit sink") && text.contains(ROUTES_FILE_TEXT));
+    let log = Arc::new(open_file_log(&good.dir.path().join("audit.log"))?);
+    let sink: Box<core_config::types::SharedAuditFn> = Box::new(move |entry| append(&log, entry));
+    assert!(open_apply_audited(&good.settings_file, fake, Ok(sink), context()).is_ok());
     Ok(())
 }
