@@ -9,6 +9,7 @@ pub mod fetch;
 pub mod model;
 pub mod parse;
 pub mod scan;
+pub mod store;
 #[cfg(unix)]
 pub mod walk;
 pub mod watch;
