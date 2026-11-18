@@ -1,13 +1,15 @@
 use crate::canonical::{render_line, restrict_parameters, seal};
 use crate::error::AuditError;
 use crate::model::{NewEntry, Record, GENESIS_HASH};
+#[cfg(unix)]
+use crate::types::{FactsReader, Reopener};
 use crate::verify::{verify, MAX_RECORD_BYTES};
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
-#[cfg(unix)]
-use rustix::io::Errno;
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -113,25 +115,43 @@ pub struct HandleFacts {
     pub owner: u32,
     pub links: u64,
     pub mode: u32,
+    pub length: u64,
 }
 
 
 #[cfg(unix)]
-pub fn handle_facts(metadata: &Metadata) -> HandleFacts {
-    HandleFacts {
+pub fn handle_facts(file: &File) -> io::Result<HandleFacts> {
+    file.metadata().map(|metadata| HandleFacts {
         regular: metadata.file_type().is_file(),
         owner: metadata.uid(),
         links: metadata.nlink(),
         mode: metadata.mode(),
-    }
+        length: metadata.len(),
+    })
+}
+
+
+/// The two system calls of an anchored open, injected so tests can report any length or fail the reopen.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+pub struct Opener {
+    pub facts: FactsReader,
+    pub reopen: Reopener,
 }
 
 
 #[cfg(unix)]
-pub fn judge_opened(file: File) -> Result<File, AuditError> {
-    file.metadata()
+pub const SYSTEM_OPENER: Opener = Opener {
+    facts: handle_facts,
+    reopen: open_with,
+};
+
+
+#[cfg(unix)]
+pub fn judge_opened(file: File, opener: &Opener) -> Result<File, AuditError> {
+    (opener.facts)(&file)
         .map_err(AuditError::Io)
-        .and_then(|metadata| judge_handle(&handle_facts(&metadata), rustix::process::geteuid().as_raw()))
+        .and_then(|facts| judge_handle(&facts, rustix::process::geteuid().as_raw()))
         .map(|()| file)
 }
 
@@ -158,32 +178,48 @@ pub fn judge_handle(facts: &HandleFacts, effective_uid: u32) -> Result<(), Audit
 
 
 #[cfg(unix)]
-pub fn open_nonblocking(path: &Path) -> Result<File, AuditError> {
-    let flags = OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    open_with(path, flags)
+pub fn open_with(path: &Path, flags: OFlags) -> Result<File, AuditError> {
+    Ok(rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR)
+        .map(File::from)
+        .map_err(io::Error::from)?)
 }
 
 
+/// Opens `O_PATH` (no driver `open` runs), judges the anchor by `fstat`, then reopens the regular file through `/proc/self/fd` and judges it again.
 #[cfg(unix)]
-pub fn open_with(path: &Path, flags: OFlags) -> Result<File, AuditError> {
-    rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR).map(File::from).map_err(|errno| {
-        if errno == Errno::LOOP {
-            AuditError::SymlinkRefused
-        } else {
-            AuditError::Io(errno.into())
-        }
+pub fn open_anchored(path: &Path, flags: OFlags, opener: &Opener) -> Result<File, AuditError> {
+    let anchor = open_with(path, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC)?;
+    let symlink = anchor.metadata()?.file_type().is_symlink();
+    if symlink {
+        Err(AuditError::SymlinkRefused)
+    } else {
+        judge_opened(anchor, opener)
+            .and_then(|judged| reopen_through_proc(&judged, flags, opener))
+            .and_then(|reopened| judge_opened(reopened, opener))
+    }
+}
+
+
+/// A missing `/proc` is a fixed error, never a `NotFound` that `open_checked` would take for a missing log.
+#[cfg(unix)]
+pub fn reopen_through_proc(anchor: &File, flags: OFlags, opener: &Opener) -> Result<File, AuditError> {
+    (opener.reopen)(Path::new(&format!("/proc/self/fd/{}", anchor.as_raw_fd())), flags).map_err(|error| match error {
+        AuditError::Io(cause) if cause.kind() == io::ErrorKind::NotFound => AuditError::ProcUnavailable,
+        other => other,
     })
 }
 
 
-/// Read-only open for verify and export: same flags, no creation, same judgement of the handle.
+/// Read-only open for verify and export: same anchor, no creation, same judgement of the handle.
 #[cfg(unix)]
 pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
-    open_with(
-        path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
-    )
-    .and_then(judge_opened)
+    open_read_with(path, &SYSTEM_OPENER)
+}
+
+
+#[cfg(unix)]
+pub fn open_read_with(path: &Path, opener: &Opener) -> Result<File, AuditError> {
+    open_anchored(path, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC, opener)
 }
 
 
@@ -193,9 +229,25 @@ pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
 }
 
 
+/// Creates a new file exclusively (a name that does not exist yet cannot be a device or a link) and judges it.
 #[cfg(unix)]
-pub fn open_checked(path: &Path) -> Result<File, AuditError> {
-    open_nonblocking(path).and_then(judge_opened)
+pub fn create_new(path: &Path, opener: &Opener) -> Result<File, AuditError> {
+    let flags =
+        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    open_with(path, flags).and_then(|file| judge_opened(file, opener))
+}
+
+
+#[cfg(unix)]
+pub fn open_checked(path: &Path, opener: &Opener) -> Result<File, AuditError> {
+    match open_anchored(
+        path,
+        OFlags::RDWR | OFlags::APPEND | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        opener,
+    ) {
+        Err(AuditError::Io(error)) if error.kind() == io::ErrorKind::NotFound => create_new(path, opener),
+        other => other,
+    }
 }
 
 
@@ -206,8 +258,25 @@ pub fn open_checked(path: &Path) -> Result<File, AuditError> {
 
 
 /// Opens (creating if needed) an append-only file without following a link or blocking, judges the handle, verifies its chain and continues it.
+#[cfg(unix)]
 pub fn open_file_log(path: &Path) -> Result<AuditLog<File>, AuditError> {
-    let file = open_checked(path)?;
+    open_file_log_with(path, &SYSTEM_OPENER)
+}
+
+
+#[cfg(unix)]
+pub fn open_file_log_with(path: &Path, opener: &Opener) -> Result<AuditLog<File>, AuditError> {
+    open_checked(path, opener).and_then(continue_log)
+}
+
+
+#[cfg(not(unix))]
+pub fn open_file_log(path: &Path) -> Result<AuditLog<File>, AuditError> {
+    open_checked(path).and_then(continue_log)
+}
+
+
+pub fn continue_log(file: File) -> Result<AuditLog<File>, AuditError> {
     let report = verify(BufReader::new(&file), None)?;
     Ok(new_log(file, &report.head, sync_file))
 }

@@ -8,8 +8,12 @@ mod types;
 use core_audit::cli::sample_entry;
 use core_audit::cli::{export_file, verify_file};
 use core_audit::error::AuditError;
-use core_audit::log::{append_declared, check_private, handle_facts, judge_handle, open_file_log, owner_only, HandleFacts};
+use core_audit::log::{
+    append_declared, check_private, create_new, handle_facts, judge_handle, open_file_log, open_file_log_with, open_read_with, owner_only,
+    HandleFacts, Opener, SYSTEM_OPENER,
+};
 use core_audit::verify::{verify_capped, MAX_RECORD_BYTES};
+use rustix::fs::OFlags;
 use std::fs;
 use std::io::Cursor;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -40,12 +44,16 @@ const PRIVATE_MODE: u32 = 0o100_600;
 const TWO_LINKS: u64 = 2;
 
 
+const PLAIN_LENGTH: u64 = 3;
+
+
 fn facts() -> HandleFacts {
     HandleFacts {
         regular: true,
         owner: OWN_UID,
         links: 1,
         mode: PRIVATE_MODE,
+        length: 0,
     }
 }
 
@@ -88,9 +96,9 @@ fn a_symlink_is_refused_whatever_it_points_at() -> TestResult {
 
 
 #[test]
-fn a_directory_or_a_missing_parent_is_an_io_error() -> TestResult {
+fn a_directory_is_refused_and_a_missing_parent_is_an_io_error() -> TestResult {
     let dir = tempdir()?;
-    assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
+    assert!(matches!(open_file_log(dir.path()), Err(AuditError::NotRegularFile)));
     assert!(matches!(
         open_file_log(&dir.path().join("absent").join("audit.log")),
         Err(AuditError::Io(_))
@@ -170,6 +178,112 @@ fn a_large_log_opens_and_verifies_with_no_size_cap() -> TestResult {
 }
 
 
+const REPORTED_LENGTH: u64 = 1 << 40;
+
+
+fn huge_facts(file: &fs::File) -> std::io::Result<HandleFacts> {
+    handle_facts(file).map(|real| HandleFacts {
+        length: REPORTED_LENGTH,
+        ..real
+    })
+}
+
+
+const HUGE_OPENER: Opener = Opener {
+    facts: huge_facts,
+    reopen: SYSTEM_OPENER.reopen,
+};
+
+
+#[test]
+fn a_file_reporting_a_terabyte_opens_and_verifies() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let log = open_file_log(&path)?;
+    (0..THREE_RECORDS).try_for_each(|index| append_declared(&log, sample_entry(index), &["name"]).map(|_| ()))?;
+    drop(log);
+    assert!(REPORTED_LENGTH > MAX_RECORD_BYTES as u64);
+    open_file_log_with(&path, &HUGE_OPENER)?;
+    assert_eq!(
+        core_audit::verify::verify(std::io::BufReader::new(open_read_with(&path, &HUGE_OPENER)?), None)?.records,
+        THREE_RECORDS
+    );
+    Ok(())
+}
+
+
+fn proc_missing(_path: &Path, _flags: OFlags) -> Result<fs::File, AuditError> {
+    Err(AuditError::Io(std::io::ErrorKind::NotFound.into()))
+}
+
+
+const NO_PROC_OPENER: Opener = Opener {
+    facts: handle_facts,
+    reopen: proc_missing,
+};
+
+
+#[test]
+fn a_missing_proc_is_a_fixed_error_and_never_a_creation() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    open_file_log(&path)?;
+    assert!(matches!(open_file_log_with(&path, &NO_PROC_OPENER), Err(AuditError::ProcUnavailable)));
+    assert!(matches!(open_read_with(&path, &NO_PROC_OPENER), Err(AuditError::ProcUnavailable)));
+    assert!(open_file_log_with(&path, &NO_PROC_OPENER)
+        .err()
+        .is_some_and(|error| error.to_string().contains("/proc")));
+    Ok(())
+}
+
+
+fn proc_denied(_path: &Path, _flags: OFlags) -> Result<fs::File, AuditError> {
+    Err(AuditError::Io(std::io::ErrorKind::PermissionDenied.into()))
+}
+
+
+#[test]
+fn another_reopen_failure_keeps_its_kind() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    open_file_log(&path)?;
+    let denied = Opener {
+        facts: handle_facts,
+        reopen: proc_denied,
+    };
+    assert!(matches!(
+        open_file_log_with(&path, &denied),
+        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn creation_is_exclusive() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    create_new(&path, &SYSTEM_OPENER)?;
+    assert!(matches!(
+        create_new(&path, &SYSTEM_OPENER),
+        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_device_named_as_the_log_is_refused_and_a_missing_file_is_created() -> TestResult {
+    assert!(matches!(open_file_log(Path::new("/dev/ptmx")), Err(AuditError::NotRegularFile)));
+    let dir = tempdir()?;
+    let path = dir.path().join("fresh.log");
+    open_file_log(&path)?;
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & GROUP_OTHER, 0);
+    assert!(matches!(open_file_log(&path.join("below")), Err(AuditError::Io(_))));
+    Ok(())
+}
+
+
 #[test]
 fn an_oversized_record_is_refused_before_it_is_written() -> TestResult {
     let dir = tempdir()?;
@@ -237,8 +351,8 @@ fn the_facts_come_from_the_handle() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("plain");
     fs::write(&path, b"abc")?;
-    let found = handle_facts(&fs::File::open(&path)?.metadata()?);
-    assert!(found.regular && found.links == 1);
+    let found = handle_facts(&fs::File::open(&path)?)?;
+    assert!(found.regular && found.links == 1 && found.length == PLAIN_LENGTH);
     Ok(())
 }
 
