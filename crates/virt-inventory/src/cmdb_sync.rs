@@ -322,12 +322,14 @@ pub async fn try_page(
     let outcome = &folded.outcome;
     check_one_conflict_per_triple(outcome)?;
     let applied = apply_outcome(exec, scope, &snapshot, outcome, limits).await?;
+    let refused_conflicts = applied.refused.len();
+    let duplicate_conflicts = applied.duplicates.len();
     Ok(PageResult {
         created: folded.created.len(),
         updated: folded.changed.difference(&folded.created).count(),
-        conflicts: outcome.conflicts.len(),
-        refused_conflicts: applied.refused.len(),
-        duplicate_conflicts: applied.duplicates.len(),
+        conflicts: outcome.conflicts.len().saturating_sub(refused_conflicts + duplicate_conflicts),
+        refused_conflicts,
+        duplicate_conflicts,
         refused_by_cmdb: folded.refused,
         refused_no_room: folded.no_room,
         refused_attribute_room: 0,
@@ -431,12 +433,16 @@ pub async fn sync(
     let refused = report.counters.refused + report.refused_by_cmdb;
     let no_room = report.refused_no_room;
     let no_row_room = report.refused_attribute_room;
+    let refused_conflicts = report.refused_conflicts;
     let cap = cap_label(report.cap.unwrap_or(ASSETS_TABLE));
     if unapplied > 0 || refused > 0 {
         warn!("proxmox cmdb sync: {unapplied} observations unapplied, {refused} refused");
     }
     if no_room + no_row_room > 0 {
         warn!("proxmox cmdb sync: tenant at the {cap} cap, {no_room} creations and {no_row_room} updates refused, inventory incomplete");
+    }
+    if refused_conflicts > 0 {
+        warn!("proxmox cmdb sync: {refused_conflicts} conflicts refused at the open conflict cap");
     }
     Ok(report)
 }
