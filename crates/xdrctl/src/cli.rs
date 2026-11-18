@@ -3,7 +3,10 @@ use crate::assets::{assets_list, assets_show};
 use crate::cases::{cases_list, cases_show};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
-use crate::model::{AlertsCommand, AssetsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report};
+use crate::model::{
+    AlertsCommand, AssetsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report, RiskCommand,
+};
+use crate::risk::{risk_list, risk_show};
 use crate::session::session_path;
 use crate::types::SendFn;
 use clap::Parser;
@@ -61,6 +64,12 @@ pub fn execute(
         Command::Assets {
             action: AssetsCommand::Show { id },
         } => assets_show(&ctx, id),
+        Command::Risk {
+            action: RiskCommand::List { limit, kind },
+        } => risk_list(&ctx, *limit, *kind),
+        Command::Risk {
+            action: RiskCommand::Show { kind, id },
+        } => risk_show(&ctx, *kind, id),
     }
 }
 

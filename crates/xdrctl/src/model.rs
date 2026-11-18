@@ -69,6 +69,10 @@ pub enum Command {
         #[command(subcommand)]
         action: AssetsCommand,
     },
+    Risk {
+        #[command(subcommand)]
+        action: RiskCommand,
+    },
 }
 
 
@@ -124,6 +128,68 @@ pub enum AssetsCommand {
     },
     /// Shows one asset by id.
     Show { id: String },
+}
+
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RiskKind {
+    Host,
+    User,
+}
+
+
+#[derive(Subcommand)]
+pub enum RiskCommand {
+    /// Lists the riskiest hosts and users of the tenant, highest first.
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=500))]
+        limit: Option<u32>,
+        #[arg(long, value_enum)]
+        kind: Option<RiskKind>,
+    },
+    /// Shows the risk score of one host or user.
+    Show {
+        #[arg(value_enum)]
+        kind: RiskKind,
+        id: String,
+    },
+}
+
+
+#[derive(Deserialize)]
+pub struct RiskEntityRow {
+    pub kind: String,
+    pub id: String,
+    pub value: u64,
+    pub contributions_used: u64,
+    pub contributions_dropped: u64,
+}
+
+
+#[derive(Deserialize)]
+pub struct RiskTruncatedView {
+    pub limit: String,
+    pub read: u64,
+    pub cap: u64,
+}
+
+
+#[derive(Deserialize)]
+pub struct RiskListReply {
+    pub computed_at: i64,
+    pub alerts_read: u64,
+    pub informational: u64,
+    pub refused: std::collections::BTreeMap<String, u64>,
+    pub truncated: Option<RiskTruncatedView>,
+    pub entities: Vec<RiskEntityRow>,
+}
+
+
+#[derive(Deserialize)]
+pub struct RiskShowReply {
+    pub computed_at: i64,
+    pub truncated: Option<RiskTruncatedView>,
+    pub entity: RiskEntityRow,
 }
 
 
