@@ -1,6 +1,7 @@
 //! Bounded inventory of Kubernetes pods and nodes from the API list JSON, and the diff between two inventories (spec section 22).
 
 pub mod access;
+pub mod cmdb_sync;
 pub mod diff;
 pub mod error;
 pub mod fetch;
