@@ -6,13 +6,19 @@ use agent_linux::model::{
     Manager, UpdateSettings, DEFAULT_UPDATE_INTERVAL_SECONDS, MAX_UPDATE_DEADLINE_SECONDS, MAX_UPDATE_INTERVAL_SECONDS, MIN_UPDATE_INTERVAL_SECONDS,
 };
 use agent_linux::model::{
+    OsquerySettings, MAX_OSQUERY_DEADLINE_SECONDS, MAX_OSQUERY_MEMORY_BYTES, MAX_OSQUERY_TEMP_BYTES, MAX_OSQUERY_TEMP_TOTAL_BYTES,
+    MIN_OSQUERY_MEMORY_BYTES, MIN_OSQUERY_TEMP_BYTES, MIN_OSQUERY_TEMP_TOTAL_BYTES,
+};
+use agent_linux::model::{
     SensorSettings, SourceSettings, DEFAULT_POLL_MILLIS, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING, MAX_POLL_MILLIS,
     MAX_RESTARTS_PER_HOUR_CEILING, MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING,
 };
 use agent_linux::settings::{
-    invalid_sensor_settings, invalid_settings, invalid_update_settings, open_settings_engine, settings_loader, settings_state, validate_settings,
+    invalid_osquery_settings, invalid_sensor_settings, invalid_settings, invalid_update_settings, open_settings_engine, settings_loader,
+    settings_state, validate_settings,
 };
 use core_audit::log::open_file_log;
+use core_config::load::load_file;
 use core_config::reload::{reload, ReloadOutcome};
 use std::fs;
 use std::path::Path;
@@ -54,7 +60,7 @@ fn a_reload_applies_to_the_shared_settings_and_an_invalid_one_is_refused() -> Te
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, shared, _sensor, _updates) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, shared, _sensor, _updates, _osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(shared.load().poll_millis, DEFAULT_POLL_MILLIS);
     write_settings(&path, &format!("settings:\n  poll_millis: {RELOADED_MILLIS}\n"))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
@@ -187,7 +193,7 @@ fn sensor_bounds_are_refused_at_zero_and_over_their_ceiling_and_a_reload_applies
     ));
     write_settings(&path, "")?;
     let context_again = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, _shared, sensor, _updates) = open_settings_engine(path.clone(), shared_log_audit(&log), context_again)?;
+    let (engine, _shared, sensor, _updates, _osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context_again)?;
     write_settings(&path, "sensor:\n  window_seconds: 7\n")?;
     assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
     assert_eq!(sensor.load().window_seconds, RELOADED_MILLIS);
@@ -205,7 +211,7 @@ fn update_settings_are_validated_and_live_reloaded() -> TestResult {
     write_settings(&path, "")?;
     let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, _shared, _sensor, updates) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, _shared, _sensor, updates, _osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     assert_eq!(updates.load().manager, Manager::None);
     assert_eq!(updates.load().interval_seconds, DEFAULT_UPDATE_INTERVAL_SECONDS);
     write_settings(&path, "updates:\n  manager: dnf\n  interval_seconds: 300\n  deadline_seconds: 9\n")?;
@@ -239,5 +245,104 @@ fn update_settings_are_validated_and_live_reloaded() -> TestResult {
         }),
         vec!["updates.interval_seconds"]
     );
+    Ok(())
+}
+
+
+#[test]
+fn osquery_settings_are_validated_and_live_reloaded() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("agent-linux.yaml");
+    write_settings(&path, "")?;
+    let log = Arc::new(open_file_log(&dir.path().join("audit.log"))?);
+    let context = reload_context(&path, "agent_linux", "tenant", "reload");
+    let (engine, _shared, _sensor, _updates, osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    assert_eq!(osquery.load().as_ref(), &OsquerySettings::default());
+    write_settings(&path, "osquery:\n  deadline_seconds: 9\n")?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Applied { .. }));
+    assert_eq!(osquery.load().deadline_seconds, RELOADED_DEADLINE);
+    for hostile in [
+        "osquery:\n  deadline_seconds: 0\n",
+        "osquery:\n  extra: 1\n",
+        "osquery:\n  max_memory_bytes: 1\n",
+        "osquery:\n  max_temp_bytes: 1\n",
+        "osquery:\n  max_temp_total_bytes: 1\n",
+    ] {
+        write_settings(&path, hostile)?;
+        assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
+        assert_eq!(osquery.load().deadline_seconds, RELOADED_DEADLINE);
+    }
+    for key in ["path", "prlimit_path", "unshare_path", "nsenter_path", "mount_path", "umount_path"] {
+        write_settings(&path, &format!("osquery:\n  {key}: /usr/sbin/reboot\n"))?;
+        let outcome = reload(&engine);
+        assert!(
+            matches!(&outcome, ReloadOutcome::Refused { reason } if reason.contains("osquery") && reason.contains("unknown field")),
+            "{key} {outcome:?}"
+        );
+        assert_eq!(
+            osquery.load().as_ref(),
+            &OsquerySettings {
+                deadline_seconds: RELOADED_DEADLINE,
+                ..OsquerySettings::default()
+            }
+        );
+        assert!(
+            load_file::<agent_linux::model::LinuxFile>(&path)
+                .err()
+                .is_some_and(|error| error.to_string().contains("unknown field")),
+            "{key}"
+        );
+    }
+    let over = OsquerySettings {
+        deadline_seconds: MAX_OSQUERY_DEADLINE_SECONDS + 1,
+        max_memory_bytes: MAX_OSQUERY_MEMORY_BYTES + 1,
+        max_temp_bytes: MAX_OSQUERY_TEMP_BYTES + 1,
+        max_temp_total_bytes: MAX_OSQUERY_TEMP_TOTAL_BYTES + 1,
+    };
+    assert_eq!(
+        invalid_osquery_settings(&over),
+        vec![
+            "osquery.max_memory_bytes",
+            "osquery.max_temp_bytes",
+            "osquery.max_temp_total_bytes",
+            "osquery.deadline_seconds"
+        ]
+    );
+    let low = OsquerySettings {
+        max_memory_bytes: MIN_OSQUERY_MEMORY_BYTES - 1,
+        ..OsquerySettings::default()
+    };
+    assert_eq!(
+        invalid_osquery_settings(&low),
+        vec!["osquery.max_memory_bytes", "osquery.max_temp_total_bytes"]
+    );
+    let low_temp = OsquerySettings {
+        max_temp_bytes: MIN_OSQUERY_TEMP_BYTES - 1,
+        ..OsquerySettings::default()
+    };
+    assert_eq!(invalid_osquery_settings(&low_temp), vec!["osquery.max_temp_bytes"]);
+    let at_bounds = [MIN_OSQUERY_TEMP_BYTES, MAX_OSQUERY_TEMP_BYTES].map(|max_temp_bytes| OsquerySettings {
+        max_temp_bytes,
+        ..OsquerySettings::default()
+    });
+    assert!(at_bounds.iter().all(|settings| invalid_osquery_settings(settings).is_empty()));
+    let low_total = OsquerySettings {
+        max_temp_total_bytes: MIN_OSQUERY_TEMP_TOTAL_BYTES - 1,
+        ..OsquerySettings::default()
+    };
+    assert_eq!(invalid_osquery_settings(&low_total), vec!["osquery.max_temp_total_bytes"]);
+    let total_over_quarter = OsquerySettings {
+        max_memory_bytes: MIN_OSQUERY_MEMORY_BYTES,
+        max_temp_total_bytes: MIN_OSQUERY_TEMP_TOTAL_BYTES + 1,
+        ..OsquerySettings::default()
+    };
+    assert_eq!(invalid_osquery_settings(&total_over_quarter), vec!["osquery.max_temp_total_bytes"]);
+    let quarter_exactly = OsquerySettings {
+        max_memory_bytes: MIN_OSQUERY_MEMORY_BYTES,
+        max_temp_total_bytes: MIN_OSQUERY_TEMP_TOTAL_BYTES,
+        ..OsquerySettings::default()
+    };
+    assert!(invalid_osquery_settings(&quarter_exactly).is_empty());
+    assert!(invalid_osquery_settings(&OsquerySettings::default()).is_empty());
     Ok(())
 }
