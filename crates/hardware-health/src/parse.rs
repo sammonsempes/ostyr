@@ -2,6 +2,7 @@
 
 use crate::error::SmartError;
 use crate::grammar::is_clean_ident;
+use crate::limits::MAX_JSON_NODES;
 use crate::model::{Attribute, Limits, NvmeHealth, Protocol, SmartReport, WhenFailed};
 use serde_json::Value;
 use std::io::Read;
@@ -12,12 +13,50 @@ const FORMAT_VERSION_LEN: usize = 2;
 
 pub fn parse_smartctl<Input: Read>(mut reader: Input, limits: &Limits) -> Result<SmartReport, SmartError> {
     let bytes = read_bounded(&mut reader, limits.max_bytes)?;
+    (json_nodes(&bytes) <= MAX_JSON_NODES)
+        .then_some(())
+        .ok_or(SmartError::TooManyNodes { limit: MAX_JSON_NODES })?;
     let root: Value = serde_json::from_slice(&bytes)?;
     if root.is_object() {
         Ok(assemble(&root, limits))
     } else {
         Err(SmartError::NotAnObject)
     }
+}
+
+
+#[derive(Clone, Copy)]
+struct NodeScan {
+    nodes: usize,
+    in_string: bool,
+    escaped: bool,
+}
+
+
+fn node_step(scan: NodeScan, byte: u8) -> NodeScan {
+    match (scan.in_string, scan.escaped, byte) {
+        (true, true, _) => NodeScan { escaped: false, ..scan },
+        (true, false, b'\\') => NodeScan { escaped: true, ..scan },
+        (true, false, b'"') => NodeScan { in_string: false, ..scan },
+        (true, false, _) => scan,
+        (false, _, b'"') => NodeScan { in_string: true, ..scan },
+        (false, _, b'[' | b'{' | b',') => NodeScan {
+            nodes: scan.nodes + 1,
+            ..scan
+        },
+        (false, _, _) => scan,
+    }
+}
+
+
+/// Counts the arrays, objects and commas outside strings, so a value tree is bounded before `serde_json::Value` builds it.
+pub fn json_nodes(bytes: &[u8]) -> usize {
+    let start = NodeScan {
+        nodes: 0,
+        in_string: false,
+        escaped: false,
+    };
+    bytes.iter().fold(start, |scan, byte| node_step(scan, *byte)).nodes
 }
 
 
