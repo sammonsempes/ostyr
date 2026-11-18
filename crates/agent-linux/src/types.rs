@@ -1,8 +1,9 @@
 use crate::error::CapabilityError;
 use crate::error::IsolationError;
 use crate::error::SensorError;
-use crate::model::{CommandSpec, Failure, Paths, SensorSettings, SourceSettings, UpdateSettings};
+use crate::model::{CommandSpec, Failure, LinuxFile, OsquerySettings, Paths, SensorSettings, SourceSettings, UpdateSettings};
 use arc_swap::ArcSwap;
+use core_config::reload::ReloadEngine;
 use parking_lot::Mutex;
 use patch_inventory::model::Inventory;
 use std::future::Future;
@@ -52,6 +53,13 @@ pub type StatFn = fn(&Path) -> rustix::io::Result<rustix::fs::StatVfs>;
 
 
 pub type SharedUpdates = Arc<ArcSwap<UpdateSettings>>;
+
+
+pub type SharedOsquery = Arc<ArcSwap<OsquerySettings>>;
+
+
+/// A settings engine with the shared handles its subscriber keeps current.
+pub type SettingsEngine = (ReloadEngine<LinuxFile>, SharedSource, SharedSensor, SharedUpdates, SharedOsquery);
 
 
 pub type UpdateFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, SensorError>> + Send>>;

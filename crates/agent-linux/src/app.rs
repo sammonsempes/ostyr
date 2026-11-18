@@ -59,7 +59,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
         .is_absolute()
         .then_some(())
         .ok_or_else(|| SourceError::NotAbsolute(file.systemctl_path.clone()))?;
-    let (engine, shared, sensor_settings, update_settings) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
+    let (engine, shared, sensor_settings, update_settings, _osquery) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
     let reloadable = Arc::new(engine);
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
     let _signals = keep_signals(Arc::clone(&reloadable))?;

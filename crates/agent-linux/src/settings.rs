@@ -1,10 +1,11 @@
 use crate::error::SourceError;
 use crate::model::{
-    LinuxFile, SensorSettings, SourceSettings, UpdateSettings, MAX_DNS_RESOLVERS, MAX_ENDPOINTS, MAX_LINES_PER_POLL_CEILING, MAX_LINE_BYTES_CEILING,
-    MAX_POLL_MILLIS, MAX_RESTARTS_PER_HOUR_CEILING, MAX_SENSOR_INTERVAL_SECONDS, MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING,
-    MAX_UPDATE_DEADLINE_SECONDS, MAX_UPDATE_INTERVAL_SECONDS, MIN_UPDATE_INTERVAL_SECONDS, SETTINGS_SECTION,
+    LinuxFile, OsquerySettings, SensorSettings, SourceSettings, UpdateSettings, MAX_DNS_RESOLVERS, MAX_ENDPOINTS, MAX_LINES_PER_POLL_CEILING,
+    MAX_LINE_BYTES_CEILING, MAX_OSQUERY_DEADLINE_SECONDS, MAX_POLL_MILLIS, MAX_RESTARTS_PER_HOUR_CEILING, MAX_SENSOR_INTERVAL_SECONDS,
+    MAX_SENSOR_WINDOW_SECONDS, MAX_SPOOL_BYTES_CEILING, MAX_UPDATE_DEADLINE_SECONDS, MAX_UPDATE_INTERVAL_SECONDS, MIN_UPDATE_INTERVAL_SECONDS,
+    SETTINGS_SECTION,
 };
-use crate::types::{SharedSensor, SharedSource, SharedUpdates};
+use crate::types::{SettingsEngine, SharedOsquery, SharedSensor, SharedSource, SharedUpdates};
 use arc_swap::ArcSwap;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -74,6 +75,21 @@ pub fn invalid_update_settings(settings: &UpdateSettings) -> Vec<&'static str> {
 }
 
 
+/// Names of the osquery settings out of range: a relative path, a zero deadline or one above its ceiling.
+pub fn invalid_osquery_settings(settings: &OsquerySettings) -> Vec<&'static str> {
+    [
+        ("osquery.path", !settings.path.is_absolute()),
+        (
+            "osquery.deadline_seconds",
+            settings.deadline_seconds == 0 || settings.deadline_seconds > MAX_OSQUERY_DEADLINE_SECONDS,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, invalid)| invalid.then_some(name))
+    .collect()
+}
+
+
 /// An address no peer can have: unspecified, loopback, multicast or the IPv4 broadcast, an IPv4-mapped IPv6 form judged as the IPv4 address.
 pub fn unusable_address(address: &IpAddr) -> bool {
     let canonical = address.to_canonical();
@@ -116,6 +132,7 @@ pub fn validate_file(file: &LinuxFile) -> Result<(), SourceError> {
         .into_iter()
         .chain(invalid_isolation_settings(file))
         .chain(invalid_update_settings(&file.updates))
+        .chain(invalid_osquery_settings(&file.osquery))
         .collect();
     if invalid.is_empty() {
         Ok(())
@@ -141,9 +158,13 @@ pub fn settings_state(file: &LinuxFile) -> ConfigState {
         ("sensor_max_restarts_per_hour", file.sensor.max_restarts_per_hour),
         ("updates_interval_seconds", file.updates.interval_seconds),
         ("updates_deadline_seconds", file.updates.deadline_seconds),
+        ("osquery_deadline_seconds", file.osquery.deadline_seconds),
     ])
     .map(|(name, value)| (format!("{SETTINGS_SECTION}.{name}"), value.to_string()))
-    .chain([(format!("{SETTINGS_SECTION}.updates_manager"), format!("{:?}", file.updates.manager))])
+    .chain([
+        (format!("{SETTINGS_SECTION}.updates_manager"), format!("{:?}", file.updates.manager)),
+        (format!("{SETTINGS_SECTION}.osquery_path"), file.osquery.path.display().to_string()),
+    ])
     .collect()
 }
 
@@ -153,7 +174,7 @@ pub fn settings_loader(path: PathBuf) -> Box<LoaderFn<LinuxFile>> {
 }
 
 
-pub fn settings_subscriber(shared: SharedSource, sensor: SharedSensor, updates: SharedUpdates) -> Subscriber<LinuxFile> {
+pub fn settings_subscriber(shared: SharedSource, sensor: SharedSensor, updates: SharedUpdates, osquery: SharedOsquery) -> Subscriber<LinuxFile> {
     Subscriber {
         section: SETTINGS_SECTION.to_owned(),
         validate: Box::new(|candidate| validate_file(candidate).map_err(BoxError::from)),
@@ -161,26 +182,29 @@ pub fn settings_subscriber(shared: SharedSource, sensor: SharedSensor, updates: 
             shared.store(Arc::new(applied.settings.clone()));
             sensor.store(Arc::new(applied.sensor.clone()));
             updates.store(Arc::new(applied.updates.clone()));
+            osquery.store(Arc::new(applied.osquery.clone()));
         }),
     }
 }
 
 
 /// The first load must be valid; later reloads are validated, audited and swapped atomically, an invalid file keeps the old settings.
-pub fn open_settings_engine(
-    path: PathBuf,
-    audit: Box<SharedAuditFn>,
-    context: ReloadContext,
-) -> Result<(ReloadEngine<LinuxFile>, SharedSource, SharedSensor, SharedUpdates), SourceError> {
+pub fn open_settings_engine(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadContext) -> Result<SettingsEngine, SourceError> {
     let engine = open_engine(settings_loader(path), settings_state, Vec::new(), audit, context)?;
     let first = current_config(&engine);
     validate_file(&first)?;
     let shared: SharedSource = Arc::new(ArcSwap::from_pointee(first.settings.clone()));
     let sensor: SharedSensor = Arc::new(ArcSwap::from_pointee(first.sensor.clone()));
     let updates: SharedUpdates = Arc::new(ArcSwap::from_pointee(first.updates.clone()));
+    let osquery: SharedOsquery = Arc::new(ArcSwap::from_pointee(first.osquery.clone()));
     let subscribed = ReloadEngine {
-        subscribers: vec![settings_subscriber(Arc::clone(&shared), Arc::clone(&sensor), Arc::clone(&updates))],
+        subscribers: vec![settings_subscriber(
+            Arc::clone(&shared),
+            Arc::clone(&sensor),
+            Arc::clone(&updates),
+            Arc::clone(&osquery),
+        )],
         ..engine
     };
-    Ok((subscribed, shared, sensor, updates))
+    Ok((subscribed, shared, sensor, updates, osquery))
 }
