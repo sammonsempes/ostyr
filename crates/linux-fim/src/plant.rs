@@ -166,16 +166,30 @@ pub fn list_first(candidates: &[&str], owner: u32, deadline: Duration) -> std::i
 }
 
 
-/// The first candidate that exists; a candidate that fails `check_binary` is an error, never "missing" and never skipped.
+/// The first candidate that passes `check_binary`; one that fails it is skipped with a warning and never run, and when none passes the first failure is the error.
 pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Option<&'a str>> {
-    candidates
-        .iter()
-        .find_map(|path| match check_binary(path, owner) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => Some(Err(error)),
-            Ok(()) => Some(Ok(*path)),
-        })
-        .transpose()
+    let mut first_failure: Option<std::io::Error> = None;
+    let found = candidates.iter().find_map(|path| match check_binary(path, owner) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            log_skipped_candidate(path, &error);
+            first_failure.get_or_insert(error);
+            None
+        }
+        Ok(()) => Some(*path),
+    });
+    match (found, first_failure) {
+        (Some(path), _) => Ok(Some(path)),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(None),
+    }
+}
+
+
+/// Logs that a candidate was refused and not run.
+pub fn log_skipped_candidate(path: &str, error: &std::io::Error) {
+    let reason = error.to_string();
+    tracing::warn!(path, reason, "tetra candidate skipped");
 }
 
 
@@ -256,11 +270,23 @@ pub fn read_listing(mut child: Child, deadline: Duration) -> std::io::Result<Str
 }
 
 
-/// Kills the child's whole group and the child, waits for it, logging a failure of any step.
+/// Kills the child's whole group and the child, waits for it, logging a failure of any step other than "already gone".
 pub fn reap(child: &mut Child) {
-    let group = kill_process_group(Pid::from_child(child), Signal::KILL).map_err(std::io::Error::from);
-    let own = child.kill().and_then(|()| child.wait()).map(drop);
-    [group.err(), own.err()].iter().flatten().for_each(log_reap_failure);
+    let group = group_outcome(kill_process_group(Pid::from_child(child), Signal::KILL));
+    let own = own_outcome(child.kill().and_then(|()| child.wait()).map(drop));
+    [group, own].iter().flatten().for_each(log_reap_failure);
+}
+
+
+/// A group with no member left (`ESRCH`) is success; any other errno is a failure.
+pub fn group_outcome(result: Result<(), Errno>) -> Option<std::io::Error> {
+    result.err().filter(|errno| *errno != Errno::SRCH).map(std::io::Error::from)
+}
+
+
+/// Killing a child that was already reaped (`InvalidInput`) is success; any other error is a failure.
+pub fn own_outcome(result: std::io::Result<()>) -> Option<std::io::Error> {
+    result.err().filter(|error| error.kind() != std::io::ErrorKind::InvalidInput)
 }
 
 
@@ -487,8 +513,15 @@ pub fn fresh_token(ops: &PlantOps, owner_uid: u32, parent: &OwnedFd, leaf: &str,
     (ops.claim)(&handle, owner_uid, FILE_MODE)
         .map_err(PlantRefusal::from)
         .and_then(|()| write_synced(&handle, content))
-        .or_else(|refusal| remove_partial(parent, leaf, &handle).map_err(PlantRefusal::from).and(Err(refusal)))
+        .or_else(|refusal| first_refusal(refusal, remove_partial(parent, leaf, &handle)))
         .and_then(|()| fstat(&handle).map_err(PlantRefusal::from))
+}
+
+
+/// The refusal that started the cleanup stays the error; a failed cleanup is only logged.
+pub fn first_refusal(refusal: PlantRefusal, cleanup: Result<(), Errno>) -> Result<(), PlantRefusal> {
+    cleanup.err().iter().for_each(log_cleanup_failure);
+    Err(refusal)
 }
 
 
@@ -631,10 +664,10 @@ pub fn first_cause(failure: PlantError, cleanup: Result<(), Errno>) -> Result<()
 }
 
 
-/// Logs that the staged file could not be removed.
+/// Logs that a staged or partial file could not be removed.
 pub fn log_cleanup_failure(errno: &Errno) {
     let reason = errno.to_string();
-    tracing::warn!(reason, "staged file not removed");
+    tracing::warn!(reason, "partial file not removed");
 }
 
 
