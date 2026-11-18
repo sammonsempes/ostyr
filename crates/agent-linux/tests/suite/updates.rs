@@ -18,6 +18,7 @@ use patch_inventory::model::{Limits, SkipReason, Update};
 use patch_inventory::types::SkipCounts;
 use rustix::process::Pid;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -340,7 +341,7 @@ fn errors_map_to_the_outcomes() -> TestResult {
 #[test]
 fn commands_have_fixed_programs_arguments_and_environment() -> TestResult {
     let spec = command("/usr/bin/dnf", &["-q", "check-update"], &[0, DNF_CHECK_UPDATE_AVAILABLE], SMALL_CAP);
-    assert_eq!(spec.arguments, vec!["-q".to_owned(), "check-update".to_owned()]);
+    assert_eq!(spec.arguments, vec![OsString::from("-q"), OsString::from("check-update")]);
     assert_eq!(spec.accepted_codes, vec![0, CODE_AVAILABLE]);
     assert_eq!(spec.max_output, SMALL_CAP);
     assert_eq!(
@@ -357,7 +358,7 @@ fn commands_have_fixed_programs_arguments_and_environment() -> TestResult {
 fn documented(program: &str, arguments: &[&str], codes: &[i32]) -> CommandSpec {
     CommandSpec {
         program: PathBuf::from(program),
-        arguments: arguments.iter().map(|argument| (*argument).to_owned()).collect(),
+        arguments: arguments.iter().map(OsString::from).collect(),
         environment: Some(child_environment()),
         accepted_codes: codes.to_vec(),
         max_output: default_limits().max_bytes as u64,
@@ -802,7 +803,7 @@ fn refused_kill(_: Pid) -> rustix::io::Result<()> {
 async fn the_runner_accepts_only_listed_codes_caps_output_and_enforces_the_deadline() -> TestResult {
     let spec = |program: &str, arguments: &[&str], codes: &[i32], cap: u64| CommandSpec {
         program: PathBuf::from(program),
-        arguments: arguments.iter().map(|argument| (*argument).to_owned()).collect(),
+        arguments: arguments.iter().map(OsString::from).collect(),
         environment: None,
         accepted_codes: codes.to_vec(),
         max_output: cap,
@@ -839,7 +840,7 @@ async fn a_grandchild_holding_the_pipe_is_killed_with_the_group() -> TestResult 
     fs::write(&script, format!("#!/bin/sh\nsleep {LONG_SLEEP_SECONDS} &\nsleep {LONG_SLEEP_SECONDS}\n"))?;
     let spec = CommandSpec {
         program: PathBuf::from("/bin/sh"),
-        arguments: vec![script.display().to_string()],
+        arguments: vec![script.clone().into_os_string()],
         environment: None,
         accepted_codes: vec![0],
         max_output: SMALL_CAP,
