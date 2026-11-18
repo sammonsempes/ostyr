@@ -9,9 +9,12 @@ publish = false
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 csv = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 metrics-ingest = { version = "0.0.0", path = "../metrics-ingest" }
 percent-encoding = "2"
+quick-xml = "0.41"
+rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto"] }
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,10 +23,13 @@ siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 siem-schema = { version = "0.0.0", path = "../siem-schema" }
 thiserror = "2"
 time = { version = "0.3", features = ["parsing"] }
+url = "2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "net", "time"] }
 
 [lints]
 workspace = true

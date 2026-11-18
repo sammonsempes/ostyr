@@ -1035,10 +1035,14 @@ dependencies = [
  "core-config",
  "core-pg",
  "csv",
+ "flate2",
  "log",
  "metrics-ingest",
  "percent-encoding",
+ "quick-xml",
+ "rcgen",
  "rust_decimal",
+ "rusty-s3",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1047,7 +1051,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "ureq 3.5.1",
+ "url",
 ]
 
 [[package]]
