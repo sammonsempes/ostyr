@@ -23,3 +23,8 @@ pub type ClaimFn = fn(&std::os::fd::OwnedFd, u32, rustix::fs::RawMode) -> Result
 /// Called with the held parent and the name of each directory the walk just opened; a test double swaps that name between two steps.
 #[cfg(target_os = "linux")]
 pub type StepFn = fn(&std::os::fd::OwnedFd, &str);
+
+
+/// The text `tetra tracingpolicy list` prints; a test double injects a failure or a fixed listing.
+#[cfg(target_os = "linux")]
+pub type ListFn = fn() -> std::io::Result<String>;

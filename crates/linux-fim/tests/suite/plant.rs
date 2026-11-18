@@ -5,8 +5,8 @@ use linux_fim::error::{CliError, PlantError, PlantRefusal};
 use linux_fim::limits::default_limits;
 use linux_fim::model::{Honeytoken, HoneytokenKind, Limits, PlantReport, PlantedIdentity, Role};
 use linux_fim::plant::{
-    directory_verdict, file_verdict, first_failure, made_verdict, no_step, os_claim, os_ops, os_random, plant_command, plant_role, planted_text,
-    stat_device, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
+    check_unloaded, directory_verdict, file_verdict, first_failure, list_from, loaded_count, made_verdict, no_step, os_claim, os_list_policies,
+    os_ops, os_random, plant_command, plant_role, planted_text, stat_device, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
 };
 use linux_fim::policy::kernel_device;
 use rustix::fs::inotify::{add_watch, init, CreateFlags, WatchFlags};
@@ -103,9 +103,28 @@ fn failing_claim(_handle: &OwnedFd, _uid: u32, _mode: RawMode) -> Result<(), Err
 }
 
 
+const TWO_LOADED: usize = 2;
+
+
+fn nothing_loaded() -> io::Result<String> {
+    Ok("ID NAME STATE\n".to_string())
+}
+
+
+fn some_loaded() -> io::Result<String> {
+    Ok("ID NAME STATE\n1 ostyr-fimt-server enabled\n2 ostyr-fim-server enabled\n3 other enabled\n".to_string())
+}
+
+
+fn failing_list() -> io::Result<String> {
+    Err(io::Error::other("no tetra"))
+}
+
+
 fn ops(root: &Path) -> PlantOps {
     PlantOps {
         root: root.to_path_buf(),
+        list_policies: nothing_loaded,
         ..os_ops()
     }
 }
@@ -829,5 +848,69 @@ fn a_partial_token_replaced_by_another_file_is_left_alone() -> TestResult {
     let report = plant_role(&role(vec![token("/var/.swapped", HoneytokenKind::Canary)]), &default_limits(), &refusing)?;
     assert_eq!(refused_indexes(&report), [0]);
     assert_eq!(fs::read_to_string(real(dir.path(), "/var/.swapped"))?, "other");
+    Ok(())
+}
+
+
+#[test]
+fn planting_is_refused_while_a_policy_is_loaded_and_writes_nothing() -> TestResult {
+    let dir = tree()?;
+    let loaded = PlantOps {
+        list_policies: some_loaded,
+        ..ops(dir.path())
+    };
+    let refused = plant_role(&three_tokens(), &default_limits(), &loaded);
+    assert!(matches!(refused, Err(PlantError::PoliciesLoaded { count: TWO_LOADED })));
+    assert_eq!(fs::read_dir(dir.path())?.count(), 0);
+    let unknown = PlantOps {
+        list_policies: failing_list,
+        ..ops(dir.path())
+    };
+    assert!(matches!(check_unloaded(&unknown), Err(PlantError::PolicyList(_))));
+    assert!(check_unloaded(&ops(dir.path())).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn the_listing_counts_only_ostyr_fim_names() -> TestResult {
+    assert_eq!(loaded_count("1 ostyr-fimt-a enabled\n2 ostyr-other x\n3 ostyr-fimp-b y"), TWO_LOADED);
+    assert_eq!(loaded_count(""), 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_real_listing_runs_the_binary_and_fails_closed() -> TestResult {
+    assert_eq!(list_from("/bin/echo")?, "tracingpolicy list\n");
+    assert!(list_from("/bin/false").is_err());
+    assert_eq!(list_from("/nonexistent/tetra")?, "");
+    assert!(list_from("/").is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_output_rename_leaves_no_staged_file() -> TestResult {
+    let dir = tree()?;
+    fs::create_dir(dir.path().join("planted.tsv"))?;
+    let fixed = PlantOps {
+        fill_random: fixed_random,
+        ..ops(dir.path())
+    };
+    let failed = linux_fim::plant::write_planted(&fixed, &dir.path().join("planted.tsv"), &[]);
+    assert!(failed.is_err());
+    let names: Vec<String> = fs::read_dir(dir.path())?
+        .map(|entry| entry.map(|found| found.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(names, vec!["planted.tsv".to_string()]);
+    Ok(())
+}
+
+
+#[test]
+fn the_os_listing_reads_the_host_without_failing_on_a_missing_tetra() -> TestResult {
+    let listing = os_list_policies();
+    assert!(listing.map_or(true, |text| loaded_count(&text) < usize::MAX));
     Ok(())
 }
