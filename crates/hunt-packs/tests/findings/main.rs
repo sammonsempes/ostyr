@@ -163,6 +163,9 @@ fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
     assert!(MIGRATIONS
         .iter()
         .any(|migration| migration.sql.contains("ON hunt_pack_findings (tenant, window_end, pack_id)")));
+    let dropped = MIGRATIONS.get(FIFTH_INDEX + 1).ok_or("no 0006")?;
+    assert_eq!(dropped.version, "hunt_packs_0006");
+    assert!(dropped.sql.contains("DROP INDEX IF EXISTS hunt_pack_findings_by_end;"));
     Ok(())
 }
 

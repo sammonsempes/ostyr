@@ -13,7 +13,7 @@ use thiserror::Error;
 pub const MIGRATION_NAMESPACE: &str = "hunt_packs";
 
 
-pub const MIGRATIONS: [Migration; 5] = [
+pub const MIGRATIONS: [Migration; 6] = [
     Migration {
         version: "hunt_packs_0001",
         sql: include_str!("../migrations/hunt_packs_0001.sql"),
@@ -33,6 +33,10 @@ pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "hunt_packs_0005",
         sql: include_str!("../migrations/hunt_packs_0005.sql"),
+    },
+    Migration {
+        version: "hunt_packs_0006",
+        sql: include_str!("../migrations/hunt_packs_0006.sql"),
     },
 ];
 
