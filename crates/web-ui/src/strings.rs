@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 110;
+pub const TEXT_COUNT: usize = 129;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -122,6 +122,25 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("asset_truncated", "Some attributes are not shown."),
     ("asset_unreadable", "Unreadable asset."),
     ("asset_back", "Back to the assets"),
+    ("nav_risk", "Risk"),
+    ("title_risk", "Entity risk"),
+    ("title_risk_entity", "Risk of"),
+    ("risk_empty", "No scored entity."),
+    ("risk_unreadable", "Unreadable entity."),
+    ("risk_busy", "Scores are being computed. Retry in a moment."),
+    ("risk_back", "Back to the risk list"),
+    ("risk_truncated", "Scores are partial. Bound reached: {limit}. Read: {read}. Cap: {cap}."),
+    ("risk_limit_alerts", "alerts"),
+    ("risk_limit_contributions", "contributions"),
+    ("risk_limit_entities", "entities"),
+    ("col_risk_entity", "Entity"),
+    ("col_risk_value", "Score"),
+    ("col_risk_used", "Contributions used"),
+    ("col_risk_dropped", "Contributions dropped"),
+    ("risk_kind_all", "All"),
+    ("risk_kind_host", "Hosts"),
+    ("risk_kind_user", "Users"),
+    ("risk_computed", "Computed at"),
 ];
 
 
@@ -239,6 +258,28 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("asset_truncated", "Certains attributs ne sont pas affichés."),
     ("asset_unreadable", "Actif illisible."),
     ("asset_back", "Retour aux actifs"),
+    ("nav_risk", "Risque"),
+    ("title_risk", "Risque des entités"),
+    ("title_risk_entity", "Risque de"),
+    ("risk_empty", "Aucune entité notée."),
+    ("risk_unreadable", "Entité illisible."),
+    ("risk_busy", "Les scores sont en cours de calcul. Réessayez dans un instant."),
+    ("risk_back", "Retour à la liste des risques"),
+    (
+        "risk_truncated",
+        "Scores partiels. Borne atteinte : {limit}. Lus : {read}. Plafond : {cap}.",
+    ),
+    ("risk_limit_alerts", "alertes"),
+    ("risk_limit_contributions", "contributions"),
+    ("risk_limit_entities", "entités"),
+    ("col_risk_entity", "Entité"),
+    ("col_risk_value", "Score"),
+    ("col_risk_used", "Contributions utilisées"),
+    ("col_risk_dropped", "Contributions écartées"),
+    ("risk_kind_all", "Toutes"),
+    ("risk_kind_host", "Machines"),
+    ("risk_kind_user", "Utilisateurs"),
+    ("risk_computed", "Calculé le"),
 ];
 
 

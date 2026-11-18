@@ -4,11 +4,12 @@ use types::TestResult;
 use web_ui::api::{valid_asset_id, valid_case_id};
 use web_ui::model::{
     Alert, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView, CaseCountsView,
-    CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, Severity,
+    CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, RiskDetailView, RiskEntityView, RiskListView,
+    RiskTruncatedView, Severity,
 };
 use web_ui::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page,
-    format_time, login_page, optional, MAX_COMMENT_LINES,
+    format_time, login_page, optional, risk_entity_page, risk_page, MAX_COMMENT_LINES,
 };
 use web_ui::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, language_tag, resolution_key, severity_class, severity_key,
@@ -512,5 +513,66 @@ fn a_long_asset_id_is_shown_whole_and_non_composed_twins_are_unreadable() -> Tes
     assert!(html.contains(&format!(">serial_number:{}2<", "L".repeat(LONG_ID_FILLER))));
     assert_eq!(html.matches("Unreadable asset.").count(), twins.len());
     assert_eq!(html.matches("action=\"/assets/caf%C3%A9\"").count(), 1);
+    Ok(())
+}
+
+
+const SAMPLE_SCORE: u64 = 70;
+
+
+const SAMPLE_USED: u64 = 4;
+
+
+const SAMPLE_DROPPED: u64 = 2;
+
+
+const SAMPLE_READ: u64 = 11;
+
+
+const SAMPLE_CAP: u64 = 22;
+
+
+fn risk_entity_sample(kind: &str, id: &str) -> RiskEntityView {
+    RiskEntityView {
+        kind: kind.to_owned(),
+        id: id.to_owned(),
+        value: SAMPLE_SCORE,
+        contributions_used: SAMPLE_USED,
+        contributions_dropped: SAMPLE_DROPPED,
+    }
+}
+
+
+fn risk_bound(limit: &str) -> Option<RiskTruncatedView> {
+    Some(RiskTruncatedView {
+        limit: limit.to_owned(),
+        read: SAMPLE_READ,
+        cap: SAMPLE_CAP,
+    })
+}
+
+
+#[test]
+fn the_risk_pages_name_the_bound_in_both_languages() -> TestResult {
+    for language in LANGUAGES {
+        for limit in ["alerts", "contributions", "entities", "other"] {
+            let list = RiskListView {
+                computed_at: 0,
+                alerts_read: 1,
+                truncated: risk_bound(limit),
+                entities: vec![risk_entity_sample("user", "alice"), risk_entity_sample("host", "web01")],
+            };
+            let detail = RiskDetailView {
+                computed_at: 0,
+                truncated: risk_bound(limit),
+                entity: risk_entity_sample("user", "alice"),
+            };
+            for markup in [risk_page(language, "token", &list), risk_entity_page(language, "token", &detail)] {
+                assert!(!markup.0.contains(MISSING_TEXT), "{}", markup.0);
+                assert!(markup.0.contains(&SAMPLE_READ.to_string()) && markup.0.contains(&SAMPLE_CAP.to_string()) && markup.0.contains("<meter"));
+                assert!(!markup.0.contains("{limit}") && !markup.0.contains("{read}") && !markup.0.contains("{cap}"));
+            }
+        }
+    }
     Ok(())
 }

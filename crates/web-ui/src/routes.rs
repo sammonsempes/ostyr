@@ -1,12 +1,12 @@
 use crate::api::{
-    get_alert, get_asset, get_case, list_alerts, list_assets, list_cases, login, logout, post_case_action, post_case_comment, valid_asset_cursor,
-    valid_case_id, valid_cursor, valid_id, MAX_COMMENT_CHARS,
+    get_alert, get_asset, get_case, get_risk_entity, list_alerts, list_assets, list_cases, list_risk, login, logout, post_case_action,
+    post_case_comment, risk_kind, valid_asset_cursor, valid_case_id, valid_cursor, valid_id, MAX_COMMENT_CHARS,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, comment_unloaded_page, error_page, login_page,
-    STYLESHEET,
+    risk_entity_page, risk_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -607,6 +607,66 @@ pub async fn show_asset(
 }
 
 
+/// The risk module answers `503` when a computation passes its deadline: our own retry text, never the API's.
+pub fn risk_failure(state: &WebState, principal: &Principal, language: Language, failure: &ApiFailure) -> Response {
+    match failure {
+        ApiFailure::Status(status) if *status == StatusCode::SERVICE_UNAVAILABLE.as_u16() => {
+            tracing::warn!(class = failure_class(failure), "risk computation unavailable");
+            refusal(language, Some(&principal.csrf), StatusCode::SERVICE_UNAVAILABLE, "risk_busy")
+        }
+        other => api_failure(state, principal, language, other),
+    }
+}
+
+
+pub fn parse_risk_kind(query: &BTreeMap<String, String>) -> Result<Option<&'static str>, FormRefusal> {
+    query.get("kind").map(|text| risk_kind(text).ok_or(FormRefusal::Malformed)).transpose()
+}
+
+
+pub async fn show_risk_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let kind = parse_risk_kind(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let client = state.api.load_full();
+    let list = list_risk(&client, source, &principal.token, kind)
+        .await
+        .map_err(|failure| Box::new(risk_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &risk_page(language, &principal.csrf, &list), &[]))
+}
+
+
+pub async fn show_risk(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_risk_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_risk_entity_page(state: &WebState, source: IpAddr, headers: &HeaderMap, kind: &str, id: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let detail = get_risk_entity(&client, source, &principal.token, kind, id)
+        .await
+        .map_err(|failure| Box::new(risk_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &risk_entity_page(language, &principal.csrf, &detail), &[]))
+}
+
+
+pub async fn show_risk_entity(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    merge(show_risk_entity_page(&state, peer.ip(), &headers, &kind, &id).await)
+}
+
+
 pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
 
 
@@ -747,6 +807,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/cases/{id}", get(show_case))
         .route("/assets", get(show_assets))
         .route("/assets/{id}", get(show_asset))
+        .route("/risk", get(show_risk))
+        .route("/risk/{kind}/{id}", get(show_risk_entity))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))
