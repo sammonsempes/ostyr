@@ -111,26 +111,24 @@ pub fn is_agent_kind(kind: AssetKind) -> bool {
 }
 
 
-pub fn holds_address(asset: &Asset, address: IpAddr) -> bool {
-    is_agent_kind(asset.kind)
-        && asset
-            .attributes
-            .get(DISCOVERY_IP_ATTRIBUTE)
-            .is_some_and(|reported| reported.value.parse::<IpAddr>() == Ok(address))
+/// Every `discovery.ip` a CMDB server or workstation reports, parsed once.
+pub fn agent_addresses(assets: &[Asset]) -> BTreeSet<IpAddr> {
+    assets
+        .iter()
+        .filter(|asset| is_agent_kind(asset.kind))
+        .filter_map(|asset| asset.attributes.get(DISCOVERY_IP_ATTRIBUTE))
+        .filter_map(|reported| reported.value.parse::<IpAddr>().ok())
+        .collect()
 }
 
 
 /// Names of the devices of `tenant` declared `agent_managed: false` whose address a CMDB server or workstation reports as `discovery.ip`.
 pub fn agent_host_devices(devices: &[Device], tenant: &str, assets: &[Asset]) -> Vec<String> {
+    let reported = agent_addresses(assets);
     devices
         .iter()
         .filter(|device| device.tenant == tenant && !device.agent_managed)
-        .filter(|device| {
-            device
-                .addresses
-                .iter()
-                .any(|address| assets.iter().any(|asset| holds_address(asset, *address)))
-        })
+        .filter(|device| device.addresses.iter().any(|address| reported.contains(address)))
         .map(|device| device.name.clone())
         .collect()
 }
@@ -148,7 +146,13 @@ pub fn failure_reason(error: &StoreError) -> &'static str {
 }
 
 
-pub fn tally(report: &mut TenantReport, before: Option<&Asset>, result: Result<(Stored, AlertCounts), StoreError>, name_key: &str) {
+pub fn tally(
+    report: &mut TenantReport,
+    before: Option<&Asset>,
+    result: Result<(Stored, AlertCounts), StoreError>,
+    name_key: &str,
+    at: (&str, usize),
+) {
     match result {
         Ok((stored, counts)) => {
             let after = asset_named(&stored.outcome.inventory, name_key);
@@ -163,7 +167,8 @@ pub fn tally(report: &mut TenantReport, before: Option<&Asset>, result: Result<(
         }
         Err(StoreError::Cmdb(error)) => {
             let reason = error.to_string();
-            tracing::warn!(reason, "declared device refused by the CMDB checks");
+            let (tenant, index) = at;
+            tracing::warn!(tenant, index, reason, "declared device refused by the CMDB checks");
             report.refused += 1;
         }
         Err(other) => report.failed = Some(failure_reason(&other)),
@@ -187,11 +192,11 @@ pub async fn write_tenant(
             Err(error) => report.failed = Some(failure_reason(&error)),
             Ok(snapshot) => {
                 report.agent_hosts = agent_host_devices(devices, tenant, &snapshot.assets);
-                for device in devices.iter().filter(|device| device.tenant == tenant) {
+                for (index, device) in devices.iter().enumerate().filter(|(_, device)| device.tenant == tenant) {
                     if report.failed.is_none() {
                         let name_key = name_key_of(device);
                         let result = reconcile_with_alerts(exec, &scope, &observation_of(device), truth, limits, now_micros).await;
-                        tally(&mut report, asset_named(&snapshot.assets, &name_key), result, &name_key);
+                        tally(&mut report, asset_named(&snapshot.assets, &name_key), result, &name_key, (tenant, index));
                     }
                 }
             }
