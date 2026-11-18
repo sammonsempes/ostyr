@@ -38,7 +38,6 @@ fn nested_scan(_program: &Path, _arguments: &[&str], _cap: u64, _deadline: Durat
     Ok(RunOutput {
         bytes: text.into_bytes(),
         exit_code: Some(0),
-        elapsed: Duration::ZERO,
     })
 }
 

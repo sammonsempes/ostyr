@@ -126,8 +126,13 @@ fn fake_clock(settings: &SmartSettings) -> Instant {
 }
 
 
-fn fake_runner(program: &Path, arguments: &[&str], _cap: u64, _deadline: Duration) -> Result<RunOutput, FailureClass> {
-    let dir = program.parent().unwrap_or(program);
+fn missing(part: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("fake runner called without {part}"))
+}
+
+
+fn fake_runner(program: &Path, arguments: &[&str], _cap: u64, deadline: Duration) -> Result<RunOutput, FailureClass> {
+    let dir = program.parent().ok_or_else(|| missing("a program directory"))?;
     let log = dir.join("calls.log");
     let mut text = read_or_empty(&log)?;
     text.push_str(&arguments.join(" "));
@@ -135,8 +140,13 @@ fn fake_runner(program: &Path, arguments: &[&str], _cap: u64, _deadline: Duratio
     fs::write(&log, text)?;
     let stem = match arguments.first() {
         Some(&"--scan-open") => "scan".to_owned(),
-        _ => arguments.last().and_then(|name| name.rsplit('/').next()).unwrap_or("").to_owned(),
+        _ => arguments
+            .last()
+            .and_then(|name| name.rsplit('/').next())
+            .ok_or_else(|| missing("a device argument"))?
+            .to_owned(),
     };
+    fs::write(dir.join(format!("{stem}.deadline")), deadline.as_secs().to_string())?;
     let slow = read_or_empty(&dir.join(format!("{stem}.elapsed")))?;
     let ticks = read_or_empty(&dir.join("clock"))?;
     fs::write(dir.join("clock"), (seconds(&ticks)? + seconds(&slow)?).to_string())?;
@@ -149,7 +159,6 @@ fn fake_runner(program: &Path, arguments: &[&str], _cap: u64, _deadline: Duratio
             Ok(RunOutput {
                 bytes: fs::read(dir.join(format!("{stem}.json")))?,
                 exit_code: code.trim().parse().ok(),
-                elapsed: Duration::ZERO,
             })
         }
     }
@@ -448,6 +457,7 @@ fn devices_past_the_round_budget_are_deferred() -> TestResult {
     let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
     assert_eq!(report.reports.len(), COUNT_TWO);
     assert_eq!(report.failed, vec![("/dev/sdc".to_owned(), FailureClass::Deferred)]);
+    assert_eq!(report.refused_devices, 0);
     assert_eq!(calls(&setup)?.len(), COUNT_TWO + 1);
     Ok(())
 }
@@ -471,6 +481,8 @@ fn timeouts_spend_the_round_budget() -> TestResult {
             ("/dev/sdc".to_owned(), FailureClass::Deferred),
         ]
     );
+    assert!(report.reports.is_empty());
+    assert_eq!(report.refused_devices, 0);
     Ok(())
 }
 
@@ -512,6 +524,8 @@ fn slow_failures_spend_the_round_budget() -> TestResult {
             ("/dev/sdc".to_owned(), FailureClass::Deferred),
         ]
     );
+    assert!(report.reports.is_empty());
+    assert_eq!(report.refused_devices, 0);
     assert_eq!(calls(&setup)?.len(), COUNT_TWO + 1);
     Ok(())
 }
@@ -572,5 +586,32 @@ fn the_real_clock_runs_a_real_scan() -> TestResult {
         round_deadline_seconds: LONG_DEADLINE,
     };
     assert!(scan_and_report(&settings, run_smartctl).scan_failed.is_none());
+    Ok(())
+}
+
+
+#[test]
+fn the_scan_gets_the_round_as_its_deadline() -> TestResult {
+    let mut setup = setup(TWO_DISKS)?;
+    setup.settings.deadline_seconds = LONG_DEADLINE;
+    setup.settings.round_deadline_seconds = ROUND_BUDGET;
+    disk(&setup, "sda", HEALTHY, "0")?;
+    disk(&setup, "nvme0", HEALTHY, "0")?;
+    fs::write(setup.dir.path().join("scan.elapsed"), LONG_DEADLINE.to_string())?;
+    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    assert_eq!(fs::read_to_string(setup.dir.path().join("scan.deadline"))?, ROUND_BUDGET.to_string());
+    assert!(report.reports.is_empty());
+    assert_eq!(calls(&setup)?.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_fake_runner_refuses_a_call_without_its_parts() -> TestResult {
+    let dir = scratch()?;
+    let no_device = fake_runner(&dir.path().join("smartctl"), &[], 0, Duration::ZERO);
+    let no_directory = fake_runner(Path::new("/"), &["--scan-open"], 0, Duration::ZERO);
+    assert!(no_device.is_err());
+    assert!(no_directory.is_err());
     Ok(())
 }
