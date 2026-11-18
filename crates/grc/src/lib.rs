@@ -8,6 +8,7 @@ pub mod export;
 pub mod inputs;
 pub mod load;
 pub mod model;
+pub mod regulatory;
 pub mod render;
 pub mod report;
 pub mod risk;
