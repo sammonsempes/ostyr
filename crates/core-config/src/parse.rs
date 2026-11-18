@@ -33,9 +33,9 @@ pub fn read_text_capped(reader: &mut dyn Read, file: &str, max: u64) -> Result<S
     if bytes.len() as u64 > max {
         Err(ConfigError::TooLarge { file: file.to_string(), max })
     } else {
-        String::from_utf8(bytes).map_err(|source| ConfigError::Io {
+        String::from_utf8(bytes).map_err(|error| ConfigError::NotUtf8 {
             file: file.to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            valid_up_to: error.utf8_error().valid_up_to(),
         })
     }
 }

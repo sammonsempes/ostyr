@@ -427,7 +427,7 @@ fn the_ca_root_file_is_read_once_and_checked() -> Result<(), Box<dyn Error>> {
     assert_eq!(reasons, [Some(NO_CERTIFICATE), Some(NO_CERTIFICATE)]);
     assert!(matches!(
         check_ca_root(&binary.to_string_lossy()),
-        Err(WafError::Config(ConfigError::Io { .. }))
+        Err(WafError::Config(ConfigError::NotUtf8 { .. }))
     ));
     assert!(matches!(
         check_ca_root(&big.to_string_lossy()),
