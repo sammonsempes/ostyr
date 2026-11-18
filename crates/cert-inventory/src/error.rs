@@ -121,3 +121,22 @@ pub enum FetchError {
     #[error(transparent)]
     Ct(#[from] CtError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum InventoryStoreError {
+    #[error("database: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("the time of the call is outside the range a column can hold")]
+    BadNow,
+    #[error("a limit does not fit the statement")]
+    BadLimit,
+    #[error("page size must be between 1 and {limit}")]
+    BadPageSize { limit: usize },
+    #[error("cursor is malformed")]
+    BadCursor,
+    #[error("fingerprint is not 64 lowercase hexadecimal characters")]
+    BadFingerprint,
+    #[error("the store returned a malformed value in column {column}")]
+    BadRow { column: usize },
+}

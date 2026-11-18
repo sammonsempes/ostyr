@@ -113,6 +113,68 @@ pub struct ScanOutcome {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Scan,
+    Ct,
+}
+
+
+/// Where a batch of records was seen: `reference` is an ASCII-allowlisted host plus path, or a CT log host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub kind: SourceKind,
+    pub reference: String,
+}
+
+
+/// Per-tenant row caps, enforced by the store at commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreLimits {
+    pub max_certs: usize,
+    pub max_sightings: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StoreCounts {
+    pub inserted: usize,
+    pub seen_again: usize,
+    pub refused_full: usize,
+    pub refused_source: usize,
+    pub refused_record: usize,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCert {
+    pub record: CertRecord,
+    pub first_seen: i64,
+    pub last_seen: i64,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CertFilter {
+    pub expiring_before: Option<i64>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertPage {
+    pub certs: Vec<StoredCert>,
+    pub next_cursor: Option<String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sighting {
+    pub kind: SourceKind,
+    pub reference: String,
+    pub last_seen: i64,
+}
+
+
 /// The names an operator report prints and how many were cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamesShown {
