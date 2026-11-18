@@ -43,6 +43,8 @@ pub struct SyncReport {
     pub updated: usize,
     pub unchanged: usize,
     pub conflicts: usize,
+    pub refused_conflicts: usize,
+    pub duplicate_conflicts: usize,
     pub refused_no_room: usize,
     pub refused_attribute_room: usize,
     pub skipped: usize,
@@ -56,6 +58,8 @@ pub struct PageResult {
     pub created: usize,
     pub updated: usize,
     pub conflicts: usize,
+    pub refused_conflicts: usize,
+    pub duplicate_conflicts: usize,
     pub refused_by_cmdb: usize,
     pub refused_no_room: usize,
     pub refused_attribute_room: usize,
@@ -317,11 +321,15 @@ pub async fn try_page(
     let folded = reconcile_page(&snapshot.assets, page, truth, room);
     let outcome = &folded.outcome;
     check_one_conflict_per_triple(outcome)?;
-    apply_outcome(exec, scope, &snapshot, outcome, limits).await?;
+    let applied = apply_outcome(exec, scope, &snapshot, outcome, limits).await?;
+    let refused_conflicts = applied.refused.len();
+    let duplicate_conflicts = applied.duplicates.len();
     Ok(PageResult {
         created: folded.created.len(),
         updated: folded.changed.difference(&folded.created).count(),
-        conflicts: outcome.conflicts.len(),
+        conflicts: outcome.conflicts.len().saturating_sub(refused_conflicts + duplicate_conflicts),
+        refused_conflicts,
+        duplicate_conflicts,
         refused_by_cmdb: folded.refused,
         refused_no_room: folded.no_room,
         refused_attribute_room: 0,
@@ -389,6 +397,8 @@ pub fn add_page(report: &mut SyncReport, done: &PageResult) {
     report.created += done.created;
     report.updated += done.updated;
     report.conflicts += done.conflicts;
+    report.refused_conflicts += done.refused_conflicts;
+    report.duplicate_conflicts += done.duplicate_conflicts;
     report.skipped += done.refused_by_cmdb;
     report.refused_no_room += done.refused_no_room;
     report.refused_attribute_room += done.refused_attribute_room;
@@ -430,12 +440,16 @@ pub async fn sync(
     let skipped = report.skipped;
     let no_room = report.refused_no_room;
     let no_row_room = report.refused_attribute_room;
+    let refused_conflicts = report.refused_conflicts;
     let cap = cap_label(report.cap.unwrap_or(ASSETS_TABLE));
     if unapplied > 0 || skipped > 0 {
         warn!("k8s cmdb sync: {unapplied} observations unapplied, {skipped} elements skipped");
     }
     if no_room + no_row_room > 0 {
         warn!("k8s cmdb sync: tenant at the {cap} cap, {no_room} creations and {no_row_room} updates refused, inventory incomplete");
+    }
+    if refused_conflicts > 0 {
+        warn!("k8s cmdb sync: {refused_conflicts} conflicts refused at the open conflict cap");
     }
     Ok(report)
 }
