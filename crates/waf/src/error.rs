@@ -12,8 +12,8 @@ pub enum WafError {
     OutputTooLarge { bytes: usize, max: usize },
     #[error("invalid tls section: {0}")]
     BadTls(&'static str),
-    #[error("cannot read the ACME CA root file")]
-    CaRoot(#[source] std::io::Error),
+    #[error("the ACME CA root file is untrusted or unreadable")]
+    CaRoot(#[source] ConfigError),
     #[error("untrusted CA root directory: {0}")]
     BadCaDir(&'static str),
     #[error("cannot write the CA root file")]
@@ -62,6 +62,14 @@ pub enum OpenError {
     Config(#[from] core_config::error::ConfigError),
     #[error("the first configuration was refused")]
     Deliver(#[from] DeliverError),
+    #[error("cannot open the audit sink")]
+    NoSink(#[source] core_audit::error::AuditError),
+    #[error("cannot open the audit sink ({sink}) and the start is refused: {refusal}")]
+    NoSinkAndRefused {
+        #[source]
+        sink: Box<core_audit::error::AuditError>,
+        refusal: Box<core_config::error::ConfigError>,
+    },
     #[error("cannot audit the first configuration")]
     Audit(#[source] core_audit::error::AuditError),
 }

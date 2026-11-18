@@ -256,6 +256,9 @@ pub const RESULT_PARAMETER: &str = "result";
 pub const APPLIED_RESULT: &str = "applied";
 
 
+pub const REFUSED_RESULT: &str = "refused";
+
+
 pub const START_DIFF: &str = "initial configuration";
 
 
@@ -278,3 +281,11 @@ pub const UNTRUSTED_ROUTES_FILE: &str = "the routes file must be a regular file 
 
 
 pub const PROC_FD_DIRECTORY: &str = "/proc/self/fd/";
+
+
+/// Refusal text when the CA root file's directory is not trusted.
+pub const UNTRUSTED_CA_ROOT_DIR: &str = "the ca_root_file directory must be absolute, owned by the running user, closed to group and others";
+
+
+/// Refusal text when the CA root file is not trusted.
+pub const UNTRUSTED_CA_ROOT_FILE: &str = "the ca_root_file must be a regular file owned by root or this user, closed to group and others";

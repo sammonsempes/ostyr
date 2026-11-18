@@ -6,12 +6,14 @@ use crate::error::{DeliverError, OpenError, WafError};
 use crate::limits::{
     ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS, ID_PREFIX,
     LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_FILE_BYTES, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROC_FD_DIRECTORY,
-    PROGRAM_STATE_KEY, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX, STAGE_SUFFIX,
-    START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE, VALIDATE_STEP,
+    PROGRAM_STATE_KEY, REFUSED_RESULT, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX,
+    STAGE_SUFFIX, START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE,
+    VALIDATE_STEP,
 };
 use crate::model::{Applied, ApplySettings, CommandStatus, Delivery, Rendered};
 use crate::render::render_text;
 use crate::types::RunnerFn;
+use core_audit::error::AuditError;
 use core_audit::model::Outcome;
 use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text_capped};
@@ -112,7 +114,7 @@ pub fn reopen_judged(anchor: &OwnedFd, file: &str, refusal: &str) -> Result<File
 
 
 /// The file's text read through its judged directory: parent walked from `/`, file anchored without following a symlink, owner and mode judged, bytes of that inode read.
-pub fn read_trusted_text(path: &Path, file: &str, directory_refusal: &str, file_refusal: &str) -> Result<String, ConfigError> {
+pub fn read_trusted_text(path: &Path, file: &str, directory_refusal: &str, file_refusal: &str, max_bytes: u64) -> Result<String, ConfigError> {
     let (parent, name) = path
         .parent()
         .zip(path.file_name().and_then(|name| name.to_str()))
@@ -120,20 +122,20 @@ pub fn read_trusted_text(path: &Path, file: &str, directory_refusal: &str, file_
     let directory = open_trusted_dir(parent, geteuid().as_raw()).map_err(|failure| refuse_file(file, format!("{directory_refusal}: {failure}")))?;
     let anchor = judge_file(&directory, name, file, file_refusal)?;
     let label = path.display().to_string();
-    read_text_capped(&mut reopen_judged(&anchor, file, file_refusal)?, &label, MAX_FILE_BYTES)
+    read_text_capped(&mut reopen_judged(&anchor, file, file_refusal)?, &label, max_bytes)
 }
 
 
 /// The settings file read through its judged directory and parsed from those bytes.
 pub fn load_trusted_settings_file(path: &Path) -> Result<ApplySettings, ConfigError> {
-    let text = read_trusted_text(path, SETTINGS_LABEL, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE)?;
+    let text = read_trusted_text(path, SETTINGS_LABEL, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE, MAX_FILE_BYTES)?;
     check_settings(parse_document::<ApplySettings>(&text, &path.display().to_string())?)
 }
 
 
 /// The routes file read through its judged directory, then rendered from those bytes.
 pub fn load_trusted_routes(path: &Path) -> Result<Rendered, ConfigError> {
-    let text = read_trusted_text(path, FILE_LABEL, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE)?;
+    let text = read_trusted_text(path, FILE_LABEL, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, MAX_FILE_BYTES)?;
     render_text(&text).map_err(config_error)
 }
 
@@ -162,6 +164,10 @@ pub fn load_trusted_settings(path: &Path) -> Result<ApplySettings, ConfigError> 
 pub fn config_error(failure: WafError) -> ConfigError {
     match failure {
         WafError::Config(inner) => inner,
+        WafError::CaRoot(ref inner) => ConfigError::WatchedFile {
+            file: FILE_LABEL.to_owned(),
+            reason: format!("{failure}: {inner}"),
+        },
         other => ConfigError::WatchedFile {
             file: FILE_LABEL.to_owned(),
             reason: other.to_string(),
@@ -424,6 +430,55 @@ pub fn late_audit(audit: Box<SharedAuditFn>, late: Arc<AtomicBool>, epoch: Arc<A
 }
 
 
+/// The shared audit sink as a boxed function of its own.
+pub fn shared_sink(sink: &Arc<SharedAuditFn>) -> Box<SharedAuditFn> {
+    let shared = Arc::clone(sink);
+    Box::new(move |entry| shared(entry))
+}
+
+
+/// A refusal at start as one `denied` entry with the text a reload refusal uses; an audit failure is logged and the refusal is returned.
+pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failure: ConfigError) -> ConfigError {
+    let reason = failure.to_string();
+    error!(%reason, "start refused");
+    let entry = reload_entry(
+        context,
+        Outcome::Denied,
+        [(RESULT_PARAMETER, REFUSED_RESULT.to_owned()), ("reason", reason)],
+    );
+    if let Err(audit_error) = audit(entry) {
+        error!(%audit_error, "cannot audit the refused start");
+    }
+    failure
+}
+
+
+/// The refusal a start would meet, found without an audit sink.
+pub fn start_refusal(settings_file: &Path) -> Option<ConfigError> {
+    load_trusted_settings(settings_file).and_then(|running| render_applied(&running, 0)).err()
+}
+
+
+/// `open_apply` behind a sink that may have failed to open: then nothing can be audited, and the error names the sink and any refusal.
+pub fn open_apply_audited(
+    settings_file: &Path,
+    runner: RunnerFn,
+    sink: Result<Box<SharedAuditFn>, AuditError>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<Applied>, OpenError> {
+    match sink {
+        Ok(audit) => open_apply(settings_file, runner, audit, context),
+        Err(sink_failure) => Err(match start_refusal(settings_file) {
+            Some(refusal) => OpenError::NoSinkAndRefused {
+                sink: Box::new(sink_failure),
+                refusal: Box::new(refusal),
+            },
+            None => OpenError::NoSink(sink_failure),
+        }),
+    }
+}
+
+
 /// Loads the settings and the first configuration, delivers it (any refusal fails the start) and audits it as applied; later reloads do the same.
 pub fn open_apply(
     settings_file: &Path,
@@ -431,7 +486,9 @@ pub fn open_apply(
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
-    let running = load_trusted_settings(settings_file)?;
+    let sink: Arc<SharedAuditFn> = Arc::from(audit);
+    let refused = |failure| audit_start_refusal(&context, sink.as_ref(), failure);
+    let running = load_trusted_settings(settings_file).map_err(refused)?;
     let epoch = Arc::new(AtomicU64::new(0));
     let late = Arc::new(AtomicBool::new(false));
     let loader_epoch = Arc::clone(&epoch);
@@ -440,9 +497,10 @@ pub fn open_apply(
         Box::new(move || load_applied(&running, &loader_file, &loader_epoch)),
         applied_state,
         vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch))],
-        late_audit(audit, Arc::clone(&late), epoch),
-        context,
-    )?;
+        late_audit(shared_sink(&sink), Arc::clone(&late), epoch),
+        context.clone(),
+    )
+    .map_err(refused)?;
     let delivery = deliver(&current_config(&engine), runner)?;
     late.store(delivery == Delivery::Late, Ordering::SeqCst);
     let entry = reload_entry(
