@@ -15,6 +15,8 @@ pub enum ConfigError {
     },
     #[error("{file}: larger than {max} bytes")]
     TooLarge { file: String, max: u64 },
+    #[error("{file}: not valid UTF-8 after {valid_up_to} bytes")]
+    NotUtf8 { file: String, valid_up_to: usize },
     #[error("watched file `{file}` refused: {reason}")]
     WatchedFile { file: String, reason: String },
     #[error("{file}:{line}:{column}: at `{field_path}`: {message}")]

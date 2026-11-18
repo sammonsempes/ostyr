@@ -204,6 +204,25 @@ fn failing_reader_is_an_io_error() -> TestResult {
 }
 
 
+const VALID_PREFIX_BYTES: usize = 1;
+
+
+const INVALID_TAIL: [u8; 2] = [0xff, 0xfe];
+
+
+#[test]
+fn non_utf8_file_error_holds_no_bytes() -> TestResult {
+    let mut content = b"\x30\x82\x01\x02MARKER".to_vec();
+    content.extend_from_slice(&INVALID_TAIL);
+    let error = read_text(&mut content.as_slice(), "key.der").err().ok_or("no error")?;
+    assert!(matches!(error, ConfigError::NotUtf8 { ref file, valid_up_to } if file == "key.der" && valid_up_to == VALID_PREFIX_BYTES));
+    let shown = format!("{error} {error:?}");
+    assert!(!shown.contains("MARKER") && !shown.contains("48, 130"), "{shown}");
+    assert!(error.source().is_none());
+    Ok(())
+}
+
+
 #[test]
 fn missing_position_is_zero() -> TestResult {
     assert_eq!(position_of(None), (0, 0));
@@ -265,7 +284,7 @@ fn an_over_cap_file_cut_inside_a_character_is_too_large_and_a_huge_cap_does_not_
     assert_eq!(read_text_capped(&mut text.as_bytes(), "ok.yaml", u64::MAX)?, text);
     let invalid: &[u8] = &INVALID_UTF8;
     let bad = read_text_capped(&mut &*invalid, "bad.yaml", SMALL_CAP).err().ok_or("no error")?;
-    assert!(matches!(bad, ConfigError::Io { .. }));
+    assert!(matches!(bad, ConfigError::NotUtf8 { .. }));
     Ok(())
 }
 
