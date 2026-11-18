@@ -122,3 +122,62 @@ pub struct Budget {
     pub upstreams: usize,
     pub bytes: usize,
 }
+
+
+/// How a Caddy command ended; the exit code is the only thing kept of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Success,
+    Failed(Option<i32>),
+    TimedOut,
+}
+
+
+/// The apply settings file, strict: the routes file to watch, where the rendered file goes, and how Caddy is reached.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplySettings {
+    pub routes_file: String,
+    pub out_dir: String,
+    #[serde(default = "default_program")]
+    pub caddy_program: String,
+    #[serde(default = "default_socket")]
+    pub admin_socket: String,
+    #[serde(default = "default_deadline")]
+    pub deadline_seconds: u64,
+}
+
+
+pub fn default_program() -> String {
+    crate::limits::DEFAULT_CADDY_PROGRAM.to_owned()
+}
+
+
+pub fn default_socket() -> String {
+    crate::limits::DEFAULT_ADMIN_SOCKET.to_owned()
+}
+
+
+pub fn default_deadline() -> u64 {
+    crate::limits::DEFAULT_DEADLINE_SECONDS
+}
+
+
+/// One rendered configuration ready for Caddy: the JSON bytes, the checked CA root and the routes left out.
+#[derive(Debug)]
+pub struct Applied {
+    pub id: String,
+    pub epoch: u64,
+    pub settings: ApplySettings,
+    pub json: String,
+    pub ca_root: Option<CaRoot>,
+    pub refused: Vec<Refusal>,
+}
+
+
+/// How a delivery ended: Caddy answered, or its client failed and the daemon was later found to hold the configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Confirmed,
+    Late,
+}

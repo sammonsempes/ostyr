@@ -158,6 +158,7 @@ pub fn caddy_config(routes: Vec<Route>, tls: Option<&Tls>) -> CaddyConfig {
     };
     let tls_section = tls.map(|value| tls_app(value, &routes));
     CaddyConfig {
+        admin: None,
         apps: Apps {
             http: Http {
                 servers: BTreeMap::from([(SERVER_NAME.to_string(), server)]),

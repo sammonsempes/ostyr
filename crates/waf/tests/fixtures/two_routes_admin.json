@@ -1,0 +1,131 @@
+{
+  "admin": {
+    "listen": "unix//run/ostyr-waf/caddy-admin.sock",
+    "@id": "ostyr-f8094544fad9d6dde4d884d557f8d7c1"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "main": {
+          "listen": [
+            ":8080"
+          ],
+          "automatic_https": {
+            "disable": true
+          },
+          "routes": [
+            {
+              "match": [
+                {
+                  "header": {
+                    "X-Ostyr-Proxied": [
+                      "1"
+                    ]
+                  }
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 508
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": [
+                    "app.example.test"
+                  ],
+                  "path": [
+                    "/api",
+                    "/api/*"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "127.0.0.1:9001"
+                    }
+                  ],
+                  "health_checks": {
+                    "active": {
+                      "uri": "/health",
+                      "interval": "20s"
+                    },
+                    "passive": {
+                      "fail_duration": "30s",
+                      "max_fails": 3
+                    }
+                  },
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Ostyr-Proxied": [
+                          "1"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": [
+                    "web.example.test",
+                    "www.example.test"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "127.0.0.1:9002"
+                    },
+                    {
+                      "dial": "127.0.0.1:9003"
+                    }
+                  ],
+                  "health_checks": {
+                    "active": {
+                      "uri": "/",
+                      "interval": "10s"
+                    },
+                    "passive": {
+                      "fail_duration": "30s",
+                      "max_fails": 3
+                    }
+                  },
+                  "headers": {
+                    "request": {
+                      "set": {
+                        "X-Ostyr-Proxied": [
+                          "1"
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 404
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

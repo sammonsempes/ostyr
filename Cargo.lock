@@ -7236,6 +7236,7 @@ dependencies = [
 name = "waf"
 version = "0.0.0"
 dependencies = [
+ "core-audit",
  "core-config",
  "data-encoding",
  "rustix 1.1.6",
@@ -7243,9 +7244,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "tracing-subscriber",
+ "wait-timeout",
  "x509-parser",
 ]
 

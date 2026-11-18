@@ -23,3 +23,51 @@ pub enum WafError {
     #[error("cannot encode the configuration")]
     Encode(#[from] serde_json::Error),
 }
+
+
+/// A refused delivery to Caddy; every text is fixed, Caddy's own output is never read.
+#[derive(Debug, Error)]
+pub enum DeliverError {
+    #[cfg(unix)]
+    #[error(transparent)]
+    OutDir(#[from] core_config::trusted_dir::TrustedDirError),
+    #[error("the rendered file name is taken by something that is not a regular file")]
+    BadTarget,
+    #[error("cannot write the rendered file")]
+    Write(#[source] std::io::Error),
+    #[error(transparent)]
+    CaRoot(WafError),
+    #[error("cannot run caddy {step}")]
+    Spawn {
+        step: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("caddy {step} failed with exit status {code:?}")]
+    Failed { step: &'static str, code: Option<i32> },
+    #[error("caddy {step} exceeded {seconds} seconds")]
+    TimedOut { step: &'static str, seconds: u64 },
+    #[error("caddy {step} did not finish and the running configuration is unknown")]
+    Unknown { step: &'static str },
+    #[error("untrusted admin socket directory")]
+    AdminDir(#[source] WafError),
+}
+
+
+#[derive(Debug, Error)]
+pub enum OpenError {
+    #[error(transparent)]
+    Config(#[from] core_config::error::ConfigError),
+    #[error("the first configuration was refused")]
+    Deliver(#[from] DeliverError),
+    #[error("cannot audit the first configuration")]
+    Audit(#[source] core_audit::error::AuditError),
+}
+
+
+#[cfg(unix)]
+impl From<rustix::io::Errno> for DeliverError {
+    fn from(errno: rustix::io::Errno) -> Self {
+        Self::Write(errno.into())
+    }
+}
