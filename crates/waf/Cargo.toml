@@ -14,13 +14,17 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
+wait-timeout = "0.2"
 x509-parser = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
+signal-hook = "0.4.6"
 tempfile = "3"
+tracing-subscriber = "0.3"
 
 [lints]
 workspace = true

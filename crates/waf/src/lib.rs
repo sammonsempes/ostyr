@@ -1,5 +1,7 @@
 //! Caddy JSON configuration rendered from a declarative YAML routes file.
 
+#[cfg(unix)]
+pub mod apply;
 pub mod caddy;
 pub mod cadir;
 pub mod cli;
@@ -8,5 +10,7 @@ pub mod limits;
 pub mod model;
 pub mod order;
 pub mod render;
+pub mod runner;
 pub mod tls;
+pub mod types;
 pub mod validate;

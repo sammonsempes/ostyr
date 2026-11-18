@@ -4,7 +4,15 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize)]
 pub struct CaddyConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin: Option<Admin>,
     pub apps: Apps,
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct Admin {
+    pub listen: String,
 }
 
 
