@@ -85,10 +85,13 @@ pub fn binding_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 
+pub const NOT_UTF8: &str = "file is not valid UTF-8";
+
+
 pub fn secret_from(bytes: Vec<u8>) -> Result<SecretString, io::Error> {
     String::from_utf8(bytes)
         .map(|text| SecretString::from(text.trim_end().to_owned()))
-        .map_err(io::Error::other)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, NOT_UTF8))
 }
 
 
@@ -152,8 +155,7 @@ pub fn oidc_fingerprint(salt: &[u8], files: &OidcFiles, yaml: &[u8], ca_pem: Opt
 
 
 pub fn load_oidc(files: &OidcFiles, catalog: &RoleCatalog) -> Result<OidcRuntime, StartupError> {
-    let text =
-        String::from_utf8(read_public(&files.config)?).map_err(|source| StartupError::Io(io::Error::new(io::ErrorKind::InvalidData, source)))?;
+    let text = String::from_utf8(read_public(&files.config)?).map_err(|_| StartupError::Io(io::Error::new(io::ErrorKind::InvalidData, NOT_UTF8)))?;
     let config = parse_oidc_config(&text, &files.config.display().to_string(), catalog)?;
     let ca_pem = files.ca_file.as_deref().map(read_public).transpose()?;
     let agent = provider_agent(ca_pem.as_deref())?;
