@@ -1941,11 +1941,13 @@ dependencies = [
 name = "discovery"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "cmdb",
  "core-config",
  "core-export",
  "core-pg",
  "dhcp-kea",
+ "ecs-normalise",
  "ipnet",
  "serde",
  "serde_json",
@@ -1953,7 +1955,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

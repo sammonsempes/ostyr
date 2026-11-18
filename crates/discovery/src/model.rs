@@ -264,3 +264,63 @@ pub struct ObserveCounters {
     pub released: u64,
     pub before_lease: u64,
 }
+
+
+pub const MAX_UNMANAGED_PER_RUN: usize = 100;
+
+
+pub const MAX_ALERT_SERVICES: usize = 3;
+
+
+pub const LOOKUP_CHUNK: usize = 2500;
+
+
+pub const MAX_LOOKUP_CHUNKS: usize = 10;
+
+
+/// One unmanaged device of a run: its alert id, the candidate, the valid lease MAC and the lease hostname.
+#[derive(Debug, Clone)]
+pub struct Device<'a> {
+    pub id: String,
+    pub candidate: &'a Candidate,
+    pub mac: Option<&'a str>,
+    pub hostname: Option<&'a str>,
+}
+
+
+/// What the already-alerted lookup learned: the ids without a stored alert in scan order, the chunk the next run starts at, and whether a query failed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lookup {
+    pub fresh: Vec<String>,
+    pub next_chunk: usize,
+    pub failed: bool,
+}
+
+
+pub const MICROS_PER_MILLI: u64 = 1000;
+
+
+pub const UNMANAGED_RULE_ID: &str = "discovery.unmanaged_device";
+
+
+pub const FLOOD_RULE_ID: &str = "discovery.unmanaged_device_flood";
+
+
+pub const AGENT_PACKAGE: &str = "ostyr-agent";
+
+
+/// What an alert run left out: known addresses, devices whose valid lease MAC keys a CMDB asset, and devices past `MAX_UNMANAGED_PER_RUN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Skipped {
+    pub known: usize,
+    pub managed: usize,
+    pub omitted: usize,
+}
+
+
+/// What storing the alerts did: new rows, and alerts in batches the store refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Stored {
+    pub inserted: usize,
+    pub failed: usize,
+}

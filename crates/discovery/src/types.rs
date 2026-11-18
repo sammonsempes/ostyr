@@ -1,5 +1,5 @@
 use crate::error::DiscoveryError;
-use crate::model::{EdgeKey, EdgeStats, Lease, Scope};
+use crate::model::{Candidate, EdgeKey, EdgeStats, Lease, Scope};
 use cmdb::model::Asset;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -21,3 +21,6 @@ pub type LeaseMap = BTreeMap<IpAddr, Lease>;
 
 
 pub type Matched<'a> = Option<(&'a Lease, Option<&'a Asset>)>;
+
+
+pub type Pending<'a> = BTreeMap<(Millis, IpAddr), (&'a Candidate, Option<&'a str>, Option<&'a str>)>;
