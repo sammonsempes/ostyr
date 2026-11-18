@@ -371,16 +371,22 @@ fn a_server_error_is_classified_and_its_text_never_shown() -> TestResult {
 
 
 #[test]
-fn a_reply_that_never_ends_hits_the_deadline() -> TestResult {
+fn a_server_that_never_answers_hits_the_deadline() -> TestResult {
     let rig = rig(STALL_TIMEOUT_MS)?;
     let (release, held): (_, Receiver<()>) = channel();
-    let server = answer(rig.listener.try_clone()?, "200 OK", move |_| held.recv().map_err(io::Error::other));
+    let listener = rig.listener.try_clone()?;
+    let server = spawn(move || -> io::Result<String> {
+        let (mut stream, _) = listener.accept()?;
+        let head = read_head(&mut stream)?;
+        held.recv().map_err(io::Error::other)?;
+        Ok(head)
+    });
     let mut out = Vec::new();
     let failed = read_iocs(&rig.config, NOW, &mut out);
     release.send(())?;
-    assert!(matches!(failed, Err(ReadError::Body(_))));
+    assert!(matches!(failed, Err(ReadError::Refused(InsertClass::Timeout))), "{failed:?}");
     assert!(out.is_empty());
-    joined(server)?;
+    server.join().map_err(|_| "server thread panicked")??;
     Ok(())
 }
 
