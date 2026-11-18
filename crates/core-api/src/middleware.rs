@@ -23,7 +23,7 @@ use core_auth::random::random_array;
 use core_auth::service::{authorize, ANONYMOUS_ACTOR};
 use core_auth::session::{revoke_session, validate_session};
 use core_auth::types::{RandomFn, RoleCatalog};
-use core_config::reload::bounded_value;
+use core_config::reload::{bounded_text, bounded_value};
 use data_encoding::HEXLOWER;
 use http_body_util::LengthLimitError;
 use secrecy::SecretString;
@@ -129,10 +129,14 @@ pub fn result_label(status: StatusCode) -> &'static str {
 }
 
 
+/// Longest request path or method written whole to the request log line; the rest is cut with a visible marker.
+pub const MAX_LOGGED_PATH_CHARS: usize = 512;
+
+
 pub fn log_request(
     app: &ApiState,
     identity: &ApiIdentity,
-    (id, method, path): (&str, &str, &str),
+    (id, raw_method, raw_path): (&str, &str, &str),
     source: IpAddr,
     status: StatusCode,
     elapsed: std::time::Duration,
@@ -140,8 +144,11 @@ pub fn log_request(
     let (module, tenant) = (identity.module.as_str(), identity.tenant.as_str());
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let (result, code) = (result_label(status), status.as_u16());
+    let request_id = id;
+    let path = bounded_text(raw_path, MAX_LOGGED_PATH_CHARS, "path");
+    let method = bounded_text(raw_method, MAX_LOGGED_PATH_CHARS, "method");
     tracing::dispatcher::with_default(&app.dispatch, || {
-        tracing::info!(target: LOG_TARGET, module, tenant, request_id = id, duration_ms, result, method, path, status = code, source = %source, "request");
+        tracing::info!(target: LOG_TARGET, module, tenant, request_id, duration_ms, result, method, path, status = code, source = %source, "request");
     });
 }
 
