@@ -94,3 +94,16 @@ fn other_random_bytes_give_another_decoy() -> TestResult {
     );
     Ok(())
 }
+
+
+#[test]
+fn bytes_over_the_largest_multiple_are_rejected_not_folded() -> TestResult {
+    let rejected = [u8::MAX; ARMOUR_LINES * ACCESS_KEY_CHARS];
+    assert_eq!(
+        symbols(&rejected, 0, ACCESS_KEY_CHARS, ALPHANUMERIC),
+        FILLER.to_string().repeat(ACCESS_KEY_CHARS)
+    );
+    let mixed = [u8::MAX, 0, u8::MAX, 1];
+    assert_eq!(symbols(&mixed, 0, ARMOUR_LINES, ALPHANUMERIC), "AB");
+    Ok(())
+}

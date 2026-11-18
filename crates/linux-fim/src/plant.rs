@@ -3,8 +3,9 @@ use crate::content::{token_content, RANDOM_BYTES};
 use crate::error::{CliError, PlantError, PlantRefusal};
 use crate::model::{Honeytoken, Limits, PlantReport, PlantedIdentity, Role};
 use crate::policy::kernel_device;
-use crate::types::{ClaimFn, RandomFn, StepFn};
+use crate::types::{ClaimFn, ListFn, RandomFn, StepFn};
 use core_config::trusted_dir::{open_trusted_dir, GROUP_OTHER_WRITE};
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
     fchmod, fchown, fstat, makedev, mkdirat, openat, renameat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags, RawMode, Stat, CWD,
 };
@@ -14,6 +15,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 
 pub const DIRECTORY_MODE: RawMode = 0o700;
@@ -40,6 +43,24 @@ pub const DIRECTORY_PROBE: usize = 3;
 pub const RANDOM_SOURCE: &str = "/dev/urandom";
 
 
+pub const TETRA_BINARY: &str = "/usr/local/bin/tetra";
+
+
+pub const POLICY_PREFIX: &str = "ostyr-fim";
+
+
+pub const MAX_LIST_BYTES: usize = 1 << 20;
+
+
+pub const READ_CHUNK_BYTES: usize = 4096;
+
+
+pub const MAX_LIST_READS: usize = MAX_LIST_BYTES / READ_CHUNK_BYTES + 1;
+
+
+pub const LIST_DEADLINE: Duration = Duration::from_secs(30);
+
+
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 
 
@@ -55,6 +76,7 @@ const CREATE_FLAGS: OFlags = OFlags::WRONLY
 pub struct PlantOps {
     pub root: PathBuf,
     pub fill_random: RandomFn,
+    pub list_policies: ListFn,
     pub claim: ClaimFn,
     pub after_open: StepFn,
     pub after_make: StepFn,
@@ -101,6 +123,7 @@ pub fn os_ops() -> PlantOps {
     PlantOps {
         root: PathBuf::from("/"),
         fill_random: os_random,
+        list_policies: os_list_policies,
         claim: os_claim,
         after_open: no_step,
         after_make: no_step,
@@ -112,6 +135,95 @@ pub fn os_ops() -> PlantOps {
 /// Reads the bytes from the OS random source.
 pub fn os_random(buffer: &mut [u8]) -> std::io::Result<()> {
     File::open(RANDOM_SOURCE).and_then(|mut source| source.read_exact(buffer))
+}
+
+
+/// Lists the policies with the real `tetra`, within `LIST_DEADLINE`.
+pub fn os_list_policies() -> std::io::Result<String> {
+    list_from(TETRA_BINARY, LIST_DEADLINE)
+}
+
+
+/// Runs `<binary> tracingpolicy list` within `deadline`; a missing binary means no policy is loaded, any other failure is an error.
+pub fn list_from(binary: &str, deadline: Duration) -> std::io::Result<String> {
+    match Command::new(binary)
+        .args(["tracingpolicy", "list"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error),
+        Ok(child) => read_listing(child, deadline),
+    }
+}
+
+
+/// The child's output, kept only when it succeeded within the deadline and `MAX_LIST_BYTES`; a child that overruns is killed and reaped.
+pub fn read_listing(mut child: Child, deadline: Duration) -> std::io::Result<String> {
+    let read = child
+        .stdout
+        .take()
+        .ok_or(std::io::Error::other("no output pipe"))
+        .and_then(|mut out| read_until(&mut out, Instant::now() + deadline));
+    let status = if read.is_ok() {
+        child.wait()
+    } else {
+        child.kill().and_then(|()| child.wait())
+    };
+    let bytes = read?;
+    status.and_then(|done| {
+        done.success()
+            .then(|| String::from_utf8_lossy(&bytes).into_owned())
+            .ok_or_else(|| std::io::Error::other("tetra exited with an error"))
+    })
+}
+
+
+/// Reads to end of file, each read waiting at most until `until`; a listing longer than `MAX_LIST_BYTES` is an error.
+pub fn read_until(out: &mut ChildStdout, until: Instant) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [u8::MIN; READ_CHUNK_BYTES];
+    let mut done = false;
+    let mut reads = 0;
+    while !done && reads < MAX_LIST_READS {
+        wait_readable(out, until)?;
+        let count = out.read(&mut chunk)?;
+        bytes.extend(chunk.iter().take(count));
+        done = count == 0;
+        reads += 1;
+    }
+    done.then_some(bytes).ok_or(std::io::Error::other("listing too long"))
+}
+
+
+/// Waits until the pipe is readable or `until` passes (`TimedOut`).
+pub fn wait_readable(out: &ChildStdout, until: Instant) -> std::io::Result<()> {
+    let remaining = until.saturating_duration_since(Instant::now());
+    let timeout = Timespec {
+        tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(remaining.subsec_nanos()),
+    };
+    let mut fds = [PollFd::new(out, PollFlags::IN)];
+    let ready = poll(&mut fds, Some(&timeout)).map_err(std::io::Error::from)?;
+    (ready > 0).then_some(()).ok_or(std::io::Error::from(std::io::ErrorKind::TimedOut))
+}
+
+
+/// The number of listed policies whose name starts with `POLICY_PREFIX`.
+pub fn loaded_count(listing: &str) -> usize {
+    listing.split_whitespace().filter(|word| word.starts_with(POLICY_PREFIX)).count()
+}
+
+
+/// Refuses to plant while any Ostyr FIM policy is loaded: the planter's own writes would raise honeytoken alerts.
+pub fn check_unloaded(ops: &PlantOps) -> Result<(), PlantError> {
+    (ops.list_policies)()
+        .map_err(PlantError::PolicyList)
+        .and_then(|listing| match loaded_count(&listing) {
+            0 => Ok(()),
+            count => Err(PlantError::PoliciesLoaded { count }),
+        })
 }
 
 
@@ -278,11 +390,15 @@ pub fn fresh_token(ops: &PlantOps, owner_uid: u32, parent: &OwnedFd, leaf: &str,
 
 
 pub fn write_synced(handle: &OwnedFd, content: &str) -> Result<(), PlantRefusal> {
+    write_and_sync(handle, content).map_err(PlantRefusal::Io)
+}
+
+
+pub fn write_and_sync(handle: &OwnedFd, content: &str) -> std::io::Result<()> {
     handle
         .try_clone()
         .map(File::from)
         .and_then(|mut file| file.write_all(content.as_bytes()).and_then(|()| file.sync_all()))
-        .map_err(PlantRefusal::Io)
 }
 
 
@@ -349,6 +465,7 @@ pub fn plant_role(role: &Role, limits: &Limits, ops: &PlantOps) -> Result<PlantR
             count,
             max: limits.max_honeytokens,
         })
+        .and_then(|()| check_unloaded(ops))
         .map(|()| {
             let empty = PlantReport {
                 planted: Vec::new(),
@@ -395,10 +512,15 @@ pub fn stage_text(ops: &PlantOps, parent: &OwnedFd, name: &str, text: &str) -> R
         openat(parent, staged.as_str(), CREATE_FLAGS, Mode::from_raw_mode(FILE_MODE))
             .map_err(PlantError::from)
             .and_then(|handle| {
-                let mut file = File::from(handle);
-                file.write_all(text.as_bytes()).and_then(|()| file.sync_all()).map_err(PlantError::Io)
+                write_and_sync(&handle, text)
+                    .map_err(PlantError::Io)
+                    .and_then(|()| renameat(parent, staged.as_str(), parent, name).map_err(PlantError::from))
+                    .or_else(|failure| {
+                        remove_partial(parent, staged.as_str(), &handle)
+                            .map_err(PlantError::from)
+                            .and(Err(failure))
+                    })
             })
-            .and_then(|()| renameat(parent, staged.as_str(), parent, name).map_err(PlantError::from))
     })
 }
 
