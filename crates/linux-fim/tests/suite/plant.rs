@@ -5,8 +5,9 @@ use linux_fim::error::{CliError, PlantError, PlantRefusal};
 use linux_fim::limits::default_limits;
 use linux_fim::model::{Honeytoken, HoneytokenKind, Limits, PlantReport, PlantedIdentity, Role};
 use linux_fim::plant::{
-    check_unloaded, directory_verdict, file_verdict, first_failure, list_from, loaded_count, made_verdict, no_step, os_claim, os_list_policies,
-    os_ops, os_random, plant_command, plant_role, planted_text, stat_device, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
+    check_unloaded, directory_verdict, file_verdict, first_cause, first_failure, list_first, list_from, loaded_count, log_reap_failure, made_verdict,
+    no_step, os_claim, os_list_policies, os_ops, os_random, pick_binary, plant_command, plant_role, planted_text, read_listing, reap, stat_device,
+    wait_until, FileFacts, PlantOps, FILE_MODE, PERMISSION_MASK,
 };
 use linux_fim::policy::kernel_device;
 use rustix::fs::inotify::{add_watch, init, CreateFlags, WatchFlags};
@@ -19,7 +20,8 @@ use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::{tempdir_in, TempDir};
 
 
@@ -27,6 +29,9 @@ const BYTE_RANGE: usize = 256;
 
 
 const TEST_DEADLINE: Duration = Duration::from_secs(30);
+
+
+const SMALL_WRITES: usize = 1000;
 
 
 const GROUP_WRITABLE: u32 = 0o770;
@@ -933,5 +938,80 @@ fn a_failed_output_rename_leaves_no_staged_file() -> TestResult {
 fn the_os_listing_reads_the_host_without_failing_on_a_missing_tetra() -> TestResult {
     let listing = os_list_policies();
     assert!(listing.map_or(true, |text| loaded_count(&text) < usize::MAX));
+    Ok(())
+}
+
+
+#[test]
+fn a_listing_written_then_left_running_is_cut_at_the_deadline() -> TestResult {
+    let child = Command::new("/usr/bin/tail")
+        .args(["-f", "/etc/hostname"])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let failure = read_listing(child, Duration::ZERO).err().ok_or("a running listing succeeded")?;
+    assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+    Ok(())
+}
+
+
+#[test]
+fn waiting_for_an_exit_stops_at_the_deadline_and_sees_an_exit() -> TestResult {
+    let mut running = Command::new("/bin/sleep").arg("3600").spawn()?;
+    let timed_out = wait_until(&mut running, Instant::now()).err().ok_or("a running child exited")?;
+    assert_eq!(timed_out.kind(), io::ErrorKind::TimedOut);
+    reap(&mut running);
+    assert!(running.try_wait()?.is_some());
+    let mut quick = Command::new("/bin/true").spawn()?;
+    assert!(wait_until(&mut quick, Instant::now() + TEST_DEADLINE)?.success());
+    Ok(())
+}
+
+
+#[test]
+fn a_listing_in_many_small_writes_is_accepted() -> TestResult {
+    let child = Command::new("/usr/bin/stdbuf")
+        .args(["-o0", "/usr/bin/seq", "1000"])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let listing = read_listing(child, TEST_DEADLINE)?;
+    assert_eq!(listing.lines().count(), SMALL_WRITES);
+    Ok(())
+}
+
+
+#[test]
+fn the_tetra_binary_is_the_first_existing_root_owned_candidate() -> TestResult {
+    let dir = tree()?;
+    let present = dir.path().join("tetra");
+    fs::write(&present, "")?;
+    let present_text = present.to_str().ok_or("path")?;
+    let owner = fs::metadata(&present)?.uid();
+    let candidates = ["/nonexistent/tetra", present_text];
+    assert_eq!(pick_binary(&candidates, owner)?, Some(present_text));
+    assert!(pick_binary(&candidates, owner + 1).is_err());
+    assert_eq!(pick_binary(&["/nonexistent/tetra"], owner)?, None);
+    assert!(pick_binary(&["/etc/passwd/tetra"], owner).is_err());
+    assert_eq!(
+        list_first(&["/nonexistent/tetra", "/bin/echo"], fs::metadata("/bin/echo")?.uid(), TEST_DEADLINE)?,
+        "tracingpolicy list\n"
+    );
+    assert_eq!(list_first(&["/nonexistent/tetra"], owner, TEST_DEADLINE)?, "");
+    log_reap_failure(&io::Error::other("reap"));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_cleanup_keeps_the_first_cause() -> TestResult {
+    assert!(matches!(first_cause(PlantError::OutputPath, Err(Errno::IO)), Err(PlantError::OutputPath)));
+    assert!(matches!(first_cause(PlantError::OutputPath, Ok(())), Err(PlantError::OutputPath)));
+    Ok(())
+}
+
+
+#[test]
+fn a_listing_failure_keeps_its_cause_as_the_source() -> TestResult {
+    let failure = PlantError::PolicyList(io::Error::other("tetra failed"));
+    assert_eq!(failure.source().ok_or("no source")?.to_string(), "tetra failed");
     Ok(())
 }

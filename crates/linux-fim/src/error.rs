@@ -131,8 +131,8 @@ pub enum PlantError {
     TooMany { count: usize, max: usize },
     #[error("{count} Ostyr FIM policies are loaded: plant before loading them, or the planter alerts on itself")]
     PoliciesLoaded { count: usize },
-    #[error("the loaded policies could not be listed: {0}")]
-    PolicyList(std::io::Error),
+    #[error("the loaded policies could not be listed")]
+    PolicyList(#[source] std::io::Error),
     #[error("planting decoys is supported on Linux only")]
     Unsupported,
     #[error("the output path has no directory and file name")]

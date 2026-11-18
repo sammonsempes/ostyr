@@ -14,8 +14,9 @@ use rustix::process::{geteuid, Uid};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 
@@ -43,7 +44,16 @@ pub const DIRECTORY_PROBE: usize = 3;
 pub const RANDOM_SOURCE: &str = "/dev/urandom";
 
 
-pub const TETRA_BINARY: &str = "/usr/local/bin/tetra";
+pub const TETRA_BINARIES: [&str; 2] = ["/usr/local/bin/tetra", "/usr/bin/tetra"];
+
+
+pub const TETRA_OWNER_UID: u32 = 0;
+
+
+pub const WAIT_POLL: Duration = Duration::from_millis(10);
+
+
+pub const MAX_WAIT_POLLS: usize = 1 << 20;
 
 
 pub const POLICY_PREFIX: &str = "ostyr-fim";
@@ -53,9 +63,6 @@ pub const MAX_LIST_BYTES: usize = 1 << 20;
 
 
 pub const READ_CHUNK_BYTES: usize = 4096;
-
-
-pub const MAX_LIST_READS: usize = MAX_LIST_BYTES / READ_CHUNK_BYTES + 1;
 
 
 pub const LIST_DEADLINE: Duration = Duration::from_secs(30);
@@ -138,9 +145,29 @@ pub fn os_random(buffer: &mut [u8]) -> std::io::Result<()> {
 }
 
 
-/// Lists the policies with the real `tetra`, within `LIST_DEADLINE`.
+/// Lists the policies with the real `tetra`, within `LIST_DEADLINE`; no binary at any known path means no policy is loaded.
 pub fn os_list_policies() -> std::io::Result<String> {
-    list_from(TETRA_BINARY, LIST_DEADLINE)
+    list_first(&TETRA_BINARIES, TETRA_OWNER_UID, LIST_DEADLINE)
+}
+
+
+/// Lists with the first candidate that `pick_binary` accepts; none at all means no policy is loaded.
+pub fn list_first(candidates: &[&str], owner: u32, deadline: Duration) -> std::io::Result<String> {
+    pick_binary(candidates, owner).and_then(|found| found.map_or(Ok(String::new()), |binary| list_from(binary, deadline)))
+}
+
+
+/// The first candidate that exists; one not owned by `owner` is an error, so a root process never runs it and the check never reads "missing".
+pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Option<&'a str>> {
+    candidates
+        .iter()
+        .find_map(|path| match std::fs::metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(error)),
+            Ok(found) if found.uid() == owner => Some(Ok(*path)),
+            Ok(_) => Some(Err(std::io::Error::other("tetra is not owned by root"))),
+        })
+        .transpose()
 }
 
 
@@ -148,6 +175,7 @@ pub fn os_list_policies() -> std::io::Result<String> {
 pub fn list_from(binary: &str, deadline: Duration) -> std::io::Result<String> {
     match Command::new(binary)
         .args(["tracingpolicy", "list"])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -161,16 +189,19 @@ pub fn list_from(binary: &str, deadline: Duration) -> std::io::Result<String> {
 
 /// The child's output, kept only when it succeeded within the deadline and `MAX_LIST_BYTES`; a child that overruns is killed and reaped.
 pub fn read_listing(mut child: Child, deadline: Duration) -> std::io::Result<String> {
+    let until = Instant::now() + deadline;
     let read = child
         .stdout
         .take()
         .ok_or(std::io::Error::other("no output pipe"))
-        .and_then(|mut out| read_until(&mut out, Instant::now() + deadline));
-    let status = if read.is_ok() {
-        child.wait()
-    } else {
-        child.kill().and_then(|()| child.wait())
-    };
+        .and_then(|mut out| read_until(&mut out, until));
+    let status = read
+        .as_ref()
+        .map_err(|error| std::io::Error::from(error.kind()))
+        .and_then(|_| wait_until(&mut child, until));
+    if status.is_err() {
+        reap(&mut child);
+    }
     let bytes = read?;
     status.and_then(|done| {
         done.success()
@@ -180,18 +211,44 @@ pub fn read_listing(mut child: Child, deadline: Duration) -> std::io::Result<Str
 }
 
 
-/// Reads to end of file, each read waiting at most until `until`; a listing longer than `MAX_LIST_BYTES` is an error.
+/// Kills the child and waits for it, logging a failure of either.
+pub fn reap(child: &mut Child) {
+    let outcome = child.kill().and_then(|()| child.wait());
+    outcome.err().iter().for_each(log_reap_failure);
+}
+
+
+/// Logs that the listing child could not be killed or waited for.
+pub fn log_reap_failure(error: &std::io::Error) {
+    let reason = error.to_string();
+    tracing::warn!(reason, "listing child not reaped");
+}
+
+
+/// Waits for the child to exit until `until`; past it the result is `TimedOut` and the child is still running.
+pub fn wait_until(child: &mut Child, until: Instant) -> std::io::Result<ExitStatus> {
+    (0..MAX_WAIT_POLLS)
+        .find_map(|_| match child.try_wait() {
+            Ok(None) if Instant::now() < until => {
+                std::thread::sleep(WAIT_POLL);
+                None
+            }
+            other => Some(other.and_then(|exited| exited.ok_or(std::io::Error::from(std::io::ErrorKind::TimedOut)))),
+        })
+        .unwrap_or(Err(std::io::Error::from(std::io::ErrorKind::TimedOut)))
+}
+
+
+/// Reads to end of file, each read waiting at most until `until`; over `MAX_LIST_BYTES` is an error (the byte cap bounds the reads too).
 pub fn read_until(out: &mut ChildStdout, until: Instant) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [u8::MIN; READ_CHUNK_BYTES];
     let mut done = false;
-    let mut reads = 0;
-    while !done && reads < MAX_LIST_READS {
+    while !done && bytes.len() <= MAX_LIST_BYTES {
         wait_readable(out, until)?;
         let count = out.read(&mut chunk)?;
         bytes.extend(chunk.iter().take(count));
         done = count == 0;
-        reads += 1;
     }
     done.then_some(bytes).ok_or(std::io::Error::other("listing too long"))
 }
@@ -515,13 +572,23 @@ pub fn stage_text(ops: &PlantOps, parent: &OwnedFd, name: &str, text: &str) -> R
                 write_and_sync(&handle, text)
                     .map_err(PlantError::Io)
                     .and_then(|()| renameat(parent, staged.as_str(), parent, name).map_err(PlantError::from))
-                    .or_else(|failure| {
-                        remove_partial(parent, staged.as_str(), &handle)
-                            .map_err(PlantError::from)
-                            .and(Err(failure))
-                    })
+                    .or_else(|failure| first_cause(failure, remove_partial(parent, staged.as_str(), &handle)))
             })
     })
+}
+
+
+/// The failure that started the cleanup stays the error; a failed cleanup is only logged.
+pub fn first_cause(failure: PlantError, cleanup: Result<(), Errno>) -> Result<(), PlantError> {
+    cleanup.err().iter().for_each(log_cleanup_failure);
+    Err(failure)
+}
+
+
+/// Logs that the staged file could not be removed.
+pub fn log_cleanup_failure(errno: &Errno) {
+    let reason = errno.to_string();
+    tracing::warn!(reason, "staged file not removed");
 }
 
 
