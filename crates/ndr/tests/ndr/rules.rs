@@ -271,3 +271,26 @@ fn a_work_directory_others_can_write_is_refused_before_any_run() -> TestResult {
     assert_eq!(fs::read_dir(fake.work_dir.path())?.count(), 0);
     Ok(())
 }
+
+
+#[test]
+fn a_non_utf8_rule_file_never_puts_its_bytes_in_an_error() -> TestResult {
+    assert!(logging_on());
+    let dir = tempfile::tempdir()?;
+    write_rule(dir.path(), "a.yar", EICAR_RULE)?;
+    let fake = fixture(FAKE_YR)?;
+    let current = load_rules(&fake.yr, dir.path(), &Limits::default())?;
+    let current_file = current.compiled.clone();
+    fs::write(dir.path().join("b.yar"), b"\x30\x82\x01\x02MARKER\xff\xfe")?;
+    let error = load_rules(&fake.yr, dir.path(), &Limits::default()).err().ok_or("the load must fail")?;
+    let first: Option<&dyn std::error::Error> = Some(&error);
+    let chain: Vec<&dyn std::error::Error> = std::iter::successors(first, |cause| cause.source()).collect();
+    let mut texts: Vec<String> = chain.iter().flat_map(|cause| [cause.to_string(), format!("{cause:?}")]).collect();
+    texts.push(describe(&error));
+    assert!(chain.len() > 1);
+    assert!(texts.iter().all(|text| !text.contains("MARKER") && !text.contains("48, 130")));
+    assert!(describe(&error).contains("not valid UTF-8"));
+    let kept = swap_rules(&fake.yr, current, dir.path(), &Limits::default());
+    assert_eq!(kept.compiled, current_file);
+    Ok(())
+}

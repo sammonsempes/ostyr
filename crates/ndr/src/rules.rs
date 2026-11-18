@@ -65,6 +65,9 @@ pub fn list_rule_files(dir: &Path, limits: &Limits) -> Result<Vec<PathBuf>, NdrE
 }
 
 
+const NOT_UTF8: &str = "the rule file is not valid UTF-8";
+
+
 /// Reads one rule file under the size cap; a larger file is refused.
 pub fn read_rule(path: &Path, max_bytes: u64) -> Result<String, NdrError> {
     let read_error = |source| NdrError::RuleRead {
@@ -76,7 +79,7 @@ pub fn read_rule(path: &Path, max_bytes: u64) -> Result<String, NdrError> {
         path: path.to_path_buf(),
         max_bytes,
     })?;
-    String::from_utf8(bytes).map_err(|source| read_error(io::Error::new(io::ErrorKind::InvalidData, source)))
+    String::from_utf8(bytes).map_err(|_| read_error(io::Error::new(io::ErrorKind::InvalidData, NOT_UTF8)))
 }
 
 
