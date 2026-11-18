@@ -1,6 +1,7 @@
-use crate::api::{encode_asset_id, valid_asset_id, valid_case_id, MAX_COMMENT_CHARS};
+use crate::api::{encode_asset_id, risk_kind, valid_asset_id, valid_case_id, MAX_COMMENT_CHARS, MAX_RISK_VALUE, RISK_KINDS};
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CommentView, Language,
+    RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
@@ -114,6 +115,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/alerts", text(language, "nav_alerts")))
                         (go("/cases", text(language, "nav_cases")))
                         (go("/assets", text(language, "nav_assets")))
+                        (go("/risk", text(language, "nav_risk")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -662,6 +664,146 @@ pub fn case_page_with(language: Language, csrf: &str, case: &CaseDetailView, com
             @if let Some(stored) = comment { (comment_notice(language, stored)) }
             (case_forms(language, csrf, case))
             (go("/cases",text(language, "case_back")))
+        },
+    )
+}
+
+
+/// A fixed key per bound name of the risk API; any other name is the fixed "unknown" text.
+pub fn risk_limit_key(limit: &str) -> &'static str {
+    match limit {
+        "alerts" => "risk_limit_alerts",
+        "contributions" => "risk_limit_contributions",
+        "entities" => "risk_limit_entities",
+        _ => "unknown",
+    }
+}
+
+
+pub fn risk_kind_key(kind: &str) -> &'static str {
+    match kind {
+        "host" => "risk_kind_host",
+        _ => "risk_kind_user",
+    }
+}
+
+
+/// The visible banner of a partial computation: the bound by its fixed name and the two numbers.
+pub fn risk_banner(language: Language, truncated: &Option<RiskTruncatedView>) -> Markup {
+    html! {
+        @if let Some(bound) = truncated {
+            div class="notice" {
+                (text(language, "risk_truncated")
+                    .replace("{limit}", text(language, risk_limit_key(&bound.limit)))
+                    .replace("{read}", &bound.read.to_string())
+                    .replace("{cap}", &bound.cap.to_string()))
+            }
+        }
+    }
+}
+
+
+/// A row is readable only for a kind of the API, a score in 0 to 100 and an id that renders as itself.
+pub fn risk_readable(entity: &RiskEntityView) -> bool {
+    risk_kind(&entity.kind).is_some() && entity.value <= MAX_RISK_VALUE && valid_asset_id(&entity.id)
+}
+
+
+pub fn risk_bar(value: u64) -> Markup {
+    html! {
+        meter min="0" max=(MAX_RISK_VALUE) value=(value) { (value) } " " (value)
+    }
+}
+
+
+pub fn risk_row(language: Language, entity: &RiskEntityView) -> Markup {
+    if risk_readable(entity) {
+        let link = format!("/risk/{}/{}", entity.kind, encode_asset_id(&entity.id));
+        html! {
+            tr {
+                td { (text(language, risk_kind_key(&entity.kind))) }
+                td { (go(&link, &entity.id)) }
+                td { (risk_bar(entity.value)) }
+                td { (entity.contributions_used) }
+                td { (entity.contributions_dropped) }
+            }
+        }
+    } else {
+        html! {
+            tr { td colspan="5" { (text(language, "risk_unreadable")) } }
+        }
+    }
+}
+
+
+pub fn risk_filter(language: Language) -> Markup {
+    html! {
+        (go("/risk", text(language, "risk_kind_all")))
+        @for kind in RISK_KINDS {
+            form method="get" action="/risk" class="go" {
+                input type="hidden" name="kind" value=(kind);
+                button type="submit" { (text(language, risk_kind_key(kind))) }
+            }
+        }
+    }
+}
+
+
+pub fn risk_page(language: Language, csrf: &str, list: &RiskListView) -> Markup {
+    layout(
+        language,
+        "title_risk",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_risk")) }
+            (risk_filter(language))
+            div { (text(language, "risk_computed")) " " (format_time(language, list.computed_at)) }
+            (risk_banner(language, &list.truncated))
+            @if list.entities.is_empty() {
+                div { (text(language, "risk_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_kind")) }
+                            th { (text(language, "col_risk_entity")) }
+                            th { (text(language, "col_risk_value")) }
+                            th { (text(language, "col_risk_used")) }
+                            th { (text(language, "col_risk_dropped")) }
+                        }
+                    }
+                    tbody {
+                        @for entity in &list.entities { (risk_row(language, entity)) }
+                    }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn risk_entity_page(language: Language, csrf: &str, detail: &RiskDetailView) -> Markup {
+    let entity = &detail.entity;
+    layout(
+        language,
+        "title_risk_entity",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_risk_entity")) " " (entity.id) }
+            (risk_banner(language, &detail.truncated))
+            dl {
+                dt { (text(language, "col_kind")) }
+                dd { (text(language, risk_kind_key(&entity.kind))) }
+                dt { (text(language, "col_risk_value")) }
+                dd { (risk_bar(entity.value)) }
+                dt { (text(language, "col_risk_used")) }
+                dd { (entity.contributions_used) }
+                dt { (text(language, "col_risk_dropped")) }
+                dd { (entity.contributions_dropped) }
+                dt { (text(language, "risk_computed")) }
+                dd { (format_time(language, detail.computed_at)) }
+            }
+            (go("/risk", text(language, "risk_back")))
         },
     )
 }

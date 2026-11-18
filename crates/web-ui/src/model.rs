@@ -163,6 +163,43 @@ pub struct AssetPageView {
 }
 
 
+/// The bound that stopped a risk computation; `limit` stays text and is shown through a fixed table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RiskTruncatedView {
+    pub limit: String,
+    pub read: u64,
+    pub cap: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RiskEntityView {
+    pub kind: String,
+    pub id: String,
+    pub value: u64,
+    pub contributions_used: u64,
+    pub contributions_dropped: u64,
+}
+
+
+/// `GET /risk/entities`; the `informational` and `refused` fields of the API are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RiskListView {
+    pub computed_at: i64,
+    pub alerts_read: u64,
+    pub truncated: Option<RiskTruncatedView>,
+    pub entities: Vec<RiskEntityView>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RiskDetailView {
+    pub computed_at: i64,
+    pub truncated: Option<RiskTruncatedView>,
+    pub entity: RiskEntityView,
+}
+
+
 /// The API token stays on the server; the browser holds only the random session identifier.
 pub struct Session {
     pub username: String,
