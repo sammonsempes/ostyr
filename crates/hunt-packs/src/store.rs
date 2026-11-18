@@ -13,7 +13,7 @@ use thiserror::Error;
 pub const MIGRATION_NAMESPACE: &str = "hunt_packs";
 
 
-pub const MIGRATIONS: [Migration; 4] = [
+pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "hunt_packs_0001",
         sql: include_str!("../migrations/hunt_packs_0001.sql"),
@@ -29,6 +29,10 @@ pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "hunt_packs_0004",
         sql: include_str!("../migrations/hunt_packs_0004.sql"),
+    },
+    Migration {
+        version: "hunt_packs_0005",
+        sql: include_str!("../migrations/hunt_packs_0005.sql"),
     },
 ];
 
@@ -64,9 +68,9 @@ pub const ID_BYTE_CAP: i64 = MAX_ID_CHARS as i64;
 pub const OVERSIZED_REPORT_CAP: i64 = 1000;
 
 
-/// Params: `$2` cursor window end, `$3` cursor pack id, `$4` limit, `$5` id byte cap. Rows after the cursor in `(window_end, pack_id)` order.
+/// Params: `$2` cursor window end, `$3` cursor pack id, `$4` limit. Rows after the cursor in `(window_end, pack_id)` order; the literal 64 is the `hunt_packs_0005` partial index predicate.
 pub const LIST_SQL: &str = "SELECT pack_id, window_start, window_end, matches, max_matches FROM hunt_pack_findings \
-    WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= $5::bigint ORDER BY window_end, pack_id LIMIT $4";
+    WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4";
 
 
 /// Params: `$2` count limit. One row: the tenant's rows with a pack id over 64 bytes (the literal of the `hunt_packs_0004` partial index).
@@ -215,7 +219,7 @@ where
     checked_time(since_end).map_err(StateError::OutOfRange)?;
     let capped = limit.clamp(1, MAX_FINDINGS_PAGE);
     let cursor = (Param::Int(since_end), Param::Text(since_pack.to_owned()));
-    let rows = exec(&scope, LIST_SQL, vec![cursor.0, cursor.1, Param::Int(capped), Param::Int(ID_BYTE_CAP)]).await?;
+    let rows = exec(&scope, LIST_SQL, vec![cursor.0, cursor.1, Param::Int(capped)]).await?;
     let full = i64::try_from(rows.len()).is_ok_and(|read| read >= capped);
     let next = rows.last().filter(|_| full).map(|row| (row.window_end, row.pack_id.clone()));
     let (valid, refused): (Vec<FindingRow>, Vec<FindingRow>) = rows.into_iter().partition(|row| is_pack_id(&row.pack_id));
