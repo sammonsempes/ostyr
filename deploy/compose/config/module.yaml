@@ -1,0 +1,14 @@
+name: ostyr-platform
+version: 0.0.0
+tenant: default
+listen: 0.0.0.0:8443
+settings:
+  modules: alerts, cases, cmdb, risk
+  pg_settings: /etc/ostyr/pg.yaml
+  risk.weights_file: /etc/ostyr/risk-weights.yaml
+  tls_certificate: /run/secrets/api_tls_cert
+  tls_key: /run/secrets/api_tls_key
+  accounts_store: /var/lib/ostyr/accounts.json
+  audit_log: /var/lib/ostyr/audit.log
+  key_file: /run/secrets/store_key
+  compromised_list: /etc/ostyr/compromised.txt

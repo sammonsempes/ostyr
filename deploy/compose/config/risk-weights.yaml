@@ -1,0 +1,5 @@
+severity_points: {low: 1, medium: 5, high: 10, critical: 20}
+rare_threshold_per_million: 1000
+entity_rare_bonus_permille: 500
+fleet_rare_bonus_permille: 500
+full_score_points: 100

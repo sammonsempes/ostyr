@@ -1,0 +1,5 @@
+host: postgres
+database: ostyr
+user: ostyr
+password_file: /run/secrets/pg_password
+ca_file: /run/secrets/pg_ca
