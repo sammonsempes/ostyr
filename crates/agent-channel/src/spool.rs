@@ -377,7 +377,13 @@ pub fn quarantine(path: &Path, rejected: &[EventBatch], max_bytes: u64) -> io::R
         };
         let added = rejected
             .iter()
-            .map(|batch| String::from_utf8(batch.ecs_json.clone()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
+            .enumerate()
+            .map(|(index, batch)| {
+                String::from_utf8(batch.ecs_json.clone()).map_err(|error| {
+                    let cause = crate::app::invalid_utf8(&error);
+                    io::Error::new(io::ErrorKind::InvalidData, format!("rejected batch {index}: {cause}"))
+                })
+            })
             .collect::<io::Result<Vec<_>>>()?;
         lines.extend(added);
         let mut total: u64 = lines.iter().map(|line| line.len() as u64 + 1).sum();
