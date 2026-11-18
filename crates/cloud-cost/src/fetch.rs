@@ -1,7 +1,7 @@
 use crate::fetch_error::{FetchError, Refusal};
-use crate::fetch_model::{FetchEnv, FetchReport, FetchSettings, FetchSource, ListedObject, ObjectOutcome, SourceRun};
+use crate::fetch_model::{FetchEnv, FetchReport, FetchSettings, FetchSource, ListedObject, ObjectOutcome, Remembered, SourceRun};
 use crate::fetch_settings::validate_source;
-use crate::ledger::{object_state, read_cursor, record_loaded, record_refused, write_cursor, LedgerState};
+use crate::ledger::{object_state, read_cursor, record_loaded, record_refused, record_transient, write_cursor, LedgerState};
 use crate::listing::{get_body, list_objects, open_bucket, PRESIGN_SECONDS};
 use crate::load::LoadError;
 use crate::source::read_export;
@@ -20,6 +20,10 @@ pub const MAX_CREDENTIAL_BYTES: u64 = 1024;
 
 
 pub const DIGEST_CHARS: usize = 16;
+
+
+/// Transient refusals per source and round: after them the rest of the listing is deferred, so a round downloads at most `max_objects_per_run` plus this.
+pub const TRANSIENT_BUDGET: usize = 10;
 
 
 pub const GZIP_SUFFIX: &str = ".gz";
@@ -105,11 +109,22 @@ pub fn load_class(error: &LoadError) -> Option<InsertClass> {
 }
 
 
+/// A load refusal decided by the file alone is permanent for that ETag; the others are transient.
+pub fn load_refusal(error: &LoadError) -> Refusal {
+    match error {
+        LoadError::NoCoveredDay => Refusal::NoCoveredDay,
+        LoadError::TooManyAccounts => Refusal::TooManyAccounts,
+        LoadError::AccountTooLong => Refusal::AccountTooLong,
+        _other => Refusal::Load(load_class(error)),
+    }
+}
+
+
 /// Download, parse, load into ClickHouse, then the ledger row: the ledger is written only after the load succeeded.
 pub fn fetch_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> Result<(), Refusal> {
     let bytes = object_bytes(run, object)?;
     let export = read_export(Cursor::new(bytes), run.env.limits, &run.source.tenant).map_err(|_error| Refusal::Unreadable)?;
-    let outcome = (run.env.load)(&run.source.tenant, &export).map_err(|error| Refusal::Load(load_class(&error)))?;
+    let outcome = (run.env.load)(&run.source.tenant, &export).map_err(|error| load_refusal(&error))?;
     if let Some(failure) = outcome.failure {
         Err(Refusal::Load(Some(failure.class)))
     } else {
@@ -118,22 +133,42 @@ pub fn fetch_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> Res
 }
 
 
-/// A refusal that only a new version of the object can change: it is kept in the ledger and the object is not downloaded again.
-pub fn permanent_reason(refusal: &Refusal) -> Option<&'static str> {
+/// A permanent refusal is only changed by a new version of the object; a transient one is retried after a backoff.
+pub fn remembered(refusal: &Refusal) -> Remembered {
     match refusal {
-        Refusal::TooLarge => Some("too-large"),
-        Refusal::BadGzip => Some("bad-gzip"),
-        Refusal::Unreadable => Some("unreadable"),
-        _other => None,
+        Refusal::TooLarge => Remembered::Permanent("too-large"),
+        Refusal::BadGzip => Remembered::Permanent("bad-gzip"),
+        Refusal::Unreadable => Remembered::Permanent("unreadable"),
+        Refusal::NoCoveredDay => Remembered::Permanent("no-day"),
+        Refusal::TooManyAccounts => Remembered::Permanent("too-many-accounts"),
+        Refusal::AccountTooLong => Remembered::Permanent("account-too-long"),
+        Refusal::Status(_status) => Remembered::Transient("status"),
+        Refusal::Transport(_class) => Remembered::Transient("transport"),
+        Refusal::Load(_class) => Remembered::Transient("load"),
+        Refusal::Ledger => Remembered::Transient("ledger"),
     }
 }
 
 
-pub fn remember_refusal(run: &SourceRun<'_>, object: &ListedObject, refusal: &Refusal, now: u64) {
-    if let Some(reason) = permanent_reason(refusal) {
-        let written = record_refused(run.env.exec, &run.source.tenant, &run.source.id, object, reason, now);
-        if written.is_err() {
-            warn!("refusal not recorded: key digest {}", key_digest(&object.key));
+/// A failed ledger write is only logged: the object is then fetched again next round, as before.
+pub fn remember_refusal(run: &SourceRun<'_>, object: &ListedObject, refusal: &Refusal, attempts: u32, now: u64) {
+    let (exec, tenant, id) = (run.env.exec, &run.source.tenant, &run.source.id);
+    let written = match remembered(refusal) {
+        Remembered::Permanent(reason) => record_refused(exec, tenant, id, object, reason, now),
+        Remembered::Transient(reason) => record_transient(exec, tenant, id, object, reason, attempts.saturating_add(1), now),
+    };
+    if written.is_err() {
+        warn!("refusal not recorded: key digest {}", key_digest(&object.key));
+    }
+}
+
+
+pub fn attempt_object(run: &SourceRun<'_>, object: &ListedObject, attempts: u32, now: u64) -> ObjectOutcome {
+    match fetch_object(run, object, now) {
+        Ok(()) => ObjectOutcome::Loaded,
+        Err(refusal) => {
+            remember_refusal(run, object, &refusal, attempts, now);
+            ObjectOutcome::Refused(refusal)
         }
     }
 }
@@ -144,31 +179,37 @@ pub fn process_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> O
         Err(_failure) => ObjectOutcome::Refused(Refusal::Ledger),
         Ok(LedgerState::Loaded) => ObjectOutcome::AlreadyLoaded,
         Ok(LedgerState::Refused) => ObjectOutcome::AlreadyRefused,
-        Ok(LedgerState::New) => match fetch_object(run, object, now) {
-            Ok(()) => ObjectOutcome::Loaded,
-            Err(refusal) => {
-                remember_refusal(run, object, &refusal, now);
-                ObjectOutcome::Refused(refusal)
-            }
-        },
+        Ok(LedgerState::Transient { next_try, .. }) if next_try > now => ObjectOutcome::InBackoff,
+        Ok(LedgerState::Transient { attempts, .. }) => attempt_object(run, object, attempts, now),
+        Ok(LedgerState::New) => attempt_object(run, object, 0, now),
     }
 }
 
 
-/// Objects past `max_objects_per_run` attempts are not even looked up this round and count as `deferred`.
+/// Every refused object of the round is named, the budget keeps the list short.
+pub fn refuse(mut report: FetchReport, object: &ListedObject, refusal: Refusal) -> FetchReport {
+    let digest = key_digest(&object.key);
+    match remembered(&refusal) {
+        Remembered::Permanent(_reason) => report.permanent_refused += 1,
+        Remembered::Transient(_reason) => report.transient_refused += 1,
+    }
+    warn!("object refused: key digest {digest}, {refusal:?}");
+    report.refused.push((digest, refusal));
+    report
+}
+
+
+/// At most `max_objects_per_run` loads or permanent refusals plus `TRANSIENT_BUDGET` transient ones per round; the rest is `deferred`.
 pub fn handle_object(mut report: FetchReport, run: &SourceRun<'_>, object: &ListedObject, now: u64) -> FetchReport {
-    if report.loaded + report.refused.len() >= run.source.max_objects_per_run {
+    if report.loaded + report.permanent_refused >= run.source.max_objects_per_run || report.transient_refused >= TRANSIENT_BUDGET {
         report.deferred += 1;
     } else {
         match process_object(run, object, now) {
             ObjectOutcome::Loaded => report.loaded += 1,
             ObjectOutcome::AlreadyLoaded => report.already_loaded += 1,
             ObjectOutcome::AlreadyRefused => report.already_refused += 1,
-            ObjectOutcome::Refused(refusal) => {
-                let digest = key_digest(&object.key);
-                warn!("object refused: key digest {digest}, {refusal:?}");
-                report.refused.push((digest, refusal));
-            }
+            ObjectOutcome::InBackoff => report.in_backoff += 1,
+            ObjectOutcome::Refused(refusal) => report = refuse(report, object, refusal),
         }
     }
     report
@@ -211,6 +252,9 @@ pub fn merge_reports(mut total: FetchReport, found: FetchReport) -> FetchReport 
     total.loaded += found.loaded;
     total.deferred += found.deferred;
     total.incomplete_listings += found.incomplete_listings;
+    total.in_backoff += found.in_backoff;
+    total.permanent_refused += found.permanent_refused;
+    total.transient_refused += found.transient_refused;
     total.refused.extend(found.refused);
     total.failed_sources.extend(found.failed_sources);
     total

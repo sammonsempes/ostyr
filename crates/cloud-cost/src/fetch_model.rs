@@ -137,6 +137,9 @@ pub struct FetchReport {
     pub loaded: usize,
     pub deferred: usize,
     pub incomplete_listings: usize,
+    pub in_backoff: usize,
+    pub permanent_refused: usize,
+    pub transient_refused: usize,
     pub refused: Vec<(String, Refusal)>,
     pub failed_sources: Vec<(String, FetchError)>,
 }
@@ -147,7 +150,16 @@ pub enum ObjectOutcome {
     Loaded,
     AlreadyLoaded,
     AlreadyRefused,
+    InBackoff,
     Refused(Refusal),
+}
+
+
+/// How the ledger remembers a refusal: a permanent one is never retried for that ETag, a transient one is retried after a backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remembered {
+    Permanent(&'static str),
+    Transient(&'static str),
 }
 
 

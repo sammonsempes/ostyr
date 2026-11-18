@@ -32,6 +32,10 @@ pub const MAX_XML_DEPTH: usize = 6;
 pub const MAX_ETAG_BYTES: usize = 128;
 
 
+/// The ledger stores the size as a `bigint`: a larger one skips that object alone.
+pub const MAX_OBJECT_SIZE: u64 = i64::MAX as u64;
+
+
 pub const PRESIGN_SECONDS: u64 = 60;
 
 
@@ -125,7 +129,7 @@ pub fn close(state: &mut Reading) -> Result<(), FetchError> {
     match view.as_slice() {
         [ROOT, CONTENTS, "Key"] => state.pending.key = Some(text),
         [ROOT, CONTENTS, "ETag"] => state.pending.etag = Some(text),
-        [ROOT, CONTENTS, "Size"] => state.pending.size = text.parse::<u64>().ok(),
+        [ROOT, CONTENTS, "Size"] => state.pending.size = text.parse::<u64>().ok().filter(|size| *size <= MAX_OBJECT_SIZE),
         [ROOT, CONTENTS] => state.contents.push(take(&mut state.pending)),
         [ROOT, "IsTruncated"] => state.truncated = text == "true",
         [ROOT, "NextContinuationToken"] => state.token = Some(text),
