@@ -2,10 +2,14 @@ use crate::canonical::{render_line, restrict_parameters, seal};
 use crate::error::AuditError;
 use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::verify::verify;
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
+use rustix::io::Errno;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -95,11 +99,96 @@ pub fn check_private(_file: &File) -> Result<(), AuditError> {
 }
 
 
+pub const MAX_LOG_BYTES: u64 = 1_073_741_824;
+
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct HandleFacts {
+    pub regular: bool,
+    pub owner: u32,
+    pub links: u64,
+    pub mode: u32,
+    pub size: u64,
+}
+
+
+#[cfg(unix)]
+pub fn handle_facts(file: &File) -> Result<HandleFacts, AuditError> {
+    let metadata = file.metadata()?;
+    Ok(HandleFacts {
+        regular: metadata.file_type().is_file(),
+        owner: metadata.uid(),
+        links: metadata.nlink(),
+        mode: metadata.mode(),
+        size: metadata.len(),
+    })
+}
+
+
+#[cfg(unix)]
+pub fn judge_handle(facts: &HandleFacts, effective_uid: u32, max_bytes: u64) -> Result<(), AuditError> {
+    if !facts.regular {
+        Err(AuditError::NotRegularFile)
+    } else if facts.owner != effective_uid {
+        Err(AuditError::ForeignOwner {
+            owner: facts.owner,
+            expected: effective_uid,
+        })
+    } else if facts.links != 1 {
+        Err(AuditError::LinkedFile { links: facts.links })
+    } else if facts.mode & GROUP_OTHER_MASK != 0 {
+        Err(AuditError::InsecurePermissions {
+            mode: facts.mode & !FILE_TYPE_MASK,
+        })
+    } else if facts.size > max_bytes {
+        Err(AuditError::LogTooLarge {
+            size: facts.size,
+            max: max_bytes,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+
+#[cfg(unix)]
+pub fn open_nonblocking(path: &Path) -> Result<File, AuditError> {
+    let flags = OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR).map(File::from).map_err(|errno| {
+        if errno == Errno::LOOP {
+            AuditError::SymlinkRefused
+        } else {
+            AuditError::Io(errno.into())
+        }
+    })
+}
+
+
+#[cfg(unix)]
+pub fn open_checked(path: &Path, max_bytes: u64) -> Result<File, AuditError> {
+    let file = open_nonblocking(path)?;
+    judge_handle(&handle_facts(&file)?, rustix::process::geteuid().as_raw(), max_bytes)?;
+    Ok(file)
+}
+
+
+#[cfg(not(unix))]
+pub fn open_checked(path: &Path, _max_bytes: u64) -> Result<File, AuditError> {
+    Ok(owner_only(OpenOptions::new().read(true).append(true).create(true)).open(path)?)
+}
+
+
 /// Opens (creating if needed) an append-only file, verifies its existing chain and continues it.
 pub fn open_file_log(path: &Path) -> Result<AuditLog<File>, AuditError> {
-    let file = owner_only(OpenOptions::new().read(true).append(true).create(true)).open(path)?;
-    check_private(&file)?;
-    let report = verify(BufReader::new(&file), None)?;
+    open_file_log_capped(path, MAX_LOG_BYTES)
+}
+
+
+/// The handle is opened without following a link or blocking, judged by `fstat`, and its chain read stops at `max_bytes`.
+pub fn open_file_log_capped(path: &Path, max_bytes: u64) -> Result<AuditLog<File>, AuditError> {
+    let file = open_checked(path, max_bytes)?;
+    let report = verify(BufReader::new((&file).take(max_bytes)), None)?;
     Ok(new_log(file, &report.head, sync_file))
 }
 
