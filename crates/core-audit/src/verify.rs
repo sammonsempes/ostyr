@@ -1,7 +1,7 @@
 use crate::canonical::{compute_hash, render_line};
 use crate::error::{AuditError, BrokenReason};
 use crate::model::{Record, GENESIS_HASH};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,11 +27,14 @@ pub fn check_line(bytes: &[u8], previous_hash: &str) -> Result<Record, BrokenRea
 }
 
 
-/// Raw lines including their newline; an I/O error is yielded as an item and stops a `try_fold`.
-pub fn raw_lines<Input: BufRead>(mut input: Input) -> impl Iterator<Item = io::Result<Vec<u8>>> {
+pub const MAX_RECORD_BYTES: usize = 1_048_576;
+
+
+/// Raw lines including their newline, each read through at most `max_line + 1` bytes; an I/O error is yielded as an item and stops a `try_fold`.
+pub fn raw_lines_capped<Input: BufRead>(mut input: Input, max_line: usize) -> impl Iterator<Item = io::Result<Vec<u8>>> {
     std::iter::from_fn(move || {
         let mut line = Vec::new();
-        match input.read_until(b'\n', &mut line) {
+        match (&mut input).take(max_line as u64 + 1).read_until(b'\n', &mut line) {
             Ok(0) => None,
             Ok(_) => Some(Ok(line)),
             Err(error) => Some(Err(error)),
@@ -40,16 +43,34 @@ pub fn raw_lines<Input: BufRead>(mut input: Input) -> impl Iterator<Item = io::R
 }
 
 
+pub fn raw_lines<Input: BufRead>(input: Input) -> impl Iterator<Item = io::Result<Vec<u8>>> {
+    raw_lines_capped(input, MAX_RECORD_BYTES)
+}
+
+
 /// Reports the first broken record by 1-based line; `expected_head` also refuses a truncated tail.
 pub fn verify<Input: BufRead>(input: Input, expected_head: Option<&str>) -> Result<VerifyReport, AuditError> {
-    let (records, head) = raw_lines(input)
+    verify_capped(input, expected_head, MAX_RECORD_BYTES)
+}
+
+
+/// A line longer than `max_line` bytes is refused by its line number before it is parsed.
+pub fn verify_capped<Input: BufRead>(input: Input, expected_head: Option<&str>, max_line: usize) -> Result<VerifyReport, AuditError> {
+    let (records, head) = raw_lines_capped(input, max_line)
         .enumerate()
         .try_fold((0, GENESIS_HASH.to_owned()), |(_, previous), (index, line)| {
             let bytes = line?;
             let line_number = index + 1;
-            check_line(&bytes, &previous)
-                .map(|record| (line_number, record.hash))
-                .map_err(|reason| AuditError::Broken { line: line_number, reason })
+            if bytes.len() > max_line {
+                Err(AuditError::RecordTooLong {
+                    line: line_number,
+                    max: max_line,
+                })
+            } else {
+                check_line(&bytes, &previous)
+                    .map(|record| (line_number, record.hash))
+                    .map_err(|reason| AuditError::Broken { line: line_number, reason })
+            }
         })?;
     check_head(expected_head, head).map(|actual| VerifyReport { records, head: actual })
 }

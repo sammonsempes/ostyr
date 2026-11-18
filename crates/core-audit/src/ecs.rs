@@ -3,7 +3,7 @@ use crate::error::AuditError;
 use crate::model::{Outcome, Record, GENESIS_HASH};
 use crate::verify::{check_line, raw_lines, same_as_first_pass, verify};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::io::{BufRead, Write};
 
 
 pub const ECS_VERSION: &str = "8.11";
@@ -57,7 +57,7 @@ pub fn to_ecs(record: &Record) -> Value {
 
 
 /// Pass one verifies the whole chain (and the anchor, given `expected_head`) without keeping records; pass two reopens the input and writes one ECS event per line.
-pub fn export<Input: BufRead, Output: Write, Open: FnMut() -> io::Result<Input>>(
+pub fn export<Input: BufRead, Output: Write, Open: FnMut() -> Result<Input, AuditError>>(
     mut open: Open,
     out: &mut Output,
     expected_head: Option<&str>,

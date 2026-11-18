@@ -35,7 +35,7 @@ const HASH_LENGTH: usize = 64;
 const REMOVED_LINE: usize = 2;
 
 
-fn replay(data: Vec<u8>) -> impl FnMut() -> io::Result<Cursor<Vec<u8>>> {
+fn replay(data: Vec<u8>) -> impl FnMut() -> Result<Cursor<Vec<u8>>, AuditError> {
     move || Ok(Cursor::new(data.clone()))
 }
 
@@ -145,7 +145,7 @@ fn export_reports_failures_of_the_second_pass() -> TestResult {
         if calls.get() == 1 {
             Ok(Cursor::new(data.clone()))
         } else {
-            Err(io::Error::other("injected reopen failure"))
+            Err(AuditError::Io(io::Error::other("injected reopen failure")))
         }
     };
     assert!(matches!(export(reopen_fails, &mut out, None), Err(AuditError::Io(_))));

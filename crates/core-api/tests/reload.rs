@@ -1445,13 +1445,14 @@ fn the_same_audit_file_through_dot_dot_is_not_a_move_and_keeps_the_chain() -> Te
 
 #[cfg(unix)]
 #[test]
-fn the_same_audit_file_through_a_symlink_is_not_a_move_and_keeps_the_chain() -> TestResult {
+fn a_symlink_as_the_audit_log_is_refused_and_the_old_log_is_kept() -> TestResult {
     let running = live("")?;
     let directory = running.dir.path();
     std::os::unix::fs::symlink(directory.join("audit.log"), directory.join("link.log"))?;
-    reload_with_audit_path(&running, &directory.join("link.log"))?;
-    let log = fs::read_to_string(directory.join("audit.log"))?;
-    assert!(!log.contains("audit_log moved"));
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    fs::write(&running.module_file, plain.replace("audit.log", "link.log"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("`audit_log`")));
+    assert!(fs::read_to_string(directory.join("audit.log"))?.contains("refused"));
     assert!(audit_chain_is_intact(&directory.join("audit.log"))?);
     Ok(())
 }
@@ -2778,5 +2779,22 @@ fn a_file_over_the_public_cap_is_refused_by_the_checked_reader() -> TestResult {
         core_api::server::read_public(&big),
         Err(StartupError::Config(ConfigError::TooLarge { .. }))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn a_fifo_at_a_new_audit_log_is_refused_audited_in_the_old_log_and_a_later_reload_applies() -> TestResult {
+    let running = live("")?;
+    let directory = running.dir.path();
+    let fifo = directory.join("fifo.log");
+    assert!(std::process::Command::new("mkfifo").arg("-m").arg("600").arg(&fifo).status()?.success());
+    let plain = module_text(directory, "example", LOOPBACK, "")?;
+    fs::write(&running.module_file, plain.replace("audit.log", "fifo.log"))?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { ref reason } if reason.contains("`audit_log`")));
+    let old_log = fs::read_to_string(directory.join("audit.log"))?;
+    assert!(old_log.contains("refused"));
+    fs::write(&running.module_file, plain.clone() + "  rate_max_requests: 2\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
     Ok(())
 }

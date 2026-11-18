@@ -19,8 +19,8 @@ use core_api::config::{api_config, oidc_files};
 use core_api::error::StartupError;
 use core_api::model::{ApiError, ApiIdentity, ApiState, CallbackQuery, OidcFiles, OidcRuntime, StateInputs};
 use core_api::oidc::{
-    binding_cookie, binding_of, callback_flow, count_callback_failure, load_oidc, provider_agent, read_secret, start_flow, start_response,
-    BINDING_COOKIE, PENDING_PER_SOURCE_MAX,
+    binding_cookie, binding_of, callback_flow, count_callback_failure, load_oidc, provider_agent, read_secret, secret_from, start_flow,
+    start_response, BINDING_COOKIE, PENDING_PER_SOURCE_MAX,
 };
 use core_api::routes::core_access;
 use core_api::state::{build_state, build_state_from_files, lock_auth, refresh_accounts};
@@ -1221,3 +1221,21 @@ fn an_oidc_configuration_that_is_not_utf8_is_a_startup_error() -> TestResult {
 
 
 const NOT_UTF8: &[u8] = &[u8::MAX];
+
+
+const MARKER_BYTES: &[u8] = &[0xAB, u8::MAX, 0xAB];
+
+
+#[test]
+fn a_non_utf8_file_error_keeps_no_byte_of_the_file() -> TestResult {
+    let dir = tempdir()?;
+    let files = oidc_files_in(dir.path(), CONFIG_TEXT)?;
+    fs::write(&files.config, MARKER_BYTES)?;
+    let error = load_oidc(&files, &builtin_catalog()).err().ok_or("accepted")?;
+    let secret_error = secret_from(MARKER_BYTES.to_vec()).err().ok_or("accepted")?;
+    for text in [format!("{error} {error:?}"), format!("{secret_error} {secret_error:?}")] {
+        assert!(!text.contains("171") && !text.contains("255"), "{text}");
+    }
+    assert!(std::error::Error::source(&secret_error).is_none());
+    Ok(())
+}
