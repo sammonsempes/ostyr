@@ -11,11 +11,11 @@ use {
     crate::scan::{errno_error, open_at, raw_entries},
     crate::types::OpenFn,
     core_config::trusted_dir::open_trusted_dir,
-    rustix::fs::{fchmod, fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
+    rustix::fs::{chmod, fchmod, fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
     rustix::io::Errno,
     rustix::process::geteuid,
     std::fs::File,
-    std::os::fd::{AsFd, OwnedFd},
+    std::os::fd::{AsFd, AsRawFd, OwnedFd},
     std::path::PathBuf,
 };
 
@@ -137,6 +137,10 @@ pub const DIRECTORY_FLAGS: OFlags = OFlags::DIRECTORY.union(OFlags::NOFOLLOW).un
 
 
 #[cfg(target_os = "linux")]
+pub const PATH_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+
+
+#[cfg(target_os = "linux")]
 pub fn open_parent(path: &Path) -> Result<OwnedFd, ConnectorError> {
     Ok(open_trusted_dir(path, geteuid().as_raw())?)
 }
@@ -175,11 +179,20 @@ pub fn check_held_directory(parent: &OwnedFd, directory: &OwnedFd, label: &str) 
 }
 
 
+/// A directory made under a umask that strips the owner bits cannot be opened: it is made 0700 through an `O_PATH` handle and its `/proc/self/fd` link.
+#[cfg(target_os = "linux")]
+pub fn make_private(opener: OpenFn, parent: &OwnedFd, name: &str) -> Result<(), Errno> {
+    let mode = Mode::from_raw_mode(DIRECTORY_MODE | fstat(parent)?.st_mode & SETGID_BIT);
+    let handle = opener(parent.as_fd(), name, PATH_FLAGS)?;
+    chmod(format!("/proc/self/fd/{}", handle.as_raw_fd()).as_str(), mode)
+}
+
+
 /// The held directory is made 0700 whatever the umask, then checked; a refusal removes the entry only if it is the directory just made; the opener is injected.
 #[cfg(target_os = "linux")]
 pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label: &str) -> Result<Package, ConnectorError> {
     mkdirat(&parent, name.as_str(), Mode::from_raw_mode(DIRECTORY_MODE)).map_err(errno_error(label))?;
-    let held = opener(parent.as_fd(), name.as_str(), DIRECTORY_FLAGS);
+    let held = make_private(opener, &parent, name.as_str()).and_then(|()| opener(parent.as_fd(), name.as_str(), DIRECTORY_FLAGS));
     held.as_ref()
         .err()
         .map(|_| unlinkat(&parent, name.as_str(), AtFlags::REMOVEDIR))
