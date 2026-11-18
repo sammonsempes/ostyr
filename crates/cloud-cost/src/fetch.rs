@@ -1,7 +1,10 @@
 use crate::fetch_error::{FetchError, Refusal};
 use crate::fetch_model::{FetchEnv, FetchReport, FetchSettings, FetchSource, ListedObject, ObjectOutcome, Remembered, SourceRun};
 use crate::fetch_settings::validate_source;
-use crate::ledger::{object_state, read_cursor, record_loaded, record_refused, record_transient, write_cursor, LedgerState};
+use crate::ledger::{
+    latest_backoff, object_state, read_cursor, record_loaded, record_refused, record_transient, sync_seen, waiting, write_cursor, LedgerState,
+    INHERIT_FROM_ATTEMPTS,
+};
 use crate::listing::{get_body, list_objects, open_bucket, PRESIGN_SECONDS};
 use crate::load::LoadError;
 use crate::source::read_export;
@@ -11,6 +14,7 @@ use log::{info, warn};
 use rusty_s3::{Credentials, S3Action};
 use sha2::{Digest, Sha256};
 use siem_ingest::error::{InsertClass, InsertError};
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::time::Duration;
@@ -179,9 +183,20 @@ pub fn process_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> O
         Err(_failure) => ObjectOutcome::Refused(Refusal::Ledger),
         Ok(LedgerState::Loaded) => ObjectOutcome::AlreadyLoaded,
         Ok(LedgerState::Refused) => ObjectOutcome::AlreadyRefused,
-        Ok(LedgerState::Transient { next_try, .. }) if next_try > now => ObjectOutcome::InBackoff,
+        Ok(LedgerState::Transient { attempts, next_try }) if waiting(attempts, next_try, now) => ObjectOutcome::InBackoff,
         Ok(LedgerState::Transient { attempts, .. }) => attempt_object(run, object, attempts, now),
-        Ok(LedgerState::New) => attempt_object(run, object, 0, now),
+        Ok(LedgerState::New) => rewritten_object(run, object, now),
+    }
+}
+
+
+/// A new version of a key whose latest version already failed `INHERIT_FROM_ATTEMPTS` times keeps that count and wait: rewriting never buys a free download.
+pub fn rewritten_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> ObjectOutcome {
+    match latest_backoff(run.env.exec, &run.source.tenant, &run.source.id, &object.key) {
+        Err(_failure) => ObjectOutcome::Refused(Refusal::Ledger),
+        Ok(Some((attempts, next_try))) if attempts >= INHERIT_FROM_ATTEMPTS && waiting(attempts, next_try, now) => ObjectOutcome::InBackoff,
+        Ok(Some((attempts, _next_try))) => attempt_object(run, object, attempts, now),
+        Ok(None) => attempt_object(run, object, 0, now),
     }
 }
 
@@ -216,6 +231,14 @@ pub fn handle_object(mut report: FetchReport, run: &SourceRun<'_>, object: &List
 }
 
 
+/// Objects not in the ledger's order (loaded or refused ones, which cost no download) come first, in listing order; the rest follow the ledger's order.
+pub fn order_by_seen(mut objects: Vec<ListedObject>, ordered: &[String]) -> Vec<ListedObject> {
+    let ranks: HashMap<&str, usize> = ordered.iter().enumerate().map(|(rank, key)| (key.as_str(), rank + 1)).collect();
+    objects.sort_by_key(|object| ranks.get(object.key.as_str()).copied().unwrap_or(0));
+    objects
+}
+
+
 /// One source: settings checked, credentials read, listing walked, then each object handled alone.
 pub fn fetch_source(settings: &FetchSettings, source: &FetchSource, env: &FetchEnv<'_>, now: u64) -> Result<FetchReport, FetchError> {
     validate_source(source)?;
@@ -223,8 +246,9 @@ pub fn fetch_source(settings: &FetchSettings, source: &FetchSource, env: &FetchE
     let bucket = open_bucket(source)?;
     let cursor = read_cursor(env.exec, &source.tenant, &source.id).map_err(|_failure| FetchError::Ledger)?;
     let listing = list_objects(env, source, &bucket, &credentials, cursor.as_deref())?;
-    let resume = listing.last_key.as_deref().filter(|_| listing.incomplete);
-    write_cursor(env.exec, &source.tenant, &source.id, resume).map_err(|_failure| FetchError::Ledger)?;
+    let next_cursor = listing.last_key.as_deref().filter(|_| listing.incomplete);
+    write_cursor(env.exec, &source.tenant, &source.id, next_cursor).map_err(|_failure| FetchError::Ledger)?;
+    let ordered = sync_seen(env.exec, &source.tenant, &source.id, &listing.objects).map_err(|_failure| FetchError::Ledger)?;
     let run = SourceRun {
         env,
         source,
@@ -237,10 +261,10 @@ pub fn fetch_source(settings: &FetchSettings, source: &FetchSource, env: &FetchE
         incomplete_listings: usize::from(listing.incomplete),
         ..FetchReport::default()
     };
-    Ok(listing
-        .objects
+    let report = order_by_seen(listing.objects, &ordered)
         .iter()
-        .fold(start, |report, object| handle_object(report, &run, object, now)))
+        .fold(start, |total, object| handle_object(total, &run, object, now));
+    Ok(report)
 }
 
 

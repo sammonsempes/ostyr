@@ -3,19 +3,20 @@ mod types;
 
 
 use cloud_cost::fetch::{
-    fetch_new, fetch_source, gunzip_capped, key_digest, load_class, load_refusal, merge_reports, parse_credentials, read_credentials, remembered,
-    DIGEST_CHARS, MAX_CREDENTIAL_BYTES, TRANSIENT_BUDGET,
+    fetch_new, fetch_source, gunzip_capped, key_digest, load_class, load_refusal, merge_reports, order_by_seen, parse_credentials, read_credentials,
+    remembered, DIGEST_CHARS, MAX_CREDENTIAL_BYTES, TRANSIENT_BUDGET,
 };
 use cloud_cost::fetch_error::{FetchError, HttpClass, HttpFailure, LedgerFailure, Refusal};
 use cloud_cost::fetch_model::{
-    FetchEnv, FetchReport, FetchSettings, FetchSource, HttpRequest, HttpResponse, Remembered, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_OBJECTS,
+    FetchEnv, FetchReport, FetchSettings, FetchSource, HttpRequest, HttpResponse, ListedObject, Remembered, DEFAULT_FETCH_TIMEOUT_MS,
+    DEFAULT_MAX_OBJECTS,
 };
 use cloud_cost::ledger::{
-    backoff_ms, object_state, parse_backoff, read_cursor, record_loaded, record_refused, record_transient, write_cursor, LedgerState,
-    BACKOFF_BASE_MS, BACKOFF_MAX_MS, DELETE_CURSOR, INSERT_OBJECT, LEDGER_DDL, REFUSED_PREFIX, SELECT_CURSOR, SELECT_OBJECT, TRANSIENT_PREFIX,
-    UPSERT_CURSOR,
+    backoff_ms, latest_backoff, object_state, parse_backoff, read_cursor, record_loaded, record_refused, record_transient, sync_seen, waiting,
+    write_cursor, LedgerState, BACKOFF_BASE_MS, BACKOFF_MAX_MS, DELETE_CURSOR, INHERIT_FROM_ATTEMPTS, INSERT_OBJECT, LEDGER_DDL, MAX_SEEN_ROWS,
+    REFUSED_PREFIX, SELECT_CURSOR, SELECT_LATEST, SELECT_OBJECT, SYNC_SEEN, TRANSIENT_PREFIX, UPSERT_CURSOR,
 };
-use cloud_cost::listing::{MAX_LIST_BYTES, MAX_LIST_PAGES};
+use cloud_cost::listing::{MAX_KEYS_PER_PAGE, MAX_LIST_BYTES, MAX_LIST_PAGES};
 use cloud_cost::load::{BatchFailure, LoadError, LoadOutcome};
 use cloud_cost::model::Limits;
 use cloud_cost::source::Export;
@@ -100,6 +101,9 @@ const KEY_FIELD: usize = 2;
 
 
 const DIGEST_FIELD: usize = 5;
+
+
+const LOADED_AT_FIELD: usize = 6;
 
 
 #[cfg(unix)]
@@ -208,11 +212,16 @@ fn serve(fake: &Fake, request: &HttpRequest) -> Reply {
 struct Ledger {
     rows: RefCell<BTreeMap<Vec<String>, String>>,
     cursors: RefCell<BTreeMap<(String, String), String>>,
+    seen: RefCell<BTreeMap<(String, String, String), u64>>,
+    rounds: RefCell<BTreeMap<(String, String), u64>>,
+    stamps: RefCell<BTreeMap<Vec<String>, u64>>,
     calls: RefCell<Vec<(String, Vec<String>)>>,
     fail_select: Cell<bool>,
     fail_insert: Cell<bool>,
     fail_cursor_read: Cell<bool>,
     fail_cursor_write: Cell<bool>,
+    fail_sync: Cell<bool>,
+    fail_latest: Cell<bool>,
 }
 
 
@@ -249,15 +258,86 @@ fn exec(ledger: &Ledger, sql: &str, params: &[String]) -> Result<Vec<Vec<String>
             };
             Ok(Vec::new())
         }
+    } else if sql == SYNC_SEEN {
+        sync(ledger, owner, params)
+    } else if sql == SELECT_LATEST {
+        latest(ledger, owner, params)
     } else if ledger.fail_insert.get() {
         Err(LedgerFailure)
     } else {
         let digest = params.get(DIGEST_FIELD).cloned().ok_or(LedgerFailure)?;
         let mut rows = ledger.rows.borrow_mut();
         if rows.get(&identity).is_none_or(|stored| stored.starts_with(TRANSIENT_PREFIX)) {
+            let written_at = params.get(LOADED_AT_FIELD).and_then(|text| text.parse().ok()).unwrap_or(0);
+            ledger.stamps.borrow_mut().insert(identity.clone(), written_at);
             rows.insert(identity, digest);
         }
         Ok(Vec::new())
+    }
+}
+
+
+fn pending(ledger: &Ledger, owner: &(String, String), listing: &[serde_json::Value]) -> BTreeSet<String> {
+    let text = |item: &serde_json::Value, name: &str| item.get(name).and_then(|value| value.as_str()).unwrap_or("").to_owned();
+    listing
+        .iter()
+        .filter(|item| {
+            let identity = vec![owner.0.clone(), owner.1.clone(), text(item, "k"), text(item, "e")];
+            ledger
+                .rows
+                .borrow()
+                .get(&identity)
+                .is_none_or(|stored| stored.starts_with(TRANSIENT_PREFIX))
+        })
+        .map(|item| text(item, "k"))
+        .collect()
+}
+
+
+fn sync(ledger: &Ledger, owner: (String, String), params: &[String]) -> Result<Vec<Vec<String>>, LedgerFailure> {
+    if ledger.fail_sync.get() {
+        Err(LedgerFailure)
+    } else {
+        let listing: Vec<serde_json::Value> = serde_json::from_str(params.get(KEY_FIELD).ok_or(LedgerFailure)?).map_err(|_failure| LedgerFailure)?;
+        let round = {
+            let mut rounds = ledger.rounds.borrow_mut();
+            let next = rounds.get(&owner).copied().unwrap_or(0) + 1;
+            rounds.insert(owner.clone(), next);
+            next
+        };
+        let wanted = pending(ledger, &owner, &listing);
+        let mut seen = ledger.seen.borrow_mut();
+        seen.retain(|(tenant, source, key), _round| (tenant, source) != (&owner.0, &owner.1) || wanted.contains(key));
+        wanted.iter().for_each(|key| {
+            seen.entry((owner.0.clone(), owner.1.clone(), key.clone())).or_insert(round);
+        });
+        let mut ordered: Vec<(u64, String)> = seen
+            .iter()
+            .filter(|((tenant, source, _key), _round)| (tenant, source) == (&owner.0, &owner.1))
+            .map(|((_tenant, _source, key), first)| (*first, key.clone()))
+            .collect();
+        ordered.sort();
+        Ok(ordered.into_iter().map(|(_first, key)| vec![key]).collect())
+    }
+}
+
+
+fn latest(ledger: &Ledger, owner: (String, String), params: &[String]) -> Result<Vec<Vec<String>>, LedgerFailure> {
+    if ledger.fail_latest.get() {
+        Err(LedgerFailure)
+    } else {
+        let key = params.get(KEY_FIELD).ok_or(LedgerFailure)?;
+        let stamps = ledger.stamps.borrow();
+        let newest = ledger
+            .rows
+            .borrow()
+            .iter()
+            .filter(|(identity, _digest)| {
+                identity.first() == Some(&owner.0) && identity.get(1) == Some(&owner.1) && identity.get(KEY_FIELD) == Some(key)
+            })
+            .max_by_key(|(identity, _digest)| stamps.get(*identity).copied().unwrap_or(0))
+            .map(|(_identity, digest)| vec![digest.clone()]);
+        Ok(newest.into_iter().collect())
     }
 }
 
@@ -503,10 +583,10 @@ fn an_oversized_object_and_a_gzip_bomb_are_refused_alone() -> TestResult {
     assert!(bomb.len() < usize::try_from(SMALL_LIMIT)?);
     let fake = with_objects(
         &[
-            ("p/big.csv", "e", ok(big.as_bytes())),
-            ("p/bomb.csv.gz", "e", ok(&bomb)),
-            ("p/bad.csv.gz", "e", ok(b"not gzip")),
-            ("p/good.csv", "e", ok(january("acct").as_bytes())),
+            ("p/1big.csv", "e", ok(big.as_bytes())),
+            ("p/2bomb.csv.gz", "e", ok(&bomb)),
+            ("p/3bad.csv.gz", "e", ok(b"not gzip")),
+            ("p/4good.csv", "e", ok(january("acct").as_bytes())),
         ],
         None,
     );
@@ -524,10 +604,10 @@ fn every_object_failure_is_one_refusal_and_is_remembered_by_kind() -> TestResult
     let configured = settings(&rig, vec![source("main", "acme")]);
     let fake = with_objects(
         &[
-            ("p/missing.csv", "e", status(STATUS_NOT_FOUND, MARKER)),
-            ("p/down.csv", "e", Err(HttpFailure(HttpClass::Timeout))),
-            ("p/columns.csv", "e", ok(b"a,b\n1,2\n")),
-            ("p/load.csv", "e", ok(january("acct").as_bytes())),
+            ("p/1missing.csv", "e", status(STATUS_NOT_FOUND, MARKER)),
+            ("p/2down.csv", "e", Err(HttpFailure(HttpClass::Timeout))),
+            ("p/3columns.csv", "e", ok(b"a,b\n1,2\n")),
+            ("p/4load.csv", "e", ok(january("acct").as_bytes())),
         ],
         None,
     );
@@ -976,10 +1056,17 @@ fn reports_merge_and_the_ledger_binds_the_tenant_first() -> TestResult {
     record_loaded(&executor, "acme", "main", &object, "sha", NOW)?;
     assert_eq!(object_state(&executor, "acme", "main", &object)?, LedgerState::Loaded);
     assert_eq!(object_state(&executor, "globex", "main", &object)?, LedgerState::New);
-    assert!(ledger.calls.borrow().iter().all(
-        |(sql, params)| [SELECT_OBJECT, INSERT_OBJECT, SELECT_CURSOR, UPSERT_CURSOR, DELETE_CURSOR].contains(&sql.as_str())
-            && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")
-    ));
+    assert!(ledger.calls.borrow().iter().all(|(sql, params)| [
+        SELECT_OBJECT,
+        INSERT_OBJECT,
+        SELECT_CURSOR,
+        UPSERT_CURSOR,
+        DELETE_CURSOR,
+        SYNC_SEEN,
+        SELECT_LATEST
+    ]
+    .contains(&sql.as_str())
+        && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")));
     assert!(LEDGER_DDL.contains("PRIMARY KEY (tenant, source_id, key, etag)"));
     Ok(())
 }
@@ -1115,6 +1202,8 @@ fn a_permanent_refusal_is_remembered_by_etag_and_not_downloaded_again() -> TestR
     assert_eq!((third.already_refused, third.refused.len()), (TWO, 1));
     let fourth = round(&rig, &configured, &fake, &limits);
     assert_eq!((fourth.already_refused, fourth.loaded), (THREE, 1));
+    let fifth = round(&rig, &configured, &fake, &limits);
+    assert_eq!((fifth.already_refused, fifth.already_loaded), (THREE, 1));
     assert_eq!(fake.requested.borrow().iter().filter(|key| key.as_str() == "p/a.csv").count(), 1);
     let rewritten = with_objects(&[("p/a.csv", "e2", ok(january("acct").as_bytes()))], None);
     assert_eq!(round(&rig, &configured, &rewritten, &limits).loaded, 1);
@@ -1213,5 +1302,224 @@ fn a_cursor_the_ledger_cannot_read_or_write_fails_that_source_only() -> TestResu
     let unwritten = round(&rig, &configured, &fake, &Limits::default());
     assert!(matches!(unwritten.failed_sources.as_slice(), [(_, FetchError::Ledger)]));
     assert!(fake.requested.borrow().is_empty());
+    Ok(())
+}
+
+
+const REWRITTEN: usize = 10;
+
+
+const FIFTY: usize = 50;
+
+
+const ELEVEN: usize = 11;
+
+
+const SIX_ROUNDS: usize = 6;
+
+
+fn rewriting_fake(round_number: usize, good: &str) -> (Fake, Vec<String>) {
+    let keys: Vec<String> = (0..REWRITTEN).map(|number| format!("p/a{number:02}.csv")).collect();
+    let etag = format!("round{round_number}");
+    let mut entries: Vec<(&str, &str, Reply)> = keys
+        .iter()
+        .map(|key| (key.as_str(), etag.as_str(), status(STATUS_ERROR, MARKER)))
+        .collect();
+    entries.push((good, "e", ok(january("acct").as_bytes())));
+    (with_objects(&entries, None), keys)
+}
+
+
+fn inserting_fake(round_number: usize, per_round: usize) -> Fake {
+    let keys: Vec<String> = (1..=round_number)
+        .flat_map(|earlier| (0..per_round).map(move |number| format!("p/r{earlier:02}n{number:03}.csv")))
+        .collect();
+    let mut entries: Vec<(&str, &str, Reply)> = keys.iter().map(|key| (key.as_str(), "e", status(STATUS_ERROR, MARKER))).collect();
+    entries.push(("p/z.csv", "e", ok(january("acct").as_bytes())));
+    with_objects(&entries, None)
+}
+
+
+fn loaded_in_round(rig: &Rig, per_round: usize) -> Option<usize> {
+    let configured = settings(rig, vec![source("main", "acme")]);
+    (1..=SIX_ROUNDS + 1).find(|number| round(rig, &configured, &inserting_fake(*number, per_round), &Limits::default()).loaded == 1)
+}
+
+
+#[test]
+fn a_writer_adding_new_slow_keys_each_round_cannot_keep_a_good_key_out() -> TestResult {
+    let eleven = rig()?;
+    assert_eq!(loaded_in_round(&eleven, ELEVEN), Some((ELEVEN + 1).div_ceil(TRANSIENT_BUDGET)));
+    let fifty = rig()?;
+    assert_eq!(loaded_in_round(&fifty, FIFTY), Some((FIFTY + 1).div_ceil(TRANSIENT_BUDGET)));
+    let seen_keys = fifty.ledger.seen.borrow().len();
+    assert!(seen_keys <= (FIFTY + 1) * SIX_ROUNDS);
+    Ok(())
+}
+
+
+#[test]
+fn old_keys_rewritten_every_round_ahead_of_a_good_one_cannot_keep_it_out() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let loaded_round = (1..=SIX_ROUNDS)
+        .find(|number| round(&rig, &configured, &rewriting_fake(*number, "p/z.csv").0, &Limits::default()).loaded == 1)
+        .ok_or("the good key never loaded")?;
+    assert_eq!(loaded_round, INHERIT_FROM_ATTEMPTS as usize + 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_rewrite_after_two_failures_inherits_the_wait_and_the_count_and_a_later_one_is_tried() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let versions = |etag: &str| with_objects(&[("p/a.csv", etag, status(STATUS_ERROR, MARKER))], None);
+    assert_eq!(round(&rig, &configured, &versions("e1"), &Limits::default()).transient_refused, 1);
+    assert_eq!(round(&rig, &configured, &versions("e2"), &Limits::default()).transient_refused, 1);
+    let held = versions("e3");
+    let third = round(&rig, &configured, &held, &Limits::default());
+    assert_eq!((third.in_backoff, third.transient_refused), (1, 0));
+    assert!(held.requested.borrow().is_empty());
+    let due = NOW + BACKOFF_BASE_MS * DOUBLE;
+    let later = versions("e4");
+    assert_eq!(round_at(&rig, &configured, &later, &Limits::default(), due).transient_refused, 1);
+    let row = rig
+        .ledger
+        .rows
+        .borrow()
+        .get(&["acme", "main", "p/a.csv", "\"e4\""].map(str::to_owned).to_vec())
+        .cloned();
+    assert_eq!(row, Some(format!("{TRANSIENT_PREFIX}status:3:{}", due + BACKOFF_BASE_MS * QUADRUPLE)));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_latest_lookup_refuses_that_object_as_a_ledger_failure() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let fake = with_objects(&[("p/a.csv", "e", ok(january("acct").as_bytes()))], None);
+    rig.ledger.fail_latest.set(true);
+    let report = round(&rig, &configured, &fake, &Limits::default());
+    assert_eq!(report.refused.first().map(|(_, reason)| *reason), Some(Refusal::Ledger));
+    assert!(fake.requested.borrow().is_empty());
+    let executor = |sql: &str, params: &[String]| exec(&rig.ledger, sql, params);
+    assert!(latest_backoff(&executor, "acme", "main", "p/a.csv").is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_seen_ledger_drops_loaded_and_unlisted_keys_and_binds_the_tenant() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme"), source("main", "globex")]);
+    let both = with_objects(
+        &[
+            ("p/a.csv", "e", status(STATUS_ERROR, MARKER)),
+            ("p/b.csv", "e", status(STATUS_ERROR, MARKER)),
+            ("p/c.csv", "e", ok(january("acct").as_bytes())),
+        ],
+        None,
+    );
+    assert_eq!(round(&rig, &configured, &both, &Limits::default()).loaded, TWO);
+    let keys_of = |tenant: &str| -> Vec<String> {
+        rig.ledger
+            .seen
+            .borrow()
+            .keys()
+            .filter(|(owner, _source, _key)| owner == tenant)
+            .map(|(_owner, _source, key)| key.clone())
+            .collect()
+    };
+    assert_eq!(keys_of("acme"), vec!["p/a.csv", "p/b.csv", "p/c.csv"]);
+    round(&rig, &configured, &both, &Limits::default());
+    assert_eq!(keys_of("acme"), vec!["p/a.csv", "p/b.csv"]);
+    assert_eq!(keys_of("globex"), vec!["p/a.csv", "p/b.csv"]);
+    let fewer = with_objects(&[("p/b.csv", "e", status(STATUS_ERROR, MARKER))], None);
+    round(&rig, &configured, &fewer, &Limits::default());
+    assert_eq!(keys_of("acme"), vec!["p/b.csv"]);
+    assert_eq!(keys_of("globex"), vec!["p/b.csv"]);
+    assert!(rig
+        .ledger
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(sql, _params)| sql == SYNC_SEEN)
+        .all(|(_sql, params)| params.len() == THREE && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")));
+    Ok(())
+}
+
+
+#[test]
+fn the_seen_ledger_refuses_a_listing_over_the_row_bound_and_the_sql_states_it() -> TestResult {
+    assert_eq!(MAX_SEEN_ROWS, MAX_LIST_PAGES * MAX_KEYS_PER_PAGE);
+    assert!(LEDGER_DDL.contains(&format!("> {MAX_SEEN_ROWS} THEN RAISE")));
+    assert!(LEDGER_DDL.starts_with("SELECT pg_advisory_xact_lock(hashtext('cloud_cost_ddl'))"));
+    assert!(LEDGER_DDL.contains("pg_advisory_xact_lock") && LEDGER_DDL.contains("PRIMARY KEY (tenant, source_id, object_key)"));
+    let ledger = Ledger::default();
+    let executor = |sql: &str, params: &[String]| exec(&ledger, sql, params);
+    let object = |number: usize| ListedObject {
+        key: format!("p/{number}.csv"),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let full: Vec<ListedObject> = (0..MAX_SEEN_ROWS).map(object).collect();
+    assert_eq!(sync_seen(&executor, "acme", "main", &full)?.len(), MAX_SEEN_ROWS);
+    let over: Vec<ListedObject> = (0..=MAX_SEEN_ROWS).map(object).collect();
+    let calls_before = ledger.calls.borrow().len();
+    assert!(sync_seen(&executor, "acme", "main", &over).is_err());
+    assert_eq!(ledger.calls.borrow().len(), calls_before);
+    Ok(())
+}
+
+
+#[test]
+fn a_ledger_that_cannot_sync_fails_that_source_before_any_download() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let fake = with_objects(&[("p/a.csv", "e", ok(january("acct").as_bytes()))], None);
+    rig.ledger.fail_sync.set(true);
+    let report = round(&rig, &configured, &fake, &Limits::default());
+    assert!(matches!(report.failed_sources.as_slice(), [(_, FetchError::Ledger)]));
+    assert!(fake.requested.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn objects_outside_the_ledger_order_come_first_and_the_rest_follow_it() -> TestResult {
+    let object = |key: &str| ListedObject {
+        key: key.to_owned(),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let objects = vec![object("p/a"), object("p/b"), object("p/c"), object("p/d")];
+    let ordered = order_by_seen(objects, &["p/d".to_owned(), "p/a".to_owned()]);
+    let keys: Vec<&str> = ordered.iter().map(|listed| listed.key.as_str()).collect();
+    assert_eq!(keys, vec!["p/b", "p/c", "p/d", "p/a"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_next_try_beyond_the_backoff_of_its_attempts_is_due_now() -> TestResult {
+    assert!(waiting(1, NOW + BACKOFF_BASE_MS, NOW));
+    assert!(!waiting(1, NOW, NOW));
+    assert!(!waiting(1, NOW + BACKOFF_BASE_MS + 1, NOW));
+    assert!(waiting(EIGHT_ATTEMPTS, NOW + BACKOFF_MAX_MS, NOW));
+    assert!(!waiting(EIGHT_ATTEMPTS, NOW + BACKOFF_MAX_MS + 1, NOW));
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let broken = with_objects(&[("p/a.csv", "e", status(STATUS_ERROR, MARKER))], None);
+    let identity: Vec<String> = ["acme", "main", "p/a.csv", "e"].iter().map(|part| (*part).to_owned()).collect();
+    let far = NOW + BACKOFF_MAX_MS * EIGHT_ATTEMPTS as u64;
+    rig.ledger
+        .rows
+        .borrow_mut()
+        .insert(identity, format!("{TRANSIENT_PREFIX}status:{THREE_ATTEMPTS}:{far}"));
+    let report = round(&rig, &configured, &broken, &Limits::default());
+    assert_eq!((report.in_backoff, report.transient_refused), (0, 1));
+    assert_eq!(broken.requested.borrow().len(), 1);
     Ok(())
 }
