@@ -3826,15 +3826,21 @@ dependencies = [
 name = "network-devices"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "cmdb",
+ "core-api",
  "core-config",
  "core-pg",
  "ipnet",
  "rustix 1.1.6",
  "serde",
  "serde-untagged",
+ "serde_json",
  "site-collector",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

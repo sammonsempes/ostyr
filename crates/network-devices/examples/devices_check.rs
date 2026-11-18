@@ -1,17 +1,61 @@
+use alerts::backend::{lease, MAX_CONNECTIONS};
+use alerts::settings::open_pg_engine_from;
+use cmdb::backend::ACTOR;
+use cmdb::model::Limits;
+use cmdb::pg::pg_executor;
+use cmdb::store::{MIGRATIONS, MIGRATION_NAMESPACE};
+use core_config::load::load_module;
+use core_pg::migrate::migrate;
+use network_devices::cmdb_write::write_devices;
 use network_devices::load::load_devices;
+use network_devices::model::Device;
 use network_devices::plan::polling_plan;
 use std::error::Error;
 use std::io::{stdout, Write};
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 
-const USAGE: &str = "usage: devices_check <directory>";
+const USAGE: &str = "usage: devices_check <directory> [--cmdb <module.yaml>]";
 
 
-fn main() -> Result<(), Box<dyn Error>> {
+const CMDB_FLAG: &str = "--cmdb";
+
+
+async fn write_cmdb(module_file: &str, devices: &[Device]) -> Result<(), Box<dyn Error>> {
+    let loaded = load_module(Path::new(module_file))?;
+    let (opened, _pg_file) = open_pg_engine_from(Path::new(module_file), &loaded, core_api::server::new_listener(), ACTOR)?;
+    let engine = Arc::new(opened);
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let held = lease(&engine, &permits).await?;
+    migrate(&held.client, MIGRATION_NAMESPACE, &MIGRATIONS, held.deadline).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    let report = write_devices(&executor, devices, &Default::default(), &Limits::default()).await?;
+    let mut out = stdout();
+    for (tenant, tenant_report) in &report.tenants {
+        writeln!(
+            out,
+            "cmdb tenant {tenant}: created {} updated {} unchanged {} refused {}",
+            tenant_report.created, tenant_report.updated, tenant_report.unchanged, tenant_report.refused
+        )?;
+        for name in &tenant_report.agent_hosts {
+            writeln!(
+                out,
+                "warning: tenant {tenant} device {name} is declared without an agent but a CMDB host reports its address"
+            )?;
+        }
+    }
+    Ok(())
+}
+
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let directory = match arguments.as_slice() {
-        [directory] => Ok(directory),
+    let (directory, module) = match arguments.as_slice() {
+        [directory] => Ok((directory, None)),
+        [directory, flag, module] if flag == CMDB_FLAG => Ok((directory, Some(module))),
         _ => Err(USAGE),
     }?;
     let loaded = load_devices(Path::new(directory))?;
@@ -33,5 +77,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             entry.tenant, entry.name, entry.version, entry.credentials
         )?;
     }
-    Ok(())
+    match module {
+        Some(module_file) => write_cmdb(module_file, &loaded.devices).await,
+        None => Ok(()),
+    }
 }
