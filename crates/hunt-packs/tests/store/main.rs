@@ -15,6 +15,9 @@ use std::rc::Rc;
 use types::{Calls, Store, TestResult};
 
 
+const FIRST_TABLE_MIGRATIONS: usize = 2;
+
+
 const PACK: &str = "lateral-movement";
 
 
@@ -197,7 +200,7 @@ fn the_migration_is_embedded_and_its_namespace_valid() -> Result<(), Box<dyn Err
     check_namespace(MIGRATION_NAMESPACE)?;
     assert!(MIGRATIONS
         .iter()
-        .filter(|migration| migration.version < "hunt_packs_0003")
+        .take(FIRST_TABLE_MIGRATIONS)
         .all(|migration| migration.sql.contains("PRIMARY KEY (tenant, pack_id")));
     assert!(!STATEMENT_DEADLINE.is_zero());
     assert!(MIGRATION_DEADLINE > STATEMENT_DEADLINE);

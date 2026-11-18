@@ -3,7 +3,7 @@ mod types;
 
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
-use hunt_packs::packs::MAX_ID_CHARS;
+use hunt_packs::packs::{is_pack_id, MAX_ID_CHARS};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
     count_oversized, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, CursorError, FindingPage, FindingRow, Param,
@@ -33,6 +33,9 @@ const THREE: i64 = 3;
 
 
 const ID_CAP: usize = 64;
+
+
+const FIFTH_INDEX: usize = 4;
 
 
 const SECOND: i64 = 2;
@@ -105,14 +108,12 @@ fn list_exec(store: &Rows, seen: &Seen) -> impl FnMut(&TenantScope, &'static str
     move |scope, sql, params| {
         log.borrow_mut().push((tenant_of(scope).to_owned(), sql, params.clone()));
         let answer = match params.as_slice() {
-            [Param::Int(end), Param::Text(pack), Param::Int(limit), Param::Int(cap)] => {
+            [Param::Int(end), Param::Text(pack), Param::Int(limit)] => {
                 let mut matching: Vec<FindingRow> = rows
                     .borrow()
                     .iter()
                     .filter(|(owner, stored)| {
-                        owner == tenant_of(scope)
-                            && (stored.window_end, &stored.pack_id) > (*end, pack)
-                            && i64::try_from(stored.pack_id.len()).is_ok_and(|length| length <= *cap)
+                        owner == tenant_of(scope) && (stored.window_end, &stored.pack_id) > (*end, pack) && stored.pack_id.len() <= ID_CAP
                     })
                     .map(|(_, stored)| stored.clone())
                     .collect();
@@ -136,12 +137,18 @@ fn fresh() -> (Rows, Seen) {
 fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
     assert!(FINDING_SQL.contains("VALUES ($1, $2, $3, $4, $5, $6, now())"));
     assert!(FINDING_SQL.contains("ON CONFLICT (tenant, pack_id, window_end) DO NOTHING RETURNING window_end"));
-    assert!(LIST_SQL.contains(
-        "WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= $5::bigint ORDER BY window_end, pack_id LIMIT $4"
-    ));
+    assert!(LIST_SQL
+        .contains("WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4"));
     assert!(!LIST_SQL.contains("OFFSET"));
     assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > 64 LIMIT $2::bigint"));
     assert!(OVERSIZED_SQL.contains(&format!("octet_length(pack_id) > {ID_BYTE_CAP} ")));
+    assert!(LIST_SQL.contains(&format!("octet_length(pack_id) <= {ID_BYTE_CAP} ")));
+    assert!(!LIST_SQL.contains("$5"));
+    let listable = MIGRATIONS.get(FIFTH_INDEX).ok_or("no 0005")?;
+    assert_eq!(listable.version, "hunt_packs_0005");
+    assert!(listable
+        .sql
+        .contains(&format!("(tenant, window_end, pack_id) WHERE octet_length(pack_id) <= {ID_BYTE_CAP};")));
     assert_eq!(usize::try_from(ID_BYTE_CAP)?, ID_CAP);
     assert_eq!(ID_BYTE_CAP, i64::try_from(MAX_ID_CHARS)?);
     let constraint = MIGRATIONS
@@ -150,7 +157,7 @@ fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
         .ok_or("no 0003")?
         .sql;
     assert!(constraint.contains(&format!("CHECK (octet_length(pack_id) BETWEEN 1 AND {ID_BYTE_CAP}) NOT VALID")));
-    let partial = MIGRATIONS.last().ok_or("no migration")?;
+    let partial = MIGRATIONS.get(FIFTH_INDEX - 1).ok_or("no 0004")?;
     assert_eq!(partial.version, "hunt_packs_0004");
     assert!(partial.sql.contains(&format!("(tenant) WHERE octet_length(pack_id) > {ID_BYTE_CAP};")));
     assert!(MIGRATIONS
@@ -505,4 +512,16 @@ fn no_row() -> Result<Vec<i64>, PgError> {
 
 fn store_down() -> Result<Vec<i64>, PgError> {
     Err(PgError::LegacyRecords)
+}
+
+
+#[test]
+fn only_ascii_characters_are_ever_accepted_in_a_pack_id() -> TestResult {
+    let offenders = (0..=u32::from(char::MAX))
+        .filter_map(char::from_u32)
+        .filter(|character| !character.is_ascii())
+        .filter(|character| is_pack_id(&character.to_string()) || is_pack_id(&format!("a{character}b")))
+        .count();
+    assert_eq!(offenders, 0);
+    Ok(())
 }
