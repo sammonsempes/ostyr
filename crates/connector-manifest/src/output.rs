@@ -11,7 +11,7 @@ use {
     crate::scan::{errno_error, open_at, raw_entries},
     crate::types::OpenFn,
     core_config::trusted_dir::open_trusted_dir,
-    rustix::fs::{fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
+    rustix::fs::{fchmod, fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
     rustix::io::Errno,
     rustix::process::geteuid,
     std::fs::File,
@@ -175,7 +175,7 @@ pub fn check_held_directory(parent: &OwnedFd, directory: &OwnedFd, label: &str) 
 }
 
 
-/// A directory that cannot be held is removed again; one that is not the directory just made is refused and its name left alone; the opener is injected.
+/// The held directory is made 0700 whatever the umask, then checked; a refusal removes the entry only if it is the directory just made; the opener is injected.
 #[cfg(target_os = "linux")]
 pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label: &str) -> Result<Package, ConnectorError> {
     mkdirat(&parent, name.as_str(), Mode::from_raw_mode(DIRECTORY_MODE)).map_err(errno_error(label))?;
@@ -187,7 +187,18 @@ pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label:
         .into_iter()
         .for_each(report_failure);
     let directory = held.map_err(errno_error(label))?;
-    check_held_directory(&parent, &directory, label)?;
+    let verdict = fstat(&parent)
+        .and_then(|stat| fchmod(&directory, Mode::from_raw_mode(DIRECTORY_MODE | stat.st_mode & SETGID_BIT)))
+        .map_err(errno_error(label))
+        .and_then(|()| check_held_directory(&parent, &directory, label));
+    verdict
+        .as_ref()
+        .err()
+        .map(|_| remove_directory_entry(&parent, &directory, name.as_str()))
+        .and_then(Result::err)
+        .into_iter()
+        .for_each(report_failure);
+    verdict?;
     Ok(Package {
         parent,
         directory,
