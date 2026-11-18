@@ -35,6 +35,12 @@ pub enum SmartError {
         #[source]
         source: Box<SmartError>,
     },
+    #[error("settings file is larger than {limit} bytes")]
+    SettingsTooLarge { limit: usize },
+    #[error("settings file is not valid")]
+    Settings(#[source] Box<serde_saphyr::Error>),
+    #[error("setting {field} is out of range")]
+    SettingsField { field: &'static str },
     #[error("min_battery_charge must be between 1 and 100")]
     ChargeThresholdRange,
 }

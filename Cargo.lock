@@ -2566,6 +2566,7 @@ dependencies = [
  "base64 0.22.1",
  "core-pg",
  "log",
+ "net-topology",
  "rcgen",
  "rustls",
  "rustls-pki-types",

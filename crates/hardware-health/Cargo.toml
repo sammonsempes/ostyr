@@ -17,6 +17,9 @@ tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 zeroize = "1"
 
+[target.'cfg(unix)'.dependencies]
+net-topology = { version = "0.0.0", path = "../net-topology" }
+
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

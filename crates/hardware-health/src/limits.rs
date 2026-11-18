@@ -102,3 +102,40 @@ pub const ADMINISTRATOR_ROLE: &str = "Administrator";
 
 
 pub const MIN_PORT: u16 = 1;
+
+
+pub const MAX_SCAN_BYTES: u64 = 262_144;
+
+
+pub const MAX_SCAN_DEVICES: usize = 64;
+
+
+pub const MAX_DEVICE_NAME_BYTES: usize = 64;
+
+
+pub const MAX_DEVICE_TYPE_BYTES: usize = 32;
+
+
+pub const MAX_SETTINGS_BYTES: usize = 4096;
+
+
+pub const MIN_DEADLINE_SECONDS: u64 = 1;
+
+
+pub const MAX_DEADLINE_SECONDS: u64 = 120;
+
+
+pub const DEFAULT_DEADLINE_SECONDS: u64 = 30;
+
+
+pub const DEFAULT_SMARTCTL: &str = "/usr/sbin/smartctl";
+
+
+pub fn default_deadline_seconds() -> u64 {
+    DEFAULT_DEADLINE_SECONDS
+}
+
+
+pub fn default_smartctl() -> std::path::PathBuf {
+    std::path::PathBuf::from(DEFAULT_SMARTCTL)
+}

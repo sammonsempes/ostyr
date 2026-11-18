@@ -11,5 +11,9 @@ pub mod redfish;
 pub mod redfish_assess;
 pub mod redfish_devices;
 pub mod redfish_fetch;
+#[cfg(unix)]
+pub mod smart_run;
+pub mod smart_settings;
+pub mod types;
 pub mod ups;
 pub mod ups_assess;
