@@ -852,6 +852,26 @@ fn adopted_as_private(prepare: fn(&Path) -> io::Result<()>) -> TestResult {
 }
 
 
+fn swapping_opener(parent: BorrowedFd<'_>, name: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+    let target = if flags.contains(OFlags::PATH) { name } else { "other" };
+    rustix::fs::openat(parent, target, flags, rustix::fs::Mode::empty())
+}
+
+
+#[test]
+fn a_directory_swapped_in_after_the_path_handle_is_adopted_at_0700() -> TestResult {
+    let parent = TempDir::new()?;
+    let other = parent.path().join("other");
+    fs::create_dir(&other)?;
+    widen(&other)?;
+    let held = open_parent(parent.path())?;
+    let package = create_package_with(swapping_opener, held, "package".to_owned(), "package")?;
+    drop(package);
+    assert_eq!(fs::metadata(&other)?.permissions().mode() & SPECIAL_AND_PERMISSION_MASK, PRIVATE_MODE);
+    Ok(())
+}
+
+
 fn add_file(path: &Path) -> io::Result<()> {
     fs::write(path.join("x"), "x")
 }
