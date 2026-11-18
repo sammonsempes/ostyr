@@ -129,6 +129,8 @@ struct Store {
     fail: bool,
     fail_insert: bool,
     fail_lookup: bool,
+    fail_lookup_from: Option<usize>,
+    lookup_calls: std::sync::atomic::AtomicUsize,
     fail_cursor_read: bool,
     fail_cursor_write: bool,
 }
@@ -161,10 +163,17 @@ fn statement(store: &Store, scope: &TenantScope, sql: &str, params: &[String]) -
 }
 
 
+fn later_lookup_fails(store: &Store) -> bool {
+    let call = store.lookup_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    store.fail_lookup_from.is_some_and(|from| call >= from)
+}
+
+
 fn refused(store: &Store, sql: &str) -> bool {
     store.fail
         || (store.fail_insert && sql != ALERTED_SQL && sql != CURSOR_READ_SQL && sql != CURSOR_WRITE_SQL)
         || (store.fail_lookup && sql == ALERTED_SQL)
+        || (sql == ALERTED_SQL && later_lookup_fails(store))
         || (store.fail_cursor_read && sql == CURSOR_READ_SQL)
         || (store.fail_cursor_write && sql == CURSOR_WRITE_SQL)
 }
@@ -323,7 +332,7 @@ fn a_lease_mac_keying_a_cmdb_asset_and_a_known_address_raise_nothing() -> TestRe
         Skipped {
             known: 1,
             managed: 1,
-            omitted: 0
+            ..Skipped::default()
         }
     );
     assert_eq!(alerts.len(), 1);
@@ -518,6 +527,9 @@ const RUN_BOUND: usize = 2 + TWO_CHUNKS / MAX_UNMANAGED_PER_RUN;
 const ELEVEN_CHUNKS: usize = LOOKUP_CHUNK * MAX_LOOKUP_CHUNKS + MAX_UNMANAGED_PER_RUN;
 
 
+const PARTIAL_FRESH: usize = 50;
+
+
 const WRAPPED_CURSOR: &str = "7";
 
 
@@ -651,8 +663,13 @@ async fn a_lookup_covers_at_most_the_chunk_cap_per_run_then_the_cursor_moves_on(
     let held = hints(TENANT, vec![])?;
     let found = spoofed(ELEVEN_CHUNKS, OLD_MS)?;
     pre_alert(&store, found.get(..LOOKUP_CHUNK * MAX_LOOKUP_CHUNKS).ok_or("short")?)?;
-    let first = raise(&store, &found, &held).await?;
-    assert_eq!(first.1.inserted, 0);
+    let (outcome, text) = warnings_of(raise(&store, &found, &held)).await?;
+    let first = outcome?;
+    assert_eq!(
+        (first.1.inserted, first.0.deferred, first.0.omitted),
+        (1, MAX_UNMANAGED_PER_RUN, MAX_UNMANAGED_PER_RUN)
+    );
+    assert_eq!(text.matches("lookup cap reached").count(), 1);
     assert_eq!(cursor_of(&store)?, Some(MAX_LOOKUP_CHUNKS.to_string()));
     let second = raise(&store, &found, &held).await?;
     assert_eq!(second.1.inserted, MAX_UNMANAGED_PER_RUN);
@@ -687,8 +704,26 @@ async fn a_failed_lookup_alerts_nothing_and_keeps_the_cursor() -> TestResult {
     let (run, text) = warnings_of(raise(&store, &found, &held)).await?;
     let (skipped, stored) = run?;
     assert_eq!((stored, skipped.omitted), (Stored::default(), 0));
+    assert!(skipped.lookup_failed);
     assert_eq!(text.matches("lookup failed").count(), 1);
     assert_eq!((row_count(&store)?, cursor_of(&store)?), (0, None));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_lookup_failing_on_a_later_chunk_alerts_nothing_and_keeps_the_cursor() -> TestResult {
+    let store = Store {
+        fail_lookup_from: Some(1),
+        ..Store::default()
+    };
+    let held = hints(TENANT, vec![])?;
+    let found = spoofed(TWO_CHUNKS, OLD_MS)?;
+    pre_alert(&store, found.get(..LOOKUP_CHUNK - PARTIAL_FRESH).ok_or("short")?)?;
+    let skipped_and_stored = raise(&store, &found, &held).await?;
+    assert_eq!(skipped_and_stored.1, Stored::default());
+    assert!(skipped_and_stored.0.lookup_failed);
+    assert_eq!((row_count(&store)?, cursor_of(&store)?), (LOOKUP_CHUNK - PARTIAL_FRESH, None));
     Ok(())
 }
 
