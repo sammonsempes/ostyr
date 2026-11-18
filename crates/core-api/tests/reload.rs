@@ -1150,7 +1150,7 @@ async fn at_generation(listener: &SharedListener, wanted: u64) -> Result<(), Tes
 async fn a_moved_listen_serves_on_the_new_port_and_frees_the_old_one() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("module.yaml");
-    fs::write(&path, module_text(dir.path(), "example", &free_address()?, "")?)?;
+    fs::write(&path, module_text(dir.path(), "example", LOOPBACK, "")?)?;
     let (listener, task) = start_module(&path);
     let old = listening(&listener).await?;
     assert!(status_of(old).await?.contains("200"));
@@ -1168,7 +1168,7 @@ async fn a_moved_listen_serves_on_the_new_port_and_frees_the_old_one() -> TestRe
 async fn a_request_in_flight_finishes_on_the_old_listener() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("module.yaml");
-    fs::write(&path, module_text(dir.path(), "example", &free_address()?, PATIENT)?)?;
+    fs::write(&path, module_text(dir.path(), "example", LOOPBACK, PATIENT)?)?;
     let (listener, task) = start_module(&path);
     let old = listening(&listener).await?;
     let mut open = TcpStream::connect(old).await?;
