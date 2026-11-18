@@ -4,18 +4,19 @@ use crate::error::{CliError, PlantError, PlantRefusal};
 use crate::model::{Honeytoken, Limits, PlantReport, PlantedIdentity, Role};
 use crate::policy::kernel_device;
 use crate::types::{ClaimFn, ListFn, RandomFn, StepFn};
-use core_config::trusted_dir::{open_trusted_dir, GROUP_OTHER_WRITE};
+use core_config::trusted_dir::{open_trusted_dir, TrustedDirError, GROUP_OTHER_WRITE};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
     fchmod, fchown, fstat, makedev, mkdirat, openat, renameat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags, RawMode, Stat, CWD,
 };
 use rustix::io::Errno;
-use rustix::process::{geteuid, Uid};
+use rustix::process::{geteuid, kill_process_group, Pid, Signal, Uid};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 
@@ -43,7 +44,22 @@ pub const DIRECTORY_PROBE: usize = 3;
 pub const RANDOM_SOURCE: &str = "/dev/urandom";
 
 
-pub const TETRA_BINARY: &str = "/usr/local/bin/tetra";
+pub const TETRA_BINARIES: [&str; 2] = ["/usr/local/bin/tetra", "/usr/bin/tetra"];
+
+
+pub const LIST_ARGS: [&str; 2] = ["tracingpolicy", "list"];
+
+
+pub const NEW_PROCESS_GROUP: i32 = 0;
+
+
+pub const TETRA_OWNER_UID: u32 = 0;
+
+
+pub const WAIT_POLL: Duration = Duration::from_millis(10);
+
+
+pub const MAX_WAIT_POLLS: usize = 1 << 20;
 
 
 pub const POLICY_PREFIX: &str = "ostyr-fim";
@@ -55,13 +71,13 @@ pub const MAX_LIST_BYTES: usize = 1 << 20;
 pub const READ_CHUNK_BYTES: usize = 4096;
 
 
-pub const MAX_LIST_READS: usize = MAX_LIST_BYTES / READ_CHUNK_BYTES + 1;
-
-
 pub const LIST_DEADLINE: Duration = Duration::from_secs(30);
 
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+
+
+const BINARY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC).union(OFlags::NONBLOCK);
 
 
 const CREATE_FLAGS: OFlags = OFlags::WRONLY
@@ -138,39 +154,99 @@ pub fn os_random(buffer: &mut [u8]) -> std::io::Result<()> {
 }
 
 
-/// Lists the policies with the real `tetra`, within `LIST_DEADLINE`.
+/// Lists the policies with the real `tetra`, within `LIST_DEADLINE`; no binary at any known path means no policy is loaded.
 pub fn os_list_policies() -> std::io::Result<String> {
-    list_from(TETRA_BINARY, LIST_DEADLINE)
+    list_first(&TETRA_BINARIES, TETRA_OWNER_UID, LIST_DEADLINE)
 }
 
 
-/// Runs `<binary> tracingpolicy list` within `deadline`; a missing binary means no policy is loaded, any other failure is an error.
-pub fn list_from(binary: &str, deadline: Duration) -> std::io::Result<String> {
-    match Command::new(binary)
-        .args(["tracingpolicy", "list"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(error),
-        Ok(child) => read_listing(child, deadline),
+/// Lists with the first candidate that `pick_binary` accepts; none at all means no policy is loaded.
+pub fn list_first(candidates: &[&str], owner: u32, deadline: Duration) -> std::io::Result<String> {
+    pick_binary(candidates, owner).and_then(|found| found.map_or(Ok(String::new()), |binary| list_from(binary, deadline)))
+}
+
+
+/// The first candidate that exists; a candidate that fails `check_binary` is an error, never "missing" and never skipped.
+pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Option<&'a str>> {
+    candidates
+        .iter()
+        .find_map(|path| match check_binary(path, owner) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(error)),
+            Ok(()) => Some(Ok(*path)),
+        })
+        .transpose()
+}
+
+
+/// The binary and every directory above it: no symlink, owned by `owner`, closed to group and others (the rule of the ndr program check).
+pub fn check_binary(path: &str, owner: u32) -> std::io::Result<()> {
+    let parts = Path::new(path).parent().zip(Path::new(path).file_name());
+    parts
+        .ok_or(std::io::Error::other("tetra path has no directory"))
+        .and_then(|(directory, name)| {
+            open_trusted_dir(directory, owner)
+                .map_err(directory_error)
+                .and_then(|parent| openat(&parent, name, BINARY_FLAGS, Mode::empty()).map_err(std::io::Error::from))
+                .and_then(|handle| fstat(&handle).map_err(std::io::Error::from))
+                .and_then(|stat| binary_verdict(&facts_of(&stat), owner).map_err(std::io::Error::other))
+        })
+}
+
+
+/// A directory refusal keeps its reason, an open failure keeps its kind (so a missing directory reads as a missing binary).
+pub fn directory_error(error: TrustedDirError) -> std::io::Error {
+    match error {
+        TrustedDirError::Io(source) => source,
+        other => std::io::Error::other(other.to_string()),
     }
 }
 
 
-/// The child's output, kept only when it succeeded within the deadline and `MAX_LIST_BYTES`; a child that overruns is killed and reaped.
+/// The binary is a regular file of `owner` that group and others cannot write.
+pub fn binary_verdict(facts: &FileFacts, owner: u32) -> Result<(), &'static str> {
+    let failure = first_failure(&[
+        (facts.regular, "tetra is not a regular file"),
+        (facts.uid == owner, "tetra is not owned by root"),
+        (facts.mode & GROUP_OTHER_WRITE == 0, "tetra is writable by group or others"),
+    ]);
+    failure.map_or(Ok(()), Err)
+}
+
+
+/// Runs `<binary> tracingpolicy list` within `deadline`; the binary was checked, so a failure to start it is an error.
+pub fn list_from(binary: &str, deadline: Duration) -> std::io::Result<String> {
+    spawn_listing(binary, &LIST_ARGS).and_then(|child| read_listing(child, deadline))
+}
+
+
+/// Starts the listing child with a null stdin, a piped stdout and its own process group.
+pub fn spawn_listing(binary: &str, args: &[&str]) -> std::io::Result<Child> {
+    Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(NEW_PROCESS_GROUP)
+        .spawn()
+}
+
+
+/// The child's output, kept only when it succeeded within the deadline and `MAX_LIST_BYTES`; a child that overruns is killed with its group and reaped.
 pub fn read_listing(mut child: Child, deadline: Duration) -> std::io::Result<String> {
+    let until = Instant::now() + deadline;
     let read = child
         .stdout
         .take()
         .ok_or(std::io::Error::other("no output pipe"))
-        .and_then(|mut out| read_until(&mut out, Instant::now() + deadline));
-    let status = if read.is_ok() {
-        child.wait()
-    } else {
-        child.kill().and_then(|()| child.wait())
-    };
+        .and_then(|out| read_until(&mut File::from(OwnedFd::from(out)), until));
+    let status = read
+        .as_ref()
+        .map_err(|error| std::io::Error::from(error.kind()))
+        .and_then(|_| wait_until(&mut child, until));
+    if status.is_err() {
+        reap(&mut child);
+    }
     let bytes = read?;
     status.and_then(|done| {
         done.success()
@@ -180,25 +256,52 @@ pub fn read_listing(mut child: Child, deadline: Duration) -> std::io::Result<Str
 }
 
 
-/// Reads to end of file, each read waiting at most until `until`; a listing longer than `MAX_LIST_BYTES` is an error.
-pub fn read_until(out: &mut ChildStdout, until: Instant) -> std::io::Result<Vec<u8>> {
+/// Kills the child's whole group and the child, waits for it, logging a failure of any step.
+pub fn reap(child: &mut Child) {
+    let group = kill_process_group(Pid::from_child(child), Signal::KILL).map_err(std::io::Error::from);
+    let own = child.kill().and_then(|()| child.wait()).map(drop);
+    [group.err(), own.err()].iter().flatten().for_each(log_reap_failure);
+}
+
+
+/// Logs that the listing child could not be killed or waited for.
+pub fn log_reap_failure(error: &std::io::Error) {
+    let reason = error.to_string();
+    tracing::warn!(reason, "listing child not reaped");
+}
+
+
+/// Waits for the child to exit until `until`; past it the result is `TimedOut` and the child is still running.
+pub fn wait_until(child: &mut Child, until: Instant) -> std::io::Result<ExitStatus> {
+    (0..MAX_WAIT_POLLS)
+        .find_map(|_| match child.try_wait() {
+            Ok(None) if Instant::now() < until => {
+                std::thread::sleep(WAIT_POLL);
+                None
+            }
+            other => Some(other.and_then(|exited| exited.ok_or(std::io::Error::from(std::io::ErrorKind::TimedOut)))),
+        })
+        .unwrap_or(Err(std::io::Error::from(std::io::ErrorKind::TimedOut)))
+}
+
+
+/// Reads to end of file, each read waiting at most until `until`; over `MAX_LIST_BYTES` is an error (the byte cap bounds the reads too).
+pub fn read_until(out: &mut File, until: Instant) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [u8::MIN; READ_CHUNK_BYTES];
     let mut done = false;
-    let mut reads = 0;
-    while !done && reads < MAX_LIST_READS {
+    while !done && bytes.len() <= MAX_LIST_BYTES {
         wait_readable(out, until)?;
         let count = out.read(&mut chunk)?;
         bytes.extend(chunk.iter().take(count));
         done = count == 0;
-        reads += 1;
     }
     done.then_some(bytes).ok_or(std::io::Error::other("listing too long"))
 }
 
 
 /// Waits until the pipe is readable or `until` passes (`TimedOut`).
-pub fn wait_readable(out: &ChildStdout, until: Instant) -> std::io::Result<()> {
+pub fn wait_readable(out: &File, until: Instant) -> std::io::Result<()> {
     let remaining = until.saturating_duration_since(Instant::now());
     let timeout = Timespec {
         tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
@@ -515,13 +618,23 @@ pub fn stage_text(ops: &PlantOps, parent: &OwnedFd, name: &str, text: &str) -> R
                 write_and_sync(&handle, text)
                     .map_err(PlantError::Io)
                     .and_then(|()| renameat(parent, staged.as_str(), parent, name).map_err(PlantError::from))
-                    .or_else(|failure| {
-                        remove_partial(parent, staged.as_str(), &handle)
-                            .map_err(PlantError::from)
-                            .and(Err(failure))
-                    })
+                    .or_else(|failure| first_cause(failure, remove_partial(parent, staged.as_str(), &handle)))
             })
     })
+}
+
+
+/// The failure that started the cleanup stays the error; a failed cleanup is only logged.
+pub fn first_cause(failure: PlantError, cleanup: Result<(), Errno>) -> Result<(), PlantError> {
+    cleanup.err().iter().for_each(log_cleanup_failure);
+    Err(failure)
+}
+
+
+/// Logs that the staged file could not be removed.
+pub fn log_cleanup_failure(errno: &Errno) {
+    let reason = errno.to_string();
+    tracing::warn!(reason, "staged file not removed");
 }
 
 
