@@ -4,6 +4,7 @@ mod history_types;
 mod types;
 
 
+use alerts::store::INSERT_SQL;
 use alerts::types::{Executor, RowFuture};
 use core_pg::error::PgError;
 use core_pg::migrate::{check_embedded, check_namespace};
@@ -13,7 +14,7 @@ use dhcp_kea::error::HistoryError;
 use dhcp_kea::header::parse_header;
 use dhcp_kea::history::{
     check_settings, lease_at, lease_doc, leases_of_mac, store_history, HistoryCounts, HistorySettings, AT_SQL, MAC_SQL, MAX_ACTION_CHARS,
-    MAX_HISTORY_BATCH, MAX_LOOKUP_ROWS, MAX_RETENTION_DAYS, STORE_SQL,
+    MAX_HISTORY_BATCH, MAX_LOOKUP_ROWS, MAX_RETENTION_DAYS, PRESSURE_RULE_ID, STORE_SQL,
 };
 use dhcp_kea::row::{convert_row, Converted};
 use history_types::Row;
@@ -69,6 +70,18 @@ const CONCURRENT_BATCH: usize = 80;
 const CONCURRENT_REFUSED: u64 = 60;
 
 
+const CONCURRENT_INSERTED: u64 = 160;
+
+
+const TINY_CAP: u64 = 5;
+
+
+const PAIR_DAYS: i64 = 2;
+
+
+const OLD_PRESSURE_DAYS: i64 = 8;
+
+
 const SHORT_RETENTION: u32 = 10;
 
 
@@ -103,6 +116,8 @@ static ANCHOR: LazyLock<tracing::Dispatch> = LazyLock::new(|| tracing::Dispatch:
 pub struct Store {
     pub rows: Mutex<Vec<Row>>,
     pub fail: bool,
+    pub alerts: Mutex<Vec<Value>>,
+    pub alert_fail: bool,
     pub shape: Option<Vec<Vec<String>>>,
 }
 
@@ -144,16 +159,39 @@ fn model_store(store: &Store, tenant: &str, params: &[String]) -> Result<Vec<Vec
             }
         }
     }
-    let room = cap.saturating_sub(rows.iter().filter(|(row_tenant, _doc)| row_tenant == tenant).count());
-    let inserted = fresh.len().min(room);
-    rows.extend(fresh.iter().take(room).map(|doc| (tenant.to_string(), doc.clone())));
+    fresh.sort_by_key(|doc| std::cmp::Reverse((number(doc, "ends").unwrap_or(0), number(doc, "starts").unwrap_or(0))));
+    let admitted = fresh.len().min(cap);
+    let held = rows.iter().filter(|(row_tenant, _doc)| row_tenant == tenant).count();
+    let evict = (admitted + held).saturating_sub(cap);
+    let mut mine: Vec<(i64, i64)> = rows
+        .iter()
+        .filter(|(row_tenant, _doc)| row_tenant == tenant)
+        .map(|(_tenant, doc)| (number(doc, "ends").unwrap_or(0), number(doc, "starts").unwrap_or(0)))
+        .collect();
+    mine.sort();
+    let gone: Vec<(i64, i64)> = mine.into_iter().take(evict).collect();
+    let young_after = now - days * DAY / PAIR_DAYS;
+    let pressure = gone.iter().filter(|(ends, _starts)| *ends >= young_after).count();
+    let mut dropped = gone.clone();
+    rows.retain(|(row_tenant, doc)| {
+        let key = (number(doc, "ends").unwrap_or(0), number(doc, "starts").unwrap_or(0));
+        let position = dropped.iter().position(|found| *found == key);
+        let drop_it = row_tenant == tenant && position.is_some();
+        if let Some(index) = position.filter(|_found| drop_it) {
+            dropped.remove(index);
+        }
+        !drop_it
+    });
+    rows.extend(fresh.iter().take(admitted).map(|doc| (tenant.to_string(), doc.clone())));
     let duplicate = docs.len() - stale - fresh.len();
     Ok(vec![vec![
         expired.to_string(),
-        inserted.to_string(),
+        admitted.to_string(),
         duplicate.to_string(),
-        (fresh.len() - inserted).to_string(),
+        (fresh.len() - admitted).to_string(),
         stale.to_string(),
+        gone.len().to_string(),
+        pressure.to_string(),
     ]])
 }
 
@@ -199,6 +237,22 @@ fn model_lookup(store: &Store, tenant: &str, sql: &str, params: &[String]) -> Re
 }
 
 
+fn insert_alert(store: &Store, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
+    let mut alerts = store.alerts.lock().map_err(|_poisoned| PgError::InvalidTenant)?;
+    let documents: Vec<Value> = serde_json::from_str(params.first().ok_or(PgError::InvalidTenant)?).map_err(|_bad| PgError::InvalidTenant)?;
+    let document = documents.into_iter().next().ok_or(PgError::InvalidTenant)?;
+    let known = alerts.iter().any(|stored| stored.get("id") == document.get("id"));
+    let fresh = !store.alert_fail && !known;
+    let answer = if store.alert_fail {
+        Err(PgError::InvalidTenant)
+    } else {
+        Ok(vec![vec![usize::from(fresh).to_string()]])
+    };
+    alerts.extend(fresh.then_some(document));
+    answer
+}
+
+
 pub fn executor<'a>(store: &'a Store) -> impl Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'a> + 'a {
     move |scope, sql, params| -> RowFuture<'a> {
         let tenant = tenant_of(&scope).to_string();
@@ -206,6 +260,8 @@ pub fn executor<'a>(store: &'a Store) -> impl Fn(TenantScope, &'static str, Vec<
             Err(PgError::InvalidTenant)
         } else if let Some(shape) = &store.shape {
             Ok(shape.clone())
+        } else if sql == INSERT_SQL {
+            insert_alert(store, &params)
         } else if sql == STORE_SQL {
             model_store(store, &tenant, &params).map_err(|_bad| PgError::InvalidTenant)
         } else {
@@ -313,7 +369,7 @@ async fn a_replayed_batch_is_all_duplicate_and_adds_no_row() -> TestResult {
 
 
 #[tokio::test]
-async fn the_cap_refuses_the_rest_of_a_batch_loudly() -> TestResult {
+async fn a_full_tenant_evicts_its_oldest_rows_and_keeps_the_newest() -> TestResult {
     std::sync::LazyLock::force(&ANCHOR);
     let store = Store::default();
     let exec: Executor = &executor(&store);
@@ -325,10 +381,82 @@ async fn the_cap_refuses_the_rest_of_a_batch_loudly() -> TestResult {
     let quiet = store_history(exec, &scope, &settings(SMALL_CAP), NOW, &[]).await?;
     drop(guard);
     let logged = captured_text(&capture)?;
-    assert_eq!((counts.inserted, counts.refused_full), (1, REFUSED_OF_BATCH));
+    let newest = leases_of_mac(exec, &scope, MAC_A, NOW, NOW + DAY * PAIR_DAYS).await?;
+    let newest_start = newest.intervals.first().map(|interval| interval.starts);
+    assert_eq!(
+        (counts.inserted, counts.refused_full, counts.evicted),
+        (REFUSED_OF_BATCH + 1, 0, REFUSED_OF_BATCH)
+    );
+    assert_eq!(counts.pressure, REFUSED_OF_BATCH);
     assert_eq!(quiet, HistoryCounts::default());
-    assert_eq!(logged.matches("cap reached").count(), 1, "{logged}");
+    assert_eq!(logged.matches("oldest rows evicted").count(), 1, "{logged}");
+    assert_eq!(newest_start, Some(NOW + DAY + i64::try_from(OVER_CAP_BATCH)? - 1));
     assert_eq!(row_count(&store)?, usize::try_from(SMALL_CAP)?);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_batch_over_the_whole_cap_keeps_its_newest_rows_and_says_so() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let (capture, dispatch) = capture_dispatch()?;
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    let counts = store_history(exec, &scope, &settings(TINY_CAP), NOW, &distinct(OVER_CAP_BATCH, NOW)?).await?;
+    drop(guard);
+    let logged = captured_text(&capture)?;
+    assert_eq!((counts.inserted, counts.refused_full, counts.evicted), (TINY_CAP, TINY_CAP, 0));
+    assert_eq!(logged.matches("cap reached").count(), 1, "{logged}");
+    assert_eq!(row_count(&store)?, usize::try_from(TINY_CAP)?);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn old_evictions_raise_no_alert_and_recent_ones_raise_one_per_day() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let cap_rows = usize::try_from(SMALL_CAP)?;
+    let fill = |base: i64| distinct(cap_rows, base);
+    let short = HistorySettings {
+        retention_days: SHORT_RETENTION,
+        max_rows: SMALL_CAP,
+    };
+    store_history(exec, &scope, &short, NOW, &fill(NOW - DAY * OLD_PRESSURE_DAYS)?).await?;
+    let quiet = store_history(exec, &scope, &short, NOW, &fill(NOW)?).await?;
+    let loud = store_history(exec, &scope, &short, NOW, &fill(NOW + DAY)?).await?;
+    let same_day = store_history(exec, &scope, &short, NOW, &fill(NOW + DAY * PAIR_DAYS)?).await?;
+    let alerts = store.alerts.lock().map_err(|_poisoned| "poisoned")?.clone();
+    assert_eq!((quiet.evicted, quiet.pressure), (SMALL_CAP, 0));
+    assert_eq!((loud.evicted, loud.pressure), (SMALL_CAP, SMALL_CAP));
+    assert_eq!(same_day.pressure, SMALL_CAP);
+    assert_eq!(alerts.len(), 1);
+    let rule = alerts.first().and_then(|alert| alert.get("rule_id")).and_then(Value::as_str);
+    assert_eq!(rule, Some(PRESSURE_RULE_ID));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_pressure_alert_is_logged_and_the_counts_still_return() -> TestResult {
+    std::sync::LazyLock::force(&ANCHOR);
+    let store = Store {
+        alert_fail: true,
+        ..Store::default()
+    };
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    store_history(exec, &scope, &settings(SMALL_CAP), NOW, &distinct(usize::try_from(SMALL_CAP)?, NOW)?).await?;
+    let (capture, dispatch) = capture_dispatch()?;
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    let counts = store_history(exec, &scope, &settings(SMALL_CAP), NOW, &distinct(1, NOW + DAY)?).await?;
+    drop(guard);
+    let logged = captured_text(&capture)?;
+    assert_eq!((counts.inserted, counts.pressure), (1, 1));
+    assert_eq!(logged.matches("pressure alert not stored").count(), 1, "{logged}");
     Ok(())
 }
 
@@ -357,8 +485,8 @@ fn concurrent_batches_never_exceed_the_cap() -> TestResult {
         handles.into_iter().filter_map(|handle| handle.join().ok().and_then(Result::ok)).collect()
     });
     assert_eq!(totals.len(), PAIR);
-    assert_eq!(totals.iter().map(|counts| counts.inserted).sum::<u64>(), SMALL_CAP);
-    assert_eq!(totals.iter().map(|counts| counts.refused_full).sum::<u64>(), CONCURRENT_REFUSED);
+    assert_eq!(totals.iter().map(|counts| counts.inserted).sum::<u64>(), CONCURRENT_INSERTED);
+    assert_eq!(totals.iter().map(|counts| counts.evicted).sum::<u64>(), CONCURRENT_REFUSED);
     assert_eq!(row_count(&store)?, usize::try_from(SMALL_CAP)?);
     Ok(())
 }
@@ -549,7 +677,10 @@ async fn bad_inputs_and_bad_answers_are_typed_errors() -> TestResult {
 #[test]
 fn the_statements_bind_the_tenant_and_the_migrations_are_valid() -> TestResult {
     let migration = MIGRATIONS.get(1).ok_or("second migration")?.sql;
-    assert_eq!(MIGRATIONS.len(), PAIR);
+    let eviction = MIGRATIONS.get(PAIR).ok_or("third migration")?.sql;
+    assert_eq!(MIGRATIONS.len(), PAIR + 1);
+    assert!(eviction.contains("pg_advisory_xact_lock(1145586512, hashtext(tenant_name))") && eviction.contains("LIMIT greatest("));
+    assert!(eviction.contains("WHERE tenant = tenant_name ORDER BY ends, starts") && eviction.contains("dhcp_history_rows"));
     assert!(AT_SQL.contains("tenant = $1") && MAC_SQL.contains("tenant = $1") && STORE_SQL.contains("dhcp_history_store($1,"));
     assert!(migration.contains("pg_advisory_xact_lock(1145586512, hashtext(tenant_name))"));
     assert!(migration.contains("ON CONFLICT (tenant, lease_key) DO NOTHING") && migration.contains("h.tenant = tenant_name"));

@@ -1,10 +1,13 @@
 //! IP, MAC and hostname lease history in PostgreSQL (spec section 14, DHCP module): one row per lease interval, caps enforced by the store.
 
-use crate::alerting::{mac_of, MAX_DAY_SECONDS};
+use crate::alerting::{day_of, mac_of, micros_of, MAX_DAY_SECONDS};
 use crate::error::HistoryError;
 use crate::row::{normalise_mac, valid_hostname, Converted};
+use alerts::id::alert_id;
+use alerts::model::{Alert, Severity};
+use alerts::store::{insert_alerts, summarise};
 use alerts::types::Executor;
-use core_pg::scope::TenantScope;
+use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::json;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -25,7 +28,7 @@ pub const MAX_HISTORY_BATCH: usize = 1_000;
 pub const MAX_LOOKUP_ROWS: usize = 100;
 
 
-pub const COUNT_COLUMNS: usize = 5;
+pub const COUNT_COLUMNS: usize = 7;
 
 
 pub const LOOKUP_COLUMNS: usize = 7;
@@ -34,7 +37,11 @@ pub const LOOKUP_COLUMNS: usize = 7;
 pub const MAX_ACTION_CHARS: usize = 40;
 
 
-pub const STORE_SQL: &str = "SELECT n_expired::text, n_inserted::text, n_duplicate::text, n_refused_full::text, n_stale::text \
+pub const PRESSURE_RULE_ID: &str = "dhcp.history_pressure";
+
+
+pub const STORE_SQL: &str =
+    "SELECT n_expired::text, n_inserted::text, n_duplicate::text, n_refused_full::text, n_stale::text, n_evicted::text, n_pressure::text \
                              FROM dhcp_history_store($1, $2::text::jsonb, $3::text::bigint, $4::text::bigint, $5::text::bigint)";
 
 
@@ -68,7 +75,7 @@ impl Default for HistorySettings {
 }
 
 
-/// What one call did with its batch; every row is in exactly one of `inserted`, `duplicate`, `stale`, `refused_full`, `refused`.
+/// What one call did with its batch; every row is in exactly one of `inserted`, `duplicate`, `stale`, `refused_full`, `refused`; `evicted` is the oldest rows dropped, `pressure` the evicted ones under half the retention.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HistoryCounts {
     pub inserted: u64,
@@ -77,6 +84,8 @@ pub struct HistoryCounts {
     pub refused_full: u64,
     pub stale: u64,
     pub refused: u64,
+    pub evicted: u64,
+    pub pressure: u64,
 }
 
 
@@ -162,7 +171,7 @@ fn parse_counts(rows: &[Vec<String>]) -> Result<[u64; COUNT_COLUMNS], HistoryErr
 }
 
 
-fn add_counts(total: HistoryCounts, [expired, inserted, duplicate, refused_full, stale]: [u64; COUNT_COLUMNS]) -> HistoryCounts {
+fn add_counts(total: HistoryCounts, [expired, inserted, duplicate, refused_full, stale, evicted, pressure]: [u64; COUNT_COLUMNS]) -> HistoryCounts {
     HistoryCounts {
         inserted: total.inserted + inserted,
         duplicate: total.duplicate + duplicate,
@@ -170,11 +179,33 @@ fn add_counts(total: HistoryCounts, [expired, inserted, duplicate, refused_full,
         refused_full: total.refused_full + refused_full,
         stale: total.stale + stale,
         refused: total.refused,
+        evicted: total.evicted + evicted,
+        pressure: total.pressure + pressure,
     }
 }
 
 
-/// Stores a batch for the scope's tenant in groups of `MAX_HISTORY_BATCH`; `now` is Unix seconds. The store enforces the row cap and the retention under a per-tenant lock.
+/// The pressure alert: one per tenant and UTC day, with the number of recent rows evicted by the run that first raised it.
+pub fn pressure_alert(scope: &TenantScope, pressure: u64, created_micros: u64) -> Alert {
+    let tenant = tenant_of(scope).to_owned();
+    let event_ids = vec!["history-pressure".to_owned(), format!("day:{}", day_of(created_micros))];
+    Alert {
+        id: alert_id(&tenant, PRESSURE_RULE_ID, &event_ids),
+        tenant,
+        rule_id: PRESSURE_RULE_ID.to_owned(),
+        rule_title: format!("DHCP history full, {pressure} recent rows evicted"),
+        severity: Severity::Medium,
+        event_time: created_micros.to_string(),
+        created_micros,
+        host_name: None,
+        user_name: None,
+        event_ids,
+        summary: summarise(&json!({ "evicted_recent": pressure })),
+    }
+}
+
+
+/// Stores a batch for the scope's tenant in groups of `MAX_HISTORY_BATCH`; `now` is Unix seconds. The store enforces the row cap (evicting the oldest rows) and the retention under a per-tenant lock.
 pub async fn store_history(
     exec: Executor<'_, '_>,
     scope: &TenantScope,
@@ -209,6 +240,17 @@ pub async fn store_history(
     let refused_full = total.refused_full;
     if refused_full > 0 {
         tracing::warn!(refused_full, "dhcp history cap reached, rows refused");
+    }
+    let evicted = total.evicted;
+    if evicted > 0 {
+        tracing::warn!(evicted, "dhcp history full, oldest rows evicted");
+    }
+    if total.pressure > 0 {
+        let alert = pressure_alert(scope, total.pressure, micros_of(now));
+        let raised = insert_alerts(exec, scope, &[alert]).await;
+        if let Err(error) = raised {
+            tracing::warn!(%error, "dhcp history pressure alert not stored");
+        }
     }
     Ok(total)
 }
