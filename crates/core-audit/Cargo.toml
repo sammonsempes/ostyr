@@ -13,6 +13,10 @@ sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
+
+
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"

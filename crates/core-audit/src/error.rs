@@ -35,6 +35,18 @@ pub enum AuditError {
     LogPoisoned,
     #[error("file mode is {mode:o}, it must grant no access to group or other")]
     InsecurePermissions { mode: u32 },
+    #[error("the audit log is not a regular file")]
+    NotRegularFile,
+    #[error("the audit log is a symbolic link, which is refused")]
+    SymlinkRefused,
+    #[error("the audit log is owned by uid {owner}, expected {expected}")]
+    ForeignOwner { owner: u32, expected: u32 },
+    #[error("the audit log has {links} links, expected one")]
+    LinkedFile { links: u64 },
+    #[error("line {line}: the record is longer than {max} bytes")]
+    RecordTooLong { line: usize, max: usize },
+    #[error("the record is {size} bytes, the limit is {max}")]
+    RecordTooLarge { size: usize, max: usize },
     #[error("{count} audit parameters, the limit is {max}")]
     TooManyParameters { count: usize, max: usize },
     #[error("an audit parameter key is {length} bytes, the limit is {max}")]

@@ -1,11 +1,15 @@
 use crate::canonical::{render_line, restrict_parameters, seal};
 use crate::error::AuditError;
 use crate::model::{NewEntry, Record, GENESIS_HASH};
-use crate::verify::verify;
-use std::fs::{File, OpenOptions};
+use crate::verify::{verify, MAX_RECORD_BYTES};
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
+use rustix::io::Errno;
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, BufReader, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -74,7 +78,14 @@ pub fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
 
 #[cfg(unix)]
 pub fn check_private(file: &File) -> Result<(), AuditError> {
-    let mode = file.metadata()?.permissions().mode();
+    file.metadata()
+        .map_err(AuditError::Io)
+        .and_then(|metadata| private_mode(metadata.permissions().mode()))
+}
+
+
+#[cfg(unix)]
+pub fn private_mode(mode: u32) -> Result<(), AuditError> {
     if mode & GROUP_OTHER_MASK == 0 {
         Ok(())
     } else {
@@ -85,20 +96,118 @@ pub fn check_private(file: &File) -> Result<(), AuditError> {
 }
 
 
-#[cfg(unix)]
-pub const FILE_TYPE_MASK: u32 = 0o170000;
-
-
 #[cfg(not(unix))]
 pub fn check_private(_file: &File) -> Result<(), AuditError> {
     Ok(())
 }
 
 
-/// Opens (creating if needed) an append-only file, verifies its existing chain and continues it.
+#[cfg(unix)]
+pub const FILE_TYPE_MASK: u32 = 0o170000;
+
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct HandleFacts {
+    pub regular: bool,
+    pub owner: u32,
+    pub links: u64,
+    pub mode: u32,
+}
+
+
+#[cfg(unix)]
+pub fn handle_facts(metadata: &Metadata) -> HandleFacts {
+    HandleFacts {
+        regular: metadata.file_type().is_file(),
+        owner: metadata.uid(),
+        links: metadata.nlink(),
+        mode: metadata.mode(),
+    }
+}
+
+
+#[cfg(unix)]
+pub fn judge_opened(file: File) -> Result<File, AuditError> {
+    file.metadata()
+        .map_err(AuditError::Io)
+        .and_then(|metadata| judge_handle(&handle_facts(&metadata), rustix::process::geteuid().as_raw()))
+        .map(|()| file)
+}
+
+
+#[cfg(unix)]
+pub fn judge_handle(facts: &HandleFacts, effective_uid: u32) -> Result<(), AuditError> {
+    if !facts.regular {
+        Err(AuditError::NotRegularFile)
+    } else if facts.owner != effective_uid {
+        Err(AuditError::ForeignOwner {
+            owner: facts.owner,
+            expected: effective_uid,
+        })
+    } else if facts.links != 1 {
+        Err(AuditError::LinkedFile { links: facts.links })
+    } else if facts.mode & GROUP_OTHER_MASK != 0 {
+        Err(AuditError::InsecurePermissions {
+            mode: facts.mode & !FILE_TYPE_MASK,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+
+#[cfg(unix)]
+pub fn open_nonblocking(path: &Path) -> Result<File, AuditError> {
+    let flags = OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    open_with(path, flags)
+}
+
+
+#[cfg(unix)]
+pub fn open_with(path: &Path, flags: OFlags) -> Result<File, AuditError> {
+    rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR).map(File::from).map_err(|errno| {
+        if errno == Errno::LOOP {
+            AuditError::SymlinkRefused
+        } else {
+            AuditError::Io(errno.into())
+        }
+    })
+}
+
+
+/// Read-only open for verify and export: same flags, no creation, same judgement of the handle.
+#[cfg(unix)]
+pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
+    open_with(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+    )
+    .and_then(judge_opened)
+}
+
+
+#[cfg(not(unix))]
+pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
+    Ok(File::open(path)?)
+}
+
+
+#[cfg(unix)]
+pub fn open_checked(path: &Path) -> Result<File, AuditError> {
+    open_nonblocking(path).and_then(judge_opened)
+}
+
+
+#[cfg(not(unix))]
+pub fn open_checked(path: &Path) -> Result<File, AuditError> {
+    Ok(owner_only(OpenOptions::new().read(true).append(true).create(true)).open(path)?)
+}
+
+
+/// Opens (creating if needed) an append-only file without following a link or blocking, judges the handle, verifies its chain and continues it.
 pub fn open_file_log(path: &Path) -> Result<AuditLog<File>, AuditError> {
-    let file = owner_only(OpenOptions::new().read(true).append(true).create(true)).open(path)?;
-    check_private(&file)?;
+    let file = open_checked(path)?;
     let report = verify(BufReader::new(&file), None)?;
     Ok(new_log(file, &report.head, sync_file))
 }
@@ -117,8 +226,8 @@ pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<
     if state.poisoned {
         Err(AuditError::LogPoisoned)
     } else {
-        let record = seal(entry, &state.head)?;
-        match write_durably(&mut state.writer, log.sync, &render_line(&record)) {
+        let (record, line) = seal_checked(entry, &state.head)?;
+        match write_durably(&mut state.writer, log.sync, &line) {
             Ok(()) => {
                 state.head.clone_from(&record.hash);
                 Ok(record)
@@ -128,6 +237,21 @@ pub fn append<Output: Write>(log: &AuditLog<Output>, entry: NewEntry) -> Result<
                 Err(AuditError::Io(error))
             }
         }
+    }
+}
+
+
+/// Seals the entry and refuses a stored line over `MAX_RECORD_BYTES`, which `verify` could not read back.
+pub fn seal_checked(entry: NewEntry, head: &str) -> Result<(Record, String), AuditError> {
+    let record = seal(entry, head)?;
+    let line = render_line(&record);
+    if line.len() > MAX_RECORD_BYTES {
+        Err(AuditError::RecordTooLarge {
+            size: line.len(),
+            max: MAX_RECORD_BYTES,
+        })
+    } else {
+        Ok((record, line))
     }
 }
 

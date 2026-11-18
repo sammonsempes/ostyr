@@ -1,9 +1,8 @@
 use crate::ecs::export;
 use crate::error::AuditError;
-use crate::log::{append_declared, head, open_file_log, AuditLog};
+use crate::log::{append_declared, head, open_file_log, open_read_checked, AuditLog};
 use crate::model::{Actor, ActorKind, NewEntry, Outcome};
 use crate::verify::verify;
-use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::Path;
 use time::OffsetDateTime;
@@ -71,11 +70,11 @@ pub fn run<Output: Write>(args: &[&str], out: &mut Output) -> Result<(), AuditEr
 
 
 pub fn verify_file<Output: Write>(file: &str, expected: Option<&str>, out: &mut Output) -> Result<(), AuditError> {
-    let report = verify(BufReader::new(File::open(file)?), expected)?;
+    let report = verify(BufReader::new(open_read_checked(Path::new(file))?), expected)?;
     writeln!(out, "ok {} records head {}", report.records, report.head).map_err(AuditError::from)
 }
 
 
 pub fn export_file<Output: Write>(file: &str, expected: Option<&str>, out: &mut Output) -> Result<(), AuditError> {
-    export(|| File::open(file).map(BufReader::new), out, expected).map(|_| ())
+    export(|| open_read_checked(Path::new(file)).map(BufReader::new), out, expected).map(|_| ())
 }
