@@ -1,5 +1,7 @@
 //! Hunt packs as code (spec section 8): the file format, its loader and its validation.
 
+pub mod api;
+pub mod api_model;
 pub mod check;
 pub mod cli;
 pub mod clock;
