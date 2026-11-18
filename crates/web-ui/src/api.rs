@@ -1,5 +1,7 @@
 use crate::error::{unavailable, ApiFailure};
-use crate::model::{Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CommentView};
+use crate::model::{
+    Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CommentView, RiskDetailView, RiskListView,
+};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Method, Response, StatusCode};
@@ -40,6 +42,18 @@ pub const MAX_ASSET_KEYS: usize = 64;
 
 
 pub const MAX_ASSET_ATTRIBUTES: usize = 500;
+
+
+pub const RISK_KINDS: [&str; 2] = ["host", "user"];
+
+
+pub const RISK_LIMIT: u32 = 100;
+
+
+pub const MAX_RISK_ENTITIES: usize = 500;
+
+
+pub const MAX_RISK_VALUE: u64 = 100;
 
 
 pub const ID_LENGTH: usize = 64;
@@ -502,5 +516,62 @@ pub async fn post_case_comment(client: &ApiClient, source: IpAddr, token: &Secre
         Ok(serde_json::from_slice(&bytes)?)
     } else {
         Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// The fixed spelling of an entity kind of the risk API, `None` for anything else.
+pub fn risk_kind(text: &str) -> Option<&'static str> {
+    RISK_KINDS.iter().find(|kind| **kind == text).copied()
+}
+
+
+pub fn risk_path(kind: Option<&str>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("limit", &RISK_LIMIT.to_string());
+    kind.iter().for_each(|value| {
+        query.append_pair("kind", value);
+    });
+    format!("risk/entities?{}", query.finish())
+}
+
+
+pub fn check_risk_list(list: &RiskListView) -> Result<(), ApiFailure> {
+    if list.entities.len() > MAX_RISK_ENTITIES {
+        Err(ApiFailure::Malformed("too many entities"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn check_risk_detail(detail: &RiskDetailView, kind: &str, id: &str) -> Result<(), ApiFailure> {
+    if detail.entity.kind != kind || detail.entity.id != id {
+        Err(ApiFailure::Malformed("entity differs"))
+    } else if detail.entity.value > MAX_RISK_VALUE {
+        Err(ApiFailure::Malformed("score"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub async fn list_risk(client: &ApiClient, source: IpAddr, token: &SecretString, kind: Option<&str>) -> Result<RiskListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &risk_path(kind), Some(token), None).await?;
+    let list: RiskListView = serde_json::from_slice(&bytes)?;
+    check_risk_list(&list).map(|()| list)
+}
+
+
+/// A kind outside `host` and `user` or an id outside the asset id grammar is a missing entity without any call; the path holds the encoded id only.
+pub async fn get_risk_entity(client: &ApiClient, source: IpAddr, token: &SecretString, kind: &str, id: &str) -> Result<RiskDetailView, ApiFailure> {
+    match risk_kind(kind).filter(|_| valid_asset_id(id)) {
+        Some(fixed) => {
+            let path = format!("risk/entities/{fixed}/{}", encode_asset_id(id));
+            let bytes = call(client, source, Method::GET, &path, Some(token), None).await?;
+            let detail: RiskDetailView = serde_json::from_slice(&bytes)?;
+            check_risk_detail(&detail, fixed, id).map(|()| detail)
+        }
+        None => Err(ApiFailure::NotFound),
     }
 }

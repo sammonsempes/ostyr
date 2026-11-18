@@ -83,6 +83,7 @@ pub struct StubState {
     pub details: AtomicUsize,
     pub case_paths: Mutex<Vec<String>>,
     pub asset_paths: Mutex<Vec<String>>,
+    pub risk_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -654,6 +655,120 @@ pub async fn asset_detail_handler(State(state): State<Arc<StubState>>, headers: 
 }
 
 
+pub const RISK_ALERTS_READ: u32 = 1234;
+
+
+pub const RISK_CAP: u32 = 5678;
+
+
+pub const RISK_USED: u32 = 3;
+
+
+pub const RISK_COMPUTED_AT: i64 = 1_700_000_000;
+
+
+pub const RISK_DETAIL_SCORE: u32 = 55;
+
+
+pub const RISK_WEB_SCORE: u32 = 80;
+
+
+pub const RISK_DB_SCORE: u32 = 40;
+
+
+pub const RISK_ALICE_SCORE: u32 = 10;
+
+
+pub const RISK_ODD_ID: &str = "a/b?c#d%e";
+
+
+pub const RISK_UNREADABLE_IDS: [&str; 6] = ["bad\u{202e}id", "two  spaces", "cafe\u{301}", "hole\u{3164}x", "", "trail "];
+
+
+pub fn risk_entity(kind: &str, id: &str, value: u32) -> Value {
+    json!({"kind": kind, "id": id, "value": value, "contributions_used": RISK_USED, "contributions_dropped": 0})
+}
+
+
+pub fn risk_list(entities: Vec<Value>, truncated: bool) -> Value {
+    let bound = json!({"limit": "alerts", "read": RISK_ALERTS_READ, "cap": RISK_CAP});
+    json!({
+        "computed_at": RISK_COMPUTED_AT, "alerts_read": RISK_ALERTS_READ, "informational": 0, "refused": {"host": 1},
+        "truncated": if truncated { bound } else { Value::Null }, "entities": entities
+    })
+}
+
+
+pub async fn risk_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.risk_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(risk_list((0..=MAX_RISK_ROWS).map(|_| risk_entity("host", "h", 1)).collect(), false)).into_response(),
+            Mode::Hostile => {
+                let mut rows: Vec<Value> = RISK_UNREADABLE_IDS.iter().map(|id| risk_entity("host", id, 1)).collect();
+                rows.push(risk_entity("host", "over", OVER_SCORE));
+                rows.push(risk_entity("group", "g", 1));
+                rows.push(risk_entity("host", RISK_ODD_ID, 1));
+                Json(risk_list(rows, true)).into_response()
+            }
+            Mode::Chunked => Json(risk_list(vec![], false)).into_response(),
+            _ => {
+                let rows = vec![
+                    risk_entity("host", "web01", RISK_WEB_SCORE),
+                    risk_entity("host", "db01", RISK_DB_SCORE),
+                    risk_entity("user", "alice", RISK_ALICE_SCORE),
+                ];
+                let wanted = uri.query().unwrap_or("").contains("kind=user");
+                let kept = rows.into_iter().filter(|row| !wanted || row["kind"] == "user").collect();
+                Json(risk_list(kept, true)).into_response()
+            }
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn risk_detail_handler(
+    State(state): State<Arc<StubState>>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+) -> Response {
+    note_forwarded(&state, &headers);
+    {
+        let mut seen = state.risk_paths.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.push(uri.path().to_owned());
+        seen.push(format!("id={id}"));
+    }
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::BadId => Json(json!({"computed_at": 1, "truncated": null, "entity": risk_entity(&kind, "other", 1)})).into_response(),
+            Mode::Hostile => Json(json!({"computed_at": 1, "truncated": null, "entity": risk_entity(&kind, &id, OVER_SCORE)})).into_response(),
+            _ if id == "swapped" => Json(json!({"computed_at": 1, "truncated": null, "entity": risk_entity("user", &id, 1)})).into_response(),
+            _ => {
+                let bound = json!({"limit": "weird", "read": RISK_ALERTS_READ, "cap": RISK_CAP});
+                Json(json!({"computed_at": RISK_COMPUTED_AT, "truncated": bound, "entity": risk_entity(&kind, &id, RISK_DETAIL_SCORE)}))
+                    .into_response()
+            }
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub const MAX_RISK_ROWS: usize = 500;
+
+
+pub const OVER_SCORE: u32 = 101;
+
+
 pub async fn count_request(State(state): State<Arc<StubState>>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
     next.run(request).await
@@ -671,6 +786,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         details: AtomicUsize::new(0),
         case_paths: Mutex::new(Vec::new()),
         asset_paths: Mutex::new(Vec::new()),
+        risk_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -685,6 +801,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/alerts/{id}", get(detail_handler))
         .route("/assets", get(assets_handler))
         .route("/assets/{id}", get(asset_detail_handler))
+        .route("/risk/entities", get(risk_list_handler))
+        .route("/risk/entities/{kind}/{id}", get(risk_detail_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))

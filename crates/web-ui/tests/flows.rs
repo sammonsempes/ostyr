@@ -23,7 +23,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
-use stub::{id_of, Mode, ReadFault, BIG_ASSET, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, ODD_ASSET_ID, TOKEN};
+use stub::{
+    id_of, Mode, ReadFault, BIG_ASSET, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, ODD_ASSET_ID, RISK_ALERTS_READ, RISK_CAP, RISK_ODD_ID,
+    RISK_UNREADABLE_IDS, TOKEN,
+};
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Instant};
 use tokio_stream::pending;
@@ -2097,5 +2100,178 @@ async fn a_non_composed_asset_id_is_not_found_without_an_api_call() -> TestResul
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{id:?}");
     }
     assert!(asset_requests(&rig)?.is_empty());
+    Ok(())
+}
+
+
+const RISK_EXTRA_UNREADABLE: usize = 2;
+
+
+fn risk_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.risk_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+#[tokio::test]
+async fn the_risk_list_shows_scores_and_the_truncation_banner() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/risk\""));
+    let all = fire(&rig, get_with("/risk", &session)).await?;
+    assert_eq!(all.status, StatusCode::OK);
+    assert_hardened(&all);
+    for expected in [
+        "web01",
+        "db01",
+        "alice",
+        "value=\"80\"",
+        "Scores are partial.",
+        "alerts",
+        "Hosts",
+        "Users",
+    ] {
+        assert!(all.body.contains(expected), "{expected}: {}", all.body);
+    }
+    assert!(all.body.contains(&RISK_ALERTS_READ.to_string()) && all.body.contains(&RISK_CAP.to_string()));
+    assert!(all.body.contains("action=\"/risk/host/web01\"") && all.body.contains("action=\"/risk/user/alice\""));
+    assert!(all.body.contains(">web01</button>") && all.body.contains(">alice</button>"));
+    let users = fire(&rig, get_with("/risk?kind=user", &session)).await?;
+    assert!(users.body.contains("alice") && !users.body.contains("web01"));
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with("/risk?kind=host", &session)
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Scores partiels.") && french.body.contains("Machines"));
+    let seen = risk_requests(&rig)?;
+    assert_eq!(
+        seen,
+        [
+            "/risk/entities?limit=100",
+            "/risk/entities?limit=100&kind=user",
+            "/risk/entities?limit=100&kind=host"
+        ]
+    );
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/risk", &session)).await?;
+    assert!(empty.body.contains("No scored entity.") && !empty.body.contains("Scores are partial."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_bad_risk_kind_is_refused_before_any_api_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for query in ["/risk?kind=group", "/risk?kind=", "/risk?kind=host%20"] {
+        let reply = fire(&rig, get_with(query, &session)).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    let anonymous = fire(&rig, get("/risk")).await?;
+    assert_eq!(location_of(&anonymous).as_deref(), Some("/login"));
+    assert!(risk_requests(&rig)?.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn risk_ids_that_do_not_render_as_themselves_are_unreadable_rows() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/risk", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_eq!(
+        list.body.matches("Unreadable entity.").count(),
+        RISK_UNREADABLE_IDS.len() + RISK_EXTRA_UNREADABLE
+    );
+    assert!(!list.body.contains("two  spaces") && !list.body.contains("hole") && !list.body.contains("over"));
+    let odd = format!("action=\"/risk/host/{}\"", encode_asset_id(RISK_ODD_ID));
+    assert_eq!(encode_asset_id(RISK_ODD_ID), "a%2Fb%3Fc%23d%25e");
+    assert!(list.body.contains(&odd), "{}", list.body);
+    assert!(list.body.contains(&format!(">{RISK_ODD_ID}</button>")), "{}", list.body);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_risk_detail_reaches_the_exact_entity_and_never_another_route() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let detail = fire(&rig, get_with("/risk/host/web01", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_hardened(&detail);
+    for expected in [
+        "web01",
+        "value=\"55\"",
+        "Hosts",
+        "Scores are partial.",
+        "unknown",
+        "Back to the risk list",
+    ] {
+        assert!(detail.body.contains(expected), "{expected}: {}", detail.body);
+    }
+    let encoded = encode_asset_id(RISK_ODD_ID);
+    let odd = fire(&rig, get_with(&format!("/risk/user/{encoded}"), &session)).await?;
+    assert_eq!(odd.status, StatusCode::OK);
+    let seen = risk_requests(&rig)?;
+    let tail = seen.get(seen.len().saturating_sub(PAIR)..).ok_or("no requests")?;
+    assert_eq!(tail, [format!("/risk/entities/user/{encoded}"), format!("id={RISK_ODD_ID}")]);
+    let before = api_requests(&rig);
+    for path in [
+        "/risk/group/web01",
+        "/risk/host/cafe%CC%81",
+        "/risk/host/..",
+        "/risk/host/%2e%2e",
+        "/risk/host/a%20%20b",
+        "/risk/host/x%E3%85%A4",
+    ] {
+        let reply = fire(&rig, get_with(path, &session)).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert_eq!(api_requests(&rig), before);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn risk_api_failures_render_our_own_text() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for path in ["/risk", "/risk/host/web01"] {
+        for (mode, status) in [
+            (Mode::Status(StatusCode::SERVICE_UNAVAILABLE), StatusCode::SERVICE_UNAVAILABLE),
+            (Mode::Status(StatusCode::NOT_FOUND), StatusCode::NOT_FOUND),
+            (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+            (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+            (Mode::Oversize, StatusCode::BAD_GATEWAY),
+            (Mode::TooMany, StatusCode::BAD_GATEWAY),
+            (Mode::BadId, StatusCode::BAD_GATEWAY),
+            (Mode::Hostile, StatusCode::BAD_GATEWAY),
+        ] {
+            set_mode(&rig, mode)?;
+            let reply = fire(&rig, get_with(path, &session)).await?;
+            let list_served = path == "/risk" && matches!(mode, Mode::BadId | Mode::Hostile);
+            let detail_served = path == "/risk/host/web01" && mode == Mode::TooMany;
+            let expected = if list_served || detail_served { StatusCode::OK } else { status };
+            assert_eq!(reply.status, expected, "{path}");
+            assert!(!reply.body.contains(LEAK));
+            assert_hardened(&reply);
+        }
+    }
+    set_mode(&rig, Mode::Status(StatusCode::SERVICE_UNAVAILABLE))?;
+    let busy = fire(&rig, get_with("/risk", &session)).await?;
+    assert!(busy.body.contains("Scores are being computed. Retry in a moment."));
+    set_mode(&rig, Mode::Normal)?;
+    let swapped = fire(&rig, get_with("/risk/host/swapped", &session)).await?;
+    assert_eq!(swapped.status, StatusCode::BAD_GATEWAY);
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/risk", &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    let gone = fire(&rig, get_with("/risk/host/web01", &session)).await?;
+    assert_eq!(location_of(&gone).as_deref(), Some("/login"));
     Ok(())
 }
