@@ -140,6 +140,7 @@ pub struct FetchReport {
     pub in_backoff: usize,
     pub permanent_refused: usize,
     pub transient_refused: usize,
+    pub resume_key: Option<String>,
     pub refused: Vec<(String, Refusal)>,
     pub failed_sources: Vec<(String, FetchError)>,
 }

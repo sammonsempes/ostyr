@@ -1,7 +1,9 @@
 use crate::fetch_error::{FetchError, Refusal};
 use crate::fetch_model::{FetchEnv, FetchReport, FetchSettings, FetchSource, ListedObject, ObjectOutcome, Remembered, SourceRun};
 use crate::fetch_settings::validate_source;
-use crate::ledger::{object_state, read_cursor, record_loaded, record_refused, record_transient, write_cursor, LedgerState};
+use crate::ledger::{
+    object_state, read_cursor, read_rotation, record_loaded, record_refused, record_transient, waiting, write_cursor, write_rotation, LedgerState,
+};
 use crate::listing::{get_body, list_objects, open_bucket, PRESIGN_SECONDS};
 use crate::load::LoadError;
 use crate::source::read_export;
@@ -179,7 +181,7 @@ pub fn process_object(run: &SourceRun<'_>, object: &ListedObject, now: u64) -> O
         Err(_failure) => ObjectOutcome::Refused(Refusal::Ledger),
         Ok(LedgerState::Loaded) => ObjectOutcome::AlreadyLoaded,
         Ok(LedgerState::Refused) => ObjectOutcome::AlreadyRefused,
-        Ok(LedgerState::Transient { next_try, .. }) if next_try > now => ObjectOutcome::InBackoff,
+        Ok(LedgerState::Transient { attempts, next_try }) if waiting(attempts, next_try, now) => ObjectOutcome::InBackoff,
         Ok(LedgerState::Transient { attempts, .. }) => attempt_object(run, object, attempts, now),
         Ok(LedgerState::New) => attempt_object(run, object, 0, now),
     }
@@ -203,6 +205,7 @@ pub fn refuse(mut report: FetchReport, object: &ListedObject, refusal: Refusal) 
 pub fn handle_object(mut report: FetchReport, run: &SourceRun<'_>, object: &ListedObject, now: u64) -> FetchReport {
     if report.loaded + report.permanent_refused >= run.source.max_objects_per_run || report.transient_refused >= TRANSIENT_BUDGET {
         report.deferred += 1;
+        report.resume_key.get_or_insert_with(|| object.key.clone());
     } else {
         match process_object(run, object, now) {
             ObjectOutcome::Loaded => report.loaded += 1,
@@ -216,15 +219,26 @@ pub fn handle_object(mut report: FetchReport, run: &SourceRun<'_>, object: &List
 }
 
 
+/// The walk starts at the first object whose key is not below the stored resume key, and wraps: a writer cannot keep a later key out of reach.
+pub fn rotate(mut objects: Vec<ListedObject>, resume: Option<&str>) -> Vec<ListedObject> {
+    let start = resume
+        .and_then(|key| objects.iter().position(|object| object.key.as_str() >= key))
+        .unwrap_or(0);
+    objects.rotate_left(start);
+    objects
+}
+
+
 /// One source: settings checked, credentials read, listing walked, then each object handled alone.
 pub fn fetch_source(settings: &FetchSettings, source: &FetchSource, env: &FetchEnv<'_>, now: u64) -> Result<FetchReport, FetchError> {
     validate_source(source)?;
     let credentials = read_credentials(&settings.secrets_dir.join(&source.credentials))?;
     let bucket = open_bucket(source)?;
     let cursor = read_cursor(env.exec, &source.tenant, &source.id).map_err(|_failure| FetchError::Ledger)?;
+    let resume = read_rotation(env.exec, &source.tenant, &source.id).map_err(|_failure| FetchError::Ledger)?;
     let listing = list_objects(env, source, &bucket, &credentials, cursor.as_deref())?;
-    let resume = listing.last_key.as_deref().filter(|_| listing.incomplete);
-    write_cursor(env.exec, &source.tenant, &source.id, resume).map_err(|_failure| FetchError::Ledger)?;
+    let next_cursor = listing.last_key.as_deref().filter(|_| listing.incomplete);
+    write_cursor(env.exec, &source.tenant, &source.id, next_cursor).map_err(|_failure| FetchError::Ledger)?;
     let run = SourceRun {
         env,
         source,
@@ -237,10 +251,14 @@ pub fn fetch_source(settings: &FetchSettings, source: &FetchSource, env: &FetchE
         incomplete_listings: usize::from(listing.incomplete),
         ..FetchReport::default()
     };
-    Ok(listing
-        .objects
+    let mut report = rotate(listing.objects, resume.as_deref())
         .iter()
-        .fold(start, |report, object| handle_object(report, &run, object, now)))
+        .fold(start, |total, object| handle_object(total, &run, object, now));
+    let next_resume = report.resume_key.take();
+    if write_rotation(env.exec, &source.tenant, &source.id, next_resume.as_deref()).is_err() {
+        warn!("source {}: rotation not recorded", source.id);
+    }
+    Ok(report)
 }
 
 

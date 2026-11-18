@@ -7,6 +7,8 @@ use log::warn;
 pub const LEDGER_DDL: &str = "CREATE TABLE IF NOT EXISTS cloud_cost_objects (tenant text NOT NULL, source_id text NOT NULL, key text NOT NULL, \
 etag text NOT NULL, size bigint NOT NULL, sha256 text NOT NULL, loaded_at bigint NOT NULL, PRIMARY KEY (tenant, source_id, key, etag)); \
 CREATE TABLE IF NOT EXISTS cloud_cost_cursors (tenant text NOT NULL, source_id text NOT NULL, last_key text NOT NULL, \
+PRIMARY KEY (tenant, source_id)); \
+CREATE TABLE IF NOT EXISTS cloud_cost_rotation (tenant text NOT NULL, source_id text NOT NULL, resume_key text NOT NULL, \
 PRIMARY KEY (tenant, source_id))";
 
 
@@ -26,6 +28,16 @@ ON CONFLICT (tenant, source_id) DO UPDATE SET last_key = EXCLUDED.last_key";
 
 
 pub const DELETE_CURSOR: &str = "DELETE FROM cloud_cost_cursors WHERE tenant = $1 AND source_id = $2";
+
+
+pub const SELECT_ROTATION: &str = "SELECT resume_key FROM cloud_cost_rotation WHERE tenant = $1 AND source_id = $2";
+
+
+pub const UPSERT_ROTATION: &str = "INSERT INTO cloud_cost_rotation (tenant, source_id, resume_key) VALUES ($1, $2, $3) \
+ON CONFLICT (tenant, source_id) DO UPDATE SET resume_key = EXCLUDED.resume_key";
+
+
+pub const DELETE_ROTATION: &str = "DELETE FROM cloud_cost_rotation WHERE tenant = $1 AND source_id = $2";
 
 
 pub const REFUSED_PREFIX: &str = "refused:";
@@ -139,21 +151,49 @@ pub fn record_transient(
 }
 
 
-pub fn read_cursor(exec: &ExecFn<'_>, tenant: &str, source_id: &str) -> Result<Option<String>, LedgerFailure> {
-    let rows = exec(SELECT_CURSOR, &[tenant.to_owned(), source_id.to_owned()])?;
+pub fn read_key(exec: &ExecFn<'_>, select: &str, tenant: &str, source_id: &str) -> Result<Option<String>, LedgerFailure> {
+    let rows = exec(select, &[tenant.to_owned(), source_id.to_owned()])?;
     Ok(rows.into_iter().next().and_then(|row| row.into_iter().next()))
+}
+
+
+pub fn write_key(exec: &ExecFn<'_>, statements: (&str, &str), tenant: &str, source_id: &str, key: Option<&str>) -> Result<(), LedgerFailure> {
+    let mut params = vec![tenant.to_owned(), source_id.to_owned()];
+    match key {
+        Some(text) => {
+            params.push(text.to_owned());
+            exec(statements.0, &params)
+        }
+        None => exec(statements.1, &params),
+    }
+    .map(drop)
+}
+
+
+pub fn read_cursor(exec: &ExecFn<'_>, tenant: &str, source_id: &str) -> Result<Option<String>, LedgerFailure> {
+    read_key(exec, SELECT_CURSOR, tenant, source_id)
 }
 
 
 /// A cursor is kept only while a listing is incomplete; a complete one clears it so the next round starts at the first key.
 pub fn write_cursor(exec: &ExecFn<'_>, tenant: &str, source_id: &str, last_key: Option<&str>) -> Result<(), LedgerFailure> {
-    let mut params = vec![tenant.to_owned(), source_id.to_owned()];
-    match last_key {
-        Some(key) => {
-            params.push(key.to_owned());
-            exec(UPSERT_CURSOR, &params)
-        }
-        None => exec(DELETE_CURSOR, &params),
-    }
-    .map(drop)
+    write_key(exec, (UPSERT_CURSOR, DELETE_CURSOR), tenant, source_id, last_key)
+}
+
+
+/// The key the next round starts its walk at: the first object this round deferred.
+pub fn read_rotation(exec: &ExecFn<'_>, tenant: &str, source_id: &str) -> Result<Option<String>, LedgerFailure> {
+    read_key(exec, SELECT_ROTATION, tenant, source_id)
+}
+
+
+/// A round that deferred nothing clears the rotation, so the next one starts at the first key.
+pub fn write_rotation(exec: &ExecFn<'_>, tenant: &str, source_id: &str, resume_key: Option<&str>) -> Result<(), LedgerFailure> {
+    write_key(exec, (UPSERT_ROTATION, DELETE_ROTATION), tenant, source_id, resume_key)
+}
+
+
+/// A stored next try is trusted only within `backoff_ms(attempts)` of now: a later one comes from a clock set back or a forged row, and is due now.
+pub fn waiting(attempts: u32, next_try: u64, now: u64) -> bool {
+    next_try > now && next_try <= now.saturating_add(backoff_ms(attempts))
 }

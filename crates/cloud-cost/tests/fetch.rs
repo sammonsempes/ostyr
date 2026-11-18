@@ -11,9 +11,9 @@ use cloud_cost::fetch_model::{
     FetchEnv, FetchReport, FetchSettings, FetchSource, HttpRequest, HttpResponse, Remembered, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_OBJECTS,
 };
 use cloud_cost::ledger::{
-    backoff_ms, object_state, parse_backoff, read_cursor, record_loaded, record_refused, record_transient, write_cursor, LedgerState,
-    BACKOFF_BASE_MS, BACKOFF_MAX_MS, DELETE_CURSOR, INSERT_OBJECT, LEDGER_DDL, REFUSED_PREFIX, SELECT_CURSOR, SELECT_OBJECT, TRANSIENT_PREFIX,
-    UPSERT_CURSOR,
+    backoff_ms, object_state, parse_backoff, read_cursor, read_rotation, record_loaded, record_refused, record_transient, waiting, write_cursor,
+    write_rotation, LedgerState, BACKOFF_BASE_MS, BACKOFF_MAX_MS, DELETE_CURSOR, DELETE_ROTATION, INSERT_OBJECT, LEDGER_DDL, REFUSED_PREFIX,
+    SELECT_CURSOR, SELECT_OBJECT, SELECT_ROTATION, TRANSIENT_PREFIX, UPSERT_CURSOR, UPSERT_ROTATION,
 };
 use cloud_cost::listing::{MAX_LIST_BYTES, MAX_LIST_PAGES};
 use cloud_cost::load::{BatchFailure, LoadError, LoadOutcome};
@@ -208,11 +208,14 @@ fn serve(fake: &Fake, request: &HttpRequest) -> Reply {
 struct Ledger {
     rows: RefCell<BTreeMap<Vec<String>, String>>,
     cursors: RefCell<BTreeMap<(String, String), String>>,
+    rotations: RefCell<BTreeMap<(String, String), String>>,
     calls: RefCell<Vec<(String, Vec<String>)>>,
     fail_select: Cell<bool>,
     fail_insert: Cell<bool>,
     fail_cursor_read: Cell<bool>,
     fail_cursor_write: Cell<bool>,
+    fail_rotation_read: Cell<bool>,
+    fail_rotation_write: Cell<bool>,
 }
 
 
@@ -246,6 +249,22 @@ fn exec(ledger: &Ledger, sql: &str, params: &[String]) -> Result<Vec<Vec<String>
             match params.get(KEY_FIELD) {
                 Some(key) => ledger.cursors.borrow_mut().insert(owner, key.clone()),
                 None => ledger.cursors.borrow_mut().remove(&owner),
+            };
+            Ok(Vec::new())
+        }
+    } else if sql == SELECT_ROTATION {
+        if ledger.fail_rotation_read.get() {
+            Err(LedgerFailure)
+        } else {
+            Ok(ledger.rotations.borrow().get(&owner).map_or_else(Vec::new, |key| vec![vec![key.clone()]]))
+        }
+    } else if sql == UPSERT_ROTATION || sql == DELETE_ROTATION {
+        if ledger.fail_rotation_write.get() {
+            Err(LedgerFailure)
+        } else {
+            match params.get(KEY_FIELD) {
+                Some(key) => ledger.rotations.borrow_mut().insert(owner, key.clone()),
+                None => ledger.rotations.borrow_mut().remove(&owner),
             };
             Ok(Vec::new())
         }
@@ -700,10 +719,7 @@ fn hostile_objects_ahead_of_a_good_one_cost_a_bounded_round_and_it_loads_within_
         .iter()
         .all(|(_, reason)| matches!(reason, Refusal::Status(_) | Refusal::Transport(HttpClass::Timeout))));
     let second = round(&rig, &configured, &fake, &Limits::default());
-    assert_eq!(
-        (second.in_backoff, second.transient_refused, second.loaded),
-        (TRANSIENT_BUDGET, TRANSIENT_BUDGET, 0)
-    );
+    assert_eq!((second.in_backoff, second.transient_refused, second.loaded), (0, TRANSIENT_BUDGET, 0));
     assert_eq!(downloads(&fake), TRANSIENT_BUDGET * TWO);
     assert!(fake
         .requested
@@ -714,9 +730,9 @@ fn hostile_objects_ahead_of_a_good_one_cost_a_bounded_round_and_it_loads_within_
     let third = round(&rig, &configured, &fake, &Limits::default());
     assert_eq!(
         (third.in_backoff, third.transient_refused, third.loaded, third.deferred),
-        (TRANSIENT_BUDGET * TWO, HOSTILE - TRANSIENT_BUDGET * TWO, 1, 0)
+        (0, HOSTILE - TRANSIENT_BUDGET * TWO, 1, TRANSIENT_BUDGET * TWO)
     );
-    assert_eq!(downloads(&fake), HOSTILE + 1);
+    assert_eq!(downloads(&fake), HOSTILE + 1 - TRANSIENT_BUDGET * TWO + TRANSIENT_BUDGET * TWO);
     assert_eq!(rig.loads.calls.borrow().len(), 1);
     Ok(())
 }
@@ -976,10 +992,18 @@ fn reports_merge_and_the_ledger_binds_the_tenant_first() -> TestResult {
     record_loaded(&executor, "acme", "main", &object, "sha", NOW)?;
     assert_eq!(object_state(&executor, "acme", "main", &object)?, LedgerState::Loaded);
     assert_eq!(object_state(&executor, "globex", "main", &object)?, LedgerState::New);
-    assert!(ledger.calls.borrow().iter().all(
-        |(sql, params)| [SELECT_OBJECT, INSERT_OBJECT, SELECT_CURSOR, UPSERT_CURSOR, DELETE_CURSOR].contains(&sql.as_str())
-            && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")
-    ));
+    assert!(ledger.calls.borrow().iter().all(|(sql, params)| [
+        SELECT_OBJECT,
+        INSERT_OBJECT,
+        SELECT_CURSOR,
+        UPSERT_CURSOR,
+        DELETE_CURSOR,
+        SELECT_ROTATION,
+        UPSERT_ROTATION,
+        DELETE_ROTATION
+    ]
+    .contains(&sql.as_str())
+        && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")));
     assert!(LEDGER_DDL.contains("PRIMARY KEY (tenant, source_id, key, etag)"));
     Ok(())
 }
@@ -1110,11 +1134,13 @@ fn a_permanent_refusal_is_remembered_by_etag_and_not_downloaded_again() -> TestR
     let first = round(&rig, &configured, &fake, &limits);
     assert_eq!((first.refused.len(), first.deferred), (1, THREE));
     let second = round(&rig, &configured, &fake, &limits);
-    assert_eq!((second.already_refused, second.refused.len()), (1, 1));
+    assert_eq!((second.already_refused, second.refused.len()), (0, 1));
     let third = round(&rig, &configured, &fake, &limits);
-    assert_eq!((third.already_refused, third.refused.len()), (TWO, 1));
+    assert_eq!((third.already_refused, third.refused.len()), (0, 1));
     let fourth = round(&rig, &configured, &fake, &limits);
-    assert_eq!((fourth.already_refused, fourth.loaded), (THREE, 1));
+    assert_eq!((fourth.already_refused, fourth.loaded), (0, 1));
+    let fifth = round(&rig, &configured, &fake, &limits);
+    assert_eq!((fifth.already_refused, fifth.already_loaded), (THREE, 1));
     assert_eq!(fake.requested.borrow().iter().filter(|key| key.as_str() == "p/a.csv").count(), 1);
     let rewritten = with_objects(&[("p/a.csv", "e2", ok(january("acct").as_bytes()))], None);
     assert_eq!(round(&rig, &configured, &rewritten, &limits).loaded, 1);
@@ -1213,5 +1239,109 @@ fn a_cursor_the_ledger_cannot_read_or_write_fails_that_source_only() -> TestResu
     let unwritten = round(&rig, &configured, &fake, &Limits::default());
     assert!(matches!(unwritten.failed_sources.as_slice(), [(_, FetchError::Ledger)]));
     assert!(fake.requested.borrow().is_empty());
+    Ok(())
+}
+
+
+const REWRITTEN: usize = 10;
+
+
+fn rewriting_fake(round_number: usize, good: &str) -> (Fake, Vec<String>) {
+    let keys: Vec<String> = (0..REWRITTEN).map(|number| format!("p/a{number:02}.csv")).collect();
+    let etag = format!("round{round_number}");
+    let mut entries: Vec<(&str, &str, Reply)> = keys
+        .iter()
+        .map(|key| (key.as_str(), etag.as_str(), status(STATUS_ERROR, MARKER)))
+        .collect();
+    entries.push((good, "e", ok(january("acct").as_bytes())));
+    (with_objects(&entries, None), keys)
+}
+
+
+#[test]
+fn a_writer_rewriting_objects_ahead_of_a_good_one_cannot_keep_it_out() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let (first_fake, _keys) = rewriting_fake(1, "p/z.csv");
+    let first = round(&rig, &configured, &first_fake, &Limits::default());
+    assert_eq!((first.loaded, first.transient_refused, first.deferred), (0, REWRITTEN, 1));
+    let owner = ("acme".to_owned(), "main".to_owned());
+    assert_eq!(rig.ledger.rotations.borrow().get(&owner).map(String::as_str), Some("p/z.csv"));
+    let (second_fake, keys) = rewriting_fake(TWO, "p/z.csv");
+    let second = round(&rig, &configured, &second_fake, &Limits::default());
+    assert_eq!((second.loaded, second.transient_refused, second.deferred), (1, REWRITTEN, 0));
+    assert_eq!(second_fake.requested.borrow().first().map(String::as_str), Some("p/z.csv"));
+    assert_eq!(second_fake.requested.borrow().len(), keys.len() + 1);
+    assert!(rig.ledger.rotations.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_resume_key_past_every_object_wraps_to_the_first() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    rig.ledger
+        .rotations
+        .borrow_mut()
+        .insert(("acme".to_owned(), "main".to_owned()), "p/zz.csv".to_owned());
+    let fake = with_objects(
+        &[
+            ("p/a.csv", "e", ok(january("acct").as_bytes())),
+            ("p/b.csv", "e", ok(january("acct").as_bytes())),
+        ],
+        None,
+    );
+    assert_eq!(round(&rig, &configured, &fake, &Limits::default()).loaded, TWO);
+    assert_eq!(fake.requested.borrow().first().map(String::as_str), Some("p/a.csv"));
+    Ok(())
+}
+
+
+#[test]
+fn the_rotation_statements_bind_the_tenant_and_a_failing_ledger_is_handled() -> TestResult {
+    let ledger = Ledger::default();
+    let executor = |sql: &str, params: &[String]| exec(&ledger, sql, params);
+    assert_eq!(read_rotation(&executor, "acme", "main")?, None);
+    write_rotation(&executor, "acme", "main", Some("p/k.csv"))?;
+    assert_eq!(read_rotation(&executor, "acme", "main")?.as_deref(), Some("p/k.csv"));
+    assert_eq!(read_rotation(&executor, "globex", "main")?, None);
+    write_rotation(&executor, "acme", "main", None)?;
+    assert_eq!(read_rotation(&executor, "acme", "main")?, None);
+    assert!(LEDGER_DDL.contains("cloud_cost_rotation"));
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let fake = with_objects(&[("p/a.csv", "e", ok(january("acct").as_bytes()))], None);
+    rig.ledger.fail_rotation_read.set(true);
+    let unread = round(&rig, &configured, &fake, &Limits::default());
+    assert!(matches!(unread.failed_sources.as_slice(), [(_, FetchError::Ledger)]));
+    assert!(fake.requested.borrow().is_empty());
+    rig.ledger.fail_rotation_read.set(false);
+    rig.ledger.fail_rotation_write.set(true);
+    let unwritten = round(&rig, &configured, &fake, &Limits::default());
+    assert_eq!((unwritten.loaded, unwritten.failed_sources.len()), (1, 0));
+    Ok(())
+}
+
+
+#[test]
+fn a_next_try_beyond_the_backoff_of_its_attempts_is_due_now() -> TestResult {
+    assert!(waiting(1, NOW + BACKOFF_BASE_MS, NOW));
+    assert!(!waiting(1, NOW, NOW));
+    assert!(!waiting(1, NOW + BACKOFF_BASE_MS + 1, NOW));
+    assert!(waiting(EIGHT_ATTEMPTS, NOW + BACKOFF_MAX_MS, NOW));
+    assert!(!waiting(EIGHT_ATTEMPTS, NOW + BACKOFF_MAX_MS + 1, NOW));
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let broken = with_objects(&[("p/a.csv", "e", status(STATUS_ERROR, MARKER))], None);
+    let identity: Vec<String> = ["acme", "main", "p/a.csv", "e"].iter().map(|part| (*part).to_owned()).collect();
+    let far = NOW + BACKOFF_MAX_MS * EIGHT_ATTEMPTS as u64;
+    rig.ledger
+        .rows
+        .borrow_mut()
+        .insert(identity, format!("{TRANSIENT_PREFIX}status:{THREE_ATTEMPTS}:{far}"));
+    let report = round(&rig, &configured, &broken, &Limits::default());
+    assert_eq!((report.in_backoff, report.transient_refused), (0, 1));
+    assert_eq!(broken.requested.borrow().len(), 1);
     Ok(())
 }
