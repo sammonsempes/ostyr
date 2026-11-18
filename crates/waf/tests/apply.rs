@@ -2,7 +2,8 @@
 
 use core_audit::error::AuditError;
 use core_audit::log::{append, open_file_log};
-use core_config::reload::{current_config, reload, ReloadContext, ReloadEngine, ReloadOutcome};
+use core_audit::model::{NewEntry, Outcome};
+use core_config::reload::{current_config, reload, reload_entry, ReloadContext, ReloadEngine, ReloadOutcome};
 use data_encoding::HEXLOWER;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -14,17 +15,19 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use waf::admin::open_admin_directory;
 use waf::apply::{
-    applied_state, check_settings, check_start_only, config_error, config_id, discard, load_settings, open_apply, path_text_ok, refused_text,
-    render_applied, render_applied_capped,
+    applied_state, check_settings, check_start_only, config_error, config_id, discard, judge_program, judge_settings_directory, late_audit,
+    load_settings, load_trusted_settings, open_apply, path_text_ok, refused_text, render_applied, render_applied_capped,
 };
 use waf::error::{DeliverError, OpenError, WafError};
 use waf::model::{Applied, ApplySettings, CommandStatus, Refusal};
-use waf::runner::run_with_deadline;
+use waf::runner::{logged, run_child, run_with_deadline, stop};
 
 
 const TWO_ROUTES: &str = "tests/fixtures/two_routes.yaml";
@@ -143,6 +146,8 @@ fn fixture(routes_text: &str) -> Result<Fixture, Box<dyn Error>> {
     fs::set_permissions(&admin, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     let program = dir.path().join("fake").to_string_lossy().into_owned();
     fs::write(format!("{program}.mode"), "ok")?;
+    fs::write(&program, "")?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     let settings_file = dir.path().join("settings.yaml");
     let made = Fixture {
         dir,
@@ -912,7 +917,7 @@ fn a_staged_file_that_vanishes_before_publish_is_a_refusal() -> Result<(), Box<d
     let fixture = fixture(ONE_ROUTE)?;
     set_mode(&fixture, "vanish")?;
     let failure = try_open(&fixture)?.err();
-    assert!(matches!(failure, Some(OpenError::Deliver(DeliverError::Write(_)))));
+    assert!(matches!(failure, Some(OpenError::Deliver(DeliverError::Publish(_)))));
     assert!(final_text(&fixture).is_err());
     Ok(())
 }
@@ -924,5 +929,229 @@ fn a_routes_file_that_cannot_render_stops_the_start() -> Result<(), Box<dyn Erro
     let failure = try_open(&fixture)?.err();
     assert!(matches!(failure, Some(OpenError::Config(_))));
     assert!(calls(&fixture).is_empty());
+    Ok(())
+}
+
+
+const PID_FILE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/t555-wait.pid");
+
+
+fn failing_wait(child: &mut Child, _deadline: Duration) -> io::Result<Option<ExitStatus>> {
+    fs::write(PID_FILE, child.id().to_string())?;
+    Err(io::Error::other("wait failed"))
+}
+
+
+fn audit_entry(result: &str) -> NewEntry {
+    reload_entry(&context(), Outcome::Success, [("result", result.to_owned()), ("diff", "x".to_owned())])
+}
+
+
+fn engine_with_switch(fixture: &Fixture, fail: Arc<AtomicBool>) -> Result<ReloadEngine<Applied>, Box<dyn Error>> {
+    let log = Arc::new(open_file_log(&fixture.dir.path().join("audit.log"))?);
+    let engine = open_apply(
+        &fixture.settings_file,
+        fake,
+        Box::new(move |entry| {
+            if fail.load(Ordering::SeqCst) {
+                Err(AuditError::LogPoisoned)
+            } else {
+                append(&log, entry)
+            }
+        }),
+        context(),
+    )?;
+    Ok(engine)
+}
+
+
+fn program_in(fixture: &Fixture, directory_mode: u32, file_mode: u32) -> Result<String, Box<dyn Error>> {
+    let directory = fixture.dir.path().join("bin");
+    fs::create_dir_all(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(directory_mode))?;
+    let program = directory.join("caddy");
+    fs::write(&program, "")?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(file_mode))?;
+    Ok(program.to_string_lossy().into_owned())
+}
+
+
+#[test]
+fn a_publish_failure_after_a_confirmed_reload_moves_the_epoch_so_a_revert_pushes_again() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let (engine, audit) = engine_of(&fixture)?;
+    fs::write(&fixture.routes, MARKER_ROUTE)?;
+    set_mode(&fixture, "vanish")?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("cannot publish")));
+    set_mode(&fixture, "ok")?;
+    fs::write(&fixture.routes, ONE_ROUTE)?;
+    let before = calls(&fixture).len();
+    assert!(matches!(reload(&engine), ReloadOutcome::Applied { keys } if keys.contains(&"waf.epoch".to_owned())));
+    assert_eq!(calls(&fixture).len(), before + TWO_CALLS);
+    assert!(fs::read_to_string(audit)?.contains("applied"));
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_audit_after_a_confirmed_reload_moves_the_epoch_so_a_revert_pushes_again() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let fail = Arc::new(AtomicBool::new(false));
+    let engine = engine_with_switch(&fixture, Arc::clone(&fail))?;
+    fs::write(&fixture.routes, MARKER_ROUTE)?;
+    fail.store(true, Ordering::SeqCst);
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { .. }));
+    assert!(final_text(&fixture)?.contains("marker-host.example.test"));
+    fail.store(false, Ordering::SeqCst);
+    fs::write(&fixture.routes, ONE_ROUTE)?;
+    let before = calls(&fixture).len();
+    assert!(matches!(reload(&engine), ReloadOutcome::Applied { keys } if keys.contains(&"waf.epoch".to_owned())));
+    assert_eq!(calls(&fixture).len(), before + TWO_CALLS);
+    assert!(final_text(&fixture)?.contains("a.example.test"));
+    Ok(())
+}
+
+
+#[test]
+fn the_late_flag_is_cleared_on_every_entry_and_the_epoch_moves_only_for_a_lost_applied_entry() -> Result<(), Box<dyn Error>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let late = Arc::new(AtomicBool::new(true));
+    let epoch = Arc::new(AtomicU64::new(0));
+    let audit = late_audit(
+        Box::new(move |entry| {
+            sink.lock()
+                .map_err(|_| AuditError::LogPoisoned)?
+                .push(entry.parameters.contains_key("late"));
+            Err(AuditError::LogPoisoned)
+        }),
+        Arc::clone(&late),
+        Arc::clone(&epoch),
+    );
+    assert!(audit(audit_entry("refused")).is_err());
+    assert!(!late.load(Ordering::SeqCst));
+    assert_eq!(epoch.load(Ordering::SeqCst), 0);
+    assert!(audit(audit_entry("applied")).is_err());
+    assert_eq!(epoch.load(Ordering::SeqCst), 1);
+    late.store(true, Ordering::SeqCst);
+    assert!(audit(audit_entry("applied")).is_err());
+    assert_eq!(epoch.load(Ordering::SeqCst), TWO_CALLS as u64);
+    assert_eq!(*seen.lock().map_err(|_| "poisoned")?, vec![false, false, true]);
+    Ok(())
+}
+
+
+#[test]
+fn a_wait_that_fails_kills_and_reaps_the_child_and_reads_back_like_a_failed_reload() -> Result<(), Box<dyn Error>> {
+    let status = run_child("/usr/bin/sleep", &[LONG_SLEEP.to_owned()], Duration::from_secs(1), failing_wait)?;
+    assert_eq!(status, CommandStatus::Failed(None));
+    let pid = fs::read_to_string(PID_FILE)?;
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_failure_while_stopping_a_child_is_logged_and_stopping_a_reaped_child_is_harmless() -> Result<(), Box<dyn Error>> {
+    logged("test", Err(io::Error::other("refused")));
+    logged("test", Ok(()));
+    let mut child = Command::new("/usr/bin/true").spawn()?;
+    child.wait()?;
+    stop(&mut child);
+    Ok(())
+}
+
+
+#[test]
+fn a_program_in_an_open_directory_or_an_open_file_or_a_link_or_nothing_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    assert!(judge_program(&fixture.program).is_ok());
+    let open_directory = program_in(&fixture, GROUP_WRITABLE, OPEN_DIRECTORY)?;
+    assert!(judge_program(&open_directory).is_err_and(|failure| failure.to_string().contains("caddy_program")));
+    let open_file = program_in(&fixture, OPEN_DIRECTORY, GROUP_WRITABLE)?;
+    assert!(judge_program(&open_file).is_err());
+    let good = program_in(&fixture, OPEN_DIRECTORY, OPEN_DIRECTORY)?;
+    assert!(judge_program(&good).is_ok());
+    let link = fixture.dir.path().join("link");
+    symlink(&good, &link)?;
+    assert!(judge_program(&link.to_string_lossy()).is_err());
+    assert!(judge_program(&format!("{good}x")).is_err());
+    assert!(judge_program(&fixture.dir.path().join("bin").to_string_lossy()).is_err());
+    assert!(judge_program("/").is_err());
+    assert!(judge_program("/a/..").is_err());
+    assert!(judge_program("/caddy").is_err());
+    Ok(())
+}
+
+
+#[test]
+fn a_settings_directory_open_to_group_or_others_or_not_absolute_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    assert!(load_trusted_settings(&fixture.settings_file).is_ok());
+    fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    assert!(load_trusted_settings(&fixture.settings_file).is_err_and(|failure| failure.to_string().contains("settings file directory")));
+    assert!(load_settings(&fixture.settings_file).is_ok());
+    assert!(judge_settings_directory(Path::new("/")).is_err());
+    assert!(judge_settings_directory(Path::new("settings.yaml")).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn an_untrusted_program_refuses_the_start() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let open = program_in(&fixture, GROUP_WRITABLE, OPEN_DIRECTORY)?;
+    write_settings(
+        &fixture,
+        &ApplySettings {
+            caddy_program: open,
+            ..settings_of(&fixture)
+        },
+    )?;
+    assert!(matches!(try_open(&fixture)?.err(), Some(OpenError::Config(_))));
+    assert!(calls(&fixture).is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_untrusted_program_or_settings_directory_on_reload_keeps_the_old_settings_and_is_audited() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let (engine, audit) = engine_of(&fixture)?;
+    let before = calls(&fixture).len();
+    let base = settings_of(&fixture);
+    let open = program_in(&fixture, GROUP_WRITABLE, OPEN_DIRECTORY)?;
+    write_settings(
+        &fixture,
+        &ApplySettings {
+            caddy_program: open,
+            ..base.clone()
+        },
+    )?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("caddy_program")));
+    assert_eq!(current_config(&engine).settings.caddy_program, base.caddy_program);
+    write_settings(&fixture, &base)?;
+    fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("settings file directory")));
+    assert_eq!(calls(&fixture).len(), before);
+    let log = fs::read_to_string(audit)?;
+    assert!(log.contains("caddy_program") && log.contains("settings file directory"));
+    Ok(())
+}
+
+
+#[test]
+fn the_admin_directory_refusal_names_the_admin_socket() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    fs::set_permissions(&fixture.admin, fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    let failure = open_admin_directory(&settings_of(&fixture).admin_socket).err().ok_or("accepted")?;
+    let cause = failure.source().ok_or("no cause")?.to_string();
+    assert!(cause.contains("admin socket directory"));
+    assert!(!cause.contains("output directory"));
+    fs::set_permissions(&fixture.admin, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let missing = open_admin_directory(&fixture.admin.join("gone").join("sock").to_string_lossy())
+        .err()
+        .ok_or("accepted")?;
+    assert!(matches!(missing, DeliverError::AdminDir(WafError::CaWrite(_))));
     Ok(())
 }

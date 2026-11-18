@@ -1,12 +1,13 @@
 use crate::admin::{id_status, open_admin_directory, AdminDirectory};
 use crate::caddy::Admin;
-use crate::cadir::{ca_root_path, directory_text_ok, write_ca_root};
+use crate::cadir::{ca_root_path, directory_text_ok, directory_trusted, open_ca_directory, write_ca_root};
 use crate::cli::place_ca_root;
 use crate::error::{DeliverError, OpenError, WafError};
 use crate::limits::{
     ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS, ID_PREFIX,
     LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROGRAM_STATE_KEY, REFUSED_STATE_KEY,
-    RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX, STAGE_SUFFIX, START_DIFF, STATUS_OK, VALIDATE_STEP,
+    RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX, STAGE_SUFFIX, START_DIFF, STATUS_OK,
+    UNTRUSTED_PROGRAM, UNTRUSTED_SETTINGS, VALIDATE_STEP,
 };
 use crate::model::{Applied, ApplySettings, CommandStatus, Delivery};
 use crate::render::render_reader;
@@ -24,7 +25,7 @@ use rustix::io::Errno;
 use rustix::process::{geteuid, getpid};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -77,6 +78,41 @@ pub fn load_settings(path: &Path) -> Result<ApplySettings, ConfigError> {
 }
 
 
+/// The settings file's directory held open and judged from `/` (owned by the running user, closed to group and others).
+pub fn judge_settings_directory(settings_file: &Path) -> Result<(), ConfigError> {
+    let parent = settings_file.parent().ok_or_else(|| refuse_setting(UNTRUSTED_SETTINGS.to_owned()))?;
+    open_trusted_dir(parent, geteuid().as_raw())
+        .map(drop)
+        .map_err(|failure| refuse_setting(format!("{UNTRUSTED_SETTINGS}: {failure}")))
+}
+
+
+/// The Caddy program and every directory above it: owned by root or this user, no group or other write, no symlink.
+pub fn judge_program(program: &str) -> Result<(), ConfigError> {
+    let path = Path::new(program);
+    let (parent, name) = path
+        .parent()
+        .zip(path.file_name().and_then(|name| name.to_str()))
+        .ok_or_else(|| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
+    let directory = open_ca_directory(parent).map_err(|failure| refuse_setting(format!("{UNTRUSTED_PROGRAM}: {failure}")))?;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let stat = openat(&directory, name, flags, Mode::empty())
+        .and_then(|handle| fstat(&handle))
+        .map_err(|errno| refuse_setting(format!("{UNTRUSTED_PROGRAM}: {}", io::Error::from(errno))))?;
+    let trusted = FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile && directory_trusted(stat.st_mode, stat.st_uid, geteuid().as_raw());
+    trusted.then_some(()).ok_or_else(|| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))
+}
+
+
+/// `load_settings` with the settings directory and the Caddy program judged, at start and on every reload.
+pub fn load_trusted_settings(path: &Path) -> Result<ApplySettings, ConfigError> {
+    judge_settings_directory(path)?;
+    let settings = load_settings(path)?;
+    judge_program(&settings.caddy_program)?;
+    Ok(settings)
+}
+
+
 /// A render error as a reload refusal: a parse error keeps its position, anything else its fixed text.
 pub fn config_error(failure: WafError) -> ConfigError {
     match failure {
@@ -113,7 +149,7 @@ pub fn config_id(json_without_id: &str) -> String {
 
 /// The current settings file, checked against the running start-only values, then the routes rendered under it.
 pub fn load_applied(running: &ApplySettings, settings_file: &Path, epoch: &AtomicU64) -> Result<Applied, ConfigError> {
-    let loaded = load_settings(settings_file)?;
+    let loaded = load_trusted_settings(settings_file)?;
     check_start_only(running, &loaded)?;
     render_applied_capped(&loaded, epoch.load(Ordering::SeqCst), MAX_JSON_BYTES)
 }
@@ -225,8 +261,9 @@ pub fn stage_file(directory: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), D
 
 /// Renames the staged file over the final name and syncs the directory.
 pub fn publish(directory: &OwnedFd, name: &str) -> Result<(), DeliverError> {
-    renameat(directory, name, directory, FINAL_NAME)?;
-    Ok(fsync(directory)?)
+    renameat(directory, name, directory, FINAL_NAME)
+        .and_then(|()| fsync(directory))
+        .map_err(|errno| DeliverError::Publish(errno.into()))
 }
 
 
@@ -306,7 +343,7 @@ pub fn deliver(applied: &Applied, runner: RunnerFn) -> Result<Delivery, DeliverE
 }
 
 
-/// The hook of the engine: a refusal keeps the previous rendered file; an unknown outcome moves the epoch so the next reload pushes again.
+/// The hook of the engine: a refusal keeps the previous rendered file; an outcome that may differ from the engine state moves the epoch.
 pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<AtomicU64>) -> Subscriber<Applied> {
     Subscriber {
         section: APPLY_SECTION.to_owned(),
@@ -314,7 +351,7 @@ pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<Atom
             let delivery = deliver(applied, runner);
             match &delivery {
                 Ok(Delivery::Late) => late.store(true, Ordering::SeqCst),
-                Err(DeliverError::Unknown { .. }) => {
+                Err(DeliverError::Unknown { .. } | DeliverError::Publish(_)) => {
                     epoch.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(Delivery::Confirmed) | Err(_) => (),
@@ -326,14 +363,19 @@ pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<Atom
 }
 
 
-/// The audit sink with `late: true` added to the `applied` entry of a delivery that was confirmed by read-back.
-pub fn late_audit(audit: Box<SharedAuditFn>, late: Arc<AtomicBool>) -> Box<SharedAuditFn> {
+/// The audit sink: `late: true` on a read-back `applied` entry, the flag cleared on every entry, the epoch moved when an applied entry is lost.
+pub fn late_audit(audit: Box<SharedAuditFn>, late: Arc<AtomicBool>, epoch: Arc<AtomicU64>) -> Box<SharedAuditFn> {
     Box::new(move |mut entry| {
         let applied = entry.parameters.get(RESULT_PARAMETER).is_some_and(|value| value == APPLIED_RESULT);
-        if applied && late.swap(false, Ordering::SeqCst) {
+        let was_late = late.swap(false, Ordering::SeqCst);
+        if applied && was_late {
             entry.parameters.insert(LATE_PARAMETER.to_owned(), "true".to_owned());
         }
-        audit(entry)
+        let result = audit(entry);
+        if applied && result.is_err() {
+            epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        result
     })
 }
 
@@ -345,7 +387,7 @@ pub fn open_apply(
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
-    let running = load_settings(settings_file)?;
+    let running = load_trusted_settings(settings_file)?;
     let epoch = Arc::new(AtomicU64::new(0));
     let late = Arc::new(AtomicBool::new(false));
     let loader_epoch = Arc::clone(&epoch);
@@ -353,8 +395,8 @@ pub fn open_apply(
     let engine = open_engine(
         Box::new(move || load_applied(&running, &loader_file, &loader_epoch)),
         applied_state,
-        vec![caddy_subscriber(runner, Arc::clone(&late), epoch)],
-        late_audit(audit, Arc::clone(&late)),
+        vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch))],
+        late_audit(audit, Arc::clone(&late), epoch),
         context,
     )?;
     let delivery = deliver(&current_config(&engine), runner)?;
