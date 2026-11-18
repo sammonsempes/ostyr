@@ -1,31 +1,31 @@
 use crate::admin::{id_status, open_admin_directory, AdminDirectory};
 use crate::caddy::Admin;
-use crate::cadir::{ca_root_path, directory_text_ok, write_ca_root};
+use crate::cadir::{ca_root_path, directory_text_ok, directory_trusted, open_ca_directory, write_ca_root};
 use crate::cli::place_ca_root;
 use crate::error::{DeliverError, OpenError, WafError};
 use crate::limits::{
     ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS, ID_PREFIX,
-    LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROGRAM_STATE_KEY, REFUSED_STATE_KEY,
-    RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX, STAGE_SUFFIX, START_DIFF, STATUS_OK, VALIDATE_STEP,
+    LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_FILE_BYTES, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROC_FD_DIRECTORY,
+    PROGRAM_STATE_KEY, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX, STAGE_SUFFIX,
+    START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE, VALIDATE_STEP,
 };
 use crate::model::{Applied, ApplySettings, CommandStatus, Delivery};
 use crate::render::render_reader;
 use crate::types::RunnerFn;
 use core_audit::model::Outcome;
 use core_config::error::ConfigError;
-use core_config::load::load_file;
-use core_config::parse::open_regular;
+use core_config::parse::{open_regular, parse_document, read_text_capped};
 use core_config::reload::{current_config, open_engine, reload_entry, ReloadContext, ReloadEngine, Subscriber};
 use core_config::trusted_dir::open_trusted_dir;
 use core_config::types::{ConfigState, SharedAuditFn};
 use data_encoding::HEXLOWER;
-use rustix::fs::{fstat, fsync, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags};
+use rustix::fs::{fstat, fsync, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags, RawMode, CWD};
 use rustix::io::Errno;
 use rustix::process::{geteuid, getpid};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::Write;
-use std::os::fd::OwnedFd;
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -72,8 +72,70 @@ pub fn check_settings(settings: ApplySettings) -> Result<ApplySettings, ConfigEr
 }
 
 
-pub fn load_settings(path: &Path) -> Result<ApplySettings, ConfigError> {
-    check_settings(load_file::<ApplySettings>(path)?)
+/// A failed system call as a settings refusal naming the setting and the error kind text.
+pub fn errno_refusal(refusal: &str) -> impl Fn(Errno) -> ConfigError + '_ {
+    move |errno| refuse_setting(format!("{refusal}: {}", io::Error::from(errno)))
+}
+
+
+/// Regular file, owned by root or this user, closed to group and others writes.
+pub fn file_trusted(mode: RawMode, owner: u32, process_user: u32) -> bool {
+    FileType::from_raw_mode(mode) == FileType::RegularFile && directory_trusted(mode, owner, process_user)
+}
+
+
+/// Opens `name` below the judged directory as an `O_PATH` anchor (no symlink followed, no driver run) and judges that handle.
+pub fn judge_file(directory: &OwnedFd, name: &str, refusal: &str) -> Result<OwnedFd, ConfigError> {
+    let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let anchor = openat(directory, name, flags, Mode::empty()).map_err(errno_refusal(refusal))?;
+    let stat = fstat(&anchor).map_err(errno_refusal(refusal))?;
+    file_trusted(stat.st_mode, stat.st_uid, geteuid().as_raw())
+        .then_some(anchor)
+        .ok_or_else(|| refuse_setting(refusal.to_owned()))
+}
+
+
+/// The judged anchor reopened for reading through `/proc/self/fd`, so the bytes read are those of the inode that was judged.
+pub fn reopen_judged(anchor: &OwnedFd) -> Result<File, ConfigError> {
+    let path = format!("{PROC_FD_DIRECTORY}{}", anchor.as_raw_fd());
+    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    openat(CWD, path.as_str(), flags, Mode::empty())
+        .map(File::from)
+        .map_err(errno_refusal(UNTRUSTED_SETTINGS_FILE))
+}
+
+
+/// The settings file read through its judged directory: parent walked from `/`, file anchored without following a symlink, owner and mode judged, bytes of that inode parsed.
+pub fn load_trusted_settings_file(path: &Path) -> Result<ApplySettings, ConfigError> {
+    let (parent, name) = path
+        .parent()
+        .zip(path.file_name().and_then(|name| name.to_str()))
+        .ok_or_else(|| refuse_setting(UNTRUSTED_SETTINGS.to_owned()))?;
+    let directory = open_trusted_dir(parent, geteuid().as_raw()).map_err(|failure| refuse_setting(format!("{UNTRUSTED_SETTINGS}: {failure}")))?;
+    let anchor = judge_file(&directory, name, UNTRUSTED_SETTINGS_FILE)?;
+    let label = path.display().to_string();
+    let text = read_text_capped(&mut reopen_judged(&anchor)?, &label, MAX_FILE_BYTES)?;
+    check_settings(parse_document::<ApplySettings>(&text, &label)?)
+}
+
+
+/// The Caddy program and every directory above it: owned by root or this user, no group or other write, no symlink.
+pub fn judge_program(program: &str) -> Result<(), ConfigError> {
+    let path = Path::new(program);
+    let (parent, name) = path
+        .parent()
+        .zip(path.file_name().and_then(|name| name.to_str()))
+        .ok_or_else(|| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
+    let directory = open_ca_directory(parent).map_err(|_| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
+    judge_file(&directory, name, UNTRUSTED_PROGRAM).map(drop)
+}
+
+
+/// The settings file judged and read at start and on every reload, then the Caddy program judged.
+pub fn load_trusted_settings(path: &Path) -> Result<ApplySettings, ConfigError> {
+    let settings = load_trusted_settings_file(path)?;
+    judge_program(&settings.caddy_program)?;
+    Ok(settings)
 }
 
 
@@ -113,7 +175,7 @@ pub fn config_id(json_without_id: &str) -> String {
 
 /// The current settings file, checked against the running start-only values, then the routes rendered under it.
 pub fn load_applied(running: &ApplySettings, settings_file: &Path, epoch: &AtomicU64) -> Result<Applied, ConfigError> {
-    let loaded = load_settings(settings_file)?;
+    let loaded = load_trusted_settings(settings_file)?;
     check_start_only(running, &loaded)?;
     render_applied_capped(&loaded, epoch.load(Ordering::SeqCst), MAX_JSON_BYTES)
 }
@@ -225,8 +287,9 @@ pub fn stage_file(directory: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), D
 
 /// Renames the staged file over the final name and syncs the directory.
 pub fn publish(directory: &OwnedFd, name: &str) -> Result<(), DeliverError> {
-    renameat(directory, name, directory, FINAL_NAME)?;
-    Ok(fsync(directory)?)
+    renameat(directory, name, directory, FINAL_NAME)
+        .and_then(|()| fsync(directory))
+        .map_err(|errno| DeliverError::Publish(errno.into()))
 }
 
 
@@ -306,7 +369,7 @@ pub fn deliver(applied: &Applied, runner: RunnerFn) -> Result<Delivery, DeliverE
 }
 
 
-/// The hook of the engine: a refusal keeps the previous rendered file; an unknown outcome moves the epoch so the next reload pushes again.
+/// The hook of the engine: a refusal keeps the previous rendered file; an outcome that may differ from the engine state moves the epoch.
 pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<AtomicU64>) -> Subscriber<Applied> {
     Subscriber {
         section: APPLY_SECTION.to_owned(),
@@ -314,7 +377,7 @@ pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<Atom
             let delivery = deliver(applied, runner);
             match &delivery {
                 Ok(Delivery::Late) => late.store(true, Ordering::SeqCst),
-                Err(DeliverError::Unknown { .. }) => {
+                Err(DeliverError::Unknown { .. } | DeliverError::Publish(_)) => {
                     epoch.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(Delivery::Confirmed) | Err(_) => (),
@@ -326,14 +389,19 @@ pub fn caddy_subscriber(runner: RunnerFn, late: Arc<AtomicBool>, epoch: Arc<Atom
 }
 
 
-/// The audit sink with `late: true` added to the `applied` entry of a delivery that was confirmed by read-back.
-pub fn late_audit(audit: Box<SharedAuditFn>, late: Arc<AtomicBool>) -> Box<SharedAuditFn> {
+/// The audit sink: `late: true` on a read-back `applied` entry, the flag cleared on every entry, the epoch moved when an applied entry is lost.
+pub fn late_audit(audit: Box<SharedAuditFn>, late: Arc<AtomicBool>, epoch: Arc<AtomicU64>) -> Box<SharedAuditFn> {
     Box::new(move |mut entry| {
         let applied = entry.parameters.get(RESULT_PARAMETER).is_some_and(|value| value == APPLIED_RESULT);
-        if applied && late.swap(false, Ordering::SeqCst) {
+        let was_late = late.swap(false, Ordering::SeqCst);
+        if applied && was_late {
             entry.parameters.insert(LATE_PARAMETER.to_owned(), "true".to_owned());
         }
-        audit(entry)
+        let result = audit(entry);
+        if applied && result.is_err() {
+            epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        result
     })
 }
 
@@ -345,7 +413,7 @@ pub fn open_apply(
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
-    let running = load_settings(settings_file)?;
+    let running = load_trusted_settings(settings_file)?;
     let epoch = Arc::new(AtomicU64::new(0));
     let late = Arc::new(AtomicBool::new(false));
     let loader_epoch = Arc::clone(&epoch);
@@ -353,8 +421,8 @@ pub fn open_apply(
     let engine = open_engine(
         Box::new(move || load_applied(&running, &loader_file, &loader_epoch)),
         applied_state,
-        vec![caddy_subscriber(runner, Arc::clone(&late), epoch)],
-        late_audit(audit, Arc::clone(&late)),
+        vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch))],
+        late_audit(audit, Arc::clone(&late), epoch),
         context,
     )?;
     let delivery = deliver(&current_config(&engine), runner)?;

@@ -17,6 +17,15 @@ pub struct AdminDirectory {
 }
 
 
+/// A refused directory names the admin socket in its text; any other failure keeps its own.
+pub fn admin_failure(failure: WafError) -> DeliverError {
+    match failure {
+        WafError::BadCaDir(_) => DeliverError::AdminDir(WafError::BadCaDir(UNTRUSTED_ADMIN)),
+        other => DeliverError::AdminDir(other),
+    }
+}
+
+
 /// Walks the socket's parent from `/` judging every handle (no symlink, no sticky or open ancestor) and keeps the final handle.
 pub fn open_admin_directory(socket: &str) -> Result<AdminDirectory, DeliverError> {
     let path = Path::new(socket);
@@ -25,7 +34,7 @@ pub fn open_admin_directory(socket: &str) -> Result<AdminDirectory, DeliverError
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(DeliverError::AdminDir(WafError::BadCaDir(UNTRUSTED_ADMIN)))?;
-    let handle = open_ca_directory(parent).map_err(DeliverError::AdminDir)?;
+    let handle = open_ca_directory(parent).map_err(admin_failure)?;
     Ok(AdminDirectory {
         handle,
         name: name.to_owned(),

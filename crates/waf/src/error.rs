@@ -35,6 +35,8 @@ pub enum DeliverError {
     BadTarget,
     #[error("cannot write the rendered file")]
     Write(#[source] std::io::Error),
+    #[error("cannot publish the rendered file after caddy loaded it, the running configuration may differ")]
+    Publish(#[source] std::io::Error),
     #[error(transparent)]
     CaRoot(WafError),
     #[error("cannot run caddy {step}")]
