@@ -65,21 +65,21 @@ pub fn unmanaged_alert(scope: &TenantScope, candidate: &Candidate, mac: Option<&
 
 
 /// The visible cut: one alert per tenant and UTC day, with the number of devices left without an alert in the run that first raised it.
-pub fn flood_alert(scope: &TenantScope, omitted: usize, created_micros: u64) -> Alert {
+pub fn flood_alert(scope: &TenantScope, cut: usize, unchecked: usize, created_micros: u64) -> Alert {
     let tenant = tenant_of(scope).to_owned();
     let event_ids = vec!["flood".to_owned(), format!("day:{}", day_of(created_micros))];
     Alert {
         id: alert_id(&tenant, FLOOD_RULE_ID, &event_ids),
         tenant,
         rule_id: FLOOD_RULE_ID.to_owned(),
-        rule_title: format!("Unmanaged-device alerts cut at {MAX_UNMANAGED_PER_RUN}, {omitted} more"),
+        rule_title: format!("Unmanaged-device alerts cut at {MAX_UNMANAGED_PER_RUN}, {cut} cut, {unchecked} not checked"),
         severity: Severity::Medium,
         event_time: created_micros.to_string(),
         created_micros,
         host_name: None,
         user_name: None,
         event_ids,
-        summary: summarise(&json!({ "omitted": omitted, "limit": MAX_UNMANAGED_PER_RUN })),
+        summary: summarise(&json!({ "cut": cut, "unchecked": unchecked, "limit": MAX_UNMANAGED_PER_RUN })),
     }
 }
 
@@ -128,21 +128,21 @@ pub fn unmanaged_devices<'a>(
 }
 
 
-/// The alerts of the fresh ids (at most `MAX_UNMANAGED_PER_RUN`, in the given order) plus a flood alert for the rest and the `deferred` unscanned ids, and the number left out.
-pub fn alerts_of(scope: &TenantScope, devices: &[Device<'_>], fresh: &[String], deferred: usize, now_micros: u64) -> (Vec<Alert>, usize) {
+/// The alerts of the fresh ids (at most `MAX_UNMANAGED_PER_RUN`, in the given order) plus a flood alert only when fresh ids are cut; `unchecked` (unscanned ids) is reported in it, and the number cut is returned.
+pub fn alerts_of(scope: &TenantScope, devices: &[Device<'_>], fresh: &[String], unchecked: usize, now_micros: u64) -> (Vec<Alert>, usize) {
     let created_micros = now_micros.min(MAX_CREATED_MICROS);
     let by_id: BTreeMap<&str, &Device<'_>> = devices.iter().map(|device| (device.id.as_str(), device)).collect();
-    let omitted = fresh.len().saturating_sub(MAX_UNMANAGED_PER_RUN) + deferred;
+    let cut = fresh.len().saturating_sub(MAX_UNMANAGED_PER_RUN);
     let mut alerts: Vec<Alert> = fresh
         .iter()
         .take(MAX_UNMANAGED_PER_RUN)
         .filter_map(|id| by_id.get(id.as_str()))
         .map(|device| unmanaged_alert(scope, device.candidate, device.mac, device.hostname, created_micros))
         .collect();
-    if omitted > 0 {
-        alerts.push(flood_alert(scope, omitted, created_micros));
+    if cut > 0 {
+        alerts.push(flood_alert(scope, cut, unchecked, created_micros));
     }
-    (alerts, omitted)
+    (alerts, cut)
 }
 
 
@@ -157,8 +157,8 @@ pub fn unmanaged_alerts(
 ) -> (Vec<Alert>, Skipped) {
     let (devices, mut skipped) = unmanaged_devices(scope, candidates, hints, inventory, known);
     let ids: Vec<String> = devices.iter().map(|device| device.id.clone()).collect();
-    let (alerts, omitted) = alerts_of(scope, &devices, &ids, 0, now_micros);
-    skipped.omitted = omitted;
+    let (alerts, cut) = alerts_of(scope, &devices, &ids, 0, now_micros);
+    skipped.cut = cut;
     (alerts, skipped)
 }
 
@@ -176,9 +176,9 @@ pub async fn raise_unmanaged_alerts(
     let (devices, mut skipped) = unmanaged_devices(scope, candidates, hints, inventory, known);
     let ids: Vec<String> = devices.iter().map(|device| device.id.clone()).collect();
     let lookup = scan(exec, scope, &ids).await;
-    let (alerts, omitted) = alerts_of(scope, &devices, &lookup.fresh, lookup.deferred, now_micros);
-    skipped.omitted = omitted;
-    skipped.deferred = lookup.deferred;
+    let (alerts, cut) = alerts_of(scope, &devices, &lookup.fresh, lookup.deferred, now_micros);
+    skipped.cut = cut;
+    skipped.unchecked = lookup.deferred;
     skipped.lookup_failed = lookup.failed;
     let stored = store_unmanaged_alerts(exec, scope, &alerts).await;
     if !lookup.failed && stored.failed == 0 {
