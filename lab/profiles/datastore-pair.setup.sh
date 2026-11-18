@@ -20,7 +20,7 @@ ssh_options=(-i "$key" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnown
 hosts_entries="$datastore_address $DATASTORE_DOMAIN
 $client_address $CLIENT_DOMAIN"
 for target in "$datastore_user@$datastore_address" "$client_user@$client_address"; do
-    ssh -n "${ssh_options[@]}" "$target" "printf '%s\n' '$hosts_entries' | sudo tee -a /etc/hosts >/dev/null"
+    ssh -n "${ssh_options[@]}" "$target" "grep -q '$DATASTORE_DOMAIN' /etc/hosts || printf '%s\n' '$hosts_entries' | sudo tee -a /etc/hosts >/dev/null"
 done
 
 ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo /usr/local/sbin/ostyr-datastore-provision '$DATASTORE_DOMAIN' '$datastore_address'" ||

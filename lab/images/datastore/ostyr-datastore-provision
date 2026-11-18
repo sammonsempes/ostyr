@@ -24,6 +24,7 @@ readonly S3_REGION="garage"
 readonly S3_ACCESS_FILE="$LAB_DIR/s3-access-key"
 readonly S3_SECRET_FILE="$LAB_DIR/s3-secret-key"
 readonly GARAGE_CAPACITY="1G"
+readonly GARAGE_ID_SHORT=16
 readonly SERVICE_USER="ostyr"
 readonly SERVICE_DATABASE="ostyr"
 readonly DICTIONARY_USER="ostyr_dict"
@@ -34,11 +35,13 @@ postgres_hba="$(echo /etc/postgresql/*/main/pg_hba.conf)"
 install -d -m 755 "$LAB_DIR"
 install -d -m 700 "$PRIVATE_DIR"
 
-openssl req -x509 -newkey rsa:2048 -nodes -days "$CERT_DAYS" -subj "/CN=ostyr lab CA" -keyout "$PRIVATE_DIR/ca.key" -out "$LAB_DIR/ca.pem"
-openssl req -newkey rsa:2048 -nodes -subj "/CN=$domain" -keyout "$PRIVATE_DIR/tls.key" -out "$PRIVATE_DIR/tls.csr"
-printf 'subjectAltName=DNS:%s,IP:%s\nextendedKeyUsage=serverAuth\n' "$domain" "$server_ip" >"$PRIVATE_DIR/san.ext"
-openssl x509 -req -in "$PRIVATE_DIR/tls.csr" -CA "$LAB_DIR/ca.pem" -CAkey "$PRIVATE_DIR/ca.key" -CAcreateserial -days "$CERT_DAYS" \
-    -extfile "$PRIVATE_DIR/san.ext" -out "$PRIVATE_DIR/tls.crt"
+if [[ ! -s "$PRIVATE_DIR/tls.crt" ]]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days "$CERT_DAYS" -subj "/CN=ostyr lab CA" -keyout "$PRIVATE_DIR/ca.key" -out "$LAB_DIR/ca.pem"
+    openssl req -newkey rsa:2048 -nodes -subj "/CN=$domain" -keyout "$PRIVATE_DIR/tls.key" -out "$PRIVATE_DIR/tls.csr"
+    printf 'subjectAltName=DNS:%s,IP:%s\nextendedKeyUsage=serverAuth\n' "$domain" "$server_ip" >"$PRIVATE_DIR/san.ext"
+    openssl x509 -req -in "$PRIVATE_DIR/tls.csr" -CA "$LAB_DIR/ca.pem" -CAkey "$PRIVATE_DIR/ca.key" -CAcreateserial -days "$CERT_DAYS" \
+        -extfile "$PRIVATE_DIR/san.ext" -out "$PRIVATE_DIR/tls.crt"
+fi
 chmod 644 "$LAB_DIR/ca.pem"
 
 install_tls() {
@@ -52,9 +55,19 @@ install_tls nats /etc/nats/tls
 install_tls postgres /etc/postgresql/tls
 install_tls stunnel4 /etc/stunnel/tls
 
-clickhouse_password="$(openssl rand -hex 16)"
-nats_password="$(openssl rand -hex 16)"
-postgres_password="$(openssl rand -hex 16)"
+if [[ -s "$LAB_DIR/datastore.env" && -s "$S3_ACCESS_FILE" && -s "$S3_SECRET_FILE" ]]; then
+    clickhouse_password="$(sed -n 's/^CLICKHOUSE_PASSWORD=//p' "$LAB_DIR/datastore.env")"
+    nats_password="$(sed -n 's/^NATS_PASSWORD=//p' "$LAB_DIR/datastore.env")"
+    postgres_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$LAB_DIR/datastore.env")"
+    s3_access_key="$(cat "$S3_ACCESS_FILE")"
+    s3_secret_key="$(cat "$S3_SECRET_FILE")"
+else
+    clickhouse_password="$(openssl rand -hex 16)"
+    nats_password="$(openssl rand -hex 16)"
+    postgres_password="$(openssl rand -hex 16)"
+    s3_access_key="GK$(openssl rand -hex 12)"
+    s3_secret_key="$(openssl rand -hex 32)"
+fi
 
 cat >/etc/clickhouse-server/config.d/ostyr.xml <<XML
 <clickhouse>
@@ -148,9 +161,8 @@ hostssl all $SERVICE_USER 0.0.0.0/0 scram-sha-256
 CONF
 chown postgres:postgres "$postgres_conf_dir/ostyr.conf" "$postgres_hba"
 
-s3_access_key="GK$(openssl rand -hex 12)"
-s3_secret_key="$(openssl rand -hex 32)"
 install -d -m 750 -o garage -g garage /var/lib/garage /var/lib/garage/meta /var/lib/garage/data
+if [[ ! -s /etc/garage.toml ]]; then
 cat >/etc/garage.toml <<CONF
 metadata_dir = "/var/lib/garage/meta"
 data_dir = "/var/lib/garage/data"
@@ -167,6 +179,7 @@ api_bind_addr = "127.0.0.1:$GARAGE_S3_LOOPBACK_PORT"
 api_bind_addr = "127.0.0.1:$GARAGE_ADMIN_PORT"
 admin_token = "$(openssl rand -hex 32)"
 CONF
+fi
 chown root:garage /etc/garage.toml
 chmod 640 /etc/garage.toml
 cat >/etc/stunnel/ostyr-garage.conf <<CONF
@@ -228,20 +241,35 @@ wait_for() {
     printf 'error: %s not ready\n' "$description" >&2
     return 1
 }
-wait_for "PostgreSQL" systemctl is-active --quiet postgresql@16-main
+wait_for "PostgreSQL" pg_isready --quiet --host "$server_ip" --port "$POSTGRES_PORT"
+wait_for "PostgreSQL superuser query" sudo -u postgres psql --quiet --command 'SELECT 1'
 sudo -u postgres psql -v ON_ERROR_STOP=1 --quiet <<SQL
-CREATE ROLE $SERVICE_USER LOGIN PASSWORD '$postgres_password';
-CREATE DATABASE $SERVICE_DATABASE OWNER $SERVICE_USER;
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$SERVICE_USER') THEN
+        CREATE ROLE $SERVICE_USER LOGIN;
+    END IF;
+END
+\$\$;
+ALTER ROLE $SERVICE_USER LOGIN PASSWORD '$postgres_password';
+SELECT 'CREATE DATABASE $SERVICE_DATABASE OWNER $SERVICE_USER' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$SERVICE_DATABASE')\\gexec
+ALTER DATABASE $SERVICE_DATABASE OWNER TO $SERVICE_USER;
 SQL
+wait_for "PostgreSQL service user query" env PGPASSWORD="$postgres_password" psql --quiet --command 'SELECT 1' \
+    "host=$domain hostaddr=$server_ip port=$POSTGRES_PORT user=$SERVICE_USER dbname=$SERVICE_DATABASE sslmode=verify-full sslrootcert=$LAB_DIR/ca.pem"
 wait_for "ClickHouse" curl --fail --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:$CLICKHOUSE_HTTPS_PORT:$server_ip" \
     --user "$SERVICE_USER:$clickhouse_password" --data-binary 'SELECT 1' "https://$domain:$CLICKHOUSE_HTTPS_PORT/"
 wait_for "NATS" systemctl is-active --quiet nats-server
+wait_for "NATS TLS" openssl s_client -connect "$server_ip:$NATS_PORT" -CAfile "$LAB_DIR/ca.pem" -verify_return_error -verify_hostname "$domain" </dev/null
 wait_for "Garage" garage status
 garage_node="$(garage node id -q | cut -d@ -f1)"
-garage layout assign -z lab -c "$GARAGE_CAPACITY" "$garage_node"
-garage layout apply --version 1
-garage bucket create "$S3_BUCKET_NAME"
-garage key import --yes -n ostyr-lab "$s3_access_key" "$s3_secret_key"
+if ! garage layout show | grep -q "${garage_node:0:GARAGE_ID_SHORT}"; then
+    garage layout assign -z lab -c "$GARAGE_CAPACITY" "$garage_node"
+    garage layout apply --version 1
+fi
+wait_for "Garage layout" garage bucket list
+garage bucket info "$S3_BUCKET_NAME" >/dev/null 2>&1 || garage bucket create "$S3_BUCKET_NAME"
+garage key info "$s3_access_key" >/dev/null 2>&1 || garage key import --yes -n ostyr-lab "$s3_access_key" "$s3_secret_key"
 garage bucket allow --read --write --owner "$S3_BUCKET_NAME" --key "$s3_access_key"
 wait_for "S3 TLS front" curl --silent --cacert "$LAB_DIR/ca.pem" --resolve "$domain:$S3_TLS_PORT:$server_ip" "https://$domain:$S3_TLS_PORT/"
 printf 'datastore provisioned\n'
