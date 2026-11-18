@@ -8,10 +8,14 @@ mod types;
 use core_audit::cli::sample_entry;
 use core_audit::cli::{export_file, verify_file};
 use core_audit::error::AuditError;
-use core_audit::log::{append_declared, check_private, handle_facts, judge_handle, open_file_log, owner_only, HandleFacts};
+use core_audit::log::{
+    append_declared, check_private, create_new, handle_facts, judge_handle, open_file_log, open_file_log_with, open_read_with, open_with, owner_only,
+    HandleFacts, Opener, SYSTEM_OPENER,
+};
 use core_audit::verify::{verify_capped, MAX_RECORD_BYTES};
+use rustix::fs::OFlags;
 use std::fs;
-use std::io::Cursor;
+use std::io::{BufReader, Cursor, Seek, SeekFrom, Write};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
@@ -88,9 +92,9 @@ fn a_symlink_is_refused_whatever_it_points_at() -> TestResult {
 
 
 #[test]
-fn a_directory_or_a_missing_parent_is_an_io_error() -> TestResult {
+fn a_directory_is_refused_and_a_missing_parent_is_an_io_error() -> TestResult {
     let dir = tempdir()?;
-    assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
+    assert!(matches!(open_file_log(dir.path()), Err(AuditError::NotRegularFile)));
     assert!(matches!(
         open_file_log(&dir.path().join("absent").join("audit.log")),
         Err(AuditError::Io(_))
@@ -170,6 +174,119 @@ fn a_large_log_opens_and_verifies_with_no_size_cap() -> TestResult {
 }
 
 
+const SPARSE_OFFSET: u64 = 1 << 40;
+
+
+fn seek_reopen(path: &Path, flags: OFlags) -> Result<fs::File, AuditError> {
+    let mut file = open_with(path, flags)?;
+    file.seek(SeekFrom::Start(SPARSE_OFFSET))?;
+    Ok(file)
+}
+
+
+const SEEK_OPENER: Opener = Opener {
+    reopen: seek_reopen,
+    ..SYSTEM_OPENER
+};
+
+
+#[test]
+fn a_real_terabyte_file_opens_and_verifies() -> TestResult {
+    let dir = tempdir()?;
+    let seed = dir.path().join("seed.log");
+    let log = open_file_log(&seed)?;
+    (0..THREE_RECORDS).try_for_each(|index| append_declared(&log, sample_entry(index), &["name"]).map(|_| ()))?;
+    drop(log);
+    let records = fs::read(&seed)?;
+    let sparse = dir.path().join("sparse.log");
+    drop(open_file_log(&sparse)?);
+    let mut handle = fs::OpenOptions::new().write(true).open(&sparse)?;
+    handle.set_len(SPARSE_OFFSET)?;
+    handle.seek(SeekFrom::Start(SPARSE_OFFSET))?;
+    handle.write_all(&records)?;
+    drop(handle);
+    assert!(fs::metadata(&sparse)?.len() > SPARSE_OFFSET);
+    let continued = open_file_log_with(&sparse, &SEEK_OPENER)?;
+    append_declared(&continued, sample_entry(THREE_RECORDS), &["name"])?;
+    drop(continued);
+    let report = core_audit::verify::verify(BufReader::new(open_read_with(&sparse, &SEEK_OPENER)?), None)?;
+    assert_eq!(report.records, THREE_RECORDS + 1);
+    Ok(())
+}
+
+
+fn proc_missing(_path: &Path, _flags: OFlags) -> Result<fs::File, AuditError> {
+    Err(AuditError::Io(std::io::ErrorKind::NotFound.into()))
+}
+
+
+const NO_PROC_OPENER: Opener = Opener {
+    reopen: proc_missing,
+    ..SYSTEM_OPENER
+};
+
+
+#[test]
+fn a_missing_proc_is_a_fixed_error_and_never_a_creation() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    open_file_log(&path)?;
+    assert!(matches!(open_file_log_with(&path, &NO_PROC_OPENER), Err(AuditError::ProcUnavailable)));
+    assert!(matches!(open_read_with(&path, &NO_PROC_OPENER), Err(AuditError::ProcUnavailable)));
+    assert!(open_file_log_with(&path, &NO_PROC_OPENER)
+        .err()
+        .is_some_and(|error| error.to_string().contains("/proc")));
+    Ok(())
+}
+
+
+fn proc_denied(_path: &Path, _flags: OFlags) -> Result<fs::File, AuditError> {
+    Err(AuditError::Io(std::io::ErrorKind::PermissionDenied.into()))
+}
+
+
+#[test]
+fn another_reopen_failure_keeps_its_kind() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    open_file_log(&path)?;
+    let denied = Opener {
+        reopen: proc_denied,
+        ..SYSTEM_OPENER
+    };
+    assert!(matches!(
+        open_file_log_with(&path, &denied),
+        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn creation_is_exclusive() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    create_new(&path, &SYSTEM_OPENER)?;
+    assert!(matches!(
+        create_new(&path, &SYSTEM_OPENER),
+        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_device_named_as_the_log_is_refused_and_a_missing_file_is_created() -> TestResult {
+    assert!(matches!(open_file_log(Path::new("/dev/ptmx")), Err(AuditError::NotRegularFile)));
+    let dir = tempdir()?;
+    let path = dir.path().join("fresh.log");
+    open_file_log(&path)?;
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & GROUP_OTHER, 0);
+    assert!(matches!(open_file_log(&path.join("below")), Err(AuditError::Io(_))));
+    Ok(())
+}
+
+
 #[test]
 fn an_oversized_record_is_refused_before_it_is_written() -> TestResult {
     let dir = tempdir()?;
@@ -237,7 +354,7 @@ fn the_facts_come_from_the_handle() -> TestResult {
     let dir = tempdir()?;
     let path = dir.path().join("plain");
     fs::write(&path, b"abc")?;
-    let found = handle_facts(&fs::File::open(&path)?.metadata()?);
+    let found = handle_facts(&fs::File::open(&path)?)?;
     assert!(found.regular && found.links == 1);
     Ok(())
 }
@@ -265,5 +382,21 @@ fn check_private_accepts_a_private_file_and_names_a_loose_mode() -> TestResult {
         check_private(&fs::File::open(&path)?),
         Err(AuditError::InsecurePermissions { mode: GROUP_READABLE })
     ));
+    Ok(())
+}
+
+
+const HIDDEN_PROC: Opener = Opener {
+    proc_fd_dir: "/nonexistent-proc/self/fd",
+    ..SYSTEM_OPENER
+};
+
+
+#[test]
+fn a_hidden_proc_creates_nothing() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    assert!(matches!(open_file_log_with(&path, &HIDDEN_PROC), Err(AuditError::ProcUnavailable)));
+    assert!(!path.exists());
     Ok(())
 }
