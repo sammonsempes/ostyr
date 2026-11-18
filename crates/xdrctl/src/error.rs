@@ -82,6 +82,8 @@ pub enum CliError {
     NotFound,
     #[error("too many requests: retry later")]
     RateLimited,
+    #[error("risk scores unavailable, retry later")]
+    Unavailable,
     #[error("apply cancelled")]
     Cancelled,
 }

@@ -1841,3 +1841,203 @@ fn ordinary_plan_text_is_exact() -> TestResult {
     assert_eq!(String::from_utf8(prompt)?, ORDINARY_PLAN_PROMPT);
     Ok(())
 }
+
+
+const RISK_LONG: usize = 257;
+
+
+const STATUS_UNAVAILABLE: u16 = 503;
+
+
+const RISK_LIST_BODY: &str =
+    "{\"computed_at\":1780000000,\"alerts_read\":7,\"informational\":2,\"refused\":{\"host\":1,\"user\":3},\"truncated\":null,\
+\"entities\":[{\"kind\":\"host\",\"id\":\"srv1\",\"value\":80,\"contributions_used\":4,\"contributions_dropped\":1},\
+{\"kind\":\"user\",\"id\":\"bob\",\"value\":10,\"contributions_used\":1,\"contributions_dropped\":0}]}";
+
+
+const RISK_TRUNCATED_BODY: &str = "{\"computed_at\":1780000000,\"alerts_read\":7,\"informational\":0,\"refused\":{},\
+\"truncated\":{\"limit\":\"alerts\",\"read\":100,\"cap\":100},\"entities\":[]}";
+
+
+const RISK_SHOW_BODY: &str = "{\"computed_at\":1780000000,\"truncated\":null,\
+\"entity\":{\"kind\":\"host\",\"id\":\"srv1\",\"value\":80,\"contributions_used\":4,\"contributions_dropped\":1}}";
+
+
+const RISK_SHOW_TRUNCATED: &str = "{\"computed_at\":1780000000,\"truncated\":{\"limit\":\"entities\",\"read\":5,\"cap\":5},\
+\"entity\":{\"kind\":\"host\",\"id\":\"srv1\",\"value\":80,\"contributions_used\":4,\"contributions_dropped\":1}}";
+
+
+#[test]
+fn risk_list_text_json_and_paths() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let plain = invoke(
+        &offline_args(dir.path(), &["risk", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_LIST_BODY),
+    )?;
+    assert_eq!(plain.code, SUCCESS);
+    assert!(plain.out.contains("host\tsrv1\t80\t4\t1\nuser\tbob\t10\t1\t0\n"));
+    assert!(plain.out.contains("alerts_read 7 informational 2 refused host=1,user=3"));
+    assert!(plain.out.contains("computed_at 2026-"));
+    assert!(!plain.out.contains("TRUNCATED"));
+    let filtered = invoke(
+        &offline_args(dir.path(), &["risk", "list", "--kind", "user", "--limit", "2"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_TRUNCATED_BODY),
+    )?;
+    assert!(filtered.out.contains("TRUNCATED: read 100 of cap 100, limit 2 (alerts)"));
+    let defaulted = invoke(
+        &offline_args(dir.path(), &["risk", "list", "--kind", "host"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_TRUNCATED_BODY),
+    )?;
+    assert!(defaulted.out.contains("limit default (alerts)"));
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "risk", "list"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_LIST_BODY),
+    )?;
+    assert!(json.out.contains("\"alerts_read\":7"));
+    assert_eq!(
+        *seen.borrow(),
+        vec![
+            "https://example.test/risk/entities Some(\"tok\")",
+            "https://example.test/risk/entities?limit=2&kind=user Some(\"tok\")",
+            "https://example.test/risk/entities?kind=host Some(\"tok\")",
+            "https://example.test/risk/entities Some(\"tok\")",
+        ]
+    );
+    Ok(())
+}
+
+
+#[test]
+fn risk_show_text_json_and_path() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let shown = invoke(
+        &offline_args(dir.path(), &["risk", "show", "host", "a/b"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_SHOW_BODY),
+    )?;
+    assert_eq!(shown.code, SUCCESS);
+    assert!(shown
+        .out
+        .contains("kind: host\nid: srv1\nvalue: 80\ncontributions used: 4\ncontributions dropped: 1\ncomputed_at: 2026-"));
+    assert!(!shown.out.contains("TRUNCATED"));
+    let truncated = invoke(
+        &offline_args(dir.path(), &["risk", "show", "user", "x"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_SHOW_TRUNCATED),
+    )?;
+    assert!(truncated.out.contains("TRUNCATED: read 5 of cap 5, limit default (entities)"));
+    let json = invoke(
+        &offline_args(dir.path(), &["--output", "json", "risk", "show", "host", "x"]),
+        "",
+        &alerts_stub(&seen, STATUS_OK, RISK_SHOW_BODY),
+    )?;
+    assert!(json.out.contains("\"entity\""));
+    assert_eq!(
+        seen.borrow().first().map(String::as_str),
+        Some("https://example.test/risk/entities/host/a%2Fb Some(\"tok\")")
+    );
+    Ok(())
+}
+
+
+#[test]
+fn risk_bad_arguments_make_no_request() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let long = "a".repeat(RISK_LONG);
+    for id in ["", "-x", "a\u{1b}MARKER", "a\u{202e}b", long.as_str()] {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["risk", "show", "host", "--", id]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, RISK_SHOW_BODY),
+        )?;
+        assert_eq!(outcome.code, FAILURE);
+        assert!(outcome.err.contains("invalid risk id"));
+        assert!(!outcome.err.contains("MARKER"));
+    }
+    for words in [
+        vec!["risk", "list", "--limit", "0"],
+        vec!["risk", "list", "--limit", "501"],
+        vec!["risk", "list", "--kind", "ip"],
+        vec!["risk", "show", "ip", "x"],
+    ] {
+        let outcome = invoke(&offline_args(dir.path(), &words), "", &alerts_stub(&seen, STATUS_OK, RISK_LIST_BODY))?;
+        assert_eq!(outcome.code, USAGE_FAILURE);
+    }
+    assert!(seen.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn risk_hostile_values_are_escaped() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let hostile = "a\\u001b\\u0007\\u202e";
+    let list: &'static str = Box::leak(
+        format!(
+            "{{\"computed_at\":0,\"alerts_read\":1,\"informational\":0,\"refused\":{{\"{hostile}\":1}},\
+             \"truncated\":{{\"limit\":\"{hostile}\",\"read\":1,\"cap\":1}},\
+             \"entities\":[{{\"kind\":\"{hostile}\",\"id\":\"{hostile}\",\"value\":1,\"contributions_used\":1,\"contributions_dropped\":0}}]}}"
+        )
+        .into_boxed_str(),
+    );
+    let show: &'static str = Box::leak(
+        format!(
+            "{{\"computed_at\":0,\"truncated\":{{\"limit\":\"{hostile}\",\"read\":1,\"cap\":1}},\
+             \"entity\":{{\"kind\":\"{hostile}\",\"id\":\"{hostile}\",\"value\":1,\"contributions_used\":1,\"contributions_dropped\":0}}}}"
+        )
+        .into_boxed_str(),
+    );
+    for (words, reply) in [(vec!["risk", "list"], list), (vec!["risk", "show", "host", "x"], show)] {
+        let text = invoke(&offline_args(dir.path(), &words), "", &alerts_stub(&seen, STATUS_OK, reply))?;
+        assert!(!text.out.contains(['\u{1b}', '\u{7}', '\u{202e}']));
+        assert!(text.out.contains("a\\u{1b}\\u{7}\\u{202e}"));
+        let mut json_words = vec!["--output", "json"];
+        json_words.extend(words.iter());
+        let json = invoke(&offline_args(dir.path(), &json_words), "", &alerts_stub(&seen, STATUS_OK, reply))?;
+        assert!(!json.out.contains(['\u{1b}', '\u{7}', '\u{202e}']));
+        assert!(json.out.contains("\\u001b"));
+    }
+    Ok(())
+}
+
+
+#[test]
+fn risk_statuses_map_to_fixed_messages() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    let body = "{\"error\":{\"code\":\"c\",\"message\":\"MARKER\"}}";
+    for (status, expected) in [
+        (STATUS_UNAUTHORIZED, "not valid"),
+        (STATUS_FORBIDDEN, "permission denied"),
+        (STATUS_NOT_FOUND, "not found"),
+        (STATUS_TOO_MANY, "too many"),
+        (STATUS_UNAVAILABLE, "risk scores unavailable, retry later"),
+    ] {
+        for args in [vec!["risk", "list"], vec!["risk", "show", "host", "c1"]] {
+            let outcome = invoke(&offline_args(dir.path(), &args), "", &alerts_stub(&seen, status, body))?;
+            assert!(outcome.err.contains(expected));
+            assert!(!outcome.err.contains("MARKER"));
+        }
+    }
+    let other = invoke(&offline_args(dir.path(), &["risk", "list"]), "", &alerts_stub(&seen, STATUS_ERROR, body))?;
+    assert!(other.err.contains("500"));
+    for args in [vec!["risk", "list"], vec!["risk", "show", "host", "c1"]] {
+        let bad = invoke(&offline_args(dir.path(), &args), "", &alerts_stub(&seen, STATUS_OK, "[MARKER]"))?;
+        assert!(bad.err.contains("unexpected reply"));
+        assert!(!bad.err.contains("MARKER"));
+    }
+    Ok(())
+}
