@@ -1,4 +1,8 @@
+use crate::fetch_error::{HttpFailure, LedgerFailure};
+use crate::fetch_model::{HttpRequest, HttpResponse};
+use crate::load::{LoadError, LoadOutcome};
 use crate::model::SkipReason;
+use crate::source::Export;
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use time::Date;
@@ -29,3 +33,14 @@ pub type StoredMap = BTreeMap<StoredKey, Decimal>;
 
 /// A cost point before the common columns are added: day, dimension, the two key parts and the amount.
 pub type Point = (Date, String, &'static str, String, String, Decimal);
+
+
+pub type HttpFn<'a> = dyn Fn(&HttpRequest) -> Result<HttpResponse, HttpFailure> + 'a;
+
+
+/// The PostgreSQL ledger executor: a statement with `$n` text parameters in, rows of text columns out.
+pub type ExecFn<'a> = dyn Fn(&str, &[String]) -> Result<Vec<Vec<String>>, LedgerFailure> + 'a;
+
+
+/// The ClickHouse load of one export for one tenant.
+pub type LoadFn<'a> = dyn Fn(&str, &Export) -> Result<LoadOutcome, LoadError> + 'a;
