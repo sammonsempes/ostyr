@@ -312,7 +312,6 @@ pub enum FailureClass {
 pub struct RunOutput {
     pub bytes: Vec<u8>,
     pub exit_code: Option<i32>,
-    pub elapsed: std::time::Duration,
 }
 
 

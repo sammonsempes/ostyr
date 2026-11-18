@@ -139,15 +139,13 @@ fn spawn(program: &Path, arguments: &[&str], stdout: io::PipeWriter) -> io::Resu
 }
 
 
-fn finish(child: &mut Child, bytes: Vec<u8>, window: (Instant, Instant)) -> Result<RunOutput, FailureClass> {
-    let (started, until) = window;
+fn finish(child: &mut Child, bytes: Vec<u8>, until: Instant) -> Result<RunOutput, FailureClass> {
     let status = wait_exit(child, until, &mut Instant::now)
         .map_err(failure_of)?
         .ok_or(FailureClass::TimedOut)?;
     Ok(RunOutput {
         bytes,
         exit_code: status.code(),
-        elapsed: started.elapsed(),
     })
 }
 
@@ -163,7 +161,7 @@ pub fn run_smartctl(program: &Path, arguments: &[&str], cap: u64, deadline: Dura
     let mut child = spawn(program, arguments, writer).map_err(spawn_failure)?;
     let verdict = read_output(&mut reader, cap, until)
         .map_err(failure_of)
-        .and_then(|bytes| finish(&mut child, bytes, (started, until)));
+        .and_then(|bytes| finish(&mut child, bytes, until));
     if verdict.is_err() {
         reap_killed(&mut child, &mut Instant::now);
     }
@@ -265,9 +263,9 @@ fn read_device(settings: &SmartSettings, runner: RunnerFn, clock: ClockFn, mut r
 }
 
 
-/// Scans, then reads every accepted disk within the round budget; wall time of every run, the scan included, is charged; a disk past it is `Deferred`.
+/// Scans, then reads every accepted disk within the round budget; wall time of every run, the scan included, is charged and the scan gets `min(deadline, round)`; a disk past it is `Deferred`.
 pub fn scan_and_report_with(settings: &SmartSettings, runner: RunnerFn, clock: ClockFn) -> RunReport {
-    let deadline = Duration::from_secs(settings.deadline_seconds);
+    let deadline = Duration::from_secs(settings.deadline_seconds.min(settings.round_deadline_seconds));
     let started = clock(settings);
     let scanned = scan(settings, runner, deadline);
     let spent = clock(settings).saturating_duration_since(started);
