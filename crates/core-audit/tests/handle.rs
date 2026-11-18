@@ -400,3 +400,119 @@ fn a_hidden_proc_creates_nothing() -> TestResult {
     assert!(!path.exists());
     Ok(())
 }
+
+
+const TASK_DIR_OPENER: Opener = Opener {
+    reopen: echo_path,
+    proc_fd_dir: "/proc/self/task",
+    ..SYSTEM_OPENER
+};
+
+
+fn echo_path(path: &Path, _flags: OFlags) -> Result<fs::File, AuditError> {
+    Err(AuditError::Io(std::io::Error::other(path.display().to_string())))
+}
+
+
+#[test]
+fn the_reopen_path_is_built_from_the_opener_directory() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let error = open_file_log_with(&path, &TASK_DIR_OPENER).err().ok_or("expected a failure")?;
+    assert!(error.to_string().contains("/proc/self/task/"));
+    assert!(!path.exists());
+    Ok(())
+}
+
+
+const START_COUNT: u8 = 2;
+
+
+const DENIED_OPENER: Opener = Opener {
+    reopen: proc_denied,
+    ..SYSTEM_OPENER
+};
+
+
+fn is_denied(result: Result<core_audit::log::AuditLog<fs::File>, AuditError>) -> bool {
+    matches!(result, Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+
+#[test]
+fn a_denied_reopen_fails_a_new_log_like_an_existing_one_and_leaves_nothing() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    (0..START_COUNT).try_for_each(|_| -> TestResult {
+        assert!(is_denied(open_file_log_with(&path, &DENIED_OPENER)));
+        assert!(!path.exists());
+        Ok(())
+    })
+}
+
+
+fn replace_with_other_file(proc_path: &Path, flags: OFlags) -> Result<fs::File, AuditError> {
+    let name = fs::read_link(proc_path)?;
+    fs::remove_file(&name)?;
+    fs::write(&name, "other")?;
+    proc_denied(proc_path, flags)
+}
+
+
+fn replace_with_symlink(proc_path: &Path, flags: OFlags) -> Result<fs::File, AuditError> {
+    let name = fs::read_link(proc_path)?;
+    fs::remove_file(&name)?;
+    symlink("victim", &name)?;
+    proc_denied(proc_path, flags)
+}
+
+
+fn remove_name(proc_path: &Path, flags: OFlags) -> Result<fs::File, AuditError> {
+    fs::remove_file(fs::read_link(proc_path)?)?;
+    proc_denied(proc_path, flags)
+}
+
+
+#[test]
+fn a_name_swapped_after_creation_is_never_removed() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let swapped = Opener {
+        reopen: replace_with_other_file,
+        ..SYSTEM_OPENER
+    };
+    assert!(is_denied(open_file_log_with(&path, &swapped)));
+    assert_eq!(fs::read_to_string(&path)?, "other");
+    Ok(())
+}
+
+
+#[test]
+fn a_symlink_swapped_in_after_creation_is_not_followed_or_removed() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let victim = dir.path().join("victim");
+    fs::write(&victim, "keep")?;
+    let swapped = Opener {
+        reopen: replace_with_symlink,
+        ..SYSTEM_OPENER
+    };
+    assert!(is_denied(open_file_log_with(&path, &swapped)));
+    assert_eq!(fs::read_to_string(&victim)?, "keep");
+    assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_removal_keeps_the_reopen_error() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let vanished = Opener {
+        reopen: remove_name,
+        ..SYSTEM_OPENER
+    };
+    assert!(is_denied(open_file_log_with(&path, &vanished)));
+    assert!(!path.exists());
+    Ok(())
+}

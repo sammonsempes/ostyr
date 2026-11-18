@@ -5,7 +5,9 @@ use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::types::{FactsReader, Reopener};
 use crate::verify::{verify, MAX_RECORD_BYTES};
 #[cfg(unix)]
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{fstat, statat, unlinkat, AtFlags, Mode, OFlags, CWD};
+#[cfg(unix)]
+use rustix::io::Errno;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
 #[cfg(unix)]
@@ -207,7 +209,7 @@ pub fn open_anchored(path: &Path, flags: OFlags, opener: &Opener) -> Result<File
 /// A missing `/proc` is a fixed error, never a `NotFound` that `open_checked` would take for a missing log.
 #[cfg(unix)]
 pub fn reopen_through_proc(anchor: &File, flags: OFlags, opener: &Opener) -> Result<File, AuditError> {
-    (opener.reopen)(Path::new(&format!("/proc/self/fd/{}", anchor.as_raw_fd())), flags).map_err(|error| match error {
+    (opener.reopen)(&Path::new(opener.proc_fd_dir).join(anchor.as_raw_fd().to_string()), flags).map_err(|error| match error {
         AuditError::Io(cause) if cause.kind() == io::ErrorKind::NotFound => AuditError::ProcUnavailable,
         other => other,
     })
@@ -233,12 +235,52 @@ pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
 }
 
 
-/// Creates a new file exclusively (a name that does not exist yet cannot be a device or a link) and judges it.
+/// Creates a new file exclusively (a name that does not exist yet cannot be a device or a link), then reopens and judges it like an existing log.
 #[cfg(unix)]
 pub fn create_new(path: &Path, opener: &Opener) -> Result<File, AuditError> {
     let flags =
         OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    open_with(path, flags).and_then(|file| judge_opened(file, opener))
+    open_with(path, flags)
+        .and_then(|file| judge_opened(file, opener))
+        .and_then(|created| reopen_created(path, created, opener))
+}
+
+
+/// A failed reopen of a new log removes the new name (only while it is still the created inode) and keeps the reopen error.
+#[cfg(unix)]
+pub fn reopen_created(path: &Path, created: File, opener: &Opener) -> Result<File, AuditError> {
+    reopen_through_proc(
+        &created,
+        OFlags::RDWR | OFlags::APPEND | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        opener,
+    )
+    .and_then(|reopened| judge_opened(reopened, opener))
+    .or_else(|error| first_error(error, remove_if_same(path, &created)))
+}
+
+
+/// The error that started the cleanup stays the error; a failed cleanup is only logged.
+#[cfg(unix)]
+pub fn first_error(error: AuditError, cleanup: Result<(), Errno>) -> Result<File, AuditError> {
+    cleanup.err().iter().for_each(log_cleanup_failure);
+    Err(error)
+}
+
+
+/// Logs that a new log name could not be removed.
+#[cfg(unix)]
+pub fn log_cleanup_failure(errno: &Errno) {
+    let reason = errno.to_string();
+    tracing::warn!(reason, "new audit log not removed");
+}
+
+
+/// Unlinks the name only when it still is the inode of the handle.
+#[cfg(unix)]
+pub fn remove_if_same(path: &Path, created: &File) -> Result<(), Errno> {
+    fstat(created)
+        .and_then(|held| statat(CWD, path, AtFlags::SYMLINK_NOFOLLOW).map(|named| (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)))
+        .and_then(|same| if same { unlinkat(CWD, path, AtFlags::empty()) } else { Ok(()) })
 }
 
 
