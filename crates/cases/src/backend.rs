@@ -1,8 +1,8 @@
 use crate::api_model::CasesBackend;
 use crate::error::CaseStoreError;
-use crate::model::Comment;
-use crate::store::{add_comment, attach_alert, list_links};
-use crate::stored::{CaseDetail, CasePage, LinkList, LinkPage, SummaryList};
+use crate::model::{Comment, Observable};
+use crate::store::{add_comment, add_observable, attach_alert, list_links, list_observables};
+use crate::stored::{CaseDetail, CasePage, LinkList, LinkPage, SeenObservable, SummaryList};
 use crate::summary::{get_case_detail, list_case_summaries};
 use crate::transition::CaseAction;
 use crate::write::act_on_case;
@@ -91,6 +91,30 @@ pub async fn pg_links(
 }
 
 
+pub async fn pg_observable(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    (id, observable): (String, Observable),
+) -> Result<bool, CaseStoreError> {
+    let held = lease(&engine, &permits).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    add_observable(&executor, &scope, &id, &observable).await
+}
+
+
+pub async fn pg_observables(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    id: String,
+) -> Result<Vec<SeenObservable>, CaseStoreError> {
+    let held = lease(&engine, &permits).await?;
+    let executor = pg_executor(&held.client, held.deadline);
+    list_observables(&executor, &scope, &id).await
+}
+
+
 pub fn unix_now() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
@@ -108,6 +132,10 @@ pub fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>
     let link_permits = Arc::clone(&permits);
     let links_engine = Arc::clone(&engine);
     let links_permits = Arc::clone(&permits);
+    let observable_engine = Arc::clone(&engine);
+    let observable_permits = Arc::clone(&permits);
+    let observables_engine = Arc::clone(&engine);
+    let observables_permits = Arc::clone(&permits);
     CasesBackend {
         list: Arc::new(move |scope, page| Box::pin(pg_list(Arc::clone(&list_engine), Arc::clone(&list_permits), scope, page))),
         get: Arc::new(move |scope, id| Box::pin(pg_get(Arc::clone(&engine), Arc::clone(&permits), scope, id))),
@@ -131,6 +159,22 @@ pub fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>
             ))
         }),
         links: Arc::new(move |scope, id, page| Box::pin(pg_links(Arc::clone(&links_engine), Arc::clone(&links_permits), scope, (id, page)))),
+        observable: Arc::new(move |scope, id, observable| {
+            Box::pin(pg_observable(
+                Arc::clone(&observable_engine),
+                Arc::clone(&observable_permits),
+                scope,
+                (id, observable),
+            ))
+        }),
+        observables: Arc::new(move |scope, id| {
+            Box::pin(pg_observables(
+                Arc::clone(&observables_engine),
+                Arc::clone(&observables_permits),
+                scope,
+                id,
+            ))
+        }),
         clock: unix_now,
     }
 }

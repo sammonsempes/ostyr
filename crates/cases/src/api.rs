@@ -1,9 +1,15 @@
-use crate::api_model::{ActionName, ActionRequest, AlertLinkListView, CaseListView, CasesBackend, CommentRequest, LinkRequest, ListQuery};
+use crate::api_model::{
+    ActionName, ActionRequest, AlertLinkListView, CaseListView, CasesBackend, CommentRequest, LinkRequest, ListQuery, ObservableAdded,
+    ObservableListView, ObservableRequest,
+};
 use crate::error::CaseStoreError;
 use crate::links_api::{__path_link_endpoint, __path_links_endpoint, link_endpoint, links_endpoint, ALERTS_PATH, LINK_BODY_LIMIT};
-use crate::model::Comment;
+use crate::model::{Comment, IocStatus, Observable, ObservableKind, Pap, Tlp};
+use crate::observables_api::{
+    __path_observable_endpoint, __path_observables_endpoint, observable_endpoint, observables_endpoint, OBSERVABLES_PATH, OBSERVABLE_BODY_LIMIT,
+};
 use crate::store::{check_text, format_cursor, parse_cursor, MAX_ID_CHARS, MAX_PAGE_SIZE};
-use crate::stored::{AlertLink, CaseCounts, CaseCursor, CaseDetail, CasePage, CaseSummary, SummaryList};
+use crate::stored::{AlertLink, CaseCounts, CaseCursor, CaseDetail, CasePage, CaseSummary, SeenObservable, SummaryList};
 use crate::write_api::{
     __path_action_endpoint, __path_comment_endpoint, action_endpoint, comment_endpoint, ACTIONS_PATH, ACTION_BODY_LIMIT, COMMENTS_PATH,
     COMMENT_BODY_LIMIT,
@@ -49,7 +55,16 @@ pub const NOT_FOUND_MESSAGE: &str = "no such case";
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(list_endpoint, get_endpoint, action_endpoint, comment_endpoint, link_endpoint, links_endpoint),
+    paths(
+        list_endpoint,
+        get_endpoint,
+        action_endpoint,
+        comment_endpoint,
+        link_endpoint,
+        links_endpoint,
+        observable_endpoint,
+        observables_endpoint
+    ),
     components(schemas(
         CaseSummary,
         CaseDetail,
@@ -61,7 +76,16 @@ pub const NOT_FOUND_MESSAGE: &str = "no such case";
         Comment,
         LinkRequest,
         AlertLink,
-        AlertLinkListView
+        AlertLinkListView,
+        ObservableRequest,
+        ObservableAdded,
+        ObservableListView,
+        SeenObservable,
+        Observable,
+        ObservableKind,
+        Tlp,
+        Pap,
+        IocStatus
     ))
 )]
 pub struct CasesDoc;
@@ -223,13 +247,19 @@ pub fn cases_router(backend: CasesBackend) -> Router<SharedState> {
             ALERTS_PATH,
             get(links_endpoint).post(link_endpoint).layer(DefaultBodyLimit::max(LINK_BODY_LIMIT)),
         )
+        .route(
+            OBSERVABLES_PATH,
+            get(observables_endpoint)
+                .post(observable_endpoint)
+                .layer(DefaultBodyLimit::max(OBSERVABLE_BODY_LIMIT)),
+        )
         .layer(Extension(backend))
 }
 
 
 pub fn cases_access() -> AccessTable {
-    let reads = [LIST_PATH, GET_PATH, ALERTS_PATH].map(|path| (route_key("GET", path), PERMISSION_CASES_READ));
-    let writes = [ACTIONS_PATH, COMMENTS_PATH, ALERTS_PATH].map(|path| (route_key("POST", path), PERMISSION_CASES_WRITE));
+    let reads = [LIST_PATH, GET_PATH, ALERTS_PATH, OBSERVABLES_PATH].map(|path| (route_key("GET", path), PERMISSION_CASES_READ));
+    let writes = [ACTIONS_PATH, COMMENTS_PATH, ALERTS_PATH, OBSERVABLES_PATH].map(|path| (route_key("POST", path), PERMISSION_CASES_WRITE));
     reads
         .into_iter()
         .chain(writes)

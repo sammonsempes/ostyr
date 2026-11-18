@@ -9,8 +9,10 @@ use alerts::backend::{lease, MAX_CONNECTIONS};
 use alerts::error::StoreError;
 use cases::backend::pg_backend;
 use cases::error::CaseStoreError;
-use cases::model::{Comment, Resolution};
-use cases::store::{APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, GET_SQL, LINKS_AFTER_SQL, LINKS_SQL};
+use cases::model::{Comment, IocStatus, Observable, ObservableKind, Pap, Resolution, Tlp};
+use cases::store::{
+    APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, GET_SQL, LINKS_AFTER_SQL, LINKS_SQL, OBSERVABLES_SQL, OBSERVABLE_SQL, SEEN_IN_SQL,
+};
 use cases::stored::{CasePage, LinkPage};
 use cases::transition::CaseAction;
 use certs::{loopback, make_pki};
@@ -341,6 +343,62 @@ async fn the_pg_backend_links_and_lists_alerts_scoped_to_the_tenant() -> Result<
     ));
     assert!(matches!(
         (busy.links)(scope, "c1".to_owned(), LinkPage { after: None, size: 1 }).await,
+        Err(CaseStoreError::Lease(StoreError::Busy))
+    ));
+    Ok(())
+}
+
+
+pub fn observable_handler() -> Handler {
+    Arc::new(|sql| {
+        if sql == OBSERVABLE_SQL {
+            Reply::Rows(vec![["1", "1", "0", "0"].map(str::to_owned).to_vec()])
+        } else if sql == OBSERVABLES_SQL {
+            Reply::Rows(vec![vec![
+                r#"[{"kind":"domain","value":"example.com","tlp":"red","pap":"red","ioc":"confirmed","source":"s"}]"#.to_owned(),
+            ]])
+        } else if sql == SEEN_IN_SQL {
+            Reply::Rows(vec![["c1", "1", "c2"].map(str::to_owned).to_vec()])
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+#[tokio::test]
+async fn the_pg_backend_adds_and_lists_observables_scoped_to_the_tenant() -> Result<(), Box<dyn Error>> {
+    let mut served = served(observable_handler()).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let scope = tenant_scope("acme")?;
+    let observable = Observable {
+        kind: ObservableKind::Domain,
+        value: "example.com".to_owned(),
+        tlp: Tlp::Red,
+        pap: Pap::Red,
+        ioc: IocStatus::Confirmed,
+        source: "s".to_owned(),
+    };
+    assert!((backend.observable)(scope.clone(), "c1".to_owned(), observable.clone()).await?);
+    let listed = (backend.observables)(scope.clone(), "c1".to_owned()).await?;
+    assert_eq!(listed.first().map(|item| item.seen_in.clone()), Some(vec!["c2".to_owned()]));
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    let bound: Vec<String> = drain(&mut served.fake.statements)
+        .into_iter()
+        .filter(|entry| entry.starts_with("PARAMS"))
+        .collect();
+    assert!(
+        !bound.is_empty() && bound.iter().all(|entry| entry.starts_with("PARAMS acme|")),
+        "{bound:?}"
+    );
+    let busy = pg_backend(Arc::clone(&served.engine), Arc::new(Semaphore::new(0)));
+    assert!(matches!(
+        (busy.observable)(scope.clone(), "c1".to_owned(), observable).await,
+        Err(CaseStoreError::Lease(StoreError::Busy))
+    ));
+    assert!(matches!(
+        (busy.observables)(scope, "c1".to_owned()).await,
         Err(CaseStoreError::Lease(StoreError::Busy))
     ));
     Ok(())

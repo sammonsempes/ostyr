@@ -1,7 +1,7 @@
 use crate::error::CaseStoreError;
 use crate::model::{Case, CaseStatus, Comment, Observable, Task};
 use crate::observable::normalise_value;
-use crate::stored::{AlertLinkItem, CaseCursor, CaseList, CasePage, Labels, LinkList, LinkPage, Parts, Stored};
+use crate::stored::{AlertLinkItem, CaseCursor, CaseList, CasePage, Labels, LinkList, LinkPage, Parts, SeenObservable, Stored};
 use crate::transition::{apply_action, CaseAction};
 use alerts::id::is_alert_id;
 use alerts::types::{Executor, Row};
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 pub const MIGRATION_NAMESPACE: &str = "cases";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "001_cases",
         sql: include_str!("../migrations/001_cases.sql"),
@@ -21,6 +21,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "002_link_attribution",
         sql: include_str!("../migrations/002_link_attribution.sql"),
+    },
+    Migration {
+        version: "003_observable_index",
+        sql: include_str!("../migrations/003_observable_index.sql"),
     },
 ];
 
@@ -37,7 +41,7 @@ pub const APPLY_SQL: &str = include_str!("../migrations/apply.sql");
 pub const COMMENT_SQL: &str = include_str!("../migrations/comment.sql");
 
 
-/// `$2` case id, `$3` observable JSON with its normalised value, `$4` cap; answers found, added, size.
+/// `$2` case id, `$3` observable JSON with its normalised value, `$4` cap; answers found, added, size, same (the case held the value in the statement snapshot).
 pub const OBSERVABLE_SQL: &str = include_str!("../migrations/observable.sql");
 
 
@@ -51,6 +55,14 @@ pub const LINKS_SQL: &str = include_str!("../migrations/links.sql");
 
 /// `$2` case id, `$3` last alert id, `$4` page size; as `LINKS_SQL` after the cursor.
 pub const LINKS_AFTER_SQL: &str = include_str!("../migrations/links_after.sql");
+
+
+/// `$2` case id; answers the `observables` array as text, no row when the case is absent from the tenant.
+pub const OBSERVABLES_SQL: &str = include_str!("../migrations/observables.sql");
+
+
+/// `$2` case id, `$3` row limit per observable; answers (case id, observable ordinal from 1, other case id) for every observable of the case, ordinal 0 and empty ids when there is none.
+pub const SEEN_IN_SQL: &str = include_str!("../migrations/seen_in.sql");
 
 
 pub const FIRST_SQL: &str = "SELECT id, title, COALESCE(description, ''), severity, status, COALESCE(resolution, ''), COALESCE(assignee, ''), \
@@ -246,6 +258,9 @@ pub const ADDED_COLUMN: usize = 1;
 pub const SIZE_COLUMN: usize = 2;
 
 
+pub const OBSERVABLE_SAME_COLUMN: usize = 3;
+
+
 pub const ALERT_FOUND_COLUMN: usize = 1;
 
 
@@ -256,6 +271,18 @@ pub const ATTACH_LINKED_COLUMN: usize = 3;
 
 
 pub const ATTACH_SAME_COLUMN: usize = 4;
+
+
+pub const OBSERVABLES_TEXT_COLUMN: usize = 0;
+
+
+pub const SEEN_ORDINAL_COLUMN: usize = 1;
+
+
+pub const SEEN_OTHER_COLUMN: usize = 2;
+
+
+pub const SEEN_IN_LIMIT: usize = 20;
 
 
 pub const LINK_ALERT_COLUMN: usize = 1;
@@ -620,19 +647,53 @@ pub async fn add_comment(exec: Executor<'_, '_>, scope: &TenantScope, case_id: &
 }
 
 
-/// `true` when added, `false` when the case already holds the same kind and normalised value.
+/// What one run of `OBSERVABLE_SQL` did: the row was added, the case already held it, the case is full, or the write lost a race against another writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddOutcome {
+    Added,
+    Same,
+    Full,
+    Lost,
+}
+
+
+/// The statement reads size and duplicate in its statement snapshot but writes under READ COMMITTED, so a concurrent writer can make the write skip while the snapshot shows room: that is `Lost`, never a duplicate.
+pub async fn try_add(exec: Executor<'_, '_>, scope: &TenantScope, params: Vec<String>) -> Result<AddOutcome, CaseStoreError> {
+    let rows = exec(scope.clone(), OBSERVABLE_SQL, params).await?;
+    let answer = rows.first().ok_or(CaseStoreError::BadRow { column: ID_COLUMN })?;
+    if count(answer, ID_COLUMN)? == 0 {
+        Err(CaseStoreError::NotFound)
+    } else if count(answer, ADDED_COLUMN)? > 0 {
+        Ok(AddOutcome::Added)
+    } else if count(answer, OBSERVABLE_SAME_COLUMN)? > 0 {
+        Ok(AddOutcome::Same)
+    } else if count(answer, SIZE_COLUMN)? >= MAX_OBSERVABLES {
+        Ok(AddOutcome::Full)
+    } else {
+        Ok(AddOutcome::Lost)
+    }
+}
+
+
+/// `true` when added, `false` when the case already holds the same kind and normalised value; a write that lost a race is run once more on a fresh snapshot, then `Conflict`.
 pub async fn add_observable(exec: Executor<'_, '_>, scope: &TenantScope, case_id: &str, observable: &Observable) -> Result<bool, CaseStoreError> {
     check_text("id", case_id, MAX_ID_CHARS)?;
     let document = checked_observable(observable)?;
     let params = vec![case_id.to_owned(), document.to_string(), MAX_OBSERVABLES.to_string()];
-    let (added, size) = append(exec, scope, OBSERVABLE_SQL, params).await?;
-    if !added && size >= MAX_OBSERVABLES {
-        Err(CaseStoreError::Full {
+    let first = try_add(exec, scope, params.clone()).await?;
+    let outcome = if first == AddOutcome::Lost {
+        try_add(exec, scope, params).await?
+    } else {
+        first
+    };
+    match outcome {
+        AddOutcome::Added => Ok(true),
+        AddOutcome::Same => Ok(false),
+        AddOutcome::Full => Err(CaseStoreError::Full {
             what: "observables",
             limit: MAX_OBSERVABLES,
-        })
-    } else {
-        Ok(added)
+        }),
+        AddOutcome::Lost => Err(CaseStoreError::Conflict),
     }
 }
 
@@ -736,4 +797,43 @@ pub async fn list_links(exec: Executor<'_, '_>, scope: &TenantScope, case_id: &s
         let next = alerts.last().filter(|_last| more).map(|last| last.alert_id.clone());
         Ok(LinkList { alerts, next })
     }
+}
+
+
+/// Files one row of `SEEN_IN_SQL` under its observable: at most `SEEN_IN_LIMIT` ids, then the list is marked truncated.
+pub fn record_seen(items: &mut [SeenObservable], row: &Row) -> Result<(), CaseStoreError> {
+    let other = cell(row, SEEN_OTHER_COLUMN)?;
+    let ordinal = count(row, SEEN_ORDINAL_COLUMN)?;
+    let target = ordinal.checked_sub(1).and_then(|position| items.get_mut(position));
+    if let Some(item) = target.filter(|_found| !other.is_empty()) {
+        if item.seen_in.len() < SEEN_IN_LIMIT {
+            item.seen_in.push(other.to_owned());
+        } else {
+            item.seen_in_truncated = true;
+        }
+    }
+    Ok(())
+}
+
+
+/// The observables of the case in stored order, each with the other cases of the same tenant holding the same kind and value: two statements, never one per observable.
+pub async fn list_observables(exec: Executor<'_, '_>, scope: &TenantScope, case_id: &str) -> Result<Vec<SeenObservable>, CaseStoreError> {
+    check_text("id", case_id, MAX_ID_CHARS)?;
+    let rows = exec(scope.clone(), OBSERVABLES_SQL, vec![case_id.to_owned()]).await?;
+    let first = rows.first().ok_or(CaseStoreError::NotFound)?;
+    let stored: Vec<Observable> = serde_json::from_str(cell(first, OBSERVABLES_TEXT_COLUMN)?).map_err(CaseStoreError::BadDocument)?;
+    let mut items: Vec<SeenObservable> = stored
+        .into_iter()
+        .map(|observable| SeenObservable {
+            observable,
+            seen_in: Vec::new(),
+            seen_in_truncated: false,
+        })
+        .collect();
+    if !items.is_empty() {
+        let params = vec![case_id.to_owned(), (SEEN_IN_LIMIT + 1).to_string()];
+        let seen = exec(scope.clone(), SEEN_IN_SQL, params).await?;
+        seen.iter().try_for_each(|row| record_seen(&mut items, row))?;
+    }
+    Ok(items)
 }
