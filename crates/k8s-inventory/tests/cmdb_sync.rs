@@ -356,6 +356,25 @@ async fn a_derived_id_owned_by_another_asset_is_refused_alone() -> TestResult {
 
 
 #[tokio::test]
+async fn a_conflict_another_source_caused_is_written_once_then_counted_duplicate() -> TestResult {
+    let db = Db::default();
+    let id = format!("cloud_id:k8s:prod-1:pod:{}", uid("p1"));
+    seed(&db, &id, ("cloud_id", &format!("k8s:prod-1:pod:{}", uid("p1"))));
+    lock(&db.tenants)
+        .entry("a".to_owned())
+        .or_default()
+        .attributes
+        .insert((id, "k8s.name".to_owned()), ("other-name".to_owned(), "cmdb-import".to_owned()));
+    let exec = executor(&db);
+    let first = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &Limits::default()).await?;
+    assert_eq!((first.conflicts, first.duplicate_conflicts, first.refused_conflicts), (1, 0, 0));
+    let second = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &Limits::default()).await?;
+    assert_eq!((second.conflicts, second.duplicate_conflicts, second.refused_conflicts), (0, 1, 0));
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn a_version_conflict_is_retried_then_reported_after_the_cap() -> TestResult {
     let db = Db::default();
     lock(&db.forced).extend([Forced::Stale, Forced::UniqueViolation]);
