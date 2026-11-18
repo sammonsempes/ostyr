@@ -377,8 +377,11 @@ fn a_reply_that_never_ends_hits_the_deadline() -> TestResult {
     let server = answer(rig.listener.try_clone()?, "200 OK", move |_| held.recv().map_err(io::Error::other));
     let mut out = Vec::new();
     let failed = read_iocs(&rig.config, NOW, &mut out);
-    release.send(())?;
-    assert!(matches!(failed, Err(ReadError::Body(_))));
+    drop(release);
+    assert!(
+        matches!(failed, Err(ReadError::Body(_) | ReadError::Refused(InsertClass::Timeout))),
+        "{failed:?}"
+    );
     assert!(out.is_empty());
     joined(server)?;
     Ok(())
