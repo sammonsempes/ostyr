@@ -839,6 +839,19 @@ fn refused_with(opener: connector_manifest::types::OpenFn, prepare: fn(&Path) ->
 }
 
 
+fn adopted_as_private(prepare: fn(&Path) -> io::Result<()>) -> TestResult {
+    let parent = TempDir::new()?;
+    let other = parent.path().join("other");
+    fs::create_dir(&other)?;
+    prepare(&other)?;
+    let held = open_parent(parent.path())?;
+    let package = create_package_with(other_directory_opener, held, "package".to_owned(), "package")?;
+    drop(package);
+    assert_eq!(fs::metadata(&other)?.permissions().mode() & SPECIAL_AND_PERMISSION_MASK, PRIVATE_MODE);
+    Ok(())
+}
+
+
 fn add_file(path: &Path) -> io::Result<()> {
     fs::write(path.join("x"), "x")
 }
@@ -856,9 +869,8 @@ fn replace_with_file(path: &Path) -> io::Result<()> {
 
 
 #[test]
-fn a_handle_that_is_not_the_new_empty_private_directory_is_refused() -> TestResult {
+fn a_handle_that_is_not_the_new_empty_directory_is_refused() -> TestResult {
     refused_with(other_directory_opener, add_file)?;
-    refused_with(other_directory_opener, widen)?;
     refused_with(file_opener, replace_with_file)?;
     Ok(())
 }
@@ -895,10 +907,34 @@ const SETGID_PARENT_MODE: u32 = 0o2755;
 
 
 #[test]
-fn a_held_directory_with_a_special_bit_its_parent_lacks_is_refused() -> TestResult {
-    refused_with(other_directory_opener, set_setuid)?;
-    refused_with(other_directory_opener, set_sticky)?;
-    refused_with(other_directory_opener, set_setgid)?;
+fn a_held_directory_we_own_is_made_private_before_the_check() -> TestResult {
+    adopted_as_private(widen)?;
+    adopted_as_private(set_setuid)?;
+    adopted_as_private(set_sticky)?;
+    adopted_as_private(set_setgid)?;
+    Ok(())
+}
+
+
+fn path_opener(parent: BorrowedFd<'_>, name: &str, _flags: OFlags) -> Result<OwnedFd, Errno> {
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+}
+
+
+#[test]
+fn a_refusal_after_the_opener_removes_the_directory_just_made_and_a_rerun_succeeds() -> TestResult {
+    let parent = TempDir::new()?;
+    let held = open_parent(parent.path())?;
+    let result = create_package_with(path_opener, held, "package".to_owned(), "package");
+    assert!(matches!(result, Err(ConnectorError::Io { .. })));
+    assert_eq!(fs::read_dir(parent.path())?.count(), 0);
+    let rerun = create_package(open_parent(parent.path())?, "package".to_owned(), "package")?;
+    drop(rerun);
     Ok(())
 }
 

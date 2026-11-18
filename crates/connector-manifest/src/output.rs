@@ -11,11 +11,11 @@ use {
     crate::scan::{errno_error, open_at, raw_entries},
     crate::types::OpenFn,
     core_config::trusted_dir::open_trusted_dir,
-    rustix::fs::{fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
+    rustix::fs::{chmod, fchmod, fstat, mkdirat, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags},
     rustix::io::Errno,
     rustix::process::geteuid,
     std::fs::File,
-    std::os::fd::{AsFd, OwnedFd},
+    std::os::fd::{AsFd, AsRawFd, OwnedFd},
     std::path::PathBuf,
 };
 
@@ -137,6 +137,10 @@ pub const DIRECTORY_FLAGS: OFlags = OFlags::DIRECTORY.union(OFlags::NOFOLLOW).un
 
 
 #[cfg(target_os = "linux")]
+pub const PATH_FLAGS: OFlags = OFlags::PATH.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+
+
+#[cfg(target_os = "linux")]
 pub fn open_parent(path: &Path) -> Result<OwnedFd, ConnectorError> {
     Ok(open_trusted_dir(path, geteuid().as_raw())?)
 }
@@ -175,11 +179,20 @@ pub fn check_held_directory(parent: &OwnedFd, directory: &OwnedFd, label: &str) 
 }
 
 
-/// A directory that cannot be held is removed again; one that is not the directory just made is refused and its name left alone; the opener is injected.
+/// A directory made under a umask that strips the owner bits cannot be opened: it is made 0700 through an `O_PATH` handle and its `/proc/self/fd` link.
+#[cfg(target_os = "linux")]
+pub fn make_private(opener: OpenFn, parent: &OwnedFd, name: &str) -> Result<(), Errno> {
+    let mode = Mode::from_raw_mode(DIRECTORY_MODE | fstat(parent)?.st_mode & SETGID_BIT);
+    let handle = opener(parent.as_fd(), name, PATH_FLAGS)?;
+    chmod(format!("/proc/self/fd/{}", handle.as_raw_fd()).as_str(), mode)
+}
+
+
+/// The held directory is made 0700 whatever the umask, then checked; a refusal removes the entry only if it is the directory just made; the opener is injected.
 #[cfg(target_os = "linux")]
 pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label: &str) -> Result<Package, ConnectorError> {
     mkdirat(&parent, name.as_str(), Mode::from_raw_mode(DIRECTORY_MODE)).map_err(errno_error(label))?;
-    let held = opener(parent.as_fd(), name.as_str(), DIRECTORY_FLAGS);
+    let held = make_private(opener, &parent, name.as_str()).and_then(|()| opener(parent.as_fd(), name.as_str(), DIRECTORY_FLAGS));
     held.as_ref()
         .err()
         .map(|_| unlinkat(&parent, name.as_str(), AtFlags::REMOVEDIR))
@@ -187,7 +200,18 @@ pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label:
         .into_iter()
         .for_each(report_failure);
     let directory = held.map_err(errno_error(label))?;
-    check_held_directory(&parent, &directory, label)?;
+    let verdict = fstat(&parent)
+        .and_then(|stat| fchmod(&directory, Mode::from_raw_mode(DIRECTORY_MODE | stat.st_mode & SETGID_BIT)))
+        .map_err(errno_error(label))
+        .and_then(|()| check_held_directory(&parent, &directory, label));
+    verdict
+        .as_ref()
+        .err()
+        .map(|_| remove_directory_entry(&parent, &directory, name.as_str()))
+        .and_then(Result::err)
+        .into_iter()
+        .for_each(report_failure);
+    verdict?;
     Ok(Package {
         parent,
         directory,
@@ -197,12 +221,13 @@ pub fn create_package_with(opener: OpenFn, parent: OwnedFd, name: String, label:
 }
 
 
-/// Staged in the new directory under a name only this process creates (`O_EXCL`), then renamed within it; the writer is injected.
+/// Staged in the new directory under a name only this process creates (`O_EXCL`), made 0600 whatever the umask, then renamed within it; the writer is injected.
 #[cfg(target_os = "linux")]
 pub fn write_staged_with(writer: WriteFn, package: &Package, file_name: &str, text: &str) -> Result<(), ConnectorError> {
     let staged = format!("{file_name}{STAGED_SUFFIX}");
     let mut file =
         File::from(openat(&package.directory, staged.as_str(), CREATE_FLAGS, Mode::from_raw_mode(FILE_MODE)).map_err(errno_error(file_name))?);
+    fchmod(&file, Mode::from_raw_mode(FILE_MODE)).map_err(errno_error(file_name))?;
     writer(&mut file, text.as_bytes()).map_err(io_at(file_name))?;
     renameat(&package.directory, staged.as_str(), &package.directory, file_name).map_err(errno_error(file_name))
 }
