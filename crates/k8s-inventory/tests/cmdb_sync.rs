@@ -356,6 +356,62 @@ async fn a_derived_id_owned_by_another_asset_is_refused_alone() -> TestResult {
 
 
 #[tokio::test]
+async fn a_conflict_another_source_caused_is_written_once_then_counted_duplicate() -> TestResult {
+    let db = Db::default();
+    let id = format!("cloud_id:k8s:prod-1:pod:{}", uid("p1"));
+    seed(&db, &id, ("cloud_id", &format!("k8s:prod-1:pod:{}", uid("p1"))));
+    lock(&db.tenants)
+        .entry("a".to_owned())
+        .or_default()
+        .attributes
+        .insert((id, "k8s.name".to_owned()), ("other-name".to_owned(), "cmdb-import".to_owned()));
+    let exec = executor(&db);
+    let first = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &Limits::default()).await?;
+    assert_eq!((first.conflicts, first.duplicate_conflicts, first.refused_conflicts), (1, 0, 0));
+    let second = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &Limits::default()).await?;
+    assert_eq!((second.conflicts, second.duplicate_conflicts, second.refused_conflicts), (0, 1, 0));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn conflicts_refused_at_the_open_cap_are_counted_and_logged() -> TestResult {
+    LazyLock::force(&ANCHOR);
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let writer = buffer.clone();
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Capture(writer.clone()))
+            .finish(),
+    );
+    let db = Db::default();
+    let id = format!("cloud_id:k8s:prod-1:pod:{}", uid("p1"));
+    seed(&db, &id, ("cloud_id", &format!("k8s:prod-1:pod:{}", uid("p1"))));
+    ["k8s.name", "k8s.namespace"].iter().for_each(|attribute| {
+        lock(&db.tenants)
+            .entry("a".to_owned())
+            .or_default()
+            .attributes
+            .insert((id.clone(), (*attribute).to_owned()), ("other".to_owned(), "cmdb-import".to_owned()));
+    });
+    let limits = Limits {
+        max_open_conflicts: 1,
+        ..Limits::default()
+    };
+    let exec = executor(&db);
+    let first = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &limits).await?;
+    assert_eq!((first.conflicts, first.refused_conflicts, first.duplicate_conflicts), (1, 1, 0));
+    let second = sync(&exec, &settings("a", "prod-1"), &three()?, &TruthMap::new(), &limits).await?;
+    assert_eq!((second.conflicts, second.refused_conflicts, second.duplicate_conflicts), (0, 1, 1));
+    drop(guard);
+    let logged = String::from_utf8(lock(&buffer).clone())?;
+    assert!(logged.contains("1 conflicts refused at the open conflict cap"));
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn a_version_conflict_is_retried_then_reported_after_the_cap() -> TestResult {
     let db = Db::default();
     lock(&db.forced).extend([Forced::Stale, Forced::UniqueViolation]);
