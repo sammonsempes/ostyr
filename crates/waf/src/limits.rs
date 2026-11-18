@@ -167,3 +167,96 @@ pub const PEM_CERTIFICATE_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
 
 
 pub const PEM_CERTIFICATE_END: &str = "-----END CERTIFICATE-----";
+
+
+pub const MIN_DEADLINE_SECONDS: u64 = 1;
+
+
+pub const MAX_DEADLINE_SECONDS: u64 = 120;
+
+
+pub const DEFAULT_DEADLINE_SECONDS: u64 = 30;
+
+
+pub const DEFAULT_CADDY_PROGRAM: &str = "/usr/bin/caddy";
+
+
+pub const DEFAULT_ADMIN_SOCKET: &str = "/run/ostyr-waf/caddy-admin.sock";
+
+
+pub const ADMIN_LISTEN_PREFIX: &str = "unix/";
+
+
+pub const ROUTES_STATE_KEY: &str = "waf.config";
+
+
+pub const REFUSED_STATE_KEY: &str = "waf.refused";
+
+
+pub const MAX_REFUSED_LISTED: usize = 32;
+
+
+pub const FINAL_NAME: &str = "caddy.json";
+
+
+pub const STAGE_PREFIX: &str = ".apply-";
+
+
+pub const STAGE_SUFFIX: &str = ".json";
+
+
+pub const STAGE_MODE: u32 = 0o600;
+
+
+pub const VALIDATE_STEP: &str = "validate";
+
+
+pub const RELOAD_STEP: &str = "reload";
+
+
+pub const APPLY_SECTION: &str = "waf.caddy";
+
+
+pub const SETTINGS_LABEL: &str = "waf apply settings";
+
+
+pub const ID_PREFIX: &str = "ostyr-";
+
+
+pub const ID_HEX_CHARS: usize = 32;
+
+
+pub const STATUS_PREFIX_BYTES: usize = 12;
+
+
+pub const STATUS_DIGITS_START: usize = 9;
+
+
+pub const STATUS_OK: u16 = 200;
+
+
+pub const MIN_REMAINING_MILLISECONDS: u64 = 1;
+
+
+pub const EPOCH_STATE_KEY: &str = "waf.epoch";
+
+
+pub const DEADLINE_STATE_KEY: &str = "waf.deadline_seconds";
+
+
+pub const PROGRAM_STATE_KEY: &str = "waf.caddy_program";
+
+
+pub const LATE_PARAMETER: &str = "late";
+
+
+pub const RESULT_PARAMETER: &str = "result";
+
+
+pub const APPLIED_RESULT: &str = "applied";
+
+
+pub const START_DIFF: &str = "initial configuration";
+
+
+pub const UNTRUSTED_ADMIN: &str = "the admin socket directory must be absolute, owned by the running user or root, and closed to group and others";
