@@ -1,11 +1,13 @@
-//! Usage: cmdb_reconcile <module.yaml> <tenant> <source> <serial>. Runs `reconcile_stored` for one serial number against the PostgreSQL of `settings.pg_settings`.
+//! Usage: cmdb_reconcile <module.yaml> <tenant> <source> <serial>. Runs `reconcile_with_alerts` for one serial number against the PostgreSQL of `settings.pg_settings`.
 
 use alerts::backend::{lease, MAX_CONNECTIONS};
 use alerts::settings::open_pg_engine_from;
+use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
+use cmdb::alerting::reconcile_with_alerts;
 use cmdb::backend::ACTOR;
 use cmdb::model::{AssetKind, IdentityKey, Limits, Observation};
 use cmdb::pg::pg_executor;
-use cmdb::store::{reconcile_stored, MIGRATIONS, MIGRATION_NAMESPACE};
+use cmdb::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use core_config::load::load_module;
 use core_pg::migrate::migrate;
 use core_pg::scope::tenant_scope;
@@ -14,6 +16,7 @@ use std::io::{stderr, stdout, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 
@@ -36,6 +39,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let engine = Arc::new(opened);
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let held = lease(&engine, &permits).await?;
+    migrate(&held.client, ALERT_NAMESPACE, &ALERT_MIGRATIONS, held.deadline).await?;
     migrate(&held.client, MIGRATION_NAMESPACE, &MIGRATIONS, held.deadline).await?;
     let observation = Observation {
         source: source.clone(),
@@ -44,8 +48,11 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         attributes: Default::default(),
     };
     let executor = pg_executor(&held.client, held.deadline);
-    let stored = reconcile_stored(&executor, &tenant_scope(tenant)?, &observation, &Default::default(), &Limits::default()).await?;
-    writeln!(stdout(), "stored: created {:?}", stored.outcome.events)?;
+    let now_micros = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let scope = tenant_scope(tenant)?;
+    let (stored, counts) = reconcile_with_alerts(&executor, &scope, &observation, &Default::default(), &Limits::default(), now_micros).await?;
+    writeln!(stdout(), "stored: events {:?}", stored.outcome.events)?;
+    writeln!(stdout(), "alerts: {counts:?}")?;
     Ok(())
 }
 

@@ -70,7 +70,7 @@ pub fn check_reserved(observation: &Observation) -> Result<(), CmdbError> {
 }
 
 
-/// Refuses the source `cmdb`, attribute names starting `key:`, and a source, key value, derived asset id, attribute name or value over its cap or with a control character.
+/// Refuses the sources `cmdb` and `declared`, attribute names starting `key:`, and a source, key value, derived asset id, attribute name or value over its cap or with a control character.
 pub fn check_observation(observation: &Observation) -> Result<(), CmdbError> {
     check_reserved(observation)?;
     (observation.attributes.len() <= MAX_OBSERVATION_ATTRIBUTES)

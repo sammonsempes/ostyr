@@ -1,5 +1,6 @@
 //! CMDB asset model, declared business attributes, reconciliation, impact query, PostgreSQL store and read-only REST API (spec section 14).
 
+pub mod alerting;
 pub mod api;
 pub mod api_model;
 pub mod backend;
