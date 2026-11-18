@@ -1,6 +1,7 @@
 use crate::types::{SpoolLock, UpdateRunFn};
 use patch_inventory::model::Limits;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -35,6 +36,27 @@ pub const DEFAULT_MAX_SPOOL_BYTES: u64 = 67_108_864;
 
 
 pub const DEFAULT_MAX_LINES_PER_POLL: u64 = 10_000;
+
+
+pub const DEFAULT_OSQUERYI_PATH: &str = "/usr/bin/osqueryi";
+
+
+pub const DEFAULT_OSQUERY_DEADLINE_SECONDS: u64 = 60;
+
+
+pub const MAX_OSQUERY_DEADLINE_SECONDS: u64 = 600;
+
+
+pub const DEFAULT_PRLIMIT_PATH: &str = "/usr/bin/prlimit";
+
+
+pub const MIN_OSQUERY_MEMORY_BYTES: u64 = 67_108_864;
+
+
+pub const DEFAULT_OSQUERY_MEMORY_BYTES: u64 = 536_870_912;
+
+
+pub const MAX_OSQUERY_MEMORY_BYTES: u64 = 2_147_483_648;
 
 
 pub const DEFAULT_SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
@@ -165,6 +187,46 @@ impl Default for UpdateSettings {
 }
 
 
+/// The live-reloaded osquery settings: the absolute `osqueryi` and `prlimit` paths (judged again before every run), the deadline and the address-space limit of one query.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct OsquerySettings {
+    pub path: PathBuf,
+    pub prlimit_path: PathBuf,
+    pub deadline_seconds: u64,
+    pub max_memory_bytes: u64,
+}
+
+
+impl Default for OsquerySettings {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from(DEFAULT_OSQUERYI_PATH),
+            prlimit_path: PathBuf::from(DEFAULT_PRLIMIT_PATH),
+            deadline_seconds: DEFAULT_OSQUERY_DEADLINE_SECONDS,
+            max_memory_bytes: DEFAULT_OSQUERY_MEMORY_BYTES,
+        }
+    }
+}
+
+
+/// Where one query runs: `state_dir` holds the private logger directory, `trusted_uid` is the owner every checked path must have, `run` is injected.
+#[derive(Clone, Debug)]
+pub struct OsqueryEnv {
+    pub state_dir: PathBuf,
+    pub trusted_uid: u32,
+    pub run: UpdateRunFn,
+}
+
+
+/// The rows of one query, each a column to value map, and how many rows were refused alone for breaking a bound.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryRows {
+    pub rows: Vec<BTreeMap<String, String>>,
+    pub refused_rows: usize,
+}
+
+
 /// One command of the generalised bounded runner: `environment` of `None` inherits the agent's, `Some` clears it and sets exactly those variables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -265,6 +327,8 @@ pub struct LinuxFile {
     pub sensor: SensorSettings,
     #[serde(default)]
     pub updates: UpdateSettings,
+    #[serde(default)]
+    pub osquery: OsquerySettings,
     #[serde(default = "default_systemctl_path")]
     pub systemctl_path: PathBuf,
     #[serde(default)]

@@ -1,10 +1,12 @@
 use crate::error::CapabilityError;
 use crate::error::IsolationError;
 use crate::error::SensorError;
-use crate::model::{CommandSpec, Failure, Paths, SensorSettings, SourceSettings, UpdateSettings};
+use crate::model::{CommandSpec, Failure, LinuxFile, OsquerySettings, Paths, SensorSettings, SourceSettings, UpdateSettings};
 use arc_swap::ArcSwap;
+use core_config::reload::ReloadEngine;
 use parking_lot::Mutex;
 use patch_inventory::model::Inventory;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -54,6 +56,13 @@ pub type StatFn = fn(&Path) -> rustix::io::Result<rustix::fs::StatVfs>;
 pub type SharedUpdates = Arc<ArcSwap<UpdateSettings>>;
 
 
+pub type SharedOsquery = Arc<ArcSwap<OsquerySettings>>;
+
+
+/// A settings engine with the shared handles its subscriber keeps current.
+pub type SettingsEngine = (ReloadEngine<LinuxFile>, SharedSource, SharedSensor, SharedUpdates, SharedOsquery);
+
+
 pub type UpdateFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, SensorError>> + Send>>;
 
 
@@ -63,3 +72,7 @@ pub type UpdateRunFn = fn(CommandSpec, Duration) -> UpdateFuture;
 
 /// What an update run found: the inventory, or why it found nothing.
 pub type Collected = Result<Inventory, Failure>;
+
+
+/// Builds one osquery row from its raw JSON text, or refuses it; the counter lets a test see how many rows were built.
+pub type RowBuilderFn = fn(&str, &mut usize) -> Option<BTreeMap<String, String>>;
