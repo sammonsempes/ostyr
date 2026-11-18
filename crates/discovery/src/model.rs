@@ -310,13 +310,13 @@ pub const FLOOD_RULE_ID: &str = "discovery.unmanaged_device_flood";
 pub const AGENT_PACKAGE: &str = "ostyr-agent";
 
 
-/// What an alert run left out: known addresses, devices whose valid lease MAC keys a CMDB asset, and devices past `MAX_UNMANAGED_PER_RUN`.
+/// What an alert run left out: known addresses, devices whose valid lease MAC keys a CMDB asset, fresh devices cut past `MAX_UNMANAGED_PER_RUN`, and ids the lookup did not check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct Skipped {
     pub known: usize,
     pub managed: usize,
-    pub omitted: usize,
-    pub deferred: usize,
+    pub cut: usize,
+    pub unchecked: usize,
     pub lookup_failed: bool,
 }
 

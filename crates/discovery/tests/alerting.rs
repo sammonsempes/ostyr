@@ -14,7 +14,7 @@ use consts::{CLTT, MAC_A};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use discovery::alerting::raise_unmanaged_alerts;
-use discovery::alerting::{identity_of, micros_of, store_unmanaged_alerts, unmanaged_alert, unmanaged_alerts};
+use discovery::alerting::{flood_alert, identity_of, micros_of, store_unmanaged_alerts, unmanaged_alert, unmanaged_alerts};
 use discovery::candidates::known_devices;
 use discovery::cursor::{read_cursor, write_cursor, MIGRATIONS, MIGRATION_NAMESPACE, READ_SQL as CURSOR_READ_SQL, WRITE_SQL as CURSOR_WRITE_SQL};
 use discovery::lookup::{next_chunk_of, ALERTED_SQL};
@@ -389,14 +389,24 @@ fn the_run_is_capped_by_first_seen_and_a_flood_alert_names_the_rest() -> TestRes
         .collect::<Result<Vec<_>, _>>()?;
     let (alerts, skipped) = run_alerts(&scope, &found, &hints(TENANT, vec![])?);
     assert_eq!(alerts.len(), MAX_UNMANAGED_PER_RUN + 1);
-    assert_eq!(skipped.omitted, OMITTED);
+    assert_eq!(skipped.cut, OMITTED);
     let flood = alerts.last().ok_or("no flood")?;
     assert_eq!(flood.rule_id, FLOOD_RULE_ID);
-    assert!(flood.summary.text.contains(&format!("\"omitted\":{OMITTED}")));
+    assert!(flood.summary.text.contains(&format!("\"cut\":{OMITTED}")));
     let last_kept = alerts.get(MAX_UNMANAGED_PER_RUN - 1).ok_or("no last")?;
     assert_eq!(last_kept.event_ids, ["ip:10.0.0.100"]);
     let (again, _skipped) = run_alerts(&scope, &found, &hints(TENANT, vec![])?);
     assert_eq!(flood.id, again.last().ok_or("no flood")?.id);
+    Ok(())
+}
+
+
+#[test]
+fn the_flood_title_and_summary_keep_cut_and_unchecked_apart() -> TestResult {
+    let scope = tenant_scope(TENANT)?;
+    let flood = flood_alert(&scope, CUT_COUNT, UNCHECKED_COUNT, FLOOD_MICROS);
+    assert!(flood.rule_title.ends_with("7 cut, 9 not checked"));
+    assert!(flood.summary.text.contains("\"cut\":7") && flood.summary.text.contains("\"unchecked\":9"));
     Ok(())
 }
 
@@ -524,6 +534,15 @@ const OVER_ONE: usize = LOOKUP_CHUNK + MAX_UNMANAGED_PER_RUN;
 const RUN_BOUND: usize = 2 + TWO_CHUNKS / MAX_UNMANAGED_PER_RUN;
 
 
+const CUT_COUNT: usize = 7;
+
+
+const UNCHECKED_COUNT: usize = 9;
+
+
+const FLOOD_MICROS: u64 = 1_700_000_000_000_000;
+
+
 const ELEVEN_CHUNKS: usize = LOOKUP_CHUNK * MAX_LOOKUP_CHUNKS + MAX_UNMANAGED_PER_RUN;
 
 
@@ -596,10 +615,10 @@ async fn old_alerted_spoofed_addresses_do_not_hide_a_newer_real_device() -> Test
     let held = hints(TENANT, vec![])?;
     let mut found = spoofed(MAX_UNMANAGED_PER_RUN, OLD_MS)?;
     let first = raise(&store, &found, &held).await?;
-    assert_eq!((first.1.inserted, first.0.omitted), (MAX_UNMANAGED_PER_RUN, 0));
+    assert_eq!((first.1.inserted, first.0.cut), (MAX_UNMANAGED_PER_RUN, 0));
     found.push(candidate("192.168.9.9", NEW_MS)?);
     let second = raise(&store, &found, &held).await?;
-    assert_eq!((second.1.inserted, second.0.omitted), (1, 0));
+    assert_eq!((second.1.inserted, second.0.cut), (1, 0));
     assert!(has_row(&store, "192.168.9.9")?);
     let third = raise(&store, &found, &held).await?;
     assert_eq!(third.1.inserted, 0);
@@ -619,7 +638,7 @@ async fn a_set_larger_than_one_lookup_is_alerted_within_the_stated_runs() -> Tes
     assert_eq!(inserted, TWO_CHUNKS + 1);
     assert_eq!(row_count(&store)?, TWO_CHUNKS + 1);
     let last = raise(&store, &found, &held).await?;
-    assert_eq!((last.1.inserted, last.0.omitted), (0, 0));
+    assert_eq!((last.1.inserted, last.0.cut), (0, 0));
     Ok(())
 }
 
@@ -631,7 +650,7 @@ async fn a_real_device_past_a_chunk_of_old_alerted_addresses_is_alerted_in_the_s
     let found = spoofed(OVER_ONE, OLD_MS)?;
     pre_alert(&store, found.get(..LOOKUP_CHUNK).ok_or("short")?)?;
     let run = raise(&store, &found, &held).await?;
-    assert_eq!((run.1.inserted, run.0.omitted), (MAX_UNMANAGED_PER_RUN, 0));
+    assert_eq!((run.1.inserted, run.0.cut), (MAX_UNMANAGED_PER_RUN, 0));
     assert!(has_row(&store, &address_of(OVER_ONE - 1))?);
     assert_eq!(cursor_of(&store)?, Some("0".to_owned()));
     Ok(())
@@ -665,10 +684,7 @@ async fn a_lookup_covers_at_most_the_chunk_cap_per_run_then_the_cursor_moves_on(
     pre_alert(&store, found.get(..LOOKUP_CHUNK * MAX_LOOKUP_CHUNKS).ok_or("short")?)?;
     let (outcome, text) = warnings_of(raise(&store, &found, &held)).await?;
     let first = outcome?;
-    assert_eq!(
-        (first.1.inserted, first.0.deferred, first.0.omitted),
-        (1, MAX_UNMANAGED_PER_RUN, MAX_UNMANAGED_PER_RUN)
-    );
+    assert_eq!((first.1.inserted, first.0.unchecked, first.0.cut), (0, MAX_UNMANAGED_PER_RUN, 0));
     assert_eq!(text.matches("lookup cap reached").count(), 1);
     assert_eq!(cursor_of(&store)?, Some(MAX_LOOKUP_CHUNKS.to_string()));
     let second = raise(&store, &found, &held).await?;
@@ -703,7 +719,7 @@ async fn a_failed_lookup_alerts_nothing_and_keeps_the_cursor() -> TestResult {
     let found = spoofed(MAX_UNMANAGED_PER_RUN + 1, OLD_MS)?;
     let (run, text) = warnings_of(raise(&store, &found, &held)).await?;
     let (skipped, stored) = run?;
-    assert_eq!((stored, skipped.omitted), (Stored::default(), 0));
+    assert_eq!((stored, skipped.cut), (Stored::default(), 0));
     assert!(skipped.lookup_failed);
     assert_eq!(text.matches("lookup failed").count(), 1);
     assert_eq!((row_count(&store)?, cursor_of(&store)?), (0, None));
