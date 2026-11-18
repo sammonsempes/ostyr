@@ -1,7 +1,6 @@
 #![cfg(unix)]
 
 use rustix::fs::{mknodat, FileType, Mode, CWD};
-use rustix::io::Errno;
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -11,7 +10,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use waf::cli::render_to;
 use waf::error::WafError;
-use waf::tls::{check_ca_root, read_failure, NOT_REGULAR_FILE};
+use waf::tls::check_ca_root;
 
 
 const FIFO_MODE: u32 = 0o600;
@@ -84,7 +83,7 @@ fn child_renders_the_routes_file() -> Result<(), Box<dyn Error>> {
         let out_dir = Path::new(&routes).parent().ok_or("no output directory")?;
         let mut input = fs::File::open(&routes)?;
         let result = render_to(&mut input, &mut Vec::new(), &mut Vec::new(), out_dir);
-        assert!(matches!(result, Err(WafError::BadTls(reason)) if reason == NOT_REGULAR_FILE));
+        assert!(matches!(result, Err(WafError::CaRoot(_))));
     }
     Ok(())
 }
@@ -94,7 +93,7 @@ fn child_renders_the_routes_file() -> Result<(), Box<dyn Error>> {
 fn a_device_is_refused_without_being_opened() -> Result<(), Box<dyn Error>> {
     DEVICES.iter().try_for_each(|device| -> Result<(), Box<dyn Error>> {
         let result = check_ca_root(device);
-        assert!(matches!(result, Err(WafError::BadTls(reason)) if reason == NOT_REGULAR_FILE));
+        assert!(matches!(result, Err(WafError::CaRoot(_))));
         Ok(())
     })
 }
@@ -106,13 +105,6 @@ fn a_fifo_is_refused_in_process() -> Result<(), Box<dyn Error>> {
     let fifo = dir.path().join("root.pem");
     mknodat(CWD, &fifo, FileType::Fifo, Mode::from_raw_mode(FIFO_MODE), 0)?;
     let result = check_ca_root(&fifo.to_string_lossy());
-    assert!(matches!(result, Err(WafError::BadTls(reason)) if reason == NOT_REGULAR_FILE));
-    Ok(())
-}
-
-
-#[test]
-fn a_failed_system_call_names_the_ca_root_file() -> Result<(), Box<dyn Error>> {
-    assert!(matches!(read_failure(Errno::IO), WafError::CaRoot(_)));
+    assert!(matches!(result, Err(WafError::CaRoot(_))));
     Ok(())
 }

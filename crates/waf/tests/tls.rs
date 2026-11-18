@@ -11,7 +11,7 @@ use waf::order::TOO_MANY_BYTES;
 use waf::render::{render_text, render_text_capped};
 use waf::tls::{
     check_ca_root, check_directory, check_email, check_hsts, check_pem, check_tls, encode_certificate, ACME_FIELDS_MISSING, BAD_CA_ROOT_PATH,
-    BAD_DIRECTORY, BAD_EMAIL, BAD_HSTS, INTERNAL_FIELDS, NOT_ONLY_CERTIFICATES, NOT_REGULAR_FILE, NOT_X509, NO_CERTIFICATE,
+    BAD_DIRECTORY, BAD_EMAIL, BAD_HSTS, INTERNAL_FIELDS, NOT_ONLY_CERTIFICATES, NOT_X509, NO_CERTIFICATE,
 };
 
 
@@ -198,7 +198,7 @@ fn no_accepted_route_gives_no_policy() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn the_acme_issuer_carries_the_directory_email_and_root_file_name() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
     let path = dir.path().join("root.pem");
     fs::copy(CA_PEM, &path)?;
     let text = json!({
@@ -374,7 +374,7 @@ fn only_certificates_are_kept_and_any_other_section_refuses_the_file() -> Result
 
 #[test]
 fn the_kept_bytes_are_the_certificates_alone() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
     let canonical = fs::read_to_string(CA_PEM)?;
     let noisy = dir.path().join("noisy.pem");
     fs::write(&noisy, format!("db_password=hunter2\n{canonical}ignored\n"))?;
@@ -395,14 +395,14 @@ fn the_kept_bytes_are_the_certificates_alone() -> Result<(), Box<dyn Error>> {
         Some(NOT_ONLY_CERTIFICATES)
     );
     let directory = check_ca_root(&dir.path().to_string_lossy());
-    assert_eq!(directory.err().and_then(refused_reason), Some(NOT_REGULAR_FILE));
+    assert!(matches!(directory, Err(WafError::CaRoot(_))));
     Ok(())
 }
 
 
 #[test]
 fn the_ca_root_file_is_read_once_and_checked() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
     let good = dir.path().join("good.pem");
     fs::copy(CA_PEM, &good)?;
     let good_text = good.to_string_lossy().to_string();
@@ -427,11 +427,11 @@ fn the_ca_root_file_is_read_once_and_checked() -> Result<(), Box<dyn Error>> {
     assert_eq!(reasons, [Some(NO_CERTIFICATE), Some(NO_CERTIFICATE)]);
     assert!(matches!(
         check_ca_root(&binary.to_string_lossy()),
-        Err(WafError::Config(ConfigError::Io { .. }))
+        Err(WafError::CaRoot(ConfigError::Io { .. }))
     ));
     assert!(matches!(
         check_ca_root(&big.to_string_lossy()),
-        Err(WafError::Config(ConfigError::TooLarge { .. }))
+        Err(WafError::CaRoot(ConfigError::TooLarge { .. }))
     ));
     let missing = dir.path().join("missing.pem");
     assert!(matches!(check_ca_root(&missing.to_string_lossy()), Err(WafError::CaRoot(_))));
@@ -561,7 +561,7 @@ fn a_key_relabelled_as_a_certificate_is_refused() -> Result<(), Box<dyn Error>> 
     assert_eq!(check_pem(&encode_certificate(&der)), Ok(canonical.clone()));
     assert_eq!(check_pem(&encode_certificate(&[der.clone(), key_der].concat())), Err(NOT_X509));
     assert_eq!(check_pem(&encode_certificate(&[der, vec![0]].concat())), Err(NOT_X509));
-    let dir = tempfile::tempdir()?;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR"))?;
     let file = dir.path().join("key.pem");
     fs::write(&file, relabelled)?;
     assert_eq!(check_ca_root(&file.to_string_lossy()).err().and_then(refused_reason), Some(NOT_X509));

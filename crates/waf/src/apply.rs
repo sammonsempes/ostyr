@@ -6,15 +6,17 @@ use crate::error::{DeliverError, OpenError, WafError};
 use crate::limits::{
     ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS, ID_PREFIX,
     LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_FILE_BYTES, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROC_FD_DIRECTORY,
-    PROGRAM_STATE_KEY, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX, STAGE_SUFFIX,
-    START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE, VALIDATE_STEP,
+    PROGRAM_STATE_KEY, REFUSED_RESULT, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX,
+    STAGE_SUFFIX, START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE,
+    VALIDATE_STEP,
 };
-use crate::model::{Applied, ApplySettings, CommandStatus, Delivery};
-use crate::render::render_reader;
+use crate::model::{Applied, ApplySettings, CommandStatus, Delivery, Rendered};
+use crate::render::render_text;
 use crate::types::RunnerFn;
+use core_audit::error::AuditError;
 use core_audit::model::Outcome;
 use core_config::error::ConfigError;
-use core_config::parse::{open_regular, parse_document, read_text_capped};
+use core_config::parse::{parse_document, read_text_capped};
 use core_config::reload::{current_config, open_engine, reload_entry, ReloadContext, ReloadEngine, Subscriber};
 use core_config::trusted_dir::open_trusted_dir;
 use core_config::types::{ConfigState, SharedAuditFn};
@@ -33,12 +35,18 @@ use std::time::Duration;
 use tracing::{error, warn};
 
 
-/// A settings problem; the text names the field, never its value.
-pub fn refuse_setting(reason: String) -> ConfigError {
+/// A problem with a watched file; the text names the field, never its value.
+pub fn refuse_file(file: &str, reason: String) -> ConfigError {
     ConfigError::WatchedFile {
-        file: SETTINGS_LABEL.to_owned(),
+        file: file.to_owned(),
         reason,
     }
+}
+
+
+/// A settings problem; the text names the field, never its value.
+pub fn refuse_setting(reason: String) -> ConfigError {
+    refuse_file(SETTINGS_LABEL, reason)
 }
 
 
@@ -73,8 +81,8 @@ pub fn check_settings(settings: ApplySettings) -> Result<ApplySettings, ConfigEr
 
 
 /// A failed system call as a settings refusal naming the setting and the error kind text.
-pub fn errno_refusal(refusal: &str) -> impl Fn(Errno) -> ConfigError + '_ {
-    move |errno| refuse_setting(format!("{refusal}: {}", io::Error::from(errno)))
+pub fn errno_refusal<'a>(file: &'a str, refusal: &'a str) -> impl Fn(Errno) -> ConfigError + 'a {
+    move |errno| refuse_file(file, format!("{refusal}: {}", io::Error::from(errno)))
 }
 
 
@@ -85,37 +93,50 @@ pub fn file_trusted(mode: RawMode, owner: u32, process_user: u32) -> bool {
 
 
 /// Opens `name` below the judged directory as an `O_PATH` anchor (no symlink followed, no driver run) and judges that handle.
-pub fn judge_file(directory: &OwnedFd, name: &str, refusal: &str) -> Result<OwnedFd, ConfigError> {
+pub fn judge_file(directory: &OwnedFd, name: &str, file: &str, refusal: &str) -> Result<OwnedFd, ConfigError> {
     let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let anchor = openat(directory, name, flags, Mode::empty()).map_err(errno_refusal(refusal))?;
-    let stat = fstat(&anchor).map_err(errno_refusal(refusal))?;
+    let anchor = openat(directory, name, flags, Mode::empty()).map_err(errno_refusal(file, refusal))?;
+    let stat = fstat(&anchor).map_err(errno_refusal(file, refusal))?;
     file_trusted(stat.st_mode, stat.st_uid, geteuid().as_raw())
         .then_some(anchor)
-        .ok_or_else(|| refuse_setting(refusal.to_owned()))
+        .ok_or_else(|| refuse_file(file, refusal.to_owned()))
 }
 
 
 /// The judged anchor reopened for reading through `/proc/self/fd`, so the bytes read are those of the inode that was judged.
-pub fn reopen_judged(anchor: &OwnedFd) -> Result<File, ConfigError> {
+pub fn reopen_judged(anchor: &OwnedFd, file: &str, refusal: &str) -> Result<File, ConfigError> {
     let path = format!("{PROC_FD_DIRECTORY}{}", anchor.as_raw_fd());
     let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
     openat(CWD, path.as_str(), flags, Mode::empty())
         .map(File::from)
-        .map_err(errno_refusal(UNTRUSTED_SETTINGS_FILE))
+        .map_err(errno_refusal(file, refusal))
 }
 
 
-/// The settings file read through its judged directory: parent walked from `/`, file anchored without following a symlink, owner and mode judged, bytes of that inode parsed.
-pub fn load_trusted_settings_file(path: &Path) -> Result<ApplySettings, ConfigError> {
+/// The file's text read through its judged directory: parent walked from `/`, file anchored without following a symlink, owner and mode judged, bytes of that inode read.
+pub fn read_trusted_text(path: &Path, file: &str, directory_refusal: &str, file_refusal: &str, max_bytes: u64) -> Result<String, ConfigError> {
     let (parent, name) = path
         .parent()
         .zip(path.file_name().and_then(|name| name.to_str()))
-        .ok_or_else(|| refuse_setting(UNTRUSTED_SETTINGS.to_owned()))?;
-    let directory = open_trusted_dir(parent, geteuid().as_raw()).map_err(|failure| refuse_setting(format!("{UNTRUSTED_SETTINGS}: {failure}")))?;
-    let anchor = judge_file(&directory, name, UNTRUSTED_SETTINGS_FILE)?;
+        .ok_or_else(|| refuse_file(file, directory_refusal.to_owned()))?;
+    let directory = open_trusted_dir(parent, geteuid().as_raw()).map_err(|failure| refuse_file(file, format!("{directory_refusal}: {failure}")))?;
+    let anchor = judge_file(&directory, name, file, file_refusal)?;
     let label = path.display().to_string();
-    let text = read_text_capped(&mut reopen_judged(&anchor)?, &label, MAX_FILE_BYTES)?;
-    check_settings(parse_document::<ApplySettings>(&text, &label)?)
+    read_text_capped(&mut reopen_judged(&anchor, file, file_refusal)?, &label, max_bytes)
+}
+
+
+/// The settings file read through its judged directory and parsed from those bytes.
+pub fn load_trusted_settings_file(path: &Path) -> Result<ApplySettings, ConfigError> {
+    let text = read_trusted_text(path, SETTINGS_LABEL, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE, MAX_FILE_BYTES)?;
+    check_settings(parse_document::<ApplySettings>(&text, &path.display().to_string())?)
+}
+
+
+/// The routes file read through its judged directory, then rendered from those bytes.
+pub fn load_trusted_routes(path: &Path) -> Result<Rendered, ConfigError> {
+    let text = read_trusted_text(path, FILE_LABEL, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, MAX_FILE_BYTES)?;
+    render_text(&text).map_err(config_error)
 }
 
 
@@ -127,7 +148,7 @@ pub fn judge_program(program: &str) -> Result<(), ConfigError> {
         .zip(path.file_name().and_then(|name| name.to_str()))
         .ok_or_else(|| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
     let directory = open_ca_directory(parent).map_err(|_| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
-    judge_file(&directory, name, UNTRUSTED_PROGRAM).map(drop)
+    judge_file(&directory, name, SETTINGS_LABEL, UNTRUSTED_PROGRAM).map(drop)
 }
 
 
@@ -142,7 +163,7 @@ pub fn load_trusted_settings(path: &Path) -> Result<ApplySettings, ConfigError> 
 /// A render error as a reload refusal: a parse error keeps its position, anything else its fixed text.
 pub fn config_error(failure: WafError) -> ConfigError {
     match failure {
-        WafError::Config(inner) => inner,
+        WafError::Config(inner) | WafError::CaRoot(inner) => inner,
         other => ConfigError::WatchedFile {
             file: FILE_LABEL.to_owned(),
             reason: other.to_string(),
@@ -189,8 +210,7 @@ pub fn render_applied(settings: &ApplySettings, epoch: u64) -> Result<Applied, C
 
 /// `render_applied` that refuses a configuration whose JSON exceeds `max_json_bytes`.
 pub fn render_applied_capped(settings: &ApplySettings, epoch: u64, max_json_bytes: usize) -> Result<Applied, ConfigError> {
-    let mut file = open_regular(Path::new(&settings.routes_file), FILE_LABEL)?;
-    let mut rendered = render_reader(&mut file).map_err(config_error)?;
+    let mut rendered = load_trusted_routes(Path::new(&settings.routes_file))?;
     let root_path = rendered
         .ca_root
         .as_ref()
@@ -406,6 +426,55 @@ pub fn late_audit(audit: Box<SharedAuditFn>, late: Arc<AtomicBool>, epoch: Arc<A
 }
 
 
+/// The shared audit sink as a boxed function of its own.
+pub fn shared_sink(sink: &Arc<SharedAuditFn>) -> Box<SharedAuditFn> {
+    let shared = Arc::clone(sink);
+    Box::new(move |entry| shared(entry))
+}
+
+
+/// A refusal at start as one `denied` entry with the text a reload refusal uses; an audit failure is logged and the refusal is returned.
+pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failure: ConfigError) -> ConfigError {
+    let reason = failure.to_string();
+    error!(%reason, "start refused");
+    let entry = reload_entry(
+        context,
+        Outcome::Denied,
+        [(RESULT_PARAMETER, REFUSED_RESULT.to_owned()), ("reason", reason)],
+    );
+    if let Err(audit_error) = audit(entry) {
+        error!(%audit_error, "cannot audit the refused start");
+    }
+    failure
+}
+
+
+/// The refusal a start would meet, found without an audit sink.
+pub fn start_refusal(settings_file: &Path) -> Option<ConfigError> {
+    load_trusted_settings(settings_file).and_then(|running| render_applied(&running, 0)).err()
+}
+
+
+/// `open_apply` behind a sink that may have failed to open: then nothing can be audited, and the error names the sink and any refusal.
+pub fn open_apply_audited(
+    settings_file: &Path,
+    runner: RunnerFn,
+    sink: Result<Box<SharedAuditFn>, AuditError>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<Applied>, OpenError> {
+    match sink {
+        Ok(audit) => open_apply(settings_file, runner, audit, context),
+        Err(sink_failure) => Err(match start_refusal(settings_file) {
+            Some(refusal) => OpenError::NoSinkAndRefused {
+                sink: Box::new(sink_failure),
+                refusal: Box::new(refusal),
+            },
+            None => OpenError::NoSink(sink_failure),
+        }),
+    }
+}
+
+
 /// Loads the settings and the first configuration, delivers it (any refusal fails the start) and audits it as applied; later reloads do the same.
 pub fn open_apply(
     settings_file: &Path,
@@ -413,7 +482,9 @@ pub fn open_apply(
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
-    let running = load_trusted_settings(settings_file)?;
+    let sink: Arc<SharedAuditFn> = Arc::from(audit);
+    let refused = |failure| audit_start_refusal(&context, sink.as_ref(), failure);
+    let running = load_trusted_settings(settings_file).map_err(refused)?;
     let epoch = Arc::new(AtomicU64::new(0));
     let late = Arc::new(AtomicBool::new(false));
     let loader_epoch = Arc::clone(&epoch);
@@ -422,9 +493,10 @@ pub fn open_apply(
         Box::new(move || load_applied(&running, &loader_file, &loader_epoch)),
         applied_state,
         vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch))],
-        late_audit(audit, Arc::clone(&late), epoch),
-        context,
-    )?;
+        late_audit(shared_sink(&sink), Arc::clone(&late), epoch),
+        context.clone(),
+    )
+    .map_err(refused)?;
     let delivery = deliver(&current_config(&engine), runner)?;
     late.store(delivery == Delivery::Late, Ordering::SeqCst);
     let entry = reload_entry(

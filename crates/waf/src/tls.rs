@@ -1,20 +1,26 @@
+#[cfg(unix)]
+use crate::apply::read_trusted_text;
 use crate::error::WafError;
 use crate::limits::{
     CA_ROOT_LABEL, CA_ROOT_PREFIX, CA_ROOT_SUFFIX, DEFAULT_HSTS_SECONDS, HTTPS_PREFIX, MAX_CA_ROOT_BYTES, MAX_DIRECTORY_BYTES, MAX_EMAIL_BYTES,
     MAX_HSTS_SECONDS, MAX_LOCAL_BYTES, MAX_PORT_DIGITS, PEM_BEGIN, PEM_CERTIFICATE_BEGIN, PEM_CERTIFICATE_END, PEM_DASHES, PEM_LINE_CHARS,
 };
+#[cfg(unix)]
+use crate::limits::{UNTRUSTED_CA_ROOT_DIR, UNTRUSTED_CA_ROOT_FILE};
 use crate::model::{CaRoot, Issuer, RawIssuer, RawTls, Tls};
 use crate::validate::{check_host, check_raw_path};
+#[cfg(not(unix))]
+use core_config::error::ConfigError;
+#[cfg(not(unix))]
 use core_config::parse::read_text_capped;
 use data_encoding::{BASE64, HEXLOWER};
-#[cfg(target_os = "linux")]
-use rustix::fd::AsRawFd;
-#[cfg(target_os = "linux")]
-use rustix::fs::{fstat, open, FileType, Mode, OFlags};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
+#[cfg(not(unix))]
 use std::fs::File;
+#[cfg(unix)]
+use std::path::Path;
 use x509_parser::parse_x509_certificate;
 
 
@@ -37,9 +43,6 @@ pub const NO_CERTIFICATE: &str = "ca_root_file holds no certificate";
 
 
 pub const NOT_ONLY_CERTIFICATES: &str = "ca_root_file holds a section that is not a certificate";
-
-
-pub const NOT_REGULAR_FILE: &str = "ca_root_file is not a regular file";
 
 
 pub const NOT_X509: &str = "ca_root_file holds a certificate section that is not an X.509 certificate";
@@ -145,45 +148,38 @@ pub fn check_pem(text: &str) -> Result<String, &'static str> {
 }
 
 
-/// A failed system call as the error that names the CA root file.
-#[cfg(target_os = "linux")]
-pub fn read_failure(errno: rustix::io::Errno) -> WafError {
-    WafError::CaRoot(errno.into())
+/// The CA root text read through its judged directory (owner, mode, no symlink), capped at `MAX_CA_ROOT_BYTES`.
+#[cfg(unix)]
+pub fn read_root_text(path: &str) -> Result<String, WafError> {
+    read_trusted_text(
+        Path::new(path),
+        CA_ROOT_LABEL,
+        UNTRUSTED_CA_ROOT_DIR,
+        UNTRUSTED_CA_ROOT_FILE,
+        MAX_CA_ROOT_BYTES,
+    )
+    .map_err(WafError::CaRoot)
 }
 
 
-/// Opens by `O_PATH`, which has no side effect even on a device, judges that handle, and only a regular file is reopened without blocking.
-#[cfg(target_os = "linux")]
-pub fn open_regular(path: &str) -> Result<File, WafError> {
-    let anchor = open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty()).map_err(read_failure)?;
-    let stat = fstat(&anchor).map_err(read_failure)?;
-    if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile {
-        let proc_path = format!("/proc/self/fd/{}", anchor.as_raw_fd());
-        let descriptor = open(proc_path.as_str(), OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty()).map_err(read_failure)?;
-        Ok(File::from(descriptor))
-    } else {
-        Err(WafError::BadTls(NOT_REGULAR_FILE))
-    }
-}
-
-
-/// Opens the file and keeps it only if it is a regular file.
-#[cfg(not(target_os = "linux"))]
-pub fn open_regular(path: &str) -> Result<File, WafError> {
-    let file = File::open(path).map_err(WafError::CaRoot)?;
-    if file.metadata().map_err(WafError::CaRoot)?.is_file() {
-        Ok(file)
-    } else {
-        Err(WafError::BadTls(NOT_REGULAR_FILE))
-    }
+/// The CA root text of a regular file, capped at `MAX_CA_ROOT_BYTES`.
+#[cfg(not(unix))]
+pub fn read_root_text(path: &str) -> Result<String, WafError> {
+    let io_failure = |source| {
+        WafError::CaRoot(ConfigError::Io {
+            file: CA_ROOT_LABEL.to_owned(),
+            source,
+        })
+    };
+    let mut file = File::open(path).map_err(io_failure)?;
+    read_text_capped(&mut file, CA_ROOT_LABEL, MAX_CA_ROOT_BYTES).map_err(WafError::CaRoot)
 }
 
 
 /// Opens the file once and keeps the bytes of that one read: only its certificates, re-encoded, are kept and named by their SHA-256.
 pub fn check_ca_root(path: &str) -> Result<CaRoot, WafError> {
     let checked = check_raw_path(path).map_err(|_| WafError::BadTls(BAD_CA_ROOT_PATH))?;
-    let mut file = open_regular(checked)?;
-    let text = read_text_capped(&mut file, CA_ROOT_LABEL, MAX_CA_ROOT_BYTES)?;
+    let text = read_root_text(checked)?;
     let pem = check_pem(&text).map_err(WafError::BadTls)?;
     let name = format!("{CA_ROOT_PREFIX}{}{CA_ROOT_SUFFIX}", HEXLOWER.encode(&Sha256::digest(pem.as_bytes())));
     Ok(CaRoot { name, pem })

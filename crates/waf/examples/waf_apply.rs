@@ -1,7 +1,8 @@
 #[cfg(unix)]
 mod unix {
     use core_audit::log::{append, open_file_log};
-    use core_config::reload::ReloadContext;
+    use core_config::reload::{current_config, ReloadContext};
+    use core_config::types::SharedAuditFn;
     use core_config::watch::watch_files;
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     use signal_hook::iterator::Signals;
@@ -11,7 +12,7 @@ mod unix {
     use std::sync::Arc;
     use std::time::Duration;
     use tracing::{info, Level};
-    use waf::apply::{load_trusted_settings, open_apply};
+    use waf::apply::open_apply_audited;
     use waf::runner::run_with_deadline;
 
 
@@ -30,22 +31,23 @@ mod unix {
         let mut arguments = std::env::args().skip(1);
         let settings_file = arguments.next().ok_or(USAGE)?;
         let audit_file = arguments.next().ok_or(USAGE)?;
-        let settings = load_trusted_settings(Path::new(&settings_file))?;
-        let watched = [PathBuf::from(&settings.routes_file), PathBuf::from(&settings_file)];
-        let log = Arc::new(open_file_log(Path::new(&audit_file))?);
+        let sink = open_file_log(Path::new(&audit_file)).map(|opened| {
+            let log = Arc::new(opened);
+            let boxed: Box<SharedAuditFn> = Box::new(move |entry| append(&log, entry));
+            boxed
+        });
         let context = ReloadContext {
             actor_id: "waf_apply".to_owned(),
             tenant: "platform".to_owned(),
             module: "waf".to_owned(),
-            target: settings.routes_file.clone(),
+            target: settings_file.clone(),
             request_id: "waf-reload".to_owned(),
         };
-        let engine = Arc::new(open_apply(
-            Path::new(&settings_file),
-            run_with_deadline,
-            Box::new(move |entry| append(&log, entry)),
-            context,
-        )?);
+        let engine = Arc::new(open_apply_audited(Path::new(&settings_file), run_with_deadline, sink, context)?);
+        let watched = [
+            PathBuf::from(&current_config(&engine).settings.routes_file),
+            PathBuf::from(&settings_file),
+        ];
         let _watcher = watch_files(Arc::clone(&engine), &watched, DEBOUNCE)?;
         let _signals = core_config::signal::reload_on_signals(Arc::clone(&engine), &[SIGHUP])?;
         info!("waf_apply running");
