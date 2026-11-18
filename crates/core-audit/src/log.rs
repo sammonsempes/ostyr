@@ -4,10 +4,10 @@ use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::verify::{verify, MAX_RECORD_BYTES};
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
-#[cfg(unix)]
-use rustix::io::Errno;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, BufReader, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -158,32 +158,32 @@ pub fn judge_handle(facts: &HandleFacts, effective_uid: u32) -> Result<(), Audit
 
 
 #[cfg(unix)]
-pub fn open_nonblocking(path: &Path) -> Result<File, AuditError> {
-    let flags = OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    open_with(path, flags)
-}
-
-
-#[cfg(unix)]
 pub fn open_with(path: &Path, flags: OFlags) -> Result<File, AuditError> {
-    rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR).map(File::from).map_err(|errno| {
-        if errno == Errno::LOOP {
-            AuditError::SymlinkRefused
-        } else {
-            AuditError::Io(errno.into())
-        }
-    })
+    Ok(rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR)
+        .map(File::from)
+        .map_err(io::Error::from)?)
 }
 
 
-/// Read-only open for verify and export: same flags, no creation, same judgement of the handle.
+/// Opens `O_PATH` (no driver `open` runs), judges the anchor by `fstat`, then reopens the regular file through `/proc/self/fd` and judges it again.
+#[cfg(unix)]
+pub fn open_anchored(path: &Path, flags: OFlags) -> Result<File, AuditError> {
+    let anchor = open_with(path, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC)?;
+    let symlink = anchor.metadata()?.file_type().is_symlink();
+    if symlink {
+        Err(AuditError::SymlinkRefused)
+    } else {
+        judge_opened(anchor)
+            .and_then(|judged| open_with(Path::new(&format!("/proc/self/fd/{}", judged.as_raw_fd())), flags))
+            .and_then(judge_opened)
+    }
+}
+
+
+/// Read-only open for verify and export: same anchor, no creation, same judgement of the handle.
 #[cfg(unix)]
 pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
-    open_with(
-        path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
-    )
-    .and_then(judge_opened)
+    open_anchored(path, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC)
 }
 
 
@@ -193,9 +193,21 @@ pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
 }
 
 
+/// Creates a new file exclusively (a name that does not exist yet cannot be a device or a link) and judges it.
+#[cfg(unix)]
+pub fn create_new(path: &Path) -> Result<File, AuditError> {
+    let flags =
+        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    open_with(path, flags).and_then(judge_opened)
+}
+
+
 #[cfg(unix)]
 pub fn open_checked(path: &Path) -> Result<File, AuditError> {
-    open_nonblocking(path).and_then(judge_opened)
+    match open_anchored(path, OFlags::RDWR | OFlags::APPEND | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC) {
+        Err(AuditError::Io(error)) if error.kind() == io::ErrorKind::NotFound => create_new(path),
+        other => other,
+    }
 }
 
 

@@ -11,7 +11,7 @@ use core_audit::error::AuditError;
 use core_audit::log::{append_declared, check_private, handle_facts, judge_handle, open_file_log, owner_only, HandleFacts};
 use core_audit::verify::{verify_capped, MAX_RECORD_BYTES};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
@@ -88,9 +88,9 @@ fn a_symlink_is_refused_whatever_it_points_at() -> TestResult {
 
 
 #[test]
-fn a_directory_or_a_missing_parent_is_an_io_error() -> TestResult {
+fn a_directory_is_refused_and_a_missing_parent_is_an_io_error() -> TestResult {
     let dir = tempdir()?;
-    assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
+    assert!(matches!(open_file_log(dir.path()), Err(AuditError::NotRegularFile)));
     assert!(matches!(
         open_file_log(&dir.path().join("absent").join("audit.log")),
         Err(AuditError::Io(_))
@@ -166,6 +166,51 @@ fn a_large_log_opens_and_verifies_with_no_size_cap() -> TestResult {
     let mut out = Vec::new();
     verify_file(&path.display().to_string(), None, &mut out)?;
     assert!(String::from_utf8(out)?.starts_with("ok 300 records"));
+    Ok(())
+}
+
+
+#[derive(Debug)]
+pub struct HugeLengthReader {
+    pub inner: Cursor<Vec<u8>>,
+    pub reported_length: u64,
+}
+
+
+impl Read for HugeLengthReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buffer)
+    }
+}
+
+
+const REPORTED_LENGTH: u64 = 1 << 40;
+
+
+#[test]
+fn verification_takes_no_length_into_account() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("audit.log");
+    let log = open_file_log(&path)?;
+    (0..THREE_RECORDS).try_for_each(|index| append_declared(&log, sample_entry(index), &["name"]).map(|_| ()))?;
+    let reader = HugeLengthReader {
+        inner: Cursor::new(fs::read(&path)?),
+        reported_length: REPORTED_LENGTH,
+    };
+    assert!(reader.reported_length > MAX_RECORD_BYTES as u64);
+    assert_eq!(core_audit::verify::verify(std::io::BufReader::new(reader), None)?.records, THREE_RECORDS);
+    Ok(())
+}
+
+
+#[test]
+fn a_device_named_as_the_log_is_refused_and_a_missing_file_is_created() -> TestResult {
+    assert!(matches!(open_file_log(Path::new("/dev/ptmx")), Err(AuditError::NotRegularFile)));
+    let dir = tempdir()?;
+    let path = dir.path().join("fresh.log");
+    open_file_log(&path)?;
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & GROUP_OTHER, 0);
+    assert!(matches!(open_file_log(&path.join("below")), Err(AuditError::Io(_))));
     Ok(())
 }
 

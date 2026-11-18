@@ -51,7 +51,9 @@ pub enum AuditError {
     TooManyParameters { count: usize, max: usize },
     #[error("an audit parameter key is {length} bytes, the limit is {max}")]
     KeyTooLong { length: usize, max: usize },
-    #[error("usage: append <file> <count> | verify <file> [head] | export <file> [head]")]
+    #[error(
+        "usage: append <file> <count> | verify <file> [head] | export <file> [head] (verify and export run as the service user that owns the file)"
+    )]
     Usage,
     #[error("invalid count `{value}`: {source}")]
     InvalidCount {
