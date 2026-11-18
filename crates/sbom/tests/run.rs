@@ -57,7 +57,10 @@ const MAX_COMPONENTS: usize = 5;
 const STDERR_CAP: usize = 1000;
 
 
-const FLOOD_BYTES: &str = "5000000";
+const FLOOD_KILOBYTES: usize = 5000;
+
+
+const SMALL_FLOOD_KILOBYTES: usize = 5;
 
 
 const EXIT_CODE: i32 = 3;
@@ -104,6 +107,16 @@ fn fake_syft(dir: &TempDir, body: &str) -> io::Result<PathBuf> {
     } else {
         Err(io::Error::other("install failed"))
     }
+}
+
+
+fn print_fixture() -> String {
+    format!("while IFS= read -r line; do printf '%s\\n' \"$line\"; done < '{FIXTURE}'")
+}
+
+
+fn flood(kilobytes: usize) -> String {
+    format!("i=0\nwhile [ $i -lt {kilobytes} ]; do printf '%01000d' 0 >&2; i=$((i+1)); done")
 }
 
 
@@ -191,7 +204,7 @@ const LIVE_HELPERS: usize = 8;
 #[test]
 fn good_run_parses_fixture_and_carries_scope() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'"))?;
+    let binary = fake_syft(&dir, &print_fixture())?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     assert_eq!(sbom.components.len(), FIXTURE_COMPONENTS);
     assert_eq!(sbom.tenant, "tenant-a");
@@ -214,14 +227,14 @@ fn arguments_are_separate_and_typed() -> TestResult {
 #[test]
 fn environment_is_cleared_and_explicit() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, "printf '{\"components\":[{\"name\":\"%s\"}]}' \"$(env | tr '\\n' ' ')\"")?;
+    let binary = fake_syft(&dir, "set -f\nset -- $(export -p)\nprintf '{\"components\":[{\"name\":\"%s\"}]}' \"$*\"")?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     let seen = sbom
         .components
         .first()
         .map(|component| component.name.to_lowercase())
         .ok_or("no component")?;
-    assert!(seen.contains("syft_check_for_app_update=false"));
+    assert!(seen.contains("syft_check_for_app_update='false'"));
     assert!(seen.contains("home="));
     assert!(!seen.contains("proxy"));
     assert!(!seen.contains("cargo"));
@@ -256,7 +269,7 @@ fn environment_names_are_fixed() -> TestResult {
 #[test]
 fn oversized_output_is_too_large() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'"))?;
+    let binary = fake_syft(&dir, &print_fixture())?;
     let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     limited.max_stdout_bytes = SMALL_STDOUT;
     let result = run(&limited);
@@ -300,7 +313,7 @@ fn background_holder_of_the_pipe_dies_with_the_group() -> TestResult {
 #[test]
 fn non_zero_exit_is_typed() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'\nexit {EXIT_CODE}"))?;
+    let binary = fake_syft(&dir, &format!("{}\nexit {EXIT_CODE}", print_fixture()))?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(matches!(result, Err(RunError::Failed { code: Some(EXIT_CODE), .. })));
     Ok(())
@@ -320,7 +333,7 @@ fn garbage_output_is_a_parse_error() -> TestResult {
 #[test]
 fn stderr_flood_is_drained_and_capped() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, &format!("yes noise | head -c {FLOOD_BYTES} >&2\ncat '{FIXTURE}'"))?;
+    let binary = fake_syft(&dir, &format!("{}\n{}", flood(FLOOD_KILOBYTES), print_fixture()))?;
     let sbom = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS))?;
     assert_eq!(sbom.components.len(), FIXTURE_COMPONENTS);
     Ok(())
@@ -438,7 +451,7 @@ fn missing_work_directory_is_an_io_error() -> TestResult {
 #[test]
 fn a_work_directory_others_can_write_is_refused_before_syft_starts() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, "touch \"$HOME/../started\"; exit 0")?;
+    let binary = fake_syft(&dir, ": > \"$HOME/../started\"; exit 0")?;
     let configured = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE_MODE))?;
     let result = run(&configured);
@@ -633,7 +646,7 @@ fn child_that_left_the_group_and_closed_its_pipes_is_killed_by_pid() -> TestResu
 #[test]
 fn complete_document_with_a_lingering_child_is_killed_and_reported() -> TestResult {
     let dir = private_dir()?;
-    let binary = fake_syft(&dir, &format!("cat '{FIXTURE}'\nexec 1>&-\nexec 2>&-\nexec sleep 3600"))?;
+    let binary = fake_syft(&dir, &format!("{}\nexec 1>&-\nexec 2>&-\nexec sleep 3600", print_fixture()))?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(matches!(result, Err(RunError::Failed { code: None, source: None })));
     Ok(())
@@ -685,7 +698,7 @@ fn abandoned_helper_results_are_logged_not_lost() -> TestResult {
 const KIBIBYTES: u64 = 1024;
 
 
-const BIG_ALLOCATION: &str = "3000000000";
+const GROW_STRING: &str = "(s=xxxxxxxx\ni=0\nwhile [ $i -lt 30 ]; do s=\"$s$s\"; i=$((i+1)); done) || { echo 'cannot allocate memory' >&2; exit 1; }";
 
 
 const ARCHIVE_BYTES: usize = 2000;
@@ -720,7 +733,7 @@ fn the_child_runs_under_the_configured_address_space_limit() -> TestResult {
 #[test]
 fn allocating_past_the_limit_is_a_typed_memory_error_and_the_home_is_removed() -> TestResult {
     let dir = private_dir()?;
-    let body = format!("head -c {BIG_ALLOCATION} /dev/zero | tr '\\0' x | tail -n 1");
+    let body = String::from(GROW_STRING);
     let binary = fake_syft(&dir, &body)?;
     let result = run(&settings(&dir, binary, LONG_DEADLINE_MILLIS));
     assert!(
@@ -741,7 +754,7 @@ fn allocating_past_the_limit_is_a_typed_memory_error_and_the_home_is_removed() -
 #[test]
 fn writing_past_the_limit_is_a_typed_file_error_and_the_home_is_removed() -> TestResult {
     let dir = private_dir()?;
-    let body = "exec dd if=/dev/zero of=\"$HOME/big\" bs=1M count=8";
+    let body = "i=0\nwhile [ $i -lt 8192 ]; do printf '%01000d' 0 >> \"$HOME/big\"; i=$((i+1)); done";
     let binary = fake_syft(&dir, body)?;
     let mut limited = settings(&dir, binary, LONG_DEADLINE_MILLIS);
     limited.max_run_disk_bytes = HUGE_DISK;
@@ -851,7 +864,7 @@ fn limit_classification() -> TestResult {
 }
 
 
-const WRITE_STEPS: &str = "for i in 1 2 3 4; do dd if=/dev/zero of=\"$TMPDIR/f$i\" bs=1k count=512 2>/dev/null; done\nexec sleep 3600";
+const WRITE_STEPS: &str = "for i in 1 2 3 4; do printf '%0524288d' 0 > \"$TMPDIR/f$i\"; done\nexec sleep 3600";
 
 
 const MANY_FILES: &str = "for i in 1 2 3 4 5 6; do : > \"$TMPDIR/f$i\"; done\nexec sleep 3600";
@@ -985,10 +998,10 @@ fn the_limits_are_in_force_from_the_first_instruction() -> TestResult {
 #[test]
 fn only_the_kept_tail_of_stderr_classifies_a_failure() -> TestResult {
     let dir = private_dir()?;
-    let early = fake_syft(&dir, "echo 'out of memory' >&2\nyes noise | head -c 5000 >&2\nexit 1")?;
+    let early = fake_syft(&dir, &format!("echo 'out of memory' >&2\n{}\nexit 1", flood(SMALL_FLOOD_KILOBYTES)))?;
     let ignored = run(&settings(&dir, early, LONG_DEADLINE_MILLIS));
     assert!(matches!(ignored, Err(RunError::Failed { code: Some(1), .. })), "{ignored:?}");
-    let late = fake_syft(&dir, "yes noise | head -c 5000 >&2\necho 'failed to reserve' >&2\nexit 1")?;
+    let late = fake_syft(&dir, &format!("{}\necho 'failed to reserve' >&2\nexit 1", flood(SMALL_FLOOD_KILOBYTES)))?;
     let found = run(&settings(&dir, late, LONG_DEADLINE_MILLIS));
     assert!(
         matches!(
