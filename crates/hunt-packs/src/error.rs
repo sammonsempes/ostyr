@@ -1,4 +1,5 @@
 use crate::packs::{MAX_ENTRIES, MAX_FILE_BYTES, MAX_PACKS};
+use crate::store::{StateError, MAX_FINDINGS_PAGE};
 use core_config::error::ConfigError;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -47,4 +48,17 @@ pub fn shown_id(id: &str) -> String {
         let digest = format!("{:x}", Sha256::digest(id.as_bytes()));
         format!("{DIGEST_MARK}{}", digest.chars().take(DIGEST_CHARS).collect::<String>())
     }
+}
+
+
+#[derive(Debug, Error)]
+pub enum FindingsError {
+    #[error("malformed cursor")]
+    BadCursor,
+    #[error("the page size must be 1 to {MAX_FINDINGS_PAGE}")]
+    BadPageSize,
+    #[error("every connection is in use")]
+    Busy,
+    #[error("the store failed")]
+    Store(#[from] StateError),
 }
