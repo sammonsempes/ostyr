@@ -264,3 +264,38 @@ pub struct ObserveCounters {
     pub released: u64,
     pub before_lease: u64,
 }
+
+
+pub const MAX_UNMANAGED_PER_RUN: usize = 100;
+
+
+pub const MAX_ALERT_SERVICES: usize = 3;
+
+
+pub const MICROS_PER_MILLI: u64 = 1000;
+
+
+pub const UNMANAGED_RULE_ID: &str = "discovery.unmanaged_device";
+
+
+pub const FLOOD_RULE_ID: &str = "discovery.unmanaged_device_flood";
+
+
+pub const AGENT_PACKAGE: &str = "ostyr-agent";
+
+
+/// What an alert run left out: known addresses, devices whose valid lease MAC keys a CMDB asset, and devices past `MAX_UNMANAGED_PER_RUN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Skipped {
+    pub known: usize,
+    pub managed: usize,
+    pub omitted: usize,
+}
+
+
+/// What storing the alerts did: new rows, and alerts in batches the store refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Stored {
+    pub inserted: usize,
+    pub failed: usize,
+}

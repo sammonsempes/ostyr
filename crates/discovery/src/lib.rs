@@ -1,5 +1,6 @@
 //! Network discovery (spec section 22): a bounded service map and unmanaged-device candidates from flow records.
 
+pub mod alerting;
 pub mod candidates;
 pub mod error;
 pub mod leases;
