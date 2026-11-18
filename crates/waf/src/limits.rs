@@ -271,4 +271,10 @@ pub const UNTRUSTED_SETTINGS: &str = "the settings file directory must be absolu
 pub const UNTRUSTED_SETTINGS_FILE: &str = "the settings file must be a regular file owned by root or this user, closed to group and others";
 
 
+pub const UNTRUSTED_ROUTES: &str = "the routes file directory must be absolute, owned by the running user, closed to group and others";
+
+
+pub const UNTRUSTED_ROUTES_FILE: &str = "the routes file must be a regular file owned by root or this user, closed to group and others";
+
+
 pub const PROC_FD_DIRECTORY: &str = "/proc/self/fd/";

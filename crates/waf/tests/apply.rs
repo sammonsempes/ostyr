@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use waf::admin::open_admin_directory;
 use waf::apply::{
-    applied_state, check_settings, check_start_only, config_error, config_id, discard, file_trusted, judge_program, late_audit,
+    applied_state, check_settings, check_start_only, config_error, config_id, discard, file_trusted, judge_program, late_audit, load_trusted_routes,
     load_trusted_settings, load_trusted_settings_file, open_apply, path_text_ok, refused_text, render_applied, render_applied_capped,
 };
 use waf::error::{DeliverError, OpenError, WafError};
@@ -1234,5 +1234,63 @@ fn an_open_or_linked_settings_file_refuses_the_start_and_a_reload_and_keeps_the_
 #[test]
 fn a_device_node_as_program_is_refused_without_opening_it() -> Result<(), Box<dyn Error>> {
     assert!(judge_program("/dev/null").is_err());
+    Ok(())
+}
+
+
+const ROUTES_FILE_TEXT: &str = "routes file must be a regular file";
+
+
+const ROUTES_DIRECTORY_TEXT: &str = "routes file directory must be absolute";
+
+
+const GROUP_WRITABLE_DIRECTORY: u32 = 0o775;
+
+
+const SECOND_ROUTE: &str = "routes:\n  - hosts: [b.example.test]\n    backends: [\"127.0.0.1:9002\"]\n";
+
+
+#[test]
+fn a_routes_file_open_to_others_or_linked_or_in_an_open_directory_or_missing_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    assert!(load_trusted_routes(&fixture.routes).is_ok());
+    fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    assert!(load_trusted_routes(&fixture.routes).is_err_and(|failure| failure.to_string().contains(ROUTES_FILE_TEXT)));
+    fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let link = fixture.dir.path().join("link.yaml");
+    symlink(&fixture.routes, &link)?;
+    assert!(load_trusted_routes(&link).is_err_and(|failure| failure.to_string().contains(ROUTES_FILE_TEXT)));
+    assert!(load_trusted_routes(&fixture.dir.path().join("none.yaml")).is_err());
+    assert!(load_trusted_routes(&fixture.out).is_err());
+    assert!(load_trusted_routes(Path::new("/")).is_err_and(|failure| failure.to_string().contains(ROUTES_DIRECTORY_TEXT)));
+    assert!(load_trusted_routes(Path::new("relative.yaml")).is_err());
+    fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE_DIRECTORY))?;
+    assert!(load_trusted_routes(&fixture.routes).is_err_and(|failure| failure.to_string().contains(ROUTES_DIRECTORY_TEXT)));
+    Ok(())
+}
+
+
+#[test]
+fn an_untrusted_routes_file_refuses_the_start_and_a_reload_keeps_the_old_routes_and_is_audited() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    assert!(matches!(try_open(&fixture)?.err(), Some(OpenError::Config(_))));
+    assert!(calls(&fixture).is_empty());
+    fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let (engine, audit) = engine_of(&fixture)?;
+    let before = calls(&fixture).len();
+    let old = current_config(&engine).json.clone();
+    fs::write(&fixture.routes, SECOND_ROUTE)?;
+    fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains(ROUTES_FILE_TEXT)));
+    assert_eq!(current_config(&engine).json, old);
+    let real = fixture.dir.path().join("real.yaml");
+    fs::rename(&fixture.routes, &real)?;
+    fs::set_permissions(&real, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    symlink(&real, &fixture.routes)?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains(ROUTES_FILE_TEXT)));
+    assert_eq!(current_config(&engine).json, old);
+    assert_eq!(calls(&fixture).len(), before);
+    assert!(fs::read_to_string(audit)?.contains(ROUTES_FILE_TEXT));
     Ok(())
 }
