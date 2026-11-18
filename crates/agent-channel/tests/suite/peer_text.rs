@@ -1,8 +1,12 @@
 use crate::harness::{attempt_with, bounded, client_paths, custom_client, finish, init_logging, make_platform, server_paths, start_single, Platform};
 use crate::pki::{agent_spec, issue, make_authority, write_leaf, LeafSpec, AGENT_URI, SERVER_NAME};
 use crate::types::TestResult;
+use agent_channel::app::{decode_line, RawLine};
 use agent_channel::client::connect_channel;
 use agent_channel::error::{class_of, error_class, rustls_in, serve_kind, without_peer_text, ChannelError, ServeKind, TlsClass};
+use agent_channel::model::DEFAULT_MAX_MESSAGE_BYTES;
+use agent_channel::proto::EventBatch;
+use agent_channel::spool::quarantine;
 use agent_channel::tls::{parse_private_key, provider, read_certificates, read_private_key, root_store};
 use agent_channel::types::SharedClientConfig;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -205,5 +209,44 @@ async fn a_hostile_client_certificate_never_reaches_the_server_error() -> TestRe
     let served = finish(server).await?.err().ok_or("served")?;
     assert!(matches!(served, ChannelError::Handshake(TlsClass::Certificate)), "{served:?}");
     assert!(is_clean(&chain(&served)), "{}", chain(&served));
+    Ok(())
+}
+
+
+const HOSTILE_LINE: &[u8] = b"\x30\x82\x01\x02MARKER\xff\xfe";
+
+
+fn holds_no_bytes(error: &io::Error) -> bool {
+    let shown = chain(error);
+    !shown.contains("MARKER") && !shown.contains("48, 130") && error.kind() == io::ErrorKind::InvalidData && error.get_ref().is_some()
+}
+
+
+#[test]
+fn a_non_utf8_events_line_keeps_no_bytes_in_its_error() -> TestResult {
+    let raw = RawLine {
+        content: Ok(HOSTILE_LINE.to_vec()),
+        complete: true,
+    };
+    let error = decode_line(raw).err().ok_or("invalid UTF-8 was accepted")?;
+    assert!(holds_no_bytes(&error), "{}", chain(&error));
+    assert!(error.to_string().contains("byte 1"), "{error}");
+    Ok(())
+}
+
+
+#[test]
+fn a_non_utf8_rejected_batch_keeps_no_bytes_in_its_error() -> TestResult {
+    let dir = tempdir()?;
+    let batch = EventBatch {
+        sequence: 1,
+        ecs_json: HOSTILE_LINE.to_vec(),
+        ..EventBatch::default()
+    };
+    let error = quarantine(&dir.path().join("spool.rejected"), &[batch], DEFAULT_MAX_MESSAGE_BYTES as u64)
+        .err()
+        .ok_or("invalid UTF-8 was quarantined")?;
+    assert!(holds_no_bytes(&error), "{}", chain(&error));
+    assert!(error.to_string().contains("rejected batch 0"), "{error}");
     Ok(())
 }

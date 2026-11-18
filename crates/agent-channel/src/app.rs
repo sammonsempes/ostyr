@@ -128,12 +128,21 @@ pub fn read_raw_line<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) 
 }
 
 
+/// An `InvalidData` error naming only the offset of the first invalid byte, never the bytes.
+pub fn invalid_utf8(error: &std::string::FromUtf8Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("line is not valid UTF-8 at byte {}", error.utf8_error().valid_up_to()),
+    )
+}
+
+
 /// The decoded line of a raw one and whether a newline ended it; invalid UTF-8 is `InvalidData`.
 pub fn decode_line(raw: RawLine) -> io::Result<(BoundedLine, bool)> {
     match raw.content {
         Ok(bytes) => String::from_utf8(bytes)
             .map(|text| (BoundedLine::Text(text), raw.complete))
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+            .map_err(|error| invalid_utf8(&error)),
         Err(bytes) => Ok((BoundedLine::Oversized { bytes }, raw.complete)),
     }
 }
