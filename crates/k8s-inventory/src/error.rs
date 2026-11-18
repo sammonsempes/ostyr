@@ -29,6 +29,21 @@ pub enum ParseError {
 
 
 #[derive(Debug, Error)]
+pub enum SyncError {
+    #[error("invalid tenant: {0}")]
+    Tenant(#[source] PgError),
+    #[error("invalid cluster id: {0}")]
+    Cluster(#[source] PgError),
+    #[error("the uid of an element is not a plain uid")]
+    BadIdentity,
+    #[error("the inventory is not of the tenant and cluster of the settings")]
+    ScopeMismatch,
+    #[error("cmdb store: {0}")]
+    Store(#[from] cmdb::error::StoreError),
+}
+
+
+#[derive(Debug, Error)]
 pub enum InventoryError {
     #[error("invalid tenant: {0}")]
     Tenant(#[source] PgError),

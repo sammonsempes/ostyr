@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+cmdb = { version = "0.0.0", path = "../cmdb" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
@@ -23,6 +24,7 @@ zeroize = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = "0.3"
 
 [lints]
