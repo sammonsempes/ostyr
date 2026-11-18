@@ -164,6 +164,7 @@ pub struct CertFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertPage {
     pub certs: Vec<StoredCert>,
+    pub skipped: usize,
     pub next_cursor: Option<String>,
 }
 
@@ -181,4 +182,28 @@ pub struct Sighting {
 pub struct NamesShown {
     pub shown: Vec<String>,
     pub omitted: usize,
+}
+
+
+/// The sightings read for one certificate: bad rows are skipped and counted, `truncated` is set when the read cap was reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SightingPage {
+    pub sightings: Vec<Sighting>,
+    pub skipped: usize,
+    pub truncated: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertDetail {
+    pub cert: StoredCert,
+    pub sightings: SightingPage,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRequest {
+    pub filter: CertFilter,
+    pub cursor: Option<String>,
+    pub limit: usize,
 }

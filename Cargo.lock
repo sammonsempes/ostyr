@@ -872,6 +872,10 @@ name = "cert-inventory"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "data-encoding",
@@ -884,13 +888,17 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "siem-ingest",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tower",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "ureq 3.5.1",
+ "utoipa",
  "walkdir",
  "x509-parser",
 ]

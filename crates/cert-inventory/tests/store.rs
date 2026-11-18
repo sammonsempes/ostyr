@@ -11,9 +11,10 @@ use cert_inventory::error::InventoryStoreError;
 use cert_inventory::model::{CertFilter, CertRecord, KeyType, Source, SourceKind, StoreLimits};
 use cert_inventory::parse::MAX_DNS_NAMES;
 use cert_inventory::store::{
-    cut_text, decode_cursor, doc_of, encode_cursor, key_type_text, kind_text, list_certificates, record_ok, sightings_of, source_ok, store_records,
-    time_in_range, COL_DNS_NAMES, COL_FIRST_SEEN, COL_KEY_BITS, COL_KEY_TYPE, COL_LAST_SEEN, COL_NOT_AFTER, COL_NOT_BEFORE, COL_SELF_SIGNED,
-    DEFAULT_LIMITS, MAX_PAGE, MAX_SOURCE_BYTES, MAX_STORE_BATCH, MAX_TEXT_BYTES, MIGRATIONS, MIGRATION_NAMESPACE,
+    cut_text, decode_cursor, doc_of, encode_cursor, get_certificate, get_detail, key_type_text, kind_text, list_certificates, record_ok,
+    sightings_of, source_ok, store_records, time_in_range, COL_DNS_NAMES, COL_FIRST_SEEN, COL_KEY_BITS, COL_KEY_TYPE, COL_LAST_SEEN, COL_NOT_AFTER,
+    COL_NOT_BEFORE, COL_SELF_SIGNED, DEFAULT_LIMITS, MAX_PAGE, MAX_SIGHTINGS_READ, MAX_SOURCE_BYTES, MAX_STORE_BATCH, MAX_TEXT_BYTES, MIGRATIONS,
+    MIGRATION_NAMESPACE,
 };
 use core_pg::migrate::{check_embedded, check_namespace};
 use core_pg::scope::tenant_scope;
@@ -147,8 +148,8 @@ fn a_rerun_moves_last_seen_only_and_a_forged_twin_changes_nothing() -> TestResul
     assert_eq!(stored.record.dns_names, original.dns_names);
     assert_eq!(stored.record.key_type, KeyType::Other);
     let sightings = run(sightings_of(&exec, &scope, &original.fingerprint_sha256))??;
-    assert_eq!(sightings.len(), 1);
-    assert_eq!(sightings.first().ok_or("none")?.last_seen, LATER);
+    assert_eq!(sightings.sightings.len(), 1);
+    assert_eq!(sightings.sightings.first().ok_or("none")?.last_seen, LATER);
     Ok(())
 }
 
@@ -591,10 +592,8 @@ fn stored_rows_are_parsed_strictly() -> TestResult {
             None,
             1,
         ))?;
-        assert!(
-            matches!(result, Err(InventoryStoreError::BadRow { column: found }) if found == *column),
-            "{column}"
-        );
+        let refused = result?;
+        assert_eq!((refused.certs.len(), refused.skipped), (0, 1), "{column}");
         Ok(())
     })?;
     let short = run(list_certificates(
@@ -604,7 +603,7 @@ fn stored_rows_are_parsed_strictly() -> TestResult {
         None,
         1,
     ))?;
-    assert!(matches!(short, Err(InventoryStoreError::BadRow { column: COL_DNS_NAMES })));
+    assert_eq!(short?.skipped, 1);
     let paged = run(list_certificates(
         &fixed(vec![good_row(), good_row()]),
         &scope,
@@ -642,20 +641,18 @@ fn sightings_are_read_for_a_valid_fingerprint_only() -> TestResult {
     ))??;
     let found = run(sightings_of(&exec, &scope, &record.fingerprint_sha256))??;
     assert_eq!(
-        found.iter().map(|sighting| sighting.kind).collect::<Vec<_>>(),
+        found.sightings.iter().map(|sighting| sighting.kind).collect::<Vec<_>>(),
         vec![SourceKind::Ct, SourceKind::Scan]
     );
     let other = run(sightings_of(&exec, &tenant_scope("b")?, &record.fingerprint_sha256))??;
-    assert!(other.is_empty());
+    assert!(other.sightings.is_empty());
     assert!(matches!(
         run(sightings_of(&exec, &scope, "zz"))?,
         Err(InventoryStoreError::BadFingerprint)
     ));
     let weird = fixed(vec![vec!["mail".to_owned(), "x".to_owned(), "1".to_owned()]]);
-    assert!(matches!(
-        run(sightings_of(&weird, &scope, &record.fingerprint_sha256))?,
-        Err(InventoryStoreError::BadRow { column: 0 })
-    ));
+    let skipped = run(sightings_of(&weird, &scope, &record.fingerprint_sha256))??;
+    assert_eq!((skipped.sightings.len(), skipped.skipped, skipped.truncated), (0, 1, false));
     Ok(())
 }
 
@@ -671,5 +668,52 @@ fn texts_and_migrations() -> TestResult {
     check_embedded(&MIGRATIONS)?;
     let doc = doc_of(&cert(1, NOT_AFTER));
     assert_eq!(doc.get("key_bits"), Some(&serde_json::Value::Null));
+    Ok(())
+}
+
+
+#[test]
+fn a_full_page_of_bad_rows_still_gives_the_cursor_of_the_last_row_read() -> TestResult {
+    let scope = tenant_scope("a")?;
+    let bad = with_column(COL_KEY_TYPE, "dsa");
+    let rows = vec![bad.clone(), bad.clone(), bad];
+    let page = run(list_certificates(&fixed(rows), &scope, &CertFilter::default(), None, SMALL_CAP))??;
+    assert_eq!((page.certs.len(), page.skipped), (0, SMALL_CAP));
+    assert_eq!(page.next_cursor, Some(format!("2:{}", "a".repeat(HEX_WIDTH))));
+    let mixed = vec![good_row(), with_column(COL_KEY_BITS, "x"), good_row()];
+    let middle = run(list_certificates(&fixed(mixed), &scope, &CertFilter::default(), None, SMALL_CAP))??;
+    assert_eq!((middle.certs.len(), middle.skipped), (1, 1));
+    let broken_cursor = vec![with_column(COL_NOT_AFTER, "x"), good_row()];
+    assert!(matches!(
+        run(list_certificates(&fixed(broken_cursor), &scope, &CertFilter::default(), None, 1))?,
+        Err(InventoryStoreError::BadRow { column: COL_NOT_AFTER })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_sightings_read_is_truncated_at_the_cap_and_a_certificate_is_read_by_fingerprint() -> TestResult {
+    let scope = tenant_scope("a")?;
+    let fingerprint = "b".repeat(HEX_WIDTH);
+    let rows: Vec<Vec<String>> = (0..MAX_SIGHTINGS_READ)
+        .map(|index| vec!["scan".to_owned(), format!("host:{index}"), "1".to_owned()])
+        .collect();
+    let full = run(sightings_of(&fixed(rows.clone()), &scope, &fingerprint))??;
+    assert!(full.truncated);
+    let short = run(sightings_of(&fixed(rows.into_iter().skip(1).collect()), &scope, &fingerprint))??;
+    assert!(!short.truncated);
+    assert!(matches!(
+        run(get_certificate(&fixed(Vec::new()), &scope, "zz"))?,
+        Err(InventoryStoreError::BadFingerprint)
+    ));
+    assert!(run(get_certificate(&fixed(Vec::new()), &scope, &fingerprint))??.is_none());
+    assert!(run(get_detail(&fixed(Vec::new()), &scope, &fingerprint))??.is_none());
+    assert!(matches!(
+        run(get_certificate(&fixed(vec![with_column(COL_KEY_TYPE, "dsa")]), &scope, &fingerprint))?,
+        Err(InventoryStoreError::BadRow { column: COL_KEY_TYPE })
+    ));
+    let found = run(get_detail(&fixed(vec![good_row()]), &scope, &fingerprint))??.ok_or("none")?;
+    assert_eq!(found.cert.record.subject, "CN=a");
     Ok(())
 }

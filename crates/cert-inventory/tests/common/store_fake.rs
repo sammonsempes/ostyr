@@ -1,5 +1,5 @@
 use alerts::types::RowFuture;
-use cert_inventory::store::{LIST_FIRST_SQL, LIST_NEXT_SQL, SIGHTINGS_SQL, STORE_SQL};
+use cert_inventory::store::{GET_SQL, LIST_FIRST_SQL, LIST_NEXT_SQL, SIGHTINGS_SQL, STORE_SQL};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::Value;
@@ -62,6 +62,7 @@ pub struct State {
     pub certs: BTreeMap<(String, String), Stored>,
     pub sightings: BTreeMap<(String, String, String, String), i64>,
     pub statements: Vec<usize>,
+    pub reads: Vec<(String, &'static str)>,
 }
 
 
@@ -217,14 +218,28 @@ pub fn sightings_statement(state: &State, tenant: &str, params: &[String]) -> Re
 }
 
 
+pub fn get_statement(state: &State, tenant: &str, params: &[String]) -> Result<Vec<Vec<String>>, PgError> {
+    let fingerprint: String = param(params, FIRST_PARAM)?;
+    Ok(state
+        .certs
+        .get(&(tenant.to_owned(), fingerprint.clone()))
+        .map(|stored| cert_row(&fingerprint, stored))
+        .into_iter()
+        .collect())
+}
+
+
 pub async fn answer(fake: &Fake, scope: TenantScope, sql: &'static str, params: Vec<String>) -> Result<Vec<Vec<String>>, PgError> {
     if let Some(gate) = &fake.gate {
         gate.wait().await;
     }
     let tenant = tenant_of(&scope).to_owned();
     let mut state = fake.state.lock().map_err(bad)?;
+    state.reads.push((tenant.clone(), sql));
     if fake.fail {
         Err(PgError::InvalidTenant)
+    } else if sql == GET_SQL {
+        get_statement(&state, &tenant, &params)
     } else if sql == STORE_SQL {
         store_statement(&mut state, &tenant, &params)
     } else if sql == LIST_FIRST_SQL || sql == LIST_NEXT_SQL {

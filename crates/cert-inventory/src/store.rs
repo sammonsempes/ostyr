@@ -2,7 +2,9 @@
 
 use crate::alerting::{is_fingerprint, MAX_DNS_NAME_BYTES};
 use crate::error::InventoryStoreError;
-use crate::model::{CertFilter, CertPage, CertRecord, KeyType, Sighting, Source, SourceKind, StoreCounts, StoreLimits, StoredCert};
+use crate::model::{
+    CertDetail, CertFilter, CertPage, CertRecord, KeyType, Sighting, SightingPage, Source, SourceKind, StoreCounts, StoreLimits, StoredCert,
+};
 use crate::parse::MAX_DNS_NAMES;
 use alerts::types::{Executor, Row};
 use core_pg::migrate::Migration;
@@ -34,6 +36,11 @@ pub const LIST_NEXT_SQL: &str = "SELECT fingerprint, subject, issuer, array_to_j
                                  COALESCE(key_bits::text, ''), self_signed::text, first_seen::text, last_seen::text FROM cert_inventory \
                                  WHERE tenant = $1 AND not_after < $2::text::bigint AND (not_after, fingerprint) > ($4::text::bigint, $5::text) \
                                  ORDER BY not_after, fingerprint LIMIT $3::text::bigint";
+
+
+pub const GET_SQL: &str = "SELECT fingerprint, subject, issuer, array_to_json(dns_names)::text, not_before::text, not_after::text, key_type, \
+                           COALESCE(key_bits::text, ''), self_signed::text, first_seen::text, last_seen::text FROM cert_inventory \
+                           WHERE tenant = $1 AND fingerprint = $2::text";
 
 
 pub const SIGHTINGS_SQL: &str = "SELECT source_kind, source_ref, last_seen::text FROM cert_sightings WHERE tenant = $1 AND fingerprint = $2::text \
@@ -367,12 +374,50 @@ pub async fn list_certificates(
                 exec(scope.clone(), LIST_NEXT_SQL, vec![before, fetch, not_after.to_string(), fingerprint]).await?
             }
         };
-        let certs = rows.iter().take(limit).map(stored_cert_of).collect::<Result<Vec<_>, _>>()?;
-        let next_cursor = certs
-            .last()
+        let (certs, failed): (Vec<_>, Vec<_>) = rows.iter().take(limit).map(stored_cert_of).partition(Result::is_ok);
+        let skipped = failed.len();
+        if skipped > 0 {
+            tracing::warn!(skipped, "stored certificate rows refused and skipped");
+        }
+        let next_cursor = rows
+            .get(limit.saturating_sub(1))
             .filter(|_last| rows.len() > limit)
-            .map(|last| encode_cursor(last.record.not_after, &last.record.fingerprint_sha256));
-        Ok(CertPage { certs, next_cursor })
+            .map(cursor_of_row)
+            .transpose()?;
+        Ok(CertPage {
+            certs: certs.into_iter().flatten().collect(),
+            skipped,
+            next_cursor,
+        })
+    }
+}
+
+
+/// The cursor of a raw row, so a page of refused rows still moves the client forward.
+pub fn cursor_of_row(row: &Row) -> Result<String, InventoryStoreError> {
+    Ok(encode_cursor(number_at(row, COL_NOT_AFTER)?, text_at(row, COL_FINGERPRINT)?))
+}
+
+
+/// One certificate of the tenant, or `None`; a stored row that cannot be parsed is an error.
+pub async fn get_certificate(exec: Executor<'_, '_>, scope: &TenantScope, fingerprint: &str) -> Result<Option<StoredCert>, InventoryStoreError> {
+    if is_fingerprint(fingerprint) {
+        let rows = exec(scope.clone(), GET_SQL, vec![fingerprint.to_owned()]).await?;
+        rows.first().map(stored_cert_of).transpose()
+    } else {
+        Err(InventoryStoreError::BadFingerprint)
+    }
+}
+
+
+/// The certificate and its sightings: two statements at most, the second only when the first found the certificate.
+pub async fn get_detail(exec: Executor<'_, '_>, scope: &TenantScope, fingerprint: &str) -> Result<Option<CertDetail>, InventoryStoreError> {
+    match get_certificate(exec, scope, fingerprint).await? {
+        None => Ok(None),
+        Some(cert) => Ok(Some(CertDetail {
+            cert,
+            sightings: sightings_of(exec, scope, fingerprint).await?,
+        })),
     }
 }
 
@@ -391,8 +436,8 @@ pub fn sighting_of(row: &Row) -> Result<Sighting, InventoryStoreError> {
 }
 
 
-/// At most `MAX_SIGHTINGS_READ` sightings of one certificate of the tenant, ordered by kind and reference.
-pub async fn sightings_of(exec: Executor<'_, '_>, scope: &TenantScope, fingerprint: &str) -> Result<Vec<Sighting>, InventoryStoreError> {
+/// At most `MAX_SIGHTINGS_READ` sightings of one certificate of the tenant, ordered by kind and reference; a bad row is skipped and counted.
+pub async fn sightings_of(exec: Executor<'_, '_>, scope: &TenantScope, fingerprint: &str) -> Result<SightingPage, InventoryStoreError> {
     if is_fingerprint(fingerprint) {
         let rows = exec(
             scope.clone(),
@@ -400,7 +445,16 @@ pub async fn sightings_of(exec: Executor<'_, '_>, scope: &TenantScope, fingerpri
             vec![fingerprint.to_owned(), limit_text(MAX_SIGHTINGS_READ)?],
         )
         .await?;
-        rows.iter().map(sighting_of).collect()
+        let (good, failed): (Vec<_>, Vec<_>) = rows.iter().map(sighting_of).partition(Result::is_ok);
+        let skipped = failed.len();
+        if skipped > 0 {
+            tracing::warn!(skipped, "stored sighting rows refused and skipped");
+        }
+        Ok(SightingPage {
+            sightings: good.into_iter().flatten().collect(),
+            skipped,
+            truncated: rows.len() >= MAX_SIGHTINGS_READ,
+        })
     } else {
         Err(InventoryStoreError::BadFingerprint)
     }

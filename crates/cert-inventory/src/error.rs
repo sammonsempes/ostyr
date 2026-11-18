@@ -127,6 +127,8 @@ pub enum FetchError {
 pub enum InventoryStoreError {
     #[error("database: {0}")]
     Pg(#[from] core_pg::error::PgError),
+    #[error("connection: {0}")]
+    Lease(#[from] alerts::error::StoreError),
     #[error("the time of the call is outside the range a column can hold")]
     BadNow,
     #[error("a limit does not fit the statement")]
@@ -135,6 +137,10 @@ pub enum InventoryStoreError {
     BadPageSize { limit: usize },
     #[error("cursor is malformed")]
     BadCursor,
+    #[error("expiring_before is not a Unix time inside years 0 to 9999")]
+    BadExpiringBefore,
+    #[error("a stored time cannot be written as an RFC 3339 date")]
+    Unrepresentable,
     #[error("fingerprint is not 64 lowercase hexadecimal characters")]
     BadFingerprint,
     #[error("the store returned a malformed value in column {column}")]
