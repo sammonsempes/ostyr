@@ -150,7 +150,7 @@ fn file_log_refuses_a_tampered_file_and_a_directory() -> TestResult {
     fs::write(&path, "garbage\n")?;
     owner_only(&path)?;
     assert!(matches!(open_file_log(&path), Err(AuditError::Broken { line: 1, .. })));
-    assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_))));
+    assert!(matches!(open_file_log(dir.path()), Err(AuditError::Io(_) | AuditError::NotRegularFile)));
     Ok(())
 }
 

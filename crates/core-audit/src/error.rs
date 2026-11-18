@@ -39,6 +39,8 @@ pub enum AuditError {
     NotRegularFile,
     #[error("the audit log is a symbolic link, which is refused")]
     SymlinkRefused,
+    #[error("cannot reopen the audit log through /proc/self/fd: /proc is not mounted or not readable")]
+    ProcUnavailable,
     #[error("the audit log is owned by uid {owner}, expected {expected}")]
     ForeignOwner { owner: u32, expected: u32 },
     #[error("the audit log has {links} links, expected one")]
@@ -51,7 +53,9 @@ pub enum AuditError {
     TooManyParameters { count: usize, max: usize },
     #[error("an audit parameter key is {length} bytes, the limit is {max}")]
     KeyTooLong { length: usize, max: usize },
-    #[error("usage: append <file> <count> | verify <file> [head] | export <file> [head]")]
+    #[error(
+        "usage: append <file> <count> | verify <file> [head] | export <file> [head] (verify and export run as the service user that owns the file)"
+    )]
     Usage,
     #[error("invalid count `{value}`: {source}")]
     InvalidCount {
