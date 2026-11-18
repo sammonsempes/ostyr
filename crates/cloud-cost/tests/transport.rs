@@ -240,7 +240,7 @@ fn a_body_that_stalls_is_cut_by_the_same_deadline() -> Result<(), Box<dyn Error>
     let outcome = send(&request(&url, DECLARED as u64, SHORT_TIMEOUT));
     release.send(())?;
     server.join().map_err(|_| "server thread panicked")??;
-    assert!(matches!(outcome, Err(HttpFailure(HttpClass::Io(_) | HttpClass::Timeout))), "{outcome:?}");
+    assert_eq!(outcome, Err(HttpFailure(HttpClass::Timeout)));
     Ok(())
 }
 
@@ -267,6 +267,10 @@ fn another_failure_is_other() -> Result<(), Box<dyn Error>> {
         read_class(&io::Error::from(ErrorKind::BrokenPipe)),
         HttpFailure(HttpClass::Io(ErrorKind::BrokenPipe))
     );
+    let wrapped = io::Error::other(ureq::Error::Timeout(ureq::Timeout::Global));
+    assert_eq!(read_class(&wrapped), HttpFailure(HttpClass::Timeout));
+    let other_wrapped = io::Error::other(ureq::Error::HostNotFound);
+    assert_eq!(read_class(&other_wrapped), HttpFailure(HttpClass::Io(ErrorKind::Other)));
     assert_eq!(ca_failure("anything"), HttpFailure(HttpClass::Ca));
     Ok(())
 }

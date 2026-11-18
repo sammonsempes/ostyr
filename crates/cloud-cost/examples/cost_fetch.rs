@@ -74,8 +74,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut out = stdout();
     writeln!(
         out,
-        "listed {} skipped_key {} already_loaded {} already_refused {} loaded {} deferred {} incomplete_listings {}",
-        report.listed, report.skipped_key, report.already_loaded, report.already_refused, report.loaded, report.deferred, report.incomplete_listings
+        "listed {} skipped_key {} already_loaded {} already_refused {} in_backoff {} loaded {} deferred {} incomplete_listings {} permanent_refused {} transient_refused {}",
+        report.listed, report.skipped_key, report.already_loaded, report.already_refused, report.in_backoff, report.loaded, report.deferred, report.incomplete_listings, report.permanent_refused, report.transient_refused
     )?;
     writeln!(out, "refused {:?}", report.refused)?;
     writeln!(out, "failed_sources {:?}", report.failed_sources)?;

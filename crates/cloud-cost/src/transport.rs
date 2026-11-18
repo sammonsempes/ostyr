@@ -17,11 +17,12 @@ pub fn classify(error: Error) -> HttpFailure {
 }
 
 
-/// A body read that ran into the deadline is a `Timeout`, like a call that did.
+/// A body read that ran into the deadline is a `Timeout`: ureq 3 reports it as `ErrorKind::Other` wrapping its own `Error::Timeout`.
 pub fn read_class(error: &IoError) -> HttpFailure {
-    match error.kind() {
-        ErrorKind::TimedOut => HttpFailure(HttpClass::Timeout),
-        other => HttpFailure(HttpClass::Io(other)),
+    let wrapped = error.get_ref().and_then(|inner| inner.downcast_ref::<Error>());
+    match (error.kind(), wrapped) {
+        (ErrorKind::TimedOut, _) | (_, Some(Error::Timeout(_))) => HttpFailure(HttpClass::Timeout),
+        (other, _) => HttpFailure(HttpClass::Io(other)),
     }
 }
 

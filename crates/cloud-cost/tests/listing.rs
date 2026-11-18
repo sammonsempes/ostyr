@@ -8,7 +8,7 @@ use cloud_cost::fetch_error::{FetchError, HttpClass, HttpFailure};
 use cloud_cost::fetch_model::{FetchEnv, FetchSource, HttpResponse, ListedObject, Pending, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_OBJECTS};
 use cloud_cost::listing::{
     admit, cursor_key, decode_key, etag_ok, get_body, key_ok, list_objects, list_page, open_bucket, page_url, parse_page, MAX_ETAG_BYTES,
-    MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES, MAX_TOKEN_BYTES, MAX_XML_DEPTH,
+    MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES, MAX_OBJECT_SIZE, MAX_TOKEN_BYTES, MAX_XML_DEPTH,
 };
 use cloud_cost::model::Limits;
 use rusty_s3::Credentials;
@@ -151,6 +151,19 @@ fn an_incomplete_element_is_skipped_and_counted() -> TestResult {
     let empty = "<Contents/>";
     let parsed = parse_page(&page(&[no_key, no_etag, no_size, bad_size, empty]), PREFIX)?;
     assert_eq!((parsed.objects.len(), parsed.skipped), (0, FIVE));
+    Ok(())
+}
+
+
+#[test]
+fn a_size_the_ledger_cannot_store_skips_that_object_alone() -> TestResult {
+    let largest = entry("p/max.csv", "e", &MAX_OBJECT_SIZE.to_string());
+    let beyond = entry("p/huge.csv", "e", &(MAX_OBJECT_SIZE + 1).to_string());
+    let good = entry("p/ok.csv", "e", "1");
+    let parsed = parse_page(&page(&[beyond.as_str(), largest.as_str(), good.as_str()]), PREFIX)?;
+    let keys: Vec<&str> = parsed.objects.iter().map(|object| object.key.as_str()).collect();
+    assert_eq!((keys, parsed.skipped), (vec!["p/max.csv", "p/ok.csv"], 1));
+    assert_eq!(MAX_OBJECT_SIZE, u64::try_from(i64::MAX)?);
     Ok(())
 }
 
