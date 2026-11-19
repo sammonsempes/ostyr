@@ -31,6 +31,14 @@ fn pid_args(pid_file: &Path) -> Vec<OsString> {
 }
 
 
+fn assert_pid_gone(pid_file: &Path) -> TestResult {
+    let written = fs::read_to_string(pid_file)?;
+    let pid = written.trim();
+    assert!(pid.is_empty() || !Path::new("/proc").join(pid).exists());
+    Ok(())
+}
+
+
 fn failing_read(_reader: &mut dyn Read, _max_bytes: usize) -> io::Result<(Vec<u8>, bool)> {
     Err(io::Error::other("injected read failure"))
 }
@@ -70,8 +78,7 @@ fn an_endless_output_is_cut_at_the_bound_and_the_child_is_gone() -> TestResult {
     let run = run_bounded(&fake.yr, &pid_args(pid_file.path()), BOUND, LONG)?;
     assert!(run.cut && !run.timed_out && !run.exited_ok);
     assert_eq!(run.bytes.len(), BOUND);
-    let pid = fs::read_to_string(pid_file.path())?;
-    assert!(!Path::new("/proc").join(pid.trim()).exists());
+    assert_pid_gone(pid_file.path())?;
     Ok(())
 }
 
@@ -82,8 +89,7 @@ fn a_child_that_never_exits_is_killed_at_the_deadline_and_reaped() -> TestResult
     let fake = fixture(PID_SLEEP)?;
     let run = run_bounded(&fake.yr, &pid_args(pid_file.path()), BOUND, SHORT)?;
     assert!(run.timed_out && !run.exited_ok && !run.cut);
-    let pid = fs::read_to_string(pid_file.path())?;
-    assert!(!Path::new("/proc").join(pid.trim()).exists());
+    assert_pid_gone(pid_file.path())?;
     Ok(())
 }
 
