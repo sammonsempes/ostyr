@@ -1,6 +1,8 @@
-use crate::types::{SpoolLock, UpdateRunFn};
+use crate::types::{ReleaseFn, SpoolLock, UpdateRunFn};
 use patch_inventory::model::Limits;
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -35,6 +37,60 @@ pub const DEFAULT_MAX_SPOOL_BYTES: u64 = 67_108_864;
 
 
 pub const DEFAULT_MAX_LINES_PER_POLL: u64 = 10_000;
+
+
+pub const OSQUERYI_PATH: &str = "/usr/bin/osqueryi";
+
+
+pub const DEFAULT_OSQUERY_DEADLINE_SECONDS: u64 = 60;
+
+
+pub const MAX_OSQUERY_DEADLINE_SECONDS: u64 = 600;
+
+
+pub const PRLIMIT_PATH: &str = "/usr/bin/prlimit";
+
+
+pub const MIN_OSQUERY_MEMORY_BYTES: u64 = 67_108_864;
+
+
+pub const DEFAULT_OSQUERY_MEMORY_BYTES: u64 = 536_870_912;
+
+
+pub const MAX_OSQUERY_MEMORY_BYTES: u64 = 2_147_483_648;
+
+
+pub const MIN_OSQUERY_TEMP_BYTES: u64 = 65_536;
+
+
+pub const DEFAULT_OSQUERY_TEMP_BYTES: u64 = 262_144;
+
+
+pub const MAX_OSQUERY_TEMP_BYTES: u64 = 4_194_304;
+
+
+pub const MIN_OSQUERY_TEMP_TOTAL_BYTES: u64 = 16_777_216;
+
+
+pub const DEFAULT_OSQUERY_TEMP_TOTAL_BYTES: u64 = 33_554_432;
+
+
+pub const MAX_OSQUERY_TEMP_TOTAL_BYTES: u64 = 67_108_864;
+
+
+pub const TEMP_TOTAL_MEMORY_DIVISOR: u64 = 4;
+
+
+pub const UNSHARE_PATH: &str = "/usr/bin/unshare";
+
+
+pub const NSENTER_PATH: &str = "/usr/bin/nsenter";
+
+
+pub const MOUNT_PATH: &str = "/usr/bin/mount";
+
+
+pub const UMOUNT_PATH: &str = "/usr/bin/umount";
 
 
 pub const DEFAULT_SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
@@ -165,11 +221,53 @@ impl Default for UpdateSettings {
 }
 
 
+/// The live-reloaded osquery settings: the deadline, the address-space limit, the largest temp file and the total temp space (one tmpfs) of one query; every program path is a `const`, never a setting.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct OsquerySettings {
+    pub deadline_seconds: u64,
+    pub max_memory_bytes: u64,
+    pub max_temp_bytes: u64,
+    pub max_temp_total_bytes: u64,
+}
+
+
+impl Default for OsquerySettings {
+    fn default() -> Self {
+        Self {
+            deadline_seconds: DEFAULT_OSQUERY_DEADLINE_SECONDS,
+            max_memory_bytes: DEFAULT_OSQUERY_MEMORY_BYTES,
+            max_temp_bytes: DEFAULT_OSQUERY_TEMP_BYTES,
+            max_temp_total_bytes: DEFAULT_OSQUERY_TEMP_TOTAL_BYTES,
+        }
+    }
+}
+
+
+/// Where one query runs: `state_dir` holds the private logger directory, `trusted_uid` is the owner every checked path must have, `tools` the programs judged before a run (the `const` ones in production, `tool_paths`), `run` and `release` are injected.
+#[derive(Clone, Debug)]
+pub struct OsqueryEnv {
+    pub state_dir: PathBuf,
+    pub trusted_uid: u32,
+    pub run: UpdateRunFn,
+    pub release: ReleaseFn,
+    pub tools: Vec<PathBuf>,
+}
+
+
+/// The rows of one query, each a column to value map, and how many rows were refused alone for breaking a bound.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryRows {
+    pub rows: Vec<BTreeMap<String, String>>,
+    pub refused_rows: usize,
+}
+
+
 /// One command of the generalised bounded runner: `environment` of `None` inherits the agent's, `Some` clears it and sets exactly those variables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: PathBuf,
-    pub arguments: Vec<String>,
+    pub arguments: Vec<OsString>,
     pub environment: Option<Vec<(String, String)>>,
     pub accepted_codes: Vec<i32>,
     pub max_output: u64,
@@ -265,6 +363,8 @@ pub struct LinuxFile {
     pub sensor: SensorSettings,
     #[serde(default)]
     pub updates: UpdateSettings,
+    #[serde(default)]
+    pub osquery: OsquerySettings,
     #[serde(default = "default_systemctl_path")]
     pub systemctl_path: PathBuf,
     #[serde(default)]

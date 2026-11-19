@@ -10,6 +10,7 @@ use patch_inventory::error::InventoryError;
 use patch_inventory::model::{Device, SkipReason, Update};
 use patch_inventory::types::SkipCounts;
 use serde_json::{json, Map, Value};
+use std::ffi::OsString;
 use std::fs;
 use std::iter::once;
 use std::path::Path;
@@ -70,7 +71,7 @@ pub fn child_environment() -> Vec<(String, String)> {
 pub fn command(program: &str, arguments: &[&str], accepted_codes: &[i32], max_output: u64) -> CommandSpec {
     CommandSpec {
         program: program.into(),
-        arguments: arguments.iter().map(|argument| (*argument).to_owned()).collect(),
+        arguments: arguments.iter().map(OsString::from).collect(),
         environment: Some(child_environment()),
         accepted_codes: accepted_codes.to_vec(),
         max_output,
