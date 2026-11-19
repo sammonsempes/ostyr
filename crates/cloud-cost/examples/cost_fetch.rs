@@ -47,7 +47,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let deadline = Duration::from_secs(postgres.statement_timeout_secs);
     runtime.block_on(execute_script(&client, LEDGER_DDL, deadline))?;
     let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
-    let started = Instant::now();
     let exec = |sql: &str, params: &[String]| -> Result<Vec<Vec<String>>, LedgerFailure> {
         let bound: Vec<SqlParameter<'_>> = params.iter().map(|text| text as SqlParameter<'_>).collect();
         let rows = runtime
@@ -61,7 +60,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let load = |tenant: &str, export: &cloud_cost::source::Export| {
         let mut config = template.clone();
         config.tenant = tenant.to_owned();
-        load_table(&config, export, now, &|| started.elapsed())
+        let load_started = Instant::now();
+        load_table(&config, export, now, &|| load_started.elapsed())
     };
     let limits = Limits::default();
     let env = FetchEnv {
@@ -74,8 +74,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut out = stdout();
     writeln!(
         out,
-        "listed {} skipped_key {} already_loaded {} already_refused {} in_backoff {} loaded {} deferred {} incomplete_listings {} permanent_refused {} transient_refused {}",
-        report.listed, report.skipped_key, report.already_loaded, report.already_refused, report.in_backoff, report.loaded, report.deferred, report.incomplete_listings, report.permanent_refused, report.transient_refused
+        "listed {} skipped_key {} already_loaded {} already_refused {} in_backoff {} loaded {} deferred {} incomplete_listings {} permanent_refused {} transient_refused {} seen_full {} deletes_deferred {}",
+        report.listed, report.skipped_key, report.already_loaded, report.already_refused, report.in_backoff, report.loaded, report.deferred, report.incomplete_listings, report.permanent_refused, report.transient_refused, report.seen_full, report.deletes_deferred
     )?;
     writeln!(out, "refused {:?}", report.refused)?;
     writeln!(out, "failed_sources {:?}", report.failed_sources)?;

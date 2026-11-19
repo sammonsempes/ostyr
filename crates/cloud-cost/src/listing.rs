@@ -11,7 +11,7 @@ use std::time::Duration;
 use url::Url;
 
 
-pub const MAX_LIST_PAGES: usize = 100;
+pub const MAX_LIST_PAGES_PER_ROUND: usize = 10;
 
 
 pub const MAX_LIST_BYTES: u64 = 4_194_304;
@@ -315,7 +315,7 @@ pub fn walk_step(
 }
 
 
-/// At most `MAX_LIST_PAGES` pages from `start_after`; a listing still truncated after them is `incomplete` and names its last key.
+/// At most `MAX_LIST_PAGES_PER_ROUND` pages from `start_after`; a listing still truncated after them is `incomplete` and names its last key.
 pub fn list_objects(
     env: &FetchEnv<'_>,
     source: &FetchSource,
@@ -323,7 +323,7 @@ pub fn list_objects(
     credentials: &Credentials,
     start_after: Option<&str>,
 ) -> Result<Listing, FetchError> {
-    let walk = (0..MAX_LIST_PAGES).try_fold(Walk::default(), |walk, _page| {
+    let walk = (0..MAX_LIST_PAGES_PER_ROUND).try_fold(Walk::default(), |walk, _page| {
         walk_step(env, source, bucket, credentials, start_after, walk)
     })?;
     Ok(Listing {

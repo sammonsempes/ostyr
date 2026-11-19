@@ -8,7 +8,7 @@ use cloud_cost::fetch_error::{FetchError, HttpClass, HttpFailure};
 use cloud_cost::fetch_model::{FetchEnv, FetchSource, HttpResponse, ListedObject, Pending, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_OBJECTS};
 use cloud_cost::listing::{
     admit, cursor_key, decode_key, etag_ok, get_body, key_ok, list_objects, list_page, open_bucket, page_url, parse_page, MAX_ETAG_BYTES,
-    MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES, MAX_OBJECT_SIZE, MAX_TOKEN_BYTES, MAX_XML_DEPTH,
+    MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES_PER_ROUND, MAX_OBJECT_SIZE, MAX_TOKEN_BYTES, MAX_XML_DEPTH,
 };
 use cloud_cost::model::Limits;
 use rusty_s3::Credentials;
@@ -340,7 +340,7 @@ fn a_listing_still_truncated_after_the_page_cap_is_reported_incomplete() -> Test
         "<IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken>",
     ]);
     let (listing, calls) = walk(&|_index| reply(STATUS_OK, &endless))?;
-    assert_eq!(calls, MAX_LIST_PAGES);
+    assert_eq!(calls, MAX_LIST_PAGES_PER_ROUND);
     assert!(listing?.incomplete);
     Ok(())
 }
