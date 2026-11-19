@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use patch_inventory::model::Inventory;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,6 +24,10 @@ pub type StepFn = fn(&Paths);
 
 /// Reads a file under a byte cap: `None` when absent, an error when larger than the cap; a test double injects a failure.
 pub type ReadFn = fn(&Path, u64) -> Result<Option<Vec<u8>>, CapabilityError>;
+
+
+/// A step run between the anchor and the reopen of a regular file, given the directory handle and the name; a test double swaps the name there.
+pub type NameSwapFn = fn(&OwnedFd, &str);
 
 
 pub type SharedSensor = Arc<ArcSwap<SensorSettings>>;
@@ -80,3 +85,6 @@ pub type RowBuilderFn = fn(&str, &mut usize) -> Option<BTreeMap<String, String>>
 
 /// Drops one mount of the private namespace (the production function runs `umount`); a test double injects a failure.
 pub type ReleaseFn = fn(&std::path::Path) -> std::io::Result<()>;
+
+
+pub type ChildKillFn = fn(&mut std::process::Child) -> std::io::Result<()>;
