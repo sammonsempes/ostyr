@@ -2,6 +2,9 @@
 
 pub mod alert;
 pub mod alert_source;
+pub mod api;
+pub mod api_model;
+pub mod backend;
 pub mod channel;
 pub mod error;
 pub mod escalation;
