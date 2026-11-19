@@ -1,18 +1,15 @@
-#[path = "../../../cmdb/tests/pg/certs.rs"]
-mod certs;
-#[path = "../../../cmdb/tests/pg/fake.rs"]
-mod fake;
 mod types;
 
 
 use alerts::backend::{lease, MAX_CONNECTIONS};
 use alerts::error::StoreError as LeaseError;
-use certs::{loopback, make_pki};
 use core_audit::log::{append, genesis_log};
 use core_config::reload::{ReloadContext, ReloadEngine};
 use core_pg::scope::tenant_scope;
 use core_pg::settings::{open_settings, PgSettings};
-use fake::{Fake, Mode, Reply};
+use pg_fake::certs::{loopback, make_pki};
+use pg_fake::fake::{self, Fake, Mode, Reply};
+use pg_fake::types::Handler;
 use rcgen::SanType;
 use risk_score::backend::pg_backend;
 use risk_score::error::RiskError;
@@ -24,7 +21,7 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
-use types::{Handler, Running};
+use types::Running;
 
 
 const NOW: i64 = 1_800_000_000;
