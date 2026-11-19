@@ -53,6 +53,12 @@ pub const UNAVAILABLE_ID: &str = "unavailable";
 pub const UNMATCHED_ROUTE: &str = "unmatched";
 
 
+pub const OTHER_METHOD: &str = "OTHER";
+
+
+pub const KNOWN_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+
 pub const BEARER_PREFIX: &[u8] = b"Bearer ";
 
 
@@ -313,7 +319,9 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 pub fn route_of(request: &Request) -> String {
     let path = request.extensions().get::<MatchedPath>().map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    route_key(request.method().as_str(), path)
+    let method = request.method().as_str();
+    let known = if KNOWN_METHODS.contains(&method) { method } else { OTHER_METHOD };
+    route_key(known, path)
 }
 
 

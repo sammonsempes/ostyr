@@ -1682,3 +1682,35 @@ async fn the_audit_and_the_log_of_a_request_use_the_identity_that_admitted_it() 
     assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
     Ok(())
 }
+
+
+const LONG_METHOD_CHARS: usize = 400_000;
+
+
+const MAX_TARGET_CHARS: usize = 100;
+
+
+const MIN_OTHER_TARGETS: usize = 3;
+
+
+#[tokio::test]
+async fn an_unknown_method_is_audited_as_other_and_known_methods_keep_their_name() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let long_method = "M".repeat(LONG_METHOD_CHARS);
+    call(&fx.router, &long_method, "/auth/me", None).await?;
+    call(&fx.router, &long_method, "/auth/me", Some(&token)).await?;
+    call(&fx.router, "get", "/auth/me", Some(&token)).await?;
+    call(&fx.router, "DELETE", "/example/secret", Some(&token)).await?;
+    call(&fx.router, "PATCH", "/example/secret", Some(&token)).await?;
+    let targets: Vec<String> = audit_lines(&fx)?
+        .iter()
+        .filter_map(|line| line.get("target").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect();
+    assert!(targets.iter().all(|target| target.len() < MAX_TARGET_CHARS));
+    assert!(targets.iter().filter(|target| target.starts_with("OTHER ")).count() >= MIN_OTHER_TARGETS);
+    assert!(targets.iter().any(|target| target.starts_with("DELETE ")));
+    assert!(targets.iter().any(|target| target.starts_with("PATCH ")));
+    assert!(!targets.iter().any(|target| target.contains("MMMM") || target.starts_with("get ")));
+    Ok(())
+}
