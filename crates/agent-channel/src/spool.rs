@@ -1,5 +1,5 @@
 use crate::agent_app::AgentFile;
-use crate::app::{terminated_lines, BoundedLine};
+use crate::app::{terminated_lines, SpoolLine};
 use crate::error::AppError;
 use crate::model::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::proto::EventBatch;
@@ -119,22 +119,72 @@ pub fn line_limit(file: &AgentFile) -> usize {
 }
 
 
-/// The newline-ended text lines of a reader (an unterminated last line stays out), an oversized one (more than `limit` bytes) skipped with a counted log line (number, length, never the content).
-pub fn spool_texts<Input: BufRead>(reader: &mut Input, limit: usize) -> impl Iterator<Item = io::Result<String>> + '_ {
+/// The refused lines of a scan: lossy heads kept up to `MAX_REJECTED_BYTES`, how many were seen and how many did not fit.
+#[derive(Debug, Default)]
+pub struct RefusedLines {
+    pub lines: Vec<String>,
+    pub bytes: u64,
+    pub seen: u64,
+    pub dropped: u64,
+}
+
+
+/// Keeps a refused line's head while the kept bytes are under `MAX_REJECTED_BYTES`, otherwise counts it dropped.
+pub fn keep_refused(refused: &mut RefusedLines, head: String) {
+    refused.seen += 1;
+    if refused.bytes < MAX_REJECTED_BYTES {
+        refused.bytes += head.len() as u64 + 1;
+        refused.lines.push(head);
+    } else {
+        refused.dropped += 1;
+    }
+}
+
+
+/// The newline-ended text lines of a reader (an unterminated last line stays out); an oversized or non-UTF-8 line is skipped with a counted log line (number, length, offset, never the content), the lossy head of a non-UTF-8 one handed to `on_invalid`.
+pub fn spool_texts_with<'a, Input: BufRead>(
+    reader: &'a mut Input,
+    limit: usize,
+    on_invalid: &'a mut dyn FnMut(String),
+) -> impl Iterator<Item = io::Result<String>> + 'a {
     terminated_lines(reader, limit)
         .enumerate()
-        .scan(u64::MIN, |refused, (index, line)| {
+        .scan(u64::MIN, move |refused, (index, line)| {
             Some(match line {
-                Ok(BoundedLine::Text(text)) => Some(Ok(text)),
-                Ok(BoundedLine::Oversized { bytes }) => {
+                Ok(SpoolLine::Text(text)) => Some(Ok(text)),
+                Ok(SpoolLine::Oversized { bytes }) => {
                     *refused += 1;
                     tracing::warn!(line = index + 1, bytes, refused = *refused, "oversized spool line refused");
+                    None
+                }
+                Ok(SpoolLine::Invalid { valid_up_to, bytes, head }) => {
+                    *refused += 1;
+                    tracing::warn!(line = index + 1, bytes, valid_up_to, refused = *refused, "non-UTF-8 spool line refused");
+                    on_invalid(head);
                     None
                 }
                 Err(error) => Some(Err(error)),
             })
         })
         .flatten()
+}
+
+
+/// Writes the kept refused lines to `<spool>.rejected` (lossy text, capped like the quarantine); the lines that did not fit are logged by count.
+pub fn quarantine_refused(spool: &Path, refused: RefusedLines) -> io::Result<()> {
+    let dropped = refused.dropped;
+    if dropped > 0 {
+        tracing::warn!(dropped, "refused spool lines over the quarantine budget not kept");
+    }
+    let batches: Vec<EventBatch> = refused
+        .lines
+        .into_iter()
+        .map(|line| EventBatch {
+            ecs_json: line.into_bytes(),
+            ..EventBatch::default()
+        })
+        .collect();
+    quarantine(&suffixed(spool, REJECTED_SUFFIX), &batches, MAX_REJECTED_BYTES).map(|_| ())
 }
 
 
@@ -146,9 +196,19 @@ pub fn count_lines(path: &Path, limit: usize) -> io::Result<u64> {
 
 /// `count_lines` on an open file, read through that handle (a lock held on it does not refuse it).
 pub fn count_lines_of(file: &File, limit: usize) -> io::Result<u64> {
+    count_refused(file, limit).map(|(count, _)| count)
+}
+
+
+/// The count of `count_lines_of` and the non-UTF-8 lines met while counting.
+pub fn count_refused(file: &File, limit: usize) -> io::Result<(u64, RefusedLines)> {
     let mut reader = BufReader::new(file);
-    let taken = spool_texts(&mut reader, limit).take(MAX_SPOOL_BATCHES).collect::<io::Result<Vec<_>>>()?;
-    Ok(taken.len() as u64)
+    let mut refused = RefusedLines::default();
+    let mut keep = |head| keep_refused(&mut refused, head);
+    let taken = spool_texts_with(&mut reader, limit, &mut keep)
+        .take(MAX_SPOOL_BATCHES)
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok((taken.len() as u64, refused))
 }
 
 
@@ -371,7 +431,7 @@ pub fn quarantine(path: &Path, rejected: &[EventBatch], max_bytes: u64) -> io::R
         Ok(0)
     } else {
         let mut lines = match File::open(path) {
-            Ok(file) => spool_texts(&mut BufReader::new(&file), DEFAULT_MAX_MESSAGE_BYTES).collect::<io::Result<Vec<_>>>()?,
+            Ok(file) => spool_texts_with(&mut BufReader::new(&file), DEFAULT_MAX_MESSAGE_BYTES, &mut |_| ()).collect::<io::Result<Vec<_>>>()?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => Err(error)?,
         };
@@ -435,10 +495,13 @@ pub fn load_claimed(claimed: &File, spool: &Path, count: u64, limit: usize) -> i
     let mut stream = claimed;
     stream.rewind()?;
     let mut reader = BufReader::new(claimed);
-    let mut texts = spool_texts(&mut reader, limit);
+    let mut refused = RefusedLines::default();
+    let mut keep = |head| keep_refused(&mut refused, head);
+    let mut texts = spool_texts_with(&mut reader, limit, &mut keep);
     let wanted = usize::try_from(count).unwrap_or(MAX_SPOOL_BATCHES).min(MAX_SPOOL_BATCHES);
     let first = texts.by_ref().take(wanted).collect::<io::Result<Vec<_>>>()?;
     let returned = append_chunks(texts, spool)? > 0;
+    quarantine_refused(spool, refused)?;
     Ok((first, returned))
 }
 
@@ -483,13 +546,16 @@ pub fn claim_locked(file: &AgentFile, sending: &Path, spool: &File) -> Result<()
 }
 
 
-/// Sets the dead tail of the locked spool aside, counts its lines, records the sequences and renames it to `sending` (the lock and the checks of `claim_locked` stand for a no-replace rename); a spool without a complete line stays.
+/// Sets the dead tail of the locked spool aside, counts its lines (a spool of refused non-UTF-8 lines only is quarantined and emptied), records the sequences and renames it to `sending` (the lock and the checks of `claim_locked` stand for a no-replace rename); a spool without a complete line stays.
 pub fn claim_counted(file: &AgentFile, sending: &Path, spool: &File) -> Result<(), AppError> {
     cut_tail(&file.spool_file, spool)?;
     let mut stream = spool;
     stream.rewind()?;
-    let count = count_lines_of(spool, line_limit(file))?;
-    if count > 0 {
+    let (count, refused) = count_refused(spool, line_limit(file))?;
+    if count == 0 && refused.seen > 0 {
+        quarantine_refused(&file.spool_file, refused)?;
+        Ok(spool.set_len(0)?)
+    } else if count > 0 {
         let state = read_sequence(&file.sequence_file)?;
         let used = state
             .used

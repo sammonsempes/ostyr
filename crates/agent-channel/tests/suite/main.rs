@@ -14,6 +14,7 @@ mod server;
 mod services;
 mod settings;
 mod spool_append;
+mod spool_refused;
 mod state;
 mod tls;
 mod types;
