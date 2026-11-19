@@ -49,9 +49,6 @@ const DAYS_PARAM: usize = 2;
 const NOW_PARAM: usize = 3;
 
 
-const TO_PARAM: usize = 2;
-
-
 const EXTRA_ROWS: usize = 5;
 
 
@@ -218,11 +215,21 @@ fn model_store(store: &Store, tenant: &str, params: &[String]) -> Result<Vec<Vec
 }
 
 
-fn lookup_row(doc: &Value) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn nullable(doc: &Value, name: &str, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let guarded = sql.contains(&format!("coalesce({name}, '')"));
+    match doc.get(name).and_then(Value::as_str) {
+        Some(found) => Ok(found.to_string()),
+        None if guarded => Ok(String::new()),
+        None => Err("NULL column read as text".into()),
+    }
+}
+
+
+fn lookup_row(doc: &Value, sql: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     Ok(vec![
         text(doc, "address")?,
-        text(doc, "mac")?,
-        text(doc, "hostname")?,
+        nullable(doc, "mac", sql)?,
+        nullable(doc, "hostname", sql)?,
         number(doc, "starts")?.to_string(),
         number(doc, "ends")?.to_string(),
         text(doc, "action")?,
@@ -244,18 +251,17 @@ fn model_lookup(store: &Store, tenant: &str, sql: &str, params: &[String]) -> Re
         let at: i64 = param(1)?.parse()?;
         mine.into_iter()
             .filter(|doc| text(doc, "address").is_ok_and(|found| param(0).is_ok_and(|expected| found == expected)))
-            .filter(|doc| number(doc, "starts").is_ok_and(|starts| starts <= at) && number(doc, "ends").is_ok_and(|ends| ends > at))
+            .filter(|doc| number(doc, "starts").is_ok_and(|starts| starts <= at))
             .collect()
     } else {
-        let from: i64 = param(1)?.parse()?;
-        let to: i64 = param(TO_PARAM)?.parse()?;
+        let to: i64 = param(1)?.parse()?;
         mine.into_iter()
             .filter(|doc| text(doc, "mac").is_ok_and(|found| param(0).is_ok_and(|expected| found == expected)))
-            .filter(|doc| number(doc, "starts").is_ok_and(|starts| starts < to) && number(doc, "ends").is_ok_and(|ends| ends > from))
+            .filter(|doc| number(doc, "starts").is_ok_and(|starts| starts < to))
             .collect()
     };
     let limit: usize = params.last().ok_or("params")?.parse()?;
-    selected.into_iter().take(limit).map(lookup_row).collect()
+    selected.into_iter().take(limit).map(|doc| lookup_row(doc, sql)).collect()
 }
 
 
@@ -722,8 +728,10 @@ async fn bad_inputs_and_bad_answers_are_typed_errors() -> TestResult {
         store_history(short_exec, &scope, &HistorySettings::default(), NOW, &batch).await,
         Err(HistoryError::Answer)
     ));
-    assert!(matches!(lease_at(garbled_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
-    assert!(matches!(lease_at(wide_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
+    let garbled_found = lease_at(garbled_exec, &scope, "10.0.0.5", NOW).await?;
+    let wide_found = lease_at(wide_exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((garbled_found.intervals.len(), garbled_found.skipped), (0, 1));
+    assert_eq!((wide_found.intervals.len(), wide_found.skipped), (0, 1));
     assert!(matches!(lease_at(exec, &scope, "10.0.0.5 or 1=1", NOW).await, Err(HistoryError::Address)));
     assert!(matches!(
         lease_at(exec, &scope, "10.0.0.5", YEAR_10000).await,
@@ -779,18 +787,125 @@ async fn each_numeric_column_of_a_lookup_row_is_checked_and_empty_columns_are_no
         ..Store::default()
     };
     let good = Store {
-        shape: Some(vec![answer_row("1", "2", "3")]),
+        shape: Some(vec![answer_row("1", &(NOW + DAY).to_string(), "3")]),
         ..Store::default()
     };
     let ends_exec: Executor = &executor(&bad_ends);
     let subnet_exec: Executor = &executor(&bad_subnet);
     let good_exec: Executor = &executor(&good);
     let found = lease_at(good_exec, &scope, "10.0.0.5", NOW).await?;
-    assert!(matches!(lease_at(ends_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
-    assert!(matches!(lease_at(subnet_exec, &scope, "10.0.0.5", NOW).await, Err(HistoryError::Answer)));
+    let ends_found = lease_at(ends_exec, &scope, "10.0.0.5", NOW).await?;
+    let subnet_found = lease_at(subnet_exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((ends_found.intervals.len(), ends_found.skipped), (0, 1));
+    assert_eq!((subnet_found.intervals.len(), subnet_found.skipped), (0, 1));
+    assert_eq!(found.skipped, 0);
     assert_eq!(
         found.intervals.first().map(|interval| (interval.mac.clone(), interval.hostname.clone())),
         Some((None, None))
     );
     Ok(())
 }
+
+
+#[tokio::test]
+async fn nullable_columns_are_read_and_leases_without_mac_or_hostname_stay_visible() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let bare = [
+        lease("10.0.0.7", MAC_A, NOW, NOW + DAY, "")?,
+        lease("10.0.0.7", MAC_A, NOW - DAY, NOW + DAY, "evil host")?,
+    ];
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &bare).await?;
+    let found = lease_at(exec, &scope, "10.0.0.7", NOW + 1).await?;
+    assert!(AT_SQL.contains("coalesce(mac, '')") && AT_SQL.contains("coalesce(hostname, '')"));
+    assert!(MAC_SQL.contains("coalesce(mac, '')") && MAC_SQL.contains("coalesce(hostname, '')"));
+    assert_eq!((found.intervals.len(), found.skipped), (PAIR, 0));
+    assert!(found.intervals.iter().all(|interval| interval.hostname.is_none()));
+    Ok(())
+}
+
+
+fn counting<'a, 'b>(
+    inner: &'b (dyn Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'a> + Sync),
+    served: &'b Arc<Mutex<Vec<usize>>>,
+) -> impl Fn(TenantScope, &'static str, Vec<String>) -> RowFuture<'a> + Sync + 'b {
+    move |scope, sql, params| -> RowFuture<'a> {
+        let pending = inner(scope, sql, params);
+        let tally = Arc::clone(served);
+        Box::pin(async move {
+            let rows = pending.await?;
+            tally.lock().map_err(|_poisoned| PgError::InvalidTenant)?.push(rows.len());
+            Ok(rows)
+        })
+    }
+}
+
+
+fn short_leases(count: usize, base: i64) -> Result<Vec<Converted>, Box<dyn std::error::Error>> {
+    (0..count)
+        .map(|index| {
+            let starts = base + i64::try_from(index)?;
+            lease("10.0.0.5", "aa:bb:cc:dd:ee:01", starts, starts + 1, "pc")
+        })
+        .collect()
+}
+
+
+#[tokio::test]
+async fn a_lookup_in_a_gap_reads_at_most_one_more_candidate_than_the_bound_and_says_truncated() -> TestResult {
+    let store = Store::default();
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let plain = executor(&store);
+    let inner: Executor = &plain;
+    let counted = counting(inner, &served);
+    let exec: Executor = &counted;
+    let scope = tenant_scope("acme")?;
+    store_history(inner, &scope, &HistorySettings::default(), NOW, &short_leases(MANY, NOW)?).await?;
+    let gap_at = lease_at(exec, &scope, "10.0.0.5", NOW + DAY).await?;
+    let gap_mac = leases_of_mac(exec, &scope, MAC_A, NOW + DAY, NOW + DAY * PAIR_DAYS).await?;
+    let rows_read = served.lock().map_err(|_poisoned| "poisoned")?.clone();
+    assert_eq!(rows_read, vec![MAX_LOOKUP_ROWS + 1, MAX_LOOKUP_ROWS + 1]);
+    assert_eq!((gap_at.intervals.len(), gap_at.truncated), (0, true));
+    assert_eq!((gap_mac.intervals.len(), gap_mac.truncated), (0, true));
+    assert!(!AT_SQL.contains("ends >") && !MAC_SQL.contains("ends >"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_old_long_lease_behind_many_newer_candidates_is_reported_truncated_never_complete() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let long = lease("10.0.0.5", "aa:bb:cc:dd:ee:01", NOW - DAY, NOW + DAY, "victim")?;
+    let batch = [vec![long], short_leases(MAX_LOOKUP_ROWS + 1, NOW)?].concat();
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &batch).await?;
+    let found = lease_at(exec, &scope, "10.0.0.5", NOW + DAY - 1).await?;
+    let by_mac = leases_of_mac(exec, &scope, MAC_A, NOW + DAY - 1, NOW + DAY).await?;
+    assert!(found.truncated && by_mac.truncated);
+    assert!(found.intervals.is_empty() && by_mac.intervals.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_time_the_range_cannot_hold_skips_the_row() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let sentinel = Store {
+        shape: Some(vec![
+            answer_row("", "2", "3"),
+            answer_row("1", "", "3"),
+            answer_row("1", "253402300801", "3"),
+            answer_row("-1", "2", "3"),
+        ]),
+        ..Store::default()
+    };
+    let exec: Executor = &executor(&sentinel);
+    let found = lease_at(exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((found.intervals.len(), found.skipped), (0, SENTINEL_ROWS));
+    Ok(())
+}
+
+
+const SENTINEL_ROWS: usize = 4;

@@ -45,16 +45,20 @@ pub const STORE_SQL: &str =
                              FROM dhcp_history_store($1, $2::text::jsonb, $3::text::bigint, $4::text::bigint, $5::text::bigint)";
 
 
-pub const AT_SQL: &str = "SELECT host(address), mac, hostname, extract(epoch FROM starts)::bigint::text, extract(epoch FROM ends)::bigint::text, \
+pub const AT_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(hostname, ''), \
+                          CASE WHEN isfinite(starts) THEN extract(epoch FROM starts)::bigint::text ELSE '' END, \
+                          CASE WHEN isfinite(ends) THEN extract(epoch FROM ends)::bigint::text ELSE '' END, \
                           action, subnet_id::text FROM dhcp_lease_history \
-                          WHERE tenant = $1 AND address = $2::text::inet AND starts <= to_timestamp($3::text::bigint) AND ends > to_timestamp($3::text::bigint) \
+                          WHERE tenant = $1 AND address = $2::text::inet AND starts <= to_timestamp($3::text::bigint) \
                           ORDER BY starts DESC LIMIT $4::text::bigint";
 
 
-pub const MAC_SQL: &str = "SELECT host(address), mac, hostname, extract(epoch FROM starts)::bigint::text, extract(epoch FROM ends)::bigint::text, \
+pub const MAC_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(hostname, ''), \
+                           CASE WHEN isfinite(starts) THEN extract(epoch FROM starts)::bigint::text ELSE '' END, \
+                           CASE WHEN isfinite(ends) THEN extract(epoch FROM ends)::bigint::text ELSE '' END, \
                            action, subnet_id::text FROM dhcp_lease_history \
-                           WHERE tenant = $1 AND mac = $2 AND starts < to_timestamp($4::text::bigint) AND ends > to_timestamp($3::text::bigint) \
-                           ORDER BY starts DESC LIMIT $5::text::bigint";
+                           WHERE tenant = $1 AND mac = $2 AND starts < to_timestamp($3::text::bigint) \
+                           ORDER BY starts DESC LIMIT $4::text::bigint";
 
 
 /// The per-tenant row cap and the retention in days.
@@ -102,10 +106,11 @@ pub struct LeaseInterval {
 }
 
 
-/// A lookup answer: at most `MAX_LOOKUP_ROWS` intervals, newest first, and whether more matched.
+/// A lookup answer: at most `MAX_LOOKUP_ROWS` intervals, newest first, the stored rows that could not be read, and whether more matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupResult {
     pub intervals: Vec<LeaseInterval>,
+    pub skipped: usize,
     pub truncated: bool,
 }
 
@@ -116,7 +121,7 @@ pub fn check_settings(settings: &HistorySettings) -> Result<(), HistoryError> {
 }
 
 
-fn in_range(seconds: i64) -> bool {
+pub fn in_range(seconds: i64) -> bool {
     u64::try_from(seconds).is_ok_and(|found| found <= MAX_DAY_SECONDS)
 }
 
@@ -263,42 +268,42 @@ fn interval_of(row: &[String]) -> Option<LeaseInterval> {
         address: address.clone(),
         mac: optional(mac),
         hostname: optional(hostname),
-        starts: starts.parse().ok()?,
-        ends: ends.parse().ok()?,
+        starts: starts.parse().ok().filter(|found| in_range(*found))?,
+        ends: ends.parse().ok().filter(|found| in_range(*found))?,
         action: action.clone(),
         subnet_id: subnet_id.parse().ok()?,
     })
 }
 
 
-fn bounded(rows: &[Vec<String>]) -> Result<LookupResult, HistoryError> {
-    let intervals: Vec<LeaseInterval> = rows
-        .iter()
-        .take(MAX_LOOKUP_ROWS)
-        .map(|row| interval_of(row).ok_or(HistoryError::Answer))
-        .collect::<Result<_, _>>()?;
-    Ok(LookupResult {
+/// The first `MAX_LOOKUP_ROWS` candidates (newest first, bounded by `starts` in SQL) that end after `after`; a row `interval_of` refuses is skipped and counted, `truncated` says the candidate cap was reached.
+fn bounded(rows: &[Vec<String>], after: i64) -> LookupResult {
+    let read: Vec<Option<LeaseInterval>> = rows.iter().take(MAX_LOOKUP_ROWS).map(|row| interval_of(row)).collect();
+    let parsed: Vec<LeaseInterval> = read.iter().flatten().cloned().collect();
+    let intervals: Vec<LeaseInterval> = parsed.iter().filter(|interval| interval.ends > after).cloned().collect();
+    LookupResult {
+        skipped: read.len() - parsed.len(),
         intervals,
         truncated: rows.len() > MAX_LOOKUP_ROWS,
-    })
+    }
 }
 
 
-/// The intervals of the tenant's address with `starts <= at < ends`, newest first.
+/// The intervals of the tenant's address with `starts <= at < ends` among the newest `MAX_LOOKUP_ROWS` candidates with `starts <= at`, newest first.
 pub async fn lease_at(exec: Executor<'_, '_>, scope: &TenantScope, address: &str, at: i64) -> Result<LookupResult, HistoryError> {
     let parsed = IpAddr::from_str(address).map_err(|_bad| HistoryError::Address)?;
     in_range(at).then_some(()).ok_or(HistoryError::TimeRange)?;
     let limit = MAX_LOOKUP_ROWS + 1;
     let rows = exec(scope.clone(), AT_SQL, vec![parsed.to_string(), at.to_string(), limit.to_string()]).await?;
-    bounded(&rows)
+    Ok(bounded(&rows, at))
 }
 
 
-/// The intervals of the tenant's MAC overlapping `from..to`, newest first.
+/// The intervals of the tenant's MAC overlapping `from..to` among the newest `MAX_LOOKUP_ROWS` candidates with `starts < to`, newest first.
 pub async fn leases_of_mac(exec: Executor<'_, '_>, scope: &TenantScope, mac: &str, from: i64, to: i64) -> Result<LookupResult, HistoryError> {
     let normal = normalise_mac(mac).ok_or(HistoryError::Mac)?;
     (in_range(from) && in_range(to)).then_some(()).ok_or(HistoryError::TimeRange)?;
     let limit = MAX_LOOKUP_ROWS + 1;
-    let rows = exec(scope.clone(), MAC_SQL, vec![normal, from.to_string(), to.to_string(), limit.to_string()]).await?;
-    bounded(&rows)
+    let rows = exec(scope.clone(), MAC_SQL, vec![normal, to.to_string(), limit.to_string()]).await?;
+    Ok(bounded(&rows, from))
 }

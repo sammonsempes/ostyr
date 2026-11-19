@@ -72,4 +72,8 @@ pub enum HistoryError {
     Mac,
     #[error("the store answered an unexpected shape")]
     Answer,
+    #[error("the time window is reversed or wider than the lookup allows")]
+    Window,
+    #[error("too many requests in flight")]
+    Busy,
 }

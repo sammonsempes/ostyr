@@ -1245,10 +1245,10 @@ fn release_held_until_go(path: &Path) -> io::Result<()> {
 
 
 async fn wait_for_calls(log: &Path, prefix: &str, count: usize) -> io::Result<()> {
-    let mut spins = 0;
-    while real_calls(log)?.iter().filter(|line| line.starts_with(prefix)).count() < count && spins < MAX_SPINS {
-        tokio::task::yield_now().await;
-        spins += 1;
+    let mut polls = 0;
+    while real_calls(log)?.iter().filter(|line| line.starts_with(prefix)).count() < count && polls < MARKER_POLLS {
+        tokio::time::sleep(std::time::Duration::from_millis(MARKER_POLL_MILLISECONDS)).await;
+        polls += 1;
     }
     Ok(())
 }
@@ -1269,25 +1269,32 @@ async fn a_cancelled_query_keeps_the_lock_until_its_release_has_finished() -> Te
     };
     assert_eq!(first_ended, None);
     drop(first);
-    let mut second = Box::pin(run_query(&env, &fixture.settings, "SELECT 2"));
-    let second_ended = tokio::select! {
-        outcome = &mut second => Some(outcome.is_ok()),
-        () = idle() => None,
-    };
-    assert_eq!(second_ended, None);
+    let probe = agent_linux::osquery::open_lock_file(&fixture.state, trusted_uid())?;
+    assert!(matches!(agent_linux::osquery::lock_exclusive(&probe, 0).await, Err(OsqueryError::Busy)));
     let during = real_calls(&log)?;
     assert_eq!(during.iter().filter(|line| line.starts_with("umount")).count(), RELEASES_BEFORE_CANCEL);
     assert_eq!(during.iter().filter(|line| line.starts_with("mount")).count(), MOUNTS_OF_ONE_RUN);
     fs::write(fixture.state.join(GO_FILE), b"")?;
-    assert!(second.await?.rows.is_empty());
+    agent_linux::osquery::lock_exclusive(&probe, MARKER_POLLS).await?;
+    drop(probe);
+    assert!(run_query(&env, &fixture.settings, "SELECT 2").await?.rows.is_empty());
     Ok(())
 }
 
 
-async fn idle() {
-    for _ in 0..IDLE_SPINS {
-        tokio::task::yield_now().await;
-    }
+#[test]
+fn the_proc_directory_is_accepted_only_on_procfs() -> TestResult {
+    let fixture = fixture()?;
+    agent_linux::osquery::open_procfs_dir(Path::new("/proc/self/fd"), "x")?;
+    assert!(matches!(
+        agent_linux::osquery::open_procfs_dir(&fixture.state, "forged"),
+        Err(OsqueryError::Untrusted("forged"))
+    ));
+    assert!(matches!(
+        agent_linux::osquery::open_procfs_dir(&fixture.state.join("missing"), "x"),
+        Err(OsqueryError::Spawn(_))
+    ));
+    Ok(())
 }
 
 

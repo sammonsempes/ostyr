@@ -5,7 +5,7 @@ use crate::model::{
 use crate::types::{ChildKillFn, ReleaseFn, RowBuilderFn};
 use crate::updates::child_environment;
 use core_config::trusted_dir::{open_trusted_dir, TrustedDirError};
-use rustix::fs::{flock, fstat, mkdirat, open, openat, FileType, FlockOperation, Mode, OFlags};
+use rustix::fs::{flock, fstat, fstatfs, mkdirat, open, openat, FileType, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC};
 use rustix::io::Errno;
 use serde::de::IgnoredAny;
 use serde_json::value::RawValue;
@@ -265,15 +265,26 @@ pub fn open_regular(directory: &OwnedFd, name: &str, not_regular: &'static str) 
 }
 
 
-/// Judges an `O_PATH` anchor (a device, a FIFO, a socket or a link is `Untrusted`) and reopens the regular file it pins.
+/// Judges an `O_PATH` anchor (a device, a FIFO, a socket or a link is `Untrusted`) and reopens the regular file it pins through the procfs directory handle.
 pub fn reopen_regular(anchor: &OwnedFd, not_regular: &'static str) -> Result<OwnedFd, OsqueryError> {
     let stat = fstat(anchor).map_err(errno_error)?;
     (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
         .then_some(())
         .ok_or(OsqueryError::Untrusted(not_regular))?;
-    let file = open(format!("{PROC_FD_DIR}/{}", anchor.as_raw_fd()), REOPEN_FLAGS, Mode::empty()).map_err(errno_error)?;
+    let proc_dir = open_procfs_dir(Path::new(PROC_FD_DIR), not_regular)?;
+    let file = openat(&proc_dir, anchor.as_raw_fd().to_string(), REOPEN_FLAGS, Mode::empty()).map_err(errno_error)?;
     let reopened = fstat(&file).map_err(errno_error)?;
     same_identity((stat.st_dev, stat.st_ino), (reopened.st_dev, reopened.st_ino), not_regular).map(|()| file)
+}
+
+
+/// Opens a directory (no driver `open` runs on a directory) and accepts it only on procfs: a forged `/proc` (a root-only mount) could point `fd/N` at a device.
+pub fn open_procfs_dir(path: &Path, not_regular: &'static str) -> Result<OwnedFd, OsqueryError> {
+    let directory = open(path, DIRECTORY_FLAGS, Mode::empty()).map_err(errno_error)?;
+    let filesystem = fstatfs(&directory).map_err(errno_error)?;
+    (filesystem.f_type == PROC_SUPER_MAGIC)
+        .then_some(directory)
+        .ok_or(OsqueryError::Untrusted(not_regular))
 }
 
 

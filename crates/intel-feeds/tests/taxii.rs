@@ -879,6 +879,46 @@ impl Write for Capture {
 }
 
 
+const DUMP_TARGET: &str = "ureq_proto::util: ";
+
+
+const DUMP_HEX_CHARS: usize = 40;
+
+
+const DUMP_ASCII_SKIP: usize = 41;
+
+
+const DUMP_ASCII_CHARS: usize = 16;
+
+
+const HEX_RADIX: u32 = 16;
+
+
+const HEX_CHARS_PER_BYTE: usize = 2;
+
+
+fn dump_text(logged: &str) -> (String, String) {
+    let rows: Vec<&str> = logged
+        .lines()
+        .filter_map(|line| line.split_once(DUMP_TARGET).map(|(_, row)| row))
+        .collect();
+    let bytes: Vec<u8> = rows
+        .iter()
+        .flat_map(|row| {
+            let hex: Vec<char> = row.chars().take(DUMP_HEX_CHARS).filter(|ch| !ch.is_whitespace()).collect();
+            hex.chunks(HEX_CHARS_PER_BYTE)
+                .filter_map(|pair| u8::from_str_radix(&pair.iter().collect::<String>(), HEX_RADIX).ok())
+                .collect::<Vec<u8>>()
+        })
+        .collect();
+    let ascii: String = rows
+        .iter()
+        .flat_map(|row| row.chars().skip(DUMP_ASCII_SKIP).take(DUMP_ASCII_CHARS))
+        .collect();
+    (String::from_utf8_lossy(&bytes).into_owned(), ascii)
+}
+
+
 #[test]
 fn a_trace_subscriber_never_sees_the_credentials_or_the_body() -> TestResult {
     LazyLock::force(&ANCHOR);
@@ -887,6 +927,7 @@ fn a_trace_subscriber_never_sees_the_credentials_or_the_body() -> TestResult {
     let writer = capture.clone();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
     let body = format!("{{\"more\":false,\"objects\":[{{\"type\":\"x\",\"note\":\"{BODY_MARK}\"}}]}}");
@@ -911,10 +952,13 @@ fn a_trace_subscriber_never_sees_the_credentials_or_the_body() -> TestResult {
     assert!(logged.contains("taxii poll finished"), "{logged}");
     assert!(logged.contains("ureq"), "{logged}");
     let encoded = STANDARD.encode(format!("{USER}:{PASSWORD}"));
-    assert!(
-        !logged.contains(PASSWORD) && !logged.contains(&encoded) && !logged.contains(BODY_MARK),
-        "{logged}"
-    );
-    assert!(!logged.to_ascii_lowercase().contains("authorization"), "{logged}");
+    let (decoded, ascii) = dump_text(&logged);
+    [logged.as_str(), decoded.as_str(), ascii.as_str()].iter().for_each(|text| {
+        assert!(
+            !text.contains(PASSWORD) && !text.contains(&encoded) && !text.contains(BODY_MARK),
+            "{text}"
+        );
+        assert!(!text.to_ascii_lowercase().contains("authorization"), "{text}");
+    });
     Ok(())
 }
