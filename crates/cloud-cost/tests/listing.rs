@@ -7,8 +7,9 @@ mod walk_types;
 use cloud_cost::fetch_error::{FetchError, HttpClass, HttpFailure};
 use cloud_cost::fetch_model::{FetchEnv, FetchSource, HttpResponse, ListedObject, Pending, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_OBJECTS};
 use cloud_cost::listing::{
-    admit, cursor_key, decode_key, etag_ok, get_body, key_ok, list_objects, list_page, open_bucket, page_url, parse_page, MAX_ETAG_BYTES,
-    MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES, MAX_OBJECT_SIZE, MAX_TOKEN_BYTES, MAX_XML_DEPTH,
+    admit, cursor_key, decode_key, etag_ok, get_body, key_ok, list_objects, list_page, listed_bytes, open_bucket, page_url, parse_page,
+    LIST_WINDOW_STOP_BYTES, MAX_ETAG_BYTES, MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LISTED_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES_PER_ROUND,
+    MAX_OBJECT_SIZE, MAX_TOKEN_BYTES, MAX_XML_DEPTH,
 };
 use cloud_cost::model::Limits;
 use rusty_s3::Credentials;
@@ -340,7 +341,7 @@ fn a_listing_still_truncated_after_the_page_cap_is_reported_incomplete() -> Test
         "<IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken>",
     ]);
     let (listing, calls) = walk(&|_index| reply(STATUS_OK, &endless))?;
-    assert_eq!(calls, MAX_LIST_PAGES);
+    assert_eq!(calls, MAX_LIST_PAGES_PER_ROUND);
     assert!(listing?.incomplete);
     Ok(())
 }
@@ -471,5 +472,34 @@ fn a_listing_resumes_after_its_cursor_and_names_its_last_key_when_cut() -> TestR
     let blank = page(&["<IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken>"]);
     let ((kept, _), _) = walk_from(&|_index| reply(STATUS_OK, &blank), Some("p/start.csv"))?;
     assert_eq!(kept?.last_key.as_deref(), Some("p/start.csv"));
+    Ok(())
+}
+
+
+const LONG_PAD: usize = 990;
+
+
+const LONG_KEYS_PER_PAGE: usize = 1000;
+
+
+const PAGES_TO_REACH_THE_STOP: usize = 3;
+
+
+#[test]
+fn a_window_of_long_keys_stops_the_walk_after_the_page_that_reaches_the_byte_stop() -> TestResult {
+    let entries: Vec<String> = (0..LONG_KEYS_PER_PAGE)
+        .map(|number| entry(&format!("p/{}{number:04}.csv", "a".repeat(LONG_PAD)), "e", "1"))
+        .collect();
+    let mut parts: Vec<&str> = entries.iter().map(String::as_str).collect();
+    parts.push("<IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken>");
+    let endless = page(&parts);
+    let (listing, calls) = walk(&|_index| reply(STATUS_OK, &endless))?;
+    let walked = listing?;
+    assert_eq!(calls, PAGES_TO_REACH_THE_STOP);
+    assert!(walked.incomplete);
+    assert!(listed_bytes(&walked.objects) >= LIST_WINDOW_STOP_BYTES);
+    assert!(listed_bytes(&walked.objects) <= MAX_LISTED_BYTES);
+    assert!(calls < MAX_LIST_PAGES_PER_ROUND);
+    assert_eq!(walked.last_key.as_deref().map(str::len), Some(LONG_PAD + TWO + "0000.csv".len()));
     Ok(())
 }

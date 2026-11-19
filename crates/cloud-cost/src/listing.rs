@@ -11,7 +11,7 @@ use std::time::Duration;
 use url::Url;
 
 
-pub const MAX_LIST_PAGES: usize = 100;
+pub const MAX_LIST_PAGES_PER_ROUND: usize = 10;
 
 
 pub const MAX_LIST_BYTES: u64 = 4_194_304;
@@ -30,6 +30,14 @@ pub const MAX_XML_DEPTH: usize = 6;
 
 
 pub const MAX_ETAG_BYTES: usize = 128;
+
+
+/// A round's walk stops after the page that brings the key and ETag bytes of its window to this, so the work of one sync follows bytes, not only rows.
+pub const LIST_WINDOW_STOP_BYTES: usize = 2_097_152;
+
+
+/// The most key and ETag bytes one window holds: the stop plus one more page of the longest admitted keys and ETags.
+pub const MAX_LISTED_BYTES: usize = LIST_WINDOW_STOP_BYTES + MAX_KEYS_PER_PAGE * (MAX_KEY_BYTES + MAX_ETAG_BYTES);
 
 
 /// The ledger stores the size as a `bigint`: a larger one skips that object alone.
@@ -292,6 +300,12 @@ pub fn list_page(
 }
 
 
+/// Key and ETag bytes of the objects.
+pub fn listed_bytes(objects: &[ListedObject]) -> usize {
+    objects.iter().map(|object| object.key.len() + object.etag.len()).sum()
+}
+
+
 pub fn walk_step(
     env: &FetchEnv<'_>,
     source: &FetchSource,
@@ -300,7 +314,7 @@ pub fn walk_step(
     start_after: Option<&str>,
     walk: Walk,
 ) -> Result<Walk, FetchError> {
-    if walk.done {
+    if walk.done || listed_bytes(&walk.objects) >= LIST_WINDOW_STOP_BYTES {
         Ok(walk)
     } else {
         let page = list_page(env, source, bucket, credentials, walk.token.as_deref(), start_after)?;
@@ -315,7 +329,7 @@ pub fn walk_step(
 }
 
 
-/// At most `MAX_LIST_PAGES` pages from `start_after`; a listing still truncated after them is `incomplete` and names its last key.
+/// At most `MAX_LIST_PAGES_PER_ROUND` pages, fewer once the window holds `LIST_WINDOW_STOP_BYTES`, from `start_after`; a listing still truncated after them is `incomplete` and names its last key.
 pub fn list_objects(
     env: &FetchEnv<'_>,
     source: &FetchSource,
@@ -323,7 +337,7 @@ pub fn list_objects(
     credentials: &Credentials,
     start_after: Option<&str>,
 ) -> Result<Listing, FetchError> {
-    let walk = (0..MAX_LIST_PAGES).try_fold(Walk::default(), |walk, _page| {
+    let walk = (0..MAX_LIST_PAGES_PER_ROUND).try_fold(Walk::default(), |walk, _page| {
         walk_step(env, source, bucket, credentials, start_after, walk)
     })?;
     Ok(Listing {

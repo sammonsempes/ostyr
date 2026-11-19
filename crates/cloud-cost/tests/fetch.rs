@@ -3,19 +3,21 @@ mod types;
 
 
 use cloud_cost::fetch::{
-    fetch_new, fetch_source, gunzip_capped, key_digest, load_class, load_refusal, merge_reports, parse_credentials, read_credentials, remembered,
-    DIGEST_CHARS, MAX_CREDENTIAL_BYTES, TRANSIENT_BUDGET,
+    fetch_new, fetch_source, gunzip_capped, key_digest, load_class, load_refusal, merge_reports, order_by_seen, parse_credentials, read_credentials,
+    remembered, DIGEST_CHARS, MAX_CREDENTIAL_BYTES, TRANSIENT_BUDGET,
 };
 use cloud_cost::fetch_error::{FetchError, HttpClass, HttpFailure, LedgerFailure, Refusal};
 use cloud_cost::fetch_model::{
-    FetchEnv, FetchReport, FetchSettings, FetchSource, HttpRequest, HttpResponse, Remembered, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_OBJECTS,
+    FetchEnv, FetchReport, FetchSettings, FetchSource, HttpRequest, HttpResponse, ListedObject, Remembered, SeenWindow, DEFAULT_FETCH_TIMEOUT_MS,
+    DEFAULT_MAX_OBJECTS,
 };
 use cloud_cost::ledger::{
-    backoff_ms, object_state, parse_backoff, read_cursor, record_loaded, record_refused, record_transient, write_cursor, LedgerState,
-    BACKOFF_BASE_MS, BACKOFF_MAX_MS, DELETE_CURSOR, INSERT_OBJECT, LEDGER_DDL, REFUSED_PREFIX, SELECT_CURSOR, SELECT_OBJECT, TRANSIENT_PREFIX,
-    UPSERT_CURSOR,
+    backoff_ms, latest_backoff, object_state, parse_backoff, read_cursor, record_loaded, record_refused, record_transient, sync_seen, waiting,
+    write_cursor, LedgerState, BACKOFF_BASE_MS, BACKOFF_MAX_MS, DEFERRED_PREFIX, DEFERRED_ROW_KEY, DELETE_CURSOR, INSERT_OBJECT, LEDGER_DDL,
+    MAX_LISTED_OBJECTS, MAX_LISTING_TEXT_BYTES, MAX_SEEN_BYTES_PER_SOURCE, MAX_SEEN_DELETES_PER_SYNC, MAX_SEEN_ROWS_PER_SOURCE, REFUSED_PREFIX,
+    SELECT_CURSOR, SELECT_LATEST, SELECT_OBJECT, SYNC_SEEN, TRANSIENT_PREFIX, UNRECORDED, UPSERT_CURSOR,
 };
-use cloud_cost::listing::{MAX_LIST_BYTES, MAX_LIST_PAGES};
+use cloud_cost::listing::{MAX_ETAG_BYTES, MAX_KEYS_PER_PAGE, MAX_KEY_BYTES, MAX_LISTED_BYTES, MAX_LIST_BYTES, MAX_LIST_PAGES_PER_ROUND};
 use cloud_cost::load::{BatchFailure, LoadError, LoadOutcome};
 use cloud_cost::model::Limits;
 use cloud_cost::source::Export;
@@ -72,6 +74,15 @@ const STATUS_FORBIDDEN: u16 = 403;
 const THREE: usize = 3;
 
 
+const FOUR: usize = 4;
+
+
+const FIVE: usize = 5;
+
+
+const SIX: usize = 6;
+
+
 const HOSTILE: usize = 25;
 
 
@@ -100,6 +111,9 @@ const KEY_FIELD: usize = 2;
 
 
 const DIGEST_FIELD: usize = 5;
+
+
+const LOADED_AT_FIELD: usize = 6;
 
 
 #[cfg(unix)]
@@ -208,11 +222,17 @@ fn serve(fake: &Fake, request: &HttpRequest) -> Reply {
 struct Ledger {
     rows: RefCell<BTreeMap<Vec<String>, String>>,
     cursors: RefCell<BTreeMap<(String, String), String>>,
+    seen: RefCell<BTreeMap<(String, String, String, String), u64>>,
+    cap: Cell<Option<usize>>,
+    rounds: RefCell<BTreeMap<(String, String), u64>>,
+    stamps: RefCell<BTreeMap<Vec<String>, u64>>,
     calls: RefCell<Vec<(String, Vec<String>)>>,
     fail_select: Cell<bool>,
     fail_insert: Cell<bool>,
     fail_cursor_read: Cell<bool>,
     fail_cursor_write: Cell<bool>,
+    fail_sync: Cell<bool>,
+    fail_latest: Cell<bool>,
 }
 
 
@@ -249,15 +269,122 @@ fn exec(ledger: &Ledger, sql: &str, params: &[String]) -> Result<Vec<Vec<String>
             };
             Ok(Vec::new())
         }
+    } else if sql == SYNC_SEEN {
+        sync(ledger, owner, params)
+    } else if sql == SELECT_LATEST {
+        latest(ledger, owner, params)
     } else if ledger.fail_insert.get() {
         Err(LedgerFailure)
     } else {
         let digest = params.get(DIGEST_FIELD).cloned().ok_or(LedgerFailure)?;
         let mut rows = ledger.rows.borrow_mut();
         if rows.get(&identity).is_none_or(|stored| stored.starts_with(TRANSIENT_PREFIX)) {
+            let written_at = params.get(LOADED_AT_FIELD).and_then(|text| text.parse().ok()).unwrap_or(0);
+            ledger.stamps.borrow_mut().insert(identity.clone(), written_at);
             rows.insert(identity, digest);
         }
         Ok(Vec::new())
+    }
+}
+
+
+fn pending(ledger: &Ledger, owner: &(String, String), listing: &[serde_json::Value]) -> BTreeSet<(String, String)> {
+    let text = |item: &serde_json::Value, name: &str| item.get(name).and_then(|value| value.as_str()).unwrap_or("").to_owned();
+    listing
+        .iter()
+        .filter(|item| {
+            let identity = vec![owner.0.clone(), owner.1.clone(), text(item, "k"), text(item, "e")];
+            ledger
+                .rows
+                .borrow()
+                .get(&identity)
+                .is_none_or(|stored| stored.starts_with(TRANSIENT_PREFIX))
+        })
+        .map(|item| (text(item, "k"), text(item, "e")))
+        .collect()
+}
+
+
+fn sync(ledger: &Ledger, owner: (String, String), params: &[String]) -> Result<Vec<Vec<String>>, LedgerFailure> {
+    if ledger.fail_sync.get() {
+        Err(LedgerFailure)
+    } else {
+        let listing: Vec<serde_json::Value> = serde_json::from_str(params.get(KEY_FIELD).ok_or(LedgerFailure)?).map_err(|_failure| LedgerFailure)?;
+        let (after, until) = (params.get(THREE).ok_or(LedgerFailure)?, params.get(FOUR).ok_or(LedgerFailure)?);
+        let complete = params.get(FIVE).ok_or(LedgerFailure)? == "true";
+        let round = {
+            let mut rounds = ledger.rounds.borrow_mut();
+            let next = rounds.get(&owner).copied().unwrap_or(0) + 1;
+            rounds.insert(owner.clone(), next);
+            next
+        };
+        let wanted = pending(ledger, &owner, &listing);
+        let mut seen = ledger.seen.borrow_mut();
+        let cap: usize = params.get(SIX).and_then(|text| text.parse().ok()).ok_or(LedgerFailure)?;
+        let mut due: Vec<(u64, String, String)> = seen
+            .iter()
+            .filter(|((tenant, source, key, etag), _round)| {
+                (tenant, source) == (&owner.0, &owner.1)
+                    && key > after
+                    && (complete || key <= until)
+                    && !wanted.contains(&(key.clone(), etag.clone()))
+            })
+            .map(|((_tenant, _source, key, etag), first)| (*first, key.clone(), etag.clone()))
+            .collect();
+        due.sort();
+        let deferred = due.len().min(cap.saturating_mul(TWO)).saturating_sub(cap);
+        due.into_iter().take(cap).for_each(|(_first, key, etag)| {
+            seen.remove(&(owner.0.clone(), owner.1.clone(), key, etag));
+        });
+        let held = seen
+            .keys()
+            .filter(|(tenant, source, _key, _etag)| (tenant, source) == (&owner.0, &owner.1))
+            .count();
+        let room = ledger.cap.get().unwrap_or(MAX_SEEN_ROWS_PER_SOURCE).saturating_sub(held);
+        let fresh: Vec<&(String, String)> = wanted
+            .iter()
+            .filter(|(key, etag)| !seen.contains_key(&(owner.0.clone(), owner.1.clone(), key.clone(), etag.clone())))
+            .take(room)
+            .collect();
+        fresh.into_iter().for_each(|(key, etag)| {
+            seen.insert((owner.0.clone(), owner.1.clone(), key.clone(), etag.clone()), round);
+        });
+        let mut ordered: Vec<(Option<u64>, String)> = wanted
+            .iter()
+            .map(|(key, etag)| {
+                (
+                    seen.get(&(owner.0.clone(), owner.1.clone(), key.clone(), etag.clone())).copied(),
+                    key.clone(),
+                )
+            })
+            .collect();
+        ordered.sort_by_key(|(first, key)| (first.is_none(), *first, key.clone()));
+        let mut rows: Vec<Vec<String>> = ordered
+            .into_iter()
+            .map(|(first, key)| vec![key, if first.is_some() { "1" } else { UNRECORDED }.to_owned()])
+            .collect();
+        rows.push(vec![DEFERRED_ROW_KEY.to_owned(), format!("{DEFERRED_PREFIX}{deferred}")]);
+        Ok(rows)
+    }
+}
+
+
+fn latest(ledger: &Ledger, owner: (String, String), params: &[String]) -> Result<Vec<Vec<String>>, LedgerFailure> {
+    if ledger.fail_latest.get() {
+        Err(LedgerFailure)
+    } else {
+        let key = params.get(KEY_FIELD).ok_or(LedgerFailure)?;
+        let stamps = ledger.stamps.borrow();
+        let newest = ledger
+            .rows
+            .borrow()
+            .iter()
+            .filter(|(identity, _digest)| {
+                identity.first() == Some(&owner.0) && identity.get(1) == Some(&owner.1) && identity.get(KEY_FIELD) == Some(key)
+            })
+            .max_by_key(|(identity, _digest)| stamps.get(*identity).copied().unwrap_or(0))
+            .map(|(_identity, digest)| vec![digest.clone()]);
+        Ok(newest.into_iter().collect())
     }
 }
 
@@ -503,10 +630,10 @@ fn an_oversized_object_and_a_gzip_bomb_are_refused_alone() -> TestResult {
     assert!(bomb.len() < usize::try_from(SMALL_LIMIT)?);
     let fake = with_objects(
         &[
-            ("p/big.csv", "e", ok(big.as_bytes())),
-            ("p/bomb.csv.gz", "e", ok(&bomb)),
-            ("p/bad.csv.gz", "e", ok(b"not gzip")),
-            ("p/good.csv", "e", ok(january("acct").as_bytes())),
+            ("p/1big.csv", "e", ok(big.as_bytes())),
+            ("p/2bomb.csv.gz", "e", ok(&bomb)),
+            ("p/3bad.csv.gz", "e", ok(b"not gzip")),
+            ("p/4good.csv", "e", ok(january("acct").as_bytes())),
         ],
         None,
     );
@@ -524,10 +651,10 @@ fn every_object_failure_is_one_refusal_and_is_remembered_by_kind() -> TestResult
     let configured = settings(&rig, vec![source("main", "acme")]);
     let fake = with_objects(
         &[
-            ("p/missing.csv", "e", status(STATUS_NOT_FOUND, MARKER)),
-            ("p/down.csv", "e", Err(HttpFailure(HttpClass::Timeout))),
-            ("p/columns.csv", "e", ok(b"a,b\n1,2\n")),
-            ("p/load.csv", "e", ok(january("acct").as_bytes())),
+            ("p/1missing.csv", "e", status(STATUS_NOT_FOUND, MARKER)),
+            ("p/2down.csv", "e", Err(HttpFailure(HttpClass::Timeout))),
+            ("p/3columns.csv", "e", ok(b"a,b\n1,2\n")),
+            ("p/4load.csv", "e", ok(january("acct").as_bytes())),
         ],
         None,
     );
@@ -976,10 +1103,17 @@ fn reports_merge_and_the_ledger_binds_the_tenant_first() -> TestResult {
     record_loaded(&executor, "acme", "main", &object, "sha", NOW)?;
     assert_eq!(object_state(&executor, "acme", "main", &object)?, LedgerState::Loaded);
     assert_eq!(object_state(&executor, "globex", "main", &object)?, LedgerState::New);
-    assert!(ledger.calls.borrow().iter().all(
-        |(sql, params)| [SELECT_OBJECT, INSERT_OBJECT, SELECT_CURSOR, UPSERT_CURSOR, DELETE_CURSOR].contains(&sql.as_str())
-            && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")
-    ));
+    assert!(ledger.calls.borrow().iter().all(|(sql, params)| [
+        SELECT_OBJECT,
+        INSERT_OBJECT,
+        SELECT_CURSOR,
+        UPSERT_CURSOR,
+        DELETE_CURSOR,
+        SYNC_SEEN,
+        SELECT_LATEST
+    ]
+    .contains(&sql.as_str())
+        && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")));
     assert!(LEDGER_DDL.contains("PRIMARY KEY (tenant, source_id, key, etag)"));
     Ok(())
 }
@@ -1115,6 +1249,8 @@ fn a_permanent_refusal_is_remembered_by_etag_and_not_downloaded_again() -> TestR
     assert_eq!((third.already_refused, third.refused.len()), (TWO, 1));
     let fourth = round(&rig, &configured, &fake, &limits);
     assert_eq!((fourth.already_refused, fourth.loaded), (THREE, 1));
+    let fifth = round(&rig, &configured, &fake, &limits);
+    assert_eq!((fifth.already_refused, fifth.already_loaded), (THREE, 1));
     assert_eq!(fake.requested.borrow().iter().filter(|key| key.as_str() == "p/a.csv").count(), 1);
     let rewritten = with_objects(&[("p/a.csv", "e2", ok(january("acct").as_bytes()))], None);
     assert_eq!(round(&rig, &configured, &rewritten, &limits).loaded, 1);
@@ -1189,13 +1325,27 @@ fn an_incomplete_listing_resumes_after_its_last_key_next_round_and_a_complete_on
     assert_eq!(cut.starts.borrow().first(), Some(&None));
     let again = round(&rig, &configured, &cut, &Limits::default());
     assert_eq!(again.incomplete_listings, 1);
-    assert_eq!(cut.starts.borrow().get(MAX_LIST_PAGES), Some(&Some("p/m.csv".to_owned())));
-    assert_eq!(cut.starts.borrow().get(MAX_LIST_PAGES + 1), Some(&None));
+    assert_eq!(cut.starts.borrow().get(MAX_LIST_PAGES_PER_ROUND), Some(&Some("p/m.csv".to_owned())));
+    assert_eq!(cut.starts.borrow().get(MAX_LIST_PAGES_PER_ROUND + 1), Some(&None));
     let done = with_objects(&[("p/n.csv", "e", ok(january("acct").as_bytes()))], None);
     let finished = round(&rig, &configured, &done, &Limits::default());
     assert_eq!((finished.incomplete_listings, finished.loaded), (0, 1));
     assert_eq!(done.starts.borrow().clone(), vec![Some("p/m.csv".to_owned())]);
     assert!(rig.ledger.cursors.borrow().is_empty());
+    let windows: Vec<Vec<String>> = rig
+        .ledger
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(sql, _params)| sql == SYNC_SEEN)
+        .map(|(_sql, params)| params.iter().skip(THREE).take(THREE).cloned().collect())
+        .collect();
+    let windows_expected = [("", "p/m.csv", "false"), ("p/m.csv", "p/m.csv", "false"), ("p/m.csv", "p/n.csv", "true")];
+    let expected: Vec<Vec<String>> = windows_expected
+        .iter()
+        .map(|window| vec![window.0.to_owned(), window.1.to_owned(), window.2.to_owned()])
+        .collect();
+    assert_eq!(windows, expected);
     Ok(())
 }
 
@@ -1215,3 +1365,474 @@ fn a_cursor_the_ledger_cannot_read_or_write_fails_that_source_only() -> TestResu
     assert!(fake.requested.borrow().is_empty());
     Ok(())
 }
+
+
+const REWRITTEN: usize = 10;
+
+
+const FIFTY: usize = 50;
+
+
+const ELEVEN: usize = 11;
+
+
+const SIX_ROUNDS: usize = 6;
+
+
+fn rewriting_fake(round_number: usize, good: &str) -> (Fake, Vec<String>) {
+    let keys: Vec<String> = (0..REWRITTEN).map(|number| format!("p/a{number:02}.csv")).collect();
+    let etag = format!("round{round_number}");
+    let mut entries: Vec<(&str, &str, Reply)> = keys
+        .iter()
+        .map(|key| (key.as_str(), etag.as_str(), status(STATUS_ERROR, MARKER)))
+        .collect();
+    entries.push((good, "e", ok(january("acct").as_bytes())));
+    (with_objects(&entries, None), keys)
+}
+
+
+fn inserting_fake(round_number: usize, per_round: usize) -> Fake {
+    let keys: Vec<String> = (1..=round_number)
+        .flat_map(|earlier| (0..per_round).map(move |number| format!("p/r{earlier:02}n{number:03}.csv")))
+        .collect();
+    let mut entries: Vec<(&str, &str, Reply)> = keys.iter().map(|key| (key.as_str(), "e", status(STATUS_ERROR, MARKER))).collect();
+    entries.push(("p/z.csv", "e", ok(january("acct").as_bytes())));
+    with_objects(&entries, None)
+}
+
+
+fn loaded_in_round(rig: &Rig, per_round: usize) -> Option<usize> {
+    let configured = settings(rig, vec![source("main", "acme")]);
+    (1..=SIX_ROUNDS + 1).find(|number| round(rig, &configured, &inserting_fake(*number, per_round), &Limits::default()).loaded == 1)
+}
+
+
+#[test]
+fn a_writer_adding_new_slow_keys_each_round_cannot_keep_a_good_key_out() -> TestResult {
+    let eleven = rig()?;
+    assert_eq!(loaded_in_round(&eleven, ELEVEN), Some((ELEVEN + 1).div_ceil(TRANSIENT_BUDGET)));
+    let fifty = rig()?;
+    assert_eq!(loaded_in_round(&fifty, FIFTY), Some((FIFTY + 1).div_ceil(TRANSIENT_BUDGET)));
+    let seen_keys = fifty.ledger.seen.borrow().len();
+    assert!(seen_keys <= (FIFTY + 1) * SIX_ROUNDS);
+    Ok(())
+}
+
+
+#[test]
+fn old_keys_rewritten_every_round_ahead_of_a_good_one_cannot_keep_it_out() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let loaded_round = (1..=SIX_ROUNDS)
+        .find(|number| round(&rig, &configured, &rewriting_fake(*number, "p/z.csv").0, &Limits::default()).loaded == 1)
+        .ok_or("the good key never loaded")?;
+    assert_eq!(loaded_round, TWO);
+    Ok(())
+}
+
+
+#[test]
+fn a_rewrite_after_two_failures_inherits_the_wait_and_the_count_and_a_later_one_is_tried() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let versions = |etag: &str| with_objects(&[("p/a.csv", etag, status(STATUS_ERROR, MARKER))], None);
+    assert_eq!(round(&rig, &configured, &versions("e1"), &Limits::default()).transient_refused, 1);
+    assert_eq!(round(&rig, &configured, &versions("e2"), &Limits::default()).transient_refused, 1);
+    let held = versions("e3");
+    let third = round(&rig, &configured, &held, &Limits::default());
+    assert_eq!((third.in_backoff, third.transient_refused), (1, 0));
+    assert!(held.requested.borrow().is_empty());
+    let due = NOW + BACKOFF_BASE_MS * DOUBLE;
+    let later = versions("e4");
+    assert_eq!(round_at(&rig, &configured, &later, &Limits::default(), due).transient_refused, 1);
+    let row = rig
+        .ledger
+        .rows
+        .borrow()
+        .get(&["acme", "main", "p/a.csv", "\"e4\""].map(str::to_owned).to_vec())
+        .cloned();
+    assert_eq!(row, Some(format!("{TRANSIENT_PREFIX}status:3:{}", due + BACKOFF_BASE_MS * QUADRUPLE)));
+    Ok(())
+}
+
+
+#[test]
+fn a_failing_latest_lookup_refuses_that_object_as_a_ledger_failure() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let fake = with_objects(&[("p/a.csv", "e", ok(january("acct").as_bytes()))], None);
+    rig.ledger.fail_latest.set(true);
+    let report = round(&rig, &configured, &fake, &Limits::default());
+    assert_eq!(report.refused.first().map(|(_, reason)| *reason), Some(Refusal::Ledger));
+    assert!(fake.requested.borrow().is_empty());
+    let executor = |sql: &str, params: &[String]| exec(&rig.ledger, sql, params);
+    assert!(latest_backoff(&executor, "acme", "main", "p/a.csv").is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_seen_ledger_drops_loaded_and_unlisted_keys_and_binds_the_tenant() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme"), source("main", "globex")]);
+    let both = with_objects(
+        &[
+            ("p/a.csv", "e", status(STATUS_ERROR, MARKER)),
+            ("p/b.csv", "e", status(STATUS_ERROR, MARKER)),
+            ("p/c.csv", "e", ok(january("acct").as_bytes())),
+        ],
+        None,
+    );
+    assert_eq!(round(&rig, &configured, &both, &Limits::default()).loaded, TWO);
+    let keys_of = |tenant: &str| -> Vec<String> {
+        rig.ledger
+            .seen
+            .borrow()
+            .keys()
+            .filter(|(owner, _source, _key, _etag)| owner == tenant)
+            .map(|(_owner, _source, key, _etag)| key.clone())
+            .collect()
+    };
+    assert_eq!(keys_of("acme"), vec!["p/a.csv", "p/b.csv", "p/c.csv"]);
+    round(&rig, &configured, &both, &Limits::default());
+    assert_eq!(keys_of("acme"), vec!["p/a.csv", "p/b.csv"]);
+    assert_eq!(keys_of("globex"), vec!["p/a.csv", "p/b.csv"]);
+    let fewer = with_objects(&[("p/b.csv", "e", status(STATUS_ERROR, MARKER))], None);
+    round(&rig, &configured, &fewer, &Limits::default());
+    assert_eq!(keys_of("acme"), vec!["p/b.csv"]);
+    assert_eq!(keys_of("globex"), vec!["p/b.csv"]);
+    assert!(rig
+        .ledger
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(sql, _params)| sql == SYNC_SEEN)
+        .all(|(_sql, params)| params.len() == SIX + 1
+            && params.get(SIX) == Some(&MAX_SEEN_DELETES_PER_SYNC.to_string())
+            && params.first().is_some_and(|tenant| tenant == "acme" || tenant == "globex")));
+    Ok(())
+}
+
+
+#[test]
+fn the_seen_ledger_refuses_a_listing_over_the_listing_bound_and_the_sql_states_both_bounds() -> TestResult {
+    assert_eq!(MAX_LISTED_OBJECTS, MAX_LIST_PAGES_PER_ROUND * MAX_KEYS_PER_PAGE);
+    assert_eq!(MAX_SEEN_ROWS_PER_SOURCE, SEEN_ROW_CAP);
+    assert!(LEDGER_DDL.contains(&format!("> {MAX_LISTED_OBJECTS} THEN RAISE")));
+    assert!(LEDGER_DDL.contains(&format!("SELECT {MAX_SEEN_ROWS_PER_SOURCE} - count(*), {MAX_SEEN_BYTES_PER_SOURCE}")));
+    assert!(LEDGER_DDL.contains("LIMIT GREATEST(v_room, 0)"));
+    assert!(LEDGER_DDL.contains("ORDER BY s.first_seen_round LIMIT p_delete_cap * 2) c"));
+    assert!(LEDGER_DDL.contains("CREATE INDEX IF NOT EXISTS cloud_cost_seen_age ON cloud_cost_seen (tenant, source_id, first_seen_round)"));
+    assert!(LEDGER_DDL.contains("SET enable_sort = off SET enable_seqscan = off SET jit = off"));
+    assert!(!LEDGER_DDL.contains("MATERIALIZED"));
+    assert_eq!(LEDGER_DDL.matches(" JOIN ").count(), 1);
+    assert!(LEDGER_DDL.contains("LEFT JOIN LATERAL (SELECT s.first_seen_round AS fs FROM cloud_cost_seen s"));
+    assert!(LEDGER_DDL.contains("(tenant, source_id, first_seen_round) INCLUDE (weight) WHERE weight > 0"));
+    assert_eq!(LEDGER_DDL.matches("s.weight > 0").count(), TWO);
+    assert!(!LEDGER_DDL.contains("NOT EXISTS (SELECT 1 FROM cloud_cost_seen"));
+    assert!(!LEDGER_DDL.contains("ORDER BY d."));
+    assert_eq!(LEDGER_DDL.matches("jsonb_to_recordset").count(), 1);
+    assert_eq!(LEDGER_DDL.matches("p_listing::jsonb").count(), 1);
+    assert!(LEDGER_DDL.contains(&format!("octet_length(p_listing) > {MAX_LISTING_TEXT_BYTES} THEN RAISE")));
+    assert!(LEDGER_DDL.contains("33554432 - COALESCE(sum(s.weight), 0)"));
+    assert_eq!(MAX_SEEN_BYTES_PER_SOURCE, SEEN_BYTE_CAP);
+    assert!(LEDGER_DDL.contains("s.ctid = ANY(v_tids[1:p_delete_cap::int])"));
+    assert_eq!(
+        (MAX_LIST_PAGES_PER_ROUND, MAX_LISTED_OBJECTS, MAX_SEEN_DELETES_PER_SYNC),
+        (PAGE_WINDOW, KEY_WINDOW, KEY_WINDOW)
+    );
+    assert!(LEDGER_DDL.starts_with("SELECT pg_advisory_xact_lock(hashtext('cloud_cost_ddl'))"));
+    assert!(LEDGER_DDL.contains("pg_advisory_xact_lock(hashtextextended('cloud_cost_seen/'"));
+    assert!(LEDGER_DDL.contains("PRIMARY KEY (tenant, source_id, object_key, etag)"));
+    let ledger = Ledger::default();
+    let executor = |sql: &str, params: &[String]| exec(&ledger, sql, params);
+    let object = |number: usize| ListedObject {
+        key: format!("p/{number}.csv"),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let window = SeenWindow {
+        complete: true,
+        ..SeenWindow::default()
+    };
+    let full: Vec<ListedObject> = (0..MAX_LISTED_OBJECTS).map(object).collect();
+    assert_eq!(
+        sync_seen(&executor, "acme", "main", &full, &window, MAX_SEEN_DELETES_PER_SYNC)?
+            .keys
+            .len(),
+        MAX_LISTED_OBJECTS
+    );
+    let over: Vec<ListedObject> = (0..=MAX_LISTED_OBJECTS).map(object).collect();
+    let calls_before = ledger.calls.borrow().len();
+    assert!(sync_seen(&executor, "acme", "main", &over, &window, MAX_SEEN_DELETES_PER_SYNC).is_err());
+    assert_eq!(ledger.calls.borrow().len(), calls_before);
+    Ok(())
+}
+
+
+const SEEN_ROW_CAP: usize = 200_000;
+
+
+const PAGE_WINDOW: usize = 10;
+
+
+const KEY_WINDOW: usize = 10_000;
+
+
+fn slow_keys(prefix: &str, count: usize, etag: &str) -> Vec<(String, String)> {
+    (0..count).map(|number| (format!("{prefix}{number:03}.csv"), etag.to_owned())).collect()
+}
+
+
+fn fake_of(slow: &[(String, String)], good: &str, reply: &dyn Fn() -> Reply) -> Fake {
+    let mut entries: Vec<(&str, &str, Reply)> = slow.iter().map(|(key, etag)| (key.as_str(), etag.as_str(), reply())).collect();
+    entries.push((good, "e", ok(january("acct").as_bytes())));
+    with_objects(&entries, None)
+}
+
+
+#[test]
+fn a_refused_key_rewritten_every_round_is_a_new_version_behind_an_older_good_one() -> TestResult {
+    let rig = rig()?;
+    let mut capped = source("main", "acme");
+    capped.max_objects_per_run = THREE;
+    let configured = settings(&rig, vec![capped]);
+    let garbage = || ok(b"not a cost export");
+    let first = round(
+        &rig,
+        &configured,
+        &fake_of(&slow_keys("p/a", REWRITTEN, "v1"), "p/z.csv", &garbage),
+        &Limits::default(),
+    );
+    assert_eq!((first.loaded, first.permanent_refused, first.deferred), (0, THREE, REWRITTEN + 1 - THREE));
+    let second_fake = fake_of(&slow_keys("p/a", REWRITTEN, "v2"), "p/z.csv", &garbage);
+    let second = round(&rig, &configured, &second_fake, &Limits::default());
+    assert_eq!(second.loaded, 1);
+    assert_eq!(second_fake.requested.borrow().first().map(String::as_str), Some("p/z.csv"));
+    Ok(())
+}
+
+
+#[test]
+fn a_cut_listing_keeps_the_age_of_the_keys_outside_its_window() -> TestResult {
+    let rig = rig()?;
+    let owner = |key: &str| ("acme".to_owned(), "main".to_owned(), key.to_owned(), "e".to_owned());
+    let executor = |sql: &str, params: &[String]| exec(&rig.ledger, sql, params);
+    let listed = |key: &str| ListedObject {
+        key: key.to_owned(),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let window = |after: Option<&'static str>, until: Option<&'static str>, complete: bool| SeenWindow { after, until, complete };
+    let all: Vec<ListedObject> = ["p/a", "p/m", "p/z"].iter().map(|key| listed(key)).collect();
+    sync_seen(&executor, "acme", "main", &all, &window(None, None, true), MAX_SEEN_DELETES_PER_SYNC)?;
+    let low: Vec<ListedObject> = vec![listed("p/a"), listed("p/new1")];
+    sync_seen(
+        &executor,
+        "acme",
+        "main",
+        &low,
+        &window(None, Some("p/b"), false),
+        MAX_SEEN_DELETES_PER_SYNC,
+    )?;
+    let kept: Vec<String> = rig.ledger.seen.borrow().keys().map(|(_, _, key, _)| key.clone()).collect();
+    assert_eq!(kept, vec!["p/a", "p/m", "p/new1", "p/z"]);
+    assert_eq!(rig.ledger.seen.borrow().get(&owner("p/z")).copied(), Some(1));
+    assert_eq!(rig.ledger.seen.borrow().get(&owner("p/new1")).copied(), Some(TWO as u64));
+    let high: Vec<ListedObject> = vec![listed("p/y")];
+    sync_seen(
+        &executor,
+        "acme",
+        "main",
+        &high,
+        &window(Some("p/o"), Some("p/zz"), false),
+        MAX_SEEN_DELETES_PER_SYNC,
+    )?;
+    let after: Vec<String> = rig.ledger.seen.borrow().keys().map(|(_, _, key, _)| key.clone()).collect();
+    assert_eq!(after, vec!["p/a", "p/m", "p/new1", "p/y"]);
+    assert_eq!(rig.ledger.seen.borrow().get(&owner("p/m")).copied(), Some(1));
+    sync_seen(
+        &executor,
+        "acme",
+        "main",
+        &[],
+        &window(Some("p/o"), None, true),
+        MAX_SEEN_DELETES_PER_SYNC,
+    )?;
+    assert_eq!(rig.ledger.seen.borrow().len(), THREE);
+    Ok(())
+}
+
+
+#[test]
+fn a_full_seen_ledger_reports_the_unrecorded_versions_and_serves_them_last() -> TestResult {
+    let rig = rig()?;
+    rig.ledger.cap.set(Some(TWO));
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let slow = slow_keys("p/a", THREE, "e");
+    let fake = fake_of(&slow, "p/z.csv", &|| status(STATUS_ERROR, MARKER));
+    let report = round(&rig, &configured, &fake, &Limits::default());
+    assert_eq!(report.seen_full, TWO);
+    assert_eq!(rig.ledger.seen.borrow().len(), TWO);
+    let merged = merge_reports(
+        report,
+        FetchReport {
+            seen_full: 1,
+            ..FetchReport::default()
+        },
+    );
+    assert_eq!(merged.seen_full, THREE);
+    let again = round(&rig, &configured, &fake, &Limits::default());
+    assert_eq!(again.seen_full, 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_ledger_that_cannot_sync_fails_that_source_before_any_download() -> TestResult {
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let fake = with_objects(&[("p/a.csv", "e", ok(january("acct").as_bytes()))], None);
+    rig.ledger.fail_sync.set(true);
+    let report = round(&rig, &configured, &fake, &Limits::default());
+    assert!(matches!(report.failed_sources.as_slice(), [(_, FetchError::Ledger)]));
+    assert!(fake.requested.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn objects_outside_the_ledger_order_come_first_and_the_rest_follow_it() -> TestResult {
+    let object = |key: &str| ListedObject {
+        key: key.to_owned(),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let objects = vec![object("p/a"), object("p/b"), object("p/c"), object("p/d")];
+    let ordered = order_by_seen(objects, &["p/d".to_owned(), "p/a".to_owned()]);
+    let keys: Vec<&str> = ordered.iter().map(|listed| listed.key.as_str()).collect();
+    assert_eq!(keys, vec!["p/b", "p/c", "p/d", "p/a"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_next_try_beyond_the_backoff_of_its_attempts_is_due_now() -> TestResult {
+    assert!(waiting(1, NOW + BACKOFF_BASE_MS, NOW));
+    assert!(!waiting(1, NOW, NOW));
+    assert!(!waiting(1, NOW + BACKOFF_BASE_MS + 1, NOW));
+    assert!(waiting(EIGHT_ATTEMPTS, NOW + BACKOFF_MAX_MS, NOW));
+    assert!(!waiting(EIGHT_ATTEMPTS, NOW + BACKOFF_MAX_MS + 1, NOW));
+    let rig = rig()?;
+    let configured = settings(&rig, vec![source("main", "acme")]);
+    let broken = with_objects(&[("p/a.csv", "e", status(STATUS_ERROR, MARKER))], None);
+    let identity: Vec<String> = ["acme", "main", "p/a.csv", "e"].iter().map(|part| (*part).to_owned()).collect();
+    let far = NOW + BACKOFF_MAX_MS * EIGHT_ATTEMPTS as u64;
+    rig.ledger
+        .rows
+        .borrow_mut()
+        .insert(identity, format!("{TRANSIENT_PREFIX}status:{THREE_ATTEMPTS}:{far}"));
+    let report = round(&rig, &configured, &broken, &Limits::default());
+    assert_eq!((report.in_backoff, report.transient_refused), (0, 1));
+    assert_eq!(broken.requested.borrow().len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn one_sync_deletes_at_most_its_cap_oldest_first_and_reports_the_rest() -> TestResult {
+    let rig = rig()?;
+    let executor = |sql: &str, params: &[String]| exec(&rig.ledger, sql, params);
+    let listed = |key: &str| ListedObject {
+        key: key.to_owned(),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let window = SeenWindow {
+        complete: true,
+        ..SeenWindow::default()
+    };
+    let first: Vec<ListedObject> = ["p/a", "p/b"].iter().map(|key| listed(key)).collect();
+    sync_seen(&executor, "acme", "main", &first, &window, MAX_SEEN_DELETES_PER_SYNC)?;
+    let second: Vec<ListedObject> = ["p/c", "p/d", "p/e"].iter().map(|key| listed(key)).collect();
+    sync_seen(&executor, "acme", "main", &second, &window, MAX_SEEN_DELETES_PER_SYNC)?;
+    assert_eq!(rig.ledger.seen.borrow().len(), THREE);
+    let seen_keys = |held: &Rig| -> Vec<String> { held.ledger.seen.borrow().keys().map(|(_, _, key, _)| key.clone()).collect() };
+    let none = sync_seen(&executor, "acme", "main", &[], &window, TWO)?;
+    assert_eq!(none.deletes_deferred, 1);
+    assert_eq!(seen_keys(&rig), vec!["p/e"]);
+    let rest = sync_seen(&executor, "acme", "main", &[], &window, TWO)?;
+    assert_eq!((rest.deletes_deferred, seen_keys(&rig).len()), (0, 0));
+    let merged = merge_reports(
+        FetchReport {
+            deletes_deferred: 1,
+            ..FetchReport::default()
+        },
+        FetchReport {
+            deletes_deferred: TWO,
+            ..FetchReport::default()
+        },
+    );
+    assert_eq!(merged.deletes_deferred, THREE);
+    assert!(rig
+        .ledger
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(sql, _params)| sql == SYNC_SEEN)
+        .all(|(_sql, params)| params.get(SIX).is_some()));
+    Ok(())
+}
+
+
+#[test]
+fn a_full_window_of_longest_keys_is_one_bounded_statement_and_the_candidates_are_chosen_without_a_sort() -> TestResult {
+    let ledger = Ledger::default();
+    let executor = |sql: &str, params: &[String]| exec(&ledger, sql, params);
+    let longest = |number: usize| ListedObject {
+        key: format!("{:a<width$}{number:07}", "p/", width = MAX_KEY_BYTES - KEY_TAIL_DIGITS),
+        etag: "e".repeat(MAX_ETAG_BYTES),
+        size: 1,
+    };
+    let window = SeenWindow {
+        complete: true,
+        ..SeenWindow::default()
+    };
+    let full: Vec<ListedObject> = (0..MAX_LISTED_BYTES / (MAX_KEY_BYTES + MAX_ETAG_BYTES)).map(longest).collect();
+    assert!(full
+        .iter()
+        .all(|object| object.key.len() == MAX_KEY_BYTES && object.etag.len() == MAX_ETAG_BYTES));
+    let first = sync_seen(&executor, "acme", "main", &full, &window, MAX_SEEN_DELETES_PER_SYNC)?;
+    assert_eq!((first.keys.len(), first.deletes_deferred), (full.len(), 0));
+    let calls = ledger.calls.borrow();
+    let sent = calls
+        .iter()
+        .filter(|(sql, _params)| sql == SYNC_SEEN)
+        .filter_map(|(_sql, params)| params.get(KEY_FIELD))
+        .map(String::len)
+        .max()
+        .ok_or("no sync call")?;
+    assert!(sent <= MAX_LISTING_TEXT_BYTES);
+    assert!(sent >= MAX_LISTED_BYTES - MAX_LISTED_BYTES / TEN);
+    let over_bytes = vec![ListedObject {
+        key: "k".repeat(MAX_LISTED_BYTES),
+        etag: "e".to_owned(),
+        size: 1,
+    }];
+    let calls_before = calls.len();
+    assert!(sync_seen(&executor, "acme", "main", &over_bytes, &window, MAX_SEEN_DELETES_PER_SYNC).is_err());
+    assert_eq!(ledger.calls.borrow().len(), calls_before);
+    assert!(LEDGER_DDL.contains("FROM cloud_cost_seen s WHERE s.tenant = p_tenant"));
+    assert!(LEDGER_DDL.contains("NOT IN (SELECT unnest(v_hashes))"));
+    assert!(LEDGER_DDL.contains("sha256(convert_to(length(s.object_key)::text"));
+    Ok(())
+}
+
+
+const KEY_TAIL_DIGITS: usize = 7;
+
+
+const TEN: usize = 10;
+
+
+const SEEN_BYTE_CAP: usize = 33_554_432;
