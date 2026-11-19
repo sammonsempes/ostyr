@@ -7,4 +7,5 @@ pub mod load;
 pub mod model;
 pub mod plan;
 pub mod rows;
+pub mod store;
 pub mod types;

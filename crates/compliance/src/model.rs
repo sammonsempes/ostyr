@@ -185,3 +185,22 @@ pub struct DriftFinding {
     pub first_failed_micros: u64,
     pub verdict: Verdict,
 }
+
+
+/// A failed control with the time its current run of failures began, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedAt {
+    pub baseline: String,
+    pub control: String,
+    pub asset: String,
+    pub first_failed_micros: u64,
+}
+
+
+/// The result of one recorded run: the failures to alert on, the entries skipped for their grammar and those refused for lack of room.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecordOutcome {
+    pub failed: Vec<FailedAt>,
+    pub skipped_invalid: usize,
+    pub refused_no_room: usize,
+}

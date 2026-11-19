@@ -23,3 +23,16 @@ pub enum ComplianceError {
     #[error("query result is unreadable: {0}")]
     UnreadableResult(#[from] serde_json::Error),
 }
+
+
+#[derive(Debug, Error)]
+pub enum StateError {
+    #[error("a run of {entries} entries is over the limit of {max}")]
+    RunTooLarge { entries: usize, max: usize },
+    #[error("the time does not fit the state store")]
+    TimeOutOfRange,
+    #[error("the state store answered a row that cannot be read")]
+    BadRow,
+    #[error("the state store failed")]
+    Store(#[source] core_pg::error::PgError),
+}
