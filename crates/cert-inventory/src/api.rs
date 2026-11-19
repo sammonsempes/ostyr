@@ -3,7 +3,7 @@ use crate::api_model::{CertBackend, CertDetailView, CertListView, CertView, List
 use crate::error::InventoryStoreError;
 use crate::expiry::expiry_state;
 use crate::model::{CertDetail, CertFilter, CertPage, ExpiryState, ListRequest, Sighting, StoredCert};
-use crate::store::{key_type_text, kind_text, time_in_range, MAX_PAGE};
+use crate::store::{decode_cursor, key_type_text, kind_text, time_in_range, MAX_PAGE};
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -85,6 +85,7 @@ pub fn request_of(query: &ListQuery) -> Result<ListRequest, InventoryStoreError>
     if cursor.as_ref().is_some_and(|text| text.len() > MAX_CURSOR_CHARS) {
         Err(InventoryStoreError::BadCursor)
     } else {
+        cursor.as_deref().map(decode_cursor).transpose()?;
         Ok(ListRequest {
             filter: CertFilter {
                 expiring_before: query.expiring_before.as_deref().map(parse_expiring_before).transpose()?,
