@@ -1,4 +1,4 @@
-use crate::alert::{Alert, Event, FailureReason, LifecycleState, Opened, Outcome, Param, Phase, Statement};
+use crate::alert::{Alert, AlertPage, Event, FailureReason, LifecycleState, Opened, Outcome, Param, Phase, Statement};
 use crate::alert_source::FINGERPRINT_PREFIX;
 use crate::error::StoreError;
 use crate::lifecycle::transition;
@@ -216,5 +216,24 @@ where
     } else {
         let rows = run(exec, scope, LIST_SQL, vec![Param::Int(i64::from(limit))]).await?;
         rows.iter().map(decode_alert).collect()
+    }
+}
+
+
+/// Like `open_alerts`, but a row the decoder refuses is skipped and counted instead of failing the page.
+pub async fn open_alert_page<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, limit: u32) -> Result<AlertPage, StoreError>
+where
+    Executor: FnMut(&TenantScope, Statement) -> Pending,
+    Pending: Future<Output = Result<Vec<Row>, StoreError>>,
+{
+    if limit == 0 || limit > MAX_OPEN_ALERTS {
+        Err(StoreError::LimitOutOfRange { limit, max: MAX_OPEN_ALERTS })
+    } else {
+        let rows = run(exec, scope, LIST_SQL, vec![Param::Int(i64::from(limit))]).await?;
+        let (shown, refused): (Vec<_>, Vec<_>) = rows.iter().map(decode_alert).partition(Result::is_ok);
+        Ok(AlertPage {
+            alerts: shown.into_iter().flatten().collect(),
+            skipped: refused.len(),
+        })
     }
 }
