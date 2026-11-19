@@ -2,7 +2,7 @@ use crate::error::{OsqueryError, SensorError};
 use crate::model::{
     CommandSpec, OsqueryEnv, OsquerySettings, QueryRows, MOUNT_PATH, NSENTER_PATH, OSQUERYI_PATH, PRLIMIT_PATH, UMOUNT_PATH, UNSHARE_PATH,
 };
-use crate::types::{ReleaseFn, RowBuilderFn};
+use crate::types::{ChildKillFn, ReleaseFn, RowBuilderFn};
 use crate::updates::child_environment;
 use core_config::trusted_dir::{open_trusted_dir, TrustedDirError};
 use rustix::fs::{flock, fstat, mkdirat, open, openat, FileType, FlockOperation, Mode, OFlags};
@@ -12,9 +12,9 @@ use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -120,18 +120,28 @@ pub const FIXED_ARGUMENTS: [&str; 6] = [
 const FILE_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC).union(OFlags::NONBLOCK);
 
 
-const NAMESPACE_FILE_FLAGS: OFlags = OFlags::RDONLY
-    .union(OFlags::CREATE)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC)
-    .union(OFlags::NONBLOCK);
+const ANCHOR_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 
 
-const LOCK_FILE_FLAGS: OFlags = OFlags::RDONLY
+const CREATE_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::CREATE)
+    .union(OFlags::EXCL)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC)
-    .union(OFlags::NONBLOCK);
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::NOCTTY);
+
+
+const REOPEN_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::CLOEXEC).union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
+
+
+const PROC_FD_DIR: &str = "/proc/self/fd";
+
+
+const LOCK_NOT_REGULAR: &str = "lock file is not a regular file";
+
+
+const NAMESPACE_NOT_REGULAR: &str = "namespace file is not a regular file";
 
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
@@ -244,10 +254,30 @@ pub fn lock_fault(mode: u32, owner: u32, trusted_uid: u32) -> Option<&'static st
 }
 
 
+/// Opens `name` under `directory` without running any driver `open` on a node that is not a regular file: anchored with `O_PATH | O_NOFOLLOW`, judged by `fstat`, a regular file reopened through `/proc/self/fd`, a free name created with `O_CREAT | O_EXCL` (0600).
+pub fn open_regular(directory: &OwnedFd, name: &str, not_regular: &'static str) -> Result<OwnedFd, OsqueryError> {
+    match openat(directory, name, ANCHOR_FLAGS, Mode::empty()) {
+        Ok(anchor) => reopen_regular(&anchor, not_regular),
+        Err(Errno::NOENT) => openat(directory, name, CREATE_FLAGS, Mode::RUSR | Mode::WUSR).map_err(errno_error),
+        Err(errno) => Err(errno_error(errno)),
+    }
+}
+
+
+/// Judges an `O_PATH` anchor (a device, a FIFO, a socket or a link is `Untrusted`) and reopens the regular file it pins.
+pub fn reopen_regular(anchor: &OwnedFd, not_regular: &'static str) -> Result<OwnedFd, OsqueryError> {
+    let stat = fstat(anchor).map_err(errno_error)?;
+    (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
+        .then_some(())
+        .ok_or(OsqueryError::Untrusted(not_regular))?;
+    open(format!("{PROC_FD_DIR}/{}", anchor.as_raw_fd()), REOPEN_FLAGS, Mode::empty()).map_err(errno_error)
+}
+
+
 /// Opens the lock file (0600, never through a symlink) under the trusted state directory and judges the handle it got, not the path.
 pub fn open_lock_file(state_dir: &Path, trusted_uid: u32) -> Result<OwnedFd, OsqueryError> {
     let parent = open_trusted_dir(state_dir, trusted_uid).map_err(dir_error)?;
-    let file = openat(&parent, LOCK_FILE_NAME, LOCK_FILE_FLAGS, Mode::RUSR | Mode::WUSR).map_err(errno_error)?;
+    let file = open_regular(&parent, LOCK_FILE_NAME, LOCK_NOT_REGULAR)?;
     let stat = fstat(&file).map_err(errno_error)?;
     lock_fault(stat.st_mode, stat.st_uid, trusted_uid).map_or(Ok(file), |reason| Err(OsqueryError::Untrusted(reason)))
 }
@@ -394,11 +424,27 @@ pub fn bounded_status(program: &Path, path: &Path, polls: u64, interval: Duratio
     match finished {
         Some(status) => status?.success().then_some(()).ok_or_else(|| io::Error::other("umount failed")),
         None => {
-            child.kill()?;
-            child.wait()?;
+            reap_killed(&mut child, Child::kill)?;
             Err(io::Error::other("umount timed out"))
         }
     }
+}
+
+
+/// Kills a child and always waits for it, so a failed kill leaves no zombie; a kill failure is logged and returned after the wait.
+pub fn reap_killed(child: &mut Child, kill: ChildKillFn) -> io::Result<()> {
+    let killed = kill(child);
+    let waited = child.wait();
+    killed.as_ref().err().iter().for_each(|error| log_kill_failure(error));
+    killed?;
+    waited.map(|_status| ())
+}
+
+
+/// Logs that the release step could not be killed.
+pub fn log_kill_failure(error: &io::Error) {
+    let reason = error.to_string();
+    tracing::warn!(reason, "umount not killed");
 }
 
 
@@ -440,11 +486,29 @@ pub struct NamespaceGuard {
 
 impl Drop for NamespaceGuard {
     fn drop(&mut self) {
-        let failed = release_mounts(&self.targets, self.release);
-        if failed > 0 {
-            tracing::warn!(failed, "osquery mounts may be left behind");
-        }
+        warn_left_behind(release_mounts(&self.targets, self.release));
     }
+}
+
+
+/// Warns when some mounts could not be dropped.
+pub fn warn_left_behind(failed: usize) {
+    if failed > 0 {
+        tracing::warn!(failed, "osquery mounts may be left behind");
+    }
+}
+
+
+/// Runs the release off the async workers (`umount` is waited for synchronously) and returns how many mounts stayed; a lost task counts them all.
+pub async fn release_off_runtime(release: ReleaseFn, targets: Vec<PathBuf>) -> usize {
+    let total = targets.len();
+    tokio::task::spawn_blocking(move || release_mounts(&targets, release))
+        .await
+        .unwrap_or_else(|error| {
+            let reason = error.to_string();
+            tracing::warn!(reason, "osquery release task lost");
+            total
+        })
 }
 
 
@@ -465,11 +529,7 @@ pub async fn run_setup(env: &OsqueryEnv, steps: Vec<(&'static str, CommandSpec)>
 /// Creates the file that keeps the private mount namespace alive, inside the private directory, through its handle.
 pub fn prepare_namespace_file(temp_dir: &Path) -> Result<PathBuf, OsqueryError> {
     let directory = open(temp_dir, DIRECTORY_FLAGS, Mode::empty()).map_err(errno_error)?;
-    let file = openat(&directory, NAMESPACE_FILE_NAME, NAMESPACE_FILE_FLAGS, Mode::RUSR | Mode::WUSR).map_err(errno_error)?;
-    let stat = fstat(&file).map_err(errno_error)?;
-    (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
-        .then(|| temp_dir.join(NAMESPACE_FILE_NAME))
-        .ok_or(OsqueryError::Untrusted("namespace file is not a regular file"))
+    open_regular(&directory, NAMESPACE_FILE_NAME, NAMESPACE_NOT_REGULAR).map(|_file| temp_dir.join(NAMESPACE_FILE_NAME))
 }
 
 
@@ -582,10 +642,12 @@ pub async fn run_query(env: &OsqueryEnv, settings: &OsquerySettings, query: &str
     let temp_text = path_text(&temp_dir)?;
     let ns_file = prepare_namespace_file(&temp_dir)?;
     let ns_text = path_text(&ns_file)?;
-    let guard = NamespaceGuard {
+    let mut guard = NamespaceGuard {
         release: env.release,
         targets: vec![ns_file.clone(), temp_dir.clone()],
     };
-    release_mounts(&guard.targets, guard.release);
-    run_in_namespace(env, settings, temp_text, ns_text, logger_text, query).await
+    release_off_runtime(guard.release, guard.targets.clone()).await;
+    let outcome = run_in_namespace(env, settings, temp_text, ns_text, logger_text, query).await;
+    warn_left_behind(release_off_runtime(guard.release, std::mem::take(&mut guard.targets)).await);
+    outcome
 }
