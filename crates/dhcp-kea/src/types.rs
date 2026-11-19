@@ -1,4 +1,10 @@
+use crate::error::HistoryError;
+use crate::history::LookupResult;
+use core_pg::scope::TenantScope;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 
@@ -18,3 +24,12 @@ pub type PauseFn = fn(Duration);
 
 
 pub type Label = (String, String);
+
+
+pub type LookupFuture = Pin<Box<dyn Future<Output = Result<LookupResult, HistoryError>> + Send>>;
+
+
+pub type AtLookupFn = Arc<dyn Fn(TenantScope, String, i64) -> LookupFuture + Send + Sync>;
+
+
+pub type MacLookupFn = Arc<dyn Fn(TenantScope, String, i64, i64) -> LookupFuture + Send + Sync>;
