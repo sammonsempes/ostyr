@@ -244,3 +244,40 @@ pub struct ScanState {
     pub entries: usize,
     pub done: bool,
 }
+
+
+/// What one scan of one asset did; `refused` findings were outside the grammar or ranges, `refused_no_room` hit the tenant cap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub inserted: u64,
+    pub updated: u64,
+    pub resolved: u64,
+    pub refused_no_room: u64,
+    pub refused: u64,
+}
+
+
+/// An open finding as stored, times in microseconds since the Unix epoch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredFinding {
+    pub asset: String,
+    pub ecosystem: String,
+    pub package: String,
+    pub record_id: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub cvss: f64,
+    pub epss: f64,
+    pub kev: bool,
+    pub priority: u32,
+    pub first_seen_micros: u64,
+    pub last_seen_micros: u64,
+}
+
+
+/// One page of open findings, and the cursor of the next page when there is one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindingsPage {
+    pub findings: Vec<StoredFinding>,
+    pub next: Option<String>,
+}

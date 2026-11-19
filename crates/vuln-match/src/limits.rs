@@ -145,3 +145,27 @@ pub const EPSS_MODEL_KEY: &str = "model_version";
 
 
 pub const EPSS_DATE_KEY: &str = "score_date";
+
+
+pub const MAX_FINDINGS_PER_TENANT: u64 = 2_000_000;
+
+
+pub const MAX_FINDINGS_PER_SCAN: usize = 50_000;
+
+
+pub const MAX_FIELD_BYTES: usize = 128;
+
+
+pub const MAX_ALIASES_PER_FINDING: usize = 100;
+
+
+pub const MAX_PAGE_LIMIT: usize = 500;
+
+
+pub const MAX_PRIORITY_DIGITS: usize = 10;
+
+
+pub const CURSOR_FIELDS: usize = 5;
+
+
+pub const MAX_CURSOR_BYTES: usize = MAX_PRIORITY_DIGITS + (CURSOR_FIELDS - 1) * MAX_FIELD_BYTES + CURSOR_FIELDS - 1;
