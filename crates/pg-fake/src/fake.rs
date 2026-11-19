@@ -17,6 +17,15 @@ pub const TEXT_OID: i32 = 25;
 pub const INT4_OID: i32 = 23;
 
 
+pub const INT8_OID: i32 = 20;
+
+
+pub const BINARY_FORMAT: usize = 1;
+
+
+pub const INT8_BYTES: usize = 8;
+
+
 pub const NO_SIZE: i16 = -1;
 
 
@@ -34,6 +43,11 @@ pub enum Reply {
     Done,
     Rows(Vec<Vec<String>>),
     IntRows(Vec<i32>),
+    Typed {
+        parameters: Vec<i32>,
+        columns: Vec<i32>,
+        rows: Vec<Vec<Option<Vec<u8>>>>,
+    },
     Error(&'static str),
     Hang,
     Drop,
@@ -86,9 +100,14 @@ pub fn cstring(bytes: &[u8]) -> String {
 
 
 pub fn row_description(columns: usize, oid: i32) -> io::Result<Vec<u8>> {
-    let count = i16::try_from(columns).map_err(io::Error::other)?;
+    typed_row_description(&vec![oid; columns])
+}
+
+
+pub fn typed_row_description(oids: &[i32]) -> io::Result<Vec<u8>> {
+    let count = i16::try_from(oids.len()).map_err(io::Error::other)?;
     let mut body = count.to_be_bytes().to_vec();
-    (0..columns).for_each(|_| {
+    oids.iter().for_each(|oid| {
         body.extend_from_slice(b"c\0");
         body.extend_from_slice(&0i32.to_be_bytes());
         body.extend_from_slice(&0i16.to_be_bytes());
@@ -102,11 +121,24 @@ pub fn row_description(columns: usize, oid: i32) -> io::Result<Vec<u8>> {
 
 
 pub fn data_row(cells: &[Vec<u8>]) -> io::Result<Vec<u8>> {
+    nullable_row(&cells.iter().cloned().map(Some).collect::<Vec<_>>())
+}
+
+
+pub fn int8_cell(value: i64) -> Option<Vec<u8>> {
+    Some(value.to_be_bytes().to_vec())
+}
+
+
+pub fn nullable_row(cells: &[Option<Vec<u8>>]) -> io::Result<Vec<u8>> {
     let count = i16::try_from(cells.len()).map_err(io::Error::other)?;
     let mut body = count.to_be_bytes().to_vec();
-    cells.iter().for_each(|cell| {
-        body.extend_from_slice(&i32::try_from(cell.len()).unwrap_or(i32::MAX).to_be_bytes());
-        body.extend_from_slice(cell);
+    cells.iter().for_each(|cell| match cell {
+        Some(bytes) => {
+            body.extend_from_slice(&i32::try_from(bytes.len()).unwrap_or(i32::MAX).to_be_bytes());
+            body.extend_from_slice(bytes);
+        }
+        None => body.extend_from_slice(&(-1i32).to_be_bytes()),
     });
     frame(b'D', &body)
 }
@@ -115,11 +147,16 @@ pub fn data_row(cells: &[Vec<u8>]) -> io::Result<Vec<u8>> {
 pub fn rows_of(reply: &Reply) -> Option<Shape> {
     match reply {
         Reply::Rows(rows) => Some((
-            rows.first().map_or(0, Vec::len),
-            TEXT_OID,
-            rows.iter().map(|row| row.iter().map(|cell| cell.as_bytes().to_vec()).collect()).collect(),
+            vec![TEXT_OID; rows.first().map_or(0, Vec::len)],
+            rows.iter()
+                .map(|row| row.iter().map(|cell| Some(cell.as_bytes().to_vec())).collect())
+                .collect(),
         )),
-        Reply::IntRows(values) => Some((1, INT4_OID, values.iter().map(|value| vec![value.to_be_bytes().to_vec()]).collect())),
+        Reply::IntRows(values) => Some((
+            vec![INT4_OID],
+            values.iter().map(|value| vec![Some(value.to_be_bytes().to_vec())]).collect(),
+        )),
+        Reply::Typed { columns, rows, .. } if !columns.is_empty() => Some((columns.clone(), rows.clone())),
         _ => None,
     }
 }
@@ -127,11 +164,11 @@ pub fn rows_of(reply: &Reply) -> Option<Shape> {
 
 pub fn rows_frames(reply: &Reply, with_description: bool) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
-    if let Some((columns, oid, rows)) = rows_of(reply) {
+    if let Some((oids, rows)) = rows_of(reply) {
         if with_description {
-            out.extend(row_description(columns, oid)?);
+            out.extend(typed_row_description(&oids)?);
         }
-        rows.iter().try_for_each(|row| data_row(row).map(|bytes| out.extend(bytes)))?;
+        rows.iter().try_for_each(|row| nullable_row(row).map(|bytes| out.extend(bytes)))?;
     }
     Ok(out)
 }
@@ -176,10 +213,10 @@ pub async fn extended(stream: &mut (impl AsyncWrite + Unpin), session: &mut Sess
         b'D' if body.first() == Some(&b'S') => {
             let parameters = parameter_count(&session.sql);
             let mut description = i16::try_from(parameters).map_err(io::Error::other)?.to_be_bytes().to_vec();
-            (0..parameters).for_each(|_| description.extend_from_slice(&TEXT_OID.to_be_bytes()));
+            (0..parameters).for_each(|index| description.extend_from_slice(&parameter_oid(&session.reply, index).to_be_bytes()));
             out.extend(frame(b't', &description)?);
             out.extend(match rows_of(&session.reply) {
-                Some((columns, oid, _)) => row_description(columns, oid)?,
+                Some((oids, _)) => typed_row_description(&oids)?,
                 None => frame(b'n', &[])?,
             });
         }
@@ -218,7 +255,34 @@ pub fn be_i32(bytes: &[u8]) -> i32 {
 }
 
 
-/// The text parameters of a Bind message with all-text formats.
+pub fn parameter_oid(reply: &Reply, index: usize) -> i32 {
+    match reply {
+        Reply::Typed { parameters, .. } => parameters.get(index).copied().unwrap_or(TEXT_OID),
+        _ => TEXT_OID,
+    }
+}
+
+
+pub fn format_of(formats: &[u8], index: usize) -> usize {
+    let count = be_u16(formats);
+    let codes = formats.get(COUNT_BYTES..).unwrap_or(&[]);
+    match count {
+        0 => 0,
+        1 => be_u16(codes),
+        _ => be_u16(codes.get(index * COUNT_BYTES..).unwrap_or(&[])),
+    }
+}
+
+
+pub fn render_param(bytes: &[u8], format: usize) -> String {
+    match <[u8; INT8_BYTES]>::try_from(bytes) {
+        Ok(array) if format == BINARY_FORMAT => i64::from_be_bytes(array).to_string(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+
+/// The parameters of a Bind message as text; a binary 8-byte parameter is shown as an int8.
 pub fn bind_params(body: &[u8]) -> Vec<String> {
     let after_portal = body.get(cstring(body).len() + 1..).unwrap_or(&[]);
     let after_statement = after_portal.get(cstring(after_portal).len() + 1..).unwrap_or(&[]);
@@ -230,7 +294,10 @@ pub fn bind_params(body: &[u8]) -> Vec<String> {
     while rest.len() >= LENGTH_FIELD_BYTES && params.len() < expected {
         let size = usize::try_from(be_i32(rest)).unwrap_or(0);
         let end = LENGTH_FIELD_BYTES + size;
-        params.push(String::from_utf8_lossy(rest.get(LENGTH_FIELD_BYTES..end).unwrap_or(&[])).into_owned());
+        params.push(render_param(
+            rest.get(LENGTH_FIELD_BYTES..end).unwrap_or(&[]),
+            format_of(after_statement, params.len()),
+        ));
         rest = rest.get(end..).unwrap_or(&[]);
     }
     params
