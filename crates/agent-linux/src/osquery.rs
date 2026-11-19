@@ -435,8 +435,8 @@ pub fn setup_steps(settings: &OsquerySettings, temp_dir: &str, ns_file: &str) ->
 }
 
 
-/// Runs `program path` with the cleared environment and no output, waiting at most `polls` intervals; a slow or failing program is an error.
-pub fn bounded_status(program: &Path, path: &Path, polls: u64, interval: Duration) -> io::Result<()> {
+/// Runs `program path` with the cleared environment and no output, waiting at most `polls` intervals, then at most `reap_polls` for the killed child; a slow or failing program is an error.
+pub fn bounded_status(program: &Path, path: &Path, polls: u64, reap_polls: u64, interval: Duration) -> io::Result<()> {
     let mut child = Command::new(program)
         .arg(path)
         .env_clear()
@@ -454,7 +454,7 @@ pub fn bounded_status(program: &Path, path: &Path, polls: u64, interval: Duratio
     match finished {
         Some(status) => status?.success().then_some(()).ok_or_else(|| io::Error::other("umount failed")),
         None => {
-            reap_killed(&mut child, Child::kill, polls, interval)?;
+            reap_killed(&mut child, Child::kill, reap_polls, interval)?;
             Err(io::Error::other("umount timed out"))
         }
     }
@@ -503,6 +503,7 @@ pub fn umount_path(path: &Path) -> io::Result<()> {
     bounded_status(
         Path::new(UMOUNT_PATH),
         path,
+        SETUP_DEADLINE_SECONDS * LOCK_POLLS_PER_SECOND,
         SETUP_DEADLINE_SECONDS * LOCK_POLLS_PER_SECOND,
         Duration::from_millis(LOCK_POLL_MILLISECONDS),
     )
