@@ -49,6 +49,16 @@ docker run --rm -v ostyr_state:/state -v "$PWD":/backup busybox@sha256:a7dbc319b
 
 Back up `secrets/` too, outside this host's Git checkout: without `store.key` the account store cannot be opened.
 
+## Operations
+
+The service role `ostyr_service` owns database `ostyr`, so a compromised module could set `ALTER DATABASE ostyr SET local_preload_libraries = ...` and lock every connection out. This is an accepted limit. Recovery, as the superuser on the in-container socket:
+
+```sh
+docker compose exec postgres psql -U postgres -d postgres -c 'ALTER DATABASE ostyr RESET ALL'
+```
+
+`init.sh` refuses a partly missing TLS set: remove `ca.crt`, `pg_server.*` and `api_tls.*` together to regenerate it (restart both services after).
+
 ## Tests
 
 - `tests/static-test.sh`: static checks (compose config when Docker is installed, shellcheck, hardening greps).
