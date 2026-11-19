@@ -77,10 +77,11 @@ pub const LIST_SQL: &str = "SELECT pack_id, window_start, window_end, matches, m
     WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4";
 
 
-/// Params: `$2` count limit. One row: rows never listed, counted once: id over 64 bytes, or listable id with an end below year 0.
+/// Params: `$2` count limit. One row: rows never listed, counted once: id over 64 bytes, or listable id with an end below year 0, or an empty id at exactly year 0.
 pub const OVERSIZED_SQL: &str = "SELECT count(*) FROM (SELECT 1 FROM (\
     SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) > 64 \
-    UNION ALL SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) <= 64 AND window_end < -62167219200\
+    UNION ALL SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) <= 64 AND window_end <= -62167219200 \
+    AND (window_end < -62167219200 OR pack_id = '')\
     ) unlisted LIMIT $2::bigint) oversized";
 
 

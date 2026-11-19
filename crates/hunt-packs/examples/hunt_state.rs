@@ -94,7 +94,12 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
         oversized.to_string()
     };
     (oversized == 0).then_some(()).map_or_else(
-        || writeln!(stderr(), "{oversized_text} stored rows with an over-long pack id are not listed"),
+        || {
+            writeln!(
+                stderr(),
+                "{oversized_text} stored rows cannot be listed (over-long pack id or a window before year 0)"
+            )
+        },
         |()| Ok(()),
     )?;
     let cursor_line = page.next.iter().map(|(end, pack)| format!("next\t{}", format_cursor(*end, pack)));
