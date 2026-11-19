@@ -16,9 +16,11 @@ use core_audit::verify::{verify_capped, MAX_RECORD_BYTES};
 use rustix::fs::OFlags;
 use std::fs;
 use std::io::{BufReader, Cursor, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Command;
+use std::sync::LazyLock;
 use tempfile::tempdir;
 use types::TestResult;
 
@@ -27,6 +29,12 @@ const OWN_UID: u32 = 1000;
 
 
 const OTHER_UID: u32 = 1001;
+
+
+const WRITE_SEARCH_ONLY: u32 = 0o300;
+
+
+const OWNER_ALL: u32 = 0o700;
 
 
 const GROUP_READABLE: u32 = 0o640;
@@ -512,7 +520,133 @@ fn a_failed_removal_keeps_the_reopen_error() -> TestResult {
         reopen: remove_name,
         ..SYSTEM_OPENER
     };
-    assert!(is_denied(open_file_log_with(&path, &vanished)));
+    let refused = tracing::dispatcher::with_default(&LISTENING, || open_file_log_with(&path, &vanished));
+    assert!(is_denied(refused));
     assert!(!path.exists());
+    Ok(())
+}
+
+
+static LISTENING: LazyLock<tracing::Dispatch> =
+    LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+fn failing_facts_for_marked_name(file: &fs::File) -> std::io::Result<core_audit::log::HandleFacts> {
+    let name = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+    if name.to_string_lossy().contains("facts-fail") {
+        Err(std::io::Error::other("injected fstat failure"))
+    } else {
+        handle_facts(file)
+    }
+}
+
+
+#[test]
+fn a_failed_first_judge_leaves_no_file() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("facts-fail.log");
+    let failing = Opener {
+        facts: failing_facts_for_marked_name,
+        ..SYSTEM_OPENER
+    };
+    assert!(matches!(open_file_log_with(&path, &failing), Err(AuditError::Io(_))));
+    assert!(!path.exists());
+    Ok(())
+}
+
+
+fn rename_parent_then_deny(proc_path: &Path, flags: OFlags) -> Result<fs::File, AuditError> {
+    let name = fs::read_link(proc_path)?;
+    let parent = name.parent().ok_or(AuditError::SymlinkRefused)?;
+    fs::rename(parent, parent.with_extension("moved"))?;
+    fs::create_dir(parent)?;
+    fs::write(&name, "decoy")?;
+    proc_denied(proc_path, flags)
+}
+
+
+#[test]
+fn a_parent_renamed_before_the_cleanup_cannot_redirect_the_unlink() -> TestResult {
+    let dir = tempdir()?;
+    let parent = dir.path().join("logs");
+    fs::create_dir(&parent)?;
+    let path = parent.join("audit.log");
+    let renaming = Opener {
+        reopen: rename_parent_then_deny,
+        ..SYSTEM_OPENER
+    };
+    assert!(is_denied(open_file_log_with(&path, &renaming)));
+    assert!(!dir.path().join("logs.moved").join("audit.log").exists());
+    assert_eq!(fs::read_to_string(&path)?, "decoy");
+    Ok(())
+}
+
+
+#[test]
+fn a_path_without_a_parent_and_leaf_is_refused_before_any_io() -> TestResult {
+    assert!(matches!(
+        create_new(Path::new(".."), &SYSTEM_OPENER),
+        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_relative_log_name_is_created_below_the_current_directory() -> TestResult {
+    let dir = tempdir()?;
+    let up = std::env::current_dir()?
+        .components()
+        .filter(|part| matches!(part, Component::Normal(_)))
+        .count();
+    let mut relative = (0..up).fold(std::path::PathBuf::new(), |path, _| path.join(".."));
+    relative.extend(dir.path().components().filter(|part| matches!(part, Component::Normal(_))));
+    let name = relative.join("relative.log");
+    assert!(name.is_relative());
+    drop(create_new(&name, &SYSTEM_OPENER)?);
+    assert!(dir.path().join("relative.log").exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_name_ending_in_a_directory_form_is_refused_before_any_io() -> TestResult {
+    let dir = tempdir()?;
+    let slash = format!("{}/", dir.path().join("e.log").display());
+    let dot = format!("{}/.", dir.path().join("e.log").display());
+    [slash, dot].iter().for_each(|name| {
+        assert!(matches!(
+            create_new(Path::new(name), &SYSTEM_OPENER),
+            Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+    });
+    assert!(!dir.path().join("e.log").exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_symlinked_parent_creates_and_reopens_the_same_file() -> TestResult {
+    let dir = tempdir()?;
+    fs::create_dir(dir.path().join("real"))?;
+    symlink(dir.path().join("real"), dir.path().join("link"))?;
+    let path = dir.path().join("link").join("x.log");
+    drop(open_file_log_with(&path, &SYSTEM_OPENER)?);
+    assert!(dir.path().join("real").join("x.log").exists());
+    drop(open_file_log_with(&path, &SYSTEM_OPENER)?);
+    Ok(())
+}
+
+
+#[test]
+fn a_parent_without_read_permission_still_creates_the_log() -> TestResult {
+    let dir = tempdir()?;
+    let parent = dir.path().join("wx");
+    fs::create_dir(&parent)?;
+    fs::set_permissions(&parent, fs::Permissions::from_mode(WRITE_SEARCH_ONLY))?;
+    let created = create_new(&parent.join("a.log"), &SYSTEM_OPENER);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(OWNER_ALL))?;
+    drop(created?);
+    assert!(parent.join("a.log").exists());
     Ok(())
 }
