@@ -101,10 +101,13 @@ pub fn level_of(record: &CertRecord, now: i64) -> Option<(Severity, &'static str
 }
 
 
-/// Microseconds of a Unix time in seconds, clamped to the range the store accepts.
+/// Microseconds of a Unix time in seconds, clamped to the range the store accepts; a negative time gives 0 and one warning.
 pub fn micros_of(seconds: i64) -> u64 {
     u64::try_from(seconds)
-        .unwrap_or(0)
+        .unwrap_or_else(|_negative| {
+            tracing::warn!(seconds, "negative time clamped to zero");
+            0
+        })
         .saturating_mul(MICROS_PER_SECOND)
         .min(MAX_CREATED_MICROS)
 }
