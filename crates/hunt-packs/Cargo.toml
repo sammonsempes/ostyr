@@ -20,6 +20,7 @@ sha2 = "0.10"
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync"] }
+tokio-postgres = "0.7"
 tracing = "0.1"
 unicode-general-category = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
@@ -31,13 +32,14 @@ rustix = { version = "1.1", features = ["fs"] }
 [dev-dependencies]
 alerts = { version = "0.0.0", path = "../alerts" }
 core-audit = { version = "0.0.0", path = "../core-audit" }
+pg-fake = { version = "0.0.0", path = "../pg-fake" }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 serde_json = "1"
 siem-schema = { version = "0.0.0", path = "../siem-schema" }
 signal-hook = "0.4.6"
 tempfile = "3"
 time = "0.3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "time"] }
-tokio-postgres = "0.7"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "time", "net", "io-util", "test-util"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["json"] }
