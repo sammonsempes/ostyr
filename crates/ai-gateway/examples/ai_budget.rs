@@ -1,6 +1,7 @@
-use ai_gateway::budget::{budgeted_chat, BudgetDeps, Stores, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
+use ai_gateway::budget::{budgeted_chat, new_gate, BudgetDeps, Gate, Stores, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
 use ai_gateway::chat::production_deps;
 use ai_gateway::error::AiError;
+use ai_gateway::limits::MAX_WAITING_RESERVATIONS;
 use ai_gateway::pg::pg_budget_executor;
 use ai_gateway::settings::{validate_ai, AiSettings};
 use alerts::pg::pg_executor;
@@ -33,12 +34,13 @@ pub fn wall_micros() -> u64 {
 }
 
 
-async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>, scope: TenantScope) -> String {
+async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>, scope: TenantScope, gate: Arc<Gate>) -> String {
     let budget = pg_budget_executor(&client, STATEMENT_DEADLINE);
     let alerts = pg_executor(&client, STATEMENT_DEADLINE);
     let stores = Stores {
         budget: &budget,
         alerts: &alerts,
+        gate: &gate,
     };
     let deps = BudgetDeps {
         chat: production_deps(),
@@ -48,6 +50,7 @@ async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>
     match outcome {
         Ok(answer) => format!("answered {:?} {:?}", answer.prompt_tokens, answer.completion_tokens),
         Err(AiError::BudgetSpent) => "BudgetSpent".to_owned(),
+        Err(AiError::BudgetBusy) => "BudgetBusy".to_owned(),
         Err(error) => format!("failed: {error}"),
     }
 }
@@ -63,9 +66,10 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
     validate_ai(&settings)?;
     let shared = Arc::new(settings);
     let scope = tenant_scope(tenant)?;
+    let gate = Arc::new(new_gate(MAX_WAITING_RESERVATIONS));
     let mut tasks = JoinSet::new();
     (0..calls.parse::<usize>()?).for_each(|_index| {
-        tasks.spawn(one_call(Arc::clone(&client), Arc::clone(&shared), scope.clone()));
+        tasks.spawn(one_call(Arc::clone(&client), Arc::clone(&shared), scope.clone(), Arc::clone(&gate)));
     });
     let mut out = stdout();
     tasks.join_all().await.iter().try_for_each(|line| writeln!(out, "{line}"))?;

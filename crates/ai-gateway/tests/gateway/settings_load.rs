@@ -1,7 +1,6 @@
-use crate::common::{deps, scripted, settings, TIMEOUT};
+use crate::common::{chat, deps, scripted, settings, TIMEOUT};
 use crate::numbers::STATE_FIELDS;
 use crate::types::TestResult;
-use ai_gateway::chat::chat;
 use ai_gateway::error::AiError;
 use ai_gateway::limits::{
     MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING,

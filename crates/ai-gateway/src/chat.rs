@@ -53,7 +53,7 @@ pub struct Prepared {
 
 
 /// Validates, builds the tagged request and reads the key; no model I/O.
-pub fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Prepared, AiError> {
+pub(crate) fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Prepared, AiError> {
     validate_ai(settings)?;
     let started = (deps.clock)();
     let nonce = new_nonce(deps.random)?;
@@ -75,7 +75,7 @@ pub fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &D
 
 
 /// Sends a prepared request, waits at most the request's timeout, and reads a bounded answer.
-pub fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Result<Answer, AiError> {
+pub(crate) fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Result<Answer, AiError> {
     let request_bytes = prepared.request.body.len();
     let reply = (deps.transport)(&prepared.request)?;
     if reply.status == STATUS_OK {
@@ -92,11 +92,4 @@ pub fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Resu
     } else {
         Err(AiError::Status { status: reply.status })
     }
-}
-
-
-/// Sends the instructions and the telemetry, waits at most `timeout_seconds`, and reads a bounded answer. One settings snapshot serves the whole call.
-pub fn chat(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Answer, AiError> {
-    let prepared = prepare(settings, instructions, data, deps)?;
-    send(&prepared, settings.max_response_bytes, deps)
 }

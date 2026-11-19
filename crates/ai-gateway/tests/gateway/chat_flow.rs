@@ -1,11 +1,12 @@
 use crate::common::{
-    chain, deps, fixed_random, real_random_deps, scripted, settings, FIXED_NONCE, MARKER, STATUS_SERVER, STATUS_TOO_MANY, STATUS_UNAUTHORIZED, TOKENS,
+    chain, chat, deps, fixed_random, real_random_deps, scripted, settings, FIXED_NONCE, MARKER, STATUS_SERVER, STATUS_TOO_MANY, STATUS_UNAUTHORIZED,
+    TOKENS,
 };
 use crate::numbers::{
     BIG_STRING_BYTES, COMPLETION_TOKENS, FOUR_FIELDS, INVALID_UTF8, KEY_MODE, LONG_KEY_BYTES, OPEN_MODE, PROMPT_TOKENS, TWO_MESSAGES,
 };
 use crate::types::TestResult;
-use ai_gateway::chat::{chat, monotonic_millis, os_random, production_deps};
+use ai_gateway::chat::{monotonic_millis, os_random, production_deps};
 use ai_gateway::error::{AiError, SecretClass};
 use ai_gateway::limits::{MAX_CHOICES, MAX_DATA_NODES, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING, NONCE_BYTES};
 use ai_gateway::model::{Answer, FinishReason};
