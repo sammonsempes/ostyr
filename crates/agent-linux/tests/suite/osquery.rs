@@ -17,7 +17,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 
@@ -1206,6 +1206,9 @@ fn a_reopened_handle_must_be_the_anchored_file() -> TestResult {
 const RELEASES_BEFORE_CANCEL: usize = 3;
 
 
+const RELEASES_AFTER_CANCEL: usize = 2;
+
+
 const MOUNTS_OF_ONE_RUN: usize = 2;
 
 
@@ -1213,6 +1216,9 @@ const HOLD_FILE: &str = "hold";
 
 
 const GO_FILE: &str = "go";
+
+
+const PROC_SELF_FD: &str = "/proc/self/fd";
 
 
 fn holding(spec: agent_linux::model::CommandSpec, deadline: std::time::Duration) -> UpdateFuture {
@@ -1226,10 +1232,25 @@ fn holding(spec: agent_linux::model::CommandSpec, deadline: std::time::Duration)
 }
 
 
+fn record_lock_descriptor(state: &Path) -> io::Result<()> {
+    let lock = fs::metadata(state.join(agent_linux::osquery::LOCK_FILE_NAME))?;
+    let entries = fs::read_dir(PROC_SELF_FD)?.collect::<Result<Vec<_>, _>>()?;
+    let held = entries
+        .iter()
+        .any(|entry| fs::metadata(entry.path()).is_ok_and(|found| found.dev() == lock.dev() && found.ino() == lock.ino()));
+    let verdict = if held { "probe descriptor held\n" } else { "probe descriptor dropped\n" };
+    fs::OpenOptions::new()
+        .append(true)
+        .open(state.join(TEMP_DIR_NAME).join(CALL_LOG))?
+        .write_all(verdict.as_bytes())
+}
+
+
 fn release_held_until_go(path: &Path) -> io::Result<()> {
     log_release(path)?;
     let state = path.ancestors().find(|ancestor| ancestor.ends_with(TEMP_DIR_NAME)).and_then(Path::parent);
     state.map_or(Ok(()), |found| {
+        let held = found.join(HOLD_FILE).exists();
         (0..MARKER_POLLS)
             .find_map(|_| {
                 (!found.join(HOLD_FILE).exists() || found.join(GO_FILE).exists())
@@ -1239,7 +1260,12 @@ fn release_held_until_go(path: &Path) -> io::Result<()> {
                         None
                     })
             })
-            .ok_or_else(|| io::Error::other("go never appeared"))
+            .ok_or_else(|| io::Error::other("go never appeared"))?;
+        if held {
+            record_lock_descriptor(found)
+        } else {
+            Ok(())
+        }
     })
 }
 
@@ -1247,6 +1273,16 @@ fn release_held_until_go(path: &Path) -> io::Result<()> {
 async fn wait_for_calls(log: &Path, prefix: &str, count: usize) -> io::Result<()> {
     let mut polls = 0;
     while real_calls(log)?.iter().filter(|line| line.starts_with(prefix)).count() < count && polls < MARKER_POLLS {
+        tokio::time::sleep(std::time::Duration::from_millis(MARKER_POLL_MILLISECONDS)).await;
+        polls += 1;
+    }
+    Ok(())
+}
+
+
+async fn wait_for_verdicts(log: &Path, count: usize) -> io::Result<()> {
+    let mut polls = 0;
+    while fs::read_to_string(log)?.matches("probe descriptor").count() < count && polls < MARKER_POLLS {
         tokio::time::sleep(std::time::Duration::from_millis(MARKER_POLL_MILLISECONDS)).await;
         polls += 1;
     }
@@ -1269,14 +1305,17 @@ async fn a_cancelled_query_keeps_the_lock_until_its_release_has_finished() -> Te
     };
     assert_eq!(first_ended, None);
     drop(first);
-    let probe = agent_linux::osquery::open_lock_file(&fixture.state, trusted_uid())?;
-    assert!(matches!(agent_linux::osquery::lock_exclusive(&probe, 0).await, Err(OsqueryError::Busy)));
     let during = real_calls(&log)?;
     assert_eq!(during.iter().filter(|line| line.starts_with("umount")).count(), RELEASES_BEFORE_CANCEL);
     assert_eq!(during.iter().filter(|line| line.starts_with("mount")).count(), MOUNTS_OF_ONE_RUN);
     fs::write(fixture.state.join(GO_FILE), b"")?;
+    wait_for_verdicts(&log, RELEASES_AFTER_CANCEL).await?;
+    let probe = agent_linux::osquery::open_lock_file(&fixture.state, trusted_uid())?;
     agent_linux::osquery::lock_exclusive(&probe, MARKER_POLLS).await?;
     drop(probe);
+    let text = fs::read_to_string(&log)?;
+    assert_eq!(text.matches("probe descriptor held").count(), RELEASES_AFTER_CANCEL);
+    assert_eq!(text.matches("probe descriptor dropped").count(), 0);
     assert!(run_query(&env, &fixture.settings, "SELECT 2").await?.rows.is_empty());
     Ok(())
 }
@@ -1379,10 +1418,10 @@ const MARKER_POLL_MILLISECONDS: u64 = 10;
 fn the_release_step_has_the_cleared_environment_and_a_deadline() -> TestResult {
     let interval = std::time::Duration::from_millis(1);
     let printenv = Path::new("/usr/bin/printenv");
-    agent_linux::osquery::bounded_status(printenv, Path::new("PATH"), MANY_POLLS, interval)?;
-    assert!(agent_linux::osquery::bounded_status(printenv, Path::new("CARGO_MANIFEST_DIR"), MANY_POLLS, interval).is_err());
-    let slow = agent_linux::osquery::bounded_status(Path::new("/usr/bin/sleep"), Path::new("600"), TWO_POLLS, interval);
+    agent_linux::osquery::bounded_status(printenv, Path::new("PATH"), MANY_POLLS, MANY_POLLS, interval)?;
+    assert!(agent_linux::osquery::bounded_status(printenv, Path::new("CARGO_MANIFEST_DIR"), MANY_POLLS, MANY_POLLS, interval).is_err());
+    let slow = agent_linux::osquery::bounded_status(Path::new("/usr/bin/sleep"), Path::new("600"), TWO_POLLS, MANY_POLLS, interval);
     assert!(slow.is_err_and(|error| error.to_string().contains("timed out")));
-    assert!(agent_linux::osquery::bounded_status(Path::new("/nonexistent/umount"), Path::new("/"), MANY_POLLS, interval).is_err());
+    assert!(agent_linux::osquery::bounded_status(Path::new("/nonexistent/umount"), Path::new("/"), MANY_POLLS, MANY_POLLS, interval).is_err());
     Ok(())
 }
