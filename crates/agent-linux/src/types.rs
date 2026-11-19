@@ -80,3 +80,6 @@ pub type RowBuilderFn = fn(&str, &mut usize) -> Option<BTreeMap<String, String>>
 
 /// Drops one mount of the private namespace (the production function runs `umount`); a test double injects a failure.
 pub type ReleaseFn = fn(&std::path::Path) -> std::io::Result<()>;
+
+
+pub type ChildKillFn = fn(&mut std::process::Child) -> std::io::Result<()>;

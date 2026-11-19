@@ -846,7 +846,10 @@ fn the_namespace_file_is_made_once_and_never_through_a_symlink() -> TestResult {
     assert_eq!(agent_linux::osquery::prepare_namespace_file(&temp)?, made);
     fs::remove_file(&made)?;
     symlink(&fixture.state, &made)?;
-    assert!(matches!(agent_linux::osquery::prepare_namespace_file(&temp), Err(OsqueryError::Spawn(_))));
+    assert!(matches!(
+        agent_linux::osquery::prepare_namespace_file(&temp),
+        Err(OsqueryError::Untrusted(_))
+    ));
     assert!(matches!(
         agent_linux::osquery::prepare_namespace_file(&fixture.state.join("missing")),
         Err(OsqueryError::Spawn(io::ErrorKind::NotFound))
@@ -876,7 +879,7 @@ fn the_lock_file_is_judged_through_its_handle() -> TestResult {
     symlink(&fixture.state, &lock)?;
     assert!(matches!(
         agent_linux::osquery::open_lock_file(&fixture.state, uid),
-        Err(OsqueryError::Spawn(_))
+        Err(OsqueryError::Untrusted(_))
     ));
     assert!(matches!(
         agent_linux::osquery::open_lock_file(&fixture.state.join("missing"), uid),
@@ -1090,11 +1093,238 @@ async fn a_fifo_or_socket_at_the_lock_or_namespace_path_is_refused_at_once() -> 
     let bound = std::os::unix::net::UnixListener::bind(short)?;
     assert!(matches!(
         agent_linux::osquery::open_lock_file(&fixture.state, uid),
-        Err(OsqueryError::Spawn(_))
+        Err(OsqueryError::Untrusted(reason)) if reason.contains("regular")
     ));
     drop(bound);
     Ok(())
 }
+
+
+#[test]
+fn a_name_the_kernel_refuses_is_a_spawn_error_and_a_free_name_is_created_private() -> TestResult {
+    let fixture = fixture()?;
+    let directory = rustix::fs::open(
+        &fixture.state,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+        rustix::fs::Mode::empty(),
+    )?;
+    let too_long = "x".repeat(LONG_NAME_BYTES);
+    assert!(matches!(
+        agent_linux::osquery::open_regular(&directory, &too_long, "not regular"),
+        Err(OsqueryError::Spawn(_))
+    ));
+    agent_linux::osquery::open_regular(&directory, "fresh", "not regular")?;
+    assert_eq!(
+        fs::metadata(fixture.state.join("fresh"))?.permissions().mode() & MODE_BITS,
+        OWNER_ONLY_FILE
+    );
+    Ok(())
+}
+
+
+const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
+
+
+fn kill_nothing(_child: &mut std::process::Child) -> io::Result<()> {
+    Ok(())
+}
+
+
+fn kill_fails(_child: &mut std::process::Child) -> io::Result<()> {
+    Err(io::Error::other("kill refused"))
+}
+
+
+#[test]
+fn a_failed_kill_still_waits_for_the_child() -> TestResult {
+    let mut child = std::process::Command::new("/usr/bin/true").spawn()?;
+    let proc_entry = PathBuf::from(format!("/proc/{}", child.id()));
+    let failure = agent_linux::osquery::reap_killed(&mut child, kill_fails, MANY_POLLS, REAP_INTERVAL);
+    assert!(failure.is_err_and(|error| error.to_string().contains("kill refused")));
+    assert!(!proc_entry.exists());
+    let mut sleeper = std::process::Command::new("/usr/bin/sleep").arg("600").spawn()?;
+    agent_linux::osquery::reap_killed(&mut sleeper, std::process::Child::kill, MANY_POLLS, REAP_INTERVAL)?;
+    let mut stuck = std::process::Command::new("/usr/bin/sleep").arg("600").spawn()?;
+    let unreaped = agent_linux::osquery::reap_killed(&mut stuck, kill_nothing, TWO_POLLS, REAP_INTERVAL);
+    assert!(unreaped.is_err_and(|error| error.to_string().contains("not reaped")));
+    stuck.kill()?;
+    stuck.wait()?;
+    Ok(())
+}
+
+
+fn release_waits_for_marker(path: &Path) -> io::Result<()> {
+    (0..MARKER_POLLS)
+        .find_map(|_| {
+            path.exists().then_some(Ok(())).or_else(|| {
+                std::thread::sleep(std::time::Duration::from_millis(MARKER_POLL_MILLISECONDS));
+                None
+            })
+        })
+        .unwrap_or_else(|| Err(io::Error::other("marker never appeared")))
+}
+
+
+fn release_panics(_path: &Path) -> io::Result<()> {
+    let removed = Vec::<u8>::new().remove(0);
+    Err(io::Error::other(removed.to_string()))
+}
+
+
+fn lock_handle(fixture: &Fixture) -> Result<std::sync::Arc<std::os::fd::OwnedFd>, Box<dyn Error>> {
+    Ok(std::sync::Arc::new(agent_linux::osquery::open_lock_file(&fixture.state, trusted_uid())?))
+}
+
+
+const DEVICE: u64 = 1;
+
+
+const INODE: u64 = 2;
+
+
+const OTHER_INODE: u64 = 3;
+
+
+const OTHER_DEVICE: u64 = 4;
+
+
+#[test]
+fn a_reopened_handle_must_be_the_anchored_file() -> TestResult {
+    assert!(agent_linux::osquery::same_identity((DEVICE, INODE), (DEVICE, INODE), "x").is_ok());
+    assert!(matches!(
+        agent_linux::osquery::same_identity((DEVICE, INODE), (DEVICE, OTHER_INODE), "x"),
+        Err(OsqueryError::Untrusted("x"))
+    ));
+    assert!(matches!(
+        agent_linux::osquery::same_identity((DEVICE, INODE), (OTHER_DEVICE, INODE), "x"),
+        Err(OsqueryError::Untrusted("x"))
+    ));
+    Ok(())
+}
+
+
+const RELEASES_BEFORE_CANCEL: usize = 3;
+
+
+const MOUNTS_OF_ONE_RUN: usize = 2;
+
+
+const HOLD_FILE: &str = "hold";
+
+
+const GO_FILE: &str = "go";
+
+
+fn holding(spec: agent_linux::model::CommandSpec, deadline: std::time::Duration) -> UpdateFuture {
+    let hold = temp_dir_in(&spec).and_then(|directory| directory.parent().map(|parent| parent.join(HOLD_FILE)));
+    let written = hold.map_or(Ok(()), |path| fs::write(path, b"")).map_err(SensorError::Io);
+    let logged = recording(spec, deadline);
+    Box::pin(async move {
+        written?;
+        logged.await
+    })
+}
+
+
+fn release_held_until_go(path: &Path) -> io::Result<()> {
+    log_release(path)?;
+    let state = path.ancestors().find(|ancestor| ancestor.ends_with(TEMP_DIR_NAME)).and_then(Path::parent);
+    state.map_or(Ok(()), |found| {
+        (0..MARKER_POLLS)
+            .find_map(|_| {
+                (!found.join(HOLD_FILE).exists() || found.join(GO_FILE).exists())
+                    .then_some(())
+                    .or_else(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(MARKER_POLL_MILLISECONDS));
+                        None
+                    })
+            })
+            .ok_or_else(|| io::Error::other("go never appeared"))
+    })
+}
+
+
+async fn wait_for_calls(log: &Path, prefix: &str, count: usize) -> io::Result<()> {
+    let mut spins = 0;
+    while real_calls(log)?.iter().filter(|line| line.starts_with(prefix)).count() < count && spins < MAX_SPINS {
+        tokio::task::yield_now().await;
+        spins += 1;
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_cancelled_query_keeps_the_lock_until_its_release_has_finished() -> TestResult {
+    let fixture = fixture()?;
+    let env = OsqueryEnv {
+        release: release_held_until_go,
+        ..env_of(&fixture, holding)
+    };
+    let log = fixture.state.join(TEMP_DIR_NAME).join(CALL_LOG);
+    let mut first = Box::pin(run_query(&env, &fixture.settings, "SELECT 1"));
+    let first_ended = tokio::select! {
+        outcome = &mut first => Some(outcome.is_ok()),
+        reached = wait_for_calls(&log, "umount", RELEASES_BEFORE_CANCEL) => reached.map(|()| None)?,
+    };
+    assert_eq!(first_ended, None);
+    drop(first);
+    let mut second = Box::pin(run_query(&env, &fixture.settings, "SELECT 2"));
+    let second_ended = tokio::select! {
+        outcome = &mut second => Some(outcome.is_ok()),
+        () = idle() => None,
+    };
+    assert_eq!(second_ended, None);
+    let during = real_calls(&log)?;
+    assert_eq!(during.iter().filter(|line| line.starts_with("umount")).count(), RELEASES_BEFORE_CANCEL);
+    assert_eq!(during.iter().filter(|line| line.starts_with("mount")).count(), MOUNTS_OF_ONE_RUN);
+    fs::write(fixture.state.join(GO_FILE), b"")?;
+    assert!(second.await?.rows.is_empty());
+    Ok(())
+}
+
+
+async fn idle() {
+    for _ in 0..IDLE_SPINS {
+        tokio::task::yield_now().await;
+    }
+}
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_release_runs_off_the_async_worker() -> TestResult {
+    let fixture = fixture()?;
+    let marker = fixture.state.join("marker");
+    let writer = async {
+        tokio::time::sleep(std::time::Duration::from_millis(MARKER_POLL_MILLISECONDS)).await;
+        fs::write(&marker, b"x")
+    };
+    let (failed, written) = tokio::join!(
+        agent_linux::osquery::release_off_runtime(release_waits_for_marker, vec![marker.clone()], lock_handle(&fixture)?),
+        writer
+    );
+    written?;
+    assert_eq!(failed, 0);
+    let targets = vec![fixture.state.clone(), fixture.state.join("other")];
+    assert_eq!(
+        agent_linux::osquery::release_off_runtime(release_fails, targets.clone(), lock_handle(&fixture)?).await,
+        TARGET_COUNT
+    );
+    assert_eq!(
+        agent_linux::osquery::release_off_runtime(release_panics, targets, lock_handle(&fixture)?).await,
+        TARGET_COUNT
+    );
+    Ok(())
+}
+
+
+const LONG_NAME_BYTES: usize = 300;
+
+
+const MARKER_POLLS: u64 = 500;
+
+
+const MARKER_POLL_MILLISECONDS: u64 = 10;
 
 
 #[test]
