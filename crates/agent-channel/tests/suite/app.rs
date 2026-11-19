@@ -1044,7 +1044,9 @@ fn the_quarantine_keeps_refused_batches_within_its_size_cap() -> TestResult {
         ..EventBatch::default()
     };
     assert!(quarantine(&path, &[invalid], MAX_REJECTED_BYTES).is_err());
-    assert!(quarantine(dir.path(), &[refused("d")], MAX_REJECTED_BYTES).is_err());
+    let directory = dir.path().join("dir.rejected");
+    fs::create_dir(&directory)?;
+    assert_eq!(quarantine(&directory, &[refused("d")], MAX_REJECTED_BYTES)?, 0);
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "")?;
     assert!(quarantine(&blocker.join("spool.rejected"), &[refused("e")], MAX_REJECTED_BYTES).is_err());
