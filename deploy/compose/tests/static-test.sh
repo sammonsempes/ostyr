@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Usage: deploy/compose/tests/static-test.sh
+# Static checks of the compose files on the host: docker compose config when Docker is installed, shellcheck when installed, and greps for
+# the hardening the deployment promises. Builds and runs nothing.
+set -euo pipefail
+
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_DIR="$(dirname "$TESTS_DIR")"
+readonly TESTS_DIR COMPOSE_DIR
+readonly COMPOSE_FILE="$COMPOSE_DIR/compose.yaml"
+failures=0
+
+expect() {
+    local description="$1"
+    shift
+    if "$@"; then
+        printf 'ok   %s\n' "$description"
+    else
+        printf 'FAIL %s\n' "$description"
+        failures=$((failures + 1))
+    fi
+}
+
+absent() {
+    ! "$@"
+}
+
+count_lines() {
+    grep -c -- "$1" "$COMPOSE_FILE" || true
+}
+
+all_services_hardened() {
+    local services
+    services="$(grep -c '^  [a-z]*:$' "$COMPOSE_FILE")"
+    [[ "$(count_lines '^    read_only: true$')" -eq "$services" && "$(count_lines '^    cap_drop: \[ALL\]$')" -eq "$services" \
+        && "$(count_lines 'no-new-privileges:true')" -eq "$services" ]]
+}
+
+images_are_pinned() {
+    ! grep '^    image:' "$COMPOSE_FILE" | grep -v -e '@sha256:[0-9a-f]\{64\}$' -e 'image: ostyr-platform:local$'
+}
+
+compose_config_accepts() {
+    local scratch name
+    scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
+    mkdir -p "$scratch/secrets"
+    for name in pg_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key; do
+        : >"$scratch/secrets/$name"
+    done
+    cp -r "$COMPOSE_FILE" "$COMPOSE_DIR/config" "$scratch/"
+    docker compose -f "$scratch/compose.yaml" config -q
+    rm -rf "$scratch"
+}
+
+if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
+    mkdir -p "$COMPOSE_DIR/../../target"
+    expect "docker compose config accepts compose.yaml" compose_config_accepts
+else
+    printf 'info docker compose is not installed on this host: config check skipped\n'
+fi
+if command -v shellcheck >/dev/null; then
+    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh"
+else
+    printf 'info shellcheck is not installed: skipped\n'
+fi
+
+expect "no PostgreSQL port is published" absent grep -e '5432' "$COMPOSE_FILE"
+expect "only the API port is published" test "$(grep -c '^      - "[0-9]*:[0-9]*"$' "$COMPOSE_FILE")" -eq 1
+expect "every image is pinned by digest or built locally" images_are_pinned
+expect "every service is read-only, drops capabilities and sets no-new-privileges" all_services_hardened
+expect "no YAML file has a comment" absent grep -n '#' "$COMPOSE_FILE" "$COMPOSE_DIR"/config/*.yaml
+expect "pg_hba accepts hostssl only" absent grep -E '^host ' "$COMPOSE_DIR/config/pg_hba.conf"
+expect "the only local pg_hba line is the in-container socket" test "$(grep -c '^local ' "$COMPOSE_DIR/config/pg_hba.conf")" -eq 1
+expect "pg_hba admits one role on one database" test "$(grep -c '^hostssl ostyr ostyr_service all scram-sha-256$' "$COMPOSE_DIR/config/pg_hba.conf")" -eq 1
+expect "the platform does not log in as the superuser" absent grep -e 'user: postgres' -e 'pg_password' "$COMPOSE_DIR/config/pg.yaml"
+expect "no image is named by a tag alone in the README" absent grep -E 'busybox( |$)' "$COMPOSE_DIR/README.md"
+expect "secrets are ignored by Git" grep -qx 'secrets/' "$COMPOSE_DIR/.gitignore"
+expect "no secret is written in an environment value" absent grep -E '^      [A-Z_]*(PASSWORD|KEY):' "$COMPOSE_FILE"
+
+if [[ "$failures" -ne 0 ]]; then
+    printf '%s check(s) failed\n' "$failures" >&2
+    exit 1
+fi
+printf 'all checks passed\n'

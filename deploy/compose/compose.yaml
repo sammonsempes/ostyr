@@ -1,0 +1,82 @@
+name: ostyr
+services:
+  postgres:
+    image: postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    entrypoint:
+      - /bin/bash
+      - -ec
+      - |
+        install -d -m 0700 -o postgres -g postgres /run/pgtls
+        install -m 0600 -o postgres -g postgres /run/secrets/pg_service_password /run/pgtls/service_password
+        install -m 0600 -o postgres -g postgres /run/secrets/pg_server_key /run/pgtls/server.key
+        install -m 0644 -o postgres -g postgres /run/secrets/pg_server_cert /run/pgtls/server.crt
+        exec docker-entrypoint.sh "$$@"
+      - postgres-entrypoint
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/pgtls/server.crt
+      - -c
+      - ssl_key_file=/run/pgtls/server.key
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    secrets: [pg_password, pg_service_password, pg_server_key, pg_server_cert, pg_ca]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./config/pg-init-service-role.sh:/docker-entrypoint-initdb.d/10-service-role.sh:ro
+    tmpfs:
+      - /run/pgtls:mode=0700
+      - /run/postgresql
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ostyr_service -d ostyr"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  platform:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/platform_api", "/etc/ostyr/module.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets: [pg_service_password, pg_ca, api_tls_key, api_tls_cert, store_key]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - state:/var/lib/ostyr
+    ports:
+      - "8443:8443"
+volumes:
+  pgdata: {}
+  state: {}
+secrets:
+  pg_password:
+    file: ./secrets/pg_password
+  pg_service_password:
+    file: ./secrets/pg_service_password
+  pg_server_key:
+    file: ./secrets/pg_server.key
+  pg_server_cert:
+    file: ./secrets/pg_server.crt
+  pg_ca:
+    file: ./secrets/ca.crt
+  api_tls_key:
+    file: ./secrets/api_tls.key
+  api_tls_cert:
+    file: ./secrets/api_tls.crt
+  store_key:
+    file: ./secrets/store.key
