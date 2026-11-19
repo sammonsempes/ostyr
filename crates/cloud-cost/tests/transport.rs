@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver};
+use std::thread::sleep;
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
 use tempfile::tempdir;
@@ -20,6 +21,15 @@ const CHUNK: usize = 4096;
 
 
 const MAX_READS: usize = 64;
+
+
+const MAX_POLLS: usize = 60_000;
+
+
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+
+const BOUND: Duration = Duration::from_secs(30);
 
 
 const CAP: u64 = 100;
@@ -109,10 +119,10 @@ fn run(mut stream: TcpStream, script: Script) -> io::Result<()> {
                     _ => Err(error),
                 })
         }
-        Script::Stall(release) => release.recv().map_err(io::Error::other),
+        Script::Stall(release) => release.recv_timeout(BOUND).map_err(io::Error::other),
         Script::Partial(release) => {
             write_reply(&mut stream, "200 OK", "", DECLARED as u64, &[b'y'; PARTIAL_BYTES])?;
-            release.recv().map_err(io::Error::other)
+            release.recv_timeout(BOUND).map_err(io::Error::other)
         }
     }
 }
@@ -124,11 +134,28 @@ struct Served {
 }
 
 
+fn accept_bounded(listener: &TcpListener) -> io::Result<TcpStream> {
+    listener.set_nonblocking(true)?;
+    let accepted = (0..MAX_POLLS).find_map(|_poll| match listener.accept() {
+        Ok((stream, _)) => Some(Ok(stream)),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            sleep(POLL_INTERVAL);
+            None
+        }
+        Err(error) => Some(Err(error)),
+    });
+    let stream = accepted.unwrap_or_else(|| Err(io::Error::new(ErrorKind::TimedOut, "no client connected")))?;
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(BOUND))?;
+    Ok(stream)
+}
+
+
 fn serve(script: Script) -> Result<Served, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://127.0.0.1:{}/bucket/", listener.local_addr()?.port());
     let handle = spawn(move || {
-        let (stream, _) = listener.accept()?;
+        let stream = accept_bounded(&listener)?;
         run(stream, script)
     });
     Ok(Served { url, handle })
