@@ -1,3 +1,5 @@
+#[path = "common/accept.rs"]
+mod accept;
 #[path = "common/stub.rs"]
 mod stub;
 #[path = "common/types.rs"]
@@ -52,6 +54,9 @@ const REQUESTS_BEFORE_INSERT: usize = 3;
 
 
 const STALL_TIMEOUT_MS: u64 = 100;
+
+
+const EVENT_WAIT: Duration = Duration::from_secs(60);
 
 
 const LONG_TIMEOUT_MS: u64 = 60_000;
@@ -414,8 +419,10 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
 fn a_server_that_never_answers_hits_the_deadline() -> TestResult {
     let rig = rig(STALL_TIMEOUT_MS)?;
     let (release, held) = channel();
-    let server = stall(rig.listener.try_clone()?, held);
+    let (ready, requested) = channel();
+    let server = stall(rig.listener.try_clone()?, ready, held);
     let failed = load_table(&rig.config, &january()?, VERSION, &idle);
+    requested.recv_timeout(EVENT_WAIT)?;
     release.send(())?;
     joined(server)?;
     assert!(matches!(failed, Err(LoadError::Schema(InsertClass::Timeout))));
