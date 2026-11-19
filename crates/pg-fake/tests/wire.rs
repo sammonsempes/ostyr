@@ -305,12 +305,12 @@ fn bind_params_reads_text_parameters_and_tolerates_truncation() -> Result<(), Bo
     let body_of = |params: &[&str], formats: &[u8]| -> Result<Vec<u8>, Box<dyn Error>> {
         Ok(bind(params, formats)?.get(FOUR + 1..).map(<[u8]>::to_vec).ok_or("short")?)
     };
-    assert_eq!(bind_params(&body_of(&["a", "bc"], &[])?), ["a", "bc"]);
-    assert_eq!(bind_params(&body_of(&["a"], &[0, 0, 0, 0])?), ["a"]);
-    assert!(bind_params(&[]).is_empty());
+    assert_eq!(bind_params(&body_of(&["a", "bc"], &[])?, &Reply::Done)?, ["a", "bc"]);
+    assert_eq!(bind_params(&body_of(&["a"], &[0, 0, 0, 0])?, &Reply::Done)?, ["a"]);
+    assert!(bind_params(&[], &Reply::Done)?.is_empty());
     let full = body_of(&["abc", "d"], &[])?;
     let cut = full.get(..full.len() - CUT).ok_or("short")?;
-    assert_eq!(bind_params(cut), ["abc", ""]);
+    assert_eq!(bind_params(cut, &Reply::Done)?, ["abc", ""]);
     Ok(())
 }
 
@@ -404,8 +404,50 @@ fn parameter_oids_and_formats_fall_back_to_text() -> Result<(), Box<dyn Error>> 
         (format_of(TWO_FORMATS, 0), format_of(TWO_FORMATS, 1), format_of(TWO_FORMATS, PAIR)),
         (0, 1, 0)
     );
-    assert_eq!(render_param(&NINE.to_be_bytes(), 1), "9");
-    assert_eq!(render_param(&NINE.to_be_bytes(), 0), String::from_utf8_lossy(&NINE.to_be_bytes()));
-    assert_eq!(render_param(b"ab", 1), "ab");
+    assert_eq!(render_param(&NINE.to_be_bytes(), 1, INT8_OID)?, "9");
+    assert_eq!(
+        render_param(&NINE.to_be_bytes(), 0, INT8_OID)?,
+        String::from_utf8_lossy(&NINE.to_be_bytes())
+    );
+    assert_eq!(render_param(b"ab", 1, TEXT_OID)?, "ab");
+    Ok(())
+}
+
+
+const OTHER_OID: i32 = 16;
+
+
+const BAD_UTF8: &[u8] = &[0xff, 0xfe];
+
+
+const FOUR_BYTES: i32 = 4;
+
+
+const OTHER_BYTES: &[u8] = &[1, 0xab];
+
+
+#[test]
+fn render_param_follows_the_declared_type_not_the_length() -> Result<(), Box<dyn Error>> {
+    assert_eq!(render_param(b"10.0.0.5", 1, TEXT_OID)?, "10.0.0.5");
+    assert_eq!(render_param(&NINE.to_be_bytes(), 1, INT8_OID)?, "9");
+    assert_eq!(render_param(&SEVEN.to_be_bytes(), 1, INT4)?, "7");
+    assert_eq!(render_param(BAD_UTF8, 1, TEXT_OID)?, "invalid-utf8:2");
+    assert_eq!(render_param(BAD_UTF8, 0, TEXT_OID)?, "invalid-utf8:2");
+    assert_eq!(render_param(OTHER_BYTES, 1, OTHER_OID)?, "oid16:01ab");
+    assert_eq!(render_param(b"abc", 1, INT8_OID), Err("22P03"));
+    assert_eq!(render_param(b"abc", 1, INT4), Err("22P03"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_wrong_length_int8_bind_is_an_error_until_sync() -> Result<(), Box<dyn Error>> {
+    let mut body = b"\0\0\0\x01\0\x01\0\x01".to_vec();
+    body.extend_from_slice(&FOUR_BYTES.to_be_bytes());
+    body.extend_from_slice(b"abcd\0\0");
+    let input = joined(vec![parse("SELECT $1")?, frame(b'B', &body)?, frame(b'E', &[])?, frame(b'S', &[])?]);
+    let (output, statements) = run(by_sql(typed()), input).await?;
+    assert_eq!(output, joined(vec![frame(b'1', &[])?, error_frame("22P03")?, ready()?]));
+    assert_eq!(statements, ["SELECT $1"]);
     Ok(())
 }

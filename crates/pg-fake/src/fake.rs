@@ -274,16 +274,39 @@ pub fn format_of(formats: &[u8], index: usize) -> usize {
 }
 
 
-pub fn render_param(bytes: &[u8], format: usize) -> String {
-    match <[u8; INT8_BYTES]>::try_from(bytes) {
-        Ok(array) if format == BINARY_FORMAT => i64::from_be_bytes(array).to_string(),
-        _ => String::from_utf8_lossy(bytes).into_owned(),
+pub const BAD_BINARY_SQLSTATE: &str = "22P03";
+
+
+pub const INT4_BYTES: usize = 4;
+
+
+pub fn render_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => format!("invalid-utf8:{}", bytes.len()),
     }
 }
 
 
-/// The parameters of a Bind message as text; a binary 8-byte parameter is shown as an int8.
-pub fn bind_params(body: &[u8]) -> Vec<String> {
+pub fn render_param(bytes: &[u8], format: usize, oid: i32) -> Result<String, &'static str> {
+    match (format == BINARY_FORMAT, oid) {
+        (true, INT8_OID) => <[u8; INT8_BYTES]>::try_from(bytes)
+            .map(|array| i64::from_be_bytes(array).to_string())
+            .map_err(|_| BAD_BINARY_SQLSTATE),
+        (true, INT4_OID) => <[u8; INT4_BYTES]>::try_from(bytes)
+            .map(|array| i32::from_be_bytes(array).to_string())
+            .map_err(|_| BAD_BINARY_SQLSTATE),
+        (true, TEXT_OID) | (false, _) => Ok(render_text(bytes)),
+        (true, other) => Ok(format!(
+            "oid{other}:{}",
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        )),
+    }
+}
+
+
+/// The parameters of a Bind message as text, each rendered by the declared OID; a malformed binary int is a SQLSTATE.
+pub fn bind_params(body: &[u8], reply: &Reply) -> Result<Vec<String>, &'static str> {
     let after_portal = body.get(cstring(body).len() + 1..).unwrap_or(&[]);
     let after_statement = after_portal.get(cstring(after_portal).len() + 1..).unwrap_or(&[]);
     let formats = be_u16(after_statement);
@@ -297,10 +320,11 @@ pub fn bind_params(body: &[u8]) -> Vec<String> {
         params.push(render_param(
             rest.get(LENGTH_FIELD_BYTES..end).unwrap_or(&[]),
             format_of(after_statement, params.len()),
-        ));
+            parameter_oid(reply, params.len()),
+        )?);
         rest = rest.get(end..).unwrap_or(&[]);
     }
-    params
+    Ok(params)
 }
 
 
@@ -344,7 +368,13 @@ pub async fn serve_messages<Channel: AsyncRead + AsyncWrite + Unpin>(
                     }
                 }
                 if tag == b'B' {
-                    log.send(format!("PARAMS {}", bind_params(&body).join("|"))).map_err(io::Error::other)?;
+                    match bind_params(&body, &session.reply) {
+                        Ok(params) => log.send(format!("PARAMS {}", params.join("|"))).map_err(io::Error::other)?,
+                        Err(code) => {
+                            session.skipping = true;
+                            stream.write_all(&error_frame(code)?).await?;
+                        }
+                    }
                 }
                 if !session.skipping || tag == b'S' {
                     extended(stream, &mut session, tag, &body).await?;
