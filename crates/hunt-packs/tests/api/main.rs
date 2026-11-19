@@ -58,6 +58,18 @@ const MANY_BAD: usize = 1_200;
 const FLOOD: usize = 200;
 
 
+const MAX_PAGES: usize = 10;
+
+
+const EXPECTED_PAGES: usize = 6;
+
+
+const EXPECTED_SKIPPED: u64 = 4;
+
+
+const SECOND_AFTER: i64 = 2;
+
+
 const YEAR_10000: i64 = 253_402_300_800;
 
 
@@ -180,11 +192,10 @@ async fn an_ordinary_an_uppercase_and_a_longest_id_cursor_round_trip() -> TestRe
     )
     .await?;
     assert_eq!(packs(&after_alpha)?, ["beta", "gamma"]);
-    let widest = encode_cursor(FIRST_END, &"z".repeat(BYTE_CAP));
+    let widest = encode_cursor(i64::MIN, &"z".repeat(BYTE_CAP));
     assert_eq!(widest.len(), MAX_CURSOR_CHARS);
     assert_eq!(decode_cursor(&widest)?.1.len(), BYTE_CAP);
-    assert_eq!(FIRST_END.to_string().len(), MAX_END_CHARS);
-    assert_eq!(MAX_END.to_string().len(), MAX_END_CHARS);
+    assert_eq!(i64::MIN.to_string().len(), MAX_END_CHARS);
     assert!(checked_time(FIRST_END).is_ok() && checked_time(FIRST_END - 1).is_err());
     assert_eq!(MAX_ID_CHARS, BYTE_CAP);
     Ok(())
@@ -197,8 +208,7 @@ async fn a_bad_cursor_is_a_fixed_400_that_never_echoes_the_input() -> TestResult
     let long = "A".repeat(MAX_CURSOR_CHARS + 1);
     let nul = BASE64URL_NOPAD.encode(format!("{BASE}:a\0b").as_bytes());
     let utf8 = BASE64URL_NOPAD.encode(&INVALID_UTF8);
-    let negative = BASE64URL_NOPAD.encode(format!("{}:a", FIRST_END - 1).as_bytes());
-    let future = BASE64URL_NOPAD.encode(format!("{YEAR_10000}:a").as_bytes());
+    let overflow = BASE64URL_NOPAD.encode(b"9223372036854775808:a");
     let too_long_id = BASE64URL_NOPAD.encode(format!("{BASE}:{}", "a".repeat(BYTE_CAP + 1)).as_bytes());
     let no_separator = BASE64URL_NOPAD.encode(b"12345");
     let not_a_number = BASE64URL_NOPAD.encode(b"x:a");
@@ -208,8 +218,7 @@ async fn a_bad_cursor_is_a_fixed_400_that_never_echoes_the_input() -> TestResult
         long,
         nul,
         utf8,
-        negative,
-        future,
+        overflow,
         too_long_id,
         no_separator,
         not_a_number,
@@ -286,7 +295,7 @@ async fn a_long_run_of_refused_rows_is_walked_page_by_page() -> TestResult {
 
 
 #[tokio::test]
-async fn a_refused_time_is_left_out_and_counted_without_a_cursor_past_it() -> TestResult {
+async fn a_refused_time_is_left_out_and_counted_and_the_cursor_still_moves() -> TestResult {
     let fx = fixture()?;
     put(&fx.db, TENANT, finding("good", BASE));
     let mut bad_start = finding("early", BASE + 1);
@@ -297,7 +306,9 @@ async fn a_refused_time_is_left_out_and_counted_without_a_cursor_past_it() -> Te
     let page = body_json(get(&fx.router, "/hunts/findings?limit=3", Some(&token)).await?).await?;
     assert_eq!(packs(&page)?, ["good"]);
     assert_eq!(page.get("skipped"), Some(&Value::from(PAGE_OF_TWO)));
-    assert_eq!(page.get("next_cursor"), Some(&Value::Null));
+    let cursor = next_of(&page).ok_or("a full page must carry a cursor")?;
+    let rest = body_json(get(&fx.router, &format!("/hunts/findings?cursor={cursor}"), Some(&token)).await?).await?;
+    assert!(packs(&rest)?.is_empty() && next_of(&rest).is_none());
     let cut = body_json(get(&fx.router, "/hunts/findings?limit=2", Some(&token)).await?).await?;
     assert_eq!(packs(&cut)?, ["good"]);
     assert!(next_of(&cut).is_some());
@@ -455,5 +466,51 @@ async fn an_invalid_session_tenant_is_refused_before_the_backend() -> TestResult
     assert_eq!(refused.err(), Some(ApiError::Internal));
     assert!(scope_of(&session).is_err());
     assert!(lock(&db.tenants_seen).is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn every_row_is_listed_skipped_or_counted_at_any_page_size_past_year_9999() -> TestResult {
+    let fx = fixture()?;
+    for (pack, end) in [
+        ("a", BASE),
+        ("future-1", YEAR_10000),
+        ("future-2", YEAR_10000 + 1),
+        ("future-3", YEAR_10000 + SECOND_AFTER),
+        ("imax", i64::MAX),
+    ] {
+        put(&fx.db, TENANT, finding(pack, end));
+    }
+    let token = login(&fx.router, READER).await?;
+    let mut cursor: Option<String> = None;
+    let mut listed: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut requests: usize = 0;
+    for _page in 0..MAX_PAGES {
+        if requests == 0 || cursor.is_some() {
+            let url = cursor.as_ref().map_or_else(
+                || "/hunts/findings?limit=1".to_owned(),
+                |next| format!("/hunts/findings?limit=1&cursor={next}"),
+            );
+            let page = body_json(get(&fx.router, &url, Some(&token)).await?).await?;
+            listed += u64::try_from(packs(&page)?.len())?;
+            skipped += page.get("skipped").and_then(Value::as_u64).ok_or("no skipped")?;
+            cursor = next_of(&page);
+            requests += 1;
+        }
+    }
+    assert_eq!(requests, EXPECTED_PAGES);
+    assert!(cursor.is_none());
+    assert_eq!((listed, skipped), (1, EXPECTED_SKIPPED));
+    Ok(())
+}
+
+
+#[test]
+fn a_cursor_accepts_every_end_the_store_can_hold() -> TestResult {
+    for end in [i64::MAX, i64::MIN, 0, YEAR_10000, FIRST_END - 1] {
+        assert_eq!(decode_cursor(&encode_cursor(end, "a\u{1}b"))?, (end, "a\u{1}b".to_owned()));
+    }
     Ok(())
 }
