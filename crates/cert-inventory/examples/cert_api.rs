@@ -1,29 +1,25 @@
 //! Usage: cert_api <module.yaml>. Serves `GET /certificates` and `GET /certificates/{fingerprint}` through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::pg::pg_executor;
 use alerts::settings::{api_startup_reloads, open_pg_engine_from, SETTING_PG};
 use cert_inventory::api::{certificates_access, certificates_document, certificates_router};
-use cert_inventory::api_model::CertBackend;
-use cert_inventory::store::{get_detail, list_certificates, MIGRATIONS, MIGRATION_NAMESPACE};
+use cert_inventory::backend::pg_backend;
+use cert_inventory::store::{MIGRATIONS, MIGRATION_NAMESPACE};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
 use core_api::server::{new_listener, run_loaded, stop_listener};
 use core_api::types::SharedListener;
 use core_config::load::load_module;
-use core_config::reload::ReloadEngine;
 #[cfg(unix)]
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
-use core_pg::settings::PgSettings;
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
-use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
@@ -40,40 +36,10 @@ const USAGE: &str = "usage: cert_api <module.yaml>";
 const ACTOR: &str = "cert-inventory";
 
 
-fn now_seconds() -> i64 {
-    OffsetDateTime::now_utc().unix_timestamp()
-}
-
-
 async fn stop_on_interrupt(listener: SharedListener) {
     match tokio::signal::ctrl_c().await {
         Ok(()) => stop_listener(&listener, Some(Duration::from_secs(SHUTDOWN_GRACE_SECONDS))),
         Err(error) => tracing::error!(%error, "cannot listen for the interrupt signal"),
-    }
-}
-
-
-fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>) -> CertBackend {
-    let list_engine = Arc::clone(&engine);
-    let list_permits = Arc::clone(&permits);
-    CertBackend {
-        list: Arc::new(move |scope, request| {
-            let (held_engine, held_permits) = (Arc::clone(&list_engine), Arc::clone(&list_permits));
-            Box::pin(async move {
-                let held = lease(&held_engine, &held_permits).await?;
-                let executor = pg_executor(&held.client, held.deadline);
-                list_certificates(&executor, &scope, &request.filter, request.cursor.as_deref(), request.limit).await
-            })
-        }),
-        get: Arc::new(move |scope, fingerprint| {
-            let (held_engine, held_permits) = (Arc::clone(&engine), Arc::clone(&permits));
-            Box::pin(async move {
-                let held = lease(&held_engine, &held_permits).await?;
-                let executor = pg_executor(&held.client, held.deadline);
-                get_detail(&executor, &scope, &fingerprint).await
-            })
-        }),
-        clock: now_seconds,
     }
 }
 
