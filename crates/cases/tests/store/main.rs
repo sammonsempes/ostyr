@@ -2,6 +2,7 @@ mod actions;
 mod appends;
 mod links;
 mod memory;
+mod observables;
 mod rows;
 mod summary;
 mod types;

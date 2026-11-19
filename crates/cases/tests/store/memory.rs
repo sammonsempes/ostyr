@@ -1,9 +1,9 @@
-use crate::types::Table;
+use crate::types::{IndexKey, Table};
 use alerts::types::Row;
 use cases::model::{Case, CaseEvent, CaseStatus, Comment, Observable};
 use cases::store::{
     APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, FIRST_SUMMARY_SQL, GET_SQL, INSERT_SQL, LINKS_AFTER_SQL, LINKS_SQL, NEXT_SQL, NEXT_SUMMARY_SQL,
-    OBSERVABLE_SQL,
+    OBSERVABLES_SQL, OBSERVABLE_SQL, SEEN_IN_SQL,
 };
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -37,6 +37,7 @@ pub struct Entry {
 #[derive(Default)]
 pub struct Db {
     pub tenants: Mutex<BTreeMap<String, Table>>,
+    pub index: Mutex<BTreeSet<IndexKey>>,
     pub known_alerts: Mutex<BTreeMap<String, BTreeSet<String>>>,
     pub forced: Mutex<VecDeque<Forced>>,
     pub statements: Mutex<Vec<(String, &'static str)>>,
@@ -231,20 +232,78 @@ pub fn comment(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgError
 }
 
 
-pub fn observable(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgError> {
+pub fn observable(table: &mut Table, index: &mut BTreeSet<IndexKey>, tenant: &str, params: &[String]) -> Result<Vec<Row>, PgError> {
     let cap = param(params, CAP_INDEX)?.parse::<usize>().map_err(|_source| malformed())?;
     let new: Observable = serde_json::from_str(param(params, 1)?).map_err(|_source| malformed())?;
     Ok(match table.get_mut(param(params, 0)?) {
         Some(entry) => {
             let size = entry.case.observables.len();
-            let fresh = size < cap && !entry.case.observables.iter().any(|seen| seen.kind == new.kind && seen.value == new.value);
+            let same = entry.case.observables.iter().any(|seen| seen.kind == new.kind && seen.value == new.value);
+            let fresh = size < cap && !same;
             if fresh {
+                index.insert((tenant.to_owned(), format!("{:?}", new.kind), new.value.clone(), entry.case.id.clone()));
                 entry.case.observables.push(new);
             }
-            answer(true, fresh, size)
+            observable_answer(true, fresh, size, same)
         }
-        None => answer(false, false, 0),
+        None => observable_answer(false, false, 0, false),
     })
+}
+
+
+pub fn observable_answer(found: bool, added: bool, size: usize, same: bool) -> Vec<Row> {
+    vec![vec![
+        usize::from(found).to_string(),
+        usize::from(added).to_string(),
+        size.to_string(),
+        usize::from(same).to_string(),
+    ]]
+}
+
+
+pub fn observables_text(table: &Table, params: &[String]) -> Result<Vec<Row>, PgError> {
+    table
+        .get(param(params, 0)?)
+        .map(|entry| {
+            serde_json::to_string(&entry.case.observables)
+                .map(|text| vec![text])
+                .map_err(|_source| malformed())
+        })
+        .transpose()
+        .map(|row| row.into_iter().collect())
+}
+
+
+pub fn seen_in(table: &Table, index: &BTreeSet<IndexKey>, tenant: &str, params: &[String]) -> Result<Vec<Row>, PgError> {
+    let id = param(params, 0)?;
+    let limit = param(params, 1)?.parse::<usize>().map_err(|_source| malformed())?;
+    Ok(table.get(id).map_or_else(Vec::new, |entry| {
+        if entry.case.observables.is_empty() {
+            vec![vec![id.clone(), "0".to_owned(), String::new()]]
+        } else {
+            entry
+                .case
+                .observables
+                .iter()
+                .enumerate()
+                .flat_map(|(position, mine)| {
+                    let ordinal = (position + 1).to_string();
+                    let kind = format!("{:?}", mine.kind);
+                    let others: Vec<&String> = index
+                        .iter()
+                        .filter(|(owner, held_kind, value, case_id)| owner == tenant && *held_kind == kind && *value == mine.value && case_id != id)
+                        .map(|(_owner, _kind, _value, case_id)| case_id)
+                        .take(limit)
+                        .collect();
+                    if others.is_empty() {
+                        vec![vec![id.clone(), ordinal, String::new()]]
+                    } else {
+                        others.into_iter().map(|other| vec![id.clone(), ordinal.clone(), other.clone()]).collect()
+                    }
+                })
+                .collect()
+        }
+    }))
 }
 
 
@@ -319,6 +378,7 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]
         Some(Forced::Rows(rows)) => Ok(rows),
         None => {
             let mut tenants = lock(&db.tenants);
+            let mut index = lock(&db.index);
             let known = lock(&db.known_alerts).get(tenant_of(scope)).map_or_else(BTreeSet::new, Clone::clone);
             let table = tenants.entry(tenant_of(scope).to_owned()).or_default();
             if sql == INSERT_SQL {
@@ -336,7 +396,11 @@ pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]
             } else if sql == COMMENT_SQL {
                 comment(table, params)
             } else if sql == OBSERVABLE_SQL {
-                observable(table, params)
+                observable(table, &mut index, tenant_of(scope), params)
+            } else if sql == OBSERVABLES_SQL {
+                observables_text(table, params)
+            } else if sql == SEEN_IN_SQL {
+                seen_in(table, &index, tenant_of(scope), params)
             } else if sql == ATTACH_SQL {
                 attach(table, &known, params)
             } else if sql == LINKS_SQL || sql == LINKS_AFTER_SQL {

@@ -9,3 +9,6 @@ pub type TestResult = Result<(), TestError>;
 
 
 pub type Table = BTreeMap<String, Entry>;
+
+
+pub type IndexKey = (String, String, String, String);
