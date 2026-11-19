@@ -1403,6 +1403,19 @@ async fn the_caps_of_one_tenant_do_not_bind_another() -> TestResult {
 
 
 #[test]
+fn tenant_room_lock_takes_a_64_bit_key() -> TestResult {
+    let migration = MIGRATIONS.get(FOUR).ok_or("no fifth migration")?;
+    assert_eq!(migration.version, "005_cmdb_tenant_room_64_bit");
+    assert!(migration
+        .sql
+        .contains("pg_advisory_xact_lock(hashtextextended('cmdb_tenant_room/' || tenant_name, 0))"));
+    assert!(!migration.sql.contains("hashtext(tenant_name)"));
+    assert!(migration.sql.contains("SET search_path = pg_catalog, public"));
+    Ok(())
+}
+
+
+#[test]
 fn apply_takes_the_tenant_lock_before_any_row_lock_and_gates_every_write_on_the_caps() -> TestResult {
     let migration = MIGRATIONS.get(THREE).ok_or("no fourth migration")?.sql;
     assert!(migration.contains("pg_advisory_xact_lock(1129270338, hashtext(tenant_name))"));
