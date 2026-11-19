@@ -17,10 +17,16 @@ use time::OffsetDateTime;
 pub const MIGRATION_NAMESPACE: &str = "cert_inventory";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "001_cert_inventory",
-    sql: include_str!("../migrations/001_cert_inventory.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "001_cert_inventory",
+        sql: include_str!("../migrations/001_cert_inventory.sql"),
+    },
+    Migration {
+        version: "002_cert_inventory_lock_64",
+        sql: include_str!("../migrations/002_cert_inventory_lock_64.sql"),
+    },
+];
 
 
 /// One statement: `$1` tenant, `$2` records JSON, `$3` kind, `$4` reference, `$5` now, `$6` and `$7` caps; answers (inserted, seen again, refused).
