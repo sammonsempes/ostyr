@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 
+/// Name prefix of the private temporary file of a quarantine rewrite.
+pub const QUARANTINE_TEMPORARY_PREFIX: &str = ".quarantine-";
+
+
 /// Event lines claimed from the spool file per run; the rest goes back to the spool for the next run.
 pub const MAX_SPOOL_BATCHES: usize = 1_000;
 
@@ -131,7 +135,7 @@ pub const MAX_QUARANTINED_LINES: usize = 1_000;
 pub const MAX_REFUSAL_WARNINGS: u64 = 10;
 
 
-/// The refused lines of a scan: at most `MAX_QUARANTINED_LINES` lossy heads within `MAX_REJECTED_BYTES`, and the counts.
+/// The refused lines of a scan: at most `MAX_QUARANTINED_LINES` lossy heads within `MAX_REJECTED_BYTES`, and the counts (`counts_only`: no head is built).
 #[derive(Debug, Default)]
 pub struct RefusedLines {
     pub lines: Vec<String>,
@@ -139,6 +143,7 @@ pub struct RefusedLines {
     pub oversized: u64,
     pub invalid: u64,
     pub dropped: u64,
+    pub counts_only: bool,
 }
 
 
@@ -150,12 +155,12 @@ pub fn refused_total(refused: &RefusedLines) -> u64 {
 
 /// Keeps the lossy head of a refused line unless `MAX_QUARANTINED_LINES` heads or `MAX_REJECTED_BYTES` are reached (the head is built only under the count cap), otherwise counts it dropped.
 pub fn keep_head(refused: &mut RefusedLines, content: &[u8]) {
-    let kept = if refused.lines.len() < MAX_QUARANTINED_LINES {
+    let kept = if refused.counts_only || refused.lines.len() >= MAX_QUARANTINED_LINES {
+        None
+    } else {
         let head = String::from_utf8_lossy(content.get(..TAIL_QUARANTINE_BYTES).unwrap_or(content)).into_owned();
         let total = refused.bytes + head.len() as u64;
         (total < MAX_REJECTED_BYTES).then_some(head)
-    } else {
-        None
     };
     match kept {
         Some(head) => {
@@ -198,6 +203,16 @@ pub fn log_refusal_summary(refused: &RefusedLines) {
 }
 
 
+/// One summary line of a quarantine copy pass that refused old lines, with the counts.
+pub fn log_quarantine_summary(refused: &RefusedLines) {
+    let total = refused_total(refused);
+    if total > 0 {
+        let (oversized, invalid) = (refused.oversized, refused.invalid);
+        tracing::warn!(total, oversized, invalid, "quarantine lines refused and not copied");
+    }
+}
+
+
 /// The newline-ended text lines of a reader (an unterminated last line stays out); an oversized or non-UTF-8 line is skipped and recorded in `refused`.
 pub fn spool_texts_with<'a, Input: BufRead>(
     reader: &'a mut Input,
@@ -229,12 +244,15 @@ pub fn open_old(path: &Path) -> io::Result<Option<File>> {
 }
 
 
-/// How many text lines and bytes (newlines included) the old quarantine holds, streamed.
-pub fn old_totals(path: &Path) -> io::Result<(u64, u64)> {
-    let mut ignored = RefusedLines::default();
-    let mut counted = (u64::MIN, u64::MIN);
-    if let Some(file) = open_old(path)? {
-        let mut reader = BufReader::new(&file);
+/// How many text lines and bytes (newlines included) the old quarantine holds, streamed through its handle.
+pub fn old_totals(old: Option<&File>) -> io::Result<(u64, u64)> {
+    let mut ignored = RefusedLines {
+        counts_only: true,
+        ..RefusedLines::default()
+    };
+    let mut counted = (0, 0);
+    if let Some(file) = old {
+        let mut reader = BufReader::new(file);
         counted = spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, &mut ignored).try_fold(counted, |(lines, bytes), read| {
             read.map(|text| (lines + 1, bytes + text.len() as u64 + 1))
         })?;
@@ -243,12 +261,21 @@ pub fn old_totals(path: &Path) -> io::Result<(u64, u64)> {
 }
 
 
-/// Copies the text lines of the old quarantine to `out`, skipping the oldest while `excess` (bytes, lines) is not gone; a refused old line is recorded in `refused`; returns how many it skipped.
-pub fn copy_after_excess(old: Option<File>, excess: (u64, u64), refused: &mut RefusedLines, out: &mut dyn Write) -> io::Result<u64> {
-    let mut skipped_bytes = u64::MIN;
-    let mut skipped_lines = u64::MIN;
+/// Puts the handle of the old quarantine back at its start for the copying pass.
+pub fn rewind_old(old: Option<&File>) -> io::Result<()> {
+    old.map_or(Ok(()), |file| {
+        let mut handle = file;
+        handle.rewind()
+    })
+}
+
+
+/// Copies the text lines of the old quarantine to `out`, skipping the oldest while `excess` (bytes, lines) is not gone; a refused old line is counted in `refused`; returns how many it skipped.
+pub fn copy_after_excess(old: Option<&File>, excess: (u64, u64), refused: &mut RefusedLines, out: &mut dyn Write) -> io::Result<u64> {
+    let mut skipped_bytes = 0;
+    let mut skipped_lines = 0;
     if let Some(file) = old {
-        let mut reader = BufReader::new(&file);
+        let mut reader = BufReader::new(file);
         spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, refused).try_for_each(|read| {
             let text = read?;
             if skipped_bytes < excess.0 || skipped_lines < excess.1 {
@@ -264,33 +291,40 @@ pub fn copy_after_excess(old: Option<File>, excess: (u64, u64), refused: &mut Re
 }
 
 
-/// Streams the old quarantine and the added lines through one `BufWriter` into a temporary file and renames it: the newest lines within `caps` (bytes, lines) stay, the dropped count is logged and returned, a refused old line is summarised; work and memory are bounded by the caps.
+/// Streams the old quarantine and the added lines through one `BufWriter` into a private temporary file next to it and renames that over it: the newest lines within `caps` (bytes, lines) stay, the dropped count is logged and returned, a refused old line is summarised; work and memory are bounded by the caps.
 pub fn rewrite_quarantine(path: &Path, added: &[String], added_bytes: u64, caps: (u64, u64)) -> io::Result<u64> {
     rewrite_quarantine_with(path, added, added_bytes, caps, open_old)
 }
 
 
-/// `rewrite_quarantine` with the function that opens the old file for the copying pass given.
+/// `rewrite_quarantine` with the function that opens the old file given; the old file is opened once, counted, rewound and copied through that handle.
 pub fn rewrite_quarantine_with(
     path: &Path,
     added: &[String],
     added_bytes: u64,
     caps: (u64, u64),
-    reopen: fn(&Path) -> io::Result<Option<File>>,
+    open: fn(&Path) -> io::Result<Option<File>>,
 ) -> io::Result<u64> {
-    let (old_lines, old_bytes) = old_totals(path)?;
+    let old = open(path)?;
+    let (old_lines, old_bytes) = old_totals(old.as_ref())?;
     let excess = (
         (old_bytes + added_bytes).saturating_sub(caps.0),
         (old_lines + added.len() as u64).saturating_sub(caps.1),
     );
-    let temporary = suffixed(path, TEMPORARY_SUFFIX);
-    let mut out = BufWriter::new(owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&temporary)?);
-    let mut skipped = RefusedLines::default();
-    let dropped = copy_after_excess(reopen(path)?, excess, &mut skipped, &mut out)?;
+    rewind_old(old.as_ref())?;
+    let temporary = tempfile::Builder::new()
+        .prefix(QUARANTINE_TEMPORARY_PREFIX)
+        .tempfile_in(path.parent().unwrap_or(Path::new(".")))?;
+    let mut out = BufWriter::new(temporary.as_file());
+    let mut skipped = RefusedLines {
+        counts_only: true,
+        ..RefusedLines::default()
+    };
+    let dropped = copy_after_excess(old.as_ref(), excess, &mut skipped, &mut out)?;
     added.iter().try_for_each(|line| writeln!(out, "{line}"))?;
     out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
-    fs::rename(&temporary, path)?;
-    log_refusal_summary(&skipped);
+    temporary.persist(path).map_err(|error| error.error)?;
+    log_quarantine_summary(&skipped);
     if dropped > 0 {
         tracing::warn!(dropped, "quarantine full, oldest refused lines dropped");
     }

@@ -3,8 +3,8 @@ use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::proto::EventBatch;
 use agent_channel::spool::{
-    claim_spool, line_limit, quarantine, quarantine_refused, rewrite_quarantine_with, RefusedLines, MAX_QUARANTINED_LINES, MAX_REFUSAL_WARNINGS,
-    MAX_REJECTED_BYTES, MAX_REJECTED_LINES,
+    claim_spool, copy_after_excess, line_limit, quarantine, quarantine_refused, rewrite_quarantine_with, RefusedLines, MAX_QUARANTINED_LINES,
+    MAX_REFUSAL_WARNINGS, MAX_REJECTED_BYTES, MAX_REJECTED_LINES,
 };
 use std::fs::{self, File};
 use std::io;
@@ -249,9 +249,6 @@ fn a_quarantine_that_cannot_be_opened_or_written_is_an_error() -> TestResult {
     fs::write(&blocker, "file")?;
     assert!(quarantine_refused(&blocker.join("spool"), &refused).is_err());
     let spool = dir.path().join("spool");
-    fs::create_dir(dir.path().join("spool.rejected.tmp"))?;
-    assert!(quarantine_refused(&spool, &refused).is_err());
-    fs::remove_dir(dir.path().join("spool.rejected.tmp"))?;
     fs::create_dir(dir.path().join("spool.rejected"))?;
     assert!(quarantine_refused(&spool, &refused).is_err());
     Ok(())
@@ -305,7 +302,10 @@ fn a_tail_cut_over_a_full_quarantine_keeps_the_line_cap_and_logs_a_refused_old_l
     assert_eq!(text.lines().last(), Some("tail"));
     assert!(!text.contains("MARKER"));
     let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
-    assert!(log.contains("spool lines refused") && !log.contains("MARKER"), "{log}");
+    assert!(
+        log.contains("quarantine lines refused and not copied") && !log.contains("MARKER"),
+        "{log}"
+    );
     Ok(())
 }
 
@@ -346,5 +346,54 @@ fn a_copying_pass_that_cannot_read_or_open_the_old_quarantine_fails_and_keeps_it
     assert!(rewrite_quarantine_with(&rejected, &added, NEW_BYTES, (MAX_REJECTED_BYTES, MAX_REJECTED_LINES), open_the_directory).is_err());
     assert!(rewrite_quarantine_with(&rejected, &added, NEW_BYTES, (MAX_REJECTED_BYTES, MAX_REJECTED_LINES), refuse_the_file).is_err());
     assert_eq!(fs::read_to_string(&rejected)?, "keep\n");
+    Ok(())
+}
+
+
+const FILES_AFTER_REWRITE: usize = 2;
+
+
+fn no_old_file(_: &Path) -> io::Result<Option<File>> {
+    Ok(None)
+}
+
+
+#[test]
+fn a_rewrite_never_uses_a_fixed_temporary_name() -> TestResult {
+    let dir = tempdir()?;
+    let spool = dir.path().join("spool");
+    fs::create_dir(dir.path().join("spool.rejected.tmp"))?;
+    let refused = RefusedLines {
+        lines: vec!["x".to_owned()],
+        bytes: SMALL_BYTES,
+        ..RefusedLines::default()
+    };
+    quarantine_refused(&spool, &refused)?;
+    assert_eq!(fs::read_to_string(dir.path().join("spool.rejected"))?, "x\n");
+    assert_eq!(fs::read_dir(dir.path())?.count(), FILES_AFTER_REWRITE);
+    Ok(())
+}
+
+
+#[test]
+fn a_rewrite_that_cannot_rename_over_the_quarantine_fails_and_leaves_no_temporary_file() -> TestResult {
+    let dir = tempdir()?;
+    let rejected = dir.path().join("spool.rejected");
+    fs::create_dir(&rejected)?;
+    let added = vec!["new".to_owned()];
+    assert!(rewrite_quarantine_with(&rejected, &added, NEW_BYTES, (MAX_REJECTED_BYTES, MAX_REJECTED_LINES), no_old_file).is_err());
+    assert_eq!(fs::read_dir(dir.path())?.count(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_copying_pass_that_fails_to_read_the_old_handle_is_an_error() -> TestResult {
+    let dir = tempdir()?;
+    let handle = File::open(dir.path())?;
+    let mut skipped = RefusedLines::default();
+    let mut out = Vec::new();
+    assert!(copy_after_excess(Some(&handle), (0, 0), &mut skipped, &mut out).is_err());
+    assert!(out.is_empty());
     Ok(())
 }
