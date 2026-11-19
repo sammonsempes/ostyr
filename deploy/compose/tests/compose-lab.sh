@@ -109,6 +109,21 @@ expect "a 253-character name verifies and sits in the SAN" remote "cd longname &
 remote "sudo rm -rf killed && mkdir killed && cp compose/init.sh killed/ && cd killed && sudo timeout -s TERM 0.3 ./init.sh kill.example; true"
 expect "a killed init.sh leaves no scratch directory" absent remote "sudo find killed/secrets -name '.tls.*' | grep -q ."
 remote "cd killed && sudo rm -rf secrets && sudo ./init.sh kill.example && sudo openssl verify -CAfile secrets/ca.crt secrets/api_tls.crt"
+for odd_name in 1.2.3 127.1 0x7f.1.1.1 1.2.3.4.5; do
+    expect "init.sh refuses the all-numeric name $odd_name" absent remote "cd compose && sudo ./init.sh $odd_name"
+done
+remote "sudo rm -rf plant && mkdir -p plant/secrets && cp compose/init.sh plant/ && cd plant && sudo ln -s /tmp/leak-store secrets/store.key"
+expect "init.sh refuses a dangling symlink at store.key" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "no key was written through the symlink" absent remote "test -e /tmp/leak-store"
+remote "cd plant && sudo rm -rf secrets && sudo mkdir secrets && sudo ln -s /nowhere secrets/api_tls.crt"
+expect "init.sh refuses a dangling symlink at a TLS name" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "no TLS file was published next to the planted link" absent remote "cd plant && sudo test -e secrets/ca.crt"
+remote "cd plant && sudo rm -rf secrets && sudo ./init.sh plant.example && sudo truncate -s 5 secrets/store.key"
+expect "init.sh refuses a short secret naming the file" remote "cd plant && ! sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready' && sudo ./init.sh plant.example 2>&1 | grep -q 'store.key is not 32 bytes'"
+remote "cd plant && sudo rm -rf secrets && sudo mkdir secrets && sudo ln -s /root secrets2 && sudo mv secrets secrets.real && sudo ln -s secrets.real secrets"
+expect "init.sh refuses a secrets directory that is a symlink" absent remote "cd plant && sudo ./init.sh plant.example"
+remote "cd plant && sudo rm -rf secrets secrets.real secrets2 && sudo mkdir secrets && sudo chown 1000 secrets"
+expect "init.sh refuses a secrets directory owned by uid 1000" absent remote "cd plant && sudo ./init.sh plant.example"
 expect "the installed certificates verify against the CA" remote "cd compose && sudo openssl verify -CAfile secrets/ca.crt secrets/pg_server.crt secrets/api_tls.crt"
 remote "cd compose && sudo find secrets -exec stat -c '%a %u %n' {} +"
 

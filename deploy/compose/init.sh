@@ -20,6 +20,9 @@ readonly NAME_MAX=253
 readonly TLS_FILES=(ca.crt pg_server.key pg_server.crt api_tls.key api_tls.crt)
 readonly ADDRESS_PATTERN='^[0123456789]+(\.[0123456789]+){3}$'
 readonly OCTET_PATTERN='^(25[012345]|2[01234][0123456789]|1[0123456789][0123456789]|[123456789]?[0123456789])$'
+readonly HEX_LABEL_PATTERN='^0[xX][0123456789abcdefABCDEF]+$'
+readonly DIGITS_PATTERN='^[0123456789]+$'
+readonly BASE64_LENGTH=44
 readonly PLATFORM_CN=ostyr-platform
 readonly CURVE=prime256v1
 
@@ -38,6 +41,19 @@ if [[ "$host_name" =~ $ADDRESS_PATTERN ]]; then
         fi
     done
 fi
+if [[ ! "$host_name" =~ $ADDRESS_PATTERN ]]; then
+    IFS=. read -r -a labels <<<"$host_name"
+    for label in "${labels[@]}"; do
+        if [[ "$label" =~ $HEX_LABEL_PATTERN ]]; then
+            printf 'error: the label %s reads as a hexadecimal IPv4 part, refused\n' "$label" >&2
+            exit 1
+        fi
+    done
+    if [[ "${labels[-1]}" =~ $DIGITS_PATTERN ]]; then
+        printf 'error: a name whose last label is all digits must be a dotted-quad IPv4 address, refused\n' >&2
+        exit 1
+    fi
+fi
 if [[ "$(id -u)" -ne 0 ]]; then
     printf 'error: run as root (the platform secrets must be owned by uid %s)\n' "$SERVICE_UID" >&2
     exit 1
@@ -45,18 +61,52 @@ fi
 
 umask 077
 mkdir -p "$SECRETS_DIR"
+if [[ -L "$SECRETS_DIR" || ! -d "$SECRETS_DIR" || "$(stat -c %u "$SECRETS_DIR")" != 0 ]]; then
+    printf 'error: %s must be a directory owned by root, not a symlink\n' "$SECRETS_DIR" >&2
+    exit 1
+fi
 chmod 0700 "$SECRETS_DIR"
 
+is_present() {
+    [[ -e "$1" || -L "$1" ]]
+}
+
+expected_owner() {
+    case "$1" in
+    api_tls.key | pg_service_password | store.key) printf '%s:%s' "$SERVICE_UID" "$SERVICE_UID" ;;
+    *) printf '0:0' ;;
+    esac
+}
+
+check_present() {
+    local name="$1" size="${2:-}" path="$SECRETS_DIR/$1"
+    if [[ -L "$path" || ! -f "$path" || "$(stat -c %u:%g "$path")" != "$(expected_owner "$name")" ]]; then
+        printf 'error: %s must be a regular file owned by %s, remove it and rerun\n' "$path" "$(expected_owner "$name")" >&2
+        exit 1
+    fi
+    if [[ -n "$size" && "$(stat -c %s "$path")" != "$size" ]]; then
+        printf 'error: %s is not %s bytes long, remove it and rerun\n' "$path" "$size" >&2
+        exit 1
+    fi
+}
+
 make_random_file() {
-    local path="$1" encoding="$2" owner="$3"
-    if [[ ! -e "$path" ]]; then
+    local name="$1" encoding="$2" size="$KEY_BYTES" temporary
+    if [[ "$encoding" == base64 ]]; then
+        size="$BASE64_LENGTH"
+    fi
+    if is_present "$SECRETS_DIR/$name"; then
+        check_present "$name" "$size"
+    else
+        temporary="$(mktemp "$scratch/$name.XXXXXX")"
         if [[ "$encoding" == base64 ]]; then
-            head -c "$KEY_BYTES" /dev/urandom | base64 -w 0 >"$path"
+            head -c "$KEY_BYTES" /dev/urandom | base64 -w 0 >"$temporary"
         else
-            head -c "$KEY_BYTES" /dev/urandom >"$path"
+            head -c "$KEY_BYTES" /dev/urandom >"$temporary"
         fi
-        chown "$owner" "$path"
-        chmod 0600 "$path"
+        chown "$(expected_owner "$name")" "$temporary"
+        chmod 0600 "$temporary"
+        ln "$temporary" "$SECRETS_DIR/$name"
     fi
 }
 
@@ -74,12 +124,29 @@ stage_file() {
     chmod "$mode" "$scratch/$name"
 }
 
-publish_set() {
-    trap '' INT TERM HUP QUIT
+link_set() {
     local name
     for name in "${TLS_FILES[@]}"; do
-        mv -n "$scratch/$name" "$SECRETS_DIR/$name"
+        ln "$scratch/$name" "$SECRETS_DIR/$name" || return 1
     done
+}
+
+unlink_published() {
+    local name
+    for name in "${TLS_FILES[@]}"; do
+        if [[ ! -L "$SECRETS_DIR/$name" && "$SECRETS_DIR/$name" -ef "$scratch/$name" ]]; then
+            rm -f "$SECRETS_DIR/$name"
+        fi
+    done
+}
+
+publish_set() {
+    trap '' INT TERM HUP QUIT
+    if ! link_set; then
+        unlink_published
+        printf 'error: a name appeared in %s during the publish, this run removed what it had published\n' "$SECRETS_DIR" >&2
+        exit 1
+    fi
     trap 'rm -rf "$scratch"; exit 1' INT TERM HUP QUIT
 }
 
@@ -110,16 +177,17 @@ verify_scratch() {
 missing_tls_files() {
     local name
     for name in "${TLS_FILES[@]}"; do
-        if [[ ! -e "$SECRETS_DIR/$name" ]]; then
+        if ! is_present "$SECRETS_DIR/$name"; then
             printf '%s\n' "$name"
         fi
     done
 }
 
 rm -rf "$SECRETS_DIR"/.tls.*
-scratch="$(mktemp -d "$SECRETS_DIR/.tls.XXXXXX")"
+scratch=""
 trap 'rm -rf "$scratch"' EXIT
 trap 'rm -rf "$scratch"; exit 1' INT TERM HUP QUIT
+scratch="$(mktemp -d "$SECRETS_DIR/.tls.XXXXXX")"
 missing="$(missing_tls_files | tr '\n' ' ')"
 if [[ -n "$missing" ]]; then
     if [[ "$missing" == "${TLS_FILES[*]} " ]]; then
@@ -129,8 +197,12 @@ if [[ -n "$missing" ]]; then
         printf 'remove every TLS file (ca.crt pg_server.* api_tls.*) from %s to regenerate the set\n' "$SECRETS_DIR" >&2
         exit 1
     fi
+else
+    for tls_name in "${TLS_FILES[@]}"; do
+        check_present "$tls_name"
+    done
 fi
-make_random_file "$SECRETS_DIR/pg_password" base64 root:root
-make_random_file "$SECRETS_DIR/pg_service_password" base64 "$SERVICE_UID:$SERVICE_UID"
-make_random_file "$SECRETS_DIR/store.key" raw "$SERVICE_UID:$SERVICE_UID"
+make_random_file pg_password base64
+make_random_file pg_service_password base64
+make_random_file store.key raw
 printf 'secrets ready in %s\n' "$SECRETS_DIR"
