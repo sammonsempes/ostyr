@@ -1,7 +1,8 @@
+use crate::accept::accept_bounded;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::Duration;
@@ -23,6 +24,12 @@ const MAX_POLLS: usize = 120_000;
 
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+
+const READ_LIMIT: Duration = Duration::from_secs(30);
+
+
+const HOLD_LIMIT: Duration = Duration::from_secs(60);
 
 
 const DEFAULT_STATUS: &str = "200 OK";
@@ -73,6 +80,7 @@ fn poll_once(listener: &TcpListener, statuses: &[&'static str], seen: &mut Vec<S
     match listener.accept() {
         Ok((mut stream, _)) => {
             stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(READ_LIMIT))?;
             let status = statuses.get(seen.len()).copied().unwrap_or(DEFAULT_STATUS);
             seen.push(answer(&mut stream, status)?);
             Ok(())
@@ -111,11 +119,12 @@ pub fn finish(server: Server) -> io::Result<Vec<String>> {
 }
 
 
-/// Accepts one connection, reads the request and holds it open until `release` fires.
-pub fn stall(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io::Result<()>> {
+/// Accepts one connection (bounded), reads the request, signals `ready`, then holds it open until `release` fires (bounded).
+pub fn stall(listener: TcpListener, ready: Sender<()>, release: Receiver<()>) -> JoinHandle<io::Result<()>> {
     spawn(move || {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = accept_bounded(&listener)?;
         read_request(&mut stream)?;
-        release.recv().map_err(io::Error::other)
+        ready.send(()).map_err(io::Error::other)?;
+        release.recv_timeout(HOLD_LIMIT).map_err(io::Error::other)
     })
 }

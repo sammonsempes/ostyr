@@ -335,6 +335,29 @@ fn pages_are_followed_by_token_until_the_last_one() -> TestResult {
 
 
 #[test]
+fn a_repeated_version_is_listed_once_and_counted_while_another_etag_stays() -> TestResult {
+    let first = page(&[
+        &entry("p/a.csv", "e", "1"),
+        &entry("p/a.csv", "e", "1"),
+        "<IsTruncated>true</IsTruncated><NextContinuationToken>t2</NextContinuationToken>",
+    ]);
+    let second = page(&[&entry("p/a.csv", "e", "1"), &entry("p/a.csv", "other", "1")]);
+    let (listing, _calls) = walk(&|index| {
+        if index == 0 {
+            reply(STATUS_OK, &first)
+        } else {
+            reply(STATUS_OK, &second)
+        }
+    })?;
+    let walked = listing?;
+    let etags: Vec<&str> = walked.objects.iter().map(|object| object.etag.as_str()).collect();
+    assert_eq!(etags, vec!["\"e\"", "\"other\""]);
+    assert_eq!(walked.skipped_key, TWO);
+    Ok(())
+}
+
+
+#[test]
 fn a_listing_still_truncated_after_the_page_cap_is_reported_incomplete() -> TestResult {
     let endless = page(&[
         &entry("p/a.csv", "e", "1"),
@@ -487,19 +510,21 @@ const PAGES_TO_REACH_THE_STOP: usize = 3;
 
 #[test]
 fn a_window_of_long_keys_stops_the_walk_after_the_page_that_reaches_the_byte_stop() -> TestResult {
-    let entries: Vec<String> = (0..LONG_KEYS_PER_PAGE)
-        .map(|number| entry(&format!("p/{}{number:04}.csv", "a".repeat(LONG_PAD)), "e", "1"))
-        .collect();
-    let mut parts: Vec<&str> = entries.iter().map(String::as_str).collect();
-    parts.push("<IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken>");
-    let endless = page(&parts);
-    let (listing, calls) = walk(&|_index| reply(STATUS_OK, &endless))?;
+    let long_page = |index: usize| {
+        let entries: Vec<String> = (0..LONG_KEYS_PER_PAGE)
+            .map(|number| entry(&format!("p/{}{index:02}{number:04}.csv", "a".repeat(LONG_PAD)), "e", "1"))
+            .collect();
+        let mut parts: Vec<&str> = entries.iter().map(String::as_str).collect();
+        parts.push("<IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken>");
+        page(&parts)
+    };
+    let (listing, calls) = walk(&|index| reply(STATUS_OK, &long_page(index)))?;
     let walked = listing?;
     assert_eq!(calls, PAGES_TO_REACH_THE_STOP);
     assert!(walked.incomplete);
     assert!(listed_bytes(&walked.objects) >= LIST_WINDOW_STOP_BYTES);
     assert!(listed_bytes(&walked.objects) <= MAX_LISTED_BYTES);
     assert!(calls < MAX_LIST_PAGES_PER_ROUND);
-    assert_eq!(walked.last_key.as_deref().map(str::len), Some(LONG_PAD + TWO + "0000.csv".len()));
+    assert_eq!(walked.last_key.as_deref().map(str::len), Some(LONG_PAD + TWO + TWO + "0000.csv".len()));
     Ok(())
 }
