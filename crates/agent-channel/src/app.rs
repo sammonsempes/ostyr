@@ -154,12 +154,41 @@ pub fn read_line_ended<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize
 }
 
 
+/// One complete spool line: its text, the bytes consumed by an oversized one, or one that is not UTF-8 (offset of the first invalid byte, length, the raw bytes already read, at most the line limit).
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpoolLine {
+    Text(String),
+    Oversized { bytes: usize },
+    Invalid { valid_up_to: usize, bytes: usize, content: Vec<u8> },
+}
+
+
+/// The spool line of a raw one; a line that is not UTF-8 is a value, never an error.
+pub fn decode_spool_line(raw: RawLine) -> SpoolLine {
+    match raw.content {
+        Ok(content) => String::from_utf8(content).map_or_else(
+            |error| {
+                let valid_up_to = error.utf8_error().valid_up_to();
+                let invalid = error.into_bytes();
+                SpoolLine::Invalid {
+                    valid_up_to,
+                    bytes: invalid.len(),
+                    content: invalid,
+                }
+            },
+            SpoolLine::Text,
+        ),
+        Err(bytes) => SpoolLine::Oversized { bytes },
+    }
+}
+
+
 /// The lines of a reader ended by a newline, each at most `limit` bytes; an unterminated last line is left out and never decoded (a producer may still be writing it, or died mid-character).
-pub fn terminated_lines<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) -> impl Iterator<Item = io::Result<BoundedLine>> + '_ {
+pub fn terminated_lines<Input: BufRead + ?Sized>(reader: &mut Input, limit: usize) -> impl Iterator<Item = io::Result<SpoolLine>> + '_ {
     std::iter::repeat_with(move || read_raw_line(reader, limit))
         .map_while(Result::transpose)
         .map_while(|read| match read {
-            Ok(raw) if raw.complete => Some(decode_line(raw).map(|(line, _)| line)),
+            Ok(raw) if raw.complete => Some(Ok(decode_spool_line(raw))),
             Ok(_) => None,
             Err(error) => Some(Err(error)),
         })
