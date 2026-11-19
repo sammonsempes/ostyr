@@ -5,6 +5,7 @@ mod follow;
 mod hostmetrics;
 mod isolation;
 mod nft;
+mod osquery;
 mod run;
 mod sensor;
 mod settings;

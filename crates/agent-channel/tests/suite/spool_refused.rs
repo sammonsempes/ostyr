@@ -3,9 +3,12 @@ use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::proto::EventBatch;
 use agent_channel::spool::{
-    claim_spool, line_limit, quarantine_refused, RefusedLines, MAX_QUARANTINED_LINES, MAX_REFUSAL_WARNINGS, MAX_REJECTED_BYTES,
+    claim_spool, line_limit, quarantine, quarantine_refused, rewrite_quarantine_with, RefusedLines, MAX_QUARANTINED_LINES, MAX_REFUSAL_WARNINGS,
+    MAX_REJECTED_BYTES, MAX_REJECTED_LINES,
 };
-use std::fs;
+use std::fs::{self, File};
+use std::io;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -23,6 +26,9 @@ const BIG_BAD_BYTES: usize = 400_000;
 
 
 const PASSES: usize = 2;
+
+
+const NEW_BYTES: u64 = 10;
 
 
 fn captured_log() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
@@ -248,5 +254,97 @@ fn a_quarantine_that_cannot_be_opened_or_written_is_an_error() -> TestResult {
     fs::remove_dir(dir.path().join("spool.rejected.tmp"))?;
     fs::create_dir(dir.path().join("spool.rejected"))?;
     assert!(quarantine_refused(&spool, &refused).is_err());
+    Ok(())
+}
+
+
+fn numbered_lines(count: u64) -> String {
+    (0..count).map(|number| format!("old{number}\n")).collect()
+}
+
+
+#[test]
+fn the_quarantine_never_holds_more_than_its_line_cap_across_claims() -> TestResult {
+    let (captured, _guard) = captured_log();
+    let dir = tempdir()?;
+    let spool = dir.path().join("spool");
+    let rejected = dir.path().join("spool.rejected");
+    fs::write(&rejected, numbered_lines(MAX_REJECTED_LINES))?;
+    let refused = RefusedLines {
+        lines: vec!["new1".to_owned(), "new2".to_owned()],
+        bytes: NEW_BYTES,
+        ..RefusedLines::default()
+    };
+    quarantine_refused(&spool, &refused)?;
+    let text = fs::read_to_string(&rejected)?;
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len() as u64, MAX_REJECTED_LINES);
+    assert_eq!(lines.first(), Some(&"old2"));
+    assert_eq!(lines.last(), Some(&"new2"));
+    let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert!(log.contains("dropped=2"), "{log}");
+    Ok(())
+}
+
+
+#[test]
+fn a_tail_cut_over_a_full_quarantine_keeps_the_line_cap_and_logs_a_refused_old_line() -> TestResult {
+    let (captured, _guard) = captured_log();
+    let dir = tempdir()?;
+    let rejected = dir.path().join("spool.rejected");
+    let mut old = numbered_lines(MAX_REJECTED_LINES - 1).into_bytes();
+    old.extend_from_slice(BAD_LINE);
+    fs::write(&rejected, old)?;
+    let batch = EventBatch {
+        ecs_json: b"tail".to_vec(),
+        ..EventBatch::default()
+    };
+    assert_eq!(quarantine(&rejected, &[batch], MAX_REJECTED_BYTES)?, 0);
+    let text = fs::read_to_string(&rejected)?;
+    assert_eq!(text.lines().count() as u64, MAX_REJECTED_LINES);
+    assert_eq!(text.lines().last(), Some("tail"));
+    assert!(!text.contains("MARKER"));
+    let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
+    assert!(log.contains("spool lines refused") && !log.contains("MARKER"), "{log}");
+    Ok(())
+}
+
+
+#[test]
+fn a_tail_cut_over_a_quarantine_at_both_caps_drops_the_oldest_and_counts_them() -> TestResult {
+    let dir = tempdir()?;
+    let rejected = dir.path().join("spool.rejected");
+    fs::write(&rejected, numbered_lines(MAX_REJECTED_LINES))?;
+    let batch = EventBatch {
+        ecs_json: b"tail".to_vec(),
+        ..EventBatch::default()
+    };
+    assert_eq!(quarantine(&rejected, &[batch], MAX_REJECTED_BYTES)?, 1);
+    let text = fs::read_to_string(&rejected)?;
+    assert_eq!(text.lines().next(), Some("old1"));
+    assert_eq!(text.lines().count() as u64, MAX_REJECTED_LINES);
+    Ok(())
+}
+
+
+fn open_the_directory(path: &Path) -> io::Result<Option<File>> {
+    File::open(path.parent().ok_or(io::ErrorKind::NotFound)?).map(Some)
+}
+
+
+fn refuse_the_file(_: &Path) -> io::Result<Option<File>> {
+    Err(io::ErrorKind::PermissionDenied.into())
+}
+
+
+#[test]
+fn a_copying_pass_that_cannot_read_or_open_the_old_quarantine_fails_and_keeps_it() -> TestResult {
+    let dir = tempdir()?;
+    let rejected = dir.path().join("spool.rejected");
+    fs::write(&rejected, "keep\n")?;
+    let added = vec!["new".to_owned()];
+    assert!(rewrite_quarantine_with(&rejected, &added, NEW_BYTES, (MAX_REJECTED_BYTES, MAX_REJECTED_LINES), open_the_directory).is_err());
+    assert!(rewrite_quarantine_with(&rejected, &added, NEW_BYTES, (MAX_REJECTED_BYTES, MAX_REJECTED_LINES), refuse_the_file).is_err());
+    assert_eq!(fs::read_to_string(&rejected)?, "keep\n");
     Ok(())
 }

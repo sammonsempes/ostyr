@@ -9,6 +9,7 @@ use rustix::process::{kill_process_group, Pid, Signal};
 use rustix::time::{clock_gettime, ClockId};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::iter::once;
@@ -292,7 +293,7 @@ pub async fn run_bounded(program: PathBuf, arguments: Vec<String>) -> Result<Str
 pub async fn run_bounded_with(program: PathBuf, arguments: Vec<String>, kill: KillFn) -> Result<String, SensorError> {
     let spec = CommandSpec {
         program,
-        arguments,
+        arguments: arguments.into_iter().map(OsString::from).collect(),
         environment: None,
         accepted_codes: vec![0],
         max_output: MAX_OUTPUT_BYTES,

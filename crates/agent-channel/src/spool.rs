@@ -39,6 +39,10 @@ pub const REJECTED_MESSAGES: u64 = 16;
 pub const MAX_REJECTED_BYTES: u64 = REJECTED_MESSAGES * DEFAULT_MAX_MESSAGE_BYTES as u64;
 
 
+/// Line cap of the quarantine file as a whole; past it the oldest lines are dropped and counted.
+pub const MAX_REJECTED_LINES: u64 = 10_000;
+
+
 /// Bytes of the field tag of `ecs_json` in the encoded `EventBatch`.
 pub const FIELD_TAG_BYTES: usize = 1;
 
@@ -215,51 +219,97 @@ pub fn spool_texts_with<'a, Input: BufRead>(
 }
 
 
-/// Copies the lines of the old quarantine to `out`, skipping the oldest until `excess` bytes are gone; returns how many it skipped.
-pub fn copy_after_excess(old: Option<File>, excess: u64, out: &mut dyn Write) -> io::Result<u64> {
+/// Opens the quarantine file, none when there is none yet.
+pub fn open_old(path: &Path) -> io::Result<Option<File>> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+
+/// How many text lines and bytes (newlines included) the old quarantine holds, streamed.
+pub fn old_totals(path: &Path) -> io::Result<(u64, u64)> {
+    let mut ignored = RefusedLines::default();
+    let mut counted = (u64::MIN, u64::MIN);
+    if let Some(file) = open_old(path)? {
+        let mut reader = BufReader::new(&file);
+        counted = spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, &mut ignored).try_fold(counted, |(lines, bytes), read| {
+            read.map(|text| (lines + 1, bytes + text.len() as u64 + 1))
+        })?;
+    }
+    Ok(counted)
+}
+
+
+/// Copies the text lines of the old quarantine to `out`, skipping the oldest while `excess` (bytes, lines) is not gone; a refused old line is recorded in `refused`; returns how many it skipped.
+pub fn copy_after_excess(old: Option<File>, excess: (u64, u64), refused: &mut RefusedLines, out: &mut dyn Write) -> io::Result<u64> {
     let mut skipped_bytes = u64::MIN;
     let mut skipped_lines = u64::MIN;
-    old.map(BufReader::new)
-        .into_iter()
-        .flat_map(|reader| reader.split(b'\n'))
-        .try_for_each(|read| {
-            let content = read?;
-            if skipped_bytes < excess {
-                skipped_bytes += content.len() as u64 + 1;
+    if let Some(file) = old {
+        let mut reader = BufReader::new(&file);
+        spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, refused).try_for_each(|read| {
+            let text = read?;
+            if skipped_bytes < excess.0 || skipped_lines < excess.1 {
+                skipped_bytes += text.len() as u64 + 1;
                 skipped_lines += 1;
                 Ok(())
             } else {
-                out.write_all(&content)?;
-                out.write_all(b"\n")
+                writeln!(out, "{text}")
             }
         })?;
+    }
     Ok(skipped_lines)
 }
 
 
-/// Writes the kept refused heads after the old quarantine lines that fit (streamed through one `BufWriter`, no per-line batch), the oldest dropped and counted past `MAX_REJECTED_BYTES`.
+/// Streams the old quarantine and the added lines through one `BufWriter` into a temporary file and renames it: the newest lines within `caps` (bytes, lines) stay, the dropped count is logged and returned, a refused old line is summarised; work and memory are bounded by the caps.
+pub fn rewrite_quarantine(path: &Path, added: &[String], added_bytes: u64, caps: (u64, u64)) -> io::Result<u64> {
+    rewrite_quarantine_with(path, added, added_bytes, caps, open_old)
+}
+
+
+/// `rewrite_quarantine` with the function that opens the old file for the copying pass given.
+pub fn rewrite_quarantine_with(
+    path: &Path,
+    added: &[String],
+    added_bytes: u64,
+    caps: (u64, u64),
+    reopen: fn(&Path) -> io::Result<Option<File>>,
+) -> io::Result<u64> {
+    let (old_lines, old_bytes) = old_totals(path)?;
+    let excess = (
+        (old_bytes + added_bytes).saturating_sub(caps.0),
+        (old_lines + added.len() as u64).saturating_sub(caps.1),
+    );
+    let temporary = suffixed(path, TEMPORARY_SUFFIX);
+    let mut out = BufWriter::new(owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&temporary)?);
+    let mut skipped = RefusedLines::default();
+    let dropped = copy_after_excess(reopen(path)?, excess, &mut skipped, &mut out)?;
+    added.iter().try_for_each(|line| writeln!(out, "{line}"))?;
+    out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
+    fs::rename(&temporary, path)?;
+    log_refusal_summary(&skipped);
+    if dropped > 0 {
+        tracing::warn!(dropped, "quarantine full, oldest refused lines dropped");
+    }
+    Ok(dropped)
+}
+
+
+/// Adds the kept refused heads to the quarantine within `MAX_REJECTED_BYTES` and `MAX_REJECTED_LINES`.
 pub fn quarantine_refused(spool: &Path, refused: &RefusedLines) -> io::Result<()> {
     if refused.lines.is_empty() {
         Ok(())
     } else {
-        let path = suffixed(spool, REJECTED_SUFFIX);
-        let old = match File::open(&path) {
-            Ok(file) => Some(file),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => Err(error)?,
-        };
-        let length = old.as_ref().map_or(Ok(u64::MIN), |file| file.metadata().map(|meta| meta.len()))?;
-        let excess = (length + refused.bytes).saturating_sub(MAX_REJECTED_BYTES);
-        let temporary = suffixed(&path, TEMPORARY_SUFFIX);
-        let mut out = BufWriter::new(owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&temporary)?);
-        let dropped = copy_after_excess(old, excess, &mut out)?;
-        refused.lines.iter().try_for_each(|line| writeln!(out, "{line}"))?;
-        out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
-        fs::rename(&temporary, &path)?;
-        if dropped > 0 {
-            tracing::warn!(dropped, "quarantine full, oldest refused lines dropped");
-        }
-        Ok(())
+        rewrite_quarantine(
+            &suffixed(spool, REJECTED_SUFFIX),
+            &refused.lines,
+            refused.bytes,
+            (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
+        )
+        .map(|_| ())
     }
 }
 
@@ -501,17 +551,11 @@ pub fn rewrite_lines_between(path: &Path, lines: &[String], expected: u64, betwe
 }
 
 
-/// Adds the refused batches to the quarantine file, dropping the oldest lines past `max_bytes`; returns how many were dropped (logged).
+/// Adds the refused batches to the quarantine file, dropping the oldest lines past `max_bytes` or `MAX_REJECTED_LINES`; returns how many were dropped (logged).
 pub fn quarantine(path: &Path, rejected: &[EventBatch], max_bytes: u64) -> io::Result<u64> {
     if rejected.is_empty() {
         Ok(0)
     } else {
-        let mut skipped = RefusedLines::default();
-        let mut lines = match File::open(path) {
-            Ok(file) => spool_texts_with(&mut BufReader::new(&file), DEFAULT_MAX_MESSAGE_BYTES, &mut skipped).collect::<io::Result<Vec<_>>>()?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => Err(error)?,
-        };
         let added = rejected
             .iter()
             .enumerate()
@@ -522,22 +566,8 @@ pub fn quarantine(path: &Path, rejected: &[EventBatch], max_bytes: u64) -> io::R
                 })
             })
             .collect::<io::Result<Vec<_>>>()?;
-        lines.extend(added);
-        let mut total: u64 = lines.iter().map(|line| line.len() as u64 + 1).sum();
-        let dropped = lines
-            .iter()
-            .take_while(|line| {
-                let over = total > max_bytes;
-                total = total.saturating_sub(line.len() as u64 + 1);
-                over
-            })
-            .count();
-        lines.drain(..dropped);
-        fs::rename(write_temporary(path, &lines)?, path)?;
-        if dropped > 0 {
-            tracing::warn!(dropped, "quarantine full, oldest refused batches dropped");
-        }
-        Ok(dropped as u64)
+        let added_bytes = added.iter().map(|line| line.len() as u64 + 1).sum();
+        rewrite_quarantine(path, &added, added_bytes, (max_bytes, MAX_REJECTED_LINES))
     }
 }
 

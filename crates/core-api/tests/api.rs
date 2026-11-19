@@ -16,7 +16,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, StatusCode};
 use core_api::example::{example_document, PING_REPLY};
 use core_api::failure::{auth_failure, error_parts};
-use core_api::middleware::{admit_source, audit_exchange, authenticate, count_request, rate_key, SECURITY_HEADERS};
+use core_api::middleware::{admit_source, audit_exchange, authenticate, count_request, rate_key, MAX_LOGGED_PATH_CHARS, SECURITY_HEADERS};
 use core_api::model::Window;
 use core_api::model::{ApiError, ApiIdentity, ApiState, Exchange, Requirement};
 use core_api::reload::replace_identity;
@@ -75,6 +75,12 @@ const EXTRA_REQUESTS: usize = 10;
 
 
 const EXPECTED_EVENTS: usize = 3;
+
+
+const LONG_PATH_CHARS: usize = 60_000;
+
+
+const MARKER_ALLOWANCE: usize = 64;
 
 
 const OTHER_SOURCE: u8 = 2;
@@ -567,6 +573,65 @@ async fn request_logs_carry_the_constant_fields() -> TestResult {
         .collect();
     assert_eq!(results, ["success", "success", "denied"]);
     assert_eq!(events.len(), EXPECTED_EVENTS);
+    Ok(())
+}
+
+
+async fn logged_events(path: &str, method: &str, token: Option<&str>) -> Result<Vec<serde_json::Value>, TestError> {
+    let log_dir = tempfile::tempdir()?;
+    let log_path = log_dir.path().join("platform.log");
+    let dispatch = capture_dispatch(BoxMakeWriter::new(Mutex::new(File::create(&log_path)?)));
+    let fx = fixture_with(|state| Ok(ApiState { dispatch, ..state }))?;
+    let mut built = request("GET", "/health", token, Body::empty())?;
+    *built.uri_mut() = path.parse()?;
+    *built.method_mut() = axum::http::Method::from_bytes(method.as_bytes())?;
+    send(&fx.router, built).await?;
+    let text = fs::read_to_string(&log_path)?;
+    Ok(text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?)
+}
+
+
+#[tokio::test]
+async fn a_long_path_is_cut_in_the_request_log_with_the_omitted_count() -> TestResult {
+    let path = format!("/{}", "z".repeat(LONG_PATH_CHARS));
+    let omitted = path.chars().count() - MAX_LOGGED_PATH_CHARS;
+    let events = logged_events(&path, "GET", None).await?;
+    let logged = events
+        .first()
+        .and_then(|event| event.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or("no path")?;
+    let kept: String = path.chars().take(MAX_LOGGED_PATH_CHARS).collect();
+    assert!(logged.starts_with(&kept));
+    assert!(logged.ends_with(&format!("[path truncated, {omitted} characters omitted]")));
+    assert!(logged.len() <= MAX_LOGGED_PATH_CHARS + MARKER_ALLOWANCE);
+    assert_eq!(events.first().and_then(|event| event.get("result")), Some(&json!("denied")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_path_of_exactly_the_cap_is_logged_whole_and_encoded_bytes_stay_raw() -> TestResult {
+    let path = format!("/{}", "y".repeat(MAX_LOGGED_PATH_CHARS - 1));
+    let events = logged_events(&path, "GET", None).await?;
+    assert_eq!(events.first().and_then(|event| event.get("path")), Some(&json!(path)));
+    let encoded = logged_events("/a%1b%5b31m%0a", "GET", None).await?;
+    assert_eq!(encoded.first().and_then(|event| event.get("path")), Some(&json!("/a%1b%5b31m%0a")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_long_method_is_cut_in_the_request_log() -> TestResult {
+    let method = "M".repeat(LONG_PATH_CHARS);
+    let events = logged_events("/health", &method, None).await?;
+    let logged = events
+        .first()
+        .and_then(|event| event.get("method"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or("no method")?;
+    assert!(logged.contains("[method truncated,"));
+    assert!(logged.len() <= MAX_LOGGED_PATH_CHARS + MARKER_ALLOWANCE);
     Ok(())
 }
 
@@ -1615,5 +1680,37 @@ async fn the_audit_and_the_log_of_a_request_use_the_identity_that_admitted_it() 
     assert_eq!(last.get("tenant").and_then(serde_json::Value::as_str), Some("other-tenant"));
     assert_ne!(admitted.tenant, "other-tenant");
     assert_eq!(call(&fx.router, "GET", "/auth/me", Some(&token)).await?.status(), StatusCode::OK);
+    Ok(())
+}
+
+
+const LONG_METHOD_CHARS: usize = 400_000;
+
+
+const MAX_TARGET_CHARS: usize = 100;
+
+
+const MIN_OTHER_TARGETS: usize = 3;
+
+
+#[tokio::test]
+async fn an_unknown_method_is_audited_as_other_and_known_methods_keep_their_name() -> TestResult {
+    let fx = fixture()?;
+    let token = login_token(&fx.router).await?;
+    let long_method = "M".repeat(LONG_METHOD_CHARS);
+    call(&fx.router, &long_method, "/auth/me", None).await?;
+    call(&fx.router, &long_method, "/auth/me", Some(&token)).await?;
+    call(&fx.router, "get", "/auth/me", Some(&token)).await?;
+    call(&fx.router, "DELETE", "/example/secret", Some(&token)).await?;
+    call(&fx.router, "PATCH", "/example/secret", Some(&token)).await?;
+    let targets: Vec<String> = audit_lines(&fx)?
+        .iter()
+        .filter_map(|line| line.get("target").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect();
+    assert!(targets.iter().all(|target| target.len() < MAX_TARGET_CHARS));
+    assert!(targets.iter().filter(|target| target.starts_with("OTHER ")).count() >= MIN_OTHER_TARGETS);
+    assert!(targets.iter().any(|target| target.starts_with("DELETE ")));
+    assert!(targets.iter().any(|target| target.starts_with("PATCH ")));
+    assert!(!targets.iter().any(|target| target.contains("MMMM") || target.starts_with("get ")));
     Ok(())
 }
