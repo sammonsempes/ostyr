@@ -43,3 +43,17 @@ pub type AuditPurgeFn<'audit> = &'audit dyn Fn(&PurgedCounts);
 
 /// Returns the current live settings snapshot (read again just before a purge).
 pub type LiveSettingsFn<'live> = &'live dyn Fn() -> crate::alert_source::SourceSettings;
+
+
+pub type ListFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::alert::AlertPage, crate::error::ReadError>> + Send>>;
+
+
+pub type GetFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<crate::alert::Alert>, crate::error::ReadError>> + Send>>;
+
+
+/// The unresolved alerts of one tenant, at most the limit.
+pub type ListFn = std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, u32) -> ListFuture + Send + Sync>;
+
+
+/// One alert of one tenant by id; `None` when the tenant has no such alert.
+pub type GetFn = std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, i64) -> GetFuture + Send + Sync>;

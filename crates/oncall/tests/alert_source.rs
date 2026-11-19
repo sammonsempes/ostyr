@@ -881,6 +881,8 @@ async fn the_generic_open_refuses_the_source_fingerprint_prefix() -> TestResult 
     assert!(matches!(refused, Err(StoreError::InvalidFingerprint { .. })));
     assert!(lock(&db).calls.is_empty());
     assert!(oncall::store::valid_fingerprint("manual:1") && !oncall::store::valid_fingerprint("") && !oncall::store::valid_fingerprint("alert:1"));
+    assert!(!oncall::store::valid_fingerprint("a\u{2028}b") && !oncall::store::valid_fingerprint("a\u{202e}b"));
+    assert!(!oncall::store::valid_fingerprint("a\u{3164}b"));
     Ok(())
 }
 

@@ -7,10 +7,12 @@ publish = false
 
 [dependencies]
 alerts = { version = "0.0.0", path = "../alerts" }
+axum = "0.8"
 base64 = "0.22"
 cap-std = "3"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
+core-api = { version = "0.0.0", path = "../core-api" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 getrandom = "0.4.3"
@@ -26,19 +28,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 tracing = "0.1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
+utoipa = { version = "5", features = ["axum_extras"] }
 webpki-roots = "1"
 zeroize = "1"
 
 [dev-dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }
+core-auth = { version = "0.0.0", path = "../core-auth" }
+pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "test-util", "io-util"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing-subscriber = "0.3"
 
 [lints]

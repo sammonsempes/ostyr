@@ -229,3 +229,15 @@ pub fn transport_kind(error: &ureq::Error) -> TransportKind {
         _ => TransportKind::Protocol,
     }
 }
+
+
+/// What a read route can fail on; no text of the store or the peer is kept in it.
+#[derive(Debug, Error)]
+pub enum ReadError {
+    #[error("no database connection could be leased")]
+    Lease(#[from] alerts::error::StoreError),
+    #[error("the alert store failed")]
+    Store(#[from] StoreError),
+    #[error("a stored alert cannot be shown")]
+    Unrepresentable,
+}

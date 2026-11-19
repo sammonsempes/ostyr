@@ -76,6 +76,8 @@ pub enum Cell {
     Text(String),
     Time(Option<DateTime<Utc>>),
     Bool(bool),
+    /// A stored value the driver could not decode: every column decoder refuses it.
+    Unreadable,
 }
 
 
@@ -83,4 +85,12 @@ pub enum Cell {
 pub struct Statement {
     pub sql: &'static str,
     pub params: Vec<Param>,
+}
+
+
+/// The rows of one read: a row the decoder refuses is left out and counted in `skipped`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertPage {
+    pub alerts: Vec<Alert>,
+    pub skipped: usize,
 }
