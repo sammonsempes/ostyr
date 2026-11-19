@@ -1,7 +1,7 @@
 use core_pg::connect::connect;
 use core_pg::settings::parse_settings;
 use pg_fake::certs::{loopback, make_pki};
-use pg_fake::fake::{start, Fake, Mode, Reply, MAX_MESSAGES};
+use pg_fake::fake::{int8_cell, start, Fake, Mode, Reply, INT8_OID, MAX_MESSAGES, TEXT_OID};
 use pg_fake::types::Handler;
 use rcgen::SanType;
 use rustls::pki_types::pem::PemObject;
@@ -49,6 +49,12 @@ fn by_sql() -> Handler {
             Reply::Error("42601")
         } else if sql.contains("INTS") {
             Reply::IntRows(vec![SEVEN])
+        } else if sql.contains("BIGS") {
+            Reply::Typed {
+                parameters: vec![INT8_OID],
+                columns: vec![INT8_OID, TEXT_OID],
+                rows: vec![vec![int8_cell(i64::MAX), Some(b"t".to_vec())], vec![None, None]],
+            }
         } else if sql.contains("TEXT") {
             Reply::Rows(vec![vec!["a".to_owned()]])
         } else {
@@ -109,6 +115,15 @@ async fn a_real_client_runs_simple_and_extended_statements() -> Result<(), Box<d
     assert_eq!(texts.first().map(|row| row.get::<_, String>(0)), Some("a".to_owned()));
     let ints = client.query("SELECT INTS", &[]).await?;
     assert_eq!(ints.first().map(|row| row.get::<_, i32>(0)), Some(SEVEN));
+    let bigs = client.query("SELECT BIGS $1", &[&i64::MIN]).await?;
+    assert_eq!(
+        bigs.first().map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1))),
+        Some((i64::MAX, "t".to_owned()))
+    );
+    assert_eq!(
+        bigs.get(1).map(|row| (row.get::<_, Option<i64>>(0), row.get::<_, Option<String>>(1))),
+        Some((None, None))
+    );
     let failure = client.query("SELECT ERR", &[]).await.err().ok_or("accepted")?;
     assert_eq!(failure.code().map(|code| code.code().to_owned()), Some("42601".to_owned()));
     assert_eq!(fake.statements.recv().await, Some("SELECT 1".to_owned()));
