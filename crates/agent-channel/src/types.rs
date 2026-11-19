@@ -106,3 +106,7 @@ pub type PauseFn = dyn Fn(Duration) -> PauseFuture + Send + Sync;
 
 /// Reads the first lines of a locked claimed file and whether the overflow went back to the spool; injected so tests can fail it.
 pub type LoadFn = fn(&File, &Path, u64, usize) -> io::Result<(Vec<String>, bool)>;
+
+
+/// The function that opens the old quarantine and the lock attempts of one rewrite.
+pub type RewriteHooks = (fn(&Path) -> io::Result<Option<File>>, u32);

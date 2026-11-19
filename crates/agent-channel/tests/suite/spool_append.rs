@@ -481,12 +481,13 @@ fn finish_that_waited_for_the_lock_never_removes_a_file_replaced_meanwhile() -> 
         state: SequenceState::default(),
     };
     let mut held = Some(holder(&sending)?);
-    finish_spool_with(&claimed, &[], ATTEMPTS, &mut || {
+    finish_spool_with(&claimed, &[], WAIT_ATTEMPTS, &mut || {
         held.take().into_iter().for_each(|lock| {
             drop(lock);
             logged(fs::remove_file(&sending));
             logged(fs::write(&sending, "two\n"));
         });
+        pause_between_lock_attempts();
     })?;
     assert_eq!(fs::read_to_string(&sending)?, "two\n");
     Ok(())
