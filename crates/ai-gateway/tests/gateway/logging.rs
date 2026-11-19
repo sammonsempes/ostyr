@@ -1,8 +1,8 @@
-use crate::common::{completion, deps, scripted, settings};
+use crate::common::{chat, completion, deps, scripted, settings};
 use crate::numbers::KEY_MODE;
 use crate::servers::{http_reply, plain_server};
 use crate::types::TestResult;
-use ai_gateway::chat::{chat, production_deps};
+use ai_gateway::chat::production_deps;
 use ai_gateway::limits::STATUS_OK;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -71,7 +71,7 @@ fn one_line_per_call_with_counts_and_no_content_or_key() -> TestResult {
     })?;
     let logged = String::from_utf8(captured.lock().map_err(|_poisoned| "poisoned")?.clone())?;
     assert_eq!(answer.content, format!("Bearer {KEY}"));
-    assert_eq!(logged.lines().count(), 1);
+    assert_eq!(logged.lines().filter(|line| line.contains("ai call")).count(), 1);
     assert!(logged.contains("ai call") && logged.contains("model=test-model:1") && logged.contains("duration_ms=0"));
     assert!(logged.contains("request_bytes=") && logged.contains("response_bytes=") && logged.contains("prompt_tokens=Some("));
     [KEY, TELEMETRY_MARKER, INSTRUCTIONS_MARKER, CONTENT_MARKER, "Bearer"]

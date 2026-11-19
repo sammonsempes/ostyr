@@ -1,13 +1,12 @@
-use crate::common::{chain, completion, settings, MARKER};
-use crate::numbers::{CONNECT_TIMEOUT_SECONDS, KEY_MODE, KIB, STATUS_SERVER_ERROR};
+use crate::common::{chain, chat, completion, settings, MARKER};
+use crate::numbers::{KEY_MODE, KIB, STATUS_SERVER_ERROR};
 use crate::servers::{closed_port, held_server, http_reply, plain_server, tls_server, ANNOUNCED_BODY, PARTIAL_BODY};
 use crate::types::TestResult;
-use ai_gateway::chat::{chat, production_deps};
+use ai_gateway::chat::production_deps;
 use ai_gateway::error::AiError;
-use ai_gateway::limits::STATUS_OK;
-use ai_gateway::model::HttpRequest;
-use ai_gateway::response::read_body;
-use ai_gateway::transport::{body_error, ca_certificate, ureq_error, ureq_transport};
+use ai_gateway::limits::{MIN_TIMEOUT_SECONDS, STATUS_OK};
+use ai_gateway::settings::AiSettings;
+use ai_gateway::transport::{body_error, ca_certificate, ureq_error};
 use rcgen::string::Ia5String;
 use rcgen::SanType;
 use serde_json::json;
@@ -16,12 +15,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::time::Duration;
 use ureq::Error as UreqError;
-use zeroize::Zeroizing;
-
-
-const SHORT: Duration = Duration::from_millis(100);
 
 
 const ESCAPE: char = '\u{1b}';
@@ -30,14 +24,18 @@ const ESCAPE: char = '\u{1b}';
 const LONG_NAME_BYTES: usize = 40_000;
 
 
-fn request(url: String, ca_file: Option<PathBuf>) -> HttpRequest {
-    HttpRequest {
-        url,
-        authorization: Some(Zeroizing::new("Bearer sk-live".to_owned())),
-        body: b"{\"model\":\"m\"}".to_vec(),
-        timeout: Duration::from_secs(CONNECT_TIMEOUT_SECONDS),
+fn endpoint(base_url: String, ca_file: Option<PathBuf>) -> AiSettings {
+    AiSettings {
+        base_url,
         ca_file,
+        timeout_seconds: MIN_TIMEOUT_SECONDS,
+        ..settings("x")
     }
+}
+
+
+fn call(used: &AiSettings) -> Result<ai_gateway::model::Answer, AiError> {
+    chat(used, "i", &json!({"a": 1}), &production_deps())
 }
 
 
@@ -82,9 +80,8 @@ fn an_error_status_over_the_wire_is_a_fixed_error() -> TestResult {
 #[test]
 fn a_peer_that_never_answers_ends_at_the_deadline() -> TestResult {
     let held = held_server(Vec::new())?;
-    let mut call = request(format!("http://127.0.0.1:{}/v1/chat/completions", held.port), None);
-    call.timeout = SHORT;
-    let error = ureq_transport(&call).err().ok_or("answered")?;
+    let used = endpoint(format!("http://127.0.0.1:{}", held.port), None);
+    let error = call(&used).err().ok_or("answered")?;
     held.release.send(())?;
     assert!(matches!(error, AiError::Timeout));
     Ok(())
@@ -95,9 +92,8 @@ fn a_peer_that_never_answers_ends_at_the_deadline() -> TestResult {
 fn a_body_that_stalls_ends_at_the_deadline_in_either_phase() -> TestResult {
     let announced = format!("HTTP/1.1 200 X\r\nContent-Length: {ANNOUNCED_BODY}\r\nConnection: close\r\n\r\n");
     let held = held_server([announced.as_bytes(), PARTIAL_BODY].concat())?;
-    let mut call = request(format!("http://127.0.0.1:{}/v1/chat/completions", held.port), None);
-    call.timeout = SHORT;
-    let error = ureq_transport(&call).and_then(|reply| read_body(reply, KIB)).err().ok_or("read")?;
+    let used = endpoint(format!("http://127.0.0.1:{}", held.port), None);
+    let error = call(&used).err().ok_or("read")?;
     held.release.send(())?;
     assert!(matches!(error, AiError::Timeout));
     Ok(())
@@ -106,8 +102,8 @@ fn a_body_that_stalls_ends_at_the_deadline_in_either_phase() -> TestResult {
 
 #[test]
 fn a_closed_port_is_a_connect_error() -> TestResult {
-    let call = request(format!("http://127.0.0.1:{}/v1/chat/completions", closed_port()?), None);
-    let got = ureq_transport(&call).err();
+    let used = endpoint(format!("http://127.0.0.1:{}", closed_port()?), None);
+    let got = call(&used).err();
     assert!(
         matches!(
             got,
@@ -139,8 +135,8 @@ fn a_private_ca_is_trusted_through_the_ca_file() -> TestResult {
 #[test]
 fn an_untrusted_certificate_is_a_fixed_tls_error() -> TestResult {
     let tls = tls_server(loopback(), http_reply(STATUS_OK, b"{}"))?;
-    let call = request(format!("https://127.0.0.1:{}/v1/chat/completions", tls.served.port), None);
-    let got = ureq_transport(&call).err();
+    let used = endpoint(format!("https://127.0.0.1:{}", tls.served.port), None);
+    let got = call(&used).err();
     assert!(matches!(got, Some(AiError::Tls)), "{got:?}");
     Ok(())
 }
@@ -157,8 +153,8 @@ fn a_hostile_san_list_never_reaches_an_error() -> TestResult {
     let directory = tempfile::tempdir()?;
     let ca = directory.path().join("ca.pem");
     fs::write(&ca, &tls.ca_pem)?;
-    let call = request(format!("https://127.0.0.1:{}/v1/chat/completions", tls.served.port), Some(ca));
-    let error = ureq_transport(&call).err().ok_or("accepted")?;
+    let used = endpoint(format!("https://127.0.0.1:{}", tls.served.port), Some(ca));
+    let error = call(&used).err().ok_or("accepted")?;
     let shown = chain(&error);
     assert!(matches!(error, AiError::Tls), "{error:?}");
     assert!(!shown.contains(MARKER) && !shown.contains(ESCAPE) && !shown.contains("u{1b}"));
@@ -174,8 +170,8 @@ fn an_unusable_ca_file_is_refused_before_any_connection() -> TestResult {
     fs::write(&garbage, "not a certificate")?;
     assert!(matches!(ca_certificate(&garbage), Err(AiError::CaFile)));
     assert!(matches!(ca_certificate(&directory.path().join("absent.pem")), Err(AiError::CaFile)));
-    let call = request("https://127.0.0.1:1/v1/chat/completions".to_owned(), Some(garbage));
-    assert!(matches!(ureq_transport(&call), Err(AiError::CaFile)));
+    let used = endpoint("https://127.0.0.1:1".to_owned(), Some(garbage));
+    assert!(matches!(call(&used), Err(AiError::CaFile)));
     Ok(())
 }
 

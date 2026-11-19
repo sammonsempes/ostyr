@@ -28,9 +28,6 @@ pub const OPEN_MODE: u32 = 0o644;
 pub const SMALL_CAP: usize = 10;
 
 
-pub const CONNECT_TIMEOUT_SECONDS: u64 = 10;
-
-
 pub const STATUS_SERVER_ERROR: u16 = 500;
 
 
