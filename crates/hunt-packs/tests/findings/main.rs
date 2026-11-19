@@ -3,11 +3,12 @@ mod types;
 
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
+use hunt_packs::api::FIRST_END;
 use hunt_packs::packs::{is_pack_id, MAX_ID_CHARS};
 use hunt_packs::schedule::RunWindow;
 use hunt_packs::store::{
-    count_oversized, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, CursorError, FindingPage, FindingRow, Param,
-    StateError, FINDING_SQL, ID_BYTE_CAP, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS, OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
+    count_oversized, format_cursor, is_permanent, list_findings, parse_cursor, record_finding, start_cursor, CursorError, FindingPage, FindingRow,
+    Param, StateError, FINDING_SQL, ID_BYTE_CAP, LIST_SQL, MAX_FINDINGS_PAGE, MIGRATIONS, OVERSIZED_REPORT_CAP, OVERSIZED_SQL,
 };
 use hunt_packs::types::ListResult;
 use std::cell::RefCell;
@@ -48,6 +49,9 @@ const LIMIT_PARAM: usize = 2;
 
 
 const YEAR_10000: i64 = 253_402_300_800;
+
+
+const FIVE: i64 = 5;
 
 
 const OVER_LIMIT: i64 = MAX_FINDINGS_PAGE + 1;
@@ -141,8 +145,10 @@ fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
         .contains("WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4"));
     assert!(!LIST_SQL.contains("OFFSET"));
     assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > 64 UNION ALL"));
-    assert!(OVERSIZED_SQL.contains("octet_length(pack_id) <= 64 AND window_end < -62167219200) unlisted LIMIT $2::bigint"));
+    assert!(OVERSIZED_SQL.contains("window_end <= -62167219200 AND (window_end < -62167219200 OR pack_id = '')) unlisted LIMIT $2::bigint"));
     assert!(OVERSIZED_SQL.contains(&format!("window_end < {}", hunt_packs::api::FIRST_END)));
+    assert!(OVERSIZED_SQL.contains(&format!("window_end <= {} AND", hunt_packs::api::FIRST_END)));
+    assert!(OVERSIZED_SQL.contains("OR pack_id = '')"));
     assert!(OVERSIZED_SQL.contains(&format!("octet_length(pack_id) > {ID_BYTE_CAP} ")));
     assert!(LIST_SQL.contains(&format!("octet_length(pack_id) <= {ID_BYTE_CAP} ")));
     assert!(!LIST_SQL.contains("$5"));
@@ -314,16 +320,12 @@ async fn a_tenant_never_lists_another_tenants_findings() -> TestResult {
 
 
 #[tokio::test]
-async fn a_hostile_tenant_or_cursor_is_refused_before_any_statement() -> TestResult {
+async fn a_hostile_tenant_is_refused_before_any_statement() -> TestResult {
     let (store, seen) = fresh();
     let mut exec = list_exec(&store, &seen);
     for tenant in ["-x", "a' OR '1'='1", "a\0b", ""] {
         assert!(matches!(list_findings(&mut exec, tenant, 0, "", 1).await, Err(StateError::Pg(_))));
     }
-    assert!(matches!(
-        list_findings(&mut exec, "a", YEAR_10000, "", 1).await,
-        Err(StateError::OutOfRange(_))
-    ));
     assert!(seen.borrow().is_empty());
     Ok(())
 }
@@ -528,5 +530,57 @@ fn only_ascii_characters_are_ever_accepted_in_a_pack_id() -> TestResult {
         .filter(|character| is_pack_id(&character.to_string()) || is_pack_id(&format!("a{character}b")))
         .count();
     assert_eq!(offenders, 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_cursor_at_any_i64_end_is_accepted_and_the_next_cursor_keeps_the_stored_end() -> TestResult {
+    let (store, seen) = fresh();
+    store
+        .borrow_mut()
+        .extend([("a".to_owned(), row("future", YEAR_10000)), ("a".to_owned(), row("max", i64::MAX))]);
+    let mut exec = list_exec(&store, &seen);
+    let first = list_findings(&mut exec, "a", FIRST_END, "", 1).await?;
+    assert_eq!(first.next, Some((YEAR_10000, "future".to_owned())));
+    let second = list_findings(&mut exec, "a", YEAR_10000, "future", 1).await?;
+    assert_eq!(second.next, Some((i64::MAX, "max".to_owned())));
+    assert_eq!(list_findings(&mut exec, "a", i64::MAX, "max", 1).await?, FindingPage::default());
+    assert_eq!(list_findings(&mut exec, "a", i64::MIN, "", 1).await?.rows.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_row_that_ends_before_it_starts_is_skipped_and_counted() -> TestResult {
+    let (store, seen) = fresh();
+    let mut backwards = row("backwards", END);
+    backwards.window_start = END + 1;
+    store
+        .borrow_mut()
+        .extend([("a".to_owned(), backwards), ("a".to_owned(), row("fine", LATER))]);
+    let mut exec = list_exec(&store, &seen);
+    let page = list_findings(&mut exec, "a", FIRST_END, "", MAX_FINDINGS_PAGE).await?;
+    assert_eq!((page.rows.len(), page.skipped), (1, 1));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_listing_without_a_cursor_starts_at_year_zero_and_lists_rows_before_1970() -> TestResult {
+    let (store, seen) = fresh();
+    store.borrow_mut().extend([
+        ("a".to_owned(), row("first", FIRST_END + 1)),
+        ("a".to_owned(), row("zero", 0)),
+        ("a".to_owned(), row("later", LATER)),
+    ]);
+    let mut exec = list_exec(&store, &seen);
+    let (end, pack) = start_cursor(None)?;
+    assert_eq!((end, pack.as_str()), (FIRST_END, ""));
+    let page = list_findings(&mut exec, "a", end, &pack, MAX_FINDINGS_PAGE).await?;
+    let ends: Vec<i64> = page.rows.iter().map(|found| found.window_end).collect();
+    assert_eq!(ends, vec![FIRST_END + 1, 0, LATER]);
+    assert_eq!(start_cursor(Some("5:61"))?, (FIVE, "a".to_owned()));
+    assert_eq!(start_cursor(Some("x")), Err(CursorError::Malformed));
     Ok(())
 }

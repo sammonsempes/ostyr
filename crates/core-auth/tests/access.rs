@@ -11,8 +11,9 @@ use core_auth::model::Account;
 use core_auth::random::os_random;
 use core_auth::rbac::{
     builtin_catalog, check_roles, is_allowed, load_catalog, requires_mfa, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE, PERMISSION_AUDIT_READ,
-    PERMISSION_CASES_READ, PERMISSION_CASES_WRITE, PERMISSION_CMDB_READ, PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ,
-    PERMISSION_RESPONSE_EXECUTE, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER, ROLE_RESPONDER,
+    PERMISSION_CASES_READ, PERMISSION_CASES_WRITE, PERMISSION_CMDB_READ, PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ, PERMISSION_ONCALL_READ,
+    PERMISSION_RESPONSE_EXECUTE, PERMISSION_STATUS_WRITE, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER,
+    ROLE_RESPONDER,
 };
 use core_auth::session::{
     create_session, hash_token, is_revoked, mark_sessions_revoked, revocation_marker, revoke_session, revoke_user_sessions, validate_session,
@@ -55,11 +56,26 @@ fn failing_random(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 fn built_in_roles_have_the_expected_permissions() -> TestResult {
     let catalog = builtin_catalog();
     let matrix = [
-        (ROLE_READER, [true, false, false, false, false, false, false, false, false, false]),
-        (ROLE_ANALYST, [true, true, true, false, false, false, false, true, true, true]),
-        (ROLE_RESPONDER, [true, true, true, true, false, false, false, true, true, true]),
-        (ROLE_ADMINISTRATOR, [true, true, true, true, false, true, true, true, true, true]),
-        (ROLE_AUDITOR, [true, true, false, false, true, false, false, true, true, false]),
+        (
+            ROLE_READER,
+            [true, false, false, false, false, false, false, false, false, false, false, false],
+        ),
+        (
+            ROLE_ANALYST,
+            [true, true, true, false, false, false, false, true, true, true, true, false],
+        ),
+        (
+            ROLE_RESPONDER,
+            [true, true, true, true, false, false, false, true, true, true, true, true],
+        ),
+        (
+            ROLE_ADMINISTRATOR,
+            [true, true, true, true, false, true, true, true, true, true, true, true],
+        ),
+        (
+            ROLE_AUDITOR,
+            [true, true, false, false, true, false, false, true, true, false, true, false],
+        ),
     ];
     let permissions = [
         PERMISSION_EVENTS_READ,
@@ -72,6 +88,8 @@ fn built_in_roles_have_the_expected_permissions() -> TestResult {
         PERMISSION_CASES_READ,
         PERMISSION_CMDB_READ,
         PERMISSION_CASES_WRITE,
+        PERMISSION_ONCALL_READ,
+        PERMISSION_STATUS_WRITE,
     ];
     matrix.iter().for_each(|(role, expected)| {
         permissions
@@ -79,6 +97,25 @@ fn built_in_roles_have_the_expected_permissions() -> TestResult {
             .zip(expected)
             .for_each(|(permission, allowed)| assert_eq!(is_allowed(&catalog, &roles(&[role]), permission), *allowed, "{role} {permission}"));
     });
+    Ok(())
+}
+
+
+#[test]
+fn the_new_permission_strings_are_exact() -> TestResult {
+    assert_eq!(PERMISSION_ONCALL_READ, "oncall.read");
+    assert_eq!(PERMISSION_STATUS_WRITE, "status.write");
+    Ok(())
+}
+
+
+#[test]
+fn built_in_roles_never_require_mfa_for_the_new_permissions_alone() -> TestResult {
+    let catalog = builtin_catalog();
+    [ROLE_READER, ROLE_ANALYST, ROLE_RESPONDER, ROLE_AUDITOR]
+        .iter()
+        .for_each(|role| assert!(!requires_mfa(&catalog, &roles(&[role])), "{role}"));
+    assert!(requires_mfa(&catalog, &roles(&[ROLE_ADMINISTRATOR])));
     Ok(())
 }
 

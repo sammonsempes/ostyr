@@ -1,7 +1,10 @@
+#[path = "common/accept.rs"]
+mod accept;
 #[path = "common/fetch/types.rs"]
 mod types;
 
 
+use accept::accept_bounded;
 use cloud_cost::fetch::{
     fetch_new, fetch_source, gunzip_capped, key_digest, load_class, load_refusal, merge_reports, order_by_seen, parse_credentials, read_credentials,
     remembered, DIGEST_CHARS, MAX_CREDENTIAL_BYTES, TRANSIENT_BUDGET,
@@ -1154,7 +1157,7 @@ fn error_server(body: &'static str) -> Result<Served, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let endpoint = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
     let handle = spawn(move || {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = accept_bounded(&listener)?;
         let mut buffer = [b' '; REQUEST_BUFFER];
         let _read = stream.read(&mut buffer)?;
         let reply = format!(

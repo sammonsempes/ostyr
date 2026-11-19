@@ -177,15 +177,39 @@ fn the_lock_is_one_bigint_per_tenant_and_the_function_pins_its_search_path() -> 
 #[test]
 fn the_counter_and_the_retention_stay_inside_the_tenant() -> TestResult {
     let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
-    assert!(sql.contains("UPDATE compliance_state_count SET rows = rows - removed WHERE tenant = p_tenant"));
+    assert!(sql.contains("UPDATE compliance_state_count SET rows = GREATEST(rows - removed, 0) WHERE tenant = p_tenant"));
     assert!(sql.contains("old.tenant = p_tenant"));
-    assert!(sql.contains("e.tenant = p_tenant AND e.last_seen_micros < p_now - p_retention"));
+    assert!(sql.contains("e.tenant = p_tenant AND e.last_seen_micros < p_now - p_retention - p_granularity"));
     assert!(sql.contains("LIMIT p_max_expired"));
-    assert!(sql.contains("rows = rows + (SELECT count(*) FROM written WHERE written.inserted)"));
+    assert!(sql.contains("rows = GREATEST(rows + (SELECT count(*) FROM written WHERE written.inserted), 0)"));
     assert!(sql.contains("last_seen_micros < EXCLUDED.last_seen_micros - p_granularity"));
     assert_eq!(LAST_SEEN_GRANULARITY, MICROS_PER_HOUR);
     assert_eq!(STATE_RETENTION, NINETY_DAYS * HOURS_PER_DAY * MICROS_PER_HOUR);
     assert_eq!(MAX_EXPIRED_PER_RUN, EXPIRED_PER_RUN);
+    Ok(())
+}
+
+
+#[test]
+fn the_counter_recounts_once_per_utc_day_and_never_fails_a_run() -> TestResult {
+    let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
+    assert!(sql.contains("reconciled_day bigint NOT NULL DEFAULT -1"));
+    assert!(!sql.contains("CHECK (rows"));
+    assert!(sql.contains("today bigint := p_now / 86400000000"));
+    assert!(sql.contains("IF last_day <> today THEN"));
+    assert!(sql.contains("rows = (SELECT count(*) FROM compliance_state WHERE tenant = p_tenant), reconciled_day = today"));
+    assert!(sql.contains("GREATEST(rows - removed, 0)"));
+    Ok(())
+}
+
+
+#[test]
+fn the_retention_runs_after_the_upsert_and_leaves_the_current_run_alone() -> TestResult {
+    let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
+    let upsert = sql.find("INSERT INTO compliance_state AS st").ok_or("no upsert")?;
+    let retention = sql.find("DELETE FROM compliance_state AS old").ok_or("no retention")?;
+    assert!(upsert < retention);
+    assert_eq!(sql.matches("DELETE FROM compliance_state AS old").count(), 1);
     Ok(())
 }
 

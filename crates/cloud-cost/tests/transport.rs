@@ -1,3 +1,8 @@
+#[path = "common/accept.rs"]
+mod accept;
+
+
+use accept::accept_bounded;
 use cloud_cost::fetch_error::{HttpClass, HttpFailure};
 use cloud_cost::fetch_model::HttpRequest;
 use cloud_cost::transport::{agent_for_request, ca_failure, classify, read_class, send};
@@ -20,6 +25,9 @@ const CHUNK: usize = 4096;
 
 
 const MAX_READS: usize = 64;
+
+
+const BOUND: Duration = Duration::from_secs(30);
 
 
 const CAP: u64 = 100;
@@ -109,10 +117,10 @@ fn run(mut stream: TcpStream, script: Script) -> io::Result<()> {
                     _ => Err(error),
                 })
         }
-        Script::Stall(release) => release.recv().map_err(io::Error::other),
+        Script::Stall(release) => release.recv_timeout(BOUND).map_err(io::Error::other),
         Script::Partial(release) => {
             write_reply(&mut stream, "200 OK", "", DECLARED as u64, &[b'y'; PARTIAL_BYTES])?;
-            release.recv().map_err(io::Error::other)
+            release.recv_timeout(BOUND).map_err(io::Error::other)
         }
     }
 }
@@ -128,7 +136,7 @@ fn serve(script: Script) -> Result<Served, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://127.0.0.1:{}/bucket/", listener.local_addr()?.port());
     let handle = spawn(move || {
-        let (stream, _) = listener.accept()?;
+        let stream = accept_bounded(&listener)?;
         run(stream, script)
     });
     Ok(Served { url, handle })

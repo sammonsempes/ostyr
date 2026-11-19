@@ -5,6 +5,7 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use rusty_s3::{Bucket, Credentials, S3Action};
+use std::collections::HashSet;
 use std::iter::from_fn;
 use std::mem::take;
 use std::time::Duration;
@@ -306,6 +307,19 @@ pub fn listed_bytes(objects: &[ListedObject]) -> usize {
 }
 
 
+/// The incoming objects whose (key, etag) is neither in `known` nor repeated earlier in the page; the rest is the second value.
+pub fn without_repeats(known: &[ListedObject], incoming: Vec<ListedObject>) -> (Vec<ListedObject>, usize) {
+    let mut seen: HashSet<(String, String)> = known.iter().map(|object| (object.key.clone(), object.etag.clone())).collect();
+    let total = incoming.len();
+    let kept: Vec<ListedObject> = incoming
+        .into_iter()
+        .filter(|object| seen.insert((object.key.clone(), object.etag.clone())))
+        .collect();
+    let repeated = total - kept.len();
+    (kept, repeated)
+}
+
+
 pub fn walk_step(
     env: &FetchEnv<'_>,
     source: &FetchSource,
@@ -318,12 +332,13 @@ pub fn walk_step(
         Ok(walk)
     } else {
         let page = list_page(env, source, bucket, credentials, walk.token.as_deref(), start_after)?;
+        let (fresh, repeated) = without_repeats(&walk.objects, page.objects);
         Ok(Walk {
             done: page.next_token.is_none(),
             token: page.next_token,
             last_key: page.last_key.or(walk.last_key),
-            objects: walk.objects.into_iter().chain(page.objects).collect(),
-            skipped: walk.skipped + page.skipped,
+            objects: walk.objects.into_iter().chain(fresh).collect(),
+            skipped: walk.skipped + page.skipped + repeated,
         })
     }
 }
