@@ -29,7 +29,7 @@ pub const CLEARTEXT_REQUEST: i32 = 3;
 pub const SSL_REQUEST_BYTES: usize = 8;
 
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Reply {
     Done,
     Rows(Vec<Vec<String>>),
@@ -104,11 +104,10 @@ pub fn row_description(columns: usize, oid: i32) -> io::Result<Vec<u8>> {
 pub fn data_row(cells: &[Vec<u8>]) -> io::Result<Vec<u8>> {
     let count = i16::try_from(cells.len()).map_err(io::Error::other)?;
     let mut body = count.to_be_bytes().to_vec();
-    cells.iter().try_for_each(|cell| {
-        body.extend_from_slice(&i32::try_from(cell.len()).map_err(io::Error::other)?.to_be_bytes());
+    cells.iter().for_each(|cell| {
+        body.extend_from_slice(&i32::try_from(cell.len()).unwrap_or(i32::MAX).to_be_bytes());
         body.extend_from_slice(cell);
-        Ok::<(), io::Error>(())
-    })?;
+    });
     frame(b'D', &body)
 }
 
@@ -299,7 +298,7 @@ pub async fn authenticate<Channel: AsyncRead + AsyncWrite + Unpin>(
     let mut startup = vec![0u8; length.saturating_sub(LENGTH_FIELD_BYTES)];
     stream.read_exact(&mut startup).await?;
     stream.write_all(&frame(b'R', &CLEARTEXT_REQUEST.to_be_bytes())?).await?;
-    let (_, body) = read_message(stream).await?.ok_or_else(|| io::Error::other("no password"))?;
+    let (_, body) = read_message(stream).await?.ok_or(io::Error::other("no password"))?;
     let received = body.strip_suffix(&[0]).unwrap_or(&body).to_vec();
     passwords.send(received.clone()).map_err(io::Error::other)?;
     if received == expected {
@@ -348,7 +347,7 @@ pub async fn start(mode: Mode, expected: &str, handler: Handler) -> io::Result<F
         let mut accepted = 0;
         while accepted < MAX_MESSAGES {
             accepted += 1;
-            if let Ok((socket, _)) = listener.accept().await {
+            listener.accept().await.into_iter().for_each(|(socket, _)| {
                 let shared = Arc::new((Arc::clone(&shared_mode), expected_bytes.clone(), Arc::clone(&handler)));
                 let senders = (password_sender.clone(), statement_sender.clone());
                 tokio::spawn(async move {
@@ -357,7 +356,7 @@ pub async fn start(mode: Mode, expected: &str, handler: Handler) -> io::Result<F
                         tracing::debug!(%error, "fake connection ended");
                     }
                 });
-            }
+            });
         }
     });
     Ok(Fake { port, passwords, statements })

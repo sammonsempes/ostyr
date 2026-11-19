@@ -1091,8 +1091,8 @@ dependencies = [
  "csv",
  "data-encoding",
  "ecs-normalise",
+ "pg-fake",
  "rcgen",
- "rustls",
  "serde",
  "serde_json",
  "signal-hook",
@@ -1101,7 +1101,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-postgres",
- "tokio-rustls",
  "tower",
  "tracing",
  "tracing-log",
@@ -4423,6 +4422,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg-fake"
+version = "0.0.0"
+dependencies = [
+ "core-pg",
+ "rcgen",
+ "rustls",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "phf"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5287,8 +5301,8 @@ dependencies = [
  "core-config",
  "core-pg",
  "ecs-normalise",
+ "pg-fake",
  "rcgen",
- "rustls",
  "serde",
  "serde_json",
  "signal-hook",
@@ -5297,7 +5311,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-postgres-rustls",
- "tokio-rustls",
  "tower",
  "tracing",
  "tracing-log",

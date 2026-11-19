@@ -1,11 +1,5 @@
-mod certs;
-mod fake;
-mod types;
-
-
 use alerts::backend::{lease, MAX_CONNECTIONS};
 use alerts::error::StoreError as LeaseError;
-use certs::{loopback, make_pki};
 use cmdb::backend::pg_backend;
 use cmdb::error::StoreError;
 use cmdb::model::Limits;
@@ -18,7 +12,9 @@ use core_pg::connect::connect;
 use core_pg::error::PgError;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::{open_settings, parse_settings, PgSettings};
-use fake::{Fake, Mode, Reply};
+use pg_fake::certs::{loopback, make_pki};
+use pg_fake::fake::{self, Fake, Mode, Reply};
+use pg_fake::types::Handler;
 use rcgen::SanType;
 use std::error::Error;
 use std::io::sink;
@@ -28,7 +24,6 @@ use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
 use tokio_postgres::Client;
-use types::Handler;
 
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -237,6 +232,7 @@ async fn a_full_pool_is_busy_before_any_connection() -> Result<(), Box<dyn Error
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 
