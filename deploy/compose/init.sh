@@ -11,14 +11,17 @@ readonly SECRETS_DIR="$COMPOSE_DIR/secrets"
 readonly SERVICE_UID=65532
 readonly CERT_DAYS=825
 readonly KEY_BYTES=32
-readonly NAME_PATTERN='^[A-Za-z0-9.][A-Za-z0-9.-]*$'
+readonly LABEL_PATTERN='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+readonly NAME_PATTERN="^${LABEL_PATTERN}(\\.${LABEL_PATTERN})*\$"
+readonly NAME_MAX=253
+readonly TLS_FILES=(ca.crt pg_server.key pg_server.crt api_tls.key api_tls.crt)
 readonly ADDRESS_PATTERN='^[0-9]+(\.[0-9]+){3}$'
 readonly CURVE=prime256v1
 
 host_name="${1:?usage: init.sh <public-host-name>}"
 readonly host_name
-if [[ ! "$host_name" =~ $NAME_PATTERN ]]; then
-    printf 'error: the host name must match [A-Za-z0-9.-] and not start with a dash\n' >&2
+if [[ "${#host_name}" -gt "$NAME_MAX" || ! "$host_name" =~ $NAME_PATTERN ]]; then
+    printf 'error: the host name must be DNS labels of 1 to 63 letters, digits or inner dashes, 253 characters at most\n' >&2
     exit 1
 fi
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -69,6 +72,7 @@ make_certificates() {
         -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -keyout "$scratch/ca.key" -out "$scratch/ca.crt"
     make_leaf pg_server postgres DNS:postgres "$scratch"
     make_leaf api_tls "$host_name" "$api_names" "$scratch"
+    verify_scratch
     install_new "$scratch/ca.crt" ca.crt 0644 root:root
     install_new "$scratch/pg_server.key" pg_server.key 0600 root:root
     install_new "$scratch/pg_server.crt" pg_server.crt 0644 root:root
@@ -76,12 +80,34 @@ make_certificates() {
     install_new "$scratch/api_tls.crt" api_tls.crt 0644 root:root
 }
 
+verify_scratch() {
+    openssl verify -CAfile "$scratch/ca.crt" "$scratch/pg_server.crt" "$scratch/api_tls.crt" >/dev/null
+}
+
+missing_tls_files() {
+    local name
+    for name in "${TLS_FILES[@]}"; do
+        if [[ ! -e "$SECRETS_DIR/$name" ]]; then
+            printf '%s\n' "$name"
+        fi
+    done
+}
+
+rm -rf "$SECRETS_DIR"/.tls.*
 scratch="$(mktemp -d "$SECRETS_DIR/.tls.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
+trap 'rm -rf "$scratch"; exit 1' INT TERM HUP
 make_random_file "$SECRETS_DIR/pg_password" base64 root:root
 make_random_file "$SECRETS_DIR/pg_service_password" base64 "$SERVICE_UID:$SERVICE_UID"
 make_random_file "$SECRETS_DIR/store.key" raw "$SERVICE_UID:$SERVICE_UID"
-if [[ ! -e "$SECRETS_DIR/api_tls.crt" ]]; then
-    make_certificates
+missing="$(missing_tls_files | tr '\n' ' ')"
+if [[ -n "$missing" ]]; then
+    if [[ "$missing" == "${TLS_FILES[*]} " ]]; then
+        make_certificates
+    else
+        printf 'error: the TLS set is incomplete, missing: %s\n' "$missing" >&2
+        printf 'remove every TLS file (ca.crt pg_server.* api_tls.*) from %s to regenerate the set\n' "$SECRETS_DIR" >&2
+        exit 1
+    fi
 fi
 printf 'secrets ready in %s\n' "$SECRETS_DIR"
