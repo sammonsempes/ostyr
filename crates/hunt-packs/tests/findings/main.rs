@@ -140,7 +140,9 @@ fn sql_binds_the_tenant_first_and_orders_by_the_cursor_key() -> TestResult {
     assert!(LIST_SQL
         .contains("WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4"));
     assert!(!LIST_SQL.contains("OFFSET"));
-    assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > 64 LIMIT $2::bigint"));
+    assert!(OVERSIZED_SQL.contains("WHERE tenant = $1 AND octet_length(pack_id) > 64 UNION ALL"));
+    assert!(OVERSIZED_SQL.contains("octet_length(pack_id) <= 64 AND window_end < -62167219200) unlisted LIMIT $2::bigint"));
+    assert!(OVERSIZED_SQL.contains(&format!("window_end < {}", hunt_packs::api::FIRST_END)));
     assert!(OVERSIZED_SQL.contains(&format!("octet_length(pack_id) > {ID_BYTE_CAP} ")));
     assert!(LIST_SQL.contains(&format!("octet_length(pack_id) <= {ID_BYTE_CAP} ")));
     assert!(!LIST_SQL.contains("$5"));

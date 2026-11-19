@@ -2873,6 +2873,8 @@ dependencies = [
  "data-encoding",
  "log",
  "metric-alerts",
+ "pg-fake",
+ "rcgen",
  "rustix 1.1.6",
  "serde",
  "serde_json",

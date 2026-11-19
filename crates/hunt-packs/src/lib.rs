@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod api_model;
+pub mod backend;
 pub mod check;
 pub mod cli;
 pub mod clock;
