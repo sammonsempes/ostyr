@@ -6,8 +6,8 @@ use alerts::types::{Row, RowFuture};
 use compliance::error::StateError;
 use compliance::model::{FailedAt, RecordOutcome, Verdict};
 use compliance::store::{
-    apply_row, decode_rows, entries_json, plan_run, record_verdicts, record_verdicts_with_cap, row_cells, verdict_name, MAX_RUN_ENTRIES,
-    MAX_STATE_ROWS_PER_TENANT, MIGRATIONS, MIGRATION_NAMESPACE, RECORD_SQL,
+    apply_row, decode_rows, entries_json, plan_run, record_verdicts, record_verdicts_with_cap, row_cells, verdict_name, LAST_SEEN_GRANULARITY,
+    MAX_EXPIRED_PER_RUN, MAX_RUN_ENTRIES, MAX_STATE_ROWS_PER_TENANT, MIGRATIONS, MIGRATION_NAMESPACE, RECORD_SQL, STATE_RETENTION,
 };
 use compliance::types::{PlannedEntry, RunEntry};
 use core_pg::connect::connect;
@@ -43,6 +43,18 @@ const SMALL_CAP: i64 = 2;
 
 #[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
+
+
+const MICROS_PER_HOUR: i64 = 3_600_000_000;
+
+
+const HOURS_PER_DAY: i64 = 24;
+
+
+const NINETY_DAYS: i64 = 90;
+
+
+const EXPIRED_PER_RUN: i64 = 10_000;
 
 
 const TWO: usize = 2;
@@ -132,19 +144,63 @@ fn the_migration_is_registered_under_its_namespace() -> TestResult {
     assert!(sql.contains("PRIMARY KEY (tenant, baseline, control, asset)"));
     assert!(sql.contains("verdict IN ('pass', 'fail', 'error', 'excepted')"));
     assert!(sql.contains("pg_advisory_xact_lock"));
+    let second = MIGRATIONS.get(1).ok_or("no second migration")?.sql;
+    assert!(second.contains("CREATE TABLE compliance_state_count"));
+    assert!(second.contains("INSERT INTO compliance_state_count (tenant, rows) SELECT tenant, count(*) FROM compliance_state GROUP BY tenant"));
     Ok(())
 }
 
 
 #[test]
 fn the_statement_binds_the_tenant_first_and_every_query_filters_on_it() -> TestResult {
-    assert!(RECORD_SQL.contains("compliance_record($1, $2::text::jsonb, $3::text::bigint, $4::text::bigint)"));
-    let sql = MIGRATIONS.first().ok_or("no migration")?.sql;
+    assert!(RECORD_SQL.contains("$4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint)"));
+    let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
     assert!(sql.contains("WHERE tenant = p_tenant"));
     assert!(sql.contains("s.tenant = p_tenant"));
     assert!(sql.contains("SELECT p_tenant, n.baseline"));
     assert!(sql.contains("WHEN EXCLUDED.verdict <> 'fail' THEN NULL"));
     assert!(sql.contains("WHEN st.verdict = 'fail' THEN st.first_failed_micros"));
+    Ok(())
+}
+
+
+#[test]
+fn the_lock_is_one_bigint_per_tenant_and_the_function_pins_its_search_path() -> TestResult {
+    let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
+    assert!(sql.contains("pg_advisory_xact_lock(hashtextextended('compliance_state/' || p_tenant, 0))"));
+    assert!(!sql.contains("hashtext("));
+    assert!(sql.contains("SET search_path = pg_catalog, public"));
+    Ok(())
+}
+
+
+#[test]
+fn the_counter_and_the_retention_stay_inside_the_tenant() -> TestResult {
+    let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
+    assert!(sql.contains("UPDATE compliance_state_count SET rows = rows - removed WHERE tenant = p_tenant"));
+    assert!(sql.contains("old.tenant = p_tenant"));
+    assert!(sql.contains("e.tenant = p_tenant AND e.last_seen_micros < p_now - p_retention"));
+    assert!(sql.contains("LIMIT p_max_expired"));
+    assert!(sql.contains("rows = rows + (SELECT count(*) FROM written WHERE written.inserted)"));
+    assert!(sql.contains("last_seen_micros < EXCLUDED.last_seen_micros - p_granularity"));
+    assert_eq!(LAST_SEEN_GRANULARITY, MICROS_PER_HOUR);
+    assert_eq!(STATE_RETENTION, NINETY_DAYS * HOURS_PER_DAY * MICROS_PER_HOUR);
+    assert_eq!(MAX_EXPIRED_PER_RUN, EXPIRED_PER_RUN);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_cap_over_the_maximum_or_negative_is_refused_before_any_io() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let pass = Verdict::Pass;
+    let run: Vec<RunEntry<'_>> = vec![("a", "c", "web-1", &pass)];
+    for cap in [MAX_STATE_ROWS_PER_TENANT + 1, -1] {
+        let refused = record_verdicts_with_cap(&failing, &scope, &run, NOW, cap).await;
+        assert!(matches!(refused, Err(StateError::CapOutOfRange)), "{refused:?}");
+    }
+    let accepted = record_verdicts_with_cap(&answering(vec![row(&["1", "stored", ""])]), &scope, &run, NOW, MAX_STATE_ROWS_PER_TENANT).await?;
+    assert_eq!(accepted.refused_no_room, 0);
     Ok(())
 }
 
@@ -336,7 +392,7 @@ async fn the_real_client_path_binds_the_tenant_first() -> TestResult {
     assert_eq!(outcome.failed.first().map(|found| found.first_failed_micros), Some(FIRST_FAILED));
     let statements = drain(&mut fake);
     let params: Vec<&String> = statements.iter().filter(|entry| entry.starts_with("PARAMS")).collect();
-    let expected_tail = format!("|{NOW}|{MAX_STATE_ROWS_PER_TENANT}");
+    let expected_tail = format!("|{NOW}|{MAX_STATE_ROWS_PER_TENANT}|{STATE_RETENTION}|{MAX_EXPIRED_PER_RUN}|{LAST_SEEN_GRANULARITY}");
     assert_eq!(params.len(), 1, "{statements:?}");
     assert!(
         params

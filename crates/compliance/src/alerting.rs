@@ -125,3 +125,39 @@ pub async fn store_drift_alerts(exec: Executor<'_, '_>, scope: &TenantScope, ale
     }
     Ok(inserted)
 }
+
+
+pub const STATE_FULL_RULE: &str = "compliance.state_full";
+
+
+const MICROS_PER_DAY: u64 = 86_400_000_000;
+
+
+/// One alert per tenant and day: the id comes from the tenant, the rule and the day number, the summary holds the refused count only.
+pub fn state_full_alert(scope: &TenantScope, refused: usize, now_micros: u64) -> Alert {
+    let tenant = tenant_of(scope).to_owned();
+    let event_ids = vec![format!("day:{}", now_micros / MICROS_PER_DAY)];
+    Alert {
+        id: alert_id(&tenant, STATE_FULL_RULE, &event_ids),
+        tenant,
+        rule_id: STATE_FULL_RULE.to_owned(),
+        rule_title: "Compliance state is full: new controls are not recorded".to_owned(),
+        severity: Severity::Medium,
+        event_time: now_micros.to_string(),
+        created_micros: now_micros,
+        host_name: None,
+        user_name: None,
+        summary: summarise(&json!({ "refused": refused })),
+        event_ids,
+    }
+}
+
+
+/// Raises the day's `compliance.state_full` alert when a run refused entries for lack of room; answers how many alerts were new.
+pub async fn raise_state_full(exec: Executor<'_, '_>, scope: &TenantScope, refused: usize, now_micros: u64) -> Result<usize, StoreError> {
+    if refused > 0 {
+        insert_alerts(exec, scope, &[state_full_alert(scope, refused, now_micros)]).await
+    } else {
+        Ok(0)
+    }
+}

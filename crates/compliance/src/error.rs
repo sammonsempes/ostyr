@@ -29,6 +29,8 @@ pub enum ComplianceError {
 pub enum StateError {
     #[error("a run of {entries} entries is over the limit of {max}")]
     RunTooLarge { entries: usize, max: usize },
+    #[error("the row cap is outside 0 to the per-tenant maximum")]
+    CapOutOfRange,
     #[error("the time does not fit the state store")]
     TimeOutOfRange,
     #[error("the state store answered a row that cannot be read")]
