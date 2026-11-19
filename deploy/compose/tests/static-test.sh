@@ -44,7 +44,7 @@ compose_config_accepts() {
     local scratch name
     scratch="$(mktemp -d "$COMPOSE_DIR/../../target/compose-static.XXXXXX")"
     mkdir -p "$scratch/secrets"
-    for name in pg_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key; do
+    for name in pg_password pg_service_password pg_server.key pg_server.crt ca.crt api_tls.key api_tls.crt store.key; do
         : >"$scratch/secrets/$name"
     done
     cp -r "$COMPOSE_FILE" "$COMPOSE_DIR/config" "$scratch/"
@@ -56,7 +56,7 @@ if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
     mkdir -p "$COMPOSE_DIR/../../target"
     expect "docker compose config accepts compose.yaml" compose_config_accepts
 else
-    printf 'info docker compose is not installed on this host: config check skipped\n'
+    printf 'info docker compose is NOT installed on this host: the compose config check was SKIPPED\n'
 fi
 if command -v shellcheck >/dev/null; then
     expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh"
