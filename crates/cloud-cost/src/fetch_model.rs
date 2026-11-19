@@ -93,6 +93,24 @@ pub struct Listing {
 }
 
 
+/// The part of the key space one listing covered: after `after`, up to `until`, or to the end when `complete`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SeenWindow<'a> {
+    pub after: Option<&'a str>,
+    pub until: Option<&'a str>,
+    pub complete: bool,
+}
+
+
+/// The ledger's answer: the keys still to serve in order, and the count of versions it could not record.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SeenOrder {
+    pub keys: Vec<String>,
+    pub unrecorded: usize,
+    pub deletes_deferred: usize,
+}
+
+
 /// The page walk in progress; `done` is set by the first page without a continuation token.
 #[derive(Debug, Default)]
 pub struct Walk {
@@ -140,6 +158,8 @@ pub struct FetchReport {
     pub in_backoff: usize,
     pub permanent_refused: usize,
     pub transient_refused: usize,
+    pub seen_full: usize,
+    pub deletes_deferred: usize,
     pub refused: Vec<(String, Refusal)>,
     pub failed_sources: Vec<(String, FetchError)>,
 }
