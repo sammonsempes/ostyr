@@ -35,12 +35,12 @@ pub const FINDINGS_PATH: &str = "/hunts/findings";
 pub const FIRST_END: i64 = -62_167_219_200;
 
 
-/// The longest decimal window end `checked_time` admits (`-62167219200`).
-pub const MAX_END_CHARS: usize = 12;
+/// The longest decimal `i64` end (`-9223372036854775808`): a cursor accepts every end the store can hold.
+pub const MAX_END_CHARS: usize = 20;
 
 
-/// Base64url length of `<end>:<pack id>` with the longest end and a 64-byte pack id (77 bytes).
-pub const MAX_CURSOR_CHARS: usize = 103;
+/// Base64url length of `<end>:<pack id>` with the longest end and a 64-byte pack id (85 bytes).
+pub const MAX_CURSOR_CHARS: usize = 114;
 
 
 pub const CURSOR_SEPARATOR: char = ':';
@@ -76,7 +76,7 @@ pub fn encode_cursor(end: i64, pack_id: &str) -> String {
 }
 
 
-/// Accepts every cursor `encode_cursor` prints for a stored row: any admitted end, any pack id of at most 64 bytes without NUL.
+/// Accepts every cursor `encode_cursor` prints for a stored row: any `i64` end, any pack id of at most 64 bytes without NUL.
 pub fn decode_cursor(text: &str) -> Result<(i64, String), FindingsError> {
     let bytes = (text.len() <= MAX_CURSOR_CHARS)
         .then(|| BASE64URL_NOPAD.decode(text.as_bytes()).ok())
@@ -84,11 +84,7 @@ pub fn decode_cursor(text: &str) -> Result<(i64, String), FindingsError> {
         .ok_or(FindingsError::BadCursor)?;
     let decoded = String::from_utf8(bytes).map_err(|_source| FindingsError::BadCursor)?;
     let (end_text, pack_id) = decoded.split_once(CURSOR_SEPARATOR).ok_or(FindingsError::BadCursor)?;
-    let end = end_text
-        .parse::<i64>()
-        .ok()
-        .and_then(|seconds| checked_time(seconds).ok())
-        .ok_or(FindingsError::BadCursor)?;
+    let end = end_text.parse::<i64>().map_err(|_source| FindingsError::BadCursor)?;
     (pack_id.len() <= MAX_ID_CHARS && !pack_id.contains('\0'))
         .then(|| (end, pack_id.to_owned()))
         .ok_or(FindingsError::BadCursor)
@@ -192,18 +188,14 @@ pub fn oversized_view(count: i64) -> OversizedView {
 }
 
 
-/// A refused time is left out and counted in `skipped`; no cursor is printed past an end `checked_time` refuses.
+/// A refused time is left out and counted in `skipped`; the cursor is the stored end and id of the last row read, whatever its time.
 pub fn findings_view(found: FindingsReply) -> FindingsView {
     let items: Vec<FindingView> = found.page.rows.iter().filter_map(finding_item).collect();
     let refused_time = found.page.rows.len().saturating_sub(items.len());
     FindingsView {
         skipped: found.page.skipped.saturating_add(refused_time),
         oversized: oversized_view(found.oversized),
-        next_cursor: found
-            .page
-            .next
-            .filter(|(end, _pack)| checked_time(*end).is_ok())
-            .map(|(end, pack_id)| encode_cursor(end, &pack_id)),
+        next_cursor: found.page.next.map(|(end, pack_id)| encode_cursor(end, &pack_id)),
         items,
     }
 }

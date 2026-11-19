@@ -1,3 +1,4 @@
+use crate::api::FIRST_END;
 use crate::packs::{is_pack_id, MAX_ID_CHARS};
 use crate::schedule::{checked_time, RunWindow, ScheduleError};
 use crate::types::ListResult;
@@ -77,10 +78,11 @@ pub const LIST_SQL: &str = "SELECT pack_id, window_start, window_end, matches, m
     WHERE tenant = $1 AND (window_end, pack_id) > ($2, $3) AND octet_length(pack_id) <= 64 ORDER BY window_end, pack_id LIMIT $4";
 
 
-/// Params: `$2` count limit. One row: rows never listed, counted once: id over 64 bytes, or listable id with an end below year 0.
+/// Params: `$2` count limit. One row: rows never listed, counted once: id over 64 bytes, or listable id with an end below year 0, or an empty id at exactly year 0.
 pub const OVERSIZED_SQL: &str = "SELECT count(*) FROM (SELECT 1 FROM (\
     SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) > 64 \
-    UNION ALL SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) <= 64 AND window_end < -62167219200\
+    UNION ALL SELECT 1 FROM hunt_pack_findings WHERE tenant = $1 AND octet_length(pack_id) <= 64 AND window_end <= -62167219200 \
+    AND (window_end < -62167219200 OR pack_id = '')\
     ) unlisted LIMIT $2::bigint) oversized";
 
 
@@ -170,7 +172,7 @@ pub struct FindingRow {
 }
 
 
-/// Rows after the cursor, bad pack ids counted in `skipped`; `next` is the last row READ (skipped included), set only on a full page.
+/// Rows after the cursor, bad pack ids and windows that end before they start counted in `skipped`; `next` is the last row READ (skipped included), set only on a full page.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FindingPage {
     pub rows: Vec<FindingRow>,
@@ -209,7 +211,7 @@ where
 }
 
 
-/// Findings of the tenant strictly after the cursor `(end, pack_id)`, in `(window_end, pack_id)` order; the limit is capped at `MAX_FINDINGS_PAGE`.
+/// Findings of the tenant strictly after the cursor `(end, pack_id)` (any `i64` end: a printed cursor is never refused), in `(window_end, pack_id)` order; the limit is capped at `MAX_FINDINGS_PAGE`.
 pub async fn list_findings<Executor, Pending>(
     exec: &mut Executor,
     tenant: &str,
@@ -222,13 +224,14 @@ where
     Pending: Future<Output = ListResult>,
 {
     let scope = tenant_scope(tenant)?;
-    checked_time(since_end).map_err(StateError::OutOfRange)?;
     let capped = limit.clamp(1, MAX_FINDINGS_PAGE);
     let cursor = (Param::Int(since_end), Param::Text(since_pack.to_owned()));
     let rows = exec(&scope, LIST_SQL, vec![cursor.0, cursor.1, Param::Int(capped)]).await?;
     let full = i64::try_from(rows.len()).is_ok_and(|read| read >= capped);
     let next = rows.last().filter(|_| full).map(|row| (row.window_end, row.pack_id.clone()));
-    let (valid, refused): (Vec<FindingRow>, Vec<FindingRow>) = rows.into_iter().partition(|row| is_pack_id(&row.pack_id));
+    let (valid, refused): (Vec<FindingRow>, Vec<FindingRow>) = rows
+        .into_iter()
+        .partition(|row| is_pack_id(&row.pack_id) && row.window_start <= row.window_end);
     Ok(FindingPage {
         rows: valid,
         skipped: refused.len(),
@@ -237,7 +240,7 @@ where
 }
 
 
-/// How many of the tenant's stored rows have a pack id over `ID_BYTE_CAP` (never listed), counted up to `OVERSIZED_REPORT_CAP + 1`.
+/// How many of the tenant's stored rows cannot be listed (over-long id, or a window before year 0), counted up to `OVERSIZED_REPORT_CAP + 1`.
 pub async fn count_oversized<Executor, Pending>(exec: &mut Executor, tenant: &str) -> Result<i64, StateError>
 where
     Executor: FnMut(&TenantScope, &'static str, Vec<Param>) -> Pending,
@@ -298,4 +301,10 @@ pub fn parse_cursor(text: &str) -> Result<(i64, String), CursorError> {
     let end_value: i64 = end.parse().map_err(|_| CursorError::Malformed)?;
     let bytes = unhex(hex).ok_or(CursorError::Malformed)?;
     String::from_utf8(bytes).map(|pack| (end_value, pack)).map_err(|_| CursorError::Malformed)
+}
+
+
+/// The cursor a listing starts from: the one given, else `FIRST_END` with an empty id (year 0, so no stored row is before it).
+pub fn start_cursor(text: Option<&str>) -> Result<(i64, String), CursorError> {
+    text.map_or(Ok((FIRST_END, String::new())), parse_cursor)
 }

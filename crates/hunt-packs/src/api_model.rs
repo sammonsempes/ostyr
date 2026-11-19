@@ -27,6 +27,7 @@ pub struct FindingsQuery {
 #[derive(Debug, PartialEq, Eq)]
 pub struct FindingsReply {
     pub page: FindingPage,
+    /// Stored rows that cannot be listed: over-long pack id, or a window before year 0.
     pub oversized: i64,
 }
 
@@ -41,7 +42,7 @@ pub struct FindingView {
 }
 
 
-/// Rows with a pack id over 64 bytes: `count` is cut at the report cap and `capped` tells it was.
+/// Rows that cannot be listed (over-long id, or a window before year 0): `count` is cut at the report cap and `capped` tells it was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct OversizedView {
     pub count: i64,

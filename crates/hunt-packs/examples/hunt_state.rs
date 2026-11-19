@@ -5,7 +5,7 @@ use core_pg::query::scoped_query;
 use core_pg::scope::TenantScope;
 use core_pg::settings::parse_settings;
 use hunt_packs::store::{
-    count_oversized, format_cursor, last_done, list_findings, parse_cursor, record_done, FindingRow, Param, MAX_FINDINGS_PAGE, MIGRATIONS,
+    count_oversized, format_cursor, last_done, list_findings, record_done, start_cursor, FindingRow, Param, MAX_FINDINGS_PAGE, MIGRATIONS,
     MIGRATION_DEADLINE, MIGRATION_NAMESPACE, OVERSIZED_REPORT_CAP, STATEMENT_DEADLINE,
 };
 use std::io::{stderr, stdout, Write};
@@ -77,7 +77,7 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
         [since, limit] => (Some(since), Some(limit)),
         _ => Err(USAGE)?,
     };
-    let (since_end, since_pack) = cursor.map(String::as_str).map_or(Ok((0, String::new())), parse_cursor)?;
+    let (since_end, since_pack) = start_cursor(cursor.map(String::as_str))?;
     let limit_count: i64 = limit.map_or(Ok(MAX_FINDINGS_PAGE), |text| text.parse())?;
     let mut exec = |scope: &TenantScope, sql: &'static str, params: Vec<Param>| execute_list(client, scope.clone(), sql, params);
     let page = list_findings(&mut exec, tenant, since_end, &since_pack, limit_count).await?;
@@ -94,7 +94,12 @@ async fn findings(client: &Client, tenant: &str, rest: &[String]) -> Result<Vec<
         oversized.to_string()
     };
     (oversized == 0).then_some(()).map_or_else(
-        || writeln!(stderr(), "{oversized_text} stored rows with an over-long pack id are not listed"),
+        || {
+            writeln!(
+                stderr(),
+                "{oversized_text} stored rows cannot be listed (over-long pack id or a window before year 0)"
+            )
+        },
         |()| Ok(()),
     )?;
     let cursor_line = page.next.iter().map(|(end, pack)| format!("next\t{}", format_cursor(*end, pack)));
