@@ -843,9 +843,11 @@ fn an_oversized_spool_line_is_refused_and_counted_not_buffered() -> TestResult {
     fs::write(&agent.spool_file, format!("a\n{huge}\nb\n{huge}"))?;
     assert_eq!(sequences(&agent)?, vec![FIRST, SECOND]);
     fs::write(dir.path().join("invalid"), INVALID_UTF8)?;
-    assert!(count_lines(&dir.path().join("invalid"), LIMIT).is_err());
+    assert_eq!(count_lines(&dir.path().join("invalid"), LIMIT)?, 0);
     assert!(count_lines(&dir.path().join("missing"), LIMIT).is_err());
-    assert!(load_claimed(&fs::File::open(dir.path().join("invalid"))?, &agent.spool_file, 1, LIMIT).is_err());
+    assert!(load_claimed(&fs::File::open(dir.path().join("invalid"))?, &agent.spool_file, 1, LIMIT)?
+        .0
+        .is_empty());
     Ok(())
 }
 

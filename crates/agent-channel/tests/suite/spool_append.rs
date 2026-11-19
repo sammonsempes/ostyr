@@ -324,7 +324,7 @@ fn a_spool_locked_by_a_producer_never_fails_the_claim_on_windows() -> TestResult
 }
 
 
-fn agent_file(dir: &Path) -> AgentFile {
+pub fn agent_file(dir: &Path) -> AgentFile {
     AgentFile {
         server: "127.0.0.1:1".to_owned(),
         server_name: "server".to_owned(),
