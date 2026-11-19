@@ -19,6 +19,8 @@ pub mod model;
 #[cfg(unix)]
 pub mod nft;
 #[cfg(unix)]
+pub mod osquery;
+#[cfg(unix)]
 pub mod run;
 #[cfg(unix)]
 pub mod sensor;
