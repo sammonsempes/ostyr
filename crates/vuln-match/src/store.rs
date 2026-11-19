@@ -1,0 +1,292 @@
+//! Per-tenant findings store: one scan of one asset is the full truth for that asset (spec section 23).
+
+use crate::error::StoreError;
+use crate::limits::{
+    CURSOR_FIELDS, LAST_SEEN_GRANULARITY_MICROS, MAX_ALIASES_PER_FINDING, MAX_CURSOR_BYTES, MAX_FIELD_BYTES, MAX_FINDINGS_PER_SCAN,
+    MAX_OPEN_FINDINGS_PER_TENANT, MAX_PAGE_LIMIT, MAX_RESOLVED_FINDINGS_PER_TENANT,
+};
+use crate::model::{AssetFinding, FindingsPage, ScanOutcome, StoredFinding};
+use crate::priority::priority_of;
+use crate::text::is_cve_id;
+use alerts::types::Executor;
+use core_pg::migrate::Migration;
+use core_pg::scope::TenantScope;
+use serde_json::{json, Value};
+
+
+pub const MIGRATION_NAMESPACE: &str = "vuln";
+
+
+pub const MIGRATIONS: [Migration; 1] = [Migration {
+    version: "vuln_0001",
+    sql: include_str!("../migrations/vuln_0001.sql"),
+}];
+
+
+pub const OUTCOME_COLUMNS: usize = 5;
+
+
+pub const COL_ASSET: usize = 0;
+
+
+pub const COL_ECOSYSTEM: usize = 1;
+
+
+pub const COL_PACKAGE: usize = 2;
+
+
+pub const COL_RECORD: usize = 3;
+
+
+pub const COL_INSTALLED: usize = 4;
+
+
+pub const COL_FIXED: usize = 5;
+
+
+pub const COL_CVSS: usize = 6;
+
+
+pub const COL_EPSS: usize = 7;
+
+
+pub const COL_KEV: usize = 8;
+
+
+pub const COL_PRIORITY: usize = 9;
+
+
+pub const COL_FIRST_SEEN: usize = 10;
+
+
+pub const COL_LAST_SEEN: usize = 11;
+
+
+pub const SCORE_MIN: f64 = 0.0;
+
+
+pub const CVSS_MAX: f64 = 10.0;
+
+
+pub const EPSS_MAX: f64 = 1.0;
+
+
+pub const CURSOR_SEPARATOR: char = ' ';
+
+
+/// One statement under a per-tenant lock: `$1` tenant, `$2` asset, `$3` findings JSON, `$4` open cap, `$5` now, `$6` resolved cap, `$7` granularity.
+pub const SCAN_SQL: &str = "SELECT n_inserted::text, n_updated::text, n_resolved::text, n_refused_no_room::text, n_evicted::text \
+                            FROM vuln_scan_store($1, $2, $3::text::jsonb, $4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint)";
+
+
+/// `$1` tenant, `$2` limit.
+pub const FIRST_SQL: &str = "SELECT asset, ecosystem, package, record_id, installed_version, coalesce(fixed_version, ''), cvss::text, epss::text, \
+                             kev::text, priority::text, first_seen_micros::text, last_seen_micros::text FROM vuln_findings \
+                             WHERE tenant = $1 AND resolved_micros IS NULL \
+                             ORDER BY priority DESC, asset, ecosystem, package, record_id LIMIT $2::text::bigint";
+
+
+/// `$1` tenant, `$2` priority, `$3` asset, `$4` ecosystem, `$5` package, `$6` record id of the last row seen, `$7` limit.
+pub const NEXT_SQL: &str = "SELECT asset, ecosystem, package, record_id, installed_version, coalesce(fixed_version, ''), cvss::text, epss::text, \
+                            kev::text, priority::text, first_seen_micros::text, last_seen_micros::text FROM vuln_findings \
+                            WHERE tenant = $1 AND resolved_micros IS NULL \
+                            AND (priority < $2::text::bigint OR (priority = $2::text::bigint \
+                            AND (asset, ecosystem, package, record_id) > ($3::text, $4::text, $5::text, $6::text))) \
+                            ORDER BY priority DESC, asset, ecosystem, package, record_id LIMIT $7::text::bigint";
+
+
+/// Printable ASCII without space or a leading `-`, 1 to `MAX_FIELD_BYTES` bytes: the one grammar of every stored text.
+pub fn is_field(text: &str) -> bool {
+    (1..=MAX_FIELD_BYTES).contains(&text.len()) && !text.starts_with('-') && text.chars().all(|found| found.is_ascii_graphic())
+}
+
+
+/// The JSON document of one finding of `asset`, `None` when a text, an alias or a score is outside its grammar or range.
+pub fn finding_doc(asset: &str, item: &AssetFinding) -> Option<Value> {
+    let scored = &item.scored;
+    let finding = &scored.finding;
+    let texts_fit = [&finding.ecosystem, &finding.package, &finding.record_id, &finding.installed_version]
+        .iter()
+        .all(|text| is_field(text))
+        && finding.fixed_version.as_deref().is_none_or(is_field);
+    let aliases_fit = finding.cve_aliases.len() <= MAX_ALIASES_PER_FINDING && finding.cve_aliases.iter().all(|alias| is_cve_id(alias));
+    let scores_fit = (SCORE_MIN..=CVSS_MAX).contains(&scored.cvss) && (SCORE_MIN..=EPSS_MAX).contains(&scored.epss);
+    (item.asset == asset && texts_fit && aliases_fit && scores_fit).then(|| {
+        json!({
+            "ecosystem": finding.ecosystem,
+            "package": finding.package,
+            "record_id": finding.record_id,
+            "installed_version": finding.installed_version,
+            "fixed_version": finding.fixed_version,
+            "cvss": scored.cvss,
+            "epss": scored.epss,
+            "kev": scored.kev,
+            "priority": priority_of(scored),
+        })
+    })
+}
+
+
+fn parse_outcome(rows: &[Vec<String>], refused: u64) -> Result<ScanOutcome, StoreError> {
+    let row = rows.first().ok_or(StoreError::BadAnswer)?;
+    let numbers: Vec<u64> = row.iter().filter_map(|text| text.parse::<u64>().ok()).collect();
+    let [inserted, updated, resolved, refused_no_room, evicted_resolved] =
+        <[u64; OUTCOME_COLUMNS]>::try_from(numbers).map_err(|_bad| StoreError::BadAnswer)?;
+    Ok(ScanOutcome {
+        inserted,
+        updated,
+        resolved,
+        refused_no_room,
+        evicted_resolved,
+        refused,
+    })
+}
+
+
+/// Stores one full scan of `asset` under the scope's tenant with the default open and resolved row caps.
+pub async fn record_scan(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    asset: &str,
+    findings: &[AssetFinding],
+    now_micros: u64,
+) -> Result<ScanOutcome, StoreError> {
+    record_scan_capped(
+        exec,
+        scope,
+        asset,
+        findings,
+        now_micros,
+        MAX_OPEN_FINDINGS_PER_TENANT,
+        MAX_RESOLVED_FINDINGS_PER_TENANT,
+    )
+    .await
+}
+
+
+/// As `record_scan` with explicit open and resolved caps (1 to their defaults), every bound checked before any I/O.
+pub async fn record_scan_capped(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    asset: &str,
+    findings: &[AssetFinding],
+    now_micros: u64,
+    max_open: u64,
+    max_resolved: u64,
+) -> Result<ScanOutcome, StoreError> {
+    if findings.len() > MAX_FINDINGS_PER_SCAN {
+        Err(StoreError::TooManyFindings { max: MAX_FINDINGS_PER_SCAN })
+    } else if !is_field(asset) {
+        Err(StoreError::BadAsset)
+    } else if !(1..=MAX_OPEN_FINDINGS_PER_TENANT).contains(&max_open) || !(1..=MAX_RESOLVED_FINDINGS_PER_TENANT).contains(&max_resolved) {
+        Err(StoreError::BadCap {
+            max: MAX_OPEN_FINDINGS_PER_TENANT,
+        })
+    } else {
+        let now = i64::try_from(now_micros).map_err(|_bad| StoreError::BadTime)?;
+        let docs: Vec<Value> = findings.iter().filter_map(|item| finding_doc(asset, item)).collect();
+        let refused = u64::try_from(findings.len() - docs.len()).map_err(|_bad| StoreError::BadAnswer)?;
+        let params = vec![
+            asset.to_owned(),
+            Value::Array(docs).to_string(),
+            max_open.to_string(),
+            now.to_string(),
+            max_resolved.to_string(),
+            LAST_SEEN_GRANULARITY_MICROS.to_string(),
+        ];
+        let rows = exec(scope.clone(), SCAN_SQL, params).await?;
+        let outcome = parse_outcome(&rows, refused)?;
+        let no_room = outcome.refused_no_room;
+        let evicted = outcome.evicted_resolved;
+        if no_room > 0 {
+            tracing::warn!(no_room, "vulnerability findings cap reached, new findings refused");
+        }
+        if evicted > 0 {
+            tracing::warn!(evicted, "resolved vulnerability findings over the cap were deleted, oldest first");
+        }
+        if refused > 0 {
+            tracing::warn!(refused, "vulnerability findings outside the grammar were refused");
+        }
+        Ok(outcome)
+    }
+}
+
+
+/// The cursor of a stored finding: priority and key, separated by spaces, which no field holds.
+pub fn cursor_of(finding: &StoredFinding) -> String {
+    [
+        finding.priority.to_string(),
+        finding.asset.clone(),
+        finding.ecosystem.clone(),
+        finding.package.clone(),
+        finding.record_id.clone(),
+    ]
+    .join(&CURSOR_SEPARATOR.to_string())
+}
+
+
+/// The parameters of `NEXT_SQL` after the tenant, minus the limit; a cursor that is not exactly a priority and four fields is `BadCursor`.
+pub fn parse_cursor(cursor: &str) -> Result<Vec<String>, StoreError> {
+    let parts: Vec<&str> = cursor.split(CURSOR_SEPARATOR).collect();
+    let priority_fits = parts
+        .first()
+        .is_some_and(|text| text.parse::<u32>().is_ok_and(|parsed| parsed.to_string() == *text));
+    let fields_fit = parts.iter().skip(1).all(|text| is_field(text));
+    let shape_fits = cursor.len() <= MAX_CURSOR_BYTES && parts.len() == CURSOR_FIELDS;
+    (shape_fits && priority_fits && fields_fit)
+        .then(|| parts.iter().map(|text| (*text).to_owned()).collect())
+        .ok_or(StoreError::BadCursor)
+}
+
+
+fn column(row: &[String], index: usize) -> Result<&str, StoreError> {
+    row.get(index).map(String::as_str).ok_or(StoreError::BadAnswer)
+}
+
+
+fn number<Number: std::str::FromStr>(row: &[String], index: usize) -> Result<Number, StoreError> {
+    column(row, index)?.parse().map_err(|_bad| StoreError::BadAnswer)
+}
+
+
+pub fn stored_of(row: &[String]) -> Result<StoredFinding, StoreError> {
+    let text = |index: usize| column(row, index).map(str::to_owned);
+    let fixed = text(COL_FIXED)?;
+    Ok(StoredFinding {
+        asset: text(COL_ASSET)?,
+        ecosystem: text(COL_ECOSYSTEM)?,
+        package: text(COL_PACKAGE)?,
+        record_id: text(COL_RECORD)?,
+        installed_version: text(COL_INSTALLED)?,
+        fixed_version: (!fixed.is_empty()).then_some(fixed),
+        cvss: number(row, COL_CVSS)?,
+        epss: number(row, COL_EPSS)?,
+        kev: number(row, COL_KEV)?,
+        priority: number(row, COL_PRIORITY)?,
+        first_seen_micros: number(row, COL_FIRST_SEEN)?,
+        last_seen_micros: number(row, COL_LAST_SEEN)?,
+    })
+}
+
+
+/// A keyset page of the tenant's open findings, highest priority first then by key; `limit` is 1 to `MAX_PAGE_LIMIT`.
+pub async fn open_findings(exec: Executor<'_, '_>, scope: &TenantScope, cursor: Option<&str>, limit: usize) -> Result<FindingsPage, StoreError> {
+    if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+        Err(StoreError::BadLimit { max: MAX_PAGE_LIMIT })
+    } else {
+        let fetch = (limit + 1).to_string();
+        let rows = match cursor {
+            None => exec(scope.clone(), FIRST_SQL, vec![fetch]).await?,
+            Some(text) => {
+                let mut params = parse_cursor(text)?;
+                params.push(fetch);
+                exec(scope.clone(), NEXT_SQL, params).await?
+            }
+        };
+        let mut findings = rows.iter().map(|row| stored_of(row)).collect::<Result<Vec<_>, _>>()?;
+        let more = findings.len() > limit;
+        findings.truncate(limit);
+        let next = findings.last().filter(|_last| more).map(cursor_of);
+        Ok(FindingsPage { findings, next })
+    }
+}
