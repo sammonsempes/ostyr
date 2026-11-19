@@ -33,9 +33,9 @@ pub fn check_tags(tags: Tags) -> TagsResult {
 }
 
 
-/// Marks every node of a critical kind, and every node the manual tags name, as critical.
+/// Marks every node of a critical kind, and every node the manual tags name, as critical; a tag naming no node is refused.
 pub fn apply_tags(graph: &mut Graph, tags: &Tags) -> ApplyResult {
-    let known: BTreeSet<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+    let known = known_ids(graph);
     tags.critical.iter().enumerate().try_for_each(|(index, tagged)| {
         if known.contains(tagged.as_str()) {
             Ok(())
@@ -43,6 +43,26 @@ pub fn apply_tags(graph: &mut Graph, tags: &Tags) -> ApplyResult {
             Err(TagsError::UnknownNode { index })
         }
     })?;
+    mark_critical(graph, tags);
+    Ok(())
+}
+
+
+/// Same marking for a truncated graph, where a tagged node may be the one that was cut: an unknown tag is skipped and counted.
+pub fn apply_tags_lenient(graph: &mut Graph, tags: &Tags) -> usize {
+    let known = known_ids(graph);
+    let unknown = tags.critical.iter().filter(|tagged| !known.contains(tagged.as_str())).count();
+    mark_critical(graph, tags);
+    unknown
+}
+
+
+pub fn known_ids(graph: &Graph) -> BTreeSet<String> {
+    graph.nodes.iter().map(|node| node.id.clone()).collect()
+}
+
+
+pub fn mark_critical(graph: &mut Graph, tags: &Tags) {
     let manual: BTreeSet<&str> = tags.critical.iter().map(String::as_str).collect();
     let marked: BTreeSet<String> = graph
         .nodes
@@ -54,5 +74,4 @@ pub fn apply_tags(graph: &mut Graph, tags: &Tags) -> ApplyResult {
         .nodes
         .iter_mut()
         .for_each(|node| node.critical = node.critical || marked.contains(&node.id));
-    Ok(())
 }
