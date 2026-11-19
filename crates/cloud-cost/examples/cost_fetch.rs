@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .block_on(run_query(&client, sql, &bound, deadline))
             .map_err(|_failure| LedgerFailure)?;
         rows.iter()
-            .map(|row| column_text(row, 0).map(|text| vec![text]))
+            .map(|row| (0..row.len()).map(|index| column_text(row, index)).collect::<Result<Vec<_>, _>>())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_failure| LedgerFailure)
     };
