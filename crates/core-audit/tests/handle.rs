@@ -16,6 +16,7 @@ use core_audit::verify::{verify_capped, MAX_RECORD_BYTES};
 use rustix::fs::OFlags;
 use std::fs;
 use std::io::{BufReader, Cursor, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
@@ -514,5 +515,77 @@ fn a_failed_removal_keeps_the_reopen_error() -> TestResult {
     };
     assert!(is_denied(open_file_log_with(&path, &vanished)));
     assert!(!path.exists());
+    Ok(())
+}
+
+
+fn failing_facts_for_marked_name(file: &fs::File) -> std::io::Result<core_audit::log::HandleFacts> {
+    let name = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+    if name.to_string_lossy().contains("facts-fail") {
+        Err(std::io::Error::other("injected fstat failure"))
+    } else {
+        handle_facts(file)
+    }
+}
+
+
+#[test]
+fn a_failed_first_judge_leaves_no_file() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("facts-fail.log");
+    let failing = Opener {
+        facts: failing_facts_for_marked_name,
+        ..SYSTEM_OPENER
+    };
+    assert!(matches!(open_file_log_with(&path, &failing), Err(AuditError::Io(_))));
+    assert!(!path.exists());
+    Ok(())
+}
+
+
+fn rename_parent_then_deny(proc_path: &Path, flags: OFlags) -> Result<fs::File, AuditError> {
+    let name = fs::read_link(proc_path)?;
+    let parent = name.parent().ok_or(AuditError::SymlinkRefused)?;
+    fs::rename(parent, parent.with_extension("moved"))?;
+    fs::create_dir(parent)?;
+    fs::write(&name, "decoy")?;
+    proc_denied(proc_path, flags)
+}
+
+
+#[test]
+fn a_parent_renamed_before_the_cleanup_cannot_redirect_the_unlink() -> TestResult {
+    let dir = tempdir()?;
+    let parent = dir.path().join("logs");
+    fs::create_dir(&parent)?;
+    let path = parent.join("audit.log");
+    let renaming = Opener {
+        reopen: rename_parent_then_deny,
+        ..SYSTEM_OPENER
+    };
+    assert!(is_denied(open_file_log_with(&path, &renaming)));
+    assert!(!dir.path().join("logs.moved").join("audit.log").exists());
+    assert_eq!(fs::read_to_string(&path)?, "decoy");
+    Ok(())
+}
+
+
+#[test]
+fn a_path_without_a_parent_and_leaf_is_refused_before_any_io() -> TestResult {
+    assert!(matches!(
+        create_new(Path::new("/"), &SYSTEM_OPENER),
+        Err(AuditError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_relative_log_name_is_created_in_the_current_directory() -> TestResult {
+    let name = Path::new("relative-create-test.log").to_path_buf();
+    drop(fs::remove_file(&name));
+    drop(create_new(&name, &SYSTEM_OPENER)?);
+    assert!(name.exists());
+    fs::remove_file(&name)?;
     Ok(())
 }
