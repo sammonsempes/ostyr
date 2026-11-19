@@ -101,15 +101,22 @@ pub fn level_of(record: &CertRecord, now: i64) -> Option<(Severity, &'static str
 }
 
 
-/// Microseconds of a Unix time in seconds, clamped to the range the store accepts; a negative time gives 0 and one warning.
+/// Microseconds of a Unix time in seconds, clamped to the range the store accepts; a negative time gives 0.
 pub fn micros_of(seconds: i64) -> u64 {
     u64::try_from(seconds)
-        .unwrap_or_else(|_negative| {
-            tracing::warn!(seconds, "negative time clamped to zero");
-            0
-        })
+        .unwrap_or(0)
         .saturating_mul(MICROS_PER_SECOND)
         .min(MAX_CREATED_MICROS)
+}
+
+
+/// The moment the state began: `not_after` when expired, `not_after` minus `NEAR_DAYS` days otherwise.
+pub fn state_start_of(record: &CertRecord, state: &str) -> i64 {
+    if state == STATE_EXPIRED {
+        record.not_after
+    } else {
+        record.not_after.saturating_sub(i64::from(NEAR_DAYS).saturating_mul(SECONDS_PER_DAY))
+    }
 }
 
 
@@ -126,11 +133,7 @@ pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Al
     let verb = if state == STATE_EXPIRED { "expired on" } else { "expires on" };
     let event_ids = vec![format!("sha256:{}", record.fingerprint_sha256), format!("state:{state}")];
     let created_micros = micros_of(now);
-    let state_start = if state == STATE_EXPIRED {
-        record.not_after
-    } else {
-        record.not_after.saturating_sub(i64::from(NEAR_DAYS).saturating_mul(SECONDS_PER_DAY))
-    };
+    let state_start = state_start_of(record, state);
     is_fingerprint(&record.fingerprint_sha256).then(|| Alert {
         id: alert_id(&tenant, EXPIRY_RULE_ID, &event_ids),
         tenant,
@@ -152,17 +155,22 @@ pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Al
 }
 
 
-/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings and a bad `now` are counted in a warning.
+/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings, a bad `now` and clamped start times are counted in one warning.
 pub fn expiry_alerts(scope: &TenantScope, records: &[CertRecord], now: i64) -> Vec<Alert> {
     let mut alerts: Vec<Alert> = records.iter().filter_map(|record| alert_of(scope, record, now)).collect();
     let expiring = records.iter().filter(|record| level_of(record, now).is_some()).count();
     let now_dropped = if now < 0 { expiring } else { 0 };
     let bad_now = if !(0..=MAX_NOW_SECONDS).contains(&now) { expiring } else { 0 };
     let rejected = expiring.saturating_sub(alerts.len()).saturating_sub(now_dropped);
+    let clamped = records
+        .iter()
+        .filter_map(|record| level_of(record, now).map(|(_severity, state)| state_start_of(record, state)))
+        .filter(|start| *start < 0 && now >= 0)
+        .count();
     alerts.sort_by(|left, right| left.id.cmp(&right.id));
     alerts.dedup_by(|right, left| right.id == left.id);
-    if rejected > 0 || bad_now > 0 {
-        tracing::warn!(rejected, bad_now, "expiring certificates were not turned into alerts");
+    if rejected > 0 || bad_now > 0 || clamped > 0 {
+        tracing::warn!(rejected, bad_now, clamped, "expiring certificates were not turned into alerts");
     }
     alerts
 }
