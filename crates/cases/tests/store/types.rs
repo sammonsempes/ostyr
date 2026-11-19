@@ -10,3 +10,6 @@ pub type Setter = fn(&mut Case, String);
 
 
 pub type Table = BTreeMap<String, Entry>;
+
+
+pub type IndexKey = (String, String, String, String);

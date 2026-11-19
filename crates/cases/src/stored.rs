@@ -125,3 +125,13 @@ pub struct AlertLinkItem {
     pub linked_by: Option<String>,
     pub linked_at: Option<i64>,
 }
+
+
+/// An observable of a case with the other cases of the tenant that hold the same kind and normalised value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SeenObservable {
+    #[serde(flatten)]
+    pub observable: Observable,
+    pub seen_in: Vec<String>,
+    pub seen_in_truncated: bool,
+}

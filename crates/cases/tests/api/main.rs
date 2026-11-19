@@ -4,6 +4,7 @@ mod http;
 mod links;
 #[path = "../store/memory.rs"]
 mod memory;
+mod observables;
 mod settings;
 mod swap;
 mod types;
@@ -383,6 +384,8 @@ async fn a_busy_store_is_a_429() -> TestResult {
         comment: Arc::new(|_scope, _id, _comment| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
         link: Arc::new(|_scope, _id, _alert, _actor, _now| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
         links: Arc::new(|_scope, _id, _page| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
+        observable: Arc::new(|_scope, _id, _observable| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
+        observables: Arc::new(|_scope, _id| Box::pin(async { Err(CaseStoreError::Lease(StoreError::Busy)) })),
         clock: fixed_clock,
     })?;
     let token = login(&fx.router, ANALYST).await?;

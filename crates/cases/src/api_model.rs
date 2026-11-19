@@ -1,6 +1,6 @@
-use crate::model::Resolution;
-use crate::stored::{AlertLinkItem, CaseSummary};
-use crate::types::{ActFn, ClockFn, CommentFn, DetailGetFn, LinkFn, LinksFn, SummaryListFn};
+use crate::model::{IocStatus, Observable, ObservableKind, Pap, Resolution, Tlp};
+use crate::stored::{AlertLinkItem, CaseSummary, SeenObservable};
+use crate::types::{ActFn, ClockFn, CommentFn, DetailGetFn, LinkFn, LinksFn, ObservableAddFn, ObservablesFn, SummaryListFn};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -14,6 +14,8 @@ pub struct CasesBackend {
     pub comment: CommentFn,
     pub link: LinkFn,
     pub links: LinksFn,
+    pub observable: ObservableAddFn,
+    pub observables: ObservablesFn,
     pub clock: ClockFn,
 }
 
@@ -78,3 +80,37 @@ pub struct AlertLinkListView {
     pub items: Vec<AlertLinkItem>,
     pub next_cursor: Option<String>,
 }
+
+
+/// `POST /cases/{id}/observables` body; every field is required.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObservableRequest {
+    pub kind: ObservableKind,
+    pub value: String,
+    pub tlp: Tlp,
+    pub pap: Pap,
+    pub ioc: IocStatus,
+    pub source: String,
+}
+
+
+/// The observable as stored (normalised value); `already_present` is true on a replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ObservableAdded {
+    #[serde(flatten)]
+    pub observable: Observable,
+    pub already_present: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ObservableListView {
+    pub items: Vec<SeenObservable>,
+}
+
+
+/// `GET /cases/{id}/observables` takes no query: any parameter is a 400.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoQuery {}
