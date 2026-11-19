@@ -1,21 +1,17 @@
 //! Usage: `status_store <pg.yaml> <tenant-a> <tenant-b>`; the live proof of the incident store (migrate, write for two tenants, render tenant A).
 use core_pg::connect::connect;
 use core_pg::migrate::migrate;
-use core_pg::query::scoped_query;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::parse_settings;
-use status_page::error::StoreError;
 use status_page::model::{ComponentConfig, PageConfig, DEFAULT_LIMITS};
+use status_page::pg::execute;
 use status_page::render::render;
 use status_page::store::{add_update, create_incident, published_incidents, resolve_incident, MAX_PUBLISHED, MIGRATIONS, MIGRATION_NAMESPACE};
-use status_page::store_model::{Cell, IncidentRef, NewIncident, Param, Statement};
-use status_page::types::Row;
+use status_page::store_model::{IncidentRef, NewIncident, Statement};
 use std::io::{stderr, stdout, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
-use tokio_postgres::types::ToSql;
-use tokio_postgres::Client;
 
 
 const USAGE: &str = "usage: status_store <pg.yaml> <tenant-a> <tenant-b>";
@@ -34,39 +30,6 @@ const SERVICE: &str = "svc-web-internal";
 
 
 const SECRET_NOTE: &str = "internal 10.0.0.5 SECRET-NOTE";
-
-
-fn bound(params: &[Param]) -> Vec<Box<dyn ToSql + Sync>> {
-    params
-        .iter()
-        .map(|param| -> Box<dyn ToSql + Sync> {
-            match param {
-                Param::Int(value) => Box::new(*value),
-                Param::Text(value) => Box::new(value.clone()),
-                Param::Bool(value) => Box::new(*value),
-                Param::Texts(value) => Box::new(value.clone()),
-            }
-        })
-        .collect()
-}
-
-
-fn cell_of(row: &tokio_postgres::Row, index: usize) -> Result<Cell, StoreError> {
-    let column = row.columns().get(index).ok_or(StoreError::BadRow { column: "cell" })?;
-    let cell = match column.type_().name() {
-        "int8" => row.try_get::<_, Option<i64>>(index).map(|value| value.map_or(Cell::Null, Cell::Int)),
-        _ => row.try_get(index).map(Cell::Text),
-    };
-    cell.map_err(|_error| StoreError::BadRow { column: "cell" })
-}
-
-
-async fn execute(client: &Client, scope: TenantScope, statement: Statement) -> Result<Vec<Row>, StoreError> {
-    let boxed = bound(&statement.params);
-    let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|value| value.as_ref() as &(dyn ToSql + Sync)).collect();
-    let rows = scoped_query(client, &scope, statement.sql, &refs, DEADLINE).await?;
-    rows.iter().map(|row| (0..row.len()).map(|index| cell_of(row, index)).collect()).collect()
-}
 
 
 fn incident(title: &str, started_at: i64) -> NewIncident {
@@ -107,7 +70,7 @@ async fn scenario(settings_file: &Path, tenant_a: &str, tenant_b: &str) -> Resul
     )?;
     let scope_a = tenant_scope(tenant_a)?;
     let scope_b = tenant_scope(tenant_b)?;
-    let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement);
+    let mut exec = |scope: &TenantScope, statement: Statement| execute(&client, scope.clone(), statement, DEADLINE);
     let first = create_incident(&mut exec, &scope_a, &incident("Website down", STARTED)).await?;
     let second = create_incident(&mut exec, &scope_a, &incident("Mail slow", STARTED + STEP)).await?;
     let other = create_incident(&mut exec, &scope_b, &incident("Globex outage", STARTED)).await?;
