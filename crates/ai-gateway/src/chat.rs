@@ -44,14 +44,21 @@ pub fn log_call(model: &str, request_bytes: usize, response_bytes: usize, answer
 }
 
 
-/// Sends the instructions and the telemetry, waits at most `timeout_seconds`, and reads a bounded answer. One settings snapshot serves the whole call.
-pub fn chat(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Answer, AiError> {
+/// A validated request ready to send: nothing has left the process yet.
+pub struct Prepared {
+    pub request: HttpRequest,
+    pub started: u64,
+    pub model: String,
+}
+
+
+/// Validates, builds the tagged request and reads the key; no model I/O.
+pub fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Prepared, AiError> {
     validate_ai(settings)?;
     let started = (deps.clock)();
     let nonce = new_nonce(deps.random)?;
     let body = build_request(settings, instructions, data, &nonce)?;
     let authorization = settings.api_key_file.as_deref().map(read_authorization).transpose()?;
-    let request_bytes = body.len();
     let request = HttpRequest {
         url: endpoint_url(settings),
         authorization,
@@ -59,19 +66,37 @@ pub fn chat(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps
         timeout: Duration::from_secs(settings.timeout_seconds),
         ca_file: settings.ca_file.clone(),
     };
-    let reply = (deps.transport)(&request)?;
+    Ok(Prepared {
+        request,
+        started,
+        model: settings.model.clone(),
+    })
+}
+
+
+/// Sends a prepared request, waits at most the request's timeout, and reads a bounded answer.
+pub fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Result<Answer, AiError> {
+    let request_bytes = prepared.request.body.len();
+    let reply = (deps.transport)(&prepared.request)?;
     if reply.status == STATUS_OK {
-        let bytes = read_body(reply, settings.max_response_bytes)?;
+        let bytes = read_body(reply, max_response_bytes)?;
         let answer = parse_answer(&bytes)?;
         log_call(
-            &settings.model,
+            &prepared.model,
             request_bytes,
             bytes.len(),
             &answer,
-            (deps.clock)().saturating_sub(started),
+            (deps.clock)().saturating_sub(prepared.started),
         );
         Ok(answer)
     } else {
         Err(AiError::Status { status: reply.status })
     }
+}
+
+
+/// Sends the instructions and the telemetry, waits at most `timeout_seconds`, and reads a bounded answer. One settings snapshot serves the whole call.
+pub fn chat(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Answer, AiError> {
+    let prepared = prepare(settings, instructions, data, deps)?;
+    send(&prepared, settings.max_response_bytes, deps)
 }

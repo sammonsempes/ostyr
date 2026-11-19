@@ -1,3 +1,4 @@
+use core_pg::error::PgError;
 use std::io;
 use thiserror::Error;
 
@@ -51,4 +52,12 @@ pub enum AiError {
     Secret { class: SecretClass },
     #[error("no random bytes are available")]
     Random(#[from] getrandom::Error),
+    #[error("the daily budget of calls or tokens is spent")]
+    BudgetSpent,
+    #[error("the budget store failed")]
+    Store(#[from] PgError),
+    #[error("the budget store answered with an unexpected number of rows")]
+    BadReply,
+    #[error("the wall clock is outside the supported dates")]
+    Clock(#[from] time::error::ComponentRange),
 }

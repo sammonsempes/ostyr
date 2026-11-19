@@ -1,6 +1,7 @@
 use pg_fake::fake::{
-    authenticate, be_i32, be_u16, bind_params, cstring, data_row, error_frame, frame, parameter_count, read_message, ready, row_description,
-    rows_frames, rows_of, serve_messages, Reply, MAX_MESSAGES, TEXT_OID,
+    authenticate, be_i32, be_u16, bind_params, cstring, data_row, error_frame, format_of, frame, int8_cell, nullable_row, parameter_count,
+    parameter_oid, read_message, ready, render_param, row_description, rows_frames, rows_of, serve_messages, typed_row_description, Reply, INT8_OID,
+    MAX_MESSAGES, TEXT_OID,
 };
 use pg_fake::types::Handler;
 use std::error::Error;
@@ -186,7 +187,7 @@ async fn a_statement_without_rows_describes_no_data_and_integers_are_binary() ->
         int_output,
         joined(vec![frame(b'1', &[])?, data_row(&[SEVEN.to_be_bytes().to_vec()])?, frame(b'C', b"OK\0")?])
     );
-    assert_eq!(rows_of(&ints), Some((1, INT4, vec![vec![SEVEN.to_be_bytes().to_vec()]])));
+    assert_eq!(rows_of(&ints), Some((vec![INT4], vec![vec![Some(SEVEN.to_be_bytes().to_vec())]])));
     Ok(())
 }
 
@@ -292,7 +293,7 @@ fn helpers_decode_short_and_odd_input() -> Result<(), Box<dyn Error>> {
     assert_eq!((parameter_count("SELECT $1, $3, $x, $"), parameter_count("SELECT 1")), (CUT, 0));
     assert!(row_description(TOO_MANY, TEXT_OID).is_err());
     assert!(data_row(&vec![Vec::new(); TOO_MANY]).is_err());
-    assert_eq!(rows_of(&Reply::Rows(Vec::new())), Some((0, TEXT_OID, Vec::new())));
+    assert_eq!(rows_of(&Reply::Rows(Vec::new())), Some((Vec::new(), Vec::new())));
     assert!(rows_of(&Reply::Done).is_none());
     assert!(rows_frames(&Reply::Done, true)?.is_empty());
     Ok(())
@@ -310,5 +311,101 @@ fn bind_params_reads_text_parameters_and_tolerates_truncation() -> Result<(), Bo
     let full = body_of(&["abc", "d"], &[])?;
     let cut = full.get(..full.len() - CUT).ok_or("short")?;
     assert_eq!(bind_params(cut), ["abc", ""]);
+    Ok(())
+}
+
+
+const NINE: i64 = 9;
+
+
+const INT8_LENGTH: i32 = 8;
+
+
+const FAR: usize = 5;
+
+
+const TWO_FORMATS: &[u8] = &[0, 2, 0, 0, 0, 1];
+
+
+fn binary_bind(value: i64) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut body = b"\0\0\0\x01\0\x01\0\x01".to_vec();
+    body.extend_from_slice(&INT8_LENGTH.to_be_bytes());
+    body.extend_from_slice(&value.to_be_bytes());
+    body.extend_from_slice(&[0, 0]);
+    Ok(frame(b'B', &body)?)
+}
+
+
+fn typed() -> Reply {
+    Reply::Typed {
+        parameters: vec![INT8_OID],
+        columns: vec![INT8_OID, TEXT_OID],
+        rows: vec![vec![int8_cell(NINE), Some(b"t".to_vec())], vec![None, None]],
+    }
+}
+
+
+#[tokio::test]
+async fn a_typed_reply_describes_int8_parameters_and_columns_with_nulls() -> Result<(), Box<dyn Error>> {
+    let input = joined(vec![
+        parse("SELECT $1 $2")?,
+        binary_bind(NINE)?,
+        frame(b'D', b"S\0")?,
+        frame(b'E', &[])?,
+        frame(b'S', &[])?,
+    ]);
+    let (output, statements) = run(by_sql(typed()), input).await?;
+    let mut parameters = i16::try_from(PAIR)?.to_be_bytes().to_vec();
+    parameters.extend_from_slice(&INT8_OID.to_be_bytes());
+    parameters.extend_from_slice(&TEXT_OID.to_be_bytes());
+    let expected = joined(vec![
+        frame(b'1', &[])?,
+        frame(b'2', &[])?,
+        frame(b't', &parameters)?,
+        typed_row_description(&[INT8_OID, TEXT_OID])?,
+        nullable_row(&[int8_cell(NINE), Some(b"t".to_vec())])?,
+        nullable_row(&[None, None])?,
+        frame(b'C', b"OK\0")?,
+        ready()?,
+    ]);
+    assert_eq!(output, expected);
+    assert_eq!(statements, ["SELECT $1 $2", "PARAMS 9"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_typed_reply_without_columns_describes_no_data() -> Result<(), Box<dyn Error>> {
+    let reply = Reply::Typed {
+        parameters: Vec::new(),
+        columns: Vec::new(),
+        rows: Vec::new(),
+    };
+    assert!(rows_of(&reply).is_none());
+    let (output, _) = run(by_sql(reply), joined(vec![parse("SELECT 1")?, frame(b'D', b"S\0")?])).await?;
+    assert_eq!(
+        output,
+        joined(vec![frame(b'1', &[])?, frame(b't', &0i16.to_be_bytes())?, frame(b'n', &[])?])
+    );
+    Ok(())
+}
+
+
+#[test]
+fn parameter_oids_and_formats_fall_back_to_text() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        (parameter_oid(&typed(), 0), parameter_oid(&typed(), 1), parameter_oid(&Reply::Done, 0)),
+        (INT8_OID, TEXT_OID, TEXT_OID)
+    );
+    assert_eq!(format_of(&[], 0), 0);
+    assert_eq!(format_of(&[0, 0], 0), 0);
+    assert_eq!(format_of(&[0, 1, 0, 1], FAR), 1);
+    assert_eq!(
+        (format_of(TWO_FORMATS, 0), format_of(TWO_FORMATS, 1), format_of(TWO_FORMATS, PAIR)),
+        (0, 1, 0)
+    );
+    assert_eq!(render_param(&NINE.to_be_bytes(), 1), "9");
+    assert_eq!(render_param(&NINE.to_be_bytes(), 0), String::from_utf8_lossy(&NINE.to_be_bytes()));
+    assert_eq!(render_param(b"ab", 1), "ab");
     Ok(())
 }

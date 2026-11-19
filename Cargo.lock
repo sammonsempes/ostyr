@@ -183,17 +183,23 @@ dependencies = [
 name = "ai-gateway"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "base64 0.22.1",
  "core-audit",
  "core-config",
+ "core-pg",
  "getrandom 0.4.3",
  "log",
+ "pg-fake",
  "rcgen",
  "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-log",
  "tracing-subscriber",

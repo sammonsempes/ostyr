@@ -1,7 +1,8 @@
 use crate::error::AiError;
 use crate::limits::{
-    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ENDPOINT_PATH, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING,
-    MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING, MIN_RESPONSE_BYTES, MIN_TIMEOUT_SECONDS, MODEL_EXTRA_CHARACTERS,
+    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ENDPOINT_PATH, MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING,
+    MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING, MAX_TOKENS_PER_DAY_CEILING, MIN_RESPONSE_BYTES, MIN_TIMEOUT_SECONDS,
+    MODEL_EXTRA_CHARACTERS,
 };
 use core_config::error::ConfigError;
 use core_config::load::load_file;
@@ -42,6 +43,8 @@ pub struct AiSettings {
     pub max_response_bytes: usize,
     #[serde(default = "default_max_request_bytes")]
     pub max_request_bytes: usize,
+    pub max_calls_per_day: u32,
+    pub max_tokens_per_day: u32,
 }
 
 
@@ -110,6 +113,10 @@ pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
         Err(AiError::Settings { field: "max_response_bytes" })
     } else if !(1..=MAX_REQUEST_BYTES_CEILING).contains(&settings.max_request_bytes) {
         Err(AiError::Settings { field: "max_request_bytes" })
+    } else if !(1..=MAX_CALLS_PER_DAY_CEILING).contains(&settings.max_calls_per_day) {
+        Err(AiError::Settings { field: "max_calls_per_day" })
+    } else if !(1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) {
+        Err(AiError::Settings { field: "max_tokens_per_day" })
     } else {
         Ok(())
     }
@@ -131,6 +138,8 @@ pub fn ai_state(settings: &AiSettings) -> ConfigState {
         ("max_tokens", settings.max_tokens.to_string()),
         ("max_response_bytes", settings.max_response_bytes.to_string()),
         ("max_request_bytes", settings.max_request_bytes.to_string()),
+        ("max_calls_per_day", settings.max_calls_per_day.to_string()),
+        ("max_tokens_per_day", settings.max_tokens_per_day.to_string()),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))

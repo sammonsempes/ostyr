@@ -40,4 +40,4 @@ pub const INVALID_UTF8: [u8; 2] = [0xff, 0xfe];
 pub const SEPARATORS_COUNTED: usize = 2;
 
 
-pub const STATE_FIELDS: usize = 8;
+pub const STATE_FIELDS: usize = 10;
