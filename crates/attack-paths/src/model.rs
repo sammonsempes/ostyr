@@ -19,6 +19,9 @@ pub const MAX_PATHS: usize = 100_000;
 pub const MAX_TAGS: usize = 1_000;
 
 
+pub const MAX_SEARCH_STEPS: usize = 10_000_000;
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
@@ -94,6 +97,7 @@ pub struct Limits {
 pub struct PathSet {
     pub paths: Vec<Path>,
     pub truncated: bool,
+    pub budget_reached: bool,
 }
 
 
