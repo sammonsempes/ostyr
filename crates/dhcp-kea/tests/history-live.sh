@@ -78,13 +78,27 @@ check "8 parallel callers: counter at the cap" 100 "$(counter par)"
 check "8 parallel callers: inserted plus refused_full sum" 240 "$(cat /tmp/par-?.out | awk -F"|" '{s += $2 + $4} END {print s}')"
 check "8 parallel callers: inserted minus evicted" 100 "$(cat /tmp/par-?.out | awk -F"|" '{s += $2 - $6} END {print s}')"
 
-sudo -u postgres psql -X -q -tA -v ON_ERROR_STOP=1 -d "$database" -c "BEGIN; SELECT dhcp_history_store('lock', $(docs 3 $NOW), 100, 400, $NOW); SELECT pg_sleep(4); COMMIT" >/dev/null &
+LOCK_CLASS=1145586512
+MAX_POLLS=600
+wait_until() {
+    local query="$1" attempt
+    for attempt in $(seq 1 "$MAX_POLLS"); do
+        [[ "$(run -c "$query")" == "t" ]] && return 0
+        sleep 0.1
+    done
+    echo "FAIL timed out waiting for: $query"
+    failures=$((failures + 1))
+    return 0
+}
+run -c "CREATE TABLE lock_gate (open boolean NOT NULL); INSERT INTO lock_gate VALUES (false)"
+sudo -u postgres psql -X -q -tA -v ON_ERROR_STOP=1 -d "$database" -c "BEGIN; SELECT dhcp_history_store('lock', $(docs 3 $NOW), 100, 400, $NOW); DO \$\$ BEGIN FOR i IN 1..$MAX_POLLS LOOP EXIT WHEN (SELECT open FROM lock_gate); PERFORM pg_sleep(0.1); END LOOP; END \$\$; COMMIT" >/dev/null &
 holder=$!
-sleep 1.5
+wait_until "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = $LOCK_CLASS AND granted)"
 store lock 100 $NOW "$(docs 3 $((NOW + 500)))" >/tmp/lock-second.out &
 second=$!
-sleep 1
+wait_until "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = $LOCK_CLASS AND NOT granted)"
 check "second caller waits on the advisory lock of the first" "advisory:1145586512" "$(run -c "SELECT wait_event || ':' || (SELECT classid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted LIMIT 1) FROM pg_stat_activity WHERE datname = '$database' AND wait_event_type = 'Lock' LIMIT 1")"
+run -c "UPDATE lock_gate SET open = true"
 wait "$holder" "$second"
 check "both callers stored under the lock" 6 "$(rows lock)"
 check "lock counter" 6 "$(counter lock)"

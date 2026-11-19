@@ -1917,17 +1917,26 @@ name = "dhcp-kea"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
+ "core-auth",
+ "core-config",
  "core-export",
  "core-pg",
  "ecs-normalise",
  "libc",
+ "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tower",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

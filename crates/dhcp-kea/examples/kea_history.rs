@@ -57,7 +57,13 @@ async fn scenario(settings_file: &Path, leases_file: &Path, tenant: &str, lookup
                            "ends": interval.ends, "action": interval.action, "subnet_id": interval.subnet_id})
                 )
             })?;
-            writeln!(stdout(), "intervals={} truncated={}", found.intervals.len(), found.truncated)?;
+            writeln!(
+                stdout(),
+                "intervals={} skipped={} truncated={}",
+                found.intervals.len(),
+                found.skipped,
+                found.truncated
+            )?;
         }
         None => {
             let mut reader = BufReader::new(File::open(leases_file)?);
