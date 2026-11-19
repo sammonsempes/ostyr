@@ -5,13 +5,15 @@ use crate::model::{NewEntry, Record, GENESIS_HASH};
 use crate::types::{FactsReader, Reopener};
 use crate::verify::{verify, MAX_RECORD_BYTES};
 #[cfg(unix)]
-use rustix::fs::{fstat, statat, unlinkat, AtFlags, Mode, OFlags, CWD};
+use rustix::fs::{fstat, openat, statat, unlinkat, AtFlags, Mode, OFlags};
 #[cfg(unix)]
 use rustix::io::Errno;
+#[cfg(unix)]
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -155,10 +157,16 @@ pub const SYSTEM_OPENER: Opener = Opener {
 
 #[cfg(unix)]
 pub fn judge_opened(file: File, opener: &Opener) -> Result<File, AuditError> {
-    (opener.facts)(&file)
+    judge_borrowed(&file, opener).map(|()| file)
+}
+
+
+/// Judges a handle the caller keeps, so a refusal can still clean up through it.
+#[cfg(unix)]
+pub fn judge_borrowed(file: &File, opener: &Opener) -> Result<(), AuditError> {
+    (opener.facts)(file)
         .map_err(AuditError::Io)
         .and_then(|facts| judge_handle(&facts, rustix::process::geteuid().as_raw()))
-        .map(|()| file)
 }
 
 
@@ -235,27 +243,56 @@ pub fn open_read_checked(path: &Path) -> Result<File, AuditError> {
 }
 
 
-/// Creates a new file exclusively (a name that does not exist yet cannot be a device or a link), then reopens and judges it like an existing log.
+/// Creates a new file exclusively below a held parent directory, then reopens and judges it like an existing log.
 #[cfg(unix)]
 pub fn create_new(path: &Path, opener: &Opener) -> Result<File, AuditError> {
-    let flags =
-        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    open_with(path, flags)
-        .and_then(|file| judge_opened(file, opener))
-        .and_then(|created| reopen_created(path, created, opener))
+    refuse_directory_form(path)?;
+    let anchored = Path::new(".").join(path);
+    let (directory, leaf) = anchored
+        .parent()
+        .zip(anchored.file_name())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    open_with(directory, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC)
+        .map(OwnedFd::from)
+        .and_then(|parent| create_below(&parent, leaf, opener))
 }
 
 
-/// A failed reopen of a new log removes the new name (only while it is still the created inode) and keeps the reopen error.
+/// A name ending in `/` or `/.` names a directory: refused before any I/O, so the first and the next start agree.
 #[cfg(unix)]
-pub fn reopen_created(path: &Path, created: File, opener: &Opener) -> Result<File, AuditError> {
+pub fn refuse_directory_form(path: &Path) -> Result<(), AuditError> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.ends_with(b"/") || bytes.ends_with(b"/.") {
+        Err(AuditError::Io(io::Error::from(io::ErrorKind::InvalidInput)))
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Every failure after the exclusive create removes the new name (below the same held directory) and keeps the first error.
+#[cfg(unix)]
+pub fn create_below(parent: &OwnedFd, leaf: &OsStr, opener: &Opener) -> Result<File, AuditError> {
+    let flags =
+        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    let created = openat(parent, leaf, flags, Mode::RUSR | Mode::WUSR)
+        .map(File::from)
+        .map_err(io::Error::from)?;
+    judge_borrowed(&created, opener)
+        .and_then(|()| reopen_created(&created, opener))
+        .or_else(|error| first_error(error, remove_if_same(parent, leaf, &created)))
+}
+
+
+/// Reopens the created file through `/proc` and judges the reopened handle.
+#[cfg(unix)]
+pub fn reopen_created(created: &File, opener: &Opener) -> Result<File, AuditError> {
     reopen_through_proc(
-        &created,
+        created,
         OFlags::RDWR | OFlags::APPEND | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
         opener,
     )
     .and_then(|reopened| judge_opened(reopened, opener))
-    .or_else(|error| first_error(error, remove_if_same(path, &created)))
 }
 
 
@@ -275,12 +312,12 @@ pub fn log_cleanup_failure(errno: &Errno) {
 }
 
 
-/// Unlinks the name only when it still is the inode of the handle.
+/// Unlinks the name below the held parent only when it still is the inode of the handle.
 #[cfg(unix)]
-pub fn remove_if_same(path: &Path, created: &File) -> Result<(), Errno> {
+pub fn remove_if_same(parent: &OwnedFd, leaf: &OsStr, created: &File) -> Result<(), Errno> {
     fstat(created)
-        .and_then(|held| statat(CWD, path, AtFlags::SYMLINK_NOFOLLOW).map(|named| (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)))
-        .and_then(|same| if same { unlinkat(CWD, path, AtFlags::empty()) } else { Ok(()) })
+        .and_then(|held| statat(parent, leaf, AtFlags::SYMLINK_NOFOLLOW).map(|named| (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)))
+        .and_then(|same| if same { unlinkat(parent, leaf, AtFlags::empty()) } else { Ok(()) })
 }
 
 
