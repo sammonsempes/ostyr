@@ -517,10 +517,13 @@ dependencies = [
 name = "attack-paths"
 version = "0.0.0"
 dependencies = [
+ "ad-posture",
  "core-config",
  "hashbrown 0.15.5",
  "petgraph",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
 ]
