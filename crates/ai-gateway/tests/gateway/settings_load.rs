@@ -4,7 +4,8 @@ use crate::types::TestResult;
 use ai_gateway::chat::chat;
 use ai_gateway::error::AiError;
 use ai_gateway::limits::{
-    MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING, MIN_RESPONSE_BYTES,
+    MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING,
+    MAX_TOKENS_PER_DAY_CEILING, MIN_RESPONSE_BYTES,
 };
 use ai_gateway::settings::{ai_state, endpoint_url, open_ai, validate_ai, AiSettings, OpenError};
 use core_audit::log::{append, genesis_log};
@@ -116,6 +117,18 @@ fn every_numeric_bound_names_its_field() -> TestResult {
         Some("max_request_bytes")
     );
     assert_eq!(change(|used| used.max_request_bytes = MAX_REQUEST_BYTES_CEILING), None);
+    assert_eq!(change(|used| used.max_calls_per_day = 0), Some("max_calls_per_day"));
+    assert_eq!(
+        change(|used| used.max_calls_per_day = MAX_CALLS_PER_DAY_CEILING + 1),
+        Some("max_calls_per_day")
+    );
+    assert_eq!(change(|used| used.max_calls_per_day = MAX_CALLS_PER_DAY_CEILING), None);
+    assert_eq!(change(|used| used.max_tokens_per_day = 0), Some("max_tokens_per_day"));
+    assert_eq!(
+        change(|used| used.max_tokens_per_day = MAX_TOKENS_PER_DAY_CEILING + 1),
+        Some("max_tokens_per_day")
+    );
+    assert_eq!(change(|used| used.max_tokens_per_day = MAX_TOKENS_PER_DAY_CEILING), None);
     Ok(())
 }
 
@@ -133,7 +146,7 @@ fn the_endpoint_and_the_state_follow_the_settings() -> TestResult {
 }
 
 
-const YAML: &str = "base_url: https://model.example/{script}\nmodel: {model}\ntimeout_seconds: {timeout}\nmax_tokens: 100\n";
+const YAML: &str = "base_url: https://model.example/{script}\nmodel: {model}\ntimeout_seconds: {timeout}\nmax_tokens: 100\nmax_calls_per_day: 10\nmax_tokens_per_day: 10000\n";
 
 
 fn yaml(script: &str, model: &str, timeout: u64) -> String {

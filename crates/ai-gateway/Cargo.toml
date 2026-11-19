@@ -6,13 +6,17 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 getrandom = "0.4.3"
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_debug"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
+time = "0.3"
+tokio-postgres = "0.7"
 tracing = { version = "0.1", features = ["max_level_debug", "release_max_level_debug"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"
@@ -21,8 +25,10 @@ zeroize = "1"
 [dev-dependencies]
 base64 = "0.22"
 core-audit = { version = "0.0.0", path = "../core-audit" }
+pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-log = "0.2"
 tracing-subscriber = "0.3"
 

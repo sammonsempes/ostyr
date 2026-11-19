@@ -17,6 +17,15 @@ pub const TIMEOUT: u64 = 5;
 pub const TOKENS: u32 = 256;
 
 
+pub const NEGATIVE_TOKENS: i32 = -5;
+
+
+pub const CALL_CAP: u32 = 1_000;
+
+
+pub const TOKEN_CAP: u32 = 1_000_000;
+
+
 pub const FILL_BYTE: u8 = 0xab;
 
 
@@ -60,6 +69,8 @@ pub fn settings(script: &str) -> AiSettings {
         max_tokens: TOKENS,
         max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+        max_calls_per_day: CALL_CAP,
+        max_tokens_per_day: TOKEN_CAP,
     }
 }
 
@@ -107,6 +118,13 @@ pub fn completion(content: &str) -> Vec<u8> {
 }
 
 
+pub fn usage_completion(prompt: u32, completion_tokens: u32) -> Vec<u8> {
+    json!({"choices": [{"message": {"content": "x"}}], "usage": {"prompt_tokens": prompt, "completion_tokens": completion_tokens}})
+        .to_string()
+        .into_bytes()
+}
+
+
 pub fn script_name(url: &str) -> &str {
     url.strip_suffix(ENDPOINT_PATH).and_then(|base| base.rsplit('/').next()).unwrap_or("")
 }
@@ -149,6 +167,14 @@ pub fn scripted(request: &HttpRequest) -> Result<HttpReply, AiError> {
             completion(request.authorization.as_ref().map_or("none", |value| value.as_str())),
         ),
         "ok" => reply(STATUS_OK, completion("hello")),
+        "hugeusage" => reply(STATUS_OK, usage_completion(u32::MAX, u32::MAX)),
+        "negusage" => reply(
+            STATUS_OK,
+            json!({"choices": [{"message": {"content": "x"}}], "usage": {"prompt_tokens": NEGATIVE_TOKENS, "completion_tokens": NEGATIVE_TOKENS}})
+                .to_string()
+                .into_bytes(),
+        ),
+        "zerousage" => reply(STATUS_OK, usage_completion(0, 0)),
         "401" => reply(STATUS_UNAUTHORIZED, MARKER.as_bytes().to_vec()),
         "429" => reply(STATUS_TOO_MANY, MARKER.as_bytes().to_vec()),
         "500" => reply(STATUS_SERVER, MARKER.as_bytes().to_vec()),

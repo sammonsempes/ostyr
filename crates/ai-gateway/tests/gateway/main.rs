@@ -1,3 +1,6 @@
+mod budget;
+#[cfg(unix)]
+mod budget_pg;
 #[cfg(unix)]
 mod chat_flow;
 mod common;
