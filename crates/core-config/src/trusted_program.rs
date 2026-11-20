@@ -1,6 +1,6 @@
 //! Opens an external program only when no one but root and the trusted uid can swap it or anything above it (Unix only).
 
-use crate::trusted_dir::{check_trusted_path, GROUP_OTHER_WRITE};
+use crate::trusted_dir::{check_canonical_form, check_trusted_path, GROUP_OTHER_WRITE, NOT_CANONICAL};
 use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use std::ffi::OsStr;
@@ -77,6 +77,7 @@ fn check_file(handle: &OwnedFd, trusted_uid: u32) -> Result<(), TrustedProgramEr
 /// Opens the program from `/` one component at a time without following a link, every directory judged on its handle, no sticky exception.
 pub fn open_trusted_program(path: &Path, trusted_uid: u32) -> Result<OwnedFd, TrustedProgramError> {
     ensure(path.is_absolute(), "program path is not absolute")?;
+    check_canonical_form(path).map_err(|_| TrustedProgramError::Refused(NOT_CANONICAL))?;
     check_trusted_path(path).map_err(|_| TrustedProgramError::Refused("program path has a component other than a name"))?;
     let names: Vec<&OsStr> = path
         .components()
