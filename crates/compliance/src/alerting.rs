@@ -1,6 +1,7 @@
 //! Failed controls as alerts of the alert store.
 
-use crate::model::{DriftFinding, Severity as ControlSeverity, Verdict};
+use crate::error::ReportError;
+use crate::model::{DriftFinding, RecordOutcome, Severity as ControlSeverity, Verdict};
 use alerts::error::StoreError;
 use alerts::id::alert_id;
 use alerts::model::{Alert, Severity};
@@ -8,6 +9,7 @@ use alerts::store::{insert_alerts, summarise, MAX_ALERTS_PER_INSERT};
 use alerts::types::Executor;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::json;
+use std::io::Write;
 
 
 pub const RULE_PREFIX: &str = "compliance.";
@@ -159,5 +161,49 @@ pub async fn raise_state_full(exec: Executor<'_, '_>, scope: &TenantScope, refus
         insert_alerts(exec, scope, &[state_full_alert(scope, refused, now_micros)]).await
     } else {
         Ok(0)
+    }
+}
+
+
+/// The failure category of an alert insert: fixed text, never the server's.
+pub fn alert_failure_category(error: &StoreError) -> &'static str {
+    if matches!(error, StoreError::Pg(_)) {
+        "database"
+    } else {
+        "rejected"
+    }
+}
+
+
+/// Prints the stored outcome whatever the alert step gives, then raises `state_full`; a failed insert warns with its category, prints `state_full alert not raised` and is returned.
+pub async fn report_run<Sink: Write>(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    outcome: &RecordOutcome,
+    now_micros: u64,
+    out: &mut Sink,
+) -> Result<(), ReportError> {
+    let raised = raise_state_full(exec, scope, outcome.refused_no_room, now_micros).await;
+    outcome.failed.iter().try_for_each(|failed| {
+        writeln!(
+            out,
+            "failed {}:{}:{} first={}",
+            failed.baseline, failed.control, failed.asset, failed.first_failed_micros
+        )
+    })?;
+    let new_alerts = raised.as_ref().map_or(0, |count| *count);
+    writeln!(
+        out,
+        "skipped_invalid={} refused_no_room={} state_full_alerts={new_alerts}",
+        outcome.skipped_invalid, outcome.refused_no_room
+    )?;
+    match raised {
+        Ok(_count) => Ok(()),
+        Err(source) => {
+            let category = alert_failure_category(&source);
+            tracing::warn!(category, "state_full alert failed");
+            writeln!(out, "state_full alert not raised")?;
+            Err(ReportError::AlertFailed { category, source })
+        }
     }
 }

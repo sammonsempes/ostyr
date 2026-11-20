@@ -37,7 +37,7 @@ const RETENTION_DAYS: i64 = 90;
 pub const LAST_SEEN_GRANULARITY: i64 = MICROS_PER_HOUR;
 
 
-/// A row not seen for this span is deleted at the start of a run.
+/// A row not seen for this span is deleted by a statement after the upsert of the same run.
 pub const STATE_RETENTION: i64 = RETENTION_DAYS * HOURS_PER_DAY * MICROS_PER_HOUR;
 
 
