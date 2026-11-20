@@ -339,27 +339,31 @@ fn refuse_the_file(_: &Path) -> io::Result<Option<File>> {
 
 
 #[test]
-fn a_copying_pass_that_cannot_read_or_open_the_old_quarantine_fails_and_keeps_it() -> TestResult {
+fn a_copying_pass_that_cannot_read_or_open_the_old_quarantine_disables_the_rewrite_and_keeps_it() -> TestResult {
     let dir = tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, "keep\n")?;
     let added = vec!["new".to_owned()];
-    assert!(rewrite_quarantine_with(
-        &rejected,
-        &added,
-        NEW_BYTES,
-        (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
-        (open_unreadable, ATTEMPTS)
-    )
-    .is_err());
-    assert!(rewrite_quarantine_with(
-        &rejected,
-        &added,
-        NEW_BYTES,
-        (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
-        (refuse_the_file, ATTEMPTS)
-    )
-    .is_err());
+    assert_eq!(
+        rewrite_quarantine_with(
+            &rejected,
+            &added,
+            NEW_BYTES,
+            (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
+            (open_unreadable, ATTEMPTS)
+        )?,
+        None
+    );
+    assert_eq!(
+        rewrite_quarantine_with(
+            &rejected,
+            &added,
+            NEW_BYTES,
+            (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
+            (refuse_the_file, ATTEMPTS)
+        )?,
+        None
+    );
     assert_eq!(fs::read_to_string(&rejected)?, "keep\n");
     Ok(())
 }
@@ -448,7 +452,7 @@ fn directory_appears(path: &Path) -> io::Result<Option<File>> {
 
 
 #[test]
-fn a_directory_that_appears_after_the_check_fails_the_rename_and_leaves_no_temporary_file() -> TestResult {
+fn a_directory_that_appears_after_the_check_disables_the_rewrite_and_leaves_no_temporary_file() -> TestResult {
     let dir = tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let added = vec!["new".to_owned()];
@@ -459,7 +463,7 @@ fn a_directory_that_appears_after_the_check_fails_the_rename_and_leaves_no_tempo
         (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
         (directory_appears, ATTEMPTS),
     );
-    assert!(result.is_err());
+    assert_eq!(result?, None);
     assert!(rejected.is_dir());
     assert_eq!(fs::read_dir(dir.path())?.count(), FILES_AFTER_FAILED_REWRITE);
     Ok(())
@@ -481,7 +485,7 @@ fn a_copying_pass_that_fails_to_read_the_old_handle_is_an_error() -> TestResult 
     let mut skipped = RefusedLines::default();
     let mut out = Vec::new();
     let mut reader = FailingReader;
-    assert!(copy_after_excess(Some(&mut reader), (0, 0), &mut skipped, &mut out).is_err());
+    assert!(copy_after_excess(Some(&mut reader), 1, ((0, 0), (1, 1)), &mut skipped, &mut out).is_err());
     assert!(out.is_empty());
     Ok(())
 }
@@ -538,7 +542,7 @@ fn a_symlink_with_the_temporary_prefix_is_never_followed_and_a_symlink_quarantin
     assert_eq!(fs::read_to_string(&target)?, "secret\n");
     assert!(fs::symlink_metadata(dir.path().join(".spool.rejected.quarantine-link"))?.is_symlink());
     let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
-    assert!(log.contains("quarantine is not a regular file"), "{log}");
+    assert!(log.contains("ignored and replaced"), "{log}");
     Ok(())
 }
 

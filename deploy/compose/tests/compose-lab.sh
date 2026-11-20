@@ -13,6 +13,10 @@ readonly READY_ATTEMPTS=90
 readonly API_PORT=8443
 readonly ADMIN_PASSWORD="a-long-admin-passphrase-for-the-lab"
 readonly ANALYST_PASSWORD="a-long-analyst-passphrase-for-the-lab"
+readonly VM_WORK_DIR=/srv/ostyr-lab
+readonly TOTP_STEP_SECONDS=30
+readonly TOTP_STEP_ATTEMPTS=40
+readonly LOCK_PROOF_WAIT_SECONDS=3
 readonly STORE_ARGS="/var/lib/ostyr/accounts.json /var/lib/ostyr/audit-cli.log /run/secrets/store_key /etc/ostyr/compromised.txt"
 
 task_id="${1:?usage: compose-lab.sh <task-id>}"
@@ -22,12 +26,29 @@ failures=0
 
 ssh_options=(-i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
-remote() {
+remote_bare() {
     ssh -n "${ssh_options[@]}" "$vm_user@$vm_address" "$@"
 }
 
+remote() {
+    remote_bare "cd $VM_WORK_DIR && $*"
+}
+
 remote_stdin() {
-    ssh "${ssh_options[@]}" "$vm_user@$vm_address" "$@"
+    ssh "${ssh_options[@]}" "$vm_user@$vm_address" "cd $VM_WORK_DIR && $*"
+}
+
+totp_step() {
+    remote_bare "echo \$(( \$(date +%s) / $TOTP_STEP_SECONDS ))"
+}
+
+wait_after_step() {
+    local used_step="$1" _attempt
+    for _attempt in $(seq 1 "$TOTP_STEP_ATTEMPTS"); do
+        [[ "$(totp_step)" -gt "$used_step" ]] && return 0
+        sleep 1
+    done
+    return 1
 }
 
 expect() {
@@ -76,12 +97,14 @@ all_routes_answer() {
 }
 
 copy_into_vm() {
-    tar -C "$1" "${@:3}" -cf - . | remote_stdin "tar -C $2 -xf -"
+    tar -C "$1" "${@:3}" -cf - . | remote_stdin "sudo tar -C $2 -xf -"
 }
 
+remote_bare "sudo mkdir -p $VM_WORK_DIR && sudo chown root:root $VM_WORK_DIR && sudo chmod 0755 $VM_WORK_DIR"
 remote "if [ -d compose ]; then cd compose && sudo docker compose down -v; fi"
-remote "sudo rm -rf compose image && mkdir -p compose image"
+remote "sudo rm -rf compose image && sudo mkdir -p compose image"
 copy_into_vm "$COMPOSE_DIR" compose --exclude=secrets
+remote "sudo chown -R root:root compose && sudo chmod -R go-w compose"
 copy_into_vm "$IMAGE_DIR" image
 remote "command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 openssl" >/dev/null
 remote "cd image && sudo docker build -t ostyr-platform:local ."
@@ -104,11 +127,45 @@ expect "init.sh refuses a partial TLS set naming the file" remote "cd compose &&
 remote "cd compose && sudo mv /tmp/api_tls.crt.keep secrets/api_tls.crt"
 long_label="$(printf 'a%.0s' $(seq 1 63))"
 long_name="$long_label.$long_label.$long_label.${long_label:0:61}"
-remote "sudo rm -rf longname && mkdir longname && cp compose/init.sh longname/ && cd longname && sudo ./init.sh $long_name"
+remote "sudo rm -rf longname && sudo mkdir longname && sudo cp compose/init.sh longname/ && cd longname && sudo ./init.sh $long_name"
 expect "a 253-character name verifies and sits in the SAN" remote "cd longname && sudo openssl verify -CAfile secrets/ca.crt secrets/api_tls.crt && sudo openssl x509 -in secrets/api_tls.crt -noout -ext subjectAltName | grep -q $long_name"
-remote "sudo rm -rf killed && mkdir killed && cp compose/init.sh killed/ && cd killed && sudo timeout -s TERM 0.3 ./init.sh kill.example; true"
+remote "sudo rm -rf killed && sudo mkdir killed && sudo cp compose/init.sh killed/ && cd killed && sudo timeout -s TERM 0.3 ./init.sh kill.example; true"
 expect "a killed init.sh leaves no scratch directory" absent remote "sudo find killed/secrets -name '.tls.*' | grep -q ."
 remote "cd killed && sudo rm -rf secrets && sudo ./init.sh kill.example && sudo openssl verify -CAfile secrets/ca.crt secrets/api_tls.crt"
+for odd_name in 1.2.3 127.1 0x7f.1.1.1 1.2.3.4.5; do
+    expect "init.sh refuses the all-numeric name $odd_name" absent remote "cd compose && sudo ./init.sh $odd_name"
+done
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ln -s /tmp/leak-store secrets/store.key"
+expect "init.sh refuses a dangling symlink at store.key" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "no key was written through the symlink" absent remote "test -e /tmp/leak-store"
+remote "cd plant && sudo rm -rf secrets && sudo mkdir -m 0700 secrets && sudo ln -s /nowhere secrets/api_tls.crt"
+expect "init.sh refuses a dangling symlink at a TLS name" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "no TLS file was published next to the planted link" absent remote "cd plant && sudo test -e secrets/ca.crt"
+remote "cd plant && sudo rm -rf secrets && sudo ./init.sh plant.example && sudo truncate -s 5 secrets/store.key"
+expect "init.sh refuses a short secret naming the file" remote "cd plant && ! sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready' && sudo ./init.sh plant.example 2>&1 | grep -q 'store.key is not 32 bytes'"
+remote "cd plant && sudo rm -rf secrets && sudo mkdir -m 0700 secrets && sudo ln -s /root secrets2 && sudo mv secrets secrets.real && sudo ln -s secrets.real secrets"
+expect "init.sh refuses a secrets directory that is a symlink" absent remote "cd plant && sudo ./init.sh plant.example"
+remote "cd plant && sudo rm -rf secrets secrets.real secrets2 && sudo mkdir -m 0700 secrets && sudo chown 1000 secrets"
+expect "init.sh refuses a secrets directory owned by uid 1000" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "a second concurrent init.sh is refused by the lock and the first finishes a full set" remote "sudo env INIT_LOCK_WAIT_SECONDS=$LOCK_PROOF_WAIT_SECONDS compose/tests/lock-proof.sh compose/init.sh"
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ./init.sh plant.example && sudo chmod 0644 secrets/store.key"
+expect "init.sh refuses a secret with mode 0644 naming the file" remote "cd plant && sudo ./init.sh plant.example 2>&1 | grep -q 'store.key must have mode 600'"
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && sudo chmod 0777 plant"
+expect "init.sh refuses a world-writable parent of secrets" absent remote "cd plant && sudo ./init.sh plant.example"
+remote "sudo rm -rf plant && sudo mkdir -p plant/inner/compose && sudo cp compose/init.sh plant/inner/compose/ && sudo chown 1000 plant/inner"
+expect "init.sh refuses an ancestor owned by uid 1000" absent remote "cd plant/inner/compose && sudo ./init.sh plant.example"
+remote "sudo chown root plant/inner && sudo chmod 0775 plant/inner"
+expect "init.sh refuses a group-writable ancestor" absent remote "cd plant/inner/compose && sudo ./init.sh plant.example"
+remote "sudo rm -rf /tmp/*ostyr-nl && sudo mkdir -p \"/tmp/\$(printf '\\nostyr-nl')/compose\" && sudo chown 1000 \"/tmp/\$(printf '\\nostyr-nl')\" && sudo cp compose/init.sh \"/tmp/\$(printf '\\nostyr-nl')/compose/\""
+expect "init.sh refuses a user-owned ancestor with a newline in its name" absent remote "cd \"/tmp/\$(printf '\\nostyr-nl')/compose\" && sudo ./init.sh plant.example"
+expect "no secrets directory was created under the newline path" absent remote "sudo test -e \"/tmp/\$(printf '\\nostyr-nl')/compose/secrets\""
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && sudo mkfifo plant/secrets/.lock"
+expect "init.sh refuses a FIFO as the lock file without hanging" absent remote "cd plant && sudo timeout 20 ./init.sh plant.example"
+remote "sudo rm -rf plant && sudo mkdir -m 0700 -p plant/secrets && sudo cp compose/init.sh plant/ && sudo ln -s /tmp/lock-leak plant/secrets/.lock"
+expect "init.sh refuses a symlink as the lock file" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "nothing was created through the lock symlink" absent remote "test -e /tmp/lock-leak"
+remote "sudo rm -rf plant && sudo mkdir -p plant/secrets && sudo cp compose/init.sh plant/ && sudo chmod 0777 plant/secrets"
+expect "init.sh refuses a secrets directory open to others" absent remote "cd plant && sudo ./init.sh plant.example"
 expect "the installed certificates verify against the CA" remote "cd compose && sudo openssl verify -CAfile secrets/ca.crt secrets/pg_server.crt secrets/api_tls.crt"
 remote "cd compose && sudo find secrets -exec stat -c '%a %u %n' {} +"
 
@@ -122,8 +179,10 @@ token="$(login_token "$(analyst_code "$analyst_secret")")"
 printf 'info analyst token obtained: %s\n' "$([[ -n "$token" ]] && echo yes || echo no)"
 expect "the analyst reads /alerts, /cases, /assets and /risk/entities (200)" all_routes_answer "$token"
 
+login_step="$(totp_step)"
 compose "restart"
 expect "the API answers again after a restart" wait_ready
+expect "the next TOTP step began" wait_after_step "$login_step"
 token="$(login_token "$(analyst_code "$analyst_secret")")"
 expect "the account and the data survive a restart" all_routes_answer "$token"
 

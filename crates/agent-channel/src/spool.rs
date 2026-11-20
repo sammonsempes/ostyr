@@ -9,7 +9,7 @@ use prost::encoding::encoded_len_varint;
 use prost::Message;
 use same_file::Handle;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, Metadata, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -270,23 +270,65 @@ pub fn open_no_follow(path: &Path) -> io::Result<File> {
 }
 
 
-/// Opens the quarantine file, none when there is none yet or when it is not a regular file (a symlink, a pipe or a directory: logged with a fixed text, the old quarantine is then replaced).
-pub fn open_old(path: &Path) -> io::Result<Option<File>> {
-    let opened = match open_no_follow(path) {
-        Ok(file) => file.metadata().map(|metadata| metadata.is_file().then_some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound || error.kind() == io::ErrorKind::InvalidInput => Ok(None),
-        Err(error) if is_not_a_regular_file(&error) => Ok(None),
-        Err(error) => Err(error),
-    };
-    if matches!(opened, Ok(None)) && fs::symlink_metadata(path).is_ok() {
-        tracing::warn!("quarantine is not a regular file, ignored and replaced");
-    }
-    opened
+/// Why an opened quarantine is not used: not a regular file, owned by another user, hard linked, or over `MAX_REJECTED_BYTES` (judged on the handle's metadata).
+pub fn unusable_reason(metadata: &Metadata, euid: u32) -> Option<&'static str> {
+    (!metadata.is_file())
+        .then_some("not a regular file")
+        .or_else(|| ownership_reason(metadata, euid))
+        .or_else(|| (metadata.len() > MAX_REJECTED_BYTES).then_some("over the size cap"))
 }
 
 
-/// How many text lines and bytes (newlines included) the old quarantine holds, streamed through its handle.
-pub fn old_totals(old: Option<&File>) -> io::Result<(u64, u64)> {
+#[cfg(unix)]
+pub fn ownership_reason(metadata: &Metadata, euid: u32) -> Option<&'static str> {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.uid() != euid)
+        .then_some("foreign owner")
+        .or_else(|| (metadata.nlink() != 1).then_some("hard linked"))
+}
+
+
+#[cfg(not(unix))]
+pub fn ownership_reason(_metadata: &Metadata, _euid: u32) -> Option<&'static str> {
+    None
+}
+
+
+/// The effective user id of the process (0 where there is none).
+#[cfg(unix)]
+pub fn effective_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+
+#[cfg(not(unix))]
+pub fn effective_uid() -> u32 {
+    0
+}
+
+
+/// Opens the quarantine file judged on the handle: none when there is none yet or when it is unusable (a symlink, a pipe, a socket, a lease break, a directory, a foreign or hard-linked or oversized file: logged once with a fixed reason, the old quarantine is then replaced); any other open error is returned, which disables the quarantine for this run with the old file kept.
+pub fn open_old(path: &Path) -> io::Result<Option<File>> {
+    match open_no_follow(path) {
+        Ok(file) => {
+            let reason = unusable_reason(&file.metadata()?, effective_uid());
+            if let Some(why) = reason {
+                tracing::warn!(why, "quarantine entry unusable, ignored and replaced");
+            }
+            Ok(reason.is_none().then_some(file))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput || is_not_a_regular_file(&error) => {
+            tracing::warn!("quarantine entry refused by the open, ignored and replaced");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+
+/// How many text lines and bytes (newlines included) the old quarantine holds, and how many bytes were read from it (at most `MAX_REJECTED_BYTES`), streamed.
+pub fn old_totals(old: Option<&mut dyn Read>) -> io::Result<(u64, u64, u64)> {
     let mut ignored = RefusedLines {
         counts_only: true,
         quiet: true,
@@ -294,13 +336,16 @@ pub fn old_totals(old: Option<&File>) -> io::Result<(u64, u64)> {
         ..RefusedLines::default()
     };
     let mut counted = (0, 0);
-    if let Some(file) = old {
-        let mut reader = BufReader::new(file);
+    let mut consumed = 0;
+    if let Some(source) = old {
+        let mut limited = source.take(MAX_REJECTED_BYTES);
+        let mut reader = BufReader::new(&mut limited);
         counted = spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, &mut ignored).try_fold(counted, |(lines, bytes), read| {
             read.map(|text| (lines + 1, bytes + text.len() as u64 + 1))
         })?;
+        consumed = MAX_REJECTED_BYTES - limited.limit();
     }
-    Ok(counted)
+    Ok((counted.0, counted.1, consumed))
 }
 
 
@@ -313,19 +358,31 @@ pub fn rewind_old(old: Option<&File>) -> io::Result<()> {
 }
 
 
-/// Copies the text lines of the old quarantine to `out`, skipping the oldest while `excess` (bytes, lines) is not gone; a refused old line is counted in `refused`; returns how many it skipped.
-pub fn copy_after_excess(old: Option<&mut dyn Read>, excess: (u64, u64), refused: &mut RefusedLines, out: &mut dyn Write) -> io::Result<u64> {
+/// Copies the text lines of the old quarantine to `out`, reading at most `consumed` bytes (what the counting pass read), skipping the oldest while `excess` (bytes, lines) is not gone and dropping what would pass `room` (bytes, lines), so the output can never pass either cap whatever the file became in between; a refused old line is counted in `refused`; returns how many lines it skipped or dropped.
+pub fn copy_after_excess(
+    old: Option<&mut dyn Read>,
+    consumed: u64,
+    (excess, room): ((u64, u64), (u64, u64)),
+    refused: &mut RefusedLines,
+    out: &mut dyn Write,
+) -> io::Result<u64> {
     let mut skipped_bytes = 0;
     let mut skipped_lines = 0;
+    let mut written = (0, 0);
     if let Some(source) = old {
-        let mut reader = BufReader::new(source);
+        let mut reader = BufReader::new(source.take(consumed));
         spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, refused).try_for_each(|read| {
             let text = read?;
+            let size = text.len() as u64 + 1;
             if skipped_bytes < excess.0 || skipped_lines < excess.1 {
-                skipped_bytes += text.len() as u64 + 1;
+                skipped_bytes += size;
+                skipped_lines += 1;
+                Ok(())
+            } else if written.0 + size > room.0 || written.1 >= room.1 {
                 skipped_lines += 1;
                 Ok(())
             } else {
+                written = (written.0 + size, written.1 + 1);
                 writeln!(out, "{text}")
             }
         })?;
@@ -348,7 +405,7 @@ pub const QUARANTINE_LOCK_SUFFIX: &str = ".lock";
 pub const QUARANTINE_LOCK_BUSY: &str = "quarantine lock held by another process, rewrite abandoned";
 
 
-/// Whether an open error means the entry is not usable as a regular file: a symlink (`ELOOP`), a pipe without reader or a socket (`ENXIO`), a directory (`EISDIR`), a foreign entry refused by the protected-file rules of a sticky directory (`EACCES`, `EPERM`).
+/// Whether an open error means the entry is not usable as a regular file: a symlink (`ELOOP`), a pipe without reader or a socket (`ENXIO`), a directory (`EISDIR`), a foreign entry refused by the protected-file rules of a sticky directory (`EACCES`, `EPERM`), a lease break under `O_NONBLOCK` (`EWOULDBLOCK`).
 #[cfg(unix)]
 pub fn is_not_a_regular_file(error: &io::Error) -> bool {
     let codes = [
@@ -357,6 +414,7 @@ pub fn is_not_a_regular_file(error: &io::Error) -> bool {
         rustix::io::Errno::ISDIR.raw_os_error(),
         rustix::io::Errno::ACCESS.raw_os_error(),
         rustix::io::Errno::PERM.raw_os_error(),
+        rustix::io::Errno::WOULDBLOCK.raw_os_error(),
     ];
     error.raw_os_error().is_some_and(|code| codes.contains(&code))
 }
@@ -452,11 +510,12 @@ pub fn remove_regular_file(path: &Path) -> io::Result<()> {
 
 /// Writes the kept old lines and the added ones to the temporary file; the old handle is closed on return, before the rename (Windows refuses a rename over an open file).
 pub fn fill_temporary(mut old: Option<File>, added: &[String], added_bytes: u64, caps: (u64, u64), target: &File) -> io::Result<(u64, RefusedLines)> {
-    let (old_lines, old_bytes) = old_totals(old.as_ref())?;
+    let (old_lines, old_bytes, consumed) = old_totals(old.as_mut().map(|file| file as &mut dyn Read))?;
     let excess = (
         (old_bytes + added_bytes).saturating_sub(caps.0),
         (old_lines + added.len() as u64).saturating_sub(caps.1),
     );
+    let room = (caps.0.saturating_sub(added_bytes), caps.1.saturating_sub(added.len() as u64));
     rewind_old(old.as_ref())?;
     let mut out = BufWriter::new(target);
     let mut skipped = RefusedLines {
@@ -464,7 +523,8 @@ pub fn fill_temporary(mut old: Option<File>, added: &[String], added_bytes: u64,
         quarantine: true,
         ..RefusedLines::default()
     };
-    let dropped = copy_after_excess(old.as_mut().map(|file| file as &mut dyn Read), excess, &mut skipped, &mut out)?;
+    let limits = (excess, room);
+    let dropped = copy_after_excess(old.as_mut().map(|file| file as &mut dyn Read), consumed, limits, &mut skipped, &mut out)?;
     added.iter().try_for_each(|line| writeln!(out, "{line}"))?;
     out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
     Ok((dropped, skipped))
@@ -477,7 +537,7 @@ pub fn is_directory(path: &Path) -> bool {
 }
 
 
-/// `rewrite_quarantine` with the function that opens the old file and the lock attempts given; a directory at the quarantine path disables the quarantine for this run (the added lines are counted and logged, nothing is written, the caller goes on); otherwise the stale temporaries of killed rewrites are removed under the lock first.
+/// `rewrite_quarantine` with the function that opens the old file and the lock attempts given; a directory at the quarantine path, a lock that is not a regular file or any error of the rewrite disables the quarantine for this run (the added lines are counted and logged, nothing is written, the old file stays, the caller goes on); otherwise the stale temporaries of killed rewrites are removed under the lock first.
 pub fn rewrite_quarantine_with(
     path: &Path,
     added: &[String],
@@ -494,7 +554,14 @@ pub fn rewrite_quarantine_with(
         tracing::warn!(refused, "quarantine path is a directory, quarantine disabled for this run");
         Ok(None)
     } else {
-        replace_quarantine(path, added, added_bytes, caps, open).map(Some)
+        Ok(replace_quarantine(path, added, added_bytes, caps, open).map_or_else(
+            |error| {
+                let kind = error.kind();
+                tracing::warn!(refused, ?kind, "quarantine rewrite failed, quarantine disabled for this run");
+                None
+            },
+            Some,
+        ))
     }
 }
 

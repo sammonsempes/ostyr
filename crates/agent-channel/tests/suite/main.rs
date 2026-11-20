@@ -16,6 +16,8 @@ mod settings;
 mod spool_append;
 #[cfg(unix)]
 mod spool_lock_kinds;
+#[cfg(unix)]
+mod spool_old_quarantine;
 mod spool_refused;
 mod state;
 mod tls;

@@ -96,6 +96,25 @@ fn a_path_that_is_not_plain_is_refused_before_anything_is_opened() -> TestResult
 
 
 #[test]
+fn a_path_not_in_canonical_form_is_refused_by_both_check_and_open() -> TestResult {
+    let env = setup()?;
+    let base = env.work.display().to_string();
+    [format!("{base}/."), format!("{base}/"), format!("{base}//x"), format!("{base}/./x")]
+        .iter()
+        .try_for_each(|text| {
+            assert!(matches!(
+                refusal(Path::new(text), owner())?,
+                TrustedDirError::Refused("path is not in canonical form")
+            ));
+            assert!(check_trusted_path(Path::new(text)).is_err());
+            Ok::<(), Box<dyn Error>>(())
+        })?;
+    assert!(check_trusted_path(Path::new("/")).is_ok());
+    Ok(())
+}
+
+
+#[test]
 fn the_directory_itself_must_be_the_callers_and_closed_to_group_and_others() -> TestResult {
     let env = setup()?;
     assert!(matches!(

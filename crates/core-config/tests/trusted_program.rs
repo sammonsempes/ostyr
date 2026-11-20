@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 #[path = "common/types.rs"]
 mod types;
 
@@ -79,6 +79,17 @@ fn paths_that_are_not_plain_are_refused_with_distinct_reasons() -> TestResult {
     );
     assert_eq!(reason(Path::new("/"), 0)?, "program path has no file name");
     Ok(())
+}
+
+
+#[test]
+fn a_path_not_in_canonical_form_is_refused() -> TestResult {
+    ["/usr/bin/./true", "/usr/bin/true/.", "/usr/bin/true/", "/usr//bin/true", "/."]
+        .iter()
+        .try_for_each(|text| {
+            assert_eq!(reason(Path::new(text), 0)?, "path is not in canonical form", "{text}");
+            Ok::<(), Box<dyn Error>>(())
+        })
 }
 
 
