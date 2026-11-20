@@ -300,11 +300,14 @@ pub fn parse_cursor(text: &str) -> Result<(i64, String), CursorError> {
     let (end, hex) = text.split_once(':').unwrap_or((text, ""));
     let end_value: i64 = end.parse().map_err(|_| CursorError::Malformed)?;
     let bytes = unhex(hex).ok_or(CursorError::Malformed)?;
-    String::from_utf8(bytes).map(|pack| (end_value, pack)).map_err(|_| CursorError::Malformed)
+    let pack = String::from_utf8(bytes).map_err(|_| CursorError::Malformed)?;
+    (end_value >= FIRST_END && !pack.contains('\0'))
+        .then_some((end_value, pack))
+        .ok_or(CursorError::Malformed)
 }
 
 
-/// The cursor a listing starts from: the one given, else `FIRST_END` with an empty id (year 0, so no stored row is before it).
+/// The cursor a listing starts from: the one given, else `FIRST_END` with an empty id (year 0; rows before it are counted, never listed).
 pub fn start_cursor(text: Option<&str>) -> Result<(i64, String), CursorError> {
     text.map_or(Ok((FIRST_END, String::new())), parse_cursor)
 }

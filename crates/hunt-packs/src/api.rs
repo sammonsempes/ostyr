@@ -76,7 +76,7 @@ pub fn encode_cursor(end: i64, pack_id: &str) -> String {
 }
 
 
-/// Accepts every cursor `encode_cursor` prints for a stored row: any `i64` end, any pack id of at most 64 bytes without NUL.
+/// Accepts every cursor `encode_cursor` prints for a listed row: an end of `FIRST_END` or more, any pack id of at most 64 bytes without NUL.
 pub fn decode_cursor(text: &str) -> Result<(i64, String), FindingsError> {
     let bytes = (text.len() <= MAX_CURSOR_CHARS)
         .then(|| BASE64URL_NOPAD.decode(text.as_bytes()).ok())
@@ -85,7 +85,7 @@ pub fn decode_cursor(text: &str) -> Result<(i64, String), FindingsError> {
     let decoded = String::from_utf8(bytes).map_err(|_source| FindingsError::BadCursor)?;
     let (end_text, pack_id) = decoded.split_once(CURSOR_SEPARATOR).ok_or(FindingsError::BadCursor)?;
     let end = end_text.parse::<i64>().map_err(|_source| FindingsError::BadCursor)?;
-    (pack_id.len() <= MAX_ID_CHARS && !pack_id.contains('\0'))
+    (end >= FIRST_END && pack_id.len() <= MAX_ID_CHARS && !pack_id.contains('\0'))
         .then(|| (end, pack_id.to_owned()))
         .ok_or(FindingsError::BadCursor)
 }
