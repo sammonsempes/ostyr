@@ -1,3 +1,4 @@
+use serde_json::error::Category;
 use std::error::Error;
 use std::io;
 use thiserror::Error;
@@ -43,8 +44,25 @@ pub enum ApiFailure {
     TooLarge,
     #[error("the API answer is malformed: {0}")]
     Malformed(&'static str),
-    #[error("the API answer is not valid JSON: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("the API answer is not valid JSON: {category} at line {line} column {column}")]
+    Json { category: &'static str, line: usize, column: usize },
+}
+
+
+impl From<serde_json::Error> for ApiFailure {
+    fn from(error: serde_json::Error) -> Self {
+        let category = match error.classify() {
+            Category::Io => "io",
+            Category::Syntax => "syntax",
+            Category::Data => "data",
+            Category::Eof => "eof",
+        };
+        Self::Json {
+            category,
+            line: error.line(),
+            column: error.column(),
+        }
+    }
 }
 
 

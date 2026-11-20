@@ -7,7 +7,7 @@ use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
     task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
-use ecs_normalise::suricata::is_unsafe;
+use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
 use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
@@ -49,9 +49,12 @@ form.go{display:inline;margin:0}td button,main>form.go button{color:#06c}label{d
 main>form{margin:.5rem 0}textarea{display:block;width:100%;min-height:6rem}.comment{white-space:pre-wrap;border:1px solid #ccc;padding:.5rem}";
 
 
-/// Text from the API or any peer: control and bidirectional-override characters dropped, long values cut with a visible count.
+/// Text from the API or any peer: control and bidirectional-override characters replaced by U+FFFD, long values cut with a visible count.
 pub fn clip(language: Language, value: &str, max: usize) -> String {
-    let shown: String = value.chars().filter(|character| displayable(*character)).collect();
+    let shown: String = value
+        .chars()
+        .map(|character| if displayable(character) { character } else { REPLACEMENT })
+        .collect();
     let omitted = shown.chars().count().saturating_sub(max);
     if omitted == 0 {
         shown
@@ -62,6 +65,46 @@ pub fn clip(language: Language, value: &str, max: usize) -> String {
 }
 
 
+/// Identity text: `clip`, plus every whitespace character except a lone inner U+0020 shown as U+FFFD, so no look-alike of another name renders alike.
+pub fn clip_identity(language: Language, value: &str, max: usize) -> String {
+    let mapped: Vec<char> = value
+        .chars()
+        .map(|character| if displayable(character) { character } else { REPLACEMENT })
+        .collect();
+    let before = std::iter::once(None).chain(mapped.iter().copied().map(Some));
+    let after = mapped.iter().skip(1).copied().map(Some).chain(std::iter::once(None));
+    let marked: String = mapped
+        .iter()
+        .copied()
+        .zip(before)
+        .zip(after)
+        .map(|((character, previous), next)| {
+            if character.is_whitespace() && !(character == ' ' && inner_neighbour(previous) && inner_neighbour(next)) {
+                REPLACEMENT
+            } else {
+                character
+            }
+        })
+        .collect();
+    clip(language, &marked, max)
+}
+
+
+pub fn inner_neighbour(neighbour: Option<char>) -> bool {
+    neighbour.is_some_and(|character| !character.is_whitespace())
+}
+
+
+/// A DNS name is IA5String (IDNs are `xn--` labels): `clip_identity`, plus every non-ASCII character shown as U+FFFD.
+pub fn clip_dns(language: Language, value: &str, max: usize) -> String {
+    let ascii: String = value
+        .chars()
+        .map(|character| if character.is_ascii() { character } else { REPLACEMENT })
+        .collect();
+    clip_identity(language, &ascii, max)
+}
+
+
 pub fn displayable(character: char) -> bool {
     !is_unsafe(character)
 }
@@ -69,6 +112,22 @@ pub fn displayable(character: char) -> bool {
 
 pub fn optional(language: Language, value: Option<&String>) -> String {
     value.map_or_else(|| text(language, "none").to_owned(), |present| clip(language, present, MAX_FIELD_CHARS))
+}
+
+
+pub fn optional_identity(language: Language, value: Option<&String>) -> String {
+    value.map_or_else(
+        || text(language, "none").to_owned(),
+        |present| clip_identity(language, present, MAX_FIELD_CHARS),
+    )
+}
+
+
+pub fn display_identity(language: Language, value: &Value) -> String {
+    match value {
+        Value::String(plain) => clip_identity(language, plain, MAX_VALUE_CHARS),
+        other => clip_identity(language, &other.to_string(), MAX_VALUE_CHARS),
+    }
 }
 
 
@@ -181,8 +240,8 @@ pub fn alert_row(language: Language, alert: &Alert) -> Markup {
         tr {
             td class=(severity_class(alert.severity)) { (text(language, severity_key(alert.severity))) }
             td { (go(&format!("/alerts/{}", alert.id), &clip(language, &alert.rule_title, MAX_FIELD_CHARS))) }
-            td { (optional(language, alert.host_name.as_ref())) }
-            td { (optional(language, alert.user_name.as_ref())) }
+            td { (optional_identity(language, alert.host_name.as_ref())) }
+            td { (optional_identity(language, alert.user_name.as_ref())) }
             td { (clip(language, &alert.event_time, MAX_FIELD_CHARS)) }
         }
     }
@@ -230,8 +289,8 @@ pub fn summary_list(language: Language, summary: &Map<String, Value>) -> Markup 
     html! {
         dl {
             @for (name, value) in summary.iter().take(MAX_SUMMARY_ENTRIES) {
-                dt { (clip(language, name, MAX_FIELD_CHARS)) }
-                dd { (display_value(language, value)) }
+                dt { (clip_identity(language, name, MAX_FIELD_CHARS)) }
+                dd { (display_identity(language, value)) }
             }
         }
         @if omitted > 0 {
@@ -245,7 +304,7 @@ pub fn event_list(language: Language, ids: &[String]) -> Markup {
     let omitted = ids.len().saturating_sub(MAX_EVENT_IDS);
     html! {
         ul {
-            @for id in ids.iter().take(MAX_EVENT_IDS) { li { (clip(language, id, MAX_FIELD_CHARS)) } }
+            @for id in ids.iter().take(MAX_EVENT_IDS) { li { (clip_identity(language, id, MAX_FIELD_CHARS)) } }
         }
         @if omitted > 0 {
             div { (omitted) " " (text(language, "omitted")) }
@@ -265,11 +324,11 @@ pub fn alert_page(language: Language, csrf: &str, alert: &Alert) -> Markup {
                 dt { (text(language, "col_severity")) }
                 dd class=(severity_class(alert.severity)) { (text(language, severity_key(alert.severity))) }
                 dt { (text(language, "alert_rule_id")) }
-                dd { (clip(language, &alert.rule_id, MAX_FIELD_CHARS)) }
+                dd { (clip_identity(language, &alert.rule_id, MAX_FIELD_CHARS)) }
                 dt { (text(language, "col_host")) }
-                dd { (optional(language, alert.host_name.as_ref())) }
+                dd { (optional_identity(language, alert.host_name.as_ref())) }
                 dt { (text(language, "col_user")) }
-                dd { (optional(language, alert.user_name.as_ref())) }
+                dd { (optional_identity(language, alert.user_name.as_ref())) }
                 dt { (text(language, "col_time")) }
                 dd { (clip(language, &alert.event_time, MAX_FIELD_CHARS)) }
                 dt { (text(language, "alert_created")) }
@@ -316,7 +375,7 @@ pub fn case_row(language: Language, case: &CaseSummaryView) -> Markup {
             td class=(case_severity_class(&case.severity)) { (text(language, case_severity_key(&case.severity))) }
             td { (case_title_cell(language, case)) }
             td { (text(language, status_key(&case.status))) }
-            td { (optional(language, case.assignee.as_ref())) }
+            td { (optional_identity(language, case.assignee.as_ref())) }
             td { (format_time(language, case.updated_at)) }
         }
     }
@@ -384,8 +443,8 @@ pub fn asset_row_readable(language: Language, asset: &AssetSummaryView) -> Marku
     html! {
         tr {
             td { (go(&link, &asset.id)) }
-            td { (clip(language, &asset.kind, MAX_FIELD_CHARS)) }
-            td { (clip(language, &asset.lifecycle, MAX_FIELD_CHARS)) }
+            td { (clip_identity(language, &asset.kind, MAX_FIELD_CHARS)) }
+            td { (clip_identity(language, &asset.lifecycle, MAX_FIELD_CHARS)) }
             td { (asset.counts.keys) }
             td { (asset.counts.attributes) }
             td { (asset.counts.open_conflicts) }
@@ -444,9 +503,9 @@ pub fn asset_page(language: Language, csrf: &str, asset: &AssetDetailView) -> Ma
             h1 { (text(language, "title_asset")) " " (asset.summary.id) }
             dl {
                 dt { (text(language, "col_kind")) }
-                dd { (clip(language, &asset.summary.kind, MAX_FIELD_CHARS)) }
+                dd { (clip_identity(language, &asset.summary.kind, MAX_FIELD_CHARS)) }
                 dt { (text(language, "col_lifecycle")) }
-                dd { (clip(language, &asset.summary.lifecycle, MAX_FIELD_CHARS)) }
+                dd { (clip_identity(language, &asset.summary.lifecycle, MAX_FIELD_CHARS)) }
                 dt { (text(language, "count_keys")) }
                 dd { (counts.keys) }
                 dt { (text(language, "count_attributes")) }
@@ -459,8 +518,8 @@ pub fn asset_page(language: Language, csrf: &str, asset: &AssetDetailView) -> Ma
                 tbody {
                     @for entry in &asset.keys {
                         tr {
-                            td { (clip(language, &entry.key, MAX_FIELD_CHARS)) }
-                            td { (clip(language, &entry.value, MAX_VALUE_CHARS)) }
+                            td { (clip_identity(language, &entry.key, MAX_FIELD_CHARS)) }
+                            td { (clip_identity(language, &entry.value, MAX_VALUE_CHARS)) }
                         }
                     }
                 }
@@ -477,9 +536,9 @@ pub fn asset_page(language: Language, csrf: &str, asset: &AssetDetailView) -> Ma
                 tbody {
                     @for entry in &asset.attributes {
                         tr {
-                            td { (clip(language, &entry.name, MAX_FIELD_CHARS)) }
-                            td { (clip(language, &entry.value, MAX_VALUE_CHARS)) }
-                            td { (clip(language, &entry.source, MAX_FIELD_CHARS)) }
+                            td { (clip_identity(language, &entry.name, MAX_FIELD_CHARS)) }
+                            td { (clip_identity(language, &entry.value, MAX_VALUE_CHARS)) }
+                            td { (clip_identity(language, &entry.source, MAX_FIELD_CHARS)) }
                         }
                     }
                 }
@@ -595,7 +654,7 @@ pub fn comment_notice(language: Language, comment: &CommentView) -> Markup {
     html! {
         div class="comment" {
             strong { (text(language, "comment_added")) }
-            " " (clip(language, &comment.author, MAX_FIELD_CHARS)) " " (format_time(language, comment.at))
+            " " (clip_identity(language, &comment.author, MAX_FIELD_CHARS)) " " (format_time(language, comment.at))
             div {
                 @for line in comment.text.lines().take(MAX_COMMENT_LINES) {
                     (clip(language, line, MAX_TEXT_CHARS)) br;
@@ -650,7 +709,7 @@ pub fn case_page_with(language: Language, csrf: &str, case: &CaseDetailView, com
                 dt { (text(language, "col_status")) }
                 dd { (text(language, status_key(&summary.status))) }
                 dt { (text(language, "col_assignee")) }
-                dd { (optional(language, summary.assignee.as_ref())) }
+                dd { (optional_identity(language, summary.assignee.as_ref())) }
                 dt { (text(language, "col_type")) }
                 dd { (optional(language, summary.case_type.as_ref())) }
                 dt { (text(language, "case_template")) }
@@ -841,7 +900,7 @@ pub fn cert_dns_names(language: Language, names: &[String], shown: usize) -> Mar
     let hidden = names.len().saturating_sub(shown);
     html! {
         @for name in names.iter().take(shown) {
-            div { (clip(language, name, MAX_FIELD_CHARS)) }
+            div { (clip_dns(language, name, MAX_FIELD_CHARS)) }
         }
         @if hidden > 0 {
             div { (text(language, "cert_dns_more").replace("{count}", &hidden.to_string())) }
@@ -851,7 +910,7 @@ pub fn cert_dns_names(language: Language, names: &[String], shown: usize) -> Mar
 
 
 pub fn cert_key_text(language: Language, cert: &CertView) -> String {
-    let kind = clip(language, &cert.key_type, MAX_FIELD_CHARS);
+    let kind = clip_identity(language, &cert.key_type, MAX_FIELD_CHARS);
     cert.key_bits.map_or(kind.clone(), |bits| format!("{kind} {bits}"))
 }
 
@@ -861,8 +920,8 @@ pub fn cert_row(language: Language, cert: &CertView) -> Markup {
         html! {
             tr {
                 td { (go(&format!("/certificates/{}", cert.fingerprint), &cert.fingerprint)) }
-                td { (clip(language, &cert.subject, MAX_FIELD_CHARS)) }
-                td { (clip(language, &cert.issuer, MAX_FIELD_CHARS)) }
+                td { (clip_identity(language, &cert.subject, MAX_FIELD_CHARS)) }
+                td { (clip_identity(language, &cert.issuer, MAX_FIELD_CHARS)) }
                 td { (cert_dns_names(language, &cert.dns_names, MAX_ROW_DNS_NAMES)) }
                 td { (clip(language, &cert.not_after, MAX_FIELD_CHARS)) }
                 td { (text(language, cert_expiry_key(&cert.expiry))) }
@@ -943,9 +1002,9 @@ pub fn cert_page(language: Language, csrf: &str, detail: &CertDetailView) -> Mar
             h1 { (text(language, "title_cert")) " " (cert.fingerprint) }
             dl {
                 dt { (text(language, "col_subject")) }
-                dd { (clip(language, &cert.subject, MAX_FIELD_CHARS)) }
+                dd { (clip_identity(language, &cert.subject, MAX_FIELD_CHARS)) }
                 dt { (text(language, "col_issuer")) }
-                dd { (clip(language, &cert.issuer, MAX_FIELD_CHARS)) }
+                dd { (clip_identity(language, &cert.issuer, MAX_FIELD_CHARS)) }
                 dt { (text(language, "col_dns")) }
                 dd { (cert_dns_names(language, &cert.dns_names, MAX_DETAIL_DNS_NAMES)) }
                 dt { (text(language, "col_not_before")) }
@@ -981,8 +1040,8 @@ pub fn cert_page(language: Language, csrf: &str, detail: &CertDetailView) -> Mar
                 tbody {
                     @for sighting in &detail.sightings {
                         tr {
-                            td { (clip(language, &sighting.kind, MAX_FIELD_CHARS)) }
-                            td { (clip(language, &sighting.reference, MAX_FIELD_CHARS)) }
+                            td { (clip_identity(language, &sighting.kind, MAX_FIELD_CHARS)) }
+                            td { (clip_identity(language, &sighting.reference, MAX_FIELD_CHARS)) }
                             td { (clip(language, &sighting.last_seen, MAX_FIELD_CHARS)) }
                         }
                     }
