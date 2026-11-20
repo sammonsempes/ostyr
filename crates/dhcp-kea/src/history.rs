@@ -276,7 +276,7 @@ fn interval_of(row: &[String]) -> Option<LeaseInterval> {
 }
 
 
-/// The first `MAX_LOOKUP_ROWS` candidates (newest first, bounded by `starts` in SQL) that end after `after`; a row `interval_of` refuses is skipped and counted, `truncated` says the candidate cap was reached.
+/// The first `MAX_LOOKUP_ROWS` candidates (newest first, bounded by `starts` in SQL) that end after `after`; a row `interval_of` refuses is skipped and counted. With more candidates than the cap the answer is always `truncated`.
 fn bounded(rows: &[Vec<String>], after: i64) -> LookupResult {
     let read: Vec<Option<LeaseInterval>> = rows.iter().take(MAX_LOOKUP_ROWS).map(|row| interval_of(row)).collect();
     let parsed: Vec<LeaseInterval> = read.iter().flatten().cloned().collect();
