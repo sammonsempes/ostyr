@@ -157,6 +157,10 @@ check_present() {
         printf 'error: %s is not %s bytes long, remove it and rerun\n' "$path" "$size" >&2
         exit 1
     fi
+    if [[ "$(stat -c %h "$path")" != 1 ]]; then
+        printf 'error: %s has more than one hard link, remove it and rerun\n' "$path" >&2
+        exit 1
+    fi
 }
 
 make_random_file() {
@@ -200,13 +204,16 @@ stage_file() {
     fi
     chown "${owner%%:*}:${owner##*:}" "/proc/self/fd/$staged_fd"
     chmod "$mode" "/proc/self/fd/$staged_fd"
+    staged_inode[$name]="$(stat -L -c %d:%i "/proc/self/fd/$staged_fd")"
     exec {staged_fd}<&-
-    staged_inode[$name]="$(stat -c %d:%i "$scratch/$name")"
 }
 
 link_set() {
     local name
     for name in "${TLS_FILES[@]}"; do
+        if [[ -L "$scratch/$name" || "$(stat -c %d:%i "$scratch/$name")" != "${staged_inode[$name]}" ]]; then
+            return 1
+        fi
         ln "$scratch/$name" "$SECRETS_DIR/$name" || return 1
         linked_names+=("$name")
     done
