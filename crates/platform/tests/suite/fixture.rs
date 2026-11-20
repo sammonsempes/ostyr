@@ -25,6 +25,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 
@@ -146,7 +147,7 @@ pub fn module_text_with_weights(modules: &str, pg_file: &Path, weights_file: &Pa
 }
 
 
-fn prepared(modules: &str) -> Result<(TempDir, ApiConfig, Parts), TestError> {
+fn prepared(modules: &str, permits: &Arc<Semaphore>) -> Result<(TempDir, ApiConfig, Parts), TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
     seed_accounts(&config)?;
@@ -179,7 +180,7 @@ fn prepared(modules: &str) -> Result<(TempDir, ApiConfig, Parts), TestError> {
         }
         None => None,
     };
-    let parts = module_parts(&selected, &engine, &shared_permits(), weights.as_ref())?;
+    let parts = module_parts(&selected, &engine, permits, weights.as_ref())?;
     Ok((dir, config, parts))
 }
 
@@ -197,13 +198,18 @@ pub fn unweighted_parts(modules: &str) -> Result<Result<Parts, PlatformError>, T
 
 
 pub fn parts_of(modules: &str) -> Result<(TempDir, Parts), TestError> {
-    let (dir, _config, parts) = prepared(modules)?;
+    let (dir, _config, parts) = prepared(modules, &shared_permits())?;
     Ok((dir, parts))
 }
 
 
 pub fn fixture(modules: &str) -> Result<Fixture, TestError> {
-    let (dir, config, (extra, access, documents)) = prepared(modules)?;
+    fixture_with_permits(modules, &shared_permits())
+}
+
+
+pub fn fixture_with_permits(modules: &str, permits: &Arc<Semaphore>) -> Result<Fixture, TestError> {
+    let (dir, config, (extra, access, documents)) = prepared(modules, permits)?;
     let state: SharedState = Arc::new(build_state_from_files(&config, access, documents)?);
     let router = build_router(state, extra);
     Ok(Fixture { _dir: dir, router })

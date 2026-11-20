@@ -1,7 +1,7 @@
 use crate::types::TestResult;
 use core_config::types::SettingsMap;
 use platform::error::PlatformError;
-use platform::merge::{modules_of, parse_modules, weights_file_of, MAX_MODULES_CHARS, SETTING_MODULES, SETTING_WEIGHTS_FILE};
+use platform::merge::{module_of, modules_of, parse_modules, weights_file_of, MAX_MODULES_CHARS, SETTING_MODULES, SETTING_WEIGHTS_FILE};
 use platform::model::Module;
 use std::path::PathBuf;
 
@@ -9,7 +9,13 @@ use std::path::PathBuf;
 const LONG_VALUE_CHARS: usize = 10_000;
 
 
-const ALL_MODULES: usize = 4;
+const ALL_MODULES: usize = 7;
+
+
+const EXPECTED_LIMIT: usize = 128;
+
+
+const THIRD_INDEX: usize = 2;
 
 
 #[test]
@@ -18,15 +24,39 @@ fn valid_lists_parse_in_order_and_trim() -> TestResult {
     assert_eq!(parse_modules(" cases ")?, [Module::Cases]);
     assert_eq!(parse_modules("cmdb, alerts ,cases")?, [Module::Cmdb, Module::Alerts, Module::Cases]);
     assert_eq!(parse_modules("risk")?, [Module::Risk]);
+    assert_eq!(parse_modules("hunts")?, [Module::Hunts]);
+    assert_eq!(parse_modules(" certificates , oncall")?, [Module::Certificates, Module::Oncall]);
+    assert_eq!(module_of("hunts"), Some(Module::Hunts));
+    assert_eq!(module_of("certificates"), Some(Module::Certificates));
+    assert_eq!(module_of("oncall"), Some(Module::Oncall));
+    assert_eq!(module_of("hunt"), None);
     Ok(())
 }
 
 
 #[test]
 fn the_longest_list_fits_the_limit() -> TestResult {
-    let all = "alerts, cases, cmdb, risk";
+    let all = "alerts, cases, cmdb, risk, hunts, certificates, oncall";
     assert!(all.chars().count() <= MAX_MODULES_CHARS);
     assert_eq!(parse_modules(all)?.len(), ALL_MODULES);
+    Ok(())
+}
+
+
+#[test]
+fn the_limit_is_128_characters_and_129_is_refused() -> TestResult {
+    assert_eq!(MAX_MODULES_CHARS, EXPECTED_LIMIT);
+    let padded = |width: usize| format!("alerts{}", " ".repeat(width - "alerts".len()));
+    assert_eq!(parse_modules(&padded(MAX_MODULES_CHARS))?, [Module::Alerts]);
+    assert_eq!(
+        parse_modules(&padded(MAX_MODULES_CHARS + 1)),
+        Err(PlatformError::ModulesTooLong { limit: MAX_MODULES_CHARS })
+    );
+    assert_eq!(
+        parse_modules("hunts,oncall,hunts"),
+        Err(PlatformError::DuplicateModule { index: THIRD_INDEX })
+    );
+    assert_eq!(parse_modules("hunts,oncalls"), Err(PlatformError::UnknownModule { index: 1 }));
     Ok(())
 }
 

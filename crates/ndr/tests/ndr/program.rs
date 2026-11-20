@@ -1,6 +1,6 @@
 use crate::support::{ready, TestResult};
 use ndr::error::NdrError;
-use ndr::exec::{check_program, check_program_as, check_unchanged, run_with_hook};
+use ndr::exec::{check_program, check_program_as, check_unchanged, run_bounded, run_with_hook};
 use ndr::model::Yr;
 use std::ffi::OsStr;
 use std::fs;
@@ -294,5 +294,32 @@ fn a_run_refuses_a_program_owned_by_another_user() -> TestResult {
         (owner + 1, leave),
     );
     assert!(matches!(result, Err(NdrError::Program { reason: OTHER_OWNER, .. })));
+    Ok(())
+}
+
+
+#[test]
+fn the_production_check_refuses_a_program_owned_by_nobody() -> TestResult {
+    let own = own_dir()?;
+    let plain = plain_program(own.path())?;
+    let owner = rustix::process::geteuid().as_raw();
+    let _restore = hand_to_nobody(&plain.program, owner)?;
+    if owner == 0 {
+        assert!(matches!(check_program(&plain), Err(NdrError::Program { reason: OTHER_OWNER, .. })));
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_production_run_refuses_a_program_owned_by_nobody() -> TestResult {
+    let own = own_dir()?;
+    let plain = plain_program(own.path())?;
+    let owner = rustix::process::geteuid().as_raw();
+    let _restore = hand_to_nobody(&plain.program, owner)?;
+    if owner == 0 {
+        let result = run_bounded(&plain, &[], 1, std::time::Duration::from_secs(1));
+        assert!(matches!(result, Err(NdrError::Program { reason: OTHER_OWNER, .. })));
+    }
     Ok(())
 }

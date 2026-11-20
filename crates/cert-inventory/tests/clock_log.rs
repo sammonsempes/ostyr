@@ -173,3 +173,46 @@ fn a_bad_now_above_the_range_with_old_dates_counts_each_record_once() -> TestRes
     assert!(log.contains("clamped=1"));
     Ok(())
 }
+
+
+#[test]
+fn copies_of_one_fingerprint_count_as_duplicates() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let records: Vec<CertRecord> = (0..MANY).map(|_index| old_cert(1, OLD_NOT_AFTER)).collect();
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, NOW))?;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(log.lines().count(), TWO);
+    assert!(log.contains(&format!("duplicates={}", MANY - 1)));
+    assert!(log.contains("rejected=0"));
+    assert!(log.contains(&format!("clamped={MANY}")));
+    Ok(())
+}
+
+
+#[test]
+fn counts_add_up_with_duplicates_rejected_and_bad_now() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let mut records: Vec<CertRecord> = (0..MANY).map(|_index| old_cert(1, OLD_NOT_AFTER)).collect();
+    records.extend((0..TWO).map(|_index| bad_fingerprint_cert(OLD_NOT_AFTER)));
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, i64::MAX))?;
+    assert_eq!(alerts.len(), 1);
+    assert!(log.contains(&format!("duplicates={}", MANY - 1)));
+    assert!(log.contains("rejected=2"));
+    assert!(log.contains(&format!("bad_now={}", MANY + TWO)));
+    Ok(())
+}
+
+
+const HUGE: usize = 100_000;
+
+
+#[test]
+fn many_distinct_records_give_one_line_each_warning() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let records: Vec<CertRecord> = (0..HUGE).map(|index| old_cert(index, OLD_NOT_AFTER)).collect();
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, NOW))?;
+    assert_eq!(alerts.len(), HUGE);
+    assert_eq!(log.lines().count(), 1);
+    assert!(log.contains(&format!("clamped={HUGE}")));
+    Ok(())
+}
