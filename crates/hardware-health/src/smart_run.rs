@@ -3,10 +3,11 @@
 use crate::limits::{default_limits, MAX_DEADLINE_SECONDS, MAX_DEVICE_NAME_BYTES, MAX_DEVICE_TYPE_BYTES, MAX_SCAN_BYTES, MAX_SCAN_DEVICES};
 use crate::model::{FailureClass, RunOutput, RunReport, SmartReport, SmartSettings};
 use crate::parse::parse_smartctl;
-use crate::smart_exec::check_program;
+use crate::smart_exec::{check_program_as, check_unchanged};
 use crate::types::{ClockFn, RunnerFn};
 use net_topology::model::RunFailure;
 use net_topology::runner::{read_output, reap_killed, sigchld_ignored, wait_exit, PROC_STATUS};
+use rustix::process::geteuid;
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -150,11 +151,28 @@ fn finish(child: &mut Child, bytes: Vec<u8>, until: Instant) -> Result<RunOutput
 }
 
 
+/// The default hook between the check and the spawn: nothing.
+pub fn leave_alone(_program: &Path) {}
+
+
 /// Runs `program` with `arguments` (environment cleared but `LC_ALL=C`, own process group, stdout capped at `cap`, stderr discarded) within `deadline`.
 pub fn run_smartctl(program: &Path, arguments: &[&str], cap: u64, deadline: Duration) -> Result<RunOutput, FailureClass> {
+    run_with_hook(program, arguments, (cap, deadline), (geteuid().as_raw(), leave_alone))
+}
+
+
+/// `run_smartctl` with the trusted uid and a hook that runs after the check and before the spawn, so both are testable.
+pub fn run_with_hook(
+    program: &Path,
+    arguments: &[&str],
+    (cap, deadline): (u64, Duration),
+    (trusted_uid, between): (u32, fn(&Path)),
+) -> Result<RunOutput, FailureClass> {
     let waitable = !sigchld_ignored(Path::new(PROC_STATUS)).map_err(failure_of)?;
     waitable.then_some(()).ok_or(FailureClass::Unwaitable)?;
-    check_program(program)?;
+    let judged = check_program_as(program, trusted_uid)?;
+    between(program);
+    check_unchanged(program, &judged, trusted_uid)?;
     let started = Instant::now();
     let until = started + deadline.min(Duration::from_secs(MAX_DEADLINE_SECONDS));
     let (mut reader, writer) = io::pipe()?;
