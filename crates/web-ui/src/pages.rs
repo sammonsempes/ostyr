@@ -1,7 +1,7 @@
-use crate::api::{encode_asset_id, risk_kind, valid_asset_id, valid_case_id, MAX_COMMENT_CHARS, MAX_RISK_VALUE, RISK_KINDS};
+use crate::api::{encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_RISK_VALUE, RISK_KINDS};
 use crate::model::{
-    Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CommentView, Language,
-    RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView,
+    Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
+    CertView, CommentView, Language, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
@@ -33,6 +33,12 @@ pub const MAX_COMMENT_LINES: usize = 64;
 
 
 pub const MAX_TASKS: usize = 64;
+
+
+pub const MAX_ROW_DNS_NAMES: usize = 20;
+
+
+pub const MAX_DETAIL_DNS_NAMES: usize = 100;
 
 
 pub const STYLESHEET: &str = "body{font-family:sans-serif;margin:0;color:#1b1f23}header{display:flex;gap:1rem;align-items:center;padding:.5rem 1rem;\
@@ -116,6 +122,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/cases", text(language, "nav_cases")))
                         (go("/assets", text(language, "nav_assets")))
                         (go("/risk", text(language, "nav_risk")))
+                        (go("/certificates", text(language, "nav_certs")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -804,6 +811,184 @@ pub fn risk_entity_page(language: Language, csrf: &str, detail: &RiskDetailView)
                 dd { (format_time(language, detail.computed_at)) }
             }
             (go("/risk", text(language, "risk_back")))
+        },
+    )
+}
+
+
+/// A fixed key per expiry state of the API; any other value is the fixed "unknown" text.
+pub fn cert_expiry_key(expiry: &str) -> &'static str {
+    match expiry {
+        "expired" => "cert_expired",
+        "near" => "cert_near",
+        "ok" => "cert_ok",
+        _ => "unknown",
+    }
+}
+
+
+pub fn cert_filter_key(filter: &str) -> &'static str {
+    match filter {
+        "30" => "certs_filter_30",
+        "90" => "certs_filter_90",
+        _ => "certs_filter_all",
+    }
+}
+
+
+/// At most `shown` DNS names, each clipped, then the count of the others.
+pub fn cert_dns_names(language: Language, names: &[String], shown: usize) -> Markup {
+    let hidden = names.len().saturating_sub(shown);
+    html! {
+        @for name in names.iter().take(shown) {
+            div { (clip(language, name, MAX_FIELD_CHARS)) }
+        }
+        @if hidden > 0 {
+            div { (text(language, "cert_dns_more").replace("{count}", &hidden.to_string())) }
+        }
+    }
+}
+
+
+pub fn cert_key_text(language: Language, cert: &CertView) -> String {
+    let kind = clip(language, &cert.key_type, MAX_FIELD_CHARS);
+    cert.key_bits.map_or(kind.clone(), |bits| format!("{kind} {bits}"))
+}
+
+
+pub fn cert_row(language: Language, cert: &CertView) -> Markup {
+    if valid_id(&cert.fingerprint) {
+        html! {
+            tr {
+                td { (go(&format!("/certificates/{}", cert.fingerprint), &cert.fingerprint)) }
+                td { (clip(language, &cert.subject, MAX_FIELD_CHARS)) }
+                td { (clip(language, &cert.issuer, MAX_FIELD_CHARS)) }
+                td { (cert_dns_names(language, &cert.dns_names, MAX_ROW_DNS_NAMES)) }
+                td { (clip(language, &cert.not_after, MAX_FIELD_CHARS)) }
+                td { (text(language, cert_expiry_key(&cert.expiry))) }
+                td { (cert_key_text(language, cert)) }
+            }
+        }
+    } else {
+        html! {
+            tr { td colspan="7" { (text(language, "certs_unreadable")) } }
+        }
+    }
+}
+
+
+pub fn cert_filter_forms(language: Language) -> Markup {
+    html! {
+        @for filter in CERT_FILTERS {
+            form method="get" action="/certificates" class="go" {
+                input type="hidden" name="expiring" value=(filter);
+                button type="submit" { (text(language, cert_filter_key(filter))) }
+            }
+        }
+    }
+}
+
+
+pub fn certs_page(language: Language, csrf: &str, list: &CertListView, filter: &str) -> Markup {
+    layout(
+        language,
+        "title_certs",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_certs")) }
+            (cert_filter_forms(language))
+            @if list.skipped > 0 {
+                div class="notice" { (text(language, "certs_skipped").replace("{count}", &list.skipped.to_string())) }
+            }
+            @if list.items.is_empty() {
+                div { (text(language, "certs_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_fingerprint")) }
+                            th { (text(language, "col_subject")) }
+                            th { (text(language, "col_issuer")) }
+                            th { (text(language, "col_dns")) }
+                            th { (text(language, "col_not_after")) }
+                            th { (text(language, "col_expiry")) }
+                            th { (text(language, "col_key")) }
+                        }
+                    }
+                    tbody {
+                        @for cert in &list.items { (cert_row(language, cert)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &list.next_cursor {
+                form method="get" action="/certificates" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    input type="hidden" name="expiring" value=(filter);
+                    button type="submit" { (text(language, "certs_next")) }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn cert_page(language: Language, csrf: &str, detail: &CertDetailView) -> Markup {
+    let cert = &detail.cert;
+    let self_signed = if cert.self_signed { "cert_yes" } else { "cert_no" };
+    layout(
+        language,
+        "title_cert",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_cert")) " " (cert.fingerprint) }
+            dl {
+                dt { (text(language, "col_subject")) }
+                dd { (clip(language, &cert.subject, MAX_FIELD_CHARS)) }
+                dt { (text(language, "col_issuer")) }
+                dd { (clip(language, &cert.issuer, MAX_FIELD_CHARS)) }
+                dt { (text(language, "col_dns")) }
+                dd { (cert_dns_names(language, &cert.dns_names, MAX_DETAIL_DNS_NAMES)) }
+                dt { (text(language, "col_not_before")) }
+                dd { (clip(language, &cert.not_before, MAX_FIELD_CHARS)) }
+                dt { (text(language, "col_not_after")) }
+                dd { (clip(language, &cert.not_after, MAX_FIELD_CHARS)) }
+                dt { (text(language, "col_expiry")) }
+                dd { (text(language, cert_expiry_key(&cert.expiry))) }
+                dt { (text(language, "col_key")) }
+                dd { (cert_key_text(language, cert)) }
+                dt { (text(language, "cert_self_signed")) }
+                dd { (text(language, self_signed)) }
+                dt { (text(language, "col_first_seen")) }
+                dd { (clip(language, &cert.first_seen, MAX_FIELD_CHARS)) }
+                dt { (text(language, "col_last_seen")) }
+                dd { (clip(language, &cert.last_seen, MAX_FIELD_CHARS)) }
+            }
+            h2 { (text(language, "cert_sightings")) }
+            @if detail.sightings_skipped > 0 {
+                div class="notice" { (text(language, "cert_sightings_skipped").replace("{count}", &detail.sightings_skipped.to_string())) }
+            }
+            @if detail.sightings_truncated {
+                div class="notice" { (text(language, "cert_sightings_truncated")) }
+            }
+            table {
+                thead {
+                    tr {
+                        th { (text(language, "col_sighting_kind")) }
+                        th { (text(language, "col_reference")) }
+                        th { (text(language, "col_last_seen")) }
+                    }
+                }
+                tbody {
+                    @for sighting in &detail.sightings {
+                        tr {
+                            td { (clip(language, &sighting.kind, MAX_FIELD_CHARS)) }
+                            td { (clip(language, &sighting.reference, MAX_FIELD_CHARS)) }
+                            td { (clip(language, &sighting.last_seen, MAX_FIELD_CHARS)) }
+                        }
+                    }
+                }
+            }
+            (go("/certificates", text(language, "cert_back")))
         },
     )
 }

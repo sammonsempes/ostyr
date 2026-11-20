@@ -84,6 +84,7 @@ pub struct StubState {
     pub case_paths: Mutex<Vec<String>>,
     pub asset_paths: Mutex<Vec<String>>,
     pub risk_paths: Mutex<Vec<String>>,
+    pub cert_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -766,6 +767,133 @@ pub async fn risk_detail_handler(
 pub const MAX_RISK_ROWS: usize = 500;
 
 
+pub const CERT_CURSOR_TIME: &str = "1800000000";
+
+
+pub const CERT_SKIPPED: u32 = 2;
+
+
+pub const CERT_HUGE_SUBJECT: usize = 5000;
+
+
+pub const CERT_MANY_NAMES: usize = 150;
+
+
+pub const CERT_MANY_SIGHTINGS: usize = 501;
+
+
+pub const CERT_HOSTILE_SUBJECT: &str = "evil\u{1b}[31m\u{202e}cn\nnext";
+
+
+pub const CERT_BAD_FINGERPRINT_COUNT: usize = 3;
+
+
+pub fn cert_fingerprint(fill: char) -> String {
+    id_of(fill)
+}
+
+
+pub fn cert(fingerprint: &str, subject: &str, expiry: &str, names: usize) -> Value {
+    let dns: Vec<String> = (0..names).map(|index| format!("host{index}.example.test")).collect();
+    json!({
+        "fingerprint": fingerprint, "subject": subject, "issuer": "CN=Test CA", "dns_names": dns,
+        "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-01-01T00:00:00Z",
+        "first_seen": "2026-02-01T00:00:00Z", "last_seen": "2026-03-01T00:00:00Z",
+        "key_type": "rsa", "key_bits": if expiry == "weird" { Value::Null } else { json!(CERT_KEY_BITS) }, "self_signed": expiry == "weird", "expiry": expiry
+    })
+}
+
+
+pub fn cert_list(items: Vec<Value>, skipped: u32, next: Option<String>) -> Value {
+    json!({"items": items, "skipped": skipped, "next_cursor": next})
+}
+
+
+pub fn cert_detail(fingerprint: &str, subject: &str, expiry: &str, names: usize, sightings: usize, flagged: bool) -> Value {
+    let mut body = cert(fingerprint, subject, expiry, names);
+    let seen: Vec<Value> = (0..sightings)
+        .map(|index| json!({"kind": "file", "reference": format!("/etc/ssl/{index}.pem{CERT_HOSTILE_SUBJECT}"), "last_seen": "2026-03-01T00:00:00Z"}))
+        .collect();
+    if let Some(map) = body.as_object_mut() {
+        map.insert("sightings".to_owned(), Value::Array(seen));
+        map.insert("sightings_skipped".to_owned(), json!(if flagged { CERT_SKIPPED } else { 0 }));
+        map.insert("sightings_truncated".to_owned(), json!(flagged));
+    }
+    body
+}
+
+
+pub fn cert_hostile_list() -> Value {
+    let upper = format!("A{}", "a".repeat(CERT_SHORT_FINGERPRINT));
+    let short = "a".repeat(CERT_SHORT_FINGERPRINT);
+    let mut items: Vec<Value> = [upper.as_str(), short.as_str(), "../x"]
+        .iter()
+        .map(|fingerprint| cert(fingerprint, "bad", "ok", 0))
+        .collect();
+    let subject = format!("{CERT_HOSTILE_SUBJECT}{}", "s".repeat(CERT_HUGE_SUBJECT));
+    items.push(cert(&cert_fingerprint('e'), &subject, "weird", CERT_ROW_NAMES));
+    cert_list(items, CERT_SKIPPED, None)
+}
+
+
+pub async fn cert_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.cert_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(cert_list(
+                (0..MANY_ITEMS).map(|_| cert(&cert_fingerprint('a'), "s", "ok", 0)).collect(),
+                0,
+                None,
+            ))
+            .into_response(),
+            Mode::BadCursor => Json(cert_list(vec![], 0, Some("a b".to_owned()))).into_response(),
+            Mode::Hostile => Json(cert_hostile_list()).into_response(),
+            Mode::Chunked => Json(cert_list(vec![], 0, None)).into_response(),
+            _ => Json(cert_list(
+                vec![
+                    cert(&cert_fingerprint('a'), "CN=one", "expired", CERT_PAIR),
+                    cert(&cert_fingerprint('b'), "CN=two", "near", 1),
+                    cert(&cert_fingerprint('c'), "CN=three", "ok", 0),
+                ],
+                CERT_SKIPPED,
+                Some(format!("{CERT_CURSOR_TIME}:{}", cert_fingerprint('c'))),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn cert_detail_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(fingerprint): Path<String>) -> Response {
+    note_forwarded(&state, &headers);
+    state
+        .cert_paths
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(format!("/certificates/{fingerprint}"));
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::BadId => Json(cert_detail(&cert_fingerprint('f'), "s", "ok", 0, 0, false)).into_response(),
+            Mode::TooMany => Json(cert_detail(&fingerprint, "s", "ok", 0, CERT_MANY_SIGHTINGS, false)).into_response(),
+            Mode::Hostile => {
+                let subject = format!("{CERT_HOSTILE_SUBJECT}{}", "s".repeat(CERT_HUGE_SUBJECT));
+                Json(cert_detail(&fingerprint, &subject, "weird", CERT_MANY_NAMES, CERT_PAIR, true)).into_response()
+            }
+            _ => Json(cert_detail(&fingerprint, "CN=one", "near", CERT_PAIR, CERT_PAIR, false)).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub const OVER_SCORE: u32 = 101;
 
 
@@ -787,6 +915,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         case_paths: Mutex::new(Vec::new()),
         asset_paths: Mutex::new(Vec::new()),
         risk_paths: Mutex::new(Vec::new()),
+        cert_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -803,6 +932,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/assets/{id}", get(asset_detail_handler))
         .route("/risk/entities", get(risk_list_handler))
         .route("/risk/entities/{kind}/{id}", get(risk_detail_handler))
+        .route("/certificates", get(cert_list_handler))
+        .route("/certificates/{fingerprint}", get(cert_detail_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))
@@ -814,3 +945,15 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
     tokio::spawn(async move { axum::serve(listener, router).await });
     Ok(Stub { address, state })
 }
+
+
+pub const CERT_KEY_BITS: u32 = 2048;
+
+
+pub const CERT_SHORT_FINGERPRINT: usize = 63;
+
+
+pub const CERT_ROW_NAMES: usize = 30;
+
+
+pub const CERT_PAIR: usize = 2;

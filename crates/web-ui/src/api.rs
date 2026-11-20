@@ -1,6 +1,7 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
-    Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CommentView, RiskDetailView, RiskListView,
+    Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView,
+    RiskDetailView, RiskListView,
 };
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
@@ -54,6 +55,21 @@ pub const MAX_RISK_ENTITIES: usize = 500;
 
 
 pub const MAX_RISK_VALUE: u64 = 100;
+
+
+pub const CERT_LIMIT: u32 = 100;
+
+
+pub const MAX_CERT_CURSOR_CHARS: usize = 85;
+
+
+pub const MAX_CERT_SIGHTINGS: usize = 500;
+
+
+pub const SECONDS_PER_DAY: i64 = 86_400;
+
+
+pub const CERT_FILTERS: [&str; 3] = ["all", "30", "90"];
 
 
 pub const ID_LENGTH: usize = 64;
@@ -573,5 +589,82 @@ pub async fn get_risk_entity(client: &ApiClient, source: IpAddr, token: &SecretS
             check_risk_detail(&detail, fixed, id).map(|()| detail)
         }
         None => Err(ApiFailure::NotFound),
+    }
+}
+
+
+/// The fixed spelling of a certificate filter, `None` for anything else.
+pub fn cert_filter(text: &str) -> Option<&'static str> {
+    CERT_FILTERS.iter().find(|filter| **filter == text).copied()
+}
+
+
+/// The certificate cursor of the API: a signed decimal time, `:` and a 64 character fingerprint, at most 85 characters.
+pub fn valid_cert_cursor(cursor: &str) -> bool {
+    cursor.len() <= MAX_CERT_CURSOR_CHARS
+        && cursor.split_once(':').is_some_and(|(time, fingerprint)| {
+            let digits = time.strip_prefix('-').unwrap_or(time);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) && valid_id(fingerprint)
+        })
+}
+
+
+/// `expiring_before` is computed by the caller from its clock and a fixed filter, never taken from the browser.
+pub fn certs_path(cursor: Option<&str>, expiring_before: Option<i64>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("limit", &CERT_LIMIT.to_string());
+    expiring_before.iter().for_each(|seconds| {
+        query.append_pair("expiring_before", &seconds.to_string());
+    });
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    format!("certificates?{}", query.finish())
+}
+
+
+pub fn check_cert_list(list: &CertListView) -> Result<(), ApiFailure> {
+    if list.items.len() > MAX_ITEMS {
+        Err(ApiFailure::Malformed("too many items"))
+    } else if list.next_cursor.as_deref().is_some_and(|cursor| !valid_cert_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn check_cert_detail(detail: &CertDetailView, fingerprint: &str) -> Result<(), ApiFailure> {
+    if detail.cert.fingerprint != fingerprint {
+        Err(ApiFailure::Malformed("fingerprint differs"))
+    } else if detail.sightings.len() > MAX_CERT_SIGHTINGS {
+        Err(ApiFailure::Malformed("too many sightings"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub async fn list_certs(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    cursor: Option<&str>,
+    expiring_before: Option<i64>,
+) -> Result<CertListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &certs_path(cursor, expiring_before), Some(token), None).await?;
+    let list: CertListView = serde_json::from_slice(&bytes)?;
+    check_cert_list(&list).map(|()| list)
+}
+
+
+/// A fingerprint that is not 64 lower-case hex digits is a missing certificate without any call.
+pub async fn get_cert(client: &ApiClient, source: IpAddr, token: &SecretString, fingerprint: &str) -> Result<CertDetailView, ApiFailure> {
+    if valid_id(fingerprint) {
+        let bytes = call(client, source, Method::GET, &format!("certificates/{fingerprint}"), Some(token), None).await?;
+        let detail: CertDetailView = serde_json::from_slice(&bytes)?;
+        check_cert_detail(&detail, fingerprint).map(|()| detail)
+    } else {
+        Err(ApiFailure::NotFound)
     }
 }
