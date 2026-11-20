@@ -1535,6 +1535,7 @@ fn the_seen_ledger_refuses_a_listing_over_the_listing_bound_and_the_sql_states_b
     assert!(!LEDGER_DDL.contains("NOT EXISTS (SELECT 1 FROM cloud_cost_seen"));
     assert!(!LEDGER_DDL.contains("ORDER BY d."));
     assert_eq!(LEDGER_DDL.matches("jsonb_to_recordset").count(), 1);
+    assert!(LEDGER_DDL.contains("FROM (SELECT DISTINCT r.k, r.e FROM jsonb_to_recordset(v_listing) AS r(k text, e text)) l"));
     assert_eq!(LEDGER_DDL.matches("p_listing::jsonb").count(), 1);
     assert!(LEDGER_DDL.contains(&format!("octet_length(p_listing) > {MAX_LISTING_TEXT_BYTES} THEN RAISE")));
     assert!(LEDGER_DDL.contains("33554432 - COALESCE(sum(s.weight), 0)"));
@@ -1839,3 +1840,31 @@ const TEN: usize = 10;
 
 
 const SEEN_BYTE_CAP: usize = 33_554_432;
+
+
+#[test]
+fn sync_seen_sends_a_listing_that_repeats_a_pair_and_one_function_dedupes_it() -> TestResult {
+    let ledger = Ledger::default();
+    let executor = |sql: &str, params: &[String]| exec(&ledger, sql, params);
+    let repeated = ListedObject {
+        key: "p/a.csv".to_owned(),
+        etag: "e".to_owned(),
+        size: 1,
+    };
+    let objects = vec![repeated.clone(), repeated.clone(), repeated];
+    let window = SeenWindow {
+        complete: true,
+        ..SeenWindow::default()
+    };
+    let order = sync_seen(&executor, "acme", "main", &objects, &window, MAX_SEEN_DELETES_PER_SYNC)?;
+    assert_eq!(order.keys, vec!["p/a.csv".to_owned()]);
+    assert_eq!(ledger.seen.borrow().len(), 1);
+    let calls = ledger.calls.borrow();
+    let call = calls.iter().find(|(sql, _params)| sql == SYNC_SEEN);
+    let sent = call
+        .and_then(|(_sql, params)| params.get(TWO))
+        .map(|text| text.matches("p/a.csv").count());
+    assert_eq!(sent, Some(THREE));
+    assert!(LEDGER_DDL.contains("SELECT DISTINCT r.k, r.e FROM jsonb_to_recordset"));
+    Ok(())
+}
