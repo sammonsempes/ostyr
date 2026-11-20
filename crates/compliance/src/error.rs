@@ -51,3 +51,28 @@ pub enum ReportError {
         source: alerts::error::StoreError,
     },
 }
+
+
+#[derive(Debug, Error)]
+pub enum ReadError {
+    #[error("database: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("connection: {0}")]
+    Lease(#[from] alerts::error::StoreError),
+    #[error("a limit does not fit the statement")]
+    BadLimit,
+    #[error("page size must be between 1 and {limit}")]
+    BadPageSize { limit: usize },
+    #[error("cursor is malformed")]
+    BadCursor,
+    #[error("verdict is not one of fail, error, excepted, pass or all")]
+    BadVerdict,
+    #[error("baseline is not a valid baseline name")]
+    BadBaseline,
+    #[error("a stored key is outside the grammar")]
+    BadKey,
+    #[error("the store returned a row that cannot be read")]
+    BadRow,
+    #[error("a stored time cannot be written as an RFC 3339 date")]
+    Unrepresentable,
+}
