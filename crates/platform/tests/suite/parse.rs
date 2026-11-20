@@ -9,7 +9,7 @@ use std::path::PathBuf;
 const LONG_VALUE_CHARS: usize = 10_000;
 
 
-const ALL_MODULES: usize = 7;
+const ALL_MODULES: usize = 8;
 
 
 const EXPECTED_LIMIT: usize = 128;
@@ -29,6 +29,7 @@ fn valid_lists_parse_in_order_and_trim() -> TestResult {
     assert_eq!(module_of("hunts"), Some(Module::Hunts));
     assert_eq!(module_of("certificates"), Some(Module::Certificates));
     assert_eq!(module_of("oncall"), Some(Module::Oncall));
+    assert_eq!(module_of("dhcp"), Some(Module::Dhcp));
     assert_eq!(module_of("hunt"), None);
     Ok(())
 }
@@ -36,7 +37,7 @@ fn valid_lists_parse_in_order_and_trim() -> TestResult {
 
 #[test]
 fn the_longest_list_fits_the_limit() -> TestResult {
-    let all = "alerts, cases, cmdb, risk, hunts, certificates, oncall";
+    let all = "alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp";
     assert!(all.chars().count() <= MAX_MODULES_CHARS);
     assert_eq!(parse_modules(all)?.len(), ALL_MODULES);
     Ok(())

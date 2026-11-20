@@ -13,6 +13,7 @@ use core_config::reload::ReloadEngine;
 use core_config::types::SettingsMap;
 use core_pg::migrate::Migration;
 use core_pg::settings::PgSettings;
+use dhcp_kea::cursor::{MIGRATIONS as DHCP_MIGRATIONS, MIGRATION_NAMESPACE as DHCP_NAMESPACE};
 use hunt_packs::store::{MIGRATIONS as HUNT_MIGRATIONS, MIGRATION_NAMESPACE as HUNT_NAMESPACE};
 use oncall::store::{MIGRATIONS as ONCALL_MIGRATIONS, MIGRATION_NAMESPACE as ONCALL_NAMESPACE};
 use risk_score::api::{risk_access, risk_document, risk_router};
@@ -55,6 +56,9 @@ const CERT_PLAN: &[Migration] = &CERT_MIGRATIONS;
 const ONCALL_PLAN: &[Migration] = &ONCALL_MIGRATIONS;
 
 
+const DHCP_PLAN: &[Migration] = &DHCP_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -64,6 +68,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "hunts" => Some(Module::Hunts),
         "certificates" => Some(Module::Certificates),
         "oncall" => Some(Module::Oncall),
+        "dhcp" => Some(Module::Dhcp),
         _ => None,
     }
 }
@@ -156,6 +161,10 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Dhcp => Ok(dhcp_kea::api::dhcp_router(dhcp_kea::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -176,6 +185,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Hunts => hunt_packs::api::hunts_access(),
         Module::Certificates => cert_inventory::api::certificates_access(),
         Module::Oncall => oncall::api::oncall_access(),
+        Module::Dhcp => dhcp_kea::api::dhcp_access(),
     }
 }
 
@@ -189,6 +199,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Hunts => hunt_packs::api::hunts_document(),
         Module::Certificates => cert_inventory::api::certificates_document(),
         Module::Oncall => oncall::api::oncall_document(),
+        Module::Dhcp => dhcp_kea::api::dhcp_document(),
     }
 }
 
@@ -218,6 +229,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Hunts]), HUNT_NAMESPACE, HUNT_PLAN),
         (wants(&[Module::Certificates]), CERT_NAMESPACE, CERT_PLAN),
         (wants(&[Module::Oncall]), ONCALL_NAMESPACE, ONCALL_PLAN),
+        (wants(&[Module::Dhcp]), DHCP_NAMESPACE, DHCP_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)
