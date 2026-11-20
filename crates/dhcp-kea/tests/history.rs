@@ -767,7 +767,13 @@ async fn bad_inputs_and_bad_answers_are_typed_errors() -> TestResult {
 fn the_statements_bind_the_tenant_and_the_migrations_are_valid() -> TestResult {
     let migration = MIGRATIONS.get(1).ok_or("second migration")?.sql;
     let eviction = MIGRATIONS.get(PAIR).ok_or("third migration")?.sql;
-    assert_eq!(MIGRATIONS.len(), PAIR + 1);
+    let lock_64 = MIGRATIONS.get(PAIR + 1).ok_or("fourth migration")?;
+    assert_eq!(MIGRATIONS.len(), PAIR + PAIR);
+    assert_eq!(lock_64.version, "004_dhcp_history_lock_64");
+    assert!(lock_64
+        .sql
+        .contains("pg_advisory_xact_lock(hashtextextended('dhcp_history_store/' || tenant_name, 0))"));
+    assert!(!lock_64.sql.contains("hashtext(") && lock_64.sql.contains("SET search_path = pg_catalog, public"));
     assert!(eviction.contains("pg_advisory_xact_lock(1145586512, hashtext(tenant_name))") && eviction.contains("UNION ALL"));
     assert!(eviction.contains("ORDER BY ends, starts, lease_key LIMIT (SELECT n_drop FROM need)") && eviction.contains("dhcp_history_rows"));
     assert!(AT_SQL.contains("tenant = $1") && MAC_SQL.contains("tenant = $1") && STORE_SQL.contains("dhcp_history_store($1,"));
