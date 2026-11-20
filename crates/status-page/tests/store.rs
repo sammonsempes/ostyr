@@ -1106,3 +1106,35 @@ async fn malformed_counts_are_refused_with_the_column_name() -> TestResult {
     assert_eq!(count_of(&[vec![int_cell(TWO_I64)]], 0, "total")?, TWO);
     Ok(())
 }
+
+
+#[test]
+fn every_write_statement_filters_on_the_tenant_id_and_version_together() -> TestResult {
+    for sql in [UPDATE_SQL, RESOLVE_SQL] {
+        assert!(sql.contains("WHERE tenant = $1 AND id = $2 AND version = $3"), "{sql}");
+    }
+    assert!(CREATE_SQL.contains("VALUES ($1, "), "{CREATE_SQL}");
+    Ok(())
+}
+
+
+#[test]
+fn bidirectional_controls_are_refused_in_every_text() -> TestResult {
+    let hidden = NewIncident {
+        service: SERVICE.to_owned(),
+        title: "Fine \u{202e}txet".to_owned(),
+        published: true,
+        started_at: START,
+        internal_note: String::new(),
+    };
+    assert!(matches!(
+        status_page::store::validate_new_incident(&hidden),
+        Err(StoreError::TextInvalid { field: "title" })
+    ));
+    assert!(matches!(
+        status_page::store::validate_update("a \u{2066} b", ""),
+        Err(StoreError::TextInvalid { field: "message" })
+    ));
+    assert!(status_page::store::validate_update("plain\nmessage", "note").is_ok());
+    Ok(())
+}

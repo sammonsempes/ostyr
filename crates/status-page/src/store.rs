@@ -125,8 +125,14 @@ pub const COUNTS_SQL: &str =
     "SELECT count(*), count(*) FILTER (WHERE resolved_at IS NULL) FROM status_incidents WHERE tenant = $1 AND published AND service = ANY($2)";
 
 
+/// Bidirectional controls (Arabic letter mark, LRM, RLM, embeddings, overrides, isolates) can reorder a public title: refused like a control.
+pub const BIDI_CONTROLS: [char; 12] = [
+    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+
 pub fn is_refused(character: char, multiline: bool) -> bool {
-    character.is_control() && !(multiline && character == '\n')
+    (character.is_control() && !(multiline && character == '\n')) || BIDI_CONTROLS.contains(&character)
 }
 
 
@@ -210,14 +216,27 @@ pub fn decode_changed(rows: &[Row]) -> Result<IncidentRef, StoreError> {
 }
 
 
+/// The text checks of `create_incident`, callable before any connection is taken.
+pub fn validate_new_incident(incident: &NewIncident) -> Result<(), StoreError> {
+    check_required("service", &incident.service, MAX_SERVICE_CHARACTERS, false)?;
+    check_required("title", &incident.title, MAX_TITLE_CHARACTERS, false)?;
+    check_text("internal_note", &incident.internal_note, MAX_NOTE_CHARACTERS, true)
+}
+
+
+/// The text checks of `add_update`, callable before any connection is taken.
+pub fn validate_update(message: &str, internal_note: &str) -> Result<(), StoreError> {
+    check_required("message", message, MAX_MESSAGE_CHARACTERS, true)?;
+    check_text("internal_note", internal_note, MAX_NOTE_CHARACTERS, true)
+}
+
+
 pub async fn create_incident<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, incident: &NewIncident) -> Result<IncidentRef, StoreError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    check_required("service", &incident.service, MAX_SERVICE_CHARACTERS, false)?;
-    check_required("title", &incident.title, MAX_TITLE_CHARACTERS, false)?;
-    check_text("internal_note", &incident.internal_note, MAX_NOTE_CHARACTERS, true)?;
+    validate_new_incident(incident)?;
     let params = vec![
         Param::Text(incident.service.clone()),
         Param::Text(incident.title.clone()),
@@ -242,8 +261,7 @@ where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    check_required("message", message, MAX_MESSAGE_CHARACTERS, true)?;
-    check_text("internal_note", internal_note, MAX_NOTE_CHARACTERS, true)?;
+    validate_update(message, internal_note)?;
     let params = vec![
         Param::Int(incident.id),
         Param::Int(incident.version),
