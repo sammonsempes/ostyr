@@ -155,7 +155,7 @@ pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Al
 }
 
 
-/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings, a bad `now` and clamped start times are counted in one warning.
+/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings and a bad `now` are counted in one warning, clamped start times in another.
 pub fn expiry_alerts(scope: &TenantScope, records: &[CertRecord], now: i64) -> Vec<Alert> {
     let mut alerts: Vec<Alert> = records.iter().filter_map(|record| alert_of(scope, record, now)).collect();
     let expiring = records.iter().filter(|record| level_of(record, now).is_some()).count();
@@ -164,13 +164,17 @@ pub fn expiry_alerts(scope: &TenantScope, records: &[CertRecord], now: i64) -> V
     let rejected = expiring.saturating_sub(alerts.len()).saturating_sub(now_dropped);
     let clamped = records
         .iter()
+        .filter(|record| alert_of(scope, record, now).is_some())
         .filter_map(|record| level_of(record, now).map(|(_severity, state)| state_start_of(record, state)))
-        .filter(|start| *start < 0 && now >= 0)
+        .filter(|start| *start < 0)
         .count();
     alerts.sort_by(|left, right| left.id.cmp(&right.id));
     alerts.dedup_by(|right, left| right.id == left.id);
-    if rejected > 0 || bad_now > 0 || clamped > 0 {
-        tracing::warn!(rejected, bad_now, clamped, "expiring certificates were not turned into alerts");
+    if rejected > 0 || bad_now > 0 {
+        tracing::warn!(rejected, bad_now, "expiring certificates were not turned into alerts");
+    }
+    if clamped > 0 {
+        tracing::warn!(clamped, "expiring certificates got their state start clamped to 1970");
     }
     alerts
 }
