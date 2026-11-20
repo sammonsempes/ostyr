@@ -129,8 +129,14 @@ pub fn read_key(reader: &mut dyn Read) -> Result<Zeroizing<String>, AiError> {
 }
 
 
+/// Reads and checks a key file with the production checks and drops the key; the key never leaves the crate.
+pub fn check_key_file(path: &Path) -> Result<(), AiError> {
+    read_authorization(path).map(|_key| ())
+}
+
+
 /// The `Authorization` value from the key file, opened with the shared secret-file checks (regular file, owner, no group or other bit, no symlink).
-pub fn read_authorization(path: &Path) -> Result<Zeroizing<String>, AiError> {
+pub(crate) fn read_authorization(path: &Path) -> Result<Zeroizing<String>, AiError> {
     let mut handle = open_secret(path).map_err(secret_class)?;
     read_key(&mut handle)
 }

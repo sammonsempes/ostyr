@@ -1,13 +1,14 @@
-use crate::common::{deps, scripted, settings, TIMEOUT};
+use crate::common::{chat, completion, deps, reply, scripted, settings, TIMEOUT};
 use crate::numbers::STATE_FIELDS;
 use crate::types::TestResult;
-use ai_gateway::chat::chat;
 use ai_gateway::error::AiError;
+use ai_gateway::limits::STATUS_OK;
 use ai_gateway::limits::{
     MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING,
     MAX_TOKENS_PER_DAY_CEILING, MIN_RESPONSE_BYTES,
 };
-use ai_gateway::settings::{ai_state, endpoint_url, open_ai, validate_ai, AiSettings, OpenError};
+use ai_gateway::model::{request_url, HttpReply, HttpRequest};
+use ai_gateway::settings::{ai_state, open_ai, validate_ai, AiSettings, OpenError};
 use core_audit::log::{append, genesis_log};
 use core_config::reload::{current_config, reload, ReloadContext, ReloadEngine, ReloadOutcome};
 use serde_json::json;
@@ -22,6 +23,11 @@ fn field(settings_used: &AiSettings) -> Option<&'static str> {
         Err(AiError::Settings { field }) => Some(field),
         _ => None,
     }
+}
+
+
+fn url_back(request: &HttpRequest) -> Result<HttpReply, AiError> {
+    reply(STATUS_OK, completion(request_url(request)))
 }
 
 
@@ -135,10 +141,8 @@ fn every_numeric_bound_names_its_field() -> TestResult {
 
 #[test]
 fn the_endpoint_and_the_state_follow_the_settings() -> TestResult {
-    assert_eq!(
-        endpoint_url(&with_url("https://model.example/api/")),
-        "https://model.example/api/v1/chat/completions"
-    );
+    let sent = chat(&with_url("https://model.example/api/"), "i", &json!({"a": 1}), &deps(url_back))?;
+    assert_eq!(sent.content, "https://model.example/api/v1/chat/completions");
     let state = ai_state(&settings("ok"));
     assert_eq!(state.get("model").map(String::as_str), Some("test-model:1"));
     assert_eq!(state.len(), STATE_FIELDS);

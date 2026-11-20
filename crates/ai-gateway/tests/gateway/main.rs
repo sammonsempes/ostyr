@@ -10,6 +10,7 @@ mod numbers;
 #[cfg(unix)]
 mod request_build;
 mod response_parse;
+#[cfg(unix)]
 mod servers;
 mod settings_load;
 #[cfg(unix)]

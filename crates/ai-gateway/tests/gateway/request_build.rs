@@ -2,7 +2,7 @@ use crate::common::{fixed_random, settings, Failing, FIXED_NONCE};
 use crate::types::TestResult;
 use ai_gateway::error::{AiError, SecretClass};
 use ai_gateway::limits::{MAX_DATA_DEPTH, MAX_DATA_NODES, MAX_KEY_BYTES};
-use ai_gateway::request::{build_request, check_data_shape, closing_tag, key_text, new_nonce, opening_tag, read_authorization, read_key};
+use ai_gateway::request::{build_request, check_data_shape, check_key_file, closing_tag, key_text, new_nonce, opening_tag, read_key};
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -83,6 +83,6 @@ fn a_symlinked_key_file_is_refused() -> TestResult {
     fs::write(&target, b"sk-1")?;
     let link = directory.path().join("link");
     symlink(&target, &link)?;
-    assert!(matches!(read_authorization(&link), Err(AiError::Secret { class: SecretClass::Refused })));
+    assert!(matches!(check_key_file(&link), Err(AiError::Secret { class: SecretClass::Refused })));
     Ok(())
 }
