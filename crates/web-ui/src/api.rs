@@ -9,6 +9,7 @@ use reqwest::{Method, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::json;
+use serde_json::value::RawValue;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -624,9 +625,7 @@ pub fn certs_path(cursor: Option<&str>, expiring_before: Option<i64>) -> String 
 
 
 pub fn check_cert_list(list: &CertListView) -> Result<(), ApiFailure> {
-    if list.items.len() > MAX_ITEMS {
-        Err(ApiFailure::Malformed("too many items"))
-    } else if list.next_cursor.as_deref().is_some_and(|cursor| !valid_cert_cursor(cursor)) {
+    if list.next_cursor.as_deref().is_some_and(|cursor| !valid_cert_cursor(cursor)) {
         Err(ApiFailure::Malformed("cursor"))
     } else {
         Ok(())
@@ -637,7 +636,61 @@ pub fn check_cert_list(list: &CertListView) -> Result<(), ApiFailure> {
 pub fn check_cert_detail(detail: &CertDetailView, fingerprint: &str) -> Result<(), ApiFailure> {
     if detail.cert.fingerprint != fingerprint {
         Err(ApiFailure::Malformed("fingerprint differs"))
-    } else if detail.sightings.len() > MAX_CERT_SIGHTINGS {
+    } else {
+        Ok(())
+    }
+}
+
+
+pub const MAX_CERT_DNS_NAMES: usize = 1000;
+
+
+#[derive(Deserialize)]
+pub struct ListScan<'a> {
+    #[serde(borrow)]
+    pub items: Vec<&'a RawValue>,
+}
+
+
+#[derive(Deserialize)]
+pub struct NamesScan<'a> {
+    #[serde(borrow)]
+    pub dns_names: Vec<&'a RawValue>,
+}
+
+
+#[derive(Deserialize)]
+pub struct DetailScan<'a> {
+    #[serde(borrow)]
+    pub dns_names: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    pub sightings: Vec<&'a RawValue>,
+}
+
+
+/// Counts items and DNS names on raw slices, before any typed value is built.
+pub fn scan_cert_list(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: ListScan = serde_json::from_slice(bytes)?;
+    if scan.items.len() > MAX_ITEMS {
+        Err(ApiFailure::Malformed("too many items"))
+    } else {
+        scan.items.iter().try_for_each(|item| {
+            let names: NamesScan = serde_json::from_str(item.get())?;
+            if names.dns_names.len() > MAX_CERT_DNS_NAMES {
+                Err(ApiFailure::Malformed("too many DNS names"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+
+pub fn scan_cert_detail(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: DetailScan = serde_json::from_slice(bytes)?;
+    if scan.dns_names.len() > MAX_CERT_DNS_NAMES {
+        Err(ApiFailure::Malformed("too many DNS names"))
+    } else if scan.sightings.len() > MAX_CERT_SIGHTINGS {
         Err(ApiFailure::Malformed("too many sightings"))
     } else {
         Ok(())
@@ -653,6 +706,7 @@ pub async fn list_certs(
     expiring_before: Option<i64>,
 ) -> Result<CertListView, ApiFailure> {
     let bytes = call(client, source, Method::GET, &certs_path(cursor, expiring_before), Some(token), None).await?;
+    scan_cert_list(&bytes)?;
     let list: CertListView = serde_json::from_slice(&bytes)?;
     check_cert_list(&list).map(|()| list)
 }
@@ -662,6 +716,7 @@ pub async fn list_certs(
 pub async fn get_cert(client: &ApiClient, source: IpAddr, token: &SecretString, fingerprint: &str) -> Result<CertDetailView, ApiFailure> {
     if valid_id(fingerprint) {
         let bytes = call(client, source, Method::GET, &format!("certificates/{fingerprint}"), Some(token), None).await?;
+        scan_cert_detail(&bytes)?;
         let detail: CertDetailView = serde_json::from_slice(&bytes)?;
         check_cert_detail(&detail, fingerprint).map(|()| detail)
     } else {

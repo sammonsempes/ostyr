@@ -7,7 +7,7 @@ use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
     task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
-use ecs_normalise::suricata::is_unsafe;
+use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
 use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
@@ -49,9 +49,12 @@ form.go{display:inline;margin:0}td button,main>form.go button{color:#06c}label{d
 main>form{margin:.5rem 0}textarea{display:block;width:100%;min-height:6rem}.comment{white-space:pre-wrap;border:1px solid #ccc;padding:.5rem}";
 
 
-/// Text from the API or any peer: control and bidirectional-override characters dropped, long values cut with a visible count.
+/// Text from the API or any peer: control and bidirectional-override characters replaced by U+FFFD, long values cut with a visible count.
 pub fn clip(language: Language, value: &str, max: usize) -> String {
-    let shown: String = value.chars().filter(|character| displayable(*character)).collect();
+    let shown: String = value
+        .chars()
+        .map(|character| if displayable(character) { character } else { REPLACEMENT })
+        .collect();
     let omitted = shown.chars().count().saturating_sub(max);
     if omitted == 0 {
         shown
