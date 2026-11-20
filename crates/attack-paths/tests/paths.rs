@@ -287,6 +287,32 @@ fn a_clique_ends_at_the_step_budget_and_says_so() -> TestResult {
 
 
 #[test]
+fn every_entry_the_budget_stopped_is_named() -> TestResult {
+    let mut graph = clique();
+    graph.nodes.push(node("a_evil", NodeKind::User, false, true));
+    graph.edges.push(link("a_evil", "g0"));
+    let cut = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, MAX_PATHS), SMALL_BUDGET)?;
+    assert!(cut.budget_reached);
+    assert_eq!(cut.unsearched, vec!["a_evil".to_string(), "hd".to_string()]);
+    let full = paths_to_critical(&graph, limits(MAX_DEPTH, MAX_PATHS))?;
+    assert!(full.unsearched.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_entry_with_nothing_to_search_is_not_unsearched() -> TestResult {
+    let graph = Graph {
+        nodes: vec![node("only", NodeKind::DomainController, true, true)],
+        edges: Vec::new(),
+    };
+    let found = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, MAX_PATHS), 0)?;
+    assert!(found.unsearched.is_empty());
+    Ok(())
+}
+
+
+#[test]
 fn nodes_that_cannot_reach_a_critical_node_are_pruned() -> TestResult {
     let graph = Graph {
         nodes: vec![

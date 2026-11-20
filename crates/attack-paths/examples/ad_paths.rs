@@ -1,7 +1,7 @@
 //! Usage: `ad_paths <snapshot.json> [tags.yaml]`: users and workstations are the entry points; critical nodes are domain controllers and the tags.
 use ad_posture::limits::Limits as SnapshotLimits;
 use ad_posture::snapshot::read_snapshot;
-use attack_paths::ad::{apply_ad_tags, graph_from_snapshot};
+use attack_paths::ad::{apply_ad_tags, graph_from_snapshot, kind_name};
 use attack_paths::choke::choke_points;
 use attack_paths::model::{Limits, NodeKind, Tags, MAX_DEPTH, MAX_NODES, MAX_NODE_ID_BYTES, MAX_PATHS};
 use attack_paths::paths::paths_to_critical;
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut out = stdout();
     writeln!(
         out,
-        "SUMMARY nodes={} edges={} truncated={} incomplete_nodes={} duplicate_dns={} unreadable={} unknown_tags_skipped={} paths={} paths_truncated={} search_budget_reached={} removed_nodes={} skipped={:?}",
+        "SUMMARY nodes={} edges={} truncated={} incomplete_nodes={} duplicate_dns={} unreadable={} unknown_tags_skipped={} paths={} paths_truncated={} search_budget_reached={} unsearched_entries={} removed_nodes={} skipped={:?}",
         built.graph.nodes.len(),
         built.graph.edges.len(),
         built.truncated,
@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         found.paths.len(),
         found.truncated,
         found.budget_reached,
+        found.unsearched.len(),
         built.removed_digests.len(),
         built.skipped
     )?;
@@ -85,11 +86,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             node.over_limit
         )
     })?;
-    built
-        .removed_digests
-        .iter()
-        .take(MAX_NODES)
-        .try_for_each(|(_, digest)| writeln!(out, "REMOVED {digest} reason=over_nodes"))?;
+    built.removed_digests.iter().take(MAX_NODES).try_for_each(|(id, digest)| {
+        let kind = built.removed_kinds.get(id).map_or("?", |kind| kind_name(*kind));
+        writeln!(out, "REMOVED {digest} kind={kind} reason=over_nodes")
+    })?;
+    found.unsearched.iter().try_for_each(|id| {
+        writeln!(
+            out,
+            "UNSEARCHED {} {}: the search budget ended before this entry was fully searched",
+            built.digests.get(id).map_or("?", String::as_str),
+            label(id)
+        )
+    })?;
     built
         .duplicates
         .iter()

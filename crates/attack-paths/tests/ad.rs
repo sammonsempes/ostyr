@@ -1,9 +1,9 @@
 use ad_posture::model::{BoundHit, Entry, Gap, Snapshot, Unreadable};
 use ad_posture::snapshot::digest_prefix;
 use attack_paths::ad::{
-    apply_ad_tags, graph_from_snapshot, incomplete_of, kind_of, label_of, node_id, unreadable_digest, FIELD_MEMBER_OF, LABEL_CUT_MARKER,
+    apply_ad_tags, graph_from_snapshot, incomplete_of, kind_name, kind_of, label_of, node_id, unreadable_digest, FIELD_MEMBER_OF, LABEL_CUT_MARKER,
     MAX_LABEL_BYTES, MAX_MEMBER_OF_PER_NODE, NODE_ID_PREFIX, REASON_GAP, REASON_OVER_EDGES, REASON_OVER_MEMBER_CAP, REASON_OVER_NODES_TARGET,
-    REASON_UNREADABLE_TARGET,
+    REASON_UNKNOWN_TARGET_WHILE_UNREADABLE, REASON_UNREADABLE_TARGET,
 };
 use attack_paths::bounds::validate_graph;
 use attack_paths::model::{Limits, NodeKind, Tags, MAX_DEPTH, MAX_EDGES, MAX_NODES, MAX_NODE_ID_BYTES, MAX_PATHS};
@@ -528,11 +528,84 @@ fn unreadable_entry_truncates_and_marks_its_members_incomplete() -> TestResult {
     snapshot.unreadable.push(unreadable_with(unreadable_digest(admins)));
     let built = graph_from_snapshot(&snapshot);
     assert!(built.truncated);
-    assert_eq!(built.incomplete.len(), 1);
+    assert_eq!(built.incomplete.len(), TWO);
     let named = built.incomplete.first().ok_or("member not named")?;
     assert_eq!((named.reason, named.field, named.dropped), (REASON_UNREADABLE_TARGET, FIELD_MEMBER_OF, 1));
     assert_eq!(named.digest, digest_prefix("CN=hd,DC=x"));
     assert_eq!(built.skipped.unknown_target, TWO);
+    Ok(())
+}
+
+
+#[test]
+fn a_non_ascii_unreadable_target_names_its_members_whatever_the_digest() -> TestResult {
+    let mut snapshot = snapshot_of(vec![
+        entry(
+            "CN=hd,DC=x",
+            &["user"],
+            vec!["CN=H\u{e9}lpdesk,DC=x".to_string(), "CN=gone,DC=x".to_string()],
+        ),
+        entry("CN=ok,DC=x", &["user"], Vec::new()),
+    ]);
+    snapshot.unreadable.push(unreadable_with(digest_prefix("\"CN=H\\u00e9lpdesk,DC=x\"")));
+    let built = graph_from_snapshot(&snapshot);
+    assert_eq!(built.incomplete.len(), 1);
+    let named = built.incomplete.first().ok_or("member not named")?;
+    assert_eq!((named.reason, named.dropped), (REASON_UNKNOWN_TARGET_WHILE_UNREADABLE, TWO));
+    assert_eq!(named.digest, digest_prefix("CN=hd,DC=x"));
+    Ok(())
+}
+
+
+#[test]
+fn matched_and_blind_values_are_both_named() -> TestResult {
+    let admins = "CN=Domain Admins,DC=x";
+    let mut snapshot = snapshot_of(vec![entry("CN=hd,DC=x", &["user"], vec![admins.to_string(), "CN=gone,DC=x".to_string()])]);
+    snapshot.unreadable.push(unreadable_with(unreadable_digest(admins)));
+    let built = graph_from_snapshot(&snapshot);
+    let reasons: Vec<&str> = built.incomplete.iter().map(|node| node.reason).collect();
+    assert_eq!(reasons, vec![REASON_UNREADABLE_TARGET, REASON_UNKNOWN_TARGET_WHILE_UNREADABLE]);
+    Ok(())
+}
+
+
+#[test]
+fn a_known_target_is_not_blind_while_entries_are_unreadable() -> TestResult {
+    let mut snapshot = snapshot_of(vec![
+        entry("CN=hd,DC=x", &["user"], vec!["CN=ops,DC=x".to_string()]),
+        entry("CN=ops,DC=x", &["group"], Vec::new()),
+    ]);
+    snapshot.unreadable.push(unreadable_with("00".to_string()));
+    assert!(graph_from_snapshot(&snapshot).incomplete.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_removed_node_keeps_its_kind() -> TestResult {
+    let mut entries: Vec<Entry> = (0..MAX_NODES)
+        .map(|index| entry(&format!("CN=u{index},DC=x"), &["user"], Vec::new()))
+        .collect();
+    entries.push(entry("CN=dc,DC=x", &["computer"], Vec::new()));
+    let built = graph_from_snapshot(&snapshot_of(entries));
+    assert_eq!(built.removed_kinds.get(&node_id("CN=dc,DC=x")), Some(&NodeKind::Workstation));
+    Ok(())
+}
+
+
+#[test]
+fn kinds_have_printed_names() -> TestResult {
+    let names: Vec<&str> = [
+        NodeKind::DomainController,
+        NodeKind::Group,
+        NodeKind::Workstation,
+        NodeKind::User,
+        NodeKind::Internet,
+    ]
+    .into_iter()
+    .map(kind_name)
+    .collect();
+    assert_eq!(names, vec!["domain controller", "group", "computer", "user", "other"]);
     Ok(())
 }
 

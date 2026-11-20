@@ -44,6 +44,9 @@ pub const REASON_OVER_MEMBER_CAP: &str = "over_member_cap";
 pub const REASON_UNREADABLE_TARGET: &str = "unreadable_target";
 
 
+pub const REASON_UNKNOWN_TARGET_WHILE_UNREADABLE: &str = "unknown_target_while_unreadable";
+
+
 pub const REASON_OVER_EDGES: &str = "over_edges";
 
 
@@ -93,6 +96,7 @@ pub struct AdGraph {
     pub truncated: bool,
     pub removed_ids: BTreeSet<String>,
     pub removed_digests: BTreeMap<String, String>,
+    pub removed_kinds: BTreeMap<String, NodeKind>,
     pub digests: BTreeMap<String, String>,
     pub incomplete: Vec<IncompleteNode>,
     pub duplicates: Vec<DuplicateDn>,
@@ -106,6 +110,7 @@ pub struct Build<'snapshot> {
     pub first_dn: BTreeMap<String, &'snapshot str>,
     pub removed_ids: BTreeSet<String>,
     pub removed_digests: BTreeMap<String, String>,
+    pub removed_kinds: BTreeMap<String, NodeKind>,
     pub skipped: SkipCounts,
     pub truncated: bool,
     pub incomplete: Vec<IncompleteNode>,
@@ -204,6 +209,7 @@ pub fn add_entry<'snapshot>(mut build: Build<'snapshot>, entry: &'snapshot Entry
         build.skipped.over_nodes += 1;
         build.truncated = true;
         build.removed_digests.insert(id.clone(), digest_prefix(&entry.dn));
+        build.removed_kinds.insert(id.clone(), kind_of(entry));
         build.removed_ids.insert(id);
     } else {
         let gaps = incomplete_of(&id, entry);
@@ -241,6 +247,36 @@ pub fn incomplete_link(from: &str, entry: &Entry, reason: &'static str, dropped:
 }
 
 
+/// For an entry of a snapshot that lost entries: its values naming no node, split into those whose digest matches an unreadable entry and the rest.
+pub fn unnamed_targets(entry: &Entry, known: &BTreeMap<String, String>, unreadable: &BTreeSet<&str>, removed: &BTreeSet<String>) -> (usize, usize) {
+    let unnamed: Vec<&String> = entry
+        .member_of
+        .iter()
+        .filter(|group| {
+            let id = node_id(group);
+            !unreadable.is_empty() && !known.contains_key(&id) && !removed.contains(&id)
+        })
+        .collect();
+    let matched = unnamed
+        .iter()
+        .filter(|group| unreadable.contains(unreadable_digest(group).as_str()))
+        .count();
+    (matched, unnamed.len() - matched)
+}
+
+
+/// The name a removed node is printed with.
+pub fn kind_name(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::DomainController => "domain controller",
+        NodeKind::Group => "group",
+        NodeKind::Workstation => "computer",
+        NodeKind::User => "user",
+        _ => "other",
+    }
+}
+
+
 pub fn add_links(
     mut linked: Linked,
     source: &(String, &Entry),
@@ -264,13 +300,14 @@ pub fn add_links(
                 .push(incomplete_link(from, entry, REASON_OVER_EDGES, entry.member_of.len()));
         }
     } else {
-        let lost = entry
-            .member_of
-            .iter()
-            .filter(|group| !known.contains_key(&node_id(group)) && unreadable.contains(unreadable_digest(group).as_str()))
-            .count();
-        if lost > 0 {
-            linked.incomplete.push(incomplete_link(from, entry, REASON_UNREADABLE_TARGET, lost));
+        let (matched, blind) = unnamed_targets(entry, known, unreadable, removed);
+        if matched > 0 {
+            linked.incomplete.push(incomplete_link(from, entry, REASON_UNREADABLE_TARGET, matched));
+        }
+        if blind > 0 {
+            linked
+                .incomplete
+                .push(incomplete_link(from, entry, REASON_UNKNOWN_TARGET_WHILE_UNREADABLE, blind));
         }
         let cut_targets = entry.member_of.iter().filter(|group| removed.contains(&node_id(group))).count();
         if cut_targets > 0 {
@@ -315,6 +352,7 @@ pub fn graph_from_snapshot(snapshot: &Snapshot) -> AdGraph {
             first_dn: BTreeMap::new(),
             removed_ids: BTreeSet::new(),
             removed_digests: BTreeMap::new(),
+            removed_kinds: BTreeMap::new(),
             skipped: SkipCounts {
                 unreadable: snapshot.unreadable.len(),
                 ..SkipCounts::default()
@@ -349,6 +387,7 @@ pub fn graph_from_snapshot(snapshot: &Snapshot) -> AdGraph {
         truncated,
         removed_ids: built.removed_ids,
         removed_digests: built.removed_digests,
+        removed_kinds: built.removed_kinds,
         digests,
         incomplete,
         duplicates: built.duplicates,

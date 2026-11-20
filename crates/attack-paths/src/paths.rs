@@ -163,13 +163,15 @@ pub fn paths_to_critical_with_budget(graph: &Graph, limits: Limits, max_steps: u
                 paths: Vec::new(),
                 truncated: false,
                 budget_reached: false,
+                unsearched: Vec::new(),
             },
             max_steps,
         ),
         |(mut state, steps_left), entry| {
             let remaining = limits.max_paths - state.paths.len();
             let targets: HashSet<usize> = critical.iter().copied().filter(|target| target != entry).collect();
-            let idle = state.truncated || targets.is_empty();
+            let has_targets = !targets.is_empty();
+            let idle = state.truncated || !has_targets;
             let network = Network {
                 adjacency: &adjacency,
                 targets,
@@ -185,6 +187,9 @@ pub fn paths_to_critical_with_budget(graph: &Graph, limits: Limits, max_steps: u
                 walk_from(&network, *entry, remaining, steps_left)
             };
             state.truncated = state.truncated || walked.found.len() > remaining || walked.budget_reached;
+            if has_targets && (walked.budget_reached || state.budget_reached) {
+                state.unsearched.extend(ids.get(*entry).map(|id| id.to_string()));
+            }
             state.budget_reached |= walked.budget_reached;
             state.paths.extend(walked.found.into_iter().take(remaining).map(|nodes| Path {
                 nodes: nodes.iter().filter_map(|node| ids.get(*node)).map(|id| id.to_string()).collect(),

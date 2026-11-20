@@ -98,6 +98,7 @@ pub struct PathSet {
     pub paths: Vec<Path>,
     pub truncated: bool,
     pub budget_reached: bool,
+    pub unsearched: Vec<String>,
 }
 
 
