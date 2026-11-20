@@ -8,8 +8,8 @@ use alerts::model::Severity;
 use alerts::store::{MAX_ALERTS_PER_INSERT, MAX_EVENT_ID_CHARS, MAX_RULE_ID_CHARS, MAX_TITLE_CHARS};
 use alerts::types::RowFuture;
 use compliance::alerting::{
-    alert_of, drift_alerts, failed_total, is_grammar, is_id, severity_of, store_drift_alerts, ASSET_PUNCTUATION, MAX_ASSET_CHARS, MAX_ID_CHARS,
-    MAX_TITLE_CHARS as MAX_SHORT_TITLE_CHARS, RULE_PREFIX, TITLE_PUNCTUATION,
+    alert_of, drift_alerts, failed_total, is_grammar, is_id, raise_state_full, severity_of, state_full_alert, store_drift_alerts, ASSET_PUNCTUATION,
+    MAX_ASSET_CHARS, MAX_ID_CHARS, MAX_TITLE_CHARS as MAX_SHORT_TITLE_CHARS, RULE_PREFIX, STATE_FULL_RULE, TITLE_PUNCTUATION,
 };
 use compliance::model::{DriftFinding, Severity as ControlSeverity, Verdict};
 use core_pg::error::PgError;
@@ -29,6 +29,18 @@ const LATER: u64 = 1_800_000_000_000_000;
 
 
 const FIRST_FAILED: u64 = 1_600_000_000_000_000;
+
+
+const DAY: u64 = 86_400_000_000;
+
+
+const THREE: usize = 3;
+
+
+const NINE: usize = 9;
+
+
+const FIVE: usize = 5;
 
 
 const HUGE: usize = 100_000;
@@ -407,5 +419,41 @@ fn the_warning_holds_both_counts_and_no_tenant_name() -> TestResult {
     assert!(text.contains("rejected=1"), "{text}");
     assert!(text.contains("foreign_tenant=1"), "{text}");
     assert!(!text.contains("secretco") && !text.contains("acme"), "{text}");
+    Ok(())
+}
+
+
+#[test]
+fn the_state_full_alert_is_one_per_tenant_and_day_with_counts_only() -> TestResult {
+    let acme = tenant_scope("acme")?;
+    let other = tenant_scope("other")?;
+    let first = state_full_alert(&acme, THREE, NOW);
+    let later_same_day = state_full_alert(&acme, NINE, NOW + 1);
+    let next_day = state_full_alert(&acme, THREE, NOW + DAY);
+    assert_eq!(first.id, later_same_day.id);
+    assert_ne!(first.id, next_day.id);
+    assert_ne!(first.id, state_full_alert(&other, THREE, NOW).id);
+    assert_eq!(first.rule_id, STATE_FULL_RULE);
+    assert_eq!(first.summary.text, "{\"refused\":3}");
+    assert_eq!(first.host_name, None);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_state_full_alert_is_raised_only_when_entries_were_refused_and_once_a_day() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let exec = executor(&store);
+    assert_eq!(raise_state_full(&exec, &scope, 0, NOW).await?, 0);
+    assert!(store.calls.lock().map_err(|_poisoned| "poisoned")?.is_empty());
+    assert_eq!(raise_state_full(&exec, &scope, TWO, NOW).await?, 1);
+    assert_eq!(raise_state_full(&exec, &scope, FIVE, NOW + 1).await?, 0);
+    assert_eq!(raise_state_full(&exec, &scope, FIVE, NOW + DAY).await?, 1);
+    let failing = Store {
+        fail: true,
+        ..Store::default()
+    };
+    assert!(raise_state_full(&executor(&failing), &scope, 1, NOW).await.is_err());
     Ok(())
 }

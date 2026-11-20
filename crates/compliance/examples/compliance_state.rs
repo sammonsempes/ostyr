@@ -1,6 +1,7 @@
 //! Lab proof. `compliance_state migrate <pg.yaml>`; `compliance_state run <pg.yaml> <tenant> <now> <cap> <baseline:control:asset:verdict>...`.
 
 use alerts::types::RowFuture;
+use compliance::alerting::raise_state_full;
 use compliance::model::Verdict;
 use compliance::store::record_verdicts_with_cap;
 use compliance::store::{MIGRATIONS, MIGRATION_NAMESPACE};
@@ -107,6 +108,9 @@ async fn run_command(arguments: &[String]) -> Result<(), String> {
         let outcome = record_verdicts_with_cap(&exec, &scope, &run, now, cap)
             .await
             .map_err(|error| error.to_string())?;
+        let raised = raise_state_full(&exec, &scope, outcome.refused_no_room, now)
+            .await
+            .map_err(|error| error.to_string())?;
         outcome
             .failed
             .iter()
@@ -120,7 +124,7 @@ async fn run_command(arguments: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         writeln!(
             out,
-            "skipped_invalid={} refused_no_room={}",
+            "skipped_invalid={} refused_no_room={} state_full_alerts={raised}",
             outcome.skipped_invalid, outcome.refused_no_room
         )
         .map_err(|error| error.to_string())

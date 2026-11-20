@@ -12,10 +12,37 @@ use std::collections::BTreeMap;
 pub const MIGRATION_NAMESPACE: &str = "compliance";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "compliance_0001",
-    sql: include_str!("../migrations/compliance_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "compliance_0001",
+        sql: include_str!("../migrations/compliance_0001.sql"),
+    },
+    Migration {
+        version: "compliance_0002",
+        sql: include_str!("../migrations/compliance_0002.sql"),
+    },
+];
+
+
+const MICROS_PER_HOUR: i64 = 3_600_000_000;
+
+
+const HOURS_PER_DAY: i64 = 24;
+
+
+const RETENTION_DAYS: i64 = 90;
+
+
+/// `last_seen_micros` of an unchanged row is rewritten at most once per this span.
+pub const LAST_SEEN_GRANULARITY: i64 = MICROS_PER_HOUR;
+
+
+/// A row not seen for this span is deleted at the start of a run.
+pub const STATE_RETENTION: i64 = RETENTION_DAYS * HOURS_PER_DAY * MICROS_PER_HOUR;
+
+
+/// Expired rows deleted by one run (the oldest first); the rest wait for the next run.
+pub const MAX_EXPIRED_PER_RUN: i64 = 10_000;
 
 
 /// Rows of one tenant; a run that would pass it stores nothing new and reports the refusal.
@@ -35,9 +62,9 @@ pub const OUTCOME_REFUSED: &str = "refused";
 pub const VERDICT_FAIL: &str = "fail";
 
 
-/// Params: `$2` JSON array of entries, `$3` now, `$4` row cap. The advisory lock, the count and the upsert run inside one function call.
-pub const RECORD_SQL: &str =
-    "SELECT entry_index::text, outcome, first_failed FROM compliance_record($1, $2::text::jsonb, $3::text::bigint, $4::text::bigint)";
+/// Params: `$2` JSON array of entries, `$3` now, `$4` row cap, `$5` retention, `$6` expired rows per run, `$7` last-seen granularity.
+pub const RECORD_SQL: &str = "SELECT entry_index::text, outcome, first_failed FROM compliance_record($1, $2::text::jsonb, $3::text::bigint, \
+$4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint)";
 
 
 pub fn verdict_name(verdict: &Verdict) -> &'static str {
@@ -142,11 +169,22 @@ pub async fn record_verdicts_with_cap(
     cap: i64,
 ) -> Result<RecordOutcome, StateError> {
     let (entries, skipped_invalid) = plan_run(run)?;
+    (0..=MAX_STATE_ROWS_PER_TENANT)
+        .contains(&cap)
+        .then_some(())
+        .ok_or(StateError::CapOutOfRange)?;
     let now = i64::try_from(now_micros).map_err(|_error| StateError::TimeOutOfRange)?;
     let decoded = if entries.is_empty() {
         RecordOutcome::default()
     } else {
-        let params = vec![entries_json(&entries), now.to_string(), cap.to_string()];
+        let params = vec![
+            entries_json(&entries),
+            now.to_string(),
+            cap.to_string(),
+            STATE_RETENTION.to_string(),
+            MAX_EXPIRED_PER_RUN.to_string(),
+            LAST_SEEN_GRANULARITY.to_string(),
+        ];
         let rows = exec(scope.clone(), RECORD_SQL, params).await.map_err(StateError::Store)?;
         decode_rows(&entries, &rows)?
     };
