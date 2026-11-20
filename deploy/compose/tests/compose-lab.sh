@@ -82,6 +82,7 @@ copy_into_vm() {
 remote "if [ -d compose ]; then cd compose && sudo docker compose down -v; fi"
 remote "sudo rm -rf compose image && mkdir -p compose image"
 copy_into_vm "$COMPOSE_DIR" compose --exclude=secrets
+remote "sudo chown -R root:root compose && sudo chmod -R go-w compose"
 copy_into_vm "$IMAGE_DIR" image
 remote "command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 openssl" >/dev/null
 remote "cd image && sudo docker build -t ostyr-platform:local ."
@@ -104,11 +105,31 @@ expect "init.sh refuses a partial TLS set naming the file" remote "cd compose &&
 remote "cd compose && sudo mv /tmp/api_tls.crt.keep secrets/api_tls.crt"
 long_label="$(printf 'a%.0s' $(seq 1 63))"
 long_name="$long_label.$long_label.$long_label.${long_label:0:61}"
-remote "sudo rm -rf longname && mkdir longname && cp compose/init.sh longname/ && cd longname && sudo ./init.sh $long_name"
+remote "sudo rm -rf longname && sudo mkdir longname && sudo cp compose/init.sh longname/ && cd longname && sudo ./init.sh $long_name"
 expect "a 253-character name verifies and sits in the SAN" remote "cd longname && sudo openssl verify -CAfile secrets/ca.crt secrets/api_tls.crt && sudo openssl x509 -in secrets/api_tls.crt -noout -ext subjectAltName | grep -q $long_name"
-remote "sudo rm -rf killed && mkdir killed && cp compose/init.sh killed/ && cd killed && sudo timeout -s TERM 0.3 ./init.sh kill.example; true"
+remote "sudo rm -rf killed && sudo mkdir killed && sudo cp compose/init.sh killed/ && cd killed && sudo timeout -s TERM 0.3 ./init.sh kill.example; true"
 expect "a killed init.sh leaves no scratch directory" absent remote "sudo find killed/secrets -name '.tls.*' | grep -q ."
 remote "cd killed && sudo rm -rf secrets && sudo ./init.sh kill.example && sudo openssl verify -CAfile secrets/ca.crt secrets/api_tls.crt"
+for odd_name in 1.2.3 127.1 0x7f.1.1.1 1.2.3.4.5; do
+    expect "init.sh refuses the all-numeric name $odd_name" absent remote "cd compose && sudo ./init.sh $odd_name"
+done
+remote "sudo rm -rf plant && sudo mkdir -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ln -s /tmp/leak-store secrets/store.key"
+expect "init.sh refuses a dangling symlink at store.key" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "no key was written through the symlink" absent remote "test -e /tmp/leak-store"
+remote "cd plant && sudo rm -rf secrets && sudo mkdir secrets && sudo ln -s /nowhere secrets/api_tls.crt"
+expect "init.sh refuses a dangling symlink at a TLS name" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "no TLS file was published next to the planted link" absent remote "cd plant && sudo test -e secrets/ca.crt"
+remote "cd plant && sudo rm -rf secrets && sudo ./init.sh plant.example && sudo truncate -s 5 secrets/store.key"
+expect "init.sh refuses a short secret naming the file" remote "cd plant && ! sudo ./init.sh plant.example 2>&1 | grep -q 'secrets ready' && sudo ./init.sh plant.example 2>&1 | grep -q 'store.key is not 32 bytes'"
+remote "cd plant && sudo rm -rf secrets && sudo mkdir secrets && sudo ln -s /root secrets2 && sudo mv secrets secrets.real && sudo ln -s secrets.real secrets"
+expect "init.sh refuses a secrets directory that is a symlink" absent remote "cd plant && sudo ./init.sh plant.example"
+remote "cd plant && sudo rm -rf secrets secrets.real secrets2 && sudo mkdir secrets && sudo chown 1000 secrets"
+expect "init.sh refuses a secrets directory owned by uid 1000" absent remote "cd plant && sudo ./init.sh plant.example"
+expect "a second concurrent init.sh is refused by the lock and the first finishes a full set" remote "sudo compose/tests/lock-proof.sh compose/init.sh"
+remote "sudo rm -rf plant && sudo mkdir -p plant/secrets && sudo cp compose/init.sh plant/ && cd plant && sudo ./init.sh plant.example && sudo chmod 0644 secrets/store.key"
+expect "init.sh refuses a secret with mode 0644 naming the file" remote "cd plant && sudo ./init.sh plant.example 2>&1 | grep -q 'store.key must have mode 600'"
+remote "sudo rm -rf plant && sudo mkdir -p plant/secrets && sudo cp compose/init.sh plant/ && sudo chmod 0777 plant"
+expect "init.sh refuses a world-writable parent of secrets" absent remote "cd plant && sudo ./init.sh plant.example"
 expect "the installed certificates verify against the CA" remote "cd compose && sudo openssl verify -CAfile secrets/ca.crt secrets/pg_server.crt secrets/api_tls.crt"
 remote "cd compose && sudo find secrets -exec stat -c '%a %u %n' {} +"
 
