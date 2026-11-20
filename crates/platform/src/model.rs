@@ -4,4 +4,7 @@ pub enum Module {
     Cases,
     Cmdb,
     Risk,
+    Hunts,
+    Certificates,
+    Oncall,
 }

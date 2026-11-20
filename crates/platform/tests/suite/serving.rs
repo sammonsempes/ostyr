@@ -1,15 +1,30 @@
-use crate::fixture::{body_json, call, fixture, login, ANALYST, READER};
+use crate::fixture::{body_json, call, fixture, fixture_with_permits, login, ANALYST, READER};
 use crate::types::TestResult;
 use axum::body::Body;
 use axum::http::StatusCode;
+use platform::merge::MAX_MODULES_CHARS;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 
-const ROUTES: [(&str, &str); 4] = [
+const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall";
+
+
+const ROUTES: [(&str, &str); 7] = [
     ("/alerts", "alerts"),
     ("/cases", "cases"),
     ("/assets", "cmdb"),
     ("/risk/entities", "risk"),
+    ("/hunts/findings", "hunts"),
+    ("/certificates", "certificates"),
+    ("/oncall/alerts", "oncall"),
 ];
+
+
+const FINGERPRINT_PATH: &str = "/certificates/0000000000000000000000000000000000000000000000000000000000000000";
+
+
+const NEW_PATHS: [&str; 5] = ["/hunts/findings", "/certificates", FINGERPRINT_PATH, "/oncall/alerts", "/oncall/alerts/1"];
 
 
 async fn status(router: &axum::Router, method: &str, path: &str, token: Option<&str>) -> Result<StatusCode, crate::types::TestError> {
@@ -24,7 +39,7 @@ fn denied(code: StatusCode) -> bool {
 
 #[tokio::test]
 async fn one_session_reaches_every_selected_module() -> TestResult {
-    let fx = fixture("alerts,cases,cmdb,risk")?;
+    let fx = fixture(ALL_MODULES)?;
     let token = login(&fx.router, ANALYST).await?;
     for (path, _module) in ROUTES {
         let code = status(&fx.router, "GET", path, Some(&token)).await?;
@@ -37,10 +52,62 @@ async fn one_session_reaches_every_selected_module() -> TestResult {
 
 #[tokio::test]
 async fn the_permission_survives_the_merge() -> TestResult {
-    let fx = fixture("alerts,cases,cmdb,risk")?;
+    let fx = fixture(ALL_MODULES)?;
     let token = login(&fx.router, READER).await?;
+    for (path, module) in ROUTES {
+        let code = status(&fx.router, "GET", path, Some(&token)).await?;
+        if module == "hunts" {
+            assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{path} {code}");
+        } else {
+            assert_eq!(code, StatusCode::FORBIDDEN, "{path}");
+        }
+    }
+    assert_eq!(status(&fx.router, "GET", FINGERPRINT_PATH, Some(&token)).await?, StatusCode::FORBIDDEN);
+    assert_eq!(status(&fx.router, "GET", "/oncall/alerts/1", Some(&token)).await?, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_new_detail_routes_are_mounted_for_an_analyst() -> TestResult {
+    for path in NEW_PATHS {
+        let fx = fixture(ALL_MODULES)?;
+        let token = login(&fx.router, ANALYST).await?;
+        let code = status(&fx.router, "GET", path, Some(&token)).await?;
+        assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{path} {code}");
+        assert_eq!(status(&fx.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
+        for method in ["HEAD", "PUT", "POST", "DELETE"] {
+            assert!(denied(status(&fx.router, method, path, Some(&token)).await?), "{method} {path}");
+        }
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_new_modules_share_one_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
+    let permits = Arc::new(Semaphore::new(0));
+    let fx = fixture_with_permits(ALL_MODULES, &permits)?;
+    let token = login(&fx.router, ANALYST).await?;
+    for path in NEW_PATHS {
+        assert_eq!(
+            status(&fx.router, "GET", path, Some(&token)).await?,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_longest_module_list_is_served_and_the_document_lists_every_path() -> TestResult {
+    assert!(ALL_MODULES.len() <= MAX_MODULES_CHARS);
+    let fx = fixture(ALL_MODULES)?;
+    let document = body_json(call(&fx.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
+    let paths = document.get("paths").ok_or("no paths")?;
     for (path, _module) in ROUTES {
-        assert_eq!(status(&fx.router, "GET", path, Some(&token)).await?, StatusCode::FORBIDDEN, "{path}");
+        assert!(paths.get(path).is_some(), "{path}");
     }
     Ok(())
 }
@@ -58,6 +125,11 @@ async fn an_unselected_module_is_denied_by_default() -> TestResult {
         "/assets/abc",
         "/risk/entities",
         "/risk/entities/host/web01",
+        "/hunts/findings",
+        "/certificates",
+        "/certificates/abc",
+        "/oncall/alerts",
+        "/oncall/alerts/abc",
     ] {
         assert_eq!(status(&fx.router, "GET", path, Some(&token)).await?, StatusCode::FORBIDDEN, "{path}");
         assert_eq!(status(&fx.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
@@ -68,7 +140,7 @@ async fn an_unselected_module_is_denied_by_default() -> TestResult {
 
 #[tokio::test]
 async fn other_methods_are_denied_on_every_module_route() -> TestResult {
-    let fx = fixture("alerts,cases,cmdb,risk")?;
+    let fx = fixture(ALL_MODULES)?;
     let token = login(&fx.router, ANALYST).await?;
     for (path, _module) in ROUTES {
         for method in ["HEAD", "PUT", "POST", "DELETE"] {

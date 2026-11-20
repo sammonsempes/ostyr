@@ -9,10 +9,13 @@ publish = false
 alerts = { version = "0.0.0", path = "../alerts" }
 axum = "0.8"
 cases = { version = "0.0.0", path = "../cases" }
+cert-inventory = { version = "0.0.0", path = "../cert-inventory" }
 cmdb = { version = "0.0.0", path = "../cmdb" }
 core-api = { version = "0.0.0", path = "../core-api" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+hunt-packs = { version = "0.0.0", path = "../hunt-packs" }
+oncall = { version = "0.0.0", path = "../oncall" }
 risk-score = { version = "0.0.0", path = "../risk-score" }
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
