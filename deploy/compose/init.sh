@@ -7,7 +7,7 @@ set -euo pipefail
 export LC_ALL=C
 ulimit -c 0
 
-COMPOSE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly COMPOSE_DIR
 readonly SECRETS_DIR="$COMPOSE_DIR/secrets"
 readonly SERVICE_UID=65532
@@ -26,9 +26,12 @@ readonly BASE64_LENGTH=44
 readonly PLATFORM_CN=ostyr-platform
 readonly CURVE=prime256v1
 readonly LOCK_FILE="$SECRETS_DIR/.lock"
-readonly LOCK_WAIT_SECONDS=30
+readonly LOCK_WAIT_DEFAULT=30
+readonly LOCK_WAIT_SECONDS="${INIT_LOCK_WAIT_SECONDS:-$LOCK_WAIT_DEFAULT}"
 readonly LOCK_FD=9
 readonly UNSAFE_MODE_BITS=022
+readonly PRIVATE_MODE_BITS=077
+readonly STICKY_BIT=1000
 
 host_name="${1:?usage: init.sh <public-host-name>}"
 readonly host_name
@@ -63,17 +66,54 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
-umask 077
-if [[ -L "$COMPOSE_DIR" || "$(stat -c %u "$COMPOSE_DIR")" != 0 || $((8#$(stat -c %a "$COMPOSE_DIR") & 8#$UNSAFE_MODE_BITS)) -ne 0 ]]; then
-    printf 'error: %s must be owned by root and not writable by group or others\n' "$COMPOSE_DIR" >&2
+if [[ ! "$LOCK_WAIT_SECONDS" =~ $DIGITS_PATTERN ]]; then
+    printf 'error: INIT_LOCK_WAIT_SECONDS must be a whole number of seconds\n' >&2
     exit 1
 fi
+
+check_ancestor() {
+    local component="$1" mode
+    mode="$(stat -c %a "$component")"
+    if [[ "$(stat -c %u "$component")" != 0 ]]; then
+        printf 'error: %s must be owned by root\n' "$component" >&2
+        exit 1
+    fi
+    if [[ $((8#$mode & 8#$UNSAFE_MODE_BITS)) -ne 0 ]]; then
+        if [[ "$component" == "$COMPOSE_DIR" || $((8#$mode & 8#$STICKY_BIT)) -eq 0 ]]; then
+            printf 'error: %s must not be writable by group or others\n' "$component" >&2
+            exit 1
+        fi
+    fi
+}
+
+check_ancestors() {
+    local component="" part
+    local -a parts
+    check_ancestor /
+    IFS=/ read -r -a parts <<<"${COMPOSE_DIR#/}"
+    for part in "${parts[@]}"; do
+        component="$component/$part"
+        check_ancestor "$component"
+    done
+}
+
+umask 077
+check_ancestors
 mkdir -p "$SECRETS_DIR"
 if [[ -L "$SECRETS_DIR" || ! -d "$SECRETS_DIR" || "$(stat -c %u "$SECRETS_DIR")" != 0 ]]; then
     printf 'error: %s must be a directory owned by root, not a symlink\n' "$SECRETS_DIR" >&2
     exit 1
 fi
-chmod 0700 "$SECRETS_DIR"
+if [[ $((8#$(stat -c %a "$SECRETS_DIR") & 8#$PRIVATE_MODE_BITS)) -ne 0 ]]; then
+    printf 'error: %s must have no group or other permission bits (chmod 0700 it, check what is inside)\n' "$SECRETS_DIR" >&2
+    exit 1
+fi
+if [[ -e "$LOCK_FILE" || -L "$LOCK_FILE" ]]; then
+    if [[ -L "$LOCK_FILE" || ! -f "$LOCK_FILE" || "$(stat -c %u "$LOCK_FILE")" != 0 ]]; then
+        printf 'error: %s must be a regular file owned by root, not a link\n' "$LOCK_FILE" >&2
+        exit 1
+    fi
+fi
 exec 9>>"$LOCK_FILE"
 if ! flock -w "$LOCK_WAIT_SECONDS" "$LOCK_FD"; then
     printf 'error: another init.sh holds the lock on %s, wait for it and rerun\n' "$SECRETS_DIR" >&2
@@ -128,7 +168,7 @@ make_random_file() {
         else
             head -c "$KEY_BYTES" /dev/urandom >"$temporary"
         fi
-        chown "$(expected_owner "$name")" "$temporary"
+        chown -h "$(expected_owner "$name")" "$temporary"
         chmod 0600 "$temporary"
         ln "$temporary" "$SECRETS_DIR/$name"
     fi
@@ -144,7 +184,11 @@ make_leaf() {
 
 stage_file() {
     local name="$1" mode="$2" owner="$3"
-    chown "${owner%%:*}:${owner##*:}" "$scratch/$name"
+    if [[ -L "$scratch/$name" ]]; then
+        printf 'error: %s is a symlink, refused\n' "$scratch/$name" >&2
+        exit 1
+    fi
+    chown -h "${owner%%:*}:${owner##*:}" "$scratch/$name"
     chmod "$mode" "$scratch/$name"
     staged_inode[$name]="$(stat -c %d:%i "$scratch/$name")"
 }

@@ -1,7 +1,7 @@
 use attack_paths::bounds::validate_graph;
 use attack_paths::error::{GraphError, LimitsError, PathsError};
 use attack_paths::model::{Edge, Graph, Limits, Node, NodeKind, Path, Relation, MAX_DEPTH, MAX_PATHS};
-use attack_paths::paths::paths_to_critical;
+use attack_paths::paths::{paths_to_critical, paths_to_critical_with_budget};
 use types::TestResult;
 
 
@@ -251,5 +251,53 @@ fn a_malformed_graph_is_refused_before_the_search() -> TestResult {
         Err(PathsError::Graph(GraphError::UnknownNode { index: 0 }))
     ));
     assert!(validate_graph(&graph).is_err());
+    Ok(())
+}
+
+
+const CLIQUE_SIZE: usize = 8;
+
+
+const SMALL_BUDGET: usize = 1_000;
+
+
+fn clique() -> Graph {
+    let names: Vec<String> = (0..CLIQUE_SIZE).map(|index| format!("g{index}")).collect();
+    let mut nodes: Vec<Node> = names.iter().map(|name| node(name, NodeKind::Group, false, false)).collect();
+    nodes.push(node("hd", NodeKind::User, false, true));
+    nodes.push(node("da", NodeKind::DomainController, true, false));
+    let mut edges: Vec<Edge> = names.iter().flat_map(|from| names.iter().map(move |to| link(from, to))).collect();
+    edges.push(link("hd", "g0"));
+    edges.push(link("g7", "da"));
+    Graph { nodes, edges }
+}
+
+
+#[test]
+fn a_clique_ends_at_the_step_budget_and_says_so() -> TestResult {
+    let cut = paths_to_critical_with_budget(&clique(), limits(MAX_DEPTH, MAX_PATHS), SMALL_BUDGET)?;
+    assert!(cut.budget_reached);
+    assert!(cut.truncated);
+    let full = paths_to_critical(&clique(), limits(MAX_DEPTH, MAX_PATHS))?;
+    assert!(!full.budget_reached);
+    assert!(!full.truncated);
+    assert!(full.paths.len() > cut.paths.len());
+    Ok(())
+}
+
+
+#[test]
+fn nodes_that_cannot_reach_a_critical_node_are_pruned() -> TestResult {
+    let graph = Graph {
+        nodes: vec![
+            node("ws", NodeKind::Workstation, false, true),
+            node("dead", NodeKind::Group, false, false),
+            node("dc", NodeKind::DomainController, true, false),
+        ],
+        edges: vec![link("ws", "dead"), link("ws", "dc")],
+    };
+    let found = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, MAX_PATHS), TWO_PATHS * CHAIN_LENGTH)?;
+    assert_eq!(found.paths, vec![route(&["ws", "dc"])]);
+    assert!(!found.budget_reached);
     Ok(())
 }
