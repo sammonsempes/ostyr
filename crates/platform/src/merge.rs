@@ -5,6 +5,7 @@ use alerts::backend::MAX_CONNECTIONS;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use axum::Router;
 use cases::store::{MIGRATIONS as CASE_MIGRATIONS, MIGRATION_NAMESPACE as CASE_NAMESPACE};
+use cert_inventory::store::{MIGRATIONS as CERT_MIGRATIONS, MIGRATION_NAMESPACE as CERT_NAMESPACE};
 use cmdb::store::{MIGRATIONS as CMDB_MIGRATIONS, MIGRATION_NAMESPACE as CMDB_NAMESPACE};
 use core_api::routes::core_access;
 use core_api::types::{AccessTable, SharedState};
@@ -12,6 +13,8 @@ use core_config::reload::ReloadEngine;
 use core_config::types::SettingsMap;
 use core_pg::migrate::Migration;
 use core_pg::settings::PgSettings;
+use hunt_packs::store::{MIGRATIONS as HUNT_MIGRATIONS, MIGRATION_NAMESPACE as HUNT_NAMESPACE};
+use oncall::store::{MIGRATIONS as ONCALL_MIGRATIONS, MIGRATION_NAMESPACE as ONCALL_NAMESPACE};
 use risk_score::api::{risk_access, risk_document, risk_router};
 use risk_score::backend::{pg_backend as risk_backend, system_clock};
 use risk_score::cache::risk_state;
@@ -28,7 +31,7 @@ pub const SETTING_MODULES: &str = "modules";
 pub const SETTING_WEIGHTS_FILE: &str = "risk.weights_file";
 
 
-pub const MAX_MODULES_CHARS: usize = 64;
+pub const MAX_MODULES_CHARS: usize = 128;
 
 
 pub const ACTOR: &str = "platform";
@@ -43,12 +46,24 @@ const CASE_PLAN: &[Migration] = &CASE_MIGRATIONS;
 const CMDB_PLAN: &[Migration] = &CMDB_MIGRATIONS;
 
 
+const HUNT_PLAN: &[Migration] = &HUNT_MIGRATIONS;
+
+
+const CERT_PLAN: &[Migration] = &CERT_MIGRATIONS;
+
+
+const ONCALL_PLAN: &[Migration] = &ONCALL_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
         "cases" => Some(Module::Cases),
         "cmdb" => Some(Module::Cmdb),
         "risk" => Some(Module::Risk),
+        "hunts" => Some(Module::Hunts),
+        "certificates" => Some(Module::Certificates),
+        "oncall" => Some(Module::Oncall),
         _ => None,
     }
 }
@@ -129,6 +144,18 @@ pub fn module_router(
             Arc::clone(permits),
         ))),
         Module::Cmdb => Ok(cmdb::api::cmdb_router(cmdb::backend::pg_backend(Arc::clone(engine), Arc::clone(permits)))),
+        Module::Hunts => Ok(hunt_packs::api::hunts_router(hunt_packs::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
+        Module::Certificates => Ok(cert_inventory::api::certificates_router(cert_inventory::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
+        Module::Oncall => Ok(oncall::api::oncall_router(oncall::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -146,6 +173,9 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Cases => cases::api::cases_access(),
         Module::Cmdb => cmdb::api::cmdb_access(),
         Module::Risk => risk_access(),
+        Module::Hunts => hunt_packs::api::hunts_access(),
+        Module::Certificates => cert_inventory::api::certificates_access(),
+        Module::Oncall => oncall::api::oncall_access(),
     }
 }
 
@@ -156,6 +186,9 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Cases => cases::api::cases_document(),
         Module::Cmdb => cmdb::api::cmdb_document(),
         Module::Risk => risk_document(),
+        Module::Hunts => hunt_packs::api::hunts_document(),
+        Module::Certificates => cert_inventory::api::certificates_document(),
+        Module::Oncall => oncall::api::oncall_document(),
     }
 }
 
@@ -182,6 +215,9 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Alerts, Module::Cases, Module::Risk]), ALERT_NAMESPACE, ALERT_PLAN),
         (wants(&[Module::Cases]), CASE_NAMESPACE, CASE_PLAN),
         (wants(&[Module::Cmdb]), CMDB_NAMESPACE, CMDB_PLAN),
+        (wants(&[Module::Hunts]), HUNT_NAMESPACE, HUNT_PLAN),
+        (wants(&[Module::Certificates]), CERT_NAMESPACE, CERT_PLAN),
+        (wants(&[Module::Oncall]), ONCALL_NAMESPACE, ONCALL_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)
