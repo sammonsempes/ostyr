@@ -4,7 +4,8 @@ use crate::error::{CliError, PlantError, PlantRefusal};
 use crate::model::{Honeytoken, Limits, PlantReport, PlantedIdentity, Role};
 use crate::policy::kernel_device;
 use crate::types::{ClaimFn, ListFn, RandomFn, StepFn};
-use core_config::trusted_dir::{open_trusted_dir, TrustedDirError, GROUP_OTHER_WRITE};
+use core_config::trusted_dir::{open_trusted_dir, GROUP_OTHER_WRITE};
+use core_config::trusted_program::{open_trusted_program, same_program, TrustedProgramError};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{
     fchmod, fchown, fstat, makedev, mkdirat, openat, renameat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags, RawMode, Stat, CWD,
@@ -59,6 +60,9 @@ pub const TETRA_OWNER_UID: u32 = 0;
 pub const WAIT_POLL: Duration = Duration::from_millis(10);
 
 
+pub const PROGRAM_CHANGED: &str = "program changed after the check";
+
+
 pub const MAX_WAIT_POLLS: usize = 1 << 20;
 
 
@@ -75,9 +79,6 @@ pub const LIST_DEADLINE: Duration = Duration::from_secs(30);
 
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
-
-
-const BINARY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC).union(OFlags::NONBLOCK);
 
 
 const CREATE_FLAGS: OFlags = OFlags::WRONLY
@@ -162,12 +163,44 @@ pub fn os_list_policies() -> std::io::Result<String> {
 
 /// Lists with the first candidate that `pick_binary` accepts; none at all means no policy is loaded.
 pub fn list_first(candidates: &[&str], owner: u32, deadline: Duration) -> std::io::Result<String> {
-    pick_binary(candidates, owner).and_then(|found| found.map_or(Ok(String::new()), |binary| list_from(binary, deadline)))
+    list_first_with(candidates, owner, deadline, no_hook)
 }
 
 
-/// The first candidate that passes `check_binary`; one that fails it is skipped with a warning and never run, and when none passes the first failure is the error.
-pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Option<&'a str>> {
+/// `list_first` with a hook that runs between the pick and the check made right before the spawn.
+pub fn list_first_with(candidates: &[&str], owner: u32, deadline: Duration, between: fn(&str)) -> std::io::Result<String> {
+    pick_binary(candidates, owner).and_then(|found| {
+        found.map_or(Ok(String::new()), |(binary, handle)| {
+            list_checked(binary, &handle, owner, deadline, between)
+        })
+    })
+}
+
+
+pub fn no_hook(_binary: &str) {}
+
+
+/// Runs the listing only when the path still names the program the handle holds, judged again from `/`; an error is never read as "no policy loaded".
+pub fn list_checked(binary: &str, handle: &OwnedFd, owner: u32, deadline: Duration, between: fn(&str)) -> std::io::Result<String> {
+    between(binary);
+    same_program(handle, Path::new(binary), owner)
+        .inspect_err(log_unjudged)
+        .unwrap_or(false)
+        .then_some(())
+        .ok_or(std::io::Error::other(PROGRAM_CHANGED))
+        .and_then(|()| list_from(binary, deadline))
+}
+
+
+/// Logs that the program could not be judged again before the spawn.
+pub fn log_unjudged(error: &TrustedProgramError) {
+    let reason = error.to_string();
+    tracing::warn!(reason, "tetra cannot be judged again");
+}
+
+
+/// The first candidate that passes `check_binary`, with its judged handle; one that fails is skipped with a warning and never run, and when none passes the first failure is the error.
+pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Option<(&'a str, OwnedFd)>> {
     let mut first_failure: Option<std::io::Error> = None;
     let found = candidates.iter().find_map(|path| match check_binary(path, owner) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -176,10 +209,10 @@ pub fn pick_binary<'a>(candidates: &[&'a str], owner: u32) -> std::io::Result<Op
             first_failure.get_or_insert(error);
             None
         }
-        Ok(()) => Some(*path),
+        Ok(handle) => Some((*path, handle)),
     });
     match (found, first_failure) {
-        (Some(path), _) => Ok(Some(path)),
+        (Some(picked), _) => Ok(Some(picked)),
         (None, Some(error)) => Err(error),
         (None, None) => Ok(None),
     }
@@ -193,38 +226,18 @@ pub fn log_skipped_candidate(path: &str, error: &std::io::Error) {
 }
 
 
-/// The binary and every directory above it: no symlink, owned by `owner`, closed to group and others (the rule of the ndr program check).
-pub fn check_binary(path: &str, owner: u32) -> std::io::Result<()> {
-    let parts = Path::new(path).parent().zip(Path::new(path).file_name());
-    parts
-        .ok_or(std::io::Error::other("tetra path has no directory"))
-        .and_then(|(directory, name)| {
-            open_trusted_dir(directory, owner)
-                .map_err(directory_error)
-                .and_then(|parent| openat(&parent, name, BINARY_FLAGS, Mode::empty()).map_err(std::io::Error::from))
-                .and_then(|handle| fstat(&handle).map_err(std::io::Error::from))
-                .and_then(|stat| binary_verdict(&facts_of(&stat), owner).map_err(std::io::Error::other))
-        })
+/// The shared program rule (core-config): no link anywhere, every directory and the file owned by root or `owner` and closed to group and others.
+pub fn check_binary(path: &str, owner: u32) -> std::io::Result<OwnedFd> {
+    open_trusted_program(Path::new(path), owner).map_err(program_error)
 }
 
 
-/// A directory refusal keeps its reason, an open failure keeps its kind (so a missing directory reads as a missing binary).
-pub fn directory_error(error: TrustedDirError) -> std::io::Error {
+/// A refusal keeps its reason, an open failure keeps its kind (so a missing binary reads as `NotFound`).
+pub fn program_error(error: TrustedProgramError) -> std::io::Error {
     match error {
-        TrustedDirError::Io(source) => source,
-        other => std::io::Error::other(other.to_string()),
+        TrustedProgramError::Refused(reason) => std::io::Error::other(reason),
+        TrustedProgramError::Io(source) => source,
     }
-}
-
-
-/// The binary is a regular file of `owner` that group and others cannot write.
-pub fn binary_verdict(facts: &FileFacts, owner: u32) -> Result<(), &'static str> {
-    let failure = first_failure(&[
-        (facts.regular, "tetra is not a regular file"),
-        (facts.uid == owner, "tetra is not owned by root"),
-        (facts.mode & GROUP_OTHER_WRITE == 0, "tetra is writable by group or others"),
-    ]);
-    failure.map_or(Ok(()), Err)
 }
 
 
