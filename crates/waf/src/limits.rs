@@ -178,7 +178,8 @@ pub const MAX_DEADLINE_SECONDS: u64 = 120;
 pub const DEFAULT_DEADLINE_SECONDS: u64 = 30;
 
 
-pub const DEFAULT_CADDY_PROGRAM: &str = "/usr/bin/caddy";
+/// The only binary the root apply runs; no setting, variable or file field can name another.
+pub const CADDY_PROGRAM: &str = "/usr/bin/caddy";
 
 
 pub const DEFAULT_ADMIN_SOCKET: &str = "/run/ostyr-waf/caddy-admin.sock";
@@ -244,9 +245,6 @@ pub const EPOCH_STATE_KEY: &str = "waf.epoch";
 pub const DEADLINE_STATE_KEY: &str = "waf.deadline_seconds";
 
 
-pub const PROGRAM_STATE_KEY: &str = "waf.caddy_program";
-
-
 pub const LATE_PARAMETER: &str = "late";
 
 
@@ -265,7 +263,11 @@ pub const START_DIFF: &str = "initial configuration";
 pub const UNTRUSTED_ADMIN: &str = "the admin socket directory must be absolute, owned by the running user or root, and closed to group and others";
 
 
-pub const UNTRUSTED_PROGRAM: &str = "caddy_program must be a regular file that, with its directories, belongs to root or this user, closed to others";
+pub const UNTRUSTED_PROGRAM: &str =
+    "the Caddy program /usr/bin/caddy must be a regular file that, with its directories, belongs to root or this user, closed to others";
+
+
+pub const RETIRED_PROGRAM_SETTING: &str = "caddy_program is no longer a setting, the program is /usr/bin/caddy: remove the line";
 
 
 pub const UNTRUSTED_SETTINGS: &str = "the settings file directory must be absolute, owned by the running user, closed to group and others";
