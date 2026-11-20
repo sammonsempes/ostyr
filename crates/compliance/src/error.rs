@@ -38,3 +38,16 @@ pub enum StateError {
     #[error("the state store failed")]
     Store(#[source] core_pg::error::PgError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum ReportError {
+    #[error("the report could not be written")]
+    Write(#[from] std::io::Error),
+    #[error("state_full alert not raised: {category}")]
+    AlertFailed {
+        category: &'static str,
+        #[source]
+        source: alerts::error::StoreError,
+    },
+}

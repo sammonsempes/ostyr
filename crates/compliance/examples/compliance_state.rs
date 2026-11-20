@@ -1,7 +1,7 @@
 //! Lab proof. `compliance_state migrate <pg.yaml>`; `compliance_state run <pg.yaml> <tenant> <now> <cap> <baseline:control:asset:verdict>...`.
 
 use alerts::types::RowFuture;
-use compliance::alerting::raise_state_full;
+use compliance::alerting::report_run;
 use compliance::model::Verdict;
 use compliance::store::record_verdicts_with_cap;
 use compliance::store::{MIGRATIONS, MIGRATION_NAMESPACE};
@@ -86,10 +86,13 @@ async fn run_command(arguments: &[String]) -> Result<(), String> {
     let client = connect(&settings).await.map_err(|error| error.to_string())?;
     let mut out = stdout();
     if arguments.get(1).map(String::as_str) == Some("migrate") {
+        let alerts_applied = migrate(&client, alerts::store::MIGRATION_NAMESPACE, &alerts::store::MIGRATIONS, DEADLINE)
+            .await
+            .map_err(|error| error.to_string())?;
         let applied = migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE)
             .await
             .map_err(|error| error.to_string())?;
-        writeln!(out, "applied {applied:?}").map_err(|error| error.to_string())
+        writeln!(out, "applied {alerts_applied:?} {applied:?}").map_err(|error| error.to_string())
     } else if arguments.len() >= MIN_RUN_ARGS {
         let scope = tenant_scope(arguments.get(ARG_TENANT).ok_or(USAGE)?).map_err(|error| error.to_string())?;
         let now: u64 = arguments.get(ARG_NOW).ok_or(USAGE)?.parse().map_err(|_error| USAGE.to_owned())?;
@@ -108,26 +111,9 @@ async fn run_command(arguments: &[String]) -> Result<(), String> {
         let outcome = record_verdicts_with_cap(&exec, &scope, &run, now, cap)
             .await
             .map_err(|error| error.to_string())?;
-        let raised = raise_state_full(&exec, &scope, outcome.refused_no_room, now)
+        report_run(&exec, &scope, &outcome, now, &mut out)
             .await
-            .map_err(|error| error.to_string())?;
-        outcome
-            .failed
-            .iter()
-            .try_for_each(|failed| {
-                writeln!(
-                    out,
-                    "failed {}:{}:{} first={}",
-                    failed.baseline, failed.control, failed.asset, failed.first_failed_micros
-                )
-            })
-            .map_err(|error| error.to_string())?;
-        writeln!(
-            out,
-            "skipped_invalid={} refused_no_room={} state_full_alerts={raised}",
-            outcome.skipped_invalid, outcome.refused_no_room
-        )
-        .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())
     } else {
         Err(USAGE.to_owned())
     }
