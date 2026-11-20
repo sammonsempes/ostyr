@@ -262,7 +262,7 @@ pub fn open_alerts(_scope: TenantScope, _sql: &'static str, _params: Vec<String>
 
 
 /// One model call through the only public path, `budgeted_chat`, with stores that always grant the room.
-pub fn chat(used: &AiSettings, instructions: &str, data: &Value, chat_deps: &Deps) -> Result<Answer, AiError> {
+pub fn chat(used: &AiSettings, instructions: &'static str, data: &Value, chat_deps: &Deps) -> Result<Answer, AiError> {
     let gate = new_gate(WAITING_LIMIT);
     let stores = Stores {
         budget: &open_budget,

@@ -56,6 +56,8 @@ pub enum AiError {
     BudgetSpent,
     #[error("the request reserves {reserved} tokens, over the daily cap of {cap}")]
     RequestOverBudget { reserved: i64, cap: i64 },
+    #[error("the instructions alone reserve {skeleton} tokens, over the daily cap of {cap}")]
+    InstructionsOverBudget { skeleton: i64, cap: i64 },
     #[error("the request reserves {reserved} tokens but only {room} are left today: retry with less data")]
     BudgetRoomTooSmall { reserved: i64, room: i64 },
     #[error("the daily budget has no room right now: reservations are in flight or too many wait on the store, retry later")]

@@ -2,7 +2,6 @@ use crate::chat::{prepare, send};
 use crate::error::AiError;
 use crate::limits::{
     ALERT_PERCENT, BUDGET_80_RULE, BUDGET_REQUEST_TOO_LARGE_RULE, BUDGET_SPENT_RULE, HELD_EXPIRY_SECONDS, MICROS_PER_SECOND, PERCENT,
-    REQUEST_OVERHEAD_BYTES,
 };
 use crate::model::{Answer, Deps};
 use crate::settings::AiSettings;
@@ -23,7 +22,7 @@ use tracing::{info, warn};
 pub const MIGRATION_NAMESPACE: &str = "ai_gateway";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "ai_gateway_0001",
         sql: include_str!("../migrations/ai_gateway_0001.sql"),
@@ -32,10 +31,6 @@ pub const MIGRATIONS: [Migration; 3] = [
         version: "ai_gateway_0002",
         sql: include_str!("../migrations/ai_gateway_0002.sql"),
     },
-    Migration {
-        version: "ai_gateway_0003",
-        sql: include_str!("../migrations/ai_gateway_0003.sql"),
-    },
 ];
 
 
@@ -43,30 +38,27 @@ pub const MIGRATIONS: [Migration; 3] = [
 pub const STATEMENT_DEADLINE: Duration = Duration::from_secs(10);
 
 
-/// Params: `$2` UTC day, `$3` reservation, `$4` call cap, `$5` token cap, `$6` seconds a held reservation stays live. `min_reserved` keeps the smallest reservation granted that day. One statement reserves one call and the tokens when both caps hold, on insert and on update alike; no row means refused. A held count older than `$6` is a crashed call's and restarts from zero.
-pub const RESERVE_SQL: &str = "INSERT INTO ai_budget_day (tenant, day, calls, tokens, held_calls, held_tokens, held_at, min_reserved) \
-    SELECT $1, $2::text::date, 1, $3::bigint, 1, $3::bigint, now(), $3::bigint WHERE $3::bigint <= $5::bigint AND 1 <= $4::bigint \
+/// Params: `$2` UTC day, `$3` reservation, `$4` call cap, `$5` token cap, `$6` seconds a held reservation stays live. One statement reserves one call and the tokens when both caps hold, on insert and on update alike; no row means refused. A held count older than `$6` is a crashed call's and restarts from zero.
+pub const RESERVE_SQL: &str = "INSERT INTO ai_budget_day (tenant, day, calls, tokens, held_calls, held_tokens, held_at) \
+    SELECT $1, $2::text::date, 1, $3::bigint, 1, $3::bigint, now() WHERE $3::bigint <= $5::bigint AND 1 <= $4::bigint \
     ON CONFLICT (tenant, day) DO UPDATE SET calls = ai_budget_day.calls + 1, tokens = ai_budget_day.tokens + $3::bigint, \
     held_calls = CASE WHEN ai_budget_day.held_at > now() - $6::bigint * interval '1 second' THEN ai_budget_day.held_calls ELSE 0 END + 1, \
     held_tokens = CASE WHEN ai_budget_day.held_at > now() - $6::bigint * interval '1 second' THEN ai_budget_day.held_tokens ELSE 0 END + $3::bigint, \
-    held_at = now(), min_reserved = LEAST(ai_budget_day.min_reserved, $3::bigint) \
+    held_at = now() \
     WHERE ai_budget_day.calls + 1 <= $4::bigint AND ai_budget_day.tokens + $3::bigint <= $5::bigint \
     RETURNING calls, tokens";
 
 
-/// Params: `$2` UTC day of the reservation, `$3` tokens to give back, `$4` the whole reservation, released from the held counts. No total goes below zero. Runs after every call, a failed one included (it gives back nothing).
+/// Params: `$2` UTC day of the reservation, `$3` tokens to give back, `$4` the whole reservation, released from the held counts, `$5` seconds a held reservation stays live. No total goes below zero. Runs after every call, a failed one included (it gives back nothing). Returns the day's calls and the tokens no call in flight holds, read after the update under the same row lock.
 pub const SETTLE_SQL: &str = "UPDATE ai_budget_day SET tokens = GREATEST(tokens - $3::bigint, 0), held_calls = GREATEST(held_calls - 1, 0), \
-    held_tokens = GREATEST(held_tokens - $4::bigint, 0) WHERE tenant = $1 AND day = $2::text::date RETURNING calls, tokens";
+    held_tokens = GREATEST(held_tokens - $4::bigint, 0) WHERE tenant = $1 AND day = $2::text::date \
+    RETURNING calls, GREATEST(tokens - CASE WHEN held_at > now() - $5::bigint * interval '1 second' THEN held_tokens ELSE 0 END, 0)";
 
 
 /// Params: `$2` UTC day, `$3` seconds a held reservation stays live. The day's calls (never given back) and the tokens no call in flight holds.
 pub const SETTLED_SQL: &str = "SELECT calls, \
     tokens - CASE WHEN held_at > now() - $3::bigint * interval '1 second' THEN held_tokens ELSE 0 END \
     FROM ai_budget_day WHERE tenant = $1 AND day = $2::text::date";
-
-
-/// Params: `$2` UTC day. The day's calls and the smallest reservation granted that day (0 when none yet); it only goes down within a day.
-pub const MIN_GRANTED_SQL: &str = "SELECT calls, COALESCE(min_reserved, 0) FROM ai_budget_day WHERE tenant = $1 AND day = $2::text::date";
 
 
 /// A bound statement parameter; the tenant is `$1` and is added by the executor.
@@ -218,7 +210,12 @@ pub async fn give_back(
     tokens: i64,
     reserved: i64,
 ) -> Result<Option<(i64, i64)>, AiError> {
-    let params = vec![Param::Text(day.to_owned()), Param::Int(tokens), Param::Int(reserved)];
+    let params = vec![
+        Param::Text(day.to_owned()),
+        Param::Int(tokens),
+        Param::Int(reserved),
+        Param::Int(HELD_EXPIRY_SECONDS),
+    ];
     let rows = exec(scope.clone(), SETTLE_SQL, params).await?;
     single_row(rows)
 }
@@ -230,14 +227,6 @@ pub async fn read_settled(exec: BudgetExecutor<'_, '_>, scope: &TenantScope, day
     let rows = exec(scope.clone(), SETTLED_SQL, params).await?;
     let settled = single_row(rows)?;
     Ok(settled.unwrap_or((0, 0)))
-}
-
-
-/// The smallest reservation granted on `day`; 0 when none was granted yet.
-pub async fn read_min_granted(exec: BudgetExecutor<'_, '_>, scope: &TenantScope, day: &str) -> Result<i64, AiError> {
-    let rows = exec(scope.clone(), MIN_GRANTED_SQL, vec![Param::Text(day.to_owned())]).await?;
-    let granted = single_row(rows)?;
-    Ok(granted.map_or(0, |row| row.1))
 }
 
 
@@ -256,20 +245,25 @@ pub fn crossed(before: i64, after: i64, cap: i64) -> bool {
 }
 
 
-pub fn crossed_80(totals: (i64, i64), reserved: i64, settings: &AiSettings) -> bool {
-    let (calls, tokens) = totals;
-    crossed(calls - 1, calls, i64::from(settings.max_calls_per_day)) || crossed(tokens - reserved, tokens, i64::from(settings.max_tokens_per_day))
+/// The call count crossed 80 % of the call cap with this reservation (a call is never given back, so the reservation is the count).
+pub fn calls_crossed(calls: i64, settings: &AiSettings) -> bool {
+    crossed(calls - 1, calls, i64::from(settings.max_calls_per_day))
 }
 
 
-/// `Exhausted` when the call cap is reached, or the room left is under one call of `max_tokens` plus `REQUEST_OVERHEAD_BYTES`, or under `min_granted` (the smallest reservation granted that day, 0 when none), so no real request can fit again; `Busy` when this request would fit once the calls in flight settle; `TooLarge` otherwise (room for other requests, not this one).
-pub fn verdict(settled: (i64, i64), min_granted: i64, reserved: i64, settings: &AiSettings) -> Verdict {
+/// The settled tokens crossed 80 % of the token cap by what this call kept: `settled` is read after the call's own settle, so `settled - kept` is what was settled before it.
+pub fn tokens_crossed(settled: i64, kept: i64, settings: &AiSettings) -> bool {
+    crossed(settled - kept, settled, i64::from(settings.max_tokens_per_day))
+}
+
+
+/// `Exhausted` when the call cap is reached or the room left is under `skeleton` (the reservation of this request rebuilt with the data `0`, which the caller cannot inflate), so no request can fit again; `Busy` when this request would fit once the calls in flight settle; `TooLarge` otherwise (room for a smaller request, not this one).
+pub fn verdict(settled: (i64, i64), reserved: i64, skeleton: i64, settings: &AiSettings) -> Verdict {
     let (calls, tokens) = settled;
     let call_cap = i64::from(settings.max_calls_per_day);
     let token_cap = i64::from(settings.max_tokens_per_day);
     let room = token_cap - tokens;
-    let floor = i64::from(settings.max_tokens) + i64::from(REQUEST_OVERHEAD_BYTES);
-    if calls >= call_cap || room < floor || room < min_granted {
+    if calls >= call_cap || room < skeleton {
         Verdict::Exhausted
     } else if tokens + reserved <= token_cap {
         Verdict::Busy
@@ -309,15 +303,15 @@ pub async fn notify(exec: Executor<'_, '_>, scope: &TenantScope, rule: &Rule, da
 }
 
 
-/// Releases the reservation and gives back the unused part; a store failure keeps the reservation (fail closed) and is logged. Returns the tokens given back and the totals.
-pub async fn settle(exec: BudgetExecutor<'_, '_>, scope: &TenantScope, day: &str, reserved: i64, owed: i64, totals: (i64, i64)) -> (i64, (i64, i64)) {
+/// Releases the reservation and gives back the unused part; a store failure keeps the reservation (fail closed) and is logged. Returns the tokens given back and the settled totals, `None` when the store told none.
+pub async fn settle(exec: BudgetExecutor<'_, '_>, scope: &TenantScope, day: &str, reserved: i64, owed: i64) -> (i64, Option<(i64, i64)>) {
     match give_back(exec, scope, day, owed, reserved).await {
-        Ok(Some(settled)) => (owed, settled),
-        Ok(None) => (0, totals),
+        Ok(Some(settled)) => (owed, Some(settled)),
+        Ok(None) => (0, None),
         Err(error) => {
             let message = format!("ai budget settle failed: {error}");
             warn!("{message}");
-            (0, totals)
+            (0, None)
         }
     }
 }
@@ -333,19 +327,31 @@ pub fn log_budget(tenant: &str, day: &str, reserved: i64, returned: i64, totals:
 }
 
 
-/// The alert detail of a refusal: the caps, the settled counts, the smallest reservation granted, and this request's reservation against the room left.
-pub fn spent_detail(settings: &AiSettings, settled: (i64, i64), min_granted: i64, reserved: i64) -> Value {
+/// The alert detail of a refusal: the caps, the settled counts, this request's reservation against the room left, and the skeleton that decides the closing.
+pub fn spent_detail(settings: &AiSettings, settled: (i64, i64), reserved: i64, skeleton: i64) -> Value {
     let room = i64::from(settings.max_tokens_per_day) - settled.1;
     json!({
         "max_calls": settings.max_calls_per_day, "max_tokens": settings.max_tokens_per_day,
-        "settled_calls": settled.0, "settled_tokens": settled.1, "min_granted": min_granted, "reserved": reserved, "room": room
+        "settled_calls": settled.0, "settled_tokens": settled.1, "reserved": reserved, "room": room, "skeleton_reservation": skeleton
     })
 }
 
 
-/// A reservation over the whole day's token cap can never fit any day: refused before the store, with no reservation and no alert.
-pub fn check_within_cap(tenant: &str, reserved: i64, cap: i64) -> Result<(), AiError> {
-    if reserved > cap {
+/// The alert detail of instructions that can never fit: no settled counts are read.
+pub fn instructions_detail(settings: &AiSettings, reserved: i64, skeleton: i64) -> Value {
+    json!({
+        "max_calls": settings.max_calls_per_day, "max_tokens": settings.max_tokens_per_day, "reserved": reserved, "skeleton_reservation": skeleton
+    })
+}
+
+
+/// A skeleton over the day's token cap can never fit any day: those instructions are refused as `InstructionsOverBudget`, then a reservation over the cap as `RequestOverBudget`; both before the store, with no reservation.
+pub fn check_within_cap(tenant: &str, reserved: i64, skeleton: i64, cap: i64) -> Result<(), AiError> {
+    if skeleton > cap {
+        let message = format!("ai instructions over budget: tenant={tenant} skeleton_tokens={skeleton} token_cap={cap}");
+        warn!("{message}");
+        Err(AiError::InstructionsOverBudget { skeleton, cap })
+    } else if reserved > cap {
         let message = format!("ai request over budget: tenant={tenant} reserved_tokens={reserved} token_cap={cap}");
         warn!("{message}");
         Err(AiError::RequestOverBudget { reserved, cap })
@@ -355,18 +361,31 @@ pub fn check_within_cap(tenant: &str, reserved: i64, cap: i64) -> Result<(), AiE
 }
 
 
+/// The loud refusal of instructions that never fit: one `ai.budget_spent` alert under a place in the gate (a full gate skips the alert, never the error).
+pub async fn instructions_refusal(stores: &Stores<'_, '_>, scope: &TenantScope, settings: &AiSettings, day: &str, now: u64, sizes: (i64, i64)) {
+    let place = enter(stores.gate);
+    if place.is_some() {
+        let detail = instructions_detail(settings, sizes.0, sizes.1);
+        notify(stores.alerts, scope, &RULE_SPENT, day, now, &detail).await;
+    } else {
+        warn!("ai budget busy: the instructions alert waits for a place");
+    }
+}
+
+
 /// What a refused reservation becomes: `Exhausted` raises the spent alert (`BudgetSpent`); `TooLarge` raises the request-too-large alert (`BudgetRoomTooSmall`); `BudgetBusy` while calls in flight hold the room.
-pub async fn refusal(stores: &Stores<'_, '_>, scope: &TenantScope, settings: &AiSettings, day: &str, now: u64, reserved: i64) -> AiError {
-    let reads = read_refusal(stores, scope, day).await;
-    match reads {
-        Ok((settled, min_granted)) => match verdict(settled, min_granted, reserved, settings) {
+pub async fn refusal(stores: &Stores<'_, '_>, scope: &TenantScope, settings: &AiSettings, day: &str, now: u64, sizes: (i64, i64)) -> AiError {
+    let (reserved, skeleton) = sizes;
+    let read = read_settled(stores.budget, scope, day).await;
+    match read {
+        Ok(settled) => match verdict(settled, reserved, skeleton, settings) {
             Verdict::Exhausted => {
-                let detail = spent_detail(settings, settled, min_granted, reserved);
+                let detail = spent_detail(settings, settled, reserved, skeleton);
                 notify(stores.alerts, scope, &RULE_SPENT, day, now, &detail).await;
                 AiError::BudgetSpent
             }
             Verdict::TooLarge => {
-                let detail = spent_detail(settings, settled, min_granted, reserved);
+                let detail = spent_detail(settings, settled, reserved, skeleton);
                 notify(stores.alerts, scope, &RULE_TOO_LARGE, day, now, &detail).await;
                 AiError::BudgetRoomTooSmall {
                     reserved,
@@ -383,14 +402,6 @@ pub async fn refusal(stores: &Stores<'_, '_>, scope: &TenantScope, settings: &Ai
 }
 
 
-/// The settled totals and the smallest granted reservation of the day.
-pub async fn read_refusal(stores: &Stores<'_, '_>, scope: &TenantScope, day: &str) -> Result<((i64, i64), i64), AiError> {
-    let settled = read_settled(stores.budget, scope, day).await?;
-    let min_granted = read_min_granted(stores.budget, scope, day).await?;
-    Ok((settled, min_granted))
-}
-
-
 /// Takes a place in the gate, reserves, and turns a refusal into its error; the place is held until the store answered.
 pub async fn reservation(
     stores: &Stores<'_, '_>,
@@ -398,46 +409,59 @@ pub async fn reservation(
     settings: &AiSettings,
     day: &str,
     now: u64,
-    reserved: i64,
+    sizes: (i64, i64),
 ) -> Result<(i64, i64), AiError> {
     let place = enter(stores.gate);
     if place.is_none() {
         warn!("ai budget busy: too many reservations wait on the store");
     }
     let _held = place.ok_or(AiError::BudgetBusy)?;
-    let outcome = reserve(stores.budget, scope, settings, day, reserved).await?;
+    let outcome = reserve(stores.budget, scope, settings, day, sizes.0).await?;
     match outcome {
         Some(totals) => Ok(totals),
-        None => Err(refusal(stores, scope, settings, day, now, reserved).await),
+        None => Err(refusal(stores, scope, settings, day, now, sizes).await),
     }
 }
 
 
-/// One model call under the tenant's daily budget: reserve before any model I/O, settle after (a failed call releases its reservation and keeps the tokens). The model call blocks the thread (ureq), so a caller on an async runtime runs this on a blocking-capable worker.
+/// The 80 % alert of either cap.
+pub async fn alert_80(stores: &Stores<'_, '_>, scope: &TenantScope, settings: &AiSettings, day: &str, now: u64, totals: (i64, i64)) {
+    let detail = json!({
+        "calls": totals.0, "tokens": totals.1,
+        "max_calls": settings.max_calls_per_day, "max_tokens": settings.max_tokens_per_day
+    });
+    notify(stores.alerts, scope, &RULE_80, day, now, &detail).await;
+}
+
+
+/// One model call under the tenant's daily budget: reserve before any model I/O, settle after (a failed call releases its reservation and keeps the tokens). The model call blocks the thread (ureq), so a caller on an async runtime runs this on a blocking-capable worker. The instructions are platform text, never tenant or analyst text, which goes in `data`.
 pub async fn budgeted_chat(
     stores: &Stores<'_, '_>,
     scope: &TenantScope,
     settings: &AiSettings,
-    instructions: &str,
+    instructions: &'static str,
     data: &Value,
     deps: &BudgetDeps,
 ) -> Result<Answer, AiError> {
     let prepared = prepare(settings, instructions, data, &deps.chat)?;
     let now = (deps.wall_clock)();
     let day = day_text(now)?;
-    let reserved = prepared.request.body.len() as i64 + i64::from(settings.max_tokens);
-    check_within_cap(tenant_of(scope), reserved, i64::from(settings.max_tokens_per_day))?;
-    let totals = reservation(stores, scope, settings, &day, now, reserved).await?;
-    if crossed_80(totals, reserved, settings) {
-        let detail = json!({
-            "calls": totals.0, "tokens": totals.1,
-            "max_calls": settings.max_calls_per_day, "max_tokens": settings.max_tokens_per_day
-        });
-        notify(stores.alerts, scope, &RULE_80, &day, now, &detail).await;
+    let (reserved, skeleton) = (prepared.reserved, prepared.skeleton);
+    let within = check_within_cap(tenant_of(scope), reserved, skeleton, i64::from(settings.max_tokens_per_day));
+    if let Err(AiError::InstructionsOverBudget { .. }) = &within {
+        instructions_refusal(stores, scope, settings, &day, now, (reserved, skeleton)).await;
+    }
+    within?;
+    let totals = reservation(stores, scope, settings, &day, now, (reserved, skeleton)).await?;
+    if calls_crossed(totals.0, settings) {
+        alert_80(stores, scope, settings, &day, now, totals).await;
     }
     let outcome = send(&prepared, settings.max_response_bytes, &deps.chat);
     let owed = outcome.as_ref().map_or(0, |answer| refund(reserved, answer));
-    let (returned, settled) = settle(stores.budget, scope, &day, reserved, owed, totals).await;
-    log_budget(tenant_of(scope), &day, reserved, returned, settled);
+    let (returned, after) = settle(stores.budget, scope, &day, reserved, owed).await;
+    log_budget(tenant_of(scope), &day, reserved, returned, after.unwrap_or(totals));
+    if let Some(settled) = after.filter(|row| tokens_crossed(row.1, reserved - returned, settings)) {
+        alert_80(stores, scope, settings, &day, now, settled).await;
+    }
     outcome
 }

@@ -1,13 +1,14 @@
-use crate::common::{block_on_ready, deps, scripted, settings, CALL_CAP, TOKENS, TOKEN_CAP};
+use crate::common::{block_on_ready, deps, scripted, settings, CALL_CAP, TOKEN_CAP};
 use crate::types::{Statements, TestResult};
 use ai_gateway::budget::{
-    budgeted_chat, check_within_cap, crossed, crossed_80, day_text, enter, new_gate, read_min_granted, read_settled, refund, single_row,
-    spent_detail, verdict, waiting, BudgetDeps, Gate, Param, Stores, Verdict, MIGRATIONS, MIGRATION_NAMESPACE, MIN_GRANTED_SQL, RESERVE_SQL,
+    budgeted_chat, calls_crossed, check_within_cap, crossed, day_text, enter, instructions_detail, new_gate, read_settled, refund, single_row,
+    spent_detail, tokens_crossed, verdict, waiting, BudgetDeps, Gate, Param, Stores, Verdict, MIGRATIONS, MIGRATION_NAMESPACE, RESERVE_SQL,
     SETTLED_SQL, SETTLE_SQL, STATEMENT_DEADLINE,
 };
 use ai_gateway::error::AiError;
-use ai_gateway::limits::{HELD_EXPIRY_SECONDS, REQUEST_OVERHEAD_BYTES};
+use ai_gateway::limits::{HELD_EXPIRY_SECONDS, SKELETON_NONCE};
 use ai_gateway::model::{Answer, FinishReason};
+use ai_gateway::request::skeleton_reservation;
 use ai_gateway::settings::{validate_ai, AiSettings};
 use ai_gateway::types::{BudgetFuture, BudgetRows};
 use alerts::types::RowFuture;
@@ -104,6 +105,37 @@ const WIDE_CAP: u32 = 2_000;
 const WIDE_HALF: i64 = 1_000;
 
 
+const TEN: i64 = 10;
+
+
+const TWO_RESERVATIONS_OF_ROOM: i64 = 2;
+
+
+const PERCENT_BASE: i64 = 100;
+
+
+const EIGHTY: i64 = 80;
+
+
+const HUNDRED: u32 = 100;
+
+
+const THREE_DIGITS: u32 = 111;
+
+
+const THREE_BYTES: i64 = 3;
+
+
+const EIGHT_BYTES: i64 = 8;
+
+
+const EXTRA_DATA_BYTES: usize = 5_000;
+
+
+const LONG_INSTRUCTIONS: &str =
+    "These instructions are much longer than the room a tiny daily cap leaves for them, so no request can ever fit under it.";
+
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -112,7 +144,6 @@ pub enum Mode {
     SettleBroken,
     SettleEmpty,
     SettledBroken,
-    MinBroken,
     AlertsBroken,
 }
 
@@ -123,7 +154,6 @@ pub struct Model {
     pub log: Mutex<Statements>,
     pub alerts: Mutex<HashMap<(String, String), String>>,
     pub summaries: Mutex<HashMap<String, String>>,
-    pub mins: Mutex<HashMap<(String, String), i64>>,
     pub alert_statements: Mutex<usize>,
     pub mode: Mode,
 }
@@ -136,7 +166,6 @@ pub fn model(mode: Mode) -> Arc<Model> {
         log: Mutex::new(Vec::new()),
         alerts: Mutex::new(HashMap::new()),
         summaries: Mutex::new(HashMap::new()),
-        mins: Mutex::new(HashMap::new()),
         alert_statements: Mutex::new(0),
         mode,
     })
@@ -159,9 +188,6 @@ pub fn reserve_row(model: &Model, tenant: &str, params: &[Param]) -> Result<Budg
             if calls < *max_calls && used + tokens <= *max_tokens {
                 rows.insert(key.clone(), (calls + 1, used + tokens));
                 held.insert(key.clone(), (held_calls + 1, held_tokens + tokens));
-                let mut mins = lock(&model.mins)?;
-                let least = mins.get(&key).map_or(*tokens, |kept| (*kept).min(*tokens));
-                mins.insert(key, least);
                 Ok(vec![(calls + 1, used + tokens)])
             } else {
                 Ok(vec![])
@@ -174,7 +200,7 @@ pub fn reserve_row(model: &Model, tenant: &str, params: &[Param]) -> Result<Budg
 
 pub fn settle_row(model: &Model, tenant: &str, params: &[Param]) -> Result<BudgetRows, PgError> {
     match params {
-        [Param::Text(day), Param::Int(give), Param::Int(reserved)] => {
+        [Param::Text(day), Param::Int(give), Param::Int(reserved), Param::Int(HELD_EXPIRY_SECONDS)] => {
             let mut rows = lock(&model.rows)?;
             let mut held = lock(&model.held)?;
             let key = (tenant.to_owned(), day.clone());
@@ -184,8 +210,9 @@ pub fn settle_row(model: &Model, tenant: &str, params: &[Param]) -> Result<Budge
                 rows.insert(key.clone(), row);
             }
             let (held_calls, held_tokens) = held.get(&key).copied().unwrap_or((0, 0));
-            held.insert(key, ((held_calls - 1).max(0), (held_tokens - reserved).max(0)));
-            Ok(updated.into_iter().collect())
+            let held_after = (held_tokens - reserved).max(0);
+            held.insert(key, ((held_calls - 1).max(0), held_after));
+            Ok(updated.map(|(calls, used)| (calls, (used - held_after).max(0))).into_iter().collect())
         }
         _ => Err(PgError::InvalidTenant),
     }
@@ -205,32 +232,16 @@ pub fn settled_row(model: &Model, tenant: &str, params: &[Param]) -> Result<Budg
 }
 
 
-pub fn min_granted_row(model: &Model, tenant: &str, params: &[Param]) -> Result<BudgetRows, PgError> {
-    match params {
-        [Param::Text(day)] => {
-            let key = (tenant.to_owned(), day.clone());
-            let found = lock(&model.rows)?.get(&key).copied();
-            let least = lock(&model.mins)?.get(&key).copied().unwrap_or(0);
-            Ok(found.map(|(calls, _used)| (calls, least)).into_iter().collect())
-        }
-        _ => Err(PgError::InvalidTenant),
-    }
-}
-
-
 pub fn apply_statement(model: &Model, scope: &TenantScope, sql: &'static str, params: &[Param]) -> Result<BudgetRows, PgError> {
     let tenant = tenant_of(scope);
     lock(&model.log)?.push((tenant.to_owned(), sql, params.to_vec()));
     match (model.mode, sql) {
-        (Mode::Broken, _) | (Mode::SettleBroken, SETTLE_SQL) | (Mode::SettledBroken, SETTLED_SQL) | (Mode::MinBroken, MIN_GRANTED_SQL) => {
-            Err(PgError::InvalidTenant)
-        }
+        (Mode::Broken, _) | (Mode::SettleBroken, SETTLE_SQL) | (Mode::SettledBroken, SETTLED_SQL) => Err(PgError::InvalidTenant),
         (Mode::TwoRows, _) => Ok(vec![(CALLS_ONE, CALLS_ONE), (CALLS_TWO, CALLS_TWO)]),
         (Mode::SettleEmpty, SETTLE_SQL) => Ok(vec![]),
         (_, RESERVE_SQL) => reserve_row(model, tenant, params),
         (_, SETTLE_SQL) => settle_row(model, tenant, params),
         (_, SETTLED_SQL) => settled_row(model, tenant, params),
-        (_, MIN_GRANTED_SQL) => min_granted_row(model, tenant, params),
         _ => Err(PgError::InvalidTenant),
     }
 }
@@ -310,6 +321,26 @@ pub fn capped(script: &str, calls: u32, tokens: u32) -> AiSettings {
 }
 
 
+pub async fn instructed_call(
+    model: &Arc<Model>,
+    gate: &Gate,
+    used: &AiSettings,
+    instructions: &'static str,
+    data: &Value,
+) -> Result<Answer, AiError> {
+    let budget = make_budget_exec(model);
+    let alerts = make_alert_exec(model);
+    let stores = Stores {
+        budget: &budget,
+        alerts: &alerts,
+        gate,
+    };
+    let scope = tenant_scope("acme")?;
+    let chat_deps = budget_deps(wall_one);
+    budgeted_chat(&stores, &scope, used, instructions, data, &chat_deps).await
+}
+
+
 pub async fn gated_call(model: &Arc<Model>, gate: &Gate, tenant: &str, used: &AiSettings, wall_clock: fn() -> u64) -> Result<Answer, AiError> {
     let budget = make_budget_exec(model);
     let alerts = make_alert_exec(model);
@@ -321,8 +352,7 @@ pub async fn gated_call(model: &Arc<Model>, gate: &Gate, tenant: &str, used: &Ai
     let scope = tenant_scope(tenant)?;
     let data = json!({"a": 1});
     let chat_deps = budget_deps(wall_clock);
-    let outcome = budgeted_chat(&stores, &scope, used, "Summarise.", &data, &chat_deps).await;
-    outcome
+    budgeted_chat(&stores, &scope, used, "Summarise.", &data, &chat_deps).await
 }
 
 
@@ -466,12 +496,40 @@ async fn the_80_percent_alert_and_the_spent_alert_are_raised_once_each() -> Test
 
 
 #[tokio::test]
-async fn crossing_the_token_cap_share_raises_the_80_percent_alert() -> TestResult {
+async fn the_80_percent_token_alert_follows_the_settled_use_of_a_call() -> TestResult {
     let reserved = measured_reservation().await?;
-    let tokens = model(Mode::Normal);
     let cap = u32::try_from(reserved + SHORT_OF_CAP)?;
-    budgeted_call(&tokens, "acme", &capped("ok", CALL_CAP, cap), wall_one).await?;
-    assert_eq!(rule_count(&tokens, "ai.budget_80")?, 1);
+    let refunded = model(Mode::Normal);
+    budgeted_call(&refunded, "acme", &capped("ok", CALL_CAP, cap), wall_one).await?;
+    assert_eq!(rule_count(&refunded, "ai.budget_80")?, 0);
+    let kept = model(Mode::Normal);
+    budgeted_call(&kept, "acme", &capped("nofinish", CALL_CAP, cap), wall_one).await?;
+    assert_eq!(rule_count(&kept, "ai.budget_80")?, 1);
+    let failed = model(Mode::Normal);
+    let refused = budgeted_call(&failed, "acme", &capped("transport", CALL_CAP, cap), wall_one).await;
+    assert!(matches!(refused, Err(AiError::Protocol)));
+    assert_eq!(rule_count(&failed, "ai.budget_80")?, 1);
+    let broken = model(Mode::SettleBroken);
+    budgeted_call(&broken, "acme", &capped("nofinish", CALL_CAP, cap), wall_one).await?;
+    assert_eq!(rule_count(&broken, "ai.budget_80")?, 0);
+    let empty = model(Mode::SettleEmpty);
+    budgeted_call(&empty, "acme", &capped("nofinish", CALL_CAP, cap), wall_one).await?;
+    assert_eq!(rule_count(&empty, "ai.budget_80")?, 0);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_reservation_in_flight_never_raises_the_80_percent_alert_of_another_call() -> TestResult {
+    let reserved = measured_reservation().await?;
+    let cap = reserved * TEN;
+    let held = cap - TWO_RESERVATIONS_OF_ROOM * reserved;
+    let stored = model(Mode::Normal);
+    seed(&stored, "acme", DAY_ONE, (1, held), (1, held))?;
+    budgeted_call(&stored, "acme", &capped("ok", CALL_CAP, u32::try_from(cap)?), wall_one).await?;
+    assert_eq!(day_row(&stored, "acme", DAY_ONE)?, Some((CALLS_TWO, held + USED_TOKENS)));
+    assert!((held + USED_TOKENS) * PERCENT_BASE >= cap * EIGHTY);
+    assert_eq!(rule_count(&stored, "ai.budget_80")?, 0);
     Ok(())
 }
 
@@ -479,11 +537,14 @@ async fn crossing_the_token_cap_share_raises_the_80_percent_alert() -> TestResul
 #[test]
 fn the_threshold_is_crossed_only_by_the_call_that_passes_it() -> TestResult {
     assert!(crossed(CALLS_THREE, CALLS_FOUR, FIVE));
+    assert!(tokens_crossed(EIGHTY, 1, &capped("ok", FIVE_CALLS, HUNDRED)));
+    assert!(!tokens_crossed(EIGHTY, 0, &capped("ok", FIVE_CALLS, HUNDRED)));
+    assert!(!tokens_crossed(EIGHTY - 1, 1, &capped("ok", FIVE_CALLS, HUNDRED)));
     assert!(!crossed(CALLS_FOUR, FIVE, FIVE));
     assert!(!crossed(CALLS_TWO, CALLS_THREE, FIVE));
     let used = capped("ok", FIVE_CALLS, TOKEN_CAP);
-    assert!(crossed_80((CALLS_FOUR, 0), 0, &used));
-    assert!(!crossed_80((CALLS_TWO, 0), 0, &used));
+    assert!(calls_crossed(CALLS_FOUR, &used));
+    assert!(!calls_crossed(CALLS_TWO, &used));
     Ok(())
 }
 
@@ -597,16 +658,18 @@ async fn the_alert_carries_the_scope_tenant_and_the_day() -> TestResult {
 #[test]
 fn the_statements_are_one_conditional_write_each() -> TestResult {
     assert!(RESERVE_SQL.starts_with("INSERT INTO ai_budget_day"));
-    assert!(RESERVE_SQL
-        .contains("SELECT $1, $2::text::date, 1, $3::bigint, 1, $3::bigint, now(), $3::bigint WHERE $3::bigint <= $5::bigint AND 1 <= $4::bigint"));
-    assert!(RESERVE_SQL.contains("held_at, min_reserved) SELECT"));
-    assert!(RESERVE_SQL.contains("held_at = now(), min_reserved = LEAST(ai_budget_day.min_reserved, $3::bigint) WHERE"));
+    assert!(RESERVE_SQL.contains("SELECT $1, $2::text::date, 1, $3::bigint, 1, $3::bigint, now() WHERE $3::bigint <= $5::bigint AND 1 <= $4::bigint"));
+    assert!(!RESERVE_SQL.contains("min_reserved"));
+    assert!(RESERVE_SQL.contains("held_at = now() WHERE ai_budget_day.calls + 1"));
     assert!(RESERVE_SQL.contains("held_at > now() - $6::bigint * interval '1 second'"));
     assert!(RESERVE_SQL.contains("ON CONFLICT (tenant, day) DO UPDATE SET calls = ai_budget_day.calls + 1"));
     assert!(RESERVE_SQL.contains("WHERE ai_budget_day.calls + 1 <= $4::bigint AND ai_budget_day.tokens + $3::bigint <= $5::bigint"));
     assert!(RESERVE_SQL.ends_with("RETURNING calls, tokens"));
     assert_eq!(RESERVE_SQL.matches(';').count(), 0);
     assert!(SETTLE_SQL.contains("GREATEST(tokens - $3::bigint, 0)"));
+    assert!(SETTLE_SQL.ends_with(
+        "RETURNING calls, GREATEST(tokens - CASE WHEN held_at > now() - $5::bigint * interval '1 second' THEN held_tokens ELSE 0 END, 0)"
+    ));
     assert!(
         SETTLE_SQL.contains("held_calls = GREATEST(held_calls - 1, 0)") && SETTLE_SQL.contains("held_tokens = GREATEST(held_tokens - $4::bigint, 0)")
     );
@@ -627,12 +690,7 @@ fn the_statements_are_one_conditional_write_each() -> TestResult {
         .skip(1)
         .take(1)
         .all(|migration| migration.sql.contains("held_calls") && migration.sql.contains("held_tokens")));
-    assert!(MIGRATIONS
-        .iter()
-        .skip(TWICE as usize)
-        .all(|migration| migration.sql.contains("min_reserved bigint")));
-    assert_eq!(MIN_GRANTED_SQL.matches(';').count(), 0);
-    assert!(MIN_GRANTED_SQL.starts_with("SELECT calls, COALESCE(min_reserved, 0) FROM ai_budget_day WHERE tenant = $1"));
+    assert_eq!(MIGRATIONS.len(), TWICE as usize);
     assert!(!STATEMENT_DEADLINE.is_zero());
     Ok(())
 }
@@ -669,13 +727,18 @@ pub async fn sequential_calls(count: usize, stored: &Arc<Model>, gate: &Gate, us
 }
 
 
+pub fn skeleton_of(used: &AiSettings) -> i64 {
+    skeleton_reservation(used, "Summarise.", SKELETON_NONCE)
+}
+
+
 #[tokio::test]
 async fn the_token_room_held_in_flight_is_busy_and_settled_exhaustion_alerts() -> TestResult {
     let reserved = measured_reservation().await?;
     let cap = reserved * TWICE;
     let used = capped("transport", CALL_CAP, u32::try_from(cap)?);
     let stored = model(Mode::Normal);
-    let seeded = cap - i64::from(TOKENS) - i64::from(REQUEST_OVERHEAD_BYTES) + 1;
+    let seeded = cap - skeleton_of(&used) + 1;
     seed(&stored, "acme", DAY_ONE, (1, seeded), (1, seeded))?;
     assert!(matches!(budgeted_call(&stored, "acme", &used, wall_one).await, Err(AiError::BudgetBusy)));
     assert_eq!(rule_count(&stored, "ai.budget_spent")?, 0);
@@ -718,77 +781,109 @@ async fn a_request_larger_than_the_room_left_raises_its_own_alert_and_never_the_
     assert_eq!(rule_count(&stored, "ai.budget_spent")?, 0);
     assert_eq!(
         summary_of(&stored, "ai.budget_request_too_large")?,
-        expected_detail(&used, (1, 1), 0, reserved)
+        expected_detail(&used, (1, 1), reserved, skeleton_of(&used))
     );
     Ok(())
 }
 
 
 #[tokio::test]
-async fn the_band_between_the_floor_and_the_smallest_grant_closes_the_day_with_the_spent_alert() -> TestResult {
+async fn the_day_closes_when_the_skeleton_no_longer_fits_and_not_before() -> TestResult {
     let reserved = measured_reservation().await?;
-    let floor = i64::from(TOKENS) + i64::from(REQUEST_OVERHEAD_BYTES);
-    let cap = TWICE * reserved + floor + 1;
-    let used = capped("nofinish", CALL_CAP, u32::try_from(cap)?);
+    let used = capped("nofinish", CALL_CAP, u32::try_from(reserved * TEN)?);
+    let skeleton = skeleton_of(&used);
+    assert!(skeleton + THREE_BYTES < reserved, "{skeleton} {reserved}");
     let stored = model(Mode::Normal);
     let gate = new_gate(WAITING);
-    let granted = sequential_calls(CALLS_TWO as usize, &stored, &gate, &used).await?;
-    assert!(granted.iter().all(Result::is_ok));
-    let room = cap - TWICE * reserved;
-    assert!(room >= floor && room < reserved, "{room} {floor} {reserved}");
-    let refused = gated_call(&stored, &gate, "acme", &used, wall_one).await;
-    assert!(matches!(refused, Err(AiError::BudgetSpent)), "{refused:?}");
+    let cap = i64::from(used.max_tokens_per_day);
+    seed(&stored, "acme", DAY_ONE, (1, cap - skeleton - 1), (0, 0))?;
+    for _ in 0..FIVE {
+        let refused = gated_call(&stored, &gate, "acme", &used, wall_one).await;
+        assert!(matches!(refused, Err(AiError::BudgetRoomTooSmall { .. })), "{refused:?}");
+    }
+    assert_eq!(rule_count(&stored, "ai.budget_request_too_large")?, 1);
+    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 0);
+    let smallest = instructed_call(&stored, &gate, &used, "Summarise.", &json!(0)).await?;
+    assert_eq!(smallest.content, "n");
+    assert_eq!(day_row(&stored, "acme", DAY_ONE)?, Some((CALLS_TWO, cap - 1)));
+    let closed = gated_call(&stored, &gate, "acme", &used, wall_one).await;
+    assert!(matches!(closed, Err(AiError::BudgetSpent)), "{closed:?}");
     assert_eq!(rule_count(&stored, "ai.budget_spent")?, 1);
-    assert_eq!(rule_count(&stored, "ai.budget_request_too_large")?, 0);
-    let expected = expected_detail(&used, (CALLS_TWO, TWICE * reserved), reserved, reserved);
-    assert_eq!(summary_of(&stored, "ai.budget_spent")?, expected);
+    assert_eq!(rule_count(&stored, "ai.budget_request_too_large")?, 1);
+    assert_eq!(
+        summary_of(&stored, "ai.budget_spent")?,
+        expected_detail(&used, (CALLS_TWO, cap - 1), reserved, skeleton)
+    );
     Ok(())
 }
 
 
 #[tokio::test]
-async fn the_smallest_grant_only_goes_down_within_a_day() -> TestResult {
+async fn a_room_of_one_skeleton_is_open_and_one_byte_less_is_spent() -> TestResult {
+    let reserved = measured_reservation().await?;
+    let used = capped("nofinish", CALL_CAP, u32::try_from(reserved * TEN)?);
+    let skeleton = skeleton_of(&used);
+    let cap = i64::from(used.max_tokens_per_day);
+    let fits = model(Mode::Normal);
+    seed(&fits, "acme", DAY_ONE, (1, cap - skeleton), (0, 0))?;
+    instructed_call(&fits, &new_gate(WAITING), &used, "Summarise.", &json!(0)).await?;
+    assert_eq!(rule_count(&fits, "ai.budget_spent")?, 0);
+    let short = model(Mode::Normal);
+    seed(&short, "acme", DAY_ONE, (1, cap - skeleton + 1), (0, 0))?;
+    let refused = instructed_call(&short, &new_gate(WAITING), &used, "Summarise.", &json!(0)).await;
+    assert!(matches!(refused, Err(AiError::BudgetSpent)), "{refused:?}");
+    assert_eq!(rule_count(&short, "ai.budget_spent")?, 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_caller_sized_request_cannot_take_the_spent_alert_early() -> TestResult {
+    let reserved = measured_reservation().await?;
+    let used = capped("nofinish", CALL_CAP, u32::try_from(reserved * TEN)?);
     let stored = model(Mode::Normal);
-    let used = capped("nofinish", CALL_CAP, TOKEN_CAP);
-    let scope = tenant_scope("acme")?;
-    let budget = make_budget_exec(&stored);
-    assert_eq!(read_min_granted(&budget, &scope, DAY_ONE).await?, 0);
-    let big = reserve_row(&stored, "acme", &reserve_params(FIVE * TWICE))?;
-    assert_eq!(big, vec![(1, FIVE * TWICE)]);
-    assert_eq!(read_min_granted(&budget, &scope, DAY_ONE).await?, FIVE * TWICE);
-    reserve_row(&stored, "acme", &reserve_params(FIVE))?;
-    reserve_row(&stored, "acme", &reserve_params(FIVE * TWICE))?;
-    assert_eq!(read_min_granted(&budget, &scope, DAY_ONE).await?, FIVE);
-    budgeted_call(&stored, "other", &used, wall_one).await?;
-    assert_eq!(read_min_granted(&budget, &scope, DAY_TWO).await?, 0);
-    let two = model(Mode::TwoRows);
-    assert!(matches!(
-        read_min_granted(&make_budget_exec(&two), &scope, DAY_ONE).await,
-        Err(AiError::BadReply)
-    ));
+    let gate = new_gate(WAITING);
+    let cap = i64::from(used.max_tokens_per_day);
+    seed(&stored, "acme", DAY_ONE, (1, cap - skeleton_of(&used) - 1), (0, 0))?;
+    let big = Value::String("x".repeat(EXTRA_DATA_BYTES));
+    let outcomes = [json!(THREE_DIGITS), big.clone(), json!({"a": 1}), big];
+    for data in &outcomes {
+        let refused = instructed_call(&stored, &gate, &used, "Summarise.", data).await;
+        assert!(matches!(refused, Err(AiError::BudgetRoomTooSmall { .. })), "{refused:?}");
+    }
+    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 0);
+    assert_eq!(rule_count(&stored, "ai.budget_request_too_large")?, 1);
     Ok(())
 }
 
 
-pub fn reserve_params(tokens: i64) -> Vec<Param> {
-    vec![
-        Param::Text(DAY_ONE.to_owned()),
-        Param::Int(tokens),
-        Param::Int(i64::from(CALL_CAP)),
-        Param::Int(i64::from(TOKEN_CAP)),
-        Param::Int(HELD_EXPIRY_SECONDS),
-    ]
-}
-
-
 #[tokio::test]
-async fn a_failed_smallest_grant_read_is_a_store_failure_without_an_alert() -> TestResult {
-    let stored = model(Mode::MinBroken);
-    let used = capped("transport", FIVE_CALLS, TOKEN_CAP);
-    seed(&stored, "acme", DAY_ONE, (FIVE, SEEDED_TOKENS), (0, 0))?;
-    let refused = budgeted_call(&stored, "acme", &used, wall_one).await;
-    assert!(matches!(refused, Err(AiError::Store(_))), "{refused:?}");
-    assert_eq!(*lock(&stored.alert_statements)?, 0);
+async fn instructions_that_can_never_fit_raise_one_named_alert_and_no_reservation() -> TestResult {
+    let used = capped(
+        "transport",
+        CALL_CAP,
+        u32::try_from(skeleton_reservation(&settings("transport"), "", SKELETON_NONCE) + TEN)?,
+    );
+    let stored = model(Mode::Normal);
+    let gate = new_gate(WAITING);
+    let skeleton = skeleton_reservation(&used, LONG_INSTRUCTIONS, SKELETON_NONCE);
+    let refused = instructed_call(&stored, &gate, &used, LONG_INSTRUCTIONS, &json!({"a": 1})).await;
+    assert!(
+        matches!(refused, Err(AiError::InstructionsOverBudget { skeleton: asked, cap }) if asked == skeleton && cap == i64::from(used.max_tokens_per_day))
+    );
+    assert_eq!(statements(&stored)?, 0);
+    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 1);
+    let reserved = skeleton + EIGHT_BYTES;
+    assert_eq!(summary_of(&stored, "ai.budget_spent")?, instructions_detail(&used, reserved, skeleton));
+    let full = new_gate(0);
+    let busy = model(Mode::Normal);
+    let again = instructed_call(&busy, &full, &used, LONG_INSTRUCTIONS, &json!({"a": 1})).await;
+    assert!(matches!(again, Err(AiError::InstructionsOverBudget { .. })));
+    assert_eq!(*lock(&busy.alert_statements)?, 0);
+    assert!(matches!(
+        check_within_cap("acme", reserved, skeleton, skeleton - 1),
+        Err(AiError::InstructionsOverBudget { .. })
+    ));
     Ok(())
 }
 
@@ -803,34 +898,34 @@ async fn the_spent_alert_carries_every_field_of_the_closed_day() -> TestResult {
     let reserved = measured_reservation().await?;
     assert_eq!(
         summary_of(&stored, "ai.budget_spent")?,
-        expected_detail(&used, (FIVE, SEEDED_TOKENS), 0, reserved)
+        expected_detail(&used, (FIVE, SEEDED_TOKENS), reserved, skeleton_of(&used))
     );
     Ok(())
 }
 
 
 #[test]
-fn the_refusal_detail_names_the_reservation_the_room_and_the_smallest_grant() -> TestResult {
+fn the_refusal_detail_names_the_reservation_the_room_and_the_skeleton() -> TestResult {
     let used = capped("ok", FIVE_CALLS, SMALL_DAILY_CAP);
-    let detail = spent_detail(&used, (CALLS_THREE, FIVE), CALLS_FOUR, FIVE + 1);
-    assert_eq!(detail, expected_detail(&used, (CALLS_THREE, FIVE), CALLS_FOUR, FIVE + 1));
+    let detail = spent_detail(&used, (CALLS_THREE, FIVE), FIVE + 1, CALLS_FOUR);
+    assert_eq!(detail, expected_detail(&used, (CALLS_THREE, FIVE), FIVE + 1, CALLS_FOUR));
     Ok(())
 }
 
 
-pub fn expected_detail(used: &AiSettings, settled: (i64, i64), min_granted: i64, reserved: i64) -> Value {
+pub fn expected_detail(used: &AiSettings, settled: (i64, i64), reserved: i64, skeleton: i64) -> Value {
     json!({
         "max_calls": used.max_calls_per_day, "max_tokens": used.max_tokens_per_day, "settled_calls": settled.0, "settled_tokens": settled.1,
-        "min_granted": min_granted, "reserved": reserved, "room": i64::from(used.max_tokens_per_day) - settled.1
+        "reserved": reserved, "room": i64::from(used.max_tokens_per_day) - settled.1, "skeleton_reservation": skeleton
     })
 }
 
 
 #[test]
 fn a_reservation_at_the_cap_fits_and_one_over_does_not() -> TestResult {
-    assert!(check_within_cap("acme", FIVE, FIVE).is_ok());
+    assert!(check_within_cap("acme", FIVE, 1, FIVE).is_ok());
     assert!(matches!(
-        check_within_cap("acme", FIVE + 1, FIVE),
+        check_within_cap("acme", FIVE + 1, 1, FIVE),
         Err(AiError::RequestOverBudget { reserved, cap }) if reserved == FIVE + 1 && cap == FIVE
     ));
     Ok(())
@@ -838,26 +933,15 @@ fn a_reservation_at_the_cap_fits_and_one_over_does_not() -> TestResult {
 
 
 #[test]
-fn the_verdict_follows_the_settled_totals_and_the_smallest_grant() -> TestResult {
-    let used = capped("ok", FIVE_CALLS, TOKEN_CAP);
-    let reserved = i64::from(TOKENS) + i64::from(REQUEST_OVERHEAD_BYTES);
-    assert_eq!(verdict((FIVE, 0), 0, reserved, &used), Verdict::Exhausted);
-    assert_eq!(verdict((CALLS_FOUR, 0), 0, reserved, &used), Verdict::Busy);
-    let tight = capped("ok", FIVE_CALLS, u32::try_from(reserved)?);
-    assert_eq!(verdict((0, 1), 0, reserved, &tight), Verdict::Exhausted);
-    assert_eq!(verdict((0, 0), 0, reserved, &tight), Verdict::Busy);
-    assert_eq!(verdict((0, 0), 0, reserved + 1, &tight), Verdict::TooLarge);
-    let wide = capped("ok", FIVE_CALLS, WIDE_CAP);
-    assert_eq!(verdict((0, WIDE_HALF), 0, WIDE_HALF + WIDE_HALF / TWICE, &wide), Verdict::TooLarge);
-    assert_eq!(
-        verdict((0, WIDE_HALF), WIDE_HALF, WIDE_HALF + WIDE_HALF / TWICE, &wide),
-        Verdict::TooLarge
-    );
-    assert_eq!(
-        verdict((0, WIDE_HALF), WIDE_HALF + 1, WIDE_HALF + WIDE_HALF / TWICE, &wide),
-        Verdict::Exhausted
-    );
-    assert_eq!(verdict((0, WIDE_HALF), WIDE_HALF, WIDE_HALF, &wide), Verdict::Busy);
+fn the_verdict_follows_the_settled_totals_and_the_skeleton() -> TestResult {
+    let used = capped("ok", FIVE_CALLS, WIDE_CAP);
+    assert_eq!(verdict((FIVE, 0), WIDE_HALF, 1, &used), Verdict::Exhausted);
+    assert_eq!(verdict((CALLS_FOUR, 0), WIDE_HALF, 1, &used), Verdict::Busy);
+    assert_eq!(verdict((0, WIDE_HALF), WIDE_HALF + 1, 1, &used), Verdict::TooLarge);
+    assert_eq!(verdict((0, WIDE_HALF), WIDE_HALF, 1, &used), Verdict::Busy);
+    assert_eq!(verdict((0, WIDE_HALF), WIDE_HALF + 1, WIDE_HALF, &used), Verdict::TooLarge);
+    assert_eq!(verdict((0, WIDE_HALF), WIDE_HALF + 1, WIDE_HALF + 1, &used), Verdict::Exhausted);
+    assert_eq!(verdict((0, WIDE_HALF), WIDE_HALF, WIDE_HALF + 1, &used), Verdict::Exhausted);
     Ok(())
 }
 
@@ -952,8 +1036,8 @@ fn waiting_reservations_are_bounded_and_a_stalled_store_is_not_a_store_failure()
 
 
 #[test]
-fn a_daily_token_cap_below_one_reservation_is_refused_at_load() -> TestResult {
-    let floor = TOKENS + REQUEST_OVERHEAD_BYTES;
+fn a_daily_token_cap_below_the_skeleton_is_refused_at_load() -> TestResult {
+    let floor = u32::try_from(skeleton_reservation(&settings("ok"), "", SKELETON_NONCE))?;
     assert!(validate_ai(&capped("ok", CALL_CAP, floor)).is_ok());
     let refused = validate_ai(&capped("ok", CALL_CAP, floor - 1));
     assert!(matches!(refused, Err(AiError::Settings { field: "max_tokens_per_day" })));
@@ -966,22 +1050,16 @@ fn a_daily_token_cap_below_one_reservation_is_refused_at_load() -> TestResult {
 
 
 #[tokio::test]
-async fn a_minimal_request_is_never_smaller_than_the_overhead_constant() -> TestResult {
+async fn the_skeleton_is_the_reservation_of_the_shortest_request() -> TestResult {
     let stored = model(Mode::Normal);
     let used = capped("nofinish", CALL_CAP, TOKEN_CAP);
-    let budget = make_budget_exec(&stored);
-    let alerts = make_alert_exec(&stored);
-    let gate = new_gate(WAITING);
-    let stores = Stores {
-        budget: &budget,
-        alerts: &alerts,
-        gate: &gate,
-    };
-    let scope = tenant_scope("acme")?;
-    let chat_deps = budget_deps(wall_one);
-    budgeted_chat(&stores, &scope, &used, "", &json!(null), &chat_deps).await?;
-    let body = day_row(&stored, "acme", DAY_ONE)?.ok_or("no row")?.1 - i64::from(TOKENS);
-    assert!(body >= i64::from(REQUEST_OVERHEAD_BYTES), "{body}");
+    instructed_call(&stored, &new_gate(WAITING), &used, "", &json!(0)).await?;
+    let reserved = day_row(&stored, "acme", DAY_ONE)?.ok_or("no row")?.1;
+    assert_eq!(reserved, skeleton_reservation(&used, "", SKELETON_NONCE));
+    let longer = skeleton_reservation(&used, "", SKELETON_NONCE) + 1;
+    let null_request = model(Mode::Normal);
+    instructed_call(&null_request, &new_gate(WAITING), &used, "", &json!(null)).await?;
+    assert!(day_row(&null_request, "acme", DAY_ONE)?.ok_or("no row")?.1 > longer);
     Ok(())
 }
 

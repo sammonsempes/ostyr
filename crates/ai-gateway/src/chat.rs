@@ -1,7 +1,7 @@
 use crate::error::AiError;
 use crate::limits::STATUS_OK;
 use crate::model::{Answer, Deps, HttpRequest};
-use crate::request::{build_request, new_nonce, read_authorization};
+use crate::request::{build_request, new_nonce, read_authorization, reservation_tokens, skeleton_reservation};
 use crate::response::{parse_answer, read_body};
 use crate::settings::{endpoint_url, validate_ai, AiSettings};
 use crate::transport::ureq_transport;
@@ -70,6 +70,8 @@ pub struct Prepared {
     pub request: HttpRequest,
     pub started: u64,
     pub model: String,
+    pub reserved: i64,
+    pub skeleton: i64,
 }
 
 
@@ -79,6 +81,8 @@ pub(crate) fn prepare(settings: &AiSettings, instructions: &str, data: &Value, d
     let started = (deps.clock)();
     let nonce = new_nonce(deps.random)?;
     let body = build_request(settings, instructions, data, &nonce)?;
+    let reserved = reservation_tokens(body.len(), settings);
+    let skeleton = skeleton_reservation(settings, instructions, &nonce);
     let key_file = settings.api_key_file.as_deref().filter(|_path| deps.keyed);
     let authorization = key_file.map(read_authorization).transpose()?;
     let request = HttpRequest {
@@ -92,6 +96,8 @@ pub(crate) fn prepare(settings: &AiSettings, instructions: &str, data: &Value, d
         request,
         started,
         model: settings.model.clone(),
+        reserved,
+        skeleton,
     })
 }
 

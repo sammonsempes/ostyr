@@ -1,5 +1,7 @@
 use crate::error::{AiError, SecretClass};
-use crate::limits::{DELIMITER_NOTICE, MAX_DATA_DEPTH, MAX_DATA_NODES, MAX_KEY_BYTES, NONCE_BYTES, NONCE_PLACEHOLDER, TEMPERATURE};
+use crate::limits::{
+    DELIMITER_NOTICE, MAX_DATA_DEPTH, MAX_DATA_NODES, MAX_KEY_BYTES, NONCE_BYTES, NONCE_PLACEHOLDER, SKELETON_DOCUMENT, TEMPERATURE,
+};
 use crate::settings::AiSettings;
 use crate::types::RandomFn;
 use core_config::secret_file::{open_secret, SecretFileError};
@@ -54,27 +56,44 @@ pub fn closing_tag(nonce: &str) -> String {
 }
 
 
+/// The request body for an already serialised document, with no size check: the real request and the skeleton both go through it.
+pub fn request_body(settings: &AiSettings, instructions: &str, document: &str, nonce: &str) -> Vec<u8> {
+    let system = format!("{instructions}\n\n{}", DELIMITER_NOTICE.replace(NONCE_PLACEHOLDER, nonce));
+    let user = format!("{}{document}{}", opening_tag(nonce), closing_tag(nonce));
+    json!({
+        "model": settings.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": settings.max_tokens,
+        "temperature": TEMPERATURE,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+
+/// Tokens one request reserves: a token is at least one byte, so the body bytes bound the prompt tokens, plus the whole answer.
+pub fn reservation_tokens(body_bytes: usize, settings: &AiSettings) -> i64 {
+    body_bytes as i64 + i64::from(settings.max_tokens)
+}
+
+
+/// The reservation of the shortest request these instructions and settings can make: the data is the one-byte document `0`. Trusted inputs only.
+pub fn skeleton_reservation(settings: &AiSettings, instructions: &str, nonce: &str) -> i64 {
+    reservation_tokens(request_body(settings, instructions, SKELETON_DOCUMENT, nonce).len(), settings)
+}
+
+
 /// Two messages: the platform's instructions and the fixed notice, then the telemetry as one JSON document between the nonce tags.
 pub fn build_request(settings: &AiSettings, instructions: &str, data: &Value, nonce: &str) -> Result<Vec<u8>, AiError> {
     check_data_shape(data)?;
     let document = data.to_string();
-    let closing = closing_tag(nonce);
-    if document.contains(&closing) {
+    if document.contains(&closing_tag(nonce)) {
         Err(AiError::DataHoldsDelimiter)
     } else {
-        let system = format!("{instructions}\n\n{}", DELIMITER_NOTICE.replace(NONCE_PLACEHOLDER, nonce));
-        let user = format!("{}{document}{closing}", opening_tag(nonce));
-        let body = json!({
-            "model": settings.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": settings.max_tokens,
-            "temperature": TEMPERATURE,
-        })
-        .to_string()
-        .into_bytes();
+        let body = request_body(settings, instructions, &document, nonce);
         if body.len() > settings.max_request_bytes {
             Err(AiError::RequestTooLarge {
                 bytes: body.len(),

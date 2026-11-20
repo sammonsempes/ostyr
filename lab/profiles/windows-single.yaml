@@ -1,0 +1,10 @@
+vms:
+  - name: ws
+    base_image: win11.qcow2
+    vcpu: 4
+    ssh_user: labadmin
+    guest: windows
+    firmware: uefi
+    tpm: true
+    memory_gb: 8
+    disk_gb: 50

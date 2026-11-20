@@ -54,7 +54,7 @@ pub async fn pg_chat(
     gate: &Gate,
     scope: &TenantScope,
     settings: &AiSettings,
-    instructions: &str,
+    instructions: &'static str,
     data: &Value,
 ) -> Result<Answer, AiError> {
     let budget = pg_budget_executor(client, STATEMENT_DEADLINE);

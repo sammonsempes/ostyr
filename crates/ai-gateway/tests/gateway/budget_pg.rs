@@ -1,8 +1,6 @@
 use crate::common::WAITING_LIMIT;
 use crate::types::TestResult;
-use ai_gateway::budget::{
-    give_back, new_gate, read_min_granted, read_settled, reserve, Param, MIN_GRANTED_SQL, RESERVE_SQL, SETTLED_SQL, SETTLE_SQL, STATEMENT_DEADLINE,
-};
+use ai_gateway::budget::{give_back, new_gate, read_settled, reserve, Param, RESERVE_SQL, SETTLED_SQL, SETTLE_SQL, STATEMENT_DEADLINE};
 use ai_gateway::error::AiError;
 use ai_gateway::limits::HELD_EXPIRY_SECONDS;
 use ai_gateway::model::Answer;
@@ -50,9 +48,6 @@ const SETTLED_CALLS: i64 = 2;
 const SETTLED_TOKENS: i64 = 300;
 
 
-const SMALLEST_GRANT: i64 = 700;
-
-
 const DAY: &str = "2023-11-14";
 
 
@@ -77,7 +72,12 @@ pub async fn client_with(handler: Handler) -> Result<(Client, Fake, TempDir), Bo
 
 
 /// One call through the only public production path, `pg_chat`, against the fake store `store`.
-pub async fn real_chat_with(store: Handler, used: &AiSettings, instructions: &str, data: &Value) -> Result<Result<Answer, AiError>, Box<dyn Error>> {
+pub async fn real_chat_with(
+    store: Handler,
+    used: &AiSettings,
+    instructions: &'static str,
+    data: &Value,
+) -> Result<Result<Answer, AiError>, Box<dyn Error>> {
     let (client, _fake, _dir) = client_with(store).await?;
     let gate = new_gate(WAITING_LIMIT);
     let scope = tenant_scope("acme")?;
@@ -85,7 +85,7 @@ pub async fn real_chat_with(store: Handler, used: &AiSettings, instructions: &st
 }
 
 
-pub async fn real_chat(used: &AiSettings, instructions: &str, data: &Value) -> Result<Result<Answer, AiError>, Box<dyn Error>> {
+pub async fn real_chat(used: &AiSettings, instructions: &'static str, data: &Value) -> Result<Result<Answer, AiError>, Box<dyn Error>> {
     real_chat_with(handler(), used, instructions, data).await
 }
 
@@ -113,15 +113,9 @@ pub fn handler() -> Handler {
                 columns: vec![INT8_OID, INT8_OID],
                 rows: vec![vec![int8_cell(SETTLED_CALLS), int8_cell(SETTLED_TOKENS)]],
             }
-        } else if sql.starts_with("SELECT calls, COALESCE") {
-            Reply::Typed {
-                parameters: vec![TEXT_OID, TEXT_OID],
-                columns: vec![INT8_OID, INT8_OID],
-                rows: vec![vec![int8_cell(SETTLED_CALLS), int8_cell(SMALLEST_GRANT)]],
-            }
         } else if sql.starts_with("UPDATE ai_budget_day") {
             Reply::Typed {
-                parameters: vec![TEXT_OID, TEXT_OID, INT8_OID, INT8_OID],
+                parameters: vec![TEXT_OID, TEXT_OID, INT8_OID, INT8_OID, INT8_OID],
                 columns: vec![INT8_OID, INT8_OID],
                 rows: vec![],
             }
@@ -175,7 +169,7 @@ async fn an_update_that_matches_no_row_is_an_empty_answer() -> TestResult {
     assert!(
         statements
             .iter()
-            .any(|entry| entry == &format!("PARAMS acme|{DAY}|{GIVE_BACK}|{RESERVATION}")),
+            .any(|entry| entry == &format!("PARAMS acme|{DAY}|{GIVE_BACK}|{RESERVATION}|{HELD_EXPIRY_SECONDS}")),
         "{statements:?}"
     );
     assert!(statements.iter().any(|entry| entry.as_str() == SETTLE_SQL), "{statements:?}");
@@ -212,19 +206,6 @@ async fn the_settled_read_binds_the_tenant_and_the_expiry_and_reads_two_bigint_c
         "{statements:?}"
     );
     assert!(statements.iter().any(|entry| entry.as_str() == SETTLED_SQL), "{statements:?}");
-    Ok(())
-}
-
-
-#[tokio::test]
-async fn the_smallest_grant_read_binds_the_tenant_and_the_day_and_reads_two_bigint_columns() -> TestResult {
-    let (client, mut fake, _dir) = client_with(handler()).await?;
-    let scope = tenant_scope("acme")?;
-    let exec = pg_budget_executor(&client, STATEMENT_DEADLINE);
-    assert_eq!(read_min_granted(&exec, &scope, DAY).await?, SMALLEST_GRANT);
-    let statements = drain(&mut fake.statements);
-    assert!(statements.iter().any(|entry| entry == &format!("PARAMS acme|{DAY}")), "{statements:?}");
-    assert!(statements.iter().any(|entry| entry.as_str() == MIN_GRANTED_SQL), "{statements:?}");
     Ok(())
 }
 

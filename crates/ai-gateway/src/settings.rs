@@ -2,8 +2,9 @@ use crate::error::AiError;
 use crate::limits::{
     DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ENDPOINT_PATH, MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING,
     MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING, MAX_TOKENS_PER_DAY_CEILING, MIN_RESPONSE_BYTES, MIN_TIMEOUT_SECONDS,
-    MODEL_EXTRA_CHARACTERS, REQUEST_OVERHEAD_BYTES,
+    MODEL_EXTRA_CHARACTERS, SKELETON_NONCE,
 };
+use crate::request::skeleton_reservation;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -99,10 +100,10 @@ pub fn model_ok(model: &str) -> bool {
 }
 
 
-/// Within the ceiling, and room for one reservation: `max_tokens` plus the fixed request overhead.
+/// Within the ceiling, and room for the skeleton of a request with empty instructions: under a smaller cap no request could reserve.
 pub fn token_cap_ok(settings: &AiSettings) -> bool {
-    let floor = u64::from(settings.max_tokens) + u64::from(REQUEST_OVERHEAD_BYTES);
-    (1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) && u64::from(settings.max_tokens_per_day) >= floor
+    let floor = skeleton_reservation(settings, "", SKELETON_NONCE);
+    (1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) && i64::from(settings.max_tokens_per_day) >= floor
 }
 
 

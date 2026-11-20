@@ -19,14 +19,21 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 
-const USAGE: &str = "usage: ai_budget <pg-settings.yaml> <ai.yaml> <tenant> <calls>";
+const USAGE: &str = "usage: ai_budget <pg-settings.yaml> <ai.yaml> <tenant> <calls> [data-padding-bytes|zero]";
 
 
 const MIGRATION_DEADLINE: Duration = Duration::from_secs(120);
 
 
-async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>, scope: TenantScope, gate: Arc<Gate>) -> String {
-    let outcome = pg_chat(&client, &gate, &scope, &settings, "Summarise the alert.", &json!({"host": "web-1"})).await;
+async fn one_call(
+    client: Arc<tokio_postgres::Client>,
+    settings: Arc<AiSettings>,
+    scope: TenantScope,
+    gate: Arc<Gate>,
+    padding: Option<usize>,
+) -> String {
+    let data = padding.map_or(json!(0), |bytes| json!({"host": "web-1", "padding": "x".repeat(bytes)}));
+    let outcome = pg_chat(&client, &gate, &scope, &settings, "Summarise the alert.", &data).await;
     match outcome {
         Ok(answer) => format!("answered {:?} {:?}", answer.prompt_tokens, answer.completion_tokens),
         Err(AiError::BudgetSpent) => "BudgetSpent".to_owned(),
@@ -37,7 +44,14 @@ async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>
 
 
 async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let [pg_file, ai_file, tenant, calls] = args else { Err(USAGE)? };
+    let [pg_file, ai_file, tenant, calls, rest @ ..] = args else {
+        Err(USAGE)?
+    };
+    let padding = match rest.first().map(String::as_str) {
+        Some("zero") => None,
+        Some(text) => Some(text.parse::<usize>()?),
+        None => Some(0),
+    };
     let pg_settings = parse_settings(&std::fs::read_to_string(pg_file)?, pg_file)?;
     let client = Arc::new(connect(&pg_settings).await?);
     migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, MIGRATION_DEADLINE).await?;
@@ -49,7 +63,13 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
     let gate = Arc::new(new_gate(MAX_WAITING_RESERVATIONS));
     let mut tasks = JoinSet::new();
     (0..calls.parse::<usize>()?).for_each(|_index| {
-        tasks.spawn(one_call(Arc::clone(&client), Arc::clone(&shared), scope.clone(), Arc::clone(&gate)));
+        tasks.spawn(one_call(
+            Arc::clone(&client),
+            Arc::clone(&shared),
+            scope.clone(),
+            Arc::clone(&gate),
+            padding,
+        ));
     });
     let mut out = stdout();
     tasks.join_all().await.iter().try_for_each(|line| writeln!(out, "{line}"))?;
