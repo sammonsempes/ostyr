@@ -2,7 +2,7 @@ use crate::error::AiError;
 use crate::limits::{
     DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ENDPOINT_PATH, MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING,
     MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING, MAX_TOKENS_PER_DAY_CEILING, MIN_RESPONSE_BYTES, MIN_TIMEOUT_SECONDS,
-    MODEL_EXTRA_CHARACTERS,
+    MODEL_EXTRA_CHARACTERS, REQUEST_OVERHEAD_BYTES,
 };
 use core_config::error::ConfigError;
 use core_config::load::load_file;
@@ -99,6 +99,13 @@ pub fn model_ok(model: &str) -> bool {
 }
 
 
+/// Within the ceiling, and room for one reservation: `max_tokens` plus the fixed request overhead.
+pub fn token_cap_ok(settings: &AiSettings) -> bool {
+    let floor = u64::from(settings.max_tokens) + u64::from(REQUEST_OVERHEAD_BYTES);
+    (1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) && u64::from(settings.max_tokens_per_day) >= floor
+}
+
+
 /// The first refused field is named.
 pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
     if !base_url_ok(&settings.base_url) {
@@ -115,7 +122,7 @@ pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
         Err(AiError::Settings { field: "max_request_bytes" })
     } else if !(1..=MAX_CALLS_PER_DAY_CEILING).contains(&settings.max_calls_per_day) {
         Err(AiError::Settings { field: "max_calls_per_day" })
-    } else if !(1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) {
+    } else if !token_cap_ok(settings) {
         Err(AiError::Settings { field: "max_tokens_per_day" })
     } else {
         Ok(())
@@ -123,7 +130,7 @@ pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
 }
 
 
-pub fn endpoint_url(settings: &AiSettings) -> String {
+pub(crate) fn endpoint_url(settings: &AiSettings) -> String {
     format!("{}{ENDPOINT_PATH}", settings.base_url.trim_end_matches('/'))
 }
 

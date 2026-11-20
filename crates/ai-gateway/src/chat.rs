@@ -5,9 +5,10 @@ use crate::request::{build_request, new_nonce, read_authorization};
 use crate::response::{parse_answer, read_body};
 use crate::settings::{endpoint_url, validate_ai, AiSettings};
 use crate::transport::ureq_transport;
+use crate::types::{ClockFn, RandomFn, TransportFn};
 use serde_json::Value;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 
@@ -20,16 +21,36 @@ pub fn monotonic_millis() -> u64 {
 }
 
 
+/// Wall clock in microseconds since the Unix epoch.
+pub fn wall_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_micros() as u64)
+}
+
+
 pub fn os_random(buffer: &mut [u8]) -> Result<(), AiError> {
     getrandom::fill(buffer).map_err(AiError::from)
 }
 
 
-pub fn production_deps() -> Deps {
+pub(crate) fn production_deps() -> Deps {
     Deps {
         transport: ureq_transport,
+        keyed: true,
         random: os_random,
         clock: monotonic_millis,
+    }
+}
+
+
+/// Deps with a caller-chosen transport; it gets a request without the key, and the production transport is not nameable outside the crate.
+pub fn custom_deps(transport: TransportFn, random: RandomFn, clock: ClockFn) -> Deps {
+    Deps {
+        transport,
+        keyed: false,
+        random,
+        clock,
     }
 }
 
@@ -53,12 +74,13 @@ pub struct Prepared {
 
 
 /// Validates, builds the tagged request and reads the key; no model I/O.
-pub fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Prepared, AiError> {
+pub(crate) fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Prepared, AiError> {
     validate_ai(settings)?;
     let started = (deps.clock)();
     let nonce = new_nonce(deps.random)?;
     let body = build_request(settings, instructions, data, &nonce)?;
-    let authorization = settings.api_key_file.as_deref().map(read_authorization).transpose()?;
+    let key_file = settings.api_key_file.as_deref().filter(|_path| deps.keyed);
+    let authorization = key_file.map(read_authorization).transpose()?;
     let request = HttpRequest {
         url: endpoint_url(settings),
         authorization,
@@ -75,7 +97,7 @@ pub fn prepare(settings: &AiSettings, instructions: &str, data: &Value, deps: &D
 
 
 /// Sends a prepared request, waits at most the request's timeout, and reads a bounded answer.
-pub fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Result<Answer, AiError> {
+pub(crate) fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Result<Answer, AiError> {
     let request_bytes = prepared.request.body.len();
     let reply = (deps.transport)(&prepared.request)?;
     if reply.status == STATUS_OK {
@@ -92,11 +114,4 @@ pub fn send(prepared: &Prepared, max_response_bytes: usize, deps: &Deps) -> Resu
     } else {
         Err(AiError::Status { status: reply.status })
     }
-}
-
-
-/// Sends the instructions and the telemetry, waits at most `timeout_seconds`, and reads a bounded answer. One settings snapshot serves the whole call.
-pub fn chat(settings: &AiSettings, instructions: &str, data: &Value, deps: &Deps) -> Result<Answer, AiError> {
-    let prepared = prepare(settings, instructions, data, deps)?;
-    send(&prepared, settings.max_response_bytes, deps)
 }
