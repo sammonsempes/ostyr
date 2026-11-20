@@ -96,16 +96,19 @@ check "leaf only" "scope 1 packages: leaf" "" crates/leaf/src/lib.rs
 expect_log "leaf fmt" '^cargo \+nightly fmt --check -p leaf$'
 expect_log "leaf clippy" '^cargo clippy --offline -p leaf --all-targets -- -D warnings$'
 expect_log "leaf coverage" '^cargo \+nightly llvm-cov --offline --branch -p leaf --fail-under-lines 100'
+expect_log "leaf doc tests" '^cargo test --doc --offline -p leaf$'
 expect_log "leaf gate" '^tool .*cov.json .* crates/leaf$'
 expect_no_log "leaf only" '-p (base|user)'
 
 check "base and its dependents" "scope 2 packages: base user" "" crates/base/src/lib.rs
 expect_log "base fmt" '^cargo \+nightly fmt --check -p base -p user$'
+expect_log "base doc tests" '^cargo test --doc --offline -p base -p user$'
 expect_log "base gate" '^tool .*cov.json .* crates/base crates/user$'
 
 check "dependent only" "scope 1 packages: user" "" crates/user/src/lib.rs
 check "root manifest" "scope full workspace (Cargo.toml changes the whole workspace)" "" Cargo.toml
 expect_no_log "root manifest" ' -p '
+expect_log "root doc tests" '^cargo test --doc --offline$'
 expect_log "root gate" '^tool .*cov.json [^ ]*$'
 check "member manifest" "scope full workspace (crates/leaf/Cargo.toml changes the whole workspace)" "" crates/leaf/Cargo.toml
 mkdir -p crates/leaf/tests
