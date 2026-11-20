@@ -94,3 +94,25 @@ pub enum EpssError {
     #[error("EPSS header is not cve,epss,percentile")]
     BadHeader,
 }
+
+
+/// No variant carries a stored or submitted text.
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("database: {0}")]
+    Pg(#[from] core_pg::error::PgError),
+    #[error("a scan holds at most {max} findings")]
+    TooManyFindings { max: usize },
+    #[error("the asset name is outside the grammar")]
+    BadAsset,
+    #[error("the time does not fit the column")]
+    BadTime,
+    #[error("the row cap must be between 1 and {max}")]
+    BadCap { max: u64 },
+    #[error("page size must be between 1 and {max}")]
+    BadLimit { max: usize },
+    #[error("the cursor does not name a stored key")]
+    BadCursor,
+    #[error("the store answered with a malformed row")]
+    BadAnswer,
+}
