@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 pub const MIGRATION_NAMESPACE: &str = "compliance";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "compliance_0001",
         sql: include_str!("../migrations/compliance_0001.sql"),
@@ -20,6 +20,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "compliance_0002",
         sql: include_str!("../migrations/compliance_0002.sql"),
+    },
+    Migration {
+        version: "compliance_0003",
+        sql: include_str!("../migrations/compliance_0003.sql"),
     },
 ];
 

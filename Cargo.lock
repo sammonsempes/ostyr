@@ -1184,20 +1184,29 @@ name = "compliance"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
+ "data-encoding",
  "pg-fake",
  "rcgen",
  "regex",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-postgres",
+ "tower",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
