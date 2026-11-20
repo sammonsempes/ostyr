@@ -35,12 +35,18 @@ upload_volume() {
 inputs_fingerprint() {
     local files=("$image.pkr.hcl")
     case "$image" in
-        win11|ws2022-dc) files+=(pins.tsv windows) ;;
+        win11|ws2022-dc) files+=(windows) ;;
         rocky-*) files+=("keys/$image.asc") ;;
     esac
     [[ ! -d "$LAB_DIR/images/$image" ]] || files+=("$image")
     {
-        (cd "$LAB_DIR/images" && find "${files[@]}" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
+        (
+            cd "$LAB_DIR/images"
+            find "${files[@]}" -type f -print0 | xargs -0 sha256sum
+            if [[ "$image" == "win11" || "$image" == "ws2022-dc" ]]; then
+                printf '%s  pins.tsv\n' "$(grep -v -P '^sysmon\t' pins.tsv | sha256sum | cut -d' ' -f1)"
+            fi
+        ) | LC_ALL=C sort -t' ' -k3
         if [[ "$image" == "datastore" ]]; then
             grep -P '^garage(-image)?\t' "$LAB_DIR/images/pins.tsv"
         fi
