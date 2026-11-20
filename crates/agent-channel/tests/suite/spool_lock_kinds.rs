@@ -97,7 +97,7 @@ fn a_lock_path_that_is_not_a_regular_file_disables_the_quarantine_and_nothing_wa
         assert!(!rejected.exists(), "{kind:?}");
         let log = String::from_utf8(captured.lock().map_err(|_| "poisoned")?.clone())?;
         assert!(
-            log.contains("quarantine lock is not a regular file") && log.contains("refused=1"),
+            log.contains("quarantine lock is not usable") && log.contains("refused=1"),
             "{kind:?} {log}"
         );
         assert!(!log.contains("MARKERLINE"), "{kind:?} {log}");
@@ -150,7 +150,7 @@ fn a_fifo_at_the_lock_and_a_directory_at_the_quarantine_together_never_stop_the_
 
 
 #[test]
-fn a_lock_in_an_unusable_directory_is_still_an_error() -> TestResult {
+fn a_lock_in_an_unusable_directory_disables_the_quarantine_never_fails_the_claim() -> TestResult {
     let dir = tempdir()?;
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "file")?;
@@ -161,8 +161,8 @@ fn a_lock_in_an_unusable_directory_is_still_an_error() -> TestResult {
         NEW_BYTES,
         (MAX_REJECTED_BYTES, MAX_REJECTED_LINES),
         (no_old_file, ATTEMPTS),
-    );
-    assert!(result.is_err());
+    )?;
+    assert_eq!(result, None);
     Ok(())
 }
 

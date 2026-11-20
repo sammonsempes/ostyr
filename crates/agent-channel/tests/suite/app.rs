@@ -1049,7 +1049,7 @@ fn the_quarantine_keeps_refused_batches_within_its_size_cap() -> TestResult {
     assert_eq!(quarantine(&directory, &[refused("d")], MAX_REJECTED_BYTES)?, 0);
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "")?;
-    assert!(quarantine(&blocker.join("spool.rejected"), &[refused("e")], MAX_REJECTED_BYTES).is_err());
+    assert_eq!(quarantine(&blocker.join("spool.rejected"), &[refused("e")], MAX_REJECTED_BYTES)?, 0);
     Ok(())
 }
 
@@ -1224,8 +1224,6 @@ async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> T
     let dir = tempdir()?;
     let Fixture { agent, .. } = fixture(dir.path())?;
     let spool = claim_spool(&agent)?;
-    let mut broken = agent.clone();
-    broken.spool_file = dir.path().join("missing").join("spool");
     let worker = start_worker(&agent.executed_file)?;
     let execute = execute_fn(worker.sender);
     assert!(execute(command(1)));
@@ -1233,9 +1231,13 @@ async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> T
     drop(execute);
     let delivered = Delivered {
         acknowledged: vec![1],
-        rejected: vec![batch(1)],
+        rejected: vec![EventBatch {
+            sequence: 1,
+            ecs_json: INVALID_UTF8.to_vec(),
+            ..EventBatch::default()
+        }],
     };
-    let settled = settle_and_join(&broken, &spool, Ok(delivered), worker.handle).await;
+    let settled = settle_and_join(&agent, &spool, Ok(delivered), worker.handle).await;
     assert!(settled.is_err());
     assert_eq!(fs::read_to_string(&agent.executed_file)?.lines().count(), COMMANDS_QUEUED);
     Ok(())

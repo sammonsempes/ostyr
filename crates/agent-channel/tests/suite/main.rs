@@ -19,6 +19,8 @@ mod spool_lock_kinds;
 #[cfg(unix)]
 mod spool_old_quarantine;
 mod spool_refused;
+#[cfg(unix)]
+mod spool_sibling;
 mod state;
 mod tls;
 mod types;
