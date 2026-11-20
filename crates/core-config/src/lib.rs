@@ -18,5 +18,7 @@ pub mod secret_file;
 pub mod signal;
 #[cfg(unix)]
 pub mod trusted_dir;
+#[cfg(unix)]
+pub mod trusted_program;
 pub mod types;
 pub mod watch;
