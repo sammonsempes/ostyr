@@ -34,6 +34,8 @@ pub enum TagsError {
     TooMany { count: usize, max: usize },
     #[error("tag {index}: it names a node that does not exist")]
     UnknownNode { index: usize },
+    #[error("tag {index}: it names a DN that more than one entry holds, so the node cannot be told apart")]
+    AmbiguousNode { index: usize },
 }
 
 
