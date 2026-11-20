@@ -3,7 +3,7 @@ use crate::app::{terminated_lines, SpoolLine};
 use crate::error::AppError;
 use crate::model::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::proto::EventBatch;
-use crate::types::LoadFn;
+use crate::types::{LoadFn, RewriteHooks};
 use core_audit::log::owner_only;
 use prost::encoding::encoded_len_varint;
 use prost::Message;
@@ -13,6 +13,10 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+
+/// Middle part of the private temporary name of a quarantine rewrite: `.<quarantine name>.quarantine-<random>`.
+pub const QUARANTINE_TEMPORARY_INFIX: &str = ".quarantine-";
 
 
 /// Event lines claimed from the spool file per run; the rest goes back to the spool for the next run.
@@ -131,7 +135,7 @@ pub const MAX_QUARANTINED_LINES: usize = 1_000;
 pub const MAX_REFUSAL_WARNINGS: u64 = 10;
 
 
-/// The refused lines of a scan: at most `MAX_QUARANTINED_LINES` lossy heads within `MAX_REJECTED_BYTES`, and the counts.
+/// The refused lines of a scan: at most `MAX_QUARANTINED_LINES` lossy heads within `MAX_REJECTED_BYTES`, and the counts (`counts_only`: no head is built; `quiet`: no per-line warning; `quarantine`: the lines are the old quarantine's).
 #[derive(Debug, Default)]
 pub struct RefusedLines {
     pub lines: Vec<String>,
@@ -139,6 +143,9 @@ pub struct RefusedLines {
     pub oversized: u64,
     pub invalid: u64,
     pub dropped: u64,
+    pub counts_only: bool,
+    pub quiet: bool,
+    pub quarantine: bool,
 }
 
 
@@ -150,12 +157,12 @@ pub fn refused_total(refused: &RefusedLines) -> u64 {
 
 /// Keeps the lossy head of a refused line unless `MAX_QUARANTINED_LINES` heads or `MAX_REJECTED_BYTES` are reached (the head is built only under the count cap), otherwise counts it dropped.
 pub fn keep_head(refused: &mut RefusedLines, content: &[u8]) {
-    let kept = if refused.lines.len() < MAX_QUARANTINED_LINES {
+    let kept = if refused.counts_only || refused.lines.len() >= MAX_QUARANTINED_LINES {
+        None
+    } else {
         let head = String::from_utf8_lossy(content.get(..TAIL_QUARANTINE_BYTES).unwrap_or(content)).into_owned();
         let total = refused.bytes + head.len() as u64;
         (total < MAX_REJECTED_BYTES).then_some(head)
-    } else {
-        None
     };
     match kept {
         Some(head) => {
@@ -170,9 +177,13 @@ pub fn keep_head(refused: &mut RefusedLines, content: &[u8]) {
 /// Counts an oversized line and logs it while the scan is within `MAX_REFUSAL_WARNINGS` (number and length, never content).
 pub fn refuse_oversized(refused: &mut RefusedLines, index: usize, bytes: usize) {
     refused.oversized += 1;
-    if refused_total(refused) <= MAX_REFUSAL_WARNINGS {
+    if refused_total(refused) <= MAX_REFUSAL_WARNINGS && !refused.quiet {
         let line = index + 1;
-        tracing::warn!(line, bytes, "oversized spool line refused");
+        if refused.quarantine {
+            tracing::warn!(line, bytes, "oversized quarantine line refused");
+        } else {
+            tracing::warn!(line, bytes, "oversized spool line refused");
+        }
     }
 }
 
@@ -180,9 +191,13 @@ pub fn refuse_oversized(refused: &mut RefusedLines, index: usize, bytes: usize) 
 /// Counts a non-UTF-8 line, logs it while the scan is within `MAX_REFUSAL_WARNINGS` (number, length and offset, never bytes) and keeps its head.
 pub fn refuse_invalid(refused: &mut RefusedLines, index: usize, valid_up_to: usize, bytes: usize, content: &[u8]) {
     refused.invalid += 1;
-    if refused_total(refused) <= MAX_REFUSAL_WARNINGS {
+    if refused_total(refused) <= MAX_REFUSAL_WARNINGS && !refused.quiet {
         let line = index + 1;
-        tracing::warn!(line, bytes, valid_up_to, "non-UTF-8 spool line refused");
+        if refused.quarantine {
+            tracing::warn!(line, bytes, valid_up_to, "non-UTF-8 quarantine line refused");
+        } else {
+            tracing::warn!(line, bytes, valid_up_to, "non-UTF-8 spool line refused");
+        }
     }
     keep_head(refused, content);
 }
@@ -194,6 +209,16 @@ pub fn log_refusal_summary(refused: &RefusedLines) {
     if total > 0 {
         let (oversized, invalid, kept, dropped) = (refused.oversized, refused.invalid, refused.lines.len(), refused.dropped);
         tracing::warn!(total, oversized, invalid, kept, dropped, "spool lines refused");
+    }
+}
+
+
+/// One summary line of a quarantine copy pass that refused old lines, with the counts.
+pub fn log_quarantine_summary(refused: &RefusedLines) {
+    let total = refused_total(refused);
+    if total > 0 {
+        let (oversized, invalid) = (refused.oversized, refused.invalid);
+        tracing::warn!(total, oversized, invalid, "quarantine lines refused and not copied");
     }
 }
 
@@ -219,22 +244,58 @@ pub fn spool_texts_with<'a, Input: BufRead>(
 }
 
 
-/// Opens the quarantine file, none when there is none yet.
-pub fn open_old(path: &Path) -> io::Result<Option<File>> {
-    match File::open(path) {
-        Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+/// Opens the quarantine file without following a symlink and without blocking on a pipe.
+#[cfg(unix)]
+pub fn open_no_follow(path: &Path) -> io::Result<File> {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = (OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32;
+    OpenOptions::new().read(true).custom_flags(flags).open(path).map_err(|error| {
+        if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            io::Error::from(io::ErrorKind::InvalidInput)
+        } else {
+            error
+        }
+    })
+}
+
+
+#[cfg(not(unix))]
+pub fn open_no_follow(path: &Path) -> io::Result<File> {
+    if fs::symlink_metadata(path)?.is_symlink() {
+        Err(io::Error::from(io::ErrorKind::InvalidInput))
+    } else {
+        File::open(path)
     }
 }
 
 
-/// How many text lines and bytes (newlines included) the old quarantine holds, streamed.
-pub fn old_totals(path: &Path) -> io::Result<(u64, u64)> {
-    let mut ignored = RefusedLines::default();
-    let mut counted = (u64::MIN, u64::MIN);
-    if let Some(file) = open_old(path)? {
-        let mut reader = BufReader::new(&file);
+/// Opens the quarantine file, none when there is none yet or when it is not a regular file (a symlink, a pipe or a directory: logged with a fixed text, the old quarantine is then replaced).
+pub fn open_old(path: &Path) -> io::Result<Option<File>> {
+    let opened = match open_no_follow(path) {
+        Ok(file) => file.metadata().map(|metadata| metadata.is_file().then_some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(None),
+        Err(error) => Err(error),
+    };
+    if matches!(opened, Ok(None)) && fs::symlink_metadata(path).is_ok() {
+        tracing::warn!("quarantine is not a regular file, ignored and replaced");
+    }
+    opened
+}
+
+
+/// How many text lines and bytes (newlines included) the old quarantine holds, streamed through its handle.
+pub fn old_totals(old: Option<&File>) -> io::Result<(u64, u64)> {
+    let mut ignored = RefusedLines {
+        counts_only: true,
+        quiet: true,
+        quarantine: true,
+        ..RefusedLines::default()
+    };
+    let mut counted = (0, 0);
+    if let Some(file) = old {
+        let mut reader = BufReader::new(file);
         counted = spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, &mut ignored).try_fold(counted, |(lines, bytes), read| {
             read.map(|text| (lines + 1, bytes + text.len() as u64 + 1))
         })?;
@@ -243,12 +304,21 @@ pub fn old_totals(path: &Path) -> io::Result<(u64, u64)> {
 }
 
 
-/// Copies the text lines of the old quarantine to `out`, skipping the oldest while `excess` (bytes, lines) is not gone; a refused old line is recorded in `refused`; returns how many it skipped.
-pub fn copy_after_excess(old: Option<File>, excess: (u64, u64), refused: &mut RefusedLines, out: &mut dyn Write) -> io::Result<u64> {
-    let mut skipped_bytes = u64::MIN;
-    let mut skipped_lines = u64::MIN;
-    if let Some(file) = old {
-        let mut reader = BufReader::new(&file);
+/// Puts the handle of the old quarantine back at its start for the copying pass.
+pub fn rewind_old(old: Option<&File>) -> io::Result<()> {
+    old.map_or(Ok(()), |file| {
+        let mut handle = file;
+        handle.rewind()
+    })
+}
+
+
+/// Copies the text lines of the old quarantine to `out`, skipping the oldest while `excess` (bytes, lines) is not gone; a refused old line is counted in `refused`; returns how many it skipped.
+pub fn copy_after_excess(old: Option<&mut dyn Read>, excess: (u64, u64), refused: &mut RefusedLines, out: &mut dyn Write) -> io::Result<u64> {
+    let mut skipped_bytes = 0;
+    let mut skipped_lines = 0;
+    if let Some(source) = old {
+        let mut reader = BufReader::new(source);
         spool_texts_with(&mut reader, DEFAULT_MAX_MESSAGE_BYTES, refused).try_for_each(|read| {
             let text = read?;
             if skipped_bytes < excess.0 || skipped_lines < excess.1 {
@@ -264,33 +334,135 @@ pub fn copy_after_excess(old: Option<File>, excess: (u64, u64), refused: &mut Re
 }
 
 
-/// Streams the old quarantine and the added lines through one `BufWriter` into a temporary file and renames it: the newest lines within `caps` (bytes, lines) stay, the dropped count is logged and returned, a refused old line is summarised; work and memory are bounded by the caps.
+/// Streams the old quarantine and the added lines through one `BufWriter` into a private temporary file next to it and renames that over it: the newest lines within `caps` (bytes, lines) stay, the dropped count is logged and returned, a refused old line is summarised; work and memory are bounded by the caps; one rewrite at a time through `<quarantine>.lock`.
 pub fn rewrite_quarantine(path: &Path, added: &[String], added_bytes: u64, caps: (u64, u64)) -> io::Result<u64> {
-    rewrite_quarantine_with(path, added, added_bytes, caps, open_old)
+    rewrite_quarantine_with(path, added, added_bytes, caps, (open_old, SPOOL_LOCK_ATTEMPTS))
 }
 
 
-/// `rewrite_quarantine` with the function that opens the old file for the copying pass given.
+/// Name suffix of the lock file that serialises the rewrites of the quarantine.
+pub const QUARANTINE_LOCK_SUFFIX: &str = ".lock";
+
+
+/// The fixed error text of a quarantine rewrite that never got the quarantine lock.
+pub const QUARANTINE_LOCK_BUSY: &str = "quarantine lock held by another process, rewrite abandoned";
+
+
+/// Takes the exclusive lock of `<quarantine>.lock` (created private), at most `attempts` tries; released when the returned file drops.
+pub fn lock_quarantine(path: &Path, attempts: u32) -> io::Result<File> {
+    let lock = owner_only(OpenOptions::new().write(true).create(true).truncate(false)).open(suffixed(path, QUARANTINE_LOCK_SUFFIX))?;
+    lock_bounded_busy(attempts, &mut || lock.try_lock(), &mut pause_between_lock_attempts, QUARANTINE_LOCK_BUSY)?;
+    Ok(lock)
+}
+
+
+/// The directory holding the file, the current directory for a bare name.
+pub fn directory_of(path: &Path) -> &Path {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."))
+}
+
+
+/// The prefix of the temporary files of the rewrites of this quarantine: `.<quarantine name>.quarantine-`.
+pub fn temporary_prefix(path: &Path) -> String {
+    let name = path.file_name().map_or_else(String::new, |found| found.to_string_lossy().into_owned());
+    format!(".{name}{QUARANTINE_TEMPORARY_INFIX}")
+}
+
+
+/// Removes the regular files a killed rewrite left in the directory under `prefix` (never following a symlink; any other entry with the prefix is skipped, so is a file that cannot be removed: logged with a fixed text); returns (removed, skipped).
+pub fn remove_stale_temporaries(directory: &Path, prefix: &str, remove: fn(&Path) -> io::Result<()>) -> io::Result<(u64, u64)> {
+    fs::read_dir(directory)?.try_fold((0, 0), |(removed, skipped), found| {
+        let entry = found?;
+        if entry.file_name().as_encoded_bytes().starts_with(prefix.as_bytes()) {
+            if entry.file_type()?.is_file() {
+                Ok(match remove(&entry.path()) {
+                    Ok(()) => (removed + 1, skipped),
+                    Err(error) => {
+                        let kind = error.kind();
+                        tracing::warn!(?kind, "stale quarantine temporary file not removed");
+                        (removed, skipped + 1)
+                    }
+                })
+            } else {
+                Ok((removed, skipped + 1))
+            }
+        } else {
+            Ok((removed, skipped))
+        }
+    })
+}
+
+
+/// Removes one file.
+pub fn remove_regular_file(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+
+/// Writes the kept old lines and the added ones to the temporary file; the old handle is closed on return, before the rename (Windows refuses a rename over an open file).
+pub fn fill_temporary(mut old: Option<File>, added: &[String], added_bytes: u64, caps: (u64, u64), target: &File) -> io::Result<(u64, RefusedLines)> {
+    let (old_lines, old_bytes) = old_totals(old.as_ref())?;
+    let excess = (
+        (old_bytes + added_bytes).saturating_sub(caps.0),
+        (old_lines + added.len() as u64).saturating_sub(caps.1),
+    );
+    rewind_old(old.as_ref())?;
+    let mut out = BufWriter::new(target);
+    let mut skipped = RefusedLines {
+        counts_only: true,
+        quarantine: true,
+        ..RefusedLines::default()
+    };
+    let dropped = copy_after_excess(old.as_mut().map(|file| file as &mut dyn Read), excess, &mut skipped, &mut out)?;
+    added.iter().try_for_each(|line| writeln!(out, "{line}"))?;
+    out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
+    Ok((dropped, skipped))
+}
+
+
+/// Whether the path is a directory itself (a symlink is not followed): a rename cannot replace it.
+pub fn is_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+
+/// `rewrite_quarantine` with the function that opens the old file and the lock attempts given; a directory at the quarantine path disables the quarantine for this run (the added lines are counted and logged, nothing is written, the caller goes on); otherwise the stale temporaries of killed rewrites are removed under the lock first.
 pub fn rewrite_quarantine_with(
     path: &Path,
     added: &[String],
     added_bytes: u64,
     caps: (u64, u64),
-    reopen: fn(&Path) -> io::Result<Option<File>>,
+    (open, lock_attempts): RewriteHooks,
 ) -> io::Result<u64> {
-    let (old_lines, old_bytes) = old_totals(path)?;
-    let excess = (
-        (old_bytes + added_bytes).saturating_sub(caps.0),
-        (old_lines + added.len() as u64).saturating_sub(caps.1),
-    );
-    let temporary = suffixed(path, TEMPORARY_SUFFIX);
-    let mut out = BufWriter::new(owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&temporary)?);
-    let mut skipped = RefusedLines::default();
-    let dropped = copy_after_excess(reopen(path)?, excess, &mut skipped, &mut out)?;
-    added.iter().try_for_each(|line| writeln!(out, "{line}"))?;
-    out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
-    fs::rename(&temporary, path)?;
-    log_refusal_summary(&skipped);
+    let _held = lock_quarantine(path, lock_attempts)?;
+    if is_directory(path) {
+        let refused = added.len();
+        tracing::warn!(refused, "quarantine path is a directory, quarantine disabled for this run");
+        Ok(0)
+    } else {
+        replace_quarantine(path, added, added_bytes, caps, open)
+    }
+}
+
+
+/// Writes the new quarantine next to the old one and renames it over it.
+pub fn replace_quarantine(
+    path: &Path,
+    added: &[String],
+    added_bytes: u64,
+    caps: (u64, u64),
+    open: fn(&Path) -> io::Result<Option<File>>,
+) -> io::Result<u64> {
+    let directory = directory_of(path);
+    let prefix = temporary_prefix(path);
+    let (removed, left) = remove_stale_temporaries(directory, &prefix, remove_regular_file)?;
+    if removed + left > 0 {
+        tracing::warn!(removed, left, "stale quarantine temporary files");
+    }
+    let temporary = tempfile::Builder::new().prefix(&prefix).tempfile_in(directory)?;
+    let (dropped, skipped) = fill_temporary(open(path)?, added, added_bytes, caps, temporary.as_file())?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    log_quarantine_summary(&skipped);
     if dropped > 0 {
         tracing::warn!(dropped, "quarantine full, oldest refused lines dropped");
     }
@@ -372,6 +544,17 @@ pub fn pause_between_lock_attempts() {
 
 /// Takes the lock through `try_lock`, trying at most `attempts` times and calling `pause` after each refusal; the fixed `SPOOL_LOCK_BUSY` error when all fail.
 pub fn lock_bounded(attempts: u32, try_lock: &mut dyn FnMut() -> Result<(), TryLockError>, pause: &mut dyn FnMut()) -> io::Result<()> {
+    lock_bounded_busy(attempts, try_lock, pause, SPOOL_LOCK_BUSY)
+}
+
+
+/// `lock_bounded` with the fixed text of the error returned when every attempt is refused.
+pub fn lock_bounded_busy(
+    attempts: u32,
+    try_lock: &mut dyn FnMut() -> Result<(), TryLockError>,
+    pause: &mut dyn FnMut(),
+    busy: &'static str,
+) -> io::Result<()> {
     (0..attempts)
         .find_map(|_| match try_lock() {
             Ok(()) => Some(Ok(())),
@@ -381,7 +564,7 @@ pub fn lock_bounded(attempts: u32, try_lock: &mut dyn FnMut() -> Result<(), TryL
             }
             Err(TryLockError::Error(error)) => Some(Err(error)),
         })
-        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, SPOOL_LOCK_BUSY)))
+        .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, busy)))
 }
 
 
