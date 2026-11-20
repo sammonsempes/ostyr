@@ -600,6 +600,12 @@ const INVISIBLE: &[char] = &[
     '\u{E0100}',
     '\u{FFA0}',
     '\u{E000}',
+    '\u{13441}',
+    '\u{13442}',
+    '\u{13443}',
+    '\u{13444}',
+    '\u{13445}',
+    '\u{13446}',
 ];
 
 
@@ -623,6 +629,14 @@ fn no_invisible_character_lets_a_name_pass_for_another() -> TestResult {
         Ok(())
     })?;
     assert_eq!(clean(LEGIT_TEXT), LEGIT_TEXT);
+    Ok(())
+}
+
+
+#[test]
+fn the_hieroglyph_blank_range_ends_where_the_visible_signs_begin() -> TestResult {
+    assert!(!is_unsafe('\u{13440}'));
+    assert!(!is_unsafe('\u{13447}'));
     Ok(())
 }
 

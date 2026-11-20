@@ -181,6 +181,7 @@ pub fn is_unsafe(found: char) -> bool {
             | '\u{3164}'
             | '\u{FE00}'..='\u{FE0F}'
             | '\u{FFA0}'
+            | '\u{13441}'..='\u{13446}'
             | '\u{E0100}'..='\u{E01EF}'
     )
 }

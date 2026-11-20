@@ -4,11 +4,12 @@ mod types;
 
 use agent_windows::cursor::{is_time_text, parse_cursor, parse_record_id, read_cursor, write_cursor};
 use agent_windows::cut::{cut_data_values, cut_value};
-use agent_windows::lines::{gap_line, refused_line};
+use agent_windows::lines::{forged_line, gap_line, refused_line};
 use agent_windows::model::{
-    CursorState, GapReason, Item, Refusal, Splitter, SystemInfo, DATA_CUT_BYTES, MAX_CURSOR_BYTES, MAX_ITEM_BYTES, MAX_SYSTEM_BYTES, SECURITY,
+    CursorState, GapReason, Item, ItemKind, Refusal, Stream, SystemInfo, DATA_CUT_BYTES, MAX_CURSOR_BYTES, MAX_ITEM_BYTES, MAX_SYSTEM_BYTES,
+    REPLACEMENT, SECURITY,
 };
-use agent_windows::split::{feed, take_partial};
+use agent_windows::stream::{feed_bytes, flawed, partial_item};
 use agent_windows::system::{digits, scan_system};
 use types::TestResult;
 
@@ -57,24 +58,77 @@ const OVERRUN: usize = 5;
 const ID_FIFTEEN: u64 = 15;
 
 
-fn collect(chunks: &[&[u8]]) -> (Vec<Item>, Splitter) {
-    let mut splitter = Splitter::default();
+const HIGH: u16 = 0xD800;
+
+
+const LOW: u16 = 0xDC00;
+
+
+const EMOJI_HIGH: u16 = 0xD83D;
+
+
+const EMOJI_LOW: u16 = 0xDE00;
+
+
+const BOM: u16 = 0xFEFF;
+
+
+const SWAPPED_BOM: u16 = 0xFFFE;
+
+
+const NONCHARACTER: u16 = 0xFFFF;
+
+
+const REPLACED_SEVEN: u32 = 7;
+
+
+const LETTER_A: u16 = 0x61;
+
+
+const CONTROL_ONE: u16 = 0x01;
+
+
+const CONTROL_ESCAPE: u16 = 0x1B;
+
+
+fn units_to_bytes(units: &[u16]) -> Vec<u8> {
+    units.iter().flat_map(|unit| unit.to_le_bytes()).collect()
+}
+
+
+fn utf16(text: &str) -> Vec<u8> {
+    units_to_bytes(&text.encode_utf16().collect::<Vec<u16>>())
+}
+
+
+fn collect(chunks: &[&[u8]]) -> (Vec<Item>, Stream) {
+    let mut stream = Stream::default();
     let mut items = Vec::new();
-    chunks.iter().for_each(|chunk| feed(&mut splitter, chunk, &mut |item| items.push(item)));
-    (items, splitter)
+    chunks
+        .iter()
+        .for_each(|chunk| feed_bytes(&mut stream, chunk, &mut |item| items.push(item)));
+    (items, stream)
+}
+
+
+fn collect_text(text: &str) -> (Vec<Item>, Stream) {
+    collect(&[&utf16(text)])
 }
 
 
 #[test]
 fn the_split_handles_items_cut_at_every_byte_boundary() -> TestResult {
     let text = format!("{EVENT}\n{EVENT}");
-    let chunks: Vec<&[u8]> = text.as_bytes().chunks(SMALL_CHUNK).collect();
-    let (items, splitter) = collect(&chunks);
+    let bytes = utf16(&text);
+    let chunks: Vec<&[u8]> = bytes.chunks(SMALL_CHUNK).collect();
+    let (items, stream) = collect(&chunks);
     assert_eq!(items.len(), PAIR);
     assert!(items
         .iter()
-        .all(|item| matches!(item, Item::Complete(bytes) if bytes.starts_with(b"<Event ") && bytes.ends_with(b"</Event>"))));
-    assert!(!splitter.inside);
+        .all(|item| item.kind == ItemKind::Complete && item.text.starts_with("<Event ") && item.text.ends_with("</Event>")));
+    assert!(!stream.splitter.inside && !flawed(&stream));
+    let single: Vec<&[u8]> = bytes.chunks(1).collect();
+    assert_eq!(collect(&single).0.len(), PAIR);
     Ok(())
 }
 
@@ -82,25 +136,25 @@ fn the_split_handles_items_cut_at_every_byte_boundary() -> TestResult {
 #[test]
 fn the_split_ignores_lookalike_tags_and_accepts_a_bare_start_tag() -> TestResult {
     let text = "<EventData><EventID>1</EventID><EventRecordID>2</EventRecordID></Eventx><Event><System/></Event><Event\n a='1'></Event>";
-    let (items, _) = collect(&[text.as_bytes()]);
+    let (items, _) = collect_text(text);
     assert_eq!(items.len(), PAIR);
-    assert!(items.iter().all(|item| matches!(item, Item::Complete(_))));
+    assert!(items.iter().all(|item| item.kind == ItemKind::Complete));
     Ok(())
 }
 
 
 #[test]
 fn a_broken_tag_prefix_restarts_the_match() -> TestResult {
-    let (items, _) = collect(&[b"<Eve<Event a='1'></</Event>"]);
-    assert!(matches!(items.as_slice(), [Item::Complete(_)]));
+    let (items, _) = collect_text("<Eve<Event a='1'></</Event>");
+    assert!(matches!(items.as_slice(), [item] if item.kind == ItemKind::Complete));
     Ok(())
 }
 
 
 #[test]
 fn a_nested_start_makes_the_item_malformed() -> TestResult {
-    let (items, _) = collect(&[b"<Event a='1'><System/><Event b='2'></Event>"]);
-    assert!(matches!(items.as_slice(), [Item::Nested { .. }]));
+    let (items, _) = collect_text("<Event a='1'><System/><Event b='2'></Event>");
+    assert!(matches!(items.as_slice(), [item] if item.kind == ItemKind::Nested));
     Ok(())
 }
 
@@ -109,14 +163,24 @@ fn a_nested_start_makes_the_item_malformed() -> TestResult {
 fn an_item_over_the_item_cap_is_reported_with_its_size_and_a_bounded_head() -> TestResult {
     let body = "x".repeat(MAX_ITEM_BYTES);
     let text = format!("<Event a='1'>{body}</Event>");
-    let (items, _) = collect(&[text.as_bytes()]);
-    match items.as_slice() {
-        [Item::Oversized { head, size }] => {
-            assert_eq!(*size, text.len());
-            assert!(head.len() <= MAX_SYSTEM_BYTES);
-        }
-        other => assert!(other.is_empty(), "unexpected {other:?}"),
-    }
+    let (items, _) = collect_text(&text);
+    assert_eq!(items.len(), 1);
+    assert!(items
+        .iter()
+        .all(|item| item.kind == ItemKind::Oversized && item.size == text.len() && item.text.len() <= MAX_SYSTEM_BYTES));
+    Ok(())
+}
+
+
+#[test]
+fn the_head_of_an_oversized_item_never_cuts_a_character() -> TestResult {
+    let body = "é".repeat(MAX_ITEM_BYTES);
+    let text = format!("<Event a='1'>{body}</Event>");
+    let (items, _) = collect_text(&text);
+    assert!(items
+        .iter()
+        .all(|item| item.kind == ItemKind::Oversized && item.size == text.len() && item.text.len() <= MAX_SYSTEM_BYTES));
+    assert!(items.iter().all(|item| item.text.len() >= MAX_SYSTEM_BYTES - 1));
     Ok(())
 }
 
@@ -126,18 +190,95 @@ fn an_item_at_the_item_cap_is_complete() -> TestResult {
     let fixed = "<Event a='1'></Event>".len();
     let body = "x".repeat(MAX_ITEM_BYTES - fixed);
     let text = format!("<Event a='1'>{body}</Event>");
-    let (items, _) = collect(&[text.as_bytes()]);
-    assert!(matches!(items.as_slice(), [Item::Complete(bytes)] if bytes.len() == MAX_ITEM_BYTES));
+    let (items, _) = collect_text(&text);
+    assert!(matches!(items.as_slice(), [item] if item.kind == ItemKind::Complete && item.text.len() == MAX_ITEM_BYTES));
+    Ok(())
+}
+
+
+#[test]
+fn the_caps_count_decoded_text_not_utf16_bytes() -> TestResult {
+    let fixed = "<Event a='1'></Event>".len();
+    let body = "x".repeat(MAX_ITEM_BYTES - fixed);
+    let text = format!("<Event a='1'>{body}</Event>");
+    assert_eq!(utf16(&text).len(), MAX_ITEM_BYTES * PAIR);
+    let (items, _) = collect_text(&text);
+    assert!(items.iter().all(|item| item.kind == ItemKind::Complete));
     Ok(())
 }
 
 
 #[test]
 fn a_partial_item_is_taken_once() -> TestResult {
-    let (items, mut splitter) = collect(&[b"<Event a='1'><System>"]);
+    let (items, mut stream) = collect_text("<Event a='1'><System>");
     assert!(items.is_empty());
-    assert!(matches!(take_partial(&mut splitter), Some(Item::Oversized { .. })));
-    assert!(take_partial(&mut splitter).is_none());
+    assert!(matches!(partial_item(&mut stream), Some(item) if item.kind == ItemKind::Oversized));
+    assert!(partial_item(&mut stream).is_none());
+    Ok(())
+}
+
+
+#[test]
+fn the_decoder_drops_one_leading_bom_and_keeps_every_other_character() -> TestResult {
+    let mut units = vec![BOM];
+    units.extend("<Event>é\u{4e2d}\u{ff1c}\u{ff06}\t\r\n</Event>".encode_utf16());
+    let (items, stream) = collect(&[&units_to_bytes(&units)]);
+    assert!(matches!(items.as_slice(), [item] if item.text == "<Event>é\u{4e2d}\u{ff1c}\u{ff06}\t\r\n</Event>" && item.replaced == 0));
+    assert!(!flawed(&stream));
+    Ok(())
+}
+
+
+#[test]
+fn lone_surrogates_controls_and_noncharacters_are_replaced_and_counted() -> TestResult {
+    let mut units: Vec<u16> = "<Event>".encode_utf16().collect();
+    units.extend([
+        HIGH,
+        LETTER_A,
+        LOW,
+        CONTROL_ONE,
+        CONTROL_ESCAPE,
+        SWAPPED_BOM,
+        NONCHARACTER,
+        EMOJI_HIGH,
+        EMOJI_LOW,
+        HIGH,
+        HIGH,
+        LOW,
+    ]);
+    units.extend("</Event>".encode_utf16());
+    let (items, stream) = collect(&[&units_to_bytes(&units)]);
+    let replaced =
+        format!("<Event>{REPLACEMENT}a{REPLACEMENT}{REPLACEMENT}{REPLACEMENT}{REPLACEMENT}{REPLACEMENT}\u{1f600}{REPLACEMENT}\u{10000}</Event>");
+    assert!(matches!(items.as_slice(), [item] if item.text == replaced && item.replaced == REPLACED_SEVEN));
+    assert!(!flawed(&stream));
+    Ok(())
+}
+
+
+#[test]
+fn a_surrogate_pair_split_across_chunks_stays_one_character() -> TestResult {
+    let mut units: Vec<u16> = "<Event>".encode_utf16().collect();
+    units.extend([EMOJI_HIGH, EMOJI_LOW]);
+    units.extend("</Event>".encode_utf16());
+    let bytes = units_to_bytes(&units);
+    let single: Vec<&[u8]> = bytes.chunks(1).collect();
+    let (items, _) = collect(&single);
+    assert!(matches!(items.as_slice(), [item] if item.text == "<Event>\u{1f600}</Event>" && item.replaced == 0));
+    Ok(())
+}
+
+
+#[test]
+fn an_odd_trailing_byte_or_a_swapped_bom_flags_the_stream() -> TestResult {
+    let mut bytes = utf16(EVENT);
+    bytes.push(b'x');
+    let (items, stream) = collect(&[&bytes]);
+    assert_eq!(items.len(), 1);
+    assert!(flawed(&stream));
+    let swapped = units_to_bytes(&[SWAPPED_BOM, LETTER_A]);
+    let (_, bad) = collect(&[&swapped]);
+    assert!(flawed(&bad));
     Ok(())
 }
 
@@ -267,6 +408,13 @@ fn the_gap_and_refusal_lines_are_fixed_json() -> TestResult {
     };
     let malformed = refused_line(&SECURITY, &info, Refusal::Malformed, SMALL_CHUNK);
     assert!(malformed.contains("\"reason\":\"malformed\"") && malformed.contains("\"bytes\":7") && malformed.contains("\"record_id\":7"));
+    let ahead = gap_line(&SECURITY, GapReason::CursorAhead, None);
+    let stream = gap_line(&SECURITY, GapReason::Utf16, None);
+    assert!(ahead.contains("cursor_ahead") && stream.contains("\"reason\":\"utf16\""));
+    let forged = forged_line(&SECURITY, Some(ID_THREE), None);
+    assert!(forged.contains("\"reason\":\"forged\"") && forged.contains("\"first_id\":3") && forged.contains("\"breaking_id\":null"));
+    let stub = refused_line(&SECURITY, &SystemInfo::default(), Refusal::Forged, 0);
+    assert!(stub.contains("\"reason\":\"forged\""));
     let oversized = refused_line(&SECURITY, &SystemInfo::default(), Refusal::Oversized, 0);
     assert!(oversized.contains("oversized") && oversized.contains("\"record_id\":null"));
     Ok(())

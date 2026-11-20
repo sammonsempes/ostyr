@@ -180,10 +180,14 @@ fn fake_update(db: &mut Db, tenant: &str, params: &[Param]) -> Result<Vec<Row>, 
     let within = i64::try_from(count).map_err(|_overflow| bad("fake count"))? < limit;
     let message = text_param(params, THREE)?;
     let at = int_param(params, TWO)?;
-    let found = db
-        .incidents
-        .iter_mut()
-        .find(|incident| incident.tenant == tenant && incident.id == id && incident.version == version && within);
+    let found = db.incidents.iter_mut().find(|incident| {
+        incident.tenant == tenant
+            && incident.id == id
+            && incident.version == version
+            && within
+            && incident.resolved_at.is_none()
+            && at >= incident.started_at
+    });
     match found {
         Some(incident) => {
             incident.version += 1;
@@ -205,10 +209,9 @@ fn fake_resolve(db: &mut Db, tenant: &str, params: &[Param]) -> Result<Vec<Row>,
     let id = int_param(params, 0)?;
     let version = int_param(params, 1)?;
     let at = int_param(params, TWO)?;
-    let found = db
-        .incidents
-        .iter_mut()
-        .find(|incident| incident.tenant == tenant && incident.id == id && incident.version == version && incident.resolved_at.is_none());
+    let found = db.incidents.iter_mut().find(|incident| {
+        incident.tenant == tenant && incident.id == id && incident.version == version && incident.resolved_at.is_none() && at >= incident.started_at
+    });
     match found {
         Some(incident) => {
             incident.version += 1;
@@ -472,7 +475,7 @@ async fn a_stale_version_is_a_conflict_and_changes_nothing() -> TestResult {
         Err(StoreError::Conflict)
     ));
     assert!(matches!(
-        resolve_incident(&mut exec, &scope, created, END).await,
+        resolve_incident(&mut exec, &scope, created, START + END).await,
         Err(StoreError::Conflict)
     ));
     assert_eq!(db.try_borrow()?.updates.len(), 1);
@@ -486,9 +489,9 @@ async fn a_resolved_incident_cannot_be_resolved_again() -> TestResult {
     let mut exec = executor(&db);
     let scope = tenant_scope(TENANT_A)?;
     let created = create_incident(&mut exec, &scope, &new_incident("Website down", true, START)).await?;
-    let resolved = resolve_incident(&mut exec, &scope, created, END).await?;
+    let resolved = resolve_incident(&mut exec, &scope, created, START + END).await?;
     assert!(matches!(
-        resolve_incident(&mut exec, &scope, resolved, END).await,
+        resolve_incident(&mut exec, &scope, resolved, START + END).await,
         Err(StoreError::Conflict)
     ));
     Ok(())
@@ -506,7 +509,7 @@ async fn the_update_count_of_an_incident_is_bounded() -> TestResult {
         current = add_update(&mut exec, &scope, current, START + i, "progress", "").await?;
     }
     assert!(matches!(
-        add_update(&mut exec, &scope, current, END, "one too many", "").await,
+        add_update(&mut exec, &scope, current, START + END, "one too many", "").await,
         Err(StoreError::Conflict)
     ));
     Ok(())
@@ -527,12 +530,12 @@ async fn another_tenant_can_neither_change_nor_read_an_incident_with_the_same_id
         Err(StoreError::Conflict)
     ));
     assert!(matches!(
-        resolve_incident(&mut exec, &scope_b, created, END).await,
+        resolve_incident(&mut exec, &scope_b, created, START + END).await,
         Err(StoreError::Conflict)
     ));
     let probe = IncidentRef { id: created.id, version: 0 };
     assert!(matches!(
-        resolve_incident(&mut exec, &scope_b, probe, END).await,
+        resolve_incident(&mut exec, &scope_b, probe, START + END).await,
         Err(StoreError::Conflict)
     ));
     let seen_by_b = published_incidents(&mut exec, &scope_b, &declared(), MAX_PUBLISHED).await?;
@@ -558,7 +561,7 @@ async fn published_incidents_hide_unpublished_ones_and_every_internal_note() -> 
     let newer = create_incident(&mut exec, &scope, &new_incident("Mail slow", true, START + LATER)).await?;
     let first = add_update(&mut exec, &scope, shown, START + 1, "Investigating", SECRET_UPDATE_NOTE).await?;
     add_update(&mut exec, &scope, first, START + TWO_I64, "Fixing", "").await?;
-    resolve_incident(&mut exec, &scope, newer, END).await?;
+    resolve_incident(&mut exec, &scope, newer, START + END).await?;
     let incidents = published_incidents(&mut exec, &scope, &declared(), MAX_PUBLISHED).await?;
     assert_eq!(incidents.len(), TWO);
     assert_eq!(
@@ -567,7 +570,7 @@ async fn published_incidents_hide_unpublished_ones_and_every_internal_note() -> 
     );
     let ongoing = incidents.first().ok_or("missing")?;
     assert_eq!(ongoing.updates.len(), TWO);
-    assert_eq!(incidents.get(1).map(|incident| incident.resolved_at), Some(Some(END)));
+    assert_eq!(incidents.get(1).map(|incident| incident.resolved_at), Some(Some(START + END)));
     assert!(incidents.iter().all(|incident| incident.published && incident.tenant == TENANT_A));
     let dump = format!("{incidents:?}");
     assert!(!dump.contains("SECRET"));
@@ -1136,5 +1139,191 @@ fn bidirectional_controls_are_refused_in_every_text() -> TestResult {
         Err(StoreError::TextInvalid { field: "message" })
     ));
     assert!(status_page::store::validate_update("plain\nmessage", "note").is_ok());
+    Ok(())
+}
+
+
+fn titled(title: &str) -> NewIncident {
+    new_incident(title, true, START)
+}
+
+
+#[test]
+fn invisible_blank_and_unreadable_titles_are_refused_naming_the_field() -> TestResult {
+    let refused = [
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a\u{200b}b",
+        "a\u{feff}b",
+        "a\u{2060}b",
+        "a\u{2800}b",
+        "a\u{fe0f}b",
+        "a\u{e0100}b",
+        "a\u{180b}b",
+        "a\u{115f}b",
+        "a\u{ffa0}b",
+        "a\u{e000}b",
+        "a\u{0378}b",
+        "\u{3164}",
+        "   ",
+        "...",
+        "\u{0301}\u{0301}",
+        "e\u{0301}\u{0301}\u{3164}",
+        "\u{0345}",
+        "\u{0363}\u{0363}",
+        "\u{05B0}\u{05B0}\u{05B0}",
+        "\u{0941}",
+        "\u{0670}",
+        "\u{3000}\u{0345}",
+    ];
+    for title in refused {
+        assert!(
+            matches!(
+                status_page::store::validate_new_incident(&titled(title)),
+                Err(StoreError::TextInvalid { field: "title" })
+            ),
+            "{title:?}"
+        );
+    }
+    let mark_flood = "\u{0345}".repeat(MAX_TITLE_CHARACTERS);
+    assert!(matches!(
+        status_page::store::validate_new_incident(&titled(&mark_flood)),
+        Err(StoreError::TextInvalid { field: "title" })
+    ));
+    let filler_flood = format!("{}x", "\u{3164}".repeat(MAX_TITLE_CHARACTERS - 1));
+    assert!(matches!(
+        status_page::store::validate_new_incident(&titled(&filler_flood)),
+        Err(StoreError::TextInvalid { field: "title" })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn accented_and_french_titles_are_accepted_and_a_message_keeps_its_line_break() -> TestResult {
+    for title in ["Café incident", "Panne du réseau à Noël", "cafe\u{0301} down", "Incident 42"] {
+        status_page::store::validate_new_incident(&titled(title))?;
+    }
+    status_page::store::validate_update("Première ligne\nseconde ligne", "note\nsuite")?;
+    assert!(matches!(
+        status_page::store::validate_update("a\u{2028}b", ""),
+        Err(StoreError::TextInvalid { field: "message" })
+    ));
+    assert!(matches!(
+        status_page::store::validate_update("a\u{200b}b", ""),
+        Err(StoreError::TextInvalid { field: "message" })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_write_statements_refuse_a_resolved_incident_and_a_time_before_the_start() -> TestResult {
+    for sql in [UPDATE_SQL, RESOLVE_SQL] {
+        assert!(sql.contains("AND resolved_at IS NULL"), "{sql}");
+        assert!(sql.contains("AND $4 >= started_at"), "{sql}");
+        assert!(sql.contains("WHERE tenant = $1 AND id = $2 AND version = $3"), "{sql}");
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_update_after_resolve_or_before_the_start_is_a_conflict_and_changes_nothing() -> TestResult {
+    let db = Rc::new(RefCell::new(Db::default()));
+    let mut exec = executor(&db);
+    let scope = tenant_scope(TENANT_A)?;
+    let created = create_incident(&mut exec, &scope, &titled("Café incident")).await?;
+    let early = add_update(&mut exec, &scope, created, START - 1, "too early", "").await;
+    assert!(matches!(early, Err(StoreError::Conflict)));
+    let early_resolve = resolve_incident(&mut exec, &scope, created, START - 1).await;
+    assert!(matches!(early_resolve, Err(StoreError::Conflict)));
+    let resolved = resolve_incident(&mut exec, &scope, created, START + LATER).await?;
+    let late = add_update(&mut exec, &scope, resolved, START + END, "after resolve", "").await;
+    assert!(matches!(late, Err(StoreError::Conflict)));
+    assert_eq!(db.borrow().updates.len(), 0);
+    assert_eq!(db.borrow().incidents.first().map(|incident| incident.version), Some(resolved.version));
+    Ok(())
+}
+
+
+const MARK_LIMIT: usize = 6;
+
+
+#[test]
+fn egyptian_blank_and_lost_sign_glyphs_are_refused_in_titles_and_messages() -> TestResult {
+    for point in ['\u{13441}', '\u{13442}', '\u{13443}', '\u{13444}', '\u{13445}', '\u{13446}'] {
+        let alone = point.to_string();
+        let flood = point.to_string().repeat(MAX_TITLE_CHARACTERS);
+        let spaced = format!(" {point} \u{3000}{point}");
+        let mixed = format!("{point}\u{3000}\u{0345}");
+        for text in [alone, flood, spaced, mixed] {
+            assert!(
+                matches!(
+                    status_page::store::validate_new_incident(&titled(&text)),
+                    Err(StoreError::TextInvalid { field: "title" })
+                ),
+                "{text:?}"
+            );
+            assert!(
+                matches!(
+                    status_page::store::validate_update(&text, ""),
+                    Err(StoreError::TextInvalid { field: "message" })
+                ),
+                "{text:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_message_needs_a_letter_or_a_number() -> TestResult {
+    for message in ["\u{0345}", "...", "\u{3000}\n\u{0345}", " \n "] {
+        assert!(
+            matches!(
+                status_page::store::validate_update(message, ""),
+                Err(StoreError::TextInvalid { field: "message" })
+            ),
+            "{message:?}"
+        );
+    }
+    status_page::store::validate_update("42", "")?;
+    status_page::store::validate_update("Résolu\nmerci", "")?;
+    Ok(())
+}
+
+
+#[test]
+fn a_run_of_more_than_six_marks_is_refused_whatever_precedes_it() -> TestResult {
+    let over = "\u{0301}".repeat(MARK_LIMIT + 1);
+    for prefix in ["", " ", "\u{3000}", "\u{2009}", "\n", "!", "\u{2603}", "a"] {
+        let text = format!("Panne {prefix}{over}");
+        assert_eq!(status_page::store::longest_mark_run(&text), MARK_LIMIT + 1, "{prefix:?}");
+        assert!(matches!(
+            status_page::store::validate_update(&text, ""),
+            Err(StoreError::TextInvalid { field: "message" })
+        ));
+        if prefix != "\n" {
+            assert!(matches!(
+                status_page::store::validate_new_incident(&titled(&text)),
+                Err(StoreError::TextInvalid { field: "title" })
+            ));
+        }
+    }
+    let at_start = format!("{over} a");
+    assert!(matches!(
+        status_page::store::validate_new_incident(&titled(&at_start)),
+        Err(StoreError::TextInvalid { field: "title" })
+    ));
+    let accepted = format!("a{}", "\u{0301}".repeat(MARK_LIMIT));
+    status_page::store::validate_new_incident(&titled(&accepted))?;
+    let repeated = accepted.repeat(MAX_TITLE_CHARACTERS / (MARK_LIMIT + 1));
+    status_page::store::validate_new_incident(&titled(&repeated))?;
+    for real in ["བསྒྲུབས", "בְּרֵאשִׁית", "Việt", "e\u{0301}"] {
+        status_page::store::validate_new_incident(&titled(real))?;
+        status_page::store::validate_update(real, "")?;
+    }
     Ok(())
 }

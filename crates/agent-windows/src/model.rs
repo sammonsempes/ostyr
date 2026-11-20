@@ -1,4 +1,3 @@
-use crate::error::PollError;
 use crate::types::{EncodeFn, Runner};
 use ecs_normalise::types::SeenIds;
 use std::path::Path;
@@ -56,6 +55,48 @@ pub const CHANNEL_DEPTH: usize = 4;
 
 
 pub const LOCK_ATTEMPTS: u32 = 3_000;
+
+
+pub const HIGH_SURROGATE_FIRST: u16 = 0xD800;
+
+
+pub const HIGH_SURROGATE_LAST: u16 = 0xDBFF;
+
+
+pub const LOW_SURROGATE_FIRST: u16 = 0xDC00;
+
+
+pub const LOW_SURROGATE_LAST: u16 = 0xDFFF;
+
+
+pub const BYTE_ORDER_MARK: u16 = 0xFEFF;
+
+
+pub const NONCHARACTER_FFFE: u16 = 0xFFFE;
+
+
+pub const NONCHARACTER_FFFF: u16 = 0xFFFF;
+
+
+pub const FIRST_PRINTABLE_UNIT: u16 = 0x20;
+
+
+pub const TAB_UNIT: u16 = 0x09;
+
+
+pub const LINE_FEED_UNIT: u16 = 0x0A;
+
+
+pub const CARRIAGE_RETURN_UNIT: u16 = 0x0D;
+
+
+pub const REPLACEMENT: char = '\u{FFFD}';
+
+
+pub const NEWEST_COUNT: u32 = 1;
+
+
+pub const REPLACED_LABEL: &str = "agent.utf16_replaced";
 
 
 pub const UNKNOWN_SYSMON_DATASET: &str = "sysmon.unknown";
@@ -120,6 +161,8 @@ pub enum CursorState {
 pub enum GapReason {
     Hole,
     CursorInvalid,
+    CursorAhead,
+    Utf16,
 }
 
 
@@ -127,25 +170,52 @@ pub enum GapReason {
 pub enum Refusal {
     Oversized,
     Malformed,
+    Forged,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemKind {
+    Complete,
+    Oversized,
+    Nested,
 }
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Item {
-    Complete(Vec<u8>),
-    Oversized { head: Vec<u8>, size: usize },
-    Nested { head: Vec<u8>, size: usize },
+pub struct Item {
+    pub kind: ItemKind,
+    pub text: String,
+    pub size: usize,
+    pub replaced: u32,
 }
 
 
 #[derive(Debug, Default)]
 pub struct Splitter {
     pub inside: bool,
-    pub item: Vec<u8>,
+    pub item: String,
     pub size: usize,
     pub start_match: usize,
     pub end_match: usize,
     pub nested: bool,
+    pub replaced: u32,
+}
+
+
+#[derive(Debug, Default)]
+pub struct Utf16State {
+    pub carry: Option<u8>,
+    pub high: Option<u16>,
+    pub started: bool,
+    pub bad_order: bool,
+}
+
+
+#[derive(Debug, Default)]
+pub struct Stream {
+    pub decoder: Utf16State,
+    pub splitter: Splitter,
 }
 
 
@@ -164,6 +234,10 @@ pub struct PollTotals {
     pub malformed: u64,
     pub oversized: u64,
     pub holes: u64,
+    pub forged: u64,
+    pub utf16: u64,
+    pub utf16_replaced: u64,
+    pub cursor_ahead: u64,
     pub cursor_invalid: u64,
     pub channel_absent: u64,
     pub output_capped: u64,
@@ -207,23 +281,59 @@ pub enum Outcome {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Newest {
+    Id(u64),
+    Empty,
+    Absent,
+    Failed,
+}
+
+
 #[derive(Debug)]
 pub struct Plan {
     pub after: u64,
-    pub prev: Option<u64>,
+    pub cursor: Option<u64>,
     pub lines: Vec<String>,
-    pub totals: PollTotals,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForgedAt {
+    pub first: Option<u64>,
+    pub breaking: Option<u64>,
+    pub count_only: bool,
+}
+
+
+#[derive(Debug)]
+pub struct Pending {
+    pub id: u64,
+    pub info: SystemInfo,
+    pub size: usize,
+    pub outcome: Outcome,
 }
 
 
 #[derive(Debug, Default)]
 pub struct Batch {
-    pub lines: Vec<String>,
-    pub prev: Option<u64>,
-    pub last: Option<(u64, String)>,
-    pub handled: u64,
+    pub lead: Vec<String>,
+    pub pending: Vec<Pending>,
+    pub forged: Option<ForgedAt>,
+    pub seen: u64,
+    pub after: u64,
+    pub newest: u64,
+    pub limit: u32,
+    pub cursor: Option<u64>,
     pub totals: PollTotals,
-    pub fault: Option<PollError>,
+}
+
+
+#[derive(Debug, Default)]
+pub struct Settled {
+    pub lines: Vec<String>,
+    pub last: Option<(u64, String)>,
+    pub refetch: bool,
 }
 
 

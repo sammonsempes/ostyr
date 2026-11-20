@@ -27,8 +27,4 @@ pub enum PollError {
     CursorRead(#[source] io::Error),
     #[error("spool append failed")]
     Spool(#[source] io::Error),
-    #[error("an event has no readable record id")]
-    MissingRecordId,
-    #[error("record ids out of order: {previous} then {found}")]
-    OutOfOrder { previous: u64, found: u64 },
 }

@@ -6,6 +6,8 @@ pub fn reason_name(reason: GapReason) -> &'static str {
     match reason {
         GapReason::Hole => "hole",
         GapReason::CursorInvalid => "cursor_invalid",
+        GapReason::CursorAhead => "cursor_ahead",
+        GapReason::Utf16 => "utf16",
     }
 }
 
@@ -14,6 +16,7 @@ pub fn refusal_name(reason: Refusal) -> &'static str {
     match reason {
         Refusal::Oversized => "oversized",
         Refusal::Malformed => "malformed",
+        Refusal::Forged => "forged",
     }
 }
 
@@ -30,6 +33,20 @@ pub fn gap_line(channel: &Channel, reason: GapReason, range: Option<(u64, u64)>)
             "first_missing": first,
             "last_missing": last,
             "count": count,
+        }},
+    })
+    .to_string()
+}
+
+
+pub fn forged_line(channel: &Channel, first: Option<u64>, breaking: Option<u64>) -> String {
+    json!({
+        "event": {"kind": "agent.event_gap"},
+        "agent": {"event_gap": {
+            "channel": channel.name,
+            "reason": "forged",
+            "first_id": first,
+            "breaking_id": breaking,
         }},
     })
     .to_string()
