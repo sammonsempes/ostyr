@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use harness::{
     cookie_value_of, csrf_in, fire, fire_body, get, get_with, harness, harness_custom, location_of, login_body, login_csrf, post_form, post_login,
-    set_cookie_of, sign_in, Harness, Reply, Req, LIMITS,
+    set_cookie_of, sign_in, Harness, Reply, Req, LIMITS, WALL_NOW,
 };
 use secrecy::SecretString;
 use std::collections::BTreeMap;
@@ -24,8 +24,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 use stub::{
-    id_of, Mode, ReadFault, BIG_ASSET, FIRST_CURSOR, HOSTILE, LEAK, LOCK_AFTER, ODD_ASSET_ID, RISK_ALERTS_READ, RISK_CAP, RISK_ODD_ID,
-    RISK_UNREADABLE_IDS, TOKEN,
+    cert_fingerprint, id_of, Mode, ReadFault, BIG_ASSET, CERT_BAD_FINGERPRINT_COUNT, CERT_CURSOR_TIME, CERT_MANY_NAMES, CERT_SKIPPED, FIRST_CURSOR,
+    HOSTILE, LEAK, LOCK_AFTER, ODD_ASSET_ID, RISK_ALERTS_READ, RISK_CAP, RISK_ODD_ID, RISK_UNREADABLE_IDS, TOKEN,
 };
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Instant};
@@ -2275,3 +2275,244 @@ async fn risk_api_failures_render_our_own_text() -> TestResult {
     assert_eq!(location_of(&gone).as_deref(), Some("/login"));
     Ok(())
 }
+
+
+const CERT_THIRTY_DAYS: i64 = 30 * 86_400;
+
+
+const CERT_NINETY_DAYS: i64 = 90 * 86_400;
+
+
+const CERT_ROW_NAMES: usize = 20;
+
+
+const CERT_ROW_TOTAL_NAMES: usize = 30;
+
+
+const CERT_DETAIL_NAMES: usize = 100;
+
+
+fn cert_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.cert_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+fn assert_no_hidden_characters(body: &str) {
+    assert!(!body.chars().any(|character| character == '\u{1b}' || character == '\u{202e}'), "{body}");
+}
+
+
+#[tokio::test]
+async fn the_certificate_list_shows_rows_the_skipped_line_and_the_next_page() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/certificates\""));
+    let list = fire(&rig, get_with("/certificates", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_hardened(&list);
+    for fill in ['a', 'b', 'c'] {
+        let link = format!("action=\"/certificates/{}\"", cert_fingerprint(fill));
+        assert!(list.body.contains(&link), "{link}");
+    }
+    assert_eq!(list.body.matches("action=\"/certificates/").count(), CERT_LIST_ROWS);
+    for expected in ["CN=one", "Expired", "Expires soon", "Valid", "rsa 2048", "host1.example.test"] {
+        assert!(list.body.contains(expected), "{expected}");
+    }
+    assert!(list.body.contains(&format!("{CERT_SKIPPED} certificates could not be shown.")));
+    let cursor = format!("name=\"cursor\" value=\"{CERT_CURSOR_TIME}:{}\"", cert_fingerprint('c'));
+    assert!(list.body.contains(&cursor) && list.body.contains("name=\"expiring\" value=\"all\"") && list.body.contains("Next certificates"));
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with("/certificates", &session)
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Expiré") && french.body.contains("n'ont pas pu être affichés"));
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/certificates", &session)).await?;
+    assert!(empty.body.contains("No certificate.") && !empty.body.contains("could not be shown") && !empty.body.contains("Next certificates"));
+    assert_eq!(cert_requests(&rig)?, ["/certificates?limit=100"; CERT_LIST_ROWS]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hostile_certificate_is_clipped_and_bad_fingerprints_are_unreadable_rows() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/certificates", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_no_hidden_characters(&list.body);
+    assert!(list.body.contains("evil[31mcnnext") && list.body.contains("omitted]"), "{}", list.body);
+    assert_eq!(list.body.matches("Unreadable certificate.").count(), CERT_BAD_FINGERPRINT_COUNT);
+    assert_eq!(list.body.matches("action=\"/certificates/").count(), 1);
+    assert!(!list.body.contains("../x") && !list.body.contains(&format!("A{}", "a".repeat(CERT_SHORT_FINGERPRINT))));
+    assert!(list.body.contains("unknown"));
+    assert!(list.body.contains(&format!("host{}.example.test", CERT_ROW_NAMES - 1)));
+    assert!(!list.body.contains(&format!("host{CERT_ROW_NAMES}.example")));
+    assert!(list.body.contains(&format!("{} more", CERT_ROW_TOTAL_NAMES - CERT_ROW_NAMES)));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_expiry_filter_is_computed_from_the_injected_clock() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for query in ["/certificates?expiring=30", "/certificates?expiring=90", "/certificates?expiring=all"] {
+        let reply = fire(&rig, get_with(query, &session)).await?;
+        assert_eq!(reply.status, StatusCode::OK, "{query}");
+    }
+    let forged = fire(&rig, get_with("/certificates?expiring_before=5&limit=500&tenant=b", &session)).await?;
+    assert_eq!(forged.status, StatusCode::OK);
+    let cursor = format!("{CERT_CURSOR_TIME}:{}", cert_fingerprint('c'));
+    let next = fire(&rig, get_with(&format!("/certificates?expiring=30&cursor={cursor}"), &session)).await?;
+    assert_eq!(next.status, StatusCode::OK);
+    let thirty = WALL_NOW + CERT_THIRTY_DAYS;
+    assert_eq!(
+        cert_requests(&rig)?,
+        [
+            format!("/certificates?limit=100&expiring_before={thirty}"),
+            format!("/certificates?limit=100&expiring_before={}", WALL_NOW + CERT_NINETY_DAYS),
+            "/certificates?limit=100".to_owned(),
+            "/certificates?limit=100".to_owned(),
+            format!(
+                "/certificates?limit=100&expiring_before={thirty}&cursor={CERT_CURSOR_TIME}%3A{}",
+                cert_fingerprint('c')
+            ),
+        ]
+    );
+    let before = cert_requests(&rig)?.len();
+    for query in [
+        "/certificates?expiring=7",
+        "/certificates?expiring=",
+        "/certificates?expiring=ALL",
+        "/certificates?expiring=30%20",
+        "/certificates?cursor=a%20b",
+        "/certificates?cursor=",
+        "/certificates?cursor=12:XYZ",
+        "/certificates?cursor=%3A",
+        "/certificates?cursor=1x:aaaa",
+    ] {
+        let reply = fire(&rig, get_with(query, &session)).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    let long = format!("/certificates?cursor=1:{}0", cert_fingerprint('a'));
+    assert_eq!(fire(&rig, get_with(&long, &session)).await?.status, StatusCode::BAD_REQUEST);
+    assert_eq!(cert_requests(&rig)?.len(), before);
+    let negative = format!("/certificates?cursor=-5:{}", cert_fingerprint('a'));
+    assert_eq!(fire(&rig, get_with(&negative, &session)).await?.status, StatusCode::OK);
+    assert_eq!(cert_requests(&rig)?.len(), before + 1);
+    let anonymous = fire(&rig, get("/certificates?expiring=30")).await?;
+    assert_eq!(location_of(&anonymous).as_deref(), Some("/login"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_certificate_detail_shows_its_sightings_and_never_another_route() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let path = format!("/certificates/{}", cert_fingerprint('a'));
+    let detail = fire(&rig, get_with(&path, &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_hardened(&detail);
+    for expected in [
+        "CN=one",
+        "Expires soon",
+        "Sightings",
+        "/etc/ssl/1.pem",
+        "Back to the certificates",
+        &cert_fingerprint('a'),
+    ] {
+        assert!(detail.body.contains(expected), "{expected}");
+    }
+    assert!(!detail.body.contains("could not be shown") && !detail.body.contains("Sightings cut"));
+    assert_eq!(cert_requests(&rig)?, [path]);
+    let before = api_requests(&rig);
+    let upper = format!("/certificates/A{}", "a".repeat(CERT_SHORT_FINGERPRINT));
+    let short = format!("/certificates/{}", "a".repeat(CERT_SHORT_FINGERPRINT));
+    for bad in [
+        upper.as_str(),
+        short.as_str(),
+        "/certificates/..%2Fx",
+        "/certificates/a%2Fb",
+        "/certificates/%2e%2e",
+        "/certificates/aa%3Fb%23c",
+    ] {
+        let reply = fire(&rig, get_with(bad, &session)).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{bad}");
+    }
+    assert_eq!(api_requests(&rig), before);
+    assert_eq!(cert_requests(&rig)?.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hostile_certificate_detail_is_clipped_and_every_bound_is_visible() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let path = format!("/certificates/{}", cert_fingerprint('a'));
+    let detail = fire(&rig, get_with(&path, &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_no_hidden_characters(&detail.body);
+    assert!(detail.body.contains("omitted]") && detail.body.contains("unknown"));
+    assert!(detail.body.contains(&format!("host{}.example.test", CERT_DETAIL_NAMES - 1)));
+    assert!(!detail.body.contains(&format!("host{CERT_DETAIL_NAMES}.example")));
+    assert!(detail.body.contains(&format!("{} more", CERT_MANY_NAMES - CERT_DETAIL_NAMES)));
+    assert!(detail.body.contains(&format!("{CERT_SKIPPED} sightings could not be shown.")) && detail.body.contains("Sightings cut at 500."));
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with(&path, &session)
+        },
+    )
+    .await?;
+    assert!(french.body.contains("Observations coupées à 500.") && french.body.contains("Auto-signé"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn certificate_api_failures_render_our_own_text() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let detail_path = format!("/certificates/{}", cert_fingerprint('a'));
+    for path in ["/certificates", detail_path.as_str()] {
+        for (mode, status) in [
+            (Mode::Status(StatusCode::NOT_FOUND), StatusCode::NOT_FOUND),
+            (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+            (Mode::Status(StatusCode::BAD_REQUEST), StatusCode::BAD_REQUEST),
+            (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+            (Mode::Oversize, StatusCode::BAD_GATEWAY),
+            (Mode::TooMany, StatusCode::BAD_GATEWAY),
+            (Mode::BadCursor, StatusCode::BAD_GATEWAY),
+            (Mode::BadId, StatusCode::BAD_GATEWAY),
+        ] {
+            set_mode(&rig, mode)?;
+            let reply = fire(&rig, get_with(path, &session)).await?;
+            let served = (path == "/certificates" && mode == Mode::BadId) || (path != "/certificates" && mode == Mode::BadCursor);
+            let expected = if served { StatusCode::OK } else { status };
+            assert_eq!(reply.status, expected, "{path}");
+            assert!(!reply.body.contains(LEAK));
+            assert_hardened(&reply);
+        }
+    }
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/certificates", &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    let gone = fire(&rig, get_with(&detail_path, &session)).await?;
+    assert_eq!(location_of(&gone).as_deref(), Some("/login"));
+    Ok(())
+}
+
+
+const CERT_LIST_ROWS: usize = 3;
+
+
+const CERT_SHORT_FINGERPRINT: usize = 63;

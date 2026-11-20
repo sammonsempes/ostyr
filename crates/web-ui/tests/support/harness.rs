@@ -45,6 +45,9 @@ pub const LIMITS: WebLimits = WebLimits {
 };
 
 
+pub const WALL_NOW: i64 = 1_700_000_000;
+
+
 pub struct Harness {
     pub router: Router,
     pub state: Arc<WebState>,
@@ -81,7 +84,13 @@ pub async fn harness_custom(mode: Mode, random: Random, limits: WebLimits) -> Re
     })?;
     let clock = Arc::new(AtomicU64::new(0));
     let ticking = clock.clone();
-    let state = Arc::new(new_state(client, limits, Box::new(move || ticking.load(Ordering::SeqCst)), random));
+    let state = Arc::new(new_state(
+        client,
+        limits,
+        Box::new(move || ticking.load(Ordering::SeqCst)),
+        Box::new(|| WALL_NOW),
+        random,
+    ));
     state.sessions_max.store(HARNESS_SESSIONS, Ordering::SeqCst);
     Ok(Harness {
         router: build_router(state.clone()),

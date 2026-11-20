@@ -5,16 +5,17 @@ mod types;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use types::TestResult;
 use web_ui::api::{
-    alerts_path, assets_path, cases_path, check_asset_detail, check_asset_page, classify, conflict_failure, encode_asset_id, get_alert, get_case,
-    valid_asset_cursor, valid_asset_id, valid_cursor, valid_id, valid_token, MAX_ASSET_ATTRIBUTES, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES,
-    MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
+    alerts_path, assets_path, cases_path, cert_filter, certs_path, check_asset_detail, check_asset_page, classify, conflict_failure, encode_asset_id,
+    get_alert, get_case, valid_asset_cursor, valid_asset_id, valid_cert_cursor, valid_cursor, valid_id, valid_token, MAX_ASSET_ATTRIBUTES,
+    MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
 use web_ui::model::{ApiSection, WebLimits};
 use web_ui::model::{AssetDetailView, AssetPageView};
-use web_ui::routes::{comment_limits, comment_shaped, COMMENT_FORM_BYTES};
+use web_ui::routes::{comment_limits, comment_shaped, expiring_before, COMMENT_FORM_BYTES};
+use web_ui::server::wall_seconds;
 use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, session_key, set_cookie};
 
 
@@ -305,3 +306,49 @@ fn asset_answers_are_bounded() -> TestResult {
     assert!(check_asset_page(&page_with(1, Some("a b"))?).is_err());
     Ok(())
 }
+
+
+const CERT_EPOCH_FLOOR: i64 = 1_700_000_000;
+
+
+const CERT_START: i64 = 10;
+
+
+const CERT_MONTH: i64 = 2_592_000;
+
+
+#[test]
+fn certificate_helpers_accept_only_their_grammar() -> TestResult {
+    let fingerprint = "a".repeat(CERT_FINGERPRINT_CHARS);
+    assert!(valid_cert_cursor(&format!("-12:{fingerprint}")) && valid_cert_cursor(&format!("1800000000:{fingerprint}")));
+    for bad in [
+        "",
+        ":",
+        "12",
+        "x:",
+        &format!(":{fingerprint}"),
+        &format!("-:{fingerprint}"),
+        &format!("1:{}", "A".repeat(CERT_FINGERPRINT_CHARS)),
+    ] {
+        assert!(!valid_cert_cursor(bad), "{bad}");
+    }
+    assert!(!valid_cert_cursor(&format!("{}:{fingerprint}", "1".repeat(CERT_LONG_TIME))));
+    assert_eq!(cert_filter("30"), Some("30"));
+    assert_eq!(cert_filter("31"), None);
+    assert_eq!(certs_path(None, None), "certificates?limit=100");
+    assert_eq!(
+        certs_path(Some("1:x"), Some(CERT_START)),
+        "certificates?limit=100&expiring_before=10&cursor=1%3Ax"
+    );
+    assert_eq!(expiring_before(CERT_START, "all"), None);
+    assert_eq!(expiring_before(CERT_START, "30"), Some(CERT_START + CERT_MONTH));
+    assert_eq!(expiring_before(i64::MAX, "90"), Some(i64::MAX));
+    assert!(wall_seconds() > CERT_EPOCH_FLOOR);
+    Ok(())
+}
+
+
+const CERT_FINGERPRINT_CHARS: usize = 64;
+
+
+const CERT_LONG_TIME: usize = 21;

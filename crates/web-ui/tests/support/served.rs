@@ -99,7 +99,7 @@ fn settings_with(dir: &TempDir, base_url: &str, extra: &str) -> Result<PathBuf, 
 fn open_running(file: &Path) -> Result<Engine, TestError> {
     let config = load_web_config(file)?;
     let prepared = prepare(&config)?;
-    let state = Arc::new(new_state(prepared.client, DEFAULT_LIMITS, Box::new(|| 0), os_random));
+    let state = Arc::new(new_state(prepared.client, DEFAULT_LIMITS, Box::new(|| 0), Box::new(|| 0), os_random));
     let tls = prepared.tls.map(RustlsConfig::from_config);
     let subscriber = reload_subscriber(config.clone(), state.clone(), tls.clone(), PendingRuntime::default());
     let engine = Arc::new(build_engine(config.clone(), file, subscriber, audit_into(&config.audit_file)?));
