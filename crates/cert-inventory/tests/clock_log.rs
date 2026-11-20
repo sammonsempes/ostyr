@@ -107,6 +107,69 @@ fn positive_not_after_and_a_negative_now_give_no_clamp_count() -> TestResult {
     assert!(log.is_empty());
     let (none, negative_log) = captured(|| expiry_alerts(&scope, &records, NEGATIVE_SECONDS))?;
     assert!(none.is_empty());
-    assert!(negative_log.contains("clamped=0"));
+    assert!(negative_log.contains("bad_now=1"));
+    assert!(!negative_log.contains("clamped"));
+    Ok(())
+}
+
+
+fn bad_fingerprint_cert(not_after: i64) -> CertRecord {
+    let mut record = old_cert(1, not_after);
+    record.fingerprint_sha256 = "zz".to_owned();
+    record
+}
+
+
+#[test]
+fn a_rejected_record_is_not_counted_as_clamped() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let records = vec![bad_fingerprint_cert(OLD_NOT_AFTER)];
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, NOW))?;
+    assert!(alerts.is_empty());
+    assert_eq!(log.lines().count(), 1);
+    assert!(log.contains("rejected=1"));
+    assert!(log.contains("not turned into alerts"));
+    assert!(!log.contains("clamped"));
+    Ok(())
+}
+
+
+#[test]
+fn a_clamped_alert_does_not_log_the_not_turned_into_alerts_warning() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let records = vec![old_cert(1, OLD_NOT_AFTER)];
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, NOW))?;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(log.lines().count(), 1);
+    assert!(log.contains("clamped=1"));
+    assert!(log.contains("clamped to 1970"));
+    assert!(!log.contains("not turned into alerts"));
+    Ok(())
+}
+
+
+#[test]
+fn mixed_records_log_each_warning_once_with_exact_counts() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let mut records: Vec<CertRecord> = (TWO..MANY + TWO).map(|index| old_cert(index, OLD_NOT_AFTER)).collect();
+    records.extend((0..MANY).map(|_index| bad_fingerprint_cert(OLD_NOT_AFTER)));
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, NOW))?;
+    assert_eq!(alerts.len(), MANY);
+    assert_eq!(log.lines().count(), TWO);
+    assert!(log.contains(&format!("rejected={MANY}")));
+    assert!(log.contains(&format!("clamped={MANY}")));
+    Ok(())
+}
+
+
+#[test]
+fn a_bad_now_above_the_range_with_old_dates_counts_each_record_once() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let records = vec![old_cert(1, OLD_NOT_AFTER), bad_fingerprint_cert(OLD_NOT_AFTER)];
+    let (alerts, log) = captured(|| expiry_alerts(&scope, &records, i64::MAX))?;
+    assert_eq!(alerts.len(), 1);
+    assert!(log.contains("rejected=1"));
+    assert!(log.contains("bad_now=2"));
+    assert!(log.contains("clamped=1"));
     Ok(())
 }
