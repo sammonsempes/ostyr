@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::model::{PageSettings, PageState};
-use crate::store_model::PublishedRead;
+use crate::store_model::{IncidentRef, NewIncident, PublishedRead};
 use arc_swap::ArcSwap;
 use core_pg::scope::TenantScope;
 use std::collections::{BTreeMap, HashMap};
@@ -49,3 +49,24 @@ pub type Row = Vec<crate::store_model::Cell>;
 
 /// Samples (newest first) per (check, location).
 pub type Series<'a> = BTreeMap<(&'a str, &'a str), Vec<(i64, bool)>>;
+
+
+pub type WriteFuture = Pin<Box<dyn Future<Output = Result<IncidentRef, StoreError>> + Send>>;
+
+
+pub type CreateFn = Arc<dyn Fn(TenantScope, NewIncident) -> WriteFuture + Send + Sync>;
+
+
+/// Scope, incident with the version the caller read, `at`, message, internal note.
+pub type UpdateFn = Arc<dyn Fn(TenantScope, IncidentRef, i64, String, String) -> WriteFuture + Send + Sync>;
+
+
+pub type ResolveFn = Arc<dyn Fn(TenantScope, IncidentRef, i64) -> WriteFuture + Send + Sync>;
+
+
+/// Epoch seconds now; production passes `backend::now_seconds`.
+pub type ClockFn = fn() -> i64;
+
+
+/// A refusal ready to send, boxed so that a `Result` carrying it stays small.
+pub type Refused = Box<axum::response::Response>;

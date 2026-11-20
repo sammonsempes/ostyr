@@ -6357,9 +6357,12 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "status-page"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "arc-swap",
  "axum",
+ "core-api",
  "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "futures-util",
@@ -6375,6 +6378,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -6383,7 +6387,9 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

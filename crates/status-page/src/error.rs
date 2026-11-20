@@ -57,4 +57,6 @@ pub enum StoreError {
     BadRow { column: &'static str },
     #[error(transparent)]
     Pg(#[from] core_pg::error::PgError),
+    #[error(transparent)]
+    Lease(#[from] alerts::error::StoreError),
 }

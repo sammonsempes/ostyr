@@ -1,6 +1,9 @@
 //! Pre-rendered public status page, JSON and static HTML (spec section 20), slices 2 and 3 (serving).
 
+pub mod api;
+pub mod api_model;
 pub mod app;
+pub mod backend;
 pub mod config;
 pub mod derive;
 pub mod error;
