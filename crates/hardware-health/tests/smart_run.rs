@@ -4,7 +4,9 @@ mod types;
 
 
 use hardware_health::model::{FailureClass, RunOutput, SmartSettings};
-use hardware_health::smart_run::{classify_exit, failure_of, is_device_name, is_device_type, run_smartctl, scan_and_report, scan_and_report_with};
+use hardware_health::smart_run::{
+    classify_exit, failure_of, is_device_name, is_device_type, run_smartctl, run_with_hook, scan_and_report, scan_and_report_with,
+};
 use net_topology::model::RunFailure;
 use std::fs;
 use std::io;
@@ -74,6 +76,12 @@ const BIT_BOTH: i32 = 3;
 
 
 const PLAIN_MODE: u32 = 0o644;
+
+
+const EXECUTABLE_MODE: u32 = 0o755;
+
+
+const NOBODY: u32 = 65_534;
 
 
 fn scratch() -> Result<tempfile::TempDir, io::Error> {
@@ -408,7 +416,53 @@ fn the_real_runner_classifies_signal_size_deadline_and_spawn() -> TestResult {
     let plain = dir.path().join("plain");
     fs::write(&plain, "#!/bin/sh\n")?;
     fs::set_permissions(&plain, fs::Permissions::from_mode(PLAIN_MODE))?;
-    assert_eq!(run_smartctl(&plain, &[], CAP, PATIENT), Err(FailureClass::Spawn));
+    assert_eq!(run_smartctl(&plain, &[], CAP, PATIENT), Err(FailureClass::ProgramRefused));
+    let broken = dir.path().join("broken");
+    fs::write(&broken, "#!/nonexistent/interpreter\n")?;
+    fs::set_permissions(&broken, fs::Permissions::from_mode(EXECUTABLE_MODE))?;
+    assert_eq!(run_smartctl(&broken, &[], CAP, PATIENT), Err(FailureClass::Spawn));
+    Ok(())
+}
+
+
+fn swap_program(program: &Path) {
+    let swapped = fs::rename(program, program.with_extension("moved"))
+        .and_then(|()| fs::write(program, "#!/bin/sh\n"))
+        .and_then(|()| fs::set_permissions(program, fs::Permissions::from_mode(EXECUTABLE_MODE)));
+    if let Err(error) = swapped {
+        tracing::warn!(%error, "the swap failed");
+    }
+}
+
+
+fn leave(_program: &Path) {}
+
+
+fn euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+
+#[test]
+fn a_program_renamed_between_the_check_and_the_spawn_is_refused() -> TestResult {
+    let dir = scratch()?;
+    let program = install(dir.path(), "swapped", "echo ok")?;
+    let refused = run_with_hook(&program, &[], (CAP, PATIENT), (euid(), swap_program));
+    assert_eq!(refused, Err(FailureClass::ProgramRefused));
+    let untouched = install(dir.path(), "untouched", "echo ok")?;
+    assert_eq!(run_with_hook(&untouched, &[], (CAP, PATIENT), (euid(), leave))?.exit_code, Some(0));
+    Ok(())
+}
+
+
+#[test]
+fn the_production_run_refuses_a_program_owned_by_nobody() -> TestResult {
+    let dir = scratch()?;
+    let program = install(dir.path(), "nobody", "echo ok")?;
+    if euid() == 0 {
+        rustix::fs::chown(&program, Some(rustix::fs::Uid::from_raw(NOBODY)), None)?;
+        assert_eq!(run_smartctl(&program, &[], CAP, PATIENT), Err(FailureClass::ProgramRefused));
+    }
     Ok(())
 }
 
