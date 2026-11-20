@@ -6,6 +6,7 @@ use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
 use std::collections::BTreeMap;
 use std::future::Future;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 
 pub const MIGRATION_NAMESPACE: &str = "status_page";
@@ -91,9 +92,9 @@ pub const CREATE_SQL: &str = "INSERT INTO status_incidents (tenant, service, pub
     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, version";
 
 
-/// Params: `$2` id, `$3` version, `$4` at, `$5` message, `$6` note, `$7` update limit; no row on a foreign id, stale version or full list.
+/// Params: `$2` id, `$3` version, `$4` at, `$5` message, `$6` note, `$7` update limit; no row on a foreign id, stale version, resolved incident, `at` before the start or full list.
 pub const UPDATE_SQL: &str = "WITH bumped AS (UPDATE status_incidents SET version = version + 1 \
-    WHERE tenant = $1 AND id = $2 AND version = $3 \
+    WHERE tenant = $1 AND id = $2 AND version = $3 AND resolved_at IS NULL AND $4 >= started_at \
     AND (SELECT count(*) FROM status_incident_updates WHERE tenant = $1 AND incident = $2) < $7 RETURNING id, version) \
     INSERT INTO status_incident_updates (tenant, incident, at, message, internal_note) \
     SELECT $1::text, id, $4::bigint, $5::text, $6::text FROM bumped RETURNING incident, (SELECT version FROM bumped)";
@@ -101,7 +102,7 @@ pub const UPDATE_SQL: &str = "WITH bumped AS (UPDATE status_incidents SET versio
 
 /// Params: `$2` id, `$3` expected version, `$4` resolved_at.
 pub const RESOLVE_SQL: &str = "UPDATE status_incidents SET resolved_at = $4, version = version + 1 \
-    WHERE tenant = $1 AND id = $2 AND version = $3 AND resolved_at IS NULL RETURNING id, version";
+    WHERE tenant = $1 AND id = $2 AND version = $3 AND resolved_at IS NULL AND $4 >= started_at RETURNING id, version";
 
 
 /// Params: `$2` limit, `$3` declared services (`text[]`). Unresolved first, so the limit never cuts an ongoing outage before a resolved one; no internal note column; last column is the exact update count.
@@ -125,14 +126,35 @@ pub const COUNTS_SQL: &str =
     "SELECT count(*), count(*) FILTER (WHERE resolved_at IS NULL) FROM status_incidents WHERE tenant = $1 AND published AND service = ANY($2)";
 
 
-/// Bidirectional controls (Arabic letter mark, LRM, RLM, embeddings, overrides, isolates) can reorder a public title: refused like a control.
-pub const BIDI_CONTROLS: [char; 12] = [
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+/// Fillers that render blank, the Braille blank, the Khmer inherent vowels and the Mongolian free variation selector.
+pub const INVISIBLE_CHARACTERS: [char; 9] = [
+    '\u{034F}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{17B5}', '\u{2800}', '\u{180F}', '\u{3164}', '\u{FFA0}',
 ];
 
 
+/// Variation selectors: `U+180B` to `U+180D`, `U+FE00` to `U+FE0F`, `U+E0100` to `U+E01EF`.
+pub fn is_variation_selector(character: char) -> bool {
+    matches!(character, '\u{180B}'..='\u{180D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+
+/// Invisible or spoofable: categories Cc, Cf, Co, Cn, Zl, Zp, the fillers and the variation selectors (a copy of the ecs-normalise rule, shared-helper debt).
+pub fn is_invisible(character: char) -> bool {
+    matches!(
+        get_general_category(character),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    ) || INVISIBLE_CHARACTERS.contains(&character)
+        || is_variation_selector(character)
+}
+
+
 pub fn is_refused(character: char, multiline: bool) -> bool {
-    (character.is_control() && !(multiline && character == '\n')) || BIDI_CONTROLS.contains(&character)
+    is_invisible(character) && !(multiline && character == '\n')
 }
 
 
@@ -144,6 +166,31 @@ pub fn check_text(field: &'static str, text: &str, max: usize, multiline: bool) 
         Err(StoreError::TextInvalid { field })
     } else {
         Ok(())
+    }
+}
+
+
+pub fn is_letter_or_number(character: char) -> bool {
+    matches!(
+        get_general_category(character),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::OtherLetter
+            | GeneralCategory::DecimalNumber
+            | GeneralCategory::LetterNumber
+            | GeneralCategory::OtherNumber
+    )
+}
+
+
+/// A text that shows something: at least one letter or number by general category (marks do not count).
+pub fn check_readable(field: &'static str, text: &str) -> Result<(), StoreError> {
+    if text.chars().any(is_letter_or_number) {
+        Ok(())
+    } else {
+        Err(StoreError::TextInvalid { field })
     }
 }
 
@@ -220,6 +267,7 @@ pub fn decode_changed(rows: &[Row]) -> Result<IncidentRef, StoreError> {
 pub fn validate_new_incident(incident: &NewIncident) -> Result<(), StoreError> {
     check_required("service", &incident.service, MAX_SERVICE_CHARACTERS, false)?;
     check_required("title", &incident.title, MAX_TITLE_CHARACTERS, false)?;
+    check_readable("title", &incident.title)?;
     check_text("internal_note", &incident.internal_note, MAX_NOTE_CHARACTERS, true)
 }
 
