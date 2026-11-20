@@ -8,6 +8,7 @@ pub mod limits;
 pub mod mime;
 pub mod model;
 pub mod observables;
+pub mod policy;
 pub mod scan;
 pub mod text;
 pub mod triage;
