@@ -6,8 +6,8 @@ use oncall::alert::FailureReason;
 use oncall::channel::{load_channel, parse_channel, redacted_target, validate_channel};
 use oncall::error::OncallError;
 use oncall::limits::{
-    MAX_CHANNELS, MAX_NAME_LEN, MAX_PATH_LEN, MAX_TARGET_LEN, MAX_VALUE_LEN, NTFY_BODY_LEN, NTFY_SUBJECT_LEN, SLACK_BODY_LEN, SMS_BODY_LEN,
-    SMS_SUBJECT_LEN, SMTP_BODY_LEN, SMTP_SUBJECT_LEN, TEAMS_BODY_LEN, WEBHOOK_BODY_LEN,
+    MAX_CHANNELS, MAX_CHANNEL_NAME_BYTES, MAX_NAME_LEN, MAX_PATH_LEN, MAX_TARGET_LEN, MAX_VALUE_LEN, NTFY_BODY_LEN, NTFY_SUBJECT_LEN, SLACK_BODY_LEN,
+    SMS_BODY_LEN, SMS_SUBJECT_LEN, SMTP_BODY_LEN, SMTP_SUBJECT_LEN, TEAMS_BODY_LEN, WEBHOOK_BODY_LEN,
 };
 use oncall::model::{AlertNotice, Channel, ChannelKind, Message};
 use oncall::notify::notify;
@@ -408,5 +408,61 @@ fn an_empty_tenant_and_a_missing_file_are_refused() -> TestResult {
     assert!(refused(no_tenant)?.contains("channel tenant"));
     let directory = tempfile::tempdir()?;
     assert!(load_channel(&directory.path().join("absent.yaml")).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn one_channel_name_rule_applies_on_load() -> TestResult {
+    let max = "a".repeat(MAX_CHANNEL_NAME_BYTES);
+    let wide = "\u{e9}".repeat(MAX_CHANNEL_NAME_BYTES);
+    let long = "a".repeat(MAX_CHANNEL_NAME_BYTES + 1);
+    let refused_names = [
+        "\u{e9}quipe",
+        "a\u{2028}b",
+        "a\u{3164}b",
+        "a\u{202e}b",
+        "a\tb",
+        "a\0b",
+        "",
+        long.as_str(),
+        wide.as_str(),
+    ];
+    refused_names.iter().try_for_each(|name| {
+        let text = CHANNEL_YAML.replacen("name: pager-webhook", &format!("name: {}", serde_json::to_string(name)?), 1);
+        let message = refused(&text)?;
+        assert!(message.contains("channel name"), "{name:?}: {message}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    parse_channel(&CHANNEL_YAML.replacen("name: pager-webhook", &format!("name: {max}"), 1), "c.yaml")?;
+    refused_names.iter().try_for_each(|name| {
+        let mut loaded = channel(name, ChannelKind::Smtp, "a@example.com");
+        assert!(validate_channel(&loaded).is_err(), "{name:?}");
+        assert_eq!(
+            validate_channel(&loaded).err().map(|error| error.to_string()),
+            Some("the setting `channel name` is not valid".to_string())
+        );
+        loaded.name = max.clone();
+        validate_channel(&loaded)?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_channel_name_does_not_stop_the_valid_channel() -> TestResult {
+    let channels = [
+        channel("\u{e9}quipe", ChannelKind::Smtp, "a@example.com"),
+        channel("ops", ChannelKind::Smtp, "b@example.com"),
+    ];
+    let mut sent: Vec<String> = Vec::new();
+    let failures = notify(&alert("down"), &channels, &mut |target: &Channel, _: &Message| {
+        sent.push(target.name.clone());
+        Ok(())
+    })?;
+    assert_eq!(sent, ["ops"]);
+    assert_eq!(failures.len(), 1);
+    assert!(failures.iter().all(|failure| failure.reason == FailureReason::InvalidMessage));
     Ok(())
 }

@@ -1,8 +1,9 @@
 use crate::error::OncallError;
-use crate::limits::{MAX_PATH_LEN, MAX_TARGET_LEN};
+use crate::limits::{MAX_CHANNEL_NAME_BYTES, MAX_PATH_LEN, MAX_TARGET_LEN};
 use crate::load::read_file_limited;
 use crate::model::{Channel, ChannelKind};
 use crate::smtp::parse_address;
+use crate::store::valid_text;
 use crate::validate::{check_between, check_name};
 use core_config::parse::parse_document;
 use std::path::Path;
@@ -30,8 +31,17 @@ pub fn check_https(channel: &Channel) -> Result<(), OncallError> {
 }
 
 
+pub fn check_channel_name(name: &str) -> Result<(), OncallError> {
+    if valid_text(name, MAX_CHANNEL_NAME_BYTES) {
+        Ok(())
+    } else {
+        Err(OncallError::InvalidSetting { field: "channel name" })
+    }
+}
+
+
 pub fn validate_channel(channel: &Channel) -> Result<(), OncallError> {
-    check_name("channel name", &channel.name)?;
+    check_channel_name(&channel.name)?;
     check_name("channel tenant", &channel.tenant)?;
     check_between("target", channel.target.chars().count() as u64, 1, MAX_TARGET_LEN)?;
     if let Some(path) = &channel.secret_file {

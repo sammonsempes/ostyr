@@ -18,6 +18,8 @@ use oncall::api::{
 use oncall::error::{ReadError, StoreError};
 use oncall::limits::{MAX_FINGERPRINT_BYTES, MAX_OPEN_ALERTS};
 use serde_json::{json, Value};
+use std::sync::{Arc, LazyLock, Mutex};
+use tracing::Dispatch;
 use types::{TestError, TestResult};
 
 
@@ -366,3 +368,59 @@ fn the_access_table_requires_the_permission_on_both_routes() -> TestResult {
     assert!(paths.contains_key(LIST_PATH) && paths.contains_key(GET_PATH));
     Ok(())
 }
+
+
+#[tokio::test]
+async fn a_stored_line_separator_fingerprint_is_skipped_and_never_logged() -> TestResult {
+    let fx = fixture()?;
+    stored(&fx.script, TENANT, vec![alert(1, "good", at(0)?), alert(SECOND, "a\u{2028}b", at(1)?)]);
+    let token = login(&fx.router, ANALYST).await?;
+    let capture = Capture(Arc::default());
+    LazyLock::force(&ANCHOR);
+    let dispatch = Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer({
+                let sink = capture.clone();
+                move || sink.clone()
+            })
+            .finish(),
+    );
+    let (listed, single) = {
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        (
+            get(&fx.router, LIST_PATH, Some(&token)).await?,
+            get(&fx.router, "/oncall/alerts/2", Some(&token)).await?,
+        )
+    };
+    assert_eq!(listed.status(), StatusCode::OK);
+    let json = body_json(listed).await?;
+    assert_eq!(item_ids(&json)?, [1]);
+    assert_eq!(json.get("skipped"), Some(&json!(1)));
+    assert_eq!(single.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_json(single).await?.to_string();
+    let logs = String::from_utf8(capture.0.lock().map_err(|error| error.to_string())?.clone())?;
+    assert!(logs.contains("stored_value"));
+    assert!(!logs.contains("2028") && !logs.contains('\u{2028}') && !body.contains('\u{2028}') && !body.contains("2028"));
+    Ok(())
+}
+
+
+#[derive(Clone)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().map_err(|error| std::io::Error::other(error.to_string())).map(|mut inner| {
+            inner.extend_from_slice(buffer);
+            buffer.len()
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
