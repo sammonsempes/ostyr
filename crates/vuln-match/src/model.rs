@@ -286,9 +286,10 @@ pub struct StoredFinding {
 }
 
 
-/// One page of open findings, and the cursor of the next page when there is one.
+/// One page of open findings, the rows skipped as unservable and the cursor of the next page when there is one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FindingsPage {
     pub findings: Vec<StoredFinding>,
+    pub skipped: usize,
     pub next: Option<String>,
 }
