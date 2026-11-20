@@ -867,12 +867,18 @@ fn discarding_a_missing_staged_file_is_logged_not_fatal() -> Result<(), Box<dyn 
 }
 
 
+fn install_script(path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
+    let source = PathBuf::from(format!("{}.source", path.display()));
+    fs::write(&source, format!("#!/bin/sh\n{body}\n"))?;
+    let installed = Command::new("install").arg("-m").arg("755").arg(&source).arg(path).status()?;
+    assert!(installed.success());
+    Ok(())
+}
+
+
 fn script(fixture: &Fixture, name: &str, body: &str) -> Result<(PathBuf, OwnedFd), Box<dyn Error>> {
     let path = fixture.dir.path().join(name);
-    let source = fixture.dir.path().join(format!("{name}.source"));
-    fs::write(&source, format!("#!/bin/sh\n{body}\n"))?;
-    let installed = Command::new("install").arg("-m").arg("755").arg(&source).arg(&path).status()?;
-    assert!(installed.success());
+    install_script(&path, body)?;
     let handle = open_trusted_program(&path, rustix::process::geteuid().as_raw())?;
     Ok((path, handle))
 }
@@ -887,8 +893,13 @@ fn the_real_runner_reports_success_failure_spawn_error_and_deadline() -> Result<
     assert_eq!(run_with_deadline(&yes_handle, &yes, &[], second)?, CommandStatus::Success);
     let (no, no_handle) = script(&fixture, "no", "exit 1")?;
     assert_eq!(run_with_deadline(&no_handle, &no, &[], second)?, CommandStatus::Failed(Some(1)));
-    let empty = open_trusted_program(prog(&fixture), rustix::process::geteuid().as_raw())?;
-    assert!(run_with_deadline(&empty, prog(&fixture), &[], second).is_err());
+    let blank = fixture.dir.path().join("blank");
+    let blank_source = fixture.dir.path().join("blank.source");
+    fs::write(&blank_source, "")?;
+    let blank_installed = Command::new("install").arg("-m").arg("755").arg(&blank_source).arg(&blank).status()?;
+    assert!(blank_installed.success());
+    let empty = open_trusted_program(&blank, rustix::process::geteuid().as_raw())?;
+    assert!(run_with_deadline(&empty, &blank, &[], second).is_err());
     let (slow, slow_handle) = script(&fixture, "slow", &format!("exec sleep {LONG_SLEEP}"))?;
     assert_eq!(run_with_deadline(&slow_handle, &slow, &[], short)?, CommandStatus::TimedOut);
     Ok(())
@@ -1205,8 +1216,7 @@ fn a_program_renamed_or_removed_between_the_check_and_the_spawn_is_refused_and_n
     let body = format!("touch {}", spawned_marker(&fixture).display());
     let (path, handle) = script(&fixture, "swapped", &body)?;
     let other = format!("{}.other", path.display());
-    fs::write(&other, format!("#!/bin/sh\n{body}\n"))?;
-    fs::set_permissions(&other, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    install_script(Path::new(&other), &body)?;
     let euid = rustix::process::geteuid().as_raw();
     let second = Duration::from_secs(1);
     let status = run_child_with_hook((&handle, &path), &[], second, wait_child, (euid, swap_in_the_other_program))?;
@@ -1215,8 +1225,7 @@ fn a_program_renamed_or_removed_between_the_check_and_the_spawn_is_refused_and_n
     let removed = run_child_with_hook((&handle, &path), &[], second, wait_child, (euid, remove_the_program))?;
     assert_eq!(removed, CommandStatus::Refused);
     assert!(!spawned_marker(&fixture).exists());
-    fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    install_script(&path, &body)?;
     let fresh = open_trusted_program(&path, euid)?;
     let same = run_child_with_hook((&fresh, &path), &[], second, wait_child, (euid, leave_alone))?;
     assert_eq!(same, CommandStatus::Success);

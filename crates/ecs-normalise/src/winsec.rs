@@ -13,6 +13,13 @@ use tracing::warn;
 pub const SECURITY_PROVIDER: &str = "Microsoft-Windows-Security-Auditing";
 
 
+pub const EVENTLOG_PROVIDER: &str = "Microsoft-Windows-Eventlog";
+
+
+/// The only ids accepted from `EVENTLOG_PROVIDER` on the Security channel.
+pub const EVENTLOG_IDS: &[u32] = &[1102];
+
+
 pub const SECURITY_CHANNEL: &str = "Security";
 
 
@@ -155,6 +162,13 @@ pub const WIN_KINDS: &[WinKind] = &[
         kind_type: "info",
         outcome: OutcomeRule::FromStatus,
     },
+    WinKind {
+        id: "1102",
+        action: "audit-log-cleared",
+        categories: &[IAM],
+        kind_type: "change",
+        outcome: OutcomeRule::Success,
+    },
 ];
 
 
@@ -225,11 +239,11 @@ fn outcome_of(kind: &WinKind, fields: &Fields) -> Option<&'static str> {
 }
 
 
-fn user_fields(fields: &Fields) -> Option<UserFields> {
+fn user_fields(fields: &Fields, with_sid: bool) -> Option<UserFields> {
     non_empty(UserFields {
         name: first_text(fields, &["TargetUserName", "SubjectUserName"]).map(|name| clean_identity(&name)),
         domain: first_text(fields, &["TargetDomainName", "SubjectDomainName"]).map(|domain| clean_identity(&domain)),
-        id: None,
+        id: text(fields, "SubjectUserSid").filter(|_| with_sid).map(|sid| clean_identity(&sid)),
     })
 }
 
@@ -258,7 +272,8 @@ fn event_time(raw: &RawEvent) -> Result<OffsetDateTime, WinSecError> {
 fn check_origin(raw: &RawEvent) -> Result<(), WinSecError> {
     let provider = raw.provider.as_deref().unwrap_or("");
     let channel = raw.channel.as_deref().unwrap_or("");
-    if provider != SECURITY_PROVIDER {
+    let allowed = provider == SECURITY_PROVIDER || (provider == EVENTLOG_PROVIDER && EVENTLOG_IDS.contains(&raw.event_id));
+    if !allowed {
         Err(WinSecError::Provider(clean(provider)))
     } else if channel != SECURITY_CHANNEL {
         Err(WinSecError::Channel(clean(channel)))
@@ -269,7 +284,9 @@ fn check_origin(raw: &RawEvent) -> Result<(), WinSecError> {
 
 
 fn build(raw: &RawEvent, kind: &WinKind, time: OffsetDateTime) -> EcsEvent {
-    let outcome = outcome_of(kind, &raw.fields);
+    let from_user_data = raw.provider.as_deref() == Some(EVENTLOG_PROVIDER);
+    let fields = if from_user_data { &raw.user_data } else { &raw.fields };
+    let outcome = outcome_of(kind, fields);
     let failed = outcome == Some(FAILURE);
     EcsEvent {
         event: EventFields {
@@ -281,7 +298,7 @@ fn build(raw: &RawEvent, kind: &WinKind, time: OffsetDateTime) -> EcsEvent {
             outcome: outcome.map(String::from),
             dataset: Some(WINSEC_DATASET.to_string()),
             module: Some(WINSEC_MODULE.to_string()),
-            provider: Some(SECURITY_PROVIDER.to_string()),
+            provider: raw.provider.clone(),
             ..EventFields::default()
         },
         host: Some(HostFields {
@@ -291,13 +308,13 @@ fn build(raw: &RawEvent, kind: &WinKind, time: OffsetDateTime) -> EcsEvent {
             }),
             ..HostFields::default()
         }),
-        user: user_fields(&raw.fields),
+        user: user_fields(fields, from_user_data),
         source: non_empty(EndpointFields {
-            ip: source_address(&raw.fields),
-            port: small_number(&raw.fields, "IpPort"),
+            ip: source_address(fields),
+            port: small_number(fields, "IpPort"),
             ..EndpointFields::default()
         }),
-        labels: labels(&raw.fields, failed).into_iter().collect(),
+        labels: labels(fields, failed).into_iter().collect(),
         ..blank_event(time)
     }
 }

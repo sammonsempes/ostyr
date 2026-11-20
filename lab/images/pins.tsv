@@ -4,3 +4,4 @@ virtio-win	303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d	virt
 cloudbase-init	ffbf80515a7311ed00800276a6af7aab23b41d7acf13e79ce3d2d56844f638f7	CloudbaseInitSetup_1_1_9_x64.msi	2026-11-03	https://github.com/cloudbase/cloudbase-init/releases/download/1.1.9/CloudbaseInitSetup_1_1_9_x64.msi
 garage	2ff667286217cd73ebcb1c03af993822365000441dfe31a80cb64c5189a9dea8	garage-v2.5.0	2026-11-10	https://garagehq.deuxfleurs.fr/_releases/v2.5.0/x86_64-unknown-linux-musl/garage
 garage-image	23b16d34e0348d9aca9b960a7429a7e6d494974b5288bfb8f6c3ab856895f71e	dxflrs-garage-v2.5.0-amd64-manifest	2026-11-10	https://registry-1.docker.io/v2/dxflrs/garage/manifests/v2.5.0
+sysmon	00ecf1b46aec99299d3ae0bca79dc621458bd014b20b509d7c5c8e8c8611aa54	Sysmon.zip	2026-11-20	https://download.sysinternals.com/files/Sysmon.zip

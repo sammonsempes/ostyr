@@ -47,24 +47,51 @@ gate() {
   else low cargo run --offline -q -p coverage_gate -- "$EXPORT" "$ROOT" "${dirs[@]+"${dirs[@]}"}"; fi
 }
 
+GATE_TMPFS="${GATE_TMPFS:-/run/ostyr-gate}"
+GATE_TMPFS_FLOOR_KB="${GATE_TMPFS_FLOOR_KB:-4194304}"
+
+tmpfs_has_room() {
+  local free_kb
+  [ -d "$GATE_TMPFS" ] && [ -w "$GATE_TMPFS" ] || return 1
+  free_kb=$(df -Pk "$GATE_TMPFS" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  [ -n "$free_kb" ] && [ "$free_kb" -ge "$GATE_TMPFS_FLOOR_KB" ]
+}
+
+pick_scratch() {
+  TMPFS_RUN=""
+  if tmpfs_has_room; then
+    TMPFS_RUN="$GATE_TMPFS/run-$$"
+    mkdir -p -m 0755 "$TMPFS_RUN" || TMPFS_RUN=""
+  fi
+  if [ -n "$TMPFS_RUN" ]; then SCRATCH="$TMPFS_RUN"; else SCRATCH="$RUN_DIR/tmp"; fi
+  mkdir -p "$SCRATCH"
+}
+
 covered_tests() {
-  local scratch="$GATE_DIR/tmp-$$"
-  mkdir -p "$scratch"
   local status=0
-  TMPDIR="$scratch" low cargo +nightly llvm-cov --offline --branch "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" --fail-under-lines 100 --json --output-path "$EXPORT" || status=$?
-  rm -rf "$scratch"
+  pick_scratch
+  TMPDIR="$SCRATCH" low cargo +nightly llvm-cov --offline --branch "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" --fail-under-lines 100 --json --output-path "$EXPORT" || status=$?
+  rm -rf "$SCRATCH"
   return "$status"
+}
+
+cleanup_run() {
+  rm -rf "$RUN_DIR"
+  if [ -n "${TMPFS_RUN:-}" ]; then rm -rf "$TMPFS_RUN"; fi
+  if [ -z "$(find "$GATE_DIR" -mindepth 1 -maxdepth 1 -name 'run-*' 2>/dev/null)" ]; then rm -rf "$GATE_DIR"; fi
 }
 
 prepare_gate_dir() {
   GATE_DIR="$TARGET/gates/$(printf %s "$ROOT" | cksum | cut -d' ' -f1)"
+  RUN_DIR="$GATE_DIR/run-$$"
   export CARGO_LLVM_COV_TARGET_DIR="$GATE_DIR/llvm-cov-target"
   export CARGO_LLVM_COV_BUILD_DIR="$TARGET/llvm-cov-target"
   GATE_STALE_DAYS=1
   if [ -d "$TARGET/gates" ]; then find "$TARGET/gates" -mindepth 1 -maxdepth 1 -mtime "+$GATE_STALE_DAYS" -exec rm -rf {} +; fi
-  trap 'rm -rf "$GATE_DIR"' EXIT
-  EXPORT="${COVERAGE_EXPORT:-$GATE_DIR/coverage.json}"
-  mkdir -p "$(dirname "$EXPORT")"
+  if [ -d "$GATE_TMPFS" ]; then find "$GATE_TMPFS" -mindepth 1 -maxdepth 1 -name 'run-*' -mtime "+$GATE_STALE_DAYS" -exec rm -rf {} + 2>/dev/null || true; fi
+  trap cleanup_run EXIT
+  EXPORT="${COVERAGE_EXPORT:-$RUN_DIR/coverage.json}"
+  mkdir -p "$RUN_DIR" "$(dirname "$EXPORT")"
 }
 
 MENTION_PATTERN='cl''aude|anthro''pic'
