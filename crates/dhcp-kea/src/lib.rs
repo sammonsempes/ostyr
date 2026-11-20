@@ -3,6 +3,7 @@
 pub mod alerting;
 pub mod api;
 pub mod api_model;
+pub mod backend;
 pub mod cli;
 pub mod cursor;
 pub mod error;
