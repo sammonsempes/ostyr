@@ -383,3 +383,29 @@ fn each_filter_picks_its_statement_and_parameter_order() -> TestResult {
     assert!(ASSET_SQL.contains("asset = $2"));
     Ok(())
 }
+
+
+#[test]
+fn baseline_statements_compare_only_control_and_asset_after_the_equality() -> TestResult {
+    [LIST_VERDICT_BASELINE_SQL, LIST_ALL_BASELINE_SQL].iter().for_each(|sql| {
+        assert!(sql.contains("(control, asset) > ("), "{sql}");
+        assert!(!sql.contains("(baseline, control, asset) >"), "{sql}");
+    });
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_cursor_outside_the_wanted_baseline_still_pages_correctly() -> TestResult {
+    let fake = Fake::default();
+    seed_three(&fake);
+    put(&fake, TENANT, ("aaa", "c1", "host-a"), ("fail", FAILED, SEEN));
+    let exec = executor(&fake);
+    let scope = tenant_scope(TENANT)?;
+    let wanted = filter(Some("fail"), Some("base"));
+    let before = list_state(&exec, &scope, &wanted, Some(&key("aaa", "c9", "host-z")), MAX_PAGE).await?;
+    assert_eq!(before.rows.len(), THIRD);
+    let after = list_state(&exec, &scope, &wanted, Some(&key("zzz", "", "")), MAX_PAGE).await?;
+    assert!(after.rows.is_empty());
+    Ok(())
+}

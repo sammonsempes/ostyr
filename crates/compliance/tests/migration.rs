@@ -43,6 +43,7 @@ fn the_third_migration_carries_the_write_grammar_and_its_indexes() -> TestResult
     let asset = pattern(MAX_ASSET_CHARS, ASSET_PUNCTUATION);
     assert_eq!(sql.matches(&format!("'{id}'")).count(), ID_CHECKS, "{id}");
     assert_eq!(sql.matches(&format!("'{asset}'")).count(), ASSET_CHECKS, "{asset}");
+    assert!(sql.starts_with("LOCK TABLE compliance_state, compliance_state_count IN ACCESS EXCLUSIVE MODE;"));
     for needle in [
         "DELETE FROM compliance_state",
         "UPDATE compliance_state_count",

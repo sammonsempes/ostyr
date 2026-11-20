@@ -1,3 +1,5 @@
+LOCK TABLE compliance_state, compliance_state_count IN ACCESS EXCLUSIVE MODE;
+
 DELETE FROM compliance_state
 WHERE baseline !~ '^[0-9A-Za-z][0-9A-Za-z._-]{0,49}$'
     OR control !~ '^[0-9A-Za-z][0-9A-Za-z._-]{0,49}$'
