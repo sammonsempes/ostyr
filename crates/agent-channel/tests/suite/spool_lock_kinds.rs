@@ -1,10 +1,10 @@
 use crate::spool_append::agent_file;
 use crate::spool_refused::{captured_log, no_old_file, texts, ATTEMPTS, BAD_LINE, NEW_BYTES};
 use crate::types::TestResult;
-use agent_channel::spool::{claim_spool, rewrite_quarantine_with, MAX_REJECTED_BYTES, MAX_REJECTED_LINES};
+use agent_channel::spool::{claim_spool, is_not_a_regular_file, rewrite_quarantine, rewrite_quarantine_with, MAX_REJECTED_BYTES, MAX_REJECTED_LINES};
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{symlink, OpenOptionsExt};
+use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -164,4 +164,82 @@ fn a_lock_in_an_unusable_directory_is_still_an_error() -> TestResult {
     );
     assert!(result.is_err());
     Ok(())
+}
+
+
+const FOREIGN_UID: u32 = 65534;
+
+
+const STICKY_WORLD_WRITABLE: u32 = 0o1777;
+
+
+#[test]
+fn a_socket_at_the_quarantine_is_ignored_and_replaced_for_the_claim_the_tail_cut_and_the_rewrite() -> TestResult {
+    let dir = tempdir()?;
+    let file = agent_file(dir.path());
+    let rejected = dir.path().join("spool.rejected");
+    make_node(&rejected, rustix::fs::FileType::Socket)?;
+    let mut spool = b"good\n".to_vec();
+    spool.extend_from_slice(BAD_LINE);
+    spool.extend_from_slice(b"good2\ntorn");
+    fs::write(&file.spool_file, spool)?;
+    let claimed = claim_spool(&file)?;
+    assert_eq!(texts(&claimed.batches), vec!["good".to_owned(), "good2".to_owned()]);
+    let torn = dir.path().join("torn-spool");
+    fs::write(&torn, "a\nzzz")?;
+    make_node(&dir.path().join("torn-spool.rejected"), rustix::fs::FileType::Socket)?;
+    assert!(agent_channel::spool::append_back(vec![Ok("b".to_owned())].into_iter(), &torn)?);
+    assert_eq!(fs::read_to_string(&torn)?, "a\nb\n");
+    fs::remove_file(&rejected)?;
+    make_node(&rejected, rustix::fs::FileType::Socket)?;
+    let outcome = rewrite_quarantine(&rejected, &["x".to_owned()], NEW_BYTES, (MAX_REJECTED_BYTES, MAX_REJECTED_LINES))?;
+    assert_eq!(outcome, Some(0));
+    assert_eq!(fs::read_to_string(&rejected)?, "x\n");
+    Ok(())
+}
+
+
+#[test]
+fn a_permission_refusal_of_the_protected_file_rules_means_not_a_regular_file() -> TestResult {
+    assert!(is_not_a_regular_file(&io::Error::from_raw_os_error(
+        rustix::io::Errno::ACCESS.raw_os_error()
+    )));
+    assert!(is_not_a_regular_file(&io::Error::from_raw_os_error(
+        rustix::io::Errno::PERM.raw_os_error()
+    )));
+    assert!(is_not_a_regular_file(&io::Error::from_raw_os_error(
+        rustix::io::Errno::NXIO.raw_os_error()
+    )));
+    assert!(!is_not_a_regular_file(&io::Error::from_raw_os_error(
+        rustix::io::Errno::NOSPC.raw_os_error()
+    )));
+    assert!(!is_not_a_regular_file(&io::Error::from(io::ErrorKind::NotFound)));
+    Ok(())
+}
+
+
+#[test]
+fn a_foreign_entry_at_the_lock_in_a_sticky_directory_never_stops_the_claim_or_the_tail_cut() -> TestResult {
+    [LockKind::FifoWithoutReader, LockKind::Socket].iter().try_for_each(|kind| -> TestResult {
+        let dir = tempdir()?;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(STICKY_WORLD_WRITABLE))?;
+        let file = agent_file(dir.path());
+        let lock = dir.path().join("spool.rejected.lock");
+        place_lock(*kind, &lock)?;
+        let owner = rustix::fs::Uid::from_raw(FOREIGN_UID);
+        rustix::fs::chownat(rustix::fs::CWD, &lock, Some(owner), None, rustix::fs::AtFlags::empty())?;
+        fs::write(&file.spool_file, "good\ntorn")?;
+        let claimed = claim_spool(&file)?;
+        assert_eq!(texts(&claimed.batches), vec!["good".to_owned()], "{kind:?}");
+        let torn = dir.path().join("torn-spool");
+        fs::write(&torn, "a\nzzz")?;
+        let torn_lock = dir.path().join("torn-spool.rejected.lock");
+        place_lock(*kind, &torn_lock)?;
+        rustix::fs::chownat(rustix::fs::CWD, &torn_lock, Some(owner), None, rustix::fs::AtFlags::empty())?;
+        assert!(
+            agent_channel::spool::append_back(vec![Ok("b".to_owned())].into_iter(), &torn)?,
+            "{kind:?}"
+        );
+        Ok(())
+    })
 }

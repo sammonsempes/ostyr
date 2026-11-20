@@ -155,22 +155,50 @@ pub fn alert_of(scope: &TenantScope, record: &CertRecord, now: i64) -> Option<Al
 }
 
 
-/// One alert per distinct (certificate, state) of the tenant, sorted by id; rejected findings, a bad `now` and clamped start times are counted in one warning.
+/// Alerts built and the per-record counts of one `expiry_alerts` pass.
+pub struct Pass {
+    pub alerts: Vec<Alert>,
+    pub expiring: usize,
+    pub clamped: usize,
+}
+
+
+/// Adds one record to the pass: its alert is built once, the counts come from the same visit.
+pub fn tally(scope: &TenantScope, now: i64, mut pass: Pass, record: &CertRecord) -> Pass {
+    let level = level_of(record, now);
+    let alert = alert_of(scope, record, now);
+    let negative_start = level.is_some_and(|(_severity, state)| state_start_of(record, state) < 0);
+    pass.expiring += usize::from(level.is_some());
+    pass.clamped += usize::from(alert.is_some() && negative_start);
+    pass.alerts.extend(alert);
+    pass
+}
+
+
+/// One alert per distinct (certificate, state) of the tenant, sorted by id; counts are per record: rejected, duplicates and a bad `now` in one warning, clamped start times in another.
 pub fn expiry_alerts(scope: &TenantScope, records: &[CertRecord], now: i64) -> Vec<Alert> {
-    let mut alerts: Vec<Alert> = records.iter().filter_map(|record| alert_of(scope, record, now)).collect();
-    let expiring = records.iter().filter(|record| level_of(record, now).is_some()).count();
+    let start = Pass {
+        alerts: Vec::new(),
+        expiring: 0,
+        clamped: 0,
+    };
+    let Pass {
+        mut alerts,
+        expiring,
+        clamped,
+    } = records.iter().fold(start, |pass, record| tally(scope, now, pass, record));
     let now_dropped = if now < 0 { expiring } else { 0 };
     let bad_now = if !(0..=MAX_NOW_SECONDS).contains(&now) { expiring } else { 0 };
     let rejected = expiring.saturating_sub(alerts.len()).saturating_sub(now_dropped);
-    let clamped = records
-        .iter()
-        .filter_map(|record| level_of(record, now).map(|(_severity, state)| state_start_of(record, state)))
-        .filter(|start| *start < 0 && now >= 0)
-        .count();
     alerts.sort_by(|left, right| left.id.cmp(&right.id));
+    let built = alerts.len();
     alerts.dedup_by(|right, left| right.id == left.id);
-    if rejected > 0 || bad_now > 0 || clamped > 0 {
-        tracing::warn!(rejected, bad_now, clamped, "expiring certificates were not turned into alerts");
+    let duplicates = built - alerts.len();
+    if rejected > 0 || bad_now > 0 || duplicates > 0 {
+        tracing::warn!(rejected, bad_now, duplicates, "expiring certificates were not turned into alerts");
+    }
+    if clamped > 0 {
+        tracing::warn!(clamped, "expiring certificates got their state start clamped to 1970");
     }
     alerts
 }

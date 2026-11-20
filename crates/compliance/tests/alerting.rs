@@ -8,16 +8,18 @@ use alerts::model::Severity;
 use alerts::store::{MAX_ALERTS_PER_INSERT, MAX_EVENT_ID_CHARS, MAX_RULE_ID_CHARS, MAX_TITLE_CHARS};
 use alerts::types::RowFuture;
 use compliance::alerting::{
-    alert_of, drift_alerts, failed_total, is_grammar, is_id, raise_state_full, severity_of, state_full_alert, store_drift_alerts, ASSET_PUNCTUATION,
-    MAX_ASSET_CHARS, MAX_ID_CHARS, MAX_TITLE_CHARS as MAX_SHORT_TITLE_CHARS, RULE_PREFIX, STATE_FULL_RULE, TITLE_PUNCTUATION,
+    alert_failure_category, alert_of, drift_alerts, failed_total, is_grammar, is_id, raise_state_full, report_run, severity_of, state_full_alert,
+    store_drift_alerts, ASSET_PUNCTUATION, MAX_ASSET_CHARS, MAX_ID_CHARS, MAX_TITLE_CHARS as MAX_SHORT_TITLE_CHARS, RULE_PREFIX, STATE_FULL_RULE,
+    TITLE_PUNCTUATION,
 };
-use compliance::model::{DriftFinding, Severity as ControlSeverity, Verdict};
+use compliance::error::ReportError;
+use compliance::model::{DriftFinding, FailedAt, RecordOutcome, Severity as ControlSeverity, Verdict};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::future::ready;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 use types::TestResult;
 
@@ -35,6 +37,15 @@ const DAY: u64 = 86_400_000_000;
 
 
 const THREE: usize = 3;
+
+
+const STEP_FAILED_LINE: usize = 40;
+
+
+const STEP_SUMMARY: usize = 70;
+
+
+const STEP_NOT_RAISED: usize = 120;
 
 
 const NINE: usize = 9;
@@ -455,5 +466,114 @@ async fn the_state_full_alert_is_raised_only_when_entries_were_refused_and_once_
         ..Store::default()
     };
     assert!(raise_state_full(&executor(&failing), &scope, 1, NOW).await.is_err());
+    Ok(())
+}
+
+
+pub struct Budget {
+    pub left: usize,
+    pub text: Vec<u8>,
+}
+
+
+impl Write for Budget {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if buffer.len() > self.left {
+            Err(std::io::Error::other("full"))
+        } else {
+            self.left -= buffer.len();
+            self.text.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+pub fn stored_outcome() -> RecordOutcome {
+    RecordOutcome {
+        failed: vec![FailedAt {
+            baseline: "anssi".to_owned(),
+            control: "ssh-01".to_owned(),
+            asset: "web-1".to_owned(),
+            first_failed_micros: FIRST_FAILED,
+        }],
+        skipped_invalid: 1,
+        refused_no_room: TWO,
+    }
+}
+
+
+#[tokio::test]
+async fn a_failed_state_full_alert_keeps_the_stored_outcome_and_is_returned() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let failing = Store {
+        fail: true,
+        ..Store::default()
+    };
+    let mut out = Budget {
+        left: usize::MAX,
+        text: Vec::new(),
+    };
+    let result = report_run(&executor(&failing), &scope, &stored_outcome(), NOW, &mut out).await;
+    let text = String::from_utf8(out.text)?;
+    assert!(matches!(result, Err(ReportError::AlertFailed { category: "database", .. })), "{result:?}");
+    assert!(text.contains("failed anssi:ssh-01:web-1 first=1600000000000000"), "{text}");
+    assert!(text.contains("skipped_invalid=1 refused_no_room=2 state_full_alerts=0"), "{text}");
+    assert!(text.ends_with("state_full alert not raised\n"), "{text}");
+    assert_eq!(
+        result.map_err(|error| error.to_string()),
+        Err("state_full alert not raised: database".to_owned())
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_working_alert_executor_leaves_the_report_unchanged() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let mut out = Budget {
+        left: usize::MAX,
+        text: Vec::new(),
+    };
+    report_run(&executor(&store), &scope, &stored_outcome(), NOW, &mut out).await?;
+    let text = String::from_utf8(out.text)?;
+    assert!(text.ends_with("state_full_alerts=1\n"), "{text}");
+    assert!(!text.contains("not raised"), "{text}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_write_is_returned_at_each_step() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store::default();
+    let failing = Store {
+        fail: true,
+        ..Store::default()
+    };
+    let steps = [
+        (0, &store),
+        (STEP_FAILED_LINE, &store),
+        (STEP_SUMMARY, &store),
+        (STEP_NOT_RAISED, &failing),
+    ];
+    for (left, target) in steps {
+        let mut out = Budget { left, text: Vec::new() };
+        let result = report_run(&executor(target), &scope, &stored_outcome(), NOW, &mut out).await;
+        assert!(matches!(result, Err(ReportError::Write(_))), "{left}: {result:?}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_category_is_fixed_text() -> TestResult {
+    assert_eq!(alert_failure_category(&StoreError::TenantMismatch), "rejected");
+    assert_eq!(alert_failure_category(&StoreError::Pg(PgError::InvalidTenant)), "database");
     Ok(())
 }

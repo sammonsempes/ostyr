@@ -1,3 +1,5 @@
+#[path = "../common/capture.rs"]
+mod capture;
 mod fixture;
 #[path = "../../../alerts/tests/api/http.rs"]
 mod http;
@@ -5,6 +7,7 @@ mod types;
 
 
 use axum::http::StatusCode;
+use capture::{Capture, ANCHOR};
 use chrono::{TimeZone, Utc};
 use core_api::model::{ApiError, ApiIdentity, Requirement};
 use core_api::routes::route_key;
@@ -18,6 +21,8 @@ use oncall::api::{
 use oncall::error::{ReadError, StoreError};
 use oncall::limits::{MAX_FINGERPRINT_BYTES, MAX_OPEN_ALERTS};
 use serde_json::{json, Value};
+use std::sync::{Arc, LazyLock};
+use tracing::Dispatch;
 use types::{TestError, TestResult};
 
 
@@ -364,5 +369,54 @@ fn the_access_table_requires_the_permission_on_both_routes() -> TestResult {
     let document = serde_json::to_value(oncall_document())?;
     let paths = document.get("paths").and_then(Value::as_object).ok_or("no paths")?;
     assert!(paths.contains_key(LIST_PATH) && paths.contains_key(GET_PATH));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_stored_line_separator_fingerprint_is_skipped_and_never_logged() -> TestResult {
+    let fx = fixture()?;
+    stored(&fx.script, TENANT, vec![alert(1, "good", at(0)?), alert(SECOND, "a\u{2028}b", at(1)?)]);
+    let token = login(&fx.router, ANALYST).await?;
+    let capture = Capture(Arc::default());
+    LazyLock::force(&ANCHOR);
+    let dispatch = Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer({
+                let sink = capture.clone();
+                move || sink.clone()
+            })
+            .finish(),
+    );
+    let (listed, single) = {
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        (
+            get(&fx.router, LIST_PATH, Some(&token)).await?,
+            get(&fx.router, "/oncall/alerts/2", Some(&token)).await?,
+        )
+    };
+    assert_eq!(listed.status(), StatusCode::OK);
+    let json = body_json(listed).await?;
+    assert_eq!(item_ids(&json)?, [1]);
+    assert_eq!(json.get("skipped"), Some(&json!(1)));
+    assert_eq!(single.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_json(single).await?.to_string();
+    let logs = String::from_utf8(capture.0.lock().map_err(|error| error.to_string())?.clone())?;
+    assert!(logs.contains("stored_value"));
+    assert!(!logs.contains("2028") && !logs.contains('\u{2028}') && !body.contains('\u{2028}') && !body.contains("2028"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_stored_fingerprint_with_an_edge_space_is_skipped_not_a_500() -> TestResult {
+    let fx = fixture()?;
+    stored(&fx.script, TENANT, vec![alert(1, "good", at(0)?), alert(SECOND, "x ", at(1)?)]);
+    let token = login(&fx.router, ANALYST).await?;
+    let listed = get(&fx.router, LIST_PATH, Some(&token)).await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let json = body_json(listed).await?;
+    assert_eq!(item_ids(&json)?, [1]);
+    assert_eq!(json.get("skipped"), Some(&json!(1)));
     Ok(())
 }

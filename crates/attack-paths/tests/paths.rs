@@ -1,6 +1,6 @@
 use attack_paths::bounds::validate_graph;
 use attack_paths::error::{GraphError, LimitsError, PathsError};
-use attack_paths::model::{Edge, Graph, Limits, Node, NodeKind, Path, Relation, MAX_DEPTH, MAX_PATHS};
+use attack_paths::model::{Edge, Graph, Limits, Node, NodeKind, Path, Relation, StopReason, Unsearched, MAX_DEPTH, MAX_PATHS};
 use attack_paths::paths::{paths_to_critical, paths_to_critical_with_budget};
 use types::TestResult;
 
@@ -286,6 +286,40 @@ fn a_clique_ends_at_the_step_budget_and_says_so() -> TestResult {
 }
 
 
+fn unsearched(id: &str, reason: StopReason) -> Unsearched {
+    Unsearched { id: id.to_string(), reason }
+}
+
+
+#[test]
+fn every_entry_the_budget_stopped_is_named() -> TestResult {
+    let mut graph = clique();
+    graph.nodes.push(node("a_evil", NodeKind::User, false, true));
+    graph.edges.push(link("a_evil", "g0"));
+    let cut = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, MAX_PATHS), SMALL_BUDGET)?;
+    assert!(cut.budget_reached);
+    assert_eq!(
+        cut.unsearched,
+        vec![unsearched("a_evil", StopReason::StepBudget), unsearched("hd", StopReason::StepBudget)]
+    );
+    let full = paths_to_critical(&graph, limits(MAX_DEPTH, MAX_PATHS))?;
+    assert!(full.unsearched.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_entry_with_nothing_to_search_is_not_unsearched() -> TestResult {
+    let graph = Graph {
+        nodes: vec![node("only", NodeKind::DomainController, true, true)],
+        edges: Vec::new(),
+    };
+    let found = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, MAX_PATHS), 0)?;
+    assert!(found.unsearched.is_empty());
+    Ok(())
+}
+
+
 #[test]
 fn nodes_that_cannot_reach_a_critical_node_are_pruned() -> TestResult {
     let graph = Graph {
@@ -299,5 +333,67 @@ fn nodes_that_cannot_reach_a_critical_node_are_pruned() -> TestResult {
     let found = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, MAX_PATHS), TWO_PATHS * CHAIN_LENGTH)?;
     assert_eq!(found.paths, vec![route(&["ws", "dc"])]);
     assert!(!found.budget_reached);
+    Ok(())
+}
+
+
+fn two_routes_graph() -> Graph {
+    Graph {
+        nodes: vec![
+            node("a_evil", NodeKind::User, false, true),
+            node("hd", NodeKind::User, false, true),
+            node("mid", NodeKind::Group, false, false),
+            node("dc", NodeKind::DomainController, true, false),
+        ],
+        edges: vec![link("a_evil", "dc"), link("a_evil", "mid"), link("mid", "dc"), link("hd", "mid")],
+    }
+}
+
+
+#[test]
+fn the_path_cap_names_the_overflowing_and_the_idle_entries() -> TestResult {
+    let capped = paths_to_critical(&two_routes_graph(), limits(MAX_DEPTH, 1))?;
+    assert!(capped.truncated);
+    assert!(!capped.budget_reached);
+    assert_eq!(
+        capped.unsearched,
+        vec![unsearched("a_evil", StopReason::PathCap), unsearched("hd", StopReason::PathCap)]
+    );
+    assert_eq!(
+        capped.unsearched.iter().map(|entry| entry.reason.to_string()).collect::<Vec<_>>(),
+        vec!["path_cap", "path_cap"]
+    );
+    Ok(())
+}
+
+
+#[test]
+fn an_entry_that_exactly_fills_the_cap_is_not_named() -> TestResult {
+    let graph = Graph {
+        nodes: vec![
+            node("ws", NodeKind::Workstation, false, true),
+            node("dc", NodeKind::DomainController, true, false),
+        ],
+        edges: vec![link("ws", "dc")],
+    };
+    let found = paths_to_critical(&graph, limits(MAX_DEPTH, 1))?;
+    assert!(!found.truncated);
+    assert!(found.unsearched.is_empty());
+    assert_eq!(StopReason::StepBudget.to_string(), "step_budget");
+    Ok(())
+}
+
+
+#[test]
+fn a_flood_that_hits_both_bounds_names_each_entry_once() -> TestResult {
+    let mut graph = clique();
+    graph.nodes.push(node("a_evil", NodeKind::User, false, true));
+    graph.edges.push(link("a_evil", "g0"));
+    let found = paths_to_critical_with_budget(&graph, limits(MAX_DEPTH, TWO_PATHS), SMALL_BUDGET)?;
+    assert!(found.truncated);
+    assert_eq!(found.unsearched.len(), TWO_PATHS);
+    assert_eq!(found.unsearched.first().map(|entry| entry.id.as_str()), Some("a_evil"));
+    assert_eq!(found.unsearched.first().map(|entry| entry.reason), Some(StopReason::PathCap));
+    assert_eq!(found.unsearched.get(1), Some(&unsearched("hd", StopReason::PathCap)));
     Ok(())
 }

@@ -1,24 +1,19 @@
 //! Usage: dhcp_api <module.yaml>. Serves `GET /dhcp/leases/at` and `GET /dhcp/leases/mac` through core-api; `settings.pg_settings` names the core-pg settings file.
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE, MAX_CONNECTIONS};
-use alerts::pg::pg_executor;
 use alerts::settings::{api_startup_reloads, open_pg_engine_from, SETTING_PG};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
 use core_api::server::{new_listener, run_loaded, stop_listener};
 use core_api::types::SharedListener;
 use core_config::load::load_module;
-use core_config::reload::ReloadEngine;
 #[cfg(unix)]
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
-use core_pg::settings::PgSettings;
 use dhcp_kea::api::{dhcp_access, dhcp_document, dhcp_router};
-use dhcp_kea::api_model::DhcpBackend;
+use dhcp_kea::backend::pg_backend;
 use dhcp_kea::cursor::{MIGRATIONS, MIGRATION_NAMESPACE};
-use dhcp_kea::error::HistoryError;
-use dhcp_kea::history::{lease_at, leases_of_mac};
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
 use std::path::{Path, PathBuf};
@@ -39,39 +34,6 @@ const ACTOR: &str = "dhcp";
 
 
 const USAGE: &str = "usage: dhcp_api <module.yaml>";
-
-
-fn lease_failure(error: alerts::error::StoreError) -> HistoryError {
-    match error {
-        alerts::error::StoreError::Busy => HistoryError::Busy,
-        alerts::error::StoreError::Pg(source) => HistoryError::Pg(source),
-        _other => HistoryError::Answer,
-    }
-}
-
-
-fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>) -> DhcpBackend {
-    let at_engine = Arc::clone(&engine);
-    let at_permits = Arc::clone(&permits);
-    DhcpBackend {
-        at: Arc::new(move |scope, address, at| {
-            let (held_engine, held_permits) = (Arc::clone(&at_engine), Arc::clone(&at_permits));
-            Box::pin(async move {
-                let held = lease(&held_engine, &held_permits).await.map_err(lease_failure)?;
-                let executor = pg_executor(&held.client, held.deadline);
-                lease_at(&executor, &scope, &address, at).await
-            })
-        }),
-        by_mac: Arc::new(move |scope, mac, from, to| {
-            let (held_engine, held_permits) = (Arc::clone(&engine), Arc::clone(&permits));
-            Box::pin(async move {
-                let held = lease(&held_engine, &held_permits).await.map_err(lease_failure)?;
-                let executor = pg_executor(&held.client, held.deadline);
-                leases_of_mac(&executor, &scope, &mac, from, to).await
-            })
-        }),
-    }
-}
 
 
 async fn stop_on_interrupt(listener: SharedListener) {

@@ -13,6 +13,7 @@ pub mod osv;
 pub mod priority;
 pub mod rematch;
 pub mod scoring;
+pub mod store;
 pub mod text;
 pub mod types;
 pub mod version;

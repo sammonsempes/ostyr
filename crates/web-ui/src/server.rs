@@ -3,7 +3,7 @@ use crate::config::{config_state, load_web_config, tls_files, watched_files, DEF
 use crate::error::WebError;
 use crate::model::{ApiClient, WebConfig, WebLimits, WebState, DEFAULT_SESSIONS, DEFAULT_USER_SESSIONS};
 use crate::routes::build_router;
-use crate::types::{ClockFn, PendingRuntime, Random};
+use crate::types::{ClockFn, PendingRuntime, Random, WallFn};
 use arc_swap::ArcSwap;
 use axum_server::tls_rustls::RustlsConfig;
 use core_api::model::Limits;
@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 
 
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -54,7 +55,13 @@ pub fn monotonic_seconds() -> u64 {
 }
 
 
-pub fn new_state(client: ApiClient, limits: WebLimits, clock: ClockFn, random: Random) -> WebState {
+/// Unix seconds now, for the one filter that needs a date; sessions never use it.
+pub fn wall_seconds() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
+}
+
+
+pub fn new_state(client: ApiClient, limits: WebLimits, clock: ClockFn, wall: WallFn, random: Random) -> WebState {
     WebState {
         api: ArcSwap::from_pointee(client),
         sessions: Default::default(),
@@ -63,6 +70,7 @@ pub fn new_state(client: ApiClient, limits: WebLimits, clock: ClockFn, random: R
         sessions_max: AtomicUsize::new(DEFAULT_SESSIONS),
         limits,
         clock,
+        wall,
         random,
     }
 }
@@ -147,7 +155,13 @@ pub async fn serve_web(settings_file: &Path, handle: ServerHandle) -> Result<(),
     check_transport(config.listen, tls_files(&config).as_ref())?;
     let prepared = prepare(&config)?;
     let audit = audit_into(&config.audit_file)?;
-    let state = Arc::new(new_state(prepared.client, DEFAULT_LIMITS, Box::new(monotonic_seconds), os_random));
+    let state = Arc::new(new_state(
+        prepared.client,
+        DEFAULT_LIMITS,
+        Box::new(monotonic_seconds),
+        Box::new(wall_seconds),
+        os_random,
+    ));
     state.user_sessions_max.store(prepared.user_sessions, Ordering::SeqCst);
     state.sessions_max.store(prepared.sessions, Ordering::SeqCst);
     let tls = prepared.tls.map(RustlsConfig::from_config);

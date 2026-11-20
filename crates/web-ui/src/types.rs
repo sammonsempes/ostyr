@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 pub type ClockFn = Box<dyn Fn() -> u64 + Send + Sync>;
 
 
+pub type WallFn = Box<dyn Fn() -> i64 + Send + Sync>;
+
+
 pub type SessionTable = Mutex<BTreeMap<String, Session>>;
 
 

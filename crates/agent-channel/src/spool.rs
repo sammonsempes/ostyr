@@ -274,8 +274,8 @@ pub fn open_no_follow(path: &Path) -> io::Result<File> {
 pub fn open_old(path: &Path) -> io::Result<Option<File>> {
     let opened = match open_no_follow(path) {
         Ok(file) => file.metadata().map(|metadata| metadata.is_file().then_some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound || error.kind() == io::ErrorKind::InvalidInput => Ok(None),
+        Err(error) if is_not_a_regular_file(&error) => Ok(None),
         Err(error) => Err(error),
     };
     if matches!(opened, Ok(None)) && fs::symlink_metadata(path).is_ok() {
@@ -348,15 +348,23 @@ pub const QUARANTINE_LOCK_SUFFIX: &str = ".lock";
 pub const QUARANTINE_LOCK_BUSY: &str = "quarantine lock held by another process, rewrite abandoned";
 
 
-/// Whether an open error means the path holds something that is not a regular file: a symlink (`ELOOP`), a pipe without reader or a socket (`ENXIO`), a directory (`EISDIR`).
+/// Whether an open error means the entry is not usable as a regular file: a symlink (`ELOOP`), a pipe without reader or a socket (`ENXIO`), a directory (`EISDIR`), a foreign entry refused by the protected-file rules of a sticky directory (`EACCES`, `EPERM`).
 #[cfg(unix)]
 pub fn is_not_a_regular_file(error: &io::Error) -> bool {
     let codes = [
         rustix::io::Errno::LOOP.raw_os_error(),
         rustix::io::Errno::NXIO.raw_os_error(),
         rustix::io::Errno::ISDIR.raw_os_error(),
+        rustix::io::Errno::ACCESS.raw_os_error(),
+        rustix::io::Errno::PERM.raw_os_error(),
     ];
     error.raw_os_error().is_some_and(|code| codes.contains(&code))
+}
+
+
+#[cfg(not(unix))]
+pub fn is_not_a_regular_file(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::InvalidInput
 }
 
 

@@ -192,9 +192,11 @@ async fn an_ordinary_an_uppercase_and_a_longest_id_cursor_round_trip() -> TestRe
     )
     .await?;
     assert_eq!(packs(&after_alpha)?, ["beta", "gamma"]);
-    let widest = encode_cursor(i64::MIN, &"z".repeat(BYTE_CAP));
-    assert_eq!(widest.len(), MAX_CURSOR_CHARS);
+    let widest = encode_cursor(i64::MAX, &"z".repeat(BYTE_CAP));
+    assert!(widest.len() <= MAX_CURSOR_CHARS);
     assert_eq!(decode_cursor(&widest)?.1.len(), BYTE_CAP);
+    assert_eq!(decode_cursor(&encode_cursor(FIRST_END, ""))?, (FIRST_END, String::new()));
+    assert_eq!(decode_cursor(&encode_cursor(FIRST_END, &"z".repeat(BYTE_CAP)))?.1.len(), BYTE_CAP);
     assert_eq!(i64::MIN.to_string().len(), MAX_END_CHARS);
     assert!(checked_time(FIRST_END).is_ok() && checked_time(FIRST_END - 1).is_err());
     assert_eq!(MAX_ID_CHARS, BYTE_CAP);
@@ -212,7 +214,11 @@ async fn a_bad_cursor_is_a_fixed_400_that_never_echoes_the_input() -> TestResult
     let too_long_id = BASE64URL_NOPAD.encode(format!("{BASE}:{}", "a".repeat(BYTE_CAP + 1)).as_bytes());
     let no_separator = BASE64URL_NOPAD.encode(b"12345");
     let not_a_number = BASE64URL_NOPAD.encode(b"x:a");
+    let below_floor = BASE64URL_NOPAD.encode(format!("{}:x", FIRST_END - 1).as_bytes());
+    let at_minimum = encode_cursor(i64::MIN, "x");
     let bad = [
+        below_floor,
+        at_minimum,
         "!!!notbase64".to_owned(),
         "AA".to_owned(),
         long,
@@ -509,8 +515,11 @@ async fn every_row_is_listed_skipped_or_counted_at_any_page_size_past_year_9999(
 
 #[test]
 fn a_cursor_accepts_every_end_the_store_can_hold() -> TestResult {
-    for end in [i64::MAX, i64::MIN, 0, YEAR_10000, FIRST_END - 1] {
+    for end in [i64::MAX, 0, YEAR_10000, FIRST_END] {
         assert_eq!(decode_cursor(&encode_cursor(end, "a\u{1}b"))?, (end, "a\u{1}b".to_owned()));
     }
+    assert!([i64::MIN, FIRST_END - 1]
+        .iter()
+        .all(|end| decode_cursor(&encode_cursor(*end, "a")).is_err()));
     Ok(())
 }

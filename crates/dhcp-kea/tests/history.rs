@@ -40,6 +40,12 @@ const SMALL_CAP: u64 = 100;
 const MANY: usize = 150;
 
 
+const MANY_SECONDS: i64 = 150;
+
+
+const GUEST_SUBNET: i64 = 2;
+
+
 const PAIR: usize = 2;
 
 
@@ -301,8 +307,13 @@ pub fn executor<'a>(store: &'a Store) -> impl Fn(TenantScope, &'static str, Vec<
 
 
 fn lease(address: &str, mac: &str, cltt: i64, expire: i64, host: &str) -> Result<Converted, Box<dyn std::error::Error>> {
+    lease_in_subnet(address, mac, cltt, expire, host, 1)
+}
+
+
+fn lease_in_subnet(address: &str, mac: &str, cltt: i64, expire: i64, host: &str, subnet: i64) -> Result<Converted, Box<dyn std::error::Error>> {
     let columns = parse_header(HEADER)?;
-    let row = format!("{address},{mac},,{},{expire},1,0,0,{host},0,", expire - cltt);
+    let row = format!("{address},{mac},,{},{expire},{subnet},0,0,{host},0,", expire - cltt);
     Ok(convert_row(&columns, &row)?)
 }
 
@@ -852,8 +863,46 @@ fn short_leases(count: usize, base: i64) -> Result<Vec<Converted>, Box<dyn std::
 }
 
 
+fn open_leases(count: usize, base: i64) -> Result<Vec<Converted>, Box<dyn std::error::Error>> {
+    (0..count)
+        .map(|index| {
+            let starts = base + i64::try_from(index)?;
+            lease("10.0.0.5", "aa:bb:cc:dd:ee:01", starts, NOW + DAY + DAY, "pc")
+        })
+        .collect()
+}
+
+
 #[tokio::test]
-async fn a_lookup_in_a_gap_reads_at_most_one_more_candidate_than_the_bound_and_says_truncated() -> TestResult {
+async fn a_full_candidate_list_that_all_ended_before_the_time_is_truncated() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &short_leases(MANY, NOW)?).await?;
+    let found = lease_at(exec, &scope, "10.0.0.5", NOW + MANY_SECONDS).await?;
+    let by_mac = leases_of_mac(exec, &scope, MAC_A, NOW + MANY_SECONDS, NOW + DAY).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (0, true));
+    assert_eq!((by_mac.intervals.len(), by_mac.truncated), (0, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_full_candidate_list_whose_oldest_still_covers_the_time_is_truncated() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &open_leases(MANY, NOW)?).await?;
+    let found = lease_at(exec, &scope, "10.0.0.5", NOW + MANY_SECONDS).await?;
+    let by_mac = leases_of_mac(exec, &scope, MAC_A, NOW - 1, NOW + DAY).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (MAX_LOOKUP_ROWS, true));
+    assert_eq!((by_mac.intervals.len(), by_mac.truncated), (MAX_LOOKUP_ROWS, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_lookup_in_a_gap_reads_at_most_one_more_candidate_than_the_bound_and_is_truncated() -> TestResult {
     let store = Store::default();
     let served = Arc::new(Mutex::new(Vec::new()));
     let plain = executor(&store);
@@ -873,18 +922,116 @@ async fn a_lookup_in_a_gap_reads_at_most_one_more_candidate_than_the_bound_and_s
 }
 
 
+fn flood_in_subnet(count: usize, base: i64, subnet: i64, address: &str) -> Result<Vec<Converted>, Box<dyn std::error::Error>> {
+    (0..count)
+        .map(|index| {
+            let starts = base + i64::try_from(index)?;
+            lease_in_subnet(address, "aa:bb:cc:dd:ee:01", starts, starts + 1, "flood", subnet)
+        })
+        .collect()
+}
+
+
 #[tokio::test]
-async fn an_old_long_lease_behind_many_newer_candidates_is_reported_truncated_never_complete() -> TestResult {
+async fn one_subnet_with_many_renewals_is_truncated_with_the_covering_one_listed() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &short_leases(MANY, NOW)?).await?;
+    let newest = NOW + MANY_SECONDS - 1;
+    let found = lease_at(exec, &scope, "10.0.0.5", newest).await?;
+    let by_mac = leases_of_mac(exec, &scope, MAC_A, newest, NOW + DAY).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (1, true));
+    assert_eq!((by_mac.intervals.len(), by_mac.truncated), (1, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn another_subnets_flood_at_the_address_cannot_hide_a_lease_silently() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let victim = lease_in_subnet("10.0.0.5", "aa:bb:cc:dd:ee:01", NOW - DAY, NOW + DAY, "victim", 1)?;
+    let flood = flood_in_subnet(MAX_LOOKUP_ROWS + PAIR * PAIR, NOW - MANY_SECONDS, GUEST_SUBNET, "10.0.0.5")?;
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &[vec![victim], flood].concat()).await?;
+    let found = lease_at(exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (0, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_spoofed_mac_flood_on_another_subnet_cannot_hide_the_real_lease_silently() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let victim = lease_in_subnet("10.0.0.5", "aa:bb:cc:dd:ee:01", NOW - DAY, NOW + DAY, "victim", 1)?;
+    let flood = flood_in_subnet(MAX_LOOKUP_ROWS + PAIR * PAIR, NOW - MANY_SECONDS, GUEST_SUBNET, "10.0.1.9")?;
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &[vec![victim], flood].concat()).await?;
+    let found = leases_of_mac(exec, &scope, MAC_A, NOW - 1, NOW + DAY).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (0, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_match_with_other_subnet_candidates_behind_it_is_truncated() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let covering = lease_in_subnet("10.0.0.5", "aa:bb:cc:dd:ee:01", NOW - 1, NOW + DAY, "covering", 1)?;
+    let flood = flood_in_subnet(MAX_LOOKUP_ROWS + PAIR * PAIR, NOW - MANY_SECONDS, GUEST_SUBNET, "10.0.0.5")?;
+    store_history(exec, &scope, &HistorySettings::default(), NOW, &[vec![covering], flood].concat()).await?;
+    let found = lease_at(exec, &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (1, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn short_leases_of_the_same_subnet_with_another_client_id_or_server_never_make_a_complete_answer() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let covering = answer_row("1", &(NOW + DAY).to_string(), "1");
+    let ended = answer_row("1", "5", "1");
+    let rows = [vec![covering], vec![ended; MAX_LOOKUP_ROWS]].concat();
+    let store = Store {
+        shape: Some(rows),
+        ..Store::default()
+    };
+    let found = lease_at(&executor(&store), &scope, "10.0.0.5", NOW).await?;
+    let by_mac = leases_of_mac(&executor(&store), &scope, MAC_A, NOW, NOW + DAY).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (1, true));
+    assert_eq!((by_mac.intervals.len(), by_mac.truncated), (1, true));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_answer_within_the_candidate_cap_is_complete() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let store = Store {
+        shape: Some(vec![answer_row("1", &(NOW + DAY).to_string(), "1"); MAX_LOOKUP_ROWS]),
+        ..Store::default()
+    };
+    let found = lease_at(&executor(&store), &scope, "10.0.0.5", NOW).await?;
+    assert_eq!((found.intervals.len(), found.truncated), (MAX_LOOKUP_ROWS, false));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_old_long_lease_behind_many_newer_open_candidates_is_reported_truncated_never_complete() -> TestResult {
     let store = Store::default();
     let exec: Executor = &executor(&store);
     let scope = tenant_scope("acme")?;
     let long = lease("10.0.0.5", "aa:bb:cc:dd:ee:01", NOW - DAY, NOW + DAY, "victim")?;
-    let batch = [vec![long], short_leases(MAX_LOOKUP_ROWS + 1, NOW)?].concat();
+    let batch = [vec![long], open_leases(MAX_LOOKUP_ROWS + 1, NOW)?].concat();
     store_history(exec, &scope, &HistorySettings::default(), NOW, &batch).await?;
     let found = lease_at(exec, &scope, "10.0.0.5", NOW + DAY - 1).await?;
-    let by_mac = leases_of_mac(exec, &scope, MAC_A, NOW + DAY - 1, NOW + DAY).await?;
+    let by_mac = leases_of_mac(exec, &scope, MAC_A, NOW - 1, NOW + DAY).await?;
     assert!(found.truncated && by_mac.truncated);
-    assert!(found.intervals.is_empty() && by_mac.intervals.is_empty());
+    assert!(found.intervals.iter().all(|interval| interval.action != "victim"));
     Ok(())
 }
 

@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 129;
+pub const TEXT_COUNT: usize = 162;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -141,6 +141,39 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("risk_kind_host", "Hosts"),
     ("risk_kind_user", "Users"),
     ("risk_computed", "Computed at"),
+    ("nav_certs", "Certificates"),
+    ("title_certs", "Certificates"),
+    ("title_cert", "Certificate"),
+    ("certs_empty", "No certificate."),
+    ("certs_next", "Next certificates"),
+    ("certs_unreadable", "Unreadable certificate."),
+    ("certs_skipped", "{count} certificates could not be shown."),
+    ("cert_back", "Back to the certificates"),
+    ("col_fingerprint", "Fingerprint"),
+    ("col_subject", "Subject"),
+    ("col_issuer", "Issuer"),
+    ("col_dns", "DNS names"),
+    ("col_not_before", "Valid from"),
+    ("col_not_after", "Valid until"),
+    ("col_expiry", "Expiry"),
+    ("col_key", "Key"),
+    ("col_first_seen", "First seen"),
+    ("col_last_seen", "Last seen"),
+    ("cert_self_signed", "Self-signed"),
+    ("cert_dns_more", "{count} more"),
+    ("cert_expired", "Expired"),
+    ("cert_near", "Expires soon"),
+    ("cert_ok", "Valid"),
+    ("certs_filter_all", "All"),
+    ("certs_filter_30", "Expiring within 30 days"),
+    ("certs_filter_90", "Expiring within 90 days"),
+    ("cert_sightings", "Sightings"),
+    ("col_sighting_kind", "Source"),
+    ("col_reference", "Reference"),
+    ("cert_sightings_skipped", "{count} sightings could not be shown."),
+    ("cert_sightings_truncated", "Sightings cut at 500."),
+    ("cert_yes", "yes"),
+    ("cert_no", "no"),
 ];
 
 
@@ -280,6 +313,39 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("risk_kind_host", "Machines"),
     ("risk_kind_user", "Utilisateurs"),
     ("risk_computed", "Calculé le"),
+    ("nav_certs", "Certificats"),
+    ("title_certs", "Certificats"),
+    ("title_cert", "Certificat"),
+    ("certs_empty", "Aucun certificat."),
+    ("certs_next", "Certificats suivants"),
+    ("certs_unreadable", "Certificat illisible."),
+    ("certs_skipped", "{count} certificats n'ont pas pu être affichés."),
+    ("cert_back", "Retour aux certificats"),
+    ("col_fingerprint", "Empreinte"),
+    ("col_subject", "Sujet"),
+    ("col_issuer", "Émetteur"),
+    ("col_dns", "Noms DNS"),
+    ("col_not_before", "Valide depuis"),
+    ("col_not_after", "Valide jusqu'au"),
+    ("col_expiry", "Expiration"),
+    ("col_key", "Clé"),
+    ("col_first_seen", "Première observation"),
+    ("col_last_seen", "Dernière observation"),
+    ("cert_self_signed", "Auto-signé"),
+    ("cert_dns_more", "{count} de plus"),
+    ("cert_expired", "Expiré"),
+    ("cert_near", "Expire bientôt"),
+    ("cert_ok", "Valide"),
+    ("certs_filter_all", "Tous"),
+    ("certs_filter_30", "Expirent sous 30 jours"),
+    ("certs_filter_90", "Expirent sous 90 jours"),
+    ("cert_sightings", "Observations"),
+    ("col_sighting_kind", "Source"),
+    ("col_reference", "Référence"),
+    ("cert_sightings_skipped", "{count} observations n'ont pas pu être affichées."),
+    ("cert_sightings_truncated", "Observations coupées à 500."),
+    ("cert_yes", "oui"),
+    ("cert_no", "non"),
 ];
 
 

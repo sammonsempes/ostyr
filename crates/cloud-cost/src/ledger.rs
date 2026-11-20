@@ -31,7 +31,7 @@ ON CONFLICT (tenant, source_id) DO UPDATE SET round = cloud_cost_rotation.round 
 SELECT COALESCE(array_agg(l.k), '{}'), COALESCE(array_agg(l.e), '{}'), \
 COALESCE(array_agg(sha256(convert_to(length(l.k)::text || ':' || l.k || l.e, 'UTF8'))), '{}') \
 INTO v_keys, v_etags, v_hashes \
-FROM jsonb_to_recordset(v_listing) AS l(k text, e text) \
+FROM (SELECT DISTINCT r.k, r.e FROM jsonb_to_recordset(v_listing) AS r(k text, e text)) l \
 WHERE COALESCE((SELECT o.sha256 FROM cloud_cost_objects o WHERE o.tenant = p_tenant AND o.source_id = p_source AND o.key = l.k AND o.etag = l.e), \
 'transient:') LIKE 'transient:%'; \
 SELECT COALESCE(array_agg(c.t), '{}') INTO v_tids FROM (SELECT s.ctid AS t FROM cloud_cost_seen s \

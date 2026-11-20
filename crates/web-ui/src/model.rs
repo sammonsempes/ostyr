@@ -1,4 +1,4 @@
-use crate::types::{AttemptTable, ClockFn, Random, SessionTable};
+use crate::types::{AttemptTable, ClockFn, Random, SessionTable, WallFn};
 use arc_swap::ArcSwap;
 use rustls::ServerConfig;
 use secrecy::SecretString;
@@ -200,6 +200,50 @@ pub struct RiskDetailView {
 }
 
 
+/// `GET /certificates` items; every text is free text of a scanned file or a CT log.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CertView {
+    pub fingerprint: String,
+    pub subject: String,
+    pub issuer: String,
+    pub dns_names: Vec<String>,
+    pub not_before: String,
+    pub not_after: String,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub key_type: String,
+    pub key_bits: Option<u64>,
+    pub self_signed: bool,
+    pub expiry: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CertListView {
+    pub items: Vec<CertView>,
+    pub skipped: u64,
+    pub next_cursor: Option<String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SightingView {
+    pub kind: String,
+    pub reference: String,
+    pub last_seen: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CertDetailView {
+    #[serde(flatten)]
+    pub cert: CertView,
+    pub sightings: Vec<SightingView>,
+    pub sightings_skipped: u64,
+    pub sightings_truncated: bool,
+}
+
+
 /// The API token stays on the server; the browser holds only the random session identifier.
 pub struct Session {
     pub username: String,
@@ -268,6 +312,7 @@ pub struct WebState {
     pub sessions_max: AtomicUsize,
     pub limits: WebLimits,
     pub clock: ClockFn,
+    pub wall: WallFn,
     pub random: Random,
 }
 

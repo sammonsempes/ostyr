@@ -416,6 +416,19 @@ fn a_cursor_other_than_the_printed_form_is_refused() -> TestResult {
 
 
 #[test]
+fn the_cursor_floor_and_nul_are_refused() -> TestResult {
+    let below = (FIRST_END - 1).to_string();
+    let minimum = i64::MIN.to_string();
+    let refused = [below, minimum, "0:00".to_owned(), "0:6100".to_owned(), "0:0061".to_owned()];
+    assert!(refused.iter().all(|text| parse_cursor(text) == Err(CursorError::Malformed)));
+    assert_eq!(parse_cursor(&FIRST_END.to_string())?, (FIRST_END, String::new()));
+    assert_eq!(parse_cursor(&format!("{FIRST_END}:{}", "61".repeat(ID_CAP)))?.1.len(), ID_CAP);
+    assert_eq!(parse_cursor(&i64::MAX.to_string())?.0, i64::MAX);
+    Ok(())
+}
+
+
+#[test]
 fn the_error_texts_are_fixed() -> TestResult {
     assert!(CursorError::Malformed.to_string().contains("lowercase hex"));
     assert!(StateError::InvalidPackId.to_string().contains("invalid pack id"));

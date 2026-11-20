@@ -1,12 +1,13 @@
 use crate::api::{
-    get_alert, get_asset, get_case, get_risk_entity, list_alerts, list_assets, list_cases, list_risk, login, logout, post_case_action,
-    post_case_comment, risk_kind, valid_asset_cursor, valid_case_id, valid_cursor, valid_id, MAX_COMMENT_CHARS,
+    cert_filter, get_alert, get_asset, get_case, get_cert, get_risk_entity, list_alerts, list_assets, list_cases, list_certs, list_risk, login,
+    logout, post_case_action, post_case_comment, risk_kind, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_id,
+    MAX_COMMENT_CHARS, SECONDS_PER_DAY,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
 use crate::pages::{
-    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, comment_unloaded_page, error_page, login_page,
-    risk_entity_page, risk_page, STYLESHEET,
+    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, cert_page, certs_page, comment_unloaded_page,
+    error_page, login_page, risk_entity_page, risk_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -667,6 +668,78 @@ pub async fn show_risk_entity(
 }
 
 
+pub fn parse_cert_filter(query: &BTreeMap<String, String>) -> Result<&'static str, FormRefusal> {
+    query
+        .get("expiring")
+        .map_or(Ok("all"), |text| cert_filter(text).ok_or(FormRefusal::Malformed))
+}
+
+
+pub fn parse_cert_cursor(query: &BTreeMap<String, String>) -> Result<Option<&str>, FormRefusal> {
+    query
+        .get("cursor")
+        .map(|text| {
+            Some(text.as_str())
+                .filter(|cursor| valid_cert_cursor(cursor))
+                .ok_or(FormRefusal::Malformed)
+        })
+        .transpose()
+}
+
+
+/// The cut-off is the injected wall clock plus a fixed number of days: the browser never supplies a time.
+pub fn expiring_before(wall: i64, filter: &str) -> Option<i64> {
+    filter
+        .parse::<i64>()
+        .ok()
+        .map(|days| wall.saturating_add(days.saturating_mul(SECONDS_PER_DAY)))
+}
+
+
+pub async fn show_certs_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let filter = parse_cert_filter(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let cursor = parse_cert_cursor(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let client = state.api.load_full();
+    let list = list_certs(&client, source, &principal.token, cursor, expiring_before((state.wall)(), filter))
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &certs_page(language, &principal.csrf, &list, filter), &[]))
+}
+
+
+pub async fn show_certs(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_certs_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_cert_page(state: &WebState, source: IpAddr, headers: &HeaderMap, fingerprint: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let detail = get_cert(&client, source, &principal.token, fingerprint)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &cert_page(language, &principal.csrf, &detail), &[]))
+}
+
+
+pub async fn show_cert(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(fingerprint): Path<String>,
+) -> Response {
+    merge(show_cert_page(&state, peer.ip(), &headers, &fingerprint).await)
+}
+
+
 pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
 
 
@@ -809,6 +882,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/assets/{id}", get(show_asset))
         .route("/risk", get(show_risk))
         .route("/risk/{kind}/{id}", get(show_risk_entity))
+        .route("/certificates", get(show_certs))
+        .route("/certificates/{fingerprint}", get(show_cert))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))
