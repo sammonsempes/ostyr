@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 
 pub const MAX_NODES: usize = 10_000;
@@ -98,6 +99,33 @@ pub struct PathSet {
     pub paths: Vec<Path>,
     pub truncated: bool,
     pub budget_reached: bool,
+    pub unsearched: Vec<Unsearched>,
+}
+
+
+/// The bound that ended the search of an entry before it was complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StopReason {
+    StepBudget,
+    PathCap,
+}
+
+
+impl Display for StopReason {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.write_str(match self {
+            Self::StepBudget => "step_budget",
+            Self::PathCap => "path_cap",
+        })
+    }
+}
+
+
+/// An entry whose search was cut by a bound.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Unsearched {
+    pub id: String,
+    pub reason: StopReason,
 }
 
 
