@@ -17,13 +17,19 @@ use serde_json::{json, Value};
 pub const MIGRATION_NAMESPACE: &str = "vuln";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "vuln_0001",
-    sql: include_str!("../migrations/vuln_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "vuln_0001",
+        sql: include_str!("../migrations/vuln_0001.sql"),
+    },
+    Migration {
+        version: "vuln_0002",
+        sql: include_str!("../migrations/vuln_0002.sql"),
+    },
+];
 
 
-pub const OUTCOME_COLUMNS: usize = 5;
+pub const OUTCOME_COLUMNS: usize = 6;
 
 
 pub const COL_ASSET: usize = 0;
@@ -75,7 +81,7 @@ pub const CURSOR_SEPARATOR: char = ' ';
 
 
 /// One statement under a per-tenant lock: `$1` tenant, `$2` asset, `$3` findings JSON, `$4` open cap, `$5` now, `$6` resolved cap, `$7` granularity, `$8` resolved cap of the asset.
-pub const SCAN_SQL: &str = "SELECT n_inserted::text, n_updated::text, n_resolved::text, n_refused_no_room::text, n_evicted::text \
+pub const SCAN_SQL: &str = "SELECT n_inserted::text, n_updated::text, n_resolved::text, n_refused_no_room::text, n_evicted::text, n_duplicates::text \
                             FROM vuln_scan_store($1, $2, $3::text::jsonb, $4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint, $8::text::bigint)";
 
 
@@ -130,7 +136,7 @@ pub fn finding_doc(asset: &str, item: &AssetFinding) -> Option<Value> {
 fn parse_outcome(rows: &[Vec<String>], refused: u64) -> Result<ScanOutcome, StoreError> {
     let row = rows.first().ok_or(StoreError::BadAnswer)?;
     let numbers: Vec<u64> = row.iter().filter_map(|text| text.parse::<u64>().ok()).collect();
-    let [inserted, updated, resolved, refused_no_room, evicted_resolved] =
+    let [inserted, updated, resolved, refused_no_room, evicted_resolved, duplicates] =
         <[u64; OUTCOME_COLUMNS]>::try_from(numbers).map_err(|_bad| StoreError::BadAnswer)?;
     Ok(ScanOutcome {
         inserted,
@@ -139,6 +145,7 @@ fn parse_outcome(rows: &[Vec<String>], refused: u64) -> Result<ScanOutcome, Stor
         refused_no_room,
         evicted_resolved,
         refused,
+        duplicates,
     })
 }
 
@@ -202,6 +209,10 @@ pub async fn record_scan_capped(
         }
         if evicted > 0 {
             tracing::warn!(evicted, "resolved vulnerability findings over the cap were deleted, oldest first");
+        }
+        let duplicates = outcome.duplicates;
+        if duplicates > 0 {
+            tracing::warn!(duplicates, "repeated vulnerability finding keys in one scan were merged");
         }
         if refused > 0 {
             tracing::warn!(refused, "vulnerability findings outside the grammar were refused");

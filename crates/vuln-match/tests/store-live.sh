@@ -50,15 +50,19 @@ all_rows() { sql "SELECT count(*) FROM vuln_findings WHERE tenant = '$1'"; }
 counter() { sql "SELECT coalesce((SELECT open_total || '/' || resolved_total FROM vuln_finding_rows WHERE tenant = '$1'), '-1')"; }
 real_counter() { sql "SELECT count(*) FILTER (WHERE resolved_micros IS NULL) || '/' || count(*) FILTER (WHERE resolved_micros IS NOT NULL) FROM vuln_findings WHERE tenant = '$1'"; }
 open_counter() { counter "$1" | cut -d/ -f1; }
-fields() { vuln "$@" | sed -E 's/ScanOutcome \{ inserted: ([0-9]+), updated: ([0-9]+), resolved: ([0-9]+), refused_no_room: ([0-9]+), evicted_resolved: ([0-9]+), refused: ([0-9]+) \}/\1|\2|\3|\4|\5|\6/'; }
+fields() { vuln "$@" | sed -E 's/ScanOutcome \{ inserted: ([0-9]+), updated: ([0-9]+), resolved: ([0-9]+), refused_no_room: ([0-9]+), evicted_resolved: ([0-9]+), refused: ([0-9]+), duplicates: ([0-9]+) \}/\1|\2|\3|\4|\5|\6/'; }
+duplicates_of() { vuln "$@" | sed -E 's/.*duplicates: ([0-9]+) \}/\1/'; }
+asset_counter() { sql "SELECT coalesce((SELECT resolved_total FROM vuln_asset_resolved WHERE tenant = '$1' AND asset = '$2'), -1)"; }
+real_asset_counter() { sql "SELECT count(*) FROM vuln_findings WHERE tenant = '$1' AND asset = '$2' AND resolved_micros IS NOT NULL"; }
+asset_counters_equal() { sql "SELECT count(*) FROM (SELECT tenant, asset, count(*) AS n FROM vuln_findings WHERE resolved_micros IS NOT NULL GROUP BY tenant, asset) c FULL JOIN vuln_asset_resolved w USING (tenant, asset) WHERE coalesce(c.n, 0) <> coalesce(w.resolved_total, 0)"; }
 NOW=1700000000000000
 CAP=2000000
 RCAP=1000000
 HOUR=3600000000
 
 vuln migrate
-check "migration applied: function and tables exist" "1|1|1" "$(sql "SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'vuln_scan_store') || '|' || count(*) || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'vuln_finding_rows') FROM pg_class WHERE relname = 'vuln_findings'")"
-echo "columns: inserted|updated|resolved|no_room|evicted|refused"
+check "migration applied: function and tables exist" "1|1|1|1" "$(sql "SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'vuln_scan_store') || '|' || count(*) || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'vuln_finding_rows') || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'vuln_asset_resolved') FROM pg_class WHERE relname = 'vuln_findings'")"
+echo "columns: inserted|updated|resolved|no_room|evicted|refused (duplicates read apart)"
 
 check "scan 1 of h1 stores 3" "3|0|0|0|0|0" "$(fields scan a h1 $NOW $CAP $RCAP openssl/R1 curl/R2 zlib/R3)"
 check "tenant a open rows" 3 "$(open_rows a)"
@@ -77,6 +81,11 @@ check "scan of h1 with only zlib resolves the others" "0|0|2|0|0|0" "$(fields sc
 check "other asset unaffected: h2 scan of a" "1|0|0|0|0|0" "$(fields scan a h2 $NOW $CAP $RCAP openssl/R1)"
 check "h1 scan does not resolve h2" 1 "$(sql "SELECT count(*) FROM vuln_findings WHERE tenant = 'a' AND asset = 'h2' AND resolved_micros IS NULL")"
 check "counter equals the real counts" "$(real_counter a)" "$(counter a)"
+check "per-asset counts equal the real counts after the first section" 0 "$(asset_counters_equal)"
+echo "--- duplicate keys of one scan are merged and counted"
+check "3 copies of one key give duplicates=2" 2 "$(duplicates_of scan dup h1 $NOW $CAP $RCAP x/R1 x/R1 x/R1)"
+check "one row is stored" 1 "$(all_rows dup)"
+check "a scan without a repeat counts none" 0 "$(duplicates_of scan dup h1 $((NOW + 1)) $CAP $RCAP x/R1 y/R2)"
 
 check "tenant b starts empty" 0 "$(all_rows b)"
 before_a="$(sql "SELECT md5(string_agg(t::text, ',' ORDER BY package, asset)) FROM vuln_findings t WHERE tenant = 'a'")"
@@ -109,6 +118,7 @@ check "evil scan 3 swaps again, resolved history over cap 4 evicts the oldest 2"
 check "evil scan 4 evicts 3 more" "3|0|3|0|3|0" "$(fields bulk st evil $((NOW + 4)) 10 4 3 e3x)"
 check "good asset finds a new vulnerability and it is stored" "1|0|0|0|0|0" "$(fields scan st good $((NOW + 5)) 10 4 openssl/R1 curl/R2 zlib/R3)"
 check "resolved rows at the cap, counter equals count" "$(real_counter st)" "$(counter st)"
+check "per-asset counts equal the real counts after the tenant eviction" 0 "$(asset_counters_equal)"
 check "resolved rows are 4" 4 "$(sql "SELECT count(*) FROM vuln_findings WHERE tenant = 'st' AND resolved_micros IS NOT NULL")"
 check "the oldest resolved rows were the ones deleted" "0" "$(sql "SELECT count(*) FROM vuln_findings WHERE tenant = 'st' AND resolved_micros = $((NOW + 2))")"
 
@@ -171,6 +181,7 @@ start_swap="$(date +%s%N)"
 check "hostB swaps to 50 000 other findings: 50 000 resolved, 50 000 inserted" "50000|0|50000|0|0|0" "$(fields bulk big hostB $((NOW + 2)) $CAP $RCAP 50000 swapped)"
 echo "50 000 swap scan took $(( ($(date +%s%N) - start_swap) / 1000000 )) ms"
 check "counter equals the real counts after the big scans" "$(real_counter big)" "$(counter big)"
+check "per-asset counts equal the real counts after the big scans" 0 "$(asset_counters_equal)"
 
 echo "--- one asset's resolved history is capped per asset and never makes a scan cost its history"
 check "asset y stores 2" "2|0|0|0|0|0" "$(fields scan pa y $NOW $CAP $RCAP openssl/R1 curl/R2)"
@@ -180,6 +191,7 @@ check "asset x second inventory: 5 resolved, 2 over the asset cap of 3 evicted" 
 check "asset x keeps its 3 newest resolved rows" 3 "$(sql "SELECT count(*) FROM vuln_findings WHERE tenant = 'pa' AND asset = 'x' AND resolved_micros IS NOT NULL")"
 check "asset y history untouched by x churn" 2 "$(sql "SELECT count(*) FROM vuln_findings WHERE tenant = 'pa' AND asset = 'y' AND resolved_micros IS NOT NULL")"
 check "counters equal the real counts after the asset eviction" "$(real_counter pa)" "$(counter pa)"
+check "per-asset counts equal the real counts after the asset eviction" 0 "$(asset_counters_equal)"
 sql "INSERT INTO vuln_findings SELECT 'hist', 'hist', 'Debian:12', repeat('h', 100) || g, 'R1', '1.0', '1.2', 7.5, 0.5, false, g % 9000, 1, 1, 2 + g FROM generate_series(1, 1000000) g"
 sql "INSERT INTO vuln_findings SELECT 'hist', 'seed' || (g % 100), 'Debian:12', repeat('p', 100) || g, 'R1', '1.0', '1.2', 7.5, 0.5, false, g % 9000, 1, 1, NULL FROM generate_series(1, 200000) g"
 sql "ANALYZE vuln_findings"
@@ -187,6 +199,10 @@ echo "tenant hist: 1 000 000 resolved rows on asset hist (above the asset cap, s
 check "first scan of the tenant bootstraps the counter from 1 200 000 rows" "1|0|0|0|0|0" "$(fields scan hist boot $NOW $CAP $RCAP openssl/R1)"
 check "bootstrapped counter equals the real counts" "$(real_counter hist)" "$(counter hist)"
 tuples() { sleep 2; sql "SELECT seq_tup_read + idx_tup_fetch FROM pg_stat_user_tables WHERE relname = 'vuln_findings'"; }
+start_recount="$(date +%s%N)"
+check "the first scan of a SQL-seeded asset recounts its resolved rows once" "0|0|0|0|0|0" "$(fields scan hist hist $((NOW - 1)) $CAP $RCAP)"
+echo "recount of 1 000 000 resolved rows took $(( ($(date +%s%N) - start_recount) / 1000000 )) ms"
+check "the asset count is 1 000 000" 1000000 "$(asset_counter hist hist)"
 tuples_before="$(tuples)"
 start_hist="$(date +%s%N)"
 check "scan of hist, one finding" "1|0|0|0|0|0" "$(fields scan hist hist $NOW $CAP $RCAP openssl/R1)"
@@ -203,6 +219,33 @@ hist_pid=$!
 check "another asset of the tenant scans while hist scans" "1|0|0|0|0|0" "$(fields scan hist other $NOW $CAP $RCAP openssl/R1)"
 wait "$hist_pid"
 check "counter equals the real counts for the history tenant" "$(real_counter hist)" "$(counter hist)"
+check "per-asset counts equal the real counts at the end" 0 "$(asset_counters_equal)"
+
+echo "--- an asset under its resolved cap reads no resolved-index row; a forged count heals on the next UTC day"
+sql "INSERT INTO vuln_findings SELECT 'under', 'u1', 'Debian:12', 'upkg' || g, 'R1', '1.0', '1.2', 7.5, 0.5, false, 1, 1, 1, 2 + g FROM generate_series(1, 99999) g"
+sql "INSERT INTO vuln_findings SELECT 'under', 'u1', 'Debian:12', 'live' || g, 'R1', '1.0', '1.2', 7.5, 0.5, false, 1, 1, 1, NULL FROM generate_series(1, 2) g"
+check "first scan of u1 recounts its 99 999 resolved rows, resolves two, evicts one over the cap" "0|0|2|0|1|0" "$(fields scan under u1 $NOW $CAP $RCAP)"
+check "count is the cap after that eviction" "100000" "$(asset_counter under u1)"
+check "rows are the cap" "100000" "$(real_asset_counter under u1)"
+sql "UPDATE vuln_asset_resolved SET resolved_total = 99999 WHERE tenant = 'under' AND asset = 'u1'"
+sql "DELETE FROM vuln_findings WHERE ctid = ANY (ARRAY(SELECT ctid FROM vuln_findings WHERE tenant = 'under' AND asset = 'u1' AND resolved_micros IS NOT NULL LIMIT 1))"
+check "count and rows agree on 99 999 again" "99999" "$(real_asset_counter under u1)"
+check "u1 finds one open row" "1|0|0|0|0|0" "$(fields scan under u1 $((NOW + 1)) $CAP $RCAP one/R1)"
+tuples_under_before="$(tuples)"
+check "u1 resolves it again: count 100 000 is not over the cap" "0|0|1|0|0|0" "$(fields scan under u1 $((NOW + 2)) $CAP $RCAP)"
+echo "table rows read by that scan under the cap: $(( $(tuples) - tuples_under_before ))"
+check "an under-the-cap resolving scan reads a handful of rows (limit 1000, the walk would read 100 000)" 1 "$(( $(tuples) - tuples_under_before < 1000 ))"
+check "count equals rows under the cap" "$(real_asset_counter under u1)" "$(asset_counter under u1)"
+echo "a forged count (too low, too high) heals on the first scan of the next UTC day"
+sql "UPDATE vuln_asset_resolved SET resolved_total = 0 WHERE tenant = 'under' AND asset = 'u1'"
+check "forged-low count survives a scan of the same day" "0|0|0|0|0|0" "$(fields scan under u1 $((NOW + 3)) $CAP $RCAP)"
+check "forged-low count is still 0" 0 "$(asset_counter under u1)"
+check "next UTC day heals it" "0|0|0|0|0|0" "$(fields scan under u1 $((NOW + 86400000000)) $CAP $RCAP)"
+check "healed count equals rows" "$(real_asset_counter under u1)" "$(asset_counter under u1)"
+sql "UPDATE vuln_asset_resolved SET resolved_total = 5000000 WHERE tenant = 'under' AND asset = 'u1'"
+check "forged-high count heals the next day" "0|0|0|0|0|0" "$(fields scan under u1 $((NOW + 2 * 86400000000)) $CAP $RCAP)"
+check "healed again" "$(real_asset_counter under u1)" "$(asset_counter under u1)"
+check "a negative count is refused by the table" "refused" "$(sql "UPDATE vuln_asset_resolved SET resolved_total = -1 WHERE tenant = 'under'" >/dev/null 2>&1 && echo stored || echo refused)"
 echo "failures=$failures"
 exit "$failures"
 REMOTE
