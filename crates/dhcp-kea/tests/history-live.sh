@@ -10,7 +10,7 @@ read -r _ user address < <(awk '$1 == "datastore"' "$lab_state/vms.txt")
 [[ -n "$address" ]] || { echo "no datastore VM in $lab_state/vms.txt" >&2; exit 2; }
 ssh_options=(-i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
-scp "${ssh_options[@]}" "$here/migrations/002_dhcp_lease_history.sql" "$here/migrations/003_dhcp_history_eviction.sql" "$user@$address:/tmp/"
+scp "${ssh_options[@]}" "$here/migrations/002_dhcp_lease_history.sql" "$here/migrations/003_dhcp_history_eviction.sql" "$here/migrations/004_dhcp_history_lock_64.sql" "$user@$address:/tmp/"
 ssh "${ssh_options[@]}" "$user@$address" 'bash -s' <<'REMOTE'
 set -euo pipefail
 database=history_live_$$
@@ -23,6 +23,7 @@ check() {
 }
 run -f /tmp/002_dhcp_lease_history.sql
 run -f /tmp/003_dhcp_history_eviction.sql
+run -f /tmp/004_dhcp_history_lock_64.sql
 
 NOW=1700000000
 DAY=86400
@@ -78,7 +79,7 @@ check "8 parallel callers: counter at the cap" 100 "$(counter par)"
 check "8 parallel callers: inserted plus refused_full sum" 240 "$(cat /tmp/par-?.out | awk -F"|" '{s += $2 + $4} END {print s}')"
 check "8 parallel callers: inserted minus evicted" 100 "$(cat /tmp/par-?.out | awk -F"|" '{s += $2 - $6} END {print s}')"
 
-LOCK_CLASS=1145586512
+lock_held() { echo "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND ((classid::bigint << 32) | objid::bigint) = hashtextextended('dhcp_history_store/$1', 0) AND $2)"; }
 MAX_POLLS=600
 wait_until() {
     local query="$1" attempt
@@ -93,15 +94,27 @@ wait_until() {
 run -c "CREATE TABLE lock_gate (open boolean NOT NULL); INSERT INTO lock_gate VALUES (false)"
 sudo -u postgres psql -X -q -tA -v ON_ERROR_STOP=1 -d "$database" -c "BEGIN; SELECT dhcp_history_store('lock', $(docs 3 $NOW), 100, 400, $NOW); DO \$\$ BEGIN FOR i IN 1..$MAX_POLLS LOOP EXIT WHEN (SELECT open FROM lock_gate); PERFORM pg_sleep(0.1); END LOOP; END \$\$; COMMIT" >/dev/null &
 holder=$!
-wait_until "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = $LOCK_CLASS AND granted)"
+wait_until "$(lock_held lock granted)"
 store lock 100 $NOW "$(docs 3 $((NOW + 500)))" >/tmp/lock-second.out &
 second=$!
-wait_until "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = $LOCK_CLASS AND NOT granted)"
-check "second caller waits on the advisory lock of the first" "advisory:1145586512" "$(run -c "SELECT wait_event || ':' || (SELECT classid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted LIMIT 1) FROM pg_stat_activity WHERE datname = '$database' AND wait_event_type = 'Lock' LIMIT 1")"
+wait_until "$(lock_held lock "NOT granted")"
+check "second caller waits on the advisory lock of the first" "advisory" "$(run -c "SELECT wait_event FROM pg_stat_activity WHERE datname = '$database' AND wait_event_type = 'Lock' LIMIT 1")"
 run -c "UPDATE lock_gate SET open = true"
 wait "$holder" "$second"
 check "both callers stored under the lock" 6 "$(rows lock)"
 check "lock counter" 6 "$(counter lock)"
+
+check "t1481 and t45040 share the old 32-bit hash" "t" "$(run -c "SELECT hashtext('t1481') = hashtext('t45040')")"
+run -c "UPDATE lock_gate SET open = false"
+sudo -u postgres psql -X -q -tA -v ON_ERROR_STOP=1 -d "$database" -c "BEGIN; SELECT dhcp_history_store('t1481', $(docs 3 $NOW), 100, 400, $NOW); DO \$\$ BEGIN FOR i IN 1..$MAX_POLLS LOOP EXIT WHEN (SELECT open FROM lock_gate); PERFORM pg_sleep(0.1); END LOOP; END \$\$; COMMIT" >/dev/null &
+holder=$!
+wait_until "$(lock_held t1481 granted)"
+other="$(run -c "SET lock_timeout = '20s'; SELECT n_inserted FROM dhcp_history_store('t45040', $(docs 3 $NOW), 100, 400, $NOW)" 2>&1 | tail -1)"
+check "a holder of t1481 does not block t45040" 3 "$other"
+check "t45040 waited on no lock" "f" "$(run -c "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)")"
+run -c "UPDATE lock_gate SET open = true"
+wait "$holder"
+check "slash and quote in a tenant name" 3 "$(run -c "SELECT n_inserted FROM dhcp_history_store('a/b''c', $(docs 3 $NOW), 100, 400, $NOW)")"
 
 mismatch="$(run -c "SELECT count(*) FROM (SELECT tenant, count(*) AS n FROM dhcp_lease_history GROUP BY tenant) c JOIN dhcp_history_rows r USING (tenant) WHERE r.total <> c.n")"
 check "every counter equals its row count" 0 "$mismatch"
