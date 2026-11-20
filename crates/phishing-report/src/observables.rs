@@ -15,6 +15,7 @@ pub fn observables(record: &Triage) -> Vec<(ObservableKind, String)> {
         .sender
         .iter()
         .chain(record.return_path.iter())
+        .chain(record.senders.iter())
         .map(|address| address.to_ascii_lowercase());
     let hosts = record
         .urls
@@ -24,6 +25,7 @@ pub fn observables(record: &Triage) -> Vec<(ObservableKind, String)> {
         .sender
         .iter()
         .chain(record.return_path.iter())
+        .chain(record.senders.iter())
         .filter_map(|address| domain_of(address))
         .map(str::to_ascii_lowercase)
         .chain(hosts);

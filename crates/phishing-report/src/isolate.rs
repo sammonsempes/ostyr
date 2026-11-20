@@ -2,7 +2,8 @@
 
 use crate::error::TriageError;
 use crate::limits::{check_child_limits, Limits};
-use crate::model::Triage;
+use crate::model::{ReporterPolicy, Triage};
+use crate::policy::check_policy;
 use crate::triage::triage_with;
 use crate::types::{Job, ReadFn, SerializeFn, SpawnFn};
 use core_config::trusted_program::open_trusted_program;
@@ -60,6 +61,7 @@ pub struct Isolation {
 #[serde(deny_unknown_fields)]
 pub struct ChildRequest {
     pub trusted: Vec<String>,
+    pub reporters: ReporterPolicy,
     pub limits: Limits,
 }
 
@@ -74,7 +76,8 @@ pub fn exit_code(error: TriageError) -> u8 {
         | TriageError::ChildFailed
         | TriageError::ChildOutput
         | TriageError::ChildProgram
-        | TriageError::LimitsRefused => EXIT_FAILED,
+        | TriageError::LimitsRefused
+        | TriageError::PolicyRefused => EXIT_FAILED,
     }
 }
 
@@ -100,7 +103,7 @@ fn read_message(input: &mut dyn BufRead, limit: usize) -> Result<Vec<u8>, u8> {
 fn run_child(input: &mut dyn BufRead, output: &mut dyn Write) -> Result<(), u8> {
     let request = read_request(input)?;
     let raw = read_message(input, request.limits.message_bytes)?;
-    let record = triage_with(&raw, &request.trusted, &request.limits).map_err(exit_code)?;
+    let record = triage_with(&raw, &request.trusted, &request.reporters, &request.limits).map_err(exit_code)?;
     serde_json::to_writer(&mut *output, &record).map_err(|_| EXIT_FAILED)?;
     output.flush().map_err(|_| EXIT_FAILED)
 }
@@ -168,9 +171,10 @@ pub fn child_command(isolation: &Isolation, limits: &Limits) -> Command {
 
 
 /// The stdin of the child: the request line, then the raw message; the serializer is injected so a failing one is testable.
-pub fn payload(raw: &[u8], trusted: &[String], limits: &Limits, serialize: SerializeFn) -> Result<Vec<u8>, TriageError> {
+pub fn payload(raw: &[u8], trusted: &[String], reporters: &ReporterPolicy, limits: &Limits, serialize: SerializeFn) -> Result<Vec<u8>, TriageError> {
     let request = ChildRequest {
         trusted: trusted.to_vec(),
+        reporters: reporters.clone(),
         limits: limits.clone(),
     };
     let mut bytes = serialize(&request).or(Err(TriageError::ChildFailed))?;
@@ -182,11 +186,18 @@ pub fn payload(raw: &[u8], trusted: &[String], limits: &Limits, serialize: Seria
 
 
 /// One reported message in, one record out, parsed by a child under `limits.child_address_space`.
-pub fn triage_isolated(raw: &[u8], trusted: &[String], limits: &Limits, isolation: &Isolation) -> Result<Triage, TriageError> {
+pub fn triage_isolated(
+    raw: &[u8],
+    trusted: &[String],
+    reporters: &ReporterPolicy,
+    limits: &Limits,
+    isolation: &Isolation,
+) -> Result<Triage, TriageError> {
     check_child_limits(limits)?;
+    check_policy(reporters)?;
     (raw.len() <= limits.message_bytes).then_some(()).ok_or(TriageError::TooLarge)?;
     check_programs(isolation)?;
-    let bytes = payload(raw, trusted, limits, serde_json::to_vec)?;
+    let bytes = payload(raw, trusted, reporters, limits, serde_json::to_vec)?;
     run_child_process(
         child_command(isolation, limits),
         bytes,

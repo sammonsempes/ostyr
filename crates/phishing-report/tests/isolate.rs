@@ -8,7 +8,7 @@ use phishing_report::isolate::{
     PRLIMIT_PROGRAM, REQUEST_LINE_BYTES,
 };
 use phishing_report::limits::Limits;
-use phishing_report::model::Triage;
+use phishing_report::model::{ReporterPolicy, Triage};
 use phishing_report::triage::triage_with;
 use phishing_report::types::Job;
 use std::ffi::OsStr;
@@ -124,6 +124,7 @@ fn trusted() -> Vec<String> {
 fn request_bytes(raw: &[u8], limits: &Limits) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let request = ChildRequest {
         trusted: trusted(),
+        reporters: ReporterPolicy::default(),
         limits: limits.clone(),
     };
     let mut bytes = serde_json::to_vec(&request)?;
@@ -191,10 +192,17 @@ fn the_binary_triages_a_file_through_its_own_child() -> Result<(), Box<dyn std::
     let dir = work_dir()?;
     let mail = dir.path().join("mail.eml");
     std::fs::write(&mail, SMALL_MAIL)?;
-    let output = Command::new(example_program()?).arg(&mail).arg("mx.example.test").output()?;
+    let output = Command::new(example_program()?)
+        .arg(&mail)
+        .arg("mx.example.test")
+        .arg("internal:corp.test")
+        .output()?;
     let text = String::from_utf8(output.stdout)?;
     assert!(output.status.success());
     assert!(text.contains("http://example.test/x"));
+    assert!(text.contains("\"reporter\""));
+    let bad = Command::new(example_program()?).arg(&mail).arg("internal:-x").output()?;
+    assert!(!bad.status.success());
     Ok(())
 }
 
@@ -221,7 +229,7 @@ fn a_symlinked_program_is_refused() -> Result<(), Box<dyn std::error::Error>> {
         program: link,
     };
     assert_eq!(
-        triage_isolated(SMALL_MAIL.as_bytes(), &[], &Limits::default(), &isolation),
+        triage_isolated(SMALL_MAIL.as_bytes(), &[], &ReporterPolicy::default(), &Limits::default(), &isolation),
         Err(TriageError::ChildProgram)
     );
     Ok(())
@@ -248,7 +256,10 @@ fn the_child_entry_point_returns_the_record_of_a_message() -> Result<(), Box<dyn
     let (code, output) = run_main(&request_bytes(SMALL_MAIL.as_bytes(), &limits)?);
     let record: Triage = serde_json::from_slice(&output)?;
     assert_eq!(code, 0);
-    assert_eq!(record, triage_with(SMALL_MAIL.as_bytes(), &trusted(), &limits)?);
+    assert_eq!(
+        record,
+        triage_with(SMALL_MAIL.as_bytes(), &trusted(), &ReporterPolicy::default(), &limits)?
+    );
     Ok(())
 }
 
@@ -311,6 +322,7 @@ fn exit_codes_cover_every_variant() -> Result<(), Box<dyn std::error::Error>> {
         TriageError::ChildOutput,
         TriageError::ChildProgram,
         TriageError::LimitsRefused,
+        TriageError::PolicyRefused,
     ]
     .into_iter()
     .for_each(|error| assert_eq!(exit_code(error), EXIT_FAILED));
@@ -395,7 +407,7 @@ fn limits_outside_their_ceilings_are_refused_before_any_process() -> Result<(), 
     ];
     bad.iter().for_each(|limits| {
         assert_eq!(
-            triage_isolated(SMALL_MAIL.as_bytes(), &[], limits, &isolation),
+            triage_isolated(SMALL_MAIL.as_bytes(), &[], &ReporterPolicy::default(), limits, &isolation),
             Err(TriageError::LimitsRefused)
         )
     });
@@ -415,13 +427,20 @@ fn an_oversized_message_or_request_is_refused_before_any_process() -> Result<(),
         ..Limits::default()
     };
     assert_eq!(
-        triage_isolated(SMALL_MAIL.as_bytes(), &[], &small, &isolation),
+        triage_isolated(SMALL_MAIL.as_bytes(), &[], &ReporterPolicy::default(), &small, &isolation),
         Err(TriageError::TooLarge)
     );
     let many: Vec<String> = vec!["x".repeat(REQUEST_LINE_BYTES)];
     assert_eq!(
-        triage_isolated(SMALL_MAIL.as_bytes(), &many, &Limits::default(), &isolation),
+        triage_isolated(SMALL_MAIL.as_bytes(), &many, &ReporterPolicy::default(), &Limits::default(), &isolation),
         Err(TriageError::LimitsRefused)
+    );
+    let bad = ReporterPolicy {
+        internal_domains: vec!["-x".to_owned()],
+    };
+    assert_eq!(
+        triage_isolated(SMALL_MAIL.as_bytes(), &[], &bad, &Limits::default(), &isolation),
+        Err(TriageError::PolicyRefused)
     );
     Ok(())
 }
@@ -447,7 +466,7 @@ fn an_untrusted_program_is_refused_before_any_process() -> Result<(), Box<dyn st
     };
     [missing, writable, relative].iter().for_each(|isolation| {
         assert_eq!(
-            triage_isolated(SMALL_MAIL.as_bytes(), &[], &Limits::default(), isolation),
+            triage_isolated(SMALL_MAIL.as_bytes(), &[], &ReporterPolicy::default(), &Limits::default(), isolation),
             Err(TriageError::ChildProgram)
         )
     });
@@ -459,8 +478,11 @@ fn an_untrusted_program_is_refused_before_any_process() -> Result<(), Box<dyn st
 fn the_real_child_triages_an_ordinary_mail_like_the_library() -> Result<(), Box<dyn std::error::Error>> {
     LazyLock::force(&ANCHOR);
     let limits = Limits::default();
-    let isolated = triage_isolated(SMALL_MAIL.as_bytes(), &trusted(), &limits, &real_isolation()?)?;
-    assert_eq!(isolated, triage_with(SMALL_MAIL.as_bytes(), &trusted(), &limits)?);
+    let isolated = triage_isolated(SMALL_MAIL.as_bytes(), &trusted(), &ReporterPolicy::default(), &limits, &real_isolation()?)?;
+    assert_eq!(
+        isolated,
+        triage_with(SMALL_MAIL.as_bytes(), &trusted(), &ReporterPolicy::default(), &limits)?
+    );
     assert_eq!(isolated.urls.len(), 1);
     Ok(())
 }
@@ -471,7 +493,7 @@ fn the_real_child_reports_an_unparsable_and_an_oversized_message() -> Result<(),
     LazyLock::force(&ANCHOR);
     let isolation = real_isolation()?;
     assert_eq!(
-        triage_isolated(b"\x01\x02 no", &[], &Limits::default(), &isolation),
+        triage_isolated(b"\x01\x02 no", &[], &ReporterPolicy::default(), &Limits::default(), &isolation),
         Err(TriageError::Unparsable)
     );
     Ok(())
@@ -516,7 +538,7 @@ fn a_memory_bomb_the_scan_misses_ends_as_a_child_memory_error() -> Result<(), Bo
         ..Limits::default()
     };
     assert_eq!(
-        triage_isolated(raw.as_bytes(), &[], &limits, &real_isolation()?),
+        triage_isolated(raw.as_bytes(), &[], &ReporterPolicy::default(), &limits, &real_isolation()?),
         Err(TriageError::ChildMemory)
     );
     Ok(())
@@ -712,7 +734,13 @@ fn failing_executable() -> io::Result<PathBuf> {
 fn a_failing_serializer_or_executable_lookup_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     LazyLock::force(&ANCHOR);
     assert_eq!(
-        payload(SMALL_MAIL.as_bytes(), &[], &Limits::default(), failing_serializer),
+        payload(
+            SMALL_MAIL.as_bytes(),
+            &[],
+            &ReporterPolicy::default(),
+            &Limits::default(),
+            failing_serializer
+        ),
         Err(TriageError::ChildFailed)
     );
     assert_eq!(default_isolation_from(failing_executable()), Err(TriageError::ChildProgram));
@@ -726,7 +754,7 @@ fn logged_flows() -> Result<(), Box<dyn std::error::Error>> {
         program: PathBuf::from("/nonexistent/program"),
     };
     assert_eq!(
-        triage_isolated(SMALL_MAIL.as_bytes(), &[], &Limits::default(), &missing),
+        triage_isolated(SMALL_MAIL.as_bytes(), &[], &ReporterPolicy::default(), &Limits::default(), &missing),
         Err(TriageError::ChildProgram)
     );
     let absent = run_child_process(
