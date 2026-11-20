@@ -87,3 +87,18 @@ pub const BUDGET_80_RULE: &str = "ai.budget_80";
 
 
 pub const BUDGET_SPENT_RULE: &str = "ai.budget_spent";
+
+
+pub const BUDGET_REQUEST_TOO_LARGE_RULE: &str = "ai.budget_request_too_large";
+
+
+pub const SKELETON_DOCUMENT: &str = "0";
+
+
+pub const SKELETON_NONCE: &str = "00000000000000000000000000000000";
+
+
+pub const MAX_WAITING_RESERVATIONS: usize = 64;
+
+
+pub const HELD_EXPIRY_SECONDS: i64 = 900;

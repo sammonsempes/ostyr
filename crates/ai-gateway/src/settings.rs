@@ -2,8 +2,9 @@ use crate::error::AiError;
 use crate::limits::{
     DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ENDPOINT_PATH, MAX_CALLS_PER_DAY_CEILING, MAX_MODEL_CHARS, MAX_REQUEST_BYTES_CEILING,
     MAX_RESPONSE_BYTES_CEILING, MAX_TIMEOUT_SECONDS, MAX_TOKENS_CEILING, MAX_TOKENS_PER_DAY_CEILING, MIN_RESPONSE_BYTES, MIN_TIMEOUT_SECONDS,
-    MODEL_EXTRA_CHARACTERS,
+    MODEL_EXTRA_CHARACTERS, SKELETON_NONCE,
 };
+use crate::request::skeleton_reservation;
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
@@ -99,6 +100,13 @@ pub fn model_ok(model: &str) -> bool {
 }
 
 
+/// Within the ceiling, and room for the skeleton of a request with empty instructions: under a smaller cap no request could reserve.
+pub fn token_cap_ok(settings: &AiSettings) -> bool {
+    let floor = skeleton_reservation(settings, "", SKELETON_NONCE);
+    (1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) && i64::from(settings.max_tokens_per_day) >= floor
+}
+
+
 /// The first refused field is named.
 pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
     if !base_url_ok(&settings.base_url) {
@@ -115,7 +123,7 @@ pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
         Err(AiError::Settings { field: "max_request_bytes" })
     } else if !(1..=MAX_CALLS_PER_DAY_CEILING).contains(&settings.max_calls_per_day) {
         Err(AiError::Settings { field: "max_calls_per_day" })
-    } else if !(1..=MAX_TOKENS_PER_DAY_CEILING).contains(&settings.max_tokens_per_day) {
+    } else if !token_cap_ok(settings) {
         Err(AiError::Settings { field: "max_tokens_per_day" })
     } else {
         Ok(())
@@ -123,7 +131,7 @@ pub fn validate_ai(settings: &AiSettings) -> Result<(), AiError> {
 }
 
 
-pub fn endpoint_url(settings: &AiSettings) -> String {
+pub(crate) fn endpoint_url(settings: &AiSettings) -> String {
     format!("{}{ENDPOINT_PATH}", settings.base_url.trim_end_matches('/'))
 }
 

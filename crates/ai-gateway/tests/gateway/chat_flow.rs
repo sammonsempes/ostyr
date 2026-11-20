@@ -1,14 +1,16 @@
 use crate::common::{
-    chain, deps, fixed_random, real_random_deps, scripted, settings, FIXED_NONCE, MARKER, STATUS_SERVER, STATUS_TOO_MANY, STATUS_UNAUTHORIZED, TOKENS,
+    chain, chat, deps, fixed_random, real_random_deps, scripted, settings, FIXED_NONCE, MARKER, STATUS_SERVER, STATUS_TOO_MANY, STATUS_UNAUTHORIZED,
+    TOKENS,
 };
 use crate::numbers::{
     BIG_STRING_BYTES, COMPLETION_TOKENS, FOUR_FIELDS, INVALID_UTF8, KEY_MODE, LONG_KEY_BYTES, OPEN_MODE, PROMPT_TOKENS, TWO_MESSAGES,
 };
 use crate::types::TestResult;
-use ai_gateway::chat::{chat, monotonic_millis, os_random, production_deps};
+use ai_gateway::chat::{monotonic_millis, os_random, wall_micros};
 use ai_gateway::error::{AiError, SecretClass};
 use ai_gateway::limits::{MAX_CHOICES, MAX_DATA_NODES, MAX_REQUEST_BYTES_CEILING, MAX_RESPONSE_BYTES_CEILING, NONCE_BYTES};
 use ai_gateway::model::{Answer, FinishReason};
+use ai_gateway::request::check_key_file;
 use serde_json::{json, Value};
 use std::error::Error;
 use std::fs;
@@ -174,7 +176,7 @@ fn each_answer_shape_gives_its_fixed_result() -> TestResult {
 
 
 #[test]
-fn the_api_key_travels_as_a_bearer_and_a_bad_key_file_is_refused() -> TestResult {
+fn a_caller_transport_never_sees_the_key_and_a_bad_key_file_is_refused() -> TestResult {
     let directory = tempfile::tempdir()?;
     let write = |name: &str, content: &[u8], mode: u32| -> Result<std::path::PathBuf, Box<dyn Error>> {
         let path = directory.path().join(name);
@@ -183,33 +185,35 @@ fn the_api_key_travels_as_a_bearer_and_a_bad_key_file_is_refused() -> TestResult
         Ok(path)
     };
     let with_key = |path: std::path::PathBuf| {
-        let mut keyed = settings("auth");
+        let mut keyed = settings("echo");
         keyed.api_key_file = Some(path);
         chat(&keyed, "i", &json!({"a": 1}), &deps(scripted))
     };
-    assert_eq!(with_key(write("good", b"sk-secret-1\n", KEY_MODE)?)?.content, "Bearer sk-secret-1");
-    assert_eq!(chat(&settings("auth"), "i", &json!({"a": 1}), &deps(scripted))?.content, "none");
-    let class = |result: Result<Answer, AiError>| match result {
+    let good = write("good", b"sk-secret-1\n", KEY_MODE)?;
+    let echoed_request = with_key(good.clone())?.content;
+    assert!(!echoed_request.contains("sk-secret-1") && !echoed_request.to_ascii_lowercase().contains("authorization"));
+    assert_eq!(with_key(write("open", b"sk-x", OPEN_MODE)?)?.content, with_key(good.clone())?.content);
+    assert!(check_key_file(&good).is_ok());
+    let class = |path: std::path::PathBuf| match check_key_file(&path) {
         Err(AiError::Secret { class }) => Ok(class),
         other => Err(format!("{other:?}")),
     };
-    assert_eq!(class(with_key(write("open", b"sk-x", OPEN_MODE)?))?, SecretClass::Refused);
-    assert_eq!(class(with_key(directory.path().join("absent")))?, SecretClass::Unreadable);
-    assert_eq!(class(with_key(write("blank", b" \n", KEY_MODE)?))?, SecretClass::Format);
-    assert_eq!(class(with_key(write("space", b"two words", KEY_MODE)?))?, SecretClass::Format);
-    assert_eq!(class(with_key(write("binary", &INVALID_UTF8, KEY_MODE)?))?, SecretClass::Format);
-    assert_eq!(class(with_key(write("long", &[b'a'; LONG_KEY_BYTES], KEY_MODE)?))?, SecretClass::TooLarge);
+    assert_eq!(class(write("open", b"sk-x", OPEN_MODE)?)?, SecretClass::Refused);
+    assert_eq!(class(directory.path().join("absent"))?, SecretClass::Unreadable);
+    assert_eq!(class(write("blank", b" \n", KEY_MODE)?)?, SecretClass::Format);
+    assert_eq!(class(write("space", b"two words", KEY_MODE)?)?, SecretClass::Format);
+    assert_eq!(class(write("binary", &INVALID_UTF8, KEY_MODE)?)?, SecretClass::Format);
+    assert_eq!(class(write("long", &[b'a'; LONG_KEY_BYTES], KEY_MODE)?)?, SecretClass::TooLarge);
     Ok(())
 }
 
 
 #[test]
-fn the_production_dependencies_are_bound() -> TestResult {
-    let bound = production_deps();
-    let first = (bound.clock)();
-    assert!((bound.clock)() >= first);
+fn the_production_clocks_and_random_are_usable() -> TestResult {
+    let first = monotonic_millis();
     assert!(monotonic_millis() >= first);
+    assert!(wall_micros() > 0);
     let mut bytes = [0; NONCE_BYTES];
-    (bound.random)(&mut bytes)?;
+    os_random(&mut bytes)?;
     Ok(())
 }

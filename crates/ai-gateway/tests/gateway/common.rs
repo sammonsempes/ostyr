@@ -1,11 +1,20 @@
 use crate::numbers::{COMPLETION_TOKENS, PROMPT_TOKENS};
+use ai_gateway::budget::{budgeted_chat, new_gate, BudgetDeps, Param, Stores};
+use ai_gateway::chat::custom_deps;
 use ai_gateway::error::AiError;
 use ai_gateway::limits::{DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ENDPOINT_PATH, MAX_RESPONSE_NODES, STATUS_OK};
-use ai_gateway::model::{Deps, HttpReply, HttpRequest};
+use ai_gateway::model::{request_body, request_url, Answer, Deps, HttpReply, HttpRequest};
 use ai_gateway::settings::AiSettings;
+use ai_gateway::types::BudgetFuture;
+use alerts::types::RowFuture;
+use core_pg::scope::{tenant_scope, TenantScope};
 use serde_json::{json, Value};
+#[cfg(unix)]
 use std::error::Error;
+use std::future::{ready, Future};
 use std::io::{Cursor, Read};
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 
 
 pub const MARKER: &str = "peer-marker-7f3a";
@@ -29,6 +38,7 @@ pub const TOKEN_CAP: u32 = 1_000_000;
 pub const FILL_BYTE: u8 = 0xab;
 
 
+#[cfg(unix)]
 pub const FIXED_NONCE: &str = "abababababababababababababababab";
 
 
@@ -87,19 +97,13 @@ pub fn fixed_clock() -> u64 {
 
 
 pub fn deps(transport: ai_gateway::types::TransportFn) -> Deps {
-    Deps {
-        transport,
-        random: fixed_random,
-        clock: fixed_clock,
-    }
+    custom_deps(transport, fixed_random, fixed_clock)
 }
 
 
+#[cfg(unix)]
 pub fn real_random_deps(transport: ai_gateway::types::TransportFn) -> Deps {
-    Deps {
-        random: ai_gateway::chat::os_random,
-        ..deps(transport)
-    }
+    custom_deps(transport, ai_gateway::chat::os_random, fixed_clock)
 }
 
 
@@ -160,12 +164,8 @@ pub fn many_choices() -> Value {
 
 /// A fake model endpoint: the last path segment of the base URL picks the behaviour.
 pub fn scripted(request: &HttpRequest) -> Result<HttpReply, AiError> {
-    match script_name(&request.url) {
-        "echo" => reply(STATUS_OK, completion(&String::from_utf8_lossy(&request.body))),
-        "auth" => reply(
-            STATUS_OK,
-            completion(request.authorization.as_ref().map_or("none", |value| value.as_str())),
-        ),
+    match script_name(request_url(request)) {
+        "echo" => reply(STATUS_OK, completion(&String::from_utf8_lossy(request_body(request)))),
         "ok" => reply(STATUS_OK, completion("hello")),
         "hugeusage" => reply(STATUS_OK, usage_completion(u32::MAX, u32::MAX)),
         "negusage" => reply(
@@ -218,6 +218,7 @@ pub fn scripted(request: &HttpRequest) -> Result<HttpReply, AiError> {
 }
 
 
+#[cfg(unix)]
 pub fn chain(error: &(dyn Error + 'static)) -> String {
     std::iter::successors(Some(error), |inner| (*inner).source())
         .map(|inner| format!("{inner} {inner:?}"))
@@ -227,3 +228,51 @@ pub fn chain(error: &(dyn Error + 'static)) -> String {
 
 
 pub const NODE_CAP: usize = MAX_RESPONSE_NODES;
+
+
+pub const WALL_MICROS: u64 = 1_700_000_000_000_000;
+
+
+pub const WAITING_LIMIT: usize = 64;
+
+
+pub fn fixed_wall() -> u64 {
+    WALL_MICROS
+}
+
+
+pub fn block_on_ready<Out>(future: impl Future<Output = Out>) -> Option<Out> {
+    let mut pinned = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    match pinned.as_mut().poll(&mut context) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
+}
+
+
+pub fn open_budget(_scope: TenantScope, _sql: &'static str, _params: Vec<Param>) -> BudgetFuture<'static> {
+    Box::pin(ready(Ok(vec![(1, 1)])))
+}
+
+
+pub fn open_alerts(_scope: TenantScope, _sql: &'static str, _params: Vec<String>) -> RowFuture<'static> {
+    Box::pin(ready(Ok(vec![vec!["1".to_owned()]])))
+}
+
+
+/// One model call through the only public path, `budgeted_chat`, with stores that always grant the room.
+pub fn chat(used: &AiSettings, instructions: &'static str, data: &Value, chat_deps: &Deps) -> Result<Answer, AiError> {
+    let gate = new_gate(WAITING_LIMIT);
+    let stores = Stores {
+        budget: &open_budget,
+        alerts: &open_alerts,
+        gate: &gate,
+    };
+    let scope = tenant_scope("acme")?;
+    let budget_deps = BudgetDeps {
+        chat: *chat_deps,
+        wall_clock: fixed_wall,
+    };
+    block_on_ready(budgeted_chat(&stores, &scope, used, instructions, data, &budget_deps)).ok_or(AiError::BadReply)?
+}
