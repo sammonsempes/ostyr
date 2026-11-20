@@ -1,7 +1,19 @@
+#[cfg(target_os = "linux")]
 use crate::model::CommandStatus;
+#[cfg(target_os = "linux")]
 use crate::types::WaitFn;
+#[cfg(target_os = "linux")]
+use core_config::trusted_program::same_program;
+#[cfg(target_os = "linux")]
+use rustix::process::geteuid;
 use std::io;
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+use std::process::{Child, Command, ExitStatus};
 use std::time::Duration;
 use tracing::warn;
 use wait_timeout::ChildExt;
@@ -55,8 +67,14 @@ pub fn stop(child: &mut Child) {
 }
 
 
-/// Null standard streams, so no byte of Caddy's output is read; past the deadline or on a failed wait the group is killed and reaped.
-pub fn run_child(program: &str, arguments: &[String], deadline: Duration, wait: WaitFn) -> io::Result<CommandStatus> {
+/// The default hook between the first judgement and the second: nothing.
+#[cfg(target_os = "linux")]
+pub fn leave_alone(_program: &Path) {}
+
+
+/// Starts the child with null standard streams; past the deadline or on a failed wait the group is killed and reaped.
+#[cfg(target_os = "linux")]
+pub fn spawn_and_wait(program: &Path, arguments: &[String], deadline: Duration, wait: WaitFn) -> io::Result<CommandStatus> {
     let mut command = Command::new(program);
     let mut child = own_group(command.args(arguments).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())).spawn()?;
     match wait(&mut child, deadline) {
@@ -75,7 +93,34 @@ pub fn run_child(program: &str, arguments: &[String], deadline: Duration, wait: 
 }
 
 
+/// `run_child` with the trusted uid and a hook that runs before the second judgement, so a swap and a foreign owner are testable; a refusal spawns nothing.
+#[cfg(target_os = "linux")]
+pub fn run_child_with_hook(
+    (handle, program): (&OwnedFd, &Path),
+    arguments: &[String],
+    deadline: Duration,
+    wait: WaitFn,
+    (trusted_uid, between): (u32, fn(&Path)),
+) -> io::Result<CommandStatus> {
+    between(program);
+    let same = same_program(handle, program, trusted_uid).inspect_err(|failure| warn!(%failure, "the caddy program cannot be judged again"));
+    if same.unwrap_or(false) {
+        spawn_and_wait(program, arguments, deadline, wait)
+    } else {
+        Ok(CommandStatus::Refused)
+    }
+}
+
+
+/// The program is judged again from `/` right before the spawn and must still be the inode the caller judged.
+#[cfg(target_os = "linux")]
+pub fn run_child(handle: &OwnedFd, program: &Path, arguments: &[String], deadline: Duration, wait: WaitFn) -> io::Result<CommandStatus> {
+    run_child_with_hook((handle, program), arguments, deadline, wait, (geteuid().as_raw(), leave_alone))
+}
+
+
 /// `run_child` with the real wait.
-pub fn run_with_deadline(program: &str, arguments: &[String], deadline: Duration) -> io::Result<CommandStatus> {
-    run_child(program, arguments, deadline, wait_child)
+#[cfg(target_os = "linux")]
+pub fn run_with_deadline(handle: &OwnedFd, program: &Path, arguments: &[String], deadline: Duration) -> io::Result<CommandStatus> {
+    run_child(handle, program, arguments, deadline, wait_child)
 }

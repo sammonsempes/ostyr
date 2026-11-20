@@ -31,6 +31,11 @@ pub enum DeliverError {
     #[cfg(unix)]
     #[error(transparent)]
     OutDir(#[from] core_config::trusted_dir::TrustedDirError),
+    #[cfg(target_os = "linux")]
+    #[error("the Caddy program /usr/bin/caddy is untrusted")]
+    Program(#[source] core_config::trusted_program::TrustedProgramError),
+    #[error("caddy {step} not started: the program changed or is untrusted")]
+    ProgramChanged { step: &'static str },
     #[error("the rendered file name is taken by something that is not a regular file")]
     BadTarget,
     #[error("cannot write the rendered file")]

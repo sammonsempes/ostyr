@@ -1,9 +1,10 @@
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use core_audit::error::AuditError;
 use core_audit::log::{append, open_file_log};
 use core_audit::model::{NewEntry, Outcome};
 use core_config::reload::{current_config, reload, reload_entry, ReloadContext, ReloadEngine, ReloadOutcome};
+use core_config::trusted_program::open_trusted_program;
 use data_encoding::HEXLOWER;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -11,7 +12,7 @@ use std::error::Error;
 use std::error::Error as StdError;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -22,13 +23,14 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use waf::admin::open_admin_directory;
 use waf::apply::{
-    applied_state, check_settings, check_start_only, config_error, config_id, discard, file_trusted, judge_program, late_audit, load_trusted_routes,
-    load_trusted_settings, load_trusted_settings_file, open_apply, open_apply_audited, path_text_ok, refused_text, render_applied,
-    render_applied_capped, start_refusal,
+    applied_state, check_settings, check_start_only, config_error, config_id, deliver, discard, file_trusted, judge_program, late_audit,
+    load_trusted_routes, load_trusted_settings, load_trusted_settings_file, open_apply, open_apply_audited, open_apply_audited_with_program,
+    open_apply_with_program, path_text_ok, production_program, refused_text, render_applied, render_applied_capped, start_refusal,
 };
 use waf::error::{DeliverError, OpenError, WafError};
+use waf::limits::CADDY_PROGRAM;
 use waf::model::{Applied, ApplySettings, CommandStatus, Refusal};
-use waf::runner::{logged, run_child, run_with_deadline, stop};
+use waf::runner::{leave_alone, logged, run_child, run_child_with_hook, run_with_deadline, stop, wait_child};
 
 
 const TWO_ROUTES: &str = "tests/fixtures/two_routes.yaml";
@@ -167,7 +169,7 @@ fn settings_of(fixture: &Fixture) -> ApplySettings {
     ApplySettings {
         routes_file: fixture.routes.to_string_lossy().into_owned(),
         out_dir: fixture.out.to_string_lossy().into_owned(),
-        caddy_program: fixture.program.clone(),
+        retired_caddy_program: false,
         admin_socket: fixture.admin.join("sock").to_string_lossy().into_owned(),
         deadline_seconds: SETTINGS_DEADLINE,
     }
@@ -176,10 +178,15 @@ fn settings_of(fixture: &Fixture) -> ApplySettings {
 
 fn write_settings(fixture: &Fixture, settings: &ApplySettings) -> Result<(), Box<dyn Error>> {
     let text = format!(
-        "routes_file: {}\nout_dir: {}\ncaddy_program: {}\nadmin_socket: {}\ndeadline_seconds: {}\n",
-        settings.routes_file, settings.out_dir, settings.caddy_program, settings.admin_socket, settings.deadline_seconds
+        "routes_file: {}\nout_dir: {}\nadmin_socket: {}\ndeadline_seconds: {}\n",
+        settings.routes_file, settings.out_dir, settings.admin_socket, settings.deadline_seconds
     );
     Ok(fs::write(&fixture.settings_file, text)?)
+}
+
+
+fn prog(fixture: &Fixture) -> &Path {
+    Path::new(&fixture.program)
 }
 
 
@@ -193,7 +200,8 @@ fn calls(fixture: &Fixture) -> Vec<String> {
 }
 
 
-fn fake(program: &str, arguments: &[String], _deadline: Duration) -> io::Result<CommandStatus> {
+fn fake(_handle: &OwnedFd, path: &Path, arguments: &[String], _deadline: Duration) -> io::Result<CommandStatus> {
+    let program = path.display();
     let mode = fs::read_to_string(format!("{program}.mode"))?;
     let step = arguments.first().map_or("", String::as_str);
     let staged = arguments.get(STAGED_ARGUMENT).map(fs::read).transpose()?.unwrap_or_else(Vec::new);
@@ -204,6 +212,7 @@ fn fake(program: &str, arguments: &[String], _deadline: Duration) -> io::Result<
     match (mode.as_str(), step) {
         ("validate-fail", "validate") | ("reload-fail", "reload") => Ok(CommandStatus::Failed(Some(FAILED_STATUS))),
         ("reload-timeout", "reload") => Ok(CommandStatus::TimedOut),
+        ("refused", _) | ("refuse-reload", "reload") => Ok(CommandStatus::Refused),
         ("vanish", "reload") => {
             fs::remove_file(arguments.get(STAGED_ARGUMENT).ok_or_else(|| io::Error::other("no path"))?).map(|()| CommandStatus::Success)
         }
@@ -227,8 +236,9 @@ fn context() -> ReloadContext {
 fn try_open(fixture: &Fixture) -> Result<Result<ReloadEngine<Applied>, OpenError>, Box<dyn Error>> {
     let audit_path = fixture.dir.path().join("audit.log");
     let log = Arc::new(open_file_log(&audit_path)?);
-    Ok(open_apply(
+    Ok(open_apply_with_program(
         &fixture.settings_file,
+        prog(fixture),
         fake,
         Box::new(move |entry| append(&log, entry)),
         context(),
@@ -253,7 +263,7 @@ fn hash_of(text: &str) -> String {
 
 
 fn id_of(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
-    Ok(render_applied(&settings_of(fixture), 0)?.id)
+    Ok(render_applied(&settings_of(fixture), prog(fixture), 0)?.id)
 }
 
 
@@ -292,7 +302,7 @@ fn the_render_with_admin_listen_and_id_matches_the_golden_file() -> Result<(), B
         admin_socket: SOCKET.to_owned(),
         ..settings_of(&fixture)
     };
-    let applied = render_applied(&settings, 0)?;
+    let applied = render_applied(&settings, prog(&fixture), 0)?;
     assert_eq!(applied.json, fs::read_to_string(TWO_ROUTES_ADMIN)?.trim_end());
     let value: Value = serde_json::from_str(&applied.json)?;
     assert_eq!(
@@ -490,7 +500,14 @@ fn an_unknown_first_delivery_stops_the_start() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_failing_audit_stops_the_start() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
-    let failure = open_apply(&fixture.settings_file, fake, Box::new(|_entry| Err(AuditError::LogPoisoned)), context()).err();
+    let failure = open_apply_with_program(
+        &fixture.settings_file,
+        prog(&fixture),
+        fake,
+        Box::new(|_entry| Err(AuditError::LogPoisoned)),
+        context(),
+    )
+    .err();
     assert!(matches!(failure, Some(OpenError::Audit(_))));
     Ok(())
 }
@@ -537,10 +554,11 @@ fn the_refused_list_is_cut_with_a_visible_marker() -> Result<(), Box<dyn Error>>
     let applied = Applied {
         id: "ostyr-x".to_owned(),
         epoch: 0,
+        program: PathBuf::from("/c"),
         settings: ApplySettings {
             routes_file: "/r".to_owned(),
             out_dir: "/o".to_owned(),
-            caddy_program: "/c".to_owned(),
+            retired_caddy_program: false,
             admin_socket: "/s".to_owned(),
             deadline_seconds: SETTINGS_DEADLINE,
         },
@@ -551,12 +569,13 @@ fn the_refused_list_is_cut_with_a_visible_marker() -> Result<(), Box<dyn Error>>
     let text = refused_text(&applied);
     assert!(text.starts_with("40 refused: 0,1,2"));
     assert!(text.ends_with(&format!(",{} [{} more omitted]", LISTED - 1, REFUSED_COUNT - LISTED)));
-    assert_eq!(applied_state(&applied).len(), FIVE_KEYS);
+    assert_eq!(applied_state(&applied).len(), FOUR_KEYS);
+    assert!(!applied_state(&applied).contains_key("waf.caddy_program"));
     Ok(())
 }
 
 
-const FIVE_KEYS: usize = 5;
+const FOUR_KEYS: usize = 4;
 
 
 #[test]
@@ -738,17 +757,20 @@ fn an_acme_ca_root_is_written_beside_the_rendered_file() -> Result<(), Box<dyn E
 fn render_failures_become_fixed_refusals() -> Result<(), Box<dyn Error>> {
     let fixture = fixture("routes: [")?;
     let settings = settings_of(&fixture);
-    assert!(render_applied(&settings, 0).is_err());
+    assert!(render_applied(&settings, prog(&fixture), 0).is_err());
     fs::write(&fixture.routes, "tls:\n  issuer: internal\n  email: x\nroutes: []\n")?;
-    assert!(render_applied(&settings, 0).is_err());
+    assert!(render_applied(&settings, prog(&fixture), 0).is_err());
     fs::write(&fixture.routes, ONE_ROUTE)?;
-    let too_large = render_applied_capped(&settings, 0, TINY_CAP).err().ok_or("rendered")?.to_string();
+    let too_large = render_applied_capped(&settings, prog(&fixture), 0, TINY_CAP)
+        .err()
+        .ok_or("rendered")?
+        .to_string();
     assert!(too_large.contains("exceeds the limit"));
     let missing = ApplySettings {
         routes_file: "/nonexistent/routes.yaml".to_owned(),
         ..settings.clone()
     };
-    assert!(render_applied(&missing, 0).is_err());
+    assert!(render_applied(&missing, prog(&fixture), 0).is_err());
     let root = fixture.dir.path().join("root.pem");
     fs::copy(CA_PEM, &root)?;
     fs::write(
@@ -762,7 +784,7 @@ fn render_failures_become_fixed_refusals() -> Result<(), Box<dyn Error>> {
         out_dir: "relative".to_owned(),
         ..settings
     };
-    assert!(render_applied(&relative, 0).is_err());
+    assert!(render_applied(&relative, prog(&fixture), 0).is_err());
     let other = config_error(WafError::BadTls("fixed"));
     assert!(other.to_string().contains("fixed"));
     Ok(())
@@ -784,7 +806,7 @@ fn settings_are_strict_and_bounded() -> Result<(), Box<dyn Error>> {
             ..good.clone()
         },
         ApplySettings {
-            caddy_program: "-x".to_owned(),
+            retired_caddy_program: true,
             ..good.clone()
         },
         ApplySettings {
@@ -807,7 +829,7 @@ fn settings_are_strict_and_bounded() -> Result<(), Box<dyn Error>> {
     let file = fixture.dir.path().join("minimal.yaml");
     fs::write(&file, format!("routes_file: {}\nout_dir: {}\n", good.routes_file, good.out_dir))?;
     let loaded = load_trusted_settings_file(&file)?;
-    assert_eq!(loaded.caddy_program, "/usr/bin/caddy");
+    assert!(!loaded.retired_caddy_program);
     assert_eq!(loaded.admin_socket, SOCKET);
     assert_eq!(loaded.deadline_seconds, SETTINGS_DEADLINE);
     fs::write(&file, format!("routes_file: {}\nout_dir: {}\nextra: 1\n", good.routes_file, good.out_dir))?;
@@ -845,17 +867,41 @@ fn discarding_a_missing_staged_file_is_logged_not_fatal() -> Result<(), Box<dyn 
 }
 
 
+fn install_script(path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
+    let source = PathBuf::from(format!("{}.source", path.display()));
+    fs::write(&source, format!("#!/bin/sh\n{body}\n"))?;
+    let installed = Command::new("install").arg("-m").arg("755").arg(&source).arg(path).status()?;
+    assert!(installed.success());
+    Ok(())
+}
+
+
+fn script(fixture: &Fixture, name: &str, body: &str) -> Result<(PathBuf, OwnedFd), Box<dyn Error>> {
+    let path = fixture.dir.path().join(name);
+    install_script(&path, body)?;
+    let handle = open_trusted_program(&path, rustix::process::geteuid().as_raw())?;
+    Ok((path, handle))
+}
+
+
 #[test]
 fn the_real_runner_reports_success_failure_spawn_error_and_deadline() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
     let second = Duration::from_secs(1);
     let short = Duration::from_millis(SHORT_DEADLINE_MILLISECONDS);
-    assert_eq!(run_with_deadline("/usr/bin/true", &[], second)?, CommandStatus::Success);
-    assert_eq!(run_with_deadline("/usr/bin/false", &[], second)?, CommandStatus::Failed(Some(1)));
-    assert!(run_with_deadline("/nonexistent/caddy", &[], second).is_err());
-    assert_eq!(
-        run_with_deadline("/usr/bin/sleep", &[LONG_SLEEP.to_owned()], short)?,
-        CommandStatus::TimedOut
-    );
+    let (yes, yes_handle) = script(&fixture, "yes", "exit 0")?;
+    assert_eq!(run_with_deadline(&yes_handle, &yes, &[], second)?, CommandStatus::Success);
+    let (no, no_handle) = script(&fixture, "no", "exit 1")?;
+    assert_eq!(run_with_deadline(&no_handle, &no, &[], second)?, CommandStatus::Failed(Some(1)));
+    let blank = fixture.dir.path().join("blank");
+    let blank_source = fixture.dir.path().join("blank.source");
+    fs::write(&blank_source, "")?;
+    let blank_installed = Command::new("install").arg("-m").arg("755").arg(&blank_source).arg(&blank).status()?;
+    assert!(blank_installed.success());
+    let empty = open_trusted_program(&blank, rustix::process::geteuid().as_raw())?;
+    assert!(run_with_deadline(&empty, &blank, &[], second).is_err());
+    let (slow, slow_handle) = script(&fixture, "slow", &format!("exec sleep {LONG_SLEEP}"))?;
+    assert_eq!(run_with_deadline(&slow_handle, &slow, &[], short)?, CommandStatus::TimedOut);
     Ok(())
 }
 
@@ -866,8 +912,9 @@ fn the_runner_passes_a_path_with_shell_characters_as_one_argument() -> Result<()
     let odd = fixture.dir.path().join("marker file; touch x");
     fs::write(&odd, "")?;
     let arguments = ["-e".to_owned(), odd.to_string_lossy().into_owned()];
+    let (checker, handle) = script(&fixture, "checker", "test \"$@\"")?;
     assert_eq!(
-        run_with_deadline("/usr/bin/test", &arguments, Duration::from_secs(1))?,
+        run_with_deadline(&handle, &checker, &arguments, Duration::from_secs(1))?,
         CommandStatus::Success
     );
     assert!(!Path::new("x").exists());
@@ -880,7 +927,13 @@ fn the_runner_passes_a_path_with_shell_characters_as_one_argument() -> Result<()
 fn child_runs_the_fake_caddy() -> Result<(), Box<dyn Error>> {
     match std::env::var(PROGRAM_VARIABLE) {
         Ok(program) => {
-            let status = run_with_deadline(&program, &["validate".to_owned()], Duration::from_secs(SETTINGS_DEADLINE))?;
+            let handle = open_trusted_program(Path::new(&program), rustix::process::geteuid().as_raw())?;
+            let status = run_with_deadline(
+                &handle,
+                Path::new(&program),
+                &["validate".to_owned()],
+                Duration::from_secs(SETTINGS_DEADLINE),
+            )?;
             assert_eq!(status, CommandStatus::Success);
             Ok(())
         }
@@ -893,8 +946,10 @@ fn child_runs_the_fake_caddy() -> Result<(), Box<dyn Error>> {
 fn the_runner_never_lets_caddy_text_reach_the_standard_streams() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
     let script = fixture.dir.path().join("caddy-script");
-    fs::write(&script, format!("#!/bin/sh\necho {STDERR_MARKER} >&2\necho {STDERR_MARKER}\nexit 0\n"))?;
-    fs::set_permissions(&script, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let source = fixture.dir.path().join("caddy-script.source");
+    fs::write(&source, format!("#!/bin/sh\necho {STDERR_MARKER} >&2\necho {STDERR_MARKER}\nexit 0\n"))?;
+    let installed = Command::new("install").arg("-m").arg("755").arg(&source).arg(&script).status()?;
+    assert!(installed.success());
     let mut child = Command::new(std::env::current_exe()?)
         .args([CHILD_TEST, "--exact", "--test-threads", "1", "--nocapture"])
         .env(PROGRAM_VARIABLE, &script)
@@ -950,8 +1005,9 @@ fn audit_entry(result: &str) -> NewEntry {
 
 fn engine_with_switch(fixture: &Fixture, fail: Arc<AtomicBool>) -> Result<ReloadEngine<Applied>, Box<dyn Error>> {
     let log = Arc::new(open_file_log(&fixture.dir.path().join("audit.log"))?);
-    let engine = open_apply(
+    let engine = open_apply_with_program(
         &fixture.settings_file,
+        prog(fixture),
         fake,
         Box::new(move |entry| {
             if fail.load(Ordering::SeqCst) {
@@ -1044,7 +1100,9 @@ fn the_late_flag_is_cleared_on_every_entry_and_the_epoch_moves_only_for_a_lost_a
 
 #[test]
 fn a_wait_that_fails_kills_and_reaps_the_child_and_reads_back_like_a_failed_reload() -> Result<(), Box<dyn Error>> {
-    let status = run_child("/usr/bin/sleep", &[LONG_SLEEP.to_owned()], Duration::from_secs(1), failing_wait)?;
+    let fixture = fixture(ONE_ROUTE)?;
+    let (slow, handle) = script(&fixture, "slow", &format!("exec sleep {LONG_SLEEP}"))?;
+    let status = run_child(&handle, &slow, &[], Duration::from_secs(1), failing_wait)?;
     assert_eq!(status, CommandStatus::Failed(None));
     let pid = fs::read_to_string(PID_FILE)?;
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
@@ -1066,21 +1124,21 @@ fn a_failure_while_stopping_a_child_is_logged_and_stopping_a_reaped_child_is_har
 #[test]
 fn a_program_in_an_open_directory_or_an_open_file_or_a_link_or_nothing_is_refused() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
-    assert!(judge_program(&fixture.program).is_ok());
+    assert!(judge_program(prog(&fixture)).is_ok());
     let open_directory = program_in(&fixture, GROUP_WRITABLE, OPEN_DIRECTORY)?;
-    assert!(judge_program(&open_directory).is_err_and(|failure| failure.to_string().contains("caddy_program")));
+    assert!(judge_program(Path::new(&open_directory)).is_err_and(|failure| failure.to_string().contains("the Caddy program /usr/bin/caddy")));
     let open_file = program_in(&fixture, OPEN_DIRECTORY, GROUP_WRITABLE)?;
-    assert!(judge_program(&open_file).is_err());
+    assert!(judge_program(Path::new(&open_file)).is_err());
     let good = program_in(&fixture, OPEN_DIRECTORY, OPEN_DIRECTORY)?;
-    assert!(judge_program(&good).is_ok());
+    assert!(judge_program(Path::new(&good)).is_ok());
     let link = fixture.dir.path().join("link");
     symlink(&good, &link)?;
-    assert!(judge_program(&link.to_string_lossy()).is_err());
-    assert!(judge_program(&format!("{good}x")).is_err());
-    assert!(judge_program(&fixture.dir.path().join("bin").to_string_lossy()).is_err());
-    assert!(judge_program("/").is_err());
-    assert!(judge_program("/a/..").is_err());
-    assert!(judge_program("/caddy").is_err());
+    assert!(judge_program(&link).is_err());
+    assert!(judge_program(Path::new(&format!("{good}x"))).is_err());
+    assert!(judge_program(&fixture.dir.path().join("bin")).is_err());
+    assert!(judge_program(Path::new("/")).is_err());
+    assert!(judge_program(Path::new("/a/..")).is_err());
+    assert!(judge_program(Path::new("/caddy")).is_err());
     Ok(())
 }
 
@@ -1088,9 +1146,11 @@ fn a_program_in_an_open_directory_or_an_open_file_or_a_link_or_nothing_is_refuse
 #[test]
 fn a_settings_directory_open_to_group_or_others_or_not_absolute_is_refused() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
-    assert!(load_trusted_settings(&fixture.settings_file).is_ok());
+    assert!(load_trusted_settings(&fixture.settings_file, prog(&fixture)).is_ok());
     fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE))?;
-    assert!(load_trusted_settings(&fixture.settings_file).is_err_and(|failure| failure.to_string().contains("settings file directory")));
+    assert!(
+        load_trusted_settings(&fixture.settings_file, prog(&fixture)).is_err_and(|failure| failure.to_string().contains("settings file directory"))
+    );
     assert!(load_trusted_settings_file(&fixture.settings_file).is_err());
     assert!(load_trusted_settings_file(Path::new("/")).is_err());
     assert!(load_trusted_settings_file(Path::new("settings.yaml")).is_err());
@@ -1101,16 +1161,148 @@ fn a_settings_directory_open_to_group_or_others_or_not_absolute_is_refused() -> 
 #[test]
 fn an_untrusted_program_refuses_the_start() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
-    let open = program_in(&fixture, GROUP_WRITABLE, OPEN_DIRECTORY)?;
-    write_settings(
-        &fixture,
-        &ApplySettings {
-            caddy_program: open,
-            ..settings_of(&fixture)
-        },
-    )?;
+    fs::set_permissions(prog(&fixture), fs::Permissions::from_mode(GROUP_WRITABLE))?;
     assert!(matches!(try_open(&fixture)?.err(), Some(OpenError::Config(_))));
     assert!(calls(&fixture).is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_program_owned_by_another_user_is_refused_at_load_at_delivery_and_in_the_runner() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let applied = render_applied(&settings_of(&fixture), prog(&fixture), 0)?;
+    let (marker, handle) = script(&fixture, "marker", &format!("touch {}/spawned", fixture.dir.path().display()))?;
+    std::os::unix::fs::chown(&marker, Some(FOREIGN_PROGRAM_OWNER), None)?;
+    assert_eq!(
+        run_child(&handle, &marker, &[], Duration::from_secs(1), wait_child)?,
+        CommandStatus::Refused
+    );
+    assert!(!fixture.dir.path().join("spawned").exists());
+    std::os::unix::fs::chown(prog(&fixture), Some(FOREIGN_PROGRAM_OWNER), None)?;
+    assert!(judge_program(prog(&fixture)).is_err());
+    assert!(matches!(try_open(&fixture)?.err(), Some(OpenError::Config(_))));
+    let failure = deliver(&applied, fake).err().ok_or("delivered")?;
+    assert!(matches!(failure, DeliverError::Program(_)));
+    let text = format!("{failure} {failure:?}");
+    assert!(!text.contains(&fixture.program));
+    assert!(calls(&fixture).is_empty());
+    Ok(())
+}
+
+
+const FOREIGN_PROGRAM_OWNER: u32 = 65_534;
+
+
+fn swap_in_the_other_program(program: &Path) {
+    let other = format!("{}.other", program.display());
+    fs::rename(other, program).unwrap_or_else(|failure| tracing::error!(%failure, "test swap failed"));
+}
+
+
+fn remove_the_program(program: &Path) {
+    fs::remove_file(program).unwrap_or_else(|failure| tracing::error!(%failure, "test removal failed"));
+}
+
+
+fn spawned_marker(fixture: &Fixture) -> PathBuf {
+    fixture.dir.path().join("spawned")
+}
+
+
+#[test]
+fn a_program_renamed_or_removed_between_the_check_and_the_spawn_is_refused_and_nothing_starts() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let body = format!("touch {}", spawned_marker(&fixture).display());
+    let (path, handle) = script(&fixture, "swapped", &body)?;
+    let other = format!("{}.other", path.display());
+    install_script(Path::new(&other), &body)?;
+    let euid = rustix::process::geteuid().as_raw();
+    let second = Duration::from_secs(1);
+    let status = run_child_with_hook((&handle, &path), &[], second, wait_child, (euid, swap_in_the_other_program))?;
+    assert_eq!(status, CommandStatus::Refused);
+    assert!(!spawned_marker(&fixture).exists());
+    let removed = run_child_with_hook((&handle, &path), &[], second, wait_child, (euid, remove_the_program))?;
+    assert_eq!(removed, CommandStatus::Refused);
+    assert!(!spawned_marker(&fixture).exists());
+    install_script(&path, &body)?;
+    let fresh = open_trusted_program(&path, euid)?;
+    let same = run_child_with_hook((&fresh, &path), &[], second, wait_child, (euid, leave_alone))?;
+    assert_eq!(same, CommandStatus::Success);
+    assert!(spawned_marker(&fixture).exists());
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_run_is_neither_failed_nor_unknown_and_moves_no_epoch() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    set_mode(&fixture, "refused")?;
+    let failure = try_open(&fixture)?.err();
+    assert!(matches!(
+        failure,
+        Some(OpenError::Deliver(DeliverError::ProgramChanged { step: "validate" }))
+    ));
+    set_mode(&fixture, "ok")?;
+    let (engine, _audit) = engine_of(&fixture)?;
+    fs::write(&fixture.routes, MARKER_ROUTE)?;
+    set_mode(&fixture, "refuse-reload")?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("not started") && !reason.contains("unknown")));
+    set_mode(&fixture, "ok")?;
+    fs::write(&fixture.routes, ONE_ROUTE)?;
+    assert_eq!(reload(&engine), ReloadOutcome::Unchanged);
+    Ok(())
+}
+
+
+#[test]
+fn no_setting_selects_the_caddy_program_and_the_const_is_the_package_path() -> Result<(), Box<dyn Error>> {
+    assert_eq!(CADDY_PROGRAM, "/usr/bin/caddy");
+    assert_eq!(production_program(), Path::new("/usr/bin/caddy"));
+    let fixture = fixture(ONE_ROUTE)?;
+    let sink: Box<core_config::types::SharedAuditFn> = Box::new(|_entry| Err(AuditError::LogPoisoned));
+    let engine = open_apply(&fixture.settings_file, refusing_runner, sink, context());
+    assert!(engine.is_err());
+    let audited = open_apply_audited(&fixture.settings_file, refusing_runner, Err(AuditError::LogPoisoned), context());
+    assert!(audited.is_err());
+    Ok(())
+}
+
+
+fn refusing_runner(_handle: &OwnedFd, _program: &Path, _arguments: &[String], _deadline: Duration) -> io::Result<CommandStatus> {
+    Err(io::Error::other("no program is run here"))
+}
+
+
+const RETIRED_TEXT: &str = "caddy_program is no longer a setting";
+
+
+#[test]
+fn the_retired_caddy_program_key_is_refused_at_start_and_on_reload_with_the_old_configuration_kept() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture(ONE_ROUTE)?;
+    let base = fs::read_to_string(&fixture.settings_file)?;
+    let marker = "/tmp/marker-caddy-value";
+    let forms = [
+        format!("caddy_program: {marker}\n"),
+        "caddy_program:\n".to_owned(),
+        "caddy_program: [1, 2]\n".to_owned(),
+    ];
+    forms.iter().try_for_each(|line| -> Result<(), Box<dyn Error>> {
+        fs::write(&fixture.settings_file, format!("{base}{line}"))?;
+        let failure = try_open(&fixture)?.err().ok_or("opened")?;
+        let text = format!("{failure} {failure:?}");
+        assert!(text.contains(RETIRED_TEXT) && !text.contains(marker));
+        assert!(calls(&fixture).is_empty());
+        Ok(())
+    })?;
+    fs::write(&fixture.settings_file, &base)?;
+    let (engine, audit) = engine_of(&fixture)?;
+    let running = current_config(&engine).json.clone();
+    fs::write(&fixture.settings_file, format!("{base}caddy_program: {marker}\n"))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains(RETIRED_TEXT) && !reason.contains(marker)));
+    assert_eq!(current_config(&engine).json, running);
+    let log = fs::read_to_string(audit)?;
+    assert!(log.contains(RETIRED_TEXT) && log.contains("denied") && !log.contains(marker));
     Ok(())
 }
 
@@ -1121,22 +1313,15 @@ fn an_untrusted_program_or_settings_directory_on_reload_keeps_the_old_settings_a
     let (engine, audit) = engine_of(&fixture)?;
     let before = calls(&fixture).len();
     let base = settings_of(&fixture);
-    let open = program_in(&fixture, GROUP_WRITABLE, OPEN_DIRECTORY)?;
-    write_settings(
-        &fixture,
-        &ApplySettings {
-            caddy_program: open,
-            ..base.clone()
-        },
-    )?;
-    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("caddy_program")));
-    assert_eq!(current_config(&engine).settings.caddy_program, base.caddy_program);
-    write_settings(&fixture, &base)?;
+    fs::set_permissions(prog(&fixture), fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("the Caddy program")));
+    assert_eq!(current_config(&engine).settings.admin_socket, base.admin_socket);
+    fs::set_permissions(prog(&fixture), fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     fs::set_permissions(fixture.dir.path(), fs::Permissions::from_mode(GROUP_WRITABLE))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("settings file directory")));
     assert_eq!(calls(&fixture).len(), before);
     let log = fs::read_to_string(audit)?;
-    assert!(log.contains("caddy_program") && log.contains("settings file directory"));
+    assert!(log.contains("the Caddy program") && log.contains("settings file directory"));
     Ok(())
 }
 
@@ -1179,22 +1364,22 @@ const SETTINGS_FILE_TEXT: &str = "settings file must be a regular file";
 #[test]
 fn a_settings_file_open_to_others_or_foreign_or_linked_or_not_regular_is_refused() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
-    assert!(load_trusted_settings(&fixture.settings_file).is_ok());
+    assert!(load_trusted_settings(&fixture.settings_file, prog(&fixture)).is_ok());
     assert!(file_trusted(REGULAR_FILE_MODE, RUNNING_USER, RUNNING_USER));
     assert!(file_trusted(REGULAR_FILE_MODE, 0, RUNNING_USER));
     assert!(!file_trusted(REGULAR_FILE_MODE, FOREIGN_OWNER, RUNNING_USER));
     assert!(!file_trusted(REGULAR_FILE_MODE | WORLD_WRITABLE_FILE, RUNNING_USER, RUNNING_USER));
     assert!(!file_trusted(DIRECTORY_FILE_MODE, RUNNING_USER, RUNNING_USER));
     fs::set_permissions(&fixture.settings_file, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
-    assert!(load_trusted_settings(&fixture.settings_file).is_err_and(|failure| failure.to_string().contains(SETTINGS_FILE_TEXT)));
+    assert!(load_trusted_settings(&fixture.settings_file, prog(&fixture)).is_err_and(|failure| failure.to_string().contains(SETTINGS_FILE_TEXT)));
     fs::set_permissions(&fixture.settings_file, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     let target = fixture.dir.path().join("target.yaml");
     fs::copy(&fixture.settings_file, &target)?;
     let link = fixture.dir.path().join("link.yaml");
     symlink(&target, &link)?;
-    assert!(load_trusted_settings(&link).is_err_and(|failure| failure.to_string().contains(SETTINGS_FILE_TEXT)));
-    assert!(load_trusted_settings(&fixture.dir.path().join("none.yaml")).is_err());
-    assert!(load_trusted_settings(&fixture.dir.path().join("bin")).is_err());
+    assert!(load_trusted_settings(&link, prog(&fixture)).is_err_and(|failure| failure.to_string().contains(SETTINGS_FILE_TEXT)));
+    assert!(load_trusted_settings(&fixture.dir.path().join("none.yaml"), prog(&fixture)).is_err());
+    assert!(load_trusted_settings(&fixture.dir.path().join("bin"), prog(&fixture)).is_err());
     Ok(())
 }
 
@@ -1209,23 +1394,15 @@ fn an_open_or_linked_settings_file_refuses_the_start_and_a_reload_and_keeps_the_
     fs::set_permissions(&fixture.settings_file, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     let (engine, audit) = engine_of(&fixture)?;
     let before = calls(&fixture).len();
-    let other = program_in(&fixture, OPEN_DIRECTORY, OPEN_DIRECTORY)?;
-    write_settings(
-        &fixture,
-        &ApplySettings {
-            caddy_program: other,
-            ..base.clone()
-        },
-    )?;
     fs::set_permissions(&fixture.settings_file, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains(SETTINGS_FILE_TEXT)));
-    assert_eq!(current_config(&engine).settings.caddy_program, base.caddy_program);
+    assert_eq!(current_config(&engine).settings.admin_socket, base.admin_socket);
     fs::set_permissions(&fixture.settings_file, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     let real = fixture.dir.path().join("real.yaml");
     fs::rename(&fixture.settings_file, &real)?;
     symlink(&real, &fixture.settings_file)?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains(SETTINGS_FILE_TEXT)));
-    assert_eq!(current_config(&engine).settings.caddy_program, base.caddy_program);
+    assert_eq!(current_config(&engine).settings.admin_socket, base.admin_socket);
     assert_eq!(calls(&fixture).len(), before);
     assert!(fs::read_to_string(audit)?.contains(SETTINGS_FILE_TEXT));
     Ok(())
@@ -1234,7 +1411,7 @@ fn an_open_or_linked_settings_file_refuses_the_start_and_a_reload_and_keeps_the_
 
 #[test]
 fn a_device_node_as_program_is_refused_without_opening_it() -> Result<(), Box<dyn Error>> {
-    assert!(judge_program("/dev/null").is_err());
+    assert!(judge_program(Path::new("/dev/null")).is_err());
     Ok(())
 }
 
@@ -1333,20 +1510,20 @@ fn audit_lines(fixture: &Fixture) -> Result<Vec<String>, Box<dyn Error>> {
 fn a_ca_root_file_is_judged_like_the_routes_file() -> Result<(), Box<dyn Error>> {
     let (fixture, root) = ca_fixture()?;
     let settings = settings_of(&fixture);
-    assert!(render_applied(&settings, 0).is_ok());
+    assert!(render_applied(&settings, prog(&fixture), 0).is_ok());
     fs::set_permissions(&root, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
-    assert!(render_applied(&settings, 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_FILE_TEXT)));
+    assert!(render_applied(&settings, prog(&fixture), 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_FILE_TEXT)));
     fs::set_permissions(&root, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
     let real = root.with_file_name("real.pem");
     fs::rename(&root, &real)?;
     symlink(&real, &root)?;
-    assert!(render_applied(&settings, 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_FILE_TEXT)));
+    assert!(render_applied(&settings, prog(&fixture), 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_FILE_TEXT)));
     fs::remove_file(&root)?;
     fs::rename(&real, &root)?;
-    assert!(render_applied(&settings, 0).is_ok());
+    assert!(render_applied(&settings, prog(&fixture), 0).is_ok());
     let directory = root.parent().ok_or("no parent")?;
     fs::set_permissions(directory, fs::Permissions::from_mode(GROUP_WRITABLE_DIRECTORY))?;
-    assert!(render_applied(&settings, 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_DIRECTORY_TEXT)));
+    assert!(render_applied(&settings, prog(&fixture), 0).is_err_and(|failure| failure.to_string().contains(CA_ROOT_DIRECTORY_TEXT)));
     assert!(!file_trusted(REGULAR_FILE_MODE, FOREIGN_OWNER, RUNNING_USER));
     assert!(file_trusted(REGULAR_FILE_MODE, 0, RUNNING_USER));
     Ok(())
@@ -1405,7 +1582,14 @@ fn a_start_refused_for_a_bad_file_writes_one_denied_entry_and_never_reaches_cadd
 fn a_refusal_at_start_is_returned_even_when_its_audit_fails() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
     fs::set_permissions(&fixture.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
-    let failure = open_apply(&fixture.settings_file, fake, Box::new(|_entry| Err(AuditError::LogPoisoned)), context()).err();
+    let failure = open_apply_with_program(
+        &fixture.settings_file,
+        prog(&fixture),
+        fake,
+        Box::new(|_entry| Err(AuditError::LogPoisoned)),
+        context(),
+    )
+    .err();
     assert!(matches!(failure, Some(OpenError::Config(_))));
     Ok(())
 }
@@ -1416,11 +1600,11 @@ fn a_sink_that_cannot_open_is_named_with_the_refusal_when_there_is_one() -> Resu
     let good = fixture(ONE_ROUTE)?;
     let bad = fixture(ONE_ROUTE)?;
     fs::set_permissions(&bad.routes, fs::Permissions::from_mode(WORLD_WRITABLE_FILE))?;
-    assert!(start_refusal(&good.settings_file).is_none());
-    assert!(start_refusal(&bad.settings_file).is_some());
-    let only_sink = open_apply_audited(&good.settings_file, fake, Err(AuditError::LogPoisoned), context()).err();
+    assert!(start_refusal(&good.settings_file, prog(&good)).is_none());
+    assert!(start_refusal(&bad.settings_file, prog(&bad)).is_some());
+    let only_sink = open_apply_audited_with_program(&good.settings_file, prog(&good), fake, Err(AuditError::LogPoisoned), context()).err();
     assert!(matches!(only_sink, Some(OpenError::NoSink(_))));
-    let both = open_apply_audited(&bad.settings_file, fake, Err(AuditError::LogPoisoned), context())
+    let both = open_apply_audited_with_program(&bad.settings_file, prog(&bad), fake, Err(AuditError::LogPoisoned), context())
         .err()
         .ok_or("opened")?;
     assert!(matches!(both, OpenError::NoSinkAndRefused { .. }));
@@ -1428,6 +1612,6 @@ fn a_sink_that_cannot_open_is_named_with_the_refusal_when_there_is_one() -> Resu
     assert!(text.contains("audit sink") && text.contains(ROUTES_FILE_TEXT));
     let log = Arc::new(open_file_log(&good.dir.path().join("audit.log"))?);
     let sink: Box<core_config::types::SharedAuditFn> = Box::new(move |entry| append(&log, entry));
-    assert!(open_apply_audited(&good.settings_file, fake, Ok(sink), context()).is_ok());
+    assert!(open_apply_audited_with_program(&good.settings_file, prog(&good), fake, Ok(sink), context()).is_ok());
     Ok(())
 }

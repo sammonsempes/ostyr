@@ -1,14 +1,14 @@
 use crate::admin::{id_status, open_admin_directory, AdminDirectory};
 use crate::caddy::Admin;
-use crate::cadir::{ca_root_path, directory_text_ok, directory_trusted, open_ca_directory, write_ca_root};
+use crate::cadir::{ca_root_path, directory_text_ok, directory_trusted, write_ca_root};
 use crate::cli::place_ca_root;
 use crate::error::{DeliverError, OpenError, WafError};
 use crate::limits::{
-    ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS, ID_PREFIX,
-    LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_FILE_BYTES, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROC_FD_DIRECTORY,
-    PROGRAM_STATE_KEY, REFUSED_RESULT, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE, STAGE_PREFIX,
-    STAGE_SUFFIX, START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, UNTRUSTED_SETTINGS, UNTRUSTED_SETTINGS_FILE,
-    VALIDATE_STEP,
+    ADMIN_LISTEN_PREFIX, APPLIED_RESULT, APPLY_SECTION, CADDY_PROGRAM, DEADLINE_STATE_KEY, EPOCH_STATE_KEY, FILE_LABEL, FINAL_NAME, ID_HEX_CHARS,
+    ID_PREFIX, LATE_PARAMETER, MAX_DEADLINE_SECONDS, MAX_FILE_BYTES, MAX_JSON_BYTES, MAX_REFUSED_LISTED, MIN_DEADLINE_SECONDS, PROC_FD_DIRECTORY,
+    REFUSED_RESULT, REFUSED_STATE_KEY, RELOAD_STEP, RESULT_PARAMETER, RETIRED_PROGRAM_SETTING, ROUTES_STATE_KEY, SETTINGS_LABEL, STAGE_MODE,
+    STAGE_PREFIX, STAGE_SUFFIX, START_DIFF, STATUS_OK, UNTRUSTED_PROGRAM, UNTRUSTED_ROUTES, UNTRUSTED_ROUTES_FILE, UNTRUSTED_SETTINGS,
+    UNTRUSTED_SETTINGS_FILE, VALIDATE_STEP,
 };
 use crate::model::{Applied, ApplySettings, CommandStatus, Delivery, Rendered};
 use crate::render::render_text;
@@ -19,6 +19,7 @@ use core_config::error::ConfigError;
 use core_config::parse::{parse_document, read_text_capped};
 use core_config::reload::{current_config, open_engine, reload_entry, ReloadContext, ReloadEngine, Subscriber};
 use core_config::trusted_dir::open_trusted_dir;
+use core_config::trusted_program::open_trusted_program;
 use core_config::types::{ConfigState, SharedAuditFn};
 use data_encoding::HEXLOWER;
 use rustix::fs::{fstat, fsync, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags, RawMode, CWD};
@@ -61,10 +62,12 @@ pub fn path_text_ok(text: &str) -> bool {
 
 /// Every path setting is a plain absolute path and the deadline is in range.
 pub fn check_settings(settings: ApplySettings) -> Result<ApplySettings, ConfigError> {
+    (!settings.retired_caddy_program)
+        .then_some(())
+        .ok_or_else(|| refuse_setting(RETIRED_PROGRAM_SETTING.to_owned()))?;
     let paths = [
         ("routes_file", &settings.routes_file),
         ("out_dir", &settings.out_dir),
-        ("caddy_program", &settings.caddy_program),
         ("admin_socket", &settings.admin_socket),
     ];
     paths.iter().try_for_each(|(name, value)| {
@@ -140,22 +143,16 @@ pub fn load_trusted_routes(path: &Path) -> Result<Rendered, ConfigError> {
 }
 
 
-/// The Caddy program and every directory above it: owned by root or this user, no group or other write, no symlink.
-pub fn judge_program(program: &str) -> Result<(), ConfigError> {
-    let path = Path::new(program);
-    let (parent, name) = path
-        .parent()
-        .zip(path.file_name().and_then(|name| name.to_str()))
-        .ok_or_else(|| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
-    let directory = open_ca_directory(parent).map_err(|_| refuse_setting(UNTRUSTED_PROGRAM.to_owned()))?;
-    judge_file(&directory, name, SETTINGS_LABEL, UNTRUSTED_PROGRAM).map(drop)
+/// The Caddy program opened by the shared trusted program check (every directory above it and the file judged on handles, no symlink).
+pub fn judge_program(program: &Path) -> Result<OwnedFd, ConfigError> {
+    open_trusted_program(program, geteuid().as_raw()).map_err(|failure| refuse_setting(format!("{UNTRUSTED_PROGRAM}: {failure}")))
 }
 
 
 /// The settings file judged and read at start and on every reload, then the Caddy program judged.
-pub fn load_trusted_settings(path: &Path) -> Result<ApplySettings, ConfigError> {
+pub fn load_trusted_settings(path: &Path, program: &Path) -> Result<ApplySettings, ConfigError> {
     let settings = load_trusted_settings_file(path)?;
-    judge_program(&settings.caddy_program)?;
+    judge_program(program)?;
     Ok(settings)
 }
 
@@ -199,21 +196,21 @@ pub fn config_id(json_without_id: &str) -> String {
 
 
 /// The current settings file, checked against the running start-only values, then the routes rendered under it.
-pub fn load_applied(running: &ApplySettings, settings_file: &Path, epoch: &AtomicU64) -> Result<Applied, ConfigError> {
-    let loaded = load_trusted_settings(settings_file)?;
+pub fn load_applied(running: &ApplySettings, (settings_file, program): (&Path, &Path), epoch: &AtomicU64) -> Result<Applied, ConfigError> {
+    let loaded = load_trusted_settings(settings_file, program)?;
     check_start_only(running, &loaded)?;
-    render_applied_capped(&loaded, epoch.load(Ordering::SeqCst), MAX_JSON_BYTES)
+    render_applied_capped(&loaded, program, epoch.load(Ordering::SeqCst), MAX_JSON_BYTES)
 }
 
 
 /// Reads and renders the routes file; the JSON gets the Unix-socket admin endpoint with its object id and the CA root path of `out_dir`.
-pub fn render_applied(settings: &ApplySettings, epoch: u64) -> Result<Applied, ConfigError> {
-    render_applied_capped(settings, epoch, MAX_JSON_BYTES)
+pub fn render_applied(settings: &ApplySettings, program: &Path, epoch: u64) -> Result<Applied, ConfigError> {
+    render_applied_capped(settings, program, epoch, MAX_JSON_BYTES)
 }
 
 
 /// `render_applied` that refuses a configuration whose JSON exceeds `max_json_bytes`.
-pub fn render_applied_capped(settings: &ApplySettings, epoch: u64, max_json_bytes: usize) -> Result<Applied, ConfigError> {
+pub fn render_applied_capped(settings: &ApplySettings, program: &Path, epoch: u64, max_json_bytes: usize) -> Result<Applied, ConfigError> {
     let mut rendered = load_trusted_routes(Path::new(&settings.routes_file))?;
     let root_path = rendered
         .ca_root
@@ -245,6 +242,7 @@ pub fn render_applied_capped(settings: &ApplySettings, epoch: u64, max_json_byte
             id,
             epoch,
             settings: settings.clone(),
+            program: program.to_path_buf(),
             json,
             ca_root: rendered.ca_root,
             refused: rendered.refused,
@@ -278,7 +276,6 @@ pub fn applied_state(applied: &Applied) -> ConfigState {
         (REFUSED_STATE_KEY.to_owned(), refused_text(applied)),
         (EPOCH_STATE_KEY.to_owned(), applied.epoch.to_string()),
         (DEADLINE_STATE_KEY.to_owned(), applied.settings.deadline_seconds.to_string()),
-        (PROGRAM_STATE_KEY.to_owned(), applied.settings.caddy_program.clone()),
     ])
 }
 
@@ -324,12 +321,18 @@ pub fn discard(directory: &OwnedFd, name: &str) {
 
 
 /// One Caddy command; only the exit status class is kept.
-pub fn run_step(settings: &ApplySettings, runner: RunnerFn, step: &'static str, arguments: &[String]) -> Result<(), DeliverError> {
+pub fn run_step(
+    settings: &ApplySettings,
+    (runner, handle, program): (RunnerFn, &OwnedFd, &Path),
+    step: &'static str,
+    arguments: &[String],
+) -> Result<(), DeliverError> {
     let deadline = Duration::from_secs(settings.deadline_seconds);
-    let status = runner(&settings.caddy_program, arguments, deadline).map_err(|source| DeliverError::Spawn { step, source })?;
+    let status = runner(handle, program, arguments, deadline).map_err(|source| DeliverError::Spawn { step, source })?;
     match status {
         CommandStatus::Success => Ok(()),
         CommandStatus::Failed(code) => Err(DeliverError::Failed { step, code }),
+        CommandStatus::Refused => Err(DeliverError::ProgramChanged { step }),
         CommandStatus::TimedOut => Err(DeliverError::TimedOut {
             step,
             seconds: settings.deadline_seconds,
@@ -357,12 +360,18 @@ pub fn confirm_late(settings: &ApplySettings, admin: &AdminDirectory, id: &str) 
 
 
 /// `caddy validate` then `caddy reload` of the same staged file, the admin endpoint named explicitly; a failed validate never reloads.
-pub fn run_steps(settings: &ApplySettings, runner: RunnerFn, staged: &str, admin: &AdminDirectory, id: &str) -> Result<Delivery, DeliverError> {
+pub fn run_steps(
+    settings: &ApplySettings,
+    program: (RunnerFn, &OwnedFd, &Path),
+    staged: &str,
+    admin: &AdminDirectory,
+    id: &str,
+) -> Result<Delivery, DeliverError> {
     let address = format!("{ADMIN_LISTEN_PREFIX}{}", settings.admin_socket);
     let validate = ["validate", "--config", staged].map(str::to_owned);
     let reload = ["reload", "--config", staged, "--address", &address].map(str::to_owned);
-    run_step(settings, runner, VALIDATE_STEP, &validate)?;
-    let outcome = run_step(settings, runner, RELOAD_STEP, &reload);
+    run_step(settings, program, VALIDATE_STEP, &validate)?;
+    let outcome = run_step(settings, program, RELOAD_STEP, &reload);
     let ambiguous = matches!(outcome, Err(DeliverError::Failed { .. } | DeliverError::TimedOut { .. }));
     if ambiguous {
         confirm_late(settings, admin, id)
@@ -376,6 +385,7 @@ pub fn run_steps(settings: &ApplySettings, runner: RunnerFn, staged: &str, admin
 pub fn deliver(applied: &Applied, runner: RunnerFn) -> Result<Delivery, DeliverError> {
     let settings = &applied.settings;
     let admin = open_admin_directory(&settings.admin_socket)?;
+    let handle = open_trusted_program(&applied.program, geteuid().as_raw()).map_err(DeliverError::Program)?;
     let out_dir = Path::new(&settings.out_dir);
     let directory = open_trusted_dir(out_dir, geteuid().as_raw())?;
     check_target(&directory)?;
@@ -387,7 +397,7 @@ pub fn deliver(applied: &Applied, runner: RunnerFn) -> Result<Delivery, DeliverE
     let name = format!("{STAGE_PREFIX}{}{STAGE_SUFFIX}", getpid().as_raw_nonzero());
     let staged = format!("{}/{name}", settings.out_dir);
     let outcome = stage_file(&directory, &name, applied.json.as_bytes())
-        .and_then(|()| run_steps(settings, runner, &staged, &admin, &applied.id))
+        .and_then(|()| run_steps(settings, (runner, &handle, &applied.program), &staged, &admin, &applied.id))
         .and_then(|delivery| publish(&directory, &name).map(|()| delivery));
     outcome.inspect_err(|_| discard(&directory, &name))
 }
@@ -454,8 +464,16 @@ pub fn audit_start_refusal(context: &ReloadContext, audit: &SharedAuditFn, failu
 
 
 /// The refusal a start would meet, found without an audit sink.
-pub fn start_refusal(settings_file: &Path) -> Option<ConfigError> {
-    load_trusted_settings(settings_file).and_then(|running| render_applied(&running, 0)).err()
+pub fn start_refusal(settings_file: &Path, program: &Path) -> Option<ConfigError> {
+    load_trusted_settings(settings_file, program)
+        .and_then(|running| render_applied(&running, program, 0))
+        .err()
+}
+
+
+/// The one place production names the Caddy program.
+pub fn production_program() -> &'static Path {
+    Path::new(CADDY_PROGRAM)
 }
 
 
@@ -466,9 +484,21 @@ pub fn open_apply_audited(
     sink: Result<Box<SharedAuditFn>, AuditError>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
+    open_apply_audited_with_program(settings_file, production_program(), runner, sink, context)
+}
+
+
+/// `open_apply_audited` with the program named by the caller; the parameter exists for tests, production passes the const.
+pub fn open_apply_audited_with_program(
+    settings_file: &Path,
+    program: &Path,
+    runner: RunnerFn,
+    sink: Result<Box<SharedAuditFn>, AuditError>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<Applied>, OpenError> {
     match sink {
-        Ok(audit) => open_apply(settings_file, runner, audit, context),
-        Err(sink_failure) => Err(match start_refusal(settings_file) {
+        Ok(audit) => open_apply_with_program(settings_file, program, runner, audit, context),
+        Err(sink_failure) => Err(match start_refusal(settings_file, program) {
             Some(refusal) => OpenError::NoSinkAndRefused {
                 sink: Box::new(sink_failure),
                 refusal: Box::new(refusal),
@@ -486,15 +516,28 @@ pub fn open_apply(
     audit: Box<SharedAuditFn>,
     context: ReloadContext,
 ) -> Result<ReloadEngine<Applied>, OpenError> {
+    open_apply_with_program(settings_file, production_program(), runner, audit, context)
+}
+
+
+/// `open_apply` with the program named by the caller; the parameter exists for tests, production passes the const.
+pub fn open_apply_with_program(
+    settings_file: &Path,
+    program: &Path,
+    runner: RunnerFn,
+    audit: Box<SharedAuditFn>,
+    context: ReloadContext,
+) -> Result<ReloadEngine<Applied>, OpenError> {
     let sink: Arc<SharedAuditFn> = Arc::from(audit);
     let refused = |failure| audit_start_refusal(&context, sink.as_ref(), failure);
-    let running = load_trusted_settings(settings_file).map_err(refused)?;
+    let running = load_trusted_settings(settings_file, program).map_err(refused)?;
     let epoch = Arc::new(AtomicU64::new(0));
     let late = Arc::new(AtomicBool::new(false));
     let loader_epoch = Arc::clone(&epoch);
     let loader_file: PathBuf = settings_file.to_path_buf();
+    let loader_program: PathBuf = program.to_path_buf();
     let engine = open_engine(
-        Box::new(move || load_applied(&running, &loader_file, &loader_epoch)),
+        Box::new(move || load_applied(&running, (&loader_file, &loader_program), &loader_epoch)),
         applied_state,
         vec![caddy_subscriber(runner, Arc::clone(&late), Arc::clone(&epoch))],
         late_audit(shared_sink(&sink), Arc::clone(&late), epoch),

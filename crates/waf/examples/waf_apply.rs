@@ -1,4 +1,4 @@
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod unix {
     use core_audit::log::{append, open_file_log};
     use core_config::reload::{current_config, ReloadContext};
@@ -57,11 +57,11 @@ mod unix {
 }
 
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     unix::run()
 }
 
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() {}

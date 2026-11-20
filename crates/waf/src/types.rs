@@ -1,11 +1,17 @@
+#[cfg(target_os = "linux")]
 use crate::model::CommandStatus;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
 
-/// Runs a program with separate arguments under a deadline; injected so tests never start Caddy.
-pub type RunnerFn = fn(&str, &[String], Duration) -> io::Result<CommandStatus>;
+/// Runs the judged program (its handle and path) with separate arguments under a deadline; injected so tests never start Caddy.
+#[cfg(target_os = "linux")]
+pub type RunnerFn = fn(&OwnedFd, &Path, &[String], Duration) -> io::Result<CommandStatus>;
 
 
 /// Waits for the child up to the deadline; injected so a test can make the wait itself fail.
