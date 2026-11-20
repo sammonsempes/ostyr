@@ -1,13 +1,13 @@
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use core_config::trusted_program::{open_trusted_program, same_program};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::io::{stdout, Write};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::process::ExitCode;
 
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut out = stdout();
@@ -27,7 +27,7 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
 }
 
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() -> ExitCode {
     ExitCode::SUCCESS
 }

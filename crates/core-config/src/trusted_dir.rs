@@ -4,6 +4,7 @@ use rustix::fs::{fstat, openat, Mode, OFlags};
 use rustix::io::Errno;
 use std::io;
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 use thiserror::Error;
 
@@ -52,9 +53,29 @@ fn check_ancestor(handle: &OwnedFd, expected_uid: u32) -> Result<(), TrustedDirE
 }
 
 
-/// The path is absolute and holds only names (no `..`, no `.`), checked before anything is opened.
+const DOT_SEGMENT: &[u8] = b"/./";
+
+
+const DOUBLE_SLASH: &[u8] = b"//";
+
+
+pub const NOT_CANONICAL: &str = "path is not in canonical form";
+
+
+/// The raw text has no `//`, no `/./`, no final `/.` and no final `/` (`components()` hides all four).
+pub fn check_canonical_form(path: &Path) -> Result<(), TrustedDirError> {
+    let bytes = path.as_os_str().as_bytes();
+    let dotted = bytes.windows(DOT_SEGMENT.len()).any(|window| window == DOT_SEGMENT) || bytes.ends_with(b"/.");
+    let doubled = bytes.windows(DOUBLE_SLASH.len()).any(|window| window == DOUBLE_SLASH);
+    let trailing = bytes.len() > 1 && bytes.ends_with(b"/");
+    ensure(!(dotted || doubled || trailing), NOT_CANONICAL)
+}
+
+
+/// The path is absolute, canonical and holds only names (no `..`, no `.`), checked before anything is opened.
 pub fn check_trusted_path(path: &Path) -> Result<(), TrustedDirError> {
     ensure(path.is_absolute(), "work directory is not absolute")?;
+    check_canonical_form(path)?;
     ensure(
         path.components().all(|part| matches!(part, Component::RootDir | Component::Normal(_))),
         "work directory has a component other than a name",
