@@ -113,6 +113,8 @@ pub enum StoreError {
     BadLimit { max: usize },
     #[error("the cursor does not name a stored key")]
     BadCursor,
+    #[error("the tenant has no counter row: rebuild the counters first")]
+    CountersMissing,
     #[error("the store answered with a malformed row")]
     BadAnswer,
 }

@@ -869,8 +869,10 @@ fn discarding_a_missing_staged_file_is_logged_not_fatal() -> Result<(), Box<dyn 
 
 fn script(fixture: &Fixture, name: &str, body: &str) -> Result<(PathBuf, OwnedFd), Box<dyn Error>> {
     let path = fixture.dir.path().join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let source = fixture.dir.path().join(format!("{name}.source"));
+    fs::write(&source, format!("#!/bin/sh\n{body}\n"))?;
+    let installed = Command::new("install").arg("-m").arg("755").arg(&source).arg(&path).status()?;
+    assert!(installed.success());
     let handle = open_trusted_program(&path, rustix::process::geteuid().as_raw())?;
     Ok((path, handle))
 }
@@ -933,8 +935,10 @@ fn child_runs_the_fake_caddy() -> Result<(), Box<dyn Error>> {
 fn the_runner_never_lets_caddy_text_reach_the_standard_streams() -> Result<(), Box<dyn Error>> {
     let fixture = fixture(ONE_ROUTE)?;
     let script = fixture.dir.path().join("caddy-script");
-    fs::write(&script, format!("#!/bin/sh\necho {STDERR_MARKER} >&2\necho {STDERR_MARKER}\nexit 0\n"))?;
-    fs::set_permissions(&script, fs::Permissions::from_mode(OPEN_DIRECTORY))?;
+    let source = fixture.dir.path().join("caddy-script.source");
+    fs::write(&source, format!("#!/bin/sh\necho {STDERR_MARKER} >&2\necho {STDERR_MARKER}\nexit 0\n"))?;
+    let installed = Command::new("install").arg("-m").arg("755").arg(&source).arg(&script).status()?;
+    assert!(installed.success());
     let mut child = Command::new(std::env::current_exe()?)
         .args([CHILD_TEST, "--exact", "--test-threads", "1", "--nocapture"])
         .env(PROGRAM_VARIABLE, &script)

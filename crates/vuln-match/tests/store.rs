@@ -22,8 +22,8 @@ use vuln_match::limits::{
 use vuln_match::model::{AssetFinding, Criticality, Finding, ScanCaps, ScoredFinding, StoredFinding};
 use vuln_match::priority::priority_of;
 use vuln_match::store::{
-    cursor_of, finding_doc, is_field, open_findings, parse_cursor, record_scan, record_scan_capped, stored_of, FIRST_SQL, MIGRATIONS,
-    MIGRATION_NAMESPACE, NEXT_SQL, SCAN_SQL,
+    cursor_of, finding_doc, is_field, open_findings, parse_cursor, rebuild_counters, record_scan, record_scan_capped, stored_of, FIRST_SQL,
+    MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE, NEXT_SQL, REBUILD_SQL, SCAN_SQL,
 };
 
 
@@ -54,7 +54,10 @@ const EIGHT: u64 = 8;
 const KEY_FIELDS: usize = 4;
 
 
-const ANSWER_COLUMNS: usize = 5;
+const ANSWER_COLUMNS: usize = 7;
+
+
+const MIGRATION_SECONDS: u64 = 120;
 
 
 const CURSOR_PARTS: usize = 5;
@@ -142,6 +145,7 @@ const SMALL_PAGE: usize = 3;
 pub struct Double {
     pub calls: Mutex<Vec<Call>>,
     pub scan_reply: Vec<Vec<String>>,
+    pub rebuild_reply: Vec<Vec<String>>,
     pub pages: Vec<Vec<String>>,
     pub fail: bool,
 }
@@ -196,6 +200,8 @@ pub fn executor<'a>(double: &'a Double) -> impl Fn(TenantScope, &'static str, Ve
             let tenant = tenant_of(&scope).to_owned();
             let reply = if sql == SCAN_SQL {
                 double.scan_reply.clone()
+            } else if sql == REBUILD_SQL {
+                double.rebuild_reply.clone()
             } else {
                 model_pages(double, sql, &params)
             };
@@ -284,11 +290,45 @@ fn migration_is_well_formed_and_resolves_absent_rows_per_tenant() -> TestResult 
 
 
 #[test]
+fn second_migration_keeps_a_per_asset_resolved_count_and_counts_duplicates() -> TestResult {
+    check_embedded(&MIGRATIONS)?;
+    let sql = MIGRATIONS.get(1).ok_or("no second migration")?.sql;
+    assert!(sql.contains("CREATE TABLE vuln_asset_resolved ("));
+    assert!(sql.contains("PRIMARY KEY (tenant, asset)"));
+    assert!(sql.contains("DROP FUNCTION vuln_scan_store(text, text, jsonb, bigint, bigint, bigint, bigint, bigint);"));
+    assert!(sql.contains("OUT n_evicted bigint, OUT n_duplicates bigint"));
+    assert!(sql.contains("jsonb_array_length(docs) - (SELECT count(*) FROM incoming)"));
+    assert!(sql.contains("IF NOT asset_row OR asset_day <> today THEN"));
+    assert!(sql.contains("OUT n_duplicates bigint,\n    OUT n_counters_missing bigint"));
+    assert!(sql.contains("CREATE FUNCTION vuln_counters_rebuild(tenant_name text)"));
+    assert!(sql.contains("IF asset_resolved = 0 THEN\n        DELETE FROM vuln_asset_resolved WHERE tenant = tenant_name AND asset = asset_name;"));
+    assert!(sql.contains("ELSIF NOT asset_row OR asset_resolved <> asset_before THEN"));
+    assert!(sql.contains("UPDATE vuln_asset_resolved a SET resolved_total = a.resolved_total - p.n"));
+    assert!(sql.contains("AND a.resolved_total > p.n RETURNING 1"));
+    assert!(sql.contains("DELETE FROM vuln_asset_resolved a USING per_asset p"));
+    assert!(sql.contains("AND a.resolved_total <= p.n RETURNING 1"));
+    assert!(sql.contains("n_counters_missing := 1;\n        RETURN;"));
+    assert!(!sql.contains(
+        "INSERT INTO vuln_asset_resolved (tenant, asset, resolved_total, healed_day) VALUES (tenant_name, asset_name, asset_resolved, today)"
+    ));
+    assert!(sql.contains("asset_resolved := greatest(asset_resolved + n_resolved - n_reopened, 0);"));
+    assert!(sql.contains("IF n_resolved > 0 AND asset_resolved > max_asset_resolved THEN"));
+    assert!(sql.contains("ORDER BY resolved_micros DESC, ecosystem DESC, package DESC, record_id DESC OFFSET max_asset_resolved"));
+    assert!(sql.contains("FROM vuln_findings GROUP BY tenant\nON CONFLICT (tenant) DO NOTHING;"));
+    assert!(sql.contains("FROM vuln_findings WHERE resolved_micros IS NOT NULL GROUP BY tenant, asset;"));
+    assert!(sql.contains("pg_advisory_xact_lock(hashtextextended('vuln_scan_store/' || tenant_name, 0))"));
+    assert!(sql.contains("SET enable_seqscan = off SET enable_bitmapscan = off SET jit = off AS $$"));
+    Ok(())
+}
+
+
+#[test]
 fn every_read_statement_binds_the_tenant() -> TestResult {
     assert!(FIRST_SQL.contains("WHERE tenant = $1 AND resolved_micros IS NULL"));
     assert!(NEXT_SQL.contains("WHERE tenant = $1 AND resolved_micros IS NULL"));
     assert!(SCAN_SQL.contains("vuln_scan_store($1, $2"));
     assert!(SCAN_SQL.contains("$8::text::bigint)"));
+    assert!(SCAN_SQL.contains("n_evicted::text, n_duplicates::text"));
     Ok(())
 }
 
@@ -361,7 +401,7 @@ fn doc_refuses_each_bad_input_alone() -> TestResult {
 #[tokio::test]
 async fn scan_sends_tenant_asset_docs_cap_and_time() -> TestResult {
     let double = Double {
-        scan_reply: outcome_reply(["1", "2", "3", "0", "0"]),
+        scan_reply: outcome_reply(["1", "2", "3", "0", "0", "4", "0"]),
         ..Double::default()
     };
     let exec = executor(&double);
@@ -374,9 +414,10 @@ async fn scan_sends_tenant_asset_docs_cap_and_time() -> TestResult {
             outcome.updated,
             outcome.resolved,
             outcome.refused_no_room,
-            outcome.refused
+            outcome.refused,
+            outcome.duplicates
         ),
-        (1, UPDATED, RESOLVED, 0, 1)
+        (1, UPDATED, RESOLVED, 0, 1, u64::from(FOUR))
     );
     let calls = calls_of(&double)?;
     let (tenant, sql, params) = calls.first().ok_or("no call")?;
@@ -396,7 +437,7 @@ async fn scan_sends_tenant_asset_docs_cap_and_time() -> TestResult {
 #[tokio::test]
 async fn empty_scan_is_sent_to_resolve_everything() -> TestResult {
     let double = Double {
-        scan_reply: outcome_reply(["0", "0", "4", "0", "0"]),
+        scan_reply: outcome_reply(["0", "0", "4", "0", "0", "0", "0"]),
         ..Double::default()
     };
     let exec = executor(&double);
@@ -411,7 +452,7 @@ async fn empty_scan_is_sent_to_resolve_everything() -> TestResult {
 #[tokio::test]
 async fn no_room_is_reported_with_an_injected_cap() -> TestResult {
     let double = Double {
-        scan_reply: outcome_reply(["0", "1", "0", "7", "8"]),
+        scan_reply: outcome_reply(["0", "1", "0", "7", "8", "0", "0"]),
         ..Double::default()
     };
     let exec = executor(&double);
@@ -498,7 +539,7 @@ async fn database_and_answer_errors_keep_no_text() -> TestResult {
     let exec = executor(&failing);
     let scope = tenant_scope("acme")?;
     assert!(matches!(record_scan(&exec, &scope, "h1", &[], NOW).await, Err(StoreError::Pg(_))));
-    for reply in [Vec::new(), outcome_reply(["x", "0", "0", "0", "0"]), vec![vec!["1".to_owned()]]] {
+    for reply in [Vec::new(), outcome_reply(["x", "0", "0", "0", "0", "0", "0"]), vec![vec!["1".to_owned()]]] {
         let double = Double {
             scan_reply: reply,
             ..Double::default()
@@ -664,5 +705,43 @@ async fn read_errors() -> TestResult {
         open_findings(&executor(&broken), &scope, None, 1).await,
         Err(StoreError::BadAnswer)
     ));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_scan_of_a_tenant_without_counters_is_refused_and_the_rebuild_is_its_own_statement() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let missing = Double {
+        scan_reply: outcome_reply(["0", "0", "0", "0", "0", "0", "1"]),
+        ..Double::default()
+    };
+    let error = record_scan(&executor(&missing), &scope, "h1", &[], NOW).await.err().ok_or("accepted")?;
+    assert!(matches!(error, StoreError::CountersMissing));
+    assert!(!format!("{error:?}{error}").contains("acme"));
+    assert!(REBUILD_SQL.contains("vuln_counters_rebuild($1)"));
+    for (reply, expected) in [("1", true), ("0", false)] {
+        let double = Double {
+            rebuild_reply: vec![vec![reply.to_owned()]],
+            ..Double::default()
+        };
+        assert_eq!(rebuild_counters(&executor(&double), &scope).await?, expected);
+        let calls = calls_of(&double)?;
+        let (tenant, sql, params) = calls.first().ok_or("no call")?;
+        assert_eq!((tenant.as_str(), *sql, params.len()), ("acme", REBUILD_SQL, 0));
+    }
+    for reply in [Vec::new(), vec![Vec::new()], vec![vec!["2".to_owned()]]] {
+        let double = Double {
+            rebuild_reply: reply,
+            ..Double::default()
+        };
+        assert!(matches!(rebuild_counters(&executor(&double), &scope).await, Err(StoreError::BadAnswer)));
+    }
+    let failing = Double {
+        fail: true,
+        ..Double::default()
+    };
+    assert!(matches!(rebuild_counters(&executor(&failing), &scope).await, Err(StoreError::Pg(_))));
+    assert_eq!(MIGRATION_DEADLINE.as_secs(), MIGRATION_SECONDS);
     Ok(())
 }
