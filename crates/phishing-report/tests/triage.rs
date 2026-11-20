@@ -2,7 +2,7 @@ use cases::model::ObservableKind;
 use data_encoding::BASE64;
 use phishing_report::error::TriageError;
 use phishing_report::limits::Limits;
-use phishing_report::model::{AttachmentInfo, AuthVerdicts, Counts, Triage, UrlHit};
+use phishing_report::model::{AttachmentInfo, AuthVerdicts, Counts, ReporterPolicy, Triage, UrlHit};
 use phishing_report::observables::observables;
 use phishing_report::triage::{triage, triage_with, triage_with_rule};
 use regex::Regex;
@@ -33,6 +33,9 @@ const TWO: usize = 2;
 
 
 const THREE: usize = 3;
+
+
+const FOUR: usize = 4;
 
 
 const SHA_HELLO: &str = "185f8db32271fe25f561a6fc938b2e264306ec304eda518007d1764826381969";
@@ -78,6 +81,12 @@ const PAD_LINE: usize = 78;
 const SIBLINGS: usize = 240;
 
 
+const INTERNAL: &str = "corp.example";
+
+
+const INTERNAL_TEST: &str = "corp.test";
+
+
 const ID: &str = "mx.example.org";
 
 
@@ -86,8 +95,15 @@ fn trusted() -> Vec<String> {
 }
 
 
+fn policy() -> ReporterPolicy {
+    ReporterPolicy {
+        internal_domains: vec![INTERNAL.to_owned(), INTERNAL_TEST.to_owned()],
+    }
+}
+
+
 fn run(text: &str) -> Result<Triage, TriageError> {
-    triage(text.as_bytes(), &trusted())
+    triage(text.as_bytes(), &trusted(), &policy())
 }
 
 
@@ -185,7 +201,7 @@ fn a_forged_pass_without_a_receiver_header_is_unknown() -> Result<(), Box<dyn st
     let record = run(&text)?;
     assert_eq!(verdict(&record.auth), ("unknown", "unknown", "unknown"));
     assert_eq!(record.auth.reason.as_deref(), Some("no_trusted_header"));
-    let none = triage(text.as_bytes(), &[])?;
+    let none = triage(text.as_bytes(), &[], &policy())?;
     assert_eq!(none.auth.reason.as_deref(), Some("no_trusted_header"));
     Ok(())
 }
@@ -241,7 +257,7 @@ fn an_oversized_authentication_header_gives_no_verdict() -> Result<(), Box<dyn s
         header_bytes: SMALL_HEADER_BYTES,
         ..Limits::default()
     };
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(verdict(&record.auth), ("unknown", "unknown", "unknown"));
     assert_eq!(record.auth.reason.as_deref(), Some("oversized_header"));
     assert_eq!(record.counts.headers_skipped, 1);
@@ -274,7 +290,7 @@ fn original(auth: &str) -> String {
 }
 
 
-const WRAPPER_AUTH: &str = "Authentication-Results: mx.example.org; spf=pass; dkim=pass; dmarc=pass";
+const WRAPPER_AUTH: &str = "Authentication-Results: mx.example.org; spf=pass; dkim=pass; dmarc=pass header.from=corp.example";
 
 
 const FORGED_AUTH: &str = "Authentication-Results: forged.example; spf=pass; dkim=pass; dmarc=pass";
@@ -285,22 +301,32 @@ fn the_verdict_is_the_originals_and_the_forwards_is_reported_apart() -> Result<(
     let wrapper = [WRAPPER_AUTH, "From: employee@corp.example", "Subject: Fwd: Your invoice"];
     let inner = original("Authentication-Results: mx.example.org; spf=fail; dkim=none; dmarc=fail");
     let record = run(&forward(&inner, &wrapper))?;
-    assert_eq!(verdict(&record.auth), ("fail", "none", "fail"));
+    assert_eq!(verdict(&record.auth), ("unknown", "unknown", "unknown"));
+    assert_eq!(record.auth.reason.as_deref(), Some("attached_original"));
+    assert_eq!(record.counts.auth_nested_ignored, 1);
+    assert_eq!(record.reporter, "forward");
+    assert_eq!(record.original_level, Some(1));
     let reporter = record.reporter_auth.ok_or("no reporter verdict")?;
     assert_eq!(verdict(&reporter), ("pass", "pass", "pass"));
     assert_eq!(record.sender.as_deref(), Some("phisher@evil.example"));
     assert_eq!(record.subject.as_deref(), Some("Your invoice"));
     assert_eq!(
         record.urls,
-        [UrlHit {
-            level: 1,
-            url: "http://evil.example/pay".into()
-        }]
+        [
+            UrlHit {
+                level: 0,
+                url: "http://wrapper.example/".into()
+            },
+            UrlHit {
+                level: 1,
+                url: "http://evil.example/pay".into()
+            }
+        ]
     );
     assert_eq!(record.counts.nesting_cut, 0);
     assert_eq!(record.counts.messages_unopened, 0);
     let forged = run(&forward(&original(FORGED_AUTH), &wrapper))?;
-    assert_eq!(forged.auth.reason.as_deref(), Some("no_trusted_header"));
+    assert_eq!(forged.auth.reason.as_deref(), Some("attached_original"));
     assert_eq!(verdict(&forged.auth), ("unknown", "unknown", "unknown"));
     Ok(())
 }
@@ -316,8 +342,10 @@ fn a_forged_twin_below_the_receivers_header_inside_the_original_is_a_conflict() 
         ],
         "x",
     );
-    let record = run(&forward(&inner, &["From: employee@corp.example"]))?;
-    assert_eq!(record.auth.dmarc, "conflict");
+    let record = run(&forward(&inner, &[WRAPPER_AUTH, "From: employee@corp.example"]))?;
+    assert_eq!(record.auth.dmarc, "unknown");
+    assert_eq!(record.auth.reason.as_deref(), Some("attached_original"));
+    assert_eq!(record.counts.auth_nested_ignored, TWO);
     Ok(())
 }
 
@@ -329,7 +357,7 @@ fn an_eml_attachment_is_opened_as_the_original_message() -> Result<(), Box<dyn s
     let text = multipart(&wrapper, &[attachment("Original.EML", "application/octet-stream", &inner)]);
     let record = run(&text)?;
     assert_eq!(record.sender.as_deref(), Some("phisher@evil.example"));
-    assert_eq!(verdict(&record.auth), ("neutral", "unknown", "unknown"));
+    assert_eq!(verdict(&record.auth), ("unknown", "unknown", "unknown"));
     assert_eq!(links(&record), ["http://evil.example/pay"]);
     assert_eq!(record.counts.messages_unopened, 0);
     Ok(())
@@ -350,20 +378,26 @@ fn a_decoy_message_inside_the_original_never_replaces_it() -> Result<(), Box<dyn
             part(&["Content-Type: message/rfc822"], &decoy),
         ],
     );
-    let record = run(&forward(&phish, &["From: employee@corp.example"]))?;
+    let record = run(&forward(&phish, &[WRAPPER_AUTH, "From: employee@corp.example"]))?;
     assert_eq!(record.sender.as_deref(), Some("phisher@evil.example"));
     assert_eq!(record.subject.as_deref(), Some("Your invoice"));
-    assert_eq!(links(&record), ["https://evil.example/steal", "http://decoy.example/"]);
+    assert_eq!(
+        links(&record),
+        ["http://wrapper.example/", "https://evil.example/steal", "http://decoy.example/"]
+    );
     let tags: Vec<usize> = record.urls.iter().map(|hit| hit.level).collect();
-    assert_eq!(tags, [1, TWO]);
+    assert_eq!(tags, [0, 1, TWO]);
     assert!(record
         .attachments
         .iter()
         .any(|found| found.level == 1 && found.file_name.as_deref() == Some("invoice.exe")));
     let senders: Vec<Option<&str>> = record.levels.iter().map(|level| level.sender.as_deref()).collect();
-    assert_eq!(senders, [Some("phisher@evil.example"), Some("ceo@corp.example")]);
+    assert_eq!(
+        senders,
+        [Some("employee@corp.example"), Some("phisher@evil.example"), Some("ceo@corp.example")]
+    );
     let levels: Vec<usize> = record.levels.iter().map(|level| level.level).collect();
-    assert_eq!(levels, [1, TWO]);
+    assert_eq!(levels, [0, 1, TWO]);
     Ok(())
 }
 
@@ -373,7 +407,7 @@ fn a_second_attached_message_beside_the_first_is_counted_unopened() -> Result<()
     let first = mail(&["From: first@x.example"], "one");
     let second = mail(&["From: second@x.example"], "two");
     let text = multipart(
-        &["From: employee@corp.example"],
+        &[WRAPPER_AUTH, "From: employee@corp.example"],
         &[
             part(&["Content-Type: message/rfc822"], &first),
             part(&["Content-Type: message/rfc822"], &second),
@@ -413,7 +447,7 @@ fn an_eml_over_the_part_bound_is_not_opened() -> Result<(), Box<dyn std::error::
         part_bytes: SMALL_HEADER_BYTES,
         ..Limits::default()
     };
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(record.sender.as_deref(), Some("wrapper@b.example"));
     assert_eq!(record.counts.attachments_skipped, 1);
     assert_eq!(record.counts.messages_unopened, 1);
@@ -437,9 +471,9 @@ fn nesting_stops_at_the_limit_and_is_counted() -> Result<(), Box<dyn std::error:
         nesting: TWO,
         ..Limits::default()
     };
-    let record = triage_with(nested(LEVELS).as_bytes(), &trusted(), &limits)?;
-    assert_eq!(record.sender, Some(format!("l{}@x.example", LEVELS - 1)));
-    assert_eq!(record.levels.len(), TWO);
+    let record = triage_with(nested(LEVELS).as_bytes(), &trusted(), &policy(), &limits)?;
+    assert_eq!(record.sender, Some(format!("l{LEVELS}@x.example")));
+    assert_eq!(record.levels.len(), THREE);
     assert_eq!(record.counts.nesting_cut, 1);
     assert_eq!(record.counts.scan_cut, 1);
     Ok(())
@@ -452,7 +486,7 @@ fn nesting_exactly_at_the_limit_is_not_a_cut() -> Result<(), Box<dyn std::error:
         nesting: THREE,
         ..Limits::default()
     };
-    let record = triage_with(nested(THREE).as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(nested(THREE).as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(
         record.levels.last().and_then(|level| level.sender.clone()),
         Some("l0@x.example".to_owned())
@@ -462,7 +496,7 @@ fn nesting_exactly_at_the_limit_is_not_a_cut() -> Result<(), Box<dyn std::error:
         nesting: 0,
         ..Limits::default()
     };
-    let unopened = triage_with(nested(1).as_bytes(), &trusted(), &none)?;
+    let unopened = triage_with(nested(1).as_bytes(), &trusted(), &policy(), &none)?;
     assert_eq!(unopened.sender.as_deref(), Some("l1@x.example"));
     assert_eq!(unopened.counts.nesting_cut, 1);
     Ok(())
@@ -472,7 +506,7 @@ fn nesting_exactly_at_the_limit_is_not_a_cut() -> Result<(), Box<dyn std::error:
 #[test]
 fn fifty_levels_under_the_default_limits_finish() -> Result<(), Box<dyn std::error::Error>> {
     let record = run(&nested(LEVELS))?;
-    assert_eq!(record.levels.len(), THREE);
+    assert_eq!(record.levels.len(), FOUR);
     assert_eq!(record.counts.nesting_cut, 1);
     assert_eq!(record.counts.scan_cut, 1);
     Ok(())
@@ -521,14 +555,14 @@ fn a_message_over_the_size_limit_is_refused_and_junk_is_not_a_message() -> Resul
         ..Limits::default()
     };
     assert_eq!(
-        triage_with(&[b'a'; SMALL_HEADER_BYTES + 1], &trusted(), &limits),
+        triage_with(&[b'a'; SMALL_HEADER_BYTES + 1], &trusted(), &policy(), &limits),
         Err(TriageError::TooLarge)
     );
     assert_eq!(
-        triage_with(&[b'a'; SMALL_HEADER_BYTES], &trusted(), &limits),
+        triage_with(&[b'a'; SMALL_HEADER_BYTES], &trusted(), &policy(), &limits),
         Err(TriageError::Unparsable)
     );
-    assert_eq!(triage(b"", &[]), Err(TriageError::Unparsable));
+    assert_eq!(triage(b"", &[], &policy()), Err(TriageError::Unparsable));
     Ok(())
 }
 
@@ -540,7 +574,7 @@ fn an_oversized_header_is_skipped_and_counted() -> Result<(), Box<dyn std::error
         header_bytes: SMALL_HEADER_BYTES,
         ..Limits::default()
     };
-    let record = triage_with(mail(&["From: a@b.example", &long], "x").as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(mail(&["From: a@b.example", &long], "x").as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(record.subject, None);
     assert_eq!(record.sender.as_deref(), Some("a@b.example"));
     assert_eq!(record.counts.headers_skipped, 1);
@@ -555,7 +589,7 @@ fn headers_over_the_count_are_ignored_and_counted() -> Result<(), Box<dyn std::e
         ..Limits::default()
     };
     let text = mail(&["X-A: 1", "X-B: 2", "X-C: 3", "X-D: 4", "From: late@b.example"], "x");
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(record.sender, None);
     assert_eq!(record.counts.headers_skipped, TWO);
     Ok(())
@@ -599,7 +633,7 @@ fn parts_over_the_count_are_not_read() -> Result<(), Box<dyn std::error::Error>>
         parts: PART_CAP,
         ..Limits::default()
     };
-    let record = triage_with(multipart(&["From: a@b.example"], &parts).as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(multipart(&["From: a@b.example"], &parts).as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(record.urls.len(), 1);
     assert!(record.counts.parts_skipped > 0);
     Ok(())
@@ -621,7 +655,7 @@ fn a_text_part_over_the_decoded_bound_is_skipped_and_counted() -> Result<(), Box
         part_bytes: SMALL_HEADER_BYTES,
         ..Limits::default()
     };
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(links(&record), ["http://small.example/"]);
     assert_eq!(record.counts.parts_skipped, TWO);
     Ok(())
@@ -642,7 +676,7 @@ fn an_attachment_over_the_decoded_bound_is_skipped_and_counted() -> Result<(), B
         part_bytes: SMALL_HEADER_BYTES,
         ..Limits::default()
     };
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(record.attachments.len(), 1);
     assert_eq!(record.attachments.first().map(|found| found.sha256.as_str()), Some(SHA_HELLO));
     assert_eq!(record.counts.attachments_skipped, 1);
@@ -664,7 +698,7 @@ fn attachments_over_the_count_are_counted() -> Result<(), Box<dyn std::error::Er
         attachments: 1,
         ..Limits::default()
     };
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     assert_eq!(record.attachments.len(), 1);
     assert_eq!(record.counts.attachments_skipped, TWO);
     Ok(())
@@ -682,7 +716,7 @@ fn hostile_text_is_replaced_and_counted_never_kept() -> Result<(), Box<dyn std::
         subject_chars: SMALL_HEADER_BYTES,
         ..Limits::default()
     };
-    let record = triage_with(text.as_bytes(), &trusted(), &limits)?;
+    let record = triage_with(text.as_bytes(), &trusted(), &policy(), &limits)?;
     let subject = record.subject.ok_or("no subject")?;
     assert!(subject.starts_with("pay\u{fffd}[31m now "));
     assert!(subject.ends_with(" chars]"));
@@ -731,6 +765,7 @@ fn a_pattern_that_did_not_compile_is_counted_in_the_record() -> Result<(), Box<d
     let record = triage_with_rule(
         mail(&["From: a@b.example"], "http://a.example/").as_bytes(),
         &trusted(),
+        &policy(),
         &Limits::default(),
         &Regex::new(&String::from("(")),
     )?;
@@ -746,10 +781,15 @@ fn urls_hidden_by_character_references_are_listed_from_the_original() -> Result<
         &["From: p@evil.test", "Content-Type: text/html"],
         "<a href=\"https&#58;//a.evil.test/a\">x</a> <a href=\"&#104;ttps://b.evil.test/b\">y</a> <a href=\"https&colon;//c.evil.test/c\">z</a> &nope;",
     );
-    let record = run(&forward(&inner, &["From: employee@corp.example"]))?;
+    let record = run(&forward(&inner, &[WRAPPER_AUTH, "From: employee@corp.example"]))?;
     assert_eq!(
         links(&record),
-        ["https://a.evil.test/a", "https://b.evil.test/b", "https://c.evil.test/c"]
+        [
+            "http://wrapper.example/",
+            "https://a.evil.test/a",
+            "https://b.evil.test/b",
+            "https://c.evil.test/c"
+        ]
     );
     assert_eq!(record.counts.html_refs_undecoded, 1);
     Ok(())
@@ -807,7 +847,7 @@ fn observables_are_sorted_lowercase_and_deduplicated() -> Result<(), Box<dyn std
 #[test]
 fn a_header_that_cannot_be_read_back_raw_gives_no_verdict() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = b"Authentication-Results: mx.example.org; spf=pass x=\xff\r\nFrom: a@b.example\r\n\r\nx".to_vec();
-    let record = triage(&bytes, &trusted()).map_err(|error| format!("plain: {error}"))?;
+    let record = triage(&bytes, &trusted(), &policy()).map_err(|error| format!("plain: {error}"))?;
     assert_eq!(verdict(&record.auth), ("unknown", "unknown", "unknown"));
     assert_eq!(record.counts.auth_refused, 1);
     Ok(())
@@ -869,12 +909,16 @@ fn an_encoded_nested_message_with_many_children_is_refused_before_the_decode() -
 fn an_attached_eml_with_many_children_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
     let inner = siblings_with_padding("Content-Type: message/rfc822", EML_PAD_BYTES);
     let forward = multipart(
-        &["From: employee@corp.test", "Subject: Fwd"],
+        &[
+            "Authentication-Results: mx.example.org; dmarc=pass header.from=corp.test",
+            "From: employee@corp.test",
+            "Subject: Fwd",
+        ],
         &[attachment("orig.eml", "application/octet-stream", &inner)],
     );
     let record = run(&forward)?;
     assert_eq!(record.counts.scan_cut, 1);
-    assert_eq!(record.levels.len(), TWO);
+    assert_eq!(record.levels.len(), THREE);
     Ok(())
 }
 

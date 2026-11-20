@@ -1,7 +1,8 @@
-use crate::auth::verdicts;
+use crate::auth::{verdicts_with_from, PASS};
 use crate::error::TriageError;
-use crate::limits::Limits;
-use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, Triage, UrlHit};
+use crate::limits::{Limits, MAX_FROM_ADDRESSES};
+use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Triage, UrlHit};
+use crate::policy::{check_policy, is_internal, is_ldh_domain};
 use crate::scan::{scan, Scan};
 use crate::text::{clean, clean_address};
 use crate::urls::{collect, html_text, URL_RULE};
@@ -29,36 +30,102 @@ const RETURN_PATH_HEADER: &str = "return-path";
 const SUBJECT_HEADER: &str = "subject";
 
 
+pub const REPORTER_FORWARD: &str = "forward";
+
+
+pub const REPORTER_EXTERNAL: &str = "external";
+
+
+pub const REPORTER_FROM_AMBIGUOUS: &str = "from_ambiguous";
+
+
+pub const REPORTER_DMARC_MISMATCH: &str = "dmarc_domain_mismatch";
+
+
+const REPORTER_DMARC_PREFIX: &str = "dmarc_";
+
+
+pub const ATTACHED_ORIGINAL: &str = "attached_original";
+
+
+pub const INLINE_FORWARD: &str = "inline_forward";
+
+
+pub const SOURCE_ATTACHED: &str = "attached";
+
+
+pub const SOURCE_REPORTED: &str = "reported";
+
+
+pub const UNCERTAIN_OWN_CONTENT: &str = "forward_has_own_content";
+
+
+pub const UNCERTAIN_FROM_UNPARSED: &str = "from_unparsed";
+
+
 #[derive(Debug, Clone, Copy)]
 struct Context<'a> {
     trusted: &'a [String],
     limits: &'a Limits,
     rule: &'a Result<Regex, regex::Error>,
-    first: usize,
+    reporters: &'a ReporterPolicy,
+    has_attached: bool,
 }
 
 
-pub fn triage(raw: &[u8], trusted: &[String]) -> Result<Triage, TriageError> {
-    triage_with(raw, trusted, &Limits::default())
+#[derive(Debug, Clone, Copy)]
+struct Adoption {
+    internal: bool,
+    from_unparsed: bool,
 }
 
 
-pub fn triage_with(raw: &[u8], trusted: &[String], limits: &Limits) -> Result<Triage, TriageError> {
-    triage_with_rule(raw, trusted, limits, &URL_RULE)
+#[derive(Debug)]
+struct Facts {
+    sender: Option<String>,
+    return_path: Option<String>,
+    subject: Option<String>,
+    senders: Vec<String>,
+    reporter_domain: Option<String>,
+    internal: bool,
+    from_unparsed: bool,
+}
+
+
+pub fn triage(raw: &[u8], trusted: &[String], reporters: &ReporterPolicy) -> Result<Triage, TriageError> {
+    triage_with(raw, trusted, reporters, &Limits::default())
+}
+
+
+pub fn triage_with(raw: &[u8], trusted: &[String], reporters: &ReporterPolicy, limits: &Limits) -> Result<Triage, TriageError> {
+    triage_with_rule(raw, trusted, reporters, limits, &URL_RULE)
 }
 
 
 /// One reported message in, one record out; the rule is injected so a failing pattern is testable.
-pub fn triage_with_rule(raw: &[u8], trusted: &[String], limits: &Limits, rule: &Result<Regex, regex::Error>) -> Result<Triage, TriageError> {
+pub fn triage_with_rule(
+    raw: &[u8],
+    trusted: &[String],
+    reporters: &ReporterPolicy,
+    limits: &Limits,
+    rule: &Result<Regex, regex::Error>,
+) -> Result<Triage, TriageError> {
+    check_policy(reporters)?;
     if raw.len() > limits.message_bytes {
         Err(TriageError::TooLarge)
     } else {
-        parse_and_extract(raw, trusted, limits, rule)
+        parse_and_extract(raw, trusted, reporters, limits, rule)
     }
 }
 
 
-fn parse_and_extract(raw: &[u8], trusted: &[String], limits: &Limits, rule: &Result<Regex, regex::Error>) -> Result<Triage, TriageError> {
+fn parse_and_extract(
+    raw: &[u8],
+    trusted: &[String],
+    reporters: &ReporterPolicy,
+    limits: &Limits,
+    rule: &Result<Regex, regex::Error>,
+) -> Result<Triage, TriageError> {
     let scanned = scan(raw, limits);
     let root = parse_message(&scanned.usable).ok_or(TriageError::Unparsable)?;
     let mut counts = Counts::default();
@@ -68,7 +135,8 @@ fn parse_and_extract(raw: &[u8], trusted: &[String], limits: &Limits, rule: &Res
         trusted,
         limits,
         rule,
-        first: usize::from(chain.len() > 1),
+        reporters,
+        has_attached: chain.len() > 1,
     };
     let start = Triage { counts, ..Triage::default() };
     Ok(chain
@@ -204,7 +272,7 @@ fn is_auth_header(header: &Header<'_>) -> bool {
 
 /// The raw header value, never the decoded one: an RFC 2047 word in a property could decode into a semicolon and a fake result.
 fn raw_value<'a>(message: &'a Message<'_>, header: &Header<'_>) -> Option<&'a str> {
-    let base = message.headers().first().map_or(0, |first| first.offset_field) as usize;
+    let base = message.parts.first().map_or(0, |root| root.offset_header) as usize;
     let raw = message.raw_message();
     let relative = |offset: u32| (offset as usize).checked_sub(base);
     let name = header.name().as_bytes();
@@ -221,7 +289,7 @@ fn raw_value<'a>(message: &'a Message<'_>, header: &Header<'_>) -> Option<&'a st
 }
 
 
-fn authentication(message: &Message<'_>, context: &Context<'_>, counts: &mut Counts) -> AuthVerdicts {
+fn authentication(message: &Message<'_>, context: &Context<'_>, counts: &mut Counts) -> (AuthVerdicts, Vec<Vec<String>>) {
     let limits = context.limits;
     let found: Vec<&Header<'_>> = header_slice(message, limits).iter().filter(|header| is_auth_header(header)).collect();
     let oversized = found.iter().filter(|header| header_bytes(header) > limits.header_bytes).count();
@@ -231,48 +299,236 @@ fn authentication(message: &Message<'_>, context: &Context<'_>, counts: &mut Cou
         .filter(|header| header_bytes(header) <= limits.header_bytes)
         .map(|header| raw_value(message, header))
         .collect();
-    verdicts(&texts, context.trusted, oversized > 0, counts)
+    verdicts_with_from(&texts, context.trusted, oversized > 0, counts)
 }
 
 
-fn level_info(message: &Message<'_>, level: usize, context: &Context<'_>, counts: &mut Counts) -> LevelInfo {
-    let limits = context.limits;
+/// An attached message's `Authentication-Results` is never trusted: the MTA strips only the top-level headers.
+fn nested_auth(message: &Message<'_>, limits: &Limits, counts: &mut Counts) -> AuthVerdicts {
+    counts.auth_nested_ignored += header_slice(message, limits).iter().filter(|header| is_auth_header(header)).count();
+    AuthVerdicts {
+        reason: Some(ATTACHED_ORIGINAL.to_owned()),
+        ..AuthVerdicts::default()
+    }
+}
+
+
+fn domain_of(address: &str) -> Option<&str> {
+    address.rsplit_once('@').map(|(_, domain)| domain)
+}
+
+
+fn addresses<'a>(value: &'a HeaderValue<'_>) -> Vec<&'a str> {
+    match value {
+        HeaderValue::Address(Address::List(list)) => list.iter().filter_map(|addr| addr.address.as_deref()).collect(),
+        HeaderValue::Address(Address::Group(groups)) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .filter_map(|addr| addr.address.as_deref())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+
+fn from_headers<'a, 'b>(headers: &'a [Header<'b>]) -> Vec<&'a Header<'b>> {
+    headers.iter().filter(|header| header.name().eq_ignore_ascii_case(FROM_HEADER)).collect()
+}
+
+
+/// Every address of every `From` header, cleaned, at most `MAX_FROM_ADDRESSES`; the rest is counted.
+fn from_addresses(headers: &[Header<'_>], limits: &Limits, counts: &mut Counts) -> Vec<String> {
+    let (small, oversized): (Vec<&Header<'_>>, Vec<&Header<'_>>) = from_headers(headers)
+        .into_iter()
+        .partition(|header| header_bytes(header) <= limits.header_bytes);
+    counts.headers_skipped += oversized.len();
+    let all: Vec<&str> = small.into_iter().flat_map(|header| addresses(header.value())).collect();
+    counts.addresses_refused += all.len().saturating_sub(MAX_FROM_ADDRESSES);
+    all.into_iter()
+        .take(MAX_FROM_ADDRESSES)
+        .filter_map(|address| clean_address(address, limits.address_bytes, counts))
+        .collect()
+}
+
+
+/// The reporter's domain: the part after the last `@` of the one address of the one `From` header, never a group.
+fn reporter_domain(headers: &[Header<'_>], senders: &[String]) -> Option<String> {
+    let single = matches!(
+        from_headers(headers).as_slice(),
+        [only] if matches!(only.value(), HeaderValue::Address(Address::List(list)) if list.len() == 1)
+    );
+    match (single, senders) {
+        (true, [one]) => domain_of(one).map(str::to_ascii_lowercase),
+        _ => None,
+    }
+}
+
+
+/// An address is internal when its domain, without one trailing dot, is in the list.
+fn is_internal_address(address: &str, reporters: &ReporterPolicy) -> bool {
+    domain_of(address).is_some_and(|domain| is_internal(reporters, domain.strip_suffix('.').unwrap_or(domain)))
+}
+
+
+fn counted_from_addresses<'a>(headers: &'a [Header<'_>], limits: &Limits) -> Vec<&'a str> {
+    from_headers(headers)
+        .into_iter()
+        .filter(|header| header_bytes(header) <= limits.header_bytes)
+        .flat_map(|header| addresses(header.value()))
+        .collect()
+}
+
+
+/// A plain address has a domain that is an LDH domain once one trailing dot is dropped.
+fn is_plain_address(address: &str) -> bool {
+    domain_of(address).is_some_and(|domain| is_ldh_domain(domain.strip_suffix('.').unwrap_or(domain)))
+}
+
+
+/// A From header read as text or with no address, or an address that is not plain, cannot be judged: the original is uncertain.
+fn from_unparsed(headers: &[Header<'_>], raw: &[&str]) -> bool {
+    let from = from_headers(headers);
+    let not_address = from.iter().any(|header| !matches!(header.value(), HeaderValue::Address(_)));
+    not_address || (!from.is_empty() && raw.is_empty()) || !raw.iter().all(|address| is_plain_address(address))
+}
+
+
+fn header_facts(message: &Message<'_>, limits: &Limits, reporters: &ReporterPolicy, counts: &mut Counts) -> Facts {
     counts.headers_skipped += message.headers().len().saturating_sub(limits.headers);
     counts.parts_skipped += message.parts.len().saturating_sub(limits.parts);
     let headers = header_slice(message, limits);
-    let sender = address_header(headers, FROM_HEADER, limits, counts);
-    let return_path = address_header(headers, RETURN_PATH_HEADER, limits, counts);
-    let subject = find_header(headers, SUBJECT_HEADER, limits, counts)
-        .and_then(|header| header.value().as_text())
-        .map(|text| clean(text, limits.subject_chars, counts));
-    LevelInfo {
-        level,
-        sender,
-        return_path,
-        subject,
-        auth: authentication(message, context, counts),
+    let senders = from_addresses(headers, limits, counts);
+    let raw = counted_from_addresses(headers, limits);
+    let mut counted_above = Counts::default();
+    Facts {
+        sender: address_header(headers, FROM_HEADER, limits, &mut counted_above),
+        return_path: address_header(headers, RETURN_PATH_HEADER, limits, counts),
+        subject: find_header(headers, SUBJECT_HEADER, limits, counts)
+            .and_then(|header| header.value().as_text())
+            .map(|text| clean(text, limits.subject_chars, counts)),
+        reporter_domain: reporter_domain(headers, &senders),
+        internal: raw.iter().any(|address| is_internal_address(address, reporters)),
+        from_unparsed: from_unparsed(headers, &raw),
+        senders,
+    }
+}
+
+
+fn internal_reason(domain: &str, auth: &AuthVerdicts, pass_from: &[Vec<String>]) -> String {
+    let matching = pass_from
+        .iter()
+        .all(|values| !values.is_empty() && values.iter().all(|value| value == domain));
+    match (auth.dmarc == PASS, matching) {
+        (false, _) => format!("{REPORTER_DMARC_PREFIX}{}", auth.dmarc),
+        (true, false) => REPORTER_DMARC_MISMATCH.to_owned(),
+        (true, true) => REPORTER_FORWARD.to_owned(),
+    }
+}
+
+
+fn reporter_reason(domain: Option<&str>, auth: &AuthVerdicts, pass_from: &[Vec<String>], context: &Context<'_>, counts: &mut Counts) -> String {
+    match domain {
+        None => REPORTER_FROM_AMBIGUOUS.to_owned(),
+        Some(listed) if !is_internal(context.reporters, listed) => REPORTER_EXTERNAL.to_owned(),
+        Some(listed) => {
+            let reason = internal_reason(listed, auth, pass_from);
+            counts.reporter_unverified += usize::from(reason != REPORTER_FORWARD);
+            reason
+        }
+    }
+}
+
+
+/// Level 0: the reporter's forward or the reported message itself; sets the original level and the inline-forward verdict.
+fn decide_original(record: &mut Triage, auth: &AuthVerdicts, pass_from: &[Vec<String>], facts: &Facts, context: &Context<'_>) {
+    let reason = reporter_reason(facts.reporter_domain.as_deref(), auth, pass_from, context, &mut record.counts);
+    let forward = reason == REPORTER_FORWARD;
+    record.original_level = match (forward, context.has_attached) {
+        (false, _) => Some(0),
+        (true, true) => Some(1),
+        (true, false) => None,
+    };
+    record.reporter_auth = forward.then(|| auth.clone());
+    if record.original_level.is_none() {
+        record.auth = AuthVerdicts {
+            reason: Some(INLINE_FORWARD.to_owned()),
+            ..AuthVerdicts::default()
+        };
+    }
+    record.reporter = reason;
+}
+
+
+fn level_auth(record: &mut Triage, index: usize, message: &Message<'_>, facts: &Facts, context: &Context<'_>) -> AuthVerdicts {
+    if index == 0 {
+        let (auth, pass_from) = authentication(message, context, &mut record.counts);
+        decide_original(record, &auth, &pass_from, facts, context);
+        auth
+    } else {
+        nested_auth(message, context.limits, &mut record.counts)
+    }
+}
+
+
+fn mark_uncertain(record: &mut Triage, reason: &str) {
+    record.original_uncertain = true;
+    record.uncertain_reasons.push(reason.to_owned());
+    record.counts.original_uncertain += 1;
+}
+
+
+fn adopt_original(record: &mut Triage, info: &LevelInfo, facts: &Adoption) {
+    record.sender = info.sender.clone();
+    record.return_path = info.return_path.clone();
+    record.subject = info.subject.clone();
+    record.senders = info.senders.clone();
+    record.auth = info.auth.clone();
+    record.original_internal = facts.internal;
+    record.counts.original_internal += usize::from(facts.internal);
+    record.original_source = Some(if info.level == 0 { SOURCE_REPORTED } else { SOURCE_ATTACHED }.to_owned());
+    if facts.from_unparsed {
+        mark_uncertain(record, UNCERTAIN_FROM_UNPARSED);
+    }
+}
+
+
+/// A forward that carries its own URLs or attachments next to the attached message cannot be told from a forwarded decoy.
+fn note_own_content(record: &mut Triage, message: &Message<'_>, limits: &Limits) {
+    let others = message.attachments().take(limits.parts).filter(|part| !is_attached_message(part)).count()
+        + attached_count(message, limits).saturating_sub(1);
+    if record.original_level == Some(1) && (!record.urls.is_empty() || others > 0) {
+        mark_uncertain(record, UNCERTAIN_OWN_CONTENT);
     }
 }
 
 
 fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: &Context<'_>) -> Triage {
-    let info = level_info(message, index, context, &mut record.counts);
-    if index < context.first {
-        record.reporter_auth = Some(info.auth);
-    } else {
-        if index == context.first {
-            record.sender = info.sender.clone();
-            record.return_path = info.return_path.clone();
-            record.subject = info.subject.clone();
-            record.auth = info.auth.clone();
-        }
-        let known = std::mem::take(&mut record.urls);
-        record.urls = collect_urls(message, index, context, known, &mut record.counts);
-        let room = context.limits.attachments.saturating_sub(record.attachments.len());
-        let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
-        record.attachments.extend(listed);
-        record.levels.push(info);
+    let facts = header_facts(message, context.limits, context.reporters, &mut record.counts);
+    let auth = level_auth(&mut record, index, message, &facts, context);
+    let adoption = Adoption {
+        internal: facts.internal,
+        from_unparsed: facts.from_unparsed,
+    };
+    let info = LevelInfo {
+        level: index,
+        sender: facts.sender,
+        return_path: facts.return_path,
+        subject: facts.subject,
+        senders: facts.senders,
+        auth,
+    };
+    if record.original_level == Some(index) {
+        adopt_original(&mut record, &info, &adoption);
     }
+    let known = std::mem::take(&mut record.urls);
+    record.urls = collect_urls(message, index, context, known, &mut record.counts);
+    let room = context.limits.attachments.saturating_sub(record.attachments.len());
+    let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
+    record.attachments.extend(listed);
+    if index == 0 {
+        note_own_content(&mut record, message, context.limits);
+    }
+    record.levels.push(info);
     record
 }
 
