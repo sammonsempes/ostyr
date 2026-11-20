@@ -1,3 +1,5 @@
+#[path = "../common/capture.rs"]
+mod capture;
 mod fixture;
 #[path = "../../../alerts/tests/api/http.rs"]
 mod http;
@@ -5,6 +7,7 @@ mod types;
 
 
 use axum::http::StatusCode;
+use capture::{Capture, ANCHOR};
 use chrono::{TimeZone, Utc};
 use core_api::model::{ApiError, ApiIdentity, Requirement};
 use core_api::routes::route_key;
@@ -18,7 +21,7 @@ use oncall::api::{
 use oncall::error::{ReadError, StoreError};
 use oncall::limits::{MAX_FINGERPRINT_BYTES, MAX_OPEN_ALERTS};
 use serde_json::{json, Value};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 use tracing::Dispatch;
 use types::{TestError, TestResult};
 
@@ -405,22 +408,15 @@ async fn a_stored_line_separator_fingerprint_is_skipped_and_never_logged() -> Te
 }
 
 
-#[derive(Clone)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().map_err(|error| std::io::Error::other(error.to_string())).map(|mut inner| {
-            inner.extend_from_slice(buffer);
-            buffer.len()
-        })
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+#[tokio::test]
+async fn a_stored_fingerprint_with_an_edge_space_is_skipped_not_a_500() -> TestResult {
+    let fx = fixture()?;
+    stored(&fx.script, TENANT, vec![alert(1, "good", at(0)?), alert(SECOND, "x ", at(1)?)]);
+    let token = login(&fx.router, ANALYST).await?;
+    let listed = get(&fx.router, LIST_PATH, Some(&token)).await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let json = body_json(listed).await?;
+    assert_eq!(item_ids(&json)?, [1]);
+    assert_eq!(json.get("skipped"), Some(&json!(1)));
+    Ok(())
 }
-
-
-static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));

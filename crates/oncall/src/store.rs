@@ -61,8 +61,14 @@ pub const NOTIFY_SQL: &str = "INSERT INTO oncall_notifications (tenant, alert, c
     SELECT $1, id, $3::text, $4::text, $5::text, $6::timestamptz FROM oncall_alerts WHERE tenant = $1 AND id = $2 RETURNING seq";
 
 
+/// Bounded ASCII graphic text; single inner spaces only, so no two stored values look alike.
 pub fn valid_text(text: &str, max: usize) -> bool {
-    !text.is_empty() && text.len() <= max && text.chars().all(|found| found.is_ascii_graphic() || found == ' ')
+    !text.is_empty()
+        && text.len() <= max
+        && text.chars().all(|found| found.is_ascii_graphic() || found == ' ')
+        && !text.starts_with(' ')
+        && !text.ends_with(' ')
+        && !text.contains("  ")
 }
 
 
