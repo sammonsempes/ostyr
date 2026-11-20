@@ -1,0 +1,10 @@
+use crate::error::RunError;
+use crate::model::{RunEnd, RunRequest};
+use core_export::ecs::EcsEvent;
+use core_export::error::ExportError;
+
+
+pub type Runner<'a> = &'a mut dyn FnMut(&RunRequest<'_>, &mut dyn FnMut(&[u8])) -> Result<RunEnd, RunError>;
+
+
+pub type EncodeFn = fn(&EcsEvent) -> Result<String, ExportError>;
