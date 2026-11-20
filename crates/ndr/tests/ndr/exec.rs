@@ -116,6 +116,7 @@ fn a_failing_read_kills_and_reaps_the_child() -> TestResult {
 fn a_program_that_cannot_be_executed_is_a_spawn_error() -> TestResult {
     let own = crate::program::own_dir()?;
     let yr = crate::program::plain_program(own.path())?;
+    std::fs::write(&yr.program, "not a program")?;
     assert!(matches!(run_bounded(&yr, &no_args(), BOUND, LONG), Err(NdrError::Spawn(_))));
     Ok(())
 }

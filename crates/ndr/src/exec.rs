@@ -3,16 +3,15 @@
 
 use crate::error::NdrError;
 use crate::model::Yr;
-use crate::reader::{step, Stored, DIR_FLAGS, FILE_FLAGS};
 use crate::types::ReadFn;
+use core_config::trusted_program::{open_trusted_program, same_program, TrustedProgramError};
 use rustix::process::geteuid;
 use rustix::process::{kill_process, kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
-use std::ffi::{OsStr, OsString};
-use std::fs::{File, Metadata};
+use std::ffi::OsString;
 use std::io::{self, PipeWriter, Read};
-use std::os::unix::fs::MetadataExt;
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -24,16 +23,10 @@ use tracing::{debug, warn};
 const NEW_PROCESS_GROUP: i32 = 0;
 
 
-const WRITABLE_BY_OTHERS: u32 = 0o022;
+const DOES_NOT_EXIST: &str = "it does not exist";
 
 
-const ROOT_UID: u32 = 0;
-
-
-const ROOT_PATH: &str = "/";
-
-
-const THIS_DIRECTORY: &str = ".";
+const CHANGED: &str = "program changed after the check";
 
 
 /// What one run left: at most `max_bytes` of the merged output and how the run ended.
@@ -46,82 +39,46 @@ pub struct Captured {
 }
 
 
-/// Why a record is not trusted: a last component that is not a regular file, an owner other than root or `trusted_uid`, or write access for group or others.
-pub fn distrust(metadata: &Metadata, last: bool, trusted_uid: u32) -> Option<&'static str> {
-    let owner = metadata.uid();
-    [
-        (last && !metadata.is_file(), "it is not a regular file"),
-        (
-            owner != ROOT_UID && owner != trusted_uid,
-            "it or a directory on its path is owned by another user",
-        ),
-        (
-            metadata.mode() & WRITABLE_BY_OTHERS != 0,
-            "it or a directory on its path is writable by group or others",
-        ),
-    ]
-    .into_iter()
-    .find_map(|(bad, reason)| bad.then_some(reason))
+/// The program and every directory above it judged by the shared rule; the handle lets the caller check it again before the spawn.
+pub fn check_program_as(yr: &Yr, trusted_uid: u32) -> Result<OwnedFd, NdrError> {
+    open_trusted_program(&yr.program, trusted_uid).map_err(|error| refusal(yr, error))
 }
 
 
-/// Opens one component below `parent` without following a symlink and judges the handle, so the path cannot change under the check.
-pub fn descend(parent: &File, name: &OsStr, last: bool, trusted: (u32, &Path)) -> Result<File, NdrError> {
-    let (trusted_uid, program) = trusted;
-    let refuse = |reason| NdrError::Program {
-        path: program.to_path_buf(),
-        reason,
-    };
-    let flags = if last { FILE_FLAGS } else { DIR_FLAGS };
-    match name
-        .to_str()
-        .map_or(Ok(Stored::Refused), |text| step(parent, text, flags))
-        .map_err(NdrError::Spawn)?
-    {
-        Stored::Found(handle) => {
-            let metadata = handle.metadata().map_err(NdrError::Spawn)?;
-            distrust(&metadata, last, trusted_uid).map_or(Ok(handle), |reason| Err(refuse(reason)))
-        }
-        Stored::Refused => Err(refuse("a path component is a symlink, not a directory or not valid text")),
-        Stored::Missing => Err(refuse("it does not exist")),
+/// Maps a shared refusal to `NdrError::Program`, a missing file included; any other I/O failure is a spawn error.
+pub fn refusal(yr: &Yr, error: TrustedProgramError) -> NdrError {
+    match error {
+        TrustedProgramError::Refused(reason) => NdrError::Program {
+            path: yr.program.clone(),
+            reason,
+        },
+        TrustedProgramError::Io(source) if source.kind() == io::ErrorKind::NotFound => NdrError::Program {
+            path: yr.program.clone(),
+            reason: DOES_NOT_EXIST,
+        },
+        TrustedProgramError::Io(source) => NdrError::Spawn(source),
     }
 }
 
 
-/// The plain names of an absolute path; a relative path or a `..` component is `None`.
-pub fn plain_names(path: &Path) -> Option<Vec<&OsStr>> {
-    path.has_root().then_some(())?;
-    path.components().try_fold(Vec::new(), |mut names, component| match component {
-        Component::RootDir => Some(names),
-        Component::Normal(name) => {
-            names.push(name);
-            Some(names)
-        }
-        _ => None,
+/// `check_program_as` for the effective user of this process.
+pub fn check_program(yr: &Yr) -> Result<OwnedFd, NdrError> {
+    check_program_as(yr, geteuid().as_raw())
+}
+
+
+/// Refuses the run unless the path still names the program the handle holds.
+pub fn check_unchanged(yr: &Yr, handle: &OwnedFd, trusted_uid: u32) -> Result<(), NdrError> {
+    let same = same_program(handle, &yr.program, trusted_uid).inspect_err(|error| warn!(error = ?error, "program cannot be judged again"));
+    same.unwrap_or(false).then_some(()).ok_or_else(|| NdrError::Program {
+        path: yr.program.clone(),
+        reason: CHANGED,
     })
 }
 
 
-/// The program and every directory above it: no symlink, owned by root or `trusted_uid`, closed to group and others.
-pub fn check_program_as(yr: &Yr, trusted_uid: u32) -> Result<(), NdrError> {
-    let refuse = |reason| NdrError::Program {
-        path: yr.program.clone(),
-        reason,
-    };
-    let names = plain_names(&yr.program).ok_or_else(|| refuse("the path is not absolute or holds a .. component"))?;
-    let (last, directories) = names.split_last().ok_or_else(|| refuse("it is not a regular file"))?;
-    let root = File::open(ROOT_PATH).map_err(NdrError::Spawn)?;
-    let parent = std::iter::once(OsStr::new(THIS_DIRECTORY))
-        .chain(directories.iter().copied())
-        .try_fold(root, |parent, name| descend(&parent, name, false, (trusted_uid, &yr.program)))?;
-    descend(&parent, last, true, (trusted_uid, &yr.program)).map(drop)
-}
-
-
-/// `check_program_as` for the effective user of this process.
-pub fn check_program(yr: &Yr) -> Result<(), NdrError> {
-    check_program_as(yr, geteuid().as_raw())
-}
+/// The default hook between the check and the guard: nothing.
+pub fn leave_alone(_yr: &Yr) {}
 
 
 /// The child dies with its whole group when the deadline passes before `done` is dropped; a missing group is expected and only logged.
@@ -200,7 +157,22 @@ pub fn run_bounded(yr: &Yr, args: &[OsString], max_bytes: usize, deadline: Durat
 
 /// `run_bounded` with the pipe reader injected, so a failing read is testable.
 pub fn run_with(yr: &Yr, args: &[OsString], max_bytes: usize, deadline: Duration, reader_fn: ReadFn) -> Result<Captured, NdrError> {
-    check_program(yr)?;
+    run_with_hook(yr, args, max_bytes, deadline, reader_fn, (geteuid().as_raw(), leave_alone))
+}
+
+
+/// `run_with` with the trusted uid and a hook that runs after the check and before the guard, so both are testable.
+pub fn run_with_hook(
+    yr: &Yr,
+    args: &[OsString],
+    max_bytes: usize,
+    deadline: Duration,
+    reader_fn: ReadFn,
+    (trusted_uid, between): (u32, fn(&Yr)),
+) -> Result<Captured, NdrError> {
+    let judged = check_program_as(yr, trusted_uid)?;
+    between(yr);
+    check_unchanged(yr, &judged, trusted_uid)?;
     let (mut reader, writer) = io::pipe().map_err(NdrError::Spawn)?;
     let mut child = spawn(&yr.program, args, writer).map_err(NdrError::Spawn)?;
     let pid = Pid::from_child(&child);
