@@ -9,6 +9,7 @@ unset CARGO_TARGET_DIR
 trap 'rm -rf "$SCRATCH"' EXIT
 export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin"
+export GATE_TMPFS="$SCRATCH/absent"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $* tdir=${CARGO_LLVM_COV_TARGET_DIR:-} bdir=${CARGO_LLVM_COV_BUILD_DIR:-} tmp=${TMPDIR:-} jobs=${CARGO_BUILD_JOBS:-}" >>"$STUB_LOG"
@@ -57,7 +58,7 @@ fi
 
 : >"$STUB_LOG"
 env -u COVERAGE_EXPORT -u CARGO_TARGET_DIR -u OSTYR_PRIVATE_TARGET PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
-if ! grep -qF -- "tmp=$R/target/gates/" "$STUB_LOG" || ! grep -qF -- "/tmp-" "$STUB_LOG"; then
+if ! grep -qF -- "tmp=$R/target/gates/" "$STUB_LOG" || ! grep -qF -- "/run-" "$STUB_LOG"; then
   echo "FAIL: TMPDIR not under the gate directory"
   cat "$STUB_LOG"
   FAILS=$((FAILS + 1))
