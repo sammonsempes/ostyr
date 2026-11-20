@@ -6,6 +6,7 @@ pub mod backend;
 pub mod check;
 pub mod cli;
 pub mod clock;
+pub mod coverage;
 pub mod due;
 pub mod error;
 pub mod model;
