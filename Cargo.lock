@@ -6392,6 +6392,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "unicode-general-category",
  "utoipa",
 ]
 
