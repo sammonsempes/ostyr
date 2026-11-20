@@ -1,9 +1,8 @@
-use ai_gateway::budget::{budgeted_chat, BudgetDeps, Stores, MIGRATIONS, MIGRATION_NAMESPACE, STATEMENT_DEADLINE};
-use ai_gateway::chat::production_deps;
+use ai_gateway::budget::{new_gate, Gate, MIGRATIONS, MIGRATION_NAMESPACE};
 use ai_gateway::error::AiError;
-use ai_gateway::pg::pg_budget_executor;
+use ai_gateway::limits::MAX_WAITING_RESERVATIONS;
+use ai_gateway::pg::pg_chat;
 use ai_gateway::settings::{validate_ai, AiSettings};
-use alerts::pg::pg_executor;
 use alerts::store::{MIGRATIONS as ALERTS_MIGRATIONS, MIGRATION_NAMESPACE as ALERTS_NAMESPACE};
 use core_config::load::load_file;
 use core_pg::connect::connect;
@@ -16,7 +15,7 @@ use std::io::{stderr, stdout, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::task::JoinSet;
 
 
@@ -26,28 +25,12 @@ const USAGE: &str = "usage: ai_budget <pg-settings.yaml> <ai.yaml> <tenant> <cal
 const MIGRATION_DEADLINE: Duration = Duration::from_secs(120);
 
 
-pub fn wall_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_micros() as u64)
-}
-
-
-async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>, scope: TenantScope) -> String {
-    let budget = pg_budget_executor(&client, STATEMENT_DEADLINE);
-    let alerts = pg_executor(&client, STATEMENT_DEADLINE);
-    let stores = Stores {
-        budget: &budget,
-        alerts: &alerts,
-    };
-    let deps = BudgetDeps {
-        chat: production_deps(),
-        wall_clock: wall_micros,
-    };
-    let outcome = budgeted_chat(&stores, &scope, &settings, "Summarise the alert.", &json!({"host": "web-1"}), &deps).await;
+async fn one_call(client: Arc<tokio_postgres::Client>, settings: Arc<AiSettings>, scope: TenantScope, gate: Arc<Gate>) -> String {
+    let outcome = pg_chat(&client, &gate, &scope, &settings, "Summarise the alert.", &json!({"host": "web-1"})).await;
     match outcome {
         Ok(answer) => format!("answered {:?} {:?}", answer.prompt_tokens, answer.completion_tokens),
         Err(AiError::BudgetSpent) => "BudgetSpent".to_owned(),
+        Err(AiError::BudgetBusy) => "BudgetBusy".to_owned(),
         Err(error) => format!("failed: {error}"),
     }
 }
@@ -63,9 +46,10 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
     validate_ai(&settings)?;
     let shared = Arc::new(settings);
     let scope = tenant_scope(tenant)?;
+    let gate = Arc::new(new_gate(MAX_WAITING_RESERVATIONS));
     let mut tasks = JoinSet::new();
     (0..calls.parse::<usize>()?).for_each(|_index| {
-        tasks.spawn(one_call(Arc::clone(&client), Arc::clone(&shared), scope.clone()));
+        tasks.spawn(one_call(Arc::clone(&client), Arc::clone(&shared), scope.clone(), Arc::clone(&gate)));
     });
     let mut out = stdout();
     tasks.join_all().await.iter().try_for_each(|line| writeln!(out, "{line}"))?;

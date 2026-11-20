@@ -98,7 +98,7 @@ pub fn secret_class(error: SecretFileError) -> AiError {
 
 
 /// Printable ASCII without spaces, so it can sit in a header; the error never carries the bytes.
-pub fn key_text(bytes: &[u8]) -> Result<Zeroizing<String>, AiError> {
+pub(crate) fn key_text(bytes: &[u8]) -> Result<Zeroizing<String>, AiError> {
     if bytes.len() > MAX_KEY_BYTES {
         Err(AiError::Secret {
             class: SecretClass::TooLarge,
@@ -117,7 +117,7 @@ pub fn key_text(bytes: &[u8]) -> Result<Zeroizing<String>, AiError> {
 
 
 /// At most `MAX_KEY_BYTES + 1` bytes are read, into a buffer zeroed on drop.
-pub fn read_key(reader: &mut dyn Read) -> Result<Zeroizing<String>, AiError> {
+pub(crate) fn read_key(reader: &mut dyn Read) -> Result<Zeroizing<String>, AiError> {
     let mut buffer = Zeroizing::new(Vec::with_capacity(MAX_KEY_BYTES + 1));
     reader
         .take(MAX_KEY_BYTES as u64 + 1)
@@ -129,8 +129,26 @@ pub fn read_key(reader: &mut dyn Read) -> Result<Zeroizing<String>, AiError> {
 }
 
 
+/// Checks key bytes with the production rules and drops the key.
+pub fn check_key_bytes(bytes: &[u8]) -> Result<(), AiError> {
+    key_text(bytes).map(|_key| ())
+}
+
+
+/// Reads and checks a key from a reader with the production rules and drops the key.
+pub fn check_key_reader(reader: &mut dyn Read) -> Result<(), AiError> {
+    read_key(reader).map(|_key| ())
+}
+
+
+/// Reads and checks a key file with the production checks and drops the key; the key never leaves the crate.
+pub fn check_key_file(path: &Path) -> Result<(), AiError> {
+    read_authorization(path).map(|_key| ())
+}
+
+
 /// The `Authorization` value from the key file, opened with the shared secret-file checks (regular file, owner, no group or other bit, no symlink).
-pub fn read_authorization(path: &Path) -> Result<Zeroizing<String>, AiError> {
+pub(crate) fn read_authorization(path: &Path) -> Result<Zeroizing<String>, AiError> {
     let mut handle = open_secret(path).map_err(secret_class)?;
     read_key(&mut handle)
 }

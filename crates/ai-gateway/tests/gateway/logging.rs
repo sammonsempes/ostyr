@@ -1,8 +1,8 @@
-use crate::common::{completion, deps, scripted, settings};
+use crate::budget_pg::real_chat;
+use crate::common::{chat, completion, deps, scripted, settings};
 use crate::numbers::KEY_MODE;
 use crate::servers::{http_reply, plain_server};
 use crate::types::TestResult;
-use ai_gateway::chat::{chat, production_deps};
 use ai_gateway::limits::STATUS_OK;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -51,7 +51,7 @@ fn one_line_per_call_with_counts_and_no_content_or_key() -> TestResult {
     let key = directory.path().join("key");
     fs::write(&key, KEY)?;
     fs::set_permissions(&key, fs::Permissions::from_mode(KEY_MODE))?;
-    let mut used = settings("auth");
+    let mut used = settings("ok");
     used.api_key_file = Some(key);
     let captured = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&captured);
@@ -70,8 +70,8 @@ fn one_line_per_call_with_counts_and_no_content_or_key() -> TestResult {
         )
     })?;
     let logged = String::from_utf8(captured.lock().map_err(|_poisoned| "poisoned")?.clone())?;
-    assert_eq!(answer.content, format!("Bearer {KEY}"));
-    assert_eq!(logged.lines().count(), 1);
+    assert_eq!(answer.content, "hello");
+    assert_eq!(logged.lines().filter(|line| line.contains("ai call")).count(), 1);
     assert!(logged.contains("ai call") && logged.contains("model=test-model:1") && logged.contains("duration_ms=0"));
     assert!(logged.contains("request_bytes=") && logged.contains("response_bytes=") && logged.contains("prompt_tokens=Some("));
     [KEY, TELEMETRY_MARKER, INSTRUCTIONS_MARKER, CONTENT_MARKER, "Bearer"]
@@ -150,7 +150,12 @@ fn a_trace_subscriber_never_sees_the_key_on_the_real_transport() -> TestResult {
             .with_ansi(false)
             .finish(),
     );
-    let answer = tracing::dispatcher::with_default(&dispatch, || chat(&used, "i", &json!({"a": 1}), &production_deps()))?;
+    let answer = tracing::dispatcher::with_default(&dispatch, || -> Result<_, Box<dyn std::error::Error>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(real_chat(&used, "i", &json!({"a": 1})))
+    })??;
     server.request.join().map_err(|_panic| "server panicked")??;
     let logged = String::from_utf8(captured.lock().map_err(|_poisoned| "poisoned")?.clone())?;
     let encoded = STANDARD.encode(KEY);

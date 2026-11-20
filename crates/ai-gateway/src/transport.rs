@@ -53,7 +53,7 @@ pub fn ca_certificate(path: &Path) -> Result<Certificate<'static>, AiError> {
 
 
 /// With a CA file only that CA is trusted (private CA); without one the Mozilla roots are. No redirect is followed and no proxy is used.
-pub fn ureq_transport(request: &HttpRequest) -> Result<HttpReply, AiError> {
+pub(crate) fn ureq_transport(request: &HttpRequest) -> Result<HttpReply, AiError> {
     let roots = match &request.ca_file {
         Some(path) => RootCerts::new_with_certs(&[ca_certificate(path)?]),
         None => RootCerts::WebPki,
