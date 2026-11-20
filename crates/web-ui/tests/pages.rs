@@ -180,9 +180,15 @@ fn the_pages_hold_no_script_and_no_inline_style() -> TestResult {
 
 
 #[test]
-fn clip_drops_controls_and_marks_the_cut() -> TestResult {
-    assert_eq!(clip(Language::English, "ab\ncd\u{202e}\u{2066}", CLIP_LIMIT), "abcd");
-    assert_eq!(clip(Language::English, "a\u{e0041}\u{61c}\u{115f}\u{2800}b", CLIP_LIMIT), "ab");
+fn clip_replaces_controls_and_marks_the_cut() -> TestResult {
+    assert_eq!(
+        clip(Language::English, "ab\ncd\u{202e}\u{2066}", CLIP_LIMIT),
+        "ab\u{fffd}cd... [2 omitted]"
+    );
+    assert_eq!(
+        clip(Language::English, "a\u{e0041}\u{61c}\u{115f}\u{2800}b", CLIP_LIMIT),
+        "a\u{fffd}\u{fffd}\u{fffd}\u{fffd}... [1 omitted]"
+    );
     assert_eq!(clip(Language::English, "abcdefgh", CLIP_LIMIT), "abcde... [3 omitted]");
     assert_eq!(clip(Language::French, "abcdefgh", CLIP_LIMIT), "abcde... [3 omis]");
     assert_eq!(optional(Language::English, None), "none");
