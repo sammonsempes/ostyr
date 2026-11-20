@@ -1,7 +1,8 @@
 use crate::chat::{prepare, send};
 use crate::error::AiError;
 use crate::limits::{
-    ALERT_PERCENT, BUDGET_80_RULE, BUDGET_REQUEST_TOO_LARGE_RULE, BUDGET_SPENT_RULE, HELD_EXPIRY_SECONDS, MICROS_PER_SECOND, PERCENT,
+    ALERT_PERCENT, BUDGET_80_RULE, BUDGET_INSTRUCTIONS_RULE, BUDGET_REQUEST_TOO_LARGE_RULE, BUDGET_SPENT_RULE, HELD_EXPIRY_SECONDS,
+    MICROS_PER_SECOND, PERCENT,
 };
 use crate::model::{Answer, Deps};
 use crate::settings::AiSettings;
@@ -145,6 +146,13 @@ pub const RULE_80: Rule = Rule {
 pub const RULE_SPENT: Rule = Rule {
     id: BUDGET_SPENT_RULE,
     title: "AI budget spent",
+    severity: Severity::High,
+};
+
+
+pub const RULE_INSTRUCTIONS: Rule = Rule {
+    id: BUDGET_INSTRUCTIONS_RULE,
+    title: "AI instructions over the token cap",
     severity: Severity::High,
 };
 
@@ -361,12 +369,12 @@ pub fn check_within_cap(tenant: &str, reserved: i64, skeleton: i64, cap: i64) ->
 }
 
 
-/// The loud refusal of instructions that never fit: one `ai.budget_spent` alert under a place in the gate (a full gate skips the alert, never the error).
+/// The loud refusal of instructions that never fit: one `ai.budget_instructions_over_cap` alert under a place in the gate (a full gate skips the alert, never the error).
 pub async fn instructions_refusal(stores: &Stores<'_, '_>, scope: &TenantScope, settings: &AiSettings, day: &str, now: u64, sizes: (i64, i64)) {
     let place = enter(stores.gate);
     if place.is_some() {
         let detail = instructions_detail(settings, sizes.0, sizes.1);
-        notify(stores.alerts, scope, &RULE_SPENT, day, now, &detail).await;
+        notify(stores.alerts, scope, &RULE_INSTRUCTIONS, day, now, &detail).await;
     } else {
         warn!("ai budget busy: the instructions alert waits for a place");
     }

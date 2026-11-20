@@ -4,7 +4,7 @@ use crate::numbers::{KEY_MODE, KIB, STATUS_SERVER_ERROR};
 use crate::servers::{closed_port, held_server, http_reply, plain_server, tls_server, ANNOUNCED_BODY, PARTIAL_BODY};
 use crate::types::TestResult;
 use ai_gateway::error::AiError;
-use ai_gateway::limits::{MIN_TIMEOUT_SECONDS, STATUS_OK};
+use ai_gateway::limits::{MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS, STATUS_OK};
 use ai_gateway::settings::AiSettings;
 use ai_gateway::transport::{body_error, ca_certificate, ureq_error};
 use rcgen::string::Ia5String;
@@ -23,6 +23,14 @@ const ESCAPE: char = '\u{1b}';
 
 
 const LONG_NAME_BYTES: usize = 40_000;
+
+
+fn patient(base_url: String, ca_file: Option<PathBuf>) -> AiSettings {
+    AiSettings {
+        timeout_seconds: MAX_TIMEOUT_SECONDS,
+        ..endpoint(base_url, ca_file)
+    }
+}
 
 
 fn endpoint(base_url: String, ca_file: Option<PathBuf>) -> AiSettings {
@@ -136,7 +144,7 @@ async fn a_private_ca_is_trusted_through_the_ca_file() -> TestResult {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_untrusted_certificate_is_a_fixed_tls_error() -> TestResult {
     let tls = tls_server(loopback(), http_reply(STATUS_OK, b"{}"))?;
-    let used = endpoint(format!("https://127.0.0.1:{}", tls.served.port), None);
+    let used = patient(format!("https://127.0.0.1:{}", tls.served.port), None);
     let got = call(&used).await?.err();
     assert!(matches!(got, Some(AiError::Tls)), "{got:?}");
     Ok(())
@@ -154,7 +162,7 @@ async fn a_hostile_san_list_never_reaches_an_error() -> TestResult {
     let directory = tempfile::tempdir()?;
     let ca = directory.path().join("ca.pem");
     fs::write(&ca, &tls.ca_pem)?;
-    let used = endpoint(format!("https://127.0.0.1:{}", tls.served.port), Some(ca));
+    let used = patient(format!("https://127.0.0.1:{}", tls.served.port), Some(ca));
     let error = call(&used).await?.err().ok_or("accepted")?;
     let shown = chain(&error);
     assert!(matches!(error, AiError::Tls), "{error:?}");

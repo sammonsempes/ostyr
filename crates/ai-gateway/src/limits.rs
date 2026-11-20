@@ -89,6 +89,9 @@ pub const BUDGET_80_RULE: &str = "ai.budget_80";
 pub const BUDGET_SPENT_RULE: &str = "ai.budget_spent";
 
 
+pub const BUDGET_INSTRUCTIONS_RULE: &str = "ai.budget_instructions_over_cap";
+
+
 pub const BUDGET_REQUEST_TOO_LARGE_RULE: &str = "ai.budget_request_too_large";
 
 
