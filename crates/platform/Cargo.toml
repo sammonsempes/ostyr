@@ -14,6 +14,7 @@ cmdb = { version = "0.0.0", path = "../cmdb" }
 core-api = { version = "0.0.0", path = "../core-api" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
+dhcp-kea = { version = "0.0.0", path = "../dhcp-kea" }
 hunt-packs = { version = "0.0.0", path = "../hunt-packs" }
 oncall = { version = "0.0.0", path = "../oncall" }
 risk-score = { version = "0.0.0", path = "../risk-score" }

@@ -4676,6 +4676,7 @@ dependencies = [
  "core-auth",
  "core-config",
  "core-pg",
+ "dhcp-kea",
  "hunt-packs",
  "oncall",
  "risk-score",
