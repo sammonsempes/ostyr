@@ -10,16 +10,16 @@ use core_auth::limiter::{
 use core_auth::model::Account;
 use core_auth::random::os_random;
 use core_auth::rbac::{
-    builtin_catalog, check_roles, is_allowed, load_catalog, requires_mfa, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE, PERMISSION_AUDIT_READ,
-    PERMISSION_CASES_READ, PERMISSION_CASES_WRITE, PERMISSION_CMDB_READ, PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ, PERMISSION_ONCALL_READ,
-    PERMISSION_RESPONSE_EXECUTE, PERMISSION_STATUS_WRITE, PERMISSION_USERS_MANAGE, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER,
-    ROLE_RESPONDER,
+    builtin_catalog, check_roles, is_allowed, load_catalog, permission_set, requires_mfa, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE,
+    PERMISSION_AUDIT_READ, PERMISSION_CASES_READ, PERMISSION_CASES_WRITE, PERMISSION_CMDB_READ, PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ,
+    PERMISSION_ONCALL_READ, PERMISSION_RESPONSE_EXECUTE, PERMISSION_ROLES_MANAGE, PERMISSION_STATUS_WRITE, PERMISSION_USERS_MANAGE,
+    POLICY_WEBAUTHN_REQUIRED, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER, ROLE_RESPONDER,
 };
 use core_auth::session::{
     create_session, hash_token, is_revoked, mark_sessions_revoked, revocation_marker, revoke_session, revoke_user_sessions, validate_session,
     SESSION_ABSOLUTE_SECONDS, SESSION_IDLE_SECONDS,
 };
-use core_auth::types::{AccountMap, AttemptMap, RoleSet, SessionMap};
+use core_auth::types::{AccountMap, AttemptMap, RoleCatalog, RoleSet, SessionMap};
 use secrecy::ExposeSecret;
 use time::{Duration, OffsetDateTime};
 use types::TestResult;
@@ -52,51 +52,75 @@ fn failing_random(_buffer: &mut [u8]) -> Result<(), getrandom::Error> {
 }
 
 
-#[test]
-fn built_in_roles_have_the_expected_permissions() -> TestResult {
-    let catalog = builtin_catalog();
-    let matrix = [
-        (
-            ROLE_READER,
-            [true, false, false, false, false, false, false, false, false, false, false, false],
-        ),
-        (
-            ROLE_ANALYST,
-            [true, true, true, false, false, false, false, true, true, true, true, false],
-        ),
-        (
-            ROLE_RESPONDER,
-            [true, true, true, true, false, false, false, true, true, true, true, true],
-        ),
-        (
-            ROLE_ADMINISTRATOR,
-            [true, true, true, true, false, true, true, true, true, true, true, true],
-        ),
-        (
-            ROLE_AUDITOR,
-            [true, true, false, false, true, false, false, true, true, false, true, false],
-        ),
-    ];
-    let permissions = [
+fn expected_catalog() -> RoleCatalog {
+    let analyst = [
         PERMISSION_EVENTS_READ,
         PERMISSION_ALERTS_READ,
         PERMISSION_ALERTS_TRIAGE,
-        PERMISSION_RESPONSE_EXECUTE,
-        PERMISSION_AUDIT_READ,
-        PERMISSION_USERS_MANAGE,
-        PERMISSION_CONFIG_MANAGE,
         PERMISSION_CASES_READ,
-        PERMISSION_CMDB_READ,
         PERMISSION_CASES_WRITE,
+        PERMISSION_CMDB_READ,
+        PERMISSION_ONCALL_READ,
+    ];
+    let responder = [
+        PERMISSION_EVENTS_READ,
+        PERMISSION_ALERTS_READ,
+        PERMISSION_ALERTS_TRIAGE,
+        PERMISSION_CASES_READ,
+        PERMISSION_CASES_WRITE,
+        PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
         PERMISSION_STATUS_WRITE,
+        PERMISSION_RESPONSE_EXECUTE,
     ];
-    matrix.iter().for_each(|(role, expected)| {
-        permissions
-            .iter()
-            .zip(expected)
-            .for_each(|(permission, allowed)| assert_eq!(is_allowed(&catalog, &roles(&[role]), permission), *allowed, "{role} {permission}"));
-    });
+    let administrator = [
+        PERMISSION_EVENTS_READ,
+        PERMISSION_ALERTS_READ,
+        PERMISSION_ALERTS_TRIAGE,
+        PERMISSION_CASES_READ,
+        PERMISSION_CASES_WRITE,
+        PERMISSION_CMDB_READ,
+        PERMISSION_ONCALL_READ,
+        PERMISSION_STATUS_WRITE,
+        PERMISSION_RESPONSE_EXECUTE,
+        PERMISSION_USERS_MANAGE,
+        PERMISSION_CONFIG_MANAGE,
+        PERMISSION_ROLES_MANAGE,
+    ];
+    let auditor = [
+        PERMISSION_EVENTS_READ,
+        PERMISSION_ALERTS_READ,
+        PERMISSION_CASES_READ,
+        PERMISSION_CMDB_READ,
+        PERMISSION_ONCALL_READ,
+        PERMISSION_AUDIT_READ,
+    ];
+    [
+        (ROLE_READER, permission_set(&[PERMISSION_EVENTS_READ])),
+        (ROLE_ANALYST, permission_set(&analyst)),
+        (ROLE_RESPONDER, permission_set(&responder)),
+        (ROLE_ADMINISTRATOR, permission_set(&administrator)),
+        (ROLE_AUDITOR, permission_set(&auditor)),
+    ]
+    .into_iter()
+    .map(|(name, permissions)| (name.to_owned(), permissions))
+    .collect()
+}
+
+
+#[test]
+fn built_in_roles_hold_exactly_the_expected_permission_sets() -> TestResult {
+    assert_eq!(builtin_catalog(), expected_catalog());
+    Ok(())
+}
+
+
+#[test]
+fn no_built_in_role_carries_the_webauthn_policy() -> TestResult {
+    let catalog = builtin_catalog();
+    catalog
+        .iter()
+        .for_each(|(role, permissions)| assert!(!permissions.contains(POLICY_WEBAUTHN_REQUIRED), "{role}"));
     Ok(())
 }
 
