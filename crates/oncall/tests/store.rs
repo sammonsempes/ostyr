@@ -6,8 +6,8 @@ use oncall::error::{LifecycleError, StoreError};
 use oncall::limits::{MAX_ALERT_LEVEL, MAX_CHANNEL_NAME_BYTES, MAX_FINGERPRINT_BYTES, MAX_OPEN_ALERTS};
 use oncall::rows::phase_name;
 use oncall::store::{
-    apply_event, get_alert, open_alert, open_alerts, reason_text, record_notification, GET_SQL, LIST_SQL, MIGRATIONS, NOTIFY_SQL, OPEN_SQL,
-    UPDATE_SQL,
+    apply_event, get_alert, open_alert, open_alerts, reason_text, record_notification, valid_fingerprint, valid_text, GET_SQL, LIST_SQL, MIGRATIONS,
+    NOTIFY_SQL, OPEN_SQL, UPDATE_SQL,
 };
 use oncall::types::Row;
 use std::cell::RefCell;
@@ -509,5 +509,34 @@ async fn every_failure_reason_has_a_fixed_text() -> Result<(), Box<dyn Error>> {
         texts,
         ["channel belongs to another tenant", "sender failed", "invalid channel or message"]
     );
+    Ok(())
+}
+
+
+#[test]
+fn text_refuses_edge_and_double_spaces_and_non_ascii_spaces() -> Result<(), Box<dyn Error>> {
+    let longest = "a".repeat(MAX_CHANNEL_NAME_BYTES);
+    for refused in [" ops", "ops ", "a  b", " ", "a\u{a0}b", "a\u{3164}b", "a\u{2003}b", ""] {
+        assert!(!valid_text(refused, MAX_CHANNEL_NAME_BYTES), "{refused:?}");
+    }
+    for accepted in ["a b", "alert:12", longest.as_str()] {
+        assert!(valid_text(accepted, MAX_CHANNEL_NAME_BYTES), "{accepted:?}");
+    }
+    assert!(!valid_fingerprint("x "));
+    assert!(!valid_text(&format!("{longest}a"), MAX_CHANNEL_NAME_BYTES));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_fingerprint_or_channel_with_an_edge_space_is_refused_at_write() -> Result<(), Box<dyn Error>> {
+    let db = new_db();
+    let mut exec = exec_for(&db);
+    let scope = tenant_scope("acme")?;
+    let refused = open_alert(&mut exec, &scope, "x ", at(0)?).await;
+    assert!(matches!(refused, Err(StoreError::InvalidFingerprint { .. })));
+    let alert = open_alert(&mut exec, &scope, "x y", at(0)?).await?.alert;
+    let channel = record_notification(&mut exec, &scope, alert.id, "ops ", &Outcome::Sent, at(0)?).await;
+    assert!(matches!(channel, Err(StoreError::InvalidChannel { .. })));
     Ok(())
 }

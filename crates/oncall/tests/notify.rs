@@ -1,10 +1,15 @@
+#[path = "common/capture.rs"]
+mod capture;
 #[path = "common/types.rs"]
 mod types;
 
 
-use oncall::alert::FailureReason;
+use capture::{Capture, ANCHOR};
+use chrono::{TimeZone, Utc};
+use core_pg::scope::{tenant_scope, TenantScope};
+use oncall::alert::{Cell, FailureReason, Outcome, Param, Statement};
 use oncall::channel::{load_channel, parse_channel, redacted_target, validate_channel};
-use oncall::error::OncallError;
+use oncall::error::{OncallError, StoreError};
 use oncall::limits::{
     MAX_CHANNELS, MAX_CHANNEL_NAME_BYTES, MAX_NAME_LEN, MAX_PATH_LEN, MAX_TARGET_LEN, MAX_VALUE_LEN, NTFY_BODY_LEN, NTFY_SUBJECT_LEN, SLACK_BODY_LEN,
     SMS_BODY_LEN, SMS_SUBJECT_LEN, SMTP_BODY_LEN, SMTP_SUBJECT_LEN, TEAMS_BODY_LEN, WEBHOOK_BODY_LEN,
@@ -12,9 +17,11 @@ use oncall::limits::{
 use oncall::model::{AlertNotice, Channel, ChannelKind, Message};
 use oncall::notify::notify;
 use oncall::render::render;
+use oncall::store::{record_notification, NOTIFY_SQL};
+use oncall::types::Row;
 use std::collections::BTreeMap;
-use std::io;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::future::ready;
+use std::sync::{Arc, LazyLock};
 use tracing::Dispatch;
 use types::TestResult;
 
@@ -35,27 +42,6 @@ const LONG_VALUE: usize = 250;
 
 
 const TENANT: &str = "acme";
-
-
-static ANCHOR: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(tracing_subscriber::fmt().with_writer(io::sink).finish()));
-
-
-#[derive(Clone)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.lock().map_err(|error| io::Error::other(error.to_string())).map(|mut inner| {
-            inner.extend_from_slice(buffer);
-            buffer.len()
-        })
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 
 fn channel(name: &str, kind: ChannelKind, target: &str) -> Channel {
@@ -418,6 +404,10 @@ fn one_channel_name_rule_applies_on_load() -> TestResult {
     let wide = "\u{e9}".repeat(MAX_CHANNEL_NAME_BYTES);
     let long = "a".repeat(MAX_CHANNEL_NAME_BYTES + 1);
     let refused_names = [
+        "ops ",
+        " ops",
+        "a  b",
+        "a\u{a0}b",
         "\u{e9}quipe",
         "a\u{2028}b",
         "a\u{3164}b",
@@ -450,10 +440,12 @@ fn one_channel_name_rule_applies_on_load() -> TestResult {
 }
 
 
-#[test]
-fn a_refused_channel_name_does_not_stop_the_valid_channel() -> TestResult {
+#[tokio::test]
+async fn a_refused_channel_name_does_not_stop_the_valid_channel() -> TestResult {
     let channels = [
         channel("\u{e9}quipe", ChannelKind::Smtp, "a@example.com"),
+        channel("ops ", ChannelKind::Smtp, "c@example.com"),
+        channel("a  b", ChannelKind::Smtp, "d@example.com"),
         channel("ops", ChannelKind::Smtp, "b@example.com"),
     ];
     let mut sent: Vec<String> = Vec::new();
@@ -462,7 +454,31 @@ fn a_refused_channel_name_does_not_stop_the_valid_channel() -> TestResult {
         Ok(())
     })?;
     assert_eq!(sent, ["ops"]);
-    assert_eq!(failures.len(), 1);
+    assert_eq!(failures.len(), THREE);
     assert!(failures.iter().all(|failure| failure.reason == FailureReason::InvalidMessage));
+    let scope = tenant_scope(TENANT)?;
+    let now = Utc.timestamp_opt(0, 0).single().ok_or("time")?;
+    let mut statements: Vec<Statement> = Vec::new();
+    let mut exec = |_: &TenantScope, statement: Statement| {
+        let answer: Row = vec![Cell::Int(1)];
+        statements.push(statement);
+        ready(Ok::<Vec<Row>, StoreError>(vec![answer]))
+    };
+    let name = sent.first().ok_or("nothing sent")?;
+    let seq = record_notification(&mut exec, &scope, 1, name, &Outcome::Sent, now).await?;
+    assert_eq!(seq, 1);
+    assert_eq!(statements.len(), 1);
+    let recorded = statements.first().ok_or("no statement")?;
+    assert_eq!(recorded.sql, NOTIFY_SQL);
+    assert_eq!(
+        recorded.params,
+        [
+            Param::Int(1),
+            Param::Text("ops".to_string()),
+            Param::Text("sent".to_string()),
+            Param::OptText(None),
+            Param::Time(Some(now))
+        ]
+    );
     Ok(())
 }
