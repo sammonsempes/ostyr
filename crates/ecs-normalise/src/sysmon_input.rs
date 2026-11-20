@@ -39,6 +39,7 @@ pub struct RawEvent {
     pub channel: Option<String>,
     pub system_time: Option<String>,
     pub fields: Fields,
+    pub user_data: Fields,
 }
 
 
@@ -50,6 +51,7 @@ enum Target {
     Computer,
     Channel,
     Data(Option<String>),
+    UserData(String),
 }
 
 
@@ -59,6 +61,8 @@ struct Partial {
     roots: usize,
     seen_system: bool,
     seen_data: bool,
+    seen_user_data: bool,
+    seen_cleared: bool,
     target: Target,
     text: String,
     event_id: Option<String>,
@@ -67,6 +71,7 @@ struct Partial {
     channel: Option<String>,
     system_time: Option<String>,
     fields: Fields,
+    user_data: Fields,
 }
 
 
@@ -159,6 +164,15 @@ fn open(state: &mut Partial, start: &BytesStart<'_>) -> Result<(), SysmonError> 
             set_once(&mut state.system_time, time, "TimeCreated")?;
             Target::Nothing
         }
+        [b"Event", b"UserData"] => {
+            mark_once(&mut state.seen_user_data, "UserData")?;
+            Target::Nothing
+        }
+        [b"Event", b"UserData", b"LogFileCleared"] => {
+            mark_once(&mut state.seen_cleared, "LogFileCleared")?;
+            Target::Nothing
+        }
+        [b"Event", b"UserData", b"LogFileCleared", name] => Target::UserData(String::from_utf8_lossy(name).into_owned()),
         [b"Event", b"EventData", b"Data"] => Target::Data(attribute(start, "Name")?),
         _ => Target::Nothing,
     };
@@ -176,6 +190,10 @@ fn close(state: &mut Partial) -> Result<(), SysmonError> {
         Target::Channel => set_once(&mut state.channel, text, "Channel"),
         Target::Data(Some(name)) => match state.fields.insert(name, text) {
             Some(_) => Err(SysmonError::Duplicate("Data")),
+            None => Ok(()),
+        },
+        Target::UserData(name) => match state.user_data.insert(name, text) {
+            Some(_) => Err(SysmonError::Duplicate("UserData")),
             None => Ok(()),
         },
         Target::Data(None) => Err(SysmonError::MissingAttribute("Data/Name")),
@@ -415,6 +433,7 @@ fn partial(text: &str) -> Result<Partial, SysmonError> {
 pub fn parse_event(text: &str) -> Result<RawEvent, SysmonError> {
     let state = partial(text)?;
     let fields = bound_fields(state.fields)?;
+    let user_data = bound_fields(state.user_data)?;
     let id_text = state.event_id.ok_or(SysmonError::MissingField("EventID"))?;
     let event_id = parse_id(&id_text).ok_or_else(|| SysmonError::BadEventId(id_text.chars().take(MAX_ID_SHOWN).collect()))?;
     Ok(RawEvent {
@@ -424,5 +443,6 @@ pub fn parse_event(text: &str) -> Result<RawEvent, SysmonError> {
         channel: state.channel,
         system_time: state.system_time,
         fields,
+        user_data,
     })
 }
