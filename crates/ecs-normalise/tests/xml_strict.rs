@@ -104,11 +104,13 @@ fn every_xml_fixture_refuses_each_tampering() -> TestResult {
     assert!(fixtures.len() > MIN_FIXTURES);
     for (name, text) in &fixtures {
         parse_event(text).map_err(|error| format!("{name} baseline: {error}"))?;
-        let unnamed = text.replace("</EventData>", "<Data>x</Data></EventData>");
-        assert!(
-            matches!(sysmon_error(&unnamed)?, SysmonError::MissingAttribute("Data/Name")),
-            "{name} unnamed"
-        );
+        if text.contains("</EventData>") {
+            let unnamed = text.replace("</EventData>", "<Data>x</Data></EventData>");
+            assert!(
+                matches!(sysmon_error(&unnamed)?, SysmonError::MissingAttribute("Data/Name")),
+                "{name} unnamed"
+            );
+        }
         outside(&format!("{text}junk"))?;
         let start = text.find("<EventID>").map(|at| at + "<EventID>".len()).ok_or("no EventID")?;
         let end = text.find("</EventID>").ok_or("no EventID end")?;
