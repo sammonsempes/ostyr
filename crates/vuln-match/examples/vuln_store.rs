@@ -1,18 +1,21 @@
 //! Live proof: `vuln_store <pg.yaml> migrate | scan | bulk | pages`, see `USAGE`.
 
 use alerts::pg::pg_executor;
+use alerts::types::Executor;
 use core_pg::connect::connect;
 use core_pg::migrate::migrate;
-use core_pg::scope::tenant_scope;
+use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::parse_settings;
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
+use vuln_match::error::StoreError;
 use vuln_match::limits::MAX_RESOLVED_FINDINGS_PER_ASSET;
+use vuln_match::model::ScanOutcome;
 use vuln_match::model::{AssetFinding, Criticality, Finding, ScanCaps, ScoredFinding};
-use vuln_match::store::{open_findings, record_scan_capped, MIGRATIONS, MIGRATION_NAMESPACE};
+use vuln_match::store::{open_findings, rebuild_counters, record_scan_capped, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE};
 
 
 const USAGE: &str = "usage: vuln_store <pg.yaml> migrate | scan <tenant> <asset> <now_micros> <cap> <resolved_cap> <package/record>... \
@@ -69,16 +72,37 @@ fn asset_cap() -> Result<u64, Box<dyn Error>> {
 }
 
 
+async fn scan_rebuilding(
+    exec: Executor<'_, '_>,
+    rebuild_exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    asset: &str,
+    findings: &[AssetFinding],
+    now: u64,
+    caps: &ScanCaps,
+) -> Result<ScanOutcome, Box<dyn Error>> {
+    match record_scan_capped(exec, scope, asset, findings, now, caps).await {
+        Err(StoreError::CountersMissing) => {
+            rebuild_counters(rebuild_exec, scope).await?;
+            Ok(record_scan_capped(exec, scope, asset, findings, now, caps).await?)
+        }
+        other => Ok(other?),
+    }
+}
+
+
 async fn scenario(settings_file: &Path, words: &[String]) -> Result<(), Box<dyn Error>> {
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, &settings_file.display().to_string())?;
     let client = connect(&settings).await?;
     let exec = pg_executor(&client, DEADLINE);
+    let rebuild_exec = pg_executor(&client, MIGRATION_DEADLINE);
     match words {
         [word] if word == "migrate" => migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE).await.map(|_applied| ())?,
         [word, tenant, asset, now, cap, resolved_cap, specs @ ..] if word == "scan" => {
             let findings = specs.iter().map(|spec| spec_finding(asset, spec)).collect::<Result<Vec<_>, _>>()?;
-            let outcome = record_scan_capped(
+            let outcome = scan_rebuilding(
                 &exec,
+                &rebuild_exec,
                 &tenant_scope(tenant)?,
                 asset,
                 &findings,
@@ -96,8 +120,9 @@ async fn scenario(settings_file: &Path, words: &[String]) -> Result<(), Box<dyn 
             let findings: Vec<AssetFinding> = (0..count.parse::<usize>()?)
                 .map(|index| finding_of(asset, &format!("{prefix}{index}"), "R1", index))
                 .collect();
-            let outcome = record_scan_capped(
+            let outcome = scan_rebuilding(
                 &exec,
+                &rebuild_exec,
                 &tenant_scope(tenant)?,
                 asset,
                 &findings,

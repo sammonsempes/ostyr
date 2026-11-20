@@ -255,7 +255,7 @@ pub struct ScanCaps {
 }
 
 
-/// What one scan of one asset did; `refused` findings were outside the grammar or ranges, `refused_no_room` hit the open cap, `evicted_resolved` oldest resolved rows were deleted.
+/// What one scan of one asset did; `refused` findings were outside the grammar or ranges, `refused_no_room` hit the open cap, `evicted_resolved` oldest resolved rows were deleted, `duplicates` repeated keys of the scan were merged into one row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScanOutcome {
     pub inserted: u64,
@@ -264,6 +264,7 @@ pub struct ScanOutcome {
     pub refused_no_room: u64,
     pub evicted_resolved: u64,
     pub refused: u64,
+    pub duplicates: u64,
 }
 
 
