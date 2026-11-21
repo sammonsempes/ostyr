@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use backup_monitor::borg::{
     base_directory, base_directory_with, environment, fill, io_failure, local_location, parse_run, plan, private_directory, read_capped, run_raw,
-    snapshot_listing, valid_location, valid_source, BorgError, MAX_PASSPHRASE_BYTES, MODE_MASK,
+    snapshot_listing, valid_location, valid_source, verify_identity, write_identity, BorgError, IDENTITY_FILE, MAX_PASSPHRASE_BYTES, MODE_MASK,
 };
 use backup_monitor::declarations::load_declarations;
 use backup_monitor::error::BackupError;
@@ -13,6 +13,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::{create_dir_all, set_permissions, Permissions};
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -824,5 +825,150 @@ fn a_repository_name_outside_the_grammar_is_refused_before_any_spawn() -> Result
         .for_each(|name| assert!(matches!(run_named(&setup, name), Err(BorgError::BaseDir))));
     assert_eq!(runs(&setup), 0);
     assert!(!setup.state.join("borg").exists());
+    Ok(())
+}
+
+
+const OTHER_PRINCIPAL_IDENTITY: &str = "Acme\nmain\n";
+
+
+const FOLDED_NAME_IDENTITY: &str = "acme\nMAIN\n";
+
+
+const OVERSIZED_IDENTITY_BYTES: usize = 2000;
+
+
+fn identity_path(setup: &Setup, repository: &str) -> PathBuf {
+    setup.state.join("borg").join("acme").join(repository).join(IDENTITY_FILE)
+}
+
+
+fn directory_handle(path: &Path) -> Result<OwnedFd, Box<dyn Error>> {
+    Ok(OwnedFd::from(std::fs::File::open(path)?))
+}
+
+
+#[test]
+fn a_new_base_directory_gets_its_identity_file_private_and_exact() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run_named(&setup, "first")?;
+    let path = identity_path(&setup, "first");
+    assert_eq!(std::fs::read_to_string(&path)?, "acme\nfirst\n");
+    assert_eq!(std::fs::metadata(&path)?.permissions().mode() & MODE_MASK, SECRET_MODE);
+    run_named(&setup, "first")?;
+    run_named(&setup, "second")?;
+    assert_eq!(std::fs::read_to_string(identity_path(&setup, "second"))?, "acme\nsecond\n");
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_claimed_by_another_tenant_is_refused_and_the_others_still_run() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    assert_eq!(runs(&setup), 1);
+    std::fs::write(identity_path(&setup, REPOSITORY_NAME), OTHER_PRINCIPAL_IDENTITY)?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)));
+    assert_eq!(runs(&setup), 1);
+    assert!(run_named(&setup, "other").is_ok());
+    assert_eq!(runs(&setup), SEEN_RUNS);
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_claimed_by_a_folded_repository_name_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run_named(&setup, "main")?;
+    std::fs::write(identity_path(&setup, "main"), FOLDED_NAME_IDENTITY)?;
+    assert!(matches!(run_named(&setup, "main"), Err(BorgError::BaseDirCollision)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_missing_identity_file_is_refused_never_recreated() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    std::fs::remove_file(identity_path(&setup, REPOSITORY_NAME))?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)));
+    assert!(!identity_path(&setup, REPOSITORY_NAME).exists());
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_longer_or_shorter_identity_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    ["acme\nmain\nextra\n", "acme\nmain", "", "acme\nmain\n\n"]
+        .iter()
+        .try_for_each(|text| -> Result<(), Box<dyn Error>> {
+            std::fs::write(identity_path(&setup, REPOSITORY_NAME), text)?;
+            assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)), "{text:?}");
+            Ok(())
+        })?;
+    std::fs::write(identity_path(&setup, REPOSITORY_NAME), "x".repeat(OVERSIZED_IDENTITY_BYTES))?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_identity_that_is_not_a_private_regular_file_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    let path = identity_path(&setup, REPOSITORY_NAME);
+    set_permissions(&path, Permissions::from_mode(GROUP_READABLE_MODE))?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    set_permissions(&path, Permissions::from_mode(SECRET_MODE))?;
+    let elsewhere = setup.dir.path().join("elsewhere");
+    std::fs::write(&elsewhere, "acme\nmain\n")?;
+    std::fs::remove_file(&path)?;
+    symlink(&elsewhere, &path)?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    std::fs::remove_file(&path)?;
+    create_dir_all(&path)?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_identity_owned_by_someone_else_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    let handle = directory_handle(&setup.state.join("borg").join("acme").join(REPOSITORY_NAME))?;
+    verify_identity(&handle, "acme\nmain\n", euid())?;
+    assert!(matches!(
+        verify_identity(&handle, "acme\nmain\n", euid().wrapping_add(1)),
+        Err(BorgError::BaseDir)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_identity_is_created_once_and_never_over_an_existing_one() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    let directory = setup.dir.path().join("fresh");
+    create_dir_all(&directory)?;
+    let handle = directory_handle(&directory)?;
+    write_identity(&handle, "a\nb\n")?;
+    assert!(matches!(write_identity(&handle, "c\nd\n"), Err(BorgError::BaseDir)));
+    assert_eq!(std::fs::read_to_string(directory.join(IDENTITY_FILE))?, "a\nb\n");
+    Ok(())
+}
+
+
+#[test]
+fn a_trailing_dot_in_a_repository_name_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    assert!(matches!(run_named(&setup, "x."), Err(BorgError::BaseDir)));
+    assert_eq!(runs(&setup), 0);
     Ok(())
 }

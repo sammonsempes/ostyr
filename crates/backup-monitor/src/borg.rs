@@ -10,8 +10,10 @@ use core_config::trusted_dir::{open_trusted_dir, TrustedDirError};
 use core_pg::scope::{tenant_of, TenantScope};
 use net_topology::model::RunFailure;
 use net_topology::runner::run_command_with_input;
+use rustix::fs::{openat, Mode, OFlags};
 use std::fs::{DirBuilder, File};
 use std::io::{self, ErrorKind, PipeReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -40,6 +42,15 @@ pub const PRIVATE_MODE: u32 = 0o700;
 pub const MODE_MASK: u32 = 0o777;
 
 
+pub const IDENTITY_FILE: &str = ".ostyr-identity";
+
+
+pub const IDENTITY_FORBIDDEN_MODE: u32 = 0o077;
+
+
+pub const MAX_IDENTITY_BYTES: u64 = 1024;
+
+
 pub const LOCK_WAIT_SECONDS: &str = "1";
 
 
@@ -66,6 +77,8 @@ pub enum BorgError {
     PassphraseFile,
     #[error("borg base directory refused")]
     BaseDir,
+    #[error("borg base directory belongs to another tenant or repository name")]
+    BaseDirCollision,
     #[error("borg timed out")]
     Timeout,
     #[error("borg output larger than its cap")]
@@ -222,16 +235,17 @@ pub fn make_private_directory(path: &Path) -> io::Result<()> {
 }
 
 
-fn make_level(parent: &Path, name: &str, euid: u32, make: fn(&Path) -> io::Result<()>) -> Result<PathBuf, BorgError> {
+/// The level path and whether this call created it.
+fn make_level(parent: &Path, name: &str, euid: u32, make: fn(&Path) -> io::Result<()>) -> Result<(PathBuf, bool), BorgError> {
     let level = parent.join(name);
     match make(&level) {
         Err(error) if error.kind() != ErrorKind::AlreadyExists => Err(base_io(error)),
-        Ok(()) | Err(_) => open_trusted_dir(&level, euid).map_err(base_refusal).map(|_| level),
+        created => open_trusted_dir(&level, euid).map_err(base_refusal).map(|_| (level, created.is_ok())),
     }
 }
 
 
-/// `<state>/borg/<tenant>/<repository>`: `<state>` is checked first, each level is made 0700 and checked before the next, so nothing is created below an unchecked directory.
+/// `<state>/borg/<tenant>/<repository>`, each level made 0700 and checked in turn, then the identity file (`BaseDirCollision` when it names another pair).
 pub fn base_directory(state: &Path, tenant: &TenantScope, repository: &str, euid: u32) -> Result<PathBuf, BorgError> {
     base_directory_with(state, tenant, repository, euid, make_private_directory)
 }
@@ -249,20 +263,82 @@ pub fn base_directory_with(
         Err(BorgError::BaseDir)?;
     }
     open_trusted_dir(state, euid).map_err(base_refusal)?;
-    let tenant_level = make_level(&make_level(state, BORG_DIRECTORY, euid, make)?, tenant_of(tenant), euid, make)?;
-    checked_private(tenant_level, euid).and_then(|level| make_level(&level, repository, euid, make).and_then(|base| checked_private(base, euid)))
+    let (borg_level, _) = make_level(state, BORG_DIRECTORY, euid, make)?;
+    let (tenant_level, _) = make_level(&borg_level, tenant_of(tenant), euid, make)?;
+    let tenant_checked = checked_private(tenant_level, euid)?;
+    let (base, created) = make_level(&tenant_checked, repository, euid, make)?;
+    let handle = private_handle(&base, euid)?;
+    let text = identity_text(tenant, repository);
+    if created {
+        write_identity(&handle, &text)?;
+    }
+    verify_identity(&handle, &text, euid)?;
+    Ok(base)
+}
+
+
+/// The exact bytes of the identity file: `<tenant>\n<repository name>\n`.
+pub fn identity_text(tenant: &TenantScope, repository: &str) -> String {
+    format!("{}\n{repository}\n", tenant_of(tenant))
+}
+
+
+fn identity_open(directory: &OwnedFd, flags: OFlags) -> Result<File, io::Error> {
+    Ok(File::from(openat(
+        directory,
+        IDENTITY_FILE,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?))
+}
+
+
+/// Creates the identity file through the checked directory handle (`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600); an existing one is refused, never replaced.
+pub fn write_identity(directory: &OwnedFd, text: &str) -> Result<(), BorgError> {
+    let mut file = identity_open(directory, OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL).map_err(base_io)?;
+    fill(&mut file, text.as_bytes())
+}
+
+
+fn identity_missing(error: io::Error) -> BorgError {
+    if error.kind() == ErrorKind::NotFound {
+        BorgError::BaseDirCollision
+    } else {
+        base_io(error)
+    }
+}
+
+
+/// Reads the identity file through the checked directory handle: it must be a regular file of `euid` with no group or other access and hold exactly `text`.
+pub fn verify_identity(directory: &OwnedFd, text: &str, euid: u32) -> Result<(), BorgError> {
+    let mut file = identity_open(directory, OFlags::RDONLY).map_err(identity_missing)?;
+    let metadata = file.metadata().map_err(base_io)?;
+    if !metadata.is_file() || metadata.uid() != euid || metadata.mode() & IDENTITY_FORBIDDEN_MODE != 0 {
+        Err(BorgError::BaseDir)?;
+    }
+    let mut bytes = Vec::new();
+    Read::take(&mut file, MAX_IDENTITY_BYTES).read_to_end(&mut bytes).map_err(base_io)?;
+    if bytes == text.as_bytes() {
+        Ok(())
+    } else {
+        Err(BorgError::BaseDirCollision)
+    }
+}
+
+
+fn private_handle(level: &Path, euid: u32) -> Result<OwnedFd, BorgError> {
+    let file = File::from(open_trusted_dir(level, euid).map_err(base_refusal)?);
+    let metadata = file.metadata().map_err(base_io)?;
+    if private_directory(metadata.is_dir(), metadata.mode()) {
+        Ok(OwnedFd::from(file))
+    } else {
+        Err(BorgError::BaseDir)
+    }
 }
 
 
 fn checked_private(level: PathBuf, euid: u32) -> Result<PathBuf, BorgError> {
-    let metadata = File::from(open_trusted_dir(&level, euid).map_err(base_refusal)?)
-        .metadata()
-        .map_err(base_io)?;
-    if private_directory(metadata.is_dir(), metadata.mode()) {
-        Ok(level)
-    } else {
-        Err(BorgError::BaseDir)
-    }
+    private_handle(&level, euid).map(|_| level)
 }
 
 

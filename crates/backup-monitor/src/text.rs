@@ -13,10 +13,11 @@ pub fn is_hidden(character: char) -> bool {
 }
 
 
-/// Host and tag grammar, an ASCII allowlist: 1 to `max_bytes` bytes of `[A-Za-z0-9._-]`, no leading `-` or `.`.
+/// Host and tag grammar, an ASCII allowlist: 1 to `max_bytes` bytes of `[A-Za-z0-9._-]`, no leading `-` or `.` and no trailing `.`.
 pub fn valid_text(text: &str, max_bytes: usize) -> bool {
     (1..=max_bytes).contains(&text.len())
         && !text.starts_with(['-', '.'])
+        && !text.ends_with('.')
         && text
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))

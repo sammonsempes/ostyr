@@ -5,7 +5,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -493,4 +493,33 @@ pub struct WebConfig {
     pub max_sessions_per_user: usize,
     #[serde(default = "default_sessions")]
     pub max_sessions: usize,
+}
+
+
+/// One lease interval of `GET /dhcp/leases/at` and `GET /dhcp/leases/mac`; every field is checked before it is printed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LeaseView {
+    pub address: String,
+    pub mac: Option<String>,
+    pub hostname: Option<String>,
+    pub starts: String,
+    pub ends: String,
+    pub action: String,
+    pub subnet_id: i64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LookupView {
+    pub intervals: Vec<LeaseView>,
+    pub skipped: u64,
+    pub truncated: bool,
+}
+
+
+/// A checked browser lookup: values already inside the API's grammar, so the path is built from typed values only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DhcpQuery {
+    At { address: IpAddr, at: i64 },
+    Mac { mac: String, from: i64, to: i64 },
 }

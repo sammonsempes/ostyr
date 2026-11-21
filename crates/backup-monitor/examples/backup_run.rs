@@ -1,4 +1,4 @@
-//! Usage: backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run and Borg's own base directory (required for Borg).
+//! Usage: backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
 
 #[cfg(unix)]
 mod run {
@@ -11,8 +11,9 @@ mod run {
     use core_config::parse::read_file;
     use core_pg::scope::tenant_of;
     use std::error::Error;
-    use std::fs;
+    use std::fs::{self, DirBuilder, OpenOptions};
     use std::io::{stdout, Stdout, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use time::OffsetDateTime;
@@ -30,7 +31,32 @@ mod run {
     const DEADLINE_SECONDS: u64 = 120;
 
 
+    const REPORT_DIRECTORY: &str = "reports";
+
+
+    const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+
+
+    const PRIVATE_FILE_MODE: u32 = 0o600;
+
+
     const USAGE: &str = "usage: backup_run <declarations.yaml> <restic-binary> [state-dir]";
+
+
+    fn report_directory(state: Option<&Path>, tenant: &str) -> Option<PathBuf> {
+        state.map(|directory| directory.join(REPORT_DIRECTORY).join(tenant))
+    }
+
+
+    fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(PRIVATE_FILE_MODE)
+            .open(path)?;
+        Ok(file.write_all(bytes)?)
+    }
 
 
     fn previous_listing(state: Option<&Path>, name: &str, limits: &Limits) -> Option<Listing> {
@@ -48,15 +74,14 @@ mod run {
 
 
     fn save_borg(state: Option<&Path>, name: &str, raw: &[u8]) -> Result<(), Box<dyn Error>> {
-        state.map_or(Ok(()), |directory| Ok(fs::write(directory.join(format!("{name}.borg.snapshots")), raw)?))
+        state.map_or(Ok(()), |directory| write_private(&directory.join(format!("{name}.borg.snapshots")), raw))
     }
 
 
     fn save(state: Option<&Path>, name: &str, raw: &RawRun) -> Result<(), Box<dyn Error>> {
         state.map_or(Ok(()), |directory| {
-            fs::write(directory.join(format!("{name}.restic.id")), &raw.key)?;
-            fs::write(directory.join(format!("{name}.restic.snapshots")), &raw.snapshots)?;
-            Ok(())
+            write_private(&directory.join(format!("{name}.restic.id")), raw.key.as_bytes())?;
+            write_private(&directory.join(format!("{name}.restic.snapshots")), &raw.snapshots)
         })
     }
 
@@ -84,8 +109,13 @@ mod run {
         let arguments: Vec<String> = std::env::args().collect();
         let declarations_path = arguments.get(ARGUMENT_DECLARATIONS).ok_or(USAGE)?;
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM).ok_or(USAGE)?);
-        let state = arguments.get(ARGUMENT_STATE).map(Path::new);
+        let base_state = arguments.get(ARGUMENT_STATE).map(Path::new);
         let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
+        let state_directory = report_directory(base_state, tenant_of(&declarations.tenant));
+        let state = state_directory.as_deref();
+        if let Some(directory) = state {
+            DirBuilder::new().recursive(true).mode(PRIVATE_DIRECTORY_MODE).create(directory)?;
+        }
         let limits = Limits::default();
         let mut out = stdout();
         writeln!(out, "tenant {}", tenant_of(&declarations.tenant))?;
@@ -120,7 +150,7 @@ mod run {
             .iter()
             .try_for_each(|index| writeln!(out, "refused repository entry {index}"))?;
         borg.runnable.iter().try_for_each(|(name, source)| -> Result<(), Box<dyn Error>> {
-            let outcome = state.ok_or("borg needs a state directory".into()).and_then(|directory: &Path| {
+            let outcome = base_state.ok_or("borg needs a state directory".into()).and_then(|directory: &Path| {
                 borg_run(
                     Path::new(BORG_PROGRAM),
                     source,

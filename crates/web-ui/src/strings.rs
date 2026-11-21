@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 243;
+pub const TEXT_COUNT: usize = 271;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -255,6 +255,34 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("col_epss", "EPSS"),
     ("col_priority", "Priority"),
     ("vulns_kev", "KEV"),
+    ("nav_dhcp", "DHCP leases"),
+    ("title_dhcp", "DHCP leases"),
+    ("dhcp_at_title", "Who held this address"),
+    ("dhcp_mac_title", "Where was this device"),
+    ("col_address", "Address"),
+    ("col_mac", "MAC"),
+    ("col_hostname", "Hostname"),
+    ("col_starts", "Starts"),
+    ("col_ends", "Ends"),
+    ("col_action", "Action"),
+    ("col_subnet", "Subnet"),
+    ("label_address", "Address"),
+    ("label_mac", "MAC address"),
+    ("label_at", "Time (Unix seconds)"),
+    ("label_from", "From (Unix seconds)"),
+    ("label_to", "To (Unix seconds)"),
+    ("dhcp_search", "Search"),
+    ("dhcp_empty", "No lease found."),
+    ("dhcp_no_readable", "No readable lease in this answer."),
+    ("dhcp_unreadable", "Unreadable row."),
+    ("dhcp_skipped", "{count} rows could not be read."),
+    ("dhcp_skipped_one", "1 row could not be read."),
+    ("dhcp_truncated", "Results cut at 100: older leases may be missing."),
+    ("dhcp_action_assigned", "Assigned"),
+    ("dhcp_action_released", "Released"),
+    ("dhcp_action_declined", "Declined"),
+    ("dhcp_action_reclaimed", "Expired and reclaimed"),
+    ("dhcp_action_other", "Other"),
 ];
 
 
@@ -511,6 +539,34 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("col_epss", "EPSS"),
     ("col_priority", "Priorité"),
     ("vulns_kev", "KEV"),
+    ("nav_dhcp", "Baux DHCP"),
+    ("title_dhcp", "Baux DHCP"),
+    ("dhcp_at_title", "Qui avait cette adresse"),
+    ("dhcp_mac_title", "Où était cet appareil"),
+    ("col_address", "Adresse"),
+    ("col_mac", "MAC"),
+    ("col_hostname", "Nom d'hôte"),
+    ("col_starts", "Début"),
+    ("col_ends", "Fin"),
+    ("col_action", "Action"),
+    ("col_subnet", "Sous-réseau"),
+    ("label_address", "Adresse"),
+    ("label_mac", "Adresse MAC"),
+    ("label_at", "Heure (secondes Unix)"),
+    ("label_from", "Du (secondes Unix)"),
+    ("label_to", "Au (secondes Unix)"),
+    ("dhcp_search", "Chercher"),
+    ("dhcp_empty", "Aucun bail trouvé."),
+    ("dhcp_no_readable", "Aucun bail lisible dans cette réponse."),
+    ("dhcp_unreadable", "Ligne illisible."),
+    ("dhcp_skipped", "{count} lignes n'ont pas pu être lues."),
+    ("dhcp_skipped_one", "1 ligne n'a pas pu être lue."),
+    ("dhcp_truncated", "Résultats coupés à 100 : des baux plus anciens peuvent manquer."),
+    ("dhcp_action_assigned", "Attribué"),
+    ("dhcp_action_released", "Libéré"),
+    ("dhcp_action_declined", "Refusé"),
+    ("dhcp_action_reclaimed", "Expiré et récupéré"),
+    ("dhcp_action_other", "Autre"),
 ];
 
 
@@ -650,5 +706,16 @@ pub fn case_severity_class(value: &str) -> &'static str {
         "high" => "sev-high",
         "critical" => "sev-critical",
         _ => "sev-unknown",
+    }
+}
+
+
+pub fn dhcp_action_key(value: &str) -> &'static str {
+    match value {
+        "lease-assigned" => "dhcp_action_assigned",
+        "lease-released" => "dhcp_action_released",
+        "lease-declined" => "dhcp_action_declined",
+        "lease-expired-reclaimed" => "dhcp_action_reclaimed",
+        _ => "dhcp_action_other",
     }
 }
