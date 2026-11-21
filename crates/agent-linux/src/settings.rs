@@ -1,4 +1,5 @@
 use crate::error::SourceError;
+use crate::fim::load_with_plan;
 use crate::model::{
     LinuxFile, OsquerySettings, SensorSettings, SourceSettings, UpdateSettings, MAX_DNS_RESOLVERS, MAX_ENDPOINTS, MAX_LINES_PER_POLL_CEILING,
     MAX_LINE_BYTES_CEILING, MAX_OSQUERY_DEADLINE_SECONDS, MAX_OSQUERY_MEMORY_BYTES, MAX_OSQUERY_TEMP_BYTES, MAX_OSQUERY_TEMP_TOTAL_BYTES,
@@ -8,7 +9,7 @@ use crate::model::{
 };
 use crate::types::{SettingsEngine, SharedOsquery, SharedSensor, SharedSource, SharedUpdates};
 use arc_swap::ArcSwap;
-use core_config::load::load_file;
+use core_config::parse::read_bytes_capped;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use std::net::IpAddr;
@@ -177,12 +178,30 @@ pub fn settings_state(file: &LinuxFile) -> ConfigState {
     ])
     .map(|(name, value)| (format!("{SETTINGS_SECTION}.{name}"), value.to_string()))
     .chain([(format!("{SETTINGS_SECTION}.updates_manager"), format!("{:?}", file.updates.manager))])
+    .chain(fim_state(file))
     .collect()
 }
 
 
+/// The FIM entries of the state: the role and the digests of the table and `planted.tsv`, so a changed file is a change of the state; none without a `fim` section.
+pub fn fim_state(file: &LinuxFile) -> Vec<(String, String)> {
+    file.settings
+        .fim
+        .iter()
+        .flat_map(|plan| {
+            [
+                ("fim_role", plan.role.clone()),
+                ("fim_table_sha256", plan.table_sha256.clone()),
+                ("fim_planted_sha256", plan.planted_sha256.clone()),
+            ]
+        })
+        .map(|(name, value)| (format!("{SETTINGS_SECTION}.{name}"), value))
+        .collect()
+}
+
+
 pub fn settings_loader(path: PathBuf) -> Box<LoaderFn<LinuxFile>> {
-    Box::new(move || load_file::<LinuxFile>(&path))
+    Box::new(move || load_with_plan(&path, read_bytes_capped))
 }
 
 

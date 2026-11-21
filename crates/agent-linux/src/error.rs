@@ -135,3 +135,23 @@ pub enum OsqueryError {
     #[error("osquery output is not a JSON array at line {line} column {column}")]
     NotJson { line: usize, column: usize },
 }
+
+
+/// Why a FIM plan was refused; a fixed reason, never the text of a file.
+#[derive(Debug, Error)]
+pub enum FimError {
+    #[error("the role table is not UTF-8")]
+    TableNotUtf8,
+    #[error("planted.tsv is not UTF-8")]
+    PlantedNotUtf8,
+    #[error("the role table is refused: {0}")]
+    Table(#[source] linux_fim::error::TableError),
+    #[error("the role is empty")]
+    EmptyRole,
+    #[error("the table has no role of that name")]
+    NoRole,
+    #[error("planted.tsv is refused: {0}")]
+    Planted(#[source] linux_fim::error::CliError),
+    #[error("planted.tsv entry {entry} names a path the role does not declare")]
+    Undeclared { entry: usize },
+}

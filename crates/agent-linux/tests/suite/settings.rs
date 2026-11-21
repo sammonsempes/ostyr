@@ -44,6 +44,7 @@ fn every_zero_bound_is_named() -> TestResult {
         max_line_bytes: 0,
         max_spool_bytes: 0,
         max_lines_per_poll: 0,
+        fim: None,
     };
     assert_eq!(invalid_settings(&zero).len(), SETTING_COUNT);
     let refused = validate_settings(&zero);
@@ -109,6 +110,7 @@ fn every_bound_is_accepted_at_its_ceiling_and_refused_one_over() -> TestResult {
         max_line_bytes: MAX_LINE_BYTES_CEILING,
         max_spool_bytes: MAX_SPOOL_BYTES_CEILING,
         max_lines_per_poll: MAX_LINES_PER_POLL_CEILING,
+        fim: None,
     };
     assert!(validate_settings(&ceilings).is_ok());
     let over = [
