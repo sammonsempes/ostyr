@@ -64,6 +64,8 @@ pub enum PgError {
     DigestMismatch { version: String },
     #[error("migration `{version}` is recorded as applied but unknown to this build")]
     UnknownApplied { version: String },
+    #[error("{total} function(s) of any module in public lack exactly `SET search_path = pg_catalog, public, pg_temp`: {functions}")]
+    FunctionSearchPath { total: usize, functions: String },
     #[error("migration `{version}` is older than an applied migration")]
     OutOfOrder { version: String },
 }
