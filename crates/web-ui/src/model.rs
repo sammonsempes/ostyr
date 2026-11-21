@@ -3,6 +3,7 @@ use arc_swap::ArcSwap;
 use rustls::ServerConfig;
 use secrecy::SecretString;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -285,6 +286,40 @@ pub struct StateListView {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct StateAssetView {
     pub items: Vec<StateView>,
+    pub skipped: u64,
+    pub truncated: bool,
+}
+
+
+/// `GET /vulnerabilities/findings` and `GET /vulnerabilities/assets/{asset}` items; the scores stay raw so a forged one is a row marker.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VulnView {
+    pub asset: String,
+    pub ecosystem: String,
+    pub package: String,
+    pub record_id: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub cvss: Box<RawValue>,
+    pub epss: Box<RawValue>,
+    pub kev: bool,
+    pub priority: u32,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VulnListView {
+    pub items: Vec<VulnView>,
+    pub skipped: u64,
+    pub next_cursor: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VulnAssetView {
+    pub items: Vec<VulnView>,
     pub skipped: u64,
     pub truncated: bool,
 }

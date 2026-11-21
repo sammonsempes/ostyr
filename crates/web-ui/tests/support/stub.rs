@@ -60,6 +60,8 @@ pub enum Mode {
     BadId,
     BadCursor,
     Status(StatusCode),
+    UnreadableAlert,
+    Oversize422,
 }
 
 
@@ -87,6 +89,7 @@ pub struct StubState {
     pub cert_paths: Mutex<Vec<String>>,
     pub hunt_paths: Mutex<Vec<String>>,
     pub state_paths: Mutex<Vec<String>>,
+    pub vuln_paths: Mutex<Vec<String>>,
     pub oncall_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
@@ -245,6 +248,7 @@ pub async fn alerts_handler(
     if authorised(&headers) {
         match mode_of(&state) {
             Mode::Status(status) => error_reply(status),
+            Mode::UnreadableAlert | Mode::Oversize422 => error_reply(StatusCode::UNPROCESSABLE_ENTITY),
             Mode::Hostile => Json(page(vec![hostile_alert(&id_of('a'))], None)).into_response(),
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
             Mode::Chunked => stream_body().into_response(),
@@ -1114,6 +1118,208 @@ pub async fn state_asset_handler(
 }
 
 
+pub const VULN_ASSET_LIMIT: usize = 1000;
+
+
+pub const VULN_CVSS: f64 = 7.5;
+
+
+pub const VULN_EPSS: f64 = 0.25;
+
+
+pub const VULN_PRIORITY: u32 = 900;
+
+
+pub const VULN_OVER_CVSS: u32 = 11;
+
+
+pub const VULN_OVER_EPSS: u32 = 2;
+
+
+pub const VULN_NEXT_CURSOR: &str = "900 host-1 npm lodash CVE-1";
+
+
+pub const VULN_SEEN: &str = "2026-03-01T10:00:00+01:00";
+
+
+pub const VULN_HOSTILE_PACKAGE: &str = "evil\u{1b}[31m";
+
+
+pub const VULN_HOSTILE_RECORD: &str = "<script>x</script>";
+
+
+pub struct VulnFields<'a> {
+    pub asset: &'a str,
+    pub package: &'a str,
+    pub record: &'a str,
+    pub installed: &'a str,
+    pub fixed: Option<&'a str>,
+    pub cvss: Value,
+    pub epss: Value,
+    pub kev: bool,
+    pub seen: &'a str,
+}
+
+
+pub fn vuln_good(asset: &str) -> VulnFields<'_> {
+    VulnFields {
+        asset,
+        package: "lodash",
+        record: "CVE-2021-23337",
+        installed: "4.17.0",
+        fixed: Some("4.17.21"),
+        cvss: json!(VULN_CVSS),
+        epss: json!(VULN_EPSS),
+        kev: false,
+        seen: VULN_SEEN,
+    }
+}
+
+
+pub fn vuln_item(fields: &VulnFields<'_>) -> Value {
+    json!({
+        "asset": fields.asset, "ecosystem": "npm", "package": fields.package, "record_id": fields.record,
+        "installed_version": fields.installed, "fixed_version": fields.fixed, "cvss": fields.cvss, "epss": fields.epss,
+        "kev": fields.kev, "priority": VULN_PRIORITY, "first_seen": fields.seen, "last_seen": "2026-03-02T00:00:00Z"
+    })
+}
+
+
+pub fn vuln_list(items: Vec<Value>, skipped: u32, next: Option<&str>) -> Value {
+    json!({"items": items, "skipped": skipped, "next_cursor": next})
+}
+
+
+pub fn vuln_asset(items: Vec<Value>, skipped: u32, truncated: bool) -> Value {
+    json!({"items": items, "skipped": skipped, "truncated": truncated})
+}
+
+
+pub fn vuln_hostile_items(asset: &str) -> Vec<Value> {
+    let good = || vuln_good(asset);
+    vec![
+        vuln_item(&VulnFields {
+            package: VULN_HOSTILE_PACKAGE,
+            ..good()
+        }),
+        vuln_item(&VulnFields {
+            package: "pk\u{3164}g",
+            ..good()
+        }),
+        vuln_item(&VulnFields { cvss: Value::Null, ..good() }),
+        vuln_item(&VulnFields {
+            cvss: json!(VULN_OVER_CVSS),
+            ..good()
+        }),
+        vuln_item(&VulnFields {
+            epss: json!(VULN_OVER_EPSS),
+            ..good()
+        }),
+        vuln_item(&VulnFields {
+            cvss: json!("NaN"),
+            ..good()
+        }),
+        vuln_item(&VulnFields {
+            seen: "not a time",
+            ..good()
+        }),
+        vuln_item(&VulnFields { fixed: Some("-x"), ..good() }),
+        vuln_item(&VulnFields { installed: "", ..good() }),
+        vuln_item(&VulnFields {
+            record: VULN_HOSTILE_RECORD,
+            ..good()
+        }),
+        vuln_item(&VulnFields {
+            kev: true,
+            fixed: None,
+            package: "fine",
+            ..good()
+        }),
+        vuln_item(&VulnFields {
+            asset: "other-asset",
+            package: "foreign",
+            ..good()
+        }),
+    ]
+}
+
+
+pub async fn vuln_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.vuln_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(vuln_list((0..MANY_ITEMS).map(|_| vuln_item(&vuln_good("a"))).collect(), 0, None)).into_response(),
+            Mode::BadCursor => Json(vuln_list(vec![], 0, Some("ABCDEF"))).into_response(),
+            Mode::Hostile => Json(vuln_list(vuln_hostile_items("web01"), 1, None)).into_response(),
+            Mode::Chunked => Json(vuln_list(vec![], 0, None)).into_response(),
+            Mode::BadId => Json(vuln_list(vec![], 1, Some(VULN_NEXT_CURSOR))).into_response(),
+            Mode::BadSeverity => Json(vuln_list(vec![], STATE_MANY_SKIPPED, None)).into_response(),
+            _ => Json(vuln_list(
+                vec![
+                    vuln_item(&VulnFields {
+                        kev: true,
+                        ..vuln_good("host-1")
+                    }),
+                    vuln_item(&VulnFields {
+                        fixed: None,
+                        ..vuln_good("a/b+c")
+                    }),
+                ],
+                1,
+                Some(VULN_NEXT_CURSOR),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn vuln_asset_handler(
+    State(state): State<Arc<StubState>>,
+    headers: HeaderMap,
+    Path(asset): Path<String>,
+    uri: axum::http::Uri,
+) -> Response {
+    note_forwarded(&state, &headers);
+    state.vuln_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(vuln_asset(
+                (0..=VULN_ASSET_LIMIT).map(|_| vuln_item(&vuln_good(&asset))).collect(),
+                0,
+                false,
+            ))
+            .into_response(),
+            Mode::Hostile => Json(vuln_asset(vuln_hostile_items(&asset), 1, true)).into_response(),
+            Mode::Chunked => Json(vuln_asset(vec![], 0, false)).into_response(),
+            Mode::BadId => Json(vuln_asset(vec![], 1, false)).into_response(),
+            _ if asset == "elsewhere" => error_reply(StatusCode::NOT_FOUND),
+            _ => Json(vuln_asset(
+                vec![
+                    vuln_item(&vuln_good(&asset)),
+                    vuln_item(&VulnFields {
+                        kev: true,
+                        ..vuln_good(&asset)
+                    }),
+                ],
+                STATE_ASSET_SKIPPED,
+                true,
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub const OVER_SCORE: u32 = 101;
 
 
@@ -1235,6 +1441,12 @@ pub async fn oncall_alert_handler(State(state): State<Arc<StubState>>, headers: 
     if authorised(&headers) {
         match mode_of(&state) {
             Mode::Status(status) => error_reply(status),
+            Mode::UnreadableAlert => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": {"code": "unreadable_alert", "message": LEAK}})),
+            )
+                .into_response(),
+            Mode::Oversize422 => (StatusCode::UNPROCESSABLE_ENTITY, "x".repeat(OVERSIZE_BYTES)).into_response(),
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
             Mode::Hostile => Json(oncall_item(number, "evil\u{1b}[31m", "open", ONCALL_OPENED, None, None)).into_response(),
             Mode::BadId => Json(oncall_item(number + 1, "fp", "open", ONCALL_OPENED, None, None)).into_response(),
@@ -1270,6 +1482,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         cert_paths: Mutex::new(Vec::new()),
         hunt_paths: Mutex::new(Vec::new()),
         state_paths: Mutex::new(Vec::new()),
+        vuln_paths: Mutex::new(Vec::new()),
         oncall_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
@@ -1292,6 +1505,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/hunts/findings", get(hunt_list_handler))
         .route("/compliance/state", get(state_list_handler))
         .route("/compliance/assets/{asset}", get(state_asset_handler))
+        .route("/vulnerabilities/findings", get(vuln_list_handler))
+        .route("/vulnerabilities/assets/{asset}", get(vuln_asset_handler))
         .route("/oncall/alerts", get(oncall_list_handler))
         .route("/oncall/alerts/{id}", get(oncall_alert_handler))
         .route("/cases", get(cases_handler))

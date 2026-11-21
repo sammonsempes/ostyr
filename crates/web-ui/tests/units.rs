@@ -6,14 +6,17 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use types::TestResult;
 use web_ui::api::{
     alerts_path, assets_path, cases_path, cert_filter, certs_path, check_asset_detail, check_asset_page, classify, conflict_failure, encode_asset_id,
-    get_alert, get_case, valid_asset_cursor, valid_asset_id, valid_cert_cursor, valid_cursor, valid_id, valid_token, MAX_ASSET_ATTRIBUTES,
-    MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
+    get_alert, get_case, unreadable_failure, valid_asset_cursor, valid_asset_id, valid_cert_cursor, valid_cursor, valid_id, valid_token,
+    MAX_ASSET_ATTRIBUTES, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
 use web_ui::api::{hunts_path, valid_hunt_cursor, valid_pack_id, MAX_HUNT_CURSOR_CHARS, MAX_PACK_ID_CHARS};
 use web_ui::api::{oncall_path, parse_oncall_id, valid_oncall_text, MAX_ONCALL_FINGERPRINT_BYTES, ONCALL_STATES};
 use web_ui::api::{
     states_path, valid_state_asset, valid_state_cursor, valid_state_id, verdict_filter, MAX_STATE_ASSET_CHARS, MAX_STATE_CURSOR_HEX,
     MAX_STATE_ID_CHARS,
+};
+use web_ui::api::{
+    valid_vuln_asset, valid_vuln_cursor, valid_vuln_field, vuln_score, vulns_path, MAX_VULN_FIELD_BYTES, VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
@@ -28,6 +31,9 @@ use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, sess
 
 
 const CONFLICT: u16 = 409;
+
+
+const UNPROCESSABLE: u16 = 422;
 
 
 const CONNECTIONS: usize = 4;
@@ -168,6 +174,17 @@ fn a_conflict_is_one_of_the_fixed_codes_or_a_plain_status() -> TestResult {
     }
     for body in ["{\"error\":{\"code\":\"other\",\"message\":\"m\"}}", "not json", "{}", ""] {
         assert!(matches!(conflict_failure(body.as_bytes()), ApiFailure::Status(CONFLICT)), "{body}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_422_is_unreadable_only_with_the_fixed_code() -> TestResult {
+    let fixed = "{\"error\":{\"code\":\"unreadable_alert\",\"message\":\"m\"}}";
+    assert!(matches!(unreadable_failure(fixed.as_bytes()), ApiFailure::Unreadable));
+    for body in ["{\"error\":{\"code\":\"other\",\"message\":\"m\"}}", "not json", "{}", ""] {
+        assert!(matches!(unreadable_failure(body.as_bytes()), ApiFailure::Status(UNPROCESSABLE)), "{body}");
     }
     Ok(())
 }
@@ -411,6 +428,49 @@ fn hunt_helpers_accept_only_their_grammar() -> TestResult {
     ] {
         assert!(window_time(bad).is_none(), "{bad}");
     }
+    Ok(())
+}
+
+
+#[test]
+fn vulnerability_helpers_accept_only_the_stores_grammar() -> TestResult {
+    for (text, max, accepted) in [
+        ("7.5", VULN_CVSS_MAX, true),
+        ("0", VULN_CVSS_MAX, true),
+        ("10", VULN_CVSS_MAX, true),
+        ("11", VULN_CVSS_MAX, false),
+        ("-0.1", VULN_CVSS_MAX, false),
+        ("1", VULN_EPSS_MAX, true),
+        ("2", VULN_EPSS_MAX, false),
+        ("1e999", VULN_CVSS_MAX, false),
+        ("null", VULN_CVSS_MAX, false),
+        ("\"NaN\"", VULN_CVSS_MAX, false),
+        ("[1]", VULN_CVSS_MAX, false),
+    ] {
+        let raw = serde_json::value::RawValue::from_string(text.to_owned())?;
+        let expected = accepted.then(|| text.parse::<f64>()).transpose()?;
+        assert_eq!(vuln_score(&raw, max), expected, "{text}");
+    }
+    assert!(valid_vuln_field("a") && valid_vuln_field(&"a".repeat(MAX_VULN_FIELD_BYTES)));
+    for bad in ["", "-a", "a b", "a\u{3164}", "a\u{1b}", &"a".repeat(MAX_VULN_FIELD_BYTES + 1)] {
+        assert!(!valid_vuln_field(bad), "{bad}");
+    }
+    assert!(valid_vuln_asset("a.b") && !valid_vuln_asset(".") && !valid_vuln_asset("..") && !valid_vuln_asset("-a"));
+    assert!(valid_vuln_cursor("0 a b c d") && valid_vuln_cursor("4294967295 a b c d"));
+    for bad in [
+        "",
+        "1 a b c",
+        "1 a b c d e",
+        "01 a b c d",
+        "-1 a b c d",
+        "4294967296 a b c d",
+        "1 -a b c d",
+        "1  b c d",
+    ] {
+        assert!(!valid_vuln_cursor(bad), "{bad}");
+    }
+    assert_eq!(vulns_path(None), "vulnerabilities/findings?limit=100");
+    assert_eq!(vulns_path(Some("1 a b c d")), "vulnerabilities/findings?limit=100&cursor=1+a+b+c+d");
     Ok(())
 }
 
