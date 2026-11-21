@@ -9,10 +9,6 @@ use risk_score::source::{
 use std::collections::BTreeMap;
 
 
-const STATUS_SUBQUERY: &str = "COALESCE((SELECT alert_triage.status FROM alert_triage \
-                               WHERE alert_triage.tenant = alerts.tenant AND alert_triage.alert_id = alerts.id), '') FROM alerts";
-
-
 const DAY_SECONDS: u64 = 86_400;
 
 
@@ -354,7 +350,22 @@ fn the_rate_edges_and_the_critical_exemption_hold_on_their_own() -> TestResult {
 
 #[test]
 fn both_statements_read_the_status_by_a_subquery_on_the_whole_key() -> TestResult {
-    assert!(RISK_ALERTS_SQL.contains(STATUS_SUBQUERY) && RISK_ALERTS_NEXT_SQL.contains(STATUS_SUBQUERY));
-    assert!(!RISK_ALERTS_SQL.contains("JOIN") && !RISK_ALERTS_NEXT_SQL.contains("JOIN"));
+    assert_eq!(
+        RISK_ALERTS_SQL,
+        "SELECT alerts.id, alerts.rule_id, alerts.severity, alerts.created::text, COALESCE(alerts.host_name, ''), \
+         COALESCE(alerts.user_name, ''), COALESCE((SELECT alert_triage.status FROM alert_triage \
+         WHERE alert_triage.tenant = alerts.tenant AND alert_triage.alert_id = alerts.id), '') FROM alerts \
+         WHERE alerts.tenant = $1 AND alerts.created > $2::text::bigint ORDER BY alerts.created, alerts.id \
+         LIMIT $3::text::bigint"
+    );
+    assert_eq!(
+        RISK_ALERTS_NEXT_SQL,
+        "SELECT alerts.id, alerts.rule_id, alerts.severity, alerts.created::text, COALESCE(alerts.host_name, ''), \
+         COALESCE(alerts.user_name, ''), COALESCE((SELECT alert_triage.status FROM alert_triage \
+         WHERE alert_triage.tenant = alerts.tenant AND alert_triage.alert_id = alerts.id), '') FROM alerts \
+         WHERE alerts.tenant = $1 AND alerts.created > $2::text::bigint \
+         AND (alerts.created, alerts.id) > ($3::text::bigint, $4::text) \
+         ORDER BY alerts.created, alerts.id LIMIT $5::text::bigint"
+    );
     Ok(())
 }
