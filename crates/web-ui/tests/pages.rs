@@ -12,8 +12,8 @@ use web_ui::pages::{
     format_time, login_page, optional, risk_entity_page, risk_page, risk_row, MAX_COMMENT_LINES,
 };
 use web_ui::strings::{
-    action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, language_tag, resolution_key, severity_class, severity_key,
-    status_key, table, task_status_key, text, ACTIONS, ENGLISH, FRENCH, MISSING_TEXT, RESOLUTIONS,
+    action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, dhcp_action_key, language_tag, resolution_key,
+    severity_class, severity_key, status_key, table, task_status_key, text, ACTIONS, ENGLISH, FRENCH, MISSING_TEXT, RESOLUTIONS,
 };
 
 
@@ -601,6 +601,22 @@ fn a_risk_id_longer_than_the_field_cut_is_printed_whole() -> TestResult {
         assert!(row.contains(&format!(">{long_id}<")), "{row}");
         let page = risk_entity_page(language, "token", &detail).0;
         assert!(page.contains(&format!(" {long_id}</h1>")), "{page}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn dhcp_actions_map_to_fixed_texts() -> TestResult {
+    for (action, key) in [
+        ("lease-assigned", "dhcp_action_assigned"),
+        ("lease-released", "dhcp_action_released"),
+        ("lease-declined", "dhcp_action_declined"),
+        ("lease-expired-reclaimed", "dhcp_action_reclaimed"),
+        ("lease-state-9", "dhcp_action_other"),
+        ("evil", "dhcp_action_other"),
+    ] {
+        assert_eq!(dhcp_action_key(action), key);
     }
     Ok(())
 }

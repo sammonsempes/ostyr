@@ -1,16 +1,16 @@
 use crate::api::{
-    encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_oncall_text, valid_pack_id, valid_state_asset, valid_state_id,
-    valid_vuln_asset, valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE,
-    MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
+    encode_asset_id, parse_dhcp_address, parse_dhcp_mac, risk_kind, valid_asset_id, valid_case_id, valid_dhcp_hostname, valid_id, valid_oncall_text,
+    valid_pack_id, valid_state_asset, valid_state_id, valid_vuln_asset, valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS,
+    MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
-    CertView, CommentView, FindingView, FindingsView, Language, OncallAlertView, OncallListView, RiskDetailView, RiskEntityView, RiskListView,
-    RiskTruncatedView, StateAssetView, StateListView, StateView, VulnAssetView, VulnListView, VulnView,
+    CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView, RiskDetailView,
+    RiskEntityView, RiskListView, RiskTruncatedView, StateAssetView, StateListView, StateView, VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
-    action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
-    task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
+    action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, resolution_key, severity_class, severity_key,
+    status_key, task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
 use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
@@ -191,6 +191,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/hunts", text(language, "nav_hunts")))
                         (go("/compliance", text(language, "nav_compliance")))
                         (go("/vulnerabilities", text(language, "nav_vulns")))
+                        (go("/dhcp", text(language, "nav_dhcp")))
                         (go("/oncall", text(language, "nav_oncall")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
@@ -1582,6 +1583,137 @@ pub fn oncall_alert_page(language: Language, csrf: &str, alert: &OncallAlertView
                 tbody { (oncall_row(language, alert, false)) }
             }
             (go("/oncall", text(language, "oncall_back")))
+        },
+    )
+}
+
+
+pub const DHCP_COLUMNS: u32 = 7;
+
+
+/// What one lease row prints, every part already checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadableLease {
+    pub address: String,
+    pub mac: String,
+    pub hostname: String,
+    pub starts: String,
+    pub ends: String,
+}
+
+
+/// `None` unless the address parses, the MAC and the hostname are inside the store's grammars (an absent one is `-`) and both times are RFC 3339.
+pub fn readable_lease(view: &LeaseView) -> Option<ReadableLease> {
+    let address = parse_dhcp_address(Some(&view.address)).map(|found| found.to_string());
+    let mac = view.mac.as_deref().map_or(Some(NO_TIME.to_owned()), |found| parse_dhcp_mac(Some(found)));
+    let hostname = view
+        .hostname
+        .as_deref()
+        .map_or(Some(NO_TIME.to_owned()), |found| valid_dhcp_hostname(found).then(|| found.to_owned()));
+    address
+        .zip(mac)
+        .zip(hostname)
+        .zip(window_time(&view.starts))
+        .zip(window_time(&view.ends))
+        .map(|((((address_text, mac_text), hostname_text), starts), ends)| ReadableLease {
+            address: address_text,
+            mac: mac_text,
+            hostname: hostname_text,
+            starts,
+            ends,
+        })
+}
+
+
+pub fn lease_row(language: Language, view: &LeaseView) -> Markup {
+    match readable_lease(view) {
+        Some(lease) => html! {
+            tr {
+                td { (lease.address) }
+                td { (lease.mac) }
+                td { (lease.hostname) }
+                td { (lease.starts) }
+                td { (lease.ends) }
+                td { (text(language, dhcp_action_key(&view.action))) }
+                td { (view.subnet_id) }
+            }
+        },
+        None => html! {
+            tr { td colspan=(DHCP_COLUMNS) { (text(language, "dhcp_unreadable")) } }
+        },
+    }
+}
+
+
+pub fn lease_head(language: Language) -> Markup {
+    html! {
+        thead {
+            tr {
+                th { (text(language, "col_address")) }
+                th { (text(language, "col_mac")) }
+                th { (text(language, "col_hostname")) }
+                th { (text(language, "col_starts")) }
+                th { (text(language, "col_ends")) }
+                th { (text(language, "col_action")) }
+                th { (text(language, "col_subnet")) }
+            }
+        }
+    }
+}
+
+
+pub fn dhcp_field(language: Language, name: &str, label_key: &str) -> Markup {
+    html! {
+        label { (text(language, label_key)) " " input type="text" name=(name) required; }
+    }
+}
+
+
+pub fn dhcp_result(language: Language, found: &LookupView) -> Markup {
+    html! {
+        @if found.skipped > 0 {
+            div class="notice" { (counted_notice(language, "dhcp_skipped_one", "dhcp_skipped", found.skipped)) }
+        }
+        @if found.truncated {
+            div class="notice" { (text(language, "dhcp_truncated")) }
+        }
+        @if found.intervals.is_empty() {
+            div { (text(language, if found.skipped > 0 { "dhcp_no_readable" } else { "dhcp_empty" })) }
+        } @else {
+            table {
+                (lease_head(language))
+                tbody {
+                    @for view in &found.intervals { (lease_row(language, view)) }
+                }
+            }
+        }
+    }
+}
+
+
+pub fn dhcp_page(language: Language, csrf: &str, found: Option<&LookupView>) -> Markup {
+    layout(
+        language,
+        "title_dhcp",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_dhcp")) }
+            h2 { (text(language, "dhcp_at_title")) }
+            form method="get" action="/dhcp" {
+                (dhcp_field(language, "address", "label_address"))
+                (dhcp_field(language, "at", "label_at"))
+                button type="submit" { (text(language, "dhcp_search")) }
+            }
+            h2 { (text(language, "dhcp_mac_title")) }
+            form method="get" action="/dhcp" {
+                (dhcp_field(language, "mac", "label_mac"))
+                (dhcp_field(language, "from", "label_from"))
+                (dhcp_field(language, "to", "label_to"))
+                button type="submit" { (text(language, "dhcp_search")) }
+            }
+            @if let Some(result) = found {
+                (dhcp_result(language, result))
+            }
         },
     )
 }

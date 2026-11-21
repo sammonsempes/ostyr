@@ -1,15 +1,16 @@
 use crate::api::{
-    cert_filter, get_alert, get_asset, get_case, get_cert, get_oncall_alert, get_risk_entity, get_state_asset, get_vuln_asset, list_alerts,
-    list_assets, list_cases, list_certs, list_findings, list_oncall, list_risk, list_states, list_vulns, login, logout, post_case_action,
-    post_case_comment, risk_kind, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id,
-    valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, SECONDS_PER_DAY, VERDICT_DEFAULT,
+    cert_filter, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_risk_entity, get_state_asset, get_vuln_asset, list_alerts,
+    list_assets, list_cases, list_certs, list_findings, list_oncall, list_risk, list_states, list_vulns, login, logout, parse_dhcp_address,
+    parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_case_action, post_case_comment, risk_kind, valid_asset_cursor, valid_case_id,
+    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter,
+    MAX_COMMENT_CHARS, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
-use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
+use crate::model::{ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, Opened, Principal, WebLimits, WebState};
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, cert_page, certs_page, comment_unloaded_page,
-    compliance_asset_page, compliance_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page, risk_entity_page, risk_page,
-    vuln_asset_page, vulns_page, STYLESHEET,
+    compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page, risk_entity_page,
+    risk_page, vuln_asset_page, vulns_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -1105,6 +1106,7 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/hunts", get(show_hunts))
         .route("/compliance", get(show_compliance))
         .route("/compliance/{asset}", get(show_compliance_asset))
+        .route("/dhcp", get(show_dhcp))
         .route("/vulnerabilities", get(show_vulns))
         .route("/vulnerabilities/{asset}", get(show_vuln_asset))
         .route("/oncall", get(show_oncall))
@@ -1115,4 +1117,51 @@ pub fn build_router(state: SharedWeb) -> Router {
         .fallback(not_found)
         .layer(from_fn(harden))
         .with_state(state)
+}
+
+
+/// The lookup the browser asked for: `address` and `at` are the first form, `mac`, `from` and `to` the second; nothing else is read, and a value outside the API's grammar is refused before any call.
+pub fn parse_dhcp_query(query: &BTreeMap<String, String>) -> Result<Option<DhcpQuery>, FormRefusal> {
+    let value = |name: &str| query.get(name).map(String::as_str);
+    let at_form = ["address", "at"].iter().any(|name| query.contains_key(*name));
+    let mac_form = ["mac", "from", "to"].iter().any(|name| query.contains_key(*name));
+    match (at_form, mac_form) {
+        (false, false) => Ok(None),
+        (true, false) => parse_dhcp_address(value("address"))
+            .zip(parse_dhcp_time(value("at")))
+            .map(|(address, at)| Some(DhcpQuery::At { address, at }))
+            .ok_or(FormRefusal::Malformed),
+        (false, true) => parse_dhcp_mac(value("mac"))
+            .zip(parse_dhcp_window(value("from"), value("to")))
+            .map(|(mac, (from, to))| Some(DhcpQuery::Mac { mac, from, to }))
+            .ok_or(FormRefusal::Malformed),
+        (true, true) => Err(FormRefusal::Malformed),
+    }
+}
+
+
+pub async fn show_dhcp_page(state: &WebState, source: IpAddr, headers: &HeaderMap, query: &BTreeMap<String, String>) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let checked = parse_dhcp_query(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let client = state.api.load_full();
+    let found = match &checked {
+        Some(lookup) => Some(
+            get_dhcp(&client, source, &principal.token, lookup)
+                .await
+                .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?,
+        ),
+        None => None,
+    };
+    Ok(html_response(StatusCode::OK, &dhcp_page(language, &principal.csrf, found.as_ref()), &[]))
+}
+
+
+pub async fn show_dhcp(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_dhcp_page(&state, peer.ip(), &headers, &query).await)
 }
