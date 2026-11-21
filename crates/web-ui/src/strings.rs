@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 163;
+pub const TEXT_COUNT: usize = 176;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -175,6 +175,19 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("cert_sightings_truncated", "Sightings cut at 500."),
     ("cert_yes", "yes"),
     ("cert_no", "no"),
+    ("nav_hunts", "Hunts"),
+    ("title_hunts", "Hunt findings"),
+    ("hunts_empty", "No finding."),
+    ("hunts_next", "Next findings"),
+    ("hunts_unreadable", "Unreadable row."),
+    ("hunts_skipped", "{count} rows could not be read."),
+    ("hunts_oversized", "{count} findings have an over-long pack id."),
+    ("hunts_oversized_capped", "At least {count} findings have an over-long pack id."),
+    ("col_pack", "Pack"),
+    ("col_window_start", "Window start"),
+    ("col_window_end", "Window end"),
+    ("col_matches", "Matches"),
+    ("col_max_matches", "Match limit"),
 ];
 
 
@@ -348,6 +361,22 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("cert_sightings_truncated", "Observations coupées à 500."),
     ("cert_yes", "oui"),
     ("cert_no", "non"),
+    ("nav_hunts", "Chasses"),
+    ("title_hunts", "Résultats de chasse"),
+    ("hunts_empty", "Aucun résultat."),
+    ("hunts_next", "Résultats suivants"),
+    ("hunts_unreadable", "Ligne illisible."),
+    ("hunts_skipped", "{count} lignes n'ont pas pu être lues."),
+    ("hunts_oversized", "{count} résultats ont un identifiant de pack trop long."),
+    (
+        "hunts_oversized_capped",
+        "Au moins {count} résultats ont un identifiant de pack trop long.",
+    ),
+    ("col_pack", "Pack"),
+    ("col_window_start", "Début de fenêtre"),
+    ("col_window_end", "Fin de fenêtre"),
+    ("col_matches", "Correspondances"),
+    ("col_max_matches", "Limite de correspondances"),
 ];
 
 

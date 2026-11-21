@@ -244,6 +244,33 @@ pub struct CertDetailView {
 }
 
 
+/// `GET /hunts/findings` items; the pack id and both window ends are checked before they are printed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FindingView {
+    pub pack_id: String,
+    pub window_start: String,
+    pub window_end: String,
+    pub matches: i64,
+    pub max_matches: i64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OversizedView {
+    pub count: i64,
+    pub capped: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FindingsView {
+    pub items: Vec<FindingView>,
+    pub skipped: u64,
+    pub oversized: OversizedView,
+    pub next_cursor: Option<String>,
+}
+
+
 /// The API token stays on the server; the browser holds only the random session identifier.
 pub struct Session {
     pub username: String,
