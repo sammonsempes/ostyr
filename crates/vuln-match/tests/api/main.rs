@@ -368,6 +368,47 @@ async fn more_findings_than_the_maximum_set_truncated_and_a_skipped_asset_is_a_2
 
 
 #[tokio::test]
+async fn every_read_is_audited_with_the_route_pattern_and_never_the_asset_or_query() -> TestResult {
+    let fx = fixture()?;
+    seed(&fx);
+    let token = login(&fx.router, ANALYST).await?;
+    let reader = login(&fx.router, READER).await?;
+    assert_eq!(
+        get(&fx.router, "/vulnerabilities/findings?limit=5", Some(&token)).await?.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&fx.router, "/vulnerabilities/assets/host-a", Some(&token)).await?.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&fx.router, "/vulnerabilities/findings", Some(&reader)).await?.status(),
+        StatusCode::FORBIDDEN
+    );
+    let text = std::fs::read_to_string(fx._dir.path().join("audit.log"))?;
+    let records: Vec<Value> = text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
+    let reads: Vec<(String, String)> = records
+        .iter()
+        .filter(|line| line.get("action") == Some(&json!("api.request")))
+        .filter_map(|line| {
+            line.get("target").and_then(Value::as_str).map(|target| {
+                (
+                    target.to_owned(),
+                    line.get("outcome").map_or(String::new(), |outcome| outcome.to_string()),
+                )
+            })
+        })
+        .filter(|(target, _)| target.contains("vulnerabilities"))
+        .collect();
+    assert_eq!(reads.len(), THIRD, "{reads:?}");
+    assert!(reads.iter().any(|(target, _)| target == "GET /vulnerabilities/assets/{asset}"));
+    assert!(reads.iter().any(|(_, outcome)| outcome.contains("denied")));
+    assert!(!text.contains("host-a") && !text.contains("limit=5"));
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn the_permission_is_cmdb_read_and_other_methods_are_refused() -> TestResult {
     let fx = fixture()?;
     seed(&fx);
