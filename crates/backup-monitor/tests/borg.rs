@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use backup_monitor::borg::{
     base_directory, base_directory_with, environment, fill, io_failure, local_location, parse_run, plan, private_directory, read_capped, run_raw,
-    snapshot_listing, valid_location, valid_source, BorgError, MAX_PASSPHRASE_BYTES, MODE_MASK,
+    snapshot_listing, valid_location, valid_source, verify_identity, write_identity, BorgError, IDENTITY_FILE, MAX_PASSPHRASE_BYTES, MODE_MASK,
 };
 use backup_monitor::declarations::load_declarations;
 use backup_monitor::error::BackupError;
@@ -13,12 +13,16 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::{create_dir_all, set_permissions, Permissions};
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
+
+
+const REPOSITORY_NAME: &str = "main";
 
 
 const REPOSITORY_ID: &str = "41d98df912d10fb87c88abe9ff5fed1138c452f4e8c1ac0ff934aa6662a24e34";
@@ -151,7 +155,15 @@ fn euid() -> u32 {
 
 
 fn run(setup: &Setup) -> Result<Vec<u8>, BorgError> {
-    run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), PATIENT)
+    run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        PATIENT,
+    )
 }
 
 
@@ -288,7 +300,7 @@ fn the_argument_vector_and_environment_are_fixed_and_the_passphrase_travels_on_s
     run(&setup)?;
     let args = std::fs::read_to_string(setup.dir.path().join("args"))?;
     assert_eq!(args, format!("--lock-wait 1 list --json {}\n", setup.source.location));
-    let base = setup.state.join("borg").join("acme");
+    let base = setup.state.join("borg").join("acme").join(REPOSITORY_NAME);
     let environment = std::fs::read_to_string(setup.dir.path().join("env"))?;
     let lines: Vec<&str> = environment
         .lines()
@@ -335,7 +347,15 @@ fn an_ssh_location_is_passed_whole_and_ssh_is_named_in_full() -> Result<(), Box<
 #[test]
 fn the_listing_is_keyed_on_the_repository_id_and_reads_the_host_from_the_name() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let listing = snapshot_listing(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), PATIENT)?;
+    let listing = snapshot_listing(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        PATIENT,
+    )?;
     assert_eq!(listing.repository, REPOSITORY_ID);
     assert_eq!(listing.snapshots.len(), 1);
     assert_eq!(listing.snapshots.first().and_then(|snapshot| snapshot.host.as_deref()), Some("srv1"));
@@ -390,7 +410,15 @@ fn a_bad_passphrase_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Err
             passphrase_file: file.display().to_string(),
             ..setup.source.clone()
         };
-        let outcome = run_raw(&setup.program, &source, &setup.tenant, &setup.state, &Limits::default(), PATIENT);
+        let outcome = run_raw(
+            &setup.program,
+            &source,
+            &setup.tenant,
+            REPOSITORY_NAME,
+            &setup.state,
+            &Limits::default(),
+            PATIENT,
+        );
         assert!(matches!(outcome, Err(BorgError::PassphraseFile)), "{file:?}");
         Ok(())
     })?;
@@ -427,7 +455,7 @@ fn a_failing_pipe_write_is_an_io_error() -> Result<(), Box<dyn Error>> {
 fn the_base_directory_is_created_private_and_persists_between_runs() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
     run(&setup)?;
-    let base = setup.state.join("borg").join("acme");
+    let base = setup.state.join("borg").join("acme").join(REPOSITORY_NAME);
     assert_eq!(std::fs::metadata(&base)?.permissions().mode() & MODE_MASK, PRIVATE);
     assert!(!setup.dir.path().join("seen").exists());
     run(&setup)?;
@@ -445,7 +473,7 @@ fn another_tenant_gets_another_base_directory() -> Result<(), Box<dyn Error>> {
     run(&setup)?;
     setup.tenant = tenant_scope("globex")?;
     run(&setup)?;
-    assert!(setup.state.join("borg").join("globex").join("marker").exists());
+    assert!(setup.state.join("borg").join("globex").join(REPOSITORY_NAME).join("marker").exists());
     assert!(!setup.dir.path().join("seen").exists());
     Ok(())
 }
@@ -495,10 +523,13 @@ fn a_state_directory_that_cannot_hold_the_base_is_refused() -> Result<(), Box<dy
 #[test]
 fn a_base_directory_owned_by_someone_else_is_refused() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let mine = base_directory(&setup.state, &setup.tenant, euid())?;
-    assert!(mine.ends_with("borg/acme"));
+    let mine = base_directory(&setup.state, &setup.tenant, REPOSITORY_NAME, euid())?;
+    assert!(mine.ends_with("borg/acme/main"));
     let other = euid().wrapping_add(1);
-    assert!(matches!(base_directory(&setup.state, &setup.tenant, other), Err(BorgError::BaseDir)));
+    assert!(matches!(
+        base_directory(&setup.state, &setup.tenant, REPOSITORY_NAME, other),
+        Err(BorgError::BaseDir)
+    ));
     assert!(private_directory(true, DIRECTORY_PRIVATE));
     assert!(!private_directory(false, FILE_PRIVATE));
     assert!(!private_directory(true, DIRECTORY_GROUP));
@@ -518,7 +549,15 @@ fn a_base_directory_that_is_not_text_is_refused() -> Result<(), Box<dyn Error>> 
 #[test]
 fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
     let setup = setup("sleep")?;
-    let outcome = run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), IMPATIENT);
+    let outcome = run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        IMPATIENT,
+    );
     assert!(matches!(outcome, Err(BorgError::Timeout)));
     Ok(())
 }
@@ -527,7 +566,15 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn Error>> {
     let setup = setup("hold")?;
-    let outcome = run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), IMPATIENT);
+    let outcome = run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        IMPATIENT,
+    );
     assert!(matches!(outcome, Err(BorgError::Timeout)));
     let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
     let gone = (0..GONE_ATTEMPTS).any(|_| {
@@ -547,7 +594,15 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
         max_bytes: TINY_CAP,
         ..Limits::default()
     };
-    let outcome = run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &limits, PATIENT);
+    let outcome = run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &limits,
+        PATIENT,
+    );
     assert!(matches!(outcome, Err(BorgError::Oversized)));
     Ok(())
 }
@@ -573,6 +628,7 @@ fn a_missing_program_is_a_spawn_error() -> Result<(), Box<dyn Error>> {
         Path::new("/nonexistent/borg"),
         &setup.source,
         &setup.tenant,
+        REPOSITORY_NAME,
         &setup.state,
         &Limits::default(),
         PATIENT,
@@ -711,8 +767,208 @@ fn refusing_maker(_path: &Path) -> std::io::Result<()> {
 #[test]
 fn a_directory_that_cannot_be_made_is_a_base_refusal() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let outcome = base_directory_with(&setup.state, &setup.tenant, euid(), refusing_maker);
+    let outcome = base_directory_with(&setup.state, &setup.tenant, REPOSITORY_NAME, euid(), refusing_maker);
     assert!(matches!(outcome, Err(BorgError::BaseDir)));
     assert!(!setup.state.join("borg").exists());
+    Ok(())
+}
+
+
+fn run_named(setup: &Setup, repository: &str) -> Result<Vec<u8>, BorgError> {
+    run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        repository,
+        &setup.state,
+        &Limits::default(),
+        PATIENT,
+    )
+}
+
+
+#[test]
+fn each_declared_repository_gets_its_own_base_directory() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run_named(&setup, "first")?;
+    run_named(&setup, "second")?;
+    let tenant = setup.state.join("borg").join("acme");
+    assert!(tenant.join("first").join("marker").exists());
+    assert!(tenant.join("second").join("marker").exists());
+    assert!(!tenant.join("marker").exists());
+    assert!(!setup.dir.path().join("seen").exists());
+    run_named(&setup, "second")?;
+    assert_eq!(std::fs::read_to_string(setup.dir.path().join("seen"))?.lines().count(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_poisoned_repository_directory_leaves_the_others_listing() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    let tenant = setup.state.join("borg").join("acme");
+    create_dir_all(&tenant)?;
+    set_permissions(&tenant, Permissions::from_mode(PRIVATE))?;
+    create_dir_all(tenant.join("evil"))?;
+    set_permissions(tenant.join("evil"), Permissions::from_mode(OPEN_MODE))?;
+    assert!(matches!(run_named(&setup, "evil"), Err(BorgError::BaseDir)));
+    assert!(run_named(&setup, "victim").is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_repository_name_outside_the_grammar_is_refused_before_any_spawn() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    ["..", ".hidden", "-x", "", "a/b", "a b"]
+        .iter()
+        .for_each(|name| assert!(matches!(run_named(&setup, name), Err(BorgError::BaseDir))));
+    assert_eq!(runs(&setup), 0);
+    assert!(!setup.state.join("borg").exists());
+    Ok(())
+}
+
+
+const OTHER_PRINCIPAL_IDENTITY: &str = "Acme\nmain\n";
+
+
+const FOLDED_NAME_IDENTITY: &str = "acme\nMAIN\n";
+
+
+const OVERSIZED_IDENTITY_BYTES: usize = 2000;
+
+
+fn identity_path(setup: &Setup, repository: &str) -> PathBuf {
+    setup.state.join("borg").join("acme").join(repository).join(IDENTITY_FILE)
+}
+
+
+fn directory_handle(path: &Path) -> Result<OwnedFd, Box<dyn Error>> {
+    Ok(OwnedFd::from(std::fs::File::open(path)?))
+}
+
+
+#[test]
+fn a_new_base_directory_gets_its_identity_file_private_and_exact() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run_named(&setup, "first")?;
+    let path = identity_path(&setup, "first");
+    assert_eq!(std::fs::read_to_string(&path)?, "acme\nfirst\n");
+    assert_eq!(std::fs::metadata(&path)?.permissions().mode() & MODE_MASK, SECRET_MODE);
+    run_named(&setup, "first")?;
+    run_named(&setup, "second")?;
+    assert_eq!(std::fs::read_to_string(identity_path(&setup, "second"))?, "acme\nsecond\n");
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_claimed_by_another_tenant_is_refused_and_the_others_still_run() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    assert_eq!(runs(&setup), 1);
+    std::fs::write(identity_path(&setup, REPOSITORY_NAME), OTHER_PRINCIPAL_IDENTITY)?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)));
+    assert_eq!(runs(&setup), 1);
+    assert!(run_named(&setup, "other").is_ok());
+    assert_eq!(runs(&setup), SEEN_RUNS);
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_claimed_by_a_folded_repository_name_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run_named(&setup, "main")?;
+    std::fs::write(identity_path(&setup, "main"), FOLDED_NAME_IDENTITY)?;
+    assert!(matches!(run_named(&setup, "main"), Err(BorgError::BaseDirCollision)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_missing_identity_file_is_refused_never_recreated() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    std::fs::remove_file(identity_path(&setup, REPOSITORY_NAME))?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)));
+    assert!(!identity_path(&setup, REPOSITORY_NAME).exists());
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_longer_or_shorter_identity_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    ["acme\nmain\nextra\n", "acme\nmain", "", "acme\nmain\n\n"]
+        .iter()
+        .try_for_each(|text| -> Result<(), Box<dyn Error>> {
+            std::fs::write(identity_path(&setup, REPOSITORY_NAME), text)?;
+            assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)), "{text:?}");
+            Ok(())
+        })?;
+    std::fs::write(identity_path(&setup, REPOSITORY_NAME), "x".repeat(OVERSIZED_IDENTITY_BYTES))?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDirCollision)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_identity_that_is_not_a_private_regular_file_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    let path = identity_path(&setup, REPOSITORY_NAME);
+    set_permissions(&path, Permissions::from_mode(GROUP_READABLE_MODE))?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    set_permissions(&path, Permissions::from_mode(SECRET_MODE))?;
+    let elsewhere = setup.dir.path().join("elsewhere");
+    std::fs::write(&elsewhere, "acme\nmain\n")?;
+    std::fs::remove_file(&path)?;
+    symlink(&elsewhere, &path)?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    std::fs::remove_file(&path)?;
+    create_dir_all(&path)?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_identity_owned_by_someone_else_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    let handle = directory_handle(&setup.state.join("borg").join("acme").join(REPOSITORY_NAME))?;
+    verify_identity(&handle, "acme\nmain\n", euid())?;
+    assert!(matches!(
+        verify_identity(&handle, "acme\nmain\n", euid().wrapping_add(1)),
+        Err(BorgError::BaseDir)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn an_identity_is_created_once_and_never_over_an_existing_one() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    let directory = setup.dir.path().join("fresh");
+    create_dir_all(&directory)?;
+    let handle = directory_handle(&directory)?;
+    write_identity(&handle, "a\nb\n")?;
+    assert!(matches!(write_identity(&handle, "c\nd\n"), Err(BorgError::BaseDir)));
+    assert_eq!(std::fs::read_to_string(directory.join(IDENTITY_FILE))?, "a\nb\n");
+    Ok(())
+}
+
+
+#[test]
+fn a_trailing_dot_in_a_repository_name_is_refused() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    assert!(matches!(run_named(&setup, "x."), Err(BorgError::BaseDir)));
+    assert_eq!(runs(&setup), 0);
     Ok(())
 }

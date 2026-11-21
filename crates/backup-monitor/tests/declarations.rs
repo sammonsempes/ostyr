@@ -81,6 +81,14 @@ fn repositories_are_checked() -> Result<(), Box<dyn Error>> {
         "tenant: a\nrepositories:\n  - repository: r\n    expected_min_snapshots: 1\n  - repository: r\n    expected_min_snapshots: 2\n",
         "duplicate repository"
     ));
+    assert!(refused(
+        "tenant: a\nrepositories:\n  - repository: x.\n    expected_min_snapshots: 1\n",
+        "repository"
+    ));
+    assert!(refused(
+        "tenant: a\nrepositories:\n  - repository: Repo\n    expected_min_snapshots: 1\n  - repository: repo\n    expected_min_snapshots: 2\n",
+        "duplicate repository"
+    ));
     Ok(())
 }
 
