@@ -790,6 +790,38 @@ fn third_migration_locks_deletes_recounts_and_adds_every_check_in_one_statement(
 
 
 #[test]
+fn fifth_migration_keeps_the_first_kev_time_and_never_clears_it() -> TestResult {
+    check_embedded(&MIGRATIONS)?;
+    let sql = MIGRATIONS.get(FOUR as usize).ok_or("no fifth migration")?.sql;
+    let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(sql.starts_with("LOCK TABLE vuln_finding_rows, vuln_asset_resolved, vuln_findings IN ACCESS EXCLUSIVE MODE;"));
+    assert!(flat.contains("ALTER TABLE vuln_findings ADD COLUMN kev_since_micros bigint CHECK (kev_since_micros >= 0);"));
+    assert!(flat.contains("UPDATE vuln_findings SET kev_since_micros = first_seen_micros WHERE kev;"));
+    assert!(flat.contains(
+        "CREATE INDEX vuln_findings_kev_open ON vuln_findings (tenant) INCLUDE (first_seen_micros, asset) \
+         WHERE kev_since_micros IS NOT NULL AND resolved_micros IS NULL;"
+    ));
+    assert!(flat.contains(
+        "CREATE INDEX vuln_findings_kev_resolved ON vuln_findings (tenant, resolved_micros) INCLUDE (first_seen_micros, asset) \
+         WHERE kev_since_micros IS NOT NULL AND resolved_micros IS NOT NULL;"
+    ));
+    let before_function = flat.split("DROP FUNCTION").next().ok_or("no function")?;
+    assert!(!before_function.contains("last_seen_micros"));
+    assert_eq!(before_function.matches("CREATE INDEX").count(), TWO);
+    assert!(flat.contains("kev_since_micros = COALESCE(vuln_findings.kev_since_micros, EXCLUDED.kev_since_micros)"));
+    assert!(flat.contains("now_micros, now_micros, NULL, CASE WHEN w.kev THEN now_micros END"));
+    assert!(!flat.contains("kev_since_micros = EXCLUDED"));
+    assert!(flat.contains("(f.installed_version, f.fixed_version, f.cvss, f.epss, f.kev, f.priority) IS DISTINCT FROM"));
+    assert!(!flat.contains("f.kev_since_micros"));
+    assert!(flat.contains(
+        "LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog, public, pg_temp SET enable_seqscan = off SET enable_bitmapscan = off SET jit = off AS $$"
+    ));
+    assert!(flat.contains("DROP FUNCTION vuln_scan_store(text, text, jsonb, bigint, bigint, bigint, bigint, bigint);"));
+    Ok(())
+}
+
+
+#[test]
 fn paging_runs_through_pinned_functions_on_one_row_comparison() -> TestResult {
     let sql = MIGRATIONS
         .get(TWO)

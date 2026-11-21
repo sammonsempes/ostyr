@@ -65,8 +65,11 @@ fn finding_of(asset: &str, package: &str, record: &str, spread: usize) -> AssetF
 
 
 fn spec_finding(asset: &str, spec: &str) -> Result<AssetFinding, Box<dyn Error>> {
-    let (package, record) = spec.split_once('/').ok_or("spec is package/record")?;
-    Ok(finding_of(asset, package, record, 0))
+    let (package, rest) = spec.split_once('/').ok_or("spec is package/record[/kev]")?;
+    let (record, flag) = rest.split_once('/').map_or((rest, ""), |(record, flag)| (record, flag));
+    let mut finding = finding_of(asset, package, record, 0);
+    finding.scored.kev = flag == "kev";
+    Ok(finding)
 }
 
 
