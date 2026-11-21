@@ -121,6 +121,8 @@ pub struct RepositoryFloor {
     pub expected_min_snapshots: usize,
     #[serde(default)]
     pub restic: Option<ResticSource>,
+    #[serde(default)]
+    pub borg: Option<BorgSource>,
 }
 
 
@@ -130,6 +132,17 @@ pub struct RepositoryFloor {
 pub struct ResticSource {
     pub location: String,
     pub password_file: String,
+}
+
+
+/// Where one Borg repository lives, the file holding its passphrase and whether the host is the archive name up to the first `-`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BorgSource {
+    pub location: String,
+    pub passphrase_file: String,
+    #[serde(default)]
+    pub hostname_from_name: bool,
 }
 
 

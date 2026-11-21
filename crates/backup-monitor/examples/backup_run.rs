@@ -1,11 +1,12 @@
-//! Usage: backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic repository (Unix only), prints coverage and findings; the state directory keeps the previous run.
+//! Usage: backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run and Borg's own base directory (required for Borg).
 
 #[cfg(unix)]
 mod run {
+    use backup_monitor::borg::{plan as borg_plan, run_raw as borg_run, BORG_PROGRAM};
     use backup_monitor::coverage::coverage;
     use backup_monitor::declarations::load_declarations;
-    use backup_monitor::model::{CoverageStatus, Declarations, FindingKind, Limits, Listing};
-    use backup_monitor::parse::parse_restic;
+    use backup_monitor::model::{BorgSource, CoverageStatus, Declarations, FindingKind, Limits, Listing};
+    use backup_monitor::parse::{parse_borg, parse_restic};
     use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
     use core_config::parse::read_file;
     use core_pg::scope::tenant_of;
@@ -37,6 +38,17 @@ mod run {
         let key = fs::read_to_string(directory.join(format!("{name}.id"))).ok()?;
         let bytes = fs::read(directory.join(format!("{name}.snapshots"))).ok()?;
         parse_restic(bytes.as_slice(), key.trim(), limits).ok()
+    }
+
+
+    fn previous_borg(state: Option<&Path>, name: &str, source: &BorgSource, limits: &Limits) -> Option<Listing> {
+        let bytes = fs::read(state?.join(format!("{name}.snapshots"))).ok()?;
+        parse_borg(bytes.as_slice(), source.hostname_from_name, limits).ok()
+    }
+
+
+    fn save_borg(state: Option<&Path>, name: &str, raw: &[u8]) -> Result<(), Box<dyn Error>> {
+        state.map_or(Ok(()), |directory| Ok(fs::write(directory.join(format!("{name}.snapshots")), raw)?))
     }
 
 
@@ -97,6 +109,41 @@ mod run {
                     let previous = previous_listing(state, name, &limits);
                     print_findings(&mut out, name, previous.as_ref(), &current, &declarations)?;
                     save(state, name, &raw)?;
+                    listings.push(current);
+                }
+                Err(error) => writeln!(out, "repository {name} failed: {error}")?,
+            }
+            Ok(())
+        })?;
+        let borg = borg_plan(&declarations, rustix::process::geteuid().as_raw());
+        borg.refused
+            .iter()
+            .try_for_each(|index| writeln!(out, "refused repository entry {index}"))?;
+        borg.runnable.iter().try_for_each(|(name, source)| -> Result<(), Box<dyn Error>> {
+            let outcome = state.ok_or("borg needs a state directory".into()).and_then(|directory: &Path| {
+                borg_run(
+                    Path::new(BORG_PROGRAM),
+                    source,
+                    &declarations.tenant,
+                    directory,
+                    &limits,
+                    Duration::from_secs(DEADLINE_SECONDS),
+                )
+                .map_err(Box::<dyn Error>::from)
+                .and_then(|raw| Ok((parse_borg(raw.as_slice(), source.hostname_from_name, &limits)?, raw)))
+            });
+            match outcome {
+                Ok((current, raw)) => {
+                    writeln!(
+                        out,
+                        "repository {name} key {} snapshots {} skipped {:?}",
+                        current.repository,
+                        current.snapshots.len(),
+                        current.skipped
+                    )?;
+                    let previous = previous_borg(state, name, source, &limits);
+                    print_findings(&mut out, name, previous.as_ref(), &current, &declarations)?;
+                    save_borg(state, name, &raw)?;
                     listings.push(current);
                 }
                 Err(error) => writeln!(out, "repository {name} failed: {error}")?,

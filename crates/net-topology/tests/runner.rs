@@ -8,8 +8,8 @@ mod types;
 use fake::{install_script, is_gone, scratch};
 use net_topology::model::RunFailure;
 use net_topology::runner::{
-    read_output, reap_killed, run_command, run_command_with_env, run_lldpcli, sigchld_ignored, wait_exit, wait_polls, MAX_DEADLINE_SECONDS,
-    MAX_STATUS_BYTES, WAIT_POLL_MILLIS,
+    read_output, reap_killed, run_command, run_command_with_env, run_command_with_input, run_lldpcli, sigchld_ignored, wait_exit, wait_polls,
+    MAX_DEADLINE_SECONDS, MAX_STATUS_BYTES, WAIT_POLL_MILLIS,
 };
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -127,6 +127,19 @@ fn only_the_given_variables_reach_the_child() -> TestResult {
     let output = run_command_with_env(&program, &[], &[("FIXED", "value"), ("PATH", "/usr/bin:/bin")], HUGE_CAP, PATIENT)
         .map_err(|failure| format!("{failure:?}"))?;
     assert_eq!(String::from_utf8(output)?, "value\nnone\n");
+    Ok(())
+}
+
+
+#[test]
+fn the_input_reaches_the_child_on_standard_input_only() -> TestResult {
+    let dir = scratch()?;
+    let program = install_script(dir.path(), "reader", r#"cat; echo "args=$#"; printenv SECRET || echo none"#)?;
+    let (reader, mut writer) = std::io::pipe()?;
+    writer.write_all(b"hunter2")?;
+    drop(writer);
+    let output = run_command_with_input(&program, &[], &[("FIXED", "value")], reader, HUGE_CAP, PATIENT).map_err(|failure| format!("{failure:?}"))?;
+    assert_eq!(String::from_utf8(output)?, "hunter2args=0\nnone\n");
     Ok(())
 }
 
