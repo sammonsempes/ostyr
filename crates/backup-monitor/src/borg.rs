@@ -1,7 +1,7 @@
 //! Runs `borg list --json` read-only for one declared repository and keys the listing on `repository.id` (Unix only).
 
 use crate::error::BackupError;
-use crate::model::{BorgSource, Declarations, Limits, Listing};
+use crate::model::{BorgSource, Declarations, Limits, Listing, DEFAULT_MAX_TEXT_CHARS};
 use crate::parse::parse_borg;
 use crate::restic::{valid_authority, valid_path, MAX_HOST_BYTES, MAX_LOCATION_BYTES, SSH_PROGRAM};
 use crate::text::valid_text;
@@ -231,21 +231,35 @@ fn make_level(parent: &Path, name: &str, euid: u32, make: fn(&Path) -> io::Resul
 }
 
 
-/// `<state>/borg/<tenant>`: `<state>` is checked first, each level is made 0700 and checked before the next, so nothing is created below an unchecked directory.
-pub fn base_directory(state: &Path, tenant: &TenantScope, euid: u32) -> Result<PathBuf, BorgError> {
-    base_directory_with(state, tenant, euid, make_private_directory)
+/// `<state>/borg/<tenant>/<repository>`: `<state>` is checked first, each level is made 0700 and checked before the next, so nothing is created below an unchecked directory.
+pub fn base_directory(state: &Path, tenant: &TenantScope, repository: &str, euid: u32) -> Result<PathBuf, BorgError> {
+    base_directory_with(state, tenant, repository, euid, make_private_directory)
 }
 
 
 /// `base_directory` with the directory maker injected, so a failing `mkdir` can be tested.
-pub fn base_directory_with(state: &Path, tenant: &TenantScope, euid: u32, make: fn(&Path) -> io::Result<()>) -> Result<PathBuf, BorgError> {
+pub fn base_directory_with(
+    state: &Path,
+    tenant: &TenantScope,
+    repository: &str,
+    euid: u32,
+    make: fn(&Path) -> io::Result<()>,
+) -> Result<PathBuf, BorgError> {
+    if !valid_text(repository, DEFAULT_MAX_TEXT_CHARS) {
+        Err(BorgError::BaseDir)?;
+    }
     open_trusted_dir(state, euid).map_err(base_refusal)?;
-    let base = make_level(&make_level(state, BORG_DIRECTORY, euid, make)?, tenant_of(tenant), euid, make)?;
-    let metadata = File::from(open_trusted_dir(&base, euid).map_err(base_refusal)?)
+    let tenant_level = make_level(&make_level(state, BORG_DIRECTORY, euid, make)?, tenant_of(tenant), euid, make)?;
+    checked_private(tenant_level, euid).and_then(|level| make_level(&level, repository, euid, make).and_then(|base| checked_private(base, euid)))
+}
+
+
+fn checked_private(level: PathBuf, euid: u32) -> Result<PathBuf, BorgError> {
+    let metadata = File::from(open_trusted_dir(&level, euid).map_err(base_refusal)?)
         .metadata()
         .map_err(base_io)?;
     if private_directory(metadata.is_dir(), metadata.mode()) {
-        Ok(base)
+        Ok(level)
     } else {
         Err(BorgError::BaseDir)
     }
@@ -279,6 +293,7 @@ pub fn run_raw(
     program: &Path,
     source: &BorgSource,
     tenant: &TenantScope,
+    repository: &str,
     state: &Path,
     limits: &Limits,
     deadline: Duration,
@@ -289,7 +304,7 @@ pub fn run_raw(
         Err(BorgError::Refused)
     } else {
         let input = passphrase_input(Path::new(&source.passphrase_file))?;
-        let base = base_directory(state, tenant, rustix::process::geteuid().as_raw())?;
+        let base = base_directory(state, tenant, repository, rustix::process::geteuid().as_raw())?;
         let base_text = base.to_str().ok_or(BorgError::BaseDir)?;
         let variables = environment(base_text);
         let pairs: Vec<(&str, &str)> = variables.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
@@ -309,9 +324,10 @@ pub fn snapshot_listing(
     program: &Path,
     source: &BorgSource,
     tenant: &TenantScope,
+    repository: &str,
     state: &Path,
     limits: &Limits,
     deadline: Duration,
 ) -> Result<Listing, BorgError> {
-    parse_run(&run_raw(program, source, tenant, state, limits, deadline)?, source, limits)
+    parse_run(&run_raw(program, source, tenant, repository, state, limits, deadline)?, source, limits)
 }

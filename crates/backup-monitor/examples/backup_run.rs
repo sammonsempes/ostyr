@@ -125,6 +125,7 @@ mod run {
                     Path::new(BORG_PROGRAM),
                     source,
                     &declarations.tenant,
+                    name,
                     directory,
                     &limits,
                     Duration::from_secs(DEADLINE_SECONDS),

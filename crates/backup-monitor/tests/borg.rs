@@ -21,6 +21,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 
+const REPOSITORY_NAME: &str = "main";
+
+
 const REPOSITORY_ID: &str = "41d98df912d10fb87c88abe9ff5fed1138c452f4e8c1ac0ff934aa6662a24e34";
 
 
@@ -151,7 +154,15 @@ fn euid() -> u32 {
 
 
 fn run(setup: &Setup) -> Result<Vec<u8>, BorgError> {
-    run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), PATIENT)
+    run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        PATIENT,
+    )
 }
 
 
@@ -288,7 +299,7 @@ fn the_argument_vector_and_environment_are_fixed_and_the_passphrase_travels_on_s
     run(&setup)?;
     let args = std::fs::read_to_string(setup.dir.path().join("args"))?;
     assert_eq!(args, format!("--lock-wait 1 list --json {}\n", setup.source.location));
-    let base = setup.state.join("borg").join("acme");
+    let base = setup.state.join("borg").join("acme").join(REPOSITORY_NAME);
     let environment = std::fs::read_to_string(setup.dir.path().join("env"))?;
     let lines: Vec<&str> = environment
         .lines()
@@ -335,7 +346,15 @@ fn an_ssh_location_is_passed_whole_and_ssh_is_named_in_full() -> Result<(), Box<
 #[test]
 fn the_listing_is_keyed_on_the_repository_id_and_reads_the_host_from_the_name() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let listing = snapshot_listing(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), PATIENT)?;
+    let listing = snapshot_listing(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        PATIENT,
+    )?;
     assert_eq!(listing.repository, REPOSITORY_ID);
     assert_eq!(listing.snapshots.len(), 1);
     assert_eq!(listing.snapshots.first().and_then(|snapshot| snapshot.host.as_deref()), Some("srv1"));
@@ -390,7 +409,15 @@ fn a_bad_passphrase_file_is_refused_before_any_spawn() -> Result<(), Box<dyn Err
             passphrase_file: file.display().to_string(),
             ..setup.source.clone()
         };
-        let outcome = run_raw(&setup.program, &source, &setup.tenant, &setup.state, &Limits::default(), PATIENT);
+        let outcome = run_raw(
+            &setup.program,
+            &source,
+            &setup.tenant,
+            REPOSITORY_NAME,
+            &setup.state,
+            &Limits::default(),
+            PATIENT,
+        );
         assert!(matches!(outcome, Err(BorgError::PassphraseFile)), "{file:?}");
         Ok(())
     })?;
@@ -427,7 +454,7 @@ fn a_failing_pipe_write_is_an_io_error() -> Result<(), Box<dyn Error>> {
 fn the_base_directory_is_created_private_and_persists_between_runs() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
     run(&setup)?;
-    let base = setup.state.join("borg").join("acme");
+    let base = setup.state.join("borg").join("acme").join(REPOSITORY_NAME);
     assert_eq!(std::fs::metadata(&base)?.permissions().mode() & MODE_MASK, PRIVATE);
     assert!(!setup.dir.path().join("seen").exists());
     run(&setup)?;
@@ -445,7 +472,7 @@ fn another_tenant_gets_another_base_directory() -> Result<(), Box<dyn Error>> {
     run(&setup)?;
     setup.tenant = tenant_scope("globex")?;
     run(&setup)?;
-    assert!(setup.state.join("borg").join("globex").join("marker").exists());
+    assert!(setup.state.join("borg").join("globex").join(REPOSITORY_NAME).join("marker").exists());
     assert!(!setup.dir.path().join("seen").exists());
     Ok(())
 }
@@ -495,10 +522,13 @@ fn a_state_directory_that_cannot_hold_the_base_is_refused() -> Result<(), Box<dy
 #[test]
 fn a_base_directory_owned_by_someone_else_is_refused() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let mine = base_directory(&setup.state, &setup.tenant, euid())?;
-    assert!(mine.ends_with("borg/acme"));
+    let mine = base_directory(&setup.state, &setup.tenant, REPOSITORY_NAME, euid())?;
+    assert!(mine.ends_with("borg/acme/main"));
     let other = euid().wrapping_add(1);
-    assert!(matches!(base_directory(&setup.state, &setup.tenant, other), Err(BorgError::BaseDir)));
+    assert!(matches!(
+        base_directory(&setup.state, &setup.tenant, REPOSITORY_NAME, other),
+        Err(BorgError::BaseDir)
+    ));
     assert!(private_directory(true, DIRECTORY_PRIVATE));
     assert!(!private_directory(false, FILE_PRIVATE));
     assert!(!private_directory(true, DIRECTORY_GROUP));
@@ -518,7 +548,15 @@ fn a_base_directory_that_is_not_text_is_refused() -> Result<(), Box<dyn Error>> 
 #[test]
 fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
     let setup = setup("sleep")?;
-    let outcome = run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), IMPATIENT);
+    let outcome = run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        IMPATIENT,
+    );
     assert!(matches!(outcome, Err(BorgError::Timeout)));
     Ok(())
 }
@@ -527,7 +565,15 @@ fn a_run_past_the_deadline_is_a_timeout() -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_grandchild_holding_stdout_is_killed_with_the_group() -> Result<(), Box<dyn Error>> {
     let setup = setup("hold")?;
-    let outcome = run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &Limits::default(), IMPATIENT);
+    let outcome = run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &Limits::default(),
+        IMPATIENT,
+    );
     assert!(matches!(outcome, Err(BorgError::Timeout)));
     let pid: u32 = std::fs::read_to_string(setup.dir.path().join("grandchild"))?.trim().parse()?;
     let gone = (0..GONE_ATTEMPTS).any(|_| {
@@ -547,7 +593,15 @@ fn output_over_the_cap_is_oversized() -> Result<(), Box<dyn Error>> {
         max_bytes: TINY_CAP,
         ..Limits::default()
     };
-    let outcome = run_raw(&setup.program, &setup.source, &setup.tenant, &setup.state, &limits, PATIENT);
+    let outcome = run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        REPOSITORY_NAME,
+        &setup.state,
+        &limits,
+        PATIENT,
+    );
     assert!(matches!(outcome, Err(BorgError::Oversized)));
     Ok(())
 }
@@ -573,6 +627,7 @@ fn a_missing_program_is_a_spawn_error() -> Result<(), Box<dyn Error>> {
         Path::new("/nonexistent/borg"),
         &setup.source,
         &setup.tenant,
+        REPOSITORY_NAME,
         &setup.state,
         &Limits::default(),
         PATIENT,
@@ -711,8 +766,63 @@ fn refusing_maker(_path: &Path) -> std::io::Result<()> {
 #[test]
 fn a_directory_that_cannot_be_made_is_a_base_refusal() -> Result<(), Box<dyn Error>> {
     let setup = setup("ok")?;
-    let outcome = base_directory_with(&setup.state, &setup.tenant, euid(), refusing_maker);
+    let outcome = base_directory_with(&setup.state, &setup.tenant, REPOSITORY_NAME, euid(), refusing_maker);
     assert!(matches!(outcome, Err(BorgError::BaseDir)));
+    assert!(!setup.state.join("borg").exists());
+    Ok(())
+}
+
+
+fn run_named(setup: &Setup, repository: &str) -> Result<Vec<u8>, BorgError> {
+    run_raw(
+        &setup.program,
+        &setup.source,
+        &setup.tenant,
+        repository,
+        &setup.state,
+        &Limits::default(),
+        PATIENT,
+    )
+}
+
+
+#[test]
+fn each_declared_repository_gets_its_own_base_directory() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run_named(&setup, "first")?;
+    run_named(&setup, "second")?;
+    let tenant = setup.state.join("borg").join("acme");
+    assert!(tenant.join("first").join("marker").exists());
+    assert!(tenant.join("second").join("marker").exists());
+    assert!(!tenant.join("marker").exists());
+    assert!(!setup.dir.path().join("seen").exists());
+    run_named(&setup, "second")?;
+    assert_eq!(std::fs::read_to_string(setup.dir.path().join("seen"))?.lines().count(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_poisoned_repository_directory_leaves_the_others_listing() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    let tenant = setup.state.join("borg").join("acme");
+    create_dir_all(&tenant)?;
+    set_permissions(&tenant, Permissions::from_mode(PRIVATE))?;
+    create_dir_all(tenant.join("evil"))?;
+    set_permissions(tenant.join("evil"), Permissions::from_mode(OPEN_MODE))?;
+    assert!(matches!(run_named(&setup, "evil"), Err(BorgError::BaseDir)));
+    assert!(run_named(&setup, "victim").is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_repository_name_outside_the_grammar_is_refused_before_any_spawn() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    ["..", ".hidden", "-x", "", "a/b", "a b"]
+        .iter()
+        .for_each(|name| assert!(matches!(run_named(&setup, name), Err(BorgError::BaseDir))));
+    assert_eq!(runs(&setup), 0);
     assert!(!setup.state.join("borg").exists());
     Ok(())
 }
