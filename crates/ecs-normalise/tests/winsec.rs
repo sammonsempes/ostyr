@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use types::TestResult;
 
 
-const CASES: [(&str, &str); 17] = [
+const CASES: [(&str, &str); 18] = [
     (include_str!("fixtures/winsec_4624.xml"), include_str!("snapshots/winsec_4624.json")),
     (
         include_str!("fixtures/winsec_4624_dash.xml"),
@@ -39,6 +39,7 @@ const CASES: [(&str, &str); 17] = [
     (include_str!("fixtures/winsec_4771.xml"), include_str!("snapshots/winsec_4771.json")),
     (include_str!("fixtures/winsec_4776.xml"), include_str!("snapshots/winsec_4776.json")),
     (include_str!("fixtures/winsec_1102.xml"), include_str!("snapshots/winsec_1102.json")),
+    (include_str!("fixtures/winsec_1100.xml"), include_str!("snapshots/winsec_1100.json")),
     (include_str!("fixtures/winsec_json.json"), include_str!("snapshots/winsec_json.json")),
 ];
 
@@ -116,6 +117,11 @@ fn cleared(provider: &str, channel: &str, id: &str, user_data: &str) -> String {
         "<Event><System><Provider Name=\"{provider}\"/><EventID>{id}</EventID><TimeCreated SystemTime=\"2026-11-03T10:00:00Z\"/>\
          <Channel>{channel}</Channel><Computer>H</Computer></System><UserData>{user_data}</UserData></Event>"
     )
+}
+
+
+fn eventlog_with(id: &str, user_data: &str) -> String {
+    cleared(EVENTLOG, "Security", id, user_data)
 }
 
 
@@ -527,7 +533,7 @@ fn m4_system_with_a_sibling_flat_channel_is_refused() -> TestResult {
 
 
 #[test]
-fn the_eventlog_provider_is_accepted_for_1102_only_on_the_security_channel() -> TestResult {
+fn the_eventlog_provider_is_accepted_for_1100_and_1102_only_on_the_security_channel() -> TestResult {
     let event = json_of(&eventlog(SUBJECT))?;
     assert_eq!(text_at(&event, "/event/action").as_deref(), Some("audit-log-cleared"));
     assert_eq!(text_at(&event, "/event/category/0").as_deref(), Some("iam"));
@@ -546,7 +552,7 @@ fn the_eventlog_provider_is_accepted_for_1102_only_on_the_security_channel() -> 
         WinSecError::Provider(_)
     ));
     assert!(matches!(
-        error_of(&cleared(EVENTLOG, "Security", "1100", SUBJECT))?,
+        error_of(&cleared(EVENTLOG, "Security", "1101", SUBJECT))?,
         WinSecError::Provider(_)
     ));
     Ok(())
@@ -587,10 +593,65 @@ fn user_data_is_bounded_and_strict() -> TestResult {
     let nested = eventlog("<LogFileCleared><SubjectUserName><b>x</b></SubjectUserName></LogFileCleared>");
     assert!(matches!(error_of(&nested)?, WinSecError::Event(SysmonError::UnexpectedChild)));
     let repeated = eventlog("<LogFileCleared><A>1</A><A>2</A></LogFileCleared>");
-    assert!(matches!(error_of(&repeated)?, WinSecError::Event(SysmonError::Duplicate("UserData"))));
+    assert!(matches!(
+        error_of(&repeated)?,
+        WinSecError::Event(SysmonError::Duplicate("UserData/leaf"))
+    ));
     let twice = eventlog(&format!("{SUBJECT}{SUBJECT}"));
     assert!(matches!(error_of(&twice)?, WinSecError::Event(SysmonError::Duplicate("LogFileCleared"))));
     let two_blocks = cleared(EVENTLOG, "Security", "1102", &format!("{SUBJECT}</UserData><UserData>"));
     assert!(matches!(error_of(&two_blocks)?, WinSecError::Event(SysmonError::Duplicate("UserData"))));
+    Ok(())
+}
+
+
+#[test]
+fn event_1100_maps_from_the_eventlog_provider_only_and_reads_no_user() -> TestResult {
+    let event = json_of(&eventlog_with("1100", SUBJECT))?;
+    assert_eq!(text_at(&event, "/event/action").as_deref(), Some("event-log-service-shutdown"));
+    assert_eq!(text_at(&event, "/event/category/0").as_deref(), Some("process"));
+    assert_eq!(text_at(&event, "/event/type/0").as_deref(), Some("end"));
+    assert_eq!(text_at(&event, "/event/kind").as_deref(), Some("event"));
+    assert!(event.pointer("/event/outcome").is_none());
+    assert!(event.pointer("/user").is_none());
+    assert!(matches!(error_of(&cleared(EVENTLOG, "System", "1100", ""))?, WinSecError::Channel(_)));
+    assert!(matches!(
+        error_of(&cleared("Other-Provider", "Security", "1100", ""))?,
+        WinSecError::Provider(_)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn eventlog_provider_with_any_other_id_is_refused() -> TestResult {
+    let ids = ["4624", "4625", "4672", "1101", "1103"];
+    ids.iter().try_for_each(|id| {
+        let error = error_of(&cleared(EVENTLOG, "Security", id, SUBJECT))?;
+        assert!(matches!(error, WinSecError::Provider(_)), "{id} gave {error}");
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+
+#[test]
+fn the_1102_subject_reads_only_the_three_subject_fields() -> TestResult {
+    let extra = eventlog(
+        "<LogFileCleared><SubjectUserName>mallory</SubjectUserName><TargetUserName>victim</TargetUserName>\
+         <IpAddress>10.0.0.1</IpAddress><LogonType>3</LogonType></LogFileCleared>",
+    );
+    let event = json_of(&extra)?;
+    assert_eq!(text_at(&event, "/user/name").as_deref(), Some("mallory"));
+    assert!(event.pointer("/source").is_none());
+    assert!(event.pointer("/labels").is_none());
+    Ok(())
+}
+
+
+#[test]
+fn a_second_user_data_block_and_a_repeated_leaf_have_distinct_errors() -> TestResult {
+    let leaf = error_of(&eventlog("<LogFileCleared><A>1</A><A>2</A></LogFileCleared>"))?;
+    let block = error_of(&cleared(EVENTLOG, "Security", "1102", &format!("{SUBJECT}</UserData><UserData>")))?;
+    assert_ne!(leaf.to_string(), block.to_string());
     Ok(())
 }

@@ -193,7 +193,7 @@ fn close(state: &mut Partial) -> Result<(), SysmonError> {
             None => Ok(()),
         },
         Target::UserData(name) => match state.user_data.insert(name, text) {
-            Some(_) => Err(SysmonError::Duplicate("UserData")),
+            Some(_) => Err(SysmonError::Duplicate("UserData/leaf")),
             None => Ok(()),
         },
         Target::Data(None) => Err(SysmonError::MissingAttribute("Data/Name")),

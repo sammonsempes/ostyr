@@ -17,7 +17,14 @@ pub const EVENTLOG_PROVIDER: &str = "Microsoft-Windows-Eventlog";
 
 
 /// The only ids accepted from `EVENTLOG_PROVIDER` on the Security channel.
-pub const EVENTLOG_IDS: &[u32] = &[1102];
+pub const EVENTLOG_IDS: &[u32] = &[1100, 1102];
+
+
+/// The only id whose subject is read from `UserData/LogFileCleared`.
+pub const CLEARED_ID: u32 = 1102;
+
+
+const CLEARED_FIELDS: [&str; 3] = ["SubjectUserName", "SubjectDomainName", "SubjectUserSid"];
 
 
 pub const SECURITY_CHANNEL: &str = "Security";
@@ -56,6 +63,7 @@ pub enum OutcomeRule {
     Success,
     Failure,
     FromStatus,
+    Unspecified,
 }
 
 
@@ -169,6 +177,13 @@ pub const WIN_KINDS: &[WinKind] = &[
         kind_type: "change",
         outcome: OutcomeRule::Success,
     },
+    WinKind {
+        id: "1100",
+        action: "event-log-service-shutdown",
+        categories: &["process"],
+        kind_type: "end",
+        outcome: OutcomeRule::Unspecified,
+    },
 ];
 
 
@@ -234,6 +249,7 @@ fn outcome_of(kind: &WinKind, fields: &Fields) -> Option<&'static str> {
     match kind.outcome {
         OutcomeRule::Success => Some(SUCCESS),
         OutcomeRule::Failure => Some(FAILURE),
+        OutcomeRule::Unspecified => None,
         OutcomeRule::FromStatus => status(fields, "Status").map(|(_, number)| if number == 0 { SUCCESS } else { FAILURE }),
     }
 }
@@ -283,9 +299,25 @@ fn check_origin(raw: &RawEvent) -> Result<(), WinSecError> {
 }
 
 
+fn subject_fields(raw: &RawEvent, from_eventlog: bool, from_user_data: bool) -> Fields {
+    if from_user_data {
+        raw.user_data
+            .iter()
+            .filter(|(name, _)| CLEARED_FIELDS.contains(&name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    } else if from_eventlog {
+        Fields::default()
+    } else {
+        raw.fields.clone()
+    }
+}
+
+
 fn build(raw: &RawEvent, kind: &WinKind, time: OffsetDateTime) -> EcsEvent {
-    let from_user_data = raw.provider.as_deref() == Some(EVENTLOG_PROVIDER);
-    let fields = if from_user_data { &raw.user_data } else { &raw.fields };
+    let from_eventlog = raw.provider.as_deref() == Some(EVENTLOG_PROVIDER);
+    let from_user_data = from_eventlog && raw.event_id == CLEARED_ID;
+    let fields = &subject_fields(raw, from_eventlog, from_user_data);
     let outcome = outcome_of(kind, fields);
     let failed = outcome == Some(FAILURE);
     EcsEvent {
