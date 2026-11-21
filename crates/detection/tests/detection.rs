@@ -1700,7 +1700,7 @@ fn pg_handler(failing: Arc<AtomicBool>, hangup: Arc<AtomicBool>, script: Script,
                     Some(code) => Reply::Error(code),
                 }
             }
-        } else if sql.contains("INSERT INTO schema_migrations") {
+        } else if sql.contains("INSERT INTO public.schema_migrations") {
             migrate.lock().ok().and_then(|code| *code).map_or(Reply::Done, Reply::Error)
         } else {
             Reply::Done
@@ -1972,7 +1972,10 @@ fn the_connection_is_kept_migrated_once_and_survives_a_refusal_from_the_database
     assert!(ids.first().is_some_and(Option::is_some));
     assert!(ids.iter().all(|id| *id == ids.first().copied().flatten()));
     assert_eq!(
-        statements.iter().filter(|entry| entry.contains("INSERT INTO schema_migrations")).count(),
+        statements
+            .iter()
+            .filter(|entry| entry.contains("INSERT INTO public.schema_migrations"))
+            .count(),
         alerts::store::MIGRATIONS.len()
     );
     let passwords: Vec<Vec<u8>> = std::iter::repeat_with(|| database.fake.passwords.try_recv())

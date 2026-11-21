@@ -1,7 +1,7 @@
 use core_pg::error::{sqlstate_class, PgError};
 use core_pg::migrate::{
     applied_sql, bootstrap_script, check_namespace, check_not_legacy, check_row_count, check_version, digest_of, migration_script, plan_migrations,
-    table_shape, AppliedMigration, Migration, TableShape, MAX_APPLIED_ROWS,
+    table_shape, AppliedMigration, Migration, TableShape, COLUMNS_SQL, MAX_APPLIED_ROWS,
 };
 use core_pg::query::timed_script;
 use core_pg::scope::{tenant_of, tenant_scope};
@@ -113,13 +113,13 @@ fn embedded_list_must_be_valid_and_ascending() -> Result<(), Box<dyn Error>> {
 fn scripts_take_the_lock_and_record_before_the_sql() -> Result<(), Box<dyn Error>> {
     let script = migration_script("store", &FIRST)?;
     let lock = script.find("pg_advisory_xact_lock").unwrap_or(usize::MAX);
-    let record = script.find("INSERT INTO schema_migrations").unwrap_or(usize::MAX);
+    let record = script.find("INSERT INTO public.schema_migrations").unwrap_or(usize::MAX);
     let sql = script.find("CREATE TABLE a").unwrap_or(usize::MAX);
     assert!(lock < record && record < sql, "{script}");
     assert!(script.contains(&digest_of(FIRST.sql)) && script.contains("('store', '0001_init'"));
     assert!(!script.contains("BEGIN") && !script.contains("COMMIT"));
     let bootstrap = bootstrap_script();
-    assert!(bootstrap.find("pg_advisory_xact_lock") < bootstrap.find("CREATE TABLE IF NOT EXISTS schema_migrations"));
+    assert!(bootstrap.find("pg_advisory_xact_lock") < bootstrap.find("CREATE TABLE IF NOT EXISTS public.schema_migrations"));
     Ok(())
 }
 
@@ -219,7 +219,7 @@ const HOSTILE: &str = "x' || current_user || '";
 
 #[test]
 fn the_applied_query_names_the_namespace_and_caps_the_rows() -> Result<(), Box<dyn Error>> {
-    assert!(applied_sql("oncall")?.contains("WHERE namespace = 'oncall'"));
+    assert!(applied_sql("oncall")?.contains("WHERE namespace OPERATOR(pg_catalog.=) 'oncall'"));
     assert!(check_row_count(MAX_APPLIED_ROWS).is_ok() && check_row_count(MAX_APPLIED_ROWS + 1).is_err());
     Ok(())
 }
@@ -234,5 +234,35 @@ fn every_sql_builder_refuses_a_hostile_namespace_or_version_itself() -> Result<(
         sql: "SELECT 1;",
     };
     assert!(matches!(migration_script("store", &hostile_version), Err(PgError::InvalidVersion { .. })));
+    Ok(())
+}
+
+
+const EXPECTED_BOOTSTRAP: &str = "SELECT pg_catalog.pg_advisory_xact_lock(7021103100); \
+    CREATE TABLE IF NOT EXISTS public.schema_migrations (namespace pg_catalog.text NOT NULL, version pg_catalog.text NOT NULL, \
+    digest pg_catalog.text NOT NULL, applied_at pg_catalog.timestamptz NOT NULL DEFAULT pg_catalog.now(), PRIMARY KEY (namespace, version))";
+
+
+const EXPECTED_APPLIED: &str = "SELECT namespace, version, digest FROM public.schema_migrations WHERE namespace OPERATOR(pg_catalog.=) 'store' \
+    ORDER BY version LIMIT 10001";
+
+
+const EXPECTED_COLUMNS: &str =
+    "SELECT column_name::pg_catalog.text FROM information_schema.columns WHERE table_schema OPERATOR(pg_catalog.=) 'public' \
+     AND table_name OPERATOR(pg_catalog.=) 'schema_migrations'";
+
+
+#[test]
+fn the_record_statements_are_pinned_as_exact_qualified_text() -> Result<(), Box<dyn Error>> {
+    assert_eq!(bootstrap_script(), EXPECTED_BOOTSTRAP);
+    assert_eq!(applied_sql("store")?, EXPECTED_APPLIED);
+    assert_eq!(COLUMNS_SQL, EXPECTED_COLUMNS);
+    let expected_script = format!(
+        "SELECT pg_catalog.pg_advisory_xact_lock(7021103100); INSERT INTO public.schema_migrations (namespace, version, digest) \
+         VALUES ('store', '0001_init', '{}'); {}",
+        digest_of(FIRST.sql),
+        FIRST.sql
+    );
+    assert_eq!(migration_script("store", &FIRST)?, expected_script);
     Ok(())
 }

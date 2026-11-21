@@ -21,14 +21,15 @@ pub const MAX_APPLIED_ROWS: usize = 10_000;
 pub fn applied_sql(namespace: &str) -> Result<String, PgError> {
     check_namespace(namespace)?;
     Ok(format!(
-        "SELECT namespace, version, digest FROM schema_migrations WHERE namespace = '{namespace}' ORDER BY version LIMIT {}",
+        "SELECT namespace, version, digest FROM public.schema_migrations WHERE namespace OPERATOR(pg_catalog.=) '{namespace}' ORDER BY version LIMIT {}",
         MAX_APPLIED_ROWS + 1
     ))
 }
 
 
 pub const COLUMNS_SQL: &str =
-    "SELECT column_name::text FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'schema_migrations'";
+    "SELECT column_name::pg_catalog.text FROM information_schema.columns WHERE table_schema OPERATOR(pg_catalog.=) 'public' \
+     AND table_name OPERATOR(pg_catalog.=) 'schema_migrations'";
 
 
 pub const DIGEST_COLUMN: usize = 2;
@@ -213,9 +214,9 @@ pub fn plan_migrations<'a>(applied: &[AppliedMigration], embedded: &'a [Migratio
 /// Creates the record table under the same advisory lock the migrations take, so concurrent starters cannot race on it.
 pub fn bootstrap_script() -> String {
     format!(
-        "SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
-         CREATE TABLE IF NOT EXISTS schema_migrations \
-         (namespace text NOT NULL, version text NOT NULL, digest text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now(), \
+        "SELECT pg_catalog.pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
+         CREATE TABLE IF NOT EXISTS public.schema_migrations (namespace pg_catalog.text NOT NULL, version pg_catalog.text NOT NULL, \
+         digest pg_catalog.text NOT NULL, applied_at pg_catalog.timestamptz NOT NULL DEFAULT pg_catalog.now(), \
          PRIMARY KEY (namespace, version))"
     )
 }
@@ -226,8 +227,8 @@ pub fn migration_script(namespace: &str, migration: &Migration) -> Result<String
     check_namespace(namespace)?;
     check_version(migration.version)?;
     Ok(format!(
-        "SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
-         INSERT INTO schema_migrations (namespace, version, digest) VALUES ('{namespace}', '{}', '{}'); {}",
+        "SELECT pg_catalog.pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
+         INSERT INTO public.schema_migrations (namespace, version, digest) VALUES ('{namespace}', '{}', '{}'); {}",
         migration.version,
         digest_of(migration.sql),
         migration.sql

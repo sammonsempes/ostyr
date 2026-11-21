@@ -58,7 +58,7 @@ fn shaped_handler(applied: Vec<Vec<String>>, columns: Vec<&'static str>) -> Hand
     Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(columns.iter().map(|column| vec![(*column).to_owned()]).collect())
-        } else if sql.contains("FROM schema_migrations") {
+        } else if sql.contains("FROM public.schema_migrations") {
             Reply::Rows(applied.clone())
         } else if sql.contains("FAILING") {
             Reply::Error("23505")
@@ -101,7 +101,7 @@ async fn a_second_run_applies_nothing() -> Result<(), Box<dyn Error>> {
     assert!(migrate(&client, NAMESPACE, &[FIRST, SECOND], DEADLINE).await?.is_empty());
     let statements = drain(&mut fake.statements);
     assert!(
-        !statements.iter().any(|sql| sql.contains("INSERT INTO schema_migrations")),
+        !statements.iter().any(|sql| sql.contains("INSERT INTO public.schema_migrations")),
         "{statements:?}"
     );
     Ok(())
@@ -119,7 +119,7 @@ async fn an_altered_migration_is_refused_before_anything_runs() -> Result<(), Bo
     assert!(matches!(result, Err(PgError::DigestMismatch { .. })));
     assert!(!drain(&mut fake.statements)
         .iter()
-        .any(|sql| sql.contains("INSERT INTO schema_migrations")));
+        .any(|sql| sql.contains("INSERT INTO public.schema_migrations")));
     Ok(())
 }
 
@@ -167,7 +167,7 @@ async fn another_server_error_is_returned_without_a_retry() -> Result<(), Box<dy
     let handler: Handler = Arc::new(|sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
-        } else if sql.contains("FROM schema_migrations") {
+        } else if sql.contains("FROM public.schema_migrations") {
             Reply::Rows(Vec::new())
         } else if sql.contains("'0001_init'") {
             Reply::Error("42601")
@@ -189,7 +189,7 @@ fn racing_handler(failing_marker: &'static str, after_race: Vec<Vec<String>>) ->
     Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
-        } else if sql.contains("FROM schema_migrations") {
+        } else if sql.contains("FROM public.schema_migrations") {
             match reads.fetch_add(1, Ordering::SeqCst) {
                 0 => Reply::Rows(Vec::new()),
                 _ => Reply::Rows(after_race.clone()),
@@ -224,10 +224,10 @@ fn losing_every_insert_handler(all: Vec<Migration>) -> Handler {
     Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
-        } else if sql.contains("FROM schema_migrations") {
+        } else if sql.contains("FROM public.schema_migrations") {
             let winners = reads.fetch_add(1, Ordering::SeqCst);
             Reply::Rows(all.iter().take(winners).map(row_of).collect())
-        } else if sql.contains("INSERT INTO schema_migrations") {
+        } else if sql.contains("INSERT INTO public.schema_migrations") {
             Reply::Error("23505")
         } else {
             Reply::Done
@@ -243,7 +243,7 @@ async fn every_insert_losing_to_another_caller_still_ends_within_the_bound() -> 
     assert!(migrate(&client, NAMESPACE, &all, DEADLINE).await?.is_empty());
     let inserts = drain(&mut fake.statements)
         .iter()
-        .filter(|sql| sql.contains("INSERT INTO schema_migrations"))
+        .filter(|sql| sql.contains("INSERT INTO public.schema_migrations"))
         .count();
     assert_eq!(inserts, all.len());
     Ok(())
@@ -332,7 +332,7 @@ async fn a_legacy_table_is_refused_and_left_unchanged() -> Result<(), Box<dyn Er
     ));
     assert!(!drain(&mut fake.statements)
         .iter()
-        .any(|sql| sql.contains("INSERT INTO schema_migrations")));
+        .any(|sql| sql.contains("INSERT INTO public.schema_migrations")));
     Ok(())
 }
 
@@ -347,6 +347,6 @@ async fn more_records_than_the_cap_are_refused_not_truncated() -> Result<(), Box
     ));
     assert!(drain(&mut fake.statements)
         .iter()
-        .any(|sql| sql.contains("WHERE namespace = 'store'") && sql.contains("LIMIT 10001")));
+        .any(|sql| sql.contains("WHERE namespace OPERATOR(pg_catalog.=) 'store'") && sql.contains("LIMIT 10001")));
     Ok(())
 }
