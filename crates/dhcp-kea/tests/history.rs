@@ -19,6 +19,7 @@ use dhcp_kea::history::{
 use dhcp_kea::row::{convert_row, Converted};
 use history_types::Row;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::future::ready;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Barrier, LazyLock, Mutex};
@@ -764,11 +765,36 @@ async fn bad_inputs_and_bad_answers_are_typed_errors() -> TestResult {
 
 
 #[test]
+fn every_function_of_the_migrations_ends_its_search_path_with_pg_temp() -> TestResult {
+    let created: BTreeSet<&str> = MIGRATIONS
+        .iter()
+        .flat_map(|migration| migration.sql.lines())
+        .filter_map(|line| {
+            line.strip_prefix("CREATE FUNCTION ")
+                .or_else(|| line.strip_prefix("CREATE OR REPLACE FUNCTION "))
+        })
+        .filter_map(|rest| rest.split('(').next())
+        .collect();
+    let last = MIGRATIONS.last().ok_or("last migration")?;
+    assert_eq!(last.version, "005_dhcp_history_search_path_temp");
+    assert!(!created.is_empty());
+    created.iter().for_each(|name| {
+        let statement = last.sql.lines().find(|line| line.starts_with(&format!("ALTER FUNCTION {name}(")));
+        assert!(
+            statement.is_some_and(|line| line.ends_with("SET search_path = pg_catalog, public, pg_temp;")),
+            "{name}"
+        );
+    });
+    Ok(())
+}
+
+
+#[test]
 fn the_statements_bind_the_tenant_and_the_migrations_are_valid() -> TestResult {
     let migration = MIGRATIONS.get(1).ok_or("second migration")?.sql;
     let eviction = MIGRATIONS.get(PAIR).ok_or("third migration")?.sql;
     let lock_64 = MIGRATIONS.get(PAIR + 1).ok_or("fourth migration")?;
-    assert_eq!(MIGRATIONS.len(), PAIR + PAIR);
+    assert_eq!(MIGRATIONS.len(), PAIR + PAIR + 1);
     assert_eq!(lock_64.version, "004_dhcp_history_lock_64");
     assert!(lock_64
         .sql
