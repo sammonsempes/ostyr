@@ -1,5 +1,6 @@
 mod memory;
 mod types;
+mod verdicts;
 
 
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -424,7 +425,7 @@ async fn a_failing_store_is_a_typed_error_not_partial_scores() -> TestResult {
 
 #[tokio::test]
 async fn malformed_rows_are_typed_errors() -> TestResult {
-    let good = row_of(&stored("a", 1, "r1", "high", 0, "h", ""));
+    let good = row_of(&stored("a", 1, "r1", "high", 0, "h", ""), "");
     let with = |column: usize, value: &str| {
         let mut row = good.clone();
         if let Some(cell) = row.get_mut(column) {
@@ -437,6 +438,7 @@ async fn malformed_rows_are_typed_errors() -> TestResult {
         good.iter().take(THREE).cloned().collect(),
         good.iter().take(THREE + 1).cloned().collect(),
         good.iter().take(THREE + TWO).cloned().collect(),
+        good.iter().take(THREE + THREE).cloned().collect(),
         with(TWO, "bogus"),
         with(THREE, "-1"),
         with(0, ""),
@@ -452,6 +454,6 @@ async fn malformed_rows_are_typed_errors() -> TestResult {
     for outcome in outcomes {
         errors += usize::from(outcome.await);
     }
-    assert_eq!(errors, SEVEN - 1);
+    assert_eq!(errors, SEVEN);
     Ok(())
 }

@@ -142,6 +142,9 @@ pub fn outcome_of(scores: Vec<Score>) -> Outcome {
         informational: 0,
         refused: BTreeMap::new(),
         truncated: None,
+        fp_rules: Vec::new(),
+        fp_rules_omitted: 0,
+        unknown_verdicts: 0,
     }
 }
 
