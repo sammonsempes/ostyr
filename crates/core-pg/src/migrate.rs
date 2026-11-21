@@ -40,6 +40,37 @@ pub const MAX_NAMESPACE_BYTES: usize = 32;
 pub const NAMESPACE_COLUMN: &str = "namespace";
 
 
+pub const REQUIRED_SEARCH_PATH: &str = "search_path=pg_catalog, public, pg_temp";
+
+
+pub const MAX_NAMED_FUNCTIONS: usize = 20;
+
+
+pub const MAX_SIGNATURE_CHARS: usize = 128;
+
+
+pub const MAX_ROW_CHARS: usize = 256;
+
+
+/// Functions of `public` outside other roles' extensions, every name `pg_catalog`-qualified so a planted `public.unnest` cannot answer.
+pub fn functions_sql() -> String {
+    format!(
+        "SELECT pg_catalog.left(p.oid::pg_catalog.regprocedure::pg_catalog.text, {cut}), \
+         pg_catalog.left(coalesce((SELECT s FROM pg_catalog.unnest(p.proconfig) AS s WHERE pg_catalog.starts_with(s, 'search_path=') LIMIT 1), ''), {cut}) \
+         FROM pg_catalog.pg_proc p WHERE p.pronamespace OPERATOR(pg_catalog.=) 'public'::pg_catalog.regnamespace \
+         AND p.prokind OPERATOR(pg_catalog.=) ANY (ARRAY['f'::pg_catalog.\"char\", 'p'::pg_catalog.\"char\"]) \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension x ON x.oid OPERATOR(pg_catalog.=) d.refobjid \
+         WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid OPERATOR(pg_catalog.=) p.oid \
+         AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass \
+         AND d.deptype OPERATOR(pg_catalog.=) 'e'::pg_catalog.\"char\" \
+         AND x.extowner OPERATOR(pg_catalog.<>) (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) current_user)) \
+         ORDER BY 1 LIMIT {limit}",
+        cut = MAX_ROW_CHARS,
+        limit = MAX_APPLIED_ROWS + 1
+    )
+}
+
+
 /// The record table as found in the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableShape {
@@ -212,6 +243,36 @@ pub async fn read_applied(client: &Client, namespace: &str, deadline: Duration) 
 }
 
 
+/// Refuses every function whose stored `search_path` is not exactly the required text; at most `MAX_NAMED_FUNCTIONS` are named, the count is exact.
+pub fn check_search_paths(functions: &[(String, String)]) -> Result<(), PgError> {
+    let bad: Vec<String> = functions
+        .iter()
+        .filter(|(_, setting)| setting != REQUIRED_SEARCH_PATH)
+        .map(|(signature, _)| signature.escape_debug().take(MAX_SIGNATURE_CHARS).collect())
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(PgError::FunctionSearchPath {
+            total: bad.len(),
+            functions: bad.iter().take(MAX_NAMED_FUNCTIONS).cloned().collect::<Vec<String>>().join(", "),
+        })
+    }
+}
+
+
+/// Reads the final state from the database, so statement order, overloads and later `CREATE OR REPLACE` cannot hide a function.
+pub async fn read_search_paths(client: &Client, deadline: Duration) -> Result<(), PgError> {
+    let rows = global_query(client, &functions_sql(), deadline).await?;
+    check_row_count(rows.len())?;
+    let functions = rows
+        .iter()
+        .map(|row| Ok((column_text(row, 0)?, column_text(row, 1)?)))
+        .collect::<Result<Vec<(String, String)>, PgError>>()?;
+    check_search_paths(&functions)
+}
+
+
 pub fn check_row_count(rows: usize) -> Result<usize, PgError> {
     if rows > MAX_APPLIED_ROWS {
         Err(PgError::TooManyRecords { limit: MAX_APPLIED_ROWS })
@@ -262,5 +323,6 @@ pub async fn migrate(client: &Client, namespace: &str, embedded: &[Migration], d
         outcome = apply_pending(client, namespace, embedded, deadline, &mut done).await;
     }
     outcome?;
+    read_search_paths(client, deadline).await?;
     Ok(done)
 }
