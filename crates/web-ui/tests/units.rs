@@ -10,6 +10,7 @@ use web_ui::api::{
     MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
 use web_ui::api::{hunts_path, valid_hunt_cursor, valid_pack_id, MAX_HUNT_CURSOR_CHARS, MAX_PACK_ID_CHARS};
+use web_ui::api::{oncall_path, parse_oncall_id, valid_oncall_text, MAX_ONCALL_FINGERPRINT_BYTES, ONCALL_STATES};
 use web_ui::api::{
     states_path, valid_state_asset, valid_state_cursor, valid_state_id, verdict_filter, MAX_STATE_ASSET_CHARS, MAX_STATE_CURSOR_HEX,
     MAX_STATE_ID_CHARS,
@@ -19,6 +20,7 @@ use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
 use web_ui::model::{ApiSection, WebLimits};
 use web_ui::model::{AssetDetailView, AssetPageView};
+use web_ui::pages::oncall_state_key;
 use web_ui::pages::window_time;
 use web_ui::routes::{comment_limits, comment_shaped, expiring_before, COMMENT_FORM_BYTES};
 use web_ui::server::wall_seconds;
@@ -479,3 +481,38 @@ fn compliance_helpers_accept_only_the_modules_grammar() -> TestResult {
     );
     Ok(())
 }
+
+
+#[test]
+fn oncall_helpers_accept_only_the_apis_rules() -> TestResult {
+    assert_eq!(parse_oncall_id("0"), Some(0));
+    assert_eq!(parse_oncall_id(SAMPLE_ONCALL_ID.to_string().as_str()), Some(SAMPLE_ONCALL_ID));
+    for bad in ["", "-1", "+1", "1e3", " 1", "99999999999999999999", "\u{661}"] {
+        assert!(parse_oncall_id(bad).is_none(), "{bad}");
+    }
+    for good in ["a", "fp one", "a-b.c:1", &"a".repeat(MAX_ONCALL_FINGERPRINT_BYTES)] {
+        assert!(valid_oncall_text(good, MAX_ONCALL_FINGERPRINT_BYTES), "{good}");
+    }
+    for bad in [
+        "",
+        " a",
+        "a ",
+        "a  b",
+        "a\tb",
+        "a\u{1b}",
+        "\u{e9}",
+        "a\u{3164}",
+        &"a".repeat(MAX_ONCALL_FINGERPRINT_BYTES + 1),
+    ] {
+        assert!(!valid_oncall_text(bad, MAX_ONCALL_FINGERPRINT_BYTES), "{bad}");
+    }
+    assert_eq!(oncall_path(), "oncall/alerts?limit=1000");
+    ONCALL_STATES
+        .iter()
+        .try_for_each(|state| oncall_state_key(state).map(|_| ()).ok_or("unmapped state"))?;
+    assert!(oncall_state_key("bogus").is_none());
+    Ok(())
+}
+
+
+const SAMPLE_ONCALL_ID: i64 = 42;
