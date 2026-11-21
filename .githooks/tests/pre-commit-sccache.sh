@@ -11,6 +11,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin" "$SCRATCH/nobin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "cargo wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} size=${SCCACHE_CACHE_SIZE:-none} inc=${CARGO_INCREMENTAL} uds=${SCCACHE_SERVER_UDS:-none}" >>"$STUB_LOG"
 S
 printf '#!/usr/bin/env bash\nexit 0\n' >"$SCRATCH/bin/sccache"

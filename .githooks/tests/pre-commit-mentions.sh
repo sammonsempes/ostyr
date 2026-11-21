@@ -10,7 +10,7 @@ trap 'rm -rf "$SCRATCH"' EXIT
 export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin"
 for tool in cargo custom_lint; do
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$SCRATCH/bin/$tool"
+  printf '#!/usr/bin/env bash\n[[ " $* " != *" kernel-declared "* ]] || echo absent\nexit 0\n' >"$SCRATCH/bin/$tool"
   chmod +x "$SCRATCH/bin/$tool"
 done
 export PATH="$SCRATCH/bin:$PATH"

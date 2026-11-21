@@ -11,11 +11,13 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "cargo $*" >>"$STUB_LOG"
 if [ "${1:-}" = metadata ]; then cat "$STUB_METADATA"; fi
 S
 cat >"$SCRATCH/bin/tool" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "tool $*" >>"$STUB_LOG"
 S
 chmod +x "$SCRATCH/bin/cargo" "$SCRATCH/bin/tool"

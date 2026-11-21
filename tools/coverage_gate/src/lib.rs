@@ -4,5 +4,8 @@ pub mod check;
 pub mod error;
 pub mod executable;
 pub mod export;
+pub mod manifest;
+pub mod metadata;
 pub mod run;
 pub mod scan;
+pub mod unscanned;

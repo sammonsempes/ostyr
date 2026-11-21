@@ -11,6 +11,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin" "$SCRATCH/nobin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "cargo $*" >>"$STUB_LOG"
 [ -z "${STUB_FAIL:-}" ] || [[ " $* " != *" $STUB_FAIL "* ]]
 S
