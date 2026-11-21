@@ -1,5 +1,6 @@
 //! Grammar of a `<ups>@<host>[:<port>]` upsc target: an ASCII allowlist, no implicit host, no IPv6, no host glibc would read as a number.
 
+use crate::grammar::is_clean_ident;
 use crate::limits::{
     DEFAULT_UPS_PORT, IPV4_OCTETS, MAX_DNS_LABEL_BYTES, MAX_DNS_NAME_BYTES, MAX_OCTET_DIGITS, MAX_PORT_DIGITS, MAX_TARGET_BYTES, MAX_UPS_NAME_BYTES,
 };
@@ -66,25 +67,25 @@ pub fn is_port(text: &str) -> bool {
 }
 
 
-/// The checked target, or `None` when any part is refused.
+/// The checked target with its canonical `<host>:<port>` label, or `None` when any part, or a label it makes, is refused.
 pub fn parse_target(text: &str) -> Option<UpsTarget> {
     let (ups, host) = text.split_once('@')?;
     let (name, port) = host.split_once(':').map_or((host, None), |(name, port)| (name, Some(port)));
-    let valid = text.len() <= MAX_TARGET_BYTES && is_ups_name(ups) && (is_ipv4(name) || is_dns_name(name)) && port.is_none_or(is_port);
+    let host_label = format!("{name}:{}", port.unwrap_or(DEFAULT_UPS_PORT));
+    let valid = text.len() <= MAX_TARGET_BYTES
+        && is_ups_name(ups)
+        && (is_ipv4(name) || is_dns_name(name))
+        && port.is_none_or(is_port)
+        && is_clean_ident(&host_label);
     valid.then(|| UpsTarget {
         text: text.to_owned(),
         ups: ups.to_owned(),
-        host: host.to_owned(),
+        host: host_label,
     })
 }
 
 
-/// The UPS name folded and the host with the default port added: two targets with one key are the same.
+/// The UPS name folded and the canonical host: two targets with one key are the same.
 pub fn target_key(target: &UpsTarget) -> (String, String) {
-    let host = if target.host.contains(':') {
-        target.host.clone()
-    } else {
-        format!("{}:{DEFAULT_UPS_PORT}", target.host)
-    };
-    (target.ups.to_ascii_lowercase(), host)
+    (target.ups.to_ascii_lowercase(), target.host.clone())
 }
