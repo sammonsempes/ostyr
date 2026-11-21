@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 pub const MIGRATION_NAMESPACE: &str = "cert_inventory";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "001_cert_inventory",
         sql: include_str!("../migrations/001_cert_inventory.sql"),
@@ -25,6 +25,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "002_cert_inventory_lock_64",
         sql: include_str!("../migrations/002_cert_inventory_lock_64.sql"),
+    },
+    Migration {
+        version: "003_cert_inventory_pg_temp_last",
+        sql: include_str!("../migrations/003_cert_inventory_pg_temp_last.sql"),
     },
 ];
 

@@ -8,7 +8,7 @@ use core_pg::scope::TenantScope;
 pub const MIGRATION_NAMESPACE: &str = "dhcp_kea";
 
 
-pub const MIGRATIONS: [Migration; 4] = [
+pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "001_dhcp_lookup_cursor",
         sql: include_str!("../migrations/001_dhcp_lookup_cursor.sql"),
@@ -24,6 +24,10 @@ pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "004_dhcp_history_lock_64",
         sql: include_str!("../migrations/004_dhcp_history_lock_64.sql"),
+    },
+    Migration {
+        version: "005_dhcp_history_search_path_temp",
+        sql: include_str!("../migrations/005_dhcp_history_search_path_temp.sql"),
     },
 ];
 
