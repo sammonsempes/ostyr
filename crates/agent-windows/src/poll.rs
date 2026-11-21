@@ -7,6 +7,8 @@ use crate::model::{
     Stream, CHANNEL_NOT_FOUND_EXIT, MAX_EVENTS_PER_POLL,
 };
 use crate::newest::query_newest;
+use crate::recreated::check_cursor;
+use crate::room::{fits, note_pause, pending_bytes};
 use crate::stream::{feed_bytes, flawed, partial_item};
 use agent_channel::spool::{append_locked, pause_between_lock_attempts};
 use tracing::warn;
@@ -43,6 +45,16 @@ pub fn plan(cursor: &CursorState, channel: &Channel, newest: u64, totals: &mut P
                 after: 0,
                 cursor: None,
                 lines: vec![gap_line(channel, GapReason::CursorAhead, None)],
+            }
+        }
+        CursorState::Recreated => {
+            totals.log_recreated += 1;
+            let name = channel.name;
+            warn!(channel = name, "windows event log was recreated, replaying");
+            Plan {
+                after: 0,
+                cursor: None,
+                lines: vec![gap_line(channel, GapReason::LogRecreated, None)],
             }
         }
         CursorState::Invalid => {
@@ -108,6 +120,8 @@ pub fn settle_end(end: RunEnd, batch: &mut Batch, stream: &mut Stream, target: (
 pub fn log_totals(channel: &Channel, totals: &PollTotals) {
     let quiet = PollTotals {
         spooled: 0,
+        spool_full: 0,
+        full_batches: 0,
         ..totals.clone()
     } == PollTotals::default();
     let name = channel.name;
@@ -150,6 +164,7 @@ pub fn run_main(
     found: (&CursorState, u64),
 ) -> Result<bool, PollError> {
     let (cursor, newest) = found;
+    let before = totals.clone();
     let planned = plan(cursor, channel, newest, totals);
     let caught_up = planned.after >= newest;
     let args = query_args(channel, planned.after, newest, state.batch);
@@ -181,11 +196,24 @@ pub fn run_main(
             feed_bytes(&mut stream, chunk, &mut |item| handle_item(&mut batch, &context, env.seen, &item));
         })?
     };
+    let full = batch.forged.is_none() && u32::try_from(batch.pending.len()) == Ok(batch.limit);
+    batch.totals.full_batches += u64::from(full);
     let partial = settle_end(end, &mut batch, &mut stream, (state, channel));
     partial.iter().for_each(|item| handle_item(&mut batch, &context, env.seen, item));
     let settled = settle(&mut batch, channel);
-    *totals = std::mem::take(&mut batch.totals);
-    finalize(env, channel, &settled).map(|()| settled.refetch)
+    let room = fits(
+        pending_bytes(env.spool).map_err(PollError::SpoolSize)?,
+        &settled.lines,
+        env.max_spool_bytes,
+    );
+    *totals = if room { std::mem::take(&mut batch.totals) } else { before };
+    totals.spool_full += u64::from(!room);
+    state.batch = if room { state.batch } else { (batch.limit / BATCH_FACTOR).max(1) };
+    if room {
+        finalize(env, channel, &settled).map(|()| settled.refetch)
+    } else {
+        Ok(false)
+    }
 }
 
 
@@ -195,7 +223,10 @@ pub fn poll_once(env: &mut PollEnv<'_>, channel: &Channel, state: &mut ChannelSt
     totals.channel_absent += u64::from(newest == Newest::Absent);
     totals.query_failed += u64::from(newest == Newest::Failed);
     let refetch = match newest {
-        Newest::Id(id) => run_main(env, channel, state, totals, (&cursor, id))?,
+        Newest::Id(id) => match check_cursor(env, channel, cursor, id, totals)? {
+            Some(checked) => run_main(env, channel, state, totals, (&checked, id))?,
+            None => false,
+        },
         _ => false,
     };
     announce_absent(channel, state, totals.channel_absent > 0);
@@ -203,12 +234,24 @@ pub fn poll_once(env: &mut PollEnv<'_>, channel: &Channel, state: &mut ChannelSt
 }
 
 
+pub fn poll_unless_full(env: &mut PollEnv<'_>, channel: &Channel, state: &mut ChannelState, totals: &mut PollTotals) -> Result<(), PollError> {
+    if poll_once(env, channel, state, totals)? {
+        state.batch = 1;
+        poll_once(env, channel, state, totals)?;
+    }
+    Ok(())
+}
+
+
 pub fn poll_channel(env: &mut PollEnv<'_>, channel: &Channel, state: &mut ChannelState) -> Result<PollTotals, PollError> {
     let mut totals = PollTotals::default();
-    if poll_once(env, channel, state, &mut totals)? {
-        state.batch = 1;
-        poll_once(env, channel, state, &mut totals)?;
+    let pending = pending_bytes(env.spool).map_err(PollError::SpoolSize)?;
+    if pending >= env.max_spool_bytes {
+        totals.spool_full += 1;
+    } else {
+        poll_unless_full(env, channel, state, &mut totals)?;
     }
+    note_pause(state, totals.spool_full > 0, pending, env.max_spool_bytes);
     log_totals(channel, &totals);
     Ok(totals)
 }

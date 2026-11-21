@@ -96,6 +96,12 @@ pub const REPLACEMENT: char = '\u{FFFD}';
 pub const NEWEST_COUNT: u32 = 1;
 
 
+pub const POLL_INTERVAL_SECONDS: u64 = 10;
+
+
+pub const MAX_REPOLLS_PER_CYCLE: u32 = 4;
+
+
 pub const REPLACED_LABEL: &str = "agent.utf16_replaced";
 
 
@@ -153,6 +159,7 @@ pub enum RunEnd {
 pub enum CursorState {
     Missing,
     Invalid,
+    Recreated,
     Valid { record_id: u64, time: String },
 }
 
@@ -162,6 +169,7 @@ pub enum GapReason {
     Hole,
     CursorInvalid,
     CursorAhead,
+    LogRecreated,
     Utf16,
 }
 
@@ -244,6 +252,9 @@ pub struct PollTotals {
     pub deadline: u64,
     pub batch_halved: u64,
     pub query_failed: u64,
+    pub log_recreated: u64,
+    pub spool_full: u64,
+    pub full_batches: u64,
 }
 
 
@@ -251,6 +262,7 @@ pub struct PollTotals {
 pub struct ChannelState {
     pub batch: u32,
     pub absent_logged: bool,
+    pub paused_polls: u32,
 }
 
 
@@ -259,6 +271,7 @@ impl Default for ChannelState {
         Self {
             batch: MAX_EVENTS_PER_POLL,
             absent_logged: false,
+            paused_polls: 0,
         }
     }
 }
@@ -291,6 +304,30 @@ pub enum Newest {
 
 
 #[derive(Debug)]
+pub struct First {
+    pub end: RunEnd,
+    pub info: Option<SystemInfo>,
+    pub torn: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    Item(SystemInfo),
+    Empty,
+    Failed,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Intact,
+    Recreated,
+    Failed,
+}
+
+
+#[derive(Debug)]
 pub struct Plan {
     pub after: u64,
     pub cursor: Option<u64>,
@@ -309,6 +346,7 @@ pub struct ForgedAt {
 #[derive(Debug)]
 pub struct Pending {
     pub id: u64,
+    pub replaced: u32,
     pub info: SystemInfo,
     pub size: usize,
     pub outcome: Outcome,
@@ -355,5 +393,6 @@ pub struct PollEnv<'a> {
     pub lock_attempts: u32,
     pub max_output_bytes: usize,
     pub deadline_seconds: u64,
+    pub max_spool_bytes: u64,
     pub seen: &'a mut SeenIds,
 }
