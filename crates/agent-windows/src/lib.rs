@@ -1,5 +1,6 @@
 //! Windows agent: reads the Sysmon and Security event logs through `wevtutil` into the agent channel spool.
 
+pub mod created;
 pub mod cursor;
 pub mod cut;
 pub mod cycle;

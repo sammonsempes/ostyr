@@ -54,6 +54,9 @@ const HALFWAY: usize = 100;
 const TIME: &str = "2026-11-03T10:00:00.1234567Z";
 
 
+const CREATED: &str = "2026-10-01T08:00:00.000Z";
+
+
 const SEC_PROVIDER: &str = "Microsoft-Windows-Security-Auditing";
 
 
@@ -173,6 +176,7 @@ pub struct Reply {
 pub struct Probes {
     pub record: Option<Reply>,
     pub oldest: Option<Reply>,
+    pub created: Option<Reply>,
 }
 
 
@@ -185,6 +189,21 @@ pub struct Script {
 
 fn wide(text: &str) -> Vec<u8> {
     BOM_BYTES.into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect()
+}
+
+
+fn plain(text: &str) -> Reply {
+    Reply {
+        chunks: vec![text.as_bytes().to_vec()],
+        end: Ok(RunEnd::Done),
+    }
+}
+
+
+fn created_reply(created: &str) -> Reply {
+    plain(&format!(
+        "name: Security\r\nenabled: true\r\ncreationTime: {created}\r\nlastWriteTime: {created}\r\n"
+    ))
 }
 
 
@@ -289,20 +308,28 @@ fn cursor_text(lab: &Lab, channel: &Channel) -> Option<String> {
 
 
 fn expected_cursor(record: u64) -> Option<String> {
-    Some(format!("{record} {TIME}\n"))
+    Some(format!("{record} {TIME} {CREATED}\n"))
 }
 
 
 fn set_cursor(lab: &Lab, channel: &Channel, record: u64) -> TestResult {
-    Ok(fs::write(state_dir(lab).join(channel.cursor_file), format!("{record} {TIME}\n"))?)
+    Ok(fs::write(
+        state_dir(lab).join(channel.cursor_file),
+        format!("{record} {TIME} {CREATED}\n"),
+    )?)
 }
 
 
 fn main_queries(requests: &Requests) -> Vec<&Vec<String>> {
     requests
         .iter()
-        .filter(|args| !args.iter().any(|arg| arg == "/rd:true") && !is_probe(args))
+        .filter(|args| !args.iter().any(|arg| arg == "/rd:true") && !is_probe(args) && !is_created(args))
         .collect()
+}
+
+
+fn is_created(args: &[String]) -> bool {
+    args.first().is_some_and(|name| name == "gli")
 }
 
 
@@ -398,7 +425,9 @@ fn run_poll_in(
         assert_eq!(request.program, WEVTUTIL_PATH);
         requests.push(request.args.to_vec());
         let query = request.args.get(QUERY_INDEX).cloned().unwrap_or_else(String::new);
-        let served = if request.args.iter().any(|arg| arg == "/rd:true") {
+        let served = if request.args.first().is_some_and(|name| name == "gli") {
+            remaining.probes.created.clone().unwrap_or_else(|| created_reply(CREATED))
+        } else if request.args.iter().any(|arg| arg == "/rd:true") {
             remaining.newest.clone()
         } else if query.contains("EventRecordID=") {
             let id: u64 = query
@@ -467,7 +496,8 @@ fn two_events_are_spooled_the_cursor_follows_and_both_queries_are_exact() -> Tes
     .iter()
     .map(|arg| (*arg).to_string())
     .collect();
-    assert_eq!(requests, vec![expected_newest, expected_main]);
+    let expected_created = vec!["gli".to_string(), "Security".to_string()];
+    assert_eq!(requests, vec![expected_newest, expected_created, expected_main]);
     assert_eq!(Some(&newest_args(&SECURITY)), requests.first());
     Ok(())
 }
@@ -510,7 +540,7 @@ fn an_event_without_a_time_still_moves_the_cursor_with_a_placeholder() -> TestRe
     let text = security(FIRST).replace(&format!("<TimeCreated SystemTime='{TIME}'/>"), "");
     let counts = totals(run_poll(&lab, &SECURITY, &mut state, script(FIRST, vec![ok(&text)])).0)?;
     assert_eq!((counts.spooled, counts.malformed), (0, 1));
-    assert_eq!(cursor_text(&lab, &SECURITY), Some(format!("{FIRST} -\n")));
+    assert_eq!(cursor_text(&lab, &SECURITY), Some(format!("{FIRST} - {CREATED}\n")));
     Ok(())
 }
 
@@ -751,7 +781,7 @@ fn every_batch_integrity_check_refuses_the_batch() -> TestResult {
         let counts = totals(run_poll(&lab, &SECURITY, &mut state, scripted).0)?;
         assert!(counts.forged >= 1, "{counts:?}");
         assert_eq!(counts.spooled, 0);
-        assert_eq!(cursor_text(&lab, &SECURITY), Some(format!("{FIRST} {TIME}\n")));
+        assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(FIRST));
         assert!(spool_lines(&lab)?.first().is_some_and(|line| line.contains("\"reason\":\"forged\"")));
         Ok(())
     })
@@ -836,7 +866,7 @@ fn a_cursor_above_the_newest_record_is_one_loud_gap_and_a_replay() -> TestResult
     assert_eq!((counts.cursor_ahead, counts.spooled), (1, PAIR));
     assert!(spool_lines(&lab)?.first().is_some_and(|line| line.contains("cursor_ahead")));
     assert_eq!(main_queries(&requests).first().and_then(|args| query_arg(args)), bounded(0, SECOND));
-    assert_eq!(cursor_text(&lab, &SECURITY), Some(format!("2 {TIME}\n")));
+    assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(PAIR));
     Ok(())
 }
 
@@ -1442,3 +1472,190 @@ fn a_spool_that_becomes_unreadable_during_the_query_is_an_error() -> TestResult 
     assert!(matches!(poll_channel(&mut env, &SECURITY, &mut state), Err(PollError::SpoolSize(_))));
     Ok(())
 }
+
+
+const NEW_CREATED: &str = "2026-11-21T01:00:00.000Z";
+
+
+const OLD_FORMAT_CURSOR: &str = "10 2026-11-03T10:00:00.1234567Z\n";
+
+
+const WRAPPED_OLDEST: u64 = 80;
+
+
+const RECOVERY_POLLS: usize = 12;
+
+
+fn cursor_created(lab: &Lab, created: Option<&str>) -> TestResult {
+    let suffix = created.map_or_else(String::new, |text| format!(" {text}"));
+    Ok(fs::write(state_dir(lab).join(SECURITY.cursor_file), format!("{FIRST} {TIME}{suffix}\n"))?)
+}
+
+
+fn created_requests(requests: &Requests) -> usize {
+    requests.iter().filter(|args| is_created(args)).count()
+}
+
+
+#[test]
+fn another_creation_time_is_a_loud_log_recreated_without_the_record_probe() -> TestResult {
+    let lab = lab()?;
+    cursor_created(&lab, Some(CREATED))?;
+    let mut state = ChannelState::default();
+    let mut scripted = script(SECOND, vec![ok(&format!("{}{}", security(1), security(PAIR)))]);
+    scripted.probes.created = Some(created_reply(NEW_CREATED));
+    let (result, requests) = run_poll(&lab, &SECURITY, &mut state, scripted);
+    let counts = totals(result)?;
+    assert_eq!(
+        (counts.log_recreated, counts.spooled, counts.holes, counts.creation_unknown),
+        (1, PAIR, 0, 0)
+    );
+    assert_eq!(probe_requests(&requests).len(), 0);
+    assert_eq!(created_requests(&requests), 1);
+    assert_eq!(main_queries(&requests).first().and_then(|args| query_arg(args)), bounded(0, SECOND));
+    assert_eq!(reason_lines(&lab, "log_recreated")?, 1);
+    assert_eq!(cursor_text(&lab, &SECURITY), Some(format!("{PAIR} {TIME} {NEW_CREATED}\n")));
+    Ok(())
+}
+
+
+#[test]
+fn a_recreation_then_a_wrap_past_the_cursor_is_log_recreated_not_a_hole() -> TestResult {
+    let lab = lab()?;
+    cursor_created(&lab, Some(CREATED))?;
+    let mut state = ChannelState::default();
+    let text = format!("{}{}", security(WRAPPED_OLDEST), security(WRAPPED_OLDEST + 1));
+    let mut scripted = script(WRAPPED_OLDEST + 1, vec![ok(&text)]);
+    scripted.probes.created = Some(created_reply(NEW_CREATED));
+    scripted.probes.record = Some(ok(""));
+    scripted.probes.oldest = Some(ok(&security(WRAPPED_OLDEST)));
+    let counts = totals(run_poll(&lab, &SECURITY, &mut state, scripted).0)?;
+    assert_eq!((counts.log_recreated, counts.holes, counts.spooled), (1, 0, PAIR));
+    assert_eq!(reason_lines(&lab, "hole")?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_forged_cursor_creation_time_is_a_loud_replay_never_a_silent_skip() -> TestResult {
+    let lab = lab()?;
+    fs::write(
+        state_dir(&lab).join(SECURITY.cursor_file),
+        format!("{PAIR} {TIME} 1999-01-01T00:00:00Z\n"),
+    )?;
+    let mut state = ChannelState::default();
+    let text = format!("{}{}{}", security(1), security(PAIR), security(u64::from(THREE)));
+    let counts = totals(run_poll(&lab, &SECURITY, &mut state, script(u64::from(THREE), vec![ok(&text)])).0)?;
+    assert_eq!((counts.log_recreated, counts.spooled), (1, u64::from(THREE)));
+    assert_eq!(reason_lines(&lab, "log_recreated")?, 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_same_creation_time_keeps_the_probe_and_a_cursor_without_one_adopts_it() -> TestResult {
+    let lab = lab()?;
+    cursor_created(&lab, Some(CREATED))?;
+    let (result, requests) = run_poll(&lab, &SECURITY, &mut ChannelState::default(), script(SECOND, vec![ok(&security(SECOND))]));
+    assert_eq!((totals(result)?.log_recreated, probe_requests(&requests).len()), (0, 1));
+    let other = self::lab()?;
+    fs::write(state_dir(&other).join(SECURITY.cursor_file), OLD_FORMAT_CURSOR)?;
+    let (second_result, second_requests) = run_poll(
+        &other,
+        &SECURITY,
+        &mut ChannelState::default(),
+        script(SECOND, vec![ok(&security(SECOND))]),
+    );
+    assert_eq!((totals(second_result)?.log_recreated, probe_requests(&second_requests).len()), (0, 1));
+    assert_eq!(cursor_text(&other, &SECURITY), expected_cursor(SECOND));
+    Ok(())
+}
+
+
+#[test]
+fn an_unreadable_creation_time_is_counted_and_the_stored_one_is_kept() -> TestResult {
+    let unreadable = [
+        plain("name: Security\r\nenabled: true\r\n"),
+        plain("creationTime: bad time\r\n"),
+        plain("creationTime: \r\n"),
+        broken(RunEnd::Failed(Some(FAILED_EXIT))),
+    ];
+    unreadable.into_iter().try_for_each(|reply| -> TestResult {
+        let lab = lab()?;
+        cursor_created(&lab, Some(CREATED))?;
+        let mut scripted = script(SECOND, vec![ok(&security(SECOND))]);
+        scripted.probes.created = Some(reply);
+        let (result, requests) = run_poll(&lab, &SECURITY, &mut ChannelState::default(), scripted);
+        let counts = totals(result)?;
+        assert_eq!((counts.creation_unknown, counts.log_recreated, counts.spooled), (1, 0, 1));
+        assert_eq!(probe_requests(&requests).len(), 1);
+        assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(SECOND));
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_creation_time_query_that_cannot_run_is_an_error() -> TestResult {
+    let lab = lab()?;
+    let mut scripted = script(SECOND, vec![ok(&security(SECOND))]);
+    scripted.probes.created = Some(Reply {
+        chunks: Vec::new(),
+        end: Err(()),
+    });
+    assert!(matches!(
+        run_poll(&lab, &SECURITY, &mut ChannelState::default(), scripted).0,
+        Err(PollError::Run(_))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_batch_recovers_to_the_default_after_a_spool_pause() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    fs::write(spool_path(&lab), "x".repeat(HALF_SPOOL))?;
+    let mut state = ChannelState::default();
+    let text = format!("{}{}{}", security(SECOND), security(THIRD), security(FOURTH));
+    totals(run_poll_capped(&lab, &SECURITY, &mut state, script(FOURTH, vec![ok(&text)]), SMALL_SPOOL).0)?;
+    assert_eq!(state.batch, HALF);
+    fs::remove_file(spool_path(&lab))?;
+    let first = totals(run_poll(&lab, &SECURITY, &mut state, script(FOURTH, vec![ok(&text)])).0)?;
+    assert_eq!((first.spooled, state.batch), (u64::from(THREE), MAX_EVENTS_PER_POLL));
+    let mut small = ChannelState {
+        batch: SINGLE,
+        ..ChannelState::default()
+    };
+    let steps = (0..RECOVERY_POLLS)
+        .map(|_| totals(run_poll(&lab, &SECURITY, &mut small, script(FOURTH, vec![ok("")])).0).map(|_| small.batch))
+        .collect::<Result<Vec<u32>, _>>()?;
+    assert_eq!(steps.last(), Some(&MAX_EVENTS_PER_POLL));
+    assert!(steps.iter().zip(steps.iter().skip(1)).all(|(before, after)| before <= after));
+    Ok(())
+}
+
+
+#[test]
+fn a_spool_that_refuses_every_batch_at_one_event_pauses_without_a_query_loop() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    fs::write(spool_path(&lab), "x".repeat(NEARLY_FULL))?;
+    let mut state = ChannelState {
+        batch: SINGLE,
+        paused_polls: 1,
+        ..ChannelState::default()
+    };
+    let (result, requests) = run_poll_capped(&lab, &SECURITY, &mut state, script(SECOND, vec![ok(&security(SECOND))]), SMALL_SPOOL);
+    let counts = totals(result)?;
+    assert_eq!((counts.spool_full, counts.spooled, counts.full_batches, state.batch), (1, 0, 0, SINGLE));
+    assert_eq!(main_queries(&requests).len(), 1);
+    assert_eq!(state.paused_polls, PAIR_STATE);
+    Ok(())
+}
+
+
+const PAIR_STATE: u32 = 2;
+
+
+const NEARLY_FULL: usize = 990;

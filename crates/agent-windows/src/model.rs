@@ -160,7 +160,7 @@ pub enum CursorState {
     Missing,
     Invalid,
     Recreated,
-    Valid { record_id: u64, time: String },
+    Valid { record_id: u64, time: String, created: Option<String> },
 }
 
 
@@ -253,6 +253,7 @@ pub struct PollTotals {
     pub batch_halved: u64,
     pub query_failed: u64,
     pub log_recreated: u64,
+    pub creation_unknown: u64,
     pub spool_full: u64,
     pub full_batches: u64,
 }
