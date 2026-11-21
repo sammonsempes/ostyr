@@ -121,3 +121,68 @@ pub fn finding_uid(text: &str) -> Option<String> {
         .filter(|uid| !uid.is_empty() && uid.len() <= MAX_FINDING_UID_BYTES)
         .map(str::to_owned)
 }
+
+
+pub const RANK_FATAL: u8 = 7;
+
+
+pub const RANK_CRITICAL: u8 = 6;
+
+
+pub const RANK_HIGH: u8 = 5;
+
+
+pub const RANK_MEDIUM: u8 = 4;
+
+
+pub const RANK_LOW: u8 = 3;
+
+
+pub const RANK_INFORMATIONAL: u8 = 2;
+
+
+pub const RANK_OTHER: u8 = 1;
+
+
+pub const RANK_UNKNOWN: u8 = 0;
+
+
+/// The `status_code` text of a status, the inverse of `status_of`.
+pub fn status_text(status: Status) -> &'static str {
+    match status {
+        Status::Pass => "PASS",
+        Status::Fail => "FAIL",
+        Status::Manual => "MANUAL",
+        Status::Muted => "MUTED",
+    }
+}
+
+
+/// The OCSF caption of a severity, the inverse of `severity_of`.
+pub fn severity_text(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Unknown => "Unknown",
+        Severity::Informational => "Informational",
+        Severity::Low => "Low",
+        Severity::Medium => "Medium",
+        Severity::High => "High",
+        Severity::Critical => "Critical",
+        Severity::Fatal => "Fatal",
+        Severity::Other => "Other",
+    }
+}
+
+
+/// The stored order of severities, the map the paging index sorts on (`RANK_*`, pinned by a CHECK of the table).
+pub fn severity_rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Fatal => RANK_FATAL,
+        Severity::Critical => RANK_CRITICAL,
+        Severity::High => RANK_HIGH,
+        Severity::Medium => RANK_MEDIUM,
+        Severity::Low => RANK_LOW,
+        Severity::Informational => RANK_INFORMATIONAL,
+        Severity::Other => RANK_OTHER,
+        Severity::Unknown => RANK_UNKNOWN,
+    }
+}

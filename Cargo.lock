@@ -1117,10 +1117,12 @@ dependencies = [
 name = "cloud-posture"
 version = "0.0.0"
 dependencies = [
+ "alerts",
  "core-config",
  "core-pg",
  "libc",
  "net-topology",
+ "regex",
  "rustix 1.1.6",
  "serde",
  "serde-saphyr",
@@ -1130,6 +1132,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "tracing",
 ]
 
