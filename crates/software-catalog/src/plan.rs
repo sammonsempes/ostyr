@@ -14,6 +14,12 @@ use vuln_match::version::parse_version;
 pub const MALFORMED_REASON: &str = "inventory_malformed";
 
 
+pub const INCOMPLETE_REASON: &str = "inventory_incomplete";
+
+
+pub const ABSENT_REASON: &str = "inventory_absent";
+
+
 pub fn plan(catalogue: &Catalogue, assignment: &Assignment, installed: &Installed, available: &Available) -> Result<Plan, PlanError> {
     plan_with(catalogue, assignment, installed, available, &Limits::default())
 }
@@ -134,25 +140,44 @@ pub fn action_of(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>) ->
 pub fn wanted_action(entry: &Entry, installed: &Installed, available: &Available) -> Option<Action> {
     let row = row_of(entry, installed);
     let kind = row.as_ref().map_or(Some(ActionKind::Install), |found| compare(entry, found));
-    let manager = manager_of(&entry.source);
-    let gapped = covers(installed, manager);
-    kind.filter(|found| !(gapped && installed.over_limit > 0 && matches!(found, ActionKind::Install | ActionKind::Update)))
-        .map(|found| {
-            let gated = gate(found, entry, row.as_ref(), available);
-            if gapped && installed.malformed > 0 && gated == ActionKind::Install {
-                Action {
-                    reason: Some(MALFORMED_REASON),
-                    ..action_of(ActionKind::Unknown, entry, row.as_ref())
-                }
-            } else {
-                action_of(gated, entry, row.as_ref())
-            }
+    kind.map(|found| {
+        refusal(found, entry, row.as_ref(), installed).unwrap_or_else(|| action_of(gate(found, entry, row.as_ref(), available), entry, row.as_ref()))
+    })
+}
+
+
+pub fn refusal(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>, installed: &Installed) -> Option<Action> {
+    gap_reason(installed, manager_of(&entry.source))
+        .filter(|_| matches!(kind, ActionKind::Install | ActionKind::Update | ActionKind::Uninstall))
+        .map(|reason| Action {
+            reason: Some(reason),
+            ..action_of(ActionKind::Unknown, entry, row)
         })
 }
 
 
+pub fn gap_reason(installed: &Installed, manager: Manager) -> Option<&'static str> {
+    if !covers(installed, manager) {
+        Some(ABSENT_REASON)
+    } else if installed.over_limit > 0 {
+        Some(INCOMPLETE_REASON)
+    } else if installed.malformed > 0 {
+        Some(MALFORMED_REASON)
+    } else {
+        None
+    }
+}
+
+
+pub fn scope(installed: &Installed) -> Option<Manager> {
+    installed
+        .manager
+        .filter(|manager| installed.rows.iter().all(|row| row.manager == *manager))
+}
+
+
 pub fn covers(installed: &Installed, manager: Manager) -> bool {
-    installed.manager.is_none_or(|read| read == manager)
+    scope(installed).is_none_or(|read| read == manager)
 }
 
 
@@ -204,14 +229,22 @@ pub fn compare(entry: &Entry, row: &InstalledRow) -> Option<ActionKind> {
 
 
 pub fn removal_action(entry: &Entry, installed: &Installed) -> Option<Action> {
-    row_of(entry, installed).filter(|_| entry.uninstall).map(|row| {
-        let kind = match (row.held, row_count(entry, installed) > 1) {
-            (true, _) => ActionKind::Held,
-            (false, true) => ActionKind::UninstallAmbiguous,
-            (false, false) => ActionKind::Uninstall,
-        };
-        action_of(kind, entry, Some(&row))
-    })
+    let manager = manager_of(&entry.source);
+    match row_of(entry, installed) {
+        Some(row) if entry.uninstall => {
+            let kind = match (row.held, row_count(entry, installed) > 1) {
+                (true, _) => ActionKind::Held,
+                (false, true) => ActionKind::UninstallAmbiguous,
+                (false, false) => ActionKind::Uninstall,
+            };
+            Some(refusal(kind, entry, Some(&row), installed).unwrap_or_else(|| action_of(kind, entry, Some(&row))))
+        }
+        None if entry.uninstall && !covers(installed, manager) => Some(Action {
+            reason: Some(ABSENT_REASON),
+            ..action_of(ActionKind::Unknown, entry, None)
+        }),
+        _ => None,
+    }
 }
 
 

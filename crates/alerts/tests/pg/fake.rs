@@ -337,7 +337,23 @@ pub async fn serve_connection(
 }
 
 
-pub async fn start(mode: Mode, expected: &str, handler: Handler) -> io::Result<Fake> {
+pub const ISOLATION_QUERY: &str = "SHOW default_transaction_isolation";
+
+
+/// The real server answers the isolation check of core-pg `migrate`: `read committed`, as the client pins it.
+pub fn with_isolation(inner: Handler) -> Handler {
+    Arc::new(move |sql| {
+        if sql.contains(ISOLATION_QUERY) {
+            Reply::Rows(vec![vec!["read committed".to_owned()]])
+        } else {
+            inner(sql)
+        }
+    })
+}
+
+
+pub async fn start(mode: Mode, expected: &str, inner: Handler) -> io::Result<Fake> {
+    let handler: Handler = with_isolation(inner);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let (password_sender, passwords) = unbounded_channel();

@@ -97,6 +97,15 @@ async fn client_with(password: &str) -> Result<(Result<Client, core_pg::error::P
 
 
 #[tokio::test]
+async fn the_isolation_check_of_migrate_is_answered_read_committed() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with("p").await?;
+    let rows = client?.query("SHOW default_transaction_isolation", &[]).await?;
+    assert_eq!(rows.first().ok_or("no row")?.get::<_, String>(0), "read committed");
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn a_wrong_password_is_refused_and_reported() -> Result<(), Box<dyn Error>> {
     let (client, mut fake, _dir) = client_with("wrong").await?;
     assert!(client.is_err());

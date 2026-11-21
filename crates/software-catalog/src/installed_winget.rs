@@ -197,9 +197,17 @@ pub fn winget_installed(raw: &RawValue, count: usize, limits: &Limits) -> Result
 }
 
 
+pub fn winget_start() -> Installed {
+    Installed {
+        manager: Some(Manager::Winget),
+        ..Installed::default()
+    }
+}
+
+
 pub fn merge(left: Installed, right: Installed) -> Installed {
     Installed {
-        manager: left.manager.or(right.manager),
+        manager: if left.manager == right.manager { left.manager } else { None },
         rows: left.rows.into_iter().chain(right.rows).collect(),
         malformed: left.malformed + right.malformed,
         over_limit: left.over_limit + right.over_limit,
@@ -242,11 +250,12 @@ pub fn parse_winget_export<Reader: Read>(reader: Reader, limits: &Limits) -> Res
                 .sources
                 .iter()
                 .zip(sources.iter())
-                .try_fold(Installed::default(), |installed, (raw, source)| {
+                .try_fold(winget_start(), |installed, (raw, source)| {
                     let part = if is_winget_source(&source.details) {
                         winget_installed(raw, source.packages, limits)?
                     } else {
                         Installed {
+                            manager: Some(Manager::Winget),
                             other_source: source.packages,
                             ..Installed::default()
                         }

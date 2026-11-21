@@ -1,10 +1,10 @@
-use crate::common::{available, catalogue, entry, TestResult};
+use crate::common::{available, catalogue, entry, row, TestResult};
 use software_catalog::installed::parse_installed;
 use software_catalog::installed_rpm::parse_rpm_installed;
-use software_catalog::installed_winget::parse_winget_export;
+use software_catalog::installed_winget::{merge, parse_winget_export};
 use software_catalog::limits::Limits;
 use software_catalog::model::{ActionKind, Assignment, Installed, InventoryIncomplete, Manager, Plan, Source};
-use software_catalog::plan::{plan, MALFORMED_REASON};
+use software_catalog::plan::{plan, ABSENT_REASON, INCOMPLETE_REASON, MALFORMED_REASON};
 use std::io::Cursor;
 
 
@@ -87,11 +87,30 @@ fn no_install_or_update(result: &Plan) -> bool {
 }
 
 
+fn summary(result: &Plan) -> Vec<(ActionKind, &str, Option<&str>)> {
+    result
+        .actions
+        .iter()
+        .filter(|action| action.kind != ActionKind::NotInCatalogue)
+        .map(|action| (action.kind, action.name.as_str(), action.reason))
+        .collect()
+}
+
+
+fn unknowns(reason: &'static str) -> Vec<(ActionKind, &'static str, Option<&'static str>)> {
+    ["a", "b", "c"]
+        .into_iter()
+        .map(|name| (ActionKind::Unknown, name, Some(reason)))
+        .collect()
+}
+
+
 #[test]
 fn winget_over_limit_plans_no_install_and_names_the_gap() -> TestResult {
     let installed = parse_winget_export(Cursor::new(winget_text(&many(SMALL + 1))), &small())?;
     let result = plan_for(winget, Manager::Winget, &installed)?;
-    assert!(result.actions.is_empty());
+    assert_eq!(summary(&result), unknowns(INCOMPLETE_REASON));
+    assert!(result.actions.iter().all(|action| action.arguments.is_empty()));
     assert_eq!(
         result.inventory_incomplete,
         vec![InventoryIncomplete {
@@ -115,54 +134,139 @@ fn apt_and_dnf_over_limit_plan_no_install_or_update() -> TestResult {
     assert_eq!(dnf_installed.over_limit, SMALL);
     assert!(no_install_or_update(&apt_plan));
     assert!(no_install_or_update(&dnf_plan));
-    assert_eq!(
-        apt_plan.inventory_incomplete,
-        vec![InventoryIncomplete {
-            manager: Manager::Apt,
-            over_limit: SMALL
-        }]
-    );
-    assert_eq!(
-        dnf_plan.inventory_incomplete,
-        vec![InventoryIncomplete {
-            manager: Manager::Dnf,
-            over_limit: SMALL
-        }]
-    );
+    assert_eq!(summary(&apt_plan), unknowns(INCOMPLETE_REASON));
+    assert_eq!(summary(&dnf_plan), unknowns(INCOMPLETE_REASON));
+    assert_eq!(apt_plan.inventory_incomplete.len(), 1);
+    assert_eq!(dnf_plan.inventory_incomplete.len(), 1);
     Ok(())
 }
 
 
 #[test]
-fn one_malformed_package_makes_every_install_unknown_and_valid_rows_still_plan() -> TestResult {
+fn a_gap_never_lets_an_uninstall_through() -> TestResult {
+    let mut removal = entry("a", apt("libc6"), "2.0.0");
+    removal.uninstall = true;
+    let cat = catalogue(vec![removal]);
+    let assignment = Assignment {
+        install: vec![],
+        remove: vec!["a".to_string()],
+    };
+    let held = parse_installed(Cursor::new("libc6\t1.0\thi\nd\t1.0\tii\ne\t1.0\tii\n"), &small())?;
+    let held_plan = plan(&cat, &assignment, &held, &available(Manager::Apt, &[]))?;
+    assert_eq!(held.over_limit, 1);
+    assert_eq!(summary(&held_plan), vec![(ActionKind::Held, "a", None)]);
+    let plain = parse_installed(Cursor::new("libc6\t1.0\tii\nd\t1.0\tii\ne\t1.0\tii\n"), &small())?;
+    let second = plan(&cat, &assignment, &plain, &available(Manager::Apt, &[]))?;
+    assert_eq!(summary(&second), vec![(ActionKind::Unknown, "a", Some(INCOMPLETE_REASON))]);
+    Ok(())
+}
+
+
+#[test]
+fn one_malformed_package_makes_every_action_unknown() -> TestResult {
     let text = winget_text(r#"{"PackageIdentifier":"A.One","Version":"1.0.0"},"junk",{"PackageIdentifier":"B.Two","Version":"2.0.0"}"#);
     let installed = parse_winget_export(Cursor::new(text), &Limits::default())?;
     assert_eq!(installed.malformed, 1);
     let result = plan_for(winget, Manager::Winget, &installed)?;
-    let summary: Vec<(ActionKind, &str, Option<&str>)> = result
-        .actions
-        .iter()
-        .map(|action| (action.kind, action.name.as_str(), action.reason))
-        .collect();
     assert_eq!(
-        summary,
-        vec![(ActionKind::Update, "a", None), (ActionKind::Unknown, "c", Some(MALFORMED_REASON))]
+        summary(&result),
+        vec![
+            (ActionKind::Unknown, "a", Some(MALFORMED_REASON)),
+            (ActionKind::Unknown, "c", Some(MALFORMED_REASON))
+        ]
     );
-    assert!(result
-        .actions
-        .iter()
-        .filter(|action| action.kind == ActionKind::Unknown)
-        .all(|action| action.arguments.is_empty()));
+    assert!(result.actions.iter().all(|action| action.arguments.is_empty()));
     assert!(result.inventory_incomplete.is_empty());
     Ok(())
 }
 
 
 #[test]
-fn a_gap_of_one_manager_leaves_other_managers_alone() -> TestResult {
-    let installed = parse_winget_export(Cursor::new(winget_text(&many(SMALL + 1))), &small())?;
+fn a_winget_only_inventory_makes_other_managers_absent() -> TestResult {
+    let installed = parse_winget_export(Cursor::new(winget_text(&many(1))), &small())?;
     let result = plan_for(apt, Manager::Apt, &installed)?;
-    assert_eq!(result.actions.iter().filter(|action| action.kind == ActionKind::Install).count(), ENTRIES);
+    assert_eq!(summary(&result), unknowns(ABSENT_REASON));
+    assert!(result.inventory_incomplete.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn an_absent_manager_uninstall_is_unknown_and_a_plain_removal_is_nothing() -> TestResult {
+    let installed = parse_winget_export(Cursor::new(winget_text(&many(1))), &small())?;
+    let mut removal = entry("a", apt("pkg"), "2.0.0");
+    removal.uninstall = true;
+    let plain = entry("b", apt("other"), "2.0.0");
+    let cat = catalogue(vec![removal, plain]);
+    let assignment = Assignment {
+        install: vec![],
+        remove: vec!["a".to_string(), "b".to_string()],
+    };
+    let result = plan(&cat, &assignment, &installed, &available(Manager::Apt, &[]))?;
+    assert_eq!(summary(&result), vec![(ActionKind::Unknown, "a", Some(ABSENT_REASON))]);
+    let covered = plan(&cat, &assignment, &Installed::default(), &available(Manager::Apt, &[]))?;
+    assert!(covered.actions.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_merged_mixed_inventory_covers_every_manager_both_ways() -> TestResult {
+    let apt_ok = parse_installed(Cursor::new("a.one\t1.0\tii\n"), &Limits::default())?;
+    let win_over = parse_winget_export(Cursor::new(winget_text(&many(SMALL + 1))), &small())?;
+    let apt_bad = parse_installed(Cursor::new("a.one\t1.0\tii\nbroken line\n"), &Limits::default())?;
+    let win_ok = parse_winget_export(Cursor::new(winget_text(&many(1))), &Limits::default())?;
+    let first = merge(apt_ok, win_over);
+    let second = merge(win_ok, apt_bad);
+    assert_eq!(first.manager, None);
+    assert_eq!(second.manager, None);
+    let first_apt = plan_for(apt, Manager::Apt, &first)?;
+    let first_win = plan_for(winget, Manager::Winget, &first)?;
+    assert_eq!(summary(&first_apt), unknowns(INCOMPLETE_REASON));
+    assert_eq!(summary(&first_win), unknowns(INCOMPLETE_REASON));
+    assert_eq!(first_apt.inventory_incomplete.len(), UNATTRIBUTED_MANAGERS);
+    let second_apt = plan_for(apt, Manager::Apt, &second)?;
+    let second_win = plan_for(winget, Manager::Winget, &second)?;
+    assert_eq!(summary(&second_apt), unknowns(MALFORMED_REASON));
+    assert_eq!(summary(&second_win), unknowns(MALFORMED_REASON));
+    Ok(())
+}
+
+
+#[test]
+fn absent_is_named_even_when_the_package_is_not_offered() -> TestResult {
+    let installed = parse_winget_export(Cursor::new(winget_text(&many(1))), &small())?;
+    let cat = catalogue(vec![entry("a", apt("nano"), "2.0.0")]);
+    let assignment = Assignment {
+        install: vec!["a".to_string()],
+        remove: vec![],
+    };
+    let result = plan(&cat, &assignment, &installed, &available(Manager::Apt, &[]))?;
+    assert_eq!(summary(&result), vec![(ActionKind::Unknown, "a", Some(ABSENT_REASON))]);
+    Ok(())
+}
+
+
+#[test]
+fn merging_two_readers_of_one_manager_keeps_it() -> TestResult {
+    let left = parse_installed(Cursor::new("a\t1.0\tii\n"), &Limits::default())?;
+    let right = parse_installed(Cursor::new("b\t1.0\tii\n"), &Limits::default())?;
+    assert_eq!(merge(left, right).manager, Some(Manager::Apt));
+    Ok(())
+}
+
+
+#[test]
+fn a_hand_built_mixed_value_is_treated_as_covering_everything() -> TestResult {
+    let installed = Installed {
+        manager: Some(Manager::Apt),
+        rows: vec![row(Manager::Winget, "X.Y", "1.0.0")],
+        over_limit: 1,
+        ..Installed::default()
+    };
+    let result = plan_for(winget, Manager::Winget, &installed)?;
+    assert_eq!(summary(&result), unknowns(INCOMPLETE_REASON));
+    assert_eq!(result.inventory_incomplete.len(), UNATTRIBUTED_MANAGERS);
     Ok(())
 }
 
@@ -174,7 +278,7 @@ fn an_unattributed_gap_covers_every_manager() -> TestResult {
         ..Installed::default()
     };
     let result = plan_for(apt, Manager::Apt, &installed)?;
-    assert!(result.actions.is_empty());
+    assert_eq!(summary(&result), unknowns(INCOMPLETE_REASON));
     assert_eq!(result.inventory_incomplete.len(), UNATTRIBUTED_MANAGERS);
     Ok(())
 }

@@ -224,6 +224,16 @@ async fn a_hostile_certificate_name_never_reaches_the_error() -> Result<(), Box<
 }
 
 
+#[tokio::test]
+async fn every_connection_pins_read_committed_at_startup() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let settings = settings_for(dir.path(), 1, "", "p", DEADLINE.as_secs())?;
+    let config = pg_config(&settings, b"p");
+    assert_eq!(config.get_options(), Some("-c default_transaction_isolation=read\\ committed"));
+    Ok(())
+}
+
+
 #[test]
 fn rustls_errors_are_classed_without_their_text() -> Result<(), Box<dyn Error>> {
     assert_eq!(

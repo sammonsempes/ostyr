@@ -32,6 +32,12 @@ pub const COLUMNS_SQL: &str =
      AND table_name OPERATOR(pg_catalog.=) 'schema_migrations'";
 
 
+pub const ISOLATION_SQL: &str = "SHOW default_transaction_isolation";
+
+
+pub const REQUIRED_ISOLATION: &str = "read committed";
+
+
 pub const DIGEST_COLUMN: usize = 2;
 
 
@@ -300,6 +306,22 @@ pub async fn read_search_paths(client: &Client, deadline: Duration) -> Result<()
 }
 
 
+pub fn check_isolation(level: Option<&str>) -> Result<(), PgError> {
+    match level {
+        Some(REQUIRED_ISOLATION) => Ok(()),
+        _ => Err(PgError::IsolationLevel),
+    }
+}
+
+
+/// Lock-then-count caps of the stores hold only under READ COMMITTED: the connection must run it.
+pub async fn read_isolation(client: &Client, deadline: Duration) -> Result<(), PgError> {
+    let rows = global_query(client, ISOLATION_SQL, deadline).await?;
+    let level = rows.first().map(|row| column_text(row, 0)).transpose()?;
+    check_isolation(level.as_deref())
+}
+
+
 pub fn check_row_count(rows: usize) -> Result<usize, PgError> {
     if rows > MAX_APPLIED_ROWS {
         Err(PgError::TooManyRecords { limit: MAX_APPLIED_ROWS })
@@ -339,6 +361,7 @@ pub async fn apply_pending(
 pub async fn migrate(client: &Client, namespace: &str, embedded: &[Migration], deadline: Duration) -> Result<Vec<String>, PgError> {
     check_namespace(namespace)?;
     check_embedded(embedded)?;
+    read_isolation(client, deadline).await?;
     execute_script(client, &bootstrap_script(), deadline).await?;
     check_not_legacy(read_shape(client, deadline).await?)?;
     let mut done = Vec::new();
