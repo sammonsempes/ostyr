@@ -262,6 +262,34 @@ pub struct OversizedView {
 }
 
 
+/// `GET /compliance/state` and `GET /compliance/assets/{asset}` items; every field is checked before it is printed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StateView {
+    pub baseline: String,
+    pub control: String,
+    pub asset: String,
+    pub verdict: String,
+    pub first_failed: Option<String>,
+    pub last_seen: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StateListView {
+    pub items: Vec<StateView>,
+    pub skipped: u64,
+    pub next_cursor: Option<String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StateAssetView {
+    pub items: Vec<StateView>,
+    pub skipped: u64,
+    pub truncated: bool,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FindingsView {
     pub items: Vec<FindingView>,

@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 176;
+pub const TEXT_COUNT: usize = 204;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -188,6 +188,34 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("col_window_end", "Window end"),
     ("col_matches", "Matches"),
     ("col_max_matches", "Match limit"),
+    ("hunts_no_readable", "No readable finding on this page."),
+    ("hunts_skipped_one", "1 row could not be read."),
+    ("hunts_oversized_one", "1 finding has an over-long pack id."),
+    ("hunts_oversized_capped_one", "At least 1 finding has an over-long pack id."),
+    ("nav_compliance", "Compliance"),
+    ("title_compliance", "Compliance drift"),
+    ("title_compliance_asset", "Compliance of"),
+    ("compliance_empty", "No control in this state."),
+    ("compliance_no_readable", "No readable control on this page."),
+    ("compliance_next", "Next controls"),
+    ("compliance_back", "Back to compliance"),
+    ("compliance_unreadable", "Unreadable row."),
+    ("compliance_skipped", "{count} rows could not be read."),
+    ("compliance_skipped_one", "1 row could not be read."),
+    ("compliance_truncated", "Results cut at 1000."),
+    ("compliance_verdict_label", "Verdict"),
+    ("compliance_baseline_label", "Baseline"),
+    ("compliance_filter", "Filter"),
+    ("col_baseline", "Baseline"),
+    ("col_control", "Control"),
+    ("col_asset", "Asset"),
+    ("col_verdict", "Verdict"),
+    ("col_first_failed", "Failing since"),
+    ("verdict_fail", "Failed"),
+    ("verdict_error", "Error"),
+    ("verdict_excepted", "Excepted"),
+    ("verdict_pass", "Passed"),
+    ("verdict_all", "All"),
 ];
 
 
@@ -377,6 +405,34 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("col_window_end", "Fin de fenêtre"),
     ("col_matches", "Correspondances"),
     ("col_max_matches", "Limite de correspondances"),
+    ("hunts_no_readable", "Aucun résultat lisible sur cette page."),
+    ("hunts_skipped_one", "1 ligne n'a pas pu être lue."),
+    ("hunts_oversized_one", "1 résultat a un identifiant de pack trop long."),
+    ("hunts_oversized_capped_one", "Au moins 1 résultat a un identifiant de pack trop long."),
+    ("nav_compliance", "Conformité"),
+    ("title_compliance", "Dérive de conformité"),
+    ("title_compliance_asset", "Conformité de"),
+    ("compliance_empty", "Aucun contrôle dans cet état."),
+    ("compliance_no_readable", "Aucun contrôle lisible sur cette page."),
+    ("compliance_next", "Contrôles suivants"),
+    ("compliance_back", "Retour à la conformité"),
+    ("compliance_unreadable", "Ligne illisible."),
+    ("compliance_skipped", "{count} lignes n'ont pas pu être lues."),
+    ("compliance_skipped_one", "1 ligne n'a pas pu être lue."),
+    ("compliance_truncated", "Résultats coupés à 1000."),
+    ("compliance_verdict_label", "Verdict"),
+    ("compliance_baseline_label", "Référentiel"),
+    ("compliance_filter", "Filtrer"),
+    ("col_baseline", "Référentiel"),
+    ("col_control", "Contrôle"),
+    ("col_asset", "Actif"),
+    ("col_verdict", "Verdict"),
+    ("col_first_failed", "En échec depuis"),
+    ("verdict_fail", "En échec"),
+    ("verdict_error", "Erreur"),
+    ("verdict_excepted", "Exception"),
+    ("verdict_pass", "Conforme"),
+    ("verdict_all", "Tous"),
 ];
 
 

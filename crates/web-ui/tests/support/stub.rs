@@ -86,6 +86,7 @@ pub struct StubState {
     pub risk_paths: Mutex<Vec<String>>,
     pub cert_paths: Mutex<Vec<String>>,
     pub hunt_paths: Mutex<Vec<String>>,
+    pub state_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -964,12 +965,145 @@ pub async fn hunt_list_handler(State(state): State<Arc<StubState>>, headers: Hea
             Mode::BadCursor => Json(finding_list(vec![], 0, 0, false, Some("a b"))).into_response(),
             Mode::Hostile => Json(hunt_hostile_list()).into_response(),
             Mode::Chunked => Json(finding_list(vec![], 0, 0, false, None)).into_response(),
+            Mode::BadId => Json(finding_list(vec![], 1, 1, false, Some(HUNT_NEXT_CURSOR))).into_response(),
+            Mode::BadSeverity => Json(finding_list(vec![finding("p", HUNT_START, HUNT_END)], 0, 1, true, None)).into_response(),
             _ => Json(finding_list(
                 vec![finding("baseline-1", HUNT_START, HUNT_END), finding("lateral.move", HUNT_START, HUNT_END)],
                 HUNT_SKIPPED,
                 HUNT_OVERSIZED,
                 false,
                 Some(HUNT_NEXT_CURSOR),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub const STATE_ASSET_LIMIT: usize = 1000;
+
+
+pub const STATE_MANY_SKIPPED: u32 = 3;
+
+
+pub const STATE_ASSET_SKIPPED: u32 = 2;
+
+
+pub const STATE_NEXT_CURSOR: &str = "626173650063746c00686f73742d31";
+
+
+pub const STATE_HOSTILE_BASELINE: &str = "evil\u{1b}[31m";
+
+
+pub const STATE_HOSTILE_ASSET: &str = "web\u{3164}01";
+
+
+pub const STATE_FIRST_FAILED: &str = "2026-03-01T10:00:00+01:00";
+
+
+pub const STATE_LAST_SEEN: &str = "2026-03-02T00:00:00Z";
+
+
+pub fn state_item(baseline: &str, control: &str, asset: &str, verdict: &str, first_failed: Option<&str>, last_seen: &str) -> Value {
+    json!({"baseline": baseline, "control": control, "asset": asset, "verdict": verdict, "first_failed": first_failed, "last_seen": last_seen})
+}
+
+
+pub fn state_list(items: Vec<Value>, skipped: u32, next: Option<&str>) -> Value {
+    json!({"items": items, "skipped": skipped, "next_cursor": next})
+}
+
+
+pub fn state_asset(items: Vec<Value>, skipped: u32, truncated: bool) -> Value {
+    json!({"items": items, "skipped": skipped, "truncated": truncated})
+}
+
+
+pub fn state_hostile_items(asset: &str) -> Vec<Value> {
+    vec![
+        state_item(STATE_HOSTILE_BASELINE, "c1", asset, "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN),
+        state_item("base", "c<script>", asset, "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN),
+        state_item("base", "c2", STATE_HOSTILE_ASSET, "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN),
+        state_item("base", "c3", "-x", "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN),
+        state_item("base", "c4", asset, "bogus", None, STATE_LAST_SEEN),
+        state_item("base", "c5", asset, "fail", Some("not a time"), STATE_LAST_SEEN),
+        state_item("base", "c6", asset, "pass", Some("0000-01-01T00:00:00+02:00"), STATE_LAST_SEEN),
+        state_item("base", "c7", asset, "pass", None, "9999-12-31T23:00:00-02:00"),
+        state_item("base", "c8", "other-asset", "pass", None, STATE_LAST_SEEN),
+        state_item("base", "fine.1", asset, "excepted", None, STATE_LAST_SEEN),
+    ]
+}
+
+
+pub async fn state_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.state_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(state_list(
+                (0..MANY_ITEMS)
+                    .map(|_| state_item("b", "c", "a", "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN))
+                    .collect(),
+                0,
+                None,
+            ))
+            .into_response(),
+            Mode::BadCursor => Json(state_list(vec![], 0, Some("ABCDEF"))).into_response(),
+            Mode::Hostile => Json(state_list(state_hostile_items("web01"), 1, None)).into_response(),
+            Mode::Chunked => Json(state_list(vec![], 0, None)).into_response(),
+            Mode::BadId => Json(state_list(vec![], 1, Some(STATE_NEXT_CURSOR))).into_response(),
+            Mode::BadSeverity => Json(state_list(vec![], STATE_MANY_SKIPPED, None)).into_response(),
+            _ => Json(state_list(
+                vec![
+                    state_item("base", "ctl-1", "host-1", "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN),
+                    state_item("base", "ctl-2", "a/b+c", "pass", None, STATE_LAST_SEEN),
+                ],
+                1,
+                Some(STATE_NEXT_CURSOR),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn state_asset_handler(
+    State(state): State<Arc<StubState>>,
+    headers: HeaderMap,
+    Path(asset): Path<String>,
+    uri: axum::http::Uri,
+) -> Response {
+    note_forwarded(&state, &headers);
+    state.state_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(state_asset(
+                (0..=STATE_ASSET_LIMIT)
+                    .map(|_| state_item("b", "c", &asset, "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN))
+                    .collect(),
+                0,
+                false,
+            ))
+            .into_response(),
+            Mode::Hostile => Json(state_asset(state_hostile_items(&asset), 1, true)).into_response(),
+            Mode::Chunked => Json(state_asset(vec![], 0, false)).into_response(),
+            Mode::BadId => Json(state_asset(vec![], 1, false)).into_response(),
+            _ if asset == "elsewhere" => error_reply(StatusCode::NOT_FOUND),
+            _ => Json(state_asset(
+                vec![
+                    state_item("base", "ctl-1", &asset, "fail", Some(STATE_FIRST_FAILED), STATE_LAST_SEEN),
+                    state_item("base", "ctl-2", &asset, "error", None, STATE_LAST_SEEN),
+                ],
+                STATE_ASSET_SKIPPED,
+                true,
             ))
             .into_response(),
         }
@@ -1002,6 +1136,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         risk_paths: Mutex::new(Vec::new()),
         cert_paths: Mutex::new(Vec::new()),
         hunt_paths: Mutex::new(Vec::new()),
+        state_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -1021,6 +1156,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/certificates", get(cert_list_handler))
         .route("/certificates/{fingerprint}", get(cert_detail_handler))
         .route("/hunts/findings", get(hunt_list_handler))
+        .route("/compliance/state", get(state_list_handler))
+        .route("/compliance/assets/{asset}", get(state_asset_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))

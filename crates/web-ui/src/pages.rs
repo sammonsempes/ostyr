@@ -1,9 +1,11 @@
 use crate::api::{
-    encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_pack_id, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_RISK_VALUE, RISK_KINDS,
+    encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_pack_id, valid_state_asset, valid_state_id, CERT_FILTERS,
+    MAX_COMMENT_CHARS, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
-    CertView, CommentView, FindingView, FindingsView, Language, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView,
+    CertView, CommentView, FindingView, FindingsView, Language, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, StateAssetView,
+    StateListView, StateView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
@@ -186,6 +188,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/risk", text(language, "nav_risk")))
                         (go("/certificates", text(language, "nav_certs")))
                         (go("/hunts", text(language, "nav_hunts")))
+                        (go("/compliance", text(language, "nav_compliance")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -1096,14 +1099,26 @@ pub fn hunts_notices(language: Language, list: &FindingsView) -> Markup {
     } else {
         "hunts_oversized"
     };
+    let oversized_one_key = if list.oversized.capped {
+        "hunts_oversized_capped_one"
+    } else {
+        "hunts_oversized_one"
+    };
     html! {
         @if list.skipped > 0 {
-            div class="notice" { (text(language, "hunts_skipped").replace("{count}", &list.skipped.to_string())) }
+            div class="notice" { (counted_notice(language, "hunts_skipped_one", "hunts_skipped", list.skipped)) }
         }
         @if list.oversized.count > 0 {
-            div class="notice" { (text(language, oversized_key).replace("{count}", &list.oversized.count.to_string())) }
+            div class="notice" { (counted_notice(language, oversized_one_key, oversized_key, list.oversized.count.unsigned_abs())) }
         }
     }
+}
+
+
+/// The singular text for a count of one, else the plural text with its `{count}`.
+pub fn counted_notice(language: Language, one_key: &str, many_key: &str, count: u64) -> String {
+    let key = if count == 1 { one_key } else { many_key };
+    text(language, key).replace("{count}", &count.to_string())
 }
 
 
@@ -1116,7 +1131,7 @@ pub fn hunts_page(language: Language, csrf: &str, list: &FindingsView) -> Markup
             h1 { (text(language, "title_hunts")) }
             (hunts_notices(language, list))
             @if list.items.is_empty() {
-                div { (text(language, "hunts_empty")) }
+                div { (text(language, if list.skipped > 0 { "hunts_no_readable" } else { "hunts_empty" })) }
             } @else {
                 table {
                     thead {
@@ -1139,6 +1154,170 @@ pub fn hunts_page(language: Language, csrf: &str, list: &FindingsView) -> Markup
                     button type="submit" { (text(language, "hunts_next")) }
                 }
             }
+        },
+    )
+}
+
+
+pub const NO_TIME: &str = "-";
+
+
+pub const STATE_LIST_COLUMNS: u32 = 6;
+
+
+pub const STATE_ASSET_COLUMNS: u32 = 5;
+
+
+/// The text key of one of the four stored verdicts, `None` for anything else.
+pub fn verdict_key(verdict: &str) -> Option<&'static str> {
+    match verdict {
+        "fail" => Some("verdict_fail"),
+        "error" => Some("verdict_error"),
+        "excepted" => Some("verdict_excepted"),
+        "pass" => Some("verdict_pass"),
+        _other => None,
+    }
+}
+
+
+/// The verdict key and both times as UTC text, `None` unless every field is inside its grammar.
+pub fn readable_state(state: &StateView) -> Option<(&'static str, String, String)> {
+    let first_failed = state.first_failed.as_deref().map_or(Some(NO_TIME.to_owned()), window_time);
+    let last_seen = window_time(&state.last_seen);
+    let identity = valid_state_id(&state.baseline) && valid_state_id(&state.control) && valid_state_asset(&state.asset);
+    identity
+        .then(|| verdict_key(&state.verdict))
+        .flatten()
+        .zip(first_failed)
+        .zip(last_seen)
+        .map(|((key, first), last)| (key, first, last))
+}
+
+
+/// One row; `only_asset` is the asset of a detail page, where a row of another asset is refused alone.
+pub fn state_row(language: Language, state: &StateView, only_asset: Option<&str>) -> Markup {
+    let shown = readable_state(state).filter(|_| only_asset.is_none_or(|asset| asset == state.asset));
+    match shown {
+        Some((key, first_failed, last_seen)) => html! {
+            tr {
+                td { (state.baseline) }
+                td { (state.control) }
+                @if only_asset.is_none() {
+                    td { (go(&format!("/compliance/{}", encode_asset_id(&state.asset)), &state.asset)) }
+                }
+                td { (text(language, key)) }
+                td { (first_failed) }
+                td { (last_seen) }
+            }
+        },
+        None => html! {
+            tr { td colspan=(if only_asset.is_none() { STATE_LIST_COLUMNS } else { STATE_ASSET_COLUMNS }) { (text(language, "compliance_unreadable")) } }
+        },
+    }
+}
+
+
+pub fn state_head(language: Language, with_asset: bool) -> Markup {
+    html! {
+        thead {
+            tr {
+                th { (text(language, "col_baseline")) }
+                th { (text(language, "col_control")) }
+                @if with_asset {
+                    th { (text(language, "col_asset")) }
+                }
+                th { (text(language, "col_verdict")) }
+                th { (text(language, "col_first_failed")) }
+                th { (text(language, "col_last_seen")) }
+            }
+        }
+    }
+}
+
+
+pub fn state_filter_form(language: Language, verdict: &str, baseline: Option<&str>) -> Markup {
+    html! {
+        form method="get" action="/compliance" {
+            label {
+                (text(language, "compliance_verdict_label")) " "
+                select name="verdict" {
+                    @for option in STATE_VERDICTS.iter().chain([&VERDICT_ALL]) {
+                        option value=(option) selected[*option == verdict] {
+                            (text(language, verdict_key(option).unwrap_or("verdict_all")))
+                        }
+                    }
+                }
+            }
+            label {
+                (text(language, "compliance_baseline_label")) " "
+                input type="text" name="baseline" maxlength=(MAX_STATE_ID_CHARS) value=(baseline.unwrap_or(""));
+            }
+            button type="submit" { (text(language, "compliance_filter")) }
+        }
+    }
+}
+
+
+pub fn compliance_page(language: Language, csrf: &str, list: &StateListView, verdict: &str, baseline: Option<&str>) -> Markup {
+    layout(
+        language,
+        "title_compliance",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_compliance")) }
+            (state_filter_form(language, verdict, baseline))
+            @if list.skipped > 0 {
+                div class="notice" { (counted_notice(language, "compliance_skipped_one", "compliance_skipped", list.skipped)) }
+            }
+            @if list.items.is_empty() {
+                div { (text(language, if list.skipped > 0 { "compliance_no_readable" } else { "compliance_empty" })) }
+            } @else {
+                table {
+                    (state_head(language, true))
+                    tbody {
+                        @for state in &list.items { (state_row(language, state, None)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &list.next_cursor {
+                form method="get" action="/compliance" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    input type="hidden" name="verdict" value=(verdict);
+                    @if let Some(name) = baseline {
+                        input type="hidden" name="baseline" value=(name);
+                    }
+                    button type="submit" { (text(language, "compliance_next")) }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn compliance_asset_page(language: Language, csrf: &str, asset: &str, detail: &StateAssetView) -> Markup {
+    layout(
+        language,
+        "title_compliance_asset",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_compliance_asset")) " " (asset) }
+            @if detail.skipped > 0 {
+                div class="notice" { (counted_notice(language, "compliance_skipped_one", "compliance_skipped", detail.skipped)) }
+            }
+            @if detail.truncated {
+                div class="notice" { (text(language, "compliance_truncated")) }
+            }
+            @if detail.items.is_empty() {
+                div { (text(language, if detail.skipped > 0 { "compliance_no_readable" } else { "compliance_empty" })) }
+            } @else {
+                table {
+                    (state_head(language, false))
+                    tbody {
+                        @for state in &detail.items { (state_row(language, state, Some(asset))) }
+                    }
+                }
+            }
+            (go("/compliance", text(language, "compliance_back")))
         },
     )
 }

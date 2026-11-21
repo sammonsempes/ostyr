@@ -1,13 +1,14 @@
 use crate::api::{
-    cert_filter, get_alert, get_asset, get_case, get_cert, get_risk_entity, list_alerts, list_assets, list_cases, list_certs, list_findings,
-    list_risk, login, logout, post_case_action, post_case_comment, risk_kind, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor,
-    valid_hunt_cursor, valid_id, MAX_COMMENT_CHARS, SECONDS_PER_DAY,
+    cert_filter, get_alert, get_asset, get_case, get_cert, get_risk_entity, get_state_asset, list_alerts, list_assets, list_cases, list_certs,
+    list_findings, list_risk, list_states, login, logout, post_case_action, post_case_comment, risk_kind, valid_asset_cursor, valid_case_id,
+    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_state_cursor, valid_state_id, verdict_filter, MAX_COMMENT_CHARS,
+    SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, cert_page, certs_page, comment_unloaded_page,
-    error_page, hunts_page, login_page, risk_entity_page, risk_page, STYLESHEET,
+    compliance_asset_page, compliance_page, error_page, hunts_page, login_page, risk_entity_page, risk_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -774,6 +775,90 @@ pub async fn show_hunts(
 }
 
 
+/// The verdict from its fixed set (`fail` when absent), an empty baseline as none, any other baseline inside the API's grammar.
+pub fn parse_state_filter(query: &BTreeMap<String, String>) -> Result<(&'static str, Option<&str>), FormRefusal> {
+    let verdict = query
+        .get("verdict")
+        .map_or(Some(VERDICT_DEFAULT), |text| verdict_filter(text))
+        .ok_or(FormRefusal::Malformed)?;
+    let baseline = query
+        .get("baseline")
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+        .map_or(Ok(None), |name| valid_state_id(name).then_some(Some(name)).ok_or(FormRefusal::Malformed))?;
+    Ok((verdict, baseline))
+}
+
+
+pub fn parse_state_cursor(query: &BTreeMap<String, String>) -> Result<Option<&str>, FormRefusal> {
+    query
+        .get("cursor")
+        .map(|text| {
+            Some(text.as_str())
+                .filter(|cursor| valid_state_cursor(cursor))
+                .ok_or(FormRefusal::Malformed)
+        })
+        .transpose()
+}
+
+
+pub async fn show_compliance_page(
+    state: &WebState,
+    source: IpAddr,
+    headers: &HeaderMap,
+    query: &BTreeMap<String, String>,
+) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let (verdict, baseline) = parse_state_filter(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let cursor = parse_state_cursor(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
+    let client = state.api.load_full();
+    let list = list_states(&client, source, &principal.token, verdict, baseline, cursor)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(
+        StatusCode::OK,
+        &compliance_page(language, &principal.csrf, &list, verdict, baseline),
+        &[],
+    ))
+}
+
+
+pub async fn show_compliance(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_compliance_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_compliance_asset_page(state: &WebState, source: IpAddr, headers: &HeaderMap, asset: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let detail = get_state_asset(&client, source, &principal.token, asset)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(
+        StatusCode::OK,
+        &compliance_asset_page(language, &principal.csrf, asset, &detail),
+        &[],
+    ))
+}
+
+
+pub async fn show_compliance_asset(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(asset): Path<String>,
+) -> Response {
+    merge(show_compliance_asset_page(&state, peer.ip(), &headers, &asset).await)
+}
+
+
 pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
 
 
@@ -919,6 +1004,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/certificates", get(show_certs))
         .route("/certificates/{fingerprint}", get(show_cert))
         .route("/hunts", get(show_hunts))
+        .route("/compliance", get(show_compliance))
+        .route("/compliance/{asset}", get(show_compliance_asset))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))
