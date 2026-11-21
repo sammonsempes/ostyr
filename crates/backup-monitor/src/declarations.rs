@@ -24,6 +24,13 @@ pub fn all_unique<'a>(names: impl Iterator<Item = &'a str>) -> bool {
 }
 
 
+/// True when no two names are equal after ASCII case folding (a casefold state directory would merge them).
+pub fn all_unique_folded<'a>(names: impl Iterator<Item = &'a str>) -> bool {
+    let mut seen = BTreeSet::new();
+    names.into_iter().all(|name| seen.insert(name.to_ascii_lowercase()))
+}
+
+
 /// The first invalid part of the declarations, or `None`.
 pub fn problem(file: &DeclarationsFile) -> Option<&'static str> {
     if file.critical.len() > MAX_ENTRIES || file.repositories.len() > MAX_ENTRIES {
@@ -50,7 +57,7 @@ pub fn problem(file: &DeclarationsFile) -> Option<&'static str> {
         .all(|entry| (1..=MAX_FLOOR).contains(&entry.expected_min_snapshots))
     {
         Some("expected_min_snapshots")
-    } else if !all_unique(file.repositories.iter().map(|entry| entry.repository.as_str())) {
+    } else if !all_unique_folded(file.repositories.iter().map(|entry| entry.repository.as_str())) {
         Some("duplicate repository")
     } else {
         None
