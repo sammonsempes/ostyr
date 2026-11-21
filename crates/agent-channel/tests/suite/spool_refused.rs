@@ -5,7 +5,7 @@ use agent_channel::proto::EventBatch;
 use agent_channel::spool::{
     claim_spool, copy_after_excess, directory_of, line_limit, open_old, quarantine, quarantine_refused, remove_regular_file,
     remove_stale_temporaries, rewrite_quarantine_with, RefusedLines, MAX_QUARANTINED_LINES, MAX_REFUSAL_WARNINGS, MAX_REJECTED_BYTES,
-    MAX_REJECTED_LINES, QUARANTINE_LOCK_BUSY, QUARANTINE_TEMPORARY_INFIX,
+    MAX_REJECTED_LINES, MAX_STALE_ENTRIES, QUARANTINE_LOCK_BUSY, QUARANTINE_TEMPORARY_INFIX,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -239,7 +239,7 @@ fn the_oldest_quarantine_lines_make_room_for_new_ones_in_one_stream() -> TestRes
 
 
 #[test]
-fn a_quarantine_in_an_unusable_directory_is_an_error_and_a_directory_in_its_place_is_not() -> TestResult {
+fn a_quarantine_in_an_unusable_directory_and_a_directory_in_its_place_disable_the_quarantine() -> TestResult {
     let dir = tempdir()?;
     let refused = RefusedLines {
         lines: vec!["x".to_owned()],
@@ -248,7 +248,7 @@ fn a_quarantine_in_an_unusable_directory_is_an_error_and_a_directory_in_its_plac
     };
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "file")?;
-    assert!(quarantine_refused(&blocker.join("spool"), &refused).is_err());
+    assert!(quarantine_refused(&blocker.join("spool"), &refused).is_ok());
     let spool = dir.path().join("spool");
     fs::create_dir(dir.path().join("spool.rejected"))?;
     assert!(quarantine_refused(&spool, &refused).is_ok());
@@ -590,7 +590,7 @@ fn a_rewrite_that_cannot_get_the_quarantine_lock_fails_and_changes_nothing() -> 
 fn a_bare_file_name_has_the_current_directory_and_a_bad_directory_is_an_error() -> TestResult {
     assert_eq!(directory_of(Path::new("spool.rejected")), Path::new("."));
     assert_eq!(directory_of(Path::new("/a/spool.rejected")), Path::new("/a"));
-    assert!(remove_stale_temporaries(Path::new("/nonexistent-t590-dir"), ".x", remove_regular_file).is_err());
+    assert!(remove_stale_temporaries(Path::new("/nonexistent-t590-dir"), ".x", remove_regular_file, MAX_STALE_ENTRIES).is_err());
     Ok(())
 }
 
@@ -651,11 +651,11 @@ fn a_leftover_that_cannot_be_removed_is_skipped_and_counted_and_only_this_quaran
     fs::write(dir.path().join(".spool.rejected.quarantine-aaaaaa"), "x")?;
     fs::write(dir.path().join(".other.rejected.quarantine-bbbbbb"), "y")?;
     assert_eq!(
-        remove_stale_temporaries(dir.path(), ".spool.rejected.quarantine-", refuse_removal)?,
+        remove_stale_temporaries(dir.path(), ".spool.rejected.quarantine-", refuse_removal, MAX_STALE_ENTRIES)?,
         (0, 1)
     );
     assert_eq!(
-        remove_stale_temporaries(dir.path(), ".spool.rejected.quarantine-", remove_regular_file)?,
+        remove_stale_temporaries(dir.path(), ".spool.rejected.quarantine-", remove_regular_file, MAX_STALE_ENTRIES)?,
         (1, 0)
     );
     assert_eq!(leftovers(dir.path())?, vec![".other.rejected.quarantine-bbbbbb".to_owned()]);
