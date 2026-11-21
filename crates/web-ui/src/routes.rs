@@ -201,7 +201,7 @@ pub fn failure_class(failure: &ApiFailure) -> &'static str {
         ApiFailure::Status(_) => "status",
         ApiFailure::TooLarge => "too_large",
         ApiFailure::Malformed(_) => "malformed",
-        ApiFailure::Json(_) => "json",
+        ApiFailure::Json { .. } => "json",
     }
 }
 
@@ -221,7 +221,7 @@ pub fn api_refusal(language: Language, csrf: Option<&str>, failure: &ApiFailure)
         | ApiFailure::Status(_)
         | ApiFailure::TooLarge
         | ApiFailure::Malformed(_)
-        | ApiFailure::Json(_) => refusal(language, csrf, StatusCode::BAD_GATEWAY, "error_unavailable"),
+        | ApiFailure::Json { .. } => refusal(language, csrf, StatusCode::BAD_GATEWAY, "error_unavailable"),
     }
 }
 

@@ -57,10 +57,7 @@ pub const SOURCE_ATTACHED: &str = "attached";
 pub const SOURCE_REPORTED: &str = "reported";
 
 
-pub const UNCERTAIN_OWN_CONTENT: &str = "forward_has_own_content";
-
-
-pub const UNCERTAIN_CONTENT_UNREAD: &str = "forward_content_unread";
+pub const UNCERTAIN_ATTACHED_CLAIM: &str = "attached_claim";
 
 
 pub const UNCERTAIN_FROM_UNPARSED: &str = "from_unparsed";
@@ -80,13 +77,6 @@ struct Context<'a> {
 struct Adoption {
     internal: bool,
     from_unparsed: bool,
-}
-
-
-#[derive(Debug, Clone, Copy)]
-struct Unseen {
-    refused: usize,
-    parts: usize,
 }
 
 
@@ -497,22 +487,11 @@ fn adopt_original(record: &mut Triage, info: &LevelInfo, facts: &Adoption) {
     record.original_internal = facts.internal;
     record.counts.original_internal += usize::from(facts.internal);
     record.original_source = Some(if info.level == 0 { SOURCE_REPORTED } else { SOURCE_ATTACHED }.to_owned());
+    if info.level != 0 {
+        mark_uncertain(record, UNCERTAIN_ATTACHED_CLAIM);
+    }
     if facts.from_unparsed {
         mark_uncertain(record, UNCERTAIN_FROM_UNPARSED);
-    }
-}
-
-
-/// A forward that carries its own URLs or attachments next to the attached message cannot be told from a forwarded decoy.
-fn note_own_content(record: &mut Triage, message: &Message<'_>, limits: &Limits, unseen: Unseen) {
-    let others = message.attachments().take(limits.parts).filter(|part| !is_attached_message(part)).count()
-        + attached_count(message, limits).saturating_sub(1);
-    let forward = record.original_level == Some(1);
-    if forward && (!record.urls.is_empty() || others > 0 || unseen.refused > 0) {
-        mark_uncertain(record, UNCERTAIN_OWN_CONTENT);
-    }
-    if forward && unseen.parts > 0 {
-        mark_uncertain(record, UNCERTAIN_CONTENT_UNREAD);
     }
 }
 
@@ -536,18 +515,10 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
         adopt_original(&mut record, &info, &adoption);
     }
     let known = std::mem::take(&mut record.urls);
-    let (refused_before, parts_before) = (record.counts.urls_refused, record.counts.parts_skipped);
     record.urls = collect_urls(message, index, context, known, &mut record.counts);
-    let unseen = Unseen {
-        refused: record.counts.urls_refused.saturating_sub(refused_before),
-        parts: record.counts.parts_skipped.saturating_sub(parts_before),
-    };
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
-    if index == 0 {
-        note_own_content(&mut record, message, context.limits, unseen);
-    }
     record.levels.push(info);
     record
 }

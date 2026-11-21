@@ -1,7 +1,8 @@
 use crate::caddy::CaddyConfig;
 use serde::de::IgnoredAny;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use std::path::PathBuf;
 
 
 /// First pass: only counts the routes, each one is skipped without being materialised.
@@ -130,6 +131,7 @@ pub enum CommandStatus {
     Success,
     Failed(Option<i32>),
     TimedOut,
+    Refused,
 }
 
 
@@ -139,8 +141,8 @@ pub enum CommandStatus {
 pub struct ApplySettings {
     pub routes_file: String,
     pub out_dir: String,
-    #[serde(default = "default_program")]
-    pub caddy_program: String,
+    #[serde(default, rename = "caddy_program", deserialize_with = "key_present")]
+    pub retired_caddy_program: bool,
     #[serde(default = "default_socket")]
     pub admin_socket: String,
     #[serde(default = "default_deadline")]
@@ -148,8 +150,9 @@ pub struct ApplySettings {
 }
 
 
-pub fn default_program() -> String {
-    crate::limits::DEFAULT_CADDY_PROGRAM.to_owned()
+/// True whenever the key is written, whatever its value (a `null` included): the retired key is refused, never read.
+pub fn key_present<'de, Input: Deserializer<'de>>(deserializer: Input) -> Result<bool, Input::Error> {
+    IgnoredAny::deserialize(deserializer).map(|_| true)
 }
 
 
@@ -169,6 +172,7 @@ pub struct Applied {
     pub id: String,
     pub epoch: u64,
     pub settings: ApplySettings,
+    pub program: PathBuf,
     pub json: String,
     pub ca_root: Option<CaRoot>,
     pub refused: Vec<Refusal>,

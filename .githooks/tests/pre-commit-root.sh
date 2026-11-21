@@ -51,6 +51,7 @@ expect() {
 env PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >/dev/null 2>&1
 expect "clippy plain" '^cargo clippy'
 expect "llvm-cov plain" '^cargo \+nightly llvm-cov'
+expect "doc tests plain" '^cargo test --doc --offline$'
 if grep -qE '^(nice|ionice)' "$STUB_LOG"; then
   echo "FAIL: low priority wrapper used"
   FAILS=$((FAILS + 1))
@@ -72,8 +73,18 @@ if env STUB_FAIL=clippy PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-c
   echo "FAIL: failing step accepted"
   FAILS=$((FAILS + 1))
 fi
-if ! grep -qF "FAILED at step: 2/5 cargo clippy" "$SCRATCH/out"; then
+if ! grep -qF "FAILED at step: 2/6 cargo clippy" "$SCRATCH/out"; then
   echo "FAIL: failing step not named"
+  FAILS=$((FAILS + 1))
+fi
+
+: >"$STUB_LOG"
+if env STUB_FAIL=--doc PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >"$SCRATCH/out" 2>&1; then
+  echo "FAIL: failing doc tests accepted"
+  FAILS=$((FAILS + 1))
+fi
+if ! grep -qF "FAILED at step: 6/6 cargo test --doc" "$SCRATCH/out"; then
+  echo "FAIL: failing doc step not named"
   FAILS=$((FAILS + 1))
 fi
 exit "$FAILS"

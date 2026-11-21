@@ -8,11 +8,21 @@ use zeroize::Zeroizing;
 
 /// What goes on the wire. `authorization` is the whole header value, zeroed on drop; the struct has no `Debug`, so the key cannot be printed.
 pub struct HttpRequest {
-    pub url: String,
-    pub authorization: Option<Zeroizing<String>>,
-    pub body: Vec<u8>,
-    pub timeout: Duration,
-    pub ca_file: Option<PathBuf>,
+    pub(crate) url: String,
+    pub(crate) authorization: Option<Zeroizing<String>>,
+    pub(crate) body: Vec<u8>,
+    pub(crate) timeout: Duration,
+    pub(crate) ca_file: Option<PathBuf>,
+}
+
+
+pub fn request_url(request: &HttpRequest) -> &str {
+    request.url.as_str()
+}
+
+
+pub fn request_body(request: &HttpRequest) -> &[u8] {
+    request.body.as_slice()
 }
 
 
@@ -22,10 +32,11 @@ pub struct HttpReply {
 }
 
 
-/// The three injected dependencies; production values come from `production_deps`.
+/// The injected dependencies; only the production ones (`pub(crate)`) read the key file, a caller transport never sees the key.
 #[derive(Clone, Copy)]
 pub struct Deps {
-    pub transport: TransportFn,
+    pub(crate) transport: TransportFn,
+    pub(crate) keyed: bool,
     pub random: RandomFn,
     pub clock: ClockFn,
 }

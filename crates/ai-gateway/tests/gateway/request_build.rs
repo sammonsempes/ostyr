@@ -2,7 +2,7 @@ use crate::common::{fixed_random, settings, Failing, FIXED_NONCE};
 use crate::types::TestResult;
 use ai_gateway::error::{AiError, SecretClass};
 use ai_gateway::limits::{MAX_DATA_DEPTH, MAX_DATA_NODES, MAX_KEY_BYTES};
-use ai_gateway::request::{build_request, check_data_shape, closing_tag, key_text, new_nonce, opening_tag, read_authorization, read_key};
+use ai_gateway::request::{build_request, check_data_shape, check_key_bytes, check_key_file, check_key_reader, closing_tag, new_nonce, opening_tag};
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -44,16 +44,16 @@ fn the_body_is_built_from_one_settings_snapshot() -> TestResult {
 
 #[test]
 fn key_text_accepts_only_a_printable_ascii_token() -> TestResult {
-    assert_eq!(key_text(b"  abc.DEF-1_2  \n")?.as_str(), "Bearer abc.DEF-1_2");
-    assert!(matches!(key_text(b""), Err(AiError::Secret { class: SecretClass::Format })));
-    assert!(matches!(key_text(b"a b"), Err(AiError::Secret { class: SecretClass::Format })));
-    assert!(matches!(key_text(b"a\x07b"), Err(AiError::Secret { class: SecretClass::Format })));
+    assert!(check_key_bytes(b"  abc.DEF-1_2  \n").is_ok());
+    assert!(matches!(check_key_bytes(b""), Err(AiError::Secret { class: SecretClass::Format })));
+    assert!(matches!(check_key_bytes(b"a b"), Err(AiError::Secret { class: SecretClass::Format })));
+    assert!(matches!(check_key_bytes(b"a\x07b"), Err(AiError::Secret { class: SecretClass::Format })));
     assert!(matches!(
-        key_text("k\u{3164}".as_bytes()),
+        check_key_bytes("k\u{3164}".as_bytes()),
         Err(AiError::Secret { class: SecretClass::Format })
     ));
     assert!(matches!(
-        key_text(&[b'a'; MAX_KEY_BYTES + 1]),
+        check_key_bytes(&[b'a'; MAX_KEY_BYTES + 1]),
         Err(AiError::Secret {
             class: SecretClass::TooLarge
         })
@@ -64,7 +64,7 @@ fn key_text_accepts_only_a_printable_ascii_token() -> TestResult {
 
 #[test]
 fn a_failing_key_reader_is_a_fixed_class() -> TestResult {
-    let error = read_key(&mut Failing).err().ok_or("accepted")?;
+    let error = check_key_reader(&mut Failing).err().ok_or("accepted")?;
     assert!(matches!(
         error,
         AiError::Secret {
@@ -83,6 +83,6 @@ fn a_symlinked_key_file_is_refused() -> TestResult {
     fs::write(&target, b"sk-1")?;
     let link = directory.path().join("link");
     symlink(&target, &link)?;
-    assert!(matches!(read_authorization(&link), Err(AiError::Secret { class: SecretClass::Refused })));
+    assert!(matches!(check_key_file(&link), Err(AiError::Secret { class: SecretClass::Refused })));
     Ok(())
 }

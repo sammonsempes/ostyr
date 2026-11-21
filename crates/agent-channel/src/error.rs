@@ -197,6 +197,27 @@ pub enum SettingsError {
 }
 
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpoolDirReason {
+    Missing,
+    NotDirectory,
+    WrongOwner,
+    Writable,
+}
+
+
+impl std::fmt::Display for SpoolDirReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Missing => "it does not exist",
+            Self::NotDirectory => "it is not a directory (a symlink is refused)",
+            Self::WrongOwner => "it belongs to neither the agent user nor root",
+            Self::Writable => "it is writable by group or others",
+        })
+    }
+}
+
+
 #[derive(Debug, Error)]
 pub enum SinkError {
     #[error("{path}: {source}")]
@@ -238,6 +259,8 @@ pub enum AppError {
     SequenceOverflow(PathBuf),
     #[error("sequence file {} does not hold `<used> <count>`", .0.display())]
     Sequence(PathBuf),
+    #[error("spool directory of {} is refused: {reason}", .path.display())]
+    SpoolDir { path: PathBuf, reason: SpoolDirReason },
     #[error("agent session abandoned after {attempts} consecutive failed attempts")]
     AttemptsExhausted {
         attempts: u32,

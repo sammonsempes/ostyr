@@ -1510,7 +1510,7 @@ async fn a_hostile_comment_from_the_api_is_rendered_escaped() -> TestResult {
     assert_eq!(reply.status, StatusCode::OK);
     assert!(!reply.body.contains("<script>") && !reply.body.contains('\u{202e}') && !reply.body.contains("alert(2)"));
     assert!(reply.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
-    assert!(!reply.body.contains("<img src=x>") && reply.body.contains("&quot;&gt;&lt;img src=x&gt;aaa"));
+    assert!(!reply.body.contains("<img src=x>") && reply.body.contains("&quot;&gt;&lt;img src=x&gt;\u{fffd}aaa"));
     assert!(reply.body.contains("... ["));
     Ok(())
 }
@@ -1621,7 +1621,7 @@ async fn a_failed_reread_page_renders_the_stored_comment_escaped() -> TestResult
     assert_eq!(reply.status, StatusCode::OK);
     assert!(!reply.body.contains("<script>") && !reply.body.contains("SUBMITTED-MARKER") && !reply.body.contains('\u{202e}'));
     assert!(reply.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
-    assert!(reply.body.contains("&quot;&gt;&lt;img src=x&gt;aaa"));
+    assert!(reply.body.contains("&quot;&gt;&lt;img src=x&gt;\u{fffd}aaa"));
     Ok(())
 }
 
@@ -1770,7 +1770,7 @@ async fn each_failure_has_a_fixed_class_name() -> TestResult {
         (ApiFailure::Status(UPSTREAM_STATUS), "status"),
         (ApiFailure::TooLarge, "too_large"),
         (ApiFailure::Malformed("x"), "malformed"),
-        (ApiFailure::Json(json), "json"),
+        (ApiFailure::from(json), "json"),
     ];
     for (failure, expected) in &classes {
         assert_eq!(failure_class(failure), *expected);
@@ -2346,7 +2346,11 @@ async fn a_hostile_certificate_is_clipped_and_bad_fingerprints_are_unreadable_ro
     let list = fire(&rig, get_with("/certificates", &session)).await?;
     assert_eq!(list.status, StatusCode::OK);
     assert_no_hidden_characters(&list.body);
-    assert!(list.body.contains("evil[31mcnnext") && list.body.contains("omitted]"), "{}", list.body);
+    assert!(
+        list.body.contains("evil\u{fffd}[31m\u{fffd}cn\u{fffd}next") && list.body.contains("omitted]"),
+        "{}",
+        list.body
+    );
     assert_eq!(list.body.matches("Unreadable certificate.").count(), CERT_BAD_FINGERPRINT_COUNT);
     assert_eq!(list.body.matches("action=\"/certificates/").count(), 1);
     assert!(!list.body.contains("../x") && !list.body.contains(&format!("A{}", "a".repeat(CERT_SHORT_FINGERPRINT))));

@@ -2,7 +2,7 @@
 
 #[cfg(unix)]
 pub mod admin;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod apply;
 pub mod caddy;
 pub mod cadir;

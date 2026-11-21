@@ -87,20 +87,20 @@ try() {
 }
 
 printf '%s' "pub fn add(left:u32,right:u32)->u32{left+right}$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
-try "bad format" refused "1/5 cargo +nightly fmt --check"
+try "bad format" refused "1/6 cargo +nightly fmt --check"
 
 printf '%s' "pub fn add(left: u32, right: u32) -> u32 {
     let unused = 1;
     left + right
 }$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
-try "clippy error" refused "2/5 cargo clippy"
+try "clippy error" refused "2/6 cargo clippy"
 
 printf '%s' "// a comment
 $CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
-try "lint violation" refused "3/5 custom_lint"
+try "lint violation" refused "3/6 custom_lint"
 
 printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA$GAP${CLEAN_EXTRA/extra/untested}" >crates/demo/src/lib.rs
-try "uncovered branch" refused "4/5 cargo llvm-cov"
+try "uncovered branch" refused "4/6 cargo llvm-cov"
 
 printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
 try "clean commit" accepted
@@ -112,7 +112,7 @@ printf '%s' "// a comment
 $CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >"$W/crates/demo/src/lib.rs"
 mkdir -p "$W/tools"
 cd "$W"
-HOOKS="$MAIN_HOOKS" try "worktree violation" refused "3/5 custom_lint"
+HOOKS="$MAIN_HOOKS" try "worktree violation" refused "3/6 custom_lint"
 if git log --format=%s | grep -qx "worktree violation"; then
   echo "FAIL: worktree violation reached history"
   FAILS=$((FAILS + 1))
@@ -137,7 +137,7 @@ git log -1 --format=%s >/dev/null
 
 git checkout -q -b prototype/x
 printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA$GAP${CLEAN_EXTRA/extra/untested}" >crates/demo/src/lib.rs
-try "prototype branch gap" refused "4/5 cargo llvm-cov"
+try "prototype branch gap" refused "4/6 cargo llvm-cov"
 git checkout -q HEAD -- .
 
 if [ "$(git log --format=%s)" != "clean commit" ]; then

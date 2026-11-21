@@ -7,4 +7,5 @@ pub enum Module {
     Hunts,
     Certificates,
     Oncall,
+    Dhcp,
 }

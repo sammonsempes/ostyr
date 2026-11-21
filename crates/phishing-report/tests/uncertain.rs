@@ -69,44 +69,37 @@ fn with_original(from: &str) -> Result<Triage, TriageError> {
 
 
 #[test]
-fn a_forward_with_its_own_url_next_to_the_attachment_is_uncertain() -> Result<(), Box<dyn std::error::Error>> {
-    let record = run(&forward(
+fn an_attached_original_is_always_an_attached_claim() -> Result<(), Box<dyn std::error::Error>> {
+    let decoy = attached(&outside("From: noreply@microsoft.com"));
+    let with_url = run(&forward(&FORWARD_HEADERS, "see https://evil.test/steal", std::slice::from_ref(&decoy)))?;
+    let with_pdf = run(&forward(
         &FORWARD_HEADERS,
-        "see https://evil.test/steal",
-        &[attached(&outside("From: noreply@microsoft.com"))],
+        "fyi",
+        &[
+            decoy.clone(),
+            "Content-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nJVBER".to_owned(),
+        ],
     ))?;
-    assert_eq!(record.original_level, Some(1));
-    assert_eq!(record.sender.as_deref(), Some("noreply@microsoft.com"));
-    assert!(record.original_uncertain);
-    assert_eq!(record.uncertain_reasons, ["forward_has_own_content"]);
-    assert_eq!(record.original_source.as_deref(), Some("attached"));
-    assert_eq!(record.counts.original_uncertain, 1);
-    assert!(!record.original_internal);
-    Ok(())
-}
-
-
-#[test]
-fn a_forward_with_its_own_attachment_or_a_second_message_is_uncertain() -> Result<(), Box<dyn std::error::Error>> {
-    let first = attached(&outside("From: noreply@microsoft.com"));
-    let pdf = "Content-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nJVBER".to_owned();
-    let with_pdf = run(&forward(&FORWARD_HEADERS, "fyi", &[first.clone(), pdf]))?;
-    assert_eq!(with_pdf.uncertain_reasons, ["forward_has_own_content"]);
-    let with_second = run(&forward(&FORWARD_HEADERS, "fyi", &[first.clone(), first]))?;
-    assert_eq!(with_second.uncertain_reasons, ["forward_has_own_content"]);
-    assert_eq!(with_second.counts.messages_unopened, 1);
-    Ok(())
-}
-
-
-#[test]
-fn a_clean_forward_as_attachment_is_not_uncertain() -> Result<(), Box<dyn std::error::Error>> {
-    let record = with_original("From: security@bank.test")?;
-    assert_eq!(record.original_level, Some(1));
-    assert!(!record.original_uncertain);
-    assert!(record.uncertain_reasons.is_empty());
-    assert_eq!(record.counts.original_uncertain, 0);
-    assert_eq!(record.original_source.as_deref(), Some("attached"));
+    let two = run(&forward(&FORWARD_HEADERS, "fyi", &[decoy.clone(), decoy.clone()]))?;
+    let empty = run(&forward(&FORWARD_HEADERS, "", std::slice::from_ref(&decoy)))?;
+    let clean = with_original("From: security@bank.test")?;
+    let big = Limits {
+        part_bytes: SMALL_PART_BYTES,
+        ..Limits::default()
+    };
+    let unread = triage_with(
+        forward(&FORWARD_HEADERS, &"x".repeat(BIG_TEXT), &[decoy]).as_bytes(),
+        &ids(),
+        &policy(),
+        &big,
+    )?;
+    [with_url, with_pdf, two, empty, clean, unread].iter().for_each(|record| {
+        assert_eq!(record.original_level, Some(1));
+        assert!(record.original_uncertain);
+        assert_eq!(record.uncertain_reasons, ["attached_claim"]);
+        assert_eq!(record.counts.original_uncertain, 1);
+        assert_eq!(record.original_source.as_deref(), Some("attached"));
+    });
     Ok(())
 }
 
@@ -172,7 +165,7 @@ fn a_from_that_cannot_be_judged_makes_the_original_uncertain() -> Result<(), Box
         .collect::<Result<_, _>>()?;
     assert!(reasons.iter().all(|found| found.iter().any(|reason| reason == "from_unparsed")));
     let fine = with_original("From: Ceo <ceo@corp.test>")?;
-    assert!(fine.uncertain_reasons.is_empty());
+    assert_eq!(fine.uncertain_reasons, ["attached_claim"]);
     let level_zero = run(&mail(&["From: =?utf-8?q?ceo=40corp=2Etest?="], "x"))?;
     assert_eq!(level_zero.reporter, "from_ambiguous");
     assert_eq!(level_zero.uncertain_reasons, ["from_unparsed"]);
@@ -184,11 +177,10 @@ fn a_from_that_cannot_be_judged_makes_the_original_uncertain() -> Result<(), Box
     let skipped = triage_with(long.as_bytes(), &ids(), &policy(), &small)?;
     assert_eq!(skipped.uncertain_reasons, ["from_unparsed"]);
     assert_eq!(skipped.counts.headers_skipped, 1);
+    let outsider = run(&outside("From: security@bank.test"))?;
+    assert!(!outsider.original_uncertain);
     Ok(())
 }
-
-
-const SMALL_URL_BYTES: usize = 40;
 
 
 const SMALL_PART_BYTES: usize = 300;
@@ -203,49 +195,6 @@ fn run_limited(text: &str, limits: &Limits) -> Result<Triage, TriageError> {
 
 
 #[test]
-fn a_refused_level_zero_url_makes_the_forward_uncertain() -> Result<(), Box<dyn std::error::Error>> {
-    let decoy = attached(&outside("From: noreply@microsoft.com"));
-    let small = Limits {
-        url_bytes: SMALL_URL_BYTES,
-        ..Limits::default()
-    };
-    let long = format!("see https://evil.test/{}", "a".repeat(SMALL_URL_BYTES));
-    let too_long = run_limited(&forward(&FORWARD_HEADERS, &long, std::slice::from_ref(&decoy)), &small)?;
-    assert!(too_long.urls.is_empty());
-    assert_eq!(too_long.counts.urls_refused, 1);
-    assert_eq!(too_long.uncertain_reasons, ["forward_has_own_content"]);
-    let bidi = run(&forward(
-        &FORWARD_HEADERS,
-        "see https://evil.test/\u{202e}x",
-        std::slice::from_ref(&decoy),
-    ))?;
-    assert_eq!(bidi.uncertain_reasons, ["forward_has_own_content"]);
-    let bad_port = run(&forward(&FORWARD_HEADERS, "see https://evil.test:99999/x", std::slice::from_ref(&decoy)))?;
-    assert_eq!(bad_port.uncertain_reasons, ["forward_has_own_content"]);
-    let clean = run(&forward(&FORWARD_HEADERS, "fyi", &[decoy]))?;
-    assert!(clean.uncertain_reasons.is_empty());
-    Ok(())
-}
-
-
-#[test]
-fn an_unread_level_zero_part_makes_the_forward_uncertain() -> Result<(), Box<dyn std::error::Error>> {
-    let decoy = attached(&outside("From: noreply@microsoft.com"));
-    let small = Limits {
-        part_bytes: SMALL_PART_BYTES,
-        ..Limits::default()
-    };
-    let record = run_limited(&forward(&FORWARD_HEADERS, &"x".repeat(BIG_TEXT), std::slice::from_ref(&decoy)), &small)?;
-    assert_eq!(record.original_level, Some(1));
-    assert!(record.counts.parts_skipped > 0);
-    assert_eq!(record.uncertain_reasons, ["forward_content_unread"]);
-    let fine = run_limited(&forward(&FORWARD_HEADERS, "fyi", &[decoy]), &small)?;
-    assert!(fine.uncertain_reasons.is_empty());
-    Ok(())
-}
-
-
-#[test]
 fn an_oversized_second_from_of_the_original_is_unparsed() -> Result<(), Box<dyn std::error::Error>> {
     let big = format!("From: {}@corp.test", "a".repeat(LONG_LOCAL));
     let original = mail(&["From: noreply@microsoft.com", &big, "Subject: x"], "no link");
@@ -255,7 +204,7 @@ fn an_oversized_second_from_of_the_original_is_unparsed() -> Result<(), Box<dyn 
     };
     let record = run_limited(&forward(&FORWARD_HEADERS, "fyi", &[attached(&original)]), &small)?;
     assert_eq!(record.original_level, Some(1));
-    assert_eq!(record.uncertain_reasons, ["from_unparsed"]);
+    assert_eq!(record.uncertain_reasons, ["attached_claim", "from_unparsed"]);
     Ok(())
 }
 
