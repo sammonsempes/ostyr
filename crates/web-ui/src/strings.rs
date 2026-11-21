@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 223;
+pub const TEXT_COUNT: usize = 243;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -235,6 +235,26 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("oncall_state_acknowledged", "Acknowledged"),
     ("oncall_state_escalated", "Escalated"),
     ("oncall_state_resolved", "Resolved"),
+    ("nav_vulns", "Vulnerabilities"),
+    ("title_vulns", "Vulnerabilities"),
+    ("title_vuln_asset", "Vulnerabilities of"),
+    ("vulns_empty", "No open finding."),
+    ("vulns_no_readable", "No readable finding on this page."),
+    ("vulns_next", "Next findings"),
+    ("vulns_back", "Back to vulnerabilities"),
+    ("vulns_unreadable", "Unreadable row."),
+    ("vulns_skipped", "{count} rows could not be read."),
+    ("vulns_skipped_one", "1 row could not be read."),
+    ("vulns_truncated", "Results cut at 1000."),
+    ("col_ecosystem", "Ecosystem"),
+    ("col_package", "Package"),
+    ("col_record", "Advisory"),
+    ("col_installed", "Installed"),
+    ("col_fixed", "Fixed in"),
+    ("col_cvss", "CVSS"),
+    ("col_epss", "EPSS"),
+    ("col_priority", "Priority"),
+    ("vulns_kev", "KEV"),
 ];
 
 
@@ -471,6 +491,26 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("oncall_state_acknowledged", "Prise en compte"),
     ("oncall_state_escalated", "Escaladée"),
     ("oncall_state_resolved", "Résolue"),
+    ("nav_vulns", "Vulnérabilités"),
+    ("title_vulns", "Vulnérabilités"),
+    ("title_vuln_asset", "Vulnérabilités de"),
+    ("vulns_empty", "Aucune vulnérabilité ouverte."),
+    ("vulns_no_readable", "Aucune vulnérabilité lisible sur cette page."),
+    ("vulns_next", "Vulnérabilités suivantes"),
+    ("vulns_back", "Retour aux vulnérabilités"),
+    ("vulns_unreadable", "Ligne illisible."),
+    ("vulns_skipped", "{count} lignes n'ont pas pu être lues."),
+    ("vulns_skipped_one", "1 ligne n'a pas pu être lue."),
+    ("vulns_truncated", "Résultats coupés à 1000."),
+    ("col_ecosystem", "Écosystème"),
+    ("col_package", "Paquet"),
+    ("col_record", "Avis"),
+    ("col_installed", "Installée"),
+    ("col_fixed", "Corrigée en"),
+    ("col_cvss", "CVSS"),
+    ("col_epss", "EPSS"),
+    ("col_priority", "Priorité"),
+    ("vulns_kev", "KEV"),
 ];
 
 

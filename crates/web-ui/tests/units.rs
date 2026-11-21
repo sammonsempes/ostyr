@@ -15,6 +15,9 @@ use web_ui::api::{
     states_path, valid_state_asset, valid_state_cursor, valid_state_id, verdict_filter, MAX_STATE_ASSET_CHARS, MAX_STATE_CURSOR_HEX,
     MAX_STATE_ID_CHARS,
 };
+use web_ui::api::{
+    valid_vuln_asset, valid_vuln_cursor, valid_vuln_field, vuln_score, vulns_path, MAX_VULN_FIELD_BYTES, VULN_CVSS_MAX, VULN_EPSS_MAX,
+};
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
@@ -425,6 +428,49 @@ fn hunt_helpers_accept_only_their_grammar() -> TestResult {
     ] {
         assert!(window_time(bad).is_none(), "{bad}");
     }
+    Ok(())
+}
+
+
+#[test]
+fn vulnerability_helpers_accept_only_the_stores_grammar() -> TestResult {
+    for (text, max, accepted) in [
+        ("7.5", VULN_CVSS_MAX, true),
+        ("0", VULN_CVSS_MAX, true),
+        ("10", VULN_CVSS_MAX, true),
+        ("11", VULN_CVSS_MAX, false),
+        ("-0.1", VULN_CVSS_MAX, false),
+        ("1", VULN_EPSS_MAX, true),
+        ("2", VULN_EPSS_MAX, false),
+        ("1e999", VULN_CVSS_MAX, false),
+        ("null", VULN_CVSS_MAX, false),
+        ("\"NaN\"", VULN_CVSS_MAX, false),
+        ("[1]", VULN_CVSS_MAX, false),
+    ] {
+        let raw = serde_json::value::RawValue::from_string(text.to_owned())?;
+        let expected = accepted.then(|| text.parse::<f64>()).transpose()?;
+        assert_eq!(vuln_score(&raw, max), expected, "{text}");
+    }
+    assert!(valid_vuln_field("a") && valid_vuln_field(&"a".repeat(MAX_VULN_FIELD_BYTES)));
+    for bad in ["", "-a", "a b", "a\u{3164}", "a\u{1b}", &"a".repeat(MAX_VULN_FIELD_BYTES + 1)] {
+        assert!(!valid_vuln_field(bad), "{bad}");
+    }
+    assert!(valid_vuln_asset("a.b") && !valid_vuln_asset(".") && !valid_vuln_asset("..") && !valid_vuln_asset("-a"));
+    assert!(valid_vuln_cursor("0 a b c d") && valid_vuln_cursor("4294967295 a b c d"));
+    for bad in [
+        "",
+        "1 a b c",
+        "1 a b c d e",
+        "01 a b c d",
+        "-1 a b c d",
+        "4294967296 a b c d",
+        "1 -a b c d",
+        "1  b c d",
+    ] {
+        assert!(!valid_vuln_cursor(bad), "{bad}");
+    }
+    assert_eq!(vulns_path(None), "vulnerabilities/findings?limit=100");
+    assert_eq!(vulns_path(Some("1 a b c d")), "vulnerabilities/findings?limit=100&cursor=1+a+b+c+d");
     Ok(())
 }
 

@@ -9,6 +9,8 @@ mod served;
 mod stub;
 #[path = "support/types.rs"]
 mod types;
+#[path = "support/vuln_flows.rs"]
+mod vuln_flows;
 
 
 use axum::body::Body;
