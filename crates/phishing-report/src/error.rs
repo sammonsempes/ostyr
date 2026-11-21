@@ -19,4 +19,6 @@ pub enum TriageError {
     ChildProgram,
     #[error("the isolation limits are outside their bounds")]
     LimitsRefused,
+    #[error("the reporter policy holds a bad domain or too many")]
+    PolicyRefused,
 }
