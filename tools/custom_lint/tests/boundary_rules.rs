@@ -49,6 +49,26 @@ pub fn unsafe_outside_the_boundary_is_reported() -> anyhow::Result<()> {
 
 
 #[test]
+pub fn the_kernel_crate_is_inside_the_boundary_and_checked_for_safety_comments() -> anyhow::Result<()> {
+    let kernel_path = "crates/ebpf-probes/ebpf/src/main.rs";
+    let documented = "fn a() {\n    // SAFETY: the verifier rejects this path\n    unsafe { }\n}\n";
+    let undocumented = "fn a() {\n    unsafe { }\n}\n";
+    assert!(report_at(kernel_path, "unsafe-outside-boundary", documented)?.is_empty());
+    assert!(report_at(kernel_path, "unsafe-without-safety", documented)?.is_empty());
+    assert_eq!(report_at(kernel_path, "unsafe-without-safety", undocumented)?.len(), 1);
+    assert_eq!(
+        report_at("crates/ebpf-probes-extra/ebpf/src/main.rs", "unsafe-outside-boundary", documented)?.len(),
+        1
+    );
+    assert_eq!(
+        report_at("tools/ebpf-probes/src/main.rs", "unsafe-outside-boundary", documented)?.len(),
+        1
+    );
+    Ok(())
+}
+
+
+#[test]
 pub fn unsafe_blocks_need_an_adjacent_safety_comment() -> anyhow::Result<()> {
     let rule = "unsafe-without-safety";
     let block_message = "`unsafe` block needs a `// SAFETY: <reason>` comment on the line above";
