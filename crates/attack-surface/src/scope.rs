@@ -1,9 +1,9 @@
 use crate::error::{Refusal, ScopeError};
 use crate::model::{
-    OwnershipMethod, PortEntry, PortRange, Scope, ScopeFile, ScopeKind, TargetEntry, MAX_FILE_BYTES, MAX_PORTS, MAX_PORT_ENTRIES, MAX_RATE,
+    Checked, OwnershipMethod, PortEntry, PortRange, Scope, ScopeFile, ScopeKind, TargetEntry, MAX_FILE_BYTES, MAX_PORTS, MAX_PORT_ENTRIES, MAX_RATE,
     MAX_REFERENCE_BYTES, MAX_TARGETS, MIN_PORT, MIN_PREFIX_V4, MIN_PREFIX_V6, MIN_RATE,
 };
-use crate::text::{shown, valid_reference};
+use crate::text::{shown, valid_hostname, valid_reference};
 use crate::types::ScopeResult;
 use core_config::parse::{parse_document, read_text_capped};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -143,8 +143,13 @@ pub fn check_range(value: &str, kind: ScopeKind) -> Result<IpNet, Refusal> {
 }
 
 
-fn check_value(entry: &TargetEntry, kind: ScopeKind) -> Result<IpNet, Refusal> {
-    check_range(&entry.value, kind)
+fn check_value(entry: &TargetEntry, kind: ScopeKind) -> Result<Checked, Refusal> {
+    match parse_target(&entry.value) {
+        Some(net) => check_net(&net, kind, &entry.value).map(|()| Checked::Net(net)),
+        None => valid_hostname(&entry.value)
+            .then(|| Checked::Name(entry.value.to_ascii_lowercase()))
+            .ok_or_else(|| Refusal::BadTarget { shown: shown(&entry.value) }),
+    }
 }
 
 
@@ -158,7 +163,7 @@ fn check_reference(entry: &TargetEntry) -> Result<(), Refusal> {
 }
 
 
-fn check_target(entry: &TargetEntry, kind: ScopeKind, file: &str, index: usize) -> Result<IpNet, ScopeError> {
+fn check_target(entry: &TargetEntry, kind: ScopeKind, file: &str, index: usize) -> Result<Checked, ScopeError> {
     let target = check_value(entry, kind).map_err(|refusal| refuse(file, &format!("targets[{index}].value"), refusal))?;
     check_reference(entry).map_err(|refusal| refuse(file, &format!("targets[{index}].ownership.reference"), refusal))?;
     Ok(target)
@@ -273,15 +278,23 @@ fn check_ports(entries: &[PortEntry], file: &str) -> Result<Vec<PortRange>, Scop
 }
 
 
+fn checked_text(checked: &Checked) -> String {
+    match checked {
+        Checked::Net(net) => net.to_string(),
+        Checked::Name(name) => name.clone(),
+    }
+}
+
+
 /// The listed targets whose every entry is an attestation: a target also declared by `dns_txt`, which no check proves yet, is not attested.
-fn attested_targets(parsed: &ScopeFile, nets: &[IpNet]) -> Vec<String> {
+fn attested_targets(parsed: &ScopeFile, checked: &[Checked]) -> Vec<String> {
     let by_method = |method: OwnershipMethod| -> BTreeSet<String> {
         parsed
             .targets
             .iter()
-            .zip(nets)
+            .zip(checked)
             .filter(|(entry, _)| entry.ownership.method == method)
-            .map(|(_, net)| net.to_string())
+            .map(|(_, item)| checked_text(item))
             .collect()
     };
     let unproven = by_method(OwnershipMethod::DnsTxt);
@@ -294,17 +307,24 @@ pub fn validate_scope(parsed: &ScopeFile, file: &str) -> ScopeResult {
     check_rate(parsed.rate_per_second).map_err(|refusal| refuse(file, "rate_per_second", refusal))?;
     let ports = check_ports(&parsed.ports, file)?;
     check_count(parsed.targets.len(), MAX_TARGETS).map_err(|refusal| refuse(file, "targets", refusal))?;
-    let nets = parsed
+    let checked = parsed
         .targets
         .iter()
         .enumerate()
         .map(|(index, entry)| check_target(entry, parsed.kind, file, index))
         .collect::<Result<Vec<_>, _>>()?;
+    let nets = checked
+        .iter()
+        .filter_map(|item| match item {
+            Checked::Net(net) => Some(*net),
+            Checked::Name(_) => None,
+        })
+        .collect::<Vec<_>>();
     let mut ranges = IpNet::aggregate(&nets);
     check_total(&ranges).map_err(|refusal| refuse(file, "targets", refusal))?;
     ranges.sort();
-    let listed: BTreeSet<String> = nets.iter().map(IpNet::to_string).collect();
-    let attested = attested_targets(parsed, &nets);
+    let listed: BTreeSet<String> = checked.iter().map(checked_text).collect();
+    let attested = attested_targets(parsed, &checked);
     Ok(Scope {
         kind: parsed.kind,
         rate_per_second: parsed.rate_per_second,

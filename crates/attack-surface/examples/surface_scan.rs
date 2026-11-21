@@ -1,8 +1,9 @@
-//! Usage: `surface_scan --args <scope.yaml>` prints one naabu argument vector per target; `surface_scan --parse <scope.yaml> <naabu-output>` prints the kept results and the counts; `surface_scan <scope.yaml> <naabu-binary> [deadline-seconds]` runs naabu per target (Unix only).
+//! Usage: `surface_scan --args <scope.yaml>` prints one naabu argument vector per target; `surface_scan --parse <scope.yaml> <naabu-output>` prints the kept results and the counts; `surface_scan <scope.yaml> <naabu-binary> [deadline-seconds] [--nameserver <addr:port>]` runs naabu per target (Unix only).
 use attack_surface::command::naabu_args;
 use attack_surface::model::{Found, Limits};
 use attack_surface::results::parse_naabu;
 use attack_surface::scope::load_scope;
+use attack_surface::text::valid_hostname;
 use std::error::Error;
 use std::fs::File;
 use std::io::{stdout, Write};
@@ -14,6 +15,9 @@ const ARGS_FLAG: &str = "--args";
 
 
 const PARSE_FLAG: &str = "--parse";
+
+
+const NAMESERVER_FLAG: &str = "--nameserver";
 
 
 #[cfg(unix)]
@@ -47,22 +51,37 @@ fn outcome_line(index: usize, outcome: &attack_surface::model::Outcome) -> Strin
 
 
 #[cfg(unix)]
-fn run_naabu(scope_file: &str, program: &str, seconds: Option<&String>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    use attack_surface::run::{scan_scope, summary_line};
+fn run_naabu(scope_file: &str, program: &str, seconds: Option<&String>, nameserver: Option<SocketAddr>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use attack_surface::run::{scan_scope_resolving, summary_line, Resolver};
+    use std::time::{Duration, Instant};
     let scope = load_scope(Path::new(scope_file))?;
     let deadline = seconds.map_or(Ok(DEADLINE_SECONDS), |text| text.parse::<u64>())?;
-    let report = scan_scope(
+    let started = Instant::now();
+    let resolver = Resolver {
+        nameserver,
+        resolve: synthetic_checks::dns::dns_resolve,
+    };
+    let report = scan_scope_resolving(
         Path::new(program),
         &scope,
         &Limits::default(),
-        std::time::Duration::from_secs(deadline),
-        std::time::Duration::from_secs(TOTAL_SECONDS),
+        Duration::from_secs(deadline),
+        &|| started.elapsed() >= Duration::from_secs(TOTAL_SECONDS),
+        &resolver,
     )?;
     let mut out = stdout();
-    report
-        .targets
-        .iter()
-        .try_for_each(|target| writeln!(out, "{}", outcome_line(target.index, &target.outcome)))?;
+    report.targets.iter().try_for_each(|target| -> Result<(), Box<dyn Error + Send + Sync>> {
+        writeln!(out, "{}", outcome_line(target.index, &target.outcome))?;
+        target
+            .runs
+            .iter()
+            .try_for_each(|run| writeln!(out, "  run {}: {}", run.address, outcome_line(target.index, &run.outcome)))?;
+        target
+            .refused_addresses
+            .iter()
+            .try_for_each(|address| writeln!(out, "  refused {address}"))?;
+        Ok(())
+    })?;
     report.found.iter().try_for_each(|found| writeln!(out, "{}", found_line(found)))?;
     writeln!(out, "{}", summary_line(&report))?;
     Ok(())
@@ -70,25 +89,43 @@ fn run_naabu(scope_file: &str, program: &str, seconds: Option<&String>) -> Resul
 
 
 #[cfg(not(unix))]
-fn run_naabu(_scope_file: &str, _program: &str, _seconds: Option<&String>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_naabu(
+    _scope_file: &str,
+    _program: &str,
+    _seconds: Option<&String>,
+    _nameserver: Option<SocketAddr>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     Err("running naabu needs Unix".into())
 }
 
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let nameserver = match arguments.iter().position(|argument| argument == NAMESERVER_FLAG) {
+        Some(at) => {
+            let value = arguments.get(at + 1).ok_or("missing nameserver address")?.parse::<SocketAddr>()?;
+            arguments.drain(at..=at + 1);
+            Some(value)
+        }
+        None => None,
+    };
     let mut out = stdout();
     let first = arguments.first().ok_or("missing scope file")?;
     let second = arguments.get(1).ok_or("missing scope file or naabu binary")?;
     if first == ARGS_FLAG {
         let scope = load_scope(Path::new(second))?;
         scope.targets.iter().try_for_each(|target| -> Result<(), Box<dyn Error + Send + Sync>> {
-            let line = naabu_args(&scope, target)?
-                .iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" ");
-            writeln!(out, "naabu {line}")?;
+            let line = if valid_hostname(target) {
+                format!("resolve {target} (the runner passes each checked address to naabu)")
+            } else {
+                let vector = naabu_args(&scope, target)?
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("naabu {vector}")
+            };
+            writeln!(out, "{line}")?;
             Ok(())
         })?;
     } else if first == PARSE_FLAG {
@@ -98,7 +135,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         report.found.iter().try_for_each(|found| writeln!(out, "{}", found_line(found)))?;
         writeln!(out, "counts {:?}", report.counts)?;
     } else {
-        run_naabu(first, second, arguments.get(OUTPUT_POSITION))?;
+        run_naabu(first, second, arguments.get(OUTPUT_POSITION), nameserver)?;
     }
     Ok(())
 }

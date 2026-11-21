@@ -295,7 +295,6 @@ fn a_hand_built_scope_is_refused_before_any_spawn() -> TestResult {
         ("external", "0.0.0.0/0"),
         ("external", "10.0.0.0/24"),
         ("external", "2a00:1450::/48"),
-        ("external", "scan.example.com"),
         ("internal", "8.8.8.0/24"),
         ("external", "-host"),
     ];
@@ -364,6 +363,8 @@ fn an_unattested_hand_built_external_target_is_unverified() -> TestResult {
         targets: vec![TargetReport {
             index: 0,
             outcome: Outcome::TooWide,
+            runs: Vec::new(),
+            refused_addresses: Vec::new(),
         }],
     };
     assert_eq!(

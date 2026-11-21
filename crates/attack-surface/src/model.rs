@@ -2,6 +2,7 @@ use crate::error::ScanFailure;
 use ipnet::IpNet;
 use serde::Deserialize;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::io::ErrorKind;
 use std::net::IpAddr;
 
 
@@ -45,6 +46,24 @@ pub const DEFAULT_MAX_LINE_BYTES: usize = 1024;
 
 
 pub const MAX_TIMESTAMP_BYTES: usize = 64;
+
+
+pub const MAX_HOSTNAME_BYTES: usize = 253;
+
+
+pub const MIN_HOSTNAME_LABELS: usize = 2;
+
+
+pub const MAX_HOSTNAME_LABELS: usize = 8;
+
+
+pub const MAX_LABEL_BYTES: usize = 63;
+
+
+pub const MAX_ADDRESSES_PER_NAME: usize = 16;
+
+
+pub const MAX_RESOLVE_SECONDS: u64 = 5;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -184,6 +203,17 @@ pub enum Outcome {
     TooWide,
     Deferred,
     Failed(ScanFailure),
+    Resolved { addresses: usize },
+    TooManyAddresses { max: usize },
+    ResolveFailed { kind: ErrorKind },
+    OverBudget,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressRun {
+    pub address: IpAddr,
+    pub outcome: Outcome,
 }
 
 
@@ -191,6 +221,15 @@ pub enum Outcome {
 pub struct TargetReport {
     pub index: usize,
     pub outcome: Outcome,
+    pub runs: Vec<AddressRun>,
+    pub refused_addresses: Vec<IpAddr>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    Net(IpNet),
+    Name(String),
 }
 
 

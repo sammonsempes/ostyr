@@ -292,23 +292,87 @@ fn a_value_that_would_become_an_option_is_refused_as_a_target() -> TestResult {
 }
 
 
+const LABEL_63: usize = 63;
+
+
+const LABEL_64: usize = 64;
+
+
+const LABEL_61: usize = 61;
+
+
 #[test]
-fn a_hostname_is_not_a_target_yet_in_either_kind() -> TestResult {
+fn an_ascii_hostname_is_accepted_lowercased_in_both_kinds() -> TestResult {
+    ["internal", "external"].iter().try_for_each(|kind| -> TestResult {
+        let scope = scope_of(&scope_text(kind, &["Scan.Example.COM", "xn--bcher-kva.example", "0x7f.0x1"]))?;
+        assert_eq!(scope.targets, vec!["0x7f.0x1", "scan.example.com", "xn--bcher-kva.example"]);
+        assert!(scope.ranges.is_empty());
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_hostname_outside_the_grammar_is_refused_naming_the_field() -> TestResult {
+    let long_label = "a".repeat(LABEL_64);
+    let fitting_label = "a".repeat(LABEL_63);
+    let too_long = format!("{fitting_label}.{fitting_label}.{fitting_label}.{fitting_label}.com");
+    let over_by_one = format!("{fitting_label}.{fitting_label}.{fitting_label}.{}", "a".repeat(LABEL_61 + 1));
+    let many_labels = "a.b.c.d.e.f.g.h.i";
     let names = [
-        "scan.example.com",
-        "localtest.me",
-        "app.example.org",
         "localhost",
-        "0x7f.0x1",
-        "*.example.org",
+        "-x.example.com",
+        "a..b",
+        "ex ample.com",
+        "\u{3164}.example.com",
+        "\u{430}pple.com",
+        "\u{e9}.com",
+        "*.example.com",
+        "example.com.",
+        "1.2.3.4.5",
         "1.2.3",
+        "a_b.example.com",
+        "a-.example.com",
+        ".example.com",
+        &long_label,
+        &format!("{long_label}.com"),
+        &too_long,
+        &over_by_one,
+        many_labels,
+        "",
     ];
     names.iter().try_for_each(|value| -> TestResult {
         assert_refused("external", value, "bad_target")?;
         assert_refused("internal", value, "bad_target")
     })?;
-    let (_, message) = refused(&scope_text("internal", &["10.1.0.0/24", "scan.example.com"]))?;
-    assert!(message.contains("hostnames are not supported yet"), "{message}");
+    let (_, message) = refused(&scope_text("internal", &["10.1.0.0/24", "-x.example.com"]))?;
+    assert!(message.contains("targets[1].value"), "{message}");
+    assert!(!message.contains("not supported"), "{message}");
+    let fitting = format!("{fitting_label}.{fitting_label}.{fitting_label}.{}", "a".repeat(LABEL_61));
+    assert!(scope_of(&scope_text("external", &[&fitting])).is_ok());
+    assert!(scope_of(&scope_text("external", &["a.b.c.d.e.f.g.h"])).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn two_spellings_of_a_name_are_one_target_and_attestation_matches_the_lowercase_text() -> TestResult {
+    let text = "kind: external
+rate_per_second: 100
+ports: [22]
+targets:
+  - value: Example.com
+    ownership: {method: dns_txt, reference: TXT-1}
+  - value: example.com
+    ownership: {method: attestation, reference: TICKET-1}
+  - value: Other.example
+    ownership: {method: attestation, reference: TICKET-2}
+  - value: other.EXAMPLE
+    ownership: {method: attestation, reference: TICKET-3}
+";
+    let scope = scope_of(text)?;
+    assert_eq!(scope.targets, vec!["example.com", "other.example"]);
+    assert_eq!(scope.attested, vec!["other.example"]);
     Ok(())
 }
 
