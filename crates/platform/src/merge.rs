@@ -17,6 +17,7 @@ use core_pg::settings::PgSettings;
 use dhcp_kea::cursor::{MIGRATIONS as DHCP_MIGRATIONS, MIGRATION_NAMESPACE as DHCP_NAMESPACE};
 use hunt_packs::store::{MIGRATIONS as HUNT_MIGRATIONS, MIGRATION_NAMESPACE as HUNT_NAMESPACE};
 use oncall::store::{MIGRATIONS as ONCALL_MIGRATIONS, MIGRATION_NAMESPACE as ONCALL_NAMESPACE};
+use remote_shell::store::{MIGRATIONS as RSHELL_MIGRATIONS, MIGRATION_NAMESPACE as RSHELL_NAMESPACE};
 use risk_score::api::{risk_access, risk_document, risk_router};
 use risk_score::backend::{pg_backend as risk_backend, system_clock};
 use risk_score::cache::risk_state;
@@ -67,6 +68,9 @@ const COMPLIANCE_PLAN: &[Migration] = &COMPLIANCE_MIGRATIONS;
 const VULN_PLAN: &[Migration] = &VULN_MIGRATIONS;
 
 
+const RSHELL_PLAN: &[Migration] = &RSHELL_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -79,6 +83,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "dhcp" => Some(Module::Dhcp),
         "compliance" => Some(Module::Compliance),
         "vulnerabilities" => Some(Module::Vulnerabilities),
+        "remote_shell" => Some(Module::RemoteShell),
         _ => None,
     }
 }
@@ -183,6 +188,10 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::RemoteShell => Ok(remote_shell::api::remote_shell_router(remote_shell::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -206,6 +215,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Dhcp => dhcp_kea::api::dhcp_access(),
         Module::Compliance => compliance::api::compliance_access(),
         Module::Vulnerabilities => vuln_match::api::vulnerabilities_access(),
+        Module::RemoteShell => remote_shell::api::remote_shell_access(),
     }
 }
 
@@ -222,6 +232,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Dhcp => dhcp_kea::api::dhcp_document(),
         Module::Compliance => compliance::api::compliance_document(),
         Module::Vulnerabilities => vuln_match::api::vulnerabilities_document(),
+        Module::RemoteShell => remote_shell::api::remote_shell_document(),
     }
 }
 
@@ -254,6 +265,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Dhcp]), DHCP_NAMESPACE, DHCP_PLAN),
         (wants(&[Module::Compliance]), COMPLIANCE_NAMESPACE, COMPLIANCE_PLAN),
         (wants(&[Module::Vulnerabilities]), VULN_NAMESPACE, VULN_PLAN),
+        (wants(&[Module::RemoteShell]), RSHELL_NAMESPACE, RSHELL_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)

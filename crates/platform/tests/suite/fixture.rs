@@ -38,6 +38,9 @@ pub const READER: &str = "reader";
 pub const ANALYST: &str = "analyst";
 
 
+pub const AUDITOR: &str = "auditor";
+
+
 const OWNER_ONLY: u32 = 0o600;
 
 
@@ -116,7 +119,7 @@ fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
 
 
 fn seed_accounts(config: &ApiConfig) -> Result<(), TestError> {
-    [READER, ANALYST].into_iter().try_for_each(|name| -> Result<(), TestError> {
+    [READER, ANALYST, AUDITOR].into_iter().try_for_each(|name| -> Result<(), TestError> {
         let account = Account {
             username: name.to_owned(),
             password_hash: hash_password(PASSWORD, os_random)?,
