@@ -15,6 +15,17 @@ pub const THIRD_PARAM: usize = 2;
 pub const TENANT_BIND: &str = "tenant = $1";
 
 
+pub const JOIN_BIND: &str = "alert_triage.tenant = alerts.tenant";
+
+
+pub struct Triage {
+    pub tenant: String,
+    pub alert_id: String,
+    pub status: String,
+}
+
+
+#[derive(Clone)]
 pub struct Stored {
     pub tenant: String,
     pub id: String,
@@ -29,6 +40,7 @@ pub struct Stored {
 #[derive(Default)]
 pub struct Db {
     pub rows: Vec<Stored>,
+    pub triage: Vec<Triage>,
     pub fail: bool,
     pub forced: Option<Vec<Row>>,
     pub statements: Mutex<Vec<(String, &'static str)>>,
@@ -53,7 +65,7 @@ pub fn number(params: &[String], index: usize) -> Result<u64, PgError> {
 }
 
 
-pub fn row_of(stored: &Stored) -> Row {
+pub fn row_of(stored: &Stored, status: &str) -> Row {
     vec![
         stored.id.clone(),
         stored.rule.clone(),
@@ -61,7 +73,18 @@ pub fn row_of(stored: &Stored) -> Row {
         stored.created.to_string(),
         stored.host.clone(),
         stored.user.clone(),
+        status.to_owned(),
     ]
+}
+
+
+/// The triage status the statement would join: on the tenant too only when its text says so, else on the alert id alone.
+pub fn status_of(db: &Db, sql: &str, stored: &Stored) -> String {
+    let tenant_bound = sql.contains(JOIN_BIND);
+    db.triage
+        .iter()
+        .find(|triage| triage.alert_id == stored.id && (!tenant_bound || triage.tenant == stored.tenant))
+        .map_or_else(String::new, |triage| triage.status.clone())
 }
 
 
@@ -83,7 +106,11 @@ pub fn select(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]
         .filter(|stored| cursor.as_ref().is_none_or(|(created, id)| (stored.created, &stored.id) > (*created, id)))
         .collect();
     rows.sort_by(|left, right| (left.created, &left.id).cmp(&(right.created, &right.id)));
-    Ok(rows.into_iter().take(limit).map(row_of).collect())
+    Ok(rows
+        .into_iter()
+        .take(limit)
+        .map(|stored| row_of(stored, &status_of(db, sql, stored)))
+        .collect())
 }
 
 

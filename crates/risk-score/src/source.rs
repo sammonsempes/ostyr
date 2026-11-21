@@ -3,20 +3,26 @@ use crate::model::{Contribution, EntityKind, EntityRef, Score, Severity, Weights
 use crate::score::{check_contribution, score_entities, DECAY_DAYS, MAX_CONTRIBUTIONS, MAX_ENTITIES, PER_MILLION, SECONDS_PER_DAY};
 use alerts::error::StoreError;
 use alerts::model::Severity as AlertSeverity;
-use alerts::store::{cell, entity};
+use alerts::store::{cell, entity, number};
 use alerts::types::{Executor, Row};
 use core_pg::scope::TenantScope;
 use std::collections::{BTreeMap, BTreeSet};
 
 
-/// Alerts of one tenant newer than `$2`, oldest first, through `alerts_by_created`; the keyset needs `id`, no other column is read.
-pub const RISK_ALERTS_SQL: &str = "SELECT id, rule_id, severity, created::text, COALESCE(host_name, ''), COALESCE(user_name, '') FROM alerts \
-                                   WHERE tenant = $1 AND created > $2::text::bigint ORDER BY alerts.created, alerts.id LIMIT $3::text::bigint";
+/// Alerts of one tenant newer than `$2`, oldest first, through `alerts_by_created`, with the triage status (empty when none) joined on its key.
+pub const RISK_ALERTS_SQL: &str = "SELECT alerts.id, alerts.rule_id, alerts.severity, alerts.created::text, COALESCE(alerts.host_name, ''), \
+                                   COALESCE(alerts.user_name, ''), COALESCE(alert_triage.status, '') FROM alerts \
+                                   LEFT JOIN alert_triage ON alert_triage.tenant = alerts.tenant AND alert_triage.alert_id = alerts.id \
+                                   WHERE alerts.tenant = $1 AND alerts.created > $2::text::bigint ORDER BY alerts.created, alerts.id \
+                                   LIMIT $3::text::bigint";
 
 
 /// As `RISK_ALERTS_SQL` after the keyset `($3, $4)` = (created, id) of the last alert of the previous page.
-pub const RISK_ALERTS_NEXT_SQL: &str = "SELECT id, rule_id, severity, created::text, COALESCE(host_name, ''), COALESCE(user_name, '') FROM alerts \
-                                        WHERE tenant = $1 AND created > $2::text::bigint AND (created, id) > ($3::text::bigint, $4::text) \
+pub const RISK_ALERTS_NEXT_SQL: &str = "SELECT alerts.id, alerts.rule_id, alerts.severity, alerts.created::text, COALESCE(alerts.host_name, ''), \
+                                        COALESCE(alerts.user_name, ''), COALESCE(alert_triage.status, '') FROM alerts \
+                                        LEFT JOIN alert_triage ON alert_triage.tenant = alerts.tenant AND alert_triage.alert_id = alerts.id \
+                                        WHERE alerts.tenant = $1 AND alerts.created > $2::text::bigint \
+                                        AND (alerts.created, alerts.id) > ($3::text::bigint, $4::text) \
                                         ORDER BY alerts.created, alerts.id LIMIT $5::text::bigint";
 
 
@@ -45,6 +51,36 @@ pub const HOST_COLUMN: usize = 4;
 
 
 pub const USER_COLUMN: usize = 5;
+
+
+pub const STATUS_COLUMN: usize = 6;
+
+
+pub const FALSE_POSITIVE_STATUS: &str = "false_positive";
+
+
+pub const CLOSED_STATUS: &str = "closed";
+
+
+pub const ACKNOWLEDGED_STATUS: &str = "acknowledged";
+
+
+pub const MIN_VERDICTS: u64 = 20;
+
+
+pub const MIN_FP_HOSTS: usize = 3;
+
+
+pub const MIN_FP_DAYS: usize = 3;
+
+
+pub const MAX_FP_RATE_PPM: u32 = 900_000;
+
+
+pub const MAX_NAMED_FP_RULES: usize = 100;
+
+
+pub const MICROS_PER_DAY: u64 = 86_400_000_000;
 
 
 pub const ENTITY_COLUMNS: [(EntityKind, usize); 2] = [(EntityKind::Host, HOST_COLUMN), (EntityKind::User, USER_COLUMN)];
@@ -91,6 +127,27 @@ pub struct Truncated {
 }
 
 
+/// The verdicts read for one rule: counts, and the first hosts and days (at most the floors) of its false positives.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Verdicts {
+    pub false_positive: u64,
+    pub closed: u64,
+    pub hosts: BTreeSet<String>,
+    pub days: BTreeSet<u64>,
+}
+
+
+/// A rule whose false-positive rate is applied; `capped` when the raw rate went above `MAX_FP_RATE_PPM`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FpRule {
+    pub rule_id: String,
+    pub false_positive: u64,
+    pub closed: u64,
+    pub rate_ppm: u32,
+    pub capped: bool,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub scores: Vec<Score>,
@@ -98,6 +155,9 @@ pub struct Outcome {
     pub informational: usize,
     pub refused: BTreeMap<EntityKind, usize>,
     pub truncated: Option<Truncated>,
+    pub fp_rules: Vec<FpRule>,
+    pub fp_rules_omitted: usize,
+    pub unknown_verdicts: usize,
 }
 
 
@@ -109,6 +169,8 @@ pub struct Gathered {
     pub informational: usize,
     pub refused: BTreeMap<EntityKind, usize>,
     pub truncated: Option<Truncated>,
+    pub verdicts: BTreeMap<String, Verdicts>,
+    pub unknown_verdicts: usize,
 }
 
 
@@ -210,6 +272,78 @@ pub fn candidates(gathered: &mut Gathered, row: &Row, severity: Severity) -> Res
 }
 
 
+/// Counts the triage status of an alert read: false positives and closes per rule, an unknown text apart; other statuses are no verdict.
+pub fn tally_verdict(gathered: &mut Gathered, row: &Row) -> Result<(), StoreError> {
+    let status = cell(row, STATUS_COLUMN)?;
+    if status == FALSE_POSITIVE_STATUS || status == CLOSED_STATUS {
+        let rule_id = cell(row, RULE_COLUMN)?;
+        let created_micros = number(row, CREATED_COLUMN)?;
+        let host = cell(row, HOST_COLUMN)?;
+        let verdicts = gathered.verdicts.entry(rule_id.to_owned()).or_default();
+        if status == CLOSED_STATUS {
+            verdicts.closed += 1;
+        } else {
+            verdicts.false_positive += 1;
+            if !host.is_empty() && verdicts.hosts.len() < MIN_FP_HOSTS {
+                verdicts.hosts.insert(host.to_owned());
+            }
+            if verdicts.days.len() < MIN_FP_DAYS {
+                verdicts.days.insert(created_micros / MICROS_PER_DAY);
+            }
+        }
+    } else if !status.is_empty() && status != ACKNOWLEDGED_STATUS {
+        gathered.unknown_verdicts += 1;
+    }
+    Ok(())
+}
+
+
+/// The rate of a rule in parts per million, 0 below the floors (verdicts, hosts, days), and whether it was cut at `MAX_FP_RATE_PPM`.
+pub fn fp_rate(verdicts: &Verdicts) -> (u32, bool) {
+    let total = verdicts.false_positive + verdicts.closed;
+    let enough = total >= MIN_VERDICTS && verdicts.hosts.len() >= MIN_FP_HOSTS && verdicts.days.len() >= MIN_FP_DAYS;
+    let raw = if enough { per_million(verdicts.false_positive, total) } else { 0 };
+    (raw.min(MAX_FP_RATE_PPM), raw > MAX_FP_RATE_PPM)
+}
+
+
+/// The rules with an applied rate above 0, highest rate first then rule id, and how many the cut at `MAX_NAMED_FP_RULES` left out.
+pub fn fp_rules_of(verdicts: &BTreeMap<String, Verdicts>) -> (Vec<FpRule>, usize) {
+    let mut rules: Vec<FpRule> = verdicts
+        .iter()
+        .filter_map(|(rule_id, counted)| {
+            let (rate_ppm, capped) = fp_rate(counted);
+            (rate_ppm > 0).then(|| FpRule {
+                rule_id: rule_id.clone(),
+                false_positive: counted.false_positive,
+                closed: counted.closed,
+                rate_ppm,
+                capped,
+            })
+        })
+        .collect();
+    rules.sort_by(|left, right| right.rate_ppm.cmp(&left.rate_ppm).then_with(|| left.rule_id.cmp(&right.rule_id)));
+    let omitted = rules.len().saturating_sub(MAX_NAMED_FP_RULES);
+    rules.truncate(MAX_NAMED_FP_RULES);
+    (rules, omitted)
+}
+
+
+/// Sets each non-critical contribution's false-positive rate from its rule's verdicts; a critical one keeps 0.
+pub fn with_false_positive_rates(contributions: Vec<Contribution>, verdicts: &BTreeMap<String, Verdicts>) -> Vec<Contribution> {
+    contributions
+        .into_iter()
+        .map(|contribution| {
+            let rate = verdicts.get(&contribution.rule_id).map_or(0, |counted| fp_rate(counted).0);
+            Contribution {
+                false_positive_rate: if contribution.severity == Severity::Critical { 0 } else { rate },
+                ..contribution
+            }
+        })
+        .collect()
+}
+
+
 /// Adds one alert, or records which bound it would break; nothing is added once a bound is hit.
 pub fn absorb(gathered: &mut Gathered, limits: &Limits, row: &Row) -> Result<(), StoreError> {
     if gathered.alerts_read >= limits.max_alerts {
@@ -246,7 +380,10 @@ pub fn absorb(gathered: &mut Gathered, limits: &Limits, row: &Row) -> Result<(),
             }
         }
     }
-    gathered.alerts_read += usize::from(gathered.truncated.is_none());
+    if gathered.truncated.is_none() {
+        gathered.alerts_read += 1;
+        tally_verdict(gathered, row)?;
+    }
     Ok(())
 }
 
@@ -299,7 +436,8 @@ pub async fn tenant_scores(exec: Executor<'_, '_>, scope: &TenantScope, weights:
             done = rows.len() < page_size || gathered.truncated.is_some();
         }
     }
-    let contributions = with_rates(gathered.contributions);
+    let contributions = with_false_positive_rates(with_rates(gathered.contributions), &gathered.verdicts);
+    let (fp_rules, fp_rules_omitted) = fp_rules_of(&gathered.verdicts);
     let scores = score_entities(&contributions, weights, now)?;
     Ok(Outcome {
         scores,
@@ -307,5 +445,8 @@ pub async fn tenant_scores(exec: Executor<'_, '_>, scope: &TenantScope, weights:
         informational: gathered.informational,
         refused: gathered.refused,
         truncated: gathered.truncated,
+        fp_rules,
+        fp_rules_omitted,
+        unknown_verdicts: gathered.unknown_verdicts,
     })
 }

@@ -48,13 +48,26 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         .try_for_each(|score| writeln!(out, "{:?} {} {}", score.entity.kind, score.entity.id.escape_debug(), score.value))?;
     writeln!(
         out,
-        "entities={} alerts_read={} informational={} refused={:?} truncated={:?}",
+        "entities={} alerts_read={} informational={} refused={:?} truncated={:?} unknown_verdicts={} fp_rules_omitted={}",
         outcome.scores.len(),
         outcome.alerts_read,
         outcome.informational,
         outcome.refused,
-        outcome.truncated
+        outcome.truncated,
+        outcome.unknown_verdicts,
+        outcome.fp_rules_omitted
     )?;
+    outcome.fp_rules.iter().try_for_each(|rule| {
+        writeln!(
+            out,
+            "fp_rule {} false_positive={} closed={} rate_ppm={} capped={}",
+            rule.rule_id.escape_debug(),
+            rule.false_positive,
+            rule.closed,
+            rule.rate_ppm,
+            rule.capped
+        )
+    })?;
     Ok(())
 }
 
