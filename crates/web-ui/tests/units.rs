@@ -12,6 +12,10 @@ use web_ui::api::{
 use web_ui::api::{hunts_path, valid_hunt_cursor, valid_pack_id, MAX_HUNT_CURSOR_CHARS, MAX_PACK_ID_CHARS};
 use web_ui::api::{oncall_path, parse_oncall_id, valid_oncall_text, MAX_ONCALL_FINGERPRINT_BYTES, ONCALL_STATES};
 use web_ui::api::{
+    parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, scan_dhcp_intervals, valid_dhcp_hostname, DHCP_LIMIT,
+    MAX_DHCP_LABEL_CHARS,
+};
+use web_ui::api::{
     states_path, valid_state_asset, valid_state_cursor, valid_state_id, verdict_filter, MAX_STATE_ASSET_CHARS, MAX_STATE_CURSOR_HEX,
     MAX_STATE_ID_CHARS,
 };
@@ -610,5 +614,51 @@ fn a_dot_asset_vulnerability_row_has_no_link_and_a_negative_zero_score_is_unread
         let shown = vuln_row(Language::English, &refused, None).0;
         assert!(shown.contains("Unreadable row.") && !shown.contains("action="), "{shown}");
     }
+    Ok(())
+}
+
+
+#[test]
+fn dhcp_grammar_copies_accept_only_the_apis_shapes() -> TestResult {
+    let label = "a".repeat(MAX_DHCP_LABEL_CHARS);
+    let too_long = "a".repeat(MAX_DHCP_LABEL_CHARS + 1);
+    for good in ["a", "host-1.example.com", "a_b", "a.b.c", label.as_str()] {
+        assert!(valid_dhcp_hostname(good), "{good}");
+    }
+    let long_name = format!("{label}.{label}.{label}.{label}");
+    for bad in [
+        "",
+        "-a",
+        "a-",
+        "a..b",
+        ".a",
+        "a.",
+        "a b",
+        "a\u{3164}",
+        "a\u{1b}",
+        too_long.as_str(),
+        long_name.as_str(),
+    ] {
+        assert!(!valid_dhcp_hostname(bad), "{bad}");
+    }
+    assert_eq!(parse_dhcp_mac(Some("aa-bb-cc-dd-ee-0f")).as_deref(), Some("AA-BB-CC-DD-EE-0F"));
+    assert_eq!(parse_dhcp_mac(None), None);
+    assert_eq!(parse_dhcp_mac(Some("a:bb:cc:dd:ee:ff")), None);
+    assert_eq!(parse_dhcp_time(Some("0")), Some(0));
+    assert_eq!(parse_dhcp_time(None), None);
+    assert_eq!(parse_dhcp_window(Some("1"), Some("1")), Some((1, 1)));
+    assert_eq!(parse_dhcp_window(Some("1"), None), None);
+    assert_eq!(parse_dhcp_address(None), None);
+    assert!(parse_dhcp_address(Some("::1")).is_some());
+    Ok(())
+}
+
+
+#[test]
+fn the_interval_scan_refuses_more_than_the_api_cap_before_decoding() -> TestResult {
+    let items = |count: usize| format!("{{\"intervals\":[{}]}}", vec!["null"; count].join(","));
+    assert!(scan_dhcp_intervals(items(DHCP_LIMIT).as_bytes()).is_ok());
+    assert!(scan_dhcp_intervals(items(DHCP_LIMIT + 1).as_bytes()).is_err());
+    assert!(scan_dhcp_intervals(b"{\"items\":[]}").is_err());
     Ok(())
 }

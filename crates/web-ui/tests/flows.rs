@@ -1,3 +1,5 @@
+#[path = "support/dhcp_flows.rs"]
+mod dhcp_flows;
 #[path = "support/harness.rs"]
 mod harness;
 #[path = "support/logging.rs"]

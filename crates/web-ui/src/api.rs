@@ -1,7 +1,8 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
-    Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView,
-    FindingsView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery,
+    FindingsView, LookupView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, StateAssetView, StateListView, VulnAssetView,
+    VulnListView,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
@@ -12,6 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 use serde_json::value::RawValue;
 use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
@@ -1108,4 +1110,136 @@ pub async fn get_oncall_alert(client: &ApiClient, source: IpAddr, token: &Secret
         }
         None => Err(ApiFailure::NotFound),
     }
+}
+
+
+/// The DHCP history API's `MAX_LOOKUP_ROWS`: the most intervals one answer may hold.
+pub const DHCP_LIMIT: usize = 100;
+
+
+/// The DHCP history API's `MAX_TIME_CHARS`.
+pub const DHCP_MAX_TIME_CHARS: usize = 20;
+
+
+/// The DHCP history API's `MAX_DAY_SECONDS`: 9999-12-31T23:59:59Z.
+pub const DHCP_MAX_SECONDS: u64 = 253_402_300_799;
+
+
+/// The DHCP history API's `MAX_WINDOW_DAYS`.
+pub const DHCP_MAX_WINDOW_DAYS: i64 = 400;
+
+
+/// Seconds in a day.
+pub const DHCP_SECONDS_PER_DAY: i64 = 86_400;
+
+
+/// The DHCP history store's MAC shape: six groups of two hex digits.
+pub const MAC_OCTETS: usize = 6;
+
+
+/// Digits in one MAC group.
+pub const MAC_OCTET_DIGITS: usize = 2;
+
+
+/// The longest hostname the store keeps.
+pub const MAX_DHCP_HOSTNAME_CHARS: usize = 253;
+
+
+/// The longest hostname label the store keeps.
+pub const MAX_DHCP_LABEL_CHARS: usize = 63;
+
+
+/// The API's `parse_time` (copy): ASCII digits with an optional leading `-`, at most 20 characters, inside years 0 to 9999.
+pub fn parse_dhcp_time(text: Option<&str>) -> Option<i64> {
+    let digits = text?;
+    let unsigned = digits.strip_prefix('-').unwrap_or(digits);
+    let plain = !unsigned.is_empty() && digits.len() <= DHCP_MAX_TIME_CHARS && unsigned.bytes().all(|byte| byte.is_ascii_digit());
+    plain
+        .then(|| digits.parse::<i64>().ok())
+        .flatten()
+        .filter(|seconds| u64::try_from(*seconds).is_ok_and(|found| found <= DHCP_MAX_SECONDS))
+}
+
+
+/// The API's `normalise_mac` (copy): six groups of two hex digits, `:` or `-`, answered in the ECS upper case dash form.
+pub fn parse_dhcp_mac(text: Option<&str>) -> Option<String> {
+    let octets: Vec<&str> = text?.split([':', '-']).collect();
+    let valid = octets.len() == MAC_OCTETS
+        && octets
+            .iter()
+            .all(|octet| octet.len() == MAC_OCTET_DIGITS && octet.chars().all(|found| found.is_ascii_hexdigit()));
+    valid.then(|| octets.join("-").to_ascii_uppercase())
+}
+
+
+/// The API's `parse_address` (copy): `IpAddr::from_str`, so no zone id and no brackets.
+pub fn parse_dhcp_address(text: Option<&str>) -> Option<IpAddr> {
+    text.and_then(|found| IpAddr::from_str(found).ok())
+}
+
+
+/// A window of the API's grammar: `from <= to` and at most 400 days.
+pub fn parse_dhcp_window(from: Option<&str>, to: Option<&str>) -> Option<(i64, i64)> {
+    parse_dhcp_time(from)
+        .zip(parse_dhcp_time(to))
+        .filter(|(start, end)| start <= end && end - start <= DHCP_MAX_WINDOW_DAYS * DHCP_SECONDS_PER_DAY)
+}
+
+
+fn valid_dhcp_label(label: &str) -> bool {
+    (1..=MAX_DHCP_LABEL_CHARS).contains(&label.len())
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label.chars().all(|found| found.is_ascii_alphanumeric() || found == '-' || found == '_')
+}
+
+
+/// The store's hostname grammar (copy of dhcp-kea `valid_hostname`, no trailing dot): a hostname is client text, so only this ASCII shape is printed.
+pub fn valid_dhcp_hostname(text: &str) -> bool {
+    !text.is_empty() && text.len() <= MAX_DHCP_HOSTNAME_CHARS && text.split('.').all(valid_dhcp_label)
+}
+
+
+/// The API path and query of a checked lookup.
+pub fn dhcp_path(query: &DhcpQuery) -> String {
+    let mut pairs = Serializer::new(String::new());
+    match query {
+        DhcpQuery::At { address, at } => {
+            pairs.append_pair("address", &address.to_string());
+            pairs.append_pair("at", &at.to_string());
+            format!("dhcp/leases/at?{}", pairs.finish())
+        }
+        DhcpQuery::Mac { mac, from, to } => {
+            pairs.append_pair("mac", mac);
+            pairs.append_pair("from", &from.to_string());
+            pairs.append_pair("to", &to.to_string());
+            format!("dhcp/leases/mac?{}", pairs.finish())
+        }
+    }
+}
+
+
+#[derive(Deserialize)]
+pub struct IntervalScan<'a> {
+    #[serde(borrow)]
+    pub intervals: Vec<&'a RawValue>,
+}
+
+
+/// Counts the intervals on raw slices, at most `DHCP_LIMIT`, before any typed value is built.
+pub fn scan_dhcp_intervals(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: IntervalScan = serde_json::from_slice(bytes)?;
+    if scan.intervals.len() > DHCP_LIMIT {
+        Err(ApiFailure::Malformed("too many items"))
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Counts the intervals on raw slices before the typed decode, then reads the answer.
+pub async fn get_dhcp(client: &ApiClient, source: IpAddr, token: &SecretString, query: &DhcpQuery) -> Result<LookupView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &dhcp_path(query), Some(token), None).await?;
+    scan_dhcp_intervals(&bytes)?;
+    serde_json::from_slice(&bytes).map_err(ApiFailure::from)
 }

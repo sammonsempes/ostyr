@@ -90,6 +90,7 @@ pub struct StubState {
     pub hunt_paths: Mutex<Vec<String>>,
     pub state_paths: Mutex<Vec<String>>,
     pub vuln_paths: Mutex<Vec<String>>,
+    pub dhcp_paths: Mutex<Vec<String>>,
     pub oncall_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
@@ -1483,6 +1484,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         hunt_paths: Mutex::new(Vec::new()),
         state_paths: Mutex::new(Vec::new()),
         vuln_paths: Mutex::new(Vec::new()),
+        dhcp_paths: Mutex::new(Vec::new()),
         oncall_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
@@ -1505,6 +1507,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/hunts/findings", get(hunt_list_handler))
         .route("/compliance/state", get(state_list_handler))
         .route("/compliance/assets/{asset}", get(state_asset_handler))
+        .route("/dhcp/leases/at", get(dhcp_handler))
+        .route("/dhcp/leases/mac", get(dhcp_handler))
         .route("/vulnerabilities/findings", get(vuln_list_handler))
         .route("/vulnerabilities/assets/{asset}", get(vuln_asset_handler))
         .route("/oncall/alerts", get(oncall_list_handler))
@@ -1532,3 +1536,105 @@ pub const CERT_ROW_NAMES: usize = 30;
 
 
 pub const CERT_PAIR: usize = 2;
+
+
+pub const DHCP_HOSTILE_HOSTNAMES: [&str; 3] = ["evil\u{1b}[31m", "\u{3164}x", "<script>x</script>"];
+
+
+pub const DHCP_HOSTILE_BYTES: usize = 10_000;
+
+
+pub const LEASE_SUBNET: i64 = 7;
+
+
+pub fn lease_item(address: &str, mac: Value, hostname: Value, starts: &str, action: &str) -> Value {
+    json!({"address": address, "mac": mac, "hostname": hostname, "starts": starts, "ends": "2026-03-02T00:00:00Z", "action": action, "subnet_id": LEASE_SUBNET})
+}
+
+
+pub fn lease_good(hostname: &str) -> Value {
+    lease_item(
+        "10.0.0.5",
+        json!("AA-BB-CC-DD-EE-FF"),
+        json!(hostname),
+        "2026-03-01T10:00:00+01:00",
+        "lease-assigned",
+    )
+}
+
+
+pub fn dhcp_lookup(items: Vec<Value>, skipped: u32, truncated: bool) -> Value {
+    json!({"intervals": items, "skipped": skipped, "truncated": truncated})
+}
+
+
+pub fn dhcp_hostile_items() -> Vec<Value> {
+    let mut items: Vec<Value> = DHCP_HOSTILE_HOSTNAMES.iter().map(|name| lease_good(name)).collect();
+    items.push(lease_good(&"a".repeat(DHCP_HOSTILE_BYTES)));
+    items.push(lease_good("-x"));
+    items.push(lease_item(
+        "-x",
+        json!("AA-BB-CC-DD-EE-FF"),
+        json!("ok"),
+        "2026-03-01T00:00:00Z",
+        "lease-assigned",
+    ));
+    items.push(lease_item(
+        "10.0.0.6",
+        json!("evil"),
+        json!("ok"),
+        "2026-03-01T00:00:00Z",
+        "lease-assigned",
+    ));
+    items.push(lease_item(
+        "10.0.0.7",
+        json!("AA-BB-CC-DD-EE-FF"),
+        json!("ok"),
+        "not a time",
+        "lease-assigned",
+    ));
+    items.push(lease_item(
+        "10.0.0.8",
+        json!("AA-BB-CC-DD-EE-FF"),
+        json!("fine"),
+        "2026-03-01T00:00:00Z",
+        "evil\u{1b}action",
+    ));
+    items
+}
+
+
+pub async fn dhcp_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.dhcp_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(dhcp_lookup((0..MANY_ITEMS).map(|_| lease_good("ok")).collect(), 0, false)).into_response(),
+            Mode::Hostile => Json(dhcp_lookup(dhcp_hostile_items(), 1, false)).into_response(),
+            Mode::BadCursor => Json(json!({"intervals": LEAK, "skipped": 0, "truncated": false})).into_response(),
+            Mode::Chunked => Json(dhcp_lookup(vec![], 0, false)).into_response(),
+            Mode::BadId => Json(dhcp_lookup(vec![], 1, false)).into_response(),
+            Mode::BadSeverity => Json(dhcp_lookup(vec![], STATE_MANY_SKIPPED, false)).into_response(),
+            _ => Json(dhcp_lookup(
+                vec![
+                    lease_good("host-1.example.com"),
+                    lease_item("2001:db8::1", Value::Null, Value::Null, "2026-03-01T00:00:00Z", "lease-state-9"),
+                    lease_item(
+                        "10.0.0.9",
+                        json!("aa:bb:cc:dd:ee:00"),
+                        Value::Null,
+                        "2026-03-01T00:00:00Z",
+                        "lease-expired-reclaimed",
+                    ),
+                ],
+                1,
+                true,
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
