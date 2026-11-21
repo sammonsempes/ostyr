@@ -1527,6 +1527,7 @@ fn the_seen_ledger_refuses_a_listing_over_the_listing_bound_and_the_sql_states_b
     assert!(LEDGER_DDL.contains("ORDER BY s.first_seen_round LIMIT p_delete_cap * 2) c"));
     assert!(LEDGER_DDL.contains("CREATE INDEX IF NOT EXISTS cloud_cost_seen_age ON cloud_cost_seen (tenant, source_id, first_seen_round)"));
     assert!(LEDGER_DDL.contains("SET enable_sort = off SET enable_seqscan = off SET jit = off"));
+    assert!(LEDGER_DDL.ends_with("SET jit = off SET search_path = pg_catalog, public, pg_temp"));
     assert!(!LEDGER_DDL.contains("MATERIALIZED"));
     assert_eq!(LEDGER_DDL.matches(" JOIN ").count(), 1);
     assert!(LEDGER_DDL.contains("LEFT JOIN LATERAL (SELECT s.first_seen_round AS fs FROM cloud_cost_seen s"));

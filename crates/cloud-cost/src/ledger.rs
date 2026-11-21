@@ -55,7 +55,7 @@ LEFT JOIN LATERAL (SELECT s.first_seen_round AS fs FROM cloud_cost_seen s \
 WHERE s.tenant = p_tenant AND s.source_id = p_source AND s.object_key = u.k AND s.etag = u.e) f ON true \
 ORDER BY f.fs NULLS LAST, u.k COLLATE \"C\"; \
 out_key := ''; out_recorded := 'deferred:' || (v_found - v_deleted)::text; RETURN NEXT; \
-END $$ LANGUAGE plpgsql SET enable_sort = off SET enable_seqscan = off SET jit = off";
+END $$ LANGUAGE plpgsql SET enable_sort = off SET enable_seqscan = off SET jit = off SET search_path = pg_catalog, public, pg_temp";
 
 
 pub const SELECT_OBJECT: &str = "SELECT sha256 FROM cloud_cost_objects WHERE tenant = $1 AND source_id = $2 AND key = $3 AND etag = $4";
