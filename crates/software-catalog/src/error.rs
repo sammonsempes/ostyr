@@ -43,4 +43,29 @@ pub enum InstalledError {
     Read(#[from] std::io::Error),
     #[error("inventory is larger than {limit} bytes")]
     TooLarge { limit: usize },
+    #[error("inventory is not valid JSON ({category:?}) at line {line} column {column}")]
+    Json {
+        category: serde_json::error::Category,
+        line: usize,
+        column: usize,
+    },
+    #[error("inventory lists more than {limit} sources")]
+    TooManySources { limit: usize },
+    #[error("source {index} cannot be attributed")]
+    WingetSource { index: usize },
+    #[error("source {index} is named winget but has another identifier")]
+    ForeignWingetSource { index: usize },
+    #[error("inventory lists the winget source twice")]
+    DuplicateSource,
+}
+
+
+impl From<serde_json::Error> for InstalledError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json {
+            category: error.classify(),
+            line: error.line(),
+            column: error.column(),
+        }
+    }
 }

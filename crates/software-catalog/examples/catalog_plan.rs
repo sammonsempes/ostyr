@@ -1,9 +1,10 @@
-//! Prints the plan: `catalog_plan <catalogue> <assignment> <installed> <available> [apt|dnf]`.
+//! Prints the plan: `catalog_plan <catalogue> <assignment> <installed> <available> [apt|dnf|winget]`.
 
 use software_catalog::available::parse_available;
 use software_catalog::catalogue::{parse_assignment, parse_catalogue, read_text};
 use software_catalog::installed::parse_installed;
 use software_catalog::installed_rpm::parse_rpm_installed;
+use software_catalog::installed_winget::parse_winget_export;
 use software_catalog::limits::Limits;
 use software_catalog::model::Manager;
 use software_catalog::plan::plan;
@@ -32,12 +33,13 @@ const INSTALLED_ARGUMENT: usize = 3;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths: Vec<String> = std::env::args().collect();
     if !(MIN_ARGUMENTS..=MAX_ARGUMENTS).contains(&paths.len()) {
-        Err("usage: catalog_plan <catalogue> <assignment> <installed> <available> [apt|dnf]")?;
+        Err("usage: catalog_plan <catalogue> <assignment> <installed> <available> [apt|dnf|winget]")?;
     }
     let manager = match paths.get(MANAGER_ARGUMENT).map(String::as_str) {
         None | Some("apt") => Manager::Apt,
         Some("dnf") => Manager::Dnf,
-        Some(_) => Err("manager must be apt or dnf")?,
+        Some("winget") => Manager::Winget,
+        Some(_) => Err("manager must be apt, dnf or winget")?,
     };
     let limits = Limits::default();
     let open = |index: usize| -> Result<File, Box<dyn std::error::Error>> {
@@ -48,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assignment = parse_assignment(&read_text(open(ASSIGNMENT_ARGUMENT)?, &limits)?, &limits)?;
     let installed = match manager {
         Manager::Dnf => parse_rpm_installed(open(INSTALLED_ARGUMENT)?, &limits)?,
+        Manager::Winget => parse_winget_export(open(INSTALLED_ARGUMENT)?, &limits)?,
         _ => parse_installed(open(INSTALLED_ARGUMENT)?, &limits)?,
     };
     let available = parse_available(open(AVAILABLE_ARGUMENT)?, manager, &limits)?;
@@ -55,12 +58,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = std::io::stdout();
     writeln!(
         out,
-        "actions={} refused_uninstalls={:?} malformed={} over_limit={} not_installed={} available={} available_malformed={}",
+        "actions={} refused_uninstalls={:?} malformed={} over_limit={} not_installed={} other_source={} unreadable_versions={} duplicate_ids={} available={} available_malformed={}",
         result.actions.len(),
         result.refused_uninstalls,
         installed.malformed,
         installed.over_limit,
         installed.not_installed,
+        installed.other_source,
+        installed.unreadable_versions,
+        installed.duplicate_ids,
         available.names.len(),
         available.malformed
     )?;

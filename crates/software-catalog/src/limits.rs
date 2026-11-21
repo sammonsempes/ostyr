@@ -6,6 +6,9 @@ pub const MAX_CATALOGUE_BYTES: usize = 1_048_576;
 pub const MAX_ENTRIES: usize = 2048;
 
 
+pub const MAX_WINGET_SOURCES: usize = 16;
+
+
 pub const MAX_INSTALLED: usize = 50_000;
 
 
@@ -26,6 +29,7 @@ pub struct Limits {
     pub max_available: usize,
     pub max_installed_bytes: usize,
     pub max_line_bytes: usize,
+    pub max_sources: usize,
 }
 
 
@@ -38,6 +42,7 @@ impl Default for Limits {
             max_available: MAX_AVAILABLE,
             max_installed_bytes: MAX_INSTALLED_BYTES,
             max_line_bytes: MAX_LINE_BYTES,
+            max_sources: MAX_WINGET_SOURCES,
         }
     }
 }

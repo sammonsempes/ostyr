@@ -84,6 +84,9 @@ pub struct Installed {
     pub malformed: usize,
     pub over_limit: usize,
     pub not_installed: usize,
+    pub other_source: usize,
+    pub unreadable_versions: usize,
+    pub duplicate_ids: usize,
 }
 
 
