@@ -15,11 +15,14 @@ use vuln_match::error::StoreError;
 use vuln_match::limits::MAX_RESOLVED_FINDINGS_PER_ASSET;
 use vuln_match::model::ScanOutcome;
 use vuln_match::model::{AssetFinding, Criticality, Finding, ScanCaps, ScoredFinding};
-use vuln_match::store::{open_findings, rebuild_counters, record_scan_capped, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE};
+use vuln_match::store::{
+    open_findings, open_findings_of_asset, rebuild_counters, record_scan_capped, ASSET_SQL, FIRST_SQL, MIGRATIONS, MIGRATION_DEADLINE,
+    MIGRATION_NAMESPACE, NEXT_SQL,
+};
 
 
 const USAGE: &str = "usage: vuln_store <pg.yaml> migrate | scan <tenant> <asset> <now_micros> <cap> <resolved_cap> <package/record>... \
-                     | bulk <tenant> <asset> <now_micros> <cap> <resolved_cap> <count> <prefix> | pages <tenant> <limit>";
+                     | bulk <tenant> <asset> <now_micros> <cap> <resolved_cap> <count> <prefix> | pages <tenant> <limit> | asset <tenant> <asset> <limit> | sql first|next|asset";
 
 
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -150,6 +153,17 @@ async fn scenario(settings_file: &Path, words: &[String]) -> Result<(), Box<dyn 
                 cursor = page.next;
             }
             writeln!(stdout(), "pages={pages} rows={rows}")?;
+        }
+        [word, tenant, asset, limit] if word == "asset" => {
+            let page = open_findings_of_asset(&exec, &tenant_scope(tenant)?, asset, limit.parse()?).await?;
+            writeln!(stdout(), "rows={} skipped={} next={:?}", page.findings.len(), page.skipped, page.next)?;
+        }
+        [word, name] if word == "sql" => {
+            let text = [("first", FIRST_SQL), ("next", NEXT_SQL), ("asset", ASSET_SQL)]
+                .iter()
+                .find_map(|(label, sql)| (label == name).then_some(*sql))
+                .ok_or(USAGE)?;
+            writeln!(stdout(), "{text}")?;
         }
         _ => Err(Box::<dyn Error>::from(USAGE))?,
     }
