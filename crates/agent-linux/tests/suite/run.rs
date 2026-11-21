@@ -3,16 +3,42 @@ use crate::types::TestResult;
 use agent_channel::types::{PauseFn, PauseFuture};
 use agent_linux::app::{run_linux, source_paths};
 use agent_linux::cursor::write_cursor;
-use agent_linux::error::SourceError;
+use agent_linux::error::{SensorError, SourceError};
 use agent_linux::model::{Cursor, LinuxFile, Report, SourceSettings, Totals, DEFAULT_POLL_MILLIS};
 use agent_linux::run::{run_source, tally};
+use agent_linux::types::RunFuture;
 use arc_swap::ArcSwap;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tempfile::tempdir;
+
+
+pub fn no_systemctl(_program: PathBuf, _arguments: Vec<String>) -> RunFuture {
+    Box::pin(async { Err(SensorError::Exit(None)) })
+}
+
+
+#[tokio::test]
+async fn a_program_path_in_the_settings_file_is_refused_at_start() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let config = write_files(dir.path())?;
+    for setting in ["systemctl_path: /usr/sbin/reboot\n", "nft_path: /usr/sbin/reboot\n"] {
+        let text = fs::read_to_string(&config)?;
+        fs::write(&config, format!("{text}{setting}"))?;
+        assert!(matches!(
+            run_linux(&config, 1, &|_| Box::pin(async {}), no_systemctl).await,
+            Err(SourceError::Config(_))
+        ));
+        fs::write(&config, text)?;
+    }
+    assert!(!dir.path().join("linux-audit").exists());
+    Ok(())
+}
 
 
 #[tokio::test]
@@ -126,7 +152,7 @@ fn write_files(dir: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std:
         &config,
         format!(
             "agent_file: {root}/agent.yaml\nexport_path: {root}/export.json\ncursor_file: {root}/cursor\naudit_file: {root}/linux-audit\n\
-             systemctl_path: {root}/no-systemctl\ncredentials_path: {root}/process-cred\n",
+             credentials_path: {root}/process-cred\n",
             root = dir.display()
         ),
     )?;
@@ -140,7 +166,7 @@ async fn the_linux_agent_runs_the_source_and_the_agent_side_by_side() -> TestRes
     let dir = tempdir()?;
     let config = write_files(dir.path())?;
     append(&dir.path().join("export.json"), &format!("{EXEC}\n{EXEC}\n"))?;
-    let totals = run_linux(&config, TWO, &|_| Box::pin(async {})).await?;
+    let totals = run_linux(&config, TWO, &|_| Box::pin(async {}), no_systemctl).await?;
     assert_eq!((totals.polls, totals.spooled, totals.agent_runs), (TWO, TWO, 0));
     let spooled = lines(&dir.path().join("spool"))?;
     assert_eq!(spooled.len(), LEN_TWO + 1);
@@ -152,10 +178,12 @@ async fn the_linux_agent_runs_the_source_and_the_agent_side_by_side() -> TestRes
 #[tokio::test]
 async fn the_linux_agent_refuses_missing_files() -> TestResult {
     let dir = tempdir()?;
-    assert!(run_linux(&dir.path().join("absent.yaml"), 1, &|_| Box::pin(async {})).await.is_err());
+    assert!(run_linux(&dir.path().join("absent.yaml"), 1, &|_| Box::pin(async {}), no_systemctl)
+        .await
+        .is_err());
     let config = write_files(dir.path())?;
     fs::remove_file(dir.path().join("agent.yaml"))?;
-    assert!(run_linux(&config, 1, &|_| Box::pin(async {})).await.is_err());
+    assert!(run_linux(&config, 1, &|_| Box::pin(async {}), no_systemctl).await.is_err());
     Ok(())
 }
 
@@ -181,7 +209,7 @@ async fn a_source_that_fails_at_start_ends_the_agent_at_once() -> TestResult {
     let yielding: &PauseFn = &|_| Box::pin(tokio::task::yield_now());
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(WORLD_WRITABLE))?;
     assert!(matches!(
-        run_linux(&config, u64::MAX, yielding).await,
+        run_linux(&config, u64::MAX, yielding, no_systemctl).await,
         Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
     ));
     let mut left = fs::read_dir(dir.path())?
@@ -191,10 +219,16 @@ async fn a_source_that_fails_at_start_ends_the_agent_at_once() -> TestResult {
     assert_eq!(left, ["agent.yaml", "linux.yaml", "process-cred"]);
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(PRIVATE))?;
     fs::write(dir.path().join("cursor"), "garbage")?;
-    assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::Cursor(_))));
+    assert!(matches!(
+        run_linux(&config, u64::MAX, yielding, no_systemctl).await,
+        Err(SourceError::Cursor(_))
+    ));
     fs::remove_file(dir.path().join("cursor"))?;
     assert!(Command::new("mkfifo").arg(dir.path().join("cursor")).status()?.success());
-    assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::NotRegular(_))));
+    assert!(matches!(
+        run_linux(&config, u64::MAX, yielding, no_systemctl).await,
+        Err(SourceError::NotRegular(_))
+    ));
     Ok(())
 }
 
@@ -219,7 +253,7 @@ async fn a_group_writable_audit_directory_ends_the_start_and_creates_nothing() -
     );
     fs::write(&config, text)?;
     assert!(matches!(
-        run_linux(&config, 1, &|_| Box::pin(async {})).await,
+        run_linux(&config, 1, &|_| Box::pin(async {}), no_systemctl).await,
         Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
     ));
     assert_eq!(fs::read_dir(&audit_dir)?.count(), 0);
@@ -243,25 +277,10 @@ async fn a_group_writable_spool_directory_ends_the_start_before_any_spool_file_e
     );
     fs::write(&agent, text)?;
     assert!(matches!(
-        run_linux(&config, 1, &|_| Box::pin(async {})).await,
+        run_linux(&config, 1, &|_| Box::pin(async {}), no_systemctl).await,
         Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
     ));
     assert_eq!(fs::read_dir(&spool_dir)?.count(), 0);
     assert!(!dir.path().join("linux-audit").exists());
-    Ok(())
-}
-
-
-#[tokio::test]
-async fn a_relative_systemctl_path_is_refused_at_start() -> TestResult {
-    let _log = scoped_logging();
-    let dir = tempdir()?;
-    let config = write_files(dir.path())?;
-    let text = fs::read_to_string(&config)?.replace(&format!("systemctl_path: {}/", dir.path().display()), "systemctl_path: ");
-    fs::write(&config, text)?;
-    assert!(matches!(
-        run_linux(&config, 1, &|_| Box::pin(async {})).await,
-        Err(SourceError::NotAbsolute(_))
-    ));
     Ok(())
 }

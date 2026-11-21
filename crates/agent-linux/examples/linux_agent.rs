@@ -4,6 +4,8 @@ use agent_linux::app::run_linux;
 #[cfg(unix)]
 use agent_linux::model::MAX_POLLS;
 #[cfg(unix)]
+use agent_linux::sensor::run_command;
+#[cfg(unix)]
 use std::error::Error;
 #[cfg(unix)]
 use std::io::{stdout, Write};
@@ -22,7 +24,13 @@ const USAGE: &str = "usage: linux_agent <config.yaml>";
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing_subscriber::fmt().with_writer(std::io::stderr).try_init()?;
     let path = std::env::args().nth(1).ok_or(USAGE)?;
-    let totals = run_linux(Path::new(&path), MAX_POLLS, &|delay: Duration| Box::pin(tokio::time::sleep(delay))).await?;
+    let totals = run_linux(
+        Path::new(&path),
+        MAX_POLLS,
+        &|delay: Duration| Box::pin(tokio::time::sleep(delay)),
+        run_command,
+    )
+    .await?;
     writeln!(stdout(), "{totals:?}")?;
     Ok(())
 }

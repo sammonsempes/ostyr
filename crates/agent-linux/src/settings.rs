@@ -110,7 +110,7 @@ pub fn unusable_address(address: &IpAddr) -> bool {
 }
 
 
-/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, a relative `nft_path`.
+/// Names of the isolation settings that are out of range: too many endpoints or resolvers, a zero port, a zero port.
 pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
     [
         ("isolation.endpoints", file.isolation.endpoints.len() > MAX_ENDPOINTS),
@@ -121,7 +121,6 @@ pub fn invalid_isolation_settings(file: &LinuxFile) -> Vec<&'static str> {
             file.isolation.endpoints.iter().any(|endpoint| unusable_address(&endpoint.address)),
         ),
         ("isolation.dns.address", file.isolation.dns.iter().any(unusable_address)),
-        ("nft_path", !file.nft_path.is_absolute()),
     ]
     .into_iter()
     .filter_map(|(name, invalid)| invalid.then_some(name))
