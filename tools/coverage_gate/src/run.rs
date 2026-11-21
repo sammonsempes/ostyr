@@ -41,7 +41,7 @@ pub fn run<Output: Write>(args: &[String], mut out: Output) -> Result<bool, Gate
         source,
     })?;
     let scope: Vec<String> = args.iter().skip(FIRST_SCOPE_ARG).cloned().collect();
-    let violations = check(&export, &in_scope(find_sources(&resolved)?, &resolved, &scope))?;
+    let violations = check(&export, &resolved, &in_scope(find_sources(&resolved)?, &resolved, &scope))?;
     violations
         .iter()
         .try_for_each(|violation| writeln!(out, "{violation}"))

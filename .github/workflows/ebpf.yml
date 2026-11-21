@@ -1,0 +1,38 @@
+name: ebpf
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  EBPF_NIGHTLY: nightly-2026-11-08
+  EBPF_MANIFEST: crates/ebpf-probes/ebpf/Cargo.toml
+
+jobs:
+  ebpf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install the pinned nightly and bpf-linker
+        run: lab/ebpf-toolchain.sh 2026-11-08
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            crates/ebpf-probes/ebpf/target
+          key: ebpf-${{ runner.os }}-${{ hashFiles('crates/ebpf-probes/ebpf/Cargo.lock') }}
+      - name: Check the formatting of the kernel crate
+        run: cargo "+$EBPF_NIGHTLY" fmt --check --manifest-path "$EBPF_MANIFEST"
+      - name: Build the kernel crate for bpfel-unknown-none
+        env:
+          RUSTFLAGS: -C link-arg=--btf
+        run: cargo "+$EBPF_NIGHTLY" build --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path "$EBPF_MANIFEST"
+      - name: Lint the kernel crate
+        run: cargo "+$EBPF_NIGHTLY" clippy --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path "$EBPF_MANIFEST" -- -D warnings
+      - name: Fail loudly when the runner kernel has no BTF
+        run: test -r /sys/kernel/btf/vmlinux || { echo "::error::this runner kernel has no BTF (/sys/kernel/btf/vmlinux is missing), the live probe tests cannot run"; exit 1; }

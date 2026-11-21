@@ -224,6 +224,27 @@ package_args() {
   for name in "${SCOPE_PKGS[@]+"${SCOPE_PKGS[@]}"}"; do PACKAGE_ARGS+=(-p "$name"); done
 }
 
+EBPF_NIGHTLY="${EBPF_NIGHTLY:-nightly-2026-11-08}"
+EBPF_MANIFEST=crates/ebpf-probes/ebpf/Cargo.toml
+
+kernel_touched() {
+  local staged path
+  if [ "${GATE_SCOPE:-}" = full ]; then return 0; fi
+  staged=$(git diff --cached --name-only --no-renames --diff-filter=ACMRD)
+  for path in $staged; do
+    case "$path" in
+      crates/ebpf-probes/ebpf/* | .githooks/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+kernel_checks() {
+  low cargo +nightly fmt --check --manifest-path "$EBPF_MANIFEST" &&
+    low cargo "+$EBPF_NIGHTLY" clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
+      --manifest-path "$EBPF_MANIFEST" -- -D warnings
+}
+
 compute_scope
 prepare_gate_dir
 package_args
@@ -233,4 +254,5 @@ step "3/6 custom_lint" lint
 step "4/6 cargo llvm-cov" covered_tests
 step "5/6 coverage_gate" gate
 step "6/6 cargo test --doc" doc_tests
+if kernel_touched; then step "kernel crate: fmt and clippy for bpfel-unknown-none" kernel_checks; fi
 echo "pre-commit: all steps passed" >&2
