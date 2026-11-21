@@ -3094,11 +3094,18 @@ async fn oncall_api_failures_render_our_own_text() -> TestResult {
         set_mode(&rig, mode)?;
         assert_eq!(fire(&rig, get_with("/oncall", &session)).await?.status, StatusCode::BAD_GATEWAY);
     }
-    set_mode(&rig, Mode::Status(StatusCode::UNPROCESSABLE_ENTITY))?;
+    for other in [Mode::Status(StatusCode::UNPROCESSABLE_ENTITY), Mode::Oversize422] {
+        set_mode(&rig, other)?;
+        let generic = fire(&rig, get_with("/oncall/7", &session)).await?;
+        assert_eq!(generic.status, StatusCode::BAD_GATEWAY);
+        assert!(!generic.body.contains("Unreadable row.") && !generic.body.contains(LEAK));
+    }
+    set_mode(&rig, Mode::UnreadableAlert)?;
     let unreadable = fire(&rig, get_with("/oncall/7", &session)).await?;
     assert_eq!(unreadable.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(unreadable.body.contains("Unreadable row.") && !unreadable.body.contains(LEAK));
     assert_hardened(&unreadable);
+    set_mode(&rig, Mode::Status(StatusCode::UNPROCESSABLE_ENTITY))?;
     assert_eq!(fire(&rig, get_with("/oncall", &session)).await?.status, StatusCode::BAD_GATEWAY);
     set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
     let ended = fire(&rig, get_with("/oncall", &session)).await?;

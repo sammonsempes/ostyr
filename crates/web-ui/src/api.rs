@@ -91,6 +91,9 @@ pub const CONFLICT_CODES: [(&str, &str); 4] = [
 ];
 
 
+pub const UNREADABLE_CODE: &str = "unreadable_alert";
+
+
 pub const FORWARDED: HeaderName = HeaderName::from_static("forwarded");
 
 
@@ -236,6 +239,7 @@ pub async fn call_until(
     let response = request.send().await.map_err(unavailable)?;
     match response.status() {
         StatusCode::CONFLICT => Err(conflict_failure(&read_capped(response).await?)),
+        StatusCode::UNPROCESSABLE_ENTITY => Err(unreadable_failure(&read_capped(response).await?)),
         status => {
             classify(status)?;
             read_capped(response).await
@@ -255,6 +259,15 @@ pub fn conflict_failure(body: &[u8]) -> ApiFailure {
                 .map(|(_, key)| ApiFailure::Conflict(key))
         })
         .unwrap_or(ApiFailure::Status(StatusCode::CONFLICT.as_u16()))
+}
+
+
+/// A `422` is "unreadable" only with the on-call API's fixed code; any other code or body is a plain status.
+pub fn unreadable_failure(body: &[u8]) -> ApiFailure {
+    serde_json::from_slice::<ErrorEnvelope>(body)
+        .ok()
+        .filter(|envelope| envelope.error.code == UNREADABLE_CODE)
+        .map_or(ApiFailure::Status(StatusCode::UNPROCESSABLE_ENTITY.as_u16()), |_| ApiFailure::Unreadable)
 }
 
 
@@ -970,22 +983,11 @@ pub async fn list_oncall(client: &ApiClient, source: IpAddr, token: &SecretStrin
 }
 
 
-/// The on-call API answers 422 only for a stored alert it cannot show.
-pub fn unreadable_status(failure: ApiFailure) -> ApiFailure {
-    match failure {
-        ApiFailure::Status(code) if code == StatusCode::UNPROCESSABLE_ENTITY.as_u16() => ApiFailure::Unreadable,
-        other => other,
-    }
-}
-
-
 /// An id outside `i64` digits is a missing alert without any call; the answer must carry the id asked for.
 pub async fn get_oncall_alert(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<OncallAlertView, ApiFailure> {
     match parse_oncall_id(id) {
         Some(number) => {
-            let bytes = call(client, source, Method::GET, &format!("oncall/alerts/{number}"), Some(token), None)
-                .await
-                .map_err(unreadable_status)?;
+            let bytes = call(client, source, Method::GET, &format!("oncall/alerts/{number}"), Some(token), None).await?;
             let alert: OncallAlertView = serde_json::from_slice(&bytes)?;
             if alert.id == number {
                 Ok(alert)
