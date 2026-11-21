@@ -667,7 +667,10 @@ fn texts_and_migrations() -> TestResult {
     check_namespace(MIGRATION_NAMESPACE)?;
     check_embedded(&MIGRATIONS)?;
     let versions: Vec<&str> = MIGRATIONS.iter().map(|migration| migration.version).collect();
-    assert_eq!(versions, vec!["001_cert_inventory", "002_cert_inventory_lock_64"]);
+    assert_eq!(
+        versions,
+        vec!["001_cert_inventory", "002_cert_inventory_lock_64", "003_cert_inventory_pg_temp_last"]
+    );
     let doc = doc_of(&cert(1, NOT_AFTER));
     assert_eq!(doc.get("key_bits"), Some(&serde_json::Value::Null));
     Ok(())
@@ -723,9 +726,31 @@ fn the_sightings_read_is_truncated_at_the_cap_and_a_certificate_is_read_by_finge
 
 #[test]
 fn the_tenant_lock_takes_one_64_bit_key() -> TestResult {
-    let latest = MIGRATIONS.last().ok_or("no migration")?.sql;
+    let latest = MIGRATIONS.get(1).ok_or("no migration")?.sql;
     assert!(latest.contains("pg_advisory_xact_lock(hashtextextended('cert_inventory_room/' || tenant_name, 0))"));
     assert!(!latest.contains("hashtext(") && !latest.contains("1129270340"));
     assert!(latest.contains("SET search_path = pg_catalog, public"));
+    Ok(())
+}
+
+
+#[test]
+fn every_function_ends_its_search_path_with_pg_temp() -> TestResult {
+    let mut names: Vec<&str> = MIGRATIONS
+        .iter()
+        .flat_map(|migration| migration.sql.lines())
+        .filter_map(|line| line.split_once("FUNCTION ").filter(|(head, _)| head.starts_with("CREATE")))
+        .filter_map(|(_, rest)| rest.split('(').next())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert!(!names.is_empty());
+    let last = MIGRATIONS.last().ok_or("no migration")?.sql;
+    for name in names {
+        let alter = last.lines().find(|line| line.starts_with(&format!("ALTER FUNCTION {name}(")));
+        assert!(alter
+            .ok_or("function not altered")?
+            .ends_with("SET search_path = pg_catalog, public, pg_temp;"));
+    }
     Ok(())
 }
