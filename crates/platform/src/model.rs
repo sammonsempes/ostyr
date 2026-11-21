@@ -8,4 +8,5 @@ pub enum Module {
     Certificates,
     Oncall,
     Dhcp,
+    Compliance,
 }

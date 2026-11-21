@@ -4696,6 +4696,7 @@ dependencies = [
  "cases",
  "cert-inventory",
  "cmdb",
+ "compliance",
  "core-api",
  "core-auth",
  "core-config",
