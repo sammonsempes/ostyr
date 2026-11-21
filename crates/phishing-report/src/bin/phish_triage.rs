@@ -46,7 +46,7 @@ fn run_parent(all_args: Vec<String>) -> Result<ExitCode, Box<dyn std::error::Err
     let mut raw = Vec::new();
     std::fs::File::open(path)?.take(MAX_MESSAGE_BYTES as u64 + 1).read_to_end(&mut raw)?;
     let record = triage_one(&raw, &trusted, &reporters)?;
-    let found = observables(&record);
+    let found = observables(&record, &reporters);
     writeln!(out, "{}", serde_json::to_string_pretty(&record)?)?;
     writeln!(out, "{}", serde_json::to_string(&found)?)?;
     Ok(ExitCode::SUCCESS)

@@ -261,7 +261,7 @@ fn every_from_address_is_listed_up_to_a_cap_and_the_rest_counted() -> Result<(),
 #[test]
 fn the_senders_reach_the_observables() -> Result<(), Box<dyn std::error::Error>> {
     let record = run(&mail(&["From: a@evil.test, b@other.test"], "x"))?;
-    let found = observables(&record);
+    let found = observables(&record, &policy());
     assert!(found.contains(&(ObservableKind::Email, "b@other.test".to_owned())));
     assert!(found.contains(&(ObservableKind::Domain, "other.test".to_owned())));
     Ok(())

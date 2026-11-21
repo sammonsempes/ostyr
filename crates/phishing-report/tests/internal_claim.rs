@@ -175,10 +175,10 @@ fn a_header_level_cut_by_the_limit_is_unparsed() -> Result<(), Box<dyn std::erro
 #[test]
 fn an_unparsed_address_is_an_email_observable_only() -> Result<(), Box<dyn std::error::Error>> {
     let record = run(&mail(&["From: <phisher@evil.test> ceo@corp.test"], "x"))?;
-    let found = observables(&record);
+    let found = observables(&record, &policy());
     assert!(found.iter().any(|(kind, _)| *kind == ObservableKind::Email));
     assert!(!found.iter().any(|(kind, _)| *kind == ObservableKind::Domain));
-    let plain = observables(&run(&mail(&["From: a@evil.test"], "x"))?);
+    let plain = observables(&run(&mail(&["From: a@evil.test"], "x"))?, &policy());
     assert!(plain.contains(&(ObservableKind::Domain, "evil.test".to_owned())));
     Ok(())
 }

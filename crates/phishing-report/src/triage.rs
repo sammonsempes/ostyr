@@ -375,8 +375,13 @@ fn entries<'a>(value: &'a HeaderValue<'_>) -> Vec<Option<&'a str>> {
 }
 
 
+fn named_headers<'a, 'b>(headers: &'a [Header<'b>], name: &str) -> Vec<&'a Header<'b>> {
+    headers.iter().filter(|header| header.name().eq_ignore_ascii_case(name)).collect()
+}
+
+
 fn from_headers<'a, 'b>(headers: &'a [Header<'b>]) -> Vec<&'a Header<'b>> {
-    headers.iter().filter(|header| header.name().eq_ignore_ascii_case(FROM_HEADER)).collect()
+    named_headers(headers, FROM_HEADER)
 }
 
 
@@ -449,20 +454,23 @@ fn from_unparsed(headers: &[Header<'_>], entries: &[Option<&str>], limits: &Limi
 }
 
 
-/// The byte scan of every `From` value inside the header limit; a value `read` cannot give back raw is counted and claims.
+/// The byte scan of every value of the named header inside the header limit; a value `read` cannot give back raw is counted and claims.
 pub fn claim_from_raw(
     message: &Message<'_>,
     headers: &[Header<'_>],
+    name: &str,
     domains: &HashSet<String>,
     read: RawReadFn,
     counts: &mut Counts,
 ) -> (bool, bool) {
-    from_headers(headers).into_iter().fold((false, false), |(claimed, unreadable), header| {
-        let found = read(message, header).map(|bytes| claim_scan(bytes, domains));
-        counts.claim_unreadable += usize::from(found.is_none());
-        counts.claim_exhausted += usize::from(found.is_some_and(|scan| scan.exhausted));
-        (claimed || found.is_none_or(|scan| scan.claimed), unreadable || found.is_none())
-    })
+    named_headers(headers, name)
+        .into_iter()
+        .fold((false, false), |(claimed, unreadable), header| {
+            let found = read(message, header).map(|bytes| claim_scan(bytes, domains));
+            counts.claim_unreadable += usize::from(found.is_none());
+            counts.claim_exhausted += usize::from(found.is_some_and(|scan| scan.exhausted));
+            (claimed || found.is_none_or(|scan| scan.claimed), unreadable || found.is_none())
+        })
 }
 
 
@@ -474,7 +482,8 @@ fn header_facts(message: &Message<'_>, context: &Context<'_>, counts: &mut Count
     let senders = from_addresses(headers, limits, counts);
     let parsed = counted_entries(headers, limits);
     let cut = message.headers().len() > limits.headers;
-    let (scan_claim, unreadable) = claim_from_raw(message, headers, context.domains, context.read, counts);
+    let (scan_claim, unreadable) = claim_from_raw(message, headers, FROM_HEADER, context.domains, context.read, counts);
+    let (path_claim, _) = claim_from_raw(message, headers, RETURN_PATH_HEADER, context.domains, context.read, counts);
     let mut counted_above = Counts::default();
     let sender = address_header(headers, FROM_HEADER, limits, &mut counted_above);
     let no_sender = sender.is_none();
@@ -485,7 +494,7 @@ fn header_facts(message: &Message<'_>, context: &Context<'_>, counts: &mut Count
             .and_then(|header| header.value().as_text())
             .map(|text| clean(text, limits.subject_chars, counts)),
         reporter_domain: reporter_domain(headers, &senders),
-        internal_claimed: scan_claim || parsed.iter().flatten().any(|address| is_internal_address(address, context.domains)),
+        internal_claimed: scan_claim || path_claim || parsed.iter().flatten().any(|address| is_internal_address(address, context.domains)),
         from_unparsed: from_unparsed(headers, &parsed, limits, cut || unreadable || no_sender),
         senders,
     }

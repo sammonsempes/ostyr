@@ -826,7 +826,7 @@ fn observables_are_sorted_lowercase_and_deduplicated() -> Result<(), Box<dyn std
         ],
         ..Triage::default()
     };
-    let found = observables(&record);
+    let found = observables(&record, &ReporterPolicy::default());
     let expected = vec![
         (ObservableKind::Domain, "evil.example".to_owned()),
         (ObservableKind::Domain, "other.example".to_owned()),
@@ -839,7 +839,7 @@ fn observables_are_sorted_lowercase_and_deduplicated() -> Result<(), Box<dyn std
         (ObservableKind::Filename, "a.exe".to_owned()),
     ];
     assert_eq!(found, expected);
-    assert!(observables(&Triage::default()).is_empty());
+    assert!(observables(&Triage::default(), &ReporterPolicy::default()).is_empty());
     Ok(())
 }
 
