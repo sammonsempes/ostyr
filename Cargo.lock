@@ -4709,6 +4709,7 @@ dependencies = [
  "dhcp-kea",
  "hunt-packs",
  "oncall",
+ "remote-shell",
  "risk-score",
  "serde_json",
  "signal-hook",

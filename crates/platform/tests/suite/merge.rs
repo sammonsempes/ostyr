@@ -8,7 +8,7 @@ use platform::merge::{merge_access, migration_plan, module_access};
 use platform::model::Module;
 
 
-const ALL: [Module; 10] = [
+const ALL: [Module; 11] = [
     Module::Alerts,
     Module::Cases,
     Module::Cmdb,
@@ -19,6 +19,7 @@ const ALL: [Module; 10] = [
     Module::Dhcp,
     Module::Compliance,
     Module::Vulnerabilities,
+    Module::RemoteShell,
 ];
 
 
@@ -86,6 +87,7 @@ fn every_module_has_a_disjoint_table() -> TestResult {
         Module::Dhcp,
         Module::Compliance,
         Module::Vulnerabilities,
+        Module::RemoteShell,
     ] {
         let key = module_access(module).into_keys().min().ok_or("no route")?;
         assert_eq!(
@@ -117,6 +119,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
     assert_eq!(names(&[Module::Compliance, Module::Alerts]), ["alerts", "compliance"]);
     assert_eq!(names(&[Module::Vulnerabilities]), ["vuln"]);
     assert_eq!(names(&[Module::Vulnerabilities, Module::Alerts]), ["alerts", "vuln"]);
+    assert_eq!(names(&[Module::RemoteShell]), ["remote_shell"]);
+    assert_eq!(names(&[Module::RemoteShell, Module::Alerts]), ["alerts", "remote_shell"]);
     assert_eq!(
         names(&[Module::Oncall, Module::Hunts, Module::Certificates]),
         ["hunt_packs", "cert_inventory", "oncall"]
@@ -137,7 +141,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
             "oncall",
             "dhcp_kea",
             "compliance",
-            "vuln"
+            "vuln",
+            "remote_shell"
         ]
     );
     assert!(ALL.iter().all(|module| !migration_plan(&[*module]).is_empty()));
@@ -150,7 +155,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
 
 #[test]
 fn module_parts_access_is_the_union_of_each_selected_module_table() -> TestResult {
-    let (_dir, (_router, access, _documents)) = parts_of("alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities")?;
+    let (_dir, (_router, access, _documents)) =
+        parts_of("alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell")?;
     let expected: Vec<String> = ALL.iter().flat_map(|module| module_access(*module).into_keys()).collect();
     assert_eq!(access.len(), expected.len());
     assert!(expected.iter().all(|key| access.contains_key(key)));

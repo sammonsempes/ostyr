@@ -10,4 +10,5 @@ pub enum Module {
     Dhcp,
     Compliance,
     Vulnerabilities,
+    RemoteShell,
 }

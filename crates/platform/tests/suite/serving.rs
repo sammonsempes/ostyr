@@ -1,4 +1,4 @@
-use crate::fixture::{body_json, call, fixture, fixture_with_permits, login, ANALYST, READER};
+use crate::fixture::{body_json, call, fixture, fixture_with_permits, login, ANALYST, AUDITOR, READER};
 use crate::types::TestResult;
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 
-const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities";
+const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell";
 
 
 const ROUTES: [(&str, &str); 10] = [
@@ -34,6 +34,9 @@ const DHCP_QUERIES: [&str; 2] = [
 
 
 const COMPLIANCE_QUERIES: [&str; 2] = ["/compliance/state", "/compliance/assets/web01"];
+
+
+const SHELL_PATHS: [&str; 2] = ["/remote-shell/sessions", "/remote-shell/sessions/abc"];
 
 
 const VULN_QUERIES: [&str; 2] = ["/vulnerabilities/findings", "/vulnerabilities/assets/web01"];
@@ -172,6 +175,7 @@ async fn the_longest_module_list_is_served_and_the_document_lists_every_path() -
     for (path, _module) in ROUTES {
         assert!(paths.get(path).is_some(), "{path}");
     }
+    assert!(paths.get("/remote-shell/sessions").is_some());
     Ok(())
 }
 
@@ -187,7 +191,7 @@ const UNSELECTED_FIRST: [&str; 7] = [
 ];
 
 
-const UNSELECTED_SECOND: [&str; 10] = [
+const UNSELECTED_SECOND: [&str; 12] = [
     "/certificates",
     "/certificates/abc",
     "/oncall/alerts",
@@ -198,6 +202,8 @@ const UNSELECTED_SECOND: [&str; 10] = [
     "/compliance/assets/web01",
     "/vulnerabilities/findings",
     "/vulnerabilities/assets/web01",
+    "/remote-shell/sessions",
+    "/remote-shell/sessions/abc",
 ];
 
 
@@ -267,5 +273,45 @@ async fn the_document_lists_the_risk_paths_when_selected() -> TestResult {
     let document = body_json(call(&fx.router, "GET", "/openapi.json", None, Body::empty()).await?).await?;
     let paths = document.get("paths").ok_or("no paths")?;
     assert!(paths.get("/risk/entities").is_some() && paths.get("/alerts").is_some());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_remote_shell_routes_need_audit_read_and_share_the_semaphore() -> TestResult {
+    let fx = fixture(ALL_MODULES)?;
+    let analyst = login(&fx.router, ANALYST).await?;
+    for path in SHELL_PATHS {
+        assert_eq!(status(&fx.router, "GET", path, Some(&analyst)).await?, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(status(&fx.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let holder = login(&fx.router, AUDITOR).await?;
+    for path in SHELL_PATHS {
+        let code = status(&fx.router, "GET", path, Some(&holder)).await?;
+        assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{path} {code}");
+    }
+    let permits = Arc::new(Semaphore::new(0));
+    let limited = fixture_with_permits(ALL_MODULES, &permits)?;
+    let auditor = login(&limited.router, AUDITOR).await?;
+    for path in SHELL_PATHS {
+        assert_eq!(
+            status(&limited.router, "GET", path, Some(&auditor)).await?,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_remote_shell_routes_reject_other_methods() -> TestResult {
+    let fx = fixture(ALL_MODULES)?;
+    let auditor = login(&fx.router, AUDITOR).await?;
+    for path in SHELL_PATHS {
+        for method in ["HEAD", "PUT", "POST", "DELETE"] {
+            assert!(denied(status(&fx.router, method, path, Some(&auditor)).await?), "{method} {path}");
+        }
+    }
     Ok(())
 }
