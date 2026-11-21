@@ -6,6 +6,7 @@ use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT
 use axum::Router;
 use cases::store::{MIGRATIONS as CASE_MIGRATIONS, MIGRATION_NAMESPACE as CASE_NAMESPACE};
 use cert_inventory::store::{MIGRATIONS as CERT_MIGRATIONS, MIGRATION_NAMESPACE as CERT_NAMESPACE};
+use cloud_posture::store::{MIGRATIONS as POSTURE_MIGRATIONS, MIGRATION_NAMESPACE as POSTURE_NAMESPACE};
 use cmdb::store::{MIGRATIONS as CMDB_MIGRATIONS, MIGRATION_NAMESPACE as CMDB_NAMESPACE};
 use compliance::store::{MIGRATIONS as COMPLIANCE_MIGRATIONS, MIGRATION_NAMESPACE as COMPLIANCE_NAMESPACE};
 use core_api::routes::core_access;
@@ -71,6 +72,9 @@ const VULN_PLAN: &[Migration] = &VULN_MIGRATIONS;
 const RSHELL_PLAN: &[Migration] = &RSHELL_MIGRATIONS;
 
 
+const POSTURE_PLAN: &[Migration] = &POSTURE_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -84,6 +88,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "compliance" => Some(Module::Compliance),
         "vulnerabilities" => Some(Module::Vulnerabilities),
         "remote_shell" => Some(Module::RemoteShell),
+        "posture" => Some(Module::Posture),
         _ => None,
     }
 }
@@ -192,6 +197,10 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Posture => Ok(cloud_posture::api::posture_router(cloud_posture::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -216,6 +225,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Compliance => compliance::api::compliance_access(),
         Module::Vulnerabilities => vuln_match::api::vulnerabilities_access(),
         Module::RemoteShell => remote_shell::api::remote_shell_access(),
+        Module::Posture => cloud_posture::api::posture_access(),
     }
 }
 
@@ -233,6 +243,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Compliance => compliance::api::compliance_document(),
         Module::Vulnerabilities => vuln_match::api::vulnerabilities_document(),
         Module::RemoteShell => remote_shell::api::remote_shell_document(),
+        Module::Posture => cloud_posture::api::posture_document(),
     }
 }
 
@@ -266,6 +277,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Compliance]), COMPLIANCE_NAMESPACE, COMPLIANCE_PLAN),
         (wants(&[Module::Vulnerabilities]), VULN_NAMESPACE, VULN_PLAN),
         (wants(&[Module::RemoteShell]), RSHELL_NAMESPACE, RSHELL_PLAN),
+        (wants(&[Module::Posture]), POSTURE_NAMESPACE, POSTURE_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)

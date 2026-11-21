@@ -4719,6 +4719,7 @@ dependencies = [
  "axum",
  "cases",
  "cert-inventory",
+ "cloud-posture",
  "cmdb",
  "compliance",
  "core-api",
