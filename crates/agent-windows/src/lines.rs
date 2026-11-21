@@ -7,6 +7,7 @@ pub fn reason_name(reason: GapReason) -> &'static str {
         GapReason::Hole => "hole",
         GapReason::CursorInvalid => "cursor_invalid",
         GapReason::CursorAhead => "cursor_ahead",
+        GapReason::LogRecreated => "log_recreated",
         GapReason::Utf16 => "utf16",
     }
 }

@@ -16,6 +16,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio::net::TcpSocket;
 
 
 const HEAD_END: &[u8] = b"\r\n\r\n";
@@ -255,13 +256,12 @@ fn a_body_that_stalls_is_cut_by_the_same_deadline() -> Result<(), Box<dyn Error>
 
 #[test]
 fn a_refused_connection_keeps_only_its_kind() -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let url = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
-    drop(listener);
-    assert_eq!(
-        send(&request(&url, CAP, LONG_TIMEOUT)),
-        Err(HttpFailure(HttpClass::Io(ErrorKind::ConnectionRefused)))
-    );
+    let reserved = TcpSocket::new_v4()?;
+    reserved.bind("127.0.0.1:0".parse()?)?;
+    let url = format!("http://127.0.0.1:{}/", reserved.local_addr()?.port());
+    let outcome = send(&request(&url, CAP, LONG_TIMEOUT));
+    drop(reserved);
+    assert_eq!(outcome, Err(HttpFailure(HttpClass::Io(ErrorKind::ConnectionRefused))));
     Ok(())
 }
 

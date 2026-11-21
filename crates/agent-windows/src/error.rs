@@ -25,6 +25,8 @@ pub enum PollError {
     Cursor(#[source] io::Error),
     #[error("cursor file read failed")]
     CursorRead(#[source] io::Error),
+    #[error("spool size read failed")]
+    SpoolSize(#[source] io::Error),
     #[error("spool append failed")]
     Spool(#[source] io::Error),
 }

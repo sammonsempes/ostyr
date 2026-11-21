@@ -63,6 +63,9 @@ pub const UNCERTAIN_ATTACHED_CLAIM: &str = "attached_claim";
 pub const UNCERTAIN_FROM_UNPARSED: &str = "from_unparsed";
 
 
+pub const UNCERTAIN_DMARC_MISMATCH: &str = "dmarc_domain_mismatch";
+
+
 #[derive(Debug, Clone, Copy)]
 struct Context<'a> {
     trusted: &'a [String],
@@ -379,9 +382,11 @@ fn counted_from_addresses<'a>(headers: &'a [Header<'_>], limits: &Limits) -> Vec
 }
 
 
-/// A plain address has a domain that is an LDH domain once one trailing dot is dropped.
+/// A plain address is exactly one `@`, a non-empty local part and an LDH domain once one trailing dot is dropped.
 fn is_plain_address(address: &str) -> bool {
-    domain_of(address).is_some_and(|domain| is_ldh_domain(domain.strip_suffix('.').unwrap_or(domain)))
+    let mut parts = address.split('@');
+    let (local, domain, extra) = (parts.next(), parts.next(), parts.next());
+    extra.is_none() && local.is_some_and(|text| !text.is_empty()) && domain.is_some_and(|text| is_ldh_domain(text.strip_suffix('.').unwrap_or(text)))
 }
 
 
@@ -472,9 +477,9 @@ fn level_auth(record: &mut Triage, index: usize, message: &Message<'_>, facts: &
 
 
 fn mark_uncertain(record: &mut Triage, reason: &str) {
+    record.counts.original_uncertain += usize::from(!record.original_uncertain);
     record.original_uncertain = true;
     record.uncertain_reasons.push(reason.to_owned());
-    record.counts.original_uncertain += 1;
 }
 
 
@@ -484,11 +489,16 @@ fn adopt_original(record: &mut Triage, info: &LevelInfo, facts: &Adoption) {
     record.subject = info.subject.clone();
     record.senders = info.senders.clone();
     record.auth = info.auth.clone();
-    record.original_internal = facts.internal;
-    record.counts.original_internal += usize::from(facts.internal);
+    let mismatch = info.level == 0 && record.reporter == REPORTER_DMARC_MISMATCH;
+    let internal = facts.internal && !mismatch;
+    record.original_internal = internal;
+    record.counts.original_internal += usize::from(internal);
     record.original_source = Some(if info.level == 0 { SOURCE_REPORTED } else { SOURCE_ATTACHED }.to_owned());
     if info.level != 0 {
         mark_uncertain(record, UNCERTAIN_ATTACHED_CLAIM);
+    }
+    if mismatch {
+        mark_uncertain(record, UNCERTAIN_DMARC_MISMATCH);
     }
     if facts.from_unparsed {
         mark_uncertain(record, UNCERTAIN_FROM_UNPARSED);

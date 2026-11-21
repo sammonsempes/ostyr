@@ -218,3 +218,44 @@ fn only_one_pair_of_quotes_is_stripped_from_header_from() -> Result<(), Box<dyn 
     assert_eq!(plain.map(|header| header.pass_from), Some(vec![vec!["corp.test".to_owned()]]));
     Ok(())
 }
+
+
+#[test]
+fn an_attached_message_without_a_from_is_still_an_attached_claim() -> Result<(), Box<dyn std::error::Error>> {
+    let record = run(&forward(&FORWARD_HEADERS, "fyi", &[attached(&mail(&["Subject: only a subject"], "x"))]))?;
+    assert_eq!(record.original_level, Some(1));
+    assert_eq!(record.sender, None);
+    assert_eq!(record.uncertain_reasons, ["attached_claim"]);
+    assert_eq!(record.counts.original_uncertain, 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_address_with_two_at_signs_is_unparsed_and_a_domain_mismatch_is_not_internal() -> Result<(), Box<dyn std::error::Error>> {
+    let evil_pass = "Authentication-Results: mx.corp.test; dmarc=pass header.from=evil.test";
+    let record = run(&mail(&[evil_pass, "From: <phisher@evil.test> ceo@corp.test"], "x"))?;
+    assert_eq!(record.reporter, "dmarc_domain_mismatch");
+    assert_eq!(record.original_level, Some(0));
+    assert!(record.original_uncertain);
+    assert_eq!(record.uncertain_reasons, ["dmarc_domain_mismatch", "from_unparsed"]);
+    assert!(!record.original_internal);
+    assert_eq!(record.counts.original_internal, 0);
+    assert_eq!(record.counts.original_uncertain, 1);
+    let two = with_original("From: a@b@evil.test")?;
+    assert!(two.uncertain_reasons.iter().any(|reason| reason == "from_unparsed"));
+    let empty_local = with_original("From: <@evil.test>")?;
+    assert!(empty_local.uncertain_reasons.iter().any(|reason| reason == "from_unparsed"));
+    Ok(())
+}
+
+
+#[test]
+fn a_display_name_holding_an_address_is_judged_on_the_real_address() -> Result<(), Box<dyn std::error::Error>> {
+    let record = run(&outside("From: \"ceo@corp.test\" <phisher@evil.test>"))?;
+    assert_eq!(record.reporter, "external");
+    assert!(!record.original_uncertain);
+    assert!(!record.original_internal);
+    assert_eq!(record.sender.as_deref(), Some("phisher@evil.test"));
+    Ok(())
+}

@@ -45,7 +45,8 @@ pub const STYLESHEET: &str = "body{font-family:sans-serif;margin:0;color:#1b1f23
 background:#1b1f23;color:#fff}header button{color:#fff;background:none;border:0;font:inherit;cursor:pointer;text-decoration:underline}\
 main{padding:1rem}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ccc;padding:.4rem;text-align:left}\
 .sev-low{color:#0a6}.sev-medium{color:#b80}.sev-high{color:#c30}.sev-critical{color:#c00;font-weight:bold}\
-form.go{display:inline;margin:0}td button,main>form.go button{color:#06c}label{display:block;margin:.5rem 0}.notice{color:#c00}dt{font-weight:bold}\
+form.go{display:inline;margin:0}td button,main>form.go button{color:#06c}label{display:block;margin:.5rem 0}.notice{color:#c00}\
+.absent{color:#666;font-style:italic}dt{font-weight:bold}\
 main>form{margin:.5rem 0}textarea{display:block;width:100%;min-height:6rem}.comment{white-space:pre-wrap;border:1px solid #ccc;padding:.5rem}";
 
 
@@ -115,10 +116,10 @@ pub fn optional(language: Language, value: Option<&String>) -> String {
 }
 
 
-pub fn optional_identity(language: Language, value: Option<&String>) -> String {
+pub fn optional_identity(language: Language, value: Option<&String>) -> Markup {
     value.map_or_else(
-        || text(language, "none").to_owned(),
-        |present| clip_identity(language, present, MAX_FIELD_CHARS),
+        || html! { span class="absent" { (text(language, "none_marker")) } },
+        |present| html! { (clip_identity(language, present, MAX_FIELD_CHARS)) },
     )
 }
 

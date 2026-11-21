@@ -1,5 +1,5 @@
 use crate::error::PollError;
-use crate::model::{Channel, Newest, PollEnv, PollTotals, RunEnd, RunRequest, Stream, SystemInfo, CHANNEL_NOT_FOUND_EXIT, NEWEST_COUNT};
+use crate::model::{Channel, First, Newest, PollEnv, PollTotals, RunEnd, RunRequest, Stream, SystemInfo, CHANNEL_NOT_FOUND_EXIT, NEWEST_COUNT};
 use crate::stream::{feed_bytes, partial_item};
 use crate::system::scan_system;
 
@@ -26,26 +26,31 @@ pub fn classify(end: RunEnd, first: Option<SystemInfo>, torn: bool) -> Newest {
 }
 
 
-pub fn query_newest(env: &mut PollEnv<'_>, channel: &Channel, totals: &mut PollTotals) -> Result<Newest, PollError> {
-    let args = newest_args(channel);
+pub fn query_first(env: &mut PollEnv<'_>, args: &[String], totals: &mut PollTotals) -> Result<First, PollError> {
     let request = RunRequest {
         program: env.program,
-        args: &args,
+        args,
         max_bytes: env.max_output_bytes,
         deadline_seconds: env.deadline_seconds,
     };
     let mut stream = Stream::default();
-    let mut first: Option<SystemInfo> = None;
+    let mut info: Option<SystemInfo> = None;
     let mut count = 0u64;
     let end = (env.run)(&request, &mut |chunk| {
         feed_bytes(&mut stream, chunk, &mut |item| {
             count += 1;
-            if first.is_none() {
-                first = Some(scan_system(item.text.as_bytes()));
+            if info.is_none() {
+                info = Some(scan_system(item.text.as_bytes()));
             }
         });
     })?;
     totals.forged += count.saturating_sub(1);
     let torn = partial_item(&mut stream).is_some();
-    Ok(classify(end, first, torn))
+    Ok(First { end, info, torn })
+}
+
+
+pub fn query_newest(env: &mut PollEnv<'_>, channel: &Channel, totals: &mut PollTotals) -> Result<Newest, PollError> {
+    let first = query_first(env, &newest_args(channel), totals)?;
+    Ok(classify(first.end, first.info, first.torn))
 }

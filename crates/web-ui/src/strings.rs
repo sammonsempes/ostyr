@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 162;
+pub const TEXT_COUNT: usize = 163;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -41,6 +41,7 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("alert_summary_truncated", "The summary was cut by the server."),
     ("alert_back", "Back to the alerts"),
     ("none", "none"),
+    ("none_marker", "(none)"),
     ("omitted", "omitted"),
     ("cut", "cut"),
     ("nav_cases", "Cases"),
@@ -210,6 +211,7 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("alert_summary_truncated", "Le résumé a été coupé par le serveur."),
     ("alert_back", "Retour aux alertes"),
     ("none", "aucun"),
+    ("none_marker", "(aucun)"),
     ("omitted", "omis"),
     ("cut", "coupé"),
     ("nav_cases", "Dossiers"),

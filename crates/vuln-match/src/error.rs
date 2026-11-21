@@ -115,6 +115,8 @@ pub enum StoreError {
     BadCursor,
     #[error("the tenant has no counter row: rebuild the counters first")]
     CountersMissing,
+    #[error("a stored key is outside the grammar: the schema is not migrated")]
+    StoredValue,
     #[error("the store answered with a malformed row")]
     BadAnswer,
 }
