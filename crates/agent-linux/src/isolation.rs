@@ -5,6 +5,7 @@ use crate::settings::invalid_isolation_settings;
 use crate::types::NftFn;
 use agent_channel::agent_app::load_agent_file;
 use agent_channel::app::shared_log_audit;
+use agent_channel::spool_dirs::open_parent;
 use core_audit::log::open_file_log;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_config::load::load_file;
@@ -573,6 +574,7 @@ pub async fn run_isolation(path: &Path, action: &str, run: NftFn) -> Result<Stri
         Err(IsolationError::Settings(invalid.join(", ")))
     } else {
         let agent = load_agent_file(&file.agent_file)?;
+        let _audit_dir = open_parent(&file.audit_file)?;
         let log = Arc::new(open_file_log(&file.audit_file)?);
         let audit = shared_log_audit(&log);
         let state = open_state_dir(&file.cursor_file)?;

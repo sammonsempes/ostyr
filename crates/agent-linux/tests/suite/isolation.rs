@@ -20,6 +20,7 @@ use core_config::types::SharedAuditFn;
 use serde_json::{json, Value};
 use std::fs;
 use std::net::IpAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -964,5 +965,30 @@ fn a_listing_without_the_postrouting_chain_or_with_it_changed_is_a_mismatch() ->
         items.pop();
     })?;
     assert_mismatch(&last, "rules")?;
+    Ok(())
+}
+
+
+const OPEN_PARENT: u32 = 0o777;
+
+
+#[tokio::test]
+async fn a_group_writable_audit_parent_ends_the_command_before_any_record() -> TestResult {
+    let dir = tempdir()?;
+    let audit_dir = dir.path().join("auditdir");
+    fs::create_dir(&audit_dir)?;
+    fs::set_permissions(&audit_dir, fs::Permissions::from_mode(OPEN_PARENT))?;
+    let path = write_files(dir.path(), GOOD, "")?;
+    let text = fs::read_to_string(&path)?.replace(
+        &format!("{}/audit\n", dir.path().display()),
+        &format!("{}/auditdir/audit\n", dir.path().display()),
+    );
+    fs::write(&path, text)?;
+    assert!(matches!(
+        run_isolation(&path, "isolate", fake_nft).await,
+        Err(IsolationError::App(agent_channel::error::AppError::SpoolDir { .. }))
+    ));
+    assert_eq!(fs::read_dir(&audit_dir)?.count(), 0);
+    assert!(!dir.path().join("cursor").exists());
     Ok(())
 }
