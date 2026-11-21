@@ -523,3 +523,56 @@ pub enum DhcpQuery {
     At { address: IpAddr, at: i64 },
     Mac { mac: String, from: i64, to: i64 },
 }
+
+
+/// One row of the remote-shell register; every field is checked before it is printed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ShellSessionView {
+    pub session_id: String,
+    pub requester: String,
+    pub asset: String,
+    pub ticket: String,
+    pub opened_at: String,
+    pub closed_at: Option<String>,
+    pub close_reason: Option<String>,
+    pub recording_frames: Option<i64>,
+    pub recording_hash: Option<String>,
+    pub recording_bytes: Option<i64>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ShellListView {
+    pub items: Vec<ShellSessionView>,
+    pub skipped: u64,
+    pub next_cursor: Option<String>,
+}
+
+
+/// A checked browser query: every value is already inside the API's grammar; `open` is one of the two fixed words.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellQuery {
+    pub asset: Option<String>,
+    pub requester: Option<String>,
+    pub open: Option<&'static str>,
+    pub cursor: Option<String>,
+}
+
+
+/// How a closed session ended, every part checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellEnd {
+    pub closed_at: String,
+    pub reason_key: &'static str,
+    pub frames: i64,
+    pub hash: String,
+    pub bytes: i64,
+}
+
+
+/// A readable register row: the open time and, once closed, how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellFacts {
+    pub opened_at: String,
+    pub end: Option<ShellEnd>,
+}

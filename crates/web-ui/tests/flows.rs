@@ -7,6 +7,8 @@ mod logging;
 #[cfg(unix)]
 #[path = "support/served.rs"]
 mod served;
+#[path = "support/shell_flows.rs"]
+mod shell_flows;
 #[path = "support/stub.rs"]
 mod stub;
 #[path = "support/types.rs"]

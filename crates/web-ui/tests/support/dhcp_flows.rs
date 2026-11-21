@@ -11,6 +11,9 @@ const HOSTILE_UNREADABLE_ROWS: usize = 8;
 const AT_QUERY: &str = "/dhcp?address=10.0.0.5&at=1772000000";
 
 
+const PROBE: &str = "/dhcp/leases/at?address=0.0.0.0&at=0";
+
+
 const MAC_QUERY: &str = "/dhcp?mac=aa:bb:cc:dd:ee:ff&from=1772000000&to=1772003600";
 
 
@@ -38,7 +41,8 @@ async fn the_dhcp_screen_shows_both_forms_and_both_lookups_in_both_languages() -
     ] {
         assert!(forms.body.contains(expected), "{expected}");
     }
-    assert!(!forms.body.contains("<table>") && dhcp_requests(&rig)?.is_empty());
+    assert!(!forms.body.contains("<table>") && !forms.body.contains("Unreadable row.") && !forms.body.contains("could not be read"));
+    assert_eq!(dhcp_requests(&rig)?, [PROBE.to_owned()]);
     let by_address = fire(&rig, get_with(AT_QUERY, &session)).await?;
     assert_eq!(by_address.status, StatusCode::OK);
     for expected in [
@@ -73,6 +77,7 @@ async fn the_dhcp_screen_shows_both_forms_and_both_lookups_in_both_languages() -
     assert_eq!(
         dhcp_requests(&rig)?,
         [
+            PROBE.to_owned(),
             "/dhcp/leases/at?address=10.0.0.5&at=1772000000".to_owned(),
             "/dhcp/leases/mac?mac=AA-BB-CC-DD-EE-FF&from=1772000000&to=1772003600".to_owned(),
             "/dhcp/leases/at?address=10.0.0.5&at=1772000000".to_owned(),
@@ -188,6 +193,24 @@ async fn dhcp_api_failures_render_our_own_text() -> TestResult {
     }
     set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
     let ended = fire(&rig, get_with(MAC_QUERY, &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_form_less_dhcp_page_shows_the_permission_page_when_the_api_refuses_the_probe() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    set_mode(&rig, Mode::Status(StatusCode::FORBIDDEN))?;
+    let refused = fire(&rig, get_with("/dhcp", &session)).await?;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert!(refused.body.contains("You do not have the permission") && !refused.body.contains("name=\"address\"") && !refused.body.contains(LEAK));
+    assert_eq!(dhcp_requests(&rig)?, [PROBE.to_owned()]);
+    set_mode(&rig, Mode::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+    assert_eq!(fire(&rig, get_with("/dhcp", &session)).await?.status, StatusCode::BAD_GATEWAY);
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/dhcp", &session)).await?;
     assert_eq!(location_of(&ended).as_deref(), Some("/login"));
     Ok(())
 }

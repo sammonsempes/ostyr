@@ -1,16 +1,19 @@
 use crate::api::{
     encode_asset_id, parse_dhcp_address, parse_dhcp_mac, risk_kind, valid_asset_id, valid_case_id, valid_dhcp_hostname, valid_id, valid_oncall_text,
-    valid_pack_id, valid_state_asset, valid_state_id, valid_vuln_asset, valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS,
-    MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
+    valid_pack_id, valid_shell_hash, valid_shell_reference, valid_shell_subject, valid_state_asset, valid_state_id, valid_vuln_asset,
+    valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_SHELL_REFERENCE_BYTES,
+    MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, SHELL_OPEN_ONLY, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX,
+    VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
     CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView, RiskDetailView,
-    RiskEntityView, RiskListView, RiskTruncatedView, StateAssetView, StateListView, StateView, VulnAssetView, VulnListView, VulnView,
+    RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView,
+    StateListView, StateView, VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, resolution_key, severity_class, severity_key,
-    status_key, task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
+    shell_reason_key, status_key, task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
 use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
@@ -193,6 +196,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/vulnerabilities", text(language, "nav_vulns")))
                         (go("/dhcp", text(language, "nav_dhcp")))
                         (go("/oncall", text(language, "nav_oncall")))
+                        (go("/remote-shell", text(language, "nav_shell")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -1714,6 +1718,226 @@ pub fn dhcp_page(language: Language, csrf: &str, found: Option<&LookupView>) -> 
             @if let Some(result) = found {
                 (dhcp_result(language, result))
             }
+        },
+    )
+}
+
+
+pub const SHELL_COLUMNS: u32 = 7;
+
+
+pub const SHELL_FIELD_ROWS: [&str; 10] = [
+    "col_session",
+    "col_requester",
+    "col_asset",
+    "col_ticket",
+    "col_opened_at",
+    "col_closed_at",
+    "col_close_reason",
+    "col_frames",
+    "col_hash",
+    "col_bytes",
+];
+
+
+/// How a closed row ended: `Some(None)` for an open one, `None` unless every closed part is present and inside its grammar.
+pub fn shell_end(view: &ShellSessionView) -> Option<Option<ShellEnd>> {
+    match (
+        &view.closed_at,
+        &view.close_reason,
+        view.recording_frames,
+        &view.recording_hash,
+        view.recording_bytes,
+    ) {
+        (None, None, None, None, None) => Some(None),
+        (Some(closed), Some(reason), Some(frames), Some(hash), Some(bytes)) => window_time(closed)
+            .zip(shell_reason_key(reason))
+            .filter(|_| frames >= MIN_SHELL_FRAMES && bytes >= 0 && valid_shell_hash(hash))
+            .map(|(closed_at, reason_key)| {
+                Some(ShellEnd {
+                    closed_at,
+                    reason_key,
+                    frames,
+                    hash: hash.clone(),
+                    bytes,
+                })
+            }),
+        _ => None,
+    }
+}
+
+
+/// `None` unless the four texts are inside the register's grammars, the open time is a UTC year 0 to 9999 and the end is consistent.
+pub fn readable_shell(view: &ShellSessionView) -> Option<ShellFacts> {
+    let identity = valid_shell_reference(&view.session_id)
+        && valid_shell_subject(&view.requester)
+        && valid_shell_reference(&view.asset)
+        && valid_shell_reference(&view.ticket);
+    identity
+        .then(|| window_time(&view.opened_at))
+        .flatten()
+        .zip(shell_end(view))
+        .map(|(opened_at, end)| ShellFacts { opened_at, end })
+}
+
+
+pub fn shell_row(language: Language, view: &ShellSessionView) -> Markup {
+    match readable_shell(view) {
+        Some(facts) => html! {
+            tr {
+                td { (go(&format!("/remote-shell/{}", encode_asset_id(&view.session_id)), &view.session_id)) }
+                td { (view.requester) }
+                td { (view.asset) }
+                td { (view.ticket) }
+                td { (facts.opened_at) }
+                @if let Some(end) = &facts.end {
+                    td { (end.closed_at) }
+                    td { (text(language, end.reason_key)) }
+                } @else {
+                    td { (NO_TIME) }
+                    td { (text(language, "shell_still_open")) }
+                }
+            }
+        },
+        None => html! {
+            tr { td colspan=(SHELL_COLUMNS) { (text(language, "shell_unreadable")) } }
+        },
+    }
+}
+
+
+pub fn shell_head(language: Language) -> Markup {
+    html! {
+        thead {
+            tr {
+                @for key in SHELL_FIELD_ROWS.iter().take(SHELL_COLUMNS as usize) {
+                    th { (text(language, key)) }
+                }
+            }
+        }
+    }
+}
+
+
+pub fn shell_filter_form(language: Language, query: &ShellQuery) -> Markup {
+    html! {
+        form method="get" action="/remote-shell" {
+            label {
+                (text(language, "col_asset")) " "
+                input type="text" name="asset" maxlength=(MAX_SHELL_REFERENCE_BYTES) value=(query.asset.as_deref().unwrap_or(""));
+            }
+            label {
+                (text(language, "col_requester")) " "
+                input type="text" name="requester" maxlength=(MAX_SHELL_SUBJECT_BYTES) value=(query.requester.as_deref().unwrap_or(""));
+            }
+            label {
+                (text(language, "shell_open_label")) " "
+                select name="open" {
+                    option value="" selected[query.open.is_none()] { (text(language, "shell_open_any")) }
+                    option value=(SHELL_OPEN_ONLY) selected[query.open == Some(SHELL_OPEN_ONLY)] { (text(language, "shell_open_only")) }
+                }
+            }
+            button type="submit" { (text(language, "shell_filter")) }
+        }
+    }
+}
+
+
+pub fn shell_page(language: Language, csrf: &str, list: &ShellListView, query: &ShellQuery) -> Markup {
+    layout(
+        language,
+        "title_shell",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_shell")) }
+            (shell_filter_form(language, query))
+            @if list.skipped > 0 {
+                div class="notice" { (counted_notice(language, "shell_skipped_one", "shell_skipped", list.skipped)) }
+            }
+            @if list.items.is_empty() {
+                div { (text(language, if list.skipped > 0 { "shell_no_readable" } else { "shell_empty" })) }
+            } @else {
+                table {
+                    (shell_head(language))
+                    tbody {
+                        @for view in &list.items { (shell_row(language, view)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &list.next_cursor {
+                form method="get" action="/remote-shell" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    @if let Some(asset) = &query.asset {
+                        input type="hidden" name="asset" value=(asset);
+                    }
+                    @if let Some(requester) = &query.requester {
+                        input type="hidden" name="requester" value=(requester);
+                    }
+                    @if let Some(open) = query.open {
+                        input type="hidden" name="open" value=(open);
+                    }
+                    button type="submit" { (text(language, "shell_next")) }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn shell_detail_rows(language: Language, view: &ShellSessionView, facts: &ShellFacts) -> Markup {
+    let (closed, reason, frames, hash, bytes) = match &facts.end {
+        Some(end) => (
+            end.closed_at.clone(),
+            text(language, end.reason_key).to_owned(),
+            end.frames.to_string(),
+            end.hash.clone(),
+            end.bytes.to_string(),
+        ),
+        None => (
+            NO_TIME.to_owned(),
+            text(language, "shell_still_open").to_owned(),
+            NO_TIME.to_owned(),
+            NO_TIME.to_owned(),
+            NO_TIME.to_owned(),
+        ),
+    };
+    let values = [
+        view.session_id.clone(),
+        view.requester.clone(),
+        view.asset.clone(),
+        view.ticket.clone(),
+        facts.opened_at.clone(),
+        closed,
+        reason,
+        frames,
+        hash,
+        bytes,
+    ];
+    html! {
+        table {
+            tbody {
+                @for (key, value) in SHELL_FIELD_ROWS.iter().zip(values.iter()) {
+                    tr { th { (text(language, key)) } td { (value) } }
+                }
+            }
+        }
+    }
+}
+
+
+pub fn shell_detail_page(language: Language, csrf: &str, view: &ShellSessionView) -> Markup {
+    layout(
+        language,
+        "title_shell_session",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_shell_session")) }
+            @if let Some(facts) = readable_shell(view) {
+                (shell_detail_rows(language, view, &facts))
+            } @else {
+                div { (text(language, "shell_unreadable")) }
+            }
+            (go("/remote-shell", text(language, "shell_back")))
         },
     )
 }
