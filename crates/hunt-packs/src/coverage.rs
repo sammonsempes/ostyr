@@ -1,4 +1,5 @@
 use crate::model::HuntPack;
+use crate::packs::is_pack_id;
 use crate::schedule::{checked_time, ScheduleError};
 use crate::store::{Param, StateError};
 use core_pg::error::PgError;
@@ -29,6 +30,10 @@ pub const KIND_UNKNOWN: i32 = 1;
 pub const KIND_OVERSIZED: i32 = 2;
 
 
+/// SQLSTATE of a statement cancelled by `statement_timeout`.
+pub const QUERY_CANCELED: &str = "57014";
+
+
 /// Params: `$2` the loaded pack ids joined by commas (ids never hold one). Rows: at most one per loaded pack (the table key) plus two counts; 64 is the stored id byte cap.
 pub const RUNS_SQL: &str = "SELECT 0, pack_id, last_done_end FROM hunt_pack_runs WHERE tenant = $1 AND pack_id = ANY(string_to_array($2, ',')) \
     UNION ALL SELECT 1, '', count(*) FROM hunt_pack_runs WHERE tenant = $1 AND octet_length(pack_id) <= 64 AND pack_id <> ALL(string_to_array($2, ',')) \
@@ -39,7 +44,8 @@ pub const RUNS_SQL: &str = "SELECT 0, pack_id, last_done_end FROM hunt_pack_runs
 pub const FINDINGS_SQL: &str = "SELECT 0, pack_id, count(*) FILTER (WHERE matches >= 0), \
     LEAST(COALESCE(sum(matches) FILTER (WHERE matches >= 0)::numeric, 0), 9223372036854775807)::bigint, \
     COALESCE(sum(matches) FILTER (WHERE matches >= 0)::numeric > 9223372036854775807, false), count(*) FILTER (WHERE matches < 0) \
-    FROM hunt_pack_findings WHERE tenant = $1 AND window_end >= $2 AND window_end < $3 AND pack_id = ANY(string_to_array($4, ',')) GROUP BY pack_id \
+    FROM hunt_pack_findings WHERE tenant = $1 AND window_end >= $2 AND window_end < $3 AND octet_length(pack_id) <= 64 \
+    AND pack_id = ANY(string_to_array($4, ',')) GROUP BY pack_id \
     UNION ALL SELECT 1, '', count(DISTINCT pack_id), 0, false, 0 FROM hunt_pack_findings \
     WHERE tenant = $1 AND window_end >= $2 AND window_end < $3 AND octet_length(pack_id) <= 64 AND pack_id <> ALL(string_to_array($4, ',')) \
     UNION ALL SELECT 2, '', count(DISTINCT pack_id), 0, false, 0 FROM hunt_pack_findings \
@@ -126,6 +132,10 @@ pub enum CoverageError {
     TooLong { field: &'static str },
     #[error("{count} packs are loaded, at most {MAX_REPORT_PACKS} are reported")]
     TooManyPacks { count: usize },
+    #[error("pack {index} of the list has an invalid id")]
+    BadPackId { index: usize },
+    #[error("the statement deadline was reached reading {packs} packs from {from} to {to}: narrow the period")]
+    DeadlineReached { from: i64, to: i64, packs: usize },
     #[error("the store failed")]
     Store(#[from] StateError),
 }
@@ -134,7 +144,6 @@ pub enum CoverageError {
 #[derive(Debug, Clone, Copy, Default)]
 struct Found {
     windows: u64,
-    rows: u64,
     matches: i64,
     saturated: bool,
 }
@@ -183,7 +192,6 @@ fn add_found(total: Found, more: Found) -> Found {
     let sum = total.matches.checked_add(more.matches);
     Found {
         windows: total.windows.saturating_add(more.windows),
-        rows: total.rows.saturating_add(more.rows),
         matches: sum.unwrap_or(i64::MAX),
         saturated: total.saturated | more.saturated | sum.is_none(),
     }
@@ -193,10 +201,9 @@ fn add_found(total: Found, more: Found) -> Found {
 fn valid_found(row: &FindingsRow) -> Option<Found> {
     let windows = u64::try_from(row.windows).ok()?;
     let negative = u64::try_from(row.negative).ok()?;
-    let rows = windows.checked_add(negative).filter(|total| *total >= 1)?;
+    windows.checked_add(negative).filter(|total| *total >= 1)?;
     (row.matches >= 0).then_some(Found {
         windows,
-        rows,
         matches: row.matches,
         saturated: row.saturated,
     })
@@ -234,7 +241,7 @@ fn technique_entry(
     let ids: BTreeSet<&str> = group.iter().map(|pack| pack.id.as_str()).collect();
     let ends: Vec<i64> = ids.iter().filter_map(|id| runs.get(id).copied()).collect();
     let totals = ids.iter().filter_map(|id| found.get(id).copied()).fold(Found::default(), add_found);
-    let state = if totals.rows > 0 {
+    let state = if totals.windows > 0 {
         TechniqueState::HuntedFindings
     } else if ends.iter().any(|end| (period.from..period.to).contains(end)) {
         TechniqueState::HuntedClear
@@ -296,6 +303,30 @@ pub fn joined_ids(packs: &[HuntPack]) -> String {
 }
 
 
+/// The statement deadline (client or server side) names the period and the pack count; any other failure is a store failure.
+pub fn read_error(error: PgError, period: &CoveragePeriod, packs: usize) -> CoverageError {
+    match error {
+        PgError::StatementTimeout { .. } => CoverageError::DeadlineReached {
+            from: period.from,
+            to: period.to,
+            packs,
+        },
+        PgError::Server { ref code, .. } if code == QUERY_CANCELED => CoverageError::DeadlineReached {
+            from: period.from,
+            to: period.to,
+            packs,
+        },
+        other => CoverageError::Store(StateError::from(other)),
+    }
+}
+
+
+/// The first pack of the list whose id `is_pack_id` refuses.
+pub fn bad_pack_index(packs: &[HuntPack]) -> Option<usize> {
+    packs.iter().position(|pack| !is_pack_id(&pack.id))
+}
+
+
 /// Reads the tenant's last runs and finding counts of the loaded packs with two tenant-scoped statements and builds the report.
 pub async fn read_coverage<RunsExec, RunsPending, FindingsExec, FindingsPending>(
     runs_exec: &mut RunsExec,
@@ -313,12 +344,15 @@ where
     (packs.len() <= MAX_REPORT_PACKS)
         .then_some(())
         .ok_or(CoverageError::TooManyPacks { count: packs.len() })?;
+    bad_pack_index(packs).map_or(Ok(()), |index| Err(CoverageError::BadPackId { index }))?;
     let scope = tenant_scope(tenant).map_err(StateError::from)?;
     let ids = joined_ids(packs);
     let run_rows = runs_exec(&scope, RUNS_SQL, vec![Param::Text(ids.clone())])
         .await
-        .map_err(StateError::from)?;
+        .map_err(|error| read_error(error, period, packs.len()))?;
     let finding_params = vec![Param::Int(period.from), Param::Int(period.to), Param::Text(ids)];
-    let finding_rows = findings_exec(&scope, FINDINGS_SQL, finding_params).await.map_err(StateError::from)?;
+    let finding_rows = findings_exec(&scope, FINDINGS_SQL, finding_params)
+        .await
+        .map_err(|error| read_error(error, period, packs.len()))?;
     Ok(coverage_report(packs, &run_rows, &finding_rows, period))
 }

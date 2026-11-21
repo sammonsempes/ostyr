@@ -10,7 +10,7 @@ use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVEN
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
-use agent_channel::spool_dirs::{open_spool_dirs, SpoolDirs};
+use agent_channel::spool_dirs::{open_parent, open_spool_dirs, SpoolDirs};
 use agent_channel::types::PauseFn;
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
@@ -55,6 +55,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
     let file = load_file::<LinuxFile>(path)?;
     let agent = load_agent_file(&file.agent_file)?;
     let dirs = open_spool_dirs(&agent)?;
+    let _audit_dir = open_parent(&file.audit_file)?;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let context = reload_context(path, LINUX_MODULE, &agent.tenant, "agent-linux-reload");
     file.systemctl_path

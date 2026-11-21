@@ -4,8 +4,8 @@ mod types;
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::coverage::{
-    check_period, coverage_report, joined_ids, read_coverage, CoverageError, CoveragePeriod, FindingsRow, RunRow, TechniqueState, FINDINGS_SQL,
-    KIND_OVERSIZED, KIND_PACK, KIND_UNKNOWN, MAX_REPORT_DAYS, RUNS_SQL, SECONDS_PER_DAY,
+    bad_pack_index, check_period, coverage_report, joined_ids, read_coverage, CoverageError, CoveragePeriod, FindingsRow, RunRow, TechniqueState,
+    FINDINGS_SQL, KIND_OVERSIZED, KIND_PACK, KIND_UNKNOWN, MAX_REPORT_DAYS, QUERY_CANCELED, RUNS_SQL, SECONDS_PER_DAY,
 };
 use hunt_packs::model::{Baseline, Cost, HuntPack, Source};
 use hunt_packs::store::{Param, StateError};
@@ -309,8 +309,24 @@ fn negative_matches_rows_are_counted_and_the_report_survives() -> TestResult {
     let only_negative = report.entries.get(1).ok_or("entry")?;
     assert_eq!(
         (only_negative.state, only_negative.findings, only_negative.matches),
-        (TechniqueState::HuntedFindings, 0, 0)
+        (TechniqueState::NotHunted, 0, 0)
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_pack_with_only_negative_rows_is_hunted_clear_when_a_run_ends_in_the_period() -> TestResult {
+    let packs = [pack_of("a", "T1059")];
+    let report = coverage_report(&packs, &[run("a", FROM)], &[negative_only("a", TWO_WINDOWS)], &PERIOD);
+    let entry = report.entries.first().ok_or("entry")?;
+    assert_eq!(
+        (entry.state, entry.findings, report.skipped),
+        (TechniqueState::HuntedClear, 0, TWO_WINDOWS as u64)
+    );
+    let outside = coverage_report(&packs, &[run("a", TO)], &[negative_only("a", 1)], &PERIOD);
+    assert_eq!(outside.entries.first().ok_or("entry")?.state, TechniqueState::NotHunted);
+    assert_eq!(outside.skipped, 1);
     Ok(())
 }
 
@@ -359,7 +375,7 @@ fn the_period_is_checked() -> TestResult {
 }
 
 
-fn runs_fake(calls: &Calls, answer: impl Fn() -> RunsAnswer) -> impl FnMut(&TenantScope, &'static str, Vec<Param>) -> Ready<RunsAnswer> {
+fn runs_fake(calls: &Calls, answer: fn() -> RunsAnswer) -> impl FnMut(&TenantScope, &'static str, Vec<Param>) -> Ready<RunsAnswer> {
     let log = Rc::clone(calls);
     move |scope, sql, params| {
         log.borrow_mut().push((tenant_of(scope).to_owned(), sql, params));
@@ -368,7 +384,7 @@ fn runs_fake(calls: &Calls, answer: impl Fn() -> RunsAnswer) -> impl FnMut(&Tena
 }
 
 
-fn findings_fake(calls: &Calls, answer: impl Fn() -> FindingsAnswer) -> impl FnMut(&TenantScope, &'static str, Vec<Param>) -> Ready<FindingsAnswer> {
+fn findings_fake(calls: &Calls, answer: fn() -> FindingsAnswer) -> impl FnMut(&TenantScope, &'static str, Vec<Param>) -> Ready<FindingsAnswer> {
     let log = Rc::clone(calls);
     move |scope, sql, params| {
         log.borrow_mut().push((tenant_of(scope).to_owned(), sql, params));
@@ -420,7 +436,11 @@ const FOUR_MATCHES: i64 = 4;
 #[test]
 fn the_statements_bind_the_tenant_and_only_the_loaded_ids() -> TestResult {
     assert!(RUNS_SQL.contains("WHERE tenant = $1 AND pack_id = ANY(string_to_array($2, ','))"));
-    assert!(FINDINGS_SQL.contains("WHERE tenant = $1 AND window_end >= $2 AND window_end < $3 AND pack_id = ANY(string_to_array($4, ','))"));
+    assert!(FINDINGS_SQL.contains(
+        "WHERE tenant = $1 AND window_end >= $2 AND window_end < $3 AND octet_length(pack_id) <= 64 AND pack_id = ANY(string_to_array($4, ','))"
+    ));
+    assert_eq!(FINDINGS_SQL.matches("octet_length(pack_id) <= 64").count(), TWO_UNKNOWN);
+    assert_eq!(RUNS_SQL.matches("octet_length(pack_id) <= 64").count(), 1);
     assert_eq!(RUNS_SQL.matches("tenant = $1").count(), THREE_SKIPPED);
     assert_eq!(FINDINGS_SQL.matches("tenant = $1").count(), THREE_SKIPPED);
     assert_eq!(RUNS_SQL.matches("<> ALL(string_to_array($2, ','))").count(), 1);
@@ -484,7 +504,107 @@ async fn store_failures_and_bad_tenants_are_typed() -> TestResult {
 }
 
 
+fn runs_client_timeout() -> RunsAnswer {
+    Err(PgError::StatementTimeout { seconds: 1 })
+}
+
+
+fn runs_server_timeout() -> RunsAnswer {
+    Err(PgError::Server {
+        code: QUERY_CANCELED.to_owned(),
+        class: "operator intervention",
+    })
+}
+
+
+fn runs_other_failure() -> RunsAnswer {
+    Err(PgError::Server {
+        code: "23505".to_owned(),
+        class: "integrity constraint violation",
+    })
+}
+
+
+fn finds_client_timeout() -> FindingsAnswer {
+    Err(PgError::StatementTimeout { seconds: 1 })
+}
+
+
+fn finds_server_timeout() -> FindingsAnswer {
+    Err(PgError::Server {
+        code: QUERY_CANCELED.to_owned(),
+        class: "operator intervention",
+    })
+}
+
+
+fn runs_empty() -> RunsAnswer {
+    Ok(Vec::new())
+}
+
+
+fn finds_empty() -> FindingsAnswer {
+    Ok(Vec::new())
+}
+
+
+#[tokio::test]
+async fn a_statement_deadline_is_named_with_the_period_and_the_pack_count() -> TestResult {
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let packs = [pack_of("a", "T1059"), pack_of("b", "T1071")];
+    let runs_timeouts: [fn() -> RunsAnswer; TWO_UNKNOWN] = [runs_client_timeout, runs_server_timeout];
+    let finds_timeouts: [fn() -> FindingsAnswer; TWO_UNKNOWN] = [finds_client_timeout, finds_server_timeout];
+    for (runs_answer, finds_answer) in runs_timeouts.into_iter().zip(finds_timeouts) {
+        let mut runs_slow = runs_fake(&calls, runs_answer);
+        let mut finds = findings_fake(&calls, finds_empty);
+        let first = coverage_report_of(&mut runs_slow, &mut finds, &packs).await;
+        assert!(matches!(
+            first,
+            Err(CoverageError::DeadlineReached {
+                from: FROM,
+                to: TO,
+                packs: TWO_UNKNOWN
+            })
+        ));
+        let mut runs = runs_fake(&calls, runs_empty);
+        let mut finds_slow = findings_fake(&calls, finds_answer);
+        let second = coverage_report_of(&mut runs, &mut finds_slow, &packs).await;
+        let message = second.err().ok_or("error")?.to_string();
+        assert!(message.contains("deadline") && message.contains("2 packs") && message.contains("narrow the period"));
+    }
+    let mut runs_other = runs_fake(&calls, runs_other_failure);
+    let mut finds = findings_fake(&calls, finds_empty);
+    assert!(matches!(
+        coverage_report_of(&mut runs_other, &mut finds, &packs).await,
+        Err(CoverageError::Store(_))
+    ));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hand_built_pack_id_is_refused_before_any_statement() -> TestResult {
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let mut runs = runs_fake(&calls, || Ok(Vec::new()));
+    let mut finds = findings_fake(&calls, || Ok(Vec::new()));
+    let bad_ids = ["x,y", "", "Upper", "-x", &"a".repeat(OVER_LONG)];
+    for bad in bad_ids {
+        let packs = [pack_of("ok", "T1059"), pack_of(bad, "T1071")];
+        let refused = coverage_report_of(&mut runs, &mut finds, &packs).await;
+        assert!(matches!(refused, Err(CoverageError::BadPackId { index: 1 })), "{bad}");
+    }
+    assert!(calls.borrow().is_empty());
+    assert_eq!(bad_pack_index(&[pack_of("ok", "T1059")]), None);
+    let message = CoverageError::BadPackId { index: 1 }.to_string();
+    assert!(message.contains("pack 1"));
+    Ok(())
+}
+
+
 const RETIRED: i64 = 4_100;
 
 
 const SIX_SKIPPED: u64 = 6;
+
+
+const OVER_LONG: usize = 65;

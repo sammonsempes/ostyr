@@ -8,6 +8,7 @@ use crate::limits::{
 use crate::model::{AssetFinding, FindingsPage, ScanCaps, ScanOutcome, StoredFinding};
 use crate::priority::priority_of;
 use crate::text::is_cve_id;
+use crate::types::CursorSplit;
 use alerts::types::Executor;
 use core_pg::migrate::Migration;
 use core_pg::scope::TenantScope;
@@ -18,7 +19,7 @@ use std::time::Duration;
 pub const MIGRATION_NAMESPACE: &str = "vuln";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "vuln_0001",
         sql: include_str!("../migrations/vuln_0001.sql"),
@@ -26,6 +27,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "vuln_0002",
         sql: include_str!("../migrations/vuln_0002.sql"),
+    },
+    Migration {
+        version: "vuln_0003",
+        sql: include_str!("../migrations/vuln_0003.sql"),
     },
 ];
 
@@ -94,20 +99,22 @@ pub const REBUILD_SQL: &str = "SELECT vuln_counters_rebuild($1)::text";
 pub const MIGRATION_DEADLINE: Duration = Duration::from_secs(120);
 
 
-/// `$1` tenant, `$2` limit.
+/// `$1` tenant, `$2` limit: the pinned function `vuln_open_first` (the plan is fixed by its `SET` clause).
 pub const FIRST_SQL: &str = "SELECT asset, ecosystem, package, record_id, installed_version, coalesce(fixed_version, ''), cvss::text, epss::text, \
-                             kev::text, priority::text, first_seen_micros::text, last_seen_micros::text FROM vuln_findings \
-                             WHERE tenant = $1 AND resolved_micros IS NULL \
-                             ORDER BY priority DESC, asset, ecosystem, package, record_id LIMIT $2::text::bigint";
+                             kev::text, priority::text, first_seen_micros::text, last_seen_micros::text \
+                             FROM vuln_open_first($1, $2::text::bigint)";
 
 
 /// `$1` tenant, `$2` priority, `$3` asset, `$4` ecosystem, `$5` package, `$6` record id of the last row seen, `$7` limit.
 pub const NEXT_SQL: &str = "SELECT asset, ecosystem, package, record_id, installed_version, coalesce(fixed_version, ''), cvss::text, epss::text, \
-                            kev::text, priority::text, first_seen_micros::text, last_seen_micros::text FROM vuln_findings \
-                            WHERE tenant = $1 AND resolved_micros IS NULL \
-                            AND (priority < $2::text::bigint OR (priority = $2::text::bigint \
-                            AND (asset, ecosystem, package, record_id) > ($3::text, $4::text, $5::text, $6::text))) \
-                            ORDER BY priority DESC, asset, ecosystem, package, record_id LIMIT $7::text::bigint";
+                             kev::text, priority::text, first_seen_micros::text, last_seen_micros::text \
+                            FROM vuln_open_next($1, $2::text::bigint, $3, $4, $5, $6, $7::text::bigint)";
+
+
+/// `$1` tenant, `$2` asset, `$3` limit: the open rows of one asset through the pinned function `vuln_open_of_asset`.
+pub const ASSET_SQL: &str = "SELECT asset, ecosystem, package, record_id, installed_version, coalesce(fixed_version, ''), cvss::text, epss::text, \
+                             kev::text, priority::text, first_seen_micros::text, last_seen_micros::text \
+                             FROM vuln_open_of_asset($1, $2, $3::text::bigint)";
 
 
 /// Printable ASCII without space or a leading `-`, 1 to `MAX_FIELD_BYTES` bytes: the one grammar of every stored text.
@@ -260,17 +267,32 @@ pub fn cursor_of(finding: &StoredFinding) -> String {
 }
 
 
+/// Splits a cursor on the separator; the production splitter of `parse_cursor`.
+pub fn split_cursor(cursor: &str) -> Result<Vec<&str>, StoreError> {
+    Ok(cursor.split(CURSOR_SEPARATOR).collect())
+}
+
+
 /// The parameters of `NEXT_SQL` after the tenant, minus the limit; a cursor that is not exactly a priority and four fields is `BadCursor`.
 pub fn parse_cursor(cursor: &str) -> Result<Vec<String>, StoreError> {
-    let parts: Vec<&str> = cursor.split(CURSOR_SEPARATOR).collect();
-    let priority_fits = parts
-        .first()
-        .is_some_and(|text| text.parse::<u32>().is_ok_and(|parsed| parsed.to_string() == *text));
-    let fields_fit = parts.iter().skip(1).all(|text| is_field(text));
-    let shape_fits = cursor.len() <= MAX_CURSOR_BYTES && parts.len() == CURSOR_FIELDS;
-    (shape_fits && priority_fits && fields_fit)
-        .then(|| parts.iter().map(|text| (*text).to_owned()).collect())
-        .ok_or(StoreError::BadCursor)
+    parse_cursor_with(cursor, split_cursor)
+}
+
+
+/// As `parse_cursor` with an injected splitter, which is never called for a cursor over `MAX_CURSOR_BYTES`.
+pub fn parse_cursor_with(cursor: &str, split: CursorSplit) -> Result<Vec<String>, StoreError> {
+    if cursor.len() > MAX_CURSOR_BYTES {
+        Err(StoreError::BadCursor)
+    } else {
+        let parts = split(cursor)?;
+        let priority_fits = parts
+            .first()
+            .is_some_and(|text| text.parse::<u32>().is_ok_and(|parsed| parsed.to_string() == *text));
+        let fields_fit = parts.iter().skip(1).all(|text| is_field(text));
+        (parts.len() == CURSOR_FIELDS && priority_fits && fields_fit)
+            .then(|| parts.iter().map(|text| (*text).to_owned()).collect())
+            .ok_or(StoreError::BadCursor)
+    }
 }
 
 
@@ -304,6 +326,38 @@ pub fn stored_of(row: &[String]) -> Result<StoredFinding, StoreError> {
 }
 
 
+/// The cursor of a raw row straight from the store: `StoredValue` when its priority or a key text is outside the grammar (an unmigrated schema).
+pub fn raw_cursor(row: &[String]) -> Result<String, StoreError> {
+    let keys = [COL_ASSET, COL_ECOSYSTEM, COL_PACKAGE, COL_RECORD]
+        .iter()
+        .map(|index| column(row, *index))
+        .collect::<Result<Vec<_>, _>>()?;
+    let priority = column(row, COL_PRIORITY)?;
+    let priority_fits = priority.parse::<u32>().is_ok_and(|parsed| parsed.to_string() == priority);
+    (priority_fits && keys.iter().all(|text| is_field(text)))
+        .then(|| {
+            std::iter::once(priority)
+                .chain(keys.iter().copied())
+                .collect::<Vec<_>>()
+                .join(&CURSOR_SEPARATOR.to_string())
+        })
+        .ok_or(StoreError::StoredValue)
+}
+
+
+/// The page of `rows`, fetched with one row more than `limit`: a row `stored_of` refuses is skipped and counted, the cursor is the raw key of the last of the first `limit`.
+pub fn page_of(rows: &[Vec<String>], limit: usize) -> Result<FindingsPage, StoreError> {
+    let cursors = rows.iter().map(|row| raw_cursor(row)).collect::<Result<Vec<_>, _>>()?;
+    let findings: Vec<StoredFinding> = rows.iter().take(limit).filter_map(|row| stored_of(row).ok()).collect();
+    let skipped = rows.len().min(limit) - findings.len();
+    let next = cursors.get(limit.saturating_sub(1)).filter(|_last| rows.len() > limit).cloned();
+    if skipped > 0 {
+        tracing::warn!(skipped, "stored vulnerability findings that cannot be served were skipped");
+    }
+    Ok(FindingsPage { findings, skipped, next })
+}
+
+
 /// A keyset page of the tenant's open findings, highest priority first then by key; `limit` is 1 to `MAX_PAGE_LIMIT`.
 pub async fn open_findings(exec: Executor<'_, '_>, scope: &TenantScope, cursor: Option<&str>, limit: usize) -> Result<FindingsPage, StoreError> {
     if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
@@ -318,10 +372,19 @@ pub async fn open_findings(exec: Executor<'_, '_>, scope: &TenantScope, cursor: 
                 exec(scope.clone(), NEXT_SQL, params).await?
             }
         };
-        let mut findings = rows.iter().map(|row| stored_of(row)).collect::<Result<Vec<_>, _>>()?;
-        let more = findings.len() > limit;
-        findings.truncate(limit);
-        let next = findings.last().filter(|_last| more).map(cursor_of);
-        Ok(FindingsPage { findings, next })
+        page_of(&rows, limit)
+    }
+}
+
+
+/// The open findings of one asset by priority then key, `limit` (1 to `MAX_FINDINGS_PER_SCAN`) of them and `next` set when more exist; `limit + 1` rows are fetched.
+pub async fn open_findings_of_asset(exec: Executor<'_, '_>, scope: &TenantScope, asset: &str, limit: usize) -> Result<FindingsPage, StoreError> {
+    if !is_field(asset) {
+        Err(StoreError::BadAsset)
+    } else if !(1..=MAX_FINDINGS_PER_SCAN).contains(&limit) {
+        Err(StoreError::BadLimit { max: MAX_FINDINGS_PER_SCAN })
+    } else {
+        let rows = exec(scope.clone(), ASSET_SQL, vec![asset.to_owned(), (limit + 1).to_string()]).await?;
+        page_of(&rows, limit)
     }
 }

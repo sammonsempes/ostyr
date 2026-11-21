@@ -9,10 +9,16 @@ use std::path::Path;
 const GROUP_OTHER_WRITE: u32 = 0o022;
 
 
-/// The opened parent directories of every file the agent writes by path, held for the life of the process.
+#[doc = "The opened parent directories of every file the agent writes by path, held for the life of the process; only `open_spool_dirs` builds one.\n\n```compile_fail\nlet _forged = agent_channel::spool_dirs::SpoolDirs { handles: Vec::new() };\n```\n"]
 #[derive(Debug)]
 pub struct SpoolDirs {
-    pub handles: Vec<File>,
+    handles: Vec<File>,
+}
+
+
+/// How many distinct directories the token holds.
+pub fn held_directories(dirs: &SpoolDirs) -> usize {
+    dirs.handles.len()
 }
 
 
@@ -126,6 +132,22 @@ pub fn platform_acl_judge(_directory: &File, _shown: &Path) -> Result<(), sys_wi
 }
 
 
+/// Opens and judges the directory that holds `path`, returning the handle and its identity.
+pub fn open_parent(path: &Path) -> Result<(File, (u64, u64)), AppError> {
+    open_parent_with(path, platform_acl_judge)
+}
+
+
+/// `open_parent` with the ACL judge injected.
+pub fn open_parent_with(path: &Path, acl: AclJudge) -> Result<(File, (u64, u64)), AppError> {
+    let directory = parent_directory(path).ok_or_else(|| AppError::SpoolDir {
+        path: path.to_path_buf(),
+        reason: SpoolDirReason::NotDirectory,
+    })?;
+    open_and_judge(directory, path, acl)
+}
+
+
 /// Opens and judges the parent directory of every file the agent writes by path; call it once per process before any spool producer or claim.
 pub fn open_spool_dirs(file: &AgentFile) -> Result<SpoolDirs, AppError> {
     open_spool_dirs_with(file, platform_acl_judge)
@@ -142,11 +164,7 @@ pub fn open_spool_dirs_with(file: &AgentFile, acl: AclJudge) -> Result<SpoolDirs
         &file.audit_file,
     ];
     let judged = files.into_iter().try_fold(Vec::<(File, (u64, u64))>::new(), |mut kept, path| {
-        let directory = parent_directory(path).ok_or_else(|| AppError::SpoolDir {
-            path: path.clone(),
-            reason: SpoolDirReason::NotDirectory,
-        })?;
-        let (handle, identity) = open_and_judge(directory, path, acl)?;
+        let (handle, identity) = open_parent_with(path, acl)?;
         let known = kept.iter().any(|(_, seen)| *seen == identity);
         if !known {
             kept.push((handle, identity));
