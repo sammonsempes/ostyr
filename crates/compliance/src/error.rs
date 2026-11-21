@@ -76,3 +76,24 @@ pub enum ReadError {
     #[error("a stored time cannot be written as an RFC 3339 date")]
     Unrepresentable,
 }
+
+
+#[derive(Debug, Error)]
+pub enum IndicatorError {
+    #[error("more than {max} baselines")]
+    TooManyBaselines { max: usize },
+    #[error("a baseline belongs to another tenant than the scope")]
+    TenantMismatch,
+    #[error("a baseline name is given twice")]
+    DuplicateBaseline,
+    #[error("the time does not fit the indicator")]
+    TimeOutOfRange,
+    #[error("the state store answered a row that cannot be read")]
+    BadRow,
+    #[error("the computed value is not a number between 0 and 1")]
+    ValueOutOfRange,
+    #[error("the state store failed")]
+    Store(#[source] core_pg::error::PgError),
+    #[error("the output could not be written")]
+    Write(#[from] std::io::Error),
+}

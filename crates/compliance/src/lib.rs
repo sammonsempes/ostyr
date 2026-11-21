@@ -6,6 +6,7 @@ pub mod api_model;
 pub mod backend;
 pub mod error;
 pub mod evaluate;
+pub mod indicator;
 pub mod load;
 pub mod model;
 pub mod plan;
