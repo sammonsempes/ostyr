@@ -1,7 +1,7 @@
 //! UPS health verdict and measures, pure.
 
 use crate::grammar::is_clean_ident;
-use crate::model::{BlindReason, Health, Measure, UpsFlag, UpsReport, UpsThresholds};
+use crate::model::{BlindReason, Health, Measure, UpsFlag, UpsReport, UpsTarget, UpsThresholds};
 use std::collections::BTreeSet;
 
 
@@ -61,6 +61,18 @@ fn degraded_causes(report: &UpsReport, flags: &BTreeSet<UpsFlag>, thresholds: &U
     .filter(|(present, _)| *present)
     .map(|(_, cause)| (*cause).to_string())
     .collect()
+}
+
+
+/// Measures of one target with labels `ups` and `host`; `parse_target` already refused a target whose labels fail the grammar.
+pub fn ups_target_measures(report: &UpsReport, target: &UpsTarget) -> Vec<Measure> {
+    ups_measures(report, &target.ups)
+        .into_iter()
+        .map(|mut measure| {
+            measure.labels.push(("host".to_string(), target.host.clone()));
+            measure
+        })
+        .collect()
 }
 
 

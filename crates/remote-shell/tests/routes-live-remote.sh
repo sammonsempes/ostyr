@@ -151,6 +151,21 @@ attacks)
     echo "crate log lines: $(cat "$WORK/api-a.log" | grep -c 'remote_shell::') (categories: $(cat "$WORK/api-a.log" | grep 'remote_shell::' | jq -r '.category // .skipped' | sort | uniq -c | tr '\n' ' '))"
     echo "api log tail:"
     tail -4 "$WORK/api-a.log" | cut -c1-200
+    sql "ALTER TABLE remote_shell_sessions ALTER COLUMN ticket DROP NOT NULL"
+    sql "INSERT INTO remote_shell_sessions (tenant, session_id, requester, asset, opened_at) VALUES ('a', 'null-1', 'alice', 'asset-1', 1800000800)"
+    check "NULL ticket detail is 500" 500 "$(status $PORT_A /remote-shell/sessions/null-1 "$token_a")"
+    check "NULL ticket detail code" "stored_value" "$(body $PORT_A /remote-shell/sessions/null-1 "$token_a" | jq -r '.error.code')"
+    check "NULL ticket row skipped in the list" "true" "$(body $PORT_A '/remote-shell/sessions?limit=200' "$token_a" | jq -r '.skipped >= 2')"
+    for constraint in $(sql "SELECT conname FROM pg_constraint WHERE conrelid = 'remote_shell_sessions'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%session_id%'"); do
+        sql "ALTER TABLE remote_shell_sessions DROP CONSTRAINT \"$constraint\""
+    done
+    sql "INSERT INTO remote_shell_sessions (tenant, session_id, requester, asset, ticket, opened_at) VALUES ('a', 'bad id', 'alice', 'asset-1', 'TICKET-1', 1800000950)"
+    limit_one="$(body $PORT_A '/remote-shell/sessions?limit=1' "$token_a")"
+    check "page ending on a key outside the grammar is 500" 500 "$(status $PORT_A '/remote-shell/sessions?limit=1' "$token_a")"
+    check "page ending on a bad key code" "stored_value" "$(echo "$limit_one" | jq -r '.error.code')"
+    echo "audit records of reads (tenant a):"
+    grep '"target":"GET /remote-shell' "$WORK/api-audit-a.log" | tail -3 | jq -c '[.action, .actor_id, .tenant, .target, .parameters.status]'
+    check "audit lines never hold a query string" 0 "$(grep -c 'limit=' "$WORK/api-audit-a.log" || true)"
     echo "failures=$failures"
     ;;
 esac

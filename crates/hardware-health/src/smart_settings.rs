@@ -14,20 +14,13 @@ pub fn settings_error(error: serde_saphyr::Error) -> SmartError {
 }
 
 
-pub fn is_program_path(text: &str) -> bool {
-    text.starts_with('/') && !text.contains('\0')
-}
-
-
 pub fn parse_settings(text: &str) -> Result<SmartSettings, SmartError> {
     if text.len() > MAX_SETTINGS_BYTES {
         Err(SmartError::SettingsTooLarge { limit: MAX_SETTINGS_BYTES })
     } else {
         let options = serde_saphyr::options! { with_snippet: false };
         let settings: SmartSettings = serde_saphyr::from_str_with_options(text, options).map_err(settings_error)?;
-        if !settings.program.to_str().is_some_and(is_program_path) {
-            Err(SmartError::SettingsField { field: "program" })
-        } else if !(MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS).contains(&settings.deadline_seconds) {
+        if !(MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS).contains(&settings.deadline_seconds) {
             Err(SmartError::SettingsField { field: "deadline_seconds" })
         } else if !(MIN_ROUND_DEADLINE_SECONDS..=MAX_ROUND_DEADLINE_SECONDS).contains(&settings.round_deadline_seconds) {
             Err(SmartError::SettingsField {

@@ -140,9 +140,6 @@ pub const DEFAULT_ROUND_DEADLINE_SECONDS: u64 = 600;
 pub const MAX_JSON_NODES: usize = 32_768;
 
 
-pub const DEFAULT_SMARTCTL: &str = "/usr/sbin/smartctl";
-
-
 pub fn default_deadline_seconds() -> u64 {
     DEFAULT_DEADLINE_SECONDS
 }
@@ -153,6 +150,31 @@ pub fn default_round_deadline_seconds() -> u64 {
 }
 
 
-pub fn default_smartctl() -> std::path::PathBuf {
-    std::path::PathBuf::from(DEFAULT_SMARTCTL)
-}
+pub const MAX_UPS_SETTINGS_BYTES: usize = 32_768;
+
+
+pub const MAX_UPS_TARGETS: usize = 64;
+
+
+pub const MAX_TARGET_BYTES: usize = 300;
+
+
+pub const MAX_UPS_NAME_BYTES: usize = 32;
+
+
+pub const MAX_DNS_NAME_BYTES: usize = 253;
+
+
+pub const MAX_DNS_LABEL_BYTES: usize = 63;
+
+
+pub const MAX_PORT_DIGITS: usize = 5;
+
+
+pub const IPV4_OCTETS: usize = 4;
+
+
+pub const MAX_OCTET_DIGITS: usize = 3;
+
+
+pub const DEFAULT_UPS_PORT: &str = "3493";

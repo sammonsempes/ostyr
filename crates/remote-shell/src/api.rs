@@ -147,7 +147,7 @@ pub fn failure_reply(error: &StoreError) -> Response {
             let category = failure_category(other);
             tracing::warn!(category, "remote shell sessions failure");
             match other {
-                StoreError::StoredValue { .. } => stored_value(),
+                StoreError::StoredValue { .. } | StoreError::BadRow { .. } => stored_value(),
                 _else => error_response(&ApiError::Internal),
             }
         }
@@ -299,7 +299,7 @@ pub fn remote_shell_access() -> AccessTable {
                 route_key("GET", path),
                 Rule {
                     requirement: Requirement::Permission(PERMISSION_AUDIT_READ.to_owned()),
-                    sensitive: false,
+                    sensitive: true,
                 },
             )
         })

@@ -25,3 +25,8 @@ rustix = { version = "1.1", features = ["process", "fs"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+regex = "1"
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

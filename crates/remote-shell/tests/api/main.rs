@@ -10,7 +10,7 @@ use alerts::error::StoreError as LeaseError;
 use axum::http::StatusCode;
 use core_api::model::ApiIdentity;
 use core_pg::error::PgError;
-use fake::{capture_dispatch, captured, row_of, Capture, CLOSED, HASH_BYTES, HASH_FILL, OPENED};
+use fake::{capture_dispatch, captured, put_row, row_of, Capture, CLOSED, HASH_BYTES, HASH_FILL, OPENED};
 use fixture::{fixture, fixture_with, put_session, ANALYST, AUDITOR, OTHER_TENANT, TENANT};
 use http::{body_json, call, get, login};
 use remote_shell::api::{
@@ -39,6 +39,12 @@ const OVER_REFERENCE: usize = 129;
 
 
 const PAIR: usize = 2;
+
+
+const TICKET_COLUMN: usize = 3;
+
+
+const AUDITED_READS: usize = 3;
 
 
 const DETAIL_READS: usize = 3;
@@ -464,5 +470,101 @@ async fn an_identity_with_a_malformed_tenant_reaches_no_store() -> TestResult {
     assert_eq!(listed.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(detail.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(fake::read_count(&fx.fake), 0);
+    Ok(())
+}
+
+
+fn null_ticket_row(session: &str) -> remote_shell::types::Row {
+    let mut row = row_of(session, "alice", "host-1", OPENED, false);
+    if let Some(cell) = row.get_mut(TICKET_COLUMN) {
+        *cell = remote_shell::store_model::Cell::Null;
+    }
+    row
+}
+
+
+fn wrong_typed_row(session: &str) -> remote_shell::types::Row {
+    let mut row = row_of(session, "alice", "host-1", OPENED, false);
+    if let Some(cell) = row.get_mut(TICKET_COLUMN) {
+        *cell = remote_shell::store_model::Cell::Int(1);
+    }
+    row
+}
+
+
+#[tokio::test]
+async fn a_row_that_does_not_decode_is_a_stored_value_500_in_the_detail() -> TestResult {
+    let fx = fixture()?;
+    put_row(&fx.fake, TENANT, "null-1", OPENED, null_ticket_row("null-1"));
+    put_row(&fx.fake, TENANT, "typed-1", OPENED, wrong_typed_row("typed-1"));
+    let token = login(&fx.router, AUDITOR).await?;
+    for id in ["null-1", "typed-1"] {
+        let detail = get(&fx.router, &format!("/remote-shell/sessions/{id}"), Some(&token)).await?;
+        assert_eq!(detail.status(), StatusCode::INTERNAL_SERVER_ERROR, "{id}");
+        let body = body_json(detail).await?;
+        assert_eq!(code_of(&body), Some("stored_value"), "{id}");
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_page_ending_on_an_undecodable_key_is_a_stored_value_500() -> TestResult {
+    let fx = fixture()?;
+    let mut broken = row_of("last-1", "alice", "host-1", OPENED, false);
+    if let Some(cell) = broken.get_mut(0) {
+        *cell = remote_shell::store_model::Cell::Null;
+    }
+    put_row(
+        &fx.fake,
+        TENANT,
+        "first-1",
+        OPENED + 1,
+        row_of("first-1", "alice", "host-1", OPENED + 1, false),
+    );
+    put_row(&fx.fake, TENANT, "last-1", OPENED, broken);
+    put_row(
+        &fx.fake,
+        TENANT,
+        "more-1",
+        OPENED - 1,
+        row_of("more-1", "alice", "host-1", OPENED - 1, false),
+    );
+    let token = login(&fx.router, AUDITOR).await?;
+    let page = get(&fx.router, "/remote-shell/sessions?limit=2", Some(&token)).await?;
+    assert_eq!(page.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(code_of(&body_json(page).await?), Some("stored_value"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn another_tenants_row_is_never_returned_by_the_detail_or_the_list() -> TestResult {
+    let fx = fixture()?;
+    put_session(&fx.fake, OTHER_TENANT, "b-only", "host-1", OPENED, false);
+    let token = login(&fx.router, AUDITOR).await?;
+    let detail = get(&fx.router, "/remote-shell/sessions/b-only", Some(&token)).await?;
+    assert_eq!(detail.status(), StatusCode::NOT_FOUND);
+    let listed = body_json(get(&fx.router, "/remote-shell/sessions", Some(&token)).await?).await?;
+    assert!(items(&listed)?.is_empty());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn every_read_of_the_register_is_audited() -> TestResult {
+    let fx = fixture()?;
+    seed(&fx);
+    let token = login(&fx.router, AUDITOR).await?;
+    for path in [
+        "/remote-shell/sessions?asset=host-1",
+        "/remote-shell/sessions/a-6",
+        "/remote-shell/sessions/nope",
+    ] {
+        get(&fx.router, path, Some(&token)).await?;
+    }
+    let log = std::fs::read_to_string(fx._dir.path().join("audit.log"))?;
+    assert_eq!(log.matches("\"target\":\"GET /remote-shell").count(), AUDITED_READS, "{log}");
+    assert!(!log.contains("asset=host-1"), "{log}");
     Ok(())
 }

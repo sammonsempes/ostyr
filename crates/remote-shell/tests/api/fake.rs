@@ -28,6 +28,9 @@ pub const HASH_BYTES: usize = 32;
 pub const BYTES: i64 = 2_048;
 
 
+pub const TENANT_CLAUSE: &str = "WHERE tenant = $1 AND";
+
+
 pub const IDX_OPEN: usize = 2;
 
 
@@ -101,6 +104,21 @@ pub fn put(fake: &Fake, tenant: &str, session: &str, requester: &str, asset: &st
 }
 
 
+pub fn put_row(fake: &Fake, tenant: &str, session: &str, opened: i64, row: Row) {
+    if let Ok(mut entries) = fake.entries.lock() {
+        entries.push(Entry {
+            tenant: tenant.to_owned(),
+            session: session.to_owned(),
+            requester: "alice".to_owned(),
+            asset: "host-1".to_owned(),
+            opened,
+            closed: false,
+            row,
+        });
+    }
+}
+
+
 pub fn read_count(fake: &Fake) -> usize {
     fake.statements.lock().map_or(0, |statements| statements.len())
 }
@@ -127,7 +145,8 @@ pub fn answer(fake: &Fake, scope: &TenantScope, statement: &Statement) -> Result
         statements.push(statement.sql);
     }
     let entries = fake.entries.lock().map_err(|_poisoned| StoreError::BadRow { column: "lock" })?;
-    let mut mine: Vec<&Entry> = entries.iter().filter(|entry| entry.tenant == tenant_of(scope)).collect();
+    let scoped = statement.sql.contains(TENANT_CLAUSE);
+    let mut mine: Vec<&Entry> = entries.iter().filter(|entry| !scoped || entry.tenant == tenant_of(scope)).collect();
     let params = &statement.params;
     Ok(if statement.sql == SESSION_SQL {
         let wanted = text_param(params, 0);

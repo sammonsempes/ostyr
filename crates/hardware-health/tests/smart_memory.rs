@@ -45,7 +45,6 @@ fn nested_scan(_program: &Path, _arguments: &[&str], _cap: u64, _deadline: Durat
 #[test]
 fn nested_input_never_materialises_a_value_tree() -> TestResult {
     let settings = SmartSettings {
-        program: "/x".into(),
         deadline_seconds: SECONDS,
         round_deadline_seconds: SECONDS,
     };

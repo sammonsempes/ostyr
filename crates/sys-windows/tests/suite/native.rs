@@ -145,11 +145,33 @@ fn lock_down(directory: &Path) -> TestResult {
 #[test]
 fn a_protected_leaf_under_the_default_ancestors_is_accepted() -> TestResult {
     let parent = tempfile::Builder::new().prefix("ostyr-spool-").tempdir_in(PROGRAM_DATA)?;
+    lock_down(parent.path())?;
     let leaf = parent.path().join("spool");
     std::fs::create_dir(&leaf)?;
     lock_down(&leaf)?;
     let verdict = judge_spool_path(&open_directory(&leaf)?, &leaf.join("spool.jsonl"));
     assert!(verdict.is_ok(), "{verdict:?}");
+    Ok(())
+}
+
+
+#[test]
+fn a_parent_keeping_its_inherited_creator_owner_grant_is_refused_by_name() -> TestResult {
+    let parent = tempfile::Builder::new().prefix("ostyr-spool-").tempdir_in(PROGRAM_DATA)?;
+    let own_grant = format!("*{}:(OI)(CI)F", token_user_sid()?);
+    let status = std::process::Command::new(ICACLS_HOST)
+        .arg(parent.path())
+        .args(["/grant", &own_grant])
+        .status()?;
+    assert!(status.success(), "icacls failed: {status}");
+    let leaf = parent.path().join("spool");
+    std::fs::create_dir(&leaf)?;
+    lock_down(&leaf)?;
+    let verdict = judge_spool_path(&open_directory(&leaf)?, &leaf.join("spool.jsonl"));
+    assert!(
+        matches!(&verdict, Err(DirAclError::UntrustedAce { path, .. }) if path == parent.path()),
+        "{verdict:?}"
+    );
     Ok(())
 }
 
