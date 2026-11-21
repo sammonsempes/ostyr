@@ -78,7 +78,7 @@ fn link_directory(link: &std::path::Path, target: &std::path::Path, flag: &str) 
         .arg(link)
         .arg(target)
         .status()?;
-    assert!(status.success(), "mklink {flag} failed: {status}");
+    assert!(status.success(), "junction creation unavailable: mklink {flag} failed: {status}");
     Ok(())
 }
 

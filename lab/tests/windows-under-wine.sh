@@ -28,17 +28,44 @@ else
     mapfile -t crates < <(grep -rl 'cfg(windows)\|cfg(not(unix))\|target_os = "windows"' crates/*/src crates/*/tests | cut -d/ -f2 | sort -u)
 fi
 
+readonly SKIPS=(
+    "sys-windows|a_junction_in_the_path_is_refused_at_its_component|junctions cannot be created"
+    "sys-windows|a_junction_at_an_entry_name_is_refused_as_a_reparse_point|junctions cannot be created"
+    "sys-windows|a_protected_leaf_under_the_default_ancestors_is_accepted|C:\\ is user-owned and icacls is missing"
+    "sys-windows|an_ancestor_the_user_controls_is_refused_by_name_before_the_spool_directory|C:\\ is user-owned and icacls is missing"
+)
+
 failed_total=0
 for crate in "${crates[@]}"; do
     log="$LOG_DIR/$crate.log"
-    timeout "$CRATE_TIMEOUT" cargo test --target "$TARGET" -p "$crate" >"$log" 2>&1
+    skip_args=()
+    skip_note=""
+    stale=""
+    for entry in "${SKIPS[@]}"; do
+        IFS='|' read -r skip_crate skip_name skip_reason <<<"$entry"
+        if [ "$skip_crate" = "$crate" ]; then
+            skip_args+=(--skip "$skip_name")
+            skip_note="$skip_note${skip_note:+; }$skip_name, $skip_reason"
+            grep -rqE "fn $skip_name\(" "crates/$crate/tests" || stale="$stale $skip_name"
+        fi
+    done
+    if [ -n "$stale" ]; then
+        echo "$crate: failed (stale skip entry matching no test:$stale)"
+        failed_total=$((failed_total + 1))
+        continue
+    fi
+    timeout "$CRATE_TIMEOUT" cargo test --target "$TARGET" -p "$crate" -- "${skip_args[@]}" >"$log" 2>&1
     status=$?
     failing=$(grep -E '^test .* \.\.\. FAILED$' "$log" | sed 's/^test \(.*\) \.\.\. FAILED$/\1/' | tr '\n' ' ')
     if ! grep -q '^test result:' "$log"; then
         echo "$crate: not runnable (exit $status: $(grep -m1 -E '^(error|Error)|timed out' "$log" || echo "see $log"))"
         failed_total=$((failed_total + 1))
     elif [ "$status" -eq 0 ] && grep -q '^test result: ok' "$log" && ! grep -q '^test result: FAILED' "$log" && [ -z "$failing" ]; then
-        echo "$crate: passed"
+        if [ "${#skip_args[@]}" -gt 0 ]; then
+            echo "$crate: passed ($((${#skip_args[@]} / 2)) skipped under Wine: $skip_note)"
+        else
+            echo "$crate: passed"
+        fi
     else
         echo "$crate: failed (exit $status: $failing)"
         failed_total=$((failed_total + 1))
