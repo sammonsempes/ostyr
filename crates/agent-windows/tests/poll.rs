@@ -33,6 +33,9 @@ const LINE_LIMIT: usize = 524_288;
 const LOCK_ATTEMPTS: u32 = 10;
 
 
+const MAX_SPOOL: u64 = 1_073_741_824;
+
+
 const OUTPUT_CAP: usize = 8_388_608;
 
 
@@ -40,6 +43,12 @@ const DEADLINE: u64 = 30;
 
 
 const SMALL_LINE_LIMIT: usize = 100;
+
+
+const HALF_SPOOL: usize = 500;
+
+
+const HALFWAY: usize = 100;
 
 
 const TIME: &str = "2026-11-03T10:00:00.1234567Z";
@@ -160,7 +169,15 @@ pub struct Reply {
 }
 
 
+#[derive(Clone, Default)]
+pub struct Probes {
+    pub record: Option<Reply>,
+    pub oldest: Option<Reply>,
+}
+
+
 pub struct Script {
+    pub probes: Probes,
     pub newest: Reply,
     pub main: VecDeque<Reply>,
 }
@@ -194,6 +211,7 @@ fn broken(end: RunEnd) -> Reply {
 
 fn script(newest: u64, main: Vec<Reply>) -> Script {
     Script {
+        probes: Probes::default(),
         newest: ok(&security(newest)),
         main: main.into(),
     }
@@ -212,6 +230,15 @@ fn event(source: &str, event_id: u32, record: u64, data: &str) -> String {
          <TimeCreated SystemTime='{TIME}'/><EventRecordID>{record}</EventRecordID><Channel>{channel}</Channel><Computer>WIN-01</Computer></System>\
          <EventData>{data}</EventData></Event>"
     )
+}
+
+
+fn channel_event(channel: &Channel, record: u64) -> String {
+    if channel.name == SYSMON.name {
+        sysmon(record)
+    } else {
+        security(record)
+    }
 }
 
 
@@ -272,7 +299,20 @@ fn set_cursor(lab: &Lab, channel: &Channel, record: u64) -> TestResult {
 
 
 fn main_queries(requests: &Requests) -> Vec<&Vec<String>> {
-    requests.iter().filter(|args| !args.iter().any(|arg| arg == "/rd:true")).collect()
+    requests
+        .iter()
+        .filter(|args| !args.iter().any(|arg| arg == "/rd:true") && !is_probe(args))
+        .collect()
+}
+
+
+fn is_probe(args: &[String]) -> bool {
+    query_arg(args).is_some_and(|query| query.contains("EventRecordID=") || query.contains("EventRecordID>0)"))
+}
+
+
+fn probe_requests(requests: &Requests) -> Vec<&Vec<String>> {
+    requests.iter().filter(|args| is_probe(args)).collect()
 }
 
 
@@ -300,7 +340,30 @@ fn failing_encode(_event: &EcsEvent) -> Result<String, ExportError> {
 
 
 fn run_poll(lab: &Lab, channel: &Channel, state: &mut ChannelState, scripted: Script) -> (Result<PollTotals, PollError>, Requests) {
-    run_poll_in(&state_dir(lab), &spool_path(lab), channel, state, (scripted, to_json, LINE_LIMIT))
+    run_poll_in(
+        &state_dir(lab),
+        &spool_path(lab),
+        channel,
+        state,
+        (scripted, to_json, LINE_LIMIT, MAX_SPOOL),
+    )
+}
+
+
+fn run_poll_capped(
+    lab: &Lab,
+    channel: &Channel,
+    state: &mut ChannelState,
+    scripted: Script,
+    max_spool: u64,
+) -> (Result<PollTotals, PollError>, Requests) {
+    run_poll_in(
+        &state_dir(lab),
+        &spool_path(lab),
+        channel,
+        state,
+        (scripted, to_json, LINE_LIMIT, max_spool),
+    )
 }
 
 
@@ -311,7 +374,13 @@ fn run_poll_with(
     scripted: Script,
     options: (EncodeFn, usize),
 ) -> (Result<PollTotals, PollError>, Requests) {
-    run_poll_in(&state_dir(lab), &spool_path(lab), channel, state, (scripted, options.0, options.1))
+    run_poll_in(
+        &state_dir(lab),
+        &spool_path(lab),
+        channel,
+        state,
+        (scripted, options.0, options.1, MAX_SPOOL),
+    )
 }
 
 
@@ -320,16 +389,26 @@ fn run_poll_in(
     spool: &Path,
     channel: &Channel,
     state: &mut ChannelState,
-    scripted: (Script, EncodeFn, usize),
+    scripted: (Script, EncodeFn, usize, u64),
 ) -> (Result<PollTotals, PollError>, Requests) {
     LazyLock::force(&LOGGING);
-    let (mut remaining, encode, line_limit) = scripted;
+    let (mut remaining, encode, line_limit, max_spool) = scripted;
     let mut requests: Requests = Vec::new();
     let mut run = |request: &RunRequest<'_>, sink: &mut dyn FnMut(&[u8])| -> Result<RunEnd, RunError> {
         assert_eq!(request.program, WEVTUTIL_PATH);
         requests.push(request.args.to_vec());
+        let query = request.args.get(QUERY_INDEX).cloned().unwrap_or_else(String::new);
         let served = if request.args.iter().any(|arg| arg == "/rd:true") {
             remaining.newest.clone()
+        } else if query.contains("EventRecordID=") {
+            let id: u64 = query
+                .trim_start_matches("/q:*[System[(EventRecordID=")
+                .trim_end_matches(")]]")
+                .parse()
+                .unwrap_or(0);
+            remaining.probes.record.clone().unwrap_or_else(|| ok(&channel_event(channel, id)))
+        } else if query.contains("EventRecordID>0)") {
+            remaining.probes.oldest.clone().unwrap_or_else(|| ok(&channel_event(channel, 1)))
         } else {
             remaining.main.pop_front().unwrap_or_else(|| ok(""))
         };
@@ -347,6 +426,7 @@ fn run_poll_in(
         lock_attempts: LOCK_ATTEMPTS,
         max_output_bytes: OUTPUT_CAP,
         deadline_seconds: DEADLINE,
+        max_spool_bytes: max_spool,
         seen: &mut seen,
     };
     let result = poll_channel(&mut env, channel, state);
@@ -665,6 +745,7 @@ fn every_batch_integrity_check_refuses_the_batch() -> TestResult {
         let mut state = ChannelState {
             batch: if limit == 1 { MAX_EVENTS_PER_POLL } else { limit },
             absent_logged: false,
+            paused_polls: 0,
         };
         let scripted = script(newest, vec![batch, ok("")]);
         let counts = totals(run_poll(&lab, &SECURITY, &mut state, scripted).0)?;
@@ -684,6 +765,7 @@ fn at_one_event_extra_items_make_the_first_a_forged_stub_and_the_cursor_follows_
     let mut state = ChannelState {
         batch: SINGLE,
         absent_logged: false,
+        paused_polls: 0,
     };
     let batch = ok(&format!("{}{}{}", security(FIFTH), security(FIFTH + 1), security(FIFTH + PAIR)));
     let counts = totals(run_poll(&lab, &SECURITY, &mut state, script(FAR, vec![batch])).0)?;
@@ -802,6 +884,7 @@ fn a_runner_error_is_propagated_from_both_queries() -> TestResult {
         end: Err(()),
     };
     let on_newest = Script {
+        probes: Probes::default(),
         newest: failing.clone(),
         main: VecDeque::new(),
     };
@@ -818,6 +901,7 @@ fn a_missing_channel_is_named_once_and_does_not_stop_the_other() -> TestResult {
     let lab = lab()?;
     let mut state = ChannelState::default();
     let absent = || Script {
+        probes: Probes::default(),
         newest: broken(RunEnd::Failed(Some(CHANNEL_NOT_FOUND_EXIT))),
         main: VecDeque::new(),
     };
@@ -845,6 +929,7 @@ fn a_failed_query_is_counted_and_keeps_the_cursor() -> TestResult {
         let counts = totals(run_poll(&lab, &SECURITY, &mut state, main_fails).0)?;
         assert_eq!((counts.query_failed, counts.channel_absent), (1, 0));
         let newest_fails = Script {
+            probes: Probes::default(),
             newest: reply(&security(FIRST), *end),
             main: VecDeque::new(),
         };
@@ -871,6 +956,7 @@ fn a_bad_newest_answer_is_a_failed_query_and_an_empty_channel_skips_the_main_que
     bad.into_iter().try_for_each(|newest| -> TestResult {
         let mut state = ChannelState::default();
         let scripted = Script {
+            probes: Probes::default(),
             newest,
             main: VecDeque::new(),
         };
@@ -881,6 +967,7 @@ fn a_bad_newest_answer_is_a_failed_query_and_an_empty_channel_skips_the_main_que
     })?;
     let mut state = ChannelState::default();
     let empty = Script {
+        probes: Probes::default(),
         newest: ok(""),
         main: VecDeque::new(),
     };
@@ -896,6 +983,7 @@ fn a_newest_answer_with_extra_items_is_counted_forged_and_still_used() -> TestRe
     let lab = lab()?;
     let mut state = ChannelState::default();
     let scripted = Script {
+        probes: Probes::default(),
         newest: ok(&format!("{}{}", security(FIRST), security(FIFTH))),
         main: VecDeque::from(vec![ok(&security(FIRST))]),
     };
@@ -972,6 +1060,7 @@ fn a_single_event_cap_with_no_partial_item_is_only_named() -> TestResult {
     let mut state = ChannelState {
         batch: 1,
         absent_logged: false,
+        paused_polls: 0,
     };
     let counts = totals(run_poll(&lab, &SECURITY, &mut state, script(FIRST, vec![broken(RunEnd::Capped)])).0)?;
     assert_eq!((counts.output_capped, counts.oversized, counts.batch_halved), (1, 0, 0));
@@ -1041,5 +1130,315 @@ fn an_odd_trailing_byte_is_one_stream_gap_and_the_complete_items_are_kept() -> T
     assert_eq!((counts.utf16, counts.spooled), (1, 1));
     assert!(spool_lines(&lab)?.first().is_some_and(|line| line.contains("\"reason\":\"utf16\"")));
     assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(FIRST));
+    Ok(())
+}
+
+
+const OTHER_TIME: &str = "2026-11-04T11:00:00.0000000Z";
+
+
+const SMALL_SPOOL: u64 = 1_000;
+
+
+const BIG_FILE: usize = 2_000;
+
+
+fn other_time(record: u64) -> String {
+    security(record).replace(TIME, OTHER_TIME)
+}
+
+
+fn reason_lines(lab: &Lab, reason: &str) -> io::Result<usize> {
+    Ok(spool_lines(lab)?
+        .iter()
+        .filter(|line| line.contains(&format!("\"reason\":\"{reason}\"")))
+        .count())
+}
+
+
+#[test]
+fn a_record_with_another_time_means_the_log_was_recreated_and_the_log_is_replayed() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState::default();
+    let mut scripted = script(SECOND, vec![ok(&format!("{}{}", security(1), security(PAIR)))]);
+    scripted.probes.record = Some(ok(&other_time(FIRST)));
+    let (result, requests) = run_poll(&lab, &SECURITY, &mut state, scripted);
+    let counts = totals(result)?;
+    assert_eq!((counts.log_recreated, counts.spooled, counts.holes), (1, PAIR, 0));
+    assert_eq!(probe_requests(&requests).len(), 1);
+    assert_eq!(
+        probe_requests(&requests).first().and_then(|args| query_arg(args)),
+        Some("/q:*[System[(EventRecordID=10)]]".to_string())
+    );
+    assert_eq!(main_queries(&requests).first().and_then(|args| query_arg(args)), bounded(0, SECOND));
+    assert!(spool_lines(&lab)?
+        .first()
+        .is_some_and(|line| line.contains("\"reason\":\"log_recreated\"")));
+    assert_eq!(reason_lines(&lab, "log_recreated")?, 1);
+    assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(PAIR));
+    Ok(())
+}
+
+
+#[test]
+fn an_absent_record_inside_the_log_means_recreated_and_the_oldest_id_is_queried() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState::default();
+    let mut scripted = script(FIFTH, vec![ok(&security(1))]);
+    scripted.probes.record = Some(ok(""));
+    scripted.probes.oldest = Some(ok(&security(FIRST)));
+    let (result, requests) = run_poll(&lab, &SECURITY, &mut state, scripted);
+    assert_eq!(totals(result)?.log_recreated, 1);
+    assert_eq!(probe_requests(&requests).len(), TWO_LINES);
+    assert_eq!(
+        probe_requests(&requests).get(1).and_then(|args| query_arg(args)),
+        Some("/q:*[System[(EventRecordID>0)]]".to_string())
+    );
+    assert_eq!(reason_lines(&lab, "log_recreated")?, 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_absent_record_below_the_oldest_is_a_wrap_and_stays_a_hole() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState::default();
+    let mut scripted = script(FAR + 1, vec![ok(&format!("{}{}", security(FAR), security(FAR + 1)))]);
+    scripted.probes.record = Some(ok(""));
+    scripted.probes.oldest = Some(ok(&security(FAR)));
+    let counts = totals(run_poll(&lab, &SECURITY, &mut state, scripted).0)?;
+    assert_eq!((counts.log_recreated, counts.holes, counts.spooled), (0, 1, PAIR));
+    assert_eq!(reason_lines(&lab, "hole")?, 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_intact_cursor_record_costs_one_probe_and_changes_nothing() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState::default();
+    let (result, requests) = run_poll(&lab, &SECURITY, &mut state, script(SECOND, vec![ok(&security(SECOND))]));
+    let counts = totals(result)?;
+    assert_eq!((counts.log_recreated, counts.spooled, counts.query_failed), (0, 1, 0));
+    assert_eq!(probe_requests(&requests).len(), 1);
+    assert_eq!(reason_lines(&lab, "log_recreated")?, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_probe_that_cannot_be_trusted_is_a_failed_query_and_nothing_moves() -> TestResult {
+    let no_id = "<Event><System><EventID>1</EventID></System></Event>";
+    let whole = security(FIRST);
+    let torn = whole.split_at(HALFWAY).0.to_string();
+    let cases: Vec<(Option<Reply>, Option<Reply>)> = vec![
+        (Some(broken(RunEnd::Failed(Some(FAILED_EXIT)))), None),
+        (Some(ok(&security(FAR))), None),
+        (Some(ok(no_id)), None),
+        (Some(ok(&torn)), None),
+        (Some(reply(&whole, RunEnd::Capped)), None),
+        (Some(ok("")), Some(broken(RunEnd::Failed(Some(FAILED_EXIT))))),
+        (Some(ok("")), Some(ok(""))),
+        (Some(ok("")), Some(ok(no_id))),
+    ];
+    cases.into_iter().try_for_each(|(record, oldest)| -> TestResult {
+        let lab = lab()?;
+        set_cursor(&lab, &SECURITY, FIRST)?;
+        let mut state = ChannelState::default();
+        let mut scripted = script(FIFTH, vec![ok(&security(SECOND))]);
+        scripted.probes.record = record;
+        scripted.probes.oldest = oldest;
+        let (result, requests) = run_poll(&lab, &SECURITY, &mut state, scripted);
+        let counts = totals(result)?;
+        assert_eq!((counts.query_failed, counts.log_recreated, counts.spooled), (1, 0, 0));
+        assert!(main_queries(&requests).is_empty());
+        assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(FIRST));
+        assert!(spool_lines(&lab)?.is_empty());
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_probe_error_from_the_runner_is_propagated() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState::default();
+    let mut scripted = script(SECOND, vec![]);
+    scripted.probes.record = Some(Reply {
+        chunks: Vec::new(),
+        end: Err(()),
+    });
+    assert!(matches!(run_poll(&lab, &SECURITY, &mut state, scripted).0, Err(PollError::Run(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_spool_at_the_bound_pauses_reading_before_any_query() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    fs::write(spool_path(&lab), "x".repeat(BIG_FILE))?;
+    let mut state = ChannelState::default();
+    let (result, requests) = run_poll_capped(&lab, &SECURITY, &mut state, script(SECOND, vec![ok(&security(SECOND))]), SMALL_SPOOL);
+    let counts = totals(result)?;
+    assert_eq!((counts.spool_full, counts.spooled), (1, 0));
+    assert!(requests.is_empty());
+    assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(FIRST));
+    assert_eq!(state.paused_polls, 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_claimed_sending_file_counts_toward_the_bound() -> TestResult {
+    let lab = lab()?;
+    fs::write(lab.dir.path().join("spool.sending"), "x".repeat(BIG_FILE))?;
+    let mut state = ChannelState::default();
+    let (result, requests) = run_poll_capped(&lab, &SECURITY, &mut state, script(FIRST, vec![ok(&security(FIRST))]), SMALL_SPOOL);
+    assert_eq!(totals(result)?.spool_full, 1);
+    assert!(requests.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn pause_and_resume_are_one_transition_each_and_the_cursor_stays_while_paused() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    fs::write(spool_path(&lab), "x".repeat(BIG_FILE))?;
+    let mut state = ChannelState::default();
+    (0..THREE).try_for_each(|_| -> TestResult {
+        let counts = totals(run_poll_capped(&lab, &SECURITY, &mut state, script(SECOND, vec![ok(&security(SECOND))]), SMALL_SPOOL).0)?;
+        assert_eq!(counts.spool_full, 1);
+        Ok(())
+    })?;
+    assert_eq!(state.paused_polls, THREE);
+    fs::write(spool_path(&lab), "")?;
+    let counts = totals(run_poll_capped(&lab, &SECURITY, &mut state, script(SECOND, vec![ok(&security(SECOND))]), SMALL_SPOOL).0)?;
+    assert_eq!((counts.spool_full, counts.spooled), (0, 1));
+    assert_eq!(state.paused_polls, 0);
+    assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(SECOND));
+    Ok(())
+}
+
+
+#[test]
+fn a_batch_that_does_not_fit_is_not_written_the_cursor_stays_and_the_next_batch_is_smaller() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    fs::write(spool_path(&lab), "x".repeat(HALF_SPOOL))?;
+    let mut state = ChannelState::default();
+    let text = format!("{}{}{}", security(SECOND), security(THIRD), security(FOURTH));
+    let (result, _) = run_poll_capped(&lab, &SECURITY, &mut state, script(FOURTH, vec![ok(&text)]), SMALL_SPOOL);
+    let counts = totals(result)?;
+    assert_eq!((counts.spool_full, counts.spooled, counts.holes), (1, 0, 0));
+    assert_eq!(fs::read_to_string(spool_path(&lab))?.len(), HALF_SPOOL);
+    assert_eq!(cursor_text(&lab, &SECURITY), expected_cursor(FIRST));
+    assert_eq!(state.batch, HALF);
+    assert_eq!(state.paused_polls, 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_spool_takes_one_batch_even_over_the_bound() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState::default();
+    let text = format!("{}{}{}", security(SECOND), security(THIRD), security(FOURTH));
+    let counts = totals(run_poll_capped(&lab, &SECURITY, &mut state, script(FOURTH, vec![ok(&text)]), 1).0)?;
+    assert_eq!((counts.spool_full, counts.spooled), (0, u64::from(THREE)));
+    Ok(())
+}
+
+
+#[test]
+fn a_full_batch_is_counted_and_a_forged_one_is_not() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SECURITY, FIRST)?;
+    let mut state = ChannelState {
+        batch: TWO_LIMIT,
+        ..ChannelState::default()
+    };
+    let good = format!("{}{}", security(SECOND), security(THIRD));
+    assert_eq!(
+        totals(run_poll(&lab, &SECURITY, &mut state, script(FIFTH, vec![ok(&good)])).0)?.full_batches,
+        1
+    );
+    let mut again = ChannelState {
+        batch: TWO_LIMIT,
+        ..ChannelState::default()
+    };
+    let bad = format!("{}{}{}", security(FOURTH), security(FIFTH), security(FIFTH + 1));
+    let counts = totals(run_poll(&lab, &SECURITY, &mut again, script(FIFTH + 1, vec![ok(&bad), ok(&security(FOURTH))])).0)?;
+    assert_eq!((counts.forged, counts.full_batches), (1, 1));
+    Ok(())
+}
+
+
+#[test]
+fn replaced_units_of_a_refused_batch_are_not_counted() -> TestResult {
+    let lab = lab()?;
+    set_cursor(&lab, &SYSMON, FIRST)?;
+    let mut state = ChannelState::default();
+    let first = event(
+        "sysmon",
+        1,
+        SECOND,
+        "<Data Name='UtcTime'>2026-11-03 10:00:00.123</Data><Data Name='CommandLine'>a\u{1}b</Data>",
+    );
+    let forged = format!("{}{}", first, sysmon(FOURTH));
+    let counts = totals(run_poll(&lab, &SYSMON, &mut state, script(FIFTH, vec![ok(&forged), ok(&sysmon(SECOND))])).0)?;
+    assert_eq!(counts.forged, 1);
+    assert_eq!(counts.utf16_replaced, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_spool_whose_size_cannot_be_read_is_an_error() -> TestResult {
+    let lab = lab()?;
+    let mut state = ChannelState::default();
+    let bad = Path::new("spool\0bad");
+    let scripted = (script(FIRST, vec![]), to_json as EncodeFn, LINE_LIMIT, MAX_SPOOL);
+    let (result, _) = run_poll_in(&state_dir(&lab), bad, &SECURITY, &mut state, scripted);
+    assert!(matches!(result, Err(PollError::SpoolSize(_))));
+    Ok(())
+}
+
+
+#[cfg(unix)]
+#[test]
+fn a_spool_that_becomes_unreadable_during_the_query_is_an_error() -> TestResult {
+    let lab = lab()?;
+    let spool = spool_path(&lab);
+    let mut state = ChannelState::default();
+    let mut seen = SeenIds::new();
+    let mut run = |request: &RunRequest<'_>, sink: &mut dyn FnMut(&[u8])| -> Result<RunEnd, RunError> {
+        sink(&wide(&security(FIRST)));
+        if request.args.iter().any(|arg| arg == "/rd:true") {
+            assert!(std::os::unix::fs::symlink(&spool, &spool).is_ok());
+        }
+        Ok(RunEnd::Done)
+    };
+    let mut env = PollEnv {
+        run: &mut run,
+        encode: to_json,
+        program: WEVTUTIL_PATH,
+        state_dir: &state_dir(&lab),
+        spool: &spool_path(&lab),
+        line_limit: LINE_LIMIT,
+        lock_attempts: LOCK_ATTEMPTS,
+        max_output_bytes: OUTPUT_CAP,
+        deadline_seconds: DEADLINE,
+        max_spool_bytes: MAX_SPOOL,
+        seen: &mut seen,
+    };
+    assert!(matches!(poll_channel(&mut env, &SECURITY, &mut state), Err(PollError::SpoolSize(_))));
     Ok(())
 }

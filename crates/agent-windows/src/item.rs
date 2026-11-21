@@ -84,11 +84,11 @@ pub fn handle_item(batch: &mut Batch, context: &ItemContext<'_>, seen: &mut Seen
                 let outcome = convert(item, context, seen);
                 batch.pending.push(Pending {
                     id,
+                    replaced: item.replaced,
                     info,
                     size: item.size,
                     outcome,
                 });
-                batch.totals.utf16_replaced += u64::from(item.replaced);
             }
             Err(forged) => batch.forged = Some(forged),
         }
@@ -141,6 +141,7 @@ pub fn accept_all(settled: &mut Settled, batch: &mut Batch, channel: &Channel, p
             settled.lines.push(gap_line(channel, GapReason::Hole, Some(*range)));
             batch.totals.holes += 1;
         });
+    batch.totals.utf16_replaced += pending.iter().map(|entry| u64::from(entry.replaced)).sum::<u64>();
     pending
         .into_iter()
         .for_each(|entry| apply(&mut settled.lines, &mut batch.totals, channel, entry));

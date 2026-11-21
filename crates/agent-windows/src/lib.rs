@@ -2,12 +2,15 @@
 
 pub mod cursor;
 pub mod cut;
+pub mod cycle;
 pub mod error;
 pub mod item;
 pub mod lines;
 pub mod model;
 pub mod newest;
 pub mod poll;
+pub mod recreated;
+pub mod room;
 pub mod run;
 pub mod split;
 pub mod stream;
