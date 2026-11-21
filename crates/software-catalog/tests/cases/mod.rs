@@ -4,5 +4,6 @@ mod catalogue;
 mod installed;
 mod installed_rpm;
 mod installed_rpm_plan;
+mod installed_winget;
 mod plan;
 mod text;

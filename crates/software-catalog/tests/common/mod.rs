@@ -75,5 +75,8 @@ pub fn installed(rows: Vec<InstalledRow>) -> Installed {
         malformed: 0,
         over_limit: 0,
         not_installed: 0,
+        other_source: 0,
+        unreadable_versions: 0,
+        duplicate_ids: 0,
     }
 }
