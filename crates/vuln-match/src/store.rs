@@ -19,7 +19,7 @@ use std::time::Duration;
 pub const MIGRATION_NAMESPACE: &str = "vuln";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "vuln_0001",
         sql: include_str!("../migrations/vuln_0001.sql"),
@@ -31,6 +31,10 @@ pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "vuln_0003",
         sql: include_str!("../migrations/vuln_0003.sql"),
+    },
+    Migration {
+        version: "vuln_0004",
+        sql: include_str!("../migrations/vuln_0004.sql"),
     },
 ];
 
@@ -360,14 +364,25 @@ pub fn page_of(rows: &[Vec<String>], limit: usize) -> Result<FindingsPage, Store
 
 /// A keyset page of the tenant's open findings, highest priority first then by key; `limit` is 1 to `MAX_PAGE_LIMIT`.
 pub async fn open_findings(exec: Executor<'_, '_>, scope: &TenantScope, cursor: Option<&str>, limit: usize) -> Result<FindingsPage, StoreError> {
+    let parsed = cursor.map(parse_cursor).transpose()?;
+    open_findings_parsed(exec, scope, parsed, limit).await
+}
+
+
+/// As `open_findings` for a cursor already through `parse_cursor`.
+pub async fn open_findings_parsed(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    cursor: Option<Vec<String>>,
+    limit: usize,
+) -> Result<FindingsPage, StoreError> {
     if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
         Err(StoreError::BadLimit { max: MAX_PAGE_LIMIT })
     } else {
         let fetch = (limit + 1).to_string();
         let rows = match cursor {
             None => exec(scope.clone(), FIRST_SQL, vec![fetch]).await?,
-            Some(text) => {
-                let mut params = parse_cursor(text)?;
+            Some(mut params) => {
                 params.push(fetch);
                 exec(scope.clone(), NEXT_SQL, params).await?
             }

@@ -1,6 +1,9 @@
 //! Package version comparison and OSV matching.
 
 pub mod alerting;
+pub mod api;
+pub mod api_model;
+pub mod backend;
 pub mod eol;
 pub mod epss;
 pub mod error;
