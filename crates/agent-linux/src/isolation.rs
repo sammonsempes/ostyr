@@ -1,6 +1,6 @@
 use crate::cursor::open_state_dir;
 use crate::error::IsolationError;
-use crate::model::{IsolationSettings, IsolationStatus, ItemJson, LinuxFile, ListingJson, Protocol, Rule, StateDir};
+use crate::model::{IsolationAction, IsolationSettings, IsolationStatus, ItemJson, LinuxFile, ListingJson, Protocol, Rule, StateDir, NFT_PATH};
 use crate::settings::invalid_isolation_settings;
 use crate::types::NftFn;
 use agent_channel::agent_app::load_agent_file;
@@ -566,8 +566,20 @@ pub async fn release_audited(env: &IsolationEnv<'_>) -> Result<IsolationStatus, 
 }
 
 
+/// The action named on the command line, judged before any file is opened.
+pub fn parse_action(action: &str) -> Result<IsolationAction, IsolationError> {
+    match action {
+        "isolate" => Ok(IsolationAction::Isolate),
+        "release" => Ok(IsolationAction::Release),
+        "status" => Ok(IsolationAction::Status),
+        _ => Err(IsolationError::Usage),
+    }
+}
+
+
 /// One action of the example command: the settings file is read once, the state directory is held, the audit log is the agent's own.
 pub async fn run_isolation(path: &Path, action: &str, run: NftFn) -> Result<String, IsolationError> {
+    let parsed = parse_action(action)?;
     let file = load_file::<LinuxFile>(path)?;
     let invalid = invalid_isolation_settings(&file);
     if !invalid.is_empty() {
@@ -575,21 +587,20 @@ pub async fn run_isolation(path: &Path, action: &str, run: NftFn) -> Result<Stri
     } else {
         let agent = load_agent_file(&file.agent_file)?;
         let _audit_dir = open_parent(&file.audit_file)?;
+        let state = open_state_dir(&file.cursor_file)?;
         let log = Arc::new(open_file_log(&file.audit_file)?);
         let audit = shared_log_audit(&log);
-        let state = open_state_dir(&file.cursor_file)?;
         let env = IsolationEnv {
             run,
-            nft: &file.nft_path,
+            nft: Path::new(NFT_PATH),
             state: &state,
             tenant: &agent.tenant,
             audit: &*audit,
         };
-        match action {
-            "isolate" => isolate(&env, &file.isolation).await.map(|()| "isolated".to_owned()),
-            "release" => release_audited(&env).await.map(|before| format!("released, table was {before:?}")),
-            "status" => status_audited(&env, &file.isolation).await.map(|now| format!("status: {now:?}")),
-            _ => Err(IsolationError::Usage),
+        match parsed {
+            IsolationAction::Isolate => isolate(&env, &file.isolation).await.map(|()| "isolated".to_owned()),
+            IsolationAction::Release => release_audited(&env).await.map(|before| format!("released, table was {before:?}")),
+            IsolationAction::Status => status_audited(&env, &file.isolation).await.map(|now| format!("status: {now:?}")),
         }
     }
 }

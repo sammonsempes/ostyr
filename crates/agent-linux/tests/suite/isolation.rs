@@ -8,9 +8,7 @@ use agent_linux::isolation::{
     output_rules, postrouting_rules, read_back, release, release_audited, render_ruleset, rule_exprs, rule_text, run_isolation, status,
     status_audited, write_ruleset, IsolationEnv, AUDIT_MISMATCH, CHAIN_PRIORITY, DNS_PORT, MAX_LISTING_ITEMS,
 };
-use agent_linux::model::{
-    Endpoint, IsolationSettings, IsolationStatus, LinuxFile, Protocol, Rule, DEFAULT_NFT_PATH, MAX_DNS_RESOLVERS, MAX_ENDPOINTS,
-};
+use agent_linux::model::{Endpoint, IsolationSettings, IsolationStatus, LinuxFile, Protocol, Rule, MAX_DNS_RESOLVERS, MAX_ENDPOINTS, NFT_PATH};
 use agent_linux::settings::{invalid_isolation_settings, validate_file};
 use agent_linux::types::{NftFn, NftFuture};
 use core_audit::error::AuditError;
@@ -168,9 +166,9 @@ pub fn rule_item(chain: &str) -> Value {
 }
 
 
-pub fn fake_nft(_program: PathBuf, arguments: Vec<String>) -> NftFuture {
+pub fn fake_nft(program: PathBuf, arguments: Vec<String>) -> NftFuture {
     Box::pin(async move {
-        match arguments.first().map(String::as_str) {
+        match arguments.first().map(String::as_str).filter(|_| program == Path::new(NFT_PATH)) {
             Some("-j") => Ok(V4.to_owned()),
             Some("-f" | "delete") => Ok(String::new()),
             _ => Err(exit("unexpected arguments")),
@@ -694,6 +692,16 @@ async fn the_example_actions_read_the_settings_and_report() -> TestResult {
 
 
 #[tokio::test]
+async fn an_unknown_action_is_refused_before_any_file_is_opened() -> TestResult {
+    let dir = tempdir()?;
+    let path = write_files(dir.path(), GOOD, "")?;
+    assert!(matches!(run_isolation(&path, "bogus", fake_nft).await, Err(IsolationError::Usage)));
+    assert!(!dir.path().join("audit").exists());
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn hostile_or_out_of_range_settings_are_refused_at_load() -> TestResult {
     let dir = tempdir()?;
     for address in ["1.2.3.4; flush ruleset", "{ 0.0.0.0/0 }", "1.2.3.0/24", "any"] {
@@ -710,9 +718,16 @@ async fn hostile_or_out_of_range_settings_are_refused_at_load() -> TestResult {
         "",
     )?;
     assert!(matches!(run_isolation(&port, "isolate", fake_nft).await, Err(IsolationError::Config(_))));
-    let relative = write_files(dir.path(), GOOD, "nft_path: nft\n")?;
+    for program in ["nft", "/usr/sbin/reboot"] {
+        let setting = write_files(dir.path(), GOOD, &format!("nft_path: {program}\n"))?;
+        assert!(matches!(
+            run_isolation(&setting, "isolate", fake_nft).await,
+            Err(IsolationError::Config(_))
+        ));
+    }
+    let zero_port = write_files(dir.path(), "isolation:\n  endpoints:\n    - address: 10.0.0.1\n      port: 0\n", "")?;
     assert!(matches!(
-        run_isolation(&relative, "isolate", fake_nft).await,
+        run_isolation(&zero_port, "isolate", fake_nft).await,
         Err(IsolationError::Settings(_))
     ));
     let none = write_files(dir.path(), "", "")?;
@@ -776,9 +791,9 @@ fn isolation_settings_are_bounded_and_validated() -> TestResult {
         .map(|i| format!("    - address: 10.0.0.{i}\n      port: 80\n"))
         .collect();
     let dns: String = (1..=MAX_DNS_RESOLVERS + 1).map(|i| format!("    - 10.0.1.{i}\n")).collect();
-    let path = write_files(dir.path(), &format!("isolation:\n  endpoints:\n{many}  dns:\n{dns}"), "nft_path: nft\n")?;
+    let path = write_files(dir.path(), &format!("isolation:\n  endpoints:\n{many}  dns:\n{dns}"), "")?;
     let file = load_file::<LinuxFile>(&path)?;
-    assert_eq!(invalid_isolation_settings(&file), ["isolation.endpoints", "isolation.dns", "nft_path"]);
+    assert_eq!(invalid_isolation_settings(&file), ["isolation.endpoints", "isolation.dns"]);
     assert!(matches!(validate_file(&file), Err(SourceError::Settings(names)) if names.contains("isolation.dns")));
     let zero = write_files(dir.path(), "isolation:\n  endpoints:\n    - address: 10.0.0.1\n      port: 0\n", "")?;
     assert_eq!(invalid_isolation_settings(&load_file::<LinuxFile>(&zero)?), ["isolation.ports"]);
@@ -806,7 +821,6 @@ fn isolation_settings_are_bounded_and_validated() -> TestResult {
     let good = write_files(dir.path(), GOOD, "")?;
     let valid = load_file::<LinuxFile>(&good)?;
     assert!(invalid_isolation_settings(&valid).is_empty());
-    assert_eq!(valid.nft_path, Path::new(DEFAULT_NFT_PATH));
     validate_file(&valid)?;
     Ok(())
 }
@@ -990,5 +1004,26 @@ async fn a_group_writable_audit_parent_ends_the_command_before_any_record() -> T
     ));
     assert_eq!(fs::read_dir(&audit_dir)?.count(), 0);
     assert!(!dir.path().join("cursor").exists());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_group_writable_state_directory_ends_the_command_before_the_audit_file_exists() -> TestResult {
+    let dir = tempdir()?;
+    let state_dir = dir.path().join("state");
+    fs::create_dir(&state_dir)?;
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(OPEN_PARENT))?;
+    let path = write_files(dir.path(), GOOD, "")?;
+    let text = fs::read_to_string(&path)?.replace(
+        &format!("cursor_file: {}/cursor\n", dir.path().display()),
+        &format!("cursor_file: {}/state/cursor\n", dir.path().display()),
+    );
+    fs::write(&path, text)?;
+    assert!(matches!(
+        run_isolation(&path, "isolate", fake_nft).await,
+        Err(IsolationError::State(SourceError::StateDir(..)))
+    ));
+    assert!(!dir.path().join("audit").exists());
     Ok(())
 }

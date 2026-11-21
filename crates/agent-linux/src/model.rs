@@ -93,13 +93,13 @@ pub const MOUNT_PATH: &str = "/usr/bin/mount";
 pub const UMOUNT_PATH: &str = "/usr/bin/umount";
 
 
-pub const DEFAULT_SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
+pub const SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
 
 
 pub const DEFAULT_CREDENTIALS_PATH: &str = "/etc/tetragon/tetragon.conf.d/enable-process-cred";
 
 
-pub const DEFAULT_NFT_PATH: &str = "/usr/sbin/nft";
+pub const NFT_PATH: &str = "/usr/sbin/nft";
 
 
 pub const MAX_ENDPOINTS: usize = 8;
@@ -316,18 +316,8 @@ pub struct UpdateEnv {
 }
 
 
-pub fn default_systemctl_path() -> PathBuf {
-    PathBuf::from(DEFAULT_SYSTEMCTL_PATH)
-}
-
-
 pub fn default_credentials_path() -> PathBuf {
     PathBuf::from(DEFAULT_CREDENTIALS_PATH)
-}
-
-
-pub fn default_nft_path() -> PathBuf {
-    PathBuf::from(DEFAULT_NFT_PATH)
 }
 
 
@@ -349,7 +339,16 @@ pub struct IsolationSettings {
 }
 
 
-/// The settings file; `settings`, `sensor` and `updates` are live-reloaded, the paths (`systemctl_path` included) are read at start.
+/// One action of the `agent_isolation` example.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsolationAction {
+    Isolate,
+    Release,
+    Status,
+}
+
+
+/// The settings file; `settings`, `sensor` and `updates` are live-reloaded, the paths are read at start; no program path is a setting (`SYSTEMCTL_PATH`, `NFT_PATH` are consts).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinuxFile {
@@ -365,14 +364,10 @@ pub struct LinuxFile {
     pub updates: UpdateSettings,
     #[serde(default)]
     pub osquery: OsquerySettings,
-    #[serde(default = "default_systemctl_path")]
-    pub systemctl_path: PathBuf,
     #[serde(default)]
     pub isolation: IsolationSettings,
     #[serde(default = "default_credentials_path")]
     pub credentials_path: PathBuf,
-    #[serde(default = "default_nft_path")]
-    pub nft_path: PathBuf,
 }
 
 

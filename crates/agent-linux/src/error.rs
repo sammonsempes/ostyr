@@ -62,8 +62,6 @@ pub enum SourceError {
     Undrained(#[source] Box<SourceError>),
     #[error("state directory of {} is refused: {}", .0.display(), .1)]
     StateDir(PathBuf, StateDirReason),
-    #[error("{} is not an absolute path", .0.display())]
-    NotAbsolute(PathBuf),
     #[error("the background poll failed: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("settings out of range: {0}")]

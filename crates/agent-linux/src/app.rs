@@ -1,11 +1,11 @@
 use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::cursor::open_state_dir;
 use crate::error::SourceError;
-use crate::model::{LinuxFile, Paths, Totals, UpdateEnv, LINUX_MODULE};
+use crate::model::{LinuxFile, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
 use crate::run::run_source;
-use crate::sensor::{monotonic_seconds, run_command, run_sensor, run_update_command, SensorEnv};
+use crate::sensor::{monotonic_seconds, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
-use crate::types::SpoolLock;
+use crate::types::{RunFn, SpoolLock};
 use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVENTS_PER_RUN};
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
@@ -16,7 +16,7 @@ use core_audit::log::open_file_log;
 use core_config::load::load_file;
 use core_config::watch::watch_files;
 use patch_inventory::limits::default_limits;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,17 +51,13 @@ pub fn source_paths(file: &LinuxFile, agent: &AgentFile) -> Paths {
 
 
 /// The Linux agent: the Tetragon source and the agent channel side by side. Only `settings` of the file is live-reloaded (file watch and `SIGHUP`).
-pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<Totals, SourceError> {
+pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn) -> Result<Totals, SourceError> {
     let file = load_file::<LinuxFile>(path)?;
     let agent = load_agent_file(&file.agent_file)?;
     let dirs = open_spool_dirs(&agent)?;
     let _audit_dir = open_parent(&file.audit_file)?;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let context = reload_context(path, LINUX_MODULE, &agent.tenant, "agent-linux-reload");
-    file.systemctl_path
-        .is_absolute()
-        .then_some(())
-        .ok_or_else(|| SourceError::NotAbsolute(file.systemctl_path.clone()))?;
     let (engine, shared, sensor_settings, update_settings, _osquery) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
     let reloadable = Arc::new(engine);
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
@@ -75,13 +71,13 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
     };
     let cycles = async { Ok::<u64, SourceError>(run_agent_cycles(&agent, &dirs, max_polls, pause).await) };
     let env = SensorEnv {
-        systemctl: file.systemctl_path.clone(),
+        systemctl: PathBuf::from(SYSTEMCTL_PATH),
         export: file.export_path.clone(),
         spool: agent.spool_file.clone(),
         lock: Arc::clone(&paths.lock),
         tenant: agent.tenant.clone(),
         credentials_file: file.credentials_path.clone(),
-        run: run_command,
+        run,
     };
     let sensor_audit = shared_log_audit(&log);
     let sensor = async {
