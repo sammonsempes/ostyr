@@ -20,7 +20,7 @@ use siem_ingest::error::InsertClass;
 use siem_schema::metrics::MetricsRetention;
 use siem_schema::metrics::MetricsTable;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::future::ready;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -86,10 +86,13 @@ const LONG_AGO: u64 = 300;
 const DAILY: u64 = 86_400;
 
 
+const CLOSING: [&str; 2] = ["closed", "false_positive"];
+
+
 #[derive(Default)]
 struct Store {
     rows: Mutex<Vec<(String, String, String, String)>>,
-    closed: Mutex<BTreeSet<String>>,
+    closed: Mutex<BTreeMap<String, String>>,
     recoveries: Mutex<Vec<String>>,
     asked: Mutex<Vec<String>>,
     bounds: Mutex<Vec<String>>,
@@ -147,7 +150,9 @@ fn recover(store: &Store, scope: &TenantScope, params: &[String]) -> Result<Vec<
                 rows.iter()
                     .rev()
                     .filter(|(owner, id, stored_rule, events)| {
-                        *owner == tenant && !closed.contains(id) && (lax || (stored_rule == rule_id && events.contains(&format!("\"{series}\""))))
+                        *owner == tenant
+                            && !closed.get(id).is_some_and(|status| CLOSING.contains(&status.as_str()))
+                            && (lax || (stored_rule == rule_id && events.contains(&format!("\"{series}\""))))
                     })
                     .take(MAX_ROWS_PER_RULE)
                     .map(|(_, _, stored_rule, events)| vec![stored_rule.clone(), events.clone()])
@@ -360,7 +365,27 @@ async fn a_closed_alert_is_not_recovered() -> TestResult {
     let rules = file(vec![absence()]);
     run_round(&store, &rules, NOW, &mut RoundStates::default(), nothing).await?;
     let id = store.rows.lock().map_err(|_| "poisoned")?.first().ok_or("no row")?.1.clone();
-    store.closed.lock().map_err(|_| "poisoned")?.insert(id);
+    store.closed.lock().map_err(|_| "poisoned")?.insert(id, "closed".to_string());
+    let again = run_round(&store, &rules, NOW + STEP, &mut RoundStates::default(), nothing).await?;
+    assert_eq!(again, (1, NOW + STEP));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_false_positive_alert_is_not_recovered_but_an_acknowledged_one_is() -> TestResult {
+    let store = Store::default();
+    let rules = file(vec![absence()]);
+    run_round(&store, &rules, NOW, &mut RoundStates::default(), nothing).await?;
+    let id = store.rows.lock().map_err(|_| "poisoned")?.first().ok_or("no row")?.1.clone();
+    store
+        .closed
+        .lock()
+        .map_err(|_| "poisoned")?
+        .insert(id.clone(), "acknowledged".to_string());
+    let seeded = run_round(&store, &rules, NOW + STEP, &mut RoundStates::default(), nothing).await?;
+    assert_eq!(seeded, (0, NOW));
+    store.closed.lock().map_err(|_| "poisoned")?.insert(id, "false_positive".to_string());
     let again = run_round(&store, &rules, NOW + STEP, &mut RoundStates::default(), nothing).await?;
     assert_eq!(again, (1, NOW + STEP));
     Ok(())
@@ -825,7 +850,7 @@ fn the_statement_is_tenant_scoped_time_bounded_and_skips_closed_alerts() -> Test
     assert!(RECOVER_SQL.contains("alerts.rule_id = wanted.rule_id"));
     assert!(RECOVER_SQL.contains("alerts.event_ids ? wanted.series"));
     assert!(RECOVER_SQL.contains("alert_triage.tenant = alerts.tenant"));
-    assert!(RECOVER_SQL.contains("status = 'closed'"));
+    assert!(RECOVER_SQL.contains("status IN ('closed', 'false_positive')"));
     assert!(RECOVER_SQL.contains(&format!("LIMIT {MAX_ROWS_PER_RULE})")));
     assert!(!RECOVER_SQL.contains("LIKE"));
     assert!(RULE_ID_PREFIX.ends_with('.'));

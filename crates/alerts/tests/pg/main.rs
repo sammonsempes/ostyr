@@ -143,7 +143,7 @@ async fn list_alerts_runs_against_a_real_client_scoped_to_the_tenant() -> Result
 async fn set_and_get_triage_round_trip_on_a_real_client() -> Result<(), Box<dyn Error>> {
     let handler: Handler = Arc::new(|sql| {
         if sql.contains("INSERT INTO alert_triage") {
-            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned()]])
+            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned(), "r1".to_owned()]])
         } else {
             Reply::Rows(vec![vec![
                 "closed".to_owned(),
@@ -165,7 +165,7 @@ async fn set_and_get_triage_round_trip_on_a_real_client() -> Result<(), Box<dyn 
         now: TRIAGE_TIME,
     };
     let written = set_triage(&exec, &scope, &id, &change, None).await?;
-    assert_eq!(written.version, 1);
+    assert_eq!((written.triage.version, written.rule_id.as_str()), (1, "r1"));
     let read = get_triage(&exec, &scope, &id).await?.ok_or("no triage")?;
     assert_eq!(
         (read.status, read.actor.as_str(), read.note.as_deref(), read.updated_at),
@@ -236,7 +236,7 @@ pub fn alert_handler() -> Handler {
     let id = alert_id("acme", "r1", &["e1".to_owned()]);
     Arc::new(move |sql| {
         if sql.contains("INSERT INTO alert_triage") {
-            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned()]])
+            Reply::Rows(vec![vec!["1".to_owned(), "1".to_owned(), "r1".to_owned()]])
         } else if sql.contains("FROM alerts") {
             Reply::Rows(vec![alert_row(&id)])
         } else {
@@ -310,7 +310,7 @@ async fn the_pg_backend_lists_and_gets_through_a_leased_connection() -> Result<(
         now: TRIAGE_TIME,
     };
     let written = (backend.triage)(tenant_scope("acme")?, id, change, None).await?;
-    assert_eq!(written.version, 1);
+    assert_eq!((written.triage.version, written.rule_id.as_str()), (1, "r1"));
     assert!(unix_micros() > TRIAGE_TIME);
     assert!((backend.clock)() > TRIAGE_TIME);
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
