@@ -2,6 +2,7 @@
 mod types;
 
 
+use agent_windows::created::{created_args, parse_created};
 use agent_windows::cursor::{is_time_text, parse_cursor, parse_record_id, read_cursor, write_cursor};
 use agent_windows::cut::{cut_data_values, cut_value};
 use agent_windows::lines::{forged_line, gap_line, refused_line};
@@ -332,9 +333,21 @@ fn the_cursor_grammar_is_strict() -> TestResult {
         parse_cursor(b"5 2026-11-03T10:00:00Z\n"),
         CursorState::Valid {
             record_id: ID_FIVE,
-            time: "2026-11-03T10:00:00Z".to_string()
+            time: "2026-11-03T10:00:00Z".to_string(),
+            created: None
         }
     );
+    assert_eq!(
+        parse_cursor(b"5 2026-11-03T10:00:00Z 2026-10-01T08:00:00.000Z\n"),
+        CursorState::Valid {
+            record_id: ID_FIVE,
+            time: "2026-11-03T10:00:00Z".to_string(),
+            created: Some("2026-10-01T08:00:00.000Z".to_string())
+        }
+    );
+    assert_eq!(parse_cursor(b"5 2026-11-03T10:00:00Z a b\n"), CursorState::Invalid);
+    assert_eq!(parse_cursor(b"5 2026-11-03T10:00:00Z \n"), CursorState::Invalid);
+    assert_eq!(parse_cursor(b"5 2026-11-03T10:00:00Z a\xffb\n"), CursorState::Invalid);
     assert_eq!(parse_cursor(b"5 2026-11-03T10:00:00Z\n\n"), CursorState::Invalid);
     assert_eq!(parse_cursor(b"5  x"), CursorState::Invalid);
     let wide = vec![b'1'; usize::try_from(MAX_CURSOR_BYTES).unwrap_or(0) + 1];
@@ -347,12 +360,22 @@ fn the_cursor_grammar_is_strict() -> TestResult {
 fn the_cursor_file_round_trips_and_a_missing_one_is_missing() -> TestResult {
     let dir = tempfile::tempdir()?;
     assert_eq!(read_cursor(dir.path(), &SECURITY)?, CursorState::Missing);
-    write_cursor(dir.path(), &SECURITY, ID_SEVEN, "2026-11-03T10:00:00Z")?;
+    write_cursor(dir.path(), &SECURITY, ID_SEVEN, "2026-11-03T10:00:00Z", None)?;
     assert_eq!(
         read_cursor(dir.path(), &SECURITY)?,
         CursorState::Valid {
             record_id: ID_SEVEN,
-            time: "2026-11-03T10:00:00Z".to_string()
+            time: "2026-11-03T10:00:00Z".to_string(),
+            created: None
+        }
+    );
+    write_cursor(dir.path(), &SECURITY, ID_SEVEN, "2026-11-03T10:00:00Z", Some("2026-10-01T08:00:00Z"))?;
+    assert_eq!(
+        read_cursor(dir.path(), &SECURITY)?,
+        CursorState::Valid {
+            record_id: ID_SEVEN,
+            time: "2026-11-03T10:00:00Z".to_string(),
+            created: Some("2026-10-01T08:00:00Z".to_string())
         }
     );
     assert!(!dir.path().join("security.cursor.tmp").exists());
@@ -428,5 +451,24 @@ fn a_state_path_through_a_file_is_a_read_error() -> TestResult {
     let file = dir.path().join("plain");
     std::fs::write(&file, b"x")?;
     assert!(read_cursor(&file, &SECURITY).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_creation_time_is_read_from_the_gli_text_and_only_when_it_is_time_text() -> TestResult {
+    assert_eq!(created_args(&SECURITY), vec!["gli".to_string(), "Security".to_string()]);
+    assert_eq!(
+        parse_created(b"name: Security\r\ncreationTime: 2026-10-01T08:00:00.000Z\r\nlastAccessTime: x\r\n"),
+        Some("2026-10-01T08:00:00.000Z".to_string())
+    );
+    assert_eq!(
+        parse_created(b"  creationTime:2026-10-01T08:00:00Z"),
+        Some("2026-10-01T08:00:00Z".to_string())
+    );
+    assert_eq!(parse_created(b"creationTime: a b\n"), None);
+    assert_eq!(parse_created(b"creationTime:\n"), None);
+    assert_eq!(parse_created(b"nothing\xff here\n"), None);
+    assert_eq!(parse_created(b""), None);
     Ok(())
 }

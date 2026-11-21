@@ -1,3 +1,4 @@
+use crate::created::query_created;
 use crate::cursor::{read_cursor, write_cursor};
 use crate::error::PollError;
 use crate::item::{handle_item, settle};
@@ -7,9 +8,10 @@ use crate::model::{
     Stream, CHANNEL_NOT_FOUND_EXIT, MAX_EVENTS_PER_POLL,
 };
 use crate::newest::query_newest;
-use crate::recreated::check_cursor;
-use crate::room::{fits, note_pause, pending_bytes};
+use crate::recreated::{check_cursor, creation_to_store};
+use crate::room::{fits, note_pause, pending_bytes, refused_bytes};
 use crate::stream::{feed_bytes, flawed, partial_item};
+use crate::types::Found;
 use agent_channel::spool::{append_locked, pause_between_lock_attempts};
 use tracing::warn;
 
@@ -132,7 +134,7 @@ pub fn log_totals(channel: &Channel, totals: &PollTotals) {
 }
 
 
-pub fn finalize(env: &PollEnv<'_>, channel: &Channel, settled: &Settled) -> Result<(), PollError> {
+pub fn finalize(env: &PollEnv<'_>, channel: &Channel, settled: &Settled, created: Option<&str>) -> Result<(), PollError> {
     append_locked(
         settled.lines.iter().cloned().map(Ok),
         env.spool,
@@ -141,7 +143,7 @@ pub fn finalize(env: &PollEnv<'_>, channel: &Channel, settled: &Settled) -> Resu
     )
     .map_err(PollError::Spool)?;
     if let Some((record_id, time)) = &settled.last {
-        write_cursor(env.state_dir, channel, *record_id, time).map_err(PollError::Cursor)?;
+        write_cursor(env.state_dir, channel, *record_id, time, created).map_err(PollError::Cursor)?;
     }
     Ok(())
 }
@@ -161,9 +163,9 @@ pub fn run_main(
     channel: &Channel,
     state: &mut ChannelState,
     totals: &mut PollTotals,
-    found: (&CursorState, u64),
+    found: Found<'_>,
 ) -> Result<bool, PollError> {
-    let (cursor, newest) = found;
+    let (cursor, newest, created) = found;
     let before = totals.clone();
     let planned = plan(cursor, channel, newest, totals);
     let caught_up = planned.after >= newest;
@@ -201,16 +203,19 @@ pub fn run_main(
     let partial = settle_end(end, &mut batch, &mut stream, (state, channel));
     partial.iter().for_each(|item| handle_item(&mut batch, &context, env.seen, item));
     let settled = settle(&mut batch, channel);
-    let room = fits(
-        pending_bytes(env.spool).map_err(PollError::SpoolSize)?,
-        &settled.lines,
-        env.max_spool_bytes,
-    );
+    let pending = pending_bytes(env.spool).map_err(PollError::SpoolSize)?;
+    let room = fits(pending, &settled.lines, env.max_spool_bytes);
+    let refused = refused_bytes(&settled.lines);
+    let first_refusal = !room && state.paused_polls == 0;
+    let limit = env.max_spool_bytes;
+    if first_refusal {
+        warn!(pending, refused, limit, "spool batch does not fit, reading paused");
+    }
     *totals = if room { std::mem::take(&mut batch.totals) } else { before };
     totals.spool_full += u64::from(!room);
     state.batch = if room { state.batch } else { (batch.limit / BATCH_FACTOR).max(1) };
     if room {
-        finalize(env, channel, &settled).map(|()| settled.refetch)
+        finalize(env, channel, &settled, created).map(|()| settled.refetch)
     } else {
         Ok(false)
     }
@@ -223,10 +228,16 @@ pub fn poll_once(env: &mut PollEnv<'_>, channel: &Channel, state: &mut ChannelSt
     totals.channel_absent += u64::from(newest == Newest::Absent);
     totals.query_failed += u64::from(newest == Newest::Failed);
     let refetch = match newest {
-        Newest::Id(id) => match check_cursor(env, channel, cursor, id, totals)? {
-            Some(checked) => run_main(env, channel, state, totals, (&checked, id))?,
-            None => false,
-        },
+        Newest::Id(id) => {
+            let created = query_created(env, channel, totals)?;
+            match check_cursor(env, channel, cursor, (id, created.as_deref()), totals)? {
+                Some(checked) => {
+                    let stored = creation_to_store(&checked, id, created.as_deref());
+                    run_main(env, channel, state, totals, (&checked, id, stored.as_deref()))?
+                }
+                None => false,
+            }
+        }
         _ => false,
     };
     announce_absent(channel, state, totals.channel_absent > 0);

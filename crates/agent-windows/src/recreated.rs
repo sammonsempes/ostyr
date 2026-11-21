@@ -71,11 +71,17 @@ pub fn check_cursor(
     env: &mut PollEnv<'_>,
     channel: &Channel,
     cursor: CursorState,
-    newest: u64,
+    found: (u64, Option<&str>),
     totals: &mut PollTotals,
 ) -> Result<Option<CursorState>, PollError> {
+    let (newest, created) = found;
     let verdict = match &cursor {
-        CursorState::Valid { record_id, time } if *record_id <= newest => verify(env, channel, (*record_id, time), totals)?,
+        CursorState::Valid {
+            created: Some(stored),
+            record_id,
+            ..
+        } if *record_id <= newest && created.is_some_and(|now| now != stored) => Verdict::Recreated,
+        CursorState::Valid { record_id, time, .. } if *record_id <= newest => verify(env, channel, (*record_id, time), totals)?,
         _ => Verdict::Intact,
     };
     totals.query_failed += u64::from(verdict == Verdict::Failed);
@@ -84,4 +90,14 @@ pub fn check_cursor(
         Verdict::Recreated => Some(CursorState::Recreated),
         Verdict::Failed => None,
     })
+}
+
+
+pub fn creation_to_store(checked: &CursorState, newest: u64, created: Option<&str>) -> Option<String> {
+    match checked {
+        CursorState::Valid {
+            created: stored, record_id, ..
+        } if *record_id <= newest => created.map(str::to_string).or_else(|| stored.clone()),
+        _ => created.map(str::to_string),
+    }
 }

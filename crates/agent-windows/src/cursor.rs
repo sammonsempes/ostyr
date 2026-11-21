@@ -27,11 +27,20 @@ pub fn parse_cursor(bytes: &[u8]) -> CursorState {
     let within = u64::try_from(bytes.len()).is_ok_and(|length| length <= MAX_CURSOR_BYTES);
     let parsed = std::str::from_utf8(bytes).ok().filter(|_| within).and_then(|text| {
         let body = text.strip_suffix('\n').unwrap_or(text);
-        body.split_once(' ')
-            .filter(|(_, time)| is_time_text(time))
-            .and_then(|(id, time)| parse_record_id(id).map(|record_id| (record_id, time.to_string())))
+        body.split_once(' ').and_then(|(id, rest)| {
+            let (time, created) = rest.split_once(' ').map_or((rest, None), |(time, created)| (time, Some(created)));
+            let readable = is_time_text(time) && created.is_none_or(is_time_text);
+            readable
+                .then(|| parse_record_id(id))
+                .flatten()
+                .map(|record_id| (record_id, time.to_string(), created.map(str::to_string)))
+        })
     });
-    parsed.map_or(CursorState::Invalid, |(record_id, time)| CursorState::Valid { record_id, time })
+    parsed.map_or(CursorState::Invalid, |(record_id, time, created)| CursorState::Valid {
+        record_id,
+        time,
+        created,
+    })
 }
 
 
@@ -48,11 +57,12 @@ pub fn read_cursor(state_dir: &Path, channel: &Channel) -> io::Result<CursorStat
 }
 
 
-pub fn write_cursor(state_dir: &Path, channel: &Channel, record_id: u64, time: &str) -> io::Result<()> {
+pub fn write_cursor(state_dir: &Path, channel: &Channel, record_id: u64, time: &str, created: Option<&str>) -> io::Result<()> {
     let path = cursor_path(state_dir, channel);
     let temporary = state_dir.join(format!("{}.tmp", channel.cursor_file));
     let mut file = File::create(&temporary)?;
-    writeln!(file, "{record_id} {time}")?;
+    let suffix = created.map_or_else(String::new, |text| format!(" {text}"));
+    writeln!(file, "{record_id} {time}{suffix}")?;
     file.sync_all()?;
     rename(&temporary, &path)
 }
