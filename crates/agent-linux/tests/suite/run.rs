@@ -184,6 +184,11 @@ async fn a_source_that_fails_at_start_ends_the_agent_at_once() -> TestResult {
         run_linux(&config, u64::MAX, yielding).await,
         Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
     ));
+    let mut left = fs::read_dir(dir.path())?
+        .map(|entry| entry.map(|found| found.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    left.sort();
+    assert_eq!(left, ["agent.yaml", "linux.yaml", "process-cred"]);
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(PRIVATE))?;
     fs::write(dir.path().join("cursor"), "garbage")?;
     assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::Cursor(_))));
@@ -198,6 +203,53 @@ const WORLD_WRITABLE: u32 = 0o777;
 
 
 const PRIVATE: u32 = 0o700;
+
+
+#[tokio::test]
+async fn a_group_writable_audit_directory_ends_the_start_and_creates_nothing() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let config = write_files(dir.path())?;
+    let audit_dir = dir.path().join("audit");
+    fs::create_dir(&audit_dir)?;
+    fs::set_permissions(&audit_dir, fs::Permissions::from_mode(WORLD_WRITABLE))?;
+    let text = fs::read_to_string(&config)?.replace(
+        &format!("{}/linux-audit", dir.path().display()),
+        &format!("{}/audit/linux-audit", dir.path().display()),
+    );
+    fs::write(&config, text)?;
+    assert!(matches!(
+        run_linux(&config, 1, &|_| Box::pin(async {})).await,
+        Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
+    ));
+    assert_eq!(fs::read_dir(&audit_dir)?.count(), 0);
+    assert!(!dir.path().join("spool").exists());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_group_writable_spool_directory_ends_the_start_before_any_spool_file_exists() -> TestResult {
+    let _log = scoped_logging();
+    let dir = tempdir()?;
+    let config = write_files(dir.path())?;
+    let spool_dir = dir.path().join("spool-dir");
+    fs::create_dir(&spool_dir)?;
+    fs::set_permissions(&spool_dir, fs::Permissions::from_mode(WORLD_WRITABLE))?;
+    let agent = dir.path().join("agent.yaml");
+    let text = fs::read_to_string(&agent)?.replace(
+        &format!("{}/spool\n", dir.path().display()),
+        &format!("{}/spool-dir/spool\n", dir.path().display()),
+    );
+    fs::write(&agent, text)?;
+    assert!(matches!(
+        run_linux(&config, 1, &|_| Box::pin(async {})).await,
+        Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
+    ));
+    assert_eq!(fs::read_dir(&spool_dir)?.count(), 0);
+    assert!(!dir.path().join("linux-audit").exists());
+    Ok(())
+}
 
 
 #[tokio::test]

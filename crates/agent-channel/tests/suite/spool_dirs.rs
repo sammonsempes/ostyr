@@ -2,7 +2,7 @@ use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::agent_app::AgentFile;
 use agent_channel::error::{AppError, SpoolDirReason};
-use agent_channel::spool_dirs::{open_fault, open_spool_dirs, parent_directory, spool_dir_fault, SpoolDirs};
+use agent_channel::spool_dirs::{held_directories, open_fault, open_parent, open_spool_dirs, parent_directory, spool_dir_fault, SpoolDirs};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -130,7 +130,7 @@ fn a_bare_name_has_the_current_directory_and_a_root_path_has_none() -> TestResul
 fn one_private_directory_is_opened_once_for_all_five_files() -> TestResult {
     let dir = tempdir()?;
     let dirs = open_spool_dirs(&agent_file(dir.path()))?;
-    assert_eq!(dirs.handles.len(), 1);
+    assert_eq!(held_directories(&dirs), 1);
     Ok(())
 }
 
@@ -144,7 +144,7 @@ fn distinct_private_directories_are_each_held() -> TestResult {
         sequence_file: other.join("sequence"),
         ..agent_file(dir.path())
     };
-    assert_eq!(open_spool_dirs(&file)?.handles.len(), TWO_DIRECTORIES);
+    assert_eq!(held_directories(&open_spool_dirs(&file)?), TWO_DIRECTORIES);
     Ok(())
 }
 
@@ -153,7 +153,7 @@ fn distinct_private_directories_are_each_held() -> TestResult {
 fn a_root_owned_closed_directory_is_accepted() -> TestResult {
     let dir = tempdir()?;
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(READABLE))?;
-    assert_eq!(open_spool_dirs(&agent_file(dir.path()))?.handles.len(), 1);
+    assert_eq!(held_directories(&open_spool_dirs(&agent_file(dir.path()))?), 1);
     Ok(())
 }
 
@@ -255,4 +255,40 @@ fn every_file_of_the_agent_has_its_directory_judged() -> TestResult {
         assert!(found.is_some_and(|item| item.0.starts_with(&open)));
         Ok(())
     })
+}
+
+
+#[test]
+fn the_parent_of_one_path_is_judged_like_the_spool_directories() -> TestResult {
+    let dir = tempdir()?;
+    open_parent(&dir.path().join("audit"))?;
+    let open = dir.path().join("open");
+    fs::create_dir(&open)?;
+    fs::set_permissions(&open, fs::Permissions::from_mode(GROUP_WRITABLE))?;
+    let refused = open_parent(&open.join("audit")).err();
+    assert!(matches!(
+        refused,
+        Some(AppError::SpoolDir {
+            reason: SpoolDirReason::Writable,
+            ..
+        })
+    ));
+    let link = dir.path().join("link");
+    symlink(dir.path(), &link)?;
+    let linked = open_parent(&link.join("audit")).err();
+    assert!(matches!(
+        linked,
+        Some(AppError::SpoolDir {
+            reason: SpoolDirReason::NotDirectory,
+            ..
+        })
+    ));
+    assert!(matches!(
+        open_parent(Path::new("/")).err(),
+        Some(AppError::SpoolDir {
+            reason: SpoolDirReason::NotDirectory,
+            ..
+        })
+    ));
+    Ok(())
 }
