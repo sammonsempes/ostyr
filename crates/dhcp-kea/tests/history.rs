@@ -768,7 +768,7 @@ fn the_statements_bind_the_tenant_and_the_migrations_are_valid() -> TestResult {
     let migration = MIGRATIONS.get(1).ok_or("second migration")?.sql;
     let eviction = MIGRATIONS.get(PAIR).ok_or("third migration")?.sql;
     let lock_64 = MIGRATIONS.get(PAIR + 1).ok_or("fourth migration")?;
-    assert_eq!(MIGRATIONS.len(), PAIR + PAIR);
+    assert_eq!(MIGRATIONS.len(), PAIR + PAIR + 1);
     assert_eq!(lock_64.version, "004_dhcp_history_lock_64");
     assert!(lock_64
         .sql
