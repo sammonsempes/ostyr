@@ -1,11 +1,12 @@
 use crate::api::{
     encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_oncall_text, valid_pack_id, valid_state_asset, valid_state_id,
-    CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL,
+    valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS,
+    STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
     CertView, CommentView, FindingView, FindingsView, Language, OncallAlertView, OncallListView, RiskDetailView, RiskEntityView, RiskListView,
-    RiskTruncatedView, StateAssetView, StateListView, StateView,
+    RiskTruncatedView, StateAssetView, StateListView, StateView, VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
@@ -189,6 +190,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/certificates", text(language, "nav_certs")))
                         (go("/hunts", text(language, "nav_hunts")))
                         (go("/compliance", text(language, "nav_compliance")))
+                        (go("/vulnerabilities", text(language, "nav_vulns")))
                         (go("/oncall", text(language, "nav_oncall")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
@@ -1319,6 +1321,147 @@ pub fn compliance_asset_page(language: Language, csrf: &str, asset: &str, detail
                 }
             }
             (go("/compliance", text(language, "compliance_back")))
+        },
+    )
+}
+
+
+pub const VULN_LIST_COLUMNS: u32 = 12;
+
+
+pub const VULN_ASSET_COLUMNS: u32 = 11;
+
+
+/// Both scores and both times as text, `None` unless every text is inside the store's grammar and both scores inside their ranges.
+pub fn readable_vuln(view: &VulnView) -> Option<(String, String, String, String)> {
+    let texts_fit = [&view.asset, &view.ecosystem, &view.package, &view.record_id, &view.installed_version]
+        .iter()
+        .all(|value| valid_vuln_field(value))
+        && view.fixed_version.as_deref().is_none_or(valid_vuln_field);
+    let cvss = vuln_score(&view.cvss, VULN_CVSS_MAX).map(|score| format!("{score:.1}"));
+    let epss = vuln_score(&view.epss, VULN_EPSS_MAX).map(|score| format!("{score:.3}"));
+    texts_fit
+        .then_some(cvss)
+        .flatten()
+        .zip(epss)
+        .zip(window_time(&view.first_seen))
+        .zip(window_time(&view.last_seen))
+        .map(|(((cvss_text, epss_text), first), last)| (cvss_text, epss_text, first, last))
+}
+
+
+/// One row; `only_asset` is the asset of a detail page, where a row of another asset is refused alone.
+pub fn vuln_row(language: Language, view: &VulnView, only_asset: Option<&str>) -> Markup {
+    let shown = readable_vuln(view).filter(|_| only_asset.is_none_or(|asset| asset == view.asset));
+    match shown {
+        Some((cvss, epss, first_seen, last_seen)) => html! {
+            tr {
+                @if only_asset.is_none() {
+                    td { (go(&format!("/vulnerabilities/{}", encode_asset_id(&view.asset)), &view.asset)) }
+                }
+                td { (view.ecosystem) }
+                td { (view.package) }
+                td { (view.record_id) }
+                td { (view.installed_version) }
+                td { (view.fixed_version.as_deref().unwrap_or(NO_TIME)) }
+                td { (cvss) }
+                td { (epss) }
+                td {
+                    @if view.kev {
+                        strong class="badge" { (text(language, "vulns_kev")) }
+                    }
+                }
+                td { (view.priority) }
+                td { (first_seen) }
+                td { (last_seen) }
+            }
+        },
+        None => html! {
+            tr { td colspan=(if only_asset.is_none() { VULN_LIST_COLUMNS } else { VULN_ASSET_COLUMNS }) { (text(language, "vulns_unreadable")) } }
+        },
+    }
+}
+
+
+pub fn vuln_head(language: Language, with_asset: bool) -> Markup {
+    html! {
+        thead {
+            tr {
+                @if with_asset {
+                    th { (text(language, "col_asset")) }
+                }
+                th { (text(language, "col_ecosystem")) }
+                th { (text(language, "col_package")) }
+                th { (text(language, "col_record")) }
+                th { (text(language, "col_installed")) }
+                th { (text(language, "col_fixed")) }
+                th { (text(language, "col_cvss")) }
+                th { (text(language, "col_epss")) }
+                th { (text(language, "vulns_kev")) }
+                th { (text(language, "col_priority")) }
+                th { (text(language, "col_first_seen")) }
+                th { (text(language, "col_last_seen")) }
+            }
+        }
+    }
+}
+
+
+pub fn vulns_page(language: Language, csrf: &str, list: &VulnListView) -> Markup {
+    layout(
+        language,
+        "title_vulns",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_vulns")) }
+            @if list.skipped > 0 {
+                div class="notice" { (counted_notice(language, "vulns_skipped_one", "vulns_skipped", list.skipped)) }
+            }
+            @if list.items.is_empty() {
+                div { (text(language, if list.skipped > 0 { "vulns_no_readable" } else { "vulns_empty" })) }
+            } @else {
+                table {
+                    (vuln_head(language, true))
+                    tbody {
+                        @for view in &list.items { (vuln_row(language, view, None)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &list.next_cursor {
+                form method="get" action="/vulnerabilities" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    button type="submit" { (text(language, "vulns_next")) }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn vuln_asset_page(language: Language, csrf: &str, asset: &str, detail: &VulnAssetView) -> Markup {
+    layout(
+        language,
+        "title_vuln_asset",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_vuln_asset")) " " (asset) }
+            @if detail.skipped > 0 {
+                div class="notice" { (counted_notice(language, "vulns_skipped_one", "vulns_skipped", detail.skipped)) }
+            }
+            @if detail.truncated {
+                div class="notice" { (text(language, "vulns_truncated")) }
+            }
+            @if detail.items.is_empty() {
+                div { (text(language, if detail.skipped > 0 { "vulns_no_readable" } else { "vulns_empty" })) }
+            } @else {
+                table {
+                    (vuln_head(language, false))
+                    tbody {
+                        @for view in &detail.items { (vuln_row(language, view, Some(asset))) }
+                    }
+                }
+            }
+            (go("/vulnerabilities", text(language, "vulns_back")))
         },
     )
 }

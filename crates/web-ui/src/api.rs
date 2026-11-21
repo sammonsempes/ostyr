@@ -1,7 +1,7 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView,
-    FindingsView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, StateAssetView, StateListView,
+    FindingsView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
@@ -935,6 +935,116 @@ pub async fn get_state_asset(client: &ApiClient, source: IpAddr, token: &SecretS
         let path = format!("compliance/assets/{}", encode_asset_id(asset));
         let bytes = call(client, source, Method::GET, &path, Some(token), None).await?;
         scan_state_items(&bytes, MAX_STATE_ASSET_ITEMS)?;
+        serde_json::from_slice(&bytes).map_err(ApiFailure::from)
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// The limit sent to the vulnerability findings list, under its `MAX_PAGE_LIMIT` of 500.
+pub const VULN_LIMIT: u32 = 100;
+
+
+/// The vulnerability API's `MAX_ASSET_FINDINGS`: the most items one asset detail may hold.
+pub const MAX_VULN_ASSET_ITEMS: usize = 1000;
+
+
+/// The vulnerability API's `MAX_FIELD_BYTES`.
+pub const MAX_VULN_FIELD_BYTES: usize = 128;
+
+
+/// The vulnerability API's `CURSOR_FIELDS`: a priority and four fields.
+pub const VULN_CURSOR_FIELDS: usize = 5;
+
+
+/// The vulnerability API's `MAX_PRIORITY_DIGITS`.
+pub const MAX_VULN_PRIORITY_DIGITS: usize = 10;
+
+
+/// The vulnerability API's `MAX_CURSOR_BYTES`.
+pub const MAX_VULN_CURSOR_BYTES: usize = MAX_VULN_PRIORITY_DIGITS + (VULN_CURSOR_FIELDS - 1) * (MAX_VULN_FIELD_BYTES + 1);
+
+
+pub const VULN_CURSOR_SEPARATOR: char = ' ';
+
+
+pub const VULN_SCORE_MIN: f64 = 0.0;
+
+
+pub const VULN_CVSS_MAX: f64 = 10.0;
+
+
+pub const VULN_EPSS_MAX: f64 = 1.0;
+
+
+/// The vulnerability store's `is_field` (copy): printable ASCII without space or a leading `-`, 1 to 128 bytes.
+pub fn valid_vuln_field(text: &str) -> bool {
+    (1..=MAX_VULN_FIELD_BYTES).contains(&text.len()) && !text.starts_with('-') && text.chars().all(|found| found.is_ascii_graphic())
+}
+
+
+/// An asset segment: the store's field grammar and never `.` or `..`, which the URL parser would read as dot segments.
+pub fn valid_vuln_asset(text: &str) -> bool {
+    valid_vuln_field(text) && !matches!(text, "." | "..")
+}
+
+
+/// The vulnerability store's cursor grammar (copy): a canonical `u32` priority and four fields, space separated.
+pub fn valid_vuln_cursor(cursor: &str) -> bool {
+    let parts: Vec<&str> = cursor.split(VULN_CURSOR_SEPARATOR).collect();
+    let priority_fits = parts
+        .first()
+        .is_some_and(|digits| digits.parse::<u32>().is_ok_and(|parsed| parsed.to_string() == *digits));
+    cursor.len() <= MAX_VULN_CURSOR_BYTES
+        && parts.len() == VULN_CURSOR_FIELDS
+        && priority_fits
+        && parts.iter().skip(1).all(|part| valid_vuln_field(part))
+}
+
+
+/// A raw JSON score as a number inside `VULN_SCORE_MIN..=max`, `None` for a string, a null, an infinity or anything out of range.
+pub fn vuln_score(raw: &RawValue, max: f64) -> Option<f64> {
+    raw.get()
+        .parse::<f64>()
+        .ok()
+        .filter(|score| score.is_finite() && (VULN_SCORE_MIN..=max).contains(score))
+}
+
+
+pub fn vulns_path(cursor: Option<&str>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("limit", &VULN_LIMIT.to_string());
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    format!("vulnerabilities/findings?{}", query.finish())
+}
+
+
+pub fn check_vuln_list(list: &VulnListView) -> Result<(), ApiFailure> {
+    if list.next_cursor.as_deref().is_some_and(|cursor| !valid_vuln_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub async fn list_vulns(client: &ApiClient, source: IpAddr, token: &SecretString, cursor: Option<&str>) -> Result<VulnListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &vulns_path(cursor), Some(token), None).await?;
+    scan_state_items(&bytes, VULN_LIMIT as usize)?;
+    let list: VulnListView = serde_json::from_slice(&bytes)?;
+    check_vuln_list(&list).map(|()| list)
+}
+
+
+/// An asset outside the store's grammar is a missing asset without any call.
+pub async fn get_vuln_asset(client: &ApiClient, source: IpAddr, token: &SecretString, asset: &str) -> Result<VulnAssetView, ApiFailure> {
+    if valid_vuln_asset(asset) {
+        let path = format!("vulnerabilities/assets/{}", encode_asset_id(asset));
+        let bytes = call(client, source, Method::GET, &path, Some(token), None).await?;
+        scan_state_items(&bytes, MAX_VULN_ASSET_ITEMS)?;
         serde_json::from_slice(&bytes).map_err(ApiFailure::from)
     } else {
         Err(ApiFailure::NotFound)
