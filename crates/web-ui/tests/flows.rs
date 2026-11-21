@@ -1773,6 +1773,7 @@ async fn each_failure_has_a_fixed_class_name() -> TestResult {
         (unavailable, "unavailable"),
         (ApiFailure::Conflict("full"), "conflict"),
         (ApiFailure::Status(UPSTREAM_STATUS), "status"),
+        (ApiFailure::Unreadable, "unreadable"),
         (ApiFailure::TooLarge, "too_large"),
         (ApiFailure::Malformed("x"), "malformed"),
         (ApiFailure::from(json), "json"),
@@ -3093,6 +3094,12 @@ async fn oncall_api_failures_render_our_own_text() -> TestResult {
         set_mode(&rig, mode)?;
         assert_eq!(fire(&rig, get_with("/oncall", &session)).await?.status, StatusCode::BAD_GATEWAY);
     }
+    set_mode(&rig, Mode::Status(StatusCode::UNPROCESSABLE_ENTITY))?;
+    let unreadable = fire(&rig, get_with("/oncall/7", &session)).await?;
+    assert_eq!(unreadable.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(unreadable.body.contains("Unreadable row.") && !unreadable.body.contains(LEAK));
+    assert_hardened(&unreadable);
+    assert_eq!(fire(&rig, get_with("/oncall", &session)).await?.status, StatusCode::BAD_GATEWAY);
     set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
     let ended = fire(&rig, get_with("/oncall", &session)).await?;
     assert_eq!(location_of(&ended).as_deref(), Some("/login"));

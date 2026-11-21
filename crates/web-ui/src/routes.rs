@@ -200,6 +200,7 @@ pub fn failure_class(failure: &ApiFailure) -> &'static str {
         ApiFailure::Unavailable(_) => "unavailable",
         ApiFailure::Handshake(_) => "handshake",
         ApiFailure::Conflict(_) => "conflict",
+        ApiFailure::Unreadable => "unreadable",
         ApiFailure::Status(_) => "status",
         ApiFailure::TooLarge => "too_large",
         ApiFailure::Malformed(_) => "malformed",
@@ -218,6 +219,7 @@ pub fn api_refusal(language: Language, csrf: Option<&str>, failure: &ApiFailure)
         ApiFailure::Throttled => refusal(language, csrf, StatusCode::TOO_MANY_REQUESTS, "error_throttled"),
         ApiFailure::BadRequest => refusal(language, csrf, StatusCode::BAD_REQUEST, "error_bad_request"),
         ApiFailure::Conflict(key) => refusal(language, csrf, StatusCode::CONFLICT, key),
+        ApiFailure::Unreadable => refusal(language, csrf, StatusCode::UNPROCESSABLE_ENTITY, "oncall_unreadable"),
         ApiFailure::Unavailable(_)
         | ApiFailure::Handshake(_)
         | ApiFailure::Status(_)

@@ -64,6 +64,8 @@ pub enum Mode {
     Answer,
     Busy,
     Fail,
+    Down,
+    BadCell,
 }
 
 
@@ -123,6 +125,8 @@ pub fn failure(mode: Mode) -> Option<ReadError> {
         Mode::Answer => None,
         Mode::Busy => Some(ReadError::Lease(alerts::error::StoreError::Busy)),
         Mode::Fail => Some(ReadError::Unrepresentable),
+        Mode::Down => Some(ReadError::Store(oncall::error::StoreError::NotFound)),
+        Mode::BadCell => Some(ReadError::Store(oncall::error::StoreError::BadRow { column: "opened_at" })),
     }
 }
 

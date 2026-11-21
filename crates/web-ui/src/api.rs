@@ -970,11 +970,22 @@ pub async fn list_oncall(client: &ApiClient, source: IpAddr, token: &SecretStrin
 }
 
 
+/// The on-call API answers 422 only for a stored alert it cannot show.
+pub fn unreadable_status(failure: ApiFailure) -> ApiFailure {
+    match failure {
+        ApiFailure::Status(code) if code == StatusCode::UNPROCESSABLE_ENTITY.as_u16() => ApiFailure::Unreadable,
+        other => other,
+    }
+}
+
+
 /// An id outside `i64` digits is a missing alert without any call; the answer must carry the id asked for.
 pub async fn get_oncall_alert(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<OncallAlertView, ApiFailure> {
     match parse_oncall_id(id) {
         Some(number) => {
-            let bytes = call(client, source, Method::GET, &format!("oncall/alerts/{number}"), Some(token), None).await?;
+            let bytes = call(client, source, Method::GET, &format!("oncall/alerts/{number}"), Some(token), None)
+                .await
+                .map_err(unreadable_status)?;
             let alert: OncallAlertView = serde_json::from_slice(&bytes)?;
             if alert.id == number {
                 Ok(alert)
