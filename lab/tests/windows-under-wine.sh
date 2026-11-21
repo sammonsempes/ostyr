@@ -37,7 +37,17 @@ readonly SKIPS=(
     "sys-windows|an_ancestor_the_user_controls_is_refused_by_name_before_the_spool_directory|C:\\ is user-owned and icacls is missing"
 )
 
+readonly CLIPPY_CRATES=(sys-windows agent-windows agent-channel)
 failed_total=0
+clippy_args=()
+for crate in "${CLIPPY_CRATES[@]}"; do clippy_args+=(-p "$crate"); done
+clippy_log="$LOG_DIR/clippy.log"
+if cargo clippy --all-targets --target "$TARGET" "${clippy_args[@]}" -- -D warnings >"$clippy_log" 2>&1; then
+    echo "clippy ($TARGET, ${CLIPPY_CRATES[*]}): passed"
+else
+    echo "clippy ($TARGET, ${CLIPPY_CRATES[*]}): failed ($(grep -m1 -A1 -E '^(error|warning)' "$clippy_log" | tr '\n' ' '), see $clippy_log)"
+    failed_total=$((failed_total + 1))
+fi
 for crate in "${crates[@]}"; do
     log="$LOG_DIR/$crate.log"
     skip_args=()

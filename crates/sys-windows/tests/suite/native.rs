@@ -1,7 +1,7 @@
 use crate::types::TestResult;
 use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use sys_windows::judge::principals_from_token_user;
 use sys_windows::native::{file_identity, judge_directory_handle, judge_spool_entries, judge_spool_path, read_descriptor, token_user_sid};
 use sys_windows::types::DirAclError;
@@ -127,7 +127,7 @@ fn an_ancestor_the_user_controls_is_refused_by_name_before_the_spool_directory()
     };
     let named = refused.ok_or("the verdict is not an untrusted ancestor")?;
     assert!(!is_volume_root(&named), "{verdict:?}");
-    assert!(named != PathBuf::from(PROGRAM_DATA), "{verdict:?}");
+    assert!(named != Path::new(PROGRAM_DATA), "{verdict:?}");
     assert_ne!(named, file, "{verdict:?}");
     Ok(())
 }
