@@ -11,11 +11,13 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "cargo $*" >>"$STUB_LOG"
 if [ "${1:-}" = metadata ]; then cat "$STUB_METADATA"; fi
 S
 cat >"$SCRATCH/bin/tool" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "tool $*" >>"$STUB_LOG"
 S
 chmod +x "$SCRATCH/bin/cargo" "$SCRATCH/bin/tool"
@@ -109,7 +111,7 @@ check "dependent only" "scope 1 packages: user" "" crates/user/src/lib.rs
 check "root manifest" "scope full workspace (Cargo.toml changes the whole workspace)" "" Cargo.toml
 expect_no_log "root manifest" ' -p '
 expect_log "root doc tests" '^cargo test --doc --offline$'
-expect_log "root gate" '^tool .*cov.json [^ ]*$'
+expect_log "root gate" '^tool .*cov.json [^ ]* --deps-dir=[^ ]*$'
 check "member manifest" "scope full workspace (crates/leaf/Cargo.toml changes the whole workspace)" "" crates/leaf/Cargo.toml
 mkdir -p crates/leaf/tests
 echo '{}' >crates/leaf/tests/snap.json
