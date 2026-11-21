@@ -110,3 +110,6 @@ pub type LoadFn = fn(&File, &Path, u64, usize) -> io::Result<(Vec<String>, bool)
 
 /// The function that opens the old quarantine and the lock attempts of one rewrite.
 pub type RewriteHooks = (fn(&Path) -> io::Result<Option<File>>, u32);
+
+
+pub type AclJudge = fn(&File, &Path) -> Result<(), sys_windows::types::DirAclError>;

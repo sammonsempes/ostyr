@@ -20,7 +20,7 @@ use agent_channel::spool::{
     rewrite_lines_between, suffixed, write_sequence, SequenceState, ASIDE_SUFFIX, MAX_REJECTED_BYTES, MAX_SPOOL_BATCHES, REJECTED_SUFFIX,
     RETURN_CHUNK_BYTES, SENDING_SUFFIX,
 };
-use agent_channel::spool_dirs::{open_spool_dirs, SpoolDirs};
+use agent_channel::spool_dirs::{open_spool_dirs_with, SpoolDirs};
 use agent_channel::tls::client_config;
 use agent_channel::types::{DialFuture, PauseFuture};
 use agent_command::keys::open_keys_engine;
@@ -350,8 +350,13 @@ fn command(sequence: u64) -> Command {
 }
 
 
+fn accept_any_acl(_directory: &std::fs::File, _shown: &Path) -> Result<(), sys_windows::types::DirAclError> {
+    Ok(())
+}
+
+
 async fn run_once(agent: &AgentFile) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
-    let dirs = open_spool_dirs(agent)?;
+    let dirs = open_spool_dirs_with(agent, accept_any_acl)?;
     run_with(agent, &dirs).await
 }
 
@@ -467,7 +472,7 @@ async fn the_agent_refuses_bad_files_and_addresses() -> TestResult {
     let seq_dir = dir.path().join("seq-dir");
     fs::create_dir(&seq_dir)?;
     fs::write(&agent.spool_file, "")?;
-    let good_dirs = open_spool_dirs(&agent)?;
+    let good_dirs = open_spool_dirs_with(&agent, accept_any_acl)?;
     let broken = [
         AgentFile {
             certificate: gone.clone(),
