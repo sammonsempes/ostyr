@@ -108,6 +108,7 @@ fn lease_view(interval: &LeaseInterval) -> Option<LeaseView> {
         address: interval.address.clone(),
         mac: interval.mac.clone(),
         hostname: interval.hostname.clone(),
+        hostname_refused: interval.hostname_refused,
         starts: time_text(interval.starts)?,
         ends: time_text(interval.ends)?,
         action: interval.action.clone(),

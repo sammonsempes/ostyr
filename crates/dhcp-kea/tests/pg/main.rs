@@ -73,6 +73,7 @@ pub fn lease_row(mac: &str, hostname: &str) -> Vec<String> {
         ADDRESS_NOT_EIGHT_BYTES,
         mac,
         hostname,
+        "false",
         &(NOW - DAY).to_string(),
         &(NOW + DAY).to_string(),
         "lease-assigned",
