@@ -62,6 +62,7 @@ pub enum Mode {
     Status(StatusCode),
     UnreadableAlert,
     Oversize422,
+    StoredValue,
 }
 
 
@@ -91,6 +92,7 @@ pub struct StubState {
     pub state_paths: Mutex<Vec<String>>,
     pub vuln_paths: Mutex<Vec<String>>,
     pub dhcp_paths: Mutex<Vec<String>>,
+    pub shell_paths: Mutex<Vec<String>>,
     pub oncall_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
@@ -250,6 +252,7 @@ pub async fn alerts_handler(
         match mode_of(&state) {
             Mode::Status(status) => error_reply(status),
             Mode::UnreadableAlert | Mode::Oversize422 => error_reply(StatusCode::UNPROCESSABLE_ENTITY),
+            Mode::StoredValue => stored_value_reply(),
             Mode::Hostile => Json(page(vec![hostile_alert(&id_of('a'))], None)).into_response(),
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
             Mode::Chunked => stream_body().into_response(),
@@ -1468,6 +1471,192 @@ pub async fn oncall_alert_handler(State(state): State<Arc<StubState>>, headers: 
 }
 
 
+pub const SHELL_NEXT_CURSOR: &str = "1772000000.s-2";
+
+
+pub const SHELL_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+
+pub const SHELL_OPENED: &str = "2026-03-01T10:00:00+01:00";
+
+
+pub const SHELL_CLOSED: &str = "2026-03-01T11:00:00Z";
+
+
+pub const SHELL_FRAMES: i64 = 12;
+
+
+pub const SHELL_BYTES: i64 = 4096;
+
+
+pub struct ShellFields<'a> {
+    pub id: &'a str,
+    pub requester: &'a str,
+    pub asset: &'a str,
+    pub ticket: &'a str,
+    pub opened: &'a str,
+    pub closed: Option<&'a str>,
+    pub reason: Option<&'a str>,
+    pub frames: Option<i64>,
+    pub hash: Option<&'a str>,
+    pub bytes: Option<i64>,
+}
+
+
+pub fn shell_closed(id: &str) -> ShellFields<'_> {
+    ShellFields {
+        id,
+        requester: "auth0|a+b/c=d",
+        asset: "host/1",
+        ticket: "T-1",
+        opened: SHELL_OPENED,
+        closed: Some(SHELL_CLOSED),
+        reason: Some("user_close"),
+        frames: Some(SHELL_FRAMES),
+        hash: Some(SHELL_HASH),
+        bytes: Some(SHELL_BYTES),
+    }
+}
+
+
+pub fn shell_open(id: &str) -> ShellFields<'_> {
+    ShellFields {
+        closed: None,
+        reason: None,
+        frames: None,
+        hash: None,
+        bytes: None,
+        ..shell_closed(id)
+    }
+}
+
+
+pub fn shell_item(fields: &ShellFields<'_>) -> Value {
+    json!({
+        "session_id": fields.id, "requester": fields.requester, "asset": fields.asset, "ticket": fields.ticket,
+        "opened_at": fields.opened, "closed_at": fields.closed, "close_reason": fields.reason,
+        "recording_frames": fields.frames, "recording_hash": fields.hash, "recording_bytes": fields.bytes
+    })
+}
+
+
+pub fn shell_list(items: Vec<Value>, skipped: u32, next: Option<&str>) -> Value {
+    json!({"items": items, "skipped": skipped, "next_cursor": next})
+}
+
+
+pub const SHELL_HOSTILE_REQUESTER: &str = "evil\u{1b}[31m";
+
+
+pub const SHELL_HOSTILE_TICKET: &str = "T\u{3164}1";
+
+
+pub fn shell_hostile_items() -> Vec<Value> {
+    let good = || shell_closed("s-1");
+    vec![
+        shell_item(&ShellFields {
+            requester: SHELL_HOSTILE_REQUESTER,
+            ..good()
+        }),
+        shell_item(&ShellFields {
+            requester: "x\u{202e}y",
+            ..good()
+        }),
+        shell_item(&ShellFields {
+            ticket: SHELL_HOSTILE_TICKET,
+            ..good()
+        }),
+        shell_item(&ShellFields {
+            asset: "<script>x</script>",
+            ..good()
+        }),
+        shell_item(&ShellFields { id: "-x", ..good() }),
+        shell_item(&ShellFields {
+            opened: "not a time",
+            ..good()
+        }),
+        shell_item(&ShellFields {
+            closed: Some("not a time"),
+            ..good()
+        }),
+        shell_item(&ShellFields {
+            reason: Some("evil"),
+            ..good()
+        }),
+        shell_item(&ShellFields {
+            hash: Some(&SHELL_HASH.to_ascii_uppercase()),
+            ..good()
+        }),
+        shell_item(&ShellFields { hash: Some("abc"), ..good() }),
+        shell_item(&ShellFields { frames: Some(1), ..good() }),
+        shell_item(&ShellFields { bytes: Some(-1), ..good() }),
+        shell_item(&ShellFields { reason: None, ..good() }),
+        shell_item(&ShellFields { closed: None, ..good() }),
+        shell_item(&ShellFields { frames: None, ..good() }),
+        shell_item(&ShellFields { hash: None, ..good() }),
+        shell_item(&ShellFields { bytes: None, ..good() }),
+        shell_item(&shell_open("fine")),
+    ]
+}
+
+
+pub fn stored_value_reply() -> Response {
+    let body = json!({"error": {"code": "stored_value", "message": "a stored value cannot be served"}});
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+}
+
+
+pub async fn shell_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.shell_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::StoredValue => stored_value_reply(),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(shell_list((0..MANY_ITEMS).map(|_| shell_item(&shell_open("s"))).collect(), 0, None)).into_response(),
+            Mode::BadCursor => Json(shell_list(vec![], 0, Some("bad cursor"))).into_response(),
+            Mode::Hostile => Json(shell_list(shell_hostile_items(), 1, None)).into_response(),
+            Mode::Chunked => Json(shell_list(vec![], 0, None)).into_response(),
+            Mode::BadId => Json(shell_list(vec![], 1, Some(SHELL_NEXT_CURSOR))).into_response(),
+            Mode::BadSeverity => Json(shell_list(vec![], STATE_MANY_SKIPPED, None)).into_response(),
+            _ => Json(shell_list(
+                vec![shell_item(&shell_closed("s-1")), shell_item(&shell_open("s-2"))],
+                1,
+                Some(SHELL_NEXT_CURSOR),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn shell_detail_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.shell_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::StoredValue => stored_value_reply(),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::Hostile => Json(shell_item(&ShellFields {
+                requester: SHELL_HOSTILE_REQUESTER,
+                ..shell_closed(&id)
+            }))
+            .into_response(),
+            Mode::BadId => Json(shell_item(&shell_closed("other"))).into_response(),
+            Mode::Chunked => Json(shell_item(&shell_open(&id))).into_response(),
+            _ if id == "elsewhere" => error_reply(StatusCode::NOT_FOUND),
+            _ => Json(shell_item(&shell_closed(&id))).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
     let state = Arc::new(StubState {
         mode: Mutex::new(mode),
@@ -1485,6 +1674,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         state_paths: Mutex::new(Vec::new()),
         vuln_paths: Mutex::new(Vec::new()),
         dhcp_paths: Mutex::new(Vec::new()),
+        shell_paths: Mutex::new(Vec::new()),
         oncall_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
@@ -1509,6 +1699,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/compliance/assets/{asset}", get(state_asset_handler))
         .route("/dhcp/leases/at", get(dhcp_handler))
         .route("/dhcp/leases/mac", get(dhcp_handler))
+        .route("/remote-shell/sessions", get(shell_list_handler))
+        .route("/remote-shell/sessions/{id}", get(shell_detail_handler))
         .route("/vulnerabilities/findings", get(vuln_list_handler))
         .route("/vulnerabilities/assets/{asset}", get(vuln_asset_handler))
         .route("/oncall/alerts", get(oncall_list_handler))

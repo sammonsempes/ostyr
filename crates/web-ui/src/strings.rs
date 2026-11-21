@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 271;
+pub const TEXT_COUNT: usize = 300;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -283,6 +283,35 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("dhcp_action_declined", "Declined"),
     ("dhcp_action_reclaimed", "Expired and reclaimed"),
     ("dhcp_action_other", "Other"),
+    ("nav_shell", "Remote shell"),
+    ("title_shell", "Remote shell sessions"),
+    ("title_shell_session", "Remote shell session"),
+    ("shell_empty", "No session found."),
+    ("shell_no_readable", "No readable session on this page."),
+    ("shell_next", "Next sessions"),
+    ("shell_back", "Back to sessions"),
+    ("shell_unreadable", "Unreadable row."),
+    ("shell_skipped", "{count} rows could not be read."),
+    ("shell_skipped_one", "1 row could not be read."),
+    ("shell_filter", "Filter"),
+    ("shell_open_label", "State"),
+    ("shell_open_any", "All sessions"),
+    ("shell_open_only", "Open sessions"),
+    ("col_requester", "Requester"),
+    ("col_session", "Session"),
+    ("col_ticket", "Ticket"),
+    ("col_closed_at", "Closed"),
+    ("col_close_reason", "Reason"),
+    ("col_frames", "Frames"),
+    ("col_hash", "Recording hash"),
+    ("col_bytes", "Recording bytes"),
+    ("shell_still_open", "Open"),
+    ("shell_reason_idle_timeout", "Idle timeout"),
+    ("shell_reason_max_duration", "Maximum duration"),
+    ("shell_reason_recording_failed", "Recording failed"),
+    ("shell_reason_channel_dead", "Channel lost"),
+    ("shell_reason_user_close", "Closed by the user"),
+    ("shell_reason_clock_skew", "Clock skew"),
 ];
 
 
@@ -567,6 +596,35 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("dhcp_action_declined", "Refusé"),
     ("dhcp_action_reclaimed", "Expiré et récupéré"),
     ("dhcp_action_other", "Autre"),
+    ("nav_shell", "Shell distant"),
+    ("title_shell", "Sessions de shell distant"),
+    ("title_shell_session", "Session de shell distant"),
+    ("shell_empty", "Aucune session trouvée."),
+    ("shell_no_readable", "Aucune session lisible sur cette page."),
+    ("shell_next", "Sessions suivantes"),
+    ("shell_back", "Retour aux sessions"),
+    ("shell_unreadable", "Ligne illisible."),
+    ("shell_skipped", "{count} lignes n'ont pas pu être lues."),
+    ("shell_skipped_one", "1 ligne n'a pas pu être lue."),
+    ("shell_filter", "Filtrer"),
+    ("shell_open_label", "État"),
+    ("shell_open_any", "Toutes les sessions"),
+    ("shell_open_only", "Sessions ouvertes"),
+    ("col_requester", "Demandeur"),
+    ("col_session", "Session"),
+    ("col_ticket", "Ticket"),
+    ("col_closed_at", "Fermée"),
+    ("col_close_reason", "Motif"),
+    ("col_frames", "Trames"),
+    ("col_hash", "Empreinte de l'enregistrement"),
+    ("col_bytes", "Octets enregistrés"),
+    ("shell_still_open", "Ouverte"),
+    ("shell_reason_idle_timeout", "Inactivité"),
+    ("shell_reason_max_duration", "Durée maximale"),
+    ("shell_reason_recording_failed", "Échec de l'enregistrement"),
+    ("shell_reason_channel_dead", "Canal perdu"),
+    ("shell_reason_user_close", "Fermée par l'utilisateur"),
+    ("shell_reason_clock_skew", "Dérive d'horloge"),
 ];
 
 
@@ -717,5 +775,19 @@ pub fn dhcp_action_key(value: &str) -> &'static str {
         "lease-declined" => "dhcp_action_declined",
         "lease-expired-reclaimed" => "dhcp_action_reclaimed",
         _ => "dhcp_action_other",
+    }
+}
+
+
+/// The text key of one of the six close reasons the register stores, `None` for anything else.
+pub fn shell_reason_key(value: &str) -> Option<&'static str> {
+    match value {
+        "idle_timeout" => Some("shell_reason_idle_timeout"),
+        "max_duration" => Some("shell_reason_max_duration"),
+        "recording_failed" => Some("shell_reason_recording_failed"),
+        "channel_dead" => Some("shell_reason_channel_dead"),
+        "user_close" => Some("shell_reason_user_close"),
+        "clock_skew" => Some("shell_reason_clock_skew"),
+        _ => None,
     }
 }

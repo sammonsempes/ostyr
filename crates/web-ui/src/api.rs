@@ -1,8 +1,8 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery,
-    FindingsView, LookupView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, StateAssetView, StateListView, VulnAssetView,
-    VulnListView,
+    FindingsView, LookupView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, ShellListView, ShellQuery, ShellSessionView,
+    StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
@@ -12,7 +12,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::value::RawValue;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -1242,4 +1242,173 @@ pub async fn get_dhcp(client: &ApiClient, source: IpAddr, token: &SecretString, 
     let bytes = call(client, source, Method::GET, &dhcp_path(query), Some(token), None).await?;
     scan_dhcp_intervals(&bytes)?;
     serde_json::from_slice(&bytes).map_err(ApiFailure::from)
+}
+
+
+/// The address a form-less `GET /dhcp` looks up: one cheap read whose only use is the API's own permission answer.
+pub const DHCP_PROBE: DhcpQuery = DhcpQuery::At {
+    address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    at: 0,
+};
+
+
+/// The permission probe of the form-less DHCP page: the lookup is refused with 403 for a session without `cmdb.read`; its answer is dropped.
+pub async fn probe_dhcp(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<(), ApiFailure> {
+    get_dhcp(client, source, token, &DHCP_PROBE).await.map(|_lookup| ())
+}
+
+
+/// The limit sent to the register list, under the API's `MAX_PAGE` of 200: also the most items one answer may hold.
+pub const SHELL_LIMIT: u32 = 100;
+
+
+/// The remote-shell grammars' `MAX_SUBJECT_BYTES`.
+pub const MAX_SHELL_SUBJECT_BYTES: usize = 255;
+
+
+/// The remote-shell grammars' `MAX_REFERENCE_BYTES`.
+pub const MAX_SHELL_REFERENCE_BYTES: usize = 128;
+
+
+/// The remote-shell grammars' `SUBJECT_PUNCTUATION`.
+pub const SHELL_SUBJECT_PUNCTUATION: &str = "-_.@:+/=|";
+
+
+/// The remote-shell grammars' `REFERENCE_PUNCTUATION`.
+pub const SHELL_REFERENCE_PUNCTUATION: &str = "_.:/-";
+
+
+/// The remote-shell serving module's `MAX_I64_CHARS`.
+pub const MAX_SHELL_I64_CHARS: usize = 20;
+
+
+/// The remote-shell serving module's `MAX_CURSOR_BYTES`.
+pub const MAX_SHELL_CURSOR_BYTES: usize = MAX_SHELL_I64_CHARS + 1 + MAX_SHELL_REFERENCE_BYTES;
+
+
+/// The remote-shell serving module's `CURSOR_SEPARATOR`.
+pub const SHELL_CURSOR_SEPARATOR: char = '.';
+
+
+/// A recording holds at least a header and a trailer (the register's `recording_frames >= 2`).
+pub const MIN_SHELL_FRAMES: i64 = 2;
+
+
+/// A SHA-256 as lowercase hex.
+pub const SHELL_HASH_CHARS: usize = 64;
+
+
+/// The API's `OPEN_TRUE`: open sessions only.
+pub const SHELL_OPEN_ONLY: &str = "true";
+
+
+/// The API's `OPEN_FALSE`: every session.
+pub const SHELL_OPEN_EVERY: &str = "false";
+
+
+/// The only two words `open` takes.
+pub const SHELL_OPEN_WORDS: [&str; 2] = [SHELL_OPEN_ONLY, SHELL_OPEN_EVERY];
+
+
+/// An empty text is no filter; any other text must be one of the two words, returned as the fixed one.
+pub fn shell_open_filter(text: &str) -> Option<Option<&'static str>> {
+    match text {
+        "" => Some(None),
+        other => SHELL_OPEN_WORDS.iter().find(|word| **word == other).map(|word| Some(*word)),
+    }
+}
+
+
+/// The register's `valid_subject` (copy): 1 to 255 bytes of ASCII letters, digits and `-_.@:+/=|`.
+pub fn valid_shell_subject(subject: &str) -> bool {
+    (1..=MAX_SHELL_SUBJECT_BYTES).contains(&subject.len())
+        && subject
+            .chars()
+            .all(|found| found.is_ascii_alphanumeric() || SHELL_SUBJECT_PUNCTUATION.contains(found))
+}
+
+
+/// A requester typed into the filter: the register's grammar and never a leading `-` (stricter than the API, which admits one, like `valid_vuln_asset`).
+pub fn valid_shell_filter_requester(subject: &str) -> bool {
+    valid_shell_subject(subject) && !subject.starts_with('-')
+}
+
+
+/// The register's `valid_reference` (copy): `[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}`.
+pub fn valid_shell_reference(reference: &str) -> bool {
+    let mut characters = reference.chars();
+    (1..=MAX_SHELL_REFERENCE_BYTES).contains(&reference.len())
+        && characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && characters.all(|found| found.is_ascii_alphanumeric() || SHELL_REFERENCE_PUNCTUATION.contains(found))
+}
+
+
+/// The register's `parse_cursor` (copy): the length cap, then `<opened_at>.<session id>` with a canonical `i64` and a reference.
+pub fn valid_shell_cursor(cursor: &str) -> bool {
+    let parts = Some(cursor)
+        .filter(|text| text.len() <= MAX_SHELL_CURSOR_BYTES)
+        .and_then(|text| text.split_once(SHELL_CURSOR_SEPARATOR));
+    parts.is_some_and(|(opened_at, session_id)| {
+        opened_at.parse::<i64>().is_ok_and(|parsed| parsed.to_string() == opened_at) && valid_shell_reference(session_id)
+    })
+}
+
+
+/// A recording hash as the API writes it: 64 lowercase hex digits.
+pub fn valid_shell_hash(hash: &str) -> bool {
+    hash.len() == SHELL_HASH_CHARS && hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+
+/// The API path and query of a checked list request; the form encoder percent-encodes `+ | / =` in the requester and the cursor.
+pub fn shell_list_path(query: &ShellQuery) -> String {
+    let mut pairs = Serializer::new(String::new());
+    pairs.append_pair("limit", &SHELL_LIMIT.to_string());
+    query.asset.iter().for_each(|value| {
+        pairs.append_pair("asset", value);
+    });
+    query.requester.iter().for_each(|value| {
+        pairs.append_pair("requester", value);
+    });
+    query.open.iter().for_each(|value| {
+        pairs.append_pair("open", value);
+    });
+    query.cursor.iter().for_each(|value| {
+        pairs.append_pair("cursor", value);
+    });
+    format!("remote-shell/sessions?{}", pairs.finish())
+}
+
+
+pub fn check_shell_list(list: &ShellListView) -> Result<(), ApiFailure> {
+    if list.next_cursor.as_deref().is_some_and(|cursor| !valid_shell_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub async fn list_shell_sessions(client: &ApiClient, source: IpAddr, token: &SecretString, query: &ShellQuery) -> Result<ShellListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &shell_list_path(query), Some(token), None).await?;
+    scan_state_items(&bytes, SHELL_LIMIT as usize)?;
+    let list: ShellListView = serde_json::from_slice(&bytes)?;
+    check_shell_list(&list).map(|()| list)
+}
+
+
+/// An id outside the register's reference grammar is a missing session without any call; the answer must carry the id asked for.
+pub async fn get_shell_session(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<ShellSessionView, ApiFailure> {
+    if valid_shell_reference(id) {
+        let path = format!("remote-shell/sessions/{}", encode_asset_id(id));
+        let bytes = call(client, source, Method::GET, &path, Some(token), None).await?;
+        let session: ShellSessionView = serde_json::from_slice(&bytes)?;
+        if session.session_id == id {
+            Ok(session)
+        } else {
+            Err(ApiFailure::Malformed("session id differs"))
+        }
+    } else {
+        Err(ApiFailure::NotFound)
+    }
 }

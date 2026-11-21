@@ -13,7 +13,7 @@ use web_ui::pages::{
 };
 use web_ui::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, dhcp_action_key, language_tag, resolution_key,
-    severity_class, severity_key, status_key, table, task_status_key, text, ACTIONS, ENGLISH, FRENCH, MISSING_TEXT, RESOLUTIONS,
+    severity_class, severity_key, shell_reason_key, status_key, table, task_status_key, text, ACTIONS, ENGLISH, FRENCH, MISSING_TEXT, RESOLUTIONS,
 };
 
 
@@ -601,6 +601,26 @@ fn a_risk_id_longer_than_the_field_cut_is_printed_whole() -> TestResult {
         assert!(row.contains(&format!(">{long_id}<")), "{row}");
         let page = risk_entity_page(language, "token", &detail).0;
         assert!(page.contains(&format!(" {long_id}</h1>")), "{page}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn shell_close_reasons_map_to_fixed_texts_and_anything_else_is_none() -> TestResult {
+    for (reason, key) in [
+        ("idle_timeout", "shell_reason_idle_timeout"),
+        ("max_duration", "shell_reason_max_duration"),
+        ("recording_failed", "shell_reason_recording_failed"),
+        ("channel_dead", "shell_reason_channel_dead"),
+        ("user_close", "shell_reason_user_close"),
+        ("clock_skew", "shell_reason_clock_skew"),
+    ] {
+        assert_eq!(shell_reason_key(reason), Some(key));
+        assert!(ENGLISH.iter().chain(FRENCH.iter()).any(|(found, _)| *found == key));
+    }
+    for other in ["", "evil", "IDLE_TIMEOUT", "user_close\u{1b}"] {
+        assert_eq!(shell_reason_key(other), None);
     }
     Ok(())
 }

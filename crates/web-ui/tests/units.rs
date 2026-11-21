@@ -16,6 +16,10 @@ use web_ui::api::{
     MAX_DHCP_LABEL_CHARS,
 };
 use web_ui::api::{
+    shell_list_path, shell_open_filter, valid_shell_cursor, valid_shell_filter_requester, valid_shell_hash, valid_shell_reference,
+    valid_shell_subject, MAX_SHELL_CURSOR_BYTES, MAX_SHELL_I64_CHARS, MAX_SHELL_REFERENCE_BYTES, MAX_SHELL_SUBJECT_BYTES,
+};
+use web_ui::api::{
     states_path, valid_state_asset, valid_state_cursor, valid_state_id, verdict_filter, MAX_STATE_ASSET_CHARS, MAX_STATE_CURSOR_HEX,
     MAX_STATE_ID_CHARS,
 };
@@ -27,6 +31,7 @@ use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
 use web_ui::model::Language;
+use web_ui::model::ShellQuery;
 use web_ui::model::VulnView;
 use web_ui::model::{ApiSection, WebLimits};
 use web_ui::model::{AssetDetailView, AssetPageView};
@@ -35,6 +40,9 @@ use web_ui::pages::{oncall_state_key, readable_vuln, vuln_row};
 use web_ui::routes::{comment_limits, comment_shaped, expiring_before, COMMENT_FORM_BYTES};
 use web_ui::server::wall_seconds;
 use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, session_key, set_cookie};
+
+
+const HASH_REPEATS: usize = 4;
 
 
 const CONFLICT: u16 = 409;
@@ -650,6 +658,98 @@ fn dhcp_grammar_copies_accept_only_the_apis_shapes() -> TestResult {
     assert_eq!(parse_dhcp_window(Some("1"), None), None);
     assert_eq!(parse_dhcp_address(None), None);
     assert!(parse_dhcp_address(Some("::1")).is_some());
+    Ok(())
+}
+
+
+#[test]
+fn register_grammar_copies_accept_only_the_apis_shapes() -> TestResult {
+    let reference = "a".repeat(MAX_SHELL_REFERENCE_BYTES);
+    let subject = "a".repeat(MAX_SHELL_SUBJECT_BYTES);
+    for good in ["a", "A1", "s-1", "a/b:c", "a_b.c", "host/1", reference.as_str()] {
+        assert!(valid_shell_reference(good), "{good}");
+    }
+    for bad in [
+        "",
+        "-a",
+        "_a",
+        ".a",
+        "a b",
+        "a\u{3164}",
+        "a\u{1b}",
+        "a\u{0}",
+        "a+b",
+        "a|b",
+        "é",
+        &format!("{reference}a"),
+    ] {
+        assert!(!valid_shell_reference(bad), "{bad}");
+    }
+    for good in ["a", "auth0|a+b/c=d", "a@b.c", "-x", subject.as_str()] {
+        assert!(valid_shell_subject(good), "{good}");
+    }
+    for bad in ["", "a b", "a\u{3164}", "a\u{202e}", "a\u{1b}", "é", &format!("{subject}a")] {
+        assert!(!valid_shell_subject(bad), "{bad}");
+    }
+    assert!(valid_shell_filter_requester("auth0|a") && !valid_shell_filter_requester("-x") && !valid_shell_filter_requester(""));
+    for good in ["1.s", "-1.s", "0.s-1", "9223372036854775807.a.b", "-9223372036854775808.s"] {
+        assert!(valid_shell_cursor(good), "{good}");
+    }
+    let long = format!("1.{reference}");
+    let longer = format!("1.{reference}a");
+    assert!(valid_shell_cursor(&long) && !valid_shell_cursor(&longer));
+    for bad in [
+        "",
+        "1",
+        "1.",
+        ".s",
+        "01.s",
+        "+1.s",
+        "-0.s",
+        "9223372036854775808.s",
+        "1.-x",
+        "x.s",
+        "1.s b",
+        "1,s",
+    ] {
+        assert!(!valid_shell_cursor(bad), "{bad}");
+    }
+    let widest = format!("{}.{reference}", "1".repeat(MAX_SHELL_I64_CHARS));
+    assert!(widest.len() == MAX_SHELL_CURSOR_BYTES && !valid_shell_cursor(&widest));
+    assert_eq!(shell_open_filter(""), Some(None));
+    assert_eq!(shell_open_filter("true"), Some(Some("true")));
+    assert_eq!(shell_open_filter("false"), Some(Some("false")));
+    for bad in ["True", "yes", " true", "true\u{0}"] {
+        assert_eq!(shell_open_filter(bad), None, "{bad}");
+    }
+    let hash = "0123456789abcdef".repeat(HASH_REPEATS);
+    assert!(valid_shell_hash(&hash));
+    for bad in [
+        "",
+        "abc",
+        &hash.to_ascii_uppercase(),
+        &format!("{hash}0"),
+        &format!("g{}", hash.get(1..).unwrap_or("")),
+    ] {
+        assert!(!valid_shell_hash(bad), "{bad}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_register_path_is_built_from_checked_values_and_encodes_the_special_characters() -> TestResult {
+    let query = ShellQuery {
+        asset: Some("a/b".to_owned()),
+        requester: Some("auth0|a+b/c=d".to_owned()),
+        open: Some("true"),
+        cursor: Some("1.s:1".to_owned()),
+    };
+    assert_eq!(
+        shell_list_path(&query),
+        "remote-shell/sessions?limit=100&asset=a%2Fb&requester=auth0%7Ca%2Bb%2Fc%3Dd&open=true&cursor=1.s%3A1"
+    );
+    assert_eq!(shell_list_path(&ShellQuery::default()), "remote-shell/sessions?limit=100");
     Ok(())
 }
 
