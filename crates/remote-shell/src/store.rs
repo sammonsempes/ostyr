@@ -404,21 +404,3 @@ pub fn list_statement(filter: &ListFilter, after: Option<&Cursor>, rows: u32) ->
     };
     Ok((sql, params))
 }
-
-
-/// At most `limit` (1 to `MAX_PAGE`) sessions of the tenant, newest first, strictly after `after`; `serve::list_page` is the serving form.
-pub async fn list_sessions<Executor, Pending>(
-    exec: &mut Executor,
-    scope: &TenantScope,
-    filter: &ListFilter,
-    after: Option<&Cursor>,
-    limit: u32,
-) -> Result<Vec<SessionRow>, StoreError>
-where
-    Executor: FnMut(&TenantScope, Statement) -> Pending,
-    Pending: Future<Output = Result<Vec<Row>, StoreError>>,
-{
-    check_limit(limit)?;
-    let (sql, params) = list_statement(filter, after, limit)?;
-    run(exec, scope, sql, params).await?.iter().map(decode_session).collect()
-}

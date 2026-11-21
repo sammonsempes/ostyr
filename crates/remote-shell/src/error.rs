@@ -60,4 +60,6 @@ pub enum StoreError {
     BadCursor,
     #[error(transparent)]
     Pg(#[from] core_pg::error::PgError),
+    #[error("no database connection: {0}")]
+    Lease(#[from] alerts::error::StoreError),
 }
