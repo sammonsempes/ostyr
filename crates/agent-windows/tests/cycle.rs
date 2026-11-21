@@ -61,7 +61,7 @@ const LOCK_ATTEMPTS: u32 = 10;
 const FAIL_AT_REQUEST: usize = 5;
 
 
-const QUERIES_IN_A_QUIET_POLL: usize = 2;
+const QUERIES_IN_A_QUIET_POLL: usize = 3;
 
 
 const QUERY_INDEX: usize = 2;

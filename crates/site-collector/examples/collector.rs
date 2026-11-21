@@ -1,6 +1,7 @@
 use core_audit::log::{append, open_file_log};
 use core_config::reload::{current_config, ReloadContext, ReloadEngine};
 use core_config::watch::watch_files;
+use site_collector::agent_dir::open_agent_spool;
 use site_collector::forward::{forward_once, write_cursor};
 use site_collector::forward_model::{ForwardLimits, ForwardReport, MAX_AGENT_SPOOL_BYTES};
 use site_collector::listen::{open_runtime, receive_buffer_len, receive_cycle};
@@ -91,7 +92,8 @@ fn receive_and_forward(
 }
 
 
-fn start(settings_file: &str, audit_file: &str, spool_dir: &str, agent_spool: Option<&Path>) -> Result<(), Box<dyn Error>> {
+fn start(settings_file: &str, audit_file: &str, spool_dir: &str, agent_spool_file: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    let agent_spool = agent_spool_file.map(open_agent_spool).transpose()?;
     let log = open_file_log(Path::new(audit_file))?;
     let context = ReloadContext {
         actor_id: "collector".to_owned(),
@@ -114,7 +116,13 @@ fn start(settings_file: &str, audit_file: &str, spool_dir: &str, agent_spool: Op
     let shutdown = AtomicBool::new(false);
     let finished = std::thread::scope(|scope| {
         let worker = scope.spawn(|| {
-            receive_and_forward(&mut runtime, &engine, &shared, &shutdown, agent_spool);
+            receive_and_forward(
+                &mut runtime,
+                &engine,
+                &shared,
+                &shutdown,
+                agent_spool.as_ref().map(|judged| judged.spool_path.as_path()),
+            );
             runtime
         });
         stdin().lock().lines().map_while(Result::ok).any(|command| command.trim() == "quit");

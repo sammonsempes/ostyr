@@ -21,16 +21,20 @@ pub fn pending_bytes(spool: &Path) -> io::Result<u64> {
 
 
 pub fn fits(pending: u64, lines: &[String], limit: u64) -> bool {
-    let added: u64 = lines
+    pending == 0 || pending.saturating_add(refused_bytes(lines)) <= limit
+}
+
+
+pub fn refused_bytes(lines: &[String]) -> u64 {
+    lines
         .iter()
         .map(|line| u64::try_from(line.len()).unwrap_or(u64::MAX).saturating_add(1))
-        .sum();
-    pending == 0 || pending.saturating_add(added) <= limit
+        .sum()
 }
 
 
 pub fn note_pause(state: &mut ChannelState, blocked: bool, pending: u64, limit: u64) {
-    let entered = blocked && state.paused_polls == 0;
+    let entered = blocked && pending >= limit && state.paused_polls == 0;
     let left = (!blocked && state.paused_polls > 0).then_some(state.paused_polls);
     if entered {
         warn!(pending, limit, "spool full, reading paused");
