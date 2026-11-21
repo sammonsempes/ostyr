@@ -1,5 +1,6 @@
+use crate::types::Digest;
 use core_pg::scope::TenantScope;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 
 /// Declared from the least to the most serious: the derived order picks the status a repeated identity keeps.
@@ -102,4 +103,23 @@ pub enum KubeconfigFault {
     Linked,
     Mode,
     Owner,
+}
+
+
+/// The findings of one run that the store accepts: one per identity, the refusals counted by status.
+#[derive(Debug, Default)]
+pub struct Admitted<'a> {
+    pub kept: Vec<&'a Finding>,
+    pub positions: HashMap<Digest, usize>,
+    pub duplicate: usize,
+    pub refused: BTreeMap<Status, usize>,
+}
+
+
+/// What `replace_run` stored: the rows written and the findings the store itself refused or merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOutcome {
+    pub stored: usize,
+    pub store_refused: usize,
+    pub duplicate: usize,
 }

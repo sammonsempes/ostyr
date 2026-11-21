@@ -9,5 +9,6 @@ pub mod prowler;
 pub mod report;
 #[cfg(unix)]
 pub mod run;
+pub mod store;
 pub mod text;
 pub mod types;
