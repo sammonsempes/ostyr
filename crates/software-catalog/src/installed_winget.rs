@@ -173,6 +173,7 @@ pub fn assemble(candidates: Vec<Option<Candidate>>) -> Installed {
         })
         .collect();
     Installed {
+        manager: Some(Manager::Winget),
         rows: rows.into_values().collect(),
         malformed,
         duplicate_ids,
@@ -185,6 +186,7 @@ pub fn assemble(candidates: Vec<Option<Candidate>>) -> Installed {
 pub fn winget_installed(raw: &RawValue, count: usize, limits: &Limits) -> Result<Installed, InstalledError> {
     if count > limits.max_installed {
         Ok(Installed {
+            manager: Some(Manager::Winget),
             over_limit: count,
             ..Installed::default()
         })
@@ -197,6 +199,7 @@ pub fn winget_installed(raw: &RawValue, count: usize, limits: &Limits) -> Result
 
 pub fn merge(left: Installed, right: Installed) -> Installed {
     Installed {
+        manager: left.manager.or(right.manager),
         rows: left.rows.into_iter().chain(right.rows).collect(),
         malformed: left.malformed + right.malformed,
         over_limit: left.over_limit + right.over_limit,

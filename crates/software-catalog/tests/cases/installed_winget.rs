@@ -223,7 +223,7 @@ fn source_cap_and_shapes() -> TestResult {
 
 
 #[test]
-fn two_winget_sources_are_refused_and_a_foreign_identifier_is_another_source() -> TestResult {
+fn two_winget_sources_and_a_foreign_identifier_are_refused() -> TestResult {
     let one = format!(r#"{{"Packages":[{{"PackageIdentifier":"A.B"}}],{WINGET_HEAD}}}"#);
     let twice = format!(r#"{{"Sources":[{one},{one}]}}"#);
     assert!(matches!(parse(&twice), Err(InstalledError::DuplicateSource)));

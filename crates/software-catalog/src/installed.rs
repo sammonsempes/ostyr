@@ -61,7 +61,10 @@ pub fn parse_line(line: &[u8], limits: &Limits) -> Option<Line> {
 
 
 pub fn parse_installed<Source: Read>(reader: Source, limits: &Limits) -> Result<Installed, InstalledError> {
-    parse_with(reader, limits, parse_line)
+    parse_with(reader, limits, parse_line).map(|installed| Installed {
+        manager: Some(Manager::Apt),
+        ..installed
+    })
 }
 
 

@@ -80,6 +80,7 @@ pub struct Available {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Installed {
+    pub manager: Option<Manager>,
     pub rows: Vec<InstalledRow>,
     pub malformed: usize,
     pub over_limit: usize,
@@ -119,11 +120,20 @@ pub struct Action {
     pub installed_version: Option<String>,
     pub target_version: Option<String>,
     pub arguments: Vec<String>,
+    pub reason: Option<&'static str>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryIncomplete {
+    pub manager: Manager,
+    pub over_limit: usize,
 }
 
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
     pub actions: Vec<Action>,
+    pub inventory_incomplete: Vec<InventoryIncomplete>,
     pub refused_uninstalls: Vec<String>,
 }

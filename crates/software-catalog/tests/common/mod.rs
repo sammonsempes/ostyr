@@ -71,6 +71,7 @@ pub fn available(manager: Manager, names: &[&str]) -> Available {
 
 pub fn installed(rows: Vec<InstalledRow>) -> Installed {
     Installed {
+        manager: None,
         rows,
         malformed: 0,
         over_limit: 0,

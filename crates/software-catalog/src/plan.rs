@@ -3,12 +3,15 @@
 use crate::args::arguments;
 use crate::error::PlanError;
 use crate::limits::Limits;
-use crate::model::{Action, ActionKind, Assignment, Available, Catalogue, Entry, Installed, InstalledRow, Manager, Plan};
+use crate::model::{Action, ActionKind, Assignment, Available, Catalogue, Entry, Installed, InstalledRow, InventoryIncomplete, Manager, Plan};
 use crate::source::{family_of, manager_of, package_of, version_text};
 use crate::text::is_entry_name;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use vuln_match::version::parse_version;
+
+
+pub const MALFORMED_REASON: &str = "inventory_malformed";
 
 
 pub fn plan(catalogue: &Catalogue, assignment: &Assignment, installed: &Installed, available: &Available) -> Result<Plan, PlanError> {
@@ -36,7 +39,12 @@ pub fn plan_with(
             .collect();
         actions.sort_by(|left, right| (left.kind, &left.name, &left.package).cmp(&(right.kind, &right.name, &right.package)));
         let refused_uninstalls = removed.iter().filter(|entry| !entry.uninstall).map(|entry| entry.name.clone()).collect();
-        Ok(Plan { actions, refused_uninstalls })
+        let inventory_incomplete = incomplete(installed);
+        Ok(Plan {
+            actions,
+            inventory_incomplete,
+            refused_uninstalls,
+        })
     }
 }
 
@@ -118,6 +126,7 @@ pub fn action_of(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>) ->
         installed_version: row.map(|found| found.version.clone()),
         target_version: Some(version_text(&entry.version).to_string()),
         arguments: arguments(kind, entry),
+        reason: None,
     }
 }
 
@@ -125,7 +134,37 @@ pub fn action_of(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>) ->
 pub fn wanted_action(entry: &Entry, installed: &Installed, available: &Available) -> Option<Action> {
     let row = row_of(entry, installed);
     let kind = row.as_ref().map_or(Some(ActionKind::Install), |found| compare(entry, found));
-    kind.map(|found| action_of(gate(found, entry, row.as_ref(), available), entry, row.as_ref()))
+    let manager = manager_of(&entry.source);
+    let gapped = covers(installed, manager);
+    kind.filter(|found| !(gapped && installed.over_limit > 0 && matches!(found, ActionKind::Install | ActionKind::Update)))
+        .map(|found| {
+            let gated = gate(found, entry, row.as_ref(), available);
+            if gapped && installed.malformed > 0 && gated == ActionKind::Install {
+                Action {
+                    reason: Some(MALFORMED_REASON),
+                    ..action_of(ActionKind::Unknown, entry, row.as_ref())
+                }
+            } else {
+                action_of(gated, entry, row.as_ref())
+            }
+        })
+}
+
+
+pub fn covers(installed: &Installed, manager: Manager) -> bool {
+    installed.manager.is_none_or(|read| read == manager)
+}
+
+
+pub fn incomplete(installed: &Installed) -> Vec<InventoryIncomplete> {
+    [Manager::Apt, Manager::Dnf, Manager::Winget, Manager::Msi]
+        .into_iter()
+        .filter(|manager| installed.over_limit > 0 && covers(installed, *manager))
+        .map(|manager| InventoryIncomplete {
+            manager,
+            over_limit: installed.over_limit,
+        })
+        .collect()
 }
 
 
@@ -184,5 +223,6 @@ pub fn foreign_action(row: &InstalledRow) -> Action {
         installed_version: Some(row.version.clone()),
         target_version: None,
         arguments: Vec::new(),
+        reason: None,
     }
 }
