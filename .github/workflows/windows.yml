@@ -38,7 +38,11 @@ jobs:
           -p discovery -p grc -p hunt-stats -p metric-alerts
           -p patch-inventory -p patch-rollout
           -p secret-scan -p siem-schema -p sla-report -p software-catalog
-          -p vuln-match
+          -p vuln-match -p sys-windows -p agent-windows
+      - name: Lint sys-windows on Windows
+        shell: bash
+        timeout-minutes: 15
+        run: cargo clippy --locked --all-targets -p sys-windows -- -D warnings
       - name: Run the tests of agent-channel
         shell: bash
         timeout-minutes: 15
