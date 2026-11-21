@@ -1,8 +1,9 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView,
-    RiskDetailView, RiskListView,
+    FindingsView, RiskDetailView, RiskListView,
 };
+use data_encoding::BASE64URL_NOPAD;
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Method, Response, StatusCode};
@@ -722,4 +723,68 @@ pub async fn get_cert(client: &ApiClient, source: IpAddr, token: &SecretString, 
     } else {
         Err(ApiFailure::NotFound)
     }
+}
+
+
+pub const HUNT_LIMIT: u32 = 100;
+
+
+pub const MAX_HUNT_CURSOR_CHARS: usize = 114;
+
+
+pub const MAX_PACK_ID_CHARS: usize = 64;
+
+
+/// The hunt cursor of the API: unpadded base64url, at most 114 characters.
+pub fn valid_hunt_cursor(cursor: &str) -> bool {
+    !cursor.is_empty() && cursor.len() <= MAX_HUNT_CURSOR_CHARS && BASE64URL_NOPAD.decode(cursor.as_bytes()).is_ok()
+}
+
+
+/// The pack id grammar of the hunt-packs module: `[a-z0-9][a-z0-9_.-]{0,63}`.
+pub fn valid_pack_id(id: &str) -> bool {
+    let mut characters = id.chars();
+    id.len() <= MAX_PACK_ID_CHARS
+        && characters
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && characters.all(|next| next.is_ascii_lowercase() || next.is_ascii_digit() || matches!(next, '_' | '.' | '-'))
+}
+
+
+pub fn hunts_path(cursor: Option<&str>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("limit", &HUNT_LIMIT.to_string());
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    format!("hunts/findings?{}", query.finish())
+}
+
+
+pub fn check_hunt_list(list: &FindingsView) -> Result<(), ApiFailure> {
+    if list.next_cursor.as_deref().is_some_and(|cursor| !valid_hunt_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Counts the items on raw slices, at most the limit that was sent, before any typed value is built.
+pub fn scan_hunt_list(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: ListScan = serde_json::from_slice(bytes)?;
+    if scan.items.len() > HUNT_LIMIT as usize {
+        Err(ApiFailure::Malformed("too many items"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub async fn list_findings(client: &ApiClient, source: IpAddr, token: &SecretString, cursor: Option<&str>) -> Result<FindingsView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &hunts_path(cursor), Some(token), None).await?;
+    scan_hunt_list(&bytes)?;
+    let list: FindingsView = serde_json::from_slice(&bytes)?;
+    check_hunt_list(&list).map(|()| list)
 }

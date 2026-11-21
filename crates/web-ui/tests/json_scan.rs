@@ -1,6 +1,6 @@
 use std::error::Error;
 use types::TestResult;
-use web_ui::api::{scan_cert_detail, scan_cert_list, MAX_BODY_BYTES, MAX_CERT_DNS_NAMES, MAX_CERT_SIGHTINGS, MAX_ITEMS};
+use web_ui::api::{scan_cert_detail, scan_cert_list, scan_hunt_list, HUNT_LIMIT, MAX_BODY_BYTES, MAX_CERT_DNS_NAMES, MAX_CERT_SIGHTINGS, MAX_ITEMS};
 use web_ui::error::ApiFailure;
 use web_ui::model::Language;
 use web_ui::pages::clip;
@@ -113,5 +113,20 @@ fn counts_at_the_bound_pass_and_one_more_is_refused() -> TestResult {
         scan_cert_detail(sightings_over.as_bytes()),
         Err(ApiFailure::Malformed("too many sightings"))
     ));
+    Ok(())
+}
+
+
+#[test]
+fn a_hunt_list_over_the_limit_sent_is_refused_before_the_typed_decode() -> TestResult {
+    let at_bound = format!("{{\"items\":[{}]}}", names_of(HUNT_LIMIT as usize));
+    scan_hunt_list(at_bound.as_bytes())?;
+    let over = format!("{{\"items\":[{}]}}", names_of(HUNT_LIMIT as usize + 1));
+    assert!(matches!(scan_hunt_list(over.as_bytes()), Err(ApiFailure::Malformed("too many items"))));
+    let huge = format!("{{\"items\":[{}]}}", names_of(MAX_BODY_BYTES / BYTES_PER_NAME));
+    assert!(matches!(scan_hunt_list(huge.as_bytes()), Err(ApiFailure::Malformed("too many items"))));
+    let wrong = format!("{{\"items\": \"{MARKER}\"}}");
+    let failure = scan_hunt_list(wrong.as_bytes()).err().ok_or("accepted")?;
+    assert!(!format!("{failure}").contains(MARKER) && !format!("{failure:?}").contains(MARKER));
     Ok(())
 }

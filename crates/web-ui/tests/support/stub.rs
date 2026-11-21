@@ -85,6 +85,7 @@ pub struct StubState {
     pub asset_paths: Mutex<Vec<String>>,
     pub risk_paths: Mutex<Vec<String>>,
     pub cert_paths: Mutex<Vec<String>>,
+    pub hunt_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -894,6 +895,90 @@ pub async fn cert_detail_handler(State(state): State<Arc<StubState>>, headers: H
 }
 
 
+pub const HUNT_NEXT_CURSOR: &str = "MTgwMDAwMDAwMDpwYWNrLWM";
+
+
+pub const HUNT_SKIPPED: u32 = 2;
+
+
+pub const HUNT_MATCHES: u32 = 7;
+
+
+pub const HUNT_MAX_MATCHES: u32 = 500;
+
+
+pub const HUNT_OVERSIZED: u32 = 4;
+
+
+pub const HUNT_HOSTILE_PACK: &str = "evil\u{1b}[31m\u{3164}pack";
+
+
+pub fn finding(pack_id: &str, start: &str, end: &str) -> Value {
+    json!({"pack_id": pack_id, "window_start": start, "window_end": end, "matches": HUNT_MATCHES, "max_matches": HUNT_MAX_MATCHES})
+}
+
+
+pub fn finding_list(items: Vec<Value>, skipped: u32, oversized: u32, capped: bool, next: Option<&str>) -> Value {
+    json!({"items": items, "skipped": skipped, "oversized": {"count": oversized, "capped": capped}, "next_cursor": next})
+}
+
+
+pub const HUNT_START: &str = "2026-03-01T00:00:00Z";
+
+
+pub const HUNT_END: &str = "2026-03-02T01:00:00+01:00";
+
+
+pub fn hunt_hostile_list() -> Value {
+    finding_list(
+        vec![
+            finding(HUNT_HOSTILE_PACK, HUNT_START, HUNT_END),
+            finding("good-pack", "not a time", HUNT_END),
+            finding("good-pack", HUNT_START, "0000-01-01T00:00:00+02:00"),
+            finding("Upper", HUNT_START, HUNT_END),
+            finding("fine.pack_1", HUNT_START, HUNT_END),
+        ],
+        HUNT_SKIPPED,
+        HUNT_OVERSIZED,
+        true,
+        None,
+    )
+}
+
+
+pub async fn hunt_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.hunt_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(finding_list(
+                (0..MANY_ITEMS).map(|_| finding("p", HUNT_START, HUNT_END)).collect(),
+                0,
+                0,
+                false,
+                None,
+            ))
+            .into_response(),
+            Mode::BadCursor => Json(finding_list(vec![], 0, 0, false, Some("a b"))).into_response(),
+            Mode::Hostile => Json(hunt_hostile_list()).into_response(),
+            Mode::Chunked => Json(finding_list(vec![], 0, 0, false, None)).into_response(),
+            _ => Json(finding_list(
+                vec![finding("baseline-1", HUNT_START, HUNT_END), finding("lateral.move", HUNT_START, HUNT_END)],
+                HUNT_SKIPPED,
+                HUNT_OVERSIZED,
+                false,
+                Some(HUNT_NEXT_CURSOR),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub const OVER_SCORE: u32 = 101;
 
 
@@ -916,6 +1001,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         asset_paths: Mutex::new(Vec::new()),
         risk_paths: Mutex::new(Vec::new()),
         cert_paths: Mutex::new(Vec::new()),
+        hunt_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -934,6 +1020,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/risk/entities/{kind}/{id}", get(risk_detail_handler))
         .route("/certificates", get(cert_list_handler))
         .route("/certificates/{fingerprint}", get(cert_detail_handler))
+        .route("/hunts/findings", get(hunt_list_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))

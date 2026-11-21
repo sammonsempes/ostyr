@@ -25,14 +25,17 @@ use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 use stub::{
     cert_fingerprint, id_of, Mode, ReadFault, BIG_ASSET, CERT_BAD_FINGERPRINT_COUNT, CERT_CURSOR_TIME, CERT_MANY_NAMES, CERT_SKIPPED, FIRST_CURSOR,
-    HOSTILE, LEAK, LOCK_AFTER, ODD_ASSET_ID, RISK_ALERTS_READ, RISK_CAP, RISK_ODD_ID, RISK_UNREADABLE_IDS, TOKEN,
+    HOSTILE, HUNT_NEXT_CURSOR, HUNT_OVERSIZED, HUNT_SKIPPED, LEAK, LOCK_AFTER, ODD_ASSET_ID, RISK_ALERTS_READ, RISK_CAP, RISK_ODD_ID,
+    RISK_UNREADABLE_IDS, TOKEN,
 };
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Instant};
 use tokio_stream::pending;
 use types::TestError;
 use types::TestResult;
-use web_ui::api::{encode_asset_id, forwarded_value, header_from_text, list_alerts, login, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES};
+use web_ui::api::{
+    encode_asset_id, forwarded_value, header_from_text, list_alerts, login, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_HUNT_CURSOR_CHARS,
+};
 use web_ui::client::{build_client, login_slots};
 use web_ui::error::ApiFailure;
 use web_ui::model::{ApiClient, ApiSection, Session};
@@ -2277,6 +2280,9 @@ async fn risk_api_failures_render_our_own_text() -> TestResult {
 }
 
 
+const HUNT_UNREADABLE_ROWS: usize = 4;
+
+
 const CERT_THIRTY_DAYS: i64 = 30 * 86_400;
 
 
@@ -2520,3 +2526,130 @@ const CERT_LIST_ROWS: usize = 3;
 
 
 const CERT_SHORT_FINGERPRINT: usize = 63;
+
+
+fn hunt_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.hunt_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+#[tokio::test]
+async fn the_hunt_list_shows_rows_the_notices_and_the_next_page() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/hunts\""));
+    let list = fire(&rig, get_with("/hunts", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_hardened(&list);
+    for expected in [
+        "baseline-1",
+        "lateral.move",
+        "2026-03-01T00:00:00Z",
+        "2026-03-02T00:00:00Z",
+        "<td>7</td>",
+        "<td>500</td>",
+        "Hunt findings",
+    ] {
+        assert!(list.body.contains(expected), "{expected}: {}", list.body);
+    }
+    assert!(list.body.contains(&format!("{HUNT_SKIPPED} rows could not be read.")));
+    assert!(list.body.contains(&format!("{HUNT_OVERSIZED} findings have an over-long pack id.")));
+    assert!(!list.body.contains("At least"));
+    assert!(list.body.contains(&format!("name=\"cursor\" value=\"{HUNT_NEXT_CURSOR}\"")) && list.body.contains("Next findings"));
+    let french = fire(
+        &rig,
+        Req {
+            language: Some("fr".to_owned()),
+            ..get_with("/hunts", &session)
+        },
+    )
+    .await?;
+    assert!(
+        french.body.contains("Résultats de chasse") && french.body.contains("n'ont pas pu être lues") && french.body.contains("Résultats suivants")
+    );
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/hunts", &session)).await?;
+    assert!(empty.body.contains("No finding.") && !empty.body.contains("could not be read") && !empty.body.contains("Next findings"));
+    assert!(!empty.body.contains("over-long"));
+    let forged = format!("/hunts?cursor={HUNT_NEXT_CURSOR}&limit=500&tenant=b&expiring=30");
+    assert_eq!(fire(&rig, get_with(&forged, &session)).await?.status, StatusCode::OK);
+    assert_eq!(
+        hunt_requests(&rig)?,
+        [
+            "/hunts/findings?limit=100".to_owned(),
+            "/hunts/findings?limit=100".to_owned(),
+            "/hunts/findings?limit=100".to_owned(),
+            format!("/hunts/findings?limit=100&cursor={HUNT_NEXT_CURSOR}"),
+        ]
+    );
+    let anonymous = fire(&rig, get("/hunts")).await?;
+    assert_eq!(location_of(&anonymous).as_deref(), Some("/login"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hostile_finding_is_an_unreadable_row_and_never_printed() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/hunts", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_no_hidden_characters(&list.body);
+    assert!(!list.body.contains('\u{3164}') && !list.body.contains("evil") && !list.body.contains("Upper") && !list.body.contains("not a time"));
+    assert_eq!(list.body.matches("Unreadable row.").count(), HUNT_UNREADABLE_ROWS);
+    assert_eq!(list.body.matches("<td>7</td>").count(), 1);
+    assert!(list.body.contains("fine.pack_1") && list.body.contains("2026-03-02T00:00:00Z"));
+    assert!(list.body.contains("At least 4 findings have an over-long pack id."));
+    assert!(list.body.contains("2 rows could not be read."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_malformed_hunt_cursor_is_refused_before_any_api_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let long = format!("/hunts?cursor={}", "A".repeat(MAX_HUNT_CURSOR_CHARS + 1));
+    for query in [
+        "/hunts?cursor=",
+        "/hunts?cursor=a%20b",
+        "/hunts?cursor=a.b",
+        "/hunts?cursor=12:abc",
+        "/hunts?cursor=A",
+        "/hunts?cursor=MTgwMDAwMDAwMDpwYWNrLWM%3D",
+        long.as_str(),
+    ] {
+        let reply = fire(&rig, get_with(query, &session)).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    assert!(hunt_requests(&rig)?.is_empty());
+    let longest = format!("/hunts?cursor={}", "A".repeat(MAX_HUNT_CURSOR_CHARS));
+    assert_eq!(fire(&rig, get_with(&longest, &session)).await?.status, StatusCode::OK);
+    assert_eq!(hunt_requests(&rig)?.len(), 1);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn hunt_api_failures_render_our_own_text() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for (mode, status) in [
+        (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+        (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+        (Mode::Oversize, StatusCode::BAD_GATEWAY),
+        (Mode::TooMany, StatusCode::BAD_GATEWAY),
+        (Mode::BadCursor, StatusCode::BAD_GATEWAY),
+    ] {
+        set_mode(&rig, mode)?;
+        let reply = fire(&rig, get_with("/hunts", &session)).await?;
+        assert_eq!(reply.status, status);
+        assert!(!reply.body.contains(LEAK));
+        assert_hardened(&reply);
+    }
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/hunts", &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    Ok(())
+}
