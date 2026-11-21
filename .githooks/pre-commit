@@ -75,6 +75,14 @@ covered_tests() {
   return "$status"
 }
 
+doc_tests() {
+  local status=0
+  pick_scratch
+  TMPDIR="$SCRATCH" low cargo test --doc --offline "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" || status=$?
+  rm -rf "$SCRATCH"
+  return "$status"
+}
+
 cleanup_run() {
   rm -rf "$RUN_DIR"
   if [ -n "${TMPFS_RUN:-}" ]; then rm -rf "$TMPFS_RUN"; fi
@@ -219,9 +227,10 @@ package_args() {
 compute_scope
 prepare_gate_dir
 package_args
-step "1/5 cargo +nightly fmt --check" low cargo +nightly fmt --check "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}"
-step "2/5 cargo clippy" low cargo clippy --offline "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" --all-targets -- -D warnings
-step "3/5 custom_lint" lint
-step "4/5 cargo llvm-cov" covered_tests
-step "5/5 coverage_gate" gate
+step "1/6 cargo +nightly fmt --check" low cargo +nightly fmt --check "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}"
+step "2/6 cargo clippy" low cargo clippy --offline "${PACKAGE_ARGS[@]+"${PACKAGE_ARGS[@]}"}" --all-targets -- -D warnings
+step "3/6 custom_lint" lint
+step "4/6 cargo llvm-cov" covered_tests
+step "5/6 coverage_gate" gate
+step "6/6 cargo test --doc" doc_tests
 echo "pre-commit: all steps passed" >&2
