@@ -40,6 +40,27 @@ pub const MAX_NAMESPACE_BYTES: usize = 32;
 pub const NAMESPACE_COLUMN: &str = "namespace";
 
 
+pub const REQUIRED_SEARCH_PATH: &str = "search_path=pg_catalog, public, pg_temp";
+
+
+pub const MAX_NAMED_FUNCTIONS: usize = 20;
+
+
+pub const MAX_SIGNATURE_CHARS: usize = 128;
+
+
+/// One row per function of `public` that belongs to no extension: its signature and its stored `search_path` setting, empty when it has none.
+pub fn functions_sql() -> String {
+    format!(
+        "SELECT p.oid::regprocedure::text, coalesce((SELECT s FROM unnest(p.proconfig) AS s WHERE starts_with(s, 'search_path=') LIMIT 1), '') \
+         FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prokind IN ('f', 'p') \
+         AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') \
+         ORDER BY 1 LIMIT {}",
+        MAX_APPLIED_ROWS + 1
+    )
+}
+
+
 /// The record table as found in the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableShape {
@@ -212,6 +233,36 @@ pub async fn read_applied(client: &Client, namespace: &str, deadline: Duration) 
 }
 
 
+/// Refuses every function whose stored `search_path` is not exactly the required text; at most `MAX_NAMED_FUNCTIONS` are named, the count is exact.
+pub fn check_search_paths(functions: &[(String, String)]) -> Result<(), PgError> {
+    let bad: Vec<String> = functions
+        .iter()
+        .filter(|(_, setting)| setting != REQUIRED_SEARCH_PATH)
+        .map(|(signature, _)| signature.escape_debug().take(MAX_SIGNATURE_CHARS).collect())
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(PgError::FunctionSearchPath {
+            total: bad.len(),
+            functions: bad.iter().take(MAX_NAMED_FUNCTIONS).cloned().collect::<Vec<String>>().join(", "),
+        })
+    }
+}
+
+
+/// Reads the final state from the database, so statement order, overloads and later `CREATE OR REPLACE` cannot hide a function.
+pub async fn read_search_paths(client: &Client, deadline: Duration) -> Result<(), PgError> {
+    let rows = global_query(client, &functions_sql(), deadline).await?;
+    check_row_count(rows.len())?;
+    let functions = rows
+        .iter()
+        .map(|row| Ok((column_text(row, 0)?, column_text(row, 1)?)))
+        .collect::<Result<Vec<(String, String)>, PgError>>()?;
+    check_search_paths(&functions)
+}
+
+
 pub fn check_row_count(rows: usize) -> Result<usize, PgError> {
     if rows > MAX_APPLIED_ROWS {
         Err(PgError::TooManyRecords { limit: MAX_APPLIED_ROWS })
@@ -262,5 +313,6 @@ pub async fn migrate(client: &Client, namespace: &str, embedded: &[Migration], d
         outcome = apply_pending(client, namespace, embedded, deadline, &mut done).await;
     }
     outcome?;
+    read_search_paths(client, deadline).await?;
     Ok(done)
 }
