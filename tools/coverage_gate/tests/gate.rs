@@ -177,7 +177,7 @@ fn both_shortfalls_are_listed() -> anyhow::Result<()> {
     let both = BRANCH_MISSED.replace("\"covered\":10", "\"covered\":8");
     let export = write_export(&root, &both)?;
     let parsed = parse_export(fs::File::open(&export)?)?;
-    let violations = check(&parsed, &find_sources(&root)?)?;
+    let violations = check(&parsed, &root, &find_sources(&root)?)?;
     assert_eq!(violations.len(), TWO_SHORTFALLS);
     assert!(matches!(
         violations.first(),
@@ -276,9 +276,12 @@ fn errors_keep_their_cause() -> anyhow::Result<()> {
 fn default_root_is_the_current_directory() -> anyhow::Result<()> {
     let (_dir, root) = workspace()?;
     let export = write_export(&root, COVERED)?;
-    let arguments = vec!["coverage_gate".to_string(), export.display().to_string()];
-    let passed = run(&arguments, Vec::new());
-    assert!(passed.is_ok());
+    let refused = Command::new(env!("CARGO_BIN_EXE_coverage_gate"))
+        .arg(&export)
+        .env_remove("CARGO_LLVM_COV_TARGET_DIR")
+        .output()?;
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8(refused.stderr)?.contains("no dep-info for"));
     Ok(())
 }
 
@@ -346,7 +349,7 @@ fn executable_code_detection() -> anyhow::Result<()> {
         "#![allow(dead_code)]\nfn a() {}",
     ];
     for text in code {
-        assert!(has_executable_code(text)?, "{text}");
+        assert!(has_executable_code(text, false)?, "{text}");
     }
     let plain = [
         "",
@@ -361,7 +364,7 @@ fn executable_code_detection() -> anyhow::Result<()> {
         "#![cfg(windows)]\nfn a() {}",
     ];
     for text in plain {
-        assert!(!has_executable_code(text)?, "{text}");
+        assert!(!has_executable_code(text, false)?, "{text}");
     }
     Ok(())
 }

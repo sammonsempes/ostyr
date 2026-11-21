@@ -11,6 +11,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin" "$SCRATCH/sync"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 if [ "$1" = "+nightly" ] && [ "$2" = "fmt" ]; then
   touch "$SYNC/here.$(basename "$PWD")"
   echo "$CARGO_TARGET_DIR" >"$SYNC/target.$(basename "$PWD")"
