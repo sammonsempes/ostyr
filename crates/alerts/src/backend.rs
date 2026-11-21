@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use crate::model::{AlertDetail, AlertPage, Backend, Lease, Page, Triage, TriageChange};
+use crate::model::{AlertDetail, AlertPage, Backend, Lease, Page, TriageChange, Triaged};
 use crate::pg::pg_executor;
 use crate::store::{get_detail, list_alerts, set_triage};
 use core_config::reload::{current_config, ReloadEngine};
@@ -67,7 +67,7 @@ pub async fn pg_triage(
     id: String,
     change: TriageChange,
     expected: Option<i64>,
-) -> Result<Triage, StoreError> {
+) -> Result<Triaged, StoreError> {
     let held = lease(&engine, &permits).await?;
     let executor = pg_executor(&held.client, held.deadline);
     set_triage(&executor, &scope, &id, &change, expected).await

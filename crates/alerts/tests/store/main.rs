@@ -33,6 +33,9 @@ const THREE: usize = 3;
 const FOUR: usize = 4;
 
 
+const FIVE: usize = 5;
+
+
 const SEVEN: usize = 7;
 
 
@@ -154,7 +157,7 @@ fn migrations_are_valid_and_namespaced() -> TestResult {
     [FIRST_SQL, NEXT_SQL, GET_SQL]
         .iter()
         .for_each(|sql| assert!(sql.contains("WHERE tenant = $1")));
-    assert_eq!(MIGRATIONS.len(), FOUR);
+    assert_eq!(MIGRATIONS.len(), FIVE);
     let triage = MIGRATIONS.get(THREE).ok_or("no migration")?;
     assert!(triage.sql.contains("PRIMARY KEY (tenant, alert_id)") && triage.sql.contains("REFERENCES alerts (tenant, id) ON DELETE CASCADE"));
     assert!(triage.sql.contains("CHECK (status IN ('acknowledged', 'closed'))"));
@@ -188,15 +191,20 @@ async fn triage_inserts_then_updates_with_the_right_version() -> TestResult {
     assert_eq!(get_triage(&exec, &scope, &one.id).await?, None);
     let first = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Acknowledged, "ana", Some("looking")), None).await?;
     assert_eq!(
-        (first.version, first.status, first.note.as_deref()),
+        (first.triage.version, first.triage.status, first.triage.note.as_deref()),
         (1, TriageStatus::Acknowledged, Some("looking"))
     );
     let second = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Closed, "bob", None), Some(1)).await?;
     assert_eq!(
-        (second.version, second.status, second.note.as_deref(), second.updated_at),
+        (
+            second.triage.version,
+            second.triage.status,
+            second.triage.note.as_deref(),
+            second.triage.updated_at
+        ),
         (TWO as i64, TriageStatus::Closed, None, BASE_TIME)
     );
-    assert_eq!(get_triage(&exec, &scope, &one.id).await?, Some(second));
+    assert_eq!(get_triage(&exec, &scope, &one.id).await?, Some(second.triage));
     Ok(())
 }
 
@@ -213,7 +221,7 @@ async fn a_stale_version_or_a_second_insert_is_a_conflict_and_changes_nothing() 
     assert!(matches!(again, Err(StoreError::Conflict)));
     let stale = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Closed, "eve", None), Some(TWO as i64)).await;
     assert!(matches!(stale, Err(StoreError::Conflict)));
-    assert_eq!(get_triage(&exec, &scope, &one.id).await?, Some(first));
+    assert_eq!(get_triage(&exec, &scope, &one.id).await?, Some(first.triage));
     let missing_row = alert("acme", "r2", &["e2"], BASE_TIME);
     insert_alerts(&exec, &scope, std::slice::from_ref(&missing_row)).await?;
     let none_yet = set_triage(&exec, &scope, &missing_row.id, &change(TriageStatus::Closed, "eve", None), Some(1)).await;
@@ -997,5 +1005,36 @@ fn the_memory_store_refuses_a_document_with_missing_fields() -> TestResult {
     let mut wrong_type = full.clone();
     wrong_type.as_object_mut().ok_or("not an object")?.insert("id".to_owned(), json!(true));
     assert!(row_of(&wrong_type).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn migration_005_admits_the_verdict_and_replaces_the_check_by_name() -> TestResult {
+    let verdict = MIGRATIONS.get(FOUR).ok_or("no migration")?;
+    assert_eq!(verdict.version, "005_alert_triage_false_positive");
+    assert!(verdict.sql.contains("DROP CONSTRAINT alert_triage_status_check"));
+    assert!(verdict.sql.contains("CHECK (status IN ('acknowledged', 'closed', 'false_positive'))"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_false_positive_is_stored_and_the_answer_names_the_rule() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    let one = alert("acme", "rule-7", &["e1"], BASE_TIME);
+    insert_alerts(&exec, &scope, std::slice::from_ref(&one)).await?;
+    let written = set_triage(&exec, &scope, &one.id, &change(TriageStatus::FalsePositive, "ana", Some("noise")), None).await?;
+    assert_eq!(written.rule_id, "rule-7");
+    assert_eq!(written.triage.status, TriageStatus::FalsePositive);
+    let read = get_triage(&exec, &scope, &one.id).await?.ok_or("no triage")?;
+    assert_eq!((read.status, read.note.as_deref()), (TriageStatus::FalsePositive, Some("noise")));
+    let withdrawn = set_triage(&exec, &scope, &one.id, &change(TriageStatus::Acknowledged, "ana", None), Some(1)).await?;
+    assert_eq!(
+        (withdrawn.triage.version, withdrawn.triage.status),
+        (TWO as i64, TriageStatus::Acknowledged)
+    );
     Ok(())
 }
