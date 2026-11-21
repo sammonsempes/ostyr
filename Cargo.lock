@@ -5314,19 +5314,31 @@ dependencies = [
 name = "remote-shell"
 version = "0.0.0"
 dependencies = [
+ "alerts",
+ "axum",
  "cmdb",
+ "core-api",
+ "core-audit",
  "core-auth",
  "core-config",
  "core-pg",
+ "pg-fake",
+ "rcgen",
  "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-postgres",
+ "tower",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
