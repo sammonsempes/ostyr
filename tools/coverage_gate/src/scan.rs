@@ -1,4 +1,5 @@
 use crate::error::GateError;
+use crate::manifest::excluded_dirs;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};
@@ -30,10 +31,11 @@ pub fn is_source(entry: &DirEntry, root_depth: usize) -> bool {
 
 pub fn find_sources(root: &Path) -> Result<Vec<PathBuf>, GateError> {
     let root_depth = root.components().count();
+    let excluded = excluded_dirs(root)?;
     WalkDir::new(root)
         .sort_by_file_name()
         .into_iter()
-        .filter_entry(|entry| entry.depth() == 0 || !is_skipped(entry.file_name()))
+        .filter_entry(|entry| entry.depth() == 0 || !(is_skipped(entry.file_name()) || excluded.iter().any(|dir| dir == entry.path())))
         .filter_map(|walked| {
             walked
                 .map_err(GateError::from)
