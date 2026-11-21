@@ -23,6 +23,12 @@ const SYSTEM_GRANT: &str = "SYSTEM:(OI)(CI)F";
 const ADMINISTRATORS_GRANT: &str = "Administrators:(OI)(CI)F";
 
 
+const ADMINISTRATORS_OWNER: &str = "*S-1-5-32-544";
+
+
+const SETOWNER_FLAG: &str = "/setowner";
+
+
 const MKLINK_HOST: &str = "cmd";
 
 
@@ -138,6 +144,33 @@ fn lock_down(directory: &Path) -> TestResult {
         .args(["/inheritance:r", "/grant:r", SYSTEM_GRANT, ADMINISTRATORS_GRANT])
         .status()?;
     assert!(status.success(), "icacls failed: {status}");
+    set_owner(directory, ADMINISTRATORS_OWNER)
+}
+
+
+fn set_owner(directory: &Path, owner: &str) -> TestResult {
+    let status = std::process::Command::new(ICACLS_HOST)
+        .arg(directory)
+        .args([SETOWNER_FLAG, owner])
+        .status()?;
+    assert!(status.success(), "icacls setowner failed: {status}");
+    Ok(())
+}
+
+
+#[test]
+fn a_locked_parent_owned_by_the_process_user_is_refused_by_name() -> TestResult {
+    let parent = tempfile::Builder::new().prefix("ostyr-spool-").tempdir_in(PROGRAM_DATA)?;
+    lock_down(parent.path())?;
+    set_owner(parent.path(), &format!("*{}", token_user_sid()?))?;
+    let leaf = parent.path().join("spool");
+    std::fs::create_dir(&leaf)?;
+    lock_down(&leaf)?;
+    let verdict = judge_spool_path(&open_directory(&leaf)?, &leaf.join("spool.jsonl"));
+    assert!(
+        matches!(&verdict, Err(DirAclError::UntrustedOwner { path, .. }) if path == parent.path()),
+        "{verdict:?}"
+    );
     Ok(())
 }
 

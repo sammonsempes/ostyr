@@ -33,6 +33,7 @@ readonly SKIPS=(
     "sys-windows|a_junction_at_an_entry_name_is_refused_as_a_reparse_point|junctions cannot be created"
     "sys-windows|a_protected_leaf_under_the_default_ancestors_is_accepted|C:\\ is user-owned and icacls is missing"
     "sys-windows|a_parent_keeping_its_inherited_creator_owner_grant_is_refused_by_name|C:\\ is user-owned and icacls is missing"
+    "sys-windows|a_locked_parent_owned_by_the_process_user_is_refused_by_name|C:\\ is user-owned and icacls is missing"
     "sys-windows|an_ancestor_the_user_controls_is_refused_by_name_before_the_spool_directory|C:\\ is user-owned and icacls is missing"
 )
 
