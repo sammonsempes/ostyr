@@ -101,6 +101,8 @@ pub enum EpssError {
 pub enum StoreError {
     #[error("database: {0}")]
     Pg(#[from] core_pg::error::PgError),
+    #[error("connection: {0}")]
+    Lease(#[from] alerts::error::StoreError),
     #[error("a scan holds at most {max} findings")]
     TooManyFindings { max: usize },
     #[error("the asset name is outside the grammar")]

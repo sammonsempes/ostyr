@@ -178,3 +178,10 @@ pub const CURSOR_FIELDS: usize = 5;
 
 
 pub const MAX_CURSOR_BYTES: usize = MAX_PRIORITY_DIGITS + (CURSOR_FIELDS - 1) * MAX_FIELD_BYTES + CURSOR_FIELDS - 1;
+
+
+/// Open findings one asset's detail serves; one more is fetched to set `truncated`.
+pub const MAX_ASSET_FINDINGS: usize = 1_000;
+
+
+pub const DEFAULT_PAGE_LIMIT: usize = 50;
