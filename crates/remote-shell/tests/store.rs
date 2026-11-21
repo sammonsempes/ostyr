@@ -716,9 +716,9 @@ const THIRD_MIGRATION: usize = 2;
 
 
 #[test]
-fn the_third_migration_is_registered_last() -> TestResult {
+fn the_migrations_are_registered_in_order() -> TestResult {
     let versions: Vec<&str> = MIGRATIONS.iter().map(|migration| migration.version).collect();
-    assert_eq!(versions, vec!["rshell_0001", "rshell_0002", "rshell_0003"]);
+    assert_eq!(versions, vec!["rshell_0001", "rshell_0002", "rshell_0003", "rshell_0004"]);
     assert!(!MIGRATIONS.get(THIRD_MIGRATION).ok_or("no third migration")?.sql.is_empty());
     Ok(())
 }

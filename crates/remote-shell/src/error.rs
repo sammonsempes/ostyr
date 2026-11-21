@@ -54,6 +54,10 @@ pub enum StoreError {
     OutOfRange { field: &'static str },
     #[error("unexpected value in column `{column}`")]
     BadRow { column: &'static str },
+    #[error("stored value of `{field}` is outside its grammar")]
+    StoredValue { field: &'static str },
+    #[error("the page cursor is malformed")]
+    BadCursor,
     #[error(transparent)]
     Pg(#[from] core_pg::error::PgError),
 }

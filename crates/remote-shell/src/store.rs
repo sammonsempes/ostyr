@@ -13,7 +13,7 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "remote_shell";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "rshell_0001",
         sql: include_str!("../migrations/rshell_0001.sql"),
@@ -25,6 +25,10 @@ pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "rshell_0003",
         sql: include_str!("../migrations/rshell_0003.sql"),
+    },
+    Migration {
+        version: "rshell_0004",
+        sql: include_str!("../migrations/rshell_0004.sql"),
     },
 ];
 
@@ -102,6 +106,11 @@ pub const STATE_SQL: &str = "SELECT closed_at, opened_at, requester, asset, tick
 pub const LIST_SQL: &str = "SELECT session_id, requester, asset, ticket, opened_at, closed_at, close_reason, recording_frames, recording_hash, \
     recording_bytes FROM remote_shell_sessions WHERE tenant = $1 AND ($2 = '' OR asset = $2) AND ($3 = '' OR requester = $3) \
     AND (NOT $4 OR closed_at IS NULL) ORDER BY opened_at DESC, session_id DESC LIMIT $5";
+
+
+/// Params: `$2` session id; one session of the tenant, in the columns of `LIST_SQL`.
+pub const SESSION_SQL: &str = "SELECT session_id, requester, asset, ticket, opened_at, closed_at, close_reason, recording_frames, recording_hash, \
+    recording_bytes FROM remote_shell_sessions WHERE tenant = $1 AND session_id = $2";
 
 
 /// As `LIST_SQL` plus `$6` and `$7`, the opened_at and session id the page starts strictly after.
@@ -367,7 +376,37 @@ pub fn decode_session(row: &Row) -> Result<SessionRow, StoreError> {
 }
 
 
-/// At most `limit` (1 to `MAX_PAGE`) sessions of the tenant, newest first by (opened_at, session id), strictly after `after` when given.
+pub fn check_limit(limit: u32) -> Result<(), StoreError> {
+    if limit == 0 || limit > MAX_PAGE {
+        Err(StoreError::LimitOutOfRange { limit, max: MAX_PAGE })
+    } else {
+        Ok(())
+    }
+}
+
+
+/// The list statement and its params (from `$2`); `rows` is the SQL `LIMIT`.
+pub fn list_statement(filter: &ListFilter, after: Option<&Cursor>, rows: u32) -> Result<(&'static str, Vec<Param>), StoreError> {
+    let mut params = vec![
+        Param::Text(filter_text(filter.asset.as_ref(), check_asset)?),
+        Param::Text(filter_text(filter.requester.as_ref(), check_requester)?),
+        Param::Bool(filter.open_only),
+        Param::Int(i64::from(rows)),
+    ];
+    let sql = match after {
+        Some(cursor) => {
+            check_reference("cursor", &cursor.session_id)?;
+            params.push(Param::Int(cursor.opened_at));
+            params.push(Param::Text(cursor.session_id.clone()));
+            LIST_AFTER_SQL
+        }
+        None => LIST_SQL,
+    };
+    Ok((sql, params))
+}
+
+
+/// At most `limit` (1 to `MAX_PAGE`) sessions of the tenant, newest first, strictly after `after`; `serve::list_page` is the serving form.
 pub async fn list_sessions<Executor, Pending>(
     exec: &mut Executor,
     scope: &TenantScope,
@@ -379,24 +418,7 @@ where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
     Pending: Future<Output = Result<Vec<Row>, StoreError>>,
 {
-    if limit == 0 || limit > MAX_PAGE {
-        Err(StoreError::LimitOutOfRange { limit, max: MAX_PAGE })
-    } else {
-        let mut params = vec![
-            Param::Text(filter_text(filter.asset.as_ref(), check_asset)?),
-            Param::Text(filter_text(filter.requester.as_ref(), check_requester)?),
-            Param::Bool(filter.open_only),
-            Param::Int(i64::from(limit)),
-        ];
-        let sql = match after {
-            Some(cursor) => {
-                check_reference("cursor", &cursor.session_id)?;
-                params.push(Param::Int(cursor.opened_at));
-                params.push(Param::Text(cursor.session_id.clone()));
-                LIST_AFTER_SQL
-            }
-            None => LIST_SQL,
-        };
-        run(exec, scope, sql, params).await?.iter().map(decode_session).collect()
-    }
+    check_limit(limit)?;
+    let (sql, params) = list_statement(filter, after, limit)?;
+    run(exec, scope, sql, params).await?.iter().map(decode_session).collect()
 }
