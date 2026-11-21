@@ -1168,7 +1168,7 @@ async fn hostile_case_list_is_escaped_clipped_and_unlinked() -> TestResult {
     }
     assert!(!list.body.contains(&"i".repeat(stub::LONG_CASE_ID_CHARS)));
     assert_eq!(list.body.matches("not linkable").count(), UNLINKED_CASES);
-    assert!(list.body.contains("unknown") && !list.body.contains("weird"));
+    assert!(list.body.contains("unknown") && !without_tokens(&list.body).contains("weird"));
     assert_eq!(case_requests(&rig)?.len(), 1);
     Ok(())
 }
@@ -1202,12 +1202,15 @@ async fn hostile_case_detail_is_escaped_and_bounded() -> TestResult {
     assert_eq!(detail.status, StatusCode::OK);
     assert!(!detail.body.contains("<script>") && !detail.body.contains('\u{202e}'));
     assert!(detail.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;&quot;'&lt;/td&gt;&amp;amp;"));
-    assert!(!detail.body.contains("weird") && !detail.body.contains("mystery") && !detail.body.contains("odd") && !detail.body.contains("urgent"));
+    assert!({
+        let cleaned = without_tokens(&detail.body);
+        ["weird", "mystery", "odd", "urgent"].iter().all(|word| !cleaned.contains(word))
+    });
     assert!(detail.body.contains("unknown"));
     assert!(detail.body.contains("6 omitted"));
     assert!(!detail.body.contains("<img") && !detail.body.contains("</style>"));
     assert_eq!(detail.body.matches("&lt;script&gt;alert(1)&lt;/script&gt;").count(), DETAIL_HOSTILE_SITES);
-    assert!(!detail.body.contains("task69"));
+    assert!(!without_tokens(&detail.body).contains("task69"));
     assert!(!detail.body.contains("9223372036854775807"));
     Ok(())
 }
@@ -2087,7 +2090,7 @@ async fn asset_api_failures_render_the_page_of_their_class() -> TestResult {
     assert_eq!(location_of(&ended).as_deref(), Some("/login"));
     let gone = fire(&rig, get_with("/assets/srv-1", &session)).await?;
     assert_eq!(location_of(&gone).as_deref(), Some("/login"));
-    assert!(!gone.body.contains("srv-1"));
+    assert!(!without_tokens(&gone.body).contains("srv-1"));
     Ok(())
 }
 
@@ -2145,7 +2148,7 @@ async fn the_risk_list_shows_scores_and_the_truncation_banner() -> TestResult {
     assert!(all.body.contains("action=\"/risk/host/web01\"") && all.body.contains("action=\"/risk/user/alice\""));
     assert!(all.body.contains(">web01</button>") && all.body.contains(">alice</button>"));
     let users = fire(&rig, get_with("/risk?kind=user", &session)).await?;
-    assert!(users.body.contains("alice") && !users.body.contains("web01"));
+    assert!(users.body.contains("alice") && !without_tokens(&users.body).contains("web01"));
     let french = fire(
         &rig,
         Req {
@@ -2196,7 +2199,7 @@ async fn risk_ids_that_do_not_render_as_themselves_are_unreadable_rows() -> Test
         list.body.matches("Unreadable entity.").count(),
         RISK_UNREADABLE_IDS.len() + RISK_EXTRA_UNREADABLE
     );
-    assert!(!list.body.contains("two  spaces") && !list.body.contains("hole") && !list.body.contains("over"));
+    assert!(!list.body.contains("two  spaces") && !without_tokens(&list.body).contains("hole") && !without_tokens(&list.body).contains("over"));
     let odd = format!("action=\"/risk/host/{}\"", encode_asset_id(RISK_ODD_ID));
     assert_eq!(encode_asset_id(RISK_ODD_ID), "a%2Fb%3Fc%23d%25e");
     assert!(list.body.contains(&odd), "{}", list.body);

@@ -64,16 +64,13 @@ fn degraded_causes(report: &UpsReport, flags: &BTreeSet<UpsFlag>, thresholds: &U
 }
 
 
-/// Measures of one target with labels `ups` and `host`; a host that fails the label grammar gives none, so two series never merge.
+/// Measures of one target with labels `ups` and `host`; `parse_target` already refused a target whose labels fail the grammar.
 pub fn ups_target_measures(report: &UpsReport, target: &UpsTarget) -> Vec<Measure> {
-    let host_label = Some(target.host.as_str()).filter(|host| is_clean_ident(host));
     ups_measures(report, &target.ups)
         .into_iter()
-        .filter_map(|mut measure| {
-            host_label.map(|host| {
-                measure.labels.push(("host".to_string(), host.to_string()));
-                measure
-            })
+        .map(|mut measure| {
+            measure.labels.push(("host".to_string(), target.host.clone()));
+            measure
         })
         .collect()
 }
