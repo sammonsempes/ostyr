@@ -1,9 +1,10 @@
 use crate::agent_app::AgentFile;
 use crate::error::{AppError, SpoolDirReason};
-use crate::types::AclJudge;
+use crate::spool::{suffixed, ASIDE_SUFFIX, QUARANTINE_LOCK_SUFFIX, REJECTED_SUFFIX, SENDING_SUFFIX, TEMPORARY_SUFFIX};
+use crate::types::{AclJudge, EntriesJudge};
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 
 const GROUP_OTHER_WRITE: u32 = 0o022;
@@ -114,14 +115,15 @@ pub fn open_and_judge(directory: &Path, shown: &Path, acl: AclJudge) -> Result<(
         reason: SpoolDirReason::NotDirectory,
     })?;
     acl(&handle, shown)?;
-    Ok((handle, (0, 0)))
+    let identity = sys_windows::native::file_identity(&handle)?;
+    Ok((handle, (u64::from(identity.volume), identity.index)))
 }
 
 
 /// The ACL judge of the platform: the real one on Windows, none on Unix where the owner and mode checks decide.
 #[cfg(not(unix))]
 pub fn platform_acl_judge(directory: &File, shown: &Path) -> Result<(), sys_windows::types::DirAclError> {
-    sys_windows::native::judge_directory_handle(directory, shown)
+    sys_windows::native::judge_spool_path(directory, shown)
 }
 
 
@@ -129,6 +131,50 @@ pub fn platform_acl_judge(directory: &File, shown: &Path) -> Result<(), sys_wind
 #[cfg(unix)]
 pub fn platform_acl_judge(_directory: &File, _shown: &Path) -> Result<(), sys_windows::types::DirAclError> {
     Ok(())
+}
+
+
+/// The entries judged on Windows: none on Unix where the owner and mode checks decide.
+#[cfg(unix)]
+pub fn platform_entries_judge(_paths: &[PathBuf]) -> Result<(), sys_windows::types::DirAclError> {
+    Ok(())
+}
+
+
+/// The entries judged on Windows: each fixed name that exists is checked against the spool rule.
+#[cfg(not(unix))]
+pub fn platform_entries_judge(paths: &[PathBuf]) -> Result<(), sys_windows::types::DirAclError> {
+    sys_windows::native::judge_spool_entries(paths)
+}
+
+
+/// Accepts every entry: the default of `open_spool_dirs_with`, where tests inject their own directory judge.
+pub fn accept_any_entries(_paths: &[PathBuf]) -> Result<(), sys_windows::types::DirAclError> {
+    Ok(())
+}
+
+
+/// Every fixed name the agent opens in its spool directories: each file, its `.tmp`, and the spool's `.sending`, `.rejected`, `.rejected.lock` and `.old`.
+pub fn spool_entry_paths(file: &AgentFile) -> Vec<PathBuf> {
+    let rejected = suffixed(&file.spool_file, REJECTED_SUFFIX);
+    let derived = [
+        suffixed(&file.spool_file, SENDING_SUFFIX),
+        rejected.clone(),
+        suffixed(&rejected, QUARANTINE_LOCK_SUFFIX),
+        suffixed(&file.spool_file, ASIDE_SUFFIX),
+    ];
+    let files = [
+        &file.spool_file,
+        &file.sequence_file,
+        &file.executed_file,
+        &file.state_file,
+        &file.audit_file,
+    ];
+    files
+        .into_iter()
+        .flat_map(|path| [path.clone(), suffixed(path, TEMPORARY_SUFFIX)])
+        .chain(derived)
+        .collect()
 }
 
 
@@ -150,12 +196,18 @@ pub fn open_parent_with(path: &Path, acl: AclJudge) -> Result<(File, (u64, u64))
 
 /// Opens and judges the parent directory of every file the agent writes by path; call it once per process before any spool producer or claim.
 pub fn open_spool_dirs(file: &AgentFile) -> Result<SpoolDirs, AppError> {
-    open_spool_dirs_with(file, platform_acl_judge)
+    open_spool_dirs_judged(file, platform_acl_judge, platform_entries_judge)
 }
 
 
 /// `open_spool_dirs` with the ACL judge injected, so a Windows test can open a temporary directory the real judge refuses.
 pub fn open_spool_dirs_with(file: &AgentFile, acl: AclJudge) -> Result<SpoolDirs, AppError> {
+    open_spool_dirs_judged(file, acl, accept_any_entries)
+}
+
+
+/// `open_spool_dirs` with both judges injected: the directories first, then every existing fixed-name entry.
+pub fn open_spool_dirs_judged(file: &AgentFile, acl: AclJudge, entries: EntriesJudge) -> Result<SpoolDirs, AppError> {
     let files = [
         &file.spool_file,
         &file.sequence_file,
@@ -171,6 +223,7 @@ pub fn open_spool_dirs_with(file: &AgentFile, acl: AclJudge) -> Result<SpoolDirs
         }
         Ok::<_, AppError>(kept)
     })?;
+    entries(&spool_entry_paths(file))?;
     Ok(SpoolDirs {
         handles: judged.into_iter().map(|(handle, _)| handle).collect(),
     })

@@ -1,19 +1,40 @@
 #![cfg(windows)]
 use crate::descriptor::{parse_descriptor, sid_from_token_user};
 use crate::judge::{judge_spool_dir, principals_from_token_user};
-use crate::types::{DirAclError, ParsedDescriptor};
-use std::fs::File;
+use crate::types::{DirAclError, FileIdentity, ParsedDescriptor, Principals};
+use crate::walk::{judge_ancestor, split_volume_path, walk_prefixes};
+use std::fs::{File, OpenOptions};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use windows::core::Owned;
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows::Win32::Security::{GetSecurityDescriptorLength, GetTokenInformation, TokenUser};
 use windows::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY};
+use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 
 const WORD_BYTES: usize = std::mem::size_of::<u64>();
+
+
+const WALK_FLAGS: u32 = 0x0200_0000 | 0x0020_0000;
+
+
+const SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+
+
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+
+const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+
+
+const READ_CONTROL: u32 = 0x0002_0000;
 
 
 fn windows_error(operation: &'static str, error: &windows::core::Error) -> DirAclError {
@@ -76,9 +97,113 @@ pub fn token_user_sid() -> Result<String, DirAclError> {
 }
 
 
+/// The volume serial number and file index of an opened file (`GetFileInformationByHandle`).
+pub fn file_identity(file: &File) -> Result<FileIdentity, DirAclError> {
+    let handle = HANDLE(file.as_raw_handle());
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is open for the whole call (borrowed from `file`) and `information` is a valid out pointer.
+    unsafe { GetFileInformationByHandle(handle, &mut information) }.map_err(|error| windows_error("GetFileInformationByHandle", &error))?;
+    Ok(FileIdentity {
+        volume: information.dwVolumeSerialNumber,
+        index: (u64::from(information.nFileIndexHigh) << u32::BITS) | u64::from(information.nFileIndexLow),
+    })
+}
+
+
+fn open_for_walk(path: &Path) -> Result<File, DirAclError> {
+    let handle = OpenOptions::new()
+        .read(true)
+        .share_mode(SHARE_READ_WRITE)
+        .custom_flags(WALK_FLAGS)
+        .open(path)
+        .map_err(|error| DirAclError::Open {
+            path: path.to_path_buf(),
+            kind: error.kind(),
+        })?;
+    let attributes = handle
+        .metadata()
+        .map_err(|error| DirAclError::Open {
+            path: path.to_path_buf(),
+            kind: error.kind(),
+        })?
+        .file_attributes();
+    (attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+        .then_some(handle)
+        .ok_or_else(|| DirAclError::ReparsePoint { path: path.to_path_buf() })
+}
+
+
+/// Walks from the volume root to the directory holding `file_path` without following a reparse point; ancestors, leaf and identity are judged.
+pub fn judge_spool_path(directory: &File, file_path: &Path) -> Result<(), DirAclError> {
+    let parent = file_path.parent().unwrap_or(file_path);
+    let text = parent.to_str().ok_or_else(|| DirAclError::BadPath {
+        path: parent.display().to_string(),
+        reason: "not valid Unicode",
+    })?;
+    let volume_path = split_volume_path(text)?;
+    let opened = walk_prefixes(&volume_path)
+        .into_iter()
+        .map(|prefix| open_for_walk(Path::new(&prefix)).map(|handle| (PathBuf::from(prefix), handle)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ((leaf_path, leaf), ancestors) = opened.split_last().ok_or(DirAclError::Malformed("empty walk"))?;
+    (file_identity(leaf)? == file_identity(directory)?)
+        .then_some(())
+        .ok_or_else(|| DirAclError::IdentityMismatch { path: leaf_path.clone() })?;
+    let principals = principals_from_token_user(&token_user_sid()?)?;
+    ancestors
+        .iter()
+        .try_for_each(|(path, handle)| judge_ancestor(path, &read_descriptor(handle)?, &principals))?;
+    judge_spool_dir(file_path, &read_descriptor(leaf)?, &principals)
+}
+
+
 /// Judges an opened spool directory: its descriptor against the process account; the one call `open_spool_dirs` makes on Windows.
 pub fn judge_directory_handle(directory: &File, shown: &Path) -> Result<(), DirAclError> {
     let descriptor = read_descriptor(directory)?;
     let principals = principals_from_token_user(&token_user_sid()?)?;
     judge_spool_dir(shown, &descriptor, &principals)
+}
+
+
+fn open_entry(path: &Path) -> Result<Option<File>, DirAclError> {
+    let opened = OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(SHARE_ALL)
+        .custom_flags(WALK_FLAGS)
+        .open(path);
+    match opened {
+        Ok(handle) => Ok(Some(handle)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DirAclError::Open {
+            path: path.to_path_buf(),
+            kind: error.kind(),
+        }),
+    }
+}
+
+
+fn judge_entry(path: &Path, handle: &File, principals: &Principals) -> Result<(), DirAclError> {
+    let attributes = handle
+        .metadata()
+        .map_err(|error| DirAclError::Open {
+            path: path.to_path_buf(),
+            kind: error.kind(),
+        })?
+        .file_attributes();
+    (attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+        .then_some(())
+        .ok_or_else(|| DirAclError::ReparsePoint { path: path.to_path_buf() })?;
+    (attributes & FILE_ATTRIBUTE_DIRECTORY == 0)
+        .then_some(())
+        .ok_or_else(|| DirAclError::NotRegularFile { path: path.to_path_buf() })?;
+    judge_spool_dir(path, &read_descriptor(handle)?, principals)
+}
+
+
+/// Judges each fixed-name entry that exists (a missing one is fine): not a reparse point or directory, trusted owner, DACL within the spool rule.
+pub fn judge_spool_entries(paths: &[PathBuf]) -> Result<(), DirAclError> {
+    let principals = principals_from_token_user(&token_user_sid()?)?;
+    paths
+        .iter()
+        .try_for_each(|path| open_entry(path)?.as_ref().map_or(Ok(()), |handle| judge_entry(path, handle, &principals)))
 }

@@ -16,6 +16,7 @@ mod settings;
 mod spool_append;
 #[cfg(unix)]
 mod spool_dirs;
+mod spool_entries;
 #[cfg(unix)]
 mod spool_lock_kinds;
 #[cfg(unix)]

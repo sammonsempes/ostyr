@@ -8,7 +8,7 @@ use std::error::Error;
 use std::fs::File;
 use std::future::Future;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -113,3 +113,7 @@ pub type RewriteHooks = (fn(&Path) -> io::Result<Option<File>>, u32);
 
 
 pub type AclJudge = fn(&File, &Path) -> Result<(), sys_windows::types::DirAclError>;
+
+
+/// Judges the fixed-name entries of the spool directories that already exist; injected so tests can refuse or record them.
+pub type EntriesJudge = fn(&[PathBuf]) -> Result<(), sys_windows::types::DirAclError>;
