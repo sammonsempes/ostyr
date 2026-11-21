@@ -10,6 +10,7 @@ use crate::updates::{run_updates, APT_LISTS_DIR, COUNTER_SUFFIX, MAX_UPDATE_EVEN
 use agent_channel::agent_app::{load_agent_file, now_seconds, run_agent, AgentFile};
 use agent_channel::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use agent_channel::spool::{line_limit, suffixed, SENDING_SUFFIX};
+use agent_channel::spool_dirs::{open_spool_dirs, SpoolDirs};
 use agent_channel::types::PauseFn;
 use core_audit::log::open_file_log;
 use core_config::load::load_file;
@@ -25,10 +26,10 @@ pub const AGENT_CYCLE_SECONDS: u64 = 5;
 
 
 /// Runs the agent `max_runs` times; a failed run is logged and the next one starts after the pause. Returns the runs that succeeded.
-pub async fn run_agent_cycles(agent: &AgentFile, max_runs: u64, pause: &PauseFn) -> u64 {
+pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn) -> u64 {
     let mut succeeded = 0;
     for _ in 0..max_runs {
-        let outcome = run_agent(agent, pause)
+        let outcome = run_agent(agent, checked, pause)
             .await
             .inspect_err(|error| tracing::warn!(%error, "agent run failed"));
         succeeded += u64::from(outcome.is_ok());
@@ -53,6 +54,7 @@ pub fn source_paths(file: &LinuxFile, agent: &AgentFile) -> Paths {
 pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<Totals, SourceError> {
     let file = load_file::<LinuxFile>(path)?;
     let agent = load_agent_file(&file.agent_file)?;
+    let dirs = open_spool_dirs(&agent)?;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let context = reload_context(path, LINUX_MODULE, &agent.tenant, "agent-linux-reload");
     file.systemctl_path
@@ -70,7 +72,7 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn) -> Result<T
             .await
             .inspect_err(|error| tracing::error!(%error, "source failed, the agent stops"))
     };
-    let cycles = async { Ok::<u64, SourceError>(run_agent_cycles(&agent, max_polls, pause).await) };
+    let cycles = async { Ok::<u64, SourceError>(run_agent_cycles(&agent, &dirs, max_polls, pause).await) };
     let env = SensorEnv {
         systemctl: file.systemctl_path.clone(),
         export: file.export_path.clone(),

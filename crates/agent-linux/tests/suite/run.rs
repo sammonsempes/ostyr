@@ -180,7 +180,10 @@ async fn a_source_that_fails_at_start_ends_the_agent_at_once() -> TestResult {
     let config = write_files(dir.path())?;
     let yielding: &PauseFn = &|_| Box::pin(tokio::task::yield_now());
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(WORLD_WRITABLE))?;
-    assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::StateDir(..))));
+    assert!(matches!(
+        run_linux(&config, u64::MAX, yielding).await,
+        Err(SourceError::App(agent_channel::error::AppError::SpoolDir { .. }))
+    ));
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(PRIVATE))?;
     fs::write(dir.path().join("cursor"), "garbage")?;
     assert!(matches!(run_linux(&config, u64::MAX, yielding).await, Err(SourceError::Cursor(_))));
