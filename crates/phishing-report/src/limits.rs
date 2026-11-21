@@ -47,6 +47,9 @@ pub const MAX_NAME_CHARS: usize = 255;
 pub const MAX_ADDRESS_BYTES: usize = 320;
 
 
+pub const MAX_FROM_ADDRESSES: usize = 32;
+
+
 pub const MAX_CHILD_ADDRESS_SPACE: usize = 512 * MIB;
 
 
