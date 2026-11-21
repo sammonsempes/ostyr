@@ -92,6 +92,10 @@ pub enum StoreError {
     RunChanged,
     #[error("a stored key or run id is outside its grammar")]
     StoredValue,
+    #[error("the query string is malformed")]
+    BadQuery,
     #[error("database: {0}")]
     Pg(#[from] PgError),
+    #[error("connection lease: {0}")]
+    Lease(#[from] alerts::error::StoreError),
 }

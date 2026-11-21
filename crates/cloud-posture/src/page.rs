@@ -342,15 +342,22 @@ pub fn page_of(account: &str, rows: &[Vec<String>], limit: usize, cursor: Option
 }
 
 
-/// Every check that needs no I/O: account, limit (1 to `MAX_PAGE_LIMIT`) and cursor.
-pub fn check_read(account: &str, cursor: Option<&str>, limit: usize) -> Result<Option<PageCursor>, StoreError> {
+/// The checks of the account and the limit (1 to `MAX_PAGE_LIMIT`).
+pub fn check_target(account: &str, limit: usize) -> Result<(), StoreError> {
     if !valid_reference(account, MAX_ACCOUNT_BYTES) {
         Err(StoreError::BadAccount)
     } else if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
         Err(StoreError::BadLimit { max: MAX_PAGE_LIMIT })
     } else {
-        cursor.map(parse_cursor).transpose()
+        Ok(())
     }
+}
+
+
+/// Every check that needs no I/O: account, limit (1 to `MAX_PAGE_LIMIT`) and cursor.
+pub fn check_read(account: &str, cursor: Option<&str>, limit: usize) -> Result<Option<PageCursor>, StoreError> {
+    check_target(account, limit)?;
+    cursor.map(parse_cursor).transpose()
 }
 
 
@@ -358,6 +365,25 @@ pub fn check_read(account: &str, cursor: Option<&str>, limit: usize) -> Result<O
 pub fn page_params(account: &str, cursor: Option<&PageCursor>, limit: usize) -> Vec<String> {
     let (rank, identity) = cursor.map_or((RANK_BEFORE_FIRST, String::new()), |named| (named.rank, named.identity.clone()));
     vec![account.to_owned(), rank.to_string(), identity, (limit + 1).to_string()]
+}
+
+
+/// One page for a cursor already parsed (the account and the limit are checked again): the API checks the request before it leases a connection.
+pub async fn read_parsed(
+    exec: Executor<'_, '_>,
+    scope: &TenantScope,
+    account: &str,
+    parsed: Option<&PageCursor>,
+    limit: usize,
+) -> Result<FindingsPage, StoreError> {
+    check_target(account, limit)?;
+    let rows = exec(scope.clone(), PAGE_SQL, page_params(account, parsed, limit)).await?;
+    let page = page_of(account, &rows, limit, parsed)?;
+    let unservable = page.unservable;
+    if unservable > 0 {
+        tracing::warn!(unservable, "stored posture findings that cannot be served were skipped");
+    }
+    Ok(page)
 }
 
 
@@ -370,11 +396,5 @@ pub async fn read_findings(
     limit: usize,
 ) -> Result<FindingsPage, StoreError> {
     let parsed = check_read(account, cursor, limit)?;
-    let rows = exec(scope.clone(), PAGE_SQL, page_params(account, parsed.as_ref(), limit)).await?;
-    let page = page_of(account, &rows, limit, parsed.as_ref())?;
-    let unservable = page.unservable;
-    if unservable > 0 {
-        tracing::warn!(unservable, "stored posture findings that cannot be served were skipped");
-    }
-    Ok(page)
+    read_parsed(exec, scope, account, parsed.as_ref(), limit).await
 }
