@@ -1,6 +1,6 @@
 use crate::alert::{Alert, AlertPage};
 use crate::api_model::{AlertListView, AlertView, ListQuery, OncallBackend};
-use crate::error::ReadError;
+use crate::error::{ReadError, StoreError};
 use crate::limits::{MAX_FINGERPRINT_BYTES, MAX_OPEN_ALERTS};
 use crate::rows::phase_name;
 use crate::store::valid_text;
@@ -37,6 +37,12 @@ pub const NOT_FOUND_CODE: &str = "not_found";
 
 
 pub const NOT_FOUND_MESSAGE: &str = "no such alert";
+
+
+pub const UNREADABLE_CODE: &str = "unreadable_alert";
+
+
+pub const UNREADABLE_MESSAGE: &str = "the stored alert cannot be shown";
 
 
 pub const FIRST_YEAR: i32 = 0;
@@ -135,6 +141,24 @@ pub fn not_found() -> Response {
 }
 
 
+/// A row of the caller's tenant that exists but cannot be shown: a fixed 422 that holds no stored text and no field name.
+pub fn unreadable() -> Response {
+    let body = ErrorBody {
+        error: ErrorDetail {
+            code: UNREADABLE_CODE.to_owned(),
+            message: UNREADABLE_MESSAGE.to_owned(),
+        },
+    };
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
+}
+
+
+/// Both causes of an unshowable row: a value the view refuses and a cell the driver could not decode.
+pub fn is_unreadable(error: &ReadError) -> bool {
+    matches!(error, ReadError::Unrepresentable | ReadError::Store(StoreError::BadRow { .. }))
+}
+
+
 /// A row whose fingerprint or times cannot be written is left out and counted in `skipped`, like a row the decoder refused.
 pub fn list_view(page: &AlertPage) -> AlertListView {
     let (shown, failed): (Vec<_>, Vec<_>) = page.alerts.iter().map(alert_view).partition(Result::is_ok);
@@ -163,13 +187,27 @@ pub async fn get_flow(identity: &ApiIdentity, backend: &OncallBackend, id: Resul
     let scope = scope_of(identity)?;
     match id.ok().as_deref().and_then(parse_id) {
         None => Ok(not_found()),
-        Some(number) => match (backend.get)(scope, number).await.map_err(|error| read_failure(&error))? {
-            None => Ok(not_found()),
-            Some(alert) => {
-                let view = alert_view(&alert).map_err(|error| read_failure(&error))?;
-                Ok(Json(view).into_response())
-            }
-        },
+        Some(number) => {
+            let found = (backend.get)(scope, number)
+                .await
+                .and_then(|stored| stored.map(|alert| alert_view(&alert)).transpose());
+            get_answer(found)
+        }
+    }
+}
+
+
+/// A missing row is the 404, an unshowable one the 422, any other failure the logged generic error.
+pub fn get_answer(found: Result<Option<AlertView>, ReadError>) -> Result<Response, ApiError> {
+    match found {
+        Ok(Some(view)) => Ok(Json(view).into_response()),
+        Ok(None) => Ok(not_found()),
+        Err(error) if is_unreadable(&error) => {
+            let category = failure_category(&error);
+            tracing::warn!(category, "on-call stored alert cannot be shown");
+            Ok(unreadable())
+        }
+        Err(error) => Err(read_failure(&error)),
     }
 }
 
@@ -206,6 +244,7 @@ pub async fn list_endpoint(
         (status = 401, description = "No valid session", body = ErrorBody),
         (status = 403, description = "Permission denied", body = ErrorBody),
         (status = 404, description = "No such alert for this tenant", body = ErrorBody),
+        (status = 422, description = "The stored alert cannot be shown", body = ErrorBody),
         (status = 429, description = "Too many requests", body = ErrorBody)
     )
 )]

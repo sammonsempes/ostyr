@@ -244,11 +244,26 @@ async fn a_full_pool_is_429_and_a_store_failure_is_a_generic_500() -> TestResult
     let failed = get(&fx.router, LIST_PATH, Some(&token)).await?;
     assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(!body_json(failed).await?.to_string().contains(MARKER));
-    assert_eq!(
-        get(&fx.router, "/oncall/alerts/11", Some(&token)).await?.status(),
-        StatusCode::INTERNAL_SERVER_ERROR
-    );
+    set_mode(&fx.script, Mode::Down);
+    for path in [LIST_PATH, "/oncall/alerts/11"] {
+        assert_eq!(
+            get(&fx.router, path, Some(&token)).await?.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+    }
+    for mode in [Mode::Fail, Mode::BadCell] {
+        set_mode(&fx.script, mode);
+        let detail = get(&fx.router, "/oncall/alerts/11", Some(&token)).await?;
+        assert_eq!(detail.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body_json(detail).await?, unreadable_body());
+    }
     Ok(())
+}
+
+
+fn unreadable_body() -> Value {
+    json!({"error": {"code": "unreadable_alert", "message": "the stored alert cannot be shown"}})
 }
 
 
@@ -275,10 +290,9 @@ async fn a_row_outside_the_grammar_is_refused_alone_and_counted() -> TestResult 
     let json = body_json(get(&fx.router, LIST_PATH, Some(&token)).await?).await?;
     assert_eq!(item_ids(&json)?, [1]);
     assert_eq!(json.get("skipped"), Some(&json!(COUNT_FIVE)));
-    assert_eq!(
-        get(&fx.router, "/oncall/alerts/2", Some(&token)).await?.status(),
-        StatusCode::INTERNAL_SERVER_ERROR
-    );
+    let detail = get(&fx.router, "/oncall/alerts/2", Some(&token)).await?;
+    assert_eq!(detail.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(detail).await?, unreadable_body());
     Ok(())
 }
 
@@ -399,7 +413,7 @@ async fn a_stored_line_separator_fingerprint_is_skipped_and_never_logged() -> Te
     let json = body_json(listed).await?;
     assert_eq!(item_ids(&json)?, [1]);
     assert_eq!(json.get("skipped"), Some(&json!(1)));
-    assert_eq!(single.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(single.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = body_json(single).await?.to_string();
     let logs = String::from_utf8(capture.0.lock().map_err(|error| error.to_string())?.clone())?;
     assert!(logs.contains("stored_value"));

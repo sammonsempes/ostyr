@@ -38,6 +38,8 @@ pub enum ApiFailure {
     Handshake(TlsClass),
     #[error("the API refused the change: {0}")]
     Conflict(&'static str),
+    #[error("the API has the object but cannot show it")]
+    Unreadable,
     #[error("the API answered with status {0}")]
     Status(u16),
     #[error("the API answer is larger than the bound")]

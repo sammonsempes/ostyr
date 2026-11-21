@@ -1,11 +1,11 @@
 use crate::api::{
-    encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_pack_id, valid_state_asset, valid_state_id, CERT_FILTERS,
-    MAX_COMMENT_CHARS, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL,
+    encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_oncall_text, valid_pack_id, valid_state_asset, valid_state_id,
+    CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
-    CertView, CommentView, FindingView, FindingsView, Language, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, StateAssetView,
-    StateListView, StateView,
+    CertView, CommentView, FindingView, FindingsView, Language, OncallAlertView, OncallListView, RiskDetailView, RiskEntityView, RiskListView,
+    RiskTruncatedView, StateAssetView, StateListView, StateView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
@@ -189,6 +189,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/certificates", text(language, "nav_certs")))
                         (go("/hunts", text(language, "nav_hunts")))
                         (go("/compliance", text(language, "nav_compliance")))
+                        (go("/oncall", text(language, "nav_oncall")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -1318,6 +1319,125 @@ pub fn compliance_asset_page(language: Language, csrf: &str, asset: &str, detail
                 }
             }
             (go("/compliance", text(language, "compliance_back")))
+        },
+    )
+}
+
+
+pub const ONCALL_COLUMNS: u32 = 8;
+
+
+/// The text key of one of the four phases the oncall API names, `None` for anything else.
+pub fn oncall_state_key(state: &str) -> Option<&'static str> {
+    match state {
+        "open" => Some("oncall_state_open"),
+        "acknowledged" => Some("oncall_state_acknowledged"),
+        "escalated" => Some("oncall_state_escalated"),
+        "resolved" => Some("oncall_state_resolved"),
+        _other => None,
+    }
+}
+
+
+/// The state key and the three times as UTC text, `None` unless the fingerprint, state, counters and times are all inside their rules.
+pub fn readable_oncall(alert: &OncallAlertView) -> Option<(&'static str, String, String, String)> {
+    let acknowledged = alert.acknowledged_at.as_deref().map_or(Some(NO_TIME.to_owned()), window_time);
+    let resolved = alert.resolved_at.as_deref().map_or(Some(NO_TIME.to_owned()), window_time);
+    let opened = window_time(&alert.opened_at);
+    let sound = valid_oncall_text(&alert.fingerprint, MAX_ONCALL_FINGERPRINT_BYTES) && alert.id >= 0 && alert.occurrences >= 0;
+    sound
+        .then(|| oncall_state_key(&alert.state))
+        .flatten()
+        .zip(opened)
+        .zip(acknowledged)
+        .zip(resolved)
+        .map(|(((key, opened_at), acknowledged_at), resolved_at)| (key, opened_at, acknowledged_at, resolved_at))
+}
+
+
+/// One row; the id is a link only on the list.
+pub fn oncall_row(language: Language, alert: &OncallAlertView, linked: bool) -> Markup {
+    match readable_oncall(alert) {
+        Some((key, opened, acknowledged, resolved)) => html! {
+            tr {
+                td {
+                    @if linked {
+                        (go(&format!("/oncall/{}", alert.id), &alert.id.to_string()))
+                    } @else {
+                        (alert.id)
+                    }
+                }
+                td { (alert.fingerprint) }
+                td { (text(language, key)) }
+                td { (alert.level) }
+                td { (alert.occurrences) }
+                td { (opened) }
+                td { (acknowledged) }
+                td { (resolved) }
+            }
+        },
+        None => html! {
+            tr { td colspan=(ONCALL_COLUMNS) { (text(language, "oncall_unreadable")) } }
+        },
+    }
+}
+
+
+pub fn oncall_head(language: Language) -> Markup {
+    html! {
+        thead {
+            tr {
+                th { (text(language, "col_oncall_id")) }
+                th { (text(language, "col_fingerprint")) }
+                th { (text(language, "col_status")) }
+                th { (text(language, "col_level")) }
+                th { (text(language, "col_occurrences")) }
+                th { (text(language, "col_opened_at")) }
+                th { (text(language, "col_acknowledged_at")) }
+                th { (text(language, "col_resolved_at")) }
+            }
+        }
+    }
+}
+
+
+pub fn oncall_page(language: Language, csrf: &str, list: &OncallListView) -> Markup {
+    layout(
+        language,
+        "title_oncall",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_oncall")) }
+            @if list.skipped > 0 {
+                div class="notice" { (counted_notice(language, "oncall_skipped_one", "oncall_skipped", list.skipped)) }
+            }
+            @if list.items.is_empty() {
+                div { (text(language, if list.skipped > 0 { "oncall_no_readable" } else { "oncall_empty" })) }
+            } @else {
+                table {
+                    (oncall_head(language))
+                    tbody {
+                        @for alert in &list.items { (oncall_row(language, alert, true)) }
+                    }
+                }
+            }
+        },
+    )
+}
+
+
+pub fn oncall_alert_page(language: Language, csrf: &str, alert: &OncallAlertView) -> Markup {
+    layout(
+        language,
+        "title_oncall_alert",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_oncall_alert")) " " (alert.id) }
+            table {
+                (oncall_head(language))
+                tbody { (oncall_row(language, alert, false)) }
+            }
+            (go("/oncall", text(language, "oncall_back")))
         },
     )
 }

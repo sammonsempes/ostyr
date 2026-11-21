@@ -1773,6 +1773,7 @@ async fn each_failure_has_a_fixed_class_name() -> TestResult {
         (unavailable, "unavailable"),
         (ApiFailure::Conflict("full"), "conflict"),
         (ApiFailure::Status(UPSTREAM_STATUS), "status"),
+        (ApiFailure::Unreadable, "unreadable"),
         (ApiFailure::TooLarge, "too_large"),
         (ApiFailure::Malformed("x"), "malformed"),
         (ApiFailure::from(json), "json"),
@@ -2944,5 +2945,168 @@ async fn compliance_api_failures_render_our_own_text() -> TestResult {
     let ended_detail = fire(&rig, get_with("/compliance/host-1", &second)).await?;
     assert_eq!(location_of(&ended_detail).as_deref(), Some("/login"));
     assert!(ended_detail.headers.get("set-cookie").is_some());
+    Ok(())
+}
+
+
+fn oncall_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.oncall_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+const ONCALL_HOSTILE_UNREADABLE_ROWS: usize = 14;
+
+
+const ONCALL_LIST_CALLS: usize = 5;
+
+
+#[tokio::test]
+async fn the_oncall_list_shows_rows_notices_and_both_languages() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/oncall\""));
+    let list = fire(&rig, get_with("/oncall?limit=5&tenant=b", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_hardened(&list);
+    for expected in [
+        "On-call alerts",
+        "fp one",
+        "fp-two",
+        "action=\"/oncall/7\"",
+        "<td>Open</td>",
+        "<td>Acknowledged</td>",
+        "<td>2026-03-01T09:00:00Z</td>",
+        "<td>2026-03-02T00:00:00Z</td>",
+        "<td>-</td>",
+        "1 row could not be read.",
+    ] {
+        assert!(list.body.contains(expected), "{expected}: {}", list.body);
+    }
+    let french_request = Req {
+        language: Some("fr".to_owned()),
+        ..get_with("/oncall", &session)
+    };
+    let french = fire(&rig, french_request).await?;
+    for expected in ["Alertes d'astreinte", "Prise en compte", "1 ligne n'a pas pu être lue."] {
+        assert!(french.body.contains(expected), "{expected}");
+    }
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/oncall", &session)).await?;
+    assert!(empty.body.contains("No open alert.") && !empty.body.contains("could not be read"));
+    set_mode(&rig, Mode::BadId)?;
+    let none_readable = fire(&rig, get_with("/oncall", &session)).await?;
+    assert!(none_readable.body.contains("No readable alert on this page.") && none_readable.body.contains("1 row could not be read."));
+    set_mode(&rig, Mode::BadSeverity)?;
+    let many = fire(&rig, get_with("/oncall", &session)).await?;
+    assert!(many.body.contains("3 rows could not be read."));
+    let anonymous = fire(&rig, get("/oncall")).await?;
+    assert_eq!(location_of(&anonymous).as_deref(), Some("/login"));
+    let paths = oncall_requests(&rig)?;
+    assert!(paths.iter().all(|path| path == "/oncall/alerts?limit=1000"), "{paths:?}");
+    assert_eq!(paths.len(), ONCALL_LIST_CALLS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hostile_oncall_row_is_an_unreadable_row_and_never_printed() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/oncall", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_no_hidden_characters(&list.body);
+    for forbidden in ["evil", "script", "\u{3164}", "bogus", "not a time", "two  spaces", "aaaaaaaaaa", "\u{e9}"] {
+        assert!(!list.body.contains(forbidden), "{forbidden}");
+    }
+    assert_eq!(list.body.matches("Unreadable row.").count(), ONCALL_HOSTILE_UNREADABLE_ROWS);
+    assert!(list.body.contains("fine.fp 1") && list.body.contains("<td>Escalated</td>") && list.body.contains("1 row could not be read."));
+    let detail = fire(&rig, get_with("/oncall/3", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_no_hidden_characters(&detail.body);
+    assert!(!detail.body.contains("evil") && detail.body.contains("Unreadable row."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_oncall_detail_shows_the_alert_and_refuses_a_bad_id_before_any_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let detail = fire(&rig, get_with("/oncall/7", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_hardened(&detail);
+    for expected in [
+        "On-call alert 7",
+        "fp one",
+        "<td>Resolved</td>",
+        "<td>2026-03-03T00:00:00Z</td>",
+        "action=\"/oncall\"",
+    ] {
+        assert!(detail.body.contains(expected), "{expected}: {}", detail.body);
+    }
+    assert!(!detail.body.contains("action=\"/oncall/7\""));
+    let french_request = Req {
+        language: Some("fr".to_owned()),
+        ..get_with("/oncall/7", &session)
+    };
+    assert!(fire(&rig, french_request).await?.body.contains("Alerte d'astreinte 7"));
+    assert_eq!(oncall_requests(&rig)?, ["/oncall/alerts/7", "/oncall/alerts/7"]);
+    for path in [
+        "/oncall/-1",
+        "/oncall/1e3",
+        "/oncall/99999999999999999999",
+        "/oncall/+1",
+        "/oncall/a%20b",
+        "/oncall/%E0%A5%A7",
+    ] {
+        let reply = fire(&rig, get_with(path, &session)).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert_eq!(oncall_requests(&rig)?.len(), TWO_VALID_CALLS);
+    let other_tenant = fire(&rig, get_with("/oncall/99", &session)).await?;
+    assert_eq!(other_tenant.status, StatusCode::NOT_FOUND);
+    assert!(!other_tenant.body.contains(LEAK));
+    set_mode(&rig, Mode::BadId)?;
+    assert_eq!(fire(&rig, get_with("/oncall/7", &session)).await?.status, StatusCode::BAD_GATEWAY);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn oncall_api_failures_render_our_own_text() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for path in ["/oncall", "/oncall/7"] {
+        for (mode, status) in [
+            (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+            (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+            (Mode::Oversize, StatusCode::BAD_GATEWAY),
+        ] {
+            set_mode(&rig, mode)?;
+            let reply = fire(&rig, get_with(path, &session)).await?;
+            assert_eq!(reply.status, status, "{path}");
+            assert!(!reply.body.contains(LEAK));
+            assert_hardened(&reply);
+        }
+    }
+    for mode in [Mode::TooMany, Mode::BadCursor] {
+        set_mode(&rig, mode)?;
+        assert_eq!(fire(&rig, get_with("/oncall", &session)).await?.status, StatusCode::BAD_GATEWAY);
+    }
+    set_mode(&rig, Mode::Status(StatusCode::UNPROCESSABLE_ENTITY))?;
+    let unreadable = fire(&rig, get_with("/oncall/7", &session)).await?;
+    assert_eq!(unreadable.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(unreadable.body.contains("Unreadable row.") && !unreadable.body.contains(LEAK));
+    assert_hardened(&unreadable);
+    assert_eq!(fire(&rig, get_with("/oncall", &session)).await?.status, StatusCode::BAD_GATEWAY);
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/oncall", &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    set_mode(&rig, Mode::Normal)?;
+    let second = sign_in(&rig).await?;
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended_detail = fire(&rig, get_with("/oncall/7", &second)).await?;
+    assert_eq!(location_of(&ended_detail).as_deref(), Some("/login"));
     Ok(())
 }

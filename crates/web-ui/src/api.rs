@@ -1,7 +1,7 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView,
-    FindingsView, RiskDetailView, RiskListView, StateAssetView, StateListView,
+    FindingsView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, StateAssetView, StateListView,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
@@ -925,5 +925,74 @@ pub async fn get_state_asset(client: &ApiClient, source: IpAddr, token: &SecretS
         serde_json::from_slice(&bytes).map_err(ApiFailure::from)
     } else {
         Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// The oncall API's `MAX_OPEN_ALERTS`: the limit sent, and the most items one list may hold.
+pub const ONCALL_LIMIT: u32 = 1000;
+
+
+/// The oncall API's `MAX_FINGERPRINT_BYTES`.
+pub const MAX_ONCALL_FINGERPRINT_BYTES: usize = 256;
+
+
+/// The four phases the oncall API names.
+pub const ONCALL_STATES: [&str; 4] = ["open", "acknowledged", "escalated", "resolved"];
+
+
+/// The oncall store's `valid_text`: printable ASCII and single inner spaces, at most `max` bytes.
+pub fn valid_oncall_text(text: &str, max: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= max
+        && text.chars().all(|found| found.is_ascii_graphic() || found == ' ')
+        && !text.starts_with(' ')
+        && !text.ends_with(' ')
+        && !text.contains("  ")
+}
+
+
+/// Digits only and inside `i64`, like the oncall API's `parse_id`.
+pub fn parse_oncall_id(text: &str) -> Option<i64> {
+    text.bytes().all(|byte| byte.is_ascii_digit()).then(|| text.parse::<i64>().ok()).flatten()
+}
+
+
+pub fn oncall_path() -> String {
+    format!("oncall/alerts?limit={ONCALL_LIMIT}")
+}
+
+
+pub async fn list_oncall(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<OncallListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &oncall_path(), Some(token), None).await?;
+    scan_state_items(&bytes, ONCALL_LIMIT as usize)?;
+    serde_json::from_slice(&bytes).map_err(ApiFailure::from)
+}
+
+
+/// The on-call API answers 422 only for a stored alert it cannot show.
+pub fn unreadable_status(failure: ApiFailure) -> ApiFailure {
+    match failure {
+        ApiFailure::Status(code) if code == StatusCode::UNPROCESSABLE_ENTITY.as_u16() => ApiFailure::Unreadable,
+        other => other,
+    }
+}
+
+
+/// An id outside `i64` digits is a missing alert without any call; the answer must carry the id asked for.
+pub async fn get_oncall_alert(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<OncallAlertView, ApiFailure> {
+    match parse_oncall_id(id) {
+        Some(number) => {
+            let bytes = call(client, source, Method::GET, &format!("oncall/alerts/{number}"), Some(token), None)
+                .await
+                .map_err(unreadable_status)?;
+            let alert: OncallAlertView = serde_json::from_slice(&bytes)?;
+            if alert.id == number {
+                Ok(alert)
+            } else {
+                Err(ApiFailure::Malformed("alert id differs"))
+            }
+        }
+        None => Err(ApiFailure::NotFound),
     }
 }
