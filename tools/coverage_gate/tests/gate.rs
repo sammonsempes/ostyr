@@ -342,6 +342,8 @@ fn executable_code_detection() -> anyhow::Result<()> {
         "mod m { pub mod n { fn deep() {} } }",
         "const C: fn() = || {};",
         "static S: fn() = || {};",
+        "#![cfg(unix)]\nfn a() {}",
+        "#![allow(dead_code)]\nfn a() {}",
     ];
     for text in code {
         assert!(has_executable_code(text)?, "{text}");
@@ -356,6 +358,7 @@ fn executable_code_detection() -> anyhow::Result<()> {
         "const C: u8 = 1;",
         "static S: u8 = 1;",
         "type A = fn(u8);",
+        "#![cfg(windows)]\nfn a() {}",
     ];
     for text in plain {
         assert!(!has_executable_code(text)?, "{text}");
