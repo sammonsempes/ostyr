@@ -43,6 +43,9 @@ const CHARGE: f64 = 90.0;
 const HALF_HOST: usize = 40;
 
 
+const HOST_LABEL_FITS: usize = 18;
+
+
 #[test]
 fn accepted_targets() -> TestResult {
     let accepted = [
@@ -60,6 +63,7 @@ fn accepted_targets() -> TestResult {
         (target.text.as_str(), target.ups.as_str(), target.host.as_str()),
         ("Ups@host:3493", "Ups", "host:3493")
     );
+    assert_eq!(parse_target("ups@localhost").ok_or("refused")?.host, "localhost:3493");
     Ok(())
 }
 
@@ -125,7 +129,8 @@ fn length_bounds() -> TestResult {
     assert_eq!(long_host.len(), HOST_MAX);
     assert!(is_dns_name(&long_host));
     assert!(!is_dns_name(&format!("{long_host}a")));
-    assert!(parse_target(&format!("ups@{}", "a".repeat(LABEL_MAX))).is_some());
+    assert!(parse_target(&format!("ups@{}", "a".repeat(LABEL_MAX - THREE - THREE + 1))).is_some());
+    assert!(parse_target(&format!("ups@{}", "a".repeat(LABEL_MAX))).is_none());
     let too_long = format!("u@{0}.{0}.{0}.{0}", "a".repeat(LABEL_MAX));
     assert!(parse_target(&too_long).is_none());
     let longest = format!(
@@ -240,9 +245,19 @@ fn two_hosts_with_one_ups_name_give_distinct_series() -> TestResult {
     );
     assert_eq!(
         second,
-        vec![vec![("ups".to_owned(), "ups".to_owned()), ("host".to_owned(), "beta".to_owned())]]
+        vec![vec![("ups".to_owned(), "ups".to_owned()), ("host".to_owned(), "beta:3493".to_owned())]]
     );
-    let unclean = format!("u@{0}.{0}", "a".repeat(HALF_HOST));
-    assert!(labels_of(&unclean)?.is_empty());
+    assert_eq!(labels_of("ups@localhost")?, labels_of("ups@localhost:3493")?);
+    Ok(())
+}
+
+
+#[test]
+fn a_host_label_over_the_bound_is_refused() -> TestResult {
+    let host = |length: usize| format!("{}.{}", "a".repeat(HALF_HOST), "b".repeat(length));
+    assert!(parse_target(&format!("u@{}", host(HOST_LABEL_FITS))).is_some());
+    assert!(parse_target(&format!("u@{}", host(HOST_LABEL_FITS + 1))).is_none());
+    assert!(parse_target(&format!("u@{}:3493", host(HOST_LABEL_FITS))).is_some());
+    assert!(parse_target(&format!("u@{}:3493", host(HOST_LABEL_FITS + 1))).is_none());
     Ok(())
 }
