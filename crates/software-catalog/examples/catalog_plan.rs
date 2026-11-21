@@ -58,21 +58,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = std::io::stdout();
     writeln!(
         out,
-        "actions={} refused_uninstalls={:?} malformed={} over_limit={} not_installed={} other_source={} unreadable_versions={} duplicate_ids={} available={} available_malformed={}",
+        "actions={} refused_uninstalls={:?} inventory_gaps={:?} not_installed={} other_source={} unreadable_versions={} available={} available_malformed={}",
         result.actions.len(),
         result.refused_uninstalls,
-        installed.malformed,
-        installed.over_limit,
+        result.inventory_gaps,
         installed.not_installed,
         installed.other_source,
         installed.unreadable_versions,
-        installed.duplicate_ids,
         available.names.len(),
         available.malformed
     )?;
     result
         .actions
         .iter()
-        .try_for_each(|action| writeln!(out, "{:?} {} {:?}", action.kind, action.name, action.arguments))?;
+        .try_for_each(|action| writeln!(out, "{:?} {} {:?} {:?}", action.kind, action.name, action.arguments, action.reason))?;
     Ok(())
 }

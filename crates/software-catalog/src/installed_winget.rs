@@ -3,13 +3,13 @@
 use crate::error::InstalledError;
 use crate::installed::read_input;
 use crate::limits::Limits;
-use crate::model::{Installed, InstalledRow, Manager};
+use crate::model::{Gap, Installed, InstalledRow, Manager};
 use crate::text::is_winget_id;
 use patch_inventory::validate::is_plain_text;
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 
@@ -154,7 +154,7 @@ pub fn assemble(candidates: Vec<Option<Candidate>>) -> Installed {
         *counts.entry(folded(candidate)).or_default() += 1;
         counts
     });
-    let duplicate_ids = counts.values().filter(|count| **count > 1).count();
+    let duplicate_ids: BTreeSet<String> = counts.iter().filter(|(_, count)| **count > 1).map(|(id, _)| id.clone()).collect();
     let unreadable_versions = valid.iter().filter(|candidate| candidate.version.is_none()).count();
     let rows: BTreeMap<String, InstalledRow> = valid
         .into_iter()
@@ -173,11 +173,17 @@ pub fn assemble(candidates: Vec<Option<Candidate>>) -> Installed {
         })
         .collect();
     Installed {
+        gaps: BTreeMap::from([(
+            Manager::Winget,
+            Gap {
+                malformed,
+                duplicate_ids,
+                ..Gap::default()
+            },
+        )]),
         rows: rows.into_values().collect(),
-        malformed,
-        duplicate_ids,
         unreadable_versions,
-        ..Installed::default()
+        ..winget_start()
     }
 }
 
@@ -185,8 +191,14 @@ pub fn assemble(candidates: Vec<Option<Candidate>>) -> Installed {
 pub fn winget_installed(raw: &RawValue, count: usize, limits: &Limits) -> Result<Installed, InstalledError> {
     if count > limits.max_installed {
         Ok(Installed {
-            over_limit: count,
-            ..Installed::default()
+            gaps: BTreeMap::from([(
+                Manager::Winget,
+                Gap {
+                    over_limit: count,
+                    ..Gap::default()
+                },
+            )]),
+            ..winget_start()
         })
     } else {
         let body: Body = serde_json::from_str(raw.get())?;
@@ -195,15 +207,36 @@ pub fn winget_installed(raw: &RawValue, count: usize, limits: &Limits) -> Result
 }
 
 
-pub fn merge(left: Installed, right: Installed) -> Installed {
+pub fn winget_start() -> Installed {
     Installed {
+        read_managers: BTreeSet::from([Manager::Winget]),
+        gaps: BTreeMap::from([(Manager::Winget, Gap::default())]),
+        ..Installed::default()
+    }
+}
+
+
+pub fn merge_gap(mut gap: Gap, other: Gap) -> Gap {
+    gap.over_limit += other.over_limit;
+    gap.malformed += other.malformed;
+    gap.duplicate_ids.extend(other.duplicate_ids);
+    gap
+}
+
+
+pub fn merge(left: Installed, right: Installed) -> Installed {
+    let gaps = right.gaps.into_iter().fold(left.gaps, |mut gaps, (manager, gap)| {
+        let merged = gaps.remove(&manager).map_or(gap.clone(), |existing| merge_gap(existing, gap));
+        gaps.insert(manager, merged);
+        gaps
+    });
+    Installed {
+        read_managers: left.read_managers.union(&right.read_managers).copied().collect(),
+        gaps,
         rows: left.rows.into_iter().chain(right.rows).collect(),
-        malformed: left.malformed + right.malformed,
-        over_limit: left.over_limit + right.over_limit,
         not_installed: left.not_installed + right.not_installed,
         other_source: left.other_source + right.other_source,
         unreadable_versions: left.unreadable_versions + right.unreadable_versions,
-        duplicate_ids: left.duplicate_ids + right.duplicate_ids,
     }
 }
 
@@ -239,13 +272,13 @@ pub fn parse_winget_export<Reader: Read>(reader: Reader, limits: &Limits) -> Res
                 .sources
                 .iter()
                 .zip(sources.iter())
-                .try_fold(Installed::default(), |installed, (raw, source)| {
+                .try_fold(winget_start(), |installed, (raw, source)| {
                     let part = if is_winget_source(&source.details) {
                         winget_installed(raw, source.packages, limits)?
                     } else {
                         Installed {
                             other_source: source.packages,
-                            ..Installed::default()
+                            ..winget_start()
                         }
                     };
                     Ok(merge(installed, part))

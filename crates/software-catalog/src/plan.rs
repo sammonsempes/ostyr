@@ -3,12 +3,24 @@
 use crate::args::arguments;
 use crate::error::PlanError;
 use crate::limits::Limits;
-use crate::model::{Action, ActionKind, Assignment, Available, Catalogue, Entry, Installed, InstalledRow, Manager, Plan};
+use crate::model::{Action, ActionKind, Assignment, Available, Catalogue, Entry, Installed, InstalledRow, InventoryGap, Manager, Plan};
 use crate::source::{family_of, manager_of, package_of, version_text};
 use crate::text::is_entry_name;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use vuln_match::version::parse_version;
+
+
+pub const MALFORMED_REASON: &str = "inventory_malformed";
+
+
+pub const INCOMPLETE_REASON: &str = "inventory_incomplete";
+
+
+pub const ABSENT_REASON: &str = "inventory_absent";
+
+
+pub const DUPLICATE_REASON: &str = "inventory_duplicate";
 
 
 pub fn plan(catalogue: &Catalogue, assignment: &Assignment, installed: &Installed, available: &Available) -> Result<Plan, PlanError> {
@@ -36,7 +48,12 @@ pub fn plan_with(
             .collect();
         actions.sort_by(|left, right| (left.kind, &left.name, &left.package).cmp(&(right.kind, &right.name, &right.package)));
         let refused_uninstalls = removed.iter().filter(|entry| !entry.uninstall).map(|entry| entry.name.clone()).collect();
-        Ok(Plan { actions, refused_uninstalls })
+        let inventory_gaps = gaps_of(installed);
+        Ok(Plan {
+            actions,
+            inventory_gaps,
+            refused_uninstalls,
+        })
     }
 }
 
@@ -69,12 +86,23 @@ pub fn lookup<'catalogue>(catalogue: &'catalogue Catalogue, name: &str) -> Resul
 }
 
 
+pub fn winget_key(manager: Manager, package: &str) -> String {
+    if manager == Manager::Winget {
+        package.to_ascii_lowercase()
+    } else {
+        package.to_string()
+    }
+}
+
+
+pub fn same_package(entry: &Entry, row: &InstalledRow) -> bool {
+    let manager = manager_of(&entry.source);
+    manager == row.manager && winget_key(manager, package_of(&entry.source)) == winget_key(manager, &row.package)
+}
+
+
 pub fn row_of(entry: &Entry, installed: &Installed) -> Option<InstalledRow> {
-    let rows: Vec<&InstalledRow> = installed
-        .rows
-        .iter()
-        .filter(|row| row.manager == manager_of(&entry.source) && row.package == package_of(&entry.source))
-        .collect();
+    let rows: Vec<&InstalledRow> = installed.rows.iter().filter(|row| same_package(entry, row)).collect();
     let held = rows.iter().any(|row| row.held);
     rows.into_iter()
         .max_by(|left, right| order_rows(left, right))
@@ -83,11 +111,7 @@ pub fn row_of(entry: &Entry, installed: &Installed) -> Option<InstalledRow> {
 
 
 pub fn row_count(entry: &Entry, installed: &Installed) -> usize {
-    installed
-        .rows
-        .iter()
-        .filter(|row| row.manager == manager_of(&entry.source) && row.package == package_of(&entry.source))
-        .count()
+    installed.rows.iter().filter(|row| same_package(entry, row)).count()
 }
 
 
@@ -103,10 +127,7 @@ pub fn order_rows(left: &InstalledRow, right: &InstalledRow) -> Ordering {
 
 
 pub fn in_catalogue(catalogue: &Catalogue, row: &InstalledRow) -> bool {
-    catalogue
-        .entries
-        .iter()
-        .any(|entry| manager_of(&entry.source) == row.manager && package_of(&entry.source) == row.package)
+    catalogue.entries.iter().any(|entry| same_package(entry, row))
 }
 
 
@@ -118,6 +139,7 @@ pub fn action_of(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>) ->
         installed_version: row.map(|found| found.version.clone()),
         target_version: Some(version_text(&entry.version).to_string()),
         arguments: arguments(kind, entry),
+        reason: None,
     }
 }
 
@@ -125,7 +147,65 @@ pub fn action_of(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>) ->
 pub fn wanted_action(entry: &Entry, installed: &Installed, available: &Available) -> Option<Action> {
     let row = row_of(entry, installed);
     let kind = row.as_ref().map_or(Some(ActionKind::Install), |found| compare(entry, found));
-    kind.map(|found| action_of(gate(found, entry, row.as_ref(), available), entry, row.as_ref()))
+    kind.map(|found| {
+        refusal(found, entry, row.as_ref(), installed).unwrap_or_else(|| action_of(gate(found, entry, row.as_ref(), available), entry, row.as_ref()))
+    })
+}
+
+
+pub fn refusal(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>, installed: &Installed) -> Option<Action> {
+    gap_reason(installed, manager_of(&entry.source))
+        .filter(|_| matches!(kind, ActionKind::Install | ActionKind::Update | ActionKind::Uninstall))
+        .or_else(|| is_duplicate(entry, installed).then_some(DUPLICATE_REASON))
+        .map(|reason| Action {
+            reason: Some(reason),
+            ..action_of(ActionKind::Unknown, entry, row)
+        })
+}
+
+
+pub fn gap_reason(installed: &Installed, manager: Manager) -> Option<&'static str> {
+    if covers(installed, manager) {
+        installed.gaps.get(&manager).and_then(|gap| {
+            if gap.over_limit > 0 {
+                Some(INCOMPLETE_REASON)
+            } else if gap.malformed > 0 {
+                Some(MALFORMED_REASON)
+            } else {
+                None
+            }
+        })
+    } else {
+        Some(ABSENT_REASON)
+    }
+}
+
+
+pub fn covers(installed: &Installed, manager: Manager) -> bool {
+    installed.read_managers.contains(&manager)
+}
+
+
+pub fn is_duplicate(entry: &Entry, installed: &Installed) -> bool {
+    installed
+        .gaps
+        .get(&manager_of(&entry.source))
+        .is_some_and(|gap| gap.duplicate_ids.contains(&winget_key(Manager::Winget, package_of(&entry.source))))
+}
+
+
+pub fn gaps_of(installed: &Installed) -> Vec<InventoryGap> {
+    installed
+        .gaps
+        .iter()
+        .filter(|(manager, gap)| covers(installed, **manager) && (gap.over_limit > 0 || gap.malformed > 0 || !gap.duplicate_ids.is_empty()))
+        .map(|(manager, gap)| InventoryGap {
+            manager: *manager,
+            over_limit: gap.over_limit,
+            malformed: gap.malformed,
+            duplicate_ids: gap.duplicate_ids.len(),
+        })
+        .collect()
 }
 
 
@@ -165,14 +245,30 @@ pub fn compare(entry: &Entry, row: &InstalledRow) -> Option<ActionKind> {
 
 
 pub fn removal_action(entry: &Entry, installed: &Installed) -> Option<Action> {
-    row_of(entry, installed).filter(|_| entry.uninstall).map(|row| {
-        let kind = match (row.held, row_count(entry, installed) > 1) {
-            (true, _) => ActionKind::Held,
-            (false, true) => ActionKind::UninstallAmbiguous,
-            (false, false) => ActionKind::Uninstall,
-        };
-        action_of(kind, entry, Some(&row))
-    })
+    let manager = manager_of(&entry.source);
+    match row_of(entry, installed) {
+        Some(row) if entry.uninstall => {
+            let kind = match (row.held, row_count(entry, installed) > 1) {
+                (true, _) => ActionKind::Held,
+                (false, true) => ActionKind::UninstallAmbiguous,
+                (false, false) => ActionKind::Uninstall,
+            };
+            let duplicate = is_duplicate(entry, installed).then_some(DUPLICATE_REASON);
+            let reason = gap_reason(installed, manager).filter(|_| kind == ActionKind::Uninstall).or(duplicate);
+            Some(match reason {
+                Some(found) => Action {
+                    reason: Some(found),
+                    ..action_of(ActionKind::Unknown, entry, Some(&row))
+                },
+                None => action_of(kind, entry, Some(&row)),
+            })
+        }
+        None if entry.uninstall => gap_reason(installed, manager).map(|found| Action {
+            reason: Some(found),
+            ..action_of(ActionKind::Unknown, entry, None)
+        }),
+        _ => None,
+    }
 }
 
 
@@ -184,5 +280,6 @@ pub fn foreign_action(row: &InstalledRow) -> Action {
         installed_version: Some(row.version.clone()),
         target_version: None,
         arguments: Vec::new(),
+        reason: None,
     }
 }

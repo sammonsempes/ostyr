@@ -6,4 +6,6 @@ mod installed_rpm;
 mod installed_rpm_plan;
 mod installed_winget;
 mod plan;
+mod plan_case;
+mod plan_gaps;
 mod text;
