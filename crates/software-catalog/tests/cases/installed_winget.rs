@@ -10,6 +10,9 @@ use std::io::Cursor;
 const FIXTURE: &str = include_str!("../fixtures/winget-export.json");
 
 
+const LIVE_FIXTURE: &str = include_str!("../fixtures/winget-export-live.json");
+
+
 const WINGET_HEAD: &str = r#""SourceDetails":{"Name":"winget","Identifier":"Microsoft.Winget.Source_8wekyb3d8bbwe"}"#;
 
 
@@ -84,6 +87,30 @@ fn fixture_gives_rows_and_counts_other_sources() -> TestResult {
     );
     assert_eq!(plan_kind(&installed, "2.44.0")?, ActionKind::Update);
     assert_eq!(plan_kind(&installed, "2.0.0")?, ActionKind::NewerThanCatalogue);
+    Ok(())
+}
+
+
+#[test]
+fn live_capture_from_winget_1_6_reads_without_gaps() -> TestResult {
+    let installed = parse(LIVE_FIXTURE)?;
+    let found: Vec<(&str, &str)> = installed.rows.iter().map(|row| (row.package.as_str(), row.version.as_str())).collect();
+    assert_eq!(
+        found,
+        vec![
+            ("7zip.7zip", "26.06"),
+            ("Microsoft.AppInstaller", "1.21.10120.0"),
+            ("Microsoft.Edge", "158.0.4370.33"),
+            ("Microsoft.UI.Xaml.2.8", "8.2310.30001.0"),
+            ("Microsoft.VCLibs.Desktop.14", "14.0.30704.0"),
+            ("jqlang.jq", "1.8.2")
+        ]
+    );
+    assert_eq!(
+        (installed.other_source, gap(&installed).malformed, installed.unreadable_versions),
+        (0, 0, 0)
+    );
+    assert!(!LIVE_FIXTURE.starts_with('\u{feff}'));
     Ok(())
 }
 

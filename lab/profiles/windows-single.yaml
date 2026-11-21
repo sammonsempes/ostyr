@@ -1,3 +1,4 @@
+egress: proxy
 vms:
   - name: ws
     base_image: win11.qcow2
