@@ -1,5 +1,6 @@
 use crate::agent_app::AgentFile;
 use crate::error::{AppError, SpoolDirReason};
+use crate::types::AclJudge;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -72,7 +73,7 @@ pub fn open_fault(path: &Path, error: io::Error) -> AppError {
 
 /// Opens a directory without following a link and judges the handle: returns it with its identity, or the refusal.
 #[cfg(unix)]
-pub fn open_and_judge(directory: &Path, shown: &Path) -> Result<(File, (u64, u64)), AppError> {
+pub fn open_and_judge(directory: &Path, shown: &Path, acl: AclJudge) -> Result<(File, (u64, u64)), AppError> {
     use rustix::fs::OFlags;
     use std::fs::OpenOptions;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -83,19 +84,17 @@ pub fn open_and_judge(directory: &Path, shown: &Path) -> Result<(File, (u64, u64
         .open(directory)
         .map_err(|error| open_fault(shown, error))?;
     let metadata = handle.metadata()?;
-    match spool_dir_fault(metadata.uid(), crate::spool::effective_uid(), metadata.mode()) {
-        None => Ok((handle, (metadata.dev(), metadata.ino()))),
-        Some(reason) => Err(AppError::SpoolDir {
-            path: shown.to_path_buf(),
-            reason,
-        }),
-    }
+    let fault = spool_dir_fault(metadata.uid(), crate::spool::effective_uid(), metadata.mode());
+    let reason_path = shown.to_path_buf();
+    fault.map_or(Ok(()), |reason| Err(AppError::SpoolDir { path: reason_path, reason }))?;
+    acl(&handle, shown)?;
+    Ok((handle, (metadata.dev(), metadata.ino())))
 }
 
 
-/// Opens a directory on Windows (backup semantics) without judging its owner: the installer's protected ACL is the requirement there.
+/// Opens a directory on Windows (backup semantics) and judges its owner and DACL on the opened handle.
 #[cfg(not(unix))]
-pub fn open_and_judge(directory: &Path, shown: &Path) -> Result<(File, (u64, u64)), AppError> {
+pub fn open_and_judge(directory: &Path, shown: &Path, acl: AclJudge) -> Result<(File, (u64, u64)), AppError> {
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
     const BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -104,15 +103,37 @@ pub fn open_and_judge(directory: &Path, shown: &Path) -> Result<(File, (u64, u64
         .custom_flags(BACKUP_SEMANTICS)
         .open(directory)
         .map_err(|error| open_fault(shown, error))?;
-    handle.metadata()?.is_dir().then_some((handle, (0, 0))).ok_or_else(|| AppError::SpoolDir {
+    handle.metadata()?.is_dir().then_some(()).ok_or_else(|| AppError::SpoolDir {
         path: shown.to_path_buf(),
         reason: SpoolDirReason::NotDirectory,
-    })
+    })?;
+    acl(&handle, shown)?;
+    Ok((handle, (0, 0)))
+}
+
+
+/// The ACL judge of the platform: the real one on Windows, none on Unix where the owner and mode checks decide.
+#[cfg(not(unix))]
+pub fn platform_acl_judge(directory: &File, shown: &Path) -> Result<(), sys_windows::types::DirAclError> {
+    sys_windows::native::judge_directory_handle(directory, shown)
+}
+
+
+/// The ACL judge of the platform: the real one on Windows, none on Unix where the owner and mode checks decide.
+#[cfg(unix)]
+pub fn platform_acl_judge(_directory: &File, _shown: &Path) -> Result<(), sys_windows::types::DirAclError> {
+    Ok(())
 }
 
 
 /// Opens and judges the parent directory of every file the agent writes by path; call it once per process before any spool producer or claim.
 pub fn open_spool_dirs(file: &AgentFile) -> Result<SpoolDirs, AppError> {
+    open_spool_dirs_with(file, platform_acl_judge)
+}
+
+
+/// `open_spool_dirs` with the ACL judge injected, so a Windows test can open a temporary directory the real judge refuses.
+pub fn open_spool_dirs_with(file: &AgentFile, acl: AclJudge) -> Result<SpoolDirs, AppError> {
     let files = [
         &file.spool_file,
         &file.sequence_file,
@@ -125,7 +146,7 @@ pub fn open_spool_dirs(file: &AgentFile) -> Result<SpoolDirs, AppError> {
             path: path.clone(),
             reason: SpoolDirReason::NotDirectory,
         })?;
-        let (handle, identity) = open_and_judge(directory, path)?;
+        let (handle, identity) = open_and_judge(directory, path, acl)?;
         let known = kept.iter().any(|(_, seen)| *seen == identity);
         if !known {
             kept.push((handle, identity));

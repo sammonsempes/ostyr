@@ -3,6 +3,9 @@ use std::iter::successors;
 use syn::{Expr, ImplItem, Item, TraitItem};
 
 
+const WINDOWS_ONLY: &str = "windows";
+
+
 pub fn is_code(item: &Item) -> bool {
     match item {
         Item::Fn(_) => true,
@@ -26,15 +29,22 @@ pub fn children(item: &Item) -> &[Item] {
 }
 
 
+pub fn is_windows_only(attribute: &syn::Attribute) -> bool {
+    matches!(&attribute.meta, syn::Meta::List(list) if list.path.is_ident("cfg") && list.tokens.to_string() == WINDOWS_ONLY)
+}
+
+
 pub fn has_executable_code(text: &str) -> Result<bool, syn::Error> {
     let file = syn::parse_file(text)?;
+    let uncompiled = file.attrs.iter().any(is_windows_only);
     let top: Vec<&Item> = file.items.iter().collect();
     Ok(successors(Some(top), |level| {
         let next: Vec<&Item> = level.iter().flat_map(|item| children(item)).collect();
         (!next.is_empty()).then_some(next)
     })
     .flatten()
-    .any(is_code))
+    .any(is_code)
+        && !uncompiled)
 }
 
 
