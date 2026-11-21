@@ -22,8 +22,8 @@ use vuln_match::limits::{
 use vuln_match::model::{AssetFinding, Criticality, Finding, ScanCaps, ScoredFinding, StoredFinding};
 use vuln_match::priority::priority_of;
 use vuln_match::store::{
-    cursor_of, finding_doc, is_field, open_findings, parse_cursor, rebuild_counters, record_scan, record_scan_capped, stored_of, FIRST_SQL,
-    MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE, NEXT_SQL, REBUILD_SQL, SCAN_SQL,
+    cursor_of, finding_doc, is_field, open_findings, open_findings_of_asset, parse_cursor, parse_cursor_with, rebuild_counters, record_scan,
+    record_scan_capped, stored_of, ASSET_SQL, FIRST_SQL, MIGRATIONS, MIGRATION_DEADLINE, MIGRATION_NAMESPACE, NEXT_SQL, REBUILD_SQL, SCAN_SQL,
 };
 
 
@@ -139,6 +139,9 @@ const DOC_COLUMN_PRIORITY: usize = 9;
 
 
 const SMALL_PAGE: usize = 3;
+
+
+const HUGE_CURSOR: usize = 400_000;
 
 
 #[derive(Default)]
@@ -324,8 +327,9 @@ fn second_migration_keeps_a_per_asset_resolved_count_and_counts_duplicates() -> 
 
 #[test]
 fn every_read_statement_binds_the_tenant() -> TestResult {
-    assert!(FIRST_SQL.contains("WHERE tenant = $1 AND resolved_micros IS NULL"));
-    assert!(NEXT_SQL.contains("WHERE tenant = $1 AND resolved_micros IS NULL"));
+    assert!(FIRST_SQL.contains("vuln_open_first($1, "));
+    assert!(NEXT_SQL.contains("vuln_open_next($1, "));
+    assert!(ASSET_SQL.contains("vuln_open_of_asset($1, "));
     assert!(SCAN_SQL.contains("vuln_scan_store($1, $2"));
     assert!(SCAN_SQL.contains("$8::text::bigint)"));
     assert!(SCAN_SQL.contains("n_evicted::text, n_duplicates::text"));
@@ -705,6 +709,14 @@ async fn read_errors() -> TestResult {
         open_findings(&executor(&broken), &scope, None, 1).await,
         Err(StoreError::BadAnswer)
     ));
+    let no_priority = Double {
+        pages: vec![row(FIVE, "h1", "e", "p", "r").into_iter().take(COL_FIXED).collect()],
+        ..Double::default()
+    };
+    assert!(matches!(
+        open_findings(&executor(&no_priority), &scope, None, 1).await,
+        Err(StoreError::BadAnswer)
+    ));
     Ok(())
 }
 
@@ -743,5 +755,226 @@ async fn a_scan_of_a_tenant_without_counters_is_refused_and_the_rebuild_is_its_o
     };
     assert!(matches!(rebuild_counters(&executor(&failing), &scope).await, Err(StoreError::Pg(_))));
     assert_eq!(MIGRATION_DEADLINE.as_secs(), MIGRATION_SECONDS);
+    Ok(())
+}
+
+
+#[test]
+fn third_migration_locks_deletes_recounts_and_adds_every_check_in_one_statement() -> TestResult {
+    check_embedded(&MIGRATIONS)?;
+    let sql = MIGRATIONS.get(TWO).ok_or("no third migration")?.sql;
+    let lock = sql
+        .find("LOCK TABLE vuln_finding_rows, vuln_asset_resolved, vuln_findings IN ACCESS EXCLUSIVE MODE;")
+        .ok_or("no lock")?;
+    let delete = sql.find("DELETE FROM vuln_findings").ok_or("no delete")?;
+    let recount = sql
+        .find("FROM vuln_touched t LEFT JOIN vuln_findings f ON f.tenant = t.tenant GROUP BY t.tenant;")
+        .ok_or("no recount")?;
+    let alter = sql.find("ALTER TABLE vuln_findings").ok_or("no alter")?;
+    let index = sql
+        .find("CREATE INDEX vuln_findings_open_asset_rank ON vuln_findings (tenant, (asset || ''), priority DESC, ecosystem, package, record_id)")
+        .ok_or("no index")?;
+    assert!(lock < delete && delete < recount && recount < alter && alter < index);
+    assert!(!sql.contains("vuln_counters_rebuild"));
+    assert!(!sql.contains("pg_advisory"));
+    assert!(sql.starts_with("LOCK TABLE vuln_finding_rows, vuln_asset_resolved, vuln_findings IN ACCESS EXCLUSIVE MODE;"));
+    assert_eq!(sql.matches("ALTER TABLE").count(), 1);
+    assert_eq!(sql.matches("ADD CONSTRAINT").count(), SEVEN as usize);
+    assert!(sql.contains("OR priority > 4294967295"));
+    assert!(sql.contains("CHECK (priority <= 4294967295)"));
+    assert!(sql.contains("WHERE resolved_micros IS NULL;"));
+    assert_eq!(sql.matches("octet_length").count(), sql.matches("char_length").count());
+    assert_eq!(sql.matches("left(").count(), sql.matches("'^[!-~]{1,128}$'").count());
+    Ok(())
+}
+
+
+#[test]
+fn paging_runs_through_pinned_functions_on_one_row_comparison() -> TestResult {
+    let sql = MIGRATIONS
+        .get(TWO)
+        .ok_or("no third migration")?
+        .sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(sql.contains(
+        "CREATE INDEX vuln_findings_page ON vuln_findings (tenant, (-priority), asset, ecosystem, package, record_id) WHERE resolved_micros IS NULL;"
+    ));
+    assert!(sql.contains("DROP INDEX vuln_findings_open;"));
+    assert!(!sql.contains("CREATE INDEX vuln_findings_open "));
+    assert_eq!(sql.matches("CREATE FUNCTION vuln_open_").count(), THREE);
+    let pin = "LANGUAGE sql STABLE SET search_path = pg_catalog, public SET enable_sort = off SET enable_incremental_sort = off \
+               SET enable_seqscan = off SET enable_bitmapscan = off SET jit = off AS $$";
+    assert_eq!(sql.matches(pin).count(), THREE);
+    assert!(sql.contains(
+        "AND ((-priority), asset, ecosystem, package, record_id) > ((-after_priority), after_asset, after_ecosystem, after_package, after_record)"
+    ));
+    assert!(sql.contains("ORDER BY (-priority), asset, ecosystem, package, record_id LIMIT page_limit"));
+    assert!(sql.contains("AND (asset || '') = asset_name AND resolved_micros IS NULL ORDER BY (asset || ''), priority DESC, ecosystem"));
+    assert_eq!(sql.matches("WHERE tenant = tenant_name AND").count(), THREE);
+    assert!(sql.trim_end().ends_with("ANALYZE vuln_findings;"));
+    assert!(!NEXT_SQL.contains("UNION") && !NEXT_SQL.contains(" OR "));
+    assert!(FIRST_SQL.contains("FROM vuln_open_first($1, $2::text::bigint)"));
+    assert!(NEXT_SQL.contains("FROM vuln_open_next($1, $2::text::bigint, $3, $4, $5, $6, $7::text::bigint)"));
+    assert!(ASSET_SQL.contains("FROM vuln_open_of_asset($1, $2, $3::text::bigint)"));
+    assert!([FIRST_SQL, NEXT_SQL, ASSET_SQL].iter().all(|text| !text.contains("ORDER BY")));
+    Ok(())
+}
+
+
+pub fn failing_split(_cursor: &str) -> Result<Vec<&str>, StoreError> {
+    Err(StoreError::BadAnswer)
+}
+
+
+#[test]
+fn an_oversized_cursor_is_refused_before_any_split() -> TestResult {
+    let spaces = " ".repeat(HUGE_CURSOR);
+    assert!(matches!(parse_cursor_with(&spaces, failing_split), Err(StoreError::BadCursor)));
+    assert!(matches!(parse_cursor(&spaces), Err(StoreError::BadCursor)));
+    let at_limit = "a".repeat(MAX_CURSOR_BYTES);
+    assert!(matches!(parse_cursor_with(&at_limit, failing_split), Err(StoreError::BadAnswer)));
+    assert!(matches!(
+        parse_cursor_with(&"a".repeat(MAX_CURSOR_BYTES + 1), failing_split),
+        Err(StoreError::BadCursor)
+    ));
+    Ok(())
+}
+
+
+pub fn broken_row(row_values: Vec<String>, column: usize, text: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut broken = row_values;
+    broken.get_mut(column).ok_or("column")?.clone_from(&text.to_owned());
+    Ok(broken)
+}
+
+
+#[tokio::test]
+async fn a_page_of_skipped_rows_is_empty_with_a_cursor_and_the_next_page_continues() -> TestResult {
+    let mut pages = Vec::new();
+    for index in 0..FOUR {
+        let value = row(FIVE, "h1", "e", &format!("p{index}"), "r");
+        pages.push(if index < FOUR - 1 { broken_row(value, COL_CVSS, "x")? } else { value });
+    }
+    let double = Double { pages, ..Double::default() };
+    let exec = executor(&double);
+    let scope = tenant_scope("acme")?;
+    let first = open_findings(&exec, &scope, None, SMALL_PAGE).await?;
+    assert_eq!((first.findings.len(), first.skipped), (0, SMALL_PAGE));
+    assert_eq!(first.next.as_deref(), Some("5 h1 e p2 r"));
+    let second = open_findings(&exec, &scope, first.next.as_deref(), SMALL_PAGE).await?;
+    assert_eq!((second.findings.len(), second.skipped, second.next), (1, 0, None));
+    assert_eq!(second.findings.first().map(|found| found.package.as_str()), Some("p3"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_skipped_row_in_the_middle_is_served_around() -> TestResult {
+    let middle = broken_row(row(FIVE, "h1", "e", "p1", "r"), COL_CVSS + 1, "nan?")?;
+    let double = Double {
+        pages: vec![row(FIVE, "h1", "e", "p0", "r"), middle, row(FIVE, "h1", "e", "p2", "r")],
+        ..Double::default()
+    };
+    let page = open_findings(&executor(&double), &tenant_scope("acme")?, None, SMALL_PAGE).await?;
+    assert_eq!((page.findings.len(), page.skipped, page.next), (TWO, 1, None));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_raw_key_outside_the_grammar_is_a_stored_value_error_with_no_text() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let bad_rows = [
+        row(FIVE, "secret marker", "e", "p", "r"),
+        row(FIVE, "h1", "e", "p", "-r"),
+        row(FIVE, "h1", "e", "", "r"),
+        row(FIVE, "h1", "e", "p", &"x".repeat(MAX_FIELD_BYTES + 1)),
+        row(FIVE, "h1", "\u{e9}", "p", "r"),
+        broken_row(row(FIVE, "h1", "e", "p", "r"), DOC_COLUMN_PRIORITY, "5000000000")?,
+        broken_row(row(FIVE, "h1", "e", "p", "r"), DOC_COLUMN_PRIORITY, "marker")?,
+    ];
+    for bad in bad_rows {
+        let double = Double {
+            pages: vec![row(FIVE, "h1", "e", "p", "ok"), bad.clone()],
+            ..Double::default()
+        };
+        let error = open_findings(&executor(&double), &scope, None, SMALL_PAGE)
+            .await
+            .err()
+            .ok_or("accepted")?;
+        assert!(matches!(error, StoreError::StoredValue), "{bad:?}");
+        assert!(!format!("{error:?}{error}").contains("marker"));
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn asset_reader_fetches_one_more_row_in_priority_order() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let double = Double {
+        pages: (0..FIVE).map(|index| row(FIVE - index, "h1", "e", "p", &format!("r{index}"))).collect(),
+        ..Double::default()
+    };
+    let exec = executor(&double);
+    let page = open_findings_of_asset(&exec, &scope, "h1", SMALL_PAGE).await?;
+    assert_eq!((page.findings.len(), page.skipped), (SMALL_PAGE, 0));
+    assert_eq!(page.next.as_deref(), Some("3 h1 e p r2"));
+    assert!(page
+        .findings
+        .windows(TWO)
+        .all(|pair| pair.first().zip(pair.get(1)).is_some_and(|(left, right)| left.priority >= right.priority)));
+    let calls = calls_of(&double)?;
+    let (tenant, sql, params) = calls.first().ok_or("no call")?;
+    assert_eq!((tenant.as_str(), *sql), ("acme", ASSET_SQL));
+    assert_eq!(params, &["h1".to_owned(), "4".to_owned()]);
+    let whole = open_findings_of_asset(&exec, &scope, "h1", MAX_FINDINGS_PER_SCAN).await?;
+    assert_eq!((whole.findings.len(), whole.next), (FIVE as usize, None));
+    let before = calls_of(&double)?.len();
+    for asset in ["", "a b", "-x", "\u{e9}", &"a".repeat(MAX_FIELD_BYTES + 1)] {
+        assert!(matches!(open_findings_of_asset(&exec, &scope, asset, 1).await, Err(StoreError::BadAsset)));
+    }
+    for limit in [0, MAX_FINDINGS_PER_SCAN + 1] {
+        assert!(matches!(
+            open_findings_of_asset(&exec, &scope, "h1", limit).await,
+            Err(StoreError::BadLimit { .. })
+        ));
+    }
+    assert_eq!(calls_of(&double)?.len(), before);
+    let failing = Double {
+        fail: true,
+        ..Double::default()
+    };
+    assert!(matches!(
+        open_findings_of_asset(&executor(&failing), &scope, "h1", 1).await,
+        Err(StoreError::Pg(_))
+    ));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn cursors_round_trip_keys_holding_url_special_characters() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let special = "a+b%2F&=/?";
+    let double = Double {
+        pages: vec![
+            row(FIVE, special, "e+", "p%", "r="),
+            row(FIVE, special, "e+", "p%", "r?"),
+            row(FOUR, "z", "e", "p", "r"),
+        ],
+        ..Double::default()
+    };
+    let exec = executor(&double);
+    let first = open_findings(&exec, &scope, None, 1).await?;
+    let cursor = first.next.clone().ok_or("no cursor")?;
+    assert_eq!(cursor, format!("5 {special} e+ p% r="));
+    assert_eq!(parse_cursor(&cursor)?, ["5", special, "e+", "p%", "r="]);
+    let second = open_findings(&exec, &scope, Some(&cursor), 1).await?;
+    assert_eq!(second.findings.first().map(|found| found.record_id.as_str()), Some("r?"));
+    let calls = calls_of(&double)?;
+    assert_eq!(calls.get(1).map(|call| call.2.get(1).map(String::as_str)), Some(Some(special)));
     Ok(())
 }
