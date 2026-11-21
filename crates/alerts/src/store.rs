@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::id::{alert_id, is_alert_id};
-use crate::model::{Alert, AlertDetail, AlertPage, Cursor, Page, Severity, Summary, Triage, TriageChange, TriageStatus, SEVERITY_COLUMN};
+use crate::model::{Alert, AlertDetail, AlertPage, Cursor, Page, Severity, Summary, Triage, TriageChange, TriageStatus, Triaged, SEVERITY_COLUMN};
 use crate::types::{Executor, Row};
 use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 pub const MIGRATION_NAMESPACE: &str = "alerts";
 
 
-pub const MIGRATIONS: [Migration; 4] = [
+pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "001_alerts",
         sql: include_str!("../migrations/001_alerts.sql"),
@@ -27,6 +27,10 @@ pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "004_alert_triage",
         sql: include_str!("../migrations/004_alert_triage.sql"),
+    },
+    Migration {
+        version: "005_alert_triage_false_positive",
+        sql: include_str!("../migrations/005_alert_triage_false_positive.sql"),
     },
 ];
 
@@ -50,7 +54,7 @@ pub const GET_SQL: &str = "SELECT id, rule_id, rule_title, severity, event_time,
                            AND id = $2::text";
 
 
-/// `$1` tenant, `$2` alert id, `$3` status, `$4` actor, `$5` note (empty for none), `$6` time; answers (alert found, new version or empty).
+/// `$1` tenant, `$2` alert id, `$3` status, `$4` actor, `$5` note (empty for none), `$6` time; answers (alert found, new version or empty, rule id of the alert).
 pub const TRIAGE_INSERT_SQL: &str = include_str!("../migrations/triage_insert.sql");
 
 
@@ -78,6 +82,10 @@ pub const TRIAGE_TIME_COLUMN: usize = 3;
 
 
 pub const TRIAGE_VERSION_COLUMN: usize = 4;
+
+
+/// The rule id column of a triage write answer.
+pub const TRIAGE_RULE_COLUMN: usize = 2;
 
 
 pub const NUL: char = '\0';
@@ -438,7 +446,7 @@ pub async fn set_triage(
     alert_id: &str,
     change: &TriageChange,
     expected: Option<i64>,
-) -> Result<Triage, StoreError> {
+) -> Result<Triaged, StoreError> {
     check_triage(alert_id, change)?;
     let mut params = vec![
         alert_id.to_owned(),
@@ -461,12 +469,15 @@ pub async fn set_triage(
     } else if cell(answer, 1)?.is_empty() {
         Err(StoreError::Conflict)
     } else {
-        Ok(Triage {
-            status: change.status,
-            actor: change.actor.clone(),
-            note: change.note.clone(),
-            updated_at: change.now,
-            version: version(answer, 1)?,
+        Ok(Triaged {
+            triage: Triage {
+                status: change.status,
+                actor: change.actor.clone(),
+                note: change.note.clone(),
+                updated_at: change.now,
+                version: version(answer, 1)?,
+            },
+            rule_id: cell(answer, TRIAGE_RULE_COLUMN)?.to_owned(),
         })
     }
 }

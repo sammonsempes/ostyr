@@ -1,5 +1,7 @@
 use crate::error::StoreError;
-use crate::model::{AlertDetail, AlertPage, Page, Triage, TriageChange};
+use crate::model::{AlertDetail, AlertPage, Page, TriageChange, Triaged};
+use core_audit::error::AuditError;
+use core_audit::model::NewEntry;
 use core_pg::error::PgError;
 use core_pg::scope::TenantScope;
 use std::future::Future;
@@ -26,8 +28,12 @@ pub type ListFn = Arc<dyn Fn(TenantScope, Page) -> StoreFuture<AlertPage> + Send
 pub type GetFn = Arc<dyn Fn(TenantScope, String) -> StoreFuture<Option<AlertDetail>> + Send + Sync>;
 
 
-pub type TriageFn = Arc<dyn Fn(TenantScope, String, TriageChange, Option<i64>) -> StoreFuture<Triage> + Send + Sync>;
+pub type TriageFn = Arc<dyn Fn(TenantScope, String, TriageChange, Option<i64>) -> StoreFuture<Triaged> + Send + Sync>;
 
 
 /// Microseconds since the Unix epoch.
 pub type ClockFn = fn() -> u64;
+
+
+/// Appends one record to the module audit log; injected so a test can make the append fail.
+pub type AuditAppendFn<'a> = &'a (dyn Fn(NewEntry) -> Result<(), AuditError> + Sync);
