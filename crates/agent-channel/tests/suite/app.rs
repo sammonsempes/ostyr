@@ -519,9 +519,9 @@ async fn an_unreachable_server_exhausts_the_attempts() -> TestResult {
     let dir = tempdir()?;
     let Fixture { mut agent, .. } = fixture(dir.path())?;
     fs::write(&agent.spool_file, "")?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    agent.server = listener.local_addr()?.to_string();
-    drop(listener);
+    let reserved = tokio::net::TcpSocket::new_v4()?;
+    reserved.bind("127.0.0.1:0".parse()?)?;
+    agent.server = reserved.local_addr()?.to_string();
     let outcome = run_once(&agent).await;
     assert!(matches!(outcome, Err(error) if error.to_string().contains("abandoned")));
     fs::write(&agent.spool_file, "{\"event\":1}\n")?;
@@ -752,9 +752,9 @@ fn a_presence_entry_keeps_silent_seconds() -> TestResult {
 async fn a_failed_heartbeat_fails_the_session_attempt() -> TestResult {
     let _logging = scoped_logging();
     let dir = tempdir()?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    drop(listener);
+    let reserved = tokio::net::TcpSocket::new_v4()?;
+    reserved.bind("127.0.0.1:0".parse()?)?;
+    let address = reserved.local_addr()?;
     let channel = tonic::transport::Endpoint::from_static(agent_channel::model::PLACEHOLDER_ENDPOINT).connect_with_connector_lazy(tower::service_fn(
         move |_uri: http::Uri| async move { tokio::net::TcpStream::connect(address).await.map(hyper_util::rt::TokioIo::new) },
     ));
