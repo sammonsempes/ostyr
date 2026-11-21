@@ -1,14 +1,15 @@
 use crate::api::{
-    cert_filter, get_alert, get_asset, get_case, get_cert, get_risk_entity, get_state_asset, list_alerts, list_assets, list_cases, list_certs,
-    list_findings, list_risk, list_states, login, logout, post_case_action, post_case_comment, risk_kind, valid_asset_cursor, valid_case_id,
-    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_state_cursor, valid_state_id, verdict_filter, MAX_COMMENT_CHARS,
-    SECONDS_PER_DAY, VERDICT_DEFAULT,
+    cert_filter, get_alert, get_asset, get_case, get_cert, get_oncall_alert, get_risk_entity, get_state_asset, list_alerts, list_assets, list_cases,
+    list_certs, list_findings, list_oncall, list_risk, list_states, login, logout, post_case_action, post_case_comment, risk_kind,
+    valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_state_cursor, valid_state_id,
+    verdict_filter, MAX_COMMENT_CHARS, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, Language, Opened, Principal, WebLimits, WebState};
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, cert_page, certs_page, comment_unloaded_page,
-    compliance_asset_page, compliance_page, error_page, hunts_page, login_page, risk_entity_page, risk_page, STYLESHEET,
+    compliance_asset_page, compliance_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page, risk_entity_page, risk_page,
+    STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -859,6 +860,43 @@ pub async fn show_compliance_asset(
 }
 
 
+pub async fn show_oncall_page(state: &WebState, source: IpAddr, headers: &HeaderMap) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let list = list_oncall(&client, source, &principal.token)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &oncall_page(language, &principal.csrf, &list), &[]))
+}
+
+
+pub async fn show_oncall(State(state): State<SharedWeb>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Response {
+    merge(show_oncall_page(&state, peer.ip(), &headers).await)
+}
+
+
+pub async fn show_oncall_alert_page(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let alert = get_oncall_alert(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &oncall_alert_page(language, &principal.csrf, &alert), &[]))
+}
+
+
+pub async fn show_oncall_alert(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    merge(show_oncall_alert_page(&state, peer.ip(), &headers, &id).await)
+}
+
+
 pub const COMMENT_FORM_BYTES: usize = MAX_COMMENT_CHARS * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
 
 
@@ -1006,6 +1044,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/hunts", get(show_hunts))
         .route("/compliance", get(show_compliance))
         .route("/compliance/{asset}", get(show_compliance_asset))
+        .route("/oncall", get(show_oncall))
+        .route("/oncall/{id}", get(show_oncall_alert))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))

@@ -1,8 +1,8 @@
-use crate::api_model::{Computed, EntityView, Failure, ListQuery, RiskEntityView, RiskListView, RiskState, TruncatedView};
+use crate::api_model::{Computed, EntityView, Failure, FpRuleView, ListQuery, RiskEntityView, RiskListView, RiskState, TruncatedView};
 use crate::cache::scores_for;
 use crate::model::{EntityKind, EntityRef, Score};
 use crate::score::check_contribution;
-use crate::source::{Limit, Truncated};
+use crate::source::{FpRule, Limit, Truncated};
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -48,7 +48,7 @@ pub const UNAVAILABLE_MESSAGE: &str = "the risk scores are unavailable, retry la
 #[derive(OpenApi)]
 #[openapi(
     paths(list_endpoint, get_endpoint),
-    components(schemas(RiskListView, RiskEntityView, EntityView, TruncatedView))
+    components(schemas(RiskListView, FpRuleView, RiskEntityView, EntityView, TruncatedView))
 )]
 pub struct RiskDoc;
 
@@ -111,6 +111,17 @@ pub fn truncated_view(truncated: &Truncated) -> TruncatedView {
 }
 
 
+pub fn fp_rule_view(rule: &FpRule) -> FpRuleView {
+    FpRuleView {
+        rule_id: rule.rule_id.clone(),
+        false_positive: rule.false_positive,
+        closed: rule.closed,
+        rate_ppm: rule.rate_ppm,
+        capped: rule.capped,
+    }
+}
+
+
 pub fn entity_view(score: &Score) -> EntityView {
     EntityView {
         kind: kind_name(score.entity.kind).to_owned(),
@@ -134,6 +145,9 @@ pub fn list_view(computed: &Computed, kind: Option<EntityKind>, limit: usize) ->
             .map(|(refused_kind, count)| (kind_name(*refused_kind).to_owned(), *count))
             .collect::<BTreeMap<_, _>>(),
         truncated: outcome.truncated.as_ref().map(truncated_view),
+        fp_rules: outcome.fp_rules.iter().map(fp_rule_view).collect(),
+        fp_rules_omitted: outcome.fp_rules_omitted,
+        unknown_verdicts: outcome.unknown_verdicts,
         entities: outcome
             .scores
             .iter()

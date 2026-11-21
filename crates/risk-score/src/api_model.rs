@@ -139,6 +139,17 @@ pub struct TruncatedView {
 }
 
 
+/// A rule whose false-positive rate lowered the scores: its verdict counts and the rate in parts per million.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct FpRuleView {
+    pub rule_id: String,
+    pub false_positive: u64,
+    pub closed: u64,
+    pub rate_ppm: u32,
+    pub capped: bool,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct RiskListView {
     pub computed_at: i64,
@@ -146,6 +157,9 @@ pub struct RiskListView {
     pub informational: usize,
     pub refused: BTreeMap<String, usize>,
     pub truncated: Option<TruncatedView>,
+    pub fp_rules: Vec<FpRuleView>,
+    pub fp_rules_omitted: usize,
+    pub unknown_verdicts: usize,
     pub entities: Vec<EntityView>,
 }
 

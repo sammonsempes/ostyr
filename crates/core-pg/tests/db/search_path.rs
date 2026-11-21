@@ -67,7 +67,7 @@ fn handler(applied: bool, functions: Reply) -> Handler {
     Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
-        } else if sql.contains("FROM schema_migrations") {
+        } else if sql.contains("FROM public.schema_migrations") {
             Reply::Rows(if applied {
                 vec![vec![NAMESPACE.to_owned(), FIRST.version.to_owned(), digest_of(FIRST.sql)]]
             } else {

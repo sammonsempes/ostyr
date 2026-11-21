@@ -136,7 +136,7 @@ pub fn alert_handler() -> Handler {
     let created = ((NOW - AGE_SECONDS) * MICROS).to_string();
     Arc::new(move |sql| {
         if sql.contains("FROM alerts") {
-            Reply::Rows(vec![["a1", "rule-1", "high", created.as_str(), "web01", "alice"]
+            Reply::Rows(vec![["a1", "rule-1", "high", created.as_str(), "web01", "alice", ""]
                 .map(str::to_owned)
                 .to_vec()])
         } else {
