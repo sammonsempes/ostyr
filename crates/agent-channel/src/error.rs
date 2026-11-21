@@ -261,6 +261,8 @@ pub enum AppError {
     Sequence(PathBuf),
     #[error("spool directory of {} is refused: {reason}", .path.display())]
     SpoolDir { path: PathBuf, reason: SpoolDirReason },
+    #[error("spool directory ACL refused: {0}")]
+    SpoolDirAcl(#[from] sys_windows::types::DirAclError),
     #[error("agent session abandoned after {attempts} consecutive failed attempts")]
     AttemptsExhausted {
         attempts: u32,

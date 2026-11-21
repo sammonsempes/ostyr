@@ -25,6 +25,7 @@ same-file = "1.0.6"
 secrecy = "0.10.3"
 serde = { version = "1", features = ["derive"] }
 socket2 = "0.6"
+sys-windows = { path = "../sys-windows" }
 tempfile = "3"
 thiserror = "2"
 time = "0.3"

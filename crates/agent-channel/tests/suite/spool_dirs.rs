@@ -2,7 +2,9 @@ use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::agent_app::AgentFile;
 use agent_channel::error::{AppError, SpoolDirReason};
-use agent_channel::spool_dirs::{held_directories, open_fault, open_parent, open_spool_dirs, parent_directory, spool_dir_fault, SpoolDirs};
+use agent_channel::spool_dirs::{
+    held_directories, open_fault, open_parent, open_parent_with, open_spool_dirs, open_spool_dirs_with, parent_directory, spool_dir_fault, SpoolDirs,
+};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -255,6 +257,35 @@ fn every_file_of_the_agent_has_its_directory_judged() -> TestResult {
         assert!(found.is_some_and(|item| item.0.starts_with(&open)));
         Ok(())
     })
+}
+
+
+fn refuse_every_acl(_directory: &fs::File, shown: &Path) -> Result<(), sys_windows::types::DirAclError> {
+    Err(sys_windows::types::DirAclError::NullDacl { path: shown.to_path_buf() })
+}
+
+
+#[test]
+fn an_acl_refusal_ends_the_start() -> TestResult {
+    let dir = tempdir()?;
+    let result = open_spool_dirs_with(&agent_file(dir.path()), refuse_every_acl);
+    assert!(matches!(
+        result,
+        Err(AppError::SpoolDirAcl(sys_windows::types::DirAclError::NullDacl { .. }))
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_parent_judge_is_the_injected_one() -> TestResult {
+    let dir = tempdir()?;
+    let result = open_parent_with(&dir.path().join("audit"), refuse_every_acl);
+    assert!(matches!(
+        result,
+        Err(AppError::SpoolDirAcl(sys_windows::types::DirAclError::NullDacl { .. }))
+    ));
+    Ok(())
 }
 
 
