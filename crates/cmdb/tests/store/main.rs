@@ -1425,3 +1425,26 @@ fn apply_takes_the_tenant_lock_before_any_row_lock_and_gates_every_write_on_the_
     assert_eq!(APPLY_SQL.matches("(SELECT go FROM gate)").count(), FIVE + 1);
     Ok(())
 }
+
+
+#[test]
+fn every_function_of_the_crate_ends_its_search_path_with_pg_temp() -> TestResult {
+    let created = MIGRATIONS
+        .iter()
+        .flat_map(|migration| migration.sql.split("FUNCTION ").skip(1))
+        .filter_map(|rest| rest.split('(').next())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(created.len(), 1);
+    let pinned = MIGRATIONS
+        .iter()
+        .flat_map(|migration| migration.sql.split("ALTER FUNCTION ").skip(1))
+        .filter(|rest| {
+            rest.split(';')
+                .next()
+                .is_some_and(|statement| statement.ends_with("SET search_path = pg_catalog, public, pg_temp"))
+        })
+        .filter_map(|rest| rest.split('(').next())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(created, pinned);
+    Ok(())
+}
