@@ -84,6 +84,14 @@ pub enum StoreError {
     TenantCap { cap: usize, items: usize, others: usize },
     #[error("the store answered a shape this build does not know")]
     BadAnswer,
+    #[error("the page limit must be 1 to {max}")]
+    BadLimit { max: usize },
+    #[error("the cursor is not one this store prints")]
+    BadCursor,
+    #[error("the run changed since the cursor was printed: restart from the first page")]
+    RunChanged,
+    #[error("a stored key or run id is outside its grammar")]
+    StoredValue,
     #[error("database: {0}")]
     Pg(#[from] PgError),
 }

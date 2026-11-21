@@ -1,10 +1,13 @@
-//! Live proof: `posture_store <pg.yaml> migrate | store | bulk | twin`, see `USAGE`.
+//! Live proof: `posture_store <pg.yaml> migrate | store | bulk | twin | read | page-sql`, see `USAGE`.
 
 use alerts::pg::pg_executor;
+use cloud_posture::error::StoreError;
 use cloud_posture::limits::Limits;
-use cloud_posture::model::{Finding, Findings, Severity, Skipped, Status};
+use cloud_posture::model::{Finding, Findings, FindingsPage, Severity, Skipped, Status};
+use cloud_posture::page::{read_findings, refusal_pending, PAGE_SQL};
 use cloud_posture::prowler::parse_prowler_ocsf;
 use cloud_posture::store::{replace_run, MIGRATIONS, MIGRATION_NAMESPACE, STORE_DEADLINE};
+use cloud_posture::text::{escaped_whole, shown};
 use core_pg::connect::connect;
 use core_pg::migrate::migrate;
 use core_pg::scope::tenant_scope;
@@ -17,6 +20,7 @@ use std::process::ExitCode;
 
 
 const USAGE: &str = "usage: posture_store <pg.yaml> migrate | store <tenant> <account> <run> <now_micros> <ocsf.json> \
+                     | read <tenant> <account> <limit> [cursor] | page-sql \
                      | bulk <tenant> <account> <run> <now_micros> <count> <prefix> [nul] | twin <tenant> <account> <run> <now_micros>";
 
 
@@ -85,6 +89,34 @@ fn findings_of(tenant: &str, account: &str, items: Vec<Finding>) -> Result<Findi
 }
 
 
+fn print_page(page: &Result<FindingsPage, StoreError>) -> Result<(), Box<dyn Error>> {
+    let mut out = stdout();
+    match page {
+        Ok(found) => {
+            writeln!(
+                out,
+                "run {:?} refusal_pending={}",
+                found.run,
+                found.run.as_ref().is_some_and(refusal_pending)
+            )?;
+            writeln!(out, "unservable={} next={:?} rows={}", found.unservable, found.next, found.items.len())?;
+            found.items.iter().try_for_each(|finding| {
+                writeln!(
+                    out,
+                    "row {:?} {:?} {:?} {:?}",
+                    escaped_whole(&finding.uid),
+                    finding.severity,
+                    finding.status,
+                    shown(&finding.title, finding.title_cut)
+                )
+            })?;
+        }
+        Err(error) => writeln!(out, "error {error:?}")?,
+    }
+    Ok(())
+}
+
+
 async fn scenario(settings_file: &Path, words: &[String]) -> Result<(), Box<dyn Error>> {
     let settings = parse_settings(&std::fs::read_to_string(settings_file)?, &settings_file.display().to_string())?;
     let client = connect(&settings).await?;
@@ -92,6 +124,16 @@ async fn scenario(settings_file: &Path, words: &[String]) -> Result<(), Box<dyn 
     let prepared = match words {
         [word] if word == "migrate" => {
             migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, STORE_DEADLINE).await?;
+            None
+        }
+        [word] if word == "page-sql" => {
+            writeln!(stdout(), "{PAGE_SQL}")?;
+            None
+        }
+        [word, tenant, account, limit, flags @ ..] if word == "read" => {
+            let scope = tenant_scope(tenant)?;
+            let page = read_findings(&exec, &scope, account, flags.first().map(String::as_str), limit.parse()?).await;
+            print_page(&page)?;
             None
         }
         [word, tenant, account, run, now, file] if word == "store" => {
