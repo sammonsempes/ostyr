@@ -22,6 +22,9 @@ use tracing::{debug, warn};
 const QUOTES: usize = 2;
 
 
+pub const SMARTCTL_PROGRAM: &str = "/usr/sbin/smartctl";
+
+
 pub const SCAN_ARGUMENTS: [&str; 2] = ["--scan-open", "--json=c"];
 
 
@@ -194,8 +197,8 @@ fn unparsable(error: serde_json::Error) -> FailureClass {
 }
 
 
-fn scan(settings: &SmartSettings, runner: RunnerFn, deadline: Duration) -> Result<Vec<Box<RawValue>>, FailureClass> {
-    let output = runner(&settings.program, &SCAN_ARGUMENTS, MAX_SCAN_BYTES, deadline)?;
+fn scan(program: &Path, runner: RunnerFn, deadline: Duration) -> Result<Vec<Box<RawValue>>, FailureClass> {
+    let output = runner(program, &SCAN_ARGUMENTS, MAX_SCAN_BYTES, deadline)?;
     classify_exit(output.exit_code).map_or(Ok(()), Err)?;
     let counted: Counted = serde_json::from_slice(&output.bytes).map_err(unparsable)?;
     let count = counted.devices.len();
@@ -209,10 +212,10 @@ fn scan(settings: &SmartSettings, runner: RunnerFn, deadline: Duration) -> Resul
 }
 
 
-fn one_device(settings: &SmartSettings, runner: RunnerFn, deadline: Duration, name: &str, kind: &str) -> Result<SmartReport, FailureClass> {
+fn one_device(program: &Path, runner: RunnerFn, deadline: Duration, name: &str, kind: &str) -> Result<SmartReport, FailureClass> {
     let limits = default_limits();
     let arguments: Vec<&str> = DEVICE_PREFIX.iter().copied().chain([kind, name]).collect();
-    let output = runner(&settings.program, &arguments, limits.max_bytes, deadline)?;
+    let output = runner(program, &arguments, limits.max_bytes, deadline)?;
     classify_exit(output.exit_code).map_or(Ok(()), Err)?;
     parse_smartctl(output.bytes.as_slice(), &limits).map_err(|error| {
         debug!(%error, "smartctl output refused");
@@ -256,12 +259,12 @@ struct Round {
 
 
 /// The real monotonic clock.
-pub fn system_clock(_settings: &SmartSettings) -> Instant {
+pub fn system_clock(_program: &Path) -> Instant {
     Instant::now()
 }
 
 
-fn read_device(settings: &SmartSettings, runner: RunnerFn, clock: ClockFn, mut round: Round, entry: (&str, &str)) -> Round {
+fn read_device(settings: &SmartSettings, program: &Path, runner: RunnerFn, clock: ClockFn, mut round: Round, entry: (&str, &str)) -> Round {
     let (name, kind) = entry;
     let budget = Duration::from_secs(settings.round_deadline_seconds);
     let remaining = budget.saturating_sub(round.spent);
@@ -269,9 +272,9 @@ fn read_device(settings: &SmartSettings, runner: RunnerFn, clock: ClockFn, mut r
         round.report.failed.push((name.to_owned(), FailureClass::Deferred));
     } else {
         let deadline = remaining.min(Duration::from_secs(settings.deadline_seconds));
-        let started = clock(settings);
-        let outcome = one_device(settings, runner, deadline, name, kind);
-        round.spent += clock(settings).saturating_duration_since(started);
+        let started = clock(program);
+        let outcome = one_device(program, runner, deadline, name, kind);
+        round.spent += clock(program).saturating_duration_since(started);
         match outcome {
             Ok(found) => round.report.reports.push((name.to_owned(), found)),
             Err(class) => round.report.failed.push((name.to_owned(), class)),
@@ -282,11 +285,11 @@ fn read_device(settings: &SmartSettings, runner: RunnerFn, clock: ClockFn, mut r
 
 
 /// Scans, then reads every accepted disk within the round budget; wall time of every run, the scan included, is charged and the scan gets `min(deadline, round)`; a disk past it is `Deferred`.
-pub fn scan_and_report_with(settings: &SmartSettings, runner: RunnerFn, clock: ClockFn) -> RunReport {
+pub fn scan_and_report_with(settings: &SmartSettings, program: &Path, runner: RunnerFn, clock: ClockFn) -> RunReport {
     let deadline = Duration::from_secs(settings.deadline_seconds.min(settings.round_deadline_seconds));
-    let started = clock(settings);
-    let scanned = scan(settings, runner, deadline);
-    let spent = clock(settings).saturating_duration_since(started);
+    let started = clock(program);
+    let scanned = scan(program, runner, deadline);
+    let spent = clock(program).saturating_duration_since(started);
     match scanned {
         Err(class) => RunReport {
             scan_failed: Some(class),
@@ -304,7 +307,7 @@ pub fn scan_and_report_with(settings: &SmartSettings, runner: RunnerFn, clock: C
                         round.report.refused_devices += 1;
                         round
                     }
-                    Some((name, kind)) => read_device(settings, runner, clock, round, (&name, &kind)),
+                    Some((name, kind)) => read_device(settings, program, runner, clock, round, (&name, &kind)),
                 })
                 .report
         }
@@ -314,5 +317,5 @@ pub fn scan_and_report_with(settings: &SmartSettings, runner: RunnerFn, clock: C
 
 /// `scan_and_report_with` on the real clock.
 pub fn scan_and_report(settings: &SmartSettings, runner: RunnerFn) -> RunReport {
-    scan_and_report_with(settings, runner, system_clock)
+    scan_and_report_with(settings, Path::new(SMARTCTL_PROGRAM), runner, system_clock)
 }

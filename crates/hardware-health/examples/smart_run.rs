@@ -9,7 +9,7 @@ use hardware_health::measures::measures;
 #[cfg(unix)]
 use hardware_health::smart_exec::check_program;
 #[cfg(unix)]
-use hardware_health::smart_run::{run_smartctl, scan_and_report};
+use hardware_health::smart_run::{run_smartctl, scan_and_report, SMARTCTL_PROGRAM};
 #[cfg(unix)]
 use hardware_health::smart_settings::parse_settings;
 #[cfg(unix)]
@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take(u64::try_from(MAX_SETTINGS_BYTES)?.saturating_add(1))
         .read_to_string(&mut text)?;
     let settings = parse_settings(&text)?;
-    check_program(&settings.program)?;
+    check_program(std::path::Path::new(SMARTCTL_PROGRAM))?;
     let report = scan_and_report(&settings, run_smartctl);
     let mut out = std::io::stdout();
     writeln!(

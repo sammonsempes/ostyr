@@ -5,7 +5,8 @@ mod types;
 
 use hardware_health::model::{FailureClass, RunOutput, SmartSettings};
 use hardware_health::smart_run::{
-    classify_exit, failure_of, is_device_name, is_device_type, run_smartctl, run_with_hook, scan_and_report, scan_and_report_with,
+    classify_exit, failure_of, is_device_name, is_device_type, run_smartctl, run_with_hook, scan_and_report, scan_and_report_with, system_clock,
+    SMARTCTL_PROGRAM,
 };
 use net_topology::model::RunFailure;
 use std::fs;
@@ -116,15 +117,15 @@ fn seconds(text: &str) -> Result<u64, FailureClass> {
 static BASE: OnceLock<Instant> = OnceLock::new();
 
 
-fn clock_seconds(settings: &SmartSettings) -> Result<u64, FailureClass> {
-    let dir = settings.program.parent().ok_or(FailureClass::Io)?;
+fn clock_seconds(program: &Path) -> Result<u64, FailureClass> {
+    let dir = program.parent().ok_or(FailureClass::Io)?;
     seconds(&read_or_empty(&dir.join("clock"))?)
 }
 
 
-fn fake_clock(settings: &SmartSettings) -> Instant {
+fn fake_clock(program: &Path) -> Instant {
     let base = *BASE.get_or_init(Instant::now);
-    match clock_seconds(settings) {
+    match clock_seconds(program) {
         Ok(ticks) => base + Duration::from_secs(ticks),
         Err(class) => {
             tracing::debug!(?class, "clock fixture unreadable");
@@ -175,6 +176,7 @@ fn fake_runner(program: &Path, arguments: &[&str], _cap: u64, deadline: Duration
 
 struct Setup {
     dir: tempfile::TempDir,
+    program: PathBuf,
     settings: SmartSettings,
 }
 
@@ -184,11 +186,11 @@ fn setup(scan: &str) -> Result<Setup, io::Error> {
     fs::write(dir.path().join("scan.json"), scan)?;
     fs::write(dir.path().join("scan.code"), "0")?;
     let settings = SmartSettings {
-        program: dir.path().join("smartctl"),
         deadline_seconds: SHORT_DEADLINE,
         round_deadline_seconds: LONG_DEADLINE,
     };
-    Ok(Setup { dir, settings })
+    let program = dir.path().join("smartctl");
+    Ok(Setup { dir, program, settings })
 }
 
 
@@ -214,7 +216,7 @@ fn a_scan_of_two_disks_gives_two_reports() -> TestResult {
     let setup = setup(TWO_DISKS)?;
     disk(&setup, "sda", HEALTHY, "0")?;
     disk(&setup, "nvme0", HEALTHY, "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(report.reports.len(), COUNT_TWO);
     assert_eq!(report.refused_devices, 0);
     assert!(report.failed.is_empty() && report.scan_failed.is_none());
@@ -232,7 +234,7 @@ fn hostile_scan_entries_are_refused_alone() -> TestResult {
         {"name":5,"type":"sat"},{"name":"/dev/sdb"},{"name":"/dev//sdc","type":"sat"},{"name":"/dev/sda","type":"sat"}]}"#;
     let setup = setup(scan)?;
     disk(&setup, "sda", HEALTHY, "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(report.refused_devices, COUNT_SIX);
     assert_eq!(report.reports.len(), 1);
     assert_eq!(calls(&setup)?.len(), COUNT_TWO);
@@ -245,7 +247,7 @@ fn too_many_entries_are_refused_before_any_device_run() -> TestResult {
     let entries = vec![r#"{"name":"/dev/sda","type":"sat"}"#; TOO_MANY].join(",");
     let setup = setup(&format!(r#"{{"devices":[{entries}]}}"#))?;
     disk(&setup, "sda", HEALTHY, "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(report.scan_failed, Some(FailureClass::TooManyDevices));
     assert!(report.reports.is_empty());
     assert_eq!(calls(&setup)?.len(), 1);
@@ -263,7 +265,7 @@ fn exit_bits_decide_failed_or_parsed() -> TestResult {
     disk(&setup, "sdc", HEALTHY, &BIT_DISK_STATE.to_string())?;
     disk(&setup, "sdd", HEALTHY, &BIT_COMMAND_LINE.to_string())?;
     disk(&setup, "sde", HEALTHY, "none")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     let names: Vec<&str> = report.reports.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, vec!["/dev/sda", "/dev/sdc"]);
     assert_eq!(
@@ -285,7 +287,7 @@ fn runner_failures_and_garbage_are_failed_classes() -> TestResult {
     fs::write(setup.dir.path().join("sda.fail"), "timed_out")?;
     fs::write(setup.dir.path().join("sdb.fail"), "too_large")?;
     disk(&setup, "sdc", "not json", "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(
         report.failed,
         vec![
@@ -302,33 +304,33 @@ fn runner_failures_and_garbage_are_failed_classes() -> TestResult {
 fn a_failed_scan_is_reported_with_its_class() -> TestResult {
     let broken = setup("not json")?;
     assert_eq!(
-        scan_and_report_with(&broken.settings, fake_runner, fake_clock).scan_failed,
+        scan_and_report_with(&broken.settings, &broken.program, fake_runner, fake_clock).scan_failed,
         Some(FailureClass::Unparsable)
     );
     let typed = setup(r#"{"devices":[{"name":1,"type":2}], "x": }"#)?;
     assert_eq!(
-        scan_and_report_with(&typed.settings, fake_runner, fake_clock).scan_failed,
+        scan_and_report_with(&typed.settings, &typed.program, fake_runner, fake_clock).scan_failed,
         Some(FailureClass::Unparsable)
     );
     let wrong_shape = setup(r#"{"devices":7}"#)?;
     assert_eq!(
-        scan_and_report_with(&wrong_shape.settings, fake_runner, fake_clock).scan_failed,
+        scan_and_report_with(&wrong_shape.settings, &wrong_shape.program, fake_runner, fake_clock).scan_failed,
         Some(FailureClass::Unparsable)
     );
     let timed = setup("{}")?;
     fs::write(timed.dir.path().join("scan.fail"), "timed_out")?;
     assert_eq!(
-        scan_and_report_with(&timed.settings, fake_runner, fake_clock).scan_failed,
+        scan_and_report_with(&timed.settings, &timed.program, fake_runner, fake_clock).scan_failed,
         Some(FailureClass::TimedOut)
     );
     let opened = setup("{}")?;
     fs::write(opened.dir.path().join("scan.code"), BIT_BOTH.to_string())?;
     assert_eq!(
-        scan_and_report_with(&opened.settings, fake_runner, fake_clock).scan_failed,
+        scan_and_report_with(&opened.settings, &opened.program, fake_runner, fake_clock).scan_failed,
         Some(FailureClass::CommandLine)
     );
     let empty = setup("{}")?;
-    let report = scan_and_report_with(&empty.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&empty.settings, &empty.program, fake_runner, fake_clock);
     assert!(report.scan_failed.is_none() && report.reports.is_empty());
     Ok(())
 }
@@ -478,11 +480,10 @@ fn a_real_script_end_to_end_never_leaks_stderr() -> TestResult {
     );
     let program = install(dir.path(), "smartctl", &body)?;
     let settings = SmartSettings {
-        program,
         deadline_seconds: LONG_DEADLINE,
         round_deadline_seconds: LONG_DEADLINE,
     };
-    let report = scan_and_report(&settings, run_smartctl);
+    let report = scan_and_report_with(&settings, &program, run_smartctl, system_clock);
     assert_eq!(report.reports.len(), 1);
     assert_eq!(report.failed, vec![("/dev/nvme0".to_owned(), FailureClass::OpenFailed)]);
     assert!(!format!("{report:?}").contains(MARKER));
@@ -508,7 +509,7 @@ fn devices_past_the_round_budget_are_deferred() -> TestResult {
     disk(&setup, "sdc", HEALTHY, "0")?;
     fs::write(setup.dir.path().join("sda.elapsed"), SLOW_RUN)?;
     fs::write(setup.dir.path().join("sdb.elapsed"), SLOW_RUN)?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(report.reports.len(), COUNT_TWO);
     assert_eq!(report.failed, vec![("/dev/sdc".to_owned(), FailureClass::Deferred)]);
     assert_eq!(report.refused_devices, 0);
@@ -526,7 +527,7 @@ fn timeouts_spend_the_round_budget() -> TestResult {
     fs::write(setup.dir.path().join("sda.elapsed"), SHORT_DEADLINE.to_string())?;
     fs::write(setup.dir.path().join("sdb.elapsed"), SHORT_DEADLINE.to_string())?;
     disk(&setup, "sdc", HEALTHY, "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(
         report.failed,
         vec![
@@ -550,7 +551,7 @@ fn names_and_types_must_be_short_plain_strings() -> TestResult {
     );
     let setup = setup(&scan)?;
     disk(&setup, "sda", HEALTHY, "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(report.refused_devices, COUNT_SIX - 1);
     assert_eq!(report.reports.len(), 1);
     Ok(())
@@ -569,7 +570,7 @@ fn slow_failures_spend_the_round_budget() -> TestResult {
     disk(&setup, "sdc", HEALTHY, "0")?;
     fs::write(setup.dir.path().join("sda.elapsed"), "6")?;
     fs::write(setup.dir.path().join("sdb.elapsed"), SLOW_FAILURE)?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(
         report.failed,
         vec![
@@ -592,7 +593,7 @@ fn the_scan_time_counts_against_the_round() -> TestResult {
     disk(&setup, "sda", HEALTHY, "0")?;
     disk(&setup, "nvme0", HEALTHY, "0")?;
     fs::write(setup.dir.path().join("scan.elapsed"), ROUND_BUDGET.to_string())?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert!(report.reports.is_empty());
     assert_eq!(
         report.failed,
@@ -612,7 +613,7 @@ fn a_bad_clock_fixture_is_logged_and_the_run_goes_on() -> TestResult {
     disk(&setup, "sda", HEALTHY, "0")?;
     disk(&setup, "nvme0", HEALTHY, "0")?;
     fs::write(setup.dir.path().join("clock"), "x")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert!(report.scan_failed.is_some() || !report.failed.is_empty());
     Ok(())
 }
@@ -623,7 +624,7 @@ fn duplicate_keys_and_non_objects_refuse_one_entry() -> TestResult {
     let scan = r#"{"devices":[7,null,{"name":"/dev/sda","name":"/dev/sdb","type":"sat"},{"name":"/dev/sda","type":"sat"}]}"#;
     let setup = setup(scan)?;
     disk(&setup, "sda", HEALTHY, "0")?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(report.refused_devices, COUNT_THREE);
     assert_eq!(report.reports.len(), 1);
     Ok(())
@@ -635,11 +636,12 @@ fn the_real_clock_runs_a_real_scan() -> TestResult {
     let dir = scratch()?;
     let program = install(dir.path(), "smartctl", "echo '{}'")?;
     let settings = SmartSettings {
-        program,
         deadline_seconds: LONG_DEADLINE,
         round_deadline_seconds: LONG_DEADLINE,
     };
-    assert!(scan_and_report(&settings, run_smartctl).scan_failed.is_none());
+    assert!(scan_and_report_with(&settings, &program, run_smartctl, system_clock)
+        .scan_failed
+        .is_none());
     Ok(())
 }
 
@@ -652,7 +654,7 @@ fn the_scan_gets_the_round_as_its_deadline() -> TestResult {
     disk(&setup, "sda", HEALTHY, "0")?;
     disk(&setup, "nvme0", HEALTHY, "0")?;
     fs::write(setup.dir.path().join("scan.elapsed"), LONG_DEADLINE.to_string())?;
-    let report = scan_and_report_with(&setup.settings, fake_runner, fake_clock);
+    let report = scan_and_report_with(&setup.settings, &setup.program, fake_runner, fake_clock);
     assert_eq!(fs::read_to_string(setup.dir.path().join("scan.deadline"))?, ROUND_BUDGET.to_string());
     assert!(report.reports.is_empty());
     assert_eq!(calls(&setup)?.len(), 1);
@@ -667,5 +669,29 @@ fn the_fake_runner_refuses_a_call_without_its_parts() -> TestResult {
     let no_directory = fake_runner(Path::new("/"), &["--scan-open"], 0, Duration::ZERO);
     assert!(no_device.is_err());
     assert!(no_directory.is_err());
+    Ok(())
+}
+
+
+fn const_path_runner(program: &Path, _arguments: &[&str], _cap: u64, _deadline: Duration) -> Result<RunOutput, FailureClass> {
+    if program == Path::new(SMARTCTL_PROGRAM) {
+        Ok(RunOutput {
+            bytes: b"{}".to_vec(),
+            exit_code: Some(0),
+        })
+    } else {
+        Err(FailureClass::ProgramRefused)
+    }
+}
+
+
+#[test]
+fn the_production_scan_runs_the_program_const_only() -> TestResult {
+    let settings = SmartSettings {
+        deadline_seconds: LONG_DEADLINE,
+        round_deadline_seconds: LONG_DEADLINE,
+    };
+    assert_eq!(SMARTCTL_PROGRAM, "/usr/sbin/smartctl");
+    assert!(scan_and_report(&settings, const_path_runner).scan_failed.is_none());
     Ok(())
 }
