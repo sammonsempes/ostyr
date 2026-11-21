@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*", "tools/*"]
+exclude = ["crates/ebpf-probes/ebpf"]
 resolver = "2"
 
 [workspace.package]

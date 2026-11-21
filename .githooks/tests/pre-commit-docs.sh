@@ -12,6 +12,7 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 for tool in cargo custom_lint; do
   cat >"$SCRATCH/bin/$tool" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "$(basename "$0") $*" >>"$STUB_LOG"
 S
   chmod +x "$SCRATCH/bin/$tool"

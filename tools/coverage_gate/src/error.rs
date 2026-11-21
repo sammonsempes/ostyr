@@ -37,6 +37,26 @@ pub enum GateError {
     },
     #[error("cannot scan the workspace")]
     Walk(#[from] walkdir::Error),
+    #[error("cannot read the workspace manifest {path}")]
+    ReadManifest {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("malformed workspace manifest {path}")]
+    ParseManifest {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("workspace.exclude entry {entry} is not crates/ebpf-probes/ebpf: an exclude cannot hide a crate from the gate")]
+    ExcludeRefused { entry: String },
+    #[error("{path} exists but the root workspace.exclude has no exact crates/ebpf-probes/ebpf entry: the kernel crate would escape the gate")]
+    KernelUndeclared { path: PathBuf },
+    #[error("{path} uses {form}, which the gate refuses: a skipped file could hide behind it")]
+    HiddenInclude { path: PathBuf, form: &'static str },
+    #[error("{path} declares a module with #[path]: the gate refuses it, a skipped file could hide behind it")]
+    PathModule { path: PathBuf },
     #[error("cannot write the report")]
     Write(#[source] io::Error),
 }

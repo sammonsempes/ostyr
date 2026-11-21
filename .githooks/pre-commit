@@ -41,10 +41,14 @@ lint() {
   if [ -n "${CUSTOM_LINT:-}" ]; then "$CUSTOM_LINT" "$ROOT"; else low cargo run --offline -q -p custom_lint -- "$ROOT"; fi
 }
 
+coverage_gate_tool() {
+  if [ -n "${COVERAGE_GATE:-}" ]; then "$COVERAGE_GATE" "$@"
+  else low cargo run --offline -q -p coverage_gate -- "$@"; fi
+}
+
 gate() {
   local -a dirs=("${SCOPE_DIRS[@]+"${SCOPE_DIRS[@]}"}")
-  if [ -n "${COVERAGE_GATE:-}" ]; then "$COVERAGE_GATE" "$EXPORT" "$ROOT" "${dirs[@]+"${dirs[@]}"}"
-  else low cargo run --offline -q -p coverage_gate -- "$EXPORT" "$ROOT" "${dirs[@]+"${dirs[@]}"}"; fi
+  coverage_gate_tool "$EXPORT" "$ROOT" "${dirs[@]+"${dirs[@]}"}"
 }
 
 GATE_TMPFS="${GATE_TMPFS:-/run/ostyr-gate}"
@@ -224,6 +228,41 @@ package_args() {
   for name in "${SCOPE_PKGS[@]+"${SCOPE_PKGS[@]}"}"; do PACKAGE_ARGS+=(-p "$name"); done
 }
 
+EBPF_NIGHTLY="${EBPF_NIGHTLY:-nightly-2026-11-08}"
+EBPF_MANIFEST=crates/ebpf-probes/ebpf/Cargo.toml
+
+kernel_touched() {
+  local path
+  local -a staged
+  if [ "${GATE_SCOPE:-}" = full ]; then return 0; fi
+  mapfile -d '' staged < <(git diff --cached --name-only -z --no-renames --diff-filter=ACMRD)
+  for path in "${staged[@]+"${staged[@]}"}"; do
+    if forced_full_path "$path"; then return 0; fi
+    case "$path" in
+      crates/ebpf-probes/ebpf/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+kernel_declaration() {
+  KERNEL_STATE=$(coverage_gate_tool kernel-declared "$ROOT")
+}
+
+kernel_manifest_present() {
+  if [ ! -f "$EBPF_MANIFEST" ]; then
+    echo "pre-commit: $EBPF_MANIFEST is missing but root Cargo.toml excludes crates/ebpf-probes/ebpf" >&2
+    return 1
+  fi
+}
+
+kernel_checks() {
+  kernel_manifest_present &&
+    low cargo +nightly fmt --check --manifest-path "$EBPF_MANIFEST" &&
+    low cargo "+$EBPF_NIGHTLY" clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
+      --manifest-path "$EBPF_MANIFEST" -- -D warnings
+}
+
 compute_scope
 prepare_gate_dir
 package_args
@@ -233,4 +272,15 @@ step "3/6 custom_lint" lint
 step "4/6 cargo llvm-cov" covered_tests
 step "5/6 coverage_gate" gate
 step "6/6 cargo test --doc" doc_tests
+step "kernel crate: declaration" kernel_declaration
+case "$KERNEL_STATE" in
+  declared)
+    if kernel_touched; then step "kernel crate: fmt and clippy for bpfel-unknown-none" kernel_checks; fi
+    ;;
+  absent) echo "pre-commit: kernel crate step skipped (root Cargo.toml does not exclude crates/ebpf-probes/ebpf)" >&2 ;;
+  *)
+    echo "pre-commit: FAILED at step: kernel crate: unexpected declaration state '$KERNEL_STATE'" >&2
+    exit 1
+    ;;
+esac
 echo "pre-commit: all steps passed" >&2
