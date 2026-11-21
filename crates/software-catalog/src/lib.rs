@@ -6,6 +6,7 @@ pub mod catalogue;
 pub mod error;
 pub mod installed;
 pub mod installed_rpm;
+pub mod installed_winget;
 pub mod limits;
 pub mod model;
 pub mod plan;
