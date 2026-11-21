@@ -575,9 +575,9 @@ pub async fn run_isolation(path: &Path, action: &str, run: NftFn) -> Result<Stri
     } else {
         let agent = load_agent_file(&file.agent_file)?;
         let _audit_dir = open_parent(&file.audit_file)?;
+        let state = open_state_dir(&file.cursor_file)?;
         let log = Arc::new(open_file_log(&file.audit_file)?);
         let audit = shared_log_audit(&log);
-        let state = open_state_dir(&file.cursor_file)?;
         let env = IsolationEnv {
             run,
             nft: &file.nft_path,

@@ -992,3 +992,24 @@ async fn a_group_writable_audit_parent_ends_the_command_before_any_record() -> T
     assert!(!dir.path().join("cursor").exists());
     Ok(())
 }
+
+
+#[tokio::test]
+async fn a_group_writable_state_directory_ends_the_command_before_the_audit_file_exists() -> TestResult {
+    let dir = tempdir()?;
+    let state_dir = dir.path().join("state");
+    fs::create_dir(&state_dir)?;
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(OPEN_PARENT))?;
+    let path = write_files(dir.path(), GOOD, "")?;
+    let text = fs::read_to_string(&path)?.replace(
+        &format!("cursor_file: {}/cursor\n", dir.path().display()),
+        &format!("cursor_file: {}/state/cursor\n", dir.path().display()),
+    );
+    fs::write(&path, text)?;
+    assert!(matches!(
+        run_isolation(&path, "isolate", fake_nft).await,
+        Err(IsolationError::State(SourceError::StateDir(..)))
+    ));
+    assert!(!dir.path().join("audit").exists());
+    Ok(())
+}
