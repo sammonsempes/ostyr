@@ -66,6 +66,8 @@ pub enum PgError {
     UnknownApplied { version: String },
     #[error("{total} function(s) of any module in public lack exactly `SET search_path = pg_catalog, public, pg_temp`: {functions}")]
     FunctionSearchPath { total: usize, functions: String },
+    #[error("the connection does not run READ COMMITTED: the lock-then-count caps of the stores would not hold")]
+    IsolationLevel,
     #[error("migration `{version}` is older than an applied migration")]
     OutOfOrder { version: String },
 }

@@ -14,6 +14,9 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::warn;
 
 
+pub const ISOLATION_OPTIONS: &str = "-c default_transaction_isolation=read\\ committed";
+
+
 /// `SslMode::Require` makes the client refuse a server without TLS; the rustls verifier checks the chain and the host name.
 pub fn pg_config(settings: &PgSettings, password: &[u8]) -> Config {
     let mut config = Config::new();
@@ -24,6 +27,7 @@ pub fn pg_config(settings: &PgSettings, password: &[u8]) -> Config {
         .user(&settings.user)
         .password(password)
         .ssl_mode(SslMode::Require)
+        .options(ISOLATION_OPTIONS)
         .connect_timeout(Duration::from_secs(settings.connect_timeout_secs));
     config
 }
