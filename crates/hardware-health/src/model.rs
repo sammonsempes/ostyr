@@ -269,8 +269,6 @@ pub struct FetchSession {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SmartSettings {
-    #[serde(default = "crate::limits::default_smartctl")]
-    pub program: std::path::PathBuf,
     #[serde(default = "crate::limits::default_deadline_seconds")]
     pub deadline_seconds: u64,
     #[serde(default = "crate::limits::default_round_deadline_seconds")]
@@ -321,4 +319,58 @@ pub struct RunReport {
     pub reports: Vec<(String, SmartReport)>,
     pub refused_devices: usize,
     pub failed: Vec<(String, FailureClass)>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsSettings {
+    pub ups_targets: Vec<String>,
+    #[serde(default = "crate::limits::default_deadline_seconds")]
+    pub deadline_seconds: u64,
+    #[serde(default = "crate::limits::default_round_deadline_seconds")]
+    pub round_deadline_seconds: u64,
+}
+
+
+/// One checked `<ups>@<host>[:<port>]` target; `host` keeps the port as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsTarget {
+    pub text: String,
+    pub ups: String,
+    pub host: String,
+}
+
+
+/// Why one upsc run produced no report; a category only, never output or stderr text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UpsFailure {
+    #[error("upsc passed its deadline")]
+    TimedOut,
+    #[error("upsc output is over the cap")]
+    TooLarge,
+    #[error("upsc could not be started")]
+    Spawn,
+    #[error("upsc run failed on an I/O error")]
+    Io,
+    #[error("the upsc child cannot be waited on")]
+    Unwaitable,
+    #[error("upsc was ended by a signal")]
+    Signalled,
+    #[error("upsc failed")]
+    CommandFailed,
+    #[error("upsc output is not readable")]
+    Unparsable,
+    #[error("the upsc program is not trusted")]
+    ProgramRefused,
+    #[error("the round deadline passed before this target was read")]
+    Deferred,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UpsRunReport {
+    pub reports: Vec<(UpsTarget, UpsReport)>,
+    pub refused_targets: Vec<usize>,
+    pub failed: Vec<(UpsTarget, UpsFailure)>,
 }
