@@ -4,11 +4,15 @@ mod types;
 
 use compliance::alerting::{is_grammar, is_id, ASSET_PUNCTUATION, ID_PUNCTUATION, MAX_ASSET_CHARS, MAX_ID_CHARS};
 use compliance::store::MIGRATIONS;
+use core_pg::migrate::digest_of;
 use regex::Regex;
 use types::TestResult;
 
 
 const THIRD_MIGRATION: usize = 2;
+
+
+const PUBLISHED_THIRD_DIGEST: &str = "ce724e63f46673883868f7d32d6535132f198062e8ad74c559e04a175d8f1dba";
 
 
 const ID_CHECKS: usize = 4;
@@ -87,5 +91,12 @@ fn the_pattern_accepts_what_the_write_grammar_accepts() -> TestResult {
             "{sample:?}"
         );
     }
+    Ok(())
+}
+
+
+#[test]
+fn the_published_third_migration_is_never_edited() -> TestResult {
+    assert_eq!(digest_of(third()?), PUBLISHED_THIRD_DIGEST);
     Ok(())
 }
