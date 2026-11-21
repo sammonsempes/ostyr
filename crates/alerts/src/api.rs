@@ -1,10 +1,10 @@
 use crate::error::StoreError;
 use crate::id::is_alert_id;
 use crate::model::{
-    Alert, AlertDetail, AlertDetailView, AlertListView, AlertView, Backend, Cursor, ListQuery, NoQuery, Page, Summary, Triage, TriageChange,
-    TriageRequest, TriageStatus, TriageView, Triaged,
+    Alert, AlertDetail, AlertDetailView, AlertListView, AlertView, AuditStamp, Backend, Cursor, ListQuery, NoQuery, Page, Summary, Triage,
+    TriageChange, TriageRequest, TriageStatus, TriageView, Triaged,
 };
-use crate::store::{check_optional, format_cursor, parse_cursor, MAX_NOTE_CHARS, MAX_PAGE_SIZE};
+use crate::store::{check_optional, format_cursor, is_readable, parse_cursor, MAX_NOTE_CHARS, MAX_PAGE_SIZE};
 use crate::types::AuditAppendFn;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -326,18 +326,28 @@ pub fn request_fault(request: &TriageRequest) -> Option<Response> {
         Some(bad_field("version", "must be at least 1"))
     } else if request.status == TriageStatus::FalsePositive && request.note.is_none() {
         Some(bad_field("note", "is required for a false_positive verdict"))
+    } else if check_optional("note", request.note.as_deref(), MAX_NOTE_CHARS).is_err() {
+        Some(bad_field("note", "is empty, too long or holds a NUL character"))
+    } else if request.status == TriageStatus::FalsePositive && !request.note.as_deref().is_some_and(is_readable) {
+        Some(bad_field("note", "must hold a letter or a number for a false_positive verdict"))
     } else {
-        check_optional("note", request.note.as_deref(), MAX_NOTE_CHARS)
-            .err()
-            .map(|_refused| bad_field("note", "is empty, too long or holds a NUL character"))
+        None
     }
 }
 
 
 /// The audit record of one committed triage write: who, which tenant and alert, the rule, the new status and version; the note only as a length.
-pub fn triage_entry(identity: &ApiIdentity, actor: &str, alert_id: &str, request_id: &str, written: &Triaged, note_chars: usize) -> NewEntry {
+pub fn triage_entry(
+    identity: &ApiIdentity,
+    actor: &str,
+    alert_id: &str,
+    request_id: &str,
+    written: &Triaged,
+    note_chars: usize,
+    timestamp: OffsetDateTime,
+) -> NewEntry {
     NewEntry {
-        timestamp: OffsetDateTime::now_utc(),
+        timestamp,
         actor: Actor {
             kind: ActorKind::User,
             id: actor.to_owned(),
@@ -382,7 +392,7 @@ pub async fn triage_flow(
     backend: &Backend,
     id: Result<String, PathRejection>,
     body: Result<TriageRequest, ApiError>,
-    request_id: &str,
+    stamp: AuditStamp<'_>,
     audit: AuditAppendFn<'_>,
 ) -> Result<Response, ApiError> {
     match body {
@@ -409,7 +419,10 @@ pub async fn triage_flow(
                     let done = (backend.triage)(scope, text.clone(), change, request.version).await;
                     match done {
                         Ok(written) => {
-                            audit_triage(audit, triage_entry(identity, &actor, &text, request_id, &written, note_chars))?;
+                            audit_triage(
+                                audit,
+                                triage_entry(identity, &actor, &text, stamp.request_id, &written, note_chars, stamp.timestamp),
+                            )?;
                             Ok(Json(triage_view(&written.triage).map_err(|error| store_failure(&error))?).into_response())
                         }
                         Err(error) => triage_failure(&error),
@@ -502,7 +515,10 @@ pub async fn triage_endpoint(
                 &backend,
                 id.map(|found| found.0),
                 parsed,
-                &request_id_of(parts.extensions.get::<RequestId>()),
+                AuditStamp {
+                    request_id: &request_id_of(parts.extensions.get::<RequestId>()),
+                    timestamp: (state.clock)(),
+                },
                 &|entry| append_declared(&state.audit, entry, &TRIAGE_AUDIT_KEYS).map(|_record| ()),
             )
             .await

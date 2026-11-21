@@ -4,9 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::str::FromStr;
 use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_postgres::Client;
 use utoipa::{IntoParams, ToSchema};
+
+
+/// The request id and the injected clock reading that stamp the audit record of one triage write.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditStamp<'a> {
+    pub request_id: &'a str,
+    pub timestamp: OffsetDateTime,
+}
 
 
 pub const SEVERITY_COLUMN: usize = 3;

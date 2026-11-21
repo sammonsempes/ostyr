@@ -6,6 +6,7 @@ use core_pg::migrate::Migration;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 
 pub const MIGRATION_NAMESPACE: &str = "alerts";
@@ -174,6 +175,48 @@ pub fn summarise(value: &Value) -> Summary {
         text,
         original_bytes,
     }
+}
+
+
+/// Copy of status-page's `INVISIBLE_CHARACTERS`: fillers that render blank although a letter category holds them.
+pub const INVISIBLE_CHARACTERS: [char; 15] = [
+    '\u{034F}',
+    '\u{115F}',
+    '\u{1160}',
+    '\u{17B4}',
+    '\u{17B5}',
+    '\u{2800}',
+    '\u{180F}',
+    '\u{3164}',
+    '\u{FFA0}',
+    '\u{13441}',
+    '\u{13442}',
+    '\u{13443}',
+    '\u{13444}',
+    '\u{13445}',
+    '\u{13446}',
+];
+
+
+pub fn is_letter_or_number(character: char) -> bool {
+    matches!(
+        get_general_category(character),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::OtherLetter
+            | GeneralCategory::DecimalNumber
+            | GeneralCategory::LetterNumber
+            | GeneralCategory::OtherNumber
+    )
+}
+
+
+/// A text that shows something: a letter or number by general category that is not a blank-rendering filler.
+pub fn is_readable(text: &str) -> bool {
+    text.chars()
+        .any(|character| is_letter_or_number(character) && !INVISIBLE_CHARACTERS.contains(&character))
 }
 
 

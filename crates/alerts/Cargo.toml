@@ -21,6 +21,7 @@ time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["sync"] }
 tokio-postgres = "0.7"
 tracing = "0.1"
+unicode-general-category = "1.1.0"
 utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]

@@ -1,11 +1,14 @@
-use crate::fixture::{alert, busy_triage, fixed_clock, fixture, fixture_with, store, Fixture, ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT};
+use crate::fixture::{
+    alert, busy_triage, fixed_clock, fixture, fixture_adjusted, fixture_with, frozen_clock, memory_backend, store, with_frozen_clock, Fixture,
+    ANALYST, BASE_TIME, OTHER_TENANT, READER, TENANT,
+};
 use crate::http::{body_json, call, get, login};
 use crate::memory::{lock, Forced};
 use crate::types::{TestError, TestResult};
 use alerts::api::{actor_of, alerts_document, request_id_of, triage_entry, triage_flow, TRIAGE_AUDIT_KEYS, TRIAGE_BODY_LIMIT};
 use alerts::backend::unix_micros;
 use alerts::error::StoreError;
-use alerts::model::{AlertDetail, Backend, Triage, TriageChange, TriageRequest, TriageStatus, Triaged};
+use alerts::model::{AlertDetail, AuditStamp, Backend, Triage, TriageChange, TriageRequest, TriageStatus, Triaged};
 use alerts::store::{check_triage, MAX_NOTE_CHARS};
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -17,6 +20,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use time::format_description::well_known::Rfc3339;
 
 
 fn accept(_entry: NewEntry) -> Result<(), AuditError> {
@@ -325,7 +329,7 @@ async fn a_request_without_a_session_is_never_written() -> TestResult {
         note: None,
         version: None,
     };
-    let refused = triage_flow(&identity, None, &backend, Ok("a".repeat(HEX_LENGTH)), Ok(request), "rid", &accept).await;
+    let refused = triage_flow(&identity, None, &backend, Ok("a".repeat(HEX_LENGTH)), Ok(request), stamp(), &accept).await;
     assert!(matches!(refused, Err(ApiError::Internal)));
     let unusable = ApiIdentity {
         module: "alerts".to_owned(),
@@ -337,7 +341,7 @@ async fn a_request_without_a_session_is_never_written() -> TestResult {
         note: None,
         version: None,
     };
-    let refused_tenant = triage_flow(&unusable, None, &backend, Ok("a".repeat(HEX_LENGTH)), Ok(again), "rid", &accept).await;
+    let refused_tenant = triage_flow(&unusable, None, &backend, Ok("a".repeat(HEX_LENGTH)), Ok(again), stamp(), &accept).await;
     assert!(matches!(refused_tenant, Err(ApiError::Internal)));
     assert!(matches!(actor_of(None), Err(ApiError::Internal)));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -578,7 +582,7 @@ async fn the_flow_answers_500_when_the_injected_audit_refuses() -> TestResult {
         &backend,
         Ok("a".repeat(HEX_LENGTH)),
         Ok(request),
-        "rid",
+        stamp(),
         &refuse,
     )
     .await;
@@ -599,7 +603,7 @@ fn the_entry_names_actor_tenant_alert_rule_status_version_and_the_note_length_on
         },
         rule_id: "r7".to_owned(),
     };
-    let entry = triage_entry(&identity(), ANALYST, "abc", "rid", &written, 1);
+    let entry = triage_entry(&identity(), ANALYST, "abc", "rid", &written, 1, frozen_clock());
     assert_eq!(
         (
             entry.actor.id.as_str(),
@@ -631,4 +635,49 @@ fn the_verdict_is_a_status_with_its_exact_wire_text() -> TestResult {
     }
     assert!(serde_json::to_string(&alerts_document())?.contains("false_positive"));
     Ok(())
+}
+
+
+#[tokio::test]
+async fn a_false_positive_note_needs_a_visible_letter_or_number() -> TestResult {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fx = fixture_with(|_db| counting(&calls))?;
+    let token = login(&fx.router, ANALYST).await?;
+    let id = "a".repeat(HEX_LENGTH);
+    for note in ["   ", "\u{200B}", "\u{3164}", "\u{0301}", "-", ".", "\u{3164}\u{FFA0}\u{2800}\u{0301} -"] {
+        let (status, body) = post(&fx, &id, Some(&token), &json!({"status": "false_positive", "note": note})).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{note:?}");
+        assert!(message(&body).contains("`note`"), "{body}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    for note in ["x", "\u{0663}", "\u{00E9}", "\u{3164} ok"] {
+        let (status, _) = post(&fx, &id, Some(&token), &json!({"status": "false_positive", "note": note})).await?;
+        assert_eq!(status, StatusCode::OK, "{note:?}");
+    }
+    let (kept, _) = post(&fx, &id, Some(&token), &json!({"status": "closed", "note": " "})).await?;
+    assert_eq!(kept, StatusCode::OK);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_audit_record_carries_the_injected_clock() -> TestResult {
+    let fx = fixture_adjusted(with_frozen_clock, memory_backend)?;
+    let own = alert(TENANT, "r1", &["e1"], BASE_TIME);
+    store(&fx.db, std::slice::from_ref(&own)).await?;
+    let token = login(&fx.router, ANALYST).await?;
+    let (status, _) = post(&fx, &own.id, Some(&token), &json!({"status": "closed"})).await?;
+    assert_eq!(status, StatusCode::OK);
+    let records = triage_records(&fx)?;
+    let record = records.first().ok_or("no record")?;
+    assert_eq!(record.get("timestamp"), Some(&json!(frozen_clock().format(&Rfc3339)?)));
+    Ok(())
+}
+
+
+fn stamp() -> AuditStamp<'static> {
+    AuditStamp {
+        request_id: "rid",
+        timestamp: frozen_clock(),
+    }
 }
