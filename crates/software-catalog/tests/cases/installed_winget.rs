@@ -1,4 +1,4 @@
-use crate::common::{available, catalogue, entry, FailingReader, TestResult};
+use crate::common::{available, catalogue, entry, gap, FailingReader, TestResult};
 use software_catalog::error::InstalledError;
 use software_catalog::installed_winget::parse_winget_export;
 use software_catalog::limits::Limits;
@@ -75,10 +75,10 @@ fn fixture_gives_rows_and_counts_other_sources() -> TestResult {
     assert_eq!(
         (
             installed.other_source,
-            installed.malformed,
+            gap(&installed).malformed,
             installed.unreadable_versions,
-            installed.duplicate_ids,
-            installed.over_limit
+            gap(&installed).duplicate_ids.len(),
+            gap(&installed).over_limit
         ),
         (SMALL_COUNT, 0, 1, 0, 0)
     );
@@ -114,7 +114,7 @@ fn bad_package_ids_and_shapes_are_malformed() -> TestResult {
         long.as_str(),
     ];
     let installed = parse(&winget(&packages.join(",")))?;
-    assert_eq!((installed.rows.len(), installed.malformed), (0, packages.len()));
+    assert_eq!((installed.rows.len(), gap(&installed).malformed), (0, packages.len()));
     Ok(())
 }
 
@@ -132,7 +132,7 @@ fn a_refused_version_is_kept_empty_and_plans_unknown() -> TestResult {
     ];
     let installed = parse(&winget(&packages.join(",")))?;
     assert_eq!(
-        (installed.rows.len(), installed.unreadable_versions, installed.malformed),
+        (installed.rows.len(), installed.unreadable_versions, gap(&installed).malformed),
         (packages.len(), packages.len(), 0)
     );
     assert!(installed.rows.iter().all(|row| row.version.is_empty()));
@@ -145,7 +145,7 @@ fn a_refused_version_is_kept_empty_and_plans_unknown() -> TestResult {
 fn a_duplicate_id_is_one_unknown_row_never_a_newer_one() -> TestResult {
     let packages = r#"{"PackageIdentifier":"Git.Git","Version":"9.0.0"},{"PackageIdentifier":"git.git","Version":"1.0.0"},{"PackageIdentifier":"A.B","Version":"1"},{"PackageIdentifier":"A.B","Version":"1"}"#;
     let installed = parse(&winget(packages))?;
-    assert_eq!(installed.duplicate_ids, SMALL_COUNT);
+    assert_eq!(gap(&installed).duplicate_ids.len(), SMALL_COUNT);
     assert_eq!(installed.rows.len(), SMALL_COUNT + 1);
     assert!(installed.rows.iter().all(|row| row.version.is_empty()));
     assert_eq!(plan_kind(&installed, "2.43.0")?, ActionKind::Unknown);
@@ -163,12 +163,12 @@ fn package_cap_counts_without_decoding() -> TestResult {
         &winget(r#"{"PackageIdentifier":"A.B","Version":"1"},{"PackageIdentifier":"C.D","Version":"1"}"#),
         &limits,
     )?;
-    assert_eq!((exact.rows.len(), exact.over_limit), (SMALL_COUNT, 0));
+    assert_eq!((exact.rows.len(), gap(&exact).over_limit), (SMALL_COUNT, 0));
     let over = parse_with_limits(
         &winget(r#"{"PackageIdentifier":"A.B"},{"PackageIdentifier":"C.D"},{"PackageIdentifier":"-"}"#),
         &limits,
     )?;
-    assert_eq!((over.rows.len(), over.over_limit, over.malformed), (0, SMALL_COUNT + 1, 0));
+    assert_eq!((over.rows.len(), gap(&over).over_limit, gap(&over).malformed), (0, SMALL_COUNT + 1, 0));
     Ok(())
 }
 
@@ -177,14 +177,14 @@ fn package_cap_counts_without_decoding() -> TestResult {
 fn huge_inputs_are_counted_or_refused() -> TestResult {
     let element = r#"{"PackageIdentifier":"A.B","Version":"1"}"#;
     let many = winget(&vec![element; MANY_PACKAGES].join(","));
-    assert_eq!(parse(&many)?.over_limit, MANY_PACKAGES);
+    assert_eq!(gap(&parse(&many)?).over_limit, MANY_PACKAGES);
     let sources = format!(r#"{{"Sources":[{}]}}"#, "{},".repeat(MANY_SOURCES - 1) + "{}");
     assert!(matches!(parse(&sources), Err(InstalledError::TooManySources { .. })));
     let deep = format!(
         r#"{{"Sources":[{{"Packages":[{}],{WINGET_HEAD}}}]}}"#,
         "[".repeat(DEEP) + &"]".repeat(DEEP)
     );
-    assert_eq!(parse(&deep)?.malformed, 1);
+    assert_eq!(gap(&parse(&deep)?).malformed, 1);
     Ok(())
 }
 
@@ -223,7 +223,7 @@ fn source_cap_and_shapes() -> TestResult {
 
 
 #[test]
-fn two_winget_sources_are_refused_and_a_foreign_identifier_is_another_source() -> TestResult {
+fn two_winget_sources_and_a_foreign_identifier_are_refused() -> TestResult {
     let one = format!(r#"{{"Packages":[{{"PackageIdentifier":"A.B"}}],{WINGET_HEAD}}}"#);
     let twice = format!(r#"{{"Sources":[{one},{one}]}}"#);
     assert!(matches!(parse(&twice), Err(InstalledError::DuplicateSource)));
@@ -270,7 +270,7 @@ fn a_valid_id_with_an_undecodable_version_is_one_unknown_row() -> TestResult {
     versions.iter().try_for_each(|package| {
         let installed = parse(&winget(package))?;
         assert_eq!(
-            (installed.rows.len(), installed.unreadable_versions, installed.malformed),
+            (installed.rows.len(), installed.unreadable_versions, gap(&installed).malformed),
             (1, 1, 0),
             "{package:.60}"
         );

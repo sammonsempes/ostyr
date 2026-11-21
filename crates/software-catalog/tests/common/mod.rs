@@ -1,4 +1,6 @@
-use software_catalog::model::{Available, Catalogue, Entry, Installed, InstalledRow, Manager, Source, Version};
+use software_catalog::installed_winget::merge_gap;
+use software_catalog::model::{Available, Catalogue, Entry, Gap, Installed, InstalledRow, Manager, Source, Version};
+use std::collections::BTreeSet;
 use std::io::Read;
 
 
@@ -71,12 +73,13 @@ pub fn available(manager: Manager, names: &[&str]) -> Available {
 
 pub fn installed(rows: Vec<InstalledRow>) -> Installed {
     Installed {
+        read_managers: BTreeSet::from([Manager::Apt, Manager::Dnf, Manager::Winget, Manager::Msi]),
         rows,
-        malformed: 0,
-        over_limit: 0,
-        not_installed: 0,
-        other_source: 0,
-        unreadable_versions: 0,
-        duplicate_ids: 0,
+        ..Installed::default()
     }
+}
+
+
+pub fn gap(installed: &Installed) -> Gap {
+    installed.gaps.values().cloned().fold(Gap::default(), merge_gap)
 }

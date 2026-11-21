@@ -37,5 +37,5 @@ pub fn rpm_line(package: &str, version: &str, architecture: &str) -> Option<Line
 
 
 pub fn parse_rpm_installed<Source: Read>(reader: Source, limits: &Limits) -> Result<Installed, InstalledError> {
-    parse_with(reader, limits, parse_rpm_line)
+    parse_with(reader, limits, Manager::Dnf, parse_rpm_line)
 }
