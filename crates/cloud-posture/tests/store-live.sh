@@ -55,7 +55,7 @@ rows() { sql "SELECT count(*) FROM cloud_posture_findings WHERE tenant = '$1' AN
 
 posture migrate
 posture migrate
-check "migrations recorded once" "1" "$(sql "SELECT count(*) FROM schema_migrations WHERE namespace = 'posture'")"
+check "migrations recorded once each" "3" "$(sql "SELECT count(*) FROM schema_migrations WHERE namespace = 'posture'")"
 check "function and tables exist" "1|1|1" "$(sql "SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'posture_replace_run') || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'cloud_posture_findings') || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'cloud_posture_runs')")"
 check "function settings pinned" '{"search_path=pg_catalog, public, pg_temp",enable_seqscan=off,enable_bitmapscan=off,jit=off}' "$(sql "SELECT proconfig FROM pg_proc WHERE proname = 'posture_replace_run'")"
 

@@ -160,6 +160,6 @@ pub struct FindingsPage {
 pub struct PageCursor {
     pub run_id: String,
     pub finished_micros: i64,
-    pub rank: u8,
+    pub rank: i16,
     pub identity: String,
 }

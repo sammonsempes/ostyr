@@ -4,7 +4,7 @@ use crate::error::StoreError;
 use crate::model::{Finding, FindingsPage, PageCursor, RunHeader};
 use crate::prowler::identity_of;
 use crate::store::{finding_fits, MAX_RUN_ID_BYTES};
-use crate::text::{severity_of, severity_rank, status_of, valid_reference, MAX_ACCOUNT_BYTES, RANK_FATAL};
+use crate::text::{severity_of, severity_rank, status_of, valid_reference, MAX_ACCOUNT_BYTES};
 use crate::types::Executor;
 use core_pg::scope::TenantScope;
 
@@ -25,8 +25,8 @@ pub const CURSOR_SEPARATOR: char = ' ';
 pub const IDENTITY_HEX_CHARACTERS: usize = 64;
 
 
-/// Above every stored rank: the first page has no row "at" the cursor rank, every row is "below" it.
-pub const RANK_BEFORE_FIRST: u8 = RANK_FATAL + 1;
+/// The highest `smallint`: the page key of that rank sorts before the key of every rank a row can hold.
+pub const RANK_BEFORE_FIRST: i16 = i16::MAX;
 
 
 pub const ROW_COLUMNS: usize = 29;
@@ -119,28 +119,20 @@ pub const COL_DETAIL: usize = 27;
 pub const COL_DETAIL_CUT: usize = 28;
 
 
-/// One statement and snapshot: `$1` tenant, `$2` account, `$3` cursor rank and `$4` identity hex (8 and empty on the first page), `$5` rows to fetch.
+/// One statement and snapshot: `$1` tenant, `$2` account, `$3` cursor rank and `$4` identity hex (32767 and empty on the first page), `$5` rows to fetch.
 pub const PAGE_SQL: &str = "SELECT coalesce(r.run_id, ''), coalesce(r.finished_micros::text, ''), r.items::text, r.unparsable::text, r.bad_field::text, \
     r.duplicate::text, r.foreign_account::text, r.refused_pass::text, r.refused_muted::text, r.refused_manual::text, r.refused_fail::text, \
     r.store_refused::text, coalesce(r.refused_micros::text, ''), r.refused_items::text, \
     coalesce(encode(p.identity, 'hex'), ''), coalesce(p.severity_rank::text, ''), coalesce(p.uid, ''), coalesce(p.check_id, ''), coalesce(p.status, ''), \
     coalesce(p.severity, ''), coalesce(p.provider, ''), coalesce(p.region, ''), coalesce(p.resource_uid, ''), coalesce(p.resource_type, ''), \
     coalesce(p.time_unix::text, ''), coalesce(p.title, ''), coalesce(p.title_cut::text, ''), coalesce(p.detail, ''), coalesce(p.detail_cut::text, '') \
-    FROM cloud_posture_runs r LEFT JOIN ( \
-        SELECT * FROM ( \
-            (SELECT f.* FROM cloud_posture_findings f WHERE f.tenant = $1 AND f.account = $2 AND f.severity_rank = $3::text::smallint \
-                AND f.identity > decode($4::text, 'hex') ORDER BY f.identity LIMIT $5::text::bigint) \
-            UNION ALL \
-            (SELECT f.* FROM cloud_posture_findings f WHERE f.tenant = $1 AND f.account = $2 AND f.severity_rank < $3::text::smallint \
-                ORDER BY f.severity_rank DESC, f.identity LIMIT $5::text::bigint) \
-        ) u ORDER BY u.severity_rank DESC, u.identity LIMIT $5::text::bigint \
-    ) p ON true \
-    WHERE r.tenant = $1 AND r.account = $2 ORDER BY p.severity_rank DESC NULLS LAST, p.identity";
+    FROM cloud_posture_runs r LEFT JOIN posture_page($1, $2, $3::text::integer, $4::text, $5::text::bigint) p ON true \
+    WHERE r.tenant = $1 AND r.account = $2 ORDER BY p.page_key NULLS LAST";
 
 
-/// A stored rank: decimal text of 0 to `RANK_FATAL`, with no sign or leading zero.
-pub fn rank_of(text: &str) -> Option<u8> {
-    text.parse::<u8>().ok().filter(|rank| *rank <= RANK_FATAL && rank.to_string() == text)
+/// A stored rank: the canonical decimal text of a `smallint`, so a row outside 0 to 7 still has a cursor.
+pub fn rank_of(text: &str) -> Option<i16> {
+    text.parse::<i16>().ok().filter(|rank| rank.to_string() == text)
 }
 
 

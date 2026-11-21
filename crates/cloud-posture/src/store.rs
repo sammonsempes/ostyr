@@ -18,7 +18,7 @@ use std::time::Duration;
 pub const MIGRATION_NAMESPACE: &str = "posture";
 
 
-pub const MIGRATIONS: [Migration; 2] = [
+pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "posture_0001",
         sql: include_str!("../migrations/posture_0001.sql"),
@@ -26,6 +26,10 @@ pub const MIGRATIONS: [Migration; 2] = [
     Migration {
         version: "posture_0002",
         sql: include_str!("../migrations/posture_0002.sql"),
+    },
+    Migration {
+        version: "posture_0003",
+        sql: include_str!("../migrations/posture_0003.sql"),
     },
 ];
 

@@ -13,7 +13,8 @@ use cloud_posture::page::{
     ROW_COLUMNS,
 };
 use cloud_posture::prowler::identity_of;
-use cloud_posture::text::{severity_rank, severity_text, status_text, RANK_FATAL};
+use cloud_posture::store::MIGRATIONS;
+use cloud_posture::text::{severity_rank, severity_text, status_text};
 use cloud_posture::types::RowFuture;
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
@@ -53,6 +54,12 @@ const FOUR: usize = 4;
 
 
 const FIVE: usize = 5;
+
+
+const SEVEN: i16 = 7;
+
+
+const NINE: i16 = 9;
 
 
 const OVER_MAX: usize = 501;
@@ -191,14 +198,16 @@ fn the_row_layout_matches_the_columns_of_the_statement() -> TestResult {
     let sample = row("u1", Severity::High);
     assert_eq!(sample.len(), ROW_COLUMNS);
     assert_eq!(sample.get(COL_IDENTITY).ok_or("none")?.len(), HEX);
-    assert_eq!(PAGE_SQL.matches("tenant = $1").count(), THREE);
-    assert!(
-        PAGE_SQL.contains("f.severity_rank = $3::text::smallint AND f.identity > decode($4::text, 'hex') ORDER BY f.identity LIMIT $5::text::bigint")
-    );
-    assert!(PAGE_SQL.contains("f.severity_rank < $3::text::smallint ORDER BY f.severity_rank DESC, f.identity LIMIT $5::text::bigint"));
-    assert!(PAGE_SQL.contains("ORDER BY p.severity_rank DESC NULLS LAST, p.identity"));
+    assert_eq!(PAGE_SQL.matches("tenant = $1").count(), 1);
+    assert!(PAGE_SQL.contains("LEFT JOIN posture_page($1, $2, $3::text::integer, $4::text, $5::text::bigint) p ON true"));
+    assert!(PAGE_SQL.contains("WHERE r.tenant = $1 AND r.account = $2 ORDER BY p.page_key NULLS LAST"));
+    let function = MIGRATIONS.get(TWO).ok_or("no third migration")?.sql;
+    assert!(function.contains(
+        "WHERE f.tenant = tenant_name AND f.account = account_name AND f.page_key > (int4send(32767 - rank_value) || decode(identity_hex, 'hex'))"
+    ));
+    assert!(function.contains("ORDER BY f.page_key LIMIT row_limit"));
     assert_eq!(PAGE_SQL.matches("coalesce(").count(), COALESCED);
-    assert_eq!(RANK_BEFORE_FIRST, RANK_FATAL + 1);
+    assert_eq!(RANK_BEFORE_FIRST, i16::MAX);
     assert_eq!(CURSOR_FIELDS, FOUR);
     Ok(())
 }
@@ -210,7 +219,7 @@ fn a_cursor_prints_and_parses_back_and_every_malformed_one_is_refused() -> TestR
     let parsed = cursor_of_row(&sample)?;
     assert_eq!(parsed.run_id, RUN);
     assert_eq!(parsed.finished_micros, FINISHED.parse::<i64>()?);
-    assert_eq!(parsed.rank, severity_rank(Severity::High));
+    assert_eq!(parsed.rank, i16::from(severity_rank(Severity::High)));
     let identity = sample.get(COL_IDENTITY).ok_or("none")?.clone();
     let good = format!("{RUN} {FINISHED} 5 {identity}");
     assert!(parse_cursor(&good).is_ok());
@@ -226,9 +235,11 @@ fn a_cursor_prints_and_parses_back_and_every_malformed_one_is_refused() -> TestR
         format!("{RUN} -1 5 {identity}"),
         format!("{RUN} 01 5 {identity}"),
         format!("{RUN} x 5 {identity}"),
-        format!("{RUN} {FINISHED} 8 {identity}"),
+        format!("{RUN} {FINISHED} 32768 {identity}"),
+        format!("{RUN} {FINISHED} -32769 {identity}"),
+        format!("{RUN} {FINISHED} +5 {identity}"),
         format!("{RUN} {FINISHED} 05 {identity}"),
-        format!("{RUN} {FINISHED} -1 {identity}"),
+        format!("{RUN} {FINISHED} -0 {identity}"),
         format!("{RUN} {FINISHED} 5 {upper}"),
         format!("{RUN} {FINISHED} 5 {short}"),
         format!("{RUN} {FINISHED} 5 {identity}\n"),
@@ -240,8 +251,15 @@ fn a_cursor_prints_and_parses_back_and_every_malformed_one_is_refused() -> TestR
         assert!(matches!(parse_cursor(bad), Err(StoreError::BadCursor)), "{bad:?}");
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
-    assert!(rank_of("7").is_some());
+    assert_eq!(rank_of("7"), Some(SEVEN));
+    assert_eq!(rank_of("9"), Some(NINE));
+    assert_eq!(rank_of("-1"), Some(-1));
+    assert_eq!(rank_of("32767"), Some(i16::MAX));
+    assert_eq!(rank_of("-32768"), Some(i16::MIN));
+    assert!(rank_of("32768").is_none());
     assert!(rank_of("+5").is_none());
+    assert!(parse_cursor(&format!("{RUN} {FINISHED} 9 {identity}")).is_ok());
+    assert!(parse_cursor(&format!("{RUN} {FINISHED} -1 {identity}")).is_ok());
     assert!(micros_of("0").is_some());
     assert!(micros_of("+5").is_none());
     assert!(is_identity_hex(&identity));
@@ -302,7 +320,7 @@ async fn the_statement_runs_once_under_the_scope_with_the_cursor_key_and_one_row
         assert_eq!(call.sql, PAGE_SQL);
     });
     let first = calls.first().ok_or("none")?;
-    assert_eq!(first.params, vec!["acc".to_owned(), "8".to_owned(), String::new(), "3".to_owned()]);
+    assert_eq!(first.params, vec!["acc".to_owned(), "32767".to_owned(), String::new(), "3".to_owned()]);
     let second = calls.get(1).ok_or("none")?;
     assert_eq!(
         second.params,
@@ -315,7 +333,7 @@ async fn the_statement_runs_once_under_the_scope_with_the_cursor_key_and_one_row
     );
     assert_eq!(
         page_params("acc", None, 1),
-        vec!["acc".to_owned(), "8".to_owned(), String::new(), "2".to_owned()]
+        vec!["acc".to_owned(), "32767".to_owned(), String::new(), "2".to_owned()]
     );
     Ok(())
 }
@@ -458,7 +476,7 @@ async fn a_served_page_carries_the_run_header_and_logs_skips() -> TestResult {
 #[test]
 fn an_unprintable_next_key_or_run_is_a_stored_value_error() -> TestResult {
     let rows = |second: Vec<String>| vec![row("u1", Severity::Critical), second, row("u3", Severity::Low)];
-    let bad_rank = with_column(row("u2", Severity::High), COL_RANK, "9");
+    let bad_rank = with_column(row("u2", Severity::High), COL_RANK, "99999");
     let bad_identity = with_column(row("u2", Severity::High), COL_IDENTITY, "ZZ");
     [bad_rank, bad_identity].iter().try_for_each(|second| {
         assert!(matches!(page_of("acc", &rows(second.clone()), TWO, None), Err(StoreError::StoredValue)));
@@ -476,9 +494,27 @@ fn an_unprintable_next_key_or_run_is_a_stored_value_error() -> TestResult {
     assert!(matches!(next_cursor(&header, &[]), Err(StoreError::BadAnswer)));
     assert!(matches!(next_cursor(&header, &vec![String::new(); FIVE]), Err(StoreError::BadAnswer)));
     assert!(matches!(
-        next_cursor(&header, &with_column(row("u1", Severity::High), COL_RANK, "9")),
+        next_cursor(&header, &with_column(row("u1", Severity::High), COL_RANK, "99999")),
         Err(StoreError::StoredValue)
     ));
+    assert!(next_cursor(&header, &with_column(row("u1", Severity::High), COL_RANK, "9")).is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_row_of_a_rank_outside_the_severity_map_is_counted_and_the_walk_goes_on() -> TestResult {
+    let rows = vec![
+        row("u1", Severity::Critical),
+        with_column(row("u2", Severity::High), COL_RANK, "9"),
+        with_column(row("u3", Severity::High), COL_RANK, "-4"),
+    ];
+    let page = page_of("acc", &rows, TWO, None)?;
+    assert_eq!((page.items.len(), page.unservable), (1, 1));
+    let next = page.next.ok_or("no next cursor")?;
+    assert!(next.contains(" 9 "));
+    let resumed = parse_cursor(&next)?;
+    assert_eq!(resumed.rank, NINE);
     Ok(())
 }
 
