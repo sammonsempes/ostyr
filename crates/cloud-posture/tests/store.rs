@@ -748,6 +748,36 @@ fn the_second_migration_writes_the_marker_under_the_tenant_lock() -> TestResult 
 
 
 #[test]
+fn the_third_migration_pins_the_page_plan_and_keeps_the_newest_refusal() -> TestResult {
+    check_embedded(&MIGRATIONS)?;
+    let migration = MIGRATIONS.get(TWO).ok_or("no third migration")?;
+    assert_eq!(migration.version, "posture_0003");
+    let sql = migration.sql;
+    assert!(sql.contains("GENERATED ALWAYS AS (int4send(32767 - severity_rank::integer) || identity) STORED;"));
+    assert!(sql.contains("CREATE INDEX cloud_posture_findings_page_key ON cloud_posture_findings (tenant, account, page_key);"));
+    assert!(sql.contains("DROP INDEX cloud_posture_findings_page;"));
+    assert!(sql.contains("LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp SET enable_seqscan = off SET enable_bitmapscan = off SET enable_sort = off SET jit = off"));
+    assert_eq!(
+        sql.matches("pg_advisory_xact_lock(hashtextextended('cloud_posture/' || tenant_name, 0::bigint))")
+            .count(),
+        TWO
+    );
+    assert!(!sql.contains(", 0))"));
+    assert_eq!(sql.matches("refused_micros = greatest(r.refused_micros, finished)").count(), TWO);
+    assert_eq!(
+        sql.matches("CASE WHEN r.refused_micros IS NULL OR finished > r.refused_micros THEN")
+            .count(),
+        TWO
+    );
+    assert!(sql.contains("refused_micros = CASE WHEN cloud_posture_runs.refused_micros > EXCLUDED.finished_micros THEN cloud_posture_runs.refused_micros ELSE NULL END;"));
+    assert!(sql.contains(
+        "refused_items = CASE WHEN cloud_posture_runs.refused_micros > EXCLUDED.finished_micros THEN cloud_posture_runs.refused_items ELSE 0 END,"
+    ));
+    Ok(())
+}
+
+
+#[test]
 fn constants_and_messages() -> TestResult {
     assert!(STORE_DEADLINE.as_secs() >= MIN_DEADLINE_SECONDS);
     assert_eq!(MAX_FINDINGS_PER_TENANT, CAP);

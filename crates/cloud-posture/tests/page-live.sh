@@ -2,8 +2,9 @@
 # Usage: bash crates/cloud-posture/tests/page-live.sh <lab-state-dir>
 # Live check of the posture paged read (T699B) on a datastore-pair lab (LAB_PROFILE=datastore-pair lab/up.sh <task>): the posture_store example, built for musl
 # (cargo build --release --target x86_64-unknown-linux-musl -p cloud-posture --example posture_store), runs on the client VM against a scratch database:
-# walks by cursor, tenant isolation, a cursor reused after a replace, the refusal marker of a run too large, EXPLAIN ANALYZE of the page statement under
-# stale statistics, and hostile rows inserted by psql with the CHECKs dropped.
+# walks by cursor, tenant isolation, a cursor reused after a replace, the refusal marker of a run too large (and its out-of-order writers), rows of a rank
+# outside 0..7, hostile rows inserted by psql with the CHECKs dropped, and (T709) the plan of the page function read through auto_explain as the postgres
+# user of the datastore VM, in both plan cache modes, under stale statistics.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -22,7 +23,8 @@ datastore_ssh "sudo -u postgres createdb -O '$owner' '$database'"
 trap 'datastore_ssh "sudo -u postgres dropdb --if-exists $database" || true' EXIT
 
 scp "${ssh_options[@]}" "$binary" "$client_user@$client_address:/tmp/posture_store"
-ssh "${ssh_options[@]}" "$client_user@$client_address" "DATABASE=$database bash -s" <<'REMOTE'
+remote_status=0
+ssh "${ssh_options[@]}" "$client_user@$client_address" "DATABASE=$database bash -s" <<'REMOTE' || remote_status=$?
 set -euo pipefail
 set -a
 source <(sudo cat /etc/ostyr-lab/datastore.env)
@@ -52,7 +54,9 @@ next_of() { sed -n 's/^unservable=[0-9]* next=Some("\(.*\)") rows=.*/\1/p'; }
 
 posture migrate
 posture migrate
-check "migrations recorded" "2" "$(sql "SELECT count(*) FROM schema_migrations WHERE namespace = 'posture'")"
+check "migrations recorded" "3" "$(sql "SELECT count(*) FROM schema_migrations WHERE namespace = 'posture'")"
+check "the third migration is recorded once after two runs" "1" "$(sql "SELECT count(*) FROM schema_migrations WHERE namespace = 'posture' AND version = 'posture_0003'")"
+check "page function and key index exist, old index dropped" "1|1|0" "$(sql "SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'posture_page') || '|' || (SELECT count(*) FROM pg_indexes WHERE indexname = 'cloud_posture_findings_page_key') || '|' || (SELECT count(*) FROM pg_indexes WHERE indexname = 'cloud_posture_findings_page')")"
 check "marker function exists" "1" "$(sql "SELECT count(*) FROM pg_proc WHERE proname = 'posture_refuse_run'")"
 sql "ALTER TABLE cloud_posture_findings SET (autovacuum_enabled = false)"
 sql "ALTER TABLE cloud_posture_runs SET (autovacuum_enabled = false)"
@@ -124,30 +128,30 @@ check "a refused run takes the marker only" "run1|3|$((NOW + 7))|200001" "$(sql 
 posture bulk n acc1 run3 $((NOW + 9)) 2 n3 >/dev/null
 check "a stored run clears the marker" "run3|2||0" "$(sql "SELECT run_id || '|' || items || '|' || coalesce(refused_micros::text, '') || '|' || refused_items FROM cloud_posture_runs WHERE tenant = 'n'")"
 
-echo "--- plans under stale statistics (autovacuum off, no ANALYZE, a new tenant with 100000 rows)"
+echo "--- an older refusal never overwrites a newer marker (T709)"
+marker() { sql "SELECT coalesce(run_id, '') || '|' || items || '|' || coalesce(refused_micros::text, '') || '|' || refused_items FROM cloud_posture_runs WHERE tenant = '$1' AND account = 'acc1'"; }
+posture bulk o acc1 run1 $NOW 3 oo >/dev/null
+posture bulk o acc1 run2 $((NOW + 10)) 200001 oo >/dev/null
+check "refusal at t=10 through the marker function" "run1|3|$((NOW + 10))|200001" "$(marker o)"
+posture bulk o acc1 run3 $((NOW + 5)) 200002 oo >/dev/null
+check "a refusal at t=5 keeps t=10 and its item count" "run1|3|$((NOW + 10))|200001" "$(marker o)"
+posture bulk o acc1 run4 $((NOW + 20)) 200003 oo >/dev/null
+check "a refusal at t=20 takes the marker" "run1|3|$((NOW + 20))|200003" "$(marker o)"
+sql "SELECT outcome FROM posture_replace_run('q', 'acc1', 'r1', '[1,2]'::jsonb, $((NOW + 10)), '{}'::jsonb, 1)" >/dev/null
+check "refusal at t=10 through the replace function" "|0|$((NOW + 10))|2" "$(marker q)"
+sql "SELECT outcome FROM posture_replace_run('q', 'acc1', 'r1', '[1,2,3]'::jsonb, $((NOW + 5)), '{}'::jsonb, 1)" >/dev/null
+check "the replace function at t=5 keeps t=10 and 2 items" "|0|$((NOW + 10))|2" "$(marker q)"
+sql "SELECT outcome FROM posture_replace_run('q', 'acc1', 'r1', '[1,2,3,4]'::jsonb, $((NOW + 20)), '{}'::jsonb, 1)" >/dev/null
+check "the replace function at t=20 takes 4 items" "|0|$((NOW + 20))|4" "$(marker q)"
+posture bulk q acc1 run9 $((NOW + 15)) 2 qq >/dev/null
+check "a stored run older than the refusal keeps the marker, which stays pending" "run9|2|$((NOW + 20))|4|1" "$(marker q)|$(posture read q acc1 10 | grep -c 'refusal_pending=true')"
+posture bulk q acc1 run10 $((NOW + 25)) 2 qq >/dev/null
+check "a stored run newer than the refusal clears it" "run10|2||0" "$(marker q)"
+
+echo "--- a new tenant with 100000 rows, autovacuum off, no ANALYZE (the plans are read after this block)"
 posture bulk f accA run1 $NOW 100000 fa >/dev/null
 sql "SELECT 'analyzed: ' || coalesce((SELECT last_analyze::text FROM pg_stat_user_tables WHERE relname = 'cloud_posture_findings'), 'never') || ' ' || coalesce((SELECT last_autoanalyze::text FROM pg_stat_user_tables WHERE relname = 'cloud_posture_findings'), 'never')"
-page_sql="$(posture page-sql)"
-mid="$(sql "SELECT severity_rank || ' ' || encode(identity, 'hex') FROM cloud_posture_findings WHERE tenant = 'f' ORDER BY severity_rank DESC, identity OFFSET 70000 LIMIT 1")"
-mid_rank="${mid% *}"
-mid_identity="${mid#* }"
-last="$(sql "SELECT severity_rank || ' ' || encode(identity, 'hex') FROM cloud_posture_findings WHERE tenant = 'f' ORDER BY severity_rank DESC, identity OFFSET 99998 LIMIT 1")"
-last_rank="${last% *}"
-last_identity="${last#* }"
-plans="$work/plans.txt"
-psql -X -q -tA -v ON_ERROR_STOP=1 -h "$DATASTORE_DOMAIN" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$DATABASE" >"$plans" <<SQL
-PREPARE page(text, text, text, text, text) AS ${page_sql};
-SELECT '== first page';
-EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF) EXECUTE page('f', 'accA', '8', '', '101');
-SELECT '== middle page';
-EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF) EXECUTE page('f', 'accA', '${mid_rank}', '${mid_identity}', '101');
-SELECT '== last page';
-EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF) EXECUTE page('f', 'accA', '${last_rank}', '${last_identity}', '101');
-SQL
-cat "$plans"
-check "no sequential scan in any plan" 0 "$(grep -c 'Seq Scan' "$plans")"
-check "no plan reads a whole tenant" 0 "$(grep -c 'rows=100000\|rows=[0-9]\{5,\} ' "$plans")"
-check "index scans on the findings table" 1 "$([[ "$(grep -c 'Index.*cloud_posture_findings' "$plans")" -ge 3 ]] && echo 1 || echo 0)"
+echo "rows loaded: $(rows f accA)"
 
 echo "--- hostile rows inserted by psql with the CHECKs dropped"
 posture bulk h acc1 run1 $NOW 6 hg >/dev/null
@@ -165,6 +169,64 @@ check "no raw ESC byte reaches the output" 0 "$(grep -c $'\x1b' <<<"$hostile" ||
 check "the ESC is shown escaped" 1 "$(grep -c 'esc\\\\u{1b}\[31mred' <<<"$hostile")"
 check "no text of a skipped row is printed" 0 "$(grep -c 'svg\|tttttttt' <<<"$hostile" || true)"
 check "the two served rows are hg-1 and hg-5" "hg-1 hg-5" "$(grep '^row ' <<<"$hostile" | awk '{print $2}' | tr -d '"' | sort | tr '\n' ' ' | sed 's/ $//')"
+echo "--- rows of a rank outside 0..7 are fetched and counted, never lost (T709)"
+posture bulk r acc1 run1 $NOW 3 rg >/dev/null
+sql "UPDATE cloud_posture_findings SET severity_rank = 9 WHERE tenant = 'r' AND uid = 'rg-0'"
+sql "UPDATE cloud_posture_findings SET severity_rank = 32767 WHERE tenant = 'r' AND uid = 'rg-1'"
+sql "UPDATE cloud_posture_findings SET severity_rank = -5 WHERE tenant = 'r' AND uid = 'rg-2'"
+whole="$(posture read r acc1 10)"
+check "one page counts the three rows" "unservable=3 next=None rows=0" "$(grep '^unservable=' <<<"$whole")"
+cursor=""
+skipped=0
+pages=0
+for page in 1 2 3 4; do
+    if [[ -z "$cursor" ]]; then out="$(posture read r acc1 1)"; else out="$(posture read r acc1 1 "$cursor")"; fi
+    skipped=$((skipped + $(sed -n 's/^unservable=\([0-9]*\) .*/\1/p' <<<"$out")))
+    cursor="$(next_of <<<"$out")"
+    pages=$page
+    [[ -n "$cursor" ]] || break
+done
+check "a walk by one visits the three rows in 3 pages and counts 3" "3|3" "$pages|$skipped"
 echo "failures=$failures"
 exit "$failures"
 REMOTE
+
+echo "--- plans of the page function under stale statistics, 100000 rows, read through auto_explain as the datastore's postgres user (T709)"
+postgres_sql() { ssh "${ssh_options[@]}" "$datastore_user@$datastore_address" "sudo -u postgres psql -X -q -tA -v ON_ERROR_STOP=1 -d $database"; }
+host_failures=0
+host_check() {
+    if [[ "$2" == "$3" ]]; then echo "PASS $1: $3"; else echo "FAIL $1: expected [$2] got [$3]"; host_failures=$((host_failures + 1)); fi
+}
+analyzed="$(postgres_sql <<<"SELECT coalesce((SELECT last_analyze::text FROM pg_stat_user_tables WHERE relname = 'cloud_posture_findings'), 'never') || ' ' || coalesce((SELECT last_autoanalyze::text FROM pg_stat_user_tables WHERE relname = 'cloud_posture_findings'), 'never')")"
+host_check "the findings table was never analysed" "never never" "$analyzed"
+echo "planner row estimate of the table (reltuples, -1 means never analysed): $(postgres_sql <<<"SELECT reltuples::bigint FROM pg_class WHERE relname = 'cloud_posture_findings'")"
+cursor_row() { postgres_sql <<<"SELECT severity_rank || ' ' || encode(identity, 'hex') FROM cloud_posture_findings WHERE tenant = 'f' ORDER BY page_key OFFSET $1 LIMIT 1"; }
+mid="$(cursor_row 70000)"
+last="$(cursor_row 99949)"
+plans="$(mktemp)"
+for mode in default force_generic_plan force_custom_plan; do
+    postgres_sql >>"$plans" 2>&1 <<SQL
+LOAD 'auto_explain';
+SET auto_explain.log_min_duration = 0;
+SET auto_explain.log_nested_statements = on;
+SET auto_explain.log_analyze = on;
+SET auto_explain.log_timing = off;
+SET client_min_messages = log;
+SET plan_cache_mode = $mode;
+SELECT '== mode $mode';
+PREPARE page(text, text, text, text, text) AS SELECT count(*) FROM posture_page(\$1, \$2, \$3::text::integer, \$4::text, \$5::text::bigint);
+SELECT '== first page';
+EXECUTE page('f', 'accA', '32767', '', '101');
+SELECT '== middle page';
+EXECUTE page('f', 'accA', '${mid% *}', '${mid#* }', '101');
+SELECT '== last page (50 rows left)';
+EXECUTE page('f', 'accA', '${last% *}', '${last#* }', '101');
+SQL
+done
+cat "$plans"
+host_check "no sequential scan and no sort in any plan" 0 "$(grep -c 'Seq Scan\|Sort' "$plans" || true)"
+host_check "nine page plans use the page key index" 9 "$(grep -c 'Index Scan using cloud_posture_findings_page_key' "$plans" || true)"
+host_check "six full pages read 101 rows and three last pages 50" "6|3" "$(grep -c 'Index Scan using.* rows=101 loops=1' "$plans" || true)|$(grep -c 'Index Scan using.* rows=50 loops=1' "$plans" || true)"
+rm -f "$plans"
+echo "host_failures=$host_failures remote_status=$remote_status"
+exit $((remote_status + host_failures))
