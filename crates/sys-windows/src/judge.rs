@@ -13,9 +13,6 @@ pub const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
 pub const SID_CREATOR_OWNER: &str = "S-1-3-0";
 
 
-pub const SID_CREATOR_GROUP: &str = "S-1-3-1";
-
-
 pub const SID_OWNER_RIGHTS: &str = "S-1-3-4";
 
 
@@ -54,7 +51,7 @@ pub const READ_ONLY_RIGHTS: u32 = 0x0012_00A9;
 
 /// The principals every directory may grant rights to, plus the process's own account when it is SYSTEM or a service SID.
 pub fn principals_from_token_user(user_sid: &str) -> Result<Principals, DirAclError> {
-    let base = [SID_SYSTEM, SID_ADMINISTRATORS, SID_CREATOR_OWNER, SID_CREATOR_GROUP, SID_OWNER_RIGHTS];
+    let base = [SID_SYSTEM, SID_ADMINISTRATORS, SID_CREATOR_OWNER, SID_OWNER_RIGHTS];
     let valid = user_sid.starts_with(SID_PREFIX);
     let agent_account = user_sid == SID_SYSTEM || user_sid.starts_with(SERVICE_SID_PREFIX);
     let mut trusted: Vec<String> = base.iter().map(|sid| (*sid).to_string()).collect();

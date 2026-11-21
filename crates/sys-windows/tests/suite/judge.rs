@@ -402,6 +402,10 @@ fn the_other_errors_describe_themselves() -> TestResult {
     assert_eq!(DirAclError::InvalidSid("x").to_string(), "invalid SID: x");
     assert_eq!(DirAclError::Malformed("y").to_string(), "malformed security descriptor: y");
     assert_eq!(
+        DirAclError::NotRegularFile { path: "a".into() }.to_string(),
+        "a exists and is not a regular file"
+    );
+    assert_eq!(
         DirAclError::Windows {
             operation: "Op",
             code: ACCESS_DENIED
