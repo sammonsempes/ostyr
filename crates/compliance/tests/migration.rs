@@ -100,3 +100,24 @@ fn the_published_third_migration_is_never_edited() -> TestResult {
     assert_eq!(digest_of(third()?), PUBLISHED_THIRD_DIGEST);
     Ok(())
 }
+
+
+const PINNED_SEARCH_PATH: &str = "SET search_path = pg_catalog, public, pg_temp;";
+
+
+const FUNCTION_PREFIX: &str = "ALTER FUNCTION compliance_record(text, jsonb, bigint, bigint, bigint, bigint, bigint) ";
+
+
+#[test]
+fn every_live_function_ends_its_search_path_with_pg_temp() -> TestResult {
+    let all: String = MIGRATIONS.iter().map(|migration| migration.sql).collect();
+    let live = all.matches("CREATE FUNCTION").count() - all.matches("DROP FUNCTION").count();
+    let fixed: Vec<&str> = all.lines().filter(|line| line.starts_with("ALTER FUNCTION ")).collect();
+    assert_eq!(fixed.len(), live);
+    assert!(live > 0);
+    for line in fixed {
+        assert!(line.starts_with(FUNCTION_PREFIX), "{line}");
+        assert!(line.ends_with(PINNED_SEARCH_PATH), "{line}");
+    }
+    Ok(())
+}
