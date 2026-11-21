@@ -1,4 +1,4 @@
-//! Usage: `rshell_register <pg.yaml> <tenant> open <session> <requester> <asset> <ticket> <opened_at> | close <session> <reason> <recording> | list <limit> <asset|-> <requester|-> <open|all> [<after_opened_at> <after_session>]`; the live proof of the session register.
+//! Usage: `rshell_register <pg.yaml> <tenant> open <session> <requester> <asset> <ticket> <opened_at> | close <session> <reason> <recording> | get <session> | page <limit> [<cursor>] | list <limit> <asset|-> <requester|-> <open|all> [<after_opened_at> <after_session>]`; the live proof of the session register.
 use core_pg::connect::connect;
 use core_pg::migrate::migrate;
 use core_pg::query::scoped_query;
@@ -6,6 +6,7 @@ use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::parse_settings;
 use remote_shell::error::StoreError;
 use remote_shell::recording::{read_recording, Header, Limits};
+use remote_shell::serve::{get_session, list_page};
 use remote_shell::session::CloseReason;
 use remote_shell::store::{close_of, list_sessions, reason_token, register_close, register_open, MIGRATIONS, MIGRATION_NAMESPACE};
 use remote_shell::store_model::{Cell, Cursor, ListFilter, Param, Statement};
@@ -20,7 +21,7 @@ use tokio_postgres::Client;
 
 
 const USAGE: &str = "usage: rshell_register <pg.yaml> <tenant> open <session> <requester> <asset> <ticket> <opened_at> | close <session> <reason> \
-    <recording> | list <limit> <asset|-> <requester|-> <open|all> [<after_opened_at> <after_session>]";
+    <recording> | get <session> | page <limit> [<cursor>] | list <limit> <asset|-> <requester|-> <open|all> [<after_opened_at> <after_session>]";
 
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -116,6 +117,24 @@ async fn scenario(settings_file: &Path, tenant: &str, command: &[String]) -> Res
                 record.bytes,
                 hex(&record.final_hash)
             )?;
+        }
+        [verb, session] if verb == "get" => {
+            let found = get_session(&mut exec, &tenant_filter, session).await?;
+            writeln!(out, "{found:?}")?;
+        }
+        [verb, limit, after @ ..] if verb == "page" => {
+            let page = list_page(
+                &mut exec,
+                &tenant_filter,
+                &ListFilter::default(),
+                after.first().map(String::as_str),
+                limit.parse()?,
+            )
+            .await?;
+            page.rows
+                .iter()
+                .try_for_each(|row| writeln!(out, "{}\t{}\t{}", row.session_id, row.requester, row.opened_at))?;
+            writeln!(out, "rows={} skipped={} next={:?}", page.rows.len(), page.skipped, page.next_cursor)?;
         }
         [verb, limit, asset, requester, mode, after @ ..] if verb == "list" => {
             let filter = ListFilter {

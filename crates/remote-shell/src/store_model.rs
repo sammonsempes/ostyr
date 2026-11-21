@@ -70,3 +70,12 @@ pub struct Cursor {
     pub opened_at: i64,
     pub session_id: String,
 }
+
+
+/// A served page: the rows that passed the serving check, the count of rows read and refused, and the cursor text of the next page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    pub rows: Vec<SessionRow>,
+    pub skipped: usize,
+    pub next_cursor: Option<String>,
+}

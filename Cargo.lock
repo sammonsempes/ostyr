@@ -5315,11 +5315,13 @@ dependencies = [
  "core-auth",
  "core-config",
  "core-pg",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-postgres",
 ]
