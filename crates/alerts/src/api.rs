@@ -2,19 +2,23 @@ use crate::error::StoreError;
 use crate::id::is_alert_id;
 use crate::model::{
     Alert, AlertDetail, AlertDetailView, AlertListView, AlertView, Backend, Cursor, ListQuery, NoQuery, Page, Summary, Triage, TriageChange,
-    TriageRequest, TriageStatus, TriageView,
+    TriageRequest, TriageStatus, TriageView, Triaged,
 };
 use crate::store::{check_optional, format_cursor, parse_cursor, MAX_NOTE_CHARS, MAX_PAGE_SIZE};
+use crate::types::AuditAppendFn;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Path, Query};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use core_api::failure::reply;
-use core_api::model::{ApiError, ApiIdentity, Authenticated, ErrorBody, ErrorDetail, Requirement, Rule};
+use core_api::model::{ApiError, ApiIdentity, Authenticated, ErrorBody, ErrorDetail, RequestId, Requirement, Rule};
 use core_api::routes::route_key;
 use core_api::types::{AccessTable, SharedState};
+use core_audit::log::append_declared;
+use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
 use core_auth::rbac::{PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_scope, TenantScope};
@@ -69,6 +73,16 @@ pub const NOT_FOUND_CODE: &str = "not_found";
 
 
 pub const NOT_FOUND_MESSAGE: &str = "no such alert";
+
+
+pub const TRIAGE_ACTION: &str = "alerts.triage";
+
+
+/// The parameters of a triage audit record; the note text is never one of them, only its length.
+pub const TRIAGE_AUDIT_KEYS: [&str; 4] = ["rule_id", "status", "version", "note_chars"];
+
+
+pub const NO_REQUEST_ID: &str = "none";
 
 
 #[derive(OpenApi)]
@@ -310,11 +324,55 @@ pub fn triage_failure(error: &StoreError) -> Result<Response, ApiError> {
 pub fn request_fault(request: &TriageRequest) -> Option<Response> {
     if request.version.is_some_and(|read| read < 1) {
         Some(bad_field("version", "must be at least 1"))
+    } else if request.status == TriageStatus::FalsePositive && request.note.is_none() {
+        Some(bad_field("note", "is required for a false_positive verdict"))
     } else {
         check_optional("note", request.note.as_deref(), MAX_NOTE_CHARS)
             .err()
             .map(|_refused| bad_field("note", "is empty, too long or holds a NUL character"))
     }
+}
+
+
+/// The audit record of one committed triage write: who, which tenant and alert, the rule, the new status and version; the note only as a length.
+pub fn triage_entry(identity: &ApiIdentity, actor: &str, alert_id: &str, request_id: &str, written: &Triaged, note_chars: usize) -> NewEntry {
+    NewEntry {
+        timestamp: OffsetDateTime::now_utc(),
+        actor: Actor {
+            kind: ActorKind::User,
+            id: actor.to_owned(),
+        },
+        tenant: identity.tenant.clone(),
+        module: identity.module.clone(),
+        action: TRIAGE_ACTION.to_owned(),
+        target: alert_id.to_owned(),
+        outcome: Outcome::Success,
+        request_id: request_id.to_owned(),
+        justification: None,
+        parameters: [
+            ("rule_id", written.rule_id.clone()),
+            ("status", written.triage.status.to_string()),
+            ("version", written.triage.version.to_string()),
+            ("note_chars", note_chars.to_string()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect(),
+    }
+}
+
+
+pub fn request_id_of(found: Option<&RequestId>) -> String {
+    found.map_or_else(|| NO_REQUEST_ID.to_owned(), |known| known.0.clone())
+}
+
+
+/// The write is committed before this runs, so a failed append is logged and answered with the generic 500, never with success.
+pub fn audit_triage(audit: AuditAppendFn<'_>, entry: NewEntry) -> Result<(), ApiError> {
+    audit(entry).map_err(|error| {
+        tracing::error!(%error, "alerts triage audit append failed");
+        ApiError::Internal
+    })
 }
 
 
@@ -324,11 +382,13 @@ pub async fn triage_flow(
     backend: &Backend,
     id: Result<String, PathRejection>,
     body: Result<TriageRequest, ApiError>,
+    request_id: &str,
+    audit: AuditAppendFn<'_>,
 ) -> Result<Response, ApiError> {
     match body {
         Err(ApiError::BadRequest) => Ok(bad_field(
             "body",
-            "must be a JSON object with `status` (acknowledged or closed), optional `note` and `version`, and no other field",
+            "must be a JSON object with `status` (acknowledged, closed or false_positive), optional `note` and `version`, and no other field",
         )),
         Err(other) => Err(other),
         Ok(request) => {
@@ -339,15 +399,19 @@ pub async fn triage_flow(
                 (None, _) => Ok(not_found()),
                 (Some(_), Some(refusal)) => Ok(refusal),
                 (Some(text), None) => {
+                    let note_chars = request.note.as_deref().map_or(0, |note| note.chars().count());
                     let change = TriageChange {
                         status: request.status,
-                        actor,
+                        actor: actor.clone(),
                         note: request.note,
                         now: (backend.clock)(),
                     };
-                    let done = (backend.triage)(scope, text, change, request.version).await;
+                    let done = (backend.triage)(scope, text.clone(), change, request.version).await;
                     match done {
-                        Ok(triage) => Ok(Json(triage_view(&triage).map_err(|error| store_failure(&error))?).into_response()),
+                        Ok(written) => {
+                            audit_triage(audit, triage_entry(identity, &actor, &text, request_id, &written, note_chars))?;
+                            Ok(Json(triage_view(&written.triage).map_err(|error| store_failure(&error))?).into_response())
+                        }
                         Err(error) => triage_failure(&error),
                     }
                 }
@@ -420,9 +484,10 @@ pub async fn get_endpoint(
     )
 )]
 pub async fn triage_endpoint(
+    State(state): State<SharedState>,
     Extension(identity): Extension<Arc<ApiIdentity>>,
     Extension(backend): Extension<Backend>,
-    session: Option<Extension<Authenticated>>,
+    parts: Parts,
     query: Result<Query<NoQuery>, QueryRejection>,
     id: Result<Path<String>, PathRejection>,
     body: Result<Json<TriageRequest>, JsonRejection>,
@@ -433,10 +498,12 @@ pub async fn triage_endpoint(
         Ok(_none) => {
             triage_flow(
                 &identity,
-                session.as_ref().map(|found| &found.0),
+                parts.extensions.get::<Authenticated>(),
                 &backend,
                 id.map(|found| found.0),
                 parsed,
+                &request_id_of(parts.extensions.get::<RequestId>()),
+                &|entry| append_declared(&state.audit, entry, &TRIAGE_AUDIT_KEYS).map(|_record| ()),
             )
             .await
         }

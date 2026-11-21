@@ -37,7 +37,7 @@ pub const RECOVER_SQL: &str =
                                WHERE alerts.tenant = $1 AND alerts.created >= (wanted.from)::bigint AND alerts.created <= $3::text::bigint \
                                AND alerts.rule_id = wanted.rule_id AND alerts.event_ids ? wanted.series AND NOT EXISTS \
                                (SELECT 1 FROM alert_triage WHERE alert_triage.tenant = alerts.tenant AND alert_triage.alert_id = alerts.id \
-                               AND alert_triage.status = 'closed') ORDER BY alerts.created DESC, alerts.id DESC LIMIT 5) AS latest \
+                               AND alert_triage.status IN ('closed', 'false_positive')) ORDER BY alerts.created DESC, alerts.id DESC LIMIT 5) AS latest \
                                ORDER BY latest.created DESC, latest.id DESC";
 
 

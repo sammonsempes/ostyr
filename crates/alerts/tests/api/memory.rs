@@ -142,8 +142,14 @@ pub fn triage_statement(
             .into_iter()
             .collect())
     } else if !tenants.get(&tenant).is_some_and(|table| table.contains_key(&alert_id)) {
-        Ok(vec![vec!["0".to_owned(), String::new()]])
+        Ok(vec![vec!["0".to_owned(), String::new(), String::new()]])
     } else {
+        let rule_id = tenants
+            .get(&tenant)
+            .and_then(|table| table.get(&alert_id))
+            .and_then(|(_created, row)| row.get(1))
+            .ok_or_else(malformed)?
+            .clone();
         let now = params
             .get(NOW_PARAM)
             .ok_or_else(malformed)?
@@ -171,7 +177,11 @@ pub fn triage_statement(
             );
             triage.insert(key, row);
         }
-        Ok(vec![vec!["1".to_owned(), version.map_or_else(String::new, |next| next.to_string())]])
+        Ok(vec![vec![
+            "1".to_owned(),
+            version.map_or_else(String::new, |next| next.to_string()),
+            rule_id,
+        ]])
     }
 }
 

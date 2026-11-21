@@ -58,6 +58,8 @@ impl FromStr for Severity {
 pub enum TriageStatus {
     Acknowledged,
     Closed,
+    #[serde(rename = "false_positive")]
+    FalsePositive,
 }
 
 
@@ -66,6 +68,7 @@ impl Display for TriageStatus {
         let name = match self {
             TriageStatus::Acknowledged => "acknowledged",
             TriageStatus::Closed => "closed",
+            TriageStatus::FalsePositive => "false_positive",
         };
         formatter.write_str(name)
     }
@@ -79,6 +82,7 @@ impl FromStr for TriageStatus {
         match text {
             "acknowledged" => Ok(TriageStatus::Acknowledged),
             "closed" => Ok(TriageStatus::Closed),
+            "false_positive" => Ok(TriageStatus::FalsePositive),
             _ => Err(StoreError::BadRow { column: 0 }),
         }
     }
@@ -102,6 +106,14 @@ pub struct Triage {
     pub note: Option<String>,
     pub updated_at: u64,
     pub version: i64,
+}
+
+
+/// A triage as written plus the rule of the alert it belongs to, read by the same statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Triaged {
+    pub triage: Triage,
+    pub rule_id: String,
 }
 
 
@@ -216,6 +228,7 @@ pub struct AlertListView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct TriageView {
+    /// acknowledged, closed or false_positive
     pub status: String,
     pub actor: String,
     pub note: Option<String>,
@@ -243,6 +256,7 @@ pub struct NoQuery {}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TriageRequest {
+    /// A false_positive verdict closes the alert and needs a note.
     pub status: TriageStatus,
     /// At most 2048 characters, no NUL.
     pub note: Option<String>,
