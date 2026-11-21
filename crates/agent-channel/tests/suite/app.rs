@@ -20,6 +20,7 @@ use agent_channel::spool::{
     rewrite_lines_between, suffixed, write_sequence, SequenceState, ASIDE_SUFFIX, MAX_REJECTED_BYTES, MAX_SPOOL_BATCHES, REJECTED_SUFFIX,
     RETURN_CHUNK_BYTES, SENDING_SUFFIX,
 };
+use agent_channel::spool_dirs::{open_spool_dirs, SpoolDirs};
 use agent_channel::tls::client_config;
 use agent_channel::types::{DialFuture, PauseFuture};
 use agent_command::keys::open_keys_engine;
@@ -350,7 +351,13 @@ fn command(sequence: u64) -> Command {
 
 
 async fn run_once(agent: &AgentFile) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
-    Ok(bounded(run_agent(agent, &|delay| Box::pin(no_pause(delay)))).await??)
+    let dirs = open_spool_dirs(agent)?;
+    run_with(agent, &dirs).await
+}
+
+
+async fn run_with(agent: &AgentFile, dirs: &SpoolDirs) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
+    Ok(bounded(run_agent(agent, dirs, &|delay| Box::pin(no_pause(delay)))).await??)
 }
 
 
@@ -457,14 +464,17 @@ async fn the_agent_refuses_bad_files_and_addresses() -> TestResult {
     };
     assert!(matches!(run_once(&bad_address).await, Err(error) if error.to_string().contains("invalid server address")));
     let gone = dir.path().join("gone").join("file");
+    let seq_dir = dir.path().join("seq-dir");
+    fs::create_dir(&seq_dir)?;
     fs::write(&agent.spool_file, "")?;
+    let good_dirs = open_spool_dirs(&agent)?;
     let broken = [
         AgentFile {
             certificate: gone.clone(),
             ..agent.clone()
         },
         AgentFile {
-            sequence_file: dir.path().to_path_buf(),
+            sequence_file: seq_dir,
             ..agent.clone()
         },
         AgentFile {
@@ -494,7 +504,7 @@ async fn the_agent_refuses_bad_files_and_addresses() -> TestResult {
     ]
     .concat();
     for file in &every_broken {
-        assert!(run_once(file).await.is_err());
+        assert!(run_with(file, &good_dirs).await.is_err());
     }
     assert!(load_agent_file(&dir.path().join("missing.yaml")).is_err());
     let file = write_file(dir.path(), "agent.yaml", AGENT_YAML, PRIVATE_MODE)?;
@@ -1049,7 +1059,7 @@ fn the_quarantine_keeps_refused_batches_within_its_size_cap() -> TestResult {
     assert_eq!(quarantine(&directory, &[refused("d")], MAX_REJECTED_BYTES)?, 0);
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "")?;
-    assert!(quarantine(&blocker.join("spool.rejected"), &[refused("e")], MAX_REJECTED_BYTES).is_err());
+    assert_eq!(quarantine(&blocker.join("spool.rejected"), &[refused("e")], MAX_REJECTED_BYTES)?, 0);
     Ok(())
 }
 
@@ -1224,8 +1234,6 @@ async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> T
     let dir = tempdir()?;
     let Fixture { agent, .. } = fixture(dir.path())?;
     let spool = claim_spool(&agent)?;
-    let mut broken = agent.clone();
-    broken.spool_file = dir.path().join("missing").join("spool");
     let worker = start_worker(&agent.executed_file)?;
     let execute = execute_fn(worker.sender);
     assert!(execute(command(1)));
@@ -1233,9 +1241,13 @@ async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> T
     drop(execute);
     let delivered = Delivered {
         acknowledged: vec![1],
-        rejected: vec![batch(1)],
+        rejected: vec![EventBatch {
+            sequence: 1,
+            ecs_json: INVALID_UTF8.to_vec(),
+            ..EventBatch::default()
+        }],
     };
-    let settled = settle_and_join(&broken, &spool, Ok(delivered), worker.handle).await;
+    let settled = settle_and_join(&agent, &spool, Ok(delivered), worker.handle).await;
     assert!(settled.is_err());
     assert_eq!(fs::read_to_string(&agent.executed_file)?.lines().count(), COMMANDS_QUEUED);
     Ok(())

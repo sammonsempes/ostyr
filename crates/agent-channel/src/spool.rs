@@ -9,7 +9,7 @@ use prost::encoding::encoded_len_varint;
 use prost::Message;
 use same_file::Handle;
 use std::ffi::OsString;
-use std::fs::{self, File, Metadata, OpenOptions, TryLockError};
+use std::fs::{self, DirEntry, File, FileType, Metadata, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -87,6 +87,133 @@ pub fn suffixed(path: &Path, suffix: &str) -> PathBuf {
 }
 
 
+/// The fixed error text of a spool file that is not a regular file (the kind follows the colon).
+pub const NOT_REGULAR_TEXT: &str = "spool file is not a regular file";
+
+
+/// The fixed error text of a temporary file whose leftover cannot be replaced (the kind of the leftover follows the colon).
+pub const LEFTOVER_TEXT: &str = "temporary file left by an earlier run cannot be removed";
+
+
+/// The fixed error text of a temporary file that kept reappearing while it was being created.
+pub const TEMPORARY_RACED_TEXT: &str = "temporary file keeps being replaced while it is created";
+
+
+/// Creation attempts of a temporary file: the first, then one more after removing a leftover.
+pub const TEMPORARY_ATTEMPTS: u32 = 2;
+
+
+/// Directory entries read per rewrite of the quarantine when looking for the temporaries of killed rewrites.
+pub const MAX_STALE_ENTRIES: usize = 4_096;
+
+
+/// A directory entry looked at by the stale temporary scan.
+#[derive(Debug)]
+pub struct Candidate {
+    pub name: OsString,
+    pub path: PathBuf,
+    pub is_file: bool,
+}
+
+
+/// Adds `O_NOFOLLOW | O_NONBLOCK` where there are such flags (Unix): no link is followed and a pipe never blocks the open.
+#[cfg(unix)]
+pub fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+}
+
+
+#[cfg(not(unix))]
+pub fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
+    options
+}
+
+
+/// The kind named by an open error that means the entry is not a regular file (a symlink, a pipe or socket, a directory, a foreign or leased file).
+#[cfg(unix)]
+pub fn refusal_kind(error: &io::Error) -> Option<&'static str> {
+    let kinds = [
+        (rustix::io::Errno::LOOP, "symlink"),
+        (rustix::io::Errno::NXIO, "pipe or socket"),
+        (rustix::io::Errno::ISDIR, "directory"),
+        (rustix::io::Errno::ACCESS, "foreign file"),
+        (rustix::io::Errno::PERM, "foreign file"),
+        (rustix::io::Errno::WOULDBLOCK, "leased file"),
+    ];
+    kinds
+        .iter()
+        .find_map(|(errno, kind)| (error.raw_os_error() == Some(errno.raw_os_error())).then_some(*kind))
+}
+
+
+#[cfg(not(unix))]
+pub fn refusal_kind(error: &io::Error) -> Option<&'static str> {
+    (error.kind() == io::ErrorKind::InvalidInput).then_some("symlink")
+}
+
+
+/// The kind of an entry that is not a regular file, from its type.
+pub fn file_kind(file_type: FileType) -> &'static str {
+    if file_type.is_dir() {
+        "directory"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else {
+        "special file"
+    }
+}
+
+
+/// The error of a spool file that is not a regular file, naming its kind.
+pub fn not_regular(kind: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("{NOT_REGULAR_TEXT}: {kind}"))
+}
+
+
+/// Opens a spool file without following a link or blocking on a pipe and judges the handle: only a regular file is returned, anything else is a fixed error naming its kind.
+pub fn open_regular(options: &mut OpenOptions, path: &Path) -> io::Result<File> {
+    let file = no_follow(options)
+        .open(path)
+        .map_err(|error| refusal_kind(&error).map_or(error, not_regular))?;
+    let file_type = file.metadata()?.file_type();
+    if file_type.is_file() {
+        Ok(file)
+    } else {
+        Err(not_regular(file_kind(file_type)))
+    }
+}
+
+
+/// Removes the leftover of an earlier run at a temporary name (a symlink or pipe is removed itself, never followed); a directory or any entry that stays is a fixed error naming its kind.
+pub fn clear_leftover(path: &Path) -> io::Result<()> {
+    fs::remove_file(path).map_err(|error| {
+        let kind = fs::symlink_metadata(path).map_or("missing", |metadata| file_kind(metadata.file_type()));
+        io::Error::new(error.kind(), format!("{LEFTOVER_TEXT}: {kind}"))
+    })
+}
+
+
+/// Creates a temporary file that did not exist (`O_EXCL`, never a link followed, private), removing a leftover of an earlier run at its name once.
+pub fn create_temporary(path: &Path) -> io::Result<File> {
+    create_temporary_with(path, clear_leftover)
+}
+
+
+/// `create_temporary` with the function that clears a leftover given.
+pub fn create_temporary_with(path: &Path, clear: fn(&Path) -> io::Result<()>) -> io::Result<File> {
+    (0..TEMPORARY_ATTEMPTS)
+        .find_map(
+            |_| match no_follow(owner_only(OpenOptions::new().write(true).create_new(true))).open(path) {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => clear(path).err().map(Err),
+                opened => Some(opened),
+            },
+        )
+        .unwrap_or_else(|| Err(io::Error::other(TEMPORARY_RACED_TEXT)))
+}
+
+
 /// A missing file is the initial state; anything else that is not `<used> <count>` is refused.
 pub fn read_sequence(path: &Path) -> Result<SequenceState, AppError> {
     match fs::read_to_string(path) {
@@ -106,7 +233,7 @@ pub fn read_sequence(path: &Path) -> Result<SequenceState, AppError> {
 /// Written to a temporary file, synced, then renamed over the old one.
 pub fn write_sequence(path: &Path, state: SequenceState) -> Result<(), AppError> {
     let temporary = suffixed(path, TEMPORARY_SUFFIX);
-    let mut out = owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&temporary)?;
+    let mut out = create_temporary(&temporary)?;
     writeln!(out, "{} {}", state.used, state.count)?;
     out.sync_all()?;
     Ok(fs::rename(&temporary, path)?)
@@ -426,28 +553,17 @@ pub fn is_not_a_regular_file(error: &io::Error) -> bool {
 }
 
 
-/// Opens the quarantine lock file (created private) without following a symlink and without blocking on a pipe; none when the path holds anything but a regular file, judged on the opened handle.
-#[cfg(unix)]
+/// Opens the quarantine lock file (created private) without following a symlink and without blocking on a pipe; none, with a warning, when the open fails for any reason or the handle is not a regular file of this user with one link.
 pub fn open_lock_file(path: &Path) -> io::Result<Option<File>> {
-    use rustix::fs::OFlags;
-    use std::os::unix::fs::OpenOptionsExt;
-    let flags = (OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32;
-    match owner_only(OpenOptions::new().write(true).create(true).truncate(false).custom_flags(flags)).open(path) {
-        Ok(file) => file.metadata().map(|metadata| metadata.is_file().then_some(file)),
-        Err(error) if is_not_a_regular_file(&error) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-
-#[cfg(not(unix))]
-pub fn open_lock_file(path: &Path) -> io::Result<Option<File>> {
-    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
-        Ok(None)
-    } else {
-        owner_only(OpenOptions::new().write(true).create(true).truncate(false))
-            .open(path)
-            .map(Some)
+    match no_follow(owner_only(OpenOptions::new().write(true).create(true).truncate(false))).open(path) {
+        Ok(file) => file
+            .metadata()
+            .map(|metadata| (metadata.is_file() && ownership_reason(&metadata, effective_uid()).is_none()).then_some(file)),
+        Err(error) => {
+            let kind = error.kind();
+            tracing::warn!(?kind, "quarantine lock not opened");
+            Ok(None)
+        }
     }
 }
 
@@ -478,27 +594,51 @@ pub fn temporary_prefix(path: &Path) -> String {
 }
 
 
-/// Removes the regular files a killed rewrite left in the directory under `prefix` (never following a symlink; any other entry with the prefix is skipped, so is a file that cannot be removed: logged with a fixed text); returns (removed, skipped).
-pub fn remove_stale_temporaries(directory: &Path, prefix: &str, remove: fn(&Path) -> io::Result<()>) -> io::Result<(u64, u64)> {
-    fs::read_dir(directory)?.try_fold((0, 0), |(removed, skipped), found| {
-        let entry = found?;
-        if entry.file_name().as_encoded_bytes().starts_with(prefix.as_bytes()) {
-            if entry.file_type()?.is_file() {
-                Ok(match remove(&entry.path()) {
-                    Ok(()) => (removed + 1, skipped),
-                    Err(error) => {
-                        let kind = error.kind();
-                        tracing::warn!(?kind, "stale quarantine temporary file not removed");
-                        (removed, skipped + 1)
-                    }
-                })
-            } else {
-                Ok((removed, skipped + 1))
-            }
-        } else {
-            Ok((removed, skipped))
-        }
+/// Reads one directory entry into a candidate (the type of a symlink is its own, never its target's).
+pub fn candidate_of(entry: DirEntry) -> io::Result<Candidate> {
+    Ok(Candidate {
+        name: entry.file_name(),
+        path: entry.path(),
+        is_file: entry.file_type()?.is_file(),
     })
+}
+
+
+/// Removes the regular files a killed rewrite left under `prefix` among at most `bound` candidates (never following a symlink; any other entry with the prefix is skipped, so is an entry that cannot be read and a file that cannot be removed: logged with a fixed text); returns (removed, skipped).
+pub fn scan_stale(
+    candidates: &mut dyn Iterator<Item = io::Result<Candidate>>,
+    prefix: &str,
+    remove: fn(&Path) -> io::Result<()>,
+    bound: usize,
+) -> (u64, u64) {
+    candidates.take(bound).fold((0, 0), |(removed, skipped), found| match found {
+        Err(error) => {
+            let kind = error.kind();
+            tracing::warn!(?kind, "stale quarantine temporary scan entry not read");
+            (removed, skipped + 1)
+        }
+        Ok(candidate) if !candidate.name.as_encoded_bytes().starts_with(prefix.as_bytes()) => (removed, skipped),
+        Ok(candidate) if !candidate.is_file => (removed, skipped + 1),
+        Ok(candidate) => match remove(&candidate.path) {
+            Ok(()) => (removed + 1, skipped),
+            Err(error) => {
+                let kind = error.kind();
+                tracing::warn!(?kind, "stale quarantine temporary file not removed");
+                (removed, skipped + 1)
+            }
+        },
+    })
+}
+
+
+/// `scan_stale` over the directory, reading at most `bound` entries; the rest is never read and the bound is named in a warning (`MAX_STALE_ENTRIES`).
+pub fn remove_stale_temporaries(directory: &Path, prefix: &str, remove: fn(&Path) -> io::Result<()>, bound: usize) -> io::Result<(u64, u64)> {
+    let mut candidates = fs::read_dir(directory)?.map(|found| found.and_then(candidate_of));
+    let counts = scan_stale(&mut candidates, prefix, remove, bound);
+    if candidates.next().is_some() {
+        tracing::warn!(bound, "stale temporary scan stopped at MAX_STALE_ENTRIES, rest not read");
+    }
+    Ok(counts)
 }
 
 
@@ -548,7 +688,7 @@ pub fn rewrite_quarantine_with(
     let refused = added.len();
     let held = lock_quarantine(path, lock_attempts)?;
     if held.is_none() {
-        tracing::warn!(refused, "quarantine lock is not a regular file, quarantine disabled for this run");
+        tracing::warn!(refused, "quarantine lock is not usable, quarantine disabled for this run");
         Ok(None)
     } else if is_directory(path) {
         tracing::warn!(refused, "quarantine path is a directory, quarantine disabled for this run");
@@ -576,7 +716,7 @@ pub fn replace_quarantine(
 ) -> io::Result<u64> {
     let directory = directory_of(path);
     let prefix = temporary_prefix(path);
-    let (removed, left) = remove_stale_temporaries(directory, &prefix, remove_regular_file)?;
+    let (removed, left) = remove_stale_temporaries(directory, &prefix, remove_regular_file, MAX_STALE_ENTRIES)?;
     if removed + left > 0 {
         tracing::warn!(removed, left, "stale quarantine temporary files");
     }
@@ -732,7 +872,7 @@ pub fn open_locked_once(
     pause: &mut dyn FnMut(),
     is_current: fn(&File, &Path) -> io::Result<bool>,
 ) -> io::Result<Option<File>> {
-    let out = owner_only(OpenOptions::new().read(true).write(true).create(true)).open(spool)?;
+    let out = open_regular(owner_only(OpenOptions::new().read(true).write(true).create(true)), spool)?;
     lock_bounded(attempts, &mut || out.try_lock(), pause)?;
     Ok(is_current(&out, spool)?.then_some(out))
 }
@@ -820,7 +960,7 @@ pub fn lines_to_claim_with(path: &Path, limit: usize, count: fn(&Path, usize) ->
 /// Writes the lines to the temporary file next to `path`, synced; returns its path.
 pub fn write_temporary(path: &Path, lines: &[String]) -> io::Result<PathBuf> {
     let temporary = suffixed(path, TEMPORARY_SUFFIX);
-    let mut out = owner_only(OpenOptions::new().write(true).create(true).truncate(true)).open(&temporary)?;
+    let mut out = create_temporary(&temporary)?;
     lines.iter().try_for_each(|line| writeln!(out, "{line}"))?;
     out.sync_all()?;
     Ok(temporary)

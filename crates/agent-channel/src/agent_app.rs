@@ -4,6 +4,7 @@ use crate::error::{AppError, ChannelError};
 use crate::model::{ClientTlsPaths, CommandRun, Delivered};
 use crate::proto::EventBatch;
 use crate::spool::{claim_spool, finish_spool, quarantine, suffixed, Spool, MAX_REJECTED_BYTES, REJECTED_SUFFIX};
+use crate::spool_dirs::SpoolDirs;
 use crate::tls::client_config;
 use crate::types::{DialFn, ExecuteFn, PauseFn, SharedClientConfig};
 use agent_command::cli::seconds_since_epoch;
@@ -242,7 +243,7 @@ pub async fn settle_and_join(
 
 
 /// Heartbeats and runs the command stream while the spooled events are delivered; a failed event delivery never stops commands.
-pub async fn run_agent(file: &AgentFile, pause: &PauseFn) -> Result<AgentOutcome, AppError> {
+pub async fn run_agent(file: &AgentFile, _checked: &SpoolDirs, pause: &PauseFn) -> Result<AgentOutcome, AppError> {
     let address: SocketAddr = file.server.parse()?;
     let config = client_config(&ClientTlsPaths {
         certificate: file.certificate.clone(),

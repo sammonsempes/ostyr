@@ -18,5 +18,6 @@ pub mod services;
 pub mod settings;
 pub mod sink;
 pub mod spool;
+pub mod spool_dirs;
 pub mod tls;
 pub mod types;
