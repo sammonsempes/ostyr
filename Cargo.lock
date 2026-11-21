@@ -4717,6 +4717,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "utoipa",
+ "vuln-match",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use utoipa::openapi::OpenApi as OpenApiDocument;
+use vuln_match::store::{MIGRATIONS as VULN_MIGRATIONS, MIGRATION_NAMESPACE as VULN_NAMESPACE};
 
 
 pub const SETTING_MODULES: &str = "modules";
@@ -63,6 +64,9 @@ const DHCP_PLAN: &[Migration] = &DHCP_MIGRATIONS;
 const COMPLIANCE_PLAN: &[Migration] = &COMPLIANCE_MIGRATIONS;
 
 
+const VULN_PLAN: &[Migration] = &VULN_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -74,6 +78,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "oncall" => Some(Module::Oncall),
         "dhcp" => Some(Module::Dhcp),
         "compliance" => Some(Module::Compliance),
+        "vulnerabilities" => Some(Module::Vulnerabilities),
         _ => None,
     }
 }
@@ -174,6 +179,10 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Vulnerabilities => Ok(vuln_match::api::vulnerabilities_router(vuln_match::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -196,6 +205,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Oncall => oncall::api::oncall_access(),
         Module::Dhcp => dhcp_kea::api::dhcp_access(),
         Module::Compliance => compliance::api::compliance_access(),
+        Module::Vulnerabilities => vuln_match::api::vulnerabilities_access(),
     }
 }
 
@@ -211,6 +221,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Oncall => oncall::api::oncall_document(),
         Module::Dhcp => dhcp_kea::api::dhcp_document(),
         Module::Compliance => compliance::api::compliance_document(),
+        Module::Vulnerabilities => vuln_match::api::vulnerabilities_document(),
     }
 }
 
@@ -242,6 +253,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Oncall]), ONCALL_NAMESPACE, ONCALL_PLAN),
         (wants(&[Module::Dhcp]), DHCP_NAMESPACE, DHCP_PLAN),
         (wants(&[Module::Compliance]), COMPLIANCE_NAMESPACE, COMPLIANCE_PLAN),
+        (wants(&[Module::Vulnerabilities]), VULN_NAMESPACE, VULN_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)

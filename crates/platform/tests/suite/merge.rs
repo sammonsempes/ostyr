@@ -8,7 +8,7 @@ use platform::merge::{merge_access, migration_plan, module_access};
 use platform::model::Module;
 
 
-const ALL: [Module; 9] = [
+const ALL: [Module; 10] = [
     Module::Alerts,
     Module::Cases,
     Module::Cmdb,
@@ -18,6 +18,7 @@ const ALL: [Module; 9] = [
     Module::Oncall,
     Module::Dhcp,
     Module::Compliance,
+    Module::Vulnerabilities,
 ];
 
 
@@ -78,7 +79,14 @@ fn every_module_has_a_disjoint_table() -> TestResult {
     let risk_key = module_access(Module::Risk).into_keys().next().ok_or("no risk route")?;
     let doubled = merge_access(vec![module_access(Module::Risk), module_access(Module::Risk)]);
     assert_eq!(doubled, Err(PlatformError::DuplicateRoute(risk_key)));
-    for module in [Module::Hunts, Module::Certificates, Module::Oncall, Module::Dhcp, Module::Compliance] {
+    for module in [
+        Module::Hunts,
+        Module::Certificates,
+        Module::Oncall,
+        Module::Dhcp,
+        Module::Compliance,
+        Module::Vulnerabilities,
+    ] {
         let key = module_access(module).into_keys().min().ok_or("no route")?;
         assert_eq!(
             merge_access(vec![module_access(module), module_access(module)]),
@@ -107,6 +115,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
     assert_eq!(names(&[Module::Dhcp, Module::Alerts]), ["alerts", "dhcp_kea"]);
     assert_eq!(names(&[Module::Compliance]), ["compliance"]);
     assert_eq!(names(&[Module::Compliance, Module::Alerts]), ["alerts", "compliance"]);
+    assert_eq!(names(&[Module::Vulnerabilities]), ["vuln"]);
+    assert_eq!(names(&[Module::Vulnerabilities, Module::Alerts]), ["alerts", "vuln"]);
     assert_eq!(
         names(&[Module::Oncall, Module::Hunts, Module::Certificates]),
         ["hunt_packs", "cert_inventory", "oncall"]
@@ -126,7 +136,8 @@ fn migrations_run_in_dependency_order() -> TestResult {
             "cert_inventory",
             "oncall",
             "dhcp_kea",
-            "compliance"
+            "compliance",
+            "vuln"
         ]
     );
     assert!(ALL.iter().all(|module| !migration_plan(&[*module]).is_empty()));
@@ -139,7 +150,7 @@ fn migrations_run_in_dependency_order() -> TestResult {
 
 #[test]
 fn module_parts_access_is_the_union_of_each_selected_module_table() -> TestResult {
-    let (_dir, (_router, access, _documents)) = parts_of("alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance")?;
+    let (_dir, (_router, access, _documents)) = parts_of("alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities")?;
     let expected: Vec<String> = ALL.iter().flat_map(|module| module_access(*module).into_keys()).collect();
     assert_eq!(access.len(), expected.len());
     assert!(expected.iter().all(|key| access.contains_key(key)));

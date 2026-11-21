@@ -22,6 +22,7 @@ risk-score = { version = "0.0.0", path = "../risk-score" }
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 utoipa = "5"
+vuln-match = { version = "0.0.0", path = "../vuln-match" }
 
 [dev-dependencies]
 core-auth = { version = "0.0.0", path = "../core-auth" }

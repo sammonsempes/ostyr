@@ -7,10 +7,10 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 
-const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance";
+const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities";
 
 
-const ROUTES: [(&str, &str); 9] = [
+const ROUTES: [(&str, &str); 10] = [
     ("/alerts", "alerts"),
     ("/cases", "cases"),
     ("/assets", "cmdb"),
@@ -20,6 +20,7 @@ const ROUTES: [(&str, &str); 9] = [
     ("/oncall/alerts", "oncall"),
     ("/dhcp/leases/at", "dhcp"),
     ("/compliance/state", "compliance"),
+    ("/vulnerabilities/findings", "vulnerabilities"),
 ];
 
 
@@ -33,6 +34,9 @@ const DHCP_QUERIES: [&str; 2] = [
 
 
 const COMPLIANCE_QUERIES: [&str; 2] = ["/compliance/state", "/compliance/assets/web01"];
+
+
+const VULN_QUERIES: [&str; 2] = ["/vulnerabilities/findings", "/vulnerabilities/assets/web01"];
 
 
 const NEW_PATHS: [&str; 5] = ["/hunts/findings", "/certificates", FINGERPRINT_PATH, "/oncall/alerts", "/oncall/alerts/1"];
@@ -144,6 +148,22 @@ async fn the_compliance_routes_share_the_semaphore_and_answer_429_when_it_is_emp
 
 
 #[tokio::test]
+async fn the_vulnerabilities_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
+    let permits = Arc::new(Semaphore::new(0));
+    let fx = fixture_with_permits(ALL_MODULES, &permits)?;
+    let token = login(&fx.router, ANALYST).await?;
+    for path in VULN_QUERIES {
+        assert_eq!(
+            status(&fx.router, "GET", path, Some(&token)).await?,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn the_longest_module_list_is_served_and_the_document_lists_every_path() -> TestResult {
     assert!(ALL_MODULES.len() <= MAX_MODULES_CHARS);
     let fx = fixture(ALL_MODULES)?;
@@ -167,7 +187,7 @@ const UNSELECTED_FIRST: [&str; 7] = [
 ];
 
 
-const UNSELECTED_SECOND: [&str; 8] = [
+const UNSELECTED_SECOND: [&str; 10] = [
     "/certificates",
     "/certificates/abc",
     "/oncall/alerts",
@@ -176,6 +196,8 @@ const UNSELECTED_SECOND: [&str; 8] = [
     "/dhcp/leases/mac",
     "/compliance/state",
     "/compliance/assets/web01",
+    "/vulnerabilities/findings",
+    "/vulnerabilities/assets/web01",
 ];
 
 
