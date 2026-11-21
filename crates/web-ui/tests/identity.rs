@@ -166,12 +166,12 @@ fn asset_summary(kind: &str, lifecycle: &str) -> AssetSummaryView {
 }
 
 
-fn asset_detail(kind: &str, lifecycle: &str, key: &str, name: &str, value: &str, source: &str) -> AssetDetailView {
+fn asset_detail(kind: &str, lifecycle: &str, key: &str, key_value: &str, name: &str, value: &str, source: &str) -> AssetDetailView {
     AssetDetailView {
         summary: asset_summary(kind, lifecycle),
         keys: vec![AssetKeyView {
             key: key.to_owned(),
-            value: value.to_owned(),
+            value: key_value.to_owned(),
         }],
         attributes: vec![AssetAttributeView {
             name: name.to_owned(),
@@ -203,12 +203,13 @@ fn asset_pages(value: &str) -> Vec<String> {
     vec![
         asset_list(asset_summary(value, other)),
         asset_list(asset_summary(other, value)),
-        asset_page(language, "t", &asset_detail(value, other, other, other, other, other)).into_string(),
-        asset_page(language, "t", &asset_detail(other, value, other, other, other, other)).into_string(),
-        asset_page(language, "t", &asset_detail(other, other, value, other, other, other)).into_string(),
-        asset_page(language, "t", &asset_detail(other, other, other, value, other, other)).into_string(),
-        asset_page(language, "t", &asset_detail(other, other, other, other, value, other)).into_string(),
-        asset_page(language, "t", &asset_detail(other, other, other, other, other, value)).into_string(),
+        asset_page(language, "t", &asset_detail(value, other, other, other, other, other, other)).into_string(),
+        asset_page(language, "t", &asset_detail(other, value, other, other, other, other, other)).into_string(),
+        asset_page(language, "t", &asset_detail(other, other, value, other, other, other, other)).into_string(),
+        asset_page(language, "t", &asset_detail(other, other, other, value, other, other, other)).into_string(),
+        asset_page(language, "t", &asset_detail(other, other, other, other, value, other, other)).into_string(),
+        asset_page(language, "t", &asset_detail(other, other, other, other, other, value, other)).into_string(),
+        asset_page(language, "t", &asset_detail(other, other, other, other, other, other, value)).into_string(),
     ]
 }
 
@@ -345,6 +346,8 @@ fn a_dns_name_is_ascii_or_marked() -> TestResult {
     );
     assert_eq!(clip_dns(Language::English, "xn--e1awd7f.example", LIMIT), "xn--e1awd7f.example");
     assert_eq!(clip_dns(Language::English, "caf\u{e9}.corp", LIMIT), "caf\u{fffd}.corp");
+    assert_eq!(clip_dns(Language::English, "a.corp ", LIMIT), "a.corp\u{fffd}");
+    assert_eq!(clip_dns(Language::English, "a\u{a0}b", LIMIT), "a\u{fffd}b");
     let genuine = cert_list(cert_with("s", "i", "k", "admin.corp"));
     let cyrillic = cert_list(cert_with("s", "i", "k", "\u{430}dmin.corp"));
     assert_ne!(genuine, cyrillic);
@@ -358,12 +361,13 @@ fn a_dns_name_is_ascii_or_marked() -> TestResult {
 #[test]
 fn optional_and_display_identity_mark_what_the_free_text_forms_keep() -> TestResult {
     let value = "a\u{a0}b".to_owned();
-    assert_eq!(optional_identity(Language::English, Some(&value)), "a\u{fffd}b");
+    assert_eq!(optional_identity(Language::English, Some(&value)).into_string(), "a\u{fffd}b");
     assert_eq!(optional(Language::English, Some(&value)), "a\u{a0}b");
-    assert_eq!(optional_identity(Language::English, None), optional(Language::English, None));
     assert_eq!(display_identity(Language::English, &json!("a\u{a0}b")), "a\u{fffd}b");
     assert_eq!(display_value(Language::English, &json!("a\u{a0}b")), "a\u{a0}b");
     assert_eq!(display_identity(Language::English, &json!(NUMBER)), "7");
+    assert_eq!(display_identity(Language::English, &json!(["a\u{a0}b"])), "[\"a\u{fffd}b\"]");
+    assert_eq!(display_value(Language::English, &json!(["a\u{a0}b"])), "[\"a\u{a0}b\"]");
     Ok(())
 }
 
@@ -382,5 +386,27 @@ fn free_text_keeps_a_no_break_space_before_a_colon() -> TestResult {
     assert!(page.contains("Note\u{a0}: texte"));
     assert!(!page.contains("Note\u{fffd}"));
     assert!(case_list(case_summary("alice", "Note\u{a0}: texte")).contains("Note\u{a0}: texte"));
+    Ok(())
+}
+
+
+#[test]
+fn an_absent_host_renders_differently_from_a_peer_value_that_spells_the_marker() -> TestResult {
+    let absent_english = optional_identity(Language::English, None).into_string();
+    let absent_french = optional_identity(Language::French, None).into_string();
+    assert_eq!(absent_english, "<span class=\"absent\">(none)</span>");
+    assert_eq!(absent_french, "<span class=\"absent\">(aucun)</span>");
+    ["none", "(none)", "aucun", "(aucun)"].iter().for_each(|forged| {
+        let shown = optional_identity(Language::English, Some(&(*forged).to_owned())).into_string();
+        assert_eq!(shown, *forged);
+        assert!(!shown.contains("absent"));
+        assert_ne!(shown, absent_english);
+    });
+    let mut forged_alert = alert_with("x", "x", "x", "x", "x", "x");
+    forged_alert.host_name = Some("(none)".to_owned());
+    forged_alert.user_name = None;
+    let list = alert_list(forged_alert);
+    assert!(list.contains("<td>(none)</td>"));
+    assert!(list.contains("<td><span class=\"absent\">(none)</span></td>"));
     Ok(())
 }
