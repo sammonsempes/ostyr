@@ -3,6 +3,7 @@
 use crate::error::CatalogueError;
 use crate::limits::Limits;
 use crate::model::{Assignment, Catalogue};
+use crate::plan::winget_key;
 use crate::source::{manager_of, package_of};
 use crate::validate::first_problem;
 use core_config::parse::parse_document;
@@ -80,7 +81,10 @@ pub fn check_sources(catalogue: &Catalogue) -> Result<(), CatalogueError> {
         .entries
         .iter()
         .try_fold(BTreeSet::new(), |mut seen, entry| {
-            if seen.insert((manager_of(&entry.source), package_of(&entry.source))) {
+            if seen.insert((
+                manager_of(&entry.source),
+                winget_key(manager_of(&entry.source), package_of(&entry.source)),
+            )) {
                 Ok(seen)
             } else {
                 Err(CatalogueError::DuplicateSource { name: entry.name.clone() })
