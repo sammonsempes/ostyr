@@ -872,9 +872,13 @@ async fn instructions_that_can_never_fit_raise_one_named_alert_and_no_reservatio
         matches!(refused, Err(AiError::InstructionsOverBudget { skeleton: asked, cap }) if asked == skeleton && cap == i64::from(used.max_tokens_per_day))
     );
     assert_eq!(statements(&stored)?, 0);
-    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 1);
+    assert_eq!(rule_count(&stored, "ai.budget_instructions_over_cap")?, 1);
+    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 0);
     let reserved = skeleton + EIGHT_BYTES;
-    assert_eq!(summary_of(&stored, "ai.budget_spent")?, instructions_detail(&used, reserved, skeleton));
+    assert_eq!(
+        summary_of(&stored, "ai.budget_instructions_over_cap")?,
+        instructions_detail(&used, reserved, skeleton)
+    );
     let full = new_gate(0);
     let busy = model(Mode::Normal);
     let again = instructed_call(&busy, &full, &used, LONG_INSTRUCTIONS, &json!({"a": 1})).await;
@@ -884,6 +888,38 @@ async fn instructions_that_can_never_fit_raise_one_named_alert_and_no_reservatio
         check_within_cap("acme", reserved, skeleton, skeleton - 1),
         Err(AiError::InstructionsOverBudget { .. })
     ));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_consumer_over_the_cap_never_takes_the_spent_alert_of_the_real_closing() -> TestResult {
+    let used = capped("nofinish", CALL_CAP, u32::try_from(skeleton_of(&settings("nofinish")) + TEN)?);
+    let stored = model(Mode::Normal);
+    let gate = new_gate(WAITING);
+    let cap = i64::from(used.max_tokens_per_day);
+    let over = skeleton_reservation(&used, LONG_INSTRUCTIONS, SKELETON_NONCE);
+    assert!(over > cap, "{over} {cap}");
+    let refused = instructed_call(&stored, &gate, &used, LONG_INSTRUCTIONS, &json!({"a": 1})).await;
+    assert!(matches!(refused, Err(AiError::InstructionsOverBudget { .. })), "{refused:?}");
+    assert_eq!(rule_count(&stored, "ai.budget_instructions_over_cap")?, 1);
+    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 0);
+    seed(&stored, "acme", DAY_ONE, (1, cap - skeleton_of(&used) + 1), (0, 0))?;
+    let closed = gated_call(&stored, &gate, "acme", &used, wall_one).await;
+    assert!(matches!(closed, Err(AiError::BudgetSpent)), "{closed:?}");
+    assert_eq!(rule_count(&stored, "ai.budget_spent")?, 1);
+    assert_eq!(rule_count(&stored, "ai.budget_instructions_over_cap")?, 1);
+    assert_eq!(lock(&stored.alerts)?.len(), TWO_ALERTS);
+    Ok(())
+}
+
+
+#[test]
+fn a_held_expiry_that_jumps_over_80_percent_is_not_a_crossing_of_any_call() -> TestResult {
+    let used = capped("ok", FIVE_CALLS, HUNDRED);
+    assert!(!tokens_crossed(EIGHTY + FIVE, FIVE, &used));
+    assert!(!tokens_crossed(EIGHTY + FIVE + FIVE, FIVE, &used));
+    assert!(tokens_crossed(EIGHTY + FIVE, EIGHTY + 1, &used));
     Ok(())
 }
 

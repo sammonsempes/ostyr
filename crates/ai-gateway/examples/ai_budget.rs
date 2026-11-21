@@ -19,7 +19,14 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 
-const USAGE: &str = "usage: ai_budget <pg-settings.yaml> <ai.yaml> <tenant> <calls> [data-padding-bytes|zero]";
+const USAGE: &str = "usage: ai_budget <pg-settings.yaml> <ai.yaml> <tenant> <calls> [data-padding-bytes|zero] [long]";
+
+
+const SHORT_INSTRUCTIONS: &str = "Summarise the alert.";
+
+
+const LONG_INSTRUCTIONS: &str =
+    "Summarise the alert for the analyst on duty in the operations centre, in plain language, and name every host, user and process it mentions.";
 
 
 const MIGRATION_DEADLINE: Duration = Duration::from_secs(120);
@@ -31,9 +38,10 @@ async fn one_call(
     scope: TenantScope,
     gate: Arc<Gate>,
     padding: Option<usize>,
+    instructions: &'static str,
 ) -> String {
     let data = padding.map_or(json!(0), |bytes| json!({"host": "web-1", "padding": "x".repeat(bytes)}));
-    let outcome = pg_chat(&client, &gate, &scope, &settings, "Summarise the alert.", &data).await;
+    let outcome = pg_chat(&client, &gate, &scope, &settings, instructions, &data).await;
     match outcome {
         Ok(answer) => format!("answered {:?} {:?}", answer.prompt_tokens, answer.completion_tokens),
         Err(AiError::BudgetSpent) => "BudgetSpent".to_owned(),
@@ -46,6 +54,11 @@ async fn one_call(
 async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
     let [pg_file, ai_file, tenant, calls, rest @ ..] = args else {
         Err(USAGE)?
+    };
+    let instructions = if rest.get(1).map(String::as_str) == Some("long") {
+        LONG_INSTRUCTIONS
+    } else {
+        SHORT_INSTRUCTIONS
     };
     let padding = match rest.first().map(String::as_str) {
         Some("zero") => None,
@@ -69,6 +82,7 @@ async fn scenario(args: &[String]) -> Result<(), Box<dyn Error>> {
             scope.clone(),
             Arc::clone(&gate),
             padding,
+            instructions,
         ));
     });
     let mut out = stdout();
