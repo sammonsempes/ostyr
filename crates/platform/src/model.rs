@@ -9,4 +9,5 @@ pub enum Module {
     Oncall,
     Dhcp,
     Compliance,
+    Vulnerabilities,
 }
