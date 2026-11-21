@@ -6,9 +6,9 @@ use cloud_posture::error::StoreError;
 use cloud_posture::model::{Admitted, Finding, Findings, Severity, Skipped, Status};
 use cloud_posture::prowler::identity_of;
 use cloud_posture::store::{
-    admit, admit_all, check_run, document_of, finding_doc, finding_fits, parse_answer, replace_run, replace_run_limited, stats_doc,
+    admit, admit_all, check_run, check_size, document_of, finding_doc, finding_fits, parse_answer, replace_run, replace_run_limited, stats_doc,
     MAX_FINDINGS_PER_TENANT, MAX_RUN_DOC_BYTES, MAX_RUN_ID_BYTES, MAX_STORED_TEXT_BYTES, MAX_TIME_UNIX, MIGRATIONS, MIGRATION_NAMESPACE,
-    MIN_TIME_UNIX, PROVIDER_PATTERN, REFERENCE_PATTERN, REPLACE_SQL, SPACED_PATTERN, STORE_DEADLINE,
+    MIN_TIME_UNIX, PROVIDER_PATTERN, REFERENCE_PATTERN, REFUSE_SQL, REPLACE_SQL, SPACED_PATTERN, STORE_DEADLINE,
 };
 use cloud_posture::text::{
     severity_of, severity_rank, severity_text, status_of, status_text, valid_provider, valid_reference, valid_spaced_reference, MAX_ACCOUNT_BYTES,
@@ -526,12 +526,8 @@ async fn checks_before_any_io_refuse_tenant_account_run_id_and_size() -> TestRes
         refused(replace_run(&exec, &scope, &good, "run", u64::MAX).await)?,
         StoreError::BadTime
     ));
-    let crowd = run_of("a", "acc", vec![finding("acc", "uid", "res", Status::Fail); MAX_FINDINGS_PER_TENANT + 1])?;
-    assert!(matches!(
-        refused(replace_run(&exec, &scope, &crowd, "run", NOW).await)?,
-        StoreError::RunTooLarge { .. }
-    ));
     assert!(check_run(&scope, &good, "run").is_ok());
+    assert!(check_size(&good).is_ok());
     assert!(calls_of(&fake)?.is_empty());
     Ok(())
 }
@@ -671,7 +667,7 @@ async fn a_failing_store_and_bad_answers_are_errors() -> TestResult {
 
 
 #[tokio::test]
-async fn a_run_over_the_document_limit_is_refused_before_any_io() -> TestResult {
+async fn a_run_too_large_to_send_writes_only_the_refusal_marker() -> TestResult {
     let scope = tenant_scope("a")?;
     let fake = double(stored_reply("0"));
     let exec = executor(&fake);
@@ -694,7 +690,59 @@ async fn a_run_over_the_document_limit_is_refused_before_any_io() -> TestResult 
         refused(replace_run(&exec, &scope, &giant, "run", NOW).await)?,
         StoreError::RunTooLarge { .. }
     ));
-    assert!(calls_of(&fake)?.is_empty());
+    let crowd = run_of("a", "acc", vec![finding("acc", "uid", "res", Status::Fail); MAX_FINDINGS_PER_TENANT + 1])?;
+    assert!(matches!(
+        refused(replace_run(&exec, &scope, &crowd, "run", NOW).await)?,
+        StoreError::RunTooLarge { .. }
+    ));
+    let calls = calls_of(&fake)?;
+    assert_eq!(calls.len(), THREE);
+    calls.iter().try_for_each(|call| {
+        assert_eq!(call.tenant, "a");
+        assert_eq!(call.sql, REFUSE_SQL);
+        assert_eq!(call.params.len(), FOUR);
+        assert!(!call.sql.contains("posture_replace_run"));
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    let sizes: Vec<&str> = calls.iter().map(|call| param(call, TWO)).collect::<Result<_, _>>()?;
+    assert_eq!(sizes, vec!["1", &GIANT_RUN.to_string(), &(MAX_FINDINGS_PER_TENANT + 1).to_string()]);
+    let first = calls.first().ok_or("no call")?;
+    assert_eq!(param(first, 0)?, "acc");
+    assert_eq!(param(first, 1)?, NOW.to_string());
+    assert_eq!(param(first, THREE)?, MAX_FINDINGS_PER_TENANT.to_string());
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failing_marker_is_logged_and_the_refusal_stays_the_answer() -> TestResult {
+    let scope = tenant_scope("a")?;
+    let failing = Double {
+        fail: true,
+        ..double(Vec::new())
+    };
+    let exec = executor(&failing);
+    let found = run_of("a", "acc", vec![finding("acc", "u1", "res-1", Status::Fail)])?;
+    assert!(matches!(
+        refused(replace_run_limited(&exec, &scope, &found, "run", NOW, 1).await)?,
+        StoreError::RunTooLarge { .. }
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn the_second_migration_writes_the_marker_under_the_tenant_lock() -> TestResult {
+    check_embedded(&MIGRATIONS)?;
+    let sql = MIGRATIONS.get(1).ok_or("no second migration")?.sql;
+    assert_eq!(MIGRATIONS.get(1).ok_or("none")?.version, "posture_0002");
+    assert!(sql.contains("pg_advisory_xact_lock(hashtextextended('cloud_posture/' || tenant_name, 0))"));
+    assert!(sql.contains("SET search_path = pg_catalog, public, pg_temp SET enable_seqscan = off SET enable_bitmapscan = off SET jit = off AS $$"));
+    assert!(sql.contains("UPDATE cloud_posture_runs r SET refused_micros = finished, refused_items = claimed WHERE r.tenant = tenant_name AND r.account = account_name;"));
+    assert!(sql.contains("IF NOT FOUND AND others + 1 <= max_total THEN"));
+    assert!(!sql.contains("DELETE"));
+    assert!(!sql.contains("INSERT INTO cloud_posture_findings"));
+    assert!(REFUSE_SQL.contains("posture_refuse_run($1, $2, $3::text::bigint, $4::text::bigint, $5::text::bigint)"));
     Ok(())
 }
 
@@ -709,6 +757,10 @@ fn constants_and_messages() -> TestResult {
         StoreError::BadRunId,
         StoreError::BadTime,
         StoreError::BadAnswer,
+        StoreError::BadLimit { max: 1 },
+        StoreError::BadCursor,
+        StoreError::RunChanged,
+        StoreError::StoredValue,
         StoreError::RunTooLarge {
             items: 1,
             max_items: TWO,

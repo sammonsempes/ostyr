@@ -123,3 +123,43 @@ pub struct RunOutcome {
     pub store_refused: usize,
     pub duplicate: usize,
 }
+
+
+/// The run row of one account: the last stored run (`run_id` and `finished_micros` are `None` while no run was ever stored) and the last refused one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunHeader {
+    pub run_id: Option<String>,
+    pub finished_micros: Option<i64>,
+    pub items: u64,
+    pub unparsable: u64,
+    pub bad_field: u64,
+    pub duplicate: u64,
+    pub foreign_account: u64,
+    pub refused_pass: u64,
+    pub refused_muted: u64,
+    pub refused_manual: u64,
+    pub refused_fail: u64,
+    pub store_refused: u64,
+    pub refused_micros: Option<i64>,
+    pub refused_items: u64,
+}
+
+
+/// One page of an account's findings: the run header, the findings that pass the serving check, the rows skipped, and the cursor of the next page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingsPage {
+    pub run: Option<RunHeader>,
+    pub items: Vec<Finding>,
+    pub unservable: usize,
+    pub next: Option<String>,
+}
+
+
+/// A parsed cursor: the run it belongs to (`run_id` and its finish time) and the key of the last row served.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageCursor {
+    pub run_id: String,
+    pub finished_micros: i64,
+    pub rank: u8,
+    pub identity: String,
+}

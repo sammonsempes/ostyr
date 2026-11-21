@@ -4,8 +4,8 @@ use crate::error::StoreError;
 use crate::model::{Admitted, Finding, Findings, RunOutcome, Skipped, Status};
 use crate::prowler::identity_of;
 use crate::text::{
-    finding_uid, severity_rank, severity_text, status_text, valid_provider, valid_reference, valid_spaced_reference, MAX_ACCOUNT_BYTES,
-    MAX_CHECK_ID_BYTES, MAX_REGION_BYTES, MAX_RESOURCE_TYPE_BYTES, MAX_RESOURCE_UID_BYTES,
+    severity_rank, severity_text, status_text, valid_provider, valid_reference, valid_spaced_reference, MAX_ACCOUNT_BYTES, MAX_CHECK_ID_BYTES,
+    MAX_FINDING_UID_BYTES, MAX_REGION_BYTES, MAX_RESOURCE_TYPE_BYTES, MAX_RESOURCE_UID_BYTES,
 };
 use crate::types::Executor;
 use core_pg::migrate::Migration;
@@ -18,10 +18,16 @@ use std::time::Duration;
 pub const MIGRATION_NAMESPACE: &str = "posture";
 
 
-pub const MIGRATIONS: [Migration; 1] = [Migration {
-    version: "posture_0001",
-    sql: include_str!("../migrations/posture_0001.sql"),
-}];
+pub const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: "posture_0001",
+        sql: include_str!("../migrations/posture_0001.sql"),
+    },
+    Migration {
+        version: "posture_0002",
+        sql: include_str!("../migrations/posture_0002.sql"),
+    },
+];
 
 
 /// Rows of one tenant, findings and run rows together: the cap the function enforces at commit.
@@ -68,6 +74,10 @@ pub const REPLACE_SQL: &str = "SELECT outcome, others::text, stored::text \
                                FROM posture_replace_run($1, $2, $3, $4::text::jsonb, $5::text::bigint, $6::text::jsonb, $7::text::bigint)";
 
 
+/// `$1` tenant, `$2` account, `$3` finish time, `$4` items the refused run held, `$5` row cap: writes the refusal marker of a run too large to send.
+pub const REFUSE_SQL: &str = "SELECT others::text FROM posture_refuse_run($1, $2, $3::text::bigint, $4::text::bigint, $5::text::bigint)";
+
+
 /// True when the store can hold the finding of the run's `account`: every identity field in its grammar, no NUL, texts and times in range.
 pub fn finding_fits(finding: &Finding, account: &str) -> bool {
     finding.account == account
@@ -76,7 +86,8 @@ pub fn finding_fits(finding: &Finding, account: &str) -> bool {
         && valid_reference(&finding.region, MAX_REGION_BYTES)
         && valid_spaced_reference(&finding.resource_uid, MAX_RESOURCE_UID_BYTES)
         && valid_spaced_reference(&finding.resource_type, MAX_RESOURCE_TYPE_BYTES)
-        && finding_uid(&finding.uid).is_some()
+        && !finding.uid.is_empty()
+        && finding.uid.len() <= MAX_FINDING_UID_BYTES
         && !finding.uid.contains('\0')
         && !finding.title.contains('\0')
         && !finding.detail.contains('\0')
@@ -187,7 +198,15 @@ pub fn check_run(scope: &TenantScope, findings: &Findings, run_id: &str) -> Resu
         Err(StoreError::BadAccount)
     } else if !valid_reference(run_id, MAX_RUN_ID_BYTES) {
         Err(StoreError::BadRunId)
-    } else if findings.items.len() > MAX_FINDINGS_PER_TENANT {
+    } else {
+        Ok(())
+    }
+}
+
+
+/// The run is refused as too large when it holds more findings than the tenant cap, before any finding is looked at.
+pub fn check_size(findings: &Findings) -> Result<(), StoreError> {
+    if findings.items.len() > MAX_FINDINGS_PER_TENANT {
         Err(StoreError::RunTooLarge {
             items: findings.items.len(),
             max_items: MAX_FINDINGS_PER_TENANT,
@@ -196,6 +215,22 @@ pub fn check_run(scope: &TenantScope, findings: &Findings, run_id: &str) -> Resu
     } else {
         Ok(())
     }
+}
+
+
+/// Writes the refusal marker of a run refused as too large (no run row is written otherwise) and gives back the refusal; a failing marker is logged, the refusal stays the answer.
+pub async fn refuse_run(exec: Executor<'_, '_>, scope: &TenantScope, account: &str, finished: i64, items: usize, refusal: StoreError) -> StoreError {
+    let params = vec![
+        account.to_owned(),
+        finished.to_string(),
+        items.to_string(),
+        MAX_FINDINGS_PER_TENANT.to_string(),
+    ];
+    if let Err(error) = exec(scope.clone(), REFUSE_SQL, params).await {
+        let category = error.to_string();
+        tracing::warn!(category, "posture refusal marker not written");
+    }
+    refusal
 }
 
 
@@ -240,8 +275,15 @@ pub async fn replace_run_limited(
 ) -> Result<RunOutcome, StoreError> {
     check_run(scope, findings, run_id)?;
     let finished = i64::try_from(finished_micros).map_err(|_bad| StoreError::BadTime)?;
-    let admitted = admit_all(&findings.account, &findings.items);
-    let document = document_of(&admitted.kept, max_doc_bytes)?;
+    let sized = check_size(findings).and_then(|()| {
+        let admitted = admit_all(&findings.account, &findings.items);
+        document_of(&admitted.kept, max_doc_bytes).map(|document| (admitted, document))
+    });
+    let prepared = match sized {
+        Ok(pair) => Ok(pair),
+        Err(refusal) => Err(refuse_run(exec, scope, &findings.account, finished, findings.items.len(), refusal).await),
+    };
+    let (admitted, document) = prepared?;
     let params = vec![
         findings.account.clone(),
         run_id.to_owned(),

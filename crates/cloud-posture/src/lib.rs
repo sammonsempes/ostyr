@@ -5,6 +5,7 @@ pub mod declarations;
 pub mod error;
 pub mod limits;
 pub mod model;
+pub mod page;
 pub mod prowler;
 pub mod report;
 #[cfg(unix)]
