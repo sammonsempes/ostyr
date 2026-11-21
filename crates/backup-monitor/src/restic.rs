@@ -26,6 +26,9 @@ pub const MAX_HOST_BYTES: usize = 253;
 pub const MAX_PORT_DIGITS: usize = 5;
 
 
+pub const MIN_PORT: u16 = 1;
+
+
 pub const CONFIG_CAP_BYTES: u64 = 4096;
 
 
@@ -129,13 +132,19 @@ pub fn valid_path(text: &str) -> bool {
 }
 
 
-/// `host` or `host:port`, the port 1 to 5 digits.
+/// A port of 1 to 5 digits whose value is 1 to 65535.
+pub fn valid_port(port: &str) -> bool {
+    (1..=MAX_PORT_DIGITS).contains(&port.len())
+        && port.chars().all(|digit| digit.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|value| value >= MIN_PORT)
+}
+
+
+/// `host` or `host:port`, the port 1 to 65535.
 pub fn valid_authority(text: &str) -> bool {
     match text.split_once(':') {
         None => valid_text(text, MAX_HOST_BYTES),
-        Some((host, port)) => {
-            valid_text(host, MAX_HOST_BYTES) && (1..=MAX_PORT_DIGITS).contains(&port.len()) && port.chars().all(|digit| digit.is_ascii_digit())
-        }
+        Some((host, port)) => valid_text(host, MAX_HOST_BYTES) && valid_port(port),
     }
 }
 
@@ -171,7 +180,12 @@ pub fn valid_source(source: &ResticSource) -> bool {
 }
 
 
-/// Splits the declared repositories that carry a `restic` entry into the runnable ones and the refused indexes.
+fn has_borg(declarations: &Declarations, index: usize) -> bool {
+    declarations.repositories.get(index).is_some_and(|entry| entry.borg.is_some())
+}
+
+
+/// Splits the declared repositories that carry a `restic` entry into the runnable ones and the refused indexes; an entry that also carries `borg` is refused.
 pub fn plan(declarations: &Declarations) -> ResticPlan<'_> {
     let declared: Vec<(usize, &str, &ResticSource)> = declarations
         .repositories
@@ -182,12 +196,12 @@ pub fn plan(declarations: &Declarations) -> ResticPlan<'_> {
     ResticPlan {
         runnable: declared
             .iter()
-            .filter(|(_, _, source)| valid_source(source))
+            .filter(|(index, _, source)| valid_source(source) && !has_borg(declarations, *index))
             .map(|(_, name, source)| (*name, *source))
             .collect(),
         refused: declared
             .iter()
-            .filter(|(_, _, source)| !valid_source(source))
+            .filter(|(index, _, source)| !valid_source(source) || has_borg(declarations, *index))
             .map(|(index, _, _)| *index)
             .collect(),
     }
