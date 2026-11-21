@@ -22,6 +22,12 @@ pub struct Counts {
     pub addresses_refused: usize,
     pub auth_refused: usize,
     pub auth_untrusted: usize,
+    pub auth_nested_ignored: usize,
+    pub reporter_unverified: usize,
+    pub internal_claimed: usize,
+    pub claim_unreadable: usize,
+    pub claim_exhausted: usize,
+    pub original_uncertain: usize,
     pub pattern_failed: usize,
 }
 
@@ -45,6 +51,13 @@ impl Default for AuthVerdicts {
             reason: None,
         }
     }
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReporterPolicy {
+    pub internal_domains: Vec<String>,
 }
 
 
@@ -74,6 +87,7 @@ pub struct LevelInfo {
     pub sender: Option<String>,
     pub return_path: Option<String>,
     pub subject: Option<String>,
+    pub senders: Vec<String>,
     pub auth: AuthVerdicts,
 }
 
@@ -85,6 +99,13 @@ pub struct Triage {
     pub return_path: Option<String>,
     pub auth: AuthVerdicts,
     pub reporter_auth: Option<AuthVerdicts>,
+    pub reporter: String,
+    pub original_level: Option<usize>,
+    pub internal_claimed: bool,
+    pub original_uncertain: bool,
+    pub uncertain_reasons: Vec<String>,
+    pub original_source: Option<String>,
+    pub senders: Vec<String>,
     pub subject: Option<String>,
     pub levels: Vec<LevelInfo>,
     pub urls: Vec<UrlHit>,

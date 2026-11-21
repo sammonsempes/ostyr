@@ -58,10 +58,22 @@ pub fn clean(text: &str, max_chars: usize, counts: &mut Counts) -> String {
 }
 
 
-/// An address without angle brackets, refused (counted) when too long, hostile or without an at sign.
+fn trimmed(text: &str) -> &str {
+    text.trim().trim_matches(['<', '>'])
+}
+
+
+/// The refusal rule of `clean_address`: too long, hostile or without an at sign; the one predicate every address check shares.
+pub fn is_refused_address(text: &str, max_bytes: usize) -> bool {
+    let address = trimmed(text);
+    address.len() > max_bytes || has_hostile(address) || !address.contains('@')
+}
+
+
+/// An address without angle brackets, refused (counted) when `is_refused_address` says so.
 pub fn clean_address(text: &str, max_bytes: usize, counts: &mut Counts) -> Option<String> {
-    let address = text.trim().trim_matches(['<', '>']);
-    let refused = address.len() > max_bytes || has_hostile(address) || !address.contains('@');
+    let address = trimmed(text);
+    let refused = is_refused_address(text, max_bytes);
     counts.addresses_refused += usize::from(refused && !address.is_empty());
     (!refused).then_some(address.to_owned())
 }
