@@ -13,6 +13,7 @@ mod types;
 
 use axum::body::Body;
 use axum::http::StatusCode;
+use data_encoding::HEXLOWER;
 use harness::{
     cookie_value_of, csrf_in, fire, fire_body, get, get_with, harness, harness_custom, location_of, login_body, login_csrf, post_form, post_login,
     set_cookie_of, sign_in, Harness, Reply, Req, LIMITS, WALL_NOW,
@@ -26,7 +27,7 @@ use std::time::Duration;
 use stub::{
     cert_fingerprint, id_of, Mode, ReadFault, BIG_ASSET, CERT_BAD_FINGERPRINT_COUNT, CERT_CURSOR_TIME, CERT_MANY_NAMES, CERT_SKIPPED, FIRST_CURSOR,
     HOSTILE, HUNT_NEXT_CURSOR, HUNT_OVERSIZED, HUNT_SKIPPED, LEAK, LOCK_AFTER, ODD_ASSET_ID, RISK_ALERTS_READ, RISK_CAP, RISK_ODD_ID,
-    RISK_UNREADABLE_IDS, TOKEN,
+    RISK_UNREADABLE_IDS, STATE_NEXT_CURSOR, TOKEN,
 };
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Instant};
@@ -35,6 +36,7 @@ use types::TestError;
 use types::TestResult;
 use web_ui::api::{
     encode_asset_id, forwarded_value, header_from_text, list_alerts, login, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_HUNT_CURSOR_CHARS,
+    MAX_STATE_ASSET_CHARS, MAX_STATE_ID_CHARS,
 };
 use web_ui::client::{build_client, login_slots};
 use web_ui::error::ApiFailure;
@@ -2283,6 +2285,21 @@ async fn risk_api_failures_render_our_own_text() -> TestResult {
 const HUNT_UNREADABLE_ROWS: usize = 4;
 
 
+const HUGE_CURSOR_CHARS: usize = 10_000;
+
+
+const STATE_LIST_UNREADABLE_ROWS: usize = 8;
+
+
+const STATE_DETAIL_UNREADABLE_ROWS: usize = 9;
+
+
+const TWO_VALID_CALLS: usize = 2;
+
+
+const THREE_CALLS: usize = 3;
+
+
 const CERT_THIRTY_DAYS: i64 = 30 * 86_400;
 
 
@@ -2651,5 +2668,281 @@ async fn hunt_api_failures_render_our_own_text() -> TestResult {
     set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
     let ended = fire(&rig, get_with("/hunts", &session)).await?;
     assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn hunt_notices_are_singular_for_one_and_an_unreadable_page_says_so() -> TestResult {
+    let rig = harness(Mode::BadId).await?;
+    let session = sign_in(&rig).await?;
+    let none_readable = fire(&rig, get_with("/hunts", &session)).await?;
+    assert!(none_readable.body.contains("1 row could not be read.") && none_readable.body.contains("1 finding has an over-long pack id."));
+    assert!(none_readable.body.contains("No readable finding on this page.") && !none_readable.body.contains("No finding."));
+    assert!(none_readable.body.contains("Next findings"));
+    set_mode(&rig, Mode::BadSeverity)?;
+    let capped = fire(&rig, get_with("/hunts", &session)).await?;
+    assert!(capped.body.contains("At least 1 finding has an over-long pack id."));
+    let french = Req {
+        language: Some("fr".to_owned()),
+        ..get_with("/hunts", &session)
+    };
+    assert!(fire(&rig, french)
+        .await?
+        .body
+        .contains("Au moins 1 résultat a un identifiant de pack trop long."));
+    set_mode(&rig, Mode::BadId)?;
+    let french_none = Req {
+        language: Some("fr".to_owned()),
+        ..get_with("/hunts", &session)
+    };
+    let body = fire(&rig, french_none).await?.body;
+    assert!(body.contains("1 ligne n'a pas pu être lue.") && body.contains("1 résultat a un identifiant") && body.contains("Aucun résultat lisible"));
+    Ok(())
+}
+
+
+fn state_requests(rig: &Harness) -> Result<Vec<String>, TestError> {
+    Ok(rig.stub.state.state_paths.lock().map_err(|_| "poisoned")?.clone())
+}
+
+
+#[tokio::test]
+async fn the_compliance_list_shows_rows_notices_filters_and_the_next_page() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let alerts = fire(&rig, get_with("/alerts", &session)).await?;
+    assert!(alerts.body.contains("action=\"/compliance\""));
+    let list = fire(&rig, get_with("/compliance", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_hardened(&list);
+    for expected in [
+        "Compliance drift",
+        "ctl-1",
+        "ctl-2",
+        "<td>Failed</td>",
+        "<td>Passed</td>",
+        "<td>2026-03-01T09:00:00Z</td>",
+        "<td>-</td>",
+        "<td>2026-03-02T00:00:00Z</td>",
+        "action=\"/compliance/host-1\"",
+        "action=\"/compliance/a%2Fb%2Bc\"",
+        "1 row could not be read.",
+        "<option value=\"fail\" selected>",
+        "name=\"cursor\" value=\"626173650063746c00686f73742d31\"",
+        "name=\"verdict\" value=\"fail\"",
+        "Next controls",
+    ] {
+        assert!(list.body.contains(expected), "{expected}: {}", list.body);
+    }
+    assert!(!list.body.contains("name=\"baseline\" value=\"base\"") && !list.body.contains("truncated"));
+    let french_request = Req {
+        language: Some("fr".to_owned()),
+        ..get_with("/compliance", &session)
+    };
+    let french = fire(&rig, french_request).await?;
+    for expected in [
+        "Dérive de conformité",
+        "En échec",
+        "Contrôles suivants",
+        "1 ligne n'a pas pu être lue.",
+        "Référentiel",
+    ] {
+        assert!(french.body.contains(expected), "{expected}");
+    }
+    let filtered = format!("/compliance?verdict=all&baseline=base&cursor={STATE_NEXT_CURSOR}&limit=500&tenant=b");
+    let reply = fire(&rig, get_with(&filtered, &session)).await?;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(reply.body.contains("<option value=\"all\" selected>") && reply.body.contains("name=\"baseline\" value=\"base\""));
+    let nameless = fire(&rig, get_with("/compliance?verdict=pass&baseline=", &session)).await?;
+    assert_eq!(nameless.status, StatusCode::OK);
+    assert_eq!(
+        state_requests(&rig)?,
+        [
+            "/compliance/state?verdict=fail&limit=100".to_owned(),
+            "/compliance/state?verdict=fail&limit=100".to_owned(),
+            format!("/compliance/state?verdict=all&limit=100&baseline=base&cursor={STATE_NEXT_CURSOR}"),
+            "/compliance/state?verdict=pass&limit=100".to_owned(),
+        ]
+    );
+    let anonymous = fire(&rig, get("/compliance")).await?;
+    assert_eq!(location_of(&anonymous).as_deref(), Some("/login"));
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/compliance", &session)).await?;
+    assert!(empty.body.contains("No control in this state.") && !empty.body.contains("could not be read") && !empty.body.contains("Next controls"));
+    set_mode(&rig, Mode::BadId)?;
+    let none_readable = fire(&rig, get_with("/compliance", &session)).await?;
+    assert!(none_readable.body.contains("No readable control on this page.") && none_readable.body.contains("1 row could not be read."));
+    assert!(none_readable.body.contains("Next controls"));
+    set_mode(&rig, Mode::BadSeverity)?;
+    let many = fire(&rig, get_with("/compliance", &session)).await?;
+    assert!(many.body.contains("3 rows could not be read."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hostile_state_row_is_an_unreadable_row_and_never_printed() -> TestResult {
+    let rig = harness(Mode::Hostile).await?;
+    let session = sign_in(&rig).await?;
+    let list = fire(&rig, get_with("/compliance", &session)).await?;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_no_hidden_characters(&list.body);
+    for forbidden in ["evil", "script", "\u{3164}", "bogus", "not a time", "-x"] {
+        assert!(!list.body.contains(forbidden), "{forbidden}");
+    }
+    assert_eq!(list.body.matches("Unreadable row.").count(), STATE_LIST_UNREADABLE_ROWS);
+    assert!(list.body.contains("fine.1") && list.body.contains("other-asset") && list.body.contains("1 row could not be read."));
+    let detail = fire(&rig, get_with("/compliance/web01", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_no_hidden_characters(&detail.body);
+    for forbidden in ["evil", "script", "\u{3164}", "bogus", "not a time", "other-asset"] {
+        assert!(!detail.body.contains(forbidden), "{forbidden}");
+    }
+    assert_eq!(detail.body.matches("Unreadable row.").count(), STATE_DETAIL_UNREADABLE_ROWS);
+    assert!(detail.body.contains("fine.1") && detail.body.contains("<td>Excepted</td>"));
+    assert!(detail.body.contains("Results cut at 1000.") && detail.body.contains("1 row could not be read."));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_compliance_detail_shows_the_asset_rows_the_notices_and_both_languages() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let detail = fire(&rig, get_with("/compliance/a%2Fb%2Bc", &session)).await?;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_hardened(&detail);
+    for expected in [
+        "Compliance of a/b+c",
+        "ctl-1",
+        "<td>Failed</td>",
+        "<td>Error</td>",
+        "2 rows could not be read.",
+        "Results cut at 1000.",
+        "action=\"/compliance\"",
+    ] {
+        assert!(detail.body.contains(expected), "{expected}: {}", detail.body);
+    }
+    assert!(!detail.body.contains("<th>Asset</th>"));
+    let french_request = Req {
+        language: Some("fr".to_owned()),
+        ..get_with("/compliance/host-1", &session)
+    };
+    let french = fire(&rig, french_request).await?;
+    assert!(
+        french.body.contains("Conformité de host-1") && french.body.contains("Résultats coupés à 1000.") && french.body.contains("En échec depuis")
+    );
+    set_mode(&rig, Mode::Chunked)?;
+    let empty = fire(&rig, get_with("/compliance/host-1", &session)).await?;
+    assert!(empty.body.contains("No control in this state.") && !empty.body.contains("Results cut"));
+    set_mode(&rig, Mode::BadId)?;
+    let none_readable = fire(&rig, get_with("/compliance/host-1", &session)).await?;
+    assert!(none_readable.body.contains("No readable control on this page.") && none_readable.body.contains("1 row could not be read."));
+    assert_eq!(
+        state_requests(&rig)?,
+        [
+            "/compliance/assets/a%2Fb%2Bc".to_owned(),
+            "/compliance/assets/host-1".to_owned(),
+            "/compliance/assets/host-1".to_owned(),
+            "/compliance/assets/host-1".to_owned(),
+        ]
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_malformed_compliance_query_or_asset_is_refused_before_any_api_call() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    let long_cursor = format!("/compliance?cursor={}", "a".repeat(HUGE_CURSOR_CHARS));
+    let long_baseline = format!("/compliance?baseline={}", "a".repeat(MAX_STATE_ID_CHARS + 1));
+    let long_asset = format!("/compliance/{}", "a".repeat(MAX_STATE_ASSET_CHARS + 1));
+    let wrong_fields = format!("/compliance?cursor={}", HEXLOWER.encode(b"a\0b"));
+    let bad_key = format!("/compliance?cursor={}", HEXLOWER.encode(b"-x\0c\0d"));
+    let not_text = format!("/compliance?cursor={}", HEXLOWER.encode(b"\xff\0\xff\0\xff"));
+    let upper = format!("/compliance?cursor={}", STATE_NEXT_CURSOR.to_ascii_uppercase());
+    let odd = format!("/compliance?cursor={}", STATE_NEXT_CURSOR.trim_end_matches('1'));
+    for query in [
+        "/compliance?verdict=fail%00",
+        "/compliance?verdict=FAIL",
+        "/compliance?verdict=",
+        "/compliance?verdict=x",
+        "/compliance?baseline=-x",
+        "/compliance?baseline=a%20b",
+        "/compliance?baseline=a%00",
+        "/compliance?cursor=",
+        "/compliance?cursor=zz",
+        long_cursor.as_str(),
+        long_baseline.as_str(),
+        wrong_fields.as_str(),
+        bad_key.as_str(),
+        not_text.as_str(),
+        upper.as_str(),
+        odd.as_str(),
+    ] {
+        let reply = fire(&rig, get_with(query, &session)).await?;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", query.len());
+    }
+    for path in [
+        "/compliance/-x",
+        "/compliance/a%00b",
+        "/compliance/a%20b",
+        "/compliance/..%2Fx",
+        "/compliance/%2e%2e",
+        "/compliance/.hidden",
+        "/compliance/a%0Ab",
+        "/compliance/%E2%80%AEx",
+        long_asset.as_str(),
+    ] {
+        let reply = fire(&rig, get_with(path, &session)).await?;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert!(state_requests(&rig)?.is_empty());
+    let longest = "a".repeat(MAX_STATE_ID_CHARS);
+    let max_key = format!("{longest}\0{longest}\0{}", "z".repeat(MAX_STATE_ASSET_CHARS));
+    let longest_cursor = format!("/compliance?baseline={longest}&cursor={}", HEXLOWER.encode(max_key.as_bytes()));
+    assert_eq!(fire(&rig, get_with(&longest_cursor, &session)).await?.status, StatusCode::OK);
+    let longest_asset = format!("/compliance/{}", "a".repeat(MAX_STATE_ASSET_CHARS));
+    assert_eq!(fire(&rig, get_with(&longest_asset, &session)).await?.status, StatusCode::OK);
+    assert_eq!(state_requests(&rig)?.len(), TWO_VALID_CALLS);
+    let other = fire(&rig, get_with("/compliance/elsewhere", &session)).await?;
+    assert_eq!(other.status, StatusCode::NOT_FOUND);
+    assert!(!other.body.contains(LEAK));
+    assert_eq!(state_requests(&rig)?.len(), THREE_CALLS);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn compliance_api_failures_render_our_own_text() -> TestResult {
+    let rig = harness(Mode::Normal).await?;
+    let session = sign_in(&rig).await?;
+    for path in ["/compliance", "/compliance/host-1"] {
+        for (mode, status) in [
+            (Mode::Status(StatusCode::FORBIDDEN), StatusCode::FORBIDDEN),
+            (Mode::Status(StatusCode::INTERNAL_SERVER_ERROR), StatusCode::BAD_GATEWAY),
+            (Mode::Oversize, StatusCode::BAD_GATEWAY),
+            (Mode::TooMany, StatusCode::BAD_GATEWAY),
+        ] {
+            set_mode(&rig, mode)?;
+            let reply = fire(&rig, get_with(path, &session)).await?;
+            assert_eq!(reply.status, status, "{path}");
+            assert!(!reply.body.contains(LEAK));
+            assert_hardened(&reply);
+        }
+    }
+    set_mode(&rig, Mode::BadCursor)?;
+    assert_eq!(fire(&rig, get_with("/compliance", &session)).await?.status, StatusCode::BAD_GATEWAY);
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended = fire(&rig, get_with("/compliance", &session)).await?;
+    assert_eq!(location_of(&ended).as_deref(), Some("/login"));
+    set_mode(&rig, Mode::Normal)?;
+    let second = sign_in(&rig).await?;
+    set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
+    let ended_detail = fire(&rig, get_with("/compliance/host-1", &second)).await?;
+    assert_eq!(location_of(&ended_detail).as_deref(), Some("/login"));
+    assert!(ended_detail.headers.get("set-cookie").is_some());
     Ok(())
 }

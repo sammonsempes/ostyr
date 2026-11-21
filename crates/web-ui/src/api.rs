@@ -1,9 +1,9 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView,
-    FindingsView, RiskDetailView, RiskListView,
+    FindingsView, RiskDetailView, RiskListView, StateAssetView, StateListView,
 };
-use data_encoding::BASE64URL_NOPAD;
+use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Method, Response, StatusCode};
@@ -787,4 +787,143 @@ pub async fn list_findings(client: &ApiClient, source: IpAddr, token: &SecretStr
     scan_hunt_list(&bytes)?;
     let list: FindingsView = serde_json::from_slice(&bytes)?;
     check_hunt_list(&list).map(|()| list)
+}
+
+
+pub const COMPLIANCE_LIMIT: u32 = 100;
+
+
+pub const MAX_STATE_ASSET_ITEMS: usize = 1000;
+
+
+pub const MAX_STATE_ID_CHARS: usize = 50;
+
+
+pub const MAX_STATE_ASSET_CHARS: usize = 100;
+
+
+pub const STATE_ID_PUNCTUATION: &str = "._-";
+
+
+pub const STATE_ASSET_PUNCTUATION: &str = "._+-:@/~^";
+
+
+pub const STATE_FIELD_SEPARATOR: char = '\0';
+
+
+/// Two hexadecimal characters per byte of `baseline NUL control NUL asset`, at the longest each: the API's `MAX_CURSOR_HEX`.
+pub const MAX_STATE_CURSOR_HEX: usize = 2 * (2 * MAX_STATE_ID_CHARS + MAX_STATE_ASSET_CHARS + 2);
+
+
+pub const STATE_VERDICTS: [&str; 4] = ["fail", "error", "excepted", "pass"];
+
+
+pub const VERDICT_ALL: &str = "all";
+
+
+pub const VERDICT_DEFAULT: &str = "fail";
+
+
+/// Alphanumeric first, then alphanumerics and `punctuation`, at most `max` characters: the grammar of the compliance module.
+pub fn state_grammar(text: &str, max: usize, punctuation: &str) -> bool {
+    let mut characters = text.chars();
+    text.chars().take(max + 1).count() <= max
+        && characters.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && characters.all(|next| next.is_ascii_alphanumeric() || punctuation.contains(next))
+}
+
+
+/// A baseline name or control id of the compliance module.
+pub fn valid_state_id(text: &str) -> bool {
+    state_grammar(text, MAX_STATE_ID_CHARS, STATE_ID_PUNCTUATION)
+}
+
+
+/// An asset of the compliance module (`is_asset` there); it is percent-encoded into every path.
+pub fn valid_state_asset(text: &str) -> bool {
+    state_grammar(text, MAX_STATE_ASSET_CHARS, STATE_ASSET_PUNCTUATION)
+}
+
+
+/// The state cursor of the API: lowercase hexadecimal of `baseline NUL control NUL asset`, every field inside its grammar.
+pub fn valid_state_cursor(cursor: &str) -> bool {
+    cursor.len() <= MAX_STATE_CURSOR_HEX
+        && HEXLOWER
+            .decode(cursor.as_bytes())
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .is_some_and(|joined| {
+                matches!(
+                    joined.split(STATE_FIELD_SEPARATOR).collect::<Vec<_>>().as_slice(),
+                    [baseline, control, asset] if valid_state_id(baseline) && valid_state_id(control) && valid_state_asset(asset)
+                )
+            })
+}
+
+
+/// The fixed spelling of a verdict filter (`all` or one of the four verdicts), `None` for anything else.
+pub fn verdict_filter(text: &str) -> Option<&'static str> {
+    STATE_VERDICTS.iter().chain([&VERDICT_ALL]).find(|verdict| **verdict == text).copied()
+}
+
+
+pub fn states_path(verdict: &str, baseline: Option<&str>, cursor: Option<&str>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("verdict", verdict);
+    query.append_pair("limit", &COMPLIANCE_LIMIT.to_string());
+    baseline.iter().for_each(|value| {
+        query.append_pair("baseline", value);
+    });
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    format!("compliance/state?{}", query.finish())
+}
+
+
+pub fn check_state_list(list: &StateListView) -> Result<(), ApiFailure> {
+    if list.next_cursor.as_deref().is_some_and(|cursor| !valid_state_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+/// Counts items on raw slices, at most `max`, before any typed value is built.
+pub fn scan_state_items(bytes: &[u8], max: usize) -> Result<(), ApiFailure> {
+    let scan: ListScan = serde_json::from_slice(bytes)?;
+    if scan.items.len() > max {
+        Err(ApiFailure::Malformed("too many items"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub async fn list_states(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    verdict: &str,
+    baseline: Option<&str>,
+    cursor: Option<&str>,
+) -> Result<StateListView, ApiFailure> {
+    let bytes = call(client, source, Method::GET, &states_path(verdict, baseline, cursor), Some(token), None).await?;
+    scan_state_items(&bytes, COMPLIANCE_LIMIT as usize)?;
+    let list: StateListView = serde_json::from_slice(&bytes)?;
+    check_state_list(&list).map(|()| list)
+}
+
+
+/// An asset outside the module's grammar is a missing asset without any call.
+pub async fn get_state_asset(client: &ApiClient, source: IpAddr, token: &SecretString, asset: &str) -> Result<StateAssetView, ApiFailure> {
+    if valid_state_asset(asset) {
+        let path = format!("compliance/assets/{}", encode_asset_id(asset));
+        let bytes = call(client, source, Method::GET, &path, Some(token), None).await?;
+        scan_state_items(&bytes, MAX_STATE_ASSET_ITEMS)?;
+        serde_json::from_slice(&bytes).map_err(ApiFailure::from)
+    } else {
+        Err(ApiFailure::NotFound)
+    }
 }

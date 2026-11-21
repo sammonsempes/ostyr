@@ -10,6 +10,10 @@ use web_ui::api::{
     MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
 use web_ui::api::{hunts_path, valid_hunt_cursor, valid_pack_id, MAX_HUNT_CURSOR_CHARS, MAX_PACK_ID_CHARS};
+use web_ui::api::{
+    states_path, valid_state_asset, valid_state_cursor, valid_state_id, verdict_filter, MAX_STATE_ASSET_CHARS, MAX_STATE_CURSOR_HEX,
+    MAX_STATE_ID_CHARS,
+};
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
@@ -405,5 +409,73 @@ fn hunt_helpers_accept_only_their_grammar() -> TestResult {
     ] {
         assert!(window_time(bad).is_none(), "{bad}");
     }
+    Ok(())
+}
+
+
+#[test]
+fn compliance_helpers_accept_only_the_modules_grammar() -> TestResult {
+    for good in ["a", "0", "a._-b", &"a".repeat(MAX_STATE_ID_CHARS)] {
+        assert!(valid_state_id(good), "{good}");
+    }
+    for bad in [
+        "",
+        "-a",
+        "_a",
+        ".a",
+        "a b",
+        "a+b",
+        "a/b",
+        "a\u{3164}",
+        "a\u{1b}",
+        "é",
+        "a\n",
+        &"a".repeat(MAX_STATE_ID_CHARS + 1),
+    ] {
+        assert!(!valid_state_id(bad), "{bad}");
+    }
+    for good in ["a", "web-01.corp", "a/b+c:d@e~f^g_h", &"a".repeat(MAX_STATE_ASSET_CHARS)] {
+        assert!(valid_state_asset(good), "{good}");
+    }
+    for bad in [
+        "",
+        "-a",
+        "/a",
+        ".a",
+        "a b",
+        "a%2e",
+        "a\u{3164}",
+        "é",
+        "a\0",
+        &"a".repeat(MAX_STATE_ASSET_CHARS + 1),
+    ] {
+        assert!(!valid_state_asset(bad), "{bad}");
+    }
+    assert!(valid_state_cursor("626173650063746c00686f73742d31"));
+    for bad in [
+        "",
+        "6",
+        "zz",
+        "626173650063746c00686f73742d3",
+        "626173650063746c00686f73742D31",
+        "61",
+        "61006200630064",
+        "61002d780063",
+        "610062002d78",
+        &"a".repeat(MAX_STATE_CURSOR_HEX + 1),
+    ] {
+        assert!(!valid_state_cursor(bad), "{bad}");
+    }
+    for good in ["fail", "error", "excepted", "pass", "all"] {
+        assert_eq!(verdict_filter(good), Some(good));
+    }
+    for bad in ["", "Fail", "fail ", "none"] {
+        assert!(verdict_filter(bad).is_none(), "{bad}");
+    }
+    assert_eq!(states_path("fail", None, None), "compliance/state?verdict=fail&limit=100");
+    assert_eq!(
+        states_path("all", Some("b"), Some("61")),
+        "compliance/state?verdict=all&limit=100&baseline=b&cursor=61"
+    );
     Ok(())
 }
