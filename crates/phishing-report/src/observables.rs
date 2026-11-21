@@ -1,4 +1,5 @@
 use crate::model::Triage;
+use crate::triage::is_plain_address;
 use cases::model::ObservableKind;
 use std::collections::BTreeSet;
 use url::Url;
@@ -26,6 +27,7 @@ pub fn observables(record: &Triage) -> Vec<(ObservableKind, String)> {
         .iter()
         .chain(record.return_path.iter())
         .chain(record.senders.iter())
+        .filter(|address| is_plain_address(address))
         .filter_map(|address| domain_of(address))
         .map(str::to_ascii_lowercase)
         .chain(hosts);

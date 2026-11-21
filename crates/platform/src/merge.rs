@@ -7,6 +7,7 @@ use axum::Router;
 use cases::store::{MIGRATIONS as CASE_MIGRATIONS, MIGRATION_NAMESPACE as CASE_NAMESPACE};
 use cert_inventory::store::{MIGRATIONS as CERT_MIGRATIONS, MIGRATION_NAMESPACE as CERT_NAMESPACE};
 use cmdb::store::{MIGRATIONS as CMDB_MIGRATIONS, MIGRATION_NAMESPACE as CMDB_NAMESPACE};
+use compliance::store::{MIGRATIONS as COMPLIANCE_MIGRATIONS, MIGRATION_NAMESPACE as COMPLIANCE_NAMESPACE};
 use core_api::routes::core_access;
 use core_api::types::{AccessTable, SharedState};
 use core_config::reload::ReloadEngine;
@@ -59,6 +60,9 @@ const ONCALL_PLAN: &[Migration] = &ONCALL_MIGRATIONS;
 const DHCP_PLAN: &[Migration] = &DHCP_MIGRATIONS;
 
 
+const COMPLIANCE_PLAN: &[Migration] = &COMPLIANCE_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -69,6 +73,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "certificates" => Some(Module::Certificates),
         "oncall" => Some(Module::Oncall),
         "dhcp" => Some(Module::Dhcp),
+        "compliance" => Some(Module::Compliance),
         _ => None,
     }
 }
@@ -165,6 +170,10 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Compliance => Ok(compliance::api::compliance_router(compliance::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -186,6 +195,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Certificates => cert_inventory::api::certificates_access(),
         Module::Oncall => oncall::api::oncall_access(),
         Module::Dhcp => dhcp_kea::api::dhcp_access(),
+        Module::Compliance => compliance::api::compliance_access(),
     }
 }
 
@@ -200,6 +210,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Certificates => cert_inventory::api::certificates_document(),
         Module::Oncall => oncall::api::oncall_document(),
         Module::Dhcp => dhcp_kea::api::dhcp_document(),
+        Module::Compliance => compliance::api::compliance_document(),
     }
 }
 
@@ -230,6 +241,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Certificates]), CERT_NAMESPACE, CERT_PLAN),
         (wants(&[Module::Oncall]), ONCALL_NAMESPACE, ONCALL_PLAN),
         (wants(&[Module::Dhcp]), DHCP_NAMESPACE, DHCP_PLAN),
+        (wants(&[Module::Compliance]), COMPLIANCE_NAMESPACE, COMPLIANCE_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)

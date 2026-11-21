@@ -24,7 +24,7 @@ pub struct Counts {
     pub auth_untrusted: usize,
     pub auth_nested_ignored: usize,
     pub reporter_unverified: usize,
-    pub original_internal: usize,
+    pub internal_claimed: usize,
     pub original_uncertain: usize,
     pub pattern_failed: usize,
 }
@@ -99,7 +99,7 @@ pub struct Triage {
     pub reporter_auth: Option<AuthVerdicts>,
     pub reporter: String,
     pub original_level: Option<usize>,
-    pub original_internal: bool,
+    pub internal_claimed: bool,
     pub original_uncertain: bool,
     pub uncertain_reasons: Vec<String>,
     pub original_source: Option<String>,

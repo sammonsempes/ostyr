@@ -136,16 +136,16 @@ fn a_quoted_header_from_holding_a_space_is_a_mismatch() -> Result<(), Box<dyn st
 #[test]
 fn a_trailing_dot_decoy_or_an_address_beyond_the_cap_is_internal() -> Result<(), Box<dyn std::error::Error>> {
     let dotted = with_original("From: ceo@corp.test.")?;
-    assert!(dotted.original_internal);
-    assert_eq!(dotted.counts.original_internal, 1);
+    assert!(dotted.internal_claimed);
+    assert_eq!(dotted.counts.internal_claimed, 1);
     let mut list: Vec<String> = (0..MANY_ADDRESSES).map(|i| format!("u{i}@evil.test")).collect();
     list.push("ceo@corp.test".to_owned());
     let crowd = with_original(&format!("From: {}", list.join(", ")))?;
     assert_eq!(crowd.senders.len(), MAX_FROM_ADDRESSES);
     assert!(!crowd.senders.iter().any(|address| address == "ceo@corp.test"));
-    assert!(crowd.original_internal);
+    assert!(crowd.internal_claimed);
     let subdomain = with_original("From: ceo@mail.corp.test")?;
-    assert!(!subdomain.original_internal);
+    assert!(!subdomain.internal_claimed);
     Ok(())
 }
 
@@ -238,9 +238,12 @@ fn an_address_with_two_at_signs_is_unparsed_and_a_domain_mismatch_is_not_interna
     assert_eq!(record.reporter, "dmarc_domain_mismatch");
     assert_eq!(record.original_level, Some(0));
     assert!(record.original_uncertain);
-    assert_eq!(record.uncertain_reasons, ["dmarc_domain_mismatch", "from_unparsed"]);
-    assert!(!record.original_internal);
-    assert_eq!(record.counts.original_internal, 0);
+    assert_eq!(
+        record.uncertain_reasons,
+        ["dmarc_domain_mismatch", "internal_unauthenticated", "from_unparsed"]
+    );
+    assert!(record.internal_claimed);
+    assert_eq!(record.counts.internal_claimed, 1);
     assert_eq!(record.counts.original_uncertain, 1);
     let two = with_original("From: a@b@evil.test")?;
     assert!(two.uncertain_reasons.iter().any(|reason| reason == "from_unparsed"));
@@ -255,7 +258,7 @@ fn a_display_name_holding_an_address_is_judged_on_the_real_address() -> Result<(
     let record = run(&outside("From: \"ceo@corp.test\" <phisher@evil.test>"))?;
     assert_eq!(record.reporter, "external");
     assert!(!record.original_uncertain);
-    assert!(!record.original_internal);
+    assert!(!record.internal_claimed);
     assert_eq!(record.sender.as_deref(), Some("phisher@evil.test"));
     Ok(())
 }

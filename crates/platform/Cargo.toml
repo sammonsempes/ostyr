@@ -11,6 +11,7 @@ axum = "0.8"
 cases = { version = "0.0.0", path = "../cases" }
 cert-inventory = { version = "0.0.0", path = "../cert-inventory" }
 cmdb = { version = "0.0.0", path = "../cmdb" }
+compliance = { version = "0.0.0", path = "../compliance" }
 core-api = { version = "0.0.0", path = "../core-api" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }

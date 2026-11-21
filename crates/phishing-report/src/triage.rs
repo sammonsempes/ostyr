@@ -2,7 +2,7 @@ use crate::auth::{verdicts_with_from, PASS};
 use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
 use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Triage, UrlHit};
-use crate::policy::{check_policy, is_internal, is_ldh_domain};
+use crate::policy::{check_policy, is_internal, is_strict_domain};
 use crate::scan::{scan, Scan};
 use crate::text::{clean, clean_address};
 use crate::urls::{collect, html_text, URL_RULE};
@@ -66,6 +66,9 @@ pub const UNCERTAIN_FROM_UNPARSED: &str = "from_unparsed";
 pub const UNCERTAIN_DMARC_MISMATCH: &str = "dmarc_domain_mismatch";
 
 
+pub const UNCERTAIN_INTERNAL_UNAUTHENTICATED: &str = "internal_unauthenticated";
+
+
 #[derive(Debug, Clone, Copy)]
 struct Context<'a> {
     trusted: &'a [String],
@@ -78,7 +81,7 @@ struct Context<'a> {
 
 #[derive(Debug, Clone, Copy)]
 struct Adoption {
-    internal: bool,
+    internal_claimed: bool,
     from_unparsed: bool,
 }
 
@@ -90,7 +93,7 @@ struct Facts {
     subject: Option<String>,
     senders: Vec<String>,
     reporter_domain: Option<String>,
-    internal: bool,
+    internal_claimed: bool,
     from_unparsed: bool,
 }
 
@@ -361,7 +364,7 @@ fn reporter_domain(headers: &[Header<'_>], senders: &[String]) -> Option<String>
         [only] if matches!(only.value(), HeaderValue::Address(Address::List(list)) if list.len() == 1)
     );
     match (single, senders) {
-        (true, [one]) => domain_of(one).map(str::to_ascii_lowercase),
+        (true, [one]) => domain_of(one).filter(|domain| is_strict_domain(domain)).map(str::to_ascii_lowercase),
         _ => None,
     }
 }
@@ -382,20 +385,20 @@ fn counted_from_addresses<'a>(headers: &'a [Header<'_>], limits: &Limits) -> Vec
 }
 
 
-/// A plain address is exactly one `@`, a non-empty local part and an LDH domain once one trailing dot is dropped.
-fn is_plain_address(address: &str) -> bool {
+/// A plain address is exactly one `@`, a non-empty local part and a strict domain (LDH, two labels, no trailing dot).
+pub fn is_plain_address(address: &str) -> bool {
     let mut parts = address.split('@');
     let (local, domain, extra) = (parts.next(), parts.next(), parts.next());
-    extra.is_none() && local.is_some_and(|text| !text.is_empty()) && domain.is_some_and(|text| is_ldh_domain(text.strip_suffix('.').unwrap_or(text)))
+    extra.is_none() && local.is_some_and(|text| !text.is_empty()) && domain.is_some_and(is_strict_domain)
 }
 
 
 /// A From header read as text or with no address, or an address that is not plain, cannot be judged: the original is uncertain.
-fn from_unparsed(headers: &[Header<'_>], raw: &[&str], limits: &Limits) -> bool {
+fn from_unparsed(headers: &[Header<'_>], raw: &[&str], limits: &Limits, cut: bool) -> bool {
     let from = from_headers(headers);
     let dropped = from.iter().any(|header| header_bytes(header) > limits.header_bytes);
     let not_address = from.iter().any(|header| !matches!(header.value(), HeaderValue::Address(_)));
-    dropped || not_address || (!from.is_empty() && raw.is_empty()) || !raw.iter().all(|address| is_plain_address(address))
+    cut || dropped || not_address || (!from.is_empty() && raw.is_empty()) || !raw.iter().all(|address| is_plain_address(address))
 }
 
 
@@ -405,6 +408,7 @@ fn header_facts(message: &Message<'_>, limits: &Limits, reporters: &ReporterPoli
     let headers = header_slice(message, limits);
     let senders = from_addresses(headers, limits, counts);
     let raw = counted_from_addresses(headers, limits);
+    let cut = message.headers().len() > limits.headers;
     let mut counted_above = Counts::default();
     Facts {
         sender: address_header(headers, FROM_HEADER, limits, &mut counted_above),
@@ -413,8 +417,8 @@ fn header_facts(message: &Message<'_>, limits: &Limits, reporters: &ReporterPoli
             .and_then(|header| header.value().as_text())
             .map(|text| clean(text, limits.subject_chars, counts)),
         reporter_domain: reporter_domain(headers, &senders),
-        internal: raw.iter().any(|address| is_internal_address(address, reporters)),
-        from_unparsed: from_unparsed(headers, &raw, limits),
+        internal_claimed: raw.iter().any(|address| is_internal_address(address, reporters)),
+        from_unparsed: from_unparsed(headers, &raw, limits, cut),
         senders,
     }
 }
@@ -489,16 +493,18 @@ fn adopt_original(record: &mut Triage, info: &LevelInfo, facts: &Adoption) {
     record.subject = info.subject.clone();
     record.senders = info.senders.clone();
     record.auth = info.auth.clone();
+    record.internal_claimed = facts.internal_claimed;
+    record.counts.internal_claimed += usize::from(facts.internal_claimed);
     let mismatch = info.level == 0 && record.reporter == REPORTER_DMARC_MISMATCH;
-    let internal = facts.internal && !mismatch;
-    record.original_internal = internal;
-    record.counts.original_internal += usize::from(internal);
     record.original_source = Some(if info.level == 0 { SOURCE_REPORTED } else { SOURCE_ATTACHED }.to_owned());
     if info.level != 0 {
         mark_uncertain(record, UNCERTAIN_ATTACHED_CLAIM);
     }
     if mismatch {
         mark_uncertain(record, UNCERTAIN_DMARC_MISMATCH);
+    }
+    if info.level == 0 && facts.internal_claimed {
+        mark_uncertain(record, UNCERTAIN_INTERNAL_UNAUTHENTICATED);
     }
     if facts.from_unparsed {
         mark_uncertain(record, UNCERTAIN_FROM_UNPARSED);
@@ -510,7 +516,7 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     let facts = header_facts(message, context.limits, context.reporters, &mut record.counts);
     let auth = level_auth(&mut record, index, message, &facts, context);
     let adoption = Adoption {
-        internal: facts.internal,
+        internal_claimed: facts.internal_claimed,
         from_unparsed: facts.from_unparsed,
     };
     let info = LevelInfo {

@@ -9,11 +9,13 @@ use web_ui::api::{
     get_alert, get_case, valid_asset_cursor, valid_asset_id, valid_cert_cursor, valid_cursor, valid_id, valid_token, MAX_ASSET_ATTRIBUTES,
     MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
+use web_ui::api::{hunts_path, valid_hunt_cursor, valid_pack_id, MAX_HUNT_CURSOR_CHARS, MAX_PACK_ID_CHARS};
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
 use web_ui::model::{ApiSection, WebLimits};
 use web_ui::model::{AssetDetailView, AssetPageView};
+use web_ui::pages::window_time;
 use web_ui::routes::{comment_limits, comment_shaped, expiring_before, COMMENT_FORM_BYTES};
 use web_ui::server::wall_seconds;
 use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, session_key, set_cookie};
@@ -352,3 +354,56 @@ const CERT_FINGERPRINT_CHARS: usize = 64;
 
 
 const CERT_LONG_TIME: usize = 21;
+
+
+#[test]
+fn hunt_helpers_accept_only_their_grammar() -> TestResult {
+    for good in ["a", "0", "a-b_c.d", &"a".repeat(MAX_PACK_ID_CHARS)] {
+        assert!(valid_pack_id(good), "{good}");
+    }
+    for bad in [
+        "",
+        "-a",
+        "_a",
+        ".a",
+        "A",
+        "a b",
+        "a\u{3164}",
+        "a\u{1b}",
+        &"a".repeat(MAX_PACK_ID_CHARS + 1),
+        "é",
+    ] {
+        assert!(!valid_pack_id(bad), "{bad}");
+    }
+    for good in ["MTgwMDAwMDAwMDpwYWNrLWM", "QQ", &"A".repeat(MAX_HUNT_CURSOR_CHARS)] {
+        assert!(valid_hunt_cursor(good), "{good}");
+    }
+    for bad in [
+        "",
+        "A",
+        "QQ==",
+        "a b",
+        "a+b/",
+        &"A".repeat(MAX_HUNT_CURSOR_CHARS + 1),
+        "MTgwMDAwMDAwMDpwYWNrLWM\n",
+    ] {
+        assert!(!valid_hunt_cursor(bad), "{bad}");
+    }
+    assert_eq!(hunts_path(None), "hunts/findings?limit=100");
+    assert_eq!(hunts_path(Some("QQ")), "hunts/findings?limit=100&cursor=QQ");
+    assert_eq!(window_time("2026-03-02T01:00:00+01:00").as_deref(), Some("2026-03-02T00:00:00Z"));
+    assert_eq!(window_time("0000-01-01T00:00:00Z").as_deref(), Some("0000-01-01T00:00:00Z"));
+    assert_eq!(window_time("9999-12-31T23:59:59Z").as_deref(), Some("9999-12-31T23:59:59Z"));
+    for bad in [
+        "",
+        "yesterday",
+        "2026-03-02",
+        "0000-01-01T00:00:00+02:00",
+        "9999-12-31T23:00:00-02:00",
+        "2026-13-01T00:00:00Z",
+        "2026-03-02T00:00:00Z\u{1b}",
+    ] {
+        assert!(window_time(bad).is_none(), "{bad}");
+    }
+    Ok(())
+}

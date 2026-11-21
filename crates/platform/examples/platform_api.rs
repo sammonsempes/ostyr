@@ -1,4 +1,4 @@
-//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp); `risk` also needs `settings.risk.weights_file`.
+//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance); `risk` also needs `settings.risk.weights_file`.
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};

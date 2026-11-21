@@ -88,7 +88,7 @@ fn a_real_forward_from_an_internal_reporter_has_level_one_as_original() -> Resul
     assert_eq!(record.sender.as_deref(), Some("security@bank.test"));
     assert_eq!(record.auth.reason.as_deref(), Some("attached_original"));
     assert_eq!(record.reporter_auth.as_ref().map(|auth| auth.dmarc.as_str()), Some("pass"));
-    assert!(!record.original_internal);
+    assert!(!record.internal_claimed);
     assert_eq!(record.counts.reporter_unverified, 0);
     assert_eq!(urls(&record), [(0, "https://evil.test/steal")]);
     Ok(())
@@ -111,7 +111,7 @@ fn a_phish_with_its_own_decoy_is_the_original_with_reporter_external() -> Result
     assert_eq!(record.sender.as_deref(), Some("security@bank.test"));
     assert_eq!(record.auth.dmarc, "fail");
     assert_eq!(record.reporter_auth, None);
-    assert!(!record.original_internal);
+    assert!(!record.internal_claimed);
     assert_eq!(record.counts.auth_nested_ignored, 1);
     assert_eq!(urls(&record), [(0, "https://evil.test/steal"), (1, "http://decoy.test/")]);
     Ok(())
@@ -123,8 +123,8 @@ fn an_inline_forward_with_a_decoy_makes_the_internal_original_loud() -> Result<(
     let record = run(&forward(&[PASS_CORP, "From: employee@corp.test"], &[&decoy()]))?;
     assert_eq!(record.original_level, Some(1));
     assert_eq!(record.sender.as_deref(), Some("ceo@corp.test"));
-    assert!(record.original_internal);
-    assert_eq!(record.counts.original_internal, 1);
+    assert!(record.internal_claimed);
+    assert_eq!(record.counts.internal_claimed, 1);
     assert_eq!(record.auth.dmarc, "unknown");
     assert!(urls(&record).contains(&(0, "https://evil.test/steal")));
     Ok(())
@@ -144,7 +144,7 @@ fn an_inline_forward_with_nothing_attached_has_no_original_headers() -> Result<(
     assert_eq!(record.subject, None);
     assert_eq!(record.auth.reason.as_deref(), Some("inline_forward"));
     assert!(record.reporter_auth.is_some());
-    assert!(!record.original_internal);
+    assert!(!record.internal_claimed);
     assert_eq!(urls(&record), [(0, "https://evil.test/steal")]);
     Ok(())
 }
@@ -163,7 +163,7 @@ fn several_from_addresses_are_ambiguous_and_all_listed() -> Result<(), Box<dyn s
     assert_eq!(record.reporter, "from_ambiguous");
     assert_eq!(record.original_level, Some(0));
     assert_eq!(record.senders, ["x@evil.test", "ceo@corp.test"]);
-    assert!(record.original_internal);
+    assert!(record.internal_claimed);
     let twice = run(&forward(&[PASS_CORP, "From: a@corp.test", "From: b@evil.test"], &[]))?;
     assert_eq!(twice.reporter, "from_ambiguous");
     assert_eq!(twice.senders, ["a@corp.test", "b@evil.test"]);

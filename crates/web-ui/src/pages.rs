@@ -1,7 +1,9 @@
-use crate::api::{encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_RISK_VALUE, RISK_KINDS};
+use crate::api::{
+    encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_pack_id, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_RISK_VALUE, RISK_KINDS,
+};
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
-    CertView, CommentView, Language, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView,
+    CertView, CommentView, FindingView, FindingsView, Language, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, language_tag, resolution_key, severity_class, severity_key, status_key,
@@ -11,7 +13,7 @@ use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
 use serde_json::{Map, Value};
 use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
 
 pub const MAX_FIELD_CHARS: usize = 256;
@@ -183,6 +185,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/assets", text(language, "nav_assets")))
                         (go("/risk", text(language, "nav_risk")))
                         (go("/certificates", text(language, "nav_certs")))
+                        (go("/hunts", text(language, "nav_hunts")))
                         form method="post" action="/logout" {
                             input type="hidden" name="csrf" value=(token);
                             button type="submit" { (text(language, "nav_logout")) }
@@ -1049,6 +1052,93 @@ pub fn cert_page(language: Language, csrf: &str, detail: &CertDetailView) -> Mar
                 }
             }
             (go("/certificates", text(language, "cert_back")))
+        },
+    )
+}
+
+
+pub const MAX_YEAR: i32 = 9999;
+
+
+/// A window end as UTC RFC 3339, `None` unless it parses and the UTC date stays within years 0 to 9999.
+pub fn window_time(value: &str) -> Option<String> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .ok()
+        .and_then(|moment| moment.checked_to_offset(UtcOffset::UTC))
+        .filter(|utc| (0..=MAX_YEAR).contains(&utc.year()))
+        .and_then(|utc| utc.format(&Rfc3339).ok())
+}
+
+
+pub fn finding_row(language: Language, finding: &FindingView) -> Markup {
+    let start = window_time(&finding.window_start);
+    let end = window_time(&finding.window_end);
+    match (valid_pack_id(&finding.pack_id), start, end) {
+        (true, Some(from), Some(until)) => html! {
+            tr {
+                td { (finding.pack_id) }
+                td { (from) }
+                td { (until) }
+                td { (finding.matches) }
+                td { (finding.max_matches) }
+            }
+        },
+        _ => html! {
+            tr { td colspan="5" { (text(language, "hunts_unreadable")) } }
+        },
+    }
+}
+
+
+pub fn hunts_notices(language: Language, list: &FindingsView) -> Markup {
+    let oversized_key = if list.oversized.capped {
+        "hunts_oversized_capped"
+    } else {
+        "hunts_oversized"
+    };
+    html! {
+        @if list.skipped > 0 {
+            div class="notice" { (text(language, "hunts_skipped").replace("{count}", &list.skipped.to_string())) }
+        }
+        @if list.oversized.count > 0 {
+            div class="notice" { (text(language, oversized_key).replace("{count}", &list.oversized.count.to_string())) }
+        }
+    }
+}
+
+
+pub fn hunts_page(language: Language, csrf: &str, list: &FindingsView) -> Markup {
+    layout(
+        language,
+        "title_hunts",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_hunts")) }
+            (hunts_notices(language, list))
+            @if list.items.is_empty() {
+                div { (text(language, "hunts_empty")) }
+            } @else {
+                table {
+                    thead {
+                        tr {
+                            th { (text(language, "col_pack")) }
+                            th { (text(language, "col_window_start")) }
+                            th { (text(language, "col_window_end")) }
+                            th { (text(language, "col_matches")) }
+                            th { (text(language, "col_max_matches")) }
+                        }
+                    }
+                    tbody {
+                        @for finding in &list.items { (finding_row(language, finding)) }
+                    }
+                }
+            }
+            @if let Some(cursor) = &list.next_cursor {
+                form method="get" action="/hunts" class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    button type="submit" { (text(language, "hunts_next")) }
+                }
+            }
         },
     )
 }

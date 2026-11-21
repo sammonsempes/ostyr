@@ -11,6 +11,9 @@ pub const MAX_DOMAIN_BYTES: usize = 253;
 const MAX_LABEL_BYTES: usize = 63;
 
 
+const MIN_DOMAIN_LABELS: usize = 2;
+
+
 fn is_ldh_label(label: &str) -> bool {
     (1..=MAX_LABEL_BYTES).contains(&label.len())
         && label.chars().all(|candidate| candidate.is_ascii_alphanumeric() || candidate == '-')
@@ -25,9 +28,15 @@ pub fn is_ldh_domain(domain: &str) -> bool {
 }
 
 
+/// The one strictness of a domain this crate judges: LDH, at least two labels, no trailing dot (a dot leaves an empty label).
+pub fn is_strict_domain(domain: &str) -> bool {
+    is_ldh_domain(domain) && domain.split('.').count() >= MIN_DOMAIN_LABELS
+}
+
+
 /// The policy as the caller's tenant list: at most `MAX_INTERNAL_DOMAINS` entries, each an LDH domain.
 pub fn check_policy(policy: &ReporterPolicy) -> Result<(), TriageError> {
-    let valid = policy.internal_domains.len() <= MAX_INTERNAL_DOMAINS && policy.internal_domains.iter().all(|domain| is_ldh_domain(domain));
+    let valid = policy.internal_domains.len() <= MAX_INTERNAL_DOMAINS && policy.internal_domains.iter().all(|domain| is_strict_domain(domain));
     valid.then_some(()).ok_or(TriageError::PolicyRefused)
 }
 
