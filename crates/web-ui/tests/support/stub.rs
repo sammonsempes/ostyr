@@ -60,6 +60,8 @@ pub enum Mode {
     BadId,
     BadCursor,
     Status(StatusCode),
+    UnreadableAlert,
+    Oversize422,
 }
 
 
@@ -245,6 +247,7 @@ pub async fn alerts_handler(
     if authorised(&headers) {
         match mode_of(&state) {
             Mode::Status(status) => error_reply(status),
+            Mode::UnreadableAlert | Mode::Oversize422 => error_reply(StatusCode::UNPROCESSABLE_ENTITY),
             Mode::Hostile => Json(page(vec![hostile_alert(&id_of('a'))], None)).into_response(),
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
             Mode::Chunked => stream_body().into_response(),
@@ -1235,6 +1238,12 @@ pub async fn oncall_alert_handler(State(state): State<Arc<StubState>>, headers: 
     if authorised(&headers) {
         match mode_of(&state) {
             Mode::Status(status) => error_reply(status),
+            Mode::UnreadableAlert => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": {"code": "unreadable_alert", "message": LEAK}})),
+            )
+                .into_response(),
+            Mode::Oversize422 => (StatusCode::UNPROCESSABLE_ENTITY, "x".repeat(OVERSIZE_BYTES)).into_response(),
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
             Mode::Hostile => Json(oncall_item(number, "evil\u{1b}[31m", "open", ONCALL_OPENED, None, None)).into_response(),
             Mode::BadId => Json(oncall_item(number + 1, "fp", "open", ONCALL_OPENED, None, None)).into_response(),

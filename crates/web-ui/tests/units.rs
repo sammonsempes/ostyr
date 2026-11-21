@@ -6,8 +6,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use types::TestResult;
 use web_ui::api::{
     alerts_path, assets_path, cases_path, cert_filter, certs_path, check_asset_detail, check_asset_page, classify, conflict_failure, encode_asset_id,
-    get_alert, get_case, valid_asset_cursor, valid_asset_id, valid_cert_cursor, valid_cursor, valid_id, valid_token, MAX_ASSET_ATTRIBUTES,
-    MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
+    get_alert, get_case, unreadable_failure, valid_asset_cursor, valid_asset_id, valid_cert_cursor, valid_cursor, valid_id, valid_token,
+    MAX_ASSET_ATTRIBUTES, MAX_ASSET_CURSOR_CHARS, MAX_ASSET_ID_BYTES, MAX_ASSET_KEYS, MAX_COMMENT_CHARS, MAX_CURSOR_CHARS, MAX_TOKEN_BYTES,
 };
 use web_ui::api::{hunts_path, valid_hunt_cursor, valid_pack_id, MAX_HUNT_CURSOR_CHARS, MAX_PACK_ID_CHARS};
 use web_ui::api::{oncall_path, parse_oncall_id, valid_oncall_text, MAX_ONCALL_FINGERPRINT_BYTES, ONCALL_STATES};
@@ -28,6 +28,9 @@ use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, sess
 
 
 const CONFLICT: u16 = 409;
+
+
+const UNPROCESSABLE: u16 = 422;
 
 
 const CONNECTIONS: usize = 4;
@@ -168,6 +171,17 @@ fn a_conflict_is_one_of_the_fixed_codes_or_a_plain_status() -> TestResult {
     }
     for body in ["{\"error\":{\"code\":\"other\",\"message\":\"m\"}}", "not json", "{}", ""] {
         assert!(matches!(conflict_failure(body.as_bytes()), ApiFailure::Status(CONFLICT)), "{body}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_422_is_unreadable_only_with_the_fixed_code() -> TestResult {
+    let fixed = "{\"error\":{\"code\":\"unreadable_alert\",\"message\":\"m\"}}";
+    assert!(matches!(unreadable_failure(fixed.as_bytes()), ApiFailure::Unreadable));
+    for body in ["{\"error\":{\"code\":\"other\",\"message\":\"m\"}}", "not json", "{}", ""] {
+        assert!(matches!(unreadable_failure(body.as_bytes()), ApiFailure::Status(UNPROCESSABLE)), "{body}");
     }
     Ok(())
 }
