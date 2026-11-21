@@ -712,6 +712,18 @@ fn the_second_migration_refuses_truncate_and_pins_the_reason_tokens() -> TestRes
 }
 
 
+const THIRD_MIGRATION: usize = 2;
+
+
+#[test]
+fn the_third_migration_is_registered_last() -> TestResult {
+    let versions: Vec<&str> = MIGRATIONS.iter().map(|migration| migration.version).collect();
+    assert_eq!(versions, vec!["rshell_0001", "rshell_0002", "rshell_0003"]);
+    assert!(!MIGRATIONS.get(THIRD_MIGRATION).ok_or("no third migration")?.sql.is_empty());
+    Ok(())
+}
+
+
 fn recording(tenant: &str, session_id: &str) -> Recording {
     Recording {
         header: header(tenant, session_id, OPENED),
