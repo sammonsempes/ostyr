@@ -1,7 +1,7 @@
 use crate::api::{
     encode_asset_id, risk_kind, valid_asset_id, valid_case_id, valid_id, valid_oncall_text, valid_pack_id, valid_state_asset, valid_state_id,
-    valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_STATE_ID_CHARS, RISK_KINDS,
-    STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
+    valid_vuln_asset, valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE,
+    MAX_STATE_ID_CHARS, RISK_KINDS, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
@@ -1334,9 +1334,10 @@ pub const VULN_ASSET_COLUMNS: u32 = 11;
 
 /// Both scores and both times as text, `None` unless every text is inside the store's grammar and both scores inside their ranges.
 pub fn readable_vuln(view: &VulnView) -> Option<(String, String, String, String)> {
-    let texts_fit = [&view.asset, &view.ecosystem, &view.package, &view.record_id, &view.installed_version]
-        .iter()
-        .all(|value| valid_vuln_field(value))
+    let texts_fit = valid_vuln_asset(&view.asset)
+        && [&view.ecosystem, &view.package, &view.record_id, &view.installed_version]
+            .iter()
+            .all(|value| valid_vuln_field(value))
         && view.fixed_version.as_deref().is_none_or(valid_vuln_field);
     let cvss = vuln_score(&view.cvss, VULN_CVSS_MAX).map(|score| format!("{score:.1}"));
     let epss = vuln_score(&view.epss, VULN_EPSS_MAX).map(|score| format!("{score:.3}"));

@@ -16,15 +16,18 @@ use web_ui::api::{
     MAX_STATE_ID_CHARS,
 };
 use web_ui::api::{
-    valid_vuln_asset, valid_vuln_cursor, valid_vuln_field, vuln_score, vulns_path, MAX_VULN_FIELD_BYTES, VULN_CVSS_MAX, VULN_EPSS_MAX,
+    valid_vuln_asset, valid_vuln_cursor, valid_vuln_field, vuln_score, vulns_path, MAX_VULN_CURSOR_BYTES, MAX_VULN_FIELD_BYTES, VULN_CVSS_MAX,
+    VULN_EPSS_MAX,
 };
 use web_ui::client::build_client;
 use web_ui::config::DEFAULT_LIMITS;
 use web_ui::error::{ApiFailure, SessionError};
+use web_ui::model::Language;
+use web_ui::model::VulnView;
 use web_ui::model::{ApiSection, WebLimits};
 use web_ui::model::{AssetDetailView, AssetPageView};
-use web_ui::pages::oncall_state_key;
 use web_ui::pages::window_time;
+use web_ui::pages::{oncall_state_key, readable_vuln, vuln_row};
 use web_ui::routes::{comment_limits, comment_shaped, expiring_before, COMMENT_FORM_BYTES};
 use web_ui::server::wall_seconds;
 use web_ui::session::{clear_cookie, cookie_value, csrf_matches, new_secret, session_key, set_cookie};
@@ -440,6 +443,8 @@ fn vulnerability_helpers_accept_only_the_stores_grammar() -> TestResult {
         ("10", VULN_CVSS_MAX, true),
         ("11", VULN_CVSS_MAX, false),
         ("-0.1", VULN_CVSS_MAX, false),
+        ("-0", VULN_CVSS_MAX, false),
+        ("-0.0", VULN_EPSS_MAX, false),
         ("1", VULN_EPSS_MAX, true),
         ("2", VULN_EPSS_MAX, false),
         ("1e999", VULN_CVSS_MAX, false),
@@ -469,6 +474,18 @@ fn vulnerability_helpers_accept_only_the_stores_grammar() -> TestResult {
     ] {
         assert!(!valid_vuln_cursor(bad), "{bad}");
     }
+    let oversized = format!("1 a b c {}", "d".repeat(MAX_VULN_CURSOR_BYTES));
+    assert!(oversized.len() > MAX_VULN_CURSOR_BYTES && !valid_vuln_cursor(&oversized));
+    let at_cap = format!(
+        "{} {} {} {} {}",
+        u32::MAX,
+        "a".repeat(MAX_VULN_FIELD_BYTES),
+        "b".repeat(MAX_VULN_FIELD_BYTES),
+        "c".repeat(MAX_VULN_FIELD_BYTES),
+        "d".repeat(MAX_VULN_FIELD_BYTES)
+    );
+    assert_eq!(at_cap.len(), MAX_VULN_CURSOR_BYTES);
+    assert!(valid_vuln_cursor(&at_cap));
     assert_eq!(vulns_path(None), "vulnerabilities/findings?limit=100");
     assert_eq!(vulns_path(Some("1 a b c d")), "vulnerabilities/findings?limit=100&cursor=1+a+b+c+d");
     Ok(())
@@ -576,3 +593,22 @@ fn oncall_helpers_accept_only_the_apis_rules() -> TestResult {
 
 
 const SAMPLE_ONCALL_ID: i64 = 42;
+
+
+#[test]
+fn a_dot_asset_vulnerability_row_has_no_link_and_a_negative_zero_score_is_unreadable() -> TestResult {
+    let row = |asset: &str, cvss: &str| -> Result<VulnView, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "asset": asset, "ecosystem": "npm", "package": "p", "record_id": "CVE-1", "installed_version": "1", "fixed_version": null,
+            "cvss": serde_json::from_str::<serde_json::Value>(cvss)?, "epss": 1, "kev": false, "priority": 1,
+            "first_seen": "2026-03-01T00:00:00Z", "last_seen": "2026-03-02T00:00:00Z"
+        }))
+    };
+    assert!(readable_vuln(&row("web01", "1.0")?).is_some());
+    for refused in [row(".", "1.0")?, row("..", "1.0")?, row("web01", "-0.0")?] {
+        assert!(readable_vuln(&refused).is_none());
+        let shown = vuln_row(Language::English, &refused, None).0;
+        assert!(shown.contains("Unreadable row.") && !shown.contains("action="), "{shown}");
+    }
+    Ok(())
+}
