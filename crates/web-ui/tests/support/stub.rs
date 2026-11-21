@@ -87,6 +87,7 @@ pub struct StubState {
     pub cert_paths: Mutex<Vec<String>>,
     pub hunt_paths: Mutex<Vec<String>>,
     pub state_paths: Mutex<Vec<String>>,
+    pub oncall_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -1122,6 +1123,138 @@ pub async fn count_request(State(state): State<Arc<StubState>>, request: axum::e
 }
 
 
+pub const ONCALL_OPENED: &str = "2026-03-01T10:00:00+01:00";
+
+
+pub const ONCALL_MANY: usize = 1001;
+
+
+pub const ONCALL_LONG: usize = 257;
+
+
+pub const ONCALL_FIRST_ID: i64 = 7;
+
+
+pub const ONCALL_LEVEL: u32 = 2;
+
+
+pub const ONCALL_OCCURRENCES: i64 = 3;
+
+
+pub const ONCALL_MISSING_ID: &str = "99";
+
+
+pub fn oncall_item(id: i64, fingerprint: &str, state: &str, opened: &str, acknowledged: Option<&str>, resolved: Option<&str>) -> Value {
+    json!({
+        "id": id, "fingerprint": fingerprint, "state": state, "level": ONCALL_LEVEL, "occurrences": ONCALL_OCCURRENCES,
+        "opened_at": opened, "acknowledged_at": acknowledged, "resolved_at": resolved,
+    })
+}
+
+
+pub fn oncall_hostile_items() -> Vec<Value> {
+    let long = "a".repeat(ONCALL_LONG);
+    let rows = vec![
+        ("evil\u{1b}[31m", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("a\u{3164}b", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("<script>x</script>\u{e9}", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("two  spaces", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        (" lead", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("trail ", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("", "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        (&long, "open", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("fp", "bogus", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+        ("fp", "open", "not a time", None, None, ONCALL_OCCURRENCES),
+        (
+            "fp",
+            "resolved",
+            ONCALL_OPENED,
+            Some("0000-01-01T00:00:00+02:00"),
+            None,
+            ONCALL_OCCURRENCES,
+        ),
+        (
+            "fp",
+            "resolved",
+            ONCALL_OPENED,
+            None,
+            Some("9999-12-31T23:00:00-02:00"),
+            ONCALL_OCCURRENCES,
+        ),
+        ("fp", "open", ONCALL_OPENED, None, None, -1),
+        ("fine.fp 1", "escalated", ONCALL_OPENED, None, None, ONCALL_OCCURRENCES),
+    ];
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, (fingerprint, state, opened, acknowledged, resolved, occurrences))| {
+            json!({
+                "id": index + 1, "fingerprint": fingerprint, "state": state, "level": ONCALL_LEVEL, "occurrences": occurrences,
+                "opened_at": opened, "acknowledged_at": acknowledged, "resolved_at": resolved,
+            })
+        })
+        .chain([oncall_item(-1, "fp", "open", ONCALL_OPENED, None, None)])
+        .collect()
+}
+
+
+pub async fn oncall_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.oncall_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(
+                json!({"items": (0..ONCALL_MANY).map(|_| oncall_item(1, "fp", "open", ONCALL_OPENED, None, None)).collect::<Vec<_>>(), "skipped": 0}),
+            )
+            .into_response(),
+            Mode::Hostile => Json(json!({"items": oncall_hostile_items(), "skipped": 1})).into_response(),
+            Mode::Chunked => Json(json!({"items": [], "skipped": 0})).into_response(),
+            Mode::BadId => Json(json!({"items": [], "skipped": 1})).into_response(),
+            Mode::BadSeverity => Json(json!({"items": [], "skipped": STATE_MANY_SKIPPED})).into_response(),
+            Mode::BadCursor => Json(json!({"items": "wrong", "skipped": 0})).into_response(),
+            _ => Json(json!({
+                "items": [
+                    oncall_item(ONCALL_FIRST_ID, "fp one", "open", ONCALL_OPENED, None, None),
+                    oncall_item(ONCALL_FIRST_ID + 1, "fp-two", "acknowledged", ONCALL_OPENED, Some("2026-03-02T00:00:00Z"), None),
+                ],
+                "skipped": 1,
+            }))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn oncall_alert_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.oncall_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    let number: i64 = id.parse().unwrap_or(0);
+    if authorised(&headers) {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::Hostile => Json(oncall_item(number, "evil\u{1b}[31m", "open", ONCALL_OPENED, None, None)).into_response(),
+            Mode::BadId => Json(oncall_item(number + 1, "fp", "open", ONCALL_OPENED, None, None)).into_response(),
+            _ if id == ONCALL_MISSING_ID => error_reply(StatusCode::NOT_FOUND),
+            _ => Json(oncall_item(
+                number,
+                "fp one",
+                "resolved",
+                ONCALL_OPENED,
+                Some("2026-03-02T00:00:00Z"),
+                Some("2026-03-03T00:00:00Z"),
+            ))
+            .into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
 pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
     let state = Arc::new(StubState {
         mode: Mutex::new(mode),
@@ -1137,6 +1270,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         cert_paths: Mutex::new(Vec::new()),
         hunt_paths: Mutex::new(Vec::new()),
         state_paths: Mutex::new(Vec::new()),
+        oncall_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -1158,6 +1292,8 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/hunts/findings", get(hunt_list_handler))
         .route("/compliance/state", get(state_list_handler))
         .route("/compliance/assets/{asset}", get(state_asset_handler))
+        .route("/oncall/alerts", get(oncall_list_handler))
+        .route("/oncall/alerts/{id}", get(oncall_alert_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))

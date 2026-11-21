@@ -290,6 +290,27 @@ pub struct StateAssetView {
 }
 
 
+/// `GET /oncall/alerts` items and `GET /oncall/alerts/{id}`; every field is checked before it is printed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OncallAlertView {
+    pub id: i64,
+    pub fingerprint: String,
+    pub state: String,
+    pub level: u32,
+    pub occurrences: i64,
+    pub opened_at: String,
+    pub acknowledged_at: Option<String>,
+    pub resolved_at: Option<String>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OncallListView {
+    pub items: Vec<OncallAlertView>,
+    pub skipped: u64,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FindingsView {
     pub items: Vec<FindingView>,

@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 204;
+pub const TEXT_COUNT: usize = 223;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -216,6 +216,25 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("verdict_excepted", "Excepted"),
     ("verdict_pass", "Passed"),
     ("verdict_all", "All"),
+    ("nav_oncall", "On-call"),
+    ("title_oncall", "On-call alerts"),
+    ("title_oncall_alert", "On-call alert"),
+    ("oncall_empty", "No open alert."),
+    ("oncall_no_readable", "No readable alert on this page."),
+    ("oncall_back", "Back to on-call"),
+    ("oncall_unreadable", "Unreadable row."),
+    ("oncall_skipped", "{count} rows could not be read."),
+    ("oncall_skipped_one", "1 row could not be read."),
+    ("col_oncall_id", "Number"),
+    ("col_level", "Level"),
+    ("col_occurrences", "Occurrences"),
+    ("col_opened_at", "Opened"),
+    ("col_acknowledged_at", "Acknowledged"),
+    ("col_resolved_at", "Resolved"),
+    ("oncall_state_open", "Open"),
+    ("oncall_state_acknowledged", "Acknowledged"),
+    ("oncall_state_escalated", "Escalated"),
+    ("oncall_state_resolved", "Resolved"),
 ];
 
 
@@ -433,6 +452,25 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("verdict_excepted", "Exception"),
     ("verdict_pass", "Conforme"),
     ("verdict_all", "Tous"),
+    ("nav_oncall", "Astreinte"),
+    ("title_oncall", "Alertes d'astreinte"),
+    ("title_oncall_alert", "Alerte d'astreinte"),
+    ("oncall_empty", "Aucune alerte ouverte."),
+    ("oncall_no_readable", "Aucune alerte lisible sur cette page."),
+    ("oncall_back", "Retour à l'astreinte"),
+    ("oncall_unreadable", "Ligne illisible."),
+    ("oncall_skipped", "{count} lignes n'ont pas pu être lues."),
+    ("oncall_skipped_one", "1 ligne n'a pas pu être lue."),
+    ("col_oncall_id", "Numéro"),
+    ("col_level", "Niveau"),
+    ("col_occurrences", "Occurrences"),
+    ("col_opened_at", "Ouverte"),
+    ("col_acknowledged_at", "Prise en compte"),
+    ("col_resolved_at", "Résolue"),
+    ("oncall_state_open", "Ouverte"),
+    ("oncall_state_acknowledged", "Prise en compte"),
+    ("oncall_state_escalated", "Escaladée"),
+    ("oncall_state_resolved", "Résolue"),
 ];
 
 
