@@ -25,7 +25,7 @@ use risk_score::cache::{
     await_flight, default_bounds, finish, is_live, join, scores_for, uncached_count, CACHE_SECONDS, MAX_CACHED_TENANTS, MAX_COMPUTE_SECONDS,
 };
 use risk_score::model::EntityKind;
-use risk_score::source::{Limit, Truncated};
+use risk_score::source::{FpRule, Limit, Truncated};
 use risk_score::types::Flight;
 use risk_score::weights::weights_state;
 use serde_json::{json, Value};
@@ -101,6 +101,21 @@ impl Write for Capture {
 }
 
 
+const FP_COUNT: u64 = 12;
+
+
+const FP_CLOSED: u64 = 8;
+
+
+const FP_RATE: u32 = 600_000;
+
+
+const FP_OMITTED: usize = 4;
+
+
+const FP_UNKNOWN: usize = 2;
+
+
 fn seeded(fx: &fixture::Fixture) {
     let mut acme = outcome_of(vec![
         score(EntityKind::Host, "web01", HIGH),
@@ -110,6 +125,15 @@ fn seeded(fx: &fixture::Fixture) {
     acme.alerts_read = ALERTS_READ;
     acme.informational = INFORMATIONAL;
     acme.refused.insert(EntityKind::Host, REFUSED_HOSTS);
+    acme.fp_rules.push(FpRule {
+        rule_id: "noisy".to_owned(),
+        false_positive: FP_COUNT,
+        closed: FP_CLOSED,
+        rate_ppm: FP_RATE,
+        capped: false,
+    });
+    acme.fp_rules_omitted = FP_OMITTED;
+    acme.unknown_verdicts = FP_UNKNOWN;
     set_outcome(&fx.script, TENANT, acme);
     set_outcome(&fx.script, OTHER_TENANT, outcome_of(vec![score(EntityKind::Host, "foreign", HIGH)]));
 }
@@ -146,6 +170,12 @@ async fn the_list_is_the_tenant_scores_highest_first_with_the_counts() -> TestRe
     assert_eq!(json.get("informational"), Some(&json!(INFORMATIONAL)));
     assert_eq!(json.get("refused"), Some(&json!({"host": REFUSED_HOSTS})));
     assert_eq!(json.get("truncated"), Some(&Value::Null));
+    assert_eq!(
+        json.get("fp_rules"),
+        Some(&json!([{"rule_id": "noisy", "false_positive": FP_COUNT, "closed": FP_CLOSED, "rate_ppm": FP_RATE, "capped": false}]))
+    );
+    assert_eq!(json.get("fp_rules_omitted"), Some(&json!(FP_OMITTED)));
+    assert_eq!(json.get("unknown_verdicts"), Some(&json!(FP_UNKNOWN)));
     let head = json
         .get("entities")
         .and_then(Value::as_array)
