@@ -49,13 +49,24 @@ const SECOND: Migration = Migration {
 };
 
 
+pub fn committed(inner: Handler) -> Handler {
+    Arc::new(move |sql| {
+        if sql.contains("SHOW default_transaction_isolation") {
+            Reply::Rows(vec![vec!["read committed".to_owned()]])
+        } else {
+            inner(sql)
+        }
+    })
+}
+
+
 pub fn applied_handler(applied: Vec<Vec<String>>) -> Handler {
     shaped_handler(applied, vec!["namespace", "version", "digest"])
 }
 
 
 fn shaped_handler(applied: Vec<Vec<String>>, columns: Vec<&'static str>) -> Handler {
-    Arc::new(move |sql| {
+    committed(Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(columns.iter().map(|column| vec![(*column).to_owned()]).collect())
         } else if sql.contains("FROM public.schema_migrations") {
@@ -65,7 +76,7 @@ fn shaped_handler(applied: Vec<Vec<String>>, columns: Vec<&'static str>) -> Hand
         } else {
             Reply::Done
         }
-    })
+    }))
 }
 
 
@@ -164,7 +175,7 @@ async fn a_unique_violation_forever_ends_after_the_attempt_cap() -> Result<(), B
 
 #[tokio::test]
 async fn another_server_error_is_returned_without_a_retry() -> Result<(), Box<dyn Error>> {
-    let handler: Handler = Arc::new(|sql| {
+    let handler: Handler = committed(Arc::new(|sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
         } else if sql.contains("FROM public.schema_migrations") {
@@ -174,7 +185,7 @@ async fn another_server_error_is_returned_without_a_retry() -> Result<(), Box<dy
         } else {
             Reply::Done
         }
-    });
+    }));
     let (client, mut fake, _dir) = client_with(handler).await?;
     let result = migrate(&client, NAMESPACE, &[FIRST], DEADLINE).await;
     assert!(matches!(result, Err(PgError::Server { code, .. }) if code == "42601"));
@@ -186,7 +197,7 @@ async fn another_server_error_is_returned_without_a_retry() -> Result<(), Box<dy
 
 fn racing_handler(failing_marker: &'static str, after_race: Vec<Vec<String>>) -> Handler {
     let reads = Arc::new(AtomicUsize::new(0));
-    Arc::new(move |sql| {
+    committed(Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
         } else if sql.contains("FROM public.schema_migrations") {
@@ -199,7 +210,7 @@ fn racing_handler(failing_marker: &'static str, after_race: Vec<Vec<String>>) ->
         } else {
             Reply::Done
         }
-    })
+    }))
 }
 
 
@@ -221,7 +232,7 @@ async fn a_concurrent_caller_that_did_everything_leaves_an_empty_result() -> Res
 
 fn losing_every_insert_handler(all: Vec<Migration>) -> Handler {
     let reads = Arc::new(AtomicUsize::new(0));
-    Arc::new(move |sql| {
+    committed(Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
         } else if sql.contains("FROM public.schema_migrations") {
@@ -232,7 +243,7 @@ fn losing_every_insert_handler(all: Vec<Migration>) -> Handler {
         } else {
             Reply::Done
         }
-    })
+    }))
 }
 
 
@@ -333,6 +344,37 @@ async fn a_legacy_table_is_refused_and_left_unchanged() -> Result<(), Box<dyn Er
     assert!(!drain(&mut fake.statements)
         .iter()
         .any(|sql| sql.contains("INSERT INTO public.schema_migrations")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_connection_not_on_read_committed_is_refused_before_any_write() -> Result<(), Box<dyn Error>> {
+    let handler: Handler = Arc::new(|sql| {
+        if sql.contains("SHOW default_transaction_isolation") {
+            Reply::Rows(vec![vec!["repeatable read".to_owned()]])
+        } else {
+            Reply::Done
+        }
+    });
+    let (client, mut fake, _dir) = client_with(handler).await?;
+    assert!(matches!(
+        migrate(&client, NAMESPACE, &[FIRST], DEADLINE).await,
+        Err(PgError::IsolationLevel)
+    ));
+    let statements = drain(&mut fake.statements);
+    assert!(!statements.iter().any(|sql| sql.contains("CREATE TABLE")), "{statements:?}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_unanswered_isolation_query_is_refused() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with(Arc::new(|_sql| Reply::Done)).await?;
+    assert!(matches!(
+        migrate(&client, NAMESPACE, &[FIRST], DEADLINE).await,
+        Err(PgError::IsolationLevel)
+    ));
     Ok(())
 }
 

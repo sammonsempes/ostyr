@@ -1,5 +1,6 @@
 use crate::drain;
 use crate::fake::Reply;
+use crate::migrate::committed;
 use crate::query::client_with;
 use crate::types::Handler;
 use core_pg::error::PgError;
@@ -64,7 +65,7 @@ fn function(signature: &str, setting: &str) -> Vec<String> {
 
 
 fn handler(applied: bool, functions: Reply) -> Handler {
-    Arc::new(move |sql| {
+    committed(Arc::new(move |sql| {
         if sql.contains("information_schema.columns") {
             Reply::Rows(vec![vec!["namespace".to_owned()]])
         } else if sql.contains("FROM public.schema_migrations") {
@@ -78,7 +79,7 @@ fn handler(applied: bool, functions: Reply) -> Handler {
         } else {
             Reply::Done
         }
-    })
+    }))
 }
 
 
