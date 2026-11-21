@@ -3,7 +3,7 @@
 use crate::args::arguments;
 use crate::error::PlanError;
 use crate::limits::Limits;
-use crate::model::{Action, ActionKind, Assignment, Available, Catalogue, Entry, Installed, InstalledRow, InventoryIncomplete, Manager, Plan};
+use crate::model::{Action, ActionKind, Assignment, Available, Catalogue, Entry, Installed, InstalledRow, InventoryGap, Manager, Plan};
 use crate::source::{family_of, manager_of, package_of, version_text};
 use crate::text::is_entry_name;
 use std::cmp::Ordering;
@@ -18,6 +18,9 @@ pub const INCOMPLETE_REASON: &str = "inventory_incomplete";
 
 
 pub const ABSENT_REASON: &str = "inventory_absent";
+
+
+pub const DUPLICATE_REASON: &str = "inventory_duplicate";
 
 
 pub fn plan(catalogue: &Catalogue, assignment: &Assignment, installed: &Installed, available: &Available) -> Result<Plan, PlanError> {
@@ -45,10 +48,10 @@ pub fn plan_with(
             .collect();
         actions.sort_by(|left, right| (left.kind, &left.name, &left.package).cmp(&(right.kind, &right.name, &right.package)));
         let refused_uninstalls = removed.iter().filter(|entry| !entry.uninstall).map(|entry| entry.name.clone()).collect();
-        let inventory_incomplete = incomplete(installed);
+        let inventory_gaps = gaps_of(installed);
         Ok(Plan {
             actions,
-            inventory_incomplete,
+            inventory_gaps,
             refused_uninstalls,
         })
     }
@@ -157,37 +160,45 @@ pub fn refusal(kind: ActionKind, entry: &Entry, row: Option<&InstalledRow>, inst
 
 
 pub fn gap_reason(installed: &Installed, manager: Manager) -> Option<&'static str> {
-    if !covers(installed, manager) {
-        Some(ABSENT_REASON)
-    } else if installed.over_limit > 0 {
-        Some(INCOMPLETE_REASON)
-    } else if installed.malformed > 0 {
-        Some(MALFORMED_REASON)
+    if covers(installed, manager) {
+        installed.gaps.get(&manager).and_then(|gap| {
+            if gap.over_limit > 0 {
+                Some(INCOMPLETE_REASON)
+            } else if gap.malformed > 0 {
+                Some(MALFORMED_REASON)
+            } else {
+                None
+            }
+        })
     } else {
-        None
+        Some(ABSENT_REASON)
     }
 }
 
 
-pub fn scope(installed: &Installed) -> Option<Manager> {
-    installed
-        .manager
-        .filter(|manager| installed.rows.iter().all(|row| row.manager == *manager))
-}
-
-
 pub fn covers(installed: &Installed, manager: Manager) -> bool {
-    scope(installed).is_none_or(|read| read == manager)
+    installed.read_managers.contains(&manager)
 }
 
 
-pub fn incomplete(installed: &Installed) -> Vec<InventoryIncomplete> {
-    [Manager::Apt, Manager::Dnf, Manager::Winget, Manager::Msi]
-        .into_iter()
-        .filter(|manager| installed.over_limit > 0 && covers(installed, *manager))
-        .map(|manager| InventoryIncomplete {
-            manager,
-            over_limit: installed.over_limit,
+pub fn is_duplicate(entry: &Entry, installed: &Installed) -> bool {
+    installed
+        .gaps
+        .get(&manager_of(&entry.source))
+        .is_some_and(|gap| gap.duplicate_ids.contains(&package_of(&entry.source).to_ascii_lowercase()))
+}
+
+
+pub fn gaps_of(installed: &Installed) -> Vec<InventoryGap> {
+    installed
+        .gaps
+        .iter()
+        .filter(|(manager, gap)| covers(installed, **manager) && (gap.over_limit > 0 || gap.malformed > 0 || !gap.duplicate_ids.is_empty()))
+        .map(|(manager, gap)| InventoryGap {
+            manager: *manager,
+            over_limit: gap.over_limit,
+            malformed: gap.malformed,
+            duplicate_ids: gap.duplicate_ids.len(),
         })
         .collect()
 }
@@ -237,10 +248,18 @@ pub fn removal_action(entry: &Entry, installed: &Installed) -> Option<Action> {
                 (false, true) => ActionKind::UninstallAmbiguous,
                 (false, false) => ActionKind::Uninstall,
             };
-            Some(refusal(kind, entry, Some(&row), installed).unwrap_or_else(|| action_of(kind, entry, Some(&row))))
+            let duplicate = (kind == ActionKind::Uninstall && is_duplicate(entry, installed)).then_some(DUPLICATE_REASON);
+            let reason = gap_reason(installed, manager).filter(|_| kind == ActionKind::Uninstall).or(duplicate);
+            Some(match reason {
+                Some(found) => Action {
+                    reason: Some(found),
+                    ..action_of(ActionKind::Unknown, entry, Some(&row))
+                },
+                None => action_of(kind, entry, Some(&row)),
+            })
         }
-        None if entry.uninstall && !covers(installed, manager) => Some(Action {
-            reason: Some(ABSENT_REASON),
+        None if entry.uninstall => gap_reason(installed, manager).map(|found| Action {
+            reason: Some(found),
             ..action_of(ActionKind::Unknown, entry, None)
         }),
         _ => None,

@@ -1,7 +1,7 @@
 //! Data only.
 
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -80,14 +80,20 @@ pub struct Available {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Installed {
-    pub manager: Option<Manager>,
+    pub read_managers: BTreeSet<Manager>,
+    pub gaps: BTreeMap<Manager, Gap>,
     pub rows: Vec<InstalledRow>,
-    pub malformed: usize,
-    pub over_limit: usize,
     pub not_installed: usize,
     pub other_source: usize,
     pub unreadable_versions: usize,
-    pub duplicate_ids: usize,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Gap {
+    pub over_limit: usize,
+    pub malformed: usize,
+    pub duplicate_ids: BTreeSet<String>,
 }
 
 
@@ -125,15 +131,17 @@ pub struct Action {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InventoryIncomplete {
+pub struct InventoryGap {
     pub manager: Manager,
     pub over_limit: usize,
+    pub malformed: usize,
+    pub duplicate_ids: usize,
 }
 
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
     pub actions: Vec<Action>,
-    pub inventory_incomplete: Vec<InventoryIncomplete>,
+    pub inventory_gaps: Vec<InventoryGap>,
     pub refused_uninstalls: Vec<String>,
 }

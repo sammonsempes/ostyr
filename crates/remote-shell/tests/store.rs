@@ -6,12 +6,13 @@ use core_pg::migrate::check_embedded;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use remote_shell::error::StoreError;
 use remote_shell::recording::{DataFrame, Direction, Header, Recording, Trailer};
+use remote_shell::serve::{cursor_text, list_page};
 use remote_shell::session::CloseReason;
 use remote_shell::store::{
-    bytes_of, check_asset, close_of, decode_session, int_of, list_sessions, reason_token, register_close, register_open, text_of, to_i64, CLOSE_SQL,
+    bytes_of, check_asset, close_of, decode_session, int_of, list_statement, reason_token, register_close, register_open, text_of, to_i64, CLOSE_SQL,
     COL_BYTES, COL_HASH, COL_OPENED_AT, LIST_AFTER_SQL, LIST_SQL, MAX_PAGE, MIGRATIONS, MIGRATION_NAMESPACE, OPEN_SQL, STATE_SQL,
 };
-use remote_shell::store_model::{Cell, CloseRecord, Cursor, ListFilter, Param, Statement};
+use remote_shell::store_model::{Cell, CloseRecord, Cursor, ListFilter, Param, SessionRow, Statement};
 use remote_shell::types::{ChainHash, Row, HASH_LEN};
 use std::cell::RefCell;
 use std::future::{ready, Future, Ready};
@@ -354,6 +355,22 @@ fn new_db() -> Rc<RefCell<Db>> {
 }
 
 
+async fn list_sessions<Executor, Pending>(
+    exec: &mut Executor,
+    scope: &TenantScope,
+    filter: &ListFilter,
+    after: Option<&Cursor>,
+    limit: u32,
+) -> Result<Vec<SessionRow>, StoreError>
+where
+    Executor: FnMut(&TenantScope, Statement) -> Pending,
+    Pending: Future<Output = Result<Vec<Row>, StoreError>>,
+{
+    let text = after.map(cursor_text);
+    Ok(list_page(exec, scope, filter, text.as_deref(), limit).await?.rows)
+}
+
+
 async fn collect_ids<Executor, Pending>(exec: &mut Executor, scope: &TenantScope, filter: &ListFilter, limit: u32) -> Result<Vec<String>, StoreError>
 where
     Executor: FnMut(&TenantScope, Statement) -> Pending,
@@ -643,7 +660,7 @@ async fn every_text_field_is_checked_before_any_statement() -> TestResult {
             Err(StoreError::Invalid { field: "requester" })
         ));
         assert!(matches!(
-            list_sessions(&mut exec, &acme, &ListFilter::default(), Some(&cursor), 1).await,
+            list_statement(&ListFilter::default(), Some(&cursor), 1),
             Err(StoreError::Invalid { field: "cursor" })
         ));
     }
@@ -856,10 +873,8 @@ fn a_row_of_the_wrong_shape_is_a_bad_row() -> TestResult {
 async fn a_list_of_bad_rows_and_a_failing_executor_are_errors() -> TestResult {
     let acme = tenant_scope(ACME)?;
     let mut short = |_scope: &TenantScope, _statement: Statement| ready(Ok(vec![Vec::new()]));
-    assert!(matches!(
-        list_sessions(&mut short, &acme, &ListFilter::default(), None, 1).await,
-        Err(StoreError::BadRow { .. })
-    ));
+    let short_page = list_page(&mut short, &acme, &ListFilter::default(), None, 1).await?;
+    assert_eq!((short_page.rows.len(), short_page.skipped), (0, 1));
     let mut failing = |_scope: &TenantScope, _statement: Statement| ready(Err::<Vec<Row>, StoreError>(bad("boom")));
     assert!(matches!(
         list_sessions(&mut failing, &acme, &ListFilter::default(), None, 1).await,

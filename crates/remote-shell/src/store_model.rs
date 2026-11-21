@@ -19,6 +19,7 @@ pub enum Cell {
     Text(String),
     Bytes(Vec<u8>),
     Null,
+    Unreadable,
 }
 
 

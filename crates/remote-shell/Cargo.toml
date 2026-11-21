@@ -6,7 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+alerts = { version = "0.0.0", path = "../alerts" }
+axum = "0.8"
 cmdb = { version = "0.0.0", path = "../cmdb" }
+core-api = { version = "0.0.0", path = "../core-api" }
 core-auth = { version = "0.0.0", path = "../core-auth" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
@@ -14,13 +17,23 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-time = "0.3"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["sync"] }
+tokio-postgres = "0.7"
+tracing = "0.1"
+utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
+core-audit = { version = "0.0.0", path = "../core-audit" }
+pg-fake = { version = "0.0.0", path = "../pg-fake" }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 regex = "1"
+signal-hook = "0.4.6"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
-tokio-postgres = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tracing-log = "0.2"
+tracing-subscriber = "0.3"
 
 [lints]
 workspace = true

@@ -2,9 +2,10 @@
 
 use crate::error::InstalledError;
 use crate::limits::Limits;
-use crate::model::{Installed, InstalledRow, Line, Manager};
+use crate::model::{Gap, Installed, InstalledRow, Line, Manager};
 use patch_inventory::scan::is_forbidden;
 use patch_inventory::validate::{is_dpkg_name, is_plain_text};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 
@@ -61,29 +62,32 @@ pub fn parse_line(line: &[u8], limits: &Limits) -> Option<Line> {
 
 
 pub fn parse_installed<Source: Read>(reader: Source, limits: &Limits) -> Result<Installed, InstalledError> {
-    parse_with(reader, limits, parse_line).map(|installed| Installed {
-        manager: Some(Manager::Apt),
-        ..installed
-    })
+    parse_with(reader, limits, Manager::Apt, parse_line)
 }
 
 
 pub fn parse_with<Source: Read>(
     reader: Source,
     limits: &Limits,
+    manager: Manager,
     line_parser: fn(&[u8], &Limits) -> Option<Line>,
 ) -> Result<Installed, InstalledError> {
     let buffer = read_input(reader, limits)?;
-    Ok(buffer
-        .split(|byte| *byte == NEWLINE)
-        .filter(|line| !line.is_empty())
-        .fold(Installed::default(), |mut installed, line| {
+    let installed = buffer.split(|byte| *byte == NEWLINE).filter(|line| !line.is_empty()).fold(
+        (Installed::default(), Gap::default()),
+        |(mut installed, mut gap), line| {
             match line_parser(line, limits) {
                 Some(Line::Row(row)) if installed.rows.len() < limits.max_installed => installed.rows.push(row),
-                Some(Line::Row(_)) => installed.over_limit += 1,
+                Some(Line::Row(_)) => gap.over_limit += 1,
                 Some(Line::NotInstalled) => installed.not_installed += 1,
-                None => installed.malformed += 1,
+                None => gap.malformed += 1,
             }
-            installed
-        }))
+            (installed, gap)
+        },
+    );
+    Ok(Installed {
+        read_managers: BTreeSet::from([manager]),
+        gaps: BTreeMap::from([(manager, installed.1)]),
+        ..installed.0
+    })
 }

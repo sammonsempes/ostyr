@@ -1,4 +1,4 @@
-use crate::common::{available, catalogue, entry, row, RemovalPlan, TestResult};
+use crate::common::{available, catalogue, entry, installed, row, RemovalPlan, TestResult};
 use software_catalog::installed_rpm::parse_rpm_installed;
 use software_catalog::limits::Limits;
 use software_catalog::model::{ActionKind, Assignment, Installed, Manager, Source};
@@ -18,10 +18,7 @@ fn assign(name: &str) -> Assignment {
 
 
 fn plan_kinds(rows: &[(&str, &str)], pin: &str) -> Result<Vec<ActionKind>, Box<dyn std::error::Error>> {
-    let installed = Installed {
-        rows: rows.iter().map(|(package, version)| row(Manager::Dnf, package, version)).collect(),
-        ..Installed::default()
-    };
+    let installed = installed(rows.iter().map(|(package, version)| row(Manager::Dnf, package, version)).collect());
     let cat = catalogue(vec![entry("pkg", Source::Dnf("pkg".to_string()), pin)]);
     let result = plan(&cat, &assign("pkg"), &installed, &available(Manager::Dnf, &["pkg"]))?;
     Ok(result.actions.iter().map(|action| action.kind).collect())
@@ -83,10 +80,7 @@ fn an_unparsable_row_among_several_makes_the_action_unknown_in_both_orders() -> 
 fn a_held_row_among_several_holds_the_update() -> TestResult {
     let mut held = row(Manager::Dnf, "pkg", "0:1.0-1");
     held.held = true;
-    let installed = Installed {
-        rows: vec![row(Manager::Dnf, "pkg", "0:1.1-1"), held],
-        ..Installed::default()
-    };
+    let installed = installed(vec![row(Manager::Dnf, "pkg", "0:1.1-1"), held]);
     let cat = catalogue(vec![entry("pkg", Source::Dnf("pkg".to_string()), "1.2-1")]);
     let result = plan(&cat, &assign("pkg"), &installed, &available(Manager::Dnf, &["pkg"]))?;
     assert_eq!(
@@ -127,17 +121,15 @@ fn the_fixture_kernels_plan_the_same_in_both_orders() -> TestResult {
 
 
 fn removal(rows: &[(&str, &str)], held: bool) -> Result<RemovalPlan, Box<dyn std::error::Error>> {
-    let installed = Installed {
-        rows: rows
-            .iter()
+    let installed = installed(
+        rows.iter()
             .map(|(package, version)| {
                 let mut found = row(Manager::Dnf, package, version);
                 found.held = held;
                 found
             })
             .collect(),
-        ..Installed::default()
-    };
+    );
     let mut removable = entry("pkg", Source::Dnf("pkg".to_string()), "1.0-1");
     removable.uninstall = true;
     let assignment = Assignment {
