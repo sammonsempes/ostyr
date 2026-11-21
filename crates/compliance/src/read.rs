@@ -40,9 +40,9 @@ pub const LIST_VERDICT_SQL: &str = "SELECT baseline, control, asset, verdict, CO
 
 pub const LIST_VERDICT_BASELINE_SQL: &str =
     "SELECT baseline, control, asset, verdict, COALESCE(first_failed_micros::text, ''), last_seen_micros::text \
-                                             FROM compliance_state WHERE tenant = $1 AND verdict = $2::text AND baseline = $7::text \
-                                             AND (baseline, control, asset) > ($3::text, $4::text, $5::text) \
-                                             ORDER BY baseline, control, asset LIMIT $6::text::bigint";
+     FROM compliance_state WHERE tenant = $1 AND verdict = $2::text AND baseline = $7::text AND $3::text <= $7::text \
+     AND (control, asset) > (CASE WHEN $3::text < $7::text THEN '' ELSE $4::text END, CASE WHEN $3::text < $7::text THEN '' ELSE $5::text END) \
+     ORDER BY baseline, control, asset LIMIT $6::text::bigint";
 
 
 pub const LIST_ALL_SQL: &str = "SELECT baseline, control, asset, verdict, COALESCE(first_failed_micros::text, ''), last_seen_micros::text \
@@ -52,9 +52,9 @@ pub const LIST_ALL_SQL: &str = "SELECT baseline, control, asset, verdict, COALES
 
 
 pub const LIST_ALL_BASELINE_SQL: &str = "SELECT baseline, control, asset, verdict, COALESCE(first_failed_micros::text, ''), last_seen_micros::text \
-                                         FROM compliance_state WHERE tenant = $1 AND baseline = $6::text \
-                                         AND (baseline, control, asset) > ($2::text, $3::text, $4::text) \
-                                         ORDER BY baseline, control, asset LIMIT $5::text::bigint";
+     FROM compliance_state WHERE tenant = $1 AND baseline = $6::text AND $2::text <= $6::text \
+     AND (control, asset) > (CASE WHEN $2::text < $6::text THEN '' ELSE $3::text END, CASE WHEN $2::text < $6::text THEN '' ELSE $4::text END) \
+     ORDER BY baseline, control, asset LIMIT $5::text::bigint";
 
 
 pub const ASSET_SQL: &str = "SELECT baseline, control, asset, verdict, COALESCE(first_failed_micros::text, ''), last_seen_micros::text \
