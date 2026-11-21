@@ -992,14 +992,15 @@ pub fn valid_vuln_asset(text: &str) -> bool {
 
 /// The vulnerability store's cursor grammar (copy): a canonical `u32` priority and four fields, space separated.
 pub fn valid_vuln_cursor(cursor: &str) -> bool {
-    let parts: Vec<&str> = cursor.split(VULN_CURSOR_SEPARATOR).collect();
+    let parts: Vec<&str> = if cursor.len() > MAX_VULN_CURSOR_BYTES {
+        Vec::new()
+    } else {
+        cursor.split(VULN_CURSOR_SEPARATOR).collect()
+    };
     let priority_fits = parts
         .first()
         .is_some_and(|digits| digits.parse::<u32>().is_ok_and(|parsed| parsed.to_string() == *digits));
-    cursor.len() <= MAX_VULN_CURSOR_BYTES
-        && parts.len() == VULN_CURSOR_FIELDS
-        && priority_fits
-        && parts.iter().skip(1).all(|part| valid_vuln_field(part))
+    parts.len() == VULN_CURSOR_FIELDS && priority_fits && parts.iter().skip(1).all(|part| valid_vuln_field(part))
 }
 
 
@@ -1008,7 +1009,7 @@ pub fn vuln_score(raw: &RawValue, max: f64) -> Option<f64> {
     raw.get()
         .parse::<f64>()
         .ok()
-        .filter(|score| score.is_finite() && (VULN_SCORE_MIN..=max).contains(score))
+        .filter(|score| score.is_finite() && score.is_sign_positive() && (VULN_SCORE_MIN..=max).contains(score))
 }
 
 

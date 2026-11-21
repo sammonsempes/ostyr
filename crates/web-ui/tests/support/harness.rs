@@ -197,6 +197,18 @@ pub fn csrf_in(body: &str) -> Option<String> {
 }
 
 
+pub fn without_tokens(body: &str) -> String {
+    let marker = "name=\"csrf\" value=\"";
+    body.split(marker)
+        .enumerate()
+        .map(|(position, part)| match (position, part.split_once('"')) {
+            (0, _) | (_, None) => part.to_owned(),
+            (_, Some((_, rest))) => format!("{marker}\"{rest}"),
+        })
+        .collect::<String>()
+}
+
+
 pub async fn login_csrf(harness: &Harness) -> Result<String, TestError> {
     let reply = fire(harness, get("/login")).await?;
     let cookie = set_cookie_of(&reply, "__Host-ostyr_login").ok_or("no login cookie")?;

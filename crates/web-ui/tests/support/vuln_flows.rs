@@ -1,5 +1,5 @@
 use super::{assert_hardened, assert_no_hidden_characters, set_mode, HUGE_CURSOR_CHARS, THREE_CALLS, TWO_VALID_CALLS};
-use crate::harness::{fire, get, get_with, harness, location_of, sign_in, Harness, Req};
+use crate::harness::{fire, get, get_with, harness, location_of, sign_in, without_tokens, Harness, Req};
 use crate::stub::{Mode, LEAK};
 use crate::types::{TestError, TestResult};
 use axum::http::StatusCode;
@@ -95,8 +95,9 @@ async fn a_hostile_vulnerability_row_is_an_unreadable_row_and_never_printed_raw(
     let list = fire(&rig, get_with("/vulnerabilities", &session)).await?;
     assert_eq!(list.status, StatusCode::OK);
     assert_no_hidden_characters(&list.body);
+    let list_page = without_tokens(&list.body);
     for forbidden in ["evil", "\u{3164}", "not a time", "-x", "NaN", "<script>x"] {
-        assert!(!list.body.contains(forbidden), "{forbidden}");
+        assert!(!list_page.contains(forbidden), "{forbidden}");
     }
     assert!(list.body.contains("&lt;script&gt;x&lt;/script&gt;"));
     assert_eq!(list.body.matches("Unreadable row.").count(), VULN_LIST_UNREADABLE_ROWS);
@@ -104,8 +105,9 @@ async fn a_hostile_vulnerability_row_is_an_unreadable_row_and_never_printed_raw(
     let detail = fire(&rig, get_with("/vulnerabilities/web01", &session)).await?;
     assert_eq!(detail.status, StatusCode::OK);
     assert_no_hidden_characters(&detail.body);
+    let detail_page = without_tokens(&detail.body);
     for forbidden in ["evil", "\u{3164}", "not a time", "foreign", "other-asset", "NaN"] {
-        assert!(!detail.body.contains(forbidden), "{forbidden}");
+        assert!(!detail_page.contains(forbidden), "{forbidden}");
     }
     assert_eq!(detail.body.matches("Unreadable row.").count(), VULN_DETAIL_UNREADABLE_ROWS);
     assert!(detail.body.contains("fine") && detail.body.contains("Results cut at 1000.") && detail.body.contains("1 row could not be read."));

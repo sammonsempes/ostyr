@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use data_encoding::HEXLOWER;
 use harness::{
     cookie_value_of, csrf_in, fire, fire_body, get, get_with, harness, harness_custom, location_of, login_body, login_csrf, post_form, post_login,
-    set_cookie_of, sign_in, Harness, Reply, Req, LIMITS, WALL_NOW,
+    set_cookie_of, sign_in, without_tokens, Harness, Reply, Req, LIMITS, WALL_NOW,
 };
 use secrecy::SecretString;
 use std::collections::BTreeMap;
@@ -2616,7 +2616,8 @@ async fn a_hostile_finding_is_an_unreadable_row_and_never_printed() -> TestResul
     let list = fire(&rig, get_with("/hunts", &session)).await?;
     assert_eq!(list.status, StatusCode::OK);
     assert_no_hidden_characters(&list.body);
-    assert!(!list.body.contains('\u{3164}') && !list.body.contains("evil") && !list.body.contains("Upper") && !list.body.contains("not a time"));
+    let list_page = without_tokens(&list.body);
+    assert!(!list_page.contains('\u{3164}') && !list_page.contains("evil") && !list_page.contains("Upper") && !list_page.contains("not a time"));
     assert_eq!(list.body.matches("Unreadable row.").count(), HUNT_UNREADABLE_ROWS);
     assert_eq!(list.body.matches("<td>7</td>").count(), 1);
     assert!(list.body.contains("fine.pack_1") && list.body.contains("2026-03-02T00:00:00Z"));
@@ -2792,7 +2793,7 @@ async fn a_hostile_state_row_is_an_unreadable_row_and_never_printed() -> TestRes
     assert_eq!(list.status, StatusCode::OK);
     assert_no_hidden_characters(&list.body);
     for forbidden in ["evil", "script", "\u{3164}", "bogus", "not a time", "-x"] {
-        assert!(!list.body.contains(forbidden), "{forbidden}");
+        assert!(!without_tokens(&list.body).contains(forbidden), "{forbidden}");
     }
     assert_eq!(list.body.matches("Unreadable row.").count(), STATE_LIST_UNREADABLE_ROWS);
     assert!(list.body.contains("fine.1") && list.body.contains("other-asset") && list.body.contains("1 row could not be read."));
@@ -2800,7 +2801,7 @@ async fn a_hostile_state_row_is_an_unreadable_row_and_never_printed() -> TestRes
     assert_eq!(detail.status, StatusCode::OK);
     assert_no_hidden_characters(&detail.body);
     for forbidden in ["evil", "script", "\u{3164}", "bogus", "not a time", "other-asset"] {
-        assert!(!detail.body.contains(forbidden), "{forbidden}");
+        assert!(!without_tokens(&detail.body).contains(forbidden), "{forbidden}");
     }
     assert_eq!(detail.body.matches("Unreadable row.").count(), STATE_DETAIL_UNREADABLE_ROWS);
     assert!(detail.body.contains("fine.1") && detail.body.contains("<td>Excepted</td>"));
@@ -3019,14 +3020,14 @@ async fn a_hostile_oncall_row_is_an_unreadable_row_and_never_printed() -> TestRe
     assert_eq!(list.status, StatusCode::OK);
     assert_no_hidden_characters(&list.body);
     for forbidden in ["evil", "script", "\u{3164}", "bogus", "not a time", "two  spaces", "aaaaaaaaaa", "\u{e9}"] {
-        assert!(!list.body.contains(forbidden), "{forbidden}");
+        assert!(!without_tokens(&list.body).contains(forbidden), "{forbidden}");
     }
     assert_eq!(list.body.matches("Unreadable row.").count(), ONCALL_HOSTILE_UNREADABLE_ROWS);
     assert!(list.body.contains("fine.fp 1") && list.body.contains("<td>Escalated</td>") && list.body.contains("1 row could not be read."));
     let detail = fire(&rig, get_with("/oncall/3", &session)).await?;
     assert_eq!(detail.status, StatusCode::OK);
     assert_no_hidden_characters(&detail.body);
-    assert!(!detail.body.contains("evil") && detail.body.contains("Unreadable row."));
+    assert!(!without_tokens(&detail.body).contains("evil") && detail.body.contains("Unreadable row."));
     Ok(())
 }
 
@@ -3117,5 +3118,19 @@ async fn oncall_api_failures_render_our_own_text() -> TestResult {
     set_mode(&rig, Mode::Status(StatusCode::UNAUTHORIZED))?;
     let ended_detail = fire(&rig, get_with("/oncall/7", &second)).await?;
     assert_eq!(location_of(&ended_detail).as_deref(), Some("/login"));
+    Ok(())
+}
+
+
+#[test]
+fn a_token_holding_a_forbidden_text_is_blanked_before_the_scan() -> TestResult {
+    let page = "<input name=\"csrf\" value=\"ab-xNaNevil\"><p>x</p><input name=\"csrf\" value=\"q-x\">";
+    assert!(page.contains("-x") && page.contains("NaN") && page.contains("evil"));
+    let cleaned = without_tokens(page);
+    assert!(
+        !cleaned.contains("-x") && !cleaned.contains("NaN") && !cleaned.contains("evil"),
+        "{cleaned}"
+    );
+    assert!(cleaned.contains("<p>x</p>"));
     Ok(())
 }
