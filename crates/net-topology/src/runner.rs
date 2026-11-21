@@ -71,12 +71,12 @@ fn spawn_failure(error: io::Error) -> RunFailure {
 }
 
 
-fn spawn(program: &Path, arguments: &[&str], environment: &[(&str, &str)], stdout: PipeWriter) -> io::Result<Child> {
+fn spawn(program: &Path, arguments: &[&str], environment: &[(&str, &str)], stdin: Stdio, stdout: PipeWriter) -> io::Result<Child> {
     Command::new(program)
         .args(arguments)
         .env_clear()
         .envs(environment.iter().copied())
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(stdout)
         .stderr(Stdio::null())
         .process_group(NEW_PROCESS_GROUP)
@@ -279,10 +279,35 @@ pub fn run_command_with_env(
     cap: u64,
     deadline: Duration,
 ) -> Result<Vec<u8>, RunFailure> {
+    run_with_stdin(program, arguments, environment, Stdio::null(), cap, deadline)
+}
+
+
+/// `run_command_with_env` with `input` as the child's standard input: a pipe whose writer the caller already dropped, never a path or an argument.
+pub fn run_command_with_input(
+    program: &Path,
+    arguments: &[&str],
+    environment: &[(&str, &str)],
+    input: PipeReader,
+    cap: u64,
+    deadline: Duration,
+) -> Result<Vec<u8>, RunFailure> {
+    run_with_stdin(program, arguments, environment, Stdio::from(input), cap, deadline)
+}
+
+
+fn run_with_stdin(
+    program: &Path,
+    arguments: &[&str],
+    environment: &[(&str, &str)],
+    stdin: Stdio,
+    cap: u64,
+    deadline: Duration,
+) -> Result<Vec<u8>, RunFailure> {
     require_waitable(Path::new(PROC_STATUS))?;
     let until = Instant::now() + deadline.min(Duration::from_secs(MAX_DEADLINE_SECONDS));
     let (mut reader, writer) = io::pipe()?;
-    let mut child = spawn(program, arguments, environment, writer).map_err(spawn_failure)?;
+    let mut child = spawn(program, arguments, environment, stdin, writer).map_err(spawn_failure)?;
     let verdict = read_output(&mut reader, cap, until).and_then(|bytes| finish(&mut child, bytes, until));
     if !matches!(verdict, Ok(_) | Err(RunFailure::Failed { .. } | RunFailure::Unwaitable)) {
         reap_killed(&mut child, &mut Instant::now);

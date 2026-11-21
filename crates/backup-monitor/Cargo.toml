@@ -17,6 +17,7 @@ unicode-general-category = "1"
 
 [target.'cfg(unix)'.dependencies]
 net-topology = { version = "0.0.0", path = "../net-topology" }
+rustix = { version = "1.1", features = ["process", "fs"] }
 
 [dev-dependencies]
 tempfile = "3"
