@@ -249,7 +249,7 @@ pub fn vulnerabilities_access() -> AccessTable {
                 route_key("GET", path),
                 Rule {
                     requirement: Requirement::Permission(PERMISSION_CMDB_READ.to_owned()),
-                    sensitive: false,
+                    sensitive: true,
                 },
             )
         })
