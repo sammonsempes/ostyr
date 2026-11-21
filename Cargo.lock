@@ -1119,10 +1119,16 @@ name = "cloud-posture"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "axum",
+ "core-api",
+ "core-audit",
+ "core-auth",
  "core-config",
  "core-pg",
  "libc",
  "net-topology",
+ "pg-fake",
+ "rcgen",
  "regex",
  "rustix 1.1.6",
  "serde",
@@ -1130,11 +1136,16 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tower",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

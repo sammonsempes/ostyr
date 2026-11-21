@@ -6,11 +6,11 @@ use cloud_posture::error::StoreError;
 use cloud_posture::model::{Finding, PageCursor, RunHeader, Severity, Status};
 use cloud_posture::page::{
     check_cursor, check_read, cursor_text, finding_of, header_of, is_identity_hex, micros_of, next_cursor, page_of, page_params, parse_cursor,
-    rank_of, read_findings, refusal_pending, served_of, COL_BAD_FIELD, COL_CHECK, COL_DETAIL, COL_DETAIL_CUT, COL_DUPLICATE, COL_FINISHED,
-    COL_FOREIGN, COL_IDENTITY, COL_ITEMS, COL_PROVIDER, COL_RANK, COL_REFUSED_FAIL, COL_REFUSED_ITEMS, COL_REFUSED_MANUAL, COL_REFUSED_MICROS,
-    COL_REFUSED_MUTED, COL_REFUSED_PASS, COL_REGION, COL_RESOURCE_TYPE, COL_RESOURCE_UID, COL_RUN_ID, COL_SEVERITY, COL_STATUS, COL_STORE_REFUSED,
-    COL_TIME, COL_TITLE, COL_TITLE_CUT, COL_UID, COL_UNPARSABLE, CURSOR_FIELDS, MAX_CURSOR_BYTES, MAX_PAGE_LIMIT, PAGE_SQL, RANK_BEFORE_FIRST,
-    ROW_COLUMNS,
+    rank_of, read_findings, read_parsed, refusal_pending, served_of, COL_BAD_FIELD, COL_CHECK, COL_DETAIL, COL_DETAIL_CUT, COL_DUPLICATE,
+    COL_FINISHED, COL_FOREIGN, COL_IDENTITY, COL_ITEMS, COL_PROVIDER, COL_RANK, COL_REFUSED_FAIL, COL_REFUSED_ITEMS, COL_REFUSED_MANUAL,
+    COL_REFUSED_MICROS, COL_REFUSED_MUTED, COL_REFUSED_PASS, COL_REGION, COL_RESOURCE_TYPE, COL_RESOURCE_UID, COL_RUN_ID, COL_SEVERITY, COL_STATUS,
+    COL_STORE_REFUSED, COL_TIME, COL_TITLE, COL_TITLE_CUT, COL_UID, COL_UNPARSABLE, CURSOR_FIELDS, MAX_CURSOR_BYTES, MAX_PAGE_LIMIT, PAGE_SQL,
+    RANK_BEFORE_FIRST, ROW_COLUMNS,
 };
 use cloud_posture::prowler::identity_of;
 use cloud_posture::store::MIGRATIONS;
@@ -295,6 +295,15 @@ async fn account_limit_and_cursor_are_refused_before_any_io() -> TestResult {
     ));
     assert!(calls_of(&fake)?.is_empty());
     assert!(check_read("acc", None, MAX_PAGE_LIMIT)?.is_none());
+    assert!(matches!(
+        refused(read_parsed(&exec, &scope, "-acc", None, 1).await)?,
+        StoreError::BadAccount
+    ));
+    assert!(matches!(
+        refused(read_parsed(&exec, &scope, "acc", None, 0).await)?,
+        StoreError::BadLimit { .. }
+    ));
+    assert!(calls_of(&fake)?.is_empty());
     Ok(())
 }
 
