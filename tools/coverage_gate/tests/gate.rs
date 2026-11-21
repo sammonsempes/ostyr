@@ -177,7 +177,7 @@ fn both_shortfalls_are_listed() -> anyhow::Result<()> {
     let both = BRANCH_MISSED.replace("\"covered\":10", "\"covered\":8");
     let export = write_export(&root, &both)?;
     let parsed = parse_export(fs::File::open(&export)?)?;
-    let violations = check(&parsed, &find_sources(&root)?)?;
+    let violations = check(&parsed, &root, &find_sources(&root)?)?;
     assert_eq!(violations.len(), TWO_SHORTFALLS);
     assert!(matches!(
         violations.first(),
@@ -346,7 +346,7 @@ fn executable_code_detection() -> anyhow::Result<()> {
         "#![allow(dead_code)]\nfn a() {}",
     ];
     for text in code {
-        assert!(has_executable_code(text)?, "{text}");
+        assert!(has_executable_code(text, false)?, "{text}");
     }
     let plain = [
         "",
@@ -361,7 +361,7 @@ fn executable_code_detection() -> anyhow::Result<()> {
         "#![cfg(windows)]\nfn a() {}",
     ];
     for text in plain {
-        assert!(!has_executable_code(text)?, "{text}");
+        assert!(!has_executable_code(text, false)?, "{text}");
     }
     Ok(())
 }

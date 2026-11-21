@@ -1,8 +1,11 @@
 use crate::error::GateError;
-use crate::executable::file_has_executable_code;
+use crate::executable::inspect_source;
 use crate::export::{Counts, Export, FileEntry};
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+
+const BOUNDARY_DIR: &str = "crates/ebpf-probes";
 
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,11 +47,20 @@ pub fn check_entry(source: &Path, entry: &FileEntry) -> Vec<Violation> {
 }
 
 
-pub fn check_source(export: &Export, source: &Path) -> Result<Vec<Violation>, GateError> {
+pub fn in_boundary(root: &Path, source: &Path) -> bool {
+    source.starts_with(root.join(BOUNDARY_DIR))
+}
+
+
+pub fn check_source(export: &Export, root: &Path, source: &Path) -> Result<Vec<Violation>, GateError> {
+    let (path_module, executable) = inspect_source(source, in_boundary(root, source))?;
+    if path_module {
+        Err(GateError::PathModule { path: source.to_path_buf() })?;
+    }
     let listed = export.data.iter().flat_map(|data| &data.files).find(|entry| entry.filename == source);
     Ok(match listed {
         Some(entry) => check_entry(source, entry),
-        None => file_has_executable_code(source)?
+        None => executable
             .then(|| Violation::Missing { file: source.to_path_buf() })
             .into_iter()
             .collect(),
@@ -56,7 +68,10 @@ pub fn check_source(export: &Export, source: &Path) -> Result<Vec<Violation>, Ga
 }
 
 
-pub fn check(export: &Export, sources: &[PathBuf]) -> Result<Vec<Violation>, GateError> {
-    let per_file = sources.iter().map(|source| check_source(export, source)).collect::<Result<Vec<_>, _>>()?;
+pub fn check(export: &Export, root: &Path, sources: &[PathBuf]) -> Result<Vec<Violation>, GateError> {
+    let per_file = sources
+        .iter()
+        .map(|source| check_source(export, root, source))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(per_file.into_iter().flatten().collect())
 }

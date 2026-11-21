@@ -1,0 +1,54 @@
+[package]
+name = "ebpf-probes-kernel"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+aya-ebpf = "=0.3.0"
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+debug = 2
+lto = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+exit = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+shadow_unrelated = "deny"
+shadow_reuse = "deny"
+shadow_same = "deny"
+infinite_loop = "deny"
+let_underscore_must_use = "deny"
+needless_return = "deny"
+bool_comparison = "deny"
+partialeq_to_none = "deny"
+arithmetic_side_effects = "deny"
+integer_division = "deny"
+modulo_arithmetic = "deny"
+string_slice = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+missing_assert_message = "deny"
+assertions_on_result_states = "deny"
