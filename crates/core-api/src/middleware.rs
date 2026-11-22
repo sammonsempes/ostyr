@@ -1,10 +1,11 @@
 use crate::failure::{auth_failure, error_response};
 use crate::model::{
-    ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, Exchange, ForwardedBy, Limits, RequestId, Requirement, Window,
+    ApiError, ApiIdentity, ApiState, Authenticated, ClientSource, Decision, Exchange, ForwardedBy, Limits, RequestId, Requirement, Rule, Window,
 };
 use crate::routes::{route_key, BODY_LIMIT_BYTES};
-use crate::state::{lock_auth, refresh_accounts, session_revoked};
-use crate::types::SharedState;
+use crate::server::admit_connection;
+use crate::state::{lock_auth, refresh_accounts, session_revoked, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_WRITES};
+use crate::types::{DetachedPermit, SharedState};
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::header::{
@@ -449,6 +450,95 @@ pub fn audit_exchange(app: &ApiState, exchange: &Exchange) -> Result<(), AuditEr
 }
 
 
+/// Appends the exchange record for `response` and answers 500 instead when the append fails.
+pub fn audit_response(app: &ApiState, template: Exchange, response: Response) -> Response {
+    let exchange = Exchange {
+        status: response.status(),
+        ..template
+    };
+    match audit_exchange(app, &exchange) {
+        Ok(()) => response,
+        Err(error) => {
+            tracing::error!(%error, "audit append failed, request answered with an error");
+            error_response(&ApiError::Internal)
+        }
+    }
+}
+
+
+/// A state-changing request under a session or a permission runs detached (T769); public routes (login, OIDC) never do.
+pub fn detaches(rule: Option<&Rule>, state_changing: bool) -> bool {
+    state_changing
+        && matches!(
+            rule.map(|found| &found.requirement),
+            Some(Requirement::Session | Requirement::Permission(_))
+        )
+}
+
+
+/// Takes the per-source slot then a global slot of the detached writes, never queueing; `None` when either is full.
+pub fn admit_detached(app: &ApiState, source: IpAddr) -> Option<DetachedPermit> {
+    admit_connection(&app.detached_sources, source, MAX_DETACHED_PER_SOURCE).and_then(|slot| {
+        app.detached
+            .clone()
+            .try_acquire_owned()
+            .inspect_err(|error| tracing::debug!(%error, "detached write pool full"))
+            .ok()
+            .map(|permit| (permit, slot))
+    })
+}
+
+
+/// Counts a refused detached write and warns when the count is a power of two, so the log stays bounded.
+pub fn note_detached_refused(app: &ApiState) -> u64 {
+    let count = app.detached_refused.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if count.is_power_of_two() {
+        tracing::dispatcher::with_default(&app.dispatch, || {
+            tracing::warn!(count, "detached write pool full, request refused");
+        });
+    }
+    count
+}
+
+
+/// Runs the handler in its own task and audits the result there, so a client that leaves never cancels the work between its commit and its record.
+pub async fn complete_write(app: SharedState, request: Request, next: Next, template: Exchange, _permit: DetachedPermit) -> Response {
+    let response = tokio::spawn(next.run(request)).await.unwrap_or_else(|_| {
+        tracing::error!("write handler task failed");
+        error_response(&ApiError::Internal)
+    });
+    audit_response(&app, template, response)
+}
+
+
+/// Admits the write to the detached pool, or answers 503 `busy` with one audited record.
+pub async fn run_detached(app: SharedState, request: Request, next: Next, template: Exchange, source: IpAddr) -> Response {
+    match admit_detached(&app, source) {
+        None => {
+            note_detached_refused(&app);
+            audit_response(&app, template, error_response(&ApiError::Busy))
+        }
+        Some(permit) => tokio::spawn(complete_write(app, request, next, template, permit))
+            .await
+            .unwrap_or_else(|_| {
+                tracing::error!("detached write task failed");
+                error_response(&ApiError::Internal)
+            }),
+    }
+}
+
+
+/// Waits until every detached write has written its record; false when `timeout` passes first (those writes are cancelled with the runtime).
+pub async fn drain_detached(app: &ApiState, timeout: std::time::Duration) -> bool {
+    let all = app.detached.clone().acquire_many_owned(u32::from(MAX_DETACHED_WRITES));
+    let drained = tokio::time::timeout(timeout, all).await.is_ok();
+    if !drained {
+        tracing::warn!("detached writes still running at shutdown");
+    }
+    drained
+}
+
+
 pub async fn guard(
     State(app): State<SharedState>,
     Extension(id): Extension<RequestId>,
@@ -461,18 +551,9 @@ pub async fn guard(
     let decision = decide(&app, rule.map(|found| &found.requirement), bearer_token(request.headers()), (app.clock)());
     let identity = decision.identity.clone().unwrap_or_else(|| app.identity.load_full());
     let state_changing = !request.method().is_safe();
+    let detach = detaches(rule, state_changing);
     let forwarded_by = request.extensions().get::<ForwardedBy>().map(|found| found.0);
-    let response = match decision.error {
-        Some(error) => error_response(&error),
-        None => {
-            request.extensions_mut().insert(identity.clone());
-            decision.session.into_iter().for_each(|session| {
-                request.extensions_mut().insert(session);
-            });
-            next.run(request).await
-        }
-    };
-    let exchange = Exchange {
+    let template = Exchange {
         request_id: id.0,
         actor: decision.actor,
         route,
@@ -480,14 +561,21 @@ pub async fn guard(
         sensitive: rule.is_some_and(|found| found.sensitive),
         source: rate_key(peer.ip()).to_string(),
         forwarded_by: forwarded_by.map(|by| by.to_string()),
-        status: response.status(),
+        status: StatusCode::OK,
         identity: identity.clone(),
     };
-    let mut answered = match audit_exchange(&app, &exchange) {
-        Ok(()) => response,
-        Err(error) => {
-            tracing::error!(%error, "audit append failed, request answered with an error");
-            error_response(&ApiError::Internal)
+    let mut answered = match decision.error {
+        Some(error) => audit_response(&app, template, error_response(&error)),
+        None => {
+            request.extensions_mut().insert(identity.clone());
+            decision.session.into_iter().for_each(|session| {
+                request.extensions_mut().insert(session);
+            });
+            if detach {
+                run_detached(app.clone(), request, next, template, peer.ip()).await
+            } else {
+                audit_response(&app, template, next.run(request).await)
+            }
         }
     };
     answered.extensions_mut().insert(identity);

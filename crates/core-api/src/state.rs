@@ -5,7 +5,7 @@ use crate::previous::{read_previous_key, record_previous, remove_stale_previous,
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
 use crate::routes::{core_access, openapi_document};
 use crate::server::read_public;
-use crate::types::AccessTable;
+use crate::types::{AccessTable, ConnectionTable};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use core_audit::log::{open_file_log, AuditLog};
 use core_audit::model::Outcome;
@@ -43,6 +43,18 @@ pub const RATE_MAX_REQUESTS: u32 = 30;
 
 
 pub const MAX_CONCURRENT_HASHES: usize = 4;
+
+
+/// Writes that may run past their client at once (the global pool of the detached writes of `guard`, T769).
+pub const MAX_DETACHED_WRITES: u16 = 64;
+
+
+/// Detached writes one folded source may hold at once.
+pub const MAX_DETACHED_PER_SOURCE: usize = 8;
+
+
+/// How long `run_module` waits at shutdown for the detached writes: above the handlers' own deadlines (about 75 s for a cases action).
+pub const DETACHED_DRAIN_SECONDS: u64 = 90;
 
 
 pub const STARTUP_REQUEST_ID: &str = "startup";
@@ -125,6 +137,9 @@ pub fn build_state(
         callback_accounts: Mutex::new(BTreeSet::new()),
         forwarders: ArcSwap::from_pointee(Vec::new()),
         ignored_forwarding: AtomicU64::new(0),
+        detached: Arc::new(Semaphore::new(usize::from(MAX_DETACHED_WRITES))),
+        detached_sources: ConnectionTable::default(),
+        detached_refused: AtomicU64::new(0),
     })
 }
 

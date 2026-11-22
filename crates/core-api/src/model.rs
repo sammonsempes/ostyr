@@ -54,6 +54,9 @@ pub struct ApiState {
     pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
     pub forwarders: ArcSwap<Vec<IpNet>>,
     pub ignored_forwarding: AtomicU64,
+    pub detached: Arc<Semaphore>,
+    pub detached_sources: ConnectionTable,
+    pub detached_refused: AtomicU64,
 }
 
 
@@ -245,6 +248,7 @@ pub enum ApiError {
     PayloadTooLarge,
     TooManyRequests,
     BadGateway,
+    Busy,
     Internal,
 }
 

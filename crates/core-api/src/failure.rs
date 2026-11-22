@@ -21,6 +21,7 @@ pub fn error_parts(error: &ApiError) -> (StatusCode, &'static str, &'static str)
         ),
         ApiError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "the request body is too large"),
         ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", "too many requests, retry later"),
+        ApiError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy", "the server is busy, retry later"),
         ApiError::BadGateway => (StatusCode::BAD_GATEWAY, "bad_gateway", "the identity provider is unavailable"),
         ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "the request could not be processed"),
     }
