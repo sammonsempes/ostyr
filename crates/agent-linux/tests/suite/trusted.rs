@@ -1,6 +1,7 @@
 use crate::types::TestResult;
 use agent_linux::trusted::{
-    judge_trusted_file, no_hook, read_trusted_capped, read_trusted_with, NOT_OWNED, NOT_REGULAR, ROOT_UID, SYMLINK, WRITABLE,
+    directory_reason, judge_trusted_file, no_hook, read_trusted_capped, read_trusted_with, DIRECTORY_ANCESTOR_NOT_OWNED, DIRECTORY_NOT_OWNED,
+    DIRECTORY_WRITABLE, NOT_OWNED, NOT_REGULAR, PATH_NOT_ABSOLUTE, PATH_NOT_PLAIN, ROOT_UID, SYMLINK, WRITABLE,
 };
 use core_config::error::ConfigError;
 use std::fs;
@@ -198,5 +199,22 @@ fn a_bad_handle_is_refused_even_when_the_path_is_swapped_for_a_good_file() -> Te
     fs::set_permissions(&path, fs::Permissions::from_mode(ALL_WRITE))?;
     fs::write(dir.path().join("swap"), BODY)?;
     assert_eq!(reason_of(read_trusted_with(&path, CAP, judge_trusted_file, swap_in))?, WRITABLE);
+    Ok(())
+}
+
+
+#[test]
+fn a_directory_refusal_is_worded_about_the_directory_of_the_file() -> TestResult {
+    assert_eq!(
+        directory_reason("work directory ancestor is not owned by root or the caller"),
+        DIRECTORY_ANCESTOR_NOT_OWNED
+    );
+    assert_eq!(directory_reason("work directory is not owned by the caller"), DIRECTORY_NOT_OWNED);
+    assert_eq!(
+        directory_reason("work directory ancestor is writable by group or others"),
+        DIRECTORY_WRITABLE
+    );
+    assert_eq!(directory_reason("work directory is not absolute"), PATH_NOT_ABSOLUTE);
+    assert_eq!(directory_reason("path is not in canonical form"), PATH_NOT_PLAIN);
     Ok(())
 }
