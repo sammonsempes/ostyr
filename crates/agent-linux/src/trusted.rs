@@ -2,16 +2,13 @@
 
 use crate::types::{AfterOpenFn, JudgeFn};
 use core_config::error::ConfigError;
-use core_config::trusted_dir::{open_trusted_dir, TrustedDirError};
+use core_config::trusted_dir::{open_trusted_dir, TrustedDirError, GROUP_OTHER_WRITE};
 use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use rustix::process::geteuid;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-
-
-pub const GROUP_OTHER_WRITE: u32 = 0o022;
 
 
 pub const ROOT_UID: u32 = 0;
@@ -30,6 +27,21 @@ pub const SYMLINK: &str = "is a symlink";
 
 
 pub const NO_PARENT: &str = "has no directory or no file name";
+
+
+pub const DIRECTORY_WRITABLE: &str = "the directory holding this file, or one above it, is writable by group or others";
+
+
+pub const DIRECTORY_ANCESTOR_NOT_OWNED: &str = "a directory above this file is not owned by root or the agent user";
+
+
+pub const DIRECTORY_NOT_OWNED: &str = "the directory holding this file is not owned by the agent user";
+
+
+pub const PATH_NOT_ABSOLUTE: &str = "the path of this file is not absolute";
+
+
+pub const PATH_NOT_PLAIN: &str = "the path of this file is not a plain canonical path";
 
 
 const FILE_FLAGS: OFlags = OFlags::RDONLY
@@ -72,10 +84,26 @@ pub fn io_error(file: &str, source: std::io::Error) -> ConfigError {
 }
 
 
-/// A directory refusal keeps its fixed reason; an I/O failure keeps its cause.
+/// A directory refusal becomes a fixed wording about the directory of the file.
+pub fn directory_reason(reason: &str) -> &'static str {
+    if reason.contains("writable") {
+        DIRECTORY_WRITABLE
+    } else if reason.contains("ancestor is not owned") {
+        DIRECTORY_ANCESTOR_NOT_OWNED
+    } else if reason.contains("not owned") {
+        DIRECTORY_NOT_OWNED
+    } else if reason.contains("not absolute") {
+        PATH_NOT_ABSOLUTE
+    } else {
+        PATH_NOT_PLAIN
+    }
+}
+
+
+/// A directory refusal keeps a fixed reason; an I/O failure keeps its cause.
 pub fn directory_error(file: &str, error: TrustedDirError) -> ConfigError {
     match error {
-        TrustedDirError::Refused(reason) => refused(file, reason),
+        TrustedDirError::Refused(reason) => refused(file, directory_reason(reason)),
         TrustedDirError::Io(source) => io_error(file, source),
     }
 }
