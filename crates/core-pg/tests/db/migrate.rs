@@ -13,10 +13,16 @@ use std::time::Duration;
 const DEADLINE: Duration = Duration::from_secs(30);
 
 
+const ABOVE_CAP: Duration = Duration::from_secs(7200);
+
+
+const MIGRATION_SECONDS: u64 = 3600;
+
+
+const BOTH_LONG_STEPS: usize = 2;
+
+
 const NAMESPACE: &str = "store";
-
-
-const ONE_MIGRATION_ATTEMPTS: usize = 2;
 
 
 const SCRIPTS: usize = 3;
@@ -159,7 +165,7 @@ async fn a_failing_migration_is_reduced_to_its_sqlstate() -> Result<(), Box<dyn 
 
 
 #[tokio::test]
-async fn a_unique_violation_forever_ends_after_the_attempt_cap() -> Result<(), Box<dyn Error>> {
+async fn a_unique_violation_without_foreign_progress_is_never_replayed() -> Result<(), Box<dyn Error>> {
     let (client, mut fake, _dir) = client_with(applied_handler(Vec::new())).await?;
     let failing = Migration {
         version: "0003_bad",
@@ -168,7 +174,7 @@ async fn a_unique_violation_forever_ends_after_the_attempt_cap() -> Result<(), B
     let result = migrate(&client, NAMESPACE, &[failing], DEADLINE).await;
     assert!(matches!(result, Err(PgError::Server { code, .. }) if code == "23505"));
     let failures = drain(&mut fake.statements).iter().filter(|sql| sql.contains("FAILING")).count();
-    assert_eq!(failures, ONE_MIGRATION_ATTEMPTS);
+    assert_eq!(failures, 1);
     Ok(())
 }
 
@@ -390,5 +396,146 @@ async fn more_records_than_the_cap_are_refused_not_truncated() -> Result<(), Box
     assert!(drain(&mut fake.statements)
         .iter()
         .any(|sql| sql.contains("WHERE namespace OPERATOR(pg_catalog.=) 'store'") && sql.contains("LIMIT 10001")));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_second_migration_failing_in_its_own_sql_runs_once() -> Result<(), Box<dyn Error>> {
+    let failing = Migration {
+        version: "0002_bad",
+        sql: "SELECT FAILING;",
+    };
+    let reads = Arc::new(AtomicUsize::new(0));
+    let first_row = row_of(&FIRST);
+    let handler: Handler = committed(Arc::new(move |sql| {
+        if sql.contains("information_schema.columns") {
+            Reply::Rows(vec![vec!["namespace".to_owned()]])
+        } else if sql.contains("FROM public.schema_migrations") {
+            match reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Reply::Rows(Vec::new()),
+                _ => Reply::Rows(vec![first_row.clone()]),
+            }
+        } else if sql.contains("FAILING") {
+            Reply::Error("23505")
+        } else {
+            Reply::Done
+        }
+    }));
+    let (client, mut fake, _dir) = client_with(handler).await?;
+    let result = migrate(&client, NAMESPACE, &[FIRST, failing], DEADLINE).await;
+    assert!(matches!(result, Err(PgError::Server { code, .. }) if code == "23505"));
+    let statements = drain(&mut fake.statements);
+    assert_eq!(statements.iter().filter(|sql| sql.contains("FAILING")).count(), 1, "{statements:?}");
+    assert_eq!(statements.iter().filter(|sql| sql.contains("CREATE TABLE a")).count(), 1);
+    Ok(())
+}
+
+
+fn timeout_values(statements: &[String], marker: &str, setting: &str) -> Vec<String> {
+    statements
+        .iter()
+        .filter(|sql| sql.contains(marker))
+        .filter_map(|sql| sql.split(setting).nth(1))
+        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect())
+        .collect()
+}
+
+
+#[tokio::test]
+async fn a_pending_migration_and_the_bootstrap_get_the_migration_deadline_and_the_reads_the_callers() -> Result<(), Box<dyn Error>> {
+    let (client, mut fake, _dir) = client_with(applied_handler(Vec::new())).await?;
+    migrate(&client, NAMESPACE, &[FIRST], DEADLINE).await?;
+    let statements = drain(&mut fake.statements);
+    let statement = "statement_timeout = ";
+    assert_eq!(
+        timeout_values(&statements, "CREATE TABLE IF NOT EXISTS", statement),
+        ["3600000"],
+        "{statements:?}"
+    );
+    assert_eq!(timeout_values(&statements, "CREATE TABLE a", statement), ["3600000"]);
+    assert_eq!(timeout_values(&statements, "CREATE TABLE a", "lock_timeout = "), ["30000"]);
+    let reads: Vec<&String> = statements.iter().filter(|sql| sql.starts_with("SET statement_timeout = 30000")).collect();
+    assert!(!reads.is_empty(), "{statements:?}");
+    let long = statements.iter().filter(|sql| sql.starts_with("SET statement_timeout = 3600000")).count();
+    assert_eq!(long, BOTH_LONG_STEPS, "{statements:?}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_caller_deadline_above_the_constant_applies_to_the_migration() -> Result<(), Box<dyn Error>> {
+    let (client, mut fake, _dir) = client_with(applied_handler(Vec::new())).await?;
+    migrate(&client, NAMESPACE, &[FIRST], ABOVE_CAP).await?;
+    let statements = drain(&mut fake.statements);
+    assert_eq!(timeout_values(&statements, "CREATE TABLE a", "statement_timeout = "), ["7200000"]);
+    assert_eq!(timeout_values(&statements, "CREATE TABLE a", "lock_timeout = "), ["7200000"]);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_migration_past_its_deadline_is_named() -> Result<(), Box<dyn Error>> {
+    let hanging = Migration {
+        version: "0001_slow",
+        sql: "SELECT HANG;",
+    };
+    let handler: Handler = committed(Arc::new(|sql| {
+        if sql.contains("information_schema.columns") {
+            Reply::Rows(vec![vec!["namespace".to_owned()]])
+        } else if sql.contains("FROM public.schema_migrations") {
+            Reply::Rows(Vec::new())
+        } else if sql.contains("HANG") {
+            tokio::time::pause();
+            Reply::Hang
+        } else {
+            Reply::Done
+        }
+    }));
+    let (client, _fake, _dir) = client_with(handler).await?;
+    let error = migrate(&client, NAMESPACE, &[hanging], DEADLINE).await.err().ok_or("accepted")?;
+    assert!(
+        matches!(&error, PgError::MigrationTimeout { namespace, version, seconds } if namespace == NAMESPACE && version == "0001_slow" && *seconds == MIGRATION_SECONDS),
+        "{error}"
+    );
+    Ok(())
+}
+
+
+fn failing_with(code: &'static str) -> Handler {
+    committed(Arc::new(move |sql| {
+        if sql.contains("information_schema.columns") {
+            Reply::Rows(vec![vec!["namespace".to_owned()]])
+        } else if sql.contains("FROM public.schema_migrations") {
+            Reply::Rows(Vec::new())
+        } else if sql.contains("'0001_init'") {
+            Reply::Error(code)
+        } else {
+            Reply::Done
+        }
+    }))
+}
+
+
+#[tokio::test]
+async fn a_server_statement_cancel_names_the_migration() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with(failing_with("57014")).await?;
+    let error = migrate(&client, NAMESPACE, &[FIRST], DEADLINE).await.err().ok_or("accepted")?;
+    assert!(
+        matches!(&error, PgError::MigrationTimeout { namespace, version, seconds } if namespace == NAMESPACE && version == "0001_init" && *seconds == MIGRATION_SECONDS),
+        "{error}"
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_server_lock_timeout_names_the_migration_and_the_lock_deadline() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with(failing_with("55P03")).await?;
+    let error = migrate(&client, NAMESPACE, &[FIRST], DEADLINE).await.err().ok_or("accepted")?;
+    assert!(
+        matches!(&error, PgError::MigrationLockWait { namespace, version, seconds } if namespace == NAMESPACE && version == "0001_init" && *seconds == DEADLINE.as_secs()),
+        "{error}"
+    );
     Ok(())
 }

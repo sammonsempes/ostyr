@@ -1,14 +1,14 @@
 //! Restores one declared canary file from the newest snapshot of a declared host with `restic dump` and compares its SHA-256 (Unix only).
 
 use crate::coverage::FUTURE_SKEW_SECONDS;
-use crate::model::{Declarations, Limits, RepositoryFloor, ResticSource, RestoreTest, Snapshot};
+use crate::model::{Declarations, Limits, Listing, RepositoryFloor, ResticSource, RestoreTest, Snapshot};
 use crate::parse::parse_restic;
 use crate::restic::{
     command_arguments, config_id, password_failure, sftp_transport, unchanged, valid_path, valid_source, ResticError, CONFIG_CAP_BYTES, CONFIG_VERB,
     MAX_HOST_BYTES, MAX_LOCATION_BYTES, SNAPSHOTS_VERB,
 };
 use crate::text::{valid_id, valid_text};
-use crate::types::Clock;
+use crate::types::{Clock, SkipCounts};
 use core_config::secret_file::open_secret;
 use core_pg::scope::TenantScope;
 use net_topology::model::RunFailure;
@@ -39,6 +39,22 @@ pub enum RestoreOutcome {
     NoSnapshot,
     Failed { code: Option<i32> },
     Timeout,
+    ListingGap { skipped: SkipCounts, future: u64 },
+}
+
+
+/// The lowercase name printed for an outcome.
+pub fn outcome_label(outcome: &RestoreOutcome) -> &'static str {
+    match outcome {
+        RestoreOutcome::Restored => "restored",
+        RestoreOutcome::DigestMismatch => "digest_mismatch",
+        RestoreOutcome::TooLarge => "too_large",
+        RestoreOutcome::NotCovered => "not_covered",
+        RestoreOutcome::NoSnapshot => "no_snapshot",
+        RestoreOutcome::Failed { .. } => "failed",
+        RestoreOutcome::Timeout => "timeout",
+        RestoreOutcome::ListingGap { .. } => "listing_gap",
+    }
 }
 
 
@@ -107,13 +123,39 @@ pub fn restore_plan(declarations: &Declarations) -> RestorePlan<'_> {
 }
 
 
+/// The latest time a snapshot may carry: `now` plus `FUTURE_SKEW_SECONDS`.
+pub fn horizon(now: OffsetDateTime) -> OffsetDateTime {
+    now.checked_add(time::Duration::seconds(FUTURE_SKEW_SECONDS)).unwrap_or(now)
+}
+
+
 /// The newest snapshot of `host` not dated over `FUTURE_SKEW_SECONDS` after `now`, ties broken by the higher id.
 pub fn choose<'a>(snapshots: &'a [Snapshot], host: &str, now: OffsetDateTime) -> Option<&'a Snapshot> {
-    let horizon = now.checked_add(time::Duration::seconds(FUTURE_SKEW_SECONDS)).unwrap_or(now);
+    let horizon = horizon(now);
     snapshots
         .iter()
         .filter(|snapshot| snapshot.host.as_deref() == Some(host) && snapshot.time <= horizon)
         .max_by_key(|snapshot| (snapshot.time, snapshot.id.as_str()))
+}
+
+
+/// Fails closed: any skipped snapshot, or any snapshot of `host` dated in the future, makes the listing untrustworthy for the test.
+pub fn listing_gap(listing: &Listing, host: &str, now: OffsetDateTime) -> Option<RestoreOutcome> {
+    let limit = horizon(now);
+    let future: u64 = listing
+        .snapshots
+        .iter()
+        .filter(|snapshot| snapshot.host.as_deref() == Some(host) && snapshot.time > limit)
+        .map(|_| 1)
+        .sum();
+    if future > 0 || !listing.skipped.is_empty() {
+        Some(RestoreOutcome::ListingGap {
+            skipped: listing.skipped.clone(),
+            future,
+        })
+    } else {
+        None
+    }
 }
 
 
@@ -179,11 +221,14 @@ pub fn restore_test(
             deadline.saturating_sub(start.elapsed()),
         )?;
         let listing = parse_restic(snapshots.as_slice(), &key, limits)?;
-        let chosen = choose(&listing.snapshots, &test.host, clock());
-        let outcome = match chosen {
-            None => RestoreOutcome::NoSnapshot,
-            Some(snapshot) if !covers(snapshot, &test.path) => RestoreOutcome::NotCovered,
-            Some(snapshot) => judge(
+        let now = clock();
+        let gap = listing_gap(&listing, &test.host, now);
+        let chosen = choose(&listing.snapshots, &test.host, now).filter(|_| gap.is_none());
+        let outcome = match (gap, chosen) {
+            (Some(found), _) => found,
+            (None, None) => RestoreOutcome::NoSnapshot,
+            (None, Some(snapshot)) if !covers(snapshot, &test.path) => RestoreOutcome::NotCovered,
+            (None, Some(snapshot)) => judge(
                 run_command(
                     program,
                     &dump_arguments(source, &transport, &snapshot.id, &test.path),

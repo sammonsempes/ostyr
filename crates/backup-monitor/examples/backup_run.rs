@@ -9,9 +9,10 @@ mod run {
     use backup_monitor::parse::{parse_borg, parse_restic};
     use backup_monitor::report::{read_report, report_directory, write_report};
     use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
-    use backup_monitor::restore::{restore_plan, restore_test};
+    use backup_monitor::restore::{outcome_label, restore_plan, restore_test, RestoreOutcome};
     use core_config::parse::read_file;
     use core_pg::scope::tenant_of;
+    use std::collections::BTreeMap;
     use std::error::Error;
     use std::io::{stdout, Stdout, Write};
     use std::os::fd::OwnedFd;
@@ -106,21 +107,36 @@ mod run {
         let limits = Limits::default();
         let mut out = stdout();
         let runs = restore_plan(&declarations);
-        runs.refused.iter().try_for_each(|index| writeln!(out, "{{\"refused_entry\":{index}}}"))?;
+        runs.refused
+            .iter()
+            .try_for_each(|index| writeln!(out, "{}", serde_json::json!({"refused_entry": index})))?;
         runs.runnable.iter().try_for_each(|(name, source, test)| -> Result<(), Box<dyn Error>> {
             let deadline = Duration::from_secs(DEADLINE_SECONDS);
             match restore_test(&program, &declarations.tenant, source, test, &limits, deadline, OffsetDateTime::now_utc) {
-                Ok(result) => writeln!(
-                    out,
-                    "{{\"tenant\":\"{}\",\"repository\":\"{name}\",\"config_id\":\"{}\",\"snapshot_id\":{:?},\"snapshot_time\":{:?},\"tested_at\":\"{}\",\"outcome\":\"{:?}\"}}",
-                    tenant_of(&result.tenant),
-                    result.config_id,
-                    result.snapshot_id,
-                    result.snapshot_time.map(|time| time.to_string()),
-                    result.tested_at,
-                    result.outcome
-                )?,
-                Err(error) => writeln!(out, "{{\"repository\":\"{name}\",\"failed\":\"{error}\"}}")?,
+                Ok(result) => {
+                    let (code, skipped, future) = match &result.outcome {
+                        RestoreOutcome::Failed { code } => (*code, None, None),
+                        RestoreOutcome::ListingGap { skipped, future } => {
+                            let by_reason: BTreeMap<String, u64> = skipped.iter().map(|(reason, count)| (format!("{reason:?}"), *count)).collect();
+                            (None, Some(by_reason), Some(*future))
+                        }
+                        _ => (None, None, None),
+                    };
+                    let line = serde_json::json!({
+                        "tenant": tenant_of(&result.tenant),
+                        "repository": name,
+                        "config_id": result.config_id,
+                        "snapshot_id": result.snapshot_id,
+                        "snapshot_time": result.snapshot_time.map(|time| time.to_string()),
+                        "tested_at": result.tested_at.to_string(),
+                        "outcome": outcome_label(&result.outcome),
+                        "code": code,
+                        "skipped": skipped,
+                        "future": future,
+                    });
+                    writeln!(out, "{line}")?
+                }
+                Err(error) => writeln!(out, "{}", serde_json::json!({"repository": name, "failed": error.to_string()}))?,
             }
             Ok(())
         })

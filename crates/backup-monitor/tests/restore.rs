@@ -1,11 +1,11 @@
 #![cfg(unix)]
 use backup_monitor::declarations::load_declarations;
 use backup_monitor::error::BackupError;
-use backup_monitor::model::{Limits, ResticSource, RestoreTest};
+use backup_monitor::model::{Limits, ResticSource, RestoreTest, SkipReason};
 use backup_monitor::restic::ResticError;
 use backup_monitor::restore::{
-    choose, covers, digest_hex, dump_arguments, judge, restore_plan, restore_test, valid_canary_path, valid_test, RestoreOutcome, CANARY_FILE_NAME,
-    MAX_CANARY_BYTES,
+    choose, covers, digest_hex, dump_arguments, judge, listing_gap, outcome_label, restore_plan, restore_test, valid_canary_path, valid_test,
+    RestoreOutcome, CANARY_FILE_NAME, MAX_CANARY_BYTES,
 };
 use net_topology::model::RunFailure;
 use std::error::Error;
@@ -83,6 +83,9 @@ const REFUSED_INDEXES: [usize; 4] = [1, 2, 3, 4];
 
 
 const LONG_PATH_BYTES: usize = 2000;
+
+
+const TOO_MANY_PATHS: usize = 257;
 
 
 const DECLARATIONS: &str = "tenant: acme\nrepositories:\n  - repository: main\n    expected_min_snapshots: 1\n    restic:\n      location: /srv/repo\n      \
@@ -299,11 +302,8 @@ fn a_newer_snapshot_without_the_canary_path_is_not_covered_and_nothing_is_dumped
 
 
 #[test]
-fn no_snapshot_of_the_host_is_no_snapshot_and_a_future_one_is_ignored() -> Result<(), Box<dyn Error>> {
-    let snapshots = vec![
-        snapshot('3', "2026-11-22T10:00:00Z", "web2", "\"/data\""),
-        snapshot('4', "9999-01-01T00:00:00Z", "web1", "\"/data\""),
-    ];
+fn no_snapshot_of_the_host_is_no_snapshot() -> Result<(), Box<dyn Error>> {
+    let snapshots = vec![snapshot('3', "2026-11-22T10:00:00Z", "web2", "\"/data\"")];
     let setup = setup("ok", &snapshots)?;
     let result = run(&setup)?;
     assert_eq!(result.outcome, RestoreOutcome::NoSnapshot);
@@ -530,5 +530,105 @@ fn the_dump_vector_carries_the_sftp_transport_and_no_json_flag() -> Result<(), B
             CANARY_PATH
         ]
     );
+    Ok(())
+}
+
+
+#[test]
+fn a_skipped_snapshot_newer_than_the_chosen_one_is_a_gap_and_nothing_is_dumped() -> Result<(), Box<dyn Error>> {
+    let bad_tag = format!(
+        "{{\"time\":\"2026-11-21T11:00:00Z\",\"paths\":[\"/data\"],\"hostname\":\"web1\",\"tags\":[\"nightly run\"],\"id\":\"{}\",\"short_id\":\"x\"}}",
+        id_of('4')
+    );
+    let mut snapshots = good_snapshots();
+    snapshots.push(bad_tag);
+    let setup = setup("ok", &snapshots)?;
+    let result = run(&setup)?;
+    let expected = RestoreOutcome::ListingGap {
+        skipped: [(SkipReason::BadTags, 1)].into_iter().collect(),
+        future: 0,
+    };
+    assert_eq!(result.outcome, expected);
+    assert_eq!((result.snapshot_id, result.snapshot_time), (None, None));
+    assert_eq!(runs(&setup), RUNS_WITHOUT_DUMP);
+    Ok(())
+}
+
+
+#[test]
+fn a_skipped_snapshot_of_another_host_is_also_a_gap() -> Result<(), Box<dyn Error>> {
+    let other = format!(
+        "{{\"time\":\"2026-11-21T11:00:00Z\",\"paths\":[\"/data\"],\"hostname\":\"web\u{e9}\",\"id\":\"{}\",\"short_id\":\"x\"}}",
+        id_of('4')
+    );
+    let mut snapshots = good_snapshots();
+    snapshots.push(other);
+    let setup = setup("ok", &snapshots)?;
+    assert!(matches!(run(&setup)?.outcome, RestoreOutcome::ListingGap { future: 0, .. }));
+    Ok(())
+}
+
+
+#[test]
+fn too_many_paths_and_a_future_snapshot_of_the_host_are_gaps() -> Result<(), Box<dyn Error>> {
+    let many = vec!["\"/a\""; TOO_MANY_PATHS].join(",");
+    let mut snapshots = good_snapshots();
+    snapshots.push(snapshot('4', "2026-11-21T11:00:00Z", "web1", &many));
+    let first = setup("ok", &snapshots)?;
+    let gap = run(&first)?.outcome;
+    assert_eq!(
+        gap,
+        RestoreOutcome::ListingGap {
+            skipped: [(SkipReason::BadPaths, 1)].into_iter().collect(),
+            future: 0
+        }
+    );
+    let mut future = good_snapshots();
+    future.push(snapshot('5', "9999-01-01T00:00:00Z", "web1", "\"/data\""));
+    let second = setup("ok", &future)?;
+    assert_eq!(
+        run(&second)?.outcome,
+        RestoreOutcome::ListingGap {
+            skipped: Default::default(),
+            future: 1
+        }
+    );
+    assert_eq!(runs(&second), RUNS_WITHOUT_DUMP);
+    Ok(())
+}
+
+
+#[test]
+fn a_future_snapshot_of_another_host_is_not_a_gap() -> Result<(), Box<dyn Error>> {
+    let listing = backup_monitor::parse::parse_restic(
+        format!("[{}]", snapshot('5', "9999-01-01T00:00:00Z", "web2", "\"/data\"")).as_bytes(),
+        CONFIG_ID,
+        &Limits::default(),
+    )?;
+    assert!(listing_gap(&listing, "web1", clock()).is_none());
+    assert!(listing_gap(&listing, "web2", clock()).is_some());
+    Ok(())
+}
+
+
+#[test]
+fn outcome_labels_are_lowercase_names() -> Result<(), Box<dyn Error>> {
+    let all = [
+        (RestoreOutcome::Restored, "restored"),
+        (RestoreOutcome::DigestMismatch, "digest_mismatch"),
+        (RestoreOutcome::TooLarge, "too_large"),
+        (RestoreOutcome::NotCovered, "not_covered"),
+        (RestoreOutcome::NoSnapshot, "no_snapshot"),
+        (RestoreOutcome::Failed { code: None }, "failed"),
+        (RestoreOutcome::Timeout, "timeout"),
+        (
+            RestoreOutcome::ListingGap {
+                skipped: Default::default(),
+                future: 0,
+            },
+            "listing_gap",
+        ),
+    ];
+    all.iter().for_each(|(outcome, label)| assert_eq!(outcome_label(outcome), *label));
     Ok(())
 }
