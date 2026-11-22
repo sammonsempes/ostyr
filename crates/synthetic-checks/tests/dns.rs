@@ -365,6 +365,15 @@ fn distinct_capped_dedupes_canonical_forms_in_order() -> TestResult {
 }
 
 
+#[test]
+fn distinct_capped_dedupes_before_the_cut() -> TestResult {
+    let first = IpAddr::V4("192.0.2.1".parse::<Ipv4Addr>()?);
+    let second = IpAddr::V4("192.0.2.2".parse::<Ipv4Addr>()?);
+    assert_eq!(distinct_capped([first, first, second].into_iter(), SMALL_CAP), vec![first, second]);
+    Ok(())
+}
+
+
 fn no_marker(error: &std::io::Error) -> bool {
     let mut chain = std::iter::successors(Some(error as &dyn std::error::Error), |current| current.source());
     !chain.any(|link| format!("{link} {link:?}").contains("marker"))
