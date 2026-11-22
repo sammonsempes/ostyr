@@ -4,6 +4,8 @@ mod dhcp_flows;
 mod harness;
 #[path = "support/logging.rs"]
 mod logging;
+#[path = "support/posture_flows.rs"]
+mod posture_flows;
 #[cfg(unix)]
 #[path = "support/served.rs"]
 mod served;

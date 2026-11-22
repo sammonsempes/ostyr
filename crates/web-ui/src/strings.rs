@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 300;
+pub const TEXT_COUNT: usize = 340;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -256,6 +256,46 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("col_priority", "Priority"),
     ("vulns_kev", "KEV"),
     ("nav_dhcp", "DHCP leases"),
+    ("nav_posture", "Cloud posture"),
+    ("title_posture", "Cloud posture"),
+    ("label_account", "Account"),
+    ("posture_search", "Show findings"),
+    ("posture_none", "No posture run stored for this account."),
+    ("posture_empty", "No finding on this page."),
+    ("posture_next", "Next findings"),
+    ("posture_back", "Back to the account form"),
+    ("posture_first", "Back to the first page"),
+    ("posture_pending", "A refusal is pending: some refused findings are not counted yet."),
+    ("posture_unservable", "{count} findings on this page could not be shown."),
+    ("posture_unservable_one", "1 finding on this page could not be shown."),
+    ("posture_cut", "({count} bytes cut)"),
+    ("posture_finished", "Run finished"),
+    ("posture_refused_at", "Refusal recorded"),
+    ("posture_items", "Findings stored"),
+    ("posture_unparsable", "Unparsable"),
+    ("posture_bad_field", "Bad field"),
+    ("posture_duplicate", "Duplicates"),
+    ("posture_foreign", "Other account"),
+    ("posture_refused", "Refused"),
+    ("posture_refused_pass", "Refused, pass"),
+    ("posture_refused_muted", "Refused, muted"),
+    ("posture_refused_manual", "Refused, manual"),
+    ("posture_refused_fail", "Refused, fail"),
+    ("posture_store_refused", "Refused by the store"),
+    ("posture_status_pass", "Pass"),
+    ("posture_status_fail", "Fail"),
+    ("posture_status_manual", "Manual"),
+    ("posture_status_muted", "Muted"),
+    ("posture_sev_unknown", "Unknown"),
+    ("posture_sev_informational", "Informational"),
+    ("posture_sev_fatal", "Fatal"),
+    ("posture_sev_other", "Other"),
+    ("error_run_changed", "The stored run changed: restart from the first page."),
+    ("col_check", "Check"),
+    ("col_resource", "Resource"),
+    ("col_finding_title", "Title"),
+    ("col_finding_detail", "Detail"),
+    ("dhcp_hostname_refused", "Hostname refused (unreadable text)"),
     ("title_dhcp", "DHCP leases"),
     ("dhcp_at_title", "Who held this address"),
     ("dhcp_mac_title", "Where was this device"),
@@ -569,6 +609,49 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("col_priority", "Priorité"),
     ("vulns_kev", "KEV"),
     ("nav_dhcp", "Baux DHCP"),
+    ("nav_posture", "Posture cloud"),
+    ("title_posture", "Posture cloud"),
+    ("label_account", "Compte"),
+    ("posture_search", "Afficher les constats"),
+    ("posture_none", "Aucune exécution de posture stockée pour ce compte."),
+    ("posture_empty", "Aucun constat sur cette page."),
+    ("posture_next", "Constats suivants"),
+    ("posture_back", "Retour au formulaire de compte"),
+    ("posture_first", "Retour à la première page"),
+    (
+        "posture_pending",
+        "Un refus est en attente : certains constats refusés ne sont pas encore comptés.",
+    ),
+    ("posture_unservable", "{count} constats de cette page n'ont pas pu être affichés."),
+    ("posture_unservable_one", "1 constat de cette page n'a pas pu être affiché."),
+    ("posture_cut", "({count} octets coupés)"),
+    ("posture_finished", "Exécution terminée"),
+    ("posture_refused_at", "Refus enregistré"),
+    ("posture_items", "Constats stockés"),
+    ("posture_unparsable", "Illisibles"),
+    ("posture_bad_field", "Champ invalide"),
+    ("posture_duplicate", "Doublons"),
+    ("posture_foreign", "Autre compte"),
+    ("posture_refused", "Refusés"),
+    ("posture_refused_pass", "Refusés, réussis"),
+    ("posture_refused_muted", "Refusés, ignorés"),
+    ("posture_refused_manual", "Refusés, manuels"),
+    ("posture_refused_fail", "Refusés, échecs"),
+    ("posture_store_refused", "Refusés par le stockage"),
+    ("posture_status_pass", "Réussi"),
+    ("posture_status_fail", "Échec"),
+    ("posture_status_manual", "Manuel"),
+    ("posture_status_muted", "Ignoré"),
+    ("posture_sev_unknown", "Inconnue"),
+    ("posture_sev_informational", "Informative"),
+    ("posture_sev_fatal", "Fatale"),
+    ("posture_sev_other", "Autre"),
+    ("error_run_changed", "L'exécution stockée a changé : repartez de la première page."),
+    ("col_check", "Contrôle"),
+    ("col_resource", "Ressource"),
+    ("col_finding_title", "Titre"),
+    ("col_finding_detail", "Détail"),
+    ("dhcp_hostname_refused", "Nom d'hôte refusé (texte illisible)"),
     ("title_dhcp", "Baux DHCP"),
     ("dhcp_at_title", "Qui avait cette adresse"),
     ("dhcp_mac_title", "Où était cet appareil"),
@@ -775,6 +858,34 @@ pub fn dhcp_action_key(value: &str) -> &'static str {
         "lease-declined" => "dhcp_action_declined",
         "lease-expired-reclaimed" => "dhcp_action_reclaimed",
         _ => "dhcp_action_other",
+    }
+}
+
+
+/// The fixed text of a posture status; anything outside the four Prowler statuses is "unknown", never the API's text.
+pub fn posture_status_key(value: &str) -> &'static str {
+    match value {
+        "PASS" => "posture_status_pass",
+        "FAIL" => "posture_status_fail",
+        "MANUAL" => "posture_status_manual",
+        "MUTED" => "posture_status_muted",
+        _ => "unknown",
+    }
+}
+
+
+/// The fixed text of a posture severity (the eight OCSF captions); anything else is "unknown".
+pub fn posture_severity_key(value: &str) -> &'static str {
+    match value {
+        "Unknown" => "posture_sev_unknown",
+        "Informational" => "posture_sev_informational",
+        "Low" => "sev_low",
+        "Medium" => "sev_medium",
+        "High" => "sev_high",
+        "Critical" => "sev_critical",
+        "Fatal" => "posture_sev_fatal",
+        "Other" => "posture_sev_other",
+        _ => "unknown",
     }
 }
 

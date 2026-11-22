@@ -16,6 +16,10 @@ use web_ui::api::{
     MAX_DHCP_LABEL_CHARS,
 };
 use web_ui::api::{
+    posture_path, scan_state_items, valid_posture_account, valid_posture_cursor, MAX_POSTURE_ACCOUNT_BYTES, MAX_POSTURE_CURSOR_BYTES,
+    MAX_POSTURE_RUN_ID_BYTES, POSTURE_LIMIT,
+};
+use web_ui::api::{
     shell_list_path, shell_open_filter, valid_shell_cursor, valid_shell_filter_requester, valid_shell_hash, valid_shell_reference,
     valid_shell_subject, MAX_SHELL_CURSOR_BYTES, MAX_SHELL_I64_CHARS, MAX_SHELL_REFERENCE_BYTES, MAX_SHELL_SUBJECT_BYTES,
 };
@@ -760,5 +764,89 @@ fn the_interval_scan_refuses_more_than_the_api_cap_before_decoding() -> TestResu
     assert!(scan_dhcp_intervals(items(DHCP_LIMIT).as_bytes()).is_ok());
     assert!(scan_dhcp_intervals(items(DHCP_LIMIT + 1).as_bytes()).is_err());
     assert!(scan_dhcp_intervals(b"{\"items\":[]}").is_err());
+    Ok(())
+}
+
+
+const POSTURE_IDENTITY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+
+#[test]
+fn the_posture_account_grammar_copy_accepts_only_the_crates_shapes() -> TestResult {
+    let longest = "a".repeat(MAX_POSTURE_ACCOUNT_BYTES);
+    let overlong = "a".repeat(MAX_POSTURE_ACCOUNT_BYTES + 1);
+    for good in ["acct", "123456789012", "arn:aws:iam::1:root", "a/b#c", "k8s_(x)$*,+=@", longest.as_str()] {
+        assert!(valid_posture_account(good), "{good}");
+    }
+    for bad in [
+        "",
+        "-x",
+        ".",
+        "..",
+        "../",
+        "../x",
+        "a/..",
+        "a/./b",
+        "/..",
+        "a b",
+        "a\u{0}",
+        "a\u{1b}",
+        "\u{3164}",
+        "caf\u{e9}",
+        "a\\b",
+        "<s>",
+        "a%",
+        overlong.as_str(),
+    ] {
+        assert!(!valid_posture_account(bad), "{bad}");
+    }
+    assert!(valid_posture_account("a.b") && valid_posture_account("..a") && valid_posture_account("a/b..") && valid_posture_account("a//b"));
+    Ok(())
+}
+
+
+#[test]
+fn the_posture_cursor_grammar_copy_accepts_only_the_stores_shape() -> TestResult {
+    let run = "r".repeat(MAX_POSTURE_RUN_ID_BYTES);
+    let long_run = "r".repeat(MAX_POSTURE_RUN_ID_BYTES + 1);
+    for good in [
+        format!("run1 0 0 {POSTURE_IDENTITY}"),
+        format!("{run} 1772000000000000 32767 {POSTURE_IDENTITY}"),
+        format!("run1 1 -1 {POSTURE_IDENTITY}"),
+    ] {
+        assert!(valid_posture_cursor(&good), "{good}");
+    }
+    for bad in [
+        String::new(),
+        "run1".to_owned(),
+        format!("{long_run} 1 1 {POSTURE_IDENTITY}"),
+        format!("-x 1 1 {POSTURE_IDENTITY}"),
+        format!("run1 -1 1 {POSTURE_IDENTITY}"),
+        format!("run1 01 1 {POSTURE_IDENTITY}"),
+        format!("run1 +1 1 {POSTURE_IDENTITY}"),
+        format!("run1 1 01 {POSTURE_IDENTITY}"),
+        format!("run1 1 32768 {POSTURE_IDENTITY}"),
+        format!("run1 1 1 {}", POSTURE_IDENTITY.to_uppercase()),
+        format!("run1 1 1 {}", POSTURE_IDENTITY.trim_end_matches('f')),
+        format!("run1 1 1 {POSTURE_IDENTITY} x"),
+        format!("run1 1 1 {}g", POSTURE_IDENTITY.trim_end_matches('f')),
+        format!("{} 1 1 {POSTURE_IDENTITY}", "r".repeat(MAX_POSTURE_CURSOR_BYTES)),
+    ] {
+        assert!(!valid_posture_cursor(&bad), "{bad}");
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_posture_path_and_item_scan_follow_the_apis_limit() -> TestResult {
+    assert_eq!(posture_path("a/b#c", None), "posture/accounts/a%2Fb%23c/findings?limit=50");
+    assert_eq!(
+        posture_path("acct", Some("run1 1 1 x")),
+        "posture/accounts/acct/findings?limit=50&cursor=run1+1+1+x"
+    );
+    let items = |count: usize| format!("{{\"items\":[{}]}}", vec!["null"; count].join(","));
+    assert!(scan_state_items(items(POSTURE_LIMIT).as_bytes(), POSTURE_LIMIT).is_ok());
+    assert!(scan_state_items(items(POSTURE_LIMIT + 1).as_bytes(), POSTURE_LIMIT).is_err());
     Ok(())
 }

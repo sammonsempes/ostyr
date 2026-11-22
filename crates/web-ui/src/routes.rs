@@ -1,17 +1,17 @@
 use crate::api::{
-    cert_filter, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_risk_entity, get_shell_session, get_state_asset,
-    get_vuln_asset, list_alerts, list_assets, list_cases, list_certs, list_findings, list_oncall, list_risk, list_shell_sessions, list_states,
-    list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_case_action, post_case_comment,
-    probe_dhcp, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id,
-    valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter,
-    MAX_COMMENT_CHARS, SECONDS_PER_DAY, VERDICT_DEFAULT,
+    cert_filter, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_posture, get_risk_entity, get_shell_session,
+    get_state_asset, get_vuln_asset, list_alerts, list_assets, list_cases, list_certs, list_findings, list_oncall, list_risk, list_shell_sessions,
+    list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_case_action,
+    post_case_comment, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor,
+    valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id,
+    valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, Opened, Principal, ShellQuery, WebLimits, WebState};
 use crate::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, cert_page, certs_page, comment_unloaded_page,
-    compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page, risk_entity_page,
-    risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page, STYLESHEET,
+    compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page,
+    posture_form_page, posture_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -1108,6 +1108,8 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/compliance", get(show_compliance))
         .route("/compliance/{asset}", get(show_compliance_asset))
         .route("/dhcp", get(show_dhcp))
+        .route("/posture", get(show_posture_form))
+        .route("/posture/{account}", get(show_posture))
         .route("/remote-shell", get(show_shell))
         .route("/remote-shell/{id}", get(show_shell_session))
         .route("/vulnerabilities", get(show_vulns))
@@ -1162,6 +1164,82 @@ pub async fn show_dhcp_page(state: &WebState, source: IpAddr, headers: &HeaderMa
         }
     };
     Ok(html_response(StatusCode::OK, &dhcp_page(language, &principal.csrf, found.as_ref()), &[]))
+}
+
+
+/// The 409 `run_changed` is a page with a link to the first page; every other failure is the generic one.
+pub fn posture_failure(state: &WebState, principal: &Principal, language: Language, account: &str, failure: &ApiFailure) -> Response {
+    match failure {
+        ApiFailure::Conflict(key) if *key == RUN_CHANGED_KEY => {
+            html_response(StatusCode::CONFLICT, &posture_changed_page(language, &principal.csrf, account), &[])
+        }
+        other => api_failure(state, principal, language, other),
+    }
+}
+
+
+/// One findings page: the account and the cursor are checked inside `get_posture`, before any API call.
+pub async fn show_posture_page(
+    state: &WebState,
+    source: IpAddr,
+    headers: &HeaderMap,
+    account: &str,
+    cursor: Option<&str>,
+) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let principal = current_principal(state, headers)?;
+    let client = state.api.load_full();
+    let view = get_posture(&client, source, &principal.token, account, cursor)
+        .await
+        .map_err(|failure| Box::new(posture_failure(state, &principal, language, account, &failure)))?;
+    Ok(html_response(
+        StatusCode::OK,
+        &posture_page(language, &principal.csrf, account, &view),
+        &[],
+    ))
+}
+
+
+/// `GET /posture`: with `account` the first findings page, without it the form after one permission probe; nothing else is read.
+pub async fn show_posture_form_page(
+    state: &WebState,
+    source: IpAddr,
+    headers: &HeaderMap,
+    query: &BTreeMap<String, String>,
+) -> Result<Response, Refused> {
+    match query.get("account") {
+        Some(account) => show_posture_page(state, source, headers, account, None).await,
+        None => {
+            let language = language_of(headers);
+            let principal = current_principal(state, headers)?;
+            let client = state.api.load_full();
+            probe_posture(&client, source, &principal.token)
+                .await
+                .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+            Ok(html_response(StatusCode::OK, &posture_form_page(language, &principal.csrf), &[]))
+        }
+    }
+}
+
+
+pub async fn show_posture_form(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_posture_form_page(&state, peer.ip(), &headers, &query).await)
+}
+
+
+pub async fn show_posture(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(account): Path<String>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    merge(show_posture_page(&state, peer.ip(), &headers, &account, query.get("cursor").map(String::as_str)).await)
 }
 
 

@@ -9,11 +9,12 @@ use web_ui::model::{
 };
 use web_ui::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page,
-    format_time, login_page, optional, risk_entity_page, risk_page, risk_row, MAX_COMMENT_LINES,
+    format_time, login_page, optional, posture_time, risk_entity_page, risk_page, risk_row, MAX_COMMENT_LINES,
 };
 use web_ui::strings::{
-    action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, dhcp_action_key, language_tag, resolution_key,
-    severity_class, severity_key, shell_reason_key, status_key, table, task_status_key, text, ACTIONS, ENGLISH, FRENCH, MISSING_TEXT, RESOLUTIONS,
+    action_key, allowed_actions, case_severity_class, case_severity_key, checked_action, dhcp_action_key, language_tag, posture_severity_key,
+    posture_status_key, resolution_key, severity_class, severity_key, shell_reason_key, status_key, table, task_status_key, text, ACTIONS, ENGLISH,
+    FRENCH, MISSING_TEXT, RESOLUTIONS,
 };
 
 
@@ -638,5 +639,45 @@ fn dhcp_actions_map_to_fixed_texts() -> TestResult {
     ] {
         assert_eq!(dhcp_action_key(action), key);
     }
+    Ok(())
+}
+
+
+#[test]
+fn posture_status_and_severity_map_to_fixed_texts() -> TestResult {
+    for (status, key) in [
+        ("PASS", "posture_status_pass"),
+        ("FAIL", "posture_status_fail"),
+        ("MANUAL", "posture_status_manual"),
+        ("MUTED", "posture_status_muted"),
+        ("fail", "unknown"),
+        ("evil\u{1b}", "unknown"),
+    ] {
+        assert_eq!(posture_status_key(status), key);
+    }
+    for (severity, key) in [
+        ("Unknown", "posture_sev_unknown"),
+        ("Informational", "posture_sev_informational"),
+        ("Low", "sev_low"),
+        ("Medium", "sev_medium"),
+        ("High", "sev_high"),
+        ("Critical", "sev_critical"),
+        ("Fatal", "posture_sev_fatal"),
+        ("Other", "posture_sev_other"),
+        ("critical", "unknown"),
+        ("evil", "unknown"),
+    ] {
+        assert_eq!(posture_severity_key(severity), key);
+    }
+    Ok(())
+}
+
+
+#[test]
+fn a_posture_time_is_utc_or_a_fixed_marker() -> TestResult {
+    assert_eq!(posture_time(Language::English, None), "-");
+    assert_eq!(posture_time(Language::English, Some(0)), "1970-01-01T00:00:00Z");
+    assert_eq!(posture_time(Language::English, Some(-1)), "1969-12-31T23:59:59Z");
+    assert_eq!(posture_time(Language::French, Some(i64::MAX)), "inconnu");
     Ok(())
 }
