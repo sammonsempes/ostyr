@@ -1,4 +1,4 @@
-//! Usage: backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
+//! Usage: backup_run restore-test <declarations.yaml> <restic-binary> prints one JSON line per declared restore test and stores nothing; backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
 
 #[cfg(unix)]
 mod run {
@@ -9,8 +9,10 @@ mod run {
     use backup_monitor::parse::{parse_borg, parse_restic};
     use backup_monitor::report::{read_report, report_directory, write_report};
     use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
+    use backup_monitor::restore::{outcome_label, restore_plan, restore_test, skip_label, RestoreOutcome};
     use core_config::parse::read_file;
     use core_pg::scope::tenant_of;
+    use std::collections::BTreeMap;
     use std::error::Error;
     use std::io::{stdout, Stdout, Write};
     use std::os::fd::OwnedFd;
@@ -31,10 +33,16 @@ mod run {
     const DEADLINE_SECONDS: u64 = 120;
 
 
+    const GAP_COUNTERS: usize = 3;
+
+
     const MAX_KEY_BYTES: u64 = 256;
 
 
-    const USAGE: &str = "usage: backup_run <declarations.yaml> <restic-binary> [absolute-state-dir]";
+    const RESTORE_MODE: &str = "restore-test";
+
+
+    const USAGE: &str = "usage: backup_run [restore-test] <declarations.yaml> <restic-binary> [absolute-state-dir]";
 
 
     fn previous_listing(reports: Option<&OwnedFd>, name: &str, limits: &Limits) -> Result<Option<Listing>, Box<dyn Error>> {
@@ -95,8 +103,68 @@ mod run {
     }
 
 
+    fn restore_mode(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+        let declarations_path = arguments.get(ARGUMENT_DECLARATIONS + 1).ok_or(USAGE)?;
+        let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM + 1).ok_or(USAGE)?);
+        let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
+        let limits = Limits::default();
+        let mut out = stdout();
+        let runs = restore_plan(&declarations);
+        runs.refused
+            .iter()
+            .try_for_each(|index| writeln!(out, "{}", serde_json::json!({"refused_entry": index})))?;
+        runs.runnable.iter().try_for_each(|(name, source, test)| -> Result<(), Box<dyn Error>> {
+            let deadline = Duration::from_secs(DEADLINE_SECONDS);
+            match restore_test(&program, &declarations.tenant, source, test, &limits, deadline, OffsetDateTime::now_utc) {
+                Ok(result) => {
+                    let (code, skipped, gaps) = match &result.outcome {
+                        RestoreOutcome::Failed { code } => (*code, None, None),
+                        RestoreOutcome::ListingGap {
+                            skipped,
+                            future,
+                            unloadable,
+                            unlisted,
+                        } => {
+                            let by_reason: BTreeMap<&str, u64> = skipped.iter().map(|(reason, count)| (skip_label(reason), *count)).collect();
+                            (None, Some(by_reason), Some([*future, *unloadable, *unlisted]))
+                        }
+                        _ => (None, None, None),
+                    };
+                    let [future, unloadable, unlisted] = gaps.map_or([None; GAP_COUNTERS], |counts| counts.map(Some));
+                    let line = serde_json::json!({
+                        "tenant": tenant_of(&result.tenant),
+                        "repository": name,
+                        "config_id": result.config_id,
+                        "snapshot_id": result.snapshot_id,
+                        "snapshot_time": result.snapshot_time.map(|time| time.to_string()),
+                        "tested_at": result.tested_at.to_string(),
+                        "outcome": outcome_label(&result.outcome),
+                        "code": code,
+                        "skipped": skipped,
+                        "future": future,
+                        "unloadable": unloadable,
+                        "unlisted": unlisted,
+                    });
+                    writeln!(out, "{line}")?
+                }
+                Err(error) => writeln!(out, "{}", serde_json::json!({"repository": name, "failed": error.to_string()}))?,
+            }
+            Ok(())
+        })
+    }
+
+
     pub fn execute() -> Result<(), Box<dyn Error>> {
         let arguments: Vec<String> = std::env::args().collect();
+        if arguments.get(1).map(String::as_str) == Some(RESTORE_MODE) {
+            restore_mode(&arguments)
+        } else {
+            execute_runs(&arguments)
+        }
+    }
+
+
+    fn execute_runs(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         let declarations_path = arguments.get(ARGUMENT_DECLARATIONS).ok_or(USAGE)?;
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM).ok_or(USAGE)?);
         let base_state = arguments.get(ARGUMENT_STATE).map(Path::new);
