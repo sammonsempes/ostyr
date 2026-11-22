@@ -21,8 +21,12 @@ fn keep_signals(breakers: &response_breakers::breakers::Breakers) -> std::io::Re
 
 
 #[cfg(not(unix))]
-fn keep_signals(_breakers: &response_breakers::breakers::Breakers) -> std::io::Result<()> {
-    Ok(())
+pub struct NoSignals;
+
+
+#[cfg(not(unix))]
+fn keep_signals(_breakers: &response_breakers::breakers::Breakers) -> std::io::Result<NoSignals> {
+    Ok(NoSignals)
 }
 
 
