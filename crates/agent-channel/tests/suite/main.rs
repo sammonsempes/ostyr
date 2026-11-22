@@ -13,6 +13,10 @@ mod revocation_support;
 mod server;
 mod services;
 mod settings;
+mod shell;
+mod shell_rig;
+mod shell_tls;
+mod shell_wire;
 mod spool_append;
 #[cfg(unix)]
 mod spool_dirs;
