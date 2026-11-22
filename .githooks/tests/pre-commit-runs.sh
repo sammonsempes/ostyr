@@ -11,6 +11,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME" "$SCRATCH/bin" "$SCRATCH/sync" "$SCRATCH/ram"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 if [ "$1" = "+nightly" ] && [ "$2" = "llvm-cov" ]; then
   echo "scratch=$TMPDIR" >>"$STUB_LOG"
   if [ -n "${SYNC:-}" ]; then

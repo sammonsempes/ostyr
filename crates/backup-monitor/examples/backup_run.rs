@@ -7,13 +7,13 @@ mod run {
     use backup_monitor::declarations::load_declarations;
     use backup_monitor::model::{BorgSource, CoverageStatus, Declarations, FindingKind, Limits, Listing};
     use backup_monitor::parse::{parse_borg, parse_restic};
+    use backup_monitor::report::{read_report, report_directory, write_report};
     use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
     use core_config::parse::read_file;
     use core_pg::scope::tenant_of;
     use std::error::Error;
-    use std::fs::{self, DirBuilder, OpenOptions};
     use std::io::{stdout, Stdout, Write};
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::fd::OwnedFd;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use time::OffsetDateTime;
@@ -31,58 +31,48 @@ mod run {
     const DEADLINE_SECONDS: u64 = 120;
 
 
-    const REPORT_DIRECTORY: &str = "reports";
+    const MAX_KEY_BYTES: u64 = 256;
 
 
-    const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+    const USAGE: &str = "usage: backup_run <declarations.yaml> <restic-binary> [absolute-state-dir]";
 
 
-    const PRIVATE_FILE_MODE: u32 = 0o600;
-
-
-    const USAGE: &str = "usage: backup_run <declarations.yaml> <restic-binary> [state-dir]";
-
-
-    fn report_directory(state: Option<&Path>, tenant: &str) -> Option<PathBuf> {
-        state.map(|directory| directory.join(REPORT_DIRECTORY).join(tenant))
-    }
-
-
-    fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(PRIVATE_FILE_MODE)
-            .open(path)?;
-        Ok(file.write_all(bytes)?)
-    }
-
-
-    fn previous_listing(state: Option<&Path>, name: &str, limits: &Limits) -> Option<Listing> {
-        let directory = state?;
-        let key = fs::read_to_string(directory.join(format!("{name}.restic.id"))).ok()?;
-        let bytes = fs::read(directory.join(format!("{name}.restic.snapshots"))).ok()?;
-        parse_restic(bytes.as_slice(), key.trim(), limits).ok()
-    }
-
-
-    fn previous_borg(state: Option<&Path>, name: &str, source: &BorgSource, limits: &Limits) -> Option<Listing> {
-        let bytes = fs::read(state?.join(format!("{name}.borg.snapshots"))).ok()?;
-        parse_borg(bytes.as_slice(), source.hostname_from_name, limits).ok()
-    }
-
-
-    fn save_borg(state: Option<&Path>, name: &str, raw: &[u8]) -> Result<(), Box<dyn Error>> {
-        state.map_or(Ok(()), |directory| write_private(&directory.join(format!("{name}.borg.snapshots")), raw))
-    }
-
-
-    fn save(state: Option<&Path>, name: &str, raw: &RawRun) -> Result<(), Box<dyn Error>> {
-        state.map_or(Ok(()), |directory| {
-            write_private(&directory.join(format!("{name}.restic.id")), raw.key.as_bytes())?;
-            write_private(&directory.join(format!("{name}.restic.snapshots")), &raw.snapshots)
+    fn previous_listing(reports: Option<&OwnedFd>, name: &str, limits: &Limits) -> Result<Option<Listing>, Box<dyn Error>> {
+        let cap = limits.max_bytes.saturating_add(1);
+        reports.map_or(Ok(None), |directory| {
+            let stored_key = read_report(directory, &format!("{name}.restic.id"), euid(), MAX_KEY_BYTES)?;
+            let stored = read_report(directory, &format!("{name}.restic.snapshots"), euid(), cap)?;
+            Ok(stored_key
+                .zip(stored)
+                .and_then(|(id, listing)| parse_restic(listing.as_slice(), String::from_utf8_lossy(&id).trim(), limits).ok()))
         })
+    }
+
+
+    fn previous_borg(reports: Option<&OwnedFd>, name: &str, source: &BorgSource, limits: &Limits) -> Result<Option<Listing>, Box<dyn Error>> {
+        let cap = limits.max_bytes.saturating_add(1);
+        reports.map_or(Ok(None), |directory| {
+            let stored = read_report(directory, &format!("{name}.borg.snapshots"), euid(), cap)?;
+            Ok(stored.and_then(|listing| parse_borg(listing.as_slice(), source.hostname_from_name, limits).ok()))
+        })
+    }
+
+
+    fn save_borg(reports: Option<&OwnedFd>, name: &str, raw: &[u8]) -> Result<(), Box<dyn Error>> {
+        reports.map_or(Ok(()), |directory| Ok(write_report(directory, &format!("{name}.borg.snapshots"), raw)?))
+    }
+
+
+    fn save(reports: Option<&OwnedFd>, name: &str, raw: &RawRun) -> Result<(), Box<dyn Error>> {
+        reports.map_or(Ok(()), |directory| {
+            write_report(directory, &format!("{name}.restic.id"), raw.key.as_bytes())?;
+            Ok(write_report(directory, &format!("{name}.restic.snapshots"), &raw.snapshots)?)
+        })
+    }
+
+
+    fn euid() -> u32 {
+        rustix::process::geteuid().as_raw()
     }
 
 
@@ -111,11 +101,10 @@ mod run {
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM).ok_or(USAGE)?);
         let base_state = arguments.get(ARGUMENT_STATE).map(Path::new);
         let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
-        let state_directory = report_directory(base_state, tenant_of(&declarations.tenant));
-        let state = state_directory.as_deref();
-        if let Some(directory) = state {
-            DirBuilder::new().recursive(true).mode(PRIVATE_DIRECTORY_MODE).create(directory)?;
-        }
+        let reports_handle = base_state
+            .map(|state| report_directory(state, &declarations.tenant, euid()))
+            .transpose()?;
+        let state = reports_handle.as_ref();
         let limits = Limits::default();
         let mut out = stdout();
         writeln!(out, "tenant {}", tenant_of(&declarations.tenant))?;
@@ -136,7 +125,7 @@ mod run {
                         current.snapshots.len(),
                         current.skipped
                     )?;
-                    let previous = previous_listing(state, name, &limits);
+                    let previous = previous_listing(state, name, &limits)?;
                     print_findings(&mut out, name, previous.as_ref(), &current, &declarations)?;
                     save(state, name, &raw)?;
                     listings.push(current);
@@ -172,7 +161,7 @@ mod run {
                         current.snapshots.len(),
                         current.skipped
                     )?;
-                    let previous = previous_borg(state, name, source, &limits);
+                    let previous = previous_borg(state, name, source, &limits)?;
                     print_findings(&mut out, name, previous.as_ref(), &current, &declarations)?;
                     save_borg(state, name, &raw)?;
                     listings.push(current);

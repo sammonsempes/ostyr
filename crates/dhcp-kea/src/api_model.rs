@@ -42,6 +42,8 @@ pub struct LeaseView {
     pub address: String,
     pub mac: Option<String>,
     pub hostname: Option<String>,
+    /// A hostname was sent and refused; its text is never kept.
+    pub hostname_refused: bool,
     pub starts: String,
     pub ends: String,
     pub action: String,

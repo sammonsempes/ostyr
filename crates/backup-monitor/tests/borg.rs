@@ -972,3 +972,22 @@ fn a_trailing_dot_in_a_repository_name_is_refused() -> Result<(), Box<dyn Error>
     assert_eq!(runs(&setup), 0);
     Ok(())
 }
+
+
+#[test]
+fn a_fifo_identity_is_refused_at_once_never_blocking() -> Result<(), Box<dyn Error>> {
+    let setup = setup("ok")?;
+    run(&setup)?;
+    let path = identity_path(&setup, REPOSITORY_NAME);
+    std::fs::remove_file(&path)?;
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )?;
+    assert!(matches!(run(&setup), Err(BorgError::BaseDir)));
+    assert_eq!(runs(&setup), 1);
+    Ok(())
+}

@@ -1,4 +1,4 @@
-//! Usage: `surface_scan --args <scope.yaml>` prints one naabu argument vector per target; `surface_scan --parse <scope.yaml> <naabu-output>` prints the kept results and the counts; `surface_scan <scope.yaml> <naabu-binary> [deadline-seconds] [--nameserver <addr:port>]` runs naabu per target (Unix only).
+//! Usage: `surface_scan --args <scope.yaml>` prints one naabu argument vector per target; `surface_scan --parse <scope.yaml> <naabu-output>` prints the kept results and the counts; `surface_scan <scope.yaml> <naabu-binary> [deadline-seconds] [--nameserver <addr:port>] [--total <seconds>]` runs naabu per target (Unix only).
 use attack_surface::command::naabu_args;
 use attack_surface::model::{Found, Limits};
 use attack_surface::results::parse_naabu;
@@ -20,11 +20,13 @@ const PARSE_FLAG: &str = "--parse";
 const NAMESERVER_FLAG: &str = "--nameserver";
 
 
+const TOTAL_FLAG: &str = "--total";
+
+
 #[cfg(unix)]
 const DEADLINE_SECONDS: u64 = 600;
 
 
-#[cfg(unix)]
 const TOTAL_SECONDS: u64 = 3600;
 
 
@@ -51,7 +53,13 @@ fn outcome_line(index: usize, outcome: &attack_surface::model::Outcome) -> Strin
 
 
 #[cfg(unix)]
-fn run_naabu(scope_file: &str, program: &str, seconds: Option<&String>, nameserver: Option<SocketAddr>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_naabu(
+    scope_file: &str,
+    program: &str,
+    seconds: Option<&String>,
+    nameserver: Option<SocketAddr>,
+    total: u64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     use attack_surface::run::{scan_scope_resolving, summary_line, Resolver};
     use std::time::{Duration, Instant};
     let scope = load_scope(Path::new(scope_file))?;
@@ -66,7 +74,7 @@ fn run_naabu(scope_file: &str, program: &str, seconds: Option<&String>, nameserv
         &scope,
         &Limits::default(),
         Duration::from_secs(deadline),
-        &|| started.elapsed() >= Duration::from_secs(TOTAL_SECONDS),
+        &|| started.elapsed() >= Duration::from_secs(total),
         &resolver,
     )?;
     let mut out = stdout();
@@ -94,6 +102,7 @@ fn run_naabu(
     _program: &str,
     _seconds: Option<&String>,
     _nameserver: Option<SocketAddr>,
+    _total: u64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     Err("running naabu needs Unix".into())
 }
@@ -108,6 +117,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             Some(value)
         }
         None => None,
+    };
+    let total = match arguments.iter().position(|argument| argument == TOTAL_FLAG) {
+        Some(at) => {
+            let value = arguments.get(at + 1).ok_or("missing total seconds")?.parse::<u64>()?;
+            arguments.drain(at..=at + 1);
+            value
+        }
+        None => TOTAL_SECONDS,
     };
     let mut out = stdout();
     let first = arguments.first().ok_or("missing scope file")?;
@@ -135,7 +152,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         report.found.iter().try_for_each(|found| writeln!(out, "{}", found_line(found)))?;
         writeln!(out, "counts {:?}", report.counts)?;
     } else {
-        run_naabu(first, second, arguments.get(OUTPUT_POSITION), nameserver)?;
+        run_naabu(first, second, arguments.get(OUTPUT_POSITION), nameserver, total)?;
     }
     Ok(())
 }

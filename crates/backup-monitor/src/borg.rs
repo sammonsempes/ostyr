@@ -210,7 +210,7 @@ fn passphrase_pipe(bytes: &[u8]) -> Result<PipeReader, BorgError> {
 }
 
 
-fn base_refusal(error: TrustedDirError) -> BorgError {
+pub fn base_refusal(error: TrustedDirError) -> BorgError {
     let refusal = error.to_string();
     debug!(refusal, "borg base directory refused");
     BorgError::BaseDir
@@ -236,7 +236,7 @@ pub fn make_private_directory(path: &Path) -> io::Result<()> {
 
 
 /// The level path and whether this call created it.
-fn make_level(parent: &Path, name: &str, euid: u32, make: fn(&Path) -> io::Result<()>) -> Result<(PathBuf, bool), BorgError> {
+pub fn make_level(parent: &Path, name: &str, euid: u32, make: fn(&Path) -> io::Result<()>) -> Result<(PathBuf, bool), BorgError> {
     let level = parent.join(name);
     match make(&level) {
         Err(error) if error.kind() != ErrorKind::AlreadyExists => Err(base_io(error)),
@@ -287,7 +287,7 @@ fn identity_open(directory: &OwnedFd, flags: OFlags) -> Result<File, io::Error> 
     Ok(File::from(openat(
         directory,
         IDENTITY_FILE,
-        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::RUSR | Mode::WUSR,
     )?))
 }
@@ -326,7 +326,7 @@ pub fn verify_identity(directory: &OwnedFd, text: &str, euid: u32) -> Result<(),
 }
 
 
-fn private_handle(level: &Path, euid: u32) -> Result<OwnedFd, BorgError> {
+pub fn private_handle(level: &Path, euid: u32) -> Result<OwnedFd, BorgError> {
     let file = File::from(open_trusted_dir(level, euid).map_err(base_refusal)?);
     let metadata = file.metadata().map_err(base_io)?;
     if private_directory(metadata.is_dir(), metadata.mode()) {

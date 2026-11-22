@@ -2,7 +2,7 @@
 
 use crate::alerting::{day_of, mac_of, micros_of, MAX_DAY_SECONDS};
 use crate::error::HistoryError;
-use crate::row::{normalise_mac, valid_hostname, Converted};
+use crate::row::{normalise_mac, valid_hostname, Converted, HOSTNAME_RAW_LABEL};
 use alerts::id::alert_id;
 use alerts::model::{Alert, Severity};
 use alerts::store::{insert_alerts, summarise};
@@ -31,7 +31,7 @@ pub const MAX_LOOKUP_ROWS: usize = 100;
 pub const COUNT_COLUMNS: usize = 7;
 
 
-pub const LOOKUP_COLUMNS: usize = 7;
+pub const LOOKUP_COLUMNS: usize = 8;
 
 
 pub const MAX_ACTION_CHARS: usize = 40;
@@ -45,7 +45,7 @@ pub const STORE_SQL: &str =
                              FROM dhcp_history_store($1, $2::text::jsonb, $3::text::bigint, $4::text::bigint, $5::text::bigint)";
 
 
-pub const AT_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(hostname, ''), \
+pub const AT_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(hostname, ''), hostname_refused::text, \
                           CASE WHEN isfinite(starts) THEN extract(epoch FROM starts)::bigint::text ELSE '' END, \
                           CASE WHEN isfinite(ends) THEN extract(epoch FROM ends)::bigint::text ELSE '' END, \
                           action, subnet_id::text FROM dhcp_lease_history \
@@ -53,7 +53,7 @@ pub const AT_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(host
                           ORDER BY starts DESC LIMIT $4::text::bigint";
 
 
-pub const MAC_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(hostname, ''), \
+pub const MAC_SQL: &str = "SELECT host(address), coalesce(mac, ''), coalesce(hostname, ''), hostname_refused::text, \
                            CASE WHEN isfinite(starts) THEN extract(epoch FROM starts)::bigint::text ELSE '' END, \
                            CASE WHEN isfinite(ends) THEN extract(epoch FROM ends)::bigint::text ELSE '' END, \
                            action, subnet_id::text FROM dhcp_lease_history \
@@ -88,6 +88,7 @@ pub struct HistoryCounts {
     pub refused_full: u64,
     pub stale: u64,
     pub refused: u64,
+    pub hostname_refused: u64,
     pub evicted: u64,
     pub pressure: u64,
 }
@@ -99,6 +100,7 @@ pub struct LeaseInterval {
     pub address: String,
     pub mac: Option<String>,
     pub hostname: Option<String>,
+    pub hostname_refused: bool,
     pub starts: i64,
     pub ends: i64,
     pub action: String,
@@ -147,6 +149,7 @@ pub fn lease_doc(lease: &Converted) -> Option<serde_json::Value> {
         .as_ref()
         .and_then(|host| host.hostname.as_deref())
         .and_then(valid_hostname);
+    let hostname_refused = lease.event.labels.iter().any(|(name, _value)| name.as_str() == HOSTNAME_RAW_LABEL);
     let times_fit = in_range(*starts) && in_range(*ends) && starts <= ends;
     let subnet_id = lease
         .event
@@ -160,6 +163,7 @@ pub fn lease_doc(lease: &Converted) -> Option<serde_json::Value> {
             "address": address.to_string(),
             "mac": mac_of(lease),
             "hostname": hostname,
+            "hostname_refused": hostname_refused,
             "starts": starts,
             "ends": ends,
             "action": action,
@@ -184,6 +188,7 @@ fn add_counts(total: HistoryCounts, [expired, inserted, duplicate, refused_full,
         refused_full: total.refused_full + refused_full,
         stale: total.stale + stale,
         refused: total.refused,
+        hostname_refused: total.hostname_refused,
         evicted: total.evicted + evicted,
         pressure: total.pressure + pressure,
     }
@@ -221,8 +226,14 @@ pub async fn store_history(
     check_settings(settings)?;
     let docs: Vec<serde_json::Value> = batch.iter().filter_map(lease_doc).collect();
     let refused = u64::try_from(batch.len() - docs.len()).map_err(|_bad| HistoryError::Answer)?;
+    let marked_docs = docs
+        .iter()
+        .filter(|doc| doc.get("hostname_refused") == Some(&serde_json::Value::Bool(true)))
+        .count();
+    let marked_hostnames = u64::try_from(marked_docs).map_err(|_bad| HistoryError::Answer)?;
     let mut total = HistoryCounts {
         refused,
+        hostname_refused: marked_hostnames,
         ..HistoryCounts::default()
     };
     let empty: [serde_json::Value; 0] = [];
@@ -246,6 +257,10 @@ pub async fn store_history(
     if refused_full > 0 {
         tracing::warn!(refused_full, "dhcp history cap reached, rows refused");
     }
+    let hostname_refused = total.hostname_refused;
+    if hostname_refused > 0 {
+        tracing::warn!(hostname_refused, "dhcp client hostnames refused, marked");
+    }
     let evicted = total.evicted;
     if evicted > 0 {
         tracing::warn!(evicted, "dhcp history full, oldest rows evicted");
@@ -262,12 +277,13 @@ pub async fn store_history(
 
 
 fn interval_of(row: &[String]) -> Option<LeaseInterval> {
-    let [address, mac, hostname, starts, ends, action, subnet_id] = <&[String; LOOKUP_COLUMNS]>::try_from(row).ok()?;
+    let [address, mac, hostname, refused, starts, ends, action, subnet_id] = <&[String; LOOKUP_COLUMNS]>::try_from(row).ok()?;
     let optional = |text: &String| (!text.is_empty()).then(|| text.clone());
     Some(LeaseInterval {
         address: address.clone(),
         mac: optional(mac),
         hostname: optional(hostname),
+        hostname_refused: refused == "true",
         starts: starts.parse().ok().filter(|found| in_range(*found))?,
         ends: ends.parse().ok().filter(|found| in_range(*found))?,
         action: action.clone(),

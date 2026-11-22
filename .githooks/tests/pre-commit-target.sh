@@ -12,6 +12,7 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 export GATE_TMPFS="$SCRATCH/absent"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
+[[ " $* " != *" kernel-declared "* ]] || echo absent
 echo "cargo $* tdir=${CARGO_LLVM_COV_TARGET_DIR:-} bdir=${CARGO_LLVM_COV_BUILD_DIR:-} tmp=${TMPDIR:-} jobs=${CARGO_BUILD_JOBS:-}" >>"$STUB_LOG"
 S
 chmod +x "$SCRATCH/bin/cargo"

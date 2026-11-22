@@ -458,6 +458,7 @@ fn failures_map_to_stable_errors_and_an_unwritable_time_is_skipped() -> TestResu
         address: "10.0.0.1".to_owned(),
         mac: None,
         hostname: None,
+        hostname_refused: false,
         starts,
         ends: NOW,
         action: "lease-assigned".to_owned(),
@@ -469,5 +470,27 @@ fn failures_map_to_stable_errors_and_an_unwritable_time_is_skipped() -> TestResu
         truncated: false,
     });
     assert_eq!((view.intervals.len(), view.skipped), (1, SKIPPED_IN_VIEW));
+    Ok(())
+}
+
+
+const REFUSED_COLUMN: usize = 3;
+
+
+#[tokio::test]
+async fn a_refused_hostname_is_served_as_a_flag_never_as_text() -> TestResult {
+    let (fx, token) = seeded().await?;
+    let mut refused = row("10.0.0.42", MAC_TEXT, NULL_CELL, NOW - SHORT, NOW + SHORT);
+    refused.get_mut(REFUSED_COLUMN).map(|cell| *cell = "true".to_owned()).ok_or("cell")?;
+    seed(
+        &fx.mem,
+        TENANT,
+        vec![refused, row("10.0.0.42", MAC_TEXT, "pc", NOW - LONGER, NOW + LONGER)],
+    );
+    let json = body_json(get(&fx.router, &format!("/dhcp/leases/at?address=10.0.0.42&at={NOW}"), Some(&token)).await?).await?;
+    let found = intervals(&json)?;
+    let flags: Vec<Option<&Value>> = found.iter().map(|view| view.get("hostname_refused")).collect();
+    assert_eq!(flags, vec![Some(&json!(true)), Some(&json!(false))]);
+    assert_eq!(found.first().and_then(|view| view.get("hostname")), Some(&Value::Null));
     Ok(())
 }
