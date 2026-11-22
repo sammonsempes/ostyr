@@ -1,4 +1,4 @@
-use crate::types::{ReleaseFn, SpoolLock, UpdateRunFn};
+use crate::types::{ReadFn, ReleaseFn, SpoolLock, StatFn, UpdateRunFn};
 use linux_fim::model::WatchSets;
 use patch_inventory::model::Limits;
 use serde::Deserialize;
@@ -139,6 +139,15 @@ pub const MAX_UPDATE_INTERVAL_SECONDS: u64 = 604_800;
 pub const DEFAULT_UPDATE_DEADLINE_SECONDS: u64 = 120;
 
 
+pub const MIN_METRICS_INTERVAL_SECONDS: u64 = 10;
+
+
+pub const DEFAULT_METRICS_INTERVAL_SECONDS: u64 = 60;
+
+
+pub const MAX_METRICS_INTERVAL_SECONDS: u64 = 3_600;
+
+
 pub const MAX_UPDATE_DEADLINE_SECONDS: u64 = 600;
 
 
@@ -255,6 +264,55 @@ impl Default for UpdateSettings {
             deadline_seconds: DEFAULT_UPDATE_DEADLINE_SECONDS,
         }
     }
+}
+
+
+/// The live-reloaded host-metric settings: seconds between samples and the absolute paths whose file system is measured (at most `MAX_MOUNTS`).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct MetricsSettings {
+    pub interval_seconds: u64,
+    pub mounts: Vec<PathBuf>,
+}
+
+
+impl Default for MetricsSettings {
+    fn default() -> Self {
+        Self {
+            interval_seconds: DEFAULT_METRICS_INTERVAL_SECONDS,
+            mounts: vec![PathBuf::from("/")],
+        }
+    }
+}
+
+
+/// What one round remembers of the previous sample: the boot and the CPU counters the next ratio is taken against.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetricsMemory {
+    pub boot_id: Option<String>,
+    pub cpu: Option<CpuTimes>,
+}
+
+
+/// What the metric rounds did: lines spooled, rounds refused by a full spool, rounds whose line exceeded the line limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MetricsTotals {
+    pub published: u64,
+    pub spool_full: u64,
+    pub too_long: u64,
+}
+
+
+/// The injected world of the metric rounds: the root of `proc`, the spool files, the line limit, the file reader and the file system statistics call.
+#[derive(Clone)]
+pub struct MetricsEnv {
+    pub root: PathBuf,
+    pub spool: PathBuf,
+    pub sending: PathBuf,
+    pub lock: SpoolLock,
+    pub line_limit: usize,
+    pub read: ReadFn,
+    pub stat: StatFn,
 }
 
 
@@ -401,6 +459,8 @@ pub struct LinuxFile {
     pub updates: UpdateSettings,
     #[serde(default)]
     pub osquery: OsquerySettings,
+    #[serde(default)]
+    pub metrics: MetricsSettings,
     #[serde(default)]
     pub isolation: IsolationSettings,
     #[serde(default = "default_credentials_path")]
