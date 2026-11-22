@@ -68,6 +68,8 @@ pub enum PgError {
     FunctionSearchPath { total: usize, functions: String },
     #[error("the connection does not run READ COMMITTED: the lock-then-count caps of the stores would not hold")]
     IsolationLevel,
+    #[error("migration `{version}` of namespace `{namespace}` did not finish within {seconds} s")]
+    MigrationTimeout { namespace: String, version: String, seconds: u64 },
     #[error("migration `{version}` is older than an applied migration")]
     OutOfOrder { version: String },
 }

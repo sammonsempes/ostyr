@@ -1,7 +1,8 @@
 use core_pg::error::{sqlstate_class, PgError};
 use core_pg::migrate::{
-    applied_sql, bootstrap_script, check_namespace, check_not_legacy, check_row_count, check_version, digest_of, migration_script, plan_migrations,
-    table_shape, AppliedMigration, Migration, TableShape, COLUMNS_SQL, MAX_APPLIED_ROWS,
+    applied_sql, bootstrap_script, check_namespace, check_not_legacy, check_row_count, check_version, digest_of, foreign_progress,
+    migration_deadline, migration_script, plan_migrations, table_shape, AppliedMigration, Migration, TableShape, COLUMNS_SQL, MAX_APPLIED_ROWS,
+    MIGRATION_DEADLINE,
 };
 use core_pg::query::timed_script;
 use core_pg::scope::{tenant_of, tenant_scope};
@@ -22,6 +23,12 @@ const DEADLINE_SECONDS: u64 = 3;
 
 
 const DEADLINE_MILLIS: &str = "3000";
+
+
+const LOCK_DEADLINE: Duration = Duration::from_secs(3);
+
+
+const ABOVE_CAP_SECS: u64 = 7200;
 
 
 const FIRST: Migration = Migration {
@@ -111,7 +118,7 @@ fn embedded_list_must_be_valid_and_ascending() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn scripts_take_the_lock_and_record_before_the_sql() -> Result<(), Box<dyn Error>> {
-    let script = migration_script("store", &FIRST)?;
+    let script = migration_script("store", &FIRST, LOCK_DEADLINE)?;
     let lock = script.find("pg_advisory_xact_lock").unwrap_or(usize::MAX);
     let record = script.find("INSERT INTO public.schema_migrations").unwrap_or(usize::MAX);
     let sql = script.find("CREATE TABLE a").unwrap_or(usize::MAX);
@@ -228,12 +235,18 @@ fn the_applied_query_names_the_namespace_and_caps_the_rows() -> Result<(), Box<d
 #[test]
 fn every_sql_builder_refuses_a_hostile_namespace_or_version_itself() -> Result<(), Box<dyn Error>> {
     assert!(matches!(applied_sql(HOSTILE), Err(PgError::InvalidNamespace { .. })));
-    assert!(matches!(migration_script(HOSTILE, &FIRST), Err(PgError::InvalidNamespace { .. })));
+    assert!(matches!(
+        migration_script(HOSTILE, &FIRST, LOCK_DEADLINE),
+        Err(PgError::InvalidNamespace { .. })
+    ));
     let hostile_version = Migration {
         version: "a'; DROP TABLE x; --",
         sql: "SELECT 1;",
     };
-    assert!(matches!(migration_script("store", &hostile_version), Err(PgError::InvalidVersion { .. })));
+    assert!(matches!(
+        migration_script("store", &hostile_version, LOCK_DEADLINE),
+        Err(PgError::InvalidVersion { .. })
+    ));
     Ok(())
 }
 
@@ -258,11 +271,51 @@ fn the_record_statements_are_pinned_as_exact_qualified_text() -> Result<(), Box<
     assert_eq!(applied_sql("store")?, EXPECTED_APPLIED);
     assert_eq!(COLUMNS_SQL, EXPECTED_COLUMNS);
     let expected_script = format!(
-        "SELECT pg_catalog.pg_advisory_xact_lock(7021103100); INSERT INTO public.schema_migrations (namespace, version, digest) \
+        "SELECT pg_catalog.pg_advisory_xact_lock(7021103100); SET LOCAL lock_timeout = 3000; INSERT INTO public.schema_migrations (namespace, version, digest) \
          VALUES ('store', '0001_init', '{}'); {}",
         digest_of(FIRST.sql),
         FIRST.sql
     );
-    assert_eq!(migration_script("store", &FIRST)?, expected_script);
+    assert_eq!(migration_script("store", &FIRST, LOCK_DEADLINE)?, expected_script);
+    Ok(())
+}
+
+
+#[test]
+fn a_migration_lock_wait_is_never_unbounded() -> Result<(), Box<dyn Error>> {
+    let script = migration_script("store", &FIRST, Duration::ZERO)?;
+    assert!(script.contains("SET LOCAL lock_timeout = 1;"), "{script}");
+    let lock = script.find("pg_advisory_xact_lock").unwrap_or(usize::MAX);
+    let timeout = script.find("SET LOCAL lock_timeout").unwrap_or(usize::MAX);
+    assert!(lock < timeout);
+    Ok(())
+}
+
+
+#[test]
+fn the_migration_deadline_is_the_larger_of_the_caller_and_the_constant() -> Result<(), Box<dyn Error>> {
+    assert_eq!(migration_deadline(Duration::from_secs(DEADLINE_SECONDS)), MIGRATION_DEADLINE);
+    assert_eq!(MIGRATION_DEADLINE, Duration::from_secs(core_pg::settings::MAX_DEADLINE_SECS));
+    let above = Duration::from_secs(ABOVE_CAP_SECS);
+    assert_eq!(migration_deadline(above), above);
+    Ok(())
+}
+
+
+fn record(version: &str) -> AppliedMigration {
+    AppliedMigration {
+        version: version.to_owned(),
+        digest: String::new(),
+    }
+}
+
+
+#[test]
+fn only_a_record_nobody_here_explains_is_foreign_progress() -> Result<(), Box<dyn Error>> {
+    let before = vec![record("0001")];
+    let done = vec!["0002".to_owned()];
+    assert!(!foreign_progress(&before, &[record("0001"), record("0002")], &done));
+    assert!(!foreign_progress(&before, &before, &[]));
+    assert!(foreign_progress(&before, &[record("0001"), record("0003")], &done));
     Ok(())
 }

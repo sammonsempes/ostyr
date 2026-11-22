@@ -1,8 +1,18 @@
+use crate::error::reduce;
 use crate::error::PgError;
-use crate::query::{column_text, execute_script, global_query};
+use crate::query::{column_text, execute_script, global_query, timed_script, timeout_millis};
+use crate::settings::MAX_DEADLINE_SECS;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
+use tokio::time::{timeout, Instant};
 use tokio_postgres::Client;
+use tracing::info;
+
+
+pub const MIGRATION_DEADLINE: Duration = Duration::from_secs(MAX_DEADLINE_SECS);
+
+
+pub const MIGRATION_CLIENT_MARGIN: Duration = Duration::from_secs(5);
 
 
 pub const MIGRATION_LOCK_KEY: i64 = 7_021_103_100;
@@ -228,13 +238,20 @@ pub fn bootstrap_script() -> String {
 }
 
 
-/// Validates the namespace and the version itself. One simple-query message is one implicit transaction, so a dropped future cannot leave one open.
-pub fn migration_script(namespace: &str, migration: &Migration) -> Result<String, PgError> {
+/// A pending migration may run as long as `MIGRATION_DEADLINE`, or longer when the caller's deadline is longer.
+pub fn migration_deadline(caller: Duration) -> Duration {
+    caller.max(MIGRATION_DEADLINE)
+}
+
+
+/// Validates the namespace and the version itself; `SET LOCAL lock_timeout` after the lock bounds each table lock wait by `lock_deadline`.
+pub fn migration_script(namespace: &str, migration: &Migration, lock_deadline: Duration) -> Result<String, PgError> {
     check_namespace(namespace)?;
     check_version(migration.version)?;
     Ok(format!(
-        "SELECT pg_catalog.pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); \
+        "SELECT pg_catalog.pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); SET LOCAL lock_timeout = {}; \
          INSERT INTO public.schema_migrations (namespace, version, digest) VALUES ('{namespace}', '{}', '{}'); {}",
+        timeout_millis(lock_deadline),
         migration.version,
         digest_of(migration.sql),
         migration.sql
@@ -339,38 +356,76 @@ pub fn is_unique_violation(error: &PgError) -> bool {
 }
 
 
-/// Reads the records, plans and applies; every version applied is pushed to `done` even when a later one fails.
+/// True when `latest` holds a version that neither `before` nor this call's own `done` explains: another caller committed it.
+pub fn foreign_progress(before: &[AppliedMigration], latest: &[AppliedMigration], done: &[String]) -> bool {
+    latest
+        .iter()
+        .any(|record| !before.iter().any(|known| known.version == record.version) && !done.contains(&record.version))
+}
+
+
+/// One migration under the migration deadline, which the server enforces; the client waits `MIGRATION_CLIENT_MARGIN` longer, only to name the failure.
+pub async fn run_migration(client: &Client, namespace: &str, migration: &Migration, deadline: Duration) -> Result<(), PgError> {
+    let limit = migration_deadline(deadline);
+    let script = timed_script(&migration_script(namespace, migration, deadline)?, limit);
+    let version = migration.version;
+    let limit_secs = limit.as_secs();
+    info!(namespace, version, limit_secs, "applying migration");
+    let started = Instant::now();
+    timeout(limit + MIGRATION_CLIENT_MARGIN, client.batch_execute(&script))
+        .await
+        .map_err(|_elapsed| PgError::MigrationTimeout {
+            namespace: namespace.to_owned(),
+            version: version.to_owned(),
+            seconds: limit_secs,
+        })?
+        .map_err(reduce)?;
+    let elapsed_ms = started.elapsed().as_millis();
+    info!(namespace, version, elapsed_ms, "migration applied");
+    Ok(())
+}
+
+
+/// Plans against the records read and applies; every version applied is pushed to `done` even when a later one fails.
 pub async fn apply_pending(
     client: &Client,
     namespace: &str,
     embedded: &[Migration],
+    applied: &[AppliedMigration],
     deadline: Duration,
     done: &mut Vec<String>,
 ) -> Result<(), PgError> {
-    let applied = read_applied(client, namespace, deadline).await?;
-    let pending = plan_migrations(&applied, embedded)?;
+    let pending = plan_migrations(applied, embedded)?;
     for migration in pending {
-        execute_script(client, &migration_script(namespace, migration)?, deadline).await?;
+        run_migration(client, namespace, migration, deadline).await?;
         done.push(migration.version.to_owned());
     }
     Ok(())
 }
 
 
-/// Applies the pending migrations in order; a unique violation (a concurrent caller won) re-reads and re-plans, `embedded.len() + 1` attempts at most: each unique violation of the record insert means another caller committed one more record.
+/// Applies the pending migrations in order; a unique violation is retried only on foreign progress, `embedded.len() + 1` attempts at most.
 pub async fn migrate(client: &Client, namespace: &str, embedded: &[Migration], deadline: Duration) -> Result<Vec<String>, PgError> {
     check_namespace(namespace)?;
     check_embedded(embedded)?;
     read_isolation(client, deadline).await?;
-    execute_script(client, &bootstrap_script(), deadline).await?;
+    info!(namespace, "waiting for the migration lock");
+    execute_script(client, &bootstrap_script(), migration_deadline(deadline)).await?;
     check_not_legacy(read_shape(client, deadline).await?)?;
     let mut done = Vec::new();
     let max_attempts = embedded.len() + 1;
     let mut attempts = 1;
-    let mut outcome = apply_pending(client, namespace, embedded, deadline, &mut done).await;
-    while attempts < MAX_APPLIED_ROWS.min(max_attempts) && outcome.as_ref().is_err_and(is_unique_violation) {
+    let mut applied = read_applied(client, namespace, deadline).await?;
+    let mut outcome = apply_pending(client, namespace, embedded, &applied, deadline, &mut done).await;
+    let mut progressed = true;
+    while progressed && attempts < MAX_APPLIED_ROWS.min(max_attempts) && outcome.as_ref().is_err_and(is_unique_violation) {
         attempts += 1;
-        outcome = apply_pending(client, namespace, embedded, deadline, &mut done).await;
+        let latest = read_applied(client, namespace, deadline).await?;
+        progressed = foreign_progress(&applied, &latest, &done);
+        if progressed {
+            outcome = apply_pending(client, namespace, embedded, &latest, deadline, &mut done).await;
+        }
+        applied = latest;
     }
     outcome?;
     read_search_paths(client, deadline).await?;
