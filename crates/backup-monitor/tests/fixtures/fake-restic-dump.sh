@@ -2,6 +2,9 @@
 dir=$(dirname "$0")
 echo "$@" >> "$dir/args"
 mode=$(cat "$dir/mode")
+last=
+for argument; do last=$argument; done
+if [ "$last" = config ] && [ -e "$dir/config.fail" ]; then exit 1; fi
 verb=
 for argument; do
   if [ "$argument" = dump ]; then verb=dump; fi

@@ -126,6 +126,21 @@ pub const ESCAPES_REFUSED: &str = "escapes are not allowed in double-quoted stri
 pub const ANCHORS_REFUSED: &str = "anchors, aliases and merge keys are not allowed";
 
 
+pub const BLOCKS_REFUSED: &str = "block scalars are not allowed";
+
+
+pub const FIRST_PRINTABLE: u8 = 0x20;
+
+
+pub const LAST_PRINTABLE: u8 = 0x7E;
+
+
+pub const LINE_FEED: u8 = b'\n';
+
+
+pub const CARRIAGE_RETURN: u8 = b'\r';
+
+
 pub const KEY_VALUE_PAIR: usize = 2;
 
 
@@ -152,6 +167,8 @@ pub fn refused_feature(event: &Event<'_>, span: &Span, text: &str) -> Option<&'s
         Event::Scalar(_, _, anchor, _) | Event::SequenceStart(_, anchor, _) | Event::MappingStart(_, anchor, _) if *anchor != 0 => {
             Some(ANCHORS_REFUSED)
         }
+        Event::Alias(_) | Event::UnresolvedAlias(_) => Some(ANCHORS_REFUSED),
+        Event::Scalar(_, ScalarStyle::Literal | ScalarStyle::Folded, _, _) => Some(BLOCKS_REFUSED),
         Event::Scalar(value, _, _, _) if value == MERGE_KEY => Some(ANCHORS_REFUSED),
         Event::Scalar(_, ScalarStyle::DoubleQuoted, _, _) if span.slice(text).is_none_or(|source| source.contains('\\')) => Some(ESCAPES_REFUSED),
         _ => None,
@@ -201,6 +218,32 @@ pub fn walk_step(walk: Walk, item: Result<(Event<'_>, Span), ScanError>, text: &
 
 pub fn is_node_start(event: &Event<'_>) -> bool {
     matches!(event, Event::Scalar(..) | Event::SequenceStart(..) | Event::MappingStart(..))
+}
+
+
+/// Whether the byte at `index` is allowed: printable ASCII, LF, or CR immediately followed by LF.
+pub fn allowed_byte(bytes: &[u8], index: usize) -> bool {
+    match bytes.get(index) {
+        Some(&byte) if (FIRST_PRINTABLE..=LAST_PRINTABLE).contains(&byte) || byte == LINE_FEED => true,
+        Some(&byte) if byte == CARRIAGE_RETURN => bytes.get(index.saturating_add(1)) == Some(&LINE_FEED),
+        _ => false,
+    }
+}
+
+
+/// Refuses the whole file on the first byte outside the allowlist, naming the line (counted on LF) and never the byte.
+pub fn refuse_bytes(text: &str, file: &str) -> Result<(), ConfigError> {
+    let bytes = text.as_bytes();
+    match (0..bytes.len()).find(|&index| !allowed_byte(bytes, index)) {
+        Some(index) => {
+            let line = bytes
+                .get(..index)
+                .map_or(0, |head| head.iter().filter(|&&byte| byte == LINE_FEED).count())
+                .saturating_add(1);
+            Err(refuse(file, format!("line {line}: only printable ASCII and line breaks are allowed")))
+        }
+        None => Ok(()),
+    }
 }
 
 
@@ -284,6 +327,7 @@ pub fn validate_file(file: &str, parsed: AgentFile, tenant: &str) -> Result<Agen
 /// Reads at most `MAX_FILE_BYTES` from `reader` and parses exactly those bytes.
 pub fn parse_agent_map(reader: &mut dyn Read, file: &str, tenant: &str) -> Result<AgentMap, ConfigError> {
     let text = read_text_capped(reader, file, MAX_FILE_BYTES)?;
+    refuse_bytes(&text, file)?;
     refuse_tags(&text, file)?;
     count_agents(&text, file)?;
     let parsed = parse_document::<AgentFile>(&text, file)?;

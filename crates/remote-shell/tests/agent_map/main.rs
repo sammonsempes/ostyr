@@ -11,7 +11,10 @@ use core_config::error::ConfigError;
 use core_config::parse::MAX_FILE_BYTES;
 use core_config::reload::{current_config, reload, ReloadContext, ReloadOutcome};
 use core_config::types::SharedAuditFn;
-use remote_shell::agent_map::{agent_state, open_agent_engine, parse_agent_map, resolve_agent, AgentMap, MAX_AGENT_ASSETS};
+use remote_shell::agent_map::{
+    agent_state, open_agent_engine, parse_agent_map, refused_feature, resolve_agent, AgentMap, ANCHORS_REFUSED, MAX_AGENT_ASSETS,
+};
+use serde_saphyr::granit_parser::{Event, Span};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -463,7 +466,64 @@ fn quoted_values_without_escapes_are_accepted() -> TestResult {
     assert!(doubled.contains("agents[0].asset is outside its grammar"), "{doubled}");
     let plain = parse(&file_text(&[("\"agent-1\"", "'srv-1'"), ("'agent-2'", "\"srv-2\"")]))?;
     assert_eq!(plain.agents.get("srv-2").map(String::as_str), Some("agent-2"));
-    let block = parse(&format!("tenant: {TENANT}\nagents:\n  - agent_id: |-\n      agent-3\n    asset: srv3\n"))?;
-    assert_eq!(block.agents.get("srv3").map(String::as_str), Some("agent-3"));
+    Ok(())
+}
+
+
+#[test]
+fn block_scalars_are_refused() -> TestResult {
+    ["|-", "|", ">-", ">"].iter().try_for_each(|header| {
+        let text = format!("tenant: {TENANT}\nagents:\n  - agent_id: {header}\n      agent-3\n    asset: srv3\n");
+        let shown = refusal(&text)?;
+        shown
+            .contains("agents[0]: block scalars are not allowed")
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("missing from {shown}")))
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn an_alias_event_is_refused_even_without_its_anchor() -> TestResult {
+    let span = Span::default();
+    assert_eq!(refused_feature(&Event::Alias(1), &span, ""), Some(ANCHORS_REFUSED));
+    assert_eq!(refused_feature(&Event::UnresolvedAlias("a".into()), &span, ""), Some(ANCHORS_REFUSED));
+    Ok(())
+}
+
+
+#[test]
+fn bytes_outside_printable_ascii_refuse_the_whole_file_naming_the_line() -> TestResult {
+    let ok = file_text(&[("agent-1", "srv1")]);
+    let hostile = [
+        "# srv9 retired\r  - agent_id: agent-2\n",
+        "# a\u{2028}  - agent_id: agent-2\n",
+        "# a\u{85}b\n",
+        "# a\u{2029}b\n",
+        "\u{feff}x: 1\n",
+        "# tab\there\n",
+        "# caf\u{e9}\n",
+        "# nul\u{0}\n",
+        "# a\u{202e}b\n",
+    ];
+    hostile.iter().try_for_each(|extra| {
+        let shown = refusal(&format!("{ok}{extra}"))?;
+        let expected = format!("line {}", ok.matches('\n').count() + 1);
+        shown
+            .contains(&expected)
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))?;
+        let bytes: Vec<char> = extra.chars().filter(|ch| !ch.is_ascii() || ch.is_control() && *ch != '\n').collect();
+        bytes
+            .iter()
+            .all(|ch| !shown.contains(*ch))
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("byte leaked: {shown}")))
+    })?;
+    let crlf = parse(&ok.replace('\n', "\r\n"))?;
+    assert_eq!(crlf.agents.len(), 1);
+    let trailing_cr = refusal(&format!("{ok}\r"))?;
+    assert!(trailing_cr.contains("only printable ASCII"), "{trailing_cr}");
     Ok(())
 }

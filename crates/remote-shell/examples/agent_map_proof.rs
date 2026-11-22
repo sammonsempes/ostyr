@@ -18,6 +18,9 @@ const BAD: &str = "tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: 
 const TAGGED: &str = "tenant: tenant-a\nagents:\n  - agent_id: !!binary YWdlbnQtMg==\n    asset: srv2\n";
 
 
+const CR_HIDDEN: &str = "tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: srv1\n# retired\r  - agent_id: agent-2\n    asset: srv2\n";
+
+
 fn main() -> Result<(), Box<dyn Error>> {
     let dir = PathBuf::from(std::env::args().nth(1).ok_or("usage: agent_map_proof <directory>")?);
     let path = dir.join("remote-shell-agents.yaml");
@@ -52,6 +55,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         out,
         "srv1 after tagged reload -> {:?}",
         resolve_agent(&current_config(&engine), "tenant-a", "srv1")
+    )?;
+    fs::write(&path, CR_HIDDEN)?;
+    writeln!(out, "reload CR-hidden file -> {:?}", reload(&engine))?;
+    writeln!(
+        out,
+        "srv2 after CR reload -> {:?}",
+        resolve_agent(&current_config(&engine), "tenant-a", "srv2")
     )?;
     let entries = recorded.lock().map_err(|_| "poisoned")?;
     entries
