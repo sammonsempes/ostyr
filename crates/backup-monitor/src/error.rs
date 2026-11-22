@@ -50,6 +50,8 @@ pub enum RestoreStoreError {
     DuplicateResult,
     #[error("a result is dated more than {max} seconds after the database clock")]
     ClockSkew { max: u64 },
+    #[error("the declarations belong to another tenant than the one asked for")]
+    DeclarationsTenant,
     #[error("the restore store answered a row that cannot be read")]
     BadRow,
     #[error("the restore store failed")]
