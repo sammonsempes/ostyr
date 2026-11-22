@@ -91,6 +91,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "futures-util",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "prost",
@@ -5351,6 +5352,7 @@ dependencies = [
 name = "remote-shell"
 version = "0.0.0"
 dependencies = [
+ "agent-channel",
  "agent-command",
  "alerts",
  "axum",

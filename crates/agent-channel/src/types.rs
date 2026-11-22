@@ -146,3 +146,11 @@ pub type AclJudge = fn(&File, &Path) -> Result<(), sys_windows::types::DirAclErr
 
 /// Judges the fixed-name entries of the spool directories that already exist; injected so tests can refuse or record them.
 pub type EntriesJudge = fn(&[PathBuf]) -> Result<(), sys_windows::types::DirAclError>;
+
+
+/// The output of the agent's shell, in chunks of any size; a failed read ends the session as an agent error.
+pub type ShellReader = Pin<Box<dyn Stream<Item = io::Result<Vec<u8>>> + Send>>;
+
+
+/// Where the terminal input of the server is written.
+pub type ShellWriter = Box<dyn tokio::io::AsyncWrite + Send + Unpin>;

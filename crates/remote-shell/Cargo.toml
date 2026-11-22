@@ -24,6 +24,7 @@ tracing = "0.1"
 utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
+agent-channel = { version = "0.0.0", path = "../agent-channel" }
 agent-command = { version = "0.0.0", path = "../agent-command" }
 core-audit = { version = "0.0.0", path = "../core-audit" }
 pg-fake = { version = "0.0.0", path = "../pg-fake" }

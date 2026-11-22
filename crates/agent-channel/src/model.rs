@@ -75,6 +75,18 @@ pub const SHELL_OPEN_SECONDS: u64 = 10;
 pub const SHELL_DEAD_SECONDS: u64 = 60;
 
 
+/// Period of the keepalive frames the agent sends, well under `SHELL_DEAD_SECONDS`.
+pub const SHELL_KEEPALIVE_SECONDS: u64 = 20;
+
+
+/// The text of every refused shell attach on the agent side.
+pub const SHELL_REFUSED_TEXT: &str = "shell attach refused";
+
+
+/// Longest wait for the injected writer to take one server frame.
+pub const SHELL_WRITE_SECONDS: u64 = 10;
+
+
 /// Longest wait on the injected shell sink.
 pub const SHELL_SINK_SECONDS: u64 = 10;
 
@@ -89,6 +101,10 @@ pub const SHELL_OUTBOUND_CAPACITY: usize = 8;
 
 /// Pending and active shell sessions of the whole server.
 pub const MAX_SHELL_SESSIONS: usize = 64;
+
+
+/// Pending and active shell sessions of one tenant, so one tenant cannot fill the table of the others.
+pub const MAX_SHELL_SESSIONS_PER_TENANT: usize = 16;
 
 
 pub const SHELL_RATE_WINDOW_SECONDS: u64 = 1;
@@ -597,6 +613,7 @@ pub struct PendingShell {
 pub struct GateTable {
     pub pending: HashMap<(Identity, String), PendingShell>,
     pub active: usize,
+    pub active_by_tenant: HashMap<String, usize>,
 }
 
 
@@ -610,6 +627,7 @@ pub struct ShellGate {
 /// One running session of the gate; dropping it gives the place back.
 pub struct ActiveShell {
     pub gate: Arc<ShellGate>,
+    pub tenant: String,
 }
 
 
@@ -628,6 +646,8 @@ pub enum GateError {
     InvalidSessionId,
     #[error("shell session is already pending")]
     Duplicate,
+    #[error("the tenant holds too many shell sessions")]
+    TenantFull,
 }
 
 
@@ -676,3 +696,26 @@ pub const GRPC_PREFIX_BYTES: u8 = 5;
 
 /// Bits shifted in per length byte.
 pub const BITS_PER_BYTE: u32 = 8;
+
+
+/// How an attached shell ended on the agent side; the text of a peer never appears in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellClientEnd {
+    ServerClosed,
+    StreamEnded,
+    Dead,
+    WriteTimeout,
+    WriteFailed,
+    Malformed,
+    Oversized,
+    Transport,
+}
+
+
+/// A validated frame from the server: terminal input, a terminal size or the end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerFrame {
+    Data(Vec<u8>),
+    Resize { cols: u32, rows: u32 },
+    Close,
+}
