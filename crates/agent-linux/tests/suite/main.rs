@@ -1,6 +1,7 @@
 #![cfg(unix)]
 mod capabilities;
 mod cursor;
+mod fim;
 mod follow;
 mod hostmetrics;
 mod isolation;

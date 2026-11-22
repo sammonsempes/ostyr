@@ -22,6 +22,7 @@ pub fn tally(totals: Totals, outcome: Result<Report, SourceError>) -> Totals {
                 malformed: totals.malformed + report.malformed,
                 unknown: totals.unknown + report.unknown,
                 oversized: totals.oversized + report.oversized,
+                fim: totals.fim + report.fim,
                 rotations: totals.rotations + u64::from(report.rotated),
                 waiting: report.missing,
                 ..totals

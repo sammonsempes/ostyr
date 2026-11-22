@@ -1,4 +1,5 @@
 use crate::types::{ReleaseFn, SpoolLock, UpdateRunFn};
+use linux_fim::model::WatchSets;
 use patch_inventory::model::Limits;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -141,6 +142,18 @@ pub const DEFAULT_UPDATE_DEADLINE_SECONDS: u64 = 120;
 pub const MAX_UPDATE_DEADLINE_SECONDS: u64 = 600;
 
 
+/// The lines of a `planted.tsv` one token can add: the token and at most 127 directories above it (a path is at most 255 bytes).
+pub const PLANTED_LINES_PER_TOKEN: u64 = 128;
+
+
+/// The bytes of one `planted.tsv` line: a path of at most 255 bytes, two tabs, two decimal numbers of at most 20 digits, the newline.
+pub const PLANTED_LINE_BYTES: u64 = 300;
+
+
+/// The size cap of `planted.tsv`: 32 tokens per role (`MAX_HONEYTOKENS`) times 128 lines times 300 bytes, 1 228 800 bytes.
+pub const MAX_PLANTED_BYTES: u64 = linux_fim::limits::MAX_HONEYTOKENS as u64 * PLANTED_LINES_PER_TOKEN * PLANTED_LINE_BYTES;
+
+
 /// Upper bound of the polls and agent runs of one process; the cap exists because the rules forbid an unbounded loop.
 pub const MAX_POLLS: u64 = u64::MAX;
 
@@ -153,6 +166,29 @@ pub struct SourceSettings {
     pub max_line_bytes: u64,
     pub max_spool_bytes: u64,
     pub max_lines_per_poll: u64,
+    #[serde(skip)]
+    pub fim: Option<Arc<FimPlan>>,
+}
+
+
+/// The `fim` section of the settings file: the role table, the role to watch and the planter's `planted.tsv`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FimFile {
+    pub table: PathBuf,
+    pub role: String,
+    pub planted: PathBuf,
+}
+
+
+/// One validated FIM snapshot, built from the bytes of the files in one read: policy names, declared sets with the planted identities, digests of the table and `planted.tsv`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FimPlan {
+    pub role: String,
+    pub policies: Vec<String>,
+    pub sets: WatchSets,
+    pub table_sha256: String,
+    pub planted_sha256: String,
 }
 
 
@@ -163,6 +199,7 @@ impl Default for SourceSettings {
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
             max_lines_per_poll: DEFAULT_MAX_LINES_PER_POLL,
+            fim: None,
         }
     }
 }
@@ -368,6 +405,8 @@ pub struct LinuxFile {
     pub isolation: IsolationSettings,
     #[serde(default = "default_credentials_path")]
     pub credentials_path: PathBuf,
+    #[serde(default)]
+    pub fim: Option<FimFile>,
 }
 
 
@@ -433,6 +472,7 @@ pub struct Report {
     pub malformed: u64,
     pub unknown: u64,
     pub oversized: u64,
+    pub fim: u64,
     pub rotated: bool,
     pub truncated: bool,
     pub missing: bool,
@@ -447,6 +487,7 @@ pub struct Totals {
     pub malformed: u64,
     pub unknown: u64,
     pub oversized: u64,
+    pub fim: u64,
     pub rotations: u64,
     pub failures: u64,
     pub agent_runs: u64,
