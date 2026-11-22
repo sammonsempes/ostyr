@@ -34,5 +34,7 @@ samba-tool user create clean "$PASSWORD"
 
 ldbsearch -H "$SAM" '(|(objectClass=user)(objectClass=group)(objectClass=domainDNS))' dn objectClass sAMAccountName userAccountControl servicePrincipalName memberOf pwdLastSet \
     lastLogonTimestamp objectSid >/tmp/export.ldif
+printf '\n' >>/tmp/export.ldif
+ldbsearch -H "$SAM" -s base -b '' currentTime >>/tmp/export.ldif
 python3 /tmp/ldif_to_snapshot.py </tmp/export.ldif >/tmp/snapshot.json
 wc -c /tmp/snapshot.json

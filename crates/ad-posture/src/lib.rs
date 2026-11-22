@@ -3,6 +3,7 @@
 pub mod checks;
 pub mod error;
 pub mod filetime;
+pub mod indicator;
 pub mod limits;
 pub mod model;
 pub mod report;

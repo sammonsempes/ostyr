@@ -1,7 +1,10 @@
-"""Reads `ldbsearch` LDIF on stdin and writes the ad-posture snapshot (a JSON array) on stdout."""
+"""Reads `ldbsearch` LDIF on stdin and writes the ad-posture snapshot on stdout: {"captured": rootDSE currentTime, "entries": [...]}.
+
+The LDIF holds the rootDSE block (`ldbsearch -s base -b "" currentTime`) besides the entries; without it `captured` is left out."""
 import base64
 import json
 import sys
+from datetime import datetime, timezone
 
 NUMERIC = {"userAccountControl", "pwdLastSet", "lastLogonTimestamp"}
 MULTI = {"objectClass", "servicePrincipalName", "memberOf"}
@@ -39,6 +42,11 @@ def entry_of(block):
     return entry
 
 
+def rfc3339_of(generalized):
+    moment = datetime.strptime(generalized.split(".")[0].rstrip("Z"), "%Y%m%d%H%M%S")
+    return moment.replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def main():
     blocks, current = [], []
     for line in folded(sys.stdin.read().splitlines()):
@@ -49,7 +57,12 @@ def main():
             current.append(line)
     blocks.append(current)
     entries = [entry_of(block) for block in blocks]
-    json.dump([entry for entry in entries if "distinguishedName" in entry], sys.stdout)
+    root = [entry for entry in entries if "currentTime" in entry]
+    document = {}
+    if root:
+        document["captured"] = rfc3339_of(root[0]["currentTime"])
+    document["entries"] = [entry for entry in entries if "distinguishedName" in entry and "currentTime" not in entry]
+    json.dump(document, sys.stdout)
 
 
 main()
