@@ -2,10 +2,11 @@
 mod types;
 
 
+use hickory_resolver::net::NetError;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
-use synthetic_checks::dns::dns_resolve;
+use synthetic_checks::dns::{distinct_capped, dns_resolve, fixed_error};
 use synthetic_checks::error::ProbeError;
 use synthetic_checks::probe::{dns_probe, guarded_addresses, probe_limits};
 use types::TestResult;
@@ -63,6 +64,21 @@ const TTL: [u8; 4] = [0, 0, 0, 60];
 const CLASS_IN: [u8; 2] = [0, 1];
 
 
+const SOA_MARKER: &str = "marker-soa.example";
+
+
+const QUERY_MARKER: &str = "marker-query.example";
+
+
+const TYPE_SOA: u16 = 6;
+
+
+const SOA_NUMBERS_BYTES: usize = 20;
+
+
+const DUPLICATED: usize = 3;
+
+
 const PACKET_BYTES: usize = 512;
 
 
@@ -73,6 +89,7 @@ const PROBE_TIMEOUT_SECONDS: u64 = 5;
 enum Mode {
     Answers(Vec<IpAddr>),
     NxDomain,
+    NxDomainSoa,
     Silent,
 }
 
@@ -109,6 +126,32 @@ fn answer_section(answers: &[&IpAddr]) -> Result<(u16, Vec<u8>), std::num::TryFr
 }
 
 
+fn labels(name: &str) -> Option<Vec<u8>> {
+    let encoded = name
+        .split('.')
+        .map(|label| u8::try_from(label.len()).ok().map(|length| [&[length], label.as_bytes()].concat()))
+        .collect::<Option<Vec<_>>>()?;
+    Some([encoded.concat(), vec![0]].concat())
+}
+
+
+fn soa() -> Option<Vec<u8>> {
+    let data = [labels(SOA_MARKER)?, labels(SOA_MARKER)?, vec![0u8; SOA_NUMBERS_BYTES]].concat();
+    let length = u16::try_from(data.len()).ok()?;
+    Some(
+        [
+            NAME_POINTER.as_slice(),
+            &TYPE_SOA.to_be_bytes(),
+            &CLASS_IN,
+            &TTL,
+            &length.to_be_bytes(),
+            &data,
+        ]
+        .concat(),
+    )
+}
+
+
 fn reply(query: &[u8], mode: &Mode) -> Option<Vec<u8>> {
     let identifier = query.get(..ID_BYTES)?;
     let body = query.get(HEADER_BYTES..)?;
@@ -120,20 +163,26 @@ fn reply(query: &[u8], mode: &Mode) -> Option<Vec<u8>> {
             .iter()
             .filter(|answer| (kind == TYPE_A) == answer.is_ipv4() && (kind == TYPE_A || kind == TYPE_AAAA))
             .collect(),
-        Mode::NxDomain | Mode::Silent => Vec::new(),
+        Mode::NxDomain | Mode::NxDomainSoa | Mode::Silent => Vec::new(),
     };
-    let rcode = if matches!(mode, Mode::NxDomain) { NXDOMAIN } else { 0 };
+    let rcode = if matches!(mode, Mode::NxDomain | Mode::NxDomainSoa) {
+        NXDOMAIN
+    } else {
+        0
+    };
     let (count, records) = answer_section(&answers)
         .map_err(|error| tracing::warn!(%error, "stub answer section failed"))
         .ok()?;
+    let authority = if matches!(mode, Mode::NxDomainSoa) { soa()? } else { Vec::new() };
+    let authority_count = u8::from(!authority.is_empty());
     let header = [
         identifier,
         &[REPLY_FLAGS, RECURSION_AVAILABLE | rcode, 0, 1],
         &count.to_be_bytes(),
-        &[0, 0, 0, 0],
+        &[0, authority_count, 0, 0],
     ]
     .concat();
-    Some([header, question.to_vec(), records].concat())
+    Some([header, question.to_vec(), records, authority].concat())
 }
 
 
@@ -289,5 +338,68 @@ fn the_dns_probe_runs_over_the_real_transport() -> TestResult {
     finish(stub)?;
     assert!(outcome.succeeded);
     assert!(outcome.body_excerpt.contains("192.0.2.7"));
+    Ok(())
+}
+
+
+#[test]
+fn duplicates_are_removed_before_the_cap() -> TestResult {
+    let distinct: Vec<IpAddr> = MANY.iter().take(DUPLICATED).map(|text| text.parse()).collect::<Result<_, _>>()?;
+    let doubled: Vec<IpAddr> = distinct.iter().flat_map(|address| [*address, *address]).collect();
+    let stub = serve(Mode::Answers(doubled))?;
+    let answers = dns_resolve(Some(stub.address), "dup.example", LEFT, DUPLICATED)?;
+    finish(stub)?;
+    assert_eq!(answers.iter().collect::<std::collections::HashSet<_>>().len(), DUPLICATED);
+    Ok(())
+}
+
+
+#[test]
+fn distinct_capped_dedupes_canonical_forms_in_order() -> TestResult {
+    let mapped = IpAddr::V6("::ffff:192.0.2.1".parse::<Ipv6Addr>()?);
+    let plain = IpAddr::V4("192.0.2.1".parse::<Ipv4Addr>()?);
+    let other = IpAddr::V4("192.0.2.2".parse::<Ipv4Addr>()?);
+    assert_eq!(distinct_capped([mapped, plain, other].into_iter(), CAP), vec![plain, other]);
+    assert_eq!(distinct_capped([plain, plain, other].into_iter(), 1), vec![plain]);
+    Ok(())
+}
+
+
+fn no_marker(error: &std::io::Error) -> bool {
+    let mut chain = std::iter::successors(Some(error as &dyn std::error::Error), |current| current.source());
+    !chain.any(|link| format!("{link} {link:?}").contains("marker"))
+}
+
+
+#[test]
+fn an_nxdomain_with_a_soa_keeps_no_peer_bytes() -> TestResult {
+    let stub = serve(Mode::NxDomainSoa)?;
+    let error = dns_resolve(Some(stub.address), QUERY_MARKER, LEFT, CAP)
+        .err()
+        .ok_or("expected an error")?;
+    finish(stub)?;
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(no_marker(&error));
+    Ok(())
+}
+
+
+#[test]
+fn errors_map_to_fixed_kinds() -> TestResult {
+    let other = fixed_error(NetError::Msg(QUERY_MARKER.to_string()));
+    assert_eq!(fixed_error(NetError::Timeout).kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(other.kind(), std::io::ErrorKind::Other);
+    assert!(no_marker(&other));
+    Ok(())
+}
+
+
+const MESSAGE_RECORDS: usize = 4000;
+
+
+#[test]
+fn a_message_full_of_duplicates_gives_one_address() -> TestResult {
+    let plain = IpAddr::V4("192.0.2.1".parse::<Ipv4Addr>()?);
+    assert_eq!(distinct_capped(std::iter::repeat_n(plain, MESSAGE_RECORDS), CAP), vec![plain]);
     Ok(())
 }

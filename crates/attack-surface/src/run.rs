@@ -367,10 +367,19 @@ pub fn scan_scope_resolving(
 /// One line: how many targets were scanned, left unproven, too wide, deferred or failed.
 pub fn summary_line(report: &ScanReport) -> String {
     let count = |wanted: fn(&Outcome) -> bool| report.targets.iter().filter(|target| wanted(&target.outcome)).count();
+    let ran = report
+        .targets
+        .iter()
+        .filter(|target| match target.outcome {
+            Outcome::Resolved { .. } => target.runs.iter().any(|run| run.outcome != Outcome::Deferred),
+            Outcome::Scanned { .. } => true,
+            _ => false,
+        })
+        .count();
     format!(
         "{} targets: {} scanned, {} ownership_unverified, {} too_wide, {} deferred, {} failed",
         report.targets.len(),
-        count(|outcome| matches!(outcome, Outcome::Scanned { .. } | Outcome::Resolved { .. })),
+        ran,
         count(|outcome| matches!(outcome, Outcome::OwnershipUnverified)),
         count(|outcome| matches!(outcome, Outcome::TooWide)),
         count(|outcome| matches!(outcome, Outcome::Deferred)),

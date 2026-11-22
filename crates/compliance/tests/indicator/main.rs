@@ -4,8 +4,8 @@ mod types;
 use alerts::types::{Row, RowFuture};
 use compliance::error::IndicatorError;
 use compliance::indicator::{
-    check_baselines, counts_text, decode_row, hardening_indicator, indicator_json, observed_at_of, pairs_json, parse_count, source_text, value_of,
-    warning_line, HARDENING_INDICATOR, INDICATOR_SQL, MAX_BASELINES, STALE_AFTER_MICROS,
+    check_baselines, check_clock, counts_text, decode_row, hardening_indicator, indicator_json, observed_at_of, pairs_json, parse_count, source_text,
+    value_of, warning_line, HARDENING_INDICATOR, INDICATOR_SQL, MAX_BASELINES, MAX_CLOCK_SKEW_SECONDS, STALE_AFTER_MICROS,
 };
 use compliance::model::{Baseline, Control, Expectation, IndicatorCounts, IndicatorRow, Severity};
 use core_pg::error::PgError;
@@ -16,6 +16,21 @@ use types::{Call, TestResult};
 
 
 const NOW: u64 = 1_700_000_000_000_000;
+
+
+const DATABASE_NOW: &str = "1700000000";
+
+
+const DATABASE_SECONDS: u64 = 1_700_000_000;
+
+
+const LONG_DIGITS: usize = 1_000;
+
+
+const SECONDS_PER_HOUR: u64 = 3_600;
+
+
+const HOURS_AGO: u64 = 47;
 
 
 const SEEN: &str = "1699990000000000";
@@ -36,7 +51,7 @@ const EXPECTED_STALE: i64 = 172_800_000_000;
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
 
-const COLUMNS: usize = 11;
+const COLUMNS: usize = 12;
 
 
 const SHARE: f64 = 0.75;
@@ -104,7 +119,7 @@ fn answer(cells: [&str; COLUMNS]) -> Row {
 
 
 fn full_row() -> Row {
-    answer(["0.75", "4", "1", "3", "2", "5", "6", "7", "8", "90", SEEN])
+    answer(["0.75", "4", "1", "3", "2", "5", "6", "7", "8", "90", SEEN, DATABASE_NOW])
 }
 
 
@@ -169,7 +184,7 @@ async fn the_figure_carries_the_oldest_fresh_row_as_observed_at() -> TestResult 
 
 #[tokio::test]
 async fn no_scored_asset_emits_nothing() -> TestResult {
-    let none = answer(["", "0", "0", "0", "0", "0", "0", "0", "0", "0", ""]);
+    let none = answer(["", "0", "0", "0", "0", "0", "0", "0", "0", "0", "", DATABASE_NOW]);
     let (result, _calls) = run_with(Ok(vec![none]), "acme", &[baseline("acme", "base", &["c1"])], NOW).await?;
     let outcome = result?;
     assert!(outcome.row.is_none());
@@ -185,7 +200,7 @@ async fn no_scored_asset_emits_nothing() -> TestResult {
 
 #[tokio::test]
 async fn all_excepted_assets_emit_nothing() -> TestResult {
-    let excepted = answer(["", "0", "3", "9", "0", "0", "0", "0", "0", "9", SEEN]);
+    let excepted = answer(["", "0", "3", "9", "0", "0", "0", "0", "0", "9", SEEN, DATABASE_NOW]);
     let (result, _calls) = run_with(Ok(vec![excepted]), "acme", &[baseline("acme", "base", &["c1"])], NOW).await?;
     let outcome = result?;
     assert!(outcome.row.is_none());
@@ -197,7 +212,7 @@ async fn all_excepted_assets_emit_nothing() -> TestResult {
 
 #[tokio::test]
 async fn only_stale_rows_emit_nothing_but_are_counted() -> TestResult {
-    let stale = answer(["0", "2", "0", "0", "0", "8", "1", "0", "0", "9", ""]);
+    let stale = answer(["0", "2", "0", "0", "0", "8", "1", "0", "0", "9", "", DATABASE_NOW]);
     let (result, _calls) = run_with(Ok(vec![stale]), "acme", &[baseline("acme", "base", &["c1"])], NOW).await?;
     let outcome = result?;
     assert!(outcome.row.is_none());
@@ -387,12 +402,55 @@ fn the_statement_reads_one_tenant_and_keeps_every_scoring_rule() -> TestResult {
     assert!(sql.contains("count(*) FILTER (WHERE c.age <> 'fresh' OR c.verdict IN ('fail', 'error')) AS failed"));
     assert!(!sql.contains("'excepted')) AS"));
     assert!(sql.contains("sum(failed) + sum(missing) + sum(passed) AS denominator"));
-    assert!(sql.contains("avg(passed::numeric / NULLIF(denominator, 0))::float8::text"));
+    assert!(sql.contains("avg(passed::numeric / NULLIF(denominator, 0))::text"));
+    assert!(!sql.contains("float8"));
+    assert!(sql.contains("extract(epoch from statement_timestamp())::bigint::text"));
     assert!(!sql.contains("::float8 /") && !sql.contains("avg(passed::float8"));
     assert!(sql.contains("count(*) FROM classified WHERE age = 'fresh' AND verdict = 'excepted'"));
     assert!(sql.contains("count(*) FROM classified WHERE age = 'fresh' AND verdict = 'error'"));
     assert!(sql.contains("min(last_seen_micros) FROM classified WHERE age = 'fresh'"));
     assert!(sql.contains("count(*) FROM tenant_rows WHERE NOT listed"));
     assert!(sql.contains("WHERE denominator > 0"));
+    Ok(())
+}
+
+
+#[test]
+fn the_value_does_not_depend_on_the_server_float_settings() -> TestResult {
+    assert!((value_of("0.28583333333333333333")? - value_of("0.28583333333333333")?).abs() < f64::EPSILON);
+    assert_eq!(value_of("0.28583333333333333333")?.to_bits(), value_of("0.28583333333333333")?.to_bits());
+    assert!(value_of("-0")?.is_sign_positive());
+    let digits = format!("0.{}", "3".repeat(LONG_DIGITS));
+    assert!(value_of(&digits)? < HALF);
+    assert!(matches!(
+        value_of(&format!("1.{}", "5".repeat(LONG_DIGITS))),
+        Err(IndicatorError::ValueOutOfRange)
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn a_time_far_from_the_database_clock_emits_nothing() -> TestResult {
+    let scope = tenant_scope("a")?;
+    let skew = MAX_CLOCK_SKEW_SECONDS;
+    check_clock(NOW, DATABASE_NOW)?;
+    check_clock(NOW, &(DATABASE_SECONDS + skew).to_string())?;
+    check_clock(NOW, &(DATABASE_SECONDS - skew).to_string())?;
+    let late = (DATABASE_SECONDS + skew + 1).to_string();
+    let early = (DATABASE_SECONDS - skew - 1).to_string();
+    assert!(matches!(
+        check_clock(NOW, &late),
+        Err(IndicatorError::ClockSkew { max: MAX_CLOCK_SKEW_SECONDS })
+    ));
+    assert!(matches!(check_clock(NOW, &early), Err(IndicatorError::ClockSkew { .. })));
+    assert!(matches!(check_clock(NOW, "x"), Err(IndicatorError::BadRow)));
+    let mut cells = full_row();
+    cells.get_mut(COLUMNS - 1).ok_or("cell")?.clone_from(&early);
+    assert!(matches!(decode_row(&scope, NOW, &cells), Err(IndicatorError::ClockSkew { .. })));
+    assert!(matches!(
+        decode_row(&scope, NOW - HOURS_AGO * SECONDS_PER_HOUR * MICROS_PER_SECOND, &full_row()),
+        Err(IndicatorError::ClockSkew { .. })
+    ));
     Ok(())
 }

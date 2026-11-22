@@ -1,6 +1,6 @@
 use crate::memory::{lock, Db, Forced};
 use crate::types::TestResult;
-use crate::{case, executor, force, sent, stored_case, FOUR, NOW, THREE, TWO};
+use crate::{case, close_columns, executor, force, sent, stored_case, FOUR, NOW, THREE, TWO};
 use cases::error::{CaseStoreError, TransitionError};
 use cases::model::{CaseEvent, CaseEventKind, CaseStatus, Resolution};
 use cases::store::{apply_case_action, apply_to_stored, create_case, get_case, MAX_HISTORY, MAX_ID_CHARS, MAX_NAME_CHARS};
@@ -166,6 +166,8 @@ async fn a_stale_snapshot_cannot_push_the_stored_history_past_the_cap() -> TestR
         crate::memory::Entry {
             case: crowded,
             version: 1,
+            closed_at: None,
+            ever_incident: false,
             alerts: Default::default(),
         },
     );
@@ -212,5 +214,73 @@ async fn a_status_changed_without_a_version_bump_is_a_conflict() -> TestResult {
     let stale = apply_to_stored(&exec, &scope, &snapshot, CaseAction::Start, "alice", NOW + 1).await;
     assert!(matches!(stale, Err(CaseStoreError::Conflict)));
     assert_eq!(stored_case(&db, "acme", "c1").map(|stored| stored.history.len()), Some(0));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_close_columns_follow_the_lifecycle_and_the_flag_is_never_cleared() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((None, false)));
+    apply_case_action(&exec, &scope, "c1", CaseAction::Close(Some(Resolution::TruePositive)), "a", NOW + 1).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((Some(NOW + 1), true)));
+    apply_case_action(&exec, &scope, "c1", CaseAction::Reopen, "a", NOW + TWO as i64).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((None, true)));
+    apply_case_action(
+        &exec,
+        &scope,
+        "c1",
+        CaseAction::Close(Some(Resolution::FalsePositive)),
+        "a",
+        NOW + THREE as i64,
+    )
+    .await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((Some(NOW + THREE as i64), true)));
+    create_case(&exec, &scope, &case("acme", "c2", NOW)).await?;
+    apply_case_action(&exec, &scope, "c2", CaseAction::Close(Some(Resolution::Benign)), "a", NOW + 1).await?;
+    assert_eq!(close_columns(&db, "acme", "c2"), Some((Some(NOW + 1), false)));
+    create_case(&exec, &scope, &case("acme", "c3", NOW)).await?;
+    apply_case_action(&exec, &scope, "c3", CaseAction::Close(Some(Resolution::Other)), "a", NOW + 1).await?;
+    assert_eq!(close_columns(&db, "acme", "c3"), Some((Some(NOW + 1), true)));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_start_and_a_reopen_of_a_never_incident_case_keep_the_flag_false() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
+    apply_case_action(&exec, &scope, "c1", CaseAction::Start, "a", NOW + 1).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((None, false)));
+    apply_case_action(&exec, &scope, "c1", CaseAction::Close(Some(Resolution::Duplicate)), "a", NOW + TWO as i64).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((Some(NOW + TWO as i64), false)));
+    apply_case_action(&exec, &scope, "c1", CaseAction::Reopen, "a", NOW + THREE as i64).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((None, false)));
+    Ok(())
+}
+
+
+#[test]
+fn the_sql_text_keeps_the_close_columns() -> TestResult {
+    assert!(cases::store::APPLY_SQL.contains("closed_at = CASE WHEN change.status = 'closed' THEN change.updated_at END"));
+    assert!(
+        cases::store::APPLY_SQL.contains("ever_incident = cases.ever_incident OR coalesce(change.resolution IN ('true_positive', 'other'), false)")
+    );
+    assert!(cases::store::INSERT_SQL.contains("NULL, false, 1"));
+    let sql = cases::store::MIGRATIONS
+        .iter()
+        .find(|found| found.version == "004_close_columns")
+        .map(|found| found.sql)
+        .ok_or("migration")?;
+    assert!(sql.contains("CHECK ((status = 'closed') = (closed_at IS NOT NULL))"));
+    assert!(sql.contains("cases_by_closed ON cases (tenant, closed_at) WHERE closed_at IS NOT NULL"));
+    assert!(sql.contains("cases_open ON cases (tenant, created_at) WHERE status <> 'closed'"));
+    assert!(sql.contains("event->>'kind' = 'reopened'"));
+    assert_eq!(sql.matches("UPDATE cases").count(), 1);
     Ok(())
 }

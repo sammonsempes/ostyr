@@ -1,4 +1,6 @@
 UPDATE cases SET status = change.status, resolution = change.resolution, updated_at = change.updated_at,
+    closed_at = CASE WHEN change.status = 'closed' THEN change.updated_at END,
+    ever_incident = cases.ever_incident OR coalesce(change.resolution IN ('true_positive', 'other'), false),
     history = cases.history || jsonb_build_array(change.event), version = cases.version + 1
 FROM jsonb_to_record($3::text::jsonb) AS change(status text, resolution text, updated_at bigint, event jsonb, version bigint, prior_status text)
 WHERE cases.tenant = $1 AND cases.id = $2::text AND cases.version = change.version

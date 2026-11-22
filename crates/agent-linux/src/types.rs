@@ -88,3 +88,7 @@ pub type ReleaseFn = fn(&std::path::Path) -> std::io::Result<()>;
 
 
 pub type ChildKillFn = fn(&mut std::process::Child) -> std::io::Result<()>;
+
+
+/// Reads a regular file under a byte cap (production: core-config's `read_bytes_capped`); a test double injects bytes or a failure.
+pub type ReadBytesFn = fn(&std::path::Path, u64) -> Result<Vec<u8>, core_config::error::ConfigError>;

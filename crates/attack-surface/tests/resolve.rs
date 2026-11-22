@@ -37,6 +37,9 @@ const TWO: usize = 2;
 const THREE: usize = 3;
 
 
+const SIX: usize = 6;
+
+
 const EXIT_SEVEN: i32 = 7;
 
 
@@ -53,6 +56,9 @@ const PUBLIC_PREFIX: [u8; 3] = [8, 8, 8];
 
 
 const FIVE: u8 = 5;
+
+
+const EIGHT: u8 = 8;
 
 
 const GENEROUS_SECONDS: u64 = 60;
@@ -202,6 +208,13 @@ fn sixteen(_: &str, _: usize) -> Mode {
 }
 
 
+fn hidden_seventeenth(_: &str, _: usize) -> Mode {
+    let [first, second, third] = PUBLIC_PREFIX;
+    let at = |last: u8| IpAddr::V4(Ipv4Addr::new(first, second, third, last));
+    Mode::Answers((1..=SIXTEEN).chain(1..=1).chain(SEVENTEEN..=SEVENTEEN).map(at).collect())
+}
+
+
 fn sixteen_and_a_repeat(_: &str, _: usize) -> Mode {
     public(SIXTEEN, 1)
 }
@@ -262,11 +275,21 @@ fn fake_sixteen_v6(_: Option<SocketAddr>, _: &str, _: Duration, _: usize) -> std
 }
 
 
+fn fake_repeats(_: Option<SocketAddr>, _: &str, _: Duration, _: usize) -> std::io::Result<Vec<IpAddr>> {
+    Ok(vec![
+        IpAddr::V4(Ipv4Addr::new(EIGHT, EIGHT, EIGHT, EIGHT)),
+        "::ffff:8.8.8.8".parse().map_err(IoError::other)?,
+        IpAddr::V4(Ipv4Addr::new(EIGHT, EIGHT, EIGHT, EIGHT)),
+    ])
+}
+
+
 fn fake_arguments(nameserver: Option<SocketAddr>, name: &str, left: Duration, cap: usize) -> std::io::Result<Vec<IpAddr>> {
     let seconds = u8::try_from(left.as_secs()).map_err(IoError::other)?;
     let capped = u8::try_from(cap).map_err(IoError::other)?;
+    let [first, second, _] = PUBLIC_PREFIX;
     if nameserver.is_some() && name == "args.example." {
-        Ok(vec![IpAddr::V4(Ipv4Addr::new(PUBLIC_PREFIX[0], PUBLIC_PREFIX[1], seconds, capped))])
+        Ok(vec![IpAddr::V4(Ipv4Addr::new(first, second, seconds, capped))])
     } else {
         Err(IoError::from(ErrorKind::InvalidInput))
     }
@@ -321,7 +344,7 @@ fn mapped_nat64_and_teredo_answers_are_refused_alone() -> TestResult {
 #[test]
 fn seventeen_distinct_addresses_scan_nothing_and_sixteen_are_all_checked() -> TestResult {
     let scope = attested("external", &["many.example.com"])?;
-    [seventeen, twenty].into_iter().try_for_each(|decide| -> TestResult {
+    [seventeen, twenty, hidden_seventeenth].into_iter().try_for_each(|decide| -> TestResult {
         let Stubbed { report, .. } = scan_stub(&scope, &missing(), decide)?;
         let item = target(&report, 0)?;
         assert_eq!(item.outcome, Outcome::TooManyAddresses { max: MAX_ADDRESSES_PER_NAME });
@@ -415,15 +438,20 @@ fn a_lookup_gets_a_qualified_name_the_deadline_and_one_more_than_the_cap() -> Te
     let scope = attested("external", &["args.example"])?;
     let nameserver = Some("127.0.0.1:9".parse::<SocketAddr>()?);
     let report = scan(&scope, &missing(), nameserver, fake_arguments)?;
-    let expected = IpAddr::V4(Ipv4Addr::new(
-        PUBLIC_PREFIX[0],
-        PUBLIC_PREFIX[1],
-        u8::try_from(MAX_RESOLVE_SECONDS)?,
-        SEVENTEEN,
-    ));
+    let [first, second, _] = PUBLIC_PREFIX;
+    let expected = IpAddr::V4(Ipv4Addr::new(first, second, u8::try_from(MAX_RESOLVE_SECONDS)?, SEVENTEEN));
     assert_eq!(run_addresses(target(&report, 0)?), vec![expected]);
     assert_eq!(MAX_ADDRESSES_PER_NAME + 1, usize::from(SEVENTEEN));
     assert_eq!(MAX_RESOLVE_SECONDS, u64::from(FIVE));
+    Ok(())
+}
+
+
+#[test]
+fn a_resolver_that_repeats_an_address_in_any_form_gets_it_checked_and_run_once() -> TestResult {
+    let scope = attested("external", &["repeat.example"])?;
+    let report = scan(&scope, &missing(), None, fake_repeats)?;
+    assert_eq!(run_addresses(target(&report, 0)?), ips(&["8.8.8.8"]));
     Ok(())
 }
 
@@ -638,7 +666,7 @@ fn the_summary_counts_the_name_outcomes() -> TestResult {
             counts: Counts::default(),
         },
     ];
-    let report = ScanReport {
+    let mut report = ScanReport {
         found: Vec::new(),
         targets: outcomes
             .into_iter()
@@ -651,9 +679,22 @@ fn the_summary_counts_the_name_outcomes() -> TestResult {
             })
             .collect(),
     };
+    let run = |outcome: Outcome| AddressRun {
+        address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        outcome,
+    };
+    if let Some(first) = report.targets.first_mut() {
+        first.runs = vec![run(Outcome::Deferred), run(Outcome::Failed(attack_surface::error::ScanFailure::Timeout))];
+    }
+    report.targets.push(TargetReport {
+        index: SIX,
+        outcome: Outcome::Resolved { addresses: 1 },
+        runs: vec![run(Outcome::Deferred)],
+        refused_addresses: Vec::new(),
+    });
     assert_eq!(
         summary_line(&report),
-        "6 targets: 2 scanned, 0 ownership_unverified, 0 too_wide, 1 deferred, 3 failed"
+        "7 targets: 2 scanned, 0 ownership_unverified, 0 too_wide, 1 deferred, 3 failed"
     );
     Ok(())
 }

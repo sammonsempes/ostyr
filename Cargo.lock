@@ -151,11 +151,13 @@ dependencies = [
  "ecs-normalise",
  "flate2",
  "libc",
+ "linux-fim",
  "parking_lot",
  "patch-inventory",
  "rustix 1.1.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -4476,6 +4478,9 @@ dependencies = [
 name = "patch-inventory"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "vuln-match",
 ]

@@ -1,5 +1,6 @@
 use crate::cursor::write_cursor;
 use crate::error::SourceError;
+use crate::fim::fim_line;
 use crate::model::{Cursor, Follower, Notes, Paths, Report, SourceSettings, StateDir, Stop};
 use crate::spool::append_within;
 use crate::types::StepFn;
@@ -132,7 +133,7 @@ pub fn rotation_candidate(path: &Path, cursor: Cursor) -> Result<(Option<(File, 
 }
 
 
-fn fit(pass: Pass, json: String, offset: u64, context: &PassContext) -> Pass {
+fn fit(pass: Pass, json: String, offset: u64, context: &PassContext, fim: bool) -> Pass {
     if json.len() > context.line_limit {
         Pass {
             offset,
@@ -152,6 +153,7 @@ fn fit(pass: Pass, json: String, offset: u64, context: &PassContext) -> Pass {
             pending: pass.pending + added,
             report: Report {
                 spooled: pass.report.spooled + 1,
+                fim: pass.report.fim + u64::from(fim),
                 ..pass.report
             },
             ..pass
@@ -160,12 +162,26 @@ fn fit(pass: Pass, json: String, offset: u64, context: &PassContext) -> Pass {
 }
 
 
-/// Converts one complete line: an event is kept for the spool, an unknown kind or a malformed line is counted.
+/// Converts one complete line: a line of a FIM policy becomes one `agent.fim` record instead of its ECS event; any other event is kept for the spool, an unknown kind or a malformed line is counted.
 pub fn process_line(pass: Pass, bytes: Vec<u8>, offset: u64, context: &PassContext) -> Result<Pass, SourceError> {
     let line_number = pass.line_number + 1;
     let counted = Pass { line_number, ..pass };
-    match decode(line_number, RawLine::Text(bytes), context.settings.max_line_bytes) {
-        Ok(Outcome::Event(event)) => Ok(fit(counted, to_json(&event)?, offset, context)),
+    let classified = context
+        .settings
+        .fim
+        .as_ref()
+        .and_then(|plan| fim_line(&bytes, context.settings.max_line_bytes, plan));
+    match classified {
+        Some(json) => Ok(fit(counted, json, offset, context, true)),
+        None => ecs_line(counted, bytes, offset, context),
+    }
+}
+
+
+/// The ECS path of one line.
+pub fn ecs_line(counted: Pass, bytes: Vec<u8>, offset: u64, context: &PassContext) -> Result<Pass, SourceError> {
+    match decode(counted.line_number, RawLine::Text(bytes), context.settings.max_line_bytes) {
+        Ok(Outcome::Event(event)) => Ok(fit(counted, to_json(&event)?, offset, context, false)),
         Ok(Outcome::Unknown(_)) => Ok(Pass {
             offset,
             report: Report {

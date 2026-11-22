@@ -1,4 +1,4 @@
-//! Live proof: `vuln_store <pg.yaml> migrate | scan | bulk | pages`, see `USAGE`.
+//! Live proof: `vuln_store <pg.yaml> migrate | migrate-as-api | scan | bulk | pages`, see `USAGE`.
 
 use alerts::pg::pg_executor;
 use alerts::types::Executor;
@@ -21,7 +21,7 @@ use vuln_match::store::{
 };
 
 
-const USAGE: &str = "usage: vuln_store <pg.yaml> migrate | scan <tenant> <asset> <now_micros> <cap> <resolved_cap> <package/record>... \
+const USAGE: &str = "usage: vuln_store <pg.yaml> migrate | migrate-as-api | scan <tenant> <asset> <now_micros> <cap> <resolved_cap> <package/record>... \
                      | bulk <tenant> <asset> <now_micros> <cap> <resolved_cap> <count> <prefix> | pages <tenant> <limit> | asset <tenant> <asset> <limit> | sql first|next|asset";
 
 
@@ -65,8 +65,11 @@ fn finding_of(asset: &str, package: &str, record: &str, spread: usize) -> AssetF
 
 
 fn spec_finding(asset: &str, spec: &str) -> Result<AssetFinding, Box<dyn Error>> {
-    let (package, record) = spec.split_once('/').ok_or("spec is package/record")?;
-    Ok(finding_of(asset, package, record, 0))
+    let (package, rest) = spec.split_once('/').ok_or("spec is package/record[/kev]")?;
+    let (record, flag) = rest.split_once('/').map_or((rest, ""), |(record, flag)| (record, flag));
+    let mut finding = finding_of(asset, package, record, 0);
+    finding.scored.kev = flag == "kev";
+    Ok(finding)
 }
 
 
@@ -100,6 +103,10 @@ async fn scenario(settings_file: &Path, words: &[String]) -> Result<(), Box<dyn 
     let exec = pg_executor(&client, DEADLINE);
     let rebuild_exec = pg_executor(&client, MIGRATION_DEADLINE);
     match words {
+        [word] if word == "migrate-as-api" => {
+            let deadline = Duration::from_secs(settings.statement_timeout_secs);
+            migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, deadline).await.map(|_applied| ())?
+        }
         [word] if word == "migrate" => migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, DEADLINE).await.map(|_applied| ())?,
         [word, tenant, asset, now, cap, resolved_cap, specs @ ..] if word == "scan" => {
             let findings = specs.iter().map(|spec| spec_finding(asset, spec)).collect::<Result<Vec<_>, _>>()?;

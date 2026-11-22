@@ -33,6 +33,8 @@ pub enum StateError {
     CapOutOfRange,
     #[error("the time does not fit the state store")]
     TimeOutOfRange,
+    #[error("the given time differs from the database clock by more than {max} seconds")]
+    ClockSkew { max: u64 },
     #[error("the state store answered a row that cannot be read")]
     BadRow,
     #[error("the state store failed")]
@@ -88,6 +90,8 @@ pub enum IndicatorError {
     DuplicateBaseline,
     #[error("the time does not fit the indicator")]
     TimeOutOfRange,
+    #[error("the given time differs from the database clock by more than {max} seconds")]
+    ClockSkew { max: u64 },
     #[error("the state store answered a row that cannot be read")]
     BadRow,
     #[error("the computed value is not a number between 0 and 1")]

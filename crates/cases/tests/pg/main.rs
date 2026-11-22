@@ -405,6 +405,7 @@ async fn the_pg_backend_adds_and_lists_observables_scoped_to_the_tenant() -> Res
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 
