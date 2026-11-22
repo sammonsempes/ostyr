@@ -656,6 +656,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
+ "tokio-postgres",
  "tracing",
  "unicode-general-category",
 ]
