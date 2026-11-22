@@ -23,18 +23,18 @@ pub const ROOT_UID: u32 = 0;
 
 
 /// Fixed terminal size of the session until agent-channel gains a resize hook.
-pub const SHELL_COLUMNS: u32 = 80;
+pub const SHELL_COLUMNS: u16 = 80;
 
 
-pub const SHELL_ROWS: u32 = 24;
+pub const SHELL_ROWS: u16 = 24;
 
 
 /// Queue of verified `OpenShell` commands: one, the busy slot refuses the second one by name.
 pub const SHELL_QUEUE_CAPACITY: usize = 1;
 
 
-/// Chunks of terminal input waiting between the attach writer and the shell input.
-pub const SHELL_INPUT_CHUNKS: usize = 16;
+/// Bytes of terminal input waiting between the attach writer and the shell input.
+pub const SHELL_INPUT_BYTES: usize = 65_536;
 
 
 /// After the shell exits, the output is given this long to reach the platform.
@@ -44,24 +44,18 @@ pub const SHELL_EXIT_FLUSH_SECONDS: u64 = 5;
 pub const BANNER_TITLE: &str = "OSTYR REMOTE SHELL SESSION";
 
 
-/// A signed `OpenShell` command that passed every grammar again; only `TryFrom<Command>` builds it.
+#[doc = "A signed `OpenShell` command that passed every grammar again; only `TryFrom<Command>` builds it and its fields are read through accessors.\n\n```compile_fail,E0451\nlet _forged = agent_shell::model::VerifiedOpenShell {\n    session_id: String::new(),\n    asset: String::new(),\n    ticket: String::new(),\n    requester: String::new(),\n    approvers: Vec::new(),\n    max_seconds: 1,\n    idle_seconds: 1,\n    expires_at: 1,\n};\n```\n\n```compile_fail,E0616\nfn forge(order: &mut agent_shell::model::VerifiedOpenShell) {\n    order.session_id = String::from(\"a\\nb\");\n}\n```\n"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedOpenShell {
-    pub session_id: String,
-    pub asset: String,
-    pub ticket: String,
-    pub requester: String,
-    pub approvers: Vec<String>,
-    pub max_seconds: u32,
-    pub idle_seconds: u32,
-    pub expires_at: u64,
-    sealed: Sealed,
+    session_id: String,
+    asset: String,
+    ticket: String,
+    requester: String,
+    approvers: Vec<String>,
+    max_seconds: u32,
+    idle_seconds: u32,
+    expires_at: u64,
 }
-
-
-/// Keeps `VerifiedOpenShell` constructible only inside this crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Sealed;
 
 
 /// One recorded session id and the time after which a replay is refused by expiry alone.
@@ -100,6 +94,16 @@ pub struct PtyHandle {
 }
 
 
+/// The five outside calls of a session, as the composer takes them.
+pub struct ShellHooks<'env> {
+    pub clock: &'env ClockFn,
+    pub dial: &'env DialFn,
+    pub spawn: &'env SpawnFn,
+    pub attach: &'env AttachFn,
+    pub cleanup: &'env CleanupFn,
+}
+
+
 /// Everything a session needs from the outside; `store_lock` is held across the check and the record of the one-use store.
 pub struct ShellEnv<'env> {
     pub agent_id: String,
@@ -126,6 +130,45 @@ pub(crate) fn verified_open_shell(fields: (String, String, String, String, Vec<S
         max_seconds,
         idle_seconds,
         expires_at,
-        sealed: Sealed,
     }
+}
+
+
+pub fn session_id_of(order: &VerifiedOpenShell) -> &str {
+    &order.session_id
+}
+
+
+pub fn asset_of(order: &VerifiedOpenShell) -> &str {
+    &order.asset
+}
+
+
+pub fn ticket_of(order: &VerifiedOpenShell) -> &str {
+    &order.ticket
+}
+
+
+pub fn requester_of(order: &VerifiedOpenShell) -> &str {
+    &order.requester
+}
+
+
+pub fn approvers_of(order: &VerifiedOpenShell) -> &[String] {
+    &order.approvers
+}
+
+
+pub fn max_seconds_of(order: &VerifiedOpenShell) -> u32 {
+    order.max_seconds
+}
+
+
+pub fn idle_seconds_of(order: &VerifiedOpenShell) -> u32 {
+    order.idle_seconds
+}
+
+
+pub fn expires_at_of(order: &VerifiedOpenShell) -> u64 {
+    order.expires_at
 }

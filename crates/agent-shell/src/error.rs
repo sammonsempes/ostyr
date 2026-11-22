@@ -65,3 +65,23 @@ pub enum StoreError {
     #[error("the store holds the maximum of live session ids")]
     Full,
 }
+
+
+/// The account the shell runs as, refused by name; no peer text.
+#[derive(Debug, Error)]
+pub enum AccountError {
+    #[error("the shell account lookup failed")]
+    Lookup(#[source] io::Error),
+    #[error("the shell account {name} does not exist")]
+    Missing { name: String },
+    #[error("the shell account {name} has uid 0 or gid 0")]
+    Privileged { name: String },
+    #[error("the home of the shell account {name} cannot be read")]
+    HomeUnreadable {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the home of the shell account {name} is not a directory owned by the account")]
+    HomeInvalid { name: String },
+}

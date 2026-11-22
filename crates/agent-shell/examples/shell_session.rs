@@ -108,13 +108,15 @@ async fn run(channel: Channel, handle: PtyHandle, limits: (u32, u32)) -> Result<
             Box::pin(async move { Ok(dialled) })
         },
         spawn: &move |_order| {
-            slot.lock()
+            let taken = slot
+                .lock()
                 .ok()
                 .and_then(|mut held| held.take())
-                .ok_or_else(|| io::Error::other("spawned twice"))
+                .ok_or_else(|| io::Error::other("spawned twice"));
+            Box::pin(std::future::ready(taken))
         },
         attach: &*attach_fn(),
-        cleanup: &|| Ok(0),
+        cleanup: &|| Box::pin(std::future::ready(Ok(0))),
     };
     Ok(run_shell_session(order_with(limits)?, &env).await?)
 }

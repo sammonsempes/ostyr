@@ -3,6 +3,8 @@ use agent_channel::error::ChannelError;
 use agent_channel::model::ShellClientEnd;
 pub use agent_channel::types::DialFn;
 use agent_channel::types::{ShellReader, ShellWriter};
+use bytes::Bytes;
+use futures_util::Stream;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -15,12 +17,22 @@ use tonic::transport::Channel;
 pub type ClockFn = dyn Fn() -> u64 + Send + Sync;
 
 
-/// Starts the shell of a verified order on a PTY; the real spawner and its privilege drop are a later slice.
-pub type SpawnFn = dyn Fn(&VerifiedOpenShell) -> io::Result<PtyHandle> + Send + Sync;
+pub type SpawnFuture = Pin<Box<dyn Future<Output = io::Result<PtyHandle>> + Send>>;
 
 
-/// Removes what an earlier session left behind and returns how many processes remain.
-pub type CleanupFn = dyn Fn() -> io::Result<usize> + Send + Sync;
+/// Starts the shell of a verified order on a PTY; the real one runs its blocking work on the blocking pool.
+pub type SpawnFn = dyn Fn(&VerifiedOpenShell) -> SpawnFuture + Send + Sync;
+
+
+pub type CleanupFuture = Pin<Box<dyn Future<Output = io::Result<usize>> + Send>>;
+
+
+/// Removes what an earlier session left behind and returns how many processes remain; the real one runs on the blocking pool.
+pub type CleanupFn = dyn Fn() -> CleanupFuture + Send + Sync;
+
+
+/// The terminal input of the platform, as the chunks its writer delivered.
+pub type InputChunks = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>;
 
 
 pub type AttachFuture = Pin<Box<dyn Future<Output = Result<ShellClientEnd, ChannelError>> + Send>>;
@@ -37,3 +49,13 @@ pub type ShellSlot = Arc<AtomicBool>;
 /// Reads the metadata of an opened store handle.
 #[cfg(unix)]
 pub type InspectFn = fn(&std::fs::File) -> io::Result<std::fs::Metadata>;
+
+
+/// Looks an account up by name.
+#[cfg(unix)]
+pub type LookupFn = fn(&str) -> io::Result<Option<crate::account::AccountEntry>>;
+
+
+/// Reads what a home path is on disk.
+#[cfg(unix)]
+pub type HomeFn = fn(&std::path::Path) -> io::Result<crate::account::HomeFacts>;

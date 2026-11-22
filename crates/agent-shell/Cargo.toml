@@ -11,7 +11,7 @@ agent-command = { path = "../agent-command" }
 atomicwrites = "0.4.4"
 bytes = "1"
 core-audit = { path = "../core-audit" }
-futures-util = { version = "0.3", features = ["sink"] }
+futures-util = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 tokio-stream = { version = "0.1", features = ["time"] }
@@ -21,6 +21,8 @@ tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+portable-pty = "0.9"
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false }

@@ -1,5 +1,5 @@
 use crate::error::ShellError;
-use crate::model::{verified_open_shell, VerifiedOpenShell};
+use crate::model::{expires_at_of, verified_open_shell, VerifiedOpenShell};
 use agent_command::action::validate_open_shell;
 use agent_command::model::{Action, Command, KeyClass, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS};
 
@@ -12,7 +12,7 @@ pub fn is_past(expires_at: u64, now: u64) -> bool {
 
 /// The start is refused after `expires_at` plus the skew; the limits then run from the PTY start and are never extended.
 pub fn check_start(order: &VerifiedOpenShell, now: u64) -> Result<(), ShellError> {
-    if is_past(order.expires_at, now) {
+    if is_past(expires_at_of(order), now) {
         Err(ShellError::Expired)
     } else {
         Ok(())
@@ -21,7 +21,9 @@ pub fn check_start(order: &VerifiedOpenShell, now: u64) -> Result<(), ShellError
 
 
 pub fn lifetime_ok(issued_at: u64, expires_at: u64) -> bool {
-    expires_at.checked_sub(issued_at).is_some_and(|lifetime| lifetime <= MAX_LIFETIME_SECONDS)
+    expires_at
+        .checked_sub(issued_at)
+        .is_some_and(|lifetime| lifetime > 0 && lifetime <= MAX_LIFETIME_SECONDS)
 }
 
 
