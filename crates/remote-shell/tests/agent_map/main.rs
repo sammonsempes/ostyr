@@ -11,7 +11,10 @@ use core_config::error::ConfigError;
 use core_config::parse::MAX_FILE_BYTES;
 use core_config::reload::{current_config, reload, ReloadContext, ReloadOutcome};
 use core_config::types::SharedAuditFn;
-use remote_shell::agent_map::{agent_state, open_agent_engine, parse_agent_map, resolve_agent, AgentMap, MAX_AGENT_ASSETS};
+use remote_shell::agent_map::{
+    agent_state, open_agent_engine, parse_agent_map, refused_feature, resolve_agent, AgentMap, ANCHORS_REFUSED, MAX_AGENT_ASSETS,
+};
+use serde_saphyr::granit_parser::{Event, Span};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -173,8 +176,11 @@ fn a_long_agent_id_is_refused_without_its_value() -> TestResult {
 #[test]
 fn an_asset_with_escape_is_refused_without_the_escape() -> TestResult {
     let text = refusal("tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: \"srv\\e1\"\n")?;
-    assert!(text.contains("agents[0].asset is outside its grammar"), "{text}");
+    assert!(text.contains("agents[0]: escapes are not allowed in double-quoted strings"), "{text}");
     assert!(!text.contains('\u{1b}'));
+    let raw = refusal("tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: 'srv\\e1'\n")?;
+    assert!(raw.contains("agents[0].asset is outside its grammar"), "{raw}");
+    assert!(!raw.contains('\u{1b}'));
     Ok(())
 }
 
@@ -293,12 +299,10 @@ fn a_good_reload_swaps_and_removes_a_mapping() -> TestResult {
 }
 
 
-#[test]
-fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
-    let marker = "MARKERQZX";
+fn marker_refusals(marker: &str) -> Vec<String> {
     let base = file_text(&[("agent-1", "srv1")]);
     let changed = |from: &str, to: String| base.replace(from, &to);
-    let refusals = [
+    vec![
         changed("asset: srv1", format!("asset: srv1\n    {marker}: 1")),
         changed("asset: srv1", format!("asset: srv1\n    asset: {marker}")),
         changed("asset: srv1", format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")),
@@ -308,22 +312,218 @@ fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
         changed("asset: srv1", format!("asset: [{marker}]")),
         format!("tenant: {TENANT}\nagents:\n  - agent_id: a\n    {marker}: !{marker} x\n  - [{marker}"),
         format!("tenant: {TENANT}\nagents: !{marker} [1]"),
-    ];
-    refusals.iter().try_for_each(|text| {
-        let error = parse(text).err().ok_or_else(|| io::Error::other(format!("expected a refusal: {text}")))?;
-        let shown = format!("{error:?} {error}");
-        (!shown.contains(marker))
-            .then_some(())
-            .ok_or_else(|| io::Error::other(format!("marker leaked: {shown}")))
+        changed("agent_id: agent-1", format!("agent_id: !{marker} agent-1")),
+        changed("agent_id: agent-1", format!("agent_id: !!binary {marker}")),
+        changed("asset: srv1", format!("asset: {marker}: x")),
+    ]
+}
+
+
+#[test]
+fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
+    let base = file_text(&[("agent-1", "srv1")]);
+    ["MARKERQZX", "markerqzx"].iter().try_for_each(|marker| {
+        marker_refusals(marker).iter().try_for_each(|text| {
+            let error = parse(text).err().ok_or_else(|| io::Error::other(format!("expected a refusal: {text}")))?;
+            let shown = format!("{error:?} {error}");
+            (!shown.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()))
+                .then_some(())
+                .ok_or_else(|| io::Error::other(format!("marker leaked: {shown}")))
+        })
     })?;
+    let marker = "markerqzx";
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(FILE);
     put_file(&path, &base)?;
     let (audit, recorded) = recording_audit();
     let engine = open_agent_engine(path.clone(), audit, context())?;
-    put_file(&path, &changed("asset: srv1", format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")))?;
+    put_file(
+        &path,
+        &base.replace("asset: srv1", &format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")),
+    )?;
     let outcome = reload(&engine);
-    let audited = format!("{outcome:?} {:?}", recorded_entries(&recorded)?);
+    let audited = format!("{outcome:?} {:?}", recorded_entries(&recorded)?).to_ascii_lowercase();
     assert!(!audited.contains(marker), "{audited}");
+    Ok(())
+}
+
+
+#[test]
+fn tags_are_refused_with_the_entry_index() -> TestResult {
+    let two = |second: &str| format!("tenant: {TENANT}\nagents:\n  - agent_id: agent-1\n    asset: srv1\n{second}");
+    let cases = [
+        (two("  - agent_id: !foo agent-2\n    asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (two("  - agent_id: !!str agent-2\n    asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (two("  - agent_id: !!int agent-2\n    asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (
+            two("  - agent_id: !!binary YWdlbnQtMg==\n    asset: srv2\n"),
+            "agents[1]: tags are not allowed",
+        ),
+        (
+            two("  - !!map\n    agent_id: agent-2\n    asset: srv2\n"),
+            "agents[1]: tags are not allowed",
+        ),
+        (two("  - agent_id: agent-2\n    !foo asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (format!("tenant: {TENANT}\nagents: !!seq []\n"), "tags are not allowed"),
+        (format!("!!map\ntenant: {TENANT}\nagents: []\n"), "tags are not allowed"),
+        (format!("tenant: !!str {TENANT}\nagents: []\n"), "tags are not allowed"),
+    ];
+    cases.iter().try_for_each(|(text, expected)| {
+        let shown = refusal(text)?;
+        shown
+            .contains(expected)
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn bare_numbers_and_booleans_are_refused_but_quoted_ones_are_accepted() -> TestResult {
+    let bare = [
+        ("asset: 12", "agents[0].asset"),
+        ("asset: true", "agents[0].asset"),
+        ("agent_id: 7", "agents[0].agent_id"),
+    ];
+    bare.iter().try_for_each(|(change, path)| {
+        let text = file_text(&[("agent-1", "srv1")]).replace(
+            &change.replace(": 12", ": srv1").replace(": true", ": srv1").replace(": 7", ": agent-1"),
+            change,
+        );
+        let shown = refusal(&text)?;
+        shown
+            .contains(&format!("{path} is not a plain or quoted string"))
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{path} missing from {shown}")))
+    })?;
+    let quoted = parse(&file_text(&[("\"7\"", "'12'")]))?;
+    assert_eq!(quoted.agents.get("12").map(String::as_str), Some("7"));
+    Ok(())
+}
+
+
+#[test]
+fn escapes_anchors_aliases_and_merge_keys_are_refused() -> TestResult {
+    let two = |first: &str, second: &str| format!("tenant: {TENANT}\nagents:\n  - {first}\n  - {second}\n");
+    let cases = [
+        (
+            two("agent_id: agent-1\n    asset: srv1", "agent_id: \"\\x61gent-2\"\n    asset: srv2"),
+            "agents[1]: escapes are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: srv1", "agent_id: \"agent\\U0000002d2\"\n    asset: srv2"),
+            "agents[1]: escapes are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: srv1", "agent_id: \"agent-2\\\n      x\"\n    asset: srv2"),
+            "agents[1]: escapes are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: &a box1", "agent_id: *a\n    asset: srv2"),
+            "agents[0]: anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: srv1", "<<: {agent_id: agent-2}\n    asset: srv2"),
+            "agents[1]: anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            two("&e agent_id: agent-1\n    asset: srv1", "agent_id: agent-2\n    asset: srv2"),
+            "agents[0]: anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            format!("tenant: &t {TENANT}\nagents: []\n"),
+            "anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            format!("tenant: {TENANT}\nagents: &s []\n"),
+            "anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            "x: &m {a: b}\ntenant: *m\nagents: []\n".to_owned(),
+            "anchors, aliases and merge keys are not allowed",
+        ),
+        ("tenant: {!foo a: b}\nagents: []\n".to_owned(), "tags are not allowed"),
+    ];
+    cases.iter().try_for_each(|(text, expected)| {
+        let shown = refusal(text)?;
+        shown
+            .contains(expected)
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))
+    })?;
+    let under_tenant = refusal("tenant: {!foo a: b}\nagents: []\n")?;
+    assert!(!under_tenant.contains("agents["), "{under_tenant}");
+    let other_key = refusal("tenant: [x, !foo y]\nagents: []\n")?;
+    assert!(!other_key.contains("agents["), "{other_key}");
+    Ok(())
+}
+
+
+#[test]
+fn quoted_values_without_escapes_are_accepted() -> TestResult {
+    let doubled = refusal(&file_text(&[("\"agent-1\"", "'it''s'")]))?;
+    assert!(doubled.contains("agents[0].asset is outside its grammar"), "{doubled}");
+    let plain = parse(&file_text(&[("\"agent-1\"", "'srv-1'"), ("'agent-2'", "\"srv-2\"")]))?;
+    assert_eq!(plain.agents.get("srv-2").map(String::as_str), Some("agent-2"));
+    Ok(())
+}
+
+
+#[test]
+fn block_scalars_are_refused() -> TestResult {
+    ["|-", "|", ">-", ">"].iter().try_for_each(|header| {
+        let text = format!("tenant: {TENANT}\nagents:\n  - agent_id: {header}\n      agent-3\n    asset: srv3\n");
+        let shown = refusal(&text)?;
+        shown
+            .contains("agents[0]: block scalars are not allowed")
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("missing from {shown}")))
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn an_alias_event_is_refused_even_without_its_anchor() -> TestResult {
+    let span = Span::default();
+    assert_eq!(refused_feature(&Event::Alias(1), &span, ""), Some(ANCHORS_REFUSED));
+    assert_eq!(refused_feature(&Event::UnresolvedAlias("a".into()), &span, ""), Some(ANCHORS_REFUSED));
+    Ok(())
+}
+
+
+#[test]
+fn bytes_outside_printable_ascii_refuse_the_whole_file_naming_the_line() -> TestResult {
+    let ok = file_text(&[("agent-1", "srv1")]);
+    let hostile = [
+        "# srv9 retired\r  - agent_id: agent-2\n",
+        "# a\u{2028}  - agent_id: agent-2\n",
+        "# a\u{85}b\n",
+        "# a\u{2029}b\n",
+        "\u{feff}x: 1\n",
+        "# tab\there\n",
+        "# caf\u{e9}\n",
+        "# nul\u{0}\n",
+        "# a\u{202e}b\n",
+    ];
+    hostile.iter().try_for_each(|extra| {
+        let shown = refusal(&format!("{ok}{extra}"))?;
+        let expected = format!("line {}", ok.matches('\n').count() + 1);
+        shown
+            .contains(&expected)
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))?;
+        let bytes: Vec<char> = extra.chars().filter(|ch| !ch.is_ascii() || ch.is_control() && *ch != '\n').collect();
+        bytes
+            .iter()
+            .all(|ch| !shown.contains(*ch))
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("byte leaked: {shown}")))
+    })?;
+    let crlf = parse(&ok.replace('\n', "\r\n"))?;
+    assert_eq!(crlf.agents.len(), 1);
+    let trailing_cr = refusal(&format!("{ok}\r"))?;
+    assert!(trailing_cr.contains("only printable ASCII"), "{trailing_cr}");
     Ok(())
 }
