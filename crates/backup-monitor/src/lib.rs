@@ -12,5 +12,7 @@ pub mod parse;
 pub mod report;
 #[cfg(unix)]
 pub mod restic;
+#[cfg(unix)]
+pub mod restore;
 pub mod text;
 pub mod types;
