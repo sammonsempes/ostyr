@@ -260,7 +260,8 @@ kernel_checks() {
   kernel_manifest_present &&
     low cargo +nightly fmt --check --manifest-path "$EBPF_MANIFEST" &&
     low cargo "+$EBPF_NIGHTLY" clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
-      --manifest-path "$EBPF_MANIFEST" -- -D warnings
+      --manifest-path "$EBPF_MANIFEST" -- -D warnings &&
+    low env EBPF_OFFLINE=1 EBPF_NIGHTLY="$EBPF_NIGHTLY" lab/ebpf-no-panic.sh "$EBPF_MANIFEST"
 }
 
 compute_scope

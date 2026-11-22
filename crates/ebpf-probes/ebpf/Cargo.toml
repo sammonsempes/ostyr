@@ -10,6 +10,9 @@ license = "MIT OR GPL-2.0-only"
 [dependencies]
 aya-ebpf = "=0.3.0"
 
+[features]
+panic-check = []
+
 [profile.release]
 opt-level = 3
 panic = "abort"

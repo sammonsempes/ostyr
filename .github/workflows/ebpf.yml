@@ -32,8 +32,10 @@ jobs:
         env:
           RUSTFLAGS: -C link-arg=--btf
         run: cargo "+$EBPF_NIGHTLY" build --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path "$EBPF_MANIFEST"
-      - name: Refuse a kernel object that holds a panic symbol
-        run: lab/ebpf-no-panic.sh crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel
+      - name: Refuse a kernel crate with a reachable panic path
+        run: lab/ebpf-no-panic.sh "$EBPF_MANIFEST" crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel
+      - name: Prove the panic check refuses attack programs
+        run: lab/tests/ebpf-no-panic-test.sh
       - name: Lint the kernel crate
         run: cargo "+$EBPF_NIGHTLY" clippy --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path "$EBPF_MANIFEST" -- -D warnings
       - name: Fail loudly when the runner kernel has no BTF
