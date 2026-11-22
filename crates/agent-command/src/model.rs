@@ -1,8 +1,8 @@
 use crate::types::SaveFn;
 use core_config::reload::ReloadEngine;
 use ed25519_dalek::VerifyingKey;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 
@@ -26,6 +26,36 @@ pub const PACKAGE_NAME_PUNCTUATION: &str = ".+-_:~";
 
 
 pub const NONCE_LENGTH: usize = 16;
+
+
+pub const ACTION_NAMES: &[&str] = &[
+    "ping",
+    "collect_status",
+    "isolate",
+    "kill",
+    "run_script",
+    "update",
+    "uninstall",
+    "change_policy",
+    "install_updates",
+    "reboot",
+];
+
+
+pub const SENSITIVE_ACTION_NAMES: &[&str] = &[
+    "isolate",
+    "kill",
+    "run_script",
+    "update",
+    "uninstall",
+    "change_policy",
+    "install_updates",
+    "reboot",
+];
+
+
+/// Kinds that only a key scoped to exactly that one kind may sign; empty until the shell action lands.
+pub const EXCLUSIVE_ACTIONS: &[&str] = &[];
 
 
 pub const SIGNING_CONTEXT: &[u8] = b"ostyr-agent-command-v1\0";
@@ -99,6 +129,7 @@ pub struct TrustedKey {
     pub not_before: u64,
     pub not_after: u64,
     pub revoked: bool,
+    pub actions: Option<BTreeSet<String>>,
 }
 
 
@@ -119,6 +150,14 @@ pub struct RawKey {
     pub not_after: u64,
     #[serde(default)]
     pub revoked: bool,
+    #[serde(default, deserialize_with = "present_actions")]
+    pub actions: Option<Option<Vec<String>>>,
+}
+
+
+/// A present field is `Some` even when it is null, so only an absent field means every action of the class.
+pub fn present_actions<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Option<Option<Vec<String>>>, Source::Error> {
+    Option::<Vec<String>>::deserialize(deserializer).map(Some)
 }
 
 

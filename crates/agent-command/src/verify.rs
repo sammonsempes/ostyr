@@ -2,7 +2,8 @@ use crate::action::validate_action;
 use crate::codec::{decode_exact, signing_message};
 use crate::error::{CommandError, StoreError};
 use crate::model::{
-    Action, Command, Envelope, KeyClass, Sequences, TrustedKey, TrustedKeys, Verifier, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS, MAX_SEQUENCE_ADVANCE,
+    Action, Command, Envelope, KeyClass, Sequences, TrustedKey, TrustedKeys, Verifier, CLOCK_SKEW_SECONDS, EXCLUSIVE_ACTIONS, MAX_LIFETIME_SECONDS,
+    MAX_SEQUENCE_ADVANCE,
 };
 use crate::store::{check_state_private, file_saver, load_sequences};
 use crate::types::SaveFn;
@@ -139,9 +140,41 @@ pub fn check_class(class: KeyClass, action: &Action) -> Result<(), CommandError>
 }
 
 
-/// The lock is held from the comparison to the durable save; a failed save leaves the sequences unaccepted.
-pub fn accept_sequence(verifier: &Verifier, class: KeyClass, sequence: u64) -> Result<(), CommandError> {
+pub fn check_scope(key: &TrustedKey, action: &Action, exclusive: &[&str]) -> Result<(), CommandError> {
+    let kind = action_name(action);
+    let in_scope = match &key.actions {
+        Some(scope) => scope.contains(kind) && (scope.len() == 1 || !exclusive.contains(&kind)),
+        None => !exclusive.contains(&kind),
+    };
+    if in_scope {
+        Ok(())
+    } else {
+        Err(CommandError::ActionOutOfScope(kind))
+    }
+}
+
+
+/// Runs again under the sequence lock against the current keys: a reload that revoked, replaced or narrowed the key refuses the command.
+pub fn recheck_signer(verifier: &Verifier, first: &TrustedKey, command: &Command, now: u64, exclusive: &[&str]) -> Result<(), CommandError> {
+    let keys = current_config(&verifier.keys);
+    let key = keys.keys.get(&command.key_id).ok_or(CommandError::UnknownKey)?;
+    check_key(key, now)?;
+    if key.public_key != first.public_key {
+        Err(CommandError::BadSignature)
+    } else {
+        check_binding(&command.key_id, key, command)?;
+        check_class(key.class, &command.action)?;
+        check_scope(key, &command.action, exclusive)
+    }
+}
+
+
+/// The lock is held from the re-check and the comparison to the durable save; a failed save leaves the sequences unaccepted.
+pub fn accept_sequence(verifier: &Verifier, first: &TrustedKey, command: &Command, now: u64, exclusive: &[&str]) -> Result<(), CommandError> {
     let mut last = verifier.last_sequences.lock().unwrap_or_else(PoisonError::into_inner);
+    recheck_signer(verifier, first, command, now, exclusive)?;
+    let class = first.class;
+    let sequence = command.sequence;
     let previous = match class {
         KeyClass::Routine => last.routine,
         KeyClass::Sensitive => last.sensitive,
@@ -165,8 +198,8 @@ pub fn accept_sequence(verifier: &Verifier, class: KeyClass, sequence: u64) -> R
 }
 
 
-/// The signature is verified over the received bytes before the command is decoded.
-pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, CommandError> {
+/// `exclusive` and `between` are injected for tests; `between` runs after the checks and before the sequence lock.
+pub fn check_with(verifier: &Verifier, bytes: &[u8], now: u64, exclusive: &[&str], between: &dyn Fn(&Verifier)) -> Result<Command, CommandError> {
     let envelope: Envelope = decode_exact(bytes)?;
     let keys = current_config(&verifier.keys);
     let key = keys.keys.get(&envelope.key_id).ok_or(CommandError::UnknownKey)?;
@@ -178,8 +211,16 @@ pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, Com
     check_times(&command, now)?;
     validate_action(&command.action)?;
     check_class(key.class, &command.action)?;
-    accept_sequence(verifier, key.class, command.sequence)?;
+    check_scope(key, &command.action, exclusive)?;
+    between(verifier);
+    accept_sequence(verifier, key, &command, now, exclusive)?;
     Ok(command)
+}
+
+
+/// The signature is verified over the received bytes before the command is decoded.
+pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, CommandError> {
+    check_with(verifier, bytes, now, EXCLUSIVE_ACTIONS, &|_| {})
 }
 
 
