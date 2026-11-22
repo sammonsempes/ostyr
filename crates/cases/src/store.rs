@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 pub const MIGRATION_NAMESPACE: &str = "cases";
 
 
-pub const MIGRATIONS: [Migration; 3] = [
+pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "001_cases",
         sql: include_str!("../migrations/001_cases.sql"),
@@ -25,6 +25,10 @@ pub const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: "003_observable_index",
         sql: include_str!("../migrations/003_observable_index.sql"),
+    },
+    Migration {
+        version: "004_close_columns",
+        sql: include_str!("../migrations/004_close_columns.sql"),
     },
 ];
 

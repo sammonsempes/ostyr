@@ -1,6 +1,6 @@
 use crate::types::{IndexKey, Table};
 use alerts::types::Row;
-use cases::model::{Case, CaseEvent, CaseStatus, Comment, Observable};
+use cases::model::{Case, CaseEvent, CaseStatus, Comment, Observable, Resolution};
 use cases::store::{
     APPLY_SQL, ATTACH_SQL, COMMENT_SQL, DETAIL_SQL, FIRST_SUMMARY_SQL, GET_SQL, INSERT_SQL, LINKS_AFTER_SQL, LINKS_SQL, NEXT_SQL, NEXT_SUMMARY_SQL,
     OBSERVABLES_SQL, OBSERVABLE_SQL, SEEN_IN_SQL,
@@ -30,6 +30,8 @@ pub enum Forced {
 pub struct Entry {
     pub case: Case,
     pub version: i64,
+    pub closed_at: Option<i64>,
+    pub ever_incident: bool,
     pub alerts: BTreeMap<String, Option<(String, i64)>>,
 }
 
@@ -149,6 +151,8 @@ pub fn insert(table: &mut Table, tenant: &str, params: &[String]) -> Result<Vec<
             Entry {
                 case,
                 version: 1,
+                closed_at: None,
+                ever_incident: false,
                 alerts: BTreeMap::new(),
             },
         );
@@ -202,6 +206,8 @@ pub fn apply(table: &mut Table, params: &[String]) -> Result<Vec<Row>, PgError> 
             entry.case.resolution =
                 serde_json::from_value(change.get("resolution").cloned().ok_or_else(malformed)?).map_err(|_source| malformed())?;
             entry.case.updated_at = change.get("updated_at").and_then(Value::as_i64).ok_or_else(malformed)?;
+            entry.closed_at = (entry.case.status == CaseStatus::Closed).then_some(entry.case.updated_at);
+            entry.ever_incident = entry.ever_incident || matches!(entry.case.resolution, Some(Resolution::TruePositive | Resolution::Other));
             entry.case.history.push(event);
             entry.version += 1;
             Ok(vec![vec![entry.version.to_string()]])

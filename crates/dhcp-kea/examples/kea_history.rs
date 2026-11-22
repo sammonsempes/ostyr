@@ -53,7 +53,7 @@ async fn scenario(settings_file: &Path, leases_file: &Path, tenant: &str, lookup
                 writeln!(
                     stdout(),
                     "{}",
-                    json!({"address": interval.address, "mac": interval.mac, "hostname": interval.hostname, "starts": interval.starts,
+                    json!({"address": interval.address, "mac": interval.mac, "hostname": interval.hostname, "hostname_refused": interval.hostname_refused, "starts": interval.starts,
                            "ends": interval.ends, "action": interval.action, "subnet_id": interval.subnet_id})
                 )
             })?;

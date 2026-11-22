@@ -204,3 +204,36 @@ pub struct RecordOutcome {
     pub skipped_invalid: usize,
     pub refused_no_room: usize,
 }
+
+
+/// Counts of one indicator computation; integers only, so they can go to a log or a source text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndicatorCounts {
+    pub assets: u64,
+    pub excepted_only: u64,
+    pub excepted_rows: u64,
+    pub error_rows: u64,
+    pub stale_rows: u64,
+    pub future_rows: u64,
+    pub missing: u64,
+    pub unlisted_rows: u64,
+    pub rows: u64,
+}
+
+
+/// One GRC indicator value, in the shape `grc::inputs::parse_indicators` reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndicatorRow {
+    pub tenant: String,
+    pub name: String,
+    pub value: f64,
+    pub observed_at: OffsetDateTime,
+    pub source: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndicatorOutcome {
+    pub row: Option<IndicatorRow>,
+    pub counts: IndicatorCounts,
+}

@@ -39,10 +39,19 @@ pub fn lock<Guarded>(mutex: &Mutex<Guarded>) -> MutexGuard<'_, Guarded> {
 
 
 pub fn row(address: &str, mac: &str, hostname: &str, starts: i64, ends: i64) -> Vec<String> {
-    [address, mac, hostname, &starts.to_string(), &ends.to_string(), "lease-assigned", "7"]
-        .iter()
-        .map(ToString::to_string)
-        .collect()
+    [
+        address,
+        mac,
+        hostname,
+        "false",
+        &starts.to_string(),
+        &ends.to_string(),
+        "lease-assigned",
+        "7",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect()
 }
 
 

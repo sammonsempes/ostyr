@@ -10,7 +10,7 @@ read -r _ user address < <(awk '$1 == "datastore"' "$lab_state/vms.txt")
 [[ -n "$address" ]] || { echo "no datastore VM in $lab_state/vms.txt" >&2; exit 2; }
 ssh_options=(-i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
-scp "${ssh_options[@]}" "$here/migrations/002_dhcp_lease_history.sql" "$here/migrations/003_dhcp_history_eviction.sql" "$here/migrations/004_dhcp_history_lock_64.sql" "$user@$address:/tmp/"
+scp "${ssh_options[@]}" "$here/migrations/002_dhcp_lease_history.sql" "$here/migrations/003_dhcp_history_eviction.sql" "$here/migrations/004_dhcp_history_lock_64.sql" "$here/migrations/006_dhcp_hostname_refused.sql" "$user@$address:/tmp/"
 ssh "${ssh_options[@]}" "$user@$address" 'bash -s' <<'REMOTE'
 set -euo pipefail
 database=history_live_$$
@@ -24,6 +24,7 @@ check() {
 run -f /tmp/002_dhcp_lease_history.sql
 run -f /tmp/003_dhcp_history_eviction.sql
 run -f /tmp/004_dhcp_history_lock_64.sql
+run -f /tmp/006_dhcp_hostname_refused.sql
 
 NOW=1700000000
 DAY=86400
@@ -115,6 +116,10 @@ check "t45040 waited on no lock" "f" "$(run -c "SELECT EXISTS (SELECT 1 FROM pg_
 run -c "UPDATE lock_gate SET open = true"
 wait "$holder"
 check "slash and quote in a tenant name" 3 "$(run -c "SELECT n_inserted FROM dhcp_history_store('a/b''c', $(docs 3 $NOW), 100, 400, $NOW)")"
+
+refused_doc="'[{\"identity\":\"r1\",\"address\":\"10.9.0.1\",\"mac\":\"AA-BB-CC-DD-EE-09\",\"hostname\":null,\"hostname_refused\":true,\"starts\":$NOW,\"ends\":$((NOW + 100)),\"action\":\"lease-assigned\",\"subnet_id\":1},{\"identity\":\"r2\",\"address\":\"10.9.0.2\",\"mac\":\"AA-BB-CC-DD-EE-09\",\"hostname\":\"pc1.example\",\"hostname_refused\":false,\"starts\":$NOW,\"ends\":$((NOW + 100)),\"action\":\"lease-assigned\",\"subnet_id\":1},{\"identity\":\"r3\",\"address\":\"10.9.0.3\",\"mac\":\"AA-BB-CC-DD-EE-09\",\"hostname\":null,\"starts\":$NOW,\"ends\":$((NOW + 100)),\"action\":\"lease-assigned\",\"subnet_id\":1}]'::jsonb"
+check "hostname_refused batch inserts three rows" 3 "$(run -c "SELECT n_inserted FROM dhcp_history_store('marked', $refused_doc, 100, 400, $NOW)")"
+check "refused, valid and absent mark" "10.9.0.1|true|;10.9.0.2|false|pc1.example;10.9.0.3|false|" "$(run -c "SELECT string_agg(host(address) || '|' || hostname_refused::text || '|' || coalesce(hostname, ''), ';' ORDER BY address) FROM dhcp_lease_history WHERE tenant = 'marked'")"
 
 mismatch="$(run -c "SELECT count(*) FROM (SELECT tenant, count(*) AS n FROM dhcp_lease_history GROUP BY tenant) c JOIN dhcp_history_rows r USING (tenant) WHERE r.total <> c.n")"
 check "every counter equals its row count" 0 "$mismatch"

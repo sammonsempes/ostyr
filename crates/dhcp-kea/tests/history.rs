@@ -236,6 +236,10 @@ fn lookup_row(doc: &Value, sql: &str) -> Result<Vec<String>, Box<dyn std::error:
         text(doc, "address")?,
         nullable(doc, "mac", sql)?,
         nullable(doc, "hostname", sql)?,
+        doc.get("hostname_refused")
+            .and_then(Value::as_bool)
+            .ok_or("hostname_refused")?
+            .to_string(),
         number(doc, "starts")?.to_string(),
         number(doc, "ends")?.to_string(),
         text(doc, "action")?,
@@ -768,7 +772,7 @@ fn the_statements_bind_the_tenant_and_the_migrations_are_valid() -> TestResult {
     let migration = MIGRATIONS.get(1).ok_or("second migration")?.sql;
     let eviction = MIGRATIONS.get(PAIR).ok_or("third migration")?.sql;
     let lock_64 = MIGRATIONS.get(PAIR + 1).ok_or("fourth migration")?;
-    assert_eq!(MIGRATIONS.len(), PAIR + PAIR + 1);
+    assert_eq!(MIGRATIONS.len(), PAIR + PAIR + PAIR);
     assert_eq!(lock_64.version, "004_dhcp_history_lock_64");
     assert!(lock_64
         .sql
@@ -788,7 +792,10 @@ fn the_statements_bind_the_tenant_and_the_migrations_are_valid() -> TestResult {
 
 
 fn answer_row(starts: &str, ends: &str, subnet: &str) -> Vec<String> {
-    ["a", "", "", starts, ends, "act", subnet].iter().map(ToString::to_string).collect()
+    ["a", "", "", "false", starts, ends, "act", subnet]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 
@@ -1062,3 +1069,49 @@ async fn a_time_the_range_cannot_hold_skips_the_row() -> TestResult {
 
 
 const SENTINEL_ROWS: usize = 4;
+
+
+const LONG_HOSTNAME: usize = 300;
+
+
+const BATCH_SIZE: u64 = 5;
+
+
+const REFUSED_COUNT: u64 = 3;
+
+
+#[tokio::test]
+async fn a_refused_hostname_is_marked_counted_and_never_stored_as_text() -> TestResult {
+    let store = Store::default();
+    let exec: Executor = &executor(&store);
+    let scope = tenant_scope("acme")?;
+    let batch = [
+        lease("10.0.0.1", MAC_A, NOW, NOW + DAY, "Johns iPhone")?,
+        lease("10.0.0.2", MAC_A, NOW, NOW + DAY, "bad\u{1b}[31mname")?,
+        lease("10.0.0.3", MAC_A, NOW, NOW + DAY, &"a".repeat(LONG_HOSTNAME))?,
+        lease("10.0.0.4", MAC_A, NOW, NOW + DAY, "pc1.example")?,
+        lease("10.0.0.5", MAC_A, NOW, NOW + DAY, "")?,
+    ];
+    let flags: Vec<Option<bool>> = batch
+        .iter()
+        .map(|found| lease_doc(found).and_then(|doc| doc.get("hostname_refused").and_then(Value::as_bool)))
+        .collect();
+    assert_eq!(flags, vec![Some(true), Some(true), Some(true), Some(false), Some(false)]);
+    let counts = store_history(exec, &scope, &HistorySettings::default(), NOW, &batch).await?;
+    assert_eq!((counts.inserted, counts.hostname_refused), (BATCH_SIZE, REFUSED_COUNT));
+    let refused = lease_at(exec, &scope, "10.0.0.1", NOW + 1).await?;
+    let valid = lease_at(exec, &scope, "10.0.0.4", NOW + 1).await?;
+    let none = lease_at(exec, &scope, "10.0.0.5", NOW + 1).await?;
+    let view = |found: &dhcp_kea::history::LookupResult| {
+        found
+            .intervals
+            .first()
+            .map(|interval| (interval.hostname.clone(), interval.hostname_refused))
+    };
+    assert_eq!(view(&refused), Some((None, true)));
+    assert_eq!(view(&valid), Some((Some("pc1.example".to_string()), false)));
+    assert_eq!(view(&none), Some((None, false)));
+    let stored = store.rows.lock().map_err(|_poisoned| "poisoned")?;
+    assert!(stored.iter().all(|(_tenant, doc)| !doc.to_string().contains("iPhone")));
+    Ok(())
+}

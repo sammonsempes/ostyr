@@ -136,6 +136,14 @@ pub fn stored_case(db: &Db, tenant: &str, id: &str) -> Option<Case> {
 }
 
 
+pub fn close_columns(db: &Db, tenant: &str, id: &str) -> Option<(Option<i64>, bool)> {
+    lock(&db.tenants)
+        .get(tenant)
+        .and_then(|table| table.get(id))
+        .map(|entry| (entry.closed_at, entry.ever_incident))
+}
+
+
 #[test]
 fn every_statement_is_scoped_to_the_tenant() -> TestResult {
     [FIRST_SQL, NEXT_SQL, GET_SQL, APPLY_SQL, COMMENT_SQL, OBSERVABLE_SQL, ATTACH_SQL]

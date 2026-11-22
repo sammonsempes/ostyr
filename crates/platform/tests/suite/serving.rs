@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 
-const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell";
+const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture";
 
 
 const ROUTES: [(&str, &str); 10] = [
@@ -34,6 +34,9 @@ const DHCP_QUERIES: [&str; 2] = [
 
 
 const COMPLIANCE_QUERIES: [&str; 2] = ["/compliance/state", "/compliance/assets/web01"];
+
+
+const POSTURE_PATH: &str = "/posture/accounts/abc/findings";
 
 
 const SHELL_PATHS: [&str; 2] = ["/remote-shell/sessions", "/remote-shell/sessions/abc"];
@@ -176,6 +179,7 @@ async fn the_longest_module_list_is_served_and_the_document_lists_every_path() -
         assert!(paths.get(path).is_some(), "{path}");
     }
     assert!(paths.get("/remote-shell/sessions").is_some());
+    assert!(paths.get("/posture/accounts/{account}/findings").is_some());
     Ok(())
 }
 
@@ -191,7 +195,7 @@ const UNSELECTED_FIRST: [&str; 7] = [
 ];
 
 
-const UNSELECTED_SECOND: [&str; 12] = [
+const UNSELECTED_SECOND: [&str; 13] = [
     "/certificates",
     "/certificates/abc",
     "/oncall/alerts",
@@ -204,6 +208,7 @@ const UNSELECTED_SECOND: [&str; 12] = [
     "/vulnerabilities/assets/web01",
     "/remote-shell/sessions",
     "/remote-shell/sessions/abc",
+    POSTURE_PATH,
 ];
 
 
@@ -312,6 +317,37 @@ async fn the_remote_shell_routes_reject_other_methods() -> TestResult {
         for method in ["HEAD", "PUT", "POST", "DELETE"] {
             assert!(denied(status(&fx.router, method, path, Some(&auditor)).await?), "{method} {path}");
         }
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_posture_route_needs_cmdb_read_and_shares_the_semaphore() -> TestResult {
+    let fx = fixture(ALL_MODULES)?;
+    assert_eq!(status(&fx.router, "GET", POSTURE_PATH, None).await?, StatusCode::UNAUTHORIZED);
+    let reader = login(&fx.router, READER).await?;
+    assert_eq!(status(&fx.router, "GET", POSTURE_PATH, Some(&reader)).await?, StatusCode::FORBIDDEN);
+    let analyst = login(&fx.router, ANALYST).await?;
+    let code = status(&fx.router, "GET", POSTURE_PATH, Some(&analyst)).await?;
+    assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{code}");
+    let permits = Arc::new(Semaphore::new(0));
+    let limited = fixture_with_permits(ALL_MODULES, &permits)?;
+    let token = login(&limited.router, ANALYST).await?;
+    assert_eq!(
+        status(&limited.router, "GET", POSTURE_PATH, Some(&token)).await?,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_posture_route_rejects_other_methods() -> TestResult {
+    let fx = fixture(ALL_MODULES)?;
+    let analyst = login(&fx.router, ANALYST).await?;
+    for method in ["HEAD", "PUT", "POST", "DELETE"] {
+        assert!(denied(status(&fx.router, method, POSTURE_PATH, Some(&analyst)).await?), "{method}");
     }
     Ok(())
 }
