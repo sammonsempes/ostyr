@@ -152,10 +152,12 @@ pub fn once_spawn(calls: &Calls, handle: PtyHandle) -> Box<SpawnFn> {
     let spawned = Arc::clone(calls);
     Box::new(move |_order| {
         note(&spawned, "spawn");
-        slot.lock()
+        let taken = slot
+            .lock()
             .ok()
             .and_then(|mut held| held.take())
-            .ok_or_else(|| io::Error::other("spawned twice"))
+            .ok_or_else(|| io::Error::other("spawned twice"));
+        Box::pin(std::future::ready(taken))
     })
 }
 
@@ -164,7 +166,7 @@ pub fn failing_spawn(calls: &Calls) -> Box<SpawnFn> {
     let spawned = Arc::clone(calls);
     Box::new(move |_order| {
         note(&spawned, "spawn");
-        Err(io::Error::other("no pty"))
+        Box::pin(std::future::ready(Err(io::Error::other("no pty"))))
     })
 }
 
@@ -173,7 +175,7 @@ pub fn forbidden_spawn(calls: &Calls) -> Box<SpawnFn> {
     let spawned = Arc::clone(calls);
     Box::new(move |_order| {
         note(&spawned, "spawn-forbidden");
-        Err(io::Error::other("must not spawn"))
+        Box::pin(std::future::ready(Err(io::Error::other("must not spawn"))))
     })
 }
 
@@ -208,10 +210,11 @@ pub fn scripted_cleanup(calls: &Calls, answers: Vec<Option<usize>>) -> Box<Clean
     Box::new(move || {
         note(&cleaned, "cleanup");
         let index = position.fetch_add(1, Ordering::SeqCst).min(answers.len().saturating_sub(1));
-        match answers.get(index).copied().flatten() {
+        let answer = match answers.get(index).copied().flatten() {
             Some(left) => Ok(left),
             None => Err(io::Error::other("cleanup failed")),
-        }
+        };
+        Box::pin(std::future::ready(answer))
     })
 }
 
