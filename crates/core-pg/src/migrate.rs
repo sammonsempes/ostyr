@@ -12,6 +12,9 @@ use tracing::info;
 pub const MIGRATION_DEADLINE: Duration = Duration::from_secs(MAX_DEADLINE_SECS);
 
 
+pub const MIGRATION_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+
 pub const MIGRATION_CLIENT_MARGIN: Duration = Duration::from_secs(5);
 
 
@@ -250,8 +253,9 @@ pub fn migration_script(namespace: &str, migration: &Migration, lock_deadline: D
     check_version(migration.version)?;
     Ok(format!(
         "SELECT pg_catalog.pg_advisory_xact_lock({MIGRATION_LOCK_KEY}); SET LOCAL lock_timeout = {}; \
-         INSERT INTO public.schema_migrations (namespace, version, digest) VALUES ('{namespace}', '{}', '{}'); {}",
+         SET LOCAL client_connection_check_interval = {}; INSERT INTO public.schema_migrations (namespace, version, digest) VALUES ('{namespace}', '{}', '{}'); {}",
         timeout_millis(lock_deadline),
+        MIGRATION_CHECK_INTERVAL.as_millis(),
         migration.version,
         digest_of(migration.sql),
         migration.sql
