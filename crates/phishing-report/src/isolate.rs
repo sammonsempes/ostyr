@@ -216,6 +216,14 @@ pub fn kill_all(pid: Pid) {
 }
 
 
+/// Kills what the child left in its process group; the child is already reaped, so only the group is signalled.
+pub fn kill_group(pid: Pid) {
+    let group = kill_process_group(pid, Signal::KILL);
+    let outcome = format!("{group:?}");
+    debug!(outcome, "the child group was swept");
+}
+
+
 /// The writer thread body: the payload into the child's stdin, the outcome logged.
 pub fn write_payload(stdin: &mut dyn Write, bytes: &[u8]) {
     let written = stdin.write_all(bytes);
@@ -306,7 +314,10 @@ fn settle(pid: Pid, child: &mut Child, bytes: &[u8], grace_millis: u64) -> Resul
     let outcome = format!("{:?}", reaped.as_ref().err().map(io::Error::kind));
     debug!(outcome, "the child status was read");
     match reaped.unwrap_or(None) {
-        Some(status) => decide(status, bytes),
+        Some(status) => {
+            kill_group(pid);
+            decide(status, bytes)
+        }
         None => stop(pid, child, TriageError::ChildFailed),
     }
 }
