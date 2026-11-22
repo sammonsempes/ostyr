@@ -16,6 +16,8 @@ pub mod server;
 pub mod server_app;
 pub mod services;
 pub mod settings;
+pub mod shell;
+pub mod shell_gate;
 pub mod sink;
 pub mod spool;
 pub mod spool_dirs;

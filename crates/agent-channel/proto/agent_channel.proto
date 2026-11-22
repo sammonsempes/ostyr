@@ -15,6 +15,10 @@ service Commands {
   rpc Report(CommandReport) returns (ReportReply);
 }
 
+service Shell {
+  rpc Attach(stream ShellFrame) returns (stream ShellFrame);
+}
+
 message BeatRequest {
   string agent_version = 1;
   string tenant = 2;
@@ -56,3 +60,39 @@ message CommandReport {
 }
 
 message ReportReply {}
+
+enum ShellCloseReason {
+  SHELL_CLOSE_REASON_UNSPECIFIED = 0;
+  SHELL_CLOSE_REASON_EXITED = 1;
+  SHELL_CLOSE_REASON_AGENT_ERROR = 2;
+  SHELL_CLOSE_REASON_USER_CLOSE = 3;
+  SHELL_CLOSE_REASON_RECORDING_FAILED = 4;
+  SHELL_CLOSE_REASON_MAX_DURATION = 5;
+  SHELL_CLOSE_REASON_IDLE_TIMEOUT = 6;
+  SHELL_CLOSE_REASON_CHANNEL_DEAD = 7;
+}
+
+message ShellOpen {
+  string session_id = 1;
+}
+
+message ShellResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message ShellKeepalive {}
+
+message ShellClose {
+  ShellCloseReason reason = 1;
+}
+
+message ShellFrame {
+  oneof frame {
+    ShellOpen open = 1;
+    bytes data = 2;
+    ShellResize resize = 3;
+    ShellKeepalive keepalive = 4;
+    ShellClose close = 5;
+  }
+}

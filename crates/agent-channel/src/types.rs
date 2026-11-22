@@ -1,6 +1,6 @@
 use crate::error::ChannelError;
-use crate::model::{ChannelSettings, Identity, Revocations, ServerState};
-use crate::proto::{CommandEnvelope, EventAck, EventBatch};
+use crate::model::{ChannelSettings, Identity, Revocations, ServerState, ShellInput, ShellSinkEvent, ShellState};
+use crate::proto::{CommandEnvelope, EventAck, EventBatch, ShellFrame};
 use agent_command::model::Command;
 use arc_swap::ArcSwap;
 use core_config::types::SharedAuditFn;
@@ -67,6 +67,26 @@ pub type AckStream = Pin<Box<dyn Stream<Item = Result<EventAck, Status>> + Send>
 
 
 pub type EnvelopeStream = Pin<Box<dyn Stream<Item = Result<CommandEnvelope, Status>> + Send>>;
+
+
+/// Receives what an agent shell sends; each call is awaited under a deadline.
+pub type ShellSink = Box<dyn Fn(Identity, String, ShellSinkEvent) -> SinkFuture + Send + Sync>;
+
+
+pub type ShellInputStream = Pin<Box<dyn Stream<Item = ShellInput> + Send>>;
+
+
+/// Opens what the platform sends to the shell of one session.
+pub type ShellSource = Box<dyn Fn(Identity, String) -> ShellInputStream + Send + Sync>;
+
+
+pub type ShellInbound = Pin<Box<dyn Stream<Item = Result<ShellFrame, Status>> + Send>>;
+
+
+pub type ShellStream = Pin<Box<dyn Stream<Item = Result<ShellFrame, Status>> + Send>>;
+
+
+pub type SharedShell = Arc<ShellState>;
 
 
 pub type SharedState = Arc<ServerState>;
