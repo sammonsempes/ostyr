@@ -3,6 +3,7 @@ mod common;
 mod keys;
 mod patch;
 mod property;
+mod scope;
 mod sign;
 mod store;
 mod verify;
