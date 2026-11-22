@@ -373,7 +373,9 @@ pub fn summary_category(target: &TargetReport) -> SummaryCategory {
         Outcome::Deferred => SummaryCategory::Deferred,
         Outcome::Resolved { .. } if target.runs.iter().any(|run| matches!(run.outcome, Outcome::Scanned { .. })) => SummaryCategory::Scanned,
         Outcome::Resolved { .. } if target.runs.iter().all(|run| run.outcome == Outcome::Deferred) => SummaryCategory::Deferred,
-        _ => SummaryCategory::Failed,
+        Outcome::Resolved { .. } | Outcome::Failed(_) | Outcome::TooManyAddresses { .. } | Outcome::ResolveFailed { .. } | Outcome::OverBudget => {
+            SummaryCategory::Failed
+        }
     }
 }
 
