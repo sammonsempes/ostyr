@@ -122,3 +122,21 @@ pub enum StoreError {
     #[error("the store answered with a malformed row")]
     BadAnswer,
 }
+
+
+/// No variant carries a stored text.
+#[derive(Debug, Error)]
+pub enum IndicatorError {
+    #[error("the time does not fit the indicator")]
+    TimeOutOfRange,
+    #[error("the given time differs from the database clock by more than {max} seconds")]
+    ClockSkew { max: u64 },
+    #[error("the findings store answered a row that cannot be read")]
+    BadRow,
+    #[error("the computed value is not a finite number of at least 0")]
+    ValueOutOfRange,
+    #[error("the findings store failed")]
+    Store(#[source] core_pg::error::PgError),
+    #[error("the output could not be written")]
+    Write(#[from] std::io::Error),
+}
