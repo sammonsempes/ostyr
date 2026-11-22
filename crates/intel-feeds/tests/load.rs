@@ -11,10 +11,11 @@ use intel_feeds::model::{Ioc, IocType, Source, Tags, Tlp};
 use intel_feeds::store::{insert_plan, settings_for};
 use siem_ingest::clickhouse::MAX_CA_BYTES;
 use siem_ingest::error::InsertClass;
+use socket2::{Domain, Socket, Type};
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, Write};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::channel;
@@ -482,13 +483,24 @@ fn schema_statements_are_idempotent_and_post_without_a_statement_sends_the_body(
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> std::io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| std::io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn an_unreachable_server_is_unavailable_and_an_error_is_summarised() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
     let agent = agent_for(&rig.config)?;
-    let free = TcpListener::bind("127.0.0.1:0")?;
-    let port = free.local_addr()?.port();
-    drop(free);
+    let (_free, port) = closed_socket()?;
     let config = ClickhouseConfig {
         url: format!("http://127.0.0.1:{port}"),
         ..rig.config.clone()

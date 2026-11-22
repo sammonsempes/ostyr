@@ -12,9 +12,10 @@ use pg_fake::certs::{loopback, make_pki};
 use pg_fake::fake::{self, int8_cell, Fake, Mode, Reply, INT8_OID, TEXT_OID};
 use pg_fake::types::Handler;
 use rcgen::SanType;
+use socket2::{Domain, Socket, Type};
 use std::error::Error;
 use std::io::sink;
-use std::net::TcpListener;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,6 +59,7 @@ pub struct Served {
     pub engine: Arc<ReloadEngine<PgSettings>>,
     pub fake: Fake,
     pub _dir: TempDir,
+    pub _closed: Option<Socket>,
 }
 
 
@@ -116,10 +118,16 @@ pub fn settings_text(port: u16, password: &Path, ca: &Path) -> String {
 }
 
 
-pub fn unused_port() -> std::io::Result<u16> {
-    TcpListener::bind((loopback(), 0))
-        .and_then(|listener| listener.local_addr())
-        .map(|address| address.port())
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+pub fn closed_socket() -> std::io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((loopback(), 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| std::io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
 }
 
 
@@ -131,7 +139,11 @@ pub async fn served_on(handler: Handler, dead_port: bool) -> Result<Served, Box<
     let ca_file = dir.path().join("ca.pem");
     write_secret(&password_file, "p")?;
     std::fs::write(&ca_file, &pki.ca_pem)?;
-    let port = if dead_port { unused_port()? } else { fake.port };
+    let (closed, port) = if dead_port {
+        closed_socket().map(|(socket, port)| (Some(socket), port))?
+    } else {
+        (None, fake.port)
+    };
     let settings_file = dir.path().join("pg.yaml");
     std::fs::write(&settings_file, settings_text(port, &password_file, &ca_file))?;
     let log = genesis_log(sink());
@@ -143,7 +155,12 @@ pub async fn served_on(handler: Handler, dead_port: bool) -> Result<Served, Box<
         request_id: "test".to_owned(),
     };
     let engine = Arc::new(open_settings(settings_file, Box::new(move |entry| append(&log, entry)), context)?);
-    Ok(Served { engine, fake, _dir: dir })
+    Ok(Served {
+        engine,
+        fake,
+        _dir: dir,
+        _closed: closed,
+    })
 }
 
 

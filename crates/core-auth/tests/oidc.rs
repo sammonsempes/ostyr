@@ -30,10 +30,11 @@ use openidconnect::url::Url;
 use openidconnect::{ClaimsVerificationError, HttpRequest, JsonWebKeyId, JsonWebKeySet, PrivateSigningKey};
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use serde_json::{json, Value};
+use socket2::{Domain, Socket, Type};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use time::OffsetDateTime;
 use types::TestResult;
 
@@ -1056,12 +1057,15 @@ fn http_adapter_talks_to_a_server_and_reports_failures() -> TestResult {
     handle.join().map_err(|_| "server thread panicked")??;
     assert_eq!(response.status().as_u16(), HTTP_OK);
     assert_eq!(response.body(), b"{}");
-    let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let held = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    held.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let closed = held.local_addr()?.as_socket().ok_or("not an inet address")?.port();
     let refused = Request::builder()
         .method("GET")
         .uri(format!("http://127.0.0.1:{closed}/x"))
         .body(Vec::new())?;
     assert!(http_call(&new_agent(), refused).is_err());
+    drop(held);
     Ok(())
 }
 

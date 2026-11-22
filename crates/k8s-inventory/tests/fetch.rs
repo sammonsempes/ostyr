@@ -27,9 +27,10 @@ use k8s_inventory::settings::{
     MAX_TIMEOUT_MS, MAX_URL_BYTES, MIN_TIMEOUT_MS,
 };
 use serde_json::{json, Value};
+use socket2::{Domain, Socket, Type};
 use std::error::Error;
 use std::io::Write;
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -916,17 +917,26 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> Result<(Socket, u16), Box<dyn Error>> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket.local_addr()?.as_socket().ok_or("not an inet address")?.port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn a_dead_port_an_unknown_ca_and_a_cut_body_are_refused() -> TestResult {
     let rig = rig(handler(standard()))?;
-    let closed = TcpListener::bind("127.0.0.1:0")?;
+    let (closed, closed_port) = closed_socket()?;
     let mut refused = rig.settings.clone();
-    refused.api_url = format!("https://localhost:{}", closed.local_addr()?.port());
-    drop(closed);
+    refused.api_url = format!("https://localhost:{closed_port}");
     let mut dead = open_session(&refused)?;
     let error = get_reply(&mut dead, PODS_PATH, &[], 1).err().ok_or("connected")?;
     assert!(matches!(error, FetchError::Transport(_)));
     assert!(!chain(&error).contains(TOKEN));
+    drop(closed);
     let other = self::rig(handler(standard()))?;
     let mut foreign = rig.settings.clone();
     foreign.ca_file = write_file(other.dir.path(), "other-ca.pem", &other.stub.ca_pem)?.into();
@@ -1123,12 +1133,12 @@ fn a_settings_file_is_strict_and_a_run_from_it_prints_the_inventory() -> TestRes
 #[test]
 fn the_token_never_appears_in_any_error_text() -> TestResult {
     let rig = rig(handler(standard()))?;
-    let closed = TcpListener::bind("127.0.0.1:0")?;
+    let (closed, closed_port) = closed_socket()?;
     let mut dead = rig.settings.clone();
-    dead.api_url = format!("https://localhost:{}", closed.local_addr()?.port());
-    drop(closed);
+    dead.api_url = format!("https://localhost:{closed_port}");
     let mut session = open_session(&dead)?;
     let transport = get_reply(&mut session, PODS_PATH, &[("continue", TOKEN)], 1).err().ok_or("connected")?;
+    drop(closed);
     let mut token_file = rig.settings.clone();
     token_file.token_file = rig.dir.path().join("absent-token");
     let real = vec![

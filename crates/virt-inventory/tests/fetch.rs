@@ -8,10 +8,11 @@ mod types;
 
 use reader::FailingReader;
 use siem_ingest::error::InsertClass;
+use socket2::{Domain, Socket, Type};
 use stand_in::{reply, spawn_stand_in, Reply, Seen, StandIn, SERVER_NAME};
 use std::error::Error;
 use std::fs;
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
@@ -284,9 +285,22 @@ fn unusable_files_are_refused_without_the_token_in_the_text() -> TestResult {
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> std::io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| std::io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn a_closed_port_is_a_transport_failure() -> TestResult {
-    let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let (_held, port) = closed_socket()?;
     let directory = tempdir()?;
     let stand_in = spawn_stand_in(Vec::new())?;
     let settings = settings_for(directory.path(), port, &stand_in.ca_pem, Limits::default())?;

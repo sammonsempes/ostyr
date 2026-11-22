@@ -11,9 +11,10 @@ use intel_feeds::read::{
     clickhouse_time, count_bad, ioc_line, read_iocs, read_iocs_capped, reason_of, total_bad, BadReason, BadRows, ReadCaps, ReadError, ReadSummary,
 };
 use siem_ingest::error::InsertClass;
+use socket2::{Domain, Socket, Type};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread::{spawn, JoinHandle};
 use tempfile::{tempdir, TempDir};
@@ -391,12 +392,24 @@ fn a_server_that_never_answers_hits_the_deadline() -> TestResult {
 }
 
 
+/// A bound, never listening IPv6 socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> std::io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv6Addr::LOCALHOST, 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| std::io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn an_unreachable_server_is_refused_as_unavailable() -> TestResult {
     let mut rig = rig(LONG_TIMEOUT_MS)?;
-    let free = TcpListener::bind("[::1]:0")?;
-    rig.config.url = format!("http://[::1]:{}", free.local_addr()?.port());
-    drop(free);
+    let (_free, port) = closed_socket()?;
+    rig.config.url = format!("http://[::1]:{port}");
     let mut out = Vec::new();
     assert!(matches!(
         read_iocs(&rig.config, NOW, &mut out),

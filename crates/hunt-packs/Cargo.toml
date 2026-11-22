@@ -37,6 +37,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 serde_json = "1"
 siem-schema = { version = "0.0.0", path = "../siem-schema" }
 signal-hook = "0.4.6"
+socket2 = "0.6"
 tempfile = "3"
 time = "0.3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "time", "net", "io-util", "test-util"] }

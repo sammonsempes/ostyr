@@ -11,10 +11,11 @@ use cert_inventory::model::CtLimits;
 use data_encoding::BASE64;
 use rcgen::{CertificateParams, KeyPair};
 use serde_json::json;
+use socket2::{Domain, Socket, Type};
 use standin::{reply, requests, start, Reply, Standin};
 use std::error::Error;
 use std::io;
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::Duration;
 use types::TestResult;
 
@@ -406,9 +407,22 @@ fn an_untrusted_certificate_is_a_tls_error() -> TestResult {
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> std::io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| std::io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn a_closed_port_is_another_transport_error() -> TestResult {
-    let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let (_held, port) = closed_socket()?;
     let log = open_log(&format!("http://127.0.0.1:{port}"), None, TIMEOUT)?;
     assert!(matches!(get_sth(&log), Err(FetchError::Transport(TransportKind::Other))));
     Ok(())
