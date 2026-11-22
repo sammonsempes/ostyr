@@ -1,6 +1,7 @@
 mod cli;
 mod common;
 mod keys;
+mod openshell;
 mod patch;
 mod property;
 mod scope;

@@ -39,6 +39,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "change_policy",
     "install_updates",
     "reboot",
+    "open_shell",
 ];
 
 
@@ -51,11 +52,39 @@ pub const SENSITIVE_ACTION_NAMES: &[&str] = &[
     "change_policy",
     "install_updates",
     "reboot",
+    "open_shell",
 ];
 
 
-/// Kinds that only a key scoped to exactly that one kind may sign; empty until the shell action lands.
-pub const EXCLUSIVE_ACTIONS: &[&str] = &[];
+/// Kinds that only a key scoped to exactly that one kind may sign.
+pub const EXCLUSIVE_ACTIONS: &[&str] = &["open_shell"];
+
+
+pub const MAX_SHELL_APPROVERS: usize = 16;
+
+
+pub const MAX_SHELL_SECONDS: u32 = 43_200;
+
+
+pub const MAX_SHELL_IDLE_SECONDS: u32 = 3_600;
+
+
+pub const MAX_SESSION_ID_BYTES: usize = 128;
+
+
+pub const MAX_REFERENCE_BYTES: usize = 128;
+
+
+pub const MAX_SUBJECT_BYTES: usize = 255;
+
+
+pub const SESSION_ID_PUNCTUATION: &str = "_.-";
+
+
+pub const REFERENCE_PUNCTUATION: &str = "_.:/-";
+
+
+pub const SUBJECT_PUNCTUATION: &str = "-_.@:+/=|";
 
 
 pub const SIGNING_CONTEXT: &[u8] = b"ostyr-agent-command-v1\0";
@@ -74,13 +103,36 @@ pub enum Action {
     Ping,
     CollectStatus,
     Isolate,
-    Kill { process_id: u32 },
-    RunScript { script: String },
-    Update { version: String },
+    Kill {
+        process_id: u32,
+    },
+    RunScript {
+        script: String,
+    },
+    Update {
+        version: String,
+    },
     Uninstall,
-    ChangePolicy { policy: String },
-    InstallUpdates { packages: PackageSelection, reboot: RebootPolicy },
-    Reboot { prompt_user: bool, deadline: u64 },
+    ChangePolicy {
+        policy: String,
+    },
+    InstallUpdates {
+        packages: PackageSelection,
+        reboot: RebootPolicy,
+    },
+    Reboot {
+        prompt_user: bool,
+        deadline: u64,
+    },
+    OpenShell {
+        session_id: String,
+        asset: String,
+        ticket: String,
+        requester: String,
+        approvers: Vec<String>,
+        max_seconds: u32,
+        idle_seconds: u32,
+    },
 }
 
 
