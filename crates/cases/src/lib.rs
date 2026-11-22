@@ -5,6 +5,7 @@ pub mod api_model;
 pub mod backend;
 pub mod error;
 pub mod grammar;
+pub mod indicator;
 pub mod links_api;
 pub mod model;
 pub mod observable;
