@@ -9,7 +9,7 @@ use core_pg::scope::tenant_scope;
 use serde::de::{Deserializer, Error, IgnoredAny, SeqAccess};
 use serde::Deserialize;
 use serde_path_to_error::deserialize as deserialize_with_path;
-use serde_saphyr::granit_parser::{Event, Parser, ScanError, Span};
+use serde_saphyr::granit_parser::{Event, Parser, ScalarStyle, ScanError, Span};
 use serde_untagged::UntaggedEnumVisitor;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -97,44 +97,104 @@ pub const ROOT_DEPTH: usize = 1;
 pub const INVALID_FILE: &str = "the document is not a valid agent file";
 
 
-/// Nesting depth and number of entries seen so far, to name the entry that holds a tag.
+/// Nesting depth, entries seen in `agents` and where the walk is in the root mapping, to name the entry that holds a refused feature.
 #[derive(Debug, Clone, Copy)]
 pub struct Walk {
     pub depth: usize,
     pub entries: usize,
+    pub root_nodes: usize,
+    pub agents_key: bool,
+    pub in_agents: bool,
 }
 
 
-/// The text of a tag refusal: the entry index when the tag is inside an entry, never the tag.
-pub fn tag_refusal(walk: Walk) -> String {
-    if walk.depth > ROOT_DEPTH {
-        format!("agents[{}]: tags are not allowed", walk.entries.saturating_sub(1))
+pub const START: Walk = Walk {
+    depth: 0,
+    entries: 0,
+    root_nodes: 0,
+    agents_key: false,
+    in_agents: false,
+};
+
+
+pub const TAGS_REFUSED: &str = "tags are not allowed";
+
+
+pub const ESCAPES_REFUSED: &str = "escapes are not allowed in double-quoted strings";
+
+
+pub const ANCHORS_REFUSED: &str = "anchors, aliases and merge keys are not allowed";
+
+
+pub const KEY_VALUE_PAIR: usize = 2;
+
+
+pub const MERGE_KEY: &str = "<<";
+
+
+pub const AGENTS_KEY: &str = "agents";
+
+
+/// The text of a refusal: the entry index when the feature is inside an entry of `agents`, never the value.
+pub fn feature_refusal(walk: Walk, reason: &str) -> String {
+    if walk.in_agents && walk.entries > 0 {
+        format!("agents[{}]: {reason}", walk.entries.saturating_sub(1))
     } else {
-        "tags are not allowed".to_owned()
+        reason.to_owned()
     }
 }
 
 
-/// One parser event: refuses any tag, tracks the nesting and the entry count.
-pub fn walk_step(walk: Walk, item: Result<(Event<'_>, Span), ScanError>, file: &str) -> Result<Walk, ConfigError> {
-    let (event, _) = item.map_err(|_| refuse(file, INVALID_FILE.to_owned()))?;
-    let entries = walk
-        .entries
-        .saturating_add(usize::from(walk.depth == ENTRY_PARENT_DEPTH && is_node_start(&event)));
-    let started = Walk { depth: walk.depth, entries };
-    match &event {
-        Event::Scalar(_, _, _, tag) | Event::SequenceStart(_, _, tag) | Event::MappingStart(_, _, tag) if tag.is_some() => {
-            Err(refuse(file, tag_refusal(started)))
+/// The fixed reason an event is refused for, if any: a tag, an anchor, an alias, a merge key or an escape in a double-quoted scalar.
+pub fn refused_feature(event: &Event<'_>, span: &Span, text: &str) -> Option<&'static str> {
+    match event {
+        Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, _, Some(_)) | Event::MappingStart(_, _, Some(_)) => Some(TAGS_REFUSED),
+        Event::Scalar(_, _, anchor, _) | Event::SequenceStart(_, anchor, _) | Event::MappingStart(_, anchor, _) if *anchor != 0 => {
+            Some(ANCHORS_REFUSED)
         }
-        Event::SequenceStart(..) | Event::MappingStart(..) => Ok(Walk {
+        Event::Scalar(value, _, _, _) if value == MERGE_KEY => Some(ANCHORS_REFUSED),
+        Event::Scalar(_, ScalarStyle::DoubleQuoted, _, _) if span.slice(text).is_none_or(|source| source.contains('\\')) => Some(ESCAPES_REFUSED),
+        _ => None,
+    }
+}
+
+
+/// Where the node that starts in the root mapping sits: keys are even nodes, values odd; only the value of `agents` is inside the entries.
+pub fn track_root(walk: Walk, event: &Event<'_>) -> Walk {
+    let at_root = walk.depth == ROOT_DEPTH && is_node_start(event);
+    let is_value = at_root && walk.root_nodes % KEY_VALUE_PAIR == 1;
+    let is_agents_key = at_root && !is_value && matches!(event, Event::Scalar(value, ..) if value == AGENTS_KEY);
+    Walk {
+        root_nodes: walk.root_nodes.saturating_add(usize::from(at_root)),
+        agents_key: if at_root && !is_value { is_agents_key } else { walk.agents_key },
+        in_agents: if at_root { is_value && walk.agents_key } else { walk.in_agents },
+        entries: if is_value { 0 } else { walk.entries },
+        ..walk
+    }
+}
+
+
+/// One parser event: refuses tags, anchors, aliases, merge keys and escapes, tracks the nesting and the entry count.
+pub fn walk_step(walk: Walk, item: Result<(Event<'_>, Span), ScanError>, text: &str, file: &str) -> Result<Walk, ConfigError> {
+    let (event, span) = item.map_err(|_| refuse(file, INVALID_FILE.to_owned()))?;
+    let tracked = track_root(walk, &event);
+    let started = Walk {
+        entries: tracked.entries.saturating_add(usize::from(
+            tracked.in_agents && tracked.depth == ENTRY_PARENT_DEPTH && is_node_start(&event),
+        )),
+        ..tracked
+    };
+    match (refused_feature(&event, &span, text), &event) {
+        (Some(reason), _) => Err(refuse(file, feature_refusal(started, reason))),
+        (None, Event::SequenceStart(..) | Event::MappingStart(..)) => Ok(Walk {
             depth: started.depth.saturating_add(1),
             ..started
         }),
-        Event::SequenceEnd | Event::MappingEnd => Ok(Walk {
+        (None, Event::SequenceEnd | Event::MappingEnd) => Ok(Walk {
             depth: started.depth.saturating_sub(1),
             ..started
         }),
-        _ => Ok(started),
+        (None, _) => Ok(started),
     }
 }
 
@@ -144,10 +204,10 @@ pub fn is_node_start(event: &Event<'_>) -> bool {
 }
 
 
-/// Refuses every YAML tag (`!foo`, `!!str`, `!!binary`, `!!int`, on a scalar, a sequence or a mapping) before any typed pass reads the text.
+/// Refuses every YAML tag, anchor, alias, merge key and double-quoted escape before any typed pass reads the text.
 pub fn refuse_tags(text: &str, file: &str) -> Result<(), ConfigError> {
     Parser::new_from_str(text)
-        .try_fold(Walk { depth: 0, entries: 0 }, |walk, item| walk_step(walk, item, file))
+        .try_fold(START, |walk, item| walk_step(walk, item, text, file))
         .map(drop)
 }
 

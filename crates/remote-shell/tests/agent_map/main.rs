@@ -173,8 +173,11 @@ fn a_long_agent_id_is_refused_without_its_value() -> TestResult {
 #[test]
 fn an_asset_with_escape_is_refused_without_the_escape() -> TestResult {
     let text = refusal("tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: \"srv\\e1\"\n")?;
-    assert!(text.contains("agents[0].asset is outside its grammar"), "{text}");
+    assert!(text.contains("agents[0]: escapes are not allowed in double-quoted strings"), "{text}");
     assert!(!text.contains('\u{1b}'));
+    let raw = refusal("tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: 'srv\\e1'\n")?;
+    assert!(raw.contains("agents[0].asset is outside its grammar"), "{raw}");
+    assert!(!raw.contains('\u{1b}'));
     Ok(())
 }
 
@@ -393,5 +396,74 @@ fn bare_numbers_and_booleans_are_refused_but_quoted_ones_are_accepted() -> TestR
     })?;
     let quoted = parse(&file_text(&[("\"7\"", "'12'")]))?;
     assert_eq!(quoted.agents.get("12").map(String::as_str), Some("7"));
+    Ok(())
+}
+
+
+#[test]
+fn escapes_anchors_aliases_and_merge_keys_are_refused() -> TestResult {
+    let two = |first: &str, second: &str| format!("tenant: {TENANT}\nagents:\n  - {first}\n  - {second}\n");
+    let cases = [
+        (
+            two("agent_id: agent-1\n    asset: srv1", "agent_id: \"\\x61gent-2\"\n    asset: srv2"),
+            "agents[1]: escapes are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: srv1", "agent_id: \"agent\\U0000002d2\"\n    asset: srv2"),
+            "agents[1]: escapes are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: srv1", "agent_id: \"agent-2\\\n      x\"\n    asset: srv2"),
+            "agents[1]: escapes are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: &a box1", "agent_id: *a\n    asset: srv2"),
+            "agents[0]: anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            two("agent_id: agent-1\n    asset: srv1", "<<: {agent_id: agent-2}\n    asset: srv2"),
+            "agents[1]: anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            two("&e agent_id: agent-1\n    asset: srv1", "agent_id: agent-2\n    asset: srv2"),
+            "agents[0]: anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            format!("tenant: &t {TENANT}\nagents: []\n"),
+            "anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            format!("tenant: {TENANT}\nagents: &s []\n"),
+            "anchors, aliases and merge keys are not allowed",
+        ),
+        (
+            "x: &m {a: b}\ntenant: *m\nagents: []\n".to_owned(),
+            "anchors, aliases and merge keys are not allowed",
+        ),
+        ("tenant: {!foo a: b}\nagents: []\n".to_owned(), "tags are not allowed"),
+    ];
+    cases.iter().try_for_each(|(text, expected)| {
+        let shown = refusal(text)?;
+        shown
+            .contains(expected)
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))
+    })?;
+    let under_tenant = refusal("tenant: {!foo a: b}\nagents: []\n")?;
+    assert!(!under_tenant.contains("agents["), "{under_tenant}");
+    let other_key = refusal("tenant: [x, !foo y]\nagents: []\n")?;
+    assert!(!other_key.contains("agents["), "{other_key}");
+    Ok(())
+}
+
+
+#[test]
+fn quoted_values_without_escapes_are_accepted() -> TestResult {
+    let doubled = refusal(&file_text(&[("\"agent-1\"", "'it''s'")]))?;
+    assert!(doubled.contains("agents[0].asset is outside its grammar"), "{doubled}");
+    let plain = parse(&file_text(&[("\"agent-1\"", "'srv-1'"), ("'agent-2'", "\"srv-2\"")]))?;
+    assert_eq!(plain.agents.get("srv-2").map(String::as_str), Some("agent-2"));
+    let block = parse(&format!("tenant: {TENANT}\nagents:\n  - agent_id: |-\n      agent-3\n    asset: srv3\n"))?;
+    assert_eq!(block.agents.get("srv3").map(String::as_str), Some("agent-3"));
     Ok(())
 }
