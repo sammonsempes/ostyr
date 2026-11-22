@@ -1,7 +1,9 @@
 use crate::capabilities::{announce, read_bounded, SYSTEM_ROOT};
 use crate::cursor::open_state_dir;
 use crate::error::SourceError;
-use crate::model::{LinuxFile, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
+use crate::hostmetrics::statvfs_path;
+use crate::metrics::run_metrics;
+use crate::model::{LinuxFile, MetricsEnv, Paths, Totals, UpdateEnv, LINUX_MODULE, SYSTEMCTL_PATH};
 use crate::run::run_source;
 use crate::sensor::{monotonic_seconds, run_sensor, run_update_command, SensorEnv};
 use crate::settings::open_settings_engine;
@@ -58,7 +60,8 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
     let _audit_dir = open_parent(&file.audit_file)?;
     let log = Arc::new(open_file_log(&file.audit_file)?);
     let context = reload_context(path, LINUX_MODULE, &agent.tenant, "agent-linux-reload");
-    let (engine, shared, sensor_settings, update_settings, _osquery) = open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
+    let (engine, shared, sensor_settings, update_settings, _osquery, metrics_settings) =
+        open_settings_engine(path.to_path_buf(), shared_log_audit(&log), context)?;
     let reloadable = Arc::new(engine);
     let _watch = watch_files(Arc::clone(&reloadable), std::slice::from_ref(&path.to_path_buf()), debounce())?;
     let _signals = keep_signals(Arc::clone(&reloadable))?;
@@ -114,6 +117,20 @@ pub async fn run_linux(path: &Path, max_polls: u64, pause: &PauseFn, run: RunFn)
             .await
             .map(|_| ())
     };
-    let (totals, runs, (), ()) = tokio::try_join!(source, cycles, sensor, updates)?;
+    let metrics_env = MetricsEnv {
+        root: PathBuf::from(SYSTEM_ROOT),
+        spool: paths.spool.clone(),
+        sending: paths.sending.clone(),
+        lock: Arc::clone(&paths.lock),
+        line_limit: line_limit(&agent),
+        read: read_bounded,
+        stat: statvfs_path,
+    };
+    let metrics = async {
+        run_metrics(&metrics_settings, &shared, &metrics_env, max_polls, pause, &monotonic_seconds)
+            .await
+            .map(|_| ())
+    };
+    let (totals, runs, (), (), ()) = tokio::try_join!(source, cycles, sensor, updates, metrics)?;
     Ok(Totals { agent_runs: runs, ..totals })
 }

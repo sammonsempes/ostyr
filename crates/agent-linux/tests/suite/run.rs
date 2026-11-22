@@ -169,7 +169,8 @@ async fn the_linux_agent_runs_the_source_and_the_agent_side_by_side() -> TestRes
     let totals = run_linux(&config, TWO, &|_| Box::pin(async {}), no_systemctl).await?;
     assert_eq!((totals.polls, totals.spooled, totals.agent_runs), (TWO, TWO, 0));
     let spooled = lines(&dir.path().join("spool"))?;
-    assert_eq!(spooled.len(), LEN_TWO + 1);
+    assert_eq!(spooled.len(), LEN_TWO + 1 + LEN_TWO);
+    assert_eq!(spooled.iter().filter(|line| line.contains("ostyr.host_metrics")).count(), LEN_TWO);
     assert!(spooled.iter().any(|line| line.contains("agent.capabilities")));
     Ok(())
 }

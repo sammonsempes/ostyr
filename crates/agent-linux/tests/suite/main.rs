@@ -5,6 +5,7 @@ mod fim;
 mod follow;
 mod hostmetrics;
 mod isolation;
+mod metrics;
 mod nft;
 mod osquery;
 mod run;
