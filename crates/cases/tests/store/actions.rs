@@ -249,10 +249,28 @@ async fn the_close_columns_follow_the_lifecycle_and_the_flag_is_never_cleared() 
 }
 
 
+#[tokio::test]
+async fn a_start_and_a_reopen_of_a_never_incident_case_keep_the_flag_false() -> TestResult {
+    let db = Db::default();
+    let exec = executor(&db);
+    let scope = tenant_scope("acme")?;
+    create_case(&exec, &scope, &case("acme", "c1", NOW)).await?;
+    apply_case_action(&exec, &scope, "c1", CaseAction::Start, "a", NOW + 1).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((None, false)));
+    apply_case_action(&exec, &scope, "c1", CaseAction::Close(Some(Resolution::Duplicate)), "a", NOW + TWO as i64).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((Some(NOW + TWO as i64), false)));
+    apply_case_action(&exec, &scope, "c1", CaseAction::Reopen, "a", NOW + THREE as i64).await?;
+    assert_eq!(close_columns(&db, "acme", "c1"), Some((None, false)));
+    Ok(())
+}
+
+
 #[test]
 fn the_sql_text_keeps_the_close_columns() -> TestResult {
     assert!(cases::store::APPLY_SQL.contains("closed_at = CASE WHEN change.status = 'closed' THEN change.updated_at END"));
-    assert!(cases::store::APPLY_SQL.contains("ever_incident = cases.ever_incident OR change.resolution IN ('true_positive', 'other')"));
+    assert!(
+        cases::store::APPLY_SQL.contains("ever_incident = cases.ever_incident OR coalesce(change.resolution IN ('true_positive', 'other'), false)")
+    );
     assert!(cases::store::INSERT_SQL.contains("NULL, false, 1"));
     let sql = cases::store::MIGRATIONS
         .iter()
@@ -263,5 +281,6 @@ fn the_sql_text_keeps_the_close_columns() -> TestResult {
     assert!(sql.contains("cases_by_closed ON cases (tenant, closed_at) WHERE closed_at IS NOT NULL"));
     assert!(sql.contains("cases_open ON cases (tenant, created_at) WHERE status <> 'closed'"));
     assert!(sql.contains("event->>'kind' = 'reopened'"));
+    assert_eq!(sql.matches("UPDATE cases").count(), 1);
     Ok(())
 }
