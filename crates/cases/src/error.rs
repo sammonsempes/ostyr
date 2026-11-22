@@ -115,3 +115,20 @@ pub enum CaseStoreError {
     #[error("a stored document is malformed")]
     BadDocument(#[source] serde_json::Error),
 }
+
+
+#[derive(Debug, Error)]
+pub enum IndicatorError {
+    #[error("the time does not fit the indicator")]
+    TimeOutOfRange,
+    #[error("the given time differs from the database clock by more than {max} seconds")]
+    ClockSkew { max: u64 },
+    #[error("the case store answered a row that cannot be read")]
+    BadRow,
+    #[error("the computed value is not a finite number of at least 0")]
+    ValueOutOfRange,
+    #[error("the case store failed")]
+    Store(#[source] core_pg::error::PgError),
+    #[error("the output could not be written")]
+    Write(#[from] std::io::Error),
+}
