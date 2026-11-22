@@ -309,6 +309,21 @@ git reset -q
 rm -f crates/ebpf-probes/ebpf/src/extra.rs
 
 git reset -q
+printf '[submodule "sub"]\n\tpath = sub\n\turl = ./x\n\tignore = all\n' >.gitmodules
+git add .gitmodules
+git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,sub
+git -c user.name=t -c user.email=t@t commit -q -m gitlink-base
+echo changed-five >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+git update-index --cacheinfo 160000,2222222222222222222222222222222222222222,sub
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG" || grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: a gitlink hidden by ignore = all beside a kernel file must take the full path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+git checkout -q -- crates/ebpf-probes/ebpf/src/main.rs
+
 run_hook EBPF_NO_PANIC="$SCRATCH/bin/no-panic"
 if ! grep -qF "override EBPF_NO_PANIC=$SCRATCH/bin/no-panic" "$SCRATCH/out"; then
   echo "FAIL: an EBPF_NO_PANIC override must be announced"

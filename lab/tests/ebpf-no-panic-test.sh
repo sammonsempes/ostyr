@@ -5,7 +5,8 @@
 # MUTANT=no-nm (the checker never reads the symbol name), MUTANT=u-only (it counts undefined symbols only), MUTANT=weak-ok (weak and undefined
 # symbols are allowed), MUTANT=no-allow (lab/ebpf-build.sh drops its -Zallow-features list), MUTANT=nightly-cargo (it builds with the nightly
 # cargo, which accepts cargo-features), MUTANT=unchecked (the handler is the old unreachable_unchecked one), MUTANT=defining (the handler
-# defines the symbol it calls).
+# defines the symbol it calls), MUTANT=path-build-code-ok (a path package may have a build script), MUTANT=proc-macro-ok (proc-macro targets are
+# not examined).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -28,6 +29,8 @@ esac
 sed "s|^ROOT=.*|ROOT=\"$ROOT\"|" "$ROOT/lab/ebpf-build.sh" >"$BUILDER"
 case "${MUTANT:-}" in
   no-allow) sed -i 's/\${UNIT_SEPARATOR}-Zallow-features=\$ALLOWED_FEATURES//' "$BUILDER" ;;
+  path-build-code-ok) sed -i '/= path \]; then$/{n;s/allowed=1/allowed=0/}' "$BUILDER" ;;
+  proc-macro-ok) sed -i 's/ or \. == "proc-macro"//' "$BUILDER" ;;
   nightly-cargo) sed -i 's/ cargo build "\${OFFLINE\[@\]}"/ cargo "+$NIGHTLY" build "${OFFLINE[@]}"/' "$BUILDER" ;;
 esac
 case "${MUTANT:-}" in
@@ -37,7 +40,7 @@ case "${MUTANT:-}" in
       exit 2
     fi
     ;;
-  no-allow | nightly-cargo)
+  no-allow | nightly-cargo | path-build-code-ok | proc-macro-ok)
     if cmp -s "$ROOT/lab/ebpf-build.sh" "$BUILDER"; then
       echo "the mutant ${MUTANT} did not change the builder" >&2
       exit 2
@@ -154,6 +157,12 @@ attack() {
   check "$name is refused naming ebpf_panic_reached" refused
 }
 
+BUILD_CODE_REFUSAL='has a build script or a proc-macro target and is not in ALLOWED_BUILD_CODE'
+build_rs_attack() {
+  write_crate "$2" "$3" "$4" "$5"
+  REFUSAL_TEXT="$BUILD_CODE_REFUSAL" check "$1 is refused by the build (a path package with a build script)" refused_build
+}
+
 attack "assert, split_at, copy_from_slice, div_euclid" \
   'let buf = [1u8, 2, 3, 4, 5, 6, 7, 8]; assert!(value < 1000, "bound"); let (head, _) = buf.split_at(n); let mut out = [0u8; 4]; out.copy_from_slice(head); (value as i32).div_euclid(n as i32) as u32 ^ out[0] as u32'
 attack "step_by(0)" \
@@ -183,13 +192,13 @@ fn pick(n: usize) -> u32 { let table = [1u32, 2, 3, 4]; table[n] }
 #[cfg(feature = "panic-check")]
 fn pick(n: usize) -> u32 { n as u32 }'
 attack "F2 cfg! macro" 'if cfg!(feature = "panic-check") { value } else { let table = [1u32, 2, 3, 4]; table[n] }'
-attack "F2 build.rs reading CARGO_FEATURE_PANIC_CHECK into a cfg" 'pick(n) ^ value' \
+build_rs_attack "F2 build.rs reading CARGO_FEATURE_PANIC_CHECK into a cfg" 'pick(n) ^ value' \
   '#[cfg(not(check_build))]
 fn pick(n: usize) -> u32 { let table = [1u32, 2, 3, 4]; table[n] }
 #[cfg(check_build)]
 fn pick(n: usize) -> u32 { n as u32 }' '' \
   'fn main() { if std::env::var_os("CARGO_FEATURE_PANIC_CHECK").is_some() { println!("cargo:rustc-cfg=check_build"); } }'
-attack "F2 build.rs testing the target directory" 'pick(n) ^ value' \
+build_rs_attack "F2 build.rs testing the target directory" 'pick(n) ^ value' \
   '#[cfg(not(check_build))]
 fn pick(n: usize) -> u32 { let table = [1u32, 2, 3, 4]; table[n] }
 #[cfg(check_build)]
@@ -202,6 +211,45 @@ write_crate "$F3_BODY"
 REFUSAL_MARK='__bpf_trap' REFUSAL_TEXT='undefined or weak symbol' check "F3 immediate-abort object (nightly cargo): weak __bpf_trap refused by the object check" refused_nightly_object
 REFUSAL_TEXT='nightly version of Cargo|nightly-only' check "F3 immediate-abort profile: the shipped build (stable cargo) refuses cargo-features" refused_build
 CRATE_MANIFEST_HEADER=""
+
+PM_ATTACK_DEP='#![feature(allow_internal_unstable)]
+extern crate proc_macro;
+use proc_macro::TokenStream;
+#[proc_macro]
+#[allow_internal_unstable(linkage)]
+pub fn define(_input: TokenStream) -> TokenStream {
+    "#[linkage = \"linkonce_odr\"] #[no_mangle] pub extern \"C\" fn ebpf_panic_reached() -> ! { loop {} }".parse().unwrap()
+}'
+SAVED_EXTERN="$EXTERN"
+EXTERN=""
+write_crate 'let table = [1u32, 2, 3, 4]; table[n]' 'panicdep::define!();' "$PM_ATTACK_DEP"
+printf '\n[lib]\nproc-macro = true\n' >>"$DEP/Cargo.toml"
+REFUSAL_TEXT="$BUILD_CODE_REFUSAL" check "atk-pm a path proc-macro dependency using allow_internal_unstable(linkage) is refused by name" refused_build
+EXTERN="$SAVED_EXTERN"
+
+LINK_ARG_BITCODE="$ROOT/target/ebpf-no-panic-evil.ll"
+printf 'target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"\ntarget triple = "bpfel"\ndefine linkonce_odr void @ebpf_panic_reached() {\n  unreachable\n}\n' \
+  >"$LINK_ARG_BITCODE"
+EXTERN=""
+build_rs_attack "atk-ld a build.rs printing cargo:rustc-link-arg of a bitcode" 'let table = [1u32, 2, 3, 4]; table[n]' '' '' \
+  "fn main() { println!(\"cargo:rustc-link-arg=$LINK_ARG_BITCODE\"); }"
+EXTERN="$SAVED_EXTERN"
+
+unlisted_registry_package_refused() {
+  local unlisted="$ROOT/target/ebpf-build-unlisted.sh" output
+  sed '/^  "aya-ebpf-macros /d' "$ROOT/lab/ebpf-build.sh" >"$unlisted"
+  sed -i "s|^ROOT=.*|ROOT=\"$ROOT\"|" "$unlisted"
+  chmod 755 "$unlisted"
+  if output=$(EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 "$unlisted" "$KERNEL/Cargo.toml" "$BUILD_TARGET" 2>&1); then
+    echo "$output" | tail -3
+    return 1
+  fi
+  echo "$output" | grep -F "aya-ebpf-macros 0.4.0" | head -2
+  grep -qF "the package aya-ebpf-macros 0.4.0" <<<"$output"
+}
+check "a registry proc-macro package missing from ALLOWED_BUILD_CODE is refused by name" unlisted_registry_package_refused
+
+write_crate 'value ^ n as u32'
 
 write_crate '(unsafe { ext(n) }) ^ value' 'extern "C" { fn ext(index: usize) -> u32; }'
 REFUSAL_MARK='ext' REFUSAL_TEXT='undefined or weak symbol' check "an undefined external function is refused by the object check" refused
