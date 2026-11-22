@@ -11,6 +11,7 @@ use agent_channel::services::channel_router;
 use agent_channel::settings::settings_of;
 use agent_channel::tls::{client_config, parse_private_key, provider, read_certificates, read_private_key, root_store, server_config};
 use agent_channel::types::{SharedClientConfig, SharedState};
+use axum::Router;
 use rustls::{ClientConfig, SupportedProtocolVersion};
 use std::error::Error;
 use std::net::SocketAddr;
@@ -122,6 +123,18 @@ pub async fn start_server_on(
     state: SharedState,
     listener: TcpListener,
 ) -> Result<RunningServer, Box<dyn Error>> {
+    let router = channel_router(Arc::clone(&state));
+    start_server_routed(paths, revocation, state, listener, router).await
+}
+
+
+pub async fn start_server_routed(
+    paths: &ServerTlsPaths,
+    revocation: Revocation,
+    state: SharedState,
+    listener: TcpListener,
+    router: Router,
+) -> Result<RunningServer, Box<dyn Error>> {
     init_logging()?;
     let address = listener.local_addr()?;
     let (shutdown, receiver) = oneshot::channel::<()>();
@@ -129,7 +142,7 @@ pub async fn start_server_on(
     let handle = tokio::spawn(serve(
         Box::pin(TcpListenerStream::new(listener)),
         config,
-        channel_router(Arc::clone(&state)),
+        router,
         state,
         revocation.watcher,
         Box::pin(async move {

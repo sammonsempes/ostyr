@@ -1,6 +1,6 @@
 use crate::error::ChannelError;
-use crate::proto::EventBatch;
-use crate::types::{AuditSink, CommandSource, EventSink, NowFn, SharedSettings};
+use crate::proto::{EventBatch, ShellCloseReason, ShellFrame};
+use crate::types::{AuditSink, ClockFn, CommandSource, EventSink, NowFn, SharedSettings, ShellSink, ShellSource};
 use agent_command::model::Command;
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -9,8 +9,9 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tokio::sync::{oneshot, Semaphore};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot, Semaphore};
+use tonic::Status;
 
 
 pub const SETTINGS_SECTION: &str = "channel_settings";
@@ -41,6 +42,67 @@ pub const SUBSCRIBE_PATH: &str = "/ostyr.agent.v1.Commands/Subscribe";
 
 
 pub const REPORT_PATH: &str = "/ostyr.agent.v1.Commands/Report";
+
+
+pub const SHELL_PATH: &str = "/ostyr.agent.v1.Shell/Attach";
+
+
+/// Shell streams one agent may hold, apart from the `Stream` and `Inflight` slots.
+pub const MAX_SHELL_STREAMS_PER_AGENT: usize = 1;
+
+
+/// Largest `Data` payload of a shell frame, equal to the remote-shell recording frame bound (pinned by a test).
+pub const MAX_SHELL_FRAME_BYTES: usize = 65_536;
+
+
+/// Room for the tag and the three length bytes of the largest valid shell frame (pinned by a test that encodes it).
+pub const MAX_SHELL_FRAME_OVERHEAD: usize = 4;
+
+
+/// Decoding bound of the shell route: the encoded size of the largest valid frame.
+pub const MAX_SHELL_MESSAGE_BYTES: usize = MAX_SHELL_FRAME_BYTES + MAX_SHELL_FRAME_OVERHEAD;
+
+
+/// Largest terminal width and height in cells.
+pub const MAX_TERMINAL_CELLS: u32 = 1_000;
+
+
+/// From the stream open to the `Open` frame; not above the request timeout, which also cuts the open.
+pub const SHELL_OPEN_SECONDS: u64 = 10;
+
+
+/// Inbound silence after which a shell stream is dead.
+pub const SHELL_DEAD_SECONDS: u64 = 60;
+
+
+/// Longest wait on the injected shell sink.
+pub const SHELL_SINK_SECONDS: u64 = 10;
+
+
+/// Longest wait to hand one item to an agent that does not read.
+pub const SHELL_SEND_SECONDS: u64 = 10;
+
+
+/// Items queued toward the agent.
+pub const SHELL_OUTBOUND_CAPACITY: usize = 8;
+
+
+/// Pending and active shell sessions of the whole server.
+pub const MAX_SHELL_SESSIONS: usize = 64;
+
+
+pub const SHELL_RATE_WINDOW_SECONDS: u64 = 1;
+
+
+pub const MAX_SHELL_FRAMES_PER_SECOND: u32 = 1_000;
+
+
+/// Encoded bytes of one session; with the frame overhead it stays under the remote-shell recording bound (pinned by a test).
+pub const MAX_SHELL_BYTES_PER_SESSION: u64 = 200_000_000;
+
+
+/// Frames of one session, keepalives included.
+pub const MAX_SHELL_FRAMES_PER_SESSION: u64 = 1_000_000;
 
 
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
@@ -321,6 +383,18 @@ pub struct Counters {
     pub first_request_timeouts: AtomicU64,
     pub handshakes_evicted: AtomicU64,
     pub handshakes_refused: AtomicU64,
+    pub shell_unexpected: AtomicU64,
+    pub shell_limited: AtomicU64,
+    pub shell_open_timeouts: AtomicU64,
+    pub shell_malformed: AtomicU64,
+    pub shell_gate_refused: AtomicU64,
+    pub shell_opened: AtomicU64,
+    pub shell_budget: AtomicU64,
+    pub shell_dead: AtomicU64,
+    pub shell_sink_timeouts: AtomicU64,
+    pub shell_sink_failed: AtomicU64,
+    pub shell_send_timeouts: AtomicU64,
+    pub shell_lifetime: AtomicU64,
 }
 
 
@@ -330,6 +404,7 @@ pub struct AgentLoad {
     pub connections: usize,
     pub streams: usize,
     pub inflight: usize,
+    pub shells: usize,
     pub window_started: Instant,
     pub window_count: u32,
 }
@@ -362,6 +437,7 @@ pub enum SlotKind {
     Connection,
     Stream,
     Inflight,
+    Shell,
 }
 
 
@@ -441,3 +517,162 @@ pub struct CommandRun {
     pub accepted: u64,
     pub refused: u64,
 }
+
+
+/// Why an agent closed its shell: the only reasons an agent may claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentCloseReason {
+    Exited,
+    AgentError,
+}
+
+
+/// How a shell stream ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellEnd {
+    AgentClosed(AgentCloseReason),
+    PlatformClosed,
+    Dead,
+    Lifetime,
+    Budget,
+    Malformed,
+    SinkTimeout,
+    SinkFailed,
+    SendTimeout,
+    Dropped,
+    Transport,
+    Oversized,
+}
+
+
+/// What the server hands to the injected shell sink: agent output, a keepalive, the end of the stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellSinkEvent {
+    Output(Vec<u8>),
+    Tick,
+    Ended(ShellEnd),
+}
+
+
+/// What the injected shell source gives to the agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellInput {
+    Data(Vec<u8>),
+    Resize { cols: u32, rows: u32 },
+    Close(ShellCloseReason),
+}
+
+
+/// A validated frame from the agent after `Open`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentFrame {
+    Data(Vec<u8>),
+    Keepalive,
+    Close(AgentCloseReason),
+}
+
+
+/// One merged item of a running shell stream.
+#[derive(Debug)]
+pub enum ShellIn {
+    Frame(ShellFrame, usize),
+    Lifetime,
+    Silent,
+    Transport(Status),
+    Eof,
+    Input(ShellInput),
+}
+
+
+/// An approved session waiting for its agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingShell {
+    pub start_deadline: u64,
+    pub max_seconds: u64,
+}
+
+
+/// Pending sessions by identity and session id, and the number of sessions running.
+#[derive(Debug, Default)]
+pub struct GateTable {
+    pub pending: HashMap<(Identity, String), PendingShell>,
+    pub active: usize,
+}
+
+
+/// The sessions the platform approved; entries are added before the command is offered and taken once by the agent.
+pub struct ShellGate {
+    pub table: Mutex<GateTable>,
+    pub clock: Box<ClockFn>,
+}
+
+
+/// One running session of the gate; dropping it gives the place back.
+pub struct ActiveShell {
+    pub gate: Arc<ShellGate>,
+}
+
+
+/// What `gate_take` returns: the lifetime of the session and its place.
+pub struct ShellTake {
+    pub max_seconds: u64,
+    pub active: ActiveShell,
+}
+
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum GateError {
+    #[error("shell gate is full")]
+    Full,
+    #[error("shell session id is not valid")]
+    InvalidSessionId,
+    #[error("shell session is already pending")]
+    Duplicate,
+}
+
+
+/// The gate and the injected ends of the shell stream.
+pub struct ShellState {
+    pub gate: Arc<ShellGate>,
+    pub sink: ShellSink,
+    pub source: ShellSource,
+}
+
+
+/// What the budgets of one session have counted.
+#[derive(Clone, Copy, Debug)]
+pub struct ShellMeter {
+    pub frames: u64,
+    pub bytes: u64,
+    pub window_started: Instant,
+    pub window_frames: u32,
+}
+
+
+/// Reads the gRPC message prefixes of the shell request body: the bytes of the prefix seen, the length being read, the bytes left in the message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WireScan {
+    pub prefix_seen: u8,
+    pub length: u32,
+    pub remaining: u32,
+}
+
+
+/// Everything a running shell stream needs.
+pub struct ShellRun {
+    pub state: Arc<ServerState>,
+    pub shell: Arc<ShellState>,
+    pub identity: Identity,
+    pub session_id: String,
+    pub started: Instant,
+    pub lifetime: Duration,
+    pub sender: mpsc::Sender<Result<ShellFrame, Status>>,
+}
+
+
+/// Bytes of a gRPC message prefix: one flag byte, then the four-byte big-endian length.
+pub const GRPC_PREFIX_BYTES: u8 = 5;
+
+
+/// Bits shifted in per length byte.
+pub const BITS_PER_BYTE: u32 = 8;
