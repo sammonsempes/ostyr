@@ -284,7 +284,8 @@ pub fn restore_test(
         let checked = open_secret(Path::new(&source.password_file)).map_err(password_failure)?;
         let transport = sftp_transport(&source.location);
         let start = Instant::now();
-        let config = run_command(program, &command_arguments(source, &transport, &CONFIG_VERB), CONFIG_CAP_BYTES, deadline)?;
+        let config = run_command(program, &command_arguments(source, &transport, &CONFIG_VERB), CONFIG_CAP_BYTES, deadline)
+            .map_err(|_failure| ResticError::BadConfig)?;
         let key = config_id(&config)?;
         let snapshots = run_command(
             program,

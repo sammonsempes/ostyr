@@ -13,11 +13,6 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $*" >>"$STUB_LOG"
-if [[ " $* " == *" build "* ]]; then
-  OUT="${STUB_OBJECT_ROOT:-$CARGO_TARGET_DIR}/bpfel-unknown-none/release/ebpf-probes-kernel"
-  mkdir -p "$(dirname "$OUT")"
-  echo object >"$OUT"
-fi
 [ -z "${STUB_FAIL:-}" ] || [[ " $* " != *" $STUB_FAIL "* ]]
 S
 chmod +x "$SCRATCH/bin/cargo"
@@ -63,6 +58,15 @@ declare_kernel() {
   mkdir -p lab
   printf '#!/usr/bin/env bash\necho "no-panic $*" >>"$STUB_LOG"\n' >lab/ebpf-no-panic.sh
   chmod +x lab/ebpf-no-panic.sh
+  cat >lab/ebpf-build.sh <<'B'
+#!/usr/bin/env bash
+echo "build $*" >>"$STUB_LOG"
+[ "${STUB_FAIL:-}" != build ] || exit 1
+OUT="${STUB_OBJECT_ROOT:-$2}/bpfel-unknown-none/release/ebpf-probes-kernel"
+mkdir -p "$(dirname "$OUT")"
+echo object >"$OUT"
+B
+  chmod +x lab/ebpf-build.sh
   git add -A
 }
 
@@ -80,8 +84,8 @@ expect_kernel() {
     echo "FAIL: $label: no kernel clippy"
     FAILS=$((FAILS + 1))
   fi
-  if ! grep -qE '^cargo \+nightly-2026-11-08 build --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml$' "$STUB_LOG"; then
-    echo "FAIL: $label: no kernel release build"
+  if ! grep -qxF "build crates/ebpf-probes/ebpf/Cargo.toml $R/target" "$STUB_LOG"; then
+    echo "FAIL: $label: the release build did not go through lab/ebpf-build.sh with the manifest and the target directory"
     FAILS=$((FAILS + 1))
   fi
 }
@@ -265,6 +269,46 @@ if ! grep -q 'llvm-cov' "$STUB_LOG"; then
   FAILS=$((FAILS + 1))
 fi
 
+echo x >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+mkdir -p other
+echo x >other/file.rs
+git add other/file.rs
+git -c user.name=t -c user.email=t@t commit -q -m other-base
+rm other/file.rs
+ln -s ../plain.rs other/file.rs
+echo changed-three >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs other/file.rs
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG" || grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: a type change (T) in another path beside a kernel file must take the full path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+git checkout -q -- other/file.rs crates/ebpf-probes/ebpf/src/main.rs
+
+rm crates/ebpf-probes/ebpf/src/main.rs
+ln -s ../../../../plain.rs crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG" || grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: a kernel src file turned into a symlink must not take the kernel-only path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+git checkout -q -- crates/ebpf-probes/ebpf/src/main.rs
+
+echo changed-four >crates/ebpf-probes/ebpf/src/extra.rs
+git add crates/ebpf-probes/ebpf/src/extra.rs
+run_hook
+if grep -q 'llvm-cov' "$STUB_LOG" || ! grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: an added kernel src file alone must take the kernel-only path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+rm -f crates/ebpf-probes/ebpf/src/extra.rs
+
+git reset -q
 run_hook EBPF_NO_PANIC="$SCRATCH/bin/no-panic"
 if ! grep -qF "override EBPF_NO_PANIC=$SCRATCH/bin/no-panic" "$SCRATCH/out"; then
   echo "FAIL: an EBPF_NO_PANIC override must be announced"

@@ -91,6 +91,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "futures-util",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "prost",
@@ -656,6 +657,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tokio",
+ "tokio-postgres",
  "tracing",
  "unicode-general-category",
 ]

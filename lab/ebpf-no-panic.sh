@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Usage: lab/ebpf-no-panic.sh <shipped kernel object> [kernel crate Cargo.toml]
+# Usage: lab/ebpf-no-panic.sh <shipped kernel object>
 # The shipped panic handler calls the undefined symbol ebpf_panic_reached, so LLVM cannot delete a panic path (the handler is not undefined
 # behaviour) and the object names the symbol exactly when a panic path survives. The object is refused when it names the symbol (undefined,
-# or defined by a dependency), when it holds any undefined or weak symbol (the object must be self-contained: a nightly panic strategy leaves
-# a weak __bpf_trap call), or when the kernel crate or a path dependency uses a nightly feature (cargo-features, #![feature(...]).
+# or defined by a dependency) or when it holds any undefined or weak symbol (the object must be self-contained: a nightly panic strategy
+# leaves a weak __bpf_trap call). Nightly features are refused at build time by cargo -Zallow-features (see the hook), not by this script.
 set -euo pipefail
-OBJECT=${1:?usage: ebpf-no-panic.sh <shipped kernel object> [kernel crate Cargo.toml]}
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-MANIFEST=${2:-"$ROOT/crates/ebpf-probes/ebpf/Cargo.toml"}
+OBJECT=${1:?usage: ebpf-no-panic.sh <shipped kernel object>}
 NIGHTLY=${EBPF_NIGHTLY:-nightly-2026-11-08}
 SYMBOL=ebpf_panic_reached
 BIN=${EBPF_LLVM_BIN:-"$(rustc "+$NIGHTLY" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"}
@@ -32,23 +30,4 @@ fi
 if grep -E '^[[:space:]]*[UwWvV] ' <<<"$SYMBOLS"; then
   refuse "$OBJECT holds an undefined or weak symbol (listed above)"
 fi
-METADATA=$(cargo "+$NIGHTLY" metadata --offline --format-version 1 --manifest-path "$MANIFEST") || refuse "cargo metadata failed for $MANIFEST"
-MANIFESTS=$(jq -r '.packages[] | select(.source == null) | .manifest_path' <<<"$METADATA") || refuse "cannot read the packages of $MANIFEST"
-[ -n "$MANIFESTS" ] || refuse "cargo metadata lists no path package for $MANIFEST"
-HITS=""
-while IFS= read -r package_manifest; do
-  status=0
-  python3 -I -c 'import sys, tomllib
-sys.exit(3 if "cargo-features" in tomllib.load(open(sys.argv[1], "rb")) else 0)' "$package_manifest" || status=$?
-  case "$status" in
-    0) ;;
-    3) HITS="$HITS cargo-features in $package_manifest;" ;;
-    *) refuse "cannot parse $package_manifest" ;;
-  esac
-  status=0
-  found=$(grep -rEl --include='*.rs' --exclude-dir=target '#!\[([^]]*[^A-Za-z_])?feature\(' "$(dirname "$package_manifest")") || status=$?
-  [ "$status" -le 1 ] || refuse "cannot scan the sources of $package_manifest"
-  if [ -n "$found" ]; then HITS="$HITS #![feature(...)] in $(tr '\n' ' ' <<<"$found");"; fi
-done <<<"$MANIFESTS"
-[ -z "$HITS" ] || refuse "nightly feature in the kernel crate or a path dependency:$HITS"
 echo "ebpf-no-panic: $OBJECT does not name $SYMBOL"

@@ -9,7 +9,7 @@ use agent_channel::limits::{admit_request, open_slot, open_stream};
 use agent_channel::model::{
     AgentCloseReason, AgentFrame, GateError, Identity, ShellEnd, ShellInput, ShellSinkEvent, SlotKind, MAX_SHELL_BYTES_PER_SESSION,
     MAX_SHELL_FRAMES_PER_SECOND, MAX_SHELL_FRAMES_PER_SESSION, MAX_SHELL_FRAME_BYTES, MAX_SHELL_MESSAGE_BYTES, MAX_SHELL_SESSIONS,
-    SHELL_OPEN_SECONDS,
+    MAX_SHELL_SESSIONS_PER_TENANT, SHELL_OPEN_SECONDS,
 };
 use agent_channel::proto::shell_frame::Frame;
 use agent_channel::proto::{ShellCloseReason, ShellFrame};
@@ -719,6 +719,70 @@ async fn an_ended_source_closes_the_session_toward_the_agent() -> TestResult {
 }
 
 
+fn fill_other_tenants(gate: &Arc<agent_channel::model::ShellGate>, count: usize) -> TestResult {
+    (0..count).try_for_each(|index| -> TestResult {
+        let tenant = format!("filler-{}", index / MAX_SHELL_SESSIONS_PER_TENANT);
+        Ok(gate_add(gate, &tenant, "agent-1", &format!("fill-{index}"), START_DEADLINE, 1)?)
+    })
+}
+
+
+#[test]
+fn a_tenant_at_its_cap_is_refused_while_another_tenant_still_adds() -> TestResult {
+    let gate = new_gate(Box::new(|| 0));
+    (0..MAX_SHELL_SESSIONS_PER_TENANT).try_for_each(|index| gate_add(&gate, "acme", "agent-1", &format!("own-{index}"), START_DEADLINE, 1))?;
+    assert_eq!(
+        gate_add(&gate, "acme", "agent-2", "one-more", START_DEADLINE, 1),
+        Err(GateError::TenantFull)
+    );
+    gate_add(&gate, "other", "agent-1", "own-0", START_DEADLINE, 1)?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", "own-0", START_DEADLINE, 1), Err(GateError::Duplicate));
+    Ok(())
+}
+
+
+#[test]
+fn a_running_session_id_is_refused_as_a_duplicate_until_it_is_dropped() -> TestResult {
+    let gate = new_gate(Box::new(|| 0));
+    gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
+    let taken = gate_take(&gate, &agent_identity(), SESSION).ok_or("not taken")?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1), Err(GateError::Duplicate));
+    assert!(gate_take(&gate, &agent_identity(), SESSION).is_none());
+    gate_add(&gate, "acme", "agent-2", SESSION, START_DEADLINE, 1)?;
+    drop(taken);
+    assert!(lock_gate(&gate).running.is_empty());
+    gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_duplicate_at_a_full_table_is_reported_as_a_duplicate() -> TestResult {
+    let gate = new_gate(Box::new(|| 0));
+    gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
+    fill_other_tenants(&gate, MAX_SHELL_SESSIONS - 1)?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1), Err(GateError::Duplicate));
+    Ok(())
+}
+
+
+#[test]
+fn running_sessions_count_against_their_tenant_until_dropped() -> TestResult {
+    let gate = new_gate(Box::new(|| 0));
+    (0..MAX_SHELL_SESSIONS_PER_TENANT).try_for_each(|index| gate_add(&gate, "acme", "agent-1", &format!("own-{index}"), START_DEADLINE, 1))?;
+    let first = gate_take(&gate, &agent_identity(), "own-0").ok_or("not taken")?;
+    let second = gate_take(&gate, &agent_identity(), "own-1").ok_or("not taken")?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", "more", START_DEADLINE, 1), Err(GateError::TenantFull));
+    drop(first);
+    gate_add(&gate, "acme", "agent-1", "more", START_DEADLINE, 1)?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", "again", START_DEADLINE, 1), Err(GateError::TenantFull));
+    drop(second);
+    gate_add(&gate, "acme", "agent-1", "again", START_DEADLINE, 1)?;
+    assert!(lock_gate(&gate).active_by_tenant.is_empty());
+    Ok(())
+}
+
+
 #[test]
 fn the_gate_refuses_a_full_table_a_bad_id_and_a_duplicate_and_prunes_the_expired() -> TestResult {
     let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -730,7 +794,7 @@ fn the_gate_refuses_a_full_table_a_bad_id_and_a_duplicate_and_prunes_the_expired
     );
     gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
     assert_eq!(gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1), Err(GateError::Duplicate));
-    (1..MAX_SHELL_SESSIONS).try_for_each(|index| gate_add(&gate, "acme", "agent-1", &format!("fill-{index}"), START_DEADLINE, 1))?;
+    fill_other_tenants(&gate, MAX_SHELL_SESSIONS - 1)?;
     assert_eq!(gate_add(&gate, "acme", "agent-1", "one-more", START_DEADLINE, 1), Err(GateError::Full));
     clock.store(PAST_DEADLINE, Ordering::Relaxed);
     assert!(!gate_has_pending(&gate, &agent_identity()));
@@ -747,7 +811,7 @@ fn an_active_session_counts_against_the_gate_until_it_is_dropped() -> TestResult
     let taken = gate_take(&gate, &agent_identity(), SESSION).ok_or("not taken")?;
     assert_eq!(taken.max_seconds, 1);
     assert_eq!(lock_gate(&gate).active, 1);
-    (1..MAX_SHELL_SESSIONS).try_for_each(|index| gate_add(&gate, "acme", "agent-1", &format!("fill-{index}"), START_DEADLINE, 1))?;
+    fill_other_tenants(&gate, MAX_SHELL_SESSIONS - 1)?;
     assert_eq!(gate_add(&gate, "acme", "agent-1", "one-more", START_DEADLINE, 1), Err(GateError::Full));
     drop(taken);
     assert_eq!(lock_gate(&gate).active, 0);

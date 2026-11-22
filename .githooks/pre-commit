@@ -186,7 +186,7 @@ compute_scope() {
   SCOPE_DIRS=()
   SCOPE_REASON=""
   local staged path line metadata
-  staged=$(git diff --cached --name-only --no-renames --diff-filter=ACMRD)
+  staged=$(git diff --cached --name-only --no-renames)
   if [ "${GATE_SCOPE:-}" = full ]; then
     SCOPE_REASON="GATE_SCOPE=full"
   elif [ -z "$staged" ]; then
@@ -237,7 +237,7 @@ kernel_touched() {
   local path
   local -a staged
   if [ "${GATE_SCOPE:-}" = full ]; then return 0; fi
-  mapfile -d '' staged < <(git diff --cached --name-only -z --no-renames --diff-filter=ACMRD)
+  mapfile -d '' staged < <(git diff --cached --name-only -z --no-renames)
   for path in "${staged[@]+"${staged[@]}"}"; do
     if forced_full_path "$path"; then return 0; fi
     case "$path" in
@@ -269,8 +269,7 @@ kernel_checks() {
 
 kernel_build() {
   rm -f "$EBPF_KERNEL_OBJECT" &&
-    low env RUSTFLAGS="-C link-arg=--btf" cargo "+$EBPF_NIGHTLY" build --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
-      --manifest-path "$EBPF_MANIFEST"
+    low env EBPF_OFFLINE=1 EBPF_NIGHTLY="$EBPF_NIGHTLY" lab/ebpf-build.sh "$EBPF_MANIFEST" "$TARGET"
 }
 
 kernel_object_check() {
@@ -296,12 +295,23 @@ kernel_stage() {
 }
 
 kernel_only_commit() {
-  local path
-  local -a staged
+  local i meta path status old_mode new_mode
+  local -a entries
   if [ "${GATE_SCOPE:-}" = full ]; then return 1; fi
-  mapfile -d '' staged < <(git diff --cached --name-only -z --no-renames --diff-filter=ACMRD)
-  [ "${#staged[@]}" -gt 0 ] || return 1
-  for path in "${staged[@]}"; do
+  mapfile -d '' entries < <(git diff --cached --raw -z --no-renames --no-abbrev)
+  [ "${#entries[@]}" -gt 0 ] || return 1
+  for ((i = 0; i + 1 < ${#entries[@]}; i += 2)); do
+    meta="${entries[i]}"
+    path="${entries[i + 1]}"
+    read -r old_mode new_mode _ _ status <<<"${meta#:}"
+    case "$status" in
+      A | C | M | D) ;;
+      *) return 1 ;;
+    esac
+    case "$old_mode $new_mode" in
+      "100644 100644" | "100644 100755" | "100755 100644" | "100755 100755" | "000000 100644" | "000000 100755" | "100644 000000" | "100755 000000") ;;
+      *) return 1 ;;
+    esac
     case "$path" in
       crates/ebpf-probes/ebpf/src/*.rs) ;;
       *) return 1 ;;

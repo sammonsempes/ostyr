@@ -3,8 +3,9 @@
 # Builds the kernel crate with attack programs under the production handler (it calls the undefined ebpf_panic_reached) and checks that
 # lab/ebpf-no-panic.sh refuses each object and passes the real crate. Mutants, each of which must make a check FAIL:
 # MUTANT=no-nm (the checker never reads the symbol name), MUTANT=u-only (it counts undefined symbols only), MUTANT=weak-ok (weak and undefined
-# symbols are allowed), MUTANT=no-feature (the nightly feature refusal is skipped), MUTANT=unchecked (the handler is the old
-# unreachable_unchecked one), MUTANT=defining (the handler defines the symbol it calls).
+# symbols are allowed), MUTANT=no-allow (lab/ebpf-build.sh drops its -Zallow-features list), MUTANT=nightly-cargo (it builds with the nightly
+# cargo, which accepts cargo-features), MUTANT=unchecked (the handler is the old unreachable_unchecked one), MUTANT=defining (the handler
+# defines the symbol it calls).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -15,24 +16,35 @@ KERNEL="$ROOT/crates/ebpf-probes/ebpf"
 NIGHTLY=${EBPF_NIGHTLY:-nightly-2026-11-08}
 CHECKER="$ROOT/lab/ebpf-no-panic.sh"
 MUTATED="$ROOT/target/ebpf-no-panic-mutated.sh"
+BUILDER="$ROOT/target/ebpf-build-mutated.sh"
 mkdir -p "$ROOT/target"
 case "${MUTANT:-}" in
   no-nm) sed 's/^if grep -w "\$SYMBOL" <<<"\$SYMBOLS"; then$/if false; then/' "$CHECKER" >"$MUTATED" ;;
   u-only) sed 's/grep -w "\$SYMBOL"/grep -w "U $SYMBOL"/' "$CHECKER" >"$MUTATED" ;;
   no-nm-status) sed 's/ || refuse "llvm-nm failed on \$OBJECT"//' "$CHECKER" >"$MUTATED" ;;
   weak-ok) sed "s/^if grep -E '^\[\[:space:\]\]\*\[UwWvV\] ' <<<\"\$SYMBOLS\"; then\$/if false; then/" "$CHECKER" >"$MUTATED" ;;
-  no-feature) sed 's/^\[ -z "\$HITS" \] || refuse .*$/true/' "$CHECKER" >"$MUTATED" ;;
   *) cp "$CHECKER" "$MUTATED" ;;
 esac
+sed "s|^ROOT=.*|ROOT=\"$ROOT\"|" "$ROOT/lab/ebpf-build.sh" >"$BUILDER"
 case "${MUTANT:-}" in
-  no-nm | u-only | no-nm-status | weak-ok | no-feature)
+  no-allow) sed -i 's/\${UNIT_SEPARATOR}-Zallow-features=\$ALLOWED_FEATURES//' "$BUILDER" ;;
+  nightly-cargo) sed -i 's/ cargo build "\${OFFLINE\[@\]}"/ cargo "+$NIGHTLY" build "${OFFLINE[@]}"/' "$BUILDER" ;;
+esac
+case "${MUTANT:-}" in
+  no-nm | u-only | no-nm-status | weak-ok)
     if cmp -s "$CHECKER" "$MUTATED"; then
       echo "the mutant ${MUTANT} did not change the checker" >&2
       exit 2
     fi
     ;;
+  no-allow | nightly-cargo)
+    if cmp -s "$ROOT/lab/ebpf-build.sh" "$BUILDER"; then
+      echo "the mutant ${MUTANT} did not change the builder" >&2
+      exit 2
+    fi
+    ;;
 esac
-chmod 755 "$MUTATED"
+chmod 755 "$MUTATED" "$BUILDER"
 failures=0
 
 check() {
@@ -49,7 +61,6 @@ check() {
 CRATE_ATTRS=""
 CRATE_MANIFEST_HEADER=""
 DEP_MANIFEST_HEADER=""
-CHECK_MANIFEST="$SCRATCH/Cargo.toml"
 HANDLER='unsafe { ebpf_panic_reached() }'
 EXTERN='extern "C" { fn ebpf_panic_reached() -> !; }'
 case "${MUTANT:-}" in
@@ -90,6 +101,10 @@ SOURCE
 }
 
 build_object() {
+  EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 EBPF_UNLOCKED=1 "$BUILDER" "$SCRATCH/Cargo.toml" "$BUILD_TARGET" >&2
+}
+
+build_nightly_object() {
   RUSTFLAGS="-C link-arg=--btf" cargo "+$NIGHTLY" build --offline --release --target bpfel-unknown-none -Z build-std=core \
     --manifest-path "$SCRATCH/Cargo.toml" --target-dir "$BUILD_TARGET" >&2
 }
@@ -99,7 +114,7 @@ OBJECT="$BUILD_TARGET/bpfel-unknown-none/release/ebpf-probes-kernel"
 refused() {
   local output
   build_object || return 1
-  if output=$(EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT" "$CHECK_MANIFEST" 2>&1); then
+  if output=$(EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT" 2>&1); then
     echo "$output" | tail -3
     return 1
   fi
@@ -107,20 +122,31 @@ refused() {
   grep -q "${REFUSAL_TEXT:-a panic path survives}" <<<"$output"
 }
 
-CLEAN_OBJECT="$ROOT/target/ebpf-no-panic-clean.o"
-RUSTFLAGS="-C link-arg=--btf" cargo "+$NIGHTLY" build --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
-  --manifest-path "$KERNEL/Cargo.toml" --target-dir "$BUILD_TARGET" >&2
-cp "$BUILD_TARGET/bpfel-unknown-none/release/ebpf-probes-kernel" "$CLEAN_OBJECT"
-
-refused_manifest() {
+refused_nightly_object() {
   local output
-  if output=$(EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$CLEAN_OBJECT" "$CHECK_MANIFEST" 2>&1); then
+  build_nightly_object || return 1
+  if output=$(EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT" 2>&1); then
     echo "$output" | tail -3
     return 1
   fi
   echo "$output" | grep -E "$REFUSAL_MARK" | head -3
   grep -q "$REFUSAL_TEXT" <<<"$output"
 }
+
+refused_build() {
+  local output
+  rm -f "$OBJECT"
+  if output=$(EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 EBPF_UNLOCKED=1 "$BUILDER" "$SCRATCH/Cargo.toml" "$BUILD_TARGET" 2>&1); then
+    echo "$output" | tail -3
+    return 1
+  fi
+  echo "$output" | grep -E "$REFUSAL_TEXT" | head -2
+  grep -qE "$REFUSAL_TEXT" <<<"$output" && [ ! -e "$OBJECT" ]
+}
+
+CLEAN_OBJECT="$ROOT/target/ebpf-no-panic-clean.o"
+EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 "$BUILDER" "$KERNEL/Cargo.toml" "$BUILD_TARGET" >&2
+cp "$BUILD_TARGET/bpfel-unknown-none/release/ebpf-probes-kernel" "$CLEAN_OBJECT"
 
 attack() {
   local name="$1" body="$2" extra_items="${3:-}" dep_source="${4:-}" build_rs="${5:-}"
@@ -173,44 +199,64 @@ fn pick(n: usize) -> u32 { n as u32 }' '' \
 F3_BODY='let buf = [1u8, 2, 3, 4, 5, 6, 7, 8]; let (head, _) = buf.split_at(n * 2); head.len() as u32 ^ value'
 CRATE_MANIFEST_HEADER='cargo-features = ["panic-immediate-abort"]'
 write_crate "$F3_BODY"
-CHECK_MANIFEST="$KERNEL/Cargo.toml"
-REFUSAL_MARK='__bpf_trap' REFUSAL_TEXT='undefined or weak symbol' check "F3 immediate-abort object: weak __bpf_trap refused by the object check" refused
-CHECK_MANIFEST="$SCRATCH/Cargo.toml"
-REFUSAL_MARK='cargo-features' REFUSAL_TEXT='nightly feature' check "F3 immediate-abort profile: cargo-features refused by the manifest check" refused_manifest
+REFUSAL_MARK='__bpf_trap' REFUSAL_TEXT='undefined or weak symbol' check "F3 immediate-abort object (nightly cargo): weak __bpf_trap refused by the object check" refused_nightly_object
+REFUSAL_TEXT='nightly version of Cargo|nightly-only' check "F3 immediate-abort profile: the shipped build (stable cargo) refuses cargo-features" refused_build
 CRATE_MANIFEST_HEADER=""
 
-CRATE_ATTRS='#![feature(linkage)]'
+write_crate '(unsafe { ext(n) }) ^ value' 'extern "C" { fn ext(index: usize) -> u32; }'
+REFUSAL_MARK='ext' REFUSAL_TEXT='undefined or weak symbol' check "an undefined external function is refused by the object check" refused
+
 LINKONCE='#[linkage = "linkonce_odr"]
 #[no_mangle]
 pub extern "C" fn ebpf_panic_reached() -> ! { loop {} }'
 SAVED_EXTERN="$EXTERN"
 EXTERN=""
-write_crate 'let table = [1u32, 2, 3, 4]; table[n]' "$LINKONCE"
+LINKAGE_REFUSAL='linkage. is not in the list of allowed features'
+linkonce_attack() {
+  CRATE_ATTRS="$1"
+  write_crate 'let table = [1u32, 2, 3, 4]; table[n]' "$LINKONCE"
+  REFUSAL_TEXT="$LINKAGE_REFUSAL" check "$2" refused_build
+}
+linkonce_attack '#![feature(linkage)]' "linkonce_odr crate with #![feature(linkage)] is refused by the build"
+linkonce_attack '#![cfg_attr(
+    all(target_arch = "bpf", target_endian = "little"),
+    feature(linkage)
+)]' "linkonce_odr behind a multi-line cfg_attr is refused by the build"
+linkonce_attack '#![doc = "]"]
+#![feature(linkage)]' "linkonce_odr after a doc attribute holding a bracket is refused by the build"
 EXTERN="$SAVED_EXTERN"
-CHECK_MANIFEST="$SCRATCH/Cargo.toml"
-REFUSAL_MARK='feature' REFUSAL_TEXT='nightly feature' check "linkonce_odr crate: #![feature(linkage)] refused by the manifest check" refused_manifest
 CRATE_ATTRS=""
+
+write_crate 'value ^ n as u32'
+printf '\n[[bin]]\nname = "ebpf-probes-kernel"\npath = "%s/outside.rs"\n' "$ROOT/target" >>"$SCRATCH/Cargo.toml"
+printf '#![no_std]\n#![no_main]\n#![feature(linkage)]\nuse aya_ebpf as _;\n#[panic_handler]\nfn panic(_info: &core::panic::PanicInfo) -> ! { loop {} }\n' >"$ROOT/target/outside.rs"
+REFUSAL_TEXT="$LINKAGE_REFUSAL" check "a [[bin]] path outside the manifest directory with #![feature(linkage)] is refused by the build" refused_build
+
+write_crate 'value ^ n as u32'
+printf '#![no_std]\n#![no_main]\n#![feature(linkage)]\nuse aya_ebpf as _;\n#[panic_handler]\nfn panic(_info: &core::panic::PanicInfo) -> ! { loop {} }\n' >"$SCRATCH/real.rs"
+rm "$SCRATCH/src/main.rs"
+ln -s ../real.rs "$SCRATCH/src/main.rs"
+REFUSAL_TEXT="$LINKAGE_REFUSAL" check "a symlinked src/main.rs with #![feature(linkage)] is refused by the build" refused_build
 
 DEP_MANIFEST_HEADER='cargo-features = ["test-dummy-unstable"]
 '
 write_crate 'value ^ n as u32' 'use panicdep as _;'
-REFUSAL_MARK='cargo-features' REFUSAL_TEXT='nightly feature' check "a path dependency with cargo-features is refused" refused_manifest
+REFUSAL_TEXT='nightly version of Cargo|nightly-only|unstable' check "a path dependency with cargo-features is refused by the build" refused_build
 DEP_MANIFEST_HEADER=""
 write_crate 'panicdep::fine() ^ value' '' '#![no_std]
 #![feature(linkage)]
 pub fn fine() -> u32 { 1 }'
-REFUSAL_MARK='feature' REFUSAL_TEXT='nightly feature' check "a path dependency with #![feature] is refused" refused_manifest
+REFUSAL_TEXT="$LINKAGE_REFUSAL" check "a path dependency with #![feature(linkage)] is refused by the build" refused_build
 write_crate 'value ^ n as u32'
 passes() {
   build_object
-  EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT" "$SCRATCH/Cargo.toml" >/dev/null
+  EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT" >/dev/null
 }
 check "a program without any panic path passes" passes
 
 real_crate_passes() {
-  RUSTFLAGS="-C link-arg=--btf" cargo "+$NIGHTLY" build --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
-    --manifest-path "$KERNEL/Cargo.toml" --target-dir "$BUILD_TARGET" >&2
-  EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT" "$KERNEL/Cargo.toml"
+  EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 "$BUILDER" "$KERNEL/Cargo.toml" "$BUILD_TARGET" >&2
+  EBPF_NIGHTLY="$NIGHTLY" "$MUTATED" "$OBJECT"
 }
 check "the real kernel crate passes" real_crate_passes
 

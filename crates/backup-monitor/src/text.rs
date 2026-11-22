@@ -1,3 +1,5 @@
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
@@ -45,7 +47,15 @@ pub fn display_text(text: &str, max_chars: usize) -> String {
 }
 
 
-/// A snapshot or archive id: 64 lowercase hexadecimal digits.
+/// RFC 3339 text of a time, `None` when RFC 3339 cannot write it (a year outside 0 to 9999).
+pub fn rfc3339_text(time: OffsetDateTime) -> Option<String> {
+    time.format(&Rfc3339)
+        .inspect_err(|error| tracing::debug!(%error, "time is not representable in RFC 3339"))
+        .ok()
+}
+
+
+/// A snapshot or archive id:64 lowercase hexadecimal digits.
 pub fn valid_id(text: &str) -> bool {
     text.len() == ID_HEX_LEN && text.chars().all(|character| matches!(character, '0'..='9' | 'a'..='f'))
 }

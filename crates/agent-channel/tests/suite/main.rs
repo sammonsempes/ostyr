@@ -14,6 +14,8 @@ mod server;
 mod services;
 mod settings;
 mod shell;
+mod shell_client;
+mod shell_grpc;
 mod shell_rig;
 mod shell_tls;
 mod shell_wire;
