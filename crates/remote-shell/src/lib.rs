@@ -1,5 +1,6 @@
 //! Remote shell (spec section 21), slice 1: the opening decision and the session lifetime, both pure.
 
+pub mod agent_map;
 pub mod api;
 pub mod api_model;
 pub mod audit;

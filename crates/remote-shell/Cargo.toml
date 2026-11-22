@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+agent-channel = { version = "0.0.0", path = "../agent-channel" }
 alerts = { version = "0.0.0", path = "../alerts" }
 axum = "0.8"
 cmdb = { version = "0.0.0", path = "../cmdb" }
@@ -14,6 +15,7 @@ core-auth = { version = "0.0.0", path = "../core-auth" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 serde = { version = "1", features = ["derive"] }
+serde-untagged = "0.1.9"
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"

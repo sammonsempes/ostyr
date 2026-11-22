@@ -5351,6 +5351,7 @@ dependencies = [
 name = "remote-shell"
 version = "0.0.0"
 dependencies = [
+ "agent-channel",
  "agent-command",
  "alerts",
  "axum",
@@ -5364,6 +5365,7 @@ dependencies = [
  "rcgen",
  "regex",
  "serde",
+ "serde-untagged",
  "serde_json",
  "sha2 0.10.9",
  "signal-hook",
