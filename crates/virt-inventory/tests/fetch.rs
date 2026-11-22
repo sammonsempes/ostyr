@@ -351,6 +351,7 @@ fn the_token_must_be_an_ascii_allowlist_with_user_and_secret() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

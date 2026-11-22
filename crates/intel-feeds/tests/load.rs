@@ -511,6 +511,7 @@ fn an_unreachable_server_is_unavailable_and_an_error_is_summarised() -> TestResu
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

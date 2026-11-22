@@ -400,6 +400,7 @@ async fn a_bridged_log_at_trace_never_carries_a_bound_parameter() -> Result<(), 
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

@@ -215,6 +215,7 @@ pub fn review_of(seen: &Seen) -> Option<(String, String)> {
 }
 
 
+#[cfg(unix)]
 pub const SECRET_MODE: u32 = 0o600;
 
 
