@@ -71,6 +71,9 @@ const OTHER_DOMAIN_SID: &str = "S-1-5-21-9-9-9";
 const ADMINS_GROUP_SID: &str = "S-1-5-21-1-2-3-512";
 
 
+const FOREIGN_KIND_SID: &str = "S-1-5-32-544";
+
+
 const TENANT: &str = "t1";
 
 
@@ -370,6 +373,17 @@ fn an_incomplete_snapshot_is_never_a_figure() -> Result<(), Box<dyn Error>> {
     assert_eq!(refusal_of(&snapshot_of(two_domains), Some(CAPTURED_TEXT))?, Refusal::NoDomain);
     let no_domain_object = vec![entry("CN=Domain Admins", &["group"], 0, None, Some(ADMINS_GROUP_SID)), administrator()];
     assert_eq!(refusal_of(&snapshot_of(no_domain_object), Some(CAPTURED_TEXT))?, Refusal::NoDomainObject);
+    let admins = || entry("CN=Domain Admins", &["group"], 0, None, Some(ADMINS_GROUP_SID));
+    let without_sid = entry("DC=lab,DC=test", &["domainDNS"], 0, None, None);
+    assert_eq!(
+        refusal_of(&snapshot_of(vec![admins(), without_sid, administrator()]), Some(CAPTURED_TEXT))?,
+        Refusal::NoDomainObject
+    );
+    let other_sid = entry("DC=lab,DC=test", &["domainDNS"], 0, None, Some(FOREIGN_KIND_SID));
+    assert_eq!(
+        refusal_of(&snapshot_of(vec![admins(), other_sid, administrator()]), Some(CAPTURED_TEXT))?,
+        Refusal::NoDomainObject
+    );
     assert_eq!(
         refusal_of(&snapshot_of(vec![domain_entry()]), Some(CAPTURED_TEXT))?,
         Refusal::NoAdministrator
