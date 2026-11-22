@@ -14,5 +14,7 @@ pub mod report;
 pub mod restic;
 #[cfg(unix)]
 pub mod restore;
+#[cfg(unix)]
+pub mod store;
 pub mod text;
 pub mod types;

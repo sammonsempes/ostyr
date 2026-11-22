@@ -1,4 +1,4 @@
-//! Usage: backup_run restore-test <declarations.yaml> <restic-binary> prints one JSON line per declared restore test and stores nothing; backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
+//! Usage: backup_run restore-test <declarations.yaml> <restic-binary> [--store <pg.yaml> [--cap <rows>]] prints one JSON line per declared restore test (times as RFC 3339) and, with `--store`, writes the results to PostgreSQL and prints the write counts; backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
 
 #[cfg(unix)]
 mod run {
@@ -9,9 +9,18 @@ mod run {
     use backup_monitor::parse::{parse_borg, parse_restic};
     use backup_monitor::report::{read_report, report_directory, write_report};
     use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
-    use backup_monitor::restore::{outcome_label, restore_plan, restore_test, skip_label, RestoreOutcome};
+    use backup_monitor::restore::{outcome_label, restore_plan, restore_test, skip_label, RestoreOutcome, RestoreResult};
+    use backup_monitor::store::{record_restore_results_with_cap, test_key, TestKey, MAX_RESTORE_ROWS, MIGRATIONS, MIGRATION_NAMESPACE};
+    use backup_monitor::text::rfc3339_text;
+    use backup_monitor::types::RowFuture;
     use core_config::parse::read_file;
-    use core_pg::scope::tenant_of;
+    use core_pg::connect::connect;
+    use core_pg::error::PgError;
+    use core_pg::migrate::migrate;
+    use core_pg::query::{column_text, scoped_query};
+    use core_pg::scope::{tenant_of, TenantScope};
+    use core_pg::settings::load_settings;
+    use core_pg::types::SqlParameter;
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::io::{stdout, Stdout, Write};
@@ -19,6 +28,7 @@ mod run {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use time::OffsetDateTime;
+    use tokio_postgres::Client;
 
 
     const ARGUMENT_DECLARATIONS: usize = 1;
@@ -31,6 +41,21 @@ mod run {
 
 
     const DEADLINE_SECONDS: u64 = 120;
+
+
+    const STORE_DEADLINE_SECONDS: u64 = 30;
+
+
+    const ARGUMENT_STORE_FLAG: usize = 4;
+
+
+    const STORE_CAP_FLAG_OFFSET: usize = 2;
+
+
+    const STORE_FLAG: &str = "--store";
+
+
+    const CAP_FLAG: &str = "--cap";
 
 
     const GAP_COUNTERS: usize = 3;
@@ -108,8 +133,23 @@ mod run {
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM + 1).ok_or(USAGE)?);
         let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
         let limits = Limits::default();
+        let store_options = arguments.get(ARGUMENT_STORE_FLAG..);
+        let store_path = store_options.and_then(|options| match options {
+            [flag, path, ..] if flag == STORE_FLAG => Some(path.as_str()),
+            _ => None,
+        });
+        let cap = store_options
+            .and_then(|options| options.get(STORE_CAP_FLAG_OFFSET..))
+            .and_then(|options| match options {
+                [flag, value, ..] if flag == CAP_FLAG => Some(value.parse::<u64>()),
+                _ => None,
+            })
+            .transpose()?
+            .unwrap_or(MAX_RESTORE_ROWS);
         let mut out = stdout();
         let runs = restore_plan(&declarations);
+        let declared: Vec<TestKey> = runs.runnable.iter().map(|(name, _, test)| test_key(name, test)).collect();
+        let mut stored: Vec<(TestKey, RestoreResult)> = Vec::new();
         runs.refused
             .iter()
             .try_for_each(|index| writeln!(out, "{}", serde_json::json!({"refused_entry": index})))?;
@@ -117,6 +157,9 @@ mod run {
             let deadline = Duration::from_secs(DEADLINE_SECONDS);
             match restore_test(&program, &declarations.tenant, source, test, &limits, deadline, OffsetDateTime::now_utc) {
                 Ok(result) => {
+                    stored.push((test_key(name, test), result.clone()));
+                    let snapshot_time = result.snapshot_time.map(rfc3339_text);
+                    let tested_at = rfc3339_text(result.tested_at);
                     let (code, skipped, gaps) = match &result.outcome {
                         RestoreOutcome::Failed { code } => (*code, None, None),
                         RestoreOutcome::ListingGap {
@@ -136,8 +179,9 @@ mod run {
                         "repository": name,
                         "config_id": result.config_id,
                         "snapshot_id": result.snapshot_id,
-                        "snapshot_time": result.snapshot_time.map(|time| time.to_string()),
-                        "tested_at": result.tested_at.to_string(),
+                        "snapshot_time": snapshot_time.clone().flatten(),
+                        "tested_at": tested_at,
+                        "time_refused": tested_at.is_none() || snapshot_time == Some(None),
                         "outcome": outcome_label(&result.outcome),
                         "code": code,
                         "skipped": skipped,
@@ -150,7 +194,51 @@ mod run {
                 Err(error) => writeln!(out, "{}", serde_json::json!({"repository": name, "failed": error.to_string()}))?,
             }
             Ok(())
+        })?;
+        store_path.map_or(Ok(()), |path| {
+            store_results(path, &declarations.tenant, &stored, &declared, cap, &mut out)
         })
+    }
+
+
+    async fn pg_rows(client: &Client, scope: TenantScope, sql: &'static str, params: Vec<String>) -> Result<Vec<Vec<String>>, PgError> {
+        let bound: Vec<SqlParameter<'_>> = params.iter().map(|param| param as SqlParameter<'_>).collect();
+        let rows = scoped_query(client, &scope, sql, &bound, Duration::from_secs(STORE_DEADLINE_SECONDS)).await?;
+        rows.iter()
+            .map(|row| (0..row.len()).map(|index| column_text(row, index)).collect())
+            .collect()
+    }
+
+
+    fn store_results(
+        settings_path: &str,
+        tenant: &TenantScope,
+        results: &[(TestKey, RestoreResult)],
+        declared: &[TestKey],
+        cap: u64,
+        out: &mut Stdout,
+    ) -> Result<(), Box<dyn Error>> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let counts = runtime.block_on(async {
+            let settings = load_settings(Path::new(settings_path))?;
+            let client = connect(&settings).await?;
+            migrate(&client, MIGRATION_NAMESPACE, &MIGRATIONS, Duration::from_secs(STORE_DEADLINE_SECONDS)).await?;
+            let exec =
+                |scope: TenantScope, sql: &'static str, params: Vec<String>| -> RowFuture<'_> { Box::pin(pg_rows(&client, scope, sql, params)) };
+            Ok::<_, Box<dyn Error>>(record_restore_results_with_cap(&exec, tenant, results, declared, cap).await?)
+        })?;
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({"store": {
+                "written": counts.written,
+                "stale_write": counts.stale_write,
+                "config_changed": counts.config_changed,
+                "pruned": counts.pruned,
+                "skipped_invalid": counts.skipped_invalid,
+            }})
+        )?;
+        Ok(())
     }
 
 

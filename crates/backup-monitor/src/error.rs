@@ -33,6 +33,28 @@ pub enum BackupError {
 }
 
 
+/// No variant carries text taken from a listing or the database.
+#[derive(Debug, Error)]
+pub enum RestoreStoreError {
+    #[error("{count} restore tests declared, over the limit of {max}")]
+    RowCap { tenant: String, count: u64, max: u64 },
+    #[error("the row cap is outside 0 to the per-tenant maximum")]
+    CapOutOfRange,
+    #[error("a declared restore test key is outside the grammar")]
+    InvalidKey,
+    #[error("a result belongs to another tenant")]
+    TenantMismatch,
+    #[error("a result names a test that is not declared")]
+    UndeclaredResult,
+    #[error("a result is dated more than {max} seconds after the database clock")]
+    ClockSkew { max: u64 },
+    #[error("the restore store answered a row that cannot be read")]
+    BadRow,
+    #[error("the restore store failed")]
+    Store(#[source] PgError),
+}
+
+
 /// Where and why a listing failed to parse; serde's own message is dropped because it can echo listing text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonFailure {
