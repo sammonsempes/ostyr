@@ -8,7 +8,7 @@ use std::io::{stderr, stdout, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use vuln_match::indicator::{indicator_json, kev_indicator, warning_line};
+use vuln_match::indicator::{failure_text, indicator_json, kev_indicator, warning_line};
 
 
 const USAGE: &str = "usage: vuln_indicators <pg.yaml> <tenant> [now micros|now]";
@@ -47,7 +47,7 @@ async fn run_command(arguments: &[String]) -> Result<(), String> {
     let now = now_of(arguments.get(ARG_NOW).map_or(NOW_WORD, String::as_str))?;
     let client = connect(&settings).await.map_err(|error| error.to_string())?;
     let exec = pg_executor(&client, DEADLINE);
-    let outcome = kev_indicator(&exec, &scope, now).await.map_err(|error| error.to_string())?;
+    let outcome = kev_indicator(&exec, &scope, now).await.map_err(|error| failure_text(&error))?;
     let rows: Vec<_> = outcome.row.iter().cloned().collect();
     let text = indicator_json(&rows).map_err(|error| error.to_string())?;
     writeln!(stdout(), "{text}").map_err(|error| error.to_string())?;
