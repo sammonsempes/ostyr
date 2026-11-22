@@ -145,6 +145,9 @@ pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str, user: &str,
     Ok(format!(
         "CREATE OR REPLACE DICTIONARY {target} (\n    \
          `prefix` String,\n    \
+         `tenant` String,\n    \
+         `indicator` String,\n    \
+         `tlp` String,\n    \
          `feed` String,\n    \
          `feed_version` String,\n    \
          `confidence` UInt8,\n    \
@@ -153,7 +156,7 @@ pub fn dictionary_ddl(database: &str, table: &str, dictionary: &str, user: &str,
          `expires_at` DateTime('UTC')\n\
          )\n\
          PRIMARY KEY `prefix`\n\
-         SOURCE(CLICKHOUSE(USER '{user}' HOST '127.0.0.1' PORT {port} SECURE 1 QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
+         SOURCE(CLICKHOUSE(USER '{user}' HOST '127.0.0.1' PORT {port} SECURE 1 QUERY 'SELECT `value` AS `prefix`, `tenant`, `value` AS `indicator`, `tlp`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
          FROM {source} FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `checked` = 1 AND `expires_at` > now()'))\n\
          LAYOUT(IP_TRIE)\n\
          LIFETIME(MIN 30 MAX 300)"
