@@ -55,6 +55,9 @@ const HIGH_REVISION: u32 = 9;
 const THREE_COUNT: usize = 3;
 
 
+const FOUR_MEBIBYTES: usize = 4 * 1024 * 1024;
+
+
 const NINE: usize = 9;
 
 
@@ -143,12 +146,9 @@ fn skipped_alone(element: String, reason: WindowsSkip) -> TestResult {
 #[test]
 fn encoded_command_is_the_script_in_utf16le_base64() -> TestResult {
     let bytes = base64::engine::general_purpose::STANDARD.decode(WUA_SEARCH_ENCODED)?;
-    let units: Vec<u16> = bytes
-        .as_chunks::<UTF16_UNIT_BYTES>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .collect();
+    let (pairs, remainder) = bytes.as_chunks::<UTF16_UNIT_BYTES>();
+    assert!(remainder.is_empty(), "an odd trailing byte");
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
     assert_eq!(String::from_utf16(&units)?, WUA_SEARCH_SCRIPT);
     Ok(())
 }
@@ -631,5 +631,45 @@ fn lab_capture_with_a_hidden_missing_security_update_lists_it_as_hidden() -> Tes
     assert!(hidden
         .iter()
         .all(|update| update.security && update.update_id == "6a98e36f-eea1-47cc-b2b3-b662124a1b32"));
+    Ok(())
+}
+
+
+#[test]
+fn the_sequence_form_of_the_envelope_is_malformed() -> TestResult {
+    [r#"[2,[]]"#, r#"  [2,[{}]]"#, r#"[]"#].iter().for_each(|input| {
+        let outcome = parse_text(input);
+        assert!(
+            matches!(outcome, Err(WindowsError::Malformed { line: 1, column: 1 })),
+            "{input}: {outcome:?}"
+        );
+    });
+    Ok(())
+}
+
+
+#[test]
+fn the_sequence_form_of_an_element_is_skipped_alone() -> TestResult {
+    skipped_alone(format!(r#"["{GOOD_ID}",1,[],"t",null,[],false,false,0]"#), WindowsSkip::Malformed)?;
+    skipped_alone(
+        format!(r#"  ["{GOOD_ID}",7,["5031234"],"Update","",[],false,false,0]"#),
+        WindowsSkip::Malformed,
+    )
+}
+
+
+#[test]
+fn four_mebibytes_of_empty_objects_are_too_many_updates() -> TestResult {
+    let body = "{},".repeat(FOUR_MEBIBYTES / THREE_COUNT);
+    let big = Limits {
+        max_bytes: FOUR_MEBIBYTES * TWO,
+        ..limits()
+    };
+    let text = format!(r#"{{"ResultCode":2,"Updates":[{body}{{}}]}}"#);
+    let outcome = parse_windows_updates(&device(), text.as_bytes(), &big);
+    assert!(
+        matches!(outcome, Err(WindowsError::TooManyUpdates { limit: MAX_WINDOWS_UPDATES })),
+        "{outcome:?}"
+    );
     Ok(())
 }

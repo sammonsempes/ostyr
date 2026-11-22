@@ -5,7 +5,7 @@ use crate::limits::MAX_WINDOWS_UPDATES;
 use crate::model::{Device, Limits, WindowsInventory, WindowsSkip};
 use crate::scan::read_input;
 use crate::types::{UpdatesById, WindowsSkipCounts};
-use crate::wua_wire::{decode_update, Envelope};
+use crate::wua_wire::{decode_update, is_object, Counted, Envelope};
 use serde_json::value::RawValue;
 use std::collections::btree_map::Entry;
 use std::io::Read;
@@ -27,20 +27,26 @@ pub struct Collected {
 pub fn parse_windows_updates<Source: Read>(device: &Device, reader: Source, limits: &Limits) -> Result<WindowsInventory, WindowsError> {
     let buffer = read_input(reader, limits)?;
     let text = ascii_text(&buffer)?;
-    let envelope: Envelope = serde_json::from_str(text).map_err(|error| WindowsError::Malformed {
+    let malformed = |error: serde_json::Error| WindowsError::Malformed {
         line: error.line(),
         column: error.column(),
-    })?;
-    let partial = match envelope.result_code {
+    };
+    if !is_object(text) {
+        Err(WindowsError::Malformed { line: 1, column: 1 })?;
+    }
+    let counted: Counted = serde_json::from_str(text).map_err(malformed)?;
+    let partial = match counted.result_code {
         RESULT_SUCCEEDED => Ok(false),
         RESULT_SUCCEEDED_WITH_ERRORS => Ok(true),
         code => Err(WindowsError::SearchFailed { code }),
     }?;
-    let elements = envelope.updates.ok_or(WindowsError::Malformed { line: 1, column: 1 })?;
-    if elements.len() > MAX_WINDOWS_UPDATES {
+    let count = counted.updates.ok_or(WindowsError::Malformed { line: 1, column: 1 })?.len();
+    if count > MAX_WINDOWS_UPDATES {
         Err(WindowsError::TooManyUpdates { limit: MAX_WINDOWS_UPDATES })
     } else {
-        let collected = elements
+        let envelope: Envelope = serde_json::from_str(text).map_err(malformed)?;
+        let collected = envelope
+            .updates
             .into_iter()
             .fold(Collected::default(), |state, element| add_element(device, state, element));
         Ok(WindowsInventory {
