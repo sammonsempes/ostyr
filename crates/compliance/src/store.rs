@@ -1,5 +1,6 @@
 use crate::alerting::{is_grammar, is_id, ASSET_PUNCTUATION, MAX_ASSET_CHARS};
 use crate::error::StateError;
+use crate::indicator::MAX_CLOCK_SKEW_SECONDS;
 use crate::model::{FailedAt, RecordOutcome, Verdict};
 use crate::types::{PlannedEntry, RunEntry, StateKey};
 use alerts::types::{Executor, Row};
@@ -12,7 +13,7 @@ use std::collections::BTreeMap;
 pub const MIGRATION_NAMESPACE: &str = "compliance";
 
 
-pub const MIGRATIONS: [Migration; 4] = [
+pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "compliance_0001",
         sql: include_str!("../migrations/compliance_0001.sql"),
@@ -28,6 +29,10 @@ pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "compliance_0004",
         sql: include_str!("../migrations/compliance_0004.sql"),
+    },
+    Migration {
+        version: "compliance_0005",
+        sql: include_str!("../migrations/compliance_0005.sql"),
     },
 ];
 
@@ -67,12 +72,15 @@ pub const OUTCOME_STORED: &str = "stored";
 pub const OUTCOME_REFUSED: &str = "refused";
 
 
+pub const OUTCOME_CLOCK_SKEW: &str = "clock_skew";
+
+
 pub const VERDICT_FAIL: &str = "fail";
 
 
-/// Params: `$2` JSON array of entries, `$3` now, `$4` row cap, `$5` retention, `$6` expired rows per run, `$7` last-seen granularity.
+/// Params: `$2` JSON array of entries, `$3` now, `$4` row cap, `$5` retention, `$6` expired rows per run, `$7` last-seen granularity, `$8` largest accepted skew in seconds.
 pub const RECORD_SQL: &str = "SELECT entry_index::text, outcome, first_failed FROM compliance_record($1, $2::text::jsonb, $3::text::bigint, \
-$4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint)";
+$4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint, $8::text::bigint)";
 
 
 pub fn verdict_name(verdict: &Verdict) -> &'static str {
@@ -141,6 +149,7 @@ pub fn apply_row(entries: &[PlannedEntry], outcome: RecordOutcome, row: &Row) ->
         .ok_or(StateError::BadRow)?;
     let ((baseline, control, asset), verdict) = entries.get(position).ok_or(StateError::BadRow)?;
     match answer.as_str() {
+        OUTCOME_CLOCK_SKEW => Err(StateError::ClockSkew { max: MAX_CLOCK_SKEW_SECONDS }),
         OUTCOME_REFUSED => Ok(RecordOutcome {
             refused_no_room: outcome.refused_no_room + 1,
             ..outcome
@@ -192,6 +201,7 @@ pub async fn record_verdicts_with_cap(
             STATE_RETENTION.to_string(),
             MAX_EXPIRED_PER_RUN.to_string(),
             LAST_SEEN_GRANULARITY.to_string(),
+            MAX_CLOCK_SKEW_SECONDS.to_string(),
         ];
         let rows = exec(scope.clone(), RECORD_SQL, params).await.map_err(StateError::Store)?;
         decode_rows(&entries, &rows)?

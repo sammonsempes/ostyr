@@ -4,6 +4,7 @@ mod types;
 
 use alerts::types::{Row, RowFuture};
 use compliance::error::StateError;
+use compliance::indicator::MAX_CLOCK_SKEW_SECONDS;
 use compliance::model::{FailedAt, RecordOutcome, Verdict};
 use compliance::store::{
     apply_row, decode_rows, entries_json, plan_run, record_verdicts, record_verdicts_with_cap, row_cells, verdict_name, LAST_SEEN_GRANULARITY,
@@ -55,6 +56,12 @@ const NINETY_DAYS: i64 = 90;
 
 
 const EXPIRED_PER_RUN: i64 = 10_000;
+
+
+const FIFTH_MIGRATION: usize = 4;
+
+
+const SKEW_SECONDS: u64 = 300;
 
 
 const TWO: usize = 2;
@@ -153,7 +160,7 @@ fn the_migration_is_registered_under_its_namespace() -> TestResult {
 
 #[test]
 fn the_statement_binds_the_tenant_first_and_every_query_filters_on_it() -> TestResult {
-    assert!(RECORD_SQL.contains("$4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint)"));
+    assert!(RECORD_SQL.contains("$4::text::bigint, $5::text::bigint, $6::text::bigint, $7::text::bigint, $8::text::bigint)"));
     let sql = MIGRATIONS.get(1).ok_or("no migration")?.sql;
     assert!(sql.contains("WHERE tenant = p_tenant"));
     assert!(sql.contains("s.tenant = p_tenant"));
@@ -416,7 +423,8 @@ async fn the_real_client_path_binds_the_tenant_first() -> TestResult {
     assert_eq!(outcome.failed.first().map(|found| found.first_failed_micros), Some(FIRST_FAILED));
     let statements = drain(&mut fake);
     let params: Vec<&String> = statements.iter().filter(|entry| entry.starts_with("PARAMS")).collect();
-    let expected_tail = format!("|{NOW}|{MAX_STATE_ROWS_PER_TENANT}|{STATE_RETENTION}|{MAX_EXPIRED_PER_RUN}|{LAST_SEEN_GRANULARITY}");
+    let expected_tail =
+        format!("|{NOW}|{MAX_STATE_ROWS_PER_TENANT}|{STATE_RETENTION}|{MAX_EXPIRED_PER_RUN}|{LAST_SEEN_GRANULARITY}|{MAX_CLOCK_SKEW_SECONDS}");
     assert_eq!(params.len(), 1, "{statements:?}");
     assert!(
         params
@@ -424,5 +432,36 @@ async fn the_real_client_path_binds_the_tenant_first() -> TestResult {
             .all(|entry| entry.starts_with("PARAMS acme|[{") && entry.ends_with(&expected_tail)),
         "{params:?}"
     );
+    Ok(())
+}
+
+
+#[test]
+fn the_fifth_migration_checks_the_clock_after_the_lock_and_before_any_write() -> TestResult {
+    let migration = MIGRATIONS.get(FIFTH_MIGRATION).ok_or("no fifth migration")?;
+    let sql = migration.sql;
+    assert_eq!(migration.version, "compliance_0005");
+    let lock = sql.find("pg_advisory_xact_lock").ok_or("no lock")?;
+    let check = sql.find("clock_timestamp()").ok_or("no clock read")?;
+    let first_write = sql.find("INSERT INTO compliance_state_count").ok_or("no write")?;
+    assert!(lock < check && check < first_write);
+    assert!(sql.contains("> p_max_skew_seconds * 1000000 THEN\n        RETURN QUERY SELECT 1::bigint, 'clock_skew'::text"));
+    assert!(sql.contains("SET search_path = pg_catalog, public, pg_temp"));
+    assert!(sql.starts_with("DROP FUNCTION compliance_record(text, jsonb, bigint, bigint, bigint, bigint, bigint);"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_skewed_run_is_refused_with_the_named_error() -> TestResult {
+    let scope = tenant_scope("acme")?;
+    let failed = fail();
+    let run: Vec<RunEntry<'_>> = vec![("a", "c", "web-1", &failed)];
+    let refused = record_verdicts(&answering(vec![row(&["1", "clock_skew", ""])]), &scope, &run, NOW).await;
+    assert!(
+        matches!(refused, Err(StateError::ClockSkew { max: MAX_CLOCK_SKEW_SECONDS })),
+        "{refused:?}"
+    );
+    assert_eq!(MAX_CLOCK_SKEW_SECONDS, SKEW_SECONDS);
     Ok(())
 }
