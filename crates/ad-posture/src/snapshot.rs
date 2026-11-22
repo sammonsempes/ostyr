@@ -2,7 +2,7 @@ use crate::checks::is_privileged_sid;
 use crate::error::{EntryError, SnapshotError};
 use crate::filetime::filetime_to_unix;
 use crate::limits::Limits;
-use crate::model::{BoundHit, Entry, Gap, Items, Snapshot, Unreadable};
+use crate::model::{BoundHit, Captured, Entry, Gap, Items, Snapshot, Unreadable};
 use crate::types::Outcome;
 use ecs_normalise::suricata::is_unsafe;
 use serde::de::{DeserializeOwned, Deserializer, IgnoredAny};
@@ -58,6 +58,16 @@ struct RawEntry<'a> {
     last_logon: Option<&'a RawValue>,
     #[serde(default, borrow, deserialize_with = "keep_raw", rename = "objectSid")]
     sid: Option<&'a RawValue>,
+}
+
+
+/// The object form of the document; unknown keys are skipped without being built.
+#[derive(Deserialize)]
+struct RawRoot<'a> {
+    #[serde(default, borrow, deserialize_with = "keep_raw")]
+    captured: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "keep_raw")]
+    entries: Option<&'a RawValue>,
 }
 
 
@@ -348,8 +358,30 @@ pub fn bound_hit(bound: &'static str, observed: u64, limit: u64) -> Snapshot {
 }
 
 
-pub fn parse_entries(buffer: &[u8], limits: &Limits) -> Result<Snapshot, SnapshotError> {
+/// The root of the document: a bare array, or an object `{"captured": text, "entries": [...]}`; returns the entries token and the capture text.
+pub fn root_of<'a>(text: &'a str, limits: &Limits) -> Result<(&'a str, Option<String>), SnapshotError> {
+    if text.trim_start().starts_with('{') {
+        let root: RawRoot = serde_json::from_str(text).map_err(|source| malformed(&source))?;
+        let entries = root.entries.ok_or(SnapshotError::MissingEntries)?;
+        Ok((
+            entries.get(),
+            optional_text(root.captured, "captured", limits).into_iter().flatten().next(),
+        ))
+    } else {
+        Ok((text, None))
+    }
+}
+
+
+pub fn parse_entries(buffer: &[u8], limits: &Limits) -> Result<Captured, SnapshotError> {
     let text = std::str::from_utf8(buffer).map_err(SnapshotError::NotUtf8)?;
+    let (entries_text, captured) = root_of(text, limits)?;
+    let snapshot = parse_list(entries_text, limits)?;
+    Ok(Captured { snapshot, captured })
+}
+
+
+pub fn parse_list(text: &str, limits: &Limits) -> Result<Snapshot, SnapshotError> {
     match bounded_items(text, limits.max_entries).map_err(|source| malformed(&source))? {
         Items::Over(count) => Ok(bound_hit("entries", count as u64, limits.max_entries as u64)),
         Items::Within(raws) => {
@@ -369,16 +401,25 @@ pub fn parse_entries(buffer: &[u8], limits: &Limits) -> Result<Snapshot, Snapsho
 }
 
 
-/// Reads a JSON array of entries: size, entry count and every value count are checked before anything is built; a bound hit is a result.
-pub fn read_snapshot<Source: Read>(source: Source, limits: &Limits) -> Result<Snapshot, SnapshotError> {
+/// Reads a document (a bare array of entries, or the object form with a capture time): size, entry count and every value count are checked before anything is built; a bound hit is a result.
+pub fn read_captured<Source: Read>(source: Source, limits: &Limits) -> Result<Captured, SnapshotError> {
     let mut buffer = Vec::new();
     source
         .take(limits.max_bytes.saturating_add(1))
         .read_to_end(&mut buffer)
         .map_err(SnapshotError::Read)?;
     if buffer.len() as u64 > limits.max_bytes {
-        Ok(bound_hit("bytes", buffer.len() as u64, limits.max_bytes))
+        Ok(Captured {
+            snapshot: bound_hit("bytes", buffer.len() as u64, limits.max_bytes),
+            captured: None,
+        })
     } else {
         parse_entries(&buffer, limits)
     }
+}
+
+
+/// The entries alone, for the posture checks that need no capture time.
+pub fn read_snapshot<Source: Read>(source: Source, limits: &Limits) -> Result<Snapshot, SnapshotError> {
+    read_captured(source, limits).map(|read| read.snapshot)
 }

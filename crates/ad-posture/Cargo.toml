@@ -7,12 +7,13 @@ publish = false
 
 [dependencies]
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 ecs-normalise = { version = "0.0.0", path = "../ecs-normalise" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 thiserror = "2"
-time = "0.3"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,5 +1,6 @@
 use crate::filetime::FiletimeError;
 use core_config::error::ConfigError;
+use core_pg::error::PgError;
 use thiserror::Error;
 
 
@@ -16,6 +17,8 @@ pub enum SnapshotError {
         line: usize,
         column: usize,
     },
+    #[error("snapshot object has no entries list")]
+    MissingEntries,
 }
 
 
@@ -35,6 +38,15 @@ pub enum EntryError {
         #[source]
         source: FiletimeError,
     },
+}
+
+
+#[derive(Debug, Error)]
+pub enum IndicatorError {
+    #[error("the tenant name is refused")]
+    InvalidTenant(#[source] PgError),
+    #[error("the clock argument is more than {max} seconds from the system clock")]
+    ClockSkew { max: u64 },
 }
 
 

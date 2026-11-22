@@ -239,7 +239,8 @@ fn invalid_utf8_and_malformed_json_are_refused() -> Result<(), Box<dyn Error>> {
     assert!(matches!(utf8, SnapshotError::NotUtf8(_)));
     assert!(utf8.source().is_some());
     assert!(matches!(refused("[1,", &limits())?, SnapshotError::Malformed { .. }));
-    assert!(matches!(refused("{}", &limits())?, SnapshotError::Malformed { .. }));
+    assert!(matches!(refused("{}", &limits())?, SnapshotError::MissingEntries));
+    assert!(matches!(refused("\"x\"", &limits())?, SnapshotError::Malformed { .. }));
     assert!(refused("", &limits())?.to_string().contains("line"));
     Ok(())
 }

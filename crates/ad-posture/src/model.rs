@@ -111,3 +111,63 @@ pub struct Thresholds {
     pub privileged_max_members: usize,
     pub inactive_days: u32,
 }
+
+
+/// A snapshot with the capture time its exporter wrote (`None` for a bare array, or a refused text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Captured {
+    pub snapshot: Snapshot,
+    pub captured: Option<String>,
+}
+
+
+/// Why the indicator emits nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    BoundHit,
+    NoCaptureTime,
+    BadCaptureTime,
+    CaptureInFuture,
+    CaptureTooOld,
+    NoDomain,
+    NoDomainObject,
+    NoAdministrator,
+}
+
+
+/// Integers only: nothing read from the directory reaches the indicator as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndicatorCounts {
+    pub entries: usize,
+    pub accounts: usize,
+    pub inactive: usize,
+    pub never_logged: usize,
+    pub future: usize,
+    pub unreadable: usize,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Logon {
+    Never,
+    Future,
+    Stale,
+    Fresh,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndicatorRow {
+    pub tenant: String,
+    pub name: &'static str,
+    pub value: usize,
+    pub observed_at: String,
+    pub source: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndicatorOutcome {
+    Row(IndicatorRow),
+    Refused { refusal: Refusal, entries: usize },
+}
