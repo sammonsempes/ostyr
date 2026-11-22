@@ -549,6 +549,7 @@ fn the_password_is_read_through_the_checked_reader() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

@@ -2625,6 +2625,7 @@ fn an_alert_over_the_id_cap_stores_a_digest_slot_and_two_tails_give_two_ids() ->
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

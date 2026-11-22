@@ -526,6 +526,7 @@ fn the_cli_names_the_refused_limit_and_never_the_password() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

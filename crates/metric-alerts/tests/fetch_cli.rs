@@ -125,6 +125,7 @@ fn a_failing_writer_is_an_output_error() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

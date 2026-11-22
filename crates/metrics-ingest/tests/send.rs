@@ -610,6 +610,7 @@ fn a_zero_batch_limit_and_invalid_settings_are_errors_before_any_send() -> TestR
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

@@ -109,6 +109,7 @@ fn a_trace_subscriber_never_sees_the_key_or_the_url() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

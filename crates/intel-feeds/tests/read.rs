@@ -575,6 +575,7 @@ fn rows_that_are_not_canonical_are_skipped_and_counted() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

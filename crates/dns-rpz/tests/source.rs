@@ -388,6 +388,7 @@ fn a_failed_source_leaves_one_warn_line_without_secrets() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

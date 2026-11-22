@@ -782,6 +782,7 @@ fn accounts_without_a_readable_day_are_refused_before_any_io() -> TestResult {
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 

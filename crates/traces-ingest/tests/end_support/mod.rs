@@ -104,6 +104,7 @@ pub fn check_end_to_end(limits: &Limits, budget_kib: u64, fail_at: Option<usize>
 }
 
 
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 
 
