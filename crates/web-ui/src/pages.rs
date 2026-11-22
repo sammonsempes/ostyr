@@ -1,19 +1,20 @@
 use crate::api::{
     encode_asset_id, parse_dhcp_address, parse_dhcp_mac, risk_kind, valid_asset_id, valid_case_id, valid_dhcp_hostname, valid_id, valid_oncall_text,
     valid_pack_id, valid_shell_hash, valid_shell_reference, valid_shell_subject, valid_state_asset, valid_state_id, valid_vuln_asset,
-    valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_SHELL_REFERENCE_BYTES,
-    MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, RUN_CHANGED_KEY, SHELL_OPEN_ONLY, STATE_VERDICTS, VERDICT_ALL,
-    VULN_CVSS_MAX, VULN_EPSS_MAX,
+    valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE,
+    MAX_SHELL_REFERENCE_BYTES, MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, RUN_CHANGED_KEY, SHELL_OPEN_ONLY,
+    STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use crate::model::{
-    Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
-    CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView, PostureFindingView,
-    PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery,
-    ShellSessionView, StateAssetView, StateListView, StateView, VulnAssetView, VulnListView, VulnView,
+    Alert, AlertDetailView, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView,
+    CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView,
+    PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts,
+    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView, VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, posture_severity_key, posture_status_key,
-    resolution_key, severity_class, severity_key, shell_reason_key, status_key, task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
+    resolution_key, severity_class, severity_key, shell_reason_key, status_key, task_status_key, text, triage_key, CLOSE_ACTION, RESOLUTIONS,
+    TRIAGE_STATUSES,
 };
 use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
@@ -329,7 +330,54 @@ pub fn event_list(language: Language, ids: &[String]) -> Markup {
 }
 
 
-pub fn alert_page(language: Language, csrf: &str, alert: &Alert) -> Markup {
+/// The triage read with the page, or the fixed "new" text.
+pub fn triage_summary(language: Language, triage: Option<&TriageView>) -> Markup {
+    html! {
+        h2 { (text(language, "triage_heading")) }
+        @if let Some(current) = triage {
+            dl {
+                dt { (text(language, "triage_status")) }
+                dd { (text(language, triage_key(&current.status))) }
+                dt { (text(language, "triage_actor")) }
+                dd { (clip_identity(language, &current.actor, MAX_FIELD_CHARS)) }
+                dt { (text(language, "triage_time")) }
+                dd { (clip(language, &current.updated_at, MAX_FIELD_CHARS)) }
+                dt { (text(language, "triage_note")) }
+                dd { (description_text(language, current.note.as_ref())) }
+            }
+        } @else {
+            div { (text(language, "triage_new")) }
+        }
+    }
+}
+
+
+/// The triage form: the version read with the page rides along as a hidden field, absent while the alert is new.
+pub fn triage_form(language: Language, csrf: &str, id: &str, triage: Option<&TriageView>) -> Markup {
+    html! {
+        form method="post" action=(format!("/alerts/{id}/triage")) {
+            input type="hidden" name="csrf" value=(csrf);
+            @if let Some(current) = triage {
+                input type="hidden" name="version" value=(current.version);
+            }
+            label {
+                (text(language, "triage_status"))
+                select name="status" required {
+                    @for status in TRIAGE_STATUSES { option value=(status) { (text(language, triage_key(status))) } }
+                }
+            }
+            label {
+                (text(language, "triage_note_label"))
+                textarea name="note" maxlength=(MAX_NOTE_CHARS) {}
+            }
+            button type="submit" { (text(language, "triage_submit")) }
+        }
+    }
+}
+
+
+pub fn alert_page(language: Language, csrf: &str, detail: &AlertDetailView) -> Markup {
+    let alert = &detail.alert;
     layout(
         language,
         "title_alert",
@@ -357,6 +405,8 @@ pub fn alert_page(language: Language, csrf: &str, alert: &Alert) -> Markup {
                 div { (text(language, "alert_summary_truncated")) }
             }
             (summary_list(language, &alert.summary))
+            (triage_summary(language, detail.triage.as_ref()))
+            (triage_form(language, csrf, &alert.id, detail.triage.as_ref()))
             (go("/alerts", text(language, "alert_back")))
         },
     )

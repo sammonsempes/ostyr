@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 341;
+pub const TEXT_COUNT: usize = 353;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -40,6 +40,18 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("alert_summary", "Summary"),
     ("alert_summary_truncated", "The summary was cut by the server."),
     ("alert_back", "Back to the alerts"),
+    ("triage_heading", "Triage"),
+    ("triage_new", "New: not triaged yet."),
+    ("triage_status", "Status"),
+    ("triage_actor", "By"),
+    ("triage_time", "Updated at"),
+    ("triage_note", "Note"),
+    ("triage_note_label", "Note (needed for a false positive)"),
+    ("triage_submit", "Save the triage"),
+    ("triage_acknowledged", "Acknowledged"),
+    ("triage_closed", "Closed"),
+    ("triage_false_positive", "False positive"),
+    ("error_triage_changed", "The alert changed meanwhile. Reload the alert and try again."),
     ("none", "none"),
     ("none_marker", "(none)"),
     ("omitted", "omitted"),
@@ -391,6 +403,21 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
     ("alert_summary", "Résumé"),
     ("alert_summary_truncated", "Le résumé a été coupé par le serveur."),
     ("alert_back", "Retour aux alertes"),
+    ("triage_heading", "Tri"),
+    ("triage_new", "Nouvelle : pas encore triée."),
+    ("triage_status", "Statut"),
+    ("triage_actor", "Par"),
+    ("triage_time", "Mise à jour le"),
+    ("triage_note", "Note"),
+    ("triage_note_label", "Note (obligatoire pour un faux positif)"),
+    ("triage_submit", "Enregistrer le tri"),
+    ("triage_acknowledged", "Prise en compte"),
+    ("triage_closed", "Clôturée"),
+    ("triage_false_positive", "Faux positif"),
+    (
+        "error_triage_changed",
+        "L'alerte a changé entre-temps. Rechargez l'alerte et recommencez.",
+    ),
     ("none", "aucun"),
     ("none_marker", "(aucun)"),
     ("omitted", "omis"),
@@ -797,6 +824,25 @@ pub fn resolution_key(value: &str) -> &'static str {
 
 
 pub const RESOLUTIONS: [&str; 5] = ["true_positive", "false_positive", "benign", "duplicate", "other"];
+
+
+pub const TRIAGE_STATUSES: [&str; 3] = ["acknowledged", "closed", "false_positive"];
+
+
+/// The status of the fixed table for a submitted name, `None` for anything else (no case folding, no trimming).
+pub fn checked_triage_status(name: &str) -> Option<&'static str> {
+    TRIAGE_STATUSES.iter().find(|candidate| **candidate == name).copied()
+}
+
+
+pub fn triage_key(status: &str) -> &'static str {
+    match status {
+        "acknowledged" => "triage_acknowledged",
+        "closed" => "triage_closed",
+        "false_positive" => "triage_false_positive",
+        _ => "unknown",
+    }
+}
 
 
 pub const CLOSE_ACTION: &str = "close";

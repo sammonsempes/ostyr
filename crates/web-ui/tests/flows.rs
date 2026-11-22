@@ -13,6 +13,8 @@ mod served;
 mod shell_flows;
 #[path = "support/stub.rs"]
 mod stub;
+#[path = "support/triage_flows.rs"]
+mod triage_flows;
 #[path = "support/types.rs"]
 mod types;
 #[path = "support/vuln_flows.rs"]
