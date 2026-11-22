@@ -2,7 +2,7 @@
 mod types;
 
 
-use attack_surface::text::{is_hidden, shown, valid_argument, valid_reference, SHOWN_BYTES};
+use attack_surface::text::{is_hidden, shown, valid_argument, valid_hostname, valid_reference, SHOWN_BYTES};
 use types::TestResult;
 
 
@@ -93,5 +93,33 @@ fn is_hidden_covers_control_format_and_separators() -> TestResult {
         .iter()
         .for_each(|next| assert!(is_hidden(*next)));
     assert!(!is_hidden('a') && !is_hidden(' '));
+    Ok(())
+}
+
+
+#[test]
+fn a_hostname_is_ascii_ldh_with_two_to_eight_labels() -> TestResult {
+    ["a.b", "Example.COM", "xn--bcher-kva.example", "a-b.c-d.e", "1.com", "0x1.0x2"]
+        .iter()
+        .for_each(|name| assert!(valid_hostname(name), "{name}"));
+    [
+        "",
+        "a",
+        "a.",
+        ".a",
+        "a..b",
+        "-a.b",
+        "a-.b",
+        "a.b-",
+        "a_b.c",
+        "a b.c",
+        "1.2",
+        "1.2.3.4.5",
+        "\u{e9}.com",
+        "*.a.b",
+        "a.b.c.d.e.f.g.h.i",
+    ]
+    .iter()
+    .for_each(|name| assert!(!valid_hostname(name), "{name}"));
     Ok(())
 }

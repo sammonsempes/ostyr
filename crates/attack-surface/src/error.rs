@@ -9,7 +9,7 @@ pub enum Refusal {
     Empty,
     #[error("{count} entries, at most {max} are allowed")]
     TooMany { count: usize, max: usize },
-    #[error("`{shown}` is not an IP address or range (hostnames are not supported yet)")]
+    #[error("`{shown}` is not an IP address, a range or a hostname (ASCII letters, digits and hyphens, 2 to 8 labels of at most 63 bytes, 253 bytes in all, last label not all digits)")]
     BadTarget { shown: String },
     #[error("`{shown}` is wider than the limit /{min_prefix}")]
     TooBroad { shown: String, min_prefix: u8 },

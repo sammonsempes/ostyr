@@ -555,6 +555,7 @@ dependencies = [
  "net-topology",
  "serde",
  "serde_json",
+ "synthetic-checks",
  "tempfile",
  "thiserror 2.0.21",
  "unicode-general-category",

@@ -15,6 +15,7 @@ unicode-general-category = "1"
 
 [target.'cfg(unix)'.dependencies]
 net-topology = { version = "0.0.0", path = "../net-topology" }
+synthetic-checks = { version = "0.0.0", path = "../synthetic-checks" }
 
 [dev-dependencies]
 tempfile = "3"

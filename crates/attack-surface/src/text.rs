@@ -1,3 +1,4 @@
+use crate::model::{MAX_HOSTNAME_BYTES, MAX_HOSTNAME_LABELS, MAX_LABEL_BYTES, MIN_HOSTNAME_LABELS};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 
@@ -54,4 +55,23 @@ pub fn valid_reference(text: &str, max_bytes: usize) -> bool {
         && text
             .chars()
             .all(|next| next.is_ascii_alphanumeric() || REFERENCE_PUNCTUATION.contains(next))
+}
+
+
+fn valid_label(label: &str) -> bool {
+    let edge = |character: Option<char>| character.is_some_and(|next| next.is_ascii_alphanumeric());
+    label.len() <= MAX_LABEL_BYTES
+        && edge(label.chars().next())
+        && edge(label.chars().last())
+        && label.chars().all(|next| next.is_ascii_alphanumeric() || next == '-')
+}
+
+
+/// ASCII LDH name of 2 to 8 labels, at most 253 bytes, no trailing dot, last label not all digits (IDN U-labels, `_` and wildcards refused).
+pub fn valid_hostname(text: &str) -> bool {
+    let labels = text.split('.').collect::<Vec<_>>();
+    text.len() <= MAX_HOSTNAME_BYTES
+        && (MIN_HOSTNAME_LABELS..=MAX_HOSTNAME_LABELS).contains(&labels.len())
+        && labels.iter().all(|label| valid_label(label))
+        && labels.last().is_some_and(|last| !last.chars().all(|next| next.is_ascii_digit()))
 }
