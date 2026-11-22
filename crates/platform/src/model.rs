@@ -12,4 +12,5 @@ pub enum Module {
     Vulnerabilities,
     RemoteShell,
     Posture,
+    Status,
 }

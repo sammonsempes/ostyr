@@ -4774,6 +4774,7 @@ dependencies = [
  "risk-score",
  "serde_json",
  "signal-hook",
+ "status-page",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

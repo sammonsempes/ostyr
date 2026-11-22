@@ -17,4 +17,8 @@ pub enum PlatformError {
     DuplicateModule { index: usize },
     #[error("settings.risk.weights_file is required by the risk module")]
     MissingWeightsFile,
+    #[error("settings.status.page_file is required by the status module")]
+    MissingPageFile,
+    #[error("settings.status.page_file {reason}")]
+    PageFile { reason: &'static str },
 }
