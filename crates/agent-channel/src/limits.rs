@@ -1,6 +1,6 @@
 use crate::model::{
     AgentLoad, ChannelSettings, Counters, Identity, Presence, ServerState, SlotKind, SlotPermit, MAX_LOGGED_DIGEST_BYTES, MAX_LOGGED_TEXT_CHARS,
-    TRUNCATION_MARKER,
+    MAX_SHELL_STREAMS_PER_AGENT, TRUNCATION_MARKER,
 };
 use crate::settings::settings_of;
 use crate::types::SharedState;
@@ -38,6 +38,7 @@ pub fn fresh_load(now: Instant) -> AgentLoad {
         connections: 0,
         streams: 0,
         inflight: 0,
+        shells: 0,
         window_started: now,
         window_count: 0,
     }
@@ -80,6 +81,7 @@ pub fn slot_count(load: &mut AgentLoad, kind: SlotKind) -> &mut usize {
         SlotKind::Connection => &mut load.connections,
         SlotKind::Stream => &mut load.streams,
         SlotKind::Inflight => &mut load.inflight,
+        SlotKind::Shell => &mut load.shells,
     }
 }
 
@@ -89,6 +91,7 @@ pub fn slot_limit(settings: &ChannelSettings, kind: SlotKind) -> usize {
         SlotKind::Connection => settings.max_connections_per_agent,
         SlotKind::Stream => settings.max_streams_per_agent,
         SlotKind::Inflight => settings.max_inflight_per_agent,
+        SlotKind::Shell => MAX_SHELL_STREAMS_PER_AGENT,
     }
 }
 
@@ -98,6 +101,7 @@ pub fn slot_refusals(counters: &Counters, kind: SlotKind) -> &AtomicU64 {
         SlotKind::Connection => &counters.connection_limited,
         SlotKind::Stream => &counters.stream_limited,
         SlotKind::Inflight => &counters.inflight_limited,
+        SlotKind::Shell => &counters.shell_limited,
     }
 }
 
@@ -187,8 +191,14 @@ pub fn check_claim(state: &ServerState, identity: &Identity, tenant: &str, agent
 
 /// A message above the decoding bound is refused by the codec with `OutOfRange`; this counts and logs it.
 pub fn count_oversized(state: &ServerState, status: &Status) {
+    count_oversized_at(state, status, settings_of(state).max_message_bytes);
+}
+
+
+/// The same count for a route with its own decoding bound; the log names that bound.
+pub fn count_oversized_at(state: &ServerState, status: &Status, limit: usize) {
     if status.code() == Code::OutOfRange {
         bump(&state.counters.oversized);
-        tracing::warn!(limit = settings_of(state).max_message_bytes, "message above the size bound refused");
+        tracing::warn!(limit, "message above the size bound refused");
     }
 }
