@@ -1,15 +1,16 @@
 use crate::api::{
     encode_asset_id, parse_dhcp_address, parse_dhcp_mac, risk_kind, valid_asset_id, valid_case_id, valid_dhcp_hostname, valid_id, valid_oncall_text,
     valid_pack_id, valid_shell_hash, valid_shell_reference, valid_shell_subject, valid_state_asset, valid_state_id, valid_vuln_asset,
-    valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE,
+    valid_vuln_field, vuln_score, CERT_FILTERS, ID_LENGTH, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE,
     MAX_SHELL_REFERENCE_BYTES, MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, RUN_CHANGED_KEY, SHELL_OPEN_ONLY,
     STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertDetailView, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView,
-    CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView,
-    PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts,
-    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView, VulnAssetView, VulnListView, VulnView,
+    CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LinksPanel, LookupView, OncallAlertView,
+    OncallListView, PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd,
+    ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView, VulnAssetView, VulnListView,
+    VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, posture_severity_key, posture_status_key,
@@ -701,6 +702,48 @@ pub fn comment_form(language: Language, csrf: &str, id: &str) -> Markup {
 }
 
 
+/// The link form: one text field for the alert id, checked again by the handler.
+pub fn link_form(language: Language, csrf: &str, id: &str) -> Markup {
+    html! {
+        form method="post" action=(format!("/cases/{id}/alerts")) {
+            input type="hidden" name="csrf" value=(csrf);
+            label {
+                (text(language, "link_label"))
+                input type="text" name="alert_id" required maxlength=(ID_LENGTH) pattern="[0-9a-f]{64}";
+            }
+            button type="submit" { (text(language, "link_submit")) }
+        }
+    }
+}
+
+
+/// The linked alerts: each id is a GET form to the alert, the next page a GET form back to the case with the checked cursor.
+pub fn links_panel(language: Language, case_id: &str, panel: &LinksPanel) -> Markup {
+    html! {
+        @match panel {
+            LinksPanel::Absent => {}
+            LinksPanel::Unavailable => {
+                h2 { (text(language, "links_title")) }
+                div { (text(language, "links_unavailable")) }
+            }
+            LinksPanel::Shown(page) => {
+                h2 { (text(language, "links_title")) }
+                @if page.items.is_empty() {
+                    div { (text(language, "links_none")) }
+                }
+                @for item in &page.items { (go(&format!("/alerts/{}", item.alert_id), &item.alert_id)) }
+                @if let Some(cursor) = &page.next_cursor {
+                    form method="get" action=(format!("/cases/{case_id}")) class="go" {
+                        input type="hidden" name="links_cursor" value=(cursor);
+                        button type="submit" { (text(language, "links_more")) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
 /// The write forms exist only for an id inside the case grammar, because the id becomes part of their action.
 pub fn case_forms(language: Language, csrf: &str, case: &CaseDetailView) -> Markup {
     let id = &case.summary.id;
@@ -709,6 +752,7 @@ pub fn case_forms(language: Language, csrf: &str, case: &CaseDetailView) -> Mark
             h2 { (text(language, "case_actions")) }
             @for action in allowed_actions(&case.summary.status) { (action_form(language, csrf, id, action)) }
             (comment_form(language, csrf, id))
+            (link_form(language, csrf, id))
         }
     }
 }
@@ -762,6 +806,11 @@ pub fn case_page(language: Language, csrf: &str, case: &CaseDetailView) -> Marku
 
 
 pub fn case_page_with(language: Language, csrf: &str, case: &CaseDetailView, comment: Option<&CommentView>) -> Markup {
+    case_page_full(language, csrf, case, comment, &LinksPanel::Absent)
+}
+
+
+pub fn case_page_full(language: Language, csrf: &str, case: &CaseDetailView, comment: Option<&CommentView>, panel: &LinksPanel) -> Markup {
     let summary = &case.summary;
     layout(
         language,
@@ -794,6 +843,7 @@ pub fn case_page_with(language: Language, csrf: &str, case: &CaseDetailView, com
             h2 { (text(language, "case_counts")) }
             (case_counts(language, case))
             @if let Some(stored) = comment { (comment_notice(language, stored)) }
+            (links_panel(language, &summary.id, panel))
             (case_forms(language, csrf, case))
             (go("/cases",text(language, "case_back")))
         },

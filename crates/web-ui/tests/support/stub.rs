@@ -1,5 +1,5 @@
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -104,6 +104,10 @@ pub struct StubState {
     pub read_fault: Mutex<Option<ReadFault>>,
     pub stored: AtomicBool,
     pub triage: Mutex<Option<Value>>,
+    pub linked: Mutex<Vec<String>>,
+    pub link_paths: Mutex<Vec<String>>,
+    pub links_reply: Mutex<Option<Value>>,
+    pub links_fault: Mutex<Option<StatusCode>>,
 }
 
 
@@ -563,6 +567,60 @@ pub async fn case_comment_handler(State(state): State<Arc<StubState>>, headers: 
                 _ => (json!("alice"), parsed.get("text").cloned().unwrap_or(Value::Null)),
             };
             (StatusCode::CREATED, Json(json!({"author": author, "at": CASE_CREATED, "text": text}))).into_response()
+        })
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub fn link_item(alert_id: &str) -> Value {
+    json!({"alert_id": alert_id, "linked_by": "alice", "linked_at": CASE_CREATED})
+}
+
+
+pub async fn links_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, RawQuery(query): RawQuery) -> Response {
+    note_forwarded(&state, &headers);
+    state
+        .link_paths
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(format!("/cases/{id}/alerts?{}", query.unwrap_or_else(String::new)));
+    let fault = *state.links_fault.lock().unwrap_or_else(PoisonError::into_inner);
+    let forged = state.links_reply.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if !authorised(&headers) {
+        error_reply(StatusCode::UNAUTHORIZED)
+    } else if let Some(status) = fault {
+        error_reply(status)
+    } else if let Some(reply) = forged {
+        Json(reply).into_response()
+    } else {
+        let items: Vec<Value> = state
+            .linked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|alert| link_item(alert))
+            .collect();
+        Json(json!({"items": items, "next_cursor": null})).into_response()
+    }
+}
+
+
+pub async fn link_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, body: Bytes) -> Response {
+    note_forwarded(&state, &headers);
+    note_write(&state, format!("/cases/{id}/alerts"), &body);
+    if authorised(&headers) {
+        write_failure(&state).unwrap_or_else(|| {
+            state.stored.store(true, Ordering::SeqCst);
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let alert = parsed.get("alert_id").and_then(Value::as_str).unwrap_or("").to_owned();
+            let mut linked = state.linked.lock().unwrap_or_else(PoisonError::into_inner);
+            let added = !linked.contains(&alert);
+            if added {
+                linked.push(alert.clone());
+            }
+            (if added { StatusCode::CREATED } else { StatusCode::OK }, Json(json!({"alert_id": alert}))).into_response()
         })
     } else {
         error_reply(StatusCode::UNAUTHORIZED)
@@ -1722,6 +1780,10 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         read_fault: Mutex::new(None),
         stored: AtomicBool::new(false),
         triage: Mutex::new(None),
+        linked: Mutex::new(Vec::new()),
+        link_paths: Mutex::new(Vec::new()),
+        links_reply: Mutex::new(None),
+        links_fault: Mutex::new(None),
     });
     let router = Router::new()
         .route("/auth/login", post(login_handler))
@@ -1751,6 +1813,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))
         .route("/cases/{id}/comments", post(case_comment_handler))
+        .route("/cases/{id}/alerts", get(links_handler).post(link_handler))
         .layer(axum::middleware::from_fn_with_state(state.clone(), count_request))
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await?;

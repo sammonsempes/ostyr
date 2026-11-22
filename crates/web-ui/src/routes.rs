@@ -1,19 +1,19 @@
 use crate::api::{
     cert_filter, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_posture, get_risk_entity, get_shell_session,
-    get_state_asset, get_vuln_asset, list_alerts, list_assets, list_cases, list_certs, list_findings, list_oncall, list_risk, list_shell_sessions,
-    list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_alert_triage,
-    post_case_action, post_case_comment, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id,
-    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference,
-    valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY,
-    VERDICT_DEFAULT,
+    get_state_asset, get_vuln_asset, list_alerts, list_assets, list_case_links, list_cases, list_certs, list_findings, list_oncall, list_risk,
+    list_shell_sessions, list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window,
+    post_alert_triage, post_case_action, post_case_comment, post_case_link, probe_dhcp, probe_posture, risk_kind, shell_open_filter,
+    valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor,
+    valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS,
+    MAX_NOTE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
-use crate::model::{ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, Opened, Principal, ShellQuery, WebLimits, WebState};
+use crate::model::{ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, LinksPanel, Opened, Principal, ShellQuery, WebLimits, WebState};
 use crate::pages::{
-    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, cert_page, certs_page, comment_unloaded_page,
-    compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page, posture_changed_page,
-    posture_form_page, posture_page, posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page, vuln_asset_page, vulns_page,
-    STYLESHEET,
+    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_full, case_page_with, cases_page, cert_page, certs_page,
+    comment_unloaded_page, compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page,
+    posture_changed_page, posture_form_page, posture_page, posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page,
+    vuln_asset_page, vulns_page, STYLESHEET,
 };
 use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
@@ -538,15 +538,56 @@ pub async fn show_cases(
 }
 
 
-pub async fn show_case_page(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str) -> Result<Response, Refused> {
+pub fn parse_links_cursor(query: &BTreeMap<String, String>) -> Result<Option<&str>, FormRefusal> {
+    query
+        .get("links_cursor")
+        .map(|text| Some(text.as_str()).filter(|cursor| valid_cursor(cursor)).ok_or(FormRefusal::Malformed))
+        .transpose()
+}
+
+
+/// The panel of the linked alerts: a `401` ends the session, any other failure is our unavailable text and the case page still renders.
+pub async fn load_links(
+    state: &WebState,
+    client: &ApiClient,
+    source: IpAddr,
+    principal: &Principal,
+    id: &str,
+    cursor: Option<&str>,
+) -> Result<LinksPanel, Refused> {
+    match list_case_links(client, source, &principal.token, id, cursor).await {
+        Ok(page) => Ok(LinksPanel::Shown(page)),
+        Err(ApiFailure::Unauthorized) => Err(Box::new(api_failure(state, principal, Language::English, &ApiFailure::Unauthorized))),
+        Err(failure) => {
+            let class = failure_class(&failure);
+            tracing::warn!(class, "the linked alerts could not be read");
+            Ok(LinksPanel::Unavailable)
+        }
+    }
+}
+
+
+pub async fn show_case_page(
+    state: &WebState,
+    source: IpAddr,
+    headers: &HeaderMap,
+    id: &str,
+    query: &BTreeMap<String, String>,
+) -> Result<Response, Refused> {
     let language = language_of(headers);
     let principal = current_principal(state, headers)?;
     require(valid_case_id(id), language, StatusCode::NOT_FOUND, "error_not_found")?;
+    let cursor = parse_links_cursor(query).map_err(|reason| Box::new(form_refusal(language, reason)))?;
     let client = state.api.load_full();
     let case = get_case(&client, source, &principal.token, id)
         .await
         .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
-    Ok(html_response(StatusCode::OK, &case_page(language, &principal.csrf, &case), &[]))
+    let panel = load_links(state, &client, source, &principal, id, cursor).await?;
+    Ok(html_response(
+        StatusCode::OK,
+        &case_page_full(language, &principal.csrf, &case, None, &panel),
+        &[],
+    ))
 }
 
 
@@ -555,8 +596,9 @@ pub async fn show_case(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<BTreeMap<String, String>>,
 ) -> Response {
-    merge(show_case_page(&state, peer.ip(), &headers, &id).await)
+    merge(show_case_page(&state, peer.ip(), &headers, &id, &query).await)
 }
 
 
@@ -1140,6 +1182,43 @@ pub async fn alert_triage_submit(
 }
 
 
+pub async fn submit_case_link(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str, body: Body) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let (principal, form) = write_request(state, headers, body, &state.limits).await?;
+    require_signed(
+        valid_id(field(&form, "alert_id")),
+        language,
+        &principal.csrf,
+        StatusCode::BAD_REQUEST,
+        "error_bad_request",
+    )?;
+    let client = state.api.load_full();
+    post_case_link(&client, source, &principal.token, id, field(&form, "alert_id"))
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    let case = get_case(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    let panel = load_links(state, &client, source, &principal, id, None).await?;
+    Ok(html_response(
+        StatusCode::OK,
+        &case_page_full(language, &principal.csrf, &case, None, &panel),
+        &[],
+    ))
+}
+
+
+pub async fn case_link_submit(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    merge(submit_case_link(&state, peer.ip(), &headers, &id, body).await)
+}
+
+
 pub fn build_router(state: SharedWeb) -> Router {
     Router::new()
         .route("/", get(index))
@@ -1171,6 +1250,7 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/alerts/{id}/triage", post(alert_triage_submit))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
+        .route("/cases/{id}/alerts", post(case_link_submit))
         .route("/language/{code}", post(switch_language))
         .fallback(not_found)
         .layer(from_fn(harden))
