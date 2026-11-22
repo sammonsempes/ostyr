@@ -5364,6 +5364,8 @@ dependencies = [
  "core-auth",
  "core-config",
  "core-pg",
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
  "pg-fake",
  "rcgen",
  "regex",
