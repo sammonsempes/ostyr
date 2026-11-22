@@ -31,6 +31,26 @@ pub enum ActionError {
     PackageNameLeadingDash,
     #[error("a package name holds a forbidden character")]
     PackageNameCharacter,
+    #[error("the shell session id is invalid")]
+    ShellSessionId,
+    #[error("the shell asset is invalid")]
+    ShellAsset,
+    #[error("the shell ticket is invalid")]
+    ShellTicket,
+    #[error("the shell requester is invalid")]
+    ShellRequester,
+    #[error("too many shell approvers")]
+    ShellTooManyApprovers,
+    #[error("a shell approver is invalid")]
+    ShellApprover,
+    #[error("a shell approver is the requester")]
+    ShellApproverIsRequester,
+    #[error("a shell approver is listed twice")]
+    ShellApproverDuplicate,
+    #[error("the shell maximum duration is invalid")]
+    ShellMaxSeconds,
+    #[error("the shell idle timeout is invalid")]
+    ShellIdleSeconds,
 }
 
 

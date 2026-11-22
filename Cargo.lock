@@ -5350,6 +5350,7 @@ dependencies = [
 name = "remote-shell"
 version = "0.0.0"
 dependencies = [
+ "agent-command",
  "alerts",
  "axum",
  "cmdb",

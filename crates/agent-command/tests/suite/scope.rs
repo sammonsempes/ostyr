@@ -156,6 +156,15 @@ fn all_actions() -> Vec<Action> {
         Action::ChangePolicy { policy: "p".to_owned() },
         install(),
         reboot(),
+        Action::OpenShell {
+            session_id: "s".to_owned(),
+            asset: "a".to_owned(),
+            ticket: "t".to_owned(),
+            requester: "r".to_owned(),
+            approvers: Vec::new(),
+            max_seconds: 1,
+            idle_seconds: 1,
+        },
     ]
 }
 

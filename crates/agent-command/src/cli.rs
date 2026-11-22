@@ -58,6 +58,7 @@ pub fn parse_action(name: &str, parameter: Option<&str>) -> Result<Action, CliEr
         "change_policy" => Ok(Action::ChangePolicy { policy: text }),
         "install_updates" => parse_install_updates(&text),
         "reboot" => parse_reboot(&text),
+        "open_shell" => parse_open_shell(&text),
         "kill" => text.parse().map(|process_id| Action::Kill { process_id }).map_err(|_| CliError::Number),
         other => Err(CliError::UnknownAction(other.to_owned())),
     }
@@ -87,6 +88,25 @@ pub fn parse_reboot(text: &str) -> Result<Action, CliError> {
         prompt_user: prompt.parse().map_err(|_| CliError::Parameter("reboot prompt must be true or false"))?,
         deadline: parse_sequence(deadline)?,
     })
+}
+
+
+/// `<session>,<asset>,<ticket>,<requester>,<max-seconds>,<idle-seconds>[,<approver>...]`.
+pub fn parse_open_shell(text: &str) -> Result<Action, CliError> {
+    match text.split(',').collect::<Vec<&str>>().as_slice() {
+        [session_id, asset, ticket, requester, max_seconds, idle_seconds, approvers @ ..] => Ok(Action::OpenShell {
+            session_id: (*session_id).to_owned(),
+            asset: (*asset).to_owned(),
+            ticket: (*ticket).to_owned(),
+            requester: (*requester).to_owned(),
+            approvers: approvers.iter().map(|approver| (*approver).to_owned()).collect(),
+            max_seconds: max_seconds.parse().map_err(|_| CliError::Number)?,
+            idle_seconds: idle_seconds.parse().map_err(|_| CliError::Number)?,
+        }),
+        _ => Err(CliError::Parameter(
+            "open_shell takes <session>,<asset>,<ticket>,<requester>,<max>,<idle>[,<approver>...]",
+        )),
+    }
 }
 
 

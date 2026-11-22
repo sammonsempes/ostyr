@@ -54,7 +54,8 @@ pub fn action_is_sensitive(action: &Action) -> bool {
         | Action::Uninstall
         | Action::ChangePolicy { .. }
         | Action::InstallUpdates { .. }
-        | Action::Reboot { .. } => true,
+        | Action::Reboot { .. }
+        | Action::OpenShell { .. } => true,
     }
 }
 
@@ -71,6 +72,7 @@ pub fn action_name(action: &Action) -> &'static str {
         Action::ChangePolicy { .. } => "change_policy",
         Action::InstallUpdates { .. } => "install_updates",
         Action::Reboot { .. } => "reboot",
+        Action::OpenShell { .. } => "open_shell",
     }
 }
 
