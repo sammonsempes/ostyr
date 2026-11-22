@@ -10,6 +10,9 @@ use std::error::Error;
 use std::time::Duration;
 
 
+const LIMIT_SECONDS: u64 = 3600;
+
+
 const SUB_MILLI_MICROS: u64 = 500;
 
 
@@ -271,7 +274,8 @@ fn the_record_statements_are_pinned_as_exact_qualified_text() -> Result<(), Box<
     assert_eq!(applied_sql("store")?, EXPECTED_APPLIED);
     assert_eq!(COLUMNS_SQL, EXPECTED_COLUMNS);
     let expected_script = format!(
-        "SELECT pg_catalog.pg_advisory_xact_lock(7021103100); SET LOCAL lock_timeout = 3000; INSERT INTO public.schema_migrations (namespace, version, digest) \
+        "SELECT pg_catalog.pg_advisory_xact_lock(7021103100); SET LOCAL lock_timeout = 3000; SET LOCAL client_connection_check_interval = 10000; \
+         INSERT INTO public.schema_migrations (namespace, version, digest) \
          VALUES ('store', '0001_init', '{}'); {}",
         digest_of(FIRST.sql),
         FIRST.sql
@@ -288,6 +292,23 @@ fn a_migration_lock_wait_is_never_unbounded() -> Result<(), Box<dyn Error>> {
     let lock = script.find("pg_advisory_xact_lock").unwrap_or(usize::MAX);
     let timeout = script.find("SET LOCAL lock_timeout").unwrap_or(usize::MAX);
     assert!(lock < timeout);
+    let check = script.find("SET LOCAL client_connection_check_interval = 10000;").unwrap_or(usize::MAX);
+    assert!(lock < check && check < script.find("INSERT INTO").unwrap_or(0));
+    Ok(())
+}
+
+
+#[test]
+fn a_migration_cancel_is_worded_as_a_cancel_with_its_limit() -> Result<(), Box<dyn Error>> {
+    let error = core_pg::error::PgError::MigrationTimeout {
+        namespace: "store".into(),
+        version: "0001_init".into(),
+        seconds: LIMIT_SECONDS,
+    };
+    assert_eq!(
+        error.to_string(),
+        "migration `0001_init` of namespace `store` was cancelled (statement timeout or operator cancel), the limit is 3600 s"
+    );
     Ok(())
 }
 
