@@ -13,6 +13,11 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $*" >>"$STUB_LOG"
+if [[ " $* " == *" build "* ]]; then
+  OUT="${STUB_OBJECT_ROOT:-$CARGO_TARGET_DIR}/bpfel-unknown-none/release/ebpf-probes-kernel"
+  mkdir -p "$(dirname "$OUT")"
+  echo object >"$OUT"
+fi
 [ -z "${STUB_FAIL:-}" ] || [[ " $* " != *" $STUB_FAIL "* ]]
 S
 chmod +x "$SCRATCH/bin/cargo"
@@ -21,6 +26,12 @@ cat >"$SCRATCH/bin/gate" <<S
 if [ "\$1" = kernel-declared ]; then exec "$SCRATCH/gate-target/debug/coverage_gate" "\$@"; fi
 S
 chmod +x "$SCRATCH/bin/gate"
+cat >"$SCRATCH/bin/no-panic" <<'S'
+#!/usr/bin/env bash
+echo "no-panic $*" >>"$STUB_LOG"
+S
+chmod +x "$SCRATCH/bin/no-panic"
+export EBPF_NO_PANIC="$SCRATCH/bin/no-panic"
 export COVERAGE_GATE="$SCRATCH/bin/gate"
 export STUB_LOG="$SCRATCH/log"
 export COVERAGE_EXPORT="$SCRATCH/cov.json"
@@ -49,6 +60,9 @@ declare_kernel() {
   printf '%s\n' "$EXCLUDE_TOML" >Cargo.toml
   mkdir -p crates/ebpf-probes/ebpf
   echo x >crates/ebpf-probes/ebpf/Cargo.toml
+  mkdir -p lab
+  printf '#!/usr/bin/env bash\necho "no-panic $*" >>"$STUB_LOG"\n' >lab/ebpf-no-panic.sh
+  chmod +x lab/ebpf-no-panic.sh
   git add -A
 }
 
@@ -58,8 +72,16 @@ expect_kernel() {
     echo "FAIL: $label: no kernel fmt"
     FAILS=$((FAILS + 1))
   fi
+  if ! grep -qxF "no-panic $R/target/bpfel-unknown-none/release/ebpf-probes-kernel" "$STUB_LOG"; then
+    echo "FAIL: $label: the checker did not get the object the build writes under CARGO_TARGET_DIR"
+    FAILS=$((FAILS + 1))
+  fi
   if ! grep -qE '^cargo \+nightly-2026-11-08 clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml -- -D warnings$' "$STUB_LOG"; then
     echo "FAIL: $label: no kernel clippy"
+    FAILS=$((FAILS + 1))
+  fi
+  if ! grep -qE '^cargo \+nightly-2026-11-08 build --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml$' "$STUB_LOG"; then
+    echo "FAIL: $label: no kernel release build"
     FAILS=$((FAILS + 1))
   fi
 }
@@ -84,6 +106,18 @@ stage .githooks/pre-commit
 declare_kernel
 run_hook
 expect_kernel "hook staged"
+
+stage lab/ebpf-no-panic.sh
+declare_kernel
+echo changed >>lab/ebpf-no-panic.sh
+git add -A
+run_hook
+expect_kernel "panic check script staged"
+
+stage lab/tests/ebpf-no-panic-test.sh
+declare_kernel
+run_hook
+expect_kernel "panic check test staged"
 
 stage plain.rs
 declare_kernel
@@ -113,6 +147,24 @@ run_hook STUB_FAIL=bpfel-unknown-none
 if ! grep -qF "FAILED at step: kernel crate" "$SCRATCH/out"; then
   echo "FAIL: failing kernel step not named"
   cat "$SCRATCH/out"
+  FAILS=$((FAILS + 1))
+fi
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+run_hook STUB_OBJECT_ROOT="$SCRATCH/elsewhere"
+if ! grep -qF "FAILED at step: kernel crate" "$SCRATCH/out" || ! grep -qF "the kernel build did not write" "$SCRATCH/out" || grep -q '^no-panic' "$STUB_LOG"; then
+  echo "FAIL: a build that writes the object elsewhere must fail the hook before the check"
+  FAILS=$((FAILS + 1))
+fi
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+mkdir -p target/bpfel-unknown-none/release
+echo stale >target/bpfel-unknown-none/release/ebpf-probes-kernel
+run_hook STUB_OBJECT_ROOT="$SCRATCH/elsewhere" STUB_FAIL=build
+if ! grep -qF "FAILED at step: kernel crate" "$SCRATCH/out" || grep -q '^no-panic' "$STUB_LOG"; then
+  echo "FAIL: a stale object left by an earlier build must never reach the check"
   FAILS=$((FAILS + 1))
 fi
 
