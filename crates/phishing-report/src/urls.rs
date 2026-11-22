@@ -6,40 +6,90 @@ use std::sync::LazyLock;
 use url::Url;
 
 
-pub const URL_PATTERN: &str = r#"(?i)(?:\b(?:https?|ftp)://|\bdata:)[^\s"'<>]+"#;
+pub const URL_PATTERN: &str =
+    r#"(?i)(?:\b(?:h[\t\n\r]*t[\t\n\r]*t[\t\n\r]*p[\t\n\r]*s?|f[\t\n\r]*t[\t\n\r]*p)[\t\n\r]*:[\t\n\r]*[/\\]+|\bdata[\t\n\r]*:)[^\s"'<>]+"#;
+
+
+/// An attribute value as the HTML tokenizer cuts it: double quoted, single quoted or bare.
+pub const ATTRIBUTE_PATTERN: &str = r#"=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>=`]+))"#;
+
+
+const ATTRIBUTE_GROUPS: usize = 3;
 
 
 const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}'];
 
 
-const MAX_REFERENCE_CHARS: usize = 32;
-
-
 pub static URL_RULE: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| Regex::new(URL_PATTERN));
 
 
+pub static ATTRIBUTE_RULE: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| Regex::new(ATTRIBUTE_PATTERN));
+
+
 fn is_reference(segment: &str) -> bool {
-    segment.split_once(';').is_some_and(|(name, _)| {
-        !name.is_empty() && name.len() <= MAX_REFERENCE_CHARS && name.chars().all(|candidate| candidate.is_ascii_alphanumeric() || candidate == '#')
-    })
+    segment
+        .split_once(';')
+        .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|candidate| candidate.is_ascii_alphanumeric() || candidate == '#'))
 }
 
 
-/// Decodes every HTML character reference (decimal, hex, named); a reference left as written is counted.
+fn is_url_noise(found: char) -> bool {
+    matches!(found, '\t' | '\n' | '\r') || is_zero_width(found)
+}
+
+
+fn changed_value(raw: &str) -> Option<String> {
+    let decoded = htmlize::unescape_attribute(raw);
+    let cleaned: String = decoded
+        .trim_matches(|edge: char| edge <= ' ')
+        .chars()
+        .filter(|found| !matches!(found, '\t' | '\n' | '\r'))
+        .collect();
+    Some(cleaned).filter(|value| value.as_str() != decoded)
+}
+
+
+fn attribute_values(rule: &Result<Regex, regex::Error>, html: &str, counts: &mut Counts) -> String {
+    match rule {
+        Ok(regex) => regex
+            .captures_iter(html)
+            .filter_map(|captured| (1..=ATTRIBUTE_GROUPS).find_map(|group| captured.get(group)))
+            .filter_map(|value| changed_value(value.as_str()))
+            .fold(String::new(), |joined, value| format!("{joined}\n{value}")),
+        Err(error) => {
+            tracing::error!(%error, "attribute pattern did not compile, no attribute is re-read");
+            counts.pattern_failed += 1;
+            String::new()
+        }
+    }
+}
+
+
+/// Decodes an HTML part as a browser does in an attribute, appends each attribute value read differently as a URL, counts every lost reference.
+pub fn html_text_with(rule: &Result<Regex, regex::Error>, html: &str, counts: &mut Counts) -> String {
+    let decoded = htmlize::unescape_attribute(html).into_owned();
+    let replaced = decoded
+        .matches(char::REPLACEMENT_CHARACTER)
+        .count()
+        .saturating_sub(html.matches(char::REPLACEMENT_CHARACTER).count());
+    counts.html_refs_undecoded += replaced + decoded.split('&').skip(1).filter(|segment| is_reference(segment)).count();
+    format!("{decoded}{}", attribute_values(rule, html, counts))
+}
+
+
+/// `html_text_with` and the built-in attribute rule.
 pub fn html_text(html: &str, counts: &mut Counts) -> String {
-    let decoded = html_escape::decode_html_entities(html).into_owned();
-    counts.html_refs_undecoded += decoded.split('&').skip(1).filter(|segment| is_reference(segment)).count();
-    decoded
+    html_text_with(&ATTRIBUTE_RULE, html, counts)
 }
 
 
 fn normalise(candidate: &str, limits: &Limits, counts: &mut Counts) -> Option<String> {
     let stripped: String = candidate
         .chars()
-        .filter(|found| !is_zero_width(*found))
+        .filter(|found| !is_url_noise(*found))
         .take(limits.url_bytes.saturating_add(1))
         .collect();
-    let cleaned = candidate.chars().any(is_zero_width);
+    let cleaned = candidate.chars().any(is_url_noise);
     let acceptable = stripped.len() <= limits.url_bytes && !has_hostile(&stripped);
     if acceptable {
         counts.urls_cleaned += usize::from(cleaned);
