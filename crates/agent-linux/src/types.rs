@@ -90,5 +90,13 @@ pub type ReleaseFn = fn(&std::path::Path) -> std::io::Result<()>;
 pub type ChildKillFn = fn(&mut std::process::Child) -> std::io::Result<()>;
 
 
-/// Reads a regular file under a byte cap (production: core-config's `read_bytes_capped`); a test double injects bytes or a failure.
+/// Reads a regular file under a byte cap (production: `trusted::read_trusted_capped`); a test double injects bytes or a failure.
 pub type ReadBytesFn = fn(&std::path::Path, u64) -> Result<Vec<u8>, core_config::error::ConfigError>;
+
+
+/// Judges an opened FIM input from its facts: regular file, mode, owner, the agent's user; a refusal is a fixed reason.
+pub type JudgeFn = fn(bool, u32, u32, u32) -> Result<(), &'static str>;
+
+
+/// Runs between the open of a FIM input and its judgement; production does nothing, a test swaps the path there.
+pub type AfterOpenFn = fn(&std::path::Path);

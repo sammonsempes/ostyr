@@ -1,6 +1,6 @@
 use coverage_gate::error::GateError;
 use coverage_gate::executable::has_executable_code;
-use coverage_gate::manifest::is_boundary_entry;
+use coverage_gate::manifest::{is_boundary_entry, parse_manifest};
 use coverage_gate::run::run;
 use coverage_gate::scan::find_sources;
 use std::error::Error;
@@ -204,7 +204,7 @@ fn the_boundary_entry_is_exactly_the_kernel_directory() -> anyhow::Result<()> {
 
 #[test]
 fn a_manifest_without_a_workspace_or_a_file_excludes_nothing() -> anyhow::Result<()> {
-    let (_dir, root, arguments) = workspace("[package]\nname = \"x\"\nversion = \"0.0.0\"\nedition = \"2021\"\n")?;
+    let (_dir, root, arguments) = workspace("[workspace]\n[package]\nname = \"x\"\nversion = \"0.0.0\"\nedition = \"2021\"\n")?;
     put(&root, "src/lib.rs", "")?;
     put(&root, "crates/demo/src/lib.rs", "pub fn demo() {}\n")?;
     lock(&root)?;
@@ -213,6 +213,14 @@ fn a_manifest_without_a_workspace_or_a_file_excludes_nothing() -> anyhow::Result
     assert!(!report(&arguments)?.0);
     fs::remove_file(root.join("Cargo.toml"))?;
     assert!(!report(&arguments)?.0);
+    Ok(())
+}
+
+
+#[test]
+fn a_manifest_with_no_workspace_table_declares_no_exclude() -> anyhow::Result<()> {
+    let manifest = parse_manifest(Path::new("Cargo.toml"), "[package]\nname = \"x\"\n")?;
+    assert!(manifest.workspace.exclude.is_empty());
     Ok(())
 }
 

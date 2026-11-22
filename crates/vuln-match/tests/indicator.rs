@@ -108,7 +108,7 @@ fn answer(cells: [&str; ANSWER_COLUMNS]) -> Row {
 
 
 fn full_row() -> Row {
-    answer(["60.500000", "4", "3", "2", "1", "5", "61", "6", SEEN, DATABASE_NOW])
+    answer(["60.500000", "4", "3", "2", "1", "5", "61", SEEN, DATABASE_NOW])
 }
 
 
@@ -153,9 +153,8 @@ async fn the_figure_carries_the_oldest_open_row_as_observed_at() -> TestResult {
     );
     assert_eq!(
         row.source,
-        "vuln:computed=1700000000;kev_open=4;kev_resolved=3;kev_cleared=2;bad_time_rows=1;open_over_30=5;oldest_open_days=61;window_days=90;assets=6"
+        "vuln:computed=1700000000;kev_open=4;kev_resolved=3;kev_cleared=2;bad_time_rows=1;open_over_30=5;oldest_open_days=61;window_days=90"
     );
-    assert_eq!(outcome.counts.assets, SIX);
     assert_eq!(calls.len(), 1);
     let (tenant, sql, params) = calls.first().ok_or("no call")?;
     assert_eq!(tenant, "acme");
@@ -167,14 +166,14 @@ async fn the_figure_carries_the_oldest_open_row_as_observed_at() -> TestResult {
 
 #[tokio::test]
 async fn a_tenant_with_no_usable_row_emits_nothing() -> TestResult {
-    let none = answer(["0", "0", "0", "0", "0", "0", "0", "0", "", DATABASE_NOW]);
+    let none = answer(["0", "0", "0", "0", "0", "0", "0", "", DATABASE_NOW]);
     let (result, _) = run_with(Ok(vec![none]), "acme", NOW).await?;
     let outcome = result?;
     assert!(outcome.row.is_none());
     assert_eq!(outcome.counts, IndicatorCounts::default());
     assert_eq!(
         warning_line(&outcome.counts),
-        "no vulnerability indicator emitted: kev_open=0;kev_resolved=0;kev_cleared=0;bad_time_rows=0;open_over_30=0;oldest_open_days=0;window_days=90;assets=0"
+        "no vulnerability indicator emitted: kev_open=0;kev_resolved=0;kev_cleared=0;bad_time_rows=0;open_over_30=0;oldest_open_days=0;window_days=90"
     );
     assert_eq!(indicator_json(&[])?, "[]");
     assert_eq!(WINDOW_DAYS, DAYS_IN_WINDOW);
@@ -280,12 +279,11 @@ fn the_source_holds_integers_only_and_fits_the_grc_limit() -> TestResult {
         bad_time_rows: FOUR,
         open_over_30: FIVE,
         oldest_open_days: SIX,
-        assets: SEVEN,
     };
     let text = source_text(NOW, &counts);
     assert_eq!(
         text,
-        "vuln:computed=1700000000;kev_open=1;kev_resolved=2;kev_cleared=3;bad_time_rows=4;open_over_30=5;oldest_open_days=6;window_days=90;assets=7"
+        "vuln:computed=1700000000;kev_open=1;kev_resolved=2;kev_cleared=3;bad_time_rows=4;open_over_30=5;oldest_open_days=6;window_days=90"
     );
     assert!(text.len() < MAX_SOURCE_CHARS);
     assert_eq!(counts_text(&counts), text.split_once(';').ok_or("no split")?.1);

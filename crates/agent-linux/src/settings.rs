@@ -7,9 +7,9 @@ use crate::model::{
     MAX_UPDATE_DEADLINE_SECONDS, MAX_UPDATE_INTERVAL_SECONDS, MIN_OSQUERY_MEMORY_BYTES, MIN_OSQUERY_TEMP_BYTES, MIN_OSQUERY_TEMP_TOTAL_BYTES,
     MIN_UPDATE_INTERVAL_SECONDS, SETTINGS_SECTION, TEMP_TOTAL_MEMORY_DIVISOR,
 };
+use crate::trusted::read_trusted_capped;
 use crate::types::{SettingsEngine, SharedOsquery, SharedSensor, SharedSource, SharedUpdates};
 use arc_swap::ArcSwap;
-use core_config::parse::read_bytes_capped;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
 use core_config::types::{BoxError, ConfigState, LoaderFn, SharedAuditFn};
 use std::net::IpAddr;
@@ -201,7 +201,7 @@ pub fn fim_state(file: &LinuxFile) -> Vec<(String, String)> {
 
 
 pub fn settings_loader(path: PathBuf) -> Box<LoaderFn<LinuxFile>> {
-    Box::new(move || load_with_plan(&path, read_bytes_capped))
+    Box::new(move || load_with_plan(&path, read_trusted_capped))
 }
 
 

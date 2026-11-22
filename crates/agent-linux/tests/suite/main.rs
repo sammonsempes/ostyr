@@ -12,5 +12,6 @@ mod sensor;
 mod settings;
 mod spool;
 mod support;
+mod trusted;
 mod types;
 mod updates;

@@ -2,18 +2,18 @@ use crate::api::{
     encode_asset_id, parse_dhcp_address, parse_dhcp_mac, risk_kind, valid_asset_id, valid_case_id, valid_dhcp_hostname, valid_id, valid_oncall_text,
     valid_pack_id, valid_shell_hash, valid_shell_reference, valid_shell_subject, valid_state_asset, valid_state_id, valid_vuln_asset,
     valid_vuln_field, vuln_score, CERT_FILTERS, MAX_COMMENT_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE, MAX_SHELL_REFERENCE_BYTES,
-    MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, SHELL_OPEN_ONLY, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX,
-    VULN_EPSS_MAX,
+    MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, RUN_CHANGED_KEY, SHELL_OPEN_ONLY, STATE_VERDICTS, VERDICT_ALL,
+    VULN_CVSS_MAX, VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView,
-    CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView, RiskDetailView,
-    RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView,
-    StateListView, StateView, VulnAssetView, VulnListView, VulnView,
+    CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LookupView, OncallAlertView, OncallListView, PostureFindingView,
+    PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery,
+    ShellSessionView, StateAssetView, StateListView, StateView, VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
-    action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, resolution_key, severity_class, severity_key,
-    shell_reason_key, status_key, task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
+    action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, posture_severity_key, posture_status_key,
+    resolution_key, severity_class, severity_key, shell_reason_key, status_key, task_status_key, text, CLOSE_ACTION, RESOLUTIONS,
 };
 use ecs_normalise::suricata::{is_unsafe, REPLACEMENT};
 use maud::{html, Markup, DOCTYPE};
@@ -195,6 +195,7 @@ pub fn layout_with(language: Language, title_key: &str, csrf: Option<&str>, swit
                         (go("/compliance", text(language, "nav_compliance")))
                         (go("/vulnerabilities", text(language, "nav_vulns")))
                         (go("/dhcp", text(language, "nav_dhcp")))
+                        (go("/posture", text(language, "nav_posture")))
                         (go("/oncall", text(language, "nav_oncall")))
                         (go("/remote-shell", text(language, "nav_shell")))
                         form method="post" action="/logout" {
@@ -1601,6 +1602,7 @@ pub struct ReadableLease {
     pub address: String,
     pub mac: String,
     pub hostname: String,
+    pub hostname_refused: bool,
     pub starts: String,
     pub ends: String,
 }
@@ -1623,6 +1625,7 @@ pub fn readable_lease(view: &LeaseView) -> Option<ReadableLease> {
             address: address_text,
             mac: mac_text,
             hostname: hostname_text,
+            hostname_refused: view.hostname_refused,
             starts,
             ends,
         })
@@ -1635,7 +1638,13 @@ pub fn lease_row(language: Language, view: &LeaseView) -> Markup {
             tr {
                 td { (lease.address) }
                 td { (lease.mac) }
-                td { (lease.hostname) }
+                td {
+                    @if lease.hostname_refused {
+                        (text(language, "dhcp_hostname_refused"))
+                    } @else {
+                        (lease.hostname)
+                    }
+                }
                 td { (lease.starts) }
                 td { (lease.ends) }
                 td { (text(language, dhcp_action_key(&view.action))) }
@@ -1718,6 +1727,183 @@ pub fn dhcp_page(language: Language, csrf: &str, found: Option<&LookupView>) -> 
             @if let Some(result) = found {
                 (dhcp_result(language, result))
             }
+        },
+    )
+}
+
+
+pub const MICROS_PER_SECOND: i64 = 1_000_000;
+
+
+/// The run's counts as `(label key, value)` rows, in the order they are shown.
+pub fn posture_counts(run: &PostureRunView) -> Vec<(&'static str, u64)> {
+    vec![
+        ("posture_items", run.items),
+        ("posture_unparsable", run.unparsable),
+        ("posture_bad_field", run.bad_field),
+        ("posture_duplicate", run.duplicate),
+        ("posture_foreign", run.foreign_account),
+        ("posture_refused", run.refused_items),
+        ("posture_refused_pass", run.refused_pass),
+        ("posture_refused_muted", run.refused_muted),
+        ("posture_refused_manual", run.refused_manual),
+        ("posture_refused_fail", run.refused_fail),
+        ("posture_store_refused", run.store_refused),
+    ]
+}
+
+
+/// A microsecond time as UTC RFC 3339, an absent one as `-`.
+pub fn posture_time(language: Language, micros: Option<i64>) -> String {
+    micros.map_or_else(|| NO_TIME.to_owned(), |found| format_time(language, found.div_euclid(MICROS_PER_SECOND)))
+}
+
+
+pub fn posture_header(language: Language, view: &PostureView) -> Markup {
+    html! {
+        @if view.unservable > 0 {
+            div class="notice" { (counted_notice(language, "posture_unservable_one", "posture_unservable", view.unservable)) }
+        }
+        @match &view.run {
+            Some(run) => {
+                @if run.refusal_pending {
+                    div class="notice" { (text(language, "posture_pending")) }
+                }
+                dl {
+                    dt { (text(language, "posture_finished")) }
+                    dd { (posture_time(language, run.finished_micros)) }
+                    dt { (text(language, "posture_refused_at")) }
+                    dd { (posture_time(language, run.refused_micros)) }
+                    @for (key, count) in posture_counts(run) {
+                        dt { (text(language, key)) }
+                        dd { (count) }
+                    }
+                }
+            }
+            None => {
+                div { (text(language, "posture_none")) }
+            }
+        }
+    }
+}
+
+
+/// A cut count as its own marker, never part of the (escaped) text it follows.
+pub fn posture_cut(language: Language, cut: u64) -> Markup {
+    html! {
+        @if cut > 0 {
+            " "
+            span class="notice" { (text(language, "posture_cut").replace("{count}", &cut.to_string())) }
+        }
+    }
+}
+
+
+pub fn posture_row(language: Language, finding: &PostureFindingView) -> Markup {
+    html! {
+        tr {
+            td { (clip_identity(language, &finding.check_id, MAX_FIELD_CHARS)) }
+            td { (text(language, posture_severity_key(&finding.severity))) }
+            td { (text(language, posture_status_key(&finding.status))) }
+            td { (clip_identity(language, &finding.resource_uid, MAX_FIELD_CHARS)) }
+            td { (format_time(language, finding.time_unix)) }
+            td { (clip(language, &finding.title, MAX_FIELD_CHARS)) (posture_cut(language, finding.title_cut)) }
+            td { (clip(language, &finding.detail, MAX_FIELD_CHARS)) (posture_cut(language, finding.detail_cut)) }
+        }
+    }
+}
+
+
+pub fn posture_head(language: Language) -> Markup {
+    html! {
+        thead {
+            tr {
+                th { (text(language, "col_check")) }
+                th { (text(language, "col_severity")) }
+                th { (text(language, "col_status")) }
+                th { (text(language, "col_resource")) }
+                th { (text(language, "col_time")) }
+                th { (text(language, "col_finding_title")) }
+                th { (text(language, "col_finding_detail")) }
+            }
+        }
+    }
+}
+
+
+pub fn posture_form_page(language: Language, csrf: &str) -> Markup {
+    layout(
+        language,
+        "title_posture",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_posture")) }
+            form method="get" action="/posture" {
+                label { (text(language, "label_account")) " " input type="text" name="account" required; }
+                button type="submit" { (text(language, "posture_search")) }
+            }
+        },
+    )
+}
+
+
+pub fn posture_page(language: Language, csrf: &str, account: &str, view: &PostureView) -> Markup {
+    layout(
+        language,
+        "title_posture",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_posture")) " " (account) }
+            (posture_header(language, view))
+            @if view.run.is_some() {
+                @if view.items.is_empty() {
+                    div { (text(language, "posture_empty")) }
+                } @else {
+                    table {
+                        (posture_head(language))
+                        tbody {
+                            @for finding in &view.items { (posture_row(language, finding)) }
+                        }
+                    }
+                }
+            }
+            @if let Some(cursor) = &view.next_cursor {
+                form method="get" action=(format!("/posture/{}", encode_asset_id(account))) class="go" {
+                    input type="hidden" name="cursor" value=(cursor);
+                    button type="submit" { (text(language, "posture_next")) }
+                }
+            }
+            (go("/posture", text(language, "posture_back")))
+        },
+    )
+}
+
+
+/// The 409 page: the run was replaced between two pages, so the cursor is dead; a link restarts from the first page.
+pub fn posture_changed_page(language: Language, csrf: &str, account: &str) -> Markup {
+    layout(
+        language,
+        "title_posture",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_posture")) }
+            div class="notice" { (text(language, RUN_CHANGED_KEY)) }
+            (go(&format!("/posture/{}", encode_asset_id(account)), text(language, "posture_first")))
+        },
+    )
+}
+
+
+/// The named page for a findings page over the body cap: our text and a link to the first page.
+pub fn posture_too_large_page(language: Language, csrf: &str, account: &str) -> Markup {
+    layout(
+        language,
+        "title_posture",
+        Some(csrf),
+        html! {
+            h1 { (text(language, "title_posture")) }
+            div class="notice" { (text(language, "posture_too_large")) }
+            (go(&format!("/posture/{}", encode_asset_id(account)), text(language, "posture_first")))
         },
     )
 }

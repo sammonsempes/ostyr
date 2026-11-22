@@ -11,6 +11,7 @@ use linux_fim::policy::{policy_names, watch_sets, with_planted};
 use linux_fim::roles::load_roles;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,9 +37,12 @@ pub fn plan_from_bytes(role_name: &str, table: &[u8], planted: &[u8]) -> Result<
     let undeclared = identities
         .iter()
         .position(|identity| !sets.tokens.contains(&identity.path) && !sets.token_ancestors.contains(&identity.path));
-    match undeclared {
-        Some(index) => Err(FimError::Undeclared { entry: index + 1 }),
-        None => Ok(FimPlan {
+    let mut seen = HashSet::new();
+    let duplicate = identities.iter().position(|identity| !seen.insert(identity.path.as_str()));
+    match (duplicate, undeclared) {
+        (Some(index), _) => Err(FimError::Duplicate { entry: index + 1 }),
+        (None, Some(index)) => Err(FimError::Undeclared { entry: index + 1 }),
+        (None, None) => Ok(FimPlan {
             role: role_name.to_owned(),
             policies: policy_names(role_name),
             sets: with_planted(sets, identities),
@@ -69,7 +73,7 @@ pub fn load_plan(section: &FimFile, read: ReadBytesFn) -> Result<FimPlan, Config
 /// The file that holds the cause: `planted.tsv` for its own errors, the table otherwise.
 pub fn file_of<'a>(section: &'a FimFile, error: &FimError) -> &'a Path {
     match error {
-        FimError::PlantedNotUtf8 | FimError::Planted(_) | FimError::Undeclared { .. } => &section.planted,
+        FimError::PlantedNotUtf8 | FimError::Planted(_) | FimError::Undeclared { .. } | FimError::Duplicate { .. } => &section.planted,
         FimError::TableNotUtf8 | FimError::Table(_) | FimError::EmptyRole | FimError::NoRole => &section.table,
     }
 }

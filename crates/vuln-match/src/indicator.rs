@@ -20,7 +20,7 @@ pub const WINDOW_DAYS: u64 = 90;
 pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
 
 
-pub const ANSWER_COLUMNS: usize = 10;
+pub const ANSWER_COLUMNS: usize = 9;
 
 
 const MICROS_PER_SECOND: u64 = 1_000_000;
@@ -38,7 +38,7 @@ const MIN_VALUE: f64 = 0.0;
 /// `$1` tenant, `$2` now: the pinned function `vuln_kev_indicator`, one answer row of text columns; the rule is in the crate notes.
 pub const INDICATOR_SQL: &str =
     "SELECT figure, n_open::text, n_resolved::text, n_cleared::text, n_bad::text, n_over_30::text, oldest_open_days::text, \
-                                 n_assets::text, observed_micros, database_seconds FROM vuln_kev_indicator($1, $2::text::bigint)";
+                                 observed_micros, database_seconds FROM vuln_kev_indicator($1, $2::text::bigint)";
 
 
 pub fn parse_count(text: &str) -> Result<u64, IndicatorError> {
@@ -48,15 +48,8 @@ pub fn parse_count(text: &str) -> Result<u64, IndicatorError> {
 
 pub fn counts_text(counts: &IndicatorCounts) -> String {
     format!(
-        "kev_open={};kev_resolved={};kev_cleared={};bad_time_rows={};open_over_30={};oldest_open_days={};window_days={};assets={}",
-        counts.kev_open,
-        counts.kev_resolved,
-        counts.kev_cleared,
-        counts.bad_time_rows,
-        counts.open_over_30,
-        counts.oldest_open_days,
-        WINDOW_DAYS,
-        counts.assets
+        "kev_open={};kev_resolved={};kev_cleared={};bad_time_rows={};open_over_30={};oldest_open_days={};window_days={}",
+        counts.kev_open, counts.kev_resolved, counts.kev_cleared, counts.bad_time_rows, counts.open_over_30, counts.oldest_open_days, WINDOW_DAYS
     )
 }
 
@@ -103,7 +96,7 @@ pub fn value_of(text: &str) -> Result<f64, IndicatorError> {
 /// One answer row: no non-bad row of the tenant (an empty observation time) is `row: None` with the counts.
 pub fn decode_row(scope: &TenantScope, now_micros: u64, row: &Row) -> Result<IndicatorOutcome, IndicatorError> {
     match row.as_slice() {
-        [figure, open, resolved, cleared, bad, over_30, oldest_days, assets, observed, database_seconds] => {
+        [figure, open, resolved, cleared, bad, over_30, oldest_days, observed, database_seconds] => {
             check_clock(now_micros, database_seconds)?;
             let counts = IndicatorCounts {
                 kev_open: parse_count(open)?,
@@ -112,7 +105,6 @@ pub fn decode_row(scope: &TenantScope, now_micros: u64, row: &Row) -> Result<Ind
                 bad_time_rows: parse_count(bad)?,
                 open_over_30: parse_count(over_30)?,
                 oldest_open_days: parse_count(oldest_days)?,
-                assets: parse_count(assets)?,
             };
             let indicator = if observed.is_empty() {
                 None

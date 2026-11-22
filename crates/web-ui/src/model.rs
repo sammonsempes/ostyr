@@ -502,6 +502,8 @@ pub struct LeaseView {
     pub address: String,
     pub mac: Option<String>,
     pub hostname: Option<String>,
+    #[serde(default)]
+    pub hostname_refused: bool,
     pub starts: String,
     pub ends: String,
     pub action: String,
@@ -522,6 +524,50 @@ pub struct LookupView {
 pub enum DhcpQuery {
     At { address: IpAddr, at: i64 },
     Mac { mac: String, from: i64, to: i64 },
+}
+
+
+/// The run header of `GET /posture/accounts/{account}/findings`: counts and microsecond times, all integers.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PostureRunView {
+    pub finished_micros: Option<i64>,
+    pub refused_micros: Option<i64>,
+    pub refused_items: u64,
+    pub items: u64,
+    pub unparsable: u64,
+    pub bad_field: u64,
+    pub duplicate: u64,
+    pub foreign_account: u64,
+    pub refused_pass: u64,
+    pub refused_muted: u64,
+    pub refused_manual: u64,
+    pub refused_fail: u64,
+    pub store_refused: u64,
+    pub refusal_pending: bool,
+}
+
+
+/// One finding: the texts are escaped by the API and still go through `clip` here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PostureFindingView {
+    pub check_id: String,
+    pub status: String,
+    pub severity: String,
+    pub resource_uid: String,
+    pub time_unix: i64,
+    pub title: String,
+    pub title_cut: u64,
+    pub detail: String,
+    pub detail_cut: u64,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PostureView {
+    pub run: Option<PostureRunView>,
+    pub unservable: u64,
+    pub items: Vec<PostureFindingView>,
+    pub next_cursor: Option<String>,
 }
 
 

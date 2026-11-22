@@ -1,7 +1,7 @@
 CREATE FUNCTION vuln_kev_indicator(
     tenant_name text, now_micros bigint,
     OUT figure text, OUT n_open bigint, OUT n_resolved bigint, OUT n_cleared bigint, OUT n_bad bigint, OUT n_over_30 bigint,
-    OUT oldest_open_days bigint, OUT n_assets bigint, OUT observed_micros text, OUT database_seconds text
+    OUT oldest_open_days bigint, OUT observed_micros text, OUT database_seconds text
 )
 LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp SET enable_seqscan = off SET enable_bitmapscan = off SET enable_sort = off SET jit = off AS $$
 WITH population AS (
@@ -42,7 +42,6 @@ SELECT
     count(*) FILTER (WHERE w.bad),
     count(*) FILTER (WHERE w.resolved IS NULL AND NOT w.bad AND now_micros - w.first_seen > 2592000000000),
     coalesce(max(now_micros - w.first_seen) FILTER (WHERE w.resolved IS NULL AND NOT w.bad) / 86400000000, 0),
-    count(DISTINCT w.asset),
     coalesce(
         (
             coalesce(

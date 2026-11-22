@@ -60,7 +60,7 @@ stamp() { date -u -d "@$(( ($1) / 1000000 ))" +%Y-%m-%dT%H:%M:%SZ; }
 DAY=86400000000
 HOUR=3600000000
 MINUTE=60000000
-ind() { sql "SELECT figure||'|'||n_open||'|'||n_resolved||'|'||n_cleared||'|'||n_bad||'|'||n_over_30||'|'||oldest_open_days||'|'||n_assets||'|'||observed_micros FROM vuln_kev_indicator('$1', ${2:-$NOW})"; }
+ind() { sql "SELECT figure||'|'||n_open||'|'||n_resolved||'|'||n_cleared||'|'||n_bad||'|'||n_over_30||'|'||oldest_open_days||'|'||observed_micros FROM vuln_kev_indicator('$1', ${2:-$NOW})"; }
 ins() { sql "INSERT INTO vuln_findings (tenant, asset, ecosystem, package, record_id, installed_version, fixed_version, cvss, epss, kev, priority, first_seen_micros, last_seen_micros, resolved_micros, kev_since_micros) VALUES ('$1', '$2', 'e', '$3', 'R', '1', '2', 5, 0.5, $4, 100, $5, $6, $7, $8)"; }
 
 vuln migrate
@@ -119,17 +119,17 @@ ins frac h1 f2 true $((NOW - 3 * DAY)) $((NOW - 2 * DAY)) $((NOW - 2 * DAY)) $((
 ins frac h1 f3 true $((NOW - 4 * DAY)) $((NOW - 2 * DAY)) $((NOW - 2 * DAY)) $((NOW - 4 * DAY))
 
 echo "--- figures"
-check "a: one KEV open 60 days, the older non-KEV row sets observed_at, b never moves it" "60.000000|1|0|0|0|1|60|1|$((NOW - 2 * HOUR))" "$(ind a)"
-check "b: 1000 fast fixes alone" "0.041667|0|1000|0|0|0|0|7|$((NOW - 2 * DAY + HOUR))" "$(ind b)"
+check "a: one KEV open 60 days, the older non-KEV row sets observed_at, b never moves it" "60.000000|1|0|0|0|1|60|$((NOW - 2 * HOUR))" "$(ind a)"
+check "b: 1000 fast fixes alone" "0.041667|0|1000|0|0|0|0|$((NOW - 2 * DAY + HOUR))" "$(ind b)"
 check "a: never fixed, ten days later the age grew" "70.000000" "$(ind a $((NOW + 10 * DAY)) | cut -d'|' -f1)"
-check "no scan stored: nothing to observe" "0|0|0|0|0|0|0|0|" "$(ind none)"
-check "scans without KEV: figure 0 with observed_at" "0|0|0|0|0|0|0|0|$((NOW - 3 * HOUR))" "$(ind clean)"
-check "mix: open KEV, a cleared KEV flag, resolved in window and at its edge, one outside" "17.500000|2|2|1|0|1|40|2|$((NOW - HOUR))" "$(ind mix)"
-check "a first_seen in 2100 is bad and worth 90 days, never 0, and never feeds observed_at" "50.000000|1|0|0|1|0|10|2|$((NOW - HOUR))" "$(ind bad2100)"
-check "a 200-day row with last_seen in the future is worth 200 days, not observed" "105.000000|1|0|0|1|0|10|2|$((NOW - HOUR))" "$(ind old)"
-check "resolved before last_seen is bad, worth 90, and nothing is observed" "90.000000|0|0|0|1|0|0|1|" "$(ind back)"
-check "one silent asset: observed_at is 49 hours old" "5.000000|1|0|0|0|0|5|1|$((NOW - 49 * HOUR))" "$(ind silent)"
-check "a bad non-KEV row is never observed" "0|0|0|0|0|0|0|0|" "$(ind back2)"
+check "no scan stored: nothing to observe" "0|0|0|0|0|0|0|" "$(ind none)"
+check "scans without KEV: figure 0 with observed_at" "0|0|0|0|0|0|0|$((NOW - 3 * HOUR))" "$(ind clean)"
+check "mix: open KEV, a cleared KEV flag, resolved in window and at its edge, one outside" "17.500000|2|2|1|0|1|40|$((NOW - HOUR))" "$(ind mix)"
+check "a first_seen in 2100 is bad and worth 90 days, never 0, and never feeds observed_at" "50.000000|1|0|0|1|0|10|$((NOW - HOUR))" "$(ind bad2100)"
+check "a 200-day row with last_seen in the future is worth 200 days, not observed" "105.000000|1|0|0|1|0|10|$((NOW - HOUR))" "$(ind old)"
+check "resolved before last_seen is bad, worth 90, and nothing is observed" "90.000000|0|0|0|1|0|0|" "$(ind back)"
+check "one silent asset: observed_at is 49 hours old" "5.000000|1|0|0|0|0|5|$((NOW - 49 * HOUR))" "$(ind silent)"
+check "a bad non-KEV row is never observed" "0|0|0|0|0|0|0|" "$(ind back2)"
 check "fractional mean is rounded to 6 digits in numeric" "1.333333" "$(ind frac | cut -d'|' -f1)"
 
 echo "--- hostile text is refused at the store, never in the output"
@@ -138,8 +138,8 @@ check "10 KB asset is refused by the CHECK" "refused" "$(sql "INSERT INTO vuln_f
 
 echo "--- the example and the output file"
 now_real="$NOW"
-check "the output has the contract shape for a" '[{"name":"vuln.kev_mean_days_to_fix","observed_at":"'"$(stamp $((NOW - 2 * HOUR)))"'","source":"vuln:computed='"$NOW_SECONDS"';kev_open=1;kev_resolved=0;kev_cleared=0;bad_time_rows=0;open_over_30=1;oldest_open_days=60;window_days=90;assets=1","tenant":"a","value":60.0}]' "$(indicators a $NOW)"
-check "no scan stored: the file is [] and the counts line is on stderr" "[]|no vulnerability indicator emitted: kev_open=0;kev_resolved=0;kev_cleared=0;bad_time_rows=0;open_over_30=0;oldest_open_days=0;window_days=90;assets=0" \
+check "the output has the contract shape for a" '[{"name":"vuln.kev_mean_days_to_fix","observed_at":"'"$(stamp $((NOW - 2 * HOUR)))"'","source":"vuln:computed='"$NOW_SECONDS"';kev_open=1;kev_resolved=0;kev_cleared=0;bad_time_rows=0;open_over_30=1;oldest_open_days=60;window_days=90","tenant":"a","value":60.0}]' "$(indicators a $NOW)"
+check "no scan stored: the file is [] and the counts line is on stderr" "[]|no vulnerability indicator emitted: kev_open=0;kev_resolved=0;kev_cleared=0;bad_time_rows=0;open_over_30=0;oldest_open_days=0;window_days=90" \
     "$(indicators none $NOW 2>"$work/err" | tr -d '\n')|$(tr -d '\n' <"$work/err")"
 check "the back-clock tenant emits nothing" "[]" "$(indicators back $NOW 2>/dev/null)"
 out_before="$(indicators frac $NOW)"
@@ -158,12 +158,12 @@ echo "--- end to end through vuln_store scan and GRC"
 vuln scan k h1 $((NOW - 60 * DAY)) 100 100 x/R1/kev y/R2 >/dev/null
 vuln scan k h1 $((NOW - 59 * DAY)) 100 100 x/R1/kev y/R2 >/dev/null
 vuln scan k h1 $((NOW - HOUR)) 100 100 x/R1/kev y/R2 >/dev/null
-check "scan stored KEV: the figure reads 60 days" "60.000000|1|0|0|0|1|60|1|$((NOW - HOUR))" "$(ind k)"
+check "scan stored KEV: the figure reads 60 days" "60.000000|1|0|0|0|1|60|$((NOW - HOUR))" "$(ind k)"
 vuln scan k h1 $((NOW - MINUTE)) 100 100 x/R1 y/R2 >/dev/null
-check "a rescan with kev = false leaves the figure unchanged but counts the cleared flag" "60.000000|1|0|1|0|1|60|1|$((NOW - HOUR))" "$(ind k)"
+check "a rescan with kev = false leaves the figure unchanged but counts the cleared flag" "60.000000|1|0|1|0|1|60|$((NOW - HOUR))" "$(ind k)"
 check "kev is false and kev_since is kept" "false|true" "$(sql "SELECT kev::text || '|' || (kev_since_micros IS NOT NULL)::text FROM vuln_findings WHERE tenant = 'k' AND package = 'x'")"
 vuln scan k h1 $NOW 100 100 y/R2 >/dev/null
-check "x fixed: the 60-day fix stays, mean of one resolved row" "60.000000|0|1|1|0|0|0|1|$NOW" "$(ind k)"
+check "x fixed: the 60-day fix stays, mean of one resolved row" "60.000000|0|1|1|0|0|0|$NOW" "$(ind k)"
 indicators k $NOW >"$work/k.json"
 cat "$work/k.json"
 printf 'evidence: []\n' >"$work/manual.yaml"
@@ -185,15 +185,15 @@ echo "grc art21-2-e for b (fast fixes, observed 47 h old):"
 jq -c '.controls[] | select(.id == "art21-2-e") | {id, status, evidence_time}' "$work/b-nis2.json" || true
 
 if [[ "$BIG" == 1 ]]; then
-    echo "--- 2 M open plus 1 M resolved rows, stale statistics"
+    echo "--- 2 M open plus 1 M in-window resolved rows, all KEV, 128-byte assets, stale statistics"
     sql "ALTER TABLE vuln_findings SET (autovacuum_enabled = false)"
     sql "INSERT INTO vuln_findings (tenant, asset, ecosystem, package, record_id, installed_version, fixed_version, cvss, epss, kev, priority, first_seen_micros, last_seen_micros, resolved_micros, kev_since_micros)
-         SELECT 'big', 'h' || (g % 5000), 'e', 'p' || g, 'R', '1', '2', 5, 0.5, g % 100 = 0, 100 + g % 1000, $((NOW - 100 * DAY)) + g::bigint * 1000, $((NOW - HOUR)) - g % 1000, NULL, CASE WHEN g % 100 = 0 THEN $((NOW - 100 * DAY)) + g::bigint * 1000 END
+         SELECT 'big', 'h' || lpad((g % 5000)::text, 127, 'x'), 'e', 'p' || g, 'R', '1', '2', 5, 0.5, true, 100 + g % 1000, $((NOW - 100 * DAY)) + g::bigint * 1000, $((NOW - HOUR)) - g % 1000, NULL, $((NOW - 100 * DAY)) + g::bigint * 1000
          FROM generate_series(1, 2000000) g"
     sql "INSERT INTO vuln_findings (tenant, asset, ecosystem, package, record_id, installed_version, fixed_version, cvss, epss, kev, priority, first_seen_micros, last_seen_micros, resolved_micros, kev_since_micros)
-         SELECT 'big', 'r' || (g % 5000), 'e', 'q' || g, 'R', '1', '2', 5, 0.5, g % 100 = 0, 100, $((NOW - 120 * DAY)), $((NOW - 119 * DAY)), $((NOW - 119 * DAY)) + g::bigint * 5000000, CASE WHEN g % 100 = 0 THEN $((NOW - 120 * DAY)) END
+         SELECT 'big', 'r' || lpad((g % 5000)::text, 127, 'y'), 'e', 'q' || g, 'R', '1', '2', 5, 0.5, true, 100, $((NOW - 120 * DAY)), $((NOW - 81 * DAY)), $((NOW - 80 * DAY)) + g::bigint * 5000000, $((NOW - 120 * DAY))
          FROM generate_series(1, 1000000) g"
-    check "rows of the big tenant" "2000000|1000000|20000|10000" "$(sql "SELECT count(*) FILTER (WHERE resolved_micros IS NULL) || '|' || count(*) FILTER (WHERE resolved_micros IS NOT NULL) || '|' || count(*) FILTER (WHERE resolved_micros IS NULL AND kev_since_micros IS NOT NULL) || '|' || count(*) FILTER (WHERE resolved_micros IS NOT NULL AND kev_since_micros IS NOT NULL) FROM vuln_findings WHERE tenant = 'big'")"
+    check "rows of the big tenant" "2000000|1000000|2000000|1000000" "$(sql "SELECT count(*) FILTER (WHERE resolved_micros IS NULL) || '|' || count(*) FILTER (WHERE resolved_micros IS NOT NULL) || '|' || count(*) FILTER (WHERE resolved_micros IS NULL AND kev_since_micros IS NOT NULL) || '|' || count(*) FILTER (WHERE resolved_micros IS NOT NULL AND kev_since_micros IS NOT NULL) FROM vuln_findings WHERE tenant = 'big'")"
     echo "statistics of the table are stale: last analyze"
     sql "SELECT coalesce(last_analyze::text, 'never') || '|' || coalesce(last_autoanalyze::text, 'never') FROM pg_stat_user_tables WHERE relname = 'vuln_findings'"
     echo "big tenant statement, five times through PREPARE/EXECUTE before any ANALYZE (wall time of each in ms):"

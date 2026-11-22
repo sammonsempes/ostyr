@@ -304,7 +304,6 @@ pub struct IndicatorCounts {
     pub bad_time_rows: u64,
     pub open_over_30: u64,
     pub oldest_open_days: u64,
-    pub assets: u64,
 }
 
 
