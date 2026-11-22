@@ -3,7 +3,6 @@ use crate::model::{
 };
 use crate::types::ClockFn;
 use agent_command::action::valid_session_id;
-use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 
@@ -48,18 +47,15 @@ pub fn gate_add(gate: &ShellGate, tenant: &str, agent_id: &str, session_id: &str
     prune(&mut table, now);
     if !valid_session_id(session_id) {
         Err(GateError::InvalidSessionId)
+    } else if table.pending.contains_key(&key) || table.running.contains(&key) {
+        Err(GateError::Duplicate)
     } else if table.pending.len().saturating_add(table.active) >= MAX_SHELL_SESSIONS {
         Err(GateError::Full)
     } else if tenant_sessions(&table, tenant) >= MAX_SHELL_SESSIONS_PER_TENANT {
         Err(GateError::TenantFull)
     } else {
-        match table.pending.entry(key) {
-            Entry::Occupied(_taken) => Err(GateError::Duplicate),
-            Entry::Vacant(slot) => {
-                slot.insert(PendingShell { start_deadline, max_seconds });
-                Ok(())
-            }
-        }
+        table.pending.insert(key, PendingShell { start_deadline, max_seconds });
+        Ok(())
     }
 }
 
@@ -81,13 +77,15 @@ pub fn gate_take(gate: &Arc<ShellGate>, identity: &Identity, session_id: &str) -
     prune(&mut table, now);
     let entry = table.pending.remove(&(identity.clone(), session_id.to_owned()))?;
     table.active = table.active.saturating_add(1);
+    table.running.insert((identity.clone(), session_id.to_owned()));
     let running = table.active_by_tenant.entry(identity.tenant.clone()).or_insert(0);
     *running = running.saturating_add(1);
     Some(ShellTake {
         max_seconds: entry.max_seconds,
         active: ActiveShell {
             gate: Arc::clone(gate),
-            tenant: identity.tenant.clone(),
+            identity: identity.clone(),
+            session_id: session_id.to_owned(),
         },
     })
 }
@@ -97,11 +95,13 @@ impl Drop for ActiveShell {
     fn drop(&mut self) {
         let mut table = lock_gate(&self.gate);
         table.active = table.active.saturating_sub(1);
-        let remaining = table.active_by_tenant.get(&self.tenant).copied().unwrap_or(0).saturating_sub(1);
+        table.running.remove(&(self.identity.clone(), self.session_id.clone()));
+        let tenant = &self.identity.tenant;
+        let remaining = table.active_by_tenant.get(tenant).copied().unwrap_or(0).saturating_sub(1);
         if remaining == 0 {
-            table.active_by_tenant.remove(&self.tenant);
+            table.active_by_tenant.remove(tenant);
         } else {
-            table.active_by_tenant.insert(self.tenant.clone(), remaining);
+            table.active_by_tenant.insert(tenant.clone(), remaining);
         }
     }
 }

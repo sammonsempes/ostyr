@@ -37,6 +37,9 @@ use tonic_prost::ProstCodec;
 use tower::service_fn;
 
 
+const STALLED_PERIODS: u64 = 5;
+
+
 const OVERSIZED_PADDING: usize = 1_048_576;
 
 
@@ -518,6 +521,19 @@ async fn the_attach_opens_first_and_sends_a_keepalive_every_interval() -> TestRe
     assert_eq!(started.elapsed().as_secs(), SHELL_KEEPALIVE_SECONDS);
     assert_eq!(frames.next().await, Some(keepalive_frame()));
     assert_eq!(started.elapsed().as_secs(), SHELL_KEEPALIVE_SECONDS * TWO_PERIODS);
+    Ok(())
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_consumer_gets_one_keepalive_then_the_normal_pace_not_a_burst() -> TestResult {
+    let mut frames = Box::pin(outbound_frames(SESSION, silent_reader()));
+    assert_eq!(frames.next().await, Some(open_frame(SESSION)));
+    tokio::time::sleep(std::time::Duration::from_secs(SHELL_KEEPALIVE_SECONDS * STALLED_PERIODS)).await;
+    assert_eq!(frames.next().await, Some(keepalive_frame()));
+    let resumed = tokio::time::Instant::now();
+    assert_eq!(frames.next().await, Some(keepalive_frame()));
+    assert_eq!(resumed.elapsed().as_secs(), SHELL_KEEPALIVE_SECONDS);
     Ok(())
 }
 
