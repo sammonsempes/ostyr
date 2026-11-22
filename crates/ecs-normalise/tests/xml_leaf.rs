@@ -128,3 +128,22 @@ fn the_new_errors_display() -> TestResult {
     assert!(SysmonError::MissingAttribute("x").to_string().contains("`x`"));
     Ok(())
 }
+
+
+const FLAT_SIBLINGS: [&str; 5] = [
+    r#""EventID":1"#,
+    r#""Computer":"host""#,
+    r#""Provider":"p""#,
+    r#""Channel":"Security""#,
+    r#""TimeCreated":{"SystemTime":"2026-11-03T10:00:00Z"}"#,
+];
+
+
+#[test]
+fn x14_json_system_with_any_flat_sibling_is_ambiguous() -> TestResult {
+    FLAT_SIBLINGS.iter().try_for_each(|flat| {
+        let text = format!(r#"{{"System":{{"EventID":2}},{flat},"EventData":{{}}}}"#);
+        assert!(matches!(refused(&text)?, SysmonError::Duplicate("System")), "{flat}");
+        Ok(())
+    })
+}

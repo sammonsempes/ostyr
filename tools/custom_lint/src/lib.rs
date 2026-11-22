@@ -7,6 +7,7 @@ pub mod model;
 pub mod position;
 pub mod rules;
 pub mod rules_audit;
+pub mod rules_bool_array;
 pub mod rules_comments;
 pub mod rules_flow;
 pub mod rules_hygiene;

@@ -1,6 +1,7 @@
 use crate::{
     model::Rule,
     rules_audit::{undeclared_audit, UNDECLARED_AUDIT},
+    rules_bool_array::{bool_array, BOOL_ARRAY},
     rules_comments::{doc_comment_multiline, line_comment, DOC_COMMENT_MULTILINE, LINE_COMMENT},
     rules_flow::{bare_loop, break_continue, process_exit, return_expression, BARE_LOOP, BREAK_CONTINUE, PROCESS_EXIT, RETURN},
     rules_hygiene::{
@@ -123,5 +124,9 @@ pub const RULES: &[Rule] = &[
     Rule {
         id: UNDECLARED_AUDIT,
         check: undeclared_audit,
+    },
+    Rule {
+        id: BOOL_ARRAY,
+        check: bool_array,
     },
 ];

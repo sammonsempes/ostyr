@@ -122,11 +122,7 @@ pub struct FetchCaps {
 
 /// Refuses a chain of more than `MAX_CHAIN_CERTS` certificates or a certificate above `MAX_CERT_BYTES`.
 pub fn check_chain(chain: &[Vec<u8>]) -> Result<(), ProbeError> {
-    let too_large = [
-        chain.len() > MAX_CHAIN_CERTS,
-        chain.iter().any(|certificate| certificate.len() > MAX_CERT_BYTES),
-    ]
-    .contains(&true);
+    let too_large = chain.len() > MAX_CHAIN_CERTS || chain.iter().any(|certificate| certificate.len() > MAX_CERT_BYTES);
     (!too_large).then_some(()).ok_or(ProbeError::ChainTooLarge {
         max_certs: MAX_CHAIN_CERTS,
         max_bytes: MAX_CERT_BYTES,

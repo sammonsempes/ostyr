@@ -216,15 +216,14 @@ pub fn tenant_bound(reference: &str, tenant: &str) -> bool {
 /// A usable source: `source_key` folds IPv6 to /64 and IPv4-mapped to IPv4, so every address that folds onto an unusable key is refused (IPv4-mapped ones fall in `::/64`).
 pub fn address_ok(address: &IpAddr) -> bool {
     match address {
-        IpAddr::V4(v4) => ![
-            v4.is_unspecified(),
-            v4.is_loopback(),
-            v4.is_multicast(),
-            v4.is_broadcast(),
-            v4.is_link_local(),
-            v4.octets().first() == Some(&0),
-        ]
-        .contains(&true),
+        IpAddr::V4(v4) => {
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_link_local()
+                || v4.octets().first() == Some(&0))
+        }
         IpAddr::V6(v6) => !in_refused_v6_class(v6),
     }
 }
