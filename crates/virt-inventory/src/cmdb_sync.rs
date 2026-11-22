@@ -17,6 +17,12 @@ pub const SOURCE_PREFIX: &str = "virt-inventory:proxmox:";
 pub const CLOUD_ID_PREFIX: &str = "proxmox:";
 
 
+pub const VSPHERE_SOURCE_PREFIX: &str = "virt-inventory:vsphere:";
+
+
+pub const VSPHERE_CLOUD_ID_PREFIX: &str = "vsphere:";
+
+
 pub const PAGE_OBSERVATIONS: usize = 100;
 
 
@@ -69,6 +75,21 @@ pub fn source_of(cluster: &str) -> String {
 }
 
 
+pub fn is_vsphere(kind: ResourceKind) -> bool {
+    matches!(kind, ResourceKind::VsphereVm | ResourceKind::VsphereHost)
+}
+
+
+/// The source of a resource lives in its platform namespace, so one cluster name on two platforms never shares a source.
+pub fn source_for(cluster: &str, kind: ResourceKind) -> String {
+    if is_vsphere(kind) {
+        format!("{VSPHERE_SOURCE_PREFIX}{cluster}")
+    } else {
+        source_of(cluster)
+    }
+}
+
+
 /// An ASCII allowlist: the part of a cloud id is never free text.
 pub fn check_part(field: &'static str, text: &str) -> Result<(), SyncError> {
     let sound = !text.is_empty()
@@ -86,24 +107,31 @@ pub fn kind_text(kind: ResourceKind) -> &'static str {
         ResourceKind::Lxc => "lxc",
         ResourceKind::Node => "node",
         ResourceKind::Storage => "storage",
+        ResourceKind::VsphereVm => "vm",
+        ResourceKind::VsphereHost => "host",
     }
 }
 
 
 pub fn asset_kind(kind: ResourceKind) -> AssetKind {
     match kind {
-        ResourceKind::Qemu => AssetKind::VirtualMachine,
+        ResourceKind::Qemu | ResourceKind::VsphereVm => AssetKind::VirtualMachine,
         ResourceKind::Lxc => AssetKind::Container,
-        ResourceKind::Node | ResourceKind::Storage => AssetKind::Server,
+        ResourceKind::Node | ResourceKind::Storage | ResourceKind::VsphereHost => AssetKind::Server,
     }
 }
 
 
-/// `proxmox:<cluster>/<kind>/<key>`: the cluster comes from the settings, the key from the grammar-checked parse.
+/// `proxmox:<cluster>/<kind>/<key>` or `vsphere:<cluster>/<kind>/<key>`: the cluster comes from the settings, the key from the grammar-checked parse.
 pub fn cloud_id(cluster: &str, resource: &Resource) -> Result<String, SyncError> {
     check_part("cluster", cluster)?;
     check_part("key", &resource.key)?;
-    Ok(format!("{CLOUD_ID_PREFIX}{cluster}/{}/{}", kind_text(resource.kind), resource.key))
+    let prefix = if is_vsphere(resource.kind) {
+        VSPHERE_CLOUD_ID_PREFIX
+    } else {
+        CLOUD_ID_PREFIX
+    };
+    Ok(format!("{prefix}{cluster}/{}/{}", kind_text(resource.kind), resource.key))
 }
 
 
@@ -129,7 +157,7 @@ pub fn attributes_of(resource: &Resource) -> ObservedMap {
 /// The only key is the cloud id, never the name: a name is chosen by whoever administers the guest.
 pub fn observation_of(cluster: &str, resource: &Resource) -> Result<Observation, SyncError> {
     let observation = Observation {
-        source: source_of(cluster),
+        source: source_for(cluster, resource.kind),
         kind: asset_kind(resource.kind),
         keys: KeyMap::from([(IdentityKey::CloudId, cloud_id(cluster, resource)?)]),
         attributes: attributes_of(resource),
