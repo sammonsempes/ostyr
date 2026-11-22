@@ -8,6 +8,7 @@ pub mod eol;
 pub mod epss;
 pub mod error;
 pub mod feed;
+pub mod indicator;
 pub mod kev;
 pub mod limits;
 pub mod matcher;
