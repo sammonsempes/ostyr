@@ -91,6 +91,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "futures-util",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "prost",

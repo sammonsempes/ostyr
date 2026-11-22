@@ -15,6 +15,7 @@ core-config = { path = "../core-config" }
 data-encoding = "2.11.1"
 futures-util = "0.3"
 http = "1"
+http-body-util = "0.1"
 hyper = "1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto", "http2", "service"] }
 prost = "0.14"
@@ -29,7 +30,7 @@ sys-windows = { path = "../sys-windows" }
 tempfile = "3"
 thiserror = "2"
 time = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-stream = { version = "0.1", features = ["net", "time"] }
 tonic = { version = "0.14", default-features = false, features = ["transport"] }
