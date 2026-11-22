@@ -210,6 +210,16 @@ pub enum Outcome {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryCategory {
+    Scanned,
+    OwnershipUnverified,
+    TooWide,
+    Deferred,
+    Failed,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressRun {
     pub address: IpAddr,

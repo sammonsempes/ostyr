@@ -37,9 +37,6 @@ const TWO: usize = 2;
 const THREE: usize = 3;
 
 
-const SIX: usize = 6;
-
-
 const EXIT_SEVEN: i32 = 7;
 
 
@@ -653,48 +650,91 @@ fn the_budget_passes_a_skip_through_unchanged() -> TestResult {
 }
 
 
-#[test]
-fn the_summary_counts_the_name_outcomes() -> TestResult {
-    let outcomes = [
-        Outcome::Resolved { addresses: 1 },
-        Outcome::ResolveFailed { kind: ErrorKind::Other },
-        Outcome::TooManyAddresses { max: MAX_ADDRESSES_PER_NAME },
-        Outcome::OverBudget,
-        Outcome::Deferred,
-        Outcome::Scanned {
-            kept: 0,
-            counts: Counts::default(),
-        },
-    ];
-    let mut report = ScanReport {
-        found: Vec::new(),
-        targets: outcomes
+fn target_of(index: usize, outcome: Outcome, runs: Vec<Outcome>) -> TargetReport {
+    TargetReport {
+        index,
+        outcome,
+        runs: runs
             .into_iter()
-            .enumerate()
-            .map(|(index, outcome)| TargetReport {
-                index,
-                outcome,
-                runs: Vec::new(),
-                refused_addresses: Vec::new(),
+            .map(|run| AddressRun {
+                address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                outcome: run,
             })
             .collect(),
-    };
-    let run = |outcome: Outcome| AddressRun {
-        address: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        outcome,
-    };
-    if let Some(first) = report.targets.first_mut() {
-        first.runs = vec![run(Outcome::Deferred), run(Outcome::Failed(attack_surface::error::ScanFailure::Timeout))];
-    }
-    report.targets.push(TargetReport {
-        index: SIX,
-        outcome: Outcome::Resolved { addresses: 1 },
-        runs: vec![run(Outcome::Deferred)],
         refused_addresses: Vec::new(),
-    });
+    }
+}
+
+
+fn scanned() -> Outcome {
+    Outcome::Scanned {
+        kept: 0,
+        counts: Counts::default(),
+    }
+}
+
+
+fn timeout() -> Outcome {
+    Outcome::Failed(attack_surface::error::ScanFailure::Timeout)
+}
+
+
+#[test]
+fn the_summary_counts_every_target_in_one_category() -> TestResult {
+    let resolved = |runs: Vec<Outcome>| (Outcome::Resolved { addresses: runs.len() }, runs);
+    let cases = vec![
+        (scanned(), Vec::new()),
+        (Outcome::OwnershipUnverified, Vec::new()),
+        (Outcome::TooWide, Vec::new()),
+        (Outcome::Deferred, Vec::new()),
+        (timeout(), Vec::new()),
+        (Outcome::ResolveFailed { kind: ErrorKind::Other }, Vec::new()),
+        (Outcome::TooManyAddresses { max: MAX_ADDRESSES_PER_NAME }, Vec::new()),
+        (Outcome::OverBudget, Vec::new()),
+        resolved(vec![Outcome::Deferred, Outcome::Deferred]),
+        resolved(vec![timeout(), timeout()]),
+        resolved(vec![Outcome::Deferred, timeout()]),
+        resolved(vec![scanned(), timeout()]),
+        resolved(vec![Outcome::Deferred, scanned()]),
+    ];
+    let report = ScanReport {
+        found: Vec::new(),
+        targets: cases
+            .into_iter()
+            .enumerate()
+            .map(|(index, (outcome, runs))| target_of(index, outcome, runs))
+            .collect(),
+    };
     assert_eq!(
         summary_line(&report),
-        "7 targets: 2 scanned, 0 ownership_unverified, 0 too_wide, 1 deferred, 3 failed"
+        "13 targets: 3 scanned, 1 ownership_unverified, 1 too_wide, 2 deferred, 6 failed"
     );
     Ok(())
+}
+
+
+#[test]
+fn the_summary_shapes_each_add_up() -> TestResult {
+    let shapes = [
+        (
+            vec![Outcome::Deferred],
+            "1 targets: 0 scanned, 0 ownership_unverified, 0 too_wide, 1 deferred, 0 failed",
+        ),
+        (
+            vec![timeout(), timeout()],
+            "1 targets: 0 scanned, 0 ownership_unverified, 0 too_wide, 0 deferred, 1 failed",
+        ),
+        (
+            vec![Outcome::Deferred, timeout()],
+            "1 targets: 0 scanned, 0 ownership_unverified, 0 too_wide, 0 deferred, 1 failed",
+        ),
+    ];
+    shapes.into_iter().try_for_each(|(runs, expected)| -> TestResult {
+        let report = ScanReport {
+            found: Vec::new(),
+            targets: vec![target_of(0, Outcome::Resolved { addresses: runs.len() }, runs)],
+        };
+        assert_eq!(summary_line(&report), expected);
+        Ok(())
+    })
 }

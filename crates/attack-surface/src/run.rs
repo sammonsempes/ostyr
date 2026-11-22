@@ -1,8 +1,8 @@
 use crate::command::naabu_args;
 use crate::error::{RunError, ScanFailure};
 use crate::model::{
-    AddressRun, Found, Limits, Outcome, Report, ScanReport, Scope, ScopeKind, TargetReport, MAX_ADDRESSES_PER_NAME, MAX_RESOLVE_SECONDS,
-    MAX_RUN_ADDRESSES_V4, MAX_RUN_ADDRESSES_V6, MAX_TARGET_PREFIX_V6,
+    AddressRun, Found, Limits, Outcome, Report, ScanReport, Scope, ScopeKind, SummaryCategory, TargetReport, MAX_ADDRESSES_PER_NAME,
+    MAX_RESOLVE_SECONDS, MAX_RUN_ADDRESSES_V4, MAX_RUN_ADDRESSES_V6, MAX_TARGET_PREFIX_V6,
 };
 use crate::results::parse_naabu;
 use crate::scope::{address_count, check_range};
@@ -364,28 +364,30 @@ pub fn scan_scope_resolving(
 }
 
 
-/// One line: how many targets were scanned, left unproven, too wide, deferred or failed.
+/// The summary category of a target: every target lands in exactly one.
+pub fn summary_category(target: &TargetReport) -> SummaryCategory {
+    match &target.outcome {
+        Outcome::Scanned { .. } => SummaryCategory::Scanned,
+        Outcome::OwnershipUnverified => SummaryCategory::OwnershipUnverified,
+        Outcome::TooWide => SummaryCategory::TooWide,
+        Outcome::Deferred => SummaryCategory::Deferred,
+        Outcome::Resolved { .. } if target.runs.iter().any(|run| matches!(run.outcome, Outcome::Scanned { .. })) => SummaryCategory::Scanned,
+        Outcome::Resolved { .. } if target.runs.iter().all(|run| run.outcome == Outcome::Deferred) => SummaryCategory::Deferred,
+        _ => SummaryCategory::Failed,
+    }
+}
+
+
+/// One line: how many targets were scanned, left unproven, too wide, deferred or failed; the five counts add up to the targets.
 pub fn summary_line(report: &ScanReport) -> String {
-    let count = |wanted: fn(&Outcome) -> bool| report.targets.iter().filter(|target| wanted(&target.outcome)).count();
-    let ran = report
-        .targets
-        .iter()
-        .filter(|target| match target.outcome {
-            Outcome::Resolved { .. } => target.runs.iter().any(|run| run.outcome != Outcome::Deferred),
-            Outcome::Scanned { .. } => true,
-            _ => false,
-        })
-        .count();
+    let count = |wanted: SummaryCategory| report.targets.iter().filter(|target| summary_category(target) == wanted).count();
     format!(
         "{} targets: {} scanned, {} ownership_unverified, {} too_wide, {} deferred, {} failed",
         report.targets.len(),
-        ran,
-        count(|outcome| matches!(outcome, Outcome::OwnershipUnverified)),
-        count(|outcome| matches!(outcome, Outcome::TooWide)),
-        count(|outcome| matches!(outcome, Outcome::Deferred)),
-        count(|outcome| matches!(
-            outcome,
-            Outcome::Failed(_) | Outcome::ResolveFailed { .. } | Outcome::TooManyAddresses { .. } | Outcome::OverBudget
-        )),
+        count(SummaryCategory::Scanned),
+        count(SummaryCategory::OwnershipUnverified),
+        count(SummaryCategory::TooWide),
+        count(SummaryCategory::Deferred),
+        count(SummaryCategory::Failed),
     )
 }

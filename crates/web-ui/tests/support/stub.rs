@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::net::TcpListener;
+use web_ui::api::{POSTURE_LIMIT, POSTURE_TEXT_BYTES, POSTURE_UID_BYTES};
 
 
 pub const ID_LENGTH: usize = 64;
@@ -63,6 +64,7 @@ pub enum Mode {
     UnreadableAlert,
     Oversize422,
     StoredValue,
+    PostureWorst,
 }
 
 
@@ -92,6 +94,7 @@ pub struct StubState {
     pub state_paths: Mutex<Vec<String>>,
     pub vuln_paths: Mutex<Vec<String>>,
     pub dhcp_paths: Mutex<Vec<String>>,
+    pub posture_paths: Mutex<Vec<String>>,
     pub shell_paths: Mutex<Vec<String>>,
     pub oncall_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
@@ -255,6 +258,7 @@ pub async fn alerts_handler(
             Mode::StoredValue => stored_value_reply(),
             Mode::Hostile => Json(page(vec![hostile_alert(&id_of('a'))], None)).into_response(),
             Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::PostureWorst => error_reply(StatusCode::NOT_IMPLEMENTED),
             Mode::Chunked => stream_body().into_response(),
             Mode::TooMany => Json(page((0..MANY_ITEMS).map(|_| alert(&id_of('a'), "t")).collect(), None)).into_response(),
             Mode::BadSeverity => {
@@ -1674,6 +1678,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         state_paths: Mutex::new(Vec::new()),
         vuln_paths: Mutex::new(Vec::new()),
         dhcp_paths: Mutex::new(Vec::new()),
+        posture_paths: Mutex::new(Vec::new()),
         shell_paths: Mutex::new(Vec::new()),
         oncall_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
@@ -1699,6 +1704,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/compliance/assets/{asset}", get(state_asset_handler))
         .route("/dhcp/leases/at", get(dhcp_handler))
         .route("/dhcp/leases/mac", get(dhcp_handler))
+        .route("/posture/accounts/{account}/findings", get(posture_handler))
         .route("/remote-shell/sessions", get(shell_list_handler))
         .route("/remote-shell/sessions/{id}", get(shell_detail_handler))
         .route("/vulnerabilities/findings", get(vuln_list_handler))
@@ -1752,6 +1758,14 @@ pub fn lease_good(hostname: &str) -> Value {
         "2026-03-01T10:00:00+01:00",
         "lease-assigned",
     )
+}
+
+
+pub fn lease_refused_hostname() -> Value {
+    json!({
+        "address": "10.0.0.10", "mac": "AA-BB-CC-DD-EE-01", "hostname": null, "hostname_refused": true, "starts": "2026-03-01T00:00:00Z",
+        "ends": "2026-03-02T00:00:00Z", "action": "lease-assigned", "subnet_id": LEASE_SUBNET
+    })
 }
 
 
@@ -1820,6 +1834,7 @@ pub async fn dhcp_handler(State(state): State<Arc<StubState>>, headers: HeaderMa
                         "2026-03-01T00:00:00Z",
                         "lease-expired-reclaimed",
                     ),
+                    lease_refused_hostname(),
                 ],
                 1,
                 true,
@@ -1828,5 +1843,139 @@ pub async fn dhcp_handler(State(state): State<Arc<StubState>>, headers: HeaderMa
         }
     } else {
         error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub const POSTURE_CURSOR: &str = "run1 1772000000000000 4 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+
+pub const POSTURE_FINISHED_MICROS: i64 = 1_772_000_000_000_000;
+
+
+pub const POSTURE_TIME_UNIX: i64 = 1_772_000_000;
+
+
+pub const POSTURE_HOSTILE_BYTES: usize = 10_000;
+
+
+pub const POSTURE_CUT: u64 = 12;
+
+
+pub fn posture_item(check: &str, status: &str, severity: &str, title: &str, detail: &str) -> Value {
+    json!({
+        "uid": "prowler-k8s-uid", "check_id": check, "status": status, "severity": severity, "provider": "kubernetes", "account": "a",
+        "region": "r", "resource_uid": "pod/web", "resource_type": "Pod", "time_unix": POSTURE_TIME_UNIX,
+        "title": title, "title_cut": 0, "detail": detail, "detail_cut": POSTURE_CUT
+    })
+}
+
+
+pub const POSTURE_UNSERVABLE: u32 = 2;
+
+
+pub const POSTURE_REFUSED: u32 = 2;
+
+
+pub const POSTURE_ITEMS: u32 = 3;
+
+
+pub const POSTURE_BAD_FIELD: u32 = 4;
+
+
+pub const POSTURE_DUPLICATE: u32 = 5;
+
+
+pub const POSTURE_FOREIGN: u32 = 6;
+
+
+pub fn posture_run() -> Value {
+    posture_run_with(true, Value::Null)
+}
+
+
+pub fn posture_run_with(pending: bool, refused_micros: Value) -> Value {
+    json!({
+        "run_id": "run1", "finished_micros": POSTURE_FINISHED_MICROS, "refused_micros": refused_micros, "refused_items": POSTURE_REFUSED,
+        "items": POSTURE_ITEMS, "unparsable": 0, "bad_field": POSTURE_BAD_FIELD, "duplicate": POSTURE_DUPLICATE,
+        "foreign_account": POSTURE_FOREIGN, "refused_pass": 1, "refused_muted": 0, "refused_manual": 0, "refused_fail": 1,
+        "store_refused": 0, "refusal_pending": pending
+    })
+}
+
+
+pub fn posture_view(run: Value, items: Vec<Value>, unservable: u32, next: Value) -> Value {
+    json!({"run": run, "unservable": unservable, "items": items, "next_cursor": next})
+}
+
+
+pub fn posture_worst_items(count: usize) -> Vec<Value> {
+    let escaped = "\\u{1b}";
+    let item = json!({
+        "uid": escaped.repeat(POSTURE_UID_BYTES), "check_id": "worst", "status": "FAIL", "severity": "High", "provider": "kubernetes",
+        "account": "a", "region": "r", "resource_uid": "pod/web", "resource_type": "Pod", "time_unix": POSTURE_TIME_UNIX,
+        "title": escaped.repeat(POSTURE_TEXT_BYTES), "title_cut": 0, "detail": escaped.repeat(POSTURE_TEXT_BYTES), "detail_cut": 0
+    });
+    vec![item; count]
+}
+
+
+pub fn posture_hostile_items() -> Vec<Value> {
+    vec![
+        posture_item(
+            "evil\u{1b}[31mcheck",
+            "FAIL",
+            "High",
+            "t\u{1b}[31mitle \u{202e}rtl",
+            "det\u{3164}ail <script>x</script>",
+        ),
+        posture_item("c2", "evil\u{1b}", "weird", "forged \\[12 bytes cut]", &"a".repeat(POSTURE_HOSTILE_BYTES)),
+    ]
+}
+
+
+pub async fn posture_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(account): Path<String>, uri: axum::http::Uri) -> Response {
+    note_forwarded(&state, &headers);
+    state.posture_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    let conflict = state.conflict.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if !authorised(&headers) {
+        error_reply(StatusCode::UNAUTHORIZED)
+    } else if let Some(code) = conflict {
+        conflict_reply(&code)
+    } else {
+        match mode_of(&state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::PostureWorst => Json(posture_view(posture_run(), posture_worst_items(POSTURE_LIMIT), 0, json!(POSTURE_CURSOR))).into_response(),
+            Mode::TooMany => Json(posture_view(
+                posture_run(),
+                (0..=POSTURE_LIMIT).map(|_| posture_item("c", "PASS", "Low", "t", "d")).collect(),
+                0,
+                Value::Null,
+            ))
+            .into_response(),
+            Mode::Hostile => Json(posture_view(
+                posture_run_with(false, json!(POSTURE_FINISHED_MICROS)),
+                posture_hostile_items(),
+                1,
+                json!(POSTURE_CURSOR),
+            ))
+            .into_response(),
+            Mode::BadCursor => Json(posture_view(posture_run(), vec![], 0, json!("bad cursor"))).into_response(),
+            Mode::Chunked => Json(posture_view(Value::Null, vec![], 0, Value::Null)).into_response(),
+            Mode::BadId => Json(posture_view(posture_run(), vec![], POSTURE_UNSERVABLE, Value::Null)).into_response(),
+            Mode::BadSeverity => Json(json!({"run": posture_run(), "unservable": 0, "items": LEAK, "next_cursor": null})).into_response(),
+            _ => Json(posture_view(
+                posture_run(),
+                vec![
+                    posture_item("check-1", "FAIL", "Critical", "Title one", "Detail one"),
+                    posture_item(&account, "PASS", "Informational", "Title two", "Detail two"),
+                    posture_item("c3", "MANUAL", "Fatal", "t3", "d3"),
+                ],
+                POSTURE_UNSERVABLE,
+                json!(POSTURE_CURSOR),
+            ))
+            .into_response(),
+        }
     }
 }
