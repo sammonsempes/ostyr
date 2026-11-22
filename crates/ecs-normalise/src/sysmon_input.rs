@@ -341,14 +341,8 @@ fn json_system(body: &mut JsonBody) -> Result<JsonSystem, SysmonError> {
         channel: body.channel.take(),
         time_created: body.time_created.take(),
     };
-    let present = [
-        flat.event_id.is_some(),
-        flat.computer.is_some(),
-        flat.provider.is_some(),
-        flat.channel.is_some(),
-        flat.time_created.is_some(),
-    ];
-    let has_flat = present.contains(&true);
+    let has_flat =
+        flat.event_id.is_some() || flat.computer.is_some() || flat.provider.is_some() || flat.channel.is_some() || flat.time_created.is_some();
     match body.system.take() {
         Some(_) if has_flat => Err(SysmonError::Duplicate("System")),
         Some(system) => Ok(system),
