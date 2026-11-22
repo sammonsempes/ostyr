@@ -70,6 +70,9 @@ const MANY_ITEMS: usize = 100_000;
 const DEEP: usize = 10_000;
 
 
+const FOUR_MEBIBYTE_ENTRIES: usize = 2_000_000;
+
+
 const TITLE_BYTES: usize = 10_240;
 
 
@@ -355,6 +358,23 @@ fn nine_kbs_or_nine_categories_are_too_many_items() -> TestResult {
         with(r#""CategoryIDs":[]"#, &format!(r#""CategoryIDs":{nine_categories}"#)),
         WindowsSkip::TooManyItems,
     )
+}
+
+
+#[test]
+fn millions_of_category_entries_are_refused_by_count_and_the_rest_is_kept() -> TestResult {
+    let entries = "1,".repeat(FOUR_MEBIBYTE_ENTRIES);
+    skipped_alone(
+        with(r#""CategoryIDs":[]"#, &format!(r#""CategoryIDs":[{entries}1]"#)),
+        WindowsSkip::TooManyItems,
+    )
+}
+
+
+#[test]
+fn millions_of_kb_entries_in_four_mebibytes_are_refused_by_count() -> TestResult {
+    let entries = "1,".repeat(FOUR_MEBIBYTE_ENTRIES);
+    skipped_alone(with(r#"["5031234"]"#, &format!("[{entries}1]")), WindowsSkip::TooManyItems)
 }
 
 

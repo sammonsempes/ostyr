@@ -42,6 +42,15 @@ pub struct Counted {
 
 
 #[derive(Debug, Deserialize)]
+pub struct CountedItems {
+    #[serde(rename = "KBArticleIDs")]
+    pub kb_ids: Vec<IgnoredAny>,
+    #[serde(rename = "CategoryIDs")]
+    pub category_ids: Vec<IgnoredAny>,
+}
+
+
+#[derive(Debug, Deserialize)]
 pub struct RawUpdate<'a> {
     #[serde(rename = "UpdateID")]
     pub update_id: String,
@@ -65,13 +74,12 @@ pub struct RawUpdate<'a> {
 
 
 pub fn decode_update(device: &Device, text: &str) -> Result<DecodedUpdate, WindowsSkip> {
-    let raw: RawUpdate = Some(text)
-        .filter(|value| is_object(value))
-        .ok_or(WindowsSkip::Malformed)
-        .and_then(|value| serde_json::from_str(value).map_err(|_| WindowsSkip::Malformed))?;
-    if raw.kb_ids.len() > MAX_ITEMS_PER_UPDATE || raw.category_ids.len() > MAX_ITEMS_PER_UPDATE {
+    let object = Some(text).filter(|value| is_object(value)).ok_or(WindowsSkip::Malformed)?;
+    let counted: CountedItems = serde_json::from_str(object).map_err(|_| WindowsSkip::Malformed)?;
+    if counted.kb_ids.len() > MAX_ITEMS_PER_UPDATE || counted.category_ids.len() > MAX_ITEMS_PER_UPDATE {
         Err(WindowsSkip::TooManyItems)
     } else {
+        let raw: RawUpdate = serde_json::from_str(object).map_err(|_| WindowsSkip::Malformed)?;
         finish_update(device, &raw)
     }
 }
