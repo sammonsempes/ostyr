@@ -23,6 +23,7 @@ fn raw(public_key: &str, not_before: u64, not_after: u64) -> RawKey {
         not_before,
         not_after,
         revoked: false,
+        actions: None,
     }
 }
 

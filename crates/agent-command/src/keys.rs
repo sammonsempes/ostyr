@@ -1,12 +1,12 @@
 use crate::error::KeyFileError;
-use crate::model::{KeyClass, RawKey, RawKeyFile, TrustedKey, TrustedKeys};
+use crate::model::{KeyClass, RawKey, RawKeyFile, TrustedKey, TrustedKeys, ACTION_NAMES, EXCLUSIVE_ACTIONS};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{open_engine, ReloadContext, ReloadEngine};
 use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
 use data_encoding::HEXLOWER;
 use ed25519_dalek::{VerifyingKey, PUBLIC_KEY_LENGTH};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 
@@ -27,7 +27,38 @@ pub fn parse_public_key(id: &str, text: &str) -> Result<VerifyingKey, KeyFileErr
 }
 
 
+pub fn scope_of(id: &str, names: &[String], exclusive: &[&str]) -> Result<BTreeSet<String>, KeyFileError> {
+    let scope = names.iter().try_fold(BTreeSet::<String>::new(), |mut scope, name| {
+        if !ACTION_NAMES.contains(&name.as_str()) {
+            Err(KeyFileError::ActionsUnknown {
+                id: id.to_owned(),
+                action: name.clone(),
+            })
+        } else if scope.insert(name.clone()) {
+            Ok(scope)
+        } else {
+            Err(KeyFileError::ActionsDuplicate {
+                id: id.to_owned(),
+                action: name.clone(),
+            })
+        }
+    })?;
+    if scope.is_empty() {
+        Err(KeyFileError::ActionsEmpty { id: id.to_owned() })
+    } else if scope.len() > 1 && exclusive.iter().any(|kind| scope.contains(*kind)) {
+        Err(KeyFileError::ActionsExclusive { id: id.to_owned() })
+    } else {
+        Ok(scope)
+    }
+}
+
+
 pub fn trusted_key(raw: &RawKey) -> Result<TrustedKey, KeyFileError> {
+    trusted_key_with(raw, EXCLUSIVE_ACTIONS)
+}
+
+
+pub fn trusted_key_with(raw: &RawKey, exclusive: &[&str]) -> Result<TrustedKey, KeyFileError> {
     if raw.not_before > raw.not_after {
         Err(KeyFileError::Validity { id: raw.id.clone() })
     } else {
@@ -37,6 +68,7 @@ pub fn trusted_key(raw: &RawKey) -> Result<TrustedKey, KeyFileError> {
             not_before: raw.not_before,
             not_after: raw.not_after,
             revoked: raw.revoked,
+            actions: raw.actions.as_deref().map(|names| scope_of(&raw.id, names, exclusive)).transpose()?,
         })
     }
 }
@@ -68,11 +100,14 @@ pub fn keys_state(keys: &TrustedKeys) -> ConfigState {
         .iter()
         .map(|(id, key)| {
             let summary = format!(
-                "class={} not_before={} not_after={} revoked={} public_key={}",
+                "class={} not_before={} not_after={} revoked={} actions={} public_key={}",
                 class_name(key.class),
                 key.not_before,
                 key.not_after,
                 key.revoked,
+                key.actions
+                    .as_ref()
+                    .map_or_else(|| "all".to_owned(), |scope| scope.iter().cloned().collect::<Vec<_>>().join(",")),
                 HEXLOWER.encode(&key.public_key.to_bytes())
             );
             (format!("keys.{id}"), summary)

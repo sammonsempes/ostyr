@@ -71,6 +71,8 @@ pub enum CommandError {
     ReplayedSequence,
     #[error("sequence number jumps further than the allowed advance")]
     SequenceJump,
+    #[error("action `{0}` is outside the scope of the signing key")]
+    ActionOutOfScope(&'static str),
     #[error("cannot store the sequence number, command refused: {0}")]
     Store(#[source] io::Error),
 }
@@ -134,6 +136,14 @@ pub enum KeyFileError {
     DuplicatePublicKey { id: String, first: String },
     #[error("key `{id}`: not_before is after not_after")]
     Validity { id: String },
+    #[error("key `{id}`: the actions list is empty")]
+    ActionsEmpty { id: String },
+    #[error("key `{id}`: unknown action `{action}`")]
+    ActionsUnknown { id: String, action: String },
+    #[error("key `{id}`: action `{action}` is listed twice")]
+    ActionsDuplicate { id: String, action: String },
+    #[error("key `{id}`: an exclusive action must be the only action of its key")]
+    ActionsExclusive { id: String },
 }
 
 

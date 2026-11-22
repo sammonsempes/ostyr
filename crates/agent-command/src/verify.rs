@@ -139,6 +139,15 @@ pub fn check_class(class: KeyClass, action: &Action) -> Result<(), CommandError>
 }
 
 
+pub fn check_scope(key: &TrustedKey, action: &Action) -> Result<(), CommandError> {
+    let kind = action_name(action);
+    match &key.actions {
+        Some(scope) if !scope.contains(kind) => Err(CommandError::ActionOutOfScope(kind)),
+        Some(_) | None => Ok(()),
+    }
+}
+
+
 /// The lock is held from the comparison to the durable save; a failed save leaves the sequences unaccepted.
 pub fn accept_sequence(verifier: &Verifier, class: KeyClass, sequence: u64) -> Result<(), CommandError> {
     let mut last = verifier.last_sequences.lock().unwrap_or_else(PoisonError::into_inner);
@@ -178,6 +187,7 @@ pub fn check(verifier: &Verifier, bytes: &[u8], now: u64) -> Result<Command, Com
     check_times(&command, now)?;
     validate_action(&command.action)?;
     check_class(key.class, &command.action)?;
+    check_scope(key, &command.action)?;
     accept_sequence(verifier, key.class, command.sequence)?;
     Ok(command)
 }
