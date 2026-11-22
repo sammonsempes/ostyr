@@ -31,6 +31,8 @@ pub mod settings;
 #[cfg(unix)]
 pub mod spool;
 #[cfg(unix)]
+pub mod trusted;
+#[cfg(unix)]
 pub mod types;
 #[cfg(unix)]
 pub mod updates;

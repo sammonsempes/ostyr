@@ -1,10 +1,11 @@
-use crate::support::{append, lines, poll_with, scoped_logging, setup, EXEC, LINE_LIMIT, THREE, TWO};
+use crate::support::{append, lines, poll_with, scoped_logging, setup, EXEC, LEN_THREE, LINE_LIMIT, THREE, TWO};
 use crate::types::TestResult;
 use agent_channel::app::{reload_context, shared_log_audit};
 use agent_linux::error::{FimError, SourceError};
 use agent_linux::fim::{event_line, fim_line, load_plan, load_with_plan, plan_from_bytes, refusal, MAX_REASON_CHARS};
 use agent_linux::model::{FimFile, FimPlan, SourceSettings, MAX_PLANTED_BYTES};
 use agent_linux::settings::{fim_state, open_settings_engine, settings_loader};
+use agent_linux::trusted::read_trusted_capped;
 use agent_linux::types::ReadBytesFn;
 use core_audit::log::open_file_log;
 use core_config::error::ConfigError;
@@ -35,6 +36,9 @@ const ROLE: &str = "server";
 
 
 const ENTRY_TWO: usize = 2;
+
+
+const ALL_WRITE: u32 = 0o666;
 
 
 const POLICY_COUNT: usize = 24;
@@ -146,6 +150,10 @@ fn every_refusal_is_named() -> TestResult {
         plan_from_bytes(ROLE, &table, PLANTED.replace("/root\t", "/etc\t").as_bytes()),
         Err(FimError::Undeclared { entry: ENTRY_TWO })
     ));
+    assert!(matches!(
+        plan_from_bytes(ROLE, &table, format!("{PLANTED}/root/passwords.txt\t64769\t4708\n").as_bytes()),
+        Err(FimError::Duplicate { entry: LEN_THREE })
+    ));
     Ok(())
 }
 
@@ -198,7 +206,7 @@ fn the_plan_is_built_from_the_bytes_that_were_read() -> TestResult {
 fn a_file_that_is_not_a_plain_capped_regular_file_is_refused_by_name() -> TestResult {
     let dir = tempdir()?;
     let files = section(dir.path(), PLANTED)?;
-    let production: ReadBytesFn = read_bytes_capped;
+    let production: ReadBytesFn = read_trusted_capped;
     fs::remove_file(&files.planted)?;
     assert!(matches!(load_plan(&files, production), Err(ConfigError::Io { .. })));
     assert!(Command::new("mkfifo").arg(&files.planted).status()?.success());
@@ -224,7 +232,7 @@ fn a_settings_file_without_the_section_has_no_plan_and_with_it_the_plan() -> Tes
     let path = dir.path().join("agent-linux.yaml");
     let base = "agent_file: /a\nexport_path: /e\ncursor_file: /c\naudit_file: /l\n";
     fs::write(&path, base)?;
-    assert!(load_with_plan(&path, read_bytes_capped)?.settings.fim.is_none());
+    assert!(load_with_plan(&path, read_trusted_capped)?.settings.fim.is_none());
     let files = section(dir.path(), PLANTED)?;
     let text = format!(
         "{base}fim:\n  table: {}\n  role: server\n  planted: {}\n",
@@ -232,12 +240,12 @@ fn a_settings_file_without_the_section_has_no_plan_and_with_it_the_plan() -> Tes
         files.planted.display()
     );
     fs::write(&path, text)?;
-    let loaded = load_with_plan(&path, read_bytes_capped)?;
+    let loaded = load_with_plan(&path, read_trusted_capped)?;
     assert_eq!(loaded.settings.fim.as_ref().map(|plan| plan.role.as_str()), Some(ROLE));
     assert_eq!(loaded.fim, Some(files.clone()));
     assert_eq!(fim_state(&loaded).len(), THREE as usize);
     fs::write(&files.planted, "bad\n")?;
-    assert!(load_with_plan(&path, read_bytes_capped).is_err());
+    assert!(load_with_plan(&path, read_trusted_capped).is_err());
     Ok(())
 }
 
@@ -480,5 +488,30 @@ fn a_bad_plan_stops_the_start_by_name() -> TestResult {
     fs::write(&files.table, "version: 9\nroles: []\n")?;
     let table_refused = settings_loader(path)().err().ok_or("loaded")?;
     assert!(table_refused.to_string().contains(&files.table.display().to_string()));
+    Ok(())
+}
+
+
+#[test]
+fn an_input_another_user_can_write_stops_the_start_and_refuses_a_reload_keeping_the_plan() -> TestResult {
+    let dir = tempdir()?;
+    let files = section(dir.path(), PLANTED)?;
+    let path = dir.path().join("agent-linux.yaml");
+    write_agent(&path, &fim_text(&files))?;
+    let audit = dir.path().join("audit.log");
+    let log = Arc::new(open_file_log(&audit)?);
+    let context = reload_context(&path, "agent_linux", "tenant", "reload");
+    let (engine, shared, _sensor, _updates, _osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    fs::write(&files.planted, "/root/passwords.txt\t64769\t4708\n")?;
+    fs::set_permissions(&files.planted, std::os::unix::fs::PermissionsExt::from_mode(ALL_WRITE))?;
+    assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("writable by group or others")));
+    assert_eq!(shared.load().fim.as_ref().map(|plan| plan.sets.planted.len()), Some(TWO as usize));
+    assert!(fs::read_to_string(&audit)?.contains("refused"));
+    let started = open_settings_engine(
+        path.clone(),
+        shared_log_audit(&log),
+        reload_context(&path, "agent_linux", "tenant", "reload"),
+    );
+    assert!(started.err().ok_or("started")?.to_string().contains(&files.planted.display().to_string()));
     Ok(())
 }

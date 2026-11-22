@@ -154,4 +154,6 @@ pub enum FimError {
     Planted(#[source] linux_fim::error::CliError),
     #[error("planted.tsv entry {entry} names a path the role does not declare")]
     Undeclared { entry: usize },
+    #[error("planted.tsv entry {entry} repeats the path of an earlier entry")]
+    Duplicate { entry: usize },
 }
