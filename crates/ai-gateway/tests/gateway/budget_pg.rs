@@ -250,8 +250,10 @@ async fn the_production_path_refuses_a_spent_day_before_any_connection() -> Test
         }
     });
     let mut used = crate::common::settings("x");
-    used.base_url = format!("http://127.0.0.1:{}", crate::servers::closed_port()?);
+    let (closed, closed_port) = crate::servers::closed_port()?;
+    used.base_url = format!("http://127.0.0.1:{closed_port}");
     let outcome = real_chat_with(refusing, &used, "i", &serde_json::json!({"a": 1})).await?;
+    drop(closed);
     assert!(matches!(outcome, Err(AiError::BudgetSpent)), "{outcome:?}");
     Ok(())
 }

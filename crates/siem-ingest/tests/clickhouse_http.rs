@@ -11,10 +11,11 @@ use siem_ingest::clickhouse::clickhouse_sink;
 use siem_ingest::model::Document;
 use siem_ingest::settings::{open_settings, IngestSettings};
 use siem_ingest::types::SinkFn;
+use socket2::{Domain, Socket, Type};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
@@ -61,6 +62,7 @@ pub struct Rig {
     pub sink: Box<SinkFn>,
     pub port: u16,
     pub listener: Option<TcpListener>,
+    pub closed: Option<Socket>,
 }
 
 
@@ -118,8 +120,16 @@ fn stall(listener: TcpListener, release: Receiver<()>) -> JoinHandle<io::Result<
 
 fn rig(timeout_ms: u64, bind: bool) -> Result<Rig, Box<dyn Error>> {
     let dir = tempdir()?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
+    let (listener, closed, port) = if bind {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        (Some(listener), None, port)
+    } else {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+        socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+        let port = socket.local_addr()?.as_socket().ok_or("not an inet address")?.port();
+        (None, Some(socket), port)
+    };
     write_private(dir.path().join("password"), "s3cret\n")?;
     let yaml = format!(
         "clickhouse_url: \"http://127.0.0.1:{port}\"\nclickhouse_password_file: \"{}\"\ninsert_timeout_ms: {timeout_ms}\n",
@@ -135,7 +145,8 @@ fn rig(timeout_ms: u64, bind: bool) -> Result<Rig, Box<dyn Error>> {
         dir,
         sink: clickhouse_sink(Arc::new(engine)),
         port,
-        listener: bind.then_some(listener),
+        listener,
+        closed,
     })
 }
 

@@ -24,10 +24,11 @@ use siem_ingest::nats::{
     settle_token, terminate, tls_config, MAX_NATS_FILE_BYTES,
 };
 use siem_ingest::settings::{open_settings, IngestSettings};
+use socket2::{Domain, Socket, Type};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
@@ -357,10 +358,18 @@ fn a_message_with_too_many_headers_is_terminated_not_delivered() -> Result<(), B
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> Result<(Socket, u16), Box<dyn Error + Send + Sync>> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket.local_addr()?.as_socket().ok_or("not an inet address")?.port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn a_down_server_fails_the_fetch() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let closed = TcpListener::bind("127.0.0.1:0")?;
-    let port = closed.local_addr()?.port();
+    let (closed, port) = closed_socket()?;
     let dir = tempdir()?;
     let engine = engine_for(&dir, &yaml(port, SHORT_MS, ""))?;
     let link = link_for(&engine)?;
