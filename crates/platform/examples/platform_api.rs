@@ -14,8 +14,8 @@ use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
 use platform::merge::{
-    load_page_services, migration_plan, module_parts, modules_of, page_file_of, shared_permits, weights_file_of, ACTOR, SETTING_MODULES,
-    SETTING_PAGE_FILE, SETTING_WEIGHTS_FILE,
+    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, shared_permits, weights_file_of, ACTOR,
+    SETTING_MODULES, SETTING_PAGE_FILE, SETTING_WEIGHTS_FILE,
 };
 use risk_score::weights::{weights_loader, weights_state};
 use std::error::Error;
@@ -54,6 +54,8 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let weights_file = weights_file_of(&loaded.settings, &modules)?;
     let page = page_file_of(&loaded.settings, &modules)?
         .map(|file| load_page_services(&file))
+        .transpose()?
+        .map(|services| check_page_tenant(services, loaded.tenant.as_deref().unwrap_or(DEFAULT_TENANT)))
         .transpose()?;
     let (dispatch, log) = reloadable_dispatch(BoxMakeWriter::new(stdout), DEFAULT_LOG_LEVEL);
     tracing::dispatcher::set_global_default(dispatch)?;
