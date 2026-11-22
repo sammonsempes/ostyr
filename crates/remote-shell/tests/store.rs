@@ -684,6 +684,22 @@ async fn a_requester_may_hold_subject_punctuation_but_an_asset_may_not_start_wit
 }
 
 
+#[tokio::test]
+async fn a_requester_with_a_leading_dash_is_refused_at_the_register_before_any_statement() -> TestResult {
+    let db = new_db();
+    let mut exec = executor(&db);
+    let acme = tenant_scope(ACME)?;
+    let mut dashed = header(ACME, "s-1", OPENED);
+    dashed.requester = "-mallory".to_owned();
+    assert!(matches!(
+        register_open(&mut exec, &acme, &dashed).await,
+        Err(StoreError::Invalid { field: "requester" })
+    ));
+    assert!(db.borrow().log.is_empty());
+    Ok(())
+}
+
+
 #[test]
 fn the_migration_is_embedded_and_named() -> TestResult {
     check_embedded(&MIGRATIONS)?;
@@ -735,7 +751,7 @@ const THIRD_MIGRATION: usize = 2;
 #[test]
 fn the_migrations_are_registered_in_order() -> TestResult {
     let versions: Vec<&str> = MIGRATIONS.iter().map(|migration| migration.version).collect();
-    assert_eq!(versions, vec!["rshell_0001", "rshell_0002", "rshell_0003", "rshell_0004"]);
+    assert_eq!(versions, vec!["rshell_0001", "rshell_0002", "rshell_0003", "rshell_0004", "rshell_0005"]);
     assert!(!MIGRATIONS.get(THIRD_MIGRATION).ok_or("no third migration")?.sql.is_empty());
     Ok(())
 }
