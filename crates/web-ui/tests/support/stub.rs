@@ -103,6 +103,7 @@ pub struct StubState {
     pub last_query: Mutex<String>,
     pub read_fault: Mutex<Option<ReadFault>>,
     pub stored: AtomicBool,
+    pub triage: Mutex<Option<Value>>,
 }
 
 
@@ -287,14 +288,47 @@ pub async fn alerts_handler(
 pub async fn detail_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>) -> Response {
     state.details.fetch_add(1, Ordering::SeqCst);
     note_forwarded(&state, &headers);
+    let fault = *state.read_fault.lock().unwrap_or_else(PoisonError::into_inner);
+    let stored = state.stored.load(Ordering::SeqCst);
     if authorised(&headers) {
         match mode_of(&state) {
+            _ if stored && matches!(fault, Some(ReadFault::Status(_))) => error_reply(match fault {
+                Some(ReadFault::Status(status)) => status,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            }),
             Mode::Status(status) => error_reply(status),
             Mode::Hostile => Json(hostile_alert(&id)).into_response(),
             Mode::BadId => Json(alert(&id_of('f'), "t")).into_response(),
             _ if id == id_of('d') => error_reply(StatusCode::NOT_FOUND),
-            _ => Json(alert(&id, "Brute force")).into_response(),
+            _ => {
+                let triage = state.triage.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap_or(Value::Null);
+                Json(merged(alert(&id, "Brute force"), json!({ "triage": triage }))).into_response()
+            }
         }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub fn triage_view(status: &str, note: &Value, version: i64) -> Value {
+    json!({"status": status, "actor": "alice", "note": note, "updated_at": "2026-11-22T08:00:00Z", "version": version})
+}
+
+
+pub async fn triage_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, body: Bytes) -> Response {
+    note_forwarded(&state, &headers);
+    note_write(&state, format!("/alerts/{id}/triage"), &body);
+    if authorised(&headers) {
+        write_failure(&state).unwrap_or_else(|| {
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let status = parsed.get("status").and_then(Value::as_str).unwrap_or("closed");
+            let version = parsed.get("version").and_then(Value::as_i64).unwrap_or(0) + 1;
+            let view = triage_view(status, parsed.get("note").unwrap_or(&Value::Null), version);
+            state.stored.store(true, Ordering::SeqCst);
+            *state.triage.lock().unwrap_or_else(PoisonError::into_inner) = Some(view.clone());
+            Json(view).into_response()
+        })
     } else {
         error_reply(StatusCode::UNAUTHORIZED)
     }
@@ -1687,12 +1721,14 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         last_query: Mutex::new(String::new()),
         read_fault: Mutex::new(None),
         stored: AtomicBool::new(false),
+        triage: Mutex::new(None),
     });
     let router = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/auth/logout", post(logout_handler))
         .route("/alerts", get(alerts_handler))
         .route("/alerts/{id}", get(detail_handler))
+        .route("/alerts/{id}/triage", post(triage_handler))
         .route("/assets", get(assets_handler))
         .route("/assets/{id}", get(asset_detail_handler))
         .route("/risk/entities", get(risk_list_handler))
