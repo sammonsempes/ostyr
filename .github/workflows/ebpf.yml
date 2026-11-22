@@ -29,9 +29,7 @@ jobs:
       - name: Check the formatting of the kernel crate
         run: cargo "+$EBPF_NIGHTLY" fmt --check --manifest-path "$EBPF_MANIFEST"
       - name: Build the kernel crate for bpfel-unknown-none
-        env:
-          RUSTFLAGS: -C link-arg=--btf
-        run: cargo "+$EBPF_NIGHTLY" build --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path "$EBPF_MANIFEST"
+        run: lab/ebpf-build.sh "$EBPF_MANIFEST" "$PWD/crates/ebpf-probes/ebpf/target"
       - name: Refuse a kernel object that names the panic symbol
         run: lab/ebpf-no-panic.sh crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel
       - name: Prove the panic check refuses attack programs

@@ -13,11 +13,6 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $*" >>"$STUB_LOG"
-if [[ " $* " == *" build "* ]]; then
-  OUT="${STUB_OBJECT_ROOT:-$CARGO_TARGET_DIR}/bpfel-unknown-none/release/ebpf-probes-kernel"
-  mkdir -p "$(dirname "$OUT")"
-  echo object >"$OUT"
-fi
 [ -z "${STUB_FAIL:-}" ] || [[ " $* " != *" $STUB_FAIL "* ]]
 S
 chmod +x "$SCRATCH/bin/cargo"
@@ -63,6 +58,20 @@ declare_kernel() {
   mkdir -p lab
   printf '#!/usr/bin/env bash\necho "no-panic $*" >>"$STUB_LOG"\n' >lab/ebpf-no-panic.sh
   chmod +x lab/ebpf-no-panic.sh
+  cat >lab/ebpf-build.sh <<'B'
+#!/usr/bin/env bash
+if [ -n "${EBPF_CHECK_ONLY:-}" ]; then
+  echo "check $*" >>"$STUB_LOG"
+  [ "${STUB_FAIL:-}" != check ] || exit 1
+  exit 0
+fi
+echo "build $*" >>"$STUB_LOG"
+[ "${STUB_FAIL:-}" != build ] || exit 1
+OUT="${STUB_OBJECT_ROOT:-$2}/bpfel-unknown-none/release/ebpf-probes-kernel"
+mkdir -p "$(dirname "$OUT")"
+echo object >"$OUT"
+B
+  chmod +x lab/ebpf-build.sh
   git add -A
 }
 
@@ -80,8 +89,12 @@ expect_kernel() {
     echo "FAIL: $label: no kernel clippy"
     FAILS=$((FAILS + 1))
   fi
-  if ! grep -qE '^cargo \+nightly-2026-11-08 build --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml$' "$STUB_LOG"; then
-    echo "FAIL: $label: no kernel release build"
+  if [ "$(grep -n -m1 -E '^check ' "$STUB_LOG" | cut -d: -f1)" -ge "$(grep -n -m1 -E 'bpfel-unknown-none -Z build-std|fmt --check --manifest-path' "$STUB_LOG" | cut -d: -f1)" ]; then
+    echo "FAIL: $label: the build refusals (ebpf-build.sh in check-only mode) did not run before every cargo command of the kernel step"
+    FAILS=$((FAILS + 1))
+  fi
+  if ! grep -qxF "build crates/ebpf-probes/ebpf/Cargo.toml $R/target" "$STUB_LOG"; then
+    echo "FAIL: $label: the release build did not go through lab/ebpf-build.sh with the manifest and the target directory"
     FAILS=$((FAILS + 1))
   fi
 }
@@ -170,6 +183,15 @@ fi
 
 stage crates/ebpf-probes/ebpf/src/main.rs
 declare_kernel
+run_hook STUB_FAIL=check
+if ! grep -qF "FAILED at step: kernel crate" "$SCRATCH/out" || grep -qE '^(build|no-panic)|bpfel-unknown-none|manifest-path' "$STUB_LOG"; then
+  echo "FAIL: a refusal of the check-only mode must stop the hook before clippy, fmt and the build (host code such as a build.rs would run there)"
+  cat "$STUB_LOG"
+  FAILS=$((FAILS + 1))
+fi
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
 run_hook STUB_FAIL=fmt
 if ! grep -qF "FAILED at step" "$SCRATCH/out"; then
   echo "FAIL: failing fmt not reported"
@@ -242,6 +264,89 @@ printf '[workspace]\nexclude = ['"'"'crates/ebpf-probes/ebpf'"'"']\n' >Cargo.tom
 git add -A
 run_hook
 expect_kernel "single-quoted exact entry"
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+git -c user.name=t -c user.email=t@t commit -q -m kernel-base
+echo changed >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+run_hook
+expect_kernel "kernel file only staged"
+if grep -qE 'llvm-cov|^cargo clippy|^cargo \+nightly fmt --check$' "$STUB_LOG" || ! grep -qF "kernel-only commit" "$SCRATCH/out" || grep -qF "FAILED" "$SCRATCH/out"; then
+  echo "FAIL: a kernel-only commit must run the kernel steps and skip the workspace steps (no coverage data for the kernel crate)"
+  cat "$SCRATCH/out"
+  FAILS=$((FAILS + 1))
+fi
+
+echo changed-again >crates/ebpf-probes/ebpf/src/main.rs
+echo y >plain.rs
+git add crates/ebpf-probes/ebpf/src/main.rs plain.rs
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG"; then
+  echo "FAIL: a kernel file staged with another file must still run the workspace steps"
+  FAILS=$((FAILS + 1))
+fi
+
+echo x >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+mkdir -p other
+echo x >other/file.rs
+git add other/file.rs
+git -c user.name=t -c user.email=t@t commit -q -m other-base
+rm other/file.rs
+ln -s ../plain.rs other/file.rs
+echo changed-three >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs other/file.rs
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG" || grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: a type change (T) in another path beside a kernel file must take the full path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+git checkout -q -- other/file.rs crates/ebpf-probes/ebpf/src/main.rs
+
+rm crates/ebpf-probes/ebpf/src/main.rs
+ln -s ../../../../plain.rs crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG" || grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: a kernel src file turned into a symlink must not take the kernel-only path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+git checkout -q -- crates/ebpf-probes/ebpf/src/main.rs
+
+echo changed-four >crates/ebpf-probes/ebpf/src/extra.rs
+git add crates/ebpf-probes/ebpf/src/extra.rs
+run_hook
+if grep -q 'llvm-cov' "$STUB_LOG" || ! grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: an added kernel src file alone must take the kernel-only path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+rm -f crates/ebpf-probes/ebpf/src/extra.rs
+
+git reset -q
+printf '[submodule "sub"]\n\tpath = sub\n\turl = ./x\n\tignore = all\n' >.gitmodules
+git add .gitmodules
+git update-index --add --cacheinfo 160000,1111111111111111111111111111111111111111,sub
+git -c user.name=t -c user.email=t@t commit -q -m gitlink-base
+echo changed-five >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+git update-index --cacheinfo 160000,2222222222222222222222222222222222222222,sub
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG" || grep -qF "kernel-only commit" "$SCRATCH/out"; then
+  echo "FAIL: a gitlink hidden by ignore = all beside a kernel file must take the full path"
+  FAILS=$((FAILS + 1))
+fi
+git reset -q
+git checkout -q -- crates/ebpf-probes/ebpf/src/main.rs
+
+run_hook EBPF_NO_PANIC="$SCRATCH/bin/no-panic"
+if ! grep -qF "override EBPF_NO_PANIC=$SCRATCH/bin/no-panic" "$SCRATCH/out"; then
+  echo "FAIL: an EBPF_NO_PANIC override must be announced"
+  FAILS=$((FAILS + 1))
+fi
 
 if [ "$FAILS" -ne 0 ]; then
   echo "pre-commit-kernel: $FAILS failures"
