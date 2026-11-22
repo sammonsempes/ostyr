@@ -3,7 +3,7 @@ use crate::assets::{id_printable, id_segment, valid_asset_id, ID_ENCODE_SET};
 use crate::commands::{bad_reply, call_with_session, FIRST_SUCCESS};
 use crate::error::CliError;
 use crate::model::{Context, FindingView, FindingsAssetReply, FindingsListReply, HttpMethod, Report};
-use percent_encoding::utf8_percent_encode;
+use percent_encoding::{percent_decode_str, utf8_percent_encode};
 
 
 pub const CURSOR_SEPARATOR: char = ' ';
@@ -22,6 +22,12 @@ pub const CVSS_PRECISION: usize = 1;
 
 
 pub const EPSS_PRECISION: usize = 4;
+
+
+pub const HEX_DIGITS_PER_ESCAPE: usize = 2;
+
+
+pub const CURSOR_PUNCTUATION: &str = "._~%-";
 
 
 pub const NONE_MARK: &str = "-";
@@ -100,12 +106,28 @@ pub fn skipped_line(skipped: usize) -> Option<String> {
 }
 
 
-/// A cursor of the store's grammar is ASCII without control characters and printed as is, so `--cursor` takes it back verbatim.
+/// The shell-inert text form of a cursor: unreserved characters stay, every other byte is `%XX`, so no shell reads it as more than one word.
 pub fn cursor_text(cursor: &str) -> String {
-    if valid_vuln_cursor(cursor) {
-        cursor.to_owned()
+    utf8_percent_encode(cursor, ID_ENCODE_SET).to_string()
+}
+
+
+/// Decodes the text form: only `[A-Za-z0-9._~%-]` with every `%` followed by two hex digits; the result is the store's cursor.
+pub fn decode_cursor(text: &str) -> Result<String, CliError> {
+    let alphabet_ok = text
+        .chars()
+        .all(|found| found.is_ascii_alphanumeric() || CURSOR_PUNCTUATION.contains(found));
+    let escapes_ok = text
+        .split('%')
+        .skip(1)
+        .all(|part| part.chars().take(HEX_DIGITS_PER_ESCAPE).filter(char::is_ascii_hexdigit).count() == HEX_DIGITS_PER_ESCAPE);
+    if alphabet_ok && escapes_ok {
+        percent_decode_str(text)
+            .decode_utf8()
+            .map(|decoded| decoded.into_owned())
+            .map_err(|_| CliError::InvalidArgument("cursor"))
     } else {
-        printable(cursor)
+        Err(CliError::InvalidArgument("cursor"))
     }
 }
 
@@ -135,7 +157,8 @@ pub fn asset_text(reply: &FindingsAssetReply) -> String {
 
 
 pub fn vulns_list(ctx: &Context, limit: Option<u32>, cursor: Option<&str>) -> Result<Report, CliError> {
-    let path = list_path(limit, cursor)?;
+    let wire_cursor = cursor.map(decode_cursor).transpose()?;
+    let path = list_path(limit, wire_cursor.as_deref())?;
     let body = call_with_session(ctx, HttpMethod::Get, &path).map_err(map_status)?;
     let reply: FindingsListReply = serde_json::from_str(&body).map_err(bad_reply(FIRST_SUCCESS))?;
     Ok(Report {

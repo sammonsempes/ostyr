@@ -1,6 +1,6 @@
 use crate::error::PlatformError;
 use crate::model::Module;
-use crate::types::{MigrationPlan, Parts};
+use crate::types::{MigrationPlan, PageLoader, Parts};
 use alerts::backend::MAX_CONNECTIONS;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use axum::Router;
@@ -11,6 +11,7 @@ use cmdb::store::{MIGRATIONS as CMDB_MIGRATIONS, MIGRATION_NAMESPACE as CMDB_NAM
 use compliance::store::{MIGRATIONS as COMPLIANCE_MIGRATIONS, MIGRATION_NAMESPACE as COMPLIANCE_NAMESPACE};
 use core_api::routes::core_access;
 use core_api::types::{AccessTable, SharedState};
+use core_config::error::ConfigError;
 use core_config::reload::ReloadEngine;
 use core_config::types::SettingsMap;
 use core_pg::migrate::Migration;
@@ -23,7 +24,13 @@ use risk_score::api::{risk_access, risk_document, risk_router};
 use risk_score::backend::{pg_backend as risk_backend, system_clock};
 use risk_score::cache::risk_state;
 use risk_score::model::Weights;
-use std::path::PathBuf;
+use status_page::api_model::PageServices;
+use status_page::config::load_config;
+use status_page::error::StatusPageError;
+use status_page::model::DEFAULT_LIMITS;
+use status_page::publish::declared_services;
+use status_page::store::{MIGRATIONS as STATUS_MIGRATIONS, MIGRATION_NAMESPACE as STATUS_NAMESPACE};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use utoipa::openapi::OpenApi as OpenApiDocument;
@@ -34,6 +41,9 @@ pub const SETTING_MODULES: &str = "modules";
 
 
 pub const SETTING_WEIGHTS_FILE: &str = "risk.weights_file";
+
+
+pub const SETTING_PAGE_FILE: &str = "status.page_file";
 
 
 pub const MAX_MODULES_CHARS: usize = 128;
@@ -75,6 +85,9 @@ const RSHELL_PLAN: &[Migration] = &RSHELL_MIGRATIONS;
 const POSTURE_PLAN: &[Migration] = &POSTURE_MIGRATIONS;
 
 
+const STATUS_PLAN: &[Migration] = &STATUS_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -89,6 +102,7 @@ pub fn module_of(name: &str) -> Option<Module> {
         "vulnerabilities" => Some(Module::Vulnerabilities),
         "remote_shell" => Some(Module::RemoteShell),
         "posture" => Some(Module::Posture),
+        "status" => Some(Module::Status),
         _ => None,
     }
 }
@@ -148,6 +162,45 @@ pub fn weights_file_of(settings: &SettingsMap, modules: &[Module]) -> Result<Opt
 }
 
 
+/// The page file of the module file, required (and read) only when `status` is selected.
+pub fn page_file_of(settings: &SettingsMap, modules: &[Module]) -> Result<Option<PathBuf>, PlatformError> {
+    if modules.contains(&Module::Status) {
+        settings
+            .get(SETTING_PAGE_FILE)
+            .map(|path| Some(PathBuf::from(path)))
+            .ok_or(PlatformError::MissingPageFile)
+    } else {
+        Ok(None)
+    }
+}
+
+
+/// A refusal names the key and a fixed category, never the file text.
+pub fn page_failure(error: &StatusPageError) -> PlatformError {
+    match error {
+        StatusPageError::Config(
+            ConfigError::Io { .. } | ConfigError::TooLarge { .. } | ConfigError::NotUtf8 { .. } | ConfigError::WatchedFile { .. },
+        ) => PlatformError::PageFile { reason: "cannot be read" },
+        _ => PlatformError::PageFile { reason: "is invalid" },
+    }
+}
+
+
+/// Reads the page file once through `load`; the page tenant and declared services are fixed for the life of the process.
+pub fn page_services_of(file: &Path, load: PageLoader<'_>) -> Result<Arc<PageServices>, PlatformError> {
+    let config = load(file).map_err(|error| page_failure(&error))?;
+    Ok(Arc::new(PageServices {
+        tenant: config.tenant.clone(),
+        services: declared_services(&config).into_iter().collect(),
+    }))
+}
+
+
+pub fn load_page_services(file: &Path) -> Result<Arc<PageServices>, PlatformError> {
+    page_services_of(file, &|path| load_config(path, &DEFAULT_LIMITS))
+}
+
+
 pub fn shared_permits() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(MAX_CONNECTIONS))
 }
@@ -158,6 +211,7 @@ pub fn module_router(
     engine: &Arc<ReloadEngine<PgSettings>>,
     permits: &Arc<Semaphore>,
     weights: Option<&Arc<ReloadEngine<Weights>>>,
+    page: Option<&Arc<PageServices>>,
 ) -> Result<Router<SharedState>, PlatformError> {
     match module {
         Module::Alerts => Ok(alerts::api::alerts_router(alerts::backend::pg_backend(
@@ -201,6 +255,13 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Status => page.ok_or(PlatformError::MissingPageFile).map(|held| {
+            status_page::api::status_router(status_page::backend::pg_backend(
+                Arc::clone(engine),
+                Arc::clone(permits),
+                Arc::clone(held),
+            ))
+        }),
         Module::Risk => weights.ok_or(PlatformError::MissingWeightsFile).map(|held| {
             risk_router(risk_state(
                 risk_backend(Arc::clone(engine), Arc::clone(permits)),
@@ -226,6 +287,7 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::Vulnerabilities => vuln_match::api::vulnerabilities_access(),
         Module::RemoteShell => remote_shell::api::remote_shell_access(),
         Module::Posture => cloud_posture::api::posture_access(),
+        Module::Status => status_page::api::status_access(),
     }
 }
 
@@ -244,6 +306,7 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::Vulnerabilities => vuln_match::api::vulnerabilities_document(),
         Module::RemoteShell => remote_shell::api::remote_shell_document(),
         Module::Posture => cloud_posture::api::posture_document(),
+        Module::Status => status_page::api::status_document(),
     }
 }
 
@@ -254,10 +317,11 @@ pub fn module_parts(
     engine: &Arc<ReloadEngine<PgSettings>>,
     permits: &Arc<Semaphore>,
     weights: Option<&Arc<ReloadEngine<Weights>>>,
+    page: Option<&Arc<PageServices>>,
 ) -> Result<Parts, PlatformError> {
     let access = merge_access(modules.iter().map(|module| module_access(*module)).collect())?;
     let router = modules.iter().try_fold(Router::new(), |merged, module| {
-        module_router(*module, engine, permits, weights).map(|part| merged.merge(part))
+        module_router(*module, engine, permits, weights, page).map(|part| merged.merge(part))
     })?;
     Ok((router, access, modules.iter().map(|module| module_document(*module)).collect()))
 }
@@ -278,6 +342,7 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::Vulnerabilities]), VULN_NAMESPACE, VULN_PLAN),
         (wants(&[Module::RemoteShell]), RSHELL_NAMESPACE, RSHELL_PLAN),
         (wants(&[Module::Posture]), POSTURE_NAMESPACE, POSTURE_PLAN),
+        (wants(&[Module::Status]), STATUS_NAMESPACE, STATUS_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)

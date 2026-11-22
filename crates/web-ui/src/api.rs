@@ -1,9 +1,10 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
-    Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery,
-    FindingsView, LookupView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView, ShellListView, ShellQuery,
-    ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    Alert, AlertDetailView, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView,
+    CommentView, DhcpQuery, FindingsView, LookupView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView, ShellListView,
+    ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
+use crate::strings::checked_triage_status;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
@@ -85,12 +86,17 @@ pub const MAX_CASE_ID_CHARS: usize = 128;
 pub const MAX_COMMENT_CHARS: usize = 8_192;
 
 
-pub const CONFLICT_CODES: [(&str, &str); 5] = [
+/// The alerts module's `MAX_NOTE_CHARS`: change both together.
+pub const MAX_NOTE_CHARS: usize = 2_048;
+
+
+pub const CONFLICT_CODES: [(&str, &str); 6] = [
     ("transition_not_allowed", "error_transition_not_allowed"),
     ("resolution_required", "error_resolution_required"),
     ("case_changed", "error_case_changed"),
     ("full", "error_comment_full"),
     ("run_changed", RUN_CHANGED_KEY),
+    ("triage_changed", "error_triage_changed"),
 ];
 
 
@@ -345,16 +351,51 @@ pub async fn list_alerts(
 }
 
 
-/// An identifier that is not 64 lower-case hex digits is a missing alert without any call.
-pub async fn get_alert(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<Alert, ApiFailure> {
+/// An identifier that is not 64 lower-case hex digits is a missing alert without any call; a triage outside the fixed statuses is a malformed answer.
+pub async fn get_alert(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<AlertDetailView, ApiFailure> {
     if valid_id(id) {
         let bytes = call(client, source, Method::GET, &format!("alerts/{id}"), Some(token), None).await?;
-        let alert: Alert = serde_json::from_slice(&bytes)?;
-        if alert.id == id {
-            Ok(alert)
-        } else {
+        let detail: AlertDetailView = serde_json::from_slice(&bytes)?;
+        if detail.alert.id != id {
             Err(ApiFailure::Malformed("alert id differs"))
+        } else if detail
+            .triage
+            .as_ref()
+            .is_some_and(|triage| checked_triage_status(&triage.status).is_none() || triage.version < 1)
+        {
+            Err(ApiFailure::Malformed("triage"))
+        } else {
+            Ok(detail)
         }
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// `POST /alerts/{id}/triage`: the id is checked first, the status comes from the fixed table; nothing of the answer is kept.
+pub async fn post_alert_triage(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    id: &str,
+    status: &str,
+    note: Option<&str>,
+    version: Option<i64>,
+) -> Result<(), ApiFailure> {
+    if valid_id(id) {
+        let mut fields = serde_json::Map::new();
+        fields.insert("status".to_owned(), json!(status));
+        note.iter().for_each(|text| {
+            fields.insert("note".to_owned(), json!(text));
+        });
+        version.iter().for_each(|read| {
+            fields.insert("version".to_owned(), json!(read));
+        });
+        let body = serde_json::Value::Object(fields).to_string();
+        call(client, source, Method::POST, &format!("alerts/{id}/triage"), Some(token), Some(body))
+            .await
+            .map(|_ignored| ())
     } else {
         Err(ApiFailure::NotFound)
     }

@@ -14,6 +14,8 @@ pub mod recording;
 pub mod recording_cli;
 pub mod serve;
 pub mod session;
+pub mod sign;
+pub mod sign_model;
 pub mod store;
 pub mod store_model;
 pub mod types;

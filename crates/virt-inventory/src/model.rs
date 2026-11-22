@@ -7,6 +7,8 @@ pub enum ResourceKind {
     Lxc,
     Node,
     Storage,
+    VsphereVm,
+    VsphereHost,
 }
 
 
@@ -49,6 +51,7 @@ pub struct Skipped {
     pub other_type: usize,
     pub key_lost: usize,
     pub name_dropped: usize,
+    pub field_dropped: usize,
     pub refused_keys: Vec<ItemKey>,
 }
 

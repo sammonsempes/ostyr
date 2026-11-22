@@ -21,6 +21,7 @@ hunt-packs = { version = "0.0.0", path = "../hunt-packs" }
 oncall = { version = "0.0.0", path = "../oncall" }
 remote-shell = { version = "0.0.0", path = "../remote-shell" }
 risk-score = { version = "0.0.0", path = "../risk-score" }
+status-page = { version = "0.0.0", path = "../status-page" }
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 utoipa = "5"

@@ -47,6 +47,26 @@ pub struct Alert {
 }
 
 
+/// The triage of one alert as `GET /alerts/{id}` returns it (contract of T671).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TriageView {
+    pub status: String,
+    pub actor: String,
+    pub note: Option<String>,
+    pub updated_at: String,
+    pub version: i64,
+}
+
+
+/// `GET /alerts/{id}`: the alert flattened plus its triage (`null` while the alert is new).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AlertDetailView {
+    #[serde(flatten)]
+    pub alert: Alert,
+    pub triage: Option<TriageView>,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AlertPage {
     pub items: Vec<Alert>,

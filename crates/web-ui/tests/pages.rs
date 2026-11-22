@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use types::TestResult;
 use web_ui::api::{valid_asset_id, valid_case_id};
 use web_ui::model::{
-    Alert, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView, CaseCountsView,
-    CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, RiskDetailView, RiskEntityView, RiskListView,
-    RiskTruncatedView, Severity,
+    Alert, AlertDetailView, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView,
+    CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CaseTaskView, CommentView, Language, RiskDetailView, RiskEntityView, RiskListView,
+    RiskTruncatedView, Severity, TriageView,
 };
 use web_ui::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page, case_page_with, cases_page, clip, comment_notice, display_value, error_page,
@@ -49,6 +49,9 @@ const ERROR_KEYS: [&str; 11] = [
 ];
 
 
+const TRIAGE_VERSION: i64 = 2;
+
+
 const CLIP_LIMIT: usize = 5;
 
 
@@ -59,6 +62,22 @@ const KEPT_LIMIT: u32 = 5;
 
 
 const NUMBER: u32 = 3;
+
+
+fn triage(status: &str, note: Option<&str>) -> TriageView {
+    TriageView {
+        status: status.to_owned(),
+        actor: "alice".to_owned(),
+        note: note.map(str::to_owned),
+        updated_at: "2026-11-22T08:00:00Z".to_owned(),
+        version: TRIAGE_VERSION,
+    }
+}
+
+
+fn detail(alert: Alert, triage: Option<TriageView>) -> AlertDetailView {
+    AlertDetailView { alert, triage }
+}
 
 
 fn sample(severity: Severity, host: Option<&str>) -> Alert {
@@ -130,7 +149,13 @@ fn every_page_renders_in_both_languages_without_a_missing_text() -> TestResult {
             ),
             asset_page(language, "token", &asset_detail_view(true)),
             asset_page(language, "token", &asset_detail_view(false)),
-            alert_page(language, "token", &sample(Severity::Low, None)),
+            alert_page(language, "token", &detail(sample(Severity::Low, None), None)),
+            alert_page(
+                language,
+                "token",
+                &detail(sample(Severity::Low, None), Some(triage("closed", Some("why")))),
+            ),
+            alert_page(language, "token", &detail(sample(Severity::Low, None), Some(triage("other", None)))),
             cases_page(language, "token", &case_page_view(), Some(KEPT_LIMIT)),
             cases_page(language, "token", &case_page_view(), None),
             cases_page(

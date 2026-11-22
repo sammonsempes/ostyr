@@ -13,7 +13,7 @@ use std::future::Future;
 pub const MIGRATION_NAMESPACE: &str = "remote_shell";
 
 
-pub const MIGRATIONS: [Migration; 4] = [
+pub const MIGRATIONS: [Migration; 5] = [
     Migration {
         version: "rshell_0001",
         sql: include_str!("../migrations/rshell_0001.sql"),
@@ -29,6 +29,10 @@ pub const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: "rshell_0004",
         sql: include_str!("../migrations/rshell_0004.sql"),
+    },
+    Migration {
+        version: "rshell_0005",
+        sql: include_str!("../migrations/rshell_0005.sql"),
     },
 ];
 
@@ -150,6 +154,17 @@ pub fn check_requester(text: &str) -> Result<(), StoreError> {
 }
 
 
+/// A requester stored in the register never starts with `-`, so a later signer or command line never reads it as an option.
+pub fn check_registered_requester(text: &str) -> Result<(), StoreError> {
+    check_requester(text)?;
+    if text.starts_with('-') {
+        Err(StoreError::Invalid { field: "requester" })
+    } else {
+        Ok(())
+    }
+}
+
+
 pub fn to_i64(field: &'static str, value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_overflow| StoreError::OutOfRange { field })
 }
@@ -222,7 +237,7 @@ where
         Err(StoreError::TenantMismatch)
     } else {
         check_reference("session_id", &header.session_id)?;
-        check_requester(&header.requester)?;
+        check_registered_requester(&header.requester)?;
         check_asset(&header.asset)?;
         check_reference("ticket", &header.ticket)?;
         let params = vec![

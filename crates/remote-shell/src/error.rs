@@ -1,3 +1,7 @@
+use crate::open::OpenRefusal;
+use crate::types::BoxedCause;
+use agent_channel::model::GateError;
+use agent_command::error::{ActionError, SignError as CommandSignError};
 use core_config::error::ConfigError;
 use serde_json::Error as JsonError;
 use std::io;
@@ -62,4 +66,48 @@ pub enum StoreError {
     Pg(#[from] core_pg::error::PgError),
     #[error("no database connection: {0}")]
     Lease(#[from] alerts::error::StoreError),
+}
+
+
+/// Fixed texts: no field value, session id or peer byte is ever part of a signing refusal.
+#[derive(Debug, Error)]
+pub enum SignError {
+    #[error("field `{field}` is outside its grammar")]
+    Invalid { field: &'static str },
+    #[error("the row is older than the signing delay")]
+    Stale,
+    #[error("the session is closed")]
+    Closed,
+    #[error("the session is not in the register or is not the row given")]
+    RowMismatch,
+    #[error("the session is already signed")]
+    AlreadySigned,
+    #[error("the tenant holds too many signed shells")]
+    TenantFull,
+    #[error("the claim was refused")]
+    Unclaimed,
+    #[error("the opening is refused: {0}")]
+    Refused(OpenRefusal),
+    #[error("no agent is declared for the asset")]
+    UnknownAsset,
+    #[error("the limits do not fit the command")]
+    Limit,
+    #[error("the clock is before the epoch")]
+    Clock,
+    #[error("the sequence could not be recorded")]
+    SequenceRecord,
+    #[error("the sequence does not fit the register")]
+    SequenceRange,
+    #[error(transparent)]
+    Action(#[from] ActionError),
+    #[error(transparent)]
+    Gate(#[from] GateError),
+    #[error(transparent)]
+    Sign(#[from] CommandSignError),
+    #[error("the nonce could not be drawn")]
+    Nonce(#[source] BoxedCause),
+    #[error("the sequence could not be allocated")]
+    Sequence(#[source] BoxedCause),
+    #[error("the register refused the statement")]
+    Store(#[from] StoreError),
 }

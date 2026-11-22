@@ -1,10 +1,11 @@
 use crate::api::{
     cert_filter, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_posture, get_risk_entity, get_shell_session,
     get_state_asset, get_vuln_asset, list_alerts, list_assets, list_cases, list_certs, list_findings, list_oncall, list_risk, list_shell_sessions,
-    list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_case_action,
-    post_case_comment, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor,
-    valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id,
-    valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
+    list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window, post_alert_triage,
+    post_case_action, post_case_comment, probe_dhcp, probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id,
+    valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference,
+    valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY,
+    VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
 use crate::model::{ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, Opened, Principal, ShellQuery, WebLimits, WebState};
@@ -18,7 +19,7 @@ use crate::session::{
     admit_login, clear_cookie, cookie_value, create_session, csrf_matches, drop_session, find_session, new_secret, set_cookie, LANGUAGE_COOKIE,
     LANGUAGE_COOKIE_SECONDS, LOGIN_COOKIE, LOGIN_COOKIE_SECONDS, SESSION_COOKIE,
 };
-use crate::strings::checked_action;
+use crate::strings::{checked_action, checked_triage_status};
 use crate::types::{Form, Refused, SharedWeb};
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
@@ -1089,6 +1090,56 @@ pub async fn case_comment_submit(
 }
 
 
+/// The note of the form: an empty textarea is no note, at most `MAX_NOTE_CHARS` characters otherwise; `None` is a refusal.
+pub fn triage_note(form: &Form) -> Option<Option<&str>> {
+    let note = field(form, "note");
+    Some(note)
+        .filter(|text| text.chars().count() <= MAX_NOTE_CHARS)
+        .map(|text| Some(text).filter(|kept| !kept.is_empty()))
+}
+
+
+/// The version of the form: absent while the alert is new, else ASCII digits of an integer from 1; `None` is a refusal.
+pub fn triage_version(form: &Form) -> Option<Option<i64>> {
+    form.get("version").map_or(Some(None), |text| {
+        Some(text)
+            .filter(|digits| !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<i64>().ok())
+            .filter(|read| *read >= 1)
+            .map(Some)
+    })
+}
+
+
+pub async fn submit_alert_triage(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str, body: Body) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let (principal, form) = write_request(state, headers, body, &comment_limits(&state.limits)).await?;
+    let bad_request = || Box::new(refusal(language, Some(&principal.csrf), StatusCode::BAD_REQUEST, "error_bad_request"));
+    let status = checked_triage_status(field(&form, "status")).ok_or_else(bad_request)?;
+    let note = triage_note(&form).ok_or_else(bad_request)?;
+    let version = triage_version(&form).ok_or_else(bad_request)?;
+    let client = state.api.load_full();
+    post_alert_triage(&client, source, &principal.token, id, status, note, version)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    let alert = get_alert(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    Ok(html_response(StatusCode::OK, &alert_page(language, &principal.csrf, &alert), &[]))
+}
+
+
+pub async fn alert_triage_submit(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    merge(submit_alert_triage(&state, peer.ip(), &headers, &id, body).await)
+}
+
+
 pub fn build_router(state: SharedWeb) -> Router {
     Router::new()
         .route("/", get(index))
@@ -1117,6 +1168,7 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/vulnerabilities/{asset}", get(show_vuln_asset))
         .route("/oncall", get(show_oncall))
         .route("/oncall/{id}", get(show_oncall_alert))
+        .route("/alerts/{id}/triage", post(alert_triage_submit))
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/language/{code}", post(switch_language))

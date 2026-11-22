@@ -90,7 +90,7 @@ fn vulns_list_paths_and_cursor_round_trip() -> TestResult {
         .last()
         .and_then(|line| line.strip_prefix("next cursor: "))
         .ok_or("no cursor line")?;
-    assert_eq!(printed, "7 h&limit=1 npm b\\c d");
+    assert_eq!(printed, "7%20h%26limit%3D1%20npm%20b%5Cc%20d");
     let again = invoke(
         &offline_args(dir.path(), &["vulns", "list", "--cursor", printed]),
         "",
@@ -98,7 +98,7 @@ fn vulns_list_paths_and_cursor_round_trip() -> TestResult {
     )?;
     assert!(again.out.ends_with("no more findings\n"));
     invoke(
-        &offline_args(dir.path(), &["vulns", "list", "--limit", "5", "--cursor", VULN_CURSOR]),
+        &offline_args(dir.path(), &["vulns", "list", "--limit", "5", "--cursor", VULN_CURSOR_ENCODED]),
         "",
         &alerts_stub(&seen, STATUS_OK, vuln_body("", 0, NO_MORE)),
     )?;
@@ -143,7 +143,7 @@ fn vulns_bad_ids_cursors_and_limits_make_no_request() -> TestResult {
     let overlong_field = format!("5 {} b c d", "a".repeat(OVERLONG_FIELD));
     for cursor in VULN_REFUSED_CURSORS.iter().copied().chain(std::iter::once(overlong_field.as_str())) {
         let outcome = invoke(
-            &offline_args(dir.path(), &["vulns", "list", "--cursor", cursor]),
+            &offline_args(dir.path(), &["vulns", "list", "--cursor", &xdrctl::vulns::cursor_text(cursor)]),
             "",
             &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
         )?;
@@ -254,7 +254,7 @@ fn vulns_hidden_characters_are_escaped_in_text_and_json() -> TestResult {
     assert!(text.out.contains("p\\u{1b}[2J\\u{202e}\\u{2066}x\\\\u{202e}"), "{}", text.out);
     assert!(text.out.contains("R\\u{7}\u{5d0}"));
     assert!(text.out.contains("h\\u{1b}\\u{5d0}\t"));
-    assert!(text.out.contains("next cursor: 5 a\\u{1b} b c d"));
+    assert!(text.out.contains("next cursor: 5%20a%1B%20b%20c%20d"));
     assert!(!text.out.contains('\u{1b}') && !text.out.contains('\u{202e}') && !text.out.contains('\u{7}'));
     let json = invoke(
         &offline_args(dir.path(), &["--output", "json", "vulns", "list"]),
@@ -293,5 +293,90 @@ fn vulns_errors_are_the_fixed_messages() -> TestResult {
         &alerts_stub(&seen, STATUS_OK, "{\"items\":1}"),
     )?;
     assert_eq!(bad.code, FAILURE);
+    Ok(())
+}
+
+
+const SHELL_CURSORS: [&str; 4] = [
+    "7 x';id;' `id`$(id) ${IFS} a|b&c;d",
+    "7 a%b #c \\d \"q\"",
+    "0 p p p p",
+    "4294967295 ~ . _ a-",
+];
+
+
+const HALF_ESCAPE_CURSORS: [&str; 7] = ["7%20a", "7 a b c d", "7%27a", "7%2", "7%zz", "%", "7%20a%20b%20c%2"];
+
+
+const MAX_PRINTED_BYTES: usize = 1578;
+
+
+const MAX_FIELD: usize = 128;
+
+
+#[test]
+fn vulns_printed_cursor_is_shell_inert_and_round_trips() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    for cursor in SHELL_CURSORS {
+        let escaped = cursor.replace('\\', "\\\\").replace('"', "\\\"");
+        let body = vuln_body("", 0, &format!("\"next_cursor\":\"{escaped}\""));
+        let page = invoke(&offline_args(dir.path(), &["vulns", "list"]), "", &alerts_stub(&seen, STATUS_OK, body))?;
+        let printed = page
+            .out
+            .lines()
+            .last()
+            .and_then(|line| line.strip_prefix("next cursor: "))
+            .ok_or("no cursor line")?;
+        assert!(
+            printed.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._~%-".contains(&byte)),
+            "{printed}"
+        );
+        assert_eq!(xdrctl::vulns::decode_cursor(printed)?, cursor);
+        invoke(
+            &offline_args(dir.path(), &["vulns", "list", "--cursor", printed]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, vuln_body("", 0, NO_MORE)),
+        )?;
+        let last = seen.borrow().last().cloned().ok_or("no request")?;
+        let sent = last
+            .strip_prefix(&format!("{VULN_PREFIX}/findings?cursor="))
+            .ok_or("bad path")?
+            .to_owned();
+        assert_eq!(sent.matches('&').count() + sent.matches('?').count(), 0);
+    }
+    Ok(())
+}
+
+
+#[test]
+fn vulns_cursor_outside_the_inert_alphabet_makes_no_request() -> TestResult {
+    let dir = tempdir()?;
+    store_alerts_session(dir.path())?;
+    let seen = RefCell::new(Vec::new());
+    for cursor in HALF_ESCAPE_CURSORS {
+        let outcome = invoke(
+            &offline_args(dir.path(), &["vulns", "list", &format!("--cursor={cursor}")]),
+            "",
+            &alerts_stub(&seen, STATUS_OK, LAST_PAGE),
+        )?;
+        assert_eq!(outcome.code, FAILURE, "{cursor}");
+        assert!(outcome.err.contains("invalid cursor"));
+    }
+    assert!(xdrctl::vulns::decode_cursor("%ff%fe").is_err());
+    assert!(seen.borrow().is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn vulns_longest_cursor_prints_within_the_stated_bound() -> TestResult {
+    let field = "%".repeat(MAX_FIELD);
+    let cursor = format!("4294967295 {field} {field} {field} {field}");
+    assert!(xdrctl::vulns::valid_vuln_cursor(&cursor));
+    let printed = xdrctl::vulns::cursor_text(&cursor);
+    assert!(printed.len() <= MAX_PRINTED_BYTES);
+    assert_eq!(xdrctl::vulns::decode_cursor(&printed)?, cursor);
     Ok(())
 }
