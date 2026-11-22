@@ -80,6 +80,13 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended('backup_restore/' || p_tenant, 0::bigint));
     now_micros := (extract(epoch from clock_timestamp()) * 1000000)::bigint;
     IF EXISTS (
+        SELECT 1 FROM jsonb_to_recordset(p_results) AS r(tested_micros bigint, db_clock boolean, outcome text)
+        WHERE (r.tested_micros IS NULL AND r.db_clock IS NOT TRUE) OR (r.db_clock IS TRUE AND r.outcome IS DISTINCT FROM 'run_error')
+    ) THEN
+        RETURN QUERY SELECT 'bad_time'::text, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint;
+        RETURN;
+    END IF;
+    IF EXISTS (
         SELECT 1 FROM jsonb_to_recordset(p_results) AS r(tested_micros bigint)
         WHERE r.tested_micros > now_micros + skew * 1000000
     ) THEN
@@ -102,11 +109,15 @@ BEGIN
     END IF;
     WITH input AS (
         SELECT DISTINCT ON (r.repository, r.host, r.path) r.*
-        FROM jsonb_to_recordset(p_results) AS r(
-            repository text, host text, path text, config_id text, snapshot_id text, snapshot_micros bigint, tested_micros bigint, outcome text,
-            category text
-        )
-        ORDER BY r.repository, r.host, r.path, r.tested_micros DESC
+        FROM (
+            SELECT e.repository, e.host, e.path, e.config_id, e.snapshot_id, e.snapshot_micros, e.outcome, e.category,
+                CASE WHEN e.db_clock IS TRUE THEN now_micros ELSE e.tested_micros END AS tested_micros
+            FROM jsonb_to_recordset(p_results) AS e(
+                repository text, host text, path text, config_id text, snapshot_id text, snapshot_micros bigint, tested_micros bigint, outcome text,
+                category text, db_clock boolean
+            )
+        ) AS r
+        ORDER BY r.repository, r.host, r.path, r.tested_micros DESC, (r.outcome = 'run_error') DESC
     ), joined AS (
         SELECT i.*, s.tested_micros AS old_tested, s.restored_config_id AS old_restored
         FROM input i

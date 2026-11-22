@@ -55,7 +55,7 @@ pub fn rfc3339_text(time: OffsetDateTime) -> Option<String> {
 }
 
 
-/// A snapshot or archive id:64 lowercase hexadecimal digits.
+/// A snapshot or archive id: 64 lowercase hexadecimal digits.
 pub fn valid_id(text: &str) -> bool {
     text.len() == ID_HEX_LEN && text.chars().all(|character| matches!(character, '0'..='9' | 'a'..='f'))
 }

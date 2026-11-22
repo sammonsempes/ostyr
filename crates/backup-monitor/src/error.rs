@@ -36,7 +36,7 @@ pub enum BackupError {
 /// No variant carries text taken from a listing or the database.
 #[derive(Debug, Error)]
 pub enum RestoreStoreError {
-    #[error("{count} restore tests declared, over the limit of {max}")]
+    #[error("{count} restore tests declared for tenant {tenant}, over the limit of {max}")]
     RowCap { tenant: String, count: u64, max: u64 },
     #[error("the row cap is outside 0 to the per-tenant maximum")]
     CapOutOfRange,
@@ -50,6 +50,8 @@ pub enum RestoreStoreError {
     DuplicateResult,
     #[error("a result is dated more than {max} seconds after the database clock")]
     ClockSkew { max: u64 },
+    #[error("a result has no time the store can accept")]
+    BadTime,
     #[error("the declarations belong to another tenant than the one asked for")]
     DeclarationsTenant,
     #[error("the restore store answered a row that cannot be read")]

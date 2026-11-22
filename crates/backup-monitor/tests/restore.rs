@@ -519,7 +519,7 @@ fn a_hostile_listing_is_an_error_without_its_text() -> Result<(), Box<dyn Error>
     std::fs::write(setup.dir.path().join("config.json"), "{}")?;
     assert!(matches!(run(&setup), Err(ResticError::BadConfig)));
     setup.program = PathBuf::from("/nonexistent/restic");
-    assert!(matches!(run(&setup), Err(ResticError::BadConfig)));
+    assert!(matches!(run(&setup), Err(ResticError::Spawn)));
     Ok(())
 }
 

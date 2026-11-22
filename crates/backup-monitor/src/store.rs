@@ -60,6 +60,9 @@ pub const OUTCOME_CLOCK_SKEW: &str = "clock_skew";
 pub const OUTCOME_ROW_CAP: &str = "row_cap";
 
 
+pub const OUTCOME_BAD_TIME: &str = "bad_time";
+
+
 /// Params: `$2` JSON array of results, `$3` JSON array of declared keys, `$4` row cap, `$5` largest accepted skew in seconds.
 pub const RECORD_SQL: &str = "SELECT outcome, written::text, stale_write::text, config_changed::text, pruned::text, row_count::text \
 FROM public.backup_restore_record($1, $2::text::jsonb, $3::text::jsonb, $4::text::bigint, $5::text::bigint)";
@@ -224,6 +227,23 @@ pub fn error_entry(key: &TestKey, tested_at: OffsetDateTime, category: RunErrorC
 }
 
 
+/// A run error `invalid` whose time cannot be stored: no time, so the function stamps its own clock read after the lock.
+pub fn database_clock_entry(key: &TestKey) -> Value {
+    json!({
+        "repository": key.repository,
+        "host": key.host,
+        "path": key.path,
+        "config_id": Value::Null,
+        "snapshot_id": Value::Null,
+        "snapshot_micros": Value::Null,
+        "tested_micros": Value::Null,
+        "db_clock": true,
+        "outcome": OUTCOME_RUN_ERROR,
+        "category": category_label(RunErrorCategory::Invalid),
+    })
+}
+
+
 pub fn key_json(key: &TestKey) -> Value {
     json!({ "repository": key.repository, "host": key.host, "path": key.path })
 }
@@ -256,24 +276,27 @@ pub fn plan_write(
         Err(RestoreStoreError::DuplicateResult)
     } else {
         let stored: Vec<Option<Value>> = results.iter().map(|(key, result)| result_entry(key, result)).collect();
-        let converted: Vec<Option<Value>> = results
+        let converted: Vec<Value> = results
             .iter()
             .zip(&stored)
             .filter(|(_, entry)| entry.is_none())
-            .map(|((key, result), _)| error_entry(key, result.tested_at, RunErrorCategory::Invalid))
+            .map(|((key, result), _)| error_entry(key, result.tested_at, RunErrorCategory::Invalid).unwrap_or_else(|| database_clock_entry(key)))
             .collect();
-        let failed: Vec<Option<Value>> = errors
+        let failed: Vec<(Value, bool)> = errors
             .iter()
-            .map(|(key, record)| error_entry(key, record.tested_at, record.category))
+            .map(|(key, record)| match error_entry(key, record.tested_at, record.category) {
+                Some(entry) => (entry, false),
+                None => (database_clock_entry(key), true),
+            })
             .collect();
-        let kept: Vec<Value> = stored.into_iter().flatten().collect();
-        let run_error = converted.iter().chain(&failed).flatten().count() as u64;
-        let skipped_invalid = converted.len() as u64 + failed.iter().filter(|entry| entry.is_none()).count() as u64;
+        let skipped_invalid = (converted.len() + failed.iter().filter(|(_, unstorable)| *unstorable).count()) as u64;
+        let run_error = (converted.len() + failed.len()) as u64;
         Ok(PlannedWrite {
-            entries: kept
+            entries: stored
                 .into_iter()
-                .chain(converted.into_iter().flatten())
-                .chain(failed.into_iter().flatten())
+                .flatten()
+                .chain(converted)
+                .chain(failed.into_iter().map(|(entry, _)| entry))
                 .collect(),
             skipped_invalid,
             run_error,
@@ -307,6 +330,7 @@ pub fn decode_rows(scope: &TenantScope, cap: u64, rows: &[Row]) -> Result<WriteC
             run_error: 0,
         }),
         OUTCOME_CLOCK_SKEW => Err(RestoreStoreError::ClockSkew { max: MAX_CLOCK_SKEW_SECONDS }),
+        OUTCOME_BAD_TIME => Err(RestoreStoreError::BadTime),
         OUTCOME_ROW_CAP => Err(RestoreStoreError::RowCap {
             tenant: tenant_of(scope).to_owned(),
             count: count_cell(total)?,

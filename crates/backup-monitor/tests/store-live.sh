@@ -59,6 +59,8 @@ case "${MUTANT:-}" in
     distinct-oldest) sed -i 's/r.tested_micros DESC/r.tested_micros/' "$migration" ;;
     no-clamp-cap) sed -i 's/least(greatest(p_cap, 0), 10000)/p_cap/' "$migration" ;;
     no-clamp-skew) sed -i 's/least(greatest(p_max_skew_seconds, 0), 300)/p_max_skew_seconds/' "$migration" ;;
+    skip-db-clock) sed -i "s/CASE WHEN e.db_clock IS TRUE THEN now_micros ELSE e.tested_micros END AS tested_micros/e.tested_micros/" "$migration" ;;
+    tie-restored) sed -i "s/, (r.outcome = 'run_error') DESC//" "$migration" ;;
     run-error-clears) sed -i "s/WHEN EXCLUDED.outcome = 'run_error' THEN st.restored_/WHEN false THEN st.restored_/" "$migration" ;;
     *) echo "unknown mutant ${MUTANT}"; exit 2 ;;
 esac
@@ -100,6 +102,19 @@ check "tenant B rows do not count toward tenant A" "ok|2|0|0|0|2" \
 check "tenant A at the cap" "row_cap|0|0|0|0|3" \
     "$(call tc2 "$(restored k1 1500000 900000),$(restored k2 1500000 900000),$(restored k3 1500000 900000)" "$(declared k1 k2 k3)" 2 300)"
 check "cap refusal wrote nothing" "2|1000000" "$(S "SELECT count(*)||'|'||max(tested_micros) FROM backup_restore_tests WHERE tenant = 'tc2'")"
+
+dbclock() { printf '{"repository":"%s","host":"h","path":"%s","config_id":null,"snapshot_id":null,"snapshot_micros":null,"tested_micros":null,"db_clock":%s,"outcome":"%s","category":%s}' \
+    "$1" "$CANARY" "$2" "$3" "$4"; }
+check "unstorable time stored as run error" "ok|1|0|0|0|1" "$(call tj "$(dbclock k true run_error '"invalid"')" "$(declared k)" 10000 300)"
+check "unstorable time row stamped with the database clock" "run_error|invalid|1" \
+    "$(cell tj "outcome||'|'||category||'|'||(abs(tested_micros - (extract(epoch from clock_timestamp())*1000000)::bigint) < 60000000)::int" k)"
+check "null time without db_clock is refused" "bad_time|0|0|0|0|0" "$(call tk "$(dbclock k false run_error '"invalid"')" "$(declared k)" 10000 300)"
+check "db_clock on a restored entry is refused" "bad_time|0|0|0|0|0" "$(call tk "$(dbclock k true restored null)" "$(declared k)" 10000 300)"
+check "bad time wrote nothing" "0" "$(S "SELECT count(*) FROM backup_restore_tests WHERE tenant = 'tk'")"
+check "a tie is won by the run error" "ok|1|0|0|0|1" "$(call tl "$(restored k 2000000 1900000),$(ent k null null null 2000000 run_error '"failed"')" "$(declared k)" 10000 300)"
+check "tie winner stored" "run_error" "$(cell tl outcome k)"
+check "a tie is won by the run error in the other order" "ok|1|0|0|0|1" "$(call tm "$(ent k null null null 2000000 run_error '"failed"'),$(restored k 2000000 1900000)" "$(declared k)" 10000 300)"
+check "tie winner stored in the other order" "run_error" "$(cell tm outcome k)"
 
 check "newest result per key" "ok|1|0|0|0|1" "$(call td "$(restored k 2000000 1900000),$(restored k 3000000 2900000)" "$(declared k)" 10000 300)"
 check "newest result kept" "3000000" "$(cell td tested_micros k)"
@@ -174,7 +189,7 @@ second="$(/tmp/backup_run restore-test "$work/declarations.yaml" "$fake/restic" 
 echo "$second"
 check "example config failure stores a run error per test" '{"store":{"config_changed":0,"pruned":0,"run_error":2,"skipped_invalid":0,"stale_write":0,"written":2}}' "$second"
 check "example rows are run errors that keep the last pass" "2" \
-    "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'run_error' AND category = 'config' AND config_id IS NULL AND restored_config_id = '$C1' AND restored_tested_micros IS NOT NULL")"
+    "$(X "SELECT count(*) FROM backup_restore_tests WHERE outcome = 'run_error' AND category = 'failed' AND config_id IS NULL AND restored_config_id = '$C1' AND restored_tested_micros IS NOT NULL")"
 echo "failures: $failures"
 exit "$failures"
 REMOTE
