@@ -3,6 +3,7 @@
 use crate::limits::{MAX_ITEMS_PER_UPDATE, MAX_TITLE_BYTES};
 use crate::model::{DecodedUpdate, Device, SeverityWord, WindowsSeverity, WindowsSkip, WindowsUpdate};
 use crate::scan::is_forbidden;
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -27,7 +28,16 @@ pub struct Envelope<'a> {
     #[serde(rename = "ResultCode")]
     pub result_code: i64,
     #[serde(rename = "Updates", borrow)]
-    pub updates: Option<Vec<&'a RawValue>>,
+    pub updates: Vec<&'a RawValue>,
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct Counted {
+    #[serde(rename = "ResultCode")]
+    pub result_code: i64,
+    #[serde(rename = "Updates")]
+    pub updates: Option<Vec<IgnoredAny>>,
 }
 
 
@@ -55,12 +65,20 @@ pub struct RawUpdate<'a> {
 
 
 pub fn decode_update(device: &Device, text: &str) -> Result<DecodedUpdate, WindowsSkip> {
-    let raw: RawUpdate = serde_json::from_str(text).map_err(|_| WindowsSkip::Malformed)?;
+    let raw: RawUpdate = Some(text)
+        .filter(|value| is_object(value))
+        .ok_or(WindowsSkip::Malformed)
+        .and_then(|value| serde_json::from_str(value).map_err(|_| WindowsSkip::Malformed))?;
     if raw.kb_ids.len() > MAX_ITEMS_PER_UPDATE || raw.category_ids.len() > MAX_ITEMS_PER_UPDATE {
         Err(WindowsSkip::TooManyItems)
     } else {
         finish_update(device, &raw)
     }
+}
+
+
+pub fn is_object(text: &str) -> bool {
+    text.trim_start().starts_with('{')
 }
 
 
