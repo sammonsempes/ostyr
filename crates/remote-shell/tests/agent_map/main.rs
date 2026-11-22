@@ -293,12 +293,10 @@ fn a_good_reload_swaps_and_removes_a_mapping() -> TestResult {
 }
 
 
-#[test]
-fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
-    let marker = "MARKERQZX";
+fn marker_refusals(marker: &str) -> Vec<String> {
     let base = file_text(&[("agent-1", "srv1")]);
     let changed = |from: &str, to: String| base.replace(from, &to);
-    let refusals = [
+    vec![
         changed("asset: srv1", format!("asset: srv1\n    {marker}: 1")),
         changed("asset: srv1", format!("asset: srv1\n    asset: {marker}")),
         changed("asset: srv1", format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")),
@@ -308,22 +306,92 @@ fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
         changed("asset: srv1", format!("asset: [{marker}]")),
         format!("tenant: {TENANT}\nagents:\n  - agent_id: a\n    {marker}: !{marker} x\n  - [{marker}"),
         format!("tenant: {TENANT}\nagents: !{marker} [1]"),
-    ];
-    refusals.iter().try_for_each(|text| {
-        let error = parse(text).err().ok_or_else(|| io::Error::other(format!("expected a refusal: {text}")))?;
-        let shown = format!("{error:?} {error}");
-        (!shown.contains(marker))
-            .then_some(())
-            .ok_or_else(|| io::Error::other(format!("marker leaked: {shown}")))
+        changed("agent_id: agent-1", format!("agent_id: !{marker} agent-1")),
+        changed("agent_id: agent-1", format!("agent_id: !!binary {marker}")),
+        changed("asset: srv1", format!("asset: {marker}: x")),
+    ]
+}
+
+
+#[test]
+fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
+    let base = file_text(&[("agent-1", "srv1")]);
+    ["MARKERQZX", "markerqzx"].iter().try_for_each(|marker| {
+        marker_refusals(marker).iter().try_for_each(|text| {
+            let error = parse(text).err().ok_or_else(|| io::Error::other(format!("expected a refusal: {text}")))?;
+            let shown = format!("{error:?} {error}");
+            (!shown.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()))
+                .then_some(())
+                .ok_or_else(|| io::Error::other(format!("marker leaked: {shown}")))
+        })
     })?;
+    let marker = "markerqzx";
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(FILE);
     put_file(&path, &base)?;
     let (audit, recorded) = recording_audit();
     let engine = open_agent_engine(path.clone(), audit, context())?;
-    put_file(&path, &changed("asset: srv1", format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")))?;
+    put_file(
+        &path,
+        &base.replace("asset: srv1", &format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")),
+    )?;
     let outcome = reload(&engine);
-    let audited = format!("{outcome:?} {:?}", recorded_entries(&recorded)?);
+    let audited = format!("{outcome:?} {:?}", recorded_entries(&recorded)?).to_ascii_lowercase();
     assert!(!audited.contains(marker), "{audited}");
+    Ok(())
+}
+
+
+#[test]
+fn tags_are_refused_with_the_entry_index() -> TestResult {
+    let two = |second: &str| format!("tenant: {TENANT}\nagents:\n  - agent_id: agent-1\n    asset: srv1\n{second}");
+    let cases = [
+        (two("  - agent_id: !foo agent-2\n    asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (two("  - agent_id: !!str agent-2\n    asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (two("  - agent_id: !!int agent-2\n    asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (
+            two("  - agent_id: !!binary YWdlbnQtMg==\n    asset: srv2\n"),
+            "agents[1]: tags are not allowed",
+        ),
+        (
+            two("  - !!map\n    agent_id: agent-2\n    asset: srv2\n"),
+            "agents[1]: tags are not allowed",
+        ),
+        (two("  - agent_id: agent-2\n    !foo asset: srv2\n"), "agents[1]: tags are not allowed"),
+        (format!("tenant: {TENANT}\nagents: !!seq []\n"), "tags are not allowed"),
+        (format!("!!map\ntenant: {TENANT}\nagents: []\n"), "tags are not allowed"),
+        (format!("tenant: !!str {TENANT}\nagents: []\n"), "tags are not allowed"),
+    ];
+    cases.iter().try_for_each(|(text, expected)| {
+        let shown = refusal(text)?;
+        shown
+            .contains(expected)
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn bare_numbers_and_booleans_are_refused_but_quoted_ones_are_accepted() -> TestResult {
+    let bare = [
+        ("asset: 12", "agents[0].asset"),
+        ("asset: true", "agents[0].asset"),
+        ("agent_id: 7", "agents[0].agent_id"),
+    ];
+    bare.iter().try_for_each(|(change, path)| {
+        let text = file_text(&[("agent-1", "srv1")]).replace(
+            &change.replace(": 12", ": srv1").replace(": true", ": srv1").replace(": 7", ": agent-1"),
+            change,
+        );
+        let shown = refusal(&text)?;
+        shown
+            .contains(&format!("{path} is not a plain or quoted string"))
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("{path} missing from {shown}")))
+    })?;
+    let quoted = parse(&file_text(&[("\"7\"", "'12'")]))?;
+    assert_eq!(quoted.agents.get("12").map(String::as_str), Some("7"));
     Ok(())
 }

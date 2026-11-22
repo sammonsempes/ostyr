@@ -8,6 +8,8 @@ use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
 use core_pg::scope::tenant_scope;
 use serde::de::{Deserializer, Error, IgnoredAny, SeqAccess};
 use serde::Deserialize;
+use serde_path_to_error::deserialize as deserialize_with_path;
+use serde_saphyr::granit_parser::{Event, Parser, ScanError, Span};
 use serde_untagged::UntaggedEnumVisitor;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -81,8 +83,86 @@ pub fn count_agents(text: &str, file: &str) -> Result<(), ConfigError> {
         ConfigError::Parse { message, .. } if message.starts_with(TOO_MANY_ENTRIES) => {
             refuse(file, format!("agents[{MAX_AGENT_ASSETS}]: {TOO_MANY_ENTRIES}"))
         }
-        _ => refuse(file, "the document is not a valid agent file".to_owned()),
+        _ => refuse(file, INVALID_FILE.to_owned()),
     })
+}
+
+
+pub const ENTRY_PARENT_DEPTH: usize = 2;
+
+
+pub const ROOT_DEPTH: usize = 1;
+
+
+pub const INVALID_FILE: &str = "the document is not a valid agent file";
+
+
+/// Nesting depth and number of entries seen so far, to name the entry that holds a tag.
+#[derive(Debug, Clone, Copy)]
+pub struct Walk {
+    pub depth: usize,
+    pub entries: usize,
+}
+
+
+/// The text of a tag refusal: the entry index when the tag is inside an entry, never the tag.
+pub fn tag_refusal(walk: Walk) -> String {
+    if walk.depth > ROOT_DEPTH {
+        format!("agents[{}]: tags are not allowed", walk.entries.saturating_sub(1))
+    } else {
+        "tags are not allowed".to_owned()
+    }
+}
+
+
+/// One parser event: refuses any tag, tracks the nesting and the entry count.
+pub fn walk_step(walk: Walk, item: Result<(Event<'_>, Span), ScanError>, file: &str) -> Result<Walk, ConfigError> {
+    let (event, _) = item.map_err(|_| refuse(file, INVALID_FILE.to_owned()))?;
+    let entries = walk
+        .entries
+        .saturating_add(usize::from(walk.depth == ENTRY_PARENT_DEPTH && is_node_start(&event)));
+    let started = Walk { depth: walk.depth, entries };
+    match &event {
+        Event::Scalar(_, _, _, tag) | Event::SequenceStart(_, _, tag) | Event::MappingStart(_, _, tag) if tag.is_some() => {
+            Err(refuse(file, tag_refusal(started)))
+        }
+        Event::SequenceStart(..) | Event::MappingStart(..) => Ok(Walk {
+            depth: started.depth.saturating_add(1),
+            ..started
+        }),
+        Event::SequenceEnd | Event::MappingEnd => Ok(Walk {
+            depth: started.depth.saturating_sub(1),
+            ..started
+        }),
+        _ => Ok(started),
+    }
+}
+
+
+pub fn is_node_start(event: &Event<'_>) -> bool {
+    matches!(event, Event::Scalar(..) | Event::SequenceStart(..) | Event::MappingStart(..))
+}
+
+
+/// Refuses every YAML tag (`!foo`, `!!str`, `!!binary`, `!!int`, on a scalar, a sequence or a mapping) before any typed pass reads the text.
+pub fn refuse_tags(text: &str, file: &str) -> Result<(), ConfigError> {
+    Parser::new_from_str(text)
+        .try_fold(Walk { depth: 0, entries: 0 }, |walk, item| walk_step(walk, item, file))
+        .map(drop)
+}
+
+
+/// Typed pass with `no_schema`: a bare number, boolean or null-like value in a string field is refused, named by path only.
+pub fn refuse_bare_scalars(text: &str, file: &str) -> Result<(), ConfigError> {
+    let options = serde_saphyr::options! { no_schema: true, with_snippet: false };
+    let mut field_path = String::new();
+    serde_saphyr::with_deserializer_from_str_with_options(text, options, |deserializer| {
+        deserialize_with_path::<_, AgentFile>(deserializer).map(drop).map_err(|error| {
+            field_path = error.path().to_string();
+            error.into_inner()
+        })
+    })
+    .map_err(|_| refuse(file, format!("{field_path} is not a plain or quoted string")))
 }
 
 
@@ -144,8 +224,10 @@ pub fn validate_file(file: &str, parsed: AgentFile, tenant: &str) -> Result<Agen
 /// Reads at most `MAX_FILE_BYTES` from `reader` and parses exactly those bytes.
 pub fn parse_agent_map(reader: &mut dyn Read, file: &str, tenant: &str) -> Result<AgentMap, ConfigError> {
     let text = read_text_capped(reader, file, MAX_FILE_BYTES)?;
+    refuse_tags(&text, file)?;
     count_agents(&text, file)?;
     let parsed = parse_document::<AgentFile>(&text, file)?;
+    refuse_bare_scalars(&text, file)?;
     validate_file(file, parsed, tenant)
 }
 
