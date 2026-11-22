@@ -11,6 +11,8 @@ readonly TESTS_DIR COMPOSE_DIR REPO_DIR
 readonly IMAGE_DIR="$REPO_DIR/target/deploy-compose/image"
 readonly READY_ATTEMPTS=90
 readonly API_PORT=8443
+PG_IMAGE="$(sed -n 's/^    image: \(postgres:.*\)$/\1/p' "$COMPOSE_DIR/compose.yaml")"
+readonly PG_IMAGE
 readonly ADMIN_PASSWORD="a-long-admin-passphrase-for-the-lab"
 readonly ANALYST_PASSWORD="a-long-analyst-passphrase-for-the-lab"
 readonly VM_WORK_DIR=/srv/ostyr-lab
@@ -212,6 +214,28 @@ expect "no secret value is in the platform environment" absent remote "sudo dock
 expect "only the API port listens on the host" test "$(remote "ss -ltn | awk 'NR>1 {print \$4}' | grep -c -e ':5432\$' || true")" = 0
 expect "5432 is closed from the host network" absent remote "nc -z -w 3 $vm_address 5432 || nc -z -w 3 127.0.0.1 5432"
 remote "ss -ltn"
+
+web_login_step="$(totp_step)"
+expect "the next TOTP step began for the web login" wait_after_step "$web_login_step"
+web_code="$(analyst_code "$analyst_secret")"
+web_proofs="$(remote_stdin "cd compose && sudo bash -s -- '$ANALYST_PASSWORD' '$web_code' secrets/ca.crt" <"$TESTS_DIR/web-proof.sh")"
+printf '%s\n' "$web_proofs"
+expect "the web sign-in page is served over TLS" test "$(printf '%s\n' "$web_proofs" | sed -n 's/^login_page //p')" = 1
+expect "the sign-in through the web service redirects (303)" test "$(printf '%s\n' "$web_proofs" | sed -n 's/^login_status //p')" = 303
+expect "the alert list renders through the web service (200)" test "$(printf '%s\n' "$web_proofs" | sed -n 's/^alerts_status //p')" = 200
+expect "plain HTTP on the web port is not served" test "$(printf '%s\n' "$web_proofs" | sed -n 's/^plain_http_status //p')" != 200
+forged_body="$(remote "sudo curl --silent --cacert compose/secrets/ca.crt -H 'Forwarded: for=1.2.3.4' https://localhost:$API_PORT/health")"
+printf 'info health with a forged Forwarded header from the host: %s\n' "$forged_body"
+web_container="$(remote "cd compose && sudo docker compose ps -q web")"
+expect "the web image runs as user 65532" test "$(remote "sudo docker inspect --format '{{.Config.User}}' $web_container")" = 65532:65532
+expect "the web root filesystem is read-only" test "$(remote "sudo docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' $web_container")" = true
+expect "the web service drops every capability" test "$(remote "sudo docker inspect --format '{{.HostConfig.CapDrop}}' $web_container")" = "[ALL]"
+expect "the web service has no-new-privileges" test "$(remote "sudo docker inspect --format '{{.HostConfig.SecurityOpt}}' $web_container")" = "[no-new-privileges:true]"
+expect "no secret value is in the web environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $web_container | grep -i -e password -e BEGIN"
+expect "the web service mounts exactly three secrets" test "$(remote "sudo docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' $web_container | tr ' ' '\n' | grep -c '^/run/secrets/'")" = 3
+expect "the web service mounts no database or store secret" absent remote "sudo docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' $web_container | grep -e pg_password -e pg_service -e pg_server -e store_key"
+expect "the web service sits at the address the platform trusts" test "$(remote "sudo docker inspect --format '{{(index .NetworkSettings.Networks \"ostyr_default\").IPAddress}}' $web_container")" = 172.29.63.10
+expect "a client on the compose network without the service password cannot open the database" absent remote "sudo docker run --rm --network ostyr_default -e PGPASSWORD=wrong -e PGSSLMODE=require $PG_IMAGE psql -h postgres -U ostyr_service -d ostyr -c 'select 1'"
 
 if [[ "$failures" -ne 0 ]]; then
     printf '%s check(s) failed\n' "$failures" >&2

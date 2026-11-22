@@ -1,6 +1,6 @@
 # Ostyr platform with Docker Compose
 
-One host runs the platform API (`alerts`, `cases`, `cmdb`, `risk`) and its own PostgreSQL 16. The two containers talk over TLS, every secret is a file under `secrets/` (never in Git, never in an environment variable), and state lives in two named volumes: `pgdata` and `state` (accounts, audit log).
+One host runs the web interface (`web`, TLS port `9443`) in front of the platform API (`alerts`, `cases`, `cmdb`, `risk`) and its own PostgreSQL 16. The two containers talk over TLS, every secret is a file under `secrets/` (never in Git, never in an environment variable), and state lives in two named volumes: `pgdata` and `state` (accounts, audit log).
 
 ## Start
 
@@ -12,7 +12,7 @@ docker compose up -d
 
 - `init.sh <public-host-name>` runs once, as root: it creates `secrets/` (mode 0700) with a throwaway CA (its key is deleted after signing), the PostgreSQL and API certificates, a random PostgreSQL superuser password, a random password for the unprivileged service role `ostyr_service`, and the account store key. It never overwrites a file, so a rerun changes nothing. The host name goes into the API certificate; it may use `A-Z a-z 0-9 . -` only. To use your own API certificate, replace `secrets/api_tls.crt` and `secrets/api_tls.key` (the key owned by uid 65532, mode 0600); the service reloads it on change.
 - `build.sh` builds `platform_api` and `auth_tool`, then the image `ostyr-platform:local` (distroless, user 65532) when Docker is present. Without Docker it leaves the build context in `target/deploy-compose/image`.
-- Only the API's TLS port `8443` is published. PostgreSQL has no published port and accepts `hostssl` connections from the service role `ostyr_service` to the database `ostyr` only (`config/pg_hba.conf`); the platform never holds the superuser password, which works on the in-container socket only. `config/pg-init-service-role.sh` creates the role (no superuser, no create-role, no create-database) as owner of the database on the first start.
+- Only the API's TLS port `8443` and the web interface's TLS port `9443` are published. The web service runs the same image (`web_ui`), serves TLS with the API certificate and key (`api_tls.*`, so browsers must trust `secrets/ca.crt`), reaches the API at `https://platform:8443` and is the only forwarder the platform trusts (`trusted_forwarders: 172.29.63.10`, the address compose pins for it). `init.sh` adds `DNS:platform` to the API certificate; on an older `secrets/` without it, `init.sh` warns and changes nothing: remove the TLS files to regenerate them. Sign in at `https://<host>:9443/login`. PostgreSQL has no published port and accepts `hostssl` connections from the service role `ostyr_service` to the database `ostyr` only (`config/pg_hba.conf`); the platform never holds the superuser password, which works on the in-container socket only. `config/pg-init-service-role.sh` creates the role (no superuser, no create-role, no create-database) as owner of the database on the first start.
 - `deploy/compose` and its `secrets/` must be writable by root only, and so must the whole ancestor chain of the clone from `/` down (a clone under `/home/<user>` is refused, use for example `/srv/ostyr`): `init.sh` and the compose file run as root on this host, and the scripts and config mounted into the containers decide what runs there.
 
 The CA certificate to trust on the clients is `secrets/ca.crt`: `curl --cacert secrets/ca.crt https://ostyr.example.org:8443/health`.
@@ -34,7 +34,7 @@ The output carries the TOTP secret to enrol in an authenticator. Other commands 
 
 ## Configuration
 
-`config/` is mounted read-only at `/etc/ostyr`: `module.yaml` (modules and file paths), `pg.yaml` (PostgreSQL host, database, service user, its password file, CA), `risk-weights.yaml`, `compromised.txt`. The service watches these files: an edit on the host applies without a restart, except the start-only keys `settings.modules`, `settings.pg_settings` and `settings.risk.weights_file`, which need `docker compose restart platform`.
+`config/` is mounted read-only at `/etc/ostyr` in both services: `web-ui.yaml` (web settings), `module.yaml` (modules and file paths), `pg.yaml` (PostgreSQL host, database, service user, its password file, CA), `risk-weights.yaml`, `compromised.txt`. The service watches these files: an edit on the host applies without a restart, except the start-only keys `settings.modules`, `settings.pg_settings` and `settings.risk.weights_file`, which need `docker compose restart platform`.
 
 ## Upgrade
 

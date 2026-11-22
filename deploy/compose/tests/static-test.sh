@@ -31,13 +31,26 @@ count_lines() {
 
 all_services_hardened() {
     local services
-    services="$(grep -c '^  [a-z]*:$' "$COMPOSE_FILE")"
+    services="$(grep -c '^    image:' "$COMPOSE_FILE")"
     [[ "$(count_lines '^    read_only: true$')" -eq "$services" && "$(count_lines '^    cap_drop: \[ALL\]$')" -eq "$services" \
         && "$(count_lines 'no-new-privileges:true')" -eq "$services" ]]
 }
 
 images_are_pinned() {
     ! grep '^    image:' "$COMPOSE_FILE" | grep -v -e '@sha256:[0-9a-f]\{64\}$' -e 'image: ostyr-platform:local$'
+}
+
+web_service() {
+    sed -n '/^  web:$/,/^[a-z]/p' "$COMPOSE_FILE"
+}
+
+web_has() {
+    web_service | grep -q -- "$1"
+}
+
+web_is_hardened() {
+    web_has '^    read_only: true$' && web_has '^    cap_drop: \[ALL\]$' && web_has 'no-new-privileges:true' \
+        && web_has '^    secrets: \[pg_ca, api_tls_key, api_tls_cert\]$' && web_has '^      - "9443:9443"$'
 }
 
 compose_config_accepts() {
@@ -59,13 +72,19 @@ else
     printf 'info docker compose is NOT installed on this host: the compose config check was SKIPPED\n'
 fi
 if command -v shellcheck >/dev/null; then
-    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh"
+    expect "shellcheck accepts the scripts" shellcheck --severity=warning "$COMPOSE_DIR/init.sh" "$COMPOSE_DIR/build.sh" "$COMPOSE_DIR/config/pg-init-service-role.sh" "$TESTS_DIR/static-test.sh" "$TESTS_DIR/compose-lab.sh" "$TESTS_DIR/pg-proofs.sh" "$TESTS_DIR/stage-file-test.sh" "$TESTS_DIR/web-proof.sh"
 else
     printf 'info shellcheck is not installed: skipped\n'
 fi
 
 expect "no PostgreSQL port is published" absent grep -e '5432' "$COMPOSE_FILE"
-expect "only the API port is published" test "$(grep -c '^      - "[0-9]*:[0-9]*"$' "$COMPOSE_FILE")" -eq 1
+expect "only the API and web ports are published" test "$(grep -c '^      - "[0-9]*:[0-9]*"$' "$COMPOSE_FILE")" -eq 2
+expect "the web service is hardened, publishes 9443 and holds three secrets" web_is_hardened
+expect "the web service holds no database or store secret" absent web_has -e pg_password -e pg_service_password -e pg_server -e store_key
+expect "the web service runs web_ui on its own settings file" web_has 'command: \["/usr/local/bin/web_ui", "/etc/ostyr/web-ui.yaml"\]'
+expect "the platform trusts the web address only as forwarder" grep -qx '  trusted_forwarders: 172.29.63.10' "$COMPOSE_DIR/config/module.yaml"
+expect "the web address is pinned to that address" web_has 'ipv4_address: 172.29.63.10$'
+expect "web-ui.yaml serves TLS and verifies the API against the CA" grep -q -e 'base_url: https://platform:8443' -e 'ca: /run/secrets/pg_ca' "$COMPOSE_DIR/config/web-ui.yaml"
 expect "every image is pinned by digest or built locally" images_are_pinned
 expect "every service is read-only, drops capabilities and sets no-new-privileges" all_services_hardened
 expect "no YAML file has a comment" absent grep -n '#' "$COMPOSE_FILE" "$COMPOSE_DIR"/config/*.yaml
