@@ -61,6 +61,8 @@ async fn the_dhcp_screen_shows_both_forms_and_both_lookups_in_both_languages() -
     ] {
         assert!(by_address.body.contains(expected), "{expected}: {}", by_address.body);
     }
+    assert_eq!(by_address.body.matches("Hostname refused (unreadable text)").count(), 1);
+    assert!(by_address.body.contains("<td>AA-BB-CC-DD-EE-01</td>"));
     let by_mac = fire(&rig, get_with(MAC_QUERY, &session)).await?;
     assert_eq!(by_mac.status, StatusCode::OK);
     assert!(by_mac.body.contains("host-1.example.com"));
@@ -69,7 +71,13 @@ async fn the_dhcp_screen_shows_both_forms_and_both_lookups_in_both_languages() -
         ..get_with(AT_QUERY, &session)
     };
     let french = fire(&rig, french_request).await?;
-    for expected in ["Baux DHCP", "Attribué", "1 ligne n'a pas pu être lue.", "Résultats coupés à 100"] {
+    for expected in [
+        "Baux DHCP",
+        "Attribué",
+        "1 ligne n'a pas pu être lue.",
+        "Résultats coupés à 100",
+        "Nom d'hôte refusé (texte illisible)",
+    ] {
         assert!(french.body.contains(expected), "{expected}");
     }
     let forged = format!("{AT_QUERY}&tenant=b&limit=500");

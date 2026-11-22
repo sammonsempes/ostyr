@@ -1,8 +1,8 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView, CommentView, DhcpQuery,
-    FindingsView, LookupView, OncallAlertView, OncallListView, RiskDetailView, RiskListView, ShellListView, ShellQuery, ShellSessionView,
-    StateAssetView, StateListView, VulnAssetView, VulnListView,
+    FindingsView, LookupView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView, ShellListView, ShellQuery,
+    ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ecs_normalise::suricata::{clean_identity, is_unsafe, MAX_FIELD_CHARS};
@@ -85,12 +85,17 @@ pub const MAX_CASE_ID_CHARS: usize = 128;
 pub const MAX_COMMENT_CHARS: usize = 8_192;
 
 
-pub const CONFLICT_CODES: [(&str, &str); 4] = [
+pub const CONFLICT_CODES: [(&str, &str); 5] = [
     ("transition_not_allowed", "error_transition_not_allowed"),
     ("resolution_required", "error_resolution_required"),
     ("case_changed", "error_case_changed"),
     ("full", "error_comment_full"),
+    ("run_changed", RUN_CHANGED_KEY),
 ];
+
+
+/// The text key of the posture API's 409 `run_changed`.
+pub const RUN_CHANGED_KEY: &str = "error_run_changed";
 
 
 pub const UNREADABLE_CODE: &str = "unreadable_alert";
@@ -1255,6 +1260,140 @@ pub const DHCP_PROBE: DhcpQuery = DhcpQuery::At {
 /// The permission probe of the form-less DHCP page: the lookup is refused with 403 for a session without `cmdb.read`; its answer is dropped.
 pub async fn probe_dhcp(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<(), ApiFailure> {
     get_dhcp(client, source, token, &DHCP_PROBE).await.map(|_lookup| ())
+}
+
+
+/// Characters the API writes for one stored byte of `uid`, `title` or `detail` at worst: a 6-character escape, each backslash doubled by JSON.
+pub const POSTURE_CHARS_PER_BYTE: usize = 7;
+
+
+/// The posture store's `uid` bound in stored bytes.
+pub const POSTURE_UID_BYTES: usize = 2_048;
+
+
+/// The posture store's `title` and `detail` bound in stored bytes, each.
+pub const POSTURE_TEXT_BYTES: usize = 1_024;
+
+
+/// The identity fields (about 1.7 KB) and the JSON keys (about 0.3 KB) of one finding.
+pub const POSTURE_FIXED_FIELD_BYTES: usize = 2_048;
+
+
+/// One worst-case finding: 7 characters per stored byte on `uid`, `title` and `detail`, plus the fixed fields (30 720).
+pub const POSTURE_WORST_FINDING_BYTES: usize = POSTURE_CHARS_PER_BYTE * (POSTURE_UID_BYTES + 2 * POSTURE_TEXT_BYTES) + POSTURE_FIXED_FIELD_BYTES;
+
+
+/// The run header, `unservable` and `next_cursor` of one page, with a wide margin.
+pub const POSTURE_HEADER_BYTES: usize = 8_192;
+
+
+/// The page limit sent as `limit` and the pre-scan's item cap: as many worst-case findings as `MAX_BODY_BYTES` holds (33).
+pub const POSTURE_LIMIT: usize = (MAX_BODY_BYTES - POSTURE_HEADER_BYTES) / POSTURE_WORST_FINDING_BYTES;
+
+
+/// The posture API's `MAX_ACCOUNT_BYTES`.
+pub const MAX_POSTURE_ACCOUNT_BYTES: usize = 256;
+
+
+/// The posture store's `MAX_RUN_ID_BYTES`.
+pub const MAX_POSTURE_RUN_ID_BYTES: usize = 128;
+
+
+/// The posture store's `MAX_CURSOR_BYTES`.
+pub const MAX_POSTURE_CURSOR_BYTES: usize = 512;
+
+
+/// The posture store's `CURSOR_FIELDS`: run id, finish time, rank and identity.
+pub const POSTURE_CURSOR_FIELDS: usize = 4;
+
+
+/// The posture store's `IDENTITY_HEX_CHARACTERS`.
+pub const POSTURE_IDENTITY_HEX_CHARACTERS: usize = 64;
+
+
+/// The posture text grammar's punctuation (`IDENTITY_PUNCTUATION`).
+pub const POSTURE_PUNCTUATION: &str = "_.:/@=+,*()$#-";
+
+
+/// What a form-less `GET /posture` reads with `limit=1`: the API's own permission answer is all it is for.
+pub const POSTURE_PROBE_PATH: &str = "posture/accounts/probe/findings?limit=1";
+
+
+/// The posture crate's `valid_reference` (copy): ASCII alphanumerics and `_.:/@=+,*()$#-`, no leading `-`, within `max_bytes`.
+pub fn valid_posture_reference(text: &str, max_bytes: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= max_bytes
+        && !text.starts_with('-')
+        && text
+            .chars()
+            .all(|found| found.is_ascii_alphanumeric() || POSTURE_PUNCTUATION.contains(found))
+}
+
+
+/// An account: the crate's grammar and no `.` or `..` between slashes (`../x`, `a/..`), which a path parser would read as dot segments.
+pub fn valid_posture_account(text: &str) -> bool {
+    valid_posture_reference(text, MAX_POSTURE_ACCOUNT_BYTES) && !text.split('/').any(|segment| matches!(segment, "." | ".."))
+}
+
+
+/// The posture store's cursor grammar (copy): `<run id> <finish micros> <rank> <identity hex>`, the numbers canonical.
+pub fn valid_posture_cursor(cursor: &str) -> bool {
+    let parts: Vec<&str> = if cursor.len() > MAX_POSTURE_CURSOR_BYTES {
+        Vec::new()
+    } else {
+        cursor.splitn(POSTURE_CURSOR_FIELDS + 1, ' ').collect()
+    };
+    match parts.as_slice() {
+        [run_id, finished, rank, identity] => {
+            valid_posture_reference(run_id, MAX_POSTURE_RUN_ID_BYTES)
+                && finished.parse::<i64>().is_ok_and(|parsed| parsed >= 0 && parsed.to_string() == *finished)
+                && rank.parse::<i16>().is_ok_and(|parsed| parsed.to_string() == *rank)
+                && identity.len() == POSTURE_IDENTITY_HEX_CHARACTERS
+                && identity.chars().all(|found| found.is_ascii_digit() || ('a'..='f').contains(&found))
+        }
+        _other => false,
+    }
+}
+
+
+pub fn posture_path(account: &str, cursor: Option<&str>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("limit", &POSTURE_LIMIT.to_string());
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    format!("posture/accounts/{}/findings?{}", encode_asset_id(account), query.finish())
+}
+
+
+/// An account or cursor outside the grammars is our 400 before any call; the items are counted on raw slices before the typed decode.
+pub async fn get_posture(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    account: &str,
+    cursor: Option<&str>,
+) -> Result<PostureView, ApiFailure> {
+    if valid_posture_account(account) && cursor.is_none_or(valid_posture_cursor) {
+        let bytes = call(client, source, Method::GET, &posture_path(account, cursor), Some(token), None).await?;
+        scan_state_items(&bytes, POSTURE_LIMIT)?;
+        let view: PostureView = serde_json::from_slice(&bytes)?;
+        if view.next_cursor.as_deref().is_some_and(|next| !valid_posture_cursor(next)) {
+            Err(ApiFailure::Malformed("cursor"))
+        } else {
+            Ok(view)
+        }
+    } else {
+        Err(ApiFailure::BadRequest)
+    }
+}
+
+
+/// The permission probe of the form-less posture page: its answer is dropped.
+pub async fn probe_posture(client: &ApiClient, source: IpAddr, token: &SecretString) -> Result<(), ApiFailure> {
+    call(client, source, Method::GET, POSTURE_PROBE_PATH, Some(token), None)
+        .await
+        .map(|_bytes| ())
 }
 
 
