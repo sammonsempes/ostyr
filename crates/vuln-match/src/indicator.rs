@@ -3,6 +3,7 @@
 use crate::error::IndicatorError;
 use crate::model::{IndicatorCounts, IndicatorOutcome, IndicatorRow};
 use alerts::types::{Executor, Row};
+use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
@@ -147,5 +148,24 @@ pub async fn kev_indicator(exec: Executor<'_, '_>, scope: &TenantScope, now_micr
     match rows.as_slice() {
         [row] => decode_row(scope, now_micros, row),
         _ => Err(IndicatorError::BadRow),
+    }
+}
+
+
+/// A fixed category of a store failure, never server text: `deadline`, `server <class>` or `connection`.
+pub fn store_category(error: &PgError) -> String {
+    match error {
+        PgError::StatementTimeout { .. } | PgError::ConnectTimeout { .. } | PgError::MigrationTimeout { .. } => "deadline".to_owned(),
+        PgError::Server { class, .. } => format!("server {class}"),
+        _ => "connection".to_owned(),
+    }
+}
+
+
+/// The line an operator reads: a store failure carries its fixed category, every other error its own message.
+pub fn failure_text(error: &IndicatorError) -> String {
+    match error {
+        IndicatorError::Store(cause) => format!("{error}: {}", store_category(cause)),
+        other => other.to_string(),
     }
 }

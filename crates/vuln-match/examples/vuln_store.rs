@@ -182,6 +182,7 @@ fn main() -> Result<ExitCode, Box<dyn Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((settings, words)) => {
+            tracing_subscriber::fmt().with_writer(stderr).with_ansi(false).init();
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             match runtime.block_on(scenario(Path::new(settings), words)) {
                 Ok(()) => Ok(ExitCode::SUCCESS),

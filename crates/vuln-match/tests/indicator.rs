@@ -14,11 +14,14 @@ use time::OffsetDateTime;
 use types::TestResult;
 use vuln_match::error::IndicatorError;
 use vuln_match::indicator::{
-    check_clock, counts_text, decode_row, indicator_json, kev_indicator, observed_at_of, parse_count, source_text, value_of, warning_line,
-    ANSWER_COLUMNS, INDICATOR_SQL, KEV_INDICATOR, MAX_CLOCK_SKEW_SECONDS, WINDOW_DAYS,
+    check_clock, counts_text, decode_row, failure_text, indicator_json, kev_indicator, observed_at_of, parse_count, source_text, store_category,
+    value_of, warning_line, ANSWER_COLUMNS, INDICATOR_SQL, KEV_INDICATOR, MAX_CLOCK_SKEW_SECONDS, WINDOW_DAYS,
 };
 use vuln_match::model::{IndicatorCounts, IndicatorRow};
 use vuln_match::store::MIGRATIONS;
+
+
+const DEADLINE_SECONDS: u64 = 5;
 
 
 const NOW: u64 = 1_700_000_000_000_000;
@@ -334,5 +337,34 @@ fn the_sixth_migration_is_one_stable_pinned_function_with_a_tenant_filter_on_eve
     assert!(INDICATOR_SQL.contains("FROM vuln_kev_indicator($1, $2::text::bigint)"));
     assert!(!INDICATOR_SQL.contains("::float"));
     assert_eq!(WINDOW_DAYS * MICROS_PER_DAY, WINDOW_MICROS);
+    Ok(())
+}
+
+
+#[test]
+fn a_store_failure_prints_only_a_fixed_category() -> TestResult {
+    let deadline = IndicatorError::Store(PgError::StatementTimeout { seconds: DEADLINE_SECONDS });
+    assert_eq!(failure_text(&deadline), "the findings store failed: deadline");
+    let migration = PgError::MigrationTimeout {
+        namespace: "vuln".to_owned(),
+        version: "vuln_0005".to_owned(),
+        seconds: 1,
+    };
+    assert_eq!(store_category(&migration), "deadline");
+    assert_eq!(store_category(&PgError::ConnectTimeout { seconds: 1 }), "deadline");
+    let server = IndicatorError::Store(PgError::Server {
+        code: "42P01".to_owned(),
+        class: "syntax error or access rule violation",
+    });
+    assert_eq!(
+        failure_text(&server),
+        "the findings store failed: server syntax error or access rule violation"
+    );
+    let connection = IndicatorError::Store(PgError::InvalidTenant);
+    assert_eq!(failure_text(&connection), "the findings store failed: connection");
+    assert_eq!(
+        failure_text(&IndicatorError::BadRow),
+        "the findings store answered a row that cannot be read"
+    );
     Ok(())
 }

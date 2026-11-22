@@ -46,7 +46,6 @@ ca_file: /etc/ostyr-lab/ca.pem
 YAML
 sed "s/^database: .*/database: $HOT_DATABASE/" "$work/pg.yaml" >"$work/pg-hot.yaml"
 { sed "s/^database: .*/database: $OLD_DATABASE/" "$work/pg.yaml"; echo "statement_timeout_secs: 5"; } >"$work/pg-old-5.yaml"
-{ sed "s/^database: .*/database: $OLD_DATABASE/" "$work/pg.yaml"; echo "statement_timeout_secs: 120"; } >"$work/pg-old-120.yaml"
 export PGPASSWORD="$POSTGRES_PASSWORD" PGSSLMODE=verify-full PGSSLROOTCERT=/etc/ostyr-lab/ca.pem
 sql() { psql -X -q -tA -v ON_ERROR_STOP=1 -h "$DATASTORE_DOMAIN" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$DATABASE" -c "$1"; }
 sql_old() { psql -X -q -tA -v ON_ERROR_STOP=1 -h "$DATASTORE_DOMAIN" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$OLD_DATABASE" "$@"; }
@@ -356,16 +355,23 @@ for number in 1 2 3 4; do
     digest="$(sha256sum "/tmp/vuln-migrations/vuln_000$number.sql" | cut -d' ' -f1)"
     sql_old -c "INSERT INTO public.schema_migrations (namespace, version, digest) VALUES ('vuln', 'vuln_000$number', '$digest')" >/dev/null
 done
+echo "--- a migration behind a reader: ACCESS SHARE held on vuln_findings, statement_timeout_secs 5 (the lock wait is the request deadline)"
+sql_old -c "BEGIN; LOCK TABLE vuln_findings IN ACCESS SHARE MODE; SELECT pg_sleep(40); COMMIT" >/dev/null &
+holder=$!
+sleep 3
+blocked_start="$(/tmp/vuln_store "$work/pg-old-5.yaml" migrate-as-api 2>&1 || true)"
+echo "blocked start: $blocked_start"
+check "a migration behind a reader fails with MigrationLockWait naming vuln_0005" "1" "$(grep -c 'migration `vuln_0005` of namespace `vuln` waited more than 5 s for a table lock' <<<"$blocked_start")"
+check "the lock-wait failure recorded nothing" "0|0" "$(sql_old -c "SELECT (SELECT count(*) FROM public.schema_migrations WHERE version IN ('vuln_0005', 'vuln_0006')) || '|' || (SELECT count(*) FROM information_schema.columns WHERE table_name = 'vuln_findings' AND column_name = 'kev_since_micros')")"
+wait "$holder"
 echo "--- an upgrade start (the vuln_api path: migrate with the statement_timeout_secs deadline) at 3 000 000 rows"
-default_start="$(/tmp/vuln_store "$work/pg-old-5.yaml" migrate-as-api 2>&1 || true)"
-echo "statement_timeout_secs 5: $default_start"
-check "a start whose deadline is shorter than the migration fails by name" "statement deadline of 5 s exceeded" "$default_start"
-sleep 5
-check "the failed start left the store unmigrated" "0" "$(sql_old -c "SELECT count(*) FROM information_schema.columns WHERE table_name = 'vuln_findings' AND column_name = 'kev_since_micros'")"
 start_migration="$(date +%s%N)"
-/tmp/vuln_store "$work/pg-old-120.yaml" migrate-as-api
+default_start="$(/tmp/vuln_store "$work/pg-old-5.yaml" migrate-as-api 2>&1)"
 migration_ms=$(( ($(date +%s%N) - start_migration) / 1000000 ))
-echo "vuln_0005 on 3 000 000 rows with statement_timeout_secs 120: ${migration_ms} ms in one transaction, which takes ACCESS EXCLUSIVE on the three tables first and holds it to the commit, so the lock time is that duration"
+echo "statement_timeout_secs 5: ${migration_ms} ms: $default_start"
+check "a start with statement_timeout_secs 5 migrates and logs applying migration vuln_0005" "1" "$(grep -c 'applying migration.*vuln_0005' <<<"$default_start")"
+check "the start logs migration applied vuln_0005" "1" "$(grep -c 'migration applied.*vuln_0005' <<<"$default_start")"
+check "the migrated start recorded vuln_0005" "1" "$(sql_old -c "SELECT count(*) FROM public.schema_migrations WHERE version = 'vuln_0005'")"
 check "backfill counted: every KEV row has its first_seen as KEV time, no other row has one" "300000|300000|0|0" "$(sql_old -c "SELECT count(*) FILTER (WHERE kev) || '|' || count(*) FILTER (WHERE kev_since_micros IS NOT NULL) || '|' || count(*) FILTER (WHERE kev AND kev_since_micros IS DISTINCT FROM first_seen_micros) || '|' || count(*) FILTER (WHERE NOT kev AND kev_since_micros IS NOT NULL) FROM vuln_findings")"
 check "migrated store: function keeps its pins" "search_path=pg_catalog, public, pg_temp,enable_seqscan=off,enable_bitmapscan=off,jit=off" "$(sql_old -c "SELECT array_to_string(proconfig, ',') FROM pg_proc WHERE proname = 'vuln_scan_store'")"
 check "migrated store: both indexes are valid" "2" "$(sql_old -c "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname IN ('vuln_findings_kev_open', 'vuln_findings_kev_resolved') AND i.indisvalid")"
