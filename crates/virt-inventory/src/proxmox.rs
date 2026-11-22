@@ -111,7 +111,7 @@ struct RawStorageKey<'a> {
 }
 
 
-fn malformed(error: serde_json::Error) -> ParseError {
+pub fn malformed(error: serde_json::Error) -> ParseError {
     ParseError::Malformed {
         category: error.classify(),
         line: error.line(),
@@ -217,6 +217,7 @@ pub fn identity_of(kind: ResourceKind, vmid: Option<u64>, node: Option<&str>, st
         ResourceKind::Storage => node_name
             .zip(storage.filter(|name| valid_storage(name)))
             .map(|(host, name)| format!("{host}/{name}")),
+        ResourceKind::VsphereVm | ResourceKind::VsphereHost => None,
     }
 }
 
@@ -253,12 +254,22 @@ pub const NODE_STATUS_VALUES: [&str; 3] = ["online", "offline", "unknown"];
 pub const STORAGE_STATUS_VALUES: [&str; 2] = ["available", "unknown"];
 
 
+/// `Vm_Power_State` of the vSphere Automation API.
+pub const VSPHERE_VM_POWER_VALUES: [&str; 3] = ["POWERED_ON", "POWERED_OFF", "SUSPENDED"];
+
+
+/// `Host_PowerState` of the vSphere Automation API.
+pub const VSPHERE_HOST_POWER_VALUES: [&str; 3] = ["POWERED_ON", "POWERED_OFF", "STANDBY"];
+
+
 pub fn status_values(kind: ResourceKind) -> &'static [&'static str] {
     match kind {
         ResourceKind::Qemu => &QEMU_STATUS_VALUES,
         ResourceKind::Lxc => &LXC_STATUS_VALUES,
         ResourceKind::Node => &NODE_STATUS_VALUES,
         ResourceKind::Storage => &STORAGE_STATUS_VALUES,
+        ResourceKind::VsphereVm => &VSPHERE_VM_POWER_VALUES,
+        ResourceKind::VsphereHost => &VSPHERE_HOST_POWER_VALUES,
     }
 }
 
@@ -317,7 +328,13 @@ pub fn refused_key(raw: &RawValue) -> Option<ItemKey> {
     let text = raw.get();
     let typed = serde_json::from_str::<RawKind>(text).ok()?;
     let kind = typed.kind.as_deref().and_then(kind_of)?;
-    let key = match kind {
+    identity_in(kind, text).map(|identity| ItemKey { kind, key: identity })
+}
+
+
+/// Reads only the identity parts of `kind` from one element's text; a vSphere kind has no Proxmox identity.
+pub fn identity_in(kind: ResourceKind, text: &str) -> Option<String> {
+    match kind {
         ResourceKind::Qemu | ResourceKind::Lxc => {
             let guest = serde_json::from_str::<RawVmid>(text).ok()?;
             identity_of(kind, guest.vmid, None, None)
@@ -330,8 +347,8 @@ pub fn refused_key(raw: &RawValue) -> Option<ItemKey> {
             let volume = serde_json::from_str::<RawStorageKey>(text).ok()?;
             identity_of(kind, None, volume.node.as_deref(), volume.storage.as_deref())
         }
-    };
-    key.map(|identity| ItemKey { kind, key: identity })
+        ResourceKind::VsphereVm | ResourceKind::VsphereHost => None,
+    }
 }
 
 
