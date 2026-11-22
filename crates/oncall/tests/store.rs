@@ -540,3 +540,11 @@ async fn a_fingerprint_or_channel_with_an_edge_space_is_refused_at_write() -> Re
     assert!(matches!(channel, Err(StoreError::InvalidChannel { .. })));
     Ok(())
 }
+
+
+#[test]
+fn the_read_and_the_write_are_keyed_by_tenant_and_id() -> Result<(), Box<dyn Error>> {
+    assert!(GET_SQL.contains("WHERE tenant = $1 AND id = $2"));
+    assert!(UPDATE_SQL.contains("WHERE tenant = $1 AND id = $2 AND version = $7"));
+    Ok(())
+}

@@ -1,4 +1,4 @@
-//! Usage: oncall_api <module.yaml>. Serves `GET /oncall/alerts` and `GET /oncall/alerts/{id}` alone through core-api; `settings.pg_settings` names the core-pg file. The role `analyst` gets `oncall.read` for the proof.
+//! Usage: oncall_api <module.yaml>. Serves the oncall read and acknowledge/resolve routes alone through core-api; `settings.pg_settings` names the core-pg file. The role `analyst` gets `oncall.read` for the proof.
 
 use alerts::backend::MAX_CONNECTIONS;
 use alerts::settings::open_pg_engine_from;
@@ -7,8 +7,9 @@ use core_api::routes::build_router;
 use core_api::server::{new_listener, serve};
 use core_api::state::build_state_from_files;
 use core_api::types::{ServerHandle, SharedState};
+use core_auth::rbac::PERMISSION_ONCALL_READ;
 use core_config::load::load_module;
-use oncall::api::{oncall_access, oncall_document, oncall_router, PERMISSION_ONCALL_READ};
+use oncall::api::{oncall_access, oncall_document, oncall_router};
 use oncall::backend::pg_backend;
 use std::error::Error;
 use std::io::{stderr, Write};

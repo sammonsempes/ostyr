@@ -12,8 +12,8 @@ use core_auth::random::os_random;
 use core_auth::rbac::{
     builtin_catalog, check_roles, is_allowed, load_catalog, permission_set, requires_mfa, PERMISSION_ALERTS_READ, PERMISSION_ALERTS_TRIAGE,
     PERMISSION_AUDIT_READ, PERMISSION_CASES_READ, PERMISSION_CASES_WRITE, PERMISSION_CMDB_READ, PERMISSION_CONFIG_MANAGE, PERMISSION_EVENTS_READ,
-    PERMISSION_ONCALL_READ, PERMISSION_RESPONSE_EXECUTE, PERMISSION_ROLES_MANAGE, PERMISSION_STATUS_WRITE, PERMISSION_USERS_MANAGE,
-    POLICY_WEBAUTHN_REQUIRED, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER, ROLE_RESPONDER,
+    PERMISSION_ONCALL_ACKNOWLEDGE, PERMISSION_ONCALL_READ, PERMISSION_RESPONSE_EXECUTE, PERMISSION_ROLES_MANAGE, PERMISSION_STATUS_WRITE,
+    PERMISSION_USERS_MANAGE, POLICY_WEBAUTHN_REQUIRED, ROLE_ADMINISTRATOR, ROLE_ANALYST, ROLE_AUDITOR, ROLE_READER, ROLE_RESPONDER,
 };
 use core_auth::session::{
     create_session, hash_token, is_revoked, mark_sessions_revoked, revocation_marker, revoke_session, revoke_user_sessions, validate_session,
@@ -61,6 +61,7 @@ fn expected_catalog() -> RoleCatalog {
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
+        PERMISSION_ONCALL_ACKNOWLEDGE,
     ];
     let responder = [
         PERMISSION_EVENTS_READ,
@@ -70,6 +71,7 @@ fn expected_catalog() -> RoleCatalog {
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
+        PERMISSION_ONCALL_ACKNOWLEDGE,
         PERMISSION_STATUS_WRITE,
         PERMISSION_RESPONSE_EXECUTE,
     ];
@@ -81,6 +83,7 @@ fn expected_catalog() -> RoleCatalog {
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
+        PERMISSION_ONCALL_ACKNOWLEDGE,
         PERMISSION_STATUS_WRITE,
         PERMISSION_RESPONSE_EXECUTE,
         PERMISSION_USERS_MANAGE,
@@ -128,6 +131,7 @@ fn no_built_in_role_carries_the_webauthn_policy() -> TestResult {
 #[test]
 fn the_new_permission_strings_are_exact() -> TestResult {
     assert_eq!(PERMISSION_ONCALL_READ, "oncall.read");
+    assert_eq!(PERMISSION_ONCALL_ACKNOWLEDGE, "oncall.acknowledge");
     assert_eq!(PERMISSION_STATUS_WRITE, "status.write");
     Ok(())
 }

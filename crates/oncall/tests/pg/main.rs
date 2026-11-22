@@ -9,8 +9,9 @@ use core_pg::connect::connect_current;
 use core_pg::error::PgError;
 use core_pg::scope::tenant_scope;
 use core_pg::settings::{open_settings, PgSettings};
+use oncall::alert::Event;
 use oncall::alert::{Cell, Param, Statement};
-use oncall::backend::{bound, execute, pg_backend, pg_get, pg_list};
+use oncall::backend::{bound, execute, pg_apply, pg_backend, pg_get, pg_list};
 use oncall::error::{ReadError, StoreError};
 use oncall::limits::MAX_OPEN_ALERTS;
 use oncall::rows::{cell_bool, cell_int, cell_text, cell_time};
@@ -59,6 +60,9 @@ const OPENED_COLUMN: usize = 6;
 
 
 const PARAMETER_KINDS: usize = 4;
+
+
+const READ_AND_WRITE: usize = 2;
 
 
 #[cfg(unix)]
@@ -399,5 +403,67 @@ async fn a_stored_true_bool_decodes_as_true_and_an_undecodable_cell_is_not_a_boo
     assert!(cell_bool(row, 0, "created")?);
     assert!(cell_bool(row, 1, "created").is_err());
     assert!(cell_int(row, 1, "x").is_err() && cell_text(row, 1, "x").is_err() && cell_time(row, 1, "x").is_err());
+    Ok(())
+}
+
+
+fn applying_handler(moved: bool) -> Handler {
+    let read = typed(vec![row(FIRST_ID, "cpu-high", "open")]);
+    let written = Reply::Typed {
+        parameters: vec![TEXT_OID, INT8_OID, TEXT_OID, INT8_OID, TIMESTAMPTZ_OID, TIMESTAMPTZ_OID, INT8_OID],
+        columns: columns(),
+        rows: if moved {
+            Vec::new()
+        } else {
+            vec![row(FIRST_ID, "cpu-high", "acknowledged")]
+        },
+    };
+    Arc::new(move |sql| {
+        if sql.starts_with("UPDATE") {
+            written.clone()
+        } else if sql.contains("FROM oncall_alerts") {
+            read.clone()
+        } else {
+            Reply::Done
+        }
+    })
+}
+
+
+#[tokio::test]
+async fn the_apply_binds_the_tenant_on_the_read_and_the_write_and_returns_the_permit() -> Result<(), Box<dyn Error>> {
+    let mut served = served(applying_handler(false)).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let backend = pg_backend(Arc::clone(&served.engine), Arc::clone(&permits));
+    let now = (backend.clock)();
+    let alert = (backend.apply)(tenant_scope("acme")?, FIRST_ID, Event::Acknowledge, now).await?;
+    assert_eq!(alert.id, FIRST_ID);
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    let params = bound_params(&mut served.fake.statements);
+    assert_eq!(params.len(), READ_AND_WRITE);
+    assert!(params.iter().all(|entry| entry.starts_with("PARAMS acme|")), "{params:?}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_moved_version_is_a_conflict_and_an_empty_pool_is_busy() -> Result<(), Box<dyn Error>> {
+    let served = served(applying_handler(true)).await?;
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let now = (pg_backend(Arc::clone(&served.engine), Arc::clone(&permits)).clock)();
+    let moved = pg_apply(
+        Arc::clone(&served.engine),
+        Arc::clone(&permits),
+        tenant_scope("acme")?,
+        FIRST_ID,
+        Event::Resolve,
+        now,
+    )
+    .await;
+    assert!(matches!(moved, Err(ReadError::Store(StoreError::Conflict))));
+    assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
+    let empty = Arc::new(Semaphore::new(0));
+    let busy = pg_apply(Arc::clone(&served.engine), empty, tenant_scope("acme")?, FIRST_ID, Event::Resolve, now).await;
+    assert!(matches!(busy, Err(ReadError::Lease(LeaseError::Busy))));
     Ok(())
 }

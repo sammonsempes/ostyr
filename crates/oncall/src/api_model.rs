@@ -1,4 +1,4 @@
-use crate::types::{GetFn, ListFn};
+use crate::types::{ApplyFn, GetFn, ListFn, NowFn};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -8,6 +8,8 @@ use utoipa::{IntoParams, ToSchema};
 pub struct OncallBackend {
     pub list: ListFn,
     pub get: GetFn,
+    pub apply: ApplyFn,
+    pub clock: NowFn,
 }
 
 
@@ -19,6 +21,12 @@ pub struct ListQuery {
     /// Number of alerts, 1 to 1000, default 50.
     pub limit: Option<String>,
 }
+
+
+/// The body of an acknowledge or resolve: an empty object, so `tenant`, `actor` or any other key is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeRequest {}
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]

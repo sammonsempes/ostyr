@@ -1,7 +1,7 @@
-use crate::alert::{Alert, AlertPage, Cell, Param, Statement};
+use crate::alert::{Alert, AlertPage, Cell, Event, Param, Statement};
 use crate::api_model::OncallBackend;
 use crate::error::{ReadError, StoreError};
-use crate::store::{get_alert, open_alert_page};
+use crate::store::{apply_event, get_alert, open_alert_page};
 use crate::types::Row;
 use alerts::backend::lease;
 use chrono::{DateTime, Utc};
@@ -94,11 +94,30 @@ pub async fn pg_get(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphor
 }
 
 
+/// Reads, transitions and writes under the tenant bound as `$1` on both statements; a moved version or a refused transition is a `StoreError`.
+pub async fn pg_apply(
+    engine: Arc<ReloadEngine<PgSettings>>,
+    permits: Arc<Semaphore>,
+    scope: TenantScope,
+    id: i64,
+    event: Event,
+    now: DateTime<Utc>,
+) -> Result<Alert, ReadError> {
+    let held = lease(&engine, &permits).await?;
+    let mut exec = |bound_scope: &TenantScope, statement: Statement| execute(&held.client, held.deadline, bound_scope.clone(), statement);
+    Ok(apply_event(&mut exec, &scope, id, event, now).await?)
+}
+
+
 pub fn pg_backend(engine: Arc<ReloadEngine<PgSettings>>, permits: Arc<Semaphore>) -> OncallBackend {
     let list_engine = Arc::clone(&engine);
     let list_permits = Arc::clone(&permits);
+    let get_engine = Arc::clone(&engine);
+    let get_permits = Arc::clone(&permits);
     OncallBackend {
         list: Arc::new(move |scope, limit| Box::pin(pg_list(Arc::clone(&list_engine), Arc::clone(&list_permits), scope, limit))),
-        get: Arc::new(move |scope, id| Box::pin(pg_get(Arc::clone(&engine), Arc::clone(&permits), scope, id))),
+        get: Arc::new(move |scope, id| Box::pin(pg_get(Arc::clone(&get_engine), Arc::clone(&get_permits), scope, id))),
+        apply: Arc::new(move |scope, id, event, now| Box::pin(pg_apply(Arc::clone(&engine), Arc::clone(&permits), scope, id, event, now))),
+        clock: Utc::now,
     }
 }

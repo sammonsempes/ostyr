@@ -38,6 +38,9 @@ pub const PERMISSION_CMDB_READ: &str = "cmdb.read";
 pub const PERMISSION_ONCALL_READ: &str = "oncall.read";
 
 
+pub const PERMISSION_ONCALL_ACKNOWLEDGE: &str = "oncall.acknowledge";
+
+
 pub const PERMISSION_STATUS_WRITE: &str = "status.write";
 
 
@@ -96,6 +99,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
+        PERMISSION_ONCALL_ACKNOWLEDGE,
     ];
     let responder = [
         PERMISSION_EVENTS_READ,
@@ -105,6 +109,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
+        PERMISSION_ONCALL_ACKNOWLEDGE,
         PERMISSION_STATUS_WRITE,
         PERMISSION_RESPONSE_EXECUTE,
     ];
@@ -116,6 +121,7 @@ pub fn builtin_catalog() -> RoleCatalog {
         PERMISSION_CASES_WRITE,
         PERMISSION_CMDB_READ,
         PERMISSION_ONCALL_READ,
+        PERMISSION_ONCALL_ACKNOWLEDGE,
         PERMISSION_STATUS_WRITE,
         PERMISSION_RESPONSE_EXECUTE,
         PERMISSION_USERS_MANAGE,
