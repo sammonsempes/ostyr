@@ -9,3 +9,6 @@ pub mod model;
 pub mod scan;
 pub mod types;
 pub mod validate;
+pub mod windows;
+pub mod wua_script;
+pub mod wua_wire;

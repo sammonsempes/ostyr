@@ -6,8 +6,13 @@ license.workspace = true
 publish = false
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 vuln-match = { version = "0.0.0", path = "../vuln-match" }
+
+[dev-dependencies]
+base64 = "0.22"
 
 [lints]
 workspace = true

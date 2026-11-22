@@ -12,6 +12,15 @@ pub const MAX_INPUT_LINES: usize = 100_000;
 pub const MAX_LINE_BYTES: usize = 4096;
 
 
+pub const MAX_WINDOWS_UPDATES: usize = 1000;
+
+
+pub const MAX_ITEMS_PER_UPDATE: usize = 8;
+
+
+pub const MAX_TITLE_BYTES: usize = 512;
+
+
 pub fn default_limits() -> Limits {
     Limits {
         max_bytes: MAX_INPUT_BYTES,

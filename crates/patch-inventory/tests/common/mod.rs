@@ -1,6 +1,6 @@
 use patch_inventory::limits::default_limits;
-use patch_inventory::model::{Device, Limits, SkipReason};
-use patch_inventory::types::SkipCounts;
+use patch_inventory::model::{Device, Limits};
+use std::collections::BTreeMap;
 use std::io::Read;
 
 
@@ -33,6 +33,6 @@ pub fn limits() -> Limits {
 }
 
 
-pub fn skipped_count(skipped: &SkipCounts, reason: SkipReason) -> usize {
+pub fn skipped_count<Reason: Ord>(skipped: &BTreeMap<Reason, usize>, reason: Reason) -> usize {
     skipped.get(&reason).copied().unwrap_or(0)
 }
