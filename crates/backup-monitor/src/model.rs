@@ -123,6 +123,19 @@ pub struct RepositoryFloor {
     pub restic: Option<ResticSource>,
     #[serde(default)]
     pub borg: Option<BorgSource>,
+    #[serde(default)]
+    pub restore_test: Option<RestoreTest>,
+}
+
+
+/// The canary file a restore test dumps from the newest snapshot of `host` and the SHA-256 (64 lowercase hex) its content must have; checked when planned.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreTest {
+    pub host: String,
+    pub path: String,
+    pub sha256: String,
+    pub max_bytes: u64,
 }
 
 
