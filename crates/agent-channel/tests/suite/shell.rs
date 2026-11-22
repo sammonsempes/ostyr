@@ -736,7 +736,32 @@ fn a_tenant_at_its_cap_is_refused_while_another_tenant_still_adds() -> TestResul
         Err(GateError::TenantFull)
     );
     gate_add(&gate, "other", "agent-1", "own-0", START_DEADLINE, 1)?;
-    assert_eq!(gate_add(&gate, "acme", "agent-1", "own-0", START_DEADLINE, 1), Err(GateError::TenantFull));
+    assert_eq!(gate_add(&gate, "acme", "agent-1", "own-0", START_DEADLINE, 1), Err(GateError::Duplicate));
+    Ok(())
+}
+
+
+#[test]
+fn a_running_session_id_is_refused_as_a_duplicate_until_it_is_dropped() -> TestResult {
+    let gate = new_gate(Box::new(|| 0));
+    gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
+    let taken = gate_take(&gate, &agent_identity(), SESSION).ok_or("not taken")?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1), Err(GateError::Duplicate));
+    assert!(gate_take(&gate, &agent_identity(), SESSION).is_none());
+    gate_add(&gate, "acme", "agent-2", SESSION, START_DEADLINE, 1)?;
+    drop(taken);
+    assert!(lock_gate(&gate).running.is_empty());
+    gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
+    Ok(())
+}
+
+
+#[test]
+fn a_duplicate_at_a_full_table_is_reported_as_a_duplicate() -> TestResult {
+    let gate = new_gate(Box::new(|| 0));
+    gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1)?;
+    fill_other_tenants(&gate, MAX_SHELL_SESSIONS - 1)?;
+    assert_eq!(gate_add(&gate, "acme", "agent-1", SESSION, START_DEADLINE, 1), Err(GateError::Duplicate));
     Ok(())
 }
 

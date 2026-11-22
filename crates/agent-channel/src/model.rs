@@ -4,7 +4,7 @@ use crate::types::{AuditSink, ClockFn, CommandSource, EventSink, NowFn, SharedSe
 use agent_command::model::Command;
 use secrecy::SecretString;
 use serde::Deserialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -614,6 +614,7 @@ pub struct GateTable {
     pub pending: HashMap<(Identity, String), PendingShell>,
     pub active: usize,
     pub active_by_tenant: HashMap<String, usize>,
+    pub running: HashSet<(Identity, String)>,
 }
 
 
@@ -627,7 +628,8 @@ pub struct ShellGate {
 /// One running session of the gate; dropping it gives the place back.
 pub struct ActiveShell {
     pub gate: Arc<ShellGate>,
-    pub tenant: String,
+    pub identity: Identity,
+    pub session_id: String,
 }
 
 

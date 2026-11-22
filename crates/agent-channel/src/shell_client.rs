@@ -15,7 +15,7 @@ use prost::Message;
 use std::future::ready;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::time::{interval_at, timeout, Instant};
+use tokio::time::{interval_at, timeout, Instant, MissedTickBehavior};
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::Elapsed;
 use tonic::client::Grpc;
@@ -64,7 +64,9 @@ pub fn reader_frames(reader: ShellReader) -> impl Stream<Item = ShellFrame> + Se
 /// `Open` first, then the output and a keepalive every `SHELL_KEEPALIVE_SECONDS`; the stream ends once the output has ended.
 pub fn outbound_frames(session_id: &str, reader: ShellReader) -> impl Stream<Item = ShellFrame> + Send {
     let period = Duration::from_secs(SHELL_KEEPALIVE_SECONDS);
-    let ticks = IntervalStream::new(interval_at(Instant::now() + period, period));
+    let mut interval = interval_at(Instant::now() + period, period);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let ticks = IntervalStream::new(interval);
     let keepalives = ticks.map(|_tick| Some(frame_of(Frame::Keepalive(ShellKeepalive {}))));
     let output = reader_frames(reader).map(Some).chain(stream::once(ready(None)));
     let open = frame_of(Frame::Open(ShellOpen {
