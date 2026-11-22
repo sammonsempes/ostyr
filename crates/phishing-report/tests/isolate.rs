@@ -820,3 +820,76 @@ fn the_largest_accepted_policy_fits_the_request_line() -> Result<(), Box<dyn std
     assert_eq!(record.sender.as_deref(), Some("a@example.test"));
     Ok(())
 }
+
+
+const KID_FIELD: usize = 2;
+
+
+const GONE_POLLS: u32 = 500;
+
+
+const GONE_POLL_MILLIS: u64 = 10;
+
+
+fn is_gone(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |text| {
+        text.rsplit(')').next().and_then(|rest| rest.split_whitespace().next()) == Some("Z")
+    })
+}
+
+
+struct GroupRun {
+    result: Result<Triage, TriageError>,
+    same_group: bool,
+    gone: bool,
+}
+
+
+fn run_leaving_a_group(tail: &str) -> Result<GroupRun, Box<dyn std::error::Error>> {
+    let dir = work_dir()?;
+    let note = dir.path().join("note");
+    let body = format!(
+        "/bin/sleep 300 >/dev/null 2>&1 </dev/null &\nkid=$!\necho \"$$ $(cut -d' ' -f5 /proc/$kid/stat) $kid\" > {}\n{tail}",
+        note.display()
+    );
+    let script = install_script(dir.path(), "group.sh", &body)?;
+    let result = run_child_process(
+        Command::new(script),
+        b"x".to_vec(),
+        &limits_for_fakes(),
+        FAST_GRACE_MILLIS,
+        (read_capped, spawn_job),
+    );
+    let text = std::fs::read_to_string(&note)?;
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    let same_group = fields.first() == fields.get(1);
+    let kid = fields.get(KID_FIELD).ok_or("no pid")?;
+    let gone = (0..GONE_POLLS).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(GONE_POLL_MILLIS));
+        is_gone(kid)
+    });
+    Ok(GroupRun { result, same_group, gone })
+}
+
+
+#[test]
+fn a_child_leaving_a_background_process_in_its_group_is_swept_on_every_exit_path() -> Result<(), Box<dyn std::error::Error>> {
+    LazyLock::force(&ANCHOR);
+    let dir = work_dir()?;
+    let record = dir.path().join("record.json");
+    std::fs::write(&record, serde_json::to_string(&Triage::default())?)?;
+    let cat = format!("exec /bin/cat {}", record.display());
+    let cases = [
+        (cat.as_str(), Ok(Triage::default())),
+        ("echo nope", Err(TriageError::ChildOutput)),
+        ("exit 3", Err(TriageError::Unparsable)),
+        ("exit 1", Err(TriageError::ChildFailed)),
+    ];
+    cases.iter().try_for_each(|(tail, expected)| {
+        let run = run_leaving_a_group(tail)?;
+        assert_eq!(&run.result, expected);
+        assert!(run.same_group);
+        assert!(run.gone, "the background process survived: {tail}");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
