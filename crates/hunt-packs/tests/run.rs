@@ -14,8 +14,9 @@ use hunt_packs::run::{
 use metric_alerts::fetch::agent_for;
 use sample::{pack, param, sent_params, settings, NOW, PASSWORD};
 use siem_ingest::error::InsertClass;
+use socket2::{Domain, Socket, Type};
 use std::io::{self, Read};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::Duration;
 use stub::{reply, serve};
 
@@ -243,8 +244,11 @@ fn server_failures_keep_only_the_class() -> TestResult {
 
 #[test]
 fn a_dead_server_is_unavailable() -> TestResult {
-    let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let closed = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    closed.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = closed.local_addr()?.as_socket().ok_or("not an inet address")?.port();
     let outcome = run(port, "acme", LONG);
+    drop(closed);
     assert!(matches!(outcome, Err(RunError::Failed(InsertClass::Unavailable))), "{outcome:?}");
     Ok(())
 }

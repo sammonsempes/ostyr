@@ -111,8 +111,10 @@ async fn a_body_that_stalls_ends_at_the_deadline_in_either_phase() -> TestResult
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_port_is_a_connect_error() -> TestResult {
-    let used = endpoint(format!("http://127.0.0.1:{}", closed_port()?), None);
+    let (closed, closed_port) = closed_port()?;
+    let used = endpoint(format!("http://127.0.0.1:{closed_port}"), None);
     let got = call(&used).await?.err();
+    drop(closed);
     assert!(
         matches!(
             got,

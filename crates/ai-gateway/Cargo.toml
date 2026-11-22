@@ -27,6 +27,7 @@ base64 = "0.22"
 core-audit = { version = "0.0.0", path = "../core-audit" }
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+socket2 = "0.6"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-log = "0.2"

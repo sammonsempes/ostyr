@@ -32,6 +32,7 @@ tracing = "0.1"
 libc = "0.2"
 
 [dev-dependencies]
+socket2 = "0.6"
 tempfile = "3"
 webauthn-authenticator-rs = { version = "0.6.2", features = ["softpasskey"] }
 

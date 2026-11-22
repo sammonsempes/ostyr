@@ -2,9 +2,10 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, SanType}
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use socket2::{Domain, Socket, Type};
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
@@ -100,9 +101,12 @@ pub fn held_server(partial: Vec<u8>) -> Result<Held, Box<dyn Error>> {
 }
 
 
-pub fn closed_port() -> Result<u16, Box<dyn Error>> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    Ok(listener.local_addr()?.port())
+/// A bound, never listening socket: Linux refuses connections to it, and no other test can take its port while it lives.
+pub fn closed_port() -> Result<(Socket, u16), Box<dyn Error>> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket.local_addr()?.as_socket().ok_or("not an inet address")?.port();
+    Ok((socket, port))
 }
 
 

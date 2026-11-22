@@ -13,10 +13,11 @@ use hardware_health::model::{BlindReason, DeviceReport, FetchSession, Health, Re
 use hardware_health::redfish::parse_redfish;
 use hardware_health::redfish_assess::assess_redfish;
 use hardware_health::redfish_fetch::{basic_header, build_agent, fetch_document, get_body, is_member_path, member_paths, poll_device, role_in};
+use socket2::{Domain, Socket, Type};
 use standin::{reply, requests, start, Reply, Standin};
 use std::error::Error;
 use std::io::Write;
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -442,6 +443,19 @@ fn a_slow_device_is_cut_at_the_injected_deadline() -> TestResult {
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> std::io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| std::io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn every_get_failure_class_is_named() -> TestResult {
     let rig = rig(|_, path| match path {
@@ -463,10 +477,9 @@ fn every_get_failure_class_is_named() -> TestResult {
     let expired = session_for(&rig, Instant::now())?;
     assert!(fetch_document(&expired, "/x", "x").is_none());
     assert_eq!(GetError::Expired.to_string(), "deadline reached");
-    let closed = TcpListener::bind("127.0.0.1:0")?;
+    let (_closed, closed_port) = closed_socket()?;
     let mut dead = rig.device.clone();
-    dead.base_url = format!("https://127.0.0.1:{}", closed.local_addr()?.port());
-    drop(closed);
+    dead.base_url = format!("https://127.0.0.1:{closed_port}");
     let unreachable = FetchSession {
         base: dead.base_url.clone(),
         ..session(&rig)?

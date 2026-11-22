@@ -17,11 +17,12 @@ use metric_alerts::query::{parse_tenant_id, rule_sql, MetricQuery};
 use metric_alerts::types::FetchResult;
 use siem_ingest::error::InsertClass;
 use siem_schema::metrics::MetricsRetention;
+use socket2::{Domain, Socket, Type};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Read};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 use stub::reply;
@@ -199,6 +200,15 @@ fn fetch(port: u16, remaining: Duration) -> Result<FetchResult, Box<dyn Error>> 
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> Result<(Socket, u16), Box<dyn Error>> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket.local_addr()?.as_socket().ok_or("not an inet address")?.port();
+    Ok((socket, port))
+}
+
+
 fn listener() -> Result<(TcpListener, u16), Box<dyn Error>> {
     let bound = TcpListener::bind("127.0.0.1:0")?;
     let port = bound.local_addr()?.port();
@@ -347,8 +357,7 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
 
 #[test]
 fn a_dead_peer_is_unavailable() -> TestResult {
-    let (bound, port) = listener()?;
-    drop(bound);
+    let (_closed, port) = closed_socket()?;
     let outcome = fetch(port, LONG)?;
     assert!(matches!(outcome, Err(FetchError::Failed(InsertClass::Unavailable))));
     Ok(())

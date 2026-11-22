@@ -5,9 +5,10 @@ mod stub;
 
 use common::types::TestResult;
 use metric_alerts::fetch_cli::{run_cli, run_files, FetchCliError, USAGE};
+use socket2::{Domain, Socket, Type};
 use std::fs;
 use std::io::{self, Write};
-use std::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use stub::reply;
 use tempfile::{tempdir, TempDir};
@@ -71,10 +72,22 @@ fn the_points_are_printed_per_rule() -> TestResult {
 }
 
 
+/// A bound, never listening socket: connections to it are refused and its port stays taken while it lives.
+fn closed_socket() -> io::Result<(Socket, u16)> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket()
+        .ok_or_else(|| io::Error::other("not an inet address"))?
+        .port();
+    Ok((socket, port))
+}
+
+
 #[test]
 fn every_failure_is_typed() -> TestResult {
-    let bound = TcpListener::bind("127.0.0.1:0")?;
-    let port = bound.local_addr()?.port();
+    let (_closed, port) = closed_socket()?;
     let (dir, settings, rules) = files(port)?;
     let mut out = Vec::new();
     let usage = run_cli(&[], NOW, &mut out);
@@ -98,7 +111,6 @@ fn every_failure_is_typed() -> TestResult {
         run_files(&text(&no_password), &rules, "acme", NOW, &mut out),
         Err(FetchCliError::Fetch(_))
     ));
-    drop(bound);
     assert!(matches!(
         run_files(&settings, &rules, "acme", NOW, &mut out),
         Err(FetchCliError::Fetch(_))
