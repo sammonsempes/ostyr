@@ -14,6 +14,7 @@ pub mod load;
 pub mod misp;
 pub mod model;
 pub mod read;
+pub mod retro;
 pub mod run;
 pub mod sample;
 pub mod stix;
