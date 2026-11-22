@@ -6,6 +6,8 @@ pub mod compare;
 pub mod coverage;
 pub mod declarations;
 pub mod error;
+#[cfg(unix)]
+pub mod indicator;
 pub mod model;
 pub mod parse;
 #[cfg(unix)]
