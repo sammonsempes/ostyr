@@ -38,6 +38,10 @@ const MIN_VALUE: f64 = 0.0;
 const MAX_VALUE: f64 = 1.0;
 
 
+/// The largest gap between the caller's clock and the database clock, in seconds.
+pub const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
+
+
 /// The GRC `max_age_hours` of the built-in controls; a row not seen within this span is stale.
 pub const STALE_AFTER_MICROS: i64 = STALE_AFTER_HOURS * MICROS_PER_HOUR;
 
@@ -64,7 +68,7 @@ FROM classified c JOIN expected e ON e.baseline = c.baseline GROUP BY c.asset, c
 ), per_asset AS (\
 SELECT asset, sum(passed) AS passed, sum(failed) + sum(missing) + sum(passed) AS denominator FROM per_baseline GROUP BY asset\
 ) SELECT \
-COALESCE((SELECT avg(passed::numeric / NULLIF(denominator, 0))::float8::text FROM per_asset WHERE denominator > 0), ''), \
+COALESCE((SELECT avg(passed::numeric / NULLIF(denominator, 0))::text FROM per_asset WHERE denominator > 0), ''), \
 (SELECT count(*) FROM per_asset WHERE denominator > 0)::text, \
 (SELECT count(*) FROM per_asset WHERE denominator = 0)::text, \
 (SELECT count(*) FROM classified WHERE age = 'fresh' AND verdict = 'excepted')::text, \
@@ -74,7 +78,8 @@ COALESCE((SELECT avg(passed::numeric / NULLIF(denominator, 0))::float8::text FRO
 (SELECT COALESCE(sum(missing), 0) FROM per_baseline)::text, \
 (SELECT count(*) FROM tenant_rows WHERE NOT listed)::text, \
 (SELECT count(*) FROM tenant_rows)::text, \
-COALESCE((SELECT min(last_seen_micros) FROM classified WHERE age = 'fresh')::text, '')";
+COALESCE((SELECT min(last_seen_micros) FROM classified WHERE age = 'fresh')::text, ''), \
+extract(epoch from statement_timestamp())::bigint::text";
 
 
 pub fn check_baselines(scope: &TenantScope, baselines: &[Baseline]) -> Result<(), IndicatorError> {
@@ -148,10 +153,19 @@ pub fn observed_at_of(oldest: &str) -> Result<OffsetDateTime, IndicatorError> {
 }
 
 
+pub fn check_clock(now_micros: u64, database_seconds: &str) -> Result<(), IndicatorError> {
+    let database = database_seconds.parse::<u64>().map_err(|_error| IndicatorError::BadRow)?;
+    let skew = (now_micros / MICROS_PER_SECOND).abs_diff(database);
+    (skew <= MAX_CLOCK_SKEW_SECONDS)
+        .then_some(())
+        .ok_or(IndicatorError::ClockSkew { max: MAX_CLOCK_SKEW_SECONDS })
+}
+
+
 pub fn value_of(text: &str) -> Result<f64, IndicatorError> {
     let value = text.parse::<f64>().map_err(|_error| IndicatorError::BadRow)?;
     (value.is_finite() && (MIN_VALUE..=MAX_VALUE).contains(&value))
-        .then_some(value)
+        .then_some(value + MIN_VALUE)
         .ok_or(IndicatorError::ValueOutOfRange)
 }
 
@@ -159,7 +173,8 @@ pub fn value_of(text: &str) -> Result<f64, IndicatorError> {
 /// One answer row: no figure (an empty value or no fresh row) is `row: None` with the counts.
 pub fn decode_row(scope: &TenantScope, now_micros: u64, row: &Row) -> Result<IndicatorOutcome, IndicatorError> {
     match row.as_slice() {
-        [value, assets, excepted_only, excepted_rows, error_rows, stale_rows, future_rows, missing, unlisted_rows, rows, oldest] => {
+        [value, assets, excepted_only, excepted_rows, error_rows, stale_rows, future_rows, missing, unlisted_rows, rows, oldest, database_seconds] => {
+            check_clock(now_micros, database_seconds)?;
             let counts = IndicatorCounts {
                 assets: parse_count(assets)?,
                 excepted_only: parse_count(excepted_only)?,
