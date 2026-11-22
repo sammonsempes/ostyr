@@ -27,6 +27,8 @@ pub fn entry() -> Entry {
     Entry {
         case: case("acme", "c1", NOW),
         version: 1,
+        closed_at: None,
+        ever_incident: false,
         alerts: BTreeMap::new(),
     }
 }

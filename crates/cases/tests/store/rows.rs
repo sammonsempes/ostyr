@@ -15,6 +15,8 @@ pub fn good_row() -> Result<Row, Box<dyn std::error::Error>> {
     let entry = Entry {
         case: case("acme", "c1", NOW),
         version: 1,
+        closed_at: None,
+        ever_incident: false,
         alerts: BTreeMap::new(),
     };
     Ok(row_of(&entry)?)
