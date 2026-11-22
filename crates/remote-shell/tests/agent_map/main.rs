@@ -182,7 +182,8 @@ fn an_asset_with_escape_is_refused_without_the_escape() -> TestResult {
 #[test]
 fn unknown_fields_are_refused() -> TestResult {
     refusal("tenant: tenant-a\nagents: []\nextra: 1\n")?;
-    refusal("tenant: tenant-a\nagents:\n  - agent_id: a\n    asset: b\n    more: c\n")?;
+    let text = refusal("tenant: tenant-a\nagents:\n  - agent_id: a\n    asset: b\n    more: c\n")?;
+    assert!(text.contains("unknown field, expected one of"), "{text}");
     Ok(())
 }
 
@@ -288,5 +289,41 @@ fn a_good_reload_swaps_and_removes_a_mapping() -> TestResult {
     assert!(resolve_agent(&snapshot, TENANT, "srv1").is_none());
     assert!(resolve_agent(&snapshot, TENANT, "srv2").is_some());
     assert_eq!(recorded_entries(&recorded)?.len(), 1);
+    Ok(())
+}
+
+
+#[test]
+fn document_text_inside_an_entry_never_reaches_a_refusal() -> TestResult {
+    let marker = "MARKERQZX";
+    let base = file_text(&[("agent-1", "srv1")]);
+    let changed = |from: &str, to: String| base.replace(from, &to);
+    let refusals = [
+        changed("asset: srv1", format!("asset: srv1\n    {marker}: 1")),
+        changed("asset: srv1", format!("asset: srv1\n    asset: {marker}")),
+        changed("asset: srv1", format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")),
+        changed("asset: srv1", format!("asset: {marker}/\u{1b}")),
+        changed("  - agent_id: agent-1\n    asset: srv1", format!("  - {marker}")),
+        changed("asset: srv1", format!("asset: {{{marker}: 1}}")),
+        changed("asset: srv1", format!("asset: [{marker}]")),
+        format!("tenant: {TENANT}\nagents:\n  - agent_id: a\n    {marker}: !{marker} x\n  - [{marker}"),
+        format!("tenant: {TENANT}\nagents: !{marker} [1]"),
+    ];
+    refusals.iter().try_for_each(|text| {
+        let error = parse(text).err().ok_or_else(|| io::Error::other(format!("expected a refusal: {text}")))?;
+        let shown = format!("{error:?} {error}");
+        (!shown.contains(marker))
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("marker leaked: {shown}")))
+    })?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join(FILE);
+    put_file(&path, &base)?;
+    let (audit, recorded) = recording_audit();
+    let engine = open_agent_engine(path.clone(), audit, context())?;
+    put_file(&path, &changed("asset: srv1", format!("asset: srv1\n    {marker}: 1\n    {marker}: 2")))?;
+    let outcome = reload(&engine);
+    let audited = format!("{outcome:?} {:?}", recorded_entries(&recorded)?);
+    assert!(!audited.contains(marker), "{audited}");
     Ok(())
 }

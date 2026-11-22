@@ -28,7 +28,6 @@ pub const STATE_PREFIX: &str = "agents.";
 #[serde(deny_unknown_fields)]
 pub struct AgentFile {
     pub tenant: String,
-    #[serde(deserialize_with = "bounded_entries")]
     pub agents: Vec<AgentEntry>,
 }
 
@@ -49,21 +48,41 @@ pub struct AgentMap {
 }
 
 
-/// At most `MAX_AGENT_ASSETS` entries are built; the entry after the cap is skipped as `IgnoredAny` and refuses the file.
-pub fn bounded_entries<'de, Source>(deserializer: Source) -> Result<Vec<AgentEntry>, Source::Error>
+/// Reads at most `MAX_AGENT_ASSETS + 1` entries as `IgnoredAny`, so the entry after the cap is never built, and refuses a longer sequence.
+pub fn count_entries<'de, Source>(deserializer: Source) -> Result<Vec<IgnoredAny>, Source::Error>
 where
     Source: Deserializer<'de>,
 {
     UntaggedEnumVisitor::new()
         .expecting("a sequence of agent entries")
         .seq(|mut seq| {
-            let entries = (0..MAX_AGENT_ASSETS)
-                .map_while(|_| seq.next_element::<AgentEntry>().transpose())
-                .collect::<Result<Vec<AgentEntry>, _>>()?;
-            let extra = seq.next_element::<IgnoredAny>()?;
-            extra.map_or(Ok(entries), |_| Err(Error::custom(TOO_MANY_ENTRIES)))
+            let items = std::iter::from_fn(|| seq.next_element::<IgnoredAny>().transpose())
+                .take(MAX_AGENT_ASSETS.saturating_add(1))
+                .collect::<Result<Vec<IgnoredAny>, _>>()?;
+            (items.len() <= MAX_AGENT_ASSETS)
+                .then_some(items)
+                .ok_or_else(|| Error::custom(TOO_MANY_ENTRIES))
         })
         .deserialize(deserializer)
+}
+
+
+/// Pass 1 mirror of `AgentFile`: only the entry count; a failure is a fixed text, never the erased parser message.
+#[derive(Debug, Deserialize)]
+pub struct CountFile {
+    #[serde(default, deserialize_with = "count_entries")]
+    pub agents: Vec<IgnoredAny>,
+}
+
+
+/// Pass 1: counts the entries without building them; every error becomes fixed text with the index, never the erased parser message.
+pub fn count_agents(text: &str, file: &str) -> Result<(), ConfigError> {
+    parse_document::<CountFile>(text, file).map(drop).map_err(|error| match error {
+        ConfigError::Parse { message, .. } if message.starts_with(TOO_MANY_ENTRIES) => {
+            refuse(file, format!("agents[{MAX_AGENT_ASSETS}]: {TOO_MANY_ENTRIES}"))
+        }
+        _ => refuse(file, "the document is not a valid agent file".to_owned()),
+    })
 }
 
 
@@ -125,6 +144,7 @@ pub fn validate_file(file: &str, parsed: AgentFile, tenant: &str) -> Result<Agen
 /// Reads at most `MAX_FILE_BYTES` from `reader` and parses exactly those bytes.
 pub fn parse_agent_map(reader: &mut dyn Read, file: &str, tenant: &str) -> Result<AgentMap, ConfigError> {
     let text = read_text_capped(reader, file, MAX_FILE_BYTES)?;
+    count_agents(&text, file)?;
     let parsed = parse_document::<AgentFile>(&text, file)?;
     validate_file(file, parsed, tenant)
 }
