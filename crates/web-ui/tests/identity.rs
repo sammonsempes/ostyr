@@ -1,8 +1,9 @@
 use serde_json::{json, Map};
 use types::TestResult;
 use web_ui::model::{
-    Alert, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView, CaseCountsView,
-    CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView, CertView, CommentView, Language, Severity, SightingView,
+    Alert, AlertDetailView, AlertPage, AssetAttributeView, AssetCountsView, AssetDetailView, AssetKeyView, AssetPageView, AssetSummaryView,
+    CaseCountsView, CaseDetailView, CasePageView, CaseSummaryView, CertDetailView, CertListView, CertView, CommentView, Language, Severity,
+    SightingView,
 };
 use web_ui::pages::{
     alert_page, alerts_page, asset_page, assets_page, case_page_with, cases_page, cert_page, certs_page, clip_dns, clip_identity, comment_notice,
@@ -83,12 +84,60 @@ fn alert_pages(value: &str) -> Vec<String> {
     let other = "x";
     let language = Language::English;
     vec![
-        alert_page(language, "t", &alert_with(value, other, other, other, other, other)).into_string(),
-        alert_page(language, "t", &alert_with(other, value, other, other, other, other)).into_string(),
-        alert_page(language, "t", &alert_with(other, other, value, other, other, other)).into_string(),
-        alert_page(language, "t", &alert_with(other, other, other, value, other, other)).into_string(),
-        alert_page(language, "t", &alert_with(other, other, other, other, value, other)).into_string(),
-        alert_page(language, "t", &alert_with(other, other, other, other, other, value)).into_string(),
+        alert_page(
+            language,
+            "t",
+            &AlertDetailView {
+                alert: alert_with(value, other, other, other, other, other),
+                triage: None,
+            },
+        )
+        .into_string(),
+        alert_page(
+            language,
+            "t",
+            &AlertDetailView {
+                alert: alert_with(other, value, other, other, other, other),
+                triage: None,
+            },
+        )
+        .into_string(),
+        alert_page(
+            language,
+            "t",
+            &AlertDetailView {
+                alert: alert_with(other, other, value, other, other, other),
+                triage: None,
+            },
+        )
+        .into_string(),
+        alert_page(
+            language,
+            "t",
+            &AlertDetailView {
+                alert: alert_with(other, other, other, value, other, other),
+                triage: None,
+            },
+        )
+        .into_string(),
+        alert_page(
+            language,
+            "t",
+            &AlertDetailView {
+                alert: alert_with(other, other, other, other, value, other),
+                triage: None,
+            },
+        )
+        .into_string(),
+        alert_page(
+            language,
+            "t",
+            &AlertDetailView {
+                alert: alert_with(other, other, other, other, other, value),
+                triage: None,
+            },
+        )
+        .into_string(),
         alert_list(alert_with(value, other, other, other, other, other)),
         alert_list(alert_with(other, value, other, other, other, other)),
     ]

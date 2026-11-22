@@ -1,4 +1,4 @@
-use crate::auth::{verdicts_with_from, PASS};
+use crate::auth::{oversized_untrusted, verdicts_with_from, PASS};
 use crate::claim::{claim_scan, domain_set};
 use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
@@ -323,14 +323,15 @@ fn raw_value<'a>(message: &'a Message<'_>, header: &Header<'_>) -> Option<&'a st
 fn authentication(message: &Message<'_>, context: &Context<'_>, counts: &mut Counts) -> (AuthVerdicts, Vec<Vec<String>>) {
     let limits = context.limits;
     let found: Vec<&Header<'_>> = header_slice(message, limits).iter().filter(|header| is_auth_header(header)).collect();
-    let oversized = found.iter().filter(|header| header_bytes(header) > limits.header_bytes).count();
-    counts.headers_skipped += oversized;
-    let texts: Vec<Option<&str>> = found
+    let (big, small): (Vec<&Header<'_>>, Vec<&Header<'_>>) = found.iter().partition(|header| header_bytes(header) > limits.header_bytes);
+    let untrusted = big
         .iter()
-        .filter(|header| header_bytes(header) <= limits.header_bytes)
-        .map(|header| raw_value(message, header))
-        .collect();
-    verdicts_with_from(&texts, context.trusted, oversized > 0, counts)
+        .filter(|header| oversized_untrusted(raw_bytes(message, header), limits.header_bytes, context.trusted))
+        .count();
+    counts.headers_skipped += big.len();
+    counts.auth_oversized_untrusted += untrusted;
+    let texts: Vec<Option<&str>> = small.iter().map(|header| raw_value(message, header)).collect();
+    verdicts_with_from(&texts, context.trusted, big.len() > untrusted, counts)
 }
 
 

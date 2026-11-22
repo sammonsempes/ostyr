@@ -1,6 +1,9 @@
 use crate::defender::{is_guid, is_utc_time, CONTROLLED_FOLDER_ACCESS, MAX_ACTION, MAX_ASR_RULES, MAX_TEXT_BYTES, STATUS_FIELDS};
 use crate::model::{DefenderRefusal, Kind, Spec};
-use crate::types::Sections;
+use crate::types::Raw;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
@@ -102,18 +105,48 @@ pub fn collect_fields(source: &Map<String, Value>, specs: &[Spec], out: &mut Map
 }
 
 
-pub fn array_of<'a>(source: &'a Map<String, Value>, key: &str) -> Result<&'a [Value], &'static str> {
-    match source.get(key) {
-        None => Err(MISSING),
-        Some(Value::Null) => Ok(&[]),
-        Some(Value::Array(items)) => Ok(items.as_slice()),
-        Some(_) => Err(WRONG_TYPE),
-    }
+pub fn keep_null<'de, Source: Deserializer<'de>>(deserializer: Source) -> Result<Option<Raw>, Source::Error> {
+    Raw::deserialize(deserializer).map(Some)
 }
 
 
-pub fn asr_arrays(preference: &Map<String, Value>) -> Result<(&[Value], &[Value]), &'static str> {
-    array_of(preference, IDS_KEY).and_then(|ids| array_of(preference, ACTIONS_KEY).map(|actions| (ids, actions)))
+#[derive(Deserialize)]
+pub struct RootShape {
+    pub status: Option<Value>,
+    pub preference: Option<Raw>,
+}
+
+
+#[derive(Deserialize)]
+pub struct PreferenceShape {
+    #[serde(rename = "AttackSurfaceReductionRules_Ids", default, deserialize_with = "keep_null")]
+    pub ids: Option<Raw>,
+    #[serde(rename = "AttackSurfaceReductionRules_Actions", default, deserialize_with = "keep_null")]
+    pub actions: Option<Raw>,
+    #[serde(rename = "EnableControlledFolderAccess")]
+    pub folder: Option<Value>,
+}
+
+
+pub fn count_items(raw: &RawValue) -> Result<usize, &'static str> {
+    serde_json::from_str::<Option<Vec<IgnoredAny>>>(raw.get())
+        .map(|items| items.map_or(0, |list| list.len()))
+        .map_err(|_| WRONG_TYPE)
+}
+
+
+pub fn list_of(raw: &RawValue) -> Vec<Value> {
+    serde_json::from_str::<Vec<Value>>(raw.get()).unwrap_or_else(|_| Vec::new())
+}
+
+
+pub fn counted(raw: &Option<Raw>) -> Result<usize, &'static str> {
+    raw.as_deref().ok_or(MISSING).and_then(count_items)
+}
+
+
+pub fn raw_rules(raw: &Option<Raw>) -> Vec<Value> {
+    raw.as_deref().map_or_else(Vec::new, list_of)
 }
 
 
@@ -125,26 +158,29 @@ pub fn asr_rule((id, action): (&Value, &Value)) -> Option<Value> {
 }
 
 
-pub fn collect_asr(preference: &Map<String, Value>, out: &mut Map<String, Value>, unknown: &mut Vec<Value>, findings: &mut Vec<&'static str>) {
-    match asr_arrays(preference) {
+pub fn collect_asr(shape: &PreferenceShape, out: &mut Map<String, Value>, unknown: &mut Vec<Value>, findings: &mut Vec<&'static str>) {
+    match counted(&shape.ids).and_then(|ids| counted(&shape.actions).map(|actions| (ids, actions))) {
         Err(reason) => unknown.push(json!({"field": "asr_rules", "reason": reason})),
-        Ok((ids, actions)) if ids.len() != actions.len() => findings.push("asr_arrays_mismatch"),
-        Ok((ids, actions)) => {
-            let rules: Vec<Value> = ids.iter().zip(actions).take(MAX_ASR_RULES).filter_map(asr_rule).collect();
-            let taken = ids.len().min(MAX_ASR_RULES);
-            let over = ids.len() - taken;
-            let refused = taken - rules.len();
-            findings.extend((over > 0).then_some("asr_rules_over_limit"));
+        Ok((ids, actions)) if ids != actions => findings.push("asr_arrays_mismatch"),
+        Ok((total, _)) if total > MAX_ASR_RULES => {
+            findings.push("asr_rules_over_limit");
+            out.insert("asr_rules_over_limit".to_string(), Value::from(total));
+        }
+        Ok((total, _)) => {
+            let ids = raw_rules(&shape.ids);
+            let actions = raw_rules(&shape.actions);
+            let rules: Vec<Value> = ids.iter().zip(&actions).filter_map(asr_rule).collect();
+            let refused = total - rules.len();
             findings.extend((refused > 0).then_some("asr_rules_refused"));
             out.insert("asr_rules".to_string(), Value::Array(rules));
-            out.insert("asr_rules_over_limit".to_string(), Value::from(over));
+            out.insert("asr_rules_over_limit".to_string(), Value::from(0));
             out.insert("asr_rules_refused".to_string(), Value::from(refused));
         }
     }
 }
 
 
-pub fn parse_root(text: &str) -> Result<Value, DefenderRefusal> {
+pub fn parse_root(text: &str) -> Result<RootShape, DefenderRefusal> {
     let body = text.strip_prefix(BOM).unwrap_or(text).trim();
     if body.is_empty() {
         Err(DefenderRefusal::Unavailable)
@@ -158,14 +194,38 @@ pub fn parse_root(text: &str) -> Result<Value, DefenderRefusal> {
 }
 
 
-pub fn sections(root: &Value) -> Result<Sections<'_>, DefenderRefusal> {
-    let object = root.as_object().ok_or(DefenderRefusal::Malformed)?;
-    let status = match object.get("status") {
-        None | Some(Value::Null) => Err(DefenderRefusal::Unavailable),
+pub fn status_of(root: &RootShape) -> Result<&Map<String, Value>, DefenderRefusal> {
+    match &root.status {
+        None => Err(DefenderRefusal::Unavailable),
+        Some(Value::Object(status)) if STATUS_FIELDS.iter().all(|spec| !status.contains_key(spec.source)) => Err(DefenderRefusal::Unavailable),
         Some(Value::Object(status)) => Ok(status),
         Some(_) => Err(DefenderRefusal::Malformed),
-    }?;
-    Ok((status, object.get("preference").and_then(Value::as_object)))
+    }
+}
+
+
+pub fn preference_of(root: &RootShape) -> Result<PreferenceShape, &'static str> {
+    match root.preference.as_deref() {
+        None => Err(MISSING),
+        Some(raw) if !raw.get().starts_with('{') => Err(WRONG_TYPE),
+        Some(raw) => serde_json::from_str(raw.get()).map_err(|_| WRONG_TYPE),
+    }
+}
+
+
+pub fn collect_preference(root: &RootShape, out: &mut Map<String, Value>, unknown: &mut Vec<Value>, findings: &mut Vec<&'static str>) {
+    match preference_of(root) {
+        Ok(shape) => {
+            let mut source = Map::new();
+            source.extend(shape.folder.clone().map(|value| (CONTROLLED_FOLDER_ACCESS.source.to_string(), value)));
+            collect_fields(&source, &[CONTROLLED_FOLDER_ACCESS], out, unknown);
+            collect_asr(&shape, out, unknown, findings);
+        }
+        Err(reason) => {
+            unknown.push(json!({"field": CONTROLLED_FOLDER_ACCESS.name, "reason": reason}));
+            unknown.push(json!({"field": "asr_rules", "reason": reason}));
+        }
+    }
 }
 
 
@@ -176,17 +236,14 @@ pub fn parse_defender(output: &[u8]) -> Result<Map<String, Value>, DefenderRefus
         DefenderRefusal::Undecodable
     })?;
     let root = parse_root(text)?;
-    let (status, preference) = sections(&root)?;
-    let empty = Map::new();
-    let chosen = preference.unwrap_or(&empty);
+    let status = status_of(&root)?;
     let mut out = Map::new();
     let mut unknown: Vec<Value> = Vec::new();
     let mut findings: Vec<&'static str> = Vec::new();
     collect_fields(status, &STATUS_FIELDS, &mut out, &mut unknown);
-    collect_fields(chosen, &[CONTROLLED_FOLDER_ACCESS], &mut out, &mut unknown);
+    collect_preference(&root, &mut out, &mut unknown, &mut findings);
     let folder_name = out.get(CONTROLLED_FOLDER_ACCESS.name).and_then(Value::as_u64).map(folder_access_name);
     out.extend(folder_name.map(|name| ("controlled_folder_access_name".to_string(), Value::from(name))));
-    collect_asr(chosen, &mut out, &mut unknown, &mut findings);
     out.insert("unknown".to_string(), Value::Array(unknown));
     out.insert("findings".to_string(), json!(findings));
     Ok(out)

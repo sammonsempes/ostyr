@@ -32,6 +32,9 @@ const FIELD_COUNT: usize = 9;
 const OVER_LIMIT: usize = 65;
 
 
+const HOSTILE_ELEMENTS: usize = 3_000;
+
+
 const RUNS: u32 = 3;
 
 
@@ -178,7 +181,20 @@ fn the_argument_vector_is_the_const_script_and_flags_only() -> TestResult {
     ];
     assert_eq!(defender_args(), expected);
     assert_eq!(POWERSHELL_PATH, r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
-    assert!(SCRIPT.contains("Get-MpComputerStatus") && SCRIPT.contains("Get-MpPreference") && SCRIPT.contains("ConvertTo-Json -Compress -Depth 3"));
+    for qualified in [
+        "Defender\\Get-MpComputerStatus",
+        "Defender\\Get-MpPreference",
+        "Microsoft.PowerShell.Utility\\Select-Object",
+        "Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress -Depth 3",
+    ] {
+        assert!(SCRIPT.contains(qualified));
+    }
+    assert!(SCRIPT.starts_with("$ErrorActionPreference = 'SilentlyContinue'; $env:Path = 'C:\\Windows\\System32;C:\\Windows'; "));
+    assert_eq!(
+        SCRIPT.matches("Select-Object").count(),
+        SCRIPT.matches("Microsoft.PowerShell.Utility\\Select-Object").count()
+    );
+    assert_eq!(SCRIPT.matches("Get-Mp").count(), SCRIPT.matches("Defender\\Get-Mp").count());
     assert!(SCRIPT.contains("$env:PSModulePath = $env:SystemRoot"));
     assert_eq!(DEFAULT_DEFENDER_INTERVAL_SECONDS, DEFAULT_INTERVAL);
     Ok(())
@@ -358,13 +374,41 @@ fn unequal_arrays_are_one_named_finding_and_no_pairing() -> TestResult {
 
 
 #[test]
-fn sixty_five_rules_keep_sixty_four_and_name_the_rest() -> TestResult {
+fn sixty_five_rules_are_refused_by_name_with_no_element_read() -> TestResult {
     let ids = vec![GUID; OVER_LIMIT];
     let actions = vec![1; OVER_LIMIT];
     let defender = parsed(&rules_root(json!(ids), json!(actions))?)?;
-    assert_eq!(defender.get("asr_rules").and_then(Value::as_array).map(Vec::len), Some(MAX_ASR_RULES));
-    assert_eq!(defender.get("asr_rules_over_limit"), Some(&json!(1)));
+    assert!(defender.get("asr_rules").is_none());
+    assert_eq!(defender.get("asr_rules_over_limit"), Some(&json!(OVER_LIMIT)));
     assert_eq!(defender.get("findings"), Some(&json!(["asr_rules_over_limit"])));
+    let exact = parsed(&rules_root(json!(vec![GUID; MAX_ASR_RULES]), json!(vec![1; MAX_ASR_RULES]))?)?;
+    assert_eq!(exact.get("asr_rules").and_then(Value::as_array).map(Vec::len), Some(MAX_ASR_RULES));
+    Ok(())
+}
+
+
+#[test]
+fn a_huge_array_of_hostile_elements_is_counted_not_built() -> TestResult {
+    let element = "[[[[[[[[[[1]]]]]]]]]]";
+    let items = vec![element; HOSTILE_ELEMENTS].join(",");
+    let text = format!(
+        r#"{{"status":{{"AMServiceEnabled":true}},"preference":{{"AttackSurfaceReductionRules_Ids":[{items}],"AttackSurfaceReductionRules_Actions":[]}}}}"#
+    );
+    let defender = parse_defender(text.as_bytes()).map_err(|refusal| format!("{refusal:?}"))?;
+    assert_eq!(defender.get("findings"), Some(&json!(["asr_arrays_mismatch"])));
+    assert!(defender.get("asr_rules").is_none());
+    Ok(())
+}
+
+
+#[test]
+fn an_empty_status_is_unavailable_and_a_non_object_preference_is_wrong_type() -> TestResult {
+    assert_eq!(refusal_of(br#"{"status":{},"preference":{}}"#)?, DefenderRefusal::Unavailable);
+    let mut root = base();
+    set(&mut root, "/preference", json!("text"))?;
+    let reasons = unknown_of(&parsed(&root)?)?;
+    assert!(reasons.contains(&("controlled_folder_access".to_string(), "wrong_type".to_string())));
+    assert!(reasons.contains(&("asr_rules".to_string(), "wrong_type".to_string())));
     Ok(())
 }
 

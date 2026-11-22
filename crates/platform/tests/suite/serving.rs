@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 
-const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture";
+const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status";
 
 
 const ROUTES: [(&str, &str); 10] = [

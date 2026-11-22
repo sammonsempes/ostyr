@@ -183,6 +183,44 @@ pub fn parse_header(text: &str, counts: &mut Counts) -> Option<Parsed> {
 }
 
 
+fn first_token(text: &str) -> String {
+    text.split_whitespace().next().map_or_else(String::new, str::to_ascii_lowercase)
+}
+
+
+/// The id of an oversized header once it is complete: the scan state after one more character; linear, nothing is cloned before the id ends.
+fn id_progress(progress: &mut (Split, bool), candidate: char) -> Option<Option<String>> {
+    let (state, seen) = progress;
+    *state = step(std::mem::take(state), candidate);
+    let last = state.current.chars().next_back();
+    *seen = *seen || last.is_some_and(|character| !character.is_whitespace());
+    let ended_by_space = *seen && last.is_some_and(char::is_whitespace);
+    let closed = state.depth == 0 && !state.quoted;
+    let id = closed
+        .then(|| state.fields.first().or_else(|| ended_by_space.then_some(&state.current)))
+        .flatten()
+        .map(|text| first_token(text));
+    Some(id)
+}
+
+
+/// The authserv-id of a header read from its prefix only, with the tokenizer of `parse_header`; None when no complete id lies inside the prefix.
+pub fn oversized_id(prefix: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(prefix)
+        .chars()
+        .scan((Split::default(), false), id_progress)
+        .find_map(|found| found)
+}
+
+
+/// True only when a complete id inside the first `bound` bytes of an oversized header is not trusted; anything unreadable is false (fail closed).
+pub fn oversized_untrusted(raw: Option<&[u8]>, bound: usize, trusted: &[String]) -> bool {
+    raw.map(|bytes| bytes.get(..bound).unwrap_or(bytes))
+        .and_then(oversized_id)
+        .is_some_and(|id| !is_trusted(&id, trusted))
+}
+
+
 fn is_trusted(id: &str, trusted: &[String]) -> bool {
     !id.is_empty() && trusted.iter().any(|candidate| candidate.eq_ignore_ascii_case(id))
 }

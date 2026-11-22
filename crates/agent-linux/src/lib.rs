@@ -17,6 +17,8 @@ pub mod hostmetrics;
 #[cfg(unix)]
 pub mod isolation;
 #[cfg(unix)]
+pub mod metrics;
+#[cfg(unix)]
 pub mod model;
 #[cfg(unix)]
 pub mod nft;

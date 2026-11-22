@@ -446,7 +446,7 @@ fn the_plan_follows_a_reload_and_a_refused_one_keeps_the_old_plan() -> TestResul
     let audit = dir.path().join("audit.log");
     let log = Arc::new(open_file_log(&audit)?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, shared, _sensor, _updates, _osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, shared, _sensor, _updates, _osquery, _metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     let first = shared.load().fim.clone().ok_or("no first plan")?;
     assert_eq!(first.sets.planted.len(), TWO as usize);
     assert_eq!(reload(&engine), ReloadOutcome::Unchanged);
@@ -501,7 +501,7 @@ fn an_input_another_user_can_write_stops_the_start_and_refuses_a_reload_keeping_
     let audit = dir.path().join("audit.log");
     let log = Arc::new(open_file_log(&audit)?);
     let context = reload_context(&path, "agent_linux", "tenant", "reload");
-    let (engine, shared, _sensor, _updates, _osquery) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
+    let (engine, shared, _sensor, _updates, _osquery, _metrics) = open_settings_engine(path.clone(), shared_log_audit(&log), context)?;
     fs::write(&files.planted, "/root/passwords.txt\t64769\t4708\n")?;
     fs::set_permissions(&files.planted, std::os::unix::fs::PermissionsExt::from_mode(ALL_WRITE))?;
     assert!(matches!(reload(&engine), ReloadOutcome::Refused { reason } if reason.contains("writable by group or others")));

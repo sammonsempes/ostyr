@@ -34,16 +34,17 @@ pub const POWERSHELL_FLAGS: [&str; 6] = ["-NoLogo", "-NoProfile", "-NonInteracti
 
 pub const SCRIPT: &str = concat!(
     "$ErrorActionPreference = 'SilentlyContinue'; ",
+    "$env:Path = 'C:\\Windows\\System32;C:\\Windows'; ",
     "$env:PSModulePath = $env:SystemRoot + '\\System32\\WindowsPowerShell\\v1.0\\Modules'; ",
     "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ",
-    "[pscustomobject]@{ status = (Get-MpComputerStatus | Select-Object ",
+    "[pscustomobject]@{ status = (Defender\\Get-MpComputerStatus | Microsoft.PowerShell.Utility\\Select-Object ",
     "AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,BehaviorMonitorEnabled,IoavProtectionEnabled,IsTamperProtected,",
     "@{Name='AntivirusSignatureLastUpdated';Expression={if ($_.AntivirusSignatureLastUpdated) ",
     "{ $_.AntivirusSignatureLastUpdated.ToUniversalTime().ToString('o') } else { $null }}},",
     "AntivirusSignatureAge,AMRunningMode); ",
-    "preference = (Get-MpPreference | Select-Object ",
+    "preference = (Defender\\Get-MpPreference | Microsoft.PowerShell.Utility\\Select-Object ",
     "AttackSurfaceReductionRules_Ids,AttackSurfaceReductionRules_Actions,EnableControlledFolderAccess) } ",
-    "| ConvertTo-Json -Compress -Depth 3",
+    "| Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress -Depth 3",
 );
 
 

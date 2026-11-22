@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 agent-channel = { version = "0.0.0", path = "../agent-channel" }
+agent-command = { version = "0.0.0", path = "../agent-command" }
 alerts = { version = "0.0.0", path = "../alerts" }
 axum = "0.8"
 cmdb = { version = "0.0.0", path = "../cmdb" }
@@ -29,8 +30,9 @@ utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
 agent-channel = { version = "0.0.0", path = "../agent-channel" }
-agent-command = { version = "0.0.0", path = "../agent-command" }
 core-audit = { version = "0.0.0", path = "../core-audit" }
+ed25519-dalek = "3"
+getrandom = "0.4.3"
 pg-fake = { version = "0.0.0", path = "../pg-fake" }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 regex = "1"

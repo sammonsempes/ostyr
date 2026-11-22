@@ -16,7 +16,4 @@ pub type EncodeFn = fn(&EcsEvent) -> Result<String, ExportError>;
 pub type Found<'a> = (&'a CursorState, u64, Option<&'a str>);
 
 
-pub type Sections<'a> = (
-    &'a serde_json::Map<String, serde_json::Value>,
-    Option<&'a serde_json::Map<String, serde_json::Value>>,
-);
+pub type Raw = Box<serde_json::value::RawValue>;
