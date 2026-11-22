@@ -27,7 +27,7 @@ trap 'datastore_ssh "sudo -u postgres dropdb --if-exists $database; sudo -u post
 scp "${ssh_options[@]}" "$binary" "$client_user@$client_address:/tmp/vuln_store"
 ssh "${ssh_options[@]}" "$client_user@$client_address" "rm -rf /tmp/vuln-migrations && mkdir /tmp/vuln-migrations"
 scp "${ssh_options[@]}" "$here"/crates/vuln-match/migrations/vuln_000*.sql "$client_user@$client_address:/tmp/vuln-migrations/"
-ssh "${ssh_options[@]}" "$client_user@$client_address" "DATABASE=$database OLD_DATABASE=$old_database HOT_DATABASE=$hot_database MUTANT_LAST_SEEN_INDEX=${MUTANT_LAST_SEEN_INDEX:-0} HOT_ONLY=${HOT_ONLY:-0} bash -s" <<'REMOTE'
+ssh "${ssh_options[@]}" "$client_user@$client_address" "DATABASE=$database OLD_DATABASE=$old_database HOT_DATABASE=$hot_database MUTANT_LAST_SEEN_INDEX=${MUTANT_LAST_SEEN_INDEX:-0} HOT_ONLY=${HOT_ONLY:-0} KEV_REFRESH_ONLY=${KEV_REFRESH_ONLY:-0} bash -s" <<'REMOTE'
 set -euo pipefail
 set -a
 source <(sudo cat /etc/ostyr-lab/datastore.env)
@@ -75,6 +75,16 @@ HOUR=3600000000
 vuln migrate
 check "migration applied: function and tables exist" "1|1|1|1" "$(sql "SELECT (SELECT count(*) FROM pg_proc WHERE proname = 'vuln_scan_store') || '|' || count(*) || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'vuln_finding_rows') || '|' || (SELECT count(*) FROM pg_class WHERE relname = 'vuln_asset_resolved') FROM pg_class WHERE relname = 'vuln_findings'")"
 echo "columns: inserted|updated|resolved|no_room|evicted|refused (duplicates read apart)"
+
+echo "--- first KEV time: a cleared flag with the KEV time kept is not a changed value"
+check "a KEV finding is inserted" "1|0|0|0|0|0" "$(fields scan kr h1 $NOW $CAP $RCAP x/R1/kev)"
+check "the flag cleared is one changed value" "0|1|0|0|0|0" "$(fields scan kr h1 $((NOW + 1000)) $CAP $RCAP x/R1)"
+check "the same scan again inside the granularity rewrites nothing" "0|0|0|0|0|0" "$(fields scan kr h1 $((NOW + 2000)) $CAP $RCAP x/R1)"
+check "the flag is cleared and the KEV time is kept" "false|true" "$(sql "SELECT kev::text || '|' || (kev_since_micros IS NOT NULL)::text FROM vuln_findings WHERE tenant = 'kr'")"
+if [[ "${KEV_REFRESH_ONLY:-0}" == 1 ]]; then
+    echo "failures=$failures"
+    exit "$failures"
+fi
 
 check "scan 1 of h1 stores 3" "3|0|0|0|0|0" "$(fields scan a h1 $NOW $CAP $RCAP openssl/R1 curl/R2 zlib/R3)"
 check "tenant a open rows" 3 "$(open_rows a)"

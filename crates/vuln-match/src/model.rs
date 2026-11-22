@@ -293,3 +293,33 @@ pub struct FindingsPage {
     pub skipped: usize,
     pub next: Option<String>,
 }
+
+
+/// Counts of one KEV indicator computation; integers only, so they can go to a log or a source text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndicatorCounts {
+    pub kev_open: u64,
+    pub kev_resolved: u64,
+    pub kev_cleared: u64,
+    pub bad_time_rows: u64,
+    pub open_over_30: u64,
+    pub oldest_open_days: u64,
+}
+
+
+/// One GRC indicator value, in the shape `grc::inputs::parse_indicators` reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndicatorRow {
+    pub tenant: String,
+    pub name: String,
+    pub value: f64,
+    pub observed_at: time::OffsetDateTime,
+    pub source: String,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndicatorOutcome {
+    pub row: Option<IndicatorRow>,
+    pub counts: IndicatorCounts,
+}
