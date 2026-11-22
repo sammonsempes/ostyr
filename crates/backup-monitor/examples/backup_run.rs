@@ -1,4 +1,4 @@
-//! Usage: backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
+//! Usage: backup_run restore-test <declarations.yaml> <restic-binary> prints one JSON line per declared restore test and stores nothing; backup_run <declarations.yaml> <restic-binary> [state-dir]: runs every declared restic and Borg repository (Unix only), prints coverage and findings; the state directory keeps the previous run (under `reports/<tenant>/`, 0600) and Borg's own base directory (required for Borg).
 
 #[cfg(unix)]
 mod run {
@@ -9,6 +9,7 @@ mod run {
     use backup_monitor::parse::{parse_borg, parse_restic};
     use backup_monitor::report::{read_report, report_directory, write_report};
     use backup_monitor::restic::{findings, parse_run, plan, run_raw, RawRun};
+    use backup_monitor::restore::{restore_plan, restore_test};
     use core_config::parse::read_file;
     use core_pg::scope::tenant_of;
     use std::error::Error;
@@ -34,7 +35,10 @@ mod run {
     const MAX_KEY_BYTES: u64 = 256;
 
 
-    const USAGE: &str = "usage: backup_run <declarations.yaml> <restic-binary> [absolute-state-dir]";
+    const RESTORE_MODE: &str = "restore-test";
+
+
+    const USAGE: &str = "usage: backup_run [restore-test] <declarations.yaml> <restic-binary> [absolute-state-dir]";
 
 
     fn previous_listing(reports: Option<&OwnedFd>, name: &str, limits: &Limits) -> Result<Option<Listing>, Box<dyn Error>> {
@@ -95,8 +99,45 @@ mod run {
     }
 
 
+    fn restore_mode(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+        let declarations_path = arguments.get(ARGUMENT_DECLARATIONS + 1).ok_or(USAGE)?;
+        let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM + 1).ok_or(USAGE)?);
+        let declarations = load_declarations(&read_file(Path::new(declarations_path))?, declarations_path)?;
+        let limits = Limits::default();
+        let mut out = stdout();
+        let runs = restore_plan(&declarations);
+        runs.refused.iter().try_for_each(|index| writeln!(out, "{{\"refused_entry\":{index}}}"))?;
+        runs.runnable.iter().try_for_each(|(name, source, test)| -> Result<(), Box<dyn Error>> {
+            let deadline = Duration::from_secs(DEADLINE_SECONDS);
+            match restore_test(&program, &declarations.tenant, source, test, &limits, deadline, OffsetDateTime::now_utc) {
+                Ok(result) => writeln!(
+                    out,
+                    "{{\"tenant\":\"{}\",\"repository\":\"{name}\",\"config_id\":\"{}\",\"snapshot_id\":{:?},\"snapshot_time\":{:?},\"tested_at\":\"{}\",\"outcome\":\"{:?}\"}}",
+                    tenant_of(&result.tenant),
+                    result.config_id,
+                    result.snapshot_id,
+                    result.snapshot_time.map(|time| time.to_string()),
+                    result.tested_at,
+                    result.outcome
+                )?,
+                Err(error) => writeln!(out, "{{\"repository\":\"{name}\",\"failed\":\"{error}\"}}")?,
+            }
+            Ok(())
+        })
+    }
+
+
     pub fn execute() -> Result<(), Box<dyn Error>> {
         let arguments: Vec<String> = std::env::args().collect();
+        if arguments.get(1).map(String::as_str) == Some(RESTORE_MODE) {
+            restore_mode(&arguments)
+        } else {
+            execute_runs(&arguments)
+        }
+    }
+
+
+    fn execute_runs(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         let declarations_path = arguments.get(ARGUMENT_DECLARATIONS).ok_or(USAGE)?;
         let program = PathBuf::from(arguments.get(ARGUMENT_PROGRAM).ok_or(USAGE)?);
         let base_state = arguments.get(ARGUMENT_STATE).map(Path::new);

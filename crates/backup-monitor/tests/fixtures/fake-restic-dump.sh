@@ -1,0 +1,21 @@
+#!/bin/sh
+dir=$(dirname "$0")
+echo "$@" >> "$dir/args"
+mode=$(cat "$dir/mode")
+verb=
+for argument; do
+  if [ "$argument" = dump ]; then verb=dump; fi
+done
+if [ "$verb" != dump ]; then
+  for verb; do :; done
+  cat "$dir/$verb.json"
+else
+  case "$mode" in
+  big) head -c 5000 /dev/zero ;;
+  failed) cat "$dir/canary"; echo "/secret/path $(printf '\033[31m') hunter2" >&2; exit 1 ;;
+  sleep) sleep 60 ;;
+  hold) sleep 60 & echo $! > "$dir/grandchild"; sleep 60 ;;
+  swap) rm "$4"; ln -s /etc/hostname "$4"; cat "$dir/canary" ;;
+  *) cat "$dir/canary" ;;
+  esac
+fi

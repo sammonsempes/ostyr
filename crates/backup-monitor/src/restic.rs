@@ -208,7 +208,7 @@ pub fn plan(declarations: &Declarations) -> ResticPlan<'_> {
 }
 
 
-fn password_failure(error: SecretFileError) -> ResticError {
+pub fn password_failure(error: SecretFileError) -> ResticError {
     let refusal = error.to_string();
     debug!(refusal, "password file refused");
     ResticError::PasswordFile
@@ -226,7 +226,7 @@ pub fn sftp_transport(location: &str) -> Vec<String> {
 }
 
 
-fn command_arguments<'a>(source: &'a ResticSource, transport: &'a [String], verb: &[&'a str]) -> Vec<&'a str> {
+pub fn command_arguments<'a>(source: &'a ResticSource, transport: &'a [String], verb: &[&'a str]) -> Vec<&'a str> {
     transport
         .iter()
         .map(String::as_str)
