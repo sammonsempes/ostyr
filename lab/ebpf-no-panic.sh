@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Usage: lab/ebpf-no-panic.sh <shipped kernel object>
+# Usage: lab/ebpf-no-panic.sh <shipped kernel object> [kernel crate Cargo.toml]
 # The shipped panic handler calls the undefined symbol ebpf_panic_reached, so LLVM cannot delete a panic path (the handler is not undefined
-# behaviour) and the object names the symbol exactly when a panic path survives. Any llvm-nm line naming it (undefined, or defined by a
-# dependency) refuses the object.
+# behaviour) and the object names the symbol exactly when a panic path survives. The object is refused when it names the symbol (undefined,
+# or defined by a dependency), when it holds any undefined or weak symbol (the object must be self-contained: a nightly panic strategy leaves
+# a weak __bpf_trap call), or when the kernel crate or a path dependency uses a nightly feature (cargo-features, #![feature(...]).
 set -euo pipefail
-OBJECT=${1:?usage: ebpf-no-panic.sh <shipped kernel object>}
+OBJECT=${1:?usage: ebpf-no-panic.sh <shipped kernel object> [kernel crate Cargo.toml]}
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+MANIFEST=${2:-"$ROOT/crates/ebpf-probes/ebpf/Cargo.toml"}
 NIGHTLY=${EBPF_NIGHTLY:-nightly-2026-11-08}
 SYMBOL=ebpf_panic_reached
 BIN=${EBPF_LLVM_BIN:-"$(rustc "+$NIGHTLY" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"}
@@ -12,14 +15,40 @@ refuse() {
   echo "ebpf-no-panic: $1" >&2
   exit 1
 }
+if [ -n "${EBPF_LLVM_BIN:-}" ]; then echo "ebpf-no-panic: override EBPF_LLVM_BIN=$EBPF_LLVM_BIN" >&2; fi
+for tool in llvm-readobj llvm-nm; do
+  [ -x "$BIN/$tool" ] || refuse "the tool $tool is missing from $BIN"
+done
 [ -e "$OBJECT" ] || refuse "object $OBJECT is missing"
 [ -f "$OBJECT" ] || refuse "object $OBJECT is not a regular file"
 [ -r "$OBJECT" ] || refuse "object $OBJECT is not readable"
 [ -s "$OBJECT" ] || refuse "object $OBJECT is empty"
-HEADER=$("$BIN/llvm-readobj" --file-headers "$OBJECT" 2>&1) || refuse "object $OBJECT is not an ELF file (llvm-readobj failed)"
-grep -q 'Machine: EM_BPF' <<<"$HEADER" || refuse "object $OBJECT is not a BPF ELF file (its machine is not EM_BPF)"
+HEADER=$("$BIN/llvm-readobj" --file-headers - <"$OBJECT" 2>&1) || refuse "object $OBJECT is not an ELF file (llvm-readobj failed)"
+grep -qE '^[[:space:]]*Machine:[[:space:]]+EM_BPF' <<<"$HEADER" || refuse "object $OBJECT is not a BPF ELF file (its machine is not EM_BPF)"
 SYMBOLS=$("$BIN/llvm-nm" -a "$OBJECT") || refuse "llvm-nm failed on $OBJECT"
 if grep -w "$SYMBOL" <<<"$SYMBOLS"; then
   refuse "a panic path survives in $OBJECT (it names $SYMBOL, listed above)"
 fi
+if grep -E '^[[:space:]]*[UwWvV] ' <<<"$SYMBOLS"; then
+  refuse "$OBJECT holds an undefined or weak symbol (listed above)"
+fi
+METADATA=$(cargo "+$NIGHTLY" metadata --offline --format-version 1 --manifest-path "$MANIFEST") || refuse "cargo metadata failed for $MANIFEST"
+MANIFESTS=$(jq -r '.packages[] | select(.source == null) | .manifest_path' <<<"$METADATA") || refuse "cannot read the packages of $MANIFEST"
+[ -n "$MANIFESTS" ] || refuse "cargo metadata lists no path package for $MANIFEST"
+HITS=""
+while IFS= read -r package_manifest; do
+  status=0
+  python3 -I -c 'import sys, tomllib
+sys.exit(3 if "cargo-features" in tomllib.load(open(sys.argv[1], "rb")) else 0)' "$package_manifest" || status=$?
+  case "$status" in
+    0) ;;
+    3) HITS="$HITS cargo-features in $package_manifest;" ;;
+    *) refuse "cannot parse $package_manifest" ;;
+  esac
+  status=0
+  found=$(grep -rEl --include='*.rs' --exclude-dir=target '#!\[([^]]*[^A-Za-z_])?feature\(' "$(dirname "$package_manifest")") || status=$?
+  [ "$status" -le 1 ] || refuse "cannot scan the sources of $package_manifest"
+  if [ -n "$found" ]; then HITS="$HITS #![feature(...)] in $(tr '\n' ' ' <<<"$found");"; fi
+done <<<"$MANIFESTS"
+[ -z "$HITS" ] || refuse "nightly feature in the kernel crate or a path dependency:$HITS"
 echo "ebpf-no-panic: $OBJECT does not name $SYMBOL"

@@ -281,6 +281,46 @@ kernel_object_check() {
   low env EBPF_NIGHTLY="$EBPF_NIGHTLY" "$EBPF_NO_PANIC" "$EBPF_KERNEL_OBJECT"
 }
 
+kernel_stage() {
+  step "kernel crate: declaration" kernel_declaration
+  case "$KERNEL_STATE" in
+    declared)
+      if kernel_touched; then step "kernel crate: fmt and clippy for bpfel-unknown-none" kernel_checks; fi
+      ;;
+    absent) echo "pre-commit: kernel crate step skipped (root Cargo.toml does not exclude crates/ebpf-probes/ebpf)" >&2 ;;
+    *)
+      echo "pre-commit: FAILED at step: kernel crate: unexpected declaration state '$KERNEL_STATE'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+kernel_only_commit() {
+  local path
+  local -a staged
+  if [ "${GATE_SCOPE:-}" = full ]; then return 1; fi
+  mapfile -d '' staged < <(git diff --cached --name-only -z --no-renames --diff-filter=ACMRD)
+  [ "${#staged[@]}" -gt 0 ] || return 1
+  for path in "${staged[@]}"; do
+    case "$path" in
+      crates/ebpf-probes/ebpf/src/*.rs) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+if [ "$EBPF_NO_PANIC" != lab/ebpf-no-panic.sh ]; then
+  echo "pre-commit: override EBPF_NO_PANIC=$EBPF_NO_PANIC" >&2
+fi
+
+if kernel_only_commit; then
+  echo "pre-commit: kernel-only commit, the workspace steps (fmt, clippy, llvm-cov, coverage_gate, doc tests) are skipped" >&2
+  step "custom_lint" lint
+  kernel_stage
+  echo "pre-commit: all steps passed" >&2
+  exit 0
+fi
+
 compute_scope
 prepare_gate_dir
 package_args
@@ -290,15 +330,5 @@ step "3/6 custom_lint" lint
 step "4/6 cargo llvm-cov" covered_tests
 step "5/6 coverage_gate" gate
 step "6/6 cargo test --doc" doc_tests
-step "kernel crate: declaration" kernel_declaration
-case "$KERNEL_STATE" in
-  declared)
-    if kernel_touched; then step "kernel crate: fmt and clippy for bpfel-unknown-none" kernel_checks; fi
-    ;;
-  absent) echo "pre-commit: kernel crate step skipped (root Cargo.toml does not exclude crates/ebpf-probes/ebpf)" >&2 ;;
-  *)
-    echo "pre-commit: FAILED at step: kernel crate: unexpected declaration state '$KERNEL_STATE'" >&2
-    exit 1
-    ;;
-esac
+kernel_stage
 echo "pre-commit: all steps passed" >&2

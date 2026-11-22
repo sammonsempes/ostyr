@@ -243,6 +243,34 @@ git add -A
 run_hook
 expect_kernel "single-quoted exact entry"
 
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+git -c user.name=t -c user.email=t@t commit -q -m kernel-base
+echo changed >crates/ebpf-probes/ebpf/src/main.rs
+git add crates/ebpf-probes/ebpf/src/main.rs
+run_hook
+expect_kernel "kernel file only staged"
+if grep -qE 'llvm-cov|^cargo clippy|^cargo \+nightly fmt --check$' "$STUB_LOG" || ! grep -qF "kernel-only commit" "$SCRATCH/out" || grep -qF "FAILED" "$SCRATCH/out"; then
+  echo "FAIL: a kernel-only commit must run the kernel steps and skip the workspace steps (no coverage data for the kernel crate)"
+  cat "$SCRATCH/out"
+  FAILS=$((FAILS + 1))
+fi
+
+echo changed-again >crates/ebpf-probes/ebpf/src/main.rs
+echo y >plain.rs
+git add crates/ebpf-probes/ebpf/src/main.rs plain.rs
+run_hook
+if ! grep -q 'llvm-cov' "$STUB_LOG"; then
+  echo "FAIL: a kernel file staged with another file must still run the workspace steps"
+  FAILS=$((FAILS + 1))
+fi
+
+run_hook EBPF_NO_PANIC="$SCRATCH/bin/no-panic"
+if ! grep -qF "override EBPF_NO_PANIC=$SCRATCH/bin/no-panic" "$SCRATCH/out"; then
+  echo "FAIL: an EBPF_NO_PANIC override must be announced"
+  FAILS=$((FAILS + 1))
+fi
+
 if [ "$FAILS" -ne 0 ]; then
   echo "pre-commit-kernel: $FAILS failures"
   exit 1
