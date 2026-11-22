@@ -12,7 +12,8 @@ read -r _ client_user client_address < <(awk '$1 == "client"' "$lab_state/vms.tx
 [[ -n "$datastore_address" && -n "$client_address" ]] || { echo "datastore and client VMs are required in $lab_state/vms.txt" >&2; exit 2; }
 ssh_options=(-i "$lab_state/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 binary="$here/target/x86_64-unknown-linux-musl/release/examples/cases_indicators"
-[[ -x "$binary" ]] || { echo "build it first: cargo build --release --target x86_64-unknown-linux-musl -p cases --example cases_indicators" >&2; exit 2; }
+grc_binary="$here/target/x86_64-unknown-linux-musl/release/examples/grc_evaluate"
+[[ -x "$binary" && -x "$grc_binary" ]] || { echo "build it first: cargo build --release --target x86_64-unknown-linux-musl -p cases --example cases_indicators and -p grc --example grc_evaluate" >&2; exit 2; }
 
 database="cases_live_$$"
 datastore_ssh() { ssh -n "${ssh_options[@]}" "$datastore_user@$datastore_address" "$@"; }
@@ -21,6 +22,7 @@ datastore_ssh "sudo -u postgres createdb -O '$owner' '$database'"
 trap 'datastore_ssh "sudo -u postgres dropdb --if-exists $database" || true' EXIT
 
 scp "${ssh_options[@]}" "$binary" "$client_user@$client_address:/tmp/cases_indicators"
+scp "${ssh_options[@]}" "$grc_binary" "$client_user@$client_address:/tmp/grc_evaluate"
 ssh "${ssh_options[@]}" "$client_user@$client_address" "rm -rf /tmp/cases-sql && mkdir /tmp/cases-sql"
 scp "${ssh_options[@]}" "$here"/crates/cases/migrations/*.sql "$client_user@$client_address:/tmp/cases-sql/"
 ssh "${ssh_options[@]}" "$client_user@$client_address" "DATABASE=$database MUTANT=${MUTANT:-} BIG=${BIG:-1} bash -s" <<'REMOTE'
@@ -194,6 +196,10 @@ if [[ -z "${MUTANT:-}" ]]; then
     check "a now of 47 h ago is refused with nothing on stdout" "0|1" "$(/tmp/cases_indicators "$work/pg.yaml" n $((now_real - 47 * 3600)) 2>"$work/skew.txt" | wc -c | tr -d ' ' | tr '\n' '|')$(grep -c 'more than 300 seconds' "$work/skew.txt")"
     check "an empty tenant prints [] and one counts-only warning" "[]|no incident indicator emitted (no case at all): open=0;closed=0;bad=0;excluded=0" "$(/tmp/cases_indicators "$work/pg.yaml" nobody now 2>"$work/warn.txt" | tr -d '\n')|$(cat "$work/warn.txt")"
     cp "$work/out.json" /tmp/cases-indicators.json
+    printf 'evidence: []\n' >"$work/manual.yaml"
+    /tmp/grc_evaluate builtin:nis2 "$work/out.json" "$work/manual.yaml" n "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --format json >"$work/grc.json" 2>"$work/grc-err.txt" || true
+    echo "GRC art21-2-b: $(jq -c '.. | objects | select(.control? == "art21-2-b" or .id? == "art21-2-b")' "$work/grc.json" 2>&1 | head -c 600)"
+    check "grc_evaluate builtin:nis2 reads the feed: art21-2-b compliant" "compliant" "$(jq -r '.. | objects | select(.control? == "art21-2-b" or .id? == "art21-2-b") | .status' "$work/grc.json" | head -n 1)"
 fi
 
 if [[ -z "${MUTANT:-}" && "${BIG:-1}" == 1 ]]; then
@@ -216,4 +222,5 @@ SQL
     check "still no statistics after the runs" "0" "$(P -c "SELECT count(*) FROM pg_stats WHERE tablename = 'cases'")"
 fi
 echo "FAILURES: $failures"
+[[ "$failures" -eq 0 ]]
 REMOTE
