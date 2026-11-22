@@ -28,3 +28,5 @@ clients2.google.com
 addons.mozilla.org
 clients2.googleusercontent.com
 .gvt1.com
+cdn.winget.microsoft.com
+storeedgefd.dsx.mp.microsoft.com

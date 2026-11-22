@@ -12,6 +12,9 @@ readonly REMOTE_ZIP="C:/Windows/Temp/Sysmon.zip"
 readonly REMOTE_DIR="C:/Windows/Temp/ostyr-sysmon"
 readonly EVENT_ATTEMPTS=30
 readonly EVENT_DELAY_SECONDS=2
+readonly EXPORT_ATTEMPTS=6
+readonly EXPORT_DELAY_SECONDS=10
+readonly WINGET_SOURCE_URL="https://cdn.winget.microsoft.com/cache/source.msix"
 
 lab_state="${1:?usage: windows-single.setup.sh <lab-state-dir> <lab-prefix>}"
 key="$lab_state/id_ed25519"
@@ -58,4 +61,18 @@ for ((attempt = 0; attempt < EVENT_ATTEMPTS && event_count < 1; attempt++)); do
     ((event_count >= 1)) || sleep "$EVENT_DELAY_SECONDS"
 done
 ((event_count >= 1)) || die "no event in Microsoft-Windows-Sysmon/Operational"
-log "windows-single ready: Sysmon64 running, one Sysmon event read back"
+bridge_address="${ws_address%.*}.1"
+set_proxy="\$k = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'; Set-ItemProperty \$k ProxyEnable 1; Set-ItemProperty \$k ProxyServer '$bridge_address:$PROXY_PORT';"
+log "ws: pointing the WinINet proxy at $bridge_address:$PROXY_PORT and registering winget"
+ps_remote "Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" >/dev/null || die "registering DesktopAppInstaller failed"
+ps_remote "$set_proxy [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy('http://$bridge_address:$PROXY_PORT'); \
+Invoke-WebRequest '$WINGET_SOURCE_URL' -OutFile C:\\Windows\\Temp\\source.msix -UseBasicParsing; Add-AppxPackage C:\\Windows\\Temp\\source.msix" >/dev/null ||
+    die "installing the winget source package failed"
+export_status=1
+for ((attempt = 0; attempt < EXPORT_ATTEMPTS && export_status != 0; attempt++)); do
+    export_status="$(ps_remote "$set_proxy winget export --include-versions --accept-source-agreements -o C:\\Windows\\Temp\\winget-check.json | Out-Null; \$LASTEXITCODE" || echo 1)"
+    [[ "$export_status" =~ ^-?[0-9]+$ ]] || export_status=1
+    ((export_status == 0)) || sleep "$EXPORT_DELAY_SECONDS"
+done
+[[ "$export_status" == "0" ]] || die "winget export failed with exit $export_status"
+log "windows-single ready: Sysmon64 running, one Sysmon event read back, winget export works"
