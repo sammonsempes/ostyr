@@ -1,5 +1,6 @@
 use crate::error::StoreError;
 use crate::store_model::{ListFilter, Page, SessionRow};
+use agent_command::model::KeyClass;
 use core_auth::types::RoleSet;
 use core_pg::scope::TenantScope;
 use std::collections::BTreeMap;
@@ -33,3 +34,10 @@ pub type ListFn = Arc<dyn Fn(TenantScope, ListFilter, Option<String>, u32) -> Pa
 
 
 pub type GetFn = Arc<dyn Fn(TenantScope, String) -> GetFuture + Send + Sync>;
+
+
+pub type BoxedCause = Box<dyn std::error::Error + Send + Sync>;
+
+
+/// The durable per-agent sequence allocator the sensitive key shares with patch-rollout: `(agent id, class)` to the next number.
+pub type SequenceFn<'counter> = dyn FnMut(&str, KeyClass) -> Result<u64, BoxedCause> + 'counter;
