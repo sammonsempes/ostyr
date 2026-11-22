@@ -21,6 +21,17 @@ const TAGGED: &str = "tenant: tenant-a\nagents:\n  - agent_id: !!binary YWdlbnQt
 const CR_HIDDEN: &str = "tenant: tenant-a\nagents:\n  - agent_id: agent-1\n    asset: srv1\n# retired\r  - agent_id: agent-2\n    asset: srv2\n";
 
 
+fn long_line_file() -> String {
+    format!(
+        "tenant: tenant-a\nagents: [{{agent_id: agent-1, asset: srv1}},{}{{agent_id: agent-2, asset: srv2}}]\n",
+        " ".repeat(LONG_LINE_PADDING)
+    )
+}
+
+
+const LONG_LINE_PADDING: usize = 5000;
+
+
 fn main() -> Result<(), Box<dyn Error>> {
     let dir = PathBuf::from(std::env::args().nth(1).ok_or("usage: agent_map_proof <directory>")?);
     let path = dir.join("remote-shell-agents.yaml");
@@ -61,6 +72,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     writeln!(
         out,
         "srv2 after CR reload -> {:?}",
+        resolve_agent(&current_config(&engine), "tenant-a", "srv2")
+    )?;
+    fs::write(&path, long_line_file())?;
+    writeln!(out, "reload long-line file -> {:?}", reload(&engine))?;
+    writeln!(
+        out,
+        "srv2 after long-line reload -> {:?}",
         resolve_agent(&current_config(&engine), "tenant-a", "srv2")
     )?;
     let entries = recorded.lock().map_err(|_| "poisoned")?;

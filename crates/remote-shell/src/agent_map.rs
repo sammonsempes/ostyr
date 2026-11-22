@@ -231,7 +231,19 @@ pub fn allowed_byte(bytes: &[u8], index: usize) -> bool {
 }
 
 
-/// Refuses the whole file on the first byte outside the allowlist, naming the line (counted on LF) and never the byte.
+/// The longest line `refuse_bytes` admits, line break excluded.
+pub const MAX_AGENT_MAP_LINE_BYTES: usize = 256;
+
+
+/// The 1-based number of the first line longer than `MAX_AGENT_MAP_LINE_BYTES` (a CR before the LF is not counted).
+pub fn first_long_line(text: &str) -> Option<usize> {
+    text.split('\n')
+        .position(|line| line.strip_suffix('\r').unwrap_or(line).len() > MAX_AGENT_MAP_LINE_BYTES)
+        .map(|index| index.saturating_add(1))
+}
+
+
+/// Refuses the whole file on the first byte outside the allowlist or the first over-long line, naming the line (counted on LF), never the content.
 pub fn refuse_bytes(text: &str, file: &str) -> Result<(), ConfigError> {
     let bytes = text.as_bytes();
     match (0..bytes.len()).find(|&index| !allowed_byte(bytes, index)) {
@@ -242,7 +254,10 @@ pub fn refuse_bytes(text: &str, file: &str) -> Result<(), ConfigError> {
                 .saturating_add(1);
             Err(refuse(file, format!("line {line}: only printable ASCII and line breaks are allowed")))
         }
-        None => Ok(()),
+        None => match first_long_line(text) {
+            Some(line) => Err(refuse(file, format!("line {line}: longer than {MAX_AGENT_MAP_LINE_BYTES} bytes"))),
+            None => Ok(()),
+        },
     }
 }
 

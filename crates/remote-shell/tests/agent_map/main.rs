@@ -13,6 +13,7 @@ use core_config::reload::{current_config, reload, ReloadContext, ReloadOutcome};
 use core_config::types::SharedAuditFn;
 use remote_shell::agent_map::{
     agent_state, open_agent_engine, parse_agent_map, refused_feature, resolve_agent, AgentMap, ANCHORS_REFUSED, MAX_AGENT_ASSETS,
+    MAX_AGENT_MAP_LINE_BYTES,
 };
 use serde_saphyr::granit_parser::{Event, Span};
 use std::fs;
@@ -33,6 +34,9 @@ const STATE_SIZE: usize = 2;
 
 
 const LONG_AGENT_ID: usize = 65;
+
+
+const HIDING_PADDING: usize = 5000;
 
 
 fn parse(text: &str) -> Result<AgentMap, ConfigError> {
@@ -226,6 +230,40 @@ fn a_file_over_the_byte_cap_is_refused() -> TestResult {
     text.push_str(&"#".repeat(MAX_FILE_BYTES as usize));
     let message = refusal(&text)?;
     assert!(message.contains("larger than"), "{message}");
+    Ok(())
+}
+
+
+fn comment_line_of(length: usize) -> String {
+    format!("{}\n", "#".repeat(length))
+}
+
+
+#[test]
+fn a_line_over_the_cap_is_refused_and_the_cap_is_exact() -> TestResult {
+    let ok = format!("{}{}", file_text(&[("agent-1", "srv1")]), comment_line_of(MAX_AGENT_MAP_LINE_BYTES));
+    assert_eq!(parse(&ok)?.agents.len(), 1);
+    let crlf = format!(
+        "tenant: {TENANT}\r\nagents:\r\n  - agent_id: a\r\n    asset: x\r\n{}\r\n",
+        "#".repeat(MAX_AGENT_MAP_LINE_BYTES)
+    );
+    assert_eq!(parse(&crlf)?.agents.len(), 1);
+    let long = format!("{}{}", file_text(&[("agent-1", "srv1")]), comment_line_of(MAX_AGENT_MAP_LINE_BYTES + 1));
+    let message = refusal(&long)?;
+    assert!(message.contains("line 5: longer than 256 bytes"), "{message}");
+    assert!(!message.contains("###"), "{message}");
+    Ok(())
+}
+
+
+#[test]
+fn a_flow_entry_hidden_far_to_the_right_is_refused() -> TestResult {
+    let text = format!(
+        "tenant: {TENANT}\nagents: [{{agent_id: a, asset: x}},{}{{agent_id: b, asset: y}}]\n",
+        " ".repeat(HIDING_PADDING)
+    );
+    let message = refusal(&text)?;
+    assert!(message.contains("line 2: longer than 256 bytes"), "{message}");
     Ok(())
 }
 
