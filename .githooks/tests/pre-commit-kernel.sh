@@ -49,6 +49,9 @@ declare_kernel() {
   printf '%s\n' "$EXCLUDE_TOML" >Cargo.toml
   mkdir -p crates/ebpf-probes/ebpf
   echo x >crates/ebpf-probes/ebpf/Cargo.toml
+  mkdir -p lab
+  printf '#!/usr/bin/env bash\necho "no-panic $*" >>"$STUB_LOG"\n' >lab/ebpf-no-panic.sh
+  chmod +x lab/ebpf-no-panic.sh
   git add -A
 }
 
@@ -60,6 +63,14 @@ expect_kernel() {
   fi
   if ! grep -qE '^cargo \+nightly-2026-11-08 clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml -- -D warnings$' "$STUB_LOG"; then
     echo "FAIL: $label: no kernel clippy"
+    FAILS=$((FAILS + 1))
+  fi
+  if ! grep -qE '^cargo \+nightly-2026-11-08 build --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml$' "$STUB_LOG"; then
+    echo "FAIL: $label: no kernel release build"
+    FAILS=$((FAILS + 1))
+  fi
+  if ! grep -qE '^no-panic crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel$' "$STUB_LOG"; then
+    echo "FAIL: $label: no panic check on the shipped object"
     FAILS=$((FAILS + 1))
   fi
 }
@@ -84,6 +95,18 @@ stage .githooks/pre-commit
 declare_kernel
 run_hook
 expect_kernel "hook staged"
+
+stage lab/ebpf-no-panic.sh
+declare_kernel
+echo changed >>lab/ebpf-no-panic.sh
+git add -A
+run_hook
+expect_kernel "panic check script staged"
+
+stage lab/tests/ebpf-no-panic-test.sh
+declare_kernel
+run_hook
+expect_kernel "panic check test staged"
 
 stage plain.rs
 declare_kernel

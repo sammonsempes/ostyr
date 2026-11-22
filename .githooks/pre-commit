@@ -230,6 +230,7 @@ package_args() {
 
 EBPF_NIGHTLY="${EBPF_NIGHTLY:-nightly-2026-11-08}"
 EBPF_MANIFEST=crates/ebpf-probes/ebpf/Cargo.toml
+EBPF_KERNEL_OBJECT=crates/ebpf-probes/ebpf/target/bpfel-unknown-none/release/ebpf-probes-kernel
 
 kernel_touched() {
   local path
@@ -239,7 +240,7 @@ kernel_touched() {
   for path in "${staged[@]+"${staged[@]}"}"; do
     if forced_full_path "$path"; then return 0; fi
     case "$path" in
-      crates/ebpf-probes/ebpf/*) return 0 ;;
+      crates/ebpf-probes/ebpf/* | lab/ebpf-no-panic.sh | lab/tests/ebpf-no-panic-test.sh) return 0 ;;
     esac
   done
   return 1
@@ -260,7 +261,10 @@ kernel_checks() {
   kernel_manifest_present &&
     low cargo +nightly fmt --check --manifest-path "$EBPF_MANIFEST" &&
     low cargo "+$EBPF_NIGHTLY" clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
-      --manifest-path "$EBPF_MANIFEST" -- -D warnings
+      --manifest-path "$EBPF_MANIFEST" -- -D warnings &&
+    low env RUSTFLAGS="-C link-arg=--btf" cargo "+$EBPF_NIGHTLY" build --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
+      --manifest-path "$EBPF_MANIFEST" &&
+    low env EBPF_NIGHTLY="$EBPF_NIGHTLY" lab/ebpf-no-panic.sh "$EBPF_KERNEL_OBJECT"
 }
 
 compute_scope
