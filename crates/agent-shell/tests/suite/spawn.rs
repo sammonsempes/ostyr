@@ -1,10 +1,11 @@
+use crate::cgroup::{host_in, tree};
 use crate::support::{default_order, private_tempdir};
 use crate::types::TestResult;
 use agent_shell::account::ShellAccount;
 use agent_shell::model::PtyHandle;
 use agent_shell::spawn::{
-    missing_program, pump_output, read_chunk, shell_args, shell_environment, spawn_fn, spawn_pty, spawn_shell, write_input, ShellPrograms,
-    OUTPUT_CHUNK_BYTES, SHELL_PROGRAMS,
+    join_args, missing_program, pump_output, read_chunk, shell_args, shell_environment, spawn_fn, spawn_pty, spawn_shell, write_input, ShellPrograms,
+    BASH_PATH, JOIN_SCRIPT, OUTPUT_CHUNK_BYTES, SETPRIV_PATH, SHELL_PROGRAMS,
 };
 use futures_util::StreamExt;
 use std::io::{self, Read, Write};
@@ -34,6 +35,9 @@ const ENV_PROGRAM: &str = "/usr/bin/env";
 
 
 const SPILL_FACTOR: usize = 2;
+
+
+const JOIN_PREFIX: usize = 6;
 
 
 fn account_in(home: &Path) -> ShellAccount {
@@ -145,7 +149,8 @@ fn a_missing_program_is_named() -> TestResult {
     assert_eq!(missing_program(&broken), Some("/nonexistent/prlimit"));
     let directory = private_tempdir()?;
     let account = account_in(directory.path());
-    let refused = spawn_shell(&account, "session-1", &broken).err();
+    let cgroups = tree()?;
+    let refused = spawn_shell(&account, "session-1", &broken, &host_in(cgroups.path())).err();
     assert_eq!(refused.as_ref().map(io::Error::kind), Some(io::ErrorKind::NotFound));
     assert_eq!(
         refused.map(|error| error.to_string()),
@@ -240,10 +245,12 @@ async fn the_shell_of_an_order_starts_through_the_blocking_pool_and_ends_on_exit
         gid: NOBODY,
         home: directory.path().to_path_buf(),
     };
-    let direct = spawn_shell(&account, "session-1", &SHELL_PROGRAMS)?;
+    let cgroups = tree()?;
+    let host = host_in(cgroups.path());
+    let direct = spawn_shell(&account, "direct-1", &SHELL_PROGRAMS, &host)?;
     direct.input.send(b"exit\n".to_vec()).await?;
     transcript(direct).await;
-    let spawn = spawn_fn(account);
+    let spawn = spawn_fn(account, host);
     let pooled = spawn(&default_order()?).await?;
     pooled.input.send(b"exit\n".to_vec()).await?;
     transcript(pooled).await;
@@ -273,5 +280,77 @@ async fn the_variables_that_reach_the_program_are_exactly_the_documented_ones() 
             "TERM=xterm-256color",
         ]
     );
+    Ok(())
+}
+
+
+#[test]
+fn the_join_script_runs_setpriv_after_the_join_and_the_arguments_carry_the_path() -> TestResult {
+    let account = account_in(Path::new("/home/ostyr-shell"));
+    assert!(JOIN_SCRIPT.contains(SETPRIV_PATH));
+    assert!(JOIN_SCRIPT.starts_with("echo $$ > \"$1\" && shift && exec "));
+    let args = join_args(&account, &SHELL_PROGRAMS, "/sys/fs/cgroup/agent/shell-s/cgroup.procs");
+    assert_eq!(
+        args.iter().take(JOIN_PREFIX).map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "--noprofile",
+            "--norc",
+            "-c",
+            JOIN_SCRIPT,
+            "ostyr-shell-join",
+            "/sys/fs/cgroup/agent/shell-s/cgroup.procs"
+        ]
+    );
+    assert_eq!(
+        args.iter().skip(JOIN_PREFIX).cloned().collect::<Vec<_>>(),
+        shell_args(&account, &SHELL_PROGRAMS)
+    );
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_shell_is_in_its_cgroup_before_it_runs_as_the_account() -> TestResult {
+    let directory = private_tempdir()?;
+    let account = ShellAccount {
+        uid: NOBODY,
+        gid: NOBODY,
+        home: directory.path().to_path_buf(),
+    };
+    let cgroups = tree()?;
+    let handle = spawn_shell(&account, "session-1", &SHELL_PROGRAMS, &host_in(cgroups.path()))?;
+    handle.input.send(b"echo pid-$$-uid-$(id -u)\nexit\n".to_vec()).await?;
+    let output = String::from_utf8(transcript(handle).await)?;
+    let joined = std::fs::read_to_string(cgroups.path().join("root/agent/shell-session-1/cgroup.procs"))?;
+    assert!(output.contains(&format!("pid-{}-uid-{NOBODY}", joined.trim())), "{output} {joined}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_join_ends_the_session_before_any_account_code_runs() -> TestResult {
+    let directory = private_tempdir()?;
+    let account = account_in(directory.path());
+    let args = join_args(&account, &SHELL_PROGRAMS, "/nonexistent/directory/cgroup.procs");
+    let handle = spawn_pty(BASH_PATH, &args, &[], directory.path())?;
+    handle.input.send(b"echo ran-$((6*7))\nexit\n".to_vec()).await?;
+    let output = String::from_utf8(transcript(handle).await)?;
+    assert!(output.contains("No such file or directory"), "{output}");
+    assert!(!output.contains("ran-42"), "{output}");
+    Ok(())
+}
+
+
+#[test]
+fn a_host_without_cgroup_v2_refuses_the_shell_by_name() -> TestResult {
+    let directory = private_tempdir()?;
+    let account = account_in(directory.path());
+    let cgroups = tree()?;
+    let absent = agent_shell::cgroup::CgroupHost {
+        root: cgroups.path().join("absent"),
+        ..host_in(cgroups.path())
+    };
+    let refused = spawn_shell(&account, "session-1", &SHELL_PROGRAMS, &absent).err().ok_or("spawned")?;
+    assert!(refused.to_string().contains("cgroup"), "{refused}");
     Ok(())
 }

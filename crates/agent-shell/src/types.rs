@@ -51,9 +51,9 @@ pub type ShellSlot = Arc<AtomicBool>;
 pub type InspectFn = fn(&std::fs::File) -> io::Result<std::fs::Metadata>;
 
 
-/// Looks an account up by name.
+/// Reads the passwd and group files once.
 #[cfg(unix)]
-pub type LookupFn = fn(&str) -> io::Result<Option<crate::account::AccountEntry>>;
+pub type DatabasesFn = fn() -> io::Result<crate::account::Databases>;
 
 
 /// Reads what a home path is on disk.
@@ -61,11 +61,15 @@ pub type LookupFn = fn(&str) -> io::Result<Option<crate::account::AccountEntry>>
 pub type HomeFn = fn(&std::path::Path) -> io::Result<crate::account::HomeFacts>;
 
 
-/// Lists the groups whose member list names an account.
-#[cfg(unix)]
-pub type GroupsFn = fn(&str) -> io::Result<Vec<String>>;
+/// Tells whether an opened directory is on a cgroup v2 filesystem.
+#[cfg(target_os = "linux")]
+pub type CgroupCheckFn = fn(&std::os::fd::OwnedFd) -> io::Result<bool>;
 
 
-/// Reads the groups that hold a gid and the other accounts that have it as their primary group, for an account name.
-#[cfg(unix)]
-pub type PrimaryFn = fn(&str, u32) -> io::Result<crate::account::PrimaryGroup>;
+/// Removes the session cgroup directory named by the second argument from the directory of the first.
+#[cfg(target_os = "linux")]
+pub type CgroupRemoveFn = fn(&std::os::fd::OwnedFd, &str) -> io::Result<()>;
+
+
+/// Waits for one poll interval.
+pub type PauseFn = fn(std::time::Duration);

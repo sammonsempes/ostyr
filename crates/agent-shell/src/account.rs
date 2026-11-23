@@ -1,5 +1,5 @@
 use crate::error::AccountError;
-use crate::types::{GroupsFn, HomeFn, LookupFn, PrimaryFn};
+use crate::types::{DatabasesFn, HomeFn};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,14 @@ pub struct GroupEntry {
 pub struct PrimaryGroup {
     pub entries: Vec<GroupEntry>,
     pub other_users: usize,
+}
+
+
+/// The text of the two local databases, each read once per resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Databases {
+    pub passwd: String,
+    pub group: String,
 }
 
 
@@ -93,18 +101,24 @@ pub fn parse_passwd_line(line: &str, name: &str) -> Option<io::Result<AccountEnt
 }
 
 
-/// The lookup by name in a passwd file.
-pub fn lookup_in(passwd: &Path, name: &str) -> io::Result<Option<AccountEntry>> {
-    std::fs::read_to_string(passwd)?
-        .lines()
-        .find_map(|line| parse_passwd_line(line, name))
-        .transpose()
+/// The lookup by name in the text of a passwd file.
+pub fn lookup_in(passwd: &str, name: &str) -> io::Result<Option<AccountEntry>> {
+    passwd.lines().find_map(|line| parse_passwd_line(line, name)).transpose()
 }
 
 
-/// The account database lookup by name: the local `/etc/passwd`, where the deployment creates the account.
-pub fn lookup_account(name: &str) -> io::Result<Option<AccountEntry>> {
-    lookup_in(Path::new(PASSWD_PATH), name)
+/// Reads the two files once each.
+pub fn read_databases_at(passwd: &Path, group: &Path) -> io::Result<Databases> {
+    Ok(Databases {
+        passwd: std::fs::read_to_string(passwd)?,
+        group: std::fs::read_to_string(group)?,
+    })
+}
+
+
+/// The local `/etc/passwd` and `/etc/group`, where the deployment creates the account.
+pub fn read_databases() -> io::Result<Databases> {
+    read_databases_at(Path::new(PASSWD_PATH), Path::new(GROUP_PATH))
 }
 
 
@@ -124,18 +138,9 @@ pub fn group_of_line(line: &str, name: &str) -> Option<io::Result<String>> {
 }
 
 
-/// Every group of a group file whose member list names the account.
-pub fn groups_in(group_file: &Path, name: &str) -> io::Result<Vec<String>> {
-    std::fs::read_to_string(group_file)?
-        .lines()
-        .filter_map(|line| group_of_line(line, name))
-        .collect()
-}
-
-
-/// The groups that list the account, from the local `/etc/group`.
-pub fn lookup_groups(name: &str) -> io::Result<Vec<String>> {
-    groups_in(Path::new(GROUP_PATH), name)
+/// Every group of the group file text whose member list names the account.
+pub fn groups_in(group_file: &str, name: &str) -> io::Result<Vec<String>> {
+    group_file.lines().filter_map(|line| group_of_line(line, name)).collect()
 }
 
 
@@ -174,22 +179,16 @@ pub fn user_sharing(line: &str, name: &str, gid: u32) -> io::Result<bool> {
 
 
 /// The groups that hold the gid and the count of other accounts that have it as their primary group.
-pub fn primary_in(group_file: &Path, passwd: &Path, name: &str, gid: u32) -> io::Result<PrimaryGroup> {
-    let entries = std::fs::read_to_string(group_file)?
+pub fn primary_in(group_file: &str, passwd: &str, name: &str, gid: u32) -> io::Result<PrimaryGroup> {
+    let entries = group_file
         .lines()
         .filter_map(|line| group_holding(line, gid))
         .collect::<io::Result<Vec<GroupEntry>>>()?;
-    let other_users = std::fs::read_to_string(passwd)?
+    let other_users = passwd
         .lines()
         .map(|line| user_sharing(line, name, gid))
         .try_fold(usize::MIN, |count, shared| shared.map(|is_shared| count + usize::from(is_shared)))?;
     Ok(PrimaryGroup { entries, other_users })
-}
-
-
-/// The primary group facts from the local `/etc/group` and `/etc/passwd`.
-pub fn lookup_primary(name: &str, gid: u32) -> io::Result<PrimaryGroup> {
-    primary_in(Path::new(GROUP_PATH), Path::new(PASSWD_PATH), name, gid)
 }
 
 
@@ -238,14 +237,17 @@ pub fn judge_home(name: &str, entry: &AccountEntry, facts: HomeFacts) -> Result<
 }
 
 
-/// Resolves the shell account once: absent, uid 0, gid 0 and membership of any group, a primary group that is not its own dedicated one, and a home that is not a directory owned by the account are each refused by name.
-pub fn resolve_account(name: &str, lookup: LookupFn, groups: GroupsFn, primary: PrimaryFn, home: HomeFn) -> Result<ShellAccount, AccountError> {
-    let entry = lookup(name)
+/// Resolves the shell account from the text of the databases: absent, uid 0, gid 0 and membership of any group, a primary group that is not its own dedicated one, and a home that is not a directory owned by the account are each refused by name.
+pub fn resolve_in(name: &str, databases: &Databases, home: HomeFn) -> Result<ShellAccount, AccountError> {
+    let entry = lookup_in(&databases.passwd, name)
         .map_err(AccountError::Lookup)?
         .ok_or_else(|| AccountError::Missing { name: name.to_owned() })?;
     judge_ids(name, &entry)?;
-    judge_groups(name, &groups(name).map_err(AccountError::GroupsUnreadable)?)?;
-    judge_primary(name, &primary(name, entry.gid).map_err(AccountError::PrimaryGroupUnreadable)?)?;
+    judge_groups(name, &groups_in(&databases.group, name).map_err(AccountError::GroupsUnreadable)?)?;
+    judge_primary(
+        name,
+        &primary_in(&databases.group, &databases.passwd, name, entry.gid).map_err(AccountError::PrimaryGroupUnreadable)?,
+    )?;
     let facts = home(&entry.home).map_err(|source| AccountError::HomeUnreadable {
         name: name.to_owned(),
         source,
@@ -256,4 +258,11 @@ pub fn resolve_account(name: &str, lookup: LookupFn, groups: GroupsFn, primary: 
         gid: entry.gid,
         home: entry.home,
     })
+}
+
+
+/// Reads the databases once, then resolves the shell account from that one read.
+pub fn resolve_account(name: &str, read: DatabasesFn, home: HomeFn) -> Result<ShellAccount, AccountError> {
+    let databases = read().map_err(AccountError::Lookup)?;
+    resolve_in(name, &databases, home)
 }

@@ -1,4 +1,5 @@
 use crate::account::ShellAccount;
+use crate::cgroup::{session_cleanup, CgroupHost};
 use crate::types::CleanupFn;
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use std::ffi::OsStr;
@@ -220,13 +221,14 @@ pub fn production_plan(account: &ShellAccount) -> SweepPlan {
 }
 
 
-/// The production `CleanupFn`: the sweep runs on the blocking pool.
-pub fn cleanup_fn(account: &ShellAccount) -> Box<CleanupFn> {
+/// The production `CleanupFn`: the session cgroups, then the sweep, on the blocking pool.
+pub fn cleanup_fn(account: &ShellAccount, host: CgroupHost) -> Box<CleanupFn> {
     let plan = production_plan(account);
     Box::new(move || {
         let owned = plan.clone();
+        let cgroups = host.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || sweep(&owned))
+            tokio::task::spawn_blocking(move || session_cleanup(&cgroups, &owned))
                 .await
                 .map_err(io::Error::other)
                 .and_then(std::convert::identity)

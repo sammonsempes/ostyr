@@ -1,7 +1,7 @@
 use crate::support::{fakes_with, forbidden_spawn, hold_script, owner_of, private_tempdir, Fakes};
 use crate::types::TestResult;
 use agent_shell::account::{
-    groups_in, lookup_account, lookup_groups, lookup_in, lookup_primary, primary_in, resolve_account, stat_home, AccountEntry, GroupEntry, HomeFacts,
+    groups_in, lookup_in, primary_in, read_databases, read_databases_at, resolve_account, resolve_in, stat_home, Databases, GroupEntry, HomeFacts,
     PrimaryGroup,
 };
 use agent_shell::compose::production_env;
@@ -15,9 +15,6 @@ const ACCOUNT_UID: u32 = 1001;
 
 
 const ACCOUNT_GID: u32 = 1002;
-
-
-const UNUSED_GID: u32 = 3_999_999_999;
 
 
 const DISK_GID: u32 = 6;
@@ -35,74 +32,13 @@ const NAME: &str = "ostyr-shell";
 const HOME: &str = "/home/ostyr-shell";
 
 
-fn entry(uid: u32, gid: u32) -> io::Result<Option<AccountEntry>> {
-    Ok(Some(AccountEntry {
-        uid,
-        gid,
-        home: PathBuf::from(HOME),
-    }))
-}
+const THIRD: usize = 2;
 
 
-fn good_entry(_name: &str) -> io::Result<Option<AccountEntry>> {
-    entry(ACCOUNT_UID, ACCOUNT_GID)
-}
+const GOOD_PASSWD: &str = "root:x:0:0::/root:/bin/sh\nostyr-shell:x:1001:1002::/home/ostyr-shell:/bin/bash\n";
 
 
-fn root_uid(_name: &str) -> io::Result<Option<AccountEntry>> {
-    entry(0, ACCOUNT_GID)
-}
-
-
-fn root_gid(_name: &str) -> io::Result<Option<AccountEntry>> {
-    entry(ACCOUNT_UID, 0)
-}
-
-
-fn absent(_name: &str) -> io::Result<Option<AccountEntry>> {
-    Ok(None)
-}
-
-
-fn broken(_name: &str) -> io::Result<Option<AccountEntry>> {
-    Err(io::Error::other("database down"))
-}
-
-
-fn no_groups(_name: &str) -> io::Result<Vec<String>> {
-    Ok(Vec::new())
-}
-
-
-fn harmless_group(_name: &str) -> io::Result<Vec<String>> {
-    Ok(vec!["users".to_owned()])
-}
-
-
-fn root_group(_name: &str) -> io::Result<Vec<String>> {
-    Ok(vec!["root".to_owned(), "disk".to_owned()])
-}
-
-
-fn groups_down(_name: &str) -> io::Result<Vec<String>> {
-    Err(io::Error::other("group database down"))
-}
-
-
-fn own_primary(name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    Ok(PrimaryGroup {
-        entries: vec![GroupEntry {
-            name: name.to_owned(),
-            has_members: false,
-        }],
-        other_users: 0,
-    })
-}
-
-
-fn primary_of(entries: Vec<GroupEntry>, other_users: usize) -> io::Result<PrimaryGroup> {
-    Ok(PrimaryGroup { entries, other_users })
-}
+const GOOD_GROUP: &str = "root:x:0:\nostyr-shell:x:1002:\n";
 
 
 fn named_group(name: &str, has_members: bool) -> GroupEntry {
@@ -113,33 +49,11 @@ fn named_group(name: &str, has_members: bool) -> GroupEntry {
 }
 
 
-fn disk_primary(_name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    primary_of(vec![named_group("disk", false)], 0)
-}
-
-
-fn members_primary(name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    primary_of(vec![named_group(name, true)], 0)
-}
-
-
-fn shared_primary(name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    primary_of(vec![named_group(name, false)], 1)
-}
-
-
-fn absent_primary(_name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    primary_of(Vec::new(), 0)
-}
-
-
-fn twin_primary(name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    primary_of(vec![named_group(name, false), named_group(name, false)], 0)
-}
-
-
-fn primary_down(_name: &str, _gid: u32) -> io::Result<PrimaryGroup> {
-    Err(io::Error::other("group database down"))
+fn databases(passwd: &str, group: &str) -> Databases {
+    Databases {
+        passwd: passwd.to_owned(),
+        group: group.to_owned(),
+    }
 }
 
 
@@ -172,98 +86,114 @@ fn unreadable(_home: &Path) -> io::Result<HomeFacts> {
 }
 
 
+fn good_databases() -> io::Result<Databases> {
+    Ok(databases(GOOD_PASSWD, GOOD_GROUP))
+}
+
+
+fn broken_databases() -> io::Result<Databases> {
+    Err(io::Error::other("database down"))
+}
+
+
+fn refusal(passwd: &str, group: &str) -> Option<AccountError> {
+    resolve_in(NAME, &databases(passwd, group), owned_directory).err()
+}
+
+
 #[test]
 fn the_account_is_resolved_once_with_its_ids_and_home() -> TestResult {
-    let account = resolve_account(NAME, good_entry, no_groups, own_primary, owned_directory)?;
+    let account = resolve_account(NAME, good_databases, owned_directory)?;
     assert_eq!((account.uid, account.gid), (ACCOUNT_UID, ACCOUNT_GID));
     assert_eq!(account.home, PathBuf::from(HOME));
+    assert!(matches!(
+        resolve_account(NAME, broken_databases, owned_directory),
+        Err(AccountError::Lookup(_))
+    ));
     Ok(())
 }
 
 
 #[test]
 fn each_refusal_is_named() -> TestResult {
+    assert!(matches!(refusal("", GOOD_GROUP), Some(AccountError::Missing { .. })));
     assert!(matches!(
-        resolve_account(NAME, absent, no_groups, own_primary, owned_directory),
-        Err(AccountError::Missing { .. })
+        refusal("ostyr-shell:x:abc:1002::/h:/b\n", GOOD_GROUP),
+        Some(AccountError::Lookup(_))
     ));
     assert!(matches!(
-        resolve_account(NAME, broken, no_groups, own_primary, owned_directory),
-        Err(AccountError::Lookup(_))
+        refusal("ostyr-shell:x:0:1002::/h:/b\n", GOOD_GROUP),
+        Some(AccountError::Privileged { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, root_uid, no_groups, own_primary, owned_directory),
-        Err(AccountError::Privileged { .. })
+        refusal("ostyr-shell:x:1001:0::/h:/b\n", GOOD_GROUP),
+        Some(AccountError::Privileged { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, root_gid, no_groups, own_primary, owned_directory),
-        Err(AccountError::Privileged { .. })
+        refusal(GOOD_PASSWD, "users:x:100:ostyr-shell\nostyr-shell:x:1002:\n"),
+        Some(AccountError::SupplementaryGroups { .. })
+    ));
+    assert!(matches!(refusal(GOOD_PASSWD, "disk:x:6\n"), Some(AccountError::GroupsUnreadable(_))));
+    assert!(matches!(
+        refusal(GOOD_PASSWD, "disk:x:1002:\n"),
+        Some(AccountError::SharedPrimaryGroup { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, good_entry, harmless_group, own_primary, owned_directory),
-        Err(AccountError::SupplementaryGroups { .. })
+        refusal(GOOD_PASSWD, "ostyr-shell:x:1002:bob\n"),
+        Some(AccountError::SharedPrimaryGroup { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, good_entry, root_group, own_primary, owned_directory),
-        Err(AccountError::SupplementaryGroups { .. })
+        refusal(&format!("{GOOD_PASSWD}bob:x:1002:1002::/home/bob:/bin/sh\n"), GOOD_GROUP),
+        Some(AccountError::SharedPrimaryGroup { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, good_entry, groups_down, own_primary, owned_directory),
-        Err(AccountError::GroupsUnreadable(_))
+        refusal(GOOD_PASSWD, "root:x:0:\n"),
+        Some(AccountError::SharedPrimaryGroup { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, disk_primary, owned_directory),
-        Err(AccountError::SharedPrimaryGroup { .. })
+        refusal(GOOD_PASSWD, "ostyr-shell:x:1002:\nostyr-shell:x:1002:\n"),
+        Some(AccountError::SharedPrimaryGroup { .. })
     ));
     assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, members_primary, owned_directory),
-        Err(AccountError::SharedPrimaryGroup { .. })
+        refusal(&format!("{GOOD_PASSWD}short\n"), GOOD_GROUP),
+        Some(AccountError::PrimaryGroupUnreadable(_))
     ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, shared_primary, owned_directory),
-        Err(AccountError::SharedPrimaryGroup { .. })
-    ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, absent_primary, owned_directory),
-        Err(AccountError::SharedPrimaryGroup { .. })
-    ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, twin_primary, owned_directory),
-        Err(AccountError::SharedPrimaryGroup { .. })
-    ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, primary_down, owned_directory),
-        Err(AccountError::PrimaryGroupUnreadable(_))
-    ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, own_primary, unreadable),
-        Err(AccountError::HomeUnreadable { .. })
-    ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, own_primary, owned_file),
-        Err(AccountError::HomeInvalid { .. })
-    ));
-    assert!(matches!(
-        resolve_account(NAME, good_entry, no_groups, own_primary, foreign_directory),
-        Err(AccountError::HomeInvalid { .. })
-    ));
-    let refused = resolve_account(NAME, absent, no_groups, own_primary, owned_directory)
-        .err()
-        .map(|error| error.to_string());
-    assert_eq!(refused, Some(format!("the shell account {NAME} does not exist")));
+    let home_refusals = [unreadable, owned_file, foreign_directory].map(|home| resolve_in(NAME, &databases(GOOD_PASSWD, GOOD_GROUP), home).err());
+    assert!(matches!(home_refusals.first(), Some(Some(AccountError::HomeUnreadable { .. }))));
+    assert!(matches!(home_refusals.get(1), Some(Some(AccountError::HomeInvalid { .. }))));
+    assert!(matches!(home_refusals.get(THIRD), Some(Some(AccountError::HomeInvalid { .. }))));
+    assert_eq!(
+        refusal("", GOOD_GROUP).map(|error| error.to_string()),
+        Some(format!("the shell account {NAME} does not exist"))
+    );
     Ok(())
 }
 
 
 #[test]
-fn the_real_lookup_finds_root_and_refuses_it() -> TestResult {
-    let root = lookup_account("root")?;
-    assert_eq!(root.map(|found| found.uid), Some(ROOT_UID));
-    assert!(lookup_account("ostyr-no-such-account-name")?.is_none());
+fn the_real_databases_find_root_and_refuse_it() -> TestResult {
+    let read = read_databases()?;
+    assert_eq!(lookup_in(&read.passwd, "root")?.map(|found| found.uid), Some(ROOT_UID));
+    assert!(lookup_in(&read.passwd, "ostyr-no-such-account-name")?.is_none());
+    assert!(groups_in(&read.group, "ostyr-no-such-account-name")?.is_empty());
     assert!(matches!(
-        resolve_account("root", lookup_account, lookup_groups, own_primary, stat_home),
+        resolve_account("root", read_databases, stat_home),
         Err(AccountError::Privileged { .. })
     ));
+    Ok(())
+}
+
+
+#[test]
+fn each_file_is_read_once_and_a_missing_one_is_an_error() -> TestResult {
+    let directory = private_tempdir()?;
+    let passwd = directory.path().join("passwd");
+    let group_file = directory.path().join("group");
+    std::fs::write(&passwd, "p")?;
+    std::fs::write(&group_file, "g")?;
+    assert_eq!(read_databases_at(&passwd, &group_file)?, databases("p", "g"));
+    assert!(read_databases_at(&directory.path().join("missing"), &group_file).is_err());
+    assert!(read_databases_at(&passwd, &directory.path().join("missing")).is_err());
     Ok(())
 }
 
@@ -302,99 +232,66 @@ fn the_composer_pins_the_store_owner_to_root() -> TestResult {
 
 
 #[test]
-fn a_passwd_file_is_read_line_by_line() -> TestResult {
-    let directory = private_tempdir()?;
-    let passwd = directory.path().join("passwd");
-    std::fs::write(
-        &passwd,
-        "short\nother:x:5:6::/home/other:/bin/sh\nostyr-shell:x:1001:1002::/home/ostyr-shell:/bin/bash\n",
-    )?;
-    let found = lookup_in(&passwd, NAME)?;
+fn a_passwd_text_is_read_line_by_line() -> TestResult {
+    let text = "short\nother:x:5:6::/home/other:/bin/sh\nostyr-shell:x:1001:1002::/home/ostyr-shell:/bin/bash\n";
+    let found = lookup_in(text, NAME)?;
     assert_eq!(
         found.map(|account| (account.uid, account.gid, account.home)),
         Some((ACCOUNT_UID, ACCOUNT_GID, PathBuf::from(HOME)))
     );
-    assert!(lookup_in(&passwd, "nobody-here")?.is_none());
-    std::fs::write(&passwd, "ostyr-shell:x:abc:1002::/home/x:/bin/sh\n")?;
-    assert!(lookup_in(&passwd, NAME).is_err());
-    std::fs::write(&passwd, "ostyr-shell:x:1:2\n")?;
-    assert!(lookup_in(&passwd, NAME).is_err());
-    assert!(lookup_in(&directory.path().join("missing"), NAME).is_err());
+    assert!(lookup_in(text, "nobody-here")?.is_none());
+    assert!(lookup_in("ostyr-shell:x:abc:1002::/home/x:/bin/sh\n", NAME).is_err());
+    assert!(lookup_in("ostyr-shell:x:1:2\n", NAME).is_err());
     Ok(())
 }
 
 
 #[test]
-fn a_group_file_is_read_line_by_line_and_a_member_is_found_by_exact_name() -> TestResult {
-    let directory = private_tempdir()?;
-    let group_file = directory.path().join("group");
-    std::fs::write(
-        &group_file,
-        "\nroot:x:0:\ndisk:x:6:alice,ostyr-shell\nshadow:x:42:ostyr-shell2,xostyr-shell\ndocker:x:999:ostyr-shell\nostyr-shell:x:1002:\n",
-    )?;
-    assert_eq!(groups_in(&group_file, NAME)?, vec!["disk".to_owned(), "docker".to_owned()]);
-    assert!(groups_in(&group_file, "nobody-here")?.is_empty());
-    std::fs::write(&group_file, "disk:x:6\n")?;
-    assert!(groups_in(&group_file, NAME).is_err());
-    assert!(groups_in(&directory.path().join("missing"), NAME).is_err());
-    assert!(lookup_groups("ostyr-no-such-account-name")?.is_empty());
+fn a_group_text_is_read_line_by_line_and_a_member_is_found_by_exact_name() -> TestResult {
+    let text = "\nroot:x:0:\ndisk:x:6:alice,ostyr-shell\nshadow:x:42:ostyr-shell2,xostyr-shell\ndocker:x:999:ostyr-shell\nostyr-shell:x:1002:\n";
+    assert_eq!(groups_in(text, NAME)?, vec!["disk".to_owned(), "docker".to_owned()]);
+    assert!(groups_in(text, "nobody-here")?.is_empty());
+    assert!(groups_in("disk:x:6\n", NAME).is_err());
     Ok(())
 }
 
 
 #[test]
-fn the_primary_group_is_read_from_both_files_and_every_malformed_line_refuses() -> TestResult {
-    let directory = private_tempdir()?;
-    let group_file = directory.path().join("group");
-    let passwd = directory.path().join("passwd");
-    std::fs::write(&group_file, "\nroot:x:0:\ndisk:x:6:\nostyr-shell:x:1002:\nusers:x:100:bob\n")?;
-    std::fs::write(
-        &passwd,
-        "\nroot:x:0:0::/root:/bin/sh\nostyr-shell:x:1001:1002::/home/ostyr-shell:/bin/bash\nbob:x:1002:100::/home/bob:/bin/sh\n",
-    )?;
-    let own = primary_in(&group_file, &passwd, NAME, ACCOUNT_GID)?;
+fn the_primary_group_is_read_from_both_texts_and_every_malformed_line_refuses() -> TestResult {
+    let group_text = "\nroot:x:0:\ndisk:x:6:\nostyr-shell:x:1002:\nusers:x:100:bob\n";
+    let passwd = "\nroot:x:0:0::/root:/bin/sh\nostyr-shell:x:1001:1002::/home/ostyr-shell:/bin/bash\nbob:x:1002:100::/home/bob:/bin/sh\n";
     assert_eq!(
-        own,
+        primary_in(group_text, passwd, NAME, ACCOUNT_GID)?,
         PrimaryGroup {
             entries: vec![named_group(NAME, false)],
             other_users: 0
         }
     );
-    let users = primary_in(&group_file, &passwd, NAME, USERS_GID)?;
     assert_eq!(
-        users,
+        primary_in(group_text, passwd, NAME, USERS_GID)?,
         PrimaryGroup {
             entries: vec![named_group("users", true)],
             other_users: 1
         }
     );
-    let disk = primary_in(&group_file, &passwd, NAME, DISK_GID)?;
-    assert_eq!(disk.entries, vec![named_group("disk", false)]);
-    assert!(primary_in(&group_file, &passwd, NAME, UNKNOWN_GID)?.entries.is_empty());
-    let bob_shares = primary_in(&group_file, &passwd, "alice", USERS_GID)?;
-    assert_eq!(bob_shares.other_users, 1);
-    assert!(primary_in(&directory.path().join("missing"), &passwd, NAME, 1).is_err());
-    assert!(primary_in(&group_file, &directory.path().join("missing"), NAME, 1).is_err());
-    let nowhere = lookup_primary("ostyr-no-such-account-name", UNUSED_GID)?;
-    assert_eq!(
-        nowhere,
-        PrimaryGroup {
-            entries: Vec::new(),
-            other_users: 0
-        }
-    );
+    assert_eq!(primary_in(group_text, passwd, NAME, DISK_GID)?.entries, vec![named_group("disk", false)]);
+    assert!(primary_in(group_text, passwd, NAME, UNKNOWN_GID)?.entries.is_empty());
+    assert_eq!(primary_in(group_text, passwd, "alice", USERS_GID)?.other_users, 1);
     ["disk:x:6\n", "disk:x:six:\n", "disk:x\n", "\nroot:x:0:\n:"].iter().try_for_each(|bad| {
-        std::fs::write(&group_file, bad)?;
-        assert!(primary_in(&group_file, &passwd, NAME, DISK_GID).is_err(), "{bad}");
-        Ok::<(), std::io::Error>(())
+        if primary_in(bad, passwd, NAME, DISK_GID).is_err() {
+            Ok(())
+        } else {
+            Err(format!("accepted {bad}"))
+        }
     })?;
-    std::fs::write(&group_file, "disk:x:6:\n")?;
     ["ostyr-shell:x:1:abc\n", "ostyr-shell:x:1\n", "ostyr-shell:x:1:2\nshort"]
         .iter()
         .try_for_each(|bad| {
-            std::fs::write(&passwd, bad)?;
-            assert!(primary_in(&group_file, &passwd, NAME, DISK_GID).is_err(), "{bad}");
-            Ok::<(), std::io::Error>(())
+            if primary_in("disk:x:6:\n", bad, NAME, DISK_GID).is_err() {
+                Ok(())
+            } else {
+                Err(format!("accepted {bad}"))
+            }
         })?;
     Ok(())
 }

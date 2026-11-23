@@ -1,4 +1,5 @@
 use crate::account::ShellAccount;
+use crate::cgroup::{create_session, CgroupHost};
 use crate::model::{session_id_of, PtyHandle, VerifiedOpenShell, SHELL_COLUMNS, SHELL_ROWS};
 use crate::types::SpawnFn;
 use futures_util::FutureExt;
@@ -69,6 +70,13 @@ pub const SHELL_PROGRAMS: ShellPrograms = ShellPrograms {
 };
 
 
+/// Run by root before the account's code: joins the session cgroup by writing the shell's own pid, then becomes `setpriv` with the rest of the arguments.
+pub const JOIN_SCRIPT: &str = "echo $$ > \"$1\" && shift && exec /usr/bin/setpriv \"$@\"";
+
+
+pub const JOIN_NAME: &str = "ostyr-shell-join";
+
+
 /// The first program that does not exist, so a missing one refuses the session by name.
 pub fn missing_program(programs: &ShellPrograms) -> Option<&'static str> {
     [programs.setpriv, programs.prlimit, programs.bash]
@@ -96,6 +104,21 @@ pub fn shell_args(account: &ShellAccount, programs: &ShellPrograms) -> Vec<Strin
         "--norc".to_owned(),
         "-i".to_owned(),
     ]
+}
+
+
+/// The arguments of the root bash that joins the cgroup file at `procs_path` and then runs `setpriv` with the privilege drop.
+pub fn join_args(account: &ShellAccount, programs: &ShellPrograms, procs_path: &str) -> Vec<String> {
+    let mut args = vec![
+        "--noprofile".to_owned(),
+        "--norc".to_owned(),
+        "-c".to_owned(),
+        JOIN_SCRIPT.to_owned(),
+        JOIN_NAME.to_owned(),
+        procs_path.to_owned(),
+    ];
+    args.extend(shell_args(account, programs));
+    args
 }
 
 
@@ -184,30 +207,32 @@ pub fn spawn_pty(program: &str, args: &[String], environment: &[(String, String)
 
 
 /// Spawns the shell of an order as the account; a missing program refuses it by name.
-pub fn spawn_shell(account: &ShellAccount, session_id: &str, programs: &ShellPrograms) -> std::io::Result<PtyHandle> {
+pub fn spawn_shell(account: &ShellAccount, session_id: &str, programs: &ShellPrograms, host: &CgroupHost) -> std::io::Result<PtyHandle> {
     match missing_program(programs) {
         Some(path) => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("shell program missing: {path}"),
         )),
-        None => spawn_pty(
-            programs.setpriv,
-            &shell_args(account, programs),
-            &shell_environment(account, session_id),
-            &account.home,
-        ),
+        None => create_session(host, session_id).map_err(std::io::Error::from).and_then(|procs_path| {
+            spawn_pty(
+                programs.bash,
+                &join_args(account, programs, &procs_path),
+                &shell_environment(account, session_id),
+                &account.home,
+            )
+        }),
     }
 }
 
 
 /// The production `SpawnFn`: the blocking spawn runs on the blocking pool.
-pub fn spawn_fn(shell_account: ShellAccount) -> Box<SpawnFn> {
-    let shared = Arc::new(shell_account);
+pub fn spawn_fn(shell_account: ShellAccount, host: CgroupHost) -> Box<SpawnFn> {
+    let shared = Arc::new((shell_account, host));
     Box::new(move |order: &VerifiedOpenShell| {
         let account = Arc::clone(&shared);
         let session = session_id_of(order).to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || spawn_shell(&account, &session, &SHELL_PROGRAMS))
+            tokio::task::spawn_blocking(move || spawn_shell(&account.0, &session, &SHELL_PROGRAMS, &account.1))
                 .await
                 .map_err(std::io::Error::other)
                 .and_then(std::convert::identity)

@@ -1,9 +1,10 @@
 //! Live proof of the real spawner and cleanup: runs the keystrokes of stdin in a shell of the account named by the first argument, then sweeps.
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod proof {
     use agent_command::model::{Action, Command, KeyClass, NONCE_LENGTH};
-    use agent_shell::account::{lookup_account, lookup_groups, lookup_primary, resolve_account, stat_home};
+    use agent_shell::account::{read_databases, resolve_account, stat_home};
+    use agent_shell::cgroup::production_host;
     use agent_shell::cleanup::cleanup_fn;
     use agent_shell::model::{PtyHandle, VerifiedOpenShell};
     use agent_shell::spawn::{spawn_fn, SHELL_ACCOUNT};
@@ -67,11 +68,11 @@ mod proof {
     pub async fn run() -> Result<(), Box<dyn Error>> {
         let name = std::env::args().nth(1).unwrap_or_else(|| SHELL_ACCOUNT.to_owned());
         let mut out = std::io::stdout();
-        let account = resolve_account(&name, lookup_account, lookup_groups, lookup_primary, stat_home)?;
+        let account = resolve_account(&name, read_databases, stat_home)?;
         let mut keystrokes = Vec::new();
         std::io::stdin().read_to_end(&mut keystrokes)?;
-        let spawn = spawn_fn(account.clone());
-        let cleanup = cleanup_fn(&account);
+        let spawn = spawn_fn(account.clone(), production_host());
+        let cleanup = cleanup_fn(&account, production_host());
         let handle = spawn(&order()?).await?;
         handle.input.send(keystrokes).await?;
         let (exited, shown) = transcript(handle).await?;
@@ -83,12 +84,12 @@ mod proof {
 }
 
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     proof::run().await
 }
 
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn main() {}
