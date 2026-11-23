@@ -354,7 +354,7 @@ async fn a_hung_list_hits_the_configured_statement_deadline_and_returns_the_perm
     let listed = pg_list(Arc::clone(&served.engine), Arc::clone(&permits), tenant_scope("acme")?, LIMIT).await;
     assert!(matches!(
         listed,
-        Err(ReadError::Store(StoreError::Pg(PgError::StatementTimeout { seconds: STATEMENT_SECONDS })))
+        Err(ReadError::Store(StoreError::Pg(PgError::ClientDeadline { seconds: STATEMENT_SECONDS })))
     ));
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
     Ok(())
@@ -368,7 +368,7 @@ async fn a_hung_get_hits_the_configured_statement_deadline_and_returns_the_permi
     let got = pg_get(Arc::clone(&served.engine), Arc::clone(&permits), tenant_scope("acme")?, FIRST_ID).await;
     assert!(matches!(
         got,
-        Err(ReadError::Store(StoreError::Pg(PgError::StatementTimeout { seconds: STATEMENT_SECONDS })))
+        Err(ReadError::Store(StoreError::Pg(PgError::ClientDeadline { seconds: STATEMENT_SECONDS })))
     ));
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
     Ok(())

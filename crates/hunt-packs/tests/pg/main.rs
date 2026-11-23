@@ -52,7 +52,7 @@ const PAGE_SIZE: i64 = 50;
 const COLUMNS: usize = 5;
 
 
-const HANG_MARGIN: Duration = Duration::from_secs(5);
+const HANG_MARGIN: Duration = Duration::from_secs(10);
 
 
 pub struct Served {
@@ -271,7 +271,7 @@ async fn a_statement_that_hangs_hits_the_deadline_and_returns_the_permit() -> Re
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let outcome = timeout(STATEMENT_DEADLINE + HANG_MARGIN, read_once(&served, &permits)).await?;
     let error = pg_error(outcome)?;
-    assert!(matches!(error, PgError::StatementTimeout { .. }), "{error}");
+    assert!(matches!(error, PgError::ClientDeadline { .. }), "{error}");
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
     Ok(())
 }

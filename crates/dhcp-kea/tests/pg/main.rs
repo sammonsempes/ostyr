@@ -6,6 +6,7 @@ use alerts::error::StoreError;
 use core_audit::log::{append, genesis_log};
 use core_config::reload::{ReloadContext, ReloadEngine};
 use core_pg::error::PgError;
+use core_pg::query::CLIENT_DEADLINE_MARGIN;
 use core_pg::scope::{tenant_scope, TenantScope};
 use core_pg::settings::{open_settings, PgSettings};
 use dhcp_kea::backend::{lease_failure, pg_backend};
@@ -257,7 +258,7 @@ pub async fn hung_lookup(by_mac: bool) -> Result<HistoryError, Box<dyn Error>> {
     until_lookup(&mut served.fake.statements).await?;
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS - 1);
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(STATEMENT_TIMEOUT_SECS + 1)).await;
+    tokio::time::advance(Duration::from_secs(STATEMENT_TIMEOUT_SECS + 1) + CLIENT_DEADLINE_MARGIN).await;
     let error = task.await?.err().ok_or("answered")?;
     assert_eq!(permits.available_permits(), MAX_CONNECTIONS);
     Ok(error)
@@ -270,7 +271,7 @@ async fn an_address_lookup_hang_ends_at_the_configured_statement_deadline_and_re
     assert!(
         matches!(
             error,
-            HistoryError::Pg(PgError::StatementTimeout {
+            HistoryError::Pg(PgError::ClientDeadline {
                 seconds: STATEMENT_TIMEOUT_SECS
             })
         ),
@@ -286,7 +287,7 @@ async fn a_mac_lookup_hang_ends_at_the_configured_statement_deadline_and_returns
     assert!(
         matches!(
             error,
-            HistoryError::Pg(PgError::StatementTimeout {
+            HistoryError::Pg(PgError::ClientDeadline {
                 seconds: STATEMENT_TIMEOUT_SECS
             })
         ),

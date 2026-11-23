@@ -42,6 +42,8 @@ pub enum PgError {
     ConnectTimeout { seconds: u64 },
     #[error("statement deadline of {seconds} s exceeded")]
     StatementTimeout { seconds: u64 },
+    #[error("the client stopped waiting {seconds} s after the statement started, plus its margin: the outcome is unknown")]
+    ClientDeadline { seconds: u64 },
     #[error("server error {code}: {class}")]
     Server { code: String, class: &'static str },
     #[error("database client error")]

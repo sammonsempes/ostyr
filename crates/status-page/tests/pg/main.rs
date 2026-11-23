@@ -343,7 +343,7 @@ async fn a_hanging_statement_times_out_at_the_passed_deadline() -> TestResult {
     let served = served(pausing).await?;
     let error = store_error(execute(&served.client, scope(TENANT)?, statement(SELECT_ONE), SHORT_DEADLINE).await)?;
     assert!(
-        matches!(error, StoreError::Pg(PgError::StatementTimeout { seconds: SHORT_SECONDS })),
+        matches!(error, StoreError::Pg(PgError::ClientDeadline { seconds: SHORT_SECONDS })),
         "{error}"
     );
     Ok(())

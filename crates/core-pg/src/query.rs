@@ -9,6 +9,12 @@ use tokio_postgres::{Client, Row};
 const MIN_TIMEOUT_MILLIS: u128 = 1;
 
 
+pub const CLIENT_DEADLINE_MARGIN: Duration = Duration::from_secs(5);
+
+
+pub const STATEMENT_TIMEOUT_SQLSTATE: &str = "57014";
+
+
 /// A deadline under 1 ms is sent as 1 ms, because 0 disables the server limit.
 pub fn timeout_millis(deadline: Duration) -> u128 {
     deadline.as_millis().max(MIN_TIMEOUT_MILLIS)
@@ -21,23 +27,36 @@ pub fn timed_script(sql: &str, deadline: Duration) -> String {
 }
 
 
-pub async fn execute_script(client: &Client, sql: &str, deadline: Duration) -> Result<(), PgError> {
-    timeout(deadline, client.batch_execute(&timed_script(sql, deadline)))
-        .await
-        .map_err(|_elapsed| PgError::StatementTimeout { seconds: deadline.as_secs() })?
-        .map_err(reduce)
+/// The server's own cancel (SQLSTATE 57014) is the only source of `StatementTimeout`.
+pub fn reduce_statement(error: tokio_postgres::Error, deadline: Duration) -> PgError {
+    match reduce(error) {
+        PgError::Server { code, .. } if code == STATEMENT_TIMEOUT_SQLSTATE => PgError::StatementTimeout { seconds: deadline.as_secs() },
+        other => other,
+    }
 }
 
 
-/// Sets the server-side deadline, then runs the statement: both share one client-side deadline.
+/// The client gives up `CLIENT_DEADLINE_MARGIN` after the server limit, so a statement that committed inside the margin is reported done.
+pub async fn execute_script(client: &Client, sql: &str, deadline: Duration) -> Result<(), PgError> {
+    timeout(deadline + CLIENT_DEADLINE_MARGIN, client.batch_execute(&timed_script(sql, deadline)))
+        .await
+        .map_err(|_elapsed| PgError::ClientDeadline { seconds: deadline.as_secs() })?
+        .map_err(|error| reduce_statement(error, deadline))
+}
+
+
+/// Sets the server-side deadline, then runs the statement: both share one client-side deadline, `CLIENT_DEADLINE_MARGIN` after the server limit.
 pub async fn run_query(client: &Client, sql: &str, params: &[SqlParameter<'_>], deadline: Duration) -> Result<Vec<Row>, PgError> {
     let work = async {
-        client.batch_execute(&timed_script("", deadline)).await.map_err(reduce)?;
-        client.query(sql, params).await.map_err(reduce)
+        client
+            .batch_execute(&timed_script("", deadline))
+            .await
+            .map_err(|error| reduce_statement(error, deadline))?;
+        client.query(sql, params).await.map_err(|error| reduce_statement(error, deadline))
     };
-    timeout(deadline, work)
+    timeout(deadline + CLIENT_DEADLINE_MARGIN, work)
         .await
-        .map_err(|_elapsed| PgError::StatementTimeout { seconds: deadline.as_secs() })?
+        .map_err(|_elapsed| PgError::ClientDeadline { seconds: deadline.as_secs() })?
 }
 
 
