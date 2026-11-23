@@ -1,4 +1,4 @@
-//! Usage: platform_api <module.yaml>. Serves the thirteen modules of `settings.modules`; `risk` also needs `settings.risk.weights_file` and `status` needs `settings.status.page_file`.
+//! Usage: platform_api <module.yaml>. Serves the fifteen modules of `settings.modules`; `risk` also needs `settings.risk.weights_file` and `status` needs `settings.status.page_file`.
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};

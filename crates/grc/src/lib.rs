@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod api_model;
+pub mod backend;
 pub mod builtin;
 pub mod error;
 pub mod evaluate;

@@ -13,4 +13,6 @@ pub enum Module {
     RemoteShell,
     Posture,
     Status,
+    Grc,
+    AttackPaths,
 }

@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 alerts = { version = "0.0.0", path = "../alerts" }
+attack-paths = { version = "0.0.0", path = "../attack-paths" }
 axum = "0.8"
 cases = { version = "0.0.0", path = "../cases" }
 cert-inventory = { version = "0.0.0", path = "../cert-inventory" }
@@ -17,6 +18,7 @@ core-api = { version = "0.0.0", path = "../core-api" }
 core-config = { version = "0.0.0", path = "../core-config" }
 core-pg = { version = "0.0.0", path = "../core-pg" }
 dhcp-kea = { version = "0.0.0", path = "../dhcp-kea" }
+grc = { version = "0.0.0", path = "../grc" }
 hunt-packs = { version = "0.0.0", path = "../hunt-packs" }
 oncall = { version = "0.0.0", path = "../oncall" }
 remote-shell = { version = "0.0.0", path = "../remote-shell" }
