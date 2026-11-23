@@ -3,23 +3,37 @@ set -euo pipefail
 if ! command -v cargo >/dev/null 2>&1; then export PATH="$HOME/.cargo/bin:$PATH"; fi
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
-if [ -e "$ROOT/.cargo" ] || [ -L "$ROOT/.cargo" ]; then
-  echo "pre-commit: $ROOT/.cargo exists: a cargo config in the repository can run a runner or swap a source (refused before any cargo command)" >&2
-  exit 1
-fi
-main_checkout=$(dirname "$(realpath "$(git rev-parse --git-common-dir)")")
-cargo_dir=$(dirname "$ROOT")
-for _ in $(seq 64); do
-  case "$cargo_dir/" in
-    "$main_checkout"/*)
-      if [ -e "$cargo_dir/.cargo" ] || [ -L "$cargo_dir/.cargo" ]; then
-        echo "pre-commit: $cargo_dir/.cargo exists above the checkout: cargo reads it (refused before any cargo command)" >&2
-        exit 1
-      fi
-      cargo_dir=$(dirname "$cargo_dir")
+MAX_CARGO_DEPTH=64
+
+check_cargo_directories() {
+  local main_checkout cargo_dir
+  if [ -e "$ROOT/.cargo" ] || [ -L "$ROOT/.cargo" ]; then
+    echo "pre-commit: $ROOT/.cargo exists: a cargo config in the repository can run a runner or swap a source (refused before any cargo command)" >&2
+    return 1
+  fi
+  main_checkout=$(dirname "$(realpath "$(git rev-parse --git-common-dir)")")
+  case "$ROOT/" in
+    "$main_checkout"/*) ;;
+    *)
+      echo "pre-commit: $ROOT is outside the main checkout $main_checkout: the .cargo directories above it cannot be checked (refused)" >&2
+      return 1
       ;;
   esac
-done
+  cargo_dir=$(dirname "$ROOT")
+  for _ in $(seq "$MAX_CARGO_DEPTH"); do
+    case "$cargo_dir/" in
+      "$main_checkout"/*)
+        if [ -e "$cargo_dir/.cargo" ] || [ -L "$cargo_dir/.cargo" ]; then
+          echo "pre-commit: $cargo_dir/.cargo exists above the checkout: cargo reads it (refused before any cargo command)" >&2
+          return 1
+        fi
+        cargo_dir=$(dirname "$cargo_dir")
+        ;;
+    esac
+  done
+}
+
+if ! check_cargo_directories; then exit 1; fi
 export CARGO_INCREMENTAL=0
 if command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
@@ -82,7 +96,7 @@ pick_scratch() {
   TMPFS_RUN=""
   if tmpfs_has_room; then
     TMPFS_RUN="$GATE_TMPFS/run-$$"
-    mkdir -p -m 0755 "$TMPFS_RUN" || TMPFS_RUN=""
+    if mkdir -p "$TMPFS_RUN" && chmod 0755 "$TMPFS_RUN"; then :; else TMPFS_RUN=""; fi
   fi
   if [ -n "$TMPFS_RUN" ]; then SCRATCH="$TMPFS_RUN"; else SCRATCH="$RUN_DIR/tmp"; fi
   mkdir -p "$SCRATCH"
@@ -154,6 +168,37 @@ check_published_mentions() {
 }
 
 if ! check_published_mentions; then exit 1; fi
+
+PUBLISHED_REF=refs/remotes/public/main
+
+check_published_migrations() {
+  local path published found=0
+  local -a paths
+  if ! git rev-parse --verify -q "$PUBLISHED_REF^{commit}" >/dev/null; then
+    echo "pre-commit: WARNING $PUBLISHED_REF is absent: published migrations are not checked (add the public remote and fetch it)" >&2
+    return 0
+  fi
+  mapfile -d '' paths < <(git ls-tree -r -z --name-only "$PUBLISHED_REF" -- crates)
+  if ! wait "$!"; then
+    echo "pre-commit: cannot list $PUBLISHED_REF" >&2
+    return 1
+  fi
+  for path in "${paths[@]+"${paths[@]}"}"; do
+    case "$path" in
+      crates/*/migrations/*.sql) ;;
+      *) continue ;;
+    esac
+    published=$(git rev-parse "$PUBLISHED_REF:$path")
+    if [ "$(git rev-parse -q --verify ":$path" || echo missing)" != "$published" ] ||
+      [ "$(git hash-object -- "$path" 2>/dev/null || echo missing)" != "$published" ]; then
+      echo "pre-commit: $path is a published migration and differs from $PUBLISHED_REF: a published migration is never edited; add a new one" >&2
+      found=1
+    fi
+  done
+  return "$found"
+}
+
+if ! check_published_migrations; then exit 1; fi
 
 docs_only() {
   local staged path
@@ -277,7 +322,8 @@ kernel_manifest_present() {
 }
 
 kernel_checks() {
-  kernel_manifest_present &&
+  check_cargo_directories &&
+    kernel_manifest_present &&
     low env EBPF_CHECK_ONLY=1 EBPF_OFFLINE=1 EBPF_NIGHTLY="$EBPF_NIGHTLY" lab/ebpf-build.sh "$EBPF_MANIFEST" &&
     low cargo +nightly fmt --check --manifest-path "$EBPF_MANIFEST" &&
     kernel_clippy &&

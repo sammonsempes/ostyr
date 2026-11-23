@@ -220,5 +220,5 @@ BUILD_DIR="$WORK_DIR/kernel-target"
 FLAGS="-Clink-arg=--btf${UNIT_SEPARATOR}--sysroot=$SYSROOT_DIR/root${UNIT_SEPARATOR}-Zallow-features=$ALLOWED_FEATURES"
 env -u RUSTFLAGS CARGO_ENCODED_RUSTFLAGS="$FLAGS" RUSTC="$NIGHTLY_RUSTC" cargo build "${OFFLINE[@]}" "${LOCKED[@]}" --release --target "$TARGET" \
   --manifest-path "$MANIFEST" --target-dir "$BUILD_DIR" >&2 || fail "the kernel crate build failed (a feature outside $ALLOWED_FEATURES, or a nightly cargo setting, is refused here)"
-rm -rf "$TARGET_DIR/$TARGET"
+rm -rf "${TARGET_DIR:?}/$TARGET"
 mv "$BUILD_DIR/$TARGET" "$TARGET_DIR/$TARGET"
