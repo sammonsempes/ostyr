@@ -1,4 +1,4 @@
-use crate::fixture::{body_json, call, fixture, fixture_with_permits, login, unweighted_parts, ANALYST, PAGE_TEXT, READER, RESPONDER};
+use crate::fixture::{body_json, call, empty_permits, fixture, fixture_with_permits, login, unweighted_parts, ANALYST, PAGE_TEXT, READER, RESPONDER};
 use crate::types::TestResult;
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -12,9 +12,7 @@ use status_page::model::DEFAULT_LIMITS;
 use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::sync::Semaphore;
 
 
 const MODULES: &str = "alerts,status";
@@ -174,7 +172,7 @@ async fn the_write_routes_need_status_write_and_reach_the_backend() -> TestResul
 
 #[tokio::test]
 async fn the_write_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
-    let permits = Arc::new(Semaphore::new(0));
+    let permits = empty_permits(MODULES)?;
     let limited = fixture_with_permits(MODULES, &permits)?;
     let token = login(&limited.router, RESPONDER).await?;
     assert_eq!(

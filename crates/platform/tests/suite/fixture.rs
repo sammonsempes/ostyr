@@ -15,9 +15,10 @@ use core_auth::random::os_random;
 use core_auth::store::update_store_file;
 use core_config::reload::{open_engine, ReloadContext};
 use platform::error::PlatformError;
-use platform::merge::{load_page_services, module_parts, modules_of, page_file_of, shared_permits, weights_file_of, ACTOR};
+use platform::merge::{load_page_services, module_parts, modules_of, page_file_of, parse_modules, weights_file_of, ACTOR};
 use platform::model::Module;
-use platform::types::Parts;
+use platform::permits::module_semaphores;
+use platform::types::{Parts, Permits};
 use risk_score::weights::{weights_loader, weights_state};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -167,7 +168,7 @@ pub fn module_text_with_page(modules: &str, pg_file: &Path, weights_file: &Path,
 }
 
 
-fn prepared(modules: &str, permits: &Arc<Semaphore>) -> Result<(TempDir, ApiConfig, Parts), TestError> {
+fn prepared(modules: &str, permits: &Permits) -> Result<(TempDir, ApiConfig, Parts), TestError> {
     let dir = tempdir()?;
     let config = config_in(&dir)?;
     seed_accounts(&config)?;
@@ -218,22 +219,35 @@ pub fn unweighted_parts(modules: &str) -> Result<Result<Parts, PlatformError>, T
     fs::write(&module_file, module_text(modules, &pg_file))?;
     let selected = modules_of(&core_config::load::load_module(&module_file)?.settings)?;
     let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, new_listener(), ACTOR)?;
-    Ok(module_parts(&selected, &Arc::new(opened), &shared_permits(), None, None))
+    Ok(module_parts(&selected, &Arc::new(opened), &module_semaphores(&selected), None, None))
 }
 
 
 pub fn parts_of(modules: &str) -> Result<(TempDir, Parts), TestError> {
-    let (dir, _config, parts) = prepared(modules, &shared_permits())?;
+    let (dir, _config, parts) = prepared(modules, &semaphores_of(modules)?)?;
     Ok((dir, parts))
 }
 
 
 pub fn fixture(modules: &str) -> Result<Fixture, TestError> {
-    fixture_with_permits(modules, &shared_permits())
+    fixture_with_permits(modules, &semaphores_of(modules)?)
 }
 
 
-pub fn fixture_with_permits(modules: &str, permits: &Arc<Semaphore>) -> Result<Fixture, TestError> {
+pub fn semaphores_of(modules: &str) -> Result<Permits, TestError> {
+    Ok(module_semaphores(&parse_modules(modules)?))
+}
+
+
+pub fn empty_permits(modules: &str) -> Result<Permits, TestError> {
+    Ok(parse_modules(modules)?
+        .into_iter()
+        .map(|module| (module, Arc::new(Semaphore::new(0))))
+        .collect())
+}
+
+
+pub fn fixture_with_permits(modules: &str, permits: &Permits) -> Result<Fixture, TestError> {
     let (dir, config, (extra, access, documents)) = prepared(modules, permits)?;
     let state: SharedState = Arc::new(build_state_from_files(&config, access, documents)?);
     let router = build_router(state, extra);
