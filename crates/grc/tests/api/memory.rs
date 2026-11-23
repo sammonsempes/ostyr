@@ -1,0 +1,127 @@
+use core_pg::error::PgError;
+use core_pg::scope::{tenant_of, TenantScope};
+use grc::store::{GET_SQL, LIST_FRAMEWORK_SQL, LIST_SQL, STORE_SQL};
+use grc::types::Row;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+
+pub const PARAM_GENERATED: usize = 2;
+
+
+pub const PARAM_DIGEST: usize = 3;
+
+
+pub const PARAM_BODY: usize = 4;
+
+
+pub const STORED_BASE: i64 = 1_700_000_000;
+
+
+#[derive(Clone)]
+pub struct Stored {
+    pub tenant: String,
+    pub id: i64,
+    pub framework: String,
+    pub version: String,
+    pub generated: String,
+    pub digest: String,
+    pub body: String,
+}
+
+
+#[derive(Default)]
+pub struct Db {
+    pub rows: Mutex<Vec<Stored>>,
+}
+
+
+pub fn lock<Guarded>(mutex: &Mutex<Guarded>) -> MutexGuard<'_, Guarded> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+
+pub fn malformed() -> PgError {
+    PgError::Server {
+        code: "22P02".to_owned(),
+        class: "data",
+    }
+}
+
+
+pub fn number<Parsed: std::str::FromStr>(params: &[String], index: usize) -> Result<Parsed, PgError> {
+    params.get(index).and_then(|text| text.parse().ok()).ok_or_else(malformed)
+}
+
+
+pub fn text(params: &[String], index: usize) -> Result<String, PgError> {
+    params.get(index).cloned().ok_or_else(malformed)
+}
+
+
+pub fn meta_row(stored: &Stored) -> Row {
+    vec![
+        stored.id.to_string(),
+        stored.framework.clone(),
+        stored.version.clone(),
+        stored.generated.clone(),
+        stored.digest.clone(),
+        stored.body.len().to_string(),
+        (STORED_BASE + stored.id).to_string(),
+    ]
+}
+
+
+pub fn listed(db: &Db, tenant: &str, framework: Option<&str>, limit: usize) -> Vec<Row> {
+    let mut found: Vec<Stored> = lock(&db.rows)
+        .iter()
+        .filter(|stored| stored.tenant == tenant && framework.is_none_or(|name| stored.framework == name))
+        .cloned()
+        .collect();
+    found.sort_by_key(|stored| std::cmp::Reverse(stored.id));
+    found.iter().take(limit).map(meta_row).collect()
+}
+
+
+pub fn insert(db: &Db, tenant: &str, params: &[String]) -> Result<Vec<Row>, PgError> {
+    let mut rows = lock(&db.rows);
+    let id = i64::try_from(rows.len()).map_err(|_error| malformed())? + 1;
+    rows.push(Stored {
+        tenant: tenant.to_owned(),
+        id,
+        framework: text(params, 0)?,
+        version: text(params, 1)?,
+        generated: text(params, PARAM_GENERATED)?,
+        digest: text(params, PARAM_DIGEST)?,
+        body: text(params, PARAM_BODY)?,
+    });
+    Ok(vec![vec!["stored".to_owned(), id.to_string()]])
+}
+
+
+pub fn handle(db: &Db, scope: &TenantScope, sql: &'static str, params: &[String]) -> Result<Vec<Row>, PgError> {
+    let tenant = tenant_of(scope);
+    if sql == STORE_SQL {
+        insert(db, tenant, params)
+    } else if sql == LIST_SQL {
+        Ok(listed(db, tenant, None, number(params, 0)?))
+    } else if sql == LIST_FRAMEWORK_SQL {
+        Ok(listed(db, tenant, Some(&text(params, 0)?), number(params, 1)?))
+    } else if sql == GET_SQL {
+        let id: i64 = number(params, 0)?;
+        Ok(lock(&db.rows)
+            .iter()
+            .filter(|stored| stored.tenant == tenant && stored.id == id)
+            .map(|stored| {
+                vec![
+                    stored.framework.clone(),
+                    stored.version.clone(),
+                    stored.generated.clone(),
+                    stored.digest.clone(),
+                    stored.body.clone(),
+                ]
+            })
+            .collect())
+    } else {
+        Err(malformed())
+    }
+}

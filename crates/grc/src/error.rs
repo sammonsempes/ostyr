@@ -57,4 +57,6 @@ pub enum StoreError {
     BadRow,
     #[error("the stored report no longer matches its digest")]
     DigestMismatch,
+    #[error("the connection pool is full")]
+    Busy,
 }
