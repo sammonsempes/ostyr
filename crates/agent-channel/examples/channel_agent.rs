@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let path = std::env::args().nth(1).ok_or(USAGE)?;
     let file = load_agent_file(Path::new(&path))?;
     let dirs = open_spool_dirs(&file)?;
-    let outcome = run_agent(&file, &dirs, &|delay: Duration| Box::pin(tokio::time::sleep(delay))).await?;
+    let outcome = run_agent(&file, &dirs, &|delay: Duration| Box::pin(tokio::time::sleep(delay)), None).await?;
     writeln!(
         stdout(),
         "acknowledged {} batches, accepted {} commands, refused {}, executed {}",

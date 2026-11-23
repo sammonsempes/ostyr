@@ -495,7 +495,7 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
         let sink = Arc::clone(&executed);
         move |command| {
             record_executed(&sink, command.sequence);
-            true
+            Ok(())
         }
     }))
     .await??;
@@ -525,7 +525,7 @@ async fn a_flood_of_junk_envelopes_keeps_only_the_capped_refusals() -> TestResul
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
-    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| true)).await??;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| Ok(()))).await??;
     assert_eq!(run.refused, u64::try_from(junk)?);
     assert_eq!(run.accepted, 0);
     assert_eq!(run.refusals.len(), MAX_KEPT_REFUSALS);
@@ -548,7 +548,7 @@ async fn an_accepted_command_reaches_the_executor_while_the_subscription_stays_o
     let execute = move |command: Command| {
         record_executed(&sink, command.sequence);
         wake.notify_one();
-        true
+        Ok(())
     };
     let mut run = Box::pin(run_commands(session.channel.clone(), &verifier, &|| NOW, &execute));
     let ended = bounded(async {
@@ -570,7 +570,7 @@ async fn the_command_stream_of_a_dead_channel_reports_the_status() -> TestResult
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-    let outcome = bounded(run_commands(channel, &verifier, &|| NOW, &|_command| true)).await?;
+    let outcome = bounded(run_commands(channel, &verifier, &|| NOW, &|_command| Ok(()))).await?;
     assert_eq!(status_code(outcome), Some(Code::Unavailable));
     Ok(())
 }
@@ -653,7 +653,10 @@ async fn an_accepted_command_the_executor_cannot_take_is_reported_refused() -> T
     let session = session(Arc::clone(&state)).await?;
     let dir = tempdir()?;
     let verifier = agent_verifier(dir.path())?;
-    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| false)).await??;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| {
+        Err(agent_channel::model::ExecuteRefusal::Busy)
+    }))
+    .await??;
     assert_eq!((run.accepted, run.refused), (0, FIRST));
     assert_eq!(
         run.refusals.first().map(|verdict| verdict.reason.as_str()),

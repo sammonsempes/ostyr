@@ -1,7 +1,7 @@
 use crate::app::{debounce, keep_signals, reload_context, shared_log_audit};
 use crate::client::{backoff_delay, connect_channel, deliver_events, heartbeat, random_jitter, run_commands};
 use crate::error::{AppError, ChannelError};
-use crate::model::{ClientTlsPaths, CommandRun, Delivered};
+use crate::model::{ClientTlsPaths, CommandRun, Delivered, ExecuteRefusal};
 use crate::proto::EventBatch;
 use crate::spool::{claim_spool, finish_spool, quarantine, suffixed, Spool, MAX_REJECTED_BYTES, REJECTED_SUFFIX};
 use crate::spool_dirs::SpoolDirs;
@@ -9,7 +9,7 @@ use crate::tls::client_config;
 use crate::types::{DialFn, ExecuteFn, PauseFn, SharedClientConfig};
 use agent_command::cli::seconds_since_epoch;
 use agent_command::keys::open_keys_engine;
-use agent_command::model::{Command, Verifier};
+use agent_command::model::{Action, Command, Verifier};
 use agent_command::verify::open_verifier;
 use core_audit::log::{open_file_log, owner_only};
 use core_config::load::load_file;
@@ -124,14 +124,37 @@ pub fn start_worker(path: &Path) -> Result<Worker, AppError> {
 }
 
 
-/// Hands each accepted command to the worker and returns at once; a full queue returns false, so the command is reported refused.
-pub fn execute_fn(sender: mpsc::Sender<Command>) -> Box<ExecuteFn> {
-    Box::new(move |command| {
-        sender
-            .try_send(command)
-            .inspect_err(|error| tracing::warn!(%error, "worker queue refused a command"))
-            .is_ok()
-    })
+/// Hands the command to the recording worker and returns at once; a full or closed queue is `Busy`, so the command is reported refused.
+pub fn record_command(sender: &mpsc::Sender<Command>, command: Command) -> Result<(), ExecuteRefusal> {
+    sender
+        .try_send(command)
+        .inspect_err(|error| tracing::warn!(%error, "worker queue refused a command"))
+        .map_err(|_refused| ExecuteRefusal::Busy)
+}
+
+
+pub fn execute_fn(sender: mpsc::Sender<Command>) -> Box<ExecuteFn<'static>> {
+    Box::new(move |command| record_command(&sender, command))
+}
+
+
+/// Routes `OpenShell` to the shell executor alone (its verdict decides, the record is best effort afterwards); every other action is recorded.
+pub fn dispatch_command(sender: &mpsc::Sender<Command>, shell: Option<&ExecuteFn<'_>>, command: Command) -> Result<(), ExecuteRefusal> {
+    match (&command.action, shell) {
+        (Action::OpenShell { .. }, Some(executor)) => {
+            let copy = command.clone();
+            executor(command).inspect(|()| {
+                if sender.try_send(copy).is_err() {
+                    tracing::warn!("open-shell admitted, not recorded");
+                }
+            })
+        }
+        (Action::OpenShell { .. }, None) => {
+            tracing::warn!("shell command refused: no shell executor");
+            Err(ExecuteRefusal::NoShellExecutor)
+        }
+        _ => record_command(sender, command),
+    }
 }
 
 
@@ -171,7 +194,7 @@ where
 }
 
 
-pub async fn session_attempt(dial: &DialFn, verifier: &Verifier, execute: &ExecuteFn) -> Result<CommandRun, crate::error::ChannelError> {
+pub async fn session_attempt(dial: &DialFn, verifier: &Verifier, execute: &ExecuteFn<'_>) -> Result<CommandRun, crate::error::ChannelError> {
     let channel = dial().await?;
     heartbeat(channel.clone(), AGENT_VERSION).await?;
     run_commands(channel, verifier, &now_seconds, execute).await
@@ -185,7 +208,7 @@ pub async fn run_streams(
     pause: &PauseFn,
     batches: Vec<EventBatch>,
     verifier: &Verifier,
-    execute: &ExecuteFn,
+    execute: &ExecuteFn<'_>,
 ) -> (Result<Delivered, ChannelError>, Result<CommandRun, AppError>) {
     tokio::join!(
         deliver_events(events_dial, pause, batches),
@@ -243,7 +266,7 @@ pub async fn settle_and_join(
 
 
 /// Heartbeats and runs the command stream while the spooled events are delivered; a failed event delivery never stops commands.
-pub async fn run_agent(file: &AgentFile, _checked: &SpoolDirs, pause: &PauseFn) -> Result<AgentOutcome, AppError> {
+pub async fn run_agent(file: &AgentFile, _checked: &SpoolDirs, pause: &PauseFn, shell: Option<&ExecuteFn<'_>>) -> Result<AgentOutcome, AppError> {
     let address: SocketAddr = file.server.parse()?;
     let config = client_config(&ClientTlsPaths {
         certificate: file.certificate.clone(),
@@ -266,9 +289,10 @@ pub async fn run_agent(file: &AgentFile, _checked: &SpoolDirs, pause: &PauseFn) 
     let _signals = keep_signals(Arc::clone(&keys))?;
     let verifier = open_verifier(&file.agent_id, &file.tenant, keys, &file.state_file)?;
     let worker = start_worker(&file.executed_file)?;
-    let execute = execute_fn(worker.sender);
-    let (delivery, run) = run_streams(dial.as_ref(), dial.as_ref(), pause, spool.batches.clone(), &verifier, execute.as_ref()).await;
-    drop(execute);
+    let sender = worker.sender;
+    let execute = |command: Command| dispatch_command(&sender, shell, command);
+    let (delivery, run) = run_streams(dial.as_ref(), dial.as_ref(), pause, spool.batches.clone(), &verifier, &execute).await;
+    drop(sender);
     let (events, executed) = settle_and_join(file, &spool, delivery, worker.handle).await?;
     Ok(AgentOutcome {
         acknowledged: events.acknowledged,

@@ -128,6 +128,37 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
 pub const EXECUTOR_BUSY_REASON: &str = "executor busy, command not executed";
 
 
+pub const NO_SHELL_EXECUTOR_REASON: &str = "no shell executor, command not executed";
+
+
+pub const SHELL_DISABLED_REASON: &str = "shell disabled, command not executed";
+
+
+pub const INVALID_COMMAND_REASON: &str = "command invalid for its executor, command not executed";
+
+
+/// Why an executor did not take an accepted command; each variant reports one fixed text, never peer text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecuteRefusal {
+    Busy,
+    NoShellExecutor,
+    ShellDisabled,
+    Invalid,
+}
+
+
+impl std::fmt::Display for ExecuteRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Busy => EXECUTOR_BUSY_REASON,
+            Self::NoShellExecutor => NO_SHELL_EXECUTOR_REASON,
+            Self::ShellDisabled => SHELL_DISABLED_REASON,
+            Self::Invalid => INVALID_COMMAND_REASON,
+        })
+    }
+}
+
+
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 1_048_576;
 
 

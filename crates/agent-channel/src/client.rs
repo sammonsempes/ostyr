@@ -1,8 +1,8 @@
 use crate::error::{without_peer_text, ChannelError};
 use crate::limits::bounded_text;
 use crate::model::{
-    CommandRun, CommandVerdict, Delivered, Delivery, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS, BACKOFF_MAX_MILLIS,
-    CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, EXECUTOR_BUSY_REASON, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS,
+    CommandRun, CommandVerdict, Delivered, Delivery, ExecuteRefusal, Judged, ATTEMPT_TIMEOUT_SECONDS, BACKOFF_FACTOR, BACKOFF_INITIAL_MILLIS,
+    BACKOFF_MAX_MILLIS, CONNECT_TIMEOUT_SECONDS, DEFAULT_MAX_MESSAGE_BYTES, EVENTS_PATH, HEARTBEAT_PATH, KEEPALIVE_INTERVAL_SECONDS,
     KEEPALIVE_TIMEOUT_SECONDS, MAX_ACK_READS, MAX_BACKOFF_SHIFT, MAX_IGNORED_ACKS, MAX_KEPT_REFUSALS, MAX_RECONNECT_ATTEMPTS, PLACEHOLDER_ENDPOINT,
     REPORT_PATH, SUBSCRIBE_PATH, UNARY_TIMEOUT_SECONDS,
 };
@@ -207,30 +207,32 @@ pub async fn judge_and_report(
     channel: Channel,
     verifier: &Verifier,
     clock: &ClockFn,
-    execute: &ExecuteFn,
+    execute: &ExecuteFn<'_>,
     envelope: Vec<u8>,
     run: CommandRun,
 ) -> Result<CommandRun, ChannelError> {
     let judged = judge(verifier, &envelope, clock());
-    let queued = judged.command.is_none_or(execute);
-    let verdict = if queued { judged.verdict } else { busy_verdict(judged.verdict.digest) };
+    let verdict = match judged.command.map(execute) {
+        Some(Err(refusal)) => refusal_verdict(judged.verdict.digest, refusal),
+        _ => judged.verdict,
+    };
     report_command(channel, &verdict).await?;
     Ok(record_verdict(run, verdict))
 }
 
 
 /// The verdict of an accepted command the executor could not take over: refused and reported, never silently lost.
-pub fn busy_verdict(digest: Vec<u8>) -> CommandVerdict {
+pub fn refusal_verdict(digest: Vec<u8>, refusal: ExecuteRefusal) -> CommandVerdict {
     CommandVerdict {
         digest,
         accepted: false,
-        reason: EXECUTOR_BUSY_REASON.to_owned(),
+        reason: refusal.to_string(),
     }
 }
 
 
 /// Executes each accepted command at once, reports every verdict, keeps counts and at most `MAX_KEPT_REFUSALS` refusals.
-pub async fn run_commands(channel: Channel, verifier: &Verifier, clock: &ClockFn, execute: &ExecuteFn) -> Result<CommandRun, ChannelError> {
+pub async fn run_commands(channel: Channel, verifier: &Verifier, clock: &ClockFn, execute: &ExecuteFn<'_>) -> Result<CommandRun, ChannelError> {
     let mut grpc = ready_grpc(channel.clone()).await?;
     let envelopes = grpc
         .server_streaming(
