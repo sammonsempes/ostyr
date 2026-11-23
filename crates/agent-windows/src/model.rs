@@ -6,6 +6,14 @@ use std::path::Path;
 pub const WEVTUTIL_PATH: &str = r"C:\Windows\System32\wevtutil.exe";
 
 
+#[cfg(windows)]
+pub const WORKING_DIRECTORY: &str = r"C:\Windows\System32";
+
+
+#[cfg(not(windows))]
+pub const WORKING_DIRECTORY: &str = "/";
+
+
 pub const MAX_EVENTS_PER_POLL: u32 = 500;
 
 
@@ -76,6 +84,52 @@ pub const NONCHARACTER_FFFE: u16 = 0xFFFE;
 
 
 pub const NONCHARACTER_FFFF: u16 = 0xFFFF;
+
+
+pub const GUID_TEXT_BYTES: usize = 36;
+
+
+pub const GUID_HYPHENS: [usize; 4] = [8, 13, 18, 23];
+
+
+pub const TIME_SHAPE: &str = "DDDD-DD-DDTDD:DD:DD.DDDDDDDZ";
+
+
+pub const MONTHS_PER_YEAR: u32 = 12;
+
+
+pub const HOURS_PER_DAY: u32 = 24;
+
+
+pub const MINUTES_PER_HOUR: u32 = 60;
+
+
+pub const SECONDS_PER_MINUTE: u32 = 60;
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Flag,
+    Count,
+    Text,
+    Time,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spec {
+    pub source: &'static str,
+    pub name: &'static str,
+    pub kind: Kind,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefenderRefusal {
+    Unavailable,
+    Malformed,
+    Undecodable,
+}
 
 
 pub const FIRST_PRINTABLE_UNIT: u16 = 0x20;

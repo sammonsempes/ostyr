@@ -5,7 +5,7 @@ mod types;
 
 
 use agent_windows::error::RunError;
-use agent_windows::model::{Drained, RunEnd, RunRequest};
+use agent_windows::model::{Drained, RunEnd, RunRequest, WORKING_DIRECTORY};
 use agent_windows::run::{drain, finish, forward, pump, run_process};
 use std::io::{self, ErrorKind, Read};
 use std::process::{Command, Stdio};
@@ -19,6 +19,9 @@ static LOGGING: LazyLock<bool> =
 
 
 const HEAD: &str = "/usr/bin/head";
+
+
+const PWD: &str = "/bin/pwd";
 
 
 const SLEEP: &str = "/bin/sleep";
@@ -89,6 +92,16 @@ fn run(program: &str, args: &[String], max_bytes: usize, deadline: u64) -> Resul
     let mut received = 0usize;
     let end = run_process(&request(program, args, max_bytes, deadline), &mut |chunk| received += chunk.len())?;
     Ok((end, received))
+}
+
+
+#[test]
+fn every_child_runs_from_the_fixed_working_directory() -> TestResult {
+    let mut received = Vec::new();
+    let end = run_process(&request(PWD, &[], BIG, GENEROUS), &mut |chunk| received.extend_from_slice(chunk))?;
+    assert_eq!(end, RunEnd::Done);
+    assert_eq!(String::from_utf8(received)?.trim(), WORKING_DIRECTORY);
+    Ok(())
 }
 
 

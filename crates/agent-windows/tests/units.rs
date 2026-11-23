@@ -8,11 +8,19 @@ use agent_windows::cut::{cut_data_values, cut_value};
 use agent_windows::lines::{forged_line, gap_line, refused_line};
 use agent_windows::model::{
     CursorState, GapReason, Item, ItemKind, Refusal, Stream, SystemInfo, DATA_CUT_BYTES, MAX_CURSOR_BYTES, MAX_ITEM_BYTES, MAX_SYSTEM_BYTES,
-    REPLACEMENT, SECURITY,
+    REPLACEMENT, SECURITY, WORKING_DIRECTORY,
 };
 use agent_windows::stream::{feed_bytes, flawed, partial_item};
 use agent_windows::system::{digits, scan_system};
 use types::TestResult;
+
+
+#[test]
+fn the_working_directory_is_system32_on_windows_and_the_root_elsewhere() -> TestResult {
+    let expected = if cfg!(windows) { r"C:\Windows\System32" } else { "/" };
+    assert_eq!(WORKING_DIRECTORY, expected);
+    Ok(())
+}
 
 
 const EVENT: &str =
