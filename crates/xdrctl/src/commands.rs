@@ -12,6 +12,7 @@ use core_config::load::{load_module, load_platform};
 use core_config::plan::{action_name, plan};
 use core_config::reload::bounded_value;
 use core_config::types::{BoxError, ConfigState, Plan};
+use serde_json::error::Category;
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -58,8 +59,24 @@ pub fn server_address(ctx: &Context, stored: Option<&Session>) -> Result<String,
 }
 
 
+/// The fixed class of a JSON error: serde's own text repeats the peer's bytes, so it is never kept.
+pub fn json_category(error: &serde_json::Error) -> &'static str {
+    match error.classify() {
+        Category::Io => "io",
+        Category::Syntax => "syntax",
+        Category::Data => "data",
+        Category::Eof => "eof",
+    }
+}
+
+
 pub fn bad_reply(status: u16) -> impl FnOnce(serde_json::Error) -> CliError {
-    move |source| CliError::BadReply { status, source }
+    move |source| CliError::BadReply {
+        status,
+        category: json_category(&source),
+        line: source.line(),
+        column: source.column(),
+    }
 }
 
 

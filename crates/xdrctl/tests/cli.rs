@@ -19,7 +19,7 @@ use support::{
 use tempfile::tempdir;
 use xdrctl::alerts::{list_path, map_status, valid_cursor, valid_id};
 use xdrctl::cli::{execute, render, render_error, run_reporting};
-use xdrctl::commands::{is_yaml, server_address, yaml_files};
+use xdrctl::commands::{bad_reply, is_yaml, json_category, server_address, yaml_files};
 use xdrctl::error::{CliError, ClientError};
 use xdrctl::http::{build_agent, send_request};
 use xdrctl::model::{Cli, Context, HttpMethod, HttpReply, HttpRequest, OutputFormat, Report, Session};
@@ -2040,5 +2040,36 @@ fn risk_statuses_map_to_fixed_messages() -> TestResult {
         assert!(bad.err.contains("unexpected reply"));
         assert!(!bad.err.contains("MARKER"));
     }
+    Ok(())
+}
+
+
+const REPLY_MARKER: &str = "SECRETMARKER";
+
+
+const REPLY_STATUS: u16 = 502;
+
+
+#[test]
+fn bad_reply_keeps_no_peer_text() -> TestResult {
+    let data = serde_json::from_str::<u32>(&format!("\"{REPLY_MARKER}\"")).err().ok_or("parsed")?;
+    let syntax = serde_json::from_str::<u32>("x").err().ok_or("parsed")?;
+    let eof = serde_json::from_str::<u32>("").err().ok_or("parsed")?;
+    let io = serde_json::Error::io(std::io::Error::other(REPLY_MARKER));
+    assert!(data.to_string().contains(REPLY_MARKER));
+    let categories: Vec<&str> = [&data, &syntax, &eof, &io].into_iter().map(json_category).collect();
+    assert_eq!(categories, ["data", "syntax", "eof", "io"]);
+    let error = bad_reply(REPLY_STATUS)(data);
+    let shown = format!("{error} {error:?}");
+    assert!(!shown.contains(REPLY_MARKER));
+    assert!(std::error::Error::source(&error).is_none());
+    assert!(matches!(
+        error,
+        CliError::BadReply {
+            status: REPLY_STATUS,
+            category: "data",
+            ..
+        }
+    ));
     Ok(())
 }
