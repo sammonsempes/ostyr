@@ -119,6 +119,30 @@ pub struct CaseDetailView {
 }
 
 
+/// One alert linked to a case; `linked_by` and `linked_at` of the API are not shown.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AlertLinkView {
+    pub alert_id: String,
+}
+
+
+/// `GET /cases/{id}/alerts`: one page of links.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AlertLinkPageView {
+    pub items: Vec<AlertLinkView>,
+    pub next_cursor: Option<String>,
+}
+
+
+/// The linked-alerts panel of the case page: left out, our unavailable text, or one page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinksPanel {
+    Absent,
+    Unavailable,
+    Shown(AlertLinkPageView),
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CommentView {
     pub author: String,

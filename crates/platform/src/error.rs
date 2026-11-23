@@ -21,4 +21,6 @@ pub enum PlatformError {
     MissingPageFile,
     #[error("settings.status.page_file {reason}")]
     PageFile { reason: &'static str },
+    #[error("settings.status.page_file tenant differs from the module file tenant")]
+    PageTenantMismatch,
 }

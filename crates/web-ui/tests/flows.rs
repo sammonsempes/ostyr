@@ -2,6 +2,8 @@
 mod dhcp_flows;
 #[path = "support/harness.rs"]
 mod harness;
+#[path = "support/link_flows.rs"]
+mod link_flows;
 #[path = "support/logging.rs"]
 mod logging;
 #[path = "support/posture_flows.rs"]
@@ -1298,7 +1300,7 @@ fn encoded(fields: &[(&str, &str)]) -> String {
 
 
 async fn csrf_of(rig: &Harness, session: &str) -> Result<String, TestError> {
-    let page = fire(rig, get_with("/cases/case-1", session)).await?;
+    let page = fire(rig, get_with("/cases/missing", session)).await?;
     Ok(csrf_in(&page.body).ok_or("no token in the page")?)
 }
 

@@ -59,10 +59,36 @@ services:
       - ./config:/etc/ostyr:ro
       - state:/var/lib/ostyr
     ports:
-      - "8443:8443"
+      - "0.0.0.0:8443:8443"
+  web:
+    image: ostyr-platform:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["/usr/local/bin/web_ui", "/etc/ostyr/web-ui.yaml"]
+    depends_on:
+      - platform
+    secrets: [pg_ca, api_tls_key, api_tls_cert]
+    volumes:
+      - ./config:/etc/ostyr:ro
+      - webstate:/var/lib/ostyr
+    networks:
+      default:
+        ipv4_address: 172.29.63.10
+    ports:
+      - "0.0.0.0:9443:9443"
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.63.0/24
+          ip_range: 172.29.63.128/25
 volumes:
   pgdata: {}
   state: {}
+  webstate: {}
 secrets:
   pg_password:
     file: ./secrets/pg_password

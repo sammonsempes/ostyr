@@ -250,9 +250,9 @@ publish_set() {
 make_certificates() {
     local api_names
     if [[ "$host_name" =~ $ADDRESS_PATTERN ]]; then
-        api_names="IP:$host_name,DNS:localhost,IP:127.0.0.1"
+        api_names="IP:$host_name,DNS:platform,DNS:localhost,IP:127.0.0.1"
     else
-        api_names="DNS:$host_name,DNS:localhost,IP:127.0.0.1"
+        api_names="DNS:$host_name,DNS:platform,DNS:localhost,IP:127.0.0.1"
     fi
     openssl req -x509 -newkey ec -pkeyopt "ec_paramgen_curve:$CURVE" -nodes -days "$CERT_DAYS" -subj "/CN=Ostyr compose CA" \
         -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -keyout "$scratch/ca.key" -out "$scratch/ca.crt"
@@ -301,6 +301,10 @@ else
     for tls_name in "${TLS_FILES[@]}"; do
         check_present "$tls_name"
     done
+fi
+if ! openssl x509 -in "$SECRETS_DIR/api_tls.crt" -noout -ext subjectAltName | grep -Eq 'DNS:platform(,|$)'; then
+    printf 'warning: api_tls.crt has no DNS:platform name, so the web service cannot verify the API\n' >&2
+    printf 'to fix it, remove every TLS file (ca.crt pg_server.* api_tls.*) from %s and rerun init.sh; nothing was changed\n' "$SECRETS_DIR" >&2
 fi
 make_random_file pg_password base64
 make_random_file pg_service_password base64

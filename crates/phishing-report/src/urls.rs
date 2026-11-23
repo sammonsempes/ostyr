@@ -49,6 +49,11 @@ fn changed_value(raw: &str) -> Option<String> {
 }
 
 
+fn without_line_noise(decoded: &str) -> String {
+    decoded.chars().filter(|found| !matches!(found, '\t' | '\n' | '\r')).collect()
+}
+
+
 fn attribute_values(rule: &Result<Regex, regex::Error>, html: &str, counts: &mut Counts) -> String {
     match rule {
         Ok(regex) => regex
@@ -69,7 +74,7 @@ fn attribute_values(rule: &Result<Regex, regex::Error>, html: &str, counts: &mut
 }
 
 
-/// Decodes an HTML part as a browser does in an attribute, appends each attribute value read differently as a URL, counts every lost reference.
+/// Decodes an HTML part as a browser does in an attribute, appends the part without TAB, CR and LF and each attribute value read differently, counts every lost reference.
 pub fn html_text_with(rule: &Result<Regex, regex::Error>, html: &str, counts: &mut Counts) -> String {
     let decoded = htmlize::unescape_attribute(html).into_owned();
     let replaced = decoded
@@ -77,7 +82,14 @@ pub fn html_text_with(rule: &Result<Regex, regex::Error>, html: &str, counts: &m
         .count()
         .saturating_sub(html.matches(char::REPLACEMENT_CHARACTER).count());
     counts.html_refs_undecoded += replaced + decoded.split('&').skip(1).filter(|segment| is_reference(segment)).count();
-    format!("{decoded}{}", attribute_values(rule, html, counts))
+    let attributes = attribute_values(rule, html, counts);
+    let stripped = Some(without_line_noise(&decoded)).filter(|candidate| candidate.len() != decoded.len());
+    let mut text = String::with_capacity(decoded.len() + stripped.as_ref().map_or(0, String::len) + attributes.len() + 1);
+    text.push_str(&decoded);
+    text.push('\n');
+    text.push_str(stripped.as_deref().unwrap_or(""));
+    text.push_str(&attributes);
+    text
 }
 
 

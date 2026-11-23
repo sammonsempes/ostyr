@@ -1,11 +1,11 @@
 use crate::error::StartupError;
-use crate::middleware::rate_key;
+use crate::middleware::{drain_detached, rate_key};
 use crate::model::{
     ApiConfig, Bound, ConnectionGuard, Current, Listener, ListenerSetup, LoadedTls, Rewatch, ServerStop, StateInputs, TlsFiles, WatchStop,
 };
 use crate::reload::{apply_log_level, build_settings, content_digest, open_reload, rewatch, watched_files};
 use crate::routes::build_router;
-use crate::state::build_state;
+use crate::state::{build_state, DETACHED_DRAIN_SECONDS};
 use crate::types::{
     AccessTable, ConnectionTable, LogLevelHandle, ModuleParts, ServerHandle, SharedLimits, SharedListener, SharedState, StartupReloadFn,
 };
@@ -418,5 +418,7 @@ pub async fn run_loaded(
     let _signals = core_config::signal::reload_on_signals(engine, &[signal_hook::consts::SIGHUP])?;
     #[cfg(not(unix))]
     drop(engine);
-    wait_finished(&listener).await
+    let finished = wait_finished(&listener).await;
+    drain_detached(&state, Duration::from_secs(DETACHED_DRAIN_SECONDS)).await;
+    finished
 }

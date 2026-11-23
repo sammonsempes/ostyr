@@ -10,12 +10,13 @@ use backup_monitor::restore::{RestoreOutcome, RestoreResult};
 use backup_monitor::store::{
     category_label, count_cell, decode_rows, error_entry, key_json, micros_of, plan_write, record_restore_results, record_restore_results_with_cap,
     result_entry, run_error_category, snapshot_parts, test_key, valid_key, RunErrorCategory, RunErrorRecord, TestKey, WriteCounts,
-    MAX_CLOCK_SKEW_SECONDS, MAX_MICROS, MAX_RESTORE_ROWS, MIGRATIONS, MIGRATION_NAMESPACE, MIN_MICROS, OUTCOME_CLOCK_SKEW, OUTCOME_OK,
-    OUTCOME_ROW_CAP, RECORD_SQL, SKEW_MICROS,
+    MAX_CLOCK_SKEW_SECONDS, MAX_MICROS, MAX_RESTORE_ROWS, MIGRATIONS, MIGRATION_NAMESPACE, MIN_MICROS, OUTCOME_BAD_TIME, OUTCOME_CLOCK_SKEW,
+    OUTCOME_OK, OUTCOME_ROW_CAP, RECORD_SQL, SKEW_MICROS,
 };
 use backup_monitor::text::rfc3339_text;
 use backup_monitor::types::{Row, RowFuture};
 use core_pg::error::PgError;
+use core_pg::migrate::digest_of;
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
 use serde_json::Value;
 use std::error::Error;
@@ -27,6 +28,9 @@ use types::TestResult;
 
 
 const ANSWER_CELLS: usize = 6;
+
+
+const PUBLISHED_FIRST_DIGEST: &str = "6bc232daeb4041a1895e550bcd0f59efde128d6a9358d0d7b41079c6c3d25eaa";
 
 
 const SEVEN: u64 = 7;
@@ -140,21 +144,31 @@ fn ok_row() -> Row {
 #[test]
 fn the_migration_constants_match_the_table_text() -> TestResult {
     let sql = MIGRATIONS.first().ok_or("no migration")?.sql;
+    let function_sql = migration_sql()?;
     assert_eq!(MIGRATION_NAMESPACE, "backup");
     assert_eq!(MIGRATIONS.first().map(|migration| migration.version), Some("backup_0001"));
+    assert_eq!(MIGRATIONS.get(1).map(|migration| migration.version), Some("backup_0002"));
     assert_eq!(SKEW_MICROS, i64::try_from(MAX_CLOCK_SKEW_SECONDS)? * MICROS_PER_SECOND);
     assert_eq!(SKEW_MICROS, SKEW_SECONDS * MICROS_PER_SECOND);
     assert_eq!(sql.matches(&SKEW_MICROS.to_string()).count(), TWO as usize);
     assert!(sql.contains(&format!("BETWEEN {MIN_MICROS} AND {MAX_MICROS}")));
     assert!(sql.contains("pg_advisory_xact_lock(hashtextextended('backup_restore/' || p_tenant, 0::bigint))"));
     assert!(sql.contains("SET search_path = pg_catalog, public, pg_temp"));
+    assert!(function_sql.contains("CREATE OR REPLACE FUNCTION backup_restore_record("));
+    assert!(function_sql.contains("pg_advisory_xact_lock(hashtextextended('backup_restore/' || p_tenant, 0::bigint))"));
+    assert!(function_sql.contains("SET search_path = pg_catalog, public, pg_temp"));
     assert!(RECORD_SQL.contains("public.backup_restore_record($1"));
     Ok(())
 }
 
 
-fn migration_sql() -> Result<&'static str, Box<dyn Error>> {
+fn table_sql() -> Result<&'static str, Box<dyn Error>> {
     Ok(MIGRATIONS.first().ok_or("no migration")?.sql)
+}
+
+
+fn migration_sql() -> Result<&'static str, Box<dyn Error>> {
+    Ok(MIGRATIONS.get(1).ok_or("no second migration")?.sql)
 }
 
 
@@ -209,9 +223,10 @@ fn the_function_keeps_the_restored_columns_on_a_run_error() -> TestResult {
         sql.matches("WHEN EXCLUDED.outcome = 'run_error' THEN st.restored_").count(),
         THREE as usize
     );
-    assert!(sql.contains("(config_id IS NOT NULL OR outcome = 'run_error')"));
-    assert!(sql.contains("(outcome = 'run_error') = (category IS NOT NULL)"));
-    assert!(sql.contains("'config', 'listing', 'list', 'password_changed', 'timeout', 'failed', 'invalid'"));
+    let table = table_sql()?;
+    assert!(table.contains("(config_id IS NOT NULL OR outcome = 'run_error')"));
+    assert!(table.contains("(outcome = 'run_error') = (category IS NOT NULL)"));
+    assert!(table.contains("'config', 'listing', 'list', 'password_changed', 'timeout', 'failed', 'invalid'"));
     Ok(())
 }
 
@@ -221,7 +236,7 @@ fn the_function_filters_every_statement_by_tenant() -> TestResult {
     let sql = migration_sql()?;
     assert!(sql.contains("ON s.tenant = p_tenant AND s.repository = i.repository"));
     assert!(sql.contains("WHERE t.tenant = p_tenant AND t.repository = d.repository"));
-    assert!(sql.contains("ORDER BY r.repository, r.host, r.path, r.tested_micros DESC"));
+    assert!(sql.contains("ORDER BY r.repository, r.host, r.path, r.tested_micros DESC, (r.outcome = 'restored') ASC, (r.outcome = 'run_error') DESC"));
     Ok(())
 }
 
@@ -379,7 +394,12 @@ fn a_run_is_refused_whole_on_a_caller_defect() -> TestResult {
         ..result(&tenant, RestoreOutcome::Restored, true)
     };
     let dropped = plan_write(&tenant, &[(key("repo-a"), unwritable)], &[], &declared, MAX_RESTORE_ROWS)?;
-    assert_eq!((dropped.entries.len(), dropped.skipped_invalid, dropped.run_error), (0, 1, 0));
+    assert_eq!((dropped.entries.len(), dropped.skipped_invalid, dropped.run_error), (1, 1, 1));
+    let stamped = dropped.entries.first().ok_or("no entry")?;
+    assert_eq!(stamped.get("tested_micros"), Some(&Value::Null));
+    assert_eq!(stamped.get("db_clock"), Some(&Value::Bool(true)));
+    assert_eq!(stamped.get("outcome"), Some(&Value::from("run_error")));
+    assert_eq!(stamped.get("category"), Some(&Value::from("invalid")));
     let over = plan_write(&tenant, &[], &[], &[key("repo-a"), key("repo-b")], SMALL_CAP);
     assert!(matches!(
         over,
@@ -438,6 +458,10 @@ fn the_answer_row_is_decoded_or_named() -> TestResult {
     assert!(matches!(
         decode_rows(&tenant, MAX_RESTORE_ROWS, &[row([OUTCOME_CLOCK_SKEW, "0", "0", "0", "0", "0"])]),
         Err(RestoreStoreError::ClockSkew { max: MAX_CLOCK_SKEW_SECONDS })
+    ));
+    assert!(matches!(
+        decode_rows(&tenant, MAX_RESTORE_ROWS, &[row([OUTCOME_BAD_TIME, "0", "0", "0", "0", "0"])]),
+        Err(RestoreStoreError::BadTime)
     ));
     let capped = decode_rows(&tenant, SMALL_CAP, &[row([OUTCOME_ROW_CAP, "0", "0", "0", "0", "7"])]);
     assert!(matches!(
@@ -594,6 +618,53 @@ fn run_errors_are_planned_beside_results() -> TestResult {
         ),
     ];
     let planned = plan_write(&tenant, &results, &errors, &declared, MAX_RESTORE_ROWS)?;
-    assert_eq!((planned.entries.len(), planned.skipped_invalid, planned.run_error), (TWO_KEYS, 1, 1));
+    assert_eq!(
+        (planned.entries.len(), planned.skipped_invalid, planned.run_error),
+        (THREE as usize, 1, TWO)
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_row_cap_refusal_names_its_tenant() -> TestResult {
+    let message = RestoreStoreError::RowCap {
+        tenant: "acme".to_owned(),
+        count: THREE,
+        max: TWO,
+    }
+    .to_string();
+    assert!(message.contains("tenant acme"));
+    Ok(())
+}
+
+
+#[test]
+fn the_function_refuses_a_result_without_a_time_by_name() -> TestResult {
+    let sql = migration_sql()?;
+    let refusal = sql.find("'bad_time'").ok_or("no bad_time")?;
+    let clock = sql.find("clock_timestamp()").ok_or("no clock")?;
+    assert!(clock < refusal);
+    assert!(sql.contains("(r.tested_micros IS NULL AND r.db_clock IS NOT TRUE) OR (r.db_clock IS TRUE AND r.outcome IS DISTINCT FROM 'run_error')"));
+    assert!(sql.contains("CASE WHEN e.db_clock IS TRUE THEN now_micros ELSE e.tested_micros END AS tested_micros"));
+    Ok(())
+}
+
+
+#[test]
+fn the_published_first_migration_is_never_edited() -> TestResult {
+    let first = MIGRATIONS.first().ok_or("no migration")?.sql;
+    assert_eq!(digest_of(first), PUBLISHED_FIRST_DIGEST);
+    Ok(())
+}
+
+
+#[test]
+fn the_tie_order_is_fail_closed() -> TestResult {
+    let sql = migration_sql()?;
+    let restored_last = sql.find("(r.outcome = 'restored') ASC").ok_or("no restored order")?;
+    let run_error_first = sql.find("(r.outcome = 'run_error') DESC").ok_or("no run_error order")?;
+    let time_first = sql.find("r.tested_micros DESC").ok_or("no time order")?;
+    assert!(time_first < restored_last && restored_last < run_error_first);
     Ok(())
 }

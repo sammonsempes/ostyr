@@ -129,6 +129,15 @@ pub const ANCHORS_REFUSED: &str = "anchors, aliases and merge keys are not allow
 pub const BLOCKS_REFUSED: &str = "block scalars are not allowed";
 
 
+pub const FLOW_REFUSED: &str = "flow collections are not allowed, write each entry in block style";
+
+
+pub const FLOW_STARTS: [char; 2] = ['[', '{'];
+
+
+pub const PADDING: &str = "  ";
+
+
 pub const FIRST_PRINTABLE: u8 = 0x20;
 
 
@@ -168,6 +177,9 @@ pub fn refused_feature(event: &Event<'_>, span: &Span, text: &str) -> Option<&'s
             Some(ANCHORS_REFUSED)
         }
         Event::Alias(_) | Event::UnresolvedAlias(_) => Some(ANCHORS_REFUSED),
+        Event::SequenceStart(..) | Event::MappingStart(..) if span.slice(text).is_none_or(|source| source.starts_with(FLOW_STARTS)) => {
+            Some(FLOW_REFUSED)
+        }
         Event::Scalar(_, ScalarStyle::Literal | ScalarStyle::Folded, _, _) => Some(BLOCKS_REFUSED),
         Event::Scalar(value, _, _, _) if value == MERGE_KEY => Some(ANCHORS_REFUSED),
         Event::Scalar(_, ScalarStyle::DoubleQuoted, _, _) if span.slice(text).is_none_or(|source| source.contains('\\')) => Some(ESCAPES_REFUSED),
@@ -231,7 +243,19 @@ pub fn allowed_byte(bytes: &[u8], index: usize) -> bool {
 }
 
 
-/// Refuses the whole file on the first byte outside the allowlist, naming the line (counted on LF) and never the byte.
+/// The longest line `refuse_bytes` admits, line break excluded.
+pub const MAX_AGENT_MAP_LINE_BYTES: usize = 256;
+
+
+/// The 1-based number of the first line longer than `MAX_AGENT_MAP_LINE_BYTES` (a CR before the LF is not counted).
+pub fn first_long_line(text: &str) -> Option<usize> {
+    text.split('\n')
+        .position(|line| line.strip_suffix('\r').unwrap_or(line).len() > MAX_AGENT_MAP_LINE_BYTES)
+        .map(|index| index.saturating_add(1))
+}
+
+
+/// Refuses the whole file on the first byte outside the allowlist or the first over-long line, naming the line (counted on LF), never the content.
 pub fn refuse_bytes(text: &str, file: &str) -> Result<(), ConfigError> {
     let bytes = text.as_bytes();
     match (0..bytes.len()).find(|&index| !allowed_byte(bytes, index)) {
@@ -242,12 +266,31 @@ pub fn refuse_bytes(text: &str, file: &str) -> Result<(), ConfigError> {
                 .saturating_add(1);
             Err(refuse(file, format!("line {line}: only printable ASCII and line breaks are allowed")))
         }
-        None => Ok(()),
+        None => match first_long_line(text) {
+            Some(line) => Err(refuse(file, format!("line {line}: longer than {MAX_AGENT_MAP_LINE_BYTES} bytes"))),
+            None => Ok(()),
+        },
     }
 }
 
 
-/// Refuses every YAML tag, anchor, alias, merge key and double-quoted escape before any typed pass reads the text.
+/// The 1-based number of the first line holding a run of two spaces after its indentation (a CR before the LF is not counted).
+pub fn first_padded_line(text: &str) -> Option<usize> {
+    text.split('\n')
+        .position(|line| line.trim_start_matches(' ').contains(PADDING))
+        .map(|index| index.saturating_add(1))
+}
+
+
+/// Refuses a run of two spaces after the indentation of a line: padding can push a value out of the view of a web diff.
+pub fn refuse_padding(text: &str, file: &str) -> Result<(), ConfigError> {
+    first_padded_line(text).map_or(Ok(()), |line| {
+        Err(refuse(file, format!("line {line}: runs of spaces inside a line are not allowed")))
+    })
+}
+
+
+/// Refuses every YAML tag, anchor, alias, merge key, flow collection and double-quoted escape before any typed pass reads the text.
 pub fn refuse_tags(text: &str, file: &str) -> Result<(), ConfigError> {
     Parser::new_from_str(text)
         .try_fold(START, |walk, item| walk_step(walk, item, text, file))
@@ -328,6 +371,7 @@ pub fn validate_file(file: &str, parsed: AgentFile, tenant: &str) -> Result<Agen
 pub fn parse_agent_map(reader: &mut dyn Read, file: &str, tenant: &str) -> Result<AgentMap, ConfigError> {
     let text = read_text_capped(reader, file, MAX_FILE_BYTES)?;
     refuse_bytes(&text, file)?;
+    refuse_padding(&text, file)?;
     refuse_tags(&text, file)?;
     count_agents(&text, file)?;
     let parsed = parse_document::<AgentFile>(&text, file)?;

@@ -95,6 +95,39 @@ fn a_decoded_control_or_bidi_character_refuses_the_url_and_counts_it() -> Result
 
 
 #[test]
+fn a_fake_attribute_opened_in_a_text_node_does_not_hide_the_real_url() -> Result<(), Box<dyn std::error::Error>> {
+    let inputs = [
+        "<p>Score a='</p><a href='https://ph&#9;ish.evil.test/login'>",
+        "<p>Score a=\"</p><a href=\"https://ph&#9;ish.evil.test/login\">",
+        "<p>Score a='</p><a href='https://path.evil.test/lo&#9;gin'>",
+        "<p>Score a=\"</p><a href='https://path.evil.test/lo&#10;gin'>",
+        "<p>Score a='</p><a href=https://path.evil.test/lo&#13;gin>",
+    ];
+    let expected = ["https://phish.evil.test/login", "https://path.evil.test/login"];
+    inputs.iter().try_for_each(|html| {
+        let mut counts = Counts::default();
+        let found = found_in(html, &mut counts);
+        assert!(
+            links(&found).iter().any(|url| expected.contains(url)),
+            "{html:?} gave {:?}",
+            links(&found)
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn an_unquoted_value_stopping_at_an_equals_sign_is_listed_whole() -> Result<(), Box<dyn std::error::Error>> {
+    let mut counts = Counts::default();
+    let found = found_in("<a href=ht&#9;tps://h.evil.test/x?a=b>", &mut counts);
+    assert!(links(&found).contains(&"https://h.evil.test/x?a=b"), "{:?}", links(&found));
+    Ok(())
+}
+
+
+#[test]
 fn a_tab_removed_by_the_browser_is_not_a_hostile_character() -> Result<(), Box<dyn std::error::Error>> {
     let mut counts = Counts::default();
     let found = found_in("<a href='https://tab.evil.test/a&#9;b'>", &mut counts);
