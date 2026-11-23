@@ -10,13 +10,13 @@ use patch_inventory::winget::parse_winget_updates;
 use patch_inventory::winget_script::{WINGET_ENCODED, WINGET_SCRIPT};
 
 
-const TWO_CAPTURE: &[u8] = include_bytes!("fixtures/winget-lab-two.json");
+const TWO_CAPTURE: &[u8] = include_bytes!("fixtures/winget-stub-two.json");
 
 
-const ONE_CAPTURE: &[u8] = include_bytes!("fixtures/winget-lab-one.json");
+const ONE_CAPTURE: &[u8] = include_bytes!("fixtures/winget-stub-one.json");
 
 
-const ZERO_CAPTURE: &[u8] = include_bytes!("fixtures/winget-lab-zero.json");
+const ZERO_CAPTURE: &[u8] = include_bytes!("fixtures/winget-stub-zero.json");
 
 
 const UTF16_UNIT_BYTES: usize = 2;

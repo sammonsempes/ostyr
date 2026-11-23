@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage: lab/profiles/windows-single.setup.sh <lab-state-dir> <lab-prefix>
 # Run by up.sh once ws answers SSH: installs Sysmon from the pinned, Authenticode-checked Sysinternals zip. LAB_SYSMON_ZIP uses a local zip instead of
-# the download, LAB_SYSMON_SHA256 replaces the pin (both for tests of the checks only).
+# the download, LAB_SYSMON_SHA256 replaces the pin (both for tests of the checks only). LAB_WINGET_MODULE_SHA512 replaces the Microsoft.WinGet.Client pin
+# (for the test of the check only).
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
@@ -15,6 +16,11 @@ readonly EVENT_DELAY_SECONDS=2
 readonly EXPORT_ATTEMPTS=6
 readonly EXPORT_DELAY_SECONDS=10
 readonly WINGET_SOURCE_URL="https://cdn.winget.microsoft.com/cache/source.msix"
+readonly WINGET_MODULE_VERSION="1.29.380"
+readonly WINGET_MODULE_SHA512="8b34e93eae0897d7fb1e5078726a7092472edbedaafb664b7129cf611d89a31a9aa759b08135c7644df1710c8c7f13373f3e41f1fb69978a9a4c7e621b9f0f20"
+readonly WINGET_MODULE_URL="https://cdn.powershellgallery.com/packages/microsoft.winget.client.$WINGET_MODULE_VERSION.nupkg"
+readonly WINGET_MODULE_ZIP="C:\\Windows\\Temp\\winget-client.zip"
+readonly WINGET_MODULE_DIR="C:\\Program Files\\WindowsPowerShell\\Modules\\Microsoft.WinGet.Client\\$WINGET_MODULE_VERSION"
 
 lab_state="${1:?usage: windows-single.setup.sh <lab-state-dir> <lab-prefix>}"
 key="$lab_state/id_ed25519"
@@ -75,4 +81,16 @@ for ((attempt = 0; attempt < EXPORT_ATTEMPTS && export_status != 0; attempt++));
     ((export_status == 0)) || sleep "$EXPORT_DELAY_SECONDS"
 done
 [[ "$export_status" == "0" ]] || die "winget export failed with exit $export_status"
-log "windows-single ready: Sysmon64 running, one Sysmon event read back, winget export works"
+module_sha512="${LAB_WINGET_MODULE_SHA512:-$WINGET_MODULE_SHA512}"
+[[ "$module_sha512" =~ ^[0-9a-f]{128}$ ]] || die "invalid Microsoft.WinGet.Client SHA-512 pin"
+log "ws: downloading Microsoft.WinGet.Client $WINGET_MODULE_VERSION"
+actual_module_sha512="$(ps_remote "$set_proxy [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy('http://$bridge_address:$PROXY_PORT'); \
+Invoke-WebRequest '$WINGET_MODULE_URL' -OutFile '$WINGET_MODULE_ZIP' -UseBasicParsing; (Get-FileHash -Algorithm SHA512 '$WINGET_MODULE_ZIP').Hash.ToLower()")" ||
+    die "Microsoft.WinGet.Client download failed"
+[[ "$actual_module_sha512" == "$module_sha512" ]] ||
+    die "Microsoft.WinGet.Client $WINGET_MODULE_VERSION digest $actual_module_sha512 differs from the pin $module_sha512 (update the pin by a task)"
+ps_remote "Remove-Item -Recurse -Force '$WINGET_MODULE_DIR' -ErrorAction SilentlyContinue; Expand-Archive -Path '$WINGET_MODULE_ZIP' -DestinationPath '$WINGET_MODULE_DIR'" >/dev/null ||
+    die "installing Microsoft.WinGet.Client failed"
+module_version="$(ps_remote "\$env:PSModulePath += ';C:\\Program Files\\WindowsPowerShell\\Modules'; (Get-Module -ListAvailable Microsoft.WinGet.Client).Version.ToString()")"
+[[ "$module_version" == "$WINGET_MODULE_VERSION" ]] || die "Microsoft.WinGet.Client $WINGET_MODULE_VERSION is not listed after install: $module_version"
+log "windows-single ready: Sysmon64 running, one Sysmon event read back, winget export works, Microsoft.WinGet.Client $module_version installed"
