@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 agent-channel = { path = "../agent-channel" }
+core-config = { path = "../core-config" }
 core-export = { path = "../core-export" }
 ecs-normalise = { path = "../ecs-normalise" }
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +16,7 @@ thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
+core-audit = { path = "../core-audit" }
 tempfile = "3"
 tracing-subscriber = "0.3"
 

@@ -5,7 +5,7 @@ use crate::item::{handle_item, settle};
 use crate::lines::gap_line;
 use crate::model::{
     Batch, Channel, ChannelState, CursorState, Drained, GapReason, Item, ItemContext, Newest, Plan, PollEnv, PollTotals, RunEnd, RunRequest, Settled,
-    Stream, CHANNEL_NOT_FOUND_EXIT, MAX_EVENTS_PER_POLL,
+    Stream, CHANNEL_NOT_FOUND_EXIT,
 };
 use crate::newest::query_newest;
 use crate::recreated::{check_cursor, creation_to_store};
@@ -96,7 +96,7 @@ pub fn note_end(end: RunEnd, batch: &mut Batch, stream: &Stream, channel: &Chann
 }
 
 
-pub fn settle_end(end: RunEnd, batch: &mut Batch, stream: &mut Stream, target: (&mut ChannelState, &Channel)) -> Option<Item> {
+pub fn settle_end(end: RunEnd, batch: &mut Batch, stream: &mut Stream, target: (&mut ChannelState, &Channel), max_batch: u32) -> Option<Item> {
     let (state, channel) = target;
     note_end(end, batch, stream, channel);
     let drained = match end {
@@ -107,7 +107,7 @@ pub fn settle_end(end: RunEnd, batch: &mut Batch, stream: &mut Stream, target: (
     match drained {
         Some(Drained::Capped) => batch.totals.output_capped += 1,
         Some(Drained::Deadline) => batch.totals.deadline += 1,
-        _ => state.batch = state.batch.saturating_mul(BATCH_FACTOR).min(MAX_EVENTS_PER_POLL),
+        _ => state.batch = state.batch.saturating_mul(BATCH_FACTOR).min(max_batch),
     }
     let stalled = drained.is_some() && batch.seen == 0;
     let single = stalled && state.batch == 1;
@@ -200,7 +200,7 @@ pub fn run_main(
     };
     let full = batch.forged.is_none() && u32::try_from(batch.pending.len()) == Ok(batch.limit);
     batch.totals.full_batches += u64::from(full);
-    let partial = settle_end(end, &mut batch, &mut stream, (state, channel));
+    let partial = settle_end(end, &mut batch, &mut stream, (state, channel), env.max_batch);
     partial.iter().for_each(|item| handle_item(&mut batch, &context, env.seen, item));
     let settled = settle(&mut batch, channel);
     let pending = pending_bytes(env.spool).map_err(PollError::SpoolSize)?;
@@ -256,6 +256,7 @@ pub fn poll_unless_full(env: &mut PollEnv<'_>, channel: &Channel, state: &mut Ch
 
 pub fn poll_channel(env: &mut PollEnv<'_>, channel: &Channel, state: &mut ChannelState) -> Result<PollTotals, PollError> {
     let mut totals = PollTotals::default();
+    state.batch = state.batch.min(env.max_batch);
     let pending = pending_bytes(env.spool).map_err(PollError::SpoolSize)?;
     if pending >= env.max_spool_bytes {
         totals.spool_full += 1;
