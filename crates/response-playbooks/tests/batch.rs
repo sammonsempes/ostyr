@@ -8,16 +8,16 @@ use response_breakers::check::check;
 use response_breakers::model::{ActionKind, ProposedAction, Target};
 use response_breakers::store::sync_path;
 use response_playbooks::batch::{
-    dry_run_batch, foreign_tenant, is_token, read_alerts, refusal, request_id, shape_refusal, DryRunLimits, DryRunReport, SkipReason,
-    MAX_ALERT_BYTES, MAX_ALERT_DEPTH, MAX_ALERT_NODES, MAX_ALERT_TEXT_BYTES,
+    dry_run_batch, foreign_tenant, is_token, raw_keys, read_alerts, refusal, request_id, shape_refusal, value_keys, DryRunLimits, DryRunReport, Line,
+    SkipReason, MAX_ALERT_BYTES, MAX_ALERT_DEPTH, MAX_ALERT_NODES, MAX_ALERT_TEXT_BYTES,
 };
 use response_playbooks::bundle::{load_bundle, Bundle};
 use response_playbooks::error::DryRunError;
-use response_playbooks::render::{escape_controls, render_dry_run, render_trace};
+use response_playbooks::render::{escape_controls, quoted, render_dry_run, render_trace, write_dry_run};
 use serde_json::{json, Map, Value};
 use std::error::Error;
 use std::fs;
-use std::io::{self, BufReader, Cursor, Read};
+use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -163,7 +163,7 @@ fn bundle() -> Result<Bundle, Box<dyn Error>> {
 }
 
 
-fn alert_lines() -> Result<Vec<Value>, Box<dyn Error>> {
+fn alert_lines() -> Result<Vec<Line>, Box<dyn Error>> {
     Ok(read(ALERTS.as_bytes(), ROOMY, ROOMY)?.alerts)
 }
 
@@ -182,7 +182,12 @@ fn with_field(key: &str, value: Value) -> Value {
 }
 
 
-fn batch(tenant: &str, alerts: &[Value], limits: DryRunLimits) -> Result<DryRunReport, Box<dyn Error>> {
+fn lines(alerts: &[Value]) -> Vec<Line> {
+    alerts.iter().cloned().map(Line::Alert).collect()
+}
+
+
+fn batch_lines(tenant: &str, alerts: &[Line], limits: DryRunLimits) -> Result<DryRunReport, Box<dyn Error>> {
     let current = harness()?;
     Ok(dry_run_batch(
         &bundle()?,
@@ -192,6 +197,46 @@ fn batch(tenant: &str, alerts: &[Value], limits: DryRunLimits) -> Result<DryRunR
         alerts,
         limits,
     )?)
+}
+
+
+fn batch(tenant: &str, alerts: &[Value], limits: DryRunLimits) -> Result<DryRunReport, Box<dyn Error>> {
+    batch_lines(tenant, &lines(alerts), limits)
+}
+
+
+pub struct FailingWriter;
+
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("write refused"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+
+pub struct FailOnSecond {
+    pub written: bool,
+}
+
+
+impl Write for FailOnSecond {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self.written {
+            Err(io::Error::other("write refused"))
+        } else {
+            self.written = true;
+            Ok(buffer.len())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 
@@ -223,7 +268,7 @@ fn nested(depth: usize) -> Value {
 
 #[test]
 fn the_fixture_batch_is_a_snapshot() -> TestResult {
-    let report = batch("acme", &alert_lines()?, ROOMY_LIMITS)?;
+    let report = batch_lines("acme", &alert_lines()?, ROOMY_LIMITS)?;
     let expected = fs::read_to_string(format!("{}/tests/snapshots/dry_run_hostile.txt", env!("CARGO_MANIFEST_DIR")))?;
     assert_eq!(render_dry_run(&report), expected);
     Ok(())
@@ -434,9 +479,18 @@ fn skip_reasons_read_in_full() -> TestResult {
 
 
 #[test]
-fn alert_lines_are_read_bounded_and_unparsable_ones_are_null() -> TestResult {
+fn alert_lines_are_read_bounded_and_unusable_ones_keep_their_cause() -> TestResult {
     let file = read(b"{}\n\nnope\n[1]\n{\"a\":", ROOMY, ROOMY)?;
-    assert_eq!(file.alerts, [json!({}), Value::Null, Value::Null, Value::Null, Value::Null]);
+    assert_eq!(
+        file.alerts,
+        [
+            Line::Alert(json!({})),
+            Line::Skipped(SkipReason::NotObject),
+            Line::Skipped(SkipReason::NotObject),
+            Line::Skipped(SkipReason::NotObject),
+            Line::Skipped(SkipReason::Unreadable)
+        ]
+    );
     assert_eq!((file.refused, file.unreadable, file.too_long, file.unread), (THREE, 1, 0, 0));
     assert!(!file.unread_more);
     assert!(read(b"", ROOMY, ROOMY)?.alerts.is_empty());
@@ -465,13 +519,13 @@ fn an_overlong_line_is_discarded_to_its_newline_and_its_tail_is_never_an_alert()
     bytes.extend_from_slice(tail);
     bytes.extend_from_slice(b"\n{}\n");
     let file = read(&bytes, ROOMY, ROOMY)?;
-    assert_eq!(file.alerts, [Value::Null, json!({})]);
+    assert_eq!(file.alerts, [Line::Skipped(SkipReason::TooLong), Line::Alert(json!({}))]);
     assert_eq!((file.too_long, file.refused, file.unreadable), (1, 0, 0));
     let exact = [b"{\"k\":\"".as_slice(), &vec![b'a'; MAX_ALERT_BYTES - FRAME_BYTES], b"\"}\n"].concat();
     assert_eq!(exact.len(), MAX_ALERT_BYTES + 1);
     let fits = read(&exact, ROOMY, ROOMY)?;
     assert_eq!((fits.too_long, fits.alerts.len()), (0, 1));
-    assert!(fits.alerts.first().is_some_and(Value::is_object));
+    assert!(matches!(fits.alerts.first(), Some(Line::Alert(alert)) if alert.is_object()));
     let unterminated = read(&vec![b'a'; MAX_ALERT_BYTES + 1], ROOMY, ROOMY)?;
     assert_eq!((unterminated.too_long, unterminated.alerts.len()), (1, 1));
     assert!(read_alerts(&mut BufReader::new(LongThenFail { sent: false }), ROOMY, ROOMY).is_err());
@@ -493,7 +547,7 @@ fn the_shape_pre_pass_refuses_raw_bytes_before_any_value_is_built() -> TestResul
     assert_eq!(shape_refusal(b""), Some(SkipReason::NotObject));
     assert_eq!(shape_refusal(br#" {"a":"x\"[[[[[[[[[[[[[[[[[[[[","b":"\\","c":[1,2]}"#), None);
     let file = read(format!("{{\"k\":[{items}]}}\n{{}}\n").as_bytes(), ROOMY, ROOMY)?;
-    assert_eq!((file.refused, file.alerts.get(1).cloned()), (1, Some(json!({}))));
+    assert_eq!((file.refused, file.alerts.get(1).cloned()), (1, Some(Line::Alert(json!({})))));
     Ok(())
 }
 
@@ -523,7 +577,7 @@ fn a_batch_never_touches_the_live_counters() -> TestResult {
     let limits_file = live.dir.path().join("limits.yaml");
     let spent = [c2_alert(), c2_alert()];
     let loaded = bundle()?;
-    (0..TWO).try_for_each(|_| dry_run_batch(&loaded, &limits_file, live.dir.path(), "acme", &spent, ROOMY_LIMITS).map(|_| ()))?;
+    (0..TWO).try_for_each(|_| dry_run_batch(&loaded, &limits_file, live.dir.path(), "acme", &lines(&spent), ROOMY_LIMITS).map(|_| ()))?;
     assert_eq!(fs::read(&counters)?, before);
     Ok(())
 }
@@ -546,7 +600,7 @@ fn a_missing_or_invalid_limits_file_is_an_error_and_a_refused_tenant_reads_none(
         Path::new("/nonexistent/limits.yaml"),
         Path::new("/nonexistent"),
         "-x",
-        &[c2_alert()],
+        &lines(&[c2_alert()]),
         ROOMY_LIMITS,
     )?;
     assert!(refused.tenant_refused);
@@ -566,11 +620,112 @@ fn the_batch_path_never_reaches_the_real_runner_or_an_executor() -> TestResult {
 
 
 #[test]
-fn a_breaker_stop_in_the_scratch_state_is_audited_and_traced() -> TestResult {
+fn a_breaker_stop_in_the_scratch_state_is_traced() -> TestResult {
     let live = harness()?;
     let strict = live.dir.path().join("strict.yaml");
     fs::write(&strict, "limits:\n  isolations_per_hour: 0\n")?;
-    let report = dry_run_batch(&bundle()?, &strict, live.dir.path(), "acme", &[c2_alert()], ROOMY_LIMITS)?;
+    let report = dry_run_batch(&bundle()?, &strict, live.dir.path(), "acme", &lines(&[c2_alert()]), ROOMY_LIMITS)?;
     assert!(render_dry_run(&report).contains("waiting for approval"));
+    Ok(())
+}
+
+
+#[test]
+fn a_line_that_is_not_an_alert_keeps_its_cause_to_the_per_alert_line() -> TestResult {
+    let long = [vec![b'a'; MAX_ALERT_BYTES + 1], b"\n".to_vec()].concat();
+    let deep = format!("{{\"k\":{}1{}}}\n", "[".repeat(MAX_ALERT_DEPTH + 1), "]".repeat(MAX_ALERT_DEPTH + 1));
+    let bytes = [
+        long,
+        b"[1]\n{\"a\":\n".to_vec(),
+        deep.into_bytes(),
+        b"{\"id\":\"x\",\"id\":\"y\"}\n{}\n".to_vec(),
+    ]
+    .concat();
+    let file = read(&bytes, ROOMY, ROOMY)?;
+    let report = batch_lines("acme", &file.alerts, ROOMY_LIMITS)?;
+    let reasons: Vec<Option<SkipReason>> = report.alerts.iter().map(|run| run.skipped).collect();
+    assert_eq!(
+        reasons,
+        [
+            Some(SkipReason::TooLong),
+            Some(SkipReason::NotObject),
+            Some(SkipReason::Unreadable),
+            Some(SkipReason::TooDeep),
+            Some(SkipReason::DuplicateKey),
+            None
+        ]
+    );
+    let text = render_dry_run(&report);
+    assert!(text.contains("skipped: line longer than 65536 bytes"));
+    assert!(text.contains("skipped: line is not JSON"));
+    assert!(text.contains("skipped: duplicate_key"));
+    assert_eq!((file.too_long, file.unreadable, file.refused), (1, 1, THREE));
+    Ok(())
+}
+
+
+#[test]
+fn a_repeated_key_at_any_level_is_refused_alone() -> TestResult {
+    let tenant_twice = br#"{"tenant":"other","tenant":"acme","id":"a"}"#;
+    let nested_twice = br#"{"a":{"b":[{"c":1,"c":2}]}}"#;
+    let escaped_twice = br#"{"a":1,"\u0061":2}"#;
+    let same_in_two_objects = br#"{"a":{"k":1},"b":{"k":2},"c":["k",{"k":3}],"d":"a:b" ,"e":"x"}"#;
+    let file = read(
+        &[
+            tenant_twice.as_slice(),
+            b"\n",
+            nested_twice,
+            b"\n",
+            escaped_twice,
+            b"\n",
+            same_in_two_objects,
+            b"\n",
+        ]
+        .concat(),
+        ROOMY,
+        ROOMY,
+    )?;
+    let causes: Vec<bool> = file
+        .alerts
+        .iter()
+        .map(|line| matches!(line, Line::Skipped(SkipReason::DuplicateKey)))
+        .collect();
+    assert_eq!(causes, [true, true, true, false]);
+    assert_eq!(file.refused, THREE);
+    let report = batch_lines("acme", &file.alerts, ROOMY_LIMITS)?;
+    assert!(report
+        .alerts
+        .iter()
+        .take(THREE)
+        .all(|run| run.traces.is_empty() && run.skipped == Some(SkipReason::DuplicateKey)));
+    assert_eq!(raw_keys(tenant_twice), THREE);
+    assert_eq!(value_keys(&serde_json::from_slice(tenant_twice)?), TWO);
+    assert_eq!(raw_keys(b"{\"a\" : 1,\"b\"\t:\n2, \"c\":\"d\"}"), THREE);
+    assert_eq!(raw_keys(br#"["a","b:c",{"k":"v:w"}]"#), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_dry_run_is_written_to_an_injected_writer_and_a_failed_write_is_an_error() -> TestResult {
+    let report = batch("acme", &[c2_alert()], ROOMY_LIMITS)?;
+    let mut out = Vec::new();
+    write_dry_run(&mut out, &report)?;
+    assert_eq!(String::from_utf8(out)?, render_dry_run(&report));
+    assert!(write_dry_run(&mut FailingWriter, &report).is_err());
+    assert!(write_dry_run(&mut FailOnSecond { written: false }, &report).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_asset_id_is_quoted_and_escaped() -> TestResult {
+    assert_eq!(quoted("ws-1"), "\"ws-1\"");
+    assert_eq!(quoted("a\" b \\"), "\"a\\\" b \\\\\"");
+    assert_ne!(quoted("a\" b"), quoted("a\\\" b"));
+    let ghost = with_field("host", json!({"value": "x\" y\nalert 9"}));
+    let text = render_dry_run(&batch("acme", &[ghost], ROOMY_LIMITS)?);
+    assert!(text.contains("unknown asset steps.2.then.0 \"x\\\\\" y"), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with("alert 9")));
     Ok(())
 }
