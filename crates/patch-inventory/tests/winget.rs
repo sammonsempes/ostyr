@@ -1,412 +1,642 @@
 mod common;
 
 
-use base64::Engine;
 use common::{device, limits, skipped_count, FailingReader, TestResult};
-use patch_inventory::error::WingetError;
-use patch_inventory::limits::{MAX_WINGET_ID_BYTES, MAX_WINGET_UPDATES, MAX_WINGET_VERSION_BYTES};
-use patch_inventory::model::{Limits, WingetInventory, WingetSkip};
-use patch_inventory::winget::parse_winget_updates;
-use patch_inventory::winget_script::{WINGET_ENCODED, WINGET_SCRIPT};
+use patch_inventory::error::{InventoryError, WingetError};
+use patch_inventory::limits::{MAX_WINGET_ID_BYTES, MAX_WINGET_TABLES, MAX_WINGET_UPDATES, MIN_SEPARATOR_DASHES, SOURCE_OPEN_FAILED_EXIT};
+use patch_inventory::model::{CliInventory, Limits, WingetSkip, WingetSource};
+use patch_inventory::winget::{is_frame, lines_of, parse_winget_cli};
 
 
-const TWO_CAPTURE: &[u8] = include_bytes!("fixtures/winget-stub-two.json");
+const ONE: &[u8] = include_bytes!("fixtures/winget-cli-en-one.txt");
 
 
-const ONE_CAPTURE: &[u8] = include_bytes!("fixtures/winget-stub-one.json");
+const TWO: &[u8] = include_bytes!("fixtures/winget-cli-en-two.txt");
 
 
-const ZERO_CAPTURE: &[u8] = include_bytes!("fixtures/winget-stub-zero.json");
+const UNKNOWN: &[u8] = include_bytes!("fixtures/winget-cli-en-unknown.txt");
 
 
-const UTF16_UNIT_BYTES: usize = 2;
+const UNKNOWN_INCLUDED: &[u8] = include_bytes!("fixtures/winget-cli-en-unknown-included.txt");
 
 
-const FOUR: usize = 4;
+const PINNED: &[u8] = include_bytes!("fixtures/winget-cli-en-pinned.txt");
 
 
-const MANY_ITEMS: usize = 100_000;
+const PINNED_INCLUDED: &[u8] = include_bytes!("fixtures/winget-cli-en-pinned-included.txt");
 
 
-const DEEP: usize = 10_000;
+const LONG: &[u8] = include_bytes!("fixtures/winget-cli-en-long.txt");
 
 
-const FOUR_MEBIBYTE_ENTRIES: usize = 2_000_000;
+const NONE: &[u8] = include_bytes!("fixtures/winget-cli-en-none.txt");
+
+
+const MSSTORE: &[u8] = include_bytes!("fixtures/winget-cli-en-msstore.txt");
+
+
+const FRENCH: &[u8] = include_bytes!("fixtures/winget-cli-fr-hand.txt");
+
+
+const MSSTORE_EXIT: i32 = -1_978_335_229;
+
+
+const NO_DASH_FILL: usize = 19;
+
+
+const COUNT_TWO: usize = 2;
+
+
+const COUNT_THREE: usize = 3;
+
+
+const COUNT_FOUR: usize = 4;
+
+
+const FOOTER_TWO: u32 = 2;
+
+
+const FOOTER_FIVE: u32 = 5;
+
+
+const INVALID_BYTE: u8 = 0xff;
+
+
+const SPINNER_START: [u8; 7] = [0x0d, 0x20, 0x20, 0x20, 0x2d, 0x20, 0x0d];
+
+
+const SMALL_LINE: usize = 64;
 
 
 const SMALL_CAP: usize = 16;
 
 
-const GOOD_ID: &str = "Vendor.Product";
+const LONG_ID: usize = 200;
 
 
-fn good() -> String {
-    format!(r#"{{"Id":"{GOOD_ID}","InstalledVersion":"1.0.0","AvailableVersion":"1.1.0","Source":"winget"}}"#)
+const HEADER: &str = "Name Id Version Available";
+
+
+const GOOD_ROW: &str = "Foo Foo.Bar 1.0 2.0";
+
+
+fn dashes() -> String {
+    "-".repeat(MIN_SEPARATOR_DASHES)
 }
 
 
-fn with(from: &str, to: &str) -> String {
-    good().replace(from, to)
+fn table(rows: &[&str], footer: &str) -> String {
+    format!("{HEADER}\r\n{}\r\n{}\r\n{footer}\r\n", dashes(), rows.join("\r\n"))
 }
 
 
-fn envelope(elements: &[String]) -> String {
-    format!(r#"{{"Updates":[{}]}}"#, elements.join(","))
+fn parse(bytes: &[u8]) -> Result<CliInventory, WingetError> {
+    parse_winget_cli(&device(), bytes, 0, WingetSource::Winget, &limits())
 }
 
 
-fn parse_text(text: &str) -> Result<WingetInventory, WingetError> {
-    parse_winget_updates(&device(), text.as_bytes(), &limits())
+fn parse_text(text: &str) -> Result<CliInventory, WingetError> {
+    parse(text.as_bytes())
 }
 
 
-fn one_element(element: String) -> Result<WingetInventory, WingetError> {
-    parse_text(&envelope(&[element]))
-}
-
-
-fn skipped_alone(element: String, reason: WingetSkip) -> TestResult {
-    let inventory = parse_text(&envelope(&[element, good().replace(GOOD_ID, "Other.Package")]))?;
-    assert_eq!(inventory.updates.len(), 1, "the other element is kept");
-    assert_eq!(skipped_count(&inventory.skipped, reason), 1);
-    assert_eq!(inventory.skipped.len(), 1);
-    Ok(())
-}
-
-
-#[test]
-fn encoded_command_is_the_script_in_utf16le_base64() -> TestResult {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(WINGET_ENCODED)?;
-    let (pairs, remainder) = bytes.as_chunks::<UTF16_UNIT_BYTES>();
-    assert!(remainder.is_empty(), "an odd trailing byte");
-    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-    assert_eq!(String::from_utf16(&units)?, WINGET_SCRIPT);
-    Ok(())
+fn ids(inventory: &CliInventory) -> Vec<&str> {
+    inventory.updates.iter().map(|update| update.package.as_str()).collect()
 }
 
 
 #[test]
-fn script_is_ascii_module_qualified_and_filters_on_updates() -> TestResult {
-    assert!(WINGET_SCRIPT.is_ascii());
-    assert!(WINGET_SCRIPT.contains("Import-Module Microsoft.WinGet.Client"));
-    assert!(WINGET_SCRIPT.contains("Microsoft.WinGet.Client\\Get-WinGetPackage"));
-    assert!(WINGET_SCRIPT.contains("$_.IsUpdateAvailable"));
-    assert!(WINGET_SCRIPT.contains("ConvertTo-Json -InputObject $envelope -Compress"));
-    assert!(WINGET_SCRIPT.contains("[\\u007F-\\uFFFF]"));
-    Ok(())
-}
-
-
-#[test]
-fn lab_capture_is_parsed() -> TestResult {
-    let inventory = parse_winget_updates(&device(), TWO_CAPTURE, &limits())?;
-    assert_eq!(inventory.updates.len(), FOUR);
-    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::UnknownInstalledVersion), 1);
-    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::OtherSource), 1);
-    let one = parse_winget_updates(&device(), ONE_CAPTURE, &limits())?;
-    assert_eq!(one.updates.len(), 1);
-    assert!(inventory.updates.iter().all(|update| !update.security && update.architecture == "any"));
-    assert!(inventory
-        .updates
-        .iter()
-        .all(|update| update.tenant == "tenant-a" && update.device_id == "device-1"));
-    let none = parse_winget_updates(&device(), ZERO_CAPTURE, &limits())?;
-    assert!(none.updates.is_empty() && none.skipped.is_empty());
-    Ok(())
-}
-
-
-#[test]
-fn a_good_element_becomes_an_update() -> TestResult {
-    let inventory = one_element(good())?;
+fn the_live_one_update_capture_gives_one_record() -> TestResult {
+    let inventory = parse(ONE)?;
+    assert_eq!(ids(&inventory), ["Microsoft.Edge"]);
     let update = inventory.updates.first().ok_or("no update")?;
-    assert_eq!(update.package, GOOD_ID);
-    assert_eq!(update.installed_version.as_deref(), Some("1.0.0"));
-    assert_eq!(update.candidate_version, "1.1.0");
+    assert_eq!(update.installed_version.as_deref(), Some("100.0.1.0"));
+    assert_eq!(update.candidate_version, "156.0.4314.58");
     assert_eq!(update.origin.as_deref(), Some("winget"));
-    assert!(!update.security && update.advisory_id.is_none() && update.severity.is_none());
+    assert_eq!(update.architecture, "any");
+    assert!(!update.security);
+    assert_eq!(update.tenant, "tenant-a");
+    assert_eq!(update.device_id, "device-1");
+    assert!(inventory.skipped.is_empty());
+    assert_eq!(inventory.preamble_lines, 0);
+    Ok(())
+}
+
+
+#[test]
+fn a_live_capture_starts_with_the_spinner_bytes_the_frame_rule_names() -> TestResult {
+    let head = ONE.get(..SPINNER_START.len()).ok_or("short capture")?;
+    assert_eq!(head, SPINNER_START);
+    Ok(())
+}
+
+
+#[test]
+fn the_live_two_update_capture_gives_two_sorted_records_with_a_spaced_name() -> TestResult {
+    let inventory = parse(TWO)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
+    assert_eq!(inventory.preamble_lines, 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_english_unknown_version_footer_never_becomes_a_record() -> TestResult {
+    let inventory = parse(UNKNOWN)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
+    assert!(inventory.skipped.is_empty());
+    assert_eq!(inventory.preamble_lines, 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_pins_footer_never_becomes_a_record() -> TestResult {
+    let inventory = parse(PINNED)?;
+    assert_eq!(ids(&inventory), ["Microsoft.Edge"]);
+    assert!(inventory.skipped.is_empty());
+    assert_eq!(parse(PINNED_INCLUDED)?.updates.len(), COUNT_TWO);
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_installed_version_word_is_a_counted_malformed_row_and_the_footer_still_matches() -> TestResult {
+    let inventory = parse(UNKNOWN_INCLUDED)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn the_live_long_name_row_keeps_its_id_and_the_name_is_never_read() -> TestResult {
+    let inventory = parse(LONG)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
     assert!(inventory.skipped.is_empty());
     Ok(())
 }
 
 
 #[test]
-fn real_winget_version_forms_are_kept_as_text() -> TestResult {
-    ["23.01", "8.6", "2.43.0.windows.2", "10.0.19041.1", "20240101", "1.2.3-beta+4"]
-        .iter()
-        .try_for_each(|version| {
-            let inventory = one_element(with(r#""AvailableVersion":"1.1.0""#, &format!(r#""AvailableVersion":"{version}""#)))?;
-            assert_eq!(inventory.updates.first().ok_or("no update")?.candidate_version, *version);
-            Ok::<(), Box<dyn std::error::Error>>(())
-        })
-}
-
-
-#[test]
-fn an_unknown_or_empty_installed_version_is_none_and_counted() -> TestResult {
-    ["Unknown", ""].iter().try_for_each(|installed| {
-        let inventory = one_element(with(r#""InstalledVersion":"1.0.0""#, &format!(r#""InstalledVersion":"{installed}""#)))?;
-        assert_eq!(inventory.updates.len(), 1);
-        assert!(inventory.updates.first().ok_or("no update")?.installed_version.is_none());
-        assert_eq!(skipped_count(&inventory.skipped, WingetSkip::UnknownInstalledVersion), 1);
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })
-}
-
-
-#[test]
-fn sources_are_a_fixed_list_and_any_other_is_counted() -> TestResult {
-    let store = one_element(with(r#""Source":"winget""#, r#""Source":"msstore""#))?;
-    assert_eq!(store.updates.first().ok_or("no update")?.origin.as_deref(), Some("msstore"));
-    assert!(store.skipped.is_empty());
-    ["Evil\\u0027;id", "", "WINGET", "private"].iter().try_for_each(|source| {
-        let inventory = one_element(with(r#""Source":"winget""#, &format!(r#""Source":"{source}""#)))?;
-        assert_eq!(inventory.updates.len(), 1);
-        assert!(inventory.updates.first().ok_or("no update")?.origin.is_none());
-        assert_eq!(skipped_count(&inventory.skipped, WingetSkip::OtherSource), 1);
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })
-}
-
-
-#[test]
-fn ids_outside_the_grammar_are_malformed_alone() -> TestResult {
-    let long = "A".repeat(MAX_WINGET_ID_BYTES + 1);
-    [
-        "-Vendor.Product",
-        "Vendor;Product",
-        "Vendor Product",
-        "Vendor'Product",
-        "\\u0022x",
-        "",
-        ".x",
-        &long,
-    ]
-    .iter()
-    .try_for_each(|id| skipped_alone(with(GOOD_ID, id), WingetSkip::Malformed))?;
-    let at_limit = "A".repeat(MAX_WINGET_ID_BYTES);
-    let ok = one_element(with(GOOD_ID, &at_limit))?;
-    assert_eq!(ok.updates.len(), 1);
-    ["Microsoft.VCRedist.2015+.x64", "9NBLGGH4NNS1", "a_b-c.d"].iter().try_for_each(|id| {
-        let inventory = one_element(with(GOOD_ID, id))?;
-        assert_eq!(inventory.updates.len(), 1);
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })
-}
-
-
-#[test]
-fn versions_outside_the_grammar_are_malformed_alone() -> TestResult {
-    let long = "1".repeat(MAX_WINGET_VERSION_BYTES + 1);
-    ["-1.0", "< 1.0", "1 0", "1.0\\u0001", &long].iter().try_for_each(|version| {
-        skipped_alone(
-            with(r#""AvailableVersion":"1.1.0""#, &format!(r#""AvailableVersion":"{version}""#)),
-            WingetSkip::Malformed,
-        )
-    })?;
-    ["-1.0", "1.0\\u0001", "\\u00e9 1", " 1 0", "1 \\t0", &long]
-        .iter()
-        .try_for_each(|version| {
-            skipped_alone(
-                with(r#""InstalledVersion":"1.0.0""#, &format!(r#""InstalledVersion":"{version}""#)),
-                WingetSkip::Malformed,
-            )
-        })?;
-    skipped_alone(with(r#""AvailableVersion":"1.1.0""#, r#""AvailableVersion":"""#), WingetSkip::Malformed)?;
-    let at_limit = "1".repeat(MAX_WINGET_VERSION_BYTES);
-    let ok = one_element(with(r#""AvailableVersion":"1.1.0""#, &format!(r#""AvailableVersion":"{at_limit}""#)))?;
-    assert_eq!(ok.updates.len(), 1);
+fn the_live_nothing_to_upgrade_capture_is_an_empty_inventory() -> TestResult {
+    let inventory = parse(NONE)?;
+    assert!(inventory.updates.is_empty());
+    assert!(inventory.skipped.is_empty());
+    assert_eq!(inventory.preamble_lines, 0);
     Ok(())
 }
 
 
 #[test]
-fn a_missing_or_mistyped_field_is_malformed_alone() -> TestResult {
-    [
-        r#"{"Id":"Vendor.Product","InstalledVersion":"1.0.0","AvailableVersion":"1.1.0"}"#,
-        r#"{"Id":"Vendor.Product","InstalledVersion":"1.0.0","Source":"winget"}"#,
-        r#"{"Id":"Vendor.Product","AvailableVersion":"1.1.0","Source":"winget"}"#,
-        r#"{"InstalledVersion":"1.0.0","AvailableVersion":"1.1.0","Source":"winget"}"#,
-        r#"{"Id":5,"InstalledVersion":"1.0.0","AvailableVersion":"1.1.0","Source":"winget"}"#,
-        r#"{"Id":"Vendor.Product","InstalledVersion":null,"AvailableVersion":"1.1.0","Source":"winget"}"#,
-        "[]",
-        "5",
-        "null",
-        "{}",
-    ]
-    .iter()
-    .try_for_each(|element| skipped_alone((*element).to_string(), WingetSkip::Malformed))
+fn the_live_refused_source_capture_is_a_named_exit_error() -> TestResult {
+    let refused = parse_winget_cli(&device(), MSSTORE, MSSTORE_EXIT, WingetSource::Msstore, &limits());
+    assert!(matches!(refused, Err(WingetError::Exit { code: MSSTORE_EXIT })));
+    Ok(())
 }
 
 
 #[test]
-fn a_duplicate_id_keeps_the_first_and_counts() -> TestResult {
-    let second = with(r#""AvailableVersion":"1.1.0""#, r#""AvailableVersion":"9.9.9""#);
-    let inventory = parse_text(&envelope(&[good(), second]))?;
+fn the_french_stand_in_capture_parses_without_any_word_of_the_language() -> TestResult {
+    let inventory = parse(FRENCH)?;
+    assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
+    assert!(inventory.skipped.is_empty());
+    assert_eq!(inventory.preamble_lines, 0);
+    Ok(())
+}
+
+
+#[test]
+fn the_source_open_exit_is_its_own_error_and_any_other_exit_is_named() -> TestResult {
+    let opened = parse_winget_cli(&device(), ONE, SOURCE_OPEN_FAILED_EXIT, WingetSource::Winget, &limits());
+    assert!(matches!(opened, Err(WingetError::SourceOpenFailed)));
+    let other = parse_winget_cli(&device(), ONE, 1, WingetSource::Winget, &limits());
+    assert!(matches!(other, Err(WingetError::Exit { code: 1 })));
+    Ok(())
+}
+
+
+#[test]
+fn origin_is_the_source_argument_and_never_a_row_token() -> TestResult {
+    let from_msstore = parse_winget_cli(&device(), ONE, 0, WingetSource::Msstore, &limits())?;
+    assert_eq!(from_msstore.updates.first().ok_or("no update")?.origin.as_deref(), Some("msstore"));
+    let with_source_column = table(&["Foo Foo.Bar 1.0 2.0 msstore"], "1 upgrades available.");
+    let refused = parse_text(&with_source_column)?;
+    assert!(refused.updates.is_empty());
+    assert_eq!(skipped_count(&refused.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn two_sources_are_two_results_and_one_failure_never_empties_the_other() -> TestResult {
+    let good = parse_winget_cli(&device(), ONE, 0, WingetSource::Winget, &limits());
+    let bad = parse_winget_cli(&device(), MSSTORE, MSSTORE_EXIT, WingetSource::Msstore, &limits());
+    assert_eq!(good?.updates.len(), 1);
+    assert!(bad.is_err());
+    Ok(())
+}
+
+
+#[test]
+fn an_unknown_installed_marker_joins_its_version_and_keeps_the_record_with_no_installed_version() -> TestResult {
+    let inventory = parse_text(&table(&["Foo Foo.Bar < 1.0 2.0", "Baz Baz.Qux > 3.0 4.0"], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Baz.Qux", "Foo.Bar"]);
+    assert!(inventory.updates.iter().all(|update| update.installed_version.is_none()));
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::UnknownInstalledVersion), COUNT_TWO);
+    Ok(())
+}
+
+
+#[test]
+fn a_marker_row_without_a_name_is_malformed() -> TestResult {
+    let inventory = parse_text(&table(&["Foo.Bar < 1.0 2.0", GOOD_ROW], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_version_token_without_a_digit_is_malformed() -> TestResult {
+    let inventory = parse_text(&table(&["Foo Foo.Bar winget them.", GOOD_ROW], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_footer_count_that_differs_from_the_rows_is_a_named_error() -> TestResult {
+    let result = parse_text(&table(&[GOOD_ROW], "2 upgrades available."));
+    assert!(matches!(result, Err(WingetError::FooterMismatch { footer: FOOTER_TWO, rows: 1 })));
+    Ok(())
+}
+
+
+#[test]
+fn skipped_rows_count_for_the_footer_check() -> TestResult {
+    let truncated = "Foo Foo.Bar\u{2026} 1.0 2.0";
+    let inventory = parse_text(&table(&[GOOD_ROW, truncated], "2 upgrades available."))?;
     assert_eq!(inventory.updates.len(), 1);
-    assert_eq!(inventory.updates.first().ok_or("no update")?.candidate_version, "1.1.0");
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Truncated), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_footer_number_over_thirty_two_bits_is_a_named_error() -> TestResult {
+    let result = parse_text(&table(&[GOOD_ROW], "99999999999 upgrades available."));
+    assert!(matches!(result, Err(WingetError::FooterTooLarge)));
+    Ok(())
+}
+
+
+#[test]
+fn a_table_ending_in_a_line_with_no_number_is_a_named_error() -> TestResult {
+    let at_the_end = parse_text(&table(&[GOOD_ROW], "no number here at all"));
+    assert!(matches!(at_the_end, Err(WingetError::FooterUnreadable)));
+    let before_a_blank = parse_text(&format!("{}\r\n", table(&[GOOD_ROW], "no number here at all")));
+    assert!(matches!(before_a_blank, Err(WingetError::FooterUnreadable)));
+    let several = parse_text(&table(&[GOOD_ROW], "1 of 2 upgrades available."));
+    assert!(matches!(several, Err(WingetError::FooterUnreadable)));
+    Ok(())
+}
+
+
+#[test]
+fn a_table_with_no_footer_at_the_end_of_input_is_read_without_a_count() -> TestResult {
+    let inventory = parse_text(&format!("{HEADER}\r\n{}\r\n{GOOD_ROW}\r\n", dashes()))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_malformed_line_before_the_footer_is_skipped_and_never_ends_the_table() -> TestResult {
+    let inventory = parse_text(&table(&["not a row", GOOD_ROW, "Baz Baz.Qux 3.0 4.0"], "3 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Baz.Qux", "Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_short_line_inside_the_table_does_not_end_it() -> TestResult {
+    let inventory = parse_text(&table(&["x y", "Baz Baz.Qux 3.0 4.0"], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Baz.Qux"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_blank_line_ends_the_table_and_what_follows_is_not_read_as_rows() -> TestResult {
+    let inventory = parse_text(&format!("{}\r\nBaz Baz.Qux 3.0 4.0\r\n", table(&[GOOD_ROW], "1 upgrades available.")))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_dash_line_of_nineteen_is_not_a_separator() -> TestResult {
+    let result = parse_text(&format!(
+        "{HEADER}\r\n{}\r\n{GOOD_ROW}\r\n1 upgrades available.\r\n",
+        "-".repeat(NO_DASH_FILL)
+    ));
+    assert!(matches!(result, Err(WingetError::UnrecognisedLayout)));
+    Ok(())
+}
+
+
+#[test]
+fn a_dash_line_at_the_start_or_after_a_blank_or_a_frame_is_not_a_separator() -> TestResult {
+    let first = parse_text(&format!("{}\r\n{GOOD_ROW}\r\n", dashes()));
+    assert!(matches!(first, Err(WingetError::UnrecognisedLayout)));
+    let after_blank = parse_text(&format!("{HEADER}\r\n\r\n{}\r\n{GOOD_ROW}\r\n", dashes()));
+    assert!(matches!(after_blank, Err(WingetError::UnrecognisedLayout)));
+    let after_frame = parse_text(&format!("   - \r\n{}\r\n{GOOD_ROW}\r\n", dashes()));
+    assert!(matches!(after_frame, Err(WingetError::UnrecognisedLayout)));
+    Ok(())
+}
+
+
+#[test]
+fn a_dash_line_with_another_character_is_not_a_separator() -> TestResult {
+    let result = parse_text(&format!("{HEADER}\r\n{}x\r\n{GOOD_ROW}\r\n", dashes()));
+    assert!(matches!(result, Err(WingetError::UnrecognisedLayout)));
+    Ok(())
+}
+
+
+#[test]
+fn a_lone_spinner_dash_is_never_a_separator() -> TestResult {
+    let result = parse_text("Name\r\n   - \r\n-\r\n");
+    assert!(matches!(result, Err(WingetError::UnrecognisedLayout)));
+    Ok(())
+}
+
+
+#[test]
+fn a_carriage_return_progress_region_is_split_into_lines() -> TestResult {
+    let lines: Vec<&str> = lines_of("a\rb\r\nc\n\nd").collect();
+    assert_eq!(lines, ["a", "b", "c", "", "d"]);
+    assert_eq!(lines_of("").count(), 0);
+    let region = "   - \r   \\ \r".repeat(MAX_WINGET_UPDATES);
+    let tight = Limits {
+        max_bytes: limits().max_bytes,
+        max_lines: limits().max_lines,
+        max_line_bytes: SMALL_LINE,
+    };
+    let inventory = parse_winget_cli(
+        &device(),
+        format!("{region}{}", table(&[GOOD_ROW], "1 upgrades available.")).as_bytes(),
+        0,
+        WingetSource::Winget,
+        &tight,
+    )?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(inventory.preamble_lines, 0);
+    Ok(())
+}
+
+
+#[test]
+fn frames_are_recognised_by_their_exact_forms_only() -> TestResult {
+    assert!(is_frame("   - "));
+    assert!(is_frame("   \\ "));
+    assert!(is_frame("   | "));
+    assert!(is_frame("   / "));
+    assert!(!is_frame("   -"));
+    assert!(!is_frame("   x "));
+    assert!(!is_frame("  - "));
+    assert!(is_frame("  \u{2588}\u{2592}\u{2592}  45.4 MB / 45.4 MB"));
+    assert!(is_frame("  \u{2588}\u{2588}"));
+    assert!(!is_frame("  45.4 MB"));
+    assert!(!is_frame("\u{2588}\u{2592}  1 MB"));
+    assert!(!is_frame("  \u{2588}\u{2592}  1 MB \u{00e9}"));
+    Ok(())
+}
+
+
+#[test]
+fn a_progress_row_after_the_separator_is_a_counted_malformed_row_not_a_stripped_frame() -> TestResult {
+    let inventory = parse_text(&table(&["  \u{2588}\u{2592}  1 MB / 2 MB", GOOD_ROW], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), 1);
+    Ok(())
+}
+
+
+#[test]
+fn preamble_lines_before_the_header_are_counted_and_frames_are_not() -> TestResult {
+    let text = format!(
+        "   - \r\nFailed in attempting to update the source: winget\r\n  \u{2588}\u{2592}  1 MB / 2 MB\r\n\r\n{}",
+        table(&[GOOD_ROW], "1 upgrades available.")
+    );
+    let inventory = parse_text(&text)?;
+    assert_eq!(inventory.preamble_lines, 1);
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_second_table_is_read_with_its_own_footer_and_the_explicit_targeting_line_is_not_a_record() -> TestResult {
+    let second = format!(
+        "\r\nThe following packages have an upgrade available, but require explicit targeting for upgrade:\r\n{HEADER}\r\n{}\r\nBaz Baz.Qux 3.0 4.0\r\n1 upgrades available.\r\n",
+        dashes()
+    );
+    let inventory = parse_text(&format!("{}{second}", table(&[GOOD_ROW], "1 upgrades available.")))?;
+    assert_eq!(ids(&inventory), ["Baz.Qux", "Foo.Bar"]);
+    assert!(inventory.skipped.is_empty());
+    let mismatch = parse_text(&format!(
+        "{}{}",
+        table(&[GOOD_ROW], "1 upgrades available."),
+        second.replace("1 upgrades", "5 upgrades")
+    ));
+    assert!(matches!(
+        mismatch,
+        Err(WingetError::FooterMismatch {
+            footer: FOOTER_FIVE,
+            rows: 1
+        })
+    ));
+    Ok(())
+}
+
+
+#[test]
+fn consecutive_separators_make_an_empty_table_each() -> TestResult {
+    let result = parse_text(&format!("{HEADER}\r\n{}\r\n{}\r\n{GOOD_ROW}\r\n", dashes(), dashes()));
+    assert_eq!(ids(&result?), ["Foo.Bar"]);
+    Ok(())
+}
+
+
+#[test]
+fn a_third_table_is_a_named_error() -> TestResult {
+    let block = table(&[GOOD_ROW], "1 upgrades available.");
+    let result = parse_text(&format!("{block}\r\n{block}\r\n{block}"));
+    assert!(matches!(result, Err(WingetError::TooManyTables { limit: MAX_WINGET_TABLES })));
+    Ok(())
+}
+
+
+#[test]
+fn a_non_utf8_byte_is_a_whole_input_error() -> TestResult {
+    let mut bytes = table(&[GOOD_ROW], "1 upgrades available.").into_bytes();
+    bytes.push(INVALID_BYTE);
+    assert!(matches!(parse(&bytes), Err(WingetError::Encoding)));
+    Ok(())
+}
+
+
+#[test]
+fn a_row_over_the_line_cap_is_skipped_counted_and_still_a_row_for_the_footer() -> TestResult {
+    let tight = Limits {
+        max_bytes: limits().max_bytes,
+        max_lines: limits().max_lines,
+        max_line_bytes: SMALL_LINE,
+    };
+    let giant = format!("Foo {} 1.0 2.0", "A".repeat(LONG_ID));
+    let text = table(&[GOOD_ROW, &giant], "2 upgrades available.");
+    let inventory = parse_winget_cli(&device(), text.as_bytes(), 0, WingetSource::Winget, &tight)?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::LineTooLong), 1);
+    Ok(())
+}
+
+
+#[test]
+fn an_id_or_version_over_the_byte_cap_is_malformed() -> TestResult {
+    let long_id = format!("Foo {} 1.0 2.0", "A".repeat(MAX_WINGET_ID_BYTES + 1));
+    let long_version = format!("Foo Foo.Baz 1.{} 2.0", "0".repeat(MAX_WINGET_ID_BYTES));
+    let inventory = parse_text(&table(&[GOOD_ROW, &long_id, &long_version], "3 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), COUNT_TWO);
+    Ok(())
+}
+
+
+#[test]
+fn an_id_or_a_version_holding_an_ellipsis_is_truncated() -> TestResult {
+    let id = "Foo Foo.Ba\u{2026} 1.0 2.0";
+    let installed = "Foo Foo.Bar 1.\u{2026} 2.0";
+    let available = "Foo Foo.Bar 1.0 2.\u{2026}";
+    let inventory = parse_text(&table(&[GOOD_ROW, id, installed, available], "4 upgrades available."))?;
+    assert_eq!(inventory.updates.len(), 1);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Truncated), COUNT_THREE);
+    Ok(())
+}
+
+
+#[test]
+fn a_control_character_in_a_row_is_counted_and_never_read() -> TestResult {
+    let inventory = parse_text(&table(
+        &[
+            GOOD_ROW,
+            "Foo\u{1b} Foo.Baz 1.0 2.0",
+            "Foo\tFoo.Baz 1.0 2.0",
+            "Foo\u{200b} Foo.Baz 1.0 2.0",
+        ],
+        "4 upgrades available.",
+    ))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::ControlCharacters), COUNT_THREE);
+    Ok(())
+}
+
+
+#[test]
+fn a_row_with_a_leading_dash_or_a_bad_character_is_malformed() -> TestResult {
+    let rows = [
+        "Foo -Foo.Bar 1.0 2.0",
+        "Foo Foo;Bar 1.0 2.0",
+        "Foo Foo.Bar -1.0 2.0",
+        "Foo Foo.Bar 1.0 2.0$",
+        GOOD_ROW,
+    ];
+    let inventory = parse_text(&table(&rows, "5 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
+    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Malformed), COUNT_FOUR);
+    Ok(())
+}
+
+
+#[test]
+fn a_duplicate_id_in_any_case_keeps_the_first_and_is_counted() -> TestResult {
+    let inventory = parse_text(&table(&[GOOD_ROW, "Other foo.bar 5.0 6.0"], "2 upgrades available."))?;
+    assert_eq!(ids(&inventory), ["Foo.Bar"]);
     assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Duplicate), 1);
     Ok(())
 }
 
 
 #[test]
-fn output_is_sorted_by_package() -> TestResult {
-    let inventory = parse_text(&envelope(&[with(GOOD_ID, "Zed.App"), with(GOOD_ID, "Alpha.App")]))?;
-    let names: Vec<&str> = inventory.updates.iter().map(|update| update.package.as_str()).collect();
-    assert_eq!(names, ["Alpha.App", "Zed.App"]);
+fn more_rows_than_the_cap_is_a_named_error_counted_before_any_record() -> TestResult {
+    let rows: Vec<String> = (0..=MAX_WINGET_UPDATES)
+        .map(|number| format!("N{number} Pkg.P{number} 1.0 2.0"))
+        .collect();
+    let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let footer = format!("{} upgrades available.", rows.len());
+    let result = parse_text(&table(&borrowed, &footer));
+    assert!(matches!(result, Err(WingetError::TooManyUpdates { limit: MAX_WINGET_UPDATES })));
     Ok(())
 }
 
 
 #[test]
-fn a_count_bomb_inside_one_element_is_malformed_alone() -> TestResult {
-    let many = vec![r#""1""#; MANY_ITEMS].join(",");
-    skipped_alone(with(r#""Id":"Vendor.Product""#, &format!(r#""Id":[{many}]"#)), WingetSkip::Malformed)?;
-    skipped_alone(with(r#""Source":"winget""#, &format!(r#""Source":[{many}]"#)), WingetSkip::Malformed)?;
-    let nested = format!("{}{}", "[".repeat(DEEP), "]".repeat(DEEP));
-    skipped_alone(with(r#""Source":"winget""#, &format!(r#""Source":{nested}"#)), WingetSkip::Malformed)
-}
-
-
-#[test]
-fn an_extra_field_is_ignored() -> TestResult {
-    let inventory = one_element(with(r#""Source":"winget""#, r#""Source":"winget","Name":"Product""#))?;
-    assert_eq!(inventory.updates.len(), 1);
-    assert!(inventory.skipped.is_empty());
+fn exactly_the_cap_of_rows_is_accepted() -> TestResult {
+    let rows: Vec<String> = (0..MAX_WINGET_UPDATES).map(|number| format!("N{number} Pkg.P{number} 1.0 2.0")).collect();
+    let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let footer = format!("{} upgrades available.", rows.len());
+    assert_eq!(parse_text(&table(&borrowed, &footer))?.updates.len(), MAX_WINGET_UPDATES);
     Ok(())
 }
 
 
 #[test]
-fn drop_the_element_count_prescan_mutant_is_caught() -> TestResult {
-    let elements: Vec<String> = (0..=MAX_WINGET_UPDATES).map(|_| "{}".to_string()).collect();
-    let outcome = parse_text(&envelope(&elements));
-    assert!(
-        matches!(outcome, Err(WingetError::TooManyUpdates { limit: MAX_WINGET_UPDATES })),
-        "{outcome:?}"
-    );
-    let at_limit: Vec<String> = (0..MAX_WINGET_UPDATES).map(|index| with(GOOD_ID, &format!("Vendor.P{index}"))).collect();
-    let accepted = parse_text(&envelope(&at_limit))?;
-    assert_eq!(accepted.updates.len(), MAX_WINGET_UPDATES);
+fn nothing_but_one_line_is_an_empty_listing_and_anything_else_without_a_table_is_unrecognised() -> TestResult {
+    assert!(parse_text("No installed package found matching input criteria.\r\n")?.updates.is_empty());
+    assert!(matches!(parse_text(""), Err(WingetError::UnrecognisedLayout)));
+    assert!(matches!(parse_text("   - \r\n  \r\n"), Err(WingetError::UnrecognisedLayout)));
+    assert!(matches!(parse_text("one line\r\nsecond line\r\n"), Err(WingetError::UnrecognisedLayout)));
     Ok(())
 }
 
 
 #[test]
-fn millions_of_elements_in_the_byte_cap_are_refused_by_count() -> TestResult {
-    let entries = "{},".repeat(FOUR_MEBIBYTE_ENTRIES / TWO_ELEMENT_DIVISOR);
-    let outcome = parse_text(&format!(r#"{{"Updates":[{entries}{{}}]}}"#));
-    assert!(matches!(outcome, Err(WingetError::TooManyUpdates { .. })), "{outcome:?}");
-    Ok(())
-}
-
-
-const TWO_ELEMENT_DIVISOR: usize = 2;
-
-
-#[test]
-fn an_empty_input_is_no_output_never_an_empty_inventory() -> TestResult {
-    [&b""[..], b"\r\n", b"  \t\n"].iter().for_each(|input| {
-        let outcome = parse_winget_updates(&device(), *input, &limits());
-        assert!(matches!(outcome, Err(WingetError::NoOutput)), "{outcome:?}");
-    });
-    Ok(())
-}
-
-
-#[test]
-fn non_ascii_input_is_refused_by_name() -> TestResult {
-    let utf16: Vec<u8> = "{}".encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let inputs: Vec<Vec<u8>> = vec![
-        b"\xef\xbb\xbf{}".to_vec(),
-        utf16,
-        b"{\0}".to_vec(),
-        "{\"a\":\"caf\u{e9}\"}".as_bytes().to_vec(),
-        b"{\"a\":\"\xff\"}".to_vec(),
-    ];
-    inputs.iter().for_each(|input| {
-        let outcome = parse_winget_updates(&device(), input.as_slice(), &limits());
-        assert!(matches!(outcome, Err(WingetError::NotAscii)), "{outcome:?}");
-    });
-    Ok(())
-}
-
-
-#[test]
-fn a_bare_array_a_scalar_and_a_missing_updates_list_are_malformed() -> TestResult {
-    [
-        "[]",
-        "2",
-        "null",
-        "{",
-        r#"{"Updates":null}"#,
-        "{}",
-        r#"{"Updates":{}}"#,
-        r#"{"Updates":"x"}"#,
-    ]
-    .iter()
-    .for_each(|input| {
-        let outcome = parse_text(input);
-        assert!(matches!(outcome, Err(WingetError::Malformed { .. })), "{input}: {outcome:?}");
-    });
-    Ok(())
-}
-
-
-#[test]
-fn a_malformed_input_error_carries_a_position_and_no_peer_text() -> TestResult {
-    let marker = "SECRET-PEER-MARKER";
-    let outcome = parse_text(&format!(r#"{{"Updates":"{marker}"}}"#));
-    let error = outcome.err().ok_or("an error was expected")?;
-    let shown = format!("{error:?} {error}");
-    assert!(matches!(error, WingetError::Malformed { line: 1, .. }), "{shown}");
-    assert!(!shown.contains(marker));
-    Ok(())
-}
-
-
-#[test]
-fn an_oversized_input_is_refused_by_the_byte_cap() -> TestResult {
+fn the_byte_and_line_caps_and_a_failing_reader_are_named_errors() -> TestResult {
     let small = Limits {
         max_bytes: SMALL_CAP,
-        ..limits()
+        max_lines: limits().max_lines,
+        max_line_bytes: limits().max_line_bytes,
     };
-    let outcome = parse_winget_updates(&device(), TWO_CAPTURE, &small);
-    assert!(matches!(outcome, Err(WingetError::Input(_))), "{outcome:?}");
+    let too_large = parse_winget_cli(&device(), ONE, 0, WingetSource::Winget, &small);
+    assert!(matches!(
+        too_large,
+        Err(WingetError::Input(InventoryError::TooLarge { limit: SMALL_CAP }))
+    ));
+    let few_lines = Limits {
+        max_bytes: limits().max_bytes,
+        max_lines: SMALL_CAP,
+        max_line_bytes: limits().max_line_bytes,
+    };
+    let too_many = parse_winget_cli(&device(), ONE, 0, WingetSource::Winget, &few_lines);
+    assert!(matches!(
+        too_many,
+        Err(WingetError::Input(InventoryError::TooManyLines { limit: SMALL_CAP }))
+    ));
+    let failing = parse_winget_cli(&device(), FailingReader, 0, WingetSource::Winget, &limits());
+    assert!(matches!(failing, Err(WingetError::Input(InventoryError::Read(_)))));
     Ok(())
 }
 
 
 #[test]
-fn a_failing_reader_is_an_input_error() -> TestResult {
-    let outcome = parse_winget_updates(&device(), FailingReader, &limits());
-    assert!(matches!(outcome, Err(WingetError::Input(_))), "{outcome:?}");
-    Ok(())
-}
-
-
-#[test]
-fn an_installed_version_with_a_space_is_none_and_counted_never_dropped() -> TestResult {
-    ["< 1.0", "1 0", "Unknown 1"].iter().try_for_each(|installed| {
-        let inventory = one_element(with(r#""InstalledVersion":"1.0.0""#, &format!(r#""InstalledVersion":"{installed}""#)))?;
-        assert_eq!(inventory.updates.len(), 1);
-        assert!(inventory.updates.first().ok_or("no update")?.installed_version.is_none());
-        assert_eq!(skipped_count(&inventory.skipped, WingetSkip::UnknownInstalledVersion), 1);
-        assert_eq!(inventory.skipped.len(), 1);
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })
-}
-
-
-#[test]
-fn ids_are_deduplicated_after_ascii_lowercasing_keeping_the_first_spelling() -> TestResult {
-    let upper = with(GOOD_ID, "VENDOR.PRODUCT");
-    let inventory = parse_text(&envelope(&[good(), upper.replace("1.1.0", "9.9.9")]))?;
-    assert_eq!(inventory.updates.len(), 1);
-    assert_eq!(inventory.updates.first().ok_or("no update")?.package, GOOD_ID);
-    assert_eq!(skipped_count(&inventory.skipped, WingetSkip::Duplicate), 1);
-    let reversed = parse_text(&envelope(&[upper, good()]))?;
-    assert_eq!(reversed.updates.first().ok_or("no update")?.package, "VENDOR.PRODUCT");
+fn errors_carry_no_line_text() -> TestResult {
+    let result = parse_text(&table(&["Marker Marker.Id 1.0 2.0"], "9 upgrades available."));
+    let error = result.err().ok_or("no error")?;
+    assert!(!format!("{error} {error:?}").contains("Marker"));
     Ok(())
 }

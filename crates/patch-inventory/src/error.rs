@@ -35,12 +35,22 @@ pub enum WindowsError {
 pub enum WingetError {
     #[error("reading the winget output failed")]
     Input(#[from] InventoryError),
-    #[error("the winget output holds a byte outside printable ASCII")]
-    NotAscii,
-    #[error("the winget listing printed nothing")]
-    NoOutput,
-    #[error("the winget output is not the expected JSON envelope (line {line}, column {column})")]
-    Malformed { line: usize, column: usize },
-    #[error("the winget listing has more than {limit} updates")]
+    #[error("the winget output is not valid UTF-8")]
+    Encoding,
+    #[error("winget could not open its source")]
+    SourceOpenFailed,
+    #[error("winget exited with code {code}")]
+    Exit { code: i32 },
+    #[error("the winget output has no recognisable table")]
+    UnrecognisedLayout,
+    #[error("the winget output has more than {limit} tables")]
+    TooManyTables { limit: usize },
+    #[error("the winget output lists more than {limit} updates")]
     TooManyUpdates { limit: usize },
+    #[error("a winget table ends with a line that holds no single number")]
+    FooterUnreadable,
+    #[error("the number in a winget footer does not fit in 32 bits")]
+    FooterTooLarge,
+    #[error("a winget footer counts {footer} rows but the table has {rows}")]
+    FooterMismatch { footer: u32, rows: usize },
 }
