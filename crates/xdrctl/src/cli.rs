@@ -4,8 +4,10 @@ use crate::cases::{cases_list, cases_show};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
 use crate::model::{
-    AlertsCommand, AssetsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report, RiskCommand, VulnsCommand,
+    AlertsCommand, AssetsCommand, AttackPathsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, GrcCommand, OutputFormat,
+    Report, RiskCommand, VulnsCommand,
 };
+use crate::reports::{attack_paths_list, attack_paths_show, grc_list, grc_show};
 use crate::risk::{risk_list, risk_show};
 use crate::session::session_path;
 use crate::types::SendFn;
@@ -77,6 +79,18 @@ pub fn execute(
         Command::Vulns {
             action: VulnsCommand::Show { asset },
         } => vulns_show(&ctx, asset),
+        Command::Grc {
+            action: GrcCommand::List { framework, limit },
+        } => grc_list(&ctx, framework.as_deref(), *limit),
+        Command::Grc {
+            action: GrcCommand::Show { id },
+        } => grc_show(&ctx, id),
+        Command::AttackPaths {
+            action: AttackPathsCommand::List { limit },
+        } => attack_paths_list(&ctx, *limit),
+        Command::AttackPaths {
+            action: AttackPathsCommand::Show { id },
+        } => attack_paths_show(&ctx, id),
     }
 }
 
