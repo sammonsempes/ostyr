@@ -9,5 +9,6 @@ pub mod model;
 pub mod ports;
 #[cfg(unix)]
 pub mod runner;
+pub mod settings;
 pub mod text;
 pub mod types;
