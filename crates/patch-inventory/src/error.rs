@@ -29,3 +29,18 @@ pub enum WindowsError {
     #[error("the update search lists more than {limit} updates")]
     TooManyUpdates { limit: usize },
 }
+
+
+#[derive(Debug, Error)]
+pub enum WingetError {
+    #[error("reading the winget output failed")]
+    Input(#[from] InventoryError),
+    #[error("the winget output holds a byte outside printable ASCII")]
+    NotAscii,
+    #[error("the winget listing printed nothing")]
+    NoOutput,
+    #[error("the winget output is not the expected JSON envelope (line {line}, column {column})")]
+    Malformed { line: usize, column: usize },
+    #[error("the winget listing has more than {limit} updates")]
+    TooManyUpdates { limit: usize },
+}

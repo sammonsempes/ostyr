@@ -1,5 +1,6 @@
 //! Package manager grammars: a field that does not match is a malformed line, never a record.
 
+use crate::limits::{MAX_WINGET_ID_BYTES, MAX_WINGET_VERSION_BYTES};
 use crate::model::Update;
 
 
@@ -54,4 +55,26 @@ pub fn is_valid_debian(update: &Update) -> bool {
 
 pub fn is_valid_rpm(update: &Update) -> bool {
     is_rpm_name(&update.package) && is_rpm_architecture(&update.architecture) && has_plain_text(update)
+}
+
+
+pub fn is_winget_package_id(text: &str) -> bool {
+    text.len() <= MAX_WINGET_ID_BYTES
+        && text.starts_with(|first: char| first.is_ascii_alphanumeric())
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-'))
+}
+
+
+pub fn is_winget_version(text: &str) -> bool {
+    text.len() <= MAX_WINGET_VERSION_BYTES && is_plain_text(text)
+}
+
+
+pub fn is_spaced_version(text: &str) -> bool {
+    text.len() <= MAX_WINGET_VERSION_BYTES
+        && text.contains(' ')
+        && !text.starts_with(['-', ' '])
+        && text.chars().all(|character| character.is_ascii_graphic() || character == ' ')
 }
