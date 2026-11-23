@@ -8,6 +8,7 @@ pub mod commands;
 pub mod error;
 pub mod http;
 pub mod model;
+pub mod reports;
 pub mod risk;
 pub mod session;
 pub mod types;
