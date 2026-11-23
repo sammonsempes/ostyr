@@ -1,7 +1,7 @@
 use crate::limits::Limits;
 use crate::model::{Counts, UrlHit, UrlIndex};
 use crate::text::{has_hostile, is_zero_width};
-use regex::Regex;
+use regex::{Match, Regex};
 use std::sync::LazyLock;
 use url::Url;
 
@@ -151,7 +151,7 @@ fn refused_host(stripped: &str, too_long: bool) -> Option<String> {
         .filter(|text| too_long || has_hostile(text))
         .filter(|text| !too_long || authority_ends(text))
         .and_then(|text| Url::parse(text).ok())
-        .and_then(|parsed| parsed.domain().map(str::to_owned))
+        .and_then(|parsed| parsed.host_str().map(|host| host.trim_matches(['[', ']']).to_owned()))
 }
 
 
@@ -163,6 +163,7 @@ pub fn index_from(urls: &[UrlHit], hosts: Vec<String>) -> UrlIndex {
         hosts,
         probes: 0,
         probed_bytes: 0,
+        window_bytes: 0,
     }
 }
 
@@ -217,6 +218,61 @@ fn add(mut urls: Vec<UrlHit>, candidate: &str, level: usize, limits: &Limits, in
 }
 
 
+const WINDOW_BUDGET: usize = 8_388_608;
+
+
+/// What follows a match that ended on a delimiter: up to the end of the attribute value, or no end within the bound.
+pub enum Region<'text> {
+    Closed(&'text str),
+    Open,
+}
+
+
+fn is_window_end(found: u8) -> bool {
+    matches!(found, b'/' | b'?' | b'#' | b'\\' | b'\n')
+}
+
+
+fn is_url_delimiter(found: char) -> bool {
+    found.is_whitespace() || matches!(found, '"' | '\'' | '<' | '>')
+}
+
+
+/// The text after a match up to the first `/`, `?`, `#`, `\` or line end, `Open` when `bound` bytes hold none.
+pub fn split_region(tail: &str, bound: usize) -> Region<'_> {
+    match tail.bytes().take(bound).position(is_window_end) {
+        Some(end) => Region::Closed(tail.split_at(end).0),
+        None if tail.len() >= bound => Region::Open,
+        None => Region::Closed(tail),
+    }
+}
+
+
+fn read_split(
+    urls: Vec<UrlHit>,
+    text: &str,
+    found: &Match<'_>,
+    level: usize,
+    limits: &Limits,
+    index: &mut UrlIndex,
+    counts: &mut Counts,
+) -> Vec<UrlHit> {
+    let tail = text.split_at(found.end()).1;
+    let opens = tail.chars().next().is_some_and(is_url_delimiter) && !authority_ends(found.as_str()) && !is_data(found.as_str());
+    index.window_bytes += usize::from(opens) * tail.len().min(limits.url_bytes);
+    let spent = index.window_bytes > WINDOW_BUDGET;
+    let region = (opens && !spent).then(|| split_region(tail, limits.url_bytes));
+    counts.url_host_unread += usize::from(opens && (spent || matches!(region, Some(Region::Open))));
+    match region {
+        Some(Region::Closed(rest)) if rest.contains('@') => {
+            counts.url_userinfo_split += 1;
+            add(urls, &format!("{}{}", found.as_str(), rest), level, limits, index, counts)
+        }
+        _ => urls,
+    }
+}
+
+
 /// Adds the URLs of `text` to `known`: deduplicated through `index`, at most `limits.urls`; a refused or dropped one is counted.
 pub fn collect_indexed(
     rule: &Result<Regex, regex::Error>,
@@ -228,9 +284,10 @@ pub fn collect_indexed(
     counts: &mut Counts,
 ) -> Vec<UrlHit> {
     match rule {
-        Ok(regex) => regex
-            .find_iter(text)
-            .fold(known, |urls, found| add(urls, found.as_str(), level, limits, index, counts)),
+        Ok(regex) => regex.find_iter(text).fold(known, |urls, found| {
+            let listed = add(urls, found.as_str(), level, limits, index, counts);
+            read_split(listed, text, &found, level, limits, index, counts)
+        }),
         Err(error) => {
             tracing::error!(%error, "url pattern did not compile, no url is listed");
             counts.pattern_failed += 1;
