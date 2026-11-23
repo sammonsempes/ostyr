@@ -108,6 +108,9 @@ pub struct StubState {
     pub link_paths: Mutex<Vec<String>>,
     pub links_reply: Mutex<Option<Value>>,
     pub links_fault: Mutex<Option<StatusCode>>,
+    pub observables: Mutex<Vec<Value>>,
+    pub observables_reply: Mutex<Option<Value>>,
+    pub observables_fault: Mutex<Option<StatusCode>>,
 }
 
 
@@ -631,6 +634,57 @@ pub async fn link_handler(State(state): State<Arc<StubState>>, headers: HeaderMa
                 }
                 None => error_reply(StatusCode::BAD_REQUEST),
             }
+        })
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub fn seen_item(stored: &Value) -> Value {
+    merged(stored.clone(), json!({"seen_in": ["case-2"], "seen_in_truncated": false}))
+}
+
+
+pub async fn observables_handler(State(state): State<Arc<StubState>>, headers: HeaderMap) -> Response {
+    note_forwarded(&state, &headers);
+    let fault = *state.observables_fault.lock().unwrap_or_else(PoisonError::into_inner);
+    let forged = state.observables_reply.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if !authorised(&headers) {
+        error_reply(StatusCode::UNAUTHORIZED)
+    } else if let Some(status) = fault {
+        error_reply(status)
+    } else if let Some(reply) = forged {
+        Json(reply).into_response()
+    } else {
+        let items: Vec<Value> = state
+            .observables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(seen_item)
+            .collect();
+        Json(json!({"items": items})).into_response()
+    }
+}
+
+
+pub async fn observable_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, body: Bytes) -> Response {
+    note_forwarded(&state, &headers);
+    note_write(&state, format!("/cases/{id}/observables"), &body);
+    if authorised(&headers) {
+        write_failure(&state).unwrap_or_else(|| {
+            state.stored.store(true, Ordering::SeqCst);
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let mut stored = state.observables.lock().unwrap_or_else(PoisonError::into_inner);
+            let present = stored
+                .iter()
+                .any(|held| held.get("kind") == parsed.get("kind") && held.get("value") == parsed.get("value"));
+            if !present {
+                stored.push(parsed.clone());
+            }
+            let status = if present { StatusCode::OK } else { StatusCode::CREATED };
+            (status, Json(merged(parsed, json!({"already_present": present})))).into_response()
         })
     } else {
         error_reply(StatusCode::UNAUTHORIZED)
@@ -1794,6 +1848,9 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         link_paths: Mutex::new(Vec::new()),
         links_reply: Mutex::new(None),
         links_fault: Mutex::new(None),
+        observables: Mutex::new(Vec::new()),
+        observables_reply: Mutex::new(None),
+        observables_fault: Mutex::new(None),
     });
     let router = Router::new()
         .route("/auth/login", post(login_handler))
@@ -1824,6 +1881,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/cases/{id}/actions", post(case_action_handler))
         .route("/cases/{id}/comments", post(case_comment_handler))
         .route("/cases/{id}/alerts", get(links_handler).post(link_handler))
+        .route("/cases/{id}/observables", get(observables_handler).post(observable_handler))
         .layer(axum::middleware::from_fn_with_state(state.clone(), count_request))
         .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await?;

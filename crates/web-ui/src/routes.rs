@@ -1,16 +1,18 @@
 use crate::api::{
-    cert_filter, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_posture, get_risk_entity, get_shell_session,
-    get_state_asset, get_vuln_asset, list_alerts, list_assets, list_case_links, list_cases, list_certs, list_findings, list_oncall, list_risk,
-    list_shell_sessions, list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac, parse_dhcp_time, parse_dhcp_window,
-    post_alert_triage, post_case_action, post_case_comment, post_case_link, probe_dhcp, probe_posture, risk_kind, shell_open_filter,
-    valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id, valid_shell_cursor,
-    valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter, MAX_COMMENT_CHARS,
-    MAX_NOTE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
+    cert_filter, checked_observable, get_alert, get_asset, get_case, get_cert, get_dhcp, get_oncall_alert, get_posture, get_risk_entity,
+    get_shell_session, get_state_asset, get_vuln_asset, list_alerts, list_assets, list_case_links, list_case_observables, list_cases, list_certs,
+    list_findings, list_oncall, list_risk, list_shell_sessions, list_states, list_vulns, login, logout, parse_dhcp_address, parse_dhcp_mac,
+    parse_dhcp_time, parse_dhcp_window, post_alert_triage, post_case_action, post_case_comment, post_case_link, post_case_observable, probe_dhcp,
+    probe_posture, risk_kind, shell_open_filter, valid_asset_cursor, valid_case_id, valid_cert_cursor, valid_cursor, valid_hunt_cursor, valid_id,
+    valid_shell_cursor, valid_shell_filter_requester, valid_shell_reference, valid_state_cursor, valid_state_id, valid_vuln_cursor, verdict_filter,
+    MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_OBSERVABLE_CHARS, MAX_SOURCE_CHARS, RUN_CHANGED_KEY, SECONDS_PER_DAY, VERDICT_DEFAULT,
 };
 use crate::error::{ApiFailure, FormRefusal, SessionError};
-use crate::model::{ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, LinksPanel, Opened, Principal, ShellQuery, WebLimits, WebState};
+use crate::model::{
+    ApiClient, CaseDetailView, CommentView, DhcpQuery, Language, LinksPanel, ObservablesPanel, Opened, Principal, ShellQuery, WebLimits, WebState,
+};
 use crate::pages::{
-    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_full, case_page_with, cases_page, cert_page, certs_page,
+    alert_page, alerts_page, asset_page, assets_page, case_page, case_page_all, case_page_full, case_page_with, cases_page, cert_page, certs_page,
     comment_unloaded_page, compliance_asset_page, compliance_page, dhcp_page, error_page, hunts_page, login_page, oncall_alert_page, oncall_page,
     posture_changed_page, posture_form_page, posture_page, posture_too_large_page, risk_entity_page, risk_page, shell_detail_page, shell_page,
     vuln_asset_page, vulns_page, STYLESHEET,
@@ -583,9 +585,10 @@ pub async fn show_case_page(
         .await
         .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
     let panel = load_links(state, &client, source, &principal, language, (id, cursor)).await?;
+    let observables = load_observables(state, &client, source, &principal, language, id).await?;
     Ok(html_response(
         StatusCode::OK,
-        &case_page_full(language, &principal.csrf, &case, None, &panel),
+        &case_page_all(language, &principal.csrf, &case, None, (&panel, &observables, false)),
         &[],
     ))
 }
@@ -1225,6 +1228,79 @@ pub async fn case_link_submit(
 }
 
 
+/// The observables panel: a `401` ends the session, any other failure is our unavailable text and the case page still renders.
+pub async fn load_observables(
+    state: &WebState,
+    client: &ApiClient,
+    source: IpAddr,
+    principal: &Principal,
+    language: Language,
+    id: &str,
+) -> Result<ObservablesPanel, Refused> {
+    match list_case_observables(client, source, &principal.token, id).await {
+        Ok(list) => Ok(ObservablesPanel::Shown(list)),
+        Err(ApiFailure::Unauthorized) => Err(Box::new(api_failure(state, principal, language, &ApiFailure::Unauthorized))),
+        Err(ApiFailure::TooLarge) => {
+            tracing::warn!(class = "observables_too_large", "The observables answer is over the body cap");
+            Ok(ObservablesPanel::TooLarge)
+        }
+        Err(failure) => {
+            let class = failure_class(&failure);
+            tracing::warn!(class, "the observables could not be read");
+            Ok(ObservablesPanel::Unavailable)
+        }
+    }
+}
+
+
+pub const OBSERVABLE_FORM_BYTES: usize = (MAX_OBSERVABLE_CHARS + MAX_SOURCE_CHARS) * FORM_BYTES_PER_CHAR + FORM_OVERHEAD_BYTES;
+
+
+/// A value and a source of the API's caps, four-byte characters percent-encoded, must fit the form.
+pub fn observable_limits(limits: &WebLimits) -> WebLimits {
+    WebLimits {
+        form_bytes: limits.form_bytes.max(OBSERVABLE_FORM_BYTES),
+        ..*limits
+    }
+}
+
+
+/// Session, form and CSRF first; then the four selects and the two texts against the fixed tables and shapes; then the API.
+pub async fn submit_case_observable(state: &WebState, source: IpAddr, headers: &HeaderMap, id: &str, body: Body) -> Result<Response, Refused> {
+    let language = language_of(headers);
+    let (principal, form) = write_request(state, headers, body, &observable_limits(&state.limits)).await?;
+    let fields = checked_observable(
+        (field(&form, "kind"), field(&form, "tlp"), field(&form, "pap"), field(&form, "ioc")),
+        (field(&form, "value"), field(&form, "source")),
+    )
+    .ok_or_else(|| Box::new(refusal(language, Some(&principal.csrf), StatusCode::BAD_REQUEST, "error_bad_request")))?;
+    let client = state.api.load_full();
+    let already = post_case_observable(&client, source, &principal.token, id, &fields)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    let case = get_case(&client, source, &principal.token, id)
+        .await
+        .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
+    let observables = load_observables(state, &client, source, &principal, language, id).await?;
+    Ok(html_response(
+        StatusCode::OK,
+        &case_page_all(language, &principal.csrf, &case, None, (&LinksPanel::Absent, &observables, already)),
+        &[],
+    ))
+}
+
+
+pub async fn case_observable_submit(
+    State(state): State<SharedWeb>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Response {
+    merge(submit_case_observable(&state, peer.ip(), &headers, &id, body).await)
+}
+
+
 pub fn build_router(state: SharedWeb) -> Router {
     Router::new()
         .route("/", get(index))
@@ -1257,6 +1333,7 @@ pub fn build_router(state: SharedWeb) -> Router {
         .route("/cases/{id}/action", post(case_action_submit))
         .route("/cases/{id}/comment", post(case_comment_submit))
         .route("/cases/{id}/alerts", post(case_link_submit))
+        .route("/cases/{id}/observables", post(case_observable_submit))
         .route("/language/{code}", post(switch_language))
         .fallback(not_found)
         .layer(from_fn(harden))
