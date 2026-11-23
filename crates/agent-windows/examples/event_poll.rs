@@ -1,6 +1,8 @@
 use agent_channel::model::DEFAULT_MAX_MESSAGE_BYTES;
 use agent_windows::cycle::{poll_cycle, sleep_seconds};
-use agent_windows::model::{ChannelState, PollEnv, LOCK_ATTEMPTS, MAX_OUTPUT_BYTES, QUERY_DEADLINE_SECONDS, SECURITY, SYSMON, WEVTUTIL_PATH};
+use agent_windows::model::{
+    ChannelState, PollEnv, LOCK_ATTEMPTS, MAX_EVENTS_PER_POLL, MAX_OUTPUT_BYTES, QUERY_DEADLINE_SECONDS, SECURITY, SYSMON, WEVTUTIL_PATH,
+};
 use agent_windows::run::run_process;
 use core_export::ecs::to_json;
 use ecs_normalise::types::SeenIds;
@@ -43,6 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         max_output_bytes: MAX_OUTPUT_BYTES,
         deadline_seconds: QUERY_DEADLINE_SECONDS,
         max_spool_bytes,
+        max_batch: MAX_EVENTS_PER_POLL,
         seen: &mut seen,
     };
     let mut stdout = std::io::stdout();

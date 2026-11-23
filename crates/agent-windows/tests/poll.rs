@@ -456,6 +456,7 @@ fn run_poll_in(
         max_output_bytes: OUTPUT_CAP,
         deadline_seconds: DEADLINE,
         max_spool_bytes: max_spool,
+        max_batch: MAX_EVENTS_PER_POLL,
         seen: &mut seen,
     };
     let result = poll_channel(&mut env, channel, state);
@@ -1467,6 +1468,7 @@ fn a_spool_that_becomes_unreadable_during_the_query_is_an_error() -> TestResult 
         max_output_bytes: OUTPUT_CAP,
         deadline_seconds: DEADLINE,
         max_spool_bytes: MAX_SPOOL,
+        max_batch: MAX_EVENTS_PER_POLL,
         seen: &mut seen,
     };
     assert!(matches!(poll_channel(&mut env, &SECURITY, &mut state), Err(PollError::SpoolSize(_))));

@@ -171,6 +171,7 @@ pub enum Source {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Channel {
+    pub key: &'static str,
     pub name: &'static str,
     pub cursor_file: &'static str,
     pub source: Source,
@@ -178,6 +179,7 @@ pub struct Channel {
 
 
 pub const SYSMON: Channel = Channel {
+    key: "sysmon",
     name: "Microsoft-Windows-Sysmon/Operational",
     cursor_file: "sysmon.cursor",
     source: Source::Sysmon,
@@ -185,10 +187,14 @@ pub const SYSMON: Channel = Channel {
 
 
 pub const SECURITY: Channel = Channel {
+    key: "security",
     name: "Security",
     cursor_file: "security.cursor",
     source: Source::Security,
 };
+
+
+pub const KNOWN_CHANNELS: [Channel; 2] = [SYSMON, SECURITY];
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,5 +455,6 @@ pub struct PollEnv<'a> {
     pub max_output_bytes: usize,
     pub deadline_seconds: u64,
     pub max_spool_bytes: u64,
+    pub max_batch: u32,
     pub seen: &'a mut SeenIds,
 }

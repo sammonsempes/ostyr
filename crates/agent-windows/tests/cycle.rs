@@ -5,7 +5,7 @@ mod types;
 use agent_windows::cycle::{poll_cycle, sleep_seconds};
 use agent_windows::error::{PollError, RunError};
 use agent_windows::model::{
-    ChannelState, PollEnv, PollTotals, RunEnd, RunRequest, MAX_REPOLLS_PER_CYCLE, POLL_INTERVAL_SECONDS, SECURITY, WEVTUTIL_PATH,
+    ChannelState, PollEnv, PollTotals, RunEnd, RunRequest, MAX_EVENTS_PER_POLL, MAX_REPOLLS_PER_CYCLE, POLL_INTERVAL_SECONDS, SECURITY, WEVTUTIL_PATH,
 };
 use core_export::ecs::to_json;
 use ecs_normalise::types::SeenIds;
@@ -150,6 +150,7 @@ fn cycle(harness: &Harness, state: &mut ChannelState, newest: u64, fail_at: usiz
         max_output_bytes: OUTPUT_CAP,
         deadline_seconds: DEADLINE,
         max_spool_bytes: MAX_SPOOL,
+        max_batch: MAX_EVENTS_PER_POLL,
         seen: &mut seen,
     };
     let mut waits: Vec<u64> = Vec::new();
