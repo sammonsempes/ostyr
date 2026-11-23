@@ -41,7 +41,8 @@ pub fn reduce_statement(error: tokio_postgres::Error, deadline: Duration) -> PgE
 
 /// The client gives up `CLIENT_DEADLINE_MARGIN` after the server limit, so a statement that committed inside the margin is reported done.
 pub async fn execute_script(client: &Client, sql: &str, deadline: Duration) -> Result<(), PgError> {
-    timeout(deadline + CLIENT_DEADLINE_MARGIN, client.batch_execute(&timed_script(sql, deadline)))
+    let cut = deadline.checked_add(CLIENT_DEADLINE_MARGIN).ok_or(PgError::DeadlineOverflow)?;
+    timeout(cut, client.batch_execute(&timed_script(sql, deadline)))
         .await
         .map_err(|_elapsed| PgError::ClientDeadline { seconds: deadline.as_secs() })?
         .map_err(|error| reduce_statement(error, deadline))
@@ -57,7 +58,11 @@ pub async fn run_query(client: &Client, sql: &str, params: &[SqlParameter<'_>], 
             .map_err(|error| reduce_statement(error, deadline))?;
         client.query(sql, params).await.map_err(|error| reduce_statement(error, deadline))
     };
-    timeout(deadline * QUERY_WINDOWS + CLIENT_DEADLINE_MARGIN, work)
+    let cut = deadline
+        .checked_mul(QUERY_WINDOWS)
+        .and_then(|windows| windows.checked_add(CLIENT_DEADLINE_MARGIN))
+        .ok_or(PgError::DeadlineOverflow)?;
+    timeout(cut, work)
         .await
         .map_err(|_elapsed| PgError::ClientDeadline { seconds: deadline.as_secs() })?
 }
