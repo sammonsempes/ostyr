@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::spool_refused::{captured_log, no_old_file, ATTEMPTS, NEW_BYTES};
 use crate::types::TestResult;
 use agent_channel::spool::{
@@ -9,7 +10,6 @@ use agent_channel::spool::{
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use tempfile::tempdir;
 
 
 const SEQUENCE_STATE: SequenceState = SequenceState { used: 5, count: 2 };
@@ -56,7 +56,7 @@ fn candidate(name: &str, is_file: bool) -> Candidate {
 
 #[test]
 fn a_symlink_at_the_sequence_temporary_never_reaches_its_target() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let target = dir.path().join("target");
     fs::write(&target, MARKER)?;
     let sequence = dir.path().join("sequence");
@@ -70,7 +70,7 @@ fn a_symlink_at_the_sequence_temporary_never_reaches_its_target() -> TestResult 
 
 #[test]
 fn a_symlink_at_the_sending_temporary_never_reaches_its_target() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let target = dir.path().join("target");
     fs::write(&target, MARKER)?;
     let sending = dir.path().join("spool.sending");
@@ -85,7 +85,7 @@ fn a_symlink_at_the_sending_temporary_never_reaches_its_target() -> TestResult {
 
 #[test]
 fn a_dangling_symlink_and_a_pipe_at_a_temporary_are_replaced_by_identity() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let temporary = dir.path().join("sequence.tmp");
     std::os::unix::fs::symlink(dir.path().join("missing"), &temporary)?;
     write_sequence(&dir.path().join("sequence"), SEQUENCE_STATE)?;
@@ -106,7 +106,7 @@ fn a_dangling_symlink_and_a_pipe_at_a_temporary_are_replaced_by_identity() -> Te
 
 #[test]
 fn a_directory_at_a_temporary_is_a_fixed_error_naming_its_kind() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     fs::create_dir(dir.path().join("sequence.tmp"))?;
     let error = write_sequence(&dir.path().join("sequence"), SEQUENCE_STATE).err().ok_or("accepted")?;
     assert!(
@@ -123,7 +123,7 @@ fn a_directory_at_a_temporary_is_a_fixed_error_naming_its_kind() -> TestResult {
 
 #[test]
 fn a_leftover_that_cannot_be_cleared_names_its_kind_and_a_temporary_that_reappears_fails() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let leftover = dir.path().join("leftover");
     fs::write(&leftover, "")?;
     assert!(clear_leftover(&leftover).is_ok());
@@ -140,7 +140,7 @@ fn a_leftover_that_cannot_be_cleared_names_its_kind_and_a_temporary_that_reappea
 
 #[test]
 fn the_kind_of_an_entry_is_named_from_its_type_and_its_open_error() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let link = dir.path().join("link");
     std::os::unix::fs::symlink(dir.path(), &link)?;
     assert_eq!(file_kind(fs::symlink_metadata(&link)?.file_type()), "symlink");
@@ -158,7 +158,7 @@ fn the_kind_of_an_entry_is_named_from_its_type_and_its_open_error() -> TestResul
 
 #[test]
 fn a_spool_that_is_a_link_or_a_pipe_is_refused_by_kind_and_never_followed() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let target = dir.path().join("target");
     fs::write(&target, MARKER)?;
     let spool = dir.path().join("spool");
@@ -187,7 +187,7 @@ fn a_spool_that_is_a_link_or_a_pipe_is_refused_by_kind_and_never_followed() -> T
 #[test]
 fn a_hard_linked_lock_disables_the_quarantine_and_a_missing_directory_does_too() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let lock = dir.path().join("spool.rejected.lock");
     fs::write(&lock, "")?;
@@ -223,7 +223,7 @@ fn make_directory_then_say_none(path: &Path) -> io::Result<Option<File>> {
 #[test]
 fn a_directory_created_at_the_quarantine_after_the_check_disables_the_quarantine() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let added = vec!["x".to_owned()];
     let outcome = rewrite_quarantine_with(
@@ -272,7 +272,7 @@ const STALE_FILES: usize = 10;
 #[test]
 fn the_stale_scan_reads_at_most_its_bound_and_names_it() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     (0..STALE_FILES).try_for_each(|index| fs::write(dir.path().join(format!(".p-{index}")), ""))?;
     let (removed, skipped) = remove_stale_temporaries(dir.path(), ".p-", remove_regular_file, SMALL_BOUND)?;
     assert_eq!((removed, skipped), (SMALL_BOUND as u64, 0));
@@ -293,7 +293,7 @@ const LOCK_ENTRY: usize = 1;
 
 #[test]
 fn a_rewrite_reads_at_most_the_production_stale_bound() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let quarantine = dir.path().join("spool.rejected");
     (0..MAX_STALE_ENTRIES + EXTRA_STALE).try_for_each(|index| fs::write(dir.path().join(format!(".spool.rejected.quarantine-{index}")), ""))?;
     let lines = vec!["x".to_owned()];
@@ -337,7 +337,7 @@ fn restrict_descriptors(free: usize) -> io::Result<Vec<File>> {
 #[test]
 fn descriptor_child_when_asked() -> TestResult {
     if let Ok(text) = std::env::var(FREE_DESCRIPTORS_VARIABLE) {
-        let dir = tempdir()?;
+        let dir = long_tempdir()?;
         let rejected = dir.path().join("spool.rejected");
         fs::write(&rejected, OLD_QUARANTINE)?;
         let held = restrict_descriptors(text.parse()?)?;

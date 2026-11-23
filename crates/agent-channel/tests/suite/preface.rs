@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{
     attempt, awaited, bounded, client_paths, empty_revocation, make_platform, scoped_logging, server_paths, start_server_state, start_single_state,
     stop_server,
@@ -16,7 +17,6 @@ use rustls_pki_types::ServerName;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::client::TlsStream;
@@ -51,7 +51,7 @@ fn agent_connections(state: &SharedState) -> usize {
 async fn a_client_sending_nothing_after_tls_is_dropped_at_the_deadline() -> TestResult {
     let _logging = scoped_logging();
     let (state, _stored) = recording_state(settings(|_base| ()));
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let server = start_single_state(&paths, empty_revocation(&paths)?, state.clone()).await?;
@@ -77,7 +77,7 @@ fn the_patient_settings_are_accepted_by_validation() -> TestResult {
 async fn a_swap_during_the_handshake_does_not_change_the_connection_bounds() -> TestResult {
     let _logging = scoped_logging();
     let (state, _stored) = recording_state(settings(|base| base.first_request_timeout_seconds = SNAPSHOT_SECONDS));
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let server = start_single_state(&paths, empty_revocation(&paths)?, state.clone()).await?;
@@ -100,7 +100,7 @@ async fn a_swap_during_the_handshake_does_not_change_the_connection_bounds() -> 
 async fn permits_are_released_and_the_agent_reconnects_after_a_silent_connection() -> TestResult {
     let _logging = scoped_logging();
     let (state, _stored) = recording_state(settings(|base| base.max_connections_per_agent = 1));
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let server = start_server_state(&paths, empty_revocation(&paths)?, state.clone()).await?;

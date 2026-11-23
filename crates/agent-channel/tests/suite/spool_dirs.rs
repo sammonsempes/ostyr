@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::agent_app::AgentFile;
@@ -10,7 +11,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
-use tempfile::tempdir;
 
 
 const PRIVATE: u32 = 0o700;
@@ -130,7 +130,7 @@ fn a_bare_name_has_the_current_directory_and_a_root_path_has_none() -> TestResul
 
 #[test]
 fn one_private_directory_is_opened_once_for_all_five_files() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let dirs = open_spool_dirs(&agent_file(dir.path()))?;
     assert_eq!(held_directories(&dirs), 1);
     Ok(())
@@ -139,7 +139,7 @@ fn one_private_directory_is_opened_once_for_all_five_files() -> TestResult {
 
 #[test]
 fn distinct_private_directories_are_each_held() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let other = dir.path().join("other");
     private_dir(&other)?;
     let file = AgentFile {
@@ -153,7 +153,7 @@ fn distinct_private_directories_are_each_held() -> TestResult {
 
 #[test]
 fn a_root_owned_closed_directory_is_accepted() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(READABLE))?;
     assert_eq!(held_directories(&open_spool_dirs(&agent_file(dir.path()))?), 1);
     Ok(())
@@ -162,7 +162,7 @@ fn a_root_owned_closed_directory_is_accepted() -> TestResult {
 
 #[test]
 fn a_directory_writable_by_group_or_others_ends_the_start() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     [STICKY_WORLD, GROUP_WRITABLE, OTHERS_WRITABLE].iter().try_for_each(|mode| -> TestResult {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(*mode))?;
@@ -174,7 +174,7 @@ fn a_directory_writable_by_group_or_others_ends_the_start() -> TestResult {
 
 #[test]
 fn a_directory_owned_by_another_user_ends_the_start() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     rustix::fs::chownat(
         rustix::fs::CWD,
@@ -193,7 +193,7 @@ fn a_directory_owned_by_another_user_ends_the_start() -> TestResult {
 
 #[test]
 fn a_symlinked_a_missing_and_a_file_directory_are_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let real = dir.path().join("real");
     private_dir(&real)?;
     let link = dir.path().join("link");
@@ -216,7 +216,7 @@ fn a_symlinked_a_missing_and_a_file_directory_are_refused() -> TestResult {
 
 #[test]
 fn a_path_without_a_parent_is_refused() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = AgentFile {
         spool_file: PathBuf::from("/"),
         ..agent_file(dir.path())
@@ -228,7 +228,7 @@ fn a_path_without_a_parent_is_refused() -> TestResult {
 
 #[test]
 fn every_file_of_the_agent_has_its_directory_judged() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let open = dir.path().join("open");
     fs::create_dir(&open)?;
     fs::set_permissions(&open, fs::Permissions::from_mode(STICKY_WORLD))?;
@@ -267,7 +267,7 @@ fn refuse_every_acl(_directory: &fs::File, shown: &Path) -> Result<(), sys_windo
 
 #[test]
 fn an_acl_refusal_ends_the_start() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let result = open_spool_dirs_with(&agent_file(dir.path()), refuse_every_acl);
     assert!(matches!(
         result,
@@ -279,7 +279,7 @@ fn an_acl_refusal_ends_the_start() -> TestResult {
 
 #[test]
 fn the_parent_judge_is_the_injected_one() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let result = open_parent_with(&dir.path().join("audit"), refuse_every_acl);
     assert!(matches!(
         result,
@@ -291,7 +291,7 @@ fn the_parent_judge_is_the_injected_one() -> TestResult {
 
 #[test]
 fn the_parent_of_one_path_is_judged_like_the_spool_directories() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     open_parent(&dir.path().join("audit"))?;
     let open = dir.path().join("open");
     fs::create_dir(&open)?;

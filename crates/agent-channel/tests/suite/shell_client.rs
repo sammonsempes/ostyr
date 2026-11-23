@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{
     bounded, client_paths, empty_revocation, make_platform, server_paths, start_server_routed, stop_server, Platform, RunningServer,
 };
@@ -26,7 +27,7 @@ use std::error::Error;
 use std::future::ready;
 use std::io;
 use std::sync::Arc;
-use tempfile::{tempdir, TempDir};
+use tempfile::TempDir;
 use tokio::io::{duplex, AsyncReadExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -115,7 +116,7 @@ pub struct Wire {
 
 
 async fn wire_to(router: Router, rig: &Rig) -> Result<Wire, Box<dyn Error>> {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform: Platform = make_platform()?;
     let paths = server_paths(dir.path(), &platform)?;
     let server = start_server_routed(

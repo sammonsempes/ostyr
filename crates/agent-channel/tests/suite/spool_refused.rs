@@ -1,4 +1,5 @@
 use crate::bounds::Capture;
+use crate::harness::long_tempdir;
 use crate::spool_append::agent_file;
 use crate::types::TestResult;
 use agent_channel::proto::EventBatch;
@@ -11,7 +12,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tempfile::tempdir;
 
 
 pub const BAD_LINE: &[u8] = b"<\x30\x82MARKER\xff\xfe>\n";
@@ -51,7 +51,7 @@ pub fn texts(batches: &[EventBatch]) -> Vec<String> {
 #[test]
 fn a_bad_line_is_refused_alone_and_the_good_ones_around_it_are_claimed() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let mut spool = b"good1\n".to_vec();
     spool.extend_from_slice(BAD_LINE);
@@ -74,7 +74,7 @@ fn a_bad_line_is_refused_alone_and_the_good_ones_around_it_are_claimed() -> Test
 
 #[test]
 fn a_spool_of_bad_lines_only_claims_nothing_and_quarantines_each() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, [BAD_LINE, b"\xc3\n"].concat())?;
     let claimed = claim_spool(&file)?;
@@ -91,7 +91,7 @@ fn a_spool_of_bad_lines_only_claims_nothing_and_quarantines_each() -> TestResult
 
 #[test]
 fn many_bad_lines_never_hide_the_good_one_behind_them() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let mut spool = BAD_LINE.repeat(MANY_BAD_LINES);
     spool.extend_from_slice(b"good\n");
@@ -107,7 +107,7 @@ fn many_bad_lines_never_hide_the_good_one_behind_them() -> TestResult {
 #[test]
 fn bad_lines_over_the_quarantine_budget_are_counted_and_the_good_line_still_goes() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let mut spool = [vec![u8::MAX; BIG_BAD_BYTES], b"\n".to_vec()].concat().repeat(BIG_BAD_LINES);
     spool.extend_from_slice(b"good\n");
@@ -124,7 +124,7 @@ fn bad_lines_over_the_quarantine_budget_are_counted_and_the_good_line_still_goes
 #[test]
 fn a_hostile_bad_line_logs_one_line_per_pass_without_its_bytes() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, b"good\n{\"a\":\"\r\x1b[31m\xff\"}\n")?;
     claim_spool(&file)?;
@@ -158,7 +158,7 @@ fn count_of(log: &str, needle: &str) -> usize {
 #[test]
 fn thousands_of_one_byte_bad_lines_keep_a_capped_quarantine_and_a_bounded_log() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let mut spool = b"\xff\n".repeat(ONE_BYTE_BAD_LINES);
     spool.extend_from_slice(b"good\n");
@@ -183,7 +183,7 @@ fn thousands_of_one_byte_bad_lines_keep_a_capped_quarantine_and_a_bounded_log() 
 
 #[test]
 fn an_all_bad_spool_of_one_byte_lines_is_emptied_with_a_capped_quarantine() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, b"\xff\n".repeat(ONE_BYTE_BAD_LINES))?;
     let claimed = claim_spool(&file)?;
@@ -200,7 +200,7 @@ fn an_all_bad_spool_of_one_byte_lines_is_emptied_with_a_capped_quarantine() -> T
 #[test]
 fn oversized_lines_are_logged_up_to_the_cap_then_summarised() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let big = [vec![b'a'; line_limit(&file) + SLACK_BYTES], b"\n".to_vec()].concat();
     let mut spool = big.repeat(OVERSIZED_LINES);
@@ -221,7 +221,7 @@ fn oversized_lines_are_logged_up_to_the_cap_then_summarised() -> TestResult {
 
 #[test]
 fn the_oldest_quarantine_lines_make_room_for_new_ones_in_one_stream() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, "aaaa\nbbbb\ncccc\n")?;
@@ -240,7 +240,7 @@ fn the_oldest_quarantine_lines_make_room_for_new_ones_in_one_stream() -> TestRes
 
 #[test]
 fn a_quarantine_in_an_unusable_directory_and_a_directory_in_its_place_disable_the_quarantine() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let refused = RefusedLines {
         lines: vec!["x".to_owned()],
         bytes: SMALL_BYTES,
@@ -264,7 +264,7 @@ fn numbered_lines(count: u64) -> String {
 #[test]
 fn the_quarantine_never_holds_more_than_its_line_cap_across_claims() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, numbered_lines(MAX_REJECTED_LINES))?;
@@ -288,7 +288,7 @@ fn the_quarantine_never_holds_more_than_its_line_cap_across_claims() -> TestResu
 #[test]
 fn a_tail_cut_over_a_full_quarantine_keeps_the_line_cap_and_logs_a_refused_old_line() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let mut old = numbered_lines(MAX_REJECTED_LINES - 1).into_bytes();
     old.extend_from_slice(BAD_LINE);
@@ -313,7 +313,7 @@ fn a_tail_cut_over_a_full_quarantine_keeps_the_line_cap_and_logs_a_refused_old_l
 
 #[test]
 fn a_tail_cut_over_a_quarantine_at_both_caps_drops_the_oldest_and_counts_them() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, numbered_lines(MAX_REJECTED_LINES))?;
     let batch = EventBatch {
@@ -340,7 +340,7 @@ fn refuse_the_file(_: &Path) -> io::Result<Option<File>> {
 
 #[test]
 fn a_copying_pass_that_cannot_read_or_open_the_old_quarantine_disables_the_rewrite_and_keeps_it() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, "keep\n")?;
     let added = vec!["new".to_owned()];
@@ -385,7 +385,7 @@ pub fn no_old_file(_: &Path) -> io::Result<Option<File>> {
 
 #[test]
 fn a_rewrite_never_uses_a_fixed_temporary_name() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     fs::create_dir(dir.path().join("spool.rejected.tmp"))?;
     let refused = RefusedLines {
@@ -403,7 +403,7 @@ fn a_rewrite_never_uses_a_fixed_temporary_name() -> TestResult {
 #[test]
 fn a_directory_at_the_quarantine_disables_it_for_the_run_and_nothing_is_written() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::create_dir(&rejected)?;
     let added = vec!["new".to_owned(), "newer".to_owned()];
@@ -426,7 +426,7 @@ fn a_directory_at_the_quarantine_disables_it_for_the_run_and_nothing_is_written(
 
 #[test]
 fn a_directory_at_the_quarantine_never_stops_the_claim_or_the_tail_cut() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::create_dir(dir.path().join("spool.rejected"))?;
     let mut spool = b"good1\n".to_vec();
@@ -453,7 +453,7 @@ fn directory_appears(path: &Path) -> io::Result<Option<File>> {
 
 #[test]
 fn a_directory_that_appears_after_the_check_disables_the_rewrite_and_leaves_no_temporary_file() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let added = vec!["new".to_owned()];
     let result = rewrite_quarantine_with(
@@ -502,7 +502,7 @@ fn leftovers(dir: &Path) -> io::Result<Vec<String>> {
 #[test]
 fn a_rewrite_removes_the_files_killed_rewrites_left_and_skips_other_entries() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     fs::write(dir.path().join(".spool.rejected.quarantine-aaaaaa"), "x")?;
     fs::write(dir.path().join(".spool.rejected.quarantine-bbbbbb"), "y")?;
@@ -526,7 +526,7 @@ fn a_rewrite_removes_the_files_killed_rewrites_left_and_skips_other_entries() ->
 #[test]
 fn a_symlink_with_the_temporary_prefix_is_never_followed_and_a_symlink_quarantine_is_replaced() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let target = dir.path().join("target");
     fs::write(&target, "secret\n")?;
     std::os::unix::fs::symlink(&target, dir.path().join(".spool.rejected.quarantine-link"))?;
@@ -550,7 +550,7 @@ fn a_symlink_with_the_temporary_prefix_is_never_followed_and_a_symlink_quarantin
 #[cfg(unix)]
 #[test]
 fn a_pipe_at_the_quarantine_never_blocks_the_rewrite() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let status = std::process::Command::new("mkfifo").arg(&rejected).status()?;
     assert!(status.success());
@@ -567,7 +567,7 @@ fn a_pipe_at_the_quarantine_never_blocks_the_rewrite() -> TestResult {
 
 #[test]
 fn a_rewrite_that_cannot_get_the_quarantine_lock_fails_and_changes_nothing() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     fs::write(&rejected, "keep\n")?;
     let holder = File::create(dir.path().join("spool.rejected.lock"))?;
@@ -598,7 +598,7 @@ fn a_bare_file_name_has_the_current_directory_and_a_bad_directory_is_an_error() 
 #[test]
 fn an_old_refused_line_is_reported_once_with_quarantine_wording() -> TestResult {
     let (captured, _guard) = captured_log();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let mut old = b"good\n".to_vec();
     old.extend_from_slice(BAD_LINE);
@@ -623,7 +623,7 @@ fn an_old_refused_line_is_reported_once_with_quarantine_wording() -> TestResult 
 
 #[test]
 fn a_missing_old_quarantine_is_none() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     assert!(open_old(&dir.path().join("absent"))?.is_none());
     Ok(())
 }
@@ -632,7 +632,7 @@ fn a_missing_old_quarantine_is_none() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn an_old_quarantine_that_cannot_be_opened_for_another_reason_is_an_error() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let blocker = dir.path().join("blocker");
     fs::write(&blocker, "file")?;
     assert!(open_old(&blocker.join("spool.rejected")).is_err());
@@ -647,7 +647,7 @@ fn refuse_removal(_: &Path) -> io::Result<()> {
 
 #[test]
 fn a_leftover_that_cannot_be_removed_is_skipped_and_counted_and_only_this_quarantines_are_touched() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     fs::write(dir.path().join(".spool.rejected.quarantine-aaaaaa"), "x")?;
     fs::write(dir.path().join(".other.rejected.quarantine-bbbbbb"), "y")?;
     assert_eq!(
@@ -672,7 +672,7 @@ fn a_leftover_that_cannot_be_removed_is_skipped_and_counted_and_only_this_quaran
 
 #[test]
 fn a_busy_quarantine_lock_has_its_own_error_text() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let rejected = dir.path().join("spool.rejected");
     let holder = File::create(dir.path().join("spool.rejected.lock"))?;
     holder.lock()?;

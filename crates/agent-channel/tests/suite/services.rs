@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::harness::{bounded, client_paths, make_platform, scoped_logging, server_paths, start_server_state, stop_server, Platform};
 use crate::pki::{agent_spec, AGENT_URI, SERVER_NAME};
 use crate::state::{envelope_source, failing_sink, make_state, new_stored, recording_sink};
@@ -25,7 +26,6 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use tempfile::tempdir;
 use tokio::sync::Notify;
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
@@ -141,7 +141,7 @@ pub struct Session {
 
 pub async fn session(state: SharedState) -> Result<Session, Box<dyn Error>> {
     let logging = scoped_logging();
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let platform: Platform = make_platform()?;
     let server = start_server_state(
         &server_paths(dir.path(), &platform)?,
@@ -488,7 +488,7 @@ async fn the_agent_accepts_a_valid_command_and_refuses_a_forged_and_a_replayed_o
     let commands: CommandSource = envelope_source(vec![valid.clone(), valid, forged]);
     let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let executed = Arc::new(Mutex::new(Vec::new()));
     let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &{
@@ -523,7 +523,7 @@ async fn a_flood_of_junk_envelopes_keeps_only_the_capped_refusals() -> TestResul
     let commands: CommandSource = envelope_source(vec![b"junk".to_vec(); junk]);
     let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| Ok(()))).await??;
     assert_eq!(run.refused, u64::try_from(junk)?);
@@ -540,7 +540,7 @@ async fn an_accepted_command_reaches_the_executor_while_the_subscription_stays_o
     let commands: CommandSource = Box::new(move |_identity| Box::pin(stream::iter(envelopes.clone()).chain(stream::pending())));
     let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let arrived = Arc::new(Notify::new());
     let executed = Arc::new(Mutex::new(Vec::new()));
@@ -567,7 +567,7 @@ async fn an_accepted_command_reaches_the_executor_while_the_subscription_stays_o
 
 #[tokio::test]
 async fn the_command_stream_of_a_dead_channel_reports_the_status() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
     let outcome = bounded(run_commands(channel, &verifier, &|| NOW, &|_command| Ok(()))).await?;
@@ -600,7 +600,7 @@ fn a_status_keeps_its_code_in_the_channel_error() -> TestResult {
 
 #[test]
 fn the_default_settings_use_the_documented_bounds() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = dir.path().join("settings.yaml");
     fs::write(&file, "max_streams_per_agent: 2\n")?;
     let loaded = core_config::load::load_file::<ChannelSettings>(&file)?;
@@ -651,7 +651,7 @@ async fn an_accepted_command_the_executor_cannot_take_is_reported_refused() -> T
     let commands: CommandSource = envelope_source(vec![signed_envelope(1)?]);
     let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
     let session = session(Arc::clone(&state)).await?;
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let verifier = agent_verifier(dir.path())?;
     let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| {
         Err(agent_channel::model::ExecuteRefusal::Busy)

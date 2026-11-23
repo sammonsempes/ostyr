@@ -1,3 +1,4 @@
+use crate::harness::long_tempdir;
 use crate::types::TestResult;
 use agent_channel::agent_app::AgentFile;
 use agent_channel::spool::SequenceState;
@@ -13,7 +14,6 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{mpsc, Barrier};
 use std::thread::scope;
-use tempfile::tempdir;
 
 
 const WRITERS: usize = 2;
@@ -35,7 +35,7 @@ fn payload(writer: usize, index: usize) -> String {
 
 #[test]
 fn concurrent_appends_to_one_spool_never_interleave() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let barrier = Barrier::new(WRITERS);
     let outcomes = scope(|workers| {
@@ -77,7 +77,7 @@ fn concurrent_appends_to_one_spool_never_interleave() -> TestResult {
 
 #[test]
 fn a_failing_line_appends_nothing_of_the_call() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let lines = vec![Ok("whole".to_owned()), Err(io::Error::other("injected"))];
     assert!(append_back(lines.into_iter(), &spool).is_err());
@@ -193,7 +193,7 @@ fn wait_for_children(children: Vec<std::process::Child>) -> Result<(), Box<dyn s
 
 #[test]
 fn two_processes_appending_to_one_spool_lose_no_line() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let me = std::env::current_exe()?;
     let children = (0..CHILD_PROCESSES)
@@ -226,7 +226,7 @@ fn holder(path: &Path) -> io::Result<File> {
 
 #[test]
 fn a_held_spool_lock_fails_the_append_at_the_deadline_with_the_fixed_error() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let held = holder(&spool)?;
     let mut pauses = 0;
@@ -244,7 +244,7 @@ fn a_held_spool_lock_fails_the_append_at_the_deadline_with_the_fixed_error() -> 
 
 #[test]
 fn a_lock_released_during_the_wait_lets_the_append_through() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let mut held = Some(holder(&spool)?);
     assert!(append_locked(std::iter::once(Ok("late".to_owned())), &spool, WAIT_ATTEMPTS, &mut || {
@@ -303,7 +303,7 @@ fn a_producer_holding_the_spool_defers_the_claim_and_other_errors_surface() -> T
     assert_eq!(lines_to_claim_with(path, 1, violated)?, None);
     assert_eq!(lines_to_claim_with(path, 1, counted)?, Some(CLAIMED_LINES));
     assert!(lines_to_claim_with(path, 1, refused).is_err());
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     fs::write(&spool, "a\nb\n")?;
     assert_eq!(lines_to_claim(&spool, CHILD_LINE_BYTES)?, Some(CLAIMED_LINES));
@@ -314,7 +314,7 @@ fn a_producer_holding_the_spool_defers_the_claim_and_other_errors_surface() -> T
 #[cfg(windows)]
 #[test]
 fn a_spool_locked_by_a_producer_never_fails_the_claim_on_windows() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     fs::write(&spool, "a\n")?;
     let _held = holder(&spool)?;
@@ -355,7 +355,7 @@ fn refused_load(_claimed: &File, _spool: &Path, _count: u64, _limit: usize) -> i
 
 #[test]
 fn a_locked_claimed_file_is_kept_and_never_removed_by_finish() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&sending, "a\n")?;
@@ -370,7 +370,7 @@ fn a_locked_claimed_file_is_kept_and_never_removed_by_finish() -> TestResult {
 
 #[test]
 fn a_spool_renamed_after_the_write_is_still_synced_on_the_written_handle() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let claimed = dir.path().join("spool.sending");
     let mut renamed = false;
@@ -386,7 +386,7 @@ fn a_spool_renamed_after_the_write_is_still_synced_on_the_written_handle() -> Te
 
 #[test]
 fn an_append_that_waited_while_the_agent_delivered_the_claim_never_loses_its_line() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let spool = dir.path().join("spool");
     let claimed = dir.path().join("spool.sending");
@@ -410,7 +410,7 @@ fn an_append_that_waited_while_the_agent_delivered_the_claim_never_loses_its_lin
 
 #[test]
 fn a_spool_replaced_by_another_producer_while_waiting_gets_the_line() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let aside = dir.path().join("aside");
     let mut held = Some(holder(&spool)?);
@@ -435,7 +435,7 @@ fn never_current(_out: &File, _spool: &Path) -> io::Result<bool> {
 
 #[test]
 fn an_append_that_never_finds_the_spool_current_fails_with_the_fixed_error_and_writes_nothing() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let error = write_locked_with("a\n", &spool, ATTEMPTS, &mut || (), &mut || (), never_current)
         .err()
@@ -448,7 +448,7 @@ fn an_append_that_never_finds_the_spool_current_fails_with_the_fixed_error_and_w
 
 #[test]
 fn a_claimed_file_locked_by_a_producer_is_kept_by_finish() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let sending = dir.path().join("spool.sending");
     fs::write(&sending, "")?;
     let claimed = Spool {
@@ -470,7 +470,7 @@ fn a_claimed_file_locked_by_a_producer_is_kept_by_finish() -> TestResult {
 #[cfg(unix)]
 #[test]
 fn finish_that_waited_for_the_lock_never_removes_a_file_replaced_meanwhile() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let sending = dir.path().join("spool.sending");
     fs::write(&sending, "one\n")?;
     let claimed = Spool {
@@ -496,7 +496,7 @@ fn finish_that_waited_for_the_lock_never_removes_a_file_replaced_meanwhile() -> 
 
 #[test]
 fn an_empty_locked_claimed_file_is_never_removed_by_finish() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&sending, "")?;
@@ -594,7 +594,7 @@ fn child(spool: &Path, signals: &Path, role: &str) -> io::Result<std::process::C
 
 #[test]
 fn a_process_waiting_for_the_spool_lock_cannot_finish_before_the_holder_releases_it() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let signals = dir.path().join("signals");
     fs::create_dir(&signals)?;
     let spool = dir.path().join("spool");
@@ -614,7 +614,7 @@ fn a_process_waiting_for_the_spool_lock_cannot_finish_before_the_holder_releases
 
 #[test]
 fn a_thread_waiting_for_the_spool_lock_cannot_finish_before_the_holder_releases_it() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let spool = dir.path().join("spool");
     let (held_sender, held_receiver) = std::sync::mpsc::channel();
     let (release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
@@ -665,7 +665,7 @@ fn logged<Sent, Failure: std::fmt::Display>(outcome: Result<Sent, Failure>) {
 
 #[test]
 fn a_claim_waits_for_an_appender_inside_its_locked_write_then_takes_its_line_whole() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let spool = dir.path().join("spool");
     let sending = dir.path().join("spool.sending");
@@ -706,7 +706,7 @@ fn a_claim_waits_for_an_appender_inside_its_locked_write_then_takes_its_line_who
 
 #[test]
 fn a_claim_that_never_gets_the_lock_defers_and_a_later_one_succeeds() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let spool = dir.path().join("spool");
     let sending = dir.path().join("spool.sending");
@@ -728,7 +728,7 @@ const TERMINATED_LINE_LIMIT: usize = 100;
 
 #[test]
 fn an_unterminated_last_line_is_never_counted_or_loaded_and_a_claim_sets_it_aside() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let spool = dir.path().join("spool");
     let sending = dir.path().join("spool.sending");
@@ -769,7 +769,7 @@ const WEDGE_ROUNDS: usize = 5;
 
 #[test]
 fn a_torn_tail_of_a_claimed_spool_is_set_aside_and_later_events_are_delivered() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, "a\nzzz")?;
     let mut rounds = Vec::new();
@@ -794,7 +794,7 @@ fn a_torn_tail_of_a_claimed_spool_is_set_aside_and_later_events_are_delivered() 
 
 #[test]
 fn an_invalid_utf8_tail_is_quarantined_lossily_and_cut_from_the_claim() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, b"a\nb\n\xff\xfe")?;
     let claimed = claim_spool(&file)?;
@@ -808,7 +808,7 @@ fn an_invalid_utf8_tail_is_quarantined_lossily_and_cut_from_the_claim() -> TestR
 
 #[test]
 fn a_claimed_file_that_ends_in_a_newline_or_is_empty_keeps_its_bytes() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(dir.path().join("spool.sending"), "a\nb\n")?;
     fs::write(&file.sequence_file, "2 2\n")?;
@@ -821,7 +821,7 @@ fn a_claimed_file_that_ends_in_a_newline_or_is_empty_keeps_its_bytes() -> TestRe
 
 #[test]
 fn a_torn_tail_in_a_claimed_file_that_cannot_be_locked_is_left_whole_for_the_next_run() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&sending, "a\nzzz")?;
@@ -837,7 +837,7 @@ fn a_torn_tail_in_a_claimed_file_that_cannot_be_locked_is_left_whole_for_the_nex
 
 
 fn stale_claim(delivered: bool) -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&file.spool_file, "1\n")?;
@@ -875,7 +875,7 @@ fn a_claim_that_waited_while_another_claimed_and_delivered_the_spool_defers_on_t
 
 #[test]
 fn a_locked_current_spool_is_never_renamed_over_an_existing_sending_file() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&file.spool_file, "7\n")?;
@@ -892,7 +892,7 @@ fn a_locked_current_spool_is_never_renamed_over_an_existing_sending_file() -> Te
 
 #[test]
 fn an_event_appended_after_a_dead_tail_is_never_glued_onto_it() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, "zzz")?;
     assert!(claim_spool(&file)?.batches.is_empty());
@@ -906,7 +906,7 @@ fn an_event_appended_after_a_dead_tail_is_never_glued_onto_it() -> TestResult {
 
 #[test]
 fn an_append_before_each_claim_never_glues_an_event_onto_a_dead_tail() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::write(&file.spool_file, "a\nzzz")?;
     let mut sent = Vec::new();
@@ -931,7 +931,7 @@ fn an_append_before_each_claim_never_glues_an_event_onto_a_dead_tail() -> TestRe
 #[cfg(unix)]
 #[test]
 fn a_second_claimer_that_waited_while_the_first_claimed_a_new_file_defers_and_loads_nothing() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&sending, "one\n")?;
@@ -963,7 +963,7 @@ fn a_second_claimer_that_waited_while_the_first_claimed_a_new_file_defers_and_lo
 
 #[test]
 fn finish_never_removes_a_claimed_file_that_a_later_claim_replaced() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     let sending = dir.path().join("spool.sending");
     fs::write(&file.spool_file, "one\n")?;
@@ -985,7 +985,7 @@ fn finish_never_removes_a_claimed_file_that_a_later_claim_replaced() -> TestResu
 
 #[test]
 fn a_claimed_file_that_cannot_be_opened_fails_the_claim() -> TestResult {
-    let dir = tempdir()?;
+    let dir = long_tempdir()?;
     let file = agent_file(dir.path());
     fs::create_dir(dir.path().join("spool.sending"))?;
     assert!(claim_spool(&file).is_err());
