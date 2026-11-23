@@ -13,6 +13,7 @@ use core_config::reload::{current_config, reload, ReloadContext, ReloadOutcome};
 use core_config::types::SharedAuditFn;
 use remote_shell::agent_map::{
     agent_state, open_agent_engine, parse_agent_map, refused_feature, resolve_agent, AgentMap, ANCHORS_REFUSED, MAX_AGENT_ASSETS,
+    MAX_AGENT_MAP_LINE_BYTES,
 };
 use serde_saphyr::granit_parser::{Event, Span};
 use std::fs;
@@ -33,6 +34,15 @@ const STATE_SIZE: usize = 2;
 
 
 const LONG_AGENT_ID: usize = 65;
+
+
+const HIDING_PADDING: usize = 5000;
+
+
+const HIDDEN_PADDING: usize = 180;
+
+
+const BLOCK_ENTRIES: usize = 200;
 
 
 fn parse(text: &str) -> Result<AgentMap, ConfigError> {
@@ -149,7 +159,7 @@ fn a_duplicate_agent_id_is_refused_also_by_case() -> TestResult {
 
 #[test]
 fn another_tenant_in_the_file_is_refused() -> TestResult {
-    let text = refusal("tenant: tenant-b\nagents: []\n")?;
+    let text = refusal("tenant: tenant-b\nagents:\n  - agent_id: a\n    asset: b\n")?;
     assert!(text.contains("`tenant` is not the tenant of this engine"), "{text}");
     Ok(())
 }
@@ -157,7 +167,7 @@ fn another_tenant_in_the_file_is_refused() -> TestResult {
 
 #[test]
 fn a_bad_tenant_grammar_is_refused() -> TestResult {
-    let text = refusal("tenant: \"-x\"\nagents: []\n")?;
+    let text = refusal("tenant: \"-x\"\nagents:\n  - agent_id: a\n    asset: b\n")?;
     assert!(text.contains("`tenant` is outside its grammar"), "{text}");
     Ok(())
 }
@@ -195,7 +205,7 @@ fn unknown_fields_are_refused() -> TestResult {
 
 
 fn many_entries(count: usize) -> String {
-    let lines: String = (0..count).map(|i| format!("  - {{agent_id: a{i}, asset: s{i}}}\n")).collect();
+    let lines: String = (0..count).map(|i| format!("  - agent_id: a{i}\n    asset: s{i}\n")).collect();
     format!("tenant: {TENANT}\nagents:\n{lines}")
 }
 
@@ -213,7 +223,7 @@ fn the_entry_cap_is_exact() -> TestResult {
 #[test]
 fn the_entry_after_the_cap_is_never_built() -> TestResult {
     let mut text = many_entries(MAX_AGENT_ASSETS);
-    text.push_str("  - {agent_id: late, asset: late, surprise: 1}\n");
+    text.push_str("  - agent_id: late\n    asset: late\n    surprise: 1\n");
     let message = refusal(&text)?;
     assert!(message.contains("too many agent entries"), "{message}");
     Ok(())
@@ -226,6 +236,100 @@ fn a_file_over_the_byte_cap_is_refused() -> TestResult {
     text.push_str(&"#".repeat(MAX_FILE_BYTES as usize));
     let message = refusal(&text)?;
     assert!(message.contains("larger than"), "{message}");
+    Ok(())
+}
+
+
+fn comment_line_of(length: usize) -> String {
+    format!("{}\n", "#".repeat(length))
+}
+
+
+#[test]
+fn a_line_over_the_cap_is_refused_and_the_cap_is_exact() -> TestResult {
+    let ok = format!("{}{}", file_text(&[("agent-1", "srv1")]), comment_line_of(MAX_AGENT_MAP_LINE_BYTES));
+    assert_eq!(parse(&ok)?.agents.len(), 1);
+    let crlf = format!(
+        "tenant: {TENANT}\r\nagents:\r\n  - agent_id: a\r\n    asset: x\r\n{}\r\n",
+        "#".repeat(MAX_AGENT_MAP_LINE_BYTES)
+    );
+    assert_eq!(parse(&crlf)?.agents.len(), 1);
+    let long = format!("{}{}", file_text(&[("agent-1", "srv1")]), comment_line_of(MAX_AGENT_MAP_LINE_BYTES + 1));
+    let message = refusal(&long)?;
+    assert!(message.contains("line 5: longer than 256 bytes"), "{message}");
+    assert!(!message.contains("###"), "{message}");
+    Ok(())
+}
+
+
+#[test]
+fn a_flow_entry_hidden_far_to_the_right_is_refused() -> TestResult {
+    let text = format!(
+        "tenant: {TENANT}\nagents: [{{agent_id: a, asset: x}},{}{{agent_id: b, asset: y}}]\n",
+        " ".repeat(HIDING_PADDING)
+    );
+    let message = refusal(&text)?;
+    assert!(message.contains("line 2: longer than 256 bytes"), "{message}");
+    Ok(())
+}
+
+
+#[test]
+fn the_reviewer_line_under_the_cap_is_refused_for_its_padding() -> TestResult {
+    let line = format!(
+        "agents: [{{agent_id: agent-1, asset: srv1}},{}{{agent_id: evil, asset: dc01}}]",
+        " ".repeat(HIDDEN_PADDING)
+    );
+    assert!(line.len() < MAX_AGENT_MAP_LINE_BYTES, "{}", line.len());
+    let message = refusal(&format!("tenant: {TENANT}\n{line}\n"))?;
+    assert!(message.contains("line 2: runs of spaces"), "{message}");
+    let single = refusal(&format!(
+        "tenant: {TENANT}\nagents: [{{agent_id: agent-1, asset: srv1}}, {{agent_id: evil, asset: dc01}}]\n"
+    ))?;
+    assert!(single.contains("flow collections are not allowed"), "{single}");
+    Ok(())
+}
+
+
+#[test]
+fn flow_mappings_and_sequences_are_refused() -> TestResult {
+    let cases = [
+        format!("tenant: {TENANT}\nagents:\n  - {{agent_id: a, asset: b}}\n"),
+        format!("tenant: {TENANT}\nagents:\n  - agent_id: a\n    asset: [b]\n"),
+        format!("tenant: {TENANT}\nagents: [a]\n"),
+        format!("tenant: {TENANT}\nagents: []\n"),
+        "tenant: {x: y}\nagents:\n  - agent_id: a\n    asset: b\n".to_owned(),
+    ];
+    cases.iter().try_for_each(|text| {
+        let shown = refusal(text)?;
+        shown
+            .contains("flow collections are not allowed")
+            .then_some(())
+            .ok_or_else(|| io::Error::other(format!("flow refusal missing from {shown}")))
+    })?;
+    Ok(())
+}
+
+
+#[test]
+fn a_block_file_of_200_entries_is_accepted() -> TestResult {
+    assert_eq!(parse(&many_entries(BLOCK_ENTRIES))?.agents.len(), BLOCK_ENTRIES);
+    Ok(())
+}
+
+
+#[test]
+fn padding_after_the_indentation_is_refused_but_indentation_is_not() -> TestResult {
+    let base = file_text(&[("agent-1", "srv1")]);
+    assert_eq!(parse(&base)?.agents.len(), 1);
+    let padded_value = base.replace("asset: srv1", &format!("asset:{}srv1", " ".repeat(HIDDEN_PADDING)));
+    assert!(refusal(&padded_value)?.contains("line 4: runs of spaces inside a line are not allowed"));
+    let padded_comment = format!("{base}# two  spaces\r\n");
+    assert!(refusal(&padded_comment)?.contains("line 5: runs of spaces"));
+    let quoted = base.replace("asset: srv1", "asset: \"a  b\"");
+    assert!(refusal(&quoted)?.contains("line 4: runs of spaces"));
+    let one_space = format!("{base}# one space only \n\n   \n");
+    assert_eq!(parse(&one_space)?.agents.len(), 1);
     Ok(())
 }
 
@@ -443,7 +547,7 @@ fn escapes_anchors_aliases_and_merge_keys_are_refused() -> TestResult {
             "x: &m {a: b}\ntenant: *m\nagents: []\n".to_owned(),
             "anchors, aliases and merge keys are not allowed",
         ),
-        ("tenant: {!foo a: b}\nagents: []\n".to_owned(), "tags are not allowed"),
+        ("tenant:\n  !foo a: b\nagents: []\n".to_owned(), "tags are not allowed"),
     ];
     cases.iter().try_for_each(|(text, expected)| {
         let shown = refusal(text)?;
@@ -452,9 +556,9 @@ fn escapes_anchors_aliases_and_merge_keys_are_refused() -> TestResult {
             .then_some(())
             .ok_or_else(|| io::Error::other(format!("{expected} missing from {shown}")))
     })?;
-    let under_tenant = refusal("tenant: {!foo a: b}\nagents: []\n")?;
+    let under_tenant = refusal("tenant:\n  !foo a: b\nagents: []\n")?;
     assert!(!under_tenant.contains("agents["), "{under_tenant}");
-    let other_key = refusal("tenant: [x, !foo y]\nagents: []\n")?;
+    let other_key = refusal("tenant:\n  - x\n  - !foo y\nagents: []\n")?;
     assert!(!other_key.contains("agents["), "{other_key}");
     Ok(())
 }
