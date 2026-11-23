@@ -30,3 +30,4 @@ clients2.googleusercontent.com
 .gvt1.com
 cdn.winget.microsoft.com
 storeedgefd.dsx.mp.microsoft.com
+cdn.powershellgallery.com
