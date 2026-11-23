@@ -97,6 +97,7 @@ pub struct StubState {
     pub posture_paths: Mutex<Vec<String>>,
     pub shell_paths: Mutex<Vec<String>>,
     pub oncall_paths: Mutex<Vec<String>>,
+    pub report_paths: Mutex<Vec<String>>,
     pub writes: Mutex<Vec<String>>,
     pub requests: AtomicUsize,
     pub conflict: Mutex<Option<String>>,
@@ -1837,6 +1838,7 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         posture_paths: Mutex::new(Vec::new()),
         shell_paths: Mutex::new(Vec::new()),
         oncall_paths: Mutex::new(Vec::new()),
+        report_paths: Mutex::new(Vec::new()),
         writes: Mutex::new(Vec::new()),
         requests: AtomicUsize::new(0),
         conflict: Mutex::new(None),
@@ -1876,6 +1878,10 @@ pub async fn start_stub(mode: Mode) -> Result<Stub, std::io::Error> {
         .route("/vulnerabilities/assets/{asset}", get(vuln_asset_handler))
         .route("/oncall/alerts", get(oncall_list_handler))
         .route("/oncall/alerts/{id}", get(oncall_alert_handler))
+        .route("/grc/reports", get(grc_list_handler))
+        .route("/grc/reports/{id}", get(grc_get_handler))
+        .route("/attack-paths/reports", get(attack_list_handler))
+        .route("/attack-paths/reports/{id}", get(attack_get_handler))
         .route("/cases", get(cases_handler))
         .route("/cases/{id}", get(case_detail_handler))
         .route("/cases/{id}/actions", post(case_action_handler))
@@ -2145,4 +2151,155 @@ pub async fn posture_handler(State(state): State<Arc<StubState>>, headers: Heade
             .into_response(),
         }
     }
+}
+
+
+pub const REPORT_MANY: usize = 101;
+
+
+pub const REPORT_FIRST_ID: i64 = 5;
+
+
+pub const REPORT_HOSTILE_TEXT: &str = "<script>alert(1)</script>\"><img src=x onerror=alert(2)>\u{1b}[31m\u{202e}\u{3164}";
+
+
+pub const REPORT_LONG: usize = 400;
+
+
+pub const REPORT_VERSION: u32 = 2;
+
+
+pub const REPORT_GRC_BYTES: u64 = 1234;
+
+
+pub const REPORT_ATTACK_BYTES: u64 = 777;
+
+
+pub const REPORT_STORED_AT: i64 = 1_772_000_000;
+
+
+pub const REPORT_COUNT: u64 = 11;
+
+
+pub const REPORT_COUNT_PARTIAL: u64 = 12;
+
+
+pub const REPORT_COUNT_FAILED: u64 = 13;
+
+
+pub const REPORT_COUNT_UNKNOWN: u64 = 14;
+
+
+pub const REPORT_UNSEARCHED: u64 = 3;
+
+
+pub const REPORT_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+
+pub fn report_hostile_text() -> String {
+    format!("{REPORT_HOSTILE_TEXT}{}", "z".repeat(REPORT_LONG))
+}
+
+
+pub fn grc_item(id: i64, framework: &str, generated: &str) -> Value {
+    json!({"id": id, "framework": framework, "version": REPORT_VERSION, "generated": generated, "digest": REPORT_DIGEST, "bytes": REPORT_GRC_BYTES, "stored_at": REPORT_STORED_AT})
+}
+
+
+pub fn attack_item(id: i64, generated: &str, truncated: bool, unsearched: u64) -> Value {
+    json!({
+        "id": id, "graph_digest": REPORT_DIGEST, "generated": generated, "digest": REPORT_DIGEST, "bytes": REPORT_ATTACK_BYTES, "truncated": truncated,
+        "budget_reached": false, "unsearched_count": unsearched, "stored_at": REPORT_STORED_AT,
+    })
+}
+
+
+pub fn report_list_reply(state: &StubState, uri: &axum::http::Uri, headers: &HeaderMap, normal: Value, hostile: Value) -> Response {
+    note_forwarded(state, headers);
+    state.report_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(headers) {
+        match mode_of(state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::TooMany => Json(json!({"items": vec![normal.get("items").and_then(|items| items.get(0)).cloned(); REPORT_MANY]})).into_response(),
+            Mode::BadCursor => Json(json!({"items": "wrong"})).into_response(),
+            Mode::Chunked => Json(json!({"items": []})).into_response(),
+            Mode::Hostile => Json(hostile).into_response(),
+            _ => Json(normal).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub fn report_get_reply(state: &StubState, uri: &axum::http::Uri, headers: &HeaderMap, id: &str, normal: Value, hostile: Value) -> Response {
+    note_forwarded(state, headers);
+    state.report_paths.lock().unwrap_or_else(PoisonError::into_inner).push(uri.to_string());
+    if authorised(headers) {
+        match mode_of(state) {
+            Mode::Status(status) => error_reply(status),
+            Mode::Oversize => "x".repeat(OVERSIZE_BYTES).into_response(),
+            Mode::BadCursor => Json(json!({"unexpected": true})).into_response(),
+            _ if id == ONCALL_MISSING_ID => error_reply(StatusCode::NOT_FOUND),
+            Mode::Hostile => Json(hostile).into_response(),
+            _ => Json(normal).into_response(),
+        }
+    } else {
+        error_reply(StatusCode::UNAUTHORIZED)
+    }
+}
+
+
+pub async fn grc_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    let normal = json!({"items": [grc_item(REPORT_FIRST_ID, "iso27001", "2026-03-01"), grc_item(REPORT_FIRST_ID - 1, "cis-v8", "2026-02-01")]});
+    let hostile = json!({"items": [
+        grc_item(1, &report_hostile_text(), &report_hostile_text()),
+        grc_item(-1, "negative", "2026-03-01"),
+        grc_item(REPORT_FIRST_ID, "fine-one", "2026-03-01"),
+    ]});
+    report_list_reply(&state, &uri, &headers, normal, hostile)
+}
+
+
+pub async fn grc_get_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, uri: axum::http::Uri) -> Response {
+    let body = |framework: &str| {
+        json!({
+            "tenant": "a", "framework": framework, "version": REPORT_VERSION, "generated": "2026-03-01",
+            "counts": {"compliant": REPORT_COUNT, "partially_compliant": REPORT_COUNT_PARTIAL, "non_compliant": REPORT_COUNT_FAILED, "not_assessable": REPORT_COUNT_UNKNOWN},
+            "controls": [{"id": "a"}, {"id": "b"}, {"id": "c"}], "gaps": [{"id": "g"}], "plan": [],
+        })
+    };
+    report_get_reply(&state, &uri, &headers, &id, body("iso27001"), body(&report_hostile_text()))
+}
+
+
+pub async fn attack_list_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    let normal = json!({"items": [
+        attack_item(REPORT_FIRST_ID, "2026-03-01T10:00:00Z", false, 0),
+        attack_item(REPORT_FIRST_ID - 1, "2026-02-01T10:00:00Z", true, REPORT_UNSEARCHED),
+    ]});
+    let hostile = json!({"items": [
+        attack_item(1, &report_hostile_text(), false, 0),
+        attack_item(-1, "2026-03-01T10:00:00Z", false, 0),
+        attack_item(REPORT_FIRST_ID, "2026-03-01T10:00:00+01:00", false, 0),
+    ]});
+    report_list_reply(&state, &uri, &headers, normal, hostile)
+}
+
+
+pub async fn attack_get_handler(State(state): State<Arc<StubState>>, headers: HeaderMap, Path(id): Path<String>, uri: axum::http::Uri) -> Response {
+    let (truncated, budget, unsearched) = match mode_of(&state) {
+        Mode::BadId => (false, true, json!([])),
+        Mode::StoredValue => (false, false, json!([])),
+        Mode::Hostile => (false, false, json!([{"id": "x", "reason": "path_cap"}])),
+        _ => (true, false, json!([{"id": "x", "reason": "path_cap"}])),
+    };
+    let body = |digest: &str| {
+        json!({
+            "graph_digest": digest, "truncated": truncated, "budget_reached": budget, "unsearched": unsearched,
+            "paths": [{"nodes": ["a", "b"]}, {"nodes": ["a", "c"]}], "choke_points": [{"node": "b", "paths_through": REPORT_VERSION}], "recommendations": [],
+        })
+    };
+    report_get_reply(&state, &uri, &headers, &id, body(REPORT_DIGEST), body(&report_hostile_text()))
 }
