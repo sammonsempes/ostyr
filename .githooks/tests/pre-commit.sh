@@ -105,7 +105,7 @@ try "uncovered branch" refused "4/6 cargo llvm-cov"
 printf '%s' "$CLEAN_ADD$GAP$CLEAN_PICK$GAP$CLEAN_EXTRA" >crates/demo/src/lib.rs
 try "clean commit" accepted
 
-W="$SCRATCH/wt"
+W="$R/wt"
 MAIN_HOOKS="$R/.githooks"
 git worktree add -q "$W" -b side
 printf '%s' "// a comment

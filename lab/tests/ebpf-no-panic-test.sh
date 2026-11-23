@@ -41,7 +41,7 @@ case "${MUTANT:-}" in
   no-lock-check) sed -i '/^  \[ -f "\$lock" \] || fail/d' "$BUILDER" ;;
   reverify-off) sed -i 's/^    verify_registry_package .*$/    true/' "$BUILDER" ;;
   patch-ok) sed -i 's/^  check_patch_tables "\${manifests\[@\]}"$/  true/' "$BUILDER" ;;
-  nightly-cargo) sed -i 's/ cargo build "\${OFFLINE\[@\]}"/ cargo "+$NIGHTLY" build "${OFFLINE[@]}"/' "$BUILDER" ;;
+  nightly-cargo) sed -i 's/ cargo build "\${OFFLINE\[@\]}"/ cargo "+$NIGHTLY" build "${OFFLINE[@]}"/;s/ cargo metadata / cargo "+$NIGHTLY" metadata /' "$BUILDER" ;;
 esac
 case "${MUTANT:-}" in
   no-nm | u-only | no-nm-status | weak-ok)
