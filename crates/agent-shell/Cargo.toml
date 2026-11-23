@@ -22,7 +22,7 @@ tracing = "0.1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 portable-pty = "0.9"
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "fs"] }
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false }

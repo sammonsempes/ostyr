@@ -93,3 +93,42 @@ pub enum AccountError {
     #[error("the home of the shell account {name} is not a directory owned by the account")]
     HomeInvalid { name: String },
 }
+
+
+/// The session cgroup, refused by name; no peer text.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Error)]
+pub enum CgroupError {
+    #[error("the own cgroup file cannot be read")]
+    Io(#[from] io::Error),
+    #[error("a cgroup call failed")]
+    Sys(#[from] rustix::io::Errno),
+    #[error("a cgroup file is larger than its limit")]
+    TooLarge,
+    #[error("the own cgroup file is not exactly one cgroup v2 line")]
+    SelfCgroupShape,
+    #[error("the own cgroup path is outside the allowed grammar")]
+    PathRefused,
+    #[error("the cgroup root is not a cgroup v2 filesystem")]
+    NotCgroup2,
+    #[error("the own cgroup has no cgroup.kill file")]
+    KillMissing(#[source] rustix::io::Errno),
+    #[error("the session id is not valid for a cgroup name")]
+    SessionId,
+    #[error("the session cgroup already exists")]
+    Exists,
+    #[error("more session cgroups than the limit")]
+    TooManySessions,
+    #[error("more processes in a session cgroup than the limit")]
+    TooManyProcesses,
+    #[error("a cgroup file does not hold the expected text")]
+    Malformed,
+}
+
+
+#[cfg(target_os = "linux")]
+impl From<CgroupError> for io::Error {
+    fn from(error: CgroupError) -> Self {
+        io::Error::other(error)
+    }
+}

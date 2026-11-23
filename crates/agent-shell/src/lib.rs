@@ -4,14 +4,16 @@
 #[cfg(unix)]
 pub mod account;
 pub mod banner;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+pub mod cgroup;
+#[cfg(target_os = "linux")]
 pub mod cleanup;
 pub mod compose;
 pub mod error;
 pub mod model;
 pub mod queue;
 pub mod session;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod spawn;
 pub mod store;
 pub mod types;

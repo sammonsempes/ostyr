@@ -1,12 +1,14 @@
 #[cfg(unix)]
 mod account;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+mod cgroup;
+#[cfg(target_os = "linux")]
 mod cleanup;
 mod loopback;
 mod order;
 mod rig;
 mod session;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod spawn;
 #[cfg(unix)]
 mod store;

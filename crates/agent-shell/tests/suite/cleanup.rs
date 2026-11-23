@@ -80,7 +80,7 @@ fn status_text(uid: u32, state: &str) -> String {
 }
 
 
-fn pid_of(raw: i32) -> Result<Pid, Box<dyn std::error::Error>> {
+pub fn pid_of(raw: i32) -> Result<Pid, Box<dyn std::error::Error>> {
     Ok(Pid::from_raw(raw).ok_or("pid")?)
 }
 
@@ -93,7 +93,7 @@ fn write_status(root: &Path, pid: i32, text: &str) -> TestResult {
 }
 
 
-fn plan_for(root: &Path, uid: u32, grace_polls: u64, rounds: usize) -> SweepPlan {
+pub fn plan_for(root: &Path, uid: u32, grace_polls: u64, rounds: usize) -> SweepPlan {
     SweepPlan {
         proc_root: root.to_path_buf(),
         uid,
@@ -103,13 +103,13 @@ fn plan_for(root: &Path, uid: u32, grace_polls: u64, rounds: usize) -> SweepPlan
 }
 
 
-fn own_uid() -> Result<u32, Box<dyn std::error::Error>> {
+pub fn own_uid() -> Result<u32, Box<dyn std::error::Error>> {
     let directory = private_tempdir()?;
     owner_of(directory.path())
 }
 
 
-fn linked_root(pids: &[u32]) -> Result<TempDir, Box<dyn std::error::Error>> {
+pub fn linked_root(pids: &[u32]) -> Result<TempDir, Box<dyn std::error::Error>> {
     let root = private_tempdir()?;
     pids.iter()
         .try_for_each(|pid| std::os::unix::fs::symlink(format!("/proc/{pid}"), root.path().join(pid.to_string())))?;
@@ -133,7 +133,7 @@ fn hup_ignoring_sleeper() -> Result<Child, Box<dyn std::error::Error>> {
 }
 
 
-fn trapping_child() -> Result<(Child, BufReader<ChildStdout>), Box<dyn std::error::Error>> {
+pub fn trapping_child() -> Result<(Child, BufReader<ChildStdout>), Box<dyn std::error::Error>> {
     let mut child = Command::new("python3")
         .args(["-I", "-c", TRAPPING_PROGRAM])
         .stdout(Stdio::piped())
@@ -325,7 +325,8 @@ async fn the_production_cleanup_runs_on_the_blocking_pool() -> TestResult {
         gid: UNUSED_UID,
         home: "/nonexistent".into(),
     };
-    let cleanup = cleanup_fn(&account);
+    let cgroups = crate::cgroup::tree()?;
+    let cleanup = cleanup_fn(&account, crate::cgroup::host_in(cgroups.path()));
     assert_eq!(cleanup().await?, 0);
     Ok(())
 }
