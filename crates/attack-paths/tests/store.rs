@@ -16,11 +16,23 @@ use core_pg::scope::{tenant_of, TenantScope};
 use std::future::ready;
 use std::sync::{Mutex, PoisonError};
 use time::format_description::well_known::Rfc3339;
-use time::{Date, Month, OffsetDateTime};
+use time::{Date, Month, OffsetDateTime, UtcOffset};
 use types::TestResult;
 
 
 const SMALL_CAP: i64 = 3;
+
+
+const WEST_HOURS: i8 = 2;
+
+
+const MAX_YEAR_TEST: i32 = 9999;
+
+
+const LAST_DAY: u8 = 31;
+
+
+const LATE_HOUR: u8 = 23;
 
 
 const STORED_ID: i64 = 7;
@@ -271,6 +283,20 @@ async fn a_tenant_over_the_cap_is_refused_by_name_and_the_cap_is_lowered_to_the_
 }
 
 
+#[tokio::test]
+async fn a_cap_of_zero_or_below_is_refused_by_name() -> TestResult {
+    let calls = Calls::default();
+    let when = moment("2026-11-23T10:00:00Z")?;
+    let exec = answering(&calls, Ok(vec![cells(&["refused", ""])]));
+    let zero = store_report_with_cap(&exec, "acme", &graph(), &found(false, false), when, 0).await;
+    assert!(matches!(zero, Err(StoreError::CapReached { max: 0 })));
+    let again = answering(&calls, Ok(vec![cells(&["refused", ""])]));
+    let negative = store_report_with_cap(&again, "acme", &graph(), &found(false, false), when, -1).await;
+    assert!(matches!(negative, Err(StoreError::CapReached { max: -1 })));
+    Ok(())
+}
+
+
 #[test]
 fn the_generation_time_is_written_in_utc_and_refused_outside_years_1_to_9999() -> TestResult {
     assert_eq!(generated_text(moment("2026-11-23T12:34:56.789+02:00")?)?, "2026-11-23T10:34:56Z");
@@ -284,8 +310,11 @@ fn the_generation_time_is_written_in_utc_and_refused_outside_years_1_to_9999() -
     ));
     let before_year_one = Date::from_calendar_date(-1, Month::January, 1)?.midnight().assume_utc();
     assert!(matches!(generated_text(before_year_one), Err(StoreError::BadGenerated)));
-    let past_the_end = OffsetDateTime::parse("9999-12-31T23:00:00-02:00", &Rfc3339);
-    assert!(past_the_end.is_err() || matches!(generated_text(past_the_end?), Err(StoreError::BadGenerated)));
+    let west = UtcOffset::from_hms(-WEST_HOURS, 0, 0)?;
+    let past_the_end = Date::from_calendar_date(MAX_YEAR_TEST, Month::December, LAST_DAY)?
+        .with_hms(LATE_HOUR, 0, 0)?
+        .assume_offset(west);
+    assert!(matches!(generated_text(past_the_end), Err(StoreError::BadGenerated)));
     Ok(())
 }
 

@@ -66,6 +66,8 @@ pub enum StoreError {
     BadBody,
     #[error("the stored columns disagree with the stored body")]
     MetadataMismatch,
+    #[error("the connection pool is full")]
+    Busy,
 }
 
 
