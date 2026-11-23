@@ -8,7 +8,7 @@ mod wait;
 
 use core_config::error::WatchError;
 use core_config::reload::{reload, ReloadOutcome};
-use core_config::watch::{handle_events, parent_of, watch_files, watch_files_counted};
+use core_config::watch::{check_windows_path, handle_events, parent_of, watch_checked, watch_files, watch_files_counted};
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 use notify::{Event, EventKind};
 use notify_debouncer_full::DebouncedEvent;
@@ -105,6 +105,39 @@ fn watching_a_missing_path_is_an_error() -> TestResult {
     let engine = Arc::new(engine_for(&path, audit, Vec::new())?);
     let result = watch_files(engine, &[dir.path().join("absent").join("module.yaml")], DEBOUNCE);
     assert!(matches!(result, Err(WatchError::Notify(_))));
+    Ok(())
+}
+
+
+#[test]
+fn the_windows_rule_refuses_before_any_watch_starts() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    replace_file(&path, &module_text("30d"))?;
+    let (audit, _recorded) = recording_audit();
+    let engine = Arc::new(engine_for(&path, audit, Vec::new())?);
+    let files = [PathBuf::from("module.yaml"), PathBuf::from("C:module.yaml")];
+    let result = watch_checked(engine, &files, DEBOUNCE, Arc::new(AtomicUsize::new(0)), check_windows_path);
+    assert!(matches!(result, Err(WatchError::DriveRelative(_))));
+    Ok(())
+}
+
+
+#[test]
+fn a_case_variant_event_reloads_only_where_names_ignore_case() -> TestResult {
+    let dir = tempdir()?;
+    let path = dir.path().join("module.yaml");
+    replace_file(&path, &module_text("30d"))?;
+    let (audit, _recorded) = recording_audit();
+    let engine = engine_for(&path, audit, Vec::new())?;
+    replace_file(&path, &module_text("90d"))?;
+    let names = [OsString::from("module.yaml")];
+    let ignored = AtomicUsize::new(0);
+    let variant = event_on(EventKind::Modify(ModifyKind::Name(RenameMode::To)), dir.path().join("Module.YAML"));
+    handle_events(&engine, &names, &ignored, Ok(vec![variant]));
+    let expected = if cfg!(windows) { "90d" } else { "30d" };
+    assert_eq!(retention(&engine).as_deref(), Some(expected));
+    assert_eq!(ignored.load(Ordering::Relaxed), usize::from(!cfg!(windows)));
     Ok(())
 }
 

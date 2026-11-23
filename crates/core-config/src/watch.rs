@@ -1,8 +1,9 @@
 use crate::error::WatchError;
 use crate::reload::{reload, ReloadEngine};
+use crate::types::{NameEqFn, PathCheckFn};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -31,7 +32,90 @@ pub fn is_watched(event: &DebouncedEvent, names: &[OsString]) -> bool {
             .paths
             .iter()
             .filter_map(|path| path.file_name())
-            .any(|name| names.iter().any(|watched| watched == name))
+            .any(|name| names.iter().any(|watched| same_name(watched, name)))
+}
+
+
+const MAX_SHORT_BASE: usize = 6;
+
+
+const MAX_SHORT_EXTENSION: usize = 3;
+
+
+#[cfg(windows)]
+pub const NAME_EQ: NameEqFn = names_equal_ignoring_case;
+
+
+#[cfg(not(windows))]
+pub const NAME_EQ: NameEqFn = names_equal_exact;
+
+
+#[cfg(windows)]
+pub const PATH_CHECK: PathCheckFn = check_windows_path;
+
+
+#[cfg(not(windows))]
+pub const PATH_CHECK: PathCheckFn = accept_path;
+
+
+pub fn same_name(watched: &OsStr, event: &OsStr) -> bool {
+    NAME_EQ(watched, event)
+}
+
+
+pub fn names_equal_exact(left: &OsStr, right: &OsStr) -> bool {
+    left == right
+}
+
+
+/// NTFS is case-insensitive, so a rename to another case is the same file.
+pub fn names_equal_ignoring_case(left: &OsStr, right: &OsStr) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+
+pub fn accept_path(_file: &Path) -> Result<(), WatchError> {
+    Ok(())
+}
+
+
+fn is_separator(character: char) -> bool {
+    character == '\\' || character == '/'
+}
+
+
+/// True for `SETTIN~1.YAM`: at most 6 characters, `~`, digits, then an optional dot and at most 3 characters.
+pub fn is_short_name(component: &str) -> bool {
+    component.split_once('~').is_some_and(|(base, rest)| {
+        let tail = rest.trim_start_matches(|character: char| character.is_ascii_digit());
+        base.chars().count() <= MAX_SHORT_BASE
+            && tail.len() < rest.len()
+            && (tail.is_empty()
+                || tail
+                    .strip_prefix('.')
+                    .is_some_and(|extension| extension.chars().count() <= MAX_SHORT_EXTENSION))
+    })
+}
+
+
+/// Windows only: refuses `C:x` (drive without root), `\x` (root without drive) and any 8.3 short name component; `\\?\`, `\\.\` and UNC stay allowed.
+pub fn check_windows_path(file: &Path) -> Result<(), WatchError> {
+    let text = file.to_string_lossy();
+    let mut characters = text.chars();
+    let first = characters.next();
+    let second = characters.next();
+    let third = characters.next();
+    let drive_without_root = first.is_some_and(|letter| letter.is_ascii_alphabetic()) && second == Some(':') && !third.is_some_and(is_separator);
+    let root_without_drive = first.is_some_and(is_separator) && !second.is_some_and(is_separator);
+    if drive_without_root {
+        Err(WatchError::DriveRelative(file.to_path_buf()))
+    } else if root_without_drive {
+        Err(WatchError::RootRelative(file.to_path_buf()))
+    } else if text.split(is_separator).any(is_short_name) {
+        Err(WatchError::ShortName(file.to_path_buf()))
+    } else {
+        Ok(())
+    }
 }
 
 
@@ -59,6 +143,19 @@ pub fn watch_files_counted<Config: Send + Sync + 'static>(
     debounce: Duration,
     ignored: Arc<AtomicUsize>,
 ) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, WatchError> {
+    watch_checked(engine, files, debounce, ignored, PATH_CHECK)
+}
+
+
+/// Same as `watch_files_counted` with the path rule injected, so every platform can run the Windows rule.
+pub fn watch_checked<Config: Send + Sync + 'static>(
+    engine: Arc<ReloadEngine<Config>>,
+    files: &[PathBuf],
+    debounce: Duration,
+    ignored: Arc<AtomicUsize>,
+    check: PathCheckFn,
+) -> Result<Debouncer<RecommendedWatcher, RecommendedCache>, WatchError> {
+    files.iter().try_for_each(|file| check(file))?;
     let names: Vec<OsString> = files.iter().filter_map(|file| file.file_name().map(OsString::from)).collect();
     let mut debouncer = new_debouncer(debounce, None, move |result| handle_events(&engine, &names, &ignored, result))?;
     files
