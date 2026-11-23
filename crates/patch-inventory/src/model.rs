@@ -1,6 +1,6 @@
 //! Data model: device, update records, inventory and parse outcomes.
 
-use crate::types::{SkipCounts, WindowsSkipCounts};
+use crate::types::{SkipCounts, WindowsSkipCounts, WingetSkipCounts};
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,4 +121,20 @@ pub struct WindowsInventory {
     pub updates: Vec<WindowsUpdate>,
     pub skipped: WindowsSkipCounts,
     pub partial: bool,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WingetSkip {
+    Malformed,
+    UnknownInstalledVersion,
+    OtherSource,
+    Duplicate,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WingetInventory {
+    pub updates: Vec<Update>,
+    pub skipped: WingetSkipCounts,
 }
