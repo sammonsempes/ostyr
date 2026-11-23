@@ -73,6 +73,26 @@ git tag public/main HEAD
 git reset -q --hard HEAD~1
 echo "alter table a add column x int;" >>"$OLD"
 check "a branch and a tag named public/main do not shadow the remote ref" refused "$OLD is a published migration"
+staged() {
+  local label=$1 got=accepted
+  if ! git -c core.hooksPath=.githooks -c user.name=t -c user.email=t@example.com commit -q -m "$label" >"$SCRATCH/out" 2>&1; then got=refused; fi
+  if [ "$got" != refused ] || ! grep -qF -- "$OLD is a published migration" "$SCRATCH/out"; then
+    echo "FAIL: $label expected refused by name got $got"
+    cat "$SCRATCH/out"
+    FAILS=$((FAILS + 1))
+  fi
+  git reset -q --hard
+}
+git reset -q --hard
+echo "six" >>README
+echo "alter table a add column x int;" >>"$OLD"
+git add -A
+git show "HEAD:$OLD" >"$OLD"
+staged "a staged edit with the working-tree file restored is refused"
+echo "seven" >>README
+git add -A
+echo "alter table a add column x int;" >>"$OLD"
+staged "an unstaged working-tree edit with the index unchanged is refused"
 REAL_GIT=$(command -v git)
 export REAL_GIT
 mkdir -p "$SCRATCH/gitwrap"
