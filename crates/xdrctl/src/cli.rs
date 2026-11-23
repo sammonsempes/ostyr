@@ -4,11 +4,12 @@ use crate::cases::{cases_list, cases_show};
 use crate::commands::{apply_command, audit_verify, config_validate, login, logout, plan_command, whoami};
 use crate::error::CliError;
 use crate::model::{
-    AlertsCommand, AssetsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report, RiskCommand,
+    AlertsCommand, AssetsCommand, AuditCommand, CasesCommand, Cli, Command, ConfigCommand, Context, OutputFormat, Report, RiskCommand, VulnsCommand,
 };
 use crate::risk::{risk_list, risk_show};
 use crate::session::session_path;
 use crate::types::SendFn;
+use crate::vulns::{vulns_list, vulns_show};
 use clap::Parser;
 use serde_json::json;
 use std::io::{self, BufRead, Write};
@@ -70,6 +71,12 @@ pub fn execute(
         Command::Risk {
             action: RiskCommand::Show { kind, id },
         } => risk_show(&ctx, *kind, id),
+        Command::Vulns {
+            action: VulnsCommand::List { limit, cursor },
+        } => vulns_list(&ctx, *limit, cursor.as_deref()),
+        Command::Vulns {
+            action: VulnsCommand::Show { asset },
+        } => vulns_show(&ctx, asset),
     }
 }
 
