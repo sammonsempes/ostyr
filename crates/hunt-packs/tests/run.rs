@@ -11,7 +11,7 @@ use hunt_packs::run::{
     count_statement, failure_line, pack_refusal, parse_count, read_count, refusal_text, run_pack, server_settings, shown_tenant, window_text,
     HuntOutcome, PackRefusal, RunError, MAX_COUNT_BYTES,
 };
-use metric_alerts::fetch::agent_for;
+use metric_alerts::fetch::{agent_for, PINNED_SETTINGS};
 use sample::{pack, param, sent_params, settings, NOW, PASSWORD};
 use siem_ingest::error::InsertClass;
 use socket2::{Domain, Socket, Type};
@@ -27,13 +27,19 @@ const COUNT: u64 = 42;
 const SEVEN: u64 = 7;
 
 
-const BODIES: usize = 4;
+const BODIES: usize = 6;
 
 
 const HOSTILE: usize = 7;
 
 
-const SERVER_SETTINGS: usize = 6;
+const SERVER_SETTINGS: usize = 5;
+
+
+const EXCEPTION_LINE: &[u8] = b"{\"exception\": \"Code: 159. DB::Exception: Timeout exceeded\"}\n";
+
+
+const COUNT_THEN_EXCEPTION: &[u8] = b"5\n{\"exception\": \"Code: 159. DB::Exception\"}\n";
 
 
 const OK: &str = "200 OK";
@@ -162,17 +168,19 @@ fn sent_url_holds_every_setting_and_the_callers_tenant() -> TestResult {
     let (outcome, seen) = run_against(OK, "", b"1".to_vec())?;
     assert_eq!(outcome?.matches, 1);
     let params = sent_params(&seen)?;
-    let expected = [
+    let own = [
         ("readonly", "1"),
         ("max_execution_time", "10"),
         ("max_rows_to_read", MAX_ROWS_LIMIT),
         ("max_bytes_to_read", "1000000"),
         ("max_result_rows", "1"),
-        ("result_overflow_mode", "throw"),
         ("param_tenant", "acme"),
         ("param_window_end", "2023-11-14 22:13:20.000"),
         ("param_window_start", "2023-11-13 22:13:20.000"),
     ];
+    let expected: Vec<(&str, &str)> = own.into_iter().chain(PINNED_SETTINGS.iter().copied()).collect();
+    assert!(expected.contains(&("http_write_exception_in_output_format", "0")));
+    assert!(expected.contains(&("date_time_output_format", "simple")));
     expected
         .iter()
         .for_each(|(name, _)| assert_eq!(params.iter().filter(|(found, _)| found == name).count(), 1, "{name}: {params:?}"));
@@ -192,7 +200,14 @@ fn sent_url_holds_every_setting_and_the_callers_tenant() -> TestResult {
 
 #[test]
 fn malformed_bodies_are_refused() -> TestResult {
-    let bodies: [Vec<u8>; BODIES] = [vec![b'7'; HUNDRED], b"abc".to_vec(), b"-1".to_vec(), Vec::new()];
+    let bodies: [Vec<u8>; BODIES] = [
+        vec![b'7'; HUNDRED],
+        b"abc".to_vec(),
+        b"-1".to_vec(),
+        Vec::new(),
+        EXCEPTION_LINE.to_vec(),
+        COUNT_THEN_EXCEPTION.to_vec(),
+    ];
     bodies.into_iter().try_for_each(|body| {
         let (outcome, _) = run_against(OK, "", body)?;
         assert!(matches!(outcome, Err(RunError::Malformed)), "{outcome:?}");
@@ -290,7 +305,7 @@ fn statement_and_settings() -> TestResult {
         "SELECT count() FROM (\nSELECT 1 -- x\n) FORMAT TabSeparated"
     );
     let mut candidate = pack();
-    assert_eq!(server_settings(&candidate)?.len(), SERVER_SETTINGS);
+    assert_eq!(server_settings(&candidate)?.len(), SERVER_SETTINGS + PINNED_SETTINGS.len());
     candidate.cost.max_bytes_read = None;
     assert!(matches!(server_settings(&candidate), Err(RunError::NoByteLimit)));
     let texts = [RunError::UnsupportedSource, RunError::Window, RunError::NoByteLimit, RunError::Malformed];

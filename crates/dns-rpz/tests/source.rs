@@ -256,7 +256,12 @@ fn the_table_rows_give_the_zone_of_the_json_lines_path() -> TestResult {
 fn the_rows_left_out_are_counted_in_the_summary() -> TestResult {
     init_logging();
     let rig = rig("tenant-a")?;
-    let body = format!("{}not json\n{}\n", good_rows(), row("odd.example.com", "weird"));
+    let body = format!(
+        "{}{}\n{}\n",
+        good_rows(),
+        row("odd2.example.com", "strange"),
+        row("odd.example.com", "weird")
+    );
     let server = answer(&rig.listener, "200 OK", text_body(body))?;
     let rejected = AtomicU64::new(0);
     let spec = format!("clickhouse:{}", rig.feeds.display());

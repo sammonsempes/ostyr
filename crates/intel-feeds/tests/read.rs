@@ -9,6 +9,7 @@ use intel_feeds::load::LoadError;
 use intel_feeds::model::{Ioc, IocType, Tlp};
 use intel_feeds::read::{
     clickhouse_time, count_bad, ioc_line, read_iocs, read_iocs_capped, reason_of, total_bad, BadReason, BadRows, ReadCaps, ReadError, ReadSummary,
+    PINNED_SETTINGS,
 };
 use siem_ingest::error::InsertClass;
 use socket2::{Domain, Socket, Type};
@@ -207,17 +208,14 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
         row("b.example", "clear"),
         row("c.example", "weird"),
         row("d.example", "RED"),
-        BAD_DATE_ROW.to_owned(),
         BAD_TYPE_ROW.to_owned(),
-        String::new(),
-        "not json".to_owned(),
         row("e.example", "amber_strict"),
     ]
     .join("\n");
     let server = answer(rig.listener.try_clone()?, "200 OK", text_body(format!("{body}\n")));
     let mut out = Vec::new();
     let summary = read_iocs(&rig.config, NOW, &mut out)?;
-    assert_eq!(total_bad(&summary.bad), BAD_ROWS + 1);
+    assert_eq!(total_bad(&summary.bad), BAD_ROWS - TWO);
     assert_eq!(
         summary,
         ReadSummary {
@@ -225,8 +223,8 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
             bad: BadRows {
                 unknown_tlp: TWO,
                 unknown_type: 1,
-                bad_time: 1,
-                bad_json: TWO,
+                bad_time: 0,
+                bad_json: 0,
                 too_broad: 0,
                 not_canonical: 0,
             }
@@ -242,11 +240,14 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
     assert_eq!(first.expires_at, Some(EXPIRES));
     let (head, _) = joined(server)?;
     let line = head.lines().next().ok_or("no head")?;
-    assert!(line.starts_with("POST /?query=SELECT"), "{line}");
+    assert!(line.starts_with("POST /?") && line.contains("&query=SELECT"), "{line}");
     assert!(line.contains("param_tenant=tenant-a"), "{line}");
     assert!(line.contains(&format!("param_now={}", NOW.unix_timestamp())), "{line}");
     assert!(line.contains(&format!("param_limit={}", MAX_READ_ROWS + 1)), "{line}");
     assert!(!line.contains(PASSWORD));
+    PINNED_SETTINGS
+        .iter()
+        .for_each(|(name, value)| assert!(line.contains(&format!("{name}={value}")), "{name}: {line}"));
     assert!(head.to_lowercase().contains(&format!("x-clickhouse-key: {}", PASSWORD.to_lowercase())));
     Ok(())
 }
@@ -350,6 +351,49 @@ fn a_chunked_reply_cut_before_its_end_fails_and_writes_nothing() -> TestResult {
     assert!(out.is_empty());
     joined(server)?;
     Ok(())
+}
+
+
+#[test]
+fn an_exception_line_in_a_200_body_fails_and_writes_nothing() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let body = format!("{}\n{{\"exception\": \"Code: 396. DB::Exception: limit\"}}\n", row("a.example", "green"));
+    let server = answer(rig.listener.try_clone()?, "200 OK", text_body(body));
+    let mut out = Vec::new();
+    let failed = read_iocs(&rig.config, NOW, &mut out);
+    assert!(matches!(failed, Err(ReadError::ExceptionInBody)), "{failed:?}");
+    assert!(!failed.map_or_else(|error| error.to_string(), |_| String::new()).contains("Code: 396"));
+    assert!(out.is_empty());
+    let (seen, _) = joined(server)?;
+    assert!(seen.contains("http_write_exception_in_output_format=0"), "{seen}");
+    Ok(())
+}
+
+
+#[test]
+fn a_line_that_is_not_a_row_fails_and_writes_nothing() -> TestResult {
+    let lines = [
+        "{\"ioc_type\":\"domain\",\"value\":\"a.exa".to_owned(),
+        "not json".to_owned(),
+        String::new(),
+        "{\"value\":\"a.example\"}".to_owned(),
+        BAD_DATE_ROW.to_owned(),
+        row("b.example", "green").replace("2026-11-03 00:00:00", "2026-11-03T00:00:00Z"),
+    ];
+    lines.into_iter().try_for_each(|bad| -> TestResult {
+        let rig = rig(LONG_TIMEOUT_MS)?;
+        let server = answer(
+            rig.listener.try_clone()?,
+            "200 OK",
+            text_body(format!("{}\n{bad}\n", row("a.example", "green"))),
+        );
+        let mut out = Vec::new();
+        let failed = read_iocs(&rig.config, NOW, &mut out);
+        assert!(matches!(failed, Err(ReadError::MalformedReply)), "{failed:?}");
+        assert!(out.is_empty());
+        joined(server)?;
+        Ok(())
+    })
 }
 
 

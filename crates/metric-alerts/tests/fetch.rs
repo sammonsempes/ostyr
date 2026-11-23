@@ -10,7 +10,7 @@ use hold::{endless, half_reply, stall};
 use metric_alerts::fetch::{
     agent_for, class_text, default_timeout_ms, escape_param, fetch_points, load_fetch_settings, parse_line, parse_points, read_key, read_points,
     validate_fetch_settings, FetchError, FetchSettings, LineFault, LineFaults, DEFAULT_TIMEOUT_MS, MAX_CA_BYTES, MAX_FETCH_BYTES, MAX_FETCH_POINTS,
-    MAX_TIMEOUT_MS, MAX_USER_BYTES,
+    MAX_TIMEOUT_MS, MAX_USER_BYTES, PINNED_SETTINGS,
 };
 use metric_alerts::model::{Condition, Direction, Rule, Severity};
 use metric_alerts::query::{parse_tenant_id, rule_sql, MetricQuery};
@@ -246,7 +246,10 @@ fn the_request_carries_every_param_escaped_and_the_format_suffix() -> TestResult
         .iter()
         .map(|(name, value)| (format!("param_{name}"), escape_param(value)))
         .collect();
-    assert_eq!(sent_params(&request)?, wanted);
+    let sent = sent_params(&request)?;
+    let only_params: Vec<(String, String)> = sent.iter().filter(|(name, _)| name.starts_with("param_")).cloned().collect();
+    assert_eq!(only_params, wanted);
+    assert_eq!(sent.len(), wanted.len() + PINNED_SETTINGS.len());
     assert!(wanted.iter().any(|(name, value)| name == "param_tenant" && value == "acme"));
     assert!(wanted.iter().any(|(_, value)| value.contains("\\nx' OR 1=1 --")));
     assert!(wanted.iter().any(|(_, value)| value.contains("\\\\tmp\\tdir\\r\\0}")));
@@ -256,6 +259,11 @@ fn the_request_carries_every_param_escaped_and_the_format_suffix() -> TestResult
     assert!(lowered.contains(&format!("x-clickhouse-key: {}", PASSWORD.to_lowercase())));
     assert!(request.trim_end().ends_with("FORMAT TabSeparated"), "{request}");
     assert!(request.contains("{tenant:String}"));
+    let head = request.lines().next().unwrap_or("");
+    PINNED_SETTINGS
+        .iter()
+        .for_each(|(name, value)| assert!(head.contains(&format!("{name}={value}")), "{name}: {head}"));
+    assert!(head.contains("date_time_output_format=simple"));
     Ok(())
 }
 
@@ -351,6 +359,22 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
     let outcome = fetch(port, Duration::ZERO)?;
     assert!(matches!(outcome, Err(FetchError::Failed(InsertClass::Timeout))));
     assert_eq!(bound.accept().err().map(|error| error.kind()), Some(io::ErrorKind::WouldBlock));
+    Ok(())
+}
+
+
+#[test]
+fn an_exception_line_in_a_200_body_fails_the_fetch() -> TestResult {
+    let (bound, port) = listener()?;
+    let server = reply(
+        bound,
+        OK,
+        "",
+        format!("1\t{SINGLE}\n{{\"exception\": \"Code: 159. DB::Exception\"}}\n").into_bytes(),
+    );
+    let outcome = fetch(port, LONG)?;
+    server.join().map_err(|_| "server panicked")??;
+    assert!(matches!(outcome, Err(FetchError::Malformed(_))), "{outcome:?}");
     Ok(())
 }
 

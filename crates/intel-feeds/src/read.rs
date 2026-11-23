@@ -35,6 +35,10 @@ pub enum ReadError {
     TooManyRows(usize),
     #[error("reply larger than {0} bytes: the list would be truncated")]
     TooManyBytes(u64),
+    #[error("the reply carries a ClickHouse exception line: the list would be truncated")]
+    ExceptionInBody,
+    #[error("a reply line is not a row of the expected shape: the list would be truncated")]
+    MalformedReply,
     #[error("the IOC lines could not be written")]
     Output(#[source] io::Error),
 }
@@ -246,6 +250,30 @@ pub fn refuse_broad(row: StoredRow) -> Result<StoredRow, RowError> {
 }
 
 
+/// Settings pinned on every read (T773): a failing read cuts the stream, times stay `simple`, no limit, offset, `break` overflow or result filter.
+pub const PINNED_SETTINGS: &[(&str, &str)] = &[
+    ("http_write_exception_in_output_format", "0"),
+    ("date_time_output_format", "simple"),
+    ("limit", "0"),
+    ("offset", "0"),
+    ("additional_result_filter", ""),
+    ("result_overflow_mode", "throw"),
+    ("read_overflow_mode", "throw"),
+    ("read_overflow_mode_leaf", "throw"),
+    ("group_by_overflow_mode", "throw"),
+    ("sort_overflow_mode", "throw"),
+    ("join_overflow_mode", "throw"),
+    ("set_overflow_mode", "throw"),
+    ("distinct_overflow_mode", "throw"),
+    ("transfer_overflow_mode", "throw"),
+    ("timeout_overflow_mode", "throw"),
+];
+
+
+/// The start of the line ClickHouse writes in `JSONEachRow` for an exception, whatever the setting.
+pub const EXCEPTION_PREFIX: &str = "{\"exception\"";
+
+
 /// A row that does not parse (unknown TLP or type included) is an error, never a default.
 pub fn ioc_line(text: Result<String, EntryError>) -> Result<String, RowError> {
     text.map_err(RowError::from)
@@ -264,8 +292,10 @@ pub fn request_rows(
     now: OffsetDateTime,
     max_rows: usize,
 ) -> Result<Response<Body>, ReadError> {
-    let reply = agent
-        .post(&config.url)
+    let pinned = PINNED_SETTINGS
+        .iter()
+        .fold(agent.post(&config.url), |builder, (name, value)| builder.query(*name, *value));
+    let reply = pinned
         .header(USER_HEADER, &config.user)
         .header(KEY_HEADER, password)
         .query("query", statement)
@@ -286,13 +316,24 @@ pub fn request_rows(
 }
 
 
-/// Stops at the first row over `MAX_READ_ROWS`; a bad line is counted and the read goes on.
+/// A line that is not JSON of the row shape, or a time the server wrote unparsable, is a server abnormality: an error, not a counted skip.
+pub fn valid_shape(error: &RowError) -> Result<BadReason, ReadError> {
+    match reason_of(error) {
+        BadReason::BadJson | BadReason::BadTime => Err(ReadError::MalformedReply),
+        reason => Ok(reason),
+    }
+}
+
+
+/// Stops at the first row over `MAX_READ_ROWS`; a refused value is counted and the read goes on, a malformed line is an error.
 pub fn collect_rows(reader: &mut dyn BufRead, max_rows: usize) -> Result<Collected, ReadError> {
     numbered_lines(reader).try_fold(Collected::default(), |mut collected, line| {
         let numbered = line.map_err(ReadError::Body)?;
+        let exception = numbered.text.as_ref().is_ok_and(|text| text.starts_with(EXCEPTION_PREFIX));
+        (!exception).then_some(()).ok_or(ReadError::ExceptionInBody)?;
         match ioc_line(numbered.text) {
             Ok(json) => collected.lines.push(json),
-            Err(error) => collected.bad = count_bad(collected.bad, reason_of(&error)),
+            Err(error) => collected.bad = count_bad(collected.bad, valid_shape(&error)?),
         }
         if collected.lines.len() > max_rows {
             Err(ReadError::TooManyRows(max_rows))
@@ -311,11 +352,11 @@ pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime, caps: ReadCa
     let agent = agent_for(config)?;
     let response = request_rows(&agent, config, key, &statement, now, caps.rows)?;
     let mut reader = BufReader::new(response.into_body().into_reader().take(caps.bytes + 1));
-    let collected = collect_rows(&mut reader, caps.rows)?;
+    let collected = collect_rows(&mut reader, caps.rows);
     if reader.get_ref().limit() == 0 {
         Err(ReadError::TooManyBytes(caps.bytes))
     } else {
-        Ok(collected)
+        collected
     }
 }
 
