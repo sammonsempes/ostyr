@@ -581,6 +581,8 @@ dependencies = [
  "core-auth",
  "core-config",
  "core-pg",
+ "pg-fake",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2749,6 +2751,8 @@ dependencies = [
  "core-config",
  "core-pg",
  "csv",
+ "pg-fake",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4926,6 +4930,7 @@ name = "platform"
 version = "0.0.0"
 dependencies = [
  "alerts",
+ "attack-paths",
  "axum",
  "cases",
  "cert-inventory",
@@ -4937,6 +4942,7 @@ dependencies = [
  "core-config",
  "core-pg",
  "dhcp-kea",
+ "grc",
  "hunt-packs",
  "oncall",
  "remote-shell",

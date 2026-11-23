@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 
-const ALL_MODULES: &str = "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status";
+const ALL_MODULES: &str =
+    "alerts,cases,cmdb,risk,hunts,certificates,oncall,dhcp,compliance,vulnerabilities,remote_shell,posture,status,grc,attack_paths";
 
 
 const ROUTES: [(&str, &str); 10] = [
@@ -34,6 +35,12 @@ const DHCP_QUERIES: [&str; 2] = [
 
 
 const COMPLIANCE_QUERIES: [&str; 2] = ["/compliance/state", "/compliance/assets/web01"];
+
+
+const GRC_PATHS: [&str; 2] = ["/grc/reports", "/grc/reports/1"];
+
+
+const ATTACK_PATHS: [&str; 2] = ["/attack-paths/reports", "/attack-paths/reports/1"];
 
 
 const POSTURE_PATH: &str = "/posture/accounts/abc/findings";
@@ -180,6 +187,10 @@ async fn the_longest_module_list_is_served_and_the_document_lists_every_path() -
     }
     assert!(paths.get("/remote-shell/sessions").is_some());
     assert!(paths.get("/posture/accounts/{account}/findings").is_some());
+    assert!(paths.get("/grc/reports").is_some());
+    assert!(paths.get("/grc/reports/{id}").is_some());
+    assert!(paths.get("/attack-paths/reports").is_some());
+    assert!(paths.get("/attack-paths/reports/{id}").is_some());
     Ok(())
 }
 
@@ -212,6 +223,9 @@ const UNSELECTED_SECOND: [&str; 13] = [
 ];
 
 
+const UNSELECTED_THIRD: [&str; 4] = ["/grc/reports", "/grc/reports/1", "/attack-paths/reports", "/attack-paths/reports/1"];
+
+
 async fn assert_denied_by_default(modules: &str, paths: &[&str]) -> TestResult {
     let fx = fixture(modules)?;
     let token = login(&fx.router, ANALYST).await?;
@@ -227,7 +241,8 @@ async fn assert_denied_by_default(modules: &str, paths: &[&str]) -> TestResult {
 #[tokio::test]
 async fn an_unselected_module_is_denied_by_default() -> TestResult {
     assert_denied_by_default("alerts", &UNSELECTED_FIRST).await?;
-    assert_denied_by_default("alerts", &UNSELECTED_SECOND).await
+    assert_denied_by_default("alerts", &UNSELECTED_SECOND).await?;
+    assert_denied_by_default("alerts", &UNSELECTED_THIRD).await
 }
 
 
@@ -348,6 +363,40 @@ async fn the_posture_route_rejects_other_methods() -> TestResult {
     let analyst = login(&fx.router, ANALYST).await?;
     for method in ["HEAD", "PUT", "POST", "DELETE"] {
         assert!(denied(status(&fx.router, method, POSTURE_PATH, Some(&analyst)).await?), "{method}");
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_grc_and_attack_path_routes_need_their_permission_and_reach_their_backend() -> TestResult {
+    let fx = fixture(ALL_MODULES)?;
+    let reader = login(&fx.router, READER).await?;
+    let analyst = login(&fx.router, ANALYST).await?;
+    for path in GRC_PATHS.into_iter().chain(ATTACK_PATHS) {
+        assert_eq!(status(&fx.router, "GET", path, None).await?, StatusCode::UNAUTHORIZED, "{path}");
+        assert_eq!(status(&fx.router, "GET", path, Some(&reader)).await?, StatusCode::FORBIDDEN, "{path}");
+        let code = status(&fx.router, "GET", path, Some(&analyst)).await?;
+        assert!(!denied(code) && code != StatusCode::NOT_FOUND, "{path} {code}");
+        for method in ["HEAD", "PUT", "POST", "DELETE"] {
+            assert!(denied(status(&fx.router, method, path, Some(&analyst)).await?), "{path} {method}");
+        }
+    }
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_grc_and_attack_path_routes_share_the_semaphore_and_answer_429_when_it_is_empty() -> TestResult {
+    let permits = Arc::new(Semaphore::new(0));
+    let limited = fixture_with_permits(ALL_MODULES, &permits)?;
+    let token = login(&limited.router, ANALYST).await?;
+    for path in [GRC_PATHS[0], ATTACK_PATHS[0]] {
+        assert_eq!(
+            status(&limited.router, "GET", path, Some(&token)).await?,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path}"
+        );
     }
     Ok(())
 }
