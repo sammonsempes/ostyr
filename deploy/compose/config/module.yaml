@@ -12,3 +12,4 @@ settings:
   audit_log: /var/lib/ostyr/audit.log
   key_file: /run/secrets/store_key
   compromised_list: /etc/ostyr/compromised.txt
+  trusted_forwarders: 172.29.63.10
