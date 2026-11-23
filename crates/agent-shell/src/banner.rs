@@ -1,4 +1,4 @@
-use crate::model::{VerifiedOpenShell, BANNER_TITLE};
+use crate::model::{approvers_of, asset_of, requester_of, session_id_of, ticket_of, VerifiedOpenShell, BANNER_TITLE};
 
 
 pub const BANNER_END_OF_LINE: &str = "\r\n";
@@ -25,12 +25,12 @@ pub fn printable(text: &str) -> String {
 pub fn shell_banner(order: &VerifiedOpenShell, agent_id: &str) -> Vec<u8> {
     let lines = [
         BANNER_TITLE.to_owned(),
-        format!("session: {}", order.session_id),
+        format!("session: {}", session_id_of(order)),
         format!("agent: {}", printable(agent_id)),
-        format!("asset: {}", order.asset),
-        format!("ticket: {}", order.ticket),
-        format!("requester: {}", order.requester),
-        format!("approvers: {}", order.approvers.join(", ")),
+        format!("asset: {}", asset_of(order)),
+        format!("ticket: {}", ticket_of(order)),
+        format!("requester: {}", requester_of(order)),
+        format!("approvers: {}", approvers_of(order).join(", ")),
     ];
     lines.iter().flat_map(|line| line.bytes().chain(BANNER_END_OF_LINE.bytes())).collect()
 }
