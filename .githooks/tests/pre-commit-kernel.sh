@@ -348,6 +348,41 @@ if ! grep -qF "override EBPF_NO_PANIC=$SCRATCH/bin/no-panic" "$SCRATCH/out"; the
   FAILS=$((FAILS + 1))
 fi
 
+cargo_config_refused() {
+  local label=$1
+  if ! grep -qF "$R/.cargo exists" "$SCRATCH/out" || [ -s "$STUB_LOG" ] || [ -e "$SCRATCH/runner-marker" ]; then
+    echo "FAIL: $label: a repository .cargo must be refused by name before any cargo command"
+    cat "$SCRATCH/out" "$STUB_LOG"
+    FAILS=$((FAILS + 1))
+  fi
+}
+
+plant_cargo_config() {
+  mkdir -p .cargo
+  printf '[build]\nrunner = "touch %s/runner-marker"\n' "$SCRATCH" >.cargo/config.toml
+}
+
+stage plain.rs
+plant_cargo_config
+run_hook
+cargo_config_refused "an untracked root .cargo on a workspace commit"
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+plant_cargo_config
+run_hook
+cargo_config_refused "an untracked root .cargo on a kernel-only commit"
+stage notes.md
+plant_cargo_config
+run_hook
+cargo_config_refused "an untracked root .cargo on a documentation-only commit"
+run_hook GATE_SCOPE=full
+cargo_config_refused "an untracked root .cargo with GATE_SCOPE=full"
+rm -rf .cargo
+ln -s nowhere .cargo
+run_hook
+cargo_config_refused "a dangling .cargo symlink"
+rm -f .cargo
+
 if [ "$FAILS" -ne 0 ]; then
   echo "pre-commit-kernel: $FAILS failures"
   exit 1

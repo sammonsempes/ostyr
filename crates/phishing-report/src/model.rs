@@ -22,6 +22,7 @@ pub struct Counts {
     pub addresses_refused: usize,
     pub auth_refused: usize,
     pub auth_untrusted: usize,
+    pub auth_oversized_untrusted: usize,
     pub auth_nested_ignored: usize,
     pub reporter_unverified: usize,
     pub internal_claimed: usize,

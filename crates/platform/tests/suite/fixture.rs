@@ -15,7 +15,7 @@ use core_auth::random::os_random;
 use core_auth::store::update_store_file;
 use core_config::reload::{open_engine, ReloadContext};
 use platform::error::PlatformError;
-use platform::merge::{module_parts, modules_of, shared_permits, weights_file_of, ACTOR};
+use platform::merge::{load_page_services, module_parts, modules_of, page_file_of, shared_permits, weights_file_of, ACTOR};
 use platform::model::Module;
 use platform::types::Parts;
 use risk_score::weights::{weights_loader, weights_state};
@@ -39,6 +39,9 @@ pub const ANALYST: &str = "analyst";
 
 
 pub const AUDITOR: &str = "auditor";
+
+
+pub const RESPONDER: &str = "responder";
 
 
 const OWNER_ONLY: u32 = 0o600;
@@ -119,21 +122,23 @@ fn config_in(dir: &TempDir) -> Result<ApiConfig, TestError> {
 
 
 fn seed_accounts(config: &ApiConfig) -> Result<(), TestError> {
-    [READER, ANALYST, AUDITOR].into_iter().try_for_each(|name| -> Result<(), TestError> {
-        let account = Account {
-            username: name.to_owned(),
-            password_hash: hash_password(PASSWORD, os_random)?,
-            roles: [name.to_owned()].into(),
-            totp: None,
-            sessions_valid_after: None,
-        };
-        update_store_file(&config.accounts_store, os_random, |accounts, _| {
-            accounts.insert(name.to_owned(), account);
+    [READER, ANALYST, AUDITOR, RESPONDER]
+        .into_iter()
+        .try_for_each(|name| -> Result<(), TestError> {
+            let account = Account {
+                username: name.to_owned(),
+                password_hash: hash_password(PASSWORD, os_random)?,
+                roles: [name.to_owned()].into(),
+                totp: None,
+                sessions_valid_after: None,
+            };
+            update_store_file(&config.accounts_store, os_random, |accounts, _| {
+                accounts.insert(name.to_owned(), account);
+                Ok(())
+            })?
+            .saved?;
             Ok(())
-        })?
-        .saved?;
-        Ok(())
-    })
+        })
 }
 
 
@@ -145,8 +150,20 @@ pub fn module_text(modules: &str, pg_file: &Path) -> String {
 }
 
 
+pub const PAGE_TEXT: &str = "id: main\ntenant: acme\ntitle: Status\ncomponents:\n  - name: Website\n    service: web\n";
+
+
 pub fn module_text_with_weights(modules: &str, pg_file: &Path, weights_file: &Path) -> String {
     format!("{}  risk.weights_file: {}\n", module_text(modules, pg_file), weights_file.display())
+}
+
+
+pub fn module_text_with_page(modules: &str, pg_file: &Path, weights_file: &Path, page_file: &Path) -> String {
+    format!(
+        "{}  status.page_file: {}\n",
+        module_text_with_weights(modules, pg_file, weights_file),
+        page_file.display()
+    )
 }
 
 
@@ -159,7 +176,9 @@ fn prepared(modules: &str, permits: &Arc<Semaphore>) -> Result<(TempDir, ApiConf
     let module_file = dir.path().join("platform.yaml");
     let weights_file = dir.path().join("weights.yaml");
     fs::write(&weights_file, WEIGHTS_TEXT)?;
-    fs::write(&module_file, module_text_with_weights(modules, &pg_file, &weights_file))?;
+    let page_file = dir.path().join("page.yaml");
+    fs::write(&page_file, PAGE_TEXT)?;
+    fs::write(&module_file, module_text_with_page(modules, &pg_file, &weights_file, &page_file))?;
     let loaded = core_config::load::load_module(&module_file)?;
     let selected: Vec<Module> = modules_of(&loaded.settings)?;
     let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, new_listener(), ACTOR)?;
@@ -183,7 +202,10 @@ fn prepared(modules: &str, permits: &Arc<Semaphore>) -> Result<(TempDir, ApiConf
         }
         None => None,
     };
-    let parts = module_parts(&selected, &engine, permits, weights.as_ref())?;
+    let page = page_file_of(&loaded.settings, &selected)?
+        .map(|file| load_page_services(&file))
+        .transpose()?;
+    let parts = module_parts(&selected, &engine, permits, weights.as_ref(), page.as_ref())?;
     Ok((dir, config, parts))
 }
 
@@ -196,7 +218,7 @@ pub fn unweighted_parts(modules: &str) -> Result<Result<Parts, PlatformError>, T
     fs::write(&module_file, module_text(modules, &pg_file))?;
     let selected = modules_of(&core_config::load::load_module(&module_file)?.settings)?;
     let (opened, _pg) = alerts::settings::open_pg_engine_as(&module_file, new_listener(), ACTOR)?;
-    Ok(module_parts(&selected, &Arc::new(opened), &shared_permits(), None))
+    Ok(module_parts(&selected, &Arc::new(opened), &shared_permits(), None, None))
 }
 
 

@@ -8,7 +8,8 @@
 # defines the symbol it calls), MUTANT=path-build-code-ok (a path package may have a build script), MUTANT=proc-macro-ok (proc-macro targets are
 # not examined), MUTANT=checksum-name-only (the lock checksum is matched on name and version, not source), MUTANT=filter-platform (cargo metadata
 # is filtered to the target again), MUTANT=patch-ok (a [patch] table is accepted), MUTANT=lock-source-ok (the Cargo.lock source check before cargo
-# metadata is off), MUTANT=reverify-off (extracted registry sources are not compared with their archive).
+# metadata is off), MUTANT=stale-target (the kernel crate builds in the shared target directory), MUTANT=no-lock-check (a missing Cargo.lock
+# is not refused), MUTANT=reverify-off (extracted registry sources are not compared with their archive).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -36,6 +37,8 @@ case "${MUTANT:-}" in
   checksum-name-only) sed -i 's/ && found_source == source//' "$BUILDER" ;;
   filter-platform) sed -i 's/--format-version 1 --manifest-path/--format-version 1 --filter-platform "$TARGET" --manifest-path/' "$BUILDER" ;;
   lock-source-ok) sed -i 's/^  check_lock_sources "\$lock"$/  true/' "$BUILDER" ;;
+  stale-target) sed -i 's|^BUILD_DIR=.*|BUILD_DIR="$TARGET_DIR"|;/^rm -rf "\$TARGET_DIR\/\$TARGET"$/d;/^mv "\$BUILD_DIR/d' "$BUILDER" ;;
+  no-lock-check) sed -i '/^  \[ -f "\$lock" \] || fail/d' "$BUILDER" ;;
   reverify-off) sed -i 's/^    verify_registry_package .*$/    true/' "$BUILDER" ;;
   patch-ok) sed -i 's/^  check_patch_tables "\${manifests\[@\]}"$/  true/' "$BUILDER" ;;
   nightly-cargo) sed -i 's/ cargo build "\${OFFLINE\[@\]}"/ cargo "+$NIGHTLY" build "${OFFLINE[@]}"/' "$BUILDER" ;;
@@ -47,7 +50,7 @@ case "${MUTANT:-}" in
       exit 2
     fi
     ;;
-  no-allow | nightly-cargo | path-build-code-ok | proc-macro-ok | checksum-name-only | filter-platform | patch-ok | lock-source-ok | reverify-off)
+  no-allow | nightly-cargo | path-build-code-ok | proc-macro-ok | checksum-name-only | filter-platform | patch-ok | lock-source-ok | reverify-off | stale-target | no-lock-check)
     if cmp -s "$ROOT/lab/ebpf-build.sh" "$BUILDER"; then
       echo "the mutant ${MUTANT} did not change the builder" >&2
       exit 2
@@ -349,6 +352,33 @@ edited_archive_refused() {
 check "an archive in the registry cache that does not hash to the Cargo.lock checksum is refused by name" edited_archive_refused
 rm -rf "$COLD_HOME"
 
+POISON_EDIT='Ok(prog) => { let mut poisoned = prog.expand(); poisoned.extend("#[unsafe(link_section = \\\"poison\\\")] #[used] static POISON: u8 = 1;".parse::<proc_macro2::TokenStream>().unwrap()); poisoned }'
+stale_proc_macro_not_reused() {
+  local source stale="$ROOT/target/ebpf-stale-target" flags separator=$'\x1f' output
+  write_crate 'value ^ n as u32'
+  cold_home
+  CARGO_HOME="$COLD_HOME" check_only >&2 || return 1
+  source=$(find "$COLD_HOME/registry/src" -maxdepth 2 -type d -name 'aya-ebpf-macros-0.4.0' | head -1)
+  cp "$source/src/lib.rs" "$ROOT/target/ebpf-macros-lib.rs"
+  sed -i "s|^        Ok(prog) => prog.expand(),\$|        $POISON_EDIT,|" "$source/src/lib.rs"
+  rm -rf "$stale"
+  flags="-Clink-arg=--btf${separator}--sysroot=$BUILD_TARGET/ebpf-sysroot/root${separator}-Zallow-features=asm_experimental_arch"
+  env -u RUSTFLAGS CARGO_HOME="$COLD_HOME" CARGO_ENCODED_RUSTFLAGS="$flags" RUSTC="$(rustc "+$NIGHTLY" --print sysroot)/bin/rustc" \
+    cargo build --offline --release --target bpfel-unknown-none --manifest-path "$SCRATCH/Cargo.toml" --target-dir "$stale" >&2 || return 1
+  grep -q poison "$stale/bpfel-unknown-none/release/ebpf-probes-kernel" || { echo "the poisoned control build holds no poison section"; return 1; }
+  cp "$ROOT/target/ebpf-macros-lib.rs" "$source/src/lib.rs"
+  output=$(CARGO_HOME="$COLD_HOME" EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 EBPF_UNLOCKED=1 "$BUILDER" "$SCRATCH/Cargo.toml" "$stale" 2>&1) \
+    || { echo "$output" | tail -5; return 1; }
+  if grep -q poison "$stale/bpfel-unknown-none/release/ebpf-probes-kernel"; then
+    echo "the shipped object holds the poison section: the stale proc-macro of the shared target directory was reused"
+    return 1
+  fi
+  echo "the object built after the revert holds no poison section"
+}
+check "T692FS2 a proc-macro built from an edited registry source and left in the target directory is not reused after the edit is reverted" \
+  stale_proc_macro_not_reused
+rm -rf "$COLD_HOME" "$ROOT/target/ebpf-stale-target"
+
 host_code_never_runs_in_check_only() {
   local marker="$ROOT/target/ebpf-check-only-marker" output
   rm -f "$marker"
@@ -370,7 +400,6 @@ atk_patch_refused() {
   printf '#![no_std]\n' >"$evil/src/lib.rs"
   write_crate 'value ^ n as u32'
   printf '\n[patch.crates-io]\nlibc = { path = "%s" }\n' "$evil" >>"$SCRATCH/Cargo.toml"
-  rm -f "$SCRATCH/Cargo.lock"
   REFUSAL_TEXT="$PATCH_REFUSAL" refused_unlocked
 }
 check "atk-patch a [patch.crates-io] to a path libc is refused by name" atk_patch_refused
@@ -404,6 +433,27 @@ atk_ancestor_refused() {
   grep -qF "$SCRATCH/.cargo exists" <<<"$output"
 }
 check "a .cargo directory in an ancestor of the kernel manifest is refused by name" atk_ancestor_refused
+
+missing_lock_refused() {
+  local output
+  write_crate 'value ^ n as u32'
+  rm -f "$SCRATCH/Cargo.lock"
+  if output=$(EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 EBPF_UNLOCKED=1 "$BUILDER" "$SCRATCH/Cargo.toml" "$BUILD_TARGET" 2>&1); then
+    echo "$output" | tail -3
+    return 1
+  fi
+  echo "$output" | grep -F 'Cargo.lock is missing' | head -2
+  grep -qF 'Cargo.lock is missing' <<<"$output"
+}
+check "a missing Cargo.lock is refused by name, never a skipped check" missing_lock_refused
+
+relative_target_built() {
+  write_crate 'value ^ n as u32'
+  rm -rf "$ROOT/target/ebpf-relative-target"
+  (cd "$ROOT/target" && EBPF_NIGHTLY="$NIGHTLY" EBPF_OFFLINE=1 EBPF_UNLOCKED=1 "$BUILDER" ebpf-no-panic-test/Cargo.toml ebpf-relative-target >&2) \
+    && [ -f "$ROOT/target/ebpf-relative-target/bpfel-unknown-none/release/ebpf-probes-kernel" ]
+}
+check "a relative manifest and target directory are made absolute before the script changes directory" relative_target_built
 
 write_crate 'value ^ n as u32'
 

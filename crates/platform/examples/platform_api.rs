@@ -1,4 +1,4 @@
-//! Usage: platform_api <module.yaml>. Serves the modules of `settings.modules` (alerts, cases, cmdb, risk, hunts, certificates, oncall, dhcp, compliance, vulnerabilities); `risk` also needs `settings.risk.weights_file`.
+//! Usage: platform_api <module.yaml>. Serves the thirteen modules of `settings.modules`; `risk` also needs `settings.risk.weights_file` and `status` needs `settings.status.page_file`.
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
@@ -13,7 +13,10 @@ use core_config::reload::{open_engine, reload, ReloadContext};
 use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
-use platform::merge::{migration_plan, module_parts, modules_of, shared_permits, weights_file_of, ACTOR, SETTING_MODULES, SETTING_WEIGHTS_FILE};
+use platform::merge::{
+    load_page_services, migration_plan, module_parts, modules_of, page_file_of, shared_permits, weights_file_of, ACTOR, SETTING_MODULES,
+    SETTING_PAGE_FILE, SETTING_WEIGHTS_FILE,
+};
 use risk_score::weights::{weights_loader, weights_state};
 use std::error::Error;
 use std::io::{stderr, stdout, Write};
@@ -49,6 +52,9 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let loaded = load_module(Path::new(module_file))?;
     let modules = modules_of(&loaded.settings)?;
     let weights_file = weights_file_of(&loaded.settings, &modules)?;
+    let page = page_file_of(&loaded.settings, &modules)?
+        .map(|file| load_page_services(&file))
+        .transpose()?;
     let (dispatch, log) = reloadable_dispatch(BoxMakeWriter::new(stdout), DEFAULT_LOG_LEVEL);
     tracing::dispatcher::set_global_default(dispatch)?;
     tracing_log::LogTracer::builder().ignore_crate(LOG_IGNORED_CRATE).init()?;
@@ -93,7 +99,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         tracing::info!(namespace, applied = applied.len(), "migrations checked");
     }
     drop(held);
-    let (router, access, documents) = module_parts(&modules, &engine, &permits, weights.as_ref())?;
+    let (router, access, documents) = module_parts(&modules, &engine, &permits, weights.as_ref(), page.as_ref())?;
     tokio::spawn(stop_on_interrupt(listener.clone()));
     let mut startup_reloads = api_startup_reloads(Arc::clone(&engine));
     if let Some(weights_engine) = weights {
@@ -103,7 +109,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         Path::new(module_file),
         loaded,
         (router, access, documents),
-        &[SETTING_PG, SETTING_MODULES, SETTING_WEIGHTS_FILE],
+        &[SETTING_PG, SETTING_MODULES, SETTING_WEIGHTS_FILE, SETTING_PAGE_FILE],
         listener,
         Some(log),
         startup_reloads,

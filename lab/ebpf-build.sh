@@ -20,9 +20,14 @@
 # (which would fetch a remote source), so the refusal never depends on the cargo cache of remote sources. Every registry package of the graph is
 # then re-verified: the .crate file in the registry cache must hash to the Cargo.lock checksum and the extracted source cargo will compile must
 # equal the archive (cargo itself never re-reads an extracted registry source).
+# The kernel crate is built into a fresh target directory (cargo fingerprints a registry package by id, so a proc-macro built once from an edited
+# source would otherwise be reused after the edit is reverted) and the finished <target>/bpfel-unknown-none replaces the old one.
+# The scratch directory is under the checkout's target/ and removed on every exit. Cargo.lock is read from the directory
+# cargo locate-project reports, and a missing one is refused by name.
 set -euo pipefail
-MANIFEST=${1:?usage: ebpf-build.sh <kernel crate Cargo.toml> <target dir>}
+MANIFEST=$(realpath -m "${1:?usage: ebpf-build.sh <kernel crate Cargo.toml> <target dir>}")
 TARGET_DIR=${2:-}
+if [ -n "$TARGET_DIR" ]; then TARGET_DIR=$(realpath -m "$TARGET_DIR"); fi
 if [ -z "${EBPF_CHECK_ONLY:-}" ] && [ -z "$TARGET_DIR" ]; then
   echo "usage: ebpf-build.sh <kernel crate Cargo.toml> <target dir>" >&2
   exit 1
@@ -62,6 +67,9 @@ fail() {
   exit 1
 }
 cd "$ROOT"
+mkdir -p "$ROOT/target"
+WORK_DIR=$(mktemp -d -p "$ROOT/target")
+trap 'rm -rf "$WORK_DIR"' EXIT
 case "$(cargo --version)" in
   *nightly*) fail "the default cargo is a nightly: step 2 needs the stable cargo of rust-toolchain.toml, which refuses cargo-features" ;;
 esac
@@ -95,32 +103,32 @@ build_code_allowed() {
 check_lock_sources() {
   local lock="$1" line
   local -a foreign
-  if [ -f "$lock" ]; then
-    mapfile -t foreign < <(python3 -I -c 'import sys, tomllib
+  [ -f "$lock" ] || fail "$lock is missing: the sources and checksums of the build cannot be checked (commit the Cargo.lock of the kernel crate)"
+  mapfile -t foreign < <(python3 -I -c 'import sys, tomllib
 with open(sys.argv[1], "rb") as handle:
     document = tomllib.load(handle)
 for package in document.get("package", []):
     source = package.get("source")
     if source is not None and source != sys.argv[2]:
         print(package["name"], package["version"], source)' "$lock" "$CRATES_IO") || fail "cannot read $lock"
-    for line in "${foreign[@]+"${foreign[@]}"}"; do
-      fail "the package $line does not come from crates.io (remote sources and other registries are refused)"
-    done
-  fi
+  for line in "${foreign[@]+"${foreign[@]}"}"; do
+    fail "the package $line does not come from crates.io (remote sources and other registries are refused)"
+  done
 }
 
 verify_registry_package() {
-  local name="$1" version="$2" directory="$3" lock="$4" crate checksum scratch
+  local name="$1" version="$2" directory="$3" lock="$4" crate checksum scratch="$WORK_DIR/verify"
   local cache="${CARGO_HOME:-$HOME/.cargo}/registry/cache"
   checksum=$(lock_checksum "$name" "$version" "$lock" "$CRATES_IO")
   crate=$(find "$cache" -maxdepth 2 -name "$name-$version.crate" 2>/dev/null | head -1)
   [ -n "$crate" ] || fail "the archive of $name $version is not in the registry cache $cache: it cannot be re-verified"
   [ -n "$checksum" ] && [ "$(sha256sum "$crate" | cut -d' ' -f1)" = "$checksum" ] \
-    || fail "the archive of $name $version in the registry cache does not match the Cargo.lock checksum"
-  scratch=$(mktemp -d)
+  || fail "the archive of $name $version in the registry cache does not match the Cargo.lock checksum"
+  rm -rf "$scratch"
+  mkdir -p "$scratch"
   tar -xzf "$crate" -C "$scratch" || fail "cannot unpack the archive of $name $version"
   diff -r --exclude=.cargo-ok "$scratch/$name-$version" "$directory" >/dev/null \
-    || fail "the extracted source of $name $version ($directory) differs from its archive: the registry source was edited"
+  || fail "the extracted source of $name $version ($directory) differs from its archive: the registry source was edited"
   rm -rf "$scratch"
 }
 
@@ -156,7 +164,8 @@ sys.exit(1 if "patch" in document or "replace" in document else 0)' "$manifest" 
 check_build_code() {
   local metadata lock line name version source directory
   local -a packages foreign manifests registry
-  lock="$(dirname "$MANIFEST")/Cargo.lock"
+  lock="$(dirname "$(cargo locate-project --workspace --message-format plain --manifest-path "$MANIFEST")")/Cargo.lock" \
+    || fail "cargo locate-project failed on $MANIFEST"
   check_lock_sources "$lock"
   metadata=$(RUSTC="$NIGHTLY_RUSTC" cargo metadata "${OFFLINE[@]}" "${LOCKED[@]}" --format-version 1 --manifest-path "$MANIFEST") \
     || fail "cargo metadata failed on $MANIFEST"
@@ -207,6 +216,9 @@ while IFS= read -r library; do
 done <<<"$LIBRARIES"
 ln -s "$NIGHTLY_SYSROOT/lib/rustlib/x86_64-unknown-linux-gnu" "$SYSROOT_DIR/root/lib/rustlib/x86_64-unknown-linux-gnu"
 
+BUILD_DIR="$WORK_DIR/kernel-target"
 FLAGS="-Clink-arg=--btf${UNIT_SEPARATOR}--sysroot=$SYSROOT_DIR/root${UNIT_SEPARATOR}-Zallow-features=$ALLOWED_FEATURES"
 env -u RUSTFLAGS CARGO_ENCODED_RUSTFLAGS="$FLAGS" RUSTC="$NIGHTLY_RUSTC" cargo build "${OFFLINE[@]}" "${LOCKED[@]}" --release --target "$TARGET" \
-  --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" >&2 || fail "the kernel crate build failed (a feature outside $ALLOWED_FEATURES, or a nightly cargo setting, is refused here)"
+  --manifest-path "$MANIFEST" --target-dir "$BUILD_DIR" >&2 || fail "the kernel crate build failed (a feature outside $ALLOWED_FEATURES, or a nightly cargo setting, is refused here)"
+rm -rf "$TARGET_DIR/$TARGET"
+mv "$BUILD_DIR/$TARGET" "$TARGET_DIR/$TARGET"

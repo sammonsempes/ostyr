@@ -106,10 +106,10 @@ fn table_ddl_golden() -> TestResult {
 
 #[test]
 fn dictionary_ddl_golden() -> TestResult {
-    let expected = "CREATE OR REPLACE DICTIONARY `intel`.`ioc_ip` (\n    `prefix` String,\n    `feed` String,\n    `feed_version` String,\n    \
+    let expected = "CREATE OR REPLACE DICTIONARY `intel`.`ioc_ip` (\n    `prefix` String,\n    `tenant` String,\n    `indicator` String,\n    `tlp` String,\n    `feed` String,\n    `feed_version` String,\n    \
         `confidence` UInt8,\n    `first_seen` DateTime('UTC'),\n    `last_seen` DateTime('UTC'),\n    `expires_at` DateTime('UTC')\n)\n\
         PRIMARY KEY `prefix`\n\
-        SOURCE(CLICKHOUSE(USER 'ostyr_dict' HOST '127.0.0.1' PORT 9440 SECURE 1 QUERY 'SELECT `value` AS `prefix`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
+        SOURCE(CLICKHOUSE(USER 'ostyr_dict' HOST '127.0.0.1' PORT 9440 SECURE 1 QUERY 'SELECT `value` AS `prefix`, `tenant`, `value` AS `indicator`, `tlp`, `feed`, `feed_version`, `confidence`, `first_seen`, `last_seen`, `expires_at` \
         FROM `intel`.`ioc` FINAL WHERE `ioc_type` IN (\\'ipv4\\', \\'ipv6\\', \\'cidr\\') AND `checked` = 1 AND `expires_at` > now()'))\n\
         LAYOUT(IP_TRIE)\nLIFETIME(MIN 30 MAX 300)";
     assert_eq!(dictionary_ddl("intel", "ioc", "ioc_ip", "ostyr_dict", PORT)?, expected);
