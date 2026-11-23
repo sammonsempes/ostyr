@@ -1,4 +1,5 @@
 use core_config::error::ConfigError;
+use core_pg::error::PgError;
 use thiserror::Error;
 
 
@@ -36,6 +37,35 @@ pub enum TagsError {
     UnknownNode { index: usize },
     #[error("tag {index}: it names a DN that more than one entry holds, so the node cannot be told apart")]
     AmbiguousNode { index: usize },
+}
+
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error(transparent)]
+    Tenant(#[from] PgError),
+    #[error(transparent)]
+    Graph(#[from] GraphError),
+    #[error("cannot render the report")]
+    Render(#[source] serde_json::Error),
+    #[error("the report is at least {bytes} bytes, the limit is {max}")]
+    TooLarge { bytes: usize, max: usize },
+    #[error("the generation time is not a date-time RFC 3339 can write back in UTC (years 1 to 9999)")]
+    BadGenerated,
+    #[error("the tenant already holds {max} reports")]
+    CapReached { max: i64 },
+    #[error("the limit must be between 1 and {max}")]
+    BadLimit { max: usize },
+    #[error("the store failed")]
+    Store(#[source] PgError),
+    #[error("the store answered a row this version cannot read")]
+    BadRow,
+    #[error("the stored report no longer matches its digest")]
+    DigestMismatch,
+    #[error("the stored body is not a report document")]
+    BadBody,
+    #[error("the stored columns disagree with the stored body")]
+    MetadataMismatch,
 }
 
 

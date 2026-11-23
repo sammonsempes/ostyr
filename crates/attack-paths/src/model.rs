@@ -81,7 +81,7 @@ pub struct Graph {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Path {
     pub nodes: Vec<String>,
 }
@@ -104,7 +104,8 @@ pub struct PathSet {
 
 
 /// The bound that ended the search of an entry before it was complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     StepBudget,
     PathCap,
@@ -122,28 +123,28 @@ impl Display for StopReason {
 
 
 /// An entry whose search was cut by a bound.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Unsearched {
     pub id: String,
     pub reason: StopReason,
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChokePoint {
     pub node: String,
     pub paths_through: usize,
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeRef {
     pub from: String,
     pub to: String,
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recommendation {
     pub edge: EdgeRef,
     pub paths_closed: usize,
