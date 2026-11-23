@@ -1,8 +1,8 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
-    Alert, AlertDetailView, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView, CertListView,
-    CommentView, DhcpQuery, FindingsView, LookupView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView, ShellListView,
-    ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    Alert, AlertDetailView, AlertLinkPageView, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView,
+    CertListView, CommentView, DhcpQuery, FindingsView, LookupView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView,
+    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use crate::strings::checked_triage_status;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
@@ -30,6 +30,10 @@ pub const MAX_BODY_READS: usize = 4096;
 
 
 pub const MAX_ITEMS: usize = 100;
+
+
+/// The page size asked of `GET /cases/{id}/alerts` and the most items accepted back.
+pub const LINKS_LIMIT: usize = 50;
 
 
 pub const MAX_TOKEN_BYTES: usize = 4096;
@@ -90,13 +94,14 @@ pub const MAX_COMMENT_CHARS: usize = 8_192;
 pub const MAX_NOTE_CHARS: usize = 2_048;
 
 
-pub const CONFLICT_CODES: [(&str, &str); 6] = [
+pub const CONFLICT_CODES: [(&str, &str); 7] = [
     ("transition_not_allowed", "error_transition_not_allowed"),
     ("resolution_required", "error_resolution_required"),
     ("case_changed", "error_case_changed"),
     ("full", "error_comment_full"),
     ("run_changed", RUN_CHANGED_KEY),
     ("triage_changed", "error_triage_changed"),
+    ("alerts_full", "error_alerts_full"),
 ];
 
 
@@ -593,6 +598,60 @@ pub async fn post_case_comment(client: &ApiClient, source: IpAddr, token: &Secre
         let body = json!({ "text": text }).to_string();
         let bytes = call(client, source, Method::POST, &format!("cases/{id}/comments"), Some(token), Some(body)).await?;
         Ok(serde_json::from_slice(&bytes)?)
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// An item that is not a 64 lowercase hex id or a cursor outside the base64url alphabet is a malformed answer (the item count is the pre-scan's).
+pub fn check_links(page: &AlertLinkPageView) -> Result<(), ApiFailure> {
+    if page.items.iter().any(|item| !valid_id(&item.alert_id)) {
+        Err(ApiFailure::Malformed("links"))
+    } else if page.next_cursor.as_deref().is_some_and(|cursor| !valid_cursor(cursor)) {
+        Err(ApiFailure::Malformed("cursor"))
+    } else {
+        Ok(())
+    }
+}
+
+
+pub fn links_path(id: &str, cursor: Option<&str>) -> String {
+    let mut query = Serializer::new(String::new());
+    query.append_pair("limit", &LINKS_LIMIT.to_string());
+    cursor.iter().for_each(|value| {
+        query.append_pair("cursor", value);
+    });
+    format!("cases/{id}/alerts?{}", query.finish())
+}
+
+
+/// `GET /cases/{id}/alerts`: the case id is checked first, the items are counted on raw slices before the typed decode.
+pub async fn list_case_links(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    id: &str,
+    cursor: Option<&str>,
+) -> Result<AlertLinkPageView, ApiFailure> {
+    if valid_case_id(id) {
+        let bytes = call(client, source, Method::GET, &links_path(id, cursor), Some(token), None).await?;
+        scan_state_items(&bytes, LINKS_LIMIT)?;
+        let page: AlertLinkPageView = serde_json::from_slice(&bytes)?;
+        check_links(&page).map(|()| page)
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// `POST /cases/{id}/alerts`: the case id and the alert id are checked first; nothing of the answer is kept.
+pub async fn post_case_link(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str, alert_id: &str) -> Result<(), ApiFailure> {
+    if valid_case_id(id) && valid_id(alert_id) {
+        let body = json!({ "alert_id": alert_id }).to_string();
+        call(client, source, Method::POST, &format!("cases/{id}/alerts"), Some(token), Some(body))
+            .await
+            .map(|_ignored| ())
     } else {
         Err(ApiFailure::NotFound)
     }

@@ -186,6 +186,7 @@ fn a_conflict_is_one_of_the_fixed_codes_or_a_plain_status() -> TestResult {
         ("full", "error_comment_full"),
         ("run_changed", "error_run_changed"),
         ("triage_changed", "error_triage_changed"),
+        ("alerts_full", "error_alerts_full"),
     ] {
         let body = format!("{{\"error\":{{\"code\":\"{code}\",\"message\":\"m\"}}}}");
         assert!(
