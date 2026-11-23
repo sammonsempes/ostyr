@@ -32,7 +32,8 @@ pub fn observables(record: &Triage, policy: &ReporterPolicy) -> Vec<(ObservableK
         .filter_map(|address| domain_of(address))
         .filter(|domain| !is_internal(policy, domain))
         .map(str::to_ascii_lowercase)
-        .chain(hosts);
+        .chain(hosts)
+        .chain(record.refused_hosts.iter().cloned());
     let urls = record.urls.iter().map(|hit| (ObservableKind::Url, hit.url.clone()));
     let attachments = record.attachments.iter().flat_map(|attachment| {
         let name = attachment.file_name.iter().map(|name| (ObservableKind::Filename, name.clone()));
