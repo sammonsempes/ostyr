@@ -12,6 +12,7 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
+use tokio::sync::Notify;
 use tokio_postgres::Client;
 
 
@@ -31,6 +32,9 @@ const STEP_PAUSE: Duration = Duration::from_millis(300);
 
 
 const SHARED_DEADLINE: Duration = Duration::from_millis(500);
+
+
+const HALF: u32 = 2;
 
 
 const QUERY_CUT: Duration = Duration::from_secs(6);
@@ -140,14 +144,27 @@ async fn a_malformed_sqlstate_from_the_server_is_reduced() -> Result<(), Box<dyn
 #[tokio::test]
 async fn the_set_and_the_query_share_one_deadline() -> Result<(), Box<dyn Error>> {
     let pause = STEP_PAUSE;
-    let handler: Handler = Arc::new(move |sql| if sql.starts_with("SET") { Reply::Sleep(pause) } else { Reply::Hang });
+    let received = Arc::new(Notify::new());
+    let signal = Arc::clone(&received);
+    let handler: Handler = Arc::new(move |sql| {
+        if sql.starts_with("SET") {
+            signal.notify_one();
+            Reply::Sleep(pause)
+        } else {
+            Reply::Hang
+        }
+    });
     let (client, _fake, _dir) = client_with(handler).await?;
-    tokio::time::pause();
     let start = tokio::time::Instant::now();
-    let error = global_query(&client, "SELECT 1", SHARED_DEADLINE).await.err().ok_or("accepted")?;
+    let freeze = async {
+        received.notified().await;
+        tokio::time::pause();
+    };
+    let (outcome, ()) = tokio::join!(global_query(&client, "SELECT 1", SHARED_DEADLINE), freeze);
+    let error = outcome.err().ok_or("accepted")?;
     assert!(matches!(error, PgError::ClientDeadline { .. }), "{error}");
     assert!(start.elapsed() >= QUERY_CUT);
-    assert!(start.elapsed() < QUERY_CUT + STEP_PAUSE);
+    assert!(start.elapsed() < QUERY_CUT + STEP_PAUSE / HALF);
     Ok(())
 }
 
@@ -186,5 +203,16 @@ async fn a_refused_set_is_a_server_error() -> Result<(), Box<dyn Error>> {
     let (client, _fake, _dir) = client_with(handler).await?;
     let error = global_query(&client, "SELECT 1", DEADLINE).await.err().ok_or("accepted")?;
     assert!(matches!(error, PgError::Server { .. }), "{error}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_deadline_that_overflows_is_refused_by_name() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with(by_sql()).await?;
+    let script = execute_script(&client, "X", Duration::MAX).await.err().ok_or("accepted")?;
+    let query = global_query(&client, "SELECT 1", Duration::MAX).await.err().ok_or("accepted")?;
+    assert!(matches!(script, PgError::DeadlineOverflow), "{script}");
+    assert!(matches!(query, PgError::DeadlineOverflow), "{query}");
     Ok(())
 }
