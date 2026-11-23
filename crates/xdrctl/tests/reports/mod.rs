@@ -12,7 +12,7 @@ use xdrctl::model::GrcBodyView;
 use xdrctl::reports::{parse_reply, parse_report_id, shown, valid_framework, CUT_MARK, FRAMEWORK_MAX_BYTES, MAX_LIST_ROWS, MAX_SHOWN_CHARS};
 
 
-const HOSTILE_ESCAPED: &str = "a\\u{1b}\\u{7}\\u{202e}";
+const HOSTILE_ESCAPED: &str = "a\\u{1b}\\u{7}\\u{202e}\\u{3164}b";
 
 
 const HOSTILE_JSON: &str = "a\\u001b\\u0007\\u202e\\u3164b";
@@ -123,15 +123,16 @@ fn hostile_text_is_escaped_and_bounded_in_both_outputs() -> TestResult {
     ];
     for (words, body) in cases {
         let (text, _) = run(words, STATUS_OK, body)?;
-        assert!(!text.out.contains(['\u{1b}', '\u{7}', '\u{202e}']));
+        assert!(!text.out.contains(['\u{1b}', '\u{7}', '\u{202e}', '\u{3164}']));
         assert!(text.out.contains(HOSTILE_ESCAPED));
         assert!(text.out.contains(CUT_MARK));
         assert!(text.out.len() < MAX_SHOWN_CHARS * TEN);
         let mut json_words = vec!["--output", "json"];
         json_words.extend(words.iter());
         let (json_out, _) = run(&json_words, STATUS_OK, body)?;
-        assert!(!json_out.out.contains(['\u{1b}', '\u{7}', '\u{202e}']));
+        assert!(!json_out.out.contains(['\u{1b}', '\u{7}', '\u{202e}', '\u{3164}']));
         assert!(json_out.out.contains("\\u001b"));
+        assert!(json_out.out.contains("\\u3164"));
     }
     Ok(())
 }
@@ -154,7 +155,7 @@ fn rows_beyond_the_cap_are_announced() -> TestResult {
 
 #[test]
 fn bad_arguments_make_no_request() -> TestResult {
-    let refused: [&[&str]; SEVEN] = [
+    let refused: [&[&str]; EIGHT] = [
         &["grc", "show", "1/../2"],
         &["grc", "show", "99999999999999999999"],
         &["grc", "show", "+1"],
@@ -162,6 +163,7 @@ fn bad_arguments_make_no_request() -> TestResult {
         &["attack-paths", "show", "1/../2"],
         &["attack-paths", "show", "x"],
         &["grc", "list", "--framework", "a&tenant=b"],
+        &["grc", "list", "--framework=-x"],
     ];
     for words in refused {
         let (outcome, urls) = run(words, STATUS_OK, "{}")?;
@@ -182,6 +184,33 @@ fn bad_arguments_make_no_request() -> TestResult {
         assert_eq!(outcome.code, USAGE_FAILURE);
         assert!(urls.is_empty());
     }
+    Ok(())
+}
+
+
+#[test]
+fn framework_grammar_agrees_with_grc() -> TestResult {
+    let singles = (0..=u8::MAX).map(|byte| char::from(byte).to_string());
+    let lengths = [FRAMEWORK_MAX_BYTES - 1, FRAMEWORK_MAX_BYTES, FRAMEWORK_MAX_BYTES + 1].map(|count| "a".repeat(count));
+    let hostile = ["-x", "a-", "a b", "\u{e9}", "a\u{e9}", "\u{3164}", "", "iso-27001.v2_x", ".a", "_a"].map(str::to_owned);
+    let prefixed = (0..=u8::MAX).map(|byte| format!("a{}", char::from(byte)));
+    for text in singles.chain(lengths).chain(hostile).chain(prefixed) {
+        assert_eq!(
+            valid_framework(&text),
+            grc::load::is_identifier(&text, grc::load::MAX_ID_CHARS),
+            "{text:?}"
+        );
+    }
+    assert_eq!(FRAMEWORK_MAX_BYTES, grc::load::MAX_ID_CHARS);
+    Ok(())
+}
+
+
+#[test]
+fn blank_letters_match_status_page() -> TestResult {
+    assert_eq!(xdrctl::alerts::BLANK_LETTERS, status_page::store::INVISIBLE_CHARACTERS);
+    assert!(xdrctl::alerts::is_escaped('\u{3164}'));
+    assert!(!xdrctl::alerts::is_hidden('\u{3164}'));
     Ok(())
 }
 
@@ -246,7 +275,7 @@ const FOUR: usize = 4;
 const SIX: usize = 6;
 
 
-const SEVEN: usize = 7;
+const EIGHT: usize = 8;
 
 
 const TEN: usize = 10;
