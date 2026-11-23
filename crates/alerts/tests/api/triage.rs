@@ -13,6 +13,7 @@ use alerts::store::{check_triage, MAX_NOTE_CHARS};
 use axum::body::Body;
 use axum::http::StatusCode;
 use core_api::model::{ApiError, ApiIdentity, Authenticated, RequestId};
+use core_api::routes::BODY_LIMIT_BYTES;
 use core_audit::error::AuditError;
 use core_audit::model::NewEntry;
 use core_pg::error::PgError;
@@ -251,6 +252,22 @@ async fn a_note_of_wide_characters_fits_the_route_limit_and_a_huge_body_is_413()
     assert_eq!(post_raw(&fx, &id, &token, over_route_limit).await?, StatusCode::PAYLOAD_TOO_LARGE);
     let huge = format!("{{\"status\":\"closed\",\"note\":\"{}\"}}", "x".repeat(TEN_MEGABYTES));
     assert_eq!(post_raw(&fx, &id, &token, huge).await?, StatusCode::PAYLOAD_TOO_LARGE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_note_of_escaped_controls_fits_the_limit_and_one_byte_more_is_413() -> TestResult {
+    let (fx, token, id) = seeded().await?;
+    assert_eq!(TRIAGE_BODY_LIMIT.min(BODY_LIMIT_BYTES), TRIAGE_BODY_LIMIT);
+    let escaped = serde_json::to_string(&json!({"status": "closed", "note": "\u{1}".repeat(MAX_NOTE_CHARS)}))?;
+    assert!(escaped.len() <= TRIAGE_BODY_LIMIT);
+    assert_eq!(post_raw(&fx, &id, &token, escaped.clone()).await?, StatusCode::OK);
+    let padded = format!("{escaped}{}", " ".repeat(TRIAGE_BODY_LIMIT - escaped.len()));
+    assert_eq!(padded.len(), TRIAGE_BODY_LIMIT);
+    assert_eq!(post_raw(&fx, &id, &token, padded.clone()).await?, StatusCode::CONFLICT);
+    let over = format!("{padded} ");
+    assert_eq!(post_raw(&fx, &id, &token, over).await?, StatusCode::PAYLOAD_TOO_LARGE);
     Ok(())
 }
 
