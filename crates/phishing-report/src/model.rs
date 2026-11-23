@@ -23,6 +23,7 @@ pub struct Counts {
     pub url_refused_host_kept: usize,
     pub url_host_unread: usize,
     pub url_userinfo_split: usize,
+    pub url_host_ambiguous: usize,
     pub html_refs_undecoded: usize,
     pub addresses_refused: usize,
     pub auth_refused: usize,
@@ -86,8 +87,18 @@ pub struct UrlHit {
 }
 
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Shapes {
+    #[default]
+    Refuse,
+    Markup,
+    Plain,
+}
+
+
 #[derive(Debug, Clone, Default)]
 pub struct UrlIndex {
+    pub shapes: Shapes,
     pub seen: HashSet<String>,
     pub hosts: Vec<String>,
     pub hosts_seen: HashSet<String>,
