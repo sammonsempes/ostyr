@@ -212,6 +212,13 @@ expect "the platform drops every capability" test "$(remote "sudo docker inspect
 expect "the platform has no-new-privileges" test "$(remote "sudo docker inspect --format '{{.HostConfig.SecurityOpt}}' $platform_container")" = "[no-new-privileges:true]"
 expect "no secret value is in the platform environment" absent remote "sudo docker inspect --format '{{.Config.Env}}' $platform_container | grep -i -e password -e BEGIN"
 expect "only the API and web ports are published on the host" test "$(remote "sudo ss -ltnp | grep docker-proxy | awk '{print \$4}' | sed 's/.*://' | sort -un | xargs")" = "8443 9443"
+parsed_config="$(remote "cd compose && sudo docker compose config --format json | python3 -I tests/config-check.py . " || true)"
+printf '%s\n' "$parsed_config"
+expect "the parsed configuration passes every port, mount and secret check" absent grep -q '^FAIL' <<<"$parsed_config"
+expect "the parsed configuration was checked (five checks ran)" test "$(grep -c '^ok' <<<"$parsed_config")" -eq 5
+mutation_output="$(remote "cd compose && sudo tests/mutation-test.sh parsed" || true)"
+printf '%s\n' "$mutation_output"
+expect "every mutated copy is refused by the parsed checks, dash_newline and web_mount_dot included" grep -q '^all mutants refused$' <<<"$mutation_output"
 expect "5432 is closed from the host network" absent remote "nc -z -w 3 $vm_address 5432 || nc -z -w 3 127.0.0.1 5432"
 remote "ss -ltn"
 
