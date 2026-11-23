@@ -1,10 +1,11 @@
 use crate::cardinality::CardinalityState;
 use crate::decode::decode_request;
+use crate::host::host_rows;
 use crate::insert::{encode_rows, insert_batches, EncodeError, RefusedRow};
-use crate::model::Refusal;
+use crate::model::{HostCaller, Limits, Refusal};
 use crate::send::{clickhouse_sender, SendError};
 use crate::settings::{load_settings, LoadError};
-use crate::types::{Dropped, ElapsedFn};
+use crate::types::{BuildFn, Dropped, ElapsedFn};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope};
 use std::collections::BTreeMap;
@@ -48,9 +49,44 @@ pub fn run_insert(
     now_nanos: u64,
     elapsed: &ElapsedFn,
 ) -> Result<RunReport, RunError> {
+    run_with(&decode_request, settings_path, request, tenant, state, now_nanos, elapsed)
+}
+
+
+/// The same run for one `ostyr.host_metrics` event: `agent_id` is the authenticated channel identity and `now_nanos` the receive time.
+pub fn run_host_insert(
+    settings_path: &Path,
+    event: &[u8],
+    tenant: &str,
+    agent_id: &str,
+    state: &mut CardinalityState,
+    now_nanos: u64,
+    elapsed: &ElapsedFn,
+) -> Result<RunReport, RunError> {
+    let build = |bytes: &[u8], scoped: &str, limits: &Limits, seen: &mut CardinalityState| {
+        let caller = HostCaller {
+            tenant: scoped,
+            agent_id,
+            received_nanos: now_nanos,
+        };
+        host_rows(bytes, &caller, limits, seen)
+    };
+    run_with(&build, settings_path, event, tenant, state, now_nanos, elapsed)
+}
+
+
+pub fn run_with(
+    build: &BuildFn<'_>,
+    settings_path: &Path,
+    request: &[u8],
+    tenant: &str,
+    state: &mut CardinalityState,
+    now_nanos: u64,
+    elapsed: &ElapsedFn,
+) -> Result<RunReport, RunError> {
     let scope = tenant_scope(tenant).map_err(RunError::Tenant)?;
     let settings = load_settings(settings_path)?;
-    let outcome = decode_request(request, tenant_of(&scope), &settings.limits, state);
+    let outcome = build(request, tenant_of(&scope), &settings.limits, state);
     let encoded = encode_rows(&outcome.rows, &settings.limits, now_nanos)?;
     let sent = if encoded.batches.is_empty() {
         Ok(0)

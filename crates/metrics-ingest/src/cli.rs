@@ -1,7 +1,7 @@
 use crate::cardinality::CardinalityState;
-use crate::run::{run_insert, write_report, RunError};
+use crate::run::{run_host_insert, run_insert, write_report, RunError};
 use crate::settings::{LoadError, SettingsError};
-use crate::types::ElapsedFn;
+use crate::types::{ElapsedFn, RunFn};
 use core_pg::error::PgError;
 use core_pg::password::read_limited;
 use std::io::{self, Write};
@@ -12,7 +12,10 @@ use thiserror::Error;
 pub const MAX_REQUEST_FILE_BYTES: u64 = 67_108_864;
 
 
-pub const USAGE: &str = "usage: metrics_insert <settings.yaml> <request.pb> <tenant>";
+pub const HOST_MODE: &str = "host";
+
+
+pub const USAGE: &str = "usage: metrics_insert <settings.yaml> <request.pb> <tenant> [host <agent_id>]";
 
 
 #[derive(Debug, Error)]
@@ -31,9 +34,39 @@ pub enum CliError {
 
 
 pub fn run_files(settings: &str, request: &str, tenant: &str, now_nanos: u64, elapsed: &ElapsedFn, out: &mut dyn Write) -> Result<(), CliError> {
+    run_input(&run_insert, settings, request, tenant, now_nanos, elapsed, out)
+}
+
+
+/// The request file holds one host metrics event (JSON), stored for the authenticated `agent_id` instead of an OTLP request.
+pub fn run_host_files(
+    settings: &str,
+    request: &str,
+    tenant: &str,
+    agent_id: &str,
+    now_nanos: u64,
+    elapsed: &ElapsedFn,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let run = |path: &Path, bytes: &[u8], scoped: &str, state: &mut CardinalityState, now: u64, clock: &ElapsedFn| {
+        run_host_insert(path, bytes, scoped, agent_id, state, now, clock)
+    };
+    run_input(&run, settings, request, tenant, now_nanos, elapsed, out)
+}
+
+
+pub fn run_input(
+    run: &RunFn<'_>,
+    settings: &str,
+    request: &str,
+    tenant: &str,
+    now_nanos: u64,
+    elapsed: &ElapsedFn,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
     let bytes = read_limited(Path::new(request), MAX_REQUEST_FILE_BYTES).map_err(CliError::Request)?;
     let mut state = CardinalityState::default();
-    let report = run_insert(Path::new(settings), &bytes, tenant, &mut state, now_nanos, elapsed)?;
+    let report = run(Path::new(settings), &bytes, tenant, &mut state, now_nanos, elapsed)?;
     write_report(&report, out)?;
     report.failed_batch.map_or(Ok(()), |index| Err(CliError::BatchFailed(index)))
 }
@@ -43,6 +76,9 @@ pub fn run_files(settings: &str, request: &str, tenant: &str, now_nanos: u64, el
 pub fn run_cli(args: &[String], now_nanos: u64, elapsed: &ElapsedFn, out: &mut dyn Write) -> Result<(), CliError> {
     match args {
         [settings, request, tenant] => run_files(settings, request, tenant, now_nanos, elapsed, out),
+        [settings, request, tenant, mode, agent_id] if mode == HOST_MODE => {
+            run_host_files(settings, request, tenant, agent_id, now_nanos, elapsed, out)
+        }
         _ => Err(CliError::Usage),
     }
 }
