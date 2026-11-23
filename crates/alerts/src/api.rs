@@ -79,7 +79,19 @@ pub const TRIAGE_ACTION: &str = "alerts.triage";
 
 
 /// The parameters of a triage audit record; the note text is never one of them, only its length.
-pub const TRIAGE_AUDIT_KEYS: [&str; 4] = ["rule_id", "status", "version", "note_chars"];
+pub const TRIAGE_AUDIT_KEYS: [&str; 5] = ["rule_id", "status", "version", "note_chars", "reason"];
+
+
+pub const INVALID_TARGET: &str = "invalid";
+
+
+pub const REASON_CONFLICT: &str = "conflict";
+
+
+pub const REASON_BAD_REQUEST: &str = "bad_request";
+
+
+pub const REASON_NOT_FOUND: &str = "not_found";
 
 
 pub const NO_REQUEST_ID: &str = "none";
@@ -372,6 +384,36 @@ pub fn triage_entry(
 }
 
 
+/// The audit record of one refused triage: the fixed `reason` only, never the note, the status text or the path text.
+pub fn refusal_entry(identity: &ApiIdentity, actor: &str, target: &str, stamp: AuditStamp<'_>, reason: &str) -> NewEntry {
+    NewEntry {
+        timestamp: stamp.timestamp,
+        actor: Actor {
+            kind: ActorKind::User,
+            id: actor.to_owned(),
+        },
+        tenant: identity.tenant.clone(),
+        module: identity.module.clone(),
+        action: TRIAGE_ACTION.to_owned(),
+        target: target.to_owned(),
+        outcome: Outcome::Failure,
+        request_id: stamp.request_id.to_owned(),
+        justification: None,
+        parameters: [("reason".to_owned(), reason.to_owned())].into_iter().collect(),
+    }
+}
+
+
+/// The fixed reason a store refusal is audited under; any other store error writes no record.
+pub fn refusal_reason(error: &StoreError) -> Option<&'static str> {
+    match error {
+        StoreError::NotFound | StoreError::BadId => Some(REASON_NOT_FOUND),
+        StoreError::Conflict => Some(REASON_CONFLICT),
+        _other => None,
+    }
+}
+
+
 pub fn request_id_of(found: Option<&RequestId>) -> String {
     found.map_or_else(|| NO_REQUEST_ID.to_owned(), |known| known.0.clone())
 }
@@ -405,9 +447,16 @@ pub async fn triage_flow(
             let scope = scope_of(identity).map_err(|error| store_failure(&error))?;
             let actor = actor_of(session)?;
             let checked = id.ok().filter(|text| is_alert_id(text));
+            let refused = |target: &str, reason: &str| audit_triage(audit, refusal_entry(identity, &actor, target, stamp, reason));
             match (checked, request_fault(&request)) {
-                (None, _) => Ok(not_found()),
-                (Some(_), Some(refusal)) => Ok(refusal),
+                (None, _) => {
+                    refused(INVALID_TARGET, REASON_NOT_FOUND)?;
+                    Ok(not_found())
+                }
+                (Some(text), Some(refusal)) => {
+                    refused(&text, REASON_BAD_REQUEST)?;
+                    Ok(refusal)
+                }
                 (Some(text), None) => {
                     let note_chars = request.note.as_deref().map_or(0, |note| note.chars().count());
                     let change = TriageChange {
@@ -425,7 +474,11 @@ pub async fn triage_flow(
                             )?;
                             Ok(Json(triage_view(&written.triage).map_err(|error| store_failure(&error))?).into_response())
                         }
-                        Err(error) => triage_failure(&error),
+                        Err(error) => {
+                            let response = triage_failure(&error)?;
+                            refusal_reason(&error).map(|reason| refused(&text, reason)).transpose()?;
+                            Ok(response)
+                        }
                     }
                 }
             }

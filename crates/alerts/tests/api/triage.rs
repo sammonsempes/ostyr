@@ -5,7 +5,7 @@ use crate::fixture::{
 use crate::http::{body_json, call, get, login};
 use crate::memory::{lock, Forced};
 use crate::types::{TestError, TestResult};
-use alerts::api::{actor_of, alerts_document, request_id_of, triage_entry, triage_flow, TRIAGE_AUDIT_KEYS, TRIAGE_BODY_LIMIT};
+use alerts::api::{actor_of, alerts_document, refusal_reason, request_id_of, triage_entry, triage_flow, TRIAGE_AUDIT_KEYS, TRIAGE_BODY_LIMIT};
 use alerts::backend::unix_micros;
 use alerts::error::StoreError;
 use alerts::model::{AlertDetail, AuditStamp, Backend, Triage, TriageChange, TriageRequest, TriageStatus, Triaged};
@@ -533,7 +533,7 @@ async fn other_spellings_of_the_verdict_are_the_typed_body_400() -> TestResult {
 
 
 #[tokio::test]
-async fn each_successful_write_is_audited_without_the_note_and_each_refusal_is_not() -> TestResult {
+async fn each_write_is_audited_without_the_note_and_each_refusal_is_a_failure_record() -> TestResult {
     let (fx, token, id) = seeded().await?;
     let reader = login(&fx.router, READER).await?;
     let other = alert(OTHER_TENANT, "r9", &["e9"], BASE_TIME);
@@ -543,12 +543,27 @@ async fn each_successful_write_is_audited_without_the_note_and_each_refusal_is_n
     post(&fx, &other.id, Some(&token), &json!({"status": "false_positive", "note": secret_note})).await?;
     post(&fx, &id, Some(&token), &json!({"status": "false_positive"})).await?;
     post(&fx, &id, Some(&token), &json!({"status": "closed", "version": FIRST_VERSION})).await?;
-    assert!(triage_records(&fx)?.is_empty());
+    let refusals = triage_records(&fx)?;
+    let reasons = refusals
+        .iter()
+        .map(|record| (record.get("outcome").cloned(), record.get("parameters").cloned()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasons,
+        ["not_found", "bad_request", "conflict"]
+            .map(|reason| (Some(json!("failure")), Some(json!({"reason": reason}))))
+            .to_vec()
+    );
+    assert_eq!(
+        refusals.iter().map(|record| record.get("target").cloned()).collect::<Vec<_>>(),
+        [&other.id, &id, &id].map(|target| Some(json!(target))).to_vec()
+    );
+    assert!(!fs::read_to_string(fx._dir.path().join("audit.log"))?.contains(secret_note));
     let (written, _) = post(&fx, &id, Some(&token), &json!({"status": "false_positive", "note": secret_note})).await?;
     assert_eq!(written, StatusCode::OK);
     let (next, _) = post(&fx, &id, Some(&token), &json!({"status": "acknowledged", "version": FIRST_VERSION})).await?;
     assert_eq!(next, StatusCode::OK);
-    let records = triage_records(&fx)?;
+    let records = triage_records(&fx)?.into_iter().skip(refusals.len()).collect::<Vec<_>>();
     assert_eq!(records.len(), SECOND_VERSION as usize);
     let first = records.first().ok_or("no record")?;
     assert_eq!(
@@ -632,8 +647,11 @@ fn the_entry_names_actor_tenant_alert_rule_status_version_and_the_note_length_on
         (ANALYST, TENANT, "abc", "rid", "alerts.triage")
     );
     assert!(entry.parameters.values().all(|value| value != "secret"));
-    assert_eq!(entry.parameters.len(), TRIAGE_AUDIT_KEYS.len());
-    assert!(TRIAGE_AUDIT_KEYS.iter().all(|key| entry.parameters.contains_key(*key)));
+    assert_eq!(entry.parameters.len(), TRIAGE_AUDIT_KEYS.len() - 1);
+    assert!(TRIAGE_AUDIT_KEYS
+        .iter()
+        .filter(|key| **key != "reason")
+        .all(|key| entry.parameters.contains_key(*key)));
     assert_eq!(request_id_of(None), "none");
     assert_eq!(request_id_of(Some(&RequestId("x".to_owned()))), "x");
     Ok(())
@@ -697,4 +715,30 @@ fn stamp() -> AuditStamp<'static> {
         request_id: "rid",
         timestamp: frozen_clock(),
     }
+}
+
+
+#[tokio::test]
+async fn a_malformed_id_is_audited_under_a_fixed_target() -> TestResult {
+    let (fx, token, _id) = seeded().await?;
+    let (status, _) = post(&fx, "abc-secret-path", Some(&token), &json!({"status": "closed", "note": "secret-note"})).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let records = triage_records(&fx)?;
+    let record = records.first().ok_or("no record")?;
+    assert_eq!(record.get("target"), Some(&json!("invalid")));
+    assert_eq!(record.get("parameters"), Some(&json!({"reason": "not_found"})));
+    let text = fs::read_to_string(fx._dir.path().join("audit.log"))?;
+    assert!(!text.contains("secret"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_failed_refusal_append_is_the_generic_500_and_a_store_fault_writes_no_record() -> TestResult {
+    let (fx, token, id) = seeded().await?;
+    lock_audit(&fx)?;
+    let (status, _) = post(&fx, &id, Some(&token), &json!({"status": "closed", "version": FIRST_VERSION})).await?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(refusal_reason(&StoreError::Busy).is_none());
+    Ok(())
 }
