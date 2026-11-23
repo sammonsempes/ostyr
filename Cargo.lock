@@ -5539,6 +5539,7 @@ version = "0.0.0"
 dependencies = [
  "core-audit",
  "core-config",
+ "core-pg",
  "humantime",
  "minijinja",
  "proptest",
@@ -5550,6 +5551,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tracing",
+ "unicode-general-category",
 ]
 
 [[package]]

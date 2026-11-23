@@ -123,3 +123,12 @@ pub enum CommandError {
     #[error(transparent)]
     Invalid(#[from] ValidationError),
 }
+
+
+#[derive(Debug, Error)]
+pub enum DryRunError {
+    #[error("cannot prepare the scratch breaker state: {0}")]
+    Scratch(#[from] io::Error),
+    #[error("cannot open the scratch breakers: {0}")]
+    Breakers(#[from] response_breakers::error::BreakerError),
+}
