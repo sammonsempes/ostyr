@@ -1,5 +1,6 @@
 //! Playbook parsing, validation and simulation (spec section 10); nothing here executes an action.
 
+pub mod batch;
 pub mod bundle;
 pub mod catalogue;
 pub mod cli;
