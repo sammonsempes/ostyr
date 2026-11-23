@@ -1,16 +1,17 @@
 use crate::api::{
     encode_asset_id, parse_dhcp_address, parse_dhcp_mac, risk_kind, valid_asset_id, valid_case_id, valid_dhcp_hostname, valid_id, valid_oncall_text,
     valid_pack_id, valid_shell_hash, valid_shell_reference, valid_shell_subject, valid_state_asset, valid_state_id, valid_vuln_asset,
-    valid_vuln_field, vuln_score, CERT_FILTERS, ID_LENGTH, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_ONCALL_FINGERPRINT_BYTES, MAX_RISK_VALUE,
-    MAX_SHELL_REFERENCE_BYTES, MAX_SHELL_SUBJECT_BYTES, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, RISK_KINDS, RUN_CHANGED_KEY, SHELL_OPEN_ONLY,
-    STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX, VULN_EPSS_MAX,
+    valid_vuln_field, vuln_score, CERT_FILTERS, ID_LENGTH, MAX_COMMENT_CHARS, MAX_NOTE_CHARS, MAX_OBSERVABLE_CHARS, MAX_ONCALL_FINGERPRINT_BYTES,
+    MAX_RISK_VALUE, MAX_SHELL_REFERENCE_BYTES, MAX_SHELL_SUBJECT_BYTES, MAX_SOURCE_CHARS, MAX_STATE_ID_CHARS, MIN_SHELL_FRAMES, OBSERVABLE_IOCS,
+    OBSERVABLE_KINDS, OBSERVABLE_PAPS, OBSERVABLE_TLPS, RISK_KINDS, RUN_CHANGED_KEY, SHELL_OPEN_ONLY, STATE_VERDICTS, VERDICT_ALL, VULN_CVSS_MAX,
+    VULN_EPSS_MAX,
 };
 use crate::model::{
     Alert, AlertDetailView, AlertPage, AssetDetailView, AssetPageView, AssetSummaryView, CaseDetailView, CasePageView, CaseSummaryView,
-    CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LinksPanel, LookupView, OncallAlertView,
-    OncallListView, PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView, RiskTruncatedView, ShellEnd,
-    ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView, VulnAssetView, VulnListView,
-    VulnView,
+    CertDetailView, CertListView, CertView, CommentView, FindingView, FindingsView, Language, LeaseView, LinksPanel, LookupView, ObservableView,
+    ObservablesPanel, OncallAlertView, OncallListView, PostureFindingView, PostureRunView, PostureView, RiskDetailView, RiskEntityView, RiskListView,
+    RiskTruncatedView, ShellEnd, ShellFacts, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, StateView, TriageView,
+    VulnAssetView, VulnListView, VulnView,
 };
 use crate::strings::{
     action_key, allowed_actions, case_severity_class, case_severity_key, dhcp_action_key, language_tag, posture_severity_key, posture_status_key,
@@ -744,6 +745,107 @@ pub fn links_panel(language: Language, case_id: &str, panel: &LinksPanel) -> Mar
 }
 
 
+/// The observables: a table whose labels come from fixed tables, the value through `clip`, each other case a GET form to it.
+pub fn observables_panel(language: Language, panel: &ObservablesPanel) -> Markup {
+    html! {
+        @match panel {
+            ObservablesPanel::Absent => {}
+            ObservablesPanel::Unavailable => {
+                h2 { (text(language, "obs_title")) }
+                div { (text(language, "obs_unavailable")) }
+            }
+            ObservablesPanel::Shown(list) => {
+                h2 { (text(language, "obs_title")) }
+                @if list.items.is_empty() {
+                    div { (text(language, "obs_none")) }
+                } @else {
+                    table {
+                        tr {
+                            th { (text(language, "obs_col_kind")) }
+                            th { (text(language, "obs_col_value")) }
+                            th { "TLP" }
+                            th { "PAP" }
+                            th { (text(language, "obs_col_ioc")) }
+                            th { (text(language, "obs_col_seen")) }
+                        }
+                        @for item in &list.items { (observable_row(language, item)) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+pub fn table_label(language: Language, table: &'static [(&'static str, &'static str)], name: &str, translated: bool) -> &'static str {
+    table.iter().find(|(known, _)| *known == name).map_or(
+        text(language, "unknown"),
+        |(_, label)| if translated { text(language, label) } else { label },
+    )
+}
+
+
+pub fn observable_row(language: Language, item: &ObservableView) -> Markup {
+    html! {
+        tr {
+            td { (table_label(language, &OBSERVABLE_KINDS, &item.kind, true)) }
+            td { (clip(language, &item.value, MAX_OBSERVABLE_CHARS)) }
+            td { (table_label(language, &OBSERVABLE_TLPS, &item.tlp, false)) }
+            td { (table_label(language, &OBSERVABLE_PAPS, &item.pap, false)) }
+            td { (table_label(language, &OBSERVABLE_IOCS, &item.ioc, true)) }
+            td {
+                @for case in &item.seen_in { (go(&format!("/cases/{case}"), case)) }
+                @if item.seen_in_truncated { div { (text(language, "obs_more_cases")) } }
+            }
+        }
+    }
+}
+
+
+pub fn select_options(language: Language, table: &'static [(&'static str, &'static str)], chosen: &str, translated: bool) -> Markup {
+    html! {
+        @for (name, label) in table {
+            option value=(name) selected[*name == chosen] { (if translated { text(language, label) } else { label }) }
+        }
+    }
+}
+
+
+/// The add form: four fixed selects and two text fields; the handler checks every one again.
+pub fn observable_form(language: Language, csrf: &str, id: &str) -> Markup {
+    html! {
+        form method="post" action=(format!("/cases/{id}/observables")) {
+            input type="hidden" name="csrf" value=(csrf);
+            label {
+                (text(language, "obs_f_kind"))
+                select name="kind" { (select_options(language, &OBSERVABLE_KINDS, "ip", true)) }
+            }
+            label {
+                (text(language, "obs_f_value"))
+                input type="text" name="value" required maxlength=(MAX_OBSERVABLE_CHARS);
+            }
+            label {
+                "TLP"
+                select name="tlp" { (select_options(language, &OBSERVABLE_TLPS, "amber", false)) }
+            }
+            label {
+                "PAP"
+                select name="pap" { (select_options(language, &OBSERVABLE_PAPS, "amber", false)) }
+            }
+            label {
+                (text(language, "obs_f_ioc"))
+                select name="ioc" { (select_options(language, &OBSERVABLE_IOCS, "suspected", true)) }
+            }
+            label {
+                (text(language, "obs_f_source"))
+                input type="text" name="source" required maxlength=(MAX_SOURCE_CHARS);
+            }
+            button type="submit" { (text(language, "obs_submit")) }
+        }
+    }
+}
+
+
 /// The write forms exist only for an id inside the case grammar, because the id becomes part of their action.
 pub fn case_forms(language: Language, csrf: &str, case: &CaseDetailView) -> Markup {
     let id = &case.summary.id;
@@ -753,6 +855,7 @@ pub fn case_forms(language: Language, csrf: &str, case: &CaseDetailView) -> Mark
             @for action in allowed_actions(&case.summary.status) { (action_form(language, csrf, id, action)) }
             (comment_form(language, csrf, id))
             (link_form(language, csrf, id))
+            (observable_form(language, csrf, id))
         }
     }
 }
@@ -811,6 +914,18 @@ pub fn case_page_with(language: Language, csrf: &str, case: &CaseDetailView, com
 
 
 pub fn case_page_full(language: Language, csrf: &str, case: &CaseDetailView, comment: Option<&CommentView>, panel: &LinksPanel) -> Markup {
+    case_page_all(language, csrf, case, comment, (panel, &ObservablesPanel::Absent, false))
+}
+
+
+/// The case page with both panels; `already` adds the note that the submitted observable was already held.
+pub fn case_page_all(
+    language: Language,
+    csrf: &str,
+    case: &CaseDetailView,
+    comment: Option<&CommentView>,
+    (panel, observables, already): (&LinksPanel, &ObservablesPanel, bool),
+) -> Markup {
     let summary = &case.summary;
     layout(
         language,
@@ -843,7 +958,9 @@ pub fn case_page_full(language: Language, csrf: &str, case: &CaseDetailView, com
             h2 { (text(language, "case_counts")) }
             (case_counts(language, case))
             @if let Some(stored) = comment { (comment_notice(language, stored)) }
+            @if already { div class="notice" { (text(language, "obs_already")) } }
             (links_panel(language, &summary.id, panel))
+            (observables_panel(language, observables))
             (case_forms(language, csrf, case))
             (go("/cases",text(language, "case_back")))
         },

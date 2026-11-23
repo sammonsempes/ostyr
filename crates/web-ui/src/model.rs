@@ -143,6 +143,46 @@ pub enum LinksPanel {
 }
 
 
+/// One observable of a case as `GET /cases/{id}/observables` lists it; the enum names stay text until the fixed tables check them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ObservableView {
+    pub kind: String,
+    pub value: String,
+    pub tlp: String,
+    pub pap: String,
+    pub ioc: String,
+    pub seen_in: Vec<String>,
+    pub seen_in_truncated: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ObservableListView {
+    pub items: Vec<ObservableView>,
+}
+
+
+/// The observables panel of the case page: left out, our unavailable text, or the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservablesPanel {
+    Absent,
+    Unavailable,
+    Shown(ObservableListView),
+}
+
+
+/// The five fields of a new observable, each already checked against its fixed table or shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewObservable<'form> {
+    pub kind: &'static str,
+    pub value: &'form str,
+    pub tlp: &'static str,
+    pub pap: &'static str,
+    pub ioc: &'static str,
+    pub source: &'form str,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CommentView {
     pub author: String,

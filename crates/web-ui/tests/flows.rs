@@ -6,6 +6,8 @@ mod harness;
 mod link_flows;
 #[path = "support/logging.rs"]
 mod logging;
+#[path = "support/observable_flows.rs"]
+mod observable_flows;
 #[path = "support/posture_flows.rs"]
 mod posture_flows;
 #[cfg(unix)]

@@ -1,8 +1,8 @@
 use crate::error::{unavailable, ApiFailure};
 use crate::model::{
     Alert, AlertDetailView, AlertLinkPageView, AlertPage, ApiClient, AssetDetailView, AssetPageView, CaseDetailView, CasePageView, CertDetailView,
-    CertListView, CommentView, DhcpQuery, FindingsView, LookupView, OncallAlertView, OncallListView, PostureView, RiskDetailView, RiskListView,
-    ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
+    CertListView, CommentView, DhcpQuery, FindingsView, LookupView, NewObservable, ObservableListView, OncallAlertView, OncallListView, PostureView,
+    RiskDetailView, RiskListView, ShellListView, ShellQuery, ShellSessionView, StateAssetView, StateListView, VulnAssetView, VulnListView,
 };
 use crate::strings::checked_triage_status;
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
@@ -652,6 +652,185 @@ pub async fn post_case_link(client: &ApiClient, source: IpAddr, token: &SecretSt
         call(client, source, Method::POST, &format!("cases/{id}/alerts"), Some(token), Some(body))
             .await
             .map(|_ignored| ())
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+/// The cases module's `MAX_OBSERVABLES`: the most items the observables list may hold; change both together.
+pub const MAX_OBSERVABLES: usize = 500;
+
+
+/// The cases module's `SEEN_IN_LIMIT`: the most case ids one observable lists.
+pub const MAX_SEEN_IN: usize = 20;
+
+
+/// The cases module's `MAX_OBSERVABLE_CHARS`.
+pub const MAX_OBSERVABLE_CHARS: usize = 2_048;
+
+
+/// The cases module's `MAX_NAME_CHARS`, the cap of the source.
+pub const MAX_SOURCE_CHARS: usize = 256;
+
+
+/// The API's `full` conflict code reads as the comment text elsewhere; on the observables route it can only mean observables.
+pub const OBSERVABLES_FULL_KEY: &str = "error_observables_full";
+
+
+pub const COMMENT_FULL_KEY: &str = "error_comment_full";
+
+
+/// The API's enum names with our text key: `kind`.
+pub const OBSERVABLE_KINDS: [(&str, &str); 7] = [
+    ("ip", "obs_kind_ip"),
+    ("domain", "obs_kind_domain"),
+    ("url", "obs_kind_url"),
+    ("hash", "obs_kind_hash"),
+    ("email", "obs_kind_email"),
+    ("filename", "obs_kind_filename"),
+    ("other", "obs_kind_other"),
+];
+
+
+/// `tlp` with its fixed label (language neutral).
+pub const OBSERVABLE_TLPS: [(&str, &str); 5] = [
+    ("clear", "TLP:CLEAR"),
+    ("green", "TLP:GREEN"),
+    ("amber", "TLP:AMBER"),
+    ("amber_strict", "TLP:AMBER+STRICT"),
+    ("red", "TLP:RED"),
+];
+
+
+/// `pap` with its fixed label (language neutral).
+pub const OBSERVABLE_PAPS: [(&str, &str); 4] = [("clear", "PAP:CLEAR"), ("green", "PAP:GREEN"), ("amber", "PAP:AMBER"), ("red", "PAP:RED")];
+
+
+pub const OBSERVABLE_IOCS: [(&str, &str); 3] = [
+    ("not_ioc", "obs_ioc_not_ioc"),
+    ("suspected", "obs_ioc_suspected"),
+    ("confirmed", "obs_ioc_confirmed"),
+];
+
+
+/// The table row of `name`, so only the table's own strings ever reach the API.
+pub fn table_row(table: &'static [(&'static str, &'static str)], name: &str) -> Option<&'static (&'static str, &'static str)> {
+    table.iter().find(|(known, _)| *known == name)
+}
+
+
+/// A form text for the API: not blank, at most `max` characters, no character `is_unsafe` refuses.
+pub fn observable_text(text: &str, max: usize) -> bool {
+    !text.trim().is_empty() && text.chars().take(max + 1).count() <= max && !text.chars().any(is_unsafe)
+}
+
+
+/// The five fields of the form against the fixed tables and the shapes; `None` is a refusal.
+pub fn checked_observable<'form>(
+    (kind, tlp, pap, ioc): (&str, &str, &str, &str),
+    (value, source): (&'form str, &'form str),
+) -> Option<NewObservable<'form>> {
+    let kind_row = table_row(&OBSERVABLE_KINDS, kind)?;
+    let tlp_row = table_row(&OBSERVABLE_TLPS, tlp)?;
+    let pap_row = table_row(&OBSERVABLE_PAPS, pap)?;
+    let ioc_row = table_row(&OBSERVABLE_IOCS, ioc)?;
+    Some(NewObservable {
+        kind: kind_row.0,
+        value,
+        tlp: tlp_row.0,
+        pap: pap_row.0,
+        ioc: ioc_row.0,
+        source,
+    })
+    .filter(|new| observable_text(new.value, MAX_OBSERVABLE_CHARS) && observable_text(new.source, MAX_SOURCE_CHARS))
+}
+
+
+#[derive(Deserialize)]
+pub struct SeenScan<'a> {
+    #[serde(borrow)]
+    pub seen_in: Vec<&'a RawValue>,
+}
+
+
+#[derive(Deserialize)]
+pub struct AddedScan {
+    pub already_present: bool,
+}
+
+
+/// Counts the items, then the `seen_in` ids of each, on raw slices before any typed value is built.
+pub fn scan_observables(bytes: &[u8]) -> Result<(), ApiFailure> {
+    let scan: ListScan = serde_json::from_slice(bytes)?;
+    if scan.items.len() > MAX_OBSERVABLES {
+        Err(ApiFailure::Malformed("too many items"))
+    } else {
+        scan.items.iter().try_for_each(|item| {
+            let seen: SeenScan = serde_json::from_str(item.get())?;
+            if seen.seen_in.len() > MAX_SEEN_IN {
+                Err(ApiFailure::Malformed("too many cases"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+
+/// Every enum name is one of the tables' and every `seen_in` id inside the case grammar, else the whole list is malformed.
+pub fn check_observables(list: &ObservableListView) -> Result<(), ApiFailure> {
+    let sound = list.items.iter().all(|item| {
+        table_row(&OBSERVABLE_KINDS, &item.kind).is_some()
+            && table_row(&OBSERVABLE_TLPS, &item.tlp).is_some()
+            && table_row(&OBSERVABLE_PAPS, &item.pap).is_some()
+            && table_row(&OBSERVABLE_IOCS, &item.ioc).is_some()
+            && item.seen_in.iter().all(|case| valid_case_id(case))
+    });
+    if sound {
+        Ok(())
+    } else {
+        Err(ApiFailure::Malformed("observables"))
+    }
+}
+
+
+/// `GET /cases/{id}/observables`: the case id is checked first, items and `seen_in` are counted before the typed decode.
+pub async fn list_case_observables(client: &ApiClient, source: IpAddr, token: &SecretString, id: &str) -> Result<ObservableListView, ApiFailure> {
+    if valid_case_id(id) {
+        let bytes = call(client, source, Method::GET, &format!("cases/{id}/observables"), Some(token), None).await?;
+        scan_observables(&bytes)?;
+        let list: ObservableListView = serde_json::from_slice(&bytes)?;
+        check_observables(&list).map(|()| list)
+    } else {
+        Err(ApiFailure::NotFound)
+    }
+}
+
+
+pub fn observables_full(failure: ApiFailure) -> ApiFailure {
+    match failure {
+        ApiFailure::Conflict(COMMENT_FULL_KEY) => ApiFailure::Conflict(OBSERVABLES_FULL_KEY),
+        other => other,
+    }
+}
+
+
+/// `POST /cases/{id}/observables`: the case id is checked first; the answer is read for `already_present` only.
+pub async fn post_case_observable(
+    client: &ApiClient,
+    source: IpAddr,
+    token: &SecretString,
+    id: &str,
+    new: &NewObservable<'_>,
+) -> Result<bool, ApiFailure> {
+    if valid_case_id(id) {
+        let body = json!({ "kind": new.kind, "value": new.value, "tlp": new.tlp, "pap": new.pap, "ioc": new.ioc, "source": new.source }).to_string();
+        let bytes = call(client, source, Method::POST, &format!("cases/{id}/observables"), Some(token), Some(body))
+            .await
+            .map_err(observables_full)?;
+        let added: AddedScan = serde_json::from_slice(&bytes)?;
+        Ok(added.already_present)
     } else {
         Err(ApiFailure::NotFound)
     }
