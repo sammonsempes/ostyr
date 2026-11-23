@@ -156,10 +156,13 @@ fn schema_statements_match_their_goldens() -> TestResult {
          `currency` LowCardinality(String),\n    `version` UInt64\n)\nENGINE = ReplacingMergeTree(`version`)\n\
          ORDER BY (`tenant`, `account`, `source`, `day`, `dimension`, `key1`, `key2`)\nTTL `day` + INTERVAL 400 DAY DELETE"
     );
-    assert_eq!(insert_statement(&config)?, "INSERT INTO `ostyr`.`cloud_cost_daily` FORMAT JSONEachRow");
+    assert_eq!(
+        insert_statement(&config)?,
+        "INSERT INTO `ostyr`.`cloud_cost_daily` SETTINGS async_insert = 0 FORMAT JSONEachRow"
+    );
     assert_eq!(
         delete_statement(&config)?,
-        "DELETE FROM `ostyr`.`cloud_cost_daily` WHERE tenant = {tenant:String} AND account IN {accounts:Array(String)} AND day >= {first:Date} AND day <= {last:Date}"
+        "DELETE FROM `ostyr`.`cloud_cost_daily` WHERE tenant = {tenant:String} AND account IN {accounts:Array(String)} AND day >= {first:Date} AND day <= {last:Date} SETTINGS lightweight_deletes_sync = 2"
     );
     let mut bad = config;
     bad.table = "x`y".to_owned();

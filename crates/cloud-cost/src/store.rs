@@ -135,14 +135,17 @@ pub fn next_generation(previous: u64, now_ms: u64) -> u64 {
 
 
 pub fn insert_statement(config: &CostLoadConfig) -> Result<String, SchemaError> {
-    Ok(format!("INSERT INTO {} FORMAT JSONEachRow", qualified(&config.database, &config.table)?))
+    Ok(format!(
+        "INSERT INTO {} SETTINGS async_insert = 0 FORMAT JSONEachRow",
+        qualified(&config.database, &config.table)?
+    ))
 }
 
 
 /// Lightweight delete of the tenant's rows of the export's billing accounts in a day range; every value is a bound parameter.
 pub fn delete_statement(config: &CostLoadConfig) -> Result<String, SchemaError> {
     Ok(format!(
-        "DELETE FROM {} WHERE tenant = {{tenant:String}} AND account IN {{accounts:Array(String)}} AND day >= {{first:Date}} AND day <= {{last:Date}}",
+        "DELETE FROM {} WHERE tenant = {{tenant:String}} AND account IN {{accounts:Array(String)}} AND day >= {{first:Date}} AND day <= {{last:Date}} SETTINGS lightweight_deletes_sync = 2",
         qualified(&config.database, &config.table)?
     ))
 }
