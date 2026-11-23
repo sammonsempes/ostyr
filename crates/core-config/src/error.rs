@@ -1,6 +1,7 @@
 use crate::types::BoxError;
 use core_audit::error::AuditError;
 use std::io;
+use std::path::PathBuf;
 use thiserror::Error;
 
 
@@ -74,4 +75,14 @@ pub enum ReloadRefusal {
 pub enum WatchError {
     #[error("cannot watch: {0}")]
     Notify(#[from] notify::Error),
+    #[error("cannot watch {0}: a drive without a root is relative to the drive's current directory, give a full path")]
+    DriveRelative(PathBuf),
+    #[error("cannot watch {0}: a root without a drive depends on the current drive, give a full path")]
+    RootRelative(PathBuf),
+    #[error("cannot watch {0}: a short 8.3 name is never reported by the file system, use another name")]
+    ShortName(PathBuf),
+    #[error("cannot watch {0}: a ':' after the drive is stream syntax and never matches an event")]
+    StreamSyntax(PathBuf),
+    #[error("cannot watch {0}: the file name must be ASCII letters, digits, '.', '_' or '-' and not end in a dot")]
+    FileName(PathBuf),
 }

@@ -5,6 +5,8 @@ use core_audit::error::AuditError;
 use core_audit::model::{NewEntry, Record};
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::ffi::OsStr;
+use std::path::Path;
 
 
 pub type SecretMap = BTreeMap<String, SecretRef>;
@@ -44,3 +46,9 @@ pub type ValidateFn<Config> = dyn Fn(&Config) -> Result<(), BoxError> + Send + S
 
 
 pub type ApplySectionFn<Config> = dyn Fn(&Config) + Send + Sync;
+
+
+pub type NameEqFn = fn(&OsStr, &OsStr) -> bool;
+
+
+pub type PathCheckFn = fn(&Path) -> Result<(), crate::error::WatchError>;
