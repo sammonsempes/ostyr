@@ -4,6 +4,7 @@ use crate::types::{MigrationPlan, PageLoader, Parts};
 use alerts::backend::MAX_CONNECTIONS;
 use alerts::settings::SETTING_PG;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
+use attack_paths::store::{MIGRATIONS as ATTACK_MIGRATIONS, MIGRATION_NAMESPACE as ATTACK_NAMESPACE};
 use axum::Router;
 use cases::store::{MIGRATIONS as CASE_MIGRATIONS, MIGRATION_NAMESPACE as CASE_NAMESPACE};
 use cert_inventory::store::{MIGRATIONS as CERT_MIGRATIONS, MIGRATION_NAMESPACE as CERT_NAMESPACE};
@@ -19,6 +20,7 @@ use core_config::types::SettingsMap;
 use core_pg::migrate::Migration;
 use core_pg::settings::PgSettings;
 use dhcp_kea::cursor::{MIGRATIONS as DHCP_MIGRATIONS, MIGRATION_NAMESPACE as DHCP_NAMESPACE};
+use grc::store::{MIGRATIONS as GRC_MIGRATIONS, MIGRATION_NAMESPACE as GRC_NAMESPACE};
 use hunt_packs::store::{MIGRATIONS as HUNT_MIGRATIONS, MIGRATION_NAMESPACE as HUNT_NAMESPACE};
 use oncall::store::{MIGRATIONS as ONCALL_MIGRATIONS, MIGRATION_NAMESPACE as ONCALL_NAMESPACE};
 use remote_shell::store::{MIGRATIONS as RSHELL_MIGRATIONS, MIGRATION_NAMESPACE as RSHELL_NAMESPACE};
@@ -103,6 +105,12 @@ const POSTURE_PLAN: &[Migration] = &POSTURE_MIGRATIONS;
 const STATUS_PLAN: &[Migration] = &STATUS_MIGRATIONS;
 
 
+const GRC_PLAN: &[Migration] = &GRC_MIGRATIONS;
+
+
+const ATTACK_PLAN: &[Migration] = &ATTACK_MIGRATIONS;
+
+
 pub fn module_of(name: &str) -> Option<Module> {
     match name {
         "alerts" => Some(Module::Alerts),
@@ -118,6 +126,8 @@ pub fn module_of(name: &str) -> Option<Module> {
         "remote_shell" => Some(Module::RemoteShell),
         "posture" => Some(Module::Posture),
         "status" => Some(Module::Status),
+        "grc" => Some(Module::Grc),
+        "attack_paths" => Some(Module::AttackPaths),
         _ => None,
     }
 }
@@ -280,6 +290,11 @@ pub fn module_router(
             Arc::clone(engine),
             Arc::clone(permits),
         ))),
+        Module::Grc => Ok(grc::api::grc_router(grc::backend::pg_backend(Arc::clone(engine), Arc::clone(permits)))),
+        Module::AttackPaths => Ok(attack_paths::api::attack_paths_router(attack_paths::backend::pg_backend(
+            Arc::clone(engine),
+            Arc::clone(permits),
+        ))),
         Module::Status => page.ok_or(PlatformError::MissingPageFile).map(|held| {
             status_page::api::status_router(status_page::backend::pg_backend(
                 Arc::clone(engine),
@@ -313,6 +328,8 @@ pub fn module_access(module: Module) -> AccessTable {
         Module::RemoteShell => remote_shell::api::remote_shell_access(),
         Module::Posture => cloud_posture::api::posture_access(),
         Module::Status => status_page::api::status_access(),
+        Module::Grc => grc::api::grc_access(),
+        Module::AttackPaths => attack_paths::api::attack_paths_access(),
     }
 }
 
@@ -332,6 +349,8 @@ pub fn module_document(module: Module) -> OpenApiDocument {
         Module::RemoteShell => remote_shell::api::remote_shell_document(),
         Module::Posture => cloud_posture::api::posture_document(),
         Module::Status => status_page::api::status_document(),
+        Module::Grc => grc::api::grc_document(),
+        Module::AttackPaths => attack_paths::api::attack_paths_document(),
     }
 }
 
@@ -368,6 +387,8 @@ pub fn migration_plan(modules: &[Module]) -> MigrationPlan {
         (wants(&[Module::RemoteShell]), RSHELL_NAMESPACE, RSHELL_PLAN),
         (wants(&[Module::Posture]), POSTURE_NAMESPACE, POSTURE_PLAN),
         (wants(&[Module::Status]), STATUS_NAMESPACE, STATUS_PLAN),
+        (wants(&[Module::Grc]), GRC_NAMESPACE, GRC_PLAN),
+        (wants(&[Module::AttackPaths]), ATTACK_NAMESPACE, ATTACK_PLAN),
     ]
     .into_iter()
     .filter(|(selected, _namespace, _migrations)| *selected)
