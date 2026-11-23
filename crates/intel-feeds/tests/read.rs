@@ -209,15 +209,13 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
         row("d.example", "RED"),
         BAD_DATE_ROW.to_owned(),
         BAD_TYPE_ROW.to_owned(),
-        String::new(),
-        "not json".to_owned(),
         row("e.example", "amber_strict"),
     ]
     .join("\n");
     let server = answer(rig.listener.try_clone()?, "200 OK", text_body(format!("{body}\n")));
     let mut out = Vec::new();
     let summary = read_iocs(&rig.config, NOW, &mut out)?;
-    assert_eq!(total_bad(&summary.bad), BAD_ROWS + 1);
+    assert_eq!(total_bad(&summary.bad), BAD_ROWS - 1);
     assert_eq!(
         summary,
         ReadSummary {
@@ -226,7 +224,7 @@ fn rows_become_ioc_lines_and_the_request_carries_its_parameters() -> TestResult 
                 unknown_tlp: TWO,
                 unknown_type: 1,
                 bad_time: 1,
-                bad_json: TWO,
+                bad_json: 0,
                 too_broad: 0,
                 not_canonical: 0,
             }
@@ -350,6 +348,47 @@ fn a_chunked_reply_cut_before_its_end_fails_and_writes_nothing() -> TestResult {
     assert!(out.is_empty());
     joined(server)?;
     Ok(())
+}
+
+
+#[test]
+fn an_exception_line_in_a_200_body_fails_and_writes_nothing() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let body = format!("{}\n{{\"exception\": \"Code: 396. DB::Exception: limit\"}}\n", row("a.example", "green"));
+    let server = answer(rig.listener.try_clone()?, "200 OK", text_body(body));
+    let mut out = Vec::new();
+    let failed = read_iocs(&rig.config, NOW, &mut out);
+    assert!(matches!(failed, Err(ReadError::ExceptionInBody)), "{failed:?}");
+    assert!(!failed.map_or_else(|error| error.to_string(), |_| String::new()).contains("Code: 396"));
+    assert!(out.is_empty());
+    let (seen, _) = joined(server)?;
+    assert!(seen.contains("http_write_exception_in_output_format=0"), "{seen}");
+    Ok(())
+}
+
+
+#[test]
+fn a_line_that_is_not_a_row_fails_and_writes_nothing() -> TestResult {
+    let lines = [
+        "{\"ioc_type\":\"domain\",\"value\":\"a.exa".to_owned(),
+        "not json".to_owned(),
+        String::new(),
+        "{\"value\":\"a.example\"}".to_owned(),
+    ];
+    lines.into_iter().try_for_each(|bad| -> TestResult {
+        let rig = rig(LONG_TIMEOUT_MS)?;
+        let server = answer(
+            rig.listener.try_clone()?,
+            "200 OK",
+            text_body(format!("{}\n{bad}\n", row("a.example", "green"))),
+        );
+        let mut out = Vec::new();
+        let failed = read_iocs(&rig.config, NOW, &mut out);
+        assert!(matches!(failed, Err(ReadError::MalformedReply)), "{failed:?}");
+        assert!(out.is_empty());
+        joined(server)?;
+        Ok(())
+    })
 }
 
 

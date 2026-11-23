@@ -25,6 +25,10 @@ pub const MAX_RESULT_ROWS: &str = "1";
 pub const OVERFLOW_MODE: &str = "throw";
 
 
+/// An exception is never written into a 200 body as a line: the stream is cut instead, which `read_count` reports as `Body`.
+pub const EXCEPTION_IN_BODY: &str = "0";
+
+
 pub const WINDOW_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
 
@@ -156,6 +160,7 @@ pub fn server_settings(pack: &HuntPack) -> Result<Vec<(&'static str, String)>, R
         ("max_bytes_to_read", bytes.to_string()),
         ("max_result_rows", MAX_RESULT_ROWS.to_string()),
         ("result_overflow_mode", OVERFLOW_MODE.to_string()),
+        ("http_write_exception_in_output_format", EXCEPTION_IN_BODY.to_string()),
     ])
 }
 
