@@ -21,6 +21,9 @@ pub const READ_DEADLINE: Duration =
     Duration::from_secs(MAX_DEADLINE_SECS * (1 + READER_QUERIES * QUERY_WINDOWS as u64) + READER_QUERIES * CLIENT_DEADLINE_MARGIN.as_secs());
 
 
+pub const READ_CUT_SLACK_SECS: u64 = 5;
+
+
 pub const UNLIMITED_TICKS: u64 = u64::MAX;
 
 
@@ -32,6 +35,27 @@ pub fn error_class(error: &StoreError) -> &'static str {
         StoreError::Config(_) => "config",
         _ => "rows",
     }
+}
+
+
+/// The reader's own worst case from its settings (connect, then `READER_QUERIES` queries of `QUERY_WINDOWS` windows and the client margin) plus a slack.
+pub fn settings_cut(connect_timeout_secs: u64, statement_timeout_secs: u64) -> Duration {
+    let query_secs = statement_timeout_secs
+        .saturating_mul(u64::from(QUERY_WINDOWS))
+        .saturating_add(CLIENT_DEADLINE_MARGIN.as_secs());
+    let secs = connect_timeout_secs
+        .saturating_add(query_secs.saturating_mul(READER_QUERIES))
+        .saturating_add(READ_CUT_SLACK_SECS);
+    Duration::from_secs(secs).min(READ_DEADLINE)
+}
+
+
+/// A read cut at the settings' worst case, named `ReadTimeout`; `READ_DEADLINE` stays the outer ceiling in `fetch`.
+pub async fn read_within<ReadFuture>(cut: Duration, read: ReadFuture) -> Result<PublishedRead, StoreError>
+where
+    ReadFuture: std::future::Future<Output = Result<PublishedRead, StoreError>>,
+{
+    timeout(cut, read).await.map_err(|_elapsed| StoreError::ReadTimeout)?
 }
 
 
