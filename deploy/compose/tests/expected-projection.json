@@ -1,0 +1,308 @@
+{
+  "name": "ostyr",
+  "networks": {
+    "default": {
+      "ipam": {
+        "config": [
+          {
+            "ip_range": "172.29.63.128/25",
+            "subnet": "172.29.63.0/24"
+          }
+        ]
+      },
+      "name": "ostyr_default"
+    }
+  },
+  "secrets": {
+    "api_tls_cert": {
+      "file": "secrets/api_tls.crt",
+      "name": "ostyr_api_tls_cert"
+    },
+    "api_tls_key": {
+      "file": "secrets/api_tls.key",
+      "name": "ostyr_api_tls_key"
+    },
+    "pg_ca": {
+      "file": "secrets/ca.crt",
+      "name": "ostyr_pg_ca"
+    },
+    "pg_password": {
+      "file": "secrets/pg_password",
+      "name": "ostyr_pg_password"
+    },
+    "pg_server_cert": {
+      "file": "secrets/pg_server.crt",
+      "name": "ostyr_pg_server_cert"
+    },
+    "pg_server_key": {
+      "file": "secrets/pg_server.key",
+      "name": "ostyr_pg_server_key"
+    },
+    "pg_service_password": {
+      "file": "secrets/pg_service_password",
+      "name": "ostyr_pg_service_password"
+    },
+    "store_key": {
+      "file": "secrets/store.key",
+      "name": "ostyr_store_key"
+    }
+  },
+  "services": {
+    "platform": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/platform_api",
+        "/etc/ostyr/module.yaml"
+      ],
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "host_ip": "0.0.0.0",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "8443",
+          "target": 8443
+        }
+      ],
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_service_password",
+          "target": "/run/secrets/pg_service_password"
+        },
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "api_tls_key",
+          "target": "/run/secrets/api_tls_key"
+        },
+        {
+          "source": "api_tls_cert",
+          "target": "/run/secrets/api_tls_cert"
+        },
+        {
+          "source": "store_key",
+          "target": "/run/secrets/store_key"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "state",
+          "target": "/var/lib/ostyr",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "postgres": {
+      "cap_add": [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "SETUID",
+        "SETGID"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "postgres",
+        "-c",
+        "ssl=on",
+        "-c",
+        "ssl_cert_file=/run/pgtls/server.crt",
+        "-c",
+        "ssl_key_file=/run/pgtls/server.key",
+        "-c",
+        "hba_file=/etc/postgresql/pg_hba.conf"
+      ],
+      "entrypoint": [
+        "/bin/bash",
+        "-ec",
+        "install -d -m 0700 -o postgres -g postgres /run/pgtls\ninstall -m 0600 -o postgres -g postgres /run/secrets/pg_service_password /run/pgtls/service_password\ninstall -m 0600 -o postgres -g postgres /run/secrets/pg_server_key /run/pgtls/server.key\ninstall -m 0644 -o postgres -g postgres /run/secrets/pg_server_cert /run/pgtls/server.crt\nexec docker-entrypoint.sh \"$$@\"\n",
+        "postgres-entrypoint"
+      ],
+      "environment": {
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/pg_password"
+      },
+      "healthcheck": {
+        "interval": "5s",
+        "retries": 30,
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U ostyr_service -d ostyr"
+        ],
+        "timeout": "5s"
+      },
+      "image": "postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f",
+      "networks": {
+        "default": null
+      },
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_password",
+          "target": "/run/secrets/pg_password"
+        },
+        {
+          "source": "pg_service_password",
+          "target": "/run/secrets/pg_service_password"
+        },
+        {
+          "source": "pg_server_key",
+          "target": "/run/secrets/pg_server_key"
+        },
+        {
+          "source": "pg_server_cert",
+          "target": "/run/secrets/pg_server_cert"
+        },
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/run/pgtls:mode=0700",
+        "/run/postgresql",
+        "/tmp"
+      ],
+      "volumes": [
+        {
+          "source": "pgdata",
+          "target": "/var/lib/postgresql/data",
+          "type": "volume",
+          "volume": {}
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config/pg_hba.conf",
+          "target": "/etc/postgresql/pg_hba.conf",
+          "type": "bind"
+        },
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config/pg-init-service-role.sh",
+          "target": "/docker-entrypoint-initdb.d/10-service-role.sh",
+          "type": "bind"
+        }
+      ]
+    },
+    "web": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "/usr/local/bin/web_ui",
+        "/etc/ostyr/web-ui.yaml"
+      ],
+      "depends_on": {
+        "platform": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "image": "ostyr-platform:local",
+      "networks": {
+        "default": {
+          "ipv4_address": "172.29.63.10"
+        }
+      },
+      "ports": [
+        {
+          "host_ip": "0.0.0.0",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "9443",
+          "target": 9443
+        }
+      ],
+      "pull_policy": "never",
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "pg_ca",
+          "target": "/run/secrets/pg_ca"
+        },
+        {
+          "source": "api_tls_key",
+          "target": "/run/secrets/api_tls_key"
+        },
+        {
+          "source": "api_tls_cert",
+          "target": "/run/secrets/api_tls_cert"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "bind": {
+            "create_host_path": true
+          },
+          "read_only": true,
+          "source": "config",
+          "target": "/etc/ostyr",
+          "type": "bind"
+        },
+        {
+          "source": "webstate",
+          "target": "/var/lib/ostyr",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "pgdata": {
+      "name": "ostyr_pgdata"
+    },
+    "state": {
+      "name": "ostyr_state"
+    },
+    "webstate": {
+      "name": "ostyr_webstate"
+    }
+  }
+}
