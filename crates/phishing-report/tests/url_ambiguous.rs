@@ -460,3 +460,64 @@ fn a_part_with_two_content_type_headers_is_read_as_markup() -> Result<(), Box<dy
 
 
 const TWO_BYTES: usize = 2;
+
+
+const UNREADABLE_TYPES: [&str; 9] = [
+    "",
+    "   ",
+    "/html",
+    ";text/html",
+    "; text/html",
+    "//text/html",
+    "(text/html",
+    "(text/html)",
+    "; charset=utf-8",
+];
+
+
+const HIDDEN_LINK: &str = "<a href=\"https://good.test&#64;evil.test/\">x</a>";
+
+
+fn raw_triage(raw: &str) -> Result<Triage, Box<dyn std::error::Error>> {
+    Ok(triage_with(
+        raw.as_bytes(),
+        &["mx.example.org".to_owned()],
+        &ReporterPolicy::default(),
+        &Limits::default(),
+    )?)
+}
+
+
+fn placements(header: &str) -> Vec<String> {
+    let part = format!("{header}\r\n\r\n{HIDDEN_LINK}\r\n");
+    let top = format!("From: p@sender.test\r\n{part}");
+    let mixed = format!("From: p@sender.test\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n{part}--b--\r\n");
+    let alternative = format!("From: p@sender.test\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n--b\r\n{part}--b--\r\n");
+    let nested = format!(
+        "From: p@sender.test\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: message/rfc822\r\n\r\nFrom: q@sender.test\r\n{part}--b--\r\n"
+    );
+    vec![top, mixed, alternative, nested]
+}
+
+
+#[test]
+fn an_unreadable_content_type_is_never_plain_in_any_placement() -> Result<(), Box<dyn std::error::Error>> {
+    UNREADABLE_TYPES.iter().try_for_each(|value| {
+        placements(&format!("Content-Type:{value}")).iter().try_for_each(|raw| {
+            let record = raw_triage(raw)?;
+            assert!(
+                domains(&record).iter().any(|host| host == "evil.test"),
+                "{value:?}: {:?}",
+                domains(&record)
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+    })?;
+    let broken = raw_triage(&format!(
+        "From: p@sender.test\r\nContent-Type: application/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n!!!!{HIDDEN_LINK}\r\n"
+    ))?;
+    assert!(domains(&broken).iter().any(|host| host == "evil.test"), "{:?}", domains(&broken));
+    let none = raw_triage(&format!("From: p@sender.test\r\n\r\n{HIDDEN_LINK}\r\n"))?;
+    assert!(!domains(&none).iter().any(|host| host == "evil.test"));
+    Ok(())
+}

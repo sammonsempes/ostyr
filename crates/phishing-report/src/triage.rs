@@ -651,17 +651,19 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
 const CONTENT_TYPE_HEADER: &str = "Content-Type";
 
 
-/// Plain only with at most one `Content-Type` header and that one `text/plain` (or none); every other case is read as markup.
+/// Plain only with no `Content-Type` header, or exactly one that parses to `text/plain`; every other case, an unparsable value included, is markup.
 pub fn is_plain(part: &MessagePart<'_>) -> bool {
     let declared = part
         .headers()
         .iter()
         .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
         .count();
-    declared <= 1
-        && part
-            .content_type()
-            .is_none_or(|content_type| content_type.subtype().is_some_and(|subtype| subtype.eq_ignore_ascii_case("plain")))
+    declared == 0
+        || (declared == 1
+            && part.content_type().is_some_and(|content_type| {
+                content_type.ctype().eq_ignore_ascii_case("text")
+                    && content_type.subtype().is_some_and(|subtype| subtype.eq_ignore_ascii_case("plain"))
+            }))
 }
 
 
