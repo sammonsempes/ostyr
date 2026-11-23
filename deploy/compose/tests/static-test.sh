@@ -116,6 +116,35 @@ no_interpolation() {
     ! dollar_outside_entrypoint
 }
 
+outside_allowlist() {
+    LC_ALL=C grep -a -v -x -F -f <(block_scalar_lines) "$COMPOSE_FILE" | LC_ALL=C sed 's/: {}$/:/' \
+        | LC_ALL=C grep -a -v -x '[]A-Za-z0-9 _./:=,"'"'"'@[-]*'
+}
+
+only_allowlisted_bytes() {
+    ! outside_allowlist | grep -q .
+}
+
+no_backslash() {
+    ! grep -q -F '\' "$COMPOSE_FILE"
+}
+
+environment_valueless_items() {
+    LC_ALL=C awk '/^ *environment:/ {match($0, /^ */); base = RLENGTH; inside = 1; next}
+        inside {match($0, /^ */); if (RLENGTH <= base) {inside = 0}}
+        inside {
+            item = $0
+            sub(/^ */, "", item)
+            sub(/ *$/, "", item)
+            if (item ~ /^- /) {if (item !~ /^- [A-Za-z_][A-Za-z0-9_]*=/) {print}; next}
+            if (item !~ /^[A-Za-z_][A-Za-z0-9_]*: +[^ ]/ || item ~ /: +(~|[Nn]ull|NULL)$/) {print}
+        }' "$COMPOSE_FILE"
+}
+
+no_environment_passthrough() {
+    ! environment_valueless_items | grep -q .
+}
+
 published_port_items() {
     awk '/^ *ports:/ {match($0, /^ */); base = RLENGTH; inside = 1; next}
         inside {match($0, /^ */); if (RLENGTH < base || (RLENGTH == base && $0 !~ /^ *- /)) {inside = 0}}
@@ -211,6 +240,9 @@ parsed_config_passes() {
 expect "compose.yaml uses only the allowed YAML shapes" shapes_are_allowed
 expect "no other compose file or .env is in the project directory" no_other_compose_input
 expect "compose.yaml interpolates no variable outside the entrypoint script" no_interpolation
+expect "compose.yaml holds only allowlisted characters outside the entrypoint" only_allowlisted_bytes
+expect "compose.yaml holds no backslash escape" no_backslash
+expect "compose.yaml has no environment entry without a value" no_environment_passthrough
 if [[ "$failures" -ne 0 ]]; then
     unknown_shapes | head -n 5 >&2
     printf 'an early check failed: nothing else was checked\n' >&2
