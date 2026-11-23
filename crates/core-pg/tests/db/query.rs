@@ -33,6 +33,12 @@ const STEP_PAUSE: Duration = Duration::from_millis(300);
 const SHARED_DEADLINE: Duration = Duration::from_millis(500);
 
 
+const QUERY_CUT: Duration = Duration::from_secs(6);
+
+
+const SCRIPT_CUT: Duration = Duration::from_millis(5500);
+
+
 pub async fn client_with(handler: Handler) -> Result<(Client, Fake, TempDir), Box<dyn Error>> {
     let pki = make_pki(SanType::IpAddress(loopback()))?;
     let fake = crate::fake::start(Mode::Tls(pki.server), "p", handler).await?;
@@ -97,12 +103,12 @@ async fn a_column_of_the_wrong_type_is_an_error() -> Result<(), Box<dyn Error>> 
 
 
 #[tokio::test]
-async fn a_hung_script_hits_the_statement_deadline() -> Result<(), Box<dyn Error>> {
+async fn a_hung_script_hits_the_client_deadline() -> Result<(), Box<dyn Error>> {
     let (client, _fake, _dir) = client_with(by_sql()).await?;
     tokio::time::pause();
     let error = execute_script(&client, "HANG", SHORT).await.err().ok_or("accepted")?;
     assert!(
-        matches!(error, PgError::StatementTimeout { seconds } if seconds == SHORT.as_secs()),
+        matches!(error, PgError::ClientDeadline { seconds } if seconds == SHORT.as_secs()),
         "{error}"
     );
     Ok(())
@@ -110,11 +116,11 @@ async fn a_hung_script_hits_the_statement_deadline() -> Result<(), Box<dyn Error
 
 
 #[tokio::test]
-async fn a_hung_query_hits_the_statement_deadline() -> Result<(), Box<dyn Error>> {
+async fn a_hung_query_hits_the_client_deadline() -> Result<(), Box<dyn Error>> {
     let (client, _fake, _dir) = client_with(by_sql()).await?;
     tokio::time::pause();
     let error = global_query(&client, "SELECT HANG", SHORT).await.err().ok_or("accepted")?;
-    assert!(matches!(error, PgError::StatementTimeout { .. }), "{error}");
+    assert!(matches!(error, PgError::ClientDeadline { .. }), "{error}");
     Ok(())
 }
 
@@ -139,8 +145,37 @@ async fn the_set_and_the_query_share_one_deadline() -> Result<(), Box<dyn Error>
     tokio::time::pause();
     let start = tokio::time::Instant::now();
     let error = global_query(&client, "SELECT 1", SHARED_DEADLINE).await.err().ok_or("accepted")?;
-    assert!(matches!(error, PgError::StatementTimeout { .. }), "{error}");
-    assert!(start.elapsed() < SHARED_DEADLINE + STEP_PAUSE);
+    assert!(matches!(error, PgError::ClientDeadline { .. }), "{error}");
+    assert!(start.elapsed() >= QUERY_CUT);
+    assert!(start.elapsed() < QUERY_CUT + STEP_PAUSE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_hung_script_is_cut_one_window_plus_the_margin_after_the_start() -> Result<(), Box<dyn Error>> {
+    let (client, _fake, _dir) = client_with(by_sql()).await?;
+    tokio::time::pause();
+    let start = tokio::time::Instant::now();
+    let error = execute_script(&client, "HANG", SHARED_DEADLINE).await.err().ok_or("accepted")?;
+    assert!(matches!(error, PgError::ClientDeadline { .. }), "{error}");
+    assert!(start.elapsed() >= SCRIPT_CUT);
+    assert!(start.elapsed() < SCRIPT_CUT + STEP_PAUSE);
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn the_server_cancel_is_the_statement_timeout() -> Result<(), Box<dyn Error>> {
+    let handler: Handler = Arc::new(|sql| if sql.contains("CANCEL") { Reply::Error("57014") } else { Reply::Done });
+    let (client, _fake, _dir) = client_with(handler).await?;
+    let error = global_query(&client, "SELECT CANCEL", SHORT).await.err().ok_or("accepted")?;
+    assert!(
+        matches!(error, PgError::StatementTimeout { seconds } if seconds == SHORT.as_secs()),
+        "{error}"
+    );
+    let script_error = execute_script(&client, "SELECT CANCEL", SHORT).await.err().ok_or("accepted")?;
+    assert!(matches!(script_error, PgError::StatementTimeout { .. }), "{script_error}");
     Ok(())
 }
 

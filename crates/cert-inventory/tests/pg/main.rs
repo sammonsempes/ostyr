@@ -216,7 +216,7 @@ pub fn pausing_handler(arrived: Arc<Notify>) -> Handler {
 pub fn deadline_expired<Found>(outcome: &Result<Found, InventoryStoreError>) -> bool {
     matches!(
         outcome,
-        Err(InventoryStoreError::Pg(PgError::StatementTimeout {
+        Err(InventoryStoreError::Pg(PgError::ClientDeadline {
             seconds: STATEMENT_TIMEOUT_SECS
         }))
     )

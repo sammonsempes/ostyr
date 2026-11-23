@@ -271,7 +271,7 @@ pub async fn deadline_of(which: usize) -> TestResult {
     let (outcomes, permits) = hung(which).await?;
     let deadline = matches!(
         outcomes.first(),
-        Some(Err(StoreError::Pg(PgError::StatementTimeout {
+        Some(Err(StoreError::Pg(PgError::ClientDeadline {
             seconds: STATEMENT_TIMEOUT_SECS
         })))
     );
