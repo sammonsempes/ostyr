@@ -593,6 +593,19 @@ fn adopt_original(record: &mut Triage, info: &LevelInfo, facts: &Adoption) {
 const URL_HOST_UNREAD: &str = "url_host_unread";
 
 
+const URL_USERINFO_SPLIT: &str = "url_userinfo_split";
+
+
+const URL_CAP_REACHED: &str = "url_cap_reached";
+
+
+fn mark_once(record: &mut Triage, flagged: bool, reason: &str) {
+    if flagged && !record.uncertain_reasons.iter().any(|found| found == reason) {
+        mark_uncertain(record, reason);
+    }
+}
+
+
 fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: &Context<'_>) -> Triage {
     let facts = header_facts(message, context, &mut record.counts);
     let auth = level_auth(&mut record, index, message, &facts, context);
@@ -615,9 +628,12 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     let mut urls_index = index_from(&known, std::mem::take(&mut record.refused_hosts));
     record.urls = collect_urls(message, index, context, known, &mut urls_index, &mut record.counts);
     record.refused_hosts = urls_index.hosts;
-    if record.counts.url_host_unread > 0 && !record.uncertain_reasons.iter().any(|reason| reason == URL_HOST_UNREAD) {
-        mark_uncertain(&mut record, URL_HOST_UNREAD);
-    }
+    let unread = record.counts.url_host_unread > 0;
+    let split = record.counts.url_userinfo_split > 0;
+    let capped = record.counts.url_cap_reached > 0;
+    mark_once(&mut record, unread, URL_HOST_UNREAD);
+    mark_once(&mut record, split, URL_USERINFO_SPLIT);
+    mark_once(&mut record, capped, URL_CAP_REACHED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
