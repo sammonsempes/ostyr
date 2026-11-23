@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct Counts {
     pub urls_refused: usize,
     pub urls_dropped: usize,
     pub urls_cleaned: usize,
+    pub url_cap_reached: usize,
+    pub url_refused_host_kept: usize,
     pub html_refs_undecoded: usize,
     pub addresses_refused: usize,
     pub auth_refused: usize,
@@ -81,6 +84,16 @@ pub struct UrlHit {
 }
 
 
+#[derive(Debug, Clone, Default)]
+pub struct UrlIndex {
+    pub seen: HashSet<String>,
+    pub hosts: Vec<String>,
+    pub hosts_seen: HashSet<String>,
+    pub probes: usize,
+    pub probed_bytes: usize,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LevelInfo {
@@ -110,6 +123,7 @@ pub struct Triage {
     pub subject: Option<String>,
     pub levels: Vec<LevelInfo>,
     pub urls: Vec<UrlHit>,
+    pub refused_hosts: Vec<String>,
     pub attachments: Vec<AttachmentInfo>,
     pub counts: Counts,
 }

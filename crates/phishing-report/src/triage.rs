@@ -2,12 +2,12 @@ use crate::auth::{oversized_untrusted, verdicts_with_from, PASS};
 use crate::claim::{claim_scan, domain_set};
 use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
-use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Triage, UrlHit};
+use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Triage, UrlHit, UrlIndex};
 use crate::policy::{check_policy, is_internal, is_strict_domain};
 use crate::scan::{scan, Scan};
 use crate::text::{clean, clean_address, is_refused_address};
 use crate::types::RawReadFn;
-use crate::urls::{collect, html_text, URL_RULE};
+use crate::urls::{collect_indexed, html_text, index_from, URL_RULE};
 use data_encoding::HEXLOWER;
 use mail_parser::{Address, Header, HeaderValue, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use regex::Regex;
@@ -609,7 +609,9 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
         adopt_original(&mut record, &info, &adoption);
     }
     let known = std::mem::take(&mut record.urls);
-    record.urls = collect_urls(message, index, context, known, &mut record.counts);
+    let mut urls_index = index_from(&known, std::mem::take(&mut record.refused_hosts));
+    record.urls = collect_urls(message, index, context, known, &mut urls_index, &mut record.counts);
+    record.refused_hosts = urls_index.hosts;
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
@@ -618,7 +620,14 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
 }
 
 
-fn collect_urls(message: &Message<'_>, level: usize, context: &Context<'_>, known: Vec<UrlHit>, counts: &mut Counts) -> Vec<UrlHit> {
+fn collect_urls(
+    message: &Message<'_>,
+    level: usize,
+    context: &Context<'_>,
+    known: Vec<UrlHit>,
+    urls_index: &mut UrlIndex,
+    counts: &mut Counts,
+) -> Vec<UrlHit> {
     let limits = context.limits;
     message.parts.iter().take(limits.parts).fold(known, |urls, part| {
         let oversized = part.len() > limits.part_bytes;
@@ -627,10 +636,10 @@ fn collect_urls(message: &Message<'_>, level: usize, context: &Context<'_>, know
                 counts.parts_skipped += 1;
                 urls
             }
-            PartType::Text(text) => collect(context.rule, text, level, limits, urls, counts),
+            PartType::Text(text) => collect_indexed(context.rule, text, level, limits, urls, urls_index, counts),
             PartType::Html(html) => {
                 let decoded = html_text(html, counts);
-                collect(context.rule, &decoded, level, limits, urls, counts)
+                collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts)
             }
             _ => urls,
         }
