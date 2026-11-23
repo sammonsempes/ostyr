@@ -10,5 +10,8 @@ pub mod scan;
 pub mod types;
 pub mod validate;
 pub mod windows;
+pub mod winget;
+pub mod winget_script;
+pub mod winget_wire;
 pub mod wua_script;
 pub mod wua_wire;

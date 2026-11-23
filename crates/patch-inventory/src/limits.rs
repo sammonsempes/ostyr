@@ -28,3 +28,12 @@ pub fn default_limits() -> Limits {
         max_line_bytes: MAX_LINE_BYTES,
     }
 }
+
+
+pub const MAX_WINGET_UPDATES: usize = 1000;
+
+
+pub const MAX_WINGET_ID_BYTES: usize = 128;
+
+
+pub const MAX_WINGET_VERSION_BYTES: usize = 128;
