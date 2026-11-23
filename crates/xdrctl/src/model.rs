@@ -86,6 +86,7 @@ pub enum VulnsCommand {
     List {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=500))]
         limit: Option<u32>,
+        /// The printed text form of the cursor (percent-encoded), exactly as the previous page showed it.
         #[arg(long)]
         cursor: Option<String>,
     },

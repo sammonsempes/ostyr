@@ -51,8 +51,9 @@ pub enum CliError {
     #[error("unexpected reply from the server (status {status})")]
     BadReply {
         status: u16,
-        #[source]
-        source: serde_json::Error,
+        category: &'static str,
+        line: usize,
+        column: usize,
     },
     #[error("cannot read the input: {0}")]
     Input(#[source] io::Error),
