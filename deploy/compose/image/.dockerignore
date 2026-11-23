@@ -1,4 +1,5 @@
 *
 !platform_api
 !auth_tool
+!web_ui
 !state

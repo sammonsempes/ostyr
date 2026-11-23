@@ -15,7 +15,7 @@ const ALL_MODULES: usize = 13;
 const LONGEST_LIST: usize = 120;
 
 
-const EXPECTED_LIMIT: usize = 128;
+const EXPECTED_LIMIT: usize = 256;
 
 
 const THIRD_INDEX: usize = 2;
@@ -54,7 +54,7 @@ fn the_longest_list_fits_the_limit() -> TestResult {
 
 
 #[test]
-fn the_limit_is_128_characters_and_129_is_refused() -> TestResult {
+fn the_limit_is_256_characters_and_257_is_refused() -> TestResult {
     assert_eq!(MAX_MODULES_CHARS, EXPECTED_LIMIT);
     let padded = |width: usize| format!("alerts{}", " ".repeat(width - "alerts".len()));
     assert_eq!(parse_modules(&padded(MAX_MODULES_CHARS))?, [Module::Alerts]);

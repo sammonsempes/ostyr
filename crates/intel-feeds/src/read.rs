@@ -250,8 +250,24 @@ pub fn refuse_broad(row: StoredRow) -> Result<StoredRow, RowError> {
 }
 
 
-/// The setting that makes ClickHouse cut the stream, not write a line, when a query fails after the 200 head.
-pub const EXCEPTION_IN_BODY: &str = "0";
+/// Settings pinned on every read (T773): a failing read cuts the stream, times stay `simple`, no limit, offset, `break` overflow or result filter.
+pub const PINNED_SETTINGS: &[(&str, &str)] = &[
+    ("http_write_exception_in_output_format", "0"),
+    ("date_time_output_format", "simple"),
+    ("limit", "0"),
+    ("offset", "0"),
+    ("additional_result_filter", ""),
+    ("result_overflow_mode", "throw"),
+    ("read_overflow_mode", "throw"),
+    ("read_overflow_mode_leaf", "throw"),
+    ("group_by_overflow_mode", "throw"),
+    ("sort_overflow_mode", "throw"),
+    ("join_overflow_mode", "throw"),
+    ("set_overflow_mode", "throw"),
+    ("distinct_overflow_mode", "throw"),
+    ("transfer_overflow_mode", "throw"),
+    ("timeout_overflow_mode", "throw"),
+];
 
 
 /// The start of the line ClickHouse writes in `JSONEachRow` for an exception, whatever the setting.
@@ -276,15 +292,16 @@ pub fn request_rows(
     now: OffsetDateTime,
     max_rows: usize,
 ) -> Result<Response<Body>, ReadError> {
-    let reply = agent
-        .post(&config.url)
+    let pinned = PINNED_SETTINGS
+        .iter()
+        .fold(agent.post(&config.url), |builder, (name, value)| builder.query(*name, *value));
+    let reply = pinned
         .header(USER_HEADER, &config.user)
         .header(KEY_HEADER, password)
         .query("query", statement)
         .query("param_tenant", &config.tenant)
         .query("param_now", epoch_u32(now.unix_timestamp()).to_string())
         .query("param_limit", (max_rows + 1).to_string())
-        .query("http_write_exception_in_output_format", EXCEPTION_IN_BODY)
         .config()
         .timeout_global(Some(Duration::from_millis(config.timeout_ms)))
         .http_status_as_error(false)
@@ -299,10 +316,10 @@ pub fn request_rows(
 }
 
 
-/// A line that is not JSON of the row shape is a server abnormality, never peer data: an error, not a counted skip.
+/// A line that is not JSON of the row shape, or a time the server wrote unparsable, is a server abnormality: an error, not a counted skip.
 pub fn valid_shape(error: &RowError) -> Result<BadReason, ReadError> {
     match reason_of(error) {
-        BadReason::BadJson => Err(ReadError::MalformedReply),
+        BadReason::BadJson | BadReason::BadTime => Err(ReadError::MalformedReply),
         reason => Ok(reason),
     }
 }

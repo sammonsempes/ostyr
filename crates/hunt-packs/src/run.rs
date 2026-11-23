@@ -3,7 +3,7 @@ use crate::model::{HuntPack, Source};
 use chrono::{DateTime, Datelike, Utc};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope};
-use metric_alerts::fetch::{class_text, escape_param, FetchSettings, FORMAT_SUFFIX, PARAM_PREFIX};
+use metric_alerts::fetch::{class_text, escape_param, FetchSettings, FORMAT_SUFFIX, PARAM_PREFIX, PINNED_SETTINGS};
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::InsertClass;
 use std::io::{self, Read};
@@ -20,13 +20,6 @@ pub const READONLY_VALUE: &str = "1";
 
 
 pub const MAX_RESULT_ROWS: &str = "1";
-
-
-pub const OVERFLOW_MODE: &str = "throw";
-
-
-/// An exception is never written into a 200 body as a line: the stream is cut instead, which `read_count` reports as `Body`.
-pub const EXCEPTION_IN_BODY: &str = "0";
 
 
 pub const WINDOW_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -153,15 +146,17 @@ pub fn count_statement(query: &str) -> String {
 /// ClickHouse's own read-only and cost settings, sent as URL parameters on every run.
 pub fn server_settings(pack: &HuntPack) -> Result<Vec<(&'static str, String)>, RunError> {
     let bytes = pack.cost.max_bytes_read.ok_or(RunError::NoByteLimit)?;
-    Ok(vec![
+    let own = [
         ("readonly", READONLY_VALUE.to_string()),
         ("max_execution_time", pack.cost.max_seconds.to_string()),
         ("max_rows_to_read", pack.cost.max_rows.to_string()),
         ("max_bytes_to_read", bytes.to_string()),
         ("max_result_rows", MAX_RESULT_ROWS.to_string()),
-        ("result_overflow_mode", OVERFLOW_MODE.to_string()),
-        ("http_write_exception_in_output_format", EXCEPTION_IN_BODY.to_string()),
-    ])
+    ];
+    Ok(own
+        .into_iter()
+        .chain(PINNED_SETTINGS.iter().map(|(name, value)| (*name, (*value).to_string())))
+        .collect())
 }
 
 

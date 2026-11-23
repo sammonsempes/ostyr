@@ -73,6 +73,57 @@ pub enum Command {
         #[command(subcommand)]
         action: RiskCommand,
     },
+    Vulns {
+        #[command(subcommand)]
+        action: VulnsCommand,
+    },
+}
+
+
+#[derive(Subcommand)]
+pub enum VulnsCommand {
+    /// Lists the open vulnerability findings, highest priority first; the next cursor is printed when there are more.
+    List {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=500))]
+        limit: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Shows the findings of one asset.
+    Show { asset: String },
+}
+
+
+#[derive(Deserialize)]
+pub struct FindingView {
+    pub asset: String,
+    pub ecosystem: String,
+    pub package: String,
+    pub record_id: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub cvss: f64,
+    pub epss: f64,
+    pub kev: bool,
+    pub priority: u32,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+
+#[derive(Deserialize)]
+pub struct FindingsListReply {
+    pub items: Vec<FindingView>,
+    pub skipped: usize,
+    pub next_cursor: Option<String>,
+}
+
+
+#[derive(Deserialize)]
+pub struct FindingsAssetReply {
+    pub items: Vec<FindingView>,
+    pub skipped: usize,
+    pub truncated: bool,
 }
 
 

@@ -1,3 +1,5 @@
+#[path = "detached/mod.rs"]
+mod detached;
 #[path = "support/fixture.rs"]
 mod fixture;
 #[path = "support/http.rs"]

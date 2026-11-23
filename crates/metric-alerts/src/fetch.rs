@@ -39,6 +39,26 @@ pub const MAX_FETCH_POINTS: usize = 100_000;
 pub const FORMAT_SUFFIX: &str = " FORMAT TabSeparated";
 
 
+/// Settings pinned on every read so a user or profile cannot change what a reply means (T773): the exception goes to the stream end, times stay `simple`, no limit, offset, overflow `break` or result filter.
+pub const PINNED_SETTINGS: &[(&str, &str)] = &[
+    ("http_write_exception_in_output_format", "0"),
+    ("date_time_output_format", "simple"),
+    ("limit", "0"),
+    ("offset", "0"),
+    ("additional_result_filter", ""),
+    ("result_overflow_mode", "throw"),
+    ("read_overflow_mode", "throw"),
+    ("read_overflow_mode_leaf", "throw"),
+    ("group_by_overflow_mode", "throw"),
+    ("sort_overflow_mode", "throw"),
+    ("join_overflow_mode", "throw"),
+    ("set_overflow_mode", "throw"),
+    ("distinct_overflow_mode", "throw"),
+    ("transfer_overflow_mode", "throw"),
+    ("timeout_overflow_mode", "throw"),
+];
+
+
 pub const PARAM_PREFIX: &str = "param_";
 
 
@@ -274,7 +294,10 @@ pub fn request_points(
         Err(FetchError::Failed(InsertClass::Timeout))
     } else {
         let statement = format!("{}{FORMAT_SUFFIX}", query.sql.trim_end());
-        let builder = query.params.iter().fold(agent.post(&settings.url), |builder, (name, value)| {
+        let pinned = PINNED_SETTINGS
+            .iter()
+            .fold(agent.post(&settings.url), |builder, (name, value)| builder.query(*name, *value));
+        let builder = query.params.iter().fold(pinned, |builder, (name, value)| {
             builder.query(format!("{PARAM_PREFIX}{name}"), escape_param(value))
         });
         let response = builder
