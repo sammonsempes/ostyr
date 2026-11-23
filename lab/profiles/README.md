@@ -5,6 +5,7 @@ A profile is `lab/profiles/<name>.yaml`: a list of VMs (name, base_image, vcpu, 
 | Profile | VMs | Used by |
 | --- | --- | --- |
 | `ubuntu-single` | one `ubuntu-2404` VM | T010, T011, T015, T020, T022, T023, T028 |
+| `ubuntu-docker` | one `ubuntu-docker` VM (`ubuntu-2404` plus Docker Engine and Compose, `egress: proxy`) | T795, `deploy/compose/tests/compose-lab.sh` |
 | `rocky-single` | one `rocky-9` VM, `egress: proxy` | T120B |
 | `ubuntu-pair` | `server` and `client` (attacks the server), both `ubuntu-2404` | T024, T025, T026, T027 |
 | `ubuntu-pair-proxy` | the two `ubuntu-pair` VMs (`server`, `client`) plus `egress: proxy`; use it when a task installs packages or pulls images on two VMs, `ubuntu-pair` has no egress | T391 |
