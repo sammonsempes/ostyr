@@ -750,9 +750,7 @@ fn a_spool_whose_size_cannot_be_read_ends_the_defender_line_with_an_error() -> T
     let lab = lab("channels: [sysmon]\n")?;
     let mut run = |_: &RunRequest<'_>, _: &mut dyn FnMut(&[u8])| -> Result<RunEnd, RunError> { Ok(RunEnd::Done) };
     let mut seen = SeenIds::new();
-    let blocker = lab.directory.path().join("blocker");
-    fs::write(&blocker, "x")?;
-    let spool = blocker.join("spool");
+    let spool = PathBuf::from("spool\0bad");
     let mut env = PollEnv {
         run: &mut run,
         encode: to_json,
