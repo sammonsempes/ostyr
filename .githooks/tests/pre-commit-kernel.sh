@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+HOOK="${HOOK:-$HERE/.githooks/pre-commit}"
 mkdir -p "${CARGO_TARGET_DIR:-$PWD/target}"
 SCRATCH=$(mktemp -d -p "${CARGO_TARGET_DIR:-$PWD/target}")
 mkdir -p "$SCRATCH/tmp"
@@ -13,6 +14,19 @@ mkdir -p "$HOME" "$SCRATCH/bin"
 cat >"$SCRATCH/bin/cargo" <<'S'
 #!/usr/bin/env bash
 echo "cargo $*" >>"$STUB_LOG"
+if [[ " $* " == *" clippy "* ]]; then
+  previous=""
+  clippy_dir=""
+  for argument in "$@"; do
+    if [ "$previous" = --target-dir ]; then clippy_dir=$argument; fi
+    previous=$argument
+  done
+  if [ -n "$clippy_dir" ]; then
+    echo "clippy-dir-entries $(find "$clippy_dir" -mindepth 1 2>/dev/null | wc -l)" >>"$STUB_LOG"
+    mkdir -p "$clippy_dir"
+    echo leftover >"$clippy_dir/built-by-clippy"
+  fi
+fi
 [ -z "${STUB_FAIL:-}" ] || [[ " $* " != *" $STUB_FAIL "* ]]
 S
 chmod +x "$SCRATCH/bin/cargo"
@@ -38,7 +52,7 @@ FAILS=0
 
 run_hook() {
   : >"$STUB_LOG"
-  env "$@" PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >"$SCRATCH/out" 2>&1 || true
+  env "$@" PATH="$SCRATCH/bin:/usr/bin:/bin" "$HOOK" >"$SCRATCH/out" 2>&1 || true
 }
 
 stage() {
@@ -85,7 +99,7 @@ expect_kernel() {
     echo "FAIL: $label: the checker did not get the object the build writes under CARGO_TARGET_DIR"
     FAILS=$((FAILS + 1))
   fi
-  if ! grep -qE '^cargo \+nightly-2026-11-08 clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml -- -D warnings$' "$STUB_LOG"; then
+  if ! grep -qE '^cargo \+nightly-2026-11-08 clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core --manifest-path crates/ebpf-probes/ebpf/Cargo.toml --target-dir '"$R"'/target/ebpf-clippy -- -D warnings$' "$STUB_LOG"; then
     echo "FAIL: $label: no kernel clippy"
     FAILS=$((FAILS + 1))
   fi
@@ -131,6 +145,40 @@ stage lab/tests/ebpf-no-panic-test.sh
 declare_kernel
 run_hook
 expect_kernel "panic check test staged"
+
+stage lab/ebpf-build.sh
+declare_kernel
+echo "true" >>lab/ebpf-build.sh
+git add -A
+run_hook
+expect_kernel "build script staged"
+
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+mkdir -p target/ebpf-clippy/debug
+echo stale >target/ebpf-clippy/debug/proc-macro-leftover
+run_hook
+if ! grep -qxF "clippy-dir-entries 0" "$STUB_LOG"; then
+  echo "FAIL: the kernel clippy must start in an emptied target directory (a proc-macro built earlier from an edited source would run again on the host)"
+  cat "$STUB_LOG"
+  FAILS=$((FAILS + 1))
+fi
+if [ -e target/ebpf-clippy ]; then
+  echo "FAIL: the clippy target directory must be removed after the clippy"
+  FAILS=$((FAILS + 1))
+fi
+stage crates/ebpf-probes/ebpf/src/main.rs
+declare_kernel
+run_hook STUB_FAIL=bpfel-unknown-none
+if [ -e target/ebpf-clippy ]; then
+  echo "FAIL: a failed clippy must still remove its target directory before the next run"
+  FAILS=$((FAILS + 1))
+fi
+run_hook
+if ! grep -qxF "clippy-dir-entries 0" "$STUB_LOG"; then
+  echo "FAIL: the run after a failed clippy must start in an emptied directory"
+  FAILS=$((FAILS + 1))
+fi
 
 stage plain.rs
 declare_kernel
@@ -382,6 +430,42 @@ ln -s nowhere .cargo
 run_hook
 cargo_config_refused "a dangling .cargo symlink"
 rm -f .cargo
+
+ancestor_refused() {
+  local label=$1 where=$2
+  if ! grep -qF "$where/.cargo exists above the checkout" "$SCRATCH/out" || [ -s "$STUB_LOG" ] || [ -e "$SCRATCH/runner-marker" ]; then
+    echo "FAIL: $label: a .cargo above a linked worktree must be refused by name before any cargo command"
+    cat "$SCRATCH/out" "$STUB_LOG"
+    FAILS=$((FAILS + 1))
+  fi
+}
+
+stage plain.rs
+declare_kernel
+git -c user.name=t -c user.email=t@t commit -q -m worktree-base
+WT="$R/wt-parent/mid/wt"
+mkdir -p "$R/wt-parent"
+git worktree add -q --detach "$WT" HEAD
+cd "$WT"
+echo z >plain.rs
+git add plain.rs
+run_hook
+if grep -qF "exists above the checkout" "$SCRATCH/out" || [ ! -s "$STUB_LOG" ]; then
+  echo "FAIL: a linked worktree with no .cargo above it must run the gate (control for the refusal tests)"
+  FAILS=$((FAILS + 1))
+fi
+for above in "$R" "$R/wt-parent" "$R/wt-parent/mid"; do
+  mkdir -p "$above/.cargo"
+  printf '[build]\nrunner = "touch %s/runner-marker"\n' "$SCRATCH" >"$above/.cargo/config.toml"
+  run_hook
+  ancestor_refused "a .cargo in $above" "$above"
+  rm -rf "$above/.cargo"
+done
+ln -s nowhere "$R/wt-parent/.cargo"
+run_hook
+ancestor_refused "a dangling .cargo symlink in $R/wt-parent" "$R/wt-parent"
+rm -f "$R/wt-parent/.cargo"
+cd "$R"
 
 if [ "$FAILS" -ne 0 ]; then
   echo "pre-commit-kernel: $FAILS failures"

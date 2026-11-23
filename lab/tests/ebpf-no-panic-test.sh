@@ -9,7 +9,7 @@
 # not examined), MUTANT=checksum-name-only (the lock checksum is matched on name and version, not source), MUTANT=filter-platform (cargo metadata
 # is filtered to the target again), MUTANT=patch-ok (a [patch] table is accepted), MUTANT=lock-source-ok (the Cargo.lock source check before cargo
 # metadata is off), MUTANT=stale-target (the kernel crate builds in the shared target directory), MUTANT=no-lock-check (a missing Cargo.lock
-# is not refused), MUTANT=reverify-off (extracted registry sources are not compared with their archive).
+# is not refused), MUTANT=clippy-shared (the hook's kernel clippy goes back to a shared target directory), MUTANT=reverify-off (extracted registry sources are not compared with their archive).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -378,6 +378,58 @@ stale_proc_macro_not_reused() {
 check "T692FS2 a proc-macro built from an edited registry source and left in the target directory is not reused after the edit is reverted" \
   stale_proc_macro_not_reused
 rm -rf "$COLD_HOME" "$ROOT/target/ebpf-stale-target"
+
+MARKER_EDIT='Ok(prog) => { std::fs::write(\"MARKER_PATH\", \"ran\").ok(); prog.expand() }'
+HOOK="$ROOT/.githooks/pre-commit"
+HOOK_COPY="$ROOT/target/ebpf-hook-mutated"
+case "${MUTANT:-}" in
+  clippy-shared) sed 's| --target-dir "\$EBPF_CLIPPY_DIR"||' "$HOOK" >"$HOOK_COPY" ;;
+  *) cp "$HOOK" "$HOOK_COPY" ;;
+esac
+if [ "${MUTANT:-}" = clippy-shared ] && cmp -s "$HOOK" "$HOOK_COPY"; then
+  echo "the mutant clippy-shared did not change the hook" >&2
+  exit 2
+fi
+
+hook_clippy_in_fresh_directory() {
+  grep -qF -- '--manifest-path "$EBPF_MANIFEST" --target-dir "$EBPF_CLIPPY_DIR" -- -D warnings' "$HOOK_COPY" \
+    && [ "$(grep -cxF '  rm -rf "$EBPF_CLIPPY_DIR"' "$HOOK_COPY")" -eq 2 ]
+}
+
+hook_style_clippy() {
+  local target_dir="$1"
+  CARGO_HOME="$COLD_HOME" cargo "+$NIGHTLY" clippy --offline --locked --release --target bpfel-unknown-none -Z build-std=core \
+    --manifest-path "$SCRATCH/Cargo.toml" --target-dir "$target_dir" >&2 || echo "clippy lints on the attack crate: status ignored, only the marker matters" >&2
+}
+
+clippy_stale_macro_not_reused() {
+  local source marker="$ROOT/target/ebpf-clippy-marker" shared="$ROOT/target/ebpf-clippy-shared" fresh="$ROOT/target/ebpf-clippy-fresh"
+  hook_clippy_in_fresh_directory || { echo "the hook's kernel clippy does not run in an emptied --target-dir"; return 1; }
+  write_crate 'value ^ n as u32'
+  cold_home
+  CARGO_HOME="$COLD_HOME" check_only >&2 || return 1
+  source=$(find "$COLD_HOME/registry/src" -maxdepth 2 -type d -name 'aya-ebpf-macros-0.4.0' | head -1)
+  cp "$source/src/lib.rs" "$ROOT/target/ebpf-macros-lib.rs"
+  sed -i "s|^        Ok(prog) => prog.expand(),\$|        ${MARKER_EDIT//MARKER_PATH/$marker},|" "$source/src/lib.rs"
+  rm -rf "$marker" "$shared" "$fresh"
+  hook_style_clippy "$shared" || return 1
+  [ -e "$marker" ] || { echo "the control clippy never ran the edited proc-macro"; return 1; }
+  rm -f "$marker"
+  cp "$ROOT/target/ebpf-macros-lib.rs" "$source/src/lib.rs"
+  hook_style_clippy "$shared" || return 1
+  [ -e "$marker" ] || { echo "control: the stale proc-macro of the shared directory was not reused (the attack is not live here)"; return 1; }
+  rm -f "$marker"
+  rm -rf "$fresh"
+  if [ "${MUTANT:-}" = clippy-shared ]; then hook_style_clippy "$shared" || return 1; else hook_style_clippy "$fresh" || return 1; fi
+  if [ -e "$marker" ]; then
+    echo "the marker was written again after the source was restored: the stale proc-macro ran on the host"
+    return 1
+  fi
+  echo "no marker after the source is restored"
+}
+check "T692FS3 the kernel clippy in an emptied target directory never runs a proc-macro built from an edited source" \
+  clippy_stale_macro_not_reused
+rm -rf "$COLD_HOME" "$ROOT/target/ebpf-clippy-shared" "$ROOT/target/ebpf-clippy-fresh" "$ROOT/target/ebpf-clippy-marker"
 
 host_code_never_runs_in_check_only() {
   local marker="$ROOT/target/ebpf-check-only-marker" output

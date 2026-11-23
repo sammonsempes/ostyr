@@ -70,9 +70,6 @@ cd "$ROOT"
 mkdir -p "$ROOT/target"
 WORK_DIR=$(mktemp -d -p "$ROOT/target")
 trap 'rm -rf "$WORK_DIR"' EXIT
-case "$(cargo --version)" in
-  *nightly*) fail "the default cargo is a nightly: step 2 needs the stable cargo of rust-toolchain.toml, which refuses cargo-features" ;;
-esac
 NIGHTLY_SYSROOT=$(rustc "+$NIGHTLY" --print sysroot) || fail "rustc +$NIGHTLY is not installed"
 NIGHTLY_RUSTC="$NIGHTLY_SYSROOT/bin/rustc"
 [ -x "$NIGHTLY_RUSTC" ] || fail "$NIGHTLY_RUSTC is missing"
@@ -195,6 +192,9 @@ check_build_code() {
 }
 
 check_cargo_directories
+case "$(cargo --version)" in
+  *nightly*) fail "the default cargo is a nightly: step 2 needs the stable cargo of rust-toolchain.toml, which refuses cargo-features" ;;
+esac
 check_build_code
 if [ -n "${EBPF_CHECK_ONLY:-}" ]; then exit 0; fi
 
