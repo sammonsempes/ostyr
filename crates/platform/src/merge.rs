@@ -46,7 +46,7 @@ pub const SETTING_WEIGHTS_FILE: &str = "risk.weights_file";
 pub const SETTING_PAGE_FILE: &str = "status.page_file";
 
 
-pub const MAX_MODULES_CHARS: usize = 128;
+pub const MAX_MODULES_CHARS: usize = 256;
 
 
 pub const ACTOR: &str = "platform";
@@ -193,6 +193,16 @@ pub fn page_services_of(file: &Path, load: PageLoader<'_>) -> Result<Arc<PageSer
         tenant: config.tenant.clone(),
         services: declared_services(&config).into_iter().collect(),
     }))
+}
+
+
+/// Refuses a page whose tenant is not exactly the module file tenant (byte comparison: no case folding, no trimming).
+pub fn check_page_tenant(page: Arc<PageServices>, module_tenant: &str) -> Result<Arc<PageServices>, PlatformError> {
+    if page.tenant == module_tenant {
+        Ok(page)
+    } else {
+        Err(PlatformError::PageTenantMismatch)
+    }
 }
 
 

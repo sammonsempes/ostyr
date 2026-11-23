@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use core_config::types::SettingsMap;
 use platform::error::PlatformError;
-use platform::merge::{load_page_services, page_failure, page_file_of, page_services_of, SETTING_PAGE_FILE};
+use platform::merge::{check_page_tenant, load_page_services, page_failure, page_file_of, page_services_of, SETTING_PAGE_FILE};
 use platform::model::Module;
 use status_page::config::load_config;
 use status_page::error::StatusPageError;
@@ -211,5 +211,24 @@ async fn the_document_lists_the_write_paths_when_status_is_selected() -> TestRes
     assert!(paths.get(CREATE).is_some());
     assert!(paths.get("/status/incidents/{id}/updates").is_some());
     assert!(paths.get("/status/incidents/{id}/resolve").is_some());
+    Ok(())
+}
+
+
+#[test]
+fn a_page_of_another_tenant_is_refused_by_exact_comparison() -> TestResult {
+    let dir = tempdir()?;
+    let file = dir.path().join("page.yaml");
+    fs::write(&file, PAGE_TEXT)?;
+    let page = load_page_services(&file)?;
+    assert_eq!(check_page_tenant(page.clone(), "acme")?, page);
+    [("b", "other"), ("ACME", "case"), ("acme ", "trailing space"), ("", "empty")]
+        .iter()
+        .try_for_each(|(tenant, label)| {
+            let error = check_page_tenant(page.clone(), tenant).err().ok_or(*label)?;
+            assert_eq!(error, PlatformError::PageTenantMismatch);
+            assert!(!error.to_string().contains("acme"));
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
     Ok(())
 }
