@@ -552,12 +552,12 @@ pub async fn load_links(
     client: &ApiClient,
     source: IpAddr,
     principal: &Principal,
-    id: &str,
-    cursor: Option<&str>,
+    language: Language,
+    (id, cursor): (&str, Option<&str>),
 ) -> Result<LinksPanel, Refused> {
     match list_case_links(client, source, &principal.token, id, cursor).await {
         Ok(page) => Ok(LinksPanel::Shown(page)),
-        Err(ApiFailure::Unauthorized) => Err(Box::new(api_failure(state, principal, Language::English, &ApiFailure::Unauthorized))),
+        Err(ApiFailure::Unauthorized) => Err(Box::new(api_failure(state, principal, language, &ApiFailure::Unauthorized))),
         Err(failure) => {
             let class = failure_class(&failure);
             tracing::warn!(class, "the linked alerts could not be read");
@@ -582,7 +582,7 @@ pub async fn show_case_page(
     let case = get_case(&client, source, &principal.token, id)
         .await
         .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
-    let panel = load_links(state, &client, source, &principal, id, cursor).await?;
+    let panel = load_links(state, &client, source, &principal, language, (id, cursor)).await?;
     Ok(html_response(
         StatusCode::OK,
         &case_page_full(language, &principal.csrf, &case, None, &panel),
@@ -1062,8 +1062,14 @@ pub async fn case_action_submit(
 }
 
 
+/// The characters a textarea counts: a browser sends a line break as CRLF, which the user sees and the `maxlength` counts as one.
+pub fn browser_chars(text: &str) -> usize {
+    text.chars().count() - text.matches("\r\n").count()
+}
+
+
 pub fn comment_shaped(text: &str) -> bool {
-    !text.is_empty() && text.chars().count() <= MAX_COMMENT_CHARS
+    !text.is_empty() && browser_chars(text) <= MAX_COMMENT_CHARS
 }
 
 
@@ -1136,7 +1142,7 @@ pub async fn case_comment_submit(
 pub fn triage_note(form: &Form) -> Option<Option<&str>> {
     let note = field(form, "note");
     Some(note)
-        .filter(|text| text.chars().count() <= MAX_NOTE_CHARS)
+        .filter(|text| browser_chars(text) <= MAX_NOTE_CHARS)
         .map(|text| Some(text).filter(|kept| !kept.is_empty()))
 }
 
@@ -1199,7 +1205,7 @@ pub async fn submit_case_link(state: &WebState, source: IpAddr, headers: &Header
     let case = get_case(&client, source, &principal.token, id)
         .await
         .map_err(|failure| Box::new(api_failure(state, &principal, language, &failure)))?;
-    let panel = load_links(state, &client, source, &principal, id, None).await?;
+    let panel = load_links(state, &client, source, &principal, language, (id, None)).await?;
     Ok(html_response(
         StatusCode::OK,
         &case_page_full(language, &principal.csrf, &case, None, &panel),
