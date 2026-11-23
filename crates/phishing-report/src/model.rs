@@ -22,6 +22,7 @@ pub struct Counts {
     pub url_cap_reached: usize,
     pub url_refused_host_kept: usize,
     pub url_host_unread: usize,
+    pub url_userinfo_split: usize,
     pub html_refs_undecoded: usize,
     pub addresses_refused: usize,
     pub auth_refused: usize,
@@ -92,6 +93,7 @@ pub struct UrlIndex {
     pub hosts_seen: HashSet<String>,
     pub probes: usize,
     pub probed_bytes: usize,
+    pub window_bytes: usize,
 }
 
 
