@@ -78,6 +78,12 @@ unknown_shapes() {
             if (value ~ /^\[/) {return key in flowing}
             return value == "{}" || value !~ /^[\[{&*!|>%@`"\047?-]/
         }
+        function item_at_parent_indent(current, indent,    j) {
+            for (j = current - 1; j > 0; j--) {
+                if (line_indent[j] <= indent) {return !line_is_item[j] && line_indent[j] == indent}
+            }
+            return 0
+        }
         BEGIN {
             split(keys, a, " "); for (i in a) {allowed[a[i]] = 1}
             split(flow, b, " "); for (i in b) {flowing[b[i]] = 1}
@@ -86,8 +92,13 @@ unknown_shapes() {
         {
             body = $0
             sub(/^ */, "", body)
+            indent = length($0) - length(body)
+            lines_seen++
+            line_indent[lines_seen] = indent
+            line_is_item[lines_seen] = (body ~ /^- /)
             if ($0 !~ /^[ -~]*$/ || body == "") {print; next}
             if (body ~ /^- /) {
+                if (item_at_parent_indent(lines_seen, indent)) {print; next}
                 body = substr(body, 3)
                 if (body !~ /^([A-Za-z0-9_\/."]|-[A-Za-z])/ || body ~ /:$/) {print; next}
                 if (body !~ /^[A-Za-z_][A-Za-z0-9_]*: /) {next}
@@ -104,6 +115,11 @@ stray_compose_inputs() {
     find "$PROJECT_DIR" -maxdepth 1 \( -name 'compose*.y*ml' -o -name 'docker-compose*' -o -name '.env*' \) ! -name compose.yaml
 }
 
+entrypoint_block_in_place() {
+    [[ "$(grep -c -x -F -f <(block_scalar_lines) "$COMPOSE_FILE")" -eq "$(block_scalar_lines | wc -l)" && "$(grep -c -x -F -- '      - -ec' "$COMPOSE_FILE")" -eq 1 \
+        && "$(grep -x -F -A "$(block_scalar_lines | wc -l)" -- '      - -ec' "$COMPOSE_FILE" | tail -n +2)" == "$(block_scalar_lines)" ]]
+}
+
 no_other_compose_input() {
     ! stray_compose_inputs | grep -q .
 }
@@ -114,6 +130,35 @@ dollar_outside_entrypoint() {
 
 no_interpolation() {
     ! dollar_outside_entrypoint
+}
+
+outside_allowlist() {
+    LC_ALL=C grep -a -v -x -F -f <(block_scalar_lines) "$COMPOSE_FILE" | LC_ALL=C sed 's/: {}$/:/' \
+        | LC_ALL=C grep -a -v -x '[]A-Za-z0-9 _./:=,"'"'"'@[-]*'
+}
+
+only_allowlisted_bytes() {
+    ! outside_allowlist | grep -q .
+}
+
+no_backslash() {
+    ! LC_ALL=C grep -a -q -F '\' "$COMPOSE_FILE"
+}
+
+environment_valueless_items() {
+    LC_ALL=C awk '/^ *environment:/ {match($0, /^ */); base = RLENGTH; inside = 1; next}
+        inside {match($0, /^ */); if (RLENGTH <= base) {inside = 0}}
+        inside {
+            item = $0
+            sub(/^ */, "", item)
+            sub(/ *$/, "", item)
+            if (item ~ /^- /) {if (item !~ /^- [A-Za-z_][A-Za-z0-9_]*=/) {print}; next}
+            if (item !~ /^[A-Za-z_][A-Za-z0-9_]*: +[^ ]/ || item ~ /: +(~|[Nn]ull|NULL)$/) {print}
+        }' "$COMPOSE_FILE"
+}
+
+no_environment_passthrough() {
+    ! environment_valueless_items | grep -q .
 }
 
 published_port_items() {
@@ -209,8 +254,12 @@ parsed_config_passes() {
 }
 
 expect "compose.yaml uses only the allowed YAML shapes" shapes_are_allowed
+expect "the entrypoint script lines appear once, right after its -ec line" entrypoint_block_in_place
 expect "no other compose file or .env is in the project directory" no_other_compose_input
 expect "compose.yaml interpolates no variable outside the entrypoint script" no_interpolation
+expect "compose.yaml holds only allowlisted characters outside the entrypoint" only_allowlisted_bytes
+expect "compose.yaml holds no backslash escape" no_backslash
+expect "compose.yaml has no environment entry without a value" no_environment_passthrough
 if [[ "$failures" -ne 0 ]]; then
     unknown_shapes | head -n 5 >&2
     printf 'an early check failed: nothing else was checked\n' >&2
