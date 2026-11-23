@@ -7,8 +7,8 @@ use cloud_cost::model::{CostTable, Limits, OtherBucket};
 use cloud_cost::settings::CostLoadConfig;
 use cloud_cost::source::read_export;
 use cloud_cost::store::{
-    account_set, array_literal, covered_days, database_ddl, delete_statement, encode_row, insert_plan, insert_statement, plan_rows, table_ddl,
-    CostRow, ROWS_PER_BATCH,
+    account_set, array_literal, covered_days, database_ddl, delete_statement, encode_row, generation_statement, insert_plan, insert_statement,
+    next_generation, plan_rows, state_ddl, state_insert_statement, state_row, table_ddl, CostRow, ROWS_PER_BATCH,
 };
 use core_pg::scope::tenant_scope;
 use rust_decimal::Decimal;
@@ -35,6 +35,15 @@ const SECOND_DAY: u8 = 6;
 
 
 const TTL: u32 = 400;
+
+
+const STATE_GENERATION: u64 = 12;
+
+
+const CLOCK: u64 = 1_000;
+
+
+const DOUBLE: u64 = 2;
 
 
 const TIMEOUT: u64 = 30_000;
@@ -93,6 +102,46 @@ const SAMPLE: [&str; 3] = [
     "2.5,USD,acct,2026-01-06T10:00:00Z,storage,",
     "1.10,USD,acct,2026-01-06T11:00:00Z,network,",
 ];
+
+
+#[test]
+fn the_load_state_is_keyed_by_tenant_and_export_digest() -> TestResult {
+    let config = config();
+    assert_eq!(
+        state_ddl(&config)?,
+        "CREATE TABLE IF NOT EXISTS `ostyr`.`cloud_cost_daily_load_state` (\n    `tenant` String,\n    `source` String,\n    `generation` UInt64,\n    \
+         `state` LowCardinality(String)\n)\nENGINE = ReplacingMergeTree(`generation`)\nORDER BY (`tenant`, `source`)"
+    );
+    assert_eq!(
+        generation_statement(&config)?,
+        "SELECT toString(max(`generation`)) FROM `ostyr`.`cloud_cost_daily_load_state` WHERE `tenant` = {tenant:String} AND `source` = {source:String}"
+    );
+    assert_eq!(
+        state_insert_statement(&config)?,
+        "INSERT INTO `ostyr`.`cloud_cost_daily_load_state` FORMAT JSONEachRow"
+    );
+    assert_eq!(
+        state_row("acme", "abc", STATE_GENERATION, "done"),
+        "{\"generation\":12,\"source\":\"abc\",\"state\":\"done\",\"tenant\":\"acme\"}"
+    );
+    let mut bad = config;
+    bad.table = "x`y".to_owned();
+    assert!(state_ddl(&bad).is_err());
+    assert!(generation_statement(&bad).is_err());
+    assert!(state_insert_statement(&bad).is_err());
+    Ok(())
+}
+
+
+#[test]
+fn the_next_generation_is_above_the_previous_one_and_the_clock() -> TestResult {
+    assert_eq!(next_generation(0, CLOCK), CLOCK);
+    assert_eq!(next_generation(CLOCK - 1, CLOCK), CLOCK);
+    assert_eq!(next_generation(CLOCK, CLOCK), CLOCK + 1);
+    assert_eq!(next_generation(CLOCK * DOUBLE, CLOCK), CLOCK * DOUBLE + 1);
+    assert_eq!(next_generation(u64::MAX, CLOCK), u64::MAX);
+    Ok(())
+}
 
 
 #[test]

@@ -7,8 +7,8 @@ mod types;
 
 
 use cloud_cost::load::{
-    account_batches, agent_for, item_cost, load_table, post, replace_statements, request_url_len, BatchFailure, LoadError, LoadOutcome, Statement,
-    MAX_REPLACE_ACCOUNTS, MAX_TOTAL_ACCOUNTS, MAX_URL_BYTES,
+    account_batches, agent_for, item_cost, load_table, post, previous_generation, replace_statements, request_url_len, BatchFailure, LoadError,
+    LoadOutcome, Statement, MAX_REPLACE_ACCOUNTS, MAX_TOTAL_ACCOUNTS, MAX_URL_BYTES,
 };
 use cloud_cost::model::{CostTable, Limits};
 use cloud_cost::settings::CostLoadConfig;
@@ -38,6 +38,9 @@ const PASSWORD: &str = "TRACEPW-5b2e8d40";
 const TWICE: usize = 2;
 
 
+const PREVIOUS_STEP: u64 = 6;
+
+
 const OK: &str = "200 OK";
 
 
@@ -47,10 +50,16 @@ const SERVER_ERROR: &str = "500 Internal Server Error";
 const VERSION: u64 = 1_700_000_000_000;
 
 
-const SCHEMA_REQUESTS: usize = 2;
+const SCHEMA_REQUESTS: usize = 3;
 
 
-const REQUESTS_BEFORE_INSERT: usize = 3;
+const BEFORE_DELETE: usize = 5;
+
+
+const LOAD_REQUESTS: usize = 8;
+
+
+const REQUESTS_BEFORE_INSERT: usize = 6;
 
 
 const STALL_TIMEOUT_MS: u64 = 100;
@@ -171,7 +180,7 @@ fn body_of(request: &str) -> &str {
 #[test]
 fn schema_replace_then_insert_in_order_with_the_key_in_a_header_only() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS]);
     let outcome = load_table(&rig.config, &january()?, VERSION, &idle)?;
     assert_eq!(outcome.failure, None);
     assert_eq!(outcome.batches_planned, 1);
@@ -183,7 +192,7 @@ fn schema_replace_then_insert_in_order_with_the_key_in_a_header_only() -> TestRe
         head(0)?
     );
     assert!(head(1)?.contains("CREATE"));
-    let delete = head(SCHEMA_REQUESTS)?;
+    let delete = head(BEFORE_DELETE)?;
     assert!(delete.contains("DELETE"), "{delete}");
     assert!(delete.contains("param_tenant=acme"), "{delete}");
     assert!(delete.contains("param_first=2026-01-05"), "{delete}");
@@ -208,12 +217,12 @@ fn a_rerun_of_the_same_file_sends_identical_rows() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
     let export = january()?;
     let again = january()?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; (REQUESTS_BEFORE_INSERT + 1) * TWICE]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS * TWICE]);
     load_table(&rig.config, &export, VERSION, &idle)?;
     load_table(&rig.config, &again, VERSION, &idle)?;
     let seen = finished(server)?;
     let first = body_of(seen.get(REQUESTS_BEFORE_INSERT).ok_or("no insert")?);
-    let second = body_of(seen.get(REQUESTS_BEFORE_INSERT * TWICE + 1).ok_or("no insert")?);
+    let second = body_of(seen.get(LOAD_REQUESTS + REQUESTS_BEFORE_INSERT).ok_or("no insert")?);
     assert!(!first.is_empty());
     assert_eq!(first, second);
     Ok(())
@@ -229,15 +238,15 @@ fn a_corrected_export_deletes_the_covered_days_before_inserting_its_own_source()
         "acme",
     )?;
     assert_ne!(original.source, corrected.source);
-    let server = serve(rig.listener.try_clone()?, vec![OK; (REQUESTS_BEFORE_INSERT + 1) * TWICE]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS * TWICE]);
     load_table(&rig.config, &original, VERSION, &idle)?;
     load_table(&rig.config, &corrected, VERSION, &idle)?;
     let seen = finished(server)?;
-    let second_delete = seen.get(REQUESTS_BEFORE_INSERT + 1 + SCHEMA_REQUESTS).ok_or("no delete")?;
+    let second_delete = seen.get(LOAD_REQUESTS + BEFORE_DELETE).ok_or("no delete")?;
     assert!(second_delete.contains("DELETE"));
     assert!(second_delete.contains("param_tenant=acme"));
     assert!(second_delete.contains("param_accounts=%5B%27acct%27%5D"), "{second_delete}");
-    let second_insert = body_of(seen.get(REQUESTS_BEFORE_INSERT * TWICE + 1).ok_or("no insert")?);
+    let second_insert = body_of(seen.get(LOAD_REQUESTS + REQUESTS_BEFORE_INSERT).ok_or("no insert")?);
     assert!(second_insert.contains(&corrected.source));
     assert!(!second_insert.contains(&original.source));
     assert!(second_insert.contains("\"cost\":\"9.5\""));
@@ -249,11 +258,11 @@ fn a_corrected_export_deletes_the_covered_days_before_inserting_its_own_source()
 fn another_tenant_deletes_only_its_own_rows() -> TestResult {
     let mut rig = rig(LONG_TIMEOUT_MS)?;
     rig.config.tenant = "globex".to_owned();
-    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS]);
     let other = export_of(&["1,USD,acct,2026-01-05T10:00:00Z,compute,"], "globex")?;
     load_table(&rig.config, &other, VERSION, &idle)?;
     let seen = finished(server)?;
-    let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
+    let delete = seen.get(BEFORE_DELETE).ok_or("no delete")?;
     assert!(delete.contains("param_tenant=globex"));
     assert!(!delete.contains("acme"));
     Ok(())
@@ -263,14 +272,14 @@ fn another_tenant_deletes_only_its_own_rows() -> TestResult {
 #[test]
 fn the_delete_names_every_account_of_the_export_and_no_other() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS]);
     let export = export_of(
         &["1,USD,acct2,2026-01-06T10:00:00Z,compute,", "2,USD,it's,2026-01-06T10:00:00Z,compute,"],
         "acme",
     )?;
     load_table(&rig.config, &export, VERSION, &idle)?;
     let seen = finished(server)?;
-    let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
+    let delete = seen.get(BEFORE_DELETE).ok_or("no delete")?;
     assert!(delete.contains("param_accounts=%5B%27acct2%27%2C%27it%5C%27s%27%5D"), "{delete}");
     assert!(!delete.contains("acct1"), "{delete}");
     Ok(())
@@ -381,14 +390,14 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
     let calls = Cell::new(0);
     let late = || {
         calls.set(calls.get() + 1);
-        if calls.get() > SCHEMA_REQUESTS {
+        if calls.get() > BEFORE_DELETE {
             ONE_HOUR
         } else {
             Duration::ZERO
         }
     };
     rig.listener.set_nonblocking(false)?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; BEFORE_DELETE]);
     let failed = load_table(&rig.config, &january()?, VERSION, &late);
     assert!(matches!(
         failed,
@@ -397,7 +406,7 @@ fn a_spent_deadline_sends_nothing() -> TestResult {
             ..
         })
     ));
-    assert_eq!(finished(server)?.len(), SCHEMA_REQUESTS);
+    assert_eq!(finished(server)?.len(), BEFORE_DELETE);
     let after_delete = Cell::new(0);
     let last = || {
         after_delete.set(after_delete.get() + 1);
@@ -437,7 +446,7 @@ fn refusals_are_classified_without_reading_the_message() -> TestResult {
     let failed = load_table(&rig.config, &january()?, VERSION, &idle);
     assert!(matches!(failed, Err(LoadError::Schema(InsertClass::Unauthorized))));
     finished(server)?;
-    let delete_refused = serve(rig.listener.try_clone()?, vec![OK, OK, SERVER_ERROR]);
+    let delete_refused = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, SERVER_ERROR]);
     let replace = load_table(&rig.config, &january()?, VERSION, &idle);
     assert!(matches!(
         replace,
@@ -448,7 +457,7 @@ fn refusals_are_classified_without_reading_the_message() -> TestResult {
         })
     ));
     finished(delete_refused)?;
-    let insert_refused = serve(rig.listener.try_clone()?, vec![OK, OK, OK, "302 Found"]);
+    let insert_refused = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, OK, "302 Found"]);
     let outcome = load_table(&rig.config, &january()?, VERSION, &idle)?;
     assert_eq!(outcome.failure.map(|failure| failure.class), Some(InsertClass::Rejected));
     assert_eq!(outcome.batches_planned, 1);
@@ -481,10 +490,10 @@ fn wide_export() -> Result<Export, Box<dyn Error>> {
 #[test]
 fn a_failed_second_batch_is_reported_with_the_first_as_stored() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
-    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, SERVER_ERROR]);
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, OK, OK, SERVER_ERROR]);
     let outcome = load_table(&rig.config, &wide_export()?, VERSION, &idle)?;
     assert_eq!(outcome.rows_per_batch, vec![ROWS_PER_BATCH]);
-    assert_eq!(outcome.batches_planned, SCHEMA_REQUESTS);
+    assert_eq!(outcome.batches_planned, TWICE);
     assert_eq!(
         outcome.failure,
         Some(BatchFailure {
@@ -558,13 +567,13 @@ fn many_accounts_are_replaced_in_bounded_batches_before_the_insert() -> TestResu
     let lines: Vec<String> = names.iter().map(|name| format!("1,USD,{name},2026-01-05T10:00:00Z,compute,")).collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     let export = export_of(&refs, "acme")?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS + MANY_BATCHES + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; BEFORE_DELETE + MANY_BATCHES + TWICE]);
     let outcome = load_table(&rig.config, &export, VERSION, &idle)?;
     assert_eq!(outcome.failure, None);
     let seen = finished(server)?;
     let deletes: Vec<&String> = seen.iter().filter(|request| request.contains("param_accounts")).collect();
     assert_eq!(deletes.len(), MANY_BATCHES);
-    assert!(seen.get(SCHEMA_REQUESTS + MANY_BATCHES).ok_or("no insert")?.contains("INSERT"));
+    assert!(seen.get(BEFORE_DELETE + MANY_BATCHES).ok_or("no insert")?.contains("INSERT"));
     assert!(deletes.iter().all(|request| request.contains("param_tenant=acme")));
     assert!(deletes.iter().all(|request| request.contains("param_first=2026-01-05")));
     let named = |name: &str| deletes.iter().filter(|request| request.contains(&format!("%27{name}%27"))).count();
@@ -580,7 +589,7 @@ fn a_failed_second_delete_batch_names_the_batches_done() -> TestResult {
         .map(|number| format!("1,USD,a{number},2026-01-05T10:00:00Z,compute,"))
         .collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, SERVER_ERROR]);
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, OK, SERVER_ERROR]);
     let failed = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle);
     assert!(matches!(
         failed,
@@ -606,10 +615,10 @@ fn an_account_whose_rows_are_all_skipped_is_still_replaced() -> TestResult {
         ],
         "acme",
     )?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS]);
     load_table(&rig.config, &export, VERSION, &idle)?;
     let seen = finished(server)?;
-    let delete = seen.get(SCHEMA_REQUESTS).ok_or("no delete")?;
+    let delete = seen.get(BEFORE_DELETE).ok_or("no delete")?;
     assert!(
         delete.contains("acct1") && delete.contains("acct2") && delete.contains("acct3"),
         "{delete}"
@@ -683,7 +692,7 @@ fn long_plain_names_load_in_batches_whose_urls_stay_under_the_cap() -> TestResul
         .map(|number| format!("1,USD,{number:0>width$},2026-01-05T10:00:00Z,compute,", width = LONG_NAME))
         .collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let server = serve(rig.listener.try_clone()?, vec![OK; SCHEMA_REQUESTS + MANY_BATCHES + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; BEFORE_DELETE + MANY_BATCHES + TWICE]);
     let outcome = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle)?;
     assert_eq!(outcome.failure, None);
     let seen = finished(server)?;
@@ -701,7 +710,7 @@ fn quote_heavy_names_load_in_small_batches() -> TestResult {
         .map(|number| format!("1,USD,\"{number:0>5}{}\",2026-01-05T10:00:00Z,compute,", "'".repeat(QUOTE_RUN)))
         .collect();
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let server = serve(rig.listener.try_clone()?, vec![OK; QUOTE_NAMES + SCHEMA_REQUESTS + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; QUOTE_NAMES + BEFORE_DELETE + TWICE]);
     let outcome = load_table(&rig.config, &export_of(&refs, "acme")?, VERSION, &idle)?;
     assert_eq!(outcome.failure, None);
     let seen = finished(server)?;
@@ -728,7 +737,7 @@ fn skipped_rows_widen_the_delete_range_and_name_their_accounts() -> TestResult {
         ],
         "acme",
     )?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT + 1]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS]);
     load_table(&rig.config, &export, VERSION, &idle)?;
     let seen = finished(server)?;
     let deletes = deletes_of(&seen);
@@ -753,7 +762,7 @@ fn an_export_of_only_skipped_rows_replaces_their_days() -> TestResult {
         &["x,USD,acct1,2026-01-05T10:00:00Z,compute,", "y,USD,acct2,2026-01-06T10:00:00Z,compute,"],
         "acme",
     )?;
-    let server = serve(rig.listener.try_clone()?, vec![OK; REQUESTS_BEFORE_INSERT]);
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS - 1]);
     let outcome = load_table(&rig.config, &export, VERSION, &idle)?;
     assert_eq!(outcome.failure, None);
     let seen = finished(server)?;
@@ -796,4 +805,178 @@ fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) ->
 #[cfg(not(unix))]
 fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path.as_ref(), content)
+}
+
+
+fn heads_of(seen: &[String]) -> Vec<&str> {
+    seen.iter().map(|request| request.lines().next().unwrap_or("")).collect()
+}
+
+
+fn state_body(digest: &str, generation: u64, state: &str) -> String {
+    format!("{{\"generation\":{generation},\"source\":\"{digest}\",\"state\":\"{state}\",\"tenant\":\"acme\"}}")
+}
+
+
+#[test]
+fn the_export_is_marked_in_progress_before_the_delete_and_done_after_the_insert() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let export = january()?;
+    let server = serve(rig.listener.try_clone()?, vec![OK; LOAD_REQUESTS]);
+    load_table(&rig.config, &export, VERSION, &idle)?;
+    let seen = finished(server)?;
+    assert_eq!(seen.len(), LOAD_REQUESTS);
+    let heads = heads_of(&seen);
+    assert!(heads
+        .get(SCHEMA_REQUESTS - 1)
+        .is_some_and(|head| head.contains("cloud_cost_daily_load_state")));
+    let generation_head = heads.get(SCHEMA_REQUESTS).ok_or("no generation read")?;
+    assert!(
+        generation_head.contains("max") && generation_head.contains("load_state"),
+        "{generation_head}"
+    );
+    assert!(generation_head.contains(&format!("param_source={}", export.source)), "{generation_head}");
+    assert!(generation_head.contains("param_tenant=acme"), "{generation_head}");
+    let before = body_of(seen.get(SCHEMA_REQUESTS + 1).ok_or("no in_progress")?);
+    assert_eq!(before, state_body(&export.source, VERSION, "in_progress"));
+    assert!(heads.get(SCHEMA_REQUESTS + 1).is_some_and(|head| head.contains("load_state")));
+    assert!(heads.get(BEFORE_DELETE).is_some_and(|head| head.contains("DELETE")));
+    let after = body_of(seen.get(LOAD_REQUESTS - 1).ok_or("no done")?);
+    assert_eq!(after, state_body(&export.source, VERSION, "done"));
+    assert!(heads.get(LOAD_REQUESTS - 1).is_some_and(|head| head.contains("load_state")));
+    Ok(())
+}
+
+
+#[test]
+fn the_generation_never_goes_backwards() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let export = january()?;
+    let ahead = serve(rig.listener.try_clone()?, vec![OK, OK, OK, "200 OK|1700000000005\n", OK, OK, OK, OK]);
+    load_table(&rig.config, &export, VERSION, &idle)?;
+    let seen = finished(ahead)?;
+    let expected = VERSION + PREVIOUS_STEP;
+    assert_eq!(
+        body_of(seen.get(SCHEMA_REQUESTS + 1).ok_or("no in_progress")?),
+        state_body(&export.source, expected, "in_progress")
+    );
+    assert_eq!(
+        body_of(seen.get(LOAD_REQUESTS - 1).ok_or("no done")?),
+        state_body(&export.source, expected, "done")
+    );
+    let behind = serve(rig.listener.try_clone()?, vec![OK, OK, OK, "200 OK|5\n", OK, OK, OK, OK]);
+    load_table(&rig.config, &export, VERSION, &idle)?;
+    let later = finished(behind)?;
+    assert_eq!(
+        body_of(later.get(SCHEMA_REQUESTS + 1).ok_or("no in_progress")?),
+        state_body(&export.source, VERSION, "in_progress")
+    );
+    Ok(())
+}
+
+
+#[test]
+fn a_bad_generation_reply_is_a_named_error_before_any_write() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    [
+        "200 OK|abc\n",
+        "200 OK|\n",
+        "200 OK|-1\n",
+        "200 OK|99999999999999999999\n",
+        "200 OK|1\n2\n",
+    ]
+    .into_iter()
+    .try_for_each(|reply| -> TestResult {
+        let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, reply]);
+        assert!(
+            matches!(load_table(&rig.config, &january()?, VERSION, &idle), Err(LoadError::GenerationReply)),
+            "{reply}"
+        );
+        assert_eq!(finished(server)?.len(), SCHEMA_REQUESTS + 1);
+        Ok(())
+    })
+}
+
+
+#[test]
+fn a_failed_batch_or_delete_leaves_the_export_in_progress() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let server = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, OK, SERVER_ERROR]);
+    let outcome = load_table(&rig.config, &january()?, VERSION, &idle)?;
+    assert!(outcome.failure.is_some());
+    assert_eq!(finished(server)?.len(), REQUESTS_BEFORE_INSERT + 1);
+    let delete_failed = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, SERVER_ERROR]);
+    assert!(load_table(&rig.config, &january()?, VERSION, &idle).is_err());
+    assert_eq!(finished(delete_failed)?.len(), BEFORE_DELETE + 1);
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_generation_or_state_write_is_a_named_error_and_nothing_follows() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let generation = serve(rig.listener.try_clone()?, vec![OK, OK, OK, SERVER_ERROR]);
+    assert!(matches!(
+        load_table(&rig.config, &january()?, VERSION, &idle),
+        Err(LoadError::State(InsertClass::Unavailable))
+    ));
+    assert_eq!(finished(generation)?.len(), SCHEMA_REQUESTS + 1);
+    let first = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, SERVER_ERROR]);
+    assert!(matches!(
+        load_table(&rig.config, &january()?, VERSION, &idle),
+        Err(LoadError::State(InsertClass::Unavailable))
+    ));
+    assert_eq!(finished(first)?.len(), BEFORE_DELETE);
+    let last = serve(rig.listener.try_clone()?, vec![OK, OK, OK, OK, OK, OK, OK, SERVER_ERROR]);
+    assert!(matches!(
+        load_table(&rig.config, &january()?, VERSION, &idle),
+        Err(LoadError::State(InsertClass::Unavailable))
+    ));
+    assert_eq!(finished(last)?.len(), LOAD_REQUESTS);
+    Ok(())
+}
+
+
+fn spent_after(limit: usize, calls: &Cell<usize>) -> Duration {
+    calls.set(calls.get() + 1);
+    if calls.get() > limit {
+        ONE_HOUR
+    } else {
+        Duration::ZERO
+    }
+}
+
+
+#[test]
+fn a_spent_deadline_stops_the_generation_read_and_each_state_write() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    [SCHEMA_REQUESTS, SCHEMA_REQUESTS + 1, LOAD_REQUESTS - 1]
+        .into_iter()
+        .try_for_each(|limit| -> TestResult {
+            let calls = Cell::new(0);
+            let elapsed = || spent_after(limit, &calls);
+            let server = serve(rig.listener.try_clone()?, vec![OK; limit]);
+            assert!(matches!(
+                load_table(&rig.config, &january()?, VERSION, &elapsed),
+                Err(LoadError::State(InsertClass::Timeout))
+            ));
+            assert_eq!(finished(server)?.len(), limit);
+            Ok(())
+        })
+}
+
+
+#[test]
+fn a_server_that_never_answers_the_generation_read_hits_the_deadline() -> TestResult {
+    let rig = rig(STALL_TIMEOUT_MS)?;
+    let (release, held) = channel();
+    let (ready, requested) = channel();
+    let server = stall(rig.listener.try_clone()?, ready, held);
+    let agent = agent_for(&rig.config)?;
+    let failed = previous_generation(&agent, &rig.config, PASSWORD, "digest", &idle);
+    requested.recv_timeout(EVENT_WAIT)?;
+    release.send(())?;
+    joined(server)?;
+    assert!(matches!(failed, Err(LoadError::State(InsertClass::Timeout))));
+    Ok(())
 }
