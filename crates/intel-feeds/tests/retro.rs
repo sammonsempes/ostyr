@@ -6,8 +6,9 @@ use intel_feeds::config::{ClickhouseConfig, ClickhouseError};
 use intel_feeds::limits::{MAX_RETRO_BYTES, MAX_RETRO_MATCHES, MAX_RETRO_ROWS_TO_GROUP, MAX_RETRO_ROWS_TO_READ, MAX_RETRO_SECONDS};
 use intel_feeds::load::LoadError;
 use intel_feeds::retro::{
-    absorb, body_failure, gap_of, parse_scalar, refusal, retro_run, statements, time_of, validate_retro, window_epochs, Collected, Direction, Gap,
-    MatchGroup, RetroError, RetroReply, RetroRequest, RetroRun, RetroSettings,
+    absorb, body_failure, gap_of, parse_scalar, refusal, retro_run, server_settings, settings_clause, statements, time_of, validate_retro,
+    window_epochs, Collected, Direction, Gap, MatchGroup, RetroError, RetroReply, RetroRequest, RetroRun, RetroSettings, MAX_CHANGED_BYTES,
+    RETRO_ALLOWED_CHANGED,
 };
 use serde_json::json;
 use siem_ingest::error::InsertClass;
@@ -45,10 +46,7 @@ const FOUR: usize = 4;
 const FIVE: usize = 5;
 
 
-const RESULT_ROWS_OF_A_COUNT: &str = "1";
-
-
-const MATCH_FIELDS: usize = 20;
+const SPENT_STEPS: usize = 4;
 
 
 const DICTIONARY_PORT: u16 = 9440;
@@ -118,6 +116,12 @@ const SECOND_LEFT_MS: u64 = 3_000;
 
 
 const THIRD_LEFT_MS: u64 = 2_000;
+
+
+const FOURTH_LEFT_MS: u64 = 1_000;
+
+
+const PIN_NAMES: usize = 20;
 
 
 const HOST_CHARS: usize = 256;
@@ -244,8 +248,24 @@ fn run_ok(script: Vec<Result<RetroReply, InsertClass>>) -> (Result<RetroRun, Ret
 }
 
 
+fn clean() -> Result<RetroReply, InsertClass> {
+    text("readonly\nmax_execution_time\nfilter\n")
+}
+
+
 fn three_replies(not_an_ip: &str, body: &str) -> Vec<Result<RetroReply, InsertClass>> {
-    vec![text("0\n"), text(not_an_ip), text(body)]
+    vec![clean(), text("0\n"), text(not_an_ip), text(body)]
+}
+
+
+fn pins(result_rows: &str) -> String {
+    format!(
+        " SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', max_rows_to_read = 1000000, read_overflow_mode = 'throw', \
+         max_rows_to_group_by = 10000, group_by_overflow_mode = 'throw', max_result_rows = {result_rows}, result_overflow_mode = 'throw', \
+         sort_overflow_mode = 'throw', set_overflow_mode = 'throw', distinct_overflow_mode = 'throw', join_overflow_mode = 'throw', \
+         transfer_overflow_mode = 'throw', read_overflow_mode_leaf = 'throw', timeout_overflow_mode_leaf = 'throw', limit = 0, offset = 0, \
+         additional_result_filter = '', filter = '', additional_table_filters = {{}}"
+    )
 }
 
 
@@ -260,15 +280,23 @@ fn the_statements_are_exact_and_carry_no_tenant_or_time_text() -> TestResult {
     let window =
         "`tenant` = {tenant:String} AND `@timestamp` >= toDateTime({start:UInt32}, 'UTC') AND `@timestamp` < toDateTime({end:UInt32}, 'UTC')";
     assert_eq!(
+        found.changed,
+        format!("SELECT `name` FROM `system`.`settings` WHERE `changed`{} FORMAT TabSeparated", pins("64"))
+    );
+    assert_eq!(
         found.foreign,
-        "SELECT count() FROM (SELECT 1 FROM `ostyr`.`iocs` WHERE `tenant` != {tenant:String} AND `checked` = 1 LIMIT 1) FORMAT TabSeparated"
+        format!(
+            "SELECT count() FROM (SELECT 1 FROM `ostyr`.`iocs` WHERE `tenant` != {{tenant:String}} AND `checked` = 1 LIMIT 1){} FORMAT TabSeparated",
+            pins("1")
+        )
     );
     assert_eq!(
         found.not_an_ip,
         format!(
             "SELECT countIf(`source.ip` != '' AND isNull(toIPv6OrNull(`source.ip`))) + \
              countIf(`destination.ip` != '' AND isNull(toIPv6OrNull(`destination.ip`))) \
-             FROM `ostyr`.`events` WHERE {window} FORMAT TabSeparated"
+             FROM `ostyr`.`events` WHERE {window}{} FORMAT TabSeparated",
+            pins("1")
         )
     );
     let direction = |name: &str, column: &str| {
@@ -286,79 +314,102 @@ fn the_statements_are_exact_and_carry_no_tenant_or_time_text() -> TestResult {
              toUInt32(count()) AS `matches`, toUInt32(toUnixTimestamp(min(`ts`))) AS `first_time`, toUInt32(toUnixTimestamp(max(`ts`))) AS `last_time` \
              FROM ({} UNION ALL {}) WHERE dictHas('ostyr.ioc_trie', `key`) \
              GROUP BY `indicator`, `matched_ip`, `direction`, `host`, `host_was_cut`, `event_day`, `foreign` \
-             ORDER BY `foreign` DESC, `first_time`, `indicator`, `matched_ip`, `direction`, `host` LIMIT {{limit:UInt64}} FORMAT JSONEachRow",
+             ORDER BY `foreign` DESC, `first_time`, `indicator`, `matched_ip`, `direction`, `host` LIMIT {{limit:UInt64}}{} FORMAT JSONEachRow",
             direction("source", "source.ip"),
-            direction("destination", "destination.ip")
+            direction("destination", "destination.ip"),
+            pins("4")
         )
     );
-    [&found.foreign, &found.not_an_ip, &found.matches].iter().for_each(|statement| {
-        assert!(!statement.contains("tenant-a"));
-        assert!(!statement.contains("OrDefault"));
-        assert!(!statement.contains("toIPv6(`"));
-        assert!(!statement.contains("now()"));
-    });
+    [&found.changed, &found.foreign, &found.not_an_ip, &found.matches]
+        .iter()
+        .for_each(|statement| {
+            assert!(!statement.contains("tenant-a"));
+            assert!(!statement.contains("OrDefault"));
+            assert!(!statement.contains("toIPv6(`"));
+            assert!(!statement.contains("now()"));
+        });
     Ok(())
 }
 
 
 #[test]
-fn the_requests_carry_the_parameters_and_every_setting_with_throw_overflow_modes() -> TestResult {
+fn the_requests_carry_the_parameters_and_only_the_two_url_settings() -> TestResult {
     let (result, seen) = run_ok(three_replies(&format!("{NOT_AN_IP}\n"), &rows(PAIR)));
     let run = result?;
     assert_eq!(run.summary.not_an_ip, NOT_AN_IP);
-    assert_eq!(seen.len(), THREE);
+    assert_eq!(seen.len(), SPENT_STEPS);
     let tenant = ("tenant", "tenant-a".to_owned());
     let window = [tenant.clone(), ("start", START_EPOCH.to_string()), ("end", END_EPOCH.to_string())];
-    assert_eq!(seen.first().map(|request| request.params.clone()), Some(vec![tenant.clone()]));
-    assert_eq!(seen.get(1).map(|request| request.params.clone()), Some(window.to_vec()));
-    let match_params = seen.get(PAIR).map(|request| request.params.clone());
+    assert_eq!(seen.first().map(|request| request.params.clone()), Some(Vec::new()));
+    assert_eq!(seen.get(1).map(|request| request.params.clone()), Some(vec![tenant.clone()]));
+    assert_eq!(seen.get(PAIR).map(|request| request.params.clone()), Some(window.to_vec()));
+    let match_params = seen.get(THREE).map(|request| request.params.clone());
     let mut with_limit = window.to_vec();
     with_limit.push(("limit", "4".to_owned()));
     assert_eq!(match_params, Some(with_limit));
-    let match_settings = seen.get(PAIR).map(|request| request.settings.clone()).ok_or("no match request")?;
-    assert_eq!(
-        match_settings,
-        vec![
-            ("readonly", "1".to_owned()),
-            ("max_execution_time", "30".to_owned()),
-            ("timeout_overflow_mode", "throw".to_owned()),
-            ("max_rows_to_read", "1000000".to_owned()),
-            ("read_overflow_mode", "throw".to_owned()),
-            ("max_rows_to_group_by", "10000".to_owned()),
-            ("group_by_overflow_mode", "throw".to_owned()),
-            ("max_result_rows", "4".to_owned()),
-            ("result_overflow_mode", "throw".to_owned()),
-            ("http_write_exception_in_output_format", "0".to_owned()),
-            ("limit", "0".to_owned()),
-            ("offset", "0".to_owned()),
-            ("additional_result_filter", String::new()),
-            ("sort_overflow_mode", "throw".to_owned()),
-            ("set_overflow_mode", "throw".to_owned()),
-            ("distinct_overflow_mode", "throw".to_owned()),
-            ("join_overflow_mode", "throw".to_owned()),
-            ("transfer_overflow_mode", "throw".to_owned()),
-            ("read_overflow_mode_leaf", "throw".to_owned()),
-            ("timeout_overflow_mode_leaf", "throw".to_owned()),
-        ]
-    );
-    assert_eq!(match_settings.len(), MATCH_FIELDS);
-    seen.iter().for_each(|request| {
-        assert!(request
-            .settings
-            .iter()
-            .all(|(name, value)| !name.contains("break") && !value.contains("break")));
-        assert!(request
-            .settings
-            .iter()
-            .filter(|(name, _)| name.ends_with("_mode"))
-            .all(|(_, value)| value == "throw"));
-        assert_eq!(request.remaining, Duration::from_millis(TIMEOUT_MS));
-    });
-    let scalar_rows = seen
-        .first()
-        .and_then(|request| request.settings.iter().find(|(name, _)| *name == "max_result_rows"))
-        .map(|(_, value)| value.as_str());
-    assert_eq!(scalar_rows, Some(RESULT_ROWS_OF_A_COUNT));
+    let url_settings = vec![("readonly", "2".to_owned()), ("http_write_exception_in_output_format", "0".to_owned())];
+    assert_eq!(server_settings(), url_settings);
+    seen.iter().for_each(|request| assert_eq!(request.settings, url_settings));
+    seen.iter()
+        .for_each(|request| assert_eq!(request.remaining, Duration::from_millis(TIMEOUT_MS)));
+    let texts = statements(&settings())?;
+    let sent: Vec<&str> = seen.iter().map(|request| request.statement.as_str()).collect();
+    assert_eq!(sent, vec![texts.changed, texts.foreign, texts.not_an_ip, texts.matches]);
+    Ok(())
+}
+
+
+#[test]
+fn every_statement_pins_every_setting_and_the_allowlist_covers_the_pins() -> TestResult {
+    let clause = settings_clause(&settings(), PAIR as u64);
+    assert!(clause.starts_with(" SETTINGS max_execution_time = 30, "));
+    assert!(clause.contains("max_result_rows = 2, "));
+    assert!(!clause.contains("break"));
+    let names: Vec<&str> = clause
+        .trim_start_matches(" SETTINGS ")
+        .split(", ")
+        .filter_map(|pin| pin.split(" = ").next())
+        .collect();
+    assert_eq!(names.len(), PIN_NAMES);
+    names.iter().for_each(|name| assert!(RETRO_ALLOWED_CHANGED.contains(name), "{name}"));
+    assert!(RETRO_ALLOWED_CHANGED.contains(&"readonly"));
+    assert!(RETRO_ALLOWED_CHANGED.contains(&"http_write_exception_in_output_format"));
+    assert_eq!(RETRO_ALLOWED_CHANGED.len(), names.len() + PAIR);
+    Ok(())
+}
+
+
+#[test]
+fn a_changed_setting_outside_the_allowlist_refuses_before_any_other_request() -> TestResult {
+    let cases = ["max_result_bytes\n", "readonly\nmax_block_size\nload_balancing\n", "\n"];
+    cases.iter().try_for_each(|body| -> TestResult {
+        let (result, seen) = run_ok(vec![text(body), text("0\n"), text("0\n"), text(&rows(1))]);
+        assert!(matches!(result, Err(RetroError::ReaderProfileChanged(_))));
+        assert_eq!(seen.len(), 1);
+        Ok(())
+    })?;
+    let (two, _) = run_ok(vec![text("readonly\nmax_block_size\nload_balancing\n")]);
+    let found = two.err().ok_or("the run succeeded")?;
+    assert!(matches!(found, RetroError::ReaderProfileChanged(PAIR)));
+    assert_eq!(found.to_string(), "reader_profile_changed: 2 setting(s) outside the allowed list");
+    assert!(!found.to_string().contains("max_block_size"));
+    Ok(())
+}
+
+
+#[test]
+fn an_oversized_or_unreadable_settings_reply_refuses() -> TestResult {
+    let allowed = RETRO_ALLOWED_CHANGED.join("\n");
+    let (run, _) = run_ok(vec![text(&format!("{allowed}\n")), text("0\n"), text("0\n"), text("")]);
+    assert!(run.is_ok());
+    let padding = "readonly\n".repeat(MAX_CHANGED_BYTES as usize / "readonly\n".len() + PAIR);
+    let (big, seen) = run_ok(vec![text(&padding)]);
+    assert!(matches!(big, Err(RetroError::ReaderProfileChanged(_))));
+    assert_eq!(seen.len(), 1);
+    let broken = Ok(reply(StatusCode::OK, None, Box::new(Failing(io::ErrorKind::ConnectionReset))));
+    assert!(matches!(error_of(vec![broken])?, RetroError::Body(io::ErrorKind::ConnectionReset)));
+    let invalid = Ok(reply(StatusCode::OK, None, Box::new(Cursor::new(NOT_UTF8.to_vec()))));
+    assert!(matches!(error_of(vec![invalid])?, RetroError::ReaderProfileChanged(1)));
     Ok(())
 }
 
@@ -434,9 +485,9 @@ fn a_foreign_row_in_the_match_reply_is_a_foreign_dictionary_error() -> TestResul
 
 #[test]
 fn a_foreign_row_in_the_source_table_stops_the_run_before_any_event_query() -> TestResult {
-    let (result, seen) = run_ok(vec![text("1\n"), text("0\n"), text(&rows(1))]);
+    let (result, seen) = run_ok(vec![clean(), text("1\n"), text("0\n"), text(&rows(1))]);
     assert!(matches!(result, Err(RetroError::ForeignDictionary)));
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.len(), PAIR);
     Ok(())
 }
 
@@ -461,7 +512,12 @@ fn any_line_that_does_not_parse_is_a_malformed_reply_and_nothing_is_returned() -
         format!("{good}{exception}").into_bytes(),
     ];
     bodies.into_iter().try_for_each(|body| -> TestResult {
-        let script = vec![text("0\n"), text("0\n"), Ok(reply(StatusCode::OK, None, Box::new(Cursor::new(body))))];
+        let script = vec![
+            clean(),
+            text("0\n"),
+            text("0\n"),
+            Ok(reply(StatusCode::OK, None, Box::new(Cursor::new(body)))),
+        ];
         let (result, _) = run_with(
             &RetroSettings {
                 max_matches: MAX_RETRO_MATCHES,
@@ -498,9 +554,9 @@ fn the_count_replies_are_parsed_strictly() -> TestResult {
         .iter()
         .for_each(|bytes| assert!(matches!(parse_scalar(bytes), Err(RetroError::Malformed))));
     let long = Ok(reply(StatusCode::OK, None, Box::new(Cursor::new(vec![b'1'; LONG_SCALAR]))));
-    assert!(matches!(error_of(vec![long])?, RetroError::Malformed));
-    assert!(matches!(error_of(vec![text("abc")])?, RetroError::Malformed));
-    assert!(matches!(error_of(vec![text("0\n"), text("")])?, RetroError::Malformed));
+    assert!(matches!(error_of(vec![clean(), long])?, RetroError::Malformed));
+    assert!(matches!(error_of(vec![clean(), text("abc")])?, RetroError::Malformed));
+    assert!(matches!(error_of(vec![clean(), text("0\n"), text("")])?, RetroError::Malformed));
     Ok(())
 }
 
@@ -508,9 +564,12 @@ fn the_count_replies_are_parsed_strictly() -> TestResult {
 #[test]
 fn a_body_that_fails_maps_to_a_fixed_variant() -> TestResult {
     let scalar = Ok(reply(StatusCode::OK, None, Box::new(Failing(io::ErrorKind::ConnectionReset))));
-    assert!(matches!(error_of(vec![scalar])?, RetroError::Body(io::ErrorKind::ConnectionReset)));
+    assert!(matches!(
+        error_of(vec![clean(), scalar])?,
+        RetroError::Body(io::ErrorKind::ConnectionReset)
+    ));
     let timed = Ok(reply(StatusCode::OK, None, Box::new(Failing(io::ErrorKind::TimedOut))));
-    assert!(matches!(error_of(vec![text("0\n"), text("0\n"), timed])?, RetroError::Timeout));
+    assert!(matches!(error_of(vec![clean(), text("0\n"), text("0\n"), timed])?, RetroError::Timeout));
     assert!(matches!(
         body_failure(&io::Error::other("secret text")),
         RetroError::Body(io::ErrorKind::Other)
@@ -529,7 +588,7 @@ fn a_reply_over_the_byte_cap_is_an_error() -> TestResult {
         max_matches: MAX_RETRO_MATCHES,
         ..settings()
     };
-    let script = vec![text("0\n"), text("0\n"), huge];
+    let script = vec![clean(), text("0\n"), text("0\n"), huge];
     let (result, _) = run_with(&wide, START, END, None, script);
     assert!(matches!(result, Err(RetroError::TooManyBytes(MAX_RETRO_BYTES))));
     Ok(())
@@ -547,8 +606,12 @@ fn exception_codes_map_to_fixed_errors_and_the_text_is_never_read() -> TestResul
     ];
     cases.iter().try_for_each(|(code, status, name)| -> TestResult {
         assert_eq!(error_of(vec![failing(*code, *status)])?.to_string(), *name);
-        assert_eq!(error_of(vec![text("0\n"), failing(*code, *status)])?.to_string(), *name);
-        assert_eq!(error_of(vec![text("0\n"), text("0\n"), failing(*code, *status)])?.to_string(), *name);
+        assert_eq!(error_of(vec![clean(), failing(*code, *status)])?.to_string(), *name);
+        assert_eq!(error_of(vec![clean(), text("0\n"), failing(*code, *status)])?.to_string(), *name);
+        assert_eq!(
+            error_of(vec![clean(), text("0\n"), text("0\n"), failing(*code, *status)])?.to_string(),
+            *name
+        );
         Ok(())
     })?;
     assert!(matches!(
@@ -600,7 +663,8 @@ fn a_spent_deadline_sends_nothing_and_each_request_gets_what_is_left() -> TestRe
         vec![
             Duration::from_millis(FIRST_LEFT_MS),
             Duration::from_millis(SECOND_LEFT_MS),
-            Duration::from_millis(THIRD_LEFT_MS)
+            Duration::from_millis(THIRD_LEFT_MS),
+            Duration::from_millis(FOURTH_LEFT_MS)
         ]
     );
     let exhausted = Cell::new(0);
@@ -616,7 +680,7 @@ fn a_spent_deadline_sends_nothing_and_each_request_gets_what_is_left() -> TestRe
         },
         &|_| {
             sent_before_exhaustion.set(sent_before_exhaustion.get() + 1);
-            text("0\n")
+            text("")
         },
     );
     assert!(matches!(result, Err(RetroError::Timeout)));

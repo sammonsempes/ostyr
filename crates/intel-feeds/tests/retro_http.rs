@@ -60,7 +60,7 @@ const MATCHES_IN_ROW: u32 = 3;
 const NOT_AN_IP: u64 = 4;
 
 
-const THIRD: usize = 2;
+const THIRD: usize = 3;
 
 
 const NOT_UTF8: [u8; 2] = [0xff, 0xfe];
@@ -188,6 +188,7 @@ fn a_run_goes_through_the_real_sender_with_the_statement_in_the_body() -> TestRe
     let server = serve(
         rig.listener.try_clone()?,
         vec![
+            reply_text("200 OK", "", "readonly\n"),
             reply_text("200 OK", "", "0\n"),
             reply_text("200 OK", "", "4\n"),
             reply_text("200 OK", "", &format!("{ROW}\n")),
@@ -202,11 +203,14 @@ fn a_run_goes_through_the_real_sender_with_the_statement_in_the_body() -> TestRe
         Some((true, MATCHES_IN_ROW))
     );
     let third = seen.get(THIRD).ok_or("no third request")?;
-    assert!(third.starts_with("POST /?readonly=1&max_execution_time=30&timeout_overflow_mode=throw&"));
-    assert!(third.contains("group_by_overflow_mode=throw"));
-    assert!(third.contains("http_write_exception_in_output_format=0&limit=0&offset=0&additional_result_filter=&sort_overflow_mode=throw&"));
-    assert!(third.contains("timeout_overflow_mode_leaf=throw&param_tenant"));
-    assert!(third.contains("param_tenant=tenant-a&param_start=1793664000&param_end=1793707200&param_limit=4"));
+    assert!(third.starts_with("POST /?readonly=2&http_write_exception_in_output_format=0&param_tenant=tenant-a&"));
+    assert!(third.contains("param_tenant=tenant-a&param_start=1793664000&param_end=1793707200&param_limit=4 HTTP/1.1"));
+    assert!(third.contains(" SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', "));
+    assert!(third.contains("additional_table_filters = {} FORMAT JSONEachRow"));
+    assert!(seen
+        .first()
+        .ok_or("no first request")?
+        .contains("FROM `system`.`settings` WHERE `changed` SETTINGS "));
     assert!(third.to_lowercase().contains(&format!("x-clickhouse-key: {PASSWORD}").to_lowercase()));
     assert!(third.to_lowercase().contains("x-clickhouse-user: retro_reader"));
     assert!(third.contains("SELECT dictGet('ostyr.ioc_trie', 'indicator'"));
