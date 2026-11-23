@@ -1,0 +1,39 @@
+mode: enforce
+default: block
+rules:
+  - action: block
+    vendor: "0781"
+    product: "5567"
+  - action: allow
+    vendor: "0627"
+    product: "0001"
+  - action: allow
+    vendor: "1d6b"
+    product: "0002"
+  - action: allow
+    vendor: "1d6b"
+    product: "0002"
+exceptions:
+  - rule:
+      action: allow
+      vendor: "046d"
+      product: "c52b"
+      serial: "45300001"
+    owner: alice@example.org
+    expires: "2099-01-01T00:00:00Z"
+    reason: Vendor firmware update stick
+  - rule:
+      action: allow
+      vendor: "0951"
+      product: "1666"
+      serial: "0019.06-3:10"
+    owner: bob
+    expires: "2099-01-01T00:00:00Z"
+    reason: Digits and punctuation serial
+  - rule:
+      action: allow
+      vendor: "0930"
+      product: "6545"
+    owner: bob
+    expires: "2020-01-01T00:00:00Z"
+    reason: Expired migration window

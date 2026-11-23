@@ -64,4 +64,10 @@ pub enum PolicyError {
 pub enum RenderError {
     #[error("no audit mode in a rule file or browser policy: render only an enforce policy")]
     AuditMode,
+    #[error("{kind} {index} has no Windows equivalent ({reason}): the Windows agent cannot enforce it as the policy means it")]
+    NoWindowsEquivalent {
+        kind: &'static str,
+        index: usize,
+        reason: &'static str,
+    },
 }

@@ -1,17 +1,20 @@
-//! `check <policy> <now>` prints a summary, `render <policy> <now>` the USBGuard rule file, `evaluate <policy> <now> <vendor> <product> <classes>` a decision.
+//! `check <policy> <now>` prints a summary, `render <policy> <now>` the USBGuard rule file, `render-windows <policy> <now>` the Windows artefact, `evaluate <policy> <now> <vendor> <product> <classes>` a decision.
 
 use device_control::evaluate::{class_only_allows, evaluate, next_change};
 use device_control::model::{Matched, UsbDevice};
 use device_control::parse::load_policy;
 use device_control::render::{render_usbguard, summarize};
+use device_control::render_windows::{format_windows, render_windows};
 use std::io::Write;
 use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 
-const USAGE: &str =
-    "usage: usb_policy check <policy> <now> | render <policy> <now> | evaluate <policy> <now> <vendor> <product> <classes,comma,separated>";
+const USAGE: &str = concat!(
+    "usage: usb_policy check <policy> <now> | render <policy> <now> | render-windows <policy> <now> | ",
+    "evaluate <policy> <now> <vendor> <product> <classes,comma,separated>"
+);
 
 
 const POLICY_POSITION: usize = 1;
@@ -50,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             write!(out, "{}", file.rules)?;
             writeln!(out, "implicit_target={:?}", file.implicit_target)?;
         }
+        "render-windows" => write!(out, "{}", format_windows(&render_windows(&policy, now)?))?,
         "evaluate" => {
             let interfaces = argument(CLASSES_POSITION)?
                 .split(',')

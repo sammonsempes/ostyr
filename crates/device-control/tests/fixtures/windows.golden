@@ -1,0 +1,14 @@
+owned	HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions
+owned	HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs
+owned	HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\AllowDeviceIDs
+owned	HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\AllowInstanceIDs
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions	AllowDenyLayered	REG_DWORD	1
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions	DenyRemovableDevices	REG_DWORD	1
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions	DenyDeviceIDs	REG_DWORD	1
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs	1	REG_SZ	USB\VID_0781&PID_5567
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions	AllowDeviceIDs	REG_DWORD	1
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\AllowDeviceIDs	1	REG_SZ	USB\VID_0627&PID_0001
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\AllowDeviceIDs	2	REG_SZ	USB\VID_1D6B&PID_0002
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions	AllowInstanceIDs	REG_DWORD	1
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\AllowInstanceIDs	1	REG_SZ	USB\VID_046D&PID_C52B\45300001
+HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\AllowInstanceIDs	2	REG_SZ	USB\VID_0951&PID_1666\0019.06-3:10

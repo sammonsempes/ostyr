@@ -47,3 +47,36 @@ pub const MAX_UPDATE_URL_BYTES: usize = 2048;
 
 
 pub const HTTPS_PREFIX: &str = "https://";
+
+
+pub const RESTRICTIONS_KEY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions";
+
+
+pub const LAYERED_VALUE: &str = "AllowDenyLayered";
+
+
+pub const DEFAULT_BLOCK_VALUE: &str = "DenyRemovableDevices";
+
+
+pub const DENY_DEVICE_IDS: &str = "DenyDeviceIDs";
+
+
+pub const REASON_CLASS: &str = "a class acts on one interface on Windows";
+
+
+pub const REASON_NO_DEVICE_ID: &str = "no Windows ID without both vendor and product";
+
+
+pub const REASON_SERIAL_CASE: &str = "Windows matches a serial case-insensitively";
+
+
+pub const REASON_PRECEDENCE: &str = "layered order decides differently from the policy";
+
+
+pub const ALLOW_DEVICE_IDS: &str = "AllowDeviceIDs";
+
+
+pub const ALLOW_INSTANCE_IDS: &str = "AllowInstanceIDs";
+
+
+pub const ENABLED: &str = "1";
