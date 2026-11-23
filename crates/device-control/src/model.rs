@@ -217,3 +217,37 @@ pub struct RuleFile {
     pub rules: String,
     pub implicit_target: Action,
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryKind {
+    Dword,
+    Text,
+}
+
+
+/// One registry value of the artefact: key path, value name, type and data (a decimal number for a `Dword`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryValue {
+    pub key: String,
+    pub name: String,
+    pub kind: RegistryKind,
+    pub data: String,
+}
+
+
+/// The complete desired state of the device installation restrictions: every value under `owned_keys` that is not in `values` is deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsPolicy {
+    pub owned_keys: Vec<String>,
+    pub values: Vec<RegistryValue>,
+}
+
+
+/// A Windows device node as the installation restrictions see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Devnode {
+    pub hardware_ids: Vec<String>,
+    pub instance_id: String,
+    pub removable: bool,
+}

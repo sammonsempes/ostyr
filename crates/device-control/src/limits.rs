@@ -47,3 +47,27 @@ pub const MAX_UPDATE_URL_BYTES: usize = 2048;
 
 
 pub const HTTPS_PREFIX: &str = "https://";
+
+
+pub const RESTRICTIONS_KEY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions";
+
+
+pub const LAYERED_VALUE: &str = "AllowDenyLayered";
+
+
+pub const DEFAULT_BLOCK_VALUE: &str = "DenyRemovableDevices";
+
+
+pub const DENY_DEVICE_IDS: &str = "DenyDeviceIDs";
+
+
+pub const DENY_RETROACTIVE_VALUE: &str = "DenyDeviceIDsRetroactive";
+
+
+pub const ALLOW_DEVICE_IDS: &str = "AllowDeviceIDs";
+
+
+pub const ALLOW_INSTANCE_IDS: &str = "AllowInstanceIDs";
+
+
+pub const ENABLED: &str = "1";
