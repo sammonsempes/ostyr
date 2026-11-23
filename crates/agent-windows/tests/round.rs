@@ -822,6 +822,24 @@ fn a_file_that_returns_to_the_refused_bytes_is_not_audited_again() -> TestResult
 }
 
 
+#[test]
+fn a_bad_file_that_comes_back_after_the_good_one_is_audited_again() -> TestResult {
+    let lab = lab(&format!("batch: {BATCH_SEVEN}\n"))?;
+    let (engine, denied) = open(&lab)?;
+    put(&lab.path, "batch: 0\n");
+    reload_once_per_refusal(&engine, &lab.observed);
+    assert_eq!(denied.load(Ordering::SeqCst), 1);
+    put(&lab.path, &format!("batch: {BATCH_SEVEN}\n"));
+    reload_once_per_refusal(&engine, &lab.observed);
+    assert!(observation(&lab.observed).refused.is_none());
+    put(&lab.path, "batch: 0\n");
+    reload_once_per_refusal(&engine, &lab.observed);
+    assert_eq!(denied.load(Ordering::SeqCst), BOTH);
+    assert_eq!(current_config(&engine).batch, BATCH_SEVEN);
+    Ok(())
+}
+
+
 fn defender_env<'a>(lab: &'a Lab, run: Runner<'a>, seen: &'a mut SeenIds) -> PollEnv<'a> {
     PollEnv {
         run,
