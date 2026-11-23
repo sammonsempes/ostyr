@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: lab-accounts.sh <admin-password> <analyst-password>   (run in the compose directory, as root, by compose-lab.sh inside the lab VM)
-# Drives one auth_tool process through the shared account store: bootstraps an administrator, logs in, creates an analyst and enrols its TOTP.
-# The sessions live in the tool's memory, so one process serves every command. Prints the analyst TOTP secret on one line.
+# Drives one auth_tool process through the shared account store: bootstraps an administrator, logs in, creates the four lab accounts and enrols their TOTP.
+# The sessions live in the tool's memory, so one process serves every command. Creates an analyst, an auditor, a responder and a reader with the analyst password and prints one `<role> <TOTP secret>` line each.
 set -euo pipefail
 
 readonly ADMIN_PASSWORD="${1:?usage: lab-accounts.sh <admin-password> <analyst-password>}"
@@ -33,10 +33,12 @@ send "totp $admin_secret"
 admin_code="$reply"
 send "login admin $ADMIN_PASSWORD $SOURCE $admin_code"
 token="${reply#ok }"
-send "create $token analyst $ANALYST_PASSWORD analyst"
-[[ "$reply" == ok ]]
-send "enrol $token analyst"
-skip_line
-secret_of
+for role in analyst auditor responder reader; do
+    send "create $token $role $ANALYST_PASSWORD $role"
+    [[ "$reply" == ok ]]
+    send "enrol $token $role"
+    skip_line
+    printf '%s %s\n' "$role" "$(secret_of)"
+done
 input_fd="${SESSION[1]}"
 exec {input_fd}>&-

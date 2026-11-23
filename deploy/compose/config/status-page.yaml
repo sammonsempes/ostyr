@@ -1,0 +1,6 @@
+id: ostyr
+tenant: default
+title: Ostyr status
+components:
+  - name: Platform
+    service: platform
