@@ -796,6 +796,59 @@ fn urls_hidden_by_character_references_are_listed_from_the_original() -> Result<
 }
 
 
+const REFUSED_LINK: &str = "<a href='https://ph&#9;ish.evil.test/a&#27;b'>x</a>";
+
+
+const INNER_REFUSED_LINK: &str = "<a href='https://ph&#9;ish.evil.test/c&#27;d'>x</a> <a href='https://deep.evil.test/e&#27;f'>y</a>";
+
+
+#[test]
+fn a_refused_url_lists_its_host_from_a_raw_message() -> Result<(), Box<dyn std::error::Error>> {
+    let record = run(&mail(&["From: p@evil.test", "Content-Type: text/html"], REFUSED_LINK))?;
+    assert!(!links(&record).iter().any(|url| url.contains("phish.evil.test")));
+    assert_eq!(record.refused_hosts, ["phish.evil.test"]);
+    assert_eq!(record.counts.url_refused_host_kept, 1);
+    assert!(observables(&record, &policy()).contains(&(ObservableKind::Domain, "phish.evil.test".to_owned())));
+    Ok(())
+}
+
+
+#[test]
+fn a_refused_host_is_carried_to_the_nested_level_and_not_listed_twice() -> Result<(), Box<dyn std::error::Error>> {
+    let inner = mail(&["From: p@evil.test", "Content-Type: text/html"], INNER_REFUSED_LINK);
+    let text = multipart(
+        &["From: employee@corp.example"],
+        &[
+            part(&["Content-Type: text/html"], REFUSED_LINK),
+            part(&["Content-Type: message/rfc822"], &inner),
+        ],
+    );
+    let record = run(&text)?;
+    assert_eq!(record.refused_hosts, ["phish.evil.test", "deep.evil.test"]);
+    assert_eq!(record.counts.url_refused_host_kept, TWO);
+    Ok(())
+}
+
+
+#[test]
+fn an_inner_refused_host_that_repeats_no_outer_host_is_listed_after_the_outer_one() -> Result<(), Box<dyn std::error::Error>> {
+    let inner = mail(
+        &["From: p@evil.test", "Content-Type: text/html"],
+        "<a href='https://deep.evil.test/e&#27;f'>y</a>",
+    );
+    let text = multipart(
+        &["From: employee@corp.example"],
+        &[
+            part(&["Content-Type: text/html"], REFUSED_LINK),
+            part(&["Content-Type: message/rfc822"], &inner),
+        ],
+    );
+    let record = run(&text)?;
+    assert_eq!(record.refused_hosts, ["phish.evil.test", "deep.evil.test"]);
+    Ok(())
+}
+
+
 #[test]
 fn observables_are_sorted_lowercase_and_deduplicated() -> Result<(), Box<dyn std::error::Error>> {
     let hit = |url: &str| UrlHit { level: 0, url: url.into() };
