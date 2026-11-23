@@ -50,14 +50,14 @@ pub const GET_PATH: &str = "/alerts/{id}";
 pub const TRIAGE_PATH: &str = "/alerts/{id}/triage";
 
 
-pub const UTF8_BYTES_PER_CHAR: usize = 4;
+pub const MAX_JSON_BYTES_PER_CHAR: usize = 6;
 
 
 pub const BODY_OVERHEAD_BYTES: usize = 256;
 
 
-/// The note cap in raw UTF-8 plus the other fields; core-api's own cap (16 384) applies first to anything larger.
-pub const TRIAGE_BODY_LIMIT: usize = MAX_NOTE_CHARS * UTF8_BYTES_PER_CHAR + BODY_OVERHEAD_BYTES;
+/// The note cap with each character in its longest JSON form (a C0 control as six bytes) plus the other fields.
+pub const TRIAGE_BODY_LIMIT: usize = MAX_NOTE_CHARS * MAX_JSON_BYTES_PER_CHAR + BODY_OVERHEAD_BYTES;
 
 
 pub const BAD_REQUEST_CODE: &str = "bad_request";

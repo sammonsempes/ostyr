@@ -204,7 +204,8 @@ fn a_run_goes_through_the_real_sender_with_the_statement_in_the_body() -> TestRe
     let third = seen.get(THIRD).ok_or("no third request")?;
     assert!(third.starts_with("POST /?readonly=1&max_execution_time=30&timeout_overflow_mode=throw&"));
     assert!(third.contains("group_by_overflow_mode=throw"));
-    assert!(third.contains("http_write_exception_in_output_format=0"));
+    assert!(third.contains("http_write_exception_in_output_format=0&limit=0&offset=0&additional_result_filter=&sort_overflow_mode=throw&"));
+    assert!(third.contains("timeout_overflow_mode_leaf=throw&param_tenant"));
     assert!(third.contains("param_tenant=tenant-a&param_start=1793664000&param_end=1793707200&param_limit=4"));
     assert!(third.to_lowercase().contains(&format!("x-clickhouse-key: {PASSWORD}").to_lowercase()));
     assert!(third.to_lowercase().contains("x-clickhouse-user: retro_reader"));

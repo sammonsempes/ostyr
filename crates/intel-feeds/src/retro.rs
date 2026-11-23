@@ -36,6 +36,22 @@ pub const EXCEPTION_IN_BODY: &str = "0";
 pub const OVERFLOW_MODE: &str = "throw";
 
 
+/// Profile settings that cut a reply without an error, reset to no effect: `limit` and `offset` truncate, the filter drops rows.
+pub const RESET_SETTINGS: [(&str, &str); 3] = [("limit", "0"), ("offset", "0"), ("additional_result_filter", "")];
+
+
+/// Every other overflow mode a profile could set to `break` (a cut sort or set gave a silent partial result, T764BS2).
+pub const EXTRA_OVERFLOW_MODES: [&str; 7] = [
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "read_overflow_mode_leaf",
+    "timeout_overflow_mode_leaf",
+];
+
+
 /// 159 `TIMEOUT_EXCEEDED` and 160 `TOO_SLOW` (the estimate already exceeds `max_execution_time`; live on a slow view).
 pub const TIMEOUT_CODES: [u32; 2] = [159, 160];
 
@@ -292,7 +308,7 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
 
 /// Read-only, every limit from the settings, every overflow mode `throw`: never `break`, which gives silent partial results.
 pub fn server_settings(settings: &RetroSettings, result_rows: u64) -> Vec<(&'static str, String)> {
-    vec![
+    let mut sent = vec![
         ("readonly", READONLY_VALUE.to_owned()),
         ("max_execution_time", settings.max_execution_seconds.to_string()),
         ("timeout_overflow_mode", OVERFLOW_MODE.to_owned()),
@@ -303,7 +319,10 @@ pub fn server_settings(settings: &RetroSettings, result_rows: u64) -> Vec<(&'sta
         ("max_result_rows", result_rows.to_string()),
         ("result_overflow_mode", OVERFLOW_MODE.to_owned()),
         ("http_write_exception_in_output_format", EXCEPTION_IN_BODY.to_owned()),
-    ]
+    ];
+    sent.extend(RESET_SETTINGS.iter().map(|(name, value)| (*name, (*value).to_owned())));
+    sent.extend(EXTRA_OVERFLOW_MODES.iter().map(|name| (*name, OVERFLOW_MODE.to_owned())));
+    sent
 }
 
 

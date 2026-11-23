@@ -48,7 +48,7 @@ const FIVE: usize = 5;
 const RESULT_ROWS_OF_A_COUNT: &str = "1";
 
 
-const MATCH_FIELDS: usize = 10;
+const MATCH_FIELDS: usize = 20;
 
 
 const DICTIONARY_PORT: u16 = 9440;
@@ -329,6 +329,16 @@ fn the_requests_carry_the_parameters_and_every_setting_with_throw_overflow_modes
             ("max_result_rows", "4".to_owned()),
             ("result_overflow_mode", "throw".to_owned()),
             ("http_write_exception_in_output_format", "0".to_owned()),
+            ("limit", "0".to_owned()),
+            ("offset", "0".to_owned()),
+            ("additional_result_filter", String::new()),
+            ("sort_overflow_mode", "throw".to_owned()),
+            ("set_overflow_mode", "throw".to_owned()),
+            ("distinct_overflow_mode", "throw".to_owned()),
+            ("join_overflow_mode", "throw".to_owned()),
+            ("transfer_overflow_mode", "throw".to_owned()),
+            ("read_overflow_mode_leaf", "throw".to_owned()),
+            ("timeout_overflow_mode_leaf", "throw".to_owned()),
         ]
     );
     assert_eq!(match_settings.len(), MATCH_FIELDS);

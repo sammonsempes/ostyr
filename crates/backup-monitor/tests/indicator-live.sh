@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: crates/backup-monitor/tests/indicator-live.sh <lab-state-dir>
 # Live check of the restore-test indicator on a datastore-pair lab (LAB_PROFILE=datastore-pair lab/up.sh <task>): psql and the examples run on the client VM over
-# TLS against a scratch database of the datastore VM that holds migration backup_0001. Rows are written by SQL relative to the database clock, the indicator
+# TLS against a scratch database of the datastore VM that holds migrations backup_0001 and backup_0002. Rows are written by SQL relative to the database clock, the indicator
 # comes from the backup_indicators example and control 11 of builtin:cis-v8 from grc_evaluate. Every line is a check; the script exits with the failure count.
 set -euo pipefail
 
@@ -24,7 +24,7 @@ datastore_ssh "sudo -u postgres createdb -O '$owner' '$database'"
 trap 'datastore_ssh "sudo -u postgres dropdb --if-exists '"$database"'" || true' EXIT
 
 for name in backup_indicators grc_evaluate; do scp "${ssh_options[@]}" "$target/$name" "$client_user@$client_address:/tmp/$name"; done
-scp "${ssh_options[@]}" "$here/crates/backup-monitor/migrations/backup_0001.sql" "$client_user@$client_address:/tmp/"
+scp "${ssh_options[@]}" "$here/crates/backup-monitor/migrations/backup_0001.sql" "$here/crates/backup-monitor/migrations/backup_0002.sql" "$client_user@$client_address:/tmp/"
 ssh "${ssh_options[@]}" "$client_user@$client_address" "DB=$database bash -s" <<'REMOTE'
 set -euo pipefail
 set -a
@@ -40,6 +40,7 @@ failures=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS $1: $3"; else echo "FAIL $1: expected [$2] got [$3]"; failures=$((failures + 1)); fi; }
 contains() { if [[ "$3" == *"$2"* ]]; then echo "PASS $1: found $2"; else echo "FAIL $1: expected [$2] in [$3]"; failures=$((failures + 1)); fi; }
 P -f /tmp/backup_0001.sql >/dev/null
+P -f /tmp/backup_0002.sql >/dev/null
 cat >"$work/pg.yaml" <<YAML
 host: $DATASTORE_DOMAIN
 port: $POSTGRES_PORT

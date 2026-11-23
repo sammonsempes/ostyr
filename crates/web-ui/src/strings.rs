@@ -2,7 +2,7 @@ use crate::model::Language;
 use crate::types::TextTable;
 
 
-pub const TEXT_COUNT: usize = 353;
+pub const TEXT_COUNT: usize = 360;
 
 
 pub const MISSING_TEXT: &str = "???";
@@ -52,6 +52,13 @@ pub const ENGLISH: [(&str, &str); TEXT_COUNT] = [
     ("triage_closed", "Closed"),
     ("triage_false_positive", "False positive"),
     ("error_triage_changed", "The alert changed meanwhile. Reload the alert and try again."),
+    ("error_alerts_full", "The case already holds the maximum number of alerts."),
+    ("links_title", "Linked alerts"),
+    ("links_none", "No alert is linked to this case."),
+    ("links_unavailable", "The linked alerts cannot be shown."),
+    ("links_more", "More linked alerts"),
+    ("link_label", "Alert id (64 lowercase hexadecimal characters)"),
+    ("link_submit", "Link the alert"),
     ("none", "none"),
     ("none_marker", "(none)"),
     ("omitted", "omitted"),
@@ -418,6 +425,13 @@ pub const FRENCH: [(&str, &str); TEXT_COUNT] = [
         "error_triage_changed",
         "L'alerte a changé entre-temps. Rechargez l'alerte et recommencez.",
     ),
+    ("error_alerts_full", "Le dossier contient déjà le nombre maximal d'alertes."),
+    ("links_title", "Alertes liées"),
+    ("links_none", "Aucune alerte n'est liée à ce dossier."),
+    ("links_unavailable", "Les alertes liées ne peuvent pas être affichées."),
+    ("links_more", "Plus d'alertes liées"),
+    ("link_label", "Identifiant de l'alerte (64 caractères hexadécimaux minuscules)"),
+    ("link_submit", "Lier l'alerte"),
     ("none", "aucun"),
     ("none_marker", "(aucun)"),
     ("omitted", "omis"),

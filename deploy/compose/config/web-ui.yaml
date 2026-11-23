@@ -1,0 +1,9 @@
+listen: 0.0.0.0:9443
+tls:
+  certificate: /run/secrets/api_tls_cert
+  key: /run/secrets/api_tls_key
+api:
+  base_url: https://platform:8443
+  ca: /run/secrets/pg_ca
+  timeout_seconds: 10
+audit_file: /var/lib/ostyr/web-audit.log

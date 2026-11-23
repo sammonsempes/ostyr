@@ -1,5 +1,6 @@
 mod support;
 mod transport_text;
+mod vulns;
 
 
 use clap::Parser;
