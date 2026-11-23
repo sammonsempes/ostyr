@@ -39,6 +39,7 @@ signal-hook = "0.4.6"
 
 [dev-dependencies]
 getrandom = "0.4.3"
+grc = { version = "0.0.0", path = "../grc" }
 http-body-util = "0.1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
