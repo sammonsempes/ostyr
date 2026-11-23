@@ -4,14 +4,14 @@ use crate::pki::{agent_spec, write_file, AGENT_URI, PRIVATE_MODE, SERVER_NAME, W
 use crate::services::agent_verifier;
 use crate::types::TestResult;
 use agent_channel::agent_app::{
-    dialer, execute_fn, load_agent_file, record_commands, run_agent, run_attempts, run_streams, session_attempt, settle_and_join, settle_events,
-    start_worker, AgentFile, MAX_AGENT_ATTEMPTS,
+    dialer, dispatch_command, execute_fn, load_agent_file, record_commands, run_agent, run_attempts, run_streams, session_attempt, settle_and_join,
+    settle_events, start_worker, AgentFile, MAX_AGENT_ATTEMPTS,
 };
 use agent_channel::app::{alerting_audit, append_bounded, read_bounded_line, reload_context, shared_log_audit, BoundedLine};
 use agent_channel::client::deliver_events;
 use agent_channel::commands::{agent_directory, command_source, paths_of, read_envelope, read_envelopes, MAX_COMMAND_FILES, MAX_ENVELOPE_FILE_BYTES};
 use agent_channel::error::{AppError, ChannelError, SinkError};
-use agent_channel::model::{ClientTlsPaths, Delivered, Identity, DEFAULT_MAX_MESSAGE_BYTES};
+use agent_channel::model::{ClientTlsPaths, Delivered, ExecuteRefusal, Identity, DEFAULT_MAX_MESSAGE_BYTES};
 use agent_channel::proto::EventBatch;
 use agent_channel::server_app::{bind_server, file_events, load_server_file, run_server, run_server_with_clock, ServerFile};
 use agent_channel::sink::{file_sink, load_seen, open_event_store, parse_line, store_batch, EventStore};
@@ -22,7 +22,7 @@ use agent_channel::spool::{
 };
 use agent_channel::spool_dirs::{open_spool_dirs_with, SpoolDirs};
 use agent_channel::tls::client_config;
-use agent_channel::types::{DialFuture, PauseFuture};
+use agent_channel::types::{DialFuture, ExecuteFn, PauseFuture};
 use agent_command::keys::open_keys_engine;
 use agent_command::model::{Action, Command, KeyClass, NONCE_LENGTH};
 use agent_command::sign::{memory_signer, sign_command};
@@ -121,6 +121,12 @@ const FOURTH: usize = 4;
 
 
 const FILLER: u8 = 0;
+
+
+const SHELL_MAX_SECONDS: u32 = 60;
+
+
+const SHELL_IDLE_SECONDS: u32 = 30;
 
 
 const AGENT_YAML: &str = "server: 127.0.0.1:1\nserver_name: x\ncertificate: c\nkey: k\nplatform_ca: p\ntenant: t\nagent_id: a\n\
@@ -362,7 +368,7 @@ async fn run_once(agent: &AgentFile) -> Result<agent_channel::agent_app::AgentOu
 
 
 async fn run_with(agent: &AgentFile, dirs: &SpoolDirs) -> Result<agent_channel::agent_app::AgentOutcome, Box<dyn std::error::Error>> {
-    Ok(bounded(run_agent(agent, dirs, &|delay| Box::pin(no_pause(delay)))).await??)
+    Ok(bounded(run_agent(agent, dirs, &|delay| Box::pin(no_pause(delay)), None)).await??)
 }
 
 
@@ -577,8 +583,8 @@ async fn the_worker_records_and_the_executor_returns_at_once() -> TestResult {
     let _logging = scoped_logging();
     let (sender, receiver) = mpsc::channel(1);
     let execute = execute_fn(sender);
-    assert!(execute(command(FIRST)));
-    assert!(!execute(command(SECOND)));
+    assert_eq!(execute(command(FIRST)), Ok(()));
+    assert_eq!(execute(command(SECOND)), Err(ExecuteRefusal::Busy));
     drop(execute);
     let mut recorded = FlakyWriter::default();
     assert_eq!(record_commands(receiver, &mut recorded).await, 0);
@@ -1241,8 +1247,8 @@ async fn a_failed_settle_still_waits_for_the_worker_so_no_command_is_lost() -> T
     let spool = claim_spool(&agent)?;
     let worker = start_worker(&agent.executed_file)?;
     let execute = execute_fn(worker.sender);
-    assert!(execute(command(1)));
-    assert!(execute(command(SECOND_SEQUENCE)));
+    assert_eq!(execute(command(1)), Ok(()));
+    assert_eq!(execute(command(SECOND_SEQUENCE)), Ok(()));
     drop(execute);
     let delivered = Delivered {
         acknowledged: vec![1],
@@ -1336,5 +1342,103 @@ fn an_overflow_of_three_chunks_goes_back_in_three_whole_writes() -> TestResult {
     assert_eq!(fs::read_to_string(&sending)?.lines().count(), all.len() + 1);
     assert_eq!(append_chunks(std::iter::empty(), &dir.path().join("none"))?, 0);
     assert!(append_chunks(std::iter::once(Err(io::Error::other("injected"))), &dir.path().join("failed")).is_err());
+    Ok(())
+}
+
+
+fn open_shell_command(sequence: u64) -> Command {
+    Command {
+        action: Action::OpenShell {
+            session_id: "session-1".to_owned(),
+            asset: "asset-1".to_owned(),
+            ticket: "TCK-1".to_owned(),
+            requester: "alice@example.org".to_owned(),
+            approvers: vec!["bob@example.org".to_owned()],
+            max_seconds: SHELL_MAX_SECONDS,
+            idle_seconds: SHELL_IDLE_SECONDS,
+        },
+        ..command(sequence)
+    }
+}
+
+
+#[test]
+fn a_shell_order_without_a_shell_executor_is_refused_and_never_recorded() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, mut receiver) = mpsc::channel(TWICE);
+    assert_eq!(
+        dispatch_command(&sender, None, open_shell_command(FIRST)),
+        Err(ExecuteRefusal::NoShellExecutor)
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(dispatch_command(&sender, None, command(SECOND)), Ok(()));
+    assert!(receiver.try_recv().is_ok());
+    Ok(())
+}
+
+
+#[test]
+fn a_shell_order_goes_to_the_shell_executor_and_is_recorded_only_after_it_admits() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, mut receiver) = mpsc::channel(TWICE);
+    let admit: &ExecuteFn<'_> = &|_command| Ok(());
+    assert_eq!(dispatch_command(&sender, Some(admit), open_shell_command(FIRST)), Ok(()));
+    assert_eq!(receiver.try_recv()?.sequence, FIRST);
+    let refuse: &ExecuteFn<'_> = &|_command| Err(ExecuteRefusal::Busy);
+    assert_eq!(
+        dispatch_command(&sender, Some(refuse), open_shell_command(SECOND)),
+        Err(ExecuteRefusal::Busy)
+    );
+    assert!(receiver.try_recv().is_err());
+    let disabled: &ExecuteFn<'_> = &|_command| Err(ExecuteRefusal::ShellDisabled);
+    assert_eq!(
+        dispatch_command(&sender, Some(disabled), open_shell_command(SECOND)),
+        Err(ExecuteRefusal::ShellDisabled)
+    );
+    Ok(())
+}
+
+
+#[test]
+fn other_actions_never_reach_the_shell_executor() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, mut receiver) = mpsc::channel(TWICE);
+    let refuse: &ExecuteFn<'_> = &|_command| Err(ExecuteRefusal::Invalid);
+    assert_eq!(dispatch_command(&sender, Some(refuse), command(FIRST)), Ok(()));
+    assert_eq!(receiver.try_recv()?.sequence, FIRST);
+    Ok(())
+}
+
+
+#[test]
+fn a_failed_record_never_changes_the_verdict_of_an_admitted_shell_order() -> TestResult {
+    let _logging = scoped_logging();
+    let (sender, receiver) = mpsc::channel(1);
+    sender.try_send(command(FIRST))?;
+    let admit: &ExecuteFn<'_> = &|_command| Ok(());
+    assert_eq!(dispatch_command(&sender, Some(admit), open_shell_command(SECOND)), Ok(()));
+    drop(receiver);
+    assert_eq!(dispatch_command(&sender, Some(admit), open_shell_command(SECOND)), Ok(()));
+    assert_eq!(dispatch_command(&sender, None, command(FIRST)), Err(ExecuteRefusal::Busy));
+    Ok(())
+}
+
+
+#[test]
+fn every_refusal_reports_its_own_fixed_text() -> TestResult {
+    let texts: Vec<String> = [
+        ExecuteRefusal::Busy,
+        ExecuteRefusal::NoShellExecutor,
+        ExecuteRefusal::ShellDisabled,
+        ExecuteRefusal::Invalid,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(texts.iter().collect::<std::collections::BTreeSet<_>>().len(), texts.len());
+    assert_eq!(texts.first().map(String::as_str), Some(agent_channel::model::EXECUTOR_BUSY_REASON));
+    let verdict = agent_channel::client::refusal_verdict(vec![1], ExecuteRefusal::NoShellExecutor);
+    assert!(!verdict.accepted);
+    assert_eq!(verdict.reason, agent_channel::model::NO_SHELL_EXECUTOR_REASON);
     Ok(())
 }

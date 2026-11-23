@@ -31,7 +31,7 @@ pub const AGENT_CYCLE_SECONDS: u64 = 5;
 pub async fn run_agent_cycles(agent: &AgentFile, checked: &SpoolDirs, max_runs: u64, pause: &PauseFn) -> u64 {
     let mut succeeded = 0;
     for _ in 0..max_runs {
-        let outcome = run_agent(agent, checked, pause)
+        let outcome = run_agent(agent, checked, pause, None)
             .await
             .inspect_err(|error| tracing::warn!(%error, "agent run failed"));
         succeeded += u64::from(outcome.is_ok());

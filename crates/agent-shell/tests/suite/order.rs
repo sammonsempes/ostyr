@@ -1,5 +1,6 @@
 use crate::support::{command_of, default_order, open_action, order_of, AGENT, IDLE_SECONDS, LIFETIME, MAX_SECONDS, NOW, SESSION};
 use crate::types::TestResult;
+use agent_channel::model::ExecuteRefusal;
 use agent_command::error::ActionError;
 use agent_command::model::{Action, KeyClass, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS};
 use agent_shell::banner::{printable, shell_banner};
@@ -168,9 +169,12 @@ fn the_execute_adapter_only_queues_and_reports_a_refusal_as_false() -> TestResul
     let slot = new_slot();
     let (queue, mut receiver) = waiting(CAPACITY);
     let execute = shell_execute_fn(slot, queue);
-    assert!(execute(command_of(open_action(SESSION, MAX_SECONDS, IDLE_SECONDS))));
-    assert!(!execute(command_of(open_action("session-2", MAX_SECONDS, IDLE_SECONDS))));
-    assert!(!execute(command_of(Action::Ping)));
+    assert_eq!(execute(command_of(open_action(SESSION, MAX_SECONDS, IDLE_SECONDS))), Ok(()));
+    assert_eq!(
+        execute(command_of(open_action("session-2", MAX_SECONDS, IDLE_SECONDS))),
+        Err(ExecuteRefusal::Busy)
+    );
+    assert_eq!(execute(command_of(Action::Ping)), Err(ExecuteRefusal::Invalid));
     assert!(receiver.try_recv().is_ok());
     assert!(receiver.try_recv().is_err());
     Ok(())
@@ -196,5 +200,20 @@ fn a_configured_name_never_writes_a_terminal_escape() -> TestResult {
     assert_eq!(printable("a\x1b[2Jb\r\n"), "a?[2Jb??");
     let banner = shell_banner(&default_order()?, "evil\x1b]0;x\x07");
     assert!(!banner.contains(&ESCAPE));
+    Ok(())
+}
+
+
+#[test]
+fn a_closed_queue_is_reported_busy_and_frees_the_slot() -> TestResult {
+    let (queue, receiver) = tokio::sync::mpsc::channel(CAPACITY);
+    drop(receiver);
+    let slot = new_slot();
+    let execute = shell_execute_fn(std::sync::Arc::clone(&slot), queue);
+    assert_eq!(
+        execute(command_of(open_action(SESSION, MAX_SECONDS, IDLE_SECONDS))),
+        Err(ExecuteRefusal::Busy)
+    );
+    assert!(!slot.load(Ordering::SeqCst));
     Ok(())
 }

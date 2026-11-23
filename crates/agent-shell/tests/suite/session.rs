@@ -480,8 +480,8 @@ async fn the_worker_runs_queued_sessions_and_frees_the_slot_each_time() -> TestR
         (accepted, refused)
     };
     let (handled, (accepted, refused)) = tokio::join!(worker, driver);
-    assert!(accepted);
-    assert!(!refused);
+    assert_eq!(accepted, Ok(()));
+    assert_eq!(refused, Err(agent_channel::model::ExecuteRefusal::Busy));
     assert_eq!(handled, 1);
     assert!(!slot.load(std::sync::atomic::Ordering::SeqCst));
     Ok(())

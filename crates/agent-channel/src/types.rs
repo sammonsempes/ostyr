@@ -1,5 +1,5 @@
 use crate::error::ChannelError;
-use crate::model::{ChannelSettings, Identity, Revocations, ServerState, ShellInput, ShellSinkEvent, ShellState};
+use crate::model::{ChannelSettings, ExecuteRefusal, Identity, Revocations, ServerState, ShellInput, ShellSinkEvent, ShellState};
 use crate::proto::{CommandEnvelope, EventAck, EventBatch, ShellFrame};
 use agent_command::model::Command;
 use arc_swap::ArcSwap;
@@ -101,8 +101,8 @@ pub type SharedShell = Arc<ShellState>;
 pub type SharedState = Arc<ServerState>;
 
 
-/// Receives each accepted command as it arrives; it must hand the work off and return quickly, true when the work was taken over.
-pub type ExecuteFn = dyn Fn(Command) -> bool + Send + Sync;
+/// Receives each accepted command as it arrives; it must hand the work off and return quickly, `Ok` when the work was taken over.
+pub type ExecuteFn<'a> = dyn Fn(Command) -> Result<(), ExecuteRefusal> + Send + Sync + 'a;
 
 
 /// Reads the monotonic time for the server limiter; production passes `system_now`.
