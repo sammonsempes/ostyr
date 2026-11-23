@@ -4,7 +4,9 @@ use agent_command::error::ActionError;
 use agent_command::model::{Action, KeyClass, CLOCK_SKEW_SECONDS, MAX_LIFETIME_SECONDS};
 use agent_shell::banner::{printable, shell_banner};
 use agent_shell::error::ShellError;
-use agent_shell::model::VerifiedOpenShell;
+use agent_shell::model::{
+    approvers_of, asset_of, expires_at_of, idle_seconds_of, max_seconds_of, requester_of, session_id_of, ticket_of, VerifiedOpenShell,
+};
 use agent_shell::queue::{admit_shell, new_slot, shell_execute_fn};
 use agent_shell::verified::{check_start, is_past, lifetime_ok};
 use std::sync::atomic::Ordering;
@@ -26,14 +28,14 @@ const OVER_MAX: u64 = MAX_LIFETIME_SECONDS + 1;
 #[test]
 fn a_valid_open_shell_command_becomes_a_verified_order() -> TestResult {
     let order = default_order()?;
-    assert_eq!(order.session_id, SESSION);
-    assert_eq!(order.asset, "asset-1");
-    assert_eq!(order.ticket, "TCK-1");
-    assert_eq!(order.requester, "alice@example.org");
-    assert_eq!(order.approvers, vec!["bob@example.org".to_owned(), "carol@example.org".to_owned()]);
-    assert_eq!(order.max_seconds, MAX_SECONDS);
-    assert_eq!(order.idle_seconds, IDLE_SECONDS);
-    assert_eq!(order.expires_at, NOW + LIFETIME);
+    assert_eq!(session_id_of(&order), SESSION);
+    assert_eq!(asset_of(&order), "asset-1");
+    assert_eq!(ticket_of(&order), "TCK-1");
+    assert_eq!(requester_of(&order), "alice@example.org");
+    assert_eq!(approvers_of(&order), ["bob@example.org".to_owned(), "carol@example.org".to_owned()]);
+    assert_eq!(max_seconds_of(&order), MAX_SECONDS);
+    assert_eq!(idle_seconds_of(&order), IDLE_SECONDS);
+    assert_eq!(expires_at_of(&order), NOW + LIFETIME);
     Ok(())
 }
 
@@ -77,15 +79,19 @@ fn a_routine_key_is_refused() -> TestResult {
 
 
 #[test]
-fn a_lifetime_that_is_negative_or_over_the_maximum_is_refused() -> TestResult {
+fn a_lifetime_that_is_zero_negative_or_over_the_maximum_is_refused() -> TestResult {
     let mut command = command_of(open_action(SESSION, MAX_SECONDS, IDLE_SECONDS));
     command.expires_at = command.issued_at - 1;
     assert!(matches!(VerifiedOpenShell::try_from(command.clone()), Err(ShellError::Lifetime)));
     command.expires_at = command.issued_at + OVER_MAX;
     assert!(matches!(VerifiedOpenShell::try_from(command.clone()), Err(ShellError::Lifetime)));
+    command.expires_at = command.issued_at;
+    assert!(matches!(VerifiedOpenShell::try_from(command.clone()), Err(ShellError::Lifetime)));
+    command.expires_at = command.issued_at + 1;
+    assert!(VerifiedOpenShell::try_from(command.clone()).is_ok());
     command.expires_at = command.issued_at + MAX_LIFETIME_SECONDS;
     assert!(VerifiedOpenShell::try_from(command).is_ok());
-    assert!(lifetime_ok(NOW, NOW));
+    assert!(!lifetime_ok(NOW, NOW));
     Ok(())
 }
 
@@ -93,11 +99,11 @@ fn a_lifetime_that_is_negative_or_over_the_maximum_is_refused() -> TestResult {
 #[test]
 fn the_start_is_refused_only_after_the_expiry_and_the_skew() -> TestResult {
     let order = default_order()?;
-    let last_good = order.expires_at + CLOCK_SKEW_SECONDS;
+    let last_good = expires_at_of(&order) + CLOCK_SKEW_SECONDS;
     assert!(check_start(&order, last_good).is_ok());
     assert!(matches!(check_start(&order, last_good + 1), Err(ShellError::Expired)));
-    assert!(!is_past(order.expires_at, last_good));
-    assert!(is_past(order.expires_at, last_good + 1));
+    assert!(!is_past(expires_at_of(&order), last_good));
+    assert!(is_past(expires_at_of(&order), last_good + 1));
     assert!(!is_past(u64::MAX, u64::MAX));
     Ok(())
 }
@@ -116,7 +122,7 @@ fn a_second_open_shell_is_refused_by_name_while_the_slot_is_held() -> TestResult
     assert!(slot.load(Ordering::SeqCst));
     let second = admit_shell(&slot, &queue, command_of(open_action("session-2", MAX_SECONDS, IDLE_SECONDS)));
     assert!(matches!(second, Err(ShellError::Busy)));
-    assert_eq!(receiver.try_recv()?.session_id, SESSION);
+    assert_eq!(session_id_of(&receiver.try_recv()?), SESSION);
     assert!(receiver.try_recv().is_err());
     Ok(())
 }

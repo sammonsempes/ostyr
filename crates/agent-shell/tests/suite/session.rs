@@ -8,7 +8,7 @@ use agent_shell::banner::shell_banner;
 use agent_shell::error::{ShellError, StoreError};
 use agent_shell::model::{EndReason, PtyHandle, StoreEntry, VerifiedOpenShell, MAX_SHELL_SESSION_IDS, STORE_FILE_NAME};
 use agent_shell::queue::{new_slot, shell_execute_fn};
-use agent_shell::session::{cleanup_verdict, input_pipe, run_shell_session, run_shell_worker, shell_queue};
+use agent_shell::session::{cleanup_verdict, forward_input, input_pipe, run_shell_session, run_shell_worker, shell_queue};
 use agent_shell::store::write_entries;
 use futures_util::StreamExt;
 use std::future::Future;
@@ -525,5 +525,14 @@ async fn the_input_pipe_reports_a_shell_input_that_is_gone() -> TestResult {
     drop(chunks);
     let failed = writer.write_all(b"x").await;
     assert_eq!(failed.err().map(|error| error.kind()), Some(io::ErrorKind::BrokenPipe));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn an_input_that_cannot_be_read_ends_the_session_as_gone() -> TestResult {
+    let (input, _typed) = tokio::sync::mpsc::channel(1);
+    let ended = forward_input(&input, Ok(Err(io::Error::other("broken")))).await;
+    assert_eq!(ended, Err(EndReason::ShellGone));
     Ok(())
 }
