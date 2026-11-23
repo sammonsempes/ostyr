@@ -261,7 +261,7 @@ fn html_character_references_are_decoded_and_undecodable_ones_counted() -> Resul
     let mut long = Counts::default();
     let name = "a".repeat(LONG_TEXT);
     html_text(&format!("&{name};"), &mut long);
-    assert_eq!(long.html_refs_undecoded, 0);
+    assert_eq!(long.html_refs_undecoded, 1);
     Ok(())
 }
 
