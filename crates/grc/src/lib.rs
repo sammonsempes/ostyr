@@ -13,3 +13,5 @@ pub mod render;
 pub mod report;
 pub mod risk;
 pub mod risk_eval;
+pub mod store;
+pub mod types;
