@@ -2,6 +2,7 @@ use crate::error::PlatformError;
 use crate::model::Module;
 use crate::types::{MigrationPlan, PageLoader, Parts};
 use alerts::backend::MAX_CONNECTIONS;
+use alerts::settings::SETTING_PG;
 use alerts::store::{MIGRATIONS as ALERT_MIGRATIONS, MIGRATION_NAMESPACE as ALERT_NAMESPACE};
 use axum::Router;
 use cases::store::{MIGRATIONS as CASE_MIGRATIONS, MIGRATION_NAMESPACE as CASE_NAMESPACE};
@@ -9,6 +10,7 @@ use cert_inventory::store::{MIGRATIONS as CERT_MIGRATIONS, MIGRATION_NAMESPACE a
 use cloud_posture::store::{MIGRATIONS as POSTURE_MIGRATIONS, MIGRATION_NAMESPACE as POSTURE_NAMESPACE};
 use cmdb::store::{MIGRATIONS as CMDB_MIGRATIONS, MIGRATION_NAMESPACE as CMDB_NAMESPACE};
 use compliance::store::{MIGRATIONS as COMPLIANCE_MIGRATIONS, MIGRATION_NAMESPACE as COMPLIANCE_NAMESPACE};
+use core_api::reload::TENANT_START_ONLY;
 use core_api::routes::core_access;
 use core_api::types::{AccessTable, SharedState};
 use core_config::error::ConfigError;
@@ -44,6 +46,19 @@ pub const SETTING_WEIGHTS_FILE: &str = "risk.weights_file";
 
 
 pub const SETTING_PAGE_FILE: &str = "status.page_file";
+
+
+pub const BASE_START_ONLY: [&str; 4] = [SETTING_PG, SETTING_MODULES, SETTING_WEIGHTS_FILE, SETTING_PAGE_FILE];
+
+
+/// The start-only entries: the settings read at start, and the file `tenant` too while the status page is served (the page tenant was checked against it).
+pub fn start_only_keys(page_selected: bool) -> Vec<&'static str> {
+    BASE_START_ONLY
+        .iter()
+        .copied()
+        .chain(page_selected.then_some(TENANT_START_ONLY))
+        .collect()
+}
 
 
 pub const MAX_MODULES_CHARS: usize = 256;

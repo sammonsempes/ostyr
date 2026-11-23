@@ -2,7 +2,7 @@
 
 
 use alerts::backend::{lease, LOG_IGNORED_CRATE};
-use alerts::settings::{api_startup_reloads, module_audit, open_pg_engine_from, DEFAULT_TENANT, SETTING_PG};
+use alerts::settings::{api_startup_reloads, module_audit, open_pg_engine_from, DEFAULT_TENANT};
 use core_api::config::DEFAULT_LOG_LEVEL;
 use core_api::logging::reloadable_dispatch;
 use core_api::server::{new_listener, run_loaded, stop_listener};
@@ -14,8 +14,8 @@ use core_config::signal::reload_on_signals;
 use core_config::watch::watch_files;
 use core_pg::migrate::migrate;
 use platform::merge::{
-    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, shared_permits, weights_file_of, ACTOR,
-    SETTING_MODULES, SETTING_PAGE_FILE, SETTING_WEIGHTS_FILE,
+    check_page_tenant, load_page_services, migration_plan, module_parts, modules_of, page_file_of, shared_permits, start_only_keys, weights_file_of,
+    ACTOR,
 };
 use risk_score::weights::{weights_loader, weights_state};
 use std::error::Error;
@@ -111,7 +111,7 @@ async fn run(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         Path::new(module_file),
         loaded,
         (router, access, documents),
-        &[SETTING_PG, SETTING_MODULES, SETTING_WEIGHTS_FILE, SETTING_PAGE_FILE],
+        &start_only_keys(page.is_some()),
         listener,
         Some(log),
         startup_reloads,

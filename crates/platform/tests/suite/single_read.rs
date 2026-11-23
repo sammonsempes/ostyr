@@ -5,6 +5,7 @@ use core_api::server::{listening_address, new_listener, run_loaded, stop_listene
 use core_api::types::{AccessTable, StartupReloadFn};
 use core_config::load::load_module;
 use core_config::reload::{current_config, ReloadOutcome};
+use platform::merge::start_only_keys;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -209,5 +210,41 @@ async fn the_extra_startup_reloads_run_before_the_first_generation_serves() -> T
     task.await??;
     assert!(ran.load(Ordering::SeqCst));
     assert!(!served_before.load(Ordering::SeqCst));
+    Ok(())
+}
+
+
+const TENANT_PINNED: [&str; 1] = [core_api::reload::TENANT_START_ONLY];
+
+
+#[test]
+fn the_tenant_is_pinned_only_while_the_status_page_is_served() -> TestResult {
+    assert!(start_only_keys(true).contains(&core_api::reload::TENANT_START_ONLY));
+    assert!(!start_only_keys(false).contains(&core_api::reload::TENANT_START_ONLY));
+    assert!(start_only_keys(false).contains(&"modules"));
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn a_tenant_change_while_serving_is_refused_denied_and_the_old_identity_stays() -> TestResult {
+    let dir = tempdir()?;
+    private_file(&dir.path().join("store.key"), &[KEY_FILL; KEY_BYTES])?;
+    fs::write(dir.path().join("compromised.txt"), "passwordpassword\n")?;
+    let module_file = dir.path().join("platform.yaml");
+    fs::write(&module_file, format!("{}tenant: tenant-a\n", module_text(dir.path())))?;
+    let mut loaded = load_module(&module_file)?;
+    loaded.tenant = Some("tenant-b".to_owned());
+    let listener = new_listener();
+    let running = listener.clone();
+    let file = module_file.clone();
+    let parts = (Router::new(), AccessTable::new(), vec![]);
+    let task = tokio::spawn(async move { run_loaded(&file, loaded, parts, &TENANT_PINNED, running, None, Vec::new()).await });
+    listening_address(&listener).await.ok_or("server did not start")?;
+    stop_listener(&listener, None);
+    assert!(task.await?.is_ok());
+    let audit = audit_text(dir.path())?;
+    assert!(audit.contains("\"denied\"") && audit.contains("tenant is read at start only"));
+    assert!(!audit.contains("\"applied\""));
     Ok(())
 }

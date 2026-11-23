@@ -26,7 +26,7 @@ use core_api::previous::{
 use core_api::reload::{
     accept, build_settings, check_store, content_digest, first_then_file, follow_files, load_settings, open_reload, prepare_key, read_store_handle,
     replace_identity, reseal_accounts, rewatch, settings_state, store_sealed_under, switch_audit, switch_identity, switch_key, switch_store,
-    watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY,
+    watched_files, FINGERPRINT_COMPROMISED, FINGERPRINT_KEY, FINGERPRINT_OIDC, FINGERPRINT_TLS_CERTIFICATE, FINGERPRINT_TLS_KEY, TENANT_START_ONLY,
 };
 use core_api::routes::build_router;
 use core_api::server::{
@@ -2688,6 +2688,35 @@ fn an_unchanged_start_only_setting_lets_other_changes_through() -> TestResult {
     let running = live_starting(tempdir()?, "  pg_settings: /etc/one.yaml\n", None, &START_ONLY_KEYS)?;
     rewrite(&running, "  pg_settings: /etc/one.yaml\n  log_level: debug\n")?;
     assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    Ok(())
+}
+
+
+const TENANT_ONLY: [&str; 1] = [TENANT_START_ONLY];
+
+
+#[test]
+fn a_change_of_the_pinned_tenant_is_refused_by_name_and_audited_denied_only() -> TestResult {
+    let running = live_starting(tempdir()?, "tenant: tenant-a\n", None, &TENANT_ONLY)?;
+    rewrite(&running, "tenant: tenant-b\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
+    let records = reload_records(running.dir.path())?;
+    assert_eq!(records.len(), 1);
+    assert!(records
+        .iter()
+        .all(|line| line.contains("\"denied\"") && line.contains("tenant is read at start only") && !line.contains("settings.tenant")));
+    assert!(records.iter().all(|line| !line.contains("tenant-b")));
+    Ok(())
+}
+
+
+#[test]
+fn a_tenant_added_later_is_refused_and_another_key_still_applies_when_the_tenant_is_unchanged() -> TestResult {
+    let running = live_starting(tempdir()?, "tenant: tenant-a\n", None, &TENANT_ONLY)?;
+    rewrite(&running, "  log_level: debug\ntenant: tenant-a\n")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Applied { .. }));
+    rewrite(&running, "")?;
+    assert!(matches!(reload(&running.engine), ReloadOutcome::Refused { .. }));
     Ok(())
 }
 
