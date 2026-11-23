@@ -23,6 +23,9 @@ use types::TestResult;
 const ONE_DAY: u32 = 86_400;
 
 
+const SETTING_KEYS: usize = 3;
+
+
 const TWO_FEEDS: usize = 2;
 
 
@@ -43,7 +46,7 @@ fn the_fixture_file_loads_and_validates() -> TestResult {
         .find(|candidate| candidate.name == "threatfox")
         .ok_or("no threatfox")?;
     assert_eq!((threatfox.tlp, threatfox.ttl_seconds), (Tlp::Green, Some(ONE_DAY)));
-    assert_eq!(feeds_state(&config).len(), FIXTURE_FEEDS + TWO_FEEDS);
+    assert_eq!(feeds_state(&config).len(), FIXTURE_FEEDS + SETTING_KEYS);
     Ok(())
 }
 

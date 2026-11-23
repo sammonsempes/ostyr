@@ -1,13 +1,16 @@
 use crate::limits::{
-    DEFAULT_CONFIDENCE, DEFAULT_DICTIONARY_PORT, DEFAULT_DICTIONARY_USER, DEFAULT_TAXII_MAX_PAGES, DEFAULT_TAXII_PAGE_LIMIT, DEFAULT_TIMEOUT_MS,
-    LIMIT_TAXII_MAX_PAGES, LIMIT_TAXII_PAGE_LIMIT, MAX_CONFIDENCE, MAX_TAXII_COLLECTION_BYTES, MAX_TIMEOUT_MS, MAX_USER_BYTES,
+    DEFAULT_CONFIDENCE, DEFAULT_DICTIONARY_PORT, DEFAULT_DICTIONARY_USER, DEFAULT_RETRO_MARGIN_SECONDS, DEFAULT_TAXII_MAX_PAGES,
+    DEFAULT_TAXII_PAGE_LIMIT, DEFAULT_TIMEOUT_MS, LIMIT_TAXII_MAX_PAGES, LIMIT_TAXII_PAGE_LIMIT, MAX_CONFIDENCE, MAX_RETRO_INTERVAL_SECONDS,
+    MAX_RETRO_MARGIN_SECONDS, MAX_RETRO_MATCHES, MAX_RETRO_ROWS_TO_GROUP, MAX_RETRO_ROWS_TO_READ, MAX_RETRO_SECONDS, MAX_RETRO_WINDOW_SECONDS,
+    MAX_TAXII_COLLECTION_BYTES, MAX_TIMEOUT_MS, MAX_USER_BYTES, MIN_RETRO_INTERVAL_SECONDS,
 };
 use crate::model::{IocType, Tlp};
+use crate::retro::{validate_retro, RetroError, RetroSettings};
 use crate::store::{quote_identifier, StoreError};
 use core_config::error::ConfigError;
 use core_config::load::load_file;
 use core_config::reload::{current_config, open_engine, ReloadContext, ReloadEngine, Subscriber};
-use core_config::types::{ConfigState, SharedAuditFn};
+use core_config::types::{ConfigState, LoaderFn, SharedAuditFn};
 use core_pg::error::PgError;
 use core_pg::scope::tenant_scope;
 use serde::Deserialize;
@@ -15,6 +18,7 @@ use siem_ingest::error::SettingsError;
 use siem_ingest::settings::check_url;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 
@@ -25,6 +29,9 @@ pub const EXPORT_KEY: &str = "export.policy";
 
 
 pub const CLICKHOUSE_KEY: &str = "clickhouse";
+
+
+pub const RETRO_KEY: &str = "retro";
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -159,6 +166,54 @@ pub struct ClickhouseConfig {
 }
 
 
+pub fn default_retro_max_matches() -> usize {
+    MAX_RETRO_MATCHES
+}
+
+
+pub fn default_retro_seconds() -> u32 {
+    MAX_RETRO_SECONDS
+}
+
+
+pub fn default_retro_rows_to_read() -> u64 {
+    MAX_RETRO_ROWS_TO_READ
+}
+
+
+pub fn default_retro_rows_to_group() -> u64 {
+    MAX_RETRO_ROWS_TO_GROUP
+}
+
+
+pub fn default_retro_margin() -> u64 {
+    DEFAULT_RETRO_MARGIN_SECONDS
+}
+
+
+/// The scheduled retro match: `reader` is its own ClickHouse identity (never the loader's), the window ends now and starts `window_seconds` before.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetroSection {
+    pub reader: ClickhouseConfig,
+    pub events_database: String,
+    pub events_table: String,
+    #[serde(default = "default_retro_max_matches")]
+    pub max_matches: usize,
+    #[serde(default = "default_retro_seconds")]
+    pub max_execution_seconds: u32,
+    #[serde(default = "default_retro_rows_to_read")]
+    pub max_rows_to_read: u64,
+    #[serde(default = "default_retro_rows_to_group")]
+    pub max_rows_to_group_by: u64,
+    pub interval_seconds: u64,
+    pub window_seconds: u64,
+    #[serde(default = "default_retro_margin")]
+    pub margin_seconds: u64,
+    pub pg_settings: PathBuf,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedsFile {
@@ -167,6 +222,8 @@ pub struct FeedsFile {
     pub export: ExportPolicy,
     #[serde(default)]
     pub clickhouse: Option<ClickhouseConfig>,
+    #[serde(default)]
+    pub retro: Option<RetroSection>,
 }
 
 
@@ -184,6 +241,21 @@ pub enum ClickhouseError {
     Port,
     #[error("clickhouse.timeout_ms must be within 1..={MAX_TIMEOUT_MS}")]
     Timeout,
+}
+
+
+#[derive(Debug, Error)]
+pub enum RetroSectionError {
+    #[error("retro reader or budget refused")]
+    Settings(#[from] RetroError),
+    #[error("retro.interval_seconds must be within {MIN_RETRO_INTERVAL_SECONDS}..={MAX_RETRO_INTERVAL_SECONDS}")]
+    Interval,
+    #[error("retro.margin_seconds must be within 1..={MAX_RETRO_MARGIN_SECONDS}")]
+    Margin,
+    #[error("retro.window_seconds must cover interval_seconds plus margin_seconds and stay within {MAX_RETRO_WINDOW_SECONDS}")]
+    Window,
+    #[error("retro.pg_settings must name a file")]
+    PgSettings,
 }
 
 
@@ -220,6 +292,8 @@ pub enum FeedsError {
     ExportConfidence,
     #[error("clickhouse settings invalid")]
     Clickhouse(#[from] ClickhouseError),
+    #[error("retro section invalid")]
+    Retro(#[from] RetroSectionError),
 }
 
 
@@ -296,6 +370,37 @@ pub fn validate_clickhouse(config: &ClickhouseConfig) -> Result<(), ClickhouseEr
 }
 
 
+pub fn retro_settings(section: &RetroSection) -> RetroSettings {
+    RetroSettings {
+        reader: section.reader.clone(),
+        events_database: section.events_database.clone(),
+        events_table: section.events_table.clone(),
+        max_matches: section.max_matches,
+        max_execution_seconds: section.max_execution_seconds,
+        max_rows_to_read: section.max_rows_to_read,
+        max_rows_to_group_by: section.max_rows_to_group_by,
+    }
+}
+
+
+/// The reader and budget by `validate_retro`; the interval and margin bounded; the window covers the interval plus the ingest-lag margin; nothing is sent here.
+pub fn validate_retro_section(section: &RetroSection) -> Result<(), RetroSectionError> {
+    validate_retro(&retro_settings(section))?;
+    let covered = section.interval_seconds.saturating_add(section.margin_seconds);
+    if !(MIN_RETRO_INTERVAL_SECONDS..=MAX_RETRO_INTERVAL_SECONDS).contains(&section.interval_seconds) {
+        Err(RetroSectionError::Interval)
+    } else if section.margin_seconds == 0 || section.margin_seconds > MAX_RETRO_MARGIN_SECONDS {
+        Err(RetroSectionError::Margin)
+    } else if section.window_seconds < covered || section.window_seconds > MAX_RETRO_WINDOW_SECONDS {
+        Err(RetroSectionError::Window)
+    } else if section.pg_settings.as_os_str().is_empty() {
+        Err(RetroSectionError::PgSettings)
+    } else {
+        Ok(())
+    }
+}
+
+
 /// Names are unique and non-empty, confidences (feeds and export minimum) within 0 to 100, generic formats carry a value mapping.
 pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
     let mut names = BTreeSet::new();
@@ -317,7 +422,11 @@ pub fn validate_feeds(config: &FeedsFile) -> Result<(), FeedsError> {
         config
             .clickhouse
             .as_ref()
-            .map_or(Ok(()), |clickhouse| validate_clickhouse(clickhouse).map_err(FeedsError::from))
+            .map_or(Ok(()), |clickhouse| validate_clickhouse(clickhouse).map_err(FeedsError::from))?;
+        config
+            .retro
+            .as_ref()
+            .map_or(Ok(()), |section| validate_retro_section(section).map_err(FeedsError::from))
     }
 }
 
@@ -330,6 +439,7 @@ pub fn feeds_state(config: &FeedsFile) -> ConfigState {
         .chain([
             (EXPORT_KEY.to_owned(), format!("{:?}", config.export)),
             (CLICKHOUSE_KEY.to_owned(), format!("{:?}", config.clickhouse)),
+            (RETRO_KEY.to_owned(), format!("{:?}", config.retro)),
         ])
         .collect()
 }
@@ -344,15 +454,34 @@ pub fn feeds_subscriber() -> Subscriber<FeedsFile> {
 }
 
 
+/// `retro.pg_settings` is read at start only: the first load fixes it (absent included) and a later load that differs is refused with the old file kept.
+pub fn check_pg_baseline(baseline: &OnceLock<Option<PathBuf>>, config: &FeedsFile) -> Result<(), ConfigError> {
+    let current = config.retro.as_ref().map(|section| section.pg_settings.clone());
+    if *baseline.get_or_init(|| current.clone()) == current {
+        Ok(())
+    } else {
+        Err(ConfigError::WatchedFile {
+            file: format!("{RETRO_KEY}.pg_settings"),
+            reason: "read at start only, restart the service to change it".to_owned(),
+        })
+    }
+}
+
+
+/// The loader of the engine: the file is parsed once per load and that one parse is checked against the start-only baseline.
+pub fn feeds_loader(path: PathBuf) -> Box<LoaderFn<FeedsFile>> {
+    let baseline = OnceLock::new();
+    Box::new(move || {
+        let config = load_file::<FeedsFile>(&path)?;
+        check_pg_baseline(&baseline, &config)?;
+        Ok(config)
+    })
+}
+
+
 /// Loads and validates the first configuration; later reloads are validated by the subscriber and refused when invalid.
 pub fn open_feeds(path: PathBuf, audit: Box<SharedAuditFn>, context: ReloadContext) -> Result<ReloadEngine<FeedsFile>, OpenError> {
-    let engine = open_engine(
-        Box::new(move || load_file::<FeedsFile>(&path)),
-        feeds_state,
-        vec![feeds_subscriber()],
-        audit,
-        context,
-    )?;
+    let engine = open_engine(feeds_loader(path), feeds_state, vec![feeds_subscriber()], audit, context)?;
     validate_feeds(&current_config(&engine))?;
     Ok(engine)
 }
