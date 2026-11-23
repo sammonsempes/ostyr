@@ -707,3 +707,29 @@ fn a_cut_type_names_truncation_not_a_missing_struct() -> Result<(), Box<dyn Erro
     assert_eq!(failure(find_task_offsets(&finish(&sample)))?, REASON_TRUNCATED);
     Ok(())
 }
+
+
+fn valid_sample() -> Sample {
+    let mut sample = new_sample();
+    add_filler_types(&mut sample);
+    add_task(&mut sample, false, TASK_SIZE, &good_members());
+    sample
+}
+
+
+#[test]
+fn a_valid_task_struct_followed_by_a_cut_type_is_truncated() -> Result<(), Box<dyn Error>> {
+    let mut sample = valid_sample();
+    add_type(&mut sample, "other", (KIND_UNION, FORGED_VLEN, false, WORD as u32), &[0, 0, 0]);
+    assert_eq!(failure(find_task_offsets(&finish(&sample)))?, REASON_TRUNCATED);
+    Ok(())
+}
+
+
+#[test]
+fn a_valid_task_struct_followed_by_types_past_the_cap_is_refused() -> Result<(), Box<dyn Error>> {
+    let mut sample = valid_sample();
+    (0..=MAX_BTF_TYPES).for_each(|_| add_type(&mut sample, "", (KIND_PTR, 0, false, 1), &[]));
+    assert_eq!(failure(find_task_offsets(&finish(&sample)))?, REASON_TOO_MANY_TYPES);
+    Ok(())
+}

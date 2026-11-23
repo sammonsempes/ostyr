@@ -279,18 +279,19 @@ pub fn find_task_offsets(data: &[u8]) -> Result<TaskOffsets, Unsupported> {
         found = found.or(matched);
         steps += 1;
     }
-    let task = found.ok_or(Unsupported(missing_reason(position, types.len())))?;
+    walk_complete(position, types.len())?;
+    let task = found.ok_or(Unsupported(REASON_NO_TASK_STRUCT))?;
     task_offsets(types, strings, &index, &task)
 }
 
 
-fn missing_reason(position: usize, length: usize) -> &'static str {
+fn walk_complete(position: usize, length: usize) -> Result<(), Unsupported> {
     if position > length {
-        REASON_TRUNCATED
+        Err(Unsupported(REASON_TRUNCATED))
     } else if position < length {
-        REASON_TOO_MANY_TYPES
+        Err(Unsupported(REASON_TOO_MANY_TYPES))
     } else {
-        REASON_NO_TASK_STRUCT
+        Ok(())
     }
 }
 
@@ -362,8 +363,8 @@ fn extra_bytes(kind: u32, count: usize) -> Result<usize, Unsupported> {
 
 fn task_offsets(types: &[u8], strings: &[u8], index: &[usize], task: &TaskStruct) -> Result<TaskOffsets, Unsupported> {
     let members = (0..task.count)
-        .map(|i| read_words::<MEMBER_WORDS>(types, task.body + i * MEMBER_BYTES))
-        .collect::<Result<Vec<Member>, _>>()?;
+        .flat_map(|i| read_words::<MEMBER_WORDS>(types, task.body + i * MEMBER_BYTES))
+        .collect::<Vec<Member>>();
     let lookup = Lookup { types, strings, index };
     let real_parent = member_offset(
         &lookup,
