@@ -9,12 +9,15 @@ use core_api::types::SharedState;
 use core_auth::model::Account;
 use core_auth::password::hash_password;
 use core_auth::random::os_random;
+use core_auth::rbac::PERMISSION_ONCALL_READ;
 use core_auth::store::update_store_file;
 use core_pg::scope::{tenant_of, TenantScope};
-use oncall::alert::{Alert, AlertPage, LifecycleState, Phase};
-use oncall::api::{oncall_access, oncall_document, oncall_router, PERMISSION_ONCALL_READ};
+use oncall::alert::{Alert, AlertPage, Event, LifecycleState, Phase};
+use oncall::api::{oncall_access, oncall_document, oncall_router};
 use oncall::api_model::OncallBackend;
-use oncall::error::ReadError;
+use oncall::error::{ReadError, StoreError};
+use oncall::lifecycle::transition;
+use oncall::store::timestamps;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -38,6 +41,9 @@ pub const OTHER_TENANT: &str = "globex";
 
 
 pub const STAMP: i64 = 1_800_000_000;
+
+
+pub const CLOCK_OFFSET: i64 = 600;
 
 
 #[cfg(unix)]
@@ -66,6 +72,7 @@ pub enum Mode {
     Fail,
     Down,
     BadCell,
+    Moved,
 }
 
 
@@ -80,6 +87,8 @@ pub struct Fixture {
     pub _dir: TempDir,
     pub router: Router,
     pub script: Arc<Script>,
+    pub state: SharedState,
+    pub audit_path: std::path::PathBuf,
 }
 
 
@@ -126,14 +135,40 @@ pub fn failure(mode: Mode) -> Option<ReadError> {
         Mode::Busy => Some(ReadError::Lease(alerts::error::StoreError::Busy)),
         Mode::Fail => Some(ReadError::Unrepresentable),
         Mode::Down => Some(ReadError::Store(oncall::error::StoreError::NotFound)),
+        Mode::Moved => Some(ReadError::Store(StoreError::Conflict)),
         Mode::BadCell => Some(ReadError::Store(oncall::error::StoreError::BadRow { column: "opened_at" })),
     }
+}
+
+
+pub fn clock() -> DateTime<Utc> {
+    DateTime::UNIX_EPOCH + chrono::Duration::seconds(STAMP + CLOCK_OFFSET)
+}
+
+
+pub fn apply_in(script: &Script, tenant: &str, id: i64, event: Event, now: DateTime<Utc>) -> Result<Alert, ReadError> {
+    lock(&script.calls).push((tenant.to_owned(), None, Some(id)));
+    let mode = *lock(&script.mode);
+    failure(mode).map_or(Ok(()), Err)?;
+    let mut alerts = lock(&script.alerts);
+    let alert = alerts
+        .get_mut(tenant)
+        .and_then(|list| list.iter_mut().find(|candidate| candidate.id == id))
+        .ok_or(ReadError::Store(StoreError::NotFound))?;
+    let next = transition(alert.state, event).map_err(|error| ReadError::Store(StoreError::Lifecycle(error)))?;
+    let (acknowledged, resolved) = timestamps(alert, next, now);
+    alert.state = next;
+    alert.acknowledged_at = acknowledged;
+    alert.resolved_at = resolved;
+    alert.version += 1;
+    Ok(alert.clone())
 }
 
 
 pub fn backend_of(script: &Arc<Script>) -> OncallBackend {
     let listing = Arc::clone(script);
     let getting = Arc::clone(script);
+    let applying = Arc::clone(script);
     OncallBackend {
         list: Arc::new(move |scope: TenantScope, limit| {
             let held = Arc::clone(&listing);
@@ -163,6 +198,11 @@ pub fn backend_of(script: &Arc<Script>) -> OncallBackend {
                 failure(mode).map_or(Ok(found), Err)
             })
         }),
+        apply: Arc::new(move |scope: TenantScope, id, event, now| {
+            let held = Arc::clone(&applying);
+            Box::pin(async move { apply_in(&held, tenant_of(&scope), id, event, now) })
+        }),
+        clock,
     }
 }
 
@@ -246,6 +286,13 @@ pub fn fixture() -> Result<Fixture, TestError> {
         .or_default()
         .insert(PERMISSION_ONCALL_READ.to_owned());
     let state: SharedState = Arc::new(built);
-    let router = build_router(state, oncall_router(backend_of(&script)));
-    Ok(Fixture { _dir: dir, router, script })
+    let audit_path = config.audit_log.clone();
+    let router = build_router(Arc::clone(&state), oncall_router(backend_of(&script)));
+    Ok(Fixture {
+        _dir: dir,
+        router,
+        script,
+        state,
+        audit_path,
+    })
 }

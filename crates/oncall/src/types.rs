@@ -57,3 +57,14 @@ pub type ListFn = std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, u32) -> Lis
 
 /// One alert of one tenant by id; `None` when the tenant has no such alert.
 pub type GetFn = std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, i64) -> GetFuture + Send + Sync>;
+
+
+pub type ApplyFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::alert::Alert, crate::error::ReadError>> + Send>>;
+
+
+/// Applies one lifecycle event to one alert of one tenant at the given time; the store's `apply_event` behind a leased connection.
+pub type ApplyFn =
+    std::sync::Arc<dyn Fn(core_pg::scope::TenantScope, i64, crate::alert::Event, chrono::DateTime<chrono::Utc>) -> ApplyFuture + Send + Sync>;
+
+
+pub type Refused = Box<axum::response::Response>;
