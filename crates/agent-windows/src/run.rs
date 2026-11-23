@@ -1,5 +1,5 @@
 use crate::error::RunError;
-use crate::model::{Drained, RunEnd, RunRequest, CHANNEL_DEPTH, MAX_READ_ROUNDS, READ_CHUNK_BYTES};
+use crate::model::{Drained, RunEnd, RunRequest, CHANNEL_DEPTH, MAX_READ_ROUNDS, READ_CHUNK_BYTES, WORKING_DIRECTORY};
 use std::io::{self, ErrorKind, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
@@ -82,6 +82,7 @@ pub fn stop(child: &mut Child) -> Result<(), RunError> {
 pub fn spawn_child(request: &RunRequest<'_>, writer: io::PipeWriter) -> Result<Child, RunError> {
     Command::new(request.program)
         .args(request.args)
+        .current_dir(WORKING_DIRECTORY)
         .stdin(Stdio::null())
         .stdout(writer)
         .stderr(Stdio::null())

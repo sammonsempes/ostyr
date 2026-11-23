@@ -18,6 +18,15 @@ pub enum RunError {
 
 
 #[derive(Debug, Error)]
+pub enum DefenderError {
+    #[error("the interval is below the 300 second floor")]
+    IntervalBelowFloor,
+    #[error("writing the defender line failed")]
+    Sink(#[source] io::Error),
+}
+
+
+#[derive(Debug, Error)]
 pub enum PollError {
     #[error("running the log tool failed")]
     Run(#[from] RunError),
