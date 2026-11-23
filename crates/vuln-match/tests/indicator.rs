@@ -352,6 +352,7 @@ fn a_store_failure_prints_only_a_fixed_category() -> TestResult {
     };
     assert_eq!(store_category(&migration), "deadline");
     assert_eq!(store_category(&PgError::ConnectTimeout { seconds: 1 }), "deadline");
+    assert_eq!(store_category(&PgError::ClientDeadline { seconds: 1 }), "deadline");
     let server = IndicatorError::Store(PgError::Server {
         code: "42P01".to_owned(),
         class: "syntax error or access rule violation",

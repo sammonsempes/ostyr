@@ -700,6 +700,7 @@ async fn a_recovery_that_succeeds_after_a_failure_seeds() -> TestResult {
 fn recovery_failures_have_fixed_class_names() -> TestResult {
     assert_eq!(recovery_class(&PgError::ConnectTimeout { seconds: 1 }), "timeout");
     assert_eq!(recovery_class(&PgError::StatementTimeout { seconds: 1 }), "timeout");
+    assert_eq!(recovery_class(&PgError::ClientDeadline { seconds: 1 }), "timeout");
     let server = PgError::Server {
         code: "57P01".to_owned(),
         class: "admin shutdown",

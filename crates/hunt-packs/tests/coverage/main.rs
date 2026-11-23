@@ -4,8 +4,8 @@ mod types;
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, TenantScope};
 use hunt_packs::coverage::{
-    bad_pack_index, check_period, coverage_report, joined_ids, read_coverage, CoverageError, CoveragePeriod, FindingsRow, RunRow, TechniqueState,
-    FINDINGS_SQL, KIND_OVERSIZED, KIND_PACK, KIND_UNKNOWN, MAX_REPORT_DAYS, QUERY_CANCELED, RUNS_SQL, SECONDS_PER_DAY,
+    bad_pack_index, check_period, coverage_report, joined_ids, read_coverage, read_error, CoverageError, CoveragePeriod, FindingsRow, RunRow,
+    TechniqueState, FINDINGS_SQL, KIND_OVERSIZED, KIND_PACK, KIND_UNKNOWN, MAX_REPORT_DAYS, QUERY_CANCELED, RUNS_SQL, SECONDS_PER_DAY,
 };
 use hunt_packs::model::{Baseline, Cost, HuntPack, Source};
 use hunt_packs::store::{Param, StateError};
@@ -500,6 +500,21 @@ async fn store_failures_and_bad_tenants_are_typed() -> TestResult {
     let refused = read_coverage(&mut runs, &mut finds_bad, "-x", &[], &PERIOD).await;
     assert!(matches!(refused, Err(CoverageError::Store(StateError::Pg(PgError::InvalidTenant)))));
     assert_eq!(calls.borrow().len(), before);
+    Ok(())
+}
+
+
+#[test]
+fn a_client_deadline_is_a_reached_deadline() -> TestResult {
+    let named = read_error(PgError::ClientDeadline { seconds: 1 }, &PERIOD, TWO_UNKNOWN);
+    assert!(matches!(
+        named,
+        CoverageError::DeadlineReached {
+            from: FROM,
+            to: TO,
+            packs: TWO_UNKNOWN
+        }
+    ));
     Ok(())
 }
 
