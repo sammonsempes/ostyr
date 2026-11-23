@@ -44,3 +44,11 @@ pub type ExecFn<'a> = dyn Fn(&str, &[String]) -> Result<Vec<Vec<String>>, Ledger
 
 /// The ClickHouse load of one export for one tenant.
 pub type LoadFn<'a> = dyn Fn(&str, &Export) -> Result<LoadOutcome, LoadError> + 'a;
+
+
+/// The tenant's load states as one pair: row count and sum of generations.
+pub type LoadStamp = (u64, u64);
+
+
+/// The time spent so far under one deadline, injected so tests never read the clock.
+pub type ElapsedFn<'a> = dyn Fn() -> std::time::Duration + 'a;

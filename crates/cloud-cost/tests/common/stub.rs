@@ -68,9 +68,30 @@ pub struct Server {
 }
 
 
-fn answer(stream: &mut TcpStream, status: &str) -> io::Result<String> {
+const GENERATION_MARK: &str = "param_source=";
+
+
+const NO_GENERATION: &str = "0\n";
+
+
+const CUT_MARK: &str = "cut";
+
+
+const CUT_BODY: &str = "1";
+
+
+/// A scripted entry is `status` or `status|body`; the generation query of a load gets `0` unless the entry gives a body.
+fn answer(stream: &mut TcpStream, entry: &str) -> io::Result<String> {
     let request = read_request(stream)?;
-    let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let (status, scripted) = entry.split_once('|').unwrap_or((entry, ""));
+    let first_line = request.lines().next().unwrap_or("");
+    let body = if scripted.is_empty() && first_line.contains(GENERATION_MARK) {
+        NO_GENERATION
+    } else {
+        scripted
+    };
+    let (shown, declared) = if body == CUT_MARK { (CUT_BODY, CHUNK) } else { (body, body.len()) };
+    let response = format!("HTTP/1.1 {status}\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{shown}");
     stream.write_all(response.as_bytes())?;
     Ok(request)
 }

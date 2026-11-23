@@ -1,7 +1,8 @@
 use crate::settings::{validate_config, CostLoadConfig, CostSettingsError};
 use crate::source::Export;
 use crate::store::{
-    account_set, array_literal, covered_days, database_ddl, delete_statement, insert_plan, insert_statement, plan_rows, quote_item, table_ddl, Batch,
+    account_set, array_literal, covered_days, database_ddl, delete_statement, generation_statement, insert_plan, insert_statement, next_generation,
+    plan_rows, quote_item, state_ddl, state_insert_statement, state_row, table_ddl, Batch, STATE_DONE, STATE_IN_PROGRESS,
 };
 use crate::types::DayRange;
 use core_pg::error::PgError;
@@ -12,6 +13,7 @@ use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code
 use siem_ingest::error::{InsertClass, InsertError};
 use siem_ingest::settings::is_loopback_http;
 use siem_schema::error::SchemaError;
+use std::io::{ErrorKind, Read};
 use std::str::Utf8Error;
 use std::time::Duration;
 use thiserror::Error;
@@ -57,6 +59,9 @@ pub const ENCODED_IN_QUERY: &AsciiSet = &CONTROLS
     .add(b'}');
 
 
+pub const MAX_GENERATION_BYTES: u64 = 64;
+
+
 pub const MAX_TOTAL_ACCOUNTS: usize = 100_000;
 
 
@@ -86,6 +91,12 @@ pub enum LoadError {
     Statement(#[from] SchemaError),
     #[error("schema statement refused: {0:?}")]
     Schema(InsertClass),
+    #[error("the load state request refused ({0:?}): the tenant stays marked as loading until a rerun")]
+    State(InsertClass),
+    #[error("the previous load generation of the export could not be read")]
+    GenerationReply,
+    #[error("the previous load generation reply body could not be read ({0:?})")]
+    GenerationBody(ErrorKind),
     #[error("replacing the covered days refused ({class:?}) after {done} of {total} account batches")]
     Replace { done: usize, total: usize, class: InsertClass },
 }
@@ -169,9 +180,11 @@ pub fn plain(text: String) -> Statement {
 /// Database then table, each `IF NOT EXISTS`, so a rerun changes nothing.
 pub fn ensure_schema(agent: &Agent, config: &CostLoadConfig, password: &str, elapsed: &dyn Fn() -> Duration) -> Result<(), LoadError> {
     let budget = Duration::from_millis(config.timeout_ms);
-    [database_ddl(config)?, table_ddl(config)?].into_iter().try_for_each(|text| {
-        post(agent, config, password, &plain(text), budget.saturating_sub(elapsed())).map_or(Ok(()), |class| Err(LoadError::Schema(class)))
-    })
+    [database_ddl(config)?, table_ddl(config)?, state_ddl(config)?]
+        .into_iter()
+        .try_for_each(|text| {
+            post(agent, config, password, &plain(text), budget.saturating_sub(elapsed())).map_or(Ok(()), |class| Err(LoadError::Schema(class)))
+        })
 }
 
 
@@ -243,7 +256,15 @@ pub fn delete_request(config: &CostLoadConfig, text: &str, days: DayRange, names
 pub fn replace_statements(config: &CostLoadConfig, days: DayRange, accounts: &[String]) -> Result<Vec<Statement>, LoadError> {
     let text = delete_statement(config)?;
     let skeleton = delete_request(config, &text, days, &[]);
-    let fixed = [database_ddl(config)?, table_ddl(config)?, insert_statement(config)?].map(plain);
+    let fixed = [
+        database_ddl(config)?,
+        table_ddl(config)?,
+        state_ddl(config)?,
+        insert_statement(config)?,
+        state_insert_statement(config)?,
+        generation_statement(config)?,
+    ]
+    .map(plain);
     let skeleton_len = request_url_len(config, &skeleton);
     let longest = fixed
         .iter()
@@ -276,6 +297,68 @@ pub fn replace_days(
         post(agent, config, password, statement, budget.saturating_sub(elapsed()))
             .map_or(Ok(()), |class| Err(LoadError::Replace { done, total, class }))
     })
+}
+
+
+/// The highest generation written for the export digest, 0 for a digest never loaded; a reply that is not one number is `GenerationReply`.
+pub fn previous_generation(
+    agent: &Agent,
+    config: &CostLoadConfig,
+    password: &str,
+    digest: &str,
+    elapsed: &dyn Fn() -> Duration,
+) -> Result<u64, LoadError> {
+    let remaining = Duration::from_millis(config.timeout_ms).saturating_sub(elapsed());
+    if remaining.is_zero() {
+        Err(LoadError::State(InsertClass::Timeout))
+    } else {
+        let response = agent
+            .post(&config.url)
+            .header(USER_HEADER, &config.user)
+            .header(KEY_HEADER, password)
+            .query("query", generation_statement(config)?)
+            .query("param_tenant", &config.tenant)
+            .query("param_source", digest)
+            .config()
+            .timeout_global(Some(remaining))
+            .http_status_as_error(false)
+            .build()
+            .send(String::new())
+            .map_err(|error| LoadError::State(classify_transport(&error)))?;
+        match classify_reply(response.status(), exception_code(response.headers())) {
+            Some(class) => Err(LoadError::State(class)),
+            None => {
+                let mut text = String::new();
+                let read = response
+                    .into_body()
+                    .into_reader()
+                    .take(MAX_GENERATION_BYTES + 1)
+                    .read_to_string(&mut text);
+                read.map_err(|error| LoadError::GenerationBody(error.kind()))?;
+                text.trim_end_matches('\n').parse::<u64>().map_err(|_| LoadError::GenerationReply)
+            }
+        }
+    }
+}
+
+
+/// One state write of the export digest: `in_progress` before the first delete, `done` after the last batch, both with the load's generation.
+pub fn write_state(
+    agent: &Agent,
+    config: &CostLoadConfig,
+    password: &str,
+    digest: &str,
+    generation: u64,
+    state: &str,
+    elapsed: &dyn Fn() -> Duration,
+) -> Result<(), LoadError> {
+    let statement = Statement {
+        text: state_insert_statement(config)?,
+        params: Vec::new(),
+        body: state_row(&config.tenant, digest, generation, state),
+    };
+    let budget = Duration::from_millis(config.timeout_ms);
+    post(agent, config, password, &statement, budget.saturating_sub(elapsed())).map_or(Ok(()), |class| Err(LoadError::State(class)))
 }
 
 
@@ -322,7 +405,7 @@ pub fn send_batches(
 }
 
 
-/// Password and CA are read, the schema is ensured, the covered days of the export's accounts are replaced and the batches posted under one deadline.
+/// Password and CA are read, the schema is ensured, the export's state is marked `in_progress` under a generation above its previous one, the covered days of the export's accounts are replaced and the batches posted, then the state is marked `done` (only when every batch was stored), all under one deadline.
 pub fn store_export(config: &CostLoadConfig, export: &Export, version: u64, elapsed: &dyn Fn() -> Duration) -> Result<LoadOutcome, LoadError> {
     let plan = insert_plan(&plan_rows(&export.table, &config.tenant, &export.source, version));
     match covered_days(&export.table) {
@@ -334,8 +417,14 @@ pub fn store_export(config: &CostLoadConfig, export: &Export, version: u64, elap
             let key = std::str::from_utf8(&password).map_err(LoadError::PasswordEncoding)?;
             let agent = agent_for(config)?;
             ensure_schema(&agent, config, key, elapsed)?;
+            let generation = next_generation(previous_generation(&agent, config, key, &export.source, elapsed)?, version);
+            write_state(&agent, config, key, &export.source, generation, STATE_IN_PROGRESS, elapsed)?;
             replace_days(&agent, config, key, &deletes, elapsed)?;
-            send_batches(&agent, config, key, &plan, elapsed)
+            let outcome = send_batches(&agent, config, key, &plan, elapsed)?;
+            if outcome.failure.is_none() {
+                write_state(&agent, config, key, &export.source, generation, STATE_DONE, elapsed)?;
+            }
+            Ok(outcome)
         }
     }
 }

@@ -70,6 +70,70 @@ pub fn table_ddl(config: &CostLoadConfig) -> Result<String, SchemaError> {
 }
 
 
+pub const STATE_IN_PROGRESS: &str = "in_progress";
+
+
+pub const STATE_DONE: &str = "done";
+
+
+pub const STATE_SUFFIX: &str = "_load_state";
+
+
+/// The load-state table of the cost table: `<table>_load_state` in the same database.
+pub fn state_target(config: &CostLoadConfig) -> Result<String, SchemaError> {
+    qualified(&config.database, &format!("{}{STATE_SUFFIX}", config.table))
+}
+
+
+/// One row per (tenant, export digest), the highest `generation` wins (same generation: the last insert, so `done` follows `in_progress`); rows expire `ttl_days` after `loaded_at`, like the figures they guard.
+pub fn state_ddl(config: &CostLoadConfig) -> Result<String, SchemaError> {
+    Ok(format!(
+        "CREATE TABLE IF NOT EXISTS {} (\n    \
+         `tenant` String,\n    \
+         `source` String,\n    \
+         `generation` UInt64,\n    \
+         `state` LowCardinality(String),\n    \
+         `loaded_at` DateTime DEFAULT now()\n\
+         )\n\
+         ENGINE = ReplacingMergeTree(`generation`)\n\
+         ORDER BY (`tenant`, `source`)\n\
+         TTL `loaded_at` + INTERVAL {} DAY DELETE",
+        state_target(config)?,
+        config.ttl_days
+    ))
+}
+
+
+/// A state write is synchronous whatever the loader's profile says, so `done` always lands after `in_progress`.
+pub fn state_insert_statement(config: &CostLoadConfig) -> Result<String, SchemaError> {
+    Ok(format!(
+        "INSERT INTO {} SETTINGS async_insert = 0 FORMAT JSONEachRow",
+        state_target(config)?
+    ))
+}
+
+
+/// The one JSON line of a state write.
+pub fn state_row(tenant: &str, digest: &str, generation: u64, state: &str) -> String {
+    json!({ "tenant": tenant, "source": digest, "generation": generation, "state": state }).to_string()
+}
+
+
+/// The highest generation ever written for the export digest (0 when none), as text.
+pub fn generation_statement(config: &CostLoadConfig) -> Result<String, SchemaError> {
+    Ok(format!(
+        "SELECT toString(max(`generation`)) FROM {} WHERE `tenant` = {{tenant:String}} AND `source` = {{source:String}}",
+        state_target(config)?
+    ))
+}
+
+
+/// The next generation of a digest: after its previous one, and after the clock when the clock is ahead, so a clock set back never goes under it.
+pub fn next_generation(previous: u64, now_ms: u64) -> u64 {
+    previous.saturating_add(1).max(now_ms)
+}
+
+
 pub fn insert_statement(config: &CostLoadConfig) -> Result<String, SchemaError> {
     Ok(format!("INSERT INTO {} FORMAT JSONEachRow", qualified(&config.database, &config.table)?))
 }
