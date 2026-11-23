@@ -9,11 +9,12 @@ use platform::merge::{module_of, module_parts};
 use platform::model::Module;
 use platform::permits::{
     connection_demand, counted, module_cap, module_name, module_permits, module_semaphores, note_refusal, permits_of, refusal_counter,
-    refusal_status, start_permits, ALL_MODULE_VARIANTS, LARGE_CAP, PLATFORM_PG_BUDGET, SMALL_CAP,
+    refusal_status, start_permits, LARGE_CAP, PLATFORM_PG_BUDGET, SMALL_CAP,
 };
 use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
+use strum::VariantArray;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::ServiceExt;
 use tracing::dispatcher::DefaultGuard;
@@ -68,11 +69,8 @@ fn hold_all(semaphore: &Arc<Semaphore>, module: Module) -> Result<OwnedSemaphore
 }
 
 
-fn all_modules() -> Result<Vec<Module>, TestError> {
-    ALL_MODULES
-        .split(',')
-        .map(|name| module_of(name.trim()).ok_or_else(|| TestError::from("unknown module")))
-        .collect()
+fn all_modules() -> Vec<Module> {
+    Module::VARIANTS.to_vec()
 }
 
 
@@ -90,10 +88,9 @@ fn the_budget_covers_every_cap_the_cancel_connection_and_the_late_close() -> Tes
 
 #[test]
 fn every_module_has_exactly_one_row_with_a_cap_and_a_name_that_parses_back() -> TestResult {
-    let modules = all_modules()?;
-    assert_eq!(modules.len(), ALL_MODULE_VARIANTS.len());
-    for module in modules {
-        assert_eq!(ALL_MODULE_VARIANTS.iter().filter(|listed| **listed == module).count(), 1, "{module:?}");
+    let names = Module::VARIANTS.iter().map(|module| module_name(*module)).collect::<Vec<_>>();
+    assert_eq!(names.join(", "), ALL_MODULES);
+    for module in all_modules() {
         assert!(module_cap(module) > 0, "{module:?}");
         assert_eq!(module_of(module_name(module)), Some(module));
     }
@@ -106,7 +103,7 @@ fn every_module_has_exactly_one_row_with_a_cap_and_a_name_that_parses_back() -> 
 
 #[test]
 fn each_module_gets_its_own_semaphore_of_its_own_cap() -> TestResult {
-    let permits = module_semaphores(&all_modules()?);
+    let permits = module_semaphores(&all_modules());
     for (module, semaphore) in &permits {
         assert_eq!(semaphore.available_permits(), module_cap(*module), "{module:?}");
         let others = permits

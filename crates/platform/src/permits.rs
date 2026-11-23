@@ -9,6 +9,7 @@ use axum::response::Response;
 use axum::Router;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use strum::VariantArray;
 use tokio::sync::Semaphore;
 
 
@@ -16,29 +17,6 @@ pub const LARGE_CAP: usize = MAX_CONNECTIONS;
 
 
 pub const SMALL_CAP: usize = 4;
-
-
-pub const MODULE_COUNT: usize = 15;
-
-
-/// Every module, for the budget sum.
-pub const ALL_MODULE_VARIANTS: [Module; MODULE_COUNT] = [
-    Module::Alerts,
-    Module::Cases,
-    Module::Cmdb,
-    Module::Risk,
-    Module::Hunts,
-    Module::Certificates,
-    Module::Oncall,
-    Module::Dhcp,
-    Module::Compliance,
-    Module::Vulnerabilities,
-    Module::RemoteShell,
-    Module::Posture,
-    Module::Status,
-    Module::Grc,
-    Module::AttackPaths,
-];
 
 
 pub const HUNTS_LATE_CLOSE: usize = 2;
@@ -70,7 +48,7 @@ pub fn module_cap(module: Module) -> usize {
 
 /// PostgreSQL connections the platform can hold at once: every cap, risk's cancel connection again, and the hunts late close.
 pub fn connection_demand() -> usize {
-    ALL_MODULE_VARIANTS.iter().map(|module| module_cap(*module)).sum::<usize>() + module_cap(Module::Risk) + HUNTS_LATE_CLOSE
+    Module::VARIANTS.iter().map(|module| module_cap(*module)).sum::<usize>() + module_cap(Module::Risk) + HUNTS_LATE_CLOSE
 }
 
 

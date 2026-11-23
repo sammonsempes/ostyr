@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::VariantArray)]
 pub enum Module {
     Alerts,
     Cases,
