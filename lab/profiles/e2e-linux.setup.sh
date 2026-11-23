@@ -118,16 +118,20 @@ cat >"$datastore_etc/gateway-settings.yaml" <<YAML
 nats_url: "tls://$DATASTORE_DOMAIN:4222"
 nats_tls_first: true
 nats_ca_file: /etc/ostyr-lab/ca.pem
-nats_user: ostyr
-nats_password_file: /etc/ostyr/nats.password
+nats_user: gateway
+nats_password_file: /etc/ostyr/nats-gateway.password
 YAML
 
-nats_block="nats_url: \"tls://$DATASTORE_DOMAIN:4222\"
+nats_block() {
+    cat <<BLOCK
+nats_url: "tls://$DATASTORE_DOMAIN:4222"
 nats_tls_first: true
 nats_ca_file: /etc/ostyr-lab/ca.pem
-nats_user: ostyr
-nats_password_file: /etc/ostyr/nats.password
-nats_stream: events"
+nats_user: $1
+nats_password_file: /etc/ostyr/nats-$2.password
+nats_stream: events
+BLOCK
+}
 cat >"$datastore_etc/ingest.yaml" <<YAML
 clickhouse_url: "https://$DATASTORE_DOMAIN:8443"
 clickhouse_database: ostyr
@@ -136,7 +140,7 @@ clickhouse_user: ostyr
 clickhouse_password_file: /etc/ostyr/clickhouse.password
 clickhouse_ca_file: /etc/ostyr-lab/ca.pem
 nats_consumer: siem-ingest
-$nats_block
+$(nats_block siem_ingest siem-ingest)
 YAML
 cat >"$datastore_etc/detection.yaml" <<YAML
 audit_file: /var/lib/ostyr/detection/audit.log
@@ -154,7 +158,7 @@ postgres:
   ca_file: /etc/ostyr-lab/ca.pem
 ingest:
   nats_consumer: detection
-$(sed 's/^/  /' <<<"$nats_block")
+$(nats_block detection detection | sed 's/^/  /')
 YAML
 cat >"$datastore_etc/pg.yaml" <<YAML
 host: $DATASTORE_DOMAIN
@@ -301,10 +305,13 @@ duplicate_window="$1"
 source /etc/ostyr-lab/datastore.env
 install -d -m 700 /var/lib/ostyr /var/lib/ostyr/gateway /var/lib/ostyr/gateway/commands /var/lib/ostyr/detection /var/lib/ostyr/detection/checkpoints \
     /var/lib/ostyr/alerts /var/lib/ostyr/web-ui
-printf '%s' "$NATS_PASSWORD" >/etc/ostyr/nats.password
+printf '%s' "$NATS_GATEWAY_PASSWORD" >/etc/ostyr/nats-gateway.password
+printf '%s' "$NATS_INGEST_PASSWORD" >/etc/ostyr/nats-siem-ingest.password
+printf '%s' "$NATS_DETECTION_PASSWORD" >/etc/ostyr/nats-detection.password
 printf '%s' "$CLICKHOUSE_PASSWORD" >/etc/ostyr/clickhouse.password
 printf '%s' "$POSTGRES_PASSWORD" >/etc/ostyr/postgres.password
-chmod 600 /etc/ostyr/nats.password /etc/ostyr/clickhouse.password /etc/ostyr/postgres.password
+chmod 400 /etc/ostyr/nats-gateway.password /etc/ostyr/nats-siem-ingest.password /etc/ostyr/nats-detection.password
+chmod 600 /etc/ostyr/clickhouse.password /etc/ostyr/postgres.password
 clickhouse() {
     curl --fail --silent --show-error --cacert "$DATASTORE_CA" --user "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --data-binary "$1" \
         "https://$DATASTORE_DOMAIN:$CLICKHOUSE_HTTPS_PORT/"
