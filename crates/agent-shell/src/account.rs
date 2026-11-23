@@ -1,6 +1,6 @@
 use crate::error::AccountError;
 use crate::types::{DatabasesFn, HomeFn};
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,9 @@ pub const PASSWD_PATH: &str = "/etc/passwd";
 pub const GROUP_PATH: &str = "/etc/group";
 
 
+pub const MAX_DATABASE_BYTES: u64 = 4_194_304;
+
+
 const GROUP_NAME_FIELD: usize = 0;
 
 
@@ -107,11 +110,27 @@ pub fn lookup_in(passwd: &str, name: &str) -> io::Result<Option<AccountEntry>> {
 }
 
 
+/// Reads a file through a byte cap; one byte more is a named refusal.
+pub fn read_database(path: &Path) -> io::Result<String> {
+    let mut limited = std::fs::File::open(path)?.take(MAX_DATABASE_BYTES + 1);
+    let mut text = String::new();
+    limited.read_to_string(&mut text)?;
+    if limited.limit() == 0 {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the account database is larger than its limit",
+        ))
+    } else {
+        Ok(text)
+    }
+}
+
+
 /// Reads the two files once each.
 pub fn read_databases_at(passwd: &Path, group: &Path) -> io::Result<Databases> {
     Ok(Databases {
-        passwd: std::fs::read_to_string(passwd)?,
-        group: std::fs::read_to_string(group)?,
+        passwd: read_database(passwd)?,
+        group: read_database(group)?,
     })
 }
 

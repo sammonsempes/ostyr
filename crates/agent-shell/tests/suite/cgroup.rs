@@ -532,8 +532,53 @@ impl Drop for TestCgroup {
 }
 
 
+fn stale_owner(name: &str) -> Option<u32> {
+    name.strip_prefix("ostyr-test-")?.split('-').next()?.parse().ok()
+}
+
+
+fn is_stale(path: &Path, pid: u32) -> io::Result<bool> {
+    let events = std::fs::read_to_string(path.join("cgroup.events"))?;
+    Ok(!Path::new(&format!("/proc/{pid}")).exists() && events.lines().any(|line| line == "populated 0"))
+}
+
+
+fn remove_stale(path: &Path) -> io::Result<()> {
+    std::fs::read_dir(path)?
+        .map(|entry| entry.map(|item| item.path()))
+        .try_for_each(|child| child.and_then(|found| if found.is_dir() { std::fs::remove_dir(found) } else { Ok(()) }))?;
+    std::fs::remove_dir(path)
+}
+
+
+fn remove_if_stale(path: &Path, pid: u32) -> io::Result<bool> {
+    let stale = is_stale(path, pid)?;
+    if stale {
+        remove_stale(path)?;
+    }
+    Ok(stale)
+}
+
+
+pub fn sweep_stale(own_directory: &Path) -> io::Result<usize> {
+    std::fs::read_dir(own_directory)?.try_fold(0, |removed, entry| {
+        let path = entry?.path();
+        let owner = path.file_name().and_then(|name| name.to_str()).and_then(stale_owner);
+        let outcome = owner.map_or(Ok(false), |pid| remove_if_stale(&path, pid));
+        Ok(match outcome {
+            Ok(was_removed) => removed + usize::from(was_removed),
+            Err(error) => {
+                tracing::warn!(?error, "stale test cgroup kept");
+                removed
+            }
+        })
+    })
+}
+
+
 fn test_cgroup() -> Result<TestCgroup, Box<dyn std::error::Error>> {
     let own = parse_self_cgroup(&std::fs::read_to_string("/proc/self/cgroup")?)?;
+    sweep_stale(&Path::new(CGROUP_ROOT).join(own.trim_start_matches('/')))?;
     let scratch = private_tempdir()?;
     let unique = scratch
         .path()
@@ -578,7 +623,7 @@ fn start_hopper(cgroup: &TestCgroup, program: &str) -> Result<Hopper, Box<dyn st
     let mut ready = String::new();
     reader.read_line(&mut ready)?;
     assert_eq!(ready, "ready\n");
-    std::fs::write(&procs, child.id().to_string())?;
+    std::fs::write(&procs, child.id().to_string()).or_else(|error| child.kill().and_then(|()| child.wait()).and(Err(error)))?;
     Ok(Hopper { child, reader, procs })
 }
 
@@ -651,6 +696,42 @@ fn two_test_cgroups_never_touch_each_other() -> TestResult {
         assert!(first.parent.join("shell-hopper-test").is_dir());
         assert!(!second.parent.join("shell-hopper-test").exists());
         assert!(first.scratch.path().exists());
+    }
+    Ok(())
+}
+
+
+#[test]
+fn the_stale_sweep_removes_only_dead_empty_test_cgroups() -> TestResult {
+    if rustix::process::getuid().is_root() {
+        let live = test_cgroup()?;
+        let own = live
+            .parent
+            .parent()
+            .ok_or("parent")?
+            .join(format!("ostyr-test-{}-sweep", std::process::id()));
+        std::fs::create_dir(&own)?;
+        let mut gone = Command::new("true").spawn()?;
+        gone.wait()?;
+        let dead = own.join(format!("ostyr-test-{}-empty", gone.id()));
+        std::fs::create_dir(&dead)?;
+        std::fs::create_dir(dead.join("shell-x"))?;
+        let mut sleeper = Command::new("sleep").arg("60").spawn()?;
+        let busy = own.join(format!("ostyr-test-{}-busy", gone.id()));
+        std::fs::create_dir(&busy)?;
+        std::fs::write(busy.join("cgroup.procs"), sleeper.id().to_string())?;
+        let other = own.join("unrelated-name");
+        std::fs::create_dir(&other)?;
+        assert!(sweep_stale(&own)? >= 1);
+        assert!(!dead.exists());
+        assert!(busy.exists());
+        assert!(other.exists());
+        sleeper.kill()?;
+        sleeper.wait()?;
+        assert!(sweep_stale(&own)? >= 1);
+        assert!(!busy.exists());
+        std::fs::remove_dir(&other)?;
+        std::fs::remove_dir(&own)?;
     }
     Ok(())
 }
