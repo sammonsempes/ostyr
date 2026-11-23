@@ -480,6 +480,7 @@ pub fn detaches(rule: Option<&Rule>, state_changing: bool) -> bool {
 pub fn admit_detached(app: &ApiState, source: IpAddr) -> Option<DetachedPermit> {
     admit_connection(&app.detached_sources, source, MAX_DETACHED_PER_SOURCE).and_then(|slot| {
         app.detached
+            .permits
             .clone()
             .try_acquire_owned()
             .inspect_err(|error| tracing::debug!(%error, "detached write pool full"))
@@ -530,7 +531,7 @@ pub async fn run_detached(app: SharedState, request: Request, next: Next, templa
 
 /// Waits until every detached write has written its record; false when `timeout` passes first (those writes are cancelled with the runtime).
 pub async fn drain_detached(app: &ApiState, timeout: std::time::Duration) -> bool {
-    let all = app.detached.clone().acquire_many_owned(app.detached_size);
+    let all = app.detached.permits.clone().acquire_many_owned(app.detached.size);
     let drained = tokio::time::timeout(timeout, all).await.is_ok();
     if !drained {
         tracing::warn!("detached writes still running at shutdown");

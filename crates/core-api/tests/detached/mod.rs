@@ -12,7 +12,7 @@ use core_api::middleware::{detaches, drain_detached, note_detached_refused};
 use core_api::model::{ApiState, Requirement, Rule};
 use core_api::routes::{build_router, BODY_LIMIT_BYTES};
 use core_api::server::serve;
-use core_api::state::{build_state_from_files, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_WRITES};
+use core_api::state::{build_state_from_files, detached_pool, MAX_DETACHED_PER_SOURCE, MAX_DETACHED_WRITES};
 use core_api::types::{AccessTable, ServerHandle, SharedState};
 use core_audit::log::append_declared;
 use core_audit::model::{Actor, ActorKind, NewEntry, Outcome};
@@ -281,7 +281,7 @@ async fn a_write_survives_a_client_that_leaves() -> TestResult {
     assert_eq!(exchange.len(), 1);
     assert_eq!(exchange.first().and_then(|record| field(record, "outcome")), Some("success"));
     assert_eq!(exchange.first().and_then(status_parameter), Some("200"));
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     assert!(fx.state.detached_sources.lock().map_err(|_| "poisoned")?.is_empty());
     Ok(())
 }
@@ -318,7 +318,7 @@ async fn a_safe_request_that_is_dropped_is_not_continued() -> TestResult {
     yield_often().await;
     assert_eq!(holds.effect.load(Ordering::SeqCst), 0);
     assert!(records(&fx, WRITE_ACTION, None)?.is_empty());
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     Ok(())
 }
 
@@ -333,8 +333,7 @@ async fn full_pool() -> TestResult {
     let holds = holds();
     let fx = fixture_over(&holds, |state| {
         Ok(ApiState {
-            detached: Arc::new(Semaphore::new(1)),
-            detached_size: 1,
+            detached: detached_pool(1),
             ..state
         })
     })?;
@@ -407,7 +406,7 @@ async fn a_handler_that_panics_after_the_client_left_is_audited_as_a_failure() -
     assert_eq!(exchange.len(), 1);
     assert_eq!(exchange.first().and_then(|record| field(record, "outcome")), Some("failure"));
     assert_eq!(exchange.first().and_then(status_parameter), Some("500"));
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     Ok(())
 }
 
@@ -457,7 +456,7 @@ async fn a_login_dropped_while_queued_is_not_continued() -> TestResult {
     hashing.add_permits(1);
     yield_often().await;
     assert!(records(&fx, "auth.login", None)?.is_empty());
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     Ok(())
 }
 
@@ -477,11 +476,34 @@ fn only_session_and_permission_writes_are_detached() -> TestResult {
 
 
 #[tokio::test]
+async fn an_injected_small_pool_drains_at_once_when_idle() -> TestResult {
+    let holds = holds();
+    let fx = fixture_over(&holds, |state| {
+        Ok(ApiState {
+            detached: detached_pool(1),
+            ..state
+        })
+    })?;
+    assert_eq!(fx.state.detached.size, 1);
+    assert_eq!(fx.state.detached.permits.available_permits(), 1);
+    assert!(drain_detached(&fx.state, SHORT_WAIT).await);
+    let token = login_token(&fx.router).await?;
+    let write = start_client(&fx, client(1), "POST", ROUTE_HOLD, &token)?;
+    arrived(&holds, 1).await?;
+    assert!(!drain_detached(&fx.state, SHORT_WAIT).await);
+    holds.gate.add_permits(1);
+    assert_eq!(write.await??.status(), StatusCode::OK);
+    assert!(drain_detached(&fx.state, HANG_GUARD).await);
+    Ok(())
+}
+
+
+#[tokio::test]
 async fn the_drain_waits_for_the_writes_and_gives_up_at_its_deadline() -> TestResult {
     let holds = holds();
     let fx = fixture_over(&holds, keep)?;
     assert!(drain_detached(&fx.state, SHORT_WAIT).await);
-    let held = fx.state.detached.clone().acquire_owned().await?;
+    let held = fx.state.detached.permits.clone().acquire_owned().await?;
     assert!(!drain_detached(&fx.state, SHORT_WAIT).await);
     drop(held);
     assert!(drain_detached(&fx.state, SHORT_WAIT).await);
@@ -534,12 +556,12 @@ async fn a_slow_body_never_takes_a_detached_slot() -> TestResult {
     let router = fx.router.clone();
     let waiting = tokio::spawn(async move { router.oneshot(slow).await });
     yield_often().await;
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     assert!(fx.state.detached_sources.lock().map_err(|_| "poisoned")?.is_empty());
     assert_eq!(holds.started.available_permits(), 0);
     drop(sender);
     arrived(&holds, 1).await?;
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES) - 1);
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES) - 1);
     holds.gate.add_permits(1);
     assert_eq!(guarded(waiting).await???.status(), StatusCode::OK);
     Ok(())
@@ -558,7 +580,7 @@ async fn a_body_that_fails_is_refused_before_the_pool_with_one_record() -> TestR
     let oversized = request("POST", ROUTE_HOLD, Some(&token), Body::from(vec![u8::MIN; BODY_LIMIT_BYTES + 1]))?;
     assert_eq!(send_from(&fx.router, client(1), oversized).await?.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(holds.started.available_permits(), 0);
-    assert_eq!(fx.state.detached.available_permits(), usize::from(MAX_DETACHED_WRITES));
+    assert_eq!(fx.state.detached.permits.available_permits(), usize::from(MAX_DETACHED_WRITES));
     assert_eq!(records(&fx, REQUEST_ACTION, Some("POST /example/hold"))?.len(), IDLE_REFERENCES);
     Ok(())
 }

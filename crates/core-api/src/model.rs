@@ -54,10 +54,17 @@ pub struct ApiState {
     pub callback_accounts: std::sync::Mutex<BTreeSet<String>>,
     pub forwarders: ArcSwap<Vec<IpNet>>,
     pub ignored_forwarding: AtomicU64,
-    pub detached: Arc<Semaphore>,
-    pub detached_size: u32,
+    pub detached: DetachedPool,
     pub detached_sources: ConnectionTable,
     pub detached_refused: AtomicU64,
+}
+
+
+/// The detached-write permits and their total, built together by `detached_pool` so they cannot disagree.
+#[derive(Debug, Clone)]
+pub struct DetachedPool {
+    pub permits: Arc<Semaphore>,
+    pub size: u32,
 }
 
 
