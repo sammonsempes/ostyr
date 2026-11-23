@@ -11,6 +11,7 @@ pub mod model;
 pub mod observables;
 pub mod policy;
 pub mod scan;
+pub mod shapes;
 pub mod text;
 pub mod triage;
 pub mod types;

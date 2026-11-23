@@ -2,9 +2,10 @@ use crate::auth::{oversized_untrusted, verdicts_with_from, PASS};
 use crate::claim::{claim_scan, domain_set};
 use crate::error::TriageError;
 use crate::limits::{Limits, MAX_FROM_ADDRESSES};
-use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Triage, UrlHit, UrlIndex};
+use crate::model::{AttachmentInfo, AuthVerdicts, Counts, LevelInfo, ReporterPolicy, Shapes, Triage, UrlHit, UrlIndex};
 use crate::policy::{check_policy, is_internal, is_strict_domain};
 use crate::scan::{scan, Scan};
+use crate::shapes::has_reference;
 use crate::text::{clean, clean_address, is_refused_address};
 use crate::types::RawReadFn;
 use crate::urls::{collect_indexed, html_text, index_from, URL_RULE};
@@ -596,6 +597,9 @@ const URL_HOST_UNREAD: &str = "url_host_unread";
 const URL_USERINFO_SPLIT: &str = "url_userinfo_split";
 
 
+const URL_HOST_AMBIGUOUS: &str = "url_host_ambiguous";
+
+
 const URL_CAP_REACHED: &str = "url_cap_reached";
 
 
@@ -630,15 +634,34 @@ fn read_level(mut record: Triage, index: usize, message: &Message<'_>, context: 
     record.refused_hosts = urls_index.hosts;
     let unread = record.counts.url_host_unread > 0;
     let split = record.counts.url_userinfo_split > 0;
+    let ambiguous = record.counts.url_host_ambiguous > 0;
     let capped = record.counts.url_cap_reached > 0;
     mark_once(&mut record, unread, URL_HOST_UNREAD);
     mark_once(&mut record, split, URL_USERINFO_SPLIT);
+    mark_once(&mut record, ambiguous, URL_HOST_AMBIGUOUS);
     mark_once(&mut record, capped, URL_CAP_REACHED);
     let room = context.limits.attachments.saturating_sub(record.attachments.len());
     let listed = list_attachments(message, index, context.limits, room, &mut record.counts);
     record.attachments.extend(listed);
     record.levels.push(info);
     record
+}
+
+
+const CONTENT_TYPE_HEADER: &str = "Content-Type";
+
+
+/// Plain only with at most one `Content-Type` header and that one `text/plain` (or none); every other case is read as markup.
+pub fn is_plain(part: &MessagePart<'_>) -> bool {
+    let declared = part
+        .headers()
+        .iter()
+        .filter(|header| header.name().eq_ignore_ascii_case(CONTENT_TYPE_HEADER))
+        .count();
+    declared <= 1
+        && part
+            .content_type()
+            .is_none_or(|content_type| content_type.subtype().is_some_and(|subtype| subtype.eq_ignore_ascii_case("plain")))
 }
 
 
@@ -658,9 +681,13 @@ fn collect_urls(
                 counts.parts_skipped += 1;
                 urls
             }
-            PartType::Text(text) => collect_indexed(context.rule, text, level, limits, urls, urls_index, counts),
-            PartType::Html(html) => {
-                let decoded = html_text(html, counts);
+            PartType::Text(text) if is_plain(part) => {
+                urls_index.shapes = Shapes::Plain;
+                collect_indexed(context.rule, text, level, limits, urls, urls_index, counts)
+            }
+            PartType::Text(markup) | PartType::Html(markup) => {
+                urls_index.shapes = if has_reference(markup) { Shapes::Refuse } else { Shapes::Markup };
+                let decoded = html_text(markup, counts);
                 collect_indexed(context.rule, &decoded, level, limits, urls, urls_index, counts)
             }
             _ => urls,
