@@ -116,6 +116,20 @@ no_interpolation() {
     ! dollar_outside_entrypoint
 }
 
+no_backslash() {
+    ! grep -q -F '\' "$COMPOSE_FILE"
+}
+
+environment_passthrough_items() {
+    awk '/^ *environment:/ {match($0, /^ */); base = RLENGTH; inside = 1; next}
+        inside {match($0, /^ */); if (RLENGTH < base || (RLENGTH == base && $0 !~ /^ *- /)) {inside = 0}}
+        inside && /^ *- / && !/=/ {print}' "$COMPOSE_FILE"
+}
+
+no_environment_passthrough() {
+    ! environment_passthrough_items | grep -q .
+}
+
 published_port_items() {
     awk '/^ *ports:/ {match($0, /^ */); base = RLENGTH; inside = 1; next}
         inside {match($0, /^ */); if (RLENGTH < base || (RLENGTH == base && $0 !~ /^ *- /)) {inside = 0}}
@@ -211,6 +225,8 @@ parsed_config_passes() {
 expect "compose.yaml uses only the allowed YAML shapes" shapes_are_allowed
 expect "no other compose file or .env is in the project directory" no_other_compose_input
 expect "compose.yaml interpolates no variable outside the entrypoint script" no_interpolation
+expect "compose.yaml holds no backslash escape" no_backslash
+expect "compose.yaml has no environment pass-through item" no_environment_passthrough
 if [[ "$failures" -ne 0 ]]; then
     unknown_shapes | head -n 5 >&2
     printf 'an early check failed: nothing else was checked\n' >&2

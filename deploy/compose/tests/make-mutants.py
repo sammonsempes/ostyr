@@ -56,6 +56,12 @@ MUTANTS = {
     "web_bind_etc": with_web_volume("/etc:/srv/etc:ro"),
     "profiled_service": lambda text: replace_once(text, "services:\n  postgres:\n", "services:\n" + PROFILED_SERVICE + "  postgres:\n"),
     "dollar_default": lambda text: replace_once(text, "ipv4_address: 172.29.63.10\n", "ipv4_address: ${WEB_IP:-172.29.63.10}\n"),
+    "esc_secopt": lambda text: replace_once(text, WEB_SECRETS, WEB_SECRETS + '    security_opt: ["\\x24{WEB_SEC:-no-new-privileges:true}"]\n'),
+    "esc_pgcmd": lambda text: replace_once(text, "      - ssl=on\n", '      - "\\x24{PG_SSL:-ssl=on}"\n'),
+    "esc_tmpfs": lambda text: replace_once(text, "      - /tmp\n", '      - "\\x24{TMP_DIR:-/tmp}"\n'),
+    "env_passthrough": lambda text: replace_once(
+        text, "    environment:\n      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password\n", "    environment:\n      - POSTGRES_PASSWORD_FILE\n"
+    ),
     "web_secret_extra": lambda text: replace_once(text, WEB_SECRETS, "    secrets: [pg_ca, api_tls_key, api_tls_cert, store_key]\n"),
 }
 

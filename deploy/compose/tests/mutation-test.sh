@@ -3,7 +3,7 @@
 #        deploy/compose/tests/mutation-test.sh parsed
 # Runs every mutated copy of compose.yaml (make-mutants.py) through one check and expects it refused by the named check.
 # static: static-test.sh on the host (no Docker). parsed: `docker compose config --format json` and config-check.py, run where Docker is
-# (the lab VM, from inside the compose directory), the mutated copies being written next to compose.yaml. dollar_default is refused by the static check
+# (the lab VM, from inside the compose directory), the mutated copies being written next to compose.yaml. dollar_default, esc_secopt, esc_pgcmd, esc_tmpfs and env_passthrough are refused by the static check
 # only (compose renders its default, so the parsed configuration is identical); the lab runs both modes.
 set -euo pipefail
 
@@ -19,6 +19,8 @@ readonly BINDS="every service mounts only its own volumes and binds"
 readonly CAPS="only postgres adds capabilities"
 readonly DEFINITIONS="the volume and secret definitions are exactly the expected ones"
 readonly PARSED="the parsed configuration equals the committed projection"
+readonly BACKSLASH="compose.yaml holds no backslash escape"
+readonly PASSTHROUGH="compose.yaml has no environment pass-through item"
 readonly STRAY="no other compose file or .env is in the project directory"
 readonly INTERPOLATION="compose.yaml interpolates no variable outside the entrypoint script"
 readonly EXTRA_PORT=$'services:\n  postgres:\n    ports:\n      - "5000:5000"\n'
@@ -31,14 +33,15 @@ declare -A STATIC_REFUSAL=(
     [ports_flow]="$GRAMMAR" [port_unquoted]="$PORTS" [port_long]="$GRAMMAR" [pg_port]="no PostgreSQL port is published"
     [network_mode_host]="$GRAMMAR" [web_mount_dot]="$VOLUMES" [web_mount_dotdot]="$VOLUMES" [web_mount_parent]="$VOLUMES"
     [web_mount_secrets]="$VOLUMES" [web_secret_extra]="$SECRETS" [webstate_named]="$GRAMMAR" [webstate_named_block]="$DEFINITIONS"
-    [profiled_service]="$GRAMMAR" [dollar_default]="$INTERPOLATION" [pg_ca_store_key]="$DEFINITIONS" [pg_publish_8443]="$PORT_OWNERS" [web_cap_add]="$CAPS" [pg_bind_secrets]="$BINDS" [web_bind_etc]="$VOLUMES"
+    [profiled_service]="$GRAMMAR" [dollar_default]="$INTERPOLATION"
+    [esc_secopt]="$BACKSLASH" [esc_pgcmd]="$BACKSLASH" [esc_tmpfs]="$BACKSLASH" [env_passthrough]="$PASSTHROUGH" [pg_ca_store_key]="$DEFINITIONS" [pg_publish_8443]="$PORT_OWNERS" [web_cap_add]="$CAPS" [pg_bind_secrets]="$BINDS" [web_bind_etc]="$VOLUMES"
 )
 declare -A STRAY_REFUSAL=([override_file]="$STRAY" [dotenv_compose_file]="$STRAY")
 declare -A PARSED_REFUSAL=()
 for mutant in "${!STATIC_REFUSAL[@]}"; do
     PARSED_REFUSAL[$mutant]="$PARSED"
 done
-unset 'PARSED_REFUSAL[dollar_default]'
+unset 'PARSED_REFUSAL[dollar_default]' 'PARSED_REFUSAL[esc_secopt]' 'PARSED_REFUSAL[esc_pgcmd]' 'PARSED_REFUSAL[esc_tmpfs]' 'PARSED_REFUSAL[env_passthrough]'
 for mutant in "${!STRAY_REFUSAL[@]}"; do
     PARSED_REFUSAL[$mutant]="$PARSED"
 done
