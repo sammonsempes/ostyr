@@ -13,7 +13,7 @@ opentelemetry-proto = { version = "0.33", default-features = false, features = [
 prost = "0.14"
 unicode-general-category = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 siem-ingest = { version = "0.0.0", path = "../siem-ingest" }
 siem-schema = { version = "0.0.0", path = "../siem-schema" }
 thiserror = "2"

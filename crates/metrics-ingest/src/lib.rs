@@ -3,6 +3,7 @@
 pub mod cardinality;
 pub mod cli;
 pub mod decode;
+pub mod host;
 pub mod insert;
 pub mod model;
 pub mod run;

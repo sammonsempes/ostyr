@@ -163,6 +163,12 @@ pub enum DropReason {
     LabelValueCap,
     LabelKeyCap,
     StateBytesCap,
+    NotANumber,
+    OutOfRange,
+    TooManyMounts,
+    MalformedMounts,
+    PayloadIdentityIgnored,
+    UnknownMetric,
 }
 
 
@@ -198,6 +204,9 @@ pub enum Refusal {
     TooManyEntityRefs { count: usize },
     TooManyEntityKeys { count: usize },
     TooManyRowBytes { bytes: usize },
+    BadEvent,
+    NotHostMetrics,
+    BadHost,
 }
 
 
@@ -205,6 +214,26 @@ impl From<prost::DecodeError> for Refusal {
     fn from(error: prost::DecodeError) -> Self {
         Refusal::Malformed(error)
     }
+}
+
+
+/// What the caller knows of a host event: the authenticated tenant and agent id, and the receive time.
+#[derive(Clone, Copy, Debug)]
+pub struct HostCaller<'a> {
+    pub tenant: &'a str,
+    pub agent_id: &'a str,
+    pub received_nanos: u64,
+}
+
+
+/// One host metric: its OpenTelemetry name, unit, kind, whether it is monotonic and whether its value is a ratio in 0..1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spec {
+    pub name: &'static str,
+    pub unit: &'static str,
+    pub kind: MetricKind,
+    pub monotonic: bool,
+    pub ratio: bool,
 }
 
 
@@ -236,6 +265,12 @@ impl Display for DropReason {
             Self::LabelValueCap => "label_value_cap",
             Self::LabelKeyCap => "label_key_cap",
             Self::StateBytesCap => "state_bytes_cap",
+            Self::NotANumber => "not_a_number",
+            Self::OutOfRange => "out_of_range",
+            Self::TooManyMounts => "too_many_mounts",
+            Self::MalformedMounts => "malformed_mounts",
+            Self::PayloadIdentityIgnored => "payload_identity_ignored",
+            Self::UnknownMetric => "unknown_metric",
         };
         formatter.write_str(name)
     }
