@@ -1,0 +1,33 @@
+dry run: 6 alert(s) simulated, 0 alert(s) not run (alert bound), 19 trace event(s)
+alert 0 dry-run-0-a1
+playbook Block confirmed C2 v3 mode=enforce
+trigger matched
+condition steps.0 true: {{ alert.remote_ip and alert.remote_ip.reputation >= 80 and not alert.remote_ip.is_internal }}
+action steps.0.then.0 fortigate/block_ip duration="24h" ip="203.0.113.9" breakers=allowed
+condition steps.1 true: {{ alert.domain }}
+rejected steps.1.then.0 sinkhole: parameter `domain`: expected a domain name, found "{{ range(10**9) }}"
+halted steps.2 {{ alert.host.criticality != 'critical' }}: not run
+halted steps.3 {{ alert.user and not alert.user.is_privileged }}: not run
+halted steps.4 slack/notify: not run
+playbook Notify on C2 v1 mode=simulate
+trigger matched
+action steps.0 slack/notify channel="#soc" message="C2 seen: {{ range(10**9) }}" breakers=not applicable
+alert 1 dry-run-1-a2
+  skipped: tenant field differs from the batch tenant
+alert 2 dry-run-2
+playbook Block confirmed C2 v3 mode=enforce
+trigger matched
+condition steps.0 false: {{ alert.remote_ip and alert.remote_ip.reputation >= 80 and not alert.remote_ip.is_internal }}
+condition steps.1 true: {{ alert.domain }}
+rejected steps.1.then.0 sinkhole: parameter `domain`: expected a domain name, found "{% for i in x %}{{ self.__init__ }}{% endfor %}\nforged line"
+halted steps.2 {{ alert.host.criticality != 'critical' }}: not run
+halted steps.3 {{ alert.user and not alert.user.is_privileged }}: not run
+halted steps.4 slack/notify: not run
+playbook Notify on C2 v1 mode=simulate
+trigger matched
+action steps.0 slack/notify channel="#soc" message="C2 seen: {% for i in x %}{{ self.__init__ }}{% endfor %}\nforged line" breakers=not applicable
+alert 3 dry-run-3
+  skipped: not a JSON object
+alert 4 dry-run-4
+  skipped: not a JSON object
+alert 5 dry-run-5-a6

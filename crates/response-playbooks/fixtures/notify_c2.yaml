@@ -1,0 +1,13 @@
+name: Notify on C2
+version: 1
+mode: simulate
+trigger:
+  alert.category: command_and_control
+steps:
+  - connector: slack
+    action: notify
+    params: { channel: "#soc", message: "C2 seen: {{ alert.domain }}" }
+on_error:
+  - connector: pagerduty
+    action: page
+    params: { severity: high, summary: "notify failed" }

@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 core-audit = { version = "0.0.0", path = "../core-audit" }
 core-config = { version = "0.0.0", path = "../core-config" }
+core-pg = { version = "0.0.0", path = "../core-pg" }
 humantime = "2"
 minijinja = { version = "3", default-features = false, features = ["builtins", "fuel", "serde", "unstable_machinery"] }
 response-breakers = { version = "0.0.0", path = "../response-breakers" }

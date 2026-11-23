@@ -1,3 +1,4 @@
+use crate::batch::{AlertRun, DryRunReport};
 use crate::model::{ConditionOutcome, Mode, Trace, TraceEvent};
 use crate::types::ParamMap;
 
@@ -65,10 +66,64 @@ pub fn event_line(event: &TraceEvent) -> String {
 }
 
 
+/// A control character in an alert value (a newline) never starts a line of its own.
+pub fn escape_controls(text: &str) -> String {
+    text.chars()
+        .flat_map(|character| {
+            if character.is_control() {
+                character.escape_unicode().collect::<Vec<char>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
+}
+
+
 /// Plain text, one line per event: byte for byte stable, the form the snapshots compare.
 pub fn render_trace(trace: &Trace) -> String {
     std::iter::once(format!("playbook {} v{} mode={}", trace.playbook, trace.version, mode_label(trace.mode)))
         .chain(trace.events.iter().map(event_line))
+        .map(|line| escape_controls(&line))
         .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+
+pub fn counted(count: usize, label: &str) -> Option<String> {
+    (count > 0).then(|| format!("  {label}: {count}\n"))
+}
+
+
+pub fn alert_block(run: &AlertRun) -> String {
+    let skipped = run.skipped.map(|reason| format!("  skipped: {reason}\n"));
+    let notes = [
+        counted(run.matches_over_bound, "matching playbooks not run (per-alert bound)"),
+        counted(run.matches_over_budget, "matching playbooks not run (trace budget)"),
+        counted(run.events_omitted, "trace events omitted (trace budget)"),
+    ];
+    std::iter::once(format!("alert {} {}\n", run.position, run.request_id))
+        .chain(skipped)
+        .chain(run.traces.iter().map(render_trace))
+        .chain(notes.into_iter().flatten())
+        .collect()
+}
+
+
+/// Plain text, one block per alert (a trace per matching playbook), then every bound that was hit; nothing was executed.
+pub fn render_dry_run(report: &DryRunReport) -> String {
+    let refused = report
+        .tenant_refused
+        .then(|| "dry run refused: the batch tenant is not a valid tenant name\n".to_owned());
+    let summary = format!(
+        "dry run: {} alert(s) simulated, {} alert(s) not run (alert bound), {} trace event(s)\n",
+        report.alerts.len(),
+        report.alerts_not_run,
+        report.trace_events
+    );
+    refused
+        .into_iter()
+        .chain(std::iter::once(summary))
+        .chain(report.alerts.iter().map(alert_block))
         .collect()
 }
