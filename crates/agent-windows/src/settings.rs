@@ -203,7 +203,7 @@ pub fn observation(observed: &Mutex<Observed>) -> MutexGuard<'_, Observed> {
 }
 
 
-/// The loader: reads the bytes once and records those very bytes; a file already refused for its own fault yields the settings in force (no reload, no second log).
+/// The loader: reads the bytes once and records those very bytes; other bytes forget a remembered refusal (a bad file that comes back is refused again); a file already refused for its own fault yields the settings in force (no reload, no second log).
 pub fn observed_load(path: &Path, observed: &Mutex<Observed>) -> Result<Settings, ConfigError> {
     let read = read_bytes_capped(path, MAX_SETTINGS_BYTES);
     let seen: Fingerprint = read.as_ref().map(Vec::clone).map_err(ToString::to_string);
@@ -213,6 +213,7 @@ pub fn observed_load(path: &Path, observed: &Mutex<Observed>) -> Result<Settings
     if state.refused.as_ref() == Some(&seen) {
         Ok(state.good.clone())
     } else {
+        state.refused = None;
         let file = path.display().to_string();
         let parsed = read.and_then(|bytes| parse_settings(&alphabet_text(&bytes, &file)?, &file));
         state.file_fault = parsed.is_err();
