@@ -14,6 +14,9 @@ use std::io::Read;
 pub const ARCHITECTURE: &str = "any";
 
 
+pub const CRLF: &str = "\r\n";
+
+
 pub const ELLIPSIS: char = '\u{2026}';
 
 
@@ -49,6 +52,7 @@ pub enum Classified<'a> {
 pub struct TableScan<'a> {
     pub rows: Vec<RowLine<'a>>,
     pub footer: Option<&'a str>,
+    pub extra_footers: usize,
 }
 
 
@@ -72,7 +76,7 @@ pub fn parse_winget_cli<Source: Read>(
     if lines_of(text).count() > limits.max_lines {
         Err(InventoryError::TooManyLines { limit: limits.max_lines })?;
     }
-    let lines: Vec<&str> = lines_of(text).collect();
+    let lines = table_lines(text)?;
     let separators: Vec<usize> = (0..lines.len()).filter(|index| is_separator(&lines, *index)).collect();
     if separators.len() > MAX_WINGET_TABLES {
         Err(WingetError::TooManyTables { limit: MAX_WINGET_TABLES })?;
@@ -80,6 +84,28 @@ pub fn parse_winget_cli<Source: Read>(
     match separators.first() {
         None => empty_listing(&lines),
         Some(first) => read_tables(device, &lines, &separators, *first, source, limits),
+    }
+}
+
+
+pub fn table_lines(text: &str) -> Result<Vec<&str>, WingetError> {
+    let head: Vec<&str> = lines_of(text).collect();
+    match (0..head.len()).find(|index| is_separator(&head, *index)) {
+        None => Ok(head),
+        Some(first) => {
+            let (kept, _) = head.split_at(first + 1);
+            let end = kept
+                .last()
+                .map_or(0, |separator| separator.as_ptr() as usize - text.as_ptr() as usize + separator.len());
+            let rest = text.split_at_checked(end).map_or("", |(_, after)| after);
+            let body = if rest.is_empty() { Some(rest) } else { rest.strip_prefix(CRLF) };
+            let tail = body.ok_or(WingetError::LineBreakInTable)?;
+            let lines: Vec<&str> = kept.iter().copied().chain(tail.split_terminator(CRLF)).collect();
+            if lines.iter().skip(first + 1).any(|line| line.contains(['\r', '\n'])) {
+                Err(WingetError::LineBreakInTable)?;
+            }
+            Ok(lines)
+        }
     }
 }
 
@@ -162,6 +188,13 @@ pub fn read_tables(
             scan_table(lines.get(start + 1..stop).unwrap_or(&[]), limits)
         })
         .collect::<Result<Vec<TableScan>, WingetError>>()?;
+    let earlier = scans.len().saturating_sub(1);
+    if scans.iter().take(earlier).any(|scan| scan.footer.is_none()) {
+        Err(WingetError::UnrecognisedLayout)?;
+    }
+    if scans.iter().take(earlier).any(|scan| scan.extra_footers > 0) {
+        Err(WingetError::RowAfterTableEnd)?;
+    }
     if scans.iter().map(|scan| scan.rows.len()).sum::<usize>() > MAX_WINGET_UPDATES {
         Err(WingetError::TooManyUpdates { limit: MAX_WINGET_UPDATES })?;
     }
@@ -195,7 +228,8 @@ pub fn scan_table<'a>(region: &[&'a str], limits: &Limits) -> Result<TableScan<'
         Err(WingetError::RowAfterTableEnd)?;
     }
     check_footer(&rows, footer)?;
-    Ok(TableScan { rows, footer })
+    let extra_footers = tail.iter().filter(|line| matches!(line, Classified::Footer(_))).count();
+    Ok(TableScan { rows, footer, extra_footers })
 }
 
 

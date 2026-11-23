@@ -53,6 +53,8 @@ pub enum WingetError {
     FooterMissing,
     #[error("a line shaped like a package row follows the end of a winget table")]
     RowAfterTableEnd,
+    #[error("a line break other than CR LF follows the first separator of a winget table")]
+    LineBreakInTable,
     #[error("the number in a winget footer does not fit in 32 bits")]
     FooterTooLarge,
     #[error("a winget footer counts {footer} rows but the table has {rows}")]

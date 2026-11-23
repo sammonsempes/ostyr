@@ -198,7 +198,7 @@ fn the_live_refused_source_capture_is_a_named_exit_error() -> TestResult {
 
 #[test]
 fn the_french_stand_in_capture_parses_without_any_word_of_the_language() -> TestResult {
-    let inventory = parse(FRENCH)?;
+    let inventory = parse_text(&std::str::from_utf8(FRENCH)?.replace('\n', "\r\n"))?;
     assert_eq!(ids(&inventory), ["7zip.7zip", "Microsoft.Edge"]);
     assert!(inventory.skipped.is_empty());
     assert_eq!(inventory.preamble_lines, 0);
@@ -356,7 +356,79 @@ fn a_fake_footer_in_a_package_version_followed_by_a_real_row_is_a_named_error() 
 #[test]
 fn a_carriage_return_pair_inside_a_name_of_the_live_capture_is_a_named_error() -> TestResult {
     let text = std::str::from_utf8(ONE)?.replace("Microsoft Edge", "Microsoft\r\rEdge");
-    let result = parse_text(&text);
+    assert!(matches!(parse_text(&text), Err(WingetError::LineBreakInTable)));
+    Ok(())
+}
+
+
+fn two_with_name(name: &str) -> Result<String, std::str::Utf8Error> {
+    Ok(std::str::from_utf8(TWO)?.replace("7-Zip 22.01 (x64 edition)", name))
+}
+
+
+#[test]
+fn a_name_forging_a_second_table_header_in_the_live_two_capture_is_a_named_error() -> TestResult {
+    let text = two_with_name("--------------------\rFake Fake.Pkg 1.0 2.0\rMicrosoft Edge")?;
+    assert!(matches!(parse_text(&text), Err(WingetError::LineBreakInTable)));
+    Ok(())
+}
+
+
+#[test]
+fn a_name_forging_a_matching_footer_in_the_live_two_capture_is_a_named_error() -> TestResult {
+    let text = two_with_name("1 x\rjunk\r")?;
+    assert!(matches!(parse_text(&text), Err(WingetError::LineBreakInTable)));
+    Ok(())
+}
+
+
+#[test]
+fn a_name_forging_a_row_a_footer_and_a_separator_in_the_live_two_capture_is_a_named_error() -> TestResult {
+    let text = two_with_name("Fake Fake.Pkg 1.0 2.0\r1 x\rH\r--------------------\r7-Zip")?;
+    assert!(matches!(parse_text(&text), Err(WingetError::LineBreakInTable)));
+    Ok(())
+}
+
+
+#[test]
+fn a_lone_line_feed_inside_a_name_or_after_the_separator_is_a_named_error() -> TestResult {
+    let text = two_with_name("7-Zip\n22.01")?;
+    assert!(matches!(parse_text(&text), Err(WingetError::LineBreakInTable)));
+    let bare = format!("{HEADER}\r\n{}\n{GOOD_ROW}\r\n1 upgrades available.\r\n", dashes());
+    assert!(matches!(parse_text(&bare), Err(WingetError::LineBreakInTable)));
+    let trailing = format!("{}\r", table(&[GOOD_ROW], "1 upgrades available."));
+    assert!(matches!(parse_text(&trailing), Err(WingetError::LineBreakInTable)));
+    Ok(())
+}
+
+
+#[test]
+fn a_header_and_separator_with_no_terminator_after_them_is_an_empty_table() -> TestResult {
+    let inventory = parse_text(&format!("{HEADER}\r\n{}", dashes()))?;
+    assert!(inventory.updates.is_empty());
+    Ok(())
+}
+
+
+#[test]
+fn a_second_separator_after_an_empty_table_with_no_footer_is_unrecognised() -> TestResult {
+    let result = parse_text(&format!(
+        "{HEADER}\r\n{}\r\n{HEADER}\r\n{}\r\n{GOOD_ROW}\r\n1 upgrades available.\r\n",
+        dashes(),
+        dashes()
+    ));
+    assert!(matches!(result, Err(WingetError::UnrecognisedLayout)));
+    Ok(())
+}
+
+
+#[test]
+fn a_second_footer_like_line_between_two_tables_is_a_named_error() -> TestResult {
+    let result = parse_text(&format!(
+        "{}9 x\r\n{HEADER}\r\n{}\r\nBaz Baz.Qux 3.0 4.0\r\n1 upgrades available.\r\n",
+        table(&[GOOD_ROW], "1 upgrades available."),
+        dashes()
+    ));
     assert!(matches!(result, Err(WingetError::RowAfterTableEnd)));
     Ok(())
 }
@@ -486,18 +558,6 @@ fn a_second_table_is_read_with_its_own_footer_and_the_explicit_targeting_line_is
             rows: 1
         })
     ));
-    Ok(())
-}
-
-
-#[test]
-fn consecutive_separators_make_an_empty_table_each() -> TestResult {
-    let result = parse_text(&format!(
-        "{HEADER}\r\n{}\r\n{}\r\n{GOOD_ROW}\r\n1 upgrades available.\r\n",
-        dashes(),
-        dashes()
-    ));
-    assert_eq!(ids(&result?), ["Foo.Bar"]);
     Ok(())
 }
 
