@@ -34,15 +34,15 @@ git init -q
 echo x >f.rs
 git add -A
 git -c user.name=t -c user.email=t@example.com commit -q --no-verify -m init
-git worktree add -q "$SCRATCH/one" -b one
-git worktree add -q "$SCRATCH/two" -b two
+git worktree add -q "$R/one" -b one
+git worktree add -q "$R/two" -b two
 FAILS=0
 for name in one two; do
-  (cd "$SCRATCH/$name" && echo y >"g-$name.rs" && git add -A)
+  (cd "$R/$name" && echo y >"g-$name.rs" && git add -A)
 done
-(cd "$SCRATCH/one" && env PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >"$SCRATCH/out.one" 2>&1) &
+(cd "$R/one" && env PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >"$SCRATCH/out.one" 2>&1) &
 FIRST=$!
-(cd "$SCRATCH/two" && env PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >"$SCRATCH/out.two" 2>&1) &
+(cd "$R/two" && env PATH="$SCRATCH/bin:/usr/bin:/bin" "$HERE/.githooks/pre-commit" >"$SCRATCH/out.two" 2>&1) &
 SECOND=$!
 wait "$FIRST" || FAILS=$((FAILS + 1))
 wait "$SECOND" || FAILS=$((FAILS + 1))
@@ -50,7 +50,7 @@ if [ "$FAILS" -ne 0 ]; then
   echo "FAIL: two hooks did not run their Rust steps at once"
   cat "$SCRATCH/out.one" "$SCRATCH/out.two"
 fi
-if [ "$(cat "$SYNC/target.one")" != "$SCRATCH/one/target" ] || [ "$(cat "$SYNC/target.two")" != "$SCRATCH/two/target" ]; then
+if [ "$(cat "$SYNC/target.one")" != "$R/one/target" ] || [ "$(cat "$SYNC/target.two")" != "$R/two/target" ]; then
   echo "FAIL: the two hooks did not build in their own target directories"
   FAILS=$((FAILS + 1))
 fi
