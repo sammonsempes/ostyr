@@ -613,14 +613,24 @@ pub async fn link_handler(State(state): State<Arc<StubState>>, headers: HeaderMa
     if authorised(&headers) {
         write_failure(&state).unwrap_or_else(|| {
             state.stored.store(true, Ordering::SeqCst);
-            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let alert = parsed.get("alert_id").and_then(Value::as_str).unwrap_or("").to_owned();
-            let mut linked = state.linked.lock().unwrap_or_else(PoisonError::into_inner);
-            let added = !linked.contains(&alert);
-            if added {
-                linked.push(alert.clone());
+            let alert = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|parsed| parsed.get("alert_id").and_then(Value::as_str).map(str::to_owned));
+            match alert {
+                Some(alert_id) => {
+                    let mut linked = state.linked.lock().unwrap_or_else(PoisonError::into_inner);
+                    let added = !linked.contains(&alert_id);
+                    if added {
+                        linked.push(alert_id.clone());
+                    }
+                    (
+                        if added { StatusCode::CREATED } else { StatusCode::OK },
+                        Json(json!({"alert_id": alert_id})),
+                    )
+                        .into_response()
+                }
+                None => error_reply(StatusCode::BAD_REQUEST),
             }
-            (if added { StatusCode::CREATED } else { StatusCode::OK }, Json(json!({"alert_id": alert}))).into_response()
         })
     } else {
         error_reply(StatusCode::UNAUTHORIZED)
