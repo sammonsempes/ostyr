@@ -247,6 +247,35 @@ pub fn judge_primary(name: &str, group: &PrimaryGroup) -> Result<(), AccountErro
 }
 
 
+/// True when a passwd line holds the uid; a malformed line is an error (fail closed), a blank one is skipped.
+pub fn holds_uid(line: &str, uid: u32) -> io::Result<bool> {
+    let fields: Vec<&str> = line.split(':').collect();
+    match (line.trim().is_empty(), fields.get(PASSWD_UID_FIELD)) {
+        (true, _) => Ok(false),
+        (false, Some(text)) => text.parse::<u32>().map(|number| number == uid).map_err(|_| invalid_passwd()),
+        (false, None) => Err(invalid_passwd()),
+    }
+}
+
+
+/// How many passwd lines hold the uid: `setpriv` resolves the first name of a uid and the sweep kills every process of it, so exactly one line may.
+pub fn uid_holders(passwd: &str, uid: u32) -> io::Result<usize> {
+    passwd
+        .lines()
+        .map(|line| holds_uid(line, uid))
+        .try_fold(0, |count, held| held.map(|is_held| count + usize::from(is_held)))
+}
+
+
+pub fn judge_uid(name: &str, holders: usize) -> Result<(), AccountError> {
+    if holders == 1 {
+        Ok(())
+    } else {
+        Err(AccountError::SharedUid { name: name.to_owned() })
+    }
+}
+
+
 pub fn judge_home(name: &str, entry: &AccountEntry, facts: HomeFacts) -> Result<(), AccountError> {
     if facts.is_directory && facts.owner == entry.uid {
         Ok(())
@@ -267,6 +296,7 @@ pub fn resolve_in(name: &str, databases: &Databases, home: HomeFn) -> Result<She
         name,
         &primary_in(&databases.group, &databases.passwd, name, entry.gid).map_err(AccountError::PrimaryGroupUnreadable)?,
     )?;
+    judge_uid(name, uid_holders(&databases.passwd, entry.uid).map_err(AccountError::Lookup)?)?;
     let facts = home(&entry.home).map_err(|source| AccountError::HomeUnreadable {
         name: name.to_owned(),
         source,

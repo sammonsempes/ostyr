@@ -10,6 +10,8 @@ pub mod cgroup;
 pub mod cleanup;
 pub mod compose;
 pub mod error;
+#[cfg(target_os = "linux")]
+pub mod hooks;
 pub mod model;
 pub mod queue;
 pub mod session;

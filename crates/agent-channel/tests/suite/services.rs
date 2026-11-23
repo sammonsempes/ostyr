@@ -664,3 +664,23 @@ async fn an_accepted_command_the_executor_cannot_take_is_reported_refused() -> T
     );
     finish_session(session).await
 }
+
+
+#[tokio::test]
+async fn a_disabled_shell_refusal_is_reported_with_its_own_reason() -> TestResult {
+    let commands: CommandSource = envelope_source(vec![signed_envelope(1)?]);
+    let state = make_state(patient_settings(), recording_sink(new_stored()), commands);
+    let session = session(Arc::clone(&state)).await?;
+    let dir = tempdir()?;
+    let verifier = agent_verifier(dir.path())?;
+    let run = bounded(run_commands(session.channel.clone(), &verifier, &|| NOW, &|_command| {
+        Err(agent_channel::model::ExecuteRefusal::ShellDisabled)
+    }))
+    .await??;
+    assert_eq!((run.accepted, run.refused), (0, FIRST));
+    assert_eq!(
+        run.refusals.first().map(|verdict| verdict.reason.as_str()),
+        Some(agent_channel::model::SHELL_DISABLED_REASON)
+    );
+    finish_session(session).await
+}

@@ -153,7 +153,19 @@ pub fn dispatch_command(sender: &mpsc::Sender<Command>, shell: Option<&ExecuteFn
             tracing::warn!("shell command refused: no shell executor");
             Err(ExecuteRefusal::NoShellExecutor)
         }
-        _ => record_command(sender, command),
+        (
+            Action::Ping
+            | Action::CollectStatus
+            | Action::Isolate
+            | Action::Kill { .. }
+            | Action::RunScript { .. }
+            | Action::Update { .. }
+            | Action::Uninstall
+            | Action::ChangePolicy { .. }
+            | Action::InstallUpdates { .. }
+            | Action::Reboot { .. },
+            _,
+        ) => record_command(sender, command),
     }
 }
 

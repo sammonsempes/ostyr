@@ -1,12 +1,12 @@
 use crate::banner::shell_banner;
 use crate::error::ShellError;
 use crate::model::{
-    expires_at_of, idle_seconds_of, max_seconds_of, session_id_of, EndReason, PtyHandle, ShellEnv, ShellOutcome, VerifiedOpenShell,
-    SHELL_EXIT_FLUSH_SECONDS, SHELL_INPUT_BYTES, SHELL_QUEUE_CAPACITY,
+    expires_at_of, idle_seconds_of, max_seconds_of, session_id_of, EndReason, PtyHandle, SessionHooks, ShellEnv, ShellOutcome, ShellShared,
+    VerifiedOpenShell, SHELL_EXIT_FLUSH_SECONDS, SHELL_INPUT_BYTES, SHELL_QUEUE_CAPACITY,
 };
 use crate::queue::release_slot;
 use crate::store::record_session;
-use crate::types::{AttachFn, InputChunks, ShellSlot};
+use crate::types::{AttachFn, BuildFn, InputChunks, ShellSlot};
 use crate::verified::check_start;
 use agent_channel::error::ChannelError;
 use agent_channel::model::ShellClientEnd;
@@ -118,7 +118,10 @@ pub async fn drive(order: &VerifiedOpenShell, channel: Channel, pty: PtyHandle, 
 pub fn log_outcome(outcome: &Result<ShellOutcome, ShellError>) {
     match outcome {
         Ok(ended) => tracing::info!(session = %ended.session_id, reason = ?ended.reason, clean = ended.cleanup_clean, "shell session ended"),
-        Err(error) => tracing::warn!(%error, "shell session refused"),
+        Err(error) => {
+            let cause = std::error::Error::source(error).map_or_else(String::new, ToString::to_string);
+            tracing::warn!(%error, %cause, "shell session refused");
+        }
     }
 }
 
@@ -161,6 +164,96 @@ pub async fn run_shell_worker(orders: mpsc::Receiver<VerifiedOpenShell>, slot: S
         })
         .fold(0, |count, ()| ready(count + 1))
         .await
+}
+
+
+/// The environment of one session: what the process shares and the hooks built for that session.
+pub fn session_env<'env>(shared: &'env ShellShared<'_>, hooks: &'env SessionHooks) -> ShellEnv<'env> {
+    ShellEnv {
+        agent_id: shared.agent_id.clone(),
+        store_directory: shared.store_directory.clone(),
+        store_owner: shared.store_owner,
+        store_lock: &shared.store_lock,
+        clock: shared.clock,
+        dial: shared.dial,
+        spawn: hooks.spawn.as_ref(),
+        attach: shared.attach,
+        cleanup: hooks.cleanup.as_ref(),
+    }
+}
+
+
+/// The switch is read again when the session starts: an order queued before it was turned off is refused.
+pub fn check_enabled(shared: &ShellShared<'_>) -> Result<(), ShellError> {
+    if (shared.enabled)() {
+        Ok(())
+    } else {
+        Err(ShellError::Disabled)
+    }
+}
+
+
+/// When the account now resolves to another uid, the processes of the earlier uid are cleaned first and any leftover refuses the session.
+pub async fn clear_previous(previous: Option<&SessionHooks>, hooks: &SessionHooks) -> Result<(), ShellError> {
+    match previous {
+        Some(earlier) if earlier.uid != hooks.uid => cleanup_verdict((earlier.cleanup)().await),
+        _ => Ok(()),
+    }
+}
+
+
+/// The switch, the account resolution of this session and the cleanup of an earlier uid, in that order.
+pub async fn prepare_session(
+    shared: &ShellShared<'_>,
+    account: &str,
+    build: BuildFn,
+    previous: Option<&SessionHooks>,
+) -> Result<SessionHooks, ShellError> {
+    check_enabled(shared)?;
+    let hooks = build(account)?;
+    clear_previous(previous, &hooks).await?;
+    Ok(hooks)
+}
+
+
+/// One session with its own hooks; the hooks come back as the next session's `previous`, a refusal keeps the old ones.
+pub async fn run_prepared(
+    order: VerifiedOpenShell,
+    shared: &ShellShared<'_>,
+    account: &str,
+    build: BuildFn,
+    previous: Option<SessionHooks>,
+) -> (Result<ShellOutcome, ShellError>, Option<SessionHooks>) {
+    match prepare_session(shared, account, build, previous.as_ref()).await {
+        Ok(hooks) => {
+            let outcome = run_shell_session(order, &session_env(shared, &hooks)).await;
+            (outcome, Some(hooks))
+        }
+        Err(error) => (Err(error), previous),
+    }
+}
+
+
+/// The process-wide worker: like `run_shell_worker`, but the account is resolved and both hooks are built afresh for every session.
+pub async fn run_shell_worker_with(
+    orders: mpsc::Receiver<VerifiedOpenShell>,
+    slot: ShellSlot,
+    shared: &ShellShared<'_>,
+    account: &str,
+    build: BuildFn,
+) -> u64 {
+    let (handled, _last) = ReceiverStream::new(orders)
+        .fold((0, None), |(count, previous), order| {
+            let released = &slot;
+            async move {
+                let (outcome, kept) = run_prepared(order, shared, account, build, previous).await;
+                log_outcome(&outcome);
+                release_slot(released);
+                (count + 1, kept)
+            }
+        })
+        .await;
+    handled
 }
 
 

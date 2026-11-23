@@ -75,7 +75,47 @@ pub fn poll_with(setup: &mut Setup, settings: &SourceSettings, limit: usize) -> 
 }
 
 
+pub static ANCHOR: std::sync::LazyLock<tracing::Dispatch> =
+    std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::fmt().with_writer(std::io::sink).finish()));
+
+
+pub struct CaptureWriter(pub std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("capture poisoned"))
+            .map(|mut held| {
+                held.extend_from_slice(bytes);
+                bytes.len()
+            })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+
+/// Runs the work and returns what it logged, one anchor registered first so parallel tests cannot cache the callsites as never.
+pub fn captured_logs(work: impl FnOnce()) -> Result<String, Box<dyn Error>> {
+    std::sync::LazyLock::force(&ANCHOR);
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = std::sync::Arc::clone(&buffer);
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || CaptureWriter(std::sync::Arc::clone(&writer)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, work);
+    let bytes = buffer.lock().map_err(|_poisoned| "capture poisoned")?.clone();
+    Ok(String::from_utf8(bytes)?)
+}
+
+
 pub fn scoped_logging() -> tracing::subscriber::DefaultGuard {
+    std::sync::LazyLock::force(&ANCHOR);
     tracing::subscriber::set_default(tracing_subscriber::fmt().with_writer(std::io::sink).finish())
 }
 

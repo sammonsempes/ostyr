@@ -31,6 +31,8 @@ pub mod sensor;
 #[cfg(unix)]
 pub mod settings;
 #[cfg(unix)]
+pub mod shell;
+#[cfg(unix)]
 pub mod spool;
 #[cfg(unix)]
 pub mod trusted;

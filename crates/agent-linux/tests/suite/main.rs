@@ -11,6 +11,7 @@ mod osquery;
 mod run;
 mod sensor;
 mod settings;
+mod shell;
 mod spool;
 mod support;
 mod trusted;
