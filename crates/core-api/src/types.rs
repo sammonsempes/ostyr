@@ -1,4 +1,4 @@
-use crate::model::{ApiState, Limits, Listener, PreparedAudit, PreparedKey, Rule, Sockets, Window};
+use crate::model::{ApiState, ConnectionGuard, Limits, Listener, PreparedAudit, PreparedKey, Rule, Sockets, Window};
 use arc_swap::ArcSwap;
 use axum::Router;
 use core_auth::error::AuthError;
@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use tokio::sync::OwnedSemaphorePermit;
 
 
 pub type SharedState = Arc<ApiState>;
@@ -21,6 +22,10 @@ pub type ModuleParts = (Router<SharedState>, AccessTable, Vec<utoipa::openapi::O
 
 /// A reload of another engine of the process (the core-pg settings), run once by `run_loaded` after the audit log is open.
 pub type StartupReloadFn = Box<dyn Fn() -> ReloadOutcome + Send + Sync>;
+
+
+/// The global slot and the per-source slot a detached write holds until its audit record is written.
+pub type DetachedPermit = (OwnedSemaphorePermit, ConnectionGuard);
 
 
 pub type PendingGenerations = Mutex<BTreeMap<String, u64>>;
