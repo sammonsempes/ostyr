@@ -1,5 +1,5 @@
 use crate::error::StartupError;
-use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, StateInputs};
+use crate::model::{ApiConfig, ApiIdentity, ApiState, AuthInputs, DetachedPool, StateInputs};
 use crate::oidc::load_oidc;
 use crate::previous::{read_previous_key, record_previous, remove_stale_previous, retire_previous, ROTATION_RESUMED};
 use crate::reload::{content_digest, reseal_accounts, RELOAD_ACTOR};
@@ -137,8 +137,7 @@ pub fn build_state(
         callback_accounts: Mutex::new(BTreeSet::new()),
         forwarders: ArcSwap::from_pointee(Vec::new()),
         ignored_forwarding: AtomicU64::new(0),
-        detached: Arc::new(Semaphore::new(usize::from(MAX_DETACHED_WRITES))),
-        detached_size: u32::from(MAX_DETACHED_WRITES),
+        detached: detached_pool(MAX_DETACHED_WRITES),
         detached_sources: ConnectionTable::default(),
         detached_refused: AtomicU64::new(0),
     })
@@ -332,5 +331,14 @@ pub fn auth_context<'a>(app: &'a ApiState, request_id: &'a str, verify: VerifyFn
         catalog: &app.catalog,
         tenant: &inputs.identity.tenant,
         request_id,
+    }
+}
+
+
+/// A detached-write pool of `size` permits, the one constructor of `DetachedPool`.
+pub fn detached_pool(size: u16) -> DetachedPool {
+    DetachedPool {
+        permits: Arc::new(Semaphore::new(usize::from(size))),
+        size: u32::from(size),
     }
 }
