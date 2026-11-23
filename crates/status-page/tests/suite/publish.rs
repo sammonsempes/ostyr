@@ -1,13 +1,15 @@
 use crate::harness::{state_with, TENANT};
 use crate::types::TestResult;
 use core_pg::error::PgError;
+use core_pg::query::{CLIENT_DEADLINE_MARGIN, QUERY_WINDOWS};
 use core_pg::scope::{tenant_of, tenant_scope, TenantScope};
+use core_pg::settings::MAX_DEADLINE_SECS;
 use status_page::app::{run_app_with, AppFile};
 use status_page::error::{StatusPageError, StoreError};
 use status_page::model::{ComponentConfig, IncidentInput, IncidentUpdateInput, PageConfig, PageSettings, Snapshot};
 use status_page::publish::{
     declared_services, error_class, fetch, first_publish, fit_page, omission_changed, omission_reason, publisher, render_class, tick,
-    MAX_RENDERS_PER_TICK, READ_DEADLINE,
+    MAX_RENDERS_PER_TICK, READER_QUERIES, READ_DEADLINE,
 };
 use status_page::settings::validate_settings;
 use status_page::store_model::PublishedRead;
@@ -714,5 +716,14 @@ fn the_omission_reason_names_the_size_fit_or_the_read_limit() -> TestResult {
     let (_second, cut) = fit_page(&config(), &sized)?;
     assert!(cut.all > 0 && cut.reason == "size");
     assert_eq!(declared_services(&config()), vec![SERVICE.to_owned()]);
+    Ok(())
+}
+
+
+#[test]
+fn the_read_deadline_outlasts_the_reader_own_cut() -> TestResult {
+    let one_query = Duration::from_secs(MAX_DEADLINE_SECS) * QUERY_WINDOWS + CLIENT_DEADLINE_MARGIN;
+    let worst = Duration::from_secs(MAX_DEADLINE_SECS) + one_query * u32::try_from(READER_QUERIES)?;
+    assert!(READ_DEADLINE >= worst);
     Ok(())
 }

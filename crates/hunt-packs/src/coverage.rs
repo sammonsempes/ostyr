@@ -306,7 +306,7 @@ pub fn joined_ids(packs: &[HuntPack]) -> String {
 /// The statement deadline (client or server side) names the period and the pack count; any other failure is a store failure.
 pub fn read_error(error: PgError, period: &CoveragePeriod, packs: usize) -> CoverageError {
     match error {
-        PgError::StatementTimeout { .. } => CoverageError::DeadlineReached {
+        PgError::StatementTimeout { .. } | PgError::ClientDeadline { .. } => CoverageError::DeadlineReached {
             from: period.from,
             to: period.to,
             packs,

@@ -119,7 +119,7 @@ pub fn held_since(rule: &Rule, table: MetricsTable, series: &[Point], since: Tim
 /// A fixed name per failure, never the text of the error.
 pub fn recovery_class(fault: &PgError) -> &'static str {
     match fault {
-        PgError::ConnectTimeout { .. } | PgError::StatementTimeout { .. } => "timeout",
+        PgError::ConnectTimeout { .. } | PgError::StatementTimeout { .. } | PgError::ClientDeadline { .. } => "timeout",
         PgError::Server { .. } | PgError::Client(_) => "database",
         _ => "other",
     }

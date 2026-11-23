@@ -4,7 +4,9 @@ use crate::render::render_omitting;
 use crate::snapshot::{publish, snapshot_of};
 use crate::store_model::PublishedRead;
 use crate::types::IncidentReadFn;
+use core_pg::query::{CLIENT_DEADLINE_MARGIN, QUERY_WINDOWS};
 use core_pg::scope::TenantScope;
+use core_pg::settings::MAX_DEADLINE_SECS;
 use futures_util::StreamExt;
 use std::cmp::Reverse;
 use std::sync::atomic::Ordering;
@@ -12,7 +14,11 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 
 
-pub const READ_DEADLINE: Duration = Duration::from_secs(30);
+pub const READER_QUERIES: u64 = 3;
+
+
+pub const READ_DEADLINE: Duration =
+    Duration::from_secs(MAX_DEADLINE_SECS * (1 + READER_QUERIES * QUERY_WINDOWS as u64) + READER_QUERIES * CLIENT_DEADLINE_MARGIN.as_secs());
 
 
 pub const UNLIMITED_TICKS: u64 = u64::MAX;

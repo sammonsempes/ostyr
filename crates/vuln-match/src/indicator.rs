@@ -155,7 +155,9 @@ pub async fn kev_indicator(exec: Executor<'_, '_>, scope: &TenantScope, now_micr
 /// A fixed category of a store failure, never server text: `deadline`, `server <class>` or `connection`.
 pub fn store_category(error: &PgError) -> String {
     match error {
-        PgError::StatementTimeout { .. } | PgError::ConnectTimeout { .. } | PgError::MigrationTimeout { .. } => "deadline".to_owned(),
+        PgError::StatementTimeout { .. } | PgError::ClientDeadline { .. } | PgError::ConnectTimeout { .. } | PgError::MigrationTimeout { .. } => {
+            "deadline".to_owned()
+        }
         PgError::Server { class, .. } => format!("server {class}"),
         _ => "connection".to_owned(),
     }
