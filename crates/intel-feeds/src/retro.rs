@@ -8,11 +8,12 @@ use crate::limits::{
 use crate::lines::numbered_lines;
 use crate::load::{agent_for, LoadError};
 use crate::store::{qualified, quote_identifier, StoreError};
-use crate::types::{ElapsedFn, RetroSendFn};
+use crate::types::{ElapsedFn, RefusalFn, RetroSendFn};
 use core_pg::password::read_password;
 use serde::{Deserialize, Serialize};
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::InsertClass;
+use siem_ingest::reader_profile::{changed_statement, pin_clause, profile_refused, read_changed_bytes, url_settings, violations};
 use std::io::{self, BufRead, BufReader, Read};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -25,72 +26,6 @@ use ureq::Agent;
 
 
 pub const PARAM_PREFIX: &str = "param_";
-
-
-/// `readonly=2`: a write is still refused, but the in-query `SETTINGS` pins may differ from the profile (under `readonly=1` ClickHouse 26.8 refuses them, code 164).
-pub const READONLY_VALUE: &str = "2";
-
-
-pub const EXCEPTION_IN_BODY: &str = "0";
-
-
-pub const OVERFLOW_MODE: &str = "throw";
-
-
-/// Profile settings that cut a reply without an error, reset to no effect: `limit` and `offset` truncate, the filter drops rows.
-pub const RESET_SETTINGS: [(&str, &str); 5] = [
-    ("limit", "0"),
-    ("offset", "0"),
-    ("additional_result_filter", "''"),
-    ("filter", "''"),
-    ("additional_table_filters", "{}"),
-];
-
-
-/// The settings a reader profile may have changed: the pins of every statement plus the two the URL sends; a named setting set in the query shows as changed.
-pub const RETRO_ALLOWED_CHANGED: [&str; 22] = [
-    "readonly",
-    "http_write_exception_in_output_format",
-    "max_execution_time",
-    "timeout_overflow_mode",
-    "max_rows_to_read",
-    "read_overflow_mode",
-    "max_rows_to_group_by",
-    "group_by_overflow_mode",
-    "max_result_rows",
-    "result_overflow_mode",
-    "sort_overflow_mode",
-    "set_overflow_mode",
-    "distinct_overflow_mode",
-    "join_overflow_mode",
-    "transfer_overflow_mode",
-    "read_overflow_mode_leaf",
-    "timeout_overflow_mode_leaf",
-    "limit",
-    "offset",
-    "additional_result_filter",
-    "filter",
-    "additional_table_filters",
-];
-
-
-/// The settings-check statement may list this many names (the server throws above it) and its reply is read through this many bytes.
-pub const CHANGED_MAX_ROWS: u64 = 64;
-
-
-pub const MAX_CHANGED_BYTES: u64 = 4096;
-
-
-/// Every other overflow mode a profile could set to `break` (a cut sort or set gave a silent partial result, T764BS2).
-pub const EXTRA_OVERFLOW_MODES: [&str; 7] = [
-    "sort_overflow_mode",
-    "set_overflow_mode",
-    "distinct_overflow_mode",
-    "join_overflow_mode",
-    "transfer_overflow_mode",
-    "read_overflow_mode_leaf",
-    "timeout_overflow_mode_leaf",
-];
 
 
 /// 159 `TIMEOUT_EXCEEDED` and 160 `TOO_SLOW` (the estimate already exceeds `max_execution_time`; live on a slow view).
@@ -328,9 +263,8 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
     let dictionary = format!("{}.{}", reader.database, reader.dictionary);
     let scalar_pins = settings_clause(settings, SCALAR_RESULT_ROWS);
     let match_pins = settings_clause(settings, settings.max_matches as u64 + 1);
-    let changed_pins = settings_clause(settings, CHANGED_MAX_ROWS);
     Ok(Statements {
-        changed: format!("SELECT `name` FROM `system`.`settings` WHERE `changed`{changed_pins} FORMAT TabSeparated"),
+        changed: changed_statement(),
         foreign: format!(
             "SELECT count() FROM (SELECT 1 FROM {source} WHERE `tenant` != {{tenant:String}} AND `checked` = 1 LIMIT 1){scalar_pins} FORMAT TabSeparated"
         ),
@@ -354,32 +288,25 @@ pub fn statements(settings: &RetroSettings) -> Result<Statements, StoreError> {
 }
 
 
-/// The pins of one statement as a `SETTINGS` clause: every limit from the settings, every overflow mode `throw` (never `break`), every cut reset.
-pub fn settings_clause(settings: &RetroSettings, result_rows: u64) -> String {
-    let mode = format!("'{OVERFLOW_MODE}'");
-    let mut pins = vec![
+/// The reader's own limits (never `max_result_rows`, which each statement sets itself).
+pub fn retro_limits(settings: &RetroSettings) -> Vec<(&'static str, String)> {
+    vec![
         ("max_execution_time", settings.max_execution_seconds.to_string()),
-        ("timeout_overflow_mode", mode.clone()),
         ("max_rows_to_read", settings.max_rows_to_read.to_string()),
-        ("read_overflow_mode", mode.clone()),
         ("max_rows_to_group_by", settings.max_rows_to_group_by.to_string()),
-        ("group_by_overflow_mode", mode.clone()),
-        ("max_result_rows", result_rows.to_string()),
-        ("result_overflow_mode", mode.clone()),
-    ];
-    pins.extend(EXTRA_OVERFLOW_MODES.iter().map(|name| (*name, mode.clone())));
-    pins.extend(RESET_SETTINGS.iter().map(|(name, value)| (*name, (*value).to_owned())));
-    let listed: Vec<String> = pins.iter().map(|(name, value)| format!("{name} = {value}")).collect();
-    format!(" SETTINGS {}", listed.join(", "))
+    ]
+}
+
+
+/// The pins of one statement as a `SETTINGS` clause (siem-ingest `reader_profile`, shared with the other ClickHouse readers).
+pub fn settings_clause(settings: &RetroSettings, result_rows: u64) -> String {
+    pin_clause(&retro_limits(settings), result_rows)
 }
 
 
 /// The URL keeps only the settings a statement cannot carry: `readonly` (changing it in a query is refused) and the exception format.
 pub fn server_settings() -> Vec<(&'static str, String)> {
-    vec![
-        ("readonly", READONLY_VALUE.to_owned()),
-        ("http_write_exception_in_output_format", EXCEPTION_IN_BODY.to_owned()),
-    ]
+    url_settings()
 }
 
 
@@ -394,13 +321,26 @@ pub fn refusal(status: StatusCode, code: Option<u32>) -> Option<RetroError> {
 }
 
 
-/// One request under what is left of the deadline; a spent deadline sends nothing.
-pub fn fetch(
+/// The refusal of the settings check: an error the profile caused is `ReaderProfileChanged`, never a data error.
+pub fn check_refusal(status: StatusCode, code: Option<u32>) -> Option<RetroError> {
+    refusal(status, code).map(|error| {
+        if profile_refused(code) {
+            RetroError::ReaderProfileChanged(1)
+        } else {
+            error
+        }
+    })
+}
+
+
+/// One request under what is left of the deadline; a spent deadline sends nothing. `refuse` maps an error reply.
+pub fn fetch_with(
     send: &RetroSendFn,
     settings: &RetroSettings,
     elapsed: &ElapsedFn,
     statement: &str,
     params: Vec<(&'static str, String)>,
+    refuse: RefusalFn,
 ) -> Result<RetroReply, RetroError> {
     let remaining = Duration::from_millis(settings.reader.timeout_ms).saturating_sub(elapsed());
     if remaining.is_zero() {
@@ -413,8 +353,19 @@ pub fn fetch(
             remaining,
         })
         .map_err(RetroError::Refused)?;
-        refusal(reply.status, reply.code).map_or(Ok(reply), Err)
+        refuse(reply.status, reply.code).map_or(Ok(reply), Err)
     }
+}
+
+
+pub fn fetch(
+    send: &RetroSendFn,
+    settings: &RetroSettings,
+    elapsed: &ElapsedFn,
+    statement: &str,
+    params: Vec<(&'static str, String)>,
+) -> Result<RetroReply, RetroError> {
+    fetch_with(send, settings, elapsed, statement, params, refusal)
 }
 
 
@@ -428,22 +379,12 @@ pub fn body_failure(error: &io::Error) -> RetroError {
 }
 
 
-/// The reader's changed settings, one name per line: any name outside `RETRO_ALLOWED_CHANGED`, or a reply over the byte cap, is a refusal that counts and never names.
-pub fn read_changed(reply: RetroReply) -> Result<(), RetroError> {
-    let mut bytes = Vec::new();
-    reply
-        .body
-        .take(MAX_CHANGED_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| body_failure(&error))?;
-    let over_cap = usize::from(bytes.len() as u64 > MAX_CHANGED_BYTES);
-    let outside = String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter(|name| !RETRO_ALLOWED_CHANGED.contains(name))
-        .count()
-        + over_cap;
-    if outside > 0 {
-        Err(RetroError::ReaderProfileChanged(outside))
+/// The reader's changed settings, one name per line: a name outside the pins, a pinned name missing (a filtered or empty `system.settings`) or a reply over the cap refuses, counted and never named.
+pub fn read_changed(reply: RetroReply, settings: &RetroSettings) -> Result<(), RetroError> {
+    let bytes = read_changed_bytes(reply.body).map_err(|error| body_failure(&error))?;
+    let found = violations(&bytes, &retro_limits(settings));
+    if found > 0 {
+        Err(RetroError::ReaderProfileChanged(found))
     } else {
         Ok(())
     }
@@ -562,7 +503,7 @@ pub fn retro_run(
     let tenant = settings.reader.tenant.as_str();
     let tenant_param = || ("tenant", tenant.to_owned());
     let window_params = || vec![tenant_param(), ("start", first.to_string()), ("end", last.to_string())];
-    fetch(send, settings, elapsed, &text.changed, Vec::new()).and_then(read_changed)?;
+    fetch_with(send, settings, elapsed, &text.changed, Vec::new(), check_refusal).and_then(|reply| read_changed(reply, settings))?;
     let foreign_rows = fetch(send, settings, elapsed, &text.foreign, vec![tenant_param()]).and_then(read_scalar)?;
     if foreign_rows > 0 {
         Err(RetroError::ForeignDictionary)

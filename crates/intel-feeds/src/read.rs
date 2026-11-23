@@ -6,13 +6,15 @@ use crate::lines::numbered_lines;
 use crate::load::{agent_for, LoadError};
 use crate::model::{Ioc, IocType, Source, Tags, Tlp};
 use crate::store::{epoch_u32, read_statement, StoreError};
+use crate::types::ElapsedFn;
 use core_pg::password::read_password;
 use serde::{Deserialize, Deserializer};
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::InsertClass;
+use siem_ingest::reader_profile::{changed_statement, profile_refused, read_changed_bytes, url_settings, violations};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use time::macros::format_description;
 use time::{OffsetDateTime, PrimitiveDateTime};
@@ -39,6 +41,8 @@ pub enum ReadError {
     ExceptionInBody,
     #[error("a reply line is not a row of the expected shape: the list would be truncated")]
     MalformedReply,
+    #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
+    ReaderProfileChanged(usize),
     #[error("the IOC lines could not be written")]
     Output(#[source] io::Error),
 }
@@ -250,26 +254,6 @@ pub fn refuse_broad(row: StoredRow) -> Result<StoredRow, RowError> {
 }
 
 
-/// Settings pinned on every read (T773): a failing read cuts the stream, times stay `simple`, no limit, offset, `break` overflow or result filter.
-pub const PINNED_SETTINGS: &[(&str, &str)] = &[
-    ("http_write_exception_in_output_format", "0"),
-    ("date_time_output_format", "simple"),
-    ("limit", "0"),
-    ("offset", "0"),
-    ("additional_result_filter", ""),
-    ("result_overflow_mode", "throw"),
-    ("read_overflow_mode", "throw"),
-    ("read_overflow_mode_leaf", "throw"),
-    ("group_by_overflow_mode", "throw"),
-    ("sort_overflow_mode", "throw"),
-    ("join_overflow_mode", "throw"),
-    ("set_overflow_mode", "throw"),
-    ("distinct_overflow_mode", "throw"),
-    ("transfer_overflow_mode", "throw"),
-    ("timeout_overflow_mode", "throw"),
-];
-
-
 /// The start of the line ClickHouse writes in `JSONEachRow` for an exception, whatever the setting.
 pub const EXCEPTION_PREFIX: &str = "{\"exception\"";
 
@@ -283,7 +267,65 @@ pub fn ioc_line(text: Result<String, EntryError>) -> Result<String, RowError> {
 }
 
 
-/// One request under the whole `timeout_ms`; tenant, time and limit travel as query parameters, never in the statement text.
+/// The time left of the one deadline `timeout_ms`; a spent budget sends nothing.
+pub fn remaining_of(config: &ClickhouseConfig, elapsed: &ElapsedFn) -> Result<Duration, ReadError> {
+    let left = Duration::from_millis(config.timeout_ms).saturating_sub(elapsed());
+    if left.is_zero() {
+        Err(ReadError::Refused(InsertClass::Timeout))
+    } else {
+        Ok(left)
+    }
+}
+
+
+/// One POST: the two URL settings, the statement and the parameters as query values (never in the statement text); only a transport failure is an error here.
+pub fn send_statement(
+    agent: &Agent,
+    config: &ClickhouseConfig,
+    password: &str,
+    statement: &str,
+    params: &[(&str, String)],
+    remaining: Duration,
+) -> Result<Response<Body>, ReadError> {
+    let with_url = url_settings()
+        .iter()
+        .fold(agent.post(&config.url), |builder, (name, value)| builder.query(*name, value));
+    let with_params = params
+        .iter()
+        .fold(with_url.query("query", statement), |builder, (name, value)| builder.query(*name, value));
+    with_params
+        .header(USER_HEADER, &config.user)
+        .header(KEY_HEADER, password)
+        .config()
+        .timeout_global(Some(remaining))
+        .http_status_as_error(false)
+        .build()
+        .send(String::new())
+        .map_err(|error| ReadError::Refused(classify_transport(&error)))
+}
+
+
+/// The settings check: any changed setting outside the pins, a pinned name missing or a refusal the profile caused is `ReaderProfileChanged`, before the read is sent.
+pub fn check_profile(agent: &Agent, config: &ClickhouseConfig, password: &str, remaining: Duration) -> Result<(), ReadError> {
+    let response = send_statement(agent, config, password, &changed_statement(), &[], remaining)?;
+    let code = exception_code(response.headers());
+    match classify_reply(response.status(), code) {
+        Some(_) if profile_refused(code) => Err(ReadError::ReaderProfileChanged(1)),
+        Some(class) => Err(ReadError::Refused(class)),
+        None => {
+            let bytes = read_changed_bytes(response.into_body().into_reader()).map_err(ReadError::Body)?;
+            let found = violations(&bytes, &[]);
+            if found > 0 {
+                Err(ReadError::ReaderProfileChanged(found))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+
+/// The read under what is left of the deadline; tenant, time and limit travel as query parameters.
 pub fn request_rows(
     agent: &Agent,
     config: &ClickhouseConfig,
@@ -291,28 +333,15 @@ pub fn request_rows(
     statement: &str,
     now: OffsetDateTime,
     max_rows: usize,
+    remaining: Duration,
 ) -> Result<Response<Body>, ReadError> {
-    let pinned = PINNED_SETTINGS
-        .iter()
-        .fold(agent.post(&config.url), |builder, (name, value)| builder.query(*name, *value));
-    let reply = pinned
-        .header(USER_HEADER, &config.user)
-        .header(KEY_HEADER, password)
-        .query("query", statement)
-        .query("param_tenant", &config.tenant)
-        .query("param_now", epoch_u32(now.unix_timestamp()).to_string())
-        .query("param_limit", (max_rows + 1).to_string())
-        .config()
-        .timeout_global(Some(Duration::from_millis(config.timeout_ms)))
-        .http_status_as_error(false)
-        .build()
-        .send(String::new());
-    match reply {
-        Ok(response) => {
-            classify_reply(response.status(), exception_code(response.headers())).map_or(Ok(response), |class| Err(ReadError::Refused(class)))
-        }
-        Err(error) => Err(ReadError::Refused(classify_transport(&error))),
-    }
+    let params = [
+        ("param_tenant", config.tenant.clone()),
+        ("param_now", epoch_u32(now.unix_timestamp()).to_string()),
+        ("param_limit", (max_rows + 1).to_string()),
+    ];
+    let response = send_statement(agent, config, password, statement, &params, remaining)?;
+    classify_reply(response.status(), exception_code(response.headers())).map_or(Ok(response), |class| Err(ReadError::Refused(class)))
 }
 
 
@@ -344,13 +373,15 @@ pub fn collect_rows(reader: &mut dyn BufRead, max_rows: usize) -> Result<Collect
 }
 
 
-pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime, caps: ReadCaps) -> Result<Collected, ReadError> {
+/// The settings check, then the read, under one deadline measured by the injected `elapsed`.
+pub fn collect_iocs_timed(config: &ClickhouseConfig, now: OffsetDateTime, caps: ReadCaps, elapsed: &ElapsedFn) -> Result<Collected, ReadError> {
     validate_clickhouse(config).map_err(LoadError::Settings)?;
     let statement = read_statement(&config.database, &config.table)?;
     let password = read_password(&config.password_file).map_err(LoadError::Password)?;
     let key = std::str::from_utf8(&password).map_err(LoadError::PasswordEncoding)?;
     let agent = agent_for(config)?;
-    let response = request_rows(&agent, config, key, &statement, now, caps.rows)?;
+    check_profile(&agent, config, key, remaining_of(config, elapsed)?)?;
+    let response = request_rows(&agent, config, key, &statement, now, caps.rows, remaining_of(config, elapsed)?)?;
     let mut reader = BufReader::new(response.into_body().into_reader().take(caps.bytes + 1));
     let collected = collect_rows(&mut reader, caps.rows);
     if reader.get_ref().limit() == 0 {
@@ -358,6 +389,12 @@ pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime, caps: ReadCa
     } else {
         collected
     }
+}
+
+
+pub fn collect_iocs(config: &ClickhouseConfig, now: OffsetDateTime, caps: ReadCaps) -> Result<Collected, ReadError> {
+    let started = Instant::now();
+    collect_iocs_timed(config, now, caps, &|| started.elapsed())
 }
 
 

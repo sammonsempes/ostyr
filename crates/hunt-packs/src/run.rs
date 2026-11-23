@@ -3,23 +3,22 @@ use crate::model::{HuntPack, Source};
 use chrono::{DateTime, Datelike, Utc};
 use core_pg::error::PgError;
 use core_pg::scope::{tenant_of, tenant_scope};
-use metric_alerts::fetch::{class_text, escape_param, FetchSettings, FORMAT_SUFFIX, PARAM_PREFIX, PINNED_SETTINGS};
+use metric_alerts::fetch::{class_text, escape_param, FetchSettings, FORMAT_SUFFIX, PARAM_PREFIX};
 use siem_ingest::clickhouse::{classify_reply, classify_transport, exception_code, KEY_HEADER, USER_HEADER};
 use siem_ingest::error::InsertClass;
+use siem_ingest::reader_profile::{changed_statement, pin_clause, profile_refused, read_changed_bytes, url_settings, violations};
 use std::io::{self, Read};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::warn;
-use ureq::Agent;
+use ureq::http::Response;
+use ureq::{Agent, Body};
 
 
 pub const MAX_COUNT_BYTES: u64 = 64;
 
 
-pub const READONLY_VALUE: &str = "1";
-
-
-pub const MAX_RESULT_ROWS: &str = "1";
+pub const COUNT_ROWS: u64 = 1;
 
 
 pub const WINDOW_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -70,6 +69,8 @@ pub enum RunError {
     Failed(InsertClass),
     #[error("{}", refusal_text(*.0))]
     PackRefused(PackRefusal),
+    #[error("reader_profile_changed: {0} setting(s) outside the allowed list")]
+    ReaderProfileChanged(usize),
     #[error("the reply body could not be read")]
     Body(#[source] io::Error),
     #[error("the reply is not one unsigned count")]
@@ -136,66 +137,118 @@ pub fn read_count<Source: Read>(reader: Source) -> Result<u64, RunError> {
 }
 
 
-/// The pack query wrapped in a count; a newline before the closing parenthesis keeps a trailing line comment from eating it.
-pub fn count_statement(query: &str) -> String {
+/// The pack query wrapped in a count, with the pins in the outer `SETTINGS` clause; a newline before the closing parenthesis keeps a trailing line comment from eating it.
+pub fn count_statement(query: &str, limits: &[(&'static str, String)]) -> String {
     let body = query.trim_end().trim_end_matches(';').trim_end();
-    format!("SELECT count() FROM (\n{body}\n){FORMAT_SUFFIX}")
+    let pins = pin_clause(limits, COUNT_ROWS);
+    format!("SELECT count() FROM (\n{body}\n){pins}{FORMAT_SUFFIX}")
 }
 
 
-/// ClickHouse's own read-only and cost settings, sent as URL parameters on every run.
-pub fn server_settings(pack: &HuntPack) -> Result<Vec<(&'static str, String)>, RunError> {
+/// The pack's own cost limits: pinned in each statement's clause, never in the URL, so a profile cannot override them.
+pub fn pack_limits(pack: &HuntPack) -> Result<Vec<(&'static str, String)>, RunError> {
     let bytes = pack.cost.max_bytes_read.ok_or(RunError::NoByteLimit)?;
-    let own = [
-        ("readonly", READONLY_VALUE.to_string()),
+    Ok(vec![
         ("max_execution_time", pack.cost.max_seconds.to_string()),
         ("max_rows_to_read", pack.cost.max_rows.to_string()),
         ("max_bytes_to_read", bytes.to_string()),
-        ("max_result_rows", MAX_RESULT_ROWS.to_string()),
-    ];
-    Ok(own
-        .into_iter()
-        .chain(PINNED_SETTINGS.iter().map(|(name, value)| (*name, (*value).to_string())))
-        .collect())
+    ])
 }
 
 
-/// Nothing is sent for an osquery pack, a bad tenant, a bad window or a spent deadline. The tenant always comes from the caller.
-pub fn execute_pack(
+/// The time left of the one deadline (`budget` reads it now); a spent budget sends nothing.
+pub fn left_of(budget: &dyn Fn() -> Duration) -> Result<Duration, RunError> {
+    let left = budget();
+    if left.is_zero() {
+        Err(RunError::Failed(InsertClass::Timeout))
+    } else {
+        Ok(left)
+    }
+}
+
+
+/// One POST: the two URL settings, the parameters (escaped) as query values, the statement as body; only a transport failure is an error here.
+pub fn send_statement(
     agent: &Agent,
     settings: &FetchSettings,
     password: &str,
-    pack: &HuntPack,
-    tenant: &str,
-    now: u64,
+    statement: &str,
+    params: &[(&str, &str)],
     remaining: Duration,
-) -> Result<HuntOutcome, RunError> {
-    (pack.source == Source::Clickhouse).then_some(()).ok_or(RunError::UnsupportedSource)?;
-    let scope = tenant_scope(tenant).map_err(RunError::Tenant)?;
-    let window_end = window_text(now)?;
-    let window_start = window_text(now.checked_sub(pack.window_seconds).ok_or(RunError::Window)?)?;
-    let server = server_settings(pack)?;
-    (!remaining.is_zero()).then_some(()).ok_or(RunError::Failed(InsertClass::Timeout))?;
-    let params = [
-        ("tenant", tenant_of(&scope)),
-        ("window_start", &window_start),
-        ("window_end", &window_end),
-    ];
-    let with_server = server
+) -> Result<Response<Body>, RunError> {
+    let with_url = url_settings()
         .iter()
         .fold(agent.post(&settings.url), |builder, (name, value)| builder.query(*name, value));
-    let builder = params.iter().fold(with_server, |builder, (name, value)| {
+    let builder = params.iter().fold(with_url, |builder, (name, value)| {
         builder.query(format!("{PARAM_PREFIX}{name}"), escape_param(value))
     });
-    let response = builder
+    builder
         .header(USER_HEADER, &settings.user)
         .header(KEY_HEADER, password)
         .config()
         .timeout_global(Some(remaining))
         .http_status_as_error(false)
         .build()
-        .send(count_statement(&pack.query))
-        .map_err(|error| RunError::Failed(classify_transport(&error)))?;
+        .send(statement)
+        .map_err(|error| RunError::Failed(classify_transport(&error)))
+}
+
+
+/// The settings check before the pack runs: a profile that changes anything outside the pins is `ReaderProfileChanged`, never a pack refusal.
+pub fn check_profile(
+    agent: &Agent,
+    settings: &FetchSettings,
+    password: &str,
+    limits: &[(&'static str, String)],
+    remaining: Duration,
+) -> Result<(), RunError> {
+    let response = send_statement(agent, settings, password, &changed_statement(), &[], remaining)?;
+    let code = exception_code(response.headers());
+    match classify_reply(response.status(), code) {
+        Some(_) if profile_refused(code) => Err(RunError::ReaderProfileChanged(1)),
+        Some(class) => Err(RunError::Failed(class)),
+        None => {
+            let bytes = read_changed_bytes(response.into_body().into_reader()).map_err(RunError::Body)?;
+            let found = violations(&bytes, limits);
+            if found > 0 {
+                Err(RunError::ReaderProfileChanged(found))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+
+/// Nothing is sent for an osquery pack, a bad tenant, a bad window or a spent deadline. The tenant always comes from the caller. Settings check first, then the count, under one deadline.
+pub fn execute_pack_timed(
+    agent: &Agent,
+    settings: &FetchSettings,
+    password: &str,
+    pack: &HuntPack,
+    tenant: &str,
+    now: u64,
+    budget: &dyn Fn() -> Duration,
+) -> Result<HuntOutcome, RunError> {
+    (pack.source == Source::Clickhouse).then_some(()).ok_or(RunError::UnsupportedSource)?;
+    let scope = tenant_scope(tenant).map_err(RunError::Tenant)?;
+    let window_end = window_text(now)?;
+    let window_start = window_text(now.checked_sub(pack.window_seconds).ok_or(RunError::Window)?)?;
+    let limits = pack_limits(pack)?;
+    check_profile(agent, settings, password, &limits, left_of(budget)?)?;
+    let params = [
+        ("tenant", tenant_of(&scope)),
+        ("window_start", &window_start),
+        ("window_end", &window_end),
+    ];
+    let response = send_statement(
+        agent,
+        settings,
+        password,
+        &count_statement(&pack.query, &limits),
+        &params,
+        left_of(budget)?,
+    )?;
     let code = exception_code(response.headers());
     let refusal = pack_refusal(code).filter(|_| !response.status().is_success());
     match (refusal, classify_reply(response.status(), code)) {
@@ -209,6 +262,22 @@ pub fn execute_pack(
             })
         }
     }
+}
+
+
+pub fn execute_pack(
+    agent: &Agent,
+    settings: &FetchSettings,
+    password: &str,
+    pack: &HuntPack,
+    tenant: &str,
+    now: u64,
+    remaining: Duration,
+) -> Result<HuntOutcome, RunError> {
+    let started = Instant::now();
+    execute_pack_timed(agent, settings, password, pack, tenant, now, &|| {
+        remaining.saturating_sub(started.elapsed())
+    })
 }
 
 

@@ -113,6 +113,9 @@ fn good_rows() -> String {
 }
 
 
+const CLEAN_NAMES: [&str; 3] = ["max_result_rows", "result_overflow_mode", "readonly"];
+
+
 fn read_head(stream: &mut TcpStream) -> io::Result<String> {
     let mut received = Vec::new();
     let mut chunk = [ZERO; CHUNK];
@@ -135,6 +138,10 @@ where
 {
     let accepting = listener.try_clone()?;
     Ok(spawn(move || {
+        let (mut check, _) = accepting.accept()?;
+        read_head(&mut check)?;
+        check.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}\n", CLEAN_NAMES.join("\n")).as_bytes())?;
+        drop(check);
         let (mut stream, _) = accepting.accept()?;
         let head = read_head(&mut stream)?;
         stream.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes())?;

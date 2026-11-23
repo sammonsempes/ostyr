@@ -38,18 +38,24 @@ const TIMEOUT_MS: u64 = 120_000;
 const ROW: &str = r#"{"ioc_type":"domain","value":"secretvalue.example","feed":"f","feed_version":"v1","confidence":70,"tlp":"green","first_seen":"2026-11-03 00:00:00","last_seen":"2026-11-03 00:00:00","expires_at":"2026-12-03 00:00:00"}"#;
 
 
+fn serve_one(listener: &TcpListener, status: &str, body: &str) -> io::Result<()> {
+    let (mut stream, _): (TcpStream, _) = listener.accept()?;
+    let mut received = Vec::new();
+    let mut chunk = [ZERO; CHUNK];
+    let mut reads = 0;
+    while !String::from_utf8_lossy(&received).contains(HEADER_END) && reads < CHUNK {
+        reads += 1;
+        let count = stream.read(&mut chunk)?;
+        received.extend_from_slice(chunk.get(..count).unwrap_or(&[]));
+    }
+    stream.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n{body}\n").as_bytes())
+}
+
+
 fn answer(listener: TcpListener, status: &'static str, body: &'static str) -> JoinHandle<io::Result<()>> {
     spawn(move || {
-        let (mut stream, _): (TcpStream, _) = listener.accept()?;
-        let mut received = Vec::new();
-        let mut chunk = [ZERO; CHUNK];
-        let mut reads = 0;
-        while !String::from_utf8_lossy(&received).contains(HEADER_END) && reads < CHUNK {
-            reads += 1;
-            let count = stream.read(&mut chunk)?;
-            received.extend_from_slice(chunk.get(..count).unwrap_or(&[]));
-        }
-        stream.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n{body}\n").as_bytes())
+        serve_one(&listener, "200 OK", "max_result_rows\nresult_overflow_mode\nreadonly")?;
+        serve_one(&listener, status, body)
     })
 }
 

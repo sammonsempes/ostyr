@@ -9,6 +9,7 @@ pub mod nats;
 pub mod nats_settings;
 pub mod parse;
 pub mod pipeline;
+pub mod reader_profile;
 pub mod settings;
 pub mod tenant;
 pub mod types;

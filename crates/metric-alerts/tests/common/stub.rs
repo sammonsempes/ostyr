@@ -15,6 +15,21 @@ const MAX_READS: usize = 10_000;
 const ZERO: u8 = 0;
 
 
+pub const CLEAN_NAMES: [&str; 3] = ["max_result_rows", "result_overflow_mode", "readonly"];
+
+
+/// Answers the settings check of a read with a profile that changed nothing outside the pins; returns the check request.
+pub fn serve_check(listener: &TcpListener) -> io::Result<String> {
+    let (mut stream, _) = listener.accept()?;
+    let seen = read_request(&mut stream)?;
+    let body = format!("{}\n", CLEAN_NAMES.join("\n"));
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    Ok(seen)
+}
+
+
 pub fn read_request(stream: &mut TcpStream) -> io::Result<String> {
     let mut received = Vec::new();
     let mut chunk = [ZERO; CHUNK];
@@ -44,6 +59,7 @@ pub fn read_request(stream: &mut TcpStream) -> io::Result<String> {
 /// Answers one connection with a status, extra header lines and a body; returns the request it saw.
 pub fn reply(listener: TcpListener, status: &'static str, extra: &'static str, body: Vec<u8>) -> JoinHandle<io::Result<String>> {
     spawn(move || {
+        serve_check(&listener)?;
         let (mut stream, _) = listener.accept()?;
         let seen = read_request(&mut stream)?;
         let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n", body.len());

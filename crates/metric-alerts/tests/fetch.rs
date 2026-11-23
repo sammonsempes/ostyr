@@ -8,9 +8,9 @@ mod stub;
 use common::types::TestResult;
 use hold::{endless, half_reply, stall};
 use metric_alerts::fetch::{
-    agent_for, class_text, default_timeout_ms, escape_param, fetch_points, load_fetch_settings, parse_line, parse_points, read_key, read_points,
-    validate_fetch_settings, FetchError, FetchSettings, LineFault, LineFaults, DEFAULT_TIMEOUT_MS, MAX_CA_BYTES, MAX_FETCH_BYTES, MAX_FETCH_POINTS,
-    MAX_TIMEOUT_MS, MAX_USER_BYTES, PINNED_SETTINGS,
+    agent_for, class_text, default_timeout_ms, escape_param, fetch_points, left_of, load_fetch_settings, parse_line, parse_points, read_key,
+    read_points, request_points_timed, validate_fetch_settings, FetchError, FetchSettings, LineFault, LineFaults, DEFAULT_TIMEOUT_MS, MAX_CA_BYTES,
+    MAX_FETCH_BYTES, MAX_FETCH_POINTS, MAX_TIMEOUT_MS, MAX_USER_BYTES,
 };
 use metric_alerts::model::{Condition, Direction, Rule, Severity};
 use metric_alerts::query::{parse_tenant_id, rule_sql, MetricQuery};
@@ -96,6 +96,46 @@ const PARSE_CODE: &str = "X-ClickHouse-Exception-Code: 27\r\n";
 
 
 const THRESHOLD: f64 = 90.0;
+
+
+const CODE_ROWS: u32 = 158;
+
+
+const CODE_READONLY: u32 = 164;
+
+
+const CODE_RESULT: u32 = 396;
+
+
+const CODE_CONSTRAINT: u32 = 452;
+
+
+const URL_SETTINGS: usize = 2;
+
+
+const SPENT: Duration = Duration::from_secs(300);
+
+
+const PIN_NAMES: [&str; 18] = [
+    "max_result_rows",
+    "timeout_overflow_mode",
+    "timeout_overflow_mode_leaf",
+    "read_overflow_mode",
+    "read_overflow_mode_leaf",
+    "group_by_overflow_mode",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+    "date_time_output_format",
+];
 
 
 fn settings(port: u16) -> FetchSettings {
@@ -249,7 +289,7 @@ fn the_request_carries_every_param_escaped_and_the_format_suffix() -> TestResult
     let sent = sent_params(&request)?;
     let only_params: Vec<(String, String)> = sent.iter().filter(|(name, _)| name.starts_with("param_")).cloned().collect();
     assert_eq!(only_params, wanted);
-    assert_eq!(sent.len(), wanted.len() + PINNED_SETTINGS.len());
+    assert_eq!(sent.len(), wanted.len() + URL_SETTINGS);
     assert!(wanted.iter().any(|(name, value)| name == "param_tenant" && value == "acme"));
     assert!(wanted.iter().any(|(_, value)| value.contains("\\nx' OR 1=1 --")));
     assert!(wanted.iter().any(|(_, value)| value.contains("\\\\tmp\\tdir\\r\\0}")));
@@ -260,10 +300,13 @@ fn the_request_carries_every_param_escaped_and_the_format_suffix() -> TestResult
     assert!(request.trim_end().ends_with("FORMAT TabSeparated"), "{request}");
     assert!(request.contains("{tenant:String}"));
     let head = request.lines().next().unwrap_or("");
-    PINNED_SETTINGS
+    assert!(head.starts_with("POST /?readonly=2&http_write_exception_in_output_format=0&"), "{head}");
+    PIN_NAMES
         .iter()
-        .for_each(|(name, value)| assert!(head.contains(&format!("{name}={value}")), "{name}: {head}"));
-    assert!(head.contains("date_time_output_format=simple"));
+        .for_each(|name| assert!(request.contains(&format!("{name} = ")), "{name}: {request}"));
+    assert!(!request.contains("break"));
+    assert!(request.contains("max_result_rows = 100001, timeout_overflow_mode = 'throw', "));
+    assert!(request.contains("additional_table_filters = {}, date_time_output_format = 'simple' FORMAT TabSeparated"));
     Ok(())
 }
 
@@ -596,4 +639,114 @@ fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) ->
 #[cfg(not(unix))]
 fn write_secret(path: impl AsRef<std::path::Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path.as_ref(), content)
+}
+
+
+fn check_only(listener: TcpListener, head: String, body: String) -> std::thread::JoinHandle<io::Result<String>> {
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let seen = stub::read_request(&mut stream)?;
+        io::Write::write_all(&mut stream, head.as_bytes())?;
+        io::Write::write_all(&mut stream, body.as_bytes())?;
+        Ok(seen)
+    })
+}
+
+
+fn untouched(listener: &TcpListener) -> Result<bool, Box<dyn Error>> {
+    listener.set_nonblocking(true)?;
+    Ok(listener.accept().err().map(|error| error.kind()) == Some(io::ErrorKind::WouldBlock))
+}
+
+
+#[test]
+fn a_profile_that_changed_a_setting_or_hides_one_refuses_before_the_query() -> TestResult {
+    let clean = stub::CLEAN_NAMES.join("\n");
+    let hidden = stub::CLEAN_NAMES
+        .iter()
+        .take(stub::CLEAN_NAMES.len() - 1)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bodies = [format!("{clean}\nmax_block_size\n"), String::new(), "filter\n".to_owned(), hidden];
+    bodies.into_iter().try_for_each(|body| -> TestResult {
+        let (bound, port) = listener()?;
+        let server = check_only(bound.try_clone()?, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(), body);
+        let outcome = fetch(port, LONG)?;
+        let seen = server.join().map_err(|_| "server panicked")??;
+        assert!(matches!(outcome, Err(FetchError::ReaderProfileChanged(_))), "{outcome:?}");
+        assert!(outcome.is_err_and(|error| error.to_string().starts_with("reader_profile_changed: ")));
+        assert!(seen.contains("system"), "{seen}");
+        assert!(untouched(&bound)?);
+        Ok(())
+    })
+}
+
+
+#[test]
+fn an_error_of_the_check_is_a_profile_refusal_only_for_the_profile_codes() -> TestResult {
+    [CODE_ROWS, CODE_READONLY, CODE_RESULT, CODE_CONSTRAINT]
+        .iter()
+        .try_for_each(|code| -> TestResult {
+            let (bound, port) = listener()?;
+            let head = format!("HTTP/1.1 500 Internal Server Error\r\nX-ClickHouse-Exception-Code: {code}\r\nConnection: close\r\n\r\n");
+            let server = check_only(bound.try_clone()?, head, "SECRET-SERVER-TEXT".to_owned());
+            let outcome = fetch(port, LONG)?;
+            server.join().map_err(|_| "server panicked")??;
+            assert!(matches!(outcome, Err(FetchError::ReaderProfileChanged(1))), "{code}");
+            assert!(!format!("{outcome:?}").contains("SECRET"));
+            assert!(untouched(&bound)?);
+            Ok(())
+        })?;
+    let (bound, port) = listener()?;
+    let head = "HTTP/1.1 500 Internal Server Error\r\nX-ClickHouse-Exception-Code: 159\r\nConnection: close\r\n\r\n".to_owned();
+    let server = check_only(bound, head, String::new());
+    let outcome = fetch(port, LONG)?;
+    server.join().map_err(|_| "server panicked")??;
+    assert!(matches!(outcome, Err(FetchError::Failed(InsertClass::Unavailable))));
+    Ok(())
+}
+
+
+#[test]
+fn a_check_reply_cut_before_its_end_is_a_body_error() -> TestResult {
+    let (bound, port) = listener()?;
+    let server = check_only(
+        bound,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),
+        "4\r\nlimi\r\n".to_owned(),
+    );
+    let outcome = fetch(port, LONG)?;
+    server.join().map_err(|_| "server panicked")??;
+    assert!(matches!(outcome, Err(FetchError::Body(_))), "{outcome:?}");
+    Ok(())
+}
+
+
+#[test]
+fn one_deadline_covers_the_check_and_the_query() -> TestResult {
+    assert!(matches!(left_of(LONG, &|| SPENT), Err(FetchError::Failed(InsertClass::Timeout))));
+    assert_eq!(left_of(LONG, &|| Duration::ZERO)?, LONG);
+    let (bound, port) = listener()?;
+    let config = settings(port);
+    let agent = agent_for(&config)?;
+    let calls = std::cell::Cell::new(0);
+    let after_check = || {
+        calls.set(calls.get() + 1);
+        if calls.get() > 1 {
+            SPENT
+        } else {
+            Duration::ZERO
+        }
+    };
+    let server = check_only(
+        bound.try_clone()?,
+        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(),
+        format!("{}\n", stub::CLEAN_NAMES.join("\n")),
+    );
+    let outcome = request_points_timed(&agent, &config, PASSWORD, &query()?, LONG, &after_check);
+    server.join().map_err(|_| "server panicked")??;
+    assert!(matches!(outcome, Err(FetchError::Failed(InsertClass::Timeout))), "{outcome:?}");
+    assert!(untouched(&bound)?);
+    Ok(())
 }

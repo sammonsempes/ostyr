@@ -338,7 +338,12 @@ fn tlp_column_and_read_statement_golden() -> TestResult {
     );
     let expected = "SELECT `ioc_type`, `value`, `feed`, `feed_version`, `confidence`, `tlp`, `first_seen`, `last_seen`, `expires_at` \
         FROM `intel`.`ioc` FINAL WHERE `tenant` = {tenant:String} AND `ioc_type` IN ('domain', 'ipv4', 'ipv6', 'cidr') \
-        AND `checked` = 1 AND `expires_at` > toDateTime({now:UInt32}) ORDER BY `ioc_type`, `value` LIMIT {limit:UInt64} FORMAT JSONEachRow";
+        AND `checked` = 1 AND `expires_at` > toDateTime({now:UInt32}) ORDER BY `ioc_type`, `value` LIMIT {limit:UInt64} \
+        SETTINGS max_result_rows = 250001, timeout_overflow_mode = 'throw', timeout_overflow_mode_leaf = 'throw', read_overflow_mode = 'throw', \
+        read_overflow_mode_leaf = 'throw', group_by_overflow_mode = 'throw', result_overflow_mode = 'throw', sort_overflow_mode = 'throw', \
+        set_overflow_mode = 'throw', distinct_overflow_mode = 'throw', join_overflow_mode = 'throw', transfer_overflow_mode = 'throw', limit = 0, \
+        offset = 0, additional_result_filter = '', filter = '', additional_table_filters = {}, date_time_output_format = 'simple' \
+        FORMAT JSONEachRow";
     assert_eq!(read_statement("intel", "ioc")?, expected);
     assert!(read_statement("intel", "a;b").is_err());
     assert!(tlp_column_ddl("a b", "ioc").is_err());

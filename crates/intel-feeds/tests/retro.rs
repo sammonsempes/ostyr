@@ -7,11 +7,11 @@ use intel_feeds::limits::{MAX_RETRO_BYTES, MAX_RETRO_MATCHES, MAX_RETRO_ROWS_TO_
 use intel_feeds::load::LoadError;
 use intel_feeds::retro::{
     absorb, body_failure, gap_of, parse_scalar, refusal, retro_run, server_settings, settings_clause, statements, time_of, validate_retro,
-    window_epochs, Collected, Direction, Gap, MatchGroup, RetroError, RetroReply, RetroRequest, RetroRun, RetroSettings, MAX_CHANGED_BYTES,
-    RETRO_ALLOWED_CHANGED,
+    window_epochs, Collected, Direction, Gap, MatchGroup, RetroError, RetroReply, RetroRequest, RetroRun, RetroSettings,
 };
 use serde_json::json;
 use siem_ingest::error::InsertClass;
+use siem_ingest::reader_profile::CHECK_MAX_BYTES;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Read};
@@ -106,6 +106,12 @@ const CODE_RESULT: u32 = 396;
 const CODE_BAD_ARGUMENTS: u32 = 36;
 
 
+const CODE_READONLY: u32 = 164;
+
+
+const CODE_CONSTRAINT: u32 = 452;
+
+
 const STEP_MS: u64 = 1_000;
 
 
@@ -121,7 +127,35 @@ const THIRD_LEFT_MS: u64 = 2_000;
 const FOURTH_LEFT_MS: u64 = 1_000;
 
 
-const PIN_NAMES: usize = 20;
+const PIN_NAMES: usize = 21;
+
+
+const RUN_NAMES: [&str; 21] = [
+    "max_execution_time",
+    "max_rows_to_read",
+    "max_rows_to_group_by",
+    "max_result_rows",
+    "timeout_overflow_mode",
+    "timeout_overflow_mode_leaf",
+    "read_overflow_mode",
+    "read_overflow_mode_leaf",
+    "group_by_overflow_mode",
+    "result_overflow_mode",
+    "sort_overflow_mode",
+    "set_overflow_mode",
+    "distinct_overflow_mode",
+    "join_overflow_mode",
+    "transfer_overflow_mode",
+    "limit",
+    "offset",
+    "additional_result_filter",
+    "filter",
+    "additional_table_filters",
+    "date_time_output_format",
+];
+
+
+const CLEAN_NAMES: [&str; 3] = ["max_result_rows", "result_overflow_mode", "readonly"];
 
 
 const HOST_CHARS: usize = 256;
@@ -249,7 +283,7 @@ fn run_ok(script: Vec<Result<RetroReply, InsertClass>>) -> (Result<RetroRun, Ret
 
 
 fn clean() -> Result<RetroReply, InsertClass> {
-    text("readonly\nmax_execution_time\nfilter\n")
+    text(&format!("{}\n", CLEAN_NAMES.join("\n")))
 }
 
 
@@ -260,11 +294,11 @@ fn three_replies(not_an_ip: &str, body: &str) -> Vec<Result<RetroReply, InsertCl
 
 fn pins(result_rows: &str) -> String {
     format!(
-        " SETTINGS max_execution_time = 30, timeout_overflow_mode = 'throw', max_rows_to_read = 1000000, read_overflow_mode = 'throw', \
-         max_rows_to_group_by = 10000, group_by_overflow_mode = 'throw', max_result_rows = {result_rows}, result_overflow_mode = 'throw', \
-         sort_overflow_mode = 'throw', set_overflow_mode = 'throw', distinct_overflow_mode = 'throw', join_overflow_mode = 'throw', \
-         transfer_overflow_mode = 'throw', read_overflow_mode_leaf = 'throw', timeout_overflow_mode_leaf = 'throw', limit = 0, offset = 0, \
-         additional_result_filter = '', filter = '', additional_table_filters = {{}}"
+        " SETTINGS max_execution_time = 30, max_rows_to_read = 1000000, max_rows_to_group_by = 10000, max_result_rows = {result_rows}, \
+         timeout_overflow_mode = 'throw', timeout_overflow_mode_leaf = 'throw', read_overflow_mode = 'throw', read_overflow_mode_leaf = 'throw', \
+         group_by_overflow_mode = 'throw', result_overflow_mode = 'throw', sort_overflow_mode = 'throw', set_overflow_mode = 'throw', \
+         distinct_overflow_mode = 'throw', join_overflow_mode = 'throw', transfer_overflow_mode = 'throw', limit = 0, offset = 0, \
+         additional_result_filter = '', filter = '', additional_table_filters = {{}}, date_time_output_format = 'simple'"
     )
 }
 
@@ -281,7 +315,7 @@ fn the_statements_are_exact_and_carry_no_tenant_or_time_text() -> TestResult {
         "`tenant` = {tenant:String} AND `@timestamp` >= toDateTime({start:UInt32}, 'UTC') AND `@timestamp` < toDateTime({end:UInt32}, 'UTC')";
     assert_eq!(
         found.changed,
-        format!("SELECT `name` FROM `system`.`settings` WHERE `changed`{} FORMAT TabSeparated", pins("64"))
+        "SELECT `name` FROM `system`.`settings` WHERE `changed` SETTINGS max_result_rows = 64, result_overflow_mode = 'throw' FORMAT TabSeparated"
     );
     assert_eq!(
         found.foreign,
@@ -360,9 +394,9 @@ fn the_requests_carry_the_parameters_and_only_the_two_url_settings() -> TestResu
 
 
 #[test]
-fn every_statement_pins_every_setting_and_the_allowlist_covers_the_pins() -> TestResult {
+fn every_statement_pins_every_setting_by_name() -> TestResult {
     let clause = settings_clause(&settings(), PAIR as u64);
-    assert!(clause.starts_with(" SETTINGS max_execution_time = 30, "));
+    assert!(clause.starts_with(" SETTINGS max_execution_time = 30, max_rows_to_read = 1000000, max_rows_to_group_by = 10000, "));
     assert!(clause.contains("max_result_rows = 2, "));
     assert!(!clause.contains("break"));
     let names: Vec<&str> = clause
@@ -371,24 +405,25 @@ fn every_statement_pins_every_setting_and_the_allowlist_covers_the_pins() -> Tes
         .filter_map(|pin| pin.split(" = ").next())
         .collect();
     assert_eq!(names.len(), PIN_NAMES);
-    names.iter().for_each(|name| assert!(RETRO_ALLOWED_CHANGED.contains(name), "{name}"));
-    assert!(RETRO_ALLOWED_CHANGED.contains(&"readonly"));
-    assert!(RETRO_ALLOWED_CHANGED.contains(&"http_write_exception_in_output_format"));
-    assert_eq!(RETRO_ALLOWED_CHANGED.len(), names.len() + PAIR);
+    RUN_NAMES.iter().for_each(|name| assert!(names.contains(name), "{name}"));
+    RUN_NAMES
+        .iter()
+        .for_each(|name| assert!(clause.contains(&format!("{name} = ")), "{name}"));
     Ok(())
 }
 
 
 #[test]
 fn a_changed_setting_outside_the_allowlist_refuses_before_any_other_request() -> TestResult {
-    let cases = ["max_result_bytes\n", "readonly\nmax_block_size\nload_balancing\n", "\n"];
+    let cases = ["max_result_bytes\n", "readonly\nmax_block_size\nload_balancing\n", "\n", ""];
     cases.iter().try_for_each(|body| -> TestResult {
         let (result, seen) = run_ok(vec![text(body), text("0\n"), text("0\n"), text(&rows(1))]);
         assert!(matches!(result, Err(RetroError::ReaderProfileChanged(_))));
         assert_eq!(seen.len(), 1);
         Ok(())
     })?;
-    let (two, _) = run_ok(vec![text("readonly\nmax_block_size\nload_balancing\n")]);
+    let two_extra = format!("{}\nmax_block_size\nload_balancing\n", CLEAN_NAMES.join("\n"));
+    let (two, _) = run_ok(vec![text(&two_extra)]);
     let found = two.err().ok_or("the run succeeded")?;
     assert!(matches!(found, RetroError::ReaderProfileChanged(PAIR)));
     assert_eq!(found.to_string(), "reader_profile_changed: 2 setting(s) outside the allowed list");
@@ -398,18 +433,57 @@ fn a_changed_setting_outside_the_allowlist_refuses_before_any_other_request() ->
 
 
 #[test]
+fn an_empty_or_filtered_settings_reply_refuses_because_a_pinned_name_is_missing() -> TestResult {
+    CLEAN_NAMES.iter().try_for_each(|missing| -> TestResult {
+        let names: Vec<&str> = CLEAN_NAMES.iter().copied().filter(|name| name != missing).collect();
+        let (result, seen) = run_ok(vec![text(&format!("{}\n", names.join("\n"))), text("0\n")]);
+        assert!(matches!(result, Err(RetroError::ReaderProfileChanged(1))), "{missing}");
+        assert_eq!(seen.len(), 1);
+        Ok(())
+    })
+}
+
+
+#[test]
+fn an_error_of_the_check_itself_is_a_profile_refusal_only_for_the_profile_codes() -> TestResult {
+    [CODE_ROWS, CODE_RESULT, CODE_READONLY, CODE_CONSTRAINT]
+        .iter()
+        .try_for_each(|code| -> TestResult {
+            let (result, seen) = run_ok(vec![failing(*code, StatusCode::INTERNAL_SERVER_ERROR), text("0\n")]);
+            assert!(matches!(result, Err(RetroError::ReaderProfileChanged(1))), "{code}");
+            assert_eq!(seen.len(), 1);
+            Ok(())
+        })?;
+    assert!(matches!(
+        error_of(vec![failing(CODE_TIMEOUT, StatusCode::INTERNAL_SERVER_ERROR)])?,
+        RetroError::Timeout
+    ));
+    assert!(matches!(
+        error_of(vec![failing(CODE_BAD_ARGUMENTS, StatusCode::INTERNAL_SERVER_ERROR)])?,
+        RetroError::DictionaryOutdatedOrBadQuery
+    ));
+    Ok(())
+}
+
+
+#[test]
 fn an_oversized_or_unreadable_settings_reply_refuses() -> TestResult {
-    let allowed = RETRO_ALLOWED_CHANGED.join("\n");
-    let (run, _) = run_ok(vec![text(&format!("{allowed}\n")), text("0\n"), text("0\n"), text("")]);
+    let allowed = CLEAN_NAMES.join("\n");
+    let (run, _) = run_ok(vec![
+        text(&format!("{allowed}\nhttp_write_exception_in_output_format\n")),
+        text("0\n"),
+        text("0\n"),
+        text(""),
+    ]);
     assert!(run.is_ok());
-    let padding = "readonly\n".repeat(MAX_CHANGED_BYTES as usize / "readonly\n".len() + PAIR);
+    let padding = "readonly\n".repeat(CHECK_MAX_BYTES as usize / "readonly\n".len() + PAIR);
     let (big, seen) = run_ok(vec![text(&padding)]);
     assert!(matches!(big, Err(RetroError::ReaderProfileChanged(_))));
     assert_eq!(seen.len(), 1);
     let broken = Ok(reply(StatusCode::OK, None, Box::new(Failing(io::ErrorKind::ConnectionReset))));
     assert!(matches!(error_of(vec![broken])?, RetroError::Body(io::ErrorKind::ConnectionReset)));
     let invalid = Ok(reply(StatusCode::OK, None, Box::new(Cursor::new(NOT_UTF8.to_vec()))));
-    assert!(matches!(error_of(vec![invalid])?, RetroError::ReaderProfileChanged(1)));
+    assert!(matches!(error_of(vec![invalid])?, RetroError::ReaderProfileChanged(_)));
     Ok(())
 }
 
@@ -605,7 +679,12 @@ fn exception_codes_map_to_fixed_errors_and_the_text_is_never_read() -> TestResul
         (CODE_BAD_ARGUMENTS, StatusCode::INTERNAL_SERVER_ERROR, "dictionary_outdated_or_bad_query"),
     ];
     cases.iter().try_for_each(|(code, status, name)| -> TestResult {
-        assert_eq!(error_of(vec![failing(*code, *status)])?.to_string(), *name);
+        let first = if *name == "too_many_rows_or_groups" {
+            "reader_profile_changed: 1 setting(s) outside the allowed list"
+        } else {
+            *name
+        };
+        assert_eq!(error_of(vec![failing(*code, *status)])?.to_string(), first);
         assert_eq!(error_of(vec![clean(), failing(*code, *status)])?.to_string(), *name);
         assert_eq!(error_of(vec![clean(), text("0\n"), failing(*code, *status)])?.to_string(), *name);
         assert_eq!(
@@ -680,7 +759,7 @@ fn a_spent_deadline_sends_nothing_and_each_request_gets_what_is_left() -> TestRe
         },
         &|_| {
             sent_before_exhaustion.set(sent_before_exhaustion.get() + 1);
-            text("")
+            clean()
         },
     );
     assert!(matches!(result, Err(RetroError::Timeout)));
