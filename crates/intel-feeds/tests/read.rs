@@ -354,6 +354,22 @@ fn a_chunked_reply_cut_before_its_end_fails_and_writes_nothing() -> TestResult {
 
 
 #[test]
+fn an_exception_line_in_a_200_body_fails_and_writes_nothing() -> TestResult {
+    let rig = rig(LONG_TIMEOUT_MS)?;
+    let body = format!("{}\n{{\"exception\": \"Code: 396. DB::Exception: limit\"}}\n", row("a.example", "green"));
+    let server = answer(rig.listener.try_clone()?, "200 OK", text_body(body));
+    let mut out = Vec::new();
+    let failed = read_iocs(&rig.config, NOW, &mut out);
+    assert!(matches!(failed, Err(ReadError::ExceptionInBody)), "{failed:?}");
+    assert!(!failed.map_or_else(|error| error.to_string(), |_| String::new()).contains("Code: 396"));
+    assert!(out.is_empty());
+    let (seen, _) = joined(server)?;
+    assert!(seen.contains("http_write_exception_in_output_format=0"), "{seen}");
+    Ok(())
+}
+
+
+#[test]
 fn a_server_error_is_classified_and_its_text_never_shown() -> TestResult {
     let rig = rig(LONG_TIMEOUT_MS)?;
     let server = answer(

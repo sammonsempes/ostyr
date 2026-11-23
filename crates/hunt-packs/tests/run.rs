@@ -27,13 +27,19 @@ const COUNT: u64 = 42;
 const SEVEN: u64 = 7;
 
 
-const BODIES: usize = 4;
+const BODIES: usize = 6;
 
 
 const HOSTILE: usize = 7;
 
 
-const SERVER_SETTINGS: usize = 6;
+const SERVER_SETTINGS: usize = 7;
+
+
+const EXCEPTION_LINE: &[u8] = b"{\"exception\": \"Code: 159. DB::Exception: Timeout exceeded\"}\n";
+
+
+const COUNT_THEN_EXCEPTION: &[u8] = b"5\n{\"exception\": \"Code: 159. DB::Exception\"}\n";
 
 
 const OK: &str = "200 OK";
@@ -169,6 +175,7 @@ fn sent_url_holds_every_setting_and_the_callers_tenant() -> TestResult {
         ("max_bytes_to_read", "1000000"),
         ("max_result_rows", "1"),
         ("result_overflow_mode", "throw"),
+        ("http_write_exception_in_output_format", "0"),
         ("param_tenant", "acme"),
         ("param_window_end", "2023-11-14 22:13:20.000"),
         ("param_window_start", "2023-11-13 22:13:20.000"),
@@ -192,7 +199,14 @@ fn sent_url_holds_every_setting_and_the_callers_tenant() -> TestResult {
 
 #[test]
 fn malformed_bodies_are_refused() -> TestResult {
-    let bodies: [Vec<u8>; BODIES] = [vec![b'7'; HUNDRED], b"abc".to_vec(), b"-1".to_vec(), Vec::new()];
+    let bodies: [Vec<u8>; BODIES] = [
+        vec![b'7'; HUNDRED],
+        b"abc".to_vec(),
+        b"-1".to_vec(),
+        Vec::new(),
+        EXCEPTION_LINE.to_vec(),
+        COUNT_THEN_EXCEPTION.to_vec(),
+    ];
     bodies.into_iter().try_for_each(|body| {
         let (outcome, _) = run_against(OK, "", body)?;
         assert!(matches!(outcome, Err(RunError::Malformed)), "{outcome:?}");

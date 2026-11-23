@@ -35,6 +35,8 @@ pub enum ReadError {
     TooManyRows(usize),
     #[error("reply larger than {0} bytes: the list would be truncated")]
     TooManyBytes(u64),
+    #[error("the reply carries a ClickHouse exception line: the list would be truncated")]
+    ExceptionInBody,
     #[error("the IOC lines could not be written")]
     Output(#[source] io::Error),
 }
@@ -246,6 +248,14 @@ pub fn refuse_broad(row: StoredRow) -> Result<StoredRow, RowError> {
 }
 
 
+/// The setting that makes ClickHouse cut the stream, not write a line, when a query fails after the 200 head.
+pub const EXCEPTION_IN_BODY: &str = "0";
+
+
+/// The start of the line ClickHouse writes in `JSONEachRow` for an exception, whatever the setting.
+pub const EXCEPTION_PREFIX: &str = "{\"exception\"";
+
+
 /// A row that does not parse (unknown TLP or type included) is an error, never a default.
 pub fn ioc_line(text: Result<String, EntryError>) -> Result<String, RowError> {
     text.map_err(RowError::from)
@@ -272,6 +282,7 @@ pub fn request_rows(
         .query("param_tenant", &config.tenant)
         .query("param_now", epoch_u32(now.unix_timestamp()).to_string())
         .query("param_limit", (max_rows + 1).to_string())
+        .query("http_write_exception_in_output_format", EXCEPTION_IN_BODY)
         .config()
         .timeout_global(Some(Duration::from_millis(config.timeout_ms)))
         .http_status_as_error(false)
@@ -290,6 +301,8 @@ pub fn request_rows(
 pub fn collect_rows(reader: &mut dyn BufRead, max_rows: usize) -> Result<Collected, ReadError> {
     numbered_lines(reader).try_fold(Collected::default(), |mut collected, line| {
         let numbered = line.map_err(ReadError::Body)?;
+        let exception = numbered.text.as_ref().is_ok_and(|text| text.starts_with(EXCEPTION_PREFIX));
+        (!exception).then_some(()).ok_or(ReadError::ExceptionInBody)?;
         match ioc_line(numbered.text) {
             Ok(json) => collected.lines.push(json),
             Err(error) => collected.bad = count_bad(collected.bad, reason_of(&error)),
